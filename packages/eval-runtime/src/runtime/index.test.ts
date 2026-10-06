@@ -37,21 +37,40 @@ function makeCatalog(samples: readonly Sample[] = [makeSample("sample-1")]): Run
   };
 }
 
-function makeStore(): RuntimeStore {
+interface StoreOptions {
+  readonly beforeRunCommit?: (run: RuntimeRunRecord) => void;
+}
+
+function makeStore(options: StoreOptions = {}): RuntimeStore {
   const runs = new Map<string, RuntimeRunRecord>();
   const samplings = new Map<string, RuntimeSamplingRecord>();
   return {
-    async createRun(record) {
-      runs.set(record.runId, record);
-    },
     async updateRun(record) {
       runs.set(record.runId, record);
     },
     async getRun(runId) {
       return runs.get(runId) ?? null;
     },
-    async createSampling(record) {
-      samplings.set(record.sampling.samplingId, record);
+    async createRunWithSamplings(run, records) {
+      const nextRuns = new Map(runs);
+      const nextSamplings = new Map(samplings);
+      nextRuns.set(run.runId, run);
+      for (const record of records) {
+        nextSamplings.set(record.sampling.samplingId, record);
+      }
+      options.beforeRunCommit?.(run);
+      runs.clear();
+      samplings.clear();
+      for (const [runId, record] of nextRuns) runs.set(runId, record);
+      for (const [samplingId, record] of nextSamplings) samplings.set(samplingId, record);
+    },
+    async prepareEvaluationSamplings(records) {
+      const nextSamplings = new Map(samplings);
+      for (const record of records) {
+        nextSamplings.set(record.sampling.samplingId, record);
+      }
+      samplings.clear();
+      for (const [samplingId, record] of nextSamplings) samplings.set(samplingId, record);
     },
     async updateSampling(record) {
       samplings.set(record.sampling.samplingId, record);
@@ -409,6 +428,53 @@ describe("eval runtime orchestration", () => {
         evaluation: { status: "succeeded" },
       },
     });
+  });
+
+  it("keeps the previous evaluation when atomic evaluation preparation fails", async () => {
+    let failEvaluationRun = false;
+    const store = makeStore({
+      beforeRunCommit: (run) => {
+        if (failEvaluationRun && run.phase === "evaluation") {
+          throw new Error("evaluation run preparation failed");
+        }
+      },
+    });
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog(),
+      harness: makeHarness(),
+      store,
+      sleep: async () => undefined,
+    });
+    const execution = await runtime.start({
+      projectId: "project-1",
+      datasetId: "dataset-1",
+      samplingCount: 1,
+      executionConcurrency: 1,
+      harness: { kind: "sp", agentConfig: SUBJECT },
+      retryPolicy: { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 },
+    });
+    await waitForTerminal(runtime, execution.runId);
+
+    const firstEvaluation = await runtime.evaluate({
+      projectId: "project-1",
+      samplingIds: execution.samplingIds,
+      evaluationHarness: { kind: "sp", agentConfig: EVALUATOR },
+      evaluationConcurrency: 1,
+      retryPolicy: { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 },
+    });
+    await waitForTerminal(runtime, firstEvaluation.runId);
+    const before = await runtime.getSampling(execution.samplingIds[0]!);
+
+    failEvaluationRun = true;
+    await expect(runtime.evaluate({
+      projectId: "project-1",
+      samplingIds: execution.samplingIds,
+      evaluationHarness: { kind: "sp", agentConfig: EVALUATOR },
+      evaluationConcurrency: 1,
+      retryPolicy: { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 },
+    })).rejects.toThrow("evaluation run preparation failed");
+
+    await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.toEqual(before);
   });
 
   it("reuses the same agent identity when the ensure response is lost", async () => {

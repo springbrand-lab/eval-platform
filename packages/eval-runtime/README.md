@@ -36,7 +36,7 @@ src/
 │   ├── agent-lifecycle.ts   # Agent ensure、提交、终态推送、校准和重试
 │   ├── execution.ts         # Subject 执行、初始数据、产物和完整轨迹
 │   ├── evaluation.ts        # Evaluation Agent、输入复制和评估输出
-│   ├── store.ts             # Run / Sampling 持久化端口
+│   ├── store.ts             # Run / Sampling 原子持久化端口
 │   ├── scheduler.ts         # 执行 / 评估两套 Agent 并发限制契约
 │   └── retry.ts             # 阶段化重试决策和 Agent 重启策略
 └── index.ts                 # 包统一导出
@@ -44,7 +44,7 @@ src/
 
 四个顶层包及其内部文件均保持在当前仓库中；内部目录是模块，不是新的 workspace package。
 
-配置、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。`RuntimeStore` 是持久化端口，实际实现由 API/DO/数据库层注入。
+配置、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。`RuntimeStore` 是持久化端口，实际实现由 API/DO/数据库层注入；Run 与 Sampling 的聚合写入、评估准备批量写入必须由 Store 在一个持久化边界内原子完成。
 
 ## 重要约束
 
@@ -58,6 +58,7 @@ src/
 6. 推送丢失、连接断开或运行时恢复时，`inspectAgentOperation` 只做一次或有限次状态校准，不作为主流程的持续轮询。
 7. 评估平台只消费 SP 的公开契约，不依赖 SP 的 DO SQLite、内部类或 Web 投影。
 8. 再次主动调用 `evaluate()` 会重置评估记录并在启动前分配新的评估 ID；这是有意重新评估，不是丢响应后的 ensure 重试。被评估 Agent 的 ID 保持不变。
+9. `start()`、`pipeline()` 和 `evaluate()` 不分别写 Run 与 Sampling。前两者使用 `createRunWithSamplings()`，Pipeline 的评估准备使用 `prepareEvaluationSamplings()`；这些命令失败时不能留下半批状态或清掉旧评估结果。
 
 轨迹通过 SP 正式接口完整获取，并无条件复制到评估 Agent 的 Workspace；本包不引入独立的轨迹树或线上流量评估子包。
 

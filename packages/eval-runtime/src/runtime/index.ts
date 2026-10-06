@@ -152,14 +152,13 @@ class RuntimeCoordinator implements EvalRuntime {
       }
       return resetEvaluation(record, evaluationAgent);
     });
-    await Promise.all(preparedRecords.map((record) => this.#store.updateSampling(record)));
 
     const run = this.createRun(
       request.projectId,
       preparedRecords.map(({ sampling }) => sampling.samplingId),
       "evaluation",
     );
-    await this.#store.createRun(run);
+    await this.#store.createRunWithSamplings(run, preparedRecords);
     void this.runEvaluationPhase(run, preparedRecords, request).catch((error: unknown) => {
       void this.failRun(run, error).catch(() => undefined);
     });
@@ -291,8 +290,7 @@ class RuntimeCoordinator implements EvalRuntime {
     run: RuntimeRunRecord,
     records: readonly RuntimeSamplingRecord[],
   ): Promise<void> {
-    await Promise.all(records.map((record) => this.#store.createSampling(record)));
-    await this.#store.createRun(run);
+    await this.#store.createRunWithSamplings(run, records);
   }
 
   private runHandle(run: RuntimeRunRecord): RunHandle {
@@ -354,22 +352,14 @@ class RuntimeCoordinator implements EvalRuntime {
     );
     if (evaluableRecords.length === 0) return;
 
-    const evaluationRecords = await Promise.all(evaluableRecords.map((record) => (
-      this.prepareEvaluationRecord(record, record.sampling.evaluationAgent)
-    )));
+    const evaluationRecords = evaluableRecords.map((record) => {
+      if (!record.sampling.evaluationAgent) {
+        throw new Error(`Sampling ${record.sampling.samplingId} has no evaluation agent`);
+      }
+      return resetEvaluation(record, record.sampling.evaluationAgent);
+    });
+    await this.#store.prepareEvaluationSamplings(evaluationRecords);
     await this.runEvaluationPhase(run, evaluationRecords, request);
-  }
-
-  private async prepareEvaluationRecord(
-    record: RuntimeSamplingRecord,
-    evaluationAgent: AgentConfigRef | undefined,
-  ): Promise<RuntimeSamplingRecord> {
-    if (!evaluationAgent) {
-      throw new Error(`Sampling ${record.sampling.samplingId} has no evaluation agent`);
-    }
-    const prepared = resetEvaluation(record, evaluationAgent);
-    await this.#store.updateSampling(prepared);
-    return prepared;
   }
 
   private scheduler(maxConcurrentDos: number): AgentScheduler {

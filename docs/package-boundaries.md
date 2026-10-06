@@ -64,7 +64,7 @@ Owns Dataset/Data definitions, JSON, initial context and initial-material refere
 
 ### `eval-runtime`
 
-Owns `start`, `evaluate`, `pipeline`, `getRun`, `getSampling`, Sampling lifecycle, separate execution/evaluation concurrency limits, retry, evaluation-input materialization and the `RuntimeStore` persistence port. SP is the first-party Harness inside this boundary; a separate `eval-sp-adapter` package is intentionally not created.
+Owns `start`, `evaluate`, `pipeline`, `getRun`, `getSampling`, Sampling lifecycle, separate execution/evaluation concurrency limits, retry, evaluation-input materialization and the `RuntimeStore` persistence port. `RuntimeStore` exposes semantic atomic commands for creating a Run with its Samplings and committing evaluation preparation; the Runtime does not sequence independent persistence calls for one aggregate. SP is the first-party Harness inside this boundary; a separate `eval-sp-adapter` package is intentionally not created.
 
 Harness exposes `ensureAgent`, not an unconditional creation operation. Runtime assigns and persists the stage's `submissionId` before calling SP; Harness passes that identity to SP's public Chat creation seam. Repeated or concurrent ensures for the same identity must return the original Agent handle. An identity already bound to a different owner, Project, Sampling, role or Agent Config must fail without rebinding or creating another Agent. SP owns authoritative deduplication and provisioning; Runtime owns identity persistence and operation-specific retry decisions, not a second local creation registry.
 

@@ -22,10 +22,13 @@ export interface RuntimeSamplingRecord {
 }
 
 export interface RuntimeStore {
-  createRun(record: RuntimeRunRecord): Promise<void>;
   updateRun(record: RuntimeRunRecord): Promise<void>;
   getRun(runId: string): Promise<RuntimeRunRecord | null>;
-  createSampling(record: RuntimeSamplingRecord): Promise<void>;
+  createRunWithSamplings(
+    run: RuntimeRunRecord,
+    records: readonly RuntimeSamplingRecord[],
+  ): Promise<void>;
+  prepareEvaluationSamplings(records: readonly RuntimeSamplingRecord[]): Promise<void>;
   updateSampling(record: RuntimeSamplingRecord): Promise<void>;
   getSampling(samplingId: string): Promise<RuntimeSamplingRecord | null>;
 }

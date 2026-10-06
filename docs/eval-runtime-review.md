@@ -160,7 +160,7 @@ SP 里已经有第一个 Agent 了，Runtime 不知道，于是又创建第二�
 
 ---
 
-### R-05：Run 和 Sampling 的创建/准备不是原子操作
+### R-05：Run 和 Sampling 的创建/准备不是原子操作（已处理）
 
 **现象**
 
@@ -196,6 +196,15 @@ Run、Sampling 和评估准备需要有明确的一致性边界：
 - 使用明确的补偿和清理机制。
 
 不能继续依赖“先写一部分，后面大概率成功”。
+
+**已落实**
+
+- `RuntimeStore` 提供语义化的 `createRunWithSamplings()`，`start()`、`pipeline()` 和 `evaluate()` 都通过一次 Store 操作创建 Run 与 Sampling；Runtime 不再分别调用 `createSampling()` 和 `createRun()`。
+- `pipeline()` 的评估准备通过 `prepareEvaluationSamplings()` 批量提交，避免逐条重置评估状态。
+- `evaluate()` 先在内存中构造新的评估状态，再与新的评估 Run 一起原子写入；写入失败时，旧评估结果保持不变。
+- Store 实现必须在自己的单一持久化边界内使用 PostgreSQL/DO SQLite 事务；事务内不执行 Harness、网络或其他外部调用。
+- 语义化写入按 Run/Sampling 身份保持可重试，具体幂等和唯一约束由 Store 实现负责；跨存储场景不伪造分布式事务，改用持久化操作记录和补偿恢复。
+- `packages/eval-runtime/src/runtime/index.test.ts` 覆盖评估准备原子提交失败时保留旧结果的场景。
 
 ---
 
