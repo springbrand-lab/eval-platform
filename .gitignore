@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+.wrangler/
+.dev.vars*
+.env*
+secrets.jsonc
+secrets.jsonc.bak
+secrets.*.jsonc
+!secrets.example.jsonc
+*.tsbuildinfo
+.DS_Store
+.idea/
+local-docs/
+/data/

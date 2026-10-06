@@ -1,0 +1,37 @@
+{
+  "name": "@eval-platform/eval-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./config": "./src/config/index.ts",
+    "./config/model": "./src/config/model.ts",
+    "./harness": "./src/harness/index.ts",
+    "./harness/model": "./src/harness/model.ts",
+    "./model": "./src/model.ts",
+    "./runtime": "./src/runtime/index.ts",
+    "./runtime/model": "./src/runtime/model.ts",
+    "./runtime/retry": "./src/runtime/retry.ts",
+    "./runtime/scheduler": "./src/runtime/scheduler.ts",
+    "./runtime/store": "./src/runtime/store.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@eval-platform/eval-contracts": "workspace:*",
+    "@eval-platform/eval-dataset": "workspace:*",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

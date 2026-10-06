@@ -1,0 +1,10 @@
+.git
+.scratch
+.wrangler
+**/.wrangler
+**/dist
+**/node_modules
+node_modules
+apps/eval-web
+secrets.jsonc
+secrets.jsonc.bak

@@ -1,0 +1,8 @@
+packages:
+  - apps/eval-api
+  - apps/eval-web
+  - apps/eval-cli
+  - packages/*
+
+onlyBuiltDependencies:
+  - esbuild

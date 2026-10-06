@@ -1,0 +1,22 @@
+{
+  "name": "@eval-platform/eval-contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./model": "./src/model.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
