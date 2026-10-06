@@ -749,4 +749,90 @@ describe("eval runtime orchestration", () => {
     expect(harness.collectExecution).toHaveBeenCalledTimes(1);
     expect(harness.collectEvaluation).toHaveBeenCalledTimes(1);
   });
+
+  it("evaluates successful pipeline samplings when another execution fails", async () => {
+    const harness = makeHarness();
+    let subjectSubmissionCount = 0;
+    vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => {
+      if (handle.role === "subject" && subjectSubmissionCount++ === 0) {
+        return {
+          status: "failed",
+          normalizedStatus: "failed",
+          retryable: false,
+          error: "subject execution failed",
+        };
+      }
+      return makeSubmission();
+    });
+
+    let releaseEvaluation!: () => void;
+    let markEvaluationStarted!: () => void;
+    const evaluationStarted = new Promise<void>((resolve) => {
+      markEvaluationStarted = resolve;
+    });
+    const evaluationGate = new Promise<void>((resolve) => {
+      releaseEvaluation = resolve;
+    });
+    vi.mocked(harness.collectEvaluation).mockImplementation(async () => {
+      markEvaluationStarted();
+      await evaluationGate;
+      return {
+        status: "succeeded",
+        artifacts: [{ artifactId: "evaluation-artifact-1", kind: "evaluation", path: "/eval/result" }],
+        score: 0.9,
+        trajectory: {
+          trajectoryId: "trajectory-2",
+          source: "evaluator",
+          path: "/eval/evaluation.jsonl",
+        },
+      };
+    });
+
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog([
+        makeSample("sample-1"),
+        makeSample("sample-2"),
+        makeSample("sample-3"),
+      ]),
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+    });
+
+    const run = await runtime.pipeline({
+      projectId: "project-1",
+      datasetId: "dataset-1",
+      samplingCount: 1,
+      executionConcurrency: 3,
+      harness: { kind: "sp", agentConfig: SUBJECT },
+      evaluationHarness: { kind: "sp", agentConfig: EVALUATOR },
+      evaluationConcurrency: 2,
+      retryPolicy: { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 },
+    });
+
+    await evaluationStarted;
+    await expect(runtime.getRun(run.runId)).resolves.toMatchObject({ status: "running" });
+    releaseEvaluation();
+
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
+      status: "failed",
+    });
+    const records = await Promise.all(
+      run.samplingIds.map((samplingId) => runtime.getSampling(samplingId)),
+    );
+    const failedExecutionRecords = records.filter(
+      ({ sampling }) => sampling.execution.status === "failed",
+    );
+    const successfulExecutionRecords = records.filter(
+      ({ sampling }) => sampling.execution.status === "succeeded",
+    );
+
+    expect(failedExecutionRecords).toHaveLength(1);
+    expect(successfulExecutionRecords).toHaveLength(2);
+    expect(harness.collectEvaluation).toHaveBeenCalledTimes(2);
+    expect(failedExecutionRecords[0]?.sampling.evaluation).toBeUndefined();
+    expect(successfulExecutionRecords.every(
+      ({ sampling }) => sampling.evaluation?.status === "succeeded",
+    )).toBe(true);
+  });
 });

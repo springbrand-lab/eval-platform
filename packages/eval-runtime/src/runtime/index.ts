@@ -349,14 +349,14 @@ class RuntimeCoordinator implements EvalRuntime {
     request: PipelineRequest,
   ): Promise<void> {
     const executedRecords = await this.runExecutionPhase(run, records, request);
-    if (executedRecords.some(({ sampling }) => sampling.execution.status !== "succeeded")) {
-      return;
-    }
+    const evaluableRecords = executedRecords.filter(
+      ({ sampling }) => sampling.execution.status === "succeeded",
+    );
+    if (evaluableRecords.length === 0) return;
 
-    const evaluationRecords = await Promise.all(executedRecords.map((record) => (
+    const evaluationRecords = await Promise.all(evaluableRecords.map((record) => (
       this.prepareEvaluationRecord(record, record.sampling.evaluationAgent)
     )));
-    await this.updateRunStatus(run, "queued");
     await this.runEvaluationPhase(run, evaluationRecords, request);
   }
 
@@ -468,20 +468,27 @@ function aggregateRunStatus(
   const resolvedStatuses = statuses.filter(
     (status): status is SamplingStatus => status !== undefined,
   );
+  const hasPendingStatus = statuses.some((status) => status === undefined)
+    || resolvedStatuses.some((status) => (
+      status === "queued"
+      || status === "starting"
+      || status === "running"
+      || status === "retrying"
+    ));
+  if (hasPendingStatus) {
+    if (resolvedStatuses.some((status) => status === "retrying")) {
+      return "retrying";
+    }
+    if (resolvedStatuses.some((status) => status === "starting" || status === "running")) {
+      return "running";
+    }
+    return phase === "pipeline" ? "running" : "queued";
+  }
   if (resolvedStatuses.some((status) => status === "failed" || status === "cancelled")) {
     return "failed";
   }
-  if (statuses.some((status) => status === undefined)) {
-    return phase === "pipeline" ? "running" : "queued";
-  }
   if (resolvedStatuses.every((status) => status === "succeeded")) {
     return "succeeded";
-  }
-  if (resolvedStatuses.some((status) => status === "retrying")) {
-    return "retrying";
-  }
-  if (resolvedStatuses.some((status) => status === "starting" || status === "running")) {
-    return "running";
   }
   return "queued";
 }

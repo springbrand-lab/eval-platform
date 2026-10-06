@@ -191,7 +191,7 @@ Run、Sampling 和评估准备需要有明确的一致性边界：
 
 ---
 
-### R-06：Pipeline 中一个 Subject 失败会阻塞所有成功 Subject 的评估
+### R-06：Pipeline 中一个 Subject 失败会阻塞所有成功 Subject 的评估（已处理）
 
 **现象**
 
@@ -221,6 +221,14 @@ if (executedRecords.some(({ sampling }) => sampling.status !== "succeeded")) {
 - 成功的 Sampling 继续进入评估；
 - 失败的 Sampling 保留失败状态；
 - Run 只汇总结果，不阻断其他 Sampling 的独立生命周期。
+
+**已落实**
+
+- Pipeline 执行完成后只筛选 `execution.status === "succeeded"` 的 Sampling 进入评估。
+- 执行失败的 Sampling 不启动评估 Agent，保留执行失败，`evaluation` 不创建。
+- Run 聚合会等待仍在执行或评估中的 Sampling 完成后再判定最终失败，避免提前结束 Pipeline。
+- 只有全部可评估 Sampling 完成后，执行失败或评估失败才会让整个 Pipeline Run 最终为 `failed`。
+- `packages/eval-runtime/src/runtime/index.test.ts` 覆盖“部分执行成功、部分执行失败仍继续评估”的场景。
 
 ---
 
