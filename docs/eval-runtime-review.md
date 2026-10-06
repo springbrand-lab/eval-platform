@@ -283,6 +283,7 @@ Run 有自己的 `status`，Runtime 又根据 Sampling 状态不断聚合和更�
 - `RuntimeStore` 不再提供 `updateRun()`；Run 创建后不需要随着 Sampling 生命周期反复写回状态。
 - `getRun()` 读取关联 Sampling，并通过 `aggregateRunStatus()` 即时生成对外 `RunSnapshot.status`；这个字段是查询投影，不是第二份持久化事实。
 - 执行、评估、Pipeline 的生命周期只更新 Sampling；失败、部分成功和阶段切换都由 Sampling 状态自然聚合。
+- Pipeline 在所有 Execution Sampling 仍为 `queued` 时返回 `queued`；至少一个 Execution 已开始后返回运行态，Execution 全部成功但 Evaluation 尚未完成时返回 `running`。
 - Runtime 测试在没有任何 Run 状态写入接口的情况下覆盖运行中、成功和失败状态查询。
 
 ---

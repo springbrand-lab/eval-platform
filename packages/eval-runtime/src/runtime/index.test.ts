@@ -847,6 +847,7 @@ describe("eval runtime orchestration", () => {
       evaluationConcurrency: 1,
       retryPolicy: { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 },
     });
+    await expect(runtime.getRun(run.runId)).resolves.toMatchObject({ status: "queued" });
     const snapshot = await waitForTerminal(runtime, run.runId);
 
     expect(snapshot.status).toBe("succeeded");

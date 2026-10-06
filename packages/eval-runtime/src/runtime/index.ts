@@ -443,7 +443,16 @@ function aggregateRunStatus(
     if (resolvedStatuses.some((status) => status === "starting" || status === "running")) {
       return "running";
     }
-    return phase === "pipeline" ? "running" : "queued";
+    if (phase === "pipeline") {
+      const allExecutionQueued = records.every(
+        ({ sampling }) => sampling.execution.status === "queued",
+      );
+      const allExecutionSucceeded = records.every(
+        ({ sampling }) => sampling.execution.status === "succeeded",
+      );
+      return allExecutionQueued || !allExecutionSucceeded ? "queued" : "running";
+    }
+    return "queued";
   }
   if (resolvedStatuses.some((status) => status === "failed" || status === "cancelled")) {
     return "failed";
