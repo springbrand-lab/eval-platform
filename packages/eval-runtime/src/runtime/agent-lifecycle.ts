@@ -12,6 +12,7 @@ import type {
 import type {
   AgentHandle,
   AgentSubmission,
+  EnsureAgentInput,
   Harness,
 } from "../harness/index.js";
 import {
@@ -54,6 +55,7 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   readonly role: AgentRole;
   readonly projectId: string;
   readonly samplingId: string;
+  readonly submissionId: string;
   readonly agentConfig: AgentConfigRef;
   readonly prompt: string;
   readonly retryPolicy: RetryPolicy | undefined;
@@ -244,12 +246,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
 
     try {
       if (!handle) {
-        handle = await dependencies.harness.startAgent({
-          role: options.role,
-          samplingId: options.samplingId,
-          agentConfig: options.agentConfig,
-          projectId: options.projectId,
-        });
+        handle = await ensureAgentWithRetry(dependencies, options, retryController);
       }
 
       attempt = await options.updateAttempt(attempt, {
@@ -327,6 +324,51 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
       }
 
       restartRequested = true;
+      await options.setSamplingStatus("retrying", details.message);
+      await dependencies.sleep(decision.backoffMs ?? 0);
+    }
+  }
+}
+
+async function ensureAgentWithRetry<TAttempt extends AgentAttemptRecord, TOutput>(
+  dependencies: AgentLifecycleDependencies,
+  options: AgentLifecycleOptions<TAttempt, TOutput>,
+  retryController: RetryController,
+): Promise<AgentHandle> {
+  const input: EnsureAgentInput = {
+    submissionId: options.submissionId,
+    role: options.role,
+    samplingId: options.samplingId,
+    agentConfig: options.agentConfig,
+    projectId: options.projectId,
+  };
+
+  for (let creationAttemptNumber = 1; ; creationAttemptNumber += 1) {
+    try {
+      const handle = await dependencies.harness.ensureAgent(input);
+      if (
+        handle.submissionId !== input.submissionId
+        || handle.role !== input.role
+        || handle.samplingId !== input.samplingId
+      ) {
+        throw new AgentOperationError(
+          `${options.stage} agent handle does not match the requested identity`,
+          false,
+          "network",
+        );
+      }
+      return handle;
+    } catch (error) {
+      const details = describeAgentError(error);
+      if (!details.retryable) throw error;
+
+      const decision = await retryController.decide({
+        operation: "creation",
+        failureKind: details.failureKind,
+        attemptNumber: creationAttemptNumber,
+      });
+      if (!decision.shouldRetry) throw error;
+
       await options.setSamplingStatus("retrying", details.message);
       await dependencies.sleep(decision.backoffMs ?? 0);
     }

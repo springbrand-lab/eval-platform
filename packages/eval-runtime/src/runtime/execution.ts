@@ -42,11 +42,17 @@ export async function executeSampling(
   };
 
   try {
+    const submissionId = current.sampling.subjectSubmissionId ?? dependencies.idFactory();
+    if (current.sampling.subjectSubmissionId === undefined) {
+      await persist({ ...current.sampling, subjectSubmissionId: submissionId });
+    }
+
     const result = await runAgentLifecycle<ExecutionAttempt, ExecutionOutput>(dependencies, {
       stage: "execution",
       role: "subject",
       projectId: current.sampling.projectId,
       samplingId: current.sampling.samplingId,
+      submissionId,
       agentConfig,
       prompt: buildExecutionPrompt(current.sample),
       retryPolicy: input.retryPolicy,
@@ -95,7 +101,6 @@ export async function executeSampling(
       execution: result.output,
       sampling: {
         ...withSamplingStatus(current.sampling, "execution", "succeeded"),
-        subjectSubmissionId: result.handle.submissionId,
         artifacts: result.output.artifacts,
         trajectory: result.output.trajectory,
       },

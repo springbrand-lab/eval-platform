@@ -73,10 +73,10 @@ function makeSubmission(status: AgentSubmission["status"] = "completed"): AgentS
 
 function makeHarness(): Harness {
   return {
-    startAgent: vi.fn(async ({ role, samplingId }): Promise<AgentHandle> => ({
+    ensureAgent: vi.fn(async ({ role, samplingId, submissionId }): Promise<AgentHandle> => ({
       role,
       samplingId,
-      submissionId: `${role}-${samplingId}`,
+      submissionId,
     })),
     materializeInitialData: vi.fn(async () => ({
       bundleId: "bundle-1",
@@ -153,7 +153,7 @@ describe("eval runtime orchestration", () => {
 
     expect(snapshot.status).toBe("succeeded");
     expect(run.samplingIds).toHaveLength(2);
-    expect(harness.startAgent).toHaveBeenCalledTimes(2);
+    expect(harness.ensureAgent).toHaveBeenCalledTimes(2);
     expect(harness.materializeInitialData).toHaveBeenCalledTimes(2);
     expect(harness.collectExecution).toHaveBeenCalledTimes(2);
   });
@@ -387,8 +387,8 @@ describe("eval runtime orchestration", () => {
     expect(harness.collectEvaluation).toHaveBeenCalledTimes(1);
     expect(harness.materializeInitialData).toHaveBeenCalledTimes(2);
     expect(harness.materializeEvaluationInput).toHaveBeenCalledWith(expect.objectContaining({
-      subjectSubmissionId: `subject-${execution.samplingIds[0]}`,
-      evaluationSubmissionId: `evaluator-${execution.samplingIds[0]}`,
+      subjectSubmissionId: expect.any(String),
+      evaluationSubmissionId: expect.any(String),
       artifacts: [{ artifactId: "artifact-1", kind: "project", path: "/eval/output" }],
       trajectory: {
         trajectoryId: "trajectory-1",
@@ -396,12 +396,55 @@ describe("eval runtime orchestration", () => {
         path: "/eval/trajectory.jsonl",
       },
     }));
-    await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.toMatchObject({
+    const sampling = await runtime.getSampling(execution.samplingIds[0]!);
+    expect(sampling.sampling.subjectSubmissionId).toEqual(expect.any(String));
+    expect(sampling.sampling.evaluationSubmissionId).toEqual(expect.any(String));
+    expect(sampling.sampling.evaluationSubmissionId).not.toBe(sampling.sampling.subjectSubmissionId);
+    const evaluationInput = vi.mocked(harness.materializeEvaluationInput).mock.calls[0]?.[0];
+    expect(evaluationInput?.subjectSubmissionId).toBe(sampling.sampling.subjectSubmissionId);
+    expect(evaluationInput?.evaluationSubmissionId).toBe(sampling.sampling.evaluationSubmissionId);
+    expect(sampling).toMatchObject({
       sampling: {
         execution: { status: "succeeded" },
         evaluation: { status: "succeeded" },
       },
     });
+  });
+
+  it("reuses the same agent identity when the ensure response is lost", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.ensureAgent).mockRejectedValueOnce(
+      new Error("connection lost after agent ensure"),
+    );
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog(),
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+      createRetryController: makeRetryControllerFactory({ creation: 1 }),
+    });
+
+    const run = await runtime.start({
+      projectId: "project-1",
+      datasetId: "dataset-1",
+      samplingCount: 1,
+      executionConcurrency: 1,
+      harness: { kind: "sp", agentConfig: SUBJECT },
+      retryPolicy: { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 },
+    });
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
+      status: "succeeded",
+    });
+
+    expect(harness.ensureAgent).toHaveBeenCalledTimes(2);
+    const firstInput = vi.mocked(harness.ensureAgent).mock.calls[0]?.[0];
+    const secondInput = vi.mocked(harness.ensureAgent).mock.calls[1]?.[0];
+    expect(secondInput).toEqual(firstInput);
+    const sampling = await runtime.getSampling(run.samplingIds[0]!);
+    expect(sampling.sampling.subjectSubmissionId).toBe(firstInput?.submissionId);
+    expect(sampling.sampling.execution.status).toBe("succeeded");
+    expect(sampling.sampling.executionAttempts).toHaveLength(1);
+    expect(harness.restartAgent).not.toHaveBeenCalled();
   });
 
   it("keeps execution success when evaluation fails", async () => {
@@ -529,7 +572,7 @@ describe("eval runtime orchestration", () => {
     await expect(restoredRuntime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
       sampling: {
         execution: { status: "succeeded" },
-        subjectSubmissionId: `subject-${run.samplingIds[0]}`,
+        subjectSubmissionId: expect.any(String),
       },
       execution: { status: "succeeded" },
     });
@@ -569,7 +612,7 @@ describe("eval runtime orchestration", () => {
     await expect(waitForTerminal(runtime, evaluation.runId)).resolves.toMatchObject({
       status: "succeeded",
     });
-    expect(harness.startAgent).toHaveBeenCalledTimes(2);
+    expect(harness.ensureAgent).toHaveBeenCalledTimes(2);
     expect(harness.restartAgent).toHaveBeenCalledTimes(1);
   });
 
@@ -745,7 +788,7 @@ describe("eval runtime orchestration", () => {
 
     expect(snapshot.status).toBe("succeeded");
     expect(snapshot.phase).toBe("pipeline");
-    expect(harness.startAgent).toHaveBeenCalledTimes(2);
+    expect(harness.ensureAgent).toHaveBeenCalledTimes(2);
     expect(harness.collectExecution).toHaveBeenCalledTimes(1);
     expect(harness.collectEvaluation).toHaveBeenCalledTimes(1);
   });

@@ -123,7 +123,7 @@ Subject 执行成功后，`Sampling.status` 是 `succeeded`。调用 `evaluate()
 
 ---
 
-### R-04：创建 Agent 的响应丢失时，会重复创建 Agent
+### R-04：创建 Agent 的响应丢失时，会重复创建 Agent（已处理）
 
 **现象**
 
@@ -149,6 +149,14 @@ SP 里已经有第一个 Agent 了，Runtime 不知道，于是又创建第二�
 - 使用 `stage + samplingId` 等稳定键幂等创建；或
 - 创建响应丢失时，可以按该身份查询并复用已有 Agent；
 - 不能因为本地没拿到响应就直接重新创建。
+
+**已落实**
+
+- Runtime 在创建执行或评估 Agent 前先分配并持久化该阶段的 `submissionId`，把它作为 SP Chat/Agent 的稳定身份。
+- Harness 改为 `ensureAgent()` 语义：同一身份重复或并发调用必须返回同一个 Agent，不能再次创建；这与 SP `Inbox.createChat(..., chatId)` → `lifecycle.ensure()` 的方案一致。
+- 创建响应丢失后的重试保留完全相同的身份和创建参数；它使用 `creation` 重试操作，不增加 Sampling、执行/评估 attempt，也不使用新的 Agent 重启键。
+- Runtime 校验返回的 Agent Handle 必须匹配请求身份；身份冲突或错误绑定不可重试。
+- `packages/eval-runtime/src/runtime/index.test.ts` 覆盖创建响应丢失后复用同一身份的场景。
 
 ---
 

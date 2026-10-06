@@ -50,11 +50,21 @@ export async function evaluateSampling(
   };
 
   try {
+    const submissionId = current.sampling.evaluationSubmissionId ?? dependencies.idFactory();
+    if (current.sampling.evaluationSubmissionId === undefined) {
+      await persist({
+        ...current.sampling,
+        evaluationAgent: agentConfig,
+        evaluationSubmissionId: submissionId,
+      });
+    }
+
     const result = await runAgentLifecycle<EvaluationAttempt, EvaluationAgentOutput>(dependencies, {
       stage: "evaluation",
       role: "evaluator",
       projectId: current.sampling.projectId,
       samplingId: current.sampling.samplingId,
+      submissionId,
       agentConfig,
       prompt: buildEvaluationPrompt(current.sampling.samplingId),
       retryPolicy: input.retryPolicy,
@@ -118,7 +128,6 @@ export async function evaluateSampling(
       sampling: {
         ...withSamplingStatus(current.sampling, "evaluation", "succeeded"),
         evaluationAgent: agentConfig,
-        evaluationSubmissionId: result.handle.submissionId,
       },
     };
     await dependencies.store.updateSampling(current);

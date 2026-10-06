@@ -33,13 +33,21 @@ describe("retry controller", () => {
     });
   });
 
-  it("does not prescribe submission, status or collection retries", async () => {
+  it("does not prescribe creation, submission, status or collection retries", async () => {
     const controller = createRetryController({
       maxRestarts: 2,
       initialBackoffMs: 10,
       maxBackoffMs: 15,
     });
 
+    await expect(controller.decide({
+      operation: "creation",
+      failureKind: "network",
+      attemptNumber: 1,
+    })).resolves.toEqual({
+      shouldRetry: false,
+      reason: "network",
+    });
     await expect(controller.decide({
       operation: "submission",
       failureKind: "network",

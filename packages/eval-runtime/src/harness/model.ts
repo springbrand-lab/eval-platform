@@ -30,7 +30,8 @@ export interface AgentSubmission {
 
 export type AgentFailureKind = "network" | "llm" | "website" | "submission-timeout";
 
-export interface StartAgentInput {
+export interface EnsureAgentInput {
+  readonly submissionId: string;
   readonly role: AgentRole;
   readonly samplingId: string;
   readonly agentConfig: AgentConfigRef;
@@ -73,7 +74,7 @@ export interface EvaluationInput {
 }
 
 export interface Harness {
-  startAgent(input: StartAgentInput): Promise<AgentHandle>;
+  ensureAgent(input: EnsureAgentInput): Promise<AgentHandle>;
   materializeInitialData(input: MaterializeInitialDataInput): Promise<MaterializedDataBinding>;
   submitAgent(input: SubmitAgentInput): Promise<AgentSubmission>;
   waitForSubmission(input: WaitForSubmissionInput): Promise<AgentSubmission>;

@@ -1,6 +1,6 @@
 export type RetryableFailureKind = "network" | "llm" | "website" | "submission-timeout";
 
-export type RetryOperation = "submission" | "status" | "collection" | "restart";
+export type RetryOperation = "creation" | "submission" | "status" | "collection" | "restart";
 
 export interface RetryDecision {
   readonly shouldRetry: boolean;

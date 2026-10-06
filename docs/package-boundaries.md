@@ -66,6 +66,8 @@ Owns Dataset/Data definitions, JSON, initial context and initial-material refere
 
 Owns `start`, `evaluate`, `pipeline`, `getRun`, `getSampling`, Sampling lifecycle, separate execution/evaluation concurrency limits, retry, evaluation-input materialization and the `RuntimeStore` persistence port. SP is the first-party Harness inside this boundary; a separate `eval-sp-adapter` package is intentionally not created.
 
+Harness exposes `ensureAgent`, not an unconditional creation operation. Runtime assigns and persists the stage's `submissionId` before calling SP; Harness passes that identity to SP's public Chat creation seam. Repeated or concurrent ensures for the same identity must return the original Agent handle. An identity already bound to a different owner, Project, Sampling, role or Agent Config must fail without rebinding or creating another Agent. SP owns authoritative deduplication and provisioning; Runtime owns identity persistence and operation-specific retry decisions, not a second local creation registry.
+
 ### `eval-metrics`
 
 Owns four internal submodules: `evaluators` for evaluation context and evaluator contracts, `attribution` for failure-cause and evidence interpretation, `aggregation` for score normalization and aggregation, and `reporting` for case results and experiment reports. It does not decide how an Agent runs or how a Workspace is copied.
@@ -94,5 +96,7 @@ The runtime Harness must consume the same public concepts as `sp-platform`:
 - Workspace tree, manifests and content boundaries.
 
 Eval records one `submissionId` for an SP Chat/Submission and does not store a second `chatId` for the same Agent.
+
+That ID is assigned before provisioning and reused after an uncertain creation response. `ensureAgent` retries retain the same creation facts and ID; a separately requested re-evaluation receives a new evaluation identity. Creation identity is distinct from the idempotency key used to submit or restart work inside that Agent.
 
 The eval project must not import SP private source files, use Web projections as facts, or read Durable Object SQLite directly.
