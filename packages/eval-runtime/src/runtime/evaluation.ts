@@ -14,7 +14,6 @@ import {
   requireSpAgent,
   runAgentLifecycle,
   withSamplingStatus,
-  withoutLastError,
   type AgentLifecycleDependencies,
 } from "./agent-lifecycle.js";
 
@@ -83,7 +82,7 @@ export async function evaluateSampling(
         return updated;
       },
       setSamplingStatus: async (status, lastError) => {
-        await persist(withSamplingStatus(current.sampling, status, lastError));
+        await persist(withSamplingStatus(current.sampling, "evaluation", status, lastError));
       },
       prepare: async (handle) => {
         await dependencies.harness.materializeInitialData({
@@ -117,8 +116,7 @@ export async function evaluateSampling(
       ...current,
       evaluation: result.output,
       sampling: {
-        ...withoutLastError(current.sampling),
-        status: "succeeded",
+        ...withSamplingStatus(current.sampling, "evaluation", "succeeded"),
         evaluationAgent: agentConfig,
         evaluationSubmissionId: result.handle.submissionId,
       },
@@ -130,9 +128,7 @@ export async function evaluateSampling(
     current = {
       ...current,
       sampling: {
-        ...current.sampling,
-        status: "failed",
-        lastError: details.message,
+        ...withSamplingStatus(current.sampling, "evaluation", "failed", details.message),
         evaluationAgent: agentConfig,
       },
     };
@@ -164,11 +160,7 @@ async function markFailed(
 ): Promise<RuntimeSamplingRecord> {
   const failed = {
     ...record,
-    sampling: {
-      ...record.sampling,
-      status: "failed" as const,
-      lastError: reason,
-    },
+    sampling: withSamplingStatus(record.sampling, "evaluation", "failed", reason),
   };
   await store.updateSampling(failed);
   return failed;

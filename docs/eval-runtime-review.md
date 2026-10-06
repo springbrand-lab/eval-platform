@@ -85,7 +85,7 @@ execution:<samplingId>:restart:2
 
 ---
 
-### R-03：一个 `Sampling.status` 同时表示执行阶段和评估阶段
+### R-03：一个 `Sampling.status` 同时表示执行阶段和评估阶段（已处理）
 
 **现象**
 
@@ -112,6 +112,14 @@ Subject 执行成功后，`Sampling.status` 是 `succeeded`。调用 `evaluate()
 **正确原则**
 
 执行和评估要有独立的阶段状态。Sampling 可以作为聚合对象，但不能用一个状态字段同时承载两个阶段的生命周期。
+
+**已落实**
+
+- `Sampling.execution` 和可选的 `Sampling.evaluation` 分别保存执行、评估阶段状态；两者共用 `SamplingStatus`。
+- 两个阶段都按 `queued → starting → running → retrying → succeeded/failed/cancelled` 流转，避免为评估另造一套状态类型。
+- 未请求评估时保持 `evaluation === undefined`，不引入额外的“尚未评估”状态。
+- 执行和评估分别写入各自阶段；评估失败不会覆盖执行成功状态，Run 聚合时按当前阶段读取对应状态。
+- `packages/eval-runtime/src/runtime/index.test.ts` 覆盖仅执行、评估成功、评估失败三种状态隔离场景。
 
 ---
 

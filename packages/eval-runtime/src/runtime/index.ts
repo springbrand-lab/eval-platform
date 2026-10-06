@@ -24,7 +24,12 @@ import type {
   RuntimeRunRecord,
   RuntimeSamplingRecord,
 } from "./store.js";
-import { errorMessage, requireSpAgent } from "./agent-lifecycle.js";
+import {
+  errorMessage,
+  requireSpAgent,
+  withSamplingStatus,
+  type AgentLifecycleStage,
+} from "./agent-lifecycle.js";
 import {
   executeSampling,
   type ExecutionStageDependencies,
@@ -259,7 +264,7 @@ class RuntimeCoordinator implements EvalRuntime {
       samplingId: this.#idFactory(),
       projectId,
       sampleId: sample.sampleId,
-      status: "queued",
+      execution: { status: "queued" },
       subjectAgent,
       ...(evaluationAgent ? { evaluationAgent } : {}),
       executionAttempts: [],
@@ -309,7 +314,7 @@ class RuntimeCoordinator implements EvalRuntime {
           retryPolicy: request.retryPolicy,
         });
       } catch (error) {
-        return this.markSamplingFailed(record.sampling.samplingId, error);
+        return this.markSamplingFailed(record.sampling.samplingId, "execution", error);
       }
     }));
     await this.refreshRunStatus(run);
@@ -331,7 +336,7 @@ class RuntimeCoordinator implements EvalRuntime {
           retryPolicy: request.retryPolicy,
         });
       } catch (error) {
-        return this.markSamplingFailed(record.sampling.samplingId, error);
+        return this.markSamplingFailed(record.sampling.samplingId, "evaluation", error);
       }
     }));
     await this.refreshRunStatus(run);
@@ -344,7 +349,7 @@ class RuntimeCoordinator implements EvalRuntime {
     request: PipelineRequest,
   ): Promise<void> {
     const executedRecords = await this.runExecutionPhase(run, records, request);
-    if (executedRecords.some(({ sampling }) => sampling.status !== "succeeded")) {
+    if (executedRecords.some(({ sampling }) => sampling.execution.status !== "succeeded")) {
       return;
     }
 
@@ -373,17 +378,19 @@ class RuntimeCoordinator implements EvalRuntime {
 
   private async markSamplingFailed(
     samplingId: string,
+    stage: AgentLifecycleStage,
     error: unknown,
   ): Promise<RuntimeSamplingRecord> {
     const current = await this.#store.getSampling(samplingId);
     if (!current) throw new Error(`Unknown sampling ${samplingId}`);
     const failed = {
       ...current,
-      sampling: {
-        ...current.sampling,
-        status: "failed" as const,
-        lastError: errorMessage(error),
-      },
+      sampling: withSamplingStatus(
+        current.sampling,
+        stage,
+        "failed",
+        errorMessage(error),
+      ),
     };
     await this.#store.updateSampling(failed);
     return failed;
@@ -410,16 +417,19 @@ class RuntimeCoordinator implements EvalRuntime {
   private async failRun(run: RuntimeRunRecord, error: unknown): Promise<void> {
     const records = await this.loadSamplingRecords(run.samplingIds);
     await Promise.all(records.map(async (record) => {
-      const shouldFail = record.sampling.status !== "succeeded"
-        || (run.phase !== "execution" && record.evaluation === undefined);
+      const stage = failureStage(record, run.phase);
+      const shouldFail = stage === "execution"
+        ? record.sampling.execution.status !== "succeeded"
+        : record.sampling.evaluation?.status !== "succeeded";
       if (!shouldFail) return;
       await this.#store.updateSampling({
         ...record,
-        sampling: {
-          ...record.sampling,
-          status: "failed",
-          lastError: errorMessage(error),
-        },
+        sampling: withSamplingStatus(
+          record.sampling,
+          stage,
+          "failed",
+          errorMessage(error),
+        ),
       });
     }));
     const latest = await this.#store.getRun(run.runId);
@@ -434,15 +444,15 @@ function resetEvaluation(
 ): RuntimeSamplingRecord {
   const { evaluation: _evaluation, ...withoutEvaluation } = record;
   const {
+    evaluation: _evaluationState,
     evaluationSubmissionId: _evaluationSubmissionId,
-    lastError: _lastError,
     ...withoutEvaluationState
   } = withoutEvaluation.sampling;
   return {
     ...withoutEvaluation,
     sampling: {
       ...withoutEvaluationState,
-      status: "queued",
+      evaluation: { status: "queued" },
       evaluationAgent,
       evaluationAttempts: [],
     },
@@ -454,22 +464,47 @@ function aggregateRunStatus(
   phase: RuntimePhase,
 ): SamplingStatus {
   if (records.length === 0) return "failed";
-  if (records.some(({ sampling }) => sampling.status === "failed" || sampling.status === "cancelled")) {
+  const statuses = records.map(({ sampling }) => statusForPhase(sampling, phase));
+  const resolvedStatuses = statuses.filter(
+    (status): status is SamplingStatus => status !== undefined,
+  );
+  if (resolvedStatuses.some((status) => status === "failed" || status === "cancelled")) {
     return "failed";
   }
-  if (records.every(({ sampling }) => sampling.status === "succeeded")) {
-    if (phase === "pipeline" && records.some(({ evaluation }) => evaluation === undefined)) {
-      return "running";
-    }
+  if (statuses.some((status) => status === undefined)) {
+    return phase === "pipeline" ? "running" : "queued";
+  }
+  if (resolvedStatuses.every((status) => status === "succeeded")) {
     return "succeeded";
   }
-  if (records.some(({ sampling }) => sampling.status === "retrying")) {
+  if (resolvedStatuses.some((status) => status === "retrying")) {
     return "retrying";
   }
-  if (records.some(({ sampling }) => sampling.status === "starting" || sampling.status === "running")) {
+  if (resolvedStatuses.some((status) => status === "starting" || status === "running")) {
     return "running";
   }
   return "queued";
+}
+
+function statusForPhase(
+  sampling: Sampling,
+  phase: RuntimePhase,
+): SamplingStatus | undefined {
+  if (phase === "execution") return sampling.execution.status;
+  if (phase === "evaluation") return sampling.evaluation?.status;
+  if (sampling.execution.status !== "succeeded") return sampling.execution.status;
+  return sampling.evaluation?.status;
+}
+
+function failureStage(
+  record: RuntimeSamplingRecord,
+  phase: RuntimePhase,
+): AgentLifecycleStage {
+  if (phase === "execution") return "execution";
+  if (phase === "evaluation") return "evaluation";
+  return record.sampling.execution.status === "succeeded"
+    ? "evaluation"
+    : "execution";
 }
 
 function toRunSnapshot(run: RuntimeRunRecord): RunSnapshot {

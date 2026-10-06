@@ -5,6 +5,7 @@ import type {
   HarnessConfig,
   RetryPolicy,
   Sampling,
+  SamplingStageState,
   SamplingStatus,
 } from "@eval-platform/eval-contracts";
 
@@ -152,21 +153,16 @@ export function requireSpAgent(harness: HarnessConfig, role: AgentRole): AgentCo
 
 export function withSamplingStatus(
   sampling: Sampling,
+  stage: AgentLifecycleStage,
   status: SamplingStatus,
   lastError?: string,
 ): Sampling {
-  if (lastError === undefined) {
-    return {
-      ...withoutLastError(sampling),
-      status,
-    };
-  }
-  return { ...sampling, status, lastError };
-}
-
-export function withoutLastError(sampling: Sampling): Omit<Sampling, "lastError"> {
-  const { lastError: _lastError, ...withoutLastErrorValue } = sampling;
-  return withoutLastErrorValue;
+  const nextState: SamplingStageState = lastError === undefined
+    ? { status }
+    : { status, lastError };
+  return stage === "execution"
+    ? { ...sampling, execution: nextState }
+    : { ...sampling, evaluation: nextState };
 }
 
 export function describeAgentError(error: unknown): {

@@ -158,6 +158,35 @@ describe("eval runtime orchestration", () => {
     expect(harness.collectExecution).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps evaluation state absent when only execution is requested", async () => {
+    const harness = makeHarness();
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog(),
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+    });
+
+    const run = await runtime.start({
+      projectId: "project-1",
+      datasetId: "dataset-1",
+      samplingCount: 1,
+      executionConcurrency: 1,
+      harness: { kind: "sp", agentConfig: SUBJECT },
+      retryPolicy: { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 },
+    });
+    await waitForTerminal(runtime, run.runId);
+
+    await expect(runtime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
+      sampling: {
+        execution: { status: "succeeded" },
+      },
+    });
+    await expect(runtime.getSampling(run.samplingIds[0]!)).resolves.not.toMatchObject({
+      sampling: { evaluation: expect.anything() },
+    });
+  });
+
   it("retries execution output collection without restarting a completed agent", async () => {
     const harness = makeHarness();
     vi.mocked(harness.collectExecution)
@@ -367,6 +396,62 @@ describe("eval runtime orchestration", () => {
         path: "/eval/trajectory.jsonl",
       },
     }));
+    await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.toMatchObject({
+      sampling: {
+        execution: { status: "succeeded" },
+        evaluation: { status: "succeeded" },
+      },
+    });
+  });
+
+  it("keeps execution success when evaluation fails", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.collectEvaluation).mockResolvedValue({
+      status: "failed",
+      artifacts: [],
+      trajectory: {
+        trajectoryId: "trajectory-2",
+        source: "evaluator",
+        path: "/eval/evaluation.jsonl",
+      },
+      error: "evaluation output failed",
+    });
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog(),
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+    });
+    const execution = await runtime.start({
+      projectId: "project-1",
+      datasetId: "dataset-1",
+      samplingCount: 1,
+      executionConcurrency: 1,
+      harness: { kind: "sp", agentConfig: SUBJECT },
+      retryPolicy: { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 },
+    });
+    await waitForTerminal(runtime, execution.runId);
+
+    const evaluation = await runtime.evaluate({
+      projectId: "project-1",
+      samplingIds: execution.samplingIds,
+      evaluationHarness: { kind: "sp", agentConfig: EVALUATOR },
+      evaluationConcurrency: 1,
+      retryPolicy: { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 },
+    });
+    await expect(waitForTerminal(runtime, evaluation.runId)).resolves.toMatchObject({
+      status: "failed",
+    });
+
+    await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.toMatchObject({
+      sampling: {
+        execution: { status: "succeeded" },
+        evaluation: {
+          status: "failed",
+          lastError: "evaluation output collection failed: evaluation output failed",
+        },
+      },
+    });
   });
 
   it("retries evaluation output collection without restarting the evaluator", async () => {
@@ -443,7 +528,7 @@ describe("eval runtime orchestration", () => {
     });
     await expect(restoredRuntime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
       sampling: {
-        status: "succeeded",
+        execution: { status: "succeeded" },
         subjectSubmissionId: `subject-${run.samplingIds[0]}`,
       },
       execution: { status: "succeeded" },

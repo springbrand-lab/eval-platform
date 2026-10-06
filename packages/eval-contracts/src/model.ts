@@ -16,6 +16,11 @@ export type SamplingStatus =
   | "failed"
   | "cancelled";
 
+export interface SamplingStageState {
+  readonly status: SamplingStatus;
+  readonly lastError?: string;
+}
+
 export type AgentStatus =
   | "queued"
   | "running"
@@ -116,7 +121,8 @@ export interface Sampling {
   readonly samplingId: string;
   readonly projectId: string;
   readonly sampleId: string;
-  readonly status: SamplingStatus;
+  readonly execution: SamplingStageState;
+  readonly evaluation?: SamplingStageState;
   readonly subjectAgent: AgentConfigRef;
   readonly subjectSubmissionId?: string;
   readonly evaluationAgent?: AgentConfigRef;
@@ -125,7 +131,6 @@ export interface Sampling {
   readonly evaluationAttempts: readonly EvaluationAttempt[];
   readonly artifacts?: readonly ArtifactRef[];
   readonly trajectory?: TrajectoryRef;
-  readonly lastError?: string;
 }
 
 export interface StartRunRequest {

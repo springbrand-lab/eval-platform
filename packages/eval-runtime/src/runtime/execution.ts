@@ -16,7 +16,6 @@ import {
   requireSpAgent,
   runAgentLifecycle,
   withSamplingStatus,
-  withoutLastError,
   type AgentLifecycleDependencies,
 } from "./agent-lifecycle.js";
 
@@ -75,7 +74,7 @@ export async function executeSampling(
         return updated;
       },
       setSamplingStatus: async (status, lastError) => {
-        await persist(withSamplingStatus(current.sampling, status, lastError));
+        await persist(withSamplingStatus(current.sampling, "execution", status, lastError));
       },
       prepare: async (handle) => {
         await dependencies.harness.materializeInitialData(
@@ -95,8 +94,7 @@ export async function executeSampling(
       ...current,
       execution: result.output,
       sampling: {
-        ...withoutLastError(current.sampling),
-        status: "succeeded",
+        ...withSamplingStatus(current.sampling, "execution", "succeeded"),
         subjectSubmissionId: result.handle.submissionId,
         artifacts: result.output.artifacts,
         trajectory: result.output.trajectory,
@@ -108,11 +106,7 @@ export async function executeSampling(
     const details = describeAgentError(error);
     current = {
       ...current,
-      sampling: {
-        ...current.sampling,
-        status: "failed",
-        lastError: details.message,
-      },
+      sampling: withSamplingStatus(current.sampling, "execution", "failed", details.message),
     };
     await dependencies.store.updateSampling(current);
     return current;

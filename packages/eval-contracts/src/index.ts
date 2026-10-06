@@ -26,6 +26,7 @@ export type {
   RunHandle,
   RunSnapshot,
   Sampling,
+  SamplingStageState,
   SamplingStatus,
   SpHarnessConfig,
   StartRunRequest,
