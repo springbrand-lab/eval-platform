@@ -43,12 +43,14 @@ export interface SubmitAgentInput {
   readonly prompt: string;
 }
 
-export interface InspectAgentInput {
+export interface InspectAgentOperationInput {
   readonly handle: AgentHandle;
+  readonly idempotencyKey: string;
 }
 
 export interface WaitForSubmissionInput {
   readonly handle: AgentHandle;
+  readonly idempotencyKey: string;
 }
 
 export interface CollectAgentInput {
@@ -75,7 +77,7 @@ export interface Harness {
   materializeInitialData(input: MaterializeInitialDataInput): Promise<MaterializedDataBinding>;
   submitAgent(input: SubmitAgentInput): Promise<AgentSubmission>;
   waitForSubmission(input: WaitForSubmissionInput): Promise<AgentSubmission>;
-  inspectAgent(input: InspectAgentInput): Promise<AgentSubmission>;
+  inspectAgentOperation(input: InspectAgentOperationInput): Promise<AgentSubmission | null>;
   restartAgent(input: SubmitAgentInput): Promise<AgentSubmission>;
   collectExecution(input: CollectAgentInput): Promise<ExecutionOutput>;
   collectEvaluation(input: CollectAgentInput): Promise<EvaluationAgentOutput>;

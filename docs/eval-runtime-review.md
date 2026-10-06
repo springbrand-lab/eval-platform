@@ -42,7 +42,7 @@ Agent 已经把任务做完了，只是 Runtime 没把结果拿回来。现在�
 `packages/eval-runtime/src/runtime/agent-lifecycle.ts` 现在按生命周期阶段处理：
 
 - `RetryOperation` 明确区分 `submission`、`status`、`collection` 和 `restart`；
-- Submission 响应不确定时，先用同一 Harness 句柄校准，重试提交也复用同一个幂等键；
+- Submission 响应不确定时，按本次操作的幂等键校准，重试提交也复用同一个幂等键；
 - 状态确认失败只按 `status` 决策，永远不会直接进入 `restartAgent()`；
 - 产物/轨迹收集失败只按 `collection` 决策，始终复用已完成的 Agent；
 - 只有收到明确的终态失败，才构造 `ConfirmedSubmissionFailure` 并按 `restart` 决策；
@@ -76,9 +76,10 @@ execution:<samplingId>:restart:2
 **已落实**
 
 - `submitWithReconciliation()` 为一次重启操作固定一个幂等键；
-- 响应丢失时先调用 `inspectAgent()` 校准原请求；
-- 校准仍不确定且策略允许重试时，重复调用复用原幂等键；
-- 只有确认上一次重启已经失败后，下一次有意发起的新重启才使用新的 attempt/key。
+- 响应丢失时调用 `inspectAgentOperation({ handle, idempotencyKey })`，只查询本次操作；
+- 查询不到或查询失败时，重复调用复用原幂等键；
+- 只有按原幂等键查到该次重启明确失败后，下一次有意发起的新重启才使用新的 attempt/key；
+- 不再提供不带操作身份的 `inspectAgent()` 校准路径。
 
 进程崩溃后的跨进程恢复仍依赖后续持久化的操作状态，不在本次 Runtime 核心实现范围内。
 

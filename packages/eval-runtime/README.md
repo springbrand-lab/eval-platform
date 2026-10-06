@@ -52,9 +52,9 @@ src/
 2. Evaluation Agent 使用独立的 Evaluation Chat / Workspace；对外只记录一个 `submissionId`，它同时表示 SP 的 Chat/Submission，不重复记录 `chatId`。
 3. 重试不能把一次采样变成新的采样，只能增加该采样的执行或评估 attempt。
    `RetryController` 按 `submission`、`status`、`collection` 和 `restart` 区分决策；默认策略只定义确认失败后的 Agent 重启，状态确认和收集是否重试由注入的控制器决定。收集失败不得重启已经完成的 Submission。
-4. Submission 终态以 Harness 推送通知为主；自动重试前仍必须查询原 `Submission`，不得因为响应丢失就盲目再次投递。
+4. Submission 终态以 Harness 推送通知为主；自动重试前仍必须按本次操作的幂等键查询原 `Submission`，不得因为响应丢失就盲目再次投递。
 5. Subject Workspace 产物和完整 Trajectory 必须复制到评估 Chat / Workspace 后，评估 Agent 才能启动。
-6. 推送丢失、连接断开或运行时恢复时，`inspectAgent` 只做一次或有限次状态校准，不作为主流程的持续轮询。
+6. 推送丢失、连接断开或运行时恢复时，`inspectAgentOperation` 只做一次或有限次状态校准，不作为主流程的持续轮询。
 7. 评估平台只消费 SP 的公开契约，不依赖 SP 的 DO SQLite、内部类或 Web 投影。
 
 轨迹通过 SP 正式接口完整获取，并无条件复制到评估 Agent 的 Workspace；本包不引入独立的轨迹树或线上流量评估子包。

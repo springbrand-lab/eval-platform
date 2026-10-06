@@ -87,7 +87,7 @@ function makeHarness(): Harness {
     submitAgent: vi.fn(async () => makeSubmission()),
     restartAgent: vi.fn(async () => makeSubmission()),
     waitForSubmission: vi.fn(async () => makeSubmission()),
-    inspectAgent: vi.fn(async () => makeSubmission()),
+    inspectAgentOperation: vi.fn(async () => makeSubmission()),
     collectExecution: vi.fn(async ({ handle }) => ({
       samplingId: handle.samplingId,
       status: "succeeded" as const,
@@ -268,7 +268,7 @@ describe("eval runtime orchestration", () => {
       retryable: true,
     });
     vi.mocked(harness.waitForSubmission).mockRejectedValue(new Error("status service unavailable"));
-    vi.mocked(harness.inspectAgent).mockRejectedValue(new Error("inspection service unavailable"));
+    vi.mocked(harness.inspectAgentOperation).mockRejectedValue(new Error("inspection service unavailable"));
     const runtime = createEvalRuntime({
       catalog: makeCatalog(),
       harness,
@@ -532,7 +532,7 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.restartAgent)
       .mockRejectedValueOnce(new Error("connection lost after restart"))
       .mockResolvedValueOnce(makeSubmission());
-    vi.mocked(harness.inspectAgent).mockRejectedValueOnce(new Error("inspection unavailable"));
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValueOnce(null);
     const runtime = createEvalRuntime({
       catalog: makeCatalog(),
       harness,
@@ -556,6 +556,51 @@ describe("eval runtime orchestration", () => {
     const firstCall = vi.mocked(harness.restartAgent).mock.calls[0]?.[0];
     const secondCall = vi.mocked(harness.restartAgent).mock.calls[1]?.[0];
     expect(firstCall?.idempotencyKey).toBe(secondCall?.idempotencyKey);
+    expect(harness.inspectAgentOperation).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: firstCall?.idempotencyKey,
+    }));
+  });
+
+  it("creates a new restart key only after the previous key is confirmed failed", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.submitAgent).mockResolvedValueOnce({
+      status: "failed",
+      normalizedStatus: "failed",
+      retryable: true,
+      error: "temporary upstream failure",
+    });
+    vi.mocked(harness.restartAgent)
+      .mockRejectedValueOnce(new Error("connection lost after restart"))
+      .mockResolvedValueOnce(makeSubmission());
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValueOnce({
+      status: "failed",
+      normalizedStatus: "failed",
+      retryable: true,
+      error: "restart was rejected by the agent",
+    });
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog(),
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+    });
+
+    const run = await runtime.start({
+      projectId: "project-1",
+      datasetId: "dataset-1",
+      samplingCount: 1,
+      executionConcurrency: 1,
+      harness: { kind: "sp", agentConfig: SUBJECT },
+      retryPolicy: { maxRestarts: 2, initialBackoffMs: 0, maxBackoffMs: 0 },
+    });
+
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
+      status: "succeeded",
+    });
+    expect(harness.restartAgent).toHaveBeenCalledTimes(2);
+    const firstCall = vi.mocked(harness.restartAgent).mock.calls[0]?.[0];
+    const secondCall = vi.mocked(harness.restartAgent).mock.calls[1]?.[0];
+    expect(firstCall?.idempotencyKey).not.toBe(secondCall?.idempotencyKey);
   });
 
   it("reconciles an uncertain submission before retrying", async () => {
@@ -588,7 +633,7 @@ describe("eval runtime orchestration", () => {
     });
     expect(harness.submitAgent).toHaveBeenCalledTimes(1);
     expect(harness.restartAgent).not.toHaveBeenCalled();
-    expect(harness.inspectAgent).toHaveBeenCalledTimes(1);
+    expect(harness.inspectAgentOperation).toHaveBeenCalledTimes(1);
     expect(harness.collectExecution).toHaveBeenCalledTimes(2);
   });
 

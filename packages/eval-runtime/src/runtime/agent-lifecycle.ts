@@ -265,13 +265,14 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
         prepared = true;
       }
 
+      const idempotencyKey = restartRequested
+        ? `${options.stage}:${options.samplingId}:restart:${attemptNumber}`
+        : `${options.stage}:${options.samplingId}`;
       const submission = await submitWithReconciliation(
         dependencies,
         options,
         handle,
-        restartRequested
-          ? `${options.stage}:${options.samplingId}:restart:${attemptNumber}`
-          : `${options.stage}:${options.samplingId}`,
+        idempotencyKey,
         restartRequested ? "restart" : "submission",
         retryController,
       );
@@ -283,6 +284,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
             dependencies,
             options,
             handle,
+            idempotencyKey,
             retryController,
           );
       if (!isSuccessfulSubmission(terminal)) {
@@ -354,9 +356,10 @@ async function submitWithReconciliation<TAttempt extends AgentAttemptRecord, TOu
         ? await dependencies.harness.restartAgent(input)
         : await dependencies.harness.submitAgent(input);
     } catch (error) {
-      const reconciliation = await inspectUncertainSubmission(
+      const reconciliation = await inspectUncertainOperation(
         dependencies.harness,
         handle,
+        idempotencyKey,
       );
       if (reconciliation) return reconciliation;
 
@@ -380,11 +383,17 @@ async function waitForTerminalWithRetry<TAttempt extends AgentAttemptRecord, TOu
   dependencies: AgentLifecycleDependencies,
   options: AgentLifecycleOptions<TAttempt, TOutput>,
   handle: AgentHandle,
+  idempotencyKey: string,
   retryController: RetryController,
 ): Promise<AgentSubmission> {
   for (let attemptNumber = 1; ; attemptNumber += 1) {
     try {
-      return await waitForTerminal(dependencies.harness, handle, options.stage);
+      return await waitForTerminal(
+        dependencies.harness,
+        handle,
+        idempotencyKey,
+        options.stage,
+      );
     } catch (error) {
       const details = describeAgentError(error);
       if (!details.retryable) throw error;
@@ -432,12 +441,13 @@ async function collectOutputWithRetry<TAttempt extends AgentAttemptRecord, TOutp
   }
 }
 
-async function inspectUncertainSubmission(
+async function inspectUncertainOperation(
   harness: Harness,
   handle: AgentHandle,
+  idempotencyKey: string,
 ): Promise<AgentSubmission | undefined> {
   try {
-    return await harness.inspectAgent({ handle });
+    return (await harness.inspectAgentOperation({ handle, idempotencyKey })) ?? undefined;
   } catch {
     return undefined;
   }
@@ -446,19 +456,24 @@ async function inspectUncertainSubmission(
 export async function waitForTerminal(
   harness: Harness,
   handle: AgentHandle,
+  idempotencyKey: string,
   stage: AgentLifecycleStage,
 ): Promise<AgentSubmission> {
   try {
-    const submission = await harness.waitForSubmission({ handle });
+    const submission = await harness.waitForSubmission({ handle, idempotencyKey });
     if (isTerminal(submission)) return submission;
 
-    const inspection = await harness.inspectAgent({ handle });
-    if (isTerminal(inspection)) return inspection;
+    const inspection = await inspectUncertainOperation(
+      harness,
+      handle,
+      idempotencyKey,
+    );
+    if (inspection && isTerminal(inspection)) return inspection;
     throw new SubmissionStatusError(
       stage,
       {
         message: `${stage} submission did not reach a terminal state`,
-        retryable: inspection.retryable !== false,
+        retryable: inspection?.retryable !== false,
         failureKind: "submission-timeout",
       },
       undefined,
@@ -466,7 +481,11 @@ export async function waitForTerminal(
   } catch (error) {
     if (error instanceof SubmissionStatusError) throw error;
 
-    const reconciliation = await inspectUncertainSubmission(harness, handle);
+    const reconciliation = await inspectUncertainOperation(
+      harness,
+      handle,
+      idempotencyKey,
+    );
     if (reconciliation && isTerminal(reconciliation)) return reconciliation;
 
     const details = describeAgentError(error);

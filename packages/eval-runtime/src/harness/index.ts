@@ -5,7 +5,7 @@ export type {
   CollectAgentInput,
   EvaluationInput,
   Harness,
-  InspectAgentInput,
+  InspectAgentOperationInput,
   MaterializeInitialDataInput,
   StartAgentInput,
   SubmitAgentInput,

@@ -70,7 +70,7 @@ Harness 只依赖以下正式边界：
 1. Agent Config 引用：`ownerUserId`、`userAgentId`；
 2. Chat 创建：`Inbox.createChat(title, userAgentId, chatId?)`；
 3. 消息投递：`dispatchMessage(message, "enqueue" | "steer")`；
-4. Submission 终态推送：Harness 接收可靠的完成/失败/取消通知；`SubmissionReceipt`、`getSubmission()` 只用于提交后的初始确认、断线恢复和重试前校准；
+4. Submission 终态推送：Harness 接收可靠的完成/失败/取消通知；`SubmissionReceipt` 和按幂等键的操作查询只用于提交后的初始确认、断线恢复和重试前校准；
 5. Trajectory：`TrajectoryPage`，按 `beforeSeq` 分页读取完整轨迹，单页不超过 `200`；
 6. Workspace：tree、manifest 和 content 的正式接口。
 
