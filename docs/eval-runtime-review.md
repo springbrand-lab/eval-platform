@@ -249,7 +249,7 @@ if (executedRecords.some(({ sampling }) => sampling.status !== "succeeded")) {
 
 ---
 
-### R-07：Run 不应该维护一份独立的权威状态
+### R-07：Run 不应该维护一份独立的权威状态（已处理）
 
 **现象**
 
@@ -276,6 +276,14 @@ Run 有自己的 `status`，Runtime 又根据 Sampling 状态不断聚合和更�
 - Sampling 保存真实的执行和评估状态；
 - Run 状态需要时从 Sampling 即时推导；
 - 如果为了查询性能保留缓存，只能是派生投影，不能成为第二个权威状态。
+
+**已落实**
+
+- 持久化的 `RuntimeRunRecord` 只保存 `runId`、`projectId`、`samplingIds` 和 `phase`，不再保存 `status`。
+- `RuntimeStore` 不再提供 `updateRun()`；Run 创建后不需要随着 Sampling 生命周期反复写回状态。
+- `getRun()` 读取关联 Sampling，并通过 `aggregateRunStatus()` 即时生成对外 `RunSnapshot.status`；这个字段是查询投影，不是第二份持久化事实。
+- 执行、评估、Pipeline 的生命周期只更新 Sampling；失败、部分成功和阶段切换都由 Sampling 状态自然聚合。
+- Runtime 测试在没有任何 Run 状态写入接口的情况下覆盖运行中、成功和失败状态查询。
 
 ---
 

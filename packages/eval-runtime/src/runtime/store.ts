@@ -2,7 +2,6 @@ import type {
   EvaluationAgentOutput,
   ExecutionOutput,
   RunPhase,
-  RunSnapshot,
   Sampling,
 } from "@eval-platform/eval-contracts";
 
@@ -10,7 +9,10 @@ import type { Sample } from "./model.js";
 
 export type RuntimePhase = RunPhase;
 
-export interface RuntimeRunRecord extends RunSnapshot {
+export interface RuntimeRunRecord {
+  readonly runId: string;
+  readonly samplingIds: readonly string[];
+  readonly projectId: string;
   readonly phase: RuntimePhase;
 }
 
@@ -22,7 +24,6 @@ export interface RuntimeSamplingRecord {
 }
 
 export interface RuntimeStore {
-  updateRun(record: RuntimeRunRecord): Promise<void>;
   getRun(runId: string): Promise<RuntimeRunRecord | null>;
   createRunWithSamplings(
     run: RuntimeRunRecord,

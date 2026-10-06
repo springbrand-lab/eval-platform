@@ -59,6 +59,7 @@ src/
 7. 评估平台只消费 SP 的公开契约，不依赖 SP 的 DO SQLite、内部类或 Web 投影。
 8. 再次主动调用 `evaluate()` 会重置评估记录并在启动前分配新的评估 ID；这是有意重新评估，不是丢响应后的 ensure 重试。被评估 Agent 的 ID 保持不变。
 9. `start()`、`pipeline()` 和 `evaluate()` 不分别写 Run 与 Sampling。前两者使用 `createRunWithSamplings()`，Pipeline 的评估准备使用 `prepareEvaluationSamplings()`；这些命令失败时不能留下半批状态或清掉旧评估结果。
+10. `RuntimeRunRecord` 不保存 Run 状态；`RunSnapshot.status` 由 `getRun()` 根据关联 Sampling 即时聚合，是查询投影而不是第二份权威状态。
 
 轨迹通过 SP 正式接口完整获取，并无条件复制到评估 Agent 的 Workspace；本包不引入独立的轨迹树或线上流量评估子包。
 

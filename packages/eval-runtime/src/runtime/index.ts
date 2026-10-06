@@ -133,7 +133,7 @@ class RuntimeCoordinator implements EvalRuntime {
     );
 
     await this.persistNewRun(run, records);
-    void this.runExecutionPhase(run, records, request).catch((error: unknown) => {
+    void this.runExecutionPhase(records, request).catch((error: unknown) => {
       void this.failRun(run, error).catch(() => undefined);
     });
     return this.runHandle(run);
@@ -159,7 +159,7 @@ class RuntimeCoordinator implements EvalRuntime {
       "evaluation",
     );
     await this.#store.createRunWithSamplings(run, preparedRecords);
-    void this.runEvaluationPhase(run, preparedRecords, request).catch((error: unknown) => {
+    void this.runEvaluationPhase(preparedRecords, request).catch((error: unknown) => {
       void this.failRun(run, error).catch(() => undefined);
     });
     return this.runHandle(run);
@@ -181,7 +181,7 @@ class RuntimeCoordinator implements EvalRuntime {
     );
 
     await this.persistNewRun(run, records);
-    void this.runPipeline(run, records, request).catch((error: unknown) => {
+    void this.runPipeline(records, request).catch((error: unknown) => {
       void this.failRun(run, error).catch(() => undefined);
     });
     return this.runHandle(run);
@@ -190,8 +190,8 @@ class RuntimeCoordinator implements EvalRuntime {
   async getRun(runId: string): Promise<RunSnapshot> {
     const run = await this.#store.getRun(runId);
     if (!run) throw new Error(`Unknown run ${runId}`);
-    const refreshed = await this.refreshRunStatus(run);
-    return toRunSnapshot(refreshed);
+    const records = await this.loadSamplingRecords(run.samplingIds);
+    return toRunSnapshot(run, records);
   }
 
   async getSampling(samplingId: string): Promise<RuntimeSamplingRecord> {
@@ -281,7 +281,6 @@ class RuntimeCoordinator implements EvalRuntime {
       runId: this.#idFactory(),
       samplingIds: [...samplingIds],
       projectId,
-      status: "queued",
       phase,
     };
   }
@@ -298,11 +297,9 @@ class RuntimeCoordinator implements EvalRuntime {
   }
 
   private async runExecutionPhase(
-    run: RuntimeRunRecord,
     records: readonly RuntimeSamplingRecord[],
     request: StartRunRequest,
   ): Promise<readonly RuntimeSamplingRecord[]> {
-    await this.updateRunStatus(run, "running");
     const scheduler = this.scheduler(request.executionConcurrency);
     const results = await scheduler.run(records.map((record) => async () => {
       try {
@@ -315,16 +312,13 @@ class RuntimeCoordinator implements EvalRuntime {
         return this.markSamplingFailed(record.sampling.samplingId, "execution", error);
       }
     }));
-    await this.refreshRunStatus(run);
     return results;
   }
 
   private async runEvaluationPhase(
-    run: RuntimeRunRecord,
     records: readonly RuntimeSamplingRecord[],
     request: EvaluationPhaseRequest,
   ): Promise<readonly RuntimeSamplingRecord[]> {
-    await this.updateRunStatus(run, "running");
     const scheduler = this.scheduler(request.evaluationConcurrency);
     const results = await scheduler.run(records.map((record) => async () => {
       try {
@@ -337,16 +331,14 @@ class RuntimeCoordinator implements EvalRuntime {
         return this.markSamplingFailed(record.sampling.samplingId, "evaluation", error);
       }
     }));
-    await this.refreshRunStatus(run);
     return results;
   }
 
   private async runPipeline(
-    run: RuntimeRunRecord,
     records: readonly RuntimeSamplingRecord[],
     request: PipelineRequest,
   ): Promise<void> {
-    const executedRecords = await this.runExecutionPhase(run, records, request);
+    const executedRecords = await this.runExecutionPhase(records, request);
     const evaluableRecords = executedRecords.filter(
       ({ sampling }) => sampling.execution.status === "succeeded",
     );
@@ -359,7 +351,7 @@ class RuntimeCoordinator implements EvalRuntime {
       return resetEvaluation(record, record.sampling.evaluationAgent);
     });
     await this.#store.prepareEvaluationSamplings(evaluationRecords);
-    await this.runEvaluationPhase(run, evaluationRecords, request);
+    await this.runEvaluationPhase(evaluationRecords, request);
   }
 
   private scheduler(maxConcurrentDos: number): AgentScheduler {
@@ -386,24 +378,6 @@ class RuntimeCoordinator implements EvalRuntime {
     return failed;
   }
 
-  private async updateRunStatus(
-    run: RuntimeRunRecord,
-    status: SamplingStatus,
-  ): Promise<RuntimeRunRecord> {
-    const updated = { ...run, status };
-    await this.#store.updateRun(updated);
-    return updated;
-  }
-
-  private async refreshRunStatus(run: RuntimeRunRecord): Promise<RuntimeRunRecord> {
-    const records = await this.loadSamplingRecords(run.samplingIds);
-    const status = aggregateRunStatus(records, run.phase);
-    if (status === run.status) return run;
-    const updated = { ...run, status };
-    await this.#store.updateRun(updated);
-    return updated;
-  }
-
   private async failRun(run: RuntimeRunRecord, error: unknown): Promise<void> {
     const records = await this.loadSamplingRecords(run.samplingIds);
     await Promise.all(records.map(async (record) => {
@@ -422,9 +396,6 @@ class RuntimeCoordinator implements EvalRuntime {
         ),
       });
     }));
-    const latest = await this.#store.getRun(run.runId);
-    if (!latest) return;
-    await this.#store.updateRun({ ...latest, status: "failed" });
   }
 }
 
@@ -504,13 +475,16 @@ function failureStage(
     : "execution";
 }
 
-function toRunSnapshot(run: RuntimeRunRecord): RunSnapshot {
+function toRunSnapshot(
+  run: RuntimeRunRecord,
+  records: readonly RuntimeSamplingRecord[],
+): RunSnapshot {
   return {
     runId: run.runId,
     samplingIds: [...run.samplingIds],
     projectId: run.projectId,
     phase: run.phase,
-    status: run.status,
+    status: aggregateRunStatus(records, run.phase),
   };
 }
 

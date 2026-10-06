@@ -45,9 +45,6 @@ function makeStore(options: StoreOptions = {}): RuntimeStore {
   const runs = new Map<string, RuntimeRunRecord>();
   const samplings = new Map<string, RuntimeSamplingRecord>();
   return {
-    async updateRun(record) {
-      runs.set(record.runId, record);
-    },
     async getRun(runId) {
       return runs.get(runId) ?? null;
     },
