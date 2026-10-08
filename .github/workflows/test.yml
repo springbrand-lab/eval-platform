@@ -15,30 +15,157 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: Check packages and apps
+  changes:
+    name: Detect affected projects
+    runs-on: ubuntu-latest
+    outputs:
+      api: ${{ steps.affected.outputs.api }}
+      cli: ${{ steps.affected.outputs.cli }}
+      web: ${{ steps.affected.outputs.web }}
+      packages: ${{ steps.affected.outputs.packages }}
+      any: ${{ steps.affected.outputs.any }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
+      - name: Test affected-project detection
+        run: node --test scripts/affected-projects.test.mjs
+
+      - id: affected
+        name: Detect affected projects
+        uses: ./.github/actions/detect-affected
+        with:
+          base-sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          head-sha: ${{ github.sha }}
+          force-all: ${{ github.event_name == 'workflow_dispatch' }}
+
+  packages:
+    name: Test shared packages
+    needs: changes
+    if: needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Set up pnpm
-        uses: pnpm/setup@v2
+      - name: Prepare tests
+        uses: ./.github/actions/prepare-workspace
         with:
-          install: false
+          package-filter: "{packages/**}"
+          cache-scope: packages
 
-      - name: Set up Node
-        uses: actions/setup-node@v6
+      - name: Restore Vitest cache
+        uses: actions/cache@v6
         with:
-          node-version-file: .node-version
-          cache: pnpm
+          path: |
+            packages/*/node_modules/.vite/vitest
+          key: vitest-${{ runner.os }}-node-${{ hashFiles('.node-version') }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          restore-keys: |
+            vitest-${{ runner.os }}-node-${{ hashFiles('.node-version') }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}-
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Check shared packages
+        run: pnpm -r --if-present --filter './packages/**' check
 
-      - name: Check
-        run: pnpm check
+      - name: Test shared packages
+        run: pnpm -r --if-present --filter './packages/**' test
 
-      - name: Test
-        run: pnpm test
+  api:
+    name: Test Eval API
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Prepare tests
+        uses: ./.github/actions/prepare-workspace
+        with:
+          package-filter: "@eval-platform/eval-api"
+          cache-scope: api
+
+      - name: Restore Vitest cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            apps/eval-api/node_modules/.vite/vitest
+          key: vitest-${{ runner.os }}-node-${{ hashFiles('.node-version') }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          restore-keys: |
+            vitest-${{ runner.os }}-node-${{ hashFiles('.node-version') }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}-
+
+      - name: Check Eval API
+        run: pnpm --filter @eval-platform/eval-api check
+
+      - name: Test Eval API
+        run: pnpm --filter @eval-platform/eval-api test
+
+  cli:
+    name: Test Eval CLI
+    needs: changes
+    if: needs.changes.outputs.cli == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Prepare tests
+        uses: ./.github/actions/prepare-workspace
+        with:
+          package-filter: "@eval-platform/eval-cli"
+          cache-scope: cli
+
+      - name: Restore Vitest cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            apps/eval-cli/node_modules/.vite/vitest
+          key: vitest-${{ runner.os }}-node-${{ hashFiles('.node-version') }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          restore-keys: |
+            vitest-${{ runner.os }}-node-${{ hashFiles('.node-version') }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}-
+
+      - name: Check Eval CLI
+        run: pnpm --filter @eval-platform/eval-cli check
+
+      - name: Test Eval CLI
+        run: pnpm --filter @eval-platform/eval-cli test
+
+  web:
+    name: Test Eval Web
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Prepare tests
+        uses: ./.github/actions/prepare-workspace
+        with:
+          package-filter: "@eval-platform/eval-web"
+          cache-scope: web
+
+      - name: Restore Vitest cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            apps/eval-web/node_modules/.vite/vitest
+          key: vitest-${{ runner.os }}-node-${{ hashFiles('.node-version') }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          restore-keys: |
+            vitest-${{ runner.os }}-node-${{ hashFiles('.node-version') }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}-
+
+      - name: Check Eval Web
+        run: pnpm --filter @eval-platform/eval-web check
+
+      - name: Test Eval Web
+        run: pnpm --filter @eval-platform/eval-web test

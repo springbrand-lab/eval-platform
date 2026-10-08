@@ -1,0 +1,48 @@
+name: Prepare workspace
+description: Set up the repository Node.js and pnpm workspace for a CI job.
+
+inputs:
+  package-filter:
+    description: Optional pnpm filter whose dependency closure should be installed.
+    required: false
+    default: ""
+  cache-scope:
+    description: Stable name used to isolate the pnpm store cache for this job.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Set up pnpm
+      uses: pnpm/setup@v2
+      with:
+        install: false
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version-file: .node-version
+
+    - name: Locate pnpm store
+      id: pnpm-store
+      shell: bash
+      run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+    - name: Restore pnpm cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ steps.pnpm-store.outputs.path }}
+        key: pnpm-${{ runner.os }}-${{ runner.arch }}-node-${{ hashFiles('.node-version') }}-${{ inputs.cache-scope }}-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: |
+          pnpm-${{ runner.os }}-${{ runner.arch }}-node-${{ hashFiles('.node-version') }}-${{ inputs.cache-scope }}-
+
+    - name: Install dependencies
+      shell: bash
+      env:
+        PACKAGE_FILTER: ${{ inputs.package-filter }}
+      run: |
+        if [[ -n "$PACKAGE_FILTER" ]]; then
+          pnpm --filter "${PACKAGE_FILTER}..." install --frozen-lockfile
+        else
+          pnpm install --frozen-lockfile
+        fi

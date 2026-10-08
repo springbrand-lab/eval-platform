@@ -1,0 +1,44 @@
+name: Detect affected projects
+description: Resolve changed workspaces and their downstream application dependents.
+
+inputs:
+  base-sha:
+    description: Git revision before the change.
+    required: false
+  head-sha:
+    description: Git revision containing the change.
+    required: false
+    default: HEAD
+  force-all:
+    description: Mark every project as affected.
+    required: false
+    default: "false"
+
+outputs:
+  api:
+    value: ${{ steps.detect.outputs.api }}
+  cli:
+    value: ${{ steps.detect.outputs.cli }}
+  web:
+    value: ${{ steps.detect.outputs.web }}
+  packages:
+    value: ${{ steps.detect.outputs.packages }}
+  any:
+    value: ${{ steps.detect.outputs.any }}
+
+runs:
+  using: composite
+  steps:
+    - id: detect
+      name: Detect affected projects
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        FORCE_ALL: ${{ inputs.force-all }}
+      run: |
+        if [[ "$FORCE_ALL" == "true" ]]; then
+          node scripts/affected-projects.mjs --all >> "$GITHUB_OUTPUT"
+        else
+          node scripts/affected-projects.mjs --base "$BASE_SHA" --head "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+        fi
