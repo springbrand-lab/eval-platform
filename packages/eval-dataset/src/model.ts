@@ -1,1 +1,1 @@
-export type { Data, Dataset, InitialMaterialsSpec } from "./dataset/model.js";
+export * from "./dataset/model.js";

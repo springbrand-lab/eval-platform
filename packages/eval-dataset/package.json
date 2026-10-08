@@ -7,6 +7,8 @@
     ".": "./src/index.ts",
     "./dataset": "./src/dataset/index.ts",
     "./dataset/model": "./src/dataset/model.ts",
+    "./dataset/serialization": "./src/dataset/serialization.ts",
+    "./dataset/store": "./src/dataset/store.ts",
     "./model": "./src/model.ts"
   },
   "scripts": {
@@ -16,9 +18,12 @@
   },
   "dependencies": {
     "@eval-platform/eval-contracts": "workspace:*",
+    "jsonc-parser": "^3.3.1",
+    "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/node": "26.1.2",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }
