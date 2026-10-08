@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./aggregation": "./src/aggregation/index.ts",
     "./aggregation/model": "./src/aggregation/model.ts",
+    "./aggregation/resources": "./src/aggregation/resources.ts",
     "./evaluators": "./src/evaluators/index.ts",
     "./evaluators/model": "./src/evaluators/model.ts",
     "./reporting": "./src/reporting/index.ts",
@@ -19,7 +20,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@eval-platform/eval-contracts": "workspace:*"
+    "@eval-platform/eval-contracts": "workspace:*",
+    "@eval-platform/eval-dataset": "workspace:*",
+    "@eval-platform/eval-runtime": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

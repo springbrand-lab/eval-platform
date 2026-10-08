@@ -1,30 +1,24 @@
 import type {
+  AgentConfigRef,
   ArtifactRef,
-  EvaluationAgentOutput,
-  EvaluatorResult,
-  JsonValue,
-  Sampling,
+  EvidenceRef,
+  SamplingStageState,
   TrajectoryRef,
 } from "@eval-platform/eval-contracts";
 
-export type EvaluatorKind = "artifact" | "trajectory" | "judge";
-
-export interface EvaluatorDefinition {
-  readonly evaluatorId: string;
-  readonly kind: EvaluatorKind;
-}
-
-export interface EvaluatorContext {
-  readonly sampling: Sampling;
+export interface EvaluationMetrics {
+  readonly evaluationId: string;
+  readonly samplingId: string;
+  readonly evaluator: AgentConfigRef;
+  readonly stage: SamplingStageState;
+  readonly outputStatus: "succeeded" | "failed" | null;
+  readonly score: {
+    readonly status: "available" | "unavailable" | "invalid";
+    readonly value: number | null;
+  };
+  readonly reason: string | null;
+  readonly outputError: string | null;
   readonly artifacts: readonly ArtifactRef[];
-  readonly evaluationOutput?: EvaluationAgentOutput;
-  readonly subjectOutput?: JsonValue;
-  readonly metadata?: Readonly<Record<string, JsonValue>>;
-  readonly metrics?: Readonly<Record<string, number>>;
-  readonly trajectory: TrajectoryRef;
-}
-
-export interface Evaluator {
-  readonly definition: EvaluatorDefinition;
-  evaluate(context: EvaluatorContext): Promise<EvaluatorResult>;
+  readonly trajectory: TrajectoryRef | null;
+  readonly evidenceRefs: readonly EvidenceRef[];
 }

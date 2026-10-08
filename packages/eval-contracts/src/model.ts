@@ -206,13 +206,6 @@ export interface EvaluatorResult {
   readonly details?: JsonValue;
 }
 
-export interface AttributionResult {
-  readonly category: string;
-  readonly confidence?: number;
-  readonly explanation: string;
-  readonly evidenceRefs: readonly EvidenceRef[];
-}
-
 export interface EvaluationAgentOutput {
   readonly status: "succeeded" | "failed";
   readonly artifacts: readonly ArtifactRef[];
@@ -237,6 +230,5 @@ export interface EvaluationResult {
   readonly sampleId: string;
   readonly samplingId: string;
   readonly evaluatorResults: readonly EvaluatorResult[];
-  readonly attribution?: AttributionResult;
   readonly evidenceRefs: readonly EvidenceRef[];
 }

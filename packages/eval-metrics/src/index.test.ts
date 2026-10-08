@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import * as entry from "./index.js";
 
 describe("@eval-platform/eval-metrics", () => {
-  it("keeps the public entry importable", () => {
-    expect(entry).toBeDefined();
+  it("exports only result interpretation, aggregation and read-only reporting", () => {
+    expect(Object.keys(entry).toSorted()).toEqual([
+      "aggregateMetrics", "aggregateResources", "createMetrics", "MetricsQueryError", "MetricsSourceError",
+      "readEvaluationMetrics", "summarizeNumbers",
+    ].toSorted());
   });
 });

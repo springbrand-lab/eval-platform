@@ -117,6 +117,12 @@ importers:
       '@eval-platform/eval-contracts':
         specifier: workspace:*
         version: link:../eval-contracts
+      '@eval-platform/eval-dataset':
+        specifier: workspace:*
+        version: link:../eval-dataset
+      '@eval-platform/eval-runtime':
+        specifier: workspace:*
+        version: link:../eval-runtime
     devDependencies:
       typescript:
         specifier: ^7.0.2
