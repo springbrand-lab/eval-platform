@@ -1,3 +1,14 @@
+import type { AgentResourceCollection } from "./resources.js";
+
+export type {
+  AgentResourceCollection,
+  AgentResourceCompleteness,
+  AgentResourceCoverage,
+  AgentResourceFact,
+  AgentResourceScope,
+  AgentResourceSnapshot,
+} from "./resources.js";
+
 export type JsonPrimitive = string | number | boolean | null;
 
 export type JsonValue =
@@ -50,8 +61,11 @@ export interface AgentConfigRef {
   readonly userAgentId: string;
 }
 
+export type AgentFramework = "sp" | "codex" | "cc";
+
 export interface SpHarnessConfig {
   readonly kind: "sp";
+  readonly framework: AgentFramework;
   readonly agentConfig: AgentConfigRef;
   readonly runtime?: {
     readonly workspaceMode?: "isolated" | "shared-readonly";
@@ -104,17 +118,19 @@ export interface ExecutionAttempt {
   readonly startedAt?: string;
   readonly completedAt?: string;
   readonly error?: string;
+  readonly resources?: AgentResourceCollection;
 }
 
 export interface EvaluationAttempt {
   readonly evaluationAttemptId: string;
-  readonly samplingId: string;
+  readonly evaluationId: string;
   readonly attemptNumber: number;
   readonly submissionId?: string;
   readonly status: AgentStatus;
   readonly startedAt?: string;
   readonly completedAt?: string;
   readonly error?: string;
+  readonly resources?: AgentResourceCollection;
 }
 
 export interface Sampling {
@@ -122,41 +138,39 @@ export interface Sampling {
   readonly projectId: string;
   readonly sampleId: string;
   readonly execution: SamplingStageState;
-  readonly evaluation?: SamplingStageState;
   readonly subjectAgent: AgentConfigRef;
   readonly subjectSubmissionId?: string;
-  readonly evaluationAgent?: AgentConfigRef;
-  readonly evaluationSubmissionId?: string;
   readonly executionAttempts: readonly ExecutionAttempt[];
-  readonly evaluationAttempts: readonly EvaluationAttempt[];
   readonly artifacts?: readonly ArtifactRef[];
   readonly trajectory?: TrajectoryRef;
 }
 
 export interface StartRunRequest {
+  readonly requestId: string;
+  readonly idempotencyKey?: string;
   readonly projectId: string;
-  readonly datasetId: string;
-  readonly sampleIds?: readonly string[];
-  readonly samplingCount: number;
-  readonly executionConcurrency: number;
-  readonly harness: HarnessConfig;
-  readonly retryPolicy?: RetryPolicy;
+  readonly executionConfigId: string;
 }
 
 export interface EvaluateRequest {
   readonly projectId: string;
   readonly samplingIds: readonly string[];
-  readonly evaluationHarness: HarnessConfig;
-  readonly evaluationConcurrency: number;
-  readonly retryPolicy?: RetryPolicy;
+  readonly evaluationConfigId: string;
 }
 
-export interface PipelineRequest extends StartRunRequest {
-  readonly evaluationHarness: HarnessConfig;
-  readonly evaluationConcurrency: number;
+export interface PipelineRequest {
+  readonly requestId: string;
+  readonly idempotencyKey?: string;
+  readonly projectId: string;
+  readonly pipelineConfigId: string;
 }
 
-export type RunPhase = "execution" | "evaluation" | "pipeline";
+export type RunPhase = "execution" | "evaluation";
+
+export type RunPhases =
+  | readonly ["execution"]
+  | readonly ["evaluation"]
+  | readonly ["execution", "evaluation"];
 
 export interface RunHandle {
   readonly runId: string;
@@ -165,6 +179,8 @@ export interface RunHandle {
 
 export interface RunSnapshot extends RunHandle {
   readonly projectId: string;
+  readonly phases: RunPhases;
+  readonly evaluationIds: readonly string[];
   readonly phase: RunPhase;
   readonly status: SamplingStatus;
 }
@@ -205,6 +221,16 @@ export interface EvaluationAgentOutput {
   readonly evidenceRefs?: readonly EvidenceRef[];
   readonly trajectory: TrajectoryRef;
   readonly error?: string;
+}
+
+export interface EvaluationRecord {
+  readonly evaluationId: string;
+  readonly samplingId: string;
+  readonly evaluator: AgentConfigRef;
+  readonly submissionId?: string;
+  readonly status: SamplingStageState;
+  readonly attempts: readonly EvaluationAttempt[];
+  readonly output?: EvaluationAgentOutput;
 }
 
 export interface EvaluationResult {

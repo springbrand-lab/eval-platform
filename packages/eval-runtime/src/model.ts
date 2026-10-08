@@ -1,11 +1,19 @@
 export type {
   AgentConfigRef,
+  AgentFramework,
+  AgentResourceCollection,
+  AgentResourceCompleteness,
+  AgentResourceCoverage,
+  AgentResourceFact,
+  AgentResourceScope,
+  AgentResourceSnapshot,
   AgentRole,
   AgentStatus,
   ArtifactRef,
   AttributionResult,
   EvaluationAgentOutput,
   EvaluationAttempt,
+  EvaluationRecord,
   EvaluateRequest,
   EvaluationResult,
   EvidenceKind,
@@ -23,6 +31,7 @@ export type {
   RemoteHarnessConfig,
   RetryPolicy,
   RunPhase,
+  RunPhases,
   RunHandle,
   RunSnapshot,
   Sampling,
@@ -32,4 +41,11 @@ export type {
   TrajectoryRef,
 } from "@eval-platform/eval-contracts/model";
 
-export type { Sample } from "./runtime/model.js";
+export type {
+  RuntimeEvaluationContext,
+  RuntimeSamplingContext,
+  Sample,
+  SamplingSnapshot,
+} from "./runtime/model.js";
+
+export type { SamplingState } from "./runtime/store.js";

@@ -115,10 +115,10 @@ Subject 执行成功后，`Sampling.status` 是 `succeeded`。调用 `evaluate()
 
 **已落实**
 
-- `Sampling.execution` 和可选的 `Sampling.evaluation` 分别保存执行、评估阶段状态；两者共用 `SamplingStatus`。
+- `Sampling.execution` 只保存执行阶段状态；评估阶段状态由独立 `EvaluationRecord.status` 保存。
 - 两个阶段都按 `queued → starting → running → retrying → succeeded/failed/cancelled` 流转，避免为评估另造一套状态类型。
-- 未请求评估时保持 `evaluation === undefined`，不引入额外的“尚未评估”状态。
-- 执行和评估分别写入各自阶段；评估失败不会覆盖执行成功状态，Run 聚合时按当前阶段读取对应状态。
+- 未请求评估时不创建 `EvaluationRecord`，不引入额外的“尚未评估”状态。
+- 执行和评估分别写入各自记录；评估失败不会覆盖执行成功状态，Run 聚合时按当前阶段读取对应记录。
 - `packages/eval-runtime/src/runtime/index.test.ts` 覆盖仅执行、评估成功、评估失败三种状态隔离场景。
 
 ---
@@ -199,9 +199,9 @@ Run、Sampling 和评估准备需要有明确的一致性边界：
 
 **已落实**
 
-- `RuntimeStore` 提供语义化的 `createRunWithSamplings()`，`start()`、`pipeline()` 和 `evaluate()` 都通过一次 Store 操作创建 Run 与 Sampling；Runtime 不再分别调用 `createSampling()` 和 `createRun()`。
-- `pipeline()` 的评估准备通过 `prepareEvaluationSamplings()` 批量提交，避免逐条重置评估状态。
-- `evaluate()` 先在内存中构造新的评估状态，再与新的评估 Run 一起原子写入；写入失败时，旧评估结果保持不变。
+- `RuntimeStore` 提供语义化的 `createRunWithSamplings()`，`start()`、`pipeline()` 和 `evaluate()` 都通过一次 Store 操作创建 Run、Sampling 和关联的 EvaluationRecord；Runtime 不再分别调用 `createSampling()` 和 `createRun()`。
+- `createRunWithSamplings()` 一次原子提交 Run、Sampling 和本次 `EvaluationRecord`；Pipeline 在执行阶段就分配评估 ID，执行失败的样本将对应评估标记为 `cancelled`。
+- `evaluate()` 为每次主动评估创建新的 `EvaluationRecord`，与新的评估 Run 一起原子写入；写入失败时，旧评估记录保持不变。
 - Store 实现必须在自己的单一持久化边界内使用 PostgreSQL/DO SQLite 事务；事务内不执行 Harness、网络或其他外部调用。
 - 语义化写入按 Run/Sampling 身份保持可重试，具体幂等和唯一约束由 Store 实现负责；跨存储场景不伪造分布式事务，改用持久化操作记录和补偿恢复。
 - `packages/eval-runtime/src/runtime/index.test.ts` 覆盖评估准备原子提交失败时保留旧结果的场景。
@@ -279,9 +279,9 @@ Run 有自己的 `status`，Runtime 又根据 Sampling 状态不断聚合和更�
 
 **已落实**
 
-- 持久化的 `RuntimeRunRecord` 只保存 `runId`、`projectId`、`samplingIds` 和 `phase`，不再保存 `status`。
+- 持久化的 `RuntimeRunRecord` 只保存 `runId`、`projectId`、`samplingIds` 和阶段范围 `phases`，不再保存当前阶段或 `status`。
 - `RuntimeStore` 不再提供 `updateRun()`；Run 创建后不需要随着 Sampling 生命周期反复写回状态。
-- `getRun()` 读取关联 Sampling，并通过 `aggregateRunStatus()` 即时生成对外 `RunSnapshot.status`；这个字段是查询投影，不是第二份持久化事实。
+- `getRun()` 读取关联 Sampling，并通过阶段聚合逻辑即时生成对外 `RunSnapshot.phase/status`；这些字段是查询投影，不是第二份持久化事实。
 - 执行、评估、Pipeline 的生命周期只更新 Sampling；失败、部分成功和阶段切换都由 Sampling 状态自然聚合。
 - Pipeline 在所有 Execution Sampling 仍为 `queued` 时返回 `queued`；至少一个 Execution 已开始后返回运行态，Execution 全部成功但 Evaluation 尚未完成时返回 `running`。
 - Runtime 测试在没有任何 Run 状态写入接口的情况下覆盖运行中、成功和失败状态查询。
@@ -295,7 +295,7 @@ Run 有自己的 `status`，Runtime 又根据 Sampling 状态不断聚合和更�
 同一份 Subject 产物和轨迹同时存在于：
 
 - `Sampling.artifacts`、`Sampling.trajectory`；
-- `RuntimeSamplingRecord.execution.artifacts`、`RuntimeSamplingRecord.execution.trajectory`。
+- 历史 Runtime 包装中的 `execution.artifacts`、`execution.trajectory`。
 
 相关位置：
 
@@ -311,9 +311,15 @@ Run 有自己的 `status`，Runtime 又根据 Sampling 状态不断聚合和更�
 
 Subject 的产物和完整轨迹只在 `Sampling` 中保留一份，作为唯一真相。`ExecutionOutput` 如果继续存在，只能是生命周期函数的临时返回值，不能再作为第二份持久化结果。
 
+**已处理**
+
+- `SamplingState` 不再持久化额外的 `execution` 副本。
+- `collectExecution()` 仍返回临时的 `ExecutionOutput`，由 Runtime 将结果写入 `Sampling.execution`、`Sampling.artifacts` 和 `Sampling.trajectory`。
+- Evaluation 只从 `Sampling` 读取 Subject 产物和完整轨迹。
+
 ---
 
-### R-09：`start()` 和 `pipeline()` 缺少请求级幂等
+### R-09：`start()` 和 `pipeline()` 缺少请求级幂等（已处理）
 
 **现象**
 
@@ -339,11 +345,19 @@ Subject 的产物和完整轨迹只在 `Sampling` 中保留一份，作为唯一
 
 入口需要调用方提供幂等键，并把它和原 Run 绑定。相同幂等键再次请求时，直接返回原来的 RunHandle，而不是重新创建 Sampling。
 
-本条已确认的范围是 `start()` 和 `pipeline()`；`evaluate()` 是否允许同一 Sampling 被有意重新评估，需要单独定义业务语义。
+**已落实**
+
+- `StartRunRequest` / `PipelineRequest` 要求调用方提供 `requestId`，并支持可选 `idempotencyKey`；`evaluate()` 保持独立的主动重评估语义。
+- Runtime 在解析 Dataset/Sample 前按 `idempotencyKey` 优先、`requestId` 其次快速查重；重复请求直接返回原 `RunHandle`。
+- Runtime 为请求事实生成稳定指纹，避免同一身份被不同项目、Dataset、Sample、采样次数、并发参数或 Agent 配置静默复用。
+- `RuntimeStore.createRunWithSamplings()` 返回原子准入结果；Store 必须在持久化事务内再次查重，竞争请求只有一个能创建 Run/Sampling，其余复用原 Run。
+- `requestId` 与 `idempotencyKey` 指向不同 Run，或同一身份对应不同请求事实时，直接返回不可重试的冲突错误。
+- 幂等映射必须由 Store 持久化并用唯一约束兜底，不能用 Runtime 进程内 Map 代替。
+- `packages/eval-runtime/src/runtime/index.test.ts` 覆盖重复请求、幂等键重试、请求事实冲突和并发准入场景。
 
 ---
 
-### R-10：静态输入被重复塞进每个 Runtime Sampling
+### R-10：静态输入被重复塞进每个 Runtime Sampling（已处理）
 
 **现象**
 
@@ -352,41 +366,50 @@ Dataset 的 `Data` 保存静态输入，但 Runtime 又定义了复制这些字�
 - `packages/eval-dataset/src/dataset/model.ts:21-28`；
 - `packages/eval-runtime/src/runtime/model.ts:19-26`。
 
-同时，`RuntimeSamplingRecord` 又直接包含完整 `sample`：
+同时，旧 Runtime 包装记录又直接包含完整 `sample`：
 
 - `packages/eval-runtime/src/runtime/store.ts:17-22`；
 - `packages/eval-runtime/src/runtime/index.ts:249-268`。
 
-`persistNewRun()` 再把完整 `RuntimeSamplingRecord` 交给 `RuntimeStore`：
+`persistNewRun()` 再把完整的 Runtime 包装记录交给 `RuntimeStore`：
 
 - `packages/eval-runtime/src/runtime/index.ts:285-290`。
 
 **大白话**
 
-一个 Sample 启动 100 次，真正需要的是 100 份不同的运行状态；不是把同一份 JSON、初始上下文和素材描述复制 100 次。
+一个 Sample 启动 100 次，真正需要的是 100 份不同的运行状态；不是把同一份 JSON、初始 Session 引用和素材描述复制 100 次。
 
 **边界共识**
 
 - Dataset 只负责 `Data/Sample` 静态输入；
 - Dataset 和 Submission 完全无关；
 - `Sampling` 只保存 `sampleId` 和这一次运行自己的状态、Submission、产物、轨迹、评估结果；
-- `RuntimeSamplingRecord.sample` 如果为了执行方便保留，只能是运行时临时拼出来的关联对象，不能作为每个 Sampling 的持久化副本。
+- 运行时拼出的 `sample` 如果为了执行方便保留，只能属于临时 Context，不能作为每个 Sampling 的持久化副本。
 
 **正确原则**
 
 ```text
 Data/Sample：存一份静态输入
 Sampling：存 N 份独立运行状态，只引用 sampleId
-RuntimeSamplingRecord：运行时 join，不作为完整持久化结构
+RuntimeSamplingContext：运行时 join，不作为持久化结构
 ```
+
+**已落实**
+
+- `SamplingState` 只保存 `Sampling` 运行状态；`RuntimeStore` 不接收静态输入副本，`getSampling()` 通过 `SamplingSnapshot` 返回稳定查询结果。
+- Runtime 使用临时 `RuntimeSamplingContext`，只在执行/评估流程中把 `SamplingState` 与 `Sample` 拼接起来。
+- `start()` / `pipeline()` 解析 Dataset 后生成临时 Context，持久化时只提交 Context 中的 `state`；Pipeline 在执行阶段和评估阶段之间复用 Context，不重复查询输入。
+- 独立 `evaluate()` 通过 `RuntimeCatalog.getSample(sampleId)` 重新关联输入；Sample 不存在或 ID 不匹配时在提交评估准备前失败，不清除旧结果。
+- 不引入 Sample 版本、快照或新的持久化副本；输入仍由 Dataset/Catalog 负责，Sampling 只通过 `sampleId` 引用。
+- `packages/eval-runtime/src/runtime/index.test.ts` 覆盖持久化记录不含 Sample，以及独立评估按 `sampleId` 重新关联输入。
 
 ---
 
-### R-11：`RunPhase` 把 Pipeline 错当成了阶段
+### R-11：`RunPhase` 把 Pipeline 错当成了阶段（已处理）
 
 **现象**
 
-当前模型把下面三个值放在同一个 `RunPhase` 中：
+旧模型把下面三个值放在同一个 `RunPhase` 中：
 
 ```ts
 "execution" | "evaluation" | "pipeline"
@@ -410,43 +433,48 @@ evaluation
 - `phase` 这个字段名和真实语义不一致；
 - 聚合逻辑需要写 `phase === "pipeline"` 的特殊判断；
 - 后续独立设计执行状态和评估状态时，模型会继续混淆；
-- 查询方无法区分“Run 的启动模式”和“当前正在执行的阶段”。
+- 查询方无法区分“Run 的阶段范围”和“当前正在执行的阶段”。
 
-**正确原则**
+**已处理**
 
-拆开两个概念：
+- `RunPhase` 收敛为 `execution | evaluation`，删除 `pipeline` 值。
+- `RunPhases` 只允许三种合法阶段范围：`["execution"]`、`["evaluation"]`、`["execution", "evaluation"]`。
+- `RuntimeRunRecord` 保存阶段范围，不保存 Pipeline kind 或第二份当前状态。
+- `RunSnapshot.phase` 和 `RunSnapshot.status` 都由阶段范围及 Sampling 状态即时推导：执行未完成时为 `execution`；执行结束且有成功 Sampling 后为 `evaluation`；成功执行等待评估时 Run 保持运行态。
+- 单独执行 Run 不会因为同一 Sampling 后续被独立评估而改变查询结果，因为它的阶段范围只有 `["execution"]`。
+- Pipeline 仍是 Runtime 内部的顺序编排，不创建独立实体，也不进入持久化阶段枚举。
+
+旧方案曾试图拆开两个概念：
 
 ```text
 runKind / orchestration: execution | evaluation | pipeline
 stage: execution | evaluation
 ```
 
-但更准确的边界是：Pipeline 不应该成为 `runKind`，也不应该创建单独的 Pipeline Run。Pipeline 只是一个行为，负责先调用 execution，再调用 evaluation；持久化的仍然只有实际的执行记录和评估记录。Pipeline 是两个阶段的组合，不是第三种数据模型。
+本实现不再增加 `runKind`；阶段范围已经表达了这个边界，Pipeline 只保留为调用编排行为。
 
 ---
 
-### R-12：评估结果应该独立建模为 `EvaluationRecord`
+### R-12：评估结果应该独立建模为 `EvaluationRecord`（已处理）
 
 **现象**
 
-当前 Subject 的产物、轨迹和尝试记录属于 `Sampling`，但 `EvaluationAgentOutput` 只存在于 `RuntimeSamplingRecord.evaluation`：
+旧模型中 Subject 的执行事实和评估事实混在 `Sampling` 与 Runtime 包装记录的 `evaluation`：
 
 ```ts
-interface RuntimeSamplingRecord {
+interface LegacyRuntimeSamplingWrapper {
   readonly sampling: Sampling;
-  readonly sample: Sample;
-  readonly execution?: ExecutionOutput;
   readonly evaluation?: EvaluationAgentOutput;
 }
 ```
 
 **大白话**
 
-一个 Sampling 的执行事实在 `Sampling` 里，评估事实却挂在 Runtime 的临时包装对象旁边。单独拿到 `Sampling`，看不到评估结果；只拿 RuntimeSamplingRecord，又把领域数据和运行时拼装结构绑在了一起。
+一个 Sampling 的执行事实在 `Sampling` 里，评估事实却挂在 Runtime 的临时包装对象旁边。单独拿到 `Sampling`，看不到评估结果；只拿旧包装记录，又把领域数据和运行时拼装结构绑在了一起。
 
-**正确原则**
+**已处理**
 
-评估结果应该独立建模成明确的 `EvaluationRecord`，通过 `samplingId` 关联：
+评估结果现在独立建模成明确的 `EvaluationRecord`，通过 `samplingId` 关联，并通过 `evaluationId` 由 Run 固定引用：
 
 ```text
 Sampling
@@ -456,17 +484,17 @@ EvaluationRecord
 ├── evaluationId
 ├── samplingId
 ├── evaluator
-├── submission
+├── submissionId
 ├── attempts
 ├── output
 └── status
 ```
 
-这样执行记录和评估记录各自有清晰的所有权，评估结果不再依赖 `RuntimeSamplingRecord` 这个内部拼装结构。
+这样执行记录和评估记录各自有清晰的所有权：`Sampling` 不再包含评估 Agent、评估 Submission、评估尝试或评估状态；Runtime 通过 `getEvaluation()` / `listEvaluations()` 查询独立评估记录。每次主动 `evaluate()` 都保留一条新的 EvaluationRecord，不覆盖旧结果。
 
 ---
 
-### R-13：`config` 必须成为真正的配置入口
+### R-13：`config` 必须成为真正的配置入口（已处理）
 
 **现象**
 
@@ -476,30 +504,28 @@ EvaluationRecord
 
 现在有两套配置模型，但只有 Request 真正生效。`config` 只是被导出、没有参与配置解析、校验、查找或运行。
 
-**确认结论**
+**已处理**
 
-不删除 `config`，而是让它成为真正的配置入口：
-
-- 配置负责定义可复用的执行、评估和 Pipeline 参数；
-- Runtime 请求只负责选择配置并提供本次运行的输入范围/覆盖项；
-- 配置经过统一解析和校验后，生成 Runtime 使用的有效配置；
-- `StartRunRequest`、`EvaluateRequest`、`PipelineRequest` 不能再和 `config` 平行维护一套重复字段。
-
-这样 `config` 才有真实职责，也能成为运行配置的唯一来源。
+- `ExecutionConfig` 现在持有 `datasetId`、可选 `sampleIds`、`samplingCount`、Subject Harness、执行并发和重试策略；Dataset 是配置引用，不把 Dataset 内容复制进 Config。
+- `EvaluationConfig` 持有评估 Harness、评估并发和重试策略。
+- `PipelineConfig` 持有自动生成的 `configId`，只组合 `executionConfigId` 和 `evaluationConfigId`；Pipeline 仍只是两个阶段的编排，不是新的运行实体或阶段。
+- `ConfigStore` 是配置持久化端口，`ConfigResolver` 统一读取、校验、归一化和组合配置；Config 创建函数负责自动生成唯一 ID。
+- `StartRunRequest`、`EvaluateRequest`、`PipelineRequest` 不再重复携带 Harness、Dataset、并发或重试字段，只分别引用 Execution、Evaluation 或 Pipeline Config。
+- Runtime 在解析 Config 后才进行 Sample 解析和 Run admission；请求幂等指纹包含解析后的有效配置，配置事实变化不会错误复用旧 Run。
 
 ---
 
-### R-14：`RuntimeSamplingRecord` 不能同时承担三种职责
+### R-14：Sampling 的三种职责不能由一个类型同时承担（已处理）
 
 **现象**
 
-当前 `RuntimeSamplingRecord` 同时被用作：
+旧实现中的一个 Runtime 包装类型同时被用作：
 
 1. `RuntimeStore` 的持久化记录；
-2. Runtime 内部执行时拼出的上下文；
+2. Runtime 内部执行状态的中间对象；
 3. `getSampling()` 对外返回的查询结果。
 
-它把 `sampling`、`sample`、`execution` 和 `evaluation` 全部放在同一个类型中。
+它把 `sampling` 同时用于持久化、Runtime 内部流程和对外查询；评估记录已经从这里移出，但三种 Sampling 边界仍未分开。
 
 **大白话**
 
@@ -507,19 +533,27 @@ EvaluationRecord
 
 **正确原则**
 
-至少要区分三个边界：
+现在固定区分三个边界：
 
 ```text
-SamplingState       持久化的 Sampling 状态
-SamplingContext     Runtime 执行时拼出的 Sample + Sampling
-SamplingSnapshot    对外查询结果
+SamplingState             持久化的 Sampling 状态
+RuntimeSamplingContext    Runtime 执行时拼出的 Sample + SamplingState
+SamplingSnapshot          对外查询结果
 ```
 
-不要求拆成新的 workspace package，但不能继续让一个 `RuntimeSamplingRecord` 包打天下。
+不拆新的 workspace package；三种职责在 `eval-runtime` 内通过不同类型和边界完成。
+
+**已处理**
+
+- `RuntimeStore` 只保存和返回 `SamplingState`，不接收 Runtime Context。
+- `RuntimeSamplingContext` 只在执行和 Pipeline 阶段临时关联 `state` 与 `sample`，不会进入 Store。
+- `getSampling()` 通过 `toSamplingSnapshot()` 返回扁平 `SamplingSnapshot`，复制数组和公开引用，不暴露静态 Sample 或临时 Context。
+- `RuntimeEvaluationContext` 使用 `SamplingState`、`EvaluationRecord` 和 `Sample` 的临时组合；独立评估仍按 `sampleId` 重新解析 Sample。
+- Runtime 测试覆盖 Store 状态、临时输入隔离和公开查询 DTO 三个边界。
 
 ---
 
-### R-15：配置需要统一的运行时解析、校验和归一化入口
+### R-15：配置需要统一的运行时解析、校验和归一化入口（已处理）
 
 **现象**
 
@@ -544,11 +578,21 @@ SamplingSnapshot    对外查询结果
 
 Runtime 内部不再对同一份配置做分散、重复和不一致的临时判断。
 
-同时，本次解析出的有效配置必须和运行绑定并固化：
+同时，本次解析出的有效配置必须和运行绑定并固化为不可变快照；不能只保存 `runId`、`projectId` 和 `samplingIds`，却无法知道本次运行实际采用了什么并发、重试和 Harness 参数。本项目当前不引入配置 version 概念。
 
-- 保存配置 ID 及版本；或
-- 保存本次生效配置的不可变快照；
-- 不能只保存 `runId`、`projectId` 和 `samplingIds`，却无法知道本次运行实际采用了什么并发、重试和 Harness 参数。
+**已处理**
+
+- `ConfigResolver` 是配置进入 Runtime 的唯一解析入口；Execution、Evaluation 和 Pipeline 都先读取、校验并归一化，再交给 Runtime。
+- Resolver 将省略的 `retryPolicy` 归一化为明确的默认策略，返回 `ResolvedExecutionConfig` / `ResolvedEvaluationConfig`；Runtime 阶段只接收这些有效配置。
+- Resolver 会剥离未参与契约的额外字段，并复制 Sample ID、Harness、运行参数和 RetryPolicy，避免配置 Store 的可变对象泄漏到运行时。
+- `RuntimeRunRecord.config` 保存本次 Run 的 `RunConfigSnapshot`：执行 Run 保存 Execution 配置，评估 Run 保存 Evaluation 配置，Pipeline 保存 Pipeline 及其解析后的两份阶段配置。
+- `SpHarnessConfig.runtime` 不只是快照字段；Runtime 将 `workspaceMode`、`timeoutMs` 作为 `HarnessRuntimeOptions` 贯穿 Subject/Evaluator 的创建、素材准备、提交、状态等待/校准、产物收集和评估输入准备调用。
+- `SpHarnessConfig.framework` 必填并支持 `sp | codex | cc`；Subject 可选择三者，EvaluationConfig 固定 SP 宿主和 SP 框架。框架经 Resolver 校验、归一化后保存在 Run 快照中，参与请求幂等指纹，并传入 `ensureAgent`；返回 Handle 必须绑定所选框架，之后的提交、重启和收集复用同一 Handle。缺少或非法框架直接拒绝，不兼容静默默认 SP。
+- 当前 Runtime 只实现 SP Harness；遇到 `RemoteHarnessConfig` 会明确报未实现错误，不会静默丢弃 `runOptions`。
+- Run、Sampling、EvaluationRecord 和有效配置快照通过 `createRunWithSamplings()` 一次原子提交；后续配置 Store 的变化不会改变已创建 Run 的生效配置。
+- 不引入 version；配置 ID 保留在快照中，同时保存完整生效字段。
+- `packages/eval-runtime/src/runtime/index.test.ts` 覆盖 Subject 和 Evaluator 的运行参数确实到达 Harness 生命周期调用。
+- 配置测试覆盖三种框架保留、非法选择和非 SP Evaluator 拒绝；Runtime 测试覆盖三种框架共用生命周期、Codex/CC 与 SP Evaluator 联跑、确保/重启时框架不变，以及切换框架后的幂等冲突。SP 真正的 Codex/CC 云端启动实现不属于本次 eval 侧改动。
 
 ## 明确不计入本次问题
 

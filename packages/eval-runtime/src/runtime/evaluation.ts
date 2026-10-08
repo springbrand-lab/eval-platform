@@ -1,19 +1,21 @@
 import type {
   EvaluationAgentOutput,
   EvaluationAttempt,
+  EvaluationRecord,
   HarnessConfig,
   RetryPolicy,
-  Sampling,
+  SamplingStatus,
 } from "@eval-platform/eval-contracts";
+import { dataInputSchema } from "@eval-platform/eval-dataset";
 
-import type { RuntimeSamplingRecord, RuntimeStore } from "./store.js";
+import type { RuntimeEvaluationContext } from "./model.js";
+import type { RuntimeStore } from "./store.js";
 import {
   AgentOperationError,
   applyAttemptPatch,
   describeAgentError,
-  requireSpAgent,
+  requireSpHarness,
   runAgentLifecycle,
-  withSamplingStatus,
   type AgentLifecycleDependencies,
 } from "./agent-lifecycle.js";
 
@@ -22,98 +24,126 @@ export interface EvaluationStageDependencies extends AgentLifecycleDependencies 
 }
 
 export interface EvaluateSamplingInput {
-  readonly record: RuntimeSamplingRecord;
+  readonly context: RuntimeEvaluationContext;
   readonly harnessConfig: HarnessConfig;
-  readonly retryPolicy: RetryPolicy | undefined;
+  readonly retryPolicy: RetryPolicy;
 }
 
 export async function evaluateSampling(
   dependencies: EvaluationStageDependencies,
   input: EvaluateSamplingInput,
-): Promise<RuntimeSamplingRecord> {
-  const agentConfig = requireSpAgent(input.harnessConfig, "evaluator");
-  let current = input.record;
-  const execution = current.execution;
-  if (!execution || execution.status !== "succeeded") {
-    return markFailed(current, dependencies.store, "sampling has no successful execution output");
+): Promise<RuntimeEvaluationContext> {
+  const evaluatorHarness = requireSpHarness(input.harnessConfig, "evaluator");
+  const agentConfig = evaluatorHarness.agentConfig;
+  const harnessRuntime = evaluatorHarness.runtime;
+  const { sampling, evaluation, sample } = input.context;
+  let currentEvaluation = evaluation;
+  const { artifacts, trajectory } = sampling;
+  if (
+    sampling.execution.status !== "succeeded"
+    || artifacts === undefined
+    || trajectory === undefined
+  ) {
+    return {
+      ...input.context,
+      evaluation: await markFailed(
+        currentEvaluation,
+        dependencies.store,
+        "sampling has no successful execution output",
+      ),
+    };
   }
 
-  const subjectSubmissionId = current.sampling.subjectSubmissionId
-    ?? latestSubmissionId(current.sampling);
+  const subjectSubmissionId = sampling.subjectSubmissionId
+    ?? latestSubmissionId(sampling);
   if (!subjectSubmissionId) {
-    return markFailed(current, dependencies.store, "sampling has no subject submission");
+    return {
+      ...input.context,
+      evaluation: await markFailed(
+        currentEvaluation,
+        dependencies.store,
+        "sampling has no subject submission",
+      ),
+    };
   }
 
-  const persist = async (sampling: Sampling): Promise<void> => {
-    current = { ...current, sampling };
-    await dependencies.store.updateSampling(current);
+  const persistEvaluation = async (next: EvaluationRecord): Promise<void> => {
+    currentEvaluation = next;
+    await dependencies.store.updateEvaluation(next);
   };
 
   try {
-    const submissionId = current.sampling.evaluationSubmissionId ?? dependencies.idFactory();
-    if (current.sampling.evaluationSubmissionId === undefined) {
-      await persist({
-        ...current.sampling,
-        evaluationAgent: agentConfig,
-        evaluationSubmissionId: submissionId,
+    const { dataId: _dataId, initialSession: _initialSession, ...data } = sample.data;
+    const initialData = dataInputSchema.parse(data);
+    const submissionId = currentEvaluation.submissionId ?? dependencies.idFactory();
+    if (currentEvaluation.submissionId === undefined) {
+      await persistEvaluation({
+        ...currentEvaluation,
+        evaluator: agentConfig,
+        submissionId,
       });
     }
 
     const result = await runAgentLifecycle<EvaluationAttempt, EvaluationAgentOutput>(dependencies, {
       stage: "evaluation",
       role: "evaluator",
-      projectId: current.sampling.projectId,
-      samplingId: current.sampling.samplingId,
+      projectId: sampling.projectId,
+      samplingId: sampling.samplingId,
       submissionId,
-      agentConfig,
-      prompt: buildEvaluationPrompt(current.sampling.samplingId),
+      harnessConfig: evaluatorHarness,
+      prompt: buildEvaluationPrompt(sampling.samplingId),
       retryPolicy: input.retryPolicy,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({
         evaluationAttemptId: attemptId,
-        samplingId: current.sampling.samplingId,
+        evaluationId: currentEvaluation.evaluationId,
         attemptNumber,
         status: "running",
         startedAt,
       }),
       appendAttempt: async (attempt) => {
-        await persist({
-          ...current.sampling,
-          evaluationAttempts: [...current.sampling.evaluationAttempts, attempt],
+        await persistEvaluation({
+          ...currentEvaluation,
+          attempts: [...currentEvaluation.attempts, attempt],
         });
       },
       updateAttempt: async (attempt, patch) => {
-        const updated = applyAttemptPatch(attempt, patch);
-        await persist({
-          ...current.sampling,
-          evaluationAttempts: current.sampling.evaluationAttempts.map((item) => (
+        const existing = currentEvaluation.attempts.find((item) => (
+          item.evaluationAttemptId === attempt.evaluationAttemptId
+        ));
+        if (!existing) throw new Error(`Unknown evaluation attempt ${attempt.evaluationAttemptId}`);
+        const updated = applyAttemptPatch(existing, patch);
+        await persistEvaluation({
+          ...currentEvaluation,
+          attempts: currentEvaluation.attempts.map((item) => (
             item.evaluationAttemptId === updated.evaluationAttemptId ? updated : item
           )),
         });
         return updated;
       },
       setSamplingStatus: async (status, lastError) => {
-        await persist(withSamplingStatus(current.sampling, "evaluation", status, lastError));
+        await persistEvaluation(withEvaluationStatus(currentEvaluation, status, lastError));
       },
       prepare: async (handle) => {
         await dependencies.harness.materializeInitialData({
           handle,
-          json: current.sample.json,
-          ...(current.sample.initialContext === undefined
-            ? {}
-            : { initialContext: current.sample.initialContext }),
-          ...(current.sample.initialMaterials === undefined
-            ? {}
-            : { initialMaterials: current.sample.initialMaterials }),
+          idempotencyKey: `initial-data:${handle.submissionId}`,
+          data: initialData,
+          ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
         await dependencies.harness.materializeEvaluationInput({
-          samplingId: current.sampling.samplingId,
+          idempotencyKey: `evaluation-input:${handle.submissionId}`,
+          samplingId: sampling.samplingId,
           subjectSubmissionId,
           evaluationSubmissionId: handle.submissionId,
-          artifacts: execution.artifacts,
-          trajectory: execution.trajectory,
+          artifacts,
+          trajectory,
+          ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
       },
-      collectOutput: (handle) => dependencies.harness.collectEvaluation({ handle }),
+      collectOutput: (handle) => dependencies.harness.collectEvaluation({
+        handle,
+        ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
+      }),
       isSuccessfulOutput: (output) => output.status === "succeeded",
       outputFailure: (output) => new AgentOperationError(
         output.error ?? "evaluation output failed",
@@ -122,31 +152,29 @@ export async function evaluateSampling(
       ),
     });
 
-    current = {
-      ...current,
-      evaluation: result.output,
-      sampling: {
-        ...withSamplingStatus(current.sampling, "evaluation", "succeeded"),
-        evaluationAgent: agentConfig,
-      },
+    currentEvaluation = {
+      ...currentEvaluation,
+      evaluator: agentConfig,
+      status: { status: "succeeded" },
+      output: result.output,
     };
-    await dependencies.store.updateSampling(current);
-    return current;
+    await dependencies.store.updateEvaluation(currentEvaluation);
+    return { ...input.context, evaluation: currentEvaluation };
   } catch (error) {
     const details = describeAgentError(error);
-    current = {
-      ...current,
-      sampling: {
-        ...withSamplingStatus(current.sampling, "evaluation", "failed", details.message),
-        evaluationAgent: agentConfig,
-      },
+    currentEvaluation = {
+      ...currentEvaluation,
+      evaluator: agentConfig,
+      status: { status: "failed", lastError: details.message },
     };
-    await dependencies.store.updateSampling(current);
-    return current;
+    await dependencies.store.updateEvaluation(currentEvaluation);
+    return { ...input.context, evaluation: currentEvaluation };
   }
 }
 
-function latestSubmissionId(sampling: Sampling): string | undefined {
+function latestSubmissionId(
+  sampling: RuntimeEvaluationContext["sampling"],
+): string | undefined {
   for (let index = sampling.executionAttempts.length - 1; index >= 0; index -= 1) {
     const submissionId = sampling.executionAttempts[index]?.submissionId;
     if (submissionId) return submissionId;
@@ -162,15 +190,23 @@ function buildEvaluationPrompt(samplingId: string): string {
   }, null, 2);
 }
 
+function withEvaluationStatus(
+  evaluation: EvaluationRecord,
+  status: SamplingStatus,
+  lastError?: string,
+): EvaluationRecord {
+  return {
+    ...evaluation,
+    status: lastError === undefined ? { status } : { status, lastError },
+  };
+}
+
 async function markFailed(
-  record: RuntimeSamplingRecord,
+  record: EvaluationRecord,
   store: RuntimeStore,
   reason: string,
-): Promise<RuntimeSamplingRecord> {
-  const failed = {
-    ...record,
-    sampling: withSamplingStatus(record.sampling, "evaluation", "failed", reason),
-  };
-  await store.updateSampling(failed);
+): Promise<EvaluationRecord> {
+  const failed = withEvaluationStatus(record, "failed", reason);
+  await store.updateEvaluation(failed);
   return failed;
 }

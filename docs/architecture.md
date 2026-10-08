@@ -29,7 +29,9 @@ eval-runtime: config/ harness/ runtime/
 eval-metrics: evaluators/ attribution/ aggregation/ reporting/
 ```
 
-`@eval-platform/eval-runtime` 拥有评估流程的控制面和 SP Harness 边界，但不复制 SP Runtime 的执行内核。每个启动请求显式携带 `HarnessConfig`；SP 只通过 `SpHarnessConfig` 作为第一方实现出现。
+`@eval-platform/eval-runtime` 拥有评估流程的控制面和 SP Harness 边界，但不复制 SP Runtime 的执行内核。`SpHarnessConfig.kind: "sp"` 表示统一云端宿主，必填的 `framework: "sp" | "codex" | "cc"` 表示执行框架；三者复用同一套 Chat/Submission/Workspace 生命周期，不在 eval 内创建 CLI 或进程启动器。ExecutionConfig 选择 Subject 框架和 SP 管理的 Agent Config；EvaluationConfig 固定 SP 框架并选择评估 Agent Config。框架进入配置快照、请求幂等指纹和 Agent 创建事实，SP 实际的 Codex/CC 云端部署由 SP 负责。
+
+运行配置由 `eval-runtime/config` 统一管理：`ExecutionConfig` 绑定 Dataset、可选 Sample 子集、Sampling 次数和 Subject 执行策略；`EvaluationConfig` 绑定评估 Agent 和评估策略；`PipelineConfig` 只组合前两者。配置创建时由代码生成唯一 `configId`，运行请求只引用配置 ID，不重复传递 Harness、并发、重试或 Dataset 字段。Runtime 通过 `ConfigResolver` 读取、校验和归一化配置，补齐默认重试策略并生成独立的有效配置对象后，才创建 Run；Run 原子保存本次生效配置快照，不引入 version。
 
 以下包明确不单独创建：
 
@@ -51,17 +53,25 @@ Project
 └── Data
     └── Sample
         └── Sampling
-            ├── execution attempts / artifacts / trajectory
-            └── evaluation attempts / evaluation output
+            └── execution attempts / artifacts / trajectory
+
+EvaluationRecord
+├── evaluationId
+├── samplingId
+├── evaluator / submissionId
+├── evaluation attempts
+├── status
+└── evaluation output
 ```
 
 - `Project` 属于用户；
 - `Dataset` 是可复用的数据组织，不挂在用户下；
 - `Data` 可以被多个 Dataset 引用；
-- `Data` 内容由 `json`、`initialContext` 和 `initialMaterials` 三部分组成；
-- `Sample` 是运行时生成的一次具体测试输入；
+- `Data.userPrompt` 是必填的当前任务，其余 JSON 业务字段自由提供并完整保留；`initialSession` 与 `initialMaterials` 都可选，引用内的 Bundle ID 和资源 ID 必须由外部提供；
+- `initialSession` 只引用独立保存的初始化 Session，启动时由 Harness 复制到目标 DO 并交给所选框架加载、重建 Context；准备完成后发送原始 `userPrompt`；
+- `Sample` 是运行时生成的一次具体测试输入，结构为 `{ sampleId, data: Data }`；外层是平台身份，Data 内任意同名业务字段完整保留，Sampling 不重复持久化 Data；
 - `Sampling` 是一次独立运行，拥有自己的 Subject Chat / Workspace；
-- 评估使用独立 Evaluation Chat / Workspace，但不改变 `Sampling` 身份。
+- 评估使用独立 Evaluation Chat / Workspace，但不改变 `Sampling` 身份；每次评估产生独立 `EvaluationRecord`。
 
 ## SP Harness 对齐
 
@@ -111,3 +121,4 @@ Subject Chat / Workspace
 2. 确认 SP 侧复制 Workspace 到另一个 Chat / Workspace 的正式写入接口；
 3. 确认评估运行记录由哪个应用层存储承载；
 4. 为 `RuntimeStore` 接入 API/DO/数据库实现；再继续实现 Evaluator 结果解析和 metrics 聚合。
+5. SP 的公开 Agent 创建边界需支持 `framework` 选择和绑定，并实际提供 Codex/CC 云端运行；评估侧只传递选择，不重建这些启动器。

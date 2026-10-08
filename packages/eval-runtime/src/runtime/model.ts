@@ -2,25 +2,53 @@ import type { Data, Dataset } from "@eval-platform/eval-dataset";
 import type {
   AgentConfigRef,
   AgentRole,
+  ArtifactRef,
+  EvaluationRecord,
   EvaluateRequest,
+  ExecutionAttempt,
   PipelineRequest,
   Project,
   RunHandle,
   RunSnapshot,
+  Sampling,
+  SamplingStageState,
   StartRunRequest,
+  TrajectoryRef,
 } from "@eval-platform/eval-contracts";
+import type {
+  ConfigResolver,
+} from "../config/index.js";
 
 import type { Harness } from "../harness/index.js";
 import type { RetryController } from "./retry.js";
-import type { RuntimeSamplingRecord, RuntimeStore } from "./store.js";
+import type { SamplingState, RuntimeStore } from "./store.js";
 
 export interface Sample {
   readonly sampleId: string;
-  readonly dataId: string;
-  readonly json: Data["json"];
-  readonly initialContext?: Data["initialContext"];
-  readonly initialMaterials?: Data["initialMaterials"];
-  readonly metadata?: Data["metadata"];
+  readonly data: Data;
+}
+
+export interface RuntimeSamplingContext {
+  readonly state: SamplingState;
+  readonly sample: Sample;
+}
+
+export interface RuntimeEvaluationContext {
+  readonly sampling: SamplingState;
+  readonly evaluation: EvaluationRecord;
+  readonly sample: Sample;
+}
+
+export interface SamplingSnapshot {
+  readonly samplingId: Sampling["samplingId"];
+  readonly projectId: Sampling["projectId"];
+  readonly sampleId: Sampling["sampleId"];
+  readonly execution: SamplingStageState;
+  readonly subjectAgent: Sampling["subjectAgent"];
+  readonly subjectSubmissionId?: Sampling["subjectSubmissionId"];
+  readonly executionAttempts: readonly ExecutionAttempt[];
+  readonly artifacts?: readonly ArtifactRef[];
+  readonly trajectory?: TrajectoryRef;
 }
 
 export interface AgentOption {
@@ -35,6 +63,7 @@ export interface RuntimeCatalog {
   listDatasets(): Promise<readonly Dataset[]>;
   listData(datasetId: string): Promise<readonly Data[]>;
   listSamples(dataId: string): Promise<readonly Sample[]>;
+  getSample(sampleId: string): Promise<Sample | null>;
 }
 
 export interface EvalRuntime {
@@ -47,11 +76,14 @@ export interface EvalRuntime {
   evaluate(request: EvaluateRequest): Promise<RunHandle>;
   pipeline(request: PipelineRequest): Promise<RunHandle>;
   getRun(runId: string): Promise<RunSnapshot>;
-  getSampling(samplingId: string): Promise<RuntimeSamplingRecord>;
+  getSampling(samplingId: string): Promise<SamplingSnapshot>;
+  getEvaluation(evaluationId: string): Promise<EvaluationRecord>;
+  listEvaluations(samplingId: string): Promise<readonly EvaluationRecord[]>;
 }
 
 export interface EvalRuntimeDependencies {
   readonly catalog: RuntimeCatalog;
+  readonly configResolver: ConfigResolver;
   readonly harness: Harness;
   readonly store: RuntimeStore;
   readonly createRetryController?: (

@@ -2,7 +2,7 @@
 
 `eval-platform` 是独立的内部评估平台。它负责编排数据、被评估 Agent、评估 Agent 和评估结果，不把评估逻辑放回 `sp-platform`。
 
-当前阶段已完成包边界、公共契约和 `eval-runtime` 的核心编排实现；API、Web、CLI 和真实持久化实现仍由应用层接入。
+当前阶段已完成包边界、公共契约、`eval-dataset` 的数据管理和 `eval-runtime` 的核心编排实现；API、Web、CLI 和真实持久化实现仍由应用层接入。
 
 ## 当前包与应用骨架
 
@@ -39,6 +39,8 @@ eval-metrics/
 
 `@eval-platform/eval-runtime` 已把 SP 作为第一方 Harness，通过公开的 Chat、Submission、Trajectory 和 Workspace 边界驱动 Agent；其余包和应用按既定边界继续演进。
 
+运行方案由 `eval-runtime/config` 管理：ExecutionConfig 绑定 Dataset、Sampling 次数和 Subject Agent，EvaluationConfig 绑定评估 Agent，PipelineConfig 组合两者。配置 ID 由代码生成；Runtime 启动请求只引用配置 ID，不重复传递 Dataset、Harness、并发或重试字段。
+
 `eval-metrics` 用于把执行结果和评估结果量化；API、Web 和 CLI 属于内部应用层，先建立包入口，后续再实现。
 
 ## 运行层次
@@ -57,7 +59,7 @@ Project
 - `evaluationConcurrency` 是评估阶段同时启动的最大 DO 数量，一个 Evaluation Agent 对应一个 DO。
 - 网络、模型或网站临时故障重试同一个 `Sampling`，不创建新的采样。
 - 每次执行都完整收集 Subject 产物和轨迹，并完整复制给评估 Agent；评估以产物为主，轨迹作为补充证据。
-- 每条 `Data` 同时支持 `json`、`initialContext` 和 `initialMaterials`。
+- 每条 `Data` 必须提供 `userPrompt`，可以附带任意其他 JSON 业务字段；`initialSession` 与 `initialMaterials` 都可选，正文独立保存，启动时由 SP 初始化能力恢复 Context。
 
 ## SP 对齐边界
 
@@ -101,3 +103,7 @@ eval-api / eval-web / eval-cli
 工程约定与 `sp-platform` 对齐：每个 workspace 都有独立的 package metadata、TypeScript 配置、README、公共入口和 Vitest 入口；应用额外拥有自己的 `CONTEXT.md`。目前没有复制 SP 的 Cloudflare 部署、数据库或私有 Agent 实现。
 
 接入真实环境前，还需要确定 `@springbrand/agent-contracts` 的共享或发布方式、SP 侧把 Subject Workspace 复制到 Evaluation Workspace 的正式写入边界，以及 `RuntimeStore` 的 API/DO/数据库实现。
+
+## CI
+
+GitHub Actions 会先根据 Git 变更和 workspace 依赖图计算受影响项目，再并行检查和测试受影响的 shared packages 与应用。根配置、锁文件、CI 配置或受影响项目检测逻辑变化会触发完整测试；不涉及 workspace 的仓库级文档变更不会启动包测试。

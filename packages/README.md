@@ -3,7 +3,7 @@
 | Package | Role |
 | --- | --- |
 | `eval-contracts` | Cross-package evaluation contracts |
-| `eval-dataset` | Dataset, Data, JSON, initial context and initial-material references |
+| `eval-dataset` | Dataset, Data, required user prompt, extensible JSON fields and optional initial-resource references |
 | `eval-runtime` | Config, execution, evaluation and SP Harness orchestration |
 | `eval-metrics` | Evaluators, attribution, aggregation and reporting |
 

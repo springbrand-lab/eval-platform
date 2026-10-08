@@ -1,6 +1,10 @@
+import { DEFAULT_RETRY_POLICY } from "../config/model.js";
+
+export { DEFAULT_RETRY_POLICY } from "../config/model.js";
+
 export type RetryableFailureKind = "network" | "llm" | "website" | "submission-timeout";
 
-export type RetryOperation = "creation" | "submission" | "status" | "collection" | "restart";
+export type RetryOperation = "creation" | "initialization" | "submission" | "status" | "collection" | "resources" | "restart";
 
 export interface RetryDecision {
   readonly shouldRetry: boolean;
@@ -15,12 +19,6 @@ export interface RetryController {
     readonly attemptNumber: number;
   }): Promise<RetryDecision>;
 }
-
-export const DEFAULT_RETRY_POLICY = {
-  maxRestarts: 2,
-  initialBackoffMs: 250,
-  maxBackoffMs: 5_000,
-} as const;
 
 export function createRetryController(
   policy: {
