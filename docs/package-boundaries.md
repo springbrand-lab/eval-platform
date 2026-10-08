@@ -30,7 +30,6 @@ eval-runtime/
 
 eval-metrics/
 ├── evaluators/
-├── attribution/
 ├── aggregation/
 └── reporting/
 ```
@@ -38,14 +37,9 @@ eval-metrics/
 ## Dependency direction
 
 ```text
-eval-contracts
-├── eval-dataset
-├── eval-metrics
-└── eval-runtime
-        ↑
-eval-dataset / eval-metrics
-        ↑
-eval-api / eval-web / eval-cli
+eval-contracts → eval-dataset → eval-runtime → eval-metrics
+                        ↓             ↓             ↓
+                       eval-api / eval-web / eval-cli
 ```
 
 The arrows describe allowed consumption direction. The contract package must not depend on runtime, storage, API, Web, CLI or Cloudflare bindings.
@@ -54,7 +48,7 @@ The arrows describe allowed consumption direction. The contract package must not
 
 ### `eval-contracts`
 
-Owns stable runtime/evaluation types shared across packages: Project, Sampling, HarnessConfig, ExecutionOutput, EvaluationAgentOutput, EvaluatorResult, AttributionResult, ArtifactRef, TrajectoryRef and EvidenceRef. Dataset/Data belong to `eval-dataset`; runtime Sample belongs to `eval-runtime`.
+Owns stable runtime/evaluation types shared across packages: Project, Sampling, HarnessConfig, ExecutionOutput, EvaluationAgentOutput, EvaluatorResult, ArtifactRef, TrajectoryRef and EvidenceRef. Dataset/Data belong to `eval-dataset`; runtime Sample belongs to `eval-runtime`. Evidence and explanations remain Evaluation Agent outputs, not an independent attribution contract.
 
 It is the only place for cross-package evaluation contracts. `AgentResourceSnapshot` carries unchanged SP usage events, telemetry events and billing settlements with collection scope and source-completeness metadata. It does not implement orchestration, persistence, normalization, aggregation or pricing.
 
@@ -104,7 +98,19 @@ Pipeline cancellation writes for failed executions run independently of the succ
 
 ### `eval-metrics`
 
-Owns four internal submodules: `evaluators` for evaluation context and evaluator contracts, `attribution` for failure-cause and evidence interpretation, `aggregation` for score/resource processing and aggregation, and `reporting` for case results and experiment reports. It reads original Dataset/Runtime facts, including failed/cancelled/restarted work, without querying SP or repricing bills. Resource interpretation, source-identity deduplication, parent/child overlap handling, model/Token normalization, costs, tool/request/Turn counts, durations, success rates and all higher-level summaries belong here, not in Runtime. SP billing identity is `accountId + eventId`, not a trajectory event ID; a Turn is not a model request. It does not decide how an Agent runs or how a Workspace is copied.
+Owns three internal submodules: `evaluators` interprets EvaluationRecord outputs, `aggregation` processes resources and groups statistics, and `reporting` serves Project/Dataset/Sample/Sampling views. There is no independent evaluator execution or attribution workflow. It reads original Dataset/Runtime facts, including failed/cancelled/restarted work, without querying SP or repricing bills. Resource interpretation, source-identity deduplication, parent/child overlap handling, model/Token normalization, costs, tool/request/Turn counts, durations, success rates and all higher-level summaries belong here, not in Runtime.
+
+`MetricsSource.read(query)` is the application's read-only, consistent Dataset/Runtime projection port, not another Store. It returns the Project, Dataset snapshots, runtime Samples, Sampling snapshots, EvaluationRecords and Run snapshots required by the query. Applications can reuse public queries or provide a transactional read projection; the package does not access private Store tables or implement PostgreSQL/DO/R2 adapters. Source results are detached before processing. Every view requires an explicit Project scope; this scopes runtime results and never gives global Datasets user ownership. Optional Run selection restricts both Sampling and Evaluation identities to those Runs. Without Run selection, all evaluations are retained, never silently replaced by the newest one. Shared Data can occur in several Dataset views; Project statistics aggregate distinct Samplings directly, not Dataset subtotals.
+
+Scores keep their supplied scale. A failed Agent, a Runtime finalization error and an unreported score remain different facts. Missing or invalid scores are not zero; score distributions are grouped by evaluator identity, not averaged across different judges. Stage success rates use terminal records as the denominator; durations describe Agent attempt spans, not a batch's parallel wall-clock time.
+
+Resource totals carry `complete | partial | unavailable` coverage and nullable values. Complete empty source streams can prove zero; absent, pending, failed, unfinalized or unsupported data cannot. Usage identity is owner plus eventId, telemetry identity is session plus eventId, operation identity is session plus operationId, and model settlement identity is accountId plus eventId. Missing source identities or contradictory duplicates are diagnosed rather than silently counted. Action charges use their execution identity. Provider USD, model debits, rated/shortfall/platform-owned units and actual Action charges stay separate; the package does not derive charges from prices or tool estimates. A present subagent usage summary covers its explicit child run for token/provider-cost totals, so child detail is not added again; actual distinct billing settlements are still authoritative charges. SP input/output/cache buckets are disjoint, while reasoning is an output subset and is not added to total tokens. Model requests and Turns are counted from distinct telemetry operations, not usage rows or model-request/Turn equivalence. Per-tool outcomes and durations come from paired start/terminal events. Parsing does not mutate any raw source records.
+
+The recognized billing facts are SP's model settlement receipt with its authoritative `accountId` and public Action log entries using `executionId` and `chargedCredits`. An in-progress Action is not a settlement, even if its provisional charged field is zero. Unsupported statuses and private database row layouts are not reinterpreted as final charges. The resource carrier still preserves those original records for diagnostics.
+
+Ambiguous subagent summaries and cyclic parent relationships are diagnosed and cannot suppress trustworthy child details. Contradictory terminal outcomes or tool names remain unknown instead of picking a winner. Project counts describe Data associated with observed Samplings; Dataset counts describe that Dataset's complete current catalog, including Data without runs.
+
+The implemented files are `evaluators/model.ts`, `evaluators/index.ts`, `aggregation/model.ts`, `aggregation/resources.ts`, `aggregation/statistics.ts`, `aggregation/index.ts`, `reporting/model.ts` and `reporting/index.ts`, plus focused tests and the two package entry files. Experiment comparison, metric persistence/caches and application UIs are not introduced in this phase.
 
 ### `apps/eval-api`
 
@@ -112,7 +118,7 @@ Future internal API entry point. It will expose runtime controls to Web, CLI and
 
 ### `apps/eval-web`
 
-Future internal UI entry point. It will select Project, Dataset, Sample, Subject Agent, Judge Agent, execution concurrency and evaluation concurrency, then render Run, artifact, metric and attribution results.
+Future internal UI entry point. It will select Project, Dataset, Sample, Subject Agent, Judge Agent, execution concurrency and evaluation concurrency, then render Run, artifacts, metrics and Evaluation Agent evidence.
 
 ### `apps/eval-cli`
 

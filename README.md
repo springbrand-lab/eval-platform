@@ -2,7 +2,7 @@
 
 `eval-platform` 是独立的内部评估平台。它负责编排数据、被评估 Agent、评估 Agent 和评估结果，不把评估逻辑放回 `sp-platform`。
 
-当前阶段已完成包边界、公共契约、`eval-dataset` 的数据管理和 `eval-runtime` 的核心编排实现；API、Web、CLI 和真实持久化实现仍由应用层接入。
+当前阶段已完成包边界、公共契约、`eval-dataset` 的数据管理、`eval-runtime` 的核心编排和 `eval-metrics` 的统计与四层查询实现；API、Web、CLI 和真实持久化/查询投影仍由应用层接入。
 
 ## 当前包与应用骨架
 
@@ -32,16 +32,15 @@ eval-runtime/
 
 eval-metrics/
 ├── evaluators/
-├── attribution/
 ├── aggregation/
 └── reporting/
 ```
 
-`@eval-platform/eval-runtime` 已把 SP 作为第一方 Harness，通过公开的 Chat、Submission、Trajectory 和 Workspace 边界驱动 Agent；其余包和应用按既定边界继续演进。
+`@eval-platform/eval-runtime` 已把 SP 作为第一方 Harness，通过公开的 Chat、Submission、Trajectory 和 Workspace 边界驱动 Agent；`eval-metrics` 读取 Dataset/Runtime 的原始事实，提供执行/评估分开的资源统计与 Project、Dataset、Sample、Sampling 查询。
 
 运行方案由 `eval-runtime/config` 管理：ExecutionConfig 绑定 Dataset、Sampling 次数和 Subject Agent，EvaluationConfig 绑定评估 Agent，PipelineConfig 组合两者。配置 ID 由代码生成；Runtime 启动请求只引用配置 ID，不重复传递 Dataset、Harness、并发或重试字段。
 
-`eval-metrics` 用于把执行结果和评估结果量化；API、Web 和 CLI 属于内部应用层，先建立包入口，后续再实现。
+`eval-metrics` 已实现状态、分数、Agent 耗时、费用、Token、模型请求、Turn、工具调用统计和四层展示模型。应用层通过只读 `MetricsSource` 提供一致的原始数据投影，不新增指标数据库或访问 SP 私有存储；实验对比与 API/Web/CLI 后续实现。
 
 ## 运行层次
 
@@ -81,14 +80,9 @@ Submission 的正常完成路径采用终态推送；`getSubmission(submissionId
 ## 包依赖方向
 
 ```text
-eval-contracts
-├── eval-dataset
-├── eval-metrics
-└── eval-runtime
-        ↑
-eval-dataset / eval-metrics
-        ↑
-eval-api / eval-web / eval-cli
+eval-contracts → eval-dataset → eval-runtime → eval-metrics
+                        ↓             ↓             ↓
+                       eval-api / eval-web / eval-cli
 ```
 
 `eval-runtime` 消费 `eval-dataset`，并将每个 `Sampling` 的执行产物、完整轨迹和评估输出交给 `eval-metrics`；应用层只消费四个顶层包的公共入口。SP Harness 直接收敛在 `eval-runtime`，不新增 `eval-sp-adapter`。CC、Codex 等进程细节也不进入评估核心；未来需要时再通过统一远程 Harness 接入。

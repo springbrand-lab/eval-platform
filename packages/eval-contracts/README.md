@@ -2,7 +2,7 @@
 
 评估平台跨包共享的稳定契约层，公共类型从包根入口和 `./model` 子路径导出。
 
-负责 Project、Sampling、EvaluationRecord、HarnessConfig、ExecutionOutput、EvaluationAgentOutput（评估产物、分数、证据和完整轨迹）、EvaluatorResult、AttributionResult、ArtifactRef、TrajectoryRef 和 EvidenceRef 等运行与评估类型边界。每个执行/评估 Attempt 的 `AgentResourceCollection` 按 `submissionId + idempotencyKey` 精确归属，只表达 `pending | collected | failed` 的采集状态。Dataset/Data 由 `eval-dataset` 拥有，Sample 由 `eval-runtime` 的运行时模型拥有。
+负责 Project、Sampling、EvaluationRecord、HarnessConfig、ExecutionOutput、EvaluationAgentOutput（评估产物、分数、证据和完整轨迹）、EvaluatorResult、ArtifactRef、TrajectoryRef 和 EvidenceRef 等运行与评估类型边界。证据和解释属于评估 Agent 输出，没有独立的归因契约。每个执行/评估 Attempt 的 `AgentResourceCollection` 按 `submissionId + idempotencyKey` 精确归属，只表达 `pending | collected | failed` 的采集状态。Dataset/Data 由 `eval-dataset` 拥有，Sample 由 `eval-runtime` 的运行时模型拥有。
 
 资源契约位于 `src/resources.ts`，通过包根入口及 `./model` 导出。`AgentResourceSnapshot` 原样承载 SP 的 `usageEvents`、`telemetryEvents`、`billingSettlements`，记录是开放的 JSON 对象，而不是 Eval 重新设计的费用/Token/工具/Turn 事实模型。来源字段、缺失字段、`null`、事件顺序、重复事件、子 Agent 明细与汇总全部保留；Runtime 不补零、不换算、不抽取、不合并、不去重、不计算总量。
 

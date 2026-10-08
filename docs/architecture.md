@@ -26,7 +26,7 @@ apps/
 ```text
 eval-dataset: dataset/
 eval-runtime: config/ harness/ runtime/
-eval-metrics: evaluators/ attribution/ aggregation/ reporting/
+eval-metrics: evaluators/ aggregation/ reporting/
 ```
 
 `@eval-platform/eval-runtime` 拥有评估流程的控制面和 SP Harness 边界，但不复制 SP Runtime 的执行内核。`SpHarnessConfig.kind: "sp"` 表示统一云端宿主，必填的 `framework: "sp" | "codex" | "cc"` 表示执行框架；三者复用同一套 Chat/Submission/Workspace 生命周期，不在 eval 内创建 CLI 或进程启动器。ExecutionConfig 选择 Subject 框架和 SP 管理的 Agent Config；EvaluationConfig 固定 SP 框架并选择评估 Agent Config。框架进入配置快照、请求幂等指纹和 Agent 创建事实，SP 实际的 Codex/CC 云端部署由 SP 负责。
@@ -37,14 +37,13 @@ eval-metrics: evaluators/ attribution/ aggregation/ reporting/
 
 - `eval-config`：配置属于 `eval-runtime/config` 子模块；
 - `eval-evaluators`：评估器属于 `eval-metrics/evaluators` 子模块；
-- `eval-attribution`：归因属于 `eval-metrics/attribution` 子模块；
 - `eval-sp-adapter`：SP 边界直接属于 runtime 的 Harness seam；
 - `eval-process-adapter`：CC、Codex 等未来统一经过 Cloudflare Agent，不提前引入进程层；
 - `eval-storage`：Agent 项目素材由对应 Harness 的 Workspace 持有，评估运行记录的持久化由未来应用层决定；
 - `eval-agent-tools`：评估 Agent 工具属于 SP Agent Config 和 Runtime 能力，不在评估包内重建；
 - 独立轨迹树或线上流量评估包：轨迹从 SP 正式接口获取，线上评估不属于当前核心范围。
 
-`eval-contracts` 只定义评估域的稳定契约，不复制 SP 的 Agent、Submission 或 Trajectory 内部实现；SP 公共契约在 Harness 边界消费。`eval-metrics` 负责评估结果的标准化、归因、聚合和报告模型。
+`eval-contracts` 只定义评估域的稳定契约，不复制 SP 的 Agent、Submission 或 Trajectory 内部实现；SP 公共契约在 Harness 边界消费。`eval-metrics` 负责已有评估结果整理、资源统计、聚合和四层查询。证据与解释由评估 Agent 输出，不引入独立归因流程。
 
 ## 核心实体
 
@@ -120,5 +119,5 @@ Subject Chat / Workspace
 1. 共享或发布 SP Agent Contracts，让评估平台直接消费 SP 的公开类型；
 2. 确认 SP 侧复制 Workspace 到另一个 Chat / Workspace 的正式写入接口；
 3. 确认评估运行记录由哪个应用层存储承载；
-4. 为 `RuntimeStore` 接入 API/DO/数据库实现；再继续实现 Evaluator 结果解析和 metrics 聚合。
+4. 为 `RuntimeStore` 和 `MetricsSource` 接入应用层真实持久化/只读投影实现；Metric 的统计与四层查询不依赖这些适配器的部署。
 5. SP 的公开 Agent 创建边界需支持 `framework` 选择和绑定，并实际提供 Codex/CC 云端运行；评估侧只传递选择，不重建这些启动器。
