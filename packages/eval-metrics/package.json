@@ -7,8 +7,6 @@
     ".": "./src/index.ts",
     "./aggregation": "./src/aggregation/index.ts",
     "./aggregation/model": "./src/aggregation/model.ts",
-    "./attribution": "./src/attribution/index.ts",
-    "./attribution/model": "./src/attribution/model.ts",
     "./evaluators": "./src/evaluators/index.ts",
     "./evaluators/model": "./src/evaluators/model.ts",
     "./reporting": "./src/reporting/index.ts",
