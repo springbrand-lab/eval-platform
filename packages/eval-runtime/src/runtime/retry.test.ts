@@ -33,7 +33,7 @@ describe("retry controller", () => {
     });
   });
 
-  it.each(["creation", "initialization", "submission", "status", "collection", "resources"] as const)(
+  it.each(["creation", "initialization", "submission", "status", "collection", "resources", "persistence"] as const)(
     "does not prescribe %s retries or spend the restart allowance on them",
     async (operation) => {
       const controller = createRetryController({

@@ -8,7 +8,9 @@ import type {
 import { dataInputSchema } from "@eval-platform/eval-dataset";
 
 import type { RuntimeStore } from "./store.js";
+import { persistRuntimeRecord } from "./store.js";
 import type { RuntimeSamplingContext } from "./model.js";
+import type { RetryController } from "./retry.js";
 import {
   AgentOperationError,
   applyAttemptPatch,
@@ -21,6 +23,7 @@ import {
 
 export interface ExecutionStageDependencies extends AgentLifecycleDependencies {
   readonly store: RuntimeStore;
+  readonly createRetryController: (policy?: RetryPolicy) => RetryController;
 }
 
 export interface ExecuteSamplingInput {
@@ -37,10 +40,17 @@ export async function executeSampling(
   const harnessRuntime = subjectHarness.runtime;
   const { sample } = input.context;
   let current = input.context.state;
+  const retryController = dependencies.createRetryController(input.retryPolicy);
 
   const persist = async (sampling: Sampling): Promise<void> => {
     current = sampling;
-    await dependencies.store.updateSampling(current);
+    await persistRuntimeRecord({
+      record: current,
+      write: (record) => dependencies.store.updateSampling(record),
+      read: () => dependencies.store.getSampling(sampling.samplingId),
+      retryController,
+      sleep: dependencies.sleep,
+    });
   };
 
   try {
@@ -59,7 +69,7 @@ export async function executeSampling(
       submissionId,
       harnessConfig: subjectHarness,
       prompt: initialData.userPrompt,
-      retryPolicy: input.retryPolicy,
+      retryController,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({
         executionAttemptId: attemptId,
         samplingId: current.samplingId,
@@ -110,17 +120,15 @@ export async function executeSampling(
       ),
     });
 
-    current = {
+    await persist({
       ...withExecutionStatus(current, "succeeded"),
       artifacts: result.output.artifacts,
       trajectory: result.output.trajectory,
-    };
-    await dependencies.store.updateSampling(current);
+    });
     return { state: current, sample };
   } catch (error) {
     const details = describeAgentError(error);
-    current = withExecutionStatus(current, "failed", details.message);
-    await dependencies.store.updateSampling(current);
+    await persist(withExecutionStatus(current, "failed", details.message));
     return { state: current, sample };
   }
 }

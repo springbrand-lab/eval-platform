@@ -619,3 +619,212 @@ Runtime 内部不再对同一份配置做分散、重复和不一致的临时判
 7. SP Agent 创建、提交、重启和收集遵守同一次操作的幂等语义；
 8. Runtime 入口对整批请求提供幂等；
 9. 每个 Sampling 的成功或失败不应阻断其他 Sampling 的独立生命周期。
+
+## 新提交复审（2026-10-08）
+
+**评审范围**：`5845b09` 的 Dataset 生产代码及 `ff9acee` 的 Contracts/Runtime 生产代码。用户明确暂不审核 CI，因此 `eafd88d` 不作通过或不通过结论。
+
+**当前结果**：Dataset 未发现新的成立缺陷；Runtime 的复现记录如下。R-16、R-19 已按用户确认的范围修复并复审通过；R-17、R-18 未证实现有正常流程会触发，评审撤回，不计本轮问题。按用户要求逐项讨论，不将条件复现或未讨论的记录等同于用户已确认的问题。
+
+| 编号 | 问题 | 严重程度 | 状态 |
+| --- | --- | --- | --- |
+| R-16 | Agent 已确认完成，资源记录持久化异常却将 Attempt 改成 Agent 失败 | P2 | 已修复，复审通过 |
+| R-17 | Config 创建函数允许额外输入的 configId 覆盖新身份，但未证实现有正常流程会触发 | — | 已撤回，不计本轮问题 |
+| R-18 | 嵌套配置保留非契约字段，但未证实现有正常流程携带这些字段 | — | 已撤回，不计本轮问题 |
+| R-19 | 失败 Sampling 的评估取消记录保存异常，阻断成功 Sampling 的独立评估 | P2 | 已修复，复审通过 |
+
+### R-16：资源持久化异常把已完成的 Agent Attempt 改成失败（已修复，复审通过）
+
+**所属提交**：`ff9acee`。
+
+**相关位置**
+
+- `packages/eval-runtime/src/runtime/agent-lifecycle.ts:224`：`submissionCompleted` 初始为 false，直到产物收集入口才置为 true。
+- `packages/eval-runtime/src/runtime/agent-lifecycle.ts:279`：此前已经接收到 Agent 的明确终态。
+- `packages/eval-runtime/src/runtime/agent-lifecycle.ts:288`：资源采集和持久化在进入产物收集之前执行。
+- `packages/eval-runtime/src/runtime/agent-lifecycle.ts:313`：资源持久化抛错时仍走未完成分支，将 Attempt 写成 `failed`。
+
+**大白话**
+
+SP 已明确通知 Agent 任务完成了。接下来 Runtime 保存费用/Token 记录时出错，代码却把这个 Agent Attempt 记成失败。实际失败的是 Runtime 收尾，不是 Agent 执行。Run/阶段是否失败可以单独决定，但不能改写已经确认的 Agent 完成事实。
+
+**独立复现**
+
+1. 分别调用真实 `executeSampling()`、`evaluateSampling()`，注入匹配身份的 Harness。
+2. `submitAgent()` 返回 `status: "completed", normalizedStatus: "completed"`。
+3. `collectAgentResources()` 返回归属正确、校验通过的原始快照。
+4. 注入的 Store 将带 `resources: collected` 的记录实际保存，然后仅在第一次保存时抛出响应丢失错误；后续读写正常。
+5. 两种角色最终持久化的 Attempt 都是 `status: "failed"`，资源快照仍为 `collected`，错误是保存响应丢失，产物收集未开始。
+
+**判断边界**
+
+- 本条不要求真实 Store 已接入，也不要求增加数据库事务、CAS 或版本；用户明确要求补齐资源持久化及相关收尾的重试能力，具体次数和退避策略尚未定案。
+- 重试耗尽或不可重试的资源保存失败可以体现为阶段失败，但不能把已经确认完成的 Agent 状态改成失败。
+- 现有回归验证了响应丢失后资源快照不被清掉及阶段失败，但没有断言这时已完成 Agent 的 Attempt 状态。
+
+**已同意的处理原则与重试要求**
+
+- 明确区分 Agent 终态与 Runtime 收尾结果，在观察到完成时保留该事实，后续资源保存/产物读取错误不应把已完成 Attempt 改成 Agent 失败。
+- 资源持久化及相关收尾失败必须支持重试，重试的是失败的保存/收尾步骤，不是已经完成的 Agent 任务。
+- 沿用同一个 Sampling/EvaluationRecord、Attempt、Submission 和操作幂等身份；保存同一份已采集资源快照，不因重试新建 Attempt、重新提交任务或重启成功 Agent。
+- 保存响应丢失时，以最新持久化事实确认是否已经提交，或按同一事实幂等重试；不能用旧的 pending/失败副本覆盖已提交的资源和 Agent 完成状态。
+- 保存成功后继续未完成的收尾流程；重试耗尽后的收尾失败单独表达，不能改写 Agent 终态。不在本轮擅自固化次数、退避或新增实现抽象。
+
+**用户结论**：2026-10-08 已确认。用户明确表示：“合理，但要有重试，记录然后说下一个”。重试能力属于修复要求，不只修改状态标记。
+
+**处理状态**：已修复，2026-10-08 复审通过。
+
+**修复实现**
+
+- `runtime/agent-lifecycle.ts` 在收到明确终态时固定并保存 Attempt 状态、完成时间和原 Agent 错误，再收集资源。收尾错误只进入阶段 `lastError`，不修改已经确认的 Agent 终态。
+- `runtime/store.ts` 的同记录保存流程新增独立 `persistence` 重试。写入失败后读取最新记录核对是否已提交；未确认且注入策略允许时，重写同一份已捕获记录。JSON 对象键顺序不参与差异判断，原始数组顺序、重复事件和 null 不被忽略。
+- Execution/Evaluation 的身份、Attempt、状态、资源、产物和失败收尾写入均接入该流程，生命周期与保存共用同一阶段 RetryController。不固化保存重试次数/退避，不新增幂等表或版本，不重新提交/重启 Agent。
+- 回归覆盖两种 Agent 的终态/资源/产物保存写前失败、提交后响应丢失、完成时间固定、重试耗尽、原 Agent 失败保留，以及资源读取/产物读取/保存预算独立。已经采集的资源和产物在保存重试中不重新读取。
+
+**复审结论**
+
+- `agent-lifecycle.ts` 在资源采集之前捕获并保存终态；后续异常不再把已经完成的 Attempt 改成失败，也不把 Runtime 收尾错误写成 Agent 错误。终态状态、原 Agent 错误及完成时间在保存重试中保持不变。
+- `persistRuntimeRecord()` 捕获同一份记录，写入异常先查询持久化事实；未确认且策略允许时仅重写该记录。对象键顺序不影响确认，数组顺序、重复事件和 null 仍参与比较。
+- 身份、Attempt、资源和产物保存复用本阶段的 RetryController；重试不会重新采集已获得的结果、增加 Attempt、重提交任务或重启 Agent。重试耗尽可以使阶段失败，但已保存的 Agent 终态仍保留。
+- 本次复审未发现与 R-16 修复相关的新缺陷；不要求增加默认重试政策、配置版本或另一套持久化身份。
+
+### R-17：额外输入的 configId 可以覆盖新身份（已撤回，不计本轮问题）
+
+**所属提交**：`ff9acee`。
+
+**相关位置**
+
+- `packages/eval-runtime/src/config/index.ts:190`：执行配置使用 `{ configId: idFactory(), ...input }`。
+- `packages/eval-runtime/src/config/index.ts:197`：评估配置使用相同顺序。
+- `packages/eval-runtime/src/config/index.ts:204`：组合配置使用相同顺序。
+
+**大白话**
+
+复现证明：额外传入 `configId` 时会覆盖新生成的 ID。但此前使用“拿现有配置复制出新配置”作为业务场景，该功能并不存在于当前库中，不能把假设的调用方式当成现有正常流程的缺陷依据。
+
+**独立复现**
+
+- 分别向三个真实 `create*Config()` 函数传入带 `configId: "existing-*"` 的已有配置，并注入返回 `"new-*"` 的 ID 工厂。
+- 三次 ID 工厂都正常生成新 ID，但三个函数返回的 `configId` 都仍是输入中的旧 ID。
+- TypeScript 的输入类型不包含 `configId`，但将一个完整配置变量传给对应输入参数符合结构类型规则；不需要绕过类型系统或手动篡改返回值。
+
+**条件影响与证据限制**
+
+- 三种创建输入的正式契约都不包含 `configId`；此前复现是额外带该字段的输入，不是已有复制功能的调用链。
+- 核对 `apps`、`packages` 的全部 `createExecutionConfig`、`createEvaluationConfig`、`createPipelineConfig` 调用点，目前只有函数定义/导出和测试调用，应用层没有复制配置入口，也没有查到正常生产调用传入旧 ID 的路径。
+- 边界行为确实存在，但此前的业务后果依赖假设场景，现有证据不足以按用户要求作为当前 P2 实际问题。
+- 不声称未接入的真实 Store 已发生覆盖，不要求为不存在的复制功能修改代码。
+
+**讨论结论**：撤回此前基于假设复制功能的缺陷结论；保留条件复现事实与排除原因，后续不能换一种说法重复提出同一假设场景。
+
+**用户反馈**：2026-10-08 用户追问：“【比如拿现有配置 A 的对象，复制成一个新配置】哪里有这个功能？”用户未认可本条。核对调用链后，由评审方撤回，不冒充用户已经作出结论。
+
+**处理状态**：已撤回，不计本轮问题。仅修正评审记录，未修改业务代码或测试。
+
+### R-18：嵌套配置保留非契约字段（已撤回，不计本轮问题）
+
+**所属提交**：`ff9acee`。
+
+**相关位置**
+
+- `packages/eval-runtime/src/config/index.ts:239`：RetryPolicy 直接展开原对象，保留非契约字段。
+- `packages/eval-runtime/src/config/index.ts:260`：Agent Config 和运行参数直接展开原对象，保留非契约字段；额外嵌套对象也保留原引用。
+- `packages/eval-runtime/src/runtime/index.ts:727`：整份解析后的配置参与请求幂等指纹。
+
+**大白话**
+
+条件复现证明：嵌套配置夹带非契约字段时，Resolver 会保留这些字段，并让它们参与请求指纹。但此前例子中的显示名、UI 提示和 UI 状态不是当前配置契约或已有功能，不能把人为塞入的字段当成正常业务路径。
+
+**独立复现**
+
+- Config Store 返回已知字段有效的配置，同时在 `agentConfig` 带 `displayName`，在 `retryPolicy` 带 `uiHint`，在 `runtime` 带额外的 `uiState` 对象。
+- 真实 `createConfigResolver()` 接受该配置，输出保留上述额外字段，`resolved.harness.runtime.uiState` 与 Store 输入里的对象是同一个引用。
+- 真实 `createEvalRuntime().start()` 首次执行成功；之后仅把 `displayName` 从 A 改成 B，项目、请求身份、配置 ID、Agent ID、采样次数及全部正式执行参数均不变。
+- 使用完全相同的请求再次 `start()`，抛出 `RuntimeRunIdentityConflictError`，不能返回第一次的 Run。Store 中仍只有一个 Run。
+
+**条件影响与证据限制**
+
+- 不要求配置 version 或输入快照，不重提并行旧 Worker/CAS 场景。
+- 实际执行参数或选定 Agent 改变时拒绝复用是正确行为；本条只涉及没有进入公开执行契约的额外字段。
+- 接口没有采用严格拒绝非契约字段的策略，文档还明确承诺 Resolver 剥离额外字段；当前行为两者都没有做到。
+- 核查当前应用和配置调用点，没有生产路径使用上述额外字段，也没有配置 Store 实现会返回上述 UI 对象；此前影响依赖构造输入。
+- 条件复现和文档表述不够精确，不等同于证实当前正常流程存在缺陷。不以尚不存在的 UI/配置管理功能要求修改生产代码。
+
+**讨论结论**：评审方主动撤回，保留条件复现及证据限制，不计本轮问题。不能换一种说法重复提出依赖非契约输入和假设功能的问题。
+
+**用户结论**：尚未逐项讨论；撤回是评审方复核后的决定，不冒充用户结论。
+
+**处理状态**：已撤回，不计本轮问题。仅修正评审记录，未修改业务代码或测试。
+
+### R-19：失败 Sampling 的取消记录保存异常，阻断成功 Sampling 的评估（已修复，复审通过）
+
+**所属提交**：`ff9acee`。属于 R-06 已确认的样本间失败隔离原则在新异常路径上的回归，不推翻既定分包或 Pipeline 编排方式。
+
+**相关位置**
+
+- `packages/eval-runtime/src/runtime/index.ts:492`：启动任何成功 Sampling 的评估前，先等待所有执行失败 Sampling 的评估取消记录写入。
+- `packages/eval-runtime/src/runtime/index.ts:497`：任意一条取消记录的 `updateEvaluation()` 抛错都会让整个 `runPipeline()` 提前退出。
+- `packages/eval-runtime/src/runtime/index.ts:519`：成功 Sampling 的评估阶段因此无法启动。
+- `packages/eval-runtime/src/runtime/index.ts:557`：Run 兜底将成功执行但尚未启动评估的 Sampling 所关联 EvaluationRecord 写成失败，使用另一条取消记录的保存错误。
+
+**大白话**
+
+A 执行成功，B 执行失败。Runtime 本来应该继续评估 A，并把 B 的评估标成取消。但保存 B 的取消状态只要报一次错，A 的评估 Agent 就完全不会启动，A 的评估记录还会被直接标成失败。B 的收尾失败不应拖死已经可以独立评估的 A。
+
+**独立复现**
+
+1. 调用真实 `createEvalRuntime().pipeline()`，通过真实 `createConfigResolver()` 解析仅含正式字段的合法配置，Catalog 提供两个合法 Sample。
+2. Harness 对 A 返回完成及合法产物、完整轨迹；对 B 返回明确、不可重试的执行失败。两者的资源采集和所有执行状态保存都成功。
+3. 对照组所有 Store 操作正常：A 评估成功并有一个评估 Attempt，B 的评估取消，创建一个评估 Agent。
+4. 故障组仅在保存 B 的取消记录时注入一次写入前异常，之后全部 Store 操作正常：A 的评估直接失败，评估 Attempt 为 0，未创建任何评估 Agent；B 的评估仍为 queued。
+5. 另一次仅在 B 的取消记录实际提交后注入响应丢失，之后全部 Store 操作正常：B 的评估已经 cancelled，但 A 仍被写成评估失败，评估 Attempt 为 0，未创建任何评估 Agent。
+6. 两个故障组 A 的执行事实都保持 succeeded；A 的评估错误却来自 B 的取消记录保存。
+
+**判断边界**
+
+- 不依赖额外字段、不存在的功能、重复 Worker、配置版本或 CAS；触发点就是当前正式流程中的 Store 写入异常。
+- 不是要求实现真实数据库，也不是要求重新设计 Runtime；新加的批量取消写入成为了所有成功样本评估的共同门槛。
+- 与 R-16 区分：R-16 是同一 Attempt 的 Agent 完成事实被收尾错误改写；本条是另一个 Sampling 的收尾错误阻断成功 Sampling 的独立生命周期。
+- 本条不要求执行、评估跨阶段流式并发；仍可以先完成整批执行，再进入评估。
+
+**修复要求**：将取消状态的保存及必要重试限制在对应失败 Sampling 的 EvaluationRecord 内，不让它阻止其他成功 Sampling 的评估。保留并处理取消写入错误，不能简单吞错，也不能把它写进无关 Sampling 的评估失败原因。不在本轮固化重试次数、退避或新增独立编排实体。
+
+**用户结论**：2026-10-08 已确认。用户明确表示：“是问题，记录”。
+
+**处理状态**：已修复，2026-10-08 复审通过。
+
+**修复实现**
+
+- `runtime/index.ts` 在执行批次结束后，并行启动成功样本的评估调度与失败样本的取消收尾；取消不占评估 Agent 并发槽，也不构成成功样本启动评估的门槛。
+- 每个取消流程仅校准/重试自己的 EvaluationRecord。耗尽或不可重试时，错误保存到对应记录的 `lastError`；已保存的取消在校准后直接确认，不降级为失败。
+- 如果连对应错误记录也无法保存，`EvalRuntimeDependencies.onError` 接收包含 Evaluation/Sampling 身份及两次原始错误的 AggregateError；默认 `console.error`，自定义上报回调抛错时仍使用默认上报。不吞错，也不把取消异常交给整批 `failRun()`。
+- 回归覆盖取消写前失败、提交后响应丢失、B 的重试被阻塞时 A 已完成评估、取消失败的局部记录、无法记录错误时的上报、取消校准读取暂时失败，以及没有可评估样本/多个取消的相互隔离。
+
+**复审结论**
+
+- 成功 Sampling 的评估调度与失败 Sampling 的取消收尾并行启动，取消不占用评估 Agent 并发槽。B 的保存重试被阻塞时，A 仍能独立完成评估。
+- 每个取消流程仅处理自己的 EvaluationRecord：提交后响应丢失能够校准，已经保存的取消不降级；取消保存失败不会传播到其他 Sampling 或触发整批失败重写。
+- 取消及其错误记录均无法保存时，错误通过带 Evaluation/Sampling 身份的 AggregateError 上报；默认上报和自定义回调同步抛错的回退路径均有覆盖，没有以吞错代替失败隔离。
+- 本次复审未发现与 R-19 修复相关的新缺陷；既定分包、阶段顺序和 Pipeline 仅编排的边界保持不变。
+
+### 问题复现时验证（修复前）
+
+- 全仓 `pnpm check` 和 `pnpm test` 通过，共 337 个测试。既有测试通过不代表上述独立复现已被覆盖。
+- 两次无文件修改的 Node 脚本独立复现三个行为：额外传入旧 ID 时三个 Config 创建函数丢弃新 ID；仅额外显示名变化导致同请求冲突；执行与评估的已完成 Attempt 被资源保存异常改写为失败。复现本身不等于证实现有业务触发路径，R-17 已据此撤回。
+- 后续核对 R-18 的配置及应用调用链，同样未证实现有正常流程触发，评审方主动撤回。另以无文件修改的 Node 脚本运行 R-19 的正常对照、取消写入前异常及提交后响应丢失三组真实 Runtime 调用，断言两种异常下成功 Sampling 的评估 Agent 均未创建且评估被标为失败。
+- 本轮只更新本评审 Markdown；不修改生产代码、测试或 CI，也不提交 Git。
+
+### R-16 / R-19 修复后验证（2026-10-08）
+
+- 先补回归并确认修复前五个聚焦用例失败：已完成 Attempt 被资源保存异常影响，以及 B 取消保存异常阻断 A 的评估。
+- 修复后全仓 `pnpm check`、`pnpm test`、`pnpm build` 通过，共 376 个测试，其中 Runtime 201 个。
+- 四个包均通过 `tsc --noEmit -p tsconfig.json --noUnusedLocals --noUnusedParameters`，`git diff --check` 通过。
+- 仅修改 `eval-platform` 的 Runtime 实现、相关回归测试和边界/评审文档；不修改 SP、Dataset、Metrics、Config 或 CI 生产代码，不处理已撤回的 R-17/R-18，不提交 Git。SP 与真实数据库仍按注入的公开能力契约验证，不声称已完成真实云端集成。
+
+### R-16 / R-19 复审验证（2026-10-08）
+
+- 复审对象为 `ff9acee` 基础上的当前工作树修复，核对生产代码、共享保存流程、阶段 RetryController 和新增回归测试；CI 不在评审范围。
+- 复审实际执行 Runtime 测试，201 个全部通过；随后全仓 `pnpm check`、`pnpm test` 通过，共 376 个测试；`git diff --check` 通过。
+- 检查两种 Agent 的终态/资源/产物保存写前失败与提交后响应丢失、固定完成时间、保存重试耗尽、原 Agent 错误保留，以及取消保存异常、长时间重试、错误上报和多个取消之间的隔离。
+- 共享保存函数具有明确的现有调用点，没有引入另一份 Agent 事实、重复 Run 状态、legacy 兼容分支、新配置版本、额外编排实体或 SP 私有实现依赖。
+- R-16、R-19 均复审通过，未发现本次两项修复相关的新问题。本次复审仅更新本评审文档，不修改业务代码或测试，不提交 Git。

@@ -37,7 +37,7 @@ import type {
   RuntimeRunRecord,
   SamplingState,
 } from "./store.js";
-import { RuntimeRunIdentityConflictError } from "./store.js";
+import { persistRuntimeRecord, RuntimeRunIdentityConflictError } from "./store.js";
 import {
   errorMessage,
   requireSpHarness,
@@ -85,6 +85,7 @@ class RuntimeCoordinator implements EvalRuntime {
   readonly #idFactory: () => string;
   readonly #now: () => string;
   readonly #createRetryController: (policy?: RetryPolicy) => RetryController;
+  readonly #onError: (error: Error) => void;
 
   constructor(dependencies: EvalRuntimeDependencies) {
     this.#catalog = dependencies.catalog;
@@ -93,6 +94,7 @@ class RuntimeCoordinator implements EvalRuntime {
     this.#idFactory = dependencies.idFactory ?? defaultIdFactory;
     this.#now = dependencies.now ?? defaultNow;
     this.#createRetryController = dependencies.createRetryController ?? createRetryController;
+    this.#onError = dependencies.onError ?? ((error) => console.error(error));
     this.#stageDependencies = {
       harness: dependencies.harness,
       store: dependencies.store,
@@ -489,23 +491,7 @@ class RuntimeCoordinator implements EvalRuntime {
     const evaluationBySamplingId = new Map(
       evaluations.map((evaluation) => [evaluation.samplingId, evaluation]),
     );
-    await Promise.all(executedContexts
-      .filter(({ state }) => state.execution.status !== "succeeded")
-      .map(async ({ state }) => {
-        const evaluation = evaluationBySamplingId.get(state.samplingId);
-        if (!evaluation) throw new Error(`Missing evaluation for sampling ${state.samplingId}`);
-        await this.#store.updateEvaluation({
-          ...evaluation,
-          status: { status: "cancelled", lastError: "execution did not succeed" },
-        });
-      }));
-
-    const evaluableContexts = executedContexts.filter(
-      ({ state }) => state.execution.status === "succeeded",
-    );
-    if (evaluableContexts.length === 0) return;
-
-    const evaluationContexts = evaluableContexts.map((context) => {
+    const evaluationContexts = executedContexts.map((context) => {
       const evaluation = evaluationBySamplingId.get(context.state.samplingId);
       if (!evaluation) {
         throw new Error(`Missing evaluation for sampling ${context.state.samplingId}`);
@@ -516,7 +502,57 @@ class RuntimeCoordinator implements EvalRuntime {
         sample: context.sample,
       };
     });
-    await this.runEvaluationPhase(evaluationContexts, config.evaluation);
+    await Promise.all([
+      this.runEvaluationPhase(evaluationContexts.filter(({ sampling }) => (
+        sampling.execution.status === "succeeded"
+      )), config.evaluation),
+      ...evaluationContexts.filter(({ sampling }) => sampling.execution.status !== "succeeded")
+        .map(({ evaluation }) => this.cancelEvaluation(evaluation, config.evaluation)),
+    ]);
+  }
+
+  private async cancelEvaluation(
+    evaluation: EvaluationRecord,
+    config: ResolvedEvaluationConfig,
+  ): Promise<void> {
+    const retryController = this.#createRetryController(config.retryPolicy);
+    const persist = (record: EvaluationRecord): Promise<void> => persistRuntimeRecord({
+      record,
+      write: (next) => this.#store.updateEvaluation(next),
+      read: () => this.#store.getEvaluation(evaluation.evaluationId),
+      retryController,
+      sleep: this.#stageDependencies.sleep,
+    });
+
+    try {
+      await persist({
+        ...evaluation,
+        status: { status: "cancelled", lastError: "execution did not succeed" },
+      });
+    } catch (error) {
+      try {
+        const current = await this.#store.getEvaluation(evaluation.evaluationId);
+        if (!current) throw new Error(`Unknown evaluation ${evaluation.evaluationId}`);
+        if (current.status.status === "cancelled") return;
+        await persist({
+          ...current,
+          status: {
+            status: "failed",
+            lastError: `evaluation cancellation persistence failed: ${errorMessage(error)}`,
+          },
+        });
+      } catch (finalizationError) {
+        const reported = new AggregateError(
+          [error, finalizationError],
+          `Could not finalize evaluation ${evaluation.evaluationId} for sampling ${evaluation.samplingId}`,
+        );
+        try {
+          this.#onError(reported);
+        } catch (reportingError) {
+          console.error(reported, reportingError);
+        }
+      }
+    }
   }
 
   private scheduler(maxConcurrentDos: number): AgentScheduler {

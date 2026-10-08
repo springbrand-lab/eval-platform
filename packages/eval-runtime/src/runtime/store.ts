@@ -1,5 +1,7 @@
 import type { EvaluationRecord, RunPhases, Sampling } from "@eval-platform/eval-contracts";
 import type { RunConfigSnapshot } from "../config/index.js";
+import { describeAgentError } from "./agent-lifecycle.js";
+import type { RetryController } from "./retry.js";
 
 export interface RuntimeRunRequestIdentity {
   /** Stable caller identity for one Runtime admission request. */
@@ -58,4 +60,53 @@ export interface RuntimeStore {
   listEvaluations(samplingId: string): Promise<readonly EvaluationRecord[]>;
   updateSampling(state: SamplingState): Promise<void>;
   getSampling(samplingId: string): Promise<SamplingState | null>;
+}
+
+export async function persistRuntimeRecord<TRecord extends SamplingState | EvaluationRecord>(input: {
+  readonly record: TRecord;
+  readonly write: (record: TRecord) => Promise<void>;
+  readonly read: () => Promise<TRecord | null>;
+  readonly retryController: RetryController;
+  readonly sleep: (milliseconds: number) => Promise<void>;
+}): Promise<void> {
+  const record = structuredClone(input.record);
+  for (let attemptNumber = 1; ; attemptNumber += 1) {
+    try {
+      await input.write(record);
+      return;
+    } catch (error) {
+      const stored = await Promise.resolve().then(input.read).catch(() => null);
+      if (sameRecordFacts(stored, record)) return;
+
+      const details = describeAgentError(error);
+      if (!details.retryable) throw error;
+      const decision = await input.retryController.decide({
+        operation: "persistence",
+        failureKind: details.failureKind,
+        attemptNumber,
+      });
+      if (!decision.shouldRetry) throw error;
+      await input.sleep(decision.backoffMs ?? 0);
+    }
+  }
+}
+
+function sameRecordFacts(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => sameRecordFacts(value, right[index]));
+  }
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord).filter((key) => leftRecord[key] !== undefined);
+  const rightKeys = Object.keys(rightRecord).filter((key) => rightRecord[key] !== undefined);
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key) => (
+      Object.hasOwn(rightRecord, key) && sameRecordFacts(leftRecord[key], rightRecord[key])
+    ));
 }

@@ -4,7 +4,7 @@ export { DEFAULT_RETRY_POLICY } from "../config/model.js";
 
 export type RetryableFailureKind = "network" | "llm" | "website" | "submission-timeout";
 
-export type RetryOperation = "creation" | "initialization" | "submission" | "status" | "collection" | "resources" | "restart";
+export type RetryOperation = "creation" | "initialization" | "submission" | "status" | "collection" | "resources" | "persistence" | "restart";
 
 export interface RetryDecision {
   readonly shouldRetry: boolean;

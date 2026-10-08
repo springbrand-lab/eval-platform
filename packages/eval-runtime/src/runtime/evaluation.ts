@@ -10,6 +10,8 @@ import { dataInputSchema } from "@eval-platform/eval-dataset";
 
 import type { RuntimeEvaluationContext } from "./model.js";
 import type { RuntimeStore } from "./store.js";
+import { persistRuntimeRecord } from "./store.js";
+import type { RetryController } from "./retry.js";
 import {
   AgentOperationError,
   applyAttemptPatch,
@@ -21,6 +23,7 @@ import {
 
 export interface EvaluationStageDependencies extends AgentLifecycleDependencies {
   readonly store: RuntimeStore;
+  readonly createRetryController: (policy?: RetryPolicy) => RetryController;
 }
 
 export interface EvaluateSamplingInput {
@@ -38,39 +41,33 @@ export async function evaluateSampling(
   const harnessRuntime = evaluatorHarness.runtime;
   const { sampling, evaluation, sample } = input.context;
   let currentEvaluation = evaluation;
+  const retryController = dependencies.createRetryController(input.retryPolicy);
+  const persistEvaluation = async (next: EvaluationRecord): Promise<void> => {
+    currentEvaluation = next;
+    await persistRuntimeRecord({
+      record: next,
+      write: (record) => dependencies.store.updateEvaluation(record),
+      read: () => dependencies.store.getEvaluation(next.evaluationId),
+      retryController,
+      sleep: dependencies.sleep,
+    });
+  };
   const { artifacts, trajectory } = sampling;
   if (
     sampling.execution.status !== "succeeded"
     || artifacts === undefined
     || trajectory === undefined
   ) {
-    return {
-      ...input.context,
-      evaluation: await markFailed(
-        currentEvaluation,
-        dependencies.store,
-        "sampling has no successful execution output",
-      ),
-    };
+    await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no successful execution output"));
+    return { ...input.context, evaluation: currentEvaluation };
   }
 
   const subjectSubmissionId = sampling.subjectSubmissionId
     ?? latestSubmissionId(sampling);
   if (!subjectSubmissionId) {
-    return {
-      ...input.context,
-      evaluation: await markFailed(
-        currentEvaluation,
-        dependencies.store,
-        "sampling has no subject submission",
-      ),
-    };
+    await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject submission"));
+    return { ...input.context, evaluation: currentEvaluation };
   }
-
-  const persistEvaluation = async (next: EvaluationRecord): Promise<void> => {
-    currentEvaluation = next;
-    await dependencies.store.updateEvaluation(next);
-  };
 
   try {
     const { dataId: _dataId, initialSession: _initialSession, ...data } = sample.data;
@@ -92,7 +89,7 @@ export async function evaluateSampling(
       submissionId,
       harnessConfig: evaluatorHarness,
       prompt: buildEvaluationPrompt(sampling.samplingId),
-      retryPolicy: input.retryPolicy,
+      retryController,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({
         evaluationAttemptId: attemptId,
         evaluationId: currentEvaluation.evaluationId,
@@ -152,22 +149,20 @@ export async function evaluateSampling(
       ),
     });
 
-    currentEvaluation = {
+    await persistEvaluation({
       ...currentEvaluation,
       evaluator: agentConfig,
       status: { status: "succeeded" },
       output: result.output,
-    };
-    await dependencies.store.updateEvaluation(currentEvaluation);
+    });
     return { ...input.context, evaluation: currentEvaluation };
   } catch (error) {
     const details = describeAgentError(error);
-    currentEvaluation = {
+    await persistEvaluation({
       ...currentEvaluation,
       evaluator: agentConfig,
       status: { status: "failed", lastError: details.message },
-    };
-    await dependencies.store.updateEvaluation(currentEvaluation);
+    });
     return { ...input.context, evaluation: currentEvaluation };
   }
 }
@@ -199,14 +194,4 @@ function withEvaluationStatus(
     ...evaluation,
     status: lastError === undefined ? { status } : { status, lastError },
   };
-}
-
-async function markFailed(
-  record: EvaluationRecord,
-  store: RuntimeStore,
-  reason: string,
-): Promise<EvaluationRecord> {
-  const failed = withEvaluationStatus(record, "failed", reason);
-  await store.updateEvaluation(failed);
-  return failed;
 }

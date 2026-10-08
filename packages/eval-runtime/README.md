@@ -37,7 +37,7 @@ src/
 │   ├── agent-lifecycle.ts   # Agent ensure、提交、终态推送、校准和重试
 │   ├── execution.ts         # Subject 执行、初始数据、产物和完整轨迹
 │   ├── evaluation.ts        # Evaluation Agent、输入复制和评估输出
-│   ├── store.ts             # Run / Sampling / EvaluationRecord 原子持久化端口
+│   ├── store.ts             # 原子持久化端口、同一记录写入校准与重试
 │   ├── resources.ts         # 原始资源快照的归属与无损 JSON 校验
 │   ├── scheduler.ts         # 执行 / 评估两套 Agent 并发限制契约
 │   └── retry.ts             # 阶段化重试决策和 Agent 重启策略
@@ -58,7 +58,7 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
 2. Evaluation Agent 使用独立的 Evaluation Chat / Workspace；对外只记录一个 `submissionId`，它同时表示 SP 的 Chat/Submission，不重复记录 `chatId`。
    Runtime 在调用 `ensureAgent` 前分配并持久化该 ID。Harness 必须按 ID 获取或创建，重复或并发请求返回同一个 Agent；同一 ID 的归属、角色、框架或 Agent Config 不一致时返回不可重试的 `AgentIdentityConflictError`，不得静默重绑定。
 3. 重试不能把一次采样变成新的采样，只能增加该采样的执行或评估 attempt。
-   `RetryController` 按 `creation`、`initialization`、`submission`、`status`、`collection`、`resources` 和 `restart` 区分决策；默认策略只定义确认失败后的 Agent 重启，其余操作是否重试由注入的控制器决定。Agent ensure 和初始化重试保留同一 Agent，各自独立计数，不新增执行/评估 attempt、不消耗 Agent 重启次数；收集失败不得重启已经完成的 Submission。
+   `RetryController` 按 `creation`、`initialization`、`submission`、`status`、`collection`、`resources`、`persistence` 和 `restart` 区分决策；默认策略只定义确认失败后的 Agent 重启，其余操作是否重试由注入的控制器决定。Agent ensure 和初始化重试保留同一 Agent，各自独立计数，不新增执行/评估 attempt、不消耗 Agent 重启次数；收集或保存失败不得重启已经完成的 Submission。
 4. Submission 终态以 Harness 推送通知为主；自动重试前仍必须按本次操作的幂等键查询原 `Submission`，不得因为响应丢失就盲目再次投递。
 5. Subject Workspace 产物和完整 Trajectory 必须复制到评估 Chat / Workspace 后，评估 Agent 才能启动。
 6. 推送丢失、连接断开或运行时恢复时，`inspectAgentOperation` 只做一次或有限次状态校准，不作为主流程的持续轮询。
@@ -79,6 +79,8 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
 21. 资源快照只包含本次操作及其子 Agent 的新工作，不包含导入历史或复制的 Subject 证据。`usageEvents`、`telemetryEvents`、`billingSettlements` 是 SP 原始 JSON 记录；未知字段、缺失字段、null、顺序、重复事件、父子关联与来源数值全部保留。Runtime 只校验归属和无损可序列化性，不解析费用/Token、不抽取工具/Turn、不归一化、不去重、不计算统计、不新增汇总字段。源 `coverage/finalized` 也原样保存，由 Metric 判断是否适合统计。
 22. 资源读取单独使用 `resources` 重试预算，与产物收集和 Agent 重启无关。采集状态只有 `pending | collected | failed`；`collected` 表示快照已保存，不表示来源完整。读取失败不能覆盖原 Agent 错误或使成功产物变成失败。Store 将 Attempt 与原始资源快照原子保存；查询从持久化记录读取，Metrics 不直接访问 SP/DO/私有数据库，而是读取 Runtime 原始内容进行解析、去重和所有统计。完整轨迹和大产物继续存引用，资源事件不构成另一份 Workspace/Session 副本。
 23. 后续 Attempt 状态补丁基于当前执行上下文的最新 Attempt，而不是调用方的旧副本；原始快照写入已提交但响应丢失时，失败处理不能用旧 `pending` 覆盖它。协调器兜底错误处理也读取 Store 中的最新评估记录再更新状态，不以启动时的 `queued` 副本重写整个记录。查询只读取持久化结果，不从执行上下文的内存副本返回数据。
+24. 一旦观察到 Agent 终态，立即固定 Attempt 的状态和完成时间，并先保存终态再收集资源，避免资源保存异常抹掉已确认事实。Agent 错误属于 Attempt，Runtime 收尾失败属于执行/评估阶段的 `lastError`，不得把已完成 Agent 记为失败。记录写入使用独立 `persistence` 重试，与生命周期共用本阶段的 RetryController：同一份记录固定后，保存失败先读取最新持久化事实确认提交；未确认且策略允许时只重写同一份记录，不能重新采集已有快照/产物、创建 Attempt、提交或重启 Agent。确认不依赖 JSON 对象键顺序，但不忽略数组顺序、重复记录或 null。次数和退避由注入策略决定，不新增默认政策。
+25. Pipeline 中失败执行的评估取消独立收尾，不占用评估 Agent 并发槽、不成为成功样本评估的门槛。取消保存失败只校准/重试对应 EvaluationRecord；仍失败时把收尾错误写入该记录，已经保存的取消事实不降级。无法连错误记录也保存时，经 `EvalRuntimeDependencies.onError(error)` 上报带 Evaluation/Sampling 身份的错误；未注入回调时默认使用 `console.error`。不吞错、不把错误记在其他样本上，也不因取消收尾异常调用整批失败处理。
 
 Sampling 的三个边界固定如下：
 

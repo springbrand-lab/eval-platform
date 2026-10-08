@@ -92,4 +92,5 @@ export interface EvalRuntimeDependencies {
   readonly idFactory?: () => string;
   readonly now?: () => string;
   readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly onError?: (error: Error) => void;
 }

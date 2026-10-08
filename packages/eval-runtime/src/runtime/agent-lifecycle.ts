@@ -4,7 +4,6 @@ import type {
   AgentResourceScope,
   AgentStatus,
   HarnessConfig,
-  RetryPolicy,
   Sampling,
   SamplingStatus,
   SpHarnessConfig,
@@ -49,7 +48,6 @@ export interface AgentLifecycleDependencies {
   readonly idFactory: () => string;
   readonly now: () => string;
   readonly sleep: (milliseconds: number) => Promise<void>;
-  readonly createRetryController: (policy?: RetryPolicy) => RetryController;
 }
 
 export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOutput> {
@@ -60,7 +58,7 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   readonly submissionId: string;
   readonly harnessConfig: SpHarnessConfig;
   readonly prompt: string;
-  readonly retryPolicy: RetryPolicy;
+  readonly retryController: RetryController;
   readonly createAttempt: (input: {
     readonly attemptId: string;
     readonly attemptNumber: number;
@@ -207,7 +205,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
   dependencies: AgentLifecycleDependencies,
   options: AgentLifecycleOptions<TAttempt, TOutput>,
 ): Promise<AgentLifecycleResult<TOutput>> {
-  const retryController = dependencies.createRetryController(options.retryPolicy);
+  const retryController = options.retryController;
   let handle: AgentHandle | undefined;
   let prepared = false;
   let restartRequested = false;
@@ -221,27 +219,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
 
     await options.appendAttempt(attempt);
     await options.setSamplingStatus(attemptNumber === 1 ? "starting" : "retrying");
-    let submissionCompleted = false;
-    const collectCompletedOutput = async (submissionHandle: AgentHandle): Promise<TOutput> => {
-      submissionCompleted = true;
-      attempt = await options.updateAttempt(attempt, {
-        status: "completed",
-        completedAt: dependencies.now(),
-      });
-      await options.setSamplingStatus("running");
-      const output = await collectOutputWithRetry(
-        dependencies,
-        options,
-        submissionHandle,
-        retryController,
-      );
-      if (!options.isSuccessfulOutput(output)) {
-        const failure = options.outputFailure(output);
-        const details = describeAgentError(failure);
-        throw new OutputCollectionError(options.stage, details, failure);
-      }
-      return output;
-    };
+    let terminalPatch: AttemptPatch | undefined;
 
     try {
       if (!handle) {
@@ -285,6 +263,14 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
               idempotencyKey,
               retryController,
             );
+        const status = submissionStatus(terminal);
+        if (status === undefined) throw new Error(`${options.stage} submission has no terminal status`);
+        terminalPatch = {
+          status,
+          completedAt: dependencies.now(),
+          ...(isSuccessfulSubmission(terminal) ? {} : { error: submissionFailure(options.stage, terminal).message }),
+        };
+        attempt = await options.updateAttempt(attempt, terminalPatch);
       } finally {
         const resources = await collectResourcesWithRetry(
           dependencies,
@@ -293,23 +279,23 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
           resourceScope,
           retryController,
         );
-        attempt = await options.updateAttempt(attempt, { resources });
+        attempt = await options.updateAttempt(attempt, { ...terminalPatch, resources });
       }
       if (!isSuccessfulSubmission(terminal)) {
         throw submissionFailure(options.stage, terminal);
       }
 
-      const output = await collectCompletedOutput(handle);
+      await options.setSamplingStatus("running");
+      const output = await collectOutputWithRetry(dependencies, options, handle, retryController);
+      if (!options.isSuccessfulOutput(output)) {
+        const failure = options.outputFailure(output);
+        throw new OutputCollectionError(options.stage, describeAgentError(failure), failure);
+      }
 
       return { handle, output };
     } catch (error) {
       const details = describeAgentError(error);
-      if (submissionCompleted) {
-        await options.updateAttempt(attempt, {
-          ...(handle ? { submissionId: handle.submissionId } : {}),
-          error: details.message,
-        });
-      } else {
+      if (terminalPatch === undefined) {
         await options.updateAttempt(attempt, {
           status: "failed",
           completedAt: dependencies.now(),

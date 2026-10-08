@@ -2301,9 +2301,19 @@ describe("raw resource persistence", () => {
       .mockRejectedValueOnce(new Error("temporary resource read failure"))
       .mockImplementation(async (input) => makeResources(input));
     vi.mocked(harness.collectExecution).mockRejectedValueOnce(new Error("temporary artifact read failure"));
+    const store = makeStore();
+    const update = store.updateSampling.bind(store);
+    let failResourceSave = true;
+    vi.spyOn(store, "updateSampling").mockImplementation(async (record) => {
+      if (failResourceSave && record.executionAttempts[0]?.resources?.status === "collected") {
+        failResourceSave = false;
+        throw new Error("temporary resource persistence failure");
+      }
+      await update(record);
+    });
     const runtime = createEvalRuntime({
-      catalog: makeCatalog(), harness, store: makeStore(), sleep: async () => undefined,
-      createRetryController: makeRetryControllerFactory({ resources: 1, collection: 1 }),
+      catalog: makeCatalog(), harness, store, sleep: async () => undefined,
+      createRetryController: makeRetryControllerFactory({ resources: 1, collection: 1, persistence: 1 }),
     });
     const run = await runtime.start(startRequest("independent-resource-retry"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
@@ -2516,6 +2526,8 @@ describe("raw resource persistence", () => {
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
     expect(sampling.execution.lastError).toBe("raw resource persistence failed");
+    expect(sampling.executionAttempts[0]!.status).toBe("completed");
+    expect(sampling.executionAttempts[0]).not.toHaveProperty("error");
     expect(sampling.executionAttempts[0]!.resources?.status).toBe("pending");
     expect(harness.collectExecution).not.toHaveBeenCalled();
     expect(harness.restartAgent).not.toHaveBeenCalled();
@@ -2535,6 +2547,7 @@ describe("raw resource persistence", () => {
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
     expect(sampling.executionAttempts[0]!.status).toBe("completed");
+    expect(sampling.executionAttempts[0]).not.toHaveProperty("error");
     expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot: captured });
     expect(sampling.execution.lastError).toContain("artifact read unavailable");
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(1);
@@ -2602,8 +2615,386 @@ describe("raw resource persistence", () => {
       ? (await runtime.getSampling(run.samplingIds[0]!)).executionAttempts
       : (await runtime.getEvaluation(completed.evaluationIds[0]!)).attempts;
 
-    expect(completed.status).toBe("failed");
+    expect(completed.status).toBe("succeeded");
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]!.status).toBe("completed");
+    expect(attempts[0]).not.toHaveProperty("error");
     expect(attempts[0]!.resources).toEqual({ status: "collected", snapshot: captured });
+    expect(role === "subject" ? harness.collectExecution : harness.collectEvaluation).toHaveBeenCalledTimes(1);
     expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
+  it.each((["terminal", "resources", "output"] as const).flatMap((step) => (
+    (["before", "after"] as const).map((failure) => ({ step, failure }))
+  )))("recovers $step save errors $failure commit without rerunning or recollecting", async ({ step, failure }) => {
+    const harness = makeHarness();
+    const store = makeStore();
+    let failedRecord: SamplingState | EvaluationRecord | undefined;
+    let retriedRecord: SamplingState | EvaluationRecord | undefined;
+    const save = async <TRecord extends SamplingState | EvaluationRecord>(
+      record: TRecord,
+      update: (record: TRecord) => Promise<void>,
+    ): Promise<void> => {
+      const attempts = "executionAttempts" in record ? record.executionAttempts : record.attempts;
+      const status = "execution" in record ? record.execution.status : record.status.status;
+      const shouldFail = step === "terminal"
+        ? attempts[0]?.status === "completed" && attempts[0]?.resources?.status === "pending"
+        : step === "resources"
+          ? attempts[0]?.resources?.status === "collected"
+          : status === "succeeded";
+      if (shouldFail && !failedRecord) {
+        failedRecord = structuredClone(record);
+        if (failure === "after") await update(record);
+        throw new Error(`${step} write unavailable`);
+      }
+      if (failedRecord && !retriedRecord) retriedRecord = structuredClone(record);
+      await update(record);
+    };
+    if (role === "subject") {
+      const update = store.updateSampling.bind(store);
+      vi.spyOn(store, "updateSampling").mockImplementation((record) => save(record, update));
+    } else {
+      const update = store.updateEvaluation.bind(store);
+      vi.spyOn(store, "updateEvaluation").mockImplementation((record) => save(record, update));
+    }
+    vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
+      const attempts = input.handle.role === "subject"
+        ? (await store.getSampling(input.handle.samplingId))!.executionAttempts
+        : (await store.listEvaluations(input.handle.samplingId))[0]!.attempts;
+      expect(attempts[0]!.status).toBe("completed");
+      return makeResources(input);
+    });
+    const decide = vi.fn<RetryController["decide"]>(async ({ operation }) => ({ shouldRetry: operation === "persistence", backoffMs: 37 }));
+    const sleep = vi.fn(async () => undefined);
+    let tick = 0;
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog(), harness, store, sleep,
+      now: () => new Date(Date.UTC(2026, 9, 8, 0, 0, tick++)).toISOString(),
+      createRetryController: () => ({ decide }),
+    });
+    const run = role === "subject"
+      ? await runtime.start(startRequest(`retry-${role}-${step}`))
+      : await runtime.pipeline(pipelineRequest(`retry-${role}-${step}`));
+    const completed = await waitForTerminal(runtime, run.runId);
+    const attempts = role === "subject"
+      ? (await runtime.getSampling(run.samplingIds[0]!)).executionAttempts
+      : (await runtime.getEvaluation(completed.evaluationIds[0]!)).attempts;
+
+    expect(completed.status).toBe("succeeded");
+    expect(failedRecord).toBeDefined();
+    if (failure === "before") expect(retriedRecord).toEqual(failedRecord);
+    const failedAttempts = "executionAttempts" in failedRecord! ? failedRecord.executionAttempts : failedRecord!.attempts;
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({ status: "completed", resources: { status: "collected" } });
+    expect(attempts[0]!.completedAt).toBe(failedAttempts[0]!.completedAt);
+    expect(attempts[0]).not.toHaveProperty("error");
+    if (failure === "before") {
+      expect(decide).toHaveBeenCalledExactlyOnceWith({ operation: "persistence", failureKind: "network", attemptNumber: 1 });
+      expect(sleep).toHaveBeenCalledExactlyOnceWith(37);
+    } else {
+      expect(decide).not.toHaveBeenCalled();
+      expect(sleep).not.toHaveBeenCalled();
+    }
+    expect(harness.ensureAgent).toHaveBeenCalledTimes(role === "subject" ? 1 : 2);
+    expect(harness.submitAgent).toHaveBeenCalledTimes(role === "subject" ? 1 : 2);
+    expect(harness.collectAgentResources).toHaveBeenCalledTimes(role === "subject" ? 1 : 2);
+    expect(role === "subject" ? harness.collectExecution : harness.collectEvaluation).toHaveBeenCalledTimes(1);
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("keeps completion when resource persistence retries are exhausted", async () => {
+    const harness = makeHarness();
+    const store = makeStore();
+    if (role === "subject") {
+      const update = store.updateSampling.bind(store);
+      vi.spyOn(store, "updateSampling").mockImplementation(async (record) => {
+        if (record.executionAttempts.some((attempt) => attempt.resources?.status === "collected")) {
+          throw new Error("resource store unavailable");
+        }
+        await update(record);
+      });
+    } else {
+      const update = store.updateEvaluation.bind(store);
+      vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+        if (record.attempts.some((attempt) => attempt.resources?.status === "collected")) {
+          throw new Error("resource store unavailable");
+        }
+        await update(record);
+      });
+    }
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog(), harness, store, sleep: async () => undefined,
+      createRetryController: makeRetryControllerFactory({ persistence: 1, restart: 1 }),
+    });
+    const run = role === "subject"
+      ? await runtime.start(startRequest(`exhausted-${role}-persistence`))
+      : await runtime.pipeline(pipelineRequest(`exhausted-${role}-persistence`));
+    const completed = await waitForTerminal(runtime, run.runId);
+    const record = role === "subject"
+      ? await runtime.getSampling(run.samplingIds[0]!)
+      : await runtime.getEvaluation(completed.evaluationIds[0]!);
+    const attempts = "executionAttempts" in record ? record.executionAttempts : record.attempts;
+    const stage = "execution" in record ? record.execution : record.status;
+
+    expect(stage).toEqual({ status: "failed", lastError: "resource store unavailable" });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({ status: "completed", completedAt: expect.any(String), resources: { status: "pending" } });
+    expect(attempts[0]).not.toHaveProperty("error");
+    expect(role === "subject" ? harness.collectExecution : harness.collectEvaluation).not.toHaveBeenCalled();
+    expect(harness.collectAgentResources).toHaveBeenCalledTimes(role === "subject" ? 1 : 2);
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("keeps the original failed Agent facts when resource saving fails", async () => {
+    const harness = makeHarness();
+    const store = makeStore();
+    vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => handle.role === role ? {
+      status: "interrupted", normalizedStatus: "interrupted", error: "original Agent interruption", retryable: false,
+    } : makeSubmission());
+    if (role === "subject") {
+      const update = store.updateSampling.bind(store);
+      vi.spyOn(store, "updateSampling").mockImplementation(async (record) => {
+        if (record.executionAttempts[0]?.resources?.status === "collected") throw new Error("resource store unavailable");
+        await update(record);
+      });
+    } else {
+      const update = store.updateEvaluation.bind(store);
+      vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+        if (record.attempts[0]?.resources?.status === "collected") throw new Error("resource store unavailable");
+        await update(record);
+      });
+    }
+    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store });
+    const run = role === "subject"
+      ? await runtime.start(startRequest(`failed-${role}-resource-persistence`))
+      : await runtime.pipeline(pipelineRequest(`failed-${role}-resource-persistence`));
+    const completed = await waitForTerminal(runtime, run.runId);
+    const attempts = role === "subject"
+      ? (await runtime.getSampling(run.samplingIds[0]!)).executionAttempts
+      : (await runtime.getEvaluation(completed.evaluationIds[0]!)).attempts;
+
+    expect(completed.status).toBe("failed");
+    expect(attempts[0]).toMatchObject({ status: "interrupted", error: "original Agent interruption", completedAt: expect.any(String) });
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe("pipeline cancellation isolation", () => {
+  function cancellationHarness(store: RuntimeStore): Harness {
+    const harness = makeHarness();
+    vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => {
+      const sampling = await store.getSampling(handle.samplingId);
+      return handle.role === "subject" && sampling?.sampleId !== "sample-a"
+        ? { status: "failed", normalizedStatus: "failed", retryable: false, error: "subject failed" }
+        : makeSubmission();
+    });
+    return harness;
+  }
+
+  it.each(["before", "after"] as const)("evaluates A despite B's cancellation write failing %s commit", async (failure) => {
+    const store = makeStore();
+    const harness = cancellationHarness(store);
+    const update = store.updateEvaluation.bind(store);
+    let firstCancellation = true;
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+      if (record.status.status === "cancelled" && firstCancellation) {
+        firstCancellation = false;
+        if (failure === "after") await update(record);
+        throw new Error("B cancellation write unavailable");
+      }
+      await update(record);
+    });
+    const onError = vi.fn();
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog([makeSample("sample-a"), makeSample("sample-b")]),
+      harness, store, onError, sleep: async () => undefined,
+      createRetryController: makeRetryControllerFactory({ persistence: 1 }),
+    });
+    const run = await runtime.pipeline(pipelineRequest(`cancel-${failure}`, PIPELINE_CONFIG_CONCURRENT_ID));
+    const completed = await waitForTerminal(runtime, run.runId);
+    const [evaluationA] = await runtime.listEvaluations(run.samplingIds[0]!);
+    await expect.poll(async () => (await runtime.listEvaluations(run.samplingIds[1]!))[0]!.status.status).toBe("cancelled");
+    const [evaluationB] = await runtime.listEvaluations(run.samplingIds[1]!);
+
+    expect(completed.status).toBe("failed");
+    expect(evaluationA!.status).toEqual({ status: "succeeded" });
+    expect(evaluationA!.attempts).toHaveLength(1);
+    expect(evaluationB!.status).toEqual({ status: "cancelled", lastError: "execution did not succeed" });
+    expect(evaluationB!.attempts).toHaveLength(0);
+    expect(vi.mocked(harness.ensureAgent).mock.calls.filter(([input]) => input.role === "evaluator")).toHaveLength(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("does not make A wait for B's cancellation retry", async () => {
+    const store = makeStore();
+    const harness = cancellationHarness(store);
+    const update = store.updateEvaluation.bind(store);
+    let firstCancellation = true;
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+      if (record.status.status === "cancelled" && firstCancellation) {
+        firstCancellation = false;
+        throw new Error("B cancellation write unavailable");
+      }
+      await update(record);
+    });
+    let releaseRetry!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseRetry = resolve; });
+    const sleep = vi.fn(async () => gate);
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog([makeSample("sample-a"), makeSample("sample-b")]), harness, store, sleep,
+      createRetryController: makeRetryControllerFactory({ persistence: 1 }),
+    });
+    const run = await runtime.pipeline(pipelineRequest("cancel-retry-gate", PIPELINE_CONFIG_CONCURRENT_ID));
+    try {
+      await expect.poll(async () => (await runtime.listEvaluations(run.samplingIds[0]!))[0]!.status.status).toBe("succeeded");
+      expect(sleep).toHaveBeenCalledTimes(1);
+      expect((await runtime.listEvaluations(run.samplingIds[1]!))[0]!.status.status).toBe("queued");
+    } finally {
+      releaseRetry();
+    }
+    await expect.poll(async () => (await runtime.listEvaluations(run.samplingIds[1]!))[0]!.status.status).toBe("cancelled");
+  });
+
+  it.each([true, false])("records cancellation failure only on B (retryable: %s)", async (retryable) => {
+    const store = makeStore();
+    const harness = cancellationHarness(store);
+    const update = store.updateEvaluation.bind(store);
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+      if (record.status.status === "cancelled") {
+        throw Object.assign(new Error("B cancellation unavailable"), { retryable });
+      }
+      await update(record);
+    });
+    const onError = vi.fn();
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog([makeSample("sample-a"), makeSample("sample-b")]), harness, store, onError,
+      sleep: async () => undefined, createRetryController: makeRetryControllerFactory({ persistence: 1 }),
+    });
+    const run = await runtime.pipeline(pipelineRequest(`cancel-exhausted-${retryable}`, PIPELINE_CONFIG_CONCURRENT_ID));
+    await waitForTerminal(runtime, run.runId);
+    await expect.poll(async () => (await runtime.listEvaluations(run.samplingIds[1]!))[0]!.status.status).toBe("failed");
+    const [evaluationA] = await runtime.listEvaluations(run.samplingIds[0]!);
+    const [evaluationB] = await runtime.listEvaluations(run.samplingIds[1]!);
+
+    expect(evaluationA!.status).toEqual({ status: "succeeded" });
+    expect(evaluationA!.attempts).toHaveLength(1);
+    expect(evaluationB!.status).toEqual({ status: "failed", lastError: "evaluation cancellation persistence failed: B cancellation unavailable" });
+    expect(evaluationB!.attempts).toHaveLength(0);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("reports B's error when neither cancellation nor its error record can be saved", async () => {
+    const store = makeStore();
+    const harness = cancellationHarness(store);
+    const update = store.updateEvaluation.bind(store);
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+      if (record.status.status === "cancelled" || record.status.lastError?.startsWith("evaluation cancellation persistence failed:")) {
+        throw new Error("B storage unavailable");
+      }
+      await update(record);
+    });
+    const onError = vi.fn();
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog([makeSample("sample-a"), makeSample("sample-b")]), harness, store, onError,
+    });
+    const run = await runtime.pipeline(pipelineRequest("cancel-report", PIPELINE_CONFIG_CONCURRENT_ID));
+    await waitForTerminal(runtime, run.runId);
+    await expect.poll(() => onError.mock.calls.length).toBe(1);
+    const [evaluationA] = await runtime.listEvaluations(run.samplingIds[0]!);
+    const [evaluationB] = await runtime.listEvaluations(run.samplingIds[1]!);
+    const reported = onError.mock.calls[0]![0] as AggregateError;
+
+    expect(evaluationA!.status).toEqual({ status: "succeeded" });
+    expect(evaluationA!.attempts).toHaveLength(1);
+    expect(evaluationB!.status.status).toBe("queued");
+    expect(evaluationB!.attempts).toHaveLength(0);
+    expect(reported).toBeInstanceOf(AggregateError);
+    expect(reported.message).toContain(evaluationB!.evaluationId);
+    expect(reported.message).toContain(evaluationB!.samplingId);
+    expect(reported.errors).toHaveLength(2);
+  });
+
+  it("does not downgrade committed cancellation when reconciliation temporarily fails", async () => {
+    const store = makeStore();
+    const harness = cancellationHarness(store);
+    const update = store.updateEvaluation.bind(store);
+    const read = store.getEvaluation.bind(store);
+    let uncertainEvaluationId: string | undefined;
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+      await update(record);
+      if (record.status.status === "cancelled" && !uncertainEvaluationId) {
+        uncertainEvaluationId = record.evaluationId;
+        throw new Error("cancellation response lost");
+      }
+    });
+    let firstRead = true;
+    vi.spyOn(store, "getEvaluation").mockImplementation(async (evaluationId) => {
+      if (evaluationId === uncertainEvaluationId && firstRead) {
+        firstRead = false;
+        throw new Error("reconciliation unavailable");
+      }
+      return read(evaluationId);
+    });
+    const onError = vi.fn();
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog([makeSample("sample-a"), makeSample("sample-b")]), harness, store, onError,
+    });
+    const run = await runtime.pipeline(pipelineRequest("cancel-read-failed", PIPELINE_CONFIG_CONCURRENT_ID));
+    await waitForTerminal(runtime, run.runId);
+    expect((await runtime.listEvaluations(run.samplingIds[0]!))[0]!.status.status).toBe("succeeded");
+    expect((await runtime.listEvaluations(run.samplingIds[1]!))[0]!.status.status).toBe("cancelled");
+    expect(onError).not.toHaveBeenCalled();
+    expect(vi.mocked(store.updateEvaluation).mock.calls.some(([record]) => record.status.status === "failed")).toBe(false);
+  });
+
+  it("isolates failed cancellation records even when no sampling is evaluable", async () => {
+    const store = makeStore();
+    const harness = cancellationHarness(store);
+    const update = store.updateEvaluation.bind(store);
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+      const sampling = await store.getSampling(record.samplingId);
+      if (record.status.status === "cancelled" && sampling!.sampleId === "sample-b") {
+        throw new Error("B cancellation unavailable");
+      }
+      await update(record);
+    });
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog([makeSample("sample-b"), makeSample("sample-c")]), harness, store,
+    });
+    const run = await runtime.pipeline(pipelineRequest("all-executions-failed", PIPELINE_CONFIG_CONCURRENT_ID));
+    await waitForTerminal(runtime, run.runId);
+    await expect.poll(async () => (await runtime.listEvaluations(run.samplingIds[0]!))[0]!.status.status).toBe("failed");
+    await expect.poll(async () => (await runtime.listEvaluations(run.samplingIds[1]!))[0]!.status.status).toBe("cancelled");
+    expect((await runtime.listEvaluations(run.samplingIds[0]!))[0]!.status.lastError).toContain("B cancellation unavailable");
+    expect(vi.mocked(harness.ensureAgent).mock.calls.every(([input]) => input.role === "subject")).toBe(true);
+    expect(harness.collectEvaluation).not.toHaveBeenCalled();
+  });
+
+  it.each(["default", "throwing"] as const)("keeps A independent when using the %s error reporter", async (reporter) => {
+    const store = makeStore();
+    const harness = cancellationHarness(store);
+    const update = store.updateEvaluation.bind(store);
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+      if (record.status.status === "cancelled" || record.status.lastError?.startsWith("evaluation cancellation persistence failed:")) {
+        throw new Error("B storage unavailable");
+      }
+      await update(record);
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const runtime = createEvalRuntime({
+        catalog: makeCatalog([makeSample("sample-a"), makeSample("sample-b")]), harness, store,
+        ...(reporter === "throwing" ? { onError: () => { throw new Error("reporter unavailable"); } } : {}),
+      });
+      const run = await runtime.pipeline(pipelineRequest(`cancel-reporter-${reporter}`, PIPELINE_CONFIG_CONCURRENT_ID));
+      await waitForTerminal(runtime, run.runId);
+      await expect.poll(() => logged.mock.calls.length).toBe(1);
+      expect((await runtime.listEvaluations(run.samplingIds[0]!))[0]!.status.status).toBe("succeeded");
+      expect((await runtime.listEvaluations(run.samplingIds[1]!))[0]!.status.status).toBe("queued");
+    } finally {
+      logged.mockRestore();
+    }
   });
 });
