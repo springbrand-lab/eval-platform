@@ -141,6 +141,41 @@ describe("resource statistics", () => {
     expect(result.costs.modelDebitedUnits.value).toBe(16);
   });
 
+  it("uses valid child detail when a subagent summary has no trusted metrics or provider cost", () => {
+    const child = usage("child-detail", {
+      runId: "child-run",
+      metrics: { inputTokens: 70, outputTokens: 20, cacheReadTokens: 10, cacheWriteTokens: 0 },
+      providerCostUsd: { total: 3 },
+    });
+    const summary: AgentResourceFact = {
+      eventId: "child-summary", runId: "root-run", subagentRunId: "child-run", parentRunId: "root-run",
+      kind: "subagent", outcome: "missing_trusted_usage",
+    };
+    const result = aggregateResources([resourceInput({ usageEvents: [child, summary] })]);
+    expect(result.tokens.total).toEqual({ value: 100, coverage: "partial" });
+    expect(result.tokens.input).toEqual({ value: 70, coverage: "partial" });
+    expect(result.costs.providerUsd).toEqual({ value: 3, coverage: "partial" });
+    expect(result.overlappingUsageRecords).toBe(0);
+  });
+
+  it("chooses summary values per metric and keeps child provider cost when only tokens are summarized", () => {
+    const child = usage("child-detail", {
+      runId: "child-run",
+      metrics: { inputTokens: 70, outputTokens: 20, cacheReadTokens: 10, cacheWriteTokens: 0 },
+      providerCostUsd: { total: 3 },
+    });
+    const summary: AgentResourceFact = {
+      eventId: "child-summary", runId: "root-run", subagentRunId: "child-run", parentRunId: "root-run",
+      kind: "subagent", outcome: "billable",
+      metrics: { inputTokens: 70, outputTokens: 20, cacheReadTokens: 10, cacheWriteTokens: 0 },
+    };
+    const result = aggregateResources([resourceInput({ usageEvents: [child, summary] })]);
+    expect(result.tokens.total).toEqual({ value: 100, coverage: "complete" });
+    expect(result.tokens.input).toEqual({ value: 70, coverage: "complete" });
+    expect(result.costs.providerUsd).toEqual({ value: 3, coverage: "partial" });
+    expect(result.overlappingUsageRecords).toBe(1);
+  });
+
   it("does not let ambiguous summaries hide child detail", () => {
     const result = aggregateResources([resourceInput({ usageEvents: [
       usage("summary-1", { kind: "subagent", subagentRunId: "child-run", parentRunId: "run-1" }),

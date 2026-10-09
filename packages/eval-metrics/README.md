@@ -42,7 +42,7 @@ Project 的 Data 数量表示当前查询中已有采样的数据；Dataset 的 
 
 统计包含执行/评估状态、Attempt/重启数量、Agent 耗时、按评估 Agent 分组的分数、费用、Token、模型请求、Turn、工具调用和工具耗时。Sampling 明细保留产物、完整轨迹、评估依据及原始 Attempt/资源记录。产物为主要对象，轨迹只作补充；解释与证据直接展示评估 Agent 的输出，没有归因模块。
 
-缺失值使用 null 和完整性标记，不能补零；完整空流才可确认零。费用区分 Provider USD 和 SP 已结算单位，模型、Action、平台承担与短缺分别展示，不重算价格。模型账单按 `accountId + eventId` 去重，Action 按执行身份，工具/模型请求/Turn 按 Session 内 operationId 合并起止事件。Token 总数按 SP 的输入/输出/缓存独立桶相加，不再加输出子集 reasoning。Subagent 汇总与其明确关联的子明细不重复计量，但不同真实结算不被丢弃。
+缺失值使用 null 和完整性标记，不能补零；完整空流才可确认零。费用区分 Provider USD 和 SP 已结算单位，模型、Action、平台承担与短缺分别展示，不重算价格。模型账单按 `accountId + eventId` 去重，Action 按执行身份，工具/模型请求/Turn 按 Session 内 operationId 合并起止事件。Token 总数按 SP 的输入/输出/缓存独立桶相加，不再加输出子集 reasoning。Subagent 汇总只在对应 Token 或 Provider USD 指标有可信值时抑制子明细；摘要缺少某个指标时继续使用有效子明细，并保留 partial/unavailable 语义。不同真实结算不被丢弃。
 
 评估分数不假设 0～1，不设置通过阈值，不把未知或失败当作 0，不跨评估 Agent 混算平均分。阶段成功率分母只包含终态记录；Agent 耗时不冒充并发批次墙钟时间。默认保留失败、取消、重启和历次重评的资源。
 

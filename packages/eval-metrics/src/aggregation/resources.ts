@@ -192,43 +192,86 @@ export function aggregateResources(inputs: readonly ResourceInput[]): ResourceSt
       }
     }
   }
-  const coveredRuns = new Set([...summaryGroups].filter(([, entries]) => !ambiguousSummaries.has(entries[0]!)).map(([key]) => key));
-  const selectedUsage = knownUsage.filter((entry) => {
-    const isSummary = entry.fact.kind === "subagent";
+  type UsageMetric = "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "reasoningTokens" | "totalTokens" | "providerUsd";
+  const valueCache = new Map<FactEntry, Map<UsageMetric, number | null>>();
+  const readUsageMetric = (entry: FactEntry, metric: UsageMetric): number | null => {
+    const cached = valueCache.get(entry)?.get(metric);
+    if (cached !== undefined) return cached;
+    let value: number | null;
+    if (metric === "providerUsd") {
+      value = numeric(entry, "usageEvents", record(entry.fact.providerCostUsd)?.total, "providerCostUsd.total", false);
+    } else if (metric !== "totalTokens") {
+      value = numeric(entry, "usageEvents", record(entry.fact.metrics)?.[metric], metric, true);
+    } else {
+      const metrics = record(entry.fact.metrics);
+      if (metrics?.totalTokens !== undefined) {
+        value = numeric(entry, "usageEvents", metrics.totalTokens, "totalTokens", true);
+      } else {
+        const buckets = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"]
+          .map((field) => numeric(entry, "usageEvents", metrics?.[field], field, true));
+        if (buckets.some((item) => item === null)) {
+          value = null;
+        } else {
+          const total = buckets.reduce<number>((previous, item) => previous + item!, 0);
+          if (!Number.isSafeInteger(total)) {
+            diagnose("invalid-value", "usageEvents", entry, "Total token buckets exceed the safe integer range");
+            value = null;
+          } else {
+            value = total;
+          }
+        }
+      }
+    }
+    const values = valueCache.get(entry) ?? new Map<UsageMetric, number | null>();
+    values.set(metric, value);
+    valueCache.set(entry, values);
+    return value;
+  };
+  const summaryCovers = (ownerUserId: string, runId: string, metric: UsageMetric): boolean => {
+    const summaries = summaryGroups.get(identity(ownerUserId, runId));
+    return summaries !== undefined
+      && summaries.length === 1
+      && !ambiguousSummaries.has(summaries[0]!)
+      && readUsageMetric(summaries[0]!, metric) !== null;
+  };
+  const metricEntries = (metric: UsageMetric): readonly FactEntry[] => knownUsage.filter((entry) => {
     if (ambiguousSummaries.has(entry)) return false;
+    const isSummary = entry.fact.kind === "subagent";
     const seen = new Set<string>();
     let current = text(isSummary ? entry.fact.parentRunId : entry.fact.runId);
     while (current && !seen.has(current)) {
       const key = identity(entry.ownerUserId, current);
-      if (coveredRuns.has(key)) return false;
+      if (summaryCovers(entry.ownerUserId, current, metric)) return false;
       seen.add(current);
       current = parentByRun.get(key);
     }
     return true;
   });
-
-  const tokenField = (entry: FactEntry, field: string): number | null => numeric(entry, "usageEvents", record(entry.fact.metrics)?.[field], field, true);
-  const tokenStatistics = (entries: readonly FactEntry[]): TokenStatistics => {
-    const metric = (field: string): MetricNumber => sum(entries, usageComplete, "usageEvents", field, true, (entry) => tokenField(entry, field));
+  const selectedTotalUsage = metricEntries("totalTokens");
+  const selectedTotalUsageSet = new Set(selectedTotalUsage);
+  const tokenStatistics = (entriesForGroup?: readonly FactEntry[]): TokenStatistics => {
+    const group = entriesForGroup === undefined ? undefined : new Set(entriesForGroup);
+    const entriesFor = (metric: UsageMetric): readonly FactEntry[] => metricEntries(metric)
+      .filter((entry) => group === undefined || group.has(entry));
+    const metric = (field: UsageMetric): MetricNumber => sum(entriesFor(field), usageComplete, "usageEvents", field, true,
+      (entry) => readUsageMetric(entry, field));
     return {
       input: metric("inputTokens"), output: metric("outputTokens"), cacheRead: metric("cacheReadTokens"),
       cacheWrite: metric("cacheWriteTokens"), reasoning: metric("reasoningTokens"),
-      total: sum(entries, usageComplete, "usageEvents", "totalTokens", true, (entry) => {
-        const metrics = record(entry.fact.metrics);
-        if (metrics?.totalTokens !== undefined) return tokenField(entry, "totalTokens");
-        const buckets = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"].map((field) => tokenField(entry, field));
-        if (buckets.some((value) => value === null)) return null;
-        const total = buckets.reduce<number>((previous, value) => previous + value!, 0);
-        if (!Number.isSafeInteger(total)) {
-          diagnose("invalid-value", "usageEvents", entry, "Total token buckets exceed the safe integer range");
-          return null;
-        }
-        return total;
-      }),
+      total: sum(entriesFor("totalTokens"), usageComplete, "usageEvents", "totalTokens", true,
+        (entry) => readUsageMetric(entry, "totalTokens")),
     };
   };
-  const providerCost = (entries: readonly FactEntry[]): MetricNumber => sum(entries, usageComplete, "usageEvents", "providerUsd", false,
-    (entry) => numeric(entry, "usageEvents", record(entry.fact.providerCostUsd)?.total, "providerCostUsd.total", false));
+  const providerCost = (entriesForGroup?: readonly FactEntry[]): MetricNumber => {
+    const group = entriesForGroup === undefined ? undefined : new Set(entriesForGroup);
+    return sum(metricEntries("providerUsd").filter((entry) => group === undefined || group.has(entry)), usageComplete,
+      "usageEvents", "providerUsd", false, (entry) => readUsageMetric(entry, "providerUsd"));
+  };
+  const selectedUsage = [...new Set([
+    ...metricEntries("inputTokens"), ...metricEntries("outputTokens"), ...metricEntries("cacheReadTokens"),
+    ...metricEntries("cacheWriteTokens"), ...metricEntries("reasoningTokens"), ...metricEntries("totalTokens"),
+    ...metricEntries("providerUsd"),
+  ])];
   const modelGroups = new Map<string, { provider: string | null; model: string | null; entries: FactEntry[] }>();
   for (const entry of selectedUsage) {
     const metadata = record(entry.fact.providerMetadata);
@@ -240,7 +283,9 @@ export function aggregateResources(inputs: readonly ResourceInput[]): ResourceSt
     modelGroups.set(key, group);
   }
   const byModel: ModelStatistics[] = [...modelGroups.values()].map((group) => ({
-    provider: group.provider, model: group.model, usageRecords: group.entries.length,
+    provider: group.provider,
+    model: group.model,
+    usageRecords: group.entries.filter((entry) => selectedTotalUsageSet.has(entry)).length,
     tokens: tokenStatistics(group.entries), providerUsd: providerCost(group.entries),
   })).sort((left, right) => JSON.stringify([left.provider, left.model]).localeCompare(JSON.stringify([right.provider, right.model])));
 
@@ -377,8 +422,8 @@ export function aggregateResources(inputs: readonly ResourceInput[]): ResourceSt
   return {
     collections,
     duplicateRecords: { usageEvents: usage.duplicates, telemetryEvents: telemetry.duplicates, billingSettlements: billing.duplicates },
-    overlappingUsageRecords: knownUsage.length - selectedUsage.length - ambiguousSummaries.size,
-    tokens: tokenStatistics(selectedUsage),
+    overlappingUsageRecords: knownUsage.length - selectedTotalUsage.length - ambiguousSummaries.size,
+    tokens: tokenStatistics(),
     costs: {
       providerUsd: providerCost(selectedUsage), modelDebitedUnits, actionChargedUnits, chargedUnits,
       ratedUnits: billingField(modelBills, "ratedUnits", (entry) => entry.fact.ratedUnits),
