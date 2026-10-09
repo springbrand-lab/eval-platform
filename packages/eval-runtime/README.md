@@ -38,6 +38,7 @@ src/
 │   ├── execution.ts         # Subject 执行、初始数据、产物和完整轨迹
 │   ├── evaluation.ts        # Evaluation Agent、输入复制和评估输出
 │   ├── store.ts             # 原子持久化端口、同一记录写入校准与重试
+│   ├── projection.ts        # Sampling / Run 原始事实到公开快照的唯一投影
 │   ├── resources.ts         # 原始资源快照的归属与无损 JSON 校验
 │   ├── scheduler.ts         # 执行 / 评估两套 Agent 并发限制契约
 │   └── retry.ts             # 阶段化重试决策和 Agent 重启策略
