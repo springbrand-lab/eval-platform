@@ -135,7 +135,8 @@ describe("Runtime public-query integration", () => {
     const fixture = runtimeFixture();
     const pipeline = await fixture.runtime.pipeline({ requestId: "request-1", projectId: PROJECT.projectId, pipelineConfigId: "pipeline-config" });
     fixture.handles.push(pipeline);
-    await vi.waitFor(async () => expect((await fixture.runtime.getRun(pipeline.runId)).status).toBe("succeeded"));
+    await fixture.runtime.resume(pipeline.runId);
+    expect((await fixture.runtime.getRun(pipeline.runId)).status).toBe("succeeded");
 
     const project = await fixture.metrics.getProjectOverview({ projectId: PROJECT.projectId });
     expect(project.counts).toEqual({ datasets: 1, data: 1, samples: 1, samplings: 5, evaluations: 5 });
@@ -167,7 +168,8 @@ describe("Runtime public-query integration", () => {
 
     const rerun = await fixture.runtime.evaluate({ projectId: PROJECT.projectId, samplingIds: [stored.samplingId], evaluationConfigId: "evaluation-config" });
     fixture.handles.push(rerun);
-    await vi.waitFor(async () => expect((await fixture.runtime.getRun(rerun.runId)).status).toBe("succeeded"));
+    await fixture.runtime.resume(rerun.runId);
+    expect((await fixture.runtime.getRun(rerun.runId)).status).toBe("succeeded");
     const all = await fixture.metrics.getSamplingDetail({ projectId: PROJECT.projectId, samplingId: stored.samplingId });
     expect(all.evaluations).toHaveLength(2);
     expect(all.summary.execution.attempts).toBe(1);

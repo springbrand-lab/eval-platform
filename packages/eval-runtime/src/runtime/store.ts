@@ -62,6 +62,10 @@ export interface RuntimeStore {
   getSampling(samplingId: string): Promise<SamplingState | null>;
 }
 
+export interface RuntimeRecoveryStore {
+  listRecoverableRunIds(afterRunId?: string, limit?: number): Promise<readonly string[]>;
+}
+
 export async function persistRuntimeRecord<TRecord extends SamplingState | EvaluationRecord>(input: {
   readonly record: TRecord;
   readonly write: (record: TRecord) => Promise<void>;

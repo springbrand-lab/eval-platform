@@ -43,7 +43,6 @@ export async function evaluateSampling(
   let currentEvaluation = evaluation;
   const retryController = dependencies.createRetryController(input.retryPolicy);
   const persistEvaluation = async (next: EvaluationRecord): Promise<void> => {
-    currentEvaluation = next;
     await persistRuntimeRecord({
       record: next,
       write: (record) => dependencies.store.updateEvaluation(record),
@@ -51,6 +50,7 @@ export async function evaluateSampling(
       retryController,
       sleep: dependencies.sleep,
     });
+    currentEvaluation = next;
   };
   const { artifacts, trajectory } = sampling;
   if (
@@ -70,8 +70,13 @@ export async function evaluateSampling(
   }
 
   try {
+    if (!sample.data || typeof sample.data !== "object" || Array.isArray(sample.data)) {
+      throw new AgentOperationError("Sample data must be an object", false, "network");
+    }
     const { dataId: _dataId, initialSession: _initialSession, ...data } = sample.data;
-    const initialData = dataInputSchema.parse(data);
+    const parsed = dataInputSchema.safeParse(data);
+    if (!parsed.success) throw new AgentOperationError(parsed.error.message, false, "network");
+    const initialData = parsed.data;
     const submissionId = currentEvaluation.submissionId ?? dependencies.idFactory();
     if (currentEvaluation.submissionId === undefined) {
       await persistEvaluation({
@@ -90,6 +95,7 @@ export async function evaluateSampling(
       harnessConfig: evaluatorHarness,
       prompt: buildEvaluationPrompt(sampling.samplingId),
       retryController,
+      attempts: currentEvaluation.attempts,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({
         evaluationAttemptId: attemptId,
         evaluationId: currentEvaluation.evaluationId,
@@ -158,6 +164,10 @@ export async function evaluateSampling(
     return { ...input.context, evaluation: currentEvaluation };
   } catch (error) {
     const details = describeAgentError(error);
+    const stored = await dependencies.store.getEvaluation(currentEvaluation.evaluationId);
+    if (!stored) throw error;
+    currentEvaluation = stored;
+    if (currentEvaluation.status.status === "succeeded") return { ...input.context, evaluation: currentEvaluation };
     await persistEvaluation({
       ...currentEvaluation,
       evaluator: agentConfig,

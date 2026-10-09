@@ -75,6 +75,7 @@ export interface EvalRuntime {
   start(request: StartRunRequest): Promise<RunHandle>;
   evaluate(request: EvaluateRequest): Promise<RunHandle>;
   pipeline(request: PipelineRequest): Promise<RunHandle>;
+  resume(runId: string): Promise<void>;
   getRun(runId: string): Promise<RunSnapshot>;
   getSampling(samplingId: string): Promise<SamplingSnapshot>;
   getEvaluation(evaluationId: string): Promise<EvaluationRecord>;

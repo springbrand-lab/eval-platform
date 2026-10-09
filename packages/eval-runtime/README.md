@@ -11,9 +11,10 @@
 - `listDatasets()`
 - `listData()`
 - `listSamples()`
-- `start()`：只启动被评估 Agent；
-- `evaluate()`：只评估已有执行结果；
-- `pipeline()`：在同一批 Sampling 上顺序编排执行和评估，不创建独立的 Pipeline 实体；
+- `start()`：持久化被评估 Agent 的执行 Run；
+- `evaluate()`：持久化已有执行结果的独立评估 Run；
+- `pipeline()`：持久化执行加评估的 Run，不创建独立的 Pipeline 实体；
+- `resume(runId)`：从持久化 Run、Sampling、Evaluation 和 Attempt 事实继续运行；
 - `getRun()`：读取项目、阶段、数据、样本、采样和执行状态；
 - `getSampling()`：读取单次采样的执行事实；
 - `getEvaluation()` / `listEvaluations()`：读取独立的评估记录。
@@ -33,8 +34,8 @@ src/
 │   └── index.ts             # Harness 子包入口
 ├── runtime/
 │   ├── model.ts             # 控制面、Catalog 和临时 Sampling Context
-│   ├── index.ts             # API 控制面和阶段编排入口
-│   ├── agent-lifecycle.ts   # Agent ensure、提交、终态推送、校准和重试
+│   ├── index.ts             # Run 入库、断点续跑和阶段编排
+│   ├── agent-lifecycle.ts   # Agent ensure、提交、终态校准、重试和 Attempt 恢复
 │   ├── execution.ts         # Subject 执行、初始数据、产物和完整轨迹
 │   ├── evaluation.ts        # Evaluation Agent、输入复制和评估输出
 │   ├── store.ts             # 原子持久化端口、同一记录写入校准与重试
@@ -48,6 +49,8 @@ src/
 四个顶层包及其内部文件均保持在当前仓库中；内部目录是模块，不是新的 workspace package。
 
 配置、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。`RuntimeStore` 是持久化端口，实际实现由 API/DO/数据库层注入；Run、Sampling、EvaluationRecord 和本次生效配置快照的聚合写入必须由 Store 在一个持久化边界内原子完成。
+
+三个启动入口只原子提交运行事实并返回 `RunHandle`，不在请求进程里执行 Agent。应用层唤醒单实例执行器调用 `resume(runId)`；恢复时使用 Run 已保存的生效配置和 Sample 引用，跳过已完成的阶段，并按 Attempt 原 `submissionId`、操作类型和幂等键向 SP 校准。已完成 Agent 的资源或产物保存失败只补收尾，不重新提交或重启。进程中断后遗留的未完成阶段由执行器接手；已处理且重试决策拒绝的失败写为 `failed`，定时扫描不构成无限次的隐式重试。`RuntimeRecoveryStore` 仅供应用扫描未完成 Run，Run 当前状态仍只从子记录推导。
 
 `ExecutionConfig` 是完整的执行方案，包含 Dataset、可选 Sample 子集、Sampling 次数、Subject Harness、执行并发和重试策略。`EvaluationConfig` 包含 Evaluation Harness、评估并发和重试策略。`PipelineConfig` 只组合一个 ExecutionConfig 和一个 EvaluationConfig，不是新的 Runtime 阶段。Config ID 由配置创建函数自动生成；实际运行请求只引用 `executionConfigId`、`evaluationConfigId` 或 `pipelineConfigId`，不再重复携带这些配置字段。`ConfigResolver` 在启动前统一读取、校验和归一化配置，输出带明确默认值的 `Resolved*Config`；Run 同时保存本次实际生效的不可变配置快照，不引入 version。SP Harness 的 `runtime` 参数会继续传入 Agent 创建、素材准备、提交、状态等待/校准、产物收集和评估输入准备；当前 Runtime 对未实现的 Remote Harness 明确报错，不会丢弃 `runOptions`。
 
@@ -70,7 +73,7 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
 11. `RuntimeRunRecord` 只保存不可变的阶段范围 `phases`，不保存当前阶段或 Run 状态；`RunSnapshot.phase/status` 由 `getRun()` 根据关联 Sampling 即时推导，是查询投影而不是第二份权威状态。单独执行范围为 `["execution"]`，单独评估为 `["evaluation"]`，联跑为 `["execution", "evaluation"]`；没有 `pipeline` 阶段或 Run kind。
 12. 联跑刚创建且所有 Execution Sampling 仍为 `queued` 时，Run 也必须是 `queued`。执行尚未结束时当前阶段为 `execution`；执行结束且存在成功 Sampling 后当前阶段为 `evaluation`，交接等待不能提前显示成功，成功 Sampling 的评估全部结束前 Run 仍是运行态。执行失败的 Sampling 不启动评估 Agent，其 EvaluationRecord 标记为 `cancelled`。
 13. `SamplingState` 只保存单次执行状态，不保存评估结果、`Sample`、JSON、初始 Session 引用、初始素材引用或 metadata；评估由独立 `EvaluationRecord` 通过 `samplingId` 关联。
-14. 执行使用临时 `RuntimeSamplingContext`，评估使用临时 `RuntimeEvaluationContext`，二者都不能整体交给 Store。独立评估先通过 `RuntimeCatalog.getSample()` 按不同 Sample ID 批量关联输入，再原子提交新的 EvaluationRecord；Pipeline 直接沿用执行阶段已关联的输入。输入缺失或返回的 Sample ID 不匹配时，不清除已有评估结果，也不启动新评估 Agent。
+14. 执行使用临时 `RuntimeSamplingContext`，评估使用临时 `RuntimeEvaluationContext`，二者都不能整体交给 Store。独立评估先通过 `RuntimeCatalog.getSample()` 按不同 Sample ID 批量关联输入，再原子提交新的 EvaluationRecord；恢复时按持久化 Sample ID 重建这些临时 Context。输入缺失或返回的 Sample ID 不匹配时，不清除已有评估结果，也不启动新评估 Agent。
 15. `getSampling()` 返回扁平的 `SamplingSnapshot`，只复制公开的 Sampling 字段，不暴露 Store 包装结构、`Sample` 或 Runtime 临时对象。
 16. `start()` 只接收项目和 `executionConfigId`；`evaluate()` 只接收项目、Sampling IDs 和 `evaluationConfigId`；`pipeline()` 只接收项目和 `pipelineConfigId`。Dataset 和 Sampling 次数由 ExecutionConfig 决定，评估 Agent 由 EvaluationConfig 决定。
 17. `Sample` 使用 `{ sampleId, data: Data }`，平台样本身份与完整业务 Data 分开，不兼容旧的扁平结构。`Sample.data.userPrompt` 必填且不能为空白，作为当前任务原样发送；其他 JSON 业务字段通过 `materializeInitialData().data` 完整交给 SP，只去除 Data 的平台 `dataId`，业务 `data.sampleId` 不覆盖、不删除。`initialSession` 和 `initialMaterials` 都可省略；提供时分别使用外部 `bundleId + sessionId`、`bundleId + materialId`，两个 ID 必须齐全，Runtime 不生成资源 ID。Session 正文不进入 Dataset、Sample、Sampling 或执行 prompt。SP 公开能力将素材与 Session 副本落入目标 DO 的存储，由所选框架加载并重建 Context；Runtime 等准备完成后才发送 `userPrompt`，不自己解析 Session、拼接消息或把扩展数据包成新 prompt。
@@ -79,7 +82,7 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
 20. 每次实际提交的 Attempt 在投递前持久化 `resources: pending`，其中包含目标 `submissionId` 和本次提交/重启的准确幂等键。终态或投递/等待失败后通过公开 `collectAgentResources()` 收集资源，并先保存到对应 Attempt，再收集产物、决定是否重启或发布阶段终态。失败、取消和重启前的费用/Token/工具/Turn 都保留；未提交任务的创建/初始化失败不假装产生资源事实。
 21. 资源快照只包含本次操作及其子 Agent 的新工作，不包含导入历史或复制的 Subject 证据。`usageEvents`、`telemetryEvents`、`billingSettlements` 是 SP 原始 JSON 记录；未知字段、缺失字段、null、顺序、重复事件、父子关联与来源数值全部保留。Runtime 只校验归属和无损可序列化性，不解析费用/Token、不抽取工具/Turn、不归一化、不去重、不计算统计、不新增汇总字段。源 `coverage/finalized` 也原样保存，由 Metric 判断是否适合统计。
 22. 资源读取单独使用 `resources` 重试预算，与产物收集和 Agent 重启无关。采集状态只有 `pending | collected | failed`；`collected` 表示快照已保存，不表示来源完整。读取失败不能覆盖原 Agent 错误或使成功产物变成失败。Store 将 Attempt 与原始资源快照原子保存；查询从持久化记录读取，Metrics 不直接访问 SP/DO/私有数据库，而是读取 Runtime 原始内容进行解析、去重和所有统计。完整轨迹和大产物继续存引用，资源事件不构成另一份 Workspace/Session 副本。
-23. 后续 Attempt 状态补丁基于当前执行上下文的最新 Attempt，而不是调用方的旧副本；原始快照写入已提交但响应丢失时，失败处理不能用旧 `pending` 覆盖它。协调器兜底错误处理也读取 Store 中的最新评估记录再更新状态，不以启动时的 `queued` 副本重写整个记录。查询只读取持久化结果，不从执行上下文的内存副本返回数据。
+23. 后续 Attempt 状态补丁基于当前执行上下文的最新 Attempt，而不是调用方的旧副本；原始快照写入已提交但响应丢失时，失败处理不能用旧 `pending` 覆盖它。运行时收尾异常先读取 Store 的最新事实，不以启动时的 `queued` 副本重写整个记录，也不把未确认的 Agent 操作误判为失败。查询只读取持久化结果，不从执行上下文的内存副本返回数据。
 24. 一旦观察到 Agent 终态，立即固定 Attempt 的状态和完成时间，并先保存终态再收集资源，避免资源保存异常抹掉已确认事实。Agent 错误属于 Attempt，Runtime 收尾失败属于执行/评估阶段的 `lastError`，不得把已完成 Agent 记为失败。记录写入使用独立 `persistence` 重试，与生命周期共用本阶段的 RetryController：同一份记录固定后，保存失败先读取最新持久化事实确认提交；未确认且策略允许时只重写同一份记录，不能重新采集已有快照/产物、创建 Attempt、提交或重启 Agent。确认不依赖 JSON 对象键顺序，但不忽略数组顺序、重复记录或 null。次数和退避由注入策略决定，不新增默认政策。
 25. Pipeline 中失败执行的评估取消独立收尾，不占用评估 Agent 并发槽、不成为成功样本评估的门槛。取消保存失败只校准/重试对应 EvaluationRecord；仍失败时把收尾错误写入该记录，已经保存的取消事实不降级。无法连错误记录也保存时，经 `EvalRuntimeDependencies.onError(error)` 上报带 Evaluation/Sampling 身份的错误；未注入回调时默认使用 `console.error`。不吞错、不把错误记在其他样本上，也不因取消收尾异常调用整批失败处理。
 

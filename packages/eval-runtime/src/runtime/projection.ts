@@ -2,7 +2,7 @@ import type { EvaluationRecord, RunPhase, RunPhases, RunSnapshot, SamplingStatus
 import type { SamplingSnapshot } from "./model.js";
 import type { RuntimeRunRecord, SamplingState } from "./store.js";
 
-function isPendingStatus(status: SamplingStatus): boolean {
+export function isPendingStatus(status: SamplingStatus): boolean {
   return status === "queued"
     || status === "starting"
     || status === "running"

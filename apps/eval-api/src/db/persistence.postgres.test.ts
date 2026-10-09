@@ -6,8 +6,8 @@ import { RuntimeRunIdentityConflictError, type RuntimeRunRecord } from "@eval-pl
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createEvalDb, createPostgresCatalog, createPostgresDatasetStore, createPostgresMetricsSource, createPostgresRuntimeStore } from "../index.js";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createEvalDb, createPostgresCatalog, createPostgresDatasetStore, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, startEvalRunWorker } from "../index.js";
 
 const connection = process.env.DATABASE_URL;
 const subjectAgent = { ownerUserId: "owner", userAgentId: "subject" };
@@ -85,6 +85,7 @@ async function testDatabase(url: string) {
   }
   return {
     db,
+    connectionString: target.toString(),
     async destroy() {
       await pool.end();
       await dropDatabase();
@@ -249,6 +250,131 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await runtime.getSampling(good.samplingId)).toBeNull();
     expect(await runtime.getSampling(bad.samplingId)).toBeNull();
     expect(await catalog.getSample(sample.sampleId)).not.toBeNull();
+  });
+
+  it("notifies committed Runs and finds unfinished execution and evaluation without a Run status column", async () => {
+    const { catalog, runtime, project, dataset, sample } = await setup();
+    const listener = await database.db.$client.connect();
+    const observed: string[] = [];
+    const onNotification = (message: { channel: string; payload?: string | undefined }) => {
+      if (message.channel === "eval_run_created" && message.payload) observed.push(message.payload);
+    };
+    listener.on("notification", onNotification);
+    try {
+      await listener.query("LISTEN eval_run_created");
+      const first = makeSampling(project.projectId, sample.sampleId);
+      const second = makeSampling(project.projectId, sample.sampleId);
+      const firstRun = makeRun(project.projectId, first, dataset.datasetId);
+      const secondRun = makeRun(project.projectId, second, dataset.datasetId);
+      await runtime.createRunWithSamplings(firstRun, [first], []);
+      await runtime.createRunWithSamplings(secondRun, [second], []);
+      await vi.waitFor(() => expect(observed).toEqual(expect.arrayContaining([firstRun.runId, secondRun.runId])));
+
+      const ids = [firstRun.runId, secondRun.runId].sort();
+      expect(await runtime.listRecoverableRunIds()).toEqual(ids);
+      expect(await runtime.listRecoverableRunIds(undefined, 1)).toEqual(ids.slice(0, 1));
+      expect(await runtime.listRecoverableRunIds(ids[0], 1)).toEqual(ids.slice(1));
+
+      const succeeded = { ...first, execution: { status: "succeeded" as const } };
+      await runtime.updateSampling(succeeded);
+      const judge = makeEvaluation(first.samplingId);
+      const evaluationRun: RuntimeRunRecord = {
+        runId: crypto.randomUUID(), projectId: project.projectId,
+        samplingIds: [first.samplingId], evaluationIds: [judge.evaluationId],
+        phases: ["evaluation"], config: evaluationConfig,
+      };
+      await runtime.createRunWithSamplings(evaluationRun, [succeeded], [judge]);
+      expect(await runtime.listRecoverableRunIds()).toEqual([secondRun.runId, evaluationRun.runId].sort());
+
+      await runtime.updateSampling({ ...second, execution: { status: "failed" } });
+      await runtime.updateEvaluation({ ...judge, status: { status: "succeeded" } });
+      expect(await runtime.listRecoverableRunIds()).toEqual([]);
+    } finally {
+      listener.removeListener("notification", onNotification);
+      await listener.query("UNLISTEN eval_run_created");
+      listener.release();
+    }
+  });
+
+  it("delivers Run notifications to the application worker subscription", async () => {
+    const { project, dataset, sample, runtime } = await setup();
+    const received: string[] = [];
+    const onError = vi.fn();
+    const onConnected = vi.fn();
+    const subscription = await createPostgresRunNotifications(database.connectionString).subscribe({
+      onRunId: (runId) => received.push(runId), onConnected, onError,
+    });
+    try {
+      const sampling = makeSampling(project.projectId, sample.sampleId);
+      const run = makeRun(project.projectId, sampling, dataset.datasetId);
+      await runtime.createRunWithSamplings(run, [sampling], []);
+      await vi.waitFor(() => expect(received).toEqual([run.runId]));
+      expect(onConnected).toHaveBeenCalledOnce();
+      expect(onError).not.toHaveBeenCalled();
+    } finally {
+      await subscription.close();
+    }
+  });
+
+  it("reconnects the Run listener after its PostgreSQL session is terminated", async () => {
+    const { project, dataset, sample, runtime } = await setup();
+    const received: string[] = [];
+    const onConnected = vi.fn();
+    const onError = vi.fn();
+    const listenerName = `eval_run_listener_${crypto.randomUUID()}`;
+    const listenerUrl = new URL(database.connectionString);
+    listenerUrl.searchParams.set("application_name", listenerName);
+    const subscription = await createPostgresRunNotifications(listenerUrl.toString()).subscribe({
+      onRunId: (runId) => received.push(runId), onConnected, onError,
+    });
+    try {
+      const result = await database.db.$client.query<{ stopped: boolean }>(
+        "SELECT pg_terminate_backend(pid) AS stopped FROM pg_stat_activity WHERE application_name = $1",
+        [listenerName],
+      );
+      expect(result.rows).toEqual([{ stopped: true }]);
+      await vi.waitFor(() => expect(onConnected).toHaveBeenCalledTimes(2), { timeout: 5_000 });
+
+      const sampling = makeSampling(project.projectId, sample.sampleId);
+      const run = makeRun(project.projectId, sampling, dataset.datasetId);
+      await runtime.createRunWithSamplings(run, [sampling], []);
+      await vi.waitFor(() => expect(received).toEqual([run.runId]));
+    } finally {
+      await subscription.close();
+    }
+  });
+
+  it("recovers an admitted Run on startup and executes the next Run from its notification", async () => {
+    const { project, dataset, sample, runtime } = await setup();
+    const first = makeSampling(project.projectId, sample.sampleId);
+    const firstRun = makeRun(project.projectId, first, dataset.datasetId);
+    await runtime.createRunWithSamplings(firstRun, [first], []);
+
+    const resume = vi.fn(async (runId: string) => {
+      const run = await runtime.getRun(runId);
+      if (!run) throw new Error(`Unknown Run ${runId}`);
+      for (const samplingId of run.samplingIds) {
+        const sampling = await runtime.getSampling(samplingId);
+        if (!sampling) throw new Error(`Unknown Sampling ${samplingId}`);
+        await runtime.updateSampling({ ...sampling, execution: { status: "succeeded" } });
+      }
+    });
+    const worker = await startEvalRunWorker({
+      runtime: { resume }, store: runtime,
+      notifications: createPostgresRunNotifications(database.connectionString),
+      scanIntervalMs: 60_000,
+    });
+    try {
+      await vi.waitFor(() => expect(resume).toHaveBeenCalledWith(firstRun.runId));
+      const second = makeSampling(project.projectId, sample.sampleId);
+      const secondRun = makeRun(project.projectId, second, dataset.datasetId);
+      await runtime.createRunWithSamplings(secondRun, [second], []);
+      await vi.waitFor(() => expect(resume).toHaveBeenCalledWith(secondRun.runId));
+      await vi.waitFor(async () => expect(await runtime.listRecoverableRunIds()).toEqual([]));
+      expect(resume).toHaveBeenCalledTimes(2);
+    } finally {
+      await worker.close();
+    }
   });
 
   it("retains raw execution and every independent re-evaluation across store instances", async () => {

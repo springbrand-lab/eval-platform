@@ -43,19 +43,24 @@ export async function executeSampling(
   const retryController = dependencies.createRetryController(input.retryPolicy);
 
   const persist = async (sampling: Sampling): Promise<void> => {
-    current = sampling;
     await persistRuntimeRecord({
-      record: current,
+      record: sampling,
       write: (record) => dependencies.store.updateSampling(record),
       read: () => dependencies.store.getSampling(sampling.samplingId),
       retryController,
       sleep: dependencies.sleep,
     });
+    current = sampling;
   };
 
   try {
+    if (!sample.data || typeof sample.data !== "object" || Array.isArray(sample.data)) {
+      throw new AgentOperationError("Sample data must be an object", false, "network");
+    }
     const { dataId: _dataId, ...data } = sample.data;
-    const initialData = dataInputSchema.parse(data);
+    const input = dataInputSchema.safeParse(data);
+    if (!input.success) throw new AgentOperationError(input.error.message, false, "network");
+    const initialData = input.data;
     const submissionId = current.subjectSubmissionId ?? dependencies.idFactory();
     if (current.subjectSubmissionId === undefined) {
       await persist({ ...current, subjectSubmissionId: submissionId });
@@ -70,6 +75,7 @@ export async function executeSampling(
       harnessConfig: subjectHarness,
       prompt: initialData.userPrompt,
       retryController,
+      attempts: current.executionAttempts,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({
         executionAttemptId: attemptId,
         samplingId: current.samplingId,
@@ -128,6 +134,10 @@ export async function executeSampling(
     return { state: current, sample };
   } catch (error) {
     const details = describeAgentError(error);
+    const stored = await dependencies.store.getSampling(current.samplingId);
+    if (!stored) throw error;
+    current = stored;
+    if (current.execution.status === "succeeded") return { state: current, sample };
     await persist(withExecutionStatus(current, "failed", details.message));
     return { state: current, sample };
   }

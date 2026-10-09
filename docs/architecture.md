@@ -102,9 +102,9 @@ Subject Chat / Workspace
 
 ## 生命周期语义
 
-- `start()` 只创建并运行 Subject Sampling；
-- `evaluate()` 只消费已有 `Sampling` 的成功执行结果；
-- `pipeline()` 只是两个阶段的编排，不是第三种执行模型；
+- `start()`、`evaluate()`、`pipeline()` 只原子提交对应 Run 和关联记录，随后返回；
+- 单实例执行器按通知和恢复扫描调用 `resume(runId)`；`pipeline` 只顺序编排执行和评估，不是第三种阶段；
+- 恢复从已保存的 Run 配置和 Attempt 幂等键继续，Agent 已完成时只补收集与保存；
 - `samplingCount` 创建多个 Sampling；
 - `executionConcurrency` 是执行阶段同时启动的最大 DO 数量，一个 Subject Agent 对应一个 DO；
 - `evaluationConcurrency` 是评估阶段同时启动的最大 DO 数量，一个 Evaluation Agent 对应一个 DO；

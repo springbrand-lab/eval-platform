@@ -39,7 +39,6 @@ import { persistRuntimeRecord, RuntimeRunIdentityConflictError } from "./store.j
 import {
   errorMessage,
   requireSpHarness,
-  withExecutionStatus,
 } from "./agent-lifecycle.js";
 import {
   executeSampling,
@@ -54,7 +53,7 @@ import {
   type RetryController,
 } from "./retry.js";
 import { createAgentScheduler, type AgentScheduler } from "./scheduler.js";
-import { currentRunPhase, toRunSnapshot, toSamplingSnapshot } from "./projection.js";
+import { isPendingStatus, toRunSnapshot, toSamplingSnapshot } from "./projection.js";
 
 type RuntimeStageDependencies = ExecutionStageDependencies & EvaluationStageDependencies;
 
@@ -148,11 +147,6 @@ class RuntimeCoordinator implements EvalRuntime {
     );
 
     const admission = await this.persistNewRun(run, records, []);
-    if (!admission.created) return this.runHandle(admission.run);
-
-    void this.runExecutionPhase(contexts, config).catch((error: unknown) => {
-      void this.failRun(admission.run, error).catch(() => undefined);
-    });
     return this.runHandle(admission.run);
   }
 
@@ -173,12 +167,6 @@ class RuntimeCoordinator implements EvalRuntime {
     const evaluations = contexts.map(({ state }) => (
       this.createEvaluationRecord(state.samplingId, evaluationAgent)
     ));
-    const evaluationContexts = contexts.map((context, index) => ({
-      sampling: context.state,
-      evaluation: evaluations[index]!,
-      sample: context.sample,
-    }));
-
     const run = this.createRun(
       request.projectId,
       records.map(({ samplingId }) => samplingId),
@@ -187,11 +175,6 @@ class RuntimeCoordinator implements EvalRuntime {
       { operation: "evaluation", evaluation: config },
     );
     const admission = await this.#store.createRunWithSamplings(run, records, evaluations);
-    if (!admission.created) return this.runHandle(admission.run);
-
-    void this.runEvaluationPhase(evaluationContexts, config).catch((error: unknown) => {
-      void this.failRun(admission.run, error).catch(() => undefined);
-    });
     return this.runHandle(admission.run);
   }
 
@@ -231,12 +214,55 @@ class RuntimeCoordinator implements EvalRuntime {
     );
 
     const admission = await this.persistNewRun(run, records, evaluations);
-    if (!admission.created) return this.runHandle(admission.run);
-
-    void this.runPipeline(contexts, evaluations, config).catch((error: unknown) => {
-      void this.failRun(admission.run, error).catch(() => undefined);
-    });
     return this.runHandle(admission.run);
+  }
+
+  async resume(runId: string): Promise<void> {
+    const run = await this.#store.getRun(runId);
+    if (!run) throw new Error(`Unknown run ${runId}`);
+
+    let samplings = await this.loadSamplingRecords(run.samplingIds);
+    if (run.config.operation !== "evaluation") {
+      const unfinished = samplings.filter(({ execution }) => isPendingStatus(execution.status));
+      if (unfinished.length > 0) {
+        const contexts = await this.loadSamplingContexts(unfinished, run.projectId);
+        await this.runExecutionPhase(contexts, run.config.execution);
+        samplings = await this.loadSamplingRecords(run.samplingIds);
+      }
+      if (samplings.some(({ execution }) => isPendingStatus(execution.status))) return;
+    }
+
+    if (run.config.operation === "execution") return;
+
+    const evaluationConfig = run.config.evaluation;
+    const evaluations = await this.loadEvaluationRecords(run.evaluationIds);
+    const samplingById = new Map(samplings.map((sampling) => [sampling.samplingId, sampling]));
+    const toEvaluate = evaluations.filter((evaluation) => (
+      isPendingStatus(evaluation.status.status)
+      && samplingById.get(evaluation.samplingId)?.execution.status === "succeeded"
+    ));
+    const toCancel = run.config.operation === "pipeline"
+      ? evaluations.filter((evaluation) => (
+          isPendingStatus(evaluation.status.status)
+          && samplingById.get(evaluation.samplingId)?.execution.status !== "succeeded"
+        ))
+      : [];
+    const contexts = await this.loadSamplingContexts(
+      toEvaluate.map((evaluation) => samplingById.get(evaluation.samplingId)!),
+      run.projectId,
+    );
+    const evaluationContexts = contexts.map((context, index) => ({
+      sampling: context.state,
+      evaluation: toEvaluate[index]!,
+      sample: context.sample,
+    }));
+
+    const settlements = await Promise.allSettled([
+      this.runEvaluationPhase(evaluationContexts, evaluationConfig),
+      ...toCancel.map((evaluation) => this.cancelEvaluation(evaluation, evaluationConfig)),
+    ]);
+    const errors = settlements.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+    if (errors.length > 0) throw new AggregateError(errors, "Evaluation phase could not persist its progress");
   }
 
   async getRun(runId: string): Promise<RunSnapshot> {
@@ -440,74 +466,41 @@ class RuntimeCoordinator implements EvalRuntime {
   private async runExecutionPhase(
     contexts: readonly RuntimeSamplingContext[],
     config: ResolvedExecutionConfig,
-  ): Promise<readonly RuntimeSamplingContext[]> {
+  ): Promise<void> {
     const scheduler = this.scheduler(config.executionConcurrency);
-    const results = await scheduler.run(contexts.map((context) => async () => {
+    const errors: unknown[] = [];
+    await scheduler.run(contexts.map((context) => async () => {
       try {
-        return await executeSampling(this.#stageDependencies, {
+        await executeSampling(this.#stageDependencies, {
           context,
           harnessConfig: config.harness,
           retryPolicy: config.retryPolicy,
         });
       } catch (error) {
-        return {
-          ...context,
-          state: await this.markSamplingFailed(context.state.samplingId, error),
-        };
+        errors.push(error);
       }
     }));
-    return results;
+    if (errors.length > 0) throw new AggregateError(errors, "Execution phase could not persist its progress");
   }
 
   private async runEvaluationPhase(
     contexts: readonly RuntimeEvaluationContext[],
     config: ResolvedEvaluationConfig,
-  ): Promise<readonly RuntimeEvaluationContext[]> {
+  ): Promise<void> {
     const scheduler = this.scheduler(config.evaluationConcurrency);
-    const results = await scheduler.run(contexts.map((context) => async () => {
+    const errors: unknown[] = [];
+    await scheduler.run(contexts.map((context) => async () => {
       try {
-        return await evaluateSampling(this.#stageDependencies, {
+        await evaluateSampling(this.#stageDependencies, {
           context,
           harnessConfig: config.evaluationHarness,
           retryPolicy: config.retryPolicy,
         });
       } catch (error) {
-        return {
-          ...context,
-          evaluation: await this.markEvaluationFailed(context.evaluation, error),
-        };
+        errors.push(error);
       }
     }));
-    return results;
-  }
-
-  private async runPipeline(
-    contexts: readonly RuntimeSamplingContext[],
-    evaluations: readonly EvaluationRecord[],
-    config: ResolvedPipelineConfig,
-  ): Promise<void> {
-    const executedContexts = await this.runExecutionPhase(contexts, config.execution);
-    const evaluationBySamplingId = new Map(
-      evaluations.map((evaluation) => [evaluation.samplingId, evaluation]),
-    );
-    const evaluationContexts = executedContexts.map((context) => {
-      const evaluation = evaluationBySamplingId.get(context.state.samplingId);
-      if (!evaluation) {
-        throw new Error(`Missing evaluation for sampling ${context.state.samplingId}`);
-      }
-      return {
-        sampling: context.state,
-        evaluation,
-        sample: context.sample,
-      };
-    });
-    await Promise.all([
-      this.runEvaluationPhase(evaluationContexts.filter(({ sampling }) => (
-        sampling.execution.status === "succeeded"
-      )), config.evaluation),
-      ...evaluationContexts.filter(({ sampling }) => sampling.execution.status !== "succeeded")
-        .map(({ evaluation }) => this.cancelEvaluation(evaluation, config.evaluation)),
-    ]);
+    if (errors.length > 0) throw new AggregateError(errors, "Evaluation phase could not persist its progress");
   }
 
   private async cancelEvaluation(
@@ -558,58 +551,6 @@ class RuntimeCoordinator implements EvalRuntime {
     return createAgentScheduler({ maxConcurrentDos });
   }
 
-  private async markSamplingFailed(
-    samplingId: string,
-    error: unknown,
-  ): Promise<SamplingState> {
-    const current = await this.#store.getSampling(samplingId);
-    if (!current) throw new Error(`Unknown sampling ${samplingId}`);
-    const failed = withExecutionStatus(current, "failed", errorMessage(error));
-    await this.#store.updateSampling(failed);
-    return failed;
-  }
-
-  private async failRun(run: RuntimeRunRecord, error: unknown): Promise<void> {
-    const records = await this.loadSamplingRecords(run.samplingIds);
-    const phase = currentRunPhase(records, run.phases);
-    if (phase === "execution") {
-      await Promise.all(records.map(async (state) => {
-        if (state.execution.status === "succeeded") return;
-        await this.#store.updateSampling(
-          withExecutionStatus(state, "failed", errorMessage(error)),
-        );
-      }));
-      return;
-    }
-
-    const evaluations = await this.loadEvaluationRecords(run.evaluationIds);
-    const samplingById = new Map(
-      records.map((state) => [state.samplingId, state]),
-    );
-    await Promise.all(evaluations.map(async (evaluation) => {
-      const sampling = samplingById.get(evaluation.samplingId);
-      if (!sampling || sampling.execution.status !== "succeeded") return;
-      if (evaluation.status.status === "succeeded") return;
-      await this.#store.updateEvaluation({
-        ...evaluation,
-        status: { status: "failed", lastError: errorMessage(error) },
-      });
-    }));
-  }
-
-  private async markEvaluationFailed(
-    evaluation: EvaluationRecord,
-    error: unknown,
-  ): Promise<EvaluationRecord> {
-    const current = await this.#store.getEvaluation(evaluation.evaluationId);
-    if (!current) throw new Error(`Unknown evaluation ${evaluation.evaluationId}`);
-    const failed = {
-      ...current,
-      status: { status: "failed", lastError: errorMessage(error) },
-    } satisfies EvaluationRecord;
-    await this.#store.updateEvaluation(failed);
-    return failed;
-  }
 }
 
 export type {
@@ -626,6 +567,7 @@ export type {
   RuntimeRunAdmission,
   RuntimeRunRequestIdentity,
   RuntimeRunRecord,
+  RuntimeRecoveryStore,
   SamplingState,
   RuntimeStore,
 } from "./store.js";

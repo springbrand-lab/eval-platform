@@ -1,7 +1,7 @@
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
-import type { RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
+import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
 import { RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, exists, gt, inArray, or, sql } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
 import { evaluations, runEvaluations, runs, runSamplings, samplings } from "./schema.js";
 
@@ -109,7 +109,7 @@ function validateAdmission(
   }
 }
 
-export function createPostgresRuntimeStore(db: EvalDb): RuntimeStore {
+export function createPostgresRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRecoveryStore {
   const findByIdentity = async (
     reader: RuntimeReader,
     identity: NonNullable<RuntimeRunRecord["requestIdentity"]>,
@@ -200,8 +200,33 @@ export function createPostgresRuntimeStore(db: EvalDb): RuntimeStore {
             runId: run.runId, evaluationId: judge.evaluationId, samplingId: judge.samplingId, position,
           })));
         }
+        await transaction.execute(sql`select pg_notify('eval_run_created', ${run.runId})`);
         return { run: structuredClone(run), created: true };
       });
+    },
+    async listRecoverableRunIds(afterRunId, limit = 100) {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+        throw new Error("Recovery page size must be between 1 and 1000");
+      }
+      const unfinished = ["queued", "starting", "running", "retrying"];
+      const executionPending = exists(db.select({ samplingId: runSamplings.samplingId })
+        .from(runSamplings)
+        .innerJoin(samplings, eq(runSamplings.samplingId, samplings.samplingId))
+        .where(and(
+          eq(runSamplings.runId, runs.runId),
+          inArray(sql<string>`${samplings.facts}->'execution'->>'status'`, unfinished),
+        )));
+      const evaluationPending = exists(db.select({ evaluationId: runEvaluations.evaluationId })
+        .from(runEvaluations)
+        .innerJoin(evaluations, eq(runEvaluations.evaluationId, evaluations.evaluationId))
+        .where(and(
+          eq(runEvaluations.runId, runs.runId),
+          inArray(sql<string>`${evaluations.facts}->'status'->>'status'`, unfinished),
+        )));
+      const rows = await db.select({ runId: runs.runId }).from(runs)
+        .where(and(afterRunId === undefined ? undefined : gt(runs.runId, afterRunId), or(executionPending, evaluationPending)))
+        .orderBy(runs.runId).limit(limit);
+      return rows.map(({ runId }) => runId);
     },
     async updateSampling(record) {
       const updated = await db.update(samplings).set({ facts: samplingFacts(record) })

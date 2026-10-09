@@ -59,6 +59,7 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   readonly harnessConfig: SpHarnessConfig;
   readonly prompt: string;
   readonly retryController: RetryController;
+  readonly attempts: readonly TAttempt[];
   readonly createAttempt: (input: {
     readonly attemptId: string;
     readonly attemptNumber: number;
@@ -95,10 +96,11 @@ class OutputCollectionError extends AgentOperationError {
     stage: AgentLifecycleStage,
     details: ReturnType<typeof describeAgentError>,
     cause: unknown,
+    retryable = details.retryable,
   ) {
     super(
       `${stage} output collection failed: ${details.message}`,
-      false,
+      retryable,
       details.failureKind,
       cause,
     );
@@ -207,80 +209,112 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
 ): Promise<AgentLifecycleResult<TOutput>> {
   const retryController = options.retryController;
   let handle: AgentHandle | undefined;
-  let prepared = false;
-  let restartRequested = false;
+  let attempt = options.attempts.at(-1);
 
-  for (let attemptNumber = 1; ; attemptNumber += 1) {
-    let attempt = options.createAttempt({
-      attemptId: dependencies.idFactory(),
-      attemptNumber,
-      startedAt: dependencies.now(),
-    });
-
-    await options.appendAttempt(attempt);
-    await options.setSamplingStatus(attemptNumber === 1 ? "starting" : "retrying");
-    let terminalPatch: AttemptPatch | undefined;
+  for (let attemptNumber = attempt?.attemptNumber ?? 1; ; attemptNumber += 1) {
+    const resuming = attempt !== undefined;
+    if (!attempt) {
+      attempt = options.createAttempt({
+        attemptId: dependencies.idFactory(),
+        attemptNumber,
+        startedAt: dependencies.now(),
+      });
+      await options.appendAttempt(attempt);
+      await options.setSamplingStatus(attemptNumber === 1 ? "starting" : "retrying");
+    }
+    let terminalPatch: AttemptPatch | undefined = attempt.completedAt === undefined
+      ? undefined
+      : { status: attempt.status, completedAt: attempt.completedAt };
 
     try {
+      if (attempt.completedAt && !attempt.resources) {
+        throw new AgentOperationError(attempt.error ?? "Agent failed before submission", false, "network");
+      }
+      if (attempt.submissionId && attempt.submissionId !== options.submissionId) {
+        throw new AgentOperationError("Attempt belongs to a different Agent submission", false, "network");
+      }
       if (!handle) {
         handle = await ensureAgentWithRetry(dependencies, options, retryController);
       }
 
-      attempt = await options.updateAttempt(attempt, {
-        submissionId: handle.submissionId,
-      });
-
-      if (!prepared) {
-        await prepareAgentWithRetry(dependencies, options, handle, retryController);
-        prepared = true;
+      if (!attempt.submissionId) {
+        attempt = await options.updateAttempt(attempt, { submissionId: handle.submissionId });
       }
 
-      const idempotencyKey = restartRequested
-        ? `${options.stage}:${options.samplingId}:restart:${attemptNumber}`
-        : `${options.stage}:${options.samplingId}`;
-      const resourceScope = { submissionId: handle.submissionId, idempotencyKey };
-      attempt = await options.updateAttempt(attempt, {
-        resources: { status: "pending", scope: resourceScope },
-      });
-      let terminal: AgentSubmission;
-      try {
-        const submission = await submitWithReconciliation(
-          dependencies,
-          options,
-          handle,
-          idempotencyKey,
-          restartRequested ? "restart" : "submission",
-          retryController,
-        );
-        restartRequested = false;
+      if (attemptNumber === 1 && !attempt.resources) {
+        await prepareAgentWithRetry(dependencies, options, handle, retryController);
+      }
 
-        terminal = isTerminal(submission)
-          ? submission
-          : await waitForTerminalWithRetry(
+      const idempotencyKey = attemptNumber === 1
+        ? `${options.stage}:${options.samplingId}`
+        : `${options.stage}:${options.samplingId}:restart:${attemptNumber}`;
+      const resourceScope = { submissionId: handle.submissionId, idempotencyKey };
+      const storedScope = attempt.resources?.status === "collected"
+        ? attempt.resources.snapshot.scope
+        : attempt.resources?.scope;
+      if (storedScope && (storedScope.submissionId !== resourceScope.submissionId
+        || storedScope.idempotencyKey !== resourceScope.idempotencyKey)) {
+        throw new AgentOperationError("Attempt resource scope does not match the submitted operation", false, "network");
+      }
+      if (!attempt.resources) {
+        attempt = await options.updateAttempt(attempt, {
+          resources: { status: "pending", scope: resourceScope },
+        });
+      }
+      const terminalAlreadyPersisted = attempt.completedAt !== undefined;
+      let terminal: AgentSubmission | undefined;
+      try {
+        if (attempt.completedAt) {
+          if (attempt.status === "completed") {
+            terminal = { status: "completed", normalizedStatus: "completed" };
+          } else {
+            const inspection = await inspectPersistedTerminalWithRetry(
+              dependencies, options, handle, idempotencyKey, retryController,
+            );
+            if (submissionStatus(inspection) !== attempt.status) {
+              throw new AgentOperationError("Agent operation disagrees with the persisted terminal status", false, "network");
+            }
+            terminal = inspection;
+          }
+        } else {
+          const inspected = resuming
+            ? await inspectUncertainOperation(dependencies.harness, handle, idempotencyKey, options.harnessConfig.runtime)
+            : undefined;
+          const submission = inspected ?? await submitWithReconciliation(
               dependencies,
               options,
               handle,
               idempotencyKey,
+              attemptNumber === 1 ? "submission" : "restart",
               retryController,
             );
-        const status = submissionStatus(terminal);
-        if (status === undefined) throw new Error(`${options.stage} submission has no terminal status`);
-        terminalPatch = {
-          status,
-          completedAt: dependencies.now(),
-          ...(isSuccessfulSubmission(terminal) ? {} : { error: submissionFailure(options.stage, terminal).message }),
-        };
-        attempt = await options.updateAttempt(attempt, terminalPatch);
+          terminal = isTerminal(submission)
+            ? submission
+            : await waitForTerminalWithRetry(
+                dependencies, options, handle, idempotencyKey, retryController,
+              );
+          const status = submissionStatus(terminal);
+          if (status === undefined) throw new Error(`${options.stage} submission has no terminal status`);
+          terminalPatch = {
+            status,
+            completedAt: dependencies.now(),
+            ...(isSuccessfulSubmission(terminal) ? {} : { error: submissionFailure(options.stage, terminal).message }),
+          };
+          attempt = await options.updateAttempt(attempt, terminalPatch);
+        }
       } finally {
-        const resources = await collectResourcesWithRetry(
-          dependencies,
-          options,
-          handle,
-          resourceScope,
-          retryController,
-        );
-        attempt = await options.updateAttempt(attempt, { ...terminalPatch, resources });
+        const terminalSaved = terminalPatch === undefined || attempt.completedAt !== undefined;
+        const needsResources = attempt.resources?.status === "pending"
+          || (attempt.resources?.status === "collected" && terminal !== undefined
+            && (!terminalAlreadyPersisted || !attempt.resources.snapshot.finalized));
+        if (terminalSaved && needsResources) {
+          const resources = await collectResourcesWithRetry(
+            dependencies, options, handle, resourceScope, retryController,
+          );
+          attempt = await options.updateAttempt(attempt, { ...terminalPatch, resources });
+        }
       }
+      if (!terminal) throw new Error(`${options.stage} submission has no confirmed status`);
       if (!isSuccessfulSubmission(terminal)) {
         throw submissionFailure(options.stage, terminal);
       }
@@ -289,17 +323,17 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
       const output = await collectOutputWithRetry(dependencies, options, handle, retryController);
       if (!options.isSuccessfulOutput(output)) {
         const failure = options.outputFailure(output);
-        throw new OutputCollectionError(options.stage, describeAgentError(failure), failure);
+        throw new OutputCollectionError(options.stage, describeAgentError(failure), failure, false);
       }
 
       return { handle, output };
     } catch (error) {
       const details = describeAgentError(error);
-      if (terminalPatch === undefined) {
+      if (terminalPatch === undefined && attempt.resources === undefined) {
         await options.updateAttempt(attempt, {
           status: "failed",
           completedAt: dependencies.now(),
-          ...(handle ? { submissionId: handle.submissionId } : {}),
+          ...(attempt.submissionId === undefined && handle ? { submissionId: handle.submissionId } : {}),
           error: details.message,
         });
       }
@@ -324,9 +358,9 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
         throw error;
       }
 
-      restartRequested = true;
       await options.setSamplingStatus("retrying", details.message);
       await dependencies.sleep(decision.backoffMs ?? 0);
+      attempt = undefined;
     }
   }
 }
@@ -565,6 +599,42 @@ async function inspectUncertainOperation(
     })) ?? undefined;
   } catch {
     return undefined;
+  }
+}
+
+async function inspectPersistedTerminalWithRetry<TAttempt extends AgentAttemptRecord, TOutput>(
+  dependencies: AgentLifecycleDependencies,
+  options: AgentLifecycleOptions<TAttempt, TOutput>,
+  handle: AgentHandle,
+  idempotencyKey: string,
+  retryController: RetryController,
+): Promise<AgentSubmission> {
+  for (let attemptNumber = 1; ; attemptNumber += 1) {
+    let details: ReturnType<typeof describeAgentError> = {
+      message: "Persisted Agent failure could not be confirmed",
+      retryable: true,
+      failureKind: "submission-timeout",
+    };
+    try {
+      const inspection = await dependencies.harness.inspectAgentOperation({
+        handle,
+        idempotencyKey,
+        ...(options.harnessConfig.runtime === undefined ? {} : { runtime: options.harnessConfig.runtime }),
+      });
+      if (inspection && isTerminal(inspection)) return inspection;
+    } catch (error) {
+      details = describeAgentError(error);
+      if (!details.retryable) throw error;
+    }
+
+    const decision = await retryController.decide({
+      operation: "status",
+      failureKind: details.failureKind,
+      attemptNumber,
+    });
+    if (!decision.shouldRetry) throw new SubmissionStatusError(options.stage, details, undefined);
+    await options.setSamplingStatus("retrying", details.message);
+    await dependencies.sleep(decision.backoffMs ?? 0);
   }
 }
 
