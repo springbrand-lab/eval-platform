@@ -39,7 +39,7 @@ eval-metrics: evaluators/ aggregation/ reporting/
 - `eval-evaluators`：评估器属于 `eval-metrics/evaluators` 子模块；
 - `eval-sp-adapter`：SP 边界直接属于 runtime 的 Harness seam；
 - `eval-process-adapter`：CC、Codex 等未来统一经过 Cloudflare Agent，不提前引入进程层；
-- `eval-storage`：Agent 项目素材由对应 Harness 的 Workspace 持有，评估运行记录的持久化由未来应用层决定；
+- `eval-storage`：Agent 项目素材由对应 Harness 的 Workspace 持有，评估运行记录由 `eval-api` 的 PostgreSQL 适配器持久化，不单独拆包；
 - `eval-agent-tools`：评估 Agent 工具属于 SP Agent Config 和 Runtime 能力，不在评估包内重建；
 - 独立轨迹树或线上流量评估包：轨迹从 SP 正式接口获取，线上评估不属于当前核心范围。
 
@@ -118,6 +118,5 @@ Subject Chat / Workspace
 
 1. 共享或发布 SP Agent Contracts，让评估平台直接消费 SP 的公开类型；
 2. 确认 SP 侧复制 Workspace 到另一个 Chat / Workspace 的正式写入接口；
-3. 确认评估运行记录由哪个应用层存储承载；
-4. 为 `RuntimeStore` 和 `MetricsSource` 接入应用层真实持久化/只读投影实现；Metric 的统计与四层查询不依赖这些适配器的部署。
-5. SP 的公开 Agent 创建边界需支持 `framework` 选择和绑定，并实际提供 Codex/CC 云端运行；评估侧只传递选择，不重建这些启动器。
+3. 把现有 `eval-api` PostgreSQL 迁移与存储适配器部署到目标环境，并补齐 Config 持久化、鉴权和 HTTP 控制面；
+4. SP 的公开 Agent 创建边界需支持 `framework` 选择和绑定，并实际提供 Codex/CC 云端运行；评估侧只传递选择，不重建这些启动器。

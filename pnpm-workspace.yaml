@@ -4,5 +4,5 @@ packages:
   - apps/eval-cli
   - packages/*
 
-onlyBuiltDependencies:
-  - esbuild
+allowBuilds:
+  esbuild: true

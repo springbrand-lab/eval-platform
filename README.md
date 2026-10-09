@@ -2,7 +2,7 @@
 
 `eval-platform` 是独立的内部评估平台。它负责编排数据、被评估 Agent、评估 Agent 和评估结果，不把评估逻辑放回 `sp-platform`。
 
-当前阶段已完成包边界、公共契约、`eval-dataset` 的数据管理、`eval-runtime` 的核心编排和 `eval-metrics` 的统计与四层查询实现；API、Web、CLI 和真实持久化/查询投影仍由应用层接入。
+当前阶段已完成包边界、公共契约、Dataset 管理、Runtime 编排、Metrics 四层查询，以及 `eval-api` 中的 PostgreSQL 持久化和一致性只读投影；HTTP API、Web、CLI 及 SP Harness 实际接线仍待实现。
 
 ## 当前包与应用骨架
 
@@ -40,7 +40,7 @@ eval-metrics/
 
 运行方案由 `eval-runtime/config` 管理：ExecutionConfig 绑定 Dataset、Sampling 次数和 Subject Agent，EvaluationConfig 绑定评估 Agent，PipelineConfig 组合两者。配置 ID 由代码生成；Runtime 启动请求只引用配置 ID，不重复传递 Dataset、Harness、并发或重试字段。
 
-`eval-metrics` 已实现状态、分数、Agent 耗时、费用、Token、模型请求、Turn、工具调用统计和四层展示模型。应用层通过只读 `MetricsSource` 提供一致的原始数据投影，不新增指标数据库或访问 SP 私有存储；实验对比与 API/Web/CLI 后续实现。
+`eval-metrics` 已实现状态、分数、Agent 耗时、费用、Token、模型请求、Turn、工具调用统计和四层展示模型。`eval-api` 实现了真实 `DatasetStore`、`RuntimeStore` 和只读 `MetricsSource`，从 PostgreSQL 原始事实一致性投影，不新增指标数据库或访问 SP 私有存储；实验对比和 HTTP/Web/CLI 后续实现。
 
 ## 运行层次
 
@@ -94,9 +94,9 @@ eval-contracts → eval-dataset → eval-runtime → eval-metrics
 - TypeScript `7.x`
 - ESM + Bundler module resolution
 
-工程约定与 `sp-platform` 对齐：每个 workspace 都有独立的 package metadata、TypeScript 配置、README、公共入口和 Vitest 入口；应用额外拥有自己的 `CONTEXT.md`。目前没有复制 SP 的 Cloudflare 部署、数据库或私有 Agent 实现。
+工程约定与 `sp-platform` 对齐：每个 workspace 都有独立的 package metadata、TypeScript 配置、README、公共入口和 Vitest 入口；应用额外拥有自己的 `CONTEXT.md`。`eval-api` 使用注入的 `pg` 连接池、Drizzle 和独立迁移；没有复制 SP 的 Cloudflare 部署、私有数据库客户端或 Agent 内核。可使用 `DATABASE_URL` 运行数据库集成测试。
 
-接入真实环境前，还需要确定 `@springbrand/agent-contracts` 的共享或发布方式、SP 侧把 Subject Workspace 复制到 Evaluation Workspace 的正式写入边界，以及 `RuntimeStore` 的 API/DO/数据库实现。
+接入真实环境前，还需要确定 `@springbrand/agent-contracts` 的共享或发布方式、SP 侧把 Subject Workspace 复制到 Evaluation Workspace 的正式写入边界，以及 Config 持久化、SP Harness、鉴权和 HTTP 控制面。
 
 ## CI
 

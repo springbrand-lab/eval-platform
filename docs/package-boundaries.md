@@ -62,7 +62,7 @@ JSON numbers must be finite, and integers must stay within JavaScript's safe-int
 
 The four internal files are `dataset/model.ts`, `dataset/serialization.ts`, `dataset/store.ts` and `dataset/index.ts`. Creation uses native UUIDs; editable-field updates are full replacements. Serialization has no persistence side effects. Import assigns missing IDs and submits a complete `DatasetSnapshot` through one atomic Store command. Existing IDs may be reused only for identical content; conflicting imports never overwrite or partially commit. Deleting a Dataset preserves shared Data; deleting referenced Data is rejected atomically. Export reads one consistent Store snapshot.
 
-`DatasetStore` is the application-injected PostgreSQL persistence port. Its implementation must follow SP's transaction, uniqueness and foreign-key constraint pattern, not add an eval-owned database client or rely on service-side prechecks. File bundles remain references to existing material capabilities; the package does not generate manifests/hashes, upload/download files, own an R2 binding or operate DO storage. Runtime/Harness owns materialization through public Workspace boundaries. SP's private workspace helpers are not copied or imported across repository source paths.
+`DatasetStore` is the application-injected PostgreSQL persistence port. Its implementation must follow SP's transaction, uniqueness and foreign-key constraint pattern, not instantiate a database client inside the Dataset package or rely on service-side prechecks. File bundles remain references to existing material capabilities; the package does not generate manifests/hashes, upload/download files, own an R2 binding or operate DO storage. Runtime/Harness owns materialization through public Workspace boundaries. SP's private workspace helpers are not copied or imported across repository source paths.
 
 ### `eval-runtime`
 
@@ -114,7 +114,9 @@ The implemented files are `evaluators/model.ts`, `evaluators/index.ts`, `aggrega
 
 ### `apps/eval-api`
 
-Future internal API entry point. It will expose runtime controls to Web, CLI and automation through authenticated internal routes.
+Internal control-plane composition boundary. Its PostgreSQL adapters implement the public `DatasetStore` and `RuntimeStore` ports, and one read-only `MetricsSource` over a consistent Dataset/Runtime snapshot. The adapters share a caller-injected Drizzle/`pg` connection; the application does not import SP private database code or read Durable Object storage. Database migrations, not process memory, enforce entity relationships, atomic Dataset imports and Run request-id/idempotency uniqueness. Runtime Sample input is stored once in the Catalog as a reference to global Data; Sampling/Evaluation keep their original raw facts, including all attempts and resources. A Run stores immutable scope and effective config, while its current progress is projected using the Runtime's own projection functions, never saved as a second status. Re-evaluating an existing Sampling creates a new EvaluationRecord and does not overwrite its execution.
+
+Projects have an ownerUserId; Dataset and Data are global and reusable between users and Projects. The Catalog stores Projects and Samples and delegates Agent listing to an injected SP-facing provider. `MetricsSource` limits reads to the requested Project and optionally selected Runs, limits both Sampling and Evaluation records, includes all independent re-evaluations when no Run is selected, and reads under a single repeatable-read, read-only transaction. Dataset membership is current global catalog state; no Dataset/Sample/Run version is introduced. Authentication, HTTP routes, SP Harness provisioning and Config storage remain separate follow-up work.
 
 ### `apps/eval-web`
 

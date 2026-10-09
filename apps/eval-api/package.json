@@ -6,15 +6,23 @@
   "scripts": {
     "build": "tsc --noEmit",
     "check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
+    "db:check": "drizzle-kit check --config=drizzle.config.ts",
+    "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts"
   },
   "dependencies": {
     "@eval-platform/eval-contracts": "workspace:*",
     "@eval-platform/eval-dataset": "workspace:*",
     "@eval-platform/eval-metrics": "workspace:*",
-    "@eval-platform/eval-runtime": "workspace:*"
+    "@eval-platform/eval-runtime": "workspace:*",
+    "drizzle-orm": "^0.45.2",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
+    "@types/node": "26.1.2",
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^0.31.10",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }

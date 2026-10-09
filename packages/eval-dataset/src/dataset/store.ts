@@ -33,7 +33,7 @@ export class DatasetIdentityConflictError extends Error {
 
 export class DataInUseError extends Error {
   constructor(readonly dataId: string) {
-    super(`Data is still referenced by a Dataset: ${dataId}`);
+    super(`Data is still referenced: ${dataId}`);
     this.name = "DataInUseError";
   }
 }
