@@ -22,6 +22,7 @@ import type {
   RetryableFailureKind,
 } from "./retry.js";
 import { validateResourceSnapshot } from "./resources.js";
+import { RuntimeRecordPersistenceError } from "./record-errors.js";
 
 export type AgentLifecycleStage = "execution" | "evaluation";
 
@@ -48,6 +49,7 @@ export interface AgentLifecycleDependencies {
   readonly idFactory: () => string;
   readonly now: () => string;
   readonly sleep: (milliseconds: number) => Promise<void>;
+  readonly onError?: (error: Error) => void;
 }
 
 export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOutput> {
@@ -261,7 +263,6 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
           resources: { status: "pending", scope: resourceScope },
         });
       }
-      const terminalAlreadyPersisted = attempt.completedAt !== undefined;
       let terminal: AgentSubmission | undefined;
       try {
         if (attempt.completedAt) {
@@ -306,12 +307,24 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
         const terminalSaved = terminalPatch === undefined || attempt.completedAt !== undefined;
         const needsResources = attempt.resources?.status === "pending"
           || (attempt.resources?.status === "collected" && terminal !== undefined
-            && (!terminalAlreadyPersisted || !attempt.resources.snapshot.finalized));
+            && !attempt.resources.snapshot.finalized);
         if (terminalSaved && needsResources) {
           const resources = await collectResourcesWithRetry(
             dependencies, options, handle, resourceScope, retryController,
           );
-          attempt = await options.updateAttempt(attempt, { ...terminalPatch, resources });
+          if (attempt.resources?.status === "collected" && resources.status === "failed") {
+            const reported = new Error(
+              options.stage + " resource refresh failed for sampling " + options.samplingId
+              + " and submission " + resourceScope.submissionId + ": " + resources.error,
+            );
+            try {
+              (dependencies.onError ?? console.error)(reported);
+            } catch (reportingError) {
+              console.error(reported, reportingError);
+            }
+          } else {
+            attempt = await options.updateAttempt(attempt, { ...terminalPatch, resources });
+          }
         }
       }
       if (!terminal) throw new Error(`${options.stage} submission has no confirmed status`);
@@ -328,6 +341,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
 
       return { handle, output };
     } catch (error) {
+      if (error instanceof RuntimeRecordPersistenceError) throw error;
       const details = describeAgentError(error);
       if (terminalPatch === undefined && attempt.resources === undefined) {
         await options.updateAttempt(attempt, {

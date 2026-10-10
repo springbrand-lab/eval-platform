@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EvaluationRecord } from "@eval-platform/eval-contracts";
 import type { RetryController } from "./retry.js";
-import { persistRuntimeRecord } from "./store.js";
+import { RuntimeRecordConflictError, persistRuntimeRecord } from "./store.js";
 
 function makeRecord(): EvaluationRecord {
   return {
@@ -41,7 +41,8 @@ function reverseObjectKeys(value: unknown): unknown {
 function persistenceInput(record = makeRecord()) {
   return {
     record,
-    write: vi.fn<(record: EvaluationRecord) => Promise<void>>(async () => undefined),
+    expected: structuredClone(record),
+    write: vi.fn<(record: EvaluationRecord, expected: EvaluationRecord) => Promise<void>>(async () => undefined),
     read: vi.fn<() => Promise<EvaluationRecord | null>>(async () => null),
     retryController: { decide: vi.fn<RetryController["decide"]>(async () => ({ shouldRetry: false })) },
     sleep: vi.fn(async (_milliseconds: number) => undefined),
@@ -52,9 +53,35 @@ describe("Runtime record persistence", () => {
   it("does not reconcile or retry an acknowledged write", async () => {
     const input = persistenceInput();
     await persistRuntimeRecord(input);
-    expect(input.write).toHaveBeenCalledExactlyOnceWith(input.record);
+    expect(input.write).toHaveBeenCalledExactlyOnceWith(input.record, input.expected);
     expect(input.write.mock.calls[0]![0]).not.toBe(input.record);
     expect(input.read).not.toHaveBeenCalled();
+    expect(input.retryController.decide).not.toHaveBeenCalled();
+  });
+
+  it("reuses the same expected and target facts for a conditional write retry", async () => {
+    const input = persistenceInput();
+    const expected = { ...makeRecord(), status: { status: "queued" as const } };
+    input.write.mockRejectedValueOnce(new Error("response lost"));
+    input.read.mockResolvedValue(expected);
+    input.retryController.decide.mockResolvedValue({ shouldRetry: true });
+    await persistRuntimeRecord({ ...input, expected });
+    expect(input.write).toHaveBeenCalledTimes(2);
+    expect(input.write.mock.calls[0]![0]).toEqual(input.record);
+    expect(input.write.mock.calls[0]![1]).toEqual(expected);
+    expect(input.write.mock.calls[1]).toEqual(input.write.mock.calls[0]);
+    expect(input.write.mock.calls[0]![0]).not.toBe(input.record);
+    expect(input.write.mock.calls[0]![1]).not.toBe(expected);
+  });
+
+  it("stops stale conditional writes after a Store conflict", async () => {
+    const input = persistenceInput();
+    input.write.mockRejectedValue(new RuntimeRecordConflictError("newer facts exist"));
+    input.read.mockResolvedValue({ ...makeRecord(), status: { status: "failed" } });
+    await expect(persistRuntimeRecord(input)).rejects.toMatchObject({
+      name: "RuntimeRecordPersistenceError", outcome: "conflict",
+    });
+    expect(input.write).toHaveBeenCalledTimes(1);
     expect(input.retryController.decide).not.toHaveBeenCalled();
   });
 
@@ -122,10 +149,10 @@ describe("Runtime record persistence", () => {
     const error = new Error("write failed");
     input.write.mockRejectedValue(error);
     input.read.mockResolvedValue(stale);
-    await expect(persistRuntimeRecord(input)).rejects.toBe(error);
-    expect(input.retryController.decide).toHaveBeenCalledExactlyOnceWith({
-      operation: "persistence", failureKind: "network", attemptNumber: 1,
+    await expect(persistRuntimeRecord(input)).rejects.toMatchObject({
+      name: "RuntimeRecordPersistenceError", message: error.message, outcome: "conflict", cause: error,
     });
+    expect(input.retryController.decide).not.toHaveBeenCalled();
     expect(input.write).toHaveBeenCalledTimes(1);
   });
 
@@ -135,7 +162,9 @@ describe("Runtime record persistence", () => {
     input.write.mockRejectedValue(error);
     input.read.mockRejectedValue(new Error("read unavailable"));
     input.retryController.decide.mockResolvedValueOnce({ shouldRetry: true, backoffMs: 7 });
-    await expect(persistRuntimeRecord(input)).rejects.toBe(error);
+    await expect(persistRuntimeRecord(input)).rejects.toMatchObject({
+      name: "RuntimeRecordPersistenceError", message: error.message, outcome: "unknown", cause: error,
+    });
     expect(input.write).toHaveBeenCalledTimes(2);
     expect(input.retryController.decide.mock.calls.map(([decision]) => decision)).toEqual([
       { operation: "persistence", failureKind: "network", attemptNumber: 1 },
@@ -148,7 +177,9 @@ describe("Runtime record persistence", () => {
     const input = persistenceInput();
     const error = Object.assign(new Error("storage rejected the record"), { retryable: false });
     input.write.mockRejectedValue(error);
-    await expect(persistRuntimeRecord(input)).rejects.toBe(error);
+    await expect(persistRuntimeRecord(input)).rejects.toMatchObject({
+      name: "RuntimeRecordPersistenceError", message: error.message, outcome: "unknown", cause: error,
+    });
     expect(input.read).toHaveBeenCalledTimes(1);
     expect(input.retryController.decide).not.toHaveBeenCalled();
     expect(input.sleep).not.toHaveBeenCalled();
@@ -159,7 +190,9 @@ describe("Runtime record persistence", () => {
     const error = new Error("write unavailable");
     input.write.mockRejectedValue(error);
     input.read.mockImplementation(() => { throw new Error("read unavailable"); });
-    await expect(persistRuntimeRecord(input)).rejects.toBe(error);
+    await expect(persistRuntimeRecord(input)).rejects.toMatchObject({
+      name: "RuntimeRecordPersistenceError", message: error.message, outcome: "unknown", cause: error,
+    });
     expect(input.retryController.decide).toHaveBeenCalledExactlyOnceWith({
       operation: "persistence", failureKind: "network", attemptNumber: 1,
     });

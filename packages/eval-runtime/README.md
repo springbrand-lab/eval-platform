@@ -86,6 +86,9 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
 24. 一旦观察到 Agent 终态，立即固定 Attempt 的状态和完成时间，并先保存终态再收集资源，避免资源保存异常抹掉已确认事实。Agent 错误属于 Attempt，Runtime 收尾失败属于执行/评估阶段的 `lastError`，不得把已完成 Agent 记为失败。记录写入使用独立 `persistence` 重试，与生命周期共用本阶段的 RetryController：同一份记录固定后，保存失败先读取最新持久化事实确认提交；未确认且策略允许时只重写同一份记录，不能重新采集已有快照/产物、创建 Attempt、提交或重启 Agent。确认不依赖 JSON 对象键顺序，但不忽略数组顺序、重复记录或 null。次数和退避由注入策略决定，不新增默认政策。
 25. Pipeline 中失败执行的评估取消独立收尾，不占用评估 Agent 并发槽、不成为成功样本评估的门槛。取消保存失败只校准/重试对应 EvaluationRecord；仍失败时把收尾错误写入该记录，已经保存的取消事实不降级。无法连错误记录也保存时，经 `EvalRuntimeDependencies.onError(error)` 上报带 Evaluation/Sampling 身份的错误；未注入回调时默认使用 `console.error`。不吞错、不把错误记在其他样本上，也不因取消收尾异常调用整批失败处理。
 
+26. Sampling/Evaluation 的每次更新携带预期旧事实，Store 原子校验后写入；记录已变化时只读回校准，不用旧的整条记录覆盖。保存响应和读回都失败直到重试耗尽时，提交结果未知，Lifecycle 不写失败状态或补丁；上报异常并保留可恢复进度。确认写入未发生时，失败收尾仍须先读最新记录再更新。此条件写入不新增版本字段。
+27. 已有 `resources: collected` 的 Attempt 补采失败时保留原始快照及其 `coverage/finalized`，单独经 `onError` 上报刷新错误；首次采集失败仍保存 `resources: failed`。已 `finalized` 的快照不再刷新。
+
 Sampling 的三个边界固定如下：
 
 - `SamplingState`：Store 长期持久化的 Sampling 事实；

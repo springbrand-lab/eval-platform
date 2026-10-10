@@ -2,6 +2,8 @@ import type { EvaluationRecord, RunPhases, Sampling } from "@eval-platform/eval-
 import type { RunConfigSnapshot } from "../config/index.js";
 import { describeAgentError } from "./agent-lifecycle.js";
 import type { RetryController } from "./retry.js";
+import { RuntimeRecordConflictError, RuntimeRecordPersistenceError, type RuntimePersistenceOutcome } from "./record-errors.js";
+export { RuntimeRecordConflictError, RuntimeRecordPersistenceError } from "./record-errors.js";
 
 export interface RuntimeRunRequestIdentity {
   /** Stable caller identity for one Runtime admission request. */
@@ -55,10 +57,12 @@ export interface RuntimeStore {
     records: readonly SamplingState[],
     evaluations: readonly EvaluationRecord[],
   ): Promise<RuntimeRunAdmission>;
-  updateEvaluation(record: EvaluationRecord): Promise<void>;
+  /** Atomically update only while the supplied previous facts still match. */
+  updateEvaluation(record: EvaluationRecord, expected: EvaluationRecord): Promise<void>;
   getEvaluation(evaluationId: string): Promise<EvaluationRecord | null>;
   listEvaluations(samplingId: string): Promise<readonly EvaluationRecord[]>;
-  updateSampling(state: SamplingState): Promise<void>;
+  /** Atomically update only while the supplied previous facts still match. */
+  updateSampling(state: SamplingState, expected: SamplingState): Promise<void>;
   getSampling(samplingId: string): Promise<SamplingState | null>;
 }
 
@@ -68,40 +72,80 @@ export interface RuntimeRecoveryStore {
 
 export async function persistRuntimeRecord<TRecord extends SamplingState | EvaluationRecord>(input: {
   readonly record: TRecord;
-  readonly write: (record: TRecord) => Promise<void>;
+  readonly expected: TRecord;
+  readonly write: (record: TRecord, expected: TRecord) => Promise<void>;
   readonly read: () => Promise<TRecord | null>;
   readonly retryController: RetryController;
   readonly sleep: (milliseconds: number) => Promise<void>;
 }): Promise<void> {
   const record = structuredClone(input.record);
+  const expected = structuredClone(input.expected);
   for (let attemptNumber = 1; ; attemptNumber += 1) {
     try {
-      await input.write(record);
+      await input.write(record, expected);
       return;
     } catch (error) {
-      const stored = await Promise.resolve().then(input.read).catch(() => null);
-      if (sameRecordFacts(stored, record)) return;
+      let stored: TRecord | null = null;
+      let readFailed = false;
+      try {
+        stored = await input.read();
+      } catch {
+        readFailed = true;
+      }
+      if (sameRuntimeRecordFacts(stored, record)) return;
 
+      const outcome: RuntimePersistenceOutcome = error instanceof RuntimeRecordConflictError
+        ? "conflict"
+        : readFailed || stored === null
+          ? "unknown"
+          : !sameRuntimeRecordFacts(stored, expected)
+            ? "conflict"
+            : "not-committed";
       const details = describeAgentError(error);
-      if (!details.retryable) throw error;
-      const decision = await input.retryController.decide({
-        operation: "persistence",
-        failureKind: details.failureKind,
-        attemptNumber,
-      });
-      if (!decision.shouldRetry) throw error;
-      await input.sleep(decision.backoffMs ?? 0);
+      if (outcome === "conflict" || !details.retryable) {
+        throw new RuntimeRecordPersistenceError(details.message, outcome, error, record, expected);
+      }
+      let decision;
+      try {
+        decision = await input.retryController.decide({
+          operation: "persistence",
+          failureKind: details.failureKind,
+          attemptNumber,
+        });
+      } catch (decisionError) {
+        throw new RuntimeRecordPersistenceError(
+          "Persistence retry decision failed: " + describeAgentError(decisionError).message,
+          outcome,
+          decisionError,
+          record,
+          expected,
+        );
+      }
+      if (!decision.shouldRetry) {
+        throw new RuntimeRecordPersistenceError(details.message, outcome, error, record, expected);
+      }
+      try {
+        await input.sleep(decision.backoffMs ?? 0);
+      } catch (sleepError) {
+        throw new RuntimeRecordPersistenceError(
+          "Persistence retry delay failed: " + describeAgentError(sleepError).message,
+          outcome,
+          sleepError,
+          record,
+          expected,
+        );
+      }
     }
   }
 }
 
-function sameRecordFacts(left: unknown, right: unknown): boolean {
+export function sameRuntimeRecordFacts(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   if (Array.isArray(left) || Array.isArray(right)) {
     return Array.isArray(left)
       && Array.isArray(right)
       && left.length === right.length
-      && left.every((value, index) => sameRecordFacts(value, right[index]));
+      && left.every((value, index) => sameRuntimeRecordFacts(value, right[index]));
   }
   if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
 
@@ -111,6 +155,6 @@ function sameRecordFacts(left: unknown, right: unknown): boolean {
   const rightKeys = Object.keys(rightRecord).filter((key) => rightRecord[key] !== undefined);
   return leftKeys.length === rightKeys.length
     && leftKeys.every((key) => (
-      Object.hasOwn(rightRecord, key) && sameRecordFacts(leftRecord[key], rightRecord[key])
+      Object.hasOwn(rightRecord, key) && sameRuntimeRecordFacts(leftRecord[key], rightRecord[key])
     ));
 }

@@ -1,6 +1,6 @@
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
-import { RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
+import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import { and, eq, exists, gt, inArray, or, sql } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
 import { evaluations, runEvaluations, runs, runSamplings, samplings } from "./schema.js";
@@ -228,22 +228,35 @@ export function createPostgresRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRe
         .orderBy(runs.runId).limit(limit);
       return rows.map(({ runId }) => runId);
     },
-    async updateSampling(record) {
+    async updateSampling(record, expected) {
+      if (record.samplingId !== expected.samplingId
+        || record.projectId !== expected.projectId || record.sampleId !== expected.sampleId) {
+        throw new RuntimeRecordConflictError("Sampling identity changed before update");
+      }
       const updated = await db.update(samplings).set({ facts: samplingFacts(record) })
         .where(and(eq(samplings.samplingId, record.samplingId), eq(samplings.projectId, record.projectId),
-          eq(samplings.sampleId, record.sampleId)))
+          eq(samplings.sampleId, record.sampleId),
+          eq(samplings.facts, samplingFacts(expected))))
         .returning({ samplingId: samplings.samplingId });
-      if (updated.length === 0) throw new Error(`Unknown Sampling or mismatched identity: ${record.samplingId}`);
+      if (updated.length === 0) {
+        throw new RuntimeRecordConflictError(`Sampling changed before update: ${record.samplingId}`);
+      }
     },
     async getSampling(samplingId) {
       const [row] = await db.select().from(samplings).where(eq(samplings.samplingId, samplingId));
       return row ? samplingFromRow(row) : null;
     },
-    async updateEvaluation(record) {
+    async updateEvaluation(record, expected) {
+      if (record.evaluationId !== expected.evaluationId || record.samplingId !== expected.samplingId) {
+        throw new RuntimeRecordConflictError("Evaluation identity changed before update");
+      }
       const updated = await db.update(evaluations).set({ facts: evaluationFacts(record) })
-        .where(and(eq(evaluations.evaluationId, record.evaluationId), eq(evaluations.samplingId, record.samplingId)))
+        .where(and(eq(evaluations.evaluationId, record.evaluationId), eq(evaluations.samplingId, record.samplingId),
+          eq(evaluations.facts, evaluationFacts(expected))))
         .returning({ evaluationId: evaluations.evaluationId });
-      if (updated.length === 0) throw new Error(`Unknown Evaluation or mismatched identity: ${record.evaluationId}`);
+      if (updated.length === 0) {
+        throw new RuntimeRecordConflictError(`Evaluation changed before update: ${record.evaluationId}`);
+      }
     },
     async getEvaluation(evaluationId) {
       const [row] = await db.select().from(evaluations).where(eq(evaluations.evaluationId, evaluationId));

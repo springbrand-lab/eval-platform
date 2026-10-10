@@ -10,7 +10,7 @@ import { dataInputSchema } from "@eval-platform/eval-dataset";
 
 import type { RuntimeEvaluationContext } from "./model.js";
 import type { RuntimeStore } from "./store.js";
-import { persistRuntimeRecord } from "./store.js";
+import { RuntimeRecordPersistenceError, persistRuntimeRecord, sameRuntimeRecordFacts } from "./store.js";
 import type { RetryController } from "./retry.js";
 import {
   AgentOperationError,
@@ -45,7 +45,8 @@ export async function evaluateSampling(
   const persistEvaluation = async (next: EvaluationRecord): Promise<void> => {
     await persistRuntimeRecord({
       record: next,
-      write: (record) => dependencies.store.updateEvaluation(record),
+      expected: currentEvaluation,
+      write: (record, expected) => dependencies.store.updateEvaluation(record, expected),
       read: () => dependencies.store.getEvaluation(next.evaluationId),
       retryController,
       sleep: dependencies.sleep,
@@ -163,13 +164,29 @@ export async function evaluateSampling(
     });
     return { ...input.context, evaluation: currentEvaluation };
   } catch (error) {
+    if (error instanceof RuntimeRecordPersistenceError && error.outcome !== "not-committed") throw error;
     const details = describeAgentError(error);
     const stored = await dependencies.store.getEvaluation(currentEvaluation.evaluationId);
     if (!stored) throw error;
+    let failureBase = stored;
+    if (error instanceof RuntimeRecordPersistenceError) {
+      const expected = error.expectedRecord as EvaluationRecord;
+      const attempted = error.attemptedRecord as EvaluationRecord;
+      if (sameRuntimeRecordFacts(stored, expected)) {
+        const observedAttempt = attempted.attempts.at(-1);
+        const savedAttempt = stored.attempts.find((item) => (
+          item.evaluationAttemptId === observedAttempt?.evaluationAttemptId
+        ));
+        if (
+          (observedAttempt?.completedAt !== undefined && savedAttempt?.completedAt === undefined)
+          || (attempted.output !== undefined && stored.output === undefined)
+        ) failureBase = attempted;
+      } else if (!sameRuntimeRecordFacts(stored, attempted)) throw error;
+    }
     currentEvaluation = stored;
     if (currentEvaluation.status.status === "succeeded") return { ...input.context, evaluation: currentEvaluation };
     await persistEvaluation({
-      ...currentEvaluation,
+      ...failureBase,
       evaluator: agentConfig,
       status: { status: "failed", lastError: details.message },
     });

@@ -21,7 +21,7 @@ import type {
   SamplingState,
   RuntimeStore,
 } from "./store.js";
-import { RuntimeRunIdentityConflictError } from "./store.js";
+import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError, sameRuntimeRecordFacts } from "./store.js";
 import type { RetryController, RetryOperation } from "./retry.js";
 import {
   createEvalRuntime as createRuntime,
@@ -326,7 +326,10 @@ function makeStore(options: StoreOptions = {}): RuntimeStore {
       }
       return { run, created: true } satisfies RuntimeRunAdmission;
     },
-    async updateEvaluation(record) {
+    async updateEvaluation(record, expected) {
+      if (!sameRuntimeRecordFacts(evaluations.get(record.evaluationId), expected)) {
+        throw new RuntimeRecordConflictError("Evaluation changed before update");
+      }
       evaluations.set(record.evaluationId, record);
     },
     async getEvaluation(evaluationId) {
@@ -335,13 +338,28 @@ function makeStore(options: StoreOptions = {}): RuntimeStore {
     async listEvaluations(samplingId) {
       return [...evaluations.values()].filter((evaluation) => evaluation.samplingId === samplingId);
     },
-    async updateSampling(state) {
+    async updateSampling(state, expected) {
+      if (!sameRuntimeRecordFacts(samplings.get(state.samplingId), expected)) {
+        throw new RuntimeRecordConflictError("Sampling changed before update");
+      }
       samplings.set(state.samplingId, state);
     },
     async getSampling(samplingId) {
       return samplings.get(samplingId) ?? null;
     },
   };
+}
+
+async function seedSampling(store: RuntimeStore, record: SamplingState): Promise<void> {
+  const expected = await store.getSampling(record.samplingId);
+  if (!expected) throw new Error("Unknown Sampling fixture");
+  await store.updateSampling(record, expected);
+}
+
+async function seedEvaluation(store: RuntimeStore, record: EvaluationRecord): Promise<void> {
+  const expected = await store.getEvaluation(record.evaluationId);
+  if (!expected) throw new Error("Unknown Evaluation fixture");
+  await store.updateEvaluation(record, expected);
 }
 
 function makeSubmission(status: AgentSubmission["status"] = "completed"): AgentSubmission {
@@ -2315,12 +2333,12 @@ describe("raw resource persistence", () => {
     const store = makeStore();
     const update = store.updateSampling.bind(store);
     let failResourceSave = true;
-    vi.spyOn(store, "updateSampling").mockImplementation(async (record) => {
+    vi.spyOn(store, "updateSampling").mockImplementation(async (record, expected) => {
       if (failResourceSave && record.executionAttempts[0]?.resources?.status === "collected") {
         failResourceSave = false;
         throw new Error("temporary resource persistence failure");
       }
-      await update(record);
+      await update(record, expected);
     });
     const runtime = createEvalRuntime({
       catalog: makeCatalog(), harness, store, sleep: async () => undefined,
@@ -2501,12 +2519,12 @@ describe("raw resource persistence", () => {
     const store = makeStore();
     const update = store.updateEvaluation.bind(store);
     let remainingFailures = 2;
-    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
       if ((record.status.status === "succeeded" || record.status.status === "failed") && remainingFailures > 0) {
         remainingFailures -= 1;
         throw new Error("terminal persistence failed");
       }
-      await update(record);
+      await update(record, expected);
     });
     const onError = vi.fn();
     const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store, onError });
@@ -2534,11 +2552,11 @@ describe("raw resource persistence", () => {
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => makeResources(input));
     const store = makeStore();
     const update = store.updateSampling.bind(store);
-    vi.spyOn(store, "updateSampling").mockImplementation(async (state) => {
+    vi.spyOn(store, "updateSampling").mockImplementation(async (state, expected) => {
       if (state.executionAttempts.some((attempt) => attempt.resources?.status === "collected")) {
         throw new Error("raw resource persistence failed");
       }
-      await update(state);
+      await update(state, expected);
     });
     const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store });
     const run = await runtime.start(startRequest("raw-store-failed", EXECUTION_CONFIG_RETRY_ONE_ID));
@@ -2609,8 +2627,8 @@ describe("raw resource persistence", () => {
     let loseResponse = true;
     if (role === "subject") {
       const update = store.updateSampling.bind(store);
-      vi.spyOn(store, "updateSampling").mockImplementation(async (state) => {
-        await update(state);
+      vi.spyOn(store, "updateSampling").mockImplementation(async (state, expected) => {
+        await update(state, expected);
         if (loseResponse && state.executionAttempts.some((attempt) => attempt.resources?.status === "collected")) {
           loseResponse = false;
           throw new Error("raw write response lost");
@@ -2618,8 +2636,8 @@ describe("raw resource persistence", () => {
       });
     } else {
       const update = store.updateEvaluation.bind(store);
-      vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
-        await update(record);
+      vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
+        await update(record, expected);
         if (loseResponse && record.attempts.some((attempt) => attempt.resources?.status === "collected")) {
           loseResponse = false;
           throw new Error("raw write response lost");
@@ -2655,7 +2673,8 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
     let retriedRecord: SamplingState | EvaluationRecord | undefined;
     const save = async <TRecord extends SamplingState | EvaluationRecord>(
       record: TRecord,
-      update: (record: TRecord) => Promise<void>,
+      expected: TRecord,
+      update: (record: TRecord, expected: TRecord) => Promise<void>,
     ): Promise<void> => {
       const attempts = "executionAttempts" in record ? record.executionAttempts : record.attempts;
       const status = "execution" in record ? record.execution.status : record.status.status;
@@ -2666,18 +2685,18 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
           : status === "succeeded";
       if (shouldFail && !failedRecord) {
         failedRecord = structuredClone(record);
-        if (failure === "after") await update(record);
+        if (failure === "after") await update(record, expected);
         throw new Error(`${step} write unavailable`);
       }
       if (failedRecord && !retriedRecord) retriedRecord = structuredClone(record);
-      await update(record);
+      await update(record, expected);
     };
     if (role === "subject") {
       const update = store.updateSampling.bind(store);
-      vi.spyOn(store, "updateSampling").mockImplementation((record) => save(record, update));
+      vi.spyOn(store, "updateSampling").mockImplementation((record, expected) => save(record, expected, update));
     } else {
       const update = store.updateEvaluation.bind(store);
-      vi.spyOn(store, "updateEvaluation").mockImplementation((record) => save(record, update));
+      vi.spyOn(store, "updateEvaluation").mockImplementation((record, expected) => save(record, expected, update));
     }
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
       const attempts = input.handle.role === "subject"
@@ -2729,19 +2748,19 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
     const store = makeStore();
     if (role === "subject") {
       const update = store.updateSampling.bind(store);
-      vi.spyOn(store, "updateSampling").mockImplementation(async (record) => {
+      vi.spyOn(store, "updateSampling").mockImplementation(async (record, expected) => {
         if (record.executionAttempts.some((attempt) => attempt.resources?.status === "collected")) {
           throw new Error("resource store unavailable");
         }
-        await update(record);
+        await update(record, expected);
       });
     } else {
       const update = store.updateEvaluation.bind(store);
-      vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+      vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
         if (record.attempts.some((attempt) => attempt.resources?.status === "collected")) {
           throw new Error("resource store unavailable");
         }
-        await update(record);
+        await update(record, expected);
       });
     }
     const runtime = createEvalRuntime({
@@ -2775,15 +2794,15 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
     } : makeSubmission());
     if (role === "subject") {
       const update = store.updateSampling.bind(store);
-      vi.spyOn(store, "updateSampling").mockImplementation(async (record) => {
+      vi.spyOn(store, "updateSampling").mockImplementation(async (record, expected) => {
         if (record.executionAttempts[0]?.resources?.status === "collected") throw new Error("resource store unavailable");
-        await update(record);
+        await update(record, expected);
       });
     } else {
       const update = store.updateEvaluation.bind(store);
-      vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+      vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
         if (record.attempts[0]?.resources?.status === "collected") throw new Error("resource store unavailable");
-        await update(record);
+        await update(record, expected);
       });
     }
     const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store });
@@ -2818,13 +2837,13 @@ describe("pipeline cancellation isolation", () => {
     const harness = cancellationHarness(store);
     const update = store.updateEvaluation.bind(store);
     let firstCancellation = true;
-    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
       if (record.status.status === "cancelled" && firstCancellation) {
         firstCancellation = false;
-        if (failure === "after") await update(record);
+        if (failure === "after") await update(record, expected);
         throw new Error("B cancellation write unavailable");
       }
-      await update(record);
+      await update(record, expected);
     });
     const onError = vi.fn();
     const runtime = createEvalRuntime({
@@ -2852,12 +2871,12 @@ describe("pipeline cancellation isolation", () => {
     const harness = cancellationHarness(store);
     const update = store.updateEvaluation.bind(store);
     let firstCancellation = true;
-    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
       if (record.status.status === "cancelled" && firstCancellation) {
         firstCancellation = false;
         throw new Error("B cancellation write unavailable");
       }
-      await update(record);
+      await update(record, expected);
     });
     let releaseRetry!: () => void;
     const gate = new Promise<void>((resolve) => { releaseRetry = resolve; });
@@ -2881,11 +2900,11 @@ describe("pipeline cancellation isolation", () => {
     const store = makeStore();
     const harness = cancellationHarness(store);
     const update = store.updateEvaluation.bind(store);
-    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
       if (record.status.status === "cancelled") {
         throw Object.assign(new Error("B cancellation unavailable"), { retryable });
       }
-      await update(record);
+      await update(record, expected);
     });
     const onError = vi.fn();
     const runtime = createEvalRuntime({
@@ -2909,11 +2928,11 @@ describe("pipeline cancellation isolation", () => {
     const store = makeStore();
     const harness = cancellationHarness(store);
     const update = store.updateEvaluation.bind(store);
-    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
       if (record.status.status === "cancelled" || record.status.lastError?.startsWith("evaluation cancellation persistence failed:")) {
         throw new Error("B storage unavailable");
       }
-      await update(record);
+      await update(record, expected);
     });
     const onError = vi.fn();
     const runtime = createEvalRuntime({
@@ -2942,8 +2961,8 @@ describe("pipeline cancellation isolation", () => {
     const update = store.updateEvaluation.bind(store);
     const read = store.getEvaluation.bind(store);
     let uncertainEvaluationId: string | undefined;
-    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
-      await update(record);
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
+      await update(record, expected);
       if (record.status.status === "cancelled" && !uncertainEvaluationId) {
         uncertainEvaluationId = record.evaluationId;
         throw new Error("cancellation response lost");
@@ -2973,12 +2992,12 @@ describe("pipeline cancellation isolation", () => {
     const store = makeStore();
     const harness = cancellationHarness(store);
     const update = store.updateEvaluation.bind(store);
-    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
       const sampling = await store.getSampling(record.samplingId);
       if (record.status.status === "cancelled" && sampling!.sampleId === "sample-b") {
         throw new Error("B cancellation unavailable");
       }
-      await update(record);
+      await update(record, expected);
     });
     const runtime = createEvalRuntime({
       catalog: makeCatalog([makeSample("sample-b"), makeSample("sample-c")]), harness, store,
@@ -2996,11 +3015,11 @@ describe("pipeline cancellation isolation", () => {
     const store = makeStore();
     const harness = cancellationHarness(store);
     const update = store.updateEvaluation.bind(store);
-    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record) => {
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
       if (record.status.status === "cancelled" || record.status.lastError?.startsWith("evaluation cancellation persistence failed:")) {
         throw new Error("B storage unavailable");
       }
-      await update(record);
+      await update(record, expected);
     });
     const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
@@ -3023,6 +3042,235 @@ describe("Run recovery from persisted facts", () => {
   function dormantRuntime(store: RuntimeStore, harness: Harness, configResolver = makeConfigResolver()) {
     return createRuntime({ catalog: makeCatalog(), harness, store, configResolver, sleep: async () => undefined });
   }
+
+  it.each((["subject", "evaluator"] as const).flatMap((role) => (
+    (["terminal", "resources"] as const).map((step) => ({ role, step }))
+  )))("keeps observed $role $step facts when saving never commits", async ({ role, step }) => {
+    const store = makeStore();
+    const harness = makeHarness();
+    let rejected = 0;
+    const isTarget = (record: SamplingState | EvaluationRecord) => {
+      const attempt = "executionAttempts" in record ? record.executionAttempts[0] : record.attempts[0];
+      return attempt?.status === "completed" && attempt.resources?.status === (
+        step === "terminal" ? "pending" : "collected"
+      );
+    };
+    if (role === "subject") {
+      const write = store.updateSampling.bind(store);
+      vi.spyOn(store, "updateSampling").mockImplementation(async (record, expected) => {
+        if (isTarget(record) && rejected++ < 2) throw new Error("save unavailable");
+        await write(record, expected);
+      });
+    } else {
+      const write = store.updateEvaluation.bind(store);
+      vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
+        if (isTarget(record) && rejected++ < 2) throw new Error("save unavailable");
+        await write(record, expected);
+      });
+    }
+    const runtime = createRuntime({
+      catalog: makeCatalog(), harness, store, configResolver: makeConfigResolver(),
+      sleep: async () => undefined,
+      createRetryController: makeRetryControllerFactory({ persistence: 1 }),
+    });
+    const run = role === "subject"
+      ? await runtime.start(startRequest("uncommitted-subject-" + step))
+      : await runtime.pipeline(pipelineRequest("uncommitted-evaluator-" + step));
+    await runtime.resume(run.runId);
+    const snapshot = await runtime.getRun(run.runId);
+    const record = role === "subject"
+      ? await store.getSampling(run.samplingIds[0]!)
+      : await store.getEvaluation(snapshot.evaluationIds[0]!);
+    const attempt = record && "executionAttempts" in record ? record.executionAttempts[0] : record?.attempts[0];
+    expect(snapshot.status).toBe("failed");
+    expect(attempt).toMatchObject({
+      status: "completed", completedAt: expect.any(String),
+      resources: { status: "pending" },
+    });
+    await runtime.resume(run.runId);
+    expect(harness.submitAgent).toHaveBeenCalledTimes(role === "subject" ? 1 : 2);
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it.each((["subject", "evaluator"] as const).flatMap((role) => (
+    (["terminal", "resources"] as const).map((step) => ({ role, step }))
+  )))("preserves committed $role $step facts when save and read responses are lost", async ({ role, step }) => {
+    const store = makeStore();
+    const harness = makeHarness();
+    let lost = 0;
+    let unreadable = 0;
+    const isTarget = (record: SamplingState | EvaluationRecord) => {
+      const attempt = "executionAttempts" in record ? record.executionAttempts[0] : record.attempts[0];
+      return attempt?.status === "completed" && attempt.resources?.status === (
+        step === "terminal" ? "pending" : "collected"
+      );
+    };
+    if (role === "subject") {
+      const write = store.updateSampling.bind(store);
+      vi.spyOn(store, "updateSampling").mockImplementation(async (record, expected) => {
+        await write(record, expected);
+        if (isTarget(record) && lost++ < 2) throw new Error("save response lost");
+      });
+      const read = store.getSampling.bind(store);
+      vi.spyOn(store, "getSampling").mockImplementation(async (id) => {
+        if (lost > 0 && unreadable++ < 2) throw new Error("read temporarily unavailable");
+        return read(id);
+      });
+    } else {
+      const write = store.updateEvaluation.bind(store);
+      vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
+        await write(record, expected);
+        if (isTarget(record) && lost++ < 2) throw new Error("save response lost");
+      });
+      const read = store.getEvaluation.bind(store);
+      vi.spyOn(store, "getEvaluation").mockImplementation(async (id) => {
+        if (lost > 0 && unreadable++ < 2) throw new Error("read temporarily unavailable");
+        return read(id);
+      });
+    }
+    const runtime = createRuntime({
+      catalog: makeCatalog(), harness, store, configResolver: makeConfigResolver(),
+      sleep: async () => undefined,
+      createRetryController: makeRetryControllerFactory({ persistence: 1 }),
+    });
+    const run = role === "subject"
+      ? await runtime.start(startRequest("uncertain-subject-" + step))
+      : await runtime.pipeline(pipelineRequest("uncertain-evaluator-" + step));
+    await expect(runtime.resume(run.runId)).rejects.toThrow(
+      role === "subject" ? "Execution phase could not persist its progress" : "Evaluation phase could not persist its progress",
+    );
+    const record = role === "subject"
+      ? await store.getSampling(run.samplingIds[0]!)
+      : await store.getEvaluation((await runtime.getRun(run.runId)).evaluationIds[0]!);
+    const attempt = record && "executionAttempts" in record ? record.executionAttempts[0] : record?.attempts[0];
+    expect(attempt).toMatchObject({
+      status: "completed", completedAt: expect.any(String),
+      resources: { status: step === "terminal" ? "pending" : "collected" },
+    });
+    const stage = record && "execution" in record ? record.execution.status : record?.status.status;
+    expect(stage).not.toBe("failed");
+    await runtime.resume(run.runId);
+    expect((await runtime.getRun(run.runId)).status).toBe("succeeded");
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+    expect(harness.submitAgent).toHaveBeenCalledTimes(role === "subject" ? 1 : 2);
+    expect(harness.collectAgentResources).toHaveBeenCalledTimes(role === "subject" ? 1 : 2);
+  });
+
+  it("keeps a partial resource snapshot when recovery refresh fails", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const reported = vi.fn();
+    const runtime = createRuntime({
+      catalog: makeCatalog(), harness, store, configResolver: makeConfigResolver(),
+      sleep: async () => undefined, onError: reported,
+    });
+    const run = await runtime.start(startRequest("partial-resource-refresh-fails"));
+    const samplingId = run.samplingIds[0]!;
+    const submissionId = "subject-submission";
+    const idempotencyKey = "execution:" + samplingId;
+    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, submissionId };
+    const snapshot = {
+      ...makeResources({ handle, idempotencyKey }),
+      finalized: false,
+      coverage: { usageEvents: "partial" as const, telemetryEvents: "partial" as const, billingSettlements: "partial" as const },
+    };
+    await seedSampling(store, {
+      ...(await store.getSampling(samplingId))!,
+      subjectSubmissionId: submissionId,
+      execution: { status: "retrying" },
+      executionAttempts: [{
+        executionAttemptId: "attempt-before-recovery", samplingId, attemptNumber: 1,
+        submissionId, status: "running", startedAt: "2026-10-09T00:00:00.000Z",
+        resources: { status: "collected", snapshot },
+      }],
+    });
+    vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("refresh unavailable"));
+    await runtime.resume(run.runId);
+    const saved = (await store.getSampling(samplingId))!;
+    expect(saved.execution.status).toBe("succeeded");
+    expect(saved.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot });
+    expect(reported).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("refresh unavailable") }));
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect(harness.collectAgentResources).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an evaluator resource snapshot when its recovery refresh fails", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const reported = vi.fn();
+    const runtime = createRuntime({
+      catalog: makeCatalog(), harness, store, configResolver: makeConfigResolver(),
+      sleep: async () => undefined, onError: reported,
+    });
+    const run = await runtime.pipeline(pipelineRequest("evaluator-resource-refresh-fails"));
+    const samplingId = run.samplingIds[0]!;
+    await seedSampling(store, {
+      ...(await store.getSampling(samplingId))!,
+      subjectSubmissionId: "subject-submission",
+      execution: { status: "succeeded" },
+      artifacts: [{ artifactId: "subject-artifact", kind: "project", path: "/output" }],
+      trajectory: { trajectoryId: "subject-trajectory", source: "subject", path: "/trajectory" },
+    });
+    const evaluation = (await store.listEvaluations(samplingId))[0]!;
+    const submissionId = "evaluator-submission";
+    const idempotencyKey = "evaluation:" + samplingId;
+    const handle: AgentHandle = { role: "evaluator", framework: "sp", samplingId, submissionId };
+    const snapshot = {
+      ...makeResources({ handle, idempotencyKey }),
+      finalized: false,
+      coverage: { usageEvents: "partial" as const, telemetryEvents: "partial" as const, billingSettlements: "partial" as const },
+    };
+    await seedEvaluation(store, {
+      ...evaluation, submissionId, status: { status: "retrying" },
+      attempts: [{
+        evaluationAttemptId: "judge-before-recovery", evaluationId: evaluation.evaluationId,
+        attemptNumber: 1, submissionId, status: "running",
+        startedAt: "2026-10-09T00:00:00.000Z",
+        resources: { status: "collected", snapshot },
+      }],
+    });
+    vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("evaluator refresh unavailable"));
+    await runtime.resume(run.runId);
+    const saved = (await store.getEvaluation(evaluation.evaluationId))!;
+    expect(saved.status.status).toBe("succeeded");
+    expect(saved.attempts[0]!.resources).toEqual({ status: "collected", snapshot });
+    expect(reported).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("evaluator refresh unavailable") }));
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect(harness.collectAgentResources).toHaveBeenCalledOnce();
+  });
+
+  it("does not refresh a finalized resource snapshot during recovery", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const reported = vi.fn();
+    const runtime = createRuntime({
+      catalog: makeCatalog(), harness, store, configResolver: makeConfigResolver(),
+      sleep: async () => undefined, onError: reported,
+    });
+    const run = await runtime.start(startRequest("finalized-resource-recovery"));
+    const samplingId = run.samplingIds[0]!;
+    const submissionId = "subject-submission";
+    const idempotencyKey = "execution:" + samplingId;
+    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, submissionId };
+    const snapshot = makeResources({ handle, idempotencyKey });
+    await seedSampling(store, {
+      ...(await store.getSampling(samplingId))!,
+      subjectSubmissionId: submissionId,
+      execution: { status: "retrying" },
+      executionAttempts: [{
+        executionAttemptId: "finalized-before-recovery", samplingId, attemptNumber: 1,
+        submissionId, status: "running", startedAt: "2026-10-09T00:00:00.000Z",
+        resources: { status: "collected", snapshot },
+      }],
+    });
+    vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("should not refresh"));
+    await runtime.resume(run.runId);
+    const saved = (await store.getSampling(samplingId))!;
+    expect(saved.execution.status).toBe("succeeded");
+    expect(saved.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot });
+    expect(harness.collectAgentResources).not.toHaveBeenCalled();
+    expect(reported).not.toHaveBeenCalled();
+  });
 
   it("admits a queued Run without executing and resumes it from its stored config", async () => {
     const store = makeStore();
@@ -3055,7 +3303,7 @@ describe("Run recovery from persisted facts", () => {
     const record = (await store.getSampling(samplingId))!;
     const submissionId = "subject-submission";
     const idempotencyKey = `execution:${samplingId}`;
-    await store.updateSampling({
+    await seedSampling(store, {
       ...record,
       subjectSubmissionId: submissionId,
       execution: { status: "running" },
@@ -3084,7 +3332,7 @@ describe("Run recovery from persisted facts", () => {
     const harness = makeHarness();
     const run = await dormantRuntime(store, harness).start(startRequest("conflicting-attempt-identity"));
     const samplingId = run.samplingIds[0]!;
-    await store.updateSampling({
+    await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
       subjectSubmissionId: "correct-submission",
       execution: { status: "running" },
@@ -3112,14 +3360,14 @@ describe("Run recovery from persisted facts", () => {
     const submissionId = "subject-submission";
     const idempotencyKey = `execution:${samplingId}`;
     const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, submissionId };
-    await store.updateSampling({
+    await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
       subjectSubmissionId: submissionId,
       execution: { status: "retrying" },
       executionAttempts: [{
         executionAttemptId: "uncertain-attempt", samplingId, attemptNumber: 1,
         submissionId, status: "running", startedAt: "2026-10-09T00:00:00.000Z",
-        resources: { status: "collected", snapshot: makeResources({ handle, idempotencyKey }) },
+        resources: { status: "collected", snapshot: { ...makeResources({ handle, idempotencyKey }), finalized: false } },
       }],
     });
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
@@ -3140,12 +3388,12 @@ describe("Run recovery from persisted facts", () => {
     const harness = makeHarness();
     const originalWrite = store.updateSampling.bind(store);
     let unavailable = true;
-    vi.spyOn(store, "updateSampling").mockImplementation(async (record) => {
+    vi.spyOn(store, "updateSampling").mockImplementation(async (record, expected) => {
       if (unavailable && (record.executionAttempts[0]?.resources?.status === "collected"
         || record.execution.status === "failed")) {
         throw new Error("resource store unavailable");
       }
-      await originalWrite(record);
+      await originalWrite(record, expected);
     });
     const original = dormantRuntime(store, harness);
     const run = await original.start(startRequest("resource-save-before-crash"));
@@ -3174,7 +3422,7 @@ describe("Run recovery from persisted facts", () => {
     const submissionId = "subject-submission";
     const idempotencyKey = `execution:${samplingId}`;
     const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, submissionId };
-    await store.updateSampling({
+    await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
       subjectSubmissionId: submissionId,
       execution: { status: "retrying" },
@@ -3212,7 +3460,7 @@ describe("Run recovery from persisted facts", () => {
     const samplingId = run.samplingIds[0]!;
     const submissionId = "subject-submission";
     const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, submissionId };
-    await store.updateSampling({
+    await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
       subjectSubmissionId: submissionId,
       execution: { status: "retrying" },
@@ -3238,7 +3486,7 @@ describe("Run recovery from persisted facts", () => {
     const harness = makeHarness();
     const run = await dormantRuntime(store, harness).pipeline(pipelineRequest("pipeline-handoff"));
     const samplingId = run.samplingIds[0]!;
-    await store.updateSampling({
+    await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
       subjectSubmissionId: "completed-subject",
       execution: { status: "succeeded" },
@@ -3267,7 +3515,7 @@ describe("Run recovery from persisted facts", () => {
     const evaluation = (await store.getEvaluation(evaluationId))!;
     const submissionId = "evaluator-submission";
     const idempotencyKey = `evaluation:${evaluation.samplingId}`;
-    await store.updateEvaluation({
+    await seedEvaluation(store, {
       ...evaluation,
       submissionId,
       status: { status: "running" },

@@ -8,7 +8,7 @@ import type {
 import { dataInputSchema } from "@eval-platform/eval-dataset";
 
 import type { RuntimeStore } from "./store.js";
-import { persistRuntimeRecord } from "./store.js";
+import { RuntimeRecordPersistenceError, persistRuntimeRecord, sameRuntimeRecordFacts } from "./store.js";
 import type { RuntimeSamplingContext } from "./model.js";
 import type { RetryController } from "./retry.js";
 import {
@@ -45,7 +45,8 @@ export async function executeSampling(
   const persist = async (sampling: Sampling): Promise<void> => {
     await persistRuntimeRecord({
       record: sampling,
-      write: (record) => dependencies.store.updateSampling(record),
+      expected: current,
+      write: (record, expected) => dependencies.store.updateSampling(record, expected),
       read: () => dependencies.store.getSampling(sampling.samplingId),
       retryController,
       sleep: dependencies.sleep,
@@ -133,12 +134,29 @@ export async function executeSampling(
     });
     return { state: current, sample };
   } catch (error) {
+    if (error instanceof RuntimeRecordPersistenceError && error.outcome !== "not-committed") throw error;
     const details = describeAgentError(error);
     const stored = await dependencies.store.getSampling(current.samplingId);
     if (!stored) throw error;
+    let failureBase = stored;
+    if (error instanceof RuntimeRecordPersistenceError) {
+      const expected = error.expectedRecord as Sampling;
+      const attempted = error.attemptedRecord as Sampling;
+      if (sameRuntimeRecordFacts(stored, expected)) {
+        const observedAttempt = attempted.executionAttempts.at(-1);
+        const savedAttempt = stored.executionAttempts.find((item) => (
+          item.executionAttemptId === observedAttempt?.executionAttemptId
+        ));
+        if (
+          (observedAttempt?.completedAt !== undefined && savedAttempt?.completedAt === undefined)
+          || (attempted.artifacts !== undefined && stored.artifacts === undefined)
+          || (attempted.trajectory !== undefined && stored.trajectory === undefined)
+        ) failureBase = attempted;
+      } else if (!sameRuntimeRecordFacts(stored, attempted)) throw error;
+    }
     current = stored;
     if (current.execution.status === "succeeded") return { state: current, sample };
-    await persist(withExecutionStatus(current, "failed", details.message));
+    await persist(withExecutionStatus(failureBase, "failed", details.message));
     return { state: current, sample };
   }
 }

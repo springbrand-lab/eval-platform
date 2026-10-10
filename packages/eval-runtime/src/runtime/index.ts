@@ -99,6 +99,7 @@ class RuntimeCoordinator implements EvalRuntime {
       idFactory: this.#idFactory,
       now: this.#now,
       sleep: dependencies.sleep ?? defaultSleep,
+      onError: this.#onError,
       createRetryController: this.#createRetryController,
     };
   }
@@ -508,9 +509,10 @@ class RuntimeCoordinator implements EvalRuntime {
     config: ResolvedEvaluationConfig,
   ): Promise<void> {
     const retryController = this.#createRetryController(config.retryPolicy);
-    const persist = (record: EvaluationRecord): Promise<void> => persistRuntimeRecord({
+    const persist = (record: EvaluationRecord, expected: EvaluationRecord): Promise<void> => persistRuntimeRecord({
       record,
-      write: (next) => this.#store.updateEvaluation(next),
+      expected,
+      write: (next, expected) => this.#store.updateEvaluation(next, expected),
       read: () => this.#store.getEvaluation(evaluation.evaluationId),
       retryController,
       sleep: this.#stageDependencies.sleep,
@@ -520,7 +522,7 @@ class RuntimeCoordinator implements EvalRuntime {
       await persist({
         ...evaluation,
         status: { status: "cancelled", lastError: "execution did not succeed" },
-      });
+      }, evaluation);
     } catch (error) {
       try {
         const current = await this.#store.getEvaluation(evaluation.evaluationId);
@@ -532,7 +534,7 @@ class RuntimeCoordinator implements EvalRuntime {
             status: "failed",
             lastError: `evaluation cancellation persistence failed: ${errorMessage(error)}`,
           },
-        });
+        }, current);
       } catch (finalizationError) {
         const reported = new AggregateError(
           [error, finalizationError],
@@ -571,7 +573,7 @@ export type {
   SamplingState,
   RuntimeStore,
 } from "./store.js";
-export { RuntimeRunIdentityConflictError } from "./store.js";
+export { RuntimeRunIdentityConflictError, RuntimeRecordConflictError, RuntimeRecordPersistenceError } from "./store.js";
 export { toRunSnapshot, toSamplingSnapshot } from "./projection.js";
 export {
   DEFAULT_RETRY_POLICY,

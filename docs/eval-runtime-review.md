@@ -828,3 +828,91 @@ A 执行成功，B 执行失败。Runtime 本来应该继续评估 A，并把 B 
 - 检查两种 Agent 的终态/资源/产物保存写前失败与提交后响应丢失、固定完成时间、保存重试耗尽、原 Agent 错误保留，以及取消保存异常、长时间重试、错误上报和多个取消之间的隔离。
 - 共享保存函数具有明确的现有调用点，没有引入另一份 Agent 事实、重复 Run 状态、legacy 兼容分支、新配置版本、额外编排实体或 SP 私有实现依赖。
 - R-16、R-19 均复审通过，未发现本次两项修复相关的新问题。本次复审仅更新本评审文档，不修改业务代码或测试，不提交 Git。
+
+## 恢复与 Worker 新提交复审（2026-10-10）
+
+**评审范围**：`741f645` 的共享查询投影、`c8e5e6c` 的 PostgreSQL 持久化和 `564c974` 的 Runtime 恢复、单实例 Worker；以当前 HEAD `564c974` 独立复现。只审核生产代码，不审核 Agent 或 CI/CD 改动。SP 接线尚未完成、默认重试策略及后续统一完善的超时/取消/通知补漏，不计为当前问题。
+
+| 编号 | 问题 | 严重程度 | 状态 |
+| --- | --- | --- | --- |
+| R-20 | 保存响应丢失且读回确认失败时，旧内存对象的失败收尾覆盖已落库的 Agent 终态或资源快照 | P2 | 已修复，待复审 |
+| R-21 | 恢复时刷新已有资源快照失败，会用采集失败覆盖并删除已保存的原始记录 | P2 | 已修复，待复审 |
+
+### R-20：失败收尾用旧对象覆盖已经存好的事实（已修复，待复审）
+
+**所属提交**：`564c974`。这是新恢复改动引入的 R-16 事实保留原则回归，不改变 R-16 在此前提交上的通过记录。
+
+**相关位置**
+
+- `packages/eval-runtime/src/runtime/execution.ts:45`：改为 `persistRuntimeRecord()` 成功返回后才推进 `current`；保存已经提交、但返回异常且读回失败时，`current` 仍是旧对象。
+- `packages/eval-runtime/src/runtime/evaluation.ts:45`：Evaluation 使用同样的保存顺序，`currentEvaluation` 同样可能落后于数据库事实。
+- `packages/eval-runtime/src/runtime/store.ts:82`：保存失败后的读回异常被视为无法确认提交；重试耗尽时抛出原保存错误。
+- `packages/eval-runtime/src/runtime/agent-lifecycle.ts:342`：进入错误收尾时先调用 `setSamplingStatus("failed")`，其回调用尚未校准的旧对象保存整条记录。
+- `packages/eval-runtime/src/runtime/execution.ts:137`、`packages/eval-runtime/src/runtime/evaluation.ts:167`：外层虽然会读取最新记录，但执行到这里前，Lifecycle 的失败状态写入已经覆盖了原事实。
+- `apps/eval-api/src/db/runtime.ts:231`、`apps/eval-api/src/db/runtime.ts:242`：Sampling/Evaluation 更新原子替换整份 `facts`，因此旧对象确实会覆盖数据库里已有的终态和原始资源，不只是查询展示错误。
+
+**大白话**
+
+数据库已经存好了 Agent 的完成状态，或者已经存好了 Token、费用等原始资源记录。但是保存的成功响应丢了，Runtime 以为保存失败；紧接着读回确认又碰上临时故障。重试耗尽后，Runtime 拿内存里的旧记录写“本阶段失败”，把数据库里刚存好的内容也一起覆盖掉。结果可能把已经完成的 Agent 改回运行中，或者把已经保存的资源快照改回“待采集”。
+
+**独立复现**
+
+1. 使用独立临时 PostgreSQL 数据库，应用本库迁移；通过真实 Dataset/Catalog/RuntimeStore、真实 `createConfigResolver()` 和真实 `createEvalRuntime().pipeline()` / `resume()` 运行，Harness 仅注入合法完成结果和合法资源快照。
+2. 对目标 Stage 的真实 Store 写入增加故障注入：先完成实际数据库提交，再抛出“保存响应丢失”；紧接着的读回确认抛出一次临时错误。注入的 RetryController 明确允许一次 `persistence` 重试；两次同一事实保存均已提交，但两次确认都暂时不可用。之后读写恢复正常，未要求无限重试。
+3. 对 Subject/Evaluator 分别在终态保存、资源保存、最终输出保存三个位置执行上述场景，并分别运行读回正常的对照，共 12 组。
+4. Subject/Evaluator 的终态保存故障组均得到：最终 Stage 为 `failed`，原已落库 `Attempt.status: completed` 被覆盖为 `running`，原 `completedAt` 被清掉。
+5. Subject/Evaluator 的资源保存故障组均得到：终态仍为 `completed`，但数据库中已经提交的 `resources: collected` 和完整快照被覆盖为 `resources: pending`；原快照不再存在。资源只采集一次，Stage 失败后没有重新采集。
+6. 读回正常的对照全部成功；最终输出保存故障组也全部成功，因为这条路径在旧对象回写前就进入外层的最新记录校准。问题限定在 Lifecycle 内部收尾，不声称所有保存失败都会丢数据。
+7. 再调用 `resume()`，故障组没有继续执行或补采集；真实 `listRecoverableRunIds()` 也不再返回这些 Run，因为 Stage 已被写成终态失败。因此丢掉的终态/快照不会由现有定时扫描自动修复。所有组均未重启 Agent。
+8. 复现完成后删除临时数据库，未改动既有 SP 应用数据库或仓库生产代码。
+
+**判断边界**
+
+- 问题不是“保存必须永远重试”，也不是“SP 尚未接入”；允许重试耗尽和 Stage 收尾失败，但不能因此删除已经提交的 Agent 事实。
+- 真正的触发条件是现有正式 Store 边界上的提交响应丢失及暂时读回失败，不需要多个 Worker、越过输入契约或假设新功能。
+- 原子提交已经有效；错误发生在随后对同一记录的旧事实覆盖，不能靠补原子性解决。
+
+**已确认的处理原则**：同一 Stage 的任何失败收尾都不能绕过最新事实校准；能够读回时基于真实持久化记录收尾，不能确认时不得拿旧整条对象覆盖，保留可恢复进度并上报异常。Agent 已确认终态和已经保存的资源必须保留，不增加第二份权威状态、版本或独立任务模型。后续授权的实现及验证见下方修复记录。
+
+**SP 对照**：在用户指定的 `sp-agent-config-model-dev-release-20261008` worktree 中，`@springbrand/agent-runtime@0.3.0-alpha.15` 的 `SubmissionLifecycle.finish()` 写前读取最新持久化记录；`SubmissionFinalizer.commit()` 在事务内再次读取；`SubmissionRepository.updateTerminal()` 只更新非终态。SP API 的 Action Execution 同样以 `status = running` 为条件写首次终态并读回获胜记录。Eval 复用“最新事实优先、条件写入、未知结果不拿旧对象收尾”的规则，仍只通过 SP 公开 Harness 接口接入。核对位置：`agent/node_modules/@springbrand/agent-runtime/src/submission/lifecycle.ts:522`、`src/submission/finalization.ts:66`、`src/submission/repository.ts:410`、`api/src/models/action-execution-log/index.ts:86`。
+
+**用户结论**：2026-10-10 已确认。用户明确表示：“确认是问题，记录，下一个”。
+
+**前次评审修改范围**：只追加评审 Markdown；没有修改生产代码、测试、Agent 或 CI，没有提交 Git。
+
+### R-21：补采失败清掉先前存好的原始资源（已修复，待复审）
+
+**所属提交**：`564c974` 的 Attempt 恢复路径；与 R-20 的“保存响应丢失、旧对象回写”不同，本条只需再次读取 SP 资源失败，无需数据库写入或读回异常。
+
+**相关位置**
+
+- `packages/eval-runtime/src/runtime/agent-lifecycle.ts:307`：恢复的 Attempt 已有 `resources: collected`，但 Agent 终态刚被确认或快照未 finalized 时，会再次采集资源。
+- `packages/eval-runtime/src/runtime/agent-lifecycle.ts:550`：补采失败或重试耗尽时返回新的 `resources: failed`，该对象没有旧快照。
+- `packages/eval-runtime/src/runtime/agent-lifecycle.ts:314`：无条件把这个失败对象写回原 Attempt，覆盖先前 `collected` 的完整原始记录。
+- `apps/eval-api/src/db/runtime.ts:231`、`apps/eval-api/src/db/runtime.ts:242`：真实 PostgreSQL Store 更新整份记录，无法保留被覆盖的旧快照。
+- `packages/eval-runtime/src/runtime/index.test.ts:3107`：现有恢复测试已经把“终态未确认，但先前已采集资源”的状态作为正式恢复场景，只覆盖补采成功，没有覆盖补采失败。
+
+**大白话**
+
+上次已经存下一份 Agent 的 Token、费用或工具调用原始记录。进程恢复时确认 Agent 已结束，于是想重新采集一份更新的资源快照。如果这次补采刚好失败，代码会把旧快照删除，只留下“采集失败”。Agent 执行仍可能显示成功，但之前明明已知的资源事实也看不到了。
+
+**独立复现**
+
+1. 调用真实 `createEvalRuntime().start()` 准入一个合法执行 Run；为该 Run 设置已有 Attempt：执行仍待恢复、SP operation 身份已保存、`resources: collected` 含一条原始用量事件，快照 `finalized: false`、`coverage: partial`。该状态符合当前恢复路径和既有回归测试的前提。
+2. 调用真实 `resume(runId)`；Harness `inspectAgentOperation()` 返回 `completed`，`collectAgentResources()` 本次抛出暂时不可用错误，`collectExecution()` 返回成功产物和轨迹；Store 只实现既定公开接口，无数据库或 SP 私有实现。
+3. 结果：执行阶段 `succeeded`；补采确实调用一次，Submission 没有重新提交；Attempt 资源从 `collected` 变为 `failed`，已保存的原始用量快照消失。单纯补采失败就足以触发，不需要 R-20 的响应丢失或写入失败。
+4. 代码的同一分支对终态尚未持久化、但已有 `finalized: true` 快照也会刷新；因此风险不限于部分快照。该进一步范围根据分支条件推断，本次独立脚本实际复现的是 `finalized: false`。
+
+**已确认的共同原则**：与 R-20 一起遵守“已经保存的真实事实不能倒退或被失败收尾抹掉”。已有采集快照是已保存事实，刷新失败不能把它替换成无快照的失败结果；继续保留原始记录及其真实 `coverage/finalized`，另外如实处理此次刷新错误，不把不完整快照伪装成完整。两条触发路径可以在同一次修复中处理，但都要有独立回归；不预设新数据模型或重试次数。
+
+**用户结论**：2026-10-10 已确认与 R-20 属于同一原则。用户明确表示：“相同原则，记录，下一个”。
+
+**前次评审修改范围**：只更新评审 Markdown；没有修改生产代码、测试、SP、Agent 或 CI，没有提交 Git。
+
+## R-20 / R-21 修复记录（2026-10-10）
+
+- RuntimeStore 的 Sampling/Evaluation 更新现在携带预期旧事实。PostgreSQL 用同一条条件 UPDATE 校验 JSONB facts 后写入；条件不匹配时返回冲突，Runtime 只读回校准，不用旧整条记录覆盖。没有新增版本字段或表。
+- 保存和读回都不能确认提交时，Lifecycle 不执行旧内存对象的失败回写；异常上报给 Worker，未完成阶段保留恢复入口。已确认写入未提交时，失败收尾先读取最新记录，并在条件写入下保留已观察到的 Agent 终态及已有的产物事实。收尾所见记录与预期旧事实、目标事实都不一致时停止写入。
+- 首次资源采集失败仍记录 failed。已有 collected 快照的补采失败只报告带 Stage、Sampling、Submission 身份的错误，保留原始快照和它真实的 coverage/finalized；finalized 快照不再补采。
+- 新增 Subject/Evaluator 在终态和资源保存的写前失败、提交后响应丢失且读回失败回归，以及两种角色的补采失败、finalized 快照跳过补采测试。Runtime 全套 223 项测试和 workspace 类型检查通过；使用临时 PostgreSQL 18.3 容器执行 eval-api 全套 19 项测试，全部通过。没有修改 SP 实现。
+- 代码已修复，仍待独立复审。本轮未提交 Git。
