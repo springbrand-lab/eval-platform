@@ -4,7 +4,6 @@ import type {
   AgentRole,
   AgentResourceSnapshot,
   AgentStatus,
-  ArtifactRef,
   EvaluationAgentOutput,
   ExecutionOutput,
   HarnessConfig,
@@ -18,11 +17,24 @@ export type HarnessRuntimeOptions = NonNullable<Extract<
   { readonly kind: "sp" }
 >["runtime"]>;
 
+/** The SP SpaceDO locator for the Subject Chat's Workspace. */
+export interface SubjectWorkspaceRef {
+  readonly userId: string;
+  readonly chatId: string;
+}
+
+/** An Evaluator owns its Chat but writes only to its directory in this Workspace. */
+export interface EvaluationWorkspaceBinding {
+  readonly subject: SubjectWorkspaceRef;
+  readonly evaluationId: string;
+}
+
 export interface AgentHandle {
   readonly role: AgentRole;
   readonly framework: AgentFramework;
   readonly submissionId: string;
   readonly samplingId: string;
+  readonly evaluationWorkspace?: EvaluationWorkspaceBinding;
 }
 
 export interface AgentSubmission {
@@ -45,6 +57,7 @@ export interface EnsureAgentInput {
   readonly samplingId: string;
   readonly agentConfig: AgentConfigRef;
   readonly projectId: string;
+  readonly evaluationWorkspace?: EvaluationWorkspaceBinding;
   readonly runtime?: HarnessRuntimeOptions;
 }
 
@@ -85,14 +98,11 @@ export interface MaterializeInitialDataInput {
   readonly runtime?: HarnessRuntimeOptions;
 }
 
-export interface EvaluationInput {
+export interface SubjectTrajectoryMaterializationInput {
   readonly idempotencyKey: string;
   readonly samplingId: string;
-  readonly subjectSubmissionId: string;
-  readonly evaluationSubmissionId: string;
-  readonly artifacts: readonly ArtifactRef[];
+  readonly subjectWorkspace: SubjectWorkspaceRef;
   readonly trajectory: TrajectoryRef;
-  readonly runtime?: HarnessRuntimeOptions;
 }
 
 export interface Harness {
@@ -105,5 +115,5 @@ export interface Harness {
   collectExecution(input: CollectAgentInput): Promise<ExecutionOutput>;
   collectEvaluation(input: CollectAgentInput): Promise<EvaluationAgentOutput>;
   collectAgentResources(input: CollectAgentResourcesInput): Promise<AgentResourceSnapshot>;
-  materializeEvaluationInput(input: EvaluationInput): Promise<void>;
+  materializeSubjectTrajectory(input: SubjectTrajectoryMaterializationInput): Promise<void>;
 }

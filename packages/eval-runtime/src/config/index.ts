@@ -94,12 +94,8 @@ function validateHarnessConfig(
       if (!isObjectRecord(harness.runtime)) {
         throw new Error(`${field}.runtime must be an object`);
       }
-      if (
-        harness.runtime.workspaceMode !== undefined
-        && harness.runtime.workspaceMode !== "isolated"
-        && harness.runtime.workspaceMode !== "shared-readonly"
-      ) {
-        throw new Error(`${field}.runtime.workspaceMode is not supported`);
+      if ("workspaceMode" in harness.runtime) {
+        throw new Error(`${field}.runtime.workspaceMode is no longer supported`);
       }
     }
     if (harness.runtime?.timeoutMs !== undefined) {

@@ -110,7 +110,7 @@ describe("runtime config", () => {
           kind: "sp",
           framework,
           agentConfig: SUBJECT,
-          runtime: { workspaceMode: "isolated", timeoutMs: 1_234 },
+          runtime: { timeoutMs: 1_234 },
         },
       };
       const { configId, ...input } = storedConfig;
@@ -133,6 +133,18 @@ describe("runtime config", () => {
       expect(resolved.harness.runtime).not.toBe(storedConfig.harness.runtime);
     },
   );
+
+  it("rejects the obsolete workspace mode so evaluator binding is explicit", () => {
+    expect(() => createEvaluationConfig({
+      evaluationHarness: {
+        kind: "sp",
+        framework: "sp",
+        agentConfig: EVALUATOR,
+        runtime: { workspaceMode: "isolated" },
+      } as unknown as EvaluationConfig["evaluationHarness"],
+      evaluationConcurrency: 1,
+    })).toThrow("evaluationHarness.runtime.workspaceMode is no longer supported");
+  });
 
   it.each([
     { framework: undefined },

@@ -45,8 +45,8 @@ const PIPELINE_CONFIG_ID = "pipeline-config-1";
 const PIPELINE_CONFIG_CONCURRENT_ID = "pipeline-config-concurrent";
 
 const NO_RETRY = { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 } as const;
-const EXECUTION_RUNTIME = { workspaceMode: "shared-readonly", timeoutMs: 1_234 } as const;
-const EVALUATION_RUNTIME = { workspaceMode: "isolated", timeoutMs: 5_678 } as const;
+const EXECUTION_RUNTIME = { timeoutMs: 1_234 } as const;
+const EVALUATION_RUNTIME = { timeoutMs: 5_678 } as const;
 
 function makeExecutionConfig(
   configId: string,
@@ -373,11 +373,12 @@ function makeSubmission(status: AgentSubmission["status"] = "completed"): AgentS
 
 function makeHarness(): Harness {
   return {
-    ensureAgent: vi.fn(async ({ role, framework, samplingId, submissionId }): Promise<AgentHandle> => ({
+    ensureAgent: vi.fn(async ({ role, framework, samplingId, submissionId, evaluationWorkspace }): Promise<AgentHandle> => ({
       role,
       framework,
       samplingId,
       submissionId,
+      ...(evaluationWorkspace === undefined ? {} : { evaluationWorkspace }),
     })),
     materializeInitialData: vi.fn(async () => ({
       bundleId: "bundle-1",
@@ -414,7 +415,7 @@ function makeHarness(): Harness {
       telemetryEvents: [],
       billingSettlements: [],
     })),
-    materializeEvaluationInput: vi.fn(async () => undefined),
+    materializeSubjectTrajectory: vi.fn(async () => undefined),
   };
 }
 
@@ -894,7 +895,7 @@ describe("eval runtime orchestration", () => {
     const evaluationSubmitIndex = vi.mocked(harness.submitAgent).mock.calls.findIndex(
       ([input]) => input.handle.role === "evaluator",
     );
-    expect(vi.mocked(harness.materializeEvaluationInput).mock.invocationCallOrder[0]!)
+    expect(vi.mocked(harness.materializeSubjectTrajectory).mock.invocationCallOrder[0]!)
       .toBeLessThan(vi.mocked(harness.submitAgent).mock.invocationCallOrder[evaluationSubmitIndex]!);
   });
 
@@ -992,9 +993,13 @@ describe("eval runtime orchestration", () => {
         role: "evaluator",
         framework: "sp",
         agentConfig: EVALUATOR,
+        evaluationWorkspace: {
+          subject: { userId: SUBJECT.ownerUserId, chatId: expect.any(String) },
+          evaluationId: expect.any(String),
+        },
       }));
-      expect(harness.materializeEvaluationInput).toHaveBeenCalledWith(expect.objectContaining({
-        artifacts: [{ artifactId: "artifact-1", kind: "project", path: "/eval/output" }],
+      expect(harness.materializeSubjectTrajectory).toHaveBeenCalledWith(expect.objectContaining({
+        subjectWorkspace: { userId: SUBJECT.ownerUserId, chatId: expect.any(String) },
         trajectory: { trajectoryId: "trajectory-1", source: "subject", path: "/eval/trajectory.jsonl" },
       }));
       await expect(store.getRun(run.runId)).resolves.toMatchObject({
@@ -1028,6 +1033,29 @@ describe("eval runtime orchestration", () => {
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
     expect(harness.materializeInitialData).not.toHaveBeenCalled();
     expect(harness.submitAgent).not.toHaveBeenCalled();
+  });
+
+  it("rejects an evaluator Chat that did not bind the Subject Workspace", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.ensureAgent).mockImplementation(async (input) => ({
+      role: input.role,
+      framework: input.framework,
+      samplingId: input.samplingId,
+      submissionId: input.submissionId,
+    }));
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog(),
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+    });
+
+    const run = await runtime.pipeline(pipelineRequest("missing-evaluator-workspace-binding"));
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
+    expect(harness.materializeSubjectTrajectory).not.toHaveBeenCalled();
+    expect(vi.mocked(harness.submitAgent).mock.calls.filter(
+      ([input]) => input.handle.role === "evaluator",
+    )).toHaveLength(0);
   });
 
   it.each(["codex", "cc"] as const)(
@@ -1165,8 +1193,8 @@ describe("eval runtime orchestration", () => {
       handle: expect.objectContaining({ role: "evaluator" }),
       runtime: EVALUATION_RUNTIME,
     }));
-    expect(harness.materializeEvaluationInput).toHaveBeenCalledWith(expect.objectContaining({
-      runtime: EVALUATION_RUNTIME,
+    expect(harness.materializeSubjectTrajectory).toHaveBeenCalledWith(expect.objectContaining({
+      subjectWorkspace: { userId: SUBJECT.ownerUserId, chatId: expect.any(String) },
     }));
     expect(harness.submitAgent).toHaveBeenCalledWith(expect.objectContaining({
       handle: expect.objectContaining({ role: "evaluator" }),
@@ -1537,10 +1565,8 @@ describe("eval runtime orchestration", () => {
     expect(harness.collectEvaluation).toHaveBeenCalledTimes(1);
     expect(getSample).toHaveBeenCalledWith("sample-1");
     expect(harness.materializeInitialData).toHaveBeenCalledTimes(2);
-    expect(harness.materializeEvaluationInput).toHaveBeenCalledWith(expect.objectContaining({
-      subjectSubmissionId: expect.any(String),
-      evaluationSubmissionId: expect.any(String),
-      artifacts: [{ artifactId: "artifact-1", kind: "project", path: "/eval/output" }],
+    expect(harness.materializeSubjectTrajectory).toHaveBeenCalledWith(expect.objectContaining({
+      subjectWorkspace: { userId: SUBJECT.ownerUserId, chatId: expect.any(String) },
       trajectory: {
         trajectoryId: "trajectory-1",
         source: "subject",
@@ -1551,9 +1577,16 @@ describe("eval runtime orchestration", () => {
     expect(sampling.subjectSubmissionId).toEqual(expect.any(String));
     expect(evaluationRecord.submissionId).toEqual(expect.any(String));
     expect(evaluationRecord.submissionId).not.toBe(sampling.subjectSubmissionId);
-    const evaluationInput = vi.mocked(harness.materializeEvaluationInput).mock.calls[0]?.[0];
-    expect(evaluationInput?.subjectSubmissionId).toBe(sampling.subjectSubmissionId);
-    expect(evaluationInput?.evaluationSubmissionId).toBe(evaluationRecord.submissionId);
+    const trajectoryInput = vi.mocked(harness.materializeSubjectTrajectory).mock.calls[0]?.[0];
+    expect(trajectoryInput?.subjectWorkspace.chatId).toBe(sampling.subjectSubmissionId);
+    expect(trajectoryInput?.idempotencyKey).toBe(`subject-trajectory:${sampling.subjectSubmissionId}`);
+    expect(harness.ensureAgent).toHaveBeenCalledWith(expect.objectContaining({
+      submissionId: evaluationRecord.submissionId,
+      evaluationWorkspace: {
+        subject: trajectoryInput?.subjectWorkspace,
+        evaluationId: evaluationRecord.evaluationId,
+      },
+    }));
     expect(sampling).toMatchObject({
       execution: { status: "succeeded" },
     });
@@ -1561,9 +1594,10 @@ describe("eval runtime orchestration", () => {
   });
 
   it("keeps independent evaluation records for repeated evaluations", async () => {
+    const harness = makeHarness();
     const runtime = createEvalRuntime({
       catalog: makeCatalog(),
-      harness: makeHarness(),
+      harness,
       store: makeStore(),
       sleep: async () => undefined,
     });
@@ -1582,6 +1616,19 @@ describe("eval runtime orchestration", () => {
       firstSnapshot.evaluationIds[0],
       secondSnapshot.evaluationIds[0],
     ]);
+    const trajectoryInputs = vi.mocked(harness.materializeSubjectTrajectory).mock.calls.map(([input]) => input);
+    expect(trajectoryInputs).toHaveLength(2);
+    expect(trajectoryInputs[1]).toEqual(trajectoryInputs[0]);
+    const evaluatorBindings = vi.mocked(harness.ensureAgent).mock.calls
+      .map(([input]) => input)
+      .filter((input) => input.role === "evaluator")
+      .map((input) => input.evaluationWorkspace);
+    expect(evaluatorBindings.map((binding) => binding?.evaluationId)).toEqual([
+      firstSnapshot.evaluationIds[0],
+      secondSnapshot.evaluationIds[0],
+    ]);
+    expect(evaluatorBindings[0]?.subject).toEqual(trajectoryInputs[0]?.subjectWorkspace);
+    expect(evaluatorBindings[1]?.subject).toEqual(trajectoryInputs[0]?.subjectWorkspace);
     await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.not.toHaveProperty(
       "evaluation",
     );
@@ -1697,7 +1744,7 @@ describe("eval runtime orchestration", () => {
     });
     expect(inputs[0]!.data).not.toHaveProperty("initialSession");
     expect(harness.ensureAgent).toHaveBeenCalledTimes(2);
-    expect(harness.materializeEvaluationInput).toHaveBeenCalledTimes(1);
+    expect(harness.materializeSubjectTrajectory).toHaveBeenCalledTimes(1);
     expect(harness.restartAgent).not.toHaveBeenCalled();
     expect(harness.inspectAgentOperation).not.toHaveBeenCalled();
     const record = await runtime.getEvaluation(snapshot.evaluationIds[0]!);
@@ -1705,17 +1752,17 @@ describe("eval runtime orchestration", () => {
     expect(record.submissionId).toBe(inputs[0]!.handle.submissionId);
   });
 
-  it("retries completed evidence copying with the same key and waits for all evaluator preparation", async () => {
+  it("retries Subject trajectory materialization with the same key before evaluator submission", async () => {
     const harness = makeHarness();
     const committedKeys = new Set<string>();
     let copyRetryStarted!: () => void;
     const started = new Promise<void>((resolve) => { copyRetryStarted = resolve; });
     let finishCopy!: () => void;
     const pending = new Promise<void>((resolve) => { finishCopy = resolve; });
-    vi.mocked(harness.materializeEvaluationInput).mockImplementation(async ({ idempotencyKey }) => {
+    vi.mocked(harness.materializeSubjectTrajectory).mockImplementation(async ({ idempotencyKey }) => {
       if (!committedKeys.has(idempotencyKey)) {
         committedKeys.add(idempotencyKey);
-        throw new Error("evidence copy response lost after commit");
+        throw new Error("trajectory materialization response lost after commit");
       }
       copyRetryStarted();
       await pending;
@@ -1740,11 +1787,11 @@ describe("eval runtime orchestration", () => {
     expect(snapshot.status).toBe("succeeded");
 
     expect(committedKeys.size).toBe(1);
-    const [first, second] = vi.mocked(harness.materializeEvaluationInput).mock.calls;
+    const [first, second] = vi.mocked(harness.materializeSubjectTrajectory).mock.calls;
     expect(second![0]).toEqual(first![0]);
-    expect(first![0].idempotencyKey).toBe(`evaluation-input:${first![0].evaluationSubmissionId}`);
+    expect(first![0].idempotencyKey).toBe(`subject-trajectory:${first![0].subjectWorkspace.chatId}`);
     expect(first![0]).toMatchObject({
-      artifacts: [{ artifactId: "artifact-1", kind: "project", path: "/eval/output" }],
+      subjectWorkspace: { userId: SUBJECT.ownerUserId, chatId: expect.any(String) },
       trajectory: { trajectoryId: "trajectory-1", source: "subject", path: "/eval/trajectory.jsonl" },
     });
     const inputs = vi.mocked(harness.materializeInitialData).mock.calls
@@ -1765,7 +1812,7 @@ describe("eval runtime orchestration", () => {
     "does not submit or restart the evaluator after evidence initialization fails (retryable: %s)",
     async (retryable) => {
       const harness = makeHarness();
-      vi.mocked(harness.materializeEvaluationInput).mockRejectedValue(Object.assign(
+      vi.mocked(harness.materializeSubjectTrajectory).mockRejectedValue(Object.assign(
         new Error("evidence initialization failed"),
         { retryable },
       ));
@@ -1787,7 +1834,7 @@ describe("eval runtime orchestration", () => {
       const snapshot = await waitForTerminal(runtime, evaluation.runId);
       expect(snapshot.status).toBe("failed");
 
-      expect(harness.materializeEvaluationInput).toHaveBeenCalledTimes(retryable ? 2 : 1);
+      expect(harness.materializeSubjectTrajectory).toHaveBeenCalledTimes(retryable ? 2 : 1);
       expect(decide.mock.calls.map(([input]) => input)).toEqual(retryable ? [
         { operation: "initialization", failureKind: "network", attemptNumber: 1 },
         { operation: "initialization", failureKind: "network", attemptNumber: 2 },

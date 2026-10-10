@@ -68,7 +68,6 @@ export interface SpHarnessConfig {
   readonly framework: AgentFramework;
   readonly agentConfig: AgentConfigRef;
   readonly runtime?: {
-    readonly workspaceMode?: "isolated" | "shared-readonly";
     readonly timeoutMs?: number;
   };
 }

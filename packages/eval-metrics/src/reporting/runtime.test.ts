@@ -55,13 +55,19 @@ function runtimeFixture() {
   const initialized = vi.fn<Harness["materializeInitialData"]>(async () => ({
     bundleId: "input-bundle", manifestHash: "manifest", target: "workspace", rootPath: "/workspace",
   }));
-  const copiedEvidence = vi.fn<Harness["materializeEvaluationInput"]>(async () => undefined);
+  const materializedTrajectory = vi.fn<Harness["materializeSubjectTrajectory"]>(async () => undefined);
   const harness: Harness = {
     async ensureAgent(input) {
-      return { samplingId: input.samplingId, submissionId: input.submissionId, role: input.role, framework: input.framework };
+      return {
+        samplingId: input.samplingId,
+        submissionId: input.submissionId,
+        role: input.role,
+        framework: input.framework,
+        ...(input.evaluationWorkspace === undefined ? {} : { evaluationWorkspace: input.evaluationWorkspace }),
+      };
     },
     materializeInitialData: initialized,
-    materializeEvaluationInput: copiedEvidence,
+    materializeSubjectTrajectory: materializedTrajectory,
     async submitAgent() { return { status: "completed", accepted: true, normalizedStatus: "completed" }; },
     async restartAgent() { throw new Error("Successful agent must not restart"); },
     async inspectAgentOperation() { return { status: "completed", accepted: true, normalizedStatus: "completed" }; },
@@ -127,7 +133,7 @@ function runtimeFixture() {
       };
     },
   };
-  return { runtime, metrics: createMetrics({ source }), handles, onError, initialized, copiedEvidence };
+  return { runtime, metrics: createMetrics({ source }), handles, onError, initialized, materializedTrajectory };
 }
 
 describe("Runtime public-query integration", () => {
@@ -164,7 +170,7 @@ describe("Runtime public-query integration", () => {
     expect(rawCollection.snapshot.usageEvents[0]!.metrics).not.toHaveProperty("totalTokens");
     expect(rawCollection.snapshot).not.toHaveProperty("totalCost");
     expect(fixture.initialized).toHaveBeenCalledTimes(10);
-    expect(fixture.copiedEvidence).toHaveBeenCalledTimes(5);
+    expect(fixture.materializedTrajectory).toHaveBeenCalledTimes(5);
 
     const rerun = await fixture.runtime.evaluate({ projectId: PROJECT.projectId, samplingIds: [stored.samplingId], evaluationConfigId: "evaluation-config" });
     fixture.handles.push(rerun);

@@ -13,6 +13,7 @@ import type {
   AgentHandle,
   AgentSubmission,
   EnsureAgentInput,
+  EvaluationWorkspaceBinding,
   Harness,
   HarnessRuntimeOptions,
 } from "../harness/index.js";
@@ -58,6 +59,7 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   readonly projectId: string;
   readonly samplingId: string;
   readonly submissionId: string;
+  readonly evaluationWorkspace?: EvaluationWorkspaceBinding;
   readonly harnessConfig: SpHarnessConfig;
   readonly prompt: string;
   readonly retryController: RetryController;
@@ -154,6 +156,9 @@ export function applyAttemptPatch<TAttempt extends AgentAttemptRecord>(
 export function requireSpHarness(harness: HarnessConfig, role: AgentRole): SpHarnessConfig {
   if (harness.kind !== "sp") {
     throw new Error(`${role} harness kind ${harness.kind} is not implemented`);
+  }
+  if (harness.runtime && "workspaceMode" in harness.runtime) {
+    throw new Error(`${role} harness runtime.workspaceMode is no longer supported`);
   }
   return harness;
 }
@@ -384,6 +389,9 @@ async function ensureAgentWithRetry<TAttempt extends AgentAttemptRecord, TOutput
   options: AgentLifecycleOptions<TAttempt, TOutput>,
   retryController: RetryController,
 ): Promise<AgentHandle> {
+  if ((options.role === "evaluator") !== (options.evaluationWorkspace !== undefined)) {
+    throw new AgentOperationError("Evaluator Workspace binding does not match Agent role", false, "network");
+  }
   const input: EnsureAgentInput = {
     submissionId: options.submissionId,
     role: options.role,
@@ -391,6 +399,7 @@ async function ensureAgentWithRetry<TAttempt extends AgentAttemptRecord, TOutput
     framework: options.harnessConfig.framework,
     agentConfig: options.harnessConfig.agentConfig,
     projectId: options.projectId,
+    ...(options.evaluationWorkspace === undefined ? {} : { evaluationWorkspace: options.evaluationWorkspace }),
     ...(options.harnessConfig.runtime === undefined ? {} : { runtime: options.harnessConfig.runtime }),
   };
 
@@ -402,6 +411,7 @@ async function ensureAgentWithRetry<TAttempt extends AgentAttemptRecord, TOutput
         || handle.role !== input.role
         || handle.framework !== input.framework
         || handle.samplingId !== input.samplingId
+        || !sameEvaluationWorkspace(handle.evaluationWorkspace, input.evaluationWorkspace)
       ) {
         throw new AgentOperationError(
           `${options.stage} agent handle does not match the requested identity`,
@@ -425,6 +435,16 @@ async function ensureAgentWithRetry<TAttempt extends AgentAttemptRecord, TOutput
       await dependencies.sleep(decision.backoffMs ?? 0);
     }
   }
+}
+
+function sameEvaluationWorkspace(
+  actual: EvaluationWorkspaceBinding | undefined,
+  expected: EvaluationWorkspaceBinding | undefined,
+): boolean {
+  if (expected === undefined) return actual === undefined;
+  return actual?.evaluationId === expected.evaluationId
+    && actual?.subject?.userId === expected.subject.userId
+    && actual?.subject?.chatId === expected.subject.chatId;
 }
 
 async function prepareAgentWithRetry<TAttempt extends AgentAttemptRecord, TOutput>(

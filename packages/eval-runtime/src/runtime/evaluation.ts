@@ -69,6 +69,11 @@ export async function evaluateSampling(
     await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject submission"));
     return { ...input.context, evaluation: currentEvaluation };
   }
+  // SP creates the Subject Chat under the selected user-agent Config owner.
+  const subjectWorkspace = {
+    userId: sampling.subjectAgent.ownerUserId,
+    chatId: subjectSubmissionId,
+  };
 
   try {
     if (!sample.data || typeof sample.data !== "object" || Array.isArray(sample.data)) {
@@ -93,6 +98,10 @@ export async function evaluateSampling(
       projectId: sampling.projectId,
       samplingId: sampling.samplingId,
       submissionId,
+      evaluationWorkspace: {
+        subject: subjectWorkspace,
+        evaluationId: currentEvaluation.evaluationId,
+      },
       harnessConfig: evaluatorHarness,
       prompt: buildEvaluationPrompt(sampling.samplingId),
       retryController,
@@ -134,14 +143,11 @@ export async function evaluateSampling(
           data: initialData,
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
-        await dependencies.harness.materializeEvaluationInput({
-          idempotencyKey: `evaluation-input:${handle.submissionId}`,
+        await dependencies.harness.materializeSubjectTrajectory({
+          idempotencyKey: `subject-trajectory:${subjectWorkspace.chatId}`,
           samplingId: sampling.samplingId,
-          subjectSubmissionId,
-          evaluationSubmissionId: handle.submissionId,
-          artifacts,
+          subjectWorkspace,
           trajectory,
-          ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
       },
       collectOutput: (handle) => dependencies.harness.collectEvaluation({

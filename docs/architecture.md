@@ -70,35 +70,31 @@ EvaluationRecord
 - `initialSession` 只引用独立保存的初始化 Session，启动时由 Harness 复制到目标 DO 并交给所选框架加载、重建 Context；准备完成后发送原始 `userPrompt`；
 - `Sample` 是运行时生成的一次具体测试输入，结构为 `{ sampleId, data: Data }`；外层是平台身份，Data 内任意同名业务字段完整保留，Sampling 不重复持久化 Data；
 - `Sampling` 是一次独立运行，拥有自己的 Subject Chat / Workspace；
-- 评估使用独立 Evaluation Chat / Workspace，但不改变 `Sampling` 身份；每次评估产生独立 `EvaluationRecord`。
+- 评估使用独立 Evaluation Chat / Session，但 Workspace 绑定 Subject Chat 的同一个物理 SpaceDO；每次评估产生独立 `EvaluationRecord`，材料和结果写入自己的 `/evaluations/<evaluationId>/` 目录。
 
 ## SP Harness 对齐
 
 Harness 只依赖以下正式边界：
 
 1. Agent Config 引用：`ownerUserId`、`userAgentId`；
-2. Chat 创建：`Inbox.createChat(title, userAgentId, chatId?)`；
+2. Eval 范围的 Chat 创建：Subject 和 Evaluator 都不进入普通 Inbox；Evaluator 创建时携带 Subject 的 `{userId, chatId}` Workspace 引用和 `evaluationId`；
 3. 消息投递：`dispatchMessage(message, "enqueue" | "steer")`；
 4. Submission 终态推送：Harness 接收可靠的完成/失败/取消通知；`SubmissionReceipt` 和按幂等键的操作查询只用于提交后的初始确认、断线恢复和重试前校准；
 5. Trajectory：`TrajectoryPage`，按 `beforeSeq` 分页读取完整轨迹，单页不超过 `200`；
 6. Workspace：tree、manifest 和 content 的正式接口。
 
-评估输入复制流程必须是：
+评估输入准备流程是：
 
 ```text
-Subject Chat / Workspace
-          │
-          ├── Submission 终态事件 ──推送──→ Runtime
-          │                                  │
-          ├── Workspace 产物 ────────────────┤
-          └── 完整 Trajectory ───────────────┘
-                                             ↓ 复制
-                           Evaluation Chat / Workspace 初始素材
-                                             ↓
-                                      Evaluation Agent
+Subject Chat ──完整 Trajectory──→ SP 物化接口
+     │                              │
+     └── Workspace 产物 ────────────┴──→ Subject SpaceDO
+                                         ↑        ↑
+                                 Subject Chat  Evaluator Chat
+                                               （仅写评估目录）
 ```
 
-复制逻辑应记录来源 `submissionId`、目标 `submissionId`、内容 hash 和复制清单，并保持幂等。生产阶段需要为目标 Workspace 选择 SP 正式写入边界，不能绕过 Workspace 直接操作 DO 存储。
+SP 根据执行 Chat 的 `{userId, chatId}` 定位同一 SpaceDO，按 Subject Chat 幂等物化完整轨迹；Subject 产物留在原处，不复制。Evaluator 有独立的 Chat、Submission 和轨迹，写权限限定在本次评估目录。Eval 不绕过 SP 的公开 Workspace/Trajectory 边界操作 DO。
 
 ## 生命周期语义
 
@@ -112,11 +108,11 @@ Subject Chat / Workspace
 - 推送丢失、连接断开或运行时恢复时，有限次调用 `getSubmission()` 做校准；
 - 网络、LLM、网站等临时故障先查询原 Submission，再决定是否重启同一个 Chat / Workspace；
 - 手动取消、鉴权失败、配置错误不自动重启；
-- 每次执行和评估都完整收集对应 Agent 的产物与轨迹，并将 Subject 的两者复制到 Evaluation Workspace；结果评估以 Subject 产物为主，轨迹作为补充证据。
+- 每次执行和评估都完整收集对应 Agent 的产物与轨迹；SP 把完整 Subject 轨迹物化到原 SpaceDO，评估直接读取留在原处的 Subject 产物；结果评估以产物为主，轨迹作为补充证据。
 
 ## 接入真实环境前的剩余事项
 
 1. 共享或发布 SP Agent Contracts，让评估平台直接消费 SP 的公开类型；
-2. 确认 SP 侧复制 Workspace 到另一个 Chat / Workspace 的正式写入接口；
+2. SP 提供 Eval Chat 的共享 SpaceDO 绑定、评估目录写入约束，以及按执行 Chat ID 物化完整轨迹的接口；
 3. 把现有 `eval-api` PostgreSQL 迁移与存储适配器部署到目标环境，并补齐 Config 持久化、鉴权和 HTTP 控制面；
 4. SP 的公开 Agent 创建边界需支持 `framework` 选择和绑定，并实际提供 Codex/CC 云端运行；评估侧只传递选择，不重建这些启动器。

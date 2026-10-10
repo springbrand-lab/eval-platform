@@ -5,12 +5,14 @@ export type {
   CollectAgentInput,
   CollectAgentResourcesInput,
   EnsureAgentInput,
-  EvaluationInput,
+  EvaluationWorkspaceBinding,
   Harness,
   HarnessRuntimeOptions,
   InspectAgentOperationInput,
   MaterializeInitialDataInput,
   SubmitAgentInput,
+  SubjectTrajectoryMaterializationInput,
+  SubjectWorkspaceRef,
   WaitForSubmissionInput,
 } from "./model.js";
 
