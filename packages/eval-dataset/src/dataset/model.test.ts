@@ -232,6 +232,33 @@ describe("InitialMaterialsRef", () => {
 });
 
 describe("Dataset documents", () => {
+  it("canonicalizes platform UUIDs before duplicate detection without changing business IDs or resource references", () => {
+    const datasetId = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const dataId = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB";
+    const document = datasetDocumentSchema.parse({
+      dataset: { datasetId, name: "tasks" },
+      data: [{
+        dataId, userPrompt: "task", sampleId: "BUSINESS-ID",
+        initialSession: { bundleId: "BUNDLE-ID", sessionId: "SESSION-ID" },
+      }],
+    });
+    expect(document.dataset.datasetId).toBe(datasetId.toLowerCase());
+    expect(document.data[0]).toMatchObject({
+      dataId: dataId.toLowerCase(), sampleId: "BUSINESS-ID",
+      initialSession: { bundleId: "BUNDLE-ID", sessionId: "SESSION-ID" },
+    });
+    expect(datasetSnapshotSchema.parse(document)).toEqual(document);
+
+    const duplicate = datasetDocumentSchema.safeParse({
+      dataset: { name: "tasks" },
+      data: [{ dataId, userPrompt: "first" }, { dataId: dataId.toLowerCase(), userPrompt: "second" }],
+    });
+    expect(duplicate.success).toBe(false);
+    if (!duplicate.success) {
+      expect(duplicate.error.issues).toContainEqual(expect.objectContaining({ path: ["data", 1, "dataId"] }));
+    }
+  });
+
   it("leaves absent IDs absent until import admission", () => {
     expect(datasetDocumentSchema.parse({ dataset: { name: "tasks" }, data: [{ userPrompt: "task" }] }))
       .toEqual({ dataset: { name: "tasks" }, data: [{ userPrompt: "task" }] });

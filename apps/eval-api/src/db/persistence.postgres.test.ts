@@ -189,6 +189,25 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       .resolves.toEqual(reordered);
   });
 
+  it.each(["datasetId", "dataId"] as const)("imports a new Dataset with an uppercase %s and returns canonical identities", async (uppercaseField) => {
+    const { datasetService } = stores();
+    const datasetId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const dataId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const document = {
+      dataset: { datasetId: uppercaseField === "datasetId" ? datasetId.toUpperCase() : datasetId, name: "import" },
+      data: [{ dataId: uppercaseField === "dataId" ? dataId.toUpperCase() : dataId, userPrompt: "task" }],
+    };
+    const imported = await datasetService.importDataset(JSON.stringify(document), "json");
+    expect(imported).toEqual({ dataset: { datasetId, name: "import" }, data: [{ dataId, userPrompt: "task" }] });
+    await expect(datasetService.importDataset(JSON.stringify(document), "json")).resolves.toEqual(imported);
+    await expect(datasetService.getDataset(datasetId.toUpperCase())).resolves.toEqual(imported.dataset);
+    await expect(datasetService.getData(dataId.toUpperCase())).resolves.toEqual(imported.data[0]);
+    expect(JSON.parse(await datasetService.exportDataset(datasetId.toUpperCase(), "json"))).toEqual(imported);
+    await expect(datasetService.importDataset(JSON.stringify({
+      ...document, data: [{ ...document.data[0], userPrompt: "different" }],
+    }), "json")).rejects.toBeInstanceOf(DatasetIdentityConflictError);
+  });
+
   it("rolls back a missing Data attachment and protects Data referenced by a Sample", async () => {
     const { datasetService, catalog } = stores();
     const collection = await datasetService.createDataset({ name: "tasks" });

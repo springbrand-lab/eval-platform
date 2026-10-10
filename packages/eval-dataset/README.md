@@ -47,7 +47,7 @@
 - `attachData(datasetId, dataIds)`、`detachData(datasetId, dataIds)`。
 - `importDataset(source, format)`、`exportDataset(datasetId, format)`，format 必须明确为 `json` 或 `yaml`。
 
-Dataset/Data 的新实体 ID 使用原生 `crypto.randomUUID()`，与 SP 的 ID 生成方式一致；这不包括外部 Bundle、Session 或素材 ID。创建实体时输入不允许调用方覆盖实体 ID。修改是全量替换可编辑字段，不是 PATCH；省略可选字段表示移除该字段。查询不存在的单个实体返回 null。数据库读写失败原样抛出，不能转成空结果。
+Dataset/Data 的新实体 ID 使用原生 `crypto.randomUUID()`，与 SP 的 ID 生成方式一致；这不包括外部 Bundle、Session 或素材 ID。平台 Dataset/Data ID 在 schema 边界按 SP 的 Zod UUID 校验与小写规范化模式处理：导入可接受大小写混合的 UUID，查重、Store 比较、查询和返回值统一使用小写身份。只有平台 ID 会转换；外部 Bundle/Session/素材引用和 Data 业务字段保持原值。创建实体时输入不允许调用方覆盖实体 ID。修改是全量替换可编辑字段，不是 PATCH；省略可选字段表示移除该字段。查询不存在的单个实体返回 null。数据库读写失败原样抛出，不能转成空结果。
 
 Data 可以关联到多个 Dataset，关联不复制 Data。全局修改 Data 会影响所有引用它的 Dataset。重复关联和重复解除关联不报错，批量关联必须全成功或全失败。删除 Dataset 只移除 Dataset 和关联，不删除 Data；被任意 Dataset 引用的 Data 不能删除。删除已不存在的实体是无操作。列表必须按实体 ID 稳定排序；查询不存在 Dataset 的 Data 列表应抛出 `DatasetEntityNotFoundError`，不能伪装成空集合。
 
@@ -69,7 +69,7 @@ JSON 和 YAML 使用同一个结构：
 }
 ```
 
-解析不会生成 ID 或写入数据库。导入时为缺失的 `datasetId`、`dataId` 生成 UUID，返回包含实际 ID 的 `DatasetSnapshot`。导出保留全部 ID，能够恢复共享关系。没有 ID 的同一文档再次导入会创建新实体；需要原身份恢复时应使用导出文档。
+解析不会生成 ID 或写入数据库；已提供的平台 ID 在解析时规范为小写。导入时为缺失的 `datasetId`、`dataId` 生成 UUID，返回包含小写实际 ID 的 `DatasetSnapshot`。导出保留全部 ID，能够恢复共享关系。没有 ID 的同一文档再次导入会创建新实体；需要原身份恢复时应使用导出文档。
 
 整个导入必须一次原子提交：新 Dataset 可以复用已有、内容完全相同的 Data ID；同一个 ID 对应不同内容时抛出 `DatasetIdentityConflictError`，不覆盖原记录。已有 Dataset 只有在元数据、Data ID 集合和每条 Data 内容都相同时才视为重复导入，Data 的排列顺序不构成冲突；否则整批拒绝。一个文档内不能重复声明同一个 Data ID。
 
@@ -85,4 +85,4 @@ Dataset、文档外壳和资源引用使用严格 schema；Data 允许任意其�
 - `getDatasetSnapshot()` 必须返回同一读取时点的 Dataset、关联和 Data 内容，不能拼接不同读取时点的结果。
 - 领域失败使用 `DatasetEntityNotFoundError`、`DatasetIdentityConflictError`、`DataInUseError`；不引入 HTTP 错误或掩盖未知 I/O 错误。
 
-SP 的 `@springbrand/utils` 和数据库客户端目前是其私有 workspace，不能跨仓库导入私有源码或复制这些实现。本包使用原生 UUID/JSON、Zod/YAML 和 `jsonc-parser` 的严格遍历能力检查重复 JSON 字段，不自己实现 JSON 语法解析器；真实数据库客户端、事务执行和 Workspace 素材能力由其所属边界提供。
+SP 的 `@springbrand/utils` 和数据库客户端目前是其私有 workspace，不能跨仓库导入私有源码或复制其数据库实现。本包使用原生 UUID/JSON、Zod/YAML 和 `jsonc-parser` 的严格遍历能力检查重复 JSON 字段，并在自己的 Zod schema 中沿用 SP 已采用的 UUID 校验与小写规范化模式；真实数据库客户端、事务执行和 Workspace 素材能力由其所属边界提供。

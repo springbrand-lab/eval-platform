@@ -52,8 +52,10 @@ const jsonRecordSchema = jsonValueSchema.pipe(z.custom<Readonly<Record<string, J
   "Expected a JSON object",
 ));
 
-export const datasetIdSchema = z.uuid();
-export const dataIdSchema = z.uuid();
+// Match SP packages/http/src/mcp-observation.ts for UUID identities persisted in PostgreSQL.
+const platformIdSchema = z.uuid().transform((value) => value.toLowerCase());
+export const datasetIdSchema = platformIdSchema;
+export const dataIdSchema = platformIdSchema;
 
 export const initialSessionRefSchema = z.strictObject({
   bundleId: identifierSchema,
