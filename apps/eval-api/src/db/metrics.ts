@@ -53,17 +53,17 @@ export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): Me
           eligibleSampleIds = [query.sampleId];
         }
 
-        const conditions: SQL[] = [...samplingScopeConditions];
-        if (query.samplingId !== undefined) conditions.push(eq(samplings.samplingId, query.samplingId));
+        const samplingConditions: SQL[] = [...samplingScopeConditions];
+        if (query.samplingId !== undefined) samplingConditions.push(eq(samplings.samplingId, query.samplingId));
         if (eligibleSampleIds !== undefined && eligibleSampleIds.length > 0) {
-          conditions.push(inArray(samplings.sampleId, eligibleSampleIds));
+          samplingConditions.push(inArray(samplings.sampleId, eligibleSampleIds));
         }
         if (runSamplingIds !== undefined && runSamplingIds.length > 0) {
-          conditions.push(inArray(samplings.samplingId, runSamplingIds));
+          samplingConditions.push(inArray(samplings.samplingId, runSamplingIds));
         }
         const selectedSamplings = (eligibleSampleIds?.length === 0 || runSamplingIds?.length === 0)
           ? [] : await transaction.select().from(samplings)
-            .where(and(...conditions)).orderBy(samplings.samplingId);
+            .where(and(...samplingConditions)).orderBy(samplings.samplingId);
         const selectedSamplingIds = selectedSamplings.map((row) => row.samplingId);
         const samplesInScope = await readSamples(transaction, project.ownerUserId, unique([
           ...selectedSamplings.map((row) => row.sampleId),
