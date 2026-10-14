@@ -23,7 +23,8 @@ export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): Me
         if (!project) throw new MetricsQueryError(`Unknown Project ${query.projectId}`);
 
         const requestedRunIds = query.runIds;
-        const selectedRuns = requestedRunIds === undefined ? undefined : await readRunRecords(transaction, requestedRunIds);
+        const selectedRuns = requestedRunIds === undefined
+          ? undefined : await readRunRecords(transaction, requestedRunIds, project.ownerUserId);
         if (selectedRuns && (selectedRuns.length !== requestedRunIds?.length
           || selectedRuns.some((run) => run.projectId !== project.projectId))) {
           throw new MetricsQueryError("Unknown Run in Project scope");
@@ -78,8 +79,9 @@ export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): Me
           const memberships = selectedSamplingIds.length === 0 ? [] : await transaction
             .selectDistinct({ runId: runSamplings.runId }).from(runSamplings)
             .innerJoin(runs, eq(runSamplings.runId, runs.runId))
-            .where(and(eq(runs.projectId, project.projectId), inArray(runSamplings.samplingId, selectedSamplingIds)));
-          runRecords = await readRunRecords(transaction, memberships.map((row) => row.runId));
+            .where(and(eq(runs.ownerUserId, project.ownerUserId), eq(runs.projectId, project.projectId),
+              inArray(runSamplings.samplingId, selectedSamplingIds)));
+          runRecords = await readRunRecords(transaction, memberships.map((row) => row.runId), project.ownerUserId);
         }
 
         const allowedEvaluationIds = selectedRuns === undefined

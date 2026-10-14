@@ -179,14 +179,20 @@ function createRuntimeStore(db: EvalDb, ownerUserId?: string): RuntimeStore & Ru
         const selectedSamples = await transaction.select({
           sampleId: samples.sampleId,
           ownerUserId: samples.ownerUserId,
-        }).from(samples).where(inArray(samples.sampleId, records.map((record) => record.sampleId)));
+        }).from(samples).where(and(
+          eq(samples.ownerUserId, project.ownerUserId),
+          inArray(samples.sampleId, records.map((record) => record.sampleId)),
+        ));
         const sampleOwner = new Map(selectedSamples.map((sample) => [sample.sampleId, sample.ownerUserId]));
         if (records.some((record) => sampleOwner.get(record.sampleId) !== project.ownerUserId)) {
           throw new Error("Run contains a Sample outside its Project owner scope");
         }
         if (run.config.operation !== "evaluation") {
           const [dataset] = await transaction.select({ ownerUserId: datasets.ownerUserId })
-            .from(datasets).where(eq(datasets.datasetId, run.config.execution.datasetId)).for("share");
+            .from(datasets).where(and(
+              eq(datasets.ownerUserId, project.ownerUserId),
+              eq(datasets.datasetId, run.config.execution.datasetId),
+            )).for("share");
           if (dataset?.ownerUserId !== project.ownerUserId) {
             throw new Error("Run uses a Dataset outside its Project owner scope");
           }
@@ -211,7 +217,8 @@ function createRuntimeStore(db: EvalDb, ownerUserId?: string): RuntimeStore & Ru
 
         if (run.phases[0] === "evaluation") {
           const existingRecords = await transaction.select().from(samplings)
-            .where(inArray(samplings.samplingId, run.samplingIds)).for("share");
+            .where(and(eq(samplings.ownerUserId, project.ownerUserId),
+              inArray(samplings.samplingId, run.samplingIds))).for("share");
           const byId = new Map(existingRecords.map((row) => [row.samplingId, row]));
           for (const record of records) {
             const stored = byId.get(record.samplingId);
