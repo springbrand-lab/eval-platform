@@ -2,13 +2,14 @@ import path from "node:path";
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError } from "@eval-platform/eval-dataset";
 import { createMetrics, MetricsQueryError } from "@eval-platform/eval-metrics";
-import { createConfigResolver, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
+import { createConfigResolver, RuntimeEvaluationSelectionError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigStore, createPostgresDatasetStore, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, startEvalRunWorker } from "../index.js";
+import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, startEvalRunWorker } from "../index.js";
 import { isForeignKeyFailure } from "./client.js";
+import { createPostgresProjectRunReader } from "./run-view.js";
 import { readRunRecords } from "./runtime.js";
 
 const connection = process.env.DATABASE_URL;
@@ -140,7 +141,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const project = await services.catalog.createProject({ name: "my project" });
     const dataset = await services.datasetService.createDataset({ name: "shared tasks" });
     const data = await services.datasetService.createData({
-      userPrompt: "build a page", sampleId: "business-id", extra: { original: true, nullable: null },
+      userPrompt: "build a page", evalPrompt: "Judge the result",
+      sampleId: "business-id", extra: { original: true, nullable: null },
       initialSession: { bundleId: "sessions", sessionId: "seed" },
       initialMaterials: { bundleId: "materials", materialId: "workspace" },
     });
@@ -567,6 +569,175 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await foreignCatalog.selectAllSuccessfulSamplingIds(project.projectId)).toEqual([]);
   });
 
+  it("serves owner-scoped independent evaluation selection, idempotent admission and results over HTTP", async () => {
+    const { project, dataset, sample, runtime } = await setup();
+    const sampling = makeSampling(project.projectId, sample.sampleId, "sampling-api-a");
+    const secondSampling = makeSampling(project.projectId, sample.sampleId, "sampling-api-b");
+    await runtime.createRunWithSamplings(makeRun(project.projectId, sampling, dataset.datasetId), [sampling], []);
+    await runtime.createRunWithSamplings(makeRun(project.projectId, secondSampling, dataset.datasetId), [secondSampling], []);
+    const staleSelection = { ...sampling, execution: { status: "succeeded" as const } };
+    const rejectedEvaluation = makeEvaluation(sampling.samplingId);
+    const rejectedRun = makeRun(project.projectId, staleSelection, dataset.datasetId, {
+      phases: ["evaluation"], config: evaluationConfig, evaluationIds: [rejectedEvaluation.evaluationId],
+      requestIdentity: { idempotencyKey: "stale-selection", requestFingerprint: "stale-selection" },
+    });
+    await expect(runtime.createRunWithSamplings(rejectedRun, [staleSelection], [rejectedEvaluation]))
+      .rejects.toBeInstanceOf(RuntimeEvaluationSelectionError);
+    expect(await runtime.getRun(rejectedRun.runId)).toBeNull();
+    await runtime.updateSampling({ ...sampling, execution: { status: "succeeded" } }, sampling);
+    await runtime.updateSampling({ ...secondSampling, execution: { status: "succeeded" } }, secondSampling);
+
+    const configs = configStore("user-A");
+    const config = await configs.createEvaluationConfig({
+      evaluationHarness: {
+        kind: "sp", framework: "sp", agentConfig: { ownerUserId: "user-A", userAgentId: "judge" },
+      },
+      evaluationConcurrency: 1,
+    });
+    expect(await createPostgresConfigReader(database.db, "user-B").getEvaluationConfig(config.configId)).toBeNull();
+    const api = createPostgresIndependentEvaluationApi({
+      db: database.db,
+      release,
+      spClient: {
+        async verifySession(token) {
+          if (token === "alice-token") return { id: "user-A", role: "user" };
+          if (token === "bob-token") return { id: "user-B", role: "user" };
+          return null;
+        },
+      },
+    });
+    const path = `/api/projects/${project.projectId}`;
+    const send = (token: string, suffix: string, init: RequestInit = {}) => api.handle(new Request(`http://eval-api.test${path}${suffix}`, {
+      ...init,
+      headers: { Authorization: `Bearer ${token}`, ...init.headers },
+    }));
+    const selected = await send("alice-token", "/samplings/successful/ids");
+    expect(selected.status).toBe(200);
+    expect(await selected.json()).toEqual({ samplingIds: [sampling.samplingId, secondSampling.samplingId] });
+    expect((await send("bob-token", "/samplings/successful/ids")).status).toBe(404);
+
+    const submitBody = JSON.stringify({
+      evaluationConfigId: config.configId,
+      samplingIds: [sampling.samplingId, secondSampling.samplingId], idempotencyKey: "first-click",
+    });
+    const submit = () => send("alice-token", "/evaluations", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: submitBody,
+    });
+    const [first, parallel] = await Promise.all([submit(), submit()]);
+    expect(first.status).toBe(202);
+    expect(parallel.status).toBe(202);
+    const handle = await first.json() as { runId: string; samplingIds: readonly string[] };
+    expect(await parallel.json()).toEqual(handle);
+    await configs.updateEvaluationConfig(config.configId, {
+      evaluationHarness: config.evaluationHarness, evaluationConcurrency: 2,
+    });
+    expect(await (await submit()).json()).toEqual(handle);
+    const storedRun = await runtime.getRun(handle.runId);
+    expect(storedRun?.config.operation).toBe("evaluation");
+    expect(storedRun?.config.operation === "evaluation" ? storedRun.config.evaluation.evaluationConcurrency : null).toBe(1);
+    expect(storedRun?.evaluationIds).toHaveLength(2);
+    const status = await send("alice-token", `/runs/${handle.runId}`);
+    expect(status.status).toBe(200);
+    expect(await status.json()).toEqual({ run: expect.objectContaining({
+      runId: handle.runId, projectId: project.projectId,
+      samplingIds: [sampling.samplingId, secondSampling.samplingId],
+      evaluationIds: storedRun!.evaluationIds, phase: "evaluation", status: "queued",
+    }) });
+    const result = await send("alice-token", `/runs/${handle.runId}/evaluations`);
+    expect(result.status).toBe(200);
+    expect(await result.json()).toEqual({ evaluations: [
+      expect.objectContaining({
+        evaluationId: storedRun!.evaluationIds[0], samplingId: sampling.samplingId,
+        status: { status: "queued" },
+      }),
+      expect.objectContaining({
+        evaluationId: storedRun!.evaluationIds[1], samplingId: secondSampling.samplingId,
+        status: { status: "queued" },
+      }),
+    ] });
+    expect((await send("bob-token", `/runs/${handle.runId}/evaluations`)).status).toBe(404);
+    expect((await send("alice-token", "/runs/missing")).status).toBe(404);
+    expect((await send("alice-token", "/evaluations", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        evaluationConfigId: config.configId, samplingIds: ["missing-sampling"], idempotencyKey: "bad-selection",
+      }),
+    })).status).toBe(409);
+    expect((await send("alice-token", "/evaluations", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        evaluationConfigId: "missing", samplingIds: [sampling.samplingId], idempotencyKey: "missing-config",
+      }),
+    })).status).toBe(404);
+    expect((await runtime.listEvaluations(sampling.samplingId))).toHaveLength(1);
+    expect((await runtime.listEvaluations(secondSampling.samplingId))).toHaveLength(1);
+  });
+
+  it("admits and reads an all-selected Evaluation across SQL batches", async () => {
+    const { project, dataset, sample, runtime } = await setup();
+    const records = Array.from({ length: 1_001 }, (_, index) => (
+      makeSampling(project.projectId, sample.sampleId, `batch-sampling-${index}`)
+    ));
+    const executionRun = makeRun(project.projectId, records[0]!, dataset.datasetId, {
+      samplingIds: records.map((record) => record.samplingId),
+    });
+    await runtime.createRunWithSamplings(executionRun, records, []);
+    await database.db.execute(sql`UPDATE eval_samplings
+      SET facts = jsonb_set(facts, '{execution,status}', '"succeeded"'::jsonb)
+      WHERE project_id = ${project.projectId}`);
+    const config = await configStore("user-A").createEvaluationConfig({
+      evaluationHarness: {
+        kind: "sp", framework: "sp", agentConfig: { ownerUserId: "user-A", userAgentId: "judge" },
+      },
+      evaluationConcurrency: 1,
+    });
+    const api = createPostgresIndependentEvaluationApi({
+      db: database.db, release,
+      spClient: { async verifySession() { return { id: "user-A", role: "user" }; } },
+    });
+    const path = `http://eval-api.test/api/projects/${project.projectId}`;
+    const headers = { Authorization: "Bearer session" };
+    const selection = await api.handle(new Request(`${path}/samplings/successful/ids`, { headers }));
+    expect(selection.status).toBe(200);
+    const selectedIds = (await selection.json() as { samplingIds: string[] }).samplingIds;
+    expect(selectedIds).toHaveLength(records.length);
+    const response = await api.handle(new Request(`${path}/evaluations`, {
+      method: "POST", headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        evaluationConfigId: config.configId, samplingIds: selectedIds, idempotencyKey: "batch-evaluation",
+      }),
+    }));
+    expect(response.status).toBe(202);
+    const handle = await response.json() as { runId: string; samplingIds: string[] };
+    expect(handle.samplingIds).toEqual(selectedIds);
+    const view = await createPostgresProjectRunReader(database.db, "user-A")(
+      project.projectId, handle.runId,
+    );
+    expect(view?.run.samplingIds).toEqual(selectedIds);
+    expect(view?.run.evaluationIds).toHaveLength(selectedIds.length);
+    expect(view?.evaluations).toHaveLength(selectedIds.length);
+    expect(view?.evaluations.map((evaluation) => evaluation.samplingId)).toEqual(selectedIds);
+  }, 30_000);
+
+  it("rejects an oversized Project all-selection without returning a partial ID list", async () => {
+    const { project, sample } = await setup();
+    await database.db.execute(sql`INSERT INTO eval_samplings
+      (sampling_id, owner_user_id, project_id, sample_id, facts)
+      SELECT 'limit-sampling-' || n, 'user-A', ${project.projectId}, ${sample.sampleId},
+        '{"execution":{"status":"succeeded"},"subjectAgent":{"ownerUserId":"owner","userAgentId":"subject"},"executionAttempts":[]}'::jsonb
+      FROM generate_series(1, 10001) AS n`);
+    const api = createPostgresIndependentEvaluationApi({
+      db: database.db, release,
+      spClient: { async verifySession() { return { id: "user-A", role: "user" }; } },
+    });
+    const response = await api.handle(new Request(
+      `http://eval-api.test/api/projects/${project.projectId}/samplings/successful/ids`,
+      { headers: { Authorization: "Bearer session" } },
+    ));
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: expect.objectContaining({ code: "SELECTION_TOO_LARGE" }) });
+  }, 30_000);
+
   it("admits one independent EvaluationRecord for concurrent requests with the same key", async () => {
     const { runtime, project, dataset, sample } = await setup();
     const sampling = makeSampling(project.projectId, sample.sampleId);
@@ -918,6 +1089,12 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await userRuntime.getRun(runA.runId)).toEqual(runA);
     expect(await userRuntime.getRun(runB.runId)).toBeNull();
     expect(await userRuntime.getSampling(samplingB.samplingId)).toBeNull();
+    expect(await userRuntime.getSamplings([samplingB.samplingId, samplingA.samplingId, "missing"])).toEqual([
+      null, samplingA, null,
+    ]);
+    expect(await catalog.getSamples([otherSample.sampleId, sample.sampleId, "missing"])).toEqual([
+      null, sample, null,
+    ]);
     expect(await userRuntime.findRunByIdempotencyKey(other.projectId, runB.requestIdentity.idempotencyKey)).toBeNull();
     expect(await otherRuntime.getRun(runB.runId)).toEqual(runB);
     await expect(userRuntime.updateSampling(samplingB, samplingB)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
@@ -970,8 +1147,10 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const userRuntime = createPostgresRuntimeStore(database.db, "user-A", release);
     const foreignRuntime = createPostgresRuntimeStore(database.db, "user-B", release);
     expect(await userRuntime.getEvaluation(judge.evaluationId)).toEqual(judge);
+    expect(await userRuntime.getEvaluations(["missing", judge.evaluationId])).toEqual([null, judge]);
     expect(await userRuntime.listEvaluations(record.samplingId)).toEqual([judge]);
     expect(await foreignRuntime.getEvaluation(judge.evaluationId)).toBeNull();
+    expect(await foreignRuntime.getEvaluations([judge.evaluationId])).toEqual([null]);
     expect(await foreignRuntime.listEvaluations(record.samplingId)).toEqual([]);
     await expect(foreignRuntime.updateEvaluation(judge, judge)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
   });

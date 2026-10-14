@@ -23,6 +23,8 @@
 
 这些接口属于运行时控制面，不绑定具体的 HTTP、Web 或 CLI 实现。
 
+只负责 Run 准入的 API 进程使用 `createEvalRunAdmission({ sourceCommit, catalog, configResolver, store })`，取得 `start()`、`evaluate()`、`pipeline()` 三个提交接口；`sourceCommit` 是当前 Eval SP 发布的完整 commit，随新 Run 保存。准入进程不持有 SP Harness 凭证，也不能调用 `resume()`。执行器仍使用带真实 Harness 的 `createEvalRunResumer()`。完整 `createEvalRuntime()` 保留两类能力的组合入口。
+
 ## 文件职责
 
 ```text
@@ -52,11 +54,13 @@ src/
 
 配置、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。`RuntimeStore` 是持久化端口，实际实现由 API/DO/数据库层注入；Run、Sampling、EvaluationRecord 和本次生效配置快照的聚合写入必须由 Store 在一个持久化边界内原子完成。
 
-三个启动入口只原子提交运行事实并返回 `RunHandle`，不在请求进程里执行 Agent。应用层唤醒单实例执行器调用 `resume(runId)`；独立 Worker 可用 `createEvalRunResumer({ getSample, store, harness })`，无需注入启动接口的 Catalog 与 ConfigResolver。恢复时使用 Run 已保存的生效配置和 Sample 引用，跳过已完成的阶段，并按 Attempt 原 `submissionId`、操作类型和幂等键向 SP 校准。已完成 Agent 的资源或产物保存失败只补收尾，不重新提交或重启。进程中断后遗留的未完成阶段由执行器接手；已保存的失败 Attempt 若 SP 校准暂不可用，仍保持待恢复，不能代替重启决策进入证据收尾。只有确认失败且重试决策拒绝后，Subject 证据保存完才写为 `failed`。定时扫描对已终结 Agent 只补收未完成证据，不隐式重试 Agent。`RuntimeRecoveryStore` 仅供应用扫描未完成 Run，Run 当前状态仍只从子记录推导。
+三个启动入口只原子提交运行事实并返回 `RunHandle`，不在请求进程里执行 Agent。应用层唤醒单实例执行器调用 `resume(runId)`；独立 Worker 可用 `createEvalRunResumer({ getSamples, store, harness })`，无需注入启动接口的 Catalog 与 ConfigResolver。恢复时使用 Run 已保存的生效配置和 Sample 引用，跳过已完成的阶段，并按 Attempt 原 `submissionId`、操作类型和幂等键向 SP 校准。已完成 Agent 的资源或产物保存失败只补收尾，不重新提交或重启。进程中断后遗留的未完成阶段由执行器接手；已保存的失败 Attempt 若 SP 校准暂不可用，仍保持待恢复，不能代替重启决策进入证据收尾。只有确认失败且重试决策拒绝后，Subject 证据保存完才写为 `failed`。定时扫描对已终结 Agent 只补收未完成证据，不隐式重试 Agent。`RuntimeRecoveryStore` 仅供应用扫描未完成 Run，Run 当前状态仍只从子记录推导。
 
 `ExecutionConfig` 是完整的执行方案，包含 Dataset、可选 Sample 子集、Sampling 次数、Subject Harness、执行并发和重试策略。`EvaluationConfig` 包含 Evaluation Harness、评估并发和重试策略。`PipelineConfig` 只组合一个 ExecutionConfig 和一个 EvaluationConfig，不是新的 Runtime 阶段。Config ID 由配置创建函数自动生成；实际运行请求只引用 `executionConfigId`、`evaluationConfigId` 或 `pipelineConfigId`，不再重复携带这些配置字段。`ConfigResolver` 在启动前统一读取、校验和归一化配置，输出带明确默认值的 `Resolved*Config`；Run 同时保存本次实际生效的不可变配置快照，不引入 version。Runtime 将 `runtime` 选项传给 Harness；SP Harness 在创建 Chat 和提交 Prompt 时将其发送给 SP，在等待终态时使用其中的超时设置。素材准备的 SP 接口不接收 `runtime`，校准和产物收集也不使用这些选项。Subject 轨迹物化按 Subject Chat 身份幂等，不把评估运行选项计入物化身份。当前 Runtime 对未实现的 Remote Harness 明确报错，不会丢弃 `runOptions`。
 
 `Data.userPrompt` 只作为 Subject 的提交消息；每条 Data 可另存 `evalPrompt`。`evaluate()` 和 `pipeline()` 在 Run 准入前要求所选 Sample 的 `evalPrompt` 非空。Evaluator 初始化数据以 `evalPrompt` 作为自己的 `userPrompt`，不加载 Subject 的初始 Session，也不把 `evalPrompt` 或 Subject 的 `userPrompt` 作为重复业务字段；评估提交直接使用原文，不拼接固定指令。Subject 初始化数据不包含 `evalPrompt`。
+
+`ConfigResolver` 找不到配置时抛出带配置种类的 `ConfigNotFoundError`，供控制面返回明确的 404；其他配置校验错误仍由解析器直接报告。
 
 SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harness，`framework` 必须显式选择 `sp`、`codex` 或 `cc`（Claude Code）。三者使用同一套生命周期，由 `ensureAgent` 将所选框架和 Agent Config 交给 SP 创建；返回的 Handle 必须对应请求的框架，后续提交、重启、等待和收集沿用该 Handle。评估 Agent 固定 `kind: "sp", framework: "sp"`，仍通过 `agentConfig` 选择。框架写入有效配置快照并参与请求幂等指纹，不存在静默降级或旧配置兼容默认值。当前只完成评估侧契约和接线，SP 云端启动 Codex/CC 的实现仍由 SP 提供。
 
@@ -72,12 +76,13 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
 6. 推送丢失、连接断开或运行时恢复时，`inspectAgentOperation` 只做一次或有限次状态校准，不作为主流程的持续轮询。
 7. 评估平台只消费 SP 的公开契约，不依赖 SP 的 DO SQLite、内部类或 Web 投影。
 8. 使用新 `idempotencyKey` 主动调用 `evaluate()` 会新建评估记录并在启动前分配新的评估 ID；复用旧 key 只返回原 Run。被评估 Agent 的 ID 保持不变，旧评估记录不被覆盖。
+   已选 Sampling 缺失、不属于请求 Project 或执行未成功时抛出 `RuntimeEvaluationSelectionError`，供 API 映射为候选已失效的冲突响应。`getRun()` 查不到 Run 时抛出 `RuntimeRunNotFoundError`，供 API 返回 404。
 9. `start()`、`pipeline()` 和 `evaluate()` 不分别写 Run、Sampling 和 EvaluationRecord。三者都使用 `createRunWithSamplings()` 原子提交；命令失败时不能留下半批状态或清掉旧评估记录。
 10. `start()`、`pipeline()` 和 `evaluate()` 都必须带调用方 `idempotencyKey`，同一 Project 内唯一。同一 Runtime 实例把同一 Project/key 的并发提交同步起来：相同操作、配置 ID 和评估 Sampling ID 顺序共用第一次提交的 Promise 和生效配置；不同请求事实立即冲突，提交结束即清理内存条目。后续重放先按 key 查找原 Run，使用已保存的生效配置快照校验请求事实；相同事实返回原 `RunHandle`，不同事实冲突。Store 在 Run/Sampling/EvaluationRecord 原子事务内二次查重，仅新 Run 唤醒 Worker；内存同步不取代持久化幂等。
 11. `RuntimeRunRecord` 只保存不可变的阶段范围 `phases`，不保存当前阶段或 Run 状态；`RunSnapshot.phase/status` 由 `getRun()` 根据关联 Sampling 即时推导，是查询投影而不是第二份权威状态。单独执行范围为 `["execution"]`，单独评估为 `["evaluation"]`，联跑为 `["execution", "evaluation"]`；没有 `pipeline` 阶段或 Run kind。
 12. 联跑刚创建且所有 Execution Sampling 仍为 `queued` 时，Run 也必须是 `queued`。执行尚未结束时当前阶段为 `execution`；执行结束且存在成功 Sampling 后当前阶段为 `evaluation`，交接等待不能提前显示成功，成功 Sampling 的评估全部结束前 Run 仍是运行态。执行失败的 Sampling 不启动评估 Agent，其 EvaluationRecord 标记为 `cancelled`。
 13. `SamplingState` 只保存单次执行状态，不保存评估结果、`Sample`、JSON、初始 Session 引用、初始素材引用或 metadata；评估由独立 `EvaluationRecord` 通过 `samplingId` 关联。
-14. 执行使用临时 `RuntimeSamplingContext`，评估使用临时 `RuntimeEvaluationContext`，二者都不能整体交给 Store。独立评估先通过 `RuntimeCatalog.getSample()` 按不同 Sample ID 批量关联输入，再原子提交新的 EvaluationRecord；恢复时按持久化 Sample ID 重建这些临时 Context。输入缺失或返回的 Sample ID 不匹配时，不清除已有评估结果，也不启动新评估 Agent。
+14. 执行使用临时 `RuntimeSamplingContext`，评估使用临时 `RuntimeEvaluationContext`，二者都不能整体交给 Store。独立评估先通过 `RuntimeStore.getSamplings()` 按请求顺序读取 Sampling，再通过 `RuntimeCatalog.getSamples()` 按不同 Sample ID 批量关联输入，最后原子提交新的 EvaluationRecord；恢复时按持久化 Sample ID 重建这些临时 Context。批量读取按输入顺序返回记录或 `null`，输入缺失或返回的 ID 不匹配时，不清除已有评估结果，也不启动新评估 Agent。
 15. `getSampling()` 返回扁平的 `SamplingSnapshot`，只复制公开的 Sampling 字段，不暴露 Store 包装结构、`Sample` 或 Runtime 临时对象。
 16. 除共同的 `idempotencyKey` 外，`start()` 只接收项目和 `executionConfigId`；`evaluate()` 只接收项目、确定的 Sampling IDs 和 `evaluationConfigId`；`pipeline()` 只接收项目和 `pipelineConfigId`。Dataset 和 Sampling 次数由 ExecutionConfig 决定，评估 Agent 由 EvaluationConfig 决定。
 17. `Sample` 使用 `{ sampleId, data: Data }`，平台样本身份与完整业务 Data 分开，不兼容旧的扁平结构。`Sample.data.userPrompt` 必填且不能为空白，作为 Subject 当前任务原样发送；其他 JSON 业务字段通过 `materializeInitialData().data` 交给 SP，Subject 输入去除平台 `dataId` 和评估专用 `evalPrompt`，业务 `data.sampleId` 不覆盖、不删除。Evaluator 输入将 `evalPrompt` 映射成自己的 `userPrompt`，去除 Subject 的 `userPrompt` 和初始 Session。`initialSession` 和 `initialMaterials` 都可省略；提供时分别使用外部 `bundleId + sessionId`、`bundleId + materialId`，两个 ID 必须齐全，Runtime 不生成资源 ID。Session 正文不进入 Dataset、Sample、Sampling 或执行 prompt。SP 公开能力将素材与 Session 副本落入目标 DO 的存储，由所选框架加载并重建 Context；Runtime 等准备完成后才发送相应阶段的原始 prompt，不自己解析 Session、拼接消息或把扩展数据包成新 prompt。

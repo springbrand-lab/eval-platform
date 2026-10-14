@@ -1,8 +1,9 @@
 import { createEvalRunResumer } from "@eval-platform/eval-runtime";
 import { dataSchema } from "@eval-platform/eval-dataset";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Pool } from "pg";
 import { createEvalDb } from "./db/client.js";
+import { sqlBatches } from "./db/batch.js";
 import { createPostgresWorkerRuntimeStore } from "./db/runtime.js";
 import { data, samples } from "./db/schema.js";
 import { createSpHarness, type SpHarnessOptions } from "./sp/harness.js";
@@ -23,19 +24,26 @@ export async function startSpEvalRunWorkerProcess(options: SpEvalRunWorkerProces
   const db = createEvalDb(options.pool);
   const store = createPostgresWorkerRuntimeStore(db);
   const runtime = createEvalRunResumer({
-    async getSample(sampleId) {
+    async getSamples(sampleIds) {
       // Only trusted, persisted Run facts reach this cross-user recovery reader.
-      const [row] = await db.select({
-        sampleId: samples.sampleId,
-        dataId: data.dataId,
-        content: data.content,
-      }).from(samples).innerJoin(data, and(
-        eq(samples.dataId, data.dataId),
-        eq(samples.ownerUserId, data.ownerUserId),
-      )).where(eq(samples.sampleId, sampleId));
-      return row
-        ? { sampleId: row.sampleId, data: dataSchema.parse({ ...row.content, dataId: row.dataId }) }
-        : null;
+      const byId = new Map<string, { sampleId: string; data: ReturnType<typeof dataSchema.parse> }>();
+      for (const batch of sqlBatches([...new Set(sampleIds)])) {
+        const rows = await db.select({
+          sampleId: samples.sampleId,
+          dataId: data.dataId,
+          content: data.content,
+        }).from(samples).innerJoin(data, and(
+          eq(samples.dataId, data.dataId),
+          eq(samples.ownerUserId, data.ownerUserId),
+        )).where(inArray(samples.sampleId, batch));
+        for (const row of rows) {
+          byId.set(row.sampleId, {
+            sampleId: row.sampleId,
+            data: dataSchema.parse({ ...row.content, dataId: row.dataId }),
+          });
+        }
+      }
+      return sampleIds.map((sampleId) => byId.get(sampleId) ?? null);
     },
     harness: createSpHarness(options.sp),
     store,

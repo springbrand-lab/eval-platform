@@ -11,7 +11,8 @@ export const PROJECT = { projectId: "project-1", ownerUserId: "owner-1", name: "
 export const SUBJECT = { ownerUserId: "owner-1", userAgentId: "subject-1" };
 export const EVALUATOR = { ownerUserId: "owner-1", userAgentId: "judge-1" };
 export const DATA = {
-  dataId: "10000000-0000-4000-8000-000000000001", userPrompt: "Build a page", category: "frontend",
+  dataId: "10000000-0000-4000-8000-000000000001", userPrompt: "Build a page",
+  evalPrompt: "Judge the finished page", category: "frontend",
   initialSession: { bundleId: "session-bundle", sessionId: "seed-session" },
   initialMaterials: { bundleId: "material-bundle", materialId: "seed-files" },
 };

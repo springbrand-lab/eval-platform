@@ -33,8 +33,10 @@ function runtimeFixture() {
     },
     async updateSampling(record) { samplings.set(record.samplingId, structuredClone(record)); },
     async getSampling(id) { return structuredClone(samplings.get(id) ?? null); },
+    async getSamplings(ids) { return ids.map((id) => structuredClone(samplings.get(id) ?? null)); },
     async updateEvaluation(record) { evaluations.set(record.evaluationId, structuredClone(record)); },
     async getEvaluation(id) { return structuredClone(evaluations.get(id) ?? null); },
+    async getEvaluations(ids) { return ids.map((id) => structuredClone(evaluations.get(id) ?? null)); },
     async listEvaluations(id) { return structuredClone([...evaluations.values()].filter((judge) => judge.samplingId === id)); },
   };
   const catalog: RuntimeCatalog = {
@@ -44,6 +46,7 @@ function runtimeFixture() {
     async listData() { return [DATA]; },
     async listSamples() { return [SAMPLE]; },
     async getSample(id) { return id === SAMPLE.sampleId ? SAMPLE : null; },
+    async getSamples(ids) { return ids.map((id) => id === SAMPLE.sampleId ? SAMPLE : null); },
   };
   const configs: ConfigStore = {
     async getExecutionConfig(configId) {
@@ -64,6 +67,7 @@ function runtimeFixture() {
       return {
         samplingId: input.samplingId,
         chatId: input.chatId,
+        ownerUserId: input.agentConfig.ownerUserId,
         role: input.role,
         framework: input.framework,
         ...(input.evaluationWorkspace === undefined ? {} : { evaluationWorkspace: input.evaluationWorkspace }),

@@ -59,7 +59,7 @@ eval-metrics: evaluators/ aggregation/ reporting/
 
 同一 Runtime 实例内，待准入的相同 Project/key 请求先比较调用方选择的事实：一致则共用首次提交的 Promise 与配置快照，即使提交期间配置被编辑也只返回同一个 Run；不一致立即冲突。请求结束后清理内存条目；持久化 Store 仍负责最终查重，内存不是权威状态。跨实例的唯一约束仍阻止重复建批，但进程内同步不保证配置同时变更时跨实例调用获得相同响应。
 
-Eval API 的用户范围 Catalog 以同一 Project、可选 Sample 和执行成功状态筛选 Sampling，并提供分页与按 ID 稳定排序的全选查询。控制面接入时把全选得到的固定 ID 列表交给 `evaluate()`，重试沿用原列表与 key，不重新解析动态筛选条件；HTTP 调用尚未接入。选择、提交和错误语义见 [独立评估入口契约](eval-independent-evaluation-entry.md)。
+Eval API 的用户范围 Catalog 以同一 Project、可选 Sample 和执行成功状态筛选 Sampling，并提供分页与按 ID 稳定排序的全选查询。独立评估 HTTP 路由把调用方提交的固定 ID 列表交给 `evaluate()`，重试沿用原列表与 key，不重新解析动态筛选条件；它还提供 Run 和 Evaluation 结果查询。选择、提交和错误语义见 [独立评估入口契约](eval-independent-evaluation-entry.md)。
 
 ## 核心实体
 

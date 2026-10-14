@@ -21,8 +21,11 @@ import type {
 import type {
   EvalRuntime,
   EvalRuntimeDependencies,
+  EvalRunAdmission,
+  EvalRunAdmissionDependencies,
   EvalRunResumer,
   EvalRunResumerDependencies,
+  RuntimeAdmissionCatalog,
   RuntimeCatalog,
   RuntimeEvaluationContext,
   Sample,
@@ -58,6 +61,21 @@ import { isPendingStatus, toRunSnapshot, toSamplingSnapshot } from "./projection
 
 type RuntimeStageDependencies = ExecutionStageDependencies & EvaluationStageDependencies;
 
+/** The chosen Sampling set cannot be admitted as an independent evaluation. */
+export class RuntimeEvaluationSelectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RuntimeEvaluationSelectionError";
+  }
+}
+
+export class RuntimeRunNotFoundError extends Error {
+  constructor(runId: string) {
+    super(`Unknown run ${runId}`);
+    this.name = "RuntimeRunNotFoundError";
+  }
+}
+
 function defaultIdFactory(): string {
   return crypto.randomUUID();
 }
@@ -83,18 +101,78 @@ function requireDistinctIds(ids: readonly string[], field: string): void {
   }
 }
 
-class RunResumer implements EvalRunResumer {
+class RunReader {
   protected readonly store: EvalRunResumerDependencies["store"];
   protected readonly idFactory: () => string;
-  readonly #getSample: EvalRunResumerDependencies["getSample"];
+  readonly #getSamples: EvalRunResumerDependencies["getSamples"];
+
+  constructor(dependencies: Pick<EvalRunResumerDependencies, "store" | "idFactory" | "getSamples">) {
+    this.store = dependencies.store;
+    this.idFactory = dependencies.idFactory ?? defaultIdFactory;
+    this.#getSamples = dependencies.getSamples;
+  }
+
+  protected async loadSamplingRecords(
+    samplingIds: readonly string[],
+  ): Promise<readonly SamplingState[]> {
+    const records = await this.store.getSamplings(samplingIds);
+    if (records.length !== samplingIds.length) throw new Error("Store returned an incomplete Sampling batch");
+    return records.map((record, index) => {
+      const samplingId = samplingIds[index]!;
+      if (!record) throw new Error(`Unknown sampling ${samplingId}`);
+      if (record.samplingId !== samplingId) throw new Error(`Store returned Sampling ${record.samplingId} for ${samplingId}`);
+      return record;
+    });
+  }
+
+  protected async loadEvaluationRecords(
+    evaluationIds: readonly string[],
+  ): Promise<readonly EvaluationRecord[]> {
+    const records = await this.store.getEvaluations(evaluationIds);
+    if (records.length !== evaluationIds.length) throw new Error("Store returned an incomplete Evaluation batch");
+    return records.map((evaluation, index) => {
+      const evaluationId = evaluationIds[index]!;
+      if (!evaluation) throw new Error(`Unknown evaluation ${evaluationId}`);
+      if (evaluation.evaluationId !== evaluationId) {
+        throw new Error(`Store returned Evaluation ${evaluation.evaluationId} for ${evaluationId}`);
+      }
+      return evaluation;
+    });
+  }
+
+  protected async loadSamplingContexts(
+    records: readonly SamplingState[],
+    projectId: string,
+  ): Promise<readonly RuntimeSamplingContext[]> {
+    for (const record of records) {
+      if (record.projectId !== projectId) {
+        throw new Error(`Sampling ${record.samplingId} does not belong to project ${projectId}`);
+      }
+    }
+    const sampleIds = [...new Set(records.map((record) => record.sampleId))];
+    const samples = await this.#getSamples(sampleIds);
+    if (samples.length !== sampleIds.length) throw new Error("Catalog returned an incomplete Sample batch");
+    const byId = new Map<string, Sample>();
+    for (let index = 0; index < sampleIds.length; index += 1) {
+      const sampleId = sampleIds[index]!;
+      const sample = samples[index];
+      if (!sample) throw new Error(`Unknown sample ${sampleId}`);
+      if (sample.sampleId !== sampleId) {
+        throw new Error(`Catalog returned sample ${sample.sampleId} for ${sampleId}`);
+      }
+      byId.set(sampleId, sample);
+    }
+    return records.map((record) => ({ state: record, sample: byId.get(record.sampleId)! }));
+  }
+}
+
+class RunResumer extends RunReader implements EvalRunResumer {
   readonly #stageDependencies: RuntimeStageDependencies;
   readonly #createRetryController: (policy?: RetryPolicy) => RetryController;
   readonly #onError: (error: Error) => void;
 
   constructor(dependencies: EvalRunResumerDependencies) {
-    this.store = dependencies.store;
-    this.idFactory = dependencies.idFactory ?? defaultIdFactory;
-    this.#getSample = dependencies.getSample;
+    super(dependencies);
     this.#createRetryController = dependencies.createRetryController ?? createRetryController;
     this.#onError = dependencies.onError ?? ((error) => console.error(error));
     this.#stageDependencies = {
@@ -154,50 +232,6 @@ class RunResumer implements EvalRunResumer {
     ]);
     const errors = settlements.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
     if (errors.length > 0) throw new AggregateError(errors, "Evaluation phase could not persist its progress");
-  }
-
-  protected async loadSamplingRecords(
-    samplingIds: readonly string[],
-  ): Promise<readonly SamplingState[]> {
-    return Promise.all(samplingIds.map(async (samplingId) => {
-      const record = await this.store.getSampling(samplingId);
-      if (!record) throw new Error(`Unknown sampling ${samplingId}`);
-      return record;
-    }));
-  }
-
-  protected async loadEvaluationRecords(
-    evaluationIds: readonly string[],
-  ): Promise<readonly EvaluationRecord[]> {
-    return Promise.all(evaluationIds.map(async (evaluationId) => {
-      const evaluation = await this.store.getEvaluation(evaluationId);
-      if (!evaluation) throw new Error(`Unknown evaluation ${evaluationId}`);
-      return evaluation;
-    }));
-  }
-
-  protected async loadSamplingContexts(
-    records: readonly SamplingState[],
-    projectId: string,
-  ): Promise<readonly RuntimeSamplingContext[]> {
-    const samplePromises = new Map<string, Promise<Sample | null>>();
-    return Promise.all(records.map(async (record) => {
-      if (record.projectId !== projectId) {
-        throw new Error(`Sampling ${record.samplingId} does not belong to project ${projectId}`);
-      }
-      const sampleId = record.sampleId;
-      let samplePromise = samplePromises.get(sampleId);
-      if (!samplePromise) {
-        samplePromise = this.#getSample(sampleId);
-        samplePromises.set(sampleId, samplePromise);
-      }
-      const sample = await samplePromise;
-      if (!sample) throw new Error(`Unknown sample ${sampleId}`);
-      if (sample.sampleId !== sampleId) {
-        throw new Error(`Catalog returned sample ${sample.sampleId} for ${sampleId}`);
-      }
-      return { state: record, sample };
-    }));
   }
 
   private async runExecutionPhase(
@@ -291,40 +325,20 @@ class RunResumer implements EvalRunResumer {
 
 }
 
-class RuntimeCoordinator extends RunResumer implements EvalRuntime {
+class RuntimeCoordinator extends RunReader implements EvalRunAdmission {
   readonly #sourceCommit: string;
-  readonly #catalog: RuntimeCatalog;
+  readonly #catalog: RuntimeAdmissionCatalog;
   readonly #configResolver: EvalRuntimeDependencies["configResolver"];
   readonly #pendingAdmissions = new Map<string, {
     readonly requestFacts: string;
     readonly promise: Promise<RunHandle>;
   }>();
 
-  constructor(dependencies: EvalRuntimeDependencies) {
-    super({ ...dependencies, getSample: dependencies.catalog.getSample.bind(dependencies.catalog) });
+  constructor(dependencies: EvalRunAdmissionDependencies) {
+    super({ ...dependencies, getSamples: dependencies.catalog.getSamples.bind(dependencies.catalog) });
     this.#sourceCommit = requireSourceCommit(dependencies.sourceCommit);
     this.#catalog = dependencies.catalog;
     this.#configResolver = dependencies.configResolver;
-  }
-
-  listProjects(): Promise<readonly Project[]> {
-    return this.#catalog.listProjects();
-  }
-
-  listAgents(role?: AgentRole) {
-    return this.#catalog.listAgents(role);
-  }
-
-  listDatasets() {
-    return this.#catalog.listDatasets();
-  }
-
-  listData(datasetId: string) {
-    return this.#catalog.listData(datasetId);
-  }
-
-  listSamples(dataId: string) {
-    return this.#catalog.listSamples(dataId);
   }
 
   async start(request: StartRunRequest): Promise<RunHandle> {
@@ -373,15 +387,18 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
 
     const config = await this.#configResolver.resolveEvaluationConfig(request.evaluationConfigId);
     const evaluationAgent = requireSpHarness(config.evaluationHarness, "evaluator").agentConfig;
-    const records = await this.loadSamplingRecords(request.samplingIds);
-    for (const record of records) {
-      if (record.projectId !== request.projectId) {
-        throw new Error(`Sampling ${record.samplingId} does not belong to project ${request.projectId}`);
+    const selected = await this.store.getSamplings(request.samplingIds);
+    if (selected.length !== request.samplingIds.length) throw new Error("Store returned an incomplete Sampling batch");
+    const records = selected.map((record, index) => {
+      const samplingId = request.samplingIds[index]!;
+      if (!record || record.samplingId !== samplingId
+        || record.projectId !== request.projectId || record.execution.status !== "succeeded") {
+        throw new RuntimeEvaluationSelectionError(
+          `Sampling ${samplingId} has no successful execution in Project ${request.projectId}`,
+        );
       }
-      if (record.execution.status !== "succeeded") {
-        throw new Error(`Sampling ${record.samplingId} has no successful execution output`);
-      }
-    }
+      return record;
+    });
     const contexts = await this.loadSamplingContexts(records, request.projectId);
     for (const { sample } of contexts) requireEvaluationPrompt(sample);
     const evaluations = contexts.map(({ state }) => (
@@ -450,7 +467,7 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
 
   async getRun(runId: string): Promise<RunSnapshot> {
     const run = await this.store.getRun(runId);
-    if (!run) throw new Error(`Unknown run ${runId}`);
+    if (!run) throw new RuntimeRunNotFoundError(runId);
     const records = await this.loadSamplingRecords(run.samplingIds);
     const evaluations = await this.loadEvaluationRecords(run.evaluationIds);
     return toRunSnapshot(run, records, evaluations);
@@ -619,12 +636,43 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
 
 }
 
+class FullRuntime extends RuntimeCoordinator implements EvalRuntime {
+  readonly #catalog: RuntimeCatalog;
+  readonly #resumer: RunResumer;
+
+  constructor(dependencies: EvalRuntimeDependencies) {
+    super(dependencies);
+    this.#catalog = dependencies.catalog;
+    this.#resumer = new RunResumer({
+      store: dependencies.store,
+      getSamples: dependencies.catalog.getSamples.bind(dependencies.catalog),
+      harness: dependencies.harness,
+      ...(dependencies.idFactory === undefined ? {} : { idFactory: dependencies.idFactory }),
+      ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
+      ...(dependencies.sleep === undefined ? {} : { sleep: dependencies.sleep }),
+      ...(dependencies.onError === undefined ? {} : { onError: dependencies.onError }),
+      ...(dependencies.createRetryController === undefined
+        ? {} : { createRetryController: dependencies.createRetryController }),
+    });
+  }
+
+  listProjects(): Promise<readonly Project[]> { return this.#catalog.listProjects(); }
+  listAgents(role?: AgentRole) { return this.#catalog.listAgents(role); }
+  listDatasets() { return this.#catalog.listDatasets(); }
+  listData(datasetId: string) { return this.#catalog.listData(datasetId); }
+  listSamples(dataId: string) { return this.#catalog.listSamples(dataId); }
+  resume(runId: string): Promise<void> { return this.#resumer.resume(runId); }
+}
+
 export type {
   AgentOption,
   EvalRuntime,
   EvalRuntimeDependencies,
+  EvalRunAdmission,
+  EvalRunAdmissionDependencies,
   EvalRunResumer,
   EvalRunResumerDependencies,
+  RuntimeAdmissionCatalog,
   RuntimeCatalog,
   RuntimeEvaluationContext,
   Sample,
@@ -658,7 +706,18 @@ export {
 export function createEvalRuntime(
   dependencies: EvalRuntimeDependencies,
 ): EvalRuntime {
-  return new RuntimeCoordinator(dependencies);
+  return new FullRuntime(dependencies);
+}
+
+export function createEvalRunAdmission(
+  dependencies: EvalRunAdmissionDependencies,
+): EvalRunAdmission {
+  const runtime = new RuntimeCoordinator(dependencies);
+  return {
+    start: (request) => runtime.start(request),
+    evaluate: (request) => runtime.evaluate(request),
+    pipeline: (request) => runtime.pipeline(request),
+  };
 }
 
 export function createEvalRunResumer(

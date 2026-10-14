@@ -25,6 +25,7 @@ import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError, sameRuntim
 import type { RetryController, RetryOperation } from "./retry.js";
 import {
   createEvalRuntime as createRuntimeWithRelease,
+  createEvalRunAdmission,
   createEvalRunResumer,
   type EvalRuntimeDependencies,
 } from "./index.js";
@@ -253,6 +254,9 @@ function makeCatalog(samples: readonly Sample[] = [makeSample("sample-1")]): Run
     listData: async () => [{ dataId: "data-1", userPrompt: "Execute data", json: { task: "data" } }],
     listSamples: async () => samples,
     getSample: async (sampleId) => samples.find((sample) => sample.sampleId === sampleId) ?? null,
+    getSamples: async (sampleIds) => sampleIds.map((sampleId) => (
+      samples.find((sample) => sample.sampleId === sampleId) ?? null
+    )),
   };
 }
 
@@ -320,6 +324,9 @@ function makeStore(options: StoreOptions = {}): RuntimeStore {
     async getEvaluation(evaluationId) {
       return evaluations.get(evaluationId) ?? null;
     },
+    async getEvaluations(evaluationIds) {
+      return evaluationIds.map((evaluationId) => evaluations.get(evaluationId) ?? null);
+    },
     async listEvaluations(samplingId) {
       return [...evaluations.values()].filter((evaluation) => evaluation.samplingId === samplingId);
     },
@@ -331,6 +338,9 @@ function makeStore(options: StoreOptions = {}): RuntimeStore {
     },
     async getSampling(samplingId) {
       return samplings.get(samplingId) ?? null;
+    },
+    async getSamplings(samplingIds) {
+      return samplingIds.map((samplingId) => samplings.get(samplingId) ?? null);
     },
   };
 }
@@ -1636,7 +1646,7 @@ describe("eval runtime orchestration", () => {
       artifacts: [{ artifactId: "partial", kind: "project", path: "/eval/partial" }],
       trajectory: { trajectoryId: "full-trajectory", source: "subject", path: "/eval/trajectory.jsonl" },
     });
-    await createEvalRunResumer({ getSample: makeCatalog().getSample, harness, store }).resume(run.runId);
+    await createEvalRunResumer({ getSamples: makeCatalog().getSamples, harness, store }).resume(run.runId);
     await expect(runtime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
       execution: { status: "failed", lastError: "agent task failed" },
       artifacts: [{ artifactId: "partial" }],
@@ -1703,7 +1713,7 @@ describe("eval runtime orchestration", () => {
   it("evaluates completed executions in new evaluator submissions", async () => {
     const harness = makeHarness();
     const catalog = makeCatalog();
-    const getSample = vi.spyOn(catalog, "getSample");
+    const getSamples = vi.spyOn(catalog, "getSamples");
     const runtime = createEvalRuntime({
       catalog,
       harness,
@@ -1723,7 +1733,7 @@ describe("eval runtime orchestration", () => {
     expect(evaluationRecord.evaluator).toEqual(EVALUATOR);
     expect(evaluationRecord.status).toEqual({ status: "succeeded" });
     expect(harness.collectEvaluation).toHaveBeenCalledTimes(1);
-    expect(getSample).toHaveBeenCalledWith("sample-1");
+    expect(getSamples).toHaveBeenCalledWith(["sample-1"]);
     expect(harness.materializeInitialData).toHaveBeenCalledTimes(2);
     expect(harness.materializeSubjectTrajectory).toHaveBeenCalledWith(expect.objectContaining({
       subjectWorkspace: { userId: SUBJECT.ownerUserId, chatId: expect.any(String) },
@@ -1792,6 +1802,29 @@ describe("eval runtime orchestration", () => {
     await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.not.toHaveProperty(
       "evaluation",
     );
+  });
+
+  it("admits execution, evaluation and pipeline Runs without a Harness credential", async () => {
+    const store = makeStore();
+    const getSamplings = vi.spyOn(store, "getSamplings");
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog: makeCatalog(), configResolver: makeConfigResolver(), store,
+    });
+    expect("resume" in admission).toBe(false);
+    const execution = await admission.start(startRequest("admission-only-execution"));
+    const sampling = await store.getSampling(execution.samplingIds[0]!);
+    expect(sampling?.execution.status).toBe("queued");
+    await store.updateSampling({ ...sampling!, execution: { status: "succeeded" } }, sampling!);
+
+    const evaluation = await admission.evaluate(evaluateRequest(
+      execution.samplingIds, EVALUATION_CONFIG_ID, "admission-only-evaluation",
+    ));
+    expect(getSamplings).toHaveBeenCalledWith(execution.samplingIds);
+    expect((await store.getRun(evaluation.runId))?.evaluationIds).toHaveLength(1);
+    const pipeline = await admission.pipeline({
+      projectId: "project-1", pipelineConfigId: PIPELINE_CONFIG_ID, idempotencyKey: "admission-only-pipeline",
+    });
+    expect((await store.getRun(pipeline.runId))?.phases).toEqual(["execution", "evaluation"]);
   });
 
   it("admits one independent evaluation when the same intent races or is retried", async () => {
@@ -1914,7 +1947,7 @@ describe("eval runtime orchestration", () => {
   it("resolves a shared sample once per admission and execution stage", async () => {
     const harness = makeHarness();
     const catalog = makeCatalog();
-    const getSample = vi.spyOn(catalog, "getSample");
+    const getSamples = vi.spyOn(catalog, "getSamples");
     const runtime = createEvalRuntime({
       catalog,
       harness,
@@ -1931,8 +1964,8 @@ describe("eval runtime orchestration", () => {
     );
     await waitForTerminal(runtime, evaluation.runId);
 
-    expect(getSample).toHaveBeenCalledTimes(3);
-    expect(getSample).toHaveBeenCalledWith("sample-1");
+    expect(getSamples).toHaveBeenCalledTimes(3);
+    expect(getSamples).toHaveBeenCalledWith(["sample-1"]);
   });
 
   it("keeps the previous evaluation when atomic evaluation preparation fails", async () => {
@@ -3492,7 +3525,7 @@ describe("Run recovery from persisted facts", () => {
     const admitted = dormantRuntime(store, harness);
     const run = await admitted.start(startRequest("narrow-run-resumer"));
     const resumer = createEvalRunResumer({
-      getSample: makeCatalog().getSample,
+      getSamples: makeCatalog().getSamples,
       harness,
       store,
     });
@@ -3536,7 +3569,7 @@ describe("Run recovery from persisted facts", () => {
       trajectory: { trajectoryId: "complete-trace", source: "subject", path: "/eval/trace.jsonl" },
     });
 
-    await createEvalRunResumer({ getSample: makeCatalog().getSample, harness, store }).resume(run.runId);
+    await createEvalRunResumer({ getSamples: makeCatalog().getSamples, harness, store }).resume(run.runId);
 
     expect((await store.getSampling(samplingId))?.execution).toEqual({ status: "failed", lastError: "agent task failed" });
     expect((await store.getSampling(samplingId))?.trajectory?.trajectoryId).toBe("complete-trace");

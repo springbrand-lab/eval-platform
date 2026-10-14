@@ -64,7 +64,12 @@ export interface RuntimeCatalog {
   listData(datasetId: string): Promise<readonly Data[]>;
   listSamples(dataId: string): Promise<readonly Sample[]>;
   getSample(sampleId: string): Promise<Sample | null>;
+  /** Return one Sample or null per input ID, in the same order. */
+  getSamples(sampleIds: readonly string[]): Promise<readonly (Sample | null)[]>;
 }
+
+/** Catalog reads needed to resolve a new Run; no Agent listing or UI queries. */
+export type RuntimeAdmissionCatalog = Pick<RuntimeCatalog, "listData" | "listSamples" | "getSamples">;
 
 export interface EvalRuntime {
   listProjects(): Promise<readonly Project[]>;
@@ -98,9 +103,17 @@ export interface EvalRuntimeDependencies {
   readonly onError?: (error: Error) => void;
 }
 
+/** Persists Run admissions only; Agent execution belongs to a separate resumer. */
+export type EvalRunAdmission = Pick<EvalRuntime, "start" | "evaluate" | "pipeline">;
+
+export type EvalRunAdmissionDependencies = Pick<
+  EvalRuntimeDependencies,
+  "sourceCommit" | "configResolver" | "store" | "idFactory"
+> & { readonly catalog: RuntimeAdmissionCatalog };
+
 /** Recovery reads persisted Run facts; admission APIs and Config resolution stay in the API process. */
 export interface EvalRunResumerDependencies extends Omit<EvalRuntimeDependencies, "catalog" | "configResolver" | "sourceCommit"> {
-  readonly getSample: RuntimeCatalog["getSample"];
+  readonly getSamples: RuntimeCatalog["getSamples"];
 }
 
 export type EvalRunResumer = Pick<EvalRuntime, "resume">;
