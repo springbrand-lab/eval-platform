@@ -7,3 +7,7 @@ export { createPostgresRunNotifications, startEvalRunWorker } from "./worker.js"
 export type { EvalRunWorker, EvalRunWorkerOptions, RunNotifications } from "./worker.js";
 export { createEvalSpClient, EvalSpApiError } from "./sp/client.js";
 export type { EvalSpAgentConfig, EvalSpClient, EvalSpUser } from "./sp/client.js";
+export { createSpHarness, SpHarnessError } from "./sp/harness.js";
+export type { SpHarnessOptions } from "./sp/harness.js";
+export { startSpEvalRunWorkerProcess } from "./run-worker-process.js";
+export type { SpEvalRunWorkerProcessOptions } from "./run-worker-process.js";
