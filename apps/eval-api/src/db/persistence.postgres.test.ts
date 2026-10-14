@@ -7,7 +7,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresProjectRunControl, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, startEvalRunWorker } from "../index.js";
+import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresProjectRunControl, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, ProjectRunStopConflictError, startEvalRunWorker } from "../index.js";
 import { isForeignKeyFailure } from "./client.js";
 import { createPostgresProjectRunReader } from "./run-view.js";
 import { readRunRecords } from "./runtime.js";
@@ -254,7 +254,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const next = makeRun(project.projectId, nextSampling, dataset.datasetId, { sourceCommit: nextRelease.sourceCommit });
     await nextStore.createRunWithSamplings(next, [nextSampling], []);
     await nextStore.updateSampling({ ...nextSampling, execution: { status: "succeeded" } }, nextSampling);
-    expect((await nextStore.getRun(first.runId))?.sourceCommit).toBe(release.sourceCommit);
+    expect(await nextStore.getRun(first.runId)).toBeNull();
     expect((await nextStore.getRun(next.runId))?.sourceCommit).toBe(nextRelease.sourceCommit);
     expect(await catalog.getProject(project.projectId)).toMatchObject({
       sourceBranch: release.sourceBranch, initialLaunch: { operation: "execution", configId: "execution-config" },
@@ -263,7 +263,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const wrongBranch = createPostgresRuntimeStore(database.db, "user-A", {
       ...nextRelease, sourceBranch: "another-release",
     });
-    expect((await wrongBranch.createRunWithSamplings(first, [firstSampling], [])).created).toBe(false);
+    await expect(wrongBranch.createRunWithSamplings(first, [firstSampling], []))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
     const rejectedSampling = makeSampling(project.projectId, sample.sampleId);
     const rejected = makeRun(project.projectId, rejectedSampling, dataset.datasetId, {
       sourceCommit: nextRelease.sourceCommit,
@@ -606,13 +607,17 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
     await runtime.updateSampling({ ...second, execution: { status: "failed" } }, second);
     await runtime.createRunWithSamplings(evaluation, [succeeded], [judge]);
-    expect(await runtime.createRunWithSamplings(replay, [first, second], []))
-      .toEqual({ run: execution, created: false });
+    expect(await runtime.getRun(execution.runId)).toBeNull();
+    await expect(runtime.createRunWithSamplings(replay, [first, second], []))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
     await expect(runtime.createRunWithSamplings(anotherRun, [another], []))
       .rejects.toMatchObject({ activeRunId: evaluation.runId });
     await runtime.updateEvaluation({ ...judge, status: { status: "cancelled" } }, judge);
     await runtime.createRunWithSamplings(anotherRun, [another], []);
     expect(await runtime.getRun(anotherRun.runId)).toEqual(anotherRun);
+    expect(await runtime.getRun(evaluation.runId)).toBeNull();
+    expect(await runtime.getSampling(first.samplingId)).toBeNull();
+    expect(await runtime.getEvaluation(judge.evaluationId)).toBeNull();
   });
 
   it("persists an idempotent Project stop under the admission lock", async () => {
@@ -626,13 +631,12 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     await runtime.createRunWithSamplings(priorRun, [priorSampling], []);
     await runtime.updateSampling({ ...priorSampling, execution: { status: "succeeded" } }, priorSampling);
     await expect(control.stopRun(project.projectId, priorRun.runId))
-      .rejects.toMatchObject({ reason: "no_active_run" });
+      .rejects.toBeInstanceOf(ProjectRunStopConflictError);
     const sampling = makeSampling(project.projectId, sample.sampleId);
     const run = makeRun(project.projectId, sampling, dataset.datasetId);
     await runtime.createRunWithSamplings(run, [sampling], []);
     expect(await control.getCurrentRun(project.projectId)).toEqual({ runId: run.runId });
-    await expect(control.stopRun(project.projectId, priorRun.runId))
-      .rejects.toMatchObject({ reason: "run_changed" });
+    expect(await control.stopRun(project.projectId, priorRun.runId)).toBeNull();
     expect(await foreign.stopRun(project.projectId, run.runId)).toBeNull();
     expect(await control.stopRun(project.projectId, run.runId)).toEqual({ runId: run.runId, stopRequested: true });
     expect(await control.stopRun(project.projectId, run.runId)).toEqual({ runId: run.runId, stopRequested: true });
@@ -653,7 +657,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await control.stopRun(project.projectId, run.runId)).toEqual({ runId: run.runId, stopRequested: true });
     await runtime.createRunWithSamplings(nextRun, [nextSampling], []);
     expect((await runtime.getRun(nextRun.runId))?.stopRequested).toBeUndefined();
-    expect(await control.stopRun(project.projectId, run.runId)).toEqual({ runId: run.runId, stopRequested: true });
+    expect(await control.stopRun(project.projectId, run.runId)).toBeNull();
     expect((await runtime.getRun(nextRun.runId))?.stopRequested).toBeUndefined();
   });
 
@@ -726,8 +730,14 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       makeSampling(project.projectId, otherSample.sampleId, "sampling-b"),
       makeSampling(project.projectId, sample.sampleId, "sampling-c"),
     ];
+    const run = makeRun(project.projectId, records[0]!, dataset.datasetId, {
+      samplingIds: records.map((record) => record.samplingId),
+      config: { operation: "execution", execution: {
+        ...executionConfig(dataset.datasetId).execution, samplingCount: records.length,
+      } },
+    });
+    await runtime.createRunWithSamplings(run, records, []);
     for (const [index, record] of records.entries()) {
-      await runtime.createRunWithSamplings(makeRun(project.projectId, record, dataset.datasetId), [record], []);
       await runtime.updateSampling({ ...record, execution: { status: index < 2 ? "succeeded" : "failed" } }, record);
     }
 
@@ -761,10 +771,15 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const { project, dataset, sample, runtime } = await setup();
     const sampling = makeSampling(project.projectId, sample.sampleId, "sampling-api-a");
     const secondSampling = makeSampling(project.projectId, sample.sampleId, "sampling-api-b");
-    await runtime.createRunWithSamplings(makeRun(project.projectId, sampling, dataset.datasetId), [sampling], []);
+    const execution = makeRun(project.projectId, sampling, dataset.datasetId, {
+      samplingIds: [sampling.samplingId, secondSampling.samplingId],
+      config: { operation: "execution", execution: {
+        ...executionConfig(dataset.datasetId).execution, samplingCount: 2,
+      } },
+    });
+    await runtime.createRunWithSamplings(execution, [sampling, secondSampling], []);
     const failed = { ...sampling, execution: { status: "failed" as const } };
     await runtime.updateSampling(failed, sampling);
-    await runtime.createRunWithSamplings(makeRun(project.projectId, secondSampling, dataset.datasetId), [secondSampling], []);
     await runtime.updateSampling({ ...secondSampling, execution: { status: "succeeded" } }, secondSampling);
     const staleSelection = { ...sampling, execution: { status: "succeeded" as const } };
     const rejectedEvaluation = makeEvaluation(sampling.samplingId);
@@ -871,6 +886,31 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       .toEqual({ runId: handle.runId, stopRequested: true });
     expect(await (await send("alice-token", `/runs/${handle.runId}`)).json())
       .toEqual({ run: expect.objectContaining({ runId: handle.runId, stopRequested: true }) });
+
+    for (const evaluationId of storedRun!.evaluationIds) {
+      const prior = (await runtime.getEvaluation(evaluationId))!;
+      await runtime.updateEvaluation({ ...prior, status: { status: "cancelled" } }, prior);
+    }
+    expect(await runtime.markRunStopFinalized(handle.runId)).toBe(true);
+    const replacement = await send("alice-token", "/evaluations", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        evaluationConfigId: config.configId,
+        samplingIds: [sampling.samplingId], idempotencyKey: "next-click",
+      }),
+    });
+    expect(replacement.status).toBe(202);
+    const nextHandle = await replacement.json() as { runId: string; samplingIds: readonly string[] };
+    expect(nextHandle.runId).not.toBe(handle.runId);
+    expect((await send("alice-token", `/runs/${handle.runId}`)).status).toBe(404);
+    expect((await send("alice-token", `/runs/${handle.runId}/stop`, { method: "POST" })).status).toBe(404);
+    expect((await submit()).status).toBe(409);
+    expect(await runtime.getEvaluation(storedRun!.evaluationIds[0]!)).toBeNull();
+    expect(await runtime.getEvaluation(storedRun!.evaluationIds[1]!)).toBeNull();
+    expect((await runtime.listEvaluations(sampling.samplingId))).toHaveLength(1);
+    expect((await runtime.listEvaluations(secondSampling.samplingId))).toEqual([]);
+    expect(await (await send("alice-token", "/samplings/successful/ids")).json())
+      .toEqual({ samplingIds: [sampling.samplingId, secondSampling.samplingId] });
   });
 
   it("admits and reads an all-selected Evaluation across SQL batches", async () => {
@@ -982,7 +1022,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       ...deliberate,
       requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "same evaluation facts" },
     }, [succeeded], [deliberateJudge]);
-    expect(await runtime.listEvaluations(sampling.samplingId)).toHaveLength(2);
+    expect(await runtime.listEvaluations(sampling.samplingId)).toEqual([deliberateJudge]);
+    expect(await runtime.getEvaluation(createdJudge.evaluationId)).toBeNull();
   });
 
   it("notifies committed Runs and finds unfinished execution and evaluation without a Run status column", async () => {
@@ -1166,7 +1207,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await runtime.getEvaluation(judge.evaluationId)).toEqual(completedEvaluation);
   });
 
-  it("retains raw execution and every independent re-evaluation across store instances", async () => {
+  it("retains raw execution evidence while replacing earlier independent evaluations", async () => {
     const { runtime, source, project, dataset, data, sample } = await setup();
     const original = makeSampling(project.projectId, sample.sampleId);
     const executionRun = makeRun(project.projectId, original, dataset.datasetId);
@@ -1207,31 +1248,29 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     await runtime.createRunWithSamplings(secondRun, [original], [secondJudge]);
     const restored = createPostgresWorkerRuntimeStore(database.db);
     expect(await restored.getSampling(original.samplingId)).toEqual(finished);
-    expect(await restored.listEvaluations(original.samplingId)).toEqual(
-      [completed, secondJudge].sort((left, right) => left.evaluationId.localeCompare(right.evaluationId)),
-    );
+    expect(await restored.listEvaluations(original.samplingId)).toEqual([secondJudge]);
+    expect(await restored.getEvaluation(firstJudge.evaluationId)).toBeNull();
+    expect(await restored.getRun(executionRun.runId)).toBeNull();
+    expect(await restored.getRun(firstRun.runId)).toBeNull();
     expect((await restored.getSampling(original.samplingId))?.executionAttempts[0]?.resources)
       .toEqual({ status: "collected", snapshot });
 
     const metrics = createMetrics({ source });
     const detail = await metrics.getSamplingDetail({ projectId: project.projectId, samplingId: original.samplingId });
     expect(detail.sample.data).toEqual(data);
-    expect(detail.evaluations).toHaveLength(2);
+    expect(detail.evaluations).toHaveLength(1);
     expect(detail.sampling.artifacts).toEqual(finished.artifacts);
     expect(detail.sampling.trajectory).toEqual(finished.trajectory);
-    expect(detail.runIds).toEqual([executionRun.runId, firstRun.runId, secondRun.runId].sort());
-    const firstOnly = await metrics.getSamplingDetail({ projectId: project.projectId,
-      samplingId: original.samplingId, runIds: [firstRun.runId] });
-    expect(firstOnly.evaluations.map((entry) => entry.record.evaluationId)).toEqual([firstJudge.evaluationId]);
-    const subjectOnly = await metrics.getSamplingDetail({ projectId: project.projectId,
-      samplingId: original.samplingId, runIds: [executionRun.runId] });
-    expect(subjectOnly.evaluations).toEqual([]);
+    expect(detail.runIds).toEqual([secondRun.runId]);
+    expect(detail.evaluations.map((entry) => entry.record.evaluationId)).toEqual([secondJudge.evaluationId]);
+    await expect(metrics.getSamplingDetail({ projectId: project.projectId,
+      samplingId: original.samplingId, runIds: [firstRun.runId] })).rejects.toBeInstanceOf(MetricsQueryError);
     expect((await metrics.getDatasetOverview({ projectId: project.projectId, datasetId: dataset.datasetId })).dataIds)
       .toEqual([data.dataId]);
     expect((await metrics.getSampleOverview({ projectId: project.projectId, sampleId: sample.sampleId })).summary)
-      .toMatchObject({ samplingCount: 1, evaluationCount: 2 });
+      .toMatchObject({ samplingCount: 1, evaluationCount: 1 });
     expect((await metrics.getProjectOverview({ projectId: project.projectId })).counts)
-      .toEqual({ datasets: 1, data: 1, samples: 1, samplings: 1, evaluations: 2 });
+      .toEqual({ datasets: 1, data: 1, samples: 1, samplings: 1, evaluations: 1 });
     await expect(metrics.getProjectOverview({ projectId: "not-a-project" })).rejects.toBeInstanceOf(MetricsQueryError);
   });
 
@@ -1333,9 +1372,13 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       kind: "project", ownerUserId: "user-A", projectId: siblingProject.projectId,
     })).toEqual([siblingRun]);
     await expect(source.read({ projectId: other.projectId })).rejects.toBeInstanceOf(MetricsQueryError);
-    const facts = await source.read({ projectId: project.projectId, runIds: [runA.runId] });
-    expect(facts.samplings.map((record) => record.samplingId)).toEqual([samplingA.samplingId]);
-    expect(facts.runs.map((run) => run.runId)).toEqual([runA.runId]);
+    expect(await userRuntime.getRun(runA.runId)).toBeNull();
+    expect(await userRuntime.getSampling(samplingA.samplingId)).toBeNull();
+    await expect(source.read({ projectId: project.projectId, runIds: [runA.runId] }))
+      .rejects.toBeInstanceOf(MetricsQueryError);
+    const facts = await source.read({ projectId: project.projectId, runIds: [collision.runId] });
+    expect(facts.samplings.map((record) => record.samplingId)).toEqual([collisionSampling.samplingId]);
+    expect(facts.runs.map((run) => run.runId)).toEqual([collision.runId]);
     await expect(source.read({ projectId: project.projectId, runIds: [runB.runId] }))
       .rejects.toBeInstanceOf(MetricsQueryError);
     await expect(source.read({ projectId: project.projectId, runIds: [siblingRun.runId] }))

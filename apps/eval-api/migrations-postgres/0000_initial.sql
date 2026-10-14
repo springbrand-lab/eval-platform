@@ -72,6 +72,13 @@ CREATE TABLE "eval_run_evaluations" (
 	CONSTRAINT "eval_run_evaluations_position_uq" UNIQUE("run_id","position")
 );
 --> statement-breakpoint
+CREATE TABLE "eval_run_request_keys" (
+	"owner_user_id" text NOT NULL,
+	"project_id" text NOT NULL,
+	"idempotency_key" text NOT NULL,
+	CONSTRAINT "eval_run_request_keys_project_id_idempotency_key_pk" PRIMARY KEY("project_id","idempotency_key")
+);
+--> statement-breakpoint
 CREATE TABLE "eval_run_samplings" (
 	"owner_user_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -90,6 +97,8 @@ CREATE TABLE "eval_runs" (
 	"config" jsonb NOT NULL,
 	"idempotency_key" text NOT NULL,
 	"request_fingerprint" text NOT NULL,
+	"stop_requested" boolean DEFAULT false NOT NULL,
+	"stop_finalized" boolean DEFAULT false NOT NULL,
 	CONSTRAINT "eval_runs_owner_id_uq" UNIQUE("owner_user_id","run_id"),
 	CONSTRAINT "eval_runs_project_idempotency_uq" UNIQUE("project_id","idempotency_key"),
 	CONSTRAINT "eval_runs_phases_ck" CHECK ("eval_runs"."phases" IN ('["execution"]'::jsonb, '["evaluation"]'::jsonb, '["execution", "evaluation"]'::jsonb)),
@@ -121,6 +130,7 @@ ALTER TABLE "eval_pipeline_configs" ADD CONSTRAINT "eval_pipeline_configs_owner_
 ALTER TABLE "eval_run_evaluations" ADD CONSTRAINT "eval_run_evaluations_run_id_eval_runs_run_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."eval_runs"("run_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_run_evaluations" ADD CONSTRAINT "eval_run_evaluations_run_id_sampling_id_eval_run_samplings_run_id_sampling_id_fk" FOREIGN KEY ("run_id","sampling_id") REFERENCES "public"."eval_run_samplings"("run_id","sampling_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_run_evaluations" ADD CONSTRAINT "eval_run_evaluations_evaluation_id_sampling_id_eval_evaluations_evaluation_id_sampling_id_fk" FOREIGN KEY ("evaluation_id","sampling_id") REFERENCES "public"."eval_evaluations"("evaluation_id","sampling_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_run_request_keys" ADD CONSTRAINT "eval_run_request_keys_owner_user_id_project_id_eval_projects_owner_user_id_project_id_fk" FOREIGN KEY ("owner_user_id","project_id") REFERENCES "public"."eval_projects"("owner_user_id","project_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_run_samplings" ADD CONSTRAINT "eval_run_samplings_owner_user_id_run_id_eval_runs_owner_user_id_run_id_fk" FOREIGN KEY ("owner_user_id","run_id") REFERENCES "public"."eval_runs"("owner_user_id","run_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_run_samplings" ADD CONSTRAINT "eval_run_samplings_owner_user_id_sampling_id_eval_samplings_owner_user_id_sampling_id_fk" FOREIGN KEY ("owner_user_id","sampling_id") REFERENCES "public"."eval_samplings"("owner_user_id","sampling_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_runs" ADD CONSTRAINT "eval_runs_owner_user_id_project_id_eval_projects_owner_user_id_project_id_fk" FOREIGN KEY ("owner_user_id","project_id") REFERENCES "public"."eval_projects"("owner_user_id","project_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint

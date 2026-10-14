@@ -202,7 +202,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
   async resume(runId: string, stopSignal?: AbortSignal): Promise<void> {
     if (stopSignal?.aborted) return;
     const run = await this.store.getRun(runId);
-    if (!run) throw new Error(`Unknown run ${runId}`);
+    if (!run) throw new RuntimeRunNotFoundError(runId);
     if (run.stopRequested || stopSignal?.aborted) return;
 
     let samplings = await this.loadSamplingRecords(run.samplingIds);

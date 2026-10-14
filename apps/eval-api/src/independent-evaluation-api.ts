@@ -387,8 +387,7 @@ export function createIndependentEvaluationApi(options: IndependentEvaluationApi
           return failure(new HttpError(409, "SAMPLING_UNAVAILABLE", "Selected Sampling is unavailable for evaluation"), corsOrigin);
         }
         if (error instanceof ProjectRunStopConflictError) {
-          return failure(new HttpError(409,
-            error.reason === "no_active_run" ? "NO_ACTIVE_RUN" : "RUN_CHANGED", error.message), corsOrigin);
+          return failure(new HttpError(409, "NO_ACTIVE_RUN", error.message), corsOrigin);
         }
         if (error instanceof HttpError) return failure(error, corsOrigin);
         if (error instanceof ConfigNotFoundError && error.kind === "evaluation") {

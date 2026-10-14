@@ -1,4 +1,4 @@
-import type { EvalRunResumer, RuntimeRecoveryStore } from "@eval-platform/eval-runtime";
+import { RuntimeRunNotFoundError, type EvalRunResumer, type RuntimeRecoveryStore } from "@eval-platform/eval-runtime";
 import { Client } from "pg";
 
 const RUN_CHANNEL = "eval_run_created";
@@ -176,7 +176,10 @@ export async function startEvalRunWorker(options: EvalRunWorkerOptions): Promise
           if (await options.store.isRunStopRequested(runId)) await finalizeStop(runId);
         }
       })
-        .catch(report)
+        .catch((error: unknown) => {
+          // A committed replacement can delete a Run after its notification is queued.
+          if (!(error instanceof RuntimeRunNotFoundError)) report(error);
+        })
         .finally(() => {
           active.delete(runId);
           drain();

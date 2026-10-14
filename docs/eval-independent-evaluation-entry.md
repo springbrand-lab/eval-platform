@@ -2,7 +2,7 @@
 
 ## 范围与现状
 
-执行成功的 Sampling 可以在原 Project 下单独发起评估，不重新执行 Subject。新建的空 Project 不能以只评估启动，也不能引用其他 Project 的 Sampling。一次评估请求保存新的 Run 和每个 Sampling 对应的 EvaluationRecord；有意再次评估同一批 Sampling 时使用新幂等键，已有执行与评估记录不被覆盖。
+执行成功的 Sampling 可以在原 Project 下单独发起评估，不重新执行 Subject。新建的空 Project 不能以只评估启动，也不能引用其他 Project 的 Sampling。Project 只保留当前状态：新执行或联跑原子删除旧 Run、Sampling 和 EvaluationRecord，再从零启动；新独立评估保留当前执行成功的 Sampling，原子替换旧 Run 和 EvaluationRecord。旧 Run ID 的结果查询在替换后返回 404。
 
 当前已实现 Catalog 的选择查询、Runtime `evaluate()`、PostgreSQL 幂等准入和 Eval API 的独立评估 HTTP 路由。Runtime 只接收调用方确定的 Sampling ID 列表，不根据筛选条件重新选一批。
 
@@ -32,9 +32,9 @@
 
 手动选择与全选都传确定、非空、无重复的 `samplingIds`，并传本次用户意图的 `idempotencyKey`。一次意图从首次提交到超时重试、网络重发和重复点击，都复用**同一 ID 顺序、配置 ID、Project 和 key**；重试不能再次调用全选查询来生成新列表。若全选为空，不提交评估请求。API 将这份请求交给 Runtime `evaluate()`，并把其 `RunHandle` 返回调用方。
 
-幂等键在 Project 内唯一，`start()`、`pipeline()` 和 `evaluate()` 共用这条规则。相同 key 与请求事实返回原 Run；同一 key 换操作、配置 ID 或 Sampling ID 列表（包括顺序）时报冲突。同一 Runtime 实例内，并发的同一意图共用第一次提交的 Promise，因此即使配置在两次点击之间改变，本次提交仍使用第一次解析并准入的生效配置。已准入后的重放用原 Run 保存的有效配置校验，不重新解析已修改的配置。全新的一次主动重评估需要新 key。Runtime 和 Store 在准入前后分别查重，数据库唯一约束兜底并发请求；只有新 Run 唤醒 Worker。内存同步只处理同一实例内的并发，不代替 Store 的持久化幂等。
+幂等键在 Project 内唯一，`start()`、`pipeline()` 和 `evaluate()` 共用这条规则。当前 Run 的相同 key 与请求事实返回原 Run；同一 key 换操作、配置 ID 或 Sampling ID 列表（包括顺序）时报冲突。同一 Runtime 实例内，并发的同一意图共用第一次提交的 Promise，因此即使配置在两次点击之间改变，本次提交仍使用第一次解析并准入的生效配置。已准入后的重放用原 Run 保存的有效配置校验，不重新解析已修改的配置。全新的一次主动重跑或重评估需要新 key；已被替换的旧 key 留在仅保存请求身份的账本中，迟到重试返回 409，不会重新启动。Runtime 和 Store 在准入前后分别查重，数据库唯一约束兜底并发请求；只有新 Run 唤醒 Worker。内存同步只处理同一实例内的并发，不代替 Store 的持久化幂等。
 
-同一 Project 同时只允许一批未结束的 Run，执行、联跑和独立评估共用此限制。Store 在 Project 行锁内先处理同 key 重放，再检查是否有 `queued`、`starting`、`running` 或 `retrying` 的 Sampling 或 EvaluationRecord；新 key 遇到未结束 Run 返回 `409 PROJECT_BUSY`，且不产生新 Run 或评估记录。原 Run 的所有阶段进入终态后可用新 key 再次提交，包括主动重评估。配置在这段时间内可以编辑，既有 Run 和同 key 重放仍沿用原快照。
+同一 Project 同时只允许一批未结束的 Run，执行、联跑和独立评估共用此限制。Store 在 Project 行锁内先处理同 key 重放，再检查是否有 `queued`、`starting`、`running` 或 `retrying` 的 Sampling 或 EvaluationRecord；新 key 遇到未结束 Run 返回 `409 PROJECT_BUSY`，且不产生新 Run 或评估记录。停止请求也必须完成证据收尾后才可重跑。原 Run 的所有阶段进入终态后，新 key 在同一事务中清掉被替换的运行状态并启动新批次。执行重跑中的 Sampling 未完成前，Project 忙碌检查阻止启动独立评估；未成功的 Sampling 本身也不进入候选集。配置在这段时间内可以编辑，当前 Run 和同 key 重放仍沿用原快照。
 
 提交时 Runtime 分批读取 Sampling 和不同 Sample 的输入，再检查每个 Sampling 属于该 Project、执行成功且输入可读取；Store 在原子准入中再次检查。选择后若候选已失效，整批提交失败，不留下半批 Run 或 EvaluationRecord。调用方需要重新选择并以新意图提交。
 
@@ -54,7 +54,7 @@
 
 提交接口只接受显式、非空、无重复的 ID 列表，不接受筛选表达式或“提交时全选”。查询时的一键全选结果由调用方固定后提交；同一意图重试发送原请求体。标识符和幂等键最多 512 字符，幂等键不能有首尾空白。POST 要求 `Content-Type: application/json`，请求体最多 8 MiB；超出 ID 数量或体积上限返回 413，格式不符返回 415。其他无效输入返回 400，缺失或失效会话返回 401，未找到的 Project/Run/评估配置返回 404，幂等身份冲突、Project 已有未结束 Run 或已失效的 Sampling 选择返回 409；未预期的内部错误返回 500，Eval SP 校验不可用返回 502。错误响应为 `{ "error": { "code": string, "message": string } }`。宿主可配置可信 Web Origin；配置后预检请求只对该 Origin 开放，其他 Origin 返回 403。
 
-停止接口只影响路径指定且当前正在运行或收尾的 Run；重复请求即使在原 Run 结束后仍返回原结果，不会误停后续批次。可先通过 `GET .../runs/current` 查询当前 ID。未知 Run 返回 404，已自然终结的 Run 返回 `409 NO_ACTIVE_RUN`，指定旧 Run 而另一批正在运行返回 `409 RUN_CHANGED`。停止请求落库后 Worker 立即向 Eval SP 请求中断正在运行的 Submission，未开始的阶段不再提交。取消后的 Subject 证据和完整轨迹尚未保存前，Project 仍视作运行中，不能提交下一批；即使阶段已经终结，仍须等 Worker 写入 `stopFinalized`。Run 查询先显示 `stopRequested`，收尾期间显示 `retrying`，全部完成后显示 `cancelled`。
+停止接口只影响路径指定且当前正在运行或收尾的 Run；原 Run 尚未被替换时重复请求仍返回原结果，不会误停后续批次。替换后旧 Run 已删除，旧 ID 返回 404。可先通过 `GET .../runs/current` 查询当前 ID。未知或已被替换的 Run 返回 404，已自然终结的 Run 返回 `409 NO_ACTIVE_RUN`。停止请求落库后 Worker 立即向 Eval SP 请求中断正在运行的 Submission，未开始的阶段不再提交。取消后的 Subject 证据和完整轨迹尚未保存前，Project 仍视作运行中，不能提交下一批；即使阶段已经终结，仍须等 Worker 写入 `stopFinalized`。Run 查询先显示 `stopRequested`，收尾期间显示 `retrying`，全部完成后显示 `cancelled`。
 
 API 的服务工厂按 Eval SP 用户 ID 在活动请求期间共享一套用户范围内的 Project Catalog、ConfigStore/ConfigResolver 和 Runtime 准入接口；同一用户的并发提交由同一 Runtime 实例处理，空闲用户条目从内存移除。HTTP 路由只负责鉴权、输入校验、Project/Run 归属和组合调用；Run 准入与结果事实仍由 Runtime 和 Store 负责。Run 准入事务分批写入大量关联，保证全选列表不会触及单条 SQL 的参数上限；Run 状态与 Evaluation 结果在同一只读事务内分批读取和投影。标准 `start:api` 也挂载这五条既有路由；`start:independent-api` 保留独立入口。两个 API 进程都使用用户范围 PostgreSQL ConfigReader，不持有 SP Harness 服务凭证；独立 `start:worker` 进程用真实 Harness 执行已入库的 Run。
 

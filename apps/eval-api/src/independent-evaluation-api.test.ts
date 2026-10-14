@@ -81,10 +81,7 @@ describe("independent evaluation HTTP API", () => {
     expect(stopRun).toHaveBeenCalledWith("project-1", "run-1");
     stopRun.mockResolvedValueOnce(null);
     expect((await api.handle(request(path, { method: "POST" }))).status).toBe(404);
-    stopRun.mockRejectedValueOnce(new ProjectRunStopConflictError("run_changed"));
-    expect(await body(await api.handle(request(path, { method: "POST" }))))
-      .toEqual({ error: { code: "RUN_CHANGED", message: "Project is running a different Run" } });
-    stopRun.mockRejectedValueOnce(new ProjectRunStopConflictError("no_active_run"));
+    stopRun.mockRejectedValueOnce(new ProjectRunStopConflictError());
     expect(await body(await api.handle(request(path, { method: "POST" }))))
       .toEqual({ error: { code: "NO_ACTIVE_RUN", message: "Project has no unfinished Run" } });
     expect((await api.handle(request(path, { method: "GET" }))).status).toBe(405);

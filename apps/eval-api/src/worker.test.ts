@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { RuntimeRunNotFoundError } from "@eval-platform/eval-runtime";
 import type { EvalRunWorkerOptions, RunNotifications } from "./worker.js";
 import { startEvalRunWorker } from "./worker.js";
 
@@ -136,6 +137,22 @@ describe("single-instance Run worker", () => {
     } finally {
       await worker.close();
     }
+  });
+
+  it("ignores a notification for a Run already replaced in its Project", async () => {
+    const source = makeNotifications();
+    const onError = vi.fn();
+    const resume = vi.fn(async (runId: string) => { throw new RuntimeRunNotFoundError(runId); });
+    const worker = await startEvalRunWorker({
+      ...workerOptions(source.notifications, [], resume), onError,
+    });
+    try {
+      source.notify("replaced-run");
+      await vi.waitFor(() => expect(resume).toHaveBeenCalledWith("replaced-run", expect.any(AbortSignal)));
+    } finally {
+      await worker.close();
+    }
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("pages through unfinished Runs and stops receiving work after close", async () => {

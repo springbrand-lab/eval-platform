@@ -54,7 +54,7 @@ src/
 
 四个顶层包及其内部文件均保持在当前仓库中；内部目录是模块，不是新的 workspace package。
 
-配置、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。`RuntimeStore` 是持久化端口，实际实现由 API/DO/数据库层注入；Run、Sampling、EvaluationRecord 和本次生效配置快照的聚合写入必须由 Store 在一个持久化边界内原子完成。
+配置、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。`RuntimeStore` 是持久化端口，实际实现由 API/DO/数据库层注入；Run、Sampling、EvaluationRecord 和本次生效配置快照的聚合写入必须由 Store 在一个持久化边界内原子完成。Store 对同 Project 的新执行或联跑先删除旧运行与结果，再保存全新状态；新独立评估保留当前成功 Sampling，只替换旧 Run 与评估记录。旧 Run 的请求 key 留在身份账本中拒绝迟到重试，但不保留旧结果。
 
 三个启动入口只原子提交运行事实并返回 `RunHandle`，不在请求进程里执行 Agent。应用层唤醒单实例执行器调用 `resume(runId)`；独立 Worker 可用 `createEvalRunResumer({ getSamples, getProject, store, harness })`，无需注入启动接口的 Catalog 与 ConfigResolver。恢复时使用 Run 已保存的生效配置和 Sample 引用，跳过已完成的阶段，并按 Attempt 原 `submissionId`、操作类型和幂等键向 SP 校准。已完成 Agent 的资源或产物保存失败只补收尾，不重新提交或重启。进程中断后遗留的未完成阶段由执行器接手；已保存的失败 Attempt 若 SP 校准暂不可用，仍保持待恢复，不能代替重启决策进入证据收尾。只有确认失败且重试决策拒绝后，Subject 证据保存完才写为 `failed`。定时扫描对已终结 Agent 只补收未完成证据，不隐式重试 Agent。`RuntimeRecoveryStore` 仅供应用扫描未完成 Run，Run 当前状态仍只从子记录推导。
 
@@ -77,11 +77,11 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
 5. Subject Workspace 产物保留在原 SpaceDO；完整 Subject Trajectory 由 SP 物化到同一个 SpaceDO。已确认失败的 Subject Submission 也收集并保存可用产物及完整轨迹，保留原失败原因。收集失败时保留 `execution.evidencePending` 和非终态；恢复只补收证据，不提交或重启 Agent。证据引用与最终执行状态同时保存。SP 确认轨迹准备完成后，评估 Agent 才能提交任务。
 6. 推送丢失、连接断开或运行时恢复时，`inspectAgentOperation` 只做一次或有限次状态校准，不作为主流程的持续轮询。
 7. 评估平台只消费 SP 的公开契约，不依赖 SP 的 DO SQLite、内部类或 Web 投影。
-8. 使用新 `idempotencyKey` 主动调用 `evaluate()` 会新建评估记录并在启动前分配新的评估 ID；复用旧 key 只返回原 Run。被评估 Agent 的 ID 保持不变，旧评估记录不被覆盖。
+8. 使用新 `idempotencyKey` 主动调用 `evaluate()` 会新建评估记录并在启动前分配新的评估 ID；当前 Run 的相同 key 返回原 Run；该 Run 被新批次替换后，旧 key 返回冲突。被评估 Subject 的 ID 保持不变，旧评估记录在新评估准入时删除。
    已选 Sampling 缺失、不属于请求 Project 或执行未成功时抛出 `RuntimeEvaluationSelectionError`，供 API 映射为候选已失效的冲突响应。`getRun()` 查不到 Run 时抛出 `RuntimeRunNotFoundError`，供 API 返回 404。
 9. `start()`、`pipeline()` 和 `evaluate()` 不分别写 Run、Sampling 和 EvaluationRecord。三者都使用 `createRunWithSamplings()` 原子提交；命令失败时不能留下半批状态或清掉旧评估记录。
 10. `start()`、`pipeline()` 和 `evaluate()` 都必须带调用方 `idempotencyKey`，同一 Project 内唯一。同一 Runtime 实例把同一 Project/key 的并发提交同步起来：相同操作、配置 ID 和评估 Sampling ID 顺序共用第一次提交的 Promise 和生效配置；不同请求事实立即冲突，提交结束即清理内存条目。后续重放先按 key 查找原 Run，使用已保存的生效配置快照校验请求事实；相同事实返回原 `RunHandle`，不同事实冲突。Store 在 Run/Sampling/EvaluationRecord 原子事务内二次查重，仅新 Run 唤醒 Worker；内存同步不取代持久化幂等。
-   同一 Project 同时只能有一批未结束 Run：Store 在锁住 Project 行后先处理同 key 重放，再用与 Worker 恢复相同的未结束状态判断阻止新 key 准入，并抛出 `RuntimeProjectBusyError`。执行、联跑和独立评估共用这条规则；原 Run 的所有阶段进入终态后才允许新提交。旧 key 重放不因配置编辑或其他新 Run 而变化。
+   同一 Project 同时只能有一批未结束 Run：Store 在锁住 Project 行后先处理同 key 重放，再用与 Worker 恢复相同的未结束状态判断阻止新 key 准入，并抛出 `RuntimeProjectBusyError`。执行、联跑和独立评估共用这条规则；原 Run 的所有阶段进入终态后才允许新提交。当前 Run 的同 key 重放不因配置编辑而变化；新 Run 替换后旧 key 返回冲突。
    停止请求写在当前 Run，Worker 收到通知后对该 Run 的 Eval SP Chat 发公开停止调用，正在运行的 Submission 立即中断。`RuntimeStore.withRunDispatchGate()` 让 SP Chat 创建、初始化和 Submission 提交的启动动作与停止请求按 Run 行锁排序，远程响应不占用行锁；停止请求落库后，未开始的阶段不能越过此门提交。已在途的准备可能完成本地读取；SP Chat 的持久停止标记拦截其延迟到达的初始化与 Submission。停止收尾中，缺失 Chat 通过 `AgentHandleNotFoundError` 表示；只有未保存 Submission ID 时才视为未提交并取消，有已保存 ID 则保留异常等待恢复。恢复进程按持久化停止请求继续收尾，Subject 已提交的任务须先保存可取得的产物和完整轨迹，再发布取消终态。Run 所有阶段终结且 Worker 写入 `stopFinalized` 前，Project 一直被准入锁拦住。
 11. `RuntimeRunRecord` 只保存不可变的阶段范围 `phases`，不保存当前阶段或 Run 状态；`RunSnapshot.phase/status` 由 `getRun()` 根据关联 Sampling 即时推导，是查询投影而不是第二份权威状态。单独执行范围为 `["execution"]`，单独评估为 `["evaluation"]`，联跑为 `["execution", "evaluation"]`；没有 `pipeline` 阶段或 Run kind。
 12. 联跑刚创建且所有 Execution Sampling 仍为 `queued` 时，Run 也必须是 `queued`。执行尚未结束时当前阶段为 `execution`；执行结束且存在成功 Sampling 后当前阶段为 `evaluation`，交接等待不能提前显示成功，成功 Sampling 的评估全部结束前 Run 仍是运行态。执行失败的 Sampling 不启动评估 Agent，其 EvaluationRecord 标记为 `cancelled`。

@@ -143,6 +143,16 @@ export const runs = pgTable("eval_runs", {
   check("eval_runs_source_commit_ck", sql`${table.sourceCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`),
 ]);
 
+/** Retired request identities prevent a late retry from replacing newer Project state. */
+export const runRequestKeys = pgTable("eval_run_request_keys", {
+  ownerUserId: text("owner_user_id").notNull(),
+  projectId: text("project_id").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.projectId, table.idempotencyKey] }),
+  foreignKey({ columns: [table.ownerUserId, table.projectId], foreignColumns: [projects.ownerUserId, projects.projectId] }).onDelete("cascade"),
+]);
+
 export const runSamplings = pgTable("eval_run_samplings", {
   ownerUserId: text("owner_user_id").notNull(),
   runId: text("run_id").notNull(),

@@ -6,7 +6,7 @@ import { sqlBatches } from "./batch.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
-import { datasets, evaluations, projects, runEvaluations, runs, runSamplings, samples, samplings } from "./schema.js";
+import { datasets, evaluations, projects, runEvaluations, runRequestKeys, runs, runSamplings, samples, samplings } from "./schema.js";
 
 export type RuntimeReader = Pick<EvalDb, "select">;
 
@@ -187,7 +187,16 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
     const [matched] = await reader.select({ runId: runs.runId }).from(runs)
       .where(and(eq(runs.ownerUserId, identityOwner), eq(runs.projectId, projectId),
         eq(runs.idempotencyKey, identity.idempotencyKey)));
-    if (!matched) return null;
+    if (!matched) {
+      const [retired] = await reader.select({ idempotencyKey: runRequestKeys.idempotencyKey }).from(runRequestKeys)
+        .where(and(eq(runRequestKeys.ownerUserId, identityOwner),
+          eq(runRequestKeys.projectId, projectId),
+          eq(runRequestKeys.idempotencyKey, identity.idempotencyKey)));
+      if (retired) {
+        throw new RuntimeRunIdentityConflictError("idempotency key belongs to a superseded Run");
+      }
+      return null;
+    }
     const [record] = await readRunRecords(reader, [matched.runId], {
       kind: "project", ownerUserId: identityOwner, projectId,
     });
@@ -225,9 +234,15 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
       return db.transaction(async (transaction) => {
         const [row] = await transaction.select({ runId: runs.runId, ownerUserId: runs.ownerUserId }).from(runs)
           .where(and(eq(runs.projectId, projectId), eq(runs.idempotencyKey, idempotencyKey), ownerScope.run));
-        return row ? (await readRunRecords(transaction, [row.runId], {
+        if (row) return (await readRunRecords(transaction, [row.runId], {
           kind: "project", ownerUserId: row.ownerUserId, projectId,
-        }))[0] ?? null : null;
+        }))[0] ?? null;
+        const [retired] = await transaction.select({ idempotencyKey: runRequestKeys.idempotencyKey })
+          .from(runRequestKeys).where(and(eq(runRequestKeys.projectId, projectId),
+            eq(runRequestKeys.idempotencyKey, idempotencyKey),
+            scope.kind === "user" ? eq(runRequestKeys.ownerUserId, scope.ownerUserId) : undefined));
+        if (retired) throw new RuntimeRunIdentityConflictError("idempotency key belongs to a superseded Run");
+        return null;
       }, { isolationLevel: "repeatable read", accessMode: "read only" });
     },
     async createRunWithSamplings(run, records, judges) {
@@ -292,6 +307,26 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
             throw new Error("Run uses a Dataset outside its Project owner scope");
           }
         }
+        const priorRunIds = transaction.select({ runId: runs.runId }).from(runs)
+          .where(and(eq(runs.ownerUserId, project.ownerUserId), eq(runs.projectId, run.projectId)));
+        const priorSamplingIds = transaction.select({ samplingId: samplings.samplingId }).from(samplings)
+          .where(and(eq(samplings.ownerUserId, project.ownerUserId), eq(samplings.projectId, run.projectId)));
+        await transaction.delete(runEvaluations).where(inArray(runEvaluations.runId, priorRunIds));
+        await transaction.delete(evaluations).where(inArray(evaluations.samplingId, priorSamplingIds));
+        await transaction.delete(runSamplings).where(inArray(runSamplings.runId, priorRunIds));
+        await transaction.delete(runs).where(and(
+          eq(runs.ownerUserId, project.ownerUserId), eq(runs.projectId, run.projectId),
+        ));
+        if (run.config.operation !== "evaluation") {
+          await transaction.delete(samplings).where(and(
+            eq(samplings.ownerUserId, project.ownerUserId), eq(samplings.projectId, run.projectId),
+          ));
+        }
+        await transaction.insert(runRequestKeys).values({
+          ownerUserId: project.ownerUserId,
+          projectId: run.projectId,
+          idempotencyKey: identity.idempotencyKey,
+        });
         const [inserted] = await transaction.insert(runs).values({
           runId: run.runId,
           ownerUserId: project.ownerUserId,
@@ -468,8 +503,8 @@ export function createPostgresRuntimeStore(db: EvalDb, ownerUserId: string, rele
 }
 
 export class ProjectRunStopConflictError extends Error {
-  constructor(readonly reason: "no_active_run" | "run_changed") {
-    super(reason === "no_active_run" ? "Project has no unfinished Run" : "Project is running a different Run");
+  constructor() {
+    super("Project has no unfinished Run");
     this.name = "ProjectRunStopConflictError";
   }
 }
@@ -501,8 +536,7 @@ export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string)
           .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId),
             activeRunCondition(transaction)))
           .limit(1);
-        if (!active) throw new ProjectRunStopConflictError("no_active_run");
-        if (active.runId !== runId) throw new ProjectRunStopConflictError("run_changed");
+        if (!active) throw new ProjectRunStopConflictError();
         await transaction.update(runs).set({ stopRequested: true }).where(eq(runs.runId, runId));
         await transaction.execute(sql`select pg_notify('eval_run_created', ${runId})`);
         return { runId, stopRequested: true };
