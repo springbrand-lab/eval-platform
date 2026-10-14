@@ -10,14 +10,19 @@ describe("Run worker process lifecycle", () => {
     const worker = { close: vi.fn(async () => undefined) };
     const closeDatabase = vi.fn(async () => undefined);
     const onError = vi.fn();
+    let startupSignal: AbortSignal | undefined;
     const startup = startWorkerWithSignals({
       signals,
-      start: () => started,
+      start(signal) {
+        startupSignal = signal;
+        return started;
+      },
       closeDatabase,
       onError,
     });
 
     signals.emit("SIGTERM");
+    expect(startupSignal?.aborted).toBe(true);
     expect(worker.close).not.toHaveBeenCalled();
     releaseStartup(worker);
     await startup;

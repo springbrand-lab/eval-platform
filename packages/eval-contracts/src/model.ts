@@ -31,6 +31,8 @@ export type SamplingStatus =
 export interface SamplingStageState {
   readonly status: SamplingStatus;
   readonly lastError?: string;
+  /** Subject Submission ended, but artifacts and complete trajectory still need finalization. */
+  readonly evidencePending?: boolean;
 }
 
 export type AgentStatus =

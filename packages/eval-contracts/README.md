@@ -10,6 +10,8 @@
 
 一旦观察到 Agent 终态，Attempt 的状态及完成时间就固定为该 Agent 事实，`error` 保留原 Agent 错误；Runtime 资源持久化/产物收尾失败由执行或评估阶段的 `lastError` 表达，不把已经 `completed` 的 Attempt 改为 Agent 失败。保存重试复用同一份事实，不改变 Sampling/Evaluation/Attempt/Submission 身份。
 
+Subject 的产物和完整轨迹是执行终态的必需证据。`Sampling.execution.evidencePending` 表示 Agent 已终结、证据尚未完整保存；此时执行保持非终态，恢复进程只补收证据，不再次提交或重启 Agent。证据与执行终态在同一次 Sampling 写入中保存；原 Agent 错误保留在 Attempt 和阶段错误中。
+
 `RunPhase` 只有 `execution | evaluation`。`RunPhases` 表示 Run 关联的实际阶段范围：只执行、只评估或顺序执行后评估；`RunSnapshot.phases` 返回该范围，`phase` 和 `status` 返回从 Sampling 推导的当前进度。Pipeline 只负责组合两阶段，没有第三种阶段、Run kind 或独立的 Pipeline 数据模型。
 
 运行请求只携带配置引用：`StartRunRequest` 使用 `executionConfigId`，`EvaluateRequest` 使用 `evaluationConfigId`，`PipelineRequest` 使用 `pipelineConfigId`。具体 Dataset、Agent、并发和重试策略属于 `eval-runtime/config`，不在请求契约中复制。

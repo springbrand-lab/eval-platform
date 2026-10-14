@@ -76,6 +76,8 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   readonly collectOutput: (handle: AgentHandle) => Promise<TOutput>;
   readonly isSuccessfulOutput: (output: TOutput) => boolean;
   readonly outputFailure: (output: TOutput) => AgentOperationError;
+  /** The caller atomically persists the final stage state with required evidence. */
+  readonly deferFailureStatus?: boolean;
 }
 
 export interface AgentLifecycleResult<TOutput> {
@@ -369,7 +371,13 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
       }
 
       await options.setSamplingStatus("running");
-      const output = await collectOutputWithRetry(dependencies, options, handle, retryController);
+      const output = await collectOutputWithRetry({
+        stage: options.stage,
+        collect: () => options.collectOutput(handle!),
+        retryController,
+        sleep: dependencies.sleep,
+        onRetry: (message) => options.setSamplingStatus("retrying", message),
+      });
       if (!options.isSuccessfulOutput(output)) {
         const failure = options.outputFailure(output);
         throw new OutputCollectionError(options.stage, describeAgentError(failure), failure, false);
@@ -388,12 +396,12 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
       }
 
       if (!(error instanceof ConfirmedSubmissionFailure)) {
-        await options.setSamplingStatus("failed", details.message);
+        if (!options.deferFailureStatus) await options.setSamplingStatus("failed", details.message);
         throw error;
       }
 
       if (!details.retryable) {
-        await options.setSamplingStatus("failed", details.message);
+        if (!options.deferFailureStatus) await options.setSamplingStatus("failed", details.message);
         throw error;
       }
 
@@ -403,7 +411,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
         attemptNumber,
       });
       if (!decision.shouldRetry) {
-        await options.setSamplingStatus("failed", details.message);
+        if (!options.deferFailureStatus) await options.setSamplingStatus("failed", details.message);
         throw error;
       }
 
@@ -581,32 +589,34 @@ async function waitForTerminalWithRetry<TAttempt extends AgentAttemptRecord, TOu
   }
 }
 
-async function collectOutputWithRetry<TAttempt extends AgentAttemptRecord, TOutput>(
-  dependencies: AgentLifecycleDependencies,
-  options: AgentLifecycleOptions<TAttempt, TOutput>,
-  handle: AgentHandle,
-  retryController: RetryController,
+export async function collectOutputWithRetry<TOutput>(input: {
+  readonly stage: AgentLifecycleStage;
+  readonly collect: () => Promise<TOutput>;
+  readonly retryController: RetryController;
+  readonly sleep: (milliseconds: number) => Promise<void>;
+  readonly onRetry?: (message: string) => Promise<void>;
+},
 ): Promise<TOutput> {
   for (let collectionAttemptNumber = 1; ; collectionAttemptNumber += 1) {
     try {
-      return await options.collectOutput(handle);
+      return await input.collect();
     } catch (error) {
       const details = describeAgentError(error);
       if (!details.retryable) {
-        throw new OutputCollectionError(options.stage, details, error);
+        throw new OutputCollectionError(input.stage, details, error);
       }
 
-      const decision = await retryController.decide({
+      const decision = await input.retryController.decide({
         operation: "collection",
         failureKind: details.failureKind,
         attemptNumber: collectionAttemptNumber,
       });
       if (!decision.shouldRetry) {
-        throw new OutputCollectionError(options.stage, details, error);
+        throw new OutputCollectionError(input.stage, details, error);
       }
 
-      await options.setSamplingStatus("retrying", details.message);
-      await dependencies.sleep(decision.backoffMs ?? 0);
+      await input.onRetry?.(details.message);
+      await input.sleep(decision.backoffMs ?? 0);
     }
   }
 }

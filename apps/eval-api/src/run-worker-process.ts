@@ -14,6 +14,7 @@ export interface SpEvalRunWorkerProcessOptions {
   readonly sp: SpHarnessOptions;
   readonly maxConcurrentRuns?: number;
   readonly scanIntervalMs?: number;
+  readonly signal?: AbortSignal;
   readonly onError?: (error: Error) => void;
 }
 
@@ -46,6 +47,7 @@ export async function startSpEvalRunWorkerProcess(options: SpEvalRunWorkerProces
     notifications: createPostgresRunNotifications(options.databaseUrl),
     ...(options.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: options.maxConcurrentRuns }),
     ...(options.scanIntervalMs === undefined ? {} : { scanIntervalMs: options.scanIntervalMs }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.onError === undefined ? {} : { onError: options.onError }),
   });
 }

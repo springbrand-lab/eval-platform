@@ -241,6 +241,9 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       if (!current) throw new SpHarnessError("Submission operation was not found", true);
       if (isTerminal(current)) return current;
       const timeoutMs = input.runtime?.timeoutMs;
+      if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+        throw new SpHarnessError("Submission timeout must be positive", false);
+      }
       const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
       for (let attempt = 1; attempt <= MAX_CONNECTION_ATTEMPTS; attempt += 1) {
         try {
@@ -250,13 +253,21 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           if (!(error instanceof SpHarnessError) || !error.retryable) throw error;
           // A disconnected observer cannot establish the terminal fact. Read once,
           // then reconnect to the same Submission; a healthy socket is never polled.
-          const reconciled = await inspect(input.handle, input.idempotencyKey);
+          let reconciled: AgentSubmission | null = null;
+          let inspectionError: SpHarnessError | undefined;
+          try {
+            reconciled = await inspect(input.handle, input.idempotencyKey);
+          } catch (cause) {
+            if (!(cause instanceof SpHarnessError) || !cause.retryable) throw cause;
+            inspectionError = cause;
+          }
           if (reconciled && reconciled.submissionId !== current.submissionId) {
             throw new SpHarnessError("Submission operation changed during observation", false);
           }
           if (reconciled && isTerminal(reconciled)) return reconciled;
-          if (!reconciled || attempt === MAX_CONNECTION_ATTEMPTS || (deadline !== undefined && Date.now() >= deadline)) {
-            throw error;
+          if ((!reconciled && !inspectionError) || attempt === MAX_CONNECTION_ATTEMPTS
+            || (deadline !== undefined && Date.now() >= deadline)) {
+            throw inspectionError ?? error;
           }
           const delay = Math.floor(Math.random() * BASE_RECONNECT_DELAY_MS * 2 ** (attempt - 1));
           await new Promise<void>((resolve) => setTimeout(resolve, delay));

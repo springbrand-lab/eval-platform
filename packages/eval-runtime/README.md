@@ -52,7 +52,7 @@ src/
 
 配置、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。`RuntimeStore` 是持久化端口，实际实现由 API/DO/数据库层注入；Run、Sampling、EvaluationRecord 和本次生效配置快照的聚合写入必须由 Store 在一个持久化边界内原子完成。
 
-三个启动入口只原子提交运行事实并返回 `RunHandle`，不在请求进程里执行 Agent。应用层唤醒单实例执行器调用 `resume(runId)`；独立 Worker 可用 `createEvalRunResumer({ getSample, store, harness })`，无需注入启动接口的 Catalog 与 ConfigResolver。恢复时使用 Run 已保存的生效配置和 Sample 引用，跳过已完成的阶段，并按 Attempt 原 `submissionId`、操作类型和幂等键向 SP 校准。已完成 Agent 的资源或产物保存失败只补收尾，不重新提交或重启。进程中断后遗留的未完成阶段由执行器接手；已处理且重试决策拒绝的失败写为 `failed`，定时扫描不构成无限次的隐式重试。`RuntimeRecoveryStore` 仅供应用扫描未完成 Run，Run 当前状态仍只从子记录推导。
+三个启动入口只原子提交运行事实并返回 `RunHandle`，不在请求进程里执行 Agent。应用层唤醒单实例执行器调用 `resume(runId)`；独立 Worker 可用 `createEvalRunResumer({ getSample, store, harness })`，无需注入启动接口的 Catalog 与 ConfigResolver。恢复时使用 Run 已保存的生效配置和 Sample 引用，跳过已完成的阶段，并按 Attempt 原 `submissionId`、操作类型和幂等键向 SP 校准。已完成 Agent 的资源或产物保存失败只补收尾，不重新提交或重启。进程中断后遗留的未完成阶段由执行器接手；已处理且重试决策拒绝的 Agent 失败在 Subject 证据保存后才写为 `failed`，定时扫描对已终结 Agent 只补收未完成证据，不隐式重试 Agent。`RuntimeRecoveryStore` 仅供应用扫描未完成 Run，Run 当前状态仍只从子记录推导。
 
 `ExecutionConfig` 是完整的执行方案，包含 Dataset、可选 Sample 子集、Sampling 次数、Subject Harness、执行并发和重试策略。`EvaluationConfig` 包含 Evaluation Harness、评估并发和重试策略。`PipelineConfig` 只组合一个 ExecutionConfig 和一个 EvaluationConfig，不是新的 Runtime 阶段。Config ID 由配置创建函数自动生成；实际运行请求只引用 `executionConfigId`、`evaluationConfigId` 或 `pipelineConfigId`，不再重复携带这些配置字段。`ConfigResolver` 在启动前统一读取、校验和归一化配置，输出带明确默认值的 `Resolved*Config`；Run 同时保存本次实际生效的不可变配置快照，不引入 version。SP Harness 的 `runtime` 参数会继续传入 Agent 创建、素材准备、提交、状态等待/校准和产物收集；Subject 轨迹物化按 Subject Chat 身份幂等，不把评估运行选项计入物化身份。当前 Runtime 对未实现的 Remote Harness 明确报错，不会丢弃 `runOptions`。
 
@@ -66,7 +66,7 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
 3. 重试不能把一次采样变成新的采样，只能增加该采样的执行或评估 attempt。
    `RetryController` 按 `creation`、`initialization`、`submission`、`status`、`collection`、`resources`、`persistence` 和 `restart` 区分决策；默认策略只定义确认失败后的 Agent 重启，其余操作是否重试由注入的控制器决定。Agent ensure 和初始化重试保留同一 Agent，各自独立计数，不新增执行/评估 attempt、不消耗 Agent 重启次数；收集或保存失败不得重启已经完成的 Submission。
 4. Submission 终态以 Harness 推送通知为主；自动重试前仍必须按本次操作的幂等键查询原 `Submission`，不得因为响应丢失就盲目再次投递。
-5. Subject Workspace 产物保留在原 SpaceDO；完整 Subject Trajectory 由 SP 物化到同一个 SpaceDO。已确认失败的 Subject Submission 也收集并保存可用产物及完整轨迹，保留原失败原因。SP 确认轨迹准备完成后，评估 Agent 才能提交任务。
+5. Subject Workspace 产物保留在原 SpaceDO；完整 Subject Trajectory 由 SP 物化到同一个 SpaceDO。已确认失败的 Subject Submission 也收集并保存可用产物及完整轨迹，保留原失败原因。收集失败时保留 `execution.evidencePending` 和非终态；恢复只补收证据，不提交或重启 Agent。证据引用与最终执行状态同时保存。SP 确认轨迹准备完成后，评估 Agent 才能提交任务。
 6. 推送丢失、连接断开或运行时恢复时，`inspectAgentOperation` 只做一次或有限次状态校准，不作为主流程的持续轮询。
 7. 评估平台只消费 SP 的公开契约，不依赖 SP 的 DO SQLite、内部类或 Web 投影。
 8. 再次主动调用 `evaluate()` 会新建评估记录并在启动前分配新的评估 ID；这是有意重新评估，不是丢响应后的 ensure 重试。被评估 Agent 的 ID 保持不变，旧评估记录不被覆盖。

@@ -24,6 +24,7 @@ export interface EvalRunWorkerOptions {
   readonly notifications: RunNotifications;
   readonly maxConcurrentRuns?: number;
   readonly scanIntervalMs?: number;
+  readonly signal?: AbortSignal;
   readonly onError?: (error: Error) => void;
 }
 
@@ -113,7 +114,7 @@ export async function startEvalRunWorker(options: EvalRunWorkerOptions): Promise
     throw new Error("scanIntervalMs must be a positive integer");
   }
 
-  let closed = false;
+  let closed = options.signal?.aborted ?? false;
   let ready = false;
   let scanning: Promise<void> | undefined;
   const pending = new Set<string>();
@@ -125,6 +126,13 @@ export async function startEvalRunWorker(options: EvalRunWorkerOptions): Promise
       console.error(error, reportingError);
     }
   };
+  let closeWorker: (() => Promise<void>) | undefined;
+  const onAbort = (): void => {
+    closed = true;
+    pending.clear();
+    if (closeWorker) void closeWorker().catch(report);
+  };
+  options.signal?.addEventListener("abort", onAbort, { once: true });
   const drain = (): void => {
     while (ready && !closed && active.size < maxConcurrentRuns && pending.size > 0) {
       const runId = pending.values().next().value!;
@@ -172,6 +180,7 @@ export async function startEvalRunWorker(options: EvalRunWorkerOptions): Promise
   const close = (): Promise<void> => {
     if (closing) return closing;
     closed = true;
+    options.signal?.removeEventListener("abort", onAbort);
     if (timer) clearInterval(timer);
     pending.clear();
     closing = (async () => {
@@ -184,13 +193,15 @@ export async function startEvalRunWorker(options: EvalRunWorkerOptions): Promise
     })();
     return closing;
   };
+  closeWorker = close;
   try {
     await scan();
   } catch (error) {
     await close();
     throw error;
   }
-  timer = setInterval(() => { void scan().catch(report); }, scanIntervalMs);
+  if (closed) await close();
+  else timer = setInterval(() => { void scan().catch(report); }, scanIntervalMs);
   return {
     wake,
     scan,

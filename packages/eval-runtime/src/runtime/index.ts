@@ -77,153 +77,33 @@ function requireDistinctIds(ids: readonly string[], field: string): void {
   }
 }
 
-class RuntimeCoordinator implements EvalRuntime {
-  readonly #catalog: Pick<RuntimeCatalog, "getSample">;
-  readonly #admission?: Pick<EvalRuntimeDependencies, "catalog" | "configResolver">;
-  readonly #store: EvalRuntimeDependencies["store"];
+class RunResumer implements EvalRunResumer {
+  protected readonly store: EvalRunResumerDependencies["store"];
+  protected readonly idFactory: () => string;
+  readonly #getSample: EvalRunResumerDependencies["getSample"];
   readonly #stageDependencies: RuntimeStageDependencies;
-  readonly #idFactory: () => string;
-  readonly #now: () => string;
   readonly #createRetryController: (policy?: RetryPolicy) => RetryController;
   readonly #onError: (error: Error) => void;
 
-  constructor(dependencies: EvalRuntimeDependencies | EvalRunResumerDependencies) {
-    this.#catalog = "catalog" in dependencies ? dependencies.catalog : { getSample: dependencies.getSample };
-    if ("catalog" in dependencies) {
-      this.#admission = { catalog: dependencies.catalog, configResolver: dependencies.configResolver };
-    }
-    this.#store = dependencies.store;
-    this.#idFactory = dependencies.idFactory ?? defaultIdFactory;
-    this.#now = dependencies.now ?? defaultNow;
+  constructor(dependencies: EvalRunResumerDependencies) {
+    this.store = dependencies.store;
+    this.idFactory = dependencies.idFactory ?? defaultIdFactory;
+    this.#getSample = dependencies.getSample;
     this.#createRetryController = dependencies.createRetryController ?? createRetryController;
     this.#onError = dependencies.onError ?? ((error) => console.error(error));
     this.#stageDependencies = {
       harness: dependencies.harness,
       store: dependencies.store,
-      idFactory: this.#idFactory,
-      now: this.#now,
+      idFactory: this.idFactory,
+      now: dependencies.now ?? defaultNow,
       sleep: dependencies.sleep ?? defaultSleep,
       onError: this.#onError,
       createRetryController: this.#createRetryController,
     };
   }
 
-  listProjects(): Promise<readonly Project[]> {
-    return this.admission().catalog.listProjects();
-  }
-
-  listAgents(role?: AgentRole) {
-    return this.admission().catalog.listAgents(role);
-  }
-
-  listDatasets() {
-    return this.admission().catalog.listDatasets();
-  }
-
-  listData(datasetId: string) {
-    return this.admission().catalog.listData(datasetId);
-  }
-
-  listSamples(dataId: string) {
-    return this.admission().catalog.listSamples(dataId);
-  }
-
-  async start(request: StartRunRequest): Promise<RunHandle> {
-    this.validateStartRequest(request);
-    const config = await this.admission().configResolver.resolveExecutionConfig(request.executionConfigId);
-    const subjectAgent = requireSpHarness(config.harness, "subject").agentConfig;
-    const requestIdentity = await createRunRequestIdentity("start", request, config);
-    const existingRun = await this.findExistingRun(requestIdentity);
-    if (existingRun) return this.runHandle(existingRun);
-
-    const samples = await this.resolveSamples(config.datasetId, config.sampleIds);
-    const contexts = samples.flatMap((sample) => Array.from(
-      { length: config.samplingCount },
-      () => this.createSamplingContext(request.projectId, sample, subjectAgent),
-    ));
-    const records = contexts.map(({ state }) => state);
-    const run = this.createRun(
-      request.projectId,
-      records.map(({ samplingId }) => samplingId),
-      ["execution"],
-      [],
-      { operation: "execution", execution: config },
-      requestIdentity,
-    );
-
-    const admission = await this.persistNewRun(run, records, []);
-    return this.runHandle(admission.run);
-  }
-
-  async evaluate(request: EvaluateRequest): Promise<RunHandle> {
-    this.validateEvaluateRequest(request);
-    const config = await this.admission().configResolver.resolveEvaluationConfig(request.evaluationConfigId);
-    const evaluationAgent = requireSpHarness(config.evaluationHarness, "evaluator").agentConfig;
-    const records = await this.loadSamplingRecords(request.samplingIds);
-    for (const record of records) {
-      if (record.projectId !== request.projectId) {
-        throw new Error(`Sampling ${record.samplingId} does not belong to project ${request.projectId}`);
-      }
-      if (record.execution.status !== "succeeded") {
-        throw new Error(`Sampling ${record.samplingId} has no successful execution output`);
-      }
-    }
-    const contexts = await this.loadSamplingContexts(records, request.projectId);
-    const evaluations = contexts.map(({ state }) => (
-      this.createEvaluationRecord(state.samplingId, evaluationAgent)
-    ));
-    const run = this.createRun(
-      request.projectId,
-      records.map(({ samplingId }) => samplingId),
-      ["evaluation"],
-      evaluations.map(({ evaluationId }) => evaluationId),
-      { operation: "evaluation", evaluation: config },
-    );
-    const admission = await this.#store.createRunWithSamplings(run, records, evaluations);
-    return this.runHandle(admission.run);
-  }
-
-  async pipeline(request: PipelineRequest): Promise<RunHandle> {
-    this.validatePipelineRequest(request);
-    const config = await this.admission().configResolver.resolvePipelineConfig(request.pipelineConfigId);
-    const subjectAgent = requireSpHarness(config.execution.harness, "subject").agentConfig;
-    const evaluationAgent = requireSpHarness(
-      config.evaluation.evaluationHarness,
-      "evaluator",
-    ).agentConfig;
-    const requestIdentity = await createRunRequestIdentity("pipeline", request, config);
-    const existingRun = await this.findExistingRun(requestIdentity);
-    if (existingRun) return this.runHandle(existingRun);
-
-    const samples = await this.resolveSamples(config.execution.datasetId, config.execution.sampleIds);
-    const contexts = samples.flatMap((sample) => Array.from(
-      { length: config.execution.samplingCount },
-      () => this.createSamplingContext(request.projectId, sample, subjectAgent),
-    ));
-    const records = contexts.map(({ state }) => state);
-    const evaluations = contexts.map(({ state }) => (
-      this.createEvaluationRecord(state.samplingId, evaluationAgent)
-    ));
-    const run = this.createRun(
-      request.projectId,
-      records.map(({ samplingId }) => samplingId),
-      ["execution", "evaluation"],
-      evaluations.map(({ evaluationId }) => evaluationId),
-      {
-        operation: "pipeline",
-        pipeline: config.pipeline,
-        execution: config.execution,
-        evaluation: config.evaluation,
-      },
-      requestIdentity,
-    );
-
-    const admission = await this.persistNewRun(run, records, evaluations);
-    return this.runHandle(admission.run);
-  }
-
   async resume(runId: string): Promise<void> {
-    const run = await this.#store.getRun(runId);
+    const run = await this.store.getRun(runId);
     if (!run) throw new Error(`Unknown run ${runId}`);
 
     let samplings = await this.loadSamplingRecords(run.samplingIds);
@@ -270,102 +150,27 @@ class RuntimeCoordinator implements EvalRuntime {
     if (errors.length > 0) throw new AggregateError(errors, "Evaluation phase could not persist its progress");
   }
 
-  async getRun(runId: string): Promise<RunSnapshot> {
-    const run = await this.#store.getRun(runId);
-    if (!run) throw new Error(`Unknown run ${runId}`);
-    const records = await this.loadSamplingRecords(run.samplingIds);
-    const evaluations = await this.loadEvaluationRecords(run.evaluationIds);
-    return toRunSnapshot(run, records, evaluations);
-  }
-
-  async getSampling(samplingId: string): Promise<SamplingSnapshot> {
-    const state = await this.#store.getSampling(samplingId);
-    if (!state) throw new Error(`Unknown sampling ${samplingId}`);
-    return toSamplingSnapshot(state);
-  }
-
-  async getEvaluation(evaluationId: string): Promise<EvaluationRecord> {
-    const evaluation = await this.#store.getEvaluation(evaluationId);
-    if (!evaluation) throw new Error(`Unknown evaluation ${evaluationId}`);
-    return structuredClone(evaluation);
-  }
-
-  async listEvaluations(samplingId: string): Promise<readonly EvaluationRecord[]> {
-    return structuredClone(await this.#store.listEvaluations(samplingId));
-  }
-
-  private validateStartRequest(request: StartRunRequest): void {
-    if (!request.requestId) throw new Error("requestId is required");
-    if (request.idempotencyKey !== undefined && !request.idempotencyKey) {
-      throw new Error("idempotencyKey must not be empty");
-    }
-    if (!request.projectId) throw new Error("projectId is required");
-    if (!request.executionConfigId) throw new Error("executionConfigId is required");
-  }
-
-  private admission(): Pick<EvalRuntimeDependencies, "catalog" | "configResolver"> {
-    if (!this.#admission) throw new Error("Run admission is unavailable in the recovery worker");
-    return this.#admission;
-  }
-
-  private validateEvaluateRequest(request: EvaluateRequest): void {
-    if (!request.projectId) throw new Error("projectId is required");
-    if (request.samplingIds.length === 0) throw new Error("samplingIds must not be empty");
-    requireDistinctIds(request.samplingIds, "samplingIds");
-    if (!request.evaluationConfigId) throw new Error("evaluationConfigId is required");
-  }
-
-  private validatePipelineRequest(request: PipelineRequest): void {
-    if (!request.requestId) throw new Error("requestId is required");
-    if (request.idempotencyKey !== undefined && !request.idempotencyKey) {
-      throw new Error("idempotencyKey must not be empty");
-    }
-    if (!request.projectId) throw new Error("projectId is required");
-    if (!request.pipelineConfigId) throw new Error("pipelineConfigId is required");
-  }
-
-  private async resolveSamples(
-    datasetId: string,
-    sampleIds?: readonly string[],
-  ): Promise<readonly Sample[]> {
-    const data = await this.admission().catalog.listData(datasetId);
-    const samples: Sample[] = [];
-    for (const item of data) {
-      samples.push(...await this.admission().catalog.listSamples(item.dataId));
-    }
-    const selected = sampleIds === undefined
-      ? samples
-      : samples.filter((sample) => sampleIds.includes(sample.sampleId));
-    if (selected.length === 0) throw new Error(`No samples found for dataset ${datasetId}`);
-    if (sampleIds && selected.length !== sampleIds.length) {
-      const selectedIds = new Set(selected.map((sample) => sample.sampleId));
-      const missing = sampleIds.find((sampleId) => !selectedIds.has(sampleId));
-      throw new Error(`Sample ${missing} does not belong to dataset ${datasetId}`);
-    }
-    return selected;
-  }
-
-  private async loadSamplingRecords(
+  protected async loadSamplingRecords(
     samplingIds: readonly string[],
   ): Promise<readonly SamplingState[]> {
     return Promise.all(samplingIds.map(async (samplingId) => {
-      const record = await this.#store.getSampling(samplingId);
+      const record = await this.store.getSampling(samplingId);
       if (!record) throw new Error(`Unknown sampling ${samplingId}`);
       return record;
     }));
   }
 
-  private async loadEvaluationRecords(
+  protected async loadEvaluationRecords(
     evaluationIds: readonly string[],
   ): Promise<readonly EvaluationRecord[]> {
     return Promise.all(evaluationIds.map(async (evaluationId) => {
-      const evaluation = await this.#store.getEvaluation(evaluationId);
+      const evaluation = await this.store.getEvaluation(evaluationId);
       if (!evaluation) throw new Error(`Unknown evaluation ${evaluationId}`);
       return evaluation;
     }));
   }
 
-  private async loadSamplingContexts(
+  protected async loadSamplingContexts(
     records: readonly SamplingState[],
     projectId: string,
   ): Promise<readonly RuntimeSamplingContext[]> {
@@ -377,7 +182,7 @@ class RuntimeCoordinator implements EvalRuntime {
       const sampleId = record.sampleId;
       let samplePromise = samplePromises.get(sampleId);
       if (!samplePromise) {
-        samplePromise = this.#catalog.getSample(sampleId);
+        samplePromise = this.#getSample(sampleId);
         samplePromises.set(sampleId, samplePromise);
       }
       const sample = await samplePromise;
@@ -387,90 +192,6 @@ class RuntimeCoordinator implements EvalRuntime {
       }
       return { state: record, sample };
     }));
-  }
-
-  private createSamplingContext(
-    projectId: string,
-    sample: Sample,
-    subjectAgent: AgentConfigRef,
-  ): RuntimeSamplingContext {
-    const sampling: Sampling = {
-      samplingId: this.#idFactory(),
-      projectId,
-      sampleId: sample.sampleId,
-      execution: { status: "queued" },
-      subjectAgent,
-      executionAttempts: [],
-    };
-    return { state: sampling, sample };
-  }
-
-  private createEvaluationRecord(
-    samplingId: string,
-    evaluator: AgentConfigRef,
-  ): EvaluationRecord {
-    return {
-      evaluationId: this.#idFactory(),
-      samplingId,
-      evaluator,
-      status: { status: "queued" },
-      attempts: [],
-    };
-  }
-
-  private createRun(
-    projectId: string,
-    samplingIds: readonly string[],
-    phases: RunPhases,
-    evaluationIds: readonly string[],
-    config: RunConfigSnapshot,
-    requestIdentity?: RuntimeRunRequestIdentity,
-  ): RuntimeRunRecord {
-    return {
-      runId: this.#idFactory(),
-      samplingIds: [...samplingIds],
-      projectId,
-      phases,
-      evaluationIds: [...evaluationIds],
-      config,
-      ...(requestIdentity ? { requestIdentity } : {}),
-    };
-  }
-
-  private async persistNewRun(
-    run: RuntimeRunRecord,
-    records: readonly SamplingState[],
-    evaluations: readonly EvaluationRecord[],
-  ): Promise<RuntimeRunAdmission> {
-    return this.#store.createRunWithSamplings(run, records, evaluations);
-  }
-
-  private async findExistingRun(
-    requestIdentity: RuntimeRunRequestIdentity,
-  ): Promise<RuntimeRunRecord | null> {
-    const byRequestId = await this.#store.findRunByRequestId(requestIdentity.requestId);
-    const byIdempotencyKey = requestIdentity.idempotencyKey === undefined
-      ? null
-      : await this.#store.findRunByIdempotencyKey(requestIdentity.idempotencyKey);
-
-    if (
-      byRequestId &&
-      byIdempotencyKey &&
-      byRequestId.runId !== byIdempotencyKey.runId
-    ) {
-      throw new RuntimeRunIdentityConflictError(
-        "requestId and idempotencyKey refer to different evaluation runs",
-      );
-    }
-
-    const existingRun = byIdempotencyKey ?? byRequestId;
-    if (!existingRun) return null;
-    assertRequestIdentity(existingRun, requestIdentity);
-    return existingRun;
-  }
-
-  private runHandle(run: RuntimeRunRecord): RunHandle {
-    return { runId: run.runId, samplingIds: [...run.samplingIds] };
   }
 
   private async runExecutionPhase(
@@ -521,8 +242,8 @@ class RuntimeCoordinator implements EvalRuntime {
     const persist = (record: EvaluationRecord, expected: EvaluationRecord): Promise<void> => persistRuntimeRecord({
       record,
       expected,
-      write: (next, expected) => this.#store.updateEvaluation(next, expected),
-      read: () => this.#store.getEvaluation(evaluation.evaluationId),
+      write: (next, expected) => this.store.updateEvaluation(next, expected),
+      read: () => this.store.getEvaluation(evaluation.evaluationId),
       retryController,
       sleep: this.#stageDependencies.sleep,
     });
@@ -534,7 +255,7 @@ class RuntimeCoordinator implements EvalRuntime {
       }, evaluation);
     } catch (error) {
       try {
-        const current = await this.#store.getEvaluation(evaluation.evaluationId);
+        const current = await this.store.getEvaluation(evaluation.evaluationId);
         if (!current) throw new Error(`Unknown evaluation ${evaluation.evaluationId}`);
         if (current.status.status === "cancelled") return;
         await persist({
@@ -561,6 +282,287 @@ class RuntimeCoordinator implements EvalRuntime {
   private scheduler(maxConcurrentDos: number): AgentScheduler {
     return createAgentScheduler({ maxConcurrentDos });
   }
+
+}
+
+class RuntimeCoordinator extends RunResumer implements EvalRuntime {
+  readonly #catalog: RuntimeCatalog;
+  readonly #configResolver: EvalRuntimeDependencies["configResolver"];
+
+  constructor(dependencies: EvalRuntimeDependencies) {
+    super({ ...dependencies, getSample: dependencies.catalog.getSample.bind(dependencies.catalog) });
+    this.#catalog = dependencies.catalog;
+    this.#configResolver = dependencies.configResolver;
+  }
+
+  listProjects(): Promise<readonly Project[]> {
+    return this.#catalog.listProjects();
+  }
+
+  listAgents(role?: AgentRole) {
+    return this.#catalog.listAgents(role);
+  }
+
+  listDatasets() {
+    return this.#catalog.listDatasets();
+  }
+
+  listData(datasetId: string) {
+    return this.#catalog.listData(datasetId);
+  }
+
+  listSamples(dataId: string) {
+    return this.#catalog.listSamples(dataId);
+  }
+
+  async start(request: StartRunRequest): Promise<RunHandle> {
+    this.validateStartRequest(request);
+    const config = await this.#configResolver.resolveExecutionConfig(request.executionConfigId);
+    const subjectAgent = requireSpHarness(config.harness, "subject").agentConfig;
+    const requestIdentity = await createRunRequestIdentity("start", request, config);
+    const existingRun = await this.findExistingRun(requestIdentity);
+    if (existingRun) return this.runHandle(existingRun);
+
+    const samples = await this.resolveSamples(config.datasetId, config.sampleIds);
+    const contexts = samples.flatMap((sample) => Array.from(
+      { length: config.samplingCount },
+      () => this.createSamplingContext(request.projectId, sample, subjectAgent),
+    ));
+    const records = contexts.map(({ state }) => state);
+    const run = this.createRun(
+      request.projectId,
+      records.map(({ samplingId }) => samplingId),
+      ["execution"],
+      [],
+      { operation: "execution", execution: config },
+      requestIdentity,
+    );
+
+    const admission = await this.persistNewRun(run, records, []);
+    return this.runHandle(admission.run);
+  }
+
+  async evaluate(request: EvaluateRequest): Promise<RunHandle> {
+    this.validateEvaluateRequest(request);
+    const config = await this.#configResolver.resolveEvaluationConfig(request.evaluationConfigId);
+    const evaluationAgent = requireSpHarness(config.evaluationHarness, "evaluator").agentConfig;
+    const records = await this.loadSamplingRecords(request.samplingIds);
+    for (const record of records) {
+      if (record.projectId !== request.projectId) {
+        throw new Error(`Sampling ${record.samplingId} does not belong to project ${request.projectId}`);
+      }
+      if (record.execution.status !== "succeeded") {
+        throw new Error(`Sampling ${record.samplingId} has no successful execution output`);
+      }
+    }
+    const contexts = await this.loadSamplingContexts(records, request.projectId);
+    const evaluations = contexts.map(({ state }) => (
+      this.createEvaluationRecord(state.samplingId, evaluationAgent)
+    ));
+    const run = this.createRun(
+      request.projectId,
+      records.map(({ samplingId }) => samplingId),
+      ["evaluation"],
+      evaluations.map(({ evaluationId }) => evaluationId),
+      { operation: "evaluation", evaluation: config },
+    );
+    const admission = await this.store.createRunWithSamplings(run, records, evaluations);
+    return this.runHandle(admission.run);
+  }
+
+  async pipeline(request: PipelineRequest): Promise<RunHandle> {
+    this.validatePipelineRequest(request);
+    const config = await this.#configResolver.resolvePipelineConfig(request.pipelineConfigId);
+    const subjectAgent = requireSpHarness(config.execution.harness, "subject").agentConfig;
+    const evaluationAgent = requireSpHarness(
+      config.evaluation.evaluationHarness,
+      "evaluator",
+    ).agentConfig;
+    const requestIdentity = await createRunRequestIdentity("pipeline", request, config);
+    const existingRun = await this.findExistingRun(requestIdentity);
+    if (existingRun) return this.runHandle(existingRun);
+
+    const samples = await this.resolveSamples(config.execution.datasetId, config.execution.sampleIds);
+    const contexts = samples.flatMap((sample) => Array.from(
+      { length: config.execution.samplingCount },
+      () => this.createSamplingContext(request.projectId, sample, subjectAgent),
+    ));
+    const records = contexts.map(({ state }) => state);
+    const evaluations = contexts.map(({ state }) => (
+      this.createEvaluationRecord(state.samplingId, evaluationAgent)
+    ));
+    const run = this.createRun(
+      request.projectId,
+      records.map(({ samplingId }) => samplingId),
+      ["execution", "evaluation"],
+      evaluations.map(({ evaluationId }) => evaluationId),
+      {
+        operation: "pipeline",
+        pipeline: config.pipeline,
+        execution: config.execution,
+        evaluation: config.evaluation,
+      },
+      requestIdentity,
+    );
+
+    const admission = await this.persistNewRun(run, records, evaluations);
+    return this.runHandle(admission.run);
+  }
+
+  async getRun(runId: string): Promise<RunSnapshot> {
+    const run = await this.store.getRun(runId);
+    if (!run) throw new Error(`Unknown run ${runId}`);
+    const records = await this.loadSamplingRecords(run.samplingIds);
+    const evaluations = await this.loadEvaluationRecords(run.evaluationIds);
+    return toRunSnapshot(run, records, evaluations);
+  }
+
+  async getSampling(samplingId: string): Promise<SamplingSnapshot> {
+    const state = await this.store.getSampling(samplingId);
+    if (!state) throw new Error(`Unknown sampling ${samplingId}`);
+    return toSamplingSnapshot(state);
+  }
+
+  async getEvaluation(evaluationId: string): Promise<EvaluationRecord> {
+    const evaluation = await this.store.getEvaluation(evaluationId);
+    if (!evaluation) throw new Error(`Unknown evaluation ${evaluationId}`);
+    return structuredClone(evaluation);
+  }
+
+  async listEvaluations(samplingId: string): Promise<readonly EvaluationRecord[]> {
+    return structuredClone(await this.store.listEvaluations(samplingId));
+  }
+
+  private validateStartRequest(request: StartRunRequest): void {
+    if (!request.requestId) throw new Error("requestId is required");
+    if (request.idempotencyKey !== undefined && !request.idempotencyKey) {
+      throw new Error("idempotencyKey must not be empty");
+    }
+    if (!request.projectId) throw new Error("projectId is required");
+    if (!request.executionConfigId) throw new Error("executionConfigId is required");
+  }
+
+  private validateEvaluateRequest(request: EvaluateRequest): void {
+    if (!request.projectId) throw new Error("projectId is required");
+    if (request.samplingIds.length === 0) throw new Error("samplingIds must not be empty");
+    requireDistinctIds(request.samplingIds, "samplingIds");
+    if (!request.evaluationConfigId) throw new Error("evaluationConfigId is required");
+  }
+
+  private validatePipelineRequest(request: PipelineRequest): void {
+    if (!request.requestId) throw new Error("requestId is required");
+    if (request.idempotencyKey !== undefined && !request.idempotencyKey) {
+      throw new Error("idempotencyKey must not be empty");
+    }
+    if (!request.projectId) throw new Error("projectId is required");
+    if (!request.pipelineConfigId) throw new Error("pipelineConfigId is required");
+  }
+
+  private async resolveSamples(
+    datasetId: string,
+    sampleIds?: readonly string[],
+  ): Promise<readonly Sample[]> {
+    const data = await this.#catalog.listData(datasetId);
+    const samples: Sample[] = [];
+    for (const item of data) {
+      samples.push(...await this.#catalog.listSamples(item.dataId));
+    }
+    const selected = sampleIds === undefined
+      ? samples
+      : samples.filter((sample) => sampleIds.includes(sample.sampleId));
+    if (selected.length === 0) throw new Error(`No samples found for dataset ${datasetId}`);
+    if (sampleIds && selected.length !== sampleIds.length) {
+      const selectedIds = new Set(selected.map((sample) => sample.sampleId));
+      const missing = sampleIds.find((sampleId) => !selectedIds.has(sampleId));
+      throw new Error(`Sample ${missing} does not belong to dataset ${datasetId}`);
+    }
+    return selected;
+  }
+
+  private createSamplingContext(
+    projectId: string,
+    sample: Sample,
+    subjectAgent: AgentConfigRef,
+  ): RuntimeSamplingContext {
+    const sampling: Sampling = {
+      samplingId: this.idFactory(),
+      projectId,
+      sampleId: sample.sampleId,
+      execution: { status: "queued" },
+      subjectAgent,
+      executionAttempts: [],
+    };
+    return { state: sampling, sample };
+  }
+
+  private createEvaluationRecord(
+    samplingId: string,
+    evaluator: AgentConfigRef,
+  ): EvaluationRecord {
+    return {
+      evaluationId: this.idFactory(),
+      samplingId,
+      evaluator,
+      status: { status: "queued" },
+      attempts: [],
+    };
+  }
+
+  private createRun(
+    projectId: string,
+    samplingIds: readonly string[],
+    phases: RunPhases,
+    evaluationIds: readonly string[],
+    config: RunConfigSnapshot,
+    requestIdentity?: RuntimeRunRequestIdentity,
+  ): RuntimeRunRecord {
+    return {
+      runId: this.idFactory(),
+      samplingIds: [...samplingIds],
+      projectId,
+      phases,
+      evaluationIds: [...evaluationIds],
+      config,
+      ...(requestIdentity ? { requestIdentity } : {}),
+    };
+  }
+
+  private async persistNewRun(
+    run: RuntimeRunRecord,
+    records: readonly SamplingState[],
+    evaluations: readonly EvaluationRecord[],
+  ): Promise<RuntimeRunAdmission> {
+    return this.store.createRunWithSamplings(run, records, evaluations);
+  }
+
+  private async findExistingRun(
+    requestIdentity: RuntimeRunRequestIdentity,
+  ): Promise<RuntimeRunRecord | null> {
+    const byRequestId = await this.store.findRunByRequestId(requestIdentity.requestId);
+    const byIdempotencyKey = requestIdentity.idempotencyKey === undefined
+      ? null
+      : await this.store.findRunByIdempotencyKey(requestIdentity.idempotencyKey);
+
+    if (
+      byRequestId &&
+      byIdempotencyKey &&
+      byRequestId.runId !== byIdempotencyKey.runId
+    ) {
+      throw new RuntimeRunIdentityConflictError(
+        "requestId and idempotencyKey refer to different evaluation runs",
+      );
+    }
+
+    const existingRun = byIdempotencyKey ?? byRequestId;
+    if (!existingRun) return null;
+    assertRequestIdentity(existingRun, requestIdentity);
+    return existingRun;
+  }
+
+  private runHandle(run: RuntimeRunRecord): RunHandle {
+    return { runId: run.runId, samplingIds: [...run.samplingIds] };
+  }
+
 
 }
 
@@ -609,7 +611,7 @@ export function createEvalRuntime(
 export function createEvalRunResumer(
   dependencies: EvalRunResumerDependencies,
 ): EvalRunResumer {
-  return new RuntimeCoordinator(dependencies);
+  return new RunResumer(dependencies);
 }
 
 type RunRequestOperation = "start" | "pipeline";

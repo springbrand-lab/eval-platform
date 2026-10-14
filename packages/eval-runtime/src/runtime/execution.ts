@@ -15,6 +15,7 @@ import type { RetryController } from "./retry.js";
 import {
   AgentOperationError,
   applyAttemptPatch,
+  collectOutputWithRetry,
   describeAgentError,
   requireSpHarness,
   runAgentLifecycle,
@@ -44,6 +45,36 @@ export async function executeSampling(
   const retryController = dependencies.createRetryController(input.retryPolicy);
   let observedOutput: ExecutionOutput | undefined;
 
+  const collectEvidence = (chatId: string): Promise<ExecutionOutput> => {
+    const handle: AgentHandle = {
+      chatId,
+      samplingId: current.samplingId,
+      role: "subject",
+      framework: subjectHarness.framework,
+    };
+    return collectOutputWithRetry({
+      stage: "execution",
+      retryController,
+      sleep: dependencies.sleep,
+      collect: () => dependencies.harness.collectExecution({
+        handle,
+        ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
+      }),
+    });
+  };
+
+  const reportEvidenceError = (error: unknown): void => {
+    const reported = new Error(
+      `Execution evidence collection failed for Sampling ${current.samplingId}: ${describeAgentError(error).message}`,
+      { cause: error },
+    );
+    try {
+      (dependencies.onError ?? console.error)(reported);
+    } catch (reportingError) {
+      console.error(reported, reportingError);
+    }
+  };
+
   const persist = async (sampling: Sampling): Promise<void> => {
     await persistRuntimeRecord({
       record: sampling,
@@ -57,6 +88,28 @@ export async function executeSampling(
   };
 
   try {
+    if (current.execution.evidencePending) {
+      const attempt = current.executionAttempts.at(-1);
+      if (!current.subjectChatId || !attempt?.submissionId || !attempt.completedAt) {
+        throw new AgentOperationError("Pending Subject evidence has no terminal Submission", false, "network");
+      }
+      let output: ExecutionOutput;
+      try {
+        output = await collectEvidence(current.subjectChatId);
+      } catch (collectionError) {
+        reportEvidenceError(collectionError);
+        return { state: current, sample };
+      }
+      const succeeded = attempt.status === "completed" && output.status === "succeeded";
+      await persist({
+        ...withExecutionStatus(current, succeeded ? "succeeded" : "failed",
+          succeeded ? undefined : attempt.error ?? output.error ?? current.execution.lastError ?? "execution failed"),
+        artifacts: output.artifacts,
+        trajectory: output.trajectory,
+      });
+      return { state: current, sample };
+    }
+
     if (!sample.data || typeof sample.data !== "object" || Array.isArray(sample.data)) {
       throw new AgentOperationError("Sample data must be an object", false, "network");
     }
@@ -133,6 +186,7 @@ export async function executeSampling(
         true,
         "network",
       ),
+      deferFailureStatus: true,
     });
 
     await persist({
@@ -165,44 +219,22 @@ export async function executeSampling(
     current = stored;
     if (current.execution.status === "succeeded") return { state: current, sample };
     const lastAttempt = failureBase.executionAttempts.at(-1);
-    if (!observedOutput && failureBase.subjectChatId && lastAttempt?.submissionId && lastAttempt.completedAt
-      && (lastAttempt.status === "failed" || lastAttempt.status === "interrupted" || lastAttempt.status === "cancelled")) {
-      const handle: AgentHandle = {
-        chatId: failureBase.subjectChatId,
-        samplingId: failureBase.samplingId,
-        role: "subject",
-        framework: subjectHarness.framework,
-      };
-      for (let collectionAttemptNumber = 1; ; collectionAttemptNumber += 1) {
-        try {
-          observedOutput = await dependencies.harness.collectExecution({
-            handle,
-            ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
-          });
-          break;
-        } catch (collectionError) {
-          const collectionDetails = describeAgentError(collectionError);
-          const decision = collectionDetails.retryable
-            ? await retryController.decide({
-              operation: "collection",
-              failureKind: collectionDetails.failureKind,
-              attemptNumber: collectionAttemptNumber,
-            })
-            : { shouldRetry: false };
-          if (!decision.shouldRetry) {
-            const reported = new Error(
-              `Execution evidence collection failed for Sampling ${current.samplingId}: ${collectionDetails.message}`,
-              { cause: collectionError },
-            );
-            try {
-              (dependencies.onError ?? console.error)(reported);
-            } catch (reportingError) {
-              console.error(reported, reportingError);
-            }
-            break;
-          }
-          await dependencies.sleep(decision.backoffMs ?? 0);
-        }
+    const hasTerminalSubmission = !!(failureBase.subjectChatId && lastAttempt?.submissionId && lastAttempt.completedAt
+      && (lastAttempt.status === "completed" || lastAttempt.status === "failed"
+        || lastAttempt.status === "interrupted" || lastAttempt.status === "cancelled"));
+    if (error instanceof RuntimeRecordPersistenceError && hasTerminalSubmission) throw error;
+    if (hasTerminalSubmission && !observedOutput) {
+      // Persist the finalization boundary before another read, so a crash cannot restart the Agent.
+      await persist({
+        ...failureBase,
+        execution: { status: "retrying", lastError: lastAttempt?.error ?? details.message, evidencePending: true },
+      });
+      if (lastAttempt?.status === "completed") return { state: current, sample };
+      try {
+        observedOutput = await collectEvidence(failureBase.subjectChatId!);
+      } catch (collectionError) {
+        reportEvidenceError(collectionError);
+        return { state: current, sample };
       }
     }
     await persist({

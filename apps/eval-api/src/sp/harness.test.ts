@@ -238,6 +238,24 @@ describe("Eval SP Harness", () => {
     expect(openWebSocket.mock.calls[1]![0]).toBe(openWebSocket.mock.calls[0]![0]);
   });
 
+  it("reopens the observer when a single disconnection status read temporarily fails", async () => {
+    const first = new FakeSocket();
+    const second = new FakeSocket();
+    const sockets = [first, second];
+    const openWebSocket = vi.fn((_url: string, _headers: Readonly<Record<string, string>>) => sockets.shift() as unknown as WebSocket);
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "running" }))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, openWebSocket });
+    const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
+    await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
+    first.close();
+    await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledTimes(2));
+    second.sendStatus({ submissionId: "submission-1", status: "completed" });
+    await expect(waiting).resolves.toMatchObject({ status: "completed" });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("stops reopening after the finite observer retry budget", async () => {
     const openWebSocket = vi.fn(() => {
       const socket = new FakeSocket();

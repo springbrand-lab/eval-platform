@@ -25,9 +25,10 @@ async function main(): Promise<void> {
   const pool = new Pool({ connectionString: databaseUrl });
   await startWorkerWithSignals({
     signals: process,
-    start: () => startSpEvalRunWorkerProcess({
+    start: (signal) => startSpEvalRunWorkerProcess({
       pool,
       databaseUrl,
+      signal,
       sp: { origin, serviceToken },
       ...(maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns }),
       ...(scanIntervalMs === undefined ? {} : { scanIntervalMs }),

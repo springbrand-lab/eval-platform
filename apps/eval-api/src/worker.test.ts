@@ -36,6 +36,26 @@ function workerOptions(
 }
 
 describe("single-instance Run worker", () => {
+  it("does not dispatch Runs returned by an initial scan after shutdown starts", async () => {
+    const source = makeNotifications();
+    const abort = new AbortController();
+    let releaseScan!: (runIds: readonly string[]) => void;
+    const scanPage = new Promise<readonly string[]>((resolve) => { releaseScan = resolve; });
+    const resume = vi.fn(async (_runId: string) => undefined);
+    const options = workerOptions(source.notifications, [], resume);
+    options.store.listRecoverableRunIds = vi.fn(() => scanPage);
+    const startup = startEvalRunWorker({ ...options, signal: abort.signal });
+
+    await vi.waitFor(() => expect(options.store.listRecoverableRunIds).toHaveBeenCalledOnce());
+    abort.abort();
+    releaseScan(["run-1", "run-2"]);
+    const worker = await startup;
+
+    expect(resume).not.toHaveBeenCalled();
+    expect(source.close).toHaveBeenCalledOnce();
+    await worker.close();
+  });
+
   it("scans after subscribing and does not execute an active Run twice", async () => {
     const source = makeNotifications();
     let finish!: () => void;

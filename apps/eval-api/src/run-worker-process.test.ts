@@ -34,10 +34,11 @@ describe("Eval SP Run worker composition", () => {
   it("uses the cross-user recovery Store, Eval SP Harness and persisted Run resumer", async () => {
     const pool = {} as Pool;
     const onError = vi.fn();
+    const signal = new AbortController().signal;
     const sp = { origin: "https://eval-sp.test", serviceToken: "secret" };
     const worker = await startSpEvalRunWorkerProcess({
       pool, databaseUrl: "postgres://eval.test/db", sp,
-      maxConcurrentRuns: 3, scanIntervalMs: 500, onError,
+      maxConcurrentRuns: 3, scanIntervalMs: 500, onError, signal,
     });
 
     expect(worker).toBe(mocks.worker);
@@ -59,6 +60,7 @@ describe("Eval SP Run worker composition", () => {
       notifications: mocks.notifications,
       maxConcurrentRuns: 3,
       scanIntervalMs: 500,
+      signal,
       onError,
     });
   });
