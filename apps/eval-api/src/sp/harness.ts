@@ -27,6 +27,8 @@ const PING_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 10_000;
 const MAX_CONNECTION_ATTEMPTS = 3;
 const BASE_RECONNECT_DELAY_MS = 100;
+const REQUEST_TIMEOUT_MS = 60_000;
+const STOP_TIMEOUT_MS = 10_000;
 
 type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -34,6 +36,8 @@ export interface SpHarnessOptions {
   readonly origin: string;
   readonly serviceToken: string;
   readonly fetch?: Fetch;
+  readonly requestTimeoutMs?: number;
+  readonly stopTimeoutMs?: number;
   readonly openWebSocket?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
   readonly resolveInitialMaterials?: (
     ownerUserId: string,
@@ -64,44 +68,66 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     throw new TypeError("Eval SP origin must be an HTTP origin without path or credentials");
   }
   if (!options.serviceToken) throw new TypeError("Eval SP service token is required");
+  const requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+  const stopTimeoutMs = options.stopTimeoutMs ?? STOP_TIMEOUT_MS;
+  if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs <= 0
+    || !Number.isFinite(stopTimeoutMs) || stopTimeoutMs <= 0) {
+    throw new TypeError("Eval SP request timeouts must be positive finite numbers");
+  }
   const fetcher = options.fetch ?? globalThis.fetch;
   const openWebSocket = options.openWebSocket
     ?? ((url: string, headers: Readonly<Record<string, string>>) => new WebSocket(url, { headers }));
 
-  async function request(method: string, path: string, body?: unknown): Promise<unknown> {
-    let response: Response;
+  async function request(method: string, path: string, body?: unknown, timeoutMs = requestTimeoutMs): Promise<unknown> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new SpHarnessError("Eval SP request timed out", true));
+      }, timeoutMs);
+    });
+    const work = (async () => {
+      let response: Response;
+      try {
+        response = await fetcher(new URL(path, origin), {
+          method,
+          headers: {
+            [SERVICE_HEADER]: options.serviceToken,
+            ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          redirect: "error",
+          signal: controller.signal,
+        });
+      } catch (cause) {
+        throw new SpHarnessError(`Eval SP request failed: ${errorText(cause)}`, true);
+      }
+      if (!response.ok) {
+        const payload: unknown = await response.json().catch(() => null);
+        const message = isRecord(payload)
+          ? (typeof payload.errMsg === "string" ? payload.errMsg
+            : typeof payload.message === "string" ? payload.message
+              : `Eval SP returned ${response.status}`)
+          : `Eval SP returned ${response.status}`;
+        throw new SpHarnessError(
+          message,
+          response.status === 408 || response.status === 429 || response.status >= 500,
+          "network",
+          response.status,
+        );
+      }
+      if (response.status === 204) return undefined;
+      try {
+        return await response.json();
+      } catch {
+        throw new SpHarnessError("Eval SP returned invalid JSON", false);
+      }
+    })();
     try {
-      response = await fetcher(new URL(path, origin), {
-        method,
-        headers: {
-          [SERVICE_HEADER]: options.serviceToken,
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        redirect: "error",
-      });
-    } catch (cause) {
-      throw new SpHarnessError(`Eval SP request failed: ${errorText(cause)}`, true);
-    }
-    if (!response.ok) {
-      const payload: unknown = await response.json().catch(() => null);
-      const message = isRecord(payload)
-        ? (typeof payload.errMsg === "string" ? payload.errMsg
-          : typeof payload.message === "string" ? payload.message
-            : `Eval SP returned ${response.status}`)
-        : `Eval SP returned ${response.status}`;
-      throw new SpHarnessError(
-        message,
-        response.status === 408 || response.status === 429 || response.status >= 500,
-        "network",
-        response.status,
-      );
-    }
-    if (response.status === 204) return undefined;
-    try {
-      return await response.json();
-    } catch {
-      throw new SpHarnessError("Eval SP returned invalid JSON", false);
+      return await Promise.race([work, timedOut]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -286,7 +312,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       requireSp(handle);
       let result: unknown;
       try {
-        result = await request("POST", `${handlePath(handle)}/submissions/stop`);
+        result = await request("POST", `${handlePath(handle)}/submissions/stop`, undefined, stopTimeoutMs);
       } catch (error) {
         if (error instanceof SpHarnessError && error.status === 404) return false;
         throw error;

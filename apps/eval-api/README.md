@@ -12,7 +12,7 @@ Catalog 提供 Project 下执行成功 Sampling 的分页查询及全选 ID 查�
 
 `pnpm --filter @eval-platform/eval-api start:independent-api` 启动当前独立评估路由的 Node 进程。必需环境变量：`DATABASE_URL`、`EVAL_SP_ORIGIN`、`EVAL_WEB_ORIGIN`、`EVAL_SP_SOURCE_BRANCH` 和完整的 `EVAL_SP_SOURCE_COMMIT`；后两者来自同一次 Eval SP 部署。可选 `EVAL_API_HOST`（默认 `0.0.0.0`）和 `EVAL_API_PORT`（默认 `3000`）。进程接到 SIGINT/SIGTERM 后停止接收新请求，等待活动请求结束，再关闭数据库连接。部署前先应用本包迁移；Run 的实际执行由持有 `EVAL_SP_SERVICE_TOKEN` 的独立 `start:worker` 进程负责。
 
-`GET /api/projects/{projectId}/runs/current` 查询当前未结束或仍在收尾的 Run；`POST /api/projects/{projectId}/runs/{runId}/stop` 必须指定这条 Run，在 Project 行锁下持久化停止请求并通知 Worker。同一 Run 的重复停止请求返回原结果，不会误停后来新建的 Run。Worker 调用 Eval SP 的服务端停止路由中断活跃 Submission，收尾已提交任务的资源和证据，再将未完成阶段标记取消。停止请求是异步的；直到所有阶段终结且 Worker 写入 `stopFinalized` 前，新 key 的启动仍返回 Project 忙碌冲突。启动扫描也会恢复尚未写入 `stopFinalized` 的停止请求。
+`GET /api/projects/{projectId}/runs/current` 查询当前未结束或仍在收尾的 Run；`POST /api/projects/{projectId}/runs/{runId}/stop` 必须指定这条 Run，在 Project 行锁下持久化停止请求并通知 Worker。同一 Run 的重复停止请求返回原结果，不会误停后来新建的 Run。Worker 调用 Eval SP 的服务端停止路由中断活跃 Submission，收尾已提交任务的资源和证据，再将未完成阶段标记取消。停止请求是异步的；直到所有阶段终结且 Worker 写入 `stopFinalized` 前，新 key 的启动仍返回 Project 忙碌冲突。启动扫描也会恢复尚未写入 `stopFinalized` 的停止请求。SP HTTP 请求默认最多等待 60 秒，停止调用最多等待 10 秒；超时后保留停止意图并由 Worker 重试收尾。
 
 目标应用组合层还负责 Eval 独立 SP 的登录校验、`user-agent` 配置列表/编辑、公开 Chat/Submission/Trajectory/Workspace HTTP 与 WebSocket 客户端，以及真实 SP Harness。所有 SP 地址均指向 Eval SP API/Agent/Space，不请求 dev/production SP。Eval SP API/数据库保存账户、Agent Config、计费、Action 等 SP 事实；本应用的 PostgreSQL 只保存评估业务、SP 身份/证据引用及已采集的原始资源快照。Project 绑定当前发布的 SP 分支；首次 Run 准入时在同一事务内固定 Project 的初始操作和配置，此后执行或 Pipeline 新 Run 必须沿用该选择。Run 记录本次发布的实际 SP commit。独立评估只能使用原 Project 已成功的 Sampling，新增评估 Run 不修改 Project 的初始选择；不增加第五个共享包。
 

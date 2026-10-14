@@ -89,6 +89,15 @@ describe("Eval SP Harness", () => {
     );
     expect(await harness.stopAgent({ handle: { ...subject, chatId: "missing-chat" } })).toBe(false);
   });
+  it("bounds a stuck SP stop request even when the fetch adapter ignores abort", async () => {
+    const fetcher = vi.fn(async () => new Promise<Response>(() => undefined));
+    const harness = createSpHarness({
+      origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, stopTimeoutMs: 10,
+    });
+    await expect(harness.stopAgent({ handle: subject })).rejects.toMatchObject({
+      name: "SpHarnessError", retryable: true, message: "Eval SP request timed out",
+    });
+  });
   it("uses service-authenticated public operations and preserves evidence and raw resource facts", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = new URL(String(input));
