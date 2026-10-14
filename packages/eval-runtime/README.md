@@ -1,5 +1,7 @@
 # @eval-platform/eval-runtime
 
+评估运行从 Project 读取一次性绑定的 JSON Schema，并在每个 Eval Agent 初始化时交给 Harness，作为 `/evaluation-output.schema.json` 写入该 Agent 的 Workspace。执行数据只带 `initialMaterials`；评估数据只带 `evalInitialMaterials`（映射为初始化材料）并沿用 `evalPrompt`。两种材料不互相泄露。
+
 评估运行时的控制面和执行编排。它只依赖 SP 的公开 Harness 边界，不复制 SP Runtime，也不直接读取 Durable Object 存储。
 
 目标部署中的 SP 是 Eval 独立发布的 API/数据库、Agent Worker 和 Space Worker；登录、Agent Config 及 Agent 生命周期全部由这套 SP 提供。Harness 使用该部署的普通 Inbox/Chat 生命周期，具体 HTTP/WebSocket 客户端由 `apps/eval-api` 组合。部署分支绑定 Project；Runtime 从当前发布信息取得 commit 并写入新 Run，恢复时只读 Run 已保存的 commit。首次 Run 的执行或 Pipeline 配置选择在同一准入事务中固定到 Project；后续同类 Run 沿用该选择，独立评估仍属于原 Project。见[部署方案](../../docs/eval-sp-deployment.md)。
@@ -54,7 +56,7 @@ src/
 
 配置、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。`RuntimeStore` 是持久化端口，实际实现由 API/DO/数据库层注入；Run、Sampling、EvaluationRecord 和本次生效配置快照的聚合写入必须由 Store 在一个持久化边界内原子完成。
 
-三个启动入口只原子提交运行事实并返回 `RunHandle`，不在请求进程里执行 Agent。应用层唤醒单实例执行器调用 `resume(runId)`；独立 Worker 可用 `createEvalRunResumer({ getSamples, store, harness })`，无需注入启动接口的 Catalog 与 ConfigResolver。恢复时使用 Run 已保存的生效配置和 Sample 引用，跳过已完成的阶段，并按 Attempt 原 `submissionId`、操作类型和幂等键向 SP 校准。已完成 Agent 的资源或产物保存失败只补收尾，不重新提交或重启。进程中断后遗留的未完成阶段由执行器接手；已保存的失败 Attempt 若 SP 校准暂不可用，仍保持待恢复，不能代替重启决策进入证据收尾。只有确认失败且重试决策拒绝后，Subject 证据保存完才写为 `failed`。定时扫描对已终结 Agent 只补收未完成证据，不隐式重试 Agent。`RuntimeRecoveryStore` 仅供应用扫描未完成 Run，Run 当前状态仍只从子记录推导。
+三个启动入口只原子提交运行事实并返回 `RunHandle`，不在请求进程里执行 Agent。应用层唤醒单实例执行器调用 `resume(runId)`；独立 Worker 可用 `createEvalRunResumer({ getSamples, getProject, store, harness })`，无需注入启动接口的 Catalog 与 ConfigResolver。恢复时使用 Run 已保存的生效配置和 Sample 引用，跳过已完成的阶段，并按 Attempt 原 `submissionId`、操作类型和幂等键向 SP 校准。已完成 Agent 的资源或产物保存失败只补收尾，不重新提交或重启。进程中断后遗留的未完成阶段由执行器接手；已保存的失败 Attempt 若 SP 校准暂不可用，仍保持待恢复，不能代替重启决策进入证据收尾。只有确认失败且重试决策拒绝后，Subject 证据保存完才写为 `failed`。定时扫描对已终结 Agent 只补收未完成证据，不隐式重试 Agent。`RuntimeRecoveryStore` 仅供应用扫描未完成 Run，Run 当前状态仍只从子记录推导。
 
 `ExecutionConfig` 是完整的执行方案，包含 Dataset、可选 Sample 子集、Sampling 次数、Subject Harness、执行并发和重试策略。`EvaluationConfig` 包含 Evaluation Harness、评估并发和重试策略。`PipelineConfig` 只组合一个 ExecutionConfig 和一个 EvaluationConfig，不是新的 Runtime 阶段。Config ID 由配置创建函数自动生成；实际运行请求只引用 `executionConfigId`、`evaluationConfigId` 或 `pipelineConfigId`，不再重复携带这些配置字段。`ConfigResolver` 在启动前统一读取、校验和归一化配置，输出带明确默认值的 `Resolved*Config`；Run 同时保存本次实际生效的不可变配置快照，不引入 version。Runtime 将 `runtime` 选项传给 Harness；SP Harness 在创建 Chat 和提交 Prompt 时将其发送给 SP，在等待终态时使用其中的超时设置。素材准备的 SP 接口不接收 `runtime`，校准和产物收集也不使用这些选项。Subject 轨迹物化按 Subject Chat 身份幂等，不把评估运行选项计入物化身份。当前 Runtime 对未实现的 Remote Harness 明确报错，不会丢弃 `runOptions`。
 

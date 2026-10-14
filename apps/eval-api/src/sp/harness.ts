@@ -5,6 +5,7 @@ import type {
   MaterializedDataBinding,
 } from "@eval-platform/eval-contracts";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
+import { createHash } from "node:crypto";
 import {
   AgentIdentityConflictError,
   type AgentFailureKind,
@@ -16,6 +17,7 @@ import {
   type EvaluationWorkspaceBinding,
 } from "@eval-platform/eval-runtime/harness";
 import WebSocket from "ws";
+import { EVALUATION_OUTPUT_SCHEMA_PATH } from "../project-output-schema.js";
 
 const BASE_PATH = "/internal/v1/eval-harness";
 const SERVICE_HEADER = "X-Eval-Service-Token";
@@ -235,6 +237,9 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     },
     async materializeInitialData(input) {
       requireSp(input.handle);
+      if ((input.handle.role === "evaluator") !== (input.evaluationOutputSchema !== undefined)) {
+        throw new SpHarnessError("Evaluation output JSON Schema must be supplied only for an Evaluator", false);
+      }
       const session = input.data.initialSession;
       const materials = input.data.initialMaterials;
       if (materials && !options.resolveInitialMaterials) {
@@ -245,11 +250,30 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         session && options.resolveInitialSession
           ? options.resolveInitialSession(input.handle.ownerUserId, session) : undefined,
       ]);
+      const schemaBytes = input.evaluationOutputSchema === undefined ? undefined
+        : Buffer.from(`${JSON.stringify(input.evaluationOutputSchema, null, 2)}\n`, "utf8");
+      if (schemaBytes && files?.some((file) => file.path === EVALUATION_OUTPUT_SCHEMA_PATH)) {
+        throw new SpHarnessError("Evaluator materials cannot overwrite the Project JSON Schema file", false);
+      }
+      const combinedFiles = schemaBytes ? [
+        ...(files ?? []),
+        { path: EVALUATION_OUTPUT_SCHEMA_PATH, mediaType: "application/schema+json",
+          contentBase64: schemaBytes.toString("base64") },
+      ] : files;
+      if (combinedFiles && (combinedFiles.length > 500 || combinedFiles.reduce((size, file) =>
+        size + Buffer.from(file.contentBase64, "base64").byteLength, 0) > 20_000_000)) {
+        throw new SpHarnessError("Evaluator initial materials and JSON Schema are too large", false);
+      }
+      const selectedMaterials = materials ?? (schemaBytes ? {
+        bundleId: "project-evaluation-output-schema",
+        materialId: createHash("sha256").update(schemaBytes).digest("hex"),
+      } : undefined);
       return dataBinding(await request("POST", `${handlePath(input.handle)}/initialization`, {
         idempotencyKey: input.idempotencyKey,
-        data: input.data,
+        data: selectedMaterials && !materials
+          ? { ...input.data, initialMaterials: selectedMaterials } : input.data,
         ...(session ? { initialSession: { ...session, ...(context ? { context } : {}) } } : {}),
-        ...(materials ? { initialMaterials: { ...materials, files } } : {}),
+        ...(selectedMaterials ? { initialMaterials: { ...selectedMaterials, files: combinedFiles } } : {}),
       }));
     },
     submitAgent: submit,

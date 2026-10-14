@@ -41,6 +41,8 @@ function runtimeFixture() {
   };
   const catalog: RuntimeCatalog = {
     async listProjects() { return [PROJECT]; },
+    async getProject(id) { return id === PROJECT.projectId
+      ? { ...PROJECT, evaluationOutputSchema: { type: "object" } } : null; },
     async listAgents() { return [{ agentConfig: SUBJECT, name: "Subject", role: "subject" }, { agentConfig: EVALUATOR, name: "Judge", role: "evaluator" }]; },
     async listDatasets() { return [DATASET]; },
     async listData() { return [DATA]; },

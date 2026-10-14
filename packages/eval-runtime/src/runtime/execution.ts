@@ -115,7 +115,7 @@ export async function executeSampling(
     if (!sample.data || typeof sample.data !== "object" || Array.isArray(sample.data)) {
       throw new AgentOperationError("Sample data must be an object", false, "network");
     }
-    const { dataId: _dataId, evalPrompt: _evalPrompt, ...data } = sample.data;
+    const { dataId: _dataId, evalPrompt: _evalPrompt, evalInitialMaterials: _evalMaterials, ...data } = sample.data;
     const input = dataInputSchema.safeParse(data);
     if (!input.success) throw new AgentOperationError(input.error.message, false, "network");
     const initialData = input.data;

@@ -16,6 +16,7 @@ import type { BundleDirectory, MaterialFile, SessionContent } from "./sp/bundle-
 
 export interface DataInitialResourcePatch {
   readonly initialMaterials?: InitialMaterialsRef | null;
+  readonly evalInitialMaterials?: InitialMaterialsRef | null;
   readonly initialSession?: InitialSessionRef | null;
 }
 
@@ -36,17 +37,21 @@ export function createInitialResourceApi(db: EvalDb, ownerUserId: string, bundle
     async bindData(dataId: string, patch: DataInitialResourcePatch): Promise<Data> {
       if (!patch || typeof patch !== "object" || Array.isArray(patch) ||
         Object.keys(patch).length === 0 || Object.keys(patch).some((key) =>
-          key !== "initialMaterials" && key !== "initialSession") ||
+          key !== "initialMaterials" && key !== "evalInitialMaterials" && key !== "initialSession") ||
         (Object.hasOwn(patch, "initialMaterials") && patch.initialMaterials === undefined) ||
+        (Object.hasOwn(patch, "evalInitialMaterials") && patch.evalInitialMaterials === undefined) ||
         (Object.hasOwn(patch, "initialSession") && patch.initialSession === undefined)) {
         throw new TypeError("Initial resource binding must specify materials or Session");
       }
       const selectedId = dataIdSchema.parse(dataId);
       const materials = patch.initialMaterials === undefined || patch.initialMaterials === null
         ? patch.initialMaterials : initialMaterialsRefSchema.parse(patch.initialMaterials);
+      const evalMaterials = patch.evalInitialMaterials === undefined || patch.evalInitialMaterials === null
+        ? patch.evalInitialMaterials : initialMaterialsRefSchema.parse(patch.evalInitialMaterials);
       const session = patch.initialSession === undefined || patch.initialSession === null
         ? patch.initialSession : initialSessionRefSchema.parse(patch.initialSession);
       if (materials) await bundles.resolveInitialMaterials(owner, materials);
+      if (evalMaterials) await bundles.resolveInitialMaterials(owner, evalMaterials);
       return db.transaction(async (transaction) => {
         const [row] = await transaction.select({ content: data.content }).from(data)
           .where(and(eq(data.ownerUserId, owner), eq(data.dataId, selectedId))).for("update");
@@ -55,6 +60,10 @@ export function createInitialResourceApi(db: EvalDb, ownerUserId: string, bundle
         if (Object.hasOwn(patch, "initialMaterials")) {
           if (materials) next.initialMaterials = materials;
           else delete next.initialMaterials;
+        }
+        if (Object.hasOwn(patch, "evalInitialMaterials")) {
+          if (evalMaterials) next.evalInitialMaterials = evalMaterials;
+          else delete next.evalInitialMaterials;
         }
         if (Object.hasOwn(patch, "initialSession")) {
           if (session) next.initialSession = session;

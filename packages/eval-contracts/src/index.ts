@@ -12,6 +12,7 @@ export type {
   AgentStatus,
   ArtifactRef,
   EvaluationAgentOutput,
+  EvaluationOutputSchema,
   EvaluationRecord,
   EvaluationAttempt,
   EvaluateRequest,

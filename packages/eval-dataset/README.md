@@ -1,5 +1,7 @@
 # @eval-platform/eval-dataset
 
+Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给评估 Agent。两者都是同样的 owner-scoped Bundle 材料引用，上传和绑定方式相同；评估输出 JSON Schema 由 Project 绑定，不存在 Data 内。
+
 ## 职责与文件
 
 本包只管理 Dataset、可复用 Data 及二者的关联，不管理用户、Project、Sample、Sampling、Agent 或评估结果，不引入 version。Eval API 注入按已认证用户限定的 Store；同一用户的 Data 可复用于其多个 Dataset，不可跨用户关联。用户身份与授权由应用和 PostgreSQL 保证，不写进 Data 业务 JSON。

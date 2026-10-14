@@ -147,6 +147,16 @@ describe("Current user prompt and extension fields", () => {
     expect(dataInputSchema.safeParse({ userPrompt: "task", evalPrompt }).success).toBe(false);
   });
 
+  it("keeps evaluator materials separate from Subject materials", () => {
+    const data = dataInputSchema.parse({ userPrompt: "Build", evalPrompt: "Judge",
+      initialMaterials: { bundleId: "subject", materialId: "brief" },
+      evalInitialMaterials: { bundleId: "evaluator", materialId: "rubric" } });
+    expect(data.evalInitialMaterials).toEqual({ bundleId: "evaluator", materialId: "rubric" });
+    expect(data.initialMaterials).toEqual({ bundleId: "subject", materialId: "brief" });
+    expect(dataInputSchema.safeParse({ userPrompt: "Build",
+      evalInitialMaterials: { bundleId: "evaluator" } }).success).toBe(false);
+  });
+
   it("preserves extension keys that object-schema parsers commonly strip", () => {
     const input: unknown = JSON.parse('{"userPrompt":"task","__proto__":{"label":"custom"},"constructor":"custom"}');
     expect(dataInputSchema.parse(input)).toEqual(input);

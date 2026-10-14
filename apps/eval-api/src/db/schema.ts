@@ -1,4 +1,4 @@
-import type { EvaluationRecord, ProjectInitialLaunch, RunPhases, Sampling } from "@eval-platform/eval-contracts";
+import type { EvaluationOutputSchema, EvaluationRecord, ProjectInitialLaunch, RunPhases, Sampling } from "@eval-platform/eval-contracts";
 import type { Data } from "@eval-platform/eval-dataset";
 import type { EvaluationConfig, ExecutionConfig, RunConfigSnapshot } from "@eval-platform/eval-runtime";
 import { sql } from "drizzle-orm";
@@ -20,6 +20,7 @@ export const projects = pgTable("eval_projects", {
   ownerUserId: text("owner_user_id").notNull(),
   name: text("name").notNull(),
   sourceBranch: text("source_branch").notNull(),
+  evaluationOutputSchema: jsonb("evaluation_output_schema").$type<EvaluationOutputSchema>(),
   initialLaunch: jsonb("initial_launch").$type<ProjectInitialLaunch>(),
 }, (table) => [
   unique("eval_projects_owner_id_uq").on(table.ownerUserId, table.projectId),

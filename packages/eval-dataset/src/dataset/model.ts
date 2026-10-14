@@ -81,6 +81,7 @@ const dataFieldsSchema = z.object({
   }).optional(),
   initialSession: initialSessionRefSchema.optional(),
   initialMaterials: initialMaterialsRefSchema.optional(),
+  evalInitialMaterials: initialMaterialsRefSchema.optional(),
 });
 
 export const datasetInputSchema = datasetFieldsSchema.readonly();

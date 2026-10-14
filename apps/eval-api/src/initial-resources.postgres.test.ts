@@ -6,6 +6,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createEvalDb } from "./db/client.js";
+import { createPostgresProjectCatalog } from "./db/catalog.js";
 import { createPostgresDatasetStore } from "./db/dataset.js";
 import { createInitialResourceApi } from "./initial-resources.js";
 import { createInitialResourceHttpHandler } from "./initial-resources.http.js";
@@ -15,6 +16,7 @@ const connection = process.env.DATABASE_URL;
 const owner = "11111111-1111-4111-8111-111111111111";
 const otherOwner = "22222222-2222-4222-8222-222222222222";
 const materials = { bundleId: "project-assets", materialId: "brief" };
+const evalMaterials = { bundleId: "project-assets", materialId: "judge-rubric" };
 const session = { bundleId: "old-sessions", sessionId: "seed" };
 
 describe.skipIf(!connection)("Data initial resource association", () => {
@@ -66,6 +68,9 @@ describe.skipIf(!connection)("Data initial resource association", () => {
         ] }),
       }), owner);
     expect(materialResponse?.status).toBe(200);
+    await api.uploadMaterials(evalMaterials, [
+      { path: "/rubric.md", mediaType: "text/markdown", contentBase64: "UnVicmlj" },
+    ]);
     const sessionResponse = await handle(new Request(
       `http://eval.test/api/bundles/${session.bundleId}/sessions/${session.sessionId}`, {
         method: "PUT", body: JSON.stringify({ format: "json", content: JSON.stringify({
@@ -82,14 +87,17 @@ describe.skipIf(!connection)("Data initial resource association", () => {
 
     const bindResponse = await handle(new Request(
       `http://eval.test/api/data/${original.dataId}/initial-resources`, {
-        method: "PATCH", body: JSON.stringify({ initialMaterials: materials, initialSession: session }),
+        method: "PATCH", body: JSON.stringify({ initialMaterials: materials,
+          evalInitialMaterials: evalMaterials, initialSession: session }),
       }), owner);
     expect(bindResponse?.status).toBe(200);
     const bound = await dataset.getData(original.dataId);
-    expect(bound).toMatchObject({ metadata: { priority: 3 }, initialMaterials: materials, initialSession: session });
+    expect(bound).toMatchObject({ metadata: { priority: 3 }, initialMaterials: materials,
+      evalInitialMaterials: evalMaterials, initialSession: session });
     const cleared = await api.bindData(original.dataId, { initialMaterials: null });
     expect(cleared).not.toHaveProperty("initialMaterials");
     expect(cleared.initialSession).toEqual(session);
+    expect(cleared.evalInitialMaterials).toEqual(evalMaterials);
 
     await expect(api.bindData(original.dataId, {
       initialMaterials: { bundleId: "missing", materialId: "file" },
@@ -104,5 +112,25 @@ describe.skipIf(!connection)("Data initial resource association", () => {
     await expect(bundles.resolveInitialSession(owner, referenceOnlySession)).resolves.toBeUndefined();
     await expect(createInitialResourceApi(db, otherOwner, bundles)
       .bindData(original.dataId, { initialMaterials: null })).rejects.toThrow(/Unknown data/u);
+  });
+
+  it("binds an uploaded Project JSON Schema once and scopes it to its owner", async () => {
+    const db = createEvalDb(pool);
+    const catalog = createPostgresProjectCatalog(db, owner, {
+      sourceBranch: "release-2.0.0", sourceCommit: "a".repeat(40),
+    });
+    const project = await catalog.createProject({ name: "Schema project" });
+    const handle = createInitialResourceHttpHandler(db, await openBundleDirectory(bundleRoot));
+    const url = `http://eval.test/api/projects/${project.projectId}/evaluation-output-schema`;
+    const schema = { type: "object", required: ["score"], properties: { score: { type: "number" } } };
+    const request = () => new Request(url, { method: "PUT", body: JSON.stringify(schema) });
+    const response = await handle(request(), owner);
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toMatchObject({ evaluationOutputSchema: schema });
+    expect(await catalog.getProject(project.projectId)).toMatchObject({ evaluationOutputSchema: schema });
+    expect((await handle(request(), owner))?.status).toBe(200);
+    await expect(handle(new Request(url, { method: "PUT", body: JSON.stringify({ type: "string" }) }), owner))
+      .rejects.toThrow(/cannot change after binding/u);
+    await expect(handle(request(), otherOwner)).rejects.toThrow(/Unknown Project/u);
   });
 });

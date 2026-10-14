@@ -241,6 +241,7 @@ function makeSample(sampleId: string): Sample {
       json: { task: sampleId },
       initialSession: { bundleId: "sessions-bundle", sessionId: "session-seed" },
       initialMaterials: { bundleId: "materials-bundle", materialId: "materials-1" },
+      evalInitialMaterials: { bundleId: "eval-bundle", materialId: "judge-brief" },
       metadata: { source: "test" },
     },
   };
@@ -249,6 +250,10 @@ function makeSample(sampleId: string): Sample {
 function makeCatalog(samples: readonly Sample[] = [makeSample("sample-1")]): RuntimeCatalog {
   return {
     listProjects: async () => [],
+    getProject: async (projectId) => ({
+      projectId, ownerUserId: "owner", name: "test", sourceBranch: "release-2.0.0",
+      evaluationOutputSchema: { type: "object", properties: { score: { type: "number" } } },
+    }),
     listAgents: async () => [],
     listDatasets: async () => [],
     listData: async () => [{ dataId: "data-1", userPrompt: "Execute data", json: { task: "data" } }],
@@ -550,6 +555,7 @@ describe("eval runtime orchestration", () => {
       expect(input.idempotencyKey).toBe(`initial-data:${input.handle.chatId}`);
       expect(input.data.initialSession).toEqual({ bundleId: "sessions-bundle", sessionId: "session-seed" });
       expect(input.data.initialMaterials).toEqual({ bundleId: "materials-bundle", materialId: "materials-1" });
+      expect(input.data).not.toHaveProperty("evalInitialMaterials");
       expect(input.data).not.toHaveProperty("sampleId");
       expect(input.data).not.toHaveProperty("dataId");
     }
@@ -584,9 +590,14 @@ describe("eval runtime orchestration", () => {
         expect(preparations).toHaveLength(2);
         const subject = preparations.find((input) => input.handle.role === "subject")!;
         const evaluator = preparations.find((input) => input.handle.role === "evaluator")!;
-        const { dataId: _dataId, evalPrompt: _evalPrompt, ...expectedSubject } = sample.data;
-        const { initialSession: _initialSession, userPrompt: _subjectPrompt, ...evaluationFields } = expectedSubject;
-        const expectedEvaluator = { ...evaluationFields, userPrompt: sample.data.evalPrompt };
+        const { dataId: _dataId, evalPrompt: _evalPrompt,
+          evalInitialMaterials: _evalMaterials, ...expectedSubject } = sample.data;
+        const { initialSession: _initialSession, userPrompt: _subjectPrompt,
+          initialMaterials: _subjectMaterials, ...evaluationFields } = expectedSubject;
+        const expectedEvaluator = {
+          ...evaluationFields, userPrompt: sample.data.evalPrompt,
+          initialMaterials: sample.data.evalInitialMaterials,
+        };
         expect(subject.data).toEqual(expectedSubject);
         expect(evaluator.data).toEqual(expectedEvaluator);
         expect(subject.data.sampleId).toEqual(businessSampleId);
@@ -919,11 +930,14 @@ describe("eval runtime orchestration", () => {
     expect(evaluator.data).not.toHaveProperty("evalPrompt");
     expect(evaluator.data).toMatchObject({
       userPrompt: sample.data.evalPrompt,
-      initialMaterials: sample.data.initialMaterials,
+      initialMaterials: sample.data.evalInitialMaterials,
       expectedOutput: sample.data.expectedOutput,
       labels: sample.data.labels,
     });
     expect(evaluator.idempotencyKey).toBe(`initial-data:${evaluator.handle.chatId}`);
+    expect(evaluator.evaluationOutputSchema).toEqual({
+      type: "object", properties: { score: { type: "number" } },
+    });
     expect(evaluator.handle.chatId).not.toBe(subject.handle.chatId);
     expect(vi.mocked(harness.submitAgent).mock.calls.find(([call]) => call.handle.role === "subject")?.[0].prompt)
       .toBe(sample.data.userPrompt);
@@ -934,6 +948,25 @@ describe("eval runtime orchestration", () => {
     );
     expect(vi.mocked(harness.materializeSubjectTrajectory).mock.invocationCallOrder[0]!)
       .toBeLessThan(vi.mocked(harness.submitAgent).mock.invocationCallOrder[evaluationSubmitIndex]!);
+  });
+
+  it("passes one Project JSON Schema to every Evaluator in a multi-Sampling evaluation", async () => {
+    const harness = makeHarness();
+    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const execution = await runtime.start(startRequest("schema-multi-execution", EXECUTION_CONFIG_TWO_SAMPLES_ID));
+    await expect(waitForTerminal(runtime, execution.runId)).resolves.toMatchObject({ status: "succeeded" });
+    const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    await expect(waitForTerminal(runtime, evaluation.runId)).resolves.toMatchObject({ status: "succeeded" });
+    const evaluatorInputs = vi.mocked(harness.materializeInitialData).mock.calls
+      .map(([input]) => input).filter((input) => input.handle.role === "evaluator");
+    expect(evaluatorInputs).toHaveLength(2);
+    for (const input of evaluatorInputs) {
+      expect(input.evaluationOutputSchema).toEqual({
+        type: "object", properties: { score: { type: "number" } },
+      });
+      expect(input.data.initialMaterials).toEqual({ bundleId: "eval-bundle", materialId: "judge-brief" });
+      expect(input.data).not.toHaveProperty("evalInitialMaterials");
+    }
   });
 
   it("allows execution-only Data without evalPrompt but rejects evaluation admission", async () => {
@@ -1646,7 +1679,8 @@ describe("eval runtime orchestration", () => {
       artifacts: [{ artifactId: "partial", kind: "project", path: "/eval/partial" }],
       trajectory: { trajectoryId: "full-trajectory", source: "subject", path: "/eval/trajectory.jsonl" },
     });
-    await createEvalRunResumer({ getSamples: makeCatalog().getSamples, harness, store }).resume(run.runId);
+    await createEvalRunResumer({ getSamples: makeCatalog().getSamples,
+      getProject: makeCatalog().getProject, harness, store }).resume(run.runId);
     await expect(runtime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
       execution: { status: "failed", lastError: "agent task failed" },
       artifacts: [{ artifactId: "partial" }],
@@ -3526,6 +3560,7 @@ describe("Run recovery from persisted facts", () => {
     const run = await admitted.start(startRequest("narrow-run-resumer"));
     const resumer = createEvalRunResumer({
       getSamples: makeCatalog().getSamples,
+      getProject: makeCatalog().getProject,
       harness,
       store,
     });
@@ -3569,7 +3604,8 @@ describe("Run recovery from persisted facts", () => {
       trajectory: { trajectoryId: "complete-trace", source: "subject", path: "/eval/trace.jsonl" },
     });
 
-    await createEvalRunResumer({ getSamples: makeCatalog().getSamples, harness, store }).resume(run.runId);
+    await createEvalRunResumer({ getSamples: makeCatalog().getSamples,
+      getProject: makeCatalog().getProject, harness, store }).resume(run.runId);
 
     expect((await store.getSampling(samplingId))?.execution).toEqual({ status: "failed", lastError: "agent task failed" });
     expect((await store.getSampling(samplingId))?.trajectory?.trajectoryId).toBe("complete-trace");

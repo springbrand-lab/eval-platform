@@ -138,7 +138,10 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
   async function setup() {
     const services = stores();
-    const project = await services.catalog.createProject({ name: "my project" });
+    const createdProject = await services.catalog.createProject({ name: "my project" });
+    const project = await services.catalog.bindEvaluationOutputSchema(createdProject.projectId, {
+      type: "object", properties: { score: { type: "number" } },
+    });
     const dataset = await services.datasetService.createDataset({ name: "shared tasks" });
     const data = await services.datasetService.createData({
       userPrompt: "build a page", evalPrompt: "Judge the result",
@@ -208,6 +211,30 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await runtime.getRun(changedConfig.runId)).toBeNull();
     expect(await runtime.getRun(changedOperation.runId)).toBeNull();
     expect(await catalog.getProject(project.projectId)).toEqual({ ...project, initialLaunch: selected });
+  });
+
+  it("requires the Project JSON Schema before admitting a Pipeline", async () => {
+    const { catalog, dataset, sample } = await setup();
+    const project = await catalog.createProject({ name: "unbound" });
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    const judge = makeEvaluation(sampling.samplingId);
+    const pipeline = makeRun(project.projectId, sampling, dataset.datasetId, {
+      phases: ["execution", "evaluation"], evaluationIds: [judge.evaluationId],
+      config: {
+        operation: "pipeline",
+        pipeline: { configId: "pipeline-config", executionConfigId: "execution-config",
+          evaluationConfigId: "evaluation-config" },
+        execution: executionConfig(dataset.datasetId).execution,
+        evaluation: evaluationConfig.evaluation,
+      },
+    });
+    const runtime = createPostgresRuntimeStore(database.db, "user-A", release);
+    await expect(runtime.createRunWithSamplings(pipeline, [sampling], [judge]))
+      .rejects.toThrow("Project evaluation output JSON Schema must be bound");
+    expect(await catalog.getProject(project.projectId)).toEqual(project);
+    await catalog.bindEvaluationOutputSchema(project.projectId, { type: "object" });
+    await expect(runtime.createRunWithSamplings(pipeline, [sampling], [judge]))
+      .resolves.toMatchObject({ created: true });
   });
 
   it("keeps Project on its source branch while recording each Run's deployed commit", async () => {

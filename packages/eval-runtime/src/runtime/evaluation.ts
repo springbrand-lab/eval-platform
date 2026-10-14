@@ -3,6 +3,7 @@ import type {
   EvaluationAttempt,
   EvaluationRecord,
   HarnessConfig,
+  Project,
   RetryPolicy,
   SamplingStatus,
 } from "@eval-platform/eval-contracts";
@@ -30,6 +31,7 @@ export interface EvaluateSamplingInput {
   readonly context: RuntimeEvaluationContext;
   readonly harnessConfig: HarnessConfig;
   readonly retryPolicy: RetryPolicy;
+  readonly evaluationOutputSchema: NonNullable<Project["evaluationOutputSchema"]>;
 }
 
 export function requireEvaluationPrompt(sample: Sample): string {
@@ -90,9 +92,13 @@ export async function evaluateSampling(
     const evalPrompt = requireEvaluationPrompt(sample);
     const {
       dataId: _dataId, initialSession: _initialSession,
-      userPrompt: _subjectPrompt, evalPrompt: _evalPrompt, ...data
+      userPrompt: _subjectPrompt, evalPrompt: _evalPrompt,
+      initialMaterials: _subjectMaterials, evalInitialMaterials, ...data
     } = sample.data;
-    const parsed = dataInputSchema.safeParse({ ...data, userPrompt: evalPrompt });
+    const parsed = dataInputSchema.safeParse({
+      ...data, userPrompt: evalPrompt,
+      ...(evalInitialMaterials === undefined ? {} : { initialMaterials: evalInitialMaterials }),
+    });
     if (!parsed.success) throw new AgentOperationError(parsed.error.message, false, "network");
     const initialData = parsed.data;
     if (currentEvaluation.chatId === undefined && currentEvaluation.attempts.length > 0) {
@@ -156,6 +162,7 @@ export async function evaluateSampling(
           handle,
           idempotencyKey: `initial-data:${handle.chatId}`,
           data: initialData,
+          evaluationOutputSchema: input.evaluationOutputSchema,
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
         await dependencies.harness.materializeSubjectTrajectory({

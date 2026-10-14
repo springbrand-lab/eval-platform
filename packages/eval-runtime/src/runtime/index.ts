@@ -168,11 +168,13 @@ class RunReader {
 
 class RunResumer extends RunReader implements EvalRunResumer {
   readonly #stageDependencies: RuntimeStageDependencies;
+  readonly #getProject: EvalRunResumerDependencies["getProject"];
   readonly #createRetryController: (policy?: RetryPolicy) => RetryController;
   readonly #onError: (error: Error) => void;
 
   constructor(dependencies: EvalRunResumerDependencies) {
     super(dependencies);
+    this.#getProject = dependencies.getProject;
     this.#createRetryController = dependencies.createRetryController ?? createRetryController;
     this.#onError = dependencies.onError ?? ((error) => console.error(error));
     this.#stageDependencies = {
@@ -226,8 +228,12 @@ class RunResumer extends RunReader implements EvalRunResumer {
       sample: context.sample,
     }));
 
+    const project = toEvaluate.length > 0 ? await this.#getProject(run.projectId) : null;
+    if (toEvaluate.length > 0 && !project?.evaluationOutputSchema) {
+      throw new Error(`Project ${run.projectId} has no evaluation output JSON Schema`);
+    }
     const settlements = await Promise.allSettled([
-      this.runEvaluationPhase(evaluationContexts, evaluationConfig),
+      this.runEvaluationPhase(evaluationContexts, evaluationConfig, project?.evaluationOutputSchema),
       ...toCancel.map((evaluation) => this.cancelEvaluation(evaluation, evaluationConfig)),
     ]);
     const errors = settlements.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
@@ -257,7 +263,9 @@ class RunResumer extends RunReader implements EvalRunResumer {
   private async runEvaluationPhase(
     contexts: readonly RuntimeEvaluationContext[],
     config: ResolvedEvaluationConfig,
+    evaluationOutputSchema: NonNullable<Project["evaluationOutputSchema"]> | undefined,
   ): Promise<void> {
+    if (contexts.length > 0 && !evaluationOutputSchema) throw new Error("Evaluation output JSON Schema is required");
     const scheduler = this.scheduler(config.evaluationConcurrency);
     const errors: unknown[] = [];
     await scheduler.run(contexts.map((context) => async () => {
@@ -266,6 +274,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
           context,
           harnessConfig: config.evaluationHarness,
           retryPolicy: config.retryPolicy,
+          evaluationOutputSchema: evaluationOutputSchema!,
         });
       } catch (error) {
         errors.push(error);
@@ -646,6 +655,7 @@ class FullRuntime extends RuntimeCoordinator implements EvalRuntime {
     this.#resumer = new RunResumer({
       store: dependencies.store,
       getSamples: dependencies.catalog.getSamples.bind(dependencies.catalog),
+      getProject: dependencies.catalog.getProject.bind(dependencies.catalog),
       harness: dependencies.harness,
       ...(dependencies.idFactory === undefined ? {} : { idFactory: dependencies.idFactory }),
       ...(dependencies.now === undefined ? {} : { now: dependencies.now }),

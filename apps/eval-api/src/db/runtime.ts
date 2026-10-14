@@ -189,6 +189,7 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
         const [project] = await transaction.select({
           ownerUserId: projects.ownerUserId,
           sourceBranch: projects.sourceBranch,
+          evaluationOutputSchema: projects.evaluationOutputSchema,
           initialLaunch: projects.initialLaunch,
         })
           .from(projects)
@@ -201,6 +202,9 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
         if (scope.kind === "user" && (project.sourceBranch !== scope.release.sourceBranch
           || run.sourceCommit !== scope.release.sourceCommit)) {
           throw new Error("Project source branch or Run source commit differs from the active Eval SP release");
+        }
+        if (run.config.operation !== "execution" && project.evaluationOutputSchema === null) {
+          throw new Error("Project evaluation output JSON Schema must be bound before evaluation admission");
         }
         const launch = launchFor(run);
         if (project.initialLaunch === null && launch === null) {

@@ -55,6 +55,7 @@ CREATE TABLE "eval_projects" (
 	"owner_user_id" text NOT NULL,
 	"name" text NOT NULL,
 	"source_branch" text NOT NULL,
+	"evaluation_output_schema" jsonb,
 	"initial_launch" jsonb,
 	CONSTRAINT "eval_projects_owner_id_uq" UNIQUE("owner_user_id","project_id"),
 	CONSTRAINT "eval_projects_source_branch_ck" CHECK (length(trim("eval_projects"."source_branch")) > 0),
