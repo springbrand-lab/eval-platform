@@ -579,7 +579,13 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await runtime.getRun(rejectedRun.runId)).toBeNull();
     await runtime.updateSampling({ ...sampling, execution: { status: "succeeded" } }, sampling);
 
-    let evaluationConcurrency = 1;
+    const configs = createPostgresConfigStore(database.db, "user-A");
+    const config = await configs.createEvaluationConfig({
+      evaluationHarness: {
+        kind: "sp", framework: "sp", agentConfig: { ownerUserId: "user-A", userAgentId: "judge" },
+      },
+      evaluationConcurrency: 1,
+    });
     const api = createPostgresIndependentEvaluationApi({
       db: database.db,
       spClient: {
@@ -588,16 +594,6 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
           if (token === "bob-token") return { id: "user-B", role: "user" };
           return null;
         },
-      },
-      configStoreForOwner(ownerUserId) {
-        return {
-          async getExecutionConfig() { return null; },
-          async getPipelineConfig() { return null; },
-          async getEvaluationConfig(configId) {
-            return ownerUserId === "user-A" && configId === "evaluation-config"
-              ? { ...evaluationConfig.evaluation, evaluationConcurrency } : null;
-          },
-        };
       },
       harness: createSpHarness({ origin: "http://localhost", serviceToken: "unused-test-token" }),
     });
@@ -612,7 +608,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect((await send("bob-token", "/samplings/successful/ids")).status).toBe(404);
 
     const submitBody = JSON.stringify({
-      evaluationConfigId: "evaluation-config", samplingIds: [sampling.samplingId], idempotencyKey: "first-click",
+      evaluationConfigId: config.configId, samplingIds: [sampling.samplingId], idempotencyKey: "first-click",
     });
     const submit = () => send("alice-token", "/evaluations", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: submitBody,
@@ -622,7 +618,9 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(parallel.status).toBe(202);
     const handle = await first.json() as { runId: string; samplingIds: readonly string[] };
     expect(await parallel.json()).toEqual(handle);
-    evaluationConcurrency = 2;
+    await configs.updateEvaluationConfig(config.configId, {
+      evaluationHarness: config.evaluationHarness, evaluationConcurrency: 2,
+    });
     expect(await (await submit()).json()).toEqual(handle);
     const storedRun = await runtime.getRun(handle.runId);
     expect(storedRun?.config.operation).toBe("evaluation");
@@ -639,7 +637,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect((await send("alice-token", "/evaluations", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        evaluationConfigId: "evaluation-config", samplingIds: ["missing-sampling"], idempotencyKey: "bad-selection",
+        evaluationConfigId: config.configId, samplingIds: ["missing-sampling"], idempotencyKey: "bad-selection",
       }),
     })).status).toBe(409);
     expect((await send("alice-token", "/evaluations", {

@@ -22,8 +22,10 @@ The owner-scoped Config adapter saves Execution, Evaluation and Pipeline configs
 it verifies Agent Config references through the authenticated Eval SP client.
 The independent-evaluation HTTP handler verifies each Bearer session through
 Eval SP and composes owner-scoped Catalog, Runtime and ConfigStore services.
-The Node transport is caller-started. Other control-plane routes and SP Harness
-provisioning remain outside the persistence adapters.
+The Node API process composes the owner-scoped PostgreSQL ConfigStore and
+Runtime, while the separate worker executes admitted Runs. Other control-plane
+routes and SP Harness provisioning remain outside the independent-evaluation
+HTTP handler.
 
 The API app also owns a single-instance Node Run worker. Run admission and
 PostgreSQL notification commit atomically; the worker listens, scans unfinished

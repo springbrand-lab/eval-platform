@@ -7,6 +7,7 @@ import {
 import { and, eq } from "drizzle-orm";
 import { createPostgresCatalog } from "./db/catalog.js";
 import type { EvalDb } from "./db/client.js";
+import { createPostgresConfigStore } from "./db/config.js";
 import { createPostgresRuntimeStore, evaluationFromRow } from "./db/runtime.js";
 import { evaluations, runEvaluations, runs } from "./db/schema.js";
 import {
@@ -18,7 +19,7 @@ import {
 export interface PostgresIndependentEvaluationApiOptions extends Omit<IndependentEvaluationApiOptions, "createOwnerServices"> {
   readonly db: EvalDb;
   /** The ConfigStore must only return configuration owned by this verified user. */
-  readonly configStoreForOwner: (ownerUserId: string) => ConfigStore | Promise<ConfigStore>;
+  readonly configStoreForOwner?: (ownerUserId: string) => ConfigStore | Promise<ConfigStore>;
   readonly harness: Harness;
 }
 
@@ -31,7 +32,8 @@ export function createPostgresIndependentEvaluationApi(
     ...(options.webOrigin === undefined ? {} : { webOrigin: options.webOrigin }),
     ...(options.onError === undefined ? {} : { onError: options.onError }),
     async createOwnerServices(ownerUserId) {
-      const configStore = await options.configStoreForOwner(ownerUserId);
+      const configStore = await (options.configStoreForOwner?.(ownerUserId)
+        ?? createPostgresConfigStore(options.db, ownerUserId));
       const catalog = createPostgresCatalog(options.db, ownerUserId, {
         async listAgents() {
           throw new Error("Agent listing is not part of the independent evaluation API");
