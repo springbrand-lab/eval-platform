@@ -14,6 +14,7 @@ Sampling and Evaluation responses retain artifact and complete trajectory refere
 | SP Agent Configs | `GET, POST /api/agent-configs`; `GET, PATCH, DELETE /api/agent-configs/{id}` | SP's public Agent Config JSON on writes |
 | Agent choices | `GET /api/agents?role=subject|evaluator` | Optional role |
 | Projects | `GET, POST /api/projects`; `GET /api/projects/{id}` | Create: `{name}` |
+| Project evaluation output Schema | `PUT /api/projects/{id}/evaluation-output-schema` | Raw draft 2020-12 JSON Schema object; may be corrected until the first Evaluation Run |
 | Successful Samplings | `GET /api/projects/{id}/samplings/successful`; `GET /api/projects/{id}/samplings/successful/ids` | Existing [independent evaluation contract](eval-independent-evaluation-entry.md) |
 | Datasets | `GET, POST /api/datasets`; `GET, PUT, DELETE /api/datasets/{id}` | Dataset input on create/full replacement |
 | Dataset membership | `GET, POST, DELETE /api/datasets/{id}/data` | POST/DELETE: `{dataIds:[...]}` |

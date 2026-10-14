@@ -238,7 +238,8 @@ function mappedError(error: unknown, onError?: (error: Error) => void): Response
     if (/\btoo large\b/iu.test(error.message)) return errorResponse(413, "invalid_request", error.message);
     return errorResponse(400, "invalid_request", error.message);
   }
-  if (error instanceof RangeError && error.message === "Request body is too large") {
+  if (error instanceof RangeError && (error.message === "Request body is too large"
+    || error.message === "Evaluation output JSON Schema is too large")) {
     return errorResponse(413, "invalid_request", error.message);
   }
   if (error instanceof SyntaxError || error instanceof URIError ||
@@ -246,6 +247,9 @@ function mappedError(error: unknown, onError?: (error: Error) => void): Response
     return errorResponse(400, "invalid_request", "Request body or Dataset document is invalid");
   }
   if (error instanceof TypeError && /^(?:Project name must not be blank|Successful Sampling page size must be between 1 and 1000|Initial resource binding must specify materials or Session|Material upload requires only a files array|Session upload accepts only format and content|JSON body is required|JSON object is required|YAML mapping keys must be strings|Expected a JSON value|JSON values must not depend on toJSON transformations)$/u.test(error.message)) {
+    return errorResponse(400, "invalid_request", error.message);
+  }
+  if (error instanceof TypeError && error.message.startsWith("Evaluation output JSON Schema")) {
     return errorResponse(400, "invalid_request", error.message);
   }
   if (error instanceof RangeError && error.message.startsWith("YAML integers must be within the safe-integer range")) {
@@ -258,7 +262,7 @@ function mappedError(error: unknown, onError?: (error: Error) => void): Response
   if (error instanceof Error && /^Unknown (?:Project|run|sample|sampling|evaluation|execution config|evaluation config|pipeline config)\b/u.test(error.message)) {
     return errorResponse(404, "not_found", error.message);
   }
-  if (error instanceof Error && /^(?:Project source branch|Project launch selection|An empty Project cannot)/u.test(error.message)) {
+  if (error instanceof Error && /^(?:Project source branch|Project launch selection|Project evaluation output JSON Schema|An empty Project cannot)/u.test(error.message)) {
     return errorResponse(409, "conflict", error.message);
   }
   if (error instanceof Error && /^(?:(?:config|configId|datasetId|sampleIds(?:\[\d+\])?|samplingIds|samplingCount|executionConcurrency|evaluationConcurrency|harness(?:\.[A-Za-z]+)*|evaluationHarness(?:\.[A-Za-z]+)*|retryPolicy(?:\.[A-Za-z]+)*|projectId|executionConfigId|evaluationConfigId|pipelineConfigId|idempotencyKey) (?:must\b|is required\b|is not supported\b)|No samples found\b|Sample .+ does not belong to dataset\b)/u.test(error.message)) {
