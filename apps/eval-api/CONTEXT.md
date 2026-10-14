@@ -2,7 +2,7 @@
 
 `eval-api` is the internal control-plane application for evaluation projects.
 
-It will expose authenticated operations for Project, Dataset, Sample, Sampling,
+It exposes authenticated operations for Project, Dataset, Sample, Sampling,
 Execution, Evaluation, Artifact, Trajectory and Metric views. It consumes
 package public exports and delegates execution/evaluation orchestration to
 `@eval-platform/eval-runtime`.
@@ -22,10 +22,18 @@ The owner-scoped Config adapter saves Execution, Evaluation and Pipeline configs
 it verifies Agent Config references through the authenticated Eval SP client.
 The independent-evaluation HTTP handler verifies each Bearer session through
 Eval SP and composes an owner-scoped Catalog, token-free Config reader, and
-admission-only Runtime interface. A dedicated PostgreSQL adapter reads Run
-status and Evaluation records in sets under one consistent transaction. The
-separate worker owns the real SP Harness and executes admitted Runs. Other
-control-plane routes remain outside this HTTP handler.
+admission-only Runtime interface. The standard API process mounts this existing
+handler for its five project-scoped routes. A dedicated PostgreSQL adapter
+reads Run status and Evaluation records in sets under one consistent
+transaction. The separate worker owns the real SP Harness and executes
+admitted Runs.
+
+The Node HTTP control plane verifies every bearer token with Eval SP, composes
+owner-scoped services and routes Dataset, Config, Run and Metrics operations.
+Execution and Pipeline admissions share a token-free per-owner Runtime during
+active requests; Config editing uses the current request's Bearer token.
+Run admission persists and notifies the separate Worker; it never executes an
+Agent in the HTTP request. See `docs/eval-http-api.md` for the route contract.
 
 The API app also owns a single-instance Node Run worker. Run admission and
 PostgreSQL notification commit atomically; the worker listens, scans unfinished

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createEvalSpClient, EvalSpApiError } from "./client.js";
+import { createEvalSpClient, EvalSpApiError, EvalSpTransportError } from "./client.js";
 
 const response = (status: number, payload: unknown) => new Response(JSON.stringify(payload), {
   status,
@@ -68,5 +68,14 @@ describe("Eval SP public API client", () => {
       fetch: vi.fn(async () => response(200, { success: true, msg: { user: { id: "user-1" } } })),
     });
     await expect(client.verifySession("token")).rejects.toThrow("invalid user identity");
+  });
+
+  it("distinguishes an unavailable SP connection from invalid caller input", async () => {
+    const client = createEvalSpClient({
+      origin: "https://eval-sp.example.test",
+      writeOrigin: "https://eval-web.example.test",
+      fetch: vi.fn(async () => { throw new TypeError("fetch failed"); }),
+    });
+    await expect(client.verifySession("token")).rejects.toBeInstanceOf(EvalSpTransportError);
   });
 });

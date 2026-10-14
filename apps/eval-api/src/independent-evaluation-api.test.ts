@@ -145,6 +145,10 @@ describe("independent evaluation HTTP API", () => {
     expect((await post({ evaluationConfigId: "config-1", samplingIds: ["a", "a"], idempotencyKey: "click" })).status).toBe(400);
     expect((await post({ evaluationConfigId: "config-1", samplingIds, idempotencyKey: "click", projectId: "other" })).status).toBe(400);
     expect((await post({ evaluationConfigId: "config-1", samplingIds, idempotencyKey: "click" }, "text/plain")).status).toBe(415);
+    expect((await api.handle(request("/api/projects/project-1/evaluations", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: '{"evaluationConfigId":"first","evaluationConfigId":"config-1","samplingIds":["sampling-1"],"idempotencyKey":"click"}',
+    }))).status).toBe(400);
     expect((await api.handle(request("/api/projects/project-1/samplings/successful?limit=0"))).status).toBe(400);
     expect((await api.handle(request("/api/projects/project-1/samplings/successful?sampleId=a&sampleId=b"))).status).toBe(400);
     expect(runtime.evaluate).not.toHaveBeenCalled();

@@ -8,6 +8,7 @@
     "check": "tsc --noEmit",
     "test": "vitest run",
     "start:independent-api": "tsx src/independent-evaluation-main.ts",
+    "start:api": "tsx src/http-main.ts",
     "start:worker": "tsx src/run-worker-main.ts",
     "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
     "db:check": "drizzle-kit check --config=drizzle.config.ts",
@@ -19,6 +20,7 @@
     "@eval-platform/eval-metrics": "workspace:*",
     "@eval-platform/eval-runtime": "workspace:*",
     "drizzle-orm": "^0.45.2",
+    "jsonc-parser": "^3.3.1",
     "pg": "^8.23.0",
     "tsx": "^4.23.15",
     "ws": "^8.22.0"

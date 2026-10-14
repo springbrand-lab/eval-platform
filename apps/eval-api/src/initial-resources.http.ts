@@ -1,6 +1,7 @@
 import type { EvalDb } from "./db/client.js";
 import { createInitialResourceApi } from "./initial-resources.js";
 import type { BundleDirectory } from "./sp/bundle-directory.js";
+import { parseStrictJson } from "./strict-json.js";
 
 const MATERIAL_ROUTE = /^\/api\/bundles\/([^/]+)\/materials\/([^/]+)$/u;
 const SESSION_ROUTE = /^\/api\/bundles\/([^/]+)\/sessions\/([^/]+)$/u;
@@ -64,7 +65,13 @@ async function readJsonObject(request: Request, maxBytes: number): Promise<Recor
     body.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
+  let source: string;
+  try { source = new TextDecoder("utf-8", { fatal: true }).decode(body); }
+  catch (error) {
+    if (error instanceof TypeError) throw new SyntaxError("Request body must be valid UTF-8");
+    throw error;
+  }
+  const parsed: unknown = parseStrictJson(source);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new TypeError("JSON object is required");
   }

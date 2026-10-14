@@ -9,6 +9,7 @@ import {
   MAX_SELECTION_RESPONSE_BYTES,
 } from "./independent-evaluation-limits.js";
 import type { EvalSpClient } from "./sp/client.js";
+import { parseStrictJson } from "./strict-json.js";
 
 export interface IndependentEvaluationOwnerServices {
   /** Every reader and writer must be scoped to the verified Eval SP user. */
@@ -36,6 +37,35 @@ type Route =
   | { readonly kind: "samplingPage" | "samplingIds" | "evaluate"; readonly projectId: string }
   | { readonly kind: "run" | "runEvaluations"; readonly projectId: string; readonly runId: string };
 
+type RouteShape =
+  | { readonly kind: "samplingPage" | "samplingIds" | "evaluate"; readonly projectSegment: string }
+  | { readonly kind: "run" | "runEvaluations"; readonly projectSegment: string; readonly runSegment: string };
+
+function routeShape(pathname: string): RouteShape | null {
+  const parts = pathname.split("/").filter(Boolean);
+  if (parts[0] !== "api" || parts[1] !== "projects" || !parts[2]) return null;
+  const projectSegment = parts[2];
+  if (parts.length === 5 && parts[3] === "samplings" && parts[4] === "successful") {
+    return { kind: "samplingPage", projectSegment };
+  }
+  if (parts.length === 6 && parts[3] === "samplings" && parts[4] === "successful" && parts[5] === "ids") {
+    return { kind: "samplingIds", projectSegment };
+  }
+  if (parts.length === 4 && parts[3] === "evaluations") return { kind: "evaluate", projectSegment };
+  if (parts.length === 5 && parts[3] === "runs" && parts[4]) {
+    return { kind: "run", projectSegment, runSegment: parts[4] };
+  }
+  if (parts.length === 6 && parts[3] === "runs" && parts[4] && parts[5] === "evaluations") {
+    return { kind: "runEvaluations", projectSegment, runSegment: parts[4] };
+  }
+  return null;
+}
+
+/** Select the established independent-evaluation routes before another API handler authenticates. */
+export function matchesIndependentEvaluationPath(pathname: string): boolean {
+  return routeShape(pathname) !== null;
+}
+
 class HttpError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
     super(message);
@@ -59,36 +89,26 @@ function validIdempotencyKey(value: unknown): string {
 }
 
 function routeFor(pathname: string): Route | null {
-  const parts = pathname.split("/").filter(Boolean);
-  if (parts[0] !== "api" || parts[1] !== "projects" || parts.length < 4) return null;
+  const shape = routeShape(pathname);
+  if (!shape) return null;
   let projectId: string;
   try {
-    projectId = validId(decodeURIComponent(parts[2]!), "projectId");
+    projectId = validId(decodeURIComponent(shape.projectSegment), "projectId");
   } catch (error) {
     if (error instanceof URIError) throw new HttpError(400, "INVALID_REQUEST", "Invalid projectId encoding");
     throw error;
   }
-  if (parts[3] === "samplings" && parts[4] === "successful" && parts.length === 5) {
-    return { kind: "samplingPage", projectId };
-  }
-  if (parts[3] === "samplings" && parts[4] === "successful" && parts[5] === "ids" && parts.length === 6) {
-    return { kind: "samplingIds", projectId };
-  }
-  if (parts[3] === "evaluations" && parts.length === 4) return { kind: "evaluate", projectId };
-  if (parts[3] === "runs" && parts.length >= 5) {
+  if (shape.kind === "run" || shape.kind === "runEvaluations") {
     let runId: string;
     try {
-      runId = validId(decodeURIComponent(parts[4]!), "runId");
+      runId = validId(decodeURIComponent(shape.runSegment), "runId");
     } catch (error) {
       if (error instanceof URIError) throw new HttpError(400, "INVALID_REQUEST", "Invalid runId encoding");
       throw error;
     }
-    if (parts.length === 5) return { kind: "run", projectId, runId };
-    if (parts.length === 6 && parts[5] === "evaluations") {
-      return { kind: "runEvaluations", projectId, runId };
-    }
+    return { kind: shape.kind, projectId, runId };
   }
-  return null;
+  return { kind: shape.kind, projectId };
 }
 
 function methodFor(route: Route): "GET" | "POST" {
@@ -151,7 +171,7 @@ async function readJsonObject(request: Request): Promise<Record<string, unknown>
   }
   let value: unknown;
   try {
-    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    value = parseStrictJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     throw new HttpError(400, "INVALID_REQUEST", "Request body must be valid JSON");
   }

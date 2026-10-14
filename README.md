@@ -2,7 +2,7 @@
 
 `eval-platform` 是独立的内部评估平台。它负责编排数据、被评估 Agent、评估 Agent 和评估结果，不把评估逻辑放回 `sp-platform`。
 
-当前阶段已完成包边界、公共契约、Dataset 管理、Runtime 编排、Metrics 四层查询，以及 `eval-api` 中的 PostgreSQL 持久化和一致性只读投影；HTTP API、Web、CLI 及 SP Harness 实际接线仍待实现。
+当前阶段已完成包边界、公共契约、Dataset 管理、Runtime 编排、Metrics 四层查询，以及 `eval-api` 中的 PostgreSQL 持久化、HTTP 控制面和单实例 Run Worker。Web、CLI 仍是骨架；独立 SP 部署的真实端到端联调尚未完成。
 
 已确定的部署目标是从固定 SP 分支的一次构建中独立发布 Eval SP API/数据库、Agent Worker、Space Worker、DO 命名空间和 R2；Eval 的登录、Agent Config 和全部 Agent 运行接口只指向这套 SP。Eval 业务事实仍在自己的 PostgreSQL 中。详见[独立 SP 部署方案](docs/eval-sp-deployment.md)和[SP 接口需求](docs/sp-eval-api-requirements.md)。
 
@@ -38,11 +38,11 @@ eval-metrics/
 └── reporting/
 ```
 
-`@eval-platform/eval-runtime` 已把 SP 作为第一方 Harness 契约，通过公开的 Chat、Submission、Trajectory 和 Workspace 边界编排 Agent；真实网络接线尚未实现。`eval-metrics` 读取 Dataset/Runtime 的原始事实，提供执行/评估分开的资源统计与 Project、Dataset、Sample、Sampling 查询。
+`@eval-platform/eval-runtime` 已把 SP 作为第一方 Harness 契约，通过公开的 Chat、Submission、Trajectory 和 Workspace 边界编排 Agent；`eval-api` 提供实际 HTTP/WebSocket 客户端和启动入口，仍需真实部署联调。`eval-metrics` 读取 Dataset/Runtime 的原始事实，提供执行/评估分开的资源统计与 Project、Dataset、Sample、Sampling 查询。
 
 运行方案由 `eval-runtime/config` 管理：ExecutionConfig 绑定 Dataset、Sampling 次数和 Subject Agent，EvaluationConfig 绑定评估 Agent，PipelineConfig 组合两者。配置 ID 由代码生成；Runtime 启动请求只引用配置 ID，不重复传递 Dataset、Harness、并发或重试字段。
 
-`eval-metrics` 已实现状态、分数、Agent 耗时、费用、Token、模型请求、Turn、工具调用统计和四层展示模型。`eval-api` 实现了真实 `DatasetStore`、`RuntimeStore` 和只读 `MetricsSource`，从 PostgreSQL 原始事实一致性投影，不新增指标数据库或访问 SP 私有存储；实验对比和 HTTP/Web/CLI 后续实现。
+`eval-metrics` 已实现状态、分数、Agent 耗时、费用、Token、模型请求、Turn、工具调用统计和四层展示模型。`eval-api` 实现了真实 `DatasetStore`、`RuntimeStore`、只读 `MetricsSource` 和 HTTP 控制面，从 PostgreSQL 原始事实一致性投影，不新增指标数据库或访问 SP 私有存储；实验对比、Web 和 CLI 后续实现。
 
 ## 运行层次
 
@@ -70,7 +70,7 @@ Dataset ──> Data ──> Sample ──(输入引用)──> Sampling
 - `TrajectoryPage` 分页读取，单页上限遵循 SP 的 `200`；
 - Workspace tree、manifest 和 content 读取边界。
 
-Runtime 预分配并保存 Subject/Evaluator 的 Chat ID；SP Chat 即持久 Session，每次提交返回的真实 Submission ID 保存在相应 Attempt。当前尚未接入真实 SP Harness，但契约和生命周期已按这两个身份拆分。
+Runtime 预分配并保存 Subject/Evaluator 的 Chat ID；SP Chat 即持久 Session，每次提交返回的真实 Submission ID 保存在相应 Attempt。Eval 侧 SP Harness 已实现；真实环境中的生命周期仍需联调验证。
 
 Submission 的正常完成路径采用终态推送；`getSubmission(submissionId)` 只用于初始确认、断线恢复、超时校准和重试前确认，不做持续轮询。
 
@@ -95,7 +95,7 @@ eval-contracts → eval-dataset → eval-runtime → eval-metrics
 
 工程约定与 `sp-platform` 对齐：每个 workspace 都有独立的 package metadata、TypeScript 配置、README、公共入口和 Vitest 入口；应用额外拥有自己的 `CONTEXT.md`。`eval-api` 使用注入的 `pg` 连接池、Drizzle 和独立迁移；不复制 SP 私有数据库客户端或 Agent 内核。Eval 发布流程从固定 SP 源码部署独立的 SP 运行环境，Eval 代码不导入其私有源文件。可使用 `DATABASE_URL` 运行数据库集成测试。
 
-接入真实环境前，还需要确定 `@springbrand/agent-contracts` 的共享或发布方式、SP 侧 Evaluator 绑定 Subject SpaceDO 的正式边界，以及 Config 持久化、SP Harness、鉴权和 HTTP 控制面。Project 分支绑定与 Run commit 来源记录仍是目标设计，当前类型和数据库尚未实现。
+接入真实环境前，还需要部署独立的 Eval SP 与 Eval API/Worker，配置各服务地址、数据库和 Bundle 目录，并验证登录、Agent 初始化、执行、评估、证据和指标的完整链路。Project 分支绑定与 Run commit 来源记录已在类型和数据库中实现。
 
 ## CI
 

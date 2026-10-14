@@ -20,6 +20,13 @@ export class EvalSpApiError extends Error {
   }
 }
 
+export class EvalSpTransportError extends Error {
+  constructor(cause: unknown) {
+    super("Eval SP request could not be sent", { cause });
+    this.name = "EvalSpTransportError";
+  }
+}
+
 export interface EvalSpClient {
   verifySession(token: string): Promise<EvalSpUser | null>;
   listAgentConfigs(token: string): Promise<readonly EvalSpAgentConfig[]>;
@@ -77,17 +84,22 @@ export function createEvalSpClient(input: {
 
   async function request(token: string, path: string, method = "GET", body?: unknown): Promise<unknown> {
     if (typeof token !== "string" || token.length === 0) throw new TypeError("Session token is required");
-    const response = await fetcher(new URL(path, origin), {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...(method === "GET" ? {} : { Origin: writeOrigin.origin }),
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      redirect: "error",
-      credentials: "omit",
-    });
+    let response: Response;
+    try {
+      response = await fetcher(new URL(path, origin), {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(method === "GET" ? {} : { Origin: writeOrigin.origin }),
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        redirect: "error",
+        credentials: "omit",
+      });
+    } catch (cause) {
+      throw new EvalSpTransportError(cause);
+    }
     const payload: unknown = await response.json().catch(() => null);
     if (!response.ok) throw new EvalSpApiError(response.status, payload);
     if (!record(payload) || payload.success !== true || !("msg" in payload)) {
