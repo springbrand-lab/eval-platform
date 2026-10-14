@@ -12,7 +12,7 @@ export interface ProjectRunView {
   readonly evaluations: readonly EvaluationRecord[];
 }
 
-/** Reads one owner/Project Run and all status facts with a fixed number of SQL statements. */
+/** Reads one owner/Project Run and its status facts in bounded SQL batches. */
 export function createPostgresProjectRunReader(db: EvalDb, ownerUserId: string) {
   const owner = requireOwnerUserId(ownerUserId);
   return async (projectId: string, runId: string): Promise<ProjectRunView | null> => db.transaction(async (transaction) => {

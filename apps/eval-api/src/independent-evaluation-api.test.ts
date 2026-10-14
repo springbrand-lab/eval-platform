@@ -145,9 +145,6 @@ describe("independent evaluation HTTP API", () => {
     expect((await post({ evaluationConfigId: "config-1", samplingIds: ["a", "a"], idempotencyKey: "click" })).status).toBe(400);
     expect((await post({ evaluationConfigId: "config-1", samplingIds, idempotencyKey: "click", projectId: "other" })).status).toBe(400);
     expect((await post({ evaluationConfigId: "config-1", samplingIds, idempotencyKey: "click" }, "text/plain")).status).toBe(415);
-    expect((await api.handle(request("/api/projects/project-1/evaluations", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: "x".repeat(4 * 1024 * 1024 + 1),
-    }))).status).toBe(413);
     expect((await api.handle(request("/api/projects/project-1/samplings/successful?limit=0"))).status).toBe(400);
     expect((await api.handle(request("/api/projects/project-1/samplings/successful?sampleId=a&sampleId=b"))).status).toBe(400);
     expect(runtime.evaluate).not.toHaveBeenCalled();
@@ -172,6 +169,23 @@ describe("independent evaluation HTTP API", () => {
     expect(await body(outage)).toEqual({ error: {
       code: "SP_UNAVAILABLE", message: "Eval SP session verification failed",
     } });
+  });
+
+  it("accepts a fixed all-selection list larger than 4 MiB", async () => {
+    const { api, runtime } = fixture();
+    const selectedIds = Array.from({ length: 9_000 }, (_, index) => `${index}-${"x".repeat(495)}`);
+    const payload = JSON.stringify({
+      evaluationConfigId: "config-1", samplingIds: selectedIds, idempotencyKey: "large-selection",
+    });
+    expect(new TextEncoder().encode(payload).byteLength).toBeGreaterThan(4 * 1024 * 1024);
+    const response = await api.handle(request("/api/projects/project-1/evaluations", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: payload,
+    }));
+    expect(response.status).toBe(202);
+    expect(runtime.evaluate).toHaveBeenCalledExactlyOnceWith({
+      projectId: "project-1", evaluationConfigId: "config-1",
+      samplingIds: selectedIds, idempotencyKey: "large-selection",
+    });
   });
 
   it("serves the Fetch handler over Node HTTP and handles the trusted Web preflight", async () => {

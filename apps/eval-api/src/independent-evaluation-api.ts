@@ -4,8 +4,6 @@ import type { PostgresProjectCatalog } from "./db/catalog.js";
 import type { ProjectRunView } from "./db/run-view.js";
 import type { EvalSpClient } from "./sp/client.js";
 
-const MAX_BODY_BYTES = 4 * 1024 * 1024;
-
 export interface IndependentEvaluationOwnerServices {
   /** Every reader and writer must be scoped to the verified Eval SP user. */
   readonly catalog: Pick<PostgresProjectCatalog, "getProject" | "listSuccessfulSamplings" | "selectAllSuccessfulSamplingIds">;
@@ -131,9 +129,6 @@ async function readJsonObject(request: Request): Promise<Record<string, unknown>
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_BODY_BYTES) {
-        throw new HttpError(413, "BODY_TOO_LARGE", "JSON request body exceeds 4 MiB");
-      }
       chunks.push(value);
     }
   } finally {
