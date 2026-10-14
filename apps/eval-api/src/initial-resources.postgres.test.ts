@@ -129,8 +129,10 @@ describe.skipIf(!connection)("Data initial resource association", () => {
     expect(await response?.json()).toMatchObject({ evaluationOutputSchema: schema });
     expect(await catalog.getProject(project.projectId)).toMatchObject({ evaluationOutputSchema: schema });
     expect((await handle(request(), owner))?.status).toBe(200);
-    await expect(handle(new Request(url, { method: "PUT", body: JSON.stringify({ type: "string" }) }), owner))
-      .rejects.toThrow(/cannot change after binding/u);
+    const corrected = { type: "object", properties: { passed: { type: "boolean" } } };
+    expect((await handle(new Request(url, { method: "PUT", body: JSON.stringify(corrected) }), owner))?.status)
+      .toBe(200);
+    expect(await catalog.getProject(project.projectId)).toMatchObject({ evaluationOutputSchema: corrected });
     await expect(handle(request(), otherOwner)).rejects.toThrow(/Unknown Project/u);
   });
 });

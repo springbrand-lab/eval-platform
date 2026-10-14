@@ -8,7 +8,7 @@ import { createPostgresDatasetStore } from "./dataset.js";
 import { requireOwnerUserId } from "./owner.js";
 import { sqlBatches } from "./batch.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
-import { data, projects, samples, samplings } from "./schema.js";
+import { data, projects, runs, samples, samplings } from "./schema.js";
 import { EvaluationSelectionTooLargeError, MAX_EVALUATION_SAMPLING_IDS } from "../independent-evaluation-limits.js";
 import { parseEvaluationOutputSchema } from "../project-output-schema.js";
 
@@ -93,7 +93,12 @@ export async function bindProjectEvaluationOutputSchema(
     if (!row) throw new Error(`Unknown Project ${projectId}`);
     if (row.evaluationOutputSchema !== null) {
       if (isDeepStrictEqual(row.evaluationOutputSchema, selected)) return projectFromRow(row);
-      throw new Error("Project evaluation output JSON Schema cannot change after binding");
+      const [evaluationRun] = await transaction.select({ runId: runs.runId }).from(runs)
+        .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId),
+          sql`${runs.phases} @> '["evaluation"]'::jsonb`)).limit(1);
+      if (evaluationRun) {
+        throw new Error("Project evaluation output JSON Schema cannot change after evaluation admission");
+      }
     }
     const [updated] = await transaction.update(projects).set({ evaluationOutputSchema: selected })
       .where(and(eq(projects.ownerUserId, owner), eq(projects.projectId, projectId))).returning();

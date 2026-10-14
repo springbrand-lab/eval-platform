@@ -9,7 +9,8 @@ describe("Project evaluation output JSON Schema", () => {
     expect(result).toEqual({ type: "object", properties: { score: { type: "number", minimum: 0 } } });
   });
 
-  it.each([null, [], "{}", { minimum: Infinity }, { minimum: Number.MAX_SAFE_INTEGER + 1 },
+  it.each([null, [], "{}", { type: 42 }, { properties: [] },
+    { minimum: Infinity }, { minimum: Number.MAX_SAFE_INTEGER + 1 },
     { toJSON: () => ({}) }, { nested: new Date() }])("rejects non-JSON Schema file contents: %j", (value) => {
     expect(() => parseEvaluationOutputSchema(value)).toThrow();
   });

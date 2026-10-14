@@ -1,7 +1,10 @@
 import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
+import Ajv2020 from "ajv/dist/2020.js";
 
-export const EVALUATION_OUTPUT_SCHEMA_PATH = "/evaluation-output.schema.json";
+/** A material-relative path; SP writes it below the returned materialization root. */
+export const EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH = "/evaluation-output.schema.json";
 export const MAX_EVALUATION_OUTPUT_SCHEMA_BYTES = 1_000_000;
+const schemaValidator = new Ajv2020({ strict: false, allErrors: true });
 
 /** Keep the bound Schema a plain, bounded JSON object with stable serialized bytes. */
 export function parseEvaluationOutputSchema(value: unknown): EvaluationOutputSchema {
@@ -23,7 +26,11 @@ export function parseEvaluationOutputSchema(value: unknown): EvaluationOutputSch
   if (Buffer.byteLength(encoded, "utf8") > MAX_EVALUATION_OUTPUT_SCHEMA_BYTES) {
     throw new RangeError("Evaluation output JSON Schema is too large");
   }
-  return JSON.parse(encoded) as EvaluationOutputSchema;
+  const schema = JSON.parse(encoded) as EvaluationOutputSchema;
+  if (!schemaValidator.validateSchema(schema)) {
+    throw new TypeError(`Evaluation output JSON Schema is invalid: ${schemaValidator.errorsText()}`);
+  }
+  return schema;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

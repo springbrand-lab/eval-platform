@@ -235,6 +235,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     await catalog.bindEvaluationOutputSchema(project.projectId, { type: "object" });
     await expect(runtime.createRunWithSamplings(pipeline, [sampling], [judge]))
       .resolves.toMatchObject({ created: true });
+    await expect(catalog.bindEvaluationOutputSchema(project.projectId, { type: "string" }))
+      .rejects.toThrow("cannot change after evaluation admission");
   });
 
   it("keeps Project on its source branch while recording each Run's deployed commit", async () => {

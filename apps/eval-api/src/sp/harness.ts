@@ -17,7 +17,7 @@ import {
   type EvaluationWorkspaceBinding,
 } from "@eval-platform/eval-runtime/harness";
 import WebSocket from "ws";
-import { EVALUATION_OUTPUT_SCHEMA_PATH } from "../project-output-schema.js";
+import { EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH } from "../project-output-schema.js";
 
 const BASE_PATH = "/internal/v1/eval-harness";
 const SERVICE_HEADER = "X-Eval-Service-Token";
@@ -252,12 +252,12 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       ]);
       const schemaBytes = input.evaluationOutputSchema === undefined ? undefined
         : Buffer.from(`${JSON.stringify(input.evaluationOutputSchema, null, 2)}\n`, "utf8");
-      if (schemaBytes && files?.some((file) => file.path === EVALUATION_OUTPUT_SCHEMA_PATH)) {
+      if (schemaBytes && files?.some((file) => file.path === EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH)) {
         throw new SpHarnessError("Evaluator materials cannot overwrite the Project JSON Schema file", false);
       }
       const combinedFiles = schemaBytes ? [
         ...(files ?? []),
-        { path: EVALUATION_OUTPUT_SCHEMA_PATH, mediaType: "application/schema+json",
+        { path: EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH, mediaType: "application/schema+json",
           contentBase64: schemaBytes.toString("base64") },
       ] : files;
       if (combinedFiles && (combinedFiles.length > 500 || combinedFiles.reduce((size, file) =>

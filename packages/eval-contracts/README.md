@@ -18,7 +18,7 @@ Subject 的产物和完整轨迹是执行终态的必需证据。`Sampling.execu
 
 每次部署选定一个 SP 分支并独立发布整套 Eval SP。Project 绑定该分支，并记录首次成功创建 Run 时选定的执行或 Pipeline 操作及配置；后续执行必须沿用这项选择。空 Project 不能以只评估启动；已有成功 Sampling 的 Project 可新增独立评估 Run，而不改首次选择。Run 记录准入时该发布使用的 SP commit；Sampling 不存分支。Agent Config 引用指向 Eval SP 自己的 `user-agent` 库，不跨 dev/production 实时共享配置。
 
-Project 可绑定一份 JSON Schema 对象作为评估输出格式。绑定一次后不可修改；所有评估 Run 必须有这份格式，每个 Eval Agent 初始化前在自己的 Workspace 收到 `/evaluation-output.schema.json`。
+Project 可绑定一份 draft 2020-12 JSON Schema 对象作为评估输出格式。首次评估 Run 准入后不可修改；所有评估 Run 必须有这份格式，每个 Eval Agent 初始化前在自己的 Workspace 的素材根目录下收到 `evaluation-output.schema.json`。
 
 `AgentFramework` 为 `sp | codex | cc`。`SpHarnessConfig.kind` 表示统一的 SP 云端宿主，必填的 `framework` 表示所运行的 Agent 框架；三种框架都引用 SP 管理的 Agent Config，复用同一 Chat/Submission/Workspace 边界。执行配置可选择三者，评估配置固定 SP 框架，不由本包实现进程启动或云端部署。
 

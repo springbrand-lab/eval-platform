@@ -154,7 +154,8 @@ describe("Eval SP Harness", () => {
 
   it("uploads the Project JSON Schema with evaluator-only materials before submission", async () => {
     const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({
-      bundleId: "eval-bundle", manifestHash: "hash", target: "workspace", rootPath: "/evaluations/evaluation-1",
+      bundleId: "eval-bundle", manifestHash: "hash", target: "workspace",
+      rootPath: "/evaluations/evaluation-1/initial-materials/eval-bundle/judge-brief",
     }));
     const resolveInitialMaterials = vi.fn(async () => [
       { path: "/brief.txt", mediaType: "text/plain", contentBase64: "SnVkZ2U=" },
@@ -162,7 +163,7 @@ describe("Eval SP Harness", () => {
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
       fetch: fetcher, resolveInitialMaterials });
     const evalMaterials = { bundleId: "eval-bundle", materialId: "judge-brief" };
-    await harness.materializeInitialData({
+    const binding = await harness.materializeInitialData({
       handle: evaluator, idempotencyKey: "initial-data:evaluator-chat",
       data: { userPrompt: "Judge", initialMaterials: evalMaterials },
       evaluationOutputSchema: { type: "object", properties: { score: { type: "number" } } },
@@ -172,6 +173,9 @@ describe("Eval SP Harness", () => {
     expect(body.initialMaterials).toMatchObject(evalMaterials);
     expect(body.initialMaterials.files.map((file: { path: string }) => file.path))
       .toEqual(["/brief.txt", "/evaluation-output.schema.json"]);
+    expect(`${binding.rootPath}${body.initialMaterials.files[1].path}`).toBe(
+      "/evaluations/evaluation-1/initial-materials/eval-bundle/judge-brief/evaluation-output.schema.json",
+    );
     expect(JSON.parse(Buffer.from(body.initialMaterials.files[1].contentBase64, "base64").toString("utf8")))
       .toEqual({ type: "object", properties: { score: { type: "number" } } });
     expect(body.data).not.toHaveProperty("evalInitialMaterials");
