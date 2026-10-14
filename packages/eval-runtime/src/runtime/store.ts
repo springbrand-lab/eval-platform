@@ -39,6 +39,15 @@ export class RuntimeRunIdentityConflictError extends Error {
   }
 }
 
+export class RuntimeProjectBusyError extends Error {
+  readonly retryable = false;
+
+  constructor(readonly projectId: string, readonly activeRunId: string) {
+    super(`Project ${projectId} already has unfinished Run ${activeRunId}`);
+    this.name = "RuntimeProjectBusyError";
+  }
+}
+
 export type SamplingState = Sampling;
 
 export interface RuntimeStore {
@@ -47,7 +56,8 @@ export interface RuntimeStore {
   findRunByIdempotencyKey(projectId: string, idempotencyKey: string): Promise<RuntimeRunRecord | null>;
   /**
    * Atomically rechecks request identity and commits Run, Sampling, EvaluationRecord and
-   * effective-config snapshot data.
+   * effective-config snapshot data. A matching-key replay returns its original Run even
+   * while it is active; a new key is rejected if this Project has an unfinished Run.
    * Implementations must use durable uniqueness constraints, not an in-memory map.
    */
   createRunWithSamplings(

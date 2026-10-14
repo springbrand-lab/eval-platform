@@ -1,4 +1,4 @@
-import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
+import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import { describe, expect, it, vi } from "vitest";
 import { createIndependentEvaluationApi } from "./independent-evaluation-api.js";
 import { createIndependentEvaluationHttpServer } from "./independent-evaluation-http.js";
@@ -164,6 +164,12 @@ describe("independent evaluation HTTP API", () => {
     expect(conflict.status).toBe(409);
     expect(await body(conflict)).toEqual({ error: {
       code: "IDEMPOTENCY_CONFLICT", message: "different request facts",
+    } });
+    runtime.evaluate.mockRejectedValueOnce(new RuntimeProjectBusyError("project-1", "active-run"));
+    const busy = await post({ evaluationConfigId: "config-1", samplingIds, idempotencyKey: "new-click" });
+    expect(busy.status).toBe(409);
+    expect(await body(busy)).toEqual({ error: {
+      code: "PROJECT_BUSY", message: "Project project-1 already has unfinished Run active-run",
     } });
     runtime.evaluate.mockRejectedValueOnce(new ConfigNotFoundError("evaluation", "config-1"));
     expect((await post({ evaluationConfigId: "config-1", samplingIds, idempotencyKey: "new-click" })).status).toBe(404);

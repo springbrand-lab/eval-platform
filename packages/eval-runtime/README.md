@@ -79,6 +79,7 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
    已选 Sampling 缺失、不属于请求 Project 或执行未成功时抛出 `RuntimeEvaluationSelectionError`，供 API 映射为候选已失效的冲突响应。`getRun()` 查不到 Run 时抛出 `RuntimeRunNotFoundError`，供 API 返回 404。
 9. `start()`、`pipeline()` 和 `evaluate()` 不分别写 Run、Sampling 和 EvaluationRecord。三者都使用 `createRunWithSamplings()` 原子提交；命令失败时不能留下半批状态或清掉旧评估记录。
 10. `start()`、`pipeline()` 和 `evaluate()` 都必须带调用方 `idempotencyKey`，同一 Project 内唯一。同一 Runtime 实例把同一 Project/key 的并发提交同步起来：相同操作、配置 ID 和评估 Sampling ID 顺序共用第一次提交的 Promise 和生效配置；不同请求事实立即冲突，提交结束即清理内存条目。后续重放先按 key 查找原 Run，使用已保存的生效配置快照校验请求事实；相同事实返回原 `RunHandle`，不同事实冲突。Store 在 Run/Sampling/EvaluationRecord 原子事务内二次查重，仅新 Run 唤醒 Worker；内存同步不取代持久化幂等。
+   同一 Project 同时只能有一批未结束 Run：Store 在锁住 Project 行后先处理同 key 重放，再用与 Worker 恢复相同的未结束状态判断阻止新 key 准入，并抛出 `RuntimeProjectBusyError`。执行、联跑和独立评估共用这条规则；原 Run 的所有阶段进入终态后才允许新提交。旧 key 重放不因配置编辑或其他新 Run 而变化。
 11. `RuntimeRunRecord` 只保存不可变的阶段范围 `phases`，不保存当前阶段或 Run 状态；`RunSnapshot.phase/status` 由 `getRun()` 根据关联 Sampling 即时推导，是查询投影而不是第二份权威状态。单独执行范围为 `["execution"]`，单独评估为 `["evaluation"]`，联跑为 `["execution", "evaluation"]`；没有 `pipeline` 阶段或 Run kind。
 12. 联跑刚创建且所有 Execution Sampling 仍为 `queued` 时，Run 也必须是 `queued`。执行尚未结束时当前阶段为 `execution`；执行结束且存在成功 Sampling 后当前阶段为 `evaluation`，交接等待不能提前显示成功，成功 Sampling 的评估全部结束前 Run 仍是运行态。执行失败的 Sampling 不启动评估 Agent，其 EvaluationRecord 标记为 `cancelled`。
 13. `SamplingState` 只保存单次执行状态，不保存评估结果、`Sample`、JSON、初始 Session 引用、初始素材引用或 metadata；评估由独立 `EvaluationRecord` 通过 `samplingId` 关联。

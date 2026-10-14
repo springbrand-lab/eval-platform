@@ -2,7 +2,7 @@ import path from "node:path";
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError } from "@eval-platform/eval-dataset";
 import { createMetrics, MetricsQueryError } from "@eval-platform/eval-metrics";
-import { createConfigResolver, RuntimeEvaluationSelectionError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
+import { createConfigResolver, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
@@ -187,6 +187,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     await runtime.createRunWithSamplings(evaluation, [succeeded], [judge]);
     expect(await catalog.getProject(project.projectId)).toEqual({ ...project, initialLaunch: selected });
     expect((await runtime.getRun(evaluation.runId))?.sourceCommit).toBe(release.sourceCommit);
+    await runtime.updateEvaluation({ ...judge, status: { status: "succeeded" } }, judge);
 
     const changedSampling = makeSampling(project.projectId, sample.sampleId);
     const changedConfig = makeRun(project.projectId, changedSampling, dataset.datasetId, {
@@ -216,12 +217,14 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const firstSampling = makeSampling(project.projectId, sample.sampleId);
     const first = makeRun(project.projectId, firstSampling, dataset.datasetId);
     await originalStore.createRunWithSamplings(first, [firstSampling], []);
+    await originalStore.updateSampling({ ...firstSampling, execution: { status: "succeeded" } }, firstSampling);
 
     const nextRelease = { ...release, sourceCommit: "b".repeat(40) };
     const nextStore = createPostgresRuntimeStore(database.db, "user-A", nextRelease);
     const nextSampling = makeSampling(project.projectId, sample.sampleId);
     const next = makeRun(project.projectId, nextSampling, dataset.datasetId, { sourceCommit: nextRelease.sourceCommit });
     await nextStore.createRunWithSamplings(next, [nextSampling], []);
+    await nextStore.updateSampling({ ...nextSampling, execution: { status: "succeeded" } }, nextSampling);
     expect((await nextStore.getRun(first.runId))?.sourceCommit).toBe(release.sourceCommit);
     expect((await nextStore.getRun(next.runId))?.sourceCommit).toBe(nextRelease.sourceCommit);
     expect(await catalog.getProject(project.projectId)).toMatchObject({
@@ -261,6 +264,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     ]);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(results.find((result) => result.status === "rejected")?.reason)
+      .toBeInstanceOf(RuntimeProjectBusyError);
     const admitted = results[0]?.status === "fulfilled" ? first : second;
     expect(await catalog.getProject(project.projectId)).toMatchObject({
       initialLaunch: { operation: "execution", configId: admitted === first ? "execution-config" : "alternative-config" },
@@ -514,6 +519,9 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     await expect(runtime.createRunWithSamplings(conflict, [makeSampling(project.projectId, sample.sampleId, conflict.samplingIds[0]!)], []))
       .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
 
+    const admittedSampling = (await runtime.getSampling(admissions[0]!.run.samplingIds[0]!))!;
+    await runtime.updateSampling({ ...admittedSampling, execution: { status: "succeeded" } }, admittedSampling);
+
     const good = makeSampling(project.projectId, sample.sampleId);
     const bad = makeSampling(project.projectId, "missing-sample");
     const invalid = makeRun(project.projectId, good, dataset.datasetId, {
@@ -527,6 +535,57 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await catalog.getSample(sample.sampleId)).not.toBeNull();
   });
 
+  it("allows only one unfinished Run per Project across execution and evaluation", async () => {
+    const { runtime, project, dataset, sample } = await setup();
+    const first = makeSampling(project.projectId, sample.sampleId);
+    const second = makeSampling(project.projectId, sample.sampleId);
+    const execution = makeRun(project.projectId, first, dataset.datasetId, {
+      samplingIds: [first.samplingId, second.samplingId],
+      config: { operation: "execution", execution: {
+        ...executionConfig(dataset.datasetId).execution, samplingCount: 2,
+      } },
+    });
+    await runtime.createRunWithSamplings(execution, [first, second], []);
+    const succeeded = { ...first, execution: { status: "succeeded" as const } };
+    await runtime.updateSampling(succeeded, first);
+
+    const replay = makeRun(project.projectId, first, dataset.datasetId, {
+      samplingIds: execution.samplingIds,
+      requestIdentity: execution.requestIdentity,
+      config: { operation: "execution", execution: {
+        ...executionConfig(dataset.datasetId).execution, samplingCount: 2, executionConcurrency: 9,
+      } },
+    });
+    expect(await runtime.createRunWithSamplings(replay, [first, second], []))
+      .toEqual({ run: execution, created: false });
+
+    const another = makeSampling(project.projectId, sample.sampleId);
+    const anotherRun = makeRun(project.projectId, another, dataset.datasetId);
+    await expect(runtime.createRunWithSamplings(anotherRun, [another], []))
+      .rejects.toMatchObject({ projectId: project.projectId, activeRunId: execution.runId });
+    expect(await runtime.getRun(anotherRun.runId)).toBeNull();
+    expect(await runtime.getSampling(another.samplingId)).toBeNull();
+
+    const judge = makeEvaluation(first.samplingId);
+    const evaluation = makeRun(project.projectId, succeeded, dataset.datasetId, {
+      phases: ["evaluation"], config: evaluationConfig, evaluationIds: [judge.evaluationId],
+    });
+    await expect(runtime.createRunWithSamplings(evaluation, [succeeded], [judge]))
+      .rejects.toBeInstanceOf(RuntimeProjectBusyError);
+    expect(await runtime.getRun(evaluation.runId)).toBeNull();
+    expect(await runtime.listEvaluations(first.samplingId)).toEqual([]);
+
+    await runtime.updateSampling({ ...second, execution: { status: "failed" } }, second);
+    await runtime.createRunWithSamplings(evaluation, [succeeded], [judge]);
+    expect(await runtime.createRunWithSamplings(replay, [first, second], []))
+      .toEqual({ run: execution, created: false });
+    await expect(runtime.createRunWithSamplings(anotherRun, [another], []))
+      .rejects.toMatchObject({ activeRunId: evaluation.runId });
+    await runtime.updateEvaluation({ ...judge, status: { status: "cancelled" } }, judge);
+    await runtime.createRunWithSamplings(anotherRun, [another], []);
+    expect(await runtime.getRun(anotherRun.runId)).toEqual(anotherRun);
+  });
+
   it("lists and selects every successful Sampling in the owned Project with stable order", async () => {
     const { catalog, runtime, project, dataset, data, sample } = await setup();
     const otherSample = await catalog.createSample(data.dataId);
@@ -535,13 +594,10 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       makeSampling(project.projectId, otherSample.sampleId, "sampling-b"),
       makeSampling(project.projectId, sample.sampleId, "sampling-c"),
     ];
-    for (const record of records) {
+    for (const [index, record] of records.entries()) {
       await runtime.createRunWithSamplings(makeRun(project.projectId, record, dataset.datasetId), [record], []);
+      await runtime.updateSampling({ ...record, execution: { status: index < 2 ? "succeeded" : "failed" } }, record);
     }
-    for (const record of records.slice(0, 2)) {
-      await runtime.updateSampling({ ...record, execution: { status: "succeeded" } }, record);
-    }
-    await runtime.updateSampling({ ...records[2]!, execution: { status: "failed" } }, records[2]!);
 
     expect(await catalog.listSuccessfulSamplings(project.projectId, { limit: 1 })).toEqual({
       samplings: [{ samplingId: "sampling-a", sampleId: sample.sampleId }],
@@ -574,7 +630,10 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const sampling = makeSampling(project.projectId, sample.sampleId, "sampling-api-a");
     const secondSampling = makeSampling(project.projectId, sample.sampleId, "sampling-api-b");
     await runtime.createRunWithSamplings(makeRun(project.projectId, sampling, dataset.datasetId), [sampling], []);
+    const failed = { ...sampling, execution: { status: "failed" as const } };
+    await runtime.updateSampling(failed, sampling);
     await runtime.createRunWithSamplings(makeRun(project.projectId, secondSampling, dataset.datasetId), [secondSampling], []);
+    await runtime.updateSampling({ ...secondSampling, execution: { status: "succeeded" } }, secondSampling);
     const staleSelection = { ...sampling, execution: { status: "succeeded" as const } };
     const rejectedEvaluation = makeEvaluation(sampling.samplingId);
     const rejectedRun = makeRun(project.projectId, staleSelection, dataset.datasetId, {
@@ -584,8 +643,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     await expect(runtime.createRunWithSamplings(rejectedRun, [staleSelection], [rejectedEvaluation]))
       .rejects.toBeInstanceOf(RuntimeEvaluationSelectionError);
     expect(await runtime.getRun(rejectedRun.runId)).toBeNull();
-    await runtime.updateSampling({ ...sampling, execution: { status: "succeeded" } }, sampling);
-    await runtime.updateSampling({ ...secondSampling, execution: { status: "succeeded" } }, secondSampling);
+    await runtime.updateSampling({ ...sampling, execution: { status: "succeeded" } }, failed);
 
     const configs = configStore("user-A");
     const config = await configs.createEvaluationConfig({
@@ -772,6 +830,11 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
     const deliberateJudge = makeEvaluation(sampling.samplingId);
     const deliberate = evaluationRun(deliberateJudge);
+    await expect(runtime.createRunWithSamplings({
+      ...deliberate,
+      requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "same evaluation facts" },
+    }, [succeeded], [deliberateJudge])).rejects.toBeInstanceOf(RuntimeProjectBusyError);
+    await runtime.updateEvaluation({ ...firstJudge, status: { status: "succeeded" } }, firstJudge);
     await runtime.createRunWithSamplings({
       ...deliberate,
       requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "same evaluation facts" },
@@ -790,9 +853,10 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     try {
       await listener.query("LISTEN eval_run_created");
       const first = makeSampling(project.projectId, sample.sampleId);
-      const second = makeSampling(project.projectId, sample.sampleId);
+      const secondProject = await catalog.createProject({ name: "concurrent project" });
+      const second = makeSampling(secondProject.projectId, sample.sampleId);
       const firstRun = makeRun(project.projectId, first, dataset.datasetId);
-      const secondRun = makeRun(project.projectId, second, dataset.datasetId);
+      const secondRun = makeRun(secondProject.projectId, second, dataset.datasetId);
       await runtime.createRunWithSamplings(firstRun, [first], []);
       await runtime.createRunWithSamplings(secondRun, [second], []);
       await vi.waitFor(() => expect(observed).toEqual(expect.arrayContaining([firstRun.runId, secondRun.runId])));
@@ -895,6 +959,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     });
     try {
       await vi.waitFor(() => expect(resume).toHaveBeenCalledWith(firstRun.runId));
+      await vi.waitFor(async () => expect((await runtime.getSampling(first.samplingId))?.execution.status).toBe("succeeded"));
       const second = makeSampling(project.projectId, sample.sampleId);
       const secondRun = makeRun(project.projectId, second, dataset.datasetId);
       await runtime.createRunWithSamplings(secondRun, [second], []);
@@ -984,11 +1049,6 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       phases: ["evaluation"], evaluationIds: [firstJudge.evaluationId], config: evaluationConfig,
     });
     await runtime.createRunWithSamplings(firstRun, [finished], [firstJudge]);
-    const secondJudge = makeEvaluation(original.samplingId);
-    const secondRun = makeRun(project.projectId, original, dataset.datasetId, {
-      phases: ["evaluation"], evaluationIds: [secondJudge.evaluationId], config: evaluationConfig,
-    });
-    await runtime.createRunWithSamplings(secondRun, [original], [secondJudge]);
     const completed = {
       ...firstJudge, status: { status: "succeeded" as const },
       attempts: [{ evaluationAttemptId: "judge-attempt", evaluationId: firstJudge.evaluationId,
@@ -997,6 +1057,11 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
         trajectory: { trajectoryId: "judge-trace", source: "evaluator" as const, path: "/judge/trace.json" } },
     };
     await runtime.updateEvaluation(completed, firstJudge);
+    const secondJudge = makeEvaluation(original.samplingId);
+    const secondRun = makeRun(project.projectId, original, dataset.datasetId, {
+      phases: ["evaluation"], evaluationIds: [secondJudge.evaluationId], config: evaluationConfig,
+    });
+    await runtime.createRunWithSamplings(secondRun, [original], [secondJudge]);
     const restored = createPostgresWorkerRuntimeStore(database.db);
     expect(await restored.getSampling(original.samplingId)).toEqual(finished);
     expect(await restored.listEvaluations(original.samplingId)).toEqual(
@@ -1099,6 +1164,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await otherRuntime.getRun(runB.runId)).toEqual(runB);
     await expect(userRuntime.updateSampling(samplingB, samplingB)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
     await expect(userRuntime.createRunWithSamplings(runB, [samplingB], [])).rejects.toThrow("Unknown Project");
+    await runtime.updateSampling({ ...samplingA, execution: { status: "succeeded" } }, samplingA);
     const collisionSampling = makeSampling(project.projectId, sample.sampleId);
     const collision = makeRun(project.projectId, collisionSampling, dataset.datasetId, {
       requestIdentity: runB.requestIdentity,

@@ -1,6 +1,6 @@
 import type { EvaluationRecord, ProjectInitialLaunch, Sampling } from "@eval-platform/eval-contracts";
 import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
-import { RuntimeEvaluationSelectionError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
+import { RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import { and, eq, exists, gt, inArray, or, sql } from "drizzle-orm";
 import { sqlBatches } from "./batch.js";
 import type { EvalDb } from "./client.js";
@@ -9,6 +9,25 @@ import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
 import { datasets, evaluations, projects, runEvaluations, runs, runSamplings, samples, samplings } from "./schema.js";
 
 export type RuntimeReader = Pick<EvalDb, "select">;
+
+function unfinishedRunCondition(reader: RuntimeReader) {
+  const unfinished = ["queued", "starting", "running", "retrying"];
+  const executionPending = exists(reader.select({ samplingId: runSamplings.samplingId })
+    .from(runSamplings)
+    .innerJoin(samplings, eq(runSamplings.samplingId, samplings.samplingId))
+    .where(and(
+      eq(runSamplings.runId, runs.runId),
+      inArray(sql<string>`${samplings.facts}->'execution'->>'status'`, unfinished),
+    )));
+  const evaluationPending = exists(reader.select({ evaluationId: runEvaluations.evaluationId })
+    .from(runEvaluations)
+    .innerJoin(evaluations, eq(runEvaluations.evaluationId, evaluations.evaluationId))
+    .where(and(
+      eq(runEvaluations.runId, runs.runId),
+      inArray(sql<string>`${evaluations.facts}->'status'->>'status'`, unfinished),
+    )));
+  return or(executionPending, evaluationPending);
+}
 
 type RuntimeStoreScope =
   | { readonly kind: "worker" }
@@ -198,6 +217,13 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
         const identity = run.requestIdentity;
         const existing = await findByIdentity(transaction, project.ownerUserId, run.projectId, identity);
         if (existing) return { run: existing, created: false };
+        const [active] = await transaction.select({ runId: runs.runId }).from(runs)
+          .where(and(
+            eq(runs.ownerUserId, project.ownerUserId),
+            eq(runs.projectId, run.projectId),
+            unfinishedRunCondition(transaction),
+          )).limit(1);
+        if (active) throw new RuntimeProjectBusyError(run.projectId, active.runId);
         if (scope.kind === "user" && (project.sourceBranch !== scope.release.sourceBranch
           || run.sourceCommit !== scope.release.sourceCommit)) {
           throw new Error("Project source branch or Run source commit differs from the active Eval SP release");
@@ -383,23 +409,8 @@ export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & Run
       if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
         throw new Error("Recovery page size must be between 1 and 1000");
       }
-      const unfinished = ["queued", "starting", "running", "retrying"];
-      const executionPending = exists(db.select({ samplingId: runSamplings.samplingId })
-        .from(runSamplings)
-        .innerJoin(samplings, eq(runSamplings.samplingId, samplings.samplingId))
-        .where(and(
-          eq(runSamplings.runId, runs.runId),
-          inArray(sql<string>`${samplings.facts}->'execution'->>'status'`, unfinished),
-        )));
-      const evaluationPending = exists(db.select({ evaluationId: runEvaluations.evaluationId })
-        .from(runEvaluations)
-        .innerJoin(evaluations, eq(runEvaluations.evaluationId, evaluations.evaluationId))
-        .where(and(
-          eq(runEvaluations.runId, runs.runId),
-          inArray(sql<string>`${evaluations.facts}->'status'->>'status'`, unfinished),
-        )));
       const rows = await db.select({ runId: runs.runId }).from(runs)
-        .where(and(afterRunId === undefined ? undefined : gt(runs.runId, afterRunId), or(executionPending, evaluationPending)))
+        .where(and(afterRunId === undefined ? undefined : gt(runs.runId, afterRunId), unfinishedRunCondition(db)))
         .orderBy(runs.runId).limit(limit);
       return rows.map(({ runId }) => runId);
     },

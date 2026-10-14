@@ -687,7 +687,7 @@ export type {
   SamplingState,
   RuntimeStore,
 } from "./store.js";
-export { RuntimeRunIdentityConflictError, RuntimeRecordConflictError, RuntimeRecordPersistenceError } from "./store.js";
+export { RuntimeProjectBusyError, RuntimeRunIdentityConflictError, RuntimeRecordConflictError, RuntimeRecordPersistenceError } from "./store.js";
 export { toRunSnapshot, toSamplingSnapshot } from "./projection.js";
 export {
   DEFAULT_RETRY_POLICY,

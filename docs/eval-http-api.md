@@ -6,6 +6,8 @@ Requests and responses use JSON unless a Dataset document is imported or exporte
 
 Run admission uses a token-free, owner-scoped ConfigReader and `createEvalRunAdmission`; Config editing uses a separate Store with the current request's session token. Concurrent Execution and Pipeline requests for one user share an admission instance while active; the existing independent-evaluation handler separately shares its admission instance for concurrent evaluation requests. Each cache releases idle owners. Run and Sampling reads use owner-scoped PostgreSQL readers and Runtime's public projection functions. No Harness or Worker credentials are present in the HTTP process.
 
+At most one unfinished Run may exist in a Project, regardless of its operation. Run admission locks that Project in PostgreSQL and checks the saved idempotency identity before checking for another unfinished Run. A matching replay returns the original Run; a new key while a Run is unfinished returns `409 project_busy` for Execution/Pipeline or `409 PROJECT_BUSY` for independent evaluation. The previous Run is finished only when all of its Sampling and EvaluationRecord phases are terminal. A new key is accepted after that; editing a configuration does not change an already admitted Run or its replay.
+
 Sampling and Evaluation responses retain artifact and complete trajectory references. Their bytes remain behind Eval SP's public read-only Workspace and Trajectory APIs; this control plane does not read SP Durable Object storage.
 
 | Operation | Route | Input |

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseDatasetDocument } from "@eval-platform/eval-dataset";
+import { RuntimeProjectBusyError } from "@eval-platform/eval-runtime";
 import type { EvalDb } from "./db/client.js";
 import type { EvalSpClient } from "./sp/client.js";
 import { EvalSpTransportError } from "./sp/client.js";
@@ -156,6 +157,18 @@ describe("Eval HTTP control plane", () => {
     const unknown = await app.handler(request("/api/runs/run-1"));
     expect(unknown.status).toBe(500);
     expect(JSON.stringify(await unknown.json())).not.toContain("secret");
+  });
+
+  it("reports an active Project as a conflict on Run admission", async () => {
+    const app = setup();
+    app.start.mockRejectedValueOnce(new RuntimeProjectBusyError("project-1", "active-run"));
+    const response = await app.handler(request("/api/runs/execution", "POST", {
+      idempotencyKey: "new-run", projectId: "project-1", executionConfigId: "config-1",
+    }));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: {
+      code: "project_busy", message: "Project project-1 already has unfinished Run active-run",
+    } });
   });
 
   it("imports raw Dataset documents and mounts the established independent evaluation routes", async () => {

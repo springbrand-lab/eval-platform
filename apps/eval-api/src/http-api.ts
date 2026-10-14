@@ -16,7 +16,7 @@ import type {
   ExecutionConfigInput,
   PipelineConfigInput,
 } from "@eval-platform/eval-runtime";
-import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeRunIdentityConflictError, RuntimeRunNotFoundError } from "@eval-platform/eval-runtime";
+import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRunIdentityConflictError, RuntimeRunNotFoundError } from "@eval-platform/eval-runtime";
 import type { PostgresCatalog } from "./db/catalog.js";
 import {
   ConfigEntityNotFoundError,
@@ -204,6 +204,9 @@ function mappedError(error: unknown, onError?: (error: Error) => void): Response
   }
   if (error instanceof ConfigNotFoundError || error instanceof RuntimeRunNotFoundError) {
     return errorResponse(404, "not_found", error.message);
+  }
+  if (error instanceof RuntimeProjectBusyError) {
+    return errorResponse(409, "project_busy", error.message);
   }
   if (error instanceof DatasetIdentityConflictError || error instanceof DatasetInUseError ||
     error instanceof DataInUseError || error instanceof ConfigIdentityConflictError ||

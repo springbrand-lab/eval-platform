@@ -1,5 +1,5 @@
 import type { EvalRunAdmission } from "@eval-platform/eval-runtime";
-import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
+import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import type { PostgresProjectCatalog } from "./db/catalog.js";
 import type { ProjectRunView } from "./db/run-view.js";
 import {
@@ -359,6 +359,9 @@ export function createIndependentEvaluationApi(options: IndependentEvaluationApi
         }
         if (error instanceof RuntimeRunIdentityConflictError) {
           return failure(new HttpError(409, "IDEMPOTENCY_CONFLICT", error.message), corsOrigin);
+        }
+        if (error instanceof RuntimeProjectBusyError) {
+          return failure(new HttpError(409, "PROJECT_BUSY", error.message), corsOrigin);
         }
         if (error instanceof RuntimeEvaluationSelectionError) {
           return failure(new HttpError(409, "SAMPLING_UNAVAILABLE", "Selected Sampling is unavailable for evaluation"), corsOrigin);
