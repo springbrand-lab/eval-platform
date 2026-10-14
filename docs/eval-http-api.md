@@ -19,7 +19,7 @@ Sampling and Evaluation responses retain artifact and complete trajectory refere
 | Agent choices | `GET /api/agents?role=subject|evaluator` | Optional role |
 | Projects | `GET, POST /api/projects`; `GET /api/projects/{id}` | Create: `{name}` |
 | Current Run and stop | `GET /api/projects/{id}/runs/current`; `POST /api/projects/{id}/runs/{runId}/stop` | Stop has no body; `202 {runId,stopRequested:true}` |
-| Project evaluation output format | `PUT /api/projects/{id}/evaluation-output-schema` | `{outputSchemaId}`; ID may change until the first Evaluation Run |
+| Project evaluation output format | `PUT /api/projects/{id}/evaluation-output-schema` | `{outputSchemaId}` or `{outputSchemaId:null}`; may change or clear until the first Evaluation Run |
 | Successful Samplings | `GET /api/projects/{id}/samplings/successful`; `GET /api/projects/{id}/samplings/successful/ids` | Existing [independent evaluation contract](eval-independent-evaluation-entry.md) |
 | Datasets | `GET, POST /api/datasets`; `GET, PUT, DELETE /api/datasets/{id}` | Dataset input on create/full replacement |
 | Dataset membership | `GET, POST, DELETE /api/datasets/{id}/data` | POST/DELETE: `{dataIds:[...]}` |

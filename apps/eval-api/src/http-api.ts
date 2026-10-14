@@ -25,8 +25,8 @@ import {
   type PostgresConfigStore,
 } from "./db/config.js";
 import { DatasetInUseError } from "./db/dataset.js";
-import { OutputSchemaNotFoundError } from "./db/output-schemas.js";
-import { BundleResourceNotFoundError } from "./db/resource-catalog.js";
+import { OutputSchemaInUseError, OutputSchemaNotFoundError } from "./db/output-schemas.js";
+import { BundleResourceInUseError, BundleResourceNotFoundError } from "./db/resource-catalog.js";
 import { EvaluationSelectionTooLargeError } from "./independent-evaluation-limits.js";
 import { matchesIndependentEvaluationPath, type IndependentEvaluationApi } from "./independent-evaluation-api.js";
 import { EvalSpApiError, EvalSpTransportError, type EvalSpClient } from "./sp/client.js";
@@ -212,7 +212,8 @@ function mappedError(error: unknown, onError?: (error: Error) => void): Response
     return errorResponse(409, "project_busy", error.message);
   }
   if (error instanceof DatasetIdentityConflictError || error instanceof DatasetInUseError ||
-    error instanceof DataInUseError || error instanceof ConfigIdentityConflictError ||
+    error instanceof DataInUseError || error instanceof BundleResourceInUseError ||
+    error instanceof OutputSchemaInUseError || error instanceof ConfigIdentityConflictError ||
     error instanceof RuntimeRunIdentityConflictError) {
     return errorResponse(409, "conflict", error.message);
   }

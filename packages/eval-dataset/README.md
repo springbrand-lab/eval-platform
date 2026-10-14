@@ -36,7 +36,7 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 "initialSession": { "bundleId": "sessions-bundle", "sessionId": "seed-session" }
 ```
 
-`bundleId` 定位外部 Bundle，`sessionId` / `materialId` 定位其中的具体资源；这两个引用的所有 ID 都必须由调用方提供，Dataset 创建、修改、导入不会生成、推导、补齐或转换它们。不接受只有 Bundle 的引用、内嵌正文或生成器配置。ID 不允许空白或前后空格，校验通过后原样保存。
+`bundleId` 定位外部 Bundle，`sessionId` / `materialId` 定位其中的具体资源；这两个引用的所有 ID 都必须由调用方提供，Dataset 核心不会生成、推导、补齐或转换它们。不接受只有 Bundle 的引用、内嵌正文或生成器配置。ID 不允许空白或前后空格；生产用的 Eval API Store 还会校验资源属于当前用户且未删除，通用 Data 创建、修改、导入也不能绕过该检查。
 
 `sessionId` 标识已保存的初始化 Session 资源，不是此次运行的 Chat/Submission ID。Dataset 只校验和保存引用，不解析原生 Session 或维护消息格式。`userPrompt` 表示当前新任务；初始 Session 表示已有历史，不作为新任务再次发送。
 
@@ -50,11 +50,11 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 - `createData(input)`、`updateData(dataId, input)`、`getData(dataId)`、`listData(datasetId?)`、`deleteData(dataId)`。
 - `attachData(datasetId, dataIds)`、`detachData(datasetId, dataIds)`。
 - `importDataset(source, format)`、`exportDataset(datasetId, format)`，format 必须明确为 `json` 或 `yaml`。
-- `importPromptDataset({name,description,format,content})`：Dataset 元数据独立于文件，JSON 文件是 Data 数组，JSONL 每行一条 Data；每条都要求 `name`、`description`、`userPrompt` 和 `evalPrompt`，一次原子导入。详见 [Dataset upload](../../docs/eval-dataset-upload.md)。
+- `importPromptDataset({name,description,format,content})`：Dataset 元数据独立于文件，JSON 文件是 Data 数组，JSONL 每行一条 Data；每条都要求 `name`、`description`、`userPrompt` 和 `evalPrompt`，一次原子导入。Store 记录 Prompt Dataset 的内部种类，后续修改和关联 Data 时继续校验这些必填字段。详见 [Dataset upload](../../docs/eval-dataset-upload.md)。
 
 Dataset/Data 的新实体 ID 使用原生 `crypto.randomUUID()`，与 SP 的 ID 生成方式一致；这不包括外部 Bundle、Session 或素材 ID。平台 Dataset/Data ID 在 schema 边界按 SP 的 Zod UUID 校验与小写规范化模式处理：导入可接受大小写混合的 UUID，查重、Store 比较、查询和返回值统一使用小写身份。只有平台 ID 会转换；外部 Bundle/Session/素材引用和 Data 业务字段保持原值。创建实体时输入不允许调用方覆盖实体 ID。修改是全量替换可编辑字段，不是 PATCH；省略可选字段表示移除该字段。查询不存在的单个实体返回 null。数据库读写失败原样抛出，不能转成空结果。
 
-Data 可以关联到同一用户的多个 Dataset，关联不复制 Data。修改 Data 会影响该用户所有引用它的 Dataset。重复关联和重复解除关联不报错，批量关联必须全成功或全失败。删除 Dataset 只移除 Dataset 和关联，不删除 Data；被任意 Dataset 引用的 Data 不能删除。删除已不存在的实体是无操作。列表必须按实体 ID 稳定排序；查询不存在 Dataset 的 Data 列表应抛出 `DatasetEntityNotFoundError`，不能伪装成空集合。
+Data 可以关联到同一用户的多个 Dataset，关联不复制 Data。修改 Data 会影响该用户所有引用它的 Dataset。重复关联和重复解除关联不报错，批量关联必须全成功或全失败。Eval API 删除 Dataset/Data 时设置 `deleted_at`，不删除行；被活动 Dataset 或 Sample 引用的 Data 不能删除。删除已不存在的实体是无操作。列表必须按实体 ID 稳定排序；查询不存在 Dataset 的 Data 列表应抛出 `DatasetEntityNotFoundError`，不能伪装成空集合。
 
 ## 文档格式
 

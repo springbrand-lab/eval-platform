@@ -320,7 +320,7 @@ describe("Dataset import and export", () => {
       userPrompt: "build", evalPrompt: "review" });
     expect(result.dataset.datasetId).toMatch(/^[0-9a-f-]{36}$/u);
     expect(result.data[0]!.dataId).toMatch(/^[0-9a-f-]{36}$/u);
-    expect(importStore).toHaveBeenCalledExactlyOnceWith(result);
+    expect(importStore).toHaveBeenCalledExactlyOnceWith(result, { kind: "prompt" });
     await expect(service.importPromptDataset({ name: "Prompts", description: "Required metadata",
       format: "jsonl", content: '{"name":"First","description":"Task one","userPrompt":"build"}\n',
     })).rejects.toThrow();

@@ -4,12 +4,15 @@ import {
   DataInUseError,
   DatasetEntityNotFoundError,
   DatasetIdentityConflictError,
+  assertPromptData,
+  assertPromptDatasetMetadata,
   dataSchema,
   datasetSchema,
 } from "@eval-platform/eval-dataset";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
+import { assertDataReferencesSelectable } from "./resource-catalog.js";
 import { data, datasetData, datasets, executionConfigs, samples } from "./schema.js";
 
 type DatasetReader = Pick<EvalDb, "select">;
@@ -78,12 +81,15 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
     },
     async updateDataset(dataset) {
       const record = datasetSchema.parse(dataset);
-      const updated = await db.update(datasets)
-        .set({ name: record.name, description: record.description ?? null })
-        .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, record.datasetId),
-          isNull(datasets.deletedAt)))
-        .returning({ datasetId: datasets.datasetId });
-      if (updated.length === 0) throw new DatasetEntityNotFoundError("dataset", record.datasetId);
+      await db.transaction(async (transaction) => {
+        const [current] = await transaction.select({ kind: datasets.kind }).from(datasets)
+          .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, record.datasetId),
+            isNull(datasets.deletedAt))).for("update");
+        if (!current) throw new DatasetEntityNotFoundError("dataset", record.datasetId);
+        if (current.kind === "prompt") assertPromptDatasetMetadata(record);
+        await transaction.update(datasets).set({ name: record.name, description: record.description ?? null })
+          .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, record.datasetId)));
+      });
     },
     async getDataset(datasetId) {
       const [row] = await db.select().from(datasets)
@@ -113,17 +119,32 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
     },
     async createData(record) {
       const entry = dataSchema.parse(record);
-      const inserted = await db.insert(data).values({ dataId: entry.dataId, ownerUserId, content: dataContent(entry) })
-        .onConflictDoNothing().returning({ dataId: data.dataId });
-      if (inserted.length === 0) throw new DatasetIdentityConflictError("data", entry.dataId);
+      await db.transaction(async (transaction) => {
+        await assertDataReferencesSelectable(transaction, ownerUserId, entry);
+        const inserted = await transaction.insert(data).values({
+          dataId: entry.dataId, ownerUserId, content: dataContent(entry),
+        }).onConflictDoNothing().returning({ dataId: data.dataId });
+        if (inserted.length === 0) throw new DatasetIdentityConflictError("data", entry.dataId);
+      });
     },
     async updateData(record) {
       const entry = dataSchema.parse(record);
-      const updated = await db.update(data).set({ content: dataContent(entry) })
-        .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, entry.dataId),
-          isNull(data.deletedAt)))
-        .returning({ dataId: data.dataId });
-      if (updated.length === 0) throw new DatasetEntityNotFoundError("data", entry.dataId);
+      await db.transaction(async (transaction) => {
+        await assertDataReferencesSelectable(transaction, ownerUserId, entry);
+        const [current] = await transaction.select({ dataId: data.dataId }).from(data)
+          .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, entry.dataId),
+            isNull(data.deletedAt))).for("update");
+        if (!current) throw new DatasetEntityNotFoundError("data", entry.dataId);
+        const [promptMember] = await transaction.select({ datasetId: datasets.datasetId })
+          .from(datasetData).innerJoin(datasets, and(
+            eq(datasetData.ownerUserId, datasets.ownerUserId),
+            eq(datasetData.datasetId, datasets.datasetId),
+          )).where(and(eq(datasetData.ownerUserId, ownerUserId), eq(datasetData.dataId, entry.dataId),
+            eq(datasets.kind, "prompt"), isNull(datasets.deletedAt))).limit(1);
+        if (promptMember) assertPromptData(entry);
+        await transaction.update(data).set({ content: dataContent(entry) })
+          .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, entry.dataId)));
+      });
     },
     async getData(dataId) {
       const [row] = await db.select().from(data)
@@ -163,19 +184,22 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
     },
     async attachData(datasetId, dataIds) {
       await db.transaction(async (transaction) => {
-        const [dataset] = await transaction.select({ datasetId: datasets.datasetId }).from(datasets)
+        const [dataset] = await transaction.select({ datasetId: datasets.datasetId, kind: datasets.kind }).from(datasets)
           .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId),
             isNull(datasets.deletedAt))).for("update");
         if (!dataset) throw new DatasetEntityNotFoundError("dataset", datasetId);
         const uniqueIds = [...new Set(dataIds)].sort();
         if (uniqueIds.length === 0) return;
-        const existing = await transaction.select({ dataId: data.dataId }).from(data)
+        const existing = await transaction.select({ dataId: data.dataId, content: data.content }).from(data)
           .where(and(eq(data.ownerUserId, ownerUserId), inArray(data.dataId, uniqueIds),
             isNull(data.deletedAt)))
           .orderBy(data.dataId).for("share");
         const found = new Set(existing.map((row) => row.dataId));
         const missing = uniqueIds.find((id) => !found.has(id));
         if (missing) throw new DatasetEntityNotFoundError("data", missing);
+        if (dataset.kind === "prompt") {
+          for (const row of existing) assertPromptData(dataFromRow(row));
+        }
         await transaction.insert(datasetData).values(uniqueIds.map((dataId) => ({ ownerUserId, datasetId, dataId })))
           .onConflictDoNothing();
       });
@@ -200,27 +224,35 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
         { isolationLevel: "repeatable read", accessMode: "read only" },
       );
     },
-    async importDataset(snapshot) {
+    async importDataset(snapshot, options) {
       await db.transaction(async (transaction) => {
         const incoming = datasetSchema.parse(snapshot.dataset);
+        const kind = options?.kind ?? "general";
+        if (kind === "prompt") assertPromptDatasetMetadata(incoming);
         const [locked] = await transaction.select().from(datasets)
           .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, incoming.datasetId))).for("update");
         let existing = locked;
         let created = false;
         if (!existing) {
           const [inserted] = await transaction.insert(datasets).values({
-            datasetId: incoming.datasetId, ownerUserId, name: incoming.name, description: incoming.description ?? null,
+            datasetId: incoming.datasetId, ownerUserId, kind,
+            name: incoming.name, description: incoming.description ?? null,
           }).onConflictDoNothing().returning();
           created = inserted !== undefined;
           existing = inserted ?? (await transaction.select().from(datasets)
             .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, incoming.datasetId))).for("update"))[0];
         }
-        if (!existing || existing.deletedAt !== null || !isDeepStrictEqual(datasetFromRow(existing), incoming)) {
+        if (!existing || existing.deletedAt !== null || existing.kind !== kind ||
+          !isDeepStrictEqual(datasetFromRow(existing), incoming)) {
           throw new DatasetIdentityConflictError("dataset", incoming.datasetId);
         }
 
         const incomingData = snapshot.data.map((entry) => dataSchema.parse(entry))
           .sort((left, right) => left.dataId.localeCompare(right.dataId));
+        for (const entry of incomingData) {
+          if (kind === "prompt") assertPromptData(entry);
+          await assertDataReferencesSelectable(transaction, ownerUserId, entry);
+        }
         const seenIds = new Set<string>();
         for (const entry of incomingData) {
           if (seenIds.has(entry.dataId)) throw new DatasetIdentityConflictError("data", entry.dataId);

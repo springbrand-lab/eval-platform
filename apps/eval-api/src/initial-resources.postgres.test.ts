@@ -110,15 +110,36 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
       initialSession: session });
     await expect(createInitialResourceApi(db, otherOwner, bundles)
       .bindData(original.dataId, { initialMaterials: null })).rejects.toThrow(/Unknown data/u);
+    await expect(handle(request(`${root}/materials/${material.materialId}`, "DELETE"), owner))
+      .rejects.toThrow(/still bound to Data/u);
+    await expect(handle(request(`${root}/sessions/${session.sessionId}`, "DELETE"), owner))
+      .rejects.toThrow(/still bound to Data/u);
+    await expect(handle(request(root, "DELETE"), owner)).rejects.toThrow(/still bound to Data/u);
+    expect(await dataset.getData(original.dataId)).toMatchObject({ initialMaterials: material });
+    await api.bindData(original.dataId, {
+      initialMaterials: null, evalInitialMaterials: null, initialSession: null,
+    });
+    const genericBound = await dataset.createData({ userPrompt: "Generic", initialMaterials: material });
+    await expect(handle(request(`${root}/materials/${material.materialId}`, "DELETE"), owner))
+      .rejects.toThrow(/still bound to Data/u);
+    await dataset.updateData(genericBound.dataId, { userPrompt: "Generic" });
     expect((await handle(request(`${root}/materials/${material.materialId}`, "DELETE"), owner))?.status).toBe(204);
     expect(await (await handle(request(`${root}/materials`, "GET"), owner))!.json()).toHaveLength(1);
     await expect(api.bindData(original.dataId, { initialMaterials: material })).rejects.toThrow(/Unknown Material/u);
-    expect(await dataset.getData(original.dataId)).toMatchObject({ initialMaterials: material });
     await expect(bundles.resolveInitialMaterials(owner, material)).resolves.toHaveLength(1);
     expect((await handle(request(root, "DELETE"), owner))?.status).toBe(204);
     expect(await (await handle(request("/api/bundles", "GET"), owner))!.json()).toEqual([]);
     await expect(api.bindData(original.dataId, { initialSession: session })).rejects.toThrow(/Unknown Session/u);
     await expect(bundles.resolveInitialSession(owner, session)).resolves.toBeDefined();
+    await expect(dataset.createData({ userPrompt: "New", initialMaterials: material }))
+      .rejects.toThrow(/Unknown Material/u);
+    await expect(dataset.updateData(original.dataId, { userPrompt: "Build page", initialSession: session }))
+      .rejects.toThrow(/Unknown Session/u);
+    const datasetsBefore = await dataset.listDatasets();
+    await expect(dataset.importDataset(JSON.stringify({
+      dataset: { name: "Invalid refs" }, data: [{ userPrompt: "New", initialMaterials: material }],
+    }), "json")).rejects.toThrow(/Unknown Material/u);
+    expect(await dataset.listDatasets()).toEqual(datasetsBefore);
   });
 
   it("uploads a standalone output format and binds only its ID to Project", async () => {
@@ -151,9 +172,11 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     expect(await catalog.getProject(project.projectId)).toMatchObject({
       evaluationOutputSchemaId: output.outputSchemaId, evaluationOutputSchema: schema,
     });
+    await expect(handle(request(item, "DELETE"), owner)).rejects.toThrow(/still bound to a Project/u);
+    expect((await handle(request(binding, "PUT", { outputSchemaId: null }), owner))?.status).toBe(200);
+    expect(await catalog.getProject(project.projectId)).not.toHaveProperty("evaluationOutputSchemaId");
     expect((await handle(request(item, "DELETE"), owner))?.status).toBe(204);
     expect(await (await handle(request("/api/evaluation-output-schemas", "GET"), owner))!.json()).toEqual([]);
-    expect(await catalog.getProject(project.projectId)).toMatchObject({ evaluationOutputSchema: schema });
     const another = await catalog.createProject({ name: "Another" });
     await expect(handle(request(`/api/projects/${another.projectId}/evaluation-output-schema`, "PUT", {
       outputSchemaId: output.outputSchemaId,

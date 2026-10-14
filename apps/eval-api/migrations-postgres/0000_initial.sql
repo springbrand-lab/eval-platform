@@ -53,10 +53,12 @@ CREATE TABLE "eval_dataset_data" (
 CREATE TABLE "eval_datasets" (
 	"dataset_id" uuid PRIMARY KEY NOT NULL,
 	"owner_user_id" text NOT NULL,
+	"kind" text DEFAULT 'general' NOT NULL,
 	"name" text NOT NULL,
 	"description" text,
 	"deleted_at" timestamp with time zone,
-	CONSTRAINT "eval_datasets_owner_id_uq" UNIQUE("owner_user_id","dataset_id")
+	CONSTRAINT "eval_datasets_owner_id_uq" UNIQUE("owner_user_id","dataset_id"),
+	CONSTRAINT "eval_datasets_kind_ck" CHECK ("eval_datasets"."kind" IN ('general', 'prompt'))
 );
 --> statement-breakpoint
 CREATE TABLE "eval_evaluation_configs" (

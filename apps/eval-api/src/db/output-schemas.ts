@@ -1,11 +1,11 @@
 import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
-import { datasetIdSchema } from "@eval-platform/eval-dataset";
 import { and, eq, isNull } from "drizzle-orm";
 import { parseEvaluationOutputSchema, MAX_EVALUATION_OUTPUT_SCHEMA_BYTES } from "../project-output-schema.js";
 import { parseStrictJson } from "../strict-json.js";
 import type { EvalDb } from "./client.js";
+import { catalogId, parseCatalogMetadataPatch, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";
 import { requireOwnerUserId } from "./owner.js";
-import { evaluationOutputSchemas } from "./schema.js";
+import { evaluationOutputSchemas, projects } from "./schema.js";
 
 export interface OutputSchemaRecord {
   readonly outputSchemaId: string;
@@ -21,33 +21,11 @@ export class OutputSchemaNotFoundError extends Error {
   }
 }
 
-export function requiredCatalogLabel(value: unknown, field: string): string {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new TypeError(`${field} must be a nonblank string`);
+export class OutputSchemaInUseError extends Error {
+  constructor(outputSchemaId: string) {
+    super(`Output format is still bound to a Project: ${outputSchemaId}`);
+    this.name = "OutputSchemaInUseError";
   }
-  return value.trim();
-}
-
-export function catalogId(value: string): string {
-  return datasetIdSchema.parse(value);
-}
-
-export interface CatalogMetadataPatch {
-  readonly name?: string;
-  readonly description?: string;
-}
-
-export function parseCatalogMetadataPatch(input: CatalogMetadataPatch): CatalogMetadataPatch {
-  if (!input || typeof input !== "object" || Array.isArray(input) ||
-    Object.keys(input).length === 0 || Object.keys(input).some((key) => key !== "name" && key !== "description") ||
-    (Object.hasOwn(input, "name") && input.name === undefined) ||
-    (Object.hasOwn(input, "description") && input.description === undefined)) {
-    throw new TypeError("Metadata patch must contain name or description");
-  }
-  return {
-    ...(input.name === undefined ? {} : { name: requiredCatalogLabel(input.name, "name") }),
-    ...(input.description === undefined ? {} : { description: requiredCatalogLabel(input.description, "description") }),
-  };
 }
 
 function toRecord(row: typeof evaluationOutputSchemas.$inferSelect): OutputSchemaRecord {
@@ -101,11 +79,20 @@ export function createOutputSchemaCatalog(db: EvalDb, ownerUserId: string) {
     },
     async delete(outputSchemaId: string): Promise<void> {
       const id = catalogId(outputSchemaId);
-      const rows = await db.update(evaluationOutputSchemas).set({ deletedAt: new Date() }).where(and(
-        eq(evaluationOutputSchemas.ownerUserId, owner), eq(evaluationOutputSchemas.outputSchemaId, id),
-        isNull(evaluationOutputSchemas.deletedAt),
-      )).returning({ outputSchemaId: evaluationOutputSchemas.outputSchemaId });
-      if (rows.length === 0) throw new OutputSchemaNotFoundError(id);
+      await db.transaction(async (transaction) => {
+        const [selected] = await transaction.select({ outputSchemaId: evaluationOutputSchemas.outputSchemaId })
+          .from(evaluationOutputSchemas).where(and(
+            eq(evaluationOutputSchemas.ownerUserId, owner), eq(evaluationOutputSchemas.outputSchemaId, id),
+            isNull(evaluationOutputSchemas.deletedAt),
+          )).for("update");
+        if (!selected) throw new OutputSchemaNotFoundError(id);
+        const [bound] = await transaction.select({ projectId: projects.projectId }).from(projects)
+          .where(and(eq(projects.ownerUserId, owner), eq(projects.evaluationOutputSchemaId, id)))
+          .limit(1);
+        if (bound) throw new OutputSchemaInUseError(id);
+        await transaction.update(evaluationOutputSchemas).set({ deletedAt: new Date() })
+          .where(eq(evaluationOutputSchemas.outputSchemaId, id));
+      });
     },
   };
 }

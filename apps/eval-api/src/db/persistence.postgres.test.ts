@@ -150,8 +150,6 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const data = await services.datasetService.createData({
       userPrompt: "build a page", evalPrompt: "Judge the result",
       sampleId: "business-id", extra: { original: true, nullable: null },
-      initialSession: { bundleId: "sessions", sessionId: "seed" },
-      initialMaterials: { bundleId: "materials", materialId: "workspace" },
     });
     await services.datasetService.attachData(dataset.datasetId, [data.dataId]);
     const sample = await services.catalog.createSample(data.dataId);
@@ -255,6 +253,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       name: "String", description: "String result", content: '{"type":"string"}',
     });
     await expect(catalog.bindEvaluationOutputSchema(project.projectId, replacement.outputSchemaId))
+      .rejects.toThrow("cannot change after evaluation admission");
+    await expect(catalog.bindEvaluationOutputSchema(project.projectId, null))
       .rejects.toThrow("cannot change after evaluation admission");
   });
 
@@ -490,6 +490,31 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     await expect(catalog.createSample(record.dataId)).rejects.toBeInstanceOf(DatasetEntityNotFoundError);
     await expect(datasetService.importDataset(JSON.stringify({ dataset, data: [] }), "json"))
       .rejects.toBeInstanceOf(DatasetIdentityConflictError);
+  });
+
+  it("keeps Prompt Dataset labels and both prompts required after import", async () => {
+    const { datasetService } = stores();
+    const imported = await datasetService.importPromptDataset({
+      name: "Prompt cases", description: "Review tasks", format: "jsonl",
+      content: '{"name":"First","description":"Case one","userPrompt":"Start","evalPrompt":"Judge"}',
+    });
+    const row = imported.data[0]!;
+    await expect(datasetService.updateDataset(imported.dataset.datasetId, { name: "Renamed" }))
+      .rejects.toThrow();
+    await expect(datasetService.updateData(row.dataId, {
+      name: "First", description: "Case one", userPrompt: "Start",
+    })).rejects.toThrow();
+    expect((await datasetService.getData(row.dataId))?.evalPrompt).toBe("Judge");
+    const general = await datasetService.createData({ userPrompt: "Execution only" });
+    await expect(datasetService.attachData(imported.dataset.datasetId, [general.dataId]))
+      .rejects.toThrow();
+    expect(await datasetService.listData(imported.dataset.datasetId)).toHaveLength(1);
+    await datasetService.updateData(row.dataId, {
+      name: "Renamed row", description: "Updated", userPrompt: "Start", evalPrompt: "Judge again",
+    });
+    expect(await datasetService.getData(row.dataId)).toMatchObject({
+      name: "Renamed row", description: "Updated", evalPrompt: "Judge again",
+    });
   });
 
   it("imports a whole Dataset atomically, rejects conflicting reuse and admits simultaneous identical imports", async () => {

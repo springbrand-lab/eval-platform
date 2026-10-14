@@ -36,7 +36,10 @@ export interface DatasetService {
 }
 
 export function createDatasetService(store: DatasetStore): DatasetService {
-  async function importDocument(document: import("./model.js").DatasetDocument): Promise<DatasetSnapshot> {
+  async function importDocument(
+    document: import("./model.js").DatasetDocument,
+    options?: { readonly kind: "prompt" },
+  ): Promise<DatasetSnapshot> {
     const snapshot = datasetSnapshotSchema.parse({
       dataset: {
         ...document.dataset,
@@ -44,7 +47,8 @@ export function createDatasetService(store: DatasetStore): DatasetService {
       },
       data: document.data.map((record) => ({ ...record, dataId: record.dataId ?? crypto.randomUUID() })),
     });
-    await store.importDataset(snapshot);
+    if (options) await store.importDataset(snapshot, options);
+    else await store.importDataset(snapshot);
     return datasetSnapshotSchema.parse(snapshot);
   }
   return {
@@ -107,7 +111,7 @@ export function createDatasetService(store: DatasetStore): DatasetService {
       return importDocument(parseDatasetDocument(source, format));
     },
     async importPromptDataset(input) {
-      return importDocument(parsePromptDatasetUpload(input));
+      return importDocument(parsePromptDatasetUpload(input), { kind: "prompt" });
     },
     async exportDataset(datasetId, format) {
       const selectedId = datasetIdSchema.parse(datasetId);

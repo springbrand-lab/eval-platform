@@ -10,10 +10,11 @@ export {
   type SuccessfulSamplingPageRequest,
 } from "./db/catalog.js";
 export { createPostgresDatasetStore, DatasetInUseError } from "./db/dataset.js";
-export { createResourceCatalog, BundleResourceNotFoundError } from "./db/resource-catalog.js";
+export { createResourceCatalog, BundleResourceNotFoundError, BundleResourceInUseError } from "./db/resource-catalog.js";
 export type { BundleRecord, MaterialRecord, SessionRecord } from "./db/resource-catalog.js";
-export { createOutputSchemaCatalog, OutputSchemaNotFoundError } from "./db/output-schemas.js";
-export type { OutputSchemaRecord, CatalogMetadataPatch } from "./db/output-schemas.js";
+export { createOutputSchemaCatalog, OutputSchemaNotFoundError, OutputSchemaInUseError } from "./db/output-schemas.js";
+export type { OutputSchemaRecord } from "./db/output-schemas.js";
+export type { CatalogMetadataPatch } from "./db/catalog-metadata.js";
 export { createPostgresConfigReader, createPostgresConfigStore, ConfigEntityNotFoundError, ConfigIdentityConflictError, ConfigReferenceError } from "./db/config.js";
 export type { PostgresConfigStore } from "./db/config.js";
 export { createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, ProjectRunStopConflictError } from "./db/runtime.js";

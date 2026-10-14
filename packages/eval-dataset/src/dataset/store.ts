@@ -14,7 +14,8 @@ export interface DatasetStore {
   attachData(datasetId: string, dataIds: readonly string[]): Promise<void>;
   detachData(datasetId: string, dataIds: readonly string[]): Promise<void>;
   getDatasetSnapshot(datasetId: string): Promise<DatasetSnapshot | null>;
-  importDataset(snapshot: DatasetSnapshot): Promise<void>;
+  /** `prompt` persists the stricter Dataset kind; omitted means general import. */
+  importDataset(snapshot: DatasetSnapshot, options?: { readonly kind: "prompt" }): Promise<void>;
 }
 
 export class DatasetEntityNotFoundError extends Error {

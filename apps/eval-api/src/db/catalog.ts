@@ -9,7 +9,8 @@ import { sqlBatches } from "./batch.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
 import { data, evaluationOutputSchemas, projects, samples, samplings } from "./schema.js";
 import { EvaluationSelectionTooLargeError, MAX_EVALUATION_SAMPLING_IDS } from "../independent-evaluation-limits.js";
-import { catalogId, OutputSchemaNotFoundError } from "./output-schemas.js";
+import { catalogId } from "./catalog-metadata.js";
+import { OutputSchemaNotFoundError } from "./output-schemas.js";
 
 export interface SuccessfulSamplingOption {
   readonly samplingId: string;
@@ -32,7 +33,7 @@ export interface SuccessfulSamplingPageRequest extends SuccessfulSamplingFilter 
 
 export interface PostgresCatalog extends RuntimeCatalog {
   createProject(input: Pick<Project, "name">): Promise<Project>;
-  bindEvaluationOutputSchema(projectId: string, outputSchemaId: string): Promise<Project>;
+  bindEvaluationOutputSchema(projectId: string, outputSchemaId: string | null): Promise<Project>;
   createSample(dataId: string): Promise<Sample>;
   listSuccessfulSamplings(projectId: string, input?: SuccessfulSamplingPageRequest): Promise<SuccessfulSamplingPage>;
   selectAllSuccessfulSamplingIds(projectId: string, filter?: SuccessfulSamplingFilter): Promise<readonly string[]>;
@@ -96,10 +97,10 @@ export async function bindProjectEvaluationOutputSchema(
   db: EvalDb,
   ownerUserId: string,
   projectId: string,
-  outputSchemaId: string,
+  outputSchemaId: string | null,
 ): Promise<Project> {
   const owner = requireOwnerUserId(ownerUserId);
-  const selectedId = catalogId(outputSchemaId);
+  const selectedId = outputSchemaId === null ? null : catalogId(outputSchemaId);
   return db.transaction(async (transaction) => {
     const [row] = await transaction.select().from(projects)
       .where(and(eq(projects.ownerUserId, owner), eq(projects.projectId, projectId))).for("update");
@@ -108,13 +109,15 @@ export async function bindProjectEvaluationOutputSchema(
     if (row.evaluationOutputSchemaLocked) {
       throw new Error("Project evaluation output JSON Schema cannot change after evaluation admission");
     }
-    const [selected] = await transaction.select({ outputSchemaId: evaluationOutputSchemas.outputSchemaId })
-      .from(evaluationOutputSchemas).where(and(
-        eq(evaluationOutputSchemas.ownerUserId, owner),
-        eq(evaluationOutputSchemas.outputSchemaId, selectedId),
-        isNull(evaluationOutputSchemas.deletedAt),
-      )).for("share");
-    if (!selected) throw new OutputSchemaNotFoundError(selectedId);
+    if (selectedId !== null) {
+      const [selected] = await transaction.select({ outputSchemaId: evaluationOutputSchemas.outputSchemaId })
+        .from(evaluationOutputSchemas).where(and(
+          eq(evaluationOutputSchemas.ownerUserId, owner),
+          eq(evaluationOutputSchemas.outputSchemaId, selectedId),
+          isNull(evaluationOutputSchemas.deletedAt),
+        )).for("share");
+      if (!selected) throw new OutputSchemaNotFoundError(selectedId);
+    }
     const [updated] = await transaction.update(projects).set({ evaluationOutputSchemaId: selectedId })
       .where(and(eq(projects.ownerUserId, owner), eq(projects.projectId, projectId))).returning();
     return projectFromRow(updated!);

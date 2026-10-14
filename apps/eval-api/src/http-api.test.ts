@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { parseDatasetDocument } from "@eval-platform/eval-dataset";
 import { RuntimeProjectBusyError } from "@eval-platform/eval-runtime";
 import type { EvalDb } from "./db/client.js";
+import { OutputSchemaInUseError } from "./db/output-schemas.js";
+import { BundleResourceInUseError } from "./db/resource-catalog.js";
 import type { EvalSpClient } from "./sp/client.js";
 import { EvalSpTransportError } from "./sp/client.js";
 import { createEvalApiHandler, type EvalApiOwnerServices } from "./http-api.js";
@@ -142,6 +144,14 @@ describe("Eval HTTP control plane", () => {
     ));
     expect((await app.handler(request("/api/runs/pipeline", "POST", {}))).status).toBe(409);
     expect(app.forOwner).not.toHaveBeenCalled();
+  });
+
+  it("reports bound resource deletion as a conflict", async () => {
+    const app = setup();
+    app.initialResources.mockRejectedValueOnce(new BundleResourceInUseError("Material", crypto.randomUUID()));
+    expect((await app.handler(request("/api/bundles/x/materials/y", "DELETE"))).status).toBe(409);
+    app.initialResources.mockRejectedValueOnce(new OutputSchemaInUseError(crypto.randomUUID()));
+    expect((await app.handler(request("/api/evaluation-output-schemas/x", "DELETE"))).status).toBe(409);
   });
 
   it("routes project, Dataset, Config, Run and Metrics operations under the verified owner", async () => {

@@ -95,12 +95,14 @@ export const bundleSessions = pgTable("eval_bundle_sessions", {
 export const datasets = pgTable("eval_datasets", {
   datasetId: uuid("dataset_id").primaryKey(),
   ownerUserId: text("owner_user_id").notNull(),
+  kind: text("kind").$type<"general" | "prompt">().notNull().default("general"),
   name: text("name").notNull(),
   description: text("description"),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
 }, (table) => [
   unique("eval_datasets_owner_id_uq").on(table.ownerUserId, table.datasetId),
   index("eval_datasets_owner_idx").on(table.ownerUserId),
+  check("eval_datasets_kind_ck", sql`${table.kind} IN ('general', 'prompt')`),
 ]);
 
 export const executionConfigs = pgTable("eval_execution_configs", {

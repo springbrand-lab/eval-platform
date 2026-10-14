@@ -1,7 +1,7 @@
 import { printParseErrorCode, visit as visitJson } from "jsonc-parser";
 import { isScalar, parseDocument, stringify, visit } from "yaml";
 import { z } from "zod";
-import type { DatasetDocument } from "./model.js";
+import type { Data, Dataset, DatasetDocument } from "./model.js";
 import { dataInputSchema, datasetDocumentSchema } from "./model.js";
 
 export type DatasetFormat = "json" | "yaml";
@@ -14,9 +14,12 @@ export interface PromptDatasetUploadInput {
 }
 
 const requiredLabel = z.string().trim().min(1);
-const promptUploadSchema = z.strictObject({
+const promptDatasetLabelsSchema = z.object({
   name: requiredLabel,
   description: requiredLabel,
+});
+const promptUploadSchema = z.strictObject({
+  ...promptDatasetLabelsSchema.shape,
   format: z.enum(["json", "jsonl"]),
   content: z.string().min(1),
 });
@@ -25,6 +28,16 @@ const promptRowLabelsSchema = z.object({
   description: requiredLabel,
   evalPrompt: z.string().refine((value) => value.trim().length > 0),
 }).passthrough();
+
+/** Store-level invariant for Datasets created through prompt upload. */
+export function assertPromptDatasetMetadata(dataset: Dataset): void {
+  promptDatasetLabelsSchema.parse(dataset);
+}
+
+/** Store-level invariant for every active member of a Prompt Dataset. */
+export function assertPromptData(data: Data): void {
+  promptRowLabelsSchema.parse(data);
+}
 
 /** Parse a Data-only file and separately supplied Dataset metadata. */
 export function parsePromptDatasetUpload(input: PromptDatasetUploadInput): DatasetDocument {
