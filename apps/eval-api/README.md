@@ -24,4 +24,4 @@ RuntimeStore 的 Sampling/Evaluation 写入必须携带预期旧事实。Postgre
 
 部署时 Worker 必须是**同一时刻只有一个实例的常驻 Node 进程**；升级先停止旧实例，再启动新实例，新实例会自动接手未完成 Run。不能把它启动在每个 HTTP 请求里，也不能只靠进程内 `Set` 防止跨进程竞争。宿主负责注入真实 SP Harness、Sample 读取、RuntimeStore 和数据库连接；Catalog 与 ConfigResolver 由 API 控制面注入。停止时先中止启动扫描的继续派发，再等待 Worker 的 `close()` 完成已启动的 Run、关闭连接池并启动新实例；尚未接手的 Run 留待下次扫描。运行中的 Agent 不因此标记失败。
 
-测试设置 `DATABASE_URL` 后使用独立的临时 PostgreSQL 数据库执行集成测试；不提供时跳过需数据库的测试。唯一的初始迁移直接创建按用户隔离的 Dataset/Data/Sample 和配置表。Node HTTP Server 与生产路由由另一阶段的 API 控制面提供。SP 服务端尚未提供上面的 Harness 路由，因此 Worker 在这些路由落地前不能执行真实 Agent。Dataset 不隶属于某个 Project，但属于一个 Eval SP 用户；Catalog 的 Agent 列表由 API 控制面注入，不在 Worker 里维护第二份 Agent 注册表。
+测试设置 `DATABASE_URL` 后使用独立的临时 PostgreSQL 数据库执行集成测试；不提供时跳过需数据库的测试。唯一的初始迁移直接创建按用户隔离的 Dataset/Data/Sample 和配置表。Node HTTP Server 与生产路由由另一阶段的 API 控制面提供。SP Harness 路由已在独立 SP 分支实现；真实跨部署联调仍需完成。Dataset 不隶属于某个 Project，但属于一个 Eval SP 用户；Catalog 的 Agent 列表由 API 控制面注入，不在 Worker 里维护第二份 Agent 注册表。

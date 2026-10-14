@@ -73,6 +73,34 @@ describe("Eval Bundle directory", () => {
       .rejects.toMatchObject({ retryable: false });
   });
 
+  it("does not follow a Bundle link into another user's directory", async () => {
+    const directory = await root();
+    const source = await openBundleDirectory(directory);
+    const files = [{ path: "/brief.txt", mediaType: "text/plain", contentBase64: "SGk=" }];
+    const context = { format: "json" as const, content: JSON.stringify({ entries: [
+      { id: "m1", message: { role: "user", content: "Hello" }, createdAt: 1 },
+    ] }) };
+    await source.uploadInitialMaterials(otherOwner, { bundleId, materialId }, files);
+    await source.uploadInitialSession(otherOwner, { bundleId, sessionId }, context);
+    await mkdir(join(directory, owner));
+    await symlink(join(directory, otherOwner, encoded(bundleId)),
+      join(directory, owner, encoded(bundleId)), "dir");
+
+    await expect(source.resolveInitialMaterials(owner, { bundleId, materialId }))
+      .rejects.toMatchObject({ retryable: false });
+    await expect(source.resolveInitialSession(owner, { bundleId, sessionId }))
+      .rejects.toMatchObject({ retryable: false });
+    await expect(source.uploadInitialMaterials(owner, { bundleId, materialId: "new" }, files))
+      .rejects.toMatchObject({ retryable: false });
+    await expect(source.uploadInitialSession(owner, { bundleId, sessionId: "new" }, context))
+      .rejects.toMatchObject({ retryable: false });
+    await expect(source.resolveInitialMaterials(otherOwner, { bundleId, materialId })).resolves.toEqual(files);
+    await expect(source.resolveInitialMaterials(otherOwner, { bundleId, materialId: "new" }))
+      .rejects.toMatchObject({ retryable: false });
+    await expect(source.resolveInitialSession(otherOwner, { bundleId, sessionId: "new" }))
+      .resolves.toBeUndefined();
+  });
+
   it("applies upload validation when reading an existing material manifest", async () => {
     const directory = await root();
     const source = await openBundleDirectory(directory);
