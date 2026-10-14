@@ -236,6 +236,7 @@ function makeSample(sampleId: string): Sample {
     data: {
       dataId: "data-1",
       userPrompt: `Execute ${sampleId}`,
+      evalPrompt: `Evaluate ${sampleId}`,
       json: { task: sampleId },
       initialSession: { bundleId: "sessions-bundle", sessionId: "session-seed" },
       initialMaterials: { bundleId: "materials-bundle", materialId: "materials-1" },
@@ -572,8 +573,9 @@ describe("eval runtime orchestration", () => {
         expect(preparations).toHaveLength(2);
         const subject = preparations.find((input) => input.handle.role === "subject")!;
         const evaluator = preparations.find((input) => input.handle.role === "evaluator")!;
-        const { dataId: _dataId, ...expectedSubject } = sample.data;
-        const { initialSession: _initialSession, ...expectedEvaluator } = expectedSubject;
+        const { dataId: _dataId, evalPrompt: _evalPrompt, ...expectedSubject } = sample.data;
+        const { initialSession: _initialSession, userPrompt: _subjectPrompt, ...evaluationFields } = expectedSubject;
+        const expectedEvaluator = { ...evaluationFields, userPrompt: sample.data.evalPrompt };
         expect(subject.data).toEqual(expectedSubject);
         expect(evaluator.data).toEqual(expectedEvaluator);
         expect(subject.data.sampleId).toEqual(businessSampleId);
@@ -886,7 +888,11 @@ describe("eval runtime orchestration", () => {
   it("keeps the Subject seed out of the evaluator Session while preserving task evidence and extra fields", async () => {
     const sample: Sample = {
       sampleId: "sample-1",
-      data: { ...makeSample("sample-1").data, expectedOutput: { pages: 3 }, labels: ["web"] },
+      data: {
+        ...makeSample("sample-1").data,
+        evalPrompt: "  Inspect the page artifacts and score accessibility.  ",
+        expectedOutput: { pages: 3 }, labels: ["web"],
+      },
     };
     const harness = makeHarness();
     const runtime = createEvalRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
@@ -896,20 +902,46 @@ describe("eval runtime orchestration", () => {
     const subject = inputs.find((input) => input.handle.role === "subject")!;
     const evaluator = inputs.find((input) => input.handle.role === "evaluator")!;
     expect(subject.data.initialSession).toEqual(sample.data.initialSession);
+    expect(subject.data).not.toHaveProperty("evalPrompt");
+    expect(subject.data.userPrompt).toBe(sample.data.userPrompt);
     expect(evaluator.data).not.toHaveProperty("initialSession");
+    expect(evaluator.data).not.toHaveProperty("evalPrompt");
     expect(evaluator.data).toMatchObject({
-      userPrompt: sample.data.userPrompt,
+      userPrompt: sample.data.evalPrompt,
       initialMaterials: sample.data.initialMaterials,
       expectedOutput: sample.data.expectedOutput,
       labels: sample.data.labels,
     });
     expect(evaluator.idempotencyKey).toBe(`initial-data:${evaluator.handle.chatId}`);
     expect(evaluator.handle.chatId).not.toBe(subject.handle.chatId);
+    expect(vi.mocked(harness.submitAgent).mock.calls.find(([call]) => call.handle.role === "subject")?.[0].prompt)
+      .toBe(sample.data.userPrompt);
+    expect(vi.mocked(harness.submitAgent).mock.calls.find(([call]) => call.handle.role === "evaluator")?.[0].prompt)
+      .toBe(sample.data.evalPrompt);
     const evaluationSubmitIndex = vi.mocked(harness.submitAgent).mock.calls.findIndex(
       ([input]) => input.handle.role === "evaluator",
     );
     expect(vi.mocked(harness.materializeSubjectTrajectory).mock.invocationCallOrder[0]!)
       .toBeLessThan(vi.mocked(harness.submitAgent).mock.invocationCallOrder[evaluationSubmitIndex]!);
+  });
+
+  it("allows execution-only Data without evalPrompt but rejects evaluation admission", async () => {
+    const { evalPrompt: _evalPrompt, ...executionData } = makeSample("sample-1").data;
+    const sample: Sample = { sampleId: "sample-1", data: executionData };
+    const harness = makeHarness();
+    const store = makeStore();
+    const runtime = createEvalRuntime({ catalog: makeCatalog([sample]), harness, store });
+
+    const pipeline = pipelineRequest("missing-evaluation-prompt");
+    await expect(runtime.pipeline(pipeline)).rejects.toThrow("requires a nonblank evalPrompt");
+    expect(await store.findRunByIdempotencyKey(pipeline.projectId, pipeline.idempotencyKey)).toBeNull();
+
+    const execution = await runtime.start(startRequest("execution-without-evaluation-prompt"));
+    await expect(waitForTerminal(runtime, execution.runId)).resolves.toMatchObject({ status: "succeeded" });
+    const evaluation = evaluateRequest(execution.samplingIds);
+    await expect(runtime.evaluate(evaluation)).rejects.toThrow("requires a nonblank evalPrompt");
+    expect(await store.findRunByIdempotencyKey(evaluation.projectId, evaluation.idempotencyKey)).toBeNull();
+    expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
   });
 
   it("continues the Agent Session after a restart without reapplying its seed", async () => {

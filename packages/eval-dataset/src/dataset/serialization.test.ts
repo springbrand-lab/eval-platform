@@ -8,6 +8,7 @@ const document: DatasetDocument = {
     {
       dataId: crypto.randomUUID(),
       userPrompt: "  完成首页\n保留已有样式。  ",
+      evalPrompt: "  检查首页的功能和体验。  ",
       json: { task: "create homepage", enabled: true, count: 3 },
       requirements: ["responsive", "accessible"],
       expectedOutput: { files: ["src/index.ts"] },

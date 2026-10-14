@@ -8,7 +8,7 @@ import type {
 } from "@eval-platform/eval-contracts";
 import { dataInputSchema } from "@eval-platform/eval-dataset";
 
-import type { RuntimeEvaluationContext } from "./model.js";
+import type { RuntimeEvaluationContext, Sample } from "./model.js";
 import type { RuntimeStore } from "./store.js";
 import { RuntimeRecordPersistenceError, persistRuntimeRecord, sameRuntimeRecordFacts } from "./store.js";
 import type { RetryController } from "./retry.js";
@@ -30,6 +30,15 @@ export interface EvaluateSamplingInput {
   readonly context: RuntimeEvaluationContext;
   readonly harnessConfig: HarnessConfig;
   readonly retryPolicy: RetryPolicy;
+}
+
+export function requireEvaluationPrompt(sample: Sample): string {
+  const prompt = sample.data && typeof sample.data === "object" && !Array.isArray(sample.data)
+    ? sample.data.evalPrompt : undefined;
+  if (typeof prompt !== "string" || prompt.trim().length === 0) {
+    throw new TypeError(`Sample ${sample.sampleId} requires a nonblank evalPrompt`);
+  }
+  return prompt;
 }
 
 export async function evaluateSampling(
@@ -78,8 +87,12 @@ export async function evaluateSampling(
     if (!sample.data || typeof sample.data !== "object" || Array.isArray(sample.data)) {
       throw new AgentOperationError("Sample data must be an object", false, "network");
     }
-    const { dataId: _dataId, initialSession: _initialSession, ...data } = sample.data;
-    const parsed = dataInputSchema.safeParse(data);
+    const evalPrompt = requireEvaluationPrompt(sample);
+    const {
+      dataId: _dataId, initialSession: _initialSession,
+      userPrompt: _subjectPrompt, evalPrompt: _evalPrompt, ...data
+    } = sample.data;
+    const parsed = dataInputSchema.safeParse({ ...data, userPrompt: evalPrompt });
     if (!parsed.success) throw new AgentOperationError(parsed.error.message, false, "network");
     const initialData = parsed.data;
     if (currentEvaluation.chatId === undefined && currentEvaluation.attempts.length > 0) {
@@ -105,7 +118,7 @@ export async function evaluateSampling(
         evaluationId: currentEvaluation.evaluationId,
       },
       harnessConfig: evaluatorHarness,
-      prompt: buildEvaluationPrompt(sampling.samplingId),
+      prompt: evalPrompt,
       retryController,
       attempts: currentEvaluation.attempts,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({
@@ -200,14 +213,6 @@ export async function evaluateSampling(
     });
     return { ...input.context, evaluation: currentEvaluation };
   }
-}
-
-function buildEvaluationPrompt(samplingId: string): string {
-  return JSON.stringify({
-    kind: "eval-evaluation",
-    samplingId,
-    instruction: "Evaluate the subject agent's artifacts. The artifacts and complete trajectory are available in the current workspace.",
-  }, null, 2);
 }
 
 function withEvaluationStatus(

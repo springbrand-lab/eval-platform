@@ -76,6 +76,9 @@ const dataFieldsSchema = z.object({
   userPrompt: z.string().refine((value) => value.trim().length > 0, {
     message: "userPrompt must not be blank",
   }),
+  evalPrompt: z.string().refine((value) => value.trim().length > 0, {
+    message: "evalPrompt must not be blank",
+  }).optional(),
   initialSession: initialSessionRefSchema.optional(),
   initialMaterials: initialMaterialsRefSchema.optional(),
 });

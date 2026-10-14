@@ -156,6 +156,18 @@ describe("Dataset service", () => {
     await expect(service.getData(data.dataId)).resolves.toEqual({ dataId: data.dataId, userPrompt: "new" });
   });
 
+  it("saves and updates each Data's evaluation prompt independently of the Subject prompt", async () => {
+    const service = createDatasetService(new TestDatasetStore());
+    const created = await service.createData({ userPrompt: "build a page", evalPrompt: "check accessibility" });
+    expect(await service.getData(created.dataId)).toEqual(created);
+    const updated = await service.updateData(created.dataId, {
+      userPrompt: "build a page", evalPrompt: "  check visual alignment  ",
+    });
+    expect(updated.evalPrompt).toBe("  check visual alignment  ");
+    expect(updated.userPrompt).toBe("build a page");
+    expect(await service.getData(created.dataId)).toEqual(updated);
+  });
+
   it("preserves a business sampleId through creation, update and persistence", async () => {
     const store = new TestDatasetStore();
     const service = createDatasetService(store);

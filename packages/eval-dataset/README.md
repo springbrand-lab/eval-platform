@@ -16,6 +16,7 @@
 每条 Data 的输入约定：
 
 - `userPrompt`：必填的当前用户任务，必须是非空白字符串，保留原始文本，不从其他字段推导。
+- `evalPrompt`：可选的本条 Data 的评估任务提示词；提供时必须是非空白字符串并原样保存。只执行不要求此字段；启动 Pipeline 或独立评估时每条选中 Data 都必须提供，不能退回使用 Subject 的 `userPrompt`。
 - `initialSession`：可选的初始 Session 引用，必须包含外部给定的 `bundleId` 和 `sessionId`；正文由 SP 的既有 Bundle/Session 能力独立保存，可以包含完整的原生会话、工具调用和恢复信息。
 - `initialMaterials`：可选的初始素材集合引用，必须包含外部给定的 `bundleId` 和 `materialId`，定位 Bundle 内的具体素材资源。
 - 其他业务字段：可以直接放在 Data 上，例如 `requirements`、`expectedOutput`、`tags` 或 `json`，只要求值可无损表示为 JSON。创建、修改、持久化、导入导出和运行时输入准备都保留这些字段，不丢弃、不改名，也不强制放进某个额外容器。
@@ -61,6 +62,7 @@ JSON 和 YAML 使用同一个结构：
   "data": [
     {
       "userPrompt": "沿用现有项目风格完成首页",
+      "evalPrompt": "检查首页是否满足响应式和无障碍要求，并说明依据",
       "requirements": { "responsive": true },
       "initialSession": { "bundleId": "sessions-bundle", "sessionId": "homepage-seed-session" },
       "initialMaterials": { "bundleId": "project-assets", "materialId": "homepage-files" }
@@ -73,7 +75,7 @@ JSON 和 YAML 使用同一个结构：
 
 整个导入必须一次原子提交：新 Dataset 可以复用已有、内容完全相同的 Data ID；同一个 ID 对应不同内容时抛出 `DatasetIdentityConflictError`，不覆盖原记录。已有 Dataset 只有在元数据、Data ID 集合和每条 Data 内容都相同时才视为重复导入，Data 的排列顺序不构成冲突；否则整批拒绝。一个文档内不能重复声明同一个 Data ID。
 
-Dataset、文档外壳和资源引用使用严格 schema；Data 允许任意其他 JSON 业务字段，但 `userPrompt` 和资源引用仍按明确契约校验。Data 输入不能用扩展字段覆盖平台生成的 `dataId`，原身份恢复只通过带 ID 的导入文档。错误的对象/数组形状、空白 prompt 和不能无损表示为 JSON 的值都会失败。JSON 和 YAML 都拒绝同一个对象内的重复字段名，包括转义后相同的 JSON 字段名；不同对象使用相同字段名不构成冲突。JSON 不接受注释、尾逗号或其他 JSONC 扩展。YAML 使用严格模式，拒绝非字符串映射键、未知 tag、多文档和 alias；序列化不会输出 alias。文本数据与素材引用不会被隐式转换或下载。
+Dataset、文档外壳和资源引用使用严格 schema；Data 允许任意其他 JSON 业务字段，但 `userPrompt`、`evalPrompt` 和资源引用仍按明确契约校验。Data 输入不能用扩展字段覆盖平台生成的 `dataId`，原身份恢复只通过带 ID 的导入文档。错误的对象/数组形状、空白 prompt 和不能无损表示为 JSON 的值都会失败。JSON 和 YAML 都拒绝同一个对象内的重复字段名，包括转义后相同的 JSON 字段名；不同对象使用相同字段名不构成冲突。JSON 不接受注释、尾逗号或其他 JSONC 扩展。YAML 使用严格模式，拒绝非字符串映射键、未知 tag、多文档和 alias；序列化不会输出 alias。文本数据与素材引用不会被隐式转换或下载。
 
 ## Store 与 SP 对齐
 

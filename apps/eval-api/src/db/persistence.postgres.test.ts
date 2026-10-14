@@ -392,9 +392,12 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const { catalog, datasetService, project, data, sample } = await setup();
     const anotherDataset = await datasetService.createDataset({ name: "another shared set" });
     await datasetService.attachData(anotherDataset.datasetId, [data.dataId, data.dataId]);
-    await datasetService.updateData(data.dataId, { userPrompt: "updated", sampleId: "business-id", extra: { nullable: null } });
+    await datasetService.updateData(data.dataId, {
+      userPrompt: "updated", evalPrompt: "  judge the result  ", sampleId: "business-id", extra: { nullable: null },
+    });
     expect((await datasetService.listData(anotherDataset.datasetId))[0]).toEqual(await datasetService.getData(data.dataId));
     expect((await catalog.getSample(sample.sampleId))?.data).toEqual(await datasetService.getData(data.dataId));
+    expect((await catalog.getSample(sample.sampleId))?.data.evalPrompt).toBe("  judge the result  ");
     const otherCatalog = createPostgresCatalog(database.db, "user-B", { async listAgents() { return []; } }, release);
     const otherService = createDatasetService(createPostgresDatasetStore(database.db, "user-B"));
     const otherProject = await otherCatalog.createProject({ name: "second" });

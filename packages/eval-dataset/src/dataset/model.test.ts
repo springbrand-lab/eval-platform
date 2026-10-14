@@ -130,6 +130,7 @@ describe("Current user prompt and extension fields", () => {
   it("preserves the prompt exactly and retains arbitrary business fields", () => {
     const input = {
       userPrompt: "  Continue the project\nKeep the current layout.  ",
+      evalPrompt: "  Check the resulting page against the requirements.  ",
       requirements: ["responsive", "accessible"],
       expectedOutput: { files: ["src/index.ts"] },
       referenceText: "design notes",
@@ -140,6 +141,10 @@ describe("Current user prompt and extension fields", () => {
       externalDataId: 123,
     };
     expect(dataInputSchema.parse(input)).toEqual(input);
+  });
+
+  it.each(["", " \n\t", null, 123, ["judge"]])("rejects invalid evaluation prompts: %j", (evalPrompt) => {
+    expect(dataInputSchema.safeParse({ userPrompt: "task", evalPrompt }).success).toBe(false);
   });
 
   it("preserves extension keys that object-schema parsers commonly strip", () => {

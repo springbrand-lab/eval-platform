@@ -46,6 +46,7 @@ import {
 } from "./execution.js";
 import {
   evaluateSampling,
+  requireEvaluationPrompt,
   type EvaluationStageDependencies,
 } from "./evaluation.js";
 import {
@@ -382,6 +383,7 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
       }
     }
     const contexts = await this.loadSamplingContexts(records, request.projectId);
+    for (const { sample } of contexts) requireEvaluationPrompt(sample);
     const evaluations = contexts.map(({ state }) => (
       this.createEvaluationRecord(state.samplingId, evaluationAgent)
     ));
@@ -424,6 +426,7 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
     const requestIdentity = await createRunRequestIdentity("pipeline", request, runConfig);
 
     const samples = await this.resolveSamples(config.execution.datasetId, config.execution.sampleIds);
+    for (const sample of samples) requireEvaluationPrompt(sample);
     const contexts = samples.flatMap((sample) => Array.from(
       { length: config.execution.samplingCount },
       () => this.createSamplingContext(request.projectId, sample, subjectAgent),
