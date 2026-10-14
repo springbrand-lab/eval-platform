@@ -3812,6 +3812,48 @@ describe("Run recovery from persisted facts", () => {
     expect((await store.getSampling(samplingId))!.executionAttempts).toHaveLength(2);
   });
 
+  it("keeps a persisted retryable failure pending through one SP status outage, then restarts it", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const runtime = dormantRuntime(store, harness);
+    const run = await runtime.start(startRequest("retry-after-status-outage", EXECUTION_CONFIG_RETRY_ONE_ID));
+    const samplingId = run.samplingIds[0]!;
+    const chatId = "subject-chat";
+    const submissionId = "submission-1";
+    const idempotencyKey = `execution:${samplingId}`;
+    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, chatId };
+    await seedSampling(store, {
+      ...(await store.getSampling(samplingId))!,
+      subjectChatId: chatId,
+      execution: { status: "retrying" },
+      executionAttempts: [{
+        executionAttemptId: "failed-before-recovery", samplingId, attemptNumber: 1, submissionId,
+        status: "failed", error: "upstream failed", completedAt: "2026-10-09T00:00:00.000Z",
+        resources: { status: "collected", snapshot: makeResources({ handle, idempotencyKey }) },
+      }],
+    });
+    vi.mocked(harness.inspectAgentOperation)
+      .mockRejectedValueOnce(new Error("temporary SP 503"))
+      .mockResolvedValueOnce({
+        submissionId, status: "failed", normalizedStatus: "failed",
+        retryable: true, failureKind: "llm", error: "upstream failed",
+      });
+
+    await expect(runtime.resume(run.runId)).rejects.toThrow("Execution phase could not persist its progress");
+    const pending = (await store.getSampling(samplingId))!;
+    expect(pending.execution).toEqual({ status: "retrying" });
+    expect(harness.collectExecution).not.toHaveBeenCalled();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+
+    await runtime.resume(run.runId);
+    expect((await runtime.getRun(run.runId)).status).toBe("succeeded");
+    expect(harness.restartAgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      idempotencyKey: `execution:${samplingId}:restart:2`,
+    }));
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect((await store.getSampling(samplingId))!.executionAttempts).toHaveLength(2);
+  });
+
   it("does not restart a persisted failure when its operation cannot be confirmed", async () => {
     const store = makeStore();
     const harness = makeHarness();
@@ -3833,12 +3875,13 @@ describe("Run recovery from persisted facts", () => {
     });
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue(null);
 
-    await runtime.resume(run.runId);
-    await runtime.resume(run.runId);
+    await expect(runtime.resume(run.runId)).rejects.toThrow("Execution phase could not persist its progress");
+    await expect(runtime.resume(run.runId)).rejects.toThrow("Execution phase could not persist its progress");
 
-    expect((await runtime.getRun(run.runId)).status).toBe("failed");
-    expect(harness.inspectAgentOperation).toHaveBeenCalledOnce();
+    expect((await runtime.getRun(run.runId)).status).toBe("retrying");
+    expect(harness.inspectAgentOperation).toHaveBeenCalledTimes(2);
     expect(harness.restartAgent).not.toHaveBeenCalled();
+    expect(harness.collectExecution).not.toHaveBeenCalled();
     expect((await store.getSampling(samplingId))!.executionAttempts).toHaveLength(1);
   });
 

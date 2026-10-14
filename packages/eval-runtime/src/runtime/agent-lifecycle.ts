@@ -130,7 +130,7 @@ class SubmissionStatusError extends AgentOperationError {
   }
 }
 
-class ConfirmedSubmissionFailure extends AgentOperationError {
+export class ConfirmedSubmissionFailure extends AgentOperationError {
   constructor(stage: AgentLifecycleStage, submission: AgentSubmission) {
     super(
       submission.error ?? `${stage} submission ended with ${submissionStatus(submission) ?? submission.status}`,

@@ -14,6 +14,7 @@ import type { RuntimeSamplingContext } from "./model.js";
 import type { RetryController } from "./retry.js";
 import {
   AgentOperationError,
+  ConfirmedSubmissionFailure,
   applyAttemptPatch,
   collectOutputWithRetry,
   describeAgentError,
@@ -223,6 +224,12 @@ export async function executeSampling(
       && (lastAttempt.status === "completed" || lastAttempt.status === "failed"
         || lastAttempt.status === "interrupted" || lastAttempt.status === "cancelled"));
     if (error instanceof RuntimeRecordPersistenceError && hasTerminalSubmission) throw error;
+    if (hasTerminalSubmission && lastAttempt?.status !== "completed"
+      && !(error instanceof ConfirmedSubmissionFailure)) {
+      // A persisted failed Attempt still needs SP calibration and the restart decision.
+      // A status outage cannot turn it into final evidence collection.
+      throw error;
+    }
     if (hasTerminalSubmission && !observedOutput) {
       // Persist the finalization boundary before another read, so a crash cannot restart the Agent.
       await persist({
