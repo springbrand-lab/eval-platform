@@ -95,3 +95,10 @@ export interface EvalRuntimeDependencies {
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly onError?: (error: Error) => void;
 }
+
+/** Recovery reads persisted Run facts; admission APIs and Config resolution stay in the API process. */
+export interface EvalRunResumerDependencies extends Omit<EvalRuntimeDependencies, "catalog" | "configResolver"> {
+  readonly getSample: RuntimeCatalog["getSample"];
+}
+
+export type EvalRunResumer = Pick<EvalRuntime, "resume">;

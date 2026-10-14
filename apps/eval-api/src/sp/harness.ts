@@ -20,6 +20,10 @@ const BASE_PATH = "/internal/v1/eval-harness";
 const SERVICE_HEADER = "X-Eval-Service-Token";
 const TERMINAL = new Set(["completed", "failed", "interrupted", "cancelled"]);
 const STATUSES = new Set(["queued", "running", ...TERMINAL]);
+const PING_INTERVAL_MS = 30_000;
+const PONG_TIMEOUT_MS = 10_000;
+const MAX_CONNECTION_ATTEMPTS = 3;
+const BASE_RECONNECT_DELAY_MS = 100;
 
 type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -131,14 +135,49 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       }
       let settled = false;
       let timeout: ReturnType<typeof setTimeout> | undefined;
+      let connectTimeout: ReturnType<typeof setTimeout> | undefined;
+      let pingTimer: ReturnType<typeof setTimeout> | undefined;
+      let pongTimeout: ReturnType<typeof setTimeout> | undefined;
       const finish = (result: AgentSubmission | SpHarnessError): void => {
         if (settled) return;
         settled = true;
         if (timeout) clearTimeout(timeout);
-        try { socket.close(); } catch { /* The result is already settled. */ }
+        if (connectTimeout) clearTimeout(connectTimeout);
+        if (pingTimer) clearTimeout(pingTimer);
+        if (pongTimeout) clearTimeout(pongTimeout);
+        try {
+          if (result instanceof SpHarnessError) socket.terminate();
+          else socket.close();
+        } catch { /* The result is already settled. */ }
         if (result instanceof SpHarnessError) reject(result);
         else resolve(result);
       };
+      const schedulePing = (): void => {
+        pingTimer = setTimeout(() => {
+          pongTimeout = setTimeout(() => finish(new SpHarnessError("Submission WebSocket stopped responding", true)), PONG_TIMEOUT_MS);
+          try {
+            socket.ping();
+          } catch (cause) {
+            finish(new SpHarnessError(`Submission WebSocket ping failed: ${errorText(cause)}`, true));
+          }
+        }, PING_INTERVAL_MS);
+      };
+      let connectedOnce = false;
+      const connected = (): void => {
+        if (settled || connectedOnce) return;
+        connectedOnce = true;
+        if (connectTimeout) clearTimeout(connectTimeout);
+        schedulePing();
+      };
+      connectTimeout = setTimeout(() => finish(new SpHarnessError("Submission WebSocket could not connect", true)), PONG_TIMEOUT_MS);
+      socket.addEventListener("open", connected);
+      socket.on("pong", () => {
+        if (!pongTimeout || settled) return;
+        clearTimeout(pongTimeout);
+        pongTimeout = undefined;
+        schedulePing();
+      });
+      if (socket.readyState === WebSocket.OPEN) connected();
       if (timeoutMs !== undefined) {
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
           finish(new SpHarnessError("Submission timeout must be positive", false));
@@ -201,15 +240,29 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       const current = await inspect(input.handle, input.idempotencyKey);
       if (!current) throw new SpHarnessError("Submission operation was not found", true);
       if (isTerminal(current)) return current;
-      try {
-        return await observeTerminal(input.handle, current.submissionId, input.runtime?.timeoutMs);
-      } catch (error) {
-        if (error instanceof SpHarnessError && !error.retryable) throw error;
-        // One read reconciles a dropped terminal event. The Runtime owns retry policy.
-        const reconciled = await inspect(input.handle, input.idempotencyKey);
-        if (reconciled && isTerminal(reconciled)) return reconciled;
-        throw error;
+      const timeoutMs = input.runtime?.timeoutMs;
+      const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
+      for (let attempt = 1; attempt <= MAX_CONNECTION_ATTEMPTS; attempt += 1) {
+        try {
+          return await observeTerminal(input.handle, current.submissionId,
+            deadline === undefined ? undefined : Math.max(1, deadline - Date.now()));
+        } catch (error) {
+          if (!(error instanceof SpHarnessError) || !error.retryable) throw error;
+          // A disconnected observer cannot establish the terminal fact. Read once,
+          // then reconnect to the same Submission; a healthy socket is never polled.
+          const reconciled = await inspect(input.handle, input.idempotencyKey);
+          if (reconciled && reconciled.submissionId !== current.submissionId) {
+            throw new SpHarnessError("Submission operation changed during observation", false);
+          }
+          if (reconciled && isTerminal(reconciled)) return reconciled;
+          if (!reconciled || attempt === MAX_CONNECTION_ATTEMPTS || (deadline !== undefined && Date.now() >= deadline)) {
+            throw error;
+          }
+          const delay = Math.floor(Math.random() * BASE_RECONNECT_DELAY_MS * 2 ** (attempt - 1));
+          await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        }
       }
+      throw new SpHarnessError("Submission WebSocket retry budget exhausted", true);
     },
     async collectExecution({ handle }) {
       requireSp(handle);

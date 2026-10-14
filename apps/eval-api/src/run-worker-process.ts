@@ -1,4 +1,4 @@
-import { createEvalRuntime, type ConfigResolver, type RuntimeCatalog } from "@eval-platform/eval-runtime";
+import { createEvalRunResumer } from "@eval-platform/eval-runtime";
 import { dataSchema } from "@eval-platform/eval-dataset";
 import { and, eq } from "drizzle-orm";
 import type { Pool } from "pg";
@@ -21,20 +21,7 @@ export interface SpEvalRunWorkerProcessOptions {
 export async function startSpEvalRunWorkerProcess(options: SpEvalRunWorkerProcessOptions): Promise<EvalRunWorker> {
   const db = createEvalDb(options.pool);
   const store = createPostgresWorkerRuntimeStore(db);
-  const unavailable = async (): Promise<never> => {
-    throw new Error("Run admission and Config resolution belong to the Eval API process");
-  };
-  const configResolver: ConfigResolver = {
-    resolveExecutionConfig: unavailable,
-    resolveEvaluationConfig: unavailable,
-    resolvePipelineConfig: unavailable,
-  };
-  const catalog: RuntimeCatalog = {
-    listProjects: unavailable,
-    listAgents: unavailable,
-    listDatasets: unavailable,
-    listData: unavailable,
-    listSamples: unavailable,
+  const runtime = createEvalRunResumer({
     async getSample(sampleId) {
       // Only trusted, persisted Run facts reach this cross-user recovery reader.
       const [row] = await db.select({
@@ -49,10 +36,6 @@ export async function startSpEvalRunWorkerProcess(options: SpEvalRunWorkerProces
         ? { sampleId: row.sampleId, data: dataSchema.parse({ ...row.content, dataId: row.dataId }) }
         : null;
     },
-  };
-  const runtime = createEvalRuntime({
-    catalog,
-    configResolver,
     harness: createSpHarness(options.sp),
     store,
     ...(options.onError === undefined ? {} : { onError: options.onError }),

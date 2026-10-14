@@ -23,6 +23,8 @@ import type {
 import type {
   EvalRuntime,
   EvalRuntimeDependencies,
+  EvalRunResumer,
+  EvalRunResumerDependencies,
   RuntimeCatalog,
   RuntimeEvaluationContext,
   Sample,
@@ -76,8 +78,8 @@ function requireDistinctIds(ids: readonly string[], field: string): void {
 }
 
 class RuntimeCoordinator implements EvalRuntime {
-  readonly #catalog: RuntimeCatalog;
-  readonly #configResolver: EvalRuntimeDependencies["configResolver"];
+  readonly #catalog: Pick<RuntimeCatalog, "getSample">;
+  readonly #admission?: Pick<EvalRuntimeDependencies, "catalog" | "configResolver">;
   readonly #store: EvalRuntimeDependencies["store"];
   readonly #stageDependencies: RuntimeStageDependencies;
   readonly #idFactory: () => string;
@@ -85,9 +87,11 @@ class RuntimeCoordinator implements EvalRuntime {
   readonly #createRetryController: (policy?: RetryPolicy) => RetryController;
   readonly #onError: (error: Error) => void;
 
-  constructor(dependencies: EvalRuntimeDependencies) {
-    this.#catalog = dependencies.catalog;
-    this.#configResolver = dependencies.configResolver;
+  constructor(dependencies: EvalRuntimeDependencies | EvalRunResumerDependencies) {
+    this.#catalog = "catalog" in dependencies ? dependencies.catalog : { getSample: dependencies.getSample };
+    if ("catalog" in dependencies) {
+      this.#admission = { catalog: dependencies.catalog, configResolver: dependencies.configResolver };
+    }
     this.#store = dependencies.store;
     this.#idFactory = dependencies.idFactory ?? defaultIdFactory;
     this.#now = dependencies.now ?? defaultNow;
@@ -105,28 +109,28 @@ class RuntimeCoordinator implements EvalRuntime {
   }
 
   listProjects(): Promise<readonly Project[]> {
-    return this.#catalog.listProjects();
+    return this.admission().catalog.listProjects();
   }
 
   listAgents(role?: AgentRole) {
-    return this.#catalog.listAgents(role);
+    return this.admission().catalog.listAgents(role);
   }
 
   listDatasets() {
-    return this.#catalog.listDatasets();
+    return this.admission().catalog.listDatasets();
   }
 
   listData(datasetId: string) {
-    return this.#catalog.listData(datasetId);
+    return this.admission().catalog.listData(datasetId);
   }
 
   listSamples(dataId: string) {
-    return this.#catalog.listSamples(dataId);
+    return this.admission().catalog.listSamples(dataId);
   }
 
   async start(request: StartRunRequest): Promise<RunHandle> {
     this.validateStartRequest(request);
-    const config = await this.#configResolver.resolveExecutionConfig(request.executionConfigId);
+    const config = await this.admission().configResolver.resolveExecutionConfig(request.executionConfigId);
     const subjectAgent = requireSpHarness(config.harness, "subject").agentConfig;
     const requestIdentity = await createRunRequestIdentity("start", request, config);
     const existingRun = await this.findExistingRun(requestIdentity);
@@ -153,7 +157,7 @@ class RuntimeCoordinator implements EvalRuntime {
 
   async evaluate(request: EvaluateRequest): Promise<RunHandle> {
     this.validateEvaluateRequest(request);
-    const config = await this.#configResolver.resolveEvaluationConfig(request.evaluationConfigId);
+    const config = await this.admission().configResolver.resolveEvaluationConfig(request.evaluationConfigId);
     const evaluationAgent = requireSpHarness(config.evaluationHarness, "evaluator").agentConfig;
     const records = await this.loadSamplingRecords(request.samplingIds);
     for (const record of records) {
@@ -181,7 +185,7 @@ class RuntimeCoordinator implements EvalRuntime {
 
   async pipeline(request: PipelineRequest): Promise<RunHandle> {
     this.validatePipelineRequest(request);
-    const config = await this.#configResolver.resolvePipelineConfig(request.pipelineConfigId);
+    const config = await this.admission().configResolver.resolvePipelineConfig(request.pipelineConfigId);
     const subjectAgent = requireSpHarness(config.execution.harness, "subject").agentConfig;
     const evaluationAgent = requireSpHarness(
       config.evaluation.evaluationHarness,
@@ -299,6 +303,11 @@ class RuntimeCoordinator implements EvalRuntime {
     if (!request.executionConfigId) throw new Error("executionConfigId is required");
   }
 
+  private admission(): Pick<EvalRuntimeDependencies, "catalog" | "configResolver"> {
+    if (!this.#admission) throw new Error("Run admission is unavailable in the recovery worker");
+    return this.#admission;
+  }
+
   private validateEvaluateRequest(request: EvaluateRequest): void {
     if (!request.projectId) throw new Error("projectId is required");
     if (request.samplingIds.length === 0) throw new Error("samplingIds must not be empty");
@@ -319,10 +328,10 @@ class RuntimeCoordinator implements EvalRuntime {
     datasetId: string,
     sampleIds?: readonly string[],
   ): Promise<readonly Sample[]> {
-    const data = await this.#catalog.listData(datasetId);
+    const data = await this.admission().catalog.listData(datasetId);
     const samples: Sample[] = [];
     for (const item of data) {
-      samples.push(...await this.#catalog.listSamples(item.dataId));
+      samples.push(...await this.admission().catalog.listSamples(item.dataId));
     }
     const selected = sampleIds === undefined
       ? samples
@@ -559,6 +568,8 @@ export type {
   AgentOption,
   EvalRuntime,
   EvalRuntimeDependencies,
+  EvalRunResumer,
+  EvalRunResumerDependencies,
   RuntimeCatalog,
   RuntimeEvaluationContext,
   Sample,
@@ -592,6 +603,12 @@ export {
 export function createEvalRuntime(
   dependencies: EvalRuntimeDependencies,
 ): EvalRuntime {
+  return new RuntimeCoordinator(dependencies);
+}
+
+export function createEvalRunResumer(
+  dependencies: EvalRunResumerDependencies,
+): EvalRunResumer {
   return new RuntimeCoordinator(dependencies);
 }
 

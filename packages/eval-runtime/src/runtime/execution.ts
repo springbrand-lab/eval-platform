@@ -6,6 +6,7 @@ import type {
   Sampling,
 } from "@eval-platform/eval-contracts";
 import { dataInputSchema } from "@eval-platform/eval-dataset";
+import type { AgentHandle } from "../harness/index.js";
 
 import type { RuntimeStore } from "./store.js";
 import { RuntimeRecordPersistenceError, persistRuntimeRecord, sameRuntimeRecordFacts } from "./store.js";
@@ -41,6 +42,7 @@ export async function executeSampling(
   const { sample } = input.context;
   let current = input.context.state;
   const retryController = dependencies.createRetryController(input.retryPolicy);
+  let observedOutput: ExecutionOutput | undefined;
 
   const persist = async (sampling: Sampling): Promise<void> => {
     await persistRuntimeRecord({
@@ -118,10 +120,13 @@ export async function executeSampling(
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
       },
-      collectOutput: (handle) => dependencies.harness.collectExecution({
-        handle,
-        ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
-      }),
+      collectOutput: async (handle) => {
+        observedOutput = await dependencies.harness.collectExecution({
+          handle,
+          ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
+        });
+        return observedOutput;
+      },
       isSuccessfulOutput: (output) => output.status === "succeeded",
       outputFailure: (output) => new AgentOperationError(
         output.error ?? "execution output failed",
@@ -159,7 +164,54 @@ export async function executeSampling(
     }
     current = stored;
     if (current.execution.status === "succeeded") return { state: current, sample };
-    await persist(withExecutionStatus(failureBase, "failed", details.message));
+    const lastAttempt = failureBase.executionAttempts.at(-1);
+    if (!observedOutput && failureBase.subjectChatId && lastAttempt?.submissionId && lastAttempt.completedAt
+      && (lastAttempt.status === "failed" || lastAttempt.status === "interrupted" || lastAttempt.status === "cancelled")) {
+      const handle: AgentHandle = {
+        chatId: failureBase.subjectChatId,
+        samplingId: failureBase.samplingId,
+        role: "subject",
+        framework: subjectHarness.framework,
+      };
+      for (let collectionAttemptNumber = 1; ; collectionAttemptNumber += 1) {
+        try {
+          observedOutput = await dependencies.harness.collectExecution({
+            handle,
+            ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
+          });
+          break;
+        } catch (collectionError) {
+          const collectionDetails = describeAgentError(collectionError);
+          const decision = collectionDetails.retryable
+            ? await retryController.decide({
+              operation: "collection",
+              failureKind: collectionDetails.failureKind,
+              attemptNumber: collectionAttemptNumber,
+            })
+            : { shouldRetry: false };
+          if (!decision.shouldRetry) {
+            const reported = new Error(
+              `Execution evidence collection failed for Sampling ${current.samplingId}: ${collectionDetails.message}`,
+              { cause: collectionError },
+            );
+            try {
+              (dependencies.onError ?? console.error)(reported);
+            } catch (reportingError) {
+              console.error(reported, reportingError);
+            }
+            break;
+          }
+          await dependencies.sleep(decision.backoffMs ?? 0);
+        }
+      }
+    }
+    await persist({
+      ...withExecutionStatus(failureBase, "failed", details.message),
+      ...(observedOutput === undefined ? {} : {
+        artifacts: observedOutput.artifacts,
+        trajectory: observedOutput.trajectory,
+      }),
+    });
     return { state: current, sample };
   }
 }

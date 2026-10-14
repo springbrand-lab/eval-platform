@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentIdentityConflictError, type AgentHandle } from "@eval-platform/eval-runtime";
-import { WebSocketServer } from "ws";
-import type WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import { createSpHarness, SpHarnessError } from "./harness.js";
 
 const subject: AgentHandle = {
@@ -46,6 +45,15 @@ function ensureInput(handle: AgentHandle) {
 
 class FakeSocket extends EventTarget {
   closed = false;
+  readyState = WebSocket.OPEN;
+  ping = vi.fn();
+
+  on(event: string, listener: () => void): this {
+    this.addEventListener(event, listener);
+    return this;
+  }
+
+  terminate(): void { this.close(); }
 
   close(): void {
     if (this.closed) return;
@@ -58,6 +66,8 @@ class FakeSocket extends EventTarget {
       data: JSON.stringify({ type: "submission.status", submission }),
     }));
   }
+
+  sendPong(): void { this.dispatchEvent(new Event("pong")); }
 }
 
 describe("Eval SP Harness", () => {
@@ -167,6 +177,79 @@ describe("Eval SP Harness", () => {
     socket.close();
     await expect(waiting).resolves.toMatchObject({ status: "completed" });
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("detects a silent socket with protocol Ping/Pong and reconciles the terminal status", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeSocket();
+      const openWebSocket = vi.fn(() => socket as unknown as WebSocket);
+      const fetcher = vi.fn()
+        .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "running" }))
+        .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "failed" }));
+      const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, openWebSocket });
+      const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
+      await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(40_000);
+      await expect(waiting).resolves.toMatchObject({ status: "failed" });
+      expect(socket.ping).toHaveBeenCalledOnce();
+      expect(socket.closed).toBe(true);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a responsive observer connected without extra status reads", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeSocket();
+      socket.ping.mockImplementation(() => socket.sendPong());
+      const openWebSocket = vi.fn(() => socket as unknown as WebSocket);
+      const fetcher = vi.fn(async () => Response.json({ submissionId: "submission-1", status: "running" }));
+      const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, openWebSocket });
+      const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
+      await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(socket.ping).toHaveBeenCalledTimes(4);
+      expect(socket.closed).toBe(false);
+      expect(fetcher).toHaveBeenCalledOnce();
+      socket.sendStatus({ submissionId: "submission-1", status: "completed" });
+      await expect(waiting).resolves.toMatchObject({ status: "completed" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reopens the same Submission after a dropped observer reports it is still running", async () => {
+    const first = new FakeSocket();
+    const sockets = [first, new FakeSocket()];
+    const openWebSocket = vi.fn((_url: string, _headers: Readonly<Record<string, string>>) => sockets.shift() as unknown as WebSocket);
+    const fetcher = vi.fn(async () => Response.json({ submissionId: "submission-1", status: "running" }));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, openWebSocket });
+    const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
+    await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
+    first.close();
+    await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledTimes(2));
+    const second = openWebSocket.mock.results[1]!.value as unknown as FakeSocket;
+    second.sendStatus({ submissionId: "submission-1", status: "completed" });
+    await expect(waiting).resolves.toMatchObject({ status: "completed" });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(openWebSocket.mock.calls[1]![0]).toBe(openWebSocket.mock.calls[0]![0]);
+  });
+
+  it("stops reopening after the finite observer retry budget", async () => {
+    const openWebSocket = vi.fn(() => {
+      const socket = new FakeSocket();
+      queueMicrotask(() => socket.close());
+      return socket as unknown as WebSocket;
+    });
+    const fetcher = vi.fn(async () => Response.json({ submissionId: "submission-1", status: "running" }));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, openWebSocket });
+    await expect(harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" }))
+      .rejects.toMatchObject({ retryable: true });
+    expect(openWebSocket).toHaveBeenCalledTimes(3);
+    expect(fetcher).toHaveBeenCalledTimes(4);
   });
 
   it("sends service authentication on a real WebSocket upgrade", async () => {
