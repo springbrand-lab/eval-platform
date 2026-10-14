@@ -380,26 +380,39 @@ class RunResumer extends RunReader implements EvalRunResumer {
     };
   }
 
-  private guardedHarness(runId: string): Harness {
+  private guardedHarness(runId: string, stopSignal?: AbortSignal): Harness {
     const harness = this.#harness;
-    const gate = <T>(dispatch: () => Promise<T>): Promise<T> => this.store.withRunDispatchGate(runId, dispatch);
+    const observe = <T>(pending: Promise<T>): Promise<T> => {
+      if (!stopSignal) return pending;
+      return new Promise<T>((resolve, reject) => {
+        const onStop = () => reject(new RuntimeRunStoppedError(runId));
+        stopSignal.addEventListener("abort", onStop, { once: true });
+        pending.then(
+          (value) => { stopSignal.removeEventListener("abort", onStop); resolve(value); },
+          (error: unknown) => { stopSignal.removeEventListener("abort", onStop); reject(error); },
+        );
+        if (stopSignal.aborted) onStop();
+      });
+    };
+    const gate = <T>(dispatch: () => Promise<T>): Promise<T> =>
+      observe(this.store.withRunDispatchGate(runId, dispatch));
     return {
       ensureAgent: (input) => gate(() => harness.ensureAgent(input)),
       materializeInitialData: (input) => gate(() => harness.materializeInitialData(input)),
       materializeSubjectTrajectory: (input) => gate(() => harness.materializeSubjectTrajectory(input)),
       submitAgent: (input) => gate(() => harness.submitAgent(input)),
       restartAgent: (input) => gate(() => harness.restartAgent(input)),
-      waitForSubmission: (input) => harness.waitForSubmission(input),
-      inspectAgentOperation: (input) => harness.inspectAgentOperation(input),
-      stopAgent: (input) => harness.stopAgent(input),
-      collectExecution: (input) => harness.collectExecution(input),
-      collectEvaluation: (input) => harness.collectEvaluation(input),
-      collectAgentResources: (input) => harness.collectAgentResources(input),
+      waitForSubmission: (input) => observe(harness.waitForSubmission(input)),
+      inspectAgentOperation: (input) => observe(harness.inspectAgentOperation(input)),
+      stopAgent: (input) => observe(harness.stopAgent(input)),
+      collectExecution: (input) => observe(harness.collectExecution(input)),
+      collectEvaluation: (input) => observe(harness.collectEvaluation(input)),
+      collectAgentResources: (input) => observe(harness.collectAgentResources(input)),
     };
   }
 
   private stageDependenciesFor(runId: string, stopSignal?: AbortSignal): RuntimeStageDependencies {
-    const harness = this.guardedHarness(runId);
+    const harness = this.guardedHarness(runId, stopSignal);
     if (!stopSignal) return { ...this.#stageDependencies, harness };
     return {
       ...this.#stageDependencies,
@@ -429,9 +442,13 @@ class RunResumer extends RunReader implements EvalRunResumer {
       const status = sampling.executionAttempts.at(-1)?.status;
       return status === "interrupted" || status === "cancelled";
     };
+    const unsubmitted = (sampling: SamplingState) => {
+      const attempt = sampling.executionAttempts.at(-1);
+      return !!attempt && !attempt.submissionId && attempt.status !== "completed";
+    };
     const wasPending = isPendingStatus(initial.execution.status);
     if (!wasPending
-      && !(initial.execution.status === "failed" && interrupted(initial))) return;
+      && !(initial.execution.status === "failed" && (interrupted(initial) || unsubmitted(initial)))) return;
     let current = initial;
     const attempt = current.executionAttempts.at(-1);
     const hasOperation = !!(current.subjectChatId && attempt
@@ -482,7 +499,8 @@ class RunResumer extends RunReader implements EvalRunResumer {
       current = next;
     }
     if (!isPendingStatus(current.execution.status)
-      && !(current.execution.status === "failed" && (wasPending || interrupted(current)))) return;
+      && !(current.execution.status === "failed"
+        && (wasPending || interrupted(current) || (unsubmitted(current) && !operationFound)))) return;
     const last = current.executionAttempts.at(-1);
     const attempts = last && !last.submissionId && !operationFound
       ? [...current.executionAttempts.slice(0, -1), stoppedAttempt(last, this.#stageDependencies.now())]
@@ -511,9 +529,13 @@ class RunResumer extends RunReader implements EvalRunResumer {
       const status = evaluation.attempts.at(-1)?.status;
       return status === "interrupted" || status === "cancelled";
     };
+    const unsubmitted = (evaluation: EvaluationRecord) => {
+      const attempt = evaluation.attempts.at(-1);
+      return !!attempt && !attempt.submissionId && attempt.status !== "completed";
+    };
     const wasPending = isPendingStatus(initial.status.status);
     if (!wasPending
-      && !(initial.status.status === "failed" && interrupted(initial))) return;
+      && !(initial.status.status === "failed" && (interrupted(initial) || unsubmitted(initial)))) return;
     let current = initial;
     const attempt = current.attempts.at(-1);
     const hasOperation = !!(current.chatId && attempt
@@ -567,7 +589,8 @@ class RunResumer extends RunReader implements EvalRunResumer {
       }
     }
     if (!isPendingStatus(current.status.status)
-      && !(current.status.status === "failed" && (wasPending || interrupted(current)))) return;
+      && !(current.status.status === "failed"
+        && (wasPending || interrupted(current) || (unsubmitted(current) && !operationFound)))) return;
     const last = current.attempts.at(-1);
     const attempts = last && !last.submissionId && !operationFound
       ? [...current.attempts.slice(0, -1), stoppedAttempt(last, this.#stageDependencies.now())]

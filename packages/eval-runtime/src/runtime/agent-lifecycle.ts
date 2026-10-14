@@ -616,6 +616,7 @@ export async function collectOutputWithRetry<TOutput>(input: {
     try {
       return await input.collect();
     } catch (error) {
+      if (error instanceof RuntimeRunStoppedError) throw error;
       const details = describeAgentError(error);
       if (!details.retryable) {
         throw new OutputCollectionError(input.stage, details, error);
@@ -666,6 +667,7 @@ async function collectResourcesWithRetry<TAttempt extends AgentAttemptRecord, TO
       }
     }
   } catch (error) {
+    if (error instanceof RuntimeRunStoppedError) throw error;
     return {
       status: "failed",
       scope,
