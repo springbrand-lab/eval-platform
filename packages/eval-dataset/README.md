@@ -1,5 +1,7 @@
 # @eval-platform/eval-dataset
 
+Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给评估 Agent。两者都是同样的 owner-scoped Bundle 材料引用，上传和绑定方式相同；评估输出 JSON Schema 由 Project 绑定，不存在 Data 内。
+
 ## 职责与文件
 
 本包只管理 Dataset、可复用 Data 及二者的关联，不管理用户、Project、Sample、Sampling、Agent 或评估结果，不引入 version。Eval API 注入按已认证用户限定的 Store；同一用户的 Data 可复用于其多个 Dataset，不可跨用户关联。用户身份与授权由应用和 PostgreSQL 保证，不写进 Data 业务 JSON。
@@ -18,7 +20,8 @@
 - `userPrompt`：必填的当前用户任务，必须是非空白字符串，保留原始文本，不从其他字段推导。
 - `evalPrompt`：可选的本条 Data 的评估任务提示词；提供时必须是非空白字符串并原样保存。只执行不要求此字段；启动 Pipeline 或独立评估时每条选中 Data 都必须提供，不能退回使用 Subject 的 `userPrompt`。
 - `initialSession`：可选的初始 Session 引用，必须包含外部给定的 `bundleId` 和 `sessionId`；上下文由 Eval 的独立 Bundle 上传接口保存为 JSON/JSONL，可为空，SP 仅在提供时导入目标 Chat。
-- `initialMaterials`：可选的初始素材集合引用，必须包含外部给定的 `bundleId` 和 `materialId`，定位 Bundle 内的具体素材资源。
+- `initialMaterials`：可选的 Subject 初始素材集合引用，必须包含外部给定的 `bundleId` 和 `materialId`，定位 Bundle 内的具体素材资源。
+- `evalInitialMaterials`：可选的 Evaluator 初始素材引用，结构与上传方式相同，与 Subject 素材分开。
 - 其他业务字段：可以直接放在 Data 上，例如 `requirements`、`expectedOutput`、`tags` 或 `json`，只要求值可无损表示为 JSON。创建、修改、持久化、导入导出和运行时输入准备都保留这些字段，不丢弃、不改名，也不强制放进某个额外容器。
 
 数值使用有限的 JavaScript Number；整数必须在 `Number.MIN_SAFE_INTEGER` 到 `Number.MAX_SAFE_INTEGER` 之间。超出范围的大整数业务 ID 必须由调用方以字符串提供，解析、创建、修改和导出都直接拒绝不安全整数，不自动截断、舍入或转换为字符串。YAML 整数先按 BigInt 解析，确认安全范围后才转为 Number。

@@ -59,6 +59,7 @@ export interface AgentOption {
 
 export interface RuntimeCatalog {
   listProjects(): Promise<readonly Project[]>;
+  getProject(projectId: string): Promise<Project | null>;
   listAgents(role?: AgentRole): Promise<readonly AgentOption[]>;
   listDatasets(): Promise<readonly Dataset[]>;
   listData(datasetId: string): Promise<readonly Data[]>;
@@ -114,6 +115,7 @@ export type EvalRunAdmissionDependencies = Pick<
 /** Recovery reads persisted Run facts; admission APIs and Config resolution stay in the API process. */
 export interface EvalRunResumerDependencies extends Omit<EvalRuntimeDependencies, "catalog" | "configResolver" | "sourceCommit"> {
   readonly getSamples: RuntimeCatalog["getSamples"];
+  readonly getProject: RuntimeCatalog["getProject"];
 }
 
 export interface EvalRunResumer {

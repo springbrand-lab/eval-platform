@@ -1,11 +1,14 @@
 import type { EvalDb } from "./db/client.js";
+import { bindProjectEvaluationOutputSchema } from "./db/catalog.js";
 import { createInitialResourceApi } from "./initial-resources.js";
+import { MAX_EVALUATION_OUTPUT_SCHEMA_BYTES } from "./project-output-schema.js";
 import type { BundleDirectory } from "./sp/bundle-directory.js";
 import { parseStrictJson } from "./strict-json.js";
 
 const MATERIAL_ROUTE = /^\/api\/bundles\/([^/]+)\/materials\/([^/]+)$/u;
 const SESSION_ROUTE = /^\/api\/bundles\/([^/]+)\/sessions\/([^/]+)$/u;
 const DATA_ROUTE = /^\/api\/data\/([^/]+)\/initial-resources$/u;
+const PROJECT_SCHEMA_ROUTE = /^\/api\/projects\/([^/]+)\/evaluation-output-schema$/u;
 
 /** Mount after Eval SP session authentication; ownerUserId is trusted server input. */
 export function createInitialResourceHttpHandler(db: EvalDb, bundles: BundleDirectory) {
@@ -14,8 +17,16 @@ export function createInitialResourceHttpHandler(db: EvalDb, bundles: BundleDire
     const material = MATERIAL_ROUTE.exec(pathname);
     const session = SESSION_ROUTE.exec(pathname);
     const selectedData = DATA_ROUTE.exec(pathname);
-    if (!material && !session && !selectedData) return null;
+    const projectSchema = PROJECT_SCHEMA_ROUTE.exec(pathname);
+    if (!material && !session && !selectedData && !projectSchema) return null;
     const api = createInitialResourceApi(db, ownerUserId, bundles);
+    if (projectSchema) {
+      if (request.method !== "PUT") return new Response(null, { status: 405, headers: { Allow: "PUT" } });
+      const schema = await readJsonObject(request, MAX_EVALUATION_OUTPUT_SCHEMA_BYTES);
+      return Response.json(await bindProjectEvaluationOutputSchema(
+        db, ownerUserId, decodeURIComponent(projectSchema[1]!), schema,
+      ));
+    }
     if (material) {
       if (request.method !== "PUT") return new Response(null, { status: 405, headers: { Allow: "PUT" } });
       const body = await readJsonObject(request, 27_000_000);

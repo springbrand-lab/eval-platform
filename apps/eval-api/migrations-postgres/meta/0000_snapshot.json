@@ -485,6 +485,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "evaluation_output_schema": {
+          "name": "evaluation_output_schema",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "initial_launch": {
           "name": "initial_launch",
           "type": "jsonb",

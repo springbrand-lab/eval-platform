@@ -4,6 +4,7 @@ import { describeAgentError } from "./agent-lifecycle.js";
 import type { RetryController } from "./retry.js";
 import { RuntimeRecordConflictError, RuntimeRecordPersistenceError, type RuntimePersistenceOutcome } from "./record-errors.js";
 export { RuntimeRecordConflictError, RuntimeRecordPersistenceError } from "./record-errors.js";
+export { RuntimeRunStoppedError } from "./stop-errors.js";
 
 export interface RuntimeRunRequestIdentity {
   /** Stable caller intent within one Project, reused on retries. */
@@ -56,6 +57,8 @@ export type SamplingState = Sampling;
 
 export interface RuntimeStore {
   getRun(runId: string): Promise<RuntimeRunRecord | null>;
+  /** Serialize remote stage mutations with the saved stop request for this Run. */
+  withRunDispatchGate<T>(runId: string, dispatch: () => Promise<T>): Promise<T>;
   /** Persistent Project-scoped lookup used before mutable Config/Sample resolution. */
   findRunByIdempotencyKey(projectId: string, idempotencyKey: string): Promise<RuntimeRunRecord | null>;
   /**

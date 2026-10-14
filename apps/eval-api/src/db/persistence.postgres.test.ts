@@ -2,7 +2,7 @@ import path from "node:path";
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError } from "@eval-platform/eval-dataset";
 import { createMetrics, MetricsQueryError } from "@eval-platform/eval-metrics";
-import { createConfigResolver, createEvalRunResumer, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
+import { createConfigResolver, createEvalRunResumer, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, RuntimeRunStoppedError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
@@ -138,7 +138,10 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
   async function setup() {
     const services = stores();
-    const project = await services.catalog.createProject({ name: "my project" });
+    const createdProject = await services.catalog.createProject({ name: "my project" });
+    const project = await services.catalog.bindEvaluationOutputSchema(createdProject.projectId, {
+      type: "object", properties: { score: { type: "number" } },
+    });
     const dataset = await services.datasetService.createDataset({ name: "shared tasks" });
     const data = await services.datasetService.createData({
       userPrompt: "build a page", evalPrompt: "Judge the result",
@@ -209,6 +212,32 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await runtime.getRun(changedConfig.runId)).toBeNull();
     expect(await runtime.getRun(changedOperation.runId)).toBeNull();
     expect(await catalog.getProject(project.projectId)).toEqual({ ...project, initialLaunch: selected });
+  });
+
+  it("requires the Project JSON Schema before admitting a Pipeline", async () => {
+    const { catalog, dataset, sample } = await setup();
+    const project = await catalog.createProject({ name: "unbound" });
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    const judge = makeEvaluation(sampling.samplingId);
+    const pipeline = makeRun(project.projectId, sampling, dataset.datasetId, {
+      phases: ["execution", "evaluation"], evaluationIds: [judge.evaluationId],
+      config: {
+        operation: "pipeline",
+        pipeline: { configId: "pipeline-config", executionConfigId: "execution-config",
+          evaluationConfigId: "evaluation-config" },
+        execution: executionConfig(dataset.datasetId).execution,
+        evaluation: evaluationConfig.evaluation,
+      },
+    });
+    const runtime = createPostgresRuntimeStore(database.db, "user-A", release);
+    await expect(runtime.createRunWithSamplings(pipeline, [sampling], [judge]))
+      .rejects.toThrow("Project evaluation output JSON Schema must be bound");
+    expect(await catalog.getProject(project.projectId)).toEqual(project);
+    await catalog.bindEvaluationOutputSchema(project.projectId, { type: "object" });
+    await expect(runtime.createRunWithSamplings(pipeline, [sampling], [judge]))
+      .resolves.toMatchObject({ created: true });
+    await expect(catalog.bindEvaluationOutputSchema(project.projectId, { type: "string" }))
+      .rejects.toThrow("cannot change after evaluation admission");
   });
 
   it("keeps Project on its source branch while recording each Run's deployed commit", async () => {
@@ -638,6 +667,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const stopAgent = vi.fn(async () => false);
     const resumer = createEvalRunResumer({
       store: runtime,
+      getProject: async () => project,
       getSamples: async (ids) => ids.map(() => null),
       harness: { stopAgent } as unknown as Parameters<typeof createEvalRunResumer>[0]["harness"],
     });
@@ -657,6 +687,38 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const nextRun = makeRun(project.projectId, nextSampling, dataset.datasetId);
     await runtime.createRunWithSamplings(nextRun, [nextSampling], []);
     expect(await runtime.getRun(nextRun.runId)).toEqual(nextRun);
+  });
+
+  it("serializes a stop request with stage dispatch and blocks later dispatch", async () => {
+    const { runtime, project, dataset, sample } = await setup();
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    const run = makeRun(project.projectId, sampling, dataset.datasetId);
+    await runtime.createRunWithSamplings(run, [sampling], []);
+    const control = createPostgresProjectRunControl(database.db, "user-A");
+    let entered!: () => void;
+    let release!: () => void;
+    const dispatchEntered = new Promise<void>((resolve) => { entered = resolve; });
+    const dispatchHold = new Promise<void>((resolve) => { release = resolve; });
+    const dispatch = runtime.withRunDispatchGate(run.runId, async () => {
+      entered();
+      await dispatchHold;
+      return "submitted";
+    });
+    await dispatchEntered;
+    let stopSettled = false;
+    const stop = control.stopRun(project.projectId, run.runId).finally(() => { stopSettled = true; });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(stopSettled).toBe(false);
+    } finally {
+      release();
+    }
+    await expect(dispatch).resolves.toBe("submitted");
+    await expect(stop).resolves.toEqual({ runId: run.runId, stopRequested: true });
+    const lateDispatch = vi.fn(async () => "late submission");
+    await expect(runtime.withRunDispatchGate(run.runId, lateDispatch))
+      .rejects.toBeInstanceOf(RuntimeRunStoppedError);
+    expect(lateDispatch).not.toHaveBeenCalled();
   });
 
   it("lists and selects every successful Sampling in the owned Project with stable order", async () => {

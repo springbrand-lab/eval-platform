@@ -17,6 +17,8 @@ export type JsonValue =
   | { readonly [key: string]: JsonValue }
   | readonly JsonValue[];
 
+export type EvaluationOutputSchema = Readonly<Record<string, JsonValue>>;
+
 export type AgentRole = "subject" | "evaluator";
 
 export type SamplingStatus =
@@ -59,6 +61,8 @@ export interface Project {
   readonly name: string;
   /** SP source branch selected by the Eval deployment that created this Project. */
   readonly sourceBranch: string;
+  /** Bound once; every Evaluation Agent receives this as a JSON Schema file. */
+  readonly evaluationOutputSchema?: EvaluationOutputSchema;
   /** Fixed by the first admitted Run; an empty Project has no initial launch yet. */
   readonly initialLaunch?: ProjectInitialLaunch;
 }

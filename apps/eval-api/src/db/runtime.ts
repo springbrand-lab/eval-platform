@@ -1,6 +1,6 @@
 import type { EvaluationRecord, ProjectInitialLaunch, Sampling } from "@eval-platform/eval-contracts";
 import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
-import { RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
+import { RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, RuntimeRunStoppedError } from "@eval-platform/eval-runtime";
 import { and, eq, exists, gt, inArray, not, or, sql } from "drizzle-orm";
 import { sqlBatches } from "./batch.js";
 import type { EvalDb } from "./client.js";
@@ -198,6 +198,15 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
   };
 
   return {
+    async withRunDispatchGate(runId, dispatch) {
+      return db.transaction(async (transaction) => {
+        const [run] = await transaction.select({ runId: runs.runId, stopRequested: runs.stopRequested })
+          .from(runs).where(and(eq(runs.runId, runId), ownerScope.run)).for("update");
+        if (!run) throw new Error(`Unknown run ${runId}`);
+        if (run.stopRequested) throw new RuntimeRunStoppedError(runId);
+        return dispatch();
+      });
+    },
     async getRun(runId) {
       return db.transaction(async (transaction) => (
         await readRunRecords(transaction, [runId], scope)
@@ -218,6 +227,7 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
         const [project] = await transaction.select({
           ownerUserId: projects.ownerUserId,
           sourceBranch: projects.sourceBranch,
+          evaluationOutputSchema: projects.evaluationOutputSchema,
           initialLaunch: projects.initialLaunch,
         })
           .from(projects)
@@ -237,6 +247,9 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
         if (scope.kind === "user" && (project.sourceBranch !== scope.release.sourceBranch
           || run.sourceCommit !== scope.release.sourceCommit)) {
           throw new Error("Project source branch or Run source commit differs from the active Eval SP release");
+        }
+        if (run.config.operation !== "execution" && project.evaluationOutputSchema === null) {
+          throw new Error("Project evaluation output JSON Schema must be bound before evaluation admission");
         }
         const launch = launchFor(run);
         if (project.initialLaunch === null && launch === null) {

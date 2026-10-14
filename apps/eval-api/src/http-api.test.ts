@@ -110,6 +110,24 @@ describe("Eval HTTP control plane", () => {
     expect(uploadInitialMaterials).toHaveBeenCalledTimes(1);
   });
 
+  it("returns request errors for invalid, oversized and locked Project JSON Schemas", async () => {
+    const app = setup();
+    const url = "/api/projects/project-1/evaluation-output-schema";
+    app.initialResources.mockRejectedValueOnce(new TypeError("Evaluation output JSON Schema is invalid"));
+    expect((await app.handler(request(url, "PUT", { type: 42 }))).status).toBe(400);
+    app.initialResources.mockRejectedValueOnce(new RangeError("Evaluation output JSON Schema is too large"));
+    expect((await app.handler(request(url, "PUT", { type: "object" }))).status).toBe(413);
+    app.initialResources.mockRejectedValueOnce(new Error(
+      "Project evaluation output JSON Schema cannot change after evaluation admission",
+    ));
+    expect((await app.handler(request(url, "PUT", { type: "object" }))).status).toBe(409);
+    app.initialResources.mockRejectedValueOnce(new Error(
+      "Project evaluation output JSON Schema must be bound before evaluation admission",
+    ));
+    expect((await app.handler(request("/api/runs/pipeline", "POST", {}))).status).toBe(409);
+    expect(app.forOwner).not.toHaveBeenCalled();
+  });
+
   it("routes project, Dataset, Config, Run and Metrics operations under the verified owner", async () => {
     const app = setup();
     const project = await app.handler(request("/api/projects", "POST", { name: "Tasks" }));

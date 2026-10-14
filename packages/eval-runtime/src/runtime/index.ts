@@ -39,7 +39,7 @@ import type {
   RuntimeRunRecord,
   SamplingState,
 } from "./store.js";
-import { persistRuntimeRecord, RuntimeRunIdentityConflictError } from "./store.js";
+import { persistRuntimeRecord, RuntimeRunIdentityConflictError, RuntimeRunStoppedError } from "./store.js";
 import {
   type AgentAttemptRecord,
   agentOperationKey,
@@ -178,12 +178,14 @@ class RunReader {
 class RunResumer extends RunReader implements EvalRunResumer {
   readonly #harness: Harness;
   readonly #stageDependencies: RuntimeStageDependencies;
+  readonly #getProject: EvalRunResumerDependencies["getProject"];
   readonly #createRetryController: (policy?: RetryPolicy) => RetryController;
   readonly #onError: (error: Error) => void;
 
   constructor(dependencies: EvalRunResumerDependencies) {
     super(dependencies);
     this.#harness = dependencies.harness;
+    this.#getProject = dependencies.getProject;
     this.#createRetryController = dependencies.createRetryController ?? createRetryController;
     this.#onError = dependencies.onError ?? ((error) => console.error(error));
     this.#stageDependencies = {
@@ -208,7 +210,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
       const unfinished = samplings.filter(({ execution }) => isPendingStatus(execution.status));
       if (unfinished.length > 0) {
         const contexts = await this.loadSamplingContexts(unfinished, run.projectId);
-        await this.runExecutionPhase(contexts, run.config.execution, stopSignal);
+        await this.runExecutionPhase(contexts, run.config.execution, runId, stopSignal);
         samplings = await this.loadSamplingRecords(run.samplingIds);
       }
       if (samplings.some(({ execution }) => isPendingStatus(execution.status))) return;
@@ -240,8 +242,12 @@ class RunResumer extends RunReader implements EvalRunResumer {
       sample: context.sample,
     }));
 
+    const project = toEvaluate.length > 0 ? await this.#getProject(run.projectId) : null;
+    if (toEvaluate.length > 0 && !project?.evaluationOutputSchema) {
+      throw new Error(`Project ${run.projectId} has no evaluation output JSON Schema`);
+    }
     const settlements = await Promise.allSettled([
-      this.runEvaluationPhase(evaluationContexts, evaluationConfig, stopSignal),
+      this.runEvaluationPhase(evaluationContexts, evaluationConfig, project?.evaluationOutputSchema, runId, stopSignal),
       ...toCancel.map((evaluation) => this.cancelEvaluation(evaluation, evaluationConfig)),
     ]);
     const errors = settlements.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
@@ -251,10 +257,11 @@ class RunResumer extends RunReader implements EvalRunResumer {
   private async runExecutionPhase(
     contexts: readonly RuntimeSamplingContext[],
     config: ResolvedExecutionConfig,
+    runId: string,
     stopSignal?: AbortSignal,
   ): Promise<void> {
     const scheduler = this.scheduler(config.executionConcurrency);
-    const dependencies = this.stageDependenciesFor(stopSignal);
+    const dependencies = this.stageDependenciesFor(runId, stopSignal);
     const errors: unknown[] = [];
     await scheduler.run(contexts.map((context) => async () => {
       if (stopSignal?.aborted) return;
@@ -265,7 +272,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
           retryPolicy: config.retryPolicy,
         });
       } catch (error) {
-        errors.push(error);
+        if (!(error instanceof RuntimeRunStoppedError)) errors.push(error);
       }
     }));
     if (errors.length > 0) throw new AggregateError(errors, "Execution phase could not persist its progress");
@@ -274,10 +281,13 @@ class RunResumer extends RunReader implements EvalRunResumer {
   private async runEvaluationPhase(
     contexts: readonly RuntimeEvaluationContext[],
     config: ResolvedEvaluationConfig,
+    evaluationOutputSchema: NonNullable<Project["evaluationOutputSchema"]> | undefined,
+    runId: string,
     stopSignal?: AbortSignal,
   ): Promise<void> {
+    if (contexts.length > 0 && !evaluationOutputSchema) throw new Error("Evaluation output JSON Schema is required");
     const scheduler = this.scheduler(config.evaluationConcurrency);
-    const dependencies = this.stageDependenciesFor(stopSignal);
+    const dependencies = this.stageDependenciesFor(runId, stopSignal);
     const errors: unknown[] = [];
     await scheduler.run(contexts.map((context) => async () => {
       if (stopSignal?.aborted) return;
@@ -286,9 +296,10 @@ class RunResumer extends RunReader implements EvalRunResumer {
           context,
           harnessConfig: config.evaluationHarness,
           retryPolicy: config.retryPolicy,
+          evaluationOutputSchema: evaluationOutputSchema!,
         });
       } catch (error) {
-        errors.push(error);
+        if (!(error instanceof RuntimeRunStoppedError)) errors.push(error);
       }
     }));
     if (errors.length > 0) throw new AggregateError(errors, "Evaluation phase could not persist its progress");
@@ -369,10 +380,30 @@ class RunResumer extends RunReader implements EvalRunResumer {
     };
   }
 
-  private stageDependenciesFor(stopSignal?: AbortSignal): RuntimeStageDependencies {
-    if (!stopSignal) return this.#stageDependencies;
+  private guardedHarness(runId: string): Harness {
+    const harness = this.#harness;
+    const gate = <T>(dispatch: () => Promise<T>): Promise<T> => this.store.withRunDispatchGate(runId, dispatch);
+    return {
+      ensureAgent: (input) => gate(() => harness.ensureAgent(input)),
+      materializeInitialData: (input) => gate(() => harness.materializeInitialData(input)),
+      materializeSubjectTrajectory: (input) => gate(() => harness.materializeSubjectTrajectory(input)),
+      submitAgent: (input) => gate(() => harness.submitAgent(input)),
+      restartAgent: (input) => gate(() => harness.restartAgent(input)),
+      waitForSubmission: (input) => harness.waitForSubmission(input),
+      inspectAgentOperation: (input) => harness.inspectAgentOperation(input),
+      stopAgent: (input) => harness.stopAgent(input),
+      collectExecution: (input) => harness.collectExecution(input),
+      collectEvaluation: (input) => harness.collectEvaluation(input),
+      collectAgentResources: (input) => harness.collectAgentResources(input),
+    };
+  }
+
+  private stageDependenciesFor(runId: string, stopSignal?: AbortSignal): RuntimeStageDependencies {
+    const harness = this.guardedHarness(runId);
+    if (!stopSignal) return { ...this.#stageDependencies, harness };
     return {
       ...this.#stageDependencies,
+      harness,
       createRetryController: (policy) => {
         const delegate = this.#createRetryController(policy);
         return {
@@ -508,10 +539,15 @@ class RunResumer extends RunReader implements EvalRunResumer {
       }
       if (receipt && isPendingStatus(current.status.status)) {
         const [context] = await this.loadSamplingContexts([sampling], run.projectId);
+        const project = await this.#getProject(run.projectId);
+        if (!project?.evaluationOutputSchema) {
+          throw new Error(`Project ${run.projectId} has no evaluation output JSON Schema`);
+        }
         await evaluateSampling(this.stopStageDependencies(), {
           context: { sampling, evaluation: current, sample: context!.sample },
           harnessConfig: evaluationConfig.evaluationHarness,
           retryPolicy: evaluationConfig.retryPolicy,
+          evaluationOutputSchema: project.evaluationOutputSchema,
         });
         current = (await this.store.getEvaluation(current.evaluationId))!;
       }
@@ -913,6 +949,7 @@ class FullRuntime extends RuntimeCoordinator implements EvalRuntime {
     this.#resumer = new RunResumer({
       store: dependencies.store,
       getSamples: dependencies.catalog.getSamples.bind(dependencies.catalog),
+      getProject: dependencies.catalog.getProject.bind(dependencies.catalog),
       harness: dependencies.harness,
       ...(dependencies.idFactory === undefined ? {} : { idFactory: dependencies.idFactory }),
       ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
@@ -954,7 +991,7 @@ export type {
   SamplingState,
   RuntimeStore,
 } from "./store.js";
-export { RuntimeProjectBusyError, RuntimeRunIdentityConflictError, RuntimeRecordConflictError, RuntimeRecordPersistenceError } from "./store.js";
+export { RuntimeProjectBusyError, RuntimeRunStoppedError, RuntimeRunIdentityConflictError, RuntimeRecordConflictError, RuntimeRecordPersistenceError } from "./store.js";
 export { toRunSnapshot, toSamplingSnapshot } from "./projection.js";
 export {
   DEFAULT_RETRY_POLICY,

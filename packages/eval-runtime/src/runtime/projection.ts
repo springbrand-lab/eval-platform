@@ -64,10 +64,8 @@ export function toRunSnapshot(
   const progress = aggregateRunProgress(records, evaluations, run.phases);
   const stopFinalizing = run.stopRequested === true && run.stopFinalized !== true
     && !isPendingStatus(progress.status);
-  const stopped = run.stopFinalized === true
-    && !isPendingStatus(progress.status)
-    && (records.some((record) => record.execution.status === "cancelled")
-      || evaluations.some((evaluation) => evaluation.status.status === "cancelled"));
+  const stopped = run.stopRequested === true && run.stopFinalized === true
+    && !isPendingStatus(progress.status);
   return {
     runId: run.runId,
     samplingIds: [...run.samplingIds],

@@ -1,4 +1,5 @@
 import type { AgentRole, Project } from "@eval-platform/eval-contracts";
+import { isDeepStrictEqual } from "node:util";
 import { DatasetEntityNotFoundError, dataSchema } from "@eval-platform/eval-dataset";
 import type { RuntimeCatalog, Sample } from "@eval-platform/eval-runtime";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
@@ -7,8 +8,9 @@ import { createPostgresDatasetStore } from "./dataset.js";
 import { requireOwnerUserId } from "./owner.js";
 import { sqlBatches } from "./batch.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
-import { data, projects, samples, samplings } from "./schema.js";
+import { data, projects, runs, samples, samplings } from "./schema.js";
 import { EvaluationSelectionTooLargeError, MAX_EVALUATION_SAMPLING_IDS } from "../independent-evaluation-limits.js";
+import { parseEvaluationOutputSchema } from "../project-output-schema.js";
 
 export interface SuccessfulSamplingOption {
   readonly samplingId: string;
@@ -32,6 +34,7 @@ export interface SuccessfulSamplingPageRequest extends SuccessfulSamplingFilter 
 export interface PostgresCatalog extends RuntimeCatalog {
   createProject(input: Pick<Project, "name">): Promise<Project>;
   getProject(projectId: string): Promise<Project | null>;
+  bindEvaluationOutputSchema(projectId: string, schema: unknown): Promise<Project>;
   createSample(dataId: string): Promise<Sample>;
   listSuccessfulSamplings(projectId: string, input?: SuccessfulSamplingPageRequest): Promise<SuccessfulSamplingPage>;
   selectAllSuccessfulSamplingIds(projectId: string, filter?: SuccessfulSamplingFilter): Promise<readonly string[]>;
@@ -58,6 +61,7 @@ export function projectFromRow(row: typeof projects.$inferSelect): Project {
     ownerUserId: row.ownerUserId,
     name: row.name,
     sourceBranch: row.sourceBranch,
+    ...(row.evaluationOutputSchema === null ? {} : { evaluationOutputSchema: row.evaluationOutputSchema }),
     ...(row.initialLaunch === null ? {} : { initialLaunch: row.initialLaunch }),
   };
 }
@@ -73,6 +77,33 @@ export async function readSamples(
     .where(and(eq(samples.ownerUserId, ownerUserId), inArray(samples.sampleId, sampleIds)))
     .orderBy(samples.sampleId);
   return records.map(toSample);
+}
+
+export async function bindProjectEvaluationOutputSchema(
+  db: EvalDb,
+  ownerUserId: string,
+  projectId: string,
+  schema: unknown,
+): Promise<Project> {
+  const owner = requireOwnerUserId(ownerUserId);
+  const selected = parseEvaluationOutputSchema(schema);
+  return db.transaction(async (transaction) => {
+    const [row] = await transaction.select().from(projects)
+      .where(and(eq(projects.ownerUserId, owner), eq(projects.projectId, projectId))).for("update");
+    if (!row) throw new Error(`Unknown Project ${projectId}`);
+    if (row.evaluationOutputSchema !== null) {
+      if (isDeepStrictEqual(row.evaluationOutputSchema, selected)) return projectFromRow(row);
+      const [evaluationRun] = await transaction.select({ runId: runs.runId }).from(runs)
+        .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId),
+          sql`${runs.phases} @> '["evaluation"]'::jsonb`)).limit(1);
+      if (evaluationRun) {
+        throw new Error("Project evaluation output JSON Schema cannot change after evaluation admission");
+      }
+    }
+    const [updated] = await transaction.update(projects).set({ evaluationOutputSchema: selected })
+      .where(and(eq(projects.ownerUserId, owner), eq(projects.projectId, projectId))).returning();
+    return projectFromRow(updated!);
+  });
 }
 
 export function createPostgresProjectCatalog(
@@ -95,6 +126,9 @@ export function createPostgresProjectCatalog(
       const [row] = await db.select().from(projects)
         .where(and(eq(projects.ownerUserId, owner), eq(projects.projectId, projectId)));
       return row ? projectFromRow(row) : null;
+    },
+    async bindEvaluationOutputSchema(projectId, schema) {
+      return bindProjectEvaluationOutputSchema(db, owner, projectId, schema);
     },
     async listProjects() {
       const rows = await db.select().from(projects)

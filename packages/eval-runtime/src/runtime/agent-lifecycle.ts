@@ -24,6 +24,7 @@ import type {
 } from "./retry.js";
 import { validateResourceSnapshot } from "./resources.js";
 import { RuntimeRecordPersistenceError } from "./record-errors.js";
+import { RuntimeRunStoppedError } from "./stop-errors.js";
 
 export type AgentLifecycleStage = "execution" | "evaluation";
 
@@ -244,6 +245,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
     let terminalPatch: AttemptPatch | undefined = attempt.completedAt === undefined
       ? undefined
       : { status: attempt.status, completedAt: attempt.completedAt };
+    let dispatchBlocked = false;
 
     try {
       if (attempt.completedAt && !attempt.resources) {
@@ -313,7 +315,10 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
               idempotencyKey,
               attemptNumber === 1 ? "submission" : "restart",
               retryController,
-            );
+            ).catch((error: unknown) => {
+              if (error instanceof RuntimeRunStoppedError) dispatchBlocked = true;
+              throw error;
+            });
           requireSubmissionId(submission);
           if (attempt.submissionId && attempt.submissionId !== submission.submissionId) {
             throw new AgentOperationError("Attempt belongs to a different Submission", false, "network");
@@ -341,9 +346,9 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
         }
       } finally {
         const terminalSaved = terminalPatch === undefined || attempt.completedAt !== undefined;
-        const needsResources = attempt.resources?.status === "pending"
+        const needsResources = !dispatchBlocked && (attempt.resources?.status === "pending"
           || (attempt.resources?.status === "collected" && terminal !== undefined
-            && !attempt.resources.snapshot.finalized);
+            && !attempt.resources.snapshot.finalized));
         if (terminalSaved && needsResources) {
           const resources = await collectResourcesWithRetry(
             dependencies, options, handle, resourceScope, retryController,
@@ -393,7 +398,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
 
       return { handle, output };
     } catch (error) {
-      if (error instanceof RuntimeRecordPersistenceError) throw error;
+      if (error instanceof RuntimeRecordPersistenceError || error instanceof RuntimeRunStoppedError) throw error;
       const details = describeAgentError(error);
       if (terminalPatch === undefined && attempt.resources === undefined) {
         await options.updateAttempt(attempt, {
@@ -541,6 +546,7 @@ async function submitWithReconciliation<TAttempt extends AgentAttemptRecord, TOu
         ? await dependencies.harness.restartAgent(input)
         : await dependencies.harness.submitAgent(input);
     } catch (error) {
+      if (error instanceof RuntimeRunStoppedError) throw error;
       const reconciliation = await inspectUncertainOperation(
         dependencies.harness,
         handle,

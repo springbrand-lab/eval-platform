@@ -19,6 +19,7 @@
     "@eval-platform/eval-dataset": "workspace:*",
     "@eval-platform/eval-metrics": "workspace:*",
     "@eval-platform/eval-runtime": "workspace:*",
+    "ajv": "^8.20.0",
     "drizzle-orm": "^0.45.2",
     "jsonc-parser": "^3.3.1",
     "pg": "^8.23.0",

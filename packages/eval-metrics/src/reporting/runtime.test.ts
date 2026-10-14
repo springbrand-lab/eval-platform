@@ -19,6 +19,7 @@ function runtimeFixture() {
   const samplings = new Map<string, SamplingState>();
   const evaluations = new Map<string, EvaluationRecord>();
   const store: RuntimeStore = {
+    async withRunDispatchGate(_runId, dispatch) { return dispatch(); },
     async getRun(id) { return structuredClone(runs.get(id) ?? null); },
     async findRunByIdempotencyKey(projectId, key) {
       return structuredClone([...runs.values()].find(
@@ -41,6 +42,8 @@ function runtimeFixture() {
   };
   const catalog: RuntimeCatalog = {
     async listProjects() { return [PROJECT]; },
+    async getProject(id) { return id === PROJECT.projectId
+      ? { ...PROJECT, evaluationOutputSchema: { type: "object" } } : null; },
     async listAgents() { return [{ agentConfig: SUBJECT, name: "Subject", role: "subject" }, { agentConfig: EVALUATOR, name: "Judge", role: "evaluator" }]; },
     async listDatasets() { return [DATASET]; },
     async listData() { return [DATA]; },

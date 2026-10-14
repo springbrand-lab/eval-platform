@@ -10,6 +10,7 @@ import type { AgentHandle } from "../harness/index.js";
 
 import type { RuntimeStore } from "./store.js";
 import { RuntimeRecordPersistenceError, persistRuntimeRecord, sameRuntimeRecordFacts } from "./store.js";
+import { RuntimeRunStoppedError } from "./stop-errors.js";
 import type { RuntimeSamplingContext } from "./model.js";
 import type { RetryController } from "./retry.js";
 import {
@@ -115,7 +116,7 @@ export async function executeSampling(
     if (!sample.data || typeof sample.data !== "object" || Array.isArray(sample.data)) {
       throw new AgentOperationError("Sample data must be an object", false, "network");
     }
-    const { dataId: _dataId, evalPrompt: _evalPrompt, ...data } = sample.data;
+    const { dataId: _dataId, evalPrompt: _evalPrompt, evalInitialMaterials: _evalMaterials, ...data } = sample.data;
     const input = dataInputSchema.safeParse(data);
     if (!input.success) throw new AgentOperationError(input.error.message, false, "network");
     const initialData = input.data;
@@ -198,6 +199,7 @@ export async function executeSampling(
     });
     return { state: current, sample };
   } catch (error) {
+    if (error instanceof RuntimeRunStoppedError) throw error;
     if (error instanceof RuntimeRecordPersistenceError && error.outcome !== "not-committed") throw error;
     const details = describeAgentError(error);
     const stored = await dependencies.store.getSampling(current.samplingId);

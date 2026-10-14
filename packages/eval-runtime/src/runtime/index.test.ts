@@ -21,7 +21,7 @@ import type {
   SamplingState,
   RuntimeStore,
 } from "./store.js";
-import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError, sameRuntimeRecordFacts } from "./store.js";
+import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError, RuntimeRunStoppedError, sameRuntimeRecordFacts } from "./store.js";
 import type { RetryController, RetryOperation } from "./retry.js";
 import {
   createEvalRuntime as createRuntimeWithRelease,
@@ -242,6 +242,7 @@ function makeSample(sampleId: string): Sample {
       json: { task: sampleId },
       initialSession: { bundleId: "sessions-bundle", sessionId: "session-seed" },
       initialMaterials: { bundleId: "materials-bundle", materialId: "materials-1" },
+      evalInitialMaterials: { bundleId: "eval-bundle", materialId: "judge-brief" },
       metadata: { source: "test" },
     },
   };
@@ -250,6 +251,10 @@ function makeSample(sampleId: string): Sample {
 function makeCatalog(samples: readonly Sample[] = [makeSample("sample-1")]): RuntimeCatalog {
   return {
     listProjects: async () => [],
+    getProject: async (projectId) => ({
+      projectId, ownerUserId: "owner", name: "test", sourceBranch: "release-2.0.0",
+      evaluationOutputSchema: { type: "object", properties: { score: { type: "number" } } },
+    }),
     listAgents: async () => [],
     listDatasets: async () => [],
     listData: async () => [{ dataId: "data-1", userPrompt: "Execute data", json: { task: "data" } }],
@@ -270,6 +275,10 @@ function makeStore(options: StoreOptions = {}): RuntimeStore {
   const samplings = new Map<string, SamplingState>();
   const evaluations = new Map<string, EvaluationRecord>();
   return {
+    async withRunDispatchGate(runId, dispatch) {
+      if (runs.get(runId)?.stopRequested) throw new RuntimeRunStoppedError(runId);
+      return dispatch();
+    },
     async getRun(runId) {
       return runs.get(runId) ?? null;
     },
@@ -552,6 +561,7 @@ describe("eval runtime orchestration", () => {
       expect(input.idempotencyKey).toBe(`initial-data:${input.handle.chatId}`);
       expect(input.data.initialSession).toEqual({ bundleId: "sessions-bundle", sessionId: "session-seed" });
       expect(input.data.initialMaterials).toEqual({ bundleId: "materials-bundle", materialId: "materials-1" });
+      expect(input.data).not.toHaveProperty("evalInitialMaterials");
       expect(input.data).not.toHaveProperty("sampleId");
       expect(input.data).not.toHaveProperty("dataId");
     }
@@ -586,9 +596,14 @@ describe("eval runtime orchestration", () => {
         expect(preparations).toHaveLength(2);
         const subject = preparations.find((input) => input.handle.role === "subject")!;
         const evaluator = preparations.find((input) => input.handle.role === "evaluator")!;
-        const { dataId: _dataId, evalPrompt: _evalPrompt, ...expectedSubject } = sample.data;
-        const { initialSession: _initialSession, userPrompt: _subjectPrompt, ...evaluationFields } = expectedSubject;
-        const expectedEvaluator = { ...evaluationFields, userPrompt: sample.data.evalPrompt };
+        const { dataId: _dataId, evalPrompt: _evalPrompt,
+          evalInitialMaterials: _evalMaterials, ...expectedSubject } = sample.data;
+        const { initialSession: _initialSession, userPrompt: _subjectPrompt,
+          initialMaterials: _subjectMaterials, ...evaluationFields } = expectedSubject;
+        const expectedEvaluator = {
+          ...evaluationFields, userPrompt: sample.data.evalPrompt,
+          initialMaterials: sample.data.evalInitialMaterials,
+        };
         expect(subject.data).toEqual(expectedSubject);
         expect(evaluator.data).toEqual(expectedEvaluator);
         expect(subject.data.sampleId).toEqual(businessSampleId);
@@ -921,11 +936,14 @@ describe("eval runtime orchestration", () => {
     expect(evaluator.data).not.toHaveProperty("evalPrompt");
     expect(evaluator.data).toMatchObject({
       userPrompt: sample.data.evalPrompt,
-      initialMaterials: sample.data.initialMaterials,
+      initialMaterials: sample.data.evalInitialMaterials,
       expectedOutput: sample.data.expectedOutput,
       labels: sample.data.labels,
     });
     expect(evaluator.idempotencyKey).toBe(`initial-data:${evaluator.handle.chatId}`);
+    expect(evaluator.evaluationOutputSchema).toEqual({
+      type: "object", properties: { score: { type: "number" } },
+    });
     expect(evaluator.handle.chatId).not.toBe(subject.handle.chatId);
     expect(vi.mocked(harness.submitAgent).mock.calls.find(([call]) => call.handle.role === "subject")?.[0].prompt)
       .toBe(sample.data.userPrompt);
@@ -936,6 +954,25 @@ describe("eval runtime orchestration", () => {
     );
     expect(vi.mocked(harness.materializeSubjectTrajectory).mock.invocationCallOrder[0]!)
       .toBeLessThan(vi.mocked(harness.submitAgent).mock.invocationCallOrder[evaluationSubmitIndex]!);
+  });
+
+  it("passes one Project JSON Schema to every Evaluator in a multi-Sampling evaluation", async () => {
+    const harness = makeHarness();
+    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const execution = await runtime.start(startRequest("schema-multi-execution", EXECUTION_CONFIG_TWO_SAMPLES_ID));
+    await expect(waitForTerminal(runtime, execution.runId)).resolves.toMatchObject({ status: "succeeded" });
+    const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    await expect(waitForTerminal(runtime, evaluation.runId)).resolves.toMatchObject({ status: "succeeded" });
+    const evaluatorInputs = vi.mocked(harness.materializeInitialData).mock.calls
+      .map(([input]) => input).filter((input) => input.handle.role === "evaluator");
+    expect(evaluatorInputs).toHaveLength(2);
+    for (const input of evaluatorInputs) {
+      expect(input.evaluationOutputSchema).toEqual({
+        type: "object", properties: { score: { type: "number" } },
+      });
+      expect(input.data.initialMaterials).toEqual({ bundleId: "eval-bundle", materialId: "judge-brief" });
+      expect(input.data).not.toHaveProperty("evalInitialMaterials");
+    }
   });
 
   it("allows execution-only Data without evalPrompt but rejects evaluation admission", async () => {
@@ -1648,7 +1685,8 @@ describe("eval runtime orchestration", () => {
       artifacts: [{ artifactId: "partial", kind: "project", path: "/eval/partial" }],
       trajectory: { trajectoryId: "full-trajectory", source: "subject", path: "/eval/trajectory.jsonl" },
     });
-    await createEvalRunResumer({ getSamples: makeCatalog().getSamples, harness, store }).resume(run.runId);
+    await createEvalRunResumer({ getSamples: makeCatalog().getSamples,
+      getProject: makeCatalog().getProject, harness, store }).resume(run.runId);
     await expect(runtime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
       execution: { status: "failed", lastError: "agent task failed" },
       artifacts: [{ artifactId: "partial" }],
@@ -2554,7 +2592,9 @@ describe("Project Run stop", () => {
       const record = await savedGetRun(runId);
       return record ? { ...record, stopRequested: true } : null;
     };
-    const resumer = createEvalRunResumer({ getSamples: catalog.getSamples, harness, store, onError: vi.fn() });
+    const resumer = createEvalRunResumer({
+      getProject: catalog.getProject, getSamples: catalog.getSamples, harness, store, onError: vi.fn(),
+    });
     return { store, harness, admission, resumer };
   }
 
@@ -2572,6 +2612,61 @@ describe("Project Run stop", () => {
     });
     expect(harness.ensureAgent).not.toHaveBeenCalled();
     expect(harness.submitAgent).not.toHaveBeenCalled();
+  });
+
+  it("reports an accepted stop as cancelled even if the last stage finished naturally", async () => {
+    const { store, admission } = stoppedRun();
+    const handle = await admission.start(startRequest("stop-natural-completion-race"));
+    const run = (await store.getRun(handle.runId))!;
+    const queued = (await store.getSampling(handle.samplingIds[0]!))!;
+    const succeeded: SamplingState = { ...queued, execution: { status: "succeeded" } };
+    await store.updateSampling(succeeded, queued);
+    expect(toRunSnapshot({ ...run, stopFinalized: true }, [succeeded], [])).toMatchObject({
+      stopRequested: true, stopFinalized: true, status: "cancelled",
+    });
+  });
+
+  it("leaves a blocked submission for stop cleanup without inventing resource facts", async () => {
+    const store = makeStore();
+    const catalog = makeCatalog();
+    const harness = makeHarness();
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog, configResolver: makeConfigResolver(), store,
+    });
+    const handle = await admission.start(startRequest("stop-before-submission"));
+    const originalGate = store.withRunDispatchGate.bind(store);
+    const originalGetRun = store.getRun.bind(store);
+    let calls = 0;
+    let stopped = false;
+    store.withRunDispatchGate = async (runId, dispatch) => {
+      calls += 1;
+      if (calls === 3) {
+        stopped = true;
+        throw new RuntimeRunStoppedError(runId);
+      }
+      return originalGate(runId, dispatch);
+    };
+    store.getRun = async (runId) => {
+      const run = await originalGetRun(runId);
+      return run && stopped ? { ...run, stopRequested: true } : run;
+    };
+    const resumer = createEvalRunResumer({
+      getProject: catalog.getProject, getSamples: catalog.getSamples, harness, store,
+    });
+
+    await resumer.resume(handle.runId);
+    const beforeCleanup = (await store.getSampling(handle.samplingIds[0]!))!;
+    expect(stopped).toBe(true);
+    expect(beforeCleanup.execution.status).toBe("starting");
+    expect(beforeCleanup.executionAttempts[0]?.resources?.status).toBe("pending");
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect(harness.collectAgentResources).not.toHaveBeenCalled();
+
+    await resumer.stop(handle.runId);
+    const final = (await store.getSampling(handle.samplingIds[0]!))!;
+    expect(final.execution.status).toBe("cancelled");
+    expect(final.executionAttempts[0]).toMatchObject({ status: "cancelled" });
+    expect(final.executionAttempts[0]?.resources).toBeUndefined();
   });
 
   it("interrupts a live Subject and preserves its artifacts, trajectory and resource facts", async () => {
@@ -2665,7 +2760,9 @@ describe("Project Run stop", () => {
     let finishWait!: (submission: AgentSubmission) => void;
     const waiting = new Promise<AgentSubmission>((resolve) => { finishWait = resolve; });
     vi.mocked(harness.waitForSubmission).mockImplementation(async () => waiting);
-    const resumer = createEvalRunResumer({ getSamples: catalog.getSamples, harness, store });
+    const resumer = createEvalRunResumer({
+      getProject: catalog.getProject, getSamples: catalog.getSamples, harness, store,
+    });
     const controller = new AbortController();
     const task = resumer.resume(handle.runId, controller.signal);
     await vi.waitFor(() => expect(harness.waitForSubmission).toHaveBeenCalledOnce());
@@ -3731,6 +3828,7 @@ describe("Run recovery from persisted facts", () => {
     const run = await admitted.start(startRequest("narrow-run-resumer"));
     const resumer = createEvalRunResumer({
       getSamples: makeCatalog().getSamples,
+      getProject: makeCatalog().getProject,
       harness,
       store,
     });
@@ -3774,7 +3872,8 @@ describe("Run recovery from persisted facts", () => {
       trajectory: { trajectoryId: "complete-trace", source: "subject", path: "/eval/trace.jsonl" },
     });
 
-    await createEvalRunResumer({ getSamples: makeCatalog().getSamples, harness, store }).resume(run.runId);
+    await createEvalRunResumer({ getSamples: makeCatalog().getSamples,
+      getProject: makeCatalog().getProject, harness, store }).resume(run.runId);
 
     expect((await store.getSampling(samplingId))?.execution).toEqual({ status: "failed", lastError: "agent task failed" });
     expect((await store.getSampling(samplingId))?.trajectory?.trajectoryId).toBe("complete-trace");

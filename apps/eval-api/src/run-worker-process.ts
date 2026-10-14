@@ -3,9 +3,10 @@ import { dataSchema } from "@eval-platform/eval-dataset";
 import { and, eq, inArray } from "drizzle-orm";
 import type { Pool } from "pg";
 import { createEvalDb } from "./db/client.js";
+import { projectFromRow } from "./db/catalog.js";
 import { sqlBatches } from "./db/batch.js";
 import { createPostgresWorkerRuntimeStore } from "./db/runtime.js";
-import { data, samples } from "./db/schema.js";
+import { data, projects, samples } from "./db/schema.js";
 import { createSpHarness, type SpHarnessOptions } from "./sp/harness.js";
 import { createPostgresRunNotifications, startEvalRunWorker, type EvalRunWorker } from "./worker.js";
 
@@ -24,6 +25,10 @@ export async function startSpEvalRunWorkerProcess(options: SpEvalRunWorkerProces
   const db = createEvalDb(options.pool);
   const store = createPostgresWorkerRuntimeStore(db);
   const runtime = createEvalRunResumer({
+    async getProject(projectId) {
+      const [row] = await db.select().from(projects).where(eq(projects.projectId, projectId));
+      return row ? projectFromRow(row) : null;
+    },
     async getSamples(sampleIds) {
       // Only trusted, persisted Run facts reach this cross-user recovery reader.
       const byId = new Map<string, { sampleId: string; data: ReturnType<typeof dataSchema.parse> }>();
