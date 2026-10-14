@@ -373,6 +373,20 @@ function makeSubmission(status: AgentSubmission["status"] = "completed", submiss
 }
 
 function makeHarness(): Harness {
+  const submissionIds = new Map<string, string>();
+  const operationKey = (handle: AgentHandle, idempotencyKey: string) =>
+    JSON.stringify([handle.chatId, idempotencyKey]);
+  const submissionIdFor = (handle: AgentHandle, idempotencyKey: string) =>
+    submissionIds.get(operationKey(handle, idempotencyKey));
+  const submit = (handle: AgentHandle, idempotencyKey: string): AgentSubmission => {
+    const key = operationKey(handle, idempotencyKey);
+    let submissionId = submissionIds.get(key);
+    if (!submissionId) {
+      submissionId = `generated-submission-${submissionIds.size + 1}`;
+      submissionIds.set(key, submissionId);
+    }
+    return makeSubmission("completed", submissionId);
+  };
   return {
     ensureAgent: vi.fn(async ({ role, framework, samplingId, chatId, evaluationWorkspace }): Promise<AgentHandle> => ({
       role,
@@ -387,10 +401,12 @@ function makeHarness(): Harness {
       target: "workspace" as const,
       rootPath: "/eval/input",
     })),
-    submitAgent: vi.fn(async () => makeSubmission()),
-    restartAgent: vi.fn(async () => makeSubmission()),
-    waitForSubmission: vi.fn(async () => makeSubmission()),
-    inspectAgentOperation: vi.fn(async () => makeSubmission()),
+    submitAgent: vi.fn(async ({ handle, idempotencyKey }) => submit(handle, idempotencyKey)),
+    restartAgent: vi.fn(async ({ handle, idempotencyKey }) => submit(handle, idempotencyKey)),
+    waitForSubmission: vi.fn(async ({ handle, idempotencyKey }) =>
+      makeSubmission("completed", submissionIdFor(handle, idempotencyKey) ?? "submission-1")),
+    inspectAgentOperation: vi.fn(async ({ handle, idempotencyKey }) =>
+      makeSubmission("completed", submissionIdFor(handle, idempotencyKey) ?? "submission-1")),
     collectExecution: vi.fn(async ({ handle }) => ({
       samplingId: handle.samplingId,
       status: "succeeded" as const,
@@ -404,7 +420,11 @@ function makeHarness(): Harness {
       trajectory: { trajectoryId: "trajectory-2", source: "evaluator" as const, path: "/eval/evaluation.jsonl" },
     })),
     collectAgentResources: vi.fn(async ({ handle, idempotencyKey, submissionId }) => ({
-      scope: { chatId: handle.chatId, submissionId: submissionId ?? "submission-1", idempotencyKey },
+      scope: {
+        chatId: handle.chatId,
+        submissionId: submissionId ?? submissionIdFor(handle, idempotencyKey) ?? "submission-1",
+        idempotencyKey,
+      },
       observedAt: "2026-10-08T00:00:00.000Z",
       finalized: true,
       coverage: {
@@ -1980,9 +2000,14 @@ describe("eval runtime orchestration", () => {
     const evaluation = await runtime.evaluate(
       evaluateRequest(execution.samplingIds, EVALUATION_CONFIG_RETRY_ONE_ID),
     );
-    await expect(waitForTerminal(runtime, evaluation.runId)).resolves.toMatchObject({
-      status: "succeeded",
-    });
+    const snapshot = await waitForTerminal(runtime, evaluation.runId);
+    expect(snapshot.status).toBe("succeeded");
+    const evaluator = await runtime.getEvaluation(snapshot.evaluationIds[0]!);
+    const submissionIds = evaluator.attempts.map((attempt) => attempt.submissionId);
+    expect(submissionIds).toHaveLength(2);
+    expect(submissionIds[0]).toBe("submission-1");
+    expect(submissionIds[1]).toBeDefined();
+    expect(submissionIds[1]).not.toBe(submissionIds[0]);
     expect(harness.ensureAgent).toHaveBeenCalledTimes(2);
     expect(harness.restartAgent).toHaveBeenCalledTimes(1);
   });
@@ -2011,6 +2036,12 @@ describe("eval runtime orchestration", () => {
 
     expect(snapshot.status).toBe("succeeded");
     expect(run.samplingIds).toHaveLength(1);
+    const sampling = await runtime.getSampling(run.samplingIds[0]!);
+    const submissionIds = sampling.executionAttempts.map((attempt) => attempt.submissionId);
+    expect(submissionIds).toHaveLength(2);
+    expect(submissionIds[0]).toBe("submission-1");
+    expect(submissionIds[1]).toBeDefined();
+    expect(submissionIds[1]).not.toBe(submissionIds[0]);
     expect(harness.restartAgent).toHaveBeenCalledTimes(1);
   });
 

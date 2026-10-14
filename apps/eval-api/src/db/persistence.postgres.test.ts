@@ -413,6 +413,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
     const completedAttempt: Sampling = {
       ...initial,
+      subjectChatId: "subject-chat",
       execution: { status: "running" },
       executionAttempts: [{
         executionAttemptId: "subject-attempt", samplingId: initial.samplingId,
