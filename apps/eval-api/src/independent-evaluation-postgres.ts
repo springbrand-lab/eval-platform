@@ -7,7 +7,7 @@ import {
 import { and, eq } from "drizzle-orm";
 import { createPostgresCatalog } from "./db/catalog.js";
 import type { EvalDb } from "./db/client.js";
-import { createPostgresConfigStore } from "./db/config.js";
+import { createPostgresConfigReader } from "./db/config.js";
 import { createPostgresRuntimeStore, evaluationFromRow } from "./db/runtime.js";
 import { evaluations, runEvaluations, runs } from "./db/schema.js";
 import {
@@ -33,7 +33,7 @@ export function createPostgresIndependentEvaluationApi(
     ...(options.onError === undefined ? {} : { onError: options.onError }),
     async createOwnerServices(ownerUserId) {
       const configStore = await (options.configStoreForOwner?.(ownerUserId)
-        ?? createPostgresConfigStore(options.db, ownerUserId));
+        ?? createPostgresConfigReader(options.db, ownerUserId));
       const catalog = createPostgresCatalog(options.db, ownerUserId, {
         async listAgents() {
           throw new Error("Agent listing is not part of the independent evaluation API");

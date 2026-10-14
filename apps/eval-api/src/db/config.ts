@@ -76,6 +76,28 @@ function evaluationSettings(config: EvaluationConfig): typeof evaluationConfigs.
   return settings;
 }
 
+/** Runtime admission reads current owner-scoped config without retaining a caller's session token. */
+export function createPostgresConfigReader(db: EvalDb, ownerUserId: string): ConfigStore {
+  const owner = requireOwnerUserId(ownerUserId);
+  return {
+    async getExecutionConfig(configId) {
+      const [row] = await db.select().from(executionConfigs)
+        .where(and(eq(executionConfigs.ownerUserId, owner), eq(executionConfigs.configId, configId)));
+      return row ? executionFromRow(row) : null;
+    },
+    async getEvaluationConfig(configId) {
+      const [row] = await db.select().from(evaluationConfigs)
+        .where(and(eq(evaluationConfigs.ownerUserId, owner), eq(evaluationConfigs.configId, configId)));
+      return row ? evaluationFromRow(row) : null;
+    },
+    async getPipelineConfig(configId) {
+      const [row] = await db.select().from(pipelineConfigs)
+        .where(and(eq(pipelineConfigs.ownerUserId, owner), eq(pipelineConfigs.configId, configId)));
+      return row ? pipelineFromRow(row) : null;
+    },
+  };
+}
+
 export function createPostgresConfigStore(
   db: EvalDb,
   ownerUserId: string,
@@ -83,6 +105,7 @@ export function createPostgresConfigStore(
   sessionToken: string,
 ): PostgresConfigStore {
   const owner = requireOwnerUserId(ownerUserId);
+  const reader = createPostgresConfigReader(db, owner);
   if (typeof sp?.getAgentConfig !== "function") throw new TypeError("Eval SP Agent Config client is required");
   if (typeof sessionToken !== "string" || sessionToken.length === 0) throw new TypeError("Session token is required");
 
@@ -159,6 +182,7 @@ export function createPostgresConfigStore(
   }
 
   return {
+    ...reader,
     async createExecutionConfig(input) {
       const config = await prepareExecutionConfig(input);
       return writeExecutionConfig(config, async (transaction) => {
@@ -178,11 +202,6 @@ export function createPostgresConfigStore(
           .returning({ configId: executionConfigs.configId });
         if (updated.length === 0) throw new ConfigEntityNotFoundError("execution", configId);
       });
-    },
-    async getExecutionConfig(configId) {
-      const [row] = await db.select().from(executionConfigs)
-        .where(and(eq(executionConfigs.ownerUserId, owner), eq(executionConfigs.configId, configId)));
-      return row ? executionFromRow(row) : null;
     },
     async listExecutionConfigs() {
       const rows = await db.select().from(executionConfigs)
@@ -206,11 +225,6 @@ export function createPostgresConfigStore(
         .returning({ configId: evaluationConfigs.configId });
       if (updated.length === 0) throw new ConfigEntityNotFoundError("evaluation", configId);
       return config;
-    },
-    async getEvaluationConfig(configId) {
-      const [row] = await db.select().from(evaluationConfigs)
-        .where(and(eq(evaluationConfigs.ownerUserId, owner), eq(evaluationConfigs.configId, configId)));
-      return row ? evaluationFromRow(row) : null;
     },
     async listEvaluationConfigs() {
       const rows = await db.select().from(evaluationConfigs)
@@ -244,11 +258,6 @@ export function createPostgresConfigStore(
         throw error;
       }
       return config;
-    },
-    async getPipelineConfig(configId) {
-      const [row] = await db.select().from(pipelineConfigs)
-        .where(and(eq(pipelineConfigs.ownerUserId, owner), eq(pipelineConfigs.configId, configId)));
-      return row ? pipelineFromRow(row) : null;
     },
     async listPipelineConfigs() {
       const rows = await db.select().from(pipelineConfigs)

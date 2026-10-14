@@ -7,7 +7,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, createSpHarness, DatasetInUseError, EvalSpApiError, startEvalRunWorker } from "../index.js";
+import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, createSpHarness, DatasetInUseError, EvalSpApiError, startEvalRunWorker } from "../index.js";
 import { isForeignKeyFailure } from "./client.js";
 import { readRunRecords } from "./runtime.js";
 
@@ -579,13 +579,14 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await runtime.getRun(rejectedRun.runId)).toBeNull();
     await runtime.updateSampling({ ...sampling, execution: { status: "succeeded" } }, sampling);
 
-    const configs = createPostgresConfigStore(database.db, "user-A");
+    const configs = configStore("user-A");
     const config = await configs.createEvaluationConfig({
       evaluationHarness: {
         kind: "sp", framework: "sp", agentConfig: { ownerUserId: "user-A", userAgentId: "judge" },
       },
       evaluationConcurrency: 1,
     });
+    expect(await createPostgresConfigReader(database.db, "user-B").getEvaluationConfig(config.configId)).toBeNull();
     const api = createPostgresIndependentEvaluationApi({
       db: database.db,
       spClient: {
