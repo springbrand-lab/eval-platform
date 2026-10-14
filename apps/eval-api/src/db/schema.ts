@@ -23,27 +23,43 @@ export const projects = pgTable("eval_projects", {
 
 export const datasets = pgTable("eval_datasets", {
   datasetId: uuid("dataset_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
   name: text("name").notNull(),
   description: text("description"),
-});
+}, (table) => [
+  unique("eval_datasets_owner_id_uq").on(table.ownerUserId, table.datasetId),
+  index("eval_datasets_owner_idx").on(table.ownerUserId),
+]);
 
 export const data = pgTable("eval_data", {
   dataId: uuid("data_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
   content: jsonb("content").$type<Omit<Data, "dataId">>().notNull(),
-});
+}, (table) => [
+  unique("eval_data_owner_id_uq").on(table.ownerUserId, table.dataId),
+  index("eval_data_owner_idx").on(table.ownerUserId),
+]);
 
 export const datasetData = pgTable("eval_dataset_data", {
-  datasetId: uuid("dataset_id").notNull().references(() => datasets.datasetId, { onDelete: "cascade" }),
-  dataId: uuid("data_id").notNull().references(() => data.dataId, { onDelete: "restrict" }),
+  ownerUserId: text("owner_user_id").notNull(),
+  datasetId: uuid("dataset_id").notNull(),
+  dataId: uuid("data_id").notNull(),
 }, (table) => [
   primaryKey({ columns: [table.datasetId, table.dataId] }),
+  foreignKey({ columns: [table.ownerUserId, table.datasetId], foreignColumns: [datasets.ownerUserId, datasets.datasetId] }).onDelete("cascade"),
+  foreignKey({ columns: [table.ownerUserId, table.dataId], foreignColumns: [data.ownerUserId, data.dataId] }).onDelete("restrict"),
   index("eval_dataset_data_data_idx").on(table.dataId),
 ]);
 
 export const samples = pgTable("eval_samples", {
   sampleId: text("sample_id").primaryKey(),
-  dataId: uuid("data_id").notNull().references(() => data.dataId, { onDelete: "restrict" }),
-}, (table) => [index("eval_samples_data_idx").on(table.dataId)]);
+  ownerUserId: text("owner_user_id").notNull(),
+  dataId: uuid("data_id").notNull(),
+}, (table) => [
+  foreignKey({ columns: [table.ownerUserId, table.dataId], foreignColumns: [data.ownerUserId, data.dataId] }).onDelete("restrict"),
+  index("eval_samples_data_idx").on(table.dataId),
+  index("eval_samples_owner_idx").on(table.ownerUserId),
+]);
 
 export const samplings = pgTable("eval_samplings", {
   samplingId: text("sampling_id").primaryKey(),

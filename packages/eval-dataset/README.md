@@ -2,7 +2,7 @@
 
 ## 职责与文件
 
-本包只管理全局 Dataset、可复用 Data 及二者的关联，不管理用户、Project、Sample、Sampling、Agent 或评估结果，不引入 version。
+本包只管理 Dataset、可复用 Data 及二者的关联，不管理用户、Project、Sample、Sampling、Agent 或评估结果，不引入 version。Eval API 注入按已认证用户限定的 Store；同一用户的 Data 可复用于其多个 Dataset，不可跨用户关联。用户身份与授权由应用和 PostgreSQL 保证，不写进 Data 业务 JSON。
 
 - `dataset/model.ts`：严格 Zod schema、模型和输入类型。模型从 schema 推导，不维护第二份校验规则。
 - `dataset/serialization.ts`：JSON/YAML 文档解析与序列化，只处理文本和模型，不访问存储。
@@ -49,7 +49,7 @@
 
 Dataset/Data 的新实体 ID 使用原生 `crypto.randomUUID()`，与 SP 的 ID 生成方式一致；这不包括外部 Bundle、Session 或素材 ID。平台 Dataset/Data ID 在 schema 边界按 SP 的 Zod UUID 校验与小写规范化模式处理：导入可接受大小写混合的 UUID，查重、Store 比较、查询和返回值统一使用小写身份。只有平台 ID 会转换；外部 Bundle/Session/素材引用和 Data 业务字段保持原值。创建实体时输入不允许调用方覆盖实体 ID。修改是全量替换可编辑字段，不是 PATCH；省略可选字段表示移除该字段。查询不存在的单个实体返回 null。数据库读写失败原样抛出，不能转成空结果。
 
-Data 可以关联到多个 Dataset，关联不复制 Data。全局修改 Data 会影响所有引用它的 Dataset。重复关联和重复解除关联不报错，批量关联必须全成功或全失败。删除 Dataset 只移除 Dataset 和关联，不删除 Data；被任意 Dataset 引用的 Data 不能删除。删除已不存在的实体是无操作。列表必须按实体 ID 稳定排序；查询不存在 Dataset 的 Data 列表应抛出 `DatasetEntityNotFoundError`，不能伪装成空集合。
+Data 可以关联到同一用户的多个 Dataset，关联不复制 Data。修改 Data 会影响该用户所有引用它的 Dataset。重复关联和重复解除关联不报错，批量关联必须全成功或全失败。删除 Dataset 只移除 Dataset 和关联，不删除 Data；被任意 Dataset 引用的 Data 不能删除。删除已不存在的实体是无操作。列表必须按实体 ID 稳定排序；查询不存在 Dataset 的 Data 列表应抛出 `DatasetEntityNotFoundError`，不能伪装成空集合。
 
 ## 文档格式
 

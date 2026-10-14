@@ -18,7 +18,7 @@
 ## 边界与原则
 
 - 保持现有分包及其职责，不重新拆包，不照搬 pydantic 实现。
-- Dataset 全局独立，Data 可复用；本包不管理 Project、Sample、Sampling、Agent、Submission、产物、轨迹或评分。
+- Dataset 按 Eval SP 用户隔离，同一用户的 Data 可复用；本包不管理 Project、Sample、Sampling、Agent、Submission、产物、轨迹或评分，用户归属由应用 Store 保证。
 - 以零技术负债、唯一真相、逻辑清晰和长期可维护为判断标准，不局限于最小补丁。
 - 复用 SP 的公开基础设施，不复制私有实现，不直接访问 SP Durable Object 存储。
 - 真实 Store、数据库事务实现和 SP 生产化接入不作为本包当前核心代码的阻塞项；现有接口本身的真实缺陷仍需评审。

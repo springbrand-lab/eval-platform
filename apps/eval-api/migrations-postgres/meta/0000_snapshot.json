@@ -1,5 +1,5 @@
 {
-  "id": "1aa81562-d34a-4da9-a2f8-effc181b45e8",
+  "id": "e30773f8-cfd1-4546-b109-f5f31962d189",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -14,6 +14,12 @@
           "primaryKey": true,
           "notNull": true
         },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "content": {
           "name": "content",
           "type": "jsonb",
@@ -21,10 +27,35 @@
           "notNull": true
         }
       },
-      "indexes": {},
+      "indexes": {
+        "eval_data_owner_idx": {
+          "name": "eval_data_owner_idx",
+          "columns": [
+            {
+              "expression": "owner_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "eval_data_owner_id_uq": {
+          "name": "eval_data_owner_id_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "owner_user_id",
+            "data_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -33,6 +64,12 @@
       "name": "eval_dataset_data",
       "schema": "",
       "columns": {
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "dataset_id": {
           "name": "dataset_id",
           "type": "uuid",
@@ -64,27 +101,31 @@
         }
       },
       "foreignKeys": {
-        "eval_dataset_data_dataset_id_eval_datasets_dataset_id_fk": {
-          "name": "eval_dataset_data_dataset_id_eval_datasets_dataset_id_fk",
+        "eval_dataset_data_owner_user_id_dataset_id_eval_datasets_owner_user_id_dataset_id_fk": {
+          "name": "eval_dataset_data_owner_user_id_dataset_id_eval_datasets_owner_user_id_dataset_id_fk",
           "tableFrom": "eval_dataset_data",
           "tableTo": "eval_datasets",
           "columnsFrom": [
+            "owner_user_id",
             "dataset_id"
           ],
           "columnsTo": [
+            "owner_user_id",
             "dataset_id"
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "eval_dataset_data_data_id_eval_data_data_id_fk": {
-          "name": "eval_dataset_data_data_id_eval_data_data_id_fk",
+        "eval_dataset_data_owner_user_id_data_id_eval_data_owner_user_id_data_id_fk": {
+          "name": "eval_dataset_data_owner_user_id_data_id_eval_data_owner_user_id_data_id_fk",
           "tableFrom": "eval_dataset_data",
           "tableTo": "eval_data",
           "columnsFrom": [
+            "owner_user_id",
             "data_id"
           ],
           "columnsTo": [
+            "owner_user_id",
             "data_id"
           ],
           "onDelete": "restrict",
@@ -115,6 +156,12 @@
           "primaryKey": true,
           "notNull": true
         },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "name": {
           "name": "name",
           "type": "text",
@@ -128,10 +175,35 @@
           "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "eval_datasets_owner_idx": {
+          "name": "eval_datasets_owner_idx",
+          "columns": [
+            {
+              "expression": "owner_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "eval_datasets_owner_id_uq": {
+          "name": "eval_datasets_owner_id_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "owner_user_id",
+            "dataset_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -568,6 +640,12 @@
           "primaryKey": true,
           "notNull": true
         },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "data_id": {
           "name": "data_id",
           "type": "uuid",
@@ -590,17 +668,34 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "eval_samples_owner_idx": {
+          "name": "eval_samples_owner_idx",
+          "columns": [
+            {
+              "expression": "owner_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
-        "eval_samples_data_id_eval_data_data_id_fk": {
-          "name": "eval_samples_data_id_eval_data_data_id_fk",
+        "eval_samples_owner_user_id_data_id_eval_data_owner_user_id_data_id_fk": {
+          "name": "eval_samples_owner_user_id_data_id_eval_data_owner_user_id_data_id_fk",
           "tableFrom": "eval_samples",
           "tableTo": "eval_data",
           "columnsFrom": [
+            "owner_user_id",
             "data_id"
           ],
           "columnsTo": [
+            "owner_user_id",
             "data_id"
           ],
           "onDelete": "restrict",

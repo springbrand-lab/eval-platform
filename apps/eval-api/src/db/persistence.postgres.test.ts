@@ -111,8 +111,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
   function stores() {
     const db = database.db;
     return {
-      catalog: createPostgresCatalog(db, { async listAgents() { return []; } }),
-      datasetService: createDatasetService(createPostgresDatasetStore(db)),
+      catalog: createPostgresCatalog(db, "user-A", { async listAgents() { return []; } }),
+      datasetService: createDatasetService(createPostgresDatasetStore(db, "user-A")),
       runtime: createPostgresRuntimeStore(db),
       source: createPostgresMetricsSource(db),
     };
@@ -120,7 +120,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
   async function setup() {
     const services = stores();
-    const project = await services.catalog.createProject({ ownerUserId: "user-A", name: "my project" });
+    const project = await services.catalog.createProject({ name: "my project" });
     const dataset = await services.datasetService.createDataset({ name: "shared tasks" });
     const data = await services.datasetService.createData({
       userPrompt: "build a page", sampleId: "business-id", extra: { original: true, nullable: null },
@@ -132,16 +132,27 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     return { ...services, project, dataset, data, sample };
   }
 
-  it("shares global Data across user-owned Projects and Datasets, preserving complete references", async () => {
+  it("shares Data within one user and rejects cross-user Dataset, Data and Sample access", async () => {
     const { catalog, datasetService, project, data, sample } = await setup();
-    const anotherProject = await catalog.createProject({ ownerUserId: "user-B", name: "second" });
     const anotherDataset = await datasetService.createDataset({ name: "another shared set" });
     await datasetService.attachData(anotherDataset.datasetId, [data.dataId, data.dataId]);
     await datasetService.updateData(data.dataId, { userPrompt: "updated", sampleId: "business-id", extra: { nullable: null } });
     expect((await datasetService.listData(anotherDataset.datasetId))[0]).toEqual(await datasetService.getData(data.dataId));
     expect((await catalog.getSample(sample.sampleId))?.data).toEqual(await datasetService.getData(data.dataId));
-    expect((await catalog.listProjectsByOwner("user-A")).map((entry) => entry.projectId)).toEqual([project.projectId]);
-    expect((await catalog.listProjectsByOwner("user-B")).map((entry) => entry.projectId)).toEqual([anotherProject.projectId]);
+    const otherCatalog = createPostgresCatalog(database.db, "user-B", { async listAgents() { return []; } });
+    const otherService = createDatasetService(createPostgresDatasetStore(database.db, "user-B"));
+    const otherProject = await otherCatalog.createProject({ name: "second" });
+    const otherDataset = await otherService.createDataset({ name: "other user's set" });
+    expect(await catalog.listProjects()).toEqual([project]);
+    expect(await otherCatalog.listProjects()).toEqual([otherProject]);
+    expect(await otherService.getDataset(anotherDataset.datasetId)).toBeNull();
+    expect(await otherService.getData(data.dataId)).toBeNull();
+    expect(await otherCatalog.getSample(sample.sampleId)).toBeNull();
+    await expect(otherCatalog.createSample(data.dataId)).rejects.toBeInstanceOf(DatasetEntityNotFoundError);
+    await expect(otherService.attachData(otherDataset.datasetId, [data.dataId]))
+      .rejects.toBeInstanceOf(DatasetEntityNotFoundError);
+    await expect(otherService.importDataset(await datasetService.exportDataset(anotherDataset.datasetId, "json"), "json"))
+      .rejects.toBeInstanceOf(DatasetIdentityConflictError);
     await expect(datasetService.deleteData(data.dataId)).rejects.toBeInstanceOf(DataInUseError);
     await datasetService.deleteDataset(anotherDataset.datasetId);
     expect(await datasetService.getData(data.dataId)).not.toBeNull();
@@ -537,13 +548,23 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect((await source.read({ projectId: project.projectId })).runs[0]).toMatchObject({ phase: "evaluation", status: "succeeded" });
   });
 
-  it("keeps Project and selected Run boundaries even when another user shares a Dataset", async () => {
+  it("keeps Project and selected Run boundaries across user-owned Datasets", async () => {
     const { runtime, catalog, source, project, dataset, sample } = await setup();
-    const other = await catalog.createProject({ ownerUserId: "user-B", name: "other" });
+    const otherCatalog = createPostgresCatalog(database.db, "user-B", { async listAgents() { return []; } });
+    const otherService = createDatasetService(createPostgresDatasetStore(database.db, "user-B"));
+    const other = await otherCatalog.createProject({ name: "other" });
+    const otherDataset = await otherService.createDataset({ name: "other data" });
+    const otherData = await otherService.createData({ userPrompt: "other task" });
+    await otherService.attachData(otherDataset.datasetId, [otherData.dataId]);
+    const otherSample = await otherCatalog.createSample(otherData.dataId);
+    const foreignSampling = makeSampling(other.projectId, sample.sampleId);
+    await expect(runtime.createRunWithSamplings(
+      makeRun(other.projectId, foreignSampling, otherDataset.datasetId), [foreignSampling], [],
+    )).rejects.toThrow("outside its Project owner scope");
     const samplingA = makeSampling(project.projectId, sample.sampleId);
-    const samplingB = makeSampling(other.projectId, sample.sampleId);
+    const samplingB = makeSampling(other.projectId, otherSample.sampleId);
     const runA = makeRun(project.projectId, samplingA, dataset.datasetId);
-    const runB = makeRun(other.projectId, samplingB, dataset.datasetId);
+    const runB = makeRun(other.projectId, samplingB, otherDataset.datasetId);
     await runtime.createRunWithSamplings(runA, [samplingA], []);
     await runtime.createRunWithSamplings(runB, [samplingB], []);
     const facts = await source.read({ projectId: project.projectId, runIds: [runA.runId] });

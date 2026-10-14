@@ -30,14 +30,14 @@ export function createPostgresMetricsSource(db: EvalDb): MetricsSource {
           ? undefined : unique(selectedRuns.flatMap((run) => run.samplingIds));
 
         const requestedDataset = query.datasetId === undefined
-          ? undefined : (await readDatasetSnapshots(transaction, [query.datasetId]))[0];
+          ? undefined : (await readDatasetSnapshots(transaction, project.ownerUserId, [query.datasetId]))[0];
         let eligibleSampleIds: string[] | undefined;
         if (query.datasetId !== undefined) {
           if (!requestedDataset) throw new MetricsQueryError(`Unknown Dataset ${query.datasetId}`);
           const dataIds = requestedDataset.data.map((record) => record.dataId);
           const associatedSamples = dataIds.length === 0 ? [] : await transaction
             .select({ sampleId: samples.sampleId }).from(samples)
-            .where(inArray(samples.dataId, dataIds));
+            .where(and(eq(samples.ownerUserId, project.ownerUserId), inArray(samples.dataId, dataIds)));
           eligibleSampleIds = associatedSamples.map((row) => row.sampleId);
         } else if (query.sampleId !== undefined) {
           eligibleSampleIds = [query.sampleId];
@@ -55,7 +55,7 @@ export function createPostgresMetricsSource(db: EvalDb): MetricsSource {
           ? [] : await transaction.select().from(samplings)
             .where(and(...conditions)).orderBy(samplings.samplingId);
         const selectedSamplingIds = selectedSamplings.map((row) => row.samplingId);
-        const samplesInScope = await readSamples(transaction, unique([
+        const samplesInScope = await readSamples(transaction, project.ownerUserId, unique([
           ...selectedSamplings.map((row) => row.sampleId),
           ...(query.sampleId === undefined ? [] : [query.sampleId]),
         ]));
@@ -67,8 +67,8 @@ export function createPostgresMetricsSource(db: EvalDb): MetricsSource {
           const dataIds = unique(samplesInScope.map((sample) => sample.data.dataId));
           const memberships = dataIds.length === 0 ? [] : await transaction
             .selectDistinct({ datasetId: datasetData.datasetId }).from(datasetData)
-            .where(inArray(datasetData.dataId, dataIds));
-          datasetsInScope = await readDatasetSnapshots(transaction, memberships.map((row) => row.datasetId));
+            .where(and(eq(datasetData.ownerUserId, project.ownerUserId), inArray(datasetData.dataId, dataIds)));
+          datasetsInScope = await readDatasetSnapshots(transaction, project.ownerUserId, memberships.map((row) => row.datasetId));
         }
 
         let runRecords = selectedRuns;

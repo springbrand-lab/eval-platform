@@ -3,7 +3,7 @@ import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval
 import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import { and, eq, exists, gt, inArray, or, sql } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
-import { evaluations, runEvaluations, runs, runSamplings, samplings } from "./schema.js";
+import { datasets, evaluations, projects, runEvaluations, runs, runSamplings, samples, samplings } from "./schema.js";
 
 export type RuntimeReader = Pick<EvalDb, "select">;
 
@@ -154,6 +154,24 @@ export function createPostgresRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRe
         if (identity) {
           const existing = await findByIdentity(transaction, identity);
           if (existing) return { run: existing, created: false };
+        }
+        const [project] = await transaction.select({ ownerUserId: projects.ownerUserId })
+          .from(projects).where(eq(projects.projectId, run.projectId)).for("share");
+        if (!project) throw new Error(`Unknown Project ${run.projectId}`);
+        const selectedSamples = await transaction.select({
+          sampleId: samples.sampleId,
+          ownerUserId: samples.ownerUserId,
+        }).from(samples).where(inArray(samples.sampleId, records.map((record) => record.sampleId)));
+        const sampleOwner = new Map(selectedSamples.map((sample) => [sample.sampleId, sample.ownerUserId]));
+        if (records.some((record) => sampleOwner.get(record.sampleId) !== project.ownerUserId)) {
+          throw new Error("Run contains a Sample outside its Project owner scope");
+        }
+        if (run.config.operation !== "evaluation") {
+          const [dataset] = await transaction.select({ ownerUserId: datasets.ownerUserId })
+            .from(datasets).where(eq(datasets.datasetId, run.config.execution.datasetId)).for("share");
+          if (dataset?.ownerUserId !== project.ownerUserId) {
+            throw new Error("Run uses a Dataset outside its Project owner scope");
+          }
         }
         const [inserted] = await transaction.insert(runs).values({
           runId: run.runId,

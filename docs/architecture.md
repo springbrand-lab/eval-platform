@@ -62,7 +62,7 @@ Dataset ──> Data ──> Sample ──(输入引用)──> Sampling
 ```
 
 - `Project` 属于用户并绑定 SP Git 分支；当前固定分支阶段仅能绑定已部署分支，Run 记录实际 commit；
-- `Dataset` 是可复用的数据组织，不挂在用户下；
+- `Dataset` 属于一个 Eval SP 用户；同一用户的 Data 可在多个 Dataset 和 Project 间复用；
 - `Data` 可以被多个 Dataset 引用；
 - `Data.userPrompt` 是必填的当前任务，其余 JSON 业务字段自由提供并完整保留；`initialSession` 与 `initialMaterials` 都可选，引用内的 Bundle ID 和资源 ID 必须由外部提供；
 - `initialSession` 只引用独立保存的初始化 Session，启动时由 Harness 复制到目标 DO 并交给所选框架加载、重建 Context；准备完成后发送原始 `userPrompt`；
