@@ -8,18 +8,19 @@ function makeRecord(): EvaluationRecord {
     evaluationId: "evaluation-1",
     samplingId: "sampling-1",
     evaluator: { ownerUserId: "user-1", userAgentId: "agent-1" },
-    submissionId: "submission-1",
+    chatId: "chat-1",
     status: { status: "running" },
     attempts: [{
       evaluationAttemptId: "attempt-1",
       evaluationId: "evaluation-1",
       attemptNumber: 1,
+      submissionId: "submission-1",
       status: "completed",
       completedAt: "2026-10-08T00:00:00.000Z",
       resources: {
         status: "collected",
         snapshot: {
-          scope: { submissionId: "submission-1", idempotencyKey: "evaluation:sampling-1" },
+          scope: { chatId: "chat-1", submissionId: "submission-1", idempotencyKey: "evaluation:sampling-1" },
           observedAt: "2026-10-08T00:00:01.000Z",
           finalized: false,
           coverage: { usageEvents: "partial", telemetryEvents: "complete", billingSettlements: "unavailable" },

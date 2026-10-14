@@ -1,8 +1,14 @@
 import type { JsonValue } from "./model.js";
 
 export interface AgentResourceScope {
-  readonly submissionId: string;
+  readonly chatId: string;
   readonly idempotencyKey: string;
+  /** Assigned by SP when the operation is submitted; absent before its receipt is known. */
+  readonly submissionId?: string;
+}
+
+export interface SubmittedAgentResourceScope extends AgentResourceScope {
+  readonly submissionId: string;
 }
 
 export type AgentResourceFact = Readonly<Record<string, JsonValue>>;
@@ -16,7 +22,7 @@ export interface AgentResourceCoverage {
 }
 
 export interface AgentResourceSnapshot {
-  readonly scope: AgentResourceScope;
+  readonly scope: SubmittedAgentResourceScope;
   readonly observedAt: string;
   readonly finalized: boolean;
   readonly coverage: AgentResourceCoverage;

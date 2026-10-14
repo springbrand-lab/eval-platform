@@ -19,8 +19,8 @@ export type {
 export class AgentIdentityConflictError extends Error {
   readonly retryable = false;
 
-  constructor(readonly submissionId: string) {
-    super(`Agent identity ${submissionId} is already bound to different creation facts`);
+  constructor(readonly chatId: string) {
+    super(`Chat identity ${chatId} is already bound to different creation facts`);
     this.name = "AgentIdentityConflictError";
   }
 }

@@ -60,7 +60,7 @@ function runtimeFixture() {
     async ensureAgent(input) {
       return {
         samplingId: input.samplingId,
-        submissionId: input.submissionId,
+        chatId: input.chatId,
         role: input.role,
         framework: input.framework,
         ...(input.evaluationWorkspace === undefined ? {} : { evaluationWorkspace: input.evaluationWorkspace }),
@@ -68,26 +68,26 @@ function runtimeFixture() {
     },
     materializeInitialData: initialized,
     materializeSubjectTrajectory: materializedTrajectory,
-    async submitAgent() { return { status: "completed", accepted: true, normalizedStatus: "completed" }; },
+    async submitAgent({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true, normalizedStatus: "completed" }; },
     async restartAgent() { throw new Error("Successful agent must not restart"); },
-    async inspectAgentOperation() { return { status: "completed", accepted: true, normalizedStatus: "completed" }; },
-    async waitForSubmission() { return { status: "completed", accepted: true, normalizedStatus: "completed" }; },
+    async inspectAgentOperation({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true, normalizedStatus: "completed" }; },
+    async waitForSubmission({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true, normalizedStatus: "completed" }; },
     async collectExecution({ handle }) {
       return {
-        samplingId: handle.samplingId, status: "succeeded", artifacts: [{ artifactId: `${handle.submissionId}:page`, kind: "file", path: "/workspace/page.html" }],
-        trajectory: { trajectoryId: handle.submissionId, source: "subject", path: "/trajectory.json" },
+        samplingId: handle.samplingId, status: "succeeded", artifacts: [{ artifactId: `${handle.chatId}:page`, kind: "file", path: "/workspace/page.html" }],
+        trajectory: { trajectoryId: handle.chatId, source: "subject", path: "/trajectory.json" },
       };
     },
     async collectEvaluation({ handle }) {
       return {
-        status: "succeeded", score: 90, reason: "The produced page passes the checks.", artifacts: [{ artifactId: handle.submissionId, kind: "report", path: "/evaluation.json" }],
+        status: "succeeded", score: 90, reason: "The produced page passes the checks.", artifacts: [{ artifactId: handle.chatId, kind: "report", path: "/evaluation.json" }],
         evidenceRefs: [{ kind: "artifact", ref: "/workspace/page.html" }],
-        trajectory: { trajectoryId: handle.submissionId, source: "evaluator", path: "/trajectory.json" },
+        trajectory: { trajectoryId: handle.chatId, source: "evaluator", path: "/trajectory.json" },
       };
     },
-    async collectAgentResources({ handle, idempotencyKey }): Promise<AgentResourceSnapshot> {
+    async collectAgentResources({ handle, idempotencyKey, submissionId }): Promise<AgentResourceSnapshot> {
       const isExecution = handle.role === "subject";
-      const event = usage(`${handle.submissionId}:usage`, {
+      const event = usage(`${handle.chatId}:usage`, {
         runId: idempotencyKey,
         metrics: isExecution
           ? { inputTokens: 20, outputTokens: 10, cacheReadTokens: 3, cacheWriteTokens: 2, reasoningTokens: 4 }
@@ -95,16 +95,16 @@ function runtimeFixture() {
         providerCostUsd: { total: isExecution ? 0.5 : 0.1 },
       });
       return {
-        scope: { submissionId: handle.submissionId, idempotencyKey }, observedAt: "2026-10-08T00:01:00.000Z",
+        scope: { chatId: handle.chatId, submissionId: submissionId ?? idempotencyKey, idempotencyKey }, observedAt: "2026-10-08T00:01:00.000Z",
         finalized: true, coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
         usageEvents: [event, event],
         telemetryEvents: [
-          telemetry("turn-start", "turn.started", "turn-1", {}, 0, handle.submissionId),
-          telemetry("turn-end", "turn.finished", "turn-1", { outcome: "completed" }, 1_000, handle.submissionId),
-          telemetry("request-start", "generation.started", "request-1", {}, 100, handle.submissionId),
-          telemetry("request-end", "generation.finished", "request-1", { outcome: "completed" }, 200, handle.submissionId),
-          telemetry("tool-start", "tool.started", "tool-1", { toolName: isExecution ? "browser" : "test" }, 300, handle.submissionId),
-          telemetry("tool-end", "tool.finished", "tool-1", { toolName: isExecution ? "browser" : "test", outcome: "completed" }, 400, handle.submissionId),
+          telemetry("turn-start", "turn.started", "turn-1", {}, 0, handle.chatId),
+          telemetry("turn-end", "turn.finished", "turn-1", { outcome: "completed" }, 1_000, handle.chatId),
+          telemetry("request-start", "generation.started", "request-1", {}, 100, handle.chatId),
+          telemetry("request-end", "generation.finished", "request-1", { outcome: "completed" }, 200, handle.chatId),
+          telemetry("tool-start", "tool.started", "tool-1", { toolName: isExecution ? "browser" : "test" }, 300, handle.chatId),
+          telemetry("tool-end", "tool.finished", "tool-1", { toolName: isExecution ? "browser" : "test", outcome: "completed" }, 400, handle.chatId),
         ],
         billingSettlements: [settlement(event.eventId as string, { debitedUnits: isExecution ? 10 : 3 })],
       };

@@ -58,7 +58,7 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   readonly role: AgentRole;
   readonly projectId: string;
   readonly samplingId: string;
-  readonly submissionId: string;
+  readonly chatId: string;
   readonly evaluationWorkspace?: EvaluationWorkspaceBinding;
   readonly harnessConfig: SpHarnessConfig;
   readonly prompt: string;
@@ -237,15 +237,8 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
       if (attempt.completedAt && !attempt.resources) {
         throw new AgentOperationError(attempt.error ?? "Agent failed before submission", false, "network");
       }
-      if (attempt.submissionId && attempt.submissionId !== options.submissionId) {
-        throw new AgentOperationError("Attempt belongs to a different Agent submission", false, "network");
-      }
       if (!handle) {
         handle = await ensureAgentWithRetry(dependencies, options, retryController);
-      }
-
-      if (!attempt.submissionId) {
-        attempt = await options.updateAttempt(attempt, { submissionId: handle.submissionId });
       }
 
       if (attemptNumber === 1 && !attempt.resources) {
@@ -255,12 +248,18 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
       const idempotencyKey = attemptNumber === 1
         ? `${options.stage}:${options.samplingId}`
         : `${options.stage}:${options.samplingId}:restart:${attemptNumber}`;
-      const resourceScope = { submissionId: handle.submissionId, idempotencyKey };
+      let resourceScope: AgentResourceScope = {
+        chatId: handle.chatId,
+        idempotencyKey,
+        ...(attempt.submissionId === undefined ? {} : { submissionId: attempt.submissionId }),
+      };
       const storedScope = attempt.resources?.status === "collected"
         ? attempt.resources.snapshot.scope
         : attempt.resources?.scope;
-      if (storedScope && (storedScope.submissionId !== resourceScope.submissionId
-        || storedScope.idempotencyKey !== resourceScope.idempotencyKey)) {
+      if (storedScope && (storedScope.chatId !== resourceScope.chatId
+        || storedScope.idempotencyKey !== resourceScope.idempotencyKey
+        || (storedScope.submissionId !== undefined && resourceScope.submissionId !== undefined
+          && storedScope.submissionId !== resourceScope.submissionId))) {
         throw new AgentOperationError("Attempt resource scope does not match the submitted operation", false, "network");
       }
       if (!attempt.resources) {
@@ -272,11 +271,22 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
       try {
         if (attempt.completedAt) {
           if (attempt.status === "completed") {
-            terminal = { status: "completed", normalizedStatus: "completed" };
+            if (!attempt.submissionId) {
+              throw new AgentOperationError("Completed attempt has no Submission ID", false, "network");
+            }
+            terminal = { submissionId: attempt.submissionId, status: "completed", normalizedStatus: "completed" };
           } else {
             const inspection = await inspectPersistedTerminalWithRetry(
               dependencies, options, handle, idempotencyKey, retryController,
             );
+            requireSubmissionId(inspection);
+            if (attempt.submissionId && attempt.submissionId !== inspection.submissionId) {
+              throw new AgentOperationError("Persisted terminal belongs to a different Submission", false, "network");
+            }
+            if (!attempt.submissionId) {
+              attempt = await options.updateAttempt(attempt, { submissionId: inspection.submissionId });
+            }
+            resourceScope = { ...resourceScope, submissionId: inspection.submissionId };
             if (submissionStatus(inspection) !== attempt.status) {
               throw new AgentOperationError("Agent operation disagrees with the persisted terminal status", false, "network");
             }
@@ -294,11 +304,22 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
               attemptNumber === 1 ? "submission" : "restart",
               retryController,
             );
+          requireSubmissionId(submission);
+          if (attempt.submissionId && attempt.submissionId !== submission.submissionId) {
+            throw new AgentOperationError("Attempt belongs to a different Submission", false, "network");
+          }
+          if (!attempt.submissionId) {
+            attempt = await options.updateAttempt(attempt, { submissionId: submission.submissionId });
+          }
+          resourceScope = { ...resourceScope, submissionId: submission.submissionId };
           terminal = isTerminal(submission)
             ? submission
             : await waitForTerminalWithRetry(
                 dependencies, options, handle, idempotencyKey, retryController,
               );
+          if (terminal.submissionId !== attempt.submissionId) {
+            throw new AgentOperationError("Terminal status belongs to a different Submission", false, "network");
+          }
           const status = submissionStatus(terminal);
           if (status === undefined) throw new Error(`${options.stage} submission has no terminal status`);
           terminalPatch = {
@@ -317,10 +338,14 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
           const resources = await collectResourcesWithRetry(
             dependencies, options, handle, resourceScope, retryController,
           );
+          if (resources.status === "collected" && attempt.submissionId
+            && resources.snapshot.scope.submissionId !== attempt.submissionId) {
+            throw new AgentOperationError("Resources belong to a different Submission", false, "network");
+          }
           if (attempt.resources?.status === "collected" && resources.status === "failed") {
             const reported = new Error(
               options.stage + " resource refresh failed for sampling " + options.samplingId
-              + " and submission " + resourceScope.submissionId + ": " + resources.error,
+              + " and Chat " + resourceScope.chatId + ": " + resources.error,
             );
             try {
               (dependencies.onError ?? console.error)(reported);
@@ -328,7 +353,13 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
               console.error(reported, reportingError);
             }
           } else {
-            attempt = await options.updateAttempt(attempt, { ...terminalPatch, resources });
+            attempt = await options.updateAttempt(attempt, {
+              ...terminalPatch,
+              ...(resources.status === "collected" && !attempt.submissionId
+                ? { submissionId: resources.snapshot.scope.submissionId }
+                : {}),
+              resources,
+            });
           }
         }
       }
@@ -352,7 +383,6 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
         await options.updateAttempt(attempt, {
           status: "failed",
           completedAt: dependencies.now(),
-          ...(attempt.submissionId === undefined && handle ? { submissionId: handle.submissionId } : {}),
           error: details.message,
         });
       }
@@ -393,7 +423,7 @@ async function ensureAgentWithRetry<TAttempt extends AgentAttemptRecord, TOutput
     throw new AgentOperationError("Evaluator Workspace binding does not match Agent role", false, "network");
   }
   const input: EnsureAgentInput = {
-    submissionId: options.submissionId,
+    chatId: options.chatId,
     role: options.role,
     samplingId: options.samplingId,
     framework: options.harnessConfig.framework,
@@ -407,7 +437,7 @@ async function ensureAgentWithRetry<TAttempt extends AgentAttemptRecord, TOutput
     try {
       const handle = await dependencies.harness.ensureAgent(input);
       if (
-        handle.submissionId !== input.submissionId
+        handle.chatId !== input.chatId
         || handle.role !== input.role
         || handle.framework !== input.framework
         || handle.samplingId !== input.samplingId
@@ -594,6 +624,7 @@ async function collectResourcesWithRetry<TAttempt extends AgentAttemptRecord, TO
         const snapshot = await dependencies.harness.collectAgentResources({
           handle,
           idempotencyKey: scope.idempotencyKey,
+          ...(scope.submissionId === undefined ? {} : { submissionId: scope.submissionId }),
           ...(options.harnessConfig.runtime === undefined ? {} : { runtime: options.harnessConfig.runtime }),
         });
         return { status: "collected", snapshot: validateResourceSnapshot(snapshot, scope) };
@@ -732,6 +763,12 @@ function normalizeFailureKind(value: unknown): RetryableFailureKind {
     return value;
   }
   return "network";
+}
+
+function requireSubmissionId(submission: AgentSubmission): void {
+  if (typeof submission.submissionId !== "string" || submission.submissionId.trim().length === 0) {
+    throw new AgentOperationError("SP Submission receipt has no Submission ID", false, "network");
+  }
 }
 
 function submissionStatus(submission: AgentSubmission): AgentStatus | undefined {

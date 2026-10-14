@@ -2,6 +2,8 @@
 
 内部评估控制面的数据库与执行器组合层：PostgreSQL `DatasetStore`、`RuntimeStore`、Project/Sample Catalog、只读 `MetricsSource` 和单实例 Run Worker。连接池由宿主注入；迁移位于 `migrations-postgres/`，用 `pnpm --filter @eval-platform/eval-api db:migrate` 应用（需 `DATABASE_URL`）。
 
+目标应用组合层还负责 Eval 独立 SP 的登录校验、`user-agent` 配置列表/编辑、公开 Chat/Submission/Trajectory/Workspace HTTP 与 WebSocket 客户端，以及真实 SP Harness。所有 SP 地址均指向 Eval SP API/Agent/Space，不请求 dev/production SP。Eval SP API/数据库保存账户、Agent Config、计费、Action 等 SP 事实；本应用的 PostgreSQL 只保存评估业务、SP 身份/证据引用及已采集的原始资源快照。Project 绑定固定 SP 分支、Run 记录实际 commit 属于待实现的应用/数据库改动；不增加第五个共享包。
+
 `src/db/client.ts`、`schema.ts` 定义与 SP 一致的 Drizzle/`pg` 注入边界和表结构；`src/db/dataset.ts` 实现全局共享 Dataset/Data 及事务导入；`src/db/catalog.ts` 管理属于用户的 Project 和指向 Data 的 Sample；`src/db/runtime.ts` 原子写入 Run/Sampling/Evaluation 和有效配置；`src/db/metrics.ts` 在单个只读、一致性事务中投影四层展示所需的原始事实。Run 当前状态复用 Runtime 公共投影，不在数据库存第二份。初始 Session/素材只存外部引用，Agent 工作区和完整轨迹只保留 Runtime 原始引用；数据迁移不触碰 SP DO。
 
 `src/worker.ts` 提供 `startEvalRunWorker({ runtime, store, notifications })` 和 `createPostgresRunNotifications(DATABASE_URL)`。新增 Run 与 `pg_notify` 在同一事务内提交；Worker 先监听、再分页扫描未完成 Run，连接恢复时及定时扫描补漏，进程内同一 Run 不并行处理。通知不是持久任务；Run/Attempt 事实仍由 PostgreSQL 和 SP 公开操作持久化。Worker 进程可同时处理多个 Run，各 Run 内仍按执行和评估配置分别控制 Agent 并发。

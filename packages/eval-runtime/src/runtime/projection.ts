@@ -78,9 +78,9 @@ export function toSamplingSnapshot(state: SamplingState): SamplingSnapshot {
     sampleId: state.sampleId,
     execution: { ...state.execution },
     subjectAgent: { ...state.subjectAgent },
-    ...(state.subjectSubmissionId === undefined
+    ...(state.subjectChatId === undefined
       ? {}
-      : { subjectSubmissionId: state.subjectSubmissionId }),
+      : { subjectChatId: state.subjectChatId }),
     executionAttempts: structuredClone(state.executionAttempts),
     ...(state.artifacts === undefined
       ? {}

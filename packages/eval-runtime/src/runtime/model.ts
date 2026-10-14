@@ -45,7 +45,7 @@ export interface SamplingSnapshot {
   readonly sampleId: Sampling["sampleId"];
   readonly execution: SamplingStageState;
   readonly subjectAgent: Sampling["subjectAgent"];
-  readonly subjectSubmissionId?: Sampling["subjectSubmissionId"];
+  readonly subjectChatId?: Sampling["subjectChatId"];
   readonly executionAttempts: readonly ExecutionAttempt[];
   readonly artifacts?: readonly ArtifactRef[];
   readonly trajectory?: TrajectoryRef;

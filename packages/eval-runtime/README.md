@@ -2,6 +2,8 @@
 
 评估运行时的控制面和执行编排。它只依赖 SP 的公开 Harness 边界，不复制 SP Runtime，也不直接读取 Durable Object 存储。
 
+目标部署中的 SP 是 Eval 独立发布的 API/数据库、Agent Worker 和 Space Worker；登录、Agent Config 及 Agent 生命周期全部由这套 SP 提供。Harness 使用该部署的普通 Inbox/Chat 生命周期，具体 HTTP/WebSocket 客户端由 `apps/eval-api` 组合。固定 SP 分支绑定 Project，Run 记录实际 commit；Runtime 不按 Sampling 切分支，也不切换线上 Worker。见[部署方案](../../docs/eval-sp-deployment.md)。
+
 ## 对外边界
 
 运行时最终向 API、Web 和 CLI 暴露同一组控制面：
@@ -59,8 +61,8 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
 ## 重要约束
 
 1. 一个 `Sampling` 必须对应一个独立的 Subject Chat / Workspace。
-2. Evaluation Agent 使用独立的 Chat / Session，并绑定 Subject 的物理 SpaceDO；其材料与结果写入 `/evaluations/<evaluationId>/`。当前模型中预分配的 `submissionId` 实际承担 Chat 身份；真实 SP Submission ID 的拆分留待 SP Harness 接入。
-   Runtime 在调用 `ensureAgent` 前分配并持久化该 ID。Harness 必须按 ID 获取或创建，重复或并发请求返回同一个 Agent；同一 ID 的归属、角色、框架、Agent Config 或 Evaluator Workspace 绑定不一致时返回不可重试的 `AgentIdentityConflictError`，不得静默重绑定。
+2. SP Chat 就是持久 Session，其中每次提交都有独立的 Submission ID。Subject 与 Evaluation Agent 都通过 Eval SP 自己的普通 Inbox 确保 Chat；Evaluation Agent 拥有独立 Chat / Session，并绑定 Subject 的物理 SpaceDO，其材料与结果写入 `/evaluations/<evaluationId>/`。Runtime 在 `ensureAgent` 前预分配并保存 Subject `subjectChatId` 或 Evaluator `chatId`；SP 的真实 Submission ID 只保存在对应 Attempt。
+   Harness 必须按 Chat ID 获取或创建，重复或并发请求返回同一个 Agent；同一 ID 的归属、角色、框架、Agent Config 或 Evaluator Workspace 绑定不一致时返回不可重试的 `AgentIdentityConflictError`，不得静默重绑定。Eval Web 只通过 Run/Sampling/EvaluationRecord 展示这些 Chat，不提供普通 Inbox 管理或聊天驱动操作。
 3. 重试不能把一次采样变成新的采样，只能增加该采样的执行或评估 attempt。
    `RetryController` 按 `creation`、`initialization`、`submission`、`status`、`collection`、`resources`、`persistence` 和 `restart` 区分决策；默认策略只定义确认失败后的 Agent 重启，其余操作是否重试由注入的控制器决定。Agent ensure 和初始化重试保留同一 Agent，各自独立计数，不新增执行/评估 attempt、不消耗 Agent 重启次数；收集或保存失败不得重启已经完成的 Submission。
 4. Submission 终态以 Harness 推送通知为主；自动重试前仍必须按本次操作的幂等键查询原 `Submission`，不得因为响应丢失就盲目再次投递。
@@ -77,9 +79,9 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
 15. `getSampling()` 返回扁平的 `SamplingSnapshot`，只复制公开的 Sampling 字段，不暴露 Store 包装结构、`Sample` 或 Runtime 临时对象。
 16. `start()` 只接收项目和 `executionConfigId`；`evaluate()` 只接收项目、Sampling IDs 和 `evaluationConfigId`；`pipeline()` 只接收项目和 `pipelineConfigId`。Dataset 和 Sampling 次数由 ExecutionConfig 决定，评估 Agent 由 EvaluationConfig 决定。
 17. `Sample` 使用 `{ sampleId, data: Data }`，平台样本身份与完整业务 Data 分开，不兼容旧的扁平结构。`Sample.data.userPrompt` 必填且不能为空白，作为当前任务原样发送；其他 JSON 业务字段通过 `materializeInitialData().data` 完整交给 SP，只去除 Data 的平台 `dataId`，业务 `data.sampleId` 不覆盖、不删除。`initialSession` 和 `initialMaterials` 都可省略；提供时分别使用外部 `bundleId + sessionId`、`bundleId + materialId`，两个 ID 必须齐全，Runtime 不生成资源 ID。Session 正文不进入 Dataset、Sample、Sampling 或执行 prompt。SP 公开能力将素材与 Session 副本落入目标 DO 的存储，由所选框架加载并重建 Context；Runtime 等准备完成后才发送 `userPrompt`，不自己解析 Session、拼接消息或把扩展数据包成新 prompt。
-18. 初始数据准备使用 `initial-data:<submissionId>` 的稳定幂等键；重复准备相同事实返回原结果，不能覆盖已经运行过的 Session。初始化发生可重试错误或响应丢失时，由 `RetryController` 的 `initialization` 决策决定是否重试完整准备流程，沿用同一目标 Agent、输入和幂等键，不重新创建或重启 Agent、不查询尚未提交的 Submission。不可重试错误立即失败，重试耗尽也不提交任务。不同 Sampling 使用不同目标 Agent 和幂等键；同一 Agent 自动重启沿用当前 Session，不重新加载初始 Session。SP 负责持久化初始化幂等，不增加 Runtime 准备状态表。
+18. 初始数据准备使用 `initial-data:<chatId>` 的稳定幂等键；重复准备相同事实返回原结果，不能覆盖已经运行过的 Session。初始化发生可重试错误或响应丢失时，由 `RetryController` 的 `initialization` 决策决定是否重试完整准备流程，沿用同一目标 Agent、输入和幂等键，不重新创建或重启 Agent、不查询尚未提交的 Submission。不可重试错误立即失败，重试耗尽也不提交任务。不同 Sampling 使用不同目标 Agent 和幂等键；同一 Agent 自动重启沿用当前 Session，不重新加载初始 Session。SP 负责持久化初始化幂等，不增加 Runtime 准备状态表。
 19. 评估 Agent 使用独立 Session，不把 Subject 的 `initialSession` 当作自己的初始会话。`ensureAgent()` 接收不可变的 `evaluationWorkspace={subject:{userId,chatId},evaluationId}`，SP 据此把 Evaluator Chat 绑定到 Subject 的物理 SpaceDO，并只允许它写本次评估目录。`materializeSubjectTrajectory()` 使用 `subject-trajectory:<subjectChatId>` 的稳定幂等键，请 SP 从 Subject Chat 读取完整轨迹并在该 SpaceDO 中物化一次；历次主动重评复用相同文件。Subject 产物不复制。响应丢失后的初始化重试沿用相同来源事实和幂等键，SP 返回原结果或续做未完成的物化；所有准备步骤确认前不得提交评估任务。
-20. 每次实际提交的 Attempt 在投递前持久化 `resources: pending`，其中包含目标 `submissionId` 和本次提交/重启的准确幂等键。终态或投递/等待失败后通过公开 `collectAgentResources()` 收集资源，并先保存到对应 Attempt，再收集产物、决定是否重启或发布阶段终态。失败、取消和重启前的费用/Token/工具/Turn 都保留；未提交任务的创建/初始化失败不假装产生资源事实。
+20. 每次实际提交的 Attempt 在投递前持久化 `resources: pending`，其中包含目标 `chatId` 和本次提交/重启的准确幂等键；SP 返回或恢复真实 Submission ID 后写到 Attempt，采集到的资源快照须包含三者。终态或投递/等待失败后通过公开 `collectAgentResources()` 收集资源，并先保存到对应 Attempt，再收集产物、决定是否重启或发布阶段终态。失败、取消和重启前的费用/Token/工具/Turn 都保留；未提交任务的创建/初始化失败不假装产生资源事实。
 21. 资源快照只包含本次操作及其子 Agent 的新工作，不包含导入历史或共享的 Subject 证据。`usageEvents`、`telemetryEvents`、`billingSettlements` 是 SP 原始 JSON 记录；未知字段、缺失字段、null、顺序、重复事件、父子关联与来源数值全部保留。Runtime 只校验归属和无损可序列化性，不解析费用/Token、不抽取工具/Turn、不归一化、不去重、不计算统计、不新增汇总字段。源 `coverage/finalized` 也原样保存，由 Metric 判断是否适合统计。
 22. 资源读取单独使用 `resources` 重试预算，与产物收集和 Agent 重启无关。采集状态只有 `pending | collected | failed`；`collected` 表示快照已保存，不表示来源完整。读取失败不能覆盖原 Agent 错误或使成功产物变成失败。Store 将 Attempt 与原始资源快照原子保存；查询从持久化记录读取，Metrics 不直接访问 SP/DO/私有数据库，而是读取 Runtime 原始内容进行解析、去重和所有统计。完整轨迹和大产物继续存引用，资源事件不构成另一份 Workspace/Session 副本。
 23. 后续 Attempt 状态补丁基于当前执行上下文的最新 Attempt，而不是调用方的旧副本；原始快照写入已提交但响应丢失时，失败处理不能用旧 `pending` 覆盖它。运行时收尾异常先读取 Store 的最新事实，不以启动时的 `queued` 副本重写整个记录，也不把未确认的 Agent 操作误判为失败。查询只读取持久化结果，不从执行上下文的内存副本返回数据。

@@ -6,6 +6,7 @@ export type {
   AgentResourceCoverage,
   AgentResourceFact,
   AgentResourceScope,
+  SubmittedAgentResourceScope,
   AgentResourceSnapshot,
   AgentRole,
   AgentStatus,

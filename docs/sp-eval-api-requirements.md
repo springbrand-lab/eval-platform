@@ -1,67 +1,40 @@
-# SP 对 Eval 的接口需求调研
+# Eval 独立 SP 的接口需求
 
-> 调研基准：`sp-platform` 工作树 `/Users/apple/code/.worktrees/sp-agent-config-model-dev-release-20261008`，HEAD `486e6a4a9a208f673a12c821b1d3f3af9e010f83`（下文引用的源码文件无本地改动）。`agent/node_modules/@springbrand/agent-runtime`、`agent/node_modules/@springbrand/space` 是该工作树安装的上游包源码，仅用于核对当前运行时能力；修改应在能力所属上游包完成、发布并升级依赖，不直接改 `node_modules`。下列路径均相对此 SP 工作树；`eval-platform/...` 路径相对 `/Users/apple/code`。本文是接口需求与现状调研，**“建议契约”不是现有 API**。
+> 目标契约，尚未全部实现。本文替代先前基于“Eval Chat 脱离普通 Inbox、共用 dev SP API”的接口方案。部署决定和数据归属见 [Eval 独立 SP 部署方案](eval-sp-deployment.md)。具体路由名称由 SP 实现时确定，不把下列能力误认为现有 HTTP API。
 
-## 已确定的边界与身份
+## 对接前提
 
-- Eval 独立管理 Project、Dataset、Sampling、EvaluationRecord、运行编排和指标。SP 负责 Agent Config、Chat/Submission、Workspace、Trajectory、计费事实。Eval 只调用 SP 的公开 Chat、Submission、Trajectory、Workspace 边界，不读写 SP 的 Durable Object 存储，也不导入 SP 私有 `agent/src/*`。依据：`eval-platform/docs/package-boundaries.md:13-30,124-149`。
-- 每个执行 Sampling 有独立的 Subject Chat；每个 EvaluationRecord 有独立的 Evaluator Chat。两者的 Chat ID 不同，消息、Submission、运行轨迹和资源归属也不同。**Evaluator 的 Workspace 指向执行 Chat 的同一个物理 SpaceDO**，Subject 产物不复制；Evaluator 的结果写入该 SpaceDO 中独立的 `/evaluations/<evaluationId>/` 目录。唯一要物化到 SpaceDO 的 Subject 证据是完整轨迹。现有 SpaceDO 定位名为 `workspace:<userId>:<chatId>`，而 `Workspace` 当前固定从自身身份取这两个字段；因此“用执行 Chat ID 关联 SpaceDO”还需要 SP 将 Chat 身份与 Workspace 定位分离。依据：`agent/src/workspace/locator.ts:11-30,45-59`，`agent/src/workspace/index.ts:220-226`，`agent/src/chat/severn-agent.ts:164-175`，`agent/src/runtime/host/runtime-host.ts:568-576`。
-- Eval 记录 SP `user-agent` 库中的 `{ownerUserId,userAgentId}`，不另建配置库，不引入 Eval Agent Config revision、快照或配置租约；运行时由 SP 解析当前配置。Eval 现有引用即这两个字段；SP 已有用户 Config 列表和内部身份/运行输入解析。依据：`eval-platform/packages/eval-contracts/src/model.ts:59-69`，`api/src/routes/user-agent-config/user-agent-config.routes.ts:13-20,69-80`，`api/src/services/agent-config-service.ts:48-66`。
-- 这里的 `chatId`、**实际** `submissionId`、`evaluationId` 不可混用。SP `submitPrompt()` 返回 SubmissionReceipt，并在内部产生独立 requestId；`getSubmission(submissionId)` 读取持久状态。Eval 当前 Harness 把预先分配的 Chat 身份命名为 `submissionId`，对接前需要拆开。依据：`agent/node_modules/@springbrand/agent-runtime/src/adapter/cloudflare/agent.ts:1412-1427,1503-1509`，`eval-platform/packages/eval-runtime/src/harness/model.ts:21-25,41-56`。
+- Eval 独立发布 SP API/数据库、Agent Worker、Space Worker、DO 命名空间和 R2。Agent 的 `API_ORIGIN` 指向 Eval SP API；Eval 的登录、Agent Config、Chat、Submission、Trajectory、Workspace、计费和 Action 接入都指向这套 SP。运行时不请求 dev/production SP。
+- Subject 和 Evaluator 使用 Eval SP **普通 Inbox/Chat**。Inbox 只存在于 Eval SP 的隔离存储中；Eval Web 不把它展示为普通聊天管理界面，而是从 Run、Sampling、EvaluationRecord 打开对应 Chat。无需 `ensureEvalChat`、Inbox 外 Chat 类型或独立 Chat 存储。
+- Eval 只消费 SP 的公开 Chat、Submission、Trajectory、Workspace 边界；不访问 SP DO SQLite、SP API 私有数据库或 `sp-platform/agent/src/*`。SP 不保存 Eval 的 Project、Dataset、Run、Sampling、EvaluationRecord 或指标汇总。
+- Agent Config 使用 Eval SP 自己的用户 `user-agent` 库，Eval 只持久化 `{ownerUserId,userAgentId}` 引用。登录、配置创建和编辑也都走 Eval SP API，不跨环境实时共享配置。
 
-## 接口清单
+## SP 需要提供或确认的能力
 
-状态说明：**现有内部能力**指 SP 源码已有数据或方法，但不代表 Eval 可调用；**需新增**指需要公开的服务接口或宿主行为；**待核实**指本次检索未找到可用契约，实施前仍须核对能力所属仓库或真实数据源。
+| 能力 | 对 Eval 的契约 | 现状与工作 |
+| --- | --- | --- |
+| 登录与 Agent Config | Eval Web/API 使用 Eval SP 的用户认证、配置列表、创建、编辑、删除及运行时解析；创建 Chat 时 SP 校验配置归属与可用性。 | 复用 SP API 现有账户与 `user-agent` 能力，给 Eval 域名和服务身份配置访问权限；不新增跨环境配置代理。 |
+| Chat 幂等创建 | Eval 预分配 Chat ID，按相同用户、配置、框架和创建事实重复确保原 Chat；冲突事实返回明确错误。Subject 与 Evaluator 均在 Eval SP Inbox 中。 | 复用 `Inbox.createChat(..., chatId)`/普通 Chat 生命周期；确认服务身份接入与重试冲突校验。无需绕开 Inbox。 |
+| 初始 Session 与材料 | 按 Data 中可选的 `bundleId + sessionId/materialId` 幂等准备目标 Chat，在首次提交前由对应 Agent 框架恢复 Context；重启不重复装载。 | 需要正式的材料/Session 准备接口；具体 Bundle 来源和各框架装载能力仍需在 SP 核实。 |
+| 提交与恢复 | 按 Chat 与幂等键提交 Prompt，返回真实 Submission ID 和回执；响应不确定时按键找回原 Submission。重启产生同一 Chat 的新 Submission/Attempt，不产生新 Sampling。 | 复用 SP Submission 能力，补足 Eval Run Worker 可调用的服务边界和按键查询。Eval 契约已将 Chat ID 与 Attempt Submission ID 拆开，真实 SP Harness 尚未接线。 |
+| 长连接终态 | Chat WebSocket 在连接及重连时给目标 Submission 的持久状态快照，在状态变化时推送带真实 Submission ID 的事件；断线后可校准，正常流程不轮询。 | 复用现有 Chat WebSocket，补足可靠的 Submission 身份与状态快照。 |
+| 无人值守 | 由提交/长连接所属的运行模式在 SP 服务端自动处理等待：所有审批给 `allow_once`，`ask_user` 返回“随意，由你全权决定”。覆盖临时子 Agent，并把决策纳入同一轨迹。 | 需要 SP Runtime 支持；不能依赖观察者在线，也不新增独立审批服务。 |
+| Evaluator 共享 Workspace | Evaluator 保持独立 Chat、Session、Submission 和轨迹，但不可变地绑定 Subject `{userId,chatId}` 所定位的物理 SpaceDO；只可写 `/evaluations/<evaluationId>/`，可读 Subject 证据。 | 需要 SP Chat/Host/Workspace 支持独立的 Chat 身份与 Workspace 定位，服务端覆盖文件、恢复、沙箱同步等所有写入通道的目录权限。 |
+| Subject 产物与完整轨迹 | Subject 产物留在原 SpaceDO。SP 确认完整产物清单可读取；终态后从 Subject Chat 收集完整轨迹并按 Chat 幂等物化到同一 SpaceDO。后续独立评估复用该文件。 | 复用 Workspace 与 Trajectory 读写能力；需新增可确认完整性的轨迹物化服务操作，不让 Eval 下载后重传，也不复制产物。 |
+| 原始资源 | 按 Chat 和真实 Submission/Attempt 身份返回原始模型用量、Token/cache 数量、结算回执与 Action 实际收费，并声明来源覆盖与是否最终完成。 | 数据来自 Eval SP 自己的 Agent 和 API；需补齐受授权的操作范围读取，不用账户级调试接口代替。Eval Metrics 自算总量、命中率、工具次数与耗时。 |
+| 只读观察 | Subject Sampling 和每个 EvaluationRecord 均可进入对应 Chat、Workspace 和轨迹，包括运行中与失败记录。交互式观察者只能读；Run Worker 通过受控身份提交。 | 复用正常 Chat/Workspace 读能力，但仍需在服务端或受控代理限制观察连接的消息、取消、审批和写入 RPC。独立部署本身不提供只读权限。 |
+| 框架选择 | Subject 可选 `sp`、`codex`、`cc`；Evaluator 使用 `sp`，全部经同一 Chat/Submission/Workspace 生命周期。 | SP 必须显式支持所选框架；不支持时返回错误，Eval 不静默回退。 |
 
-| 能力 | 现状 | SP 应提供的接口或行为 | 状态 |
-| --- | --- | --- | --- |
-| 可用 Agent Config | 浏览器 `GET /api/user-agent-configs/` 只列当前认证用户；内部有按用户和 Config ID 解析身份/运行输入的方法 | 给 Eval 服务身份授权列出指定账户可用的 `user-agent` 配置；创建 Chat 时由 SP 验证归属、可用性并解析当前配置。Eval 只传 `{ownerUserId,userAgentId}` | 需新增服务读取入口；复用内部解析 |
-| Eval Chat 创建 | 现有 `Inbox.createChat()` 可带指定 Chat ID，但会加入 Inbox；`SevernAgent.bindRuntimeFromInbox()` 注释明确 Inbox 是唯一生产调用方；运行时内存/目录投影目前仍连接 Inbox | 提供幂等 `ensureEvalChat`，分别创建 Subject/Evaluator Chat，不写入普通 Inbox；同 ID 不同 owner、role、framework、Config、Workspace 绑定必须冲突；Eval Chat 的运行时内存/投影也须与 Inbox 解耦 | 需新增 |
-| 初始 Session/Materials | Eval 有 `bundleId + sessionId/materialId` 引用和 `materializeInitialData` Harness 口；本次检索的 SP `agent/src`、`api/src` 未找到对应 Bundle 内具体资源装载/Context 重建公开接口 | 在首次提交前，按外部引用幂等准备材料和初始 Session；Session 装载为当前框架的运行 Context，当前 `userPrompt` 原样提交；重启不重放初始数据。Evaluator 有独立 Session，不装载 Subject 初始 Session | 待核实来源及框架能力，需新增可用准备入口 |
-| 提交与恢复 | 上游 `submitPrompt(text,{idempotencyKey})` 和 `getSubmission(id)` 已有；内部 repository 可按幂等键查找，未见对 Eval 开放的查找 RPC | Eval 服务提交当前 Chat 的 Prompt，返回实际 `submissionId`/状态；重复幂等键返回原结果，不确定响应可按键找回。失败、重启仍属于该 Chat 中不同 Submission/Attempt | 需新增 Eval 服务路由与按键恢复入口；复用上游提交 |
-| 长连接状态 | 现有 Chat WebSocket 传历史、活动流和完成帧，但空闲重连只有历史，流帧用 requestId 而非实际 submissionId | 同一 Agent WebSocket 推送消息与持久 Submission 状态；连接/重连先给目标 Submission 的状态快照，终态包含实际 `submissionId`、状态、完成时间、错误；支持断线恢复，不要求 Eval 轮询 SP | 需新增协议字段/快照 |
-| 无人值守决策 | 普通审批会等待用户；现有 scheduled 模式遇 `ask_user`、强制审批等会拒绝并终止 | Eval 提交模式由 SP 服务端自动给所有审批 `allow_once`，`ask_user` 直接解除等待并把“随意，由你全权决定”作为 Tool 结果交给 Agent。覆盖临时子 Agent，决策进入同一轨迹/长连接；不依赖观察者在线，也不单设外部“审批 API” | 需新增提交模式及运行时实现 |
-| 共享 Workspace | 现有 SpaceDO 定位使用 Chat 自身 `userId + chatId`，WorkspacePort 可读写/删除/移动 | Evaluator Chat 保存不可更改的 `evaluationWorkspace={subject:{userId,chatId},evaluationId}`，指向执行 Chat 的物理 SpaceDO；Subject Chat 保持自己的定位。Evaluator 仅可读取 Subject 证据，写入限 `/evaluations/<evaluationId>/`；所有写入通道、复制/移动、删除、恢复和代码执行同步都须受 SP 服务端约束。多个 Evaluator 共用一个 SpaceDO，各有独立目录 | 需新增绑定及路径权限 |
-| Subject 产物 | SP 已有 Workspace 树、内容及 `/creations` 提交清单读取；提交终态时的 Workspace checkpoint 目前是 best-effort | Eval 能通过 SP 公共 Workspace 读边界取得 Subject 产物清单/内容引用；完成前保证产物范围可用于后续评估，checkpoint 失败不能伪装成完整证据。产物留在原 SpaceDO，不复制进 Evaluator 目录 | 需新增 Eval 授权读取及完成性保证；复用现有读取 |
-| 完整 Subject 轨迹物化 | 完整轨迹存于执行 Agent DO，分页上限 200；现有 HTTP 轨迹读取受 Inbox 所有权门控 | Eval 在 Subject 结束后、Evaluator 开始前调用 SP 的**轨迹物化 API**：传执行 `userId + chatId`；SP 自行分页读取该 Agent DO 全部轨迹、校验完整性，再原子写入其 SpaceDO 的稳定证据路径。返回路径、事件数与校验信息；按 Subject Chat 幂等一次，重复评估复用。旧 Sampling 后续单独评估也可调用；Eval 不下载再上传轨迹 | 需新增服务 API；复用内部 Trajectory/Workspace |
-| 原始资源事实 | SP 存在模型用量结算和 Action 执行记录，浏览器调试用量接口仅非生产且按账户分页；单条结算查询按 accountId+eventId | 给 Eval 服务身份按 `chatId` 及实际 `submissionId` 读取原始模型用量事件、对应结算回执、Action 执行实际收费；返回覆盖/完成状态，区分未完成、缺失和确认零。保留输入、输出、cache read、cache write Token、provider USD、借记/短缺/平台承担等原字段 | 需新增生产可用的范围读取入口；复用现有事实 |
-| 轨迹读取与只读观察 | Chat/Workspace 有读路由；现有入口依赖 Inbox，Workspace HTTP 同时含恢复、发布等写操作；轨迹在 Agent DO | Subject Sampling 与每个 Evaluator EvaluationRecord 都能打开自己的 Chat/Workspace/完整轨迹，包括运行中、失败和完成状态。复用 SP Agent Chat WebSocket、Workspace 与 Trajectory 读取，只增加 Eval 范围鉴权和服务端只读限制；观察者不能发消息、取消、审批或调用写入 RPC | 需新增 Eval 观察路由/权限；复用读能力 |
+## 几个不能混用的身份
 
-## 建议契约与关键约束
+- **Project 分支**由 Eval 保存。固定分支阶段只能绑定当前发布的 SP 分支；Run 记录实际 commit，Sampling 不存分支。SP 不需要 Project 或“批量评估” API。
+- **Chat ID** 在确保 Chat 前由 Eval 分配，重试沿用；**Submission ID** 是 SP 接受一次提交后产生的真实身份，Attempt 必须用它关联资源；**evaluationId** 是 Eval 的评估记录身份。三者不可互换。
+- Evaluator 的 `evaluationWorkspace={subject:{userId,chatId},evaluationId}` 改变物理 Workspace 定位，不改变 Evaluator 自己的 Chat/Session。SP 必须确保同一 Evaluator Chat 重试不能改绑到另一个 Subject 或评估目录。
+- 单独执行 Project、以后选择已有成功 Sampling 再评估，以及一键选择 Project 下全部成功 Sampling，均属于 Eval 查询和编排；SP 只处理每个 Agent 的公开生命周期。
 
-以下字段和路径是**建议契约**，供 SP 实现时与 Eval 对齐；不是当前已存在的 HTTP 路由。
+## Eval 侧配合
 
-### 1. Config 与 Chat
-
-- `listUsableUserAgentConfigs(ownerUserId)`：仅列 SP 当前 `user-agent` 库中对该账户可用的配置，并给 UI 展示所需名称/ID；不返回 Eval 自造的 role 或 revision。SP 的浏览器列表必须先认证用户，内部 Config 服务已经按 `userId + requestedId` 查询，因此服务身份读取可沿现有 Model/鉴权边界扩展。依据：`api/src/routes/user-agent-config/user-agent-config.handlers.ts:19-38,76-85`，`api/src/services/agent-config-service.ts:48-66`。
-- Eval Chat 绕开普通 Inbox 时，SP 仍须沿用 Config 选择时的删除保护和运行时有效性校验，避免配置被删与 Chat 初始化竞态；不能让 Eval 存一份配置快照作为替代。现有保护包在 Inbox 创建流程中。依据：`agent/src/inbox/index.ts:392-432`，`agent/src/chat/severn-agent.ts:261-269`。
-- `ensureEvalChat({chatId,ownerUserId,userAgentId,framework,role,projectId,samplingId,evaluationWorkspace?})`：Subject 不填 `evaluationWorkspace`；Evaluator 必须传 Subject 的 `{userId,chatId}` 和 `evaluationId`，后者决定其写入目录。SP 验证执行 Chat 确属该 Sampling、Eval 服务可访问且绑定事实不可变；不从普通 Inbox 创建，也不通过 Inbox 查找。现有 `Inbox.createChat()` 会调用目录 `ensure()`，并在初始化时创建自己的 Workspace；现有 `SevernAgent` 只有 Inbox 绑定入口。依据：`agent/src/inbox/index.ts:196-211,352-389`，`agent/src/chat/severn-agent.ts:204-220`。Evaluator Chat 仍拥有自己的 Agent DO，不复用 Subject 的聊天历史、Submission 或轨迹。**创建入口之外还要改运行时宿主**：当前 `resolveRuntimeHost()` 从 Inbox 获取 RuntimeMemoryTarget 和 ChatDirectoryProjectionTarget；Eval Chat 需要 SP 自身的内存/投影归属，不能把运行状态写回普通 Inbox。依据：`agent/src/runtime/host/runtime-host.ts:538-565`，`agent/src/inbox/index.ts:477-494`。
-- `framework` 目前在 Eval 契约允许 `sp | codex | cc`，但本次 SP Agent Host 代码检索未证实 `codex/cc` 的同一托管生命周期。若这些框架仍未接入，SP 应明确返回不支持，Eval 不应默默回退到 SP。依据：`eval-platform/packages/eval-contracts/src/model.ts:64-69`；待核实范围：`agent/src/chat`、`agent/src/runtime`。
-
-### 2. 准备、提交与 WebSocket
-
-- 准备操作接收 Eval Data 中额外业务字段及可选 `initialSession={bundleId,sessionId}`、`initialMaterials={bundleId,materialId}`，以 `chatId + preparation idempotencyKey` 保证只应用一次。SP 负责框架原生 Session 格式、材料定位及 Context 重建；Evaluator 的材料文件也必须落在其专属写入目录，不能覆盖 Subject 输入。Eval 当前 Harness 的两个准备调用在 `eval-platform/packages/eval-runtime/src/harness/model.ts:81-108`；具体引用规则在 `eval-platform/docs/package-boundaries.md:43-46,83-85`。这里是待实现契约，不能推定 SP 已有 Bundle 装载 API。
-- 提交建议返回现有 `SubmissionReceipt`，并补充按 Chat + 幂等键查找原回执的服务读入口。上游已有仓储 `findByIdempotencyKey`，但公开 `getSubmission()` 仅按实际 Submission ID 查询。依据：`agent/node_modules/@springbrand/agent-runtime/src/submission/repository.ts:205`，`agent/node_modules/@springbrand/agent-runtime/src/adapter/cloudflare/agent.ts:1412-1427,1503-1509`。
-- WebSocket 建议在连接成功或重连时推送 `{submissionId,status,createdAt,completedAt?,error?}` 的持久快照，并在状态变化/终态推送同 ID 事件；可保留现有 Chat 消息帧。当前 `HarnessConversationBridge` 有活动流重放，但空闲连接只发历史和 `RESUME_NONE`，完成帧的 `id` 是 requestId。依据：`agent/node_modules/@springbrand/agent-runtime/src/conversation/harness-resume.ts:90-100,114-163,224-247`。Eval Worker 等待这条连接；本地 PostgreSQL 的恢复扫描不属于对 SP 的轮询。
-- 自动决策是提交模式内部行为：审批使用 `allow_once`，`ask_user` 用内部取消/继续机制，并将 Tool 结果文本设为“随意，由你全权决定”。不能简单注入普通回答，因为必填附件/选择题会拒绝任意文本；也不能直接复用 scheduled 模式，因为其现有逻辑会终止交互和强制审批。依据：`agent/node_modules/@springbrand/agent-runtime/src/tools/runtime/decision-gate.ts:259-289,306-325`，`agent/node_modules/@springbrand/agent-runtime/src/tools/assistant/ask-user.ts:180-236,240-255`，`agent/node_modules/@springbrand/agent-runtime/src/submission/delivery.ts:199-204`。具体上游实现需要覆盖根 Agent 与临时子 Agent。
-
-### 3. 一个 SpaceDO、轨迹物化与只读查看
-
-- `evaluationWorkspace.subject` 仅改变 Evaluator 的**物理 Workspace 定位**，不改变它自己的 Chat/Session 身份。SP 运行时 Host 和 Chat 包装层均要采用这个绑定；现有两处都直接使用当前 Chat 身份。依据：`agent/src/chat/severn-agent.ts:164-175`，`agent/src/runtime/host/runtime-host.ts:527-576`。Evaluator 的 `/evaluations/<evaluationId>/` 输出和 Subject 原产物在同一 SpaceDO；SP 要禁止 Eval Chat 越权修改 Subject 路径、其他评估目录，以及从 Workspace 读口触发写操作。现有 `ChatWorkspacePort` 暴露 `writeFile`、`rm`、`cp` 等，`RuntimeHost.sandbox().write` 可直接写 Workspace，代码执行工厂默认写模式；路径隔离须覆盖这些入口，不能只限制 UI。依据：`agent/src/workspace/chat-port.ts:52-61,88-115,144-160`，`agent/src/runtime/host/runtime-host.ts:230-244`，`agent/node_modules/@springbrand/agent-runtime/src/adapter/cloudflare/universal-agent/preparation.ts:135-153`。
-- Subject 产物以原 Workspace 中的文件为准，SP 已有树、当前内容、历史清单/文件读取，`/workspace/tree`、`/workspace/content` 是现有 Chat 读路由；它们仍要经 Eval 范围授权。终态时 Host 尝试 checkpoint，但当前失败只写日志，因此“Subject 产物/清单已完整可用于 Evaluator”需要明确的回执或失败状态。依据：`agent/src/workspace/index.ts:135-156`，`agent/src/workspace/http.ts:40-65,84-95`，`agent/src/runtime/host/runtime-host.ts:321-329`。这一要求不产生第二份持久化产物。
-- 建议轨迹物化操作：`POST /internal/eval/subject-chats/{chatId}/trajectory-materializations`，服务认证，主体含 `subjectUserId`；结果至少为 `{path,eventCount,sha256}`。路径可定为 `/eval-evidence/subject-trajectory.ndjson`，由 SP 固定，Eval 不传任意写入路径。SP 在确认 Subject 最终终态且轨迹写入完成后，按 `beforeSeq` 分页读取 Agent DO，按 `ingestSeq` 正序完整写入同一个 Subject SpaceDO；中途失败不能留下可误认为完整的文件。相同 Chat 重试返回原结果，检测到内容漂移应明确报冲突或重建，不能静默返回旧文件。现有轨迹页逆序读、页内正序返回，`hasOlder/beforeSeq` 可推进至最老事件；Workspace 有 `writeFileStream`。依据：`agent/src/telemetry/trajectory-store.ts:68-99`，`agent/src/workspace/index.ts:104-113`。现有 `GET /internal/chats/:userId/:chatId/trajectory` 先经 Inbox 查拥有的 Chat，不能原样用于 Inbox 外的 Eval Chat；这次物化应由 SP 内部调用 Agent DO，不要求 Eval 搬运事件。依据：`agent/src/index.ts:245-281`，`agent/src/inbox/index.ts:441-450`。
-- 观察路由复用 Chat WebSocket、`GET /workspace/tree`、`GET /workspace/content` 和 TrajectoryPage 读取，但由 SP 验证 Eval 的 Project/Sampling/EvaluationRecord 关联，分别把 Subject 与 Evaluator 的视图映射到自己的 Chat、共享的物理 SpaceDO 和对应逻辑目录。必须在服务端拒绝消息提交、`dispatchMessage`、取消、审批、Chat/Workspace 写 RPC 及 HTTP 写路由。当前 `handleWorkspaceHttpRequest()` 既提供读接口也提供 `restore`、`save`、`preview`、`publish`，不能整段放行；`agents` 包的 readonly connection 只保证其自己的状态写约束，不能代替对副作用 RPC 的逐项限制。依据：`agent/src/workspace/http.ts:40-99,106-131`，`agent/node_modules/agents/docs/readonly-connections.md:1-12,121-145`。当前预览网关在主认证之前匹配且是公开网站入口，Eval 观察路由也不能把未授权评估文件误接到该路径。依据：`agent/src/index.ts:111-119`，`agent/src/workspace/deployment/preview-gateway.ts:6-12,38-53`。
-
-### 4. 资源原始事实
-
-- 建议一个按 `ownerUserId + chatId + submissionId` 查询的资源读取契约，返回源事件及各源的 `complete | partial | unavailable` 覆盖事实；分支可以由 SP API/Agent Worker 各自提供，Eval Harness 合并。模型用量原始事件包括 `eventId`、`runId`、`chatId`、子 Agent 关系、`inputTokens`、`outputTokens`、`cacheReadTokens`、`cacheWriteTokens`、`reasoningTokens`、`providerCostUsd`；真实费用以结算回执的 `ratedUnits/debitedUnits/shortfallUnits/platformOwned` 为准。SP Host 发送时将 `runId=event.submissionId`、`chatId=this.identity.sessionId`。依据：`api/src/models/billing/index.ts:61-107`，`agent/src/runtime/host/runtime-host.ts:439-473`，`api/src/models/billing/schema.ts:27-49`。
-- 现有 `GET /api/account/debug/usage`（路由片段）只面向认证用户且生产关闭，并按账户分页；内部结算查询只能由已知 `accountId + eventId` 定位，不能当成现成的 Chat/Submission 全量资源接口。依据：`api/src/routes/account/account.routes.ts:70-85`，`api/src/routes/account/account.handlers.ts:77-90`，`api/src/routes/internal/internal.index.ts:45-50`，`api/src/models/billing/index.ts:567-609`。
-- Action 以轨迹中的 `executionId` 精确关联 SP 的实际执行记录/收费；只累计终态 `chargedCredits`，不能把运行中默认零当作已结算。SP 的轨迹摘要保留 `executionId`；已有按账户和 executionId 读取的 Model 方法、浏览器 Action 日志和内部单条执行查询；Eval 仍需要可授权的批量原始读取与完成性说明。依据：`agent/src/telemetry/action-redaction.ts:83-93`，`api/src/models/action-execution-log/index.ts:167-181,230-241`，`api/src/models/action-execution-log/schema.ts:20-39`，`api/src/routes/gateway-action/gateway-action.routes.ts:50-85`，`api/src/routes/internal/internal.index.ts:127-136`。
-- Eval 自行计算 Token 总量、cache 命中率、各类费用汇总、工具次数和耗时。**SP 不需单独提供“cache 命中率”或“工具统计”接口**：命中数量和总数量足够计算前者，后者从完整轨迹配对工具事件得到。缺字段、未结算、分页未读完不能记成零。依据：`eval-platform/docs/package-boundaries.md:105-114`，`agent/src/telemetry/trajectory-store.ts:68-99`。
-
-## Eval 侧改动与非目标
-
-1. Eval Harness 仍需拆分 Chat ID 与实际 Submission ID；Attempt 应记录真实 Submission ID，Sampling/EvaluationRecord 应分别索引其 Chat 与各次 Attempt。当前预分配的 `submissionId` 仍承担 Chat 身份；本次共享 SpaceDO 改造未迁移持久化身份。`ensureAgent` 幂等身份由 Chat ID 承担；提交幂等键不替代 Chat ID。现有混用见 `eval-platform/packages/eval-runtime/src/harness/model.ts` 和 `eval-platform/docs/package-boundaries.md`。
-2. Eval Runtime 已让 Evaluator `ensureAgent()` 携带 Subject `{userId,chatId}` 与 `evaluationId` 的不可变 Workspace 绑定；准备阶段调用 `materializeSubjectTrajectory()`，以 Subject Chat 为幂等范围，SP 只物化完整轨迹，Subject 产物不复制。多次独立评估复用 Subject 文件和轨迹文件，各自写入不同 EvaluationRecord 目录。现有调用顺序是在确保 Evaluator Chat 后、提交前完成轨迹物化；SP 应对该操作实现幂等。见 `eval-platform/packages/eval-runtime/src/harness/model.ts`、`eval-platform/packages/eval-runtime/src/runtime/evaluation.ts`。
-3. 先执行 Project、以后独立选择该 Project 评估，以及一键选中 Project 下全部成功 Sampling，属于 Eval 的查询、筛选和编排；不要求 SP 新建 Project 或“批量评估” API。执行、评估和 pipeline 仍各自可启动；Eval Worker 靠 SP 长连接推进，断线重连读持久快照。
-4. 不增加 Eval 自己的 SP DO 读写、Inbox 影子记录、Evaluator 独立 SpaceDO、Subject artifact 复制、聊天驱动观察、配置 revision、独立只读取证服务、独立审批服务、工具统计服务。SP 内部应复用现有 Agent、Workspace、Trajectory 和结算能力的所有权边界。
+1. Eval 已将预分配 Chat ID 与 Attempt 的真实 Submission ID 拆开；真实 Harness 须用 SP 回执/按键恢复填入后者，并保留 Chat ensure、提交和准备操作的稳定幂等键。资源采集在投递前以 `chatId + idempotencyKey` 登记，收集快照必须带真实 `submissionId`。
+2. `apps/eval-api` 组合 Eval SP 的公开 HTTP/WebSocket 客户端、Eval SP 登录校验、Agent Config 列表/编辑和真实 Harness；`eval-runtime` 继续负责执行、独立评估、pipeline、并发与恢复。不新增第五个共享包。
+3. Runtime 先完整收集 Subject 产物和轨迹，再请 SP 把轨迹物化到 Subject SpaceDO；Evaluator 写自己的评估目录。Runtime 保存原始资源快照，`eval-metrics` 再计算费用、Token/cache、工具和耗时。
+4. Eval Web 只提供由 Project/Run/Sampling/Evaluation 进入的只读 Chat/Workspace 视图。配置编辑仅针对 Eval SP 中的用户 Agent Config，与观察 Chat 的只读权限分开。

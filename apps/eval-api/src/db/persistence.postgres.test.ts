@@ -416,9 +416,9 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       execution: { status: "running" },
       executionAttempts: [{
         executionAttemptId: "subject-attempt", samplingId: initial.samplingId,
-        attemptNumber: 1, status: "completed", completedAt: "2026-10-10T00:00:00.000Z",
+        attemptNumber: 1, submissionId: "subject-submission", status: "completed", completedAt: "2026-10-10T00:00:00.000Z",
         resources: { status: "collected", snapshot: {
-          scope: { submissionId: "subject-submission", idempotencyKey: "execution:one" },
+          scope: { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "execution:one" },
           observedAt: "2026-10-10T00:00:01.000Z", finalized: false,
           coverage: { usageEvents: "partial", telemetryEvents: "partial", billingSettlements: "partial" },
           usageEvents: [{ eventId: "saved" }], telemetryEvents: [], billingSettlements: [],
@@ -433,7 +433,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await runtime.getSampling(initial.samplingId)).toEqual(completedAttempt);
 
     const completedEvaluation: EvaluationRecord = {
-      ...judge, status: { status: "running" },
+      ...judge, chatId: "judge-chat", status: { status: "running" },
       attempts: [{
         evaluationAttemptId: "judge-attempt", evaluationId: judge.evaluationId,
         attemptNumber: 1, status: "completed", completedAt: "2026-10-10T00:00:00.000Z",
@@ -453,14 +453,14 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const executionRun = makeRun(project.projectId, original, dataset.datasetId);
     await runtime.createRunWithSamplings(executionRun, [original], []);
     const snapshot = {
-      scope: { submissionId: "subject-submission", idempotencyKey: "execute:1" },
+      scope: { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "execute:1" },
       observedAt: "2026-10-09T01:00:00.000Z", finalized: true,
       coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" } as const,
       usageEvents: [{ eventId: "one", value: { source: null } }, { eventId: "one", value: { source: null } }],
       telemetryEvents: [], billingSettlements: [],
     };
     const finished: Sampling = {
-      ...original, execution: { status: "succeeded" }, subjectSubmissionId: "subject-submission",
+      ...original, execution: { status: "succeeded" }, subjectChatId: "subject-chat",
       executionAttempts: [{ executionAttemptId: "subject-attempt", samplingId: original.samplingId,
         attemptNumber: 1, submissionId: "subject-submission", status: "completed",
         resources: { status: "collected", snapshot } }],

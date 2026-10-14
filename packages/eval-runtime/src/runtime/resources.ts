@@ -4,8 +4,9 @@ import type { AgentResourceFact, AgentResourceScope, AgentResourceSnapshot } fro
 const identifier = z.string().refine((value) => value.trim().length > 0, "Identifier must not be blank");
 const completeness = z.enum(["complete", "partial", "unavailable"]);
 const scopeSchema = z.strictObject({
-  submissionId: identifier,
+  chatId: identifier,
   idempotencyKey: identifier,
+  submissionId: identifier,
 });
 const rawFactSchema = z.custom<AgentResourceFact>(isRawFact, "Expected an unmodified JSON object with finite numbers and safe integers");
 const snapshotSchema = z.strictObject({
@@ -41,8 +42,9 @@ export function validateResourceSnapshot(
   }
   const snapshot: AgentResourceSnapshot = parsed.data;
   if (
-    snapshot.scope.submissionId !== scope.submissionId
+    snapshot.scope.chatId !== scope.chatId
     || snapshot.scope.idempotencyKey !== scope.idempotencyKey
+    || (scope.submissionId !== undefined && snapshot.scope.submissionId !== scope.submissionId)
   ) {
     throw new AgentResourceValidationError("Resource snapshot does not match the requested operation scope");
   }

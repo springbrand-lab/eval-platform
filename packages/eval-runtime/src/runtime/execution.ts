@@ -62,9 +62,12 @@ export async function executeSampling(
     const input = dataInputSchema.safeParse(data);
     if (!input.success) throw new AgentOperationError(input.error.message, false, "network");
     const initialData = input.data;
-    const submissionId = current.subjectSubmissionId ?? dependencies.idFactory();
-    if (current.subjectSubmissionId === undefined) {
-      await persist({ ...current, subjectSubmissionId: submissionId });
+    if (current.subjectChatId === undefined && current.executionAttempts.length > 0) {
+      throw new AgentOperationError("Cannot resume an execution Attempt without its Subject Chat ID", false, "network");
+    }
+    const chatId = current.subjectChatId ?? dependencies.idFactory();
+    if (current.subjectChatId === undefined) {
+      await persist({ ...current, subjectChatId: chatId });
     }
 
     const result = await runAgentLifecycle<ExecutionAttempt, ExecutionOutput>(dependencies, {
@@ -72,7 +75,7 @@ export async function executeSampling(
       role: "subject",
       projectId: current.projectId,
       samplingId: current.samplingId,
-      submissionId,
+      chatId,
       harnessConfig: subjectHarness,
       prompt: initialData.userPrompt,
       retryController,
@@ -110,7 +113,7 @@ export async function executeSampling(
       prepare: async (handle) => {
         await dependencies.harness.materializeInitialData({
           handle,
-          idempotencyKey: `initial-data:${handle.submissionId}`,
+          idempotencyKey: `initial-data:${handle.chatId}`,
           data: initialData,
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });

@@ -63,16 +63,15 @@ export async function evaluateSampling(
     return { ...input.context, evaluation: currentEvaluation };
   }
 
-  const subjectSubmissionId = sampling.subjectSubmissionId
-    ?? latestSubmissionId(sampling);
-  if (!subjectSubmissionId) {
-    await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject submission"));
+  const subjectChatId = sampling.subjectChatId;
+  if (!subjectChatId) {
+    await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject Chat"));
     return { ...input.context, evaluation: currentEvaluation };
   }
   // SP creates the Subject Chat under the selected user-agent Config owner.
   const subjectWorkspace = {
     userId: sampling.subjectAgent.ownerUserId,
-    chatId: subjectSubmissionId,
+    chatId: subjectChatId,
   };
 
   try {
@@ -83,12 +82,15 @@ export async function evaluateSampling(
     const parsed = dataInputSchema.safeParse(data);
     if (!parsed.success) throw new AgentOperationError(parsed.error.message, false, "network");
     const initialData = parsed.data;
-    const submissionId = currentEvaluation.submissionId ?? dependencies.idFactory();
-    if (currentEvaluation.submissionId === undefined) {
+    if (currentEvaluation.chatId === undefined && currentEvaluation.attempts.length > 0) {
+      throw new AgentOperationError("Cannot resume an Evaluation Attempt without its Chat ID", false, "network");
+    }
+    const chatId = currentEvaluation.chatId ?? dependencies.idFactory();
+    if (currentEvaluation.chatId === undefined) {
       await persistEvaluation({
         ...currentEvaluation,
         evaluator: agentConfig,
-        submissionId,
+        chatId,
       });
     }
 
@@ -97,7 +99,7 @@ export async function evaluateSampling(
       role: "evaluator",
       projectId: sampling.projectId,
       samplingId: sampling.samplingId,
-      submissionId,
+      chatId,
       evaluationWorkspace: {
         subject: subjectWorkspace,
         evaluationId: currentEvaluation.evaluationId,
@@ -139,7 +141,7 @@ export async function evaluateSampling(
       prepare: async (handle) => {
         await dependencies.harness.materializeInitialData({
           handle,
-          idempotencyKey: `initial-data:${handle.submissionId}`,
+          idempotencyKey: `initial-data:${handle.chatId}`,
           data: initialData,
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
@@ -198,16 +200,6 @@ export async function evaluateSampling(
     });
     return { ...input.context, evaluation: currentEvaluation };
   }
-}
-
-function latestSubmissionId(
-  sampling: RuntimeEvaluationContext["sampling"],
-): string | undefined {
-  for (let index = sampling.executionAttempts.length - 1; index >= 0; index -= 1) {
-    const submissionId = sampling.executionAttempts[index]?.submissionId;
-    if (submissionId) return submissionId;
-  }
-  return undefined;
 }
 
 function buildEvaluationPrompt(samplingId: string): string {

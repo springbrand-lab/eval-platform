@@ -6,6 +6,7 @@ export type {
   AgentResourceCoverage,
   AgentResourceFact,
   AgentResourceScope,
+  SubmittedAgentResourceScope,
   AgentResourceSnapshot,
 } from "./resources.js";
 
@@ -138,7 +139,8 @@ export interface Sampling {
   readonly sampleId: string;
   readonly execution: SamplingStageState;
   readonly subjectAgent: AgentConfigRef;
-  readonly subjectSubmissionId?: string;
+  /** SP Chat is the Subject Session; all execution attempts submit within it. */
+  readonly subjectChatId?: string;
   readonly executionAttempts: readonly ExecutionAttempt[];
   readonly artifacts?: readonly ArtifactRef[];
   readonly trajectory?: TrajectoryRef;
@@ -219,7 +221,8 @@ export interface EvaluationRecord {
   readonly evaluationId: string;
   readonly samplingId: string;
   readonly evaluator: AgentConfigRef;
-  readonly submissionId?: string;
+  /** The Evaluator's SP Chat/Session, distinct from each attempt's Submission. */
+  readonly chatId?: string;
   readonly status: SamplingStageState;
   readonly attempts: readonly EvaluationAttempt[];
   readonly output?: EvaluationAgentOutput;
