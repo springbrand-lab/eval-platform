@@ -21,6 +21,8 @@ import type {
 import type {
   EvalRuntime,
   EvalRuntimeDependencies,
+  EvalRunAdmission,
+  EvalRunAdmissionDependencies,
   EvalRunResumer,
   EvalRunResumerDependencies,
   RuntimeCatalog,
@@ -56,6 +58,9 @@ import { createAgentScheduler, type AgentScheduler } from "./scheduler.js";
 import { isPendingStatus, toRunSnapshot, toSamplingSnapshot } from "./projection.js";
 
 type RuntimeStageDependencies = ExecutionStageDependencies & EvaluationStageDependencies;
+type RunResumerConstructionDependencies = Omit<EvalRunResumerDependencies, "harness"> & {
+  readonly harness?: EvalRunResumerDependencies["harness"];
+};
 
 /** The chosen Sampling set cannot be admitted as an independent evaluation. */
 export class RuntimeEvaluationSelectionError extends Error {
@@ -101,17 +106,17 @@ class RunResumer implements EvalRunResumer {
   protected readonly store: EvalRunResumerDependencies["store"];
   protected readonly idFactory: () => string;
   readonly #getSample: EvalRunResumerDependencies["getSample"];
-  readonly #stageDependencies: RuntimeStageDependencies;
+  readonly #stageDependencies: RuntimeStageDependencies | undefined;
   readonly #createRetryController: (policy?: RetryPolicy) => RetryController;
   readonly #onError: (error: Error) => void;
 
-  constructor(dependencies: EvalRunResumerDependencies) {
+  constructor(dependencies: RunResumerConstructionDependencies) {
     this.store = dependencies.store;
     this.idFactory = dependencies.idFactory ?? defaultIdFactory;
     this.#getSample = dependencies.getSample;
     this.#createRetryController = dependencies.createRetryController ?? createRetryController;
     this.#onError = dependencies.onError ?? ((error) => console.error(error));
-    this.#stageDependencies = {
+    this.#stageDependencies = dependencies.harness === undefined ? undefined : {
       harness: dependencies.harness,
       store: dependencies.store,
       idFactory: this.idFactory,
@@ -123,6 +128,7 @@ class RunResumer implements EvalRunResumer {
   }
 
   async resume(runId: string): Promise<void> {
+    this.requireStageDependencies();
     const run = await this.store.getRun(runId);
     if (!run) throw new Error(`Unknown run ${runId}`);
 
@@ -222,7 +228,7 @@ class RunResumer implements EvalRunResumer {
     const errors: unknown[] = [];
     await scheduler.run(contexts.map((context) => async () => {
       try {
-        await executeSampling(this.#stageDependencies, {
+        await executeSampling(this.requireStageDependencies(), {
           context,
           harnessConfig: config.harness,
           retryPolicy: config.retryPolicy,
@@ -242,7 +248,7 @@ class RunResumer implements EvalRunResumer {
     const errors: unknown[] = [];
     await scheduler.run(contexts.map((context) => async () => {
       try {
-        await evaluateSampling(this.#stageDependencies, {
+        await evaluateSampling(this.requireStageDependencies(), {
           context,
           harnessConfig: config.evaluationHarness,
           retryPolicy: config.retryPolicy,
@@ -265,7 +271,7 @@ class RunResumer implements EvalRunResumer {
       write: (next, expected) => this.store.updateEvaluation(next, expected),
       read: () => this.store.getEvaluation(evaluation.evaluationId),
       retryController,
-      sleep: this.#stageDependencies.sleep,
+      sleep: this.requireStageDependencies().sleep,
     });
 
     try {
@@ -303,6 +309,11 @@ class RunResumer implements EvalRunResumer {
     return createAgentScheduler({ maxConcurrentDos });
   }
 
+  private requireStageDependencies(): RuntimeStageDependencies {
+    if (!this.#stageDependencies) throw new Error("Run resume requires a Harness");
+    return this.#stageDependencies;
+  }
+
 }
 
 class RuntimeCoordinator extends RunResumer implements EvalRuntime {
@@ -314,7 +325,7 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
     readonly promise: Promise<RunHandle>;
   }>();
 
-  constructor(dependencies: EvalRuntimeDependencies) {
+  constructor(dependencies: EvalRuntimeDependencies | EvalRunAdmissionDependencies) {
     super({ ...dependencies, getSample: dependencies.catalog.getSample.bind(dependencies.catalog) });
     this.#sourceCommit = requireSourceCommit(dependencies.sourceCommit);
     this.#catalog = dependencies.catalog;
@@ -635,6 +646,8 @@ export type {
   AgentOption,
   EvalRuntime,
   EvalRuntimeDependencies,
+  EvalRunAdmission,
+  EvalRunAdmissionDependencies,
   EvalRunResumer,
   EvalRunResumerDependencies,
   RuntimeCatalog,
@@ -671,6 +684,17 @@ export function createEvalRuntime(
   dependencies: EvalRuntimeDependencies,
 ): EvalRuntime {
   return new RuntimeCoordinator(dependencies);
+}
+
+export function createEvalRunAdmission(
+  dependencies: EvalRunAdmissionDependencies,
+): EvalRunAdmission {
+  const runtime = new RuntimeCoordinator(dependencies);
+  return {
+    start: (request) => runtime.start(request),
+    evaluate: (request) => runtime.evaluate(request),
+    pipeline: (request) => runtime.pipeline(request),
+  };
 }
 
 export function createEvalRunResumer(

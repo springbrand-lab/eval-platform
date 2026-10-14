@@ -12,6 +12,7 @@ export { createPostgresConfigReader, createPostgresConfigStore, ConfigEntityNotF
 export type { PostgresConfigStore } from "./db/config.js";
 export { createPostgresRuntimeStore, createPostgresWorkerRuntimeStore } from "./db/runtime.js";
 export type { EvalSpRelease } from "./db/release.js";
+export type { ProjectRunView } from "./db/run-view.js";
 export { createPostgresMetricsSource } from "./db/metrics.js";
 export { createPostgresRunNotifications, startEvalRunWorker } from "./worker.js";
 export type { EvalRunWorker, EvalRunWorkerOptions, RunNotifications } from "./worker.js";

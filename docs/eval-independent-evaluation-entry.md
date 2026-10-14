@@ -50,7 +50,7 @@
 
 提交接口只接受显式、非空、无重复的 ID 列表，不接受筛选表达式或“提交时全选”。查询时的一键全选结果由调用方固定后提交；同一意图重试发送原请求体。标识符和幂等键最多 512 字符，幂等键不能有首尾空白。POST 要求 `Content-Type: application/json`，请求体上限 4 MiB；格式不符分别返回 415、413。其他无效输入返回 400，缺失或失效会话返回 401，未找到的 Project/Run/评估配置返回 404，幂等身份冲突或已失效的 Sampling 选择返回 409；未预期的内部错误返回 500，Eval SP 校验不可用返回 502。错误响应为 `{ "error": { "code": string, "message": string } }`。宿主可配置可信 Web Origin；配置后预检请求只对该 Origin 开放，其他 Origin 返回 403。
 
-API 的服务工厂按 Eval SP 用户 ID 创建并缓存一套用户范围内的 Catalog、ConfigStore/ConfigResolver 和 Runtime；同一用户的并发提交由同一 Runtime 实例处理。HTTP 路由只负责鉴权、输入校验、Project/Run 归属和组合调用；Run 准入与结果事实仍由 Runtime 和 Store 负责。`start:api` 进程默认使用 Eval API 已实现的用户范围 PostgreSQL ConfigStore，并由独立 `start:worker` 进程执行已入库的 Run。
+API 的服务工厂按 Eval SP 用户 ID 创建并缓存一套用户范围内的 Catalog、ConfigStore/ConfigResolver 和 Runtime 准入接口；同一用户的并发提交由同一 Runtime 实例处理。HTTP 路由只负责鉴权、输入校验、Project/Run 归属和组合调用；Run 准入与结果事实仍由 Runtime 和 Store 负责。Run 状态与 Evaluation 结果在同一只读事务内批量读取和投影。`start:api` 进程使用用户范围 PostgreSQL ConfigReader，不持有 SP Harness 服务凭证；独立 `start:worker` 进程用真实 Harness 执行已入库的 Run。
 
 ## 控制面接入验收
 

@@ -1,17 +1,17 @@
-import type { EvaluationRecord } from "@eval-platform/eval-contracts";
-import type { EvalRuntime } from "@eval-platform/eval-runtime";
-import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeRunIdentityConflictError, RuntimeRunNotFoundError } from "@eval-platform/eval-runtime";
+import type { EvalRunAdmission } from "@eval-platform/eval-runtime";
+import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import type { PostgresCatalog } from "./db/catalog.js";
+import type { ProjectRunView } from "./db/run-view.js";
 import type { EvalSpClient } from "./sp/client.js";
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 export interface IndependentEvaluationOwnerServices {
-  /** Both services must be scoped to the verified Eval SP user. */
+  /** Every reader and writer must be scoped to the verified Eval SP user. */
   readonly catalog: Pick<PostgresCatalog, "getProject" | "listSuccessfulSamplings" | "selectAllSuccessfulSamplingIds">;
-  readonly runtime: Pick<EvalRuntime, "evaluate" | "getRun">;
-  /** Return only this Run's records in their persisted order, without one query per Evaluation. */
-  readonly listRunEvaluations: (projectId: string, runId: string) => Promise<readonly EvaluationRecord[]>;
+  readonly runtime: Pick<EvalRunAdmission, "evaluate">;
+  /** Return a consistent, owner-scoped Run view and its ordered Evaluation records. */
+  readonly readRun: (projectId: string, runId: string) => Promise<ProjectRunView | null>;
 }
 
 export interface IndependentEvaluationApiOptions {
@@ -255,7 +255,8 @@ export function createIndependentEvaluationApi(options: IndependentEvaluationApi
           throw new HttpError(502, "SP_UNAVAILABLE", "Eval SP session verification failed");
         }
         const services = await servicesFor(ownerUserId);
-        if (!await services.catalog.getProject(route.projectId)) {
+        if (route.kind !== "run" && route.kind !== "runEvaluations"
+          && !await services.catalog.getProject(route.projectId)) {
           throw new HttpError(404, "NOT_FOUND", "Project not found");
         }
 
@@ -288,15 +289,13 @@ export function createIndependentEvaluationApi(options: IndependentEvaluationApi
           case "run":
           case "runEvaluations": {
             queryValues(url, []);
-            const run = await services.runtime.getRun(route.runId);
-            if (run.projectId !== route.projectId) throw new HttpError(404, "NOT_FOUND", "Run not found");
-            if (route.kind === "run") return json(200, { run }, corsOrigin);
-            const evaluations = await services.listRunEvaluations(route.projectId, route.runId);
-            if (evaluations.length !== run.evaluationIds.length
-              || evaluations.some((record, index) => record.evaluationId !== run.evaluationIds[index])) {
-              throw new Error(`Run ${route.runId} Evaluation records do not match its saved scope`);
+            const view = await services.readRun(route.projectId, route.runId);
+            if (!view || view.run.projectId !== route.projectId || view.run.runId !== route.runId) {
+              throw new HttpError(404, "NOT_FOUND", "Run not found");
             }
-            return json(200, { evaluations }, corsOrigin);
+            return route.kind === "run"
+              ? json(200, { run: view.run }, corsOrigin)
+              : json(200, { evaluations: view.evaluations }, corsOrigin);
           }
         }
       } catch (error) {
@@ -305,9 +304,6 @@ export function createIndependentEvaluationApi(options: IndependentEvaluationApi
         }
         if (error instanceof RuntimeEvaluationSelectionError) {
           return failure(new HttpError(409, "SAMPLING_UNAVAILABLE", "Selected Sampling is unavailable for evaluation"), corsOrigin);
-        }
-        if (error instanceof RuntimeRunNotFoundError) {
-          return failure(new HttpError(404, "NOT_FOUND", "Run not found"), corsOrigin);
         }
         if (error instanceof HttpError) return failure(error, corsOrigin);
         if (error instanceof ConfigNotFoundError && error.kind === "evaluation") {

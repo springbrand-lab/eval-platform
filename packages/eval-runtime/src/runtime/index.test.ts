@@ -25,6 +25,7 @@ import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError, sameRuntim
 import type { RetryController, RetryOperation } from "./retry.js";
 import {
   createEvalRuntime as createRuntimeWithRelease,
+  createEvalRunAdmission,
   createEvalRunResumer,
   type EvalRuntimeDependencies,
 } from "./index.js";
@@ -1738,6 +1739,27 @@ describe("eval runtime orchestration", () => {
     await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.not.toHaveProperty(
       "evaluation",
     );
+  });
+
+  it("admits execution, evaluation and pipeline Runs without a Harness credential", async () => {
+    const store = makeStore();
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog: makeCatalog(), configResolver: makeConfigResolver(), store,
+    });
+    expect("resume" in admission).toBe(false);
+    const execution = await admission.start(startRequest("admission-only-execution"));
+    const sampling = await store.getSampling(execution.samplingIds[0]!);
+    expect(sampling?.execution.status).toBe("queued");
+    await store.updateSampling({ ...sampling!, execution: { status: "succeeded" } }, sampling!);
+
+    const evaluation = await admission.evaluate(evaluateRequest(
+      execution.samplingIds, EVALUATION_CONFIG_ID, "admission-only-evaluation",
+    ));
+    expect((await store.getRun(evaluation.runId))?.evaluationIds).toHaveLength(1);
+    const pipeline = await admission.pipeline({
+      projectId: "project-1", pipelineConfigId: PIPELINE_CONFIG_ID, idempotencyKey: "admission-only-pipeline",
+    });
+    expect((await store.getRun(pipeline.runId))?.phases).toEqual(["execution", "evaluation"]);
   });
 
   it("admits one independent evaluation when the same intent races or is retried", async () => {

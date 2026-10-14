@@ -23,6 +23,8 @@
 
 这些接口属于运行时控制面，不绑定具体的 HTTP、Web 或 CLI 实现。
 
+只负责 Run 准入的 API 进程使用 `createEvalRunAdmission({ sourceCommit, catalog, configResolver, store })`，取得 `start()`、`evaluate()`、`pipeline()` 三个提交接口；`sourceCommit` 是当前 Eval SP 发布的完整 commit，随新 Run 保存。准入进程不持有 SP Harness 凭证，也不能调用 `resume()`。执行器仍使用带真实 Harness 的 `createEvalRunResumer()`。完整 `createEvalRuntime()` 保留两类能力的组合入口。
+
 ## 文件职责
 
 ```text

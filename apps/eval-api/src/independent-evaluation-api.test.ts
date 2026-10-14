@@ -1,12 +1,12 @@
-import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeRunIdentityConflictError, RuntimeRunNotFoundError } from "@eval-platform/eval-runtime";
+import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import { describe, expect, it, vi } from "vitest";
 import { createIndependentEvaluationApi } from "./independent-evaluation-api.js";
 import { createIndependentEvaluationHttpServer } from "./independent-evaluation-http.js";
 
-const project = { projectId: "project-1", ownerUserId: "alice", name: "Evaluation" };
+const project = { projectId: "project-1", ownerUserId: "alice", name: "Evaluation", sourceBranch: "release-2.0.0" };
 const samplingIds = ["sampling-1", "sampling-2"];
 const run = {
-  runId: "run-1", projectId: project.projectId, samplingIds,
+  runId: "run-1", projectId: project.projectId, sourceCommit: "a".repeat(40), samplingIds,
   evaluationIds: ["evaluation-1", "evaluation-2"],
   phases: ["evaluation"] as const, phase: "evaluation" as const, status: "queued" as const,
 };
@@ -31,21 +31,24 @@ function fixture() {
   };
   const runtime = {
     evaluate: vi.fn(async () => ({ runId: run.runId, samplingIds })),
-    getRun: vi.fn(async () => run),
   };
-  const listRunEvaluations = vi.fn(async () => [
-    evaluation("evaluation-1", samplingIds[0]!), evaluation("evaluation-2", samplingIds[1]!),
-  ]);
+  const readRun = vi.fn(async (ownerUserId: string, projectId: string, runId: string) => (
+    ownerUserId === "alice" && projectId === "project-1" && runId === "run-1"
+      ? { run, evaluations: [
+        evaluation("evaluation-1", samplingIds[0]!), evaluation("evaluation-2", samplingIds[1]!),
+      ] }
+      : null
+  ));
   const createOwnerServices = vi.fn(async (ownerUserId: string) => ({
     catalog: ownerUserId === "alice" ? catalog : {
       ...catalog,
       getProject: vi.fn(async () => null),
     },
     runtime,
-    listRunEvaluations,
+    readRun: (projectId: string, runId: string) => readRun(ownerUserId, projectId, runId),
   }));
   const api = createIndependentEvaluationApi({ spClient, createOwnerServices });
-  return { api, spClient, catalog, runtime, listRunEvaluations, createOwnerServices };
+  return { api, spClient, catalog, runtime, readRun, createOwnerServices };
 }
 
 function request(path: string, init: RequestInit = {}): Request {
@@ -108,9 +111,7 @@ describe("independent evaluation HTTP API", () => {
   });
 
   it("returns the Run and its EvaluationRecords only within the requested Project", async () => {
-    const { api, runtime, catalog, listRunEvaluations } = fixture();
-    catalog.getProject.mockImplementation(async (projectId) => projectId === "project-1" || projectId === "project-2"
-      ? { ...project, projectId } : null);
+    const { api, catalog, readRun } = fixture();
     const snapshot = await api.handle(request("/api/projects/project-1/runs/run-1"));
     const results = await api.handle(request("/api/projects/project-1/runs/run-1/evaluations"));
     expect(snapshot.status).toBe(200);
@@ -119,12 +120,16 @@ describe("independent evaluation HTTP API", () => {
     expect(await body(results)).toEqual({ evaluations: [
       evaluation("evaluation-1", "sampling-1"), evaluation("evaluation-2", "sampling-2"),
     ] });
-    expect(listRunEvaluations).toHaveBeenCalledOnce();
-    expect(listRunEvaluations).toHaveBeenCalledWith("project-1", "run-1");
+    expect(readRun).toHaveBeenCalledTimes(2);
+    expect(readRun).toHaveBeenCalledWith("alice", "project-1", "run-1");
     expect((await api.handle(request("/api/projects/project-2/runs/run-1/evaluations"))).status).toBe(404);
-    expect(listRunEvaluations).toHaveBeenCalledOnce();
-    runtime.getRun.mockRejectedValueOnce(new RuntimeRunNotFoundError("missing"));
+    expect((await api.handle(request("/api/projects/project-1/runs/run-1", {
+      headers: { Authorization: "Bearer bob-token" },
+    }))).status).toBe(404);
     expect((await api.handle(request("/api/projects/project-1/runs/missing"))).status).toBe(404);
+    readRun.mockResolvedValueOnce({ run: { ...run, projectId: "project-2" }, evaluations: [] });
+    expect((await api.handle(request("/api/projects/project-1/runs/run-1"))).status).toBe(404);
+    expect(catalog.getProject).not.toHaveBeenCalled();
   });
 
   it("distinguishes invalid input, changed selections, key conflicts and SP outages", async () => {

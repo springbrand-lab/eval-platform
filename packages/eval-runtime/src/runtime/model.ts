@@ -98,6 +98,14 @@ export interface EvalRuntimeDependencies {
   readonly onError?: (error: Error) => void;
 }
 
+/** Persists Run admissions only; Agent execution belongs to a separate resumer. */
+export type EvalRunAdmission = Pick<EvalRuntime, "start" | "evaluate" | "pipeline">;
+
+export type EvalRunAdmissionDependencies = Pick<
+  EvalRuntimeDependencies,
+  "sourceCommit" | "catalog" | "configResolver" | "store" | "idFactory"
+>;
+
 /** Recovery reads persisted Run facts; admission APIs and Config resolution stay in the API process. */
 export interface EvalRunResumerDependencies extends Omit<EvalRuntimeDependencies, "catalog" | "configResolver" | "sourceCommit"> {
   readonly getSample: RuntimeCatalog["getSample"];

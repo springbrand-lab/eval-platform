@@ -1,10 +1,10 @@
 import type { Server } from "node:http";
 import { Pool } from "pg";
 import { createEvalDb } from "./db/client.js";
+import { requireEvalSpRelease } from "./db/release.js";
 import { createIndependentEvaluationHttpServer } from "./independent-evaluation-http.js";
 import { createPostgresIndependentEvaluationApi } from "./independent-evaluation-postgres.js";
 import { createEvalSpClient } from "./sp/client.js";
-import { createSpHarness } from "./sp/harness.js";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -43,14 +43,17 @@ async function main(): Promise<void> {
   const databaseUrl = requiredEnv("DATABASE_URL");
   const spOrigin = requiredEnv("EVAL_SP_ORIGIN");
   const webOrigin = requiredEnv("EVAL_WEB_ORIGIN");
-  const serviceToken = requiredEnv("EVAL_SP_SERVICE_TOKEN");
+  const release = requireEvalSpRelease({
+    sourceBranch: requiredEnv("EVAL_SP_SOURCE_BRANCH"),
+    sourceCommit: requiredEnv("EVAL_SP_SOURCE_COMMIT"),
+  });
   const host = process.env.EVAL_API_HOST ?? "0.0.0.0";
   const port = portEnv();
   const pool = new Pool({ connectionString: databaseUrl });
   const api = createPostgresIndependentEvaluationApi({
     db: createEvalDb(pool),
+    release,
     spClient: createEvalSpClient({ origin: spOrigin, writeOrigin: webOrigin }),
-    harness: createSpHarness({ origin: spOrigin, serviceToken }),
     webOrigin,
   });
   const server = createIndependentEvaluationHttpServer(api);
