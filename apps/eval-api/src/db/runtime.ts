@@ -199,13 +199,22 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
 
   return {
     async withRunDispatchGate(runId, dispatch) {
-      return db.transaction(async (transaction) => {
+      const started = await db.transaction(async (transaction) => {
         const [run] = await transaction.select({ runId: runs.runId, stopRequested: runs.stopRequested })
           .from(runs).where(and(eq(runs.runId, runId), ownerScope.run)).for("update");
         if (!run) throw new Error(`Unknown run ${runId}`);
         if (run.stopRequested) throw new RuntimeRunStoppedError(runId);
-        return dispatch();
+        // Start the remote call before releasing the lock. Its response can be
+        // arbitrarily slow, so do not hold the transaction while awaiting it.
+        const outcome = dispatch().then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+        return { outcome };
       });
+      const outcome = await started.outcome;
+      if (!outcome.ok) throw outcome.error;
+      return outcome.value;
     },
     async getRun(runId) {
       return db.transaction(async (transaction) => (

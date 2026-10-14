@@ -689,7 +689,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await runtime.getRun(nextRun.runId)).toEqual(nextRun);
   });
 
-  it("serializes a stop request with stage dispatch and blocks later dispatch", async () => {
+  it("commits a stop without waiting for SP and blocks later stage dispatch", async () => {
     const { runtime, project, dataset, sample } = await setup();
     const sampling = makeSampling(project.projectId, sample.sampleId);
     const run = makeRun(project.projectId, sampling, dataset.datasetId);
@@ -705,20 +705,17 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       return "submitted";
     });
     await dispatchEntered;
-    let stopSettled = false;
-    const stop = control.stopRun(project.projectId, run.runId).finally(() => { stopSettled = true; });
+    const stop = control.stopRun(project.projectId, run.runId);
     try {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(stopSettled).toBe(false);
+      await expect(stop).resolves.toEqual({ runId: run.runId, stopRequested: true });
+      const lateDispatch = vi.fn(async () => "late submission");
+      await expect(runtime.withRunDispatchGate(run.runId, lateDispatch))
+        .rejects.toBeInstanceOf(RuntimeRunStoppedError);
+      expect(lateDispatch).not.toHaveBeenCalled();
     } finally {
       release();
     }
     await expect(dispatch).resolves.toBe("submitted");
-    await expect(stop).resolves.toEqual({ runId: run.runId, stopRequested: true });
-    const lateDispatch = vi.fn(async () => "late submission");
-    await expect(runtime.withRunDispatchGate(run.runId, lateDispatch))
-      .rejects.toBeInstanceOf(RuntimeRunStoppedError);
-    expect(lateDispatch).not.toHaveBeenCalled();
   });
 
   it("lists and selects every successful Sampling in the owned Project with stable order", async () => {

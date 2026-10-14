@@ -57,7 +57,7 @@ export type SamplingState = Sampling;
 
 export interface RuntimeStore {
   getRun(runId: string): Promise<RuntimeRunRecord | null>;
-  /** Serialize remote stage mutations with the saved stop request for this Run. */
+  /** Serialize the start of remote stage mutations with a saved stop request. */
   withRunDispatchGate<T>(runId: string, dispatch: () => Promise<T>): Promise<T>;
   /** Persistent Project-scoped lookup used before mutable Config/Sample resolution. */
   findRunByIdempotencyKey(projectId: string, idempotencyKey: string): Promise<RuntimeRunRecord | null>;
