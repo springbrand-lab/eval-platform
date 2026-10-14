@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createEvalDb } from "./db/client.js";
 import { createPostgresProjectCatalog } from "./db/catalog.js";
 import { createPostgresDatasetStore } from "./db/dataset.js";
+import { BundleResourceInUseError, createResourceCatalog } from "./db/resource-catalog.js";
 import { createInitialResourceApi } from "./initial-resources.js";
 import { createInitialResourceHttpHandler } from "./initial-resources.http.js";
 import { openBundleDirectory } from "./sp/bundle-directory.js";
@@ -140,6 +141,70 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
       dataset: { name: "Invalid refs" }, data: [{ userPrompt: "New", initialMaterials: material }],
     }), "json")).rejects.toThrow(/Unknown Material/u);
     expect(await dataset.listDatasets()).toEqual(datasetsBefore);
+  });
+
+  it("keeps UUID resource bindings effective when the client uses uppercase IDs", async () => {
+    const db = createEvalDb(pool);
+    const directory = await openBundleDirectory(bundleRoot);
+    const catalog = createResourceCatalog(db, owner, directory);
+    const dataset = createDatasetService(createPostgresDatasetStore(db, owner));
+    const bundle = await catalog.createBundle({ name: "Case bundle", description: "UUID case test" });
+    const material = await catalog.createMaterial(bundle.bundleId, {
+      name: "Case material", description: "One file",
+      files: [{ path: "/case.txt", mediaType: "text/plain", contentBase64: "Y2FzZQ==" }],
+    });
+    const session = await catalog.createSession(bundle.bundleId, {
+      name: "Case session", description: "One history", format: "json",
+      content: JSON.stringify({ entries: [{
+        id: "m1", message: { role: "user", content: "Earlier task" }, createdAt: 1,
+      }] }),
+    });
+    const upperRef = {
+      bundleId: bundle.bundleId.toUpperCase(), materialId: material.materialId.toUpperCase(),
+    };
+    const upperSession = {
+      bundleId: bundle.bundleId.toUpperCase(), sessionId: session.sessionId.toUpperCase(),
+    };
+    const row = await dataset.createData({
+      userPrompt: "Test case", initialMaterials: upperRef, initialSession: upperSession,
+    });
+
+    await expect(catalog.deleteMaterial(bundle.bundleId, material.materialId))
+      .rejects.toBeInstanceOf(BundleResourceInUseError);
+    await expect(catalog.deleteSession(bundle.bundleId, session.sessionId))
+      .rejects.toBeInstanceOf(BundleResourceInUseError);
+    await expect(catalog.deleteBundle(bundle.bundleId))
+      .rejects.toBeInstanceOf(BundleResourceInUseError);
+    expect(await dataset.getData(row.dataId)).toMatchObject({
+      initialMaterials: { bundleId: bundle.bundleId, materialId: material.materialId },
+      initialSession: { bundleId: bundle.bundleId, sessionId: session.sessionId },
+    });
+
+    const second = await dataset.createData({ userPrompt: "Bind later" });
+    const bound = await createInitialResourceApi(db, owner, directory)
+      .bindData(second.dataId, { evalInitialMaterials: upperRef });
+    expect(bound.evalInitialMaterials).toEqual({
+      bundleId: bundle.bundleId, materialId: material.materialId,
+    });
+    const imported = await dataset.importDataset(JSON.stringify({
+      dataset: { name: "Imported case" },
+      data: [{ userPrompt: "Import later", initialMaterials: upperRef }],
+    }), "json");
+    expect(imported.data[0]?.initialMaterials).toEqual({
+      bundleId: bundle.bundleId, materialId: material.materialId,
+    });
+    const updated = await dataset.createData({ userPrompt: "Update later" });
+    await dataset.updateData(updated.dataId, { userPrompt: "Update later", initialSession: upperSession });
+    expect((await dataset.getData(updated.dataId))?.initialSession).toEqual({
+      bundleId: bundle.bundleId, sessionId: session.sessionId,
+    });
+    await dataset.updateData(row.dataId, { userPrompt: "Test case" });
+    await dataset.updateData(second.dataId, { userPrompt: "Bind later" });
+    await dataset.updateData(imported.data[0]!.dataId, { userPrompt: "Import later" });
+    await dataset.updateData(updated.dataId, { userPrompt: "Update later" });
+    await catalog.deleteMaterial(bundle.bundleId, material.materialId);
+    await catalog.deleteSession(bundle.bundleId, session.sessionId);
+    await catalog.deleteBundle(bundle.bundleId);
   });
 
   it("uploads a standalone output format and binds only its ID to Project", async () => {

@@ -145,6 +145,27 @@ describe("Dataset service", () => {
     }
   });
 
+  it("canonicalizes UUID resource references and preserves other external IDs", async () => {
+    const service = createDatasetService(new TestDatasetStore());
+    const bundleId = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const materialId = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB";
+    const sessionId = "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC";
+    const created = await service.createData({
+      userPrompt: "task", externalCode: "ABC",
+      initialMaterials: { bundleId, materialId },
+      evalInitialMaterials: { bundleId, materialId },
+      initialSession: { bundleId, sessionId },
+    });
+    expect(created).toMatchObject({
+      externalCode: "ABC",
+      initialMaterials: { bundleId: bundleId.toLowerCase(), materialId: materialId.toLowerCase() },
+      evalInitialMaterials: { bundleId: bundleId.toLowerCase(), materialId: materialId.toLowerCase() },
+      initialSession: { bundleId: bundleId.toLowerCase(), sessionId: sessionId.toLowerCase() },
+    });
+    const opaque = await service.createData({ userPrompt: "task", initialSession });
+    expect(opaque.initialSession).toEqual(initialSession);
+  });
+
   it("fully replaces editable fields without changing entity identity", async () => {
     const service = createDatasetService(new TestDatasetStore());
     const dataset = await service.createDataset({ name: "tasks", description: "old" });

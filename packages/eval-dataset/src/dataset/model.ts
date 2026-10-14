@@ -56,15 +56,16 @@ const jsonRecordSchema = jsonValueSchema.pipe(z.custom<Readonly<Record<string, J
 const platformIdSchema = z.uuid().transform((value) => value.toLowerCase());
 export const datasetIdSchema = platformIdSchema;
 export const dataIdSchema = platformIdSchema;
+const resourceReferenceIdSchema = z.union([platformIdSchema, identifierSchema]);
 
 export const initialSessionRefSchema = z.strictObject({
-  bundleId: identifierSchema,
-  sessionId: identifierSchema,
+  bundleId: resourceReferenceIdSchema,
+  sessionId: resourceReferenceIdSchema,
 }).readonly();
 
 export const initialMaterialsRefSchema = z.strictObject({
-  bundleId: identifierSchema,
-  materialId: identifierSchema,
+  bundleId: resourceReferenceIdSchema,
+  materialId: resourceReferenceIdSchema,
 }).readonly();
 
 const datasetFieldsSchema = z.strictObject({
