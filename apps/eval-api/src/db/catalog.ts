@@ -5,6 +5,7 @@ import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { isForeignKeyFailure, type EvalDb } from "./client.js";
 import { createPostgresDatasetStore } from "./dataset.js";
 import { requireOwnerUserId } from "./owner.js";
+import { sqlBatches } from "./batch.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
 import { data, projects, samples, samplings } from "./schema.js";
 import { EvaluationSelectionTooLargeError, MAX_EVALUATION_SAMPLING_IDS } from "../independent-evaluation-limits.js";
@@ -130,6 +131,13 @@ export function createPostgresProjectCatalog(
     },
     async getSample(sampleId) {
       return (await readSamples(db, owner, [sampleId]))[0] ?? null;
+    },
+    async getSamples(sampleIds) {
+      const byId = new Map<string, Sample>();
+      for (const batch of sqlBatches([...new Set(sampleIds)])) {
+        for (const sample of await readSamples(db, owner, batch)) byId.set(sample.sampleId, sample);
+      }
+      return sampleIds.map((sampleId) => byId.get(sampleId) ?? null);
     },
     async listSuccessfulSamplings(projectId, input = {}) {
       const limit = input.limit ?? 100;

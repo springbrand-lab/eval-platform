@@ -58,10 +58,14 @@ export interface RuntimeStore {
   /** Atomically update only while the supplied previous facts still match. */
   updateEvaluation(record: EvaluationRecord, expected: EvaluationRecord): Promise<void>;
   getEvaluation(evaluationId: string): Promise<EvaluationRecord | null>;
+  /** Return one Evaluation or null per input ID, in the same order. */
+  getEvaluations(evaluationIds: readonly string[]): Promise<readonly (EvaluationRecord | null)[]>;
   listEvaluations(samplingId: string): Promise<readonly EvaluationRecord[]>;
   /** Atomically update only while the supplied previous facts still match. */
   updateSampling(state: SamplingState, expected: SamplingState): Promise<void>;
   getSampling(samplingId: string): Promise<SamplingState | null>;
+  /** Return one Sampling or null per input ID, in the same order. */
+  getSamplings(samplingIds: readonly string[]): Promise<readonly (SamplingState | null)[]>;
 }
 
 export interface RuntimeRecoveryStore {

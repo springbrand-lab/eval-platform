@@ -681,22 +681,38 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     await database.db.execute(sql`UPDATE eval_samplings
       SET facts = jsonb_set(facts, '{execution,status}', '"succeeded"'::jsonb)
       WHERE project_id = ${project.projectId}`);
-    const successful = records.map((record) => ({ ...record, execution: { status: "succeeded" as const } }));
-    const judges = successful.map((record) => makeEvaluation(record.samplingId));
-    const evaluationRun = makeRun(project.projectId, successful[0]!, dataset.datasetId, {
-      samplingIds: successful.map((record) => record.samplingId),
-      phases: ["evaluation"], config: evaluationConfig,
-      evaluationIds: judges.map((judge) => judge.evaluationId),
+    const config = await configStore("user-A").createEvaluationConfig({
+      evaluationHarness: {
+        kind: "sp", framework: "sp", agentConfig: { ownerUserId: "user-A", userAgentId: "judge" },
+      },
+      evaluationConcurrency: 1,
     });
-    await runtime.createRunWithSamplings(evaluationRun, successful, judges);
+    const api = createPostgresIndependentEvaluationApi({
+      db: database.db, release,
+      spClient: { async verifySession() { return { id: "user-A", role: "user" }; } },
+    });
+    const path = `http://eval-api.test/api/projects/${project.projectId}`;
+    const headers = { Authorization: "Bearer session" };
+    const selection = await api.handle(new Request(`${path}/samplings/successful/ids`, { headers }));
+    expect(selection.status).toBe(200);
+    const selectedIds = (await selection.json() as { samplingIds: string[] }).samplingIds;
+    expect(selectedIds).toHaveLength(records.length);
+    const response = await api.handle(new Request(`${path}/evaluations`, {
+      method: "POST", headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        evaluationConfigId: config.configId, samplingIds: selectedIds, idempotencyKey: "batch-evaluation",
+      }),
+    }));
+    expect(response.status).toBe(202);
+    const handle = await response.json() as { runId: string; samplingIds: string[] };
+    expect(handle.samplingIds).toEqual(selectedIds);
     const view = await createPostgresProjectRunReader(database.db, "user-A")(
-      project.projectId, evaluationRun.runId,
+      project.projectId, handle.runId,
     );
-    expect(view?.run.samplingIds).toEqual(evaluationRun.samplingIds);
-    expect(view?.run.evaluationIds).toEqual(evaluationRun.evaluationIds);
-    expect(view?.evaluations).toHaveLength(judges.length);
-    expect(view?.evaluations[0]?.samplingId).toBe(successful[0]!.samplingId);
-    expect(view?.evaluations.at(-1)?.samplingId).toBe(successful.at(-1)!.samplingId);
+    expect(view?.run.samplingIds).toEqual(selectedIds);
+    expect(view?.run.evaluationIds).toHaveLength(selectedIds.length);
+    expect(view?.evaluations).toHaveLength(selectedIds.length);
+    expect(view?.evaluations.map((evaluation) => evaluation.samplingId)).toEqual(selectedIds);
   }, 30_000);
 
   it("rejects an oversized Project all-selection without returning a partial ID list", async () => {
@@ -1069,6 +1085,12 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await userRuntime.getRun(runA.runId)).toEqual(runA);
     expect(await userRuntime.getRun(runB.runId)).toBeNull();
     expect(await userRuntime.getSampling(samplingB.samplingId)).toBeNull();
+    expect(await userRuntime.getSamplings([samplingB.samplingId, samplingA.samplingId, "missing"])).toEqual([
+      null, samplingA, null,
+    ]);
+    expect(await catalog.getSamples([otherSample.sampleId, sample.sampleId, "missing"])).toEqual([
+      null, sample, null,
+    ]);
     expect(await userRuntime.findRunByIdempotencyKey(other.projectId, runB.requestIdentity.idempotencyKey)).toBeNull();
     expect(await otherRuntime.getRun(runB.runId)).toEqual(runB);
     await expect(userRuntime.updateSampling(samplingB, samplingB)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
@@ -1121,8 +1143,10 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const userRuntime = createPostgresRuntimeStore(database.db, "user-A", release);
     const foreignRuntime = createPostgresRuntimeStore(database.db, "user-B", release);
     expect(await userRuntime.getEvaluation(judge.evaluationId)).toEqual(judge);
+    expect(await userRuntime.getEvaluations(["missing", judge.evaluationId])).toEqual([null, judge]);
     expect(await userRuntime.listEvaluations(record.samplingId)).toEqual([judge]);
     expect(await foreignRuntime.getEvaluation(judge.evaluationId)).toBeNull();
+    expect(await foreignRuntime.getEvaluations([judge.evaluationId])).toEqual([null]);
     expect(await foreignRuntime.listEvaluations(record.samplingId)).toEqual([]);
     await expect(foreignRuntime.updateEvaluation(judge, judge)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
   });

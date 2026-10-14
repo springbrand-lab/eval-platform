@@ -103,56 +103,65 @@ function requireDistinctIds(ids: readonly string[], field: string): void {
 class RunReader {
   protected readonly store: EvalRunResumerDependencies["store"];
   protected readonly idFactory: () => string;
-  readonly #getSample: EvalRunResumerDependencies["getSample"];
+  readonly #getSamples: EvalRunResumerDependencies["getSamples"];
 
-  constructor(dependencies: Pick<EvalRunResumerDependencies, "store" | "idFactory" | "getSample">) {
+  constructor(dependencies: Pick<EvalRunResumerDependencies, "store" | "idFactory" | "getSamples">) {
     this.store = dependencies.store;
     this.idFactory = dependencies.idFactory ?? defaultIdFactory;
-    this.#getSample = dependencies.getSample;
+    this.#getSamples = dependencies.getSamples;
   }
 
   protected async loadSamplingRecords(
     samplingIds: readonly string[],
   ): Promise<readonly SamplingState[]> {
-    return Promise.all(samplingIds.map(async (samplingId) => {
-      const record = await this.store.getSampling(samplingId);
+    const records = await this.store.getSamplings(samplingIds);
+    if (records.length !== samplingIds.length) throw new Error("Store returned an incomplete Sampling batch");
+    return records.map((record, index) => {
+      const samplingId = samplingIds[index]!;
       if (!record) throw new Error(`Unknown sampling ${samplingId}`);
+      if (record.samplingId !== samplingId) throw new Error(`Store returned Sampling ${record.samplingId} for ${samplingId}`);
       return record;
-    }));
+    });
   }
 
   protected async loadEvaluationRecords(
     evaluationIds: readonly string[],
   ): Promise<readonly EvaluationRecord[]> {
-    return Promise.all(evaluationIds.map(async (evaluationId) => {
-      const evaluation = await this.store.getEvaluation(evaluationId);
+    const records = await this.store.getEvaluations(evaluationIds);
+    if (records.length !== evaluationIds.length) throw new Error("Store returned an incomplete Evaluation batch");
+    return records.map((evaluation, index) => {
+      const evaluationId = evaluationIds[index]!;
       if (!evaluation) throw new Error(`Unknown evaluation ${evaluationId}`);
+      if (evaluation.evaluationId !== evaluationId) {
+        throw new Error(`Store returned Evaluation ${evaluation.evaluationId} for ${evaluationId}`);
+      }
       return evaluation;
-    }));
+    });
   }
 
   protected async loadSamplingContexts(
     records: readonly SamplingState[],
     projectId: string,
   ): Promise<readonly RuntimeSamplingContext[]> {
-    const samplePromises = new Map<string, Promise<Sample | null>>();
-    return Promise.all(records.map(async (record) => {
+    for (const record of records) {
       if (record.projectId !== projectId) {
         throw new Error(`Sampling ${record.samplingId} does not belong to project ${projectId}`);
       }
-      const sampleId = record.sampleId;
-      let samplePromise = samplePromises.get(sampleId);
-      if (!samplePromise) {
-        samplePromise = this.#getSample(sampleId);
-        samplePromises.set(sampleId, samplePromise);
-      }
-      const sample = await samplePromise;
+    }
+    const sampleIds = [...new Set(records.map((record) => record.sampleId))];
+    const samples = await this.#getSamples(sampleIds);
+    if (samples.length !== sampleIds.length) throw new Error("Catalog returned an incomplete Sample batch");
+    const byId = new Map<string, Sample>();
+    for (let index = 0; index < sampleIds.length; index += 1) {
+      const sampleId = sampleIds[index]!;
+      const sample = samples[index];
       if (!sample) throw new Error(`Unknown sample ${sampleId}`);
       if (sample.sampleId !== sampleId) {
         throw new Error(`Catalog returned sample ${sample.sampleId} for ${sampleId}`);
       }
-      return { state: record, sample };
-    }));
+      byId.set(sampleId, sample);
+    }
+    return records.map((record) => ({ state: record, sample: byId.get(record.sampleId)! }));
   }
 }
 
@@ -325,7 +334,7 @@ class RuntimeCoordinator extends RunReader implements EvalRunAdmission {
   }>();
 
   constructor(dependencies: EvalRunAdmissionDependencies) {
-    super({ ...dependencies, getSample: dependencies.catalog.getSample.bind(dependencies.catalog) });
+    super({ ...dependencies, getSamples: dependencies.catalog.getSamples.bind(dependencies.catalog) });
     this.#sourceCommit = requireSourceCommit(dependencies.sourceCommit);
     this.#catalog = dependencies.catalog;
     this.#configResolver = dependencies.configResolver;
@@ -377,15 +386,18 @@ class RuntimeCoordinator extends RunReader implements EvalRunAdmission {
 
     const config = await this.#configResolver.resolveEvaluationConfig(request.evaluationConfigId);
     const evaluationAgent = requireSpHarness(config.evaluationHarness, "evaluator").agentConfig;
-    const records = await Promise.all(request.samplingIds.map(async (samplingId) => {
-      const record = await this.store.getSampling(samplingId);
-      if (!record || record.projectId !== request.projectId || record.execution.status !== "succeeded") {
+    const selected = await this.store.getSamplings(request.samplingIds);
+    if (selected.length !== request.samplingIds.length) throw new Error("Store returned an incomplete Sampling batch");
+    const records = selected.map((record, index) => {
+      const samplingId = request.samplingIds[index]!;
+      if (!record || record.samplingId !== samplingId
+        || record.projectId !== request.projectId || record.execution.status !== "succeeded") {
         throw new RuntimeEvaluationSelectionError(
           `Sampling ${samplingId} has no successful execution in Project ${request.projectId}`,
         );
       }
       return record;
-    }));
+    });
     const contexts = await this.loadSamplingContexts(records, request.projectId);
     const evaluations = contexts.map(({ state }) => (
       this.createEvaluationRecord(state.samplingId, evaluationAgent)
@@ -630,7 +642,7 @@ class FullRuntime extends RuntimeCoordinator implements EvalRuntime {
     this.#catalog = dependencies.catalog;
     this.#resumer = new RunResumer({
       store: dependencies.store,
-      getSample: dependencies.catalog.getSample.bind(dependencies.catalog),
+      getSamples: dependencies.catalog.getSamples.bind(dependencies.catalog),
       harness: dependencies.harness,
       ...(dependencies.idFactory === undefined ? {} : { idFactory: dependencies.idFactory }),
       ...(dependencies.now === undefined ? {} : { now: dependencies.now }),

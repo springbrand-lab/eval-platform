@@ -34,7 +34,7 @@
 
 幂等键在 Project 内唯一，`start()`、`pipeline()` 和 `evaluate()` 共用这条规则。相同 key 与请求事实返回原 Run；同一 key 换操作、配置 ID 或 Sampling ID 列表（包括顺序）时报冲突。同一 Runtime 实例内，并发的同一意图共用第一次提交的 Promise，因此即使配置在两次点击之间改变，本次提交仍使用第一次解析并准入的生效配置。已准入后的重放用原 Run 保存的有效配置校验，不重新解析已修改的配置。全新的一次主动重评估需要新 key。Runtime 和 Store 在准入前后分别查重，数据库唯一约束兜底并发请求；只有新 Run 唤醒 Worker。内存同步只处理同一实例内的并发，不代替 Store 的持久化幂等。
 
-提交时 Runtime 再检查每个 Sampling 属于该 Project、执行成功且输入可读取；Store 在原子准入中再次检查。选择后若候选已失效，整批提交失败，不留下半批 Run 或 EvaluationRecord。调用方需要重新选择并以新意图提交。
+提交时 Runtime 分批读取 Sampling 和不同 Sample 的输入，再检查每个 Sampling 属于该 Project、执行成功且输入可读取；Store 在原子准入中再次检查。选择后若候选已失效，整批提交失败，不留下半批 Run 或 EvaluationRecord。调用方需要重新选择并以新意图提交。
 
 ## HTTP 控制面
 

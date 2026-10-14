@@ -51,7 +51,7 @@ describe("Eval SP Run worker composition", () => {
       harness: mocks.harness,
       onError,
     }));
-    expect(mocks.createEvalRunResumer.mock.calls[0]![0]).toHaveProperty("getSample", expect.any(Function));
+    expect(mocks.createEvalRunResumer.mock.calls[0]![0]).toHaveProperty("getSamples", expect.any(Function));
     expect(mocks.createEvalRunResumer.mock.calls[0]![0]).not.toHaveProperty("configResolver");
     expect(mocks.createEvalRunResumer.mock.calls[0]![0]).not.toHaveProperty("catalog");
     expect(mocks.startEvalRunWorker).toHaveBeenCalledExactlyOnceWith({

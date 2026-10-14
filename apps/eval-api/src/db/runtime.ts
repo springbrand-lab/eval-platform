@@ -321,6 +321,17 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
       ));
       return row ? samplingFromRow(row) : null;
     },
+    async getSamplings(samplingIds) {
+      const byId = new Map<string, Sampling>();
+      for (const batch of sqlBatches([...new Set(samplingIds)])) {
+        const rows = await db.select().from(samplings).where(and(
+          inArray(samplings.samplingId, batch),
+          ownerScope.sampling,
+        ));
+        for (const row of rows) byId.set(row.samplingId, samplingFromRow(row));
+      }
+      return samplingIds.map((samplingId) => byId.get(samplingId) ?? null);
+    },
     async updateEvaluation(record, expected) {
       if (record.evaluationId !== expected.evaluationId || record.samplingId !== expected.samplingId) {
         throw new RuntimeRecordConflictError("Evaluation identity changed before update");
@@ -341,6 +352,17 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
         .where(and(eq(evaluations.evaluationId, evaluationId),
           ownerScope.sampling));
       return row ? evaluationFromRow(row) : null;
+    },
+    async getEvaluations(evaluationIds) {
+      const byId = new Map<string, EvaluationRecord>();
+      for (const batch of sqlBatches([...new Set(evaluationIds)])) {
+        const rows = await db.select({
+          evaluationId: evaluations.evaluationId, samplingId: evaluations.samplingId, facts: evaluations.facts,
+        }).from(evaluations).innerJoin(samplings, eq(evaluations.samplingId, samplings.samplingId))
+          .where(and(inArray(evaluations.evaluationId, batch), ownerScope.sampling));
+        for (const row of rows) byId.set(row.evaluationId, evaluationFromRow(row));
+      }
+      return evaluationIds.map((evaluationId) => byId.get(evaluationId) ?? null);
     },
     async listEvaluations(samplingId) {
       const rows = await db.select({
