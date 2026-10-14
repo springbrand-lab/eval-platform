@@ -976,7 +976,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       ...deliberate,
       requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "same evaluation facts" },
     }, [succeeded], [deliberateJudge])).rejects.toBeInstanceOf(RuntimeProjectBusyError);
-    await runtime.updateEvaluation({ ...firstJudge, status: { status: "succeeded" } }, firstJudge);
+    const createdJudge = first.created ? firstJudge : secondJudge;
+    await runtime.updateEvaluation({ ...createdJudge, status: { status: "succeeded" } }, createdJudge);
     await runtime.createRunWithSamplings({
       ...deliberate,
       requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "same evaluation facts" },
