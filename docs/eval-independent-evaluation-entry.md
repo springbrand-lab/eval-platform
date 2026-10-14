@@ -2,7 +2,7 @@
 
 ## 范围与现状
 
-执行成功的 Sampling 可以在原 Project 下单独发起评估，不重新执行 Subject。新建的空 Project 不能以只评估启动，也不能引用其他 Project 的 Sampling。Project 只保留当前状态：新执行或联跑原子删除旧 Run、Sampling 和 EvaluationRecord，再从零启动；新独立评估保留当前执行成功的 Sampling，原子替换旧 Run 和 EvaluationRecord。旧 Run ID 的结果查询在替换后返回 404。
+执行成功的 Sampling 可以在原 Project 下单独发起评估，不重新执行 Subject。新建的空 Project 不能以只评估启动，也不能引用其他 Project 的 Sampling。Project 只保留当前状态：新执行或联跑原子删除旧 Run、Sampling 和 EvaluationRecord，再从零启动；新独立评估保留本轮执行的全部 Sampling 事实（仅成功者可入选评估），原子替换旧 Run 和 EvaluationRecord。旧 Run ID 的结果查询在替换后返回 404。
 
 当前已实现 Catalog 的选择查询、Runtime `evaluate()`、PostgreSQL 幂等准入和 Eval API 的独立评估 HTTP 路由。Runtime 只接收调用方确定的 Sampling ID 列表，不根据筛选条件重新选一批。
 

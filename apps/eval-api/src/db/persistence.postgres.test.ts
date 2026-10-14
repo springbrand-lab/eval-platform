@@ -608,6 +608,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     await runtime.updateSampling({ ...second, execution: { status: "failed" } }, second);
     await runtime.createRunWithSamplings(evaluation, [succeeded], [judge]);
     expect(await runtime.getRun(execution.runId)).toBeNull();
+    expect((await runtime.getSampling(second.samplingId))?.execution.status).toBe("failed");
     await expect(runtime.createRunWithSamplings(replay, [first, second], []))
       .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
     await expect(runtime.createRunWithSamplings(anotherRun, [another], []))
@@ -617,6 +618,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await runtime.getRun(anotherRun.runId)).toEqual(anotherRun);
     expect(await runtime.getRun(evaluation.runId)).toBeNull();
     expect(await runtime.getSampling(first.samplingId)).toBeNull();
+    expect(await runtime.getSampling(second.samplingId)).toBeNull();
     expect(await runtime.getEvaluation(judge.evaluationId)).toBeNull();
   });
 

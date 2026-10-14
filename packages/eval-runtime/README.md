@@ -54,7 +54,7 @@ src/
 
 四个顶层包及其内部文件均保持在当前仓库中；内部目录是模块，不是新的 workspace package。
 
-配置、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。`RuntimeStore` 是持久化端口，实际实现由 API/DO/数据库层注入；Run、Sampling、EvaluationRecord 和本次生效配置快照的聚合写入必须由 Store 在一个持久化边界内原子完成。Store 对同 Project 的新执行或联跑先删除旧运行与结果，再保存全新状态；新独立评估保留当前成功 Sampling，只替换旧 Run 与评估记录。旧 Run 的请求 key 留在身份账本中拒绝迟到重试，但不保留旧结果。
+配置、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。`RuntimeStore` 是持久化端口，实际实现由 API/DO/数据库层注入；Run、Sampling、EvaluationRecord 和本次生效配置快照的聚合写入必须由 Store 在一个持久化边界内原子完成。Store 对同 Project 的新执行或联跑先删除旧运行与结果，再保存全新状态；新独立评估保留本轮执行的全部 Sampling 事实，只能选其中成功者，并替换旧 Run 与评估记录。旧 Run 的请求 key 留在身份账本中拒绝迟到重试，但不保留旧结果。
 
 三个启动入口只原子提交运行事实并返回 `RunHandle`，不在请求进程里执行 Agent。应用层唤醒单实例执行器调用 `resume(runId)`；独立 Worker 可用 `createEvalRunResumer({ getSamples, getProject, store, harness })`，无需注入启动接口的 Catalog 与 ConfigResolver。恢复时使用 Run 已保存的生效配置和 Sample 引用，跳过已完成的阶段，并按 Attempt 原 `submissionId`、操作类型和幂等键向 SP 校准。已完成 Agent 的资源或产物保存失败只补收尾，不重新提交或重启。进程中断后遗留的未完成阶段由执行器接手；已保存的失败 Attempt 若 SP 校准暂不可用，仍保持待恢复，不能代替重启决策进入证据收尾。只有确认失败且重试决策拒绝后，Subject 证据保存完才写为 `failed`。定时扫描对已终结 Agent 只补收未完成证据，不隐式重试 Agent。`RuntimeRecoveryStore` 仅供应用扫描未完成 Run，Run 当前状态仍只从子记录推导。
 
