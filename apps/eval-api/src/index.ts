@@ -21,3 +21,12 @@ export { createSpHarness, SpHarnessError } from "./sp/harness.js";
 export type { SpHarnessOptions } from "./sp/harness.js";
 export { startSpEvalRunWorkerProcess } from "./run-worker-process.js";
 export type { SpEvalRunWorkerProcessOptions } from "./run-worker-process.js";
+export { createIndependentEvaluationApi } from "./independent-evaluation-api.js";
+export type {
+  IndependentEvaluationApi,
+  IndependentEvaluationApiOptions,
+  IndependentEvaluationOwnerServices,
+} from "./independent-evaluation-api.js";
+export { createIndependentEvaluationHttpServer } from "./independent-evaluation-http.js";
+export { createPostgresIndependentEvaluationApi } from "./independent-evaluation-postgres.js";
+export type { PostgresIndependentEvaluationApiOptions } from "./independent-evaluation-postgres.js";

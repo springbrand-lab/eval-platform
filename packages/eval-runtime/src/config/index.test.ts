@@ -7,6 +7,7 @@ import type {
   PipelineConfig,
 } from "./model.js";
 import {
+  ConfigNotFoundError,
   DEFAULT_RETRY_POLICY,
   createConfigResolver,
   createEvaluationConfig,
@@ -236,6 +237,10 @@ describe("runtime config", () => {
     await expect(resolver.resolveExecutionConfig("missing")).rejects.toThrow(
       "Unknown execution config missing",
     );
+    await expect(resolver.resolveExecutionConfig("missing")).rejects.toBeInstanceOf(ConfigNotFoundError);
+    await expect(resolver.resolveEvaluationConfig("missing")).rejects.toMatchObject({
+      name: "ConfigNotFoundError", kind: "evaluation",
+    });
     await expect(resolver.resolveExecutionConfig("invalid")).rejects.toThrow(
       "samplingCount must be a positive integer",
     );

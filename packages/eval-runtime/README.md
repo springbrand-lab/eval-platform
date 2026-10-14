@@ -56,6 +56,8 @@ src/
 
 `ExecutionConfig` 是完整的执行方案，包含 Dataset、可选 Sample 子集、Sampling 次数、Subject Harness、执行并发和重试策略。`EvaluationConfig` 包含 Evaluation Harness、评估并发和重试策略。`PipelineConfig` 只组合一个 ExecutionConfig 和一个 EvaluationConfig，不是新的 Runtime 阶段。Config ID 由配置创建函数自动生成；实际运行请求只引用 `executionConfigId`、`evaluationConfigId` 或 `pipelineConfigId`，不再重复携带这些配置字段。`ConfigResolver` 在启动前统一读取、校验和归一化配置，输出带明确默认值的 `Resolved*Config`；Run 同时保存本次实际生效的不可变配置快照，不引入 version。SP Harness 的 `runtime` 参数会继续传入 Agent 创建、素材准备、提交、状态等待/校准和产物收集；Subject 轨迹物化按 Subject Chat 身份幂等，不把评估运行选项计入物化身份。当前 Runtime 对未实现的 Remote Harness 明确报错，不会丢弃 `runOptions`。
 
+`ConfigResolver` 找不到配置时抛出带配置种类的 `ConfigNotFoundError`，供控制面返回明确的 404；其他配置校验错误仍由解析器直接报告。
+
 SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harness，`framework` 必须显式选择 `sp`、`codex` 或 `cc`（Claude Code）。三者使用同一套生命周期，由 `ensureAgent` 将所选框架和 Agent Config 交给 SP 创建；返回的 Handle 必须对应请求的框架，后续提交、重启、等待和收集沿用该 Handle。评估 Agent 固定 `kind: "sp", framework: "sp"`，仍通过 `agentConfig` 选择。框架写入有效配置快照并参与请求幂等指纹，不存在静默降级或旧配置兼容默认值。当前只完成评估侧契约和接线，SP 云端启动 Codex/CC 的实现仍由 SP 提供。
 
 ## 重要约束
@@ -70,6 +72,7 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
 6. 推送丢失、连接断开或运行时恢复时，`inspectAgentOperation` 只做一次或有限次状态校准，不作为主流程的持续轮询。
 7. 评估平台只消费 SP 的公开契约，不依赖 SP 的 DO SQLite、内部类或 Web 投影。
 8. 使用新 `idempotencyKey` 主动调用 `evaluate()` 会新建评估记录并在启动前分配新的评估 ID；复用旧 key 只返回原 Run。被评估 Agent 的 ID 保持不变，旧评估记录不被覆盖。
+   已选 Sampling 缺失、不属于请求 Project 或执行未成功时抛出 `RuntimeEvaluationSelectionError`，供 API 映射为候选已失效的冲突响应。`getRun()` 查不到 Run 时抛出 `RuntimeRunNotFoundError`，供 API 返回 404。
 9. `start()`、`pipeline()` 和 `evaluate()` 不分别写 Run、Sampling 和 EvaluationRecord。三者都使用 `createRunWithSamplings()` 原子提交；命令失败时不能留下半批状态或清掉旧评估记录。
 10. `start()`、`pipeline()` 和 `evaluate()` 都必须带调用方 `idempotencyKey`，同一 Project 内唯一。同一 Runtime 实例把同一 Project/key 的并发提交同步起来：相同操作、配置 ID 和评估 Sampling ID 顺序共用第一次提交的 Promise 和生效配置；不同请求事实立即冲突，提交结束即清理内存条目。后续重放先按 key 查找原 Run，使用已保存的生效配置快照校验请求事实；相同事实返回原 `RunHandle`，不同事实冲突。Store 在 Run/Sampling/EvaluationRecord 原子事务内二次查重，仅新 Run 唤醒 Worker；内存同步不取代持久化幂等。
 11. `RuntimeRunRecord` 只保存不可变的阶段范围 `phases`，不保存当前阶段或 Run 状态；`RunSnapshot.phase/status` 由 `getRun()` 根据关联 Sampling 即时推导，是查询投影而不是第二份权威状态。单独执行范围为 `["execution"]`，单独评估为 `["evaluation"]`，联跑为 `["execution", "evaluation"]`；没有 `pipeline` 阶段或 Run kind。

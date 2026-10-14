@@ -2,7 +2,9 @@
 
 内部评估控制面的数据库与执行器组合层：PostgreSQL `DatasetStore`、`RuntimeStore`、Project/Sample Catalog、只读 `MetricsSource` 和单实例 Run Worker。连接池由宿主注入；迁移位于 `migrations-postgres/`，用 `pnpm --filter @eval-platform/eval-api db:migrate` 应用（需 `DATABASE_URL`）。
 
-Catalog 提供 Project 下执行成功 Sampling 的分页查询及全选 ID 查询，二者使用同一 owner/Project/执行状态条件，按 Sampling ID 稳定排序。选择与提交的控制面契约见 [独立评估入口](../../docs/eval-independent-evaluation-entry.md)；当前已实现 Catalog、Runtime 与持久化边界，HTTP 调用由后续控制面接入。提交时将已确定的 ID 列表交给 Runtime `evaluate()`；重试复用同一列表和 Project 范围内唯一的 `idempotencyKey`。三个 Run 入口的 key 与请求事实指纹在同一次 Run 准入事务中持久化，相同请求返回原 Run，冲突请求拒绝，只有新 Run 发送 Worker 通知。
+Catalog 提供 Project 下执行成功 Sampling 的分页查询及全选 ID 查询，二者使用同一 owner/Project/执行状态条件，按 Sampling ID 稳定排序。独立评估的 HTTP 处理器提供分页、全选 ID、显式 ID 提交、Run 状态和本次 Run 的 Evaluation 结果查询；路由和请求契约见[独立评估入口](../../docs/eval-independent-evaluation-entry.md)。提交时将已确定的 ID 列表交给 Runtime `evaluate()`；重试复用同一列表和 Project 范围内唯一的 `idempotencyKey`。三个 Run 入口的 key 与请求事实指纹在同一次 Run 准入事务中持久化，相同请求返回原 Run，冲突请求拒绝，只有新 Run 发送 Worker 通知。
+
+`createIndependentEvaluationApi({ spClient, createOwnerServices, webOrigin? })` 提供 Fetch `handle(Request)`；每个受保护请求都通过 Eval SP 校验 Bearer 会话。服务工厂按校验得到的用户 ID 创建并缓存用户范围内的 Catalog/Runtime，同一用户的并发提交共享 Runtime 的待准入请求。`createPostgresIndependentEvaluationApi({ db, spClient, configStoreForOwner, harness, webOrigin? })` 将其接到本包的 PostgreSQL 适配器和 Runtime；注入的 ConfigStore 必须按用户隔离，配置编辑后仍由 Runtime 保存的 Run 快照判断旧 key 重放。`createIndependentEvaluationHttpServer(api)` 是 Node 传输层，调用方负责 `listen()`、`close()`、数据库连接和部署配置。批量 Evaluation 结果在 owner/Project/Run 范围内一次查询，不按记录逐条读库。
 
 目标应用组合层还负责 Eval 独立 SP 的登录校验、`user-agent` 配置列表/编辑、公开 Chat/Submission/Trajectory/Workspace HTTP 与 WebSocket 客户端，以及真实 SP Harness。所有 SP 地址均指向 Eval SP API/Agent/Space，不请求 dev/production SP。Eval SP API/数据库保存账户、Agent Config、计费、Action 等 SP 事实；本应用的 PostgreSQL 只保存评估业务、SP 身份/证据引用及已采集的原始资源快照。Project 绑定当前发布的 SP 分支；首次 Run 准入时在同一事务内固定 Project 的初始操作和配置，此后执行或 Pipeline 新 Run 必须沿用该选择。Run 记录本次发布的实际 SP commit。独立评估只能使用原 Project 已成功的 Sampling，新增评估 Run 不修改 Project 的初始选择；不增加第五个共享包。
 
@@ -22,4 +24,4 @@ RuntimeStore 的 Sampling/Evaluation 写入必须携带预期旧事实。Postgre
 
 部署时 Worker 必须是**同一时刻只有一个实例的常驻 Node 进程**；升级先停止旧实例，再启动新实例，新实例会自动接手未完成 Run。不能把它启动在每个 HTTP 请求里，也不能只靠进程内 `Set` 防止跨进程竞争。宿主负责注入真实 SP Harness、Sample 读取、RuntimeStore 和数据库连接；Catalog 与 ConfigResolver 由 API 控制面注入。停止时先中止启动扫描的继续派发，再等待 Worker 的 `close()` 完成已启动的 Run、关闭连接池并启动新实例；尚未接手的 Run 留待下次扫描。运行中的 Agent 不因此标记失败。
 
-测试设置 `DATABASE_URL` 后使用独立的临时 PostgreSQL 数据库执行集成测试；不提供时跳过需数据库的测试。唯一的初始迁移直接创建按用户隔离的 Dataset/Data/Sample 和配置表。Node HTTP Server 与生产路由由另一阶段的 API 控制面提供。SP 服务端尚未提供上面的 Harness 路由，因此 Worker 在这些路由落地前不能执行真实 Agent。Dataset 不隶属于某个 Project，但属于一个 Eval SP 用户；Catalog 的 Agent 列表由 API 控制面注入，不在 Worker 里维护第二份 Agent 注册表。
+测试设置 `DATABASE_URL` 后使用独立的临时 PostgreSQL 数据库执行集成测试；不提供时跳过需数据库的测试。唯一的初始迁移直接创建按用户隔离的 Dataset/Data/Sample 和配置表。当前 Node Server 只提供独立评估路由的传输适配器；其余控制面路由由后续工作接入。SP 服务端尚未提供上面的 Harness 路由，因此 Worker 在这些路由落地前不能执行真实 Agent。Dataset 不隶属于某个 Project，但属于一个 Eval SP 用户；Catalog 的 Agent 列表由 API 控制面注入，不在 Worker 里维护第二份 Agent 注册表。

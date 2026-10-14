@@ -1,6 +1,6 @@
 import type { EvaluationRecord, ProjectInitialLaunch, Sampling } from "@eval-platform/eval-contracts";
 import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
-import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
+import { RuntimeEvaluationSelectionError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import { and, eq, exists, gt, inArray, or, sql } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
@@ -255,7 +255,9 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
             const stored = byId.get(record.samplingId);
             if (!stored || stored.projectId !== run.projectId || stored.sampleId !== record.sampleId
               || stored.facts.execution.status !== "succeeded") {
-              throw new Error(`Sampling ${record.samplingId} has no successful execution in Project ${run.projectId}`);
+              throw new RuntimeEvaluationSelectionError(
+                `Sampling ${record.samplingId} has no successful execution in Project ${run.projectId}`,
+              );
             }
           }
         } else {

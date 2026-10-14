@@ -32,6 +32,13 @@ import type {
 } from "./model.js";
 import { DEFAULT_RETRY_POLICY } from "./model.js";
 
+export class ConfigNotFoundError extends Error {
+  constructor(readonly kind: "execution" | "evaluation" | "pipeline", configId: string) {
+    super(`Unknown ${kind} config ${configId}`);
+    this.name = "ConfigNotFoundError";
+  }
+}
+
 function defaultConfigIdFactory(): string {
   return crypto.randomUUID();
 }
@@ -204,14 +211,14 @@ export function createConfigResolver(store: ConfigStore): ConfigResolver {
   async function resolveExecutionConfig(configId: string): Promise<ResolvedExecutionConfig> {
     requireNonEmpty(configId, "executionConfigId");
     const config = await store.getExecutionConfig(configId);
-    if (!config) throw new Error(`Unknown execution config ${configId}`);
+    if (!config) throw new ConfigNotFoundError("execution", configId);
     return normalizeExecutionConfig(config);
   }
 
   async function resolveEvaluationConfig(configId: string): Promise<ResolvedEvaluationConfig> {
     requireNonEmpty(configId, "evaluationConfigId");
     const config = await store.getEvaluationConfig(configId);
-    if (!config) throw new Error(`Unknown evaluation config ${configId}`);
+    if (!config) throw new ConfigNotFoundError("evaluation", configId);
     return normalizeEvaluationConfig(config);
   }
 
@@ -221,7 +228,7 @@ export function createConfigResolver(store: ConfigStore): ConfigResolver {
     async resolvePipelineConfig(configId) {
       requireNonEmpty(configId, "pipelineConfigId");
       const storedPipeline = await store.getPipelineConfig(configId);
-      if (!storedPipeline) throw new Error(`Unknown pipeline config ${configId}`);
+      if (!storedPipeline) throw new ConfigNotFoundError("pipeline", configId);
       const pipeline = normalizePipelineConfig(storedPipeline);
       const [execution, evaluation] = await Promise.all([
         resolveExecutionConfig(pipeline.executionConfigId),

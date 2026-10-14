@@ -2,12 +2,12 @@ import path from "node:path";
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError } from "@eval-platform/eval-dataset";
 import { createMetrics, MetricsQueryError } from "@eval-platform/eval-metrics";
-import { createConfigResolver, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
+import { createConfigResolver, RuntimeEvaluationSelectionError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigStore, createPostgresDatasetStore, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, startEvalRunWorker } from "../index.js";
+import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, createSpHarness, DatasetInUseError, EvalSpApiError, startEvalRunWorker } from "../index.js";
 import { isForeignKeyFailure } from "./client.js";
 import { readRunRecords } from "./runtime.js";
 
@@ -562,6 +562,93 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       samplings: [], nextCursor: null,
     });
     expect(await foreignCatalog.selectAllSuccessfulSamplingIds(project.projectId)).toEqual([]);
+  });
+
+  it("serves owner-scoped independent evaluation selection, idempotent admission and results over HTTP", async () => {
+    const { project, dataset, sample, runtime } = await setup();
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    await runtime.createRunWithSamplings(makeRun(project.projectId, sampling, dataset.datasetId), [sampling], []);
+    const staleSelection = { ...sampling, execution: { status: "succeeded" as const } };
+    const rejectedEvaluation = makeEvaluation(sampling.samplingId);
+    const rejectedRun = makeRun(project.projectId, staleSelection, dataset.datasetId, {
+      phases: ["evaluation"], config: evaluationConfig, evaluationIds: [rejectedEvaluation.evaluationId],
+      requestIdentity: { idempotencyKey: "stale-selection", requestFingerprint: "stale-selection" },
+    });
+    await expect(runtime.createRunWithSamplings(rejectedRun, [staleSelection], [rejectedEvaluation]))
+      .rejects.toBeInstanceOf(RuntimeEvaluationSelectionError);
+    expect(await runtime.getRun(rejectedRun.runId)).toBeNull();
+    await runtime.updateSampling({ ...sampling, execution: { status: "succeeded" } }, sampling);
+
+    let evaluationConcurrency = 1;
+    const api = createPostgresIndependentEvaluationApi({
+      db: database.db,
+      spClient: {
+        async verifySession(token) {
+          if (token === "alice-token") return { id: "user-A", role: "user" };
+          if (token === "bob-token") return { id: "user-B", role: "user" };
+          return null;
+        },
+      },
+      configStoreForOwner(ownerUserId) {
+        return {
+          async getExecutionConfig() { return null; },
+          async getPipelineConfig() { return null; },
+          async getEvaluationConfig(configId) {
+            return ownerUserId === "user-A" && configId === "evaluation-config"
+              ? { ...evaluationConfig.evaluation, evaluationConcurrency } : null;
+          },
+        };
+      },
+      harness: createSpHarness({ origin: "http://localhost", serviceToken: "unused-test-token" }),
+    });
+    const path = `/api/projects/${project.projectId}`;
+    const send = (token: string, suffix: string, init: RequestInit = {}) => api.handle(new Request(`http://eval-api.test${path}${suffix}`, {
+      ...init,
+      headers: { Authorization: `Bearer ${token}`, ...init.headers },
+    }));
+    const selected = await send("alice-token", "/samplings/successful/ids");
+    expect(selected.status).toBe(200);
+    expect(await selected.json()).toEqual({ samplingIds: [sampling.samplingId] });
+    expect((await send("bob-token", "/samplings/successful/ids")).status).toBe(404);
+
+    const submitBody = JSON.stringify({
+      evaluationConfigId: "evaluation-config", samplingIds: [sampling.samplingId], idempotencyKey: "first-click",
+    });
+    const submit = () => send("alice-token", "/evaluations", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: submitBody,
+    });
+    const [first, parallel] = await Promise.all([submit(), submit()]);
+    expect(first.status).toBe(202);
+    expect(parallel.status).toBe(202);
+    const handle = await first.json() as { runId: string; samplingIds: readonly string[] };
+    expect(await parallel.json()).toEqual(handle);
+    evaluationConcurrency = 2;
+    expect(await (await submit()).json()).toEqual(handle);
+    const storedRun = await runtime.getRun(handle.runId);
+    expect(storedRun?.config.operation).toBe("evaluation");
+    expect(storedRun?.config.operation === "evaluation" ? storedRun.config.evaluation.evaluationConcurrency : null).toBe(1);
+    expect(storedRun?.evaluationIds).toHaveLength(1);
+    const result = await send("alice-token", `/runs/${handle.runId}/evaluations`);
+    expect(result.status).toBe(200);
+    expect(await result.json()).toEqual({ evaluations: [expect.objectContaining({
+      evaluationId: storedRun!.evaluationIds[0], samplingId: sampling.samplingId,
+      status: { status: "queued" },
+    })] });
+    expect((await send("bob-token", `/runs/${handle.runId}/evaluations`)).status).toBe(404);
+    expect((await send("alice-token", "/runs/missing")).status).toBe(404);
+    expect((await send("alice-token", "/evaluations", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        evaluationConfigId: "evaluation-config", samplingIds: ["missing-sampling"], idempotencyKey: "bad-selection",
+      }),
+    })).status).toBe(409);
+    expect((await send("alice-token", "/evaluations", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        evaluationConfigId: "missing", samplingIds: [sampling.samplingId], idempotencyKey: "missing-config",
+      }),
+    })).status).toBe(404);
+    expect((await runtime.listEvaluations(sampling.samplingId))).toHaveLength(1);
   });
 
   it("admits one independent EvaluationRecord for concurrent requests with the same key", async () => {

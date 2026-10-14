@@ -57,6 +57,21 @@ import { isPendingStatus, toRunSnapshot, toSamplingSnapshot } from "./projection
 
 type RuntimeStageDependencies = ExecutionStageDependencies & EvaluationStageDependencies;
 
+/** The chosen Sampling set cannot be admitted as an independent evaluation. */
+export class RuntimeEvaluationSelectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RuntimeEvaluationSelectionError";
+  }
+}
+
+export class RuntimeRunNotFoundError extends Error {
+  constructor(runId: string) {
+    super(`Unknown run ${runId}`);
+    this.name = "RuntimeRunNotFoundError";
+  }
+}
+
 function defaultIdFactory(): string {
   return crypto.randomUUID();
 }
@@ -372,15 +387,15 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
 
     const config = await this.#configResolver.resolveEvaluationConfig(request.evaluationConfigId);
     const evaluationAgent = requireSpHarness(config.evaluationHarness, "evaluator").agentConfig;
-    const records = await this.loadSamplingRecords(request.samplingIds);
-    for (const record of records) {
-      if (record.projectId !== request.projectId) {
-        throw new Error(`Sampling ${record.samplingId} does not belong to project ${request.projectId}`);
+    const records = await Promise.all(request.samplingIds.map(async (samplingId) => {
+      const record = await this.store.getSampling(samplingId);
+      if (!record || record.projectId !== request.projectId || record.execution.status !== "succeeded") {
+        throw new RuntimeEvaluationSelectionError(
+          `Sampling ${samplingId} has no successful execution in Project ${request.projectId}`,
+        );
       }
-      if (record.execution.status !== "succeeded") {
-        throw new Error(`Sampling ${record.samplingId} has no successful execution output`);
-      }
-    }
+      return record;
+    }));
     const contexts = await this.loadSamplingContexts(records, request.projectId);
     const evaluations = contexts.map(({ state }) => (
       this.createEvaluationRecord(state.samplingId, evaluationAgent)
@@ -447,7 +462,7 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
 
   async getRun(runId: string): Promise<RunSnapshot> {
     const run = await this.store.getRun(runId);
-    if (!run) throw new Error(`Unknown run ${runId}`);
+    if (!run) throw new RuntimeRunNotFoundError(runId);
     const records = await this.loadSamplingRecords(run.samplingIds);
     const evaluations = await this.loadEvaluationRecords(run.evaluationIds);
     return toRunSnapshot(run, records, evaluations);
