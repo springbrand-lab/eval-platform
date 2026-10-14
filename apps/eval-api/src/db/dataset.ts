@@ -9,6 +9,7 @@ import {
 } from "@eval-platform/eval-dataset";
 import { and, eq, inArray } from "drizzle-orm";
 import { isForeignKeyFailure, type EvalDb } from "./client.js";
+import { requireOwnerUserId } from "./owner.js";
 import { data, datasetData, datasets } from "./schema.js";
 
 type DatasetReader = Pick<EvalDb, "select">;
@@ -58,9 +59,7 @@ export async function readDatasetSnapshots(
 }
 
 export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): DatasetStore {
-  if (!ownerUserId || ownerUserId.trim() !== ownerUserId) {
-    throw new TypeError("ownerUserId must be a non-empty identifier");
-  }
+  requireOwnerUserId(ownerUserId);
   return {
     async createDataset(dataset) {
       const record = datasetSchema.parse(dataset);

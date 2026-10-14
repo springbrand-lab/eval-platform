@@ -4,19 +4,13 @@ import type { RuntimeCatalog, Sample } from "@eval-platform/eval-runtime";
 import { and, eq, inArray } from "drizzle-orm";
 import { isForeignKeyFailure, type EvalDb } from "./client.js";
 import { createPostgresDatasetStore } from "./dataset.js";
+import { requireOwnerUserId } from "./owner.js";
 import { data, projects, samples } from "./schema.js";
 
 export interface PostgresCatalog extends RuntimeCatalog {
   createProject(input: Pick<Project, "name">): Promise<Project>;
   getProject(projectId: string): Promise<Project | null>;
   createSample(dataId: string): Promise<Sample>;
-}
-
-function identifier(value: string, field: string): string {
-  if (typeof value !== "string" || value.length === 0 || value.trim() !== value) {
-    throw new TypeError(`${field} must be a non-empty identifier without surrounding whitespace`);
-  }
-  return value;
 }
 
 function toSample(row: { sampleId: string; dataId: string; content: typeof data.$inferSelect.content }): Sample {
@@ -41,7 +35,7 @@ export function createPostgresCatalog(
   ownerUserId: string,
   agents: { readonly listAgents: (role?: AgentRole) => ReturnType<RuntimeCatalog["listAgents"]> },
 ): PostgresCatalog {
-  const owner = identifier(ownerUserId, "ownerUserId");
+  const owner = requireOwnerUserId(ownerUserId);
   const datasetStore = createPostgresDatasetStore(db, owner);
   return {
     async createProject(input) {

@@ -7,7 +7,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createEvalDb, createPostgresCatalog, createPostgresDatasetStore, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, startEvalRunWorker } from "../index.js";
+import { createEvalDb, createPostgresCatalog, createPostgresDatasetStore, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, startEvalRunWorker } from "../index.js";
 
 const connection = process.env.DATABASE_URL;
 const subjectAgent = { ownerUserId: "owner", userAgentId: "subject" };
@@ -113,8 +113,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     return {
       catalog: createPostgresCatalog(db, "user-A", { async listAgents() { return []; } }),
       datasetService: createDatasetService(createPostgresDatasetStore(db, "user-A")),
-      runtime: createPostgresRuntimeStore(db),
-      source: createPostgresMetricsSource(db),
+      runtime: createPostgresWorkerRuntimeStore(db),
+      source: createPostgresMetricsSource(db, "user-A"),
     };
   }
 
@@ -239,7 +239,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const competing = makeRun(project.projectId, second, dataset.datasetId, { requestIdentity: run.requestIdentity! });
     const admissions = await Promise.all([
       runtime.createRunWithSamplings(run, [first], []),
-      createPostgresRuntimeStore(database.db).createRunWithSamplings(competing, [second], []),
+      createPostgresWorkerRuntimeStore(database.db).createRunWithSamplings(competing, [second], []),
     ]);
     expect(admissions.filter((result) => result.created)).toHaveLength(1);
     expect(admissions[0]!.run).toEqual(admissions[1]!.run);
@@ -498,7 +498,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
         trajectory: { trajectoryId: "judge-trace", source: "evaluator" as const, path: "/judge/trace.json" } },
     };
     await runtime.updateEvaluation(completed, firstJudge);
-    const restored = createPostgresRuntimeStore(database.db);
+    const restored = createPostgresWorkerRuntimeStore(database.db);
     expect(await restored.getSampling(original.samplingId)).toEqual(finished);
     expect(await restored.listEvaluations(original.samplingId)).toEqual(
       [completed, secondJudge].sort((left, right) => left.evaluationId.localeCompare(right.evaluationId)),
@@ -567,10 +567,47 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const runB = makeRun(other.projectId, samplingB, otherDataset.datasetId);
     await runtime.createRunWithSamplings(runA, [samplingA], []);
     await runtime.createRunWithSamplings(runB, [samplingB], []);
+    const userRuntime = createPostgresRuntimeStore(database.db, "user-A");
+    const otherRuntime = createPostgresRuntimeStore(database.db, "user-B");
+    expect(await userRuntime.getRun(runA.runId)).toEqual(runA);
+    expect(await userRuntime.getRun(runB.runId)).toBeNull();
+    expect(await userRuntime.getSampling(samplingB.samplingId)).toBeNull();
+    expect(await userRuntime.findRunByRequestId(runB.requestIdentity!.requestId)).toBeNull();
+    expect(await userRuntime.findRunByIdempotencyKey(runB.requestIdentity!.idempotencyKey!)).toBeNull();
+    expect(await otherRuntime.getRun(runB.runId)).toEqual(runB);
+    await expect(userRuntime.updateSampling(samplingB, samplingB)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
+    await expect(userRuntime.createRunWithSamplings(runB, [samplingB], [])).rejects.toThrow("Unknown Project");
+    const collisionSampling = makeSampling(project.projectId, sample.sampleId);
+    const collision = makeRun(project.projectId, collisionSampling, dataset.datasetId, {
+      requestIdentity: runB.requestIdentity!,
+    });
+    await expect(userRuntime.createRunWithSamplings(collision, [collisionSampling], []))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(source.read({ projectId: other.projectId })).rejects.toBeInstanceOf(MetricsQueryError);
     const facts = await source.read({ projectId: project.projectId, runIds: [runA.runId] });
     expect(facts.samplings.map((record) => record.samplingId)).toEqual([samplingA.samplingId]);
     expect(facts.runs.map((run) => run.runId)).toEqual([runA.runId]);
     await expect(source.read({ projectId: project.projectId, runIds: [runB.runId] }))
       .rejects.toBeInstanceOf(MetricsQueryError);
+  });
+
+  it("scopes Evaluation reads and updates to the owning user", async () => {
+    const { runtime, project, dataset, sample } = await setup();
+    const record = makeSampling(project.projectId, sample.sampleId);
+    const judge = makeEvaluation(record.samplingId);
+    const pipeline = makeRun(project.projectId, record, dataset.datasetId, {
+      phases: ["execution", "evaluation"], evaluationIds: [judge.evaluationId],
+      config: { operation: "pipeline", pipeline: {
+        configId: "pipeline-config", executionConfigId: "execution-config", evaluationConfigId: "evaluation-config",
+      }, execution: executionConfig(dataset.datasetId).execution, evaluation: evaluationConfig.evaluation },
+    });
+    await runtime.createRunWithSamplings(pipeline, [record], [judge]);
+    const userRuntime = createPostgresRuntimeStore(database.db, "user-A");
+    const foreignRuntime = createPostgresRuntimeStore(database.db, "user-B");
+    expect(await userRuntime.getEvaluation(judge.evaluationId)).toEqual(judge);
+    expect(await userRuntime.listEvaluations(record.samplingId)).toEqual([judge]);
+    expect(await foreignRuntime.getEvaluation(judge.evaluationId)).toBeNull();
+    expect(await foreignRuntime.listEvaluations(record.samplingId)).toEqual([]);
+    await expect(foreignRuntime.updateEvaluation(judge, judge)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
   });
 });

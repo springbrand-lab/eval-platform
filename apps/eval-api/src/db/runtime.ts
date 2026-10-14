@@ -3,6 +3,7 @@ import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval
 import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import { and, eq, exists, gt, inArray, or, sql } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
+import { requireOwnerUserId } from "./owner.js";
 import { datasets, evaluations, projects, runEvaluations, runs, runSamplings, samples, samplings } from "./schema.js";
 
 export type RuntimeReader = Pick<EvalDb, "select">;
@@ -109,7 +110,7 @@ function validateAdmission(
   }
 }
 
-export function createPostgresRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRecoveryStore {
+export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRecoveryStore {
   const findByIdentity = async (
     reader: RuntimeReader,
     identity: NonNullable<RuntimeRunRecord["requestIdentity"]>,
@@ -284,6 +285,69 @@ export function createPostgresRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRe
       const rows = await db.select().from(evaluations)
         .where(eq(evaluations.samplingId, samplingId)).orderBy(evaluations.evaluationId);
       return rows.map(evaluationFromRow);
+    },
+  };
+}
+
+export function createPostgresRuntimeStore(db: EvalDb, ownerUserId: string): RuntimeStore {
+  const owner = requireOwnerUserId(ownerUserId);
+  const workerStore = createPostgresWorkerRuntimeStore(db);
+
+  async function ownsProject(projectId: string): Promise<boolean> {
+    const [project] = await db.select({ projectId: projects.projectId }).from(projects)
+      .where(and(eq(projects.projectId, projectId), eq(projects.ownerUserId, owner)));
+    return project !== undefined;
+  }
+
+  async function ownedRun(record: RuntimeRunRecord | null): Promise<RuntimeRunRecord | null> {
+    return record && await ownsProject(record.projectId) ? record : null;
+  }
+
+  async function ownsSampling(samplingId: string): Promise<boolean> {
+    const record = await workerStore.getSampling(samplingId);
+    return record !== null && await ownsProject(record.projectId);
+  }
+
+  return {
+    async getRun(runId) {
+      return ownedRun(await workerStore.getRun(runId));
+    },
+    async findRunByRequestId(requestId) {
+      return ownedRun(await workerStore.findRunByRequestId(requestId));
+    },
+    async findRunByIdempotencyKey(idempotencyKey) {
+      return ownedRun(await workerStore.findRunByIdempotencyKey(idempotencyKey));
+    },
+    async createRunWithSamplings(run, records, judges) {
+      if (!await ownsProject(run.projectId)) throw new Error(`Unknown Project ${run.projectId}`);
+      const admission = await workerStore.createRunWithSamplings(run, records, judges);
+      if (admission.run.projectId !== run.projectId) {
+        throw new RuntimeRunIdentityConflictError("request identity belongs to another Project");
+      }
+      return admission;
+    },
+    async updateEvaluation(record, expected) {
+      if (!await ownsSampling(record.samplingId)) {
+        throw new RuntimeRecordConflictError(`Unknown Evaluation ${record.evaluationId}`);
+      }
+      await workerStore.updateEvaluation(record, expected);
+    },
+    async getEvaluation(evaluationId) {
+      const record = await workerStore.getEvaluation(evaluationId);
+      return record && await ownsSampling(record.samplingId) ? record : null;
+    },
+    async listEvaluations(samplingId) {
+      return await ownsSampling(samplingId) ? workerStore.listEvaluations(samplingId) : [];
+    },
+    async updateSampling(record, expected) {
+      if (!await ownsProject(record.projectId)) {
+        throw new RuntimeRecordConflictError(`Unknown Sampling ${record.samplingId}`);
+      }
+      await workerStore.updateSampling(record, expected);
+    },
+    async getSampling(samplingId) {
+      const record = await workerStore.getSampling(samplingId);
+      return record && await ownsProject(record.projectId) ? record : null;
     },
   };
 }

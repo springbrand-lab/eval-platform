@@ -14,7 +14,9 @@ The API workspace owns PostgreSQL migrations and implementations of the public
 DatasetStore, RuntimeStore and read-only MetricsSource ports. A caller supplies
 the `pg` Pool; these adapters never import SP's private database client. The
 Catalog stores user-owned Projects and Samples that reference the same user's
-Data, with Agent listing supplied separately. The Metrics projection uses one
+Data, with Agent listing supplied separately. User-facing Runtime and Metrics
+adapters require the owner identity verified by Eval SP; only the Worker Store
+scans and resumes Runs across users. The Metrics projection uses one
 repeatable-read, read-only transaction and the Runtime's status projection.
 HTTP routes, authentication, Config persistence and SP Harness provisioning
 are not implemented by the persistence adapters.

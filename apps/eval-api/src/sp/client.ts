@@ -57,21 +57,22 @@ function pathId(value: string): string {
   return encodeURIComponent(value);
 }
 
+function httpOrigin(value: string, field: string): URL {
+  const origin = new URL(value);
+  if ((origin.protocol !== "https:" && origin.protocol !== "http:")
+    || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== "/") {
+    throw new TypeError(`${field} must be an HTTP origin without a path, query or credentials`);
+  }
+  return origin;
+}
+
 export function createEvalSpClient(input: {
   readonly origin: string;
   readonly writeOrigin: string;
   readonly fetch?: Fetch;
 }): EvalSpClient {
-  const origin = new URL(input.origin);
-  if ((origin.protocol !== "https:" && origin.protocol !== "http:")
-    || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== "/") {
-    throw new TypeError("Eval SP origin must be an HTTP origin without a path, query or credentials");
-  }
-  const writeOrigin = new URL(input.writeOrigin);
-  if ((writeOrigin.protocol !== "https:" && writeOrigin.protocol !== "http:")
-    || writeOrigin.username || writeOrigin.password || writeOrigin.search || writeOrigin.hash || writeOrigin.pathname !== "/") {
-    throw new TypeError("Eval SP write Origin must be an HTTP origin without a path, query or credentials");
-  }
+  const origin = httpOrigin(input.origin, "Eval SP origin");
+  const writeOrigin = httpOrigin(input.writeOrigin, "Eval SP write Origin");
   const fetcher = input.fetch ?? globalThis.fetch;
 
   async function request(token: string, path: string, method = "GET", body?: unknown): Promise<unknown> {

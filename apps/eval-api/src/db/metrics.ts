@@ -5,6 +5,7 @@ import { and, eq, inArray, type SQL } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
 import { readSamples } from "./catalog.js";
 import { readDatasetSnapshots } from "./dataset.js";
+import { requireOwnerUserId } from "./owner.js";
 import { evaluationFromRow, readRunRecords, samplingFromRow } from "./runtime.js";
 import { datasetData, evaluations, projects, runs, runSamplings, samples, samplings } from "./schema.js";
 
@@ -12,12 +13,13 @@ function unique(ids: readonly string[]): string[] {
   return [...new Set(ids)];
 }
 
-export function createPostgresMetricsSource(db: EvalDb): MetricsSource {
+export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): MetricsSource {
+  const owner = requireOwnerUserId(ownerUserId);
   return {
     async read(query: MetricsQuery): Promise<MetricsFacts> {
       return db.transaction(async (transaction) => {
         const [project] = await transaction.select().from(projects)
-          .where(eq(projects.projectId, query.projectId));
+          .where(and(eq(projects.projectId, query.projectId), eq(projects.ownerUserId, owner)));
         if (!project) throw new MetricsQueryError(`Unknown Project ${query.projectId}`);
 
         const requestedRunIds = query.runIds;
