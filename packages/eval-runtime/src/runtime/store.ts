@@ -16,6 +16,7 @@ export interface RuntimeRunRecord {
   readonly runId: string;
   readonly samplingIds: readonly string[];
   readonly projectId: string;
+  readonly sourceCommit: string;
   readonly phases: RunPhases;
   readonly evaluationIds: readonly string[];
   /** Immutable effective configuration captured when this Run is admitted. */

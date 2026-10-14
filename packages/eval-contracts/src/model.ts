@@ -57,6 +57,15 @@ export interface Project {
   readonly projectId: string;
   readonly ownerUserId: string;
   readonly name: string;
+  /** SP source branch selected by the Eval deployment that created this Project. */
+  readonly sourceBranch: string;
+  /** Fixed by the first admitted Run; an empty Project has no initial launch yet. */
+  readonly initialLaunch?: ProjectInitialLaunch;
+}
+
+export interface ProjectInitialLaunch {
+  readonly operation: "execution" | "pipeline";
+  readonly configId: string;
 }
 
 export interface AgentConfigRef {
@@ -181,6 +190,7 @@ export interface RunHandle {
 
 export interface RunSnapshot extends RunHandle {
   readonly projectId: string;
+  readonly sourceCommit: string;
   readonly phases: RunPhases;
   readonly evaluationIds: readonly string[];
   readonly phase: RunPhase;

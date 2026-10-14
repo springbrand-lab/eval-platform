@@ -83,6 +83,8 @@ export interface EvalRuntime {
 }
 
 export interface EvalRuntimeDependencies {
+  /** Resolved SP source commit of this Eval deployment; saved on newly admitted Runs. */
+  readonly sourceCommit: string;
   readonly catalog: RuntimeCatalog;
   readonly configResolver: ConfigResolver;
   readonly harness: Harness;
@@ -97,7 +99,7 @@ export interface EvalRuntimeDependencies {
 }
 
 /** Recovery reads persisted Run facts; admission APIs and Config resolution stay in the API process. */
-export interface EvalRunResumerDependencies extends Omit<EvalRuntimeDependencies, "catalog" | "configResolver"> {
+export interface EvalRunResumerDependencies extends Omit<EvalRuntimeDependencies, "catalog" | "configResolver" | "sourceCommit"> {
   readonly getSample: RuntimeCatalog["getSample"];
 }
 

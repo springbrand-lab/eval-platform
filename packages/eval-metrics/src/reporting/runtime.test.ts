@@ -118,6 +118,7 @@ function runtimeFixture() {
   let clock = 0;
   const runtime = createEvalRuntime({
     store, catalog, configResolver: createConfigResolver(configs), harness, onError,
+    sourceCommit: "a".repeat(40),
     idFactory: () => `runtime-id-${++nextId}`,
     now: () => new Date(Date.UTC(2026, 9, 8) + ++clock).toISOString(),
   });

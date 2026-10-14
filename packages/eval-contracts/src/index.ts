@@ -28,6 +28,7 @@ export type {
   MaterializedDataBinding,
   PipelineRequest,
   Project,
+  ProjectInitialLaunch,
   RemoteHarnessConfig,
   RetryPolicy,
   RunPhase,

@@ -69,6 +69,13 @@ function defaultSleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+export function requireSourceCommit(sourceCommit: string): string {
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sourceCommit)) {
+    throw new TypeError("sourceCommit must be a full lowercase Git commit hash");
+  }
+  return sourceCommit;
+}
+
 function requireDistinctIds(ids: readonly string[], field: string): void {
   if (new Set(ids).size !== ids.length) {
     throw new Error(`${field} must not contain duplicate ids`);
@@ -284,6 +291,7 @@ class RunResumer implements EvalRunResumer {
 }
 
 class RuntimeCoordinator extends RunResumer implements EvalRuntime {
+  readonly #sourceCommit: string;
   readonly #catalog: RuntimeCatalog;
   readonly #configResolver: EvalRuntimeDependencies["configResolver"];
   readonly #pendingAdmissions = new Map<string, {
@@ -293,6 +301,7 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
 
   constructor(dependencies: EvalRuntimeDependencies) {
     super({ ...dependencies, getSample: dependencies.catalog.getSample.bind(dependencies.catalog) });
+    this.#sourceCommit = requireSourceCommit(dependencies.sourceCommit);
     this.#catalog = dependencies.catalog;
     this.#configResolver = dependencies.configResolver;
   }
@@ -542,6 +551,7 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
       runId: this.idFactory(),
       samplingIds: [...samplingIds],
       projectId,
+      sourceCommit: this.#sourceCommit,
       phases,
       evaluationIds: [...evaluationIds],
       config,

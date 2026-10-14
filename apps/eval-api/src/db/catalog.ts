@@ -5,6 +5,7 @@ import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { isForeignKeyFailure, type EvalDb } from "./client.js";
 import { createPostgresDatasetStore } from "./dataset.js";
 import { requireOwnerUserId } from "./owner.js";
+import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
 import { data, projects, samples, samplings } from "./schema.js";
 
 export interface SuccessfulSamplingOption {
@@ -47,6 +48,16 @@ function toSample(row: { sampleId: string; dataId: string; content: typeof data.
   return { sampleId: row.sampleId, data: dataSchema.parse({ ...row.content, dataId: row.dataId }) };
 }
 
+export function projectFromRow(row: typeof projects.$inferSelect): Project {
+  return {
+    projectId: row.projectId,
+    ownerUserId: row.ownerUserId,
+    name: row.name,
+    sourceBranch: row.sourceBranch,
+    ...(row.initialLaunch === null ? {} : { initialLaunch: row.initialLaunch }),
+  };
+}
+
 export async function readSamples(
   reader: Pick<EvalDb, "select">,
   ownerUserId: string,
@@ -64,26 +75,29 @@ export function createPostgresCatalog(
   db: EvalDb,
   ownerUserId: string,
   agents: { readonly listAgents: (role?: AgentRole) => ReturnType<RuntimeCatalog["listAgents"]> },
+  release: EvalSpRelease,
 ): PostgresCatalog {
   const owner = requireOwnerUserId(ownerUserId);
+  const { sourceBranch } = requireEvalSpRelease(release);
   const datasetStore = createPostgresDatasetStore(db, owner);
   return {
     async createProject(input) {
       const name = input.name.trim();
       if (name.length === 0) throw new TypeError("Project name must not be blank");
-      const project: Project = { projectId: crypto.randomUUID(), ownerUserId: owner, name };
+      const project: Project = { projectId: crypto.randomUUID(), ownerUserId: owner, name, sourceBranch };
       await db.insert(projects).values(project);
       return project;
     },
     async getProject(projectId) {
       const [row] = await db.select().from(projects)
         .where(and(eq(projects.ownerUserId, owner), eq(projects.projectId, projectId)));
-      return row ?? null;
+      return row ? projectFromRow(row) : null;
     },
     async listProjects() {
-      return db.select().from(projects)
+      const rows = await db.select().from(projects)
         .where(eq(projects.ownerUserId, owner))
         .orderBy(projects.projectId);
+      return rows.map(projectFromRow);
     },
     listAgents(role) {
       return agents.listAgents(role);

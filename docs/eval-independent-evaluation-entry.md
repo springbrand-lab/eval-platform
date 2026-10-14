@@ -2,7 +2,7 @@
 
 ## 范围与现状
 
-执行成功的 Sampling 可以在原 Project 下单独发起评估，不重新执行 Subject。一次评估请求保存新的 Run 和每个 Sampling 对应的 EvaluationRecord；有意再次评估同一批 Sampling 时使用新幂等键，已有执行与评估记录不被覆盖。
+执行成功的 Sampling 可以在原 Project 下单独发起评估，不重新执行 Subject。新建的空 Project 不能以只评估启动，也不能引用其他 Project 的 Sampling。一次评估请求保存新的 Run 和每个 Sampling 对应的 EvaluationRecord；有意再次评估同一批 Sampling 时使用新幂等键，已有执行与评估记录不被覆盖。
 
 当前已实现 Catalog 的选择查询、Runtime `evaluate()` 和 PostgreSQL 幂等准入。Eval API 的 HTTP 控制面尚无调用方；接入时按下述契约组合现有能力，不让 Runtime 根据筛选条件重新选一批 Sampling。
 

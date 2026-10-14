@@ -54,7 +54,11 @@ CREATE TABLE "eval_projects" (
 	"project_id" text PRIMARY KEY NOT NULL,
 	"owner_user_id" text NOT NULL,
 	"name" text NOT NULL,
-	CONSTRAINT "eval_projects_owner_id_uq" UNIQUE("owner_user_id","project_id")
+	"source_branch" text NOT NULL,
+	"initial_launch" jsonb,
+	CONSTRAINT "eval_projects_owner_id_uq" UNIQUE("owner_user_id","project_id"),
+	CONSTRAINT "eval_projects_source_branch_ck" CHECK (length(trim("eval_projects"."source_branch")) > 0),
+	CONSTRAINT "eval_projects_initial_launch_ck" CHECK ("eval_projects"."initial_launch" IS NULL OR coalesce((jsonb_typeof("eval_projects"."initial_launch") = 'object' AND "eval_projects"."initial_launch"->>'operation' IN ('execution', 'pipeline') AND length("eval_projects"."initial_launch"->>'configId') > 0), false))
 );
 --> statement-breakpoint
 CREATE TABLE "eval_run_evaluations" (
@@ -80,13 +84,15 @@ CREATE TABLE "eval_runs" (
 	"run_id" text PRIMARY KEY NOT NULL,
 	"owner_user_id" text NOT NULL,
 	"project_id" text NOT NULL,
+	"source_commit" text NOT NULL,
 	"phases" jsonb NOT NULL,
 	"config" jsonb NOT NULL,
 	"idempotency_key" text NOT NULL,
 	"request_fingerprint" text NOT NULL,
 	CONSTRAINT "eval_runs_owner_id_uq" UNIQUE("owner_user_id","run_id"),
 	CONSTRAINT "eval_runs_project_idempotency_uq" UNIQUE("project_id","idempotency_key"),
-	CONSTRAINT "eval_runs_phases_ck" CHECK ("eval_runs"."phases" IN ('["execution"]'::jsonb, '["evaluation"]'::jsonb, '["execution", "evaluation"]'::jsonb))
+	CONSTRAINT "eval_runs_phases_ck" CHECK ("eval_runs"."phases" IN ('["execution"]'::jsonb, '["evaluation"]'::jsonb, '["execution", "evaluation"]'::jsonb)),
+	CONSTRAINT "eval_runs_source_commit_ck" CHECK ("eval_runs"."source_commit" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$')
 );
 --> statement-breakpoint
 CREATE TABLE "eval_samples" (

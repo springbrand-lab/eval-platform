@@ -7,7 +7,7 @@ import type {
 import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
 import type { ResourceInput } from "./aggregation/model.js";
 
-export const PROJECT = { projectId: "project-1", ownerUserId: "owner-1", name: "Product evaluation" };
+export const PROJECT = { projectId: "project-1", ownerUserId: "owner-1", name: "Product evaluation", sourceBranch: "release-2.0.0" };
 export const SUBJECT = { ownerUserId: "owner-1", userAgentId: "subject-1" };
 export const EVALUATOR = { ownerUserId: "owner-1", userAgentId: "judge-1" };
 export const DATA = {

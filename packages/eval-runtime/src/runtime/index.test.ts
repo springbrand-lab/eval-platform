@@ -24,7 +24,7 @@ import type {
 import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError, sameRuntimeRecordFacts } from "./store.js";
 import type { RetryController, RetryOperation } from "./retry.js";
 import {
-  createEvalRuntime as createRuntime,
+  createEvalRuntime as createRuntimeWithRelease,
   createEvalRunResumer,
   type EvalRuntimeDependencies,
 } from "./index.js";
@@ -44,6 +44,11 @@ const EVALUATION_CONFIG_RETRY_ONE_ID = "evaluation-config-retry-one";
 const EVALUATION_CONFIG_RUNTIME_ID = "evaluation-config-runtime";
 const PIPELINE_CONFIG_ID = "pipeline-config-1";
 const PIPELINE_CONFIG_CONCURRENT_ID = "pipeline-config-concurrent";
+const SOURCE_COMMIT = "a".repeat(40);
+
+function createRuntime(dependencies: Omit<EvalRuntimeDependencies, "sourceCommit"> & { readonly sourceCommit?: string }) {
+  return createRuntimeWithRelease({ ...dependencies, sourceCommit: dependencies.sourceCommit ?? SOURCE_COMMIT });
+}
 
 const NO_RETRY = { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 } as const;
 const EXECUTION_RUNTIME = { timeoutMs: 1_234 } as const;
@@ -164,7 +169,7 @@ function makeConfigResolver(framework: AgentFramework = "sp"): ConfigResolver {
   return createConfigResolver(store);
 }
 
-type RuntimeTestDependencies = Omit<EvalRuntimeDependencies, "configResolver"> & {
+type RuntimeTestDependencies = Omit<EvalRuntimeDependencies, "configResolver" | "sourceCommit"> & {
   readonly configResolver?: ConfigResolver;
 };
 
@@ -521,6 +526,7 @@ describe("eval runtime orchestration", () => {
     const snapshot = await waitForTerminal(runtime, run.runId);
 
     expect(snapshot.status).toBe("succeeded");
+    expect(snapshot.sourceCommit).toBe(SOURCE_COMMIT);
     expect(run.samplingIds).toHaveLength(2);
     expect(harness.ensureAgent).toHaveBeenCalledTimes(2);
     expect(harness.materializeInitialData).toHaveBeenCalledTimes(2);

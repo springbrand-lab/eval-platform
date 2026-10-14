@@ -2,7 +2,7 @@
 
 评估运行时的控制面和执行编排。它只依赖 SP 的公开 Harness 边界，不复制 SP Runtime，也不直接读取 Durable Object 存储。
 
-目标部署中的 SP 是 Eval 独立发布的 API/数据库、Agent Worker 和 Space Worker；登录、Agent Config 及 Agent 生命周期全部由这套 SP 提供。Harness 使用该部署的普通 Inbox/Chat 生命周期，具体 HTTP/WebSocket 客户端由 `apps/eval-api` 组合。固定 SP 分支绑定 Project，Run 记录实际 commit；Runtime 不按 Sampling 切分支，也不切换线上 Worker。见[部署方案](../../docs/eval-sp-deployment.md)。
+目标部署中的 SP 是 Eval 独立发布的 API/数据库、Agent Worker 和 Space Worker；登录、Agent Config 及 Agent 生命周期全部由这套 SP 提供。Harness 使用该部署的普通 Inbox/Chat 生命周期，具体 HTTP/WebSocket 客户端由 `apps/eval-api` 组合。部署分支绑定 Project；Runtime 从当前发布信息取得 commit 并写入新 Run，恢复时只读 Run 已保存的 commit。首次 Run 的执行或 Pipeline 配置选择在同一准入事务中固定到 Project；后续同类 Run 沿用该选择，独立评估仍属于原 Project。见[部署方案](../../docs/eval-sp-deployment.md)。
 
 ## 对外边界
 

@@ -3,7 +3,7 @@ import type { MetricsFacts, MetricsQuery, MetricsSource } from "@eval-platform/e
 import { toRunSnapshot, toSamplingSnapshot } from "@eval-platform/eval-runtime";
 import { and, eq, inArray, type SQL } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
-import { readSamples } from "./catalog.js";
+import { projectFromRow, readSamples } from "./catalog.js";
 import { readDatasetSnapshots } from "./dataset.js";
 import { requireOwnerUserId } from "./owner.js";
 import { evaluationFromRow, readRunRecords, samplingFromRow } from "./runtime.js";
@@ -124,7 +124,7 @@ export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): Me
         });
 
         return {
-          project,
+          project: projectFromRow(project),
           datasets: datasetsInScope,
           samples: samplesInScope,
           samplings: selectedSamplings.map((row) => toSamplingSnapshot(samplingFromRow(row))),

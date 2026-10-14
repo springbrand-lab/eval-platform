@@ -1,16 +1,17 @@
-import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
+import type { EvaluationRecord, ProjectInitialLaunch, Sampling } from "@eval-platform/eval-contracts";
 import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
 import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import { and, eq, exists, gt, inArray, or, sql } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
+import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
 import { datasets, evaluations, projects, runEvaluations, runs, runSamplings, samples, samplings } from "./schema.js";
 
 export type RuntimeReader = Pick<EvalDb, "select">;
 
 type RuntimeStoreScope =
   | { readonly kind: "worker" }
-  | { readonly kind: "user"; readonly ownerUserId: string };
+  | { readonly kind: "user"; readonly ownerUserId: string; readonly release: EvalSpRelease };
 
 export type RunRecordScope = RuntimeStoreScope
   | { readonly kind: "project"; readonly ownerUserId: string; readonly projectId: string };
@@ -31,6 +32,14 @@ function samplingFacts(record: Sampling): typeof samplings.$inferInsert.facts {
 function evaluationFacts(record: EvaluationRecord): typeof evaluations.$inferInsert.facts {
   const { evaluationId: _evaluationId, samplingId: _samplingId, ...facts } = record;
   return facts;
+}
+
+function launchFor(run: RuntimeRunRecord): ProjectInitialLaunch | null {
+  switch (run.config.operation) {
+    case "execution": return { operation: "execution", configId: run.config.execution.configId };
+    case "pipeline": return { operation: "pipeline", configId: run.config.pipeline.configId };
+    case "evaluation": return null;
+  }
 }
 
 export async function readRunRecords(
@@ -69,6 +78,7 @@ export async function readRunRecords(
   return selected.map((row) => ({
     runId: row.runId,
     projectId: row.projectId,
+    sourceCommit: row.sourceCommit,
     phases: row.phases,
     config: row.config,
     samplingIds: samplingIdsByRun.get(row.runId) ?? [],
@@ -175,14 +185,30 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
     async createRunWithSamplings(run, records, judges) {
       validateAdmission(run, records, judges);
       return db.transaction(async (transaction) => {
-        const [project] = await transaction.select({ ownerUserId: projects.ownerUserId })
+        const [project] = await transaction.select({
+          ownerUserId: projects.ownerUserId,
+          sourceBranch: projects.sourceBranch,
+          initialLaunch: projects.initialLaunch,
+        })
           .from(projects)
           .where(and(eq(projects.projectId, run.projectId), ownerScope.project))
-          .for("share");
+          .for("update");
         if (!project) throw new Error(`Unknown Project ${run.projectId}`);
         const identity = run.requestIdentity;
         const existing = await findByIdentity(transaction, project.ownerUserId, run.projectId, identity);
         if (existing) return { run: existing, created: false };
+        if (scope.kind === "user" && (project.sourceBranch !== scope.release.sourceBranch
+          || run.sourceCommit !== scope.release.sourceCommit)) {
+          throw new Error("Project source branch or Run source commit differs from the active Eval SP release");
+        }
+        const launch = launchFor(run);
+        if (project.initialLaunch === null && launch === null) {
+          throw new Error("An empty Project cannot start with evaluation-only; select successful Samplings in an existing Project");
+        }
+        if (project.initialLaunch !== null && launch !== null
+          && (project.initialLaunch.operation !== launch.operation || project.initialLaunch.configId !== launch.configId)) {
+          throw new Error("Project launch selection cannot change after its first Run");
+        }
         const selectedSamples = await transaction.select({
           sampleId: samples.sampleId,
           ownerUserId: samples.ownerUserId,
@@ -208,6 +234,7 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
           runId: run.runId,
           ownerUserId: project.ownerUserId,
           projectId: run.projectId,
+          sourceCommit: run.sourceCommit,
           phases: run.phases,
           config: run.config,
           idempotencyKey: identity.idempotencyKey,
@@ -247,6 +274,10 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
           await transaction.insert(runEvaluations).values(judges.map((judge, position) => ({
             runId: run.runId, evaluationId: judge.evaluationId, samplingId: judge.samplingId, position,
           })));
+        }
+        if (project.initialLaunch === null && launch !== null) {
+          await transaction.update(projects).set({ initialLaunch: launch })
+            .where(eq(projects.projectId, run.projectId));
         }
         await transaction.execute(sql`select pg_notify('eval_run_created', ${run.runId})`);
         return { run: structuredClone(run), created: true };
@@ -337,6 +368,8 @@ export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & Run
   };
 }
 
-export function createPostgresRuntimeStore(db: EvalDb, ownerUserId: string): RuntimeStore {
-  return createRuntimeStore(db, { kind: "user", ownerUserId: requireOwnerUserId(ownerUserId) });
+export function createPostgresRuntimeStore(db: EvalDb, ownerUserId: string, release: EvalSpRelease): RuntimeStore {
+  return createRuntimeStore(db, {
+    kind: "user", ownerUserId: requireOwnerUserId(ownerUserId), release: requireEvalSpRelease(release),
+  });
 }

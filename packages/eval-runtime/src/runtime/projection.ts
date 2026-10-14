@@ -65,6 +65,7 @@ export function toRunSnapshot(
     runId: run.runId,
     samplingIds: [...run.samplingIds],
     projectId: run.projectId,
+    sourceCommit: run.sourceCommit,
     phases: run.phases,
     evaluationIds: [...run.evaluationIds],
     ...aggregateRunProgress(records, evaluations, run.phases),

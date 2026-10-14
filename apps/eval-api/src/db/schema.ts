@@ -1,4 +1,4 @@
-import type { EvaluationRecord, RunPhases, Sampling } from "@eval-platform/eval-contracts";
+import type { EvaluationRecord, ProjectInitialLaunch, RunPhases, Sampling } from "@eval-platform/eval-contracts";
 import type { Data } from "@eval-platform/eval-dataset";
 import type { EvaluationConfig, ExecutionConfig, RunConfigSnapshot } from "@eval-platform/eval-runtime";
 import { sql } from "drizzle-orm";
@@ -19,9 +19,13 @@ export const projects = pgTable("eval_projects", {
   projectId: text("project_id").primaryKey(),
   ownerUserId: text("owner_user_id").notNull(),
   name: text("name").notNull(),
+  sourceBranch: text("source_branch").notNull(),
+  initialLaunch: jsonb("initial_launch").$type<ProjectInitialLaunch>(),
 }, (table) => [
   unique("eval_projects_owner_id_uq").on(table.ownerUserId, table.projectId),
   index("eval_projects_owner_idx").on(table.ownerUserId),
+  check("eval_projects_source_branch_ck", sql`length(trim(${table.sourceBranch})) > 0`),
+  check("eval_projects_initial_launch_ck", sql`${table.initialLaunch} IS NULL OR coalesce((jsonb_typeof(${table.initialLaunch}) = 'object' AND ${table.initialLaunch}->>'operation' IN ('execution', 'pipeline') AND length(${table.initialLaunch}->>'configId') > 0), false)`),
 ]);
 
 export const datasets = pgTable("eval_datasets", {
@@ -121,6 +125,7 @@ export const runs = pgTable("eval_runs", {
   runId: text("run_id").primaryKey(),
   ownerUserId: text("owner_user_id").notNull(),
   projectId: text("project_id").notNull(),
+  sourceCommit: text("source_commit").notNull(),
   phases: jsonb("phases").$type<RunPhases>().notNull(),
   config: jsonb("config").$type<RunConfigSnapshot>().notNull(),
   idempotencyKey: text("idempotency_key").notNull(),
@@ -131,6 +136,7 @@ export const runs = pgTable("eval_runs", {
   index("eval_runs_project_idx").on(table.projectId),
   unique("eval_runs_project_idempotency_uq").on(table.projectId, table.idempotencyKey),
   check("eval_runs_phases_ck", sql`${table.phases} IN ('["execution"]'::jsonb, '["evaluation"]'::jsonb, '["execution", "evaluation"]'::jsonb)`),
+  check("eval_runs_source_commit_ck", sql`${table.sourceCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`),
 ]);
 
 export const runSamplings = pgTable("eval_run_samplings", {

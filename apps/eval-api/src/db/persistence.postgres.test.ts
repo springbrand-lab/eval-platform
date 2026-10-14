@@ -14,6 +14,7 @@ import { readRunRecords } from "./runtime.js";
 const connection = process.env.DATABASE_URL;
 const subjectAgent = { ownerUserId: "owner", userAgentId: "subject" };
 const evaluator = { ownerUserId: "owner", userAgentId: "evaluator" };
+const release = { sourceBranch: "release-2.0.0", sourceCommit: "a".repeat(40) };
 function executionConfig(datasetId: string) {
   return {
     operation: "execution" as const,
@@ -43,6 +44,7 @@ function makeSampling(projectId: string, sampleId: string, samplingId: string = 
 function makeRun(projectId: string, record: Sampling, datasetId: string, overrides: Partial<RuntimeRunRecord> = {}): RuntimeRunRecord {
   return {
     runId: crypto.randomUUID(), projectId,
+    sourceCommit: release.sourceCommit,
     samplingIds: [record.samplingId], evaluationIds: [],
     phases: ["execution"], config: executionConfig(datasetId),
     requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "facts-1" },
@@ -50,7 +52,7 @@ function makeRun(projectId: string, record: Sampling, datasetId: string, overrid
   };
 }
 
-function makeEvaluation(samplingId: string, evaluationId = crypto.randomUUID()): EvaluationRecord {
+function makeEvaluation(samplingId: string, evaluationId: string = crypto.randomUUID()): EvaluationRecord {
   return { evaluationId, samplingId, evaluator, status: { status: "queued" }, attempts: [] };
 }
 
@@ -117,7 +119,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
   function stores() {
     const db = database.db;
     return {
-      catalog: createPostgresCatalog(db, "user-A", { async listAgents() { return []; } }),
+      catalog: createPostgresCatalog(db, "user-A", { async listAgents() { return []; } }, release),
       datasetService: createDatasetService(createPostgresDatasetStore(db, "user-A")),
       runtime: createPostgresWorkerRuntimeStore(db),
       source: createPostgresMetricsSource(db, "user-A"),
@@ -146,6 +148,124 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const sample = await services.catalog.createSample(data.dataId);
     return { ...services, project, dataset, data, sample };
   }
+
+  it("fixes the first execution choice atomically and keeps later evaluation in the same Project", async () => {
+    const { catalog, project, dataset, sample } = await setup();
+    const runtime = createPostgresRuntimeStore(database.db, "user-A", release);
+    expect(await catalog.getProject(project.projectId)).toEqual(project);
+    const missing = makeSampling(project.projectId, "missing-sample");
+    await expect(runtime.createRunWithSamplings(
+      makeRun(project.projectId, missing, dataset.datasetId), [missing], [],
+    )).rejects.toThrow("Sample outside its Project owner scope");
+    expect(await catalog.getProject(project.projectId)).toEqual(project);
+
+    const phantom = { ...makeSampling(project.projectId, sample.sampleId), execution: { status: "succeeded" as const } };
+    const phantomJudge = makeEvaluation(phantom.samplingId);
+    const evaluationOnly = makeRun(project.projectId, phantom, dataset.datasetId, {
+      phases: ["evaluation"], evaluationIds: [phantomJudge.evaluationId], config: evaluationConfig,
+    });
+    await expect(runtime.createRunWithSamplings(evaluationOnly, [phantom], [phantomJudge]))
+      .rejects.toThrow("An empty Project cannot start with evaluation-only");
+    expect(await catalog.getProject(project.projectId)).toEqual(project);
+
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    const execution = makeRun(project.projectId, sampling, dataset.datasetId);
+    await runtime.createRunWithSamplings(execution, [sampling], []);
+    const selected = { operation: "execution", configId: "execution-config" };
+    expect(await catalog.getProject(project.projectId)).toEqual({ ...project, initialLaunch: selected });
+    expect(await catalog.listProjects()).toContainEqual({ ...project, initialLaunch: selected });
+    expect((await runtime.getRun(execution.runId))?.sourceCommit).toBe(release.sourceCommit);
+
+    const succeeded = { ...sampling, execution: { status: "succeeded" as const } };
+    await runtime.updateSampling(succeeded, sampling);
+    const judge = makeEvaluation(sampling.samplingId);
+    const evaluation = makeRun(project.projectId, succeeded, dataset.datasetId, {
+      phases: ["evaluation"], evaluationIds: [judge.evaluationId], config: evaluationConfig,
+    });
+    await runtime.createRunWithSamplings(evaluation, [succeeded], [judge]);
+    expect(await catalog.getProject(project.projectId)).toEqual({ ...project, initialLaunch: selected });
+    expect((await runtime.getRun(evaluation.runId))?.sourceCommit).toBe(release.sourceCommit);
+
+    const changedSampling = makeSampling(project.projectId, sample.sampleId);
+    const changedConfig = makeRun(project.projectId, changedSampling, dataset.datasetId, {
+      config: { operation: "execution", execution: {
+        ...executionConfig(dataset.datasetId).execution, configId: "another-execution-config",
+      } },
+    });
+    await expect(runtime.createRunWithSamplings(changedConfig, [changedSampling], []))
+      .rejects.toThrow("Project launch selection cannot change");
+    const changedOperation = makeRun(project.projectId, changedSampling, dataset.datasetId, {
+      phases: ["execution", "evaluation"], evaluationIds: [crypto.randomUUID()],
+      config: { operation: "pipeline", pipeline: {
+        configId: "pipeline-config", executionConfigId: "execution-config", evaluationConfigId: "evaluation-config",
+      }, execution: executionConfig(dataset.datasetId).execution, evaluation: evaluationConfig.evaluation },
+    });
+    const changedJudge = makeEvaluation(changedSampling.samplingId, changedOperation.evaluationIds[0]!);
+    await expect(runtime.createRunWithSamplings(changedOperation, [changedSampling], [changedJudge]))
+      .rejects.toThrow("Project launch selection cannot change");
+    expect(await runtime.getRun(changedConfig.runId)).toBeNull();
+    expect(await runtime.getRun(changedOperation.runId)).toBeNull();
+    expect(await catalog.getProject(project.projectId)).toEqual({ ...project, initialLaunch: selected });
+  });
+
+  it("keeps Project on its source branch while recording each Run's deployed commit", async () => {
+    const { catalog, project, dataset, sample } = await setup();
+    const originalStore = createPostgresRuntimeStore(database.db, "user-A", release);
+    const firstSampling = makeSampling(project.projectId, sample.sampleId);
+    const first = makeRun(project.projectId, firstSampling, dataset.datasetId);
+    await originalStore.createRunWithSamplings(first, [firstSampling], []);
+
+    const nextRelease = { ...release, sourceCommit: "b".repeat(40) };
+    const nextStore = createPostgresRuntimeStore(database.db, "user-A", nextRelease);
+    const nextSampling = makeSampling(project.projectId, sample.sampleId);
+    const next = makeRun(project.projectId, nextSampling, dataset.datasetId, { sourceCommit: nextRelease.sourceCommit });
+    await nextStore.createRunWithSamplings(next, [nextSampling], []);
+    expect((await nextStore.getRun(first.runId))?.sourceCommit).toBe(release.sourceCommit);
+    expect((await nextStore.getRun(next.runId))?.sourceCommit).toBe(nextRelease.sourceCommit);
+    expect(await catalog.getProject(project.projectId)).toMatchObject({
+      sourceBranch: release.sourceBranch, initialLaunch: { operation: "execution", configId: "execution-config" },
+    });
+
+    const wrongBranch = createPostgresRuntimeStore(database.db, "user-A", {
+      ...nextRelease, sourceBranch: "another-release",
+    });
+    expect((await wrongBranch.createRunWithSamplings(first, [firstSampling], [])).created).toBe(false);
+    const rejectedSampling = makeSampling(project.projectId, sample.sampleId);
+    const rejected = makeRun(project.projectId, rejectedSampling, dataset.datasetId, {
+      sourceCommit: nextRelease.sourceCommit,
+    });
+    await expect(wrongBranch.createRunWithSamplings(rejected, [rejectedSampling], []))
+      .rejects.toThrow("differs from the active Eval SP release");
+    await expect(nextStore.createRunWithSamplings(
+      { ...rejected, sourceCommit: release.sourceCommit }, [rejectedSampling], [],
+    )).rejects.toThrow("differs from the active Eval SP release");
+    expect(await nextStore.getRun(rejected.runId)).toBeNull();
+  });
+
+  it("allows only one first Project launch selection under concurrent submissions", async () => {
+    const { catalog, project, dataset, sample } = await setup();
+    const runtime = createPostgresRuntimeStore(database.db, "user-A", release);
+    const firstSampling = makeSampling(project.projectId, sample.sampleId);
+    const secondSampling = makeSampling(project.projectId, sample.sampleId);
+    const first = makeRun(project.projectId, firstSampling, dataset.datasetId);
+    const second = makeRun(project.projectId, secondSampling, dataset.datasetId, {
+      config: { operation: "execution", execution: {
+        ...executionConfig(dataset.datasetId).execution, configId: "alternative-config",
+      } },
+    });
+    const results = await Promise.allSettled([
+      runtime.createRunWithSamplings(first, [firstSampling], []),
+      runtime.createRunWithSamplings(second, [secondSampling], []),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const admitted = results[0]?.status === "fulfilled" ? first : second;
+    expect(await catalog.getProject(project.projectId)).toMatchObject({
+      initialLaunch: { operation: "execution", configId: admitted === first ? "execution-config" : "alternative-config" },
+    });
+    expect(await runtime.getRun(admitted.runId)).toEqual(admitted);
+    expect(await runtime.getRun(admitted === first ? second.runId : first.runId)).toBeNull();
+  });
 
   it("saves, lists, edits and resolves owner-scoped Execution, Evaluation and Pipeline configs", async () => {
     const { datasetService, dataset, sample } = await setup();
@@ -197,7 +317,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const owned = configStore("user-A");
     const foreign = configStore("user-B");
     const foreignService = createDatasetService(createPostgresDatasetStore(database.db, "user-B"));
-    const foreignCatalog = createPostgresCatalog(database.db, "user-B", { async listAgents() { return []; } });
+    const foreignCatalog = createPostgresCatalog(database.db, "user-B", { async listAgents() { return []; } }, release);
     const foreignDataset = await foreignService.createDataset({ name: "foreign" });
     const foreignData = await foreignService.createData({ userPrompt: "foreign task" });
     const foreignSample = await foreignCatalog.createSample(foreignData.dataId);
@@ -275,7 +395,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     await datasetService.updateData(data.dataId, { userPrompt: "updated", sampleId: "business-id", extra: { nullable: null } });
     expect((await datasetService.listData(anotherDataset.datasetId))[0]).toEqual(await datasetService.getData(data.dataId));
     expect((await catalog.getSample(sample.sampleId))?.data).toEqual(await datasetService.getData(data.dataId));
-    const otherCatalog = createPostgresCatalog(database.db, "user-B", { async listAgents() { return []; } });
+    const otherCatalog = createPostgresCatalog(database.db, "user-B", { async listAgents() { return []; } }, release);
     const otherService = createDatasetService(createPostgresDatasetStore(database.db, "user-B"));
     const otherProject = await otherCatalog.createProject({ name: "second" });
     const otherDataset = await otherService.createDataset({ name: "other user's set" });
@@ -437,7 +557,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     })).toEqual(["sampling-b"]);
     const foreignCatalog = createPostgresCatalog(database.db, "user-B", {
       async listAgents() { return []; },
-    });
+    }, release);
     expect(await foreignCatalog.listSuccessfulSamplings(project.projectId)).toEqual({
       samplings: [], nextCursor: null,
     });
@@ -513,6 +633,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       const judge = makeEvaluation(first.samplingId);
       const evaluationRun: RuntimeRunRecord = {
         runId: crypto.randomUUID(), projectId: project.projectId,
+        sourceCommit: release.sourceCommit,
         samplingIds: [first.samplingId], evaluationIds: [judge.evaluationId],
         phases: ["evaluation"], config: evaluationConfig,
         requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "evaluation facts" },
@@ -733,7 +854,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
   });
 
   it("derives queued, running and successful Pipeline progress from raw records instead of a saved Run status", async () => {
-    const { runtime, source, project, dataset, sample } = await setup();
+    const { catalog, runtime, source, project, dataset, sample } = await setup();
     const record = makeSampling(project.projectId, sample.sampleId);
     const judge = makeEvaluation(record.samplingId);
     const pipeline = makeRun(project.projectId, record, dataset.datasetId, {
@@ -743,6 +864,10 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       }, execution: executionConfig(dataset.datasetId).execution, evaluation: evaluationConfig.evaluation },
     });
     await runtime.createRunWithSamplings(pipeline, [record], [judge]);
+    expect(await catalog.getProject(project.projectId)).toMatchObject({
+      initialLaunch: { operation: "pipeline", configId: "pipeline-config" },
+    });
+    expect((await source.read({ projectId: project.projectId })).runs[0]?.sourceCommit).toBe(release.sourceCommit);
     expect((await source.read({ projectId: project.projectId })).runs[0]).toMatchObject({ phase: "execution", status: "queued" });
     await runtime.updateSampling({ ...record, execution: { status: "running" } }, record);
     expect((await source.read({ projectId: project.projectId })).runs[0]).toMatchObject({ phase: "execution", status: "running" });
@@ -754,7 +879,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
   it("keeps Project and selected Run boundaries across user-owned Datasets", async () => {
     const { runtime, catalog, source, project, dataset, sample } = await setup();
-    const otherCatalog = createPostgresCatalog(database.db, "user-B", { async listAgents() { return []; } });
+    const otherCatalog = createPostgresCatalog(database.db, "user-B", { async listAgents() { return []; } }, release);
     const otherService = createDatasetService(createPostgresDatasetStore(database.db, "user-B"));
     const other = await otherCatalog.createProject({ name: "other" });
     const otherDataset = await otherService.createDataset({ name: "other data" });
@@ -776,16 +901,16 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       VALUES (${crypto.randomUUID()}, ${"user-A"}, ${project.projectId}, ${otherSample.sampleId}, '{}'::jsonb)
     `));
     await expectForeignKeyFailure(database.db.execute(sql`
-      INSERT INTO eval_runs (run_id, owner_user_id, project_id, phases, config, idempotency_key, request_fingerprint)
-      VALUES (${crypto.randomUUID()}, ${"user-A"}, ${other.projectId}, '["execution"]'::jsonb, '{}'::jsonb,
+      INSERT INTO eval_runs (run_id, owner_user_id, project_id, source_commit, phases, config, idempotency_key, request_fingerprint)
+      VALUES (${crypto.randomUUID()}, ${"user-A"}, ${other.projectId}, ${release.sourceCommit}, '["execution"]'::jsonb, '{}'::jsonb,
         ${crypto.randomUUID()}, ${"foreign project"})
     `));
     await expectForeignKeyFailure(database.db.execute(sql`
       INSERT INTO eval_run_samplings (owner_user_id, run_id, sampling_id, position)
       VALUES (${"user-A"}, ${runA.runId}, ${samplingB.samplingId}, ${1})
     `));
-    const userRuntime = createPostgresRuntimeStore(database.db, "user-A");
-    const otherRuntime = createPostgresRuntimeStore(database.db, "user-B");
+    const userRuntime = createPostgresRuntimeStore(database.db, "user-A", release);
+    const otherRuntime = createPostgresRuntimeStore(database.db, "user-B", release);
     expect("listRecoverableRunIds" in userRuntime).toBe(false);
     expect(await userRuntime.getRun(runA.runId)).toEqual(runA);
     expect(await userRuntime.getRun(runB.runId)).toBeNull();
@@ -839,8 +964,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       }, execution: executionConfig(dataset.datasetId).execution, evaluation: evaluationConfig.evaluation },
     });
     await runtime.createRunWithSamplings(pipeline, [record], [judge]);
-    const userRuntime = createPostgresRuntimeStore(database.db, "user-A");
-    const foreignRuntime = createPostgresRuntimeStore(database.db, "user-B");
+    const userRuntime = createPostgresRuntimeStore(database.db, "user-A", release);
+    const foreignRuntime = createPostgresRuntimeStore(database.db, "user-B", release);
     expect(await userRuntime.getEvaluation(judge.evaluationId)).toEqual(judge);
     expect(await userRuntime.listEvaluations(record.samplingId)).toEqual([judge]);
     expect(await foreignRuntime.getEvaluation(judge.evaluationId)).toBeNull();
