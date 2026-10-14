@@ -7,3 +7,5 @@
 登录和 Agent Config 浏览/定制均通过 Eval API 接入独立部署的 Eval SP，不连接 dev/production SP。Subject Sampling 和 EvaluationRecord 均可进入对应 Chat、Workspace 与轨迹，只读查看且不提供聊天驱动、取消或审批操作；普通 Inbox 不作为 Eval 的管理页面。
 
 当前不包含 React、Vite、路由、页面或对外产品能力。
+
+Dataset 页、初始资源管理和 Project 输出格式选择的后端现状与接入流程见 [Dataset 层改造与 Web 接入说明](../../docs/eval-dataset-web-handoff.md)。

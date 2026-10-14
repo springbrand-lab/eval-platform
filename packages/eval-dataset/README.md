@@ -36,7 +36,7 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 "initialSession": { "bundleId": "sessions-bundle", "sessionId": "seed-session" }
 ```
 
-`bundleId` 定位外部 Bundle，`sessionId` / `materialId` 定位其中的具体资源；这两个引用的所有 ID 都必须由调用方提供，Dataset 核心不会生成、推导、补齐或转换它们。不接受只有 Bundle 的引用、内嵌正文或生成器配置。ID 不允许空白或前后空格；生产用的 Eval API Store 还会校验资源属于当前用户且未删除，通用 Data 创建、修改、导入也不能绕过该检查。
+`bundleId` 定位外部 Bundle，`sessionId` / `materialId` 定位其中的具体资源；这些引用的所有 ID 都必须由调用方提供，Dataset 核心不会生成、推导或补齐。UUID 形式的引用会规范为小写，其他不透明 ID 保持原值。不接受只有 Bundle 的引用、内嵌正文或生成器配置。ID 不允许空白或前后空格；生产用的 Eval API Store 还会校验资源属于当前用户且未删除，通用 Data 创建、修改、导入也不能绕过该检查。
 
 `sessionId` 标识已保存的初始化 Session 资源，不是此次运行的 Chat/Submission ID。Dataset 只校验和保存引用，不解析原生 Session 或维护消息格式。`userPrompt` 表示当前新任务；初始 Session 表示已有历史，不作为新任务再次发送。
 
