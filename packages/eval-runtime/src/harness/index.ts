@@ -24,3 +24,13 @@ export class AgentIdentityConflictError extends Error {
     this.name = "AgentIdentityConflictError";
   }
 }
+
+/** The persisted Chat handle no longer resolves through the public SP seam. */
+export class AgentHandleNotFoundError extends Error {
+  readonly retryable = false;
+
+  constructor(readonly chatId: string) {
+    super(`Chat ${chatId} was not found`);
+    this.name = "AgentHandleNotFoundError";
+  }
+}

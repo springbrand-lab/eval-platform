@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AgentIdentityConflictError, type AgentHandle } from "@eval-platform/eval-runtime";
+import { AgentHandleNotFoundError, AgentIdentityConflictError, type AgentHandle } from "@eval-platform/eval-runtime";
 import WebSocket, { WebSocketServer } from "ws";
 import { createSpHarness, SpHarnessError } from "./harness.js";
 
@@ -88,6 +88,9 @@ describe("Eval SP Harness", () => {
       expect.objectContaining({ method: "POST" }),
     );
     expect(await harness.stopAgent({ handle: { ...subject, chatId: "missing-chat" } })).toBe(false);
+    await expect(harness.inspectAgentOperation({
+      handle: { ...subject, chatId: "missing-chat" }, idempotencyKey: "execution:sampling-1",
+    })).rejects.toBeInstanceOf(AgentHandleNotFoundError);
   });
   it("bounds a stuck SP stop request even when the fetch adapter ignores abort", async () => {
     const fetcher = vi.fn(async () => new Promise<Response>(() => undefined));

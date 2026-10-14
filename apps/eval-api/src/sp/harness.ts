@@ -7,6 +7,7 @@ import type {
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import { createHash } from "node:crypto";
 import {
+  AgentHandleNotFoundError,
   AgentIdentityConflictError,
   type AgentFailureKind,
   type AgentHandle,
@@ -139,8 +140,15 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     `${handlePath(handle)}/submissions/by-key/${encodeURIComponent(requiredId(key, "operation key"))}`;
 
   async function inspect(handle: AgentHandle, idempotencyKey: string): Promise<AgentSubmission | null> {
-    const value = await request("GET", operationPath(handle, idempotencyKey));
-    return value === null ? null : submission(value);
+    try {
+      const value = await request("GET", operationPath(handle, idempotencyKey));
+      return value === null ? null : submission(value);
+    } catch (error) {
+      if (error instanceof SpHarnessError && error.status === 404) {
+        throw new AgentHandleNotFoundError(handle.chatId);
+      }
+      throw error;
+    }
   }
 
   async function submit(input: {

@@ -14,6 +14,7 @@ import type {
   CollectAgentResourcesInput,
   Harness,
 } from "../harness/index.js";
+import { AgentHandleNotFoundError } from "../harness/index.js";
 import type { RuntimeCatalog, Sample } from "./model.js";
 import type {
   RuntimeRunAdmission,
@@ -2748,6 +2749,89 @@ describe("Project Run stop", () => {
     expect(final.attempts[0]).toMatchObject({ status: "cancelled" });
     expect(final.attempts[0]?.resources).toBeUndefined();
     expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("cancels a failed Subject creation when the SP Chat does not exist", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const handle = await admission.start(startRequest("stop-missing-subject-chat"));
+    const samplingId = handle.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    await store.updateSampling({
+      ...queued, subjectChatId: "missing-subject-chat",
+      execution: { status: "failed", lastError: "Chat creation failed" },
+      executionAttempts: [{
+        executionAttemptId: "attempt-before-chat", samplingId,
+        attemptNumber: 1, status: "failed", completedAt: "2026-10-14T00:00:00.000Z",
+      }],
+    }, queued);
+    vi.mocked(harness.inspectAgentOperation).mockRejectedValue(
+      new AgentHandleNotFoundError("missing-subject-chat"),
+    );
+
+    await resumer.stop(handle.runId);
+
+    const final = (await store.getSampling(samplingId))!;
+    expect(final.execution.status).toBe("cancelled");
+    expect(final.executionAttempts[0]?.status).toBe("cancelled");
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+  });
+
+  it("cancels a failed Evaluator creation when its SP Chat does not exist", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const execution = await admission.start(startRequest("stop-missing-evaluator-seed"));
+    const samplingId = execution.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    await store.updateSampling({
+      ...queued,
+      subjectChatId: "subject-chat-1", execution: { status: "succeeded" },
+      artifacts: [{ artifactId: "subject-file", kind: "file", path: "/subject.txt" }],
+      trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
+    }, queued);
+    const handle = await admission.evaluate(evaluateRequest([samplingId], EVALUATION_CONFIG_ID, "stop-missing-evaluator-chat"));
+    const run = (await store.getRun(handle.runId))!;
+    const evaluationId = run.evaluationIds[0]!;
+    const initial = (await store.getEvaluation(evaluationId))!;
+    await store.updateEvaluation({
+      ...initial, chatId: "missing-evaluator-chat",
+      status: { status: "failed", lastError: "Chat creation failed" },
+      attempts: [{
+        evaluationAttemptId: "attempt-before-chat", evaluationId,
+        attemptNumber: 1, status: "failed", completedAt: "2026-10-14T00:00:00.000Z",
+      }],
+    }, initial);
+    vi.mocked(harness.inspectAgentOperation).mockRejectedValue(
+      new AgentHandleNotFoundError("missing-evaluator-chat"),
+    );
+
+    await resumer.stop(handle.runId);
+
+    const final = (await store.getEvaluation(evaluationId))!;
+    expect(final.status.status).toBe("cancelled");
+    expect(final.attempts[0]?.status).toBe("cancelled");
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+  });
+
+  it("does not erase a saved Submission ID when its SP Chat is missing", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const handle = await admission.start(startRequest("stop-missing-claimed-submission"));
+    const samplingId = handle.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    const claimed: SamplingState = {
+      ...queued, subjectChatId: "missing-claimed-chat",
+      execution: { status: "starting" },
+      executionAttempts: [{
+        executionAttemptId: "claimed-attempt", samplingId, attemptNumber: 1,
+        submissionId: "claimed-submission", status: "running",
+      }],
+    };
+    await store.updateSampling(claimed, queued);
+    vi.mocked(harness.inspectAgentOperation).mockRejectedValue(
+      new AgentHandleNotFoundError("missing-claimed-chat"),
+    );
+
+    await expect(resumer.stop(handle.runId)).rejects.toBeInstanceOf(AggregateError);
+    expect((await store.getSampling(samplingId))?.executionAttempts[0]?.submissionId)
+      .toBe("claimed-submission");
   });
 
   it("interrupts a live Subject and preserves its artifacts, trajectory and resource facts", async () => {

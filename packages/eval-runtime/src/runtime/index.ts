@@ -17,7 +17,7 @@ import type {
   ResolvedExecutionConfig,
   RunConfigSnapshot,
 } from "../config/index.js";
-import type { AgentHandle, Harness } from "../harness/index.js";
+import { AgentHandleNotFoundError, type AgentHandle, type AgentSubmission, type Harness } from "../harness/index.js";
 
 import type {
   EvalRuntime,
@@ -427,6 +427,17 @@ class RunResumer extends RunReader implements EvalRunResumer {
     };
   }
 
+  private async inspectStoppedOperation(
+    handle: AgentHandle, idempotencyKey: string, submissionId?: string,
+  ): Promise<AgentSubmission | null> {
+    try {
+      return await this.#harness.inspectAgentOperation({ handle, idempotencyKey });
+    } catch (error) {
+      if (error instanceof AgentHandleNotFoundError && !submissionId) return null;
+      throw error;
+    }
+  }
+
   private async finishStoppedExecution(run: RuntimeRunRecord, initial: SamplingState): Promise<void> {
     if (run.config.operation === "evaluation") throw new Error("Evaluation Run has no execution phase");
     const executionConfig = run.config.execution;
@@ -460,9 +471,10 @@ class RunResumer extends RunReader implements EvalRunResumer {
         ownerUserId: current.subjectAgent.ownerUserId,
         chatId: current.subjectChatId!, samplingId: current.samplingId,
       };
-      const receipt = await this.#harness.inspectAgentOperation({
-        handle, idempotencyKey: agentOperationKey("execution", current.samplingId, attempt!.attemptNumber),
-      });
+      const receipt = await this.inspectStoppedOperation(
+        handle, agentOperationKey("execution", current.samplingId, attempt!.attemptNumber),
+        attempt?.submissionId,
+      );
       operationFound = receipt !== null;
       if (!receipt && attempt?.submissionId) throw new Error(`Subject Submission ${attempt.submissionId} disappeared`);
       if (receipt && (receipt.normalizedStatus === "queued" || receipt.normalizedStatus === "running")) {
@@ -551,9 +563,10 @@ class RunResumer extends RunReader implements EvalRunResumer {
           evaluationId: current.evaluationId,
         } } : {}),
       };
-      const receipt = await this.#harness.inspectAgentOperation({
-        handle, idempotencyKey: agentOperationKey("evaluation", current.samplingId, attempt!.attemptNumber),
-      });
+      const receipt = await this.inspectStoppedOperation(
+        handle, agentOperationKey("evaluation", current.samplingId, attempt!.attemptNumber),
+        attempt?.submissionId,
+      );
       operationFound = receipt !== null;
       if (!receipt && attempt?.submissionId) throw new Error(`Evaluator Submission ${attempt.submissionId} disappeared`);
       if (receipt && (receipt.normalizedStatus === "queued" || receipt.normalizedStatus === "running")) {
