@@ -25,6 +25,7 @@ export type { SpHarnessOptions } from "./sp/harness.js";
 export { startSpEvalRunWorkerProcess } from "./run-worker-process.js";
 export type { SpEvalRunWorkerProcessOptions } from "./run-worker-process.js";
 export { createIndependentEvaluationApi } from "./independent-evaluation-api.js";
+export { EvaluationSelectionTooLargeError, MAX_EVALUATION_SAMPLING_IDS, MAX_EVALUATION_BODY_BYTES } from "./independent-evaluation-limits.js";
 export type {
   IndependentEvaluationApi,
   IndependentEvaluationApiOptions,

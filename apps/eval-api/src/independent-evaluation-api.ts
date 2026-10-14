@@ -2,6 +2,12 @@ import type { EvalRunAdmission } from "@eval-platform/eval-runtime";
 import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import type { PostgresProjectCatalog } from "./db/catalog.js";
 import type { ProjectRunView } from "./db/run-view.js";
+import {
+  EvaluationSelectionTooLargeError,
+  MAX_EVALUATION_BODY_BYTES,
+  MAX_EVALUATION_SAMPLING_IDS,
+  MAX_SELECTION_RESPONSE_BYTES,
+} from "./independent-evaluation-limits.js";
 import type { EvalSpClient } from "./sp/client.js";
 
 export interface IndependentEvaluationOwnerServices {
@@ -129,6 +135,9 @@ async function readJsonObject(request: Request): Promise<Record<string, unknown>
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
+      if (size > MAX_EVALUATION_BODY_BYTES) {
+        throw new HttpError(413, "BODY_TOO_LARGE", "Evaluation request body exceeds 8 MiB");
+      }
       chunks.push(value);
     }
   } finally {
@@ -165,6 +174,9 @@ function evaluationInput(body: Record<string, unknown>): {
   const idempotencyKey = validIdempotencyKey(body.idempotencyKey);
   if (!Array.isArray(body.samplingIds) || body.samplingIds.length === 0) {
     throw new HttpError(400, "INVALID_REQUEST", "samplingIds must be a non-empty array");
+  }
+  if (body.samplingIds.length > MAX_EVALUATION_SAMPLING_IDS) {
+    throw new HttpError(413, "SELECTION_TOO_LARGE", "Evaluation selection exceeds 10,000 Samplings");
   }
   const samplingIds = body.samplingIds.map((id) => validId(id, "samplingIds entry"));
   if (new Set(samplingIds).size !== samplingIds.length) {
@@ -294,6 +306,10 @@ export function createIndependentEvaluationApi(options: IndependentEvaluationApi
               const sampleId = optionalId(query.sampleId, "sampleId");
               const filter = sampleId === undefined ? {} : { sampleId };
               const samplingIds = await services.catalog.selectAllSuccessfulSamplingIds(route.projectId, filter);
+              if (samplingIds.length > MAX_EVALUATION_SAMPLING_IDS
+                || new TextEncoder().encode(JSON.stringify({ samplingIds })).byteLength > MAX_SELECTION_RESPONSE_BYTES) {
+                throw new HttpError(413, "SELECTION_TOO_LARGE", "Evaluation selection exceeds one request");
+              }
               return json(200, { samplingIds }, corsOrigin);
             }
             case "evaluate": {
@@ -318,6 +334,9 @@ export function createIndependentEvaluationApi(options: IndependentEvaluationApi
           release();
         }
       } catch (error) {
+        if (error instanceof EvaluationSelectionTooLargeError) {
+          return failure(new HttpError(413, "SELECTION_TOO_LARGE", error.message), corsOrigin);
+        }
         if (error instanceof RuntimeRunIdentityConflictError) {
           return failure(new HttpError(409, "IDEMPOTENCY_CONFLICT", error.message), corsOrigin);
         }

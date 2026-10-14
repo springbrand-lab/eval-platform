@@ -13,9 +13,9 @@
 | 操作 | 输入 | 输出 |
 | --- | --- | --- |
 | 分页筛选 `listSuccessfulSamplings` | `projectId`；可选 `sampleId`、排他游标 `afterSamplingId`、`limit`（默认 100，范围 1–1000） | 按 `samplingId` 升序的 `{samplingId, sampleId}` 列表和 `nextCursor`；无后续页时为 `null` |
-| 全选 `selectAllSuccessfulSamplingIds` | `projectId`；可选 `sampleId` | 同一筛选条件下、按 `samplingId` 升序的全部 ID；无匹配时为空数组 |
+| 全选 `selectAllSuccessfulSamplingIds` | `projectId`；可选 `sampleId` | 同一筛选条件下、按 `samplingId` 升序的全部 ID；无匹配时为空数组；超过单次提交上限时报错，不返回截断列表 |
 
-两个查询共用用户、Project、执行成功状态和可选 Sample 的条件。分页用于展示和手动选择；“一键全选”调用全选查询一次，取得确定的 ID 数组。全选结果是查询时的候选集合，不是一个持续变化的筛选表达式，也不另存一份选择状态。
+两个查询共用用户、Project、执行成功状态和可选 Sample 的条件。分页用于展示和手动选择；“一键全选”调用全选查询一次，取得确定的 ID 数组。单次全选或提交最多 10,000 个 ID；全选响应为提交保留 8 KiB 的字段空间，超出 8 MiB 请求上限时返回 413。超过上限时可按 Sample 筛选或分次手动选择，不会返回误称“全部”的截断列表。全选结果是查询时的候选集合，不是一个持续变化的筛选表达式，也不另存一份选择状态。
 
 ## 提交与重试
 
@@ -48,7 +48,7 @@
 | `GET /api/projects/:projectId/runs/:runId` | 无 | `200 { run }`，包含本次 Run 的 Evaluation ID 列表和状态 |
 | `GET /api/projects/:projectId/runs/:runId/evaluations` | 无 | `200 { evaluations }`，按 Run 的 Evaluation ID 顺序返回记录和结果 |
 
-提交接口只接受显式、非空、无重复的 ID 列表，不接受筛选表达式或“提交时全选”。查询时的一键全选结果由调用方固定后提交；同一意图重试发送原请求体。标识符和幂等键最多 512 字符，幂等键不能有首尾空白。POST 要求 `Content-Type: application/json`，不以固定请求体大小截断全选列表；格式不符返回 415。其他无效输入返回 400，缺失或失效会话返回 401，未找到的 Project/Run/评估配置返回 404，幂等身份冲突或已失效的 Sampling 选择返回 409；未预期的内部错误返回 500，Eval SP 校验不可用返回 502。错误响应为 `{ "error": { "code": string, "message": string } }`。宿主可配置可信 Web Origin；配置后预检请求只对该 Origin 开放，其他 Origin 返回 403。
+提交接口只接受显式、非空、无重复的 ID 列表，不接受筛选表达式或“提交时全选”。查询时的一键全选结果由调用方固定后提交；同一意图重试发送原请求体。标识符和幂等键最多 512 字符，幂等键不能有首尾空白。POST 要求 `Content-Type: application/json`，请求体最多 8 MiB；超出 ID 数量或体积上限返回 413，格式不符返回 415。其他无效输入返回 400，缺失或失效会话返回 401，未找到的 Project/Run/评估配置返回 404，幂等身份冲突或已失效的 Sampling 选择返回 409；未预期的内部错误返回 500，Eval SP 校验不可用返回 502。错误响应为 `{ "error": { "code": string, "message": string } }`。宿主可配置可信 Web Origin；配置后预检请求只对该 Origin 开放，其他 Origin 返回 403。
 
 API 的服务工厂按 Eval SP 用户 ID 在活动请求期间共享一套用户范围内的 Project Catalog、ConfigStore/ConfigResolver 和 Runtime 准入接口；同一用户的并发提交由同一 Runtime 实例处理，空闲用户条目从内存移除。HTTP 路由只负责鉴权、输入校验、Project/Run 归属和组合调用；Run 准入与结果事实仍由 Runtime 和 Store 负责。Run 准入事务分批写入大量关联，保证全选列表不会触及单条 SQL 的参数上限；Run 状态与 Evaluation 结果在同一只读事务内分批读取和投影。`start:api` 进程使用用户范围 PostgreSQL ConfigReader，不持有 SP Harness 服务凭证；独立 `start:worker` 进程用真实 Harness 执行已入库的 Run。
 

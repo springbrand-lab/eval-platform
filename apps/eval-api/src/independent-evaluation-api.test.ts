@@ -188,6 +188,32 @@ describe("independent evaluation HTTP API", () => {
     });
   });
 
+  it("rejects selections too large for one all-selection request without returning a partial list", async () => {
+    const { api, catalog, runtime } = fixture();
+    const tooMany = Array.from({ length: 10_001 }, (_, index) => `sampling-${index}`);
+    catalog.selectAllSuccessfulSamplingIds.mockResolvedValueOnce(tooMany);
+    const selection = await api.handle(request("/api/projects/project-1/samplings/successful/ids"));
+    expect(selection.status).toBe(413);
+    expect(await body(selection)).toEqual({ error: expect.objectContaining({ code: "SELECTION_TOO_LARGE" }) });
+    const submit = await api.handle(request("/api/projects/project-1/evaluations", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        evaluationConfigId: "config-1", samplingIds: tooMany, idempotencyKey: "too-many",
+      }),
+    }));
+    expect(submit.status).toBe(413);
+    expect(runtime.evaluate).not.toHaveBeenCalled();
+  });
+
+  it("bounds request buffering at 8 MiB", async () => {
+    const { api, runtime } = fixture();
+    const response = await api.handle(request("/api/projects/project-1/evaluations", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: "x".repeat(8 * 1024 * 1024 + 1),
+    }));
+    expect(response.status).toBe(413);
+    expect(runtime.evaluate).not.toHaveBeenCalled();
+  });
+
   it("serves the Fetch handler over Node HTTP and handles the trusted Web preflight", async () => {
     const { spClient, createOwnerServices } = fixture();
     const api = createIndependentEvaluationApi({

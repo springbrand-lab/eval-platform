@@ -2,7 +2,7 @@
 
 内部评估控制面的数据库与执行器组合层：PostgreSQL `DatasetStore`、`RuntimeStore`、Project/Sample Catalog、只读 `MetricsSource` 和单实例 Run Worker。连接池由宿主注入；迁移位于 `migrations-postgres/`，用 `pnpm --filter @eval-platform/eval-api db:migrate` 应用（需 `DATABASE_URL`）。
 
-Catalog 提供 Project 下执行成功 Sampling 的分页查询及全选 ID 查询，二者使用同一 owner/Project/执行状态条件，按 Sampling ID 稳定排序。独立评估的 HTTP 处理器提供分页、全选 ID、显式 ID 提交、Run 状态和本次 Run 的 Evaluation 结果查询；路由和请求契约见[独立评估入口](../../docs/eval-independent-evaluation-entry.md)。提交时将已确定的 ID 列表交给 Runtime `evaluate()`；重试复用同一列表和 Project 范围内唯一的 `idempotencyKey`。三个 Run 入口的 key 与请求事实指纹在同一次 Run 准入事务中持久化，相同请求返回原 Run，冲突请求拒绝，只有新 Run 发送 Worker 通知。
+Catalog 提供 Project 下执行成功 Sampling 的分页查询及全选 ID 查询，二者使用同一 owner/Project/执行状态条件，按 Sampling ID 稳定排序。单次全选和提交最多 10,000 条 Sampling，POST 请求体最多 8 MiB；超过上限返回 413，不返回截断的“全选”列表。独立评估的 HTTP 处理器提供分页、全选 ID、显式 ID 提交、Run 状态和本次 Run 的 Evaluation 结果查询；路由和请求契约见[独立评估入口](../../docs/eval-independent-evaluation-entry.md)。提交时将已确定的 ID 列表交给 Runtime `evaluate()`；重试复用同一列表和 Project 范围内唯一的 `idempotencyKey`。三个 Run 入口的 key 与请求事实指纹在同一次 Run 准入事务中持久化，相同请求返回原 Run，冲突请求拒绝，只有新 Run 发送 Worker 通知。
 
 `createIndependentEvaluationApi({ spClient, createOwnerServices, webOrigin? })` 提供 Fetch `handle(Request)`；每个受保护请求都通过 Eval SP 校验 Bearer 会话。服务工厂按校验得到的用户 ID 在活动请求期间共享 Catalog/Run 准入接口，同一用户的并发提交共用 Runtime 的待准入请求；请求结束后移除内存条目，已完成准入的重放仍由 PostgreSQL 判断。`createPostgresIndependentEvaluationApi({ db, spClient, release, webOrigin? })` 使用同一用户的只读 `createPostgresConfigReader()`，并将同一份已校验的 SP 分支与 commit 交给 PostgreSQL Project Catalog、RuntimeStore 和准入接口；它不持有某次登录的 Bearer token 或 SP Harness 服务凭证。配置编辑后仍由 Runtime 保存的 Run 快照判断旧 key 重放。`createIndependentEvaluationHttpServer(api)` 是 Node 传输层。Run 状态和本次 Evaluation 结果在一个只读一致性事务中按批读取，查询次数随批次数增长，不对每条 Sampling 分别查询。
 

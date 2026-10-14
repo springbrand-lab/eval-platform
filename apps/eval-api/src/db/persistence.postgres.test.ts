@@ -699,6 +699,25 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(view?.evaluations.at(-1)?.samplingId).toBe(successful.at(-1)!.samplingId);
   }, 30_000);
 
+  it("rejects an oversized Project all-selection without returning a partial ID list", async () => {
+    const { project, sample } = await setup();
+    await database.db.execute(sql`INSERT INTO eval_samplings
+      (sampling_id, owner_user_id, project_id, sample_id, facts)
+      SELECT 'limit-sampling-' || n, 'user-A', ${project.projectId}, ${sample.sampleId},
+        '{"execution":{"status":"succeeded"},"subjectAgent":{"ownerUserId":"owner","userAgentId":"subject"},"executionAttempts":[]}'::jsonb
+      FROM generate_series(1, 10001) AS n`);
+    const api = createPostgresIndependentEvaluationApi({
+      db: database.db, release,
+      spClient: { async verifySession() { return { id: "user-A", role: "user" }; } },
+    });
+    const response = await api.handle(new Request(
+      `http://eval-api.test/api/projects/${project.projectId}/samplings/successful/ids`,
+      { headers: { Authorization: "Bearer session" } },
+    ));
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: expect.objectContaining({ code: "SELECTION_TOO_LARGE" }) });
+  }, 30_000);
+
   it("admits one independent EvaluationRecord for concurrent requests with the same key", async () => {
     const { runtime, project, dataset, sample } = await setup();
     const sampling = makeSampling(project.projectId, sample.sampleId);
