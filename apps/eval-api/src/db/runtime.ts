@@ -8,6 +8,13 @@ import { datasets, evaluations, projects, runEvaluations, runs, runSamplings, sa
 
 export type RuntimeReader = Pick<EvalDb, "select">;
 
+type RuntimeStoreScope =
+  | { readonly kind: "worker" }
+  | { readonly kind: "user"; readonly ownerUserId: string };
+
+export type RunRecordScope = RuntimeStoreScope
+  | { readonly kind: "project"; readonly ownerUserId: string; readonly projectId: string };
+
 export function samplingFromRow(row: typeof samplings.$inferSelect): Sampling {
   return { ...row.facts, samplingId: row.samplingId, projectId: row.projectId, sampleId: row.sampleId };
 }
@@ -29,11 +36,15 @@ function evaluationFacts(record: EvaluationRecord): typeof evaluations.$inferIns
 export async function readRunRecords(
   reader: RuntimeReader,
   runIds: readonly string[],
-  ownerUserId?: string,
+  scope: RunRecordScope,
 ): Promise<readonly RuntimeRunRecord[]> {
   if (runIds.length === 0) return [];
   const selected = await reader.select().from(runs)
-    .where(and(inArray(runs.runId, runIds), ownerUserId === undefined ? undefined : eq(runs.ownerUserId, ownerUserId)))
+    .where(and(
+      inArray(runs.runId, runIds),
+      scope.kind === "worker" ? undefined : eq(runs.ownerUserId, scope.ownerUserId),
+      scope.kind === "project" ? eq(runs.projectId, scope.projectId) : undefined,
+    ))
     .orderBy(runs.runId);
   if (selected.length === 0) return [];
   const ids = selected.map((row) => row.runId);
@@ -116,7 +127,21 @@ function validateAdmission(
   }
 }
 
-function createRuntimeStore(db: EvalDb, ownerUserId?: string): RuntimeStore & RuntimeRecoveryStore {
+function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore {
+  const ownerScope = scope.kind === "user" ? {
+    project: eq(projects.ownerUserId, scope.ownerUserId),
+    run: eq(runs.ownerUserId, scope.ownerUserId),
+    sampling: eq(samplings.ownerUserId, scope.ownerUserId),
+    evaluation: exists(db.select({ samplingId: samplings.samplingId }).from(samplings).where(and(
+      eq(samplings.samplingId, evaluations.samplingId),
+      eq(samplings.ownerUserId, scope.ownerUserId),
+    ))),
+  } : {
+    project: undefined,
+    run: undefined,
+    sampling: undefined,
+    evaluation: undefined,
+  };
   const findByIdentity = async (
     reader: RuntimeReader,
     identityOwner: string,
@@ -131,7 +156,7 @@ function createRuntimeStore(db: EvalDb, ownerUserId?: string): RuntimeStore & Ru
     if (matched.length > 1) {
       throw new RuntimeRunIdentityConflictError("requestId and idempotencyKey refer to different evaluation runs");
     }
-    const [record] = await readRunRecords(reader, [matched[0]!.runId], identityOwner);
+    const [record] = await readRunRecords(reader, [matched[0]!.runId], { kind: "user", ownerUserId: identityOwner });
     if (record?.projectId !== projectId
       || record.requestIdentity?.requestFingerprint !== identity.requestFingerprint) {
       throw new RuntimeRunIdentityConflictError("request identity is already bound to different evaluation run facts");
@@ -142,25 +167,25 @@ function createRuntimeStore(db: EvalDb, ownerUserId?: string): RuntimeStore & Ru
   return {
     async getRun(runId) {
       return db.transaction(async (transaction) => (
-        await readRunRecords(transaction, [runId], ownerUserId)
+        await readRunRecords(transaction, [runId], scope)
       )[0] ?? null, { isolationLevel: "repeatable read", accessMode: "read only" });
     },
     async findRunByRequestId(requestId) {
       return db.transaction(async (transaction) => {
         const rows = await transaction.select({ runId: runs.runId }).from(runs)
-          .where(and(eq(runs.requestId, requestId), ownerUserId === undefined ? undefined : eq(runs.ownerUserId, ownerUserId)))
+          .where(and(eq(runs.requestId, requestId), ownerScope.run))
           .limit(2);
         if (rows.length > 1) throw new RuntimeRunIdentityConflictError("requestId is ambiguous across owners");
-        return rows[0] ? (await readRunRecords(transaction, [rows[0].runId], ownerUserId))[0] ?? null : null;
+        return rows[0] ? (await readRunRecords(transaction, [rows[0].runId], scope))[0] ?? null : null;
       }, { isolationLevel: "repeatable read", accessMode: "read only" });
     },
     async findRunByIdempotencyKey(idempotencyKey) {
       return db.transaction(async (transaction) => {
         const rows = await transaction.select({ runId: runs.runId }).from(runs)
-          .where(and(eq(runs.idempotencyKey, idempotencyKey), ownerUserId === undefined ? undefined : eq(runs.ownerUserId, ownerUserId)))
+          .where(and(eq(runs.idempotencyKey, idempotencyKey), ownerScope.run))
           .limit(2);
         if (rows.length > 1) throw new RuntimeRunIdentityConflictError("idempotencyKey is ambiguous across owners");
-        return rows[0] ? (await readRunRecords(transaction, [rows[0].runId], ownerUserId))[0] ?? null : null;
+        return rows[0] ? (await readRunRecords(transaction, [rows[0].runId], scope))[0] ?? null : null;
       }, { isolationLevel: "repeatable read", accessMode: "read only" });
     },
     async createRunWithSamplings(run, records, judges) {
@@ -168,7 +193,7 @@ function createRuntimeStore(db: EvalDb, ownerUserId?: string): RuntimeStore & Ru
       return db.transaction(async (transaction) => {
         const [project] = await transaction.select({ ownerUserId: projects.ownerUserId })
           .from(projects)
-          .where(and(eq(projects.projectId, run.projectId), ownerUserId === undefined ? undefined : eq(projects.ownerUserId, ownerUserId)))
+          .where(and(eq(projects.projectId, run.projectId), ownerScope.project))
           .for("share");
         if (!project) throw new Error(`Unknown Project ${run.projectId}`);
         const identity = run.requestIdentity;
@@ -248,6 +273,64 @@ function createRuntimeStore(db: EvalDb, ownerUserId?: string): RuntimeStore & Ru
         return { run: structuredClone(run), created: true };
       });
     },
+    async updateSampling(record, expected) {
+      if (record.samplingId !== expected.samplingId
+        || record.projectId !== expected.projectId || record.sampleId !== expected.sampleId) {
+        throw new RuntimeRecordConflictError("Sampling identity changed before update");
+      }
+      const updated = await db.update(samplings).set({ facts: samplingFacts(record) })
+        .where(and(eq(samplings.samplingId, record.samplingId), eq(samplings.projectId, record.projectId),
+          eq(samplings.sampleId, record.sampleId),
+          ownerScope.sampling,
+          eq(samplings.facts, samplingFacts(expected))))
+        .returning({ samplingId: samplings.samplingId });
+      if (updated.length === 0) {
+        throw new RuntimeRecordConflictError(`Sampling changed before update: ${record.samplingId}`);
+      }
+    },
+    async getSampling(samplingId) {
+      const [row] = await db.select().from(samplings).where(and(
+        eq(samplings.samplingId, samplingId),
+        ownerScope.sampling,
+      ));
+      return row ? samplingFromRow(row) : null;
+    },
+    async updateEvaluation(record, expected) {
+      if (record.evaluationId !== expected.evaluationId || record.samplingId !== expected.samplingId) {
+        throw new RuntimeRecordConflictError("Evaluation identity changed before update");
+      }
+      const updated = await db.update(evaluations).set({ facts: evaluationFacts(record) })
+        .where(and(eq(evaluations.evaluationId, record.evaluationId), eq(evaluations.samplingId, record.samplingId),
+          ownerScope.evaluation,
+          eq(evaluations.facts, evaluationFacts(expected))))
+        .returning({ evaluationId: evaluations.evaluationId });
+      if (updated.length === 0) {
+        throw new RuntimeRecordConflictError(`Evaluation changed before update: ${record.evaluationId}`);
+      }
+    },
+    async getEvaluation(evaluationId) {
+      const [row] = await db.select({
+        evaluationId: evaluations.evaluationId, samplingId: evaluations.samplingId, facts: evaluations.facts,
+      }).from(evaluations).innerJoin(samplings, eq(evaluations.samplingId, samplings.samplingId))
+        .where(and(eq(evaluations.evaluationId, evaluationId),
+          ownerScope.sampling));
+      return row ? evaluationFromRow(row) : null;
+    },
+    async listEvaluations(samplingId) {
+      const rows = await db.select({
+        evaluationId: evaluations.evaluationId, samplingId: evaluations.samplingId, facts: evaluations.facts,
+      }).from(evaluations).innerJoin(samplings, eq(evaluations.samplingId, samplings.samplingId))
+        .where(and(eq(evaluations.samplingId, samplingId),
+          ownerScope.sampling))
+        .orderBy(evaluations.evaluationId);
+      return rows.map(evaluationFromRow);
+    },
+  };
+}
+
+export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRecoveryStore {
+  return {
+    ...createRuntimeStore(db, { kind: "worker" }),
     async listRecoverableRunIds(afterRunId, limit = 100) {
       if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
         throw new Error("Recovery page size must be between 1 and 1000");
@@ -272,67 +355,9 @@ function createRuntimeStore(db: EvalDb, ownerUserId?: string): RuntimeStore & Ru
         .orderBy(runs.runId).limit(limit);
       return rows.map(({ runId }) => runId);
     },
-    async updateSampling(record, expected) {
-      if (record.samplingId !== expected.samplingId
-        || record.projectId !== expected.projectId || record.sampleId !== expected.sampleId) {
-        throw new RuntimeRecordConflictError("Sampling identity changed before update");
-      }
-      const updated = await db.update(samplings).set({ facts: samplingFacts(record) })
-        .where(and(eq(samplings.samplingId, record.samplingId), eq(samplings.projectId, record.projectId),
-          eq(samplings.sampleId, record.sampleId),
-          ownerUserId === undefined ? undefined : eq(samplings.ownerUserId, ownerUserId),
-          eq(samplings.facts, samplingFacts(expected))))
-        .returning({ samplingId: samplings.samplingId });
-      if (updated.length === 0) {
-        throw new RuntimeRecordConflictError(`Sampling changed before update: ${record.samplingId}`);
-      }
-    },
-    async getSampling(samplingId) {
-      const [row] = await db.select().from(samplings).where(and(
-        eq(samplings.samplingId, samplingId),
-        ownerUserId === undefined ? undefined : eq(samplings.ownerUserId, ownerUserId),
-      ));
-      return row ? samplingFromRow(row) : null;
-    },
-    async updateEvaluation(record, expected) {
-      if (record.evaluationId !== expected.evaluationId || record.samplingId !== expected.samplingId) {
-        throw new RuntimeRecordConflictError("Evaluation identity changed before update");
-      }
-      const updated = await db.update(evaluations).set({ facts: evaluationFacts(record) })
-        .where(and(eq(evaluations.evaluationId, record.evaluationId), eq(evaluations.samplingId, record.samplingId),
-          ownerUserId === undefined ? undefined : exists(db.select({ samplingId: samplings.samplingId })
-            .from(samplings).where(and(eq(samplings.samplingId, evaluations.samplingId), eq(samplings.ownerUserId, ownerUserId)))),
-          eq(evaluations.facts, evaluationFacts(expected))))
-        .returning({ evaluationId: evaluations.evaluationId });
-      if (updated.length === 0) {
-        throw new RuntimeRecordConflictError(`Evaluation changed before update: ${record.evaluationId}`);
-      }
-    },
-    async getEvaluation(evaluationId) {
-      const [row] = await db.select({
-        evaluationId: evaluations.evaluationId, samplingId: evaluations.samplingId, facts: evaluations.facts,
-      }).from(evaluations).innerJoin(samplings, eq(evaluations.samplingId, samplings.samplingId))
-        .where(and(eq(evaluations.evaluationId, evaluationId),
-          ownerUserId === undefined ? undefined : eq(samplings.ownerUserId, ownerUserId)));
-      return row ? evaluationFromRow(row) : null;
-    },
-    async listEvaluations(samplingId) {
-      const rows = await db.select({
-        evaluationId: evaluations.evaluationId, samplingId: evaluations.samplingId, facts: evaluations.facts,
-      }).from(evaluations).innerJoin(samplings, eq(evaluations.samplingId, samplings.samplingId))
-        .where(and(eq(evaluations.samplingId, samplingId),
-          ownerUserId === undefined ? undefined : eq(samplings.ownerUserId, ownerUserId)))
-        .orderBy(evaluations.evaluationId);
-      return rows.map(evaluationFromRow);
-    },
   };
 }
 
-export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRecoveryStore {
-  return createRuntimeStore(db);
-}
-
 export function createPostgresRuntimeStore(db: EvalDb, ownerUserId: string): RuntimeStore {
-  const { listRecoverableRunIds: _recovery, ...store } = createRuntimeStore(db, requireOwnerUserId(ownerUserId));
-  return store;
+  return createRuntimeStore(db, { kind: "user", ownerUserId: requireOwnerUserId(ownerUserId) });
 }

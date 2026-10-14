@@ -9,6 +9,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEvalDb, createPostgresCatalog, createPostgresDatasetStore, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, startEvalRunWorker } from "../index.js";
 import { isForeignKeyFailure } from "./client.js";
+import { readRunRecords } from "./runtime.js";
 
 const connection = process.env.DATABASE_URL;
 const subjectAgent = { ownerUserId: "owner", userAgentId: "subject" };
@@ -587,6 +588,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     `));
     const userRuntime = createPostgresRuntimeStore(database.db, "user-A");
     const otherRuntime = createPostgresRuntimeStore(database.db, "user-B");
+    expect("listRecoverableRunIds" in userRuntime).toBe(false);
     expect(await userRuntime.getRun(runA.runId)).toEqual(runA);
     expect(await userRuntime.getRun(runB.runId)).toBeNull();
     expect(await userRuntime.getSampling(samplingB.samplingId)).toBeNull();
@@ -614,11 +616,21 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     });
     await expect(userRuntime.createRunWithSamplings(siblingRun, [siblingSampling], []))
       .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    const independentSiblingRun = makeRun(siblingProject.projectId, siblingSampling, dataset.datasetId);
+    await userRuntime.createRunWithSamplings(independentSiblingRun, [siblingSampling], []);
+    expect(await readRunRecords(database.db, [independentSiblingRun.runId], {
+      kind: "project", ownerUserId: "user-A", projectId: project.projectId,
+    })).toEqual([]);
+    expect(await readRunRecords(database.db, [independentSiblingRun.runId], {
+      kind: "project", ownerUserId: "user-A", projectId: siblingProject.projectId,
+    })).toEqual([independentSiblingRun]);
     await expect(source.read({ projectId: other.projectId })).rejects.toBeInstanceOf(MetricsQueryError);
     const facts = await source.read({ projectId: project.projectId, runIds: [runA.runId] });
     expect(facts.samplings.map((record) => record.samplingId)).toEqual([samplingA.samplingId]);
     expect(facts.runs.map((run) => run.runId)).toEqual([runA.runId]);
     await expect(source.read({ projectId: project.projectId, runIds: [runB.runId] }))
+      .rejects.toBeInstanceOf(MetricsQueryError);
+    await expect(source.read({ projectId: project.projectId, runIds: [independentSiblingRun.runId] }))
       .rejects.toBeInstanceOf(MetricsQueryError);
   });
 
