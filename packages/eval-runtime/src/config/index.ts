@@ -183,21 +183,21 @@ export function createExecutionConfig(
   input: ExecutionConfigInput,
   idFactory: ConfigIdFactory = defaultConfigIdFactory,
 ): ResolvedExecutionConfig {
-  return normalizeExecutionConfig({ configId: idFactory(), ...input });
+  return normalizeExecutionConfig({ ...input, configId: idFactory() });
 }
 
 export function createEvaluationConfig(
   input: EvaluationConfigInput,
   idFactory: ConfigIdFactory = defaultConfigIdFactory,
 ): ResolvedEvaluationConfig {
-  return normalizeEvaluationConfig({ configId: idFactory(), ...input });
+  return normalizeEvaluationConfig({ ...input, configId: idFactory() });
 }
 
 export function createPipelineConfig(
   input: PipelineConfigInput,
   idFactory: ConfigIdFactory = defaultConfigIdFactory,
 ): PipelineConfig {
-  return normalizePipelineConfig({ configId: idFactory(), ...input });
+  return normalizePipelineConfig({ ...input, configId: idFactory() });
 }
 
 export function createConfigResolver(store: ConfigStore): ConfigResolver {

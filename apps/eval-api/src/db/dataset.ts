@@ -14,6 +14,13 @@ import { data, datasetData, datasets } from "./schema.js";
 
 type DatasetReader = Pick<EvalDb, "select">;
 
+export class DatasetInUseError extends Error {
+  constructor(readonly datasetId: string) {
+    super(`Dataset is still referenced: ${datasetId}`);
+    this.name = "DatasetInUseError";
+  }
+}
+
 function datasetFromRow(row: typeof datasets.$inferSelect): Dataset {
   return datasetSchema.parse({
     datasetId: row.datasetId,
@@ -87,7 +94,12 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
       return rows.map(datasetFromRow);
     },
     async deleteDataset(datasetId) {
-      await db.delete(datasets).where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId)));
+      try {
+        await db.delete(datasets).where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId)));
+      } catch (error) {
+        if (isForeignKeyFailure(error)) throw new DatasetInUseError(datasetId);
+        throw error;
+      }
     },
     async createData(record) {
       const entry = dataSchema.parse(record);

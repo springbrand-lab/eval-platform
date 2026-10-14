@@ -7,7 +7,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigStore, createPostgresDatasetStore, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, startEvalRunWorker } from "../index.js";
+import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigStore, createPostgresDatasetStore, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, startEvalRunWorker } from "../index.js";
 import { isForeignKeyFailure } from "./client.js";
 import { readRunRecords } from "./runtime.js";
 
@@ -124,6 +124,15 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     };
   }
 
+  function configStore(ownerUserId: "user-A" | "user-B") {
+    return createPostgresConfigStore(database.db, ownerUserId, {
+      async getAgentConfig(token, id) {
+        if (id === "missing-agent") throw new EvalSpApiError(404, null);
+        return { id, user_id: id === "foreign-agent" ? "user-B" : token, name: id };
+      },
+    }, ownerUserId);
+  }
+
   async function setup() {
     const services = stores();
     const project = await services.catalog.createProject({ name: "my project" });
@@ -139,8 +148,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
   }
 
   it("saves, lists, edits and resolves owner-scoped Execution, Evaluation and Pipeline configs", async () => {
-    const { dataset, sample } = await setup();
-    const store = createPostgresConfigStore(database.db, "user-A");
+    const { datasetService, dataset, sample } = await setup();
+    const store = configStore("user-A");
     const executionInput = {
       datasetId: dataset.datasetId, sampleIds: [sample.sampleId], samplingCount: 1, executionConcurrency: 2,
       harness: { kind: "sp" as const, framework: "sp" as const,
@@ -159,11 +168,17 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await store.listExecutionConfigs()).toEqual([execution]);
     expect(await store.listEvaluationConfigs()).toEqual([evaluation]);
     expect(await store.listPipelineConfigs()).toEqual([pipeline]);
+    await expect(datasetService.deleteDataset(dataset.datasetId)).rejects.toBeInstanceOf(DatasetInUseError);
+    expect(await datasetService.getDataset(dataset.datasetId)).toEqual(dataset);
     const resolver = createConfigResolver(store);
     const original = await resolver.resolvePipelineConfig(pipeline.configId);
     expect(original).toMatchObject({ pipeline, execution, evaluation });
 
-    const edited = await store.updateExecutionConfig(execution.configId, { ...executionInput, samplingCount: 3 });
+    const editedInput = {
+      ...executionInput, configId: "body-controlled", samplingCount: 3,
+    };
+    const edited = await store.updateExecutionConfig(execution.configId, editedInput);
+    expect(edited.configId).toBe(execution.configId);
     expect(await store.getExecutionConfig(execution.configId)).toEqual(edited);
     expect((await resolver.resolvePipelineConfig(pipeline.configId)).execution.samplingCount).toBe(3);
     expect(original.execution.samplingCount).toBe(1);
@@ -179,8 +194,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
   it("rejects foreign config references and hides another user's configs", async () => {
     const { catalog, datasetService, dataset, sample } = await setup();
-    const owned = createPostgresConfigStore(database.db, "user-A");
-    const foreign = createPostgresConfigStore(database.db, "user-B");
+    const owned = configStore("user-A");
+    const foreign = configStore("user-B");
     const foreignService = createDatasetService(createPostgresDatasetStore(database.db, "user-B"));
     const foreignCatalog = createPostgresCatalog(database.db, "user-B", { async listAgents() { return []; } });
     const foreignDataset = await foreignService.createDataset({ name: "foreign" });
@@ -230,6 +245,13 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       evaluationHarness: { ...evaluationInput.evaluationHarness,
         agentConfig: { ownerUserId: "user-B", userAgentId: "evaluator" } },
     })).rejects.toBeInstanceOf(ConfigReferenceError);
+    for (const userAgentId of ["foreign-agent", "missing-agent"]) {
+      await expect(owned.createEvaluationConfig({
+        ...evaluationInput,
+        evaluationHarness: { ...evaluationInput.evaluationHarness,
+          agentConfig: { ownerUserId: "user-A", userAgentId } },
+      })).rejects.toBeInstanceOf(ConfigReferenceError);
+    }
     await expect(foreign.createPipelineConfig({
       executionConfigId: execution.configId, evaluationConfigId: evaluation.configId,
     })).rejects.toBeInstanceOf(ConfigReferenceError);

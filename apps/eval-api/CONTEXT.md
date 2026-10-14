@@ -11,19 +11,20 @@ It does not own Agent execution, SP Chat/DO storage, Dataset semantics or
 evaluation scoring logic.
 
 The API workspace owns PostgreSQL migrations and implementations of the public
-DatasetStore, RuntimeStore and read-only MetricsSource ports. A caller supplies
+DatasetStore, RuntimeStore, ConfigStore and read-only MetricsSource ports. A caller supplies
 the `pg` Pool; these adapters never import SP's private database client. The
 Catalog stores user-owned Projects and Samples that reference the same user's
 Data, with Agent listing supplied separately. User-facing Runtime and Metrics
 adapters require the owner identity verified by Eval SP; only the Worker Store
 scans and resumes Runs across users. The Metrics projection uses one
 repeatable-read, read-only transaction and the Runtime's status projection.
-HTTP routes, authentication, Config persistence and SP Harness provisioning
-are not implemented by the persistence adapters.
+The owner-scoped Config adapter saves Execution, Evaluation and Pipeline configs;
+it verifies Agent Config references through the authenticated Eval SP client.
+HTTP routes and authenticated request composition are a separate control-plane step.
 
 The API app also owns a single-instance Node Run worker. Run admission and
 PostgreSQL notification commit atomically; the worker listens, scans unfinished
 Runs on startup/reconnect and periodically, and calls the Runtime's `resume()`.
-It never runs the Agent locally or stores a second Run status. A production
-process entry point depends on the not-yet-connected SP Harness and Config
-store; at most one worker process may be deployed at any moment.
+It never runs the Agent locally or stores a second Run status. The worker
+process and Eval SP Harness client exist, but the required SP service routes
+still need server-side implementation. At most one worker process may be deployed.

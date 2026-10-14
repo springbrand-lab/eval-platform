@@ -73,6 +73,19 @@ describe("runtime config", () => {
     }, idFactory).configId).toBe("config-3");
   });
 
+  it("keeps server-generated and path config ids when input carries a configId", () => {
+    const clientId = { configId: "client-controlled" };
+    const { configId: _executionId, ...executionInput } = executionConfig;
+    const { configId: _evaluationId, ...evaluationInput } = evaluationConfig;
+    const { configId: _pipelineId, ...pipelineInput } = pipelineConfig;
+    expect(createExecutionConfig({ ...executionInput, ...clientId }, () => "server-execution").configId)
+      .toBe("server-execution");
+    expect(createEvaluationConfig({ ...evaluationInput, ...clientId }, () => "server-evaluation").configId)
+      .toBe("server-evaluation");
+    expect(createPipelineConfig({ ...pipelineInput, ...clientId }, () => "server-pipeline").configId)
+      .toBe("server-pipeline");
+  });
+
   it("resolves a pipeline into validated execution and evaluation config", async () => {
     const resolver = createConfigResolver(makeStore());
 

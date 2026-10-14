@@ -1,3 +1,4 @@
+import type { AgentConfigRef } from "@eval-platform/eval-contracts";
 import type {
   ConfigStore,
   EvaluationConfig,
@@ -11,7 +12,8 @@ import { createEvaluationConfig, createExecutionConfig, createPipelineConfig } f
 import { and, eq, inArray } from "drizzle-orm";
 import { isForeignKeyFailure, type EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
-import { datasetData, evaluationConfigs, executionConfigs, pipelineConfigs, samples } from "./schema.js";
+import { datasetData, datasets, evaluationConfigs, executionConfigs, pipelineConfigs, samples } from "./schema.js";
+import { EvalSpApiError, type EvalSpClient } from "../sp/client.js";
 
 type ConfigKind = "execution" | "evaluation" | "pipeline";
 
@@ -74,16 +76,38 @@ function evaluationSettings(config: EvaluationConfig): typeof evaluationConfigs.
   return settings;
 }
 
-export function createPostgresConfigStore(db: EvalDb, ownerUserId: string): PostgresConfigStore {
+export function createPostgresConfigStore(
+  db: EvalDb,
+  ownerUserId: string,
+  sp: Pick<EvalSpClient, "getAgentConfig">,
+  sessionToken: string,
+): PostgresConfigStore {
   const owner = requireOwnerUserId(ownerUserId);
+  if (typeof sp?.getAgentConfig !== "function") throw new TypeError("Eval SP Agent Config client is required");
+  if (typeof sessionToken !== "string" || sessionToken.length === 0) throw new TypeError("Session token is required");
 
-  function requireAgentOwner(agentOwner: string): void {
-    if (agentOwner !== owner) throw new ConfigReferenceError("Agent Config owner", agentOwner);
+  async function requireAgentOwner(reference: AgentConfigRef): Promise<void> {
+    if (reference.ownerUserId !== owner) throw new ConfigReferenceError("Agent Config", reference.userAgentId);
+    try {
+      const agent = await sp.getAgentConfig(sessionToken, reference.userAgentId);
+      if (agent.id !== reference.userAgentId || agent.user_id !== owner) {
+        throw new ConfigReferenceError("Agent Config", reference.userAgentId);
+      }
+    } catch (error) {
+      if (error instanceof EvalSpApiError && (error.status === 403 || error.status === 404)) {
+        throw new ConfigReferenceError("Agent Config", reference.userAgentId);
+      }
+      throw error;
+    }
   }
 
-  async function requireDatasetSamples(datasetId: string, sampleIds: readonly string[] | undefined): Promise<void> {
+  async function requireDatasetSamples(
+    reader: Pick<EvalDb, "select">,
+    datasetId: string,
+    sampleIds: readonly string[] | undefined,
+  ): Promise<void> {
     if (sampleIds === undefined || sampleIds.length === 0) return;
-    const rows = await db.select({ sampleId: samples.sampleId }).from(samples)
+    const rows = await reader.select({ sampleId: samples.sampleId }).from(samples)
       .innerJoin(datasetData, and(
         eq(datasetData.ownerUserId, samples.ownerUserId), eq(datasetData.dataId, samples.dataId),
       ))
@@ -92,6 +116,18 @@ export function createPostgresConfigStore(db: EvalDb, ownerUserId: string): Post
     const owned = new Set(rows.map((row) => row.sampleId));
     const missing = sampleIds.find((sampleId) => !owned.has(sampleId));
     if (missing !== undefined) throw new ConfigReferenceError("Dataset Sample", missing);
+  }
+
+  async function lockDataset(reader: Pick<EvalDb, "select">, datasetId: string): Promise<void> {
+    const [dataset] = await reader.select({ datasetId: datasets.datasetId }).from(datasets)
+      .where(and(eq(datasets.ownerUserId, owner), eq(datasets.datasetId, datasetId))).for("share");
+    if (!dataset) throw new ConfigReferenceError("Dataset", datasetId);
+  }
+
+  async function prepareExecutionConfig(input: ExecutionConfigInput, configId?: string): Promise<ExecutionConfig> {
+    const config = configId === undefined ? createExecutionConfig(input) : createExecutionConfig(input, () => configId);
+    if (config.harness.kind === "sp") await requireAgentOwner(config.harness.agentConfig);
+    return config;
   }
 
   async function requirePipelineReferences(config: PipelineConfig): Promise<void> {
@@ -107,36 +143,40 @@ export function createPostgresConfigStore(db: EvalDb, ownerUserId: string): Post
 
   return {
     async createExecutionConfig(input) {
-      const config = createExecutionConfig(input);
-      if (config.harness.kind === "sp") requireAgentOwner(config.harness.agentConfig.ownerUserId);
-      await requireDatasetSamples(config.datasetId, config.sampleIds);
-      try {
-        const inserted = await db.insert(executionConfigs).values({
-          configId: config.configId, ownerUserId: owner, datasetId: config.datasetId,
-          settings: executionSettings(config),
-        }).onConflictDoNothing().returning({ configId: executionConfigs.configId });
-        if (inserted.length === 0) throw new ConfigIdentityConflictError("execution", config.configId);
-      } catch (error) {
-        if (isForeignKeyFailure(error)) throw new ConfigReferenceError("Dataset", config.datasetId);
-        throw error;
-      }
-      return config;
+      const config = await prepareExecutionConfig(input);
+      return db.transaction(async (transaction) => {
+        await lockDataset(transaction, config.datasetId);
+        await requireDatasetSamples(transaction, config.datasetId, config.sampleIds);
+        try {
+          const inserted = await transaction.insert(executionConfigs).values({
+            configId: config.configId, ownerUserId: owner, datasetId: config.datasetId,
+            settings: executionSettings(config),
+          }).onConflictDoNothing().returning({ configId: executionConfigs.configId });
+          if (inserted.length === 0) throw new ConfigIdentityConflictError("execution", config.configId);
+        } catch (error) {
+          if (isForeignKeyFailure(error)) throw new ConfigReferenceError("Dataset", config.datasetId);
+          throw error;
+        }
+        return config;
+      });
     },
     async updateExecutionConfig(configId, input) {
-      const config = createExecutionConfig(input, () => configId);
-      if (config.harness.kind === "sp") requireAgentOwner(config.harness.agentConfig.ownerUserId);
-      await requireDatasetSamples(config.datasetId, config.sampleIds);
-      try {
-        const updated = await db.update(executionConfigs).set({
-          datasetId: config.datasetId, settings: executionSettings(config),
-        }).where(and(eq(executionConfigs.ownerUserId, owner), eq(executionConfigs.configId, configId)))
-          .returning({ configId: executionConfigs.configId });
-        if (updated.length === 0) throw new ConfigEntityNotFoundError("execution", configId);
-      } catch (error) {
-        if (isForeignKeyFailure(error)) throw new ConfigReferenceError("Dataset", config.datasetId);
-        throw error;
-      }
-      return config;
+      const config = await prepareExecutionConfig(input, configId);
+      return db.transaction(async (transaction) => {
+        await lockDataset(transaction, config.datasetId);
+        await requireDatasetSamples(transaction, config.datasetId, config.sampleIds);
+        try {
+          const updated = await transaction.update(executionConfigs).set({
+            datasetId: config.datasetId, settings: executionSettings(config),
+          }).where(and(eq(executionConfigs.ownerUserId, owner), eq(executionConfigs.configId, configId)))
+            .returning({ configId: executionConfigs.configId });
+          if (updated.length === 0) throw new ConfigEntityNotFoundError("execution", configId);
+        } catch (error) {
+          if (isForeignKeyFailure(error)) throw new ConfigReferenceError("Dataset", config.datasetId);
+          throw error;
+        }
+        return config;
+      });
     },
     async getExecutionConfig(configId) {
       const [row] = await db.select().from(executionConfigs)
@@ -150,7 +190,7 @@ export function createPostgresConfigStore(db: EvalDb, ownerUserId: string): Post
     },
     async createEvaluationConfig(input) {
       const config = createEvaluationConfig(input);
-      requireAgentOwner(config.evaluationHarness.agentConfig.ownerUserId);
+      await requireAgentOwner(config.evaluationHarness.agentConfig);
       const inserted = await db.insert(evaluationConfigs).values({
         configId: config.configId, ownerUserId: owner, settings: evaluationSettings(config),
       }).onConflictDoNothing().returning({ configId: evaluationConfigs.configId });
@@ -159,7 +199,7 @@ export function createPostgresConfigStore(db: EvalDb, ownerUserId: string): Post
     },
     async updateEvaluationConfig(configId, input) {
       const config = createEvaluationConfig(input, () => configId);
-      requireAgentOwner(config.evaluationHarness.agentConfig.ownerUserId);
+      await requireAgentOwner(config.evaluationHarness.agentConfig);
       const updated = await db.update(evaluationConfigs).set({ settings: evaluationSettings(config) })
         .where(and(eq(evaluationConfigs.ownerUserId, owner), eq(evaluationConfigs.configId, configId)))
         .returning({ configId: evaluationConfigs.configId });

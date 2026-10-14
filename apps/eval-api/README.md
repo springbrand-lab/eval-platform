@@ -12,7 +12,7 @@ Catalog 提供 Project 下执行成功 Sampling 的分页查询及全选 ID 查�
 
 `src/db/client.ts`、`schema.ts` 定义与 SP 一致的 Drizzle/`pg` 注入边界和表结构；`src/db/dataset.ts` 将 Dataset/Data 及事务导入限定到已认证用户，`src/db/catalog.ts` 将 Project/Sample 查询限定到同一用户。Sampling、Run 和 Run/Sampling 关联携带用户归属，PostgreSQL 组合外键保证 Project、Sample、Sampling 和 Run 同用户；每个 Run 必须有幂等键及请求事实指纹，键在 Project 内唯一。`createPostgresRuntimeStore(db, ownerUserId)` 和 `createPostgresMetricsSource(db, ownerUserId)` 供用户请求使用，`ownerUserId` 必须来自 Eval SP 会话校验；查询和条件写入直接按用户过滤，Metrics 的 Run、Sampling 和 Evaluation 读取也在 SQL 中限定 Project。仅 Worker 使用 `createPostgresWorkerRuntimeStore(db)` 跨用户恢复 Run，HTTP 路由不能注入该 Store。`src/db/runtime.ts` 原子写入 Run/Sampling/Evaluation 和有效配置，并拒绝跨用户 Dataset/Sample；`src/db/metrics.ts` 在单个只读、一致性事务中投影四层展示所需的原始事实。Run 当前状态复用 Runtime 公共投影，不在数据库存第二份。初始 Session/素材只存外部引用，Agent 工作区和完整轨迹只保留 Runtime 原始引用；数据迁移不触碰 SP DO。
 
-`createPostgresConfigStore(db, ownerUserId)` 实现 Runtime 只读 `ConfigStore`，并为 API 控制面提供 Execution、Evaluation、Pipeline 配置的创建、编辑、列表和单条查询。配置由代码生成 ID；Execution 配置关联同一用户的 Dataset，指定的 Sample 必须当前属于该 Dataset；Pipeline 只能引用该用户的两个基础配置。保存时校验配置和 Agent Config 引用的用户归属，数据库外键保证 Dataset/Pipeline 引用；不保存 SP Agent Config 正文。修改配置只影响未来新 Run，已启动 Run 继续使用自己的有效配置快照。
+`createPostgresConfigStore(db, ownerUserId, sp, sessionToken)` 实现 Runtime 只读 `ConfigStore`，并为 API 控制面提供 Execution、Evaluation、Pipeline 配置的创建、编辑、列表和单条查询。`ownerUserId` 必须来自已校验的 Eval SP 会话；配置 ID 由服务端生成，编辑时以路径 ID 为准。Execution 配置关联同一用户的 Dataset，指定的 Sample 必须在保存事务中仍属于该 Dataset；Pipeline 只能引用该用户的两个基础配置。保存时用当前会话向 Eval SP 查询 Agent Config，核对真实归属；数据库外键保证 Dataset/Pipeline 引用。被执行配置引用的 Dataset 不可删除，删除请求得到 `DatasetInUseError`。不保存 SP Agent Config 正文。修改配置只影响未来新 Run，已启动 Run 继续使用自己的有效配置快照。
 
 `src/worker.ts` 提供 `startEvalRunWorker({ runtime, store, notifications })` 和 `createPostgresRunNotifications(DATABASE_URL)`。新增 Run 与 `pg_notify` 在同一事务内提交；Worker 先监听、再分页扫描未完成 Run，连接恢复时及定时扫描补漏，进程内同一 Run 不并行处理。通知不是持久任务；Run/Attempt 事实仍由 PostgreSQL 和 SP 公开操作持久化。Worker 进程可同时处理多个 Run，各 Run 内仍按执行和评估配置分别控制 Agent 并发。
 
@@ -22,4 +22,4 @@ RuntimeStore 的 Sampling/Evaluation 写入必须携带预期旧事实。Postgre
 
 部署时 Worker 必须是**同一时刻只有一个实例的常驻 Node 进程**；升级先停止旧实例，再启动新实例，新实例会自动接手未完成 Run。不能把它启动在每个 HTTP 请求里，也不能只靠进程内 `Set` 防止跨进程竞争。宿主负责注入真实 SP Harness、Sample 读取、RuntimeStore 和数据库连接；Catalog 与 ConfigResolver 由 API 控制面注入。停止时先中止启动扫描的继续派发，再等待 Worker 的 `close()` 完成已启动的 Run、关闭连接池并启动新实例；尚未接手的 Run 留待下次扫描。运行中的 Agent 不因此标记失败。
 
-测试设置 `DATABASE_URL` 后使用独立的临时 PostgreSQL 数据库执行集成测试；不提供时跳过需数据库的测试。唯一的初始迁移直接创建按用户隔离的 Dataset/Data/Sample 结构。不包含 Node HTTP Server、Config 存储或生产路由；它们由 API 控制面提供。SP 服务端尚未提供上面的 Harness 路由，因此 Worker 在这些路由落地前不能执行真实 Agent。Dataset 不隶属于某个 Project，但属于一个 Eval SP 用户；Catalog 的 Agent 列表由 API 控制面注入，不在 Worker 里维护第二份 Agent 注册表。
+测试设置 `DATABASE_URL` 后使用独立的临时 PostgreSQL 数据库执行集成测试；不提供时跳过需数据库的测试。唯一的初始迁移直接创建按用户隔离的 Dataset/Data/Sample 和配置表。Node HTTP Server 与生产路由由另一阶段的 API 控制面提供。SP 服务端尚未提供上面的 Harness 路由，因此 Worker 在这些路由落地前不能执行真实 Agent。Dataset 不隶属于某个 Project，但属于一个 Eval SP 用户；Catalog 的 Agent 列表由 API 控制面注入，不在 Worker 里维护第二份 Agent 注册表。
