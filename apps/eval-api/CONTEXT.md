@@ -26,5 +26,9 @@ The API app also owns a single-instance Node Run worker. Run admission and
 PostgreSQL notification commit atomically; the worker listens, scans unfinished
 Runs on startup/reconnect and periodically, and calls the Runtime's `resume()`.
 It never runs the Agent locally or stores a second Run status. The worker
-process and Eval SP Harness client exist, but the required SP service routes
-still need server-side implementation. At most one worker process may be deployed.
+process and Eval SP Harness client exist. The independent SP branch implements
+their service routes; deployment integration remains to be verified. A shared
+`EVAL_BUNDLE_DIR` stores each user's uploaded material and optional Session
+content. Uploads and Data association use separate authenticated API routes;
+the control-plane server mounts their handlers. At most one worker process may
+be deployed.

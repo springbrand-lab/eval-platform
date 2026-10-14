@@ -17,7 +17,7 @@
 
 - `userPrompt`：必填的当前用户任务，必须是非空白字符串，保留原始文本，不从其他字段推导。
 - `evalPrompt`：可选的本条 Data 的评估任务提示词；提供时必须是非空白字符串并原样保存。只执行不要求此字段；启动 Pipeline 或独立评估时每条选中 Data 都必须提供，不能退回使用 Subject 的 `userPrompt`。
-- `initialSession`：可选的初始 Session 引用，必须包含外部给定的 `bundleId` 和 `sessionId`；正文由 SP 的既有 Bundle/Session 能力独立保存，可以包含完整的原生会话、工具调用和恢复信息。
+- `initialSession`：可选的初始 Session 引用，必须包含外部给定的 `bundleId` 和 `sessionId`；上下文由 Eval 的独立 Bundle 上传接口保存为 JSON/JSONL，可为空，SP 仅在提供时导入目标 Chat。
 - `initialMaterials`：可选的初始素材集合引用，必须包含外部给定的 `bundleId` 和 `materialId`，定位 Bundle 内的具体素材资源。
 - 其他业务字段：可以直接放在 Data 上，例如 `requirements`、`expectedOutput`、`tags` 或 `json`，只要求值可无损表示为 JSON。创建、修改、持久化、导入导出和运行时输入准备都保留这些字段，不丢弃、不改名，也不强制放进某个额外容器。
 
@@ -37,7 +37,7 @@
 
 `sessionId` 标识已保存的初始化 Session 资源，不是此次运行的 Chat/Submission ID。Dataset 只校验和保存引用，不解析原生 Session 或维护消息格式。`userPrompt` 表示当前新任务；初始 Session 表示已有历史，不作为新任务再次发送。
 
-启动时 Harness 先把初始素材与 Session 副本物化到目标 DO 的存储，再由选定框架加载 Session 并重建 Context，完成后才能提交新任务。每个 Sampling 独立恢复自己的副本，不能直接操作共享源 Session。本文假设 SP 已具备完整的公开初始化能力，不在 eval 实现框架恢复或 SP 内核。
+启动时 Harness 按每条 Data 的引用从 Eval Bundle 目录读取素材，并通过 SP 公开接口写入目标 Chat 的 Workspace。存在初始 Session 上下文时，通过同一初始化调用导入 Chat；没有正文时只保留引用。准备完成后才能提交新任务。每个 Sampling 独立物化，不能直接操作共享源 Session；eval 不实现框架恢复或 SP 内核。
 
 ## 管理入口
 

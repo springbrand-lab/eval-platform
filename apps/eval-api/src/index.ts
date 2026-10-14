@@ -18,6 +18,11 @@ export type { EvalRunWorker, EvalRunWorkerOptions, RunNotifications } from "./wo
 export { createEvalSpClient, EvalSpApiError } from "./sp/client.js";
 export type { EvalSpAgentConfig, EvalSpClient, EvalSpUser } from "./sp/client.js";
 export { createSpHarness, SpHarnessError } from "./sp/harness.js";
+export { openBundleDirectory } from "./sp/bundle-directory.js";
+export type { BundleDirectory } from "./sp/bundle-directory.js";
+export { createInitialResourceApi } from "./initial-resources.js";
+export { createInitialResourceHttpHandler } from "./initial-resources.http.js";
+export type { DataInitialResourcePatch } from "./initial-resources.js";
 export type { SpHarnessOptions } from "./sp/harness.js";
 export { startSpEvalRunWorkerProcess } from "./run-worker-process.js";
 export type { SpEvalRunWorkerProcessOptions } from "./run-worker-process.js";

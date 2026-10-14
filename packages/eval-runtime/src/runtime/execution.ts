@@ -48,6 +48,7 @@ export async function executeSampling(
 
   const collectEvidence = (chatId: string): Promise<ExecutionOutput> => {
     const handle: AgentHandle = {
+      ownerUserId: subjectHarness.agentConfig.ownerUserId,
       chatId,
       samplingId: current.samplingId,
       role: "subject",

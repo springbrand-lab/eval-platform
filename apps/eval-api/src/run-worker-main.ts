@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { startWorkerWithSignals } from "./run-worker-lifecycle.js";
 import { startSpEvalRunWorkerProcess } from "./run-worker-process.js";
+import { openBundleDirectory } from "./sp/bundle-directory.js";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -22,6 +23,7 @@ async function main(): Promise<void> {
   const scanIntervalMs = positiveIntEnv("EVAL_RUN_WORKER_SCAN_MS");
   const origin = requiredEnv("EVAL_SP_ORIGIN");
   const serviceToken = requiredEnv("EVAL_SP_SERVICE_TOKEN");
+  const bundleResolvers = await openBundleDirectory(requiredEnv("EVAL_BUNDLE_DIR"));
   const pool = new Pool({ connectionString: databaseUrl });
   await startWorkerWithSignals({
     signals: process,
@@ -29,7 +31,10 @@ async function main(): Promise<void> {
       pool,
       databaseUrl,
       signal,
-      sp: { origin, serviceToken },
+      sp: { origin, serviceToken,
+        resolveInitialMaterials: bundleResolvers.resolveInitialMaterials,
+        resolveInitialSession: bundleResolvers.resolveInitialSession,
+      },
       ...(maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns }),
       ...(scanIntervalMs === undefined ? {} : { scanIntervalMs }),
     }),

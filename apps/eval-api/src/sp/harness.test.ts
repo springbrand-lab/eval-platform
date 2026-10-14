@@ -4,12 +4,14 @@ import WebSocket, { WebSocketServer } from "ws";
 import { createSpHarness, SpHarnessError } from "./harness.js";
 
 const subject: AgentHandle = {
+  ownerUserId: "user-1",
   chatId: "subject-chat",
   samplingId: "sampling-1",
   role: "subject",
   framework: "sp",
 };
 const evaluator: AgentHandle = {
+  ownerUserId: "user-1",
   chatId: "evaluator-chat",
   samplingId: "sampling-1",
   role: "evaluator",
@@ -36,10 +38,11 @@ const resources = {
 };
 
 function ensureInput(handle: AgentHandle) {
+  const { ownerUserId, ...creation } = handle;
   return {
-    ...handle,
+    ...creation,
     projectId: "project-1",
-    agentConfig: { ownerUserId: "user-1", userAgentId: "agent-config-1" },
+    agentConfig: { ownerUserId, userAgentId: "agent-config-1" },
   };
 }
 
@@ -90,7 +93,10 @@ describe("Eval SP Harness", () => {
       if (method === "POST" && url.pathname.endsWith("/trajectory")) return new Response(null, { status: 204 });
       throw new Error(`Unexpected ${method} ${url}`);
     });
-    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "service-secret", fetch: fetcher });
+    const resolveInitialMaterials = vi.fn(async () => [
+      { path: "/brief.txt", mediaType: "text/plain", contentBase64: "SGVsbG8=" },
+    ]);
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "service-secret", fetch: fetcher, resolveInitialMaterials });
     expect(await harness.ensureAgent(ensureInput(subject))).toEqual(subject);
     expect(await harness.materializeInitialData({
       handle: subject,
@@ -113,12 +119,18 @@ describe("Eval SP Harness", () => {
 
     expect(fetcher).toHaveBeenCalledTimes(7);
     const requests = fetcher.mock.calls.map(([input, init]) => ({ url: new URL(String(input)), init }));
+    expect(requests.slice(0, 6).every(({ url }) =>
+      url.pathname.startsWith("/internal/v1/eval-harness/users/user-1/chats/subject-chat")))
+      .toBe(true);
     expect(requests.every(({ init }) => new Headers(init?.headers).get("X-Eval-Service-Token") === "service-secret")).toBe(true);
     expect(JSON.parse(String(requests[0]!.init?.body))).toMatchObject(ensureInput(subject));
     expect(JSON.parse(String(requests[1]!.init?.body))).toMatchObject({
       idempotencyKey: "initial-data:subject-chat",
       data: { initialMaterials: { bundleId: "bundle-1", materialId: "material-1" } },
+      initialMaterials: { bundleId: "bundle-1", materialId: "material-1",
+        files: [{ path: "/brief.txt", mediaType: "text/plain", contentBase64: "SGVsbG8=" }] },
     });
+    expect(resolveInitialMaterials).toHaveBeenCalledWith("user-1", { bundleId: "bundle-1", materialId: "material-1" });
     expect(JSON.parse(String(requests[2]!.init?.body))).toMatchObject({ unattended: true, idempotencyKey: "execution:sampling-1" });
     expect(requests[5]!.url.searchParams.get("submissionId")).toBe("submission-1");
   });
@@ -140,12 +152,51 @@ describe("Eval SP Harness", () => {
     expect(outputUrl.searchParams.get("evaluationId")).toBe("evaluation-1");
   });
 
+  it("does not submit a material reference without its per-Sample files", async () => {
+    const fetcher = vi.fn();
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher });
+    await expect(harness.materializeInitialData({
+      handle: subject,
+      idempotencyKey: "initial-data:subject-chat",
+      data: { userPrompt: "Build a project", initialMaterials: { bundleId: "bundle-1", materialId: "material-1" } },
+    })).rejects.toMatchObject({ retryable: false });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("includes canonical Session content when a resolver supplies it", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({
+      bundleId: "sessions", manifestHash: "hash", target: "workspace", rootPath: "/",
+    }));
+    const resolveInitialSession = vi.fn(async () => ({
+      format: "jsonl" as const,
+      content: '{"id":"m1","message":{"role":"user","content":"Hi"},"createdAt":1}',
+    }));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
+      fetch: fetcher, resolveInitialSession });
+    await harness.materializeInitialData({
+      handle: subject,
+      idempotencyKey: "init-session",
+      data: { userPrompt: "Continue", initialSession: { bundleId: "sessions", sessionId: "seed" } },
+    });
+    expect(resolveInitialSession).toHaveBeenCalledWith("user-1", { bundleId: "sessions", sessionId: "seed" });
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body))).toMatchObject({
+      initialSession: { bundleId: "sessions", sessionId: "seed",
+        context: { format: "jsonl", content: expect.any(String) } },
+    });
+  });
+
   it("maps immutable Chat conflicts and rejects unsupported frameworks before contacting SP", async () => {
     const fetcher = vi.fn(async () => new Response(null, { status: 409 }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher });
     await expect(harness.ensureAgent(ensureInput(subject))).rejects.toBeInstanceOf(AgentIdentityConflictError);
     await expect(harness.ensureAgent({ ...ensureInput(subject), framework: "codex" })).rejects.toMatchObject({ retryable: false });
     expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a Chat handle returned for another Inbox owner", async () => {
+    const fetcher = vi.fn(async () => Response.json({ ...subject, ownerUserId: "user-2" }));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher });
+    await expect(harness.ensureAgent(ensureInput(subject))).rejects.toMatchObject({ retryable: false });
   });
 
   it("waits for the target Submission on a WebSocket and ignores another Submission", async () => {
@@ -161,7 +212,7 @@ describe("Eval SP Harness", () => {
     await expect(waiting).resolves.toMatchObject({ submissionId: "submission-1", status: "completed" });
     expect(socket.closed).toBe(true);
     expect(fetcher).toHaveBeenCalledOnce();
-    expect(openWebSocket.mock.calls[0]![0]).toBe("wss://eval-sp.test/internal/v1/eval-harness/chats/subject-chat/submissions/submission-1/events");
+    expect(openWebSocket.mock.calls[0]![0]).toBe("wss://eval-sp.test/internal/v1/eval-harness/users/user-1/chats/subject-chat/submissions/submission-1/events");
     expect(openWebSocket.mock.calls[0]![1]).toEqual({ "X-Eval-Service-Token": "secret" });
   });
 

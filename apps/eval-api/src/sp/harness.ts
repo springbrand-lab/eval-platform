@@ -4,6 +4,7 @@ import type {
   ExecutionOutput,
   MaterializedDataBinding,
 } from "@eval-platform/eval-contracts";
+import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import {
   AgentIdentityConflictError,
   type AgentFailureKind,
@@ -32,6 +33,14 @@ export interface SpHarnessOptions {
   readonly serviceToken: string;
   readonly fetch?: Fetch;
   readonly openWebSocket?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
+  readonly resolveInitialMaterials?: (
+    ownerUserId: string,
+    reference: InitialMaterialsRef,
+  ) => Promise<readonly { path: string; mediaType: string; contentBase64: string }[]>;
+  readonly resolveInitialSession?: (
+    ownerUserId: string,
+    reference: InitialSessionRef,
+  ) => Promise<{ format: "json" | "jsonl"; content: string } | undefined>;
 }
 
 export class SpHarnessError extends Error {
@@ -94,12 +103,15 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     }
   }
 
-  const chatPath = (chatId: string): string => `${BASE_PATH}/chats/${encodeURIComponent(requiredId(chatId, "Chat ID"))}`;
-  const operationPath = (chatId: string, key: string): string =>
-    `${chatPath(chatId)}/submissions/by-key/${encodeURIComponent(requiredId(key, "operation key"))}`;
+  const chatPath = (ownerUserId: string, chatId: string): string =>
+    `${BASE_PATH}/users/${encodeURIComponent(requiredId(ownerUserId, "owner user ID"))}` +
+    `/chats/${encodeURIComponent(requiredId(chatId, "Chat ID"))}`;
+  const handlePath = (handle: AgentHandle): string => chatPath(handle.ownerUserId, handle.chatId);
+  const operationPath = (handle: AgentHandle, key: string): string =>
+    `${handlePath(handle)}/submissions/by-key/${encodeURIComponent(requiredId(key, "operation key"))}`;
 
   async function inspect(handle: AgentHandle, idempotencyKey: string): Promise<AgentSubmission | null> {
-    const value = await request("GET", operationPath(handle.chatId, idempotencyKey));
+    const value = await request("GET", operationPath(handle, idempotencyKey));
     return value === null ? null : submission(value);
   }
 
@@ -110,7 +122,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     readonly runtime?: HarnessRuntimeOptions;
   }): Promise<AgentSubmission> {
     requireSp(input.handle);
-    return submission(await request("POST", `${chatPath(input.handle.chatId)}/submissions`, {
+    return submission(await request("POST", `${handlePath(input.handle)}/submissions`, {
       idempotencyKey: input.idempotencyKey,
       prompt: input.prompt,
       ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
@@ -123,7 +135,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     submissionId: string,
     timeoutMs?: number,
   ): Promise<AgentSubmission> {
-    const url = new URL(`${chatPath(handle.chatId)}/submissions/${encodeURIComponent(submissionId)}/events`, origin);
+    const url = new URL(`${handlePath(handle)}/submissions/${encodeURIComponent(submissionId)}/events`, origin);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     return new Promise((resolve, reject) => {
       let socket: WebSocket;
@@ -212,7 +224,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       }
       let value: unknown;
       try {
-        value = await request("PUT", chatPath(input.chatId), input);
+        value = await request("PUT", chatPath(input.agentConfig.ownerUserId, input.chatId), input);
       } catch (error) {
         if (error instanceof SpHarnessError && error.status === 409) {
           throw new AgentIdentityConflictError(input.chatId);
@@ -223,10 +235,21 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     },
     async materializeInitialData(input) {
       requireSp(input.handle);
-      return dataBinding(await request("POST", `${chatPath(input.handle.chatId)}/initialization`, {
+      const session = input.data.initialSession;
+      const materials = input.data.initialMaterials;
+      if (materials && !options.resolveInitialMaterials) {
+        throw new SpHarnessError("Initial material bundle resolver is required for this Sample", false);
+      }
+      const [files, context] = await Promise.all([
+        materials ? options.resolveInitialMaterials!(input.handle.ownerUserId, materials) : undefined,
+        session && options.resolveInitialSession
+          ? options.resolveInitialSession(input.handle.ownerUserId, session) : undefined,
+      ]);
+      return dataBinding(await request("POST", `${handlePath(input.handle)}/initialization`, {
         idempotencyKey: input.idempotencyKey,
         data: input.data,
-        ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
+        ...(session ? { initialSession: { ...session, ...(context ? { context } : {}) } } : {}),
+        ...(materials ? { initialMaterials: { ...materials, files } } : {}),
       }));
     },
     submitAgent: submit,
@@ -279,7 +302,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       requireSp(handle);
       if (handle.role !== "subject") throw new SpHarnessError("Expected Subject Chat", false);
       const query = new URLSearchParams({ role: handle.role, samplingId: handle.samplingId });
-      return executionOutput(await request("GET", `${chatPath(handle.chatId)}/output?${query}`), handle.samplingId);
+      return executionOutput(await request("GET", `${handlePath(handle)}/output?${query}`), handle.samplingId);
     },
     async collectEvaluation({ handle }) {
       requireSp(handle);
@@ -291,14 +314,14 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         samplingId: handle.samplingId,
         evaluationId: handle.evaluationWorkspace.evaluationId,
       });
-      return evaluationOutput(await request("GET", `${chatPath(handle.chatId)}/output?${query}`));
+      return evaluationOutput(await request("GET", `${handlePath(handle)}/output?${query}`));
     },
     async collectAgentResources(input) {
       requireSp(input.handle);
       const query = new URLSearchParams();
       if (input.submissionId !== undefined) query.set("submissionId", input.submissionId);
       const suffix = query.size > 0 ? `?${query}` : "";
-      return resourceSnapshot(await request("GET", `${chatPath(input.handle.chatId)}/resources/by-key/${encodeURIComponent(requiredId(input.idempotencyKey, "operation key"))}${suffix}`));
+      return resourceSnapshot(await request("GET", `${handlePath(input.handle)}/resources/by-key/${encodeURIComponent(requiredId(input.idempotencyKey, "operation key"))}${suffix}`));
     },
     async materializeSubjectTrajectory(input) {
       const { userId, chatId } = input.subjectWorkspace;
@@ -356,6 +379,7 @@ function agentHandle(value: unknown, input: EnsureAgentInput): AgentHandle {
   const workspace = evaluationWorkspace(result.evaluationWorkspace);
   if (result.chatId !== input.chatId || result.role !== input.role
     || result.framework !== input.framework || result.samplingId !== input.samplingId
+    || result.ownerUserId !== input.agentConfig.ownerUserId
     || !sameWorkspace(workspace, input.evaluationWorkspace)) {
     throw new SpHarnessError("Eval SP returned an Agent handle with different creation facts", false);
   }

@@ -373,7 +373,8 @@ function makeHarness(): Harness {
     return makeSubmission("completed", submissionId);
   };
   return {
-    ensureAgent: vi.fn(async ({ role, framework, samplingId, chatId, evaluationWorkspace }): Promise<AgentHandle> => ({
+    ensureAgent: vi.fn(async ({ role, framework, samplingId, chatId, evaluationWorkspace, agentConfig }): Promise<AgentHandle> => ({
+      ownerUserId: agentConfig.ownerUserId,
       role,
       framework,
       samplingId,
@@ -1063,6 +1064,7 @@ describe("eval runtime orchestration", () => {
     const harness = makeHarness();
     vi.mocked(harness.ensureAgent).mockImplementation(async (input) => ({
       role: input.role,
+      ownerUserId: input.agentConfig.ownerUserId,
       framework: "sp",
       samplingId: input.samplingId,
       chatId: input.chatId,
@@ -1083,10 +1085,30 @@ describe("eval runtime orchestration", () => {
     expect(harness.submitAgent).not.toHaveBeenCalled();
   });
 
+  it("rejects an Agent handle belonging to another user before initializing it", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.ensureAgent).mockImplementation(async (input) => ({
+      role: input.role,
+      ownerUserId: "another-user",
+      framework: input.framework,
+      samplingId: input.samplingId,
+      chatId: input.chatId,
+    }));
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog(), harness, store: makeStore(), sleep: async () => undefined,
+      createRetryController: makeRetryControllerFactory({ creation: 1 }),
+    });
+    const run = await runtime.start(startRequest("wrong-chat-owner"));
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
+    expect(harness.materializeInitialData).not.toHaveBeenCalled();
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+  });
+
   it("rejects an evaluator Chat that did not bind the Subject Workspace", async () => {
     const harness = makeHarness();
     vi.mocked(harness.ensureAgent).mockImplementation(async (input) => ({
       role: input.role,
+      ownerUserId: input.agentConfig.ownerUserId,
       framework: input.framework,
       samplingId: input.samplingId,
       chatId: input.chatId,
@@ -3490,7 +3512,7 @@ describe("Run recovery from persisted facts", () => {
     const run = await admitted.start(startRequest("failed-evidence-crash-gap"));
     const samplingId = run.samplingIds[0]!;
     const chatId = "subject-after-crash";
-    const handle: AgentHandle = { chatId, samplingId, role: "subject", framework: "sp" };
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, chatId, samplingId, role: "subject", framework: "sp" };
     const idempotencyKey = `execution:${samplingId}`;
     const original = (await store.getSampling(samplingId))!;
     await store.updateSampling({
@@ -3651,7 +3673,7 @@ describe("Run recovery from persisted facts", () => {
     const chatId = "subject-chat";
     const submissionId = "submission-1";
     const idempotencyKey = "execution:" + samplingId;
-    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, chatId };
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, role: "subject", framework: "sp", samplingId, chatId };
     const snapshot = {
       ...makeResources({ handle, idempotencyKey }),
       finalized: false,
@@ -3699,7 +3721,7 @@ describe("Run recovery from persisted facts", () => {
     const chatId = "evaluator-chat";
     const submissionId = "submission-1";
     const idempotencyKey = "evaluation:" + samplingId;
-    const handle: AgentHandle = { role: "evaluator", framework: "sp", samplingId, chatId };
+    const handle: AgentHandle = { ownerUserId: EVALUATOR.ownerUserId, role: "evaluator", framework: "sp", samplingId, chatId };
     const snapshot = {
       ...makeResources({ handle, idempotencyKey }),
       finalized: false,
@@ -3738,7 +3760,7 @@ describe("Run recovery from persisted facts", () => {
     const chatId = "subject-chat";
     const submissionId = "submission-1";
     const idempotencyKey = "execution:" + samplingId;
-    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, chatId };
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, role: "subject", framework: "sp", samplingId, chatId };
     const snapshot = makeResources({ handle, idempotencyKey });
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
@@ -3850,7 +3872,7 @@ describe("Run recovery from persisted facts", () => {
     const chatId = "subject-chat";
     const submissionId = "submission-1";
     const idempotencyKey = `execution:${samplingId}`;
-    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, chatId };
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, role: "subject", framework: "sp", samplingId, chatId };
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
       subjectChatId: chatId,
@@ -3913,7 +3935,7 @@ describe("Run recovery from persisted facts", () => {
     const chatId = "subject-chat";
     const submissionId = "submission-1";
     const idempotencyKey = `execution:${samplingId}`;
-    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, chatId };
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, role: "subject", framework: "sp", samplingId, chatId };
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
       subjectChatId: chatId,
@@ -3954,7 +3976,7 @@ describe("Run recovery from persisted facts", () => {
     const chatId = "subject-chat";
     const submissionId = "submission-1";
     const idempotencyKey = `execution:${samplingId}`;
-    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, chatId };
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, role: "subject", framework: "sp", samplingId, chatId };
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
       subjectChatId: chatId,
@@ -3995,7 +4017,7 @@ describe("Run recovery from persisted facts", () => {
     const samplingId = run.samplingIds[0]!;
     const chatId = "subject-chat";
     const submissionId = "submission-1";
-    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, chatId };
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, role: "subject", framework: "sp", samplingId, chatId };
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
       subjectChatId: chatId,

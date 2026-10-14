@@ -33,6 +33,8 @@ export interface EvaluationWorkspaceBinding {
 export interface AgentHandle {
   readonly role: AgentRole;
   readonly framework: AgentFramework;
+  /** Owner of the Inbox that routes this Chat and its service WebSocket. */
+  readonly ownerUserId: string;
   readonly chatId: string;
   readonly samplingId: string;
   readonly evaluationWorkspace?: EvaluationWorkspaceBinding;

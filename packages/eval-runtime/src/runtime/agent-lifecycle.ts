@@ -446,6 +446,7 @@ async function ensureAgentWithRetry<TAttempt extends AgentAttemptRecord, TOutput
       const handle = await dependencies.harness.ensureAgent(input);
       if (
         handle.chatId !== input.chatId
+        || handle.ownerUserId !== input.agentConfig.ownerUserId
         || handle.role !== input.role
         || handle.framework !== input.framework
         || handle.samplingId !== input.samplingId
