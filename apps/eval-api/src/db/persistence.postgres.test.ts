@@ -9,6 +9,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, startEvalRunWorker } from "../index.js";
 import { isForeignKeyFailure } from "./client.js";
+import { createPostgresProjectRunReader } from "./run-view.js";
 import { readRunRecords } from "./runtime.js";
 
 const connection = process.env.DATABASE_URL;
@@ -667,6 +668,36 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect((await runtime.listEvaluations(sampling.samplingId))).toHaveLength(1);
     expect((await runtime.listEvaluations(secondSampling.samplingId))).toHaveLength(1);
   });
+
+  it("admits and reads an all-selected Evaluation across SQL batches", async () => {
+    const { project, dataset, sample, runtime } = await setup();
+    const records = Array.from({ length: 1_001 }, (_, index) => (
+      makeSampling(project.projectId, sample.sampleId, `batch-sampling-${index}`)
+    ));
+    const executionRun = makeRun(project.projectId, records[0]!, dataset.datasetId, {
+      samplingIds: records.map((record) => record.samplingId),
+    });
+    await runtime.createRunWithSamplings(executionRun, records, []);
+    await database.db.execute(sql`UPDATE eval_samplings
+      SET facts = jsonb_set(facts, '{execution,status}', '"succeeded"'::jsonb)
+      WHERE project_id = ${project.projectId}`);
+    const successful = records.map((record) => ({ ...record, execution: { status: "succeeded" as const } }));
+    const judges = successful.map((record) => makeEvaluation(record.samplingId));
+    const evaluationRun = makeRun(project.projectId, successful[0]!, dataset.datasetId, {
+      samplingIds: successful.map((record) => record.samplingId),
+      phases: ["evaluation"], config: evaluationConfig,
+      evaluationIds: judges.map((judge) => judge.evaluationId),
+    });
+    await runtime.createRunWithSamplings(evaluationRun, successful, judges);
+    const view = await createPostgresProjectRunReader(database.db, "user-A")(
+      project.projectId, evaluationRun.runId,
+    );
+    expect(view?.run.samplingIds).toEqual(evaluationRun.samplingIds);
+    expect(view?.run.evaluationIds).toEqual(evaluationRun.evaluationIds);
+    expect(view?.evaluations).toHaveLength(judges.length);
+    expect(view?.evaluations[0]?.samplingId).toBe(successful[0]!.samplingId);
+    expect(view?.evaluations.at(-1)?.samplingId).toBe(successful.at(-1)!.samplingId);
+  }, 30_000);
 
   it("admits one independent EvaluationRecord for concurrent requests with the same key", async () => {
     const { runtime, project, dataset, sample } = await setup();

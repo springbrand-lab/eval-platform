@@ -1,6 +1,6 @@
 import type { EvalRunAdmission } from "@eval-platform/eval-runtime";
 import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
-import type { PostgresCatalog } from "./db/catalog.js";
+import type { PostgresProjectCatalog } from "./db/catalog.js";
 import type { ProjectRunView } from "./db/run-view.js";
 import type { EvalSpClient } from "./sp/client.js";
 
@@ -8,7 +8,7 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 export interface IndependentEvaluationOwnerServices {
   /** Every reader and writer must be scoped to the verified Eval SP user. */
-  readonly catalog: Pick<PostgresCatalog, "getProject" | "listSuccessfulSamplings" | "selectAllSuccessfulSamplingIds">;
+  readonly catalog: Pick<PostgresProjectCatalog, "getProject" | "listSuccessfulSamplings" | "selectAllSuccessfulSamplingIds">;
   readonly runtime: Pick<EvalRunAdmission, "evaluate">;
   /** Return a consistent, owner-scoped Run view and its ordered Evaluation records. */
   readonly readRun: (projectId: string, runId: string) => Promise<ProjectRunView | null>;
@@ -16,7 +16,7 @@ export interface IndependentEvaluationOwnerServices {
 
 export interface IndependentEvaluationApiOptions {
   readonly spClient: Pick<EvalSpClient, "verifySession">;
-  /** Constructed once per verified user, so concurrent submissions share one Runtime instance. */
+  /** Shared by active requests for one verified user, then released from memory. */
   readonly createOwnerServices: (ownerUserId: string) =>
     IndependentEvaluationOwnerServices | Promise<IndependentEvaluationOwnerServices>;
   /** When set, only this browser Origin may make cross-origin requests. */
@@ -209,17 +209,37 @@ function checkedWebOrigin(value: string | undefined): string | undefined {
 
 export function createIndependentEvaluationApi(options: IndependentEvaluationApiOptions): IndependentEvaluationApi {
   const webOrigin = checkedWebOrigin(options.webOrigin);
-  const ownerServices = new Map<string, Promise<IndependentEvaluationOwnerServices>>();
-  const servicesFor = (ownerUserId: string): Promise<IndependentEvaluationOwnerServices> => {
-    let services = ownerServices.get(ownerUserId);
-    if (!services) {
-      services = Promise.resolve().then(() => options.createOwnerServices(ownerUserId));
-      ownerServices.set(ownerUserId, services);
-      void services.catch(() => {
-        if (ownerServices.get(ownerUserId) === services) ownerServices.delete(ownerUserId);
-      });
+  type OwnerServicesEntry = {
+    readonly promise: Promise<IndependentEvaluationOwnerServices>;
+    activeRequests: number;
+  };
+  const ownerServices = new Map<string, OwnerServicesEntry>();
+  const servicesFor = async (ownerUserId: string): Promise<{
+    readonly services: IndependentEvaluationOwnerServices;
+    readonly release: () => void;
+  }> => {
+    let entry = ownerServices.get(ownerUserId);
+    if (!entry) {
+      entry = {
+        promise: Promise.resolve().then(() => options.createOwnerServices(ownerUserId)),
+        activeRequests: 0,
+      };
+      ownerServices.set(ownerUserId, entry);
     }
-    return services;
+    const current = entry;
+    current.activeRequests += 1;
+    const release = () => {
+      current.activeRequests -= 1;
+      if (current.activeRequests === 0 && ownerServices.get(ownerUserId) === current) {
+        ownerServices.delete(ownerUserId);
+      }
+    };
+    try {
+      return { services: await current.promise, release };
+    } catch (error) {
+      release();
+      throw error;
+    }
   };
 
   return {
@@ -254,49 +274,53 @@ export function createIndependentEvaluationApi(options: IndependentEvaluationApi
           if (error instanceof HttpError) throw error;
           throw new HttpError(502, "SP_UNAVAILABLE", "Eval SP session verification failed");
         }
-        const services = await servicesFor(ownerUserId);
-        if (route.kind !== "run" && route.kind !== "runEvaluations"
-          && !await services.catalog.getProject(route.projectId)) {
-          throw new HttpError(404, "NOT_FOUND", "Project not found");
-        }
+        const { services, release } = await servicesFor(ownerUserId);
+        try {
+          if (route.kind !== "run" && route.kind !== "runEvaluations"
+            && !await services.catalog.getProject(route.projectId)) {
+            throw new HttpError(404, "NOT_FOUND", "Project not found");
+          }
 
-        switch (route.kind) {
-          case "samplingPage": {
-            const query = queryValues(url, ["sampleId", "afterSamplingId", "limit"]);
-            const sampleId = optionalId(query.sampleId, "sampleId");
-            const afterSamplingId = optionalId(query.afterSamplingId, "afterSamplingId");
-            const limit = pageLimit(query.limit);
-            const page = await services.catalog.listSuccessfulSamplings(route.projectId, {
-              ...(sampleId === undefined ? {} : { sampleId }),
-              ...(afterSamplingId === undefined ? {} : { afterSamplingId }),
-              ...(limit === undefined ? {} : { limit }),
-            });
-            return json(200, page, corsOrigin);
-          }
-          case "samplingIds": {
-            const query = queryValues(url, ["sampleId"]);
-            const sampleId = optionalId(query.sampleId, "sampleId");
-            const filter = sampleId === undefined ? {} : { sampleId };
-            const samplingIds = await services.catalog.selectAllSuccessfulSamplingIds(route.projectId, filter);
-            return json(200, { samplingIds }, corsOrigin);
-          }
-          case "evaluate": {
-            queryValues(url, []);
-            const body = evaluationInput(await readJsonObject(request));
-            const handle = await services.runtime.evaluate({ projectId: route.projectId, ...body });
-            return json(202, handle, corsOrigin);
-          }
-          case "run":
-          case "runEvaluations": {
-            queryValues(url, []);
-            const view = await services.readRun(route.projectId, route.runId);
-            if (!view || view.run.projectId !== route.projectId || view.run.runId !== route.runId) {
-              throw new HttpError(404, "NOT_FOUND", "Run not found");
+          switch (route.kind) {
+            case "samplingPage": {
+              const query = queryValues(url, ["sampleId", "afterSamplingId", "limit"]);
+              const sampleId = optionalId(query.sampleId, "sampleId");
+              const afterSamplingId = optionalId(query.afterSamplingId, "afterSamplingId");
+              const limit = pageLimit(query.limit);
+              const page = await services.catalog.listSuccessfulSamplings(route.projectId, {
+                ...(sampleId === undefined ? {} : { sampleId }),
+                ...(afterSamplingId === undefined ? {} : { afterSamplingId }),
+                ...(limit === undefined ? {} : { limit }),
+              });
+              return json(200, page, corsOrigin);
             }
-            return route.kind === "run"
-              ? json(200, { run: view.run }, corsOrigin)
-              : json(200, { evaluations: view.evaluations }, corsOrigin);
+            case "samplingIds": {
+              const query = queryValues(url, ["sampleId"]);
+              const sampleId = optionalId(query.sampleId, "sampleId");
+              const filter = sampleId === undefined ? {} : { sampleId };
+              const samplingIds = await services.catalog.selectAllSuccessfulSamplingIds(route.projectId, filter);
+              return json(200, { samplingIds }, corsOrigin);
+            }
+            case "evaluate": {
+              queryValues(url, []);
+              const body = evaluationInput(await readJsonObject(request));
+              const handle = await services.runtime.evaluate({ projectId: route.projectId, ...body });
+              return json(202, handle, corsOrigin);
+            }
+            case "run":
+            case "runEvaluations": {
+              queryValues(url, []);
+              const view = await services.readRun(route.projectId, route.runId);
+              if (!view || view.run.projectId !== route.projectId || view.run.runId !== route.runId) {
+                throw new HttpError(404, "NOT_FOUND", "Run not found");
+              }
+              return route.kind === "run"
+                ? json(200, { run: view.run }, corsOrigin)
+                : json(200, { evaluations: view.evaluations }, corsOrigin);
+            }
           }
+        } finally {
+          release();
         }
       } catch (error) {
         if (error instanceof RuntimeRunIdentityConflictError) {

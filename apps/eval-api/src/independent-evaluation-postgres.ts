@@ -2,7 +2,7 @@ import {
   createConfigResolver,
   createEvalRunAdmission,
 } from "@eval-platform/eval-runtime";
-import { createPostgresCatalog } from "./db/catalog.js";
+import { createPostgresProjectCatalog } from "./db/catalog.js";
 import type { EvalDb } from "./db/client.js";
 import { createPostgresConfigReader } from "./db/config.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./db/release.js";
@@ -30,11 +30,7 @@ export function createPostgresIndependentEvaluationApi(
     ...(options.onError === undefined ? {} : { onError: options.onError }),
     createOwnerServices(ownerUserId) {
       const configStore = createPostgresConfigReader(options.db, ownerUserId);
-      const catalog = createPostgresCatalog(options.db, ownerUserId, {
-        async listAgents() {
-          throw new Error("Agent listing is not part of the independent evaluation API");
-        },
-      }, release);
+      const catalog = createPostgresProjectCatalog(options.db, ownerUserId, release);
       const runtime = createEvalRunAdmission({
         sourceCommit: release.sourceCommit,
         catalog,

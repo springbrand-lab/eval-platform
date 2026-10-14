@@ -66,6 +66,9 @@ export interface RuntimeCatalog {
   getSample(sampleId: string): Promise<Sample | null>;
 }
 
+/** Catalog reads needed to resolve a new Run; no Agent listing or UI queries. */
+export type RuntimeAdmissionCatalog = Pick<RuntimeCatalog, "listData" | "listSamples" | "getSample">;
+
 export interface EvalRuntime {
   listProjects(): Promise<readonly Project[]>;
   listAgents(role?: AgentRole): Promise<readonly AgentOption[]>;
@@ -103,8 +106,8 @@ export type EvalRunAdmission = Pick<EvalRuntime, "start" | "evaluate" | "pipelin
 
 export type EvalRunAdmissionDependencies = Pick<
   EvalRuntimeDependencies,
-  "sourceCommit" | "catalog" | "configResolver" | "store" | "idFactory"
->;
+  "sourceCommit" | "configResolver" | "store" | "idFactory"
+> & { readonly catalog: RuntimeAdmissionCatalog };
 
 /** Recovery reads persisted Run facts; admission APIs and Config resolution stay in the API process. */
 export interface EvalRunResumerDependencies extends Omit<EvalRuntimeDependencies, "catalog" | "configResolver" | "sourceCommit"> {

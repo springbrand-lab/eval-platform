@@ -2,6 +2,7 @@ import type { EvaluationRecord, ProjectInitialLaunch, Sampling } from "@eval-pla
 import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
 import { RuntimeEvaluationSelectionError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import { and, eq, exists, gt, inArray, or, sql } from "drizzle-orm";
+import { sqlBatches } from "./batch.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
@@ -209,14 +210,17 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
           && (project.initialLaunch.operation !== launch.operation || project.initialLaunch.configId !== launch.configId)) {
           throw new Error("Project launch selection cannot change after its first Run");
         }
-        const selectedSamples = await transaction.select({
-          sampleId: samples.sampleId,
-          ownerUserId: samples.ownerUserId,
-        }).from(samples).where(and(
-          eq(samples.ownerUserId, project.ownerUserId),
-          inArray(samples.sampleId, records.map((record) => record.sampleId)),
-        ));
-        const sampleOwner = new Map(selectedSamples.map((sample) => [sample.sampleId, sample.ownerUserId]));
+        const sampleOwner = new Map<string, string>();
+        for (const batch of sqlBatches([...new Set(records.map((record) => record.sampleId))])) {
+          const selectedSamples = await transaction.select({
+            sampleId: samples.sampleId,
+            ownerUserId: samples.ownerUserId,
+          }).from(samples).where(and(
+            eq(samples.ownerUserId, project.ownerUserId),
+            inArray(samples.sampleId, batch),
+          ));
+          for (const sample of selectedSamples) sampleOwner.set(sample.sampleId, sample.ownerUserId);
+        }
         if (records.some((record) => sampleOwner.get(record.sampleId) !== project.ownerUserId)) {
           throw new Error("Run contains a Sample outside its Project owner scope");
         }
@@ -247,10 +251,13 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
         }
 
         if (run.phases[0] === "evaluation") {
-          const existingRecords = await transaction.select().from(samplings)
-            .where(and(eq(samplings.ownerUserId, project.ownerUserId),
-              inArray(samplings.samplingId, run.samplingIds))).for("share");
-          const byId = new Map(existingRecords.map((row) => [row.samplingId, row]));
+          const byId = new Map<string, typeof samplings.$inferSelect>();
+          for (const batch of sqlBatches(run.samplingIds)) {
+            const existingRecords = await transaction.select().from(samplings)
+              .where(and(eq(samplings.ownerUserId, project.ownerUserId),
+                inArray(samplings.samplingId, batch))).for("share");
+            for (const row of existingRecords) byId.set(row.samplingId, row);
+          }
           for (const record of records) {
             const stored = byId.get(record.samplingId);
             if (!stored || stored.projectId !== run.projectId || stored.sampleId !== record.sampleId
@@ -261,21 +268,28 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
             }
           }
         } else {
-          await transaction.insert(samplings).values(records.map((record) => ({
-            samplingId: record.samplingId, ownerUserId: project.ownerUserId, projectId: record.projectId,
-            sampleId: record.sampleId, facts: samplingFacts(record),
-          })));
+          for (const batch of sqlBatches(records)) {
+            await transaction.insert(samplings).values(batch.map((record) => ({
+              samplingId: record.samplingId, ownerUserId: project.ownerUserId, projectId: record.projectId,
+              sampleId: record.sampleId, facts: samplingFacts(record),
+            })));
+          }
         }
-        await transaction.insert(runSamplings).values(run.samplingIds.map((samplingId, position) => ({
+        const runMemberships = run.samplingIds.map((samplingId, position) => ({
           ownerUserId: project.ownerUserId, runId: run.runId, samplingId, position,
-        })));
+        }));
+        for (const batch of sqlBatches(runMemberships)) await transaction.insert(runSamplings).values(batch);
         if (judges.length > 0) {
-          await transaction.insert(evaluations).values(judges.map((judge) => ({
+          const evaluationRows = judges.map((judge) => ({
             evaluationId: judge.evaluationId, samplingId: judge.samplingId, facts: evaluationFacts(judge),
-          })));
-          await transaction.insert(runEvaluations).values(judges.map((judge, position) => ({
+          }));
+          for (const batch of sqlBatches(evaluationRows)) await transaction.insert(evaluations).values(batch);
+          const evaluationMemberships = judges.map((judge, position) => ({
             runId: run.runId, evaluationId: judge.evaluationId, samplingId: judge.samplingId, position,
-          })));
+          }));
+          for (const batch of sqlBatches(evaluationMemberships)) {
+            await transaction.insert(runEvaluations).values(batch);
+          }
         }
         if (project.initialLaunch === null && launch !== null) {
           await transaction.update(projects).set({ initialLaunch: launch })

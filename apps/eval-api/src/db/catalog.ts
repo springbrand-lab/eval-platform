@@ -35,6 +35,8 @@ export interface PostgresCatalog extends RuntimeCatalog {
   selectAllSuccessfulSamplingIds(projectId: string, filter?: SuccessfulSamplingFilter): Promise<readonly string[]>;
 }
 
+export type PostgresProjectCatalog = Omit<PostgresCatalog, "listAgents">;
+
 function successfulSamplingCondition(projectId: string, ownerUserId: string, sampleId?: string) {
   return and(
     eq(projects.projectId, projectId),
@@ -71,12 +73,11 @@ export async function readSamples(
   return records.map(toSample);
 }
 
-export function createPostgresCatalog(
+export function createPostgresProjectCatalog(
   db: EvalDb,
   ownerUserId: string,
-  agents: { readonly listAgents: (role?: AgentRole) => ReturnType<RuntimeCatalog["listAgents"]> },
   release: EvalSpRelease,
-): PostgresCatalog {
+): PostgresProjectCatalog {
   const owner = requireOwnerUserId(ownerUserId);
   const { sourceBranch } = requireEvalSpRelease(release);
   const datasetStore = createPostgresDatasetStore(db, owner);
@@ -98,9 +99,6 @@ export function createPostgresCatalog(
         .where(eq(projects.ownerUserId, owner))
         .orderBy(projects.projectId);
       return rows.map(projectFromRow);
-    },
-    listAgents(role) {
-      return agents.listAgents(role);
     },
     listDatasets() {
       return datasetStore.listDatasets();
@@ -159,5 +157,17 @@ export function createPostgresCatalog(
         .orderBy(samplings.samplingId);
       return rows.map(({ samplingId }) => samplingId);
     },
+  };
+}
+
+export function createPostgresCatalog(
+  db: EvalDb,
+  ownerUserId: string,
+  agents: { readonly listAgents: (role?: AgentRole) => ReturnType<RuntimeCatalog["listAgents"]> },
+  release: EvalSpRelease,
+): PostgresCatalog {
+  return {
+    ...createPostgresProjectCatalog(db, ownerUserId, release),
+    listAgents(role) { return agents.listAgents(role); },
   };
 }

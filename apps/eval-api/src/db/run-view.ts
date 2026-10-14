@@ -1,6 +1,7 @@
 import type { EvaluationRecord, RunSnapshot } from "@eval-platform/eval-contracts";
 import { toRunSnapshot } from "@eval-platform/eval-runtime";
 import { and, eq, inArray } from "drizzle-orm";
+import { sqlBatches } from "./batch.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import { evaluationFromRow, readRunRecords, samplingFromRow } from "./runtime.js";
@@ -20,13 +21,15 @@ export function createPostgresProjectRunReader(db: EvalDb, ownerUserId: string) 
     });
     if (!record) return null;
 
-    const [samplingRows, evaluationRows] = await Promise.all([
-      transaction.select().from(samplings).where(and(
+    const samplingRows: (typeof samplings.$inferSelect)[] = [];
+    for (const batch of sqlBatches(record.samplingIds)) {
+      samplingRows.push(...await transaction.select().from(samplings).where(and(
         eq(samplings.ownerUserId, owner),
         eq(samplings.projectId, projectId),
-        inArray(samplings.samplingId, record.samplingIds),
-      )),
-      transaction.select({
+        inArray(samplings.samplingId, batch),
+      )));
+    }
+    const evaluationRows = await transaction.select({
         evaluationId: evaluations.evaluationId,
         samplingId: evaluations.samplingId,
         facts: evaluations.facts,
@@ -38,8 +41,7 @@ export function createPostgresProjectRunReader(db: EvalDb, ownerUserId: string) 
           eq(runs.projectId, projectId),
           eq(runs.runId, runId),
         ))
-        .orderBy(runEvaluations.position),
-    ]);
+        .orderBy(runEvaluations.position);
     const samplingById = new Map(samplingRows.map((row) => [row.samplingId, samplingFromRow(row)]));
     const orderedSamplings = record.samplingIds.map((id) => {
       const sampling = samplingById.get(id);

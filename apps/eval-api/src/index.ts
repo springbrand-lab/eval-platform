@@ -1,7 +1,9 @@
 export { createEvalDb, type EvalDb } from "./db/client.js";
 export {
   createPostgresCatalog,
+  createPostgresProjectCatalog,
   type PostgresCatalog,
+  type PostgresProjectCatalog,
   type SuccessfulSamplingFilter,
   type SuccessfulSamplingOption,
   type SuccessfulSamplingPage,

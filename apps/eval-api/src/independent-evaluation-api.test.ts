@@ -65,8 +65,10 @@ async function body(response: Response): Promise<unknown> {
 describe("independent evaluation HTTP API", () => {
   it("verifies every request with Eval SP and forwards the same Project filter to page and all-ID queries", async () => {
     const { api, spClient, catalog, createOwnerServices } = fixture();
-    const page = await api.handle(request("/api/projects/project-1/samplings/successful?sampleId=sample-1&afterSamplingId=previous&limit=1"));
-    const allIds = await api.handle(request("/api/projects/project-1/samplings/successful/ids?sampleId=sample-1"));
+    const [page, allIds] = await Promise.all([
+      api.handle(request("/api/projects/project-1/samplings/successful?sampleId=sample-1&afterSamplingId=previous&limit=1")),
+      api.handle(request("/api/projects/project-1/samplings/successful/ids?sampleId=sample-1")),
+    ]);
     expect(page.status).toBe(200);
     expect(await body(page)).toEqual({ samplings: [{ samplingId: "sampling-1", sampleId: "sample-1" }], nextCursor: "sampling-1" });
     expect(allIds.status).toBe(200);
@@ -78,6 +80,8 @@ describe("independent evaluation HTTP API", () => {
     expect(spClient.verifySession).toHaveBeenCalledTimes(2);
     expect(createOwnerServices).toHaveBeenCalledTimes(1);
     expect(createOwnerServices).toHaveBeenCalledWith("alice");
+    await api.handle(request("/api/projects/project-1/samplings/successful/ids"));
+    expect(createOwnerServices).toHaveBeenCalledTimes(2);
   });
 
   it("rejects absent or invalid sessions and inaccessible Projects before querying Samplings", async () => {
