@@ -189,6 +189,10 @@ export interface RunHandle {
 }
 
 export interface RunSnapshot extends RunHandle {
+  /** The Worker is interrupting and finalizing this Run. */
+  readonly stopRequested?: true;
+  /** Cancellation and evidence collection have been finalized. */
+  readonly stopFinalized?: true;
   readonly projectId: string;
   readonly sourceCommit: string;
   readonly phases: RunPhases;

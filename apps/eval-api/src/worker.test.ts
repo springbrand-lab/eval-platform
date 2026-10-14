@@ -27,15 +27,54 @@ function workerOptions(
 ): EvalRunWorkerOptions {
   return {
     notifications,
-    runtime: { resume },
+    runtime: { resume, interrupt: vi.fn(async () => undefined), stop: vi.fn(async () => undefined) },
     store: { listRecoverableRunIds: vi.fn(async (afterRunId?: string, limit = 100) => (
       runIds.filter((runId) => afterRunId === undefined || runId > afterRunId).slice(0, limit)
-    )) },
+    )), isRunStopRequested: vi.fn(async () => false), markRunStopFinalized: vi.fn(async () => true) },
     scanIntervalMs: 60_000,
   };
 }
 
 describe("single-instance Run worker", () => {
+  it("interrupts an active Run on a persisted stop notification, then finalizes it", async () => {
+    const source = makeNotifications();
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const resume = vi.fn(async (_runId: string, _signal?: AbortSignal) => gate);
+    const options = workerOptions(source.notifications, ["run-1"], resume);
+    let stopRequested = false;
+    options.store.isRunStopRequested = vi.fn(async () => stopRequested);
+    const worker = await startEvalRunWorker(options);
+    try {
+      await vi.waitFor(() => expect(resume).toHaveBeenCalledOnce());
+      const signal = resume.mock.calls[0]![1]!;
+      stopRequested = true;
+      source.notify("run-1");
+      await vi.waitFor(() => expect(signal.aborted).toBe(true));
+      await vi.waitFor(() => expect(options.runtime.interrupt).toHaveBeenCalledWith("run-1"));
+      finish();
+      await vi.waitFor(() => expect(options.runtime.stop).toHaveBeenCalledWith("run-1"));
+      await vi.waitFor(() => expect(options.store.markRunStopFinalized).toHaveBeenCalledWith("run-1"));
+    } finally {
+      finish();
+      await worker.close();
+    }
+  });
+
+  it("finalizes a stop recovered on startup without resuming work", async () => {
+    const source = makeNotifications();
+    const resume = vi.fn(async () => undefined);
+    const options = workerOptions(source.notifications, ["run-1"], resume);
+    options.store.isRunStopRequested = vi.fn(async () => true);
+    const worker = await startEvalRunWorker(options);
+    try {
+      await vi.waitFor(() => expect(options.runtime.stop).toHaveBeenCalledWith("run-1"));
+      await vi.waitFor(() => expect(options.store.markRunStopFinalized).toHaveBeenCalledWith("run-1"));
+      expect(resume).not.toHaveBeenCalled();
+    } finally {
+      await worker.close();
+    }
+  });
   it("does not dispatch Runs returned by an initial scan after shutdown starts", async () => {
     const source = makeNotifications();
     const abort = new AbortController();
@@ -63,7 +102,7 @@ describe("single-instance Run worker", () => {
     const resume = vi.fn(async (_runId: string) => gate);
     const worker = await startEvalRunWorker(workerOptions(source.notifications, ["run-1"], resume));
     try {
-      await vi.waitFor(() => expect(resume).toHaveBeenCalledExactlyOnceWith("run-1"));
+      await vi.waitFor(() => expect(resume).toHaveBeenCalledExactlyOnceWith("run-1", expect.any(AbortSignal)));
       source.notify("run-1");
       await worker.scan();
       expect(resume).toHaveBeenCalledTimes(1);
@@ -93,7 +132,7 @@ describe("single-instance Run worker", () => {
       })));
       source.reconnect();
       await vi.waitFor(() => expect(resume).toHaveBeenCalledTimes(2));
-      expect(resume).toHaveBeenNthCalledWith(2, "run-1");
+      expect(resume).toHaveBeenNthCalledWith(2, "run-1", expect.any(AbortSignal));
     } finally {
       await worker.close();
     }
@@ -147,7 +186,7 @@ describe("single-instance Run worker", () => {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const resume = vi.fn(async (_runId: string) => gate);
     const worker = await startEvalRunWorker(workerOptions(source.notifications, ["run-1"], resume));
-    await vi.waitFor(() => expect(resume).toHaveBeenCalledExactlyOnceWith("run-1"));
+    await vi.waitFor(() => expect(resume).toHaveBeenCalledExactlyOnceWith("run-1", expect.any(AbortSignal)));
 
     let closed = false;
     const closing = worker.close().then(() => { closed = true; });

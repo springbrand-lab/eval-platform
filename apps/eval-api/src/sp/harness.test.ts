@@ -74,6 +74,21 @@ class FakeSocket extends EventTarget {
 }
 
 describe("Eval SP Harness", () => {
+  it("stops an Eval Chat through the service route and accepts an already absent Chat", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      expect(init?.headers).toMatchObject({ "X-Eval-Service-Token": "secret" });
+      const path = new URL(String(input)).pathname;
+      if (path.includes("missing-chat")) return Response.json({ code: "REQUEST_NOT_FOUND" }, { status: 404 });
+      return Response.json({ ok: true });
+    });
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher });
+    expect(await harness.stopAgent({ handle: subject })).toBe(true);
+    expect(fetcher).toHaveBeenCalledWith(
+      new URL("https://eval-sp.test/internal/v1/eval-harness/users/user-1/chats/subject-chat/submissions/stop"),
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(await harness.stopAgent({ handle: { ...subject, chatId: "missing-chat" } })).toBe(false);
+  });
   it("uses service-authenticated public operations and preserves evidence and raw resource facts", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = new URL(String(input));

@@ -118,6 +118,8 @@ export interface Harness {
   submitAgent(input: SubmitAgentInput): Promise<AgentSubmission>;
   waitForSubmission(input: WaitForSubmissionInput): Promise<AgentSubmission>;
   inspectAgentOperation(input: InspectAgentOperationInput): Promise<AgentSubmission | null>;
+  /** Interrupt every unfinished Submission in this Eval-bound Chat. */
+  stopAgent(input: { readonly handle: AgentHandle }): Promise<boolean>;
   restartAgent(input: SubmitAgentInput): Promise<AgentSubmission>;
   collectExecution(input: CollectAgentInput): Promise<ExecutionOutput>;
   collectEvaluation(input: CollectAgentInput): Promise<EvaluationAgentOutput>;

@@ -12,7 +12,7 @@ export {
 export { createPostgresDatasetStore, DatasetInUseError } from "./db/dataset.js";
 export { createPostgresConfigReader, createPostgresConfigStore, ConfigEntityNotFoundError, ConfigIdentityConflictError, ConfigReferenceError } from "./db/config.js";
 export type { PostgresConfigStore } from "./db/config.js";
-export { createPostgresRuntimeStore, createPostgresWorkerRuntimeStore } from "./db/runtime.js";
+export { createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, ProjectRunStopConflictError } from "./db/runtime.js";
 export { createPostgresRuntimeQueries } from "./db/runtime-queries.js";
 export type { EvalSpRelease } from "./db/release.js";
 export type { ProjectRunView } from "./db/run-view.js";

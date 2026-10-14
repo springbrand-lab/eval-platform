@@ -2,12 +2,12 @@ import path from "node:path";
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError } from "@eval-platform/eval-dataset";
 import { createMetrics, MetricsQueryError } from "@eval-platform/eval-metrics";
-import { createConfigResolver, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
+import { createConfigResolver, createEvalRunResumer, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, startEvalRunWorker } from "../index.js";
+import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresProjectRunControl, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, startEvalRunWorker } from "../index.js";
 import { isForeignKeyFailure } from "./client.js";
 import { createPostgresProjectRunReader } from "./run-view.js";
 import { readRunRecords } from "./runtime.js";
@@ -586,6 +586,79 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await runtime.getRun(anotherRun.runId)).toEqual(anotherRun);
   });
 
+  it("persists an idempotent Project stop under the admission lock", async () => {
+    const { runtime, project, dataset, sample } = await setup();
+    const control = createPostgresProjectRunControl(database.db, "user-A");
+    const foreign = createPostgresProjectRunControl(database.db, "user-B");
+    expect(await control.getCurrentRun(project.projectId)).toBeNull();
+    expect(await control.stopRun(project.projectId, "missing")).toBeNull();
+    const priorSampling = makeSampling(project.projectId, sample.sampleId);
+    const priorRun = makeRun(project.projectId, priorSampling, dataset.datasetId);
+    await runtime.createRunWithSamplings(priorRun, [priorSampling], []);
+    await runtime.updateSampling({ ...priorSampling, execution: { status: "succeeded" } }, priorSampling);
+    await expect(control.stopRun(project.projectId, priorRun.runId))
+      .rejects.toMatchObject({ reason: "no_active_run" });
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    const run = makeRun(project.projectId, sampling, dataset.datasetId);
+    await runtime.createRunWithSamplings(run, [sampling], []);
+    expect(await control.getCurrentRun(project.projectId)).toEqual({ runId: run.runId });
+    await expect(control.stopRun(project.projectId, priorRun.runId))
+      .rejects.toMatchObject({ reason: "run_changed" });
+    expect(await foreign.stopRun(project.projectId, run.runId)).toBeNull();
+    expect(await control.stopRun(project.projectId, run.runId)).toEqual({ runId: run.runId, stopRequested: true });
+    expect(await control.stopRun(project.projectId, run.runId)).toEqual({ runId: run.runId, stopRequested: true });
+    expect((await runtime.getRun(run.runId))?.stopRequested).toBe(true);
+    expect(await runtime.isRunStopRequested(run.runId)).toBe(true);
+    expect(await runtime.markRunStopFinalized(run.runId)).toBe(false);
+    const nextSampling = makeSampling(project.projectId, sample.sampleId);
+    const nextRun = makeRun(project.projectId, nextSampling, dataset.datasetId);
+    await expect(runtime.createRunWithSamplings(nextRun, [nextSampling], []))
+      .rejects.toBeInstanceOf(RuntimeProjectBusyError);
+    await runtime.updateSampling({ ...sampling, execution: { status: "cancelled" } }, sampling);
+    expect(await control.getCurrentRun(project.projectId)).toEqual({ runId: run.runId, stopRequested: true });
+    await expect(runtime.createRunWithSamplings(nextRun, [nextSampling], []))
+      .rejects.toBeInstanceOf(RuntimeProjectBusyError);
+    expect(await runtime.markRunStopFinalized(run.runId)).toBe(true);
+    expect((await runtime.getRun(run.runId))?.stopFinalized).toBe(true);
+    expect(await control.getCurrentRun(project.projectId)).toBeNull();
+    expect(await control.stopRun(project.projectId, run.runId)).toEqual({ runId: run.runId, stopRequested: true });
+    await runtime.createRunWithSamplings(nextRun, [nextSampling], []);
+    expect((await runtime.getRun(nextRun.runId))?.stopRequested).toBeUndefined();
+    expect(await control.stopRun(project.projectId, run.runId)).toEqual({ runId: run.runId, stopRequested: true });
+    expect((await runtime.getRun(nextRun.runId))?.stopRequested).toBeUndefined();
+  });
+
+  it("recovers a stopped queued Run and opens Project admission only after cleanup", async () => {
+    const { runtime, project, dataset, sample } = await setup();
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    const run = makeRun(project.projectId, sampling, dataset.datasetId);
+    await runtime.createRunWithSamplings(run, [sampling], []);
+    const control = createPostgresProjectRunControl(database.db, "user-A");
+    await control.stopRun(project.projectId, run.runId);
+    const stopAgent = vi.fn(async () => false);
+    const resumer = createEvalRunResumer({
+      store: runtime,
+      getSamples: async (ids) => ids.map(() => null),
+      harness: { stopAgent } as unknown as Parameters<typeof createEvalRunResumer>[0]["harness"],
+    });
+    const worker = await startEvalRunWorker({
+      runtime: resumer, store: runtime,
+      notifications: createPostgresRunNotifications(database.connectionString),
+      scanIntervalMs: 60_000,
+    });
+    try {
+      await vi.waitFor(async () => expect((await runtime.getRun(run.runId))?.stopFinalized).toBe(true));
+      expect((await runtime.getSampling(sampling.samplingId))?.execution.status).toBe("cancelled");
+      expect(stopAgent).not.toHaveBeenCalled();
+    } finally {
+      await worker.close();
+    }
+    const nextSampling = makeSampling(project.projectId, sample.sampleId);
+    const nextRun = makeRun(project.projectId, nextSampling, dataset.datasetId);
+    await runtime.createRunWithSamplings(nextRun, [nextSampling], []);
+    expect(await runtime.getRun(nextRun.runId)).toEqual(nextRun);
+  });
+
   it("lists and selects every successful Sampling in the owned Project with stable order", async () => {
     const { catalog, runtime, project, dataset, data, sample } = await setup();
     const otherSample = await catalog.createSample(data.dataId);
@@ -729,6 +802,16 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     })).status).toBe(404);
     expect((await runtime.listEvaluations(sampling.samplingId))).toHaveLength(1);
     expect((await runtime.listEvaluations(secondSampling.samplingId))).toHaveLength(1);
+    expect((await send("bob-token", `/runs/${handle.runId}/stop`, { method: "POST" })).status).toBe(404);
+    expect(await (await send("alice-token", "/runs/current")).json())
+      .toEqual({ run: { runId: handle.runId } });
+    const stopped = await send("alice-token", `/runs/${handle.runId}/stop`, { method: "POST" });
+    expect(stopped.status).toBe(202);
+    expect(await stopped.json()).toEqual({ runId: handle.runId, stopRequested: true });
+    expect(await (await send("alice-token", `/runs/${handle.runId}/stop`, { method: "POST" })).json())
+      .toEqual({ runId: handle.runId, stopRequested: true });
+    expect(await (await send("alice-token", `/runs/${handle.runId}`)).json())
+      .toEqual({ run: expect.objectContaining({ runId: handle.runId, stopRequested: true }) });
   });
 
   it("admits and reads an all-selected Evaluation across SQL batches", async () => {
@@ -953,17 +1036,17 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       }
     });
     const worker = await startEvalRunWorker({
-      runtime: { resume }, store: runtime,
+      runtime: { resume, interrupt: async () => undefined, stop: async () => undefined }, store: runtime,
       notifications: createPostgresRunNotifications(database.connectionString),
       scanIntervalMs: 60_000,
     });
     try {
-      await vi.waitFor(() => expect(resume).toHaveBeenCalledWith(firstRun.runId));
+      await vi.waitFor(() => expect(resume).toHaveBeenCalledWith(firstRun.runId, expect.any(AbortSignal)));
       await vi.waitFor(async () => expect((await runtime.getSampling(first.samplingId))?.execution.status).toBe("succeeded"));
       const second = makeSampling(project.projectId, sample.sampleId);
       const secondRun = makeRun(project.projectId, second, dataset.datasetId);
       await runtime.createRunWithSamplings(secondRun, [second], []);
-      await vi.waitFor(() => expect(resume).toHaveBeenCalledWith(secondRun.runId));
+      await vi.waitFor(() => expect(resume).toHaveBeenCalledWith(secondRun.runId, expect.any(AbortSignal)));
       await vi.waitFor(async () => expect(await runtime.listRecoverableRunIds()).toEqual([]));
       expect(resume).toHaveBeenCalledTimes(2);
     } finally {

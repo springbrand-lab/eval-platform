@@ -22,6 +22,10 @@ export interface RuntimeRunRecord {
   /** Immutable effective configuration captured when this Run is admitted. */
   readonly config: RunConfigSnapshot;
   readonly requestIdentity: RuntimeRunRequestIdentity;
+  /** Persisted stop intent; omitted until a stop is requested. */
+  readonly stopRequested?: true;
+  /** Stop cleanup completed; admission may open after all child stages are terminal. */
+  readonly stopFinalized?: true;
 }
 
 export interface RuntimeRunAdmission {
@@ -80,6 +84,8 @@ export interface RuntimeStore {
 
 export interface RuntimeRecoveryStore {
   listRecoverableRunIds(afterRunId?: string, limit?: number): Promise<readonly string[]>;
+  isRunStopRequested(runId: string): Promise<boolean>;
+  markRunStopFinalized(runId: string): Promise<boolean>;
 }
 
 export async function persistRuntimeRecord<TRecord extends SamplingState | EvaluationRecord>(input: {

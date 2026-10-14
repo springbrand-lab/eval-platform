@@ -61,6 +61,13 @@ export function toRunSnapshot(
   records: readonly SamplingState[],
   evaluations: readonly EvaluationRecord[],
 ): RunSnapshot {
+  const progress = aggregateRunProgress(records, evaluations, run.phases);
+  const stopFinalizing = run.stopRequested === true && run.stopFinalized !== true
+    && !isPendingStatus(progress.status);
+  const stopped = run.stopFinalized === true
+    && !isPendingStatus(progress.status)
+    && (records.some((record) => record.execution.status === "cancelled")
+      || evaluations.some((evaluation) => evaluation.status.status === "cancelled"));
   return {
     runId: run.runId,
     samplingIds: [...run.samplingIds],
@@ -68,7 +75,11 @@ export function toRunSnapshot(
     sourceCommit: run.sourceCommit,
     phases: run.phases,
     evaluationIds: [...run.evaluationIds],
-    ...aggregateRunProgress(records, evaluations, run.phases),
+    ...progress,
+    ...(run.stopRequested === true ? { stopRequested: true as const } : {}),
+    ...(run.stopFinalized === true ? { stopFinalized: true as const } : {}),
+    ...(stopFinalizing ? { status: "retrying" as const } : {}),
+    ...(stopped ? { status: "cancelled" as const } : {}),
   };
 }
 

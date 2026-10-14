@@ -1,4 +1,4 @@
-import type { EvalRuntime, RuntimeRecoveryStore } from "@eval-platform/eval-runtime";
+import type { EvalRunResumer, RuntimeRecoveryStore } from "@eval-platform/eval-runtime";
 import { Client } from "pg";
 
 const RUN_CHANNEL = "eval_run_created";
@@ -19,7 +19,7 @@ export interface EvalRunWorker {
 }
 
 export interface EvalRunWorkerOptions {
-  readonly runtime: Pick<EvalRuntime, "resume">;
+  readonly runtime: EvalRunResumer;
   readonly store: RuntimeRecoveryStore;
   readonly notifications: RunNotifications;
   readonly maxConcurrentRuns?: number;
@@ -118,7 +118,13 @@ export async function startEvalRunWorker(options: EvalRunWorkerOptions): Promise
   let ready = false;
   let scanning: Promise<void> | undefined;
   const pending = new Set<string>();
-  const active = new Map<string, Promise<void>>();
+  type ActiveRun = {
+    promise: Promise<void>;
+    readonly controller: AbortController;
+    resuming: boolean;
+    interrupting?: Promise<void>;
+  };
+  const active = new Map<string, ActiveRun>();
   const report = (error: unknown): void => {
     try {
       (options.onError ?? console.error)(asError(error));
@@ -133,21 +139,59 @@ export async function startEvalRunWorker(options: EvalRunWorkerOptions): Promise
     if (closeWorker) void closeWorker().catch(report);
   };
   options.signal?.addEventListener("abort", onAbort, { once: true });
+  const interruptActive = (runId: string, entry: ActiveRun): void => {
+    entry.controller.abort();
+    if (entry.interrupting) return;
+    entry.interrupting = (async () => {
+      while (entry.resuming) {
+        try { await options.runtime.interrupt(runId); }
+        catch (error) { report(error); }
+        if (entry.resuming) await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    })();
+  };
+  const checkActiveStop = async (runId: string, entry: ActiveRun): Promise<void> => {
+    if (await options.store.isRunStopRequested(runId)) interruptActive(runId, entry);
+  };
+  const finalizeStop = async (runId: string): Promise<void> => {
+    await options.runtime.stop(runId);
+    await options.store.markRunStopFinalized(runId);
+  };
   const drain = (): void => {
     while (ready && !closed && active.size < maxConcurrentRuns && pending.size > 0) {
       const runId = pending.values().next().value!;
       pending.delete(runId);
-      const task = Promise.resolve().then(() => options.runtime.resume(runId))
+      const entry: ActiveRun = { promise: Promise.resolve(), controller: new AbortController(), resuming: false };
+      const task = Promise.resolve().then(async () => {
+        if (await options.store.isRunStopRequested(runId)) {
+          await finalizeStop(runId);
+          return;
+        }
+        entry.resuming = true;
+        try {
+          await options.runtime.resume(runId, entry.controller.signal);
+        } finally {
+          entry.resuming = false;
+          await entry.interrupting;
+          if (await options.store.isRunStopRequested(runId)) await finalizeStop(runId);
+        }
+      })
         .catch(report)
         .finally(() => {
           active.delete(runId);
           drain();
         });
-      active.set(runId, task);
+      entry.promise = task;
+      active.set(runId, entry);
     }
   };
   const wake = (runId: string): void => {
-    if (closed || !runId || pending.has(runId) || active.has(runId)) return;
+    if (closed || !runId || pending.has(runId)) return;
+    const running = active.get(runId);
+    if (running) {
+      void checkActiveStop(runId, running).catch(report);
+      return;
+    }
     pending.add(runId);
     drain();
   };
@@ -188,7 +232,7 @@ export async function startEvalRunWorker(options: EvalRunWorkerOptions): Promise
         await subscription.close();
       } finally {
         await scanning?.catch(report);
-        await Promise.allSettled(active.values());
+        await Promise.allSettled([...active.values()].map((entry) => entry.promise));
       }
     })();
     return closing;

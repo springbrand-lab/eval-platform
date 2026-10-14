@@ -3,6 +3,7 @@ import type { Data } from "@eval-platform/eval-dataset";
 import type { EvaluationConfig, ExecutionConfig, RunConfigSnapshot } from "@eval-platform/eval-runtime";
 import { sql } from "drizzle-orm";
 import {
+  boolean,
   check,
   foreignKey,
   index,
@@ -130,6 +131,8 @@ export const runs = pgTable("eval_runs", {
   config: jsonb("config").$type<RunConfigSnapshot>().notNull(),
   idempotencyKey: text("idempotency_key").notNull(),
   requestFingerprint: text("request_fingerprint").notNull(),
+  stopRequested: boolean("stop_requested").notNull().default(false),
+  stopFinalized: boolean("stop_finalized").notNull().default(false),
 }, (table) => [
   unique("eval_runs_owner_id_uq").on(table.ownerUserId, table.runId),
   foreignKey({ columns: [table.ownerUserId, table.projectId], foreignColumns: [projects.ownerUserId, projects.projectId] }).onDelete("restrict"),

@@ -258,6 +258,20 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       requireSp(input.handle);
       return inspect(input.handle, input.idempotencyKey);
     },
+    async stopAgent({ handle }) {
+      requireSp(handle);
+      let result: unknown;
+      try {
+        result = await request("POST", `${handlePath(handle)}/submissions/stop`);
+      } catch (error) {
+        if (error instanceof SpHarnessError && error.status === 404) return false;
+        throw error;
+      }
+      if (!isRecord(result) || typeof result.ok !== "boolean") {
+        throw new SpHarnessError("Eval SP returned invalid stop result", false);
+      }
+      return result.ok;
+    },
     async waitForSubmission(input) {
       requireSp(input.handle);
       const current = await inspect(input.handle, input.idempotencyKey);

@@ -47,10 +47,14 @@
 | `GET /api/projects/:projectId/samplings/successful` | 可选 `sampleId`、`afterSamplingId`、`limit` | `200 { samplings, nextCursor }` |
 | `GET /api/projects/:projectId/samplings/successful/ids` | 可选 `sampleId` | `200 { samplingIds }` |
 | `POST /api/projects/:projectId/evaluations` | JSON `{ evaluationConfigId, samplingIds, idempotencyKey }` | `202 { runId, samplingIds }`，重放也返回原 RunHandle |
+| `GET /api/projects/:projectId/runs/current` | 无请求体 | `200 { run: {runId, stopRequested?} \| null }` |
+| `POST /api/projects/:projectId/runs/:runId/stop` | 无请求体；路径明确本次 Run ID | `202 { runId, stopRequested: true }`；Worker 异步中断 SP Submission 并收尾 |
 | `GET /api/projects/:projectId/runs/:runId` | 无 | `200 { run }`，包含本次 Run 的 Evaluation ID 列表和状态 |
 | `GET /api/projects/:projectId/runs/:runId/evaluations` | 无 | `200 { evaluations }`，按 Run 的 Evaluation ID 顺序返回记录和结果 |
 
 提交接口只接受显式、非空、无重复的 ID 列表，不接受筛选表达式或“提交时全选”。查询时的一键全选结果由调用方固定后提交；同一意图重试发送原请求体。标识符和幂等键最多 512 字符，幂等键不能有首尾空白。POST 要求 `Content-Type: application/json`，请求体最多 8 MiB；超出 ID 数量或体积上限返回 413，格式不符返回 415。其他无效输入返回 400，缺失或失效会话返回 401，未找到的 Project/Run/评估配置返回 404，幂等身份冲突、Project 已有未结束 Run 或已失效的 Sampling 选择返回 409；未预期的内部错误返回 500，Eval SP 校验不可用返回 502。错误响应为 `{ "error": { "code": string, "message": string } }`。宿主可配置可信 Web Origin；配置后预检请求只对该 Origin 开放，其他 Origin 返回 403。
+
+停止接口只影响路径指定且当前正在运行或收尾的 Run；重复请求即使在原 Run 结束后仍返回原结果，不会误停后续批次。可先通过 `GET .../runs/current` 查询当前 ID。未知 Run 返回 404，已自然终结的 Run 返回 `409 NO_ACTIVE_RUN`，指定旧 Run 而另一批正在运行返回 `409 RUN_CHANGED`。停止请求落库后 Worker 立即向 Eval SP 请求中断正在运行的 Submission，未开始的阶段不再提交。取消后的 Subject 证据和完整轨迹尚未保存前，Project 仍视作运行中，不能提交下一批；即使阶段已经终结，仍须等 Worker 写入 `stopFinalized`。Run 查询先显示 `stopRequested`，收尾期间显示 `retrying`，全部完成后显示 `cancelled`。
 
 API 的服务工厂按 Eval SP 用户 ID 在活动请求期间共享一套用户范围内的 Project Catalog、ConfigStore/ConfigResolver 和 Runtime 准入接口；同一用户的并发提交由同一 Runtime 实例处理，空闲用户条目从内存移除。HTTP 路由只负责鉴权、输入校验、Project/Run 归属和组合调用；Run 准入与结果事实仍由 Runtime 和 Store 负责。Run 准入事务分批写入大量关联，保证全选列表不会触及单条 SQL 的参数上限；Run 状态与 Evaluation 结果在同一只读事务内分批读取和投影。标准 `start:api` 也挂载这五条既有路由；`start:independent-api` 保留独立入口。两个 API 进程都使用用户范围 PostgreSQL ConfigReader，不持有 SP Harness 服务凭证；独立 `start:worker` 进程用真实 Harness 执行已入库的 Run。
 

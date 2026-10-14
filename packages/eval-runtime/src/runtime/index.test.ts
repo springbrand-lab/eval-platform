@@ -27,6 +27,7 @@ import {
   createEvalRuntime as createRuntimeWithRelease,
   createEvalRunAdmission,
   createEvalRunResumer,
+  toRunSnapshot,
   type EvalRuntimeDependencies,
 } from "./index.js";
 
@@ -408,6 +409,7 @@ function makeHarness(): Harness {
       const submissionId = submissionIdFor(handle, idempotencyKey);
       return submissionId ? makeSubmission("completed", submissionId) : null;
     }),
+    stopAgent: vi.fn(async () => false),
     collectExecution: vi.fn(async ({ handle }) => ({
       samplingId: handle.samplingId,
       status: "succeeded" as const,
@@ -2535,6 +2537,171 @@ describe("eval runtime orchestration", () => {
     expect(successfulExecutionRecords.every(
       (sampling) => evaluationBySamplingId.get(sampling.samplingId)?.status.status === "succeeded",
     )).toBe(true);
+  });
+});
+
+describe("Project Run stop", () => {
+  function stoppedRun() {
+    const store = makeStore();
+    const catalog = makeCatalog();
+    const harness = makeHarness();
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog,
+      configResolver: makeConfigResolver(), store,
+    });
+    const savedGetRun = store.getRun.bind(store);
+    store.getRun = async (runId) => {
+      const record = await savedGetRun(runId);
+      return record ? { ...record, stopRequested: true } : null;
+    };
+    const resumer = createEvalRunResumer({ getSamples: catalog.getSamples, harness, store, onError: vi.fn() });
+    return { store, harness, admission, resumer };
+  }
+
+  it("cancels an unstarted Pipeline without dispatching either phase", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const handle = await admission.pipeline(pipelineRequest("stop-queued-pipeline"));
+    await resumer.stop(handle.runId);
+    const run = (await store.getRun(handle.runId))!;
+    const sampling = (await store.getSampling(handle.samplingIds[0]!))!;
+    const evaluation = (await store.getEvaluation(run.evaluationIds[0]!))!;
+    expect(sampling.execution.status).toBe("cancelled");
+    expect(evaluation.status.status).toBe("cancelled");
+    expect(toRunSnapshot({ ...run, stopFinalized: true }, [sampling], [evaluation])).toMatchObject({
+      stopRequested: true, stopFinalized: true, status: "cancelled",
+    });
+    expect(harness.ensureAgent).not.toHaveBeenCalled();
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+  });
+
+  it("interrupts a live Subject and preserves its artifacts, trajectory and resource facts", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const handle = await admission.start(startRequest("stop-running-subject"));
+    const samplingId = handle.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    const active: SamplingState = {
+      ...queued, subjectChatId: "subject-chat-1", execution: { status: "running" },
+      executionAttempts: [{
+        executionAttemptId: "attempt-1", samplingId, attemptNumber: 1,
+        status: "running", resources: { status: "pending", scope: {
+          chatId: "subject-chat-1", idempotencyKey: `execution:${samplingId}`,
+        } },
+      }],
+    };
+    await store.updateSampling(active, queued);
+    vi.mocked(harness.stopAgent).mockResolvedValue(true);
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
+      submissionId: "submission-1", status: "interrupted", normalizedStatus: "interrupted",
+      retryable: false, error: "Evaluation Run stopped",
+    });
+    await resumer.stop(handle.runId);
+    const result = (await store.getSampling(samplingId))!;
+    expect(result.execution.status).toBe("cancelled");
+    expect(result.artifacts).toHaveLength(1);
+    expect(result.trajectory?.source).toBe("subject");
+    expect(result.executionAttempts[0]).toMatchObject({
+      submissionId: "submission-1", status: "interrupted", completedAt: expect.any(String),
+      resources: { status: "collected" },
+    });
+    expect(harness.stopAgent).toHaveBeenCalledWith({ handle: expect.objectContaining({ chatId: "subject-chat-1" }) });
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("interrupts a live Evaluator and keeps its result and resource snapshot", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const execution = await admission.start(startRequest("stop-evaluation-seed"));
+    const samplingId = execution.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    const succeeded: SamplingState = {
+      ...queued, subjectChatId: "subject-chat-1", execution: { status: "succeeded" },
+      artifacts: [{ artifactId: "subject-file", kind: "file", path: "/subject.txt" }],
+      trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
+    };
+    await store.updateSampling(succeeded, queued);
+    const handle = await admission.evaluate(evaluateRequest([samplingId], EVALUATION_CONFIG_ID, "stop-evaluation"));
+    const run = (await store.getRun(handle.runId))!;
+    const evaluationId = run.evaluationIds[0]!;
+    const initial = (await store.getEvaluation(evaluationId))!;
+    const active: EvaluationRecord = {
+      ...initial, chatId: "evaluation-chat-1", status: { status: "running" },
+      attempts: [{
+        evaluationAttemptId: "evaluation-attempt-1", evaluationId,
+        attemptNumber: 1, status: "running", resources: { status: "pending", scope: {
+          chatId: "evaluation-chat-1", idempotencyKey: `evaluation:${samplingId}`,
+        } },
+      }],
+    };
+    await store.updateEvaluation(active, initial);
+    vi.mocked(harness.stopAgent).mockResolvedValue(true);
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
+      submissionId: "evaluation-submission-1", status: "interrupted", normalizedStatus: "interrupted",
+      retryable: false, error: "Evaluation Run stopped",
+    });
+    await resumer.stop(handle.runId);
+    const result = (await store.getEvaluation(evaluationId))!;
+    expect(result.status.status).toBe("cancelled");
+    expect(result.output?.artifacts).toHaveLength(1);
+    expect(result.output?.trajectory.source).toBe("evaluator");
+    expect(result.attempts[0]).toMatchObject({
+      submissionId: "evaluation-submission-1", status: "interrupted", completedAt: expect.any(String),
+      resources: { status: "collected" },
+    });
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("does not restart a retryable Submission after the active Run receives a stop signal", async () => {
+    const store = makeStore();
+    const catalog = makeCatalog();
+    const harness = makeHarness();
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog, configResolver: makeConfigResolver(), store,
+    });
+    const handle = await admission.start(startRequest("stop-active-retry"));
+    vi.mocked(harness.submitAgent).mockResolvedValue({
+      submissionId: "active-submission", status: "running", normalizedStatus: "running",
+    });
+    let finishWait!: (submission: AgentSubmission) => void;
+    const waiting = new Promise<AgentSubmission>((resolve) => { finishWait = resolve; });
+    vi.mocked(harness.waitForSubmission).mockImplementation(async () => waiting);
+    const resumer = createEvalRunResumer({ getSamples: catalog.getSamples, harness, store });
+    const controller = new AbortController();
+    const task = resumer.resume(handle.runId, controller.signal);
+    await vi.waitFor(() => expect(harness.waitForSubmission).toHaveBeenCalledOnce());
+    controller.abort();
+    finishWait({ submissionId: "active-submission", status: "interrupted",
+      normalizedStatus: "interrupted", retryable: true, error: "Run stopped" });
+    await task;
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("keeps a stopped Subject pending until its complete evidence can be saved", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const handle = await admission.start(startRequest("stop-evidence-retry"));
+    const samplingId = handle.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    const pending: SamplingState = {
+      ...queued, subjectChatId: "evidence-chat", execution: { status: "retrying", evidencePending: true },
+      executionAttempts: [{
+        executionAttemptId: "terminal-attempt", samplingId, attemptNumber: 1,
+        submissionId: "terminal-submission", status: "interrupted", completedAt: "2026-10-14T00:00:00.000Z",
+      }],
+    };
+    await store.updateSampling(pending, queued);
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
+      submissionId: "terminal-submission", status: "interrupted", normalizedStatus: "interrupted",
+    });
+    vi.mocked(harness.collectExecution).mockRejectedValueOnce(new Error("evidence unavailable"));
+    await resumer.stop(handle.runId);
+    expect((await store.getSampling(samplingId))?.execution).toMatchObject({
+      status: "retrying", evidencePending: true,
+    });
+    await resumer.stop(handle.runId);
+    const completed = (await store.getSampling(samplingId))!;
+    expect(completed.execution.status).toBe("cancelled");
+    expect(completed.artifacts).toHaveLength(1);
+    expect(completed.trajectory?.source).toBe("subject");
   });
 });
 

@@ -2,6 +2,7 @@ import type { EvalRunAdmission } from "@eval-platform/eval-runtime";
 import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
 import type { PostgresProjectCatalog } from "./db/catalog.js";
 import type { ProjectRunView } from "./db/run-view.js";
+import { ProjectRunStopConflictError } from "./db/runtime.js";
 import {
   EvaluationSelectionTooLargeError,
   MAX_EVALUATION_BODY_BYTES,
@@ -17,6 +18,8 @@ export interface IndependentEvaluationOwnerServices {
   readonly runtime: Pick<EvalRunAdmission, "evaluate">;
   /** Return a consistent, owner-scoped Run view and its ordered Evaluation records. */
   readonly readRun: (projectId: string, runId: string) => Promise<ProjectRunView | null>;
+  readonly getCurrentRun: (projectId: string) => Promise<{ runId: string; stopRequested?: true } | null>;
+  readonly stopRun: (projectId: string, runId: string) => Promise<{ runId: string; stopRequested: true } | null>;
 }
 
 export interface IndependentEvaluationApiOptions {
@@ -34,12 +37,12 @@ export interface IndependentEvaluationApi {
 }
 
 type Route =
-  | { readonly kind: "samplingPage" | "samplingIds" | "evaluate"; readonly projectId: string }
-  | { readonly kind: "run" | "runEvaluations"; readonly projectId: string; readonly runId: string };
+  | { readonly kind: "samplingPage" | "samplingIds" | "evaluate" | "currentRun"; readonly projectId: string }
+  | { readonly kind: "run" | "runEvaluations" | "stopRun"; readonly projectId: string; readonly runId: string };
 
 type RouteShape =
-  | { readonly kind: "samplingPage" | "samplingIds" | "evaluate"; readonly projectSegment: string }
-  | { readonly kind: "run" | "runEvaluations"; readonly projectSegment: string; readonly runSegment: string };
+  | { readonly kind: "samplingPage" | "samplingIds" | "evaluate" | "currentRun"; readonly projectSegment: string }
+  | { readonly kind: "run" | "runEvaluations" | "stopRun"; readonly projectSegment: string; readonly runSegment: string };
 
 function routeShape(pathname: string): RouteShape | null {
   const parts = pathname.split("/").filter(Boolean);
@@ -52,6 +55,12 @@ function routeShape(pathname: string): RouteShape | null {
     return { kind: "samplingIds", projectSegment };
   }
   if (parts.length === 4 && parts[3] === "evaluations") return { kind: "evaluate", projectSegment };
+  if (parts.length === 5 && parts[3] === "runs" && parts[4] === "current") {
+    return { kind: "currentRun", projectSegment };
+  }
+  if (parts.length === 6 && parts[3] === "runs" && parts[4] && parts[5] === "stop") {
+    return { kind: "stopRun", projectSegment, runSegment: parts[4] };
+  }
   if (parts.length === 5 && parts[3] === "runs" && parts[4]) {
     return { kind: "run", projectSegment, runSegment: parts[4] };
   }
@@ -98,7 +107,7 @@ function routeFor(pathname: string): Route | null {
     if (error instanceof URIError) throw new HttpError(400, "INVALID_REQUEST", "Invalid projectId encoding");
     throw error;
   }
-  if (shape.kind === "run" || shape.kind === "runEvaluations") {
+  if (shape.kind === "run" || shape.kind === "runEvaluations" || shape.kind === "stopRun") {
     let runId: string;
     try {
       runId = validId(decodeURIComponent(shape.runSegment), "runId");
@@ -112,7 +121,7 @@ function routeFor(pathname: string): Route | null {
 }
 
 function methodFor(route: Route): "GET" | "POST" {
-  return route.kind === "evaluate" ? "POST" : "GET";
+  return route.kind === "evaluate" || route.kind === "stopRun" ? "POST" : "GET";
 }
 
 function queryValues(url: URL, allowed: readonly string[]): Record<string, string> {
@@ -338,6 +347,17 @@ export function createIndependentEvaluationApi(options: IndependentEvaluationApi
               const handle = await services.runtime.evaluate({ projectId: route.projectId, ...body });
               return json(202, handle, corsOrigin);
             }
+            case "currentRun": {
+              queryValues(url, []);
+              return json(200, { run: await services.getCurrentRun(route.projectId) }, corsOrigin);
+            }
+            case "stopRun": {
+              queryValues(url, []);
+              if (request.body) throw new HttpError(400, "INVALID_REQUEST", "Stop request must not have a body");
+              const stopped = await services.stopRun(route.projectId, route.runId);
+              if (!stopped) throw new HttpError(404, "NOT_FOUND", "Run not found");
+              return json(202, stopped, corsOrigin);
+            }
             case "run":
             case "runEvaluations": {
               queryValues(url, []);
@@ -365,6 +385,10 @@ export function createIndependentEvaluationApi(options: IndependentEvaluationApi
         }
         if (error instanceof RuntimeEvaluationSelectionError) {
           return failure(new HttpError(409, "SAMPLING_UNAVAILABLE", "Selected Sampling is unavailable for evaluation"), corsOrigin);
+        }
+        if (error instanceof ProjectRunStopConflictError) {
+          return failure(new HttpError(409,
+            error.reason === "no_active_run" ? "NO_ACTIVE_RUN" : "RUN_CHANGED", error.message), corsOrigin);
         }
         if (error instanceof HttpError) return failure(error, corsOrigin);
         if (error instanceof ConfigNotFoundError && error.kind === "evaluation") {

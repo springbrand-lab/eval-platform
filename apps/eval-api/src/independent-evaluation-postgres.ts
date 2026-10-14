@@ -7,7 +7,7 @@ import type { EvalDb } from "./db/client.js";
 import { createPostgresConfigReader } from "./db/config.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./db/release.js";
 import { createPostgresProjectRunReader } from "./db/run-view.js";
-import { createPostgresRuntimeStore } from "./db/runtime.js";
+import { createPostgresProjectRunControl, createPostgresRuntimeStore } from "./db/runtime.js";
 import {
   createIndependentEvaluationApi,
   type IndependentEvaluationApi,
@@ -31,6 +31,7 @@ export function createPostgresIndependentEvaluationApi(
     createOwnerServices(ownerUserId) {
       const configStore = createPostgresConfigReader(options.db, ownerUserId);
       const catalog = createPostgresProjectCatalog(options.db, ownerUserId, release);
+      const runControl = createPostgresProjectRunControl(options.db, ownerUserId);
       const runtime = createEvalRunAdmission({
         sourceCommit: release.sourceCommit,
         catalog,
@@ -41,6 +42,8 @@ export function createPostgresIndependentEvaluationApi(
         catalog,
         runtime,
         readRun: createPostgresProjectRunReader(options.db, ownerUserId),
+        getCurrentRun: runControl.getCurrentRun,
+        stopRun: runControl.stopRun,
       };
     },
   });

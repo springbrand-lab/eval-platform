@@ -58,6 +58,8 @@ function setup() {
       },
       runtime: { evaluate },
       readRun: async () => null,
+      getCurrentRun: async () => ({ runId: "run-1" }),
+      stopRun: async () => ({ runId: "run-1", stopRequested: true }),
     }),
   });
   const handler = createEvalApiHandler({ sp, forOwner, initialResources, independentEvaluation });
@@ -169,6 +171,16 @@ describe("Eval HTTP control plane", () => {
     expect(await response.json()).toEqual({ error: {
       code: "project_busy", message: "Project project-1 already has unfinished Run active-run",
     } });
+  });
+
+  it("mounts Project current-Run lookup and targeted stop", async () => {
+    const app = setup();
+    const current = await app.handler(request("/api/projects/project-1/runs/current"));
+    expect(current.status).toBe(200);
+    expect(await current.json()).toEqual({ run: { runId: "run-1" } });
+    const stopped = await app.handler(request("/api/projects/project-1/runs/run-1/stop", "POST"));
+    expect(stopped.status).toBe(202);
+    expect(await stopped.json()).toEqual({ runId: "run-1", stopRequested: true });
   });
 
   it("imports raw Dataset documents and mounts the established independent evaluation routes", async () => {

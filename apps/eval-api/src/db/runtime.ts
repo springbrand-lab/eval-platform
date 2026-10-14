@@ -1,7 +1,7 @@
 import type { EvaluationRecord, ProjectInitialLaunch, Sampling } from "@eval-platform/eval-contracts";
 import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
 import { RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
-import { and, eq, exists, gt, inArray, or, sql } from "drizzle-orm";
+import { and, eq, exists, gt, inArray, not, or, sql } from "drizzle-orm";
 import { sqlBatches } from "./batch.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
@@ -27,6 +27,13 @@ function unfinishedRunCondition(reader: RuntimeReader) {
       inArray(sql<string>`${evaluations.facts}->'status'->>'status'`, unfinished),
     )));
   return or(executionPending, evaluationPending);
+}
+
+function activeRunCondition(reader: RuntimeReader) {
+  return or(
+    unfinishedRunCondition(reader),
+    and(eq(runs.stopRequested, true), eq(runs.stopFinalized, false)),
+  );
 }
 
 type RuntimeStoreScope =
@@ -107,6 +114,8 @@ export async function readRunRecords(
       idempotencyKey: row.idempotencyKey,
       requestFingerprint: row.requestFingerprint,
     },
+    ...(row.stopRequested ? { stopRequested: true as const } : {}),
+    ...(row.stopFinalized ? { stopFinalized: true as const } : {}),
   }));
 }
 
@@ -119,6 +128,7 @@ function validateAdmission(
   records: readonly Sampling[],
   judges: readonly EvaluationRecord[],
 ): void {
+  if (run.stopRequested || run.stopFinalized) throw new Error("New Run cannot be stopped at admission");
   if (run.samplingIds.length === 0) throw new Error("Run must contain Samplings");
   if (run.samplingIds.length !== records.length || run.samplingIds.some((id, index) => id !== records[index]?.samplingId)) {
     throw new Error("Run Sampling scope must match the submitted records");
@@ -221,7 +231,7 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
           .where(and(
             eq(runs.ownerUserId, project.ownerUserId),
             eq(runs.projectId, run.projectId),
-            unfinishedRunCondition(transaction),
+            activeRunCondition(transaction),
           )).limit(1);
         if (active) throw new RuntimeProjectBusyError(run.projectId, active.runId);
         if (scope.kind === "user" && (project.sourceBranch !== scope.release.sourceBranch
@@ -405,12 +415,24 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
 export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRecoveryStore {
   return {
     ...createRuntimeStore(db, { kind: "worker" }),
+    async isRunStopRequested(runId) {
+      const [row] = await db.select({ stopRequested: runs.stopRequested }).from(runs)
+        .where(eq(runs.runId, runId));
+      return row?.stopRequested ?? false;
+    },
+    async markRunStopFinalized(runId) {
+      const [updated] = await db.update(runs).set({ stopFinalized: true })
+        .where(and(eq(runs.runId, runId), eq(runs.stopRequested, true),
+          not(unfinishedRunCondition(db)!)))
+        .returning({ runId: runs.runId });
+      return updated !== undefined;
+    },
     async listRecoverableRunIds(afterRunId, limit = 100) {
       if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
         throw new Error("Recovery page size must be between 1 and 1000");
       }
       const rows = await db.select({ runId: runs.runId }).from(runs)
-        .where(and(afterRunId === undefined ? undefined : gt(runs.runId, afterRunId), unfinishedRunCondition(db)))
+        .where(and(afterRunId === undefined ? undefined : gt(runs.runId, afterRunId), activeRunCondition(db)))
         .orderBy(runs.runId).limit(limit);
       return rows.map(({ runId }) => runId);
     },
@@ -421,4 +443,48 @@ export function createPostgresRuntimeStore(db: EvalDb, ownerUserId: string, rele
   return createRuntimeStore(db, {
     kind: "user", ownerUserId: requireOwnerUserId(ownerUserId), release: requireEvalSpRelease(release),
   });
+}
+
+export class ProjectRunStopConflictError extends Error {
+  constructor(readonly reason: "no_active_run" | "run_changed") {
+    super(reason === "no_active_run" ? "Project has no unfinished Run" : "Project is running a different Run");
+    this.name = "ProjectRunStopConflictError";
+  }
+}
+
+/** Stop intent is serialized with Run admission through the owned Project row. */
+export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string) {
+  const owner = requireOwnerUserId(ownerUserId);
+  return {
+    async getCurrentRun(projectId: string): Promise<{ runId: string; stopRequested?: true } | null> {
+      const [active] = await db.select({ runId: runs.runId, stopRequested: runs.stopRequested })
+        .from(runs).where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId),
+          activeRunCondition(db))).limit(1);
+      return active ? { runId: active.runId,
+        ...(active.stopRequested ? { stopRequested: true as const } : {}) } : null;
+    },
+    async stopRun(projectId: string, runId: string): Promise<{ runId: string; stopRequested: true } | null> {
+      return db.transaction(async (transaction) => {
+        const [project] = await transaction.select({ projectId: projects.projectId }).from(projects)
+          .where(and(eq(projects.projectId, projectId), eq(projects.ownerUserId, owner)))
+          .for("update");
+        if (!project) return null;
+        const [target] = await transaction.select({ runId: runs.runId, stopRequested: runs.stopRequested })
+          .from(runs).where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId),
+            eq(runs.runId, runId)));
+        if (!target) return null;
+        if (target.stopRequested) return { runId, stopRequested: true };
+        const [active] = await transaction.select({ runId: runs.runId, stopRequested: runs.stopRequested })
+          .from(runs)
+          .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId),
+            activeRunCondition(transaction)))
+          .limit(1);
+        if (!active) throw new ProjectRunStopConflictError("no_active_run");
+        if (active.runId !== runId) throw new ProjectRunStopConflictError("run_changed");
+        await transaction.update(runs).set({ stopRequested: true }).where(eq(runs.runId, runId));
+        await transaction.execute(sql`select pg_notify('eval_run_created', ${runId})`);
+        return { runId, stopRequested: true };
+      });
+    },
+  };
 }

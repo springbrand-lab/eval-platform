@@ -17,6 +17,7 @@ import type {
   ResolvedExecutionConfig,
   RunConfigSnapshot,
 } from "../config/index.js";
+import type { AgentHandle, Harness } from "../harness/index.js";
 
 import type {
   EvalRuntime,
@@ -40,6 +41,7 @@ import type {
 } from "./store.js";
 import { persistRuntimeRecord, RuntimeRunIdentityConflictError } from "./store.js";
 import {
+  type AgentAttemptRecord,
   errorMessage,
   requireSpHarness,
 } from "./agent-lifecycle.js";
@@ -60,6 +62,7 @@ import { createAgentScheduler, type AgentScheduler } from "./scheduler.js";
 import { isPendingStatus, toRunSnapshot, toSamplingSnapshot } from "./projection.js";
 
 type RuntimeStageDependencies = ExecutionStageDependencies & EvaluationStageDependencies;
+const STOP_IO_CONCURRENCY = 16;
 
 /** The chosen Sampling set cannot be admitted as an independent evaluation. */
 export class RuntimeEvaluationSelectionError extends Error {
@@ -86,6 +89,15 @@ function defaultNow(): string {
 
 function defaultSleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function stageOperationKey(stage: "execution" | "evaluation", samplingId: string, attemptNumber: number): string {
+  return attemptNumber === 1 ? `${stage}:${samplingId}` : `${stage}:${samplingId}:restart:${attemptNumber}`;
+}
+
+function stoppedAttempt<T extends AgentAttemptRecord>(attempt: T, completedAt: string): T {
+  const { resources: _resources, ...facts } = attempt;
+  return { ...facts, status: "cancelled", completedAt, error: "Run stopped" } as T;
 }
 
 export function requireSourceCommit(sourceCommit: string): string {
@@ -167,12 +179,14 @@ class RunReader {
 }
 
 class RunResumer extends RunReader implements EvalRunResumer {
+  readonly #harness: Harness;
   readonly #stageDependencies: RuntimeStageDependencies;
   readonly #createRetryController: (policy?: RetryPolicy) => RetryController;
   readonly #onError: (error: Error) => void;
 
   constructor(dependencies: EvalRunResumerDependencies) {
     super(dependencies);
+    this.#harness = dependencies.harness;
     this.#createRetryController = dependencies.createRetryController ?? createRetryController;
     this.#onError = dependencies.onError ?? ((error) => console.error(error));
     this.#stageDependencies = {
@@ -186,21 +200,24 @@ class RunResumer extends RunReader implements EvalRunResumer {
     };
   }
 
-  async resume(runId: string): Promise<void> {
+  async resume(runId: string, stopSignal?: AbortSignal): Promise<void> {
+    if (stopSignal?.aborted) return;
     const run = await this.store.getRun(runId);
     if (!run) throw new Error(`Unknown run ${runId}`);
+    if (run.stopRequested || stopSignal?.aborted) return;
 
     let samplings = await this.loadSamplingRecords(run.samplingIds);
     if (run.config.operation !== "evaluation") {
       const unfinished = samplings.filter(({ execution }) => isPendingStatus(execution.status));
       if (unfinished.length > 0) {
         const contexts = await this.loadSamplingContexts(unfinished, run.projectId);
-        await this.runExecutionPhase(contexts, run.config.execution);
+        await this.runExecutionPhase(contexts, run.config.execution, stopSignal);
         samplings = await this.loadSamplingRecords(run.samplingIds);
       }
       if (samplings.some(({ execution }) => isPendingStatus(execution.status))) return;
     }
 
+    if (stopSignal?.aborted) return;
     if (run.config.operation === "execution") return;
 
     const evaluationConfig = run.config.evaluation;
@@ -227,7 +244,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
     }));
 
     const settlements = await Promise.allSettled([
-      this.runEvaluationPhase(evaluationContexts, evaluationConfig),
+      this.runEvaluationPhase(evaluationContexts, evaluationConfig, stopSignal),
       ...toCancel.map((evaluation) => this.cancelEvaluation(evaluation, evaluationConfig)),
     ]);
     const errors = settlements.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
@@ -237,12 +254,15 @@ class RunResumer extends RunReader implements EvalRunResumer {
   private async runExecutionPhase(
     contexts: readonly RuntimeSamplingContext[],
     config: ResolvedExecutionConfig,
+    stopSignal?: AbortSignal,
   ): Promise<void> {
     const scheduler = this.scheduler(config.executionConcurrency);
+    const dependencies = this.stageDependenciesFor(stopSignal);
     const errors: unknown[] = [];
     await scheduler.run(contexts.map((context) => async () => {
+      if (stopSignal?.aborted) return;
       try {
-        await executeSampling(this.#stageDependencies, {
+        await executeSampling(dependencies, {
           context,
           harnessConfig: config.harness,
           retryPolicy: config.retryPolicy,
@@ -257,12 +277,15 @@ class RunResumer extends RunReader implements EvalRunResumer {
   private async runEvaluationPhase(
     contexts: readonly RuntimeEvaluationContext[],
     config: ResolvedEvaluationConfig,
+    stopSignal?: AbortSignal,
   ): Promise<void> {
     const scheduler = this.scheduler(config.evaluationConcurrency);
+    const dependencies = this.stageDependenciesFor(stopSignal);
     const errors: unknown[] = [];
     await scheduler.run(contexts.map((context) => async () => {
+      if (stopSignal?.aborted) return;
       try {
-        await evaluateSampling(this.#stageDependencies, {
+        await evaluateSampling(dependencies, {
           context,
           harnessConfig: config.evaluationHarness,
           retryPolicy: config.retryPolicy,
@@ -272,6 +295,235 @@ class RunResumer extends RunReader implements EvalRunResumer {
       }
     }));
     if (errors.length > 0) throw new AggregateError(errors, "Evaluation phase could not persist its progress");
+  }
+
+  async interrupt(runId: string): Promise<void> {
+    const run = await this.store.getRun(runId);
+    if (!run) throw new Error(`Unknown run ${runId}`);
+    if (!run.stopRequested) return;
+    const samplings = await this.loadSamplingRecords(run.samplingIds);
+    const handles: AgentHandle[] = [];
+    if (run.config.operation !== "evaluation") {
+      for (const sampling of samplings) {
+        if (!sampling.subjectChatId || !isPendingStatus(sampling.execution.status)) continue;
+        handles.push({
+          role: "subject", framework: requireSpHarness(run.config.execution.harness, "subject").framework,
+          ownerUserId: sampling.subjectAgent.ownerUserId,
+          chatId: sampling.subjectChatId, samplingId: sampling.samplingId,
+        });
+      }
+    }
+    if (run.config.operation !== "execution") {
+      const evaluations = await this.loadEvaluationRecords(run.evaluationIds);
+      for (const evaluation of evaluations) {
+        if (!evaluation.chatId || !isPendingStatus(evaluation.status.status)) continue;
+        handles.push({
+          role: "evaluator", framework: run.config.evaluation.evaluationHarness.framework,
+          ownerUserId: evaluation.evaluator.ownerUserId,
+          chatId: evaluation.chatId, samplingId: evaluation.samplingId,
+        });
+      }
+    }
+    const errors: unknown[] = [];
+    await this.scheduler(STOP_IO_CONCURRENCY).run(handles.map((handle) => async () => {
+      try { await this.#harness.stopAgent({ handle }); }
+      catch (error) { errors.push(error); }
+    }));
+    if (errors.length > 0) throw new AggregateError(errors, `Could not interrupt Run ${runId}`);
+  }
+
+  async stop(runId: string): Promise<void> {
+    const run = await this.store.getRun(runId);
+    if (!run) throw new Error(`Unknown run ${runId}`);
+    if (!run.stopRequested) return;
+    await this.interrupt(runId);
+    const samplings = await this.loadSamplingRecords(run.samplingIds);
+    const errors: unknown[] = [];
+    if (run.config.operation !== "evaluation") {
+      await this.scheduler(STOP_IO_CONCURRENCY).run(samplings.map((sampling) => async () => {
+        try { await this.finishStoppedExecution(run, sampling); }
+        catch (error) { errors.push(error); }
+      }));
+    }
+    if (run.config.operation !== "execution") {
+      const evaluations = await this.loadEvaluationRecords(run.evaluationIds);
+      const samplingById = new Map(samplings.map((sampling) => [sampling.samplingId, sampling]));
+      await this.scheduler(STOP_IO_CONCURRENCY).run(evaluations.map((evaluation) => async () => {
+        const sampling = samplingById.get(evaluation.samplingId);
+        try {
+          if (!sampling) throw new Error(`Run ${runId} is missing Sampling ${evaluation.samplingId}`);
+          await this.finishStoppedEvaluation(run, sampling, evaluation);
+        } catch (error) { errors.push(error); }
+      }));
+    }
+    if (errors.length > 0) throw new AggregateError(errors, `Could not finalize stopped Run ${runId}`);
+  }
+
+  private stopStageDependencies(): RuntimeStageDependencies {
+    return {
+      ...this.#stageDependencies,
+      createRetryController: (policy) => {
+        const delegate = this.#createRetryController(policy);
+        return {
+          decide: (input) => input.operation === "restart"
+            ? Promise.resolve({ shouldRetry: false }) : delegate.decide(input),
+        };
+      },
+    };
+  }
+
+  private stageDependenciesFor(stopSignal?: AbortSignal): RuntimeStageDependencies {
+    if (!stopSignal) return this.#stageDependencies;
+    return {
+      ...this.#stageDependencies,
+      createRetryController: (policy) => {
+        const delegate = this.#createRetryController(policy);
+        return {
+          decide: (input) => input.operation === "restart" && stopSignal.aborted
+            ? Promise.resolve({ shouldRetry: false }) : delegate.decide(input),
+        };
+      },
+    };
+  }
+
+  private async finishStoppedExecution(run: RuntimeRunRecord, initial: SamplingState): Promise<void> {
+    if (run.config.operation === "evaluation") throw new Error("Evaluation Run has no execution phase");
+    const executionConfig = run.config.execution;
+    const interrupted = (sampling: SamplingState) => {
+      const status = sampling.executionAttempts.at(-1)?.status;
+      return status === "interrupted" || status === "cancelled";
+    };
+    const wasPending = isPendingStatus(initial.execution.status);
+    if (!wasPending
+      && !(initial.execution.status === "failed" && interrupted(initial))) return;
+    let current = initial;
+    const attempt = current.executionAttempts.at(-1);
+    const hasOperation = !!(current.subjectChatId && attempt
+      && (attempt.resources || attempt.submissionId || attempt.completedAt));
+    let operationFound = false;
+    if (hasOperation) {
+      const handle: AgentHandle = {
+        role: "subject", framework: requireSpHarness(executionConfig.harness, "subject").framework,
+        ownerUserId: current.subjectAgent.ownerUserId,
+        chatId: current.subjectChatId!, samplingId: current.samplingId,
+      };
+      const receipt = await this.#harness.inspectAgentOperation({
+        handle, idempotencyKey: stageOperationKey("execution", current.samplingId, attempt!.attemptNumber),
+      });
+      operationFound = receipt !== null;
+      if (!receipt && attempt?.submissionId) throw new Error(`Subject Submission ${attempt.submissionId} disappeared`);
+      if (receipt && (receipt.normalizedStatus === "queued" || receipt.normalizedStatus === "running")) {
+        throw new Error(`Stopped Subject Submission ${receipt.submissionId} is still active`);
+      }
+      if (receipt && isPendingStatus(current.execution.status)) {
+        const [context] = await this.loadSamplingContexts([current], run.projectId);
+        await executeSampling(this.stopStageDependencies(), {
+          context: context!, harnessConfig: executionConfig.harness,
+          retryPolicy: executionConfig.retryPolicy,
+        });
+        current = (await this.store.getSampling(current.samplingId))!;
+      }
+    }
+    if (current.execution.evidencePending) return;
+    if (interrupted(current) && (!current.artifacts || !current.trajectory) && current.subjectChatId) {
+      const handle: AgentHandle = {
+        role: "subject", framework: requireSpHarness(executionConfig.harness, "subject").framework,
+        ownerUserId: current.subjectAgent.ownerUserId,
+        chatId: current.subjectChatId, samplingId: current.samplingId,
+      };
+      try {
+        const output = await this.#harness.collectExecution({ handle });
+        const next = { ...current, artifacts: output.artifacts, trajectory: output.trajectory };
+        await this.store.updateSampling(next, current);
+        current = next;
+      } catch (error) {
+        await this.store.updateSampling({
+          ...current,
+          execution: { status: "retrying", evidencePending: true, lastError: errorMessage(error) },
+        }, current);
+        return;
+      }
+    }
+    if (!isPendingStatus(current.execution.status)
+      && !(current.execution.status === "failed" && (wasPending || interrupted(current)))) return;
+    const last = current.executionAttempts.at(-1);
+    const attempts = last && !last.submissionId && !operationFound
+      ? [...current.executionAttempts.slice(0, -1), stoppedAttempt(last, this.#stageDependencies.now())]
+      : current.executionAttempts;
+    await this.store.updateSampling({
+      ...current,
+      executionAttempts: attempts,
+      execution: { status: "cancelled", lastError: "Run stopped" },
+    }, current);
+  }
+
+  private async finishStoppedEvaluation(
+    run: RuntimeRunRecord, sampling: SamplingState, initial: EvaluationRecord,
+  ): Promise<void> {
+    if (run.config.operation === "execution") throw new Error("Execution Run has no evaluation phase");
+    const evaluationConfig = run.config.evaluation;
+    const interrupted = (evaluation: EvaluationRecord) => {
+      const status = evaluation.attempts.at(-1)?.status;
+      return status === "interrupted" || status === "cancelled";
+    };
+    const wasPending = isPendingStatus(initial.status.status);
+    if (!wasPending
+      && !(initial.status.status === "failed" && interrupted(initial))) return;
+    let current = initial;
+    const attempt = current.attempts.at(-1);
+    const hasOperation = !!(current.chatId && attempt
+      && (attempt.resources || attempt.submissionId || attempt.completedAt));
+    let operationFound = false;
+    if (hasOperation) {
+      const handle: AgentHandle = {
+        role: "evaluator", framework: evaluationConfig.evaluationHarness.framework,
+        ownerUserId: current.evaluator.ownerUserId,
+        chatId: current.chatId!, samplingId: current.samplingId,
+        ...(sampling.subjectChatId ? { evaluationWorkspace: {
+          subject: { userId: sampling.subjectAgent.ownerUserId, chatId: sampling.subjectChatId },
+          evaluationId: current.evaluationId,
+        } } : {}),
+      };
+      const receipt = await this.#harness.inspectAgentOperation({
+        handle, idempotencyKey: stageOperationKey("evaluation", current.samplingId, attempt!.attemptNumber),
+      });
+      operationFound = receipt !== null;
+      if (!receipt && attempt?.submissionId) throw new Error(`Evaluator Submission ${attempt.submissionId} disappeared`);
+      if (receipt && (receipt.normalizedStatus === "queued" || receipt.normalizedStatus === "running")) {
+        throw new Error(`Stopped Evaluator Submission ${receipt.submissionId} is still active`);
+      }
+      if (receipt && isPendingStatus(current.status.status)) {
+        const [context] = await this.loadSamplingContexts([sampling], run.projectId);
+        await evaluateSampling(this.stopStageDependencies(), {
+          context: { sampling, evaluation: current, sample: context!.sample },
+          harnessConfig: evaluationConfig.evaluationHarness,
+          retryPolicy: evaluationConfig.retryPolicy,
+        });
+        current = (await this.store.getEvaluation(current.evaluationId))!;
+      }
+      if (receipt && interrupted(current) && !current.output) {
+        try {
+          const output = await this.#harness.collectEvaluation({ handle });
+          const next = { ...current, output };
+          await this.store.updateEvaluation(next, current);
+          current = next;
+        } catch (error) {
+          await this.store.updateEvaluation({
+            ...current, status: { status: "retrying", lastError: errorMessage(error) },
+          }, current);
+          return;
+        }
+      }
+    }
+    if (!isPendingStatus(current.status.status)
+      && !(current.status.status === "failed" && (wasPending || interrupted(current)))) return;
+    const last = current.attempts.at(-1);
+    const attempts = last && !last.submissionId && !operationFound
+      ? [...current.attempts.slice(0, -1), stoppedAttempt(last, this.#stageDependencies.now())]
+      : current.attempts;
+    await this.store.updateEvaluation({
+      ...current, attempts, status: { status: "cancelled", lastError: "Run stopped" },
+    }, current);
   }
 
   private async cancelEvaluation(

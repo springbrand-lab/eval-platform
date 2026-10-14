@@ -78,6 +78,7 @@ function runtimeFixture() {
     async submitAgent({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true, normalizedStatus: "completed" }; },
     async restartAgent() { throw new Error("Successful agent must not restart"); },
     async inspectAgentOperation({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true, normalizedStatus: "completed" }; },
+    async stopAgent() { return false; },
     async waitForSubmission({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true, normalizedStatus: "completed" }; },
     async collectExecution({ handle }) {
       return {

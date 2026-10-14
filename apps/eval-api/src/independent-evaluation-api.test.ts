@@ -2,6 +2,7 @@ import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeProjectBus
 import { describe, expect, it, vi } from "vitest";
 import { createIndependentEvaluationApi } from "./independent-evaluation-api.js";
 import { createIndependentEvaluationHttpServer } from "./independent-evaluation-http.js";
+import { ProjectRunStopConflictError } from "./db/runtime.js";
 
 const project = { projectId: "project-1", ownerUserId: "alice", name: "Evaluation", sourceBranch: "release-2.0.0" };
 const samplingIds = ["sampling-1", "sampling-2"];
@@ -39,6 +40,9 @@ function fixture() {
       ] }
       : null
   ));
+  const getCurrentRun = vi.fn(async () => ({ runId: run.runId }));
+  const stopRun = vi.fn(async (): Promise<{ runId: string; stopRequested: true } | null> =>
+    ({ runId: run.runId, stopRequested: true }));
   const createOwnerServices = vi.fn(async (ownerUserId: string) => ({
     catalog: ownerUserId === "alice" ? catalog : {
       ...catalog,
@@ -46,9 +50,11 @@ function fixture() {
     },
     runtime,
     readRun: (projectId: string, runId: string) => readRun(ownerUserId, projectId, runId),
+    getCurrentRun,
+    stopRun,
   }));
   const api = createIndependentEvaluationApi({ spClient, createOwnerServices });
-  return { api, spClient, catalog, runtime, readRun, createOwnerServices };
+  return { api, spClient, catalog, runtime, readRun, getCurrentRun, stopRun, createOwnerServices };
 }
 
 function request(path: string, init: RequestInit = {}): Request {
@@ -63,6 +69,27 @@ async function body(response: Response): Promise<unknown> {
 }
 
 describe("independent evaluation HTTP API", () => {
+  it("requests stopping a named current Run without retargeting a later Run", async () => {
+    const { api, getCurrentRun, stopRun } = fixture();
+    const path = "/api/projects/project-1/runs/run-1/stop";
+    expect(await body(await api.handle(request("/api/projects/project-1/runs/current"))))
+      .toEqual({ run: { runId: "run-1" } });
+    expect(getCurrentRun).toHaveBeenCalledWith("project-1");
+    const stopped = await api.handle(request(path, { method: "POST" }));
+    expect(stopped.status).toBe(202);
+    expect(await body(stopped)).toEqual({ runId: "run-1", stopRequested: true });
+    expect(stopRun).toHaveBeenCalledWith("project-1", "run-1");
+    stopRun.mockResolvedValueOnce(null);
+    expect((await api.handle(request(path, { method: "POST" }))).status).toBe(404);
+    stopRun.mockRejectedValueOnce(new ProjectRunStopConflictError("run_changed"));
+    expect(await body(await api.handle(request(path, { method: "POST" }))))
+      .toEqual({ error: { code: "RUN_CHANGED", message: "Project is running a different Run" } });
+    stopRun.mockRejectedValueOnce(new ProjectRunStopConflictError("no_active_run"));
+    expect(await body(await api.handle(request(path, { method: "POST" }))))
+      .toEqual({ error: { code: "NO_ACTIVE_RUN", message: "Project has no unfinished Run" } });
+    expect((await api.handle(request(path, { method: "GET" }))).status).toBe(405);
+    expect((await api.handle(request("/api/projects/other/runs/run-1/stop", { method: "POST" }))).status).toBe(404);
+  });
   it("verifies every request with Eval SP and forwards the same Project filter to page and all-ID queries", async () => {
     const { api, spClient, catalog, createOwnerServices } = fixture();
     const [page, allIds] = await Promise.all([

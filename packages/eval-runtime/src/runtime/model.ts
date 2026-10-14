@@ -116,4 +116,10 @@ export interface EvalRunResumerDependencies extends Omit<EvalRuntimeDependencies
   readonly getSamples: RuntimeCatalog["getSamples"];
 }
 
-export type EvalRunResumer = Pick<EvalRuntime, "resume">;
+export interface EvalRunResumer {
+  resume(runId: string, stopSignal?: AbortSignal): Promise<void>;
+  /** Interrupt active SP Submissions without finalizing still-running local tasks. */
+  interrupt(runId: string): Promise<void>;
+  /** Finalize a persisted stop request after local resume tasks have quiesced. */
+  stop(runId: string): Promise<void>;
+}
