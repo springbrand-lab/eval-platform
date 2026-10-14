@@ -1,5 +1,5 @@
 {
-  "id": "e30773f8-cfd1-4546-b109-f5f31962d189",
+  "id": "d30193da-f9fe-4fb4-90e7-bee6edfa246a",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -320,7 +320,16 @@
       },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "eval_projects_owner_id_uq": {
+          "name": "eval_projects_owner_id_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "owner_user_id",
+            "project_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -434,6 +443,12 @@
       "name": "eval_run_samplings",
       "schema": "",
       "columns": {
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "run_id": {
           "name": "run_id",
           "type": "text",
@@ -471,27 +486,31 @@
         }
       },
       "foreignKeys": {
-        "eval_run_samplings_run_id_eval_runs_run_id_fk": {
-          "name": "eval_run_samplings_run_id_eval_runs_run_id_fk",
+        "eval_run_samplings_owner_user_id_run_id_eval_runs_owner_user_id_run_id_fk": {
+          "name": "eval_run_samplings_owner_user_id_run_id_eval_runs_owner_user_id_run_id_fk",
           "tableFrom": "eval_run_samplings",
           "tableTo": "eval_runs",
           "columnsFrom": [
+            "owner_user_id",
             "run_id"
           ],
           "columnsTo": [
+            "owner_user_id",
             "run_id"
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "eval_run_samplings_sampling_id_eval_samplings_sampling_id_fk": {
-          "name": "eval_run_samplings_sampling_id_eval_samplings_sampling_id_fk",
+        "eval_run_samplings_owner_user_id_sampling_id_eval_samplings_owner_user_id_sampling_id_fk": {
+          "name": "eval_run_samplings_owner_user_id_sampling_id_eval_samplings_owner_user_id_sampling_id_fk",
           "tableFrom": "eval_run_samplings",
           "tableTo": "eval_samplings",
           "columnsFrom": [
+            "owner_user_id",
             "sampling_id"
           ],
           "columnsTo": [
+            "owner_user_id",
             "sampling_id"
           ],
           "onDelete": "restrict",
@@ -529,6 +548,12 @@
           "name": "run_id",
           "type": "text",
           "primaryKey": true,
+          "notNull": true
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
           "notNull": true
         },
         "project_id": {
@@ -586,14 +611,16 @@
         }
       },
       "foreignKeys": {
-        "eval_runs_project_id_eval_projects_project_id_fk": {
-          "name": "eval_runs_project_id_eval_projects_project_id_fk",
+        "eval_runs_owner_user_id_project_id_eval_projects_owner_user_id_project_id_fk": {
+          "name": "eval_runs_owner_user_id_project_id_eval_projects_owner_user_id_project_id_fk",
           "tableFrom": "eval_runs",
           "tableTo": "eval_projects",
           "columnsFrom": [
+            "owner_user_id",
             "project_id"
           ],
           "columnsTo": [
+            "owner_user_id",
             "project_id"
           ],
           "onDelete": "restrict",
@@ -602,17 +629,27 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "eval_runs_request_id_unique": {
-          "name": "eval_runs_request_id_unique",
+        "eval_runs_owner_id_uq": {
+          "name": "eval_runs_owner_id_uq",
           "nullsNotDistinct": false,
           "columns": [
+            "owner_user_id",
+            "run_id"
+          ]
+        },
+        "eval_runs_owner_request_id_uq": {
+          "name": "eval_runs_owner_request_id_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "owner_user_id",
             "request_id"
           ]
         },
-        "eval_runs_idempotency_key_unique": {
-          "name": "eval_runs_idempotency_key_unique",
+        "eval_runs_owner_idempotency_key_uq": {
+          "name": "eval_runs_owner_idempotency_key_uq",
           "nullsNotDistinct": false,
           "columns": [
+            "owner_user_id",
             "idempotency_key"
           ]
         }
@@ -703,7 +740,16 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "eval_samples_owner_id_uq": {
+          "name": "eval_samples_owner_id_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "owner_user_id",
+            "sample_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -716,6 +762,12 @@
           "name": "sampling_id",
           "type": "text",
           "primaryKey": true,
+          "notNull": true
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
           "notNull": true
         },
         "project_id": {
@@ -770,27 +822,31 @@
         }
       },
       "foreignKeys": {
-        "eval_samplings_project_id_eval_projects_project_id_fk": {
-          "name": "eval_samplings_project_id_eval_projects_project_id_fk",
+        "eval_samplings_owner_user_id_project_id_eval_projects_owner_user_id_project_id_fk": {
+          "name": "eval_samplings_owner_user_id_project_id_eval_projects_owner_user_id_project_id_fk",
           "tableFrom": "eval_samplings",
           "tableTo": "eval_projects",
           "columnsFrom": [
+            "owner_user_id",
             "project_id"
           ],
           "columnsTo": [
+            "owner_user_id",
             "project_id"
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
         },
-        "eval_samplings_sample_id_eval_samples_sample_id_fk": {
-          "name": "eval_samplings_sample_id_eval_samples_sample_id_fk",
+        "eval_samplings_owner_user_id_sample_id_eval_samples_owner_user_id_sample_id_fk": {
+          "name": "eval_samplings_owner_user_id_sample_id_eval_samples_owner_user_id_sample_id_fk",
           "tableFrom": "eval_samplings",
           "tableTo": "eval_samples",
           "columnsFrom": [
+            "owner_user_id",
             "sample_id"
           ],
           "columnsTo": [
+            "owner_user_id",
             "sample_id"
           ],
           "onDelete": "restrict",
@@ -798,7 +854,16 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "eval_samplings_owner_id_uq": {
+          "name": "eval_samplings_owner_id_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "owner_user_id",
+            "sampling_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

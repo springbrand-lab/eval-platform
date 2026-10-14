@@ -8,6 +8,7 @@ import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEvalDb, createPostgresCatalog, createPostgresDatasetStore, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, startEvalRunWorker } from "../index.js";
+import { isForeignKeyFailure } from "./client.js";
 
 const connection = process.env.DATABASE_URL;
 const subjectAgent = { ownerUserId: "owner", userAgentId: "subject" };
@@ -52,6 +53,11 @@ function makeRun(projectId: string, record: Sampling, datasetId: string, overrid
 
 function makeEvaluation(samplingId: string, evaluationId = crypto.randomUUID()): EvaluationRecord {
   return { evaluationId, samplingId, evaluator, status: { status: "queued" }, attempts: [] };
+}
+
+async function expectForeignKeyFailure(operation: Promise<unknown>): Promise<void> {
+  const error = await operation.then(() => null, (reason: unknown) => reason);
+  expect(isForeignKeyFailure(error)).toBe(true);
 }
 
 async function testDatabase(url: string) {
@@ -567,6 +573,18 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const runB = makeRun(other.projectId, samplingB, otherDataset.datasetId);
     await runtime.createRunWithSamplings(runA, [samplingA], []);
     await runtime.createRunWithSamplings(runB, [samplingB], []);
+    await expectForeignKeyFailure(database.db.execute(sql`
+      INSERT INTO eval_samplings (sampling_id, owner_user_id, project_id, sample_id, facts)
+      VALUES (${crypto.randomUUID()}, ${"user-A"}, ${project.projectId}, ${otherSample.sampleId}, '{}'::jsonb)
+    `));
+    await expectForeignKeyFailure(database.db.execute(sql`
+      INSERT INTO eval_runs (run_id, owner_user_id, project_id, phases, config)
+      VALUES (${crypto.randomUUID()}, ${"user-A"}, ${other.projectId}, '["execution"]'::jsonb, '{}'::jsonb)
+    `));
+    await expectForeignKeyFailure(database.db.execute(sql`
+      INSERT INTO eval_run_samplings (owner_user_id, run_id, sampling_id, position)
+      VALUES (${"user-A"}, ${runA.runId}, ${samplingB.samplingId}, ${1})
+    `));
     const userRuntime = createPostgresRuntimeStore(database.db, "user-A");
     const otherRuntime = createPostgresRuntimeStore(database.db, "user-B");
     expect(await userRuntime.getRun(runA.runId)).toEqual(runA);
@@ -582,6 +600,19 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       requestIdentity: runB.requestIdentity!,
     });
     await expect(userRuntime.createRunWithSamplings(collision, [collisionSampling], []))
+      .resolves.toEqual({ run: collision, created: true });
+    expect(await userRuntime.findRunByRequestId(runB.requestIdentity!.requestId)).toEqual(collision);
+    expect(await userRuntime.findRunByIdempotencyKey(runB.requestIdentity!.idempotencyKey!)).toEqual(collision);
+    expect(await otherRuntime.findRunByRequestId(runB.requestIdentity!.requestId)).toEqual(runB);
+    await expect(runtime.findRunByRequestId(runB.requestIdentity!.requestId))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    expect(await runtime.listRecoverableRunIds()).toContain(runB.runId);
+    const siblingProject = await catalog.createProject({ name: "same owner's other project" });
+    const siblingSampling = makeSampling(siblingProject.projectId, sample.sampleId);
+    const siblingRun = makeRun(siblingProject.projectId, siblingSampling, dataset.datasetId, {
+      requestIdentity: runA.requestIdentity!,
+    });
+    await expect(userRuntime.createRunWithSamplings(siblingRun, [siblingSampling], []))
       .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
     await expect(source.read({ projectId: other.projectId })).rejects.toBeInstanceOf(MetricsQueryError);
     const facts = await source.read({ projectId: project.projectId, runIds: [runA.runId] });

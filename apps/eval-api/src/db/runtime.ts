@@ -26,9 +26,15 @@ function evaluationFacts(record: EvaluationRecord): typeof evaluations.$inferIns
   return facts;
 }
 
-export async function readRunRecords(reader: RuntimeReader, runIds: readonly string[]): Promise<readonly RuntimeRunRecord[]> {
+export async function readRunRecords(
+  reader: RuntimeReader,
+  runIds: readonly string[],
+  ownerUserId?: string,
+): Promise<readonly RuntimeRunRecord[]> {
   if (runIds.length === 0) return [];
-  const selected = await reader.select().from(runs).where(inArray(runs.runId, runIds)).orderBy(runs.runId);
+  const selected = await reader.select().from(runs)
+    .where(and(inArray(runs.runId, runIds), ownerUserId === undefined ? undefined : eq(runs.ownerUserId, ownerUserId)))
+    .orderBy(runs.runId);
   if (selected.length === 0) return [];
   const ids = selected.map((row) => row.runId);
   const [memberships, judges] = await Promise.all([
@@ -110,20 +116,24 @@ function validateAdmission(
   }
 }
 
-export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRecoveryStore {
+function createRuntimeStore(db: EvalDb, ownerUserId?: string): RuntimeStore & RuntimeRecoveryStore {
   const findByIdentity = async (
     reader: RuntimeReader,
+    identityOwner: string,
+    projectId: string,
     identity: NonNullable<RuntimeRunRecord["requestIdentity"]>,
   ): Promise<RuntimeRunRecord | null> => {
     const predicates = [eq(runs.requestId, identity.requestId)];
     if (identity.idempotencyKey !== undefined) predicates.push(eq(runs.idempotencyKey, identity.idempotencyKey));
-    const matched = await reader.select({ runId: runs.runId }).from(runs).where(or(...predicates));
+    const matched = await reader.select({ runId: runs.runId }).from(runs)
+      .where(and(eq(runs.ownerUserId, identityOwner), or(...predicates)));
     if (matched.length === 0) return null;
     if (matched.length > 1) {
       throw new RuntimeRunIdentityConflictError("requestId and idempotencyKey refer to different evaluation runs");
     }
-    const [record] = await readRunRecords(reader, [matched[0]!.runId]);
-    if (record?.requestIdentity?.requestFingerprint !== identity.requestFingerprint) {
+    const [record] = await readRunRecords(reader, [matched[0]!.runId], identityOwner);
+    if (record?.projectId !== projectId
+      || record.requestIdentity?.requestFingerprint !== identity.requestFingerprint) {
       throw new RuntimeRunIdentityConflictError("request identity is already bound to different evaluation run facts");
     }
     return record ?? null;
@@ -132,33 +142,40 @@ export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & Run
   return {
     async getRun(runId) {
       return db.transaction(async (transaction) => (
-        await readRunRecords(transaction, [runId])
+        await readRunRecords(transaction, [runId], ownerUserId)
       )[0] ?? null, { isolationLevel: "repeatable read", accessMode: "read only" });
     },
     async findRunByRequestId(requestId) {
       return db.transaction(async (transaction) => {
-        const [row] = await transaction.select({ runId: runs.runId }).from(runs).where(eq(runs.requestId, requestId));
-        return row ? (await readRunRecords(transaction, [row.runId]))[0] ?? null : null;
+        const rows = await transaction.select({ runId: runs.runId }).from(runs)
+          .where(and(eq(runs.requestId, requestId), ownerUserId === undefined ? undefined : eq(runs.ownerUserId, ownerUserId)))
+          .limit(2);
+        if (rows.length > 1) throw new RuntimeRunIdentityConflictError("requestId is ambiguous across owners");
+        return rows[0] ? (await readRunRecords(transaction, [rows[0].runId], ownerUserId))[0] ?? null : null;
       }, { isolationLevel: "repeatable read", accessMode: "read only" });
     },
     async findRunByIdempotencyKey(idempotencyKey) {
       return db.transaction(async (transaction) => {
-        const [row] = await transaction.select({ runId: runs.runId }).from(runs)
-          .where(eq(runs.idempotencyKey, idempotencyKey));
-        return row ? (await readRunRecords(transaction, [row.runId]))[0] ?? null : null;
+        const rows = await transaction.select({ runId: runs.runId }).from(runs)
+          .where(and(eq(runs.idempotencyKey, idempotencyKey), ownerUserId === undefined ? undefined : eq(runs.ownerUserId, ownerUserId)))
+          .limit(2);
+        if (rows.length > 1) throw new RuntimeRunIdentityConflictError("idempotencyKey is ambiguous across owners");
+        return rows[0] ? (await readRunRecords(transaction, [rows[0].runId], ownerUserId))[0] ?? null : null;
       }, { isolationLevel: "repeatable read", accessMode: "read only" });
     },
     async createRunWithSamplings(run, records, judges) {
       validateAdmission(run, records, judges);
       return db.transaction(async (transaction) => {
+        const [project] = await transaction.select({ ownerUserId: projects.ownerUserId })
+          .from(projects)
+          .where(and(eq(projects.projectId, run.projectId), ownerUserId === undefined ? undefined : eq(projects.ownerUserId, ownerUserId)))
+          .for("share");
+        if (!project) throw new Error(`Unknown Project ${run.projectId}`);
         const identity = run.requestIdentity;
         if (identity) {
-          const existing = await findByIdentity(transaction, identity);
+          const existing = await findByIdentity(transaction, project.ownerUserId, run.projectId, identity);
           if (existing) return { run: existing, created: false };
         }
-        const [project] = await transaction.select({ ownerUserId: projects.ownerUserId })
-          .from(projects).where(eq(projects.projectId, run.projectId)).for("share");
-        if (!project) throw new Error(`Unknown Project ${run.projectId}`);
         const selectedSamples = await transaction.select({
           sampleId: samples.sampleId,
           ownerUserId: samples.ownerUserId,
@@ -176,6 +193,7 @@ export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & Run
         }
         const [inserted] = await transaction.insert(runs).values({
           runId: run.runId,
+          ownerUserId: project.ownerUserId,
           projectId: run.projectId,
           phases: run.phases,
           config: run.config,
@@ -185,7 +203,7 @@ export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & Run
         }).onConflictDoNothing().returning({ runId: runs.runId });
         if (!inserted) {
           if (identity) {
-            const existing = await findByIdentity(transaction, identity);
+            const existing = await findByIdentity(transaction, project.ownerUserId, run.projectId, identity);
             if (existing) return { run: existing, created: false };
           }
           throw new RuntimeRunIdentityConflictError(`Run identity already exists: ${run.runId}`);
@@ -204,12 +222,12 @@ export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & Run
           }
         } else {
           await transaction.insert(samplings).values(records.map((record) => ({
-            samplingId: record.samplingId, projectId: record.projectId,
+            samplingId: record.samplingId, ownerUserId: project.ownerUserId, projectId: record.projectId,
             sampleId: record.sampleId, facts: samplingFacts(record),
           })));
         }
         await transaction.insert(runSamplings).values(run.samplingIds.map((samplingId, position) => ({
-          runId: run.runId, samplingId, position,
+          ownerUserId: project.ownerUserId, runId: run.runId, samplingId, position,
         })));
         if (judges.length > 0) {
           await transaction.insert(evaluations).values(judges.map((judge) => ({
@@ -255,6 +273,7 @@ export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & Run
       const updated = await db.update(samplings).set({ facts: samplingFacts(record) })
         .where(and(eq(samplings.samplingId, record.samplingId), eq(samplings.projectId, record.projectId),
           eq(samplings.sampleId, record.sampleId),
+          ownerUserId === undefined ? undefined : eq(samplings.ownerUserId, ownerUserId),
           eq(samplings.facts, samplingFacts(expected))))
         .returning({ samplingId: samplings.samplingId });
       if (updated.length === 0) {
@@ -262,7 +281,10 @@ export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & Run
       }
     },
     async getSampling(samplingId) {
-      const [row] = await db.select().from(samplings).where(eq(samplings.samplingId, samplingId));
+      const [row] = await db.select().from(samplings).where(and(
+        eq(samplings.samplingId, samplingId),
+        ownerUserId === undefined ? undefined : eq(samplings.ownerUserId, ownerUserId),
+      ));
       return row ? samplingFromRow(row) : null;
     },
     async updateEvaluation(record, expected) {
@@ -271,6 +293,8 @@ export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & Run
       }
       const updated = await db.update(evaluations).set({ facts: evaluationFacts(record) })
         .where(and(eq(evaluations.evaluationId, record.evaluationId), eq(evaluations.samplingId, record.samplingId),
+          ownerUserId === undefined ? undefined : exists(db.select({ samplingId: samplings.samplingId })
+            .from(samplings).where(and(eq(samplings.samplingId, evaluations.samplingId), eq(samplings.ownerUserId, ownerUserId)))),
           eq(evaluations.facts, evaluationFacts(expected))))
         .returning({ evaluationId: evaluations.evaluationId });
       if (updated.length === 0) {
@@ -278,76 +302,30 @@ export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & Run
       }
     },
     async getEvaluation(evaluationId) {
-      const [row] = await db.select().from(evaluations).where(eq(evaluations.evaluationId, evaluationId));
+      const [row] = await db.select({
+        evaluationId: evaluations.evaluationId, samplingId: evaluations.samplingId, facts: evaluations.facts,
+      }).from(evaluations).innerJoin(samplings, eq(evaluations.samplingId, samplings.samplingId))
+        .where(and(eq(evaluations.evaluationId, evaluationId),
+          ownerUserId === undefined ? undefined : eq(samplings.ownerUserId, ownerUserId)));
       return row ? evaluationFromRow(row) : null;
     },
     async listEvaluations(samplingId) {
-      const rows = await db.select().from(evaluations)
-        .where(eq(evaluations.samplingId, samplingId)).orderBy(evaluations.evaluationId);
+      const rows = await db.select({
+        evaluationId: evaluations.evaluationId, samplingId: evaluations.samplingId, facts: evaluations.facts,
+      }).from(evaluations).innerJoin(samplings, eq(evaluations.samplingId, samplings.samplingId))
+        .where(and(eq(evaluations.samplingId, samplingId),
+          ownerUserId === undefined ? undefined : eq(samplings.ownerUserId, ownerUserId)))
+        .orderBy(evaluations.evaluationId);
       return rows.map(evaluationFromRow);
     },
   };
 }
 
+export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRecoveryStore {
+  return createRuntimeStore(db);
+}
+
 export function createPostgresRuntimeStore(db: EvalDb, ownerUserId: string): RuntimeStore {
-  const owner = requireOwnerUserId(ownerUserId);
-  const workerStore = createPostgresWorkerRuntimeStore(db);
-
-  async function ownsProject(projectId: string): Promise<boolean> {
-    const [project] = await db.select({ projectId: projects.projectId }).from(projects)
-      .where(and(eq(projects.projectId, projectId), eq(projects.ownerUserId, owner)));
-    return project !== undefined;
-  }
-
-  async function ownedRun(record: RuntimeRunRecord | null): Promise<RuntimeRunRecord | null> {
-    return record && await ownsProject(record.projectId) ? record : null;
-  }
-
-  async function ownsSampling(samplingId: string): Promise<boolean> {
-    const record = await workerStore.getSampling(samplingId);
-    return record !== null && await ownsProject(record.projectId);
-  }
-
-  return {
-    async getRun(runId) {
-      return ownedRun(await workerStore.getRun(runId));
-    },
-    async findRunByRequestId(requestId) {
-      return ownedRun(await workerStore.findRunByRequestId(requestId));
-    },
-    async findRunByIdempotencyKey(idempotencyKey) {
-      return ownedRun(await workerStore.findRunByIdempotencyKey(idempotencyKey));
-    },
-    async createRunWithSamplings(run, records, judges) {
-      if (!await ownsProject(run.projectId)) throw new Error(`Unknown Project ${run.projectId}`);
-      const admission = await workerStore.createRunWithSamplings(run, records, judges);
-      if (admission.run.projectId !== run.projectId) {
-        throw new RuntimeRunIdentityConflictError("request identity belongs to another Project");
-      }
-      return admission;
-    },
-    async updateEvaluation(record, expected) {
-      if (!await ownsSampling(record.samplingId)) {
-        throw new RuntimeRecordConflictError(`Unknown Evaluation ${record.evaluationId}`);
-      }
-      await workerStore.updateEvaluation(record, expected);
-    },
-    async getEvaluation(evaluationId) {
-      const record = await workerStore.getEvaluation(evaluationId);
-      return record && await ownsSampling(record.samplingId) ? record : null;
-    },
-    async listEvaluations(samplingId) {
-      return await ownsSampling(samplingId) ? workerStore.listEvaluations(samplingId) : [];
-    },
-    async updateSampling(record, expected) {
-      if (!await ownsProject(record.projectId)) {
-        throw new RuntimeRecordConflictError(`Unknown Sampling ${record.samplingId}`);
-      }
-      await workerStore.updateSampling(record, expected);
-    },
-    async getSampling(samplingId) {
-      const record = await workerStore.getSampling(samplingId);
-      return record && await ownsProject(record.projectId) ? record : null;
-    },
-  };
+  const { listRecoverableRunIds: _recovery, ...store } = createRuntimeStore(db, requireOwnerUserId(ownerUserId));
+  return store;
 }

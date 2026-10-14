@@ -19,7 +19,10 @@ export const projects = pgTable("eval_projects", {
   projectId: text("project_id").primaryKey(),
   ownerUserId: text("owner_user_id").notNull(),
   name: text("name").notNull(),
-}, (table) => [index("eval_projects_owner_idx").on(table.ownerUserId)]);
+}, (table) => [
+  unique("eval_projects_owner_id_uq").on(table.ownerUserId, table.projectId),
+  index("eval_projects_owner_idx").on(table.ownerUserId),
+]);
 
 export const datasets = pgTable("eval_datasets", {
   datasetId: uuid("dataset_id").primaryKey(),
@@ -56,6 +59,7 @@ export const samples = pgTable("eval_samples", {
   ownerUserId: text("owner_user_id").notNull(),
   dataId: uuid("data_id").notNull(),
 }, (table) => [
+  unique("eval_samples_owner_id_uq").on(table.ownerUserId, table.sampleId),
   foreignKey({ columns: [table.ownerUserId, table.dataId], foreignColumns: [data.ownerUserId, data.dataId] }).onDelete("restrict"),
   index("eval_samples_data_idx").on(table.dataId),
   index("eval_samples_owner_idx").on(table.ownerUserId),
@@ -63,10 +67,14 @@ export const samples = pgTable("eval_samples", {
 
 export const samplings = pgTable("eval_samplings", {
   samplingId: text("sampling_id").primaryKey(),
-  projectId: text("project_id").notNull().references(() => projects.projectId, { onDelete: "restrict" }),
-  sampleId: text("sample_id").notNull().references(() => samples.sampleId, { onDelete: "restrict" }),
+  ownerUserId: text("owner_user_id").notNull(),
+  projectId: text("project_id").notNull(),
+  sampleId: text("sample_id").notNull(),
   facts: jsonb("facts").$type<Omit<Sampling, "samplingId" | "projectId" | "sampleId">>().notNull(),
 }, (table) => [
+  unique("eval_samplings_owner_id_uq").on(table.ownerUserId, table.samplingId),
+  foreignKey({ columns: [table.ownerUserId, table.projectId], foreignColumns: [projects.ownerUserId, projects.projectId] }).onDelete("restrict"),
+  foreignKey({ columns: [table.ownerUserId, table.sampleId], foreignColumns: [samples.ownerUserId, samples.sampleId] }).onDelete("restrict"),
   index("eval_samplings_project_idx").on(table.projectId),
   index("eval_samplings_sample_idx").on(table.sampleId),
 ]);
@@ -82,24 +90,32 @@ export const evaluations = pgTable("eval_evaluations", {
 
 export const runs = pgTable("eval_runs", {
   runId: text("run_id").primaryKey(),
-  projectId: text("project_id").notNull().references(() => projects.projectId, { onDelete: "restrict" }),
+  ownerUserId: text("owner_user_id").notNull(),
+  projectId: text("project_id").notNull(),
   phases: jsonb("phases").$type<RunPhases>().notNull(),
   config: jsonb("config").$type<RunConfigSnapshot>().notNull(),
-  requestId: text("request_id").unique(),
-  idempotencyKey: text("idempotency_key").unique(),
+  requestId: text("request_id"),
+  idempotencyKey: text("idempotency_key"),
   requestFingerprint: text("request_fingerprint"),
 }, (table) => [
+  unique("eval_runs_owner_id_uq").on(table.ownerUserId, table.runId),
+  unique("eval_runs_owner_request_id_uq").on(table.ownerUserId, table.requestId),
+  unique("eval_runs_owner_idempotency_key_uq").on(table.ownerUserId, table.idempotencyKey),
+  foreignKey({ columns: [table.ownerUserId, table.projectId], foreignColumns: [projects.ownerUserId, projects.projectId] }).onDelete("restrict"),
   index("eval_runs_project_idx").on(table.projectId),
   check("eval_runs_request_identity_ck", sql`(${table.requestId} IS NULL) = (${table.requestFingerprint} IS NULL)`),
   check("eval_runs_phases_ck", sql`${table.phases} IN ('["execution"]'::jsonb, '["evaluation"]'::jsonb, '["execution", "evaluation"]'::jsonb)`),
 ]);
 
 export const runSamplings = pgTable("eval_run_samplings", {
-  runId: text("run_id").notNull().references(() => runs.runId, { onDelete: "cascade" }),
-  samplingId: text("sampling_id").notNull().references(() => samplings.samplingId, { onDelete: "restrict" }),
+  ownerUserId: text("owner_user_id").notNull(),
+  runId: text("run_id").notNull(),
+  samplingId: text("sampling_id").notNull(),
   position: integer("position").notNull(),
 }, (table) => [
   primaryKey({ columns: [table.runId, table.samplingId] }),
+  foreignKey({ columns: [table.ownerUserId, table.runId], foreignColumns: [runs.ownerUserId, runs.runId] }).onDelete("cascade"),
+  foreignKey({ columns: [table.ownerUserId, table.samplingId], foreignColumns: [samplings.ownerUserId, samplings.samplingId] }).onDelete("restrict"),
   unique("eval_run_samplings_position_uq").on(table.runId, table.position),
   index("eval_run_samplings_sampling_idx").on(table.samplingId),
 ]);
