@@ -403,10 +403,15 @@ function makeHarness(): Harness {
     })),
     submitAgent: vi.fn(async ({ handle, idempotencyKey }) => submit(handle, idempotencyKey)),
     restartAgent: vi.fn(async ({ handle, idempotencyKey }) => submit(handle, idempotencyKey)),
-    waitForSubmission: vi.fn(async ({ handle, idempotencyKey }) =>
-      makeSubmission("completed", submissionIdFor(handle, idempotencyKey) ?? "submission-1")),
-    inspectAgentOperation: vi.fn(async ({ handle, idempotencyKey }) =>
-      makeSubmission("completed", submissionIdFor(handle, idempotencyKey) ?? "submission-1")),
+    waitForSubmission: vi.fn(async ({ handle, idempotencyKey }) => {
+      const submissionId = submissionIdFor(handle, idempotencyKey);
+      if (!submissionId) throw new Error("Cannot wait for an unknown submission");
+      return makeSubmission("completed", submissionId);
+    }),
+    inspectAgentOperation: vi.fn(async ({ handle, idempotencyKey }) => {
+      const submissionId = submissionIdFor(handle, idempotencyKey);
+      return submissionId ? makeSubmission("completed", submissionId) : null;
+    }),
     collectExecution: vi.fn(async ({ handle }) => ({
       samplingId: handle.samplingId,
       status: "succeeded" as const,
@@ -419,23 +424,23 @@ function makeHarness(): Harness {
       score: 0.9,
       trajectory: { trajectoryId: "trajectory-2", source: "evaluator" as const, path: "/eval/evaluation.jsonl" },
     })),
-    collectAgentResources: vi.fn(async ({ handle, idempotencyKey, submissionId }) => ({
-      scope: {
-        chatId: handle.chatId,
-        submissionId: submissionId ?? submissionIdFor(handle, idempotencyKey) ?? "submission-1",
-        idempotencyKey,
-      },
-      observedAt: "2026-10-08T00:00:00.000Z",
-      finalized: true,
-      coverage: {
-        usageEvents: "complete" as const,
-        telemetryEvents: "complete" as const,
-        billingSettlements: "complete" as const,
-      },
-      usageEvents: [],
-      telemetryEvents: [],
-      billingSettlements: [],
-    })),
+    collectAgentResources: vi.fn(async ({ handle, idempotencyKey, submissionId }) => {
+      const resolvedSubmissionId = submissionId ?? submissionIdFor(handle, idempotencyKey);
+      if (!resolvedSubmissionId) throw new Error("Cannot collect resources for an unknown submission");
+      return {
+        scope: { chatId: handle.chatId, submissionId: resolvedSubmissionId, idempotencyKey },
+        observedAt: "2026-10-08T00:00:00.000Z",
+        finalized: true,
+        coverage: {
+          usageEvents: "complete" as const,
+          telemetryEvents: "complete" as const,
+          billingSettlements: "complete" as const,
+        },
+        usageEvents: [],
+        telemetryEvents: [],
+        billingSettlements: [],
+      };
+    }),
     materializeSubjectTrajectory: vi.fn(async () => undefined),
   };
 }
@@ -948,6 +953,7 @@ describe("eval runtime orchestration", () => {
         status: "queued",
         normalizedStatus: "queued",
       });
+      vi.mocked(harness.waitForSubmission).mockResolvedValueOnce(makeSubmission());
       const runtime = createEvalRuntime({
         catalog: makeCatalog(),
         configResolver: makeConfigResolver(framework),
@@ -1152,6 +1158,7 @@ describe("eval runtime orchestration", () => {
       accepted: true,
       retryable: false,
     });
+    vi.mocked(harness.waitForSubmission).mockResolvedValueOnce(makeSubmission());
     const runtime = createEvalRuntime({
       catalog: makeCatalog(),
       harness,
@@ -1197,6 +1204,7 @@ describe("eval runtime orchestration", () => {
           }
         : makeSubmission()
     ));
+    vi.mocked(harness.waitForSubmission).mockResolvedValueOnce(makeSubmission());
     const runtime = createEvalRuntime({
       catalog: makeCatalog(),
       harness,
@@ -2056,7 +2064,7 @@ describe("eval runtime orchestration", () => {
     });
     vi.mocked(harness.restartAgent)
       .mockRejectedValueOnce(new Error("connection lost after restart"))
-      .mockResolvedValueOnce(makeSubmission());
+      .mockResolvedValueOnce(makeSubmission("completed", "submission-2"));
     vi.mocked(harness.inspectAgentOperation).mockResolvedValueOnce(null);
     const runtime = createEvalRuntime({
       catalog: makeCatalog(),
@@ -2077,6 +2085,9 @@ describe("eval runtime orchestration", () => {
     expect(harness.inspectAgentOperation).toHaveBeenCalledWith(expect.objectContaining({
       idempotencyKey: firstCall?.idempotencyKey,
     }));
+    const sampling = await runtime.getSampling(run.samplingIds[0]!);
+    expect(sampling.executionAttempts.map((attempt) => attempt.submissionId))
+      .toEqual(["submission-1", "submission-2"]);
   });
 
   it("creates a new restart key only after the previous key is confirmed failed", async () => {
@@ -2090,9 +2101,9 @@ describe("eval runtime orchestration", () => {
     });
     vi.mocked(harness.restartAgent)
       .mockRejectedValueOnce(new Error("connection lost after restart"))
-      .mockResolvedValueOnce(makeSubmission());
+      .mockResolvedValueOnce(makeSubmission("completed", "submission-3"));
     vi.mocked(harness.inspectAgentOperation).mockResolvedValueOnce({
-      submissionId: "submission-1",
+      submissionId: "submission-2",
       status: "failed",
       normalizedStatus: "failed",
       retryable: true,
@@ -2114,11 +2125,16 @@ describe("eval runtime orchestration", () => {
     const firstCall = vi.mocked(harness.restartAgent).mock.calls[0]?.[0];
     const secondCall = vi.mocked(harness.restartAgent).mock.calls[1]?.[0];
     expect(firstCall?.idempotencyKey).not.toBe(secondCall?.idempotencyKey);
+    const sampling = await runtime.getSampling(run.samplingIds[0]!);
+    expect(sampling.executionAttempts.map((attempt) => attempt.submissionId))
+      .toEqual(["submission-1", "submission-2", "submission-3"]);
   });
 
   it("reconciles an uncertain submission before retrying", async () => {
     const harness = makeHarness();
     vi.mocked(harness.submitAgent).mockRejectedValueOnce(new Error("connection lost after submit"));
+    vi.mocked(harness.inspectAgentOperation)
+      .mockResolvedValueOnce(makeSubmission("completed", "submission-1"));
     vi.mocked(harness.collectExecution)
       .mockRejectedValueOnce(new Error("temporary artifact fetch failure"));
     const runtime = createEvalRuntime({
@@ -2136,6 +2152,8 @@ describe("eval runtime orchestration", () => {
     expect(harness.submitAgent).toHaveBeenCalledTimes(1);
     expect(harness.restartAgent).not.toHaveBeenCalled();
     expect(harness.inspectAgentOperation).toHaveBeenCalledTimes(1);
+    expect((await runtime.getSampling(run.samplingIds[0]!)).executionAttempts[0]!.submissionId)
+      .toBe("submission-1");
     expect(harness.collectExecution).toHaveBeenCalledTimes(2);
   });
 
@@ -2260,7 +2278,7 @@ describe("raw resource persistence", () => {
         : (await store.listEvaluations(handle.samplingId))[0]!.attempts;
       expect(attempts[0]!.resources).toEqual({
         status: "pending",
-        scope: { submissionId: handle.chatId, idempotencyKey },
+        scope: { chatId: handle.chatId, idempotencyKey },
       });
       return makeSubmission();
     });
@@ -3353,6 +3371,7 @@ describe("Run recovery from persisted facts", () => {
         resources: { status: "collected", snapshot },
       }],
     });
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("refresh unavailable"));
     await runtime.resume(run.runId);
     const saved = (await store.getSampling(samplingId))!;
@@ -3399,6 +3418,7 @@ describe("Run recovery from persisted facts", () => {
         resources: { status: "collected", snapshot },
       }],
     });
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("evaluator refresh unavailable"));
     await runtime.resume(run.runId);
     const saved = (await store.getEvaluation(evaluation.evaluationId))!;
@@ -3434,6 +3454,7 @@ describe("Run recovery from persisted facts", () => {
         resources: { status: "collected", snapshot },
       }],
     });
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("should not refresh"));
     await runtime.resume(run.runId);
     const saved = (await store.getSampling(samplingId))!;
@@ -3514,6 +3535,7 @@ describe("Run recovery from persisted facts", () => {
         startedAt: "2026-10-09T00:00:00.000Z",
       }],
     });
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
 
     await dormantRuntime(store, harness).resume(run.runId);
 
