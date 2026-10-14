@@ -73,6 +73,36 @@ describe("Eval Bundle directory", () => {
       .rejects.toMatchObject({ retryable: false });
   });
 
+  it("applies upload validation when reading an existing material manifest", async () => {
+    const directory = await root();
+    const source = await openBundleDirectory(directory);
+    for (const [resourceId, file] of [
+      ["unsafe-path", { path: "/../secret.txt", mediaType: "text/plain", contentBase64: "SGk=" }],
+      ["bad-base64", { path: "/brief.txt", mediaType: "text/plain", contentBase64: "not base64" }],
+    ] as const) {
+      await put(directory, `materials/${encoded(resourceId)}.json`, JSON.stringify({ files: [file] }));
+      await expect(source.resolveInitialMaterials(owner, { bundleId, materialId: resourceId }))
+        .rejects.toMatchObject({ retryable: false });
+    }
+  });
+
+  it("rejects syntactically valid Session content that SP cannot import", async () => {
+    const source = await openBundleDirectory(await root());
+    for (const [resourceId, context] of [
+      ["no-entries", { format: "json", content: "{}" }],
+      ["wrong-first-role", { format: "json", content: JSON.stringify({ entries: [
+        { id: "m1", message: { role: "assistant" }, createdAt: 1 },
+      ] }) }],
+      ["duplicate-id", { format: "jsonl", content: [
+        { id: "m1", message: { role: "user" }, createdAt: 1 },
+        { id: "m1", message: { role: "assistant" }, createdAt: 2 },
+      ].map((entry) => JSON.stringify(entry)).join("\n") }],
+    ] as const) {
+      await expect(source.uploadInitialSession(owner, { bundleId, sessionId: resourceId }, context))
+        .rejects.toMatchObject({ retryable: false });
+    }
+  });
+
   it("requires an absolute directory at startup", async () => {
     await expect(openBundleDirectory("relative/bundles")).rejects.toThrow(/absolute path/u);
   });

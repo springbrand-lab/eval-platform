@@ -95,6 +95,13 @@ describe.skipIf(!connection)("Data initial resource association", () => {
       initialMaterials: { bundleId: "missing", materialId: "file" },
     })).rejects.toThrow(/missing/u);
     expect(await dataset.getData(original.dataId)).toEqual(cleared);
+    const referenceOnlySession = { bundleId: "old-sessions", sessionId: "no-context-file" };
+    const referenceResponse = await handle(new Request(`http://eval.test/api/data/${original.dataId}/initial-resources`, {
+      method: "PATCH", body: JSON.stringify({ initialSession: referenceOnlySession }),
+    }), owner);
+    expect(referenceResponse?.status).toBe(200);
+    expect(await dataset.getData(original.dataId)).toMatchObject({ initialSession: referenceOnlySession });
+    await expect(bundles.resolveInitialSession(owner, referenceOnlySession)).resolves.toBeUndefined();
     await expect(createInitialResourceApi(db, otherOwner, bundles)
       .bindData(original.dataId, { initialMaterials: null })).rejects.toThrow(/Unknown data/u);
   });

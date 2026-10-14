@@ -12,10 +12,7 @@ import { and, eq } from "drizzle-orm";
 import type { EvalDb } from "./db/client.js";
 import { requireOwnerUserId } from "./db/owner.js";
 import { data } from "./db/schema.js";
-import type { BundleDirectory } from "./sp/bundle-directory.js";
-
-type MaterialFile = { readonly path: string; readonly mediaType: string; readonly contentBase64: string };
-type SessionContent = { readonly format: "json" | "jsonl"; readonly content: string };
+import type { BundleDirectory, MaterialFile, SessionContent } from "./sp/bundle-directory.js";
 
 export interface DataInitialResourcePatch {
   readonly initialMaterials?: InitialMaterialsRef | null;
@@ -50,9 +47,6 @@ export function createInitialResourceApi(db: EvalDb, ownerUserId: string, bundle
       const session = patch.initialSession === undefined || patch.initialSession === null
         ? patch.initialSession : initialSessionRefSchema.parse(patch.initialSession);
       if (materials) await bundles.resolveInitialMaterials(owner, materials);
-      if (session && !await bundles.resolveInitialSession(owner, session)) {
-        throw new Error("Initial Session is missing from its Bundle");
-      }
       return db.transaction(async (transaction) => {
         const [row] = await transaction.select({ content: data.content }).from(data)
           .where(and(eq(data.ownerUserId, owner), eq(data.dataId, selectedId))).for("update");

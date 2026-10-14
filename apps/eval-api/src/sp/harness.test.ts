@@ -185,6 +185,23 @@ describe("Eval SP Harness", () => {
     });
   });
 
+  it("sends the Session reference when its optional context file is absent", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({
+      bundleId: "sessions", manifestHash: "hash", target: "workspace", rootPath: "/",
+    }));
+    const resolveInitialSession = vi.fn(async () => undefined);
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
+      fetch: fetcher, resolveInitialSession });
+    await harness.materializeInitialData({
+      handle: subject,
+      idempotencyKey: "init-reference-only",
+      data: { userPrompt: "Continue", initialSession: { bundleId: "sessions", sessionId: "seed" } },
+    });
+    expect(resolveInitialSession).toHaveBeenCalledWith("user-1", { bundleId: "sessions", sessionId: "seed" });
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body)).initialSession)
+      .toEqual({ bundleId: "sessions", sessionId: "seed" });
+  });
+
   it("maps immutable Chat conflicts and rejects unsupported frameworks before contacting SP", async () => {
     const fetcher = vi.fn(async () => new Response(null, { status: 409 }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher });

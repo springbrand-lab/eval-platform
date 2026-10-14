@@ -10,8 +10,8 @@ const MAX_MATERIAL_BYTES = 20_000_000;
 const MAX_SINGLE_MATERIAL_BYTES = 5_000_000;
 const OWNER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
-type MaterialFile = { readonly path: string; readonly mediaType: string; readonly contentBase64: string };
-type SessionContent = { readonly format: "json" | "jsonl"; readonly content: string };
+export type MaterialFile = { readonly path: string; readonly mediaType: string; readonly contentBase64: string };
+export type SessionContent = { readonly format: "json" | "jsonl"; readonly content: string };
 
 export interface BundleDirectory {
   resolveInitialMaterials: NonNullable<SpHarnessOptions["resolveInitialMaterials"]>;
@@ -88,42 +88,14 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
 
   return {
     async uploadInitialMaterials(ownerUserId, reference, files) {
-      if (!Array.isArray(files) || files.length > 500) {
-        throw new SpHarnessError("Initial materials must contain at most 500 files", false);
-      }
-      let total = 0;
-      const paths = new Set<string>();
-      for (const file of files) {
-        if (!file || typeof file !== "object" ||
-          Object.keys(file).some((key) => key !== "path" && key !== "mediaType" && key !== "contentBase64") ||
-          !validMaterialPath(file.path) || typeof file.mediaType !== "string" || !file.mediaType.trim() ||
-          !canonicalBase64(file.contentBase64) || paths.has(file.path)) {
-          throw new SpHarnessError("Initial material file is invalid or duplicated", false);
-        }
-        paths.add(file.path);
-        const size = Buffer.from(file.contentBase64, "base64").byteLength;
-        total += size;
-        if (size > MAX_SINGLE_MATERIAL_BYTES || total > MAX_MATERIAL_BYTES) {
-          throw new SpHarnessError("Initial materials are too large", false);
-        }
-      }
-      const bytes = Buffer.from(JSON.stringify({ files }), "utf8");
+      const validated = validateMaterialFiles(files);
+      const bytes = Buffer.from(JSON.stringify({ files: validated }), "utf8");
       await writeResource(resourcePath(ownerUserId, reference.bundleId, "materials",
         reference.materialId, "json"), bytes, MAX_MATERIAL_MANIFEST_BYTES);
     },
     async uploadInitialSession(ownerUserId, reference, context) {
-      if (!context || (context.format !== "json" && context.format !== "jsonl") ||
-        typeof context.content !== "string" || !context.content.trim() ||
-        context.content.length > MAX_SESSION_CONTENT_LENGTH) {
-        throw new SpHarnessError("Initial Session content is invalid or too large", false);
-      }
-      try {
-        if (context.format === "json") JSON.parse(context.content);
-        else for (const line of context.content.split(/\r?\n/u).filter((line) => line.trim())) JSON.parse(line);
-      } catch {
-        throw new SpHarnessError("Initial Session content is not valid JSON or JSONL", false);
-      }
-      const bytes = Buffer.from(JSON.stringify(context), "utf8");
+      const validated = validateSessionContent(context);
+      const bytes = Buffer.from(JSON.stringify(validated), "utf8");
       await writeResource(resourcePath(ownerUserId, reference.bundleId, "sessions",
         reference.sessionId, "json"), bytes, MAX_SESSION_FILE_BYTES);
     },
@@ -137,32 +109,79 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
       } catch {
         throw new SpHarnessError("Initial material manifest is invalid JSON", false);
       }
-      if (!isRecord(parsed) || !Array.isArray(parsed.files) || parsed.files.length > 500 ||
-        parsed.files.some((file) => !isRecord(file) || typeof file.path !== "string" ||
-          typeof file.mediaType !== "string" || typeof file.contentBase64 !== "string")) {
+      if (!isRecord(parsed) || Object.keys(parsed).length !== 1) {
         throw new SpHarnessError("Initial material manifest must contain files", false);
       }
-      return parsed.files.map((file) => ({
-        path: file.path as string,
-        mediaType: file.mediaType as string,
-        contentBase64: file.contentBase64 as string,
-      }));
+      return validateMaterialFiles(parsed.files);
     },
     async resolveInitialSession(ownerUserId: string, reference: InitialSessionRef) {
       const bytes = await readResource(resourcePath(ownerUserId, reference.bundleId, "sessions",
         reference.sessionId, "json"), MAX_SESSION_FILE_BYTES);
       if (!bytes) return undefined;
+      let parsed: unknown;
       try {
-        const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-        if (!isRecord(parsed) || (parsed.format !== "json" && parsed.format !== "jsonl") ||
-          typeof parsed.content !== "string" || !parsed.content.trim() ||
-          parsed.content.length > MAX_SESSION_CONTENT_LENGTH) throw new Error("invalid");
-        return { format: parsed.format, content: parsed.content };
+        parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
       } catch {
         throw new SpHarnessError("Initial Session content is invalid", false);
       }
+      return validateSessionContent(parsed);
     },
   };
+}
+
+function validateMaterialFiles(value: unknown): readonly MaterialFile[] {
+  if (!Array.isArray(value) || value.length > 500) {
+    throw new SpHarnessError("Initial materials must contain at most 500 files", false);
+  }
+  let total = 0;
+  const paths = new Set<string>();
+  for (const file of value) {
+    if (!isRecord(file) ||
+      Object.keys(file).some((key) => key !== "path" && key !== "mediaType" && key !== "contentBase64") ||
+      !validMaterialPath(file.path) || typeof file.mediaType !== "string" || !file.mediaType.trim() ||
+      !canonicalBase64(file.contentBase64) || paths.has(file.path)) {
+      throw new SpHarnessError("Initial material file is invalid or duplicated", false);
+    }
+    paths.add(file.path);
+    const size = Buffer.from(file.contentBase64, "base64").byteLength;
+    total += size;
+    if (size > MAX_SINGLE_MATERIAL_BYTES || total > MAX_MATERIAL_BYTES) {
+      throw new SpHarnessError("Initial materials are too large", false);
+    }
+  }
+  return value as readonly MaterialFile[];
+}
+
+function validateSessionContent(value: unknown): SessionContent {
+  if (!isRecord(value) || Object.keys(value).some((key) => key !== "format" && key !== "content") ||
+    (value.format !== "json" && value.format !== "jsonl") ||
+    typeof value.content !== "string" || !value.content.trim() ||
+    value.content.length > MAX_SESSION_CONTENT_LENGTH) {
+    throw new SpHarnessError("Initial Session content is invalid or too large", false);
+  }
+  let snapshot: unknown;
+  try {
+    snapshot = value.format === "json"
+      ? JSON.parse(value.content)
+      : { entries: value.content.split(/\r?\n/u).filter((line) => line.trim()).map((line) => JSON.parse(line)) };
+  } catch {
+    throw new SpHarnessError("Initial Session content is not valid JSON or JSONL", false);
+  }
+  if (!isRecord(snapshot) || !Array.isArray(snapshot.entries) || snapshot.entries.length > 10_000) {
+    throw new SpHarnessError("Initial Session must contain canonical entries", false);
+  }
+  const seen = new Set<string>();
+  for (const [index, entry] of snapshot.entries.entries()) {
+    if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id || seen.has(entry.id) ||
+      typeof entry.createdAt !== "number" || !Number.isSafeInteger(entry.createdAt) || entry.createdAt < 0 ||
+      !isRecord(entry.message) || typeof entry.message.role !== "string" ||
+      !["user", "assistant", "toolResult"].includes(entry.message.role) ||
+      (index === 0 && entry.message.role !== "user")) {
+      throw new SpHarnessError("Initial Session contains invalid canonical entries", false);
+    }
+    seen.add(entry.id);
+  }
+  return { format: value.format, content: value.content };
 }
 
 function encodeId(id: string): string {
