@@ -22,6 +22,13 @@ export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): Me
           .where(and(eq(projects.projectId, query.projectId), eq(projects.ownerUserId, owner)));
         if (!project) throw new MetricsQueryError(`Unknown Project ${query.projectId}`);
         const projectScope = { kind: "project" as const, ownerUserId: project.ownerUserId, projectId: project.projectId };
+        const samplingScopeConditions: readonly SQL[] = [
+          eq(samplings.ownerUserId, project.ownerUserId), eq(samplings.projectId, project.projectId),
+        ];
+        const selectProjectEvaluations = (...conditions: SQL[]) => transaction.select({
+          evaluationId: evaluations.evaluationId, samplingId: evaluations.samplingId, facts: evaluations.facts,
+        }).from(evaluations).innerJoin(samplings, eq(evaluations.samplingId, samplings.samplingId))
+          .where(and(...samplingScopeConditions, ...conditions));
 
         const requestedRunIds = query.runIds;
         const selectedRuns = requestedRunIds === undefined
@@ -46,7 +53,7 @@ export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): Me
           eligibleSampleIds = [query.sampleId];
         }
 
-        const conditions: SQL[] = [eq(samplings.ownerUserId, project.ownerUserId), eq(samplings.projectId, project.projectId)];
+        const conditions: SQL[] = [...samplingScopeConditions];
         if (query.samplingId !== undefined) conditions.push(eq(samplings.samplingId, query.samplingId));
         if (eligibleSampleIds !== undefined && eligibleSampleIds.length > 0) {
           conditions.push(inArray(samplings.sampleId, eligibleSampleIds));
@@ -87,25 +94,18 @@ export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): Me
         const allowedEvaluationIds = selectedRuns === undefined
           ? undefined : unique(selectedRuns.flatMap((run) => run.evaluationIds));
         const selectedEvaluations = selectedSamplingIds.length === 0 || allowedEvaluationIds?.length === 0
-          ? [] : await transaction.select({
-            evaluationId: evaluations.evaluationId, samplingId: evaluations.samplingId, facts: evaluations.facts,
-          }).from(evaluations).innerJoin(samplings, eq(evaluations.samplingId, samplings.samplingId)).where(and(
-            eq(samplings.ownerUserId, project.ownerUserId), eq(samplings.projectId, project.projectId),
+          ? [] : await selectProjectEvaluations(
             inArray(evaluations.samplingId, selectedSamplingIds),
             ...(allowedEvaluationIds === undefined ? [] : [inArray(evaluations.evaluationId, allowedEvaluationIds)]),
-          )).orderBy(evaluations.evaluationId);
+          ).orderBy(evaluations.evaluationId);
 
         const fullSamplingIds = unique(runRecords.flatMap((run) => run.samplingIds));
         const fullEvaluationIds = unique(runRecords.flatMap((run) => run.evaluationIds));
         const [fullSamplingRows, fullEvaluationRows] = await Promise.all([
           fullSamplingIds.length === 0 ? [] : transaction.select().from(samplings)
-            .where(and(eq(samplings.ownerUserId, project.ownerUserId), eq(samplings.projectId, project.projectId),
-              inArray(samplings.samplingId, fullSamplingIds))),
-          fullEvaluationIds.length === 0 ? [] : transaction.select({
-            evaluationId: evaluations.evaluationId, samplingId: evaluations.samplingId, facts: evaluations.facts,
-          }).from(evaluations).innerJoin(samplings, eq(evaluations.samplingId, samplings.samplingId))
-            .where(and(eq(samplings.ownerUserId, project.ownerUserId), eq(samplings.projectId, project.projectId),
-              inArray(evaluations.evaluationId, fullEvaluationIds))),
+            .where(and(...samplingScopeConditions, inArray(samplings.samplingId, fullSamplingIds))),
+          fullEvaluationIds.length === 0 ? []
+            : selectProjectEvaluations(inArray(evaluations.evaluationId, fullEvaluationIds)),
         ]);
         const samplingById = new Map(fullSamplingRows.map((row) => [row.samplingId, samplingFromRow(row)]));
         const evaluationById = new Map(fullEvaluationRows.map((row) => [row.evaluationId, evaluationFromRow(row)]));
