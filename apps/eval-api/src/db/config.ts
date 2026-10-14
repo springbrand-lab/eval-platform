@@ -130,6 +130,23 @@ export function createPostgresConfigStore(
     return config;
   }
 
+  async function writeExecutionConfig(
+    config: ExecutionConfig,
+    write: (transaction: Pick<EvalDb, "insert" | "update">) => Promise<void>,
+  ): Promise<ExecutionConfig> {
+    return db.transaction(async (transaction) => {
+      await lockDataset(transaction, config.datasetId);
+      await requireDatasetSamples(transaction, config.datasetId, config.sampleIds);
+      try {
+        await write(transaction);
+      } catch (error) {
+        if (isForeignKeyFailure(error)) throw new ConfigReferenceError("Dataset", config.datasetId);
+        throw error;
+      }
+      return config;
+    });
+  }
+
   async function requirePipelineReferences(config: PipelineConfig): Promise<void> {
     const [execution, evaluation] = await Promise.all([
       db.select({ configId: executionConfigs.configId }).from(executionConfigs)
@@ -144,38 +161,22 @@ export function createPostgresConfigStore(
   return {
     async createExecutionConfig(input) {
       const config = await prepareExecutionConfig(input);
-      return db.transaction(async (transaction) => {
-        await lockDataset(transaction, config.datasetId);
-        await requireDatasetSamples(transaction, config.datasetId, config.sampleIds);
-        try {
-          const inserted = await transaction.insert(executionConfigs).values({
-            configId: config.configId, ownerUserId: owner, datasetId: config.datasetId,
-            settings: executionSettings(config),
-          }).onConflictDoNothing().returning({ configId: executionConfigs.configId });
-          if (inserted.length === 0) throw new ConfigIdentityConflictError("execution", config.configId);
-        } catch (error) {
-          if (isForeignKeyFailure(error)) throw new ConfigReferenceError("Dataset", config.datasetId);
-          throw error;
-        }
-        return config;
+      return writeExecutionConfig(config, async (transaction) => {
+        const inserted = await transaction.insert(executionConfigs).values({
+          configId: config.configId, ownerUserId: owner, datasetId: config.datasetId,
+          settings: executionSettings(config),
+        }).onConflictDoNothing().returning({ configId: executionConfigs.configId });
+        if (inserted.length === 0) throw new ConfigIdentityConflictError("execution", config.configId);
       });
     },
     async updateExecutionConfig(configId, input) {
       const config = await prepareExecutionConfig(input, configId);
-      return db.transaction(async (transaction) => {
-        await lockDataset(transaction, config.datasetId);
-        await requireDatasetSamples(transaction, config.datasetId, config.sampleIds);
-        try {
-          const updated = await transaction.update(executionConfigs).set({
-            datasetId: config.datasetId, settings: executionSettings(config),
-          }).where(and(eq(executionConfigs.ownerUserId, owner), eq(executionConfigs.configId, configId)))
-            .returning({ configId: executionConfigs.configId });
-          if (updated.length === 0) throw new ConfigEntityNotFoundError("execution", configId);
-        } catch (error) {
-          if (isForeignKeyFailure(error)) throw new ConfigReferenceError("Dataset", config.datasetId);
-          throw error;
-        }
-        return config;
+      return writeExecutionConfig(config, async (transaction) => {
+        const updated = await transaction.update(executionConfigs).set({
+          datasetId: config.datasetId, settings: executionSettings(config),
+        }).where(and(eq(executionConfigs.ownerUserId, owner), eq(executionConfigs.configId, configId)))
+          .returning({ configId: executionConfigs.configId });
+        if (updated.length === 0) throw new ConfigEntityNotFoundError("execution", configId);
       });
     },
     async getExecutionConfig(configId) {
