@@ -2703,6 +2703,44 @@ describe("Project Run stop", () => {
     expect(completed.artifacts).toHaveLength(1);
     expect(completed.trajectory?.source).toBe("subject");
   });
+
+  it("confirms saved evidence after the store loses its write response", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const handle = await admission.start(startRequest("stop-evidence-write-response-lost"));
+    const samplingId = handle.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    const interrupted: SamplingState = {
+      ...queued,
+      subjectChatId: "interrupted-chat",
+      execution: { status: "failed", lastError: "Submission interrupted" },
+      executionAttempts: [{
+        executionAttemptId: "interrupted-attempt", samplingId, attemptNumber: 1,
+        submissionId: "interrupted-submission", status: "interrupted",
+        completedAt: "2026-10-14T00:00:00.000Z",
+      }],
+    };
+    await store.updateSampling(interrupted, queued);
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
+      submissionId: "interrupted-submission", status: "interrupted", normalizedStatus: "interrupted",
+    });
+    const updateSampling = store.updateSampling.bind(store);
+    let lostResponse = false;
+    store.updateSampling = async (next, expected) => {
+      await updateSampling(next, expected);
+      if (!lostResponse && next.artifacts && next.trajectory) {
+        lostResponse = true;
+        throw new Error("write response lost after commit");
+      }
+    };
+
+    await resumer.stop(handle.runId);
+
+    const saved = (await store.getSampling(samplingId))!;
+    expect(lostResponse).toBe(true);
+    expect(saved.execution.status).toBe("cancelled");
+    expect(saved.artifacts).toHaveLength(1);
+    expect(saved.trajectory?.source).toBe("subject");
+  });
 });
 
 describe("raw resource persistence", () => {

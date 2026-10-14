@@ -27,6 +27,16 @@ import { RuntimeRecordPersistenceError } from "./record-errors.js";
 
 export type AgentLifecycleStage = "execution" | "evaluation";
 
+export function agentOperationKey(
+  stage: AgentLifecycleStage,
+  samplingId: string,
+  attemptNumber: number,
+): string {
+  return attemptNumber === 1
+    ? `${stage}:${samplingId}`
+    : `${stage}:${samplingId}:restart:${attemptNumber}`;
+}
+
 export interface AgentAttemptRecord {
   readonly attemptNumber: number;
   readonly submissionId?: string;
@@ -247,9 +257,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
         await prepareAgentWithRetry(dependencies, options, handle, retryController);
       }
 
-      const idempotencyKey = attemptNumber === 1
-        ? `${options.stage}:${options.samplingId}`
-        : `${options.stage}:${options.samplingId}:restart:${attemptNumber}`;
+      const idempotencyKey = agentOperationKey(options.stage, options.samplingId, attemptNumber);
       let resourceScope: AgentResourceScope = {
         chatId: handle.chatId,
         idempotencyKey,

@@ -42,6 +42,7 @@ import type {
 import { persistRuntimeRecord, RuntimeRunIdentityConflictError } from "./store.js";
 import {
   type AgentAttemptRecord,
+  agentOperationKey,
   errorMessage,
   requireSpHarness,
 } from "./agent-lifecycle.js";
@@ -89,10 +90,6 @@ function defaultNow(): string {
 
 function defaultSleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function stageOperationKey(stage: "execution" | "evaluation", samplingId: string, attemptNumber: number): string {
-  return attemptNumber === 1 ? `${stage}:${samplingId}` : `${stage}:${samplingId}:restart:${attemptNumber}`;
 }
 
 function stoppedAttempt<T extends AgentAttemptRecord>(attempt: T, completedAt: string): T {
@@ -389,6 +386,14 @@ class RunResumer extends RunReader implements EvalRunResumer {
   private async finishStoppedExecution(run: RuntimeRunRecord, initial: SamplingState): Promise<void> {
     if (run.config.operation === "evaluation") throw new Error("Evaluation Run has no execution phase");
     const executionConfig = run.config.execution;
+    const retryController = this.#createRetryController(executionConfig.retryPolicy);
+    const persist = (record: SamplingState, expected: SamplingState): Promise<void> => persistRuntimeRecord({
+      record, expected,
+      write: (next, previous) => this.store.updateSampling(next, previous),
+      read: () => this.store.getSampling(record.samplingId),
+      retryController,
+      sleep: this.#stageDependencies.sleep,
+    });
     const interrupted = (sampling: SamplingState) => {
       const status = sampling.executionAttempts.at(-1)?.status;
       return status === "interrupted" || status === "cancelled";
@@ -408,7 +413,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
         chatId: current.subjectChatId!, samplingId: current.samplingId,
       };
       const receipt = await this.#harness.inspectAgentOperation({
-        handle, idempotencyKey: stageOperationKey("execution", current.samplingId, attempt!.attemptNumber),
+        handle, idempotencyKey: agentOperationKey("execution", current.samplingId, attempt!.attemptNumber),
       });
       operationFound = receipt !== null;
       if (!receipt && attempt?.submissionId) throw new Error(`Subject Submission ${attempt.submissionId} disappeared`);
@@ -431,18 +436,19 @@ class RunResumer extends RunReader implements EvalRunResumer {
         ownerUserId: current.subjectAgent.ownerUserId,
         chatId: current.subjectChatId, samplingId: current.samplingId,
       };
+      let output;
       try {
-        const output = await this.#harness.collectExecution({ handle });
-        const next = { ...current, artifacts: output.artifacts, trajectory: output.trajectory };
-        await this.store.updateSampling(next, current);
-        current = next;
+        output = await this.#harness.collectExecution({ handle });
       } catch (error) {
-        await this.store.updateSampling({
+        await persist({
           ...current,
           execution: { status: "retrying", evidencePending: true, lastError: errorMessage(error) },
         }, current);
         return;
       }
+      const next = { ...current, artifacts: output.artifacts, trajectory: output.trajectory };
+      await persist(next, current);
+      current = next;
     }
     if (!isPendingStatus(current.execution.status)
       && !(current.execution.status === "failed" && (wasPending || interrupted(current)))) return;
@@ -450,7 +456,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
     const attempts = last && !last.submissionId && !operationFound
       ? [...current.executionAttempts.slice(0, -1), stoppedAttempt(last, this.#stageDependencies.now())]
       : current.executionAttempts;
-    await this.store.updateSampling({
+    await persist({
       ...current,
       executionAttempts: attempts,
       execution: { status: "cancelled", lastError: "Run stopped" },
@@ -462,6 +468,14 @@ class RunResumer extends RunReader implements EvalRunResumer {
   ): Promise<void> {
     if (run.config.operation === "execution") throw new Error("Execution Run has no evaluation phase");
     const evaluationConfig = run.config.evaluation;
+    const retryController = this.#createRetryController(evaluationConfig.retryPolicy);
+    const persist = (record: EvaluationRecord, expected: EvaluationRecord): Promise<void> => persistRuntimeRecord({
+      record, expected,
+      write: (next, previous) => this.store.updateEvaluation(next, previous),
+      read: () => this.store.getEvaluation(record.evaluationId),
+      retryController,
+      sleep: this.#stageDependencies.sleep,
+    });
     const interrupted = (evaluation: EvaluationRecord) => {
       const status = evaluation.attempts.at(-1)?.status;
       return status === "interrupted" || status === "cancelled";
@@ -485,7 +499,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
         } } : {}),
       };
       const receipt = await this.#harness.inspectAgentOperation({
-        handle, idempotencyKey: stageOperationKey("evaluation", current.samplingId, attempt!.attemptNumber),
+        handle, idempotencyKey: agentOperationKey("evaluation", current.samplingId, attempt!.attemptNumber),
       });
       operationFound = receipt !== null;
       if (!receipt && attempt?.submissionId) throw new Error(`Evaluator Submission ${attempt.submissionId} disappeared`);
@@ -502,17 +516,18 @@ class RunResumer extends RunReader implements EvalRunResumer {
         current = (await this.store.getEvaluation(current.evaluationId))!;
       }
       if (receipt && interrupted(current) && !current.output) {
+        let output;
         try {
-          const output = await this.#harness.collectEvaluation({ handle });
-          const next = { ...current, output };
-          await this.store.updateEvaluation(next, current);
-          current = next;
+          output = await this.#harness.collectEvaluation({ handle });
         } catch (error) {
-          await this.store.updateEvaluation({
+          await persist({
             ...current, status: { status: "retrying", lastError: errorMessage(error) },
           }, current);
           return;
         }
+        const next = { ...current, output };
+        await persist(next, current);
+        current = next;
       }
     }
     if (!isPendingStatus(current.status.status)
@@ -521,7 +536,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
     const attempts = last && !last.submissionId && !operationFound
       ? [...current.attempts.slice(0, -1), stoppedAttempt(last, this.#stageDependencies.now())]
       : current.attempts;
-    await this.store.updateEvaluation({
+    await persist({
       ...current, attempts, status: { status: "cancelled", lastError: "Run stopped" },
     }, current);
   }
