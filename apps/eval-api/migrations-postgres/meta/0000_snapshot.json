@@ -1,5 +1,5 @@
 {
-  "id": "d30193da-f9fe-4fb4-90e7-bee6edfa246a",
+  "id": "3d40b37c-092a-42c4-b256-e54e3fe978ef",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -574,23 +574,17 @@
           "primaryKey": false,
           "notNull": true
         },
-        "request_id": {
-          "name": "request_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "idempotency_key": {
           "name": "idempotency_key",
           "type": "text",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "request_fingerprint": {
           "name": "request_fingerprint",
           "type": "text",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         }
       },
       "indexes": {
@@ -637,29 +631,17 @@
             "run_id"
           ]
         },
-        "eval_runs_owner_request_id_uq": {
-          "name": "eval_runs_owner_request_id_uq",
+        "eval_runs_project_idempotency_uq": {
+          "name": "eval_runs_project_idempotency_uq",
           "nullsNotDistinct": false,
           "columns": [
-            "owner_user_id",
-            "request_id"
-          ]
-        },
-        "eval_runs_owner_idempotency_key_uq": {
-          "name": "eval_runs_owner_idempotency_key_uq",
-          "nullsNotDistinct": false,
-          "columns": [
-            "owner_user_id",
+            "project_id",
             "idempotency_key"
           ]
         }
       },
       "policies": {},
       "checkConstraints": {
-        "eval_runs_request_identity_ck": {
-          "name": "eval_runs_request_identity_ck",
-          "value": "(\"eval_runs\".\"request_id\" IS NULL) = (\"eval_runs\".\"request_fingerprint\" IS NULL)"
-        },
         "eval_runs_phases_ck": {
           "name": "eval_runs_phases_ck",
           "value": "\"eval_runs\".\"phases\" IN ('[\"execution\"]'::jsonb, '[\"evaluation\"]'::jsonb, '[\"execution\", \"evaluation\"]'::jsonb)"

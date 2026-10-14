@@ -73,13 +73,10 @@ export async function readRunRecords(
     config: row.config,
     samplingIds: samplingIdsByRun.get(row.runId) ?? [],
     evaluationIds: evaluationIdsByRun.get(row.runId) ?? [],
-    ...(row.requestId === null ? {} : {
-      requestIdentity: {
-        requestId: row.requestId,
-        ...(row.idempotencyKey === null ? {} : { idempotencyKey: row.idempotencyKey }),
-        requestFingerprint: row.requestFingerprint!,
-      },
-    }),
+    requestIdentity: {
+      idempotencyKey: row.idempotencyKey,
+      requestFingerprint: row.requestFingerprint,
+    },
   }));
 }
 
@@ -107,22 +104,21 @@ function validateAdmission(
     throw new Error("Run contains records outside its Project or Sampling scope");
   }
   if (run.phases.length === 1 && run.phases[0] === "execution") {
-    if (run.config.operation !== "execution" || judges.length !== 0 || !run.requestIdentity) {
+    if (run.config.operation !== "execution" || judges.length !== 0) {
       throw new Error("Invalid execution Run scope");
     }
   } else if (run.phases.length === 1 && run.phases[0] === "evaluation") {
-    if (run.config.operation !== "evaluation" || judges.length !== records.length || run.requestIdentity) {
+    if (run.config.operation !== "evaluation" || judges.length !== records.length) {
       throw new Error("Invalid evaluation Run scope");
     }
   } else if (run.phases.length === 2 && run.phases[0] === "execution" && run.phases[1] === "evaluation") {
-    if (run.config.operation !== "pipeline" || judges.length !== records.length || !run.requestIdentity) {
+    if (run.config.operation !== "pipeline" || judges.length !== records.length) {
       throw new Error("Invalid pipeline Run scope");
     }
   } else {
     throw new Error("Invalid Run phases");
   }
-  if (run.requestIdentity && (!run.requestIdentity.requestId || !run.requestIdentity.requestFingerprint
-    || run.requestIdentity.idempotencyKey === "")) {
+  if (!run.requestIdentity.idempotencyKey || !run.requestIdentity.requestFingerprint) {
     throw new Error("Incomplete Run request identity");
   }
 }
@@ -146,20 +142,17 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
     reader: RuntimeReader,
     identityOwner: string,
     projectId: string,
-    identity: NonNullable<RuntimeRunRecord["requestIdentity"]>,
+    identity: RuntimeRunRecord["requestIdentity"],
   ): Promise<RuntimeRunRecord | null> => {
-    const predicates = [eq(runs.requestId, identity.requestId)];
-    if (identity.idempotencyKey !== undefined) predicates.push(eq(runs.idempotencyKey, identity.idempotencyKey));
-    const matched = await reader.select({ runId: runs.runId }).from(runs)
-      .where(and(eq(runs.ownerUserId, identityOwner), or(...predicates)));
-    if (matched.length === 0) return null;
-    if (matched.length > 1) {
-      throw new RuntimeRunIdentityConflictError("requestId and idempotencyKey refer to different evaluation runs");
-    }
-    const [record] = await readRunRecords(reader, [matched[0]!.runId], { kind: "user", ownerUserId: identityOwner });
-    if (record?.projectId !== projectId
-      || record.requestIdentity?.requestFingerprint !== identity.requestFingerprint) {
-      throw new RuntimeRunIdentityConflictError("request identity is already bound to different evaluation run facts");
+    const [matched] = await reader.select({ runId: runs.runId }).from(runs)
+      .where(and(eq(runs.ownerUserId, identityOwner), eq(runs.projectId, projectId),
+        eq(runs.idempotencyKey, identity.idempotencyKey)));
+    if (!matched) return null;
+    const [record] = await readRunRecords(reader, [matched.runId], {
+      kind: "project", ownerUserId: identityOwner, projectId,
+    });
+    if (record?.requestIdentity.requestFingerprint !== identity.requestFingerprint) {
+      throw new RuntimeRunIdentityConflictError("idempotency key is already bound to different Run facts");
     }
     return record ?? null;
   };
@@ -170,22 +163,13 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
         await readRunRecords(transaction, [runId], scope)
       )[0] ?? null, { isolationLevel: "repeatable read", accessMode: "read only" });
     },
-    async findRunByRequestId(requestId) {
+    async findRunByIdempotencyKey(projectId, idempotencyKey) {
       return db.transaction(async (transaction) => {
-        const rows = await transaction.select({ runId: runs.runId }).from(runs)
-          .where(and(eq(runs.requestId, requestId), ownerScope.run))
-          .limit(2);
-        if (rows.length > 1) throw new RuntimeRunIdentityConflictError("requestId is ambiguous across owners");
-        return rows[0] ? (await readRunRecords(transaction, [rows[0].runId], scope))[0] ?? null : null;
-      }, { isolationLevel: "repeatable read", accessMode: "read only" });
-    },
-    async findRunByIdempotencyKey(idempotencyKey) {
-      return db.transaction(async (transaction) => {
-        const rows = await transaction.select({ runId: runs.runId }).from(runs)
-          .where(and(eq(runs.idempotencyKey, idempotencyKey), ownerScope.run))
-          .limit(2);
-        if (rows.length > 1) throw new RuntimeRunIdentityConflictError("idempotencyKey is ambiguous across owners");
-        return rows[0] ? (await readRunRecords(transaction, [rows[0].runId], scope))[0] ?? null : null;
+        const [row] = await transaction.select({ runId: runs.runId, ownerUserId: runs.ownerUserId }).from(runs)
+          .where(and(eq(runs.projectId, projectId), eq(runs.idempotencyKey, idempotencyKey), ownerScope.run));
+        return row ? (await readRunRecords(transaction, [row.runId], {
+          kind: "project", ownerUserId: row.ownerUserId, projectId,
+        }))[0] ?? null : null;
       }, { isolationLevel: "repeatable read", accessMode: "read only" });
     },
     async createRunWithSamplings(run, records, judges) {
@@ -197,10 +181,8 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
           .for("share");
         if (!project) throw new Error(`Unknown Project ${run.projectId}`);
         const identity = run.requestIdentity;
-        if (identity) {
-          const existing = await findByIdentity(transaction, project.ownerUserId, run.projectId, identity);
-          if (existing) return { run: existing, created: false };
-        }
+        const existing = await findByIdentity(transaction, project.ownerUserId, run.projectId, identity);
+        if (existing) return { run: existing, created: false };
         const selectedSamples = await transaction.select({
           sampleId: samples.sampleId,
           ownerUserId: samples.ownerUserId,
@@ -228,15 +210,12 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
           projectId: run.projectId,
           phases: run.phases,
           config: run.config,
-          requestId: identity?.requestId ?? null,
-          idempotencyKey: identity?.idempotencyKey ?? null,
-          requestFingerprint: identity?.requestFingerprint ?? null,
+          idempotencyKey: identity.idempotencyKey,
+          requestFingerprint: identity.requestFingerprint,
         }).onConflictDoNothing().returning({ runId: runs.runId });
         if (!inserted) {
-          if (identity) {
-            const existing = await findByIdentity(transaction, project.ownerUserId, run.projectId, identity);
-            if (existing) return { run: existing, created: false };
-          }
+          const existing = await findByIdentity(transaction, project.ownerUserId, run.projectId, identity);
+          if (existing) return { run: existing, created: false };
           throw new RuntimeRunIdentityConflictError(`Run identity already exists: ${run.runId}`);
         }
 

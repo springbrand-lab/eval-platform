@@ -189,13 +189,12 @@ function createEvalRuntime(dependencies: RuntimeTestDependencies) {
 }
 
 function startRequest(
-  requestId: string,
+  intentKey: string,
   executionConfigId: string = EXECUTION_CONFIG_ID,
-  idempotencyKey?: string,
+  idempotencyKey: string = intentKey,
 ) {
   return {
-    requestId,
-    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+    idempotencyKey,
     projectId: "project-1",
     executionConfigId,
   };
@@ -204,8 +203,10 @@ function startRequest(
 function evaluateRequest(
   samplingIds: readonly string[],
   evaluationConfigId: string = EVALUATION_CONFIG_ID,
+  idempotencyKey: string = crypto.randomUUID(),
 ) {
   return {
+    idempotencyKey,
     projectId: "project-1",
     samplingIds,
     evaluationConfigId,
@@ -213,13 +214,12 @@ function evaluateRequest(
 }
 
 function pipelineRequest(
-  requestId: string,
+  intentKey: string,
   pipelineConfigId: string = PIPELINE_CONFIG_ID,
-  idempotencyKey?: string,
+  idempotencyKey: string = intentKey,
 ) {
   return {
-    requestId,
-    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+    idempotencyKey,
     projectId: "project-1",
     pipelineConfigId,
   };
@@ -262,42 +262,20 @@ function makeStore(options: StoreOptions = {}): RuntimeStore {
     async getRun(runId) {
       return runs.get(runId) ?? null;
     },
-    async findRunByRequestId(requestId) {
+    async findRunByIdempotencyKey(projectId, idempotencyKey) {
       return [...runs.values()].find(
-        (run) => run.requestIdentity?.requestId === requestId,
-      ) ?? null;
-    },
-    async findRunByIdempotencyKey(idempotencyKey) {
-      return [...runs.values()].find(
-        (run) => run.requestIdentity?.idempotencyKey === idempotencyKey,
+        (run) => run.projectId === projectId && run.requestIdentity.idempotencyKey === idempotencyKey,
       ) ?? null;
     },
     async createRunWithSamplings(run, records, evaluationRecords) {
-      const byRequestId = run.requestIdentity?.requestId === undefined
-        ? null
-        : [...runs.values()].find(
-            (existingRun) => existingRun.requestIdentity?.requestId === run.requestIdentity?.requestId,
-          ) ?? null;
-      const byIdempotencyKey = run.requestIdentity?.idempotencyKey === undefined
-        ? null
-        : [...runs.values()].find(
-            (existingRun) => existingRun.requestIdentity?.idempotencyKey === run.requestIdentity?.idempotencyKey,
-          ) ?? null;
-      if (
-        byRequestId &&
-        byIdempotencyKey &&
-        byRequestId.runId !== byIdempotencyKey.runId
-      ) {
-        throw new RuntimeRunIdentityConflictError(
-          "requestId and idempotencyKey refer to different evaluation runs",
-        );
-      }
-
-      const existingRun = byIdempotencyKey ?? byRequestId;
+      const existingRun = [...runs.values()].find(
+        (existing) => existing.projectId === run.projectId
+          && existing.requestIdentity.idempotencyKey === run.requestIdentity.idempotencyKey,
+      );
       if (existingRun) {
         if (
-          existingRun.requestIdentity?.requestFingerprint
-          !== run.requestIdentity?.requestFingerprint
+          existingRun.requestIdentity.requestFingerprint
+          !== run.requestIdentity.requestFingerprint
         ) {
           throw new RuntimeRunIdentityConflictError(
             "request identity is already bound to different evaluation run facts",
@@ -1125,7 +1103,7 @@ describe("eval runtime orchestration", () => {
     },
   );
 
-  it("rejects a reused run identity when the selected framework changes", async () => {
+  it("replays the original run from its saved config when the live config changes", async () => {
     const harness = makeHarness();
     const configResolver = makeConfigResolver("codex");
     const runtime = createEvalRuntime({
@@ -1139,14 +1117,15 @@ describe("eval runtime orchestration", () => {
     await waitForTerminal(runtime, run.runId);
 
     const config = await configResolver.resolveExecutionConfig(EXECUTION_CONFIG_ID);
-    vi.spyOn(configResolver, "resolveExecutionConfig").mockResolvedValue({
+    const resolve = vi.spyOn(configResolver, "resolveExecutionConfig").mockResolvedValue({
       ...config,
       harness: { kind: "sp", framework: "cc", agentConfig: SUBJECT },
     });
 
     await expect(runtime.start(
       startRequest("another-framework-request", EXECUTION_CONFIG_ID, "framework-key"),
-    )).rejects.toThrow(RuntimeRunIdentityConflictError);
+    )).resolves.toEqual(run);
+    expect(resolve).not.toHaveBeenCalled();
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
   });
 
@@ -1354,7 +1333,7 @@ describe("eval runtime orchestration", () => {
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects a request and key that are already bound to different runs", async () => {
+  it("rejects a key reused for another Run operation in the same Project", async () => {
     const runtime = createEvalRuntime({
       catalog: makeCatalog(),
       harness: makeHarness(),
@@ -1362,10 +1341,9 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
     await runtime.start(startRequest("request-1", EXECUTION_CONFIG_ID, "run-key-1"));
-    await runtime.start(startRequest("request-2", EXECUTION_CONFIG_ID, "run-key-2"));
 
     await expect(
-      runtime.start(startRequest("request-1", EXECUTION_CONFIG_ID, "run-key-2")),
+      runtime.pipeline(pipelineRequest("pipeline-request", PIPELINE_CONFIG_ID, "run-key-1")),
     ).rejects.toThrow(RuntimeRunIdentityConflictError);
   });
 
@@ -1754,6 +1732,123 @@ describe("eval runtime orchestration", () => {
     await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.not.toHaveProperty(
       "evaluation",
     );
+  });
+
+  it("admits one independent evaluation when the same intent races or is retried", async () => {
+    const harness = makeHarness();
+    const configResolver = makeConfigResolver();
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog(),
+      configResolver,
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+    });
+    const execution = await runtime.start(startRequest("evaluation-intent-execution"));
+    await waitForTerminal(runtime, execution.runId);
+
+    const request = evaluateRequest(execution.samplingIds, EVALUATION_CONFIG_ID, "evaluation-intent");
+    const [first, concurrent] = await Promise.all([
+      runtime.evaluate(request),
+      runtime.evaluate(request),
+    ]);
+    expect(concurrent).toEqual(first);
+    await waitForTerminal(runtime, first.runId);
+
+    const resolve = vi.spyOn(configResolver, "resolveEvaluationConfig")
+      .mockRejectedValue(new Error("live config must not be read on replay"));
+    await expect(runtime.evaluate(request)).resolves.toEqual(first);
+    expect(resolve).not.toHaveBeenCalled();
+    resolve.mockRestore();
+    expect(await runtime.listEvaluations(execution.samplingIds[0]!)).toHaveLength(1);
+    expect(vi.mocked(harness.ensureAgent).mock.calls.filter(([input]) => input.role === "evaluator"))
+      .toHaveLength(1);
+
+    const deliberate = await runtime.evaluate({
+      ...request,
+      idempotencyKey: "new-evaluation-intent",
+    });
+    expect(deliberate.runId).not.toBe(first.runId);
+    expect(await runtime.listEvaluations(execution.samplingIds[0]!)).toHaveLength(2);
+  });
+
+  it("shares a pending evaluation admission even when its live config changes", async () => {
+    const store = makeStore();
+    const configResolver = makeConfigResolver();
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog(),
+      configResolver,
+      harness: makeHarness(),
+      store,
+      sleep: async () => undefined,
+    });
+    const execution = await runtime.start(startRequest("config-change-execution"));
+    await waitForTerminal(runtime, execution.runId);
+
+    const originalConfig = await configResolver.resolveEvaluationConfig(EVALUATION_CONFIG_ID);
+    let enteredResolution!: () => void;
+    const resolving = new Promise<void>((resolve) => { enteredResolution = resolve; });
+    let releaseResolution!: () => void;
+    const resolutionGate = new Promise<void>((resolve) => { releaseResolution = resolve; });
+    const resolveConfig = vi.spyOn(configResolver, "resolveEvaluationConfig")
+      .mockImplementation(async () => {
+        enteredResolution();
+        await resolutionGate;
+        return originalConfig;
+      });
+    const request = evaluateRequest(execution.samplingIds, EVALUATION_CONFIG_ID, "config-change-key");
+    const firstAdmission = runtime.evaluate(request);
+    await resolving;
+
+    resolveConfig.mockResolvedValue({ ...originalConfig, evaluationConcurrency: 2 });
+    const retry = runtime.evaluate(request);
+    await expect(runtime.evaluate({
+      ...request, evaluationConfigId: EVALUATION_CONFIG_TWO_CONCURRENT_ID,
+    })).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(runtime.start(startRequest("other-operation", EXECUTION_CONFIG_ID, request.idempotencyKey)))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    releaseResolution();
+
+    const [first, repeated] = await Promise.all([firstAdmission, retry]);
+    expect(repeated).toEqual(first);
+    expect(resolveConfig).toHaveBeenCalledTimes(1);
+    expect((await store.getRun(first.runId))?.config).toEqual({
+      operation: "evaluation", evaluation: originalConfig,
+    });
+    expect(await runtime.listEvaluations(execution.samplingIds[0]!)).toHaveLength(1);
+    await waitForTerminal(runtime, first.runId);
+
+    const failedRequest = { ...request, idempotencyKey: "retry-after-config-error" };
+    resolveConfig.mockRejectedValueOnce(new Error("temporary config error"));
+    await expect(runtime.evaluate(failedRequest)).rejects.toThrow("temporary config error");
+    resolveConfig.mockResolvedValue(originalConfig);
+    await expect(runtime.evaluate(failedRequest)).resolves.toMatchObject({ runId: expect.any(String) });
+  });
+
+  it("rejects changed evaluation selection or config under an admitted key", async () => {
+    const runtime = createEvalRuntime({
+      catalog: makeCatalog(),
+      harness: makeHarness(),
+      store: makeStore(),
+      sleep: async () => undefined,
+    });
+    const execution = await runtime.start(startRequest(
+      "evaluation-selection-execution",
+      EXECUTION_CONFIG_TWO_CONCURRENT_ID,
+    ));
+    await waitForTerminal(runtime, execution.runId);
+    const request = evaluateRequest(execution.samplingIds, EVALUATION_CONFIG_ID, "evaluation-selection");
+    await runtime.evaluate(request);
+
+    await expect(runtime.evaluate({
+      ...request,
+      samplingIds: [...request.samplingIds].reverse(),
+    })).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(runtime.evaluate({
+      ...request,
+      evaluationConfigId: EVALUATION_CONFIG_TWO_CONCURRENT_ID,
+    })).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    expect(await runtime.listEvaluations(execution.samplingIds[0]!)).toHaveLength(1);
   });
 
   it("resolves a shared sample once per admission and execution stage", async () => {

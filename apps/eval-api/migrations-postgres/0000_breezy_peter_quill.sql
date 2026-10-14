@@ -59,13 +59,10 @@ CREATE TABLE "eval_runs" (
 	"project_id" text NOT NULL,
 	"phases" jsonb NOT NULL,
 	"config" jsonb NOT NULL,
-	"request_id" text,
-	"idempotency_key" text,
-	"request_fingerprint" text,
+	"idempotency_key" text NOT NULL,
+	"request_fingerprint" text NOT NULL,
 	CONSTRAINT "eval_runs_owner_id_uq" UNIQUE("owner_user_id","run_id"),
-	CONSTRAINT "eval_runs_owner_request_id_uq" UNIQUE("owner_user_id","request_id"),
-	CONSTRAINT "eval_runs_owner_idempotency_key_uq" UNIQUE("owner_user_id","idempotency_key"),
-	CONSTRAINT "eval_runs_request_identity_ck" CHECK (("eval_runs"."request_id" IS NULL) = ("eval_runs"."request_fingerprint" IS NULL)),
+	CONSTRAINT "eval_runs_project_idempotency_uq" UNIQUE("project_id","idempotency_key"),
 	CONSTRAINT "eval_runs_phases_ck" CHECK ("eval_runs"."phases" IN ('["execution"]'::jsonb, '["evaluation"]'::jsonb, '["execution", "evaluation"]'::jsonb))
 );
 --> statement-breakpoint

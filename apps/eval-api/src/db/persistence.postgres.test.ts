@@ -45,9 +45,7 @@ function makeRun(projectId: string, record: Sampling, datasetId: string, overrid
     runId: crypto.randomUUID(), projectId,
     samplingIds: [record.samplingId], evaluationIds: [],
     phases: ["execution"], config: executionConfig(datasetId),
-    ...(overrides.phases?.[0] === "evaluation" ? {} : {
-      requestIdentity: { requestId: crypto.randomUUID(), idempotencyKey: crypto.randomUUID(), requestFingerprint: "facts-1" },
-    }),
+    requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "facts-1" },
     ...overrides,
   };
 }
@@ -243,7 +241,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const first = makeSampling(project.projectId, sample.sampleId);
     const second = makeSampling(project.projectId, sample.sampleId);
     const run = makeRun(project.projectId, first, dataset.datasetId);
-    const competing = makeRun(project.projectId, second, dataset.datasetId, { requestIdentity: run.requestIdentity! });
+    const competing = makeRun(project.projectId, second, dataset.datasetId, { requestIdentity: run.requestIdentity });
     const admissions = await Promise.all([
       runtime.createRunWithSamplings(run, [first], []),
       createPostgresWorkerRuntimeStore(database.db).createRunWithSamplings(competing, [second], []),
@@ -252,41 +250,108 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(admissions[0]!.run).toEqual(admissions[1]!.run);
     expect(await runtime.getSampling(admissions[0]!.run.samplingIds[0]!)).not.toBeNull();
     expect(await runtime.getSampling(admissions[0]!.run.samplingIds[0] === first.samplingId ? second.samplingId : first.samplingId)).toBeNull();
-    expect(await runtime.findRunByRequestId(run.requestIdentity!.requestId)).toEqual(admissions[0]!.run);
-    expect(await runtime.findRunByIdempotencyKey(run.requestIdentity!.idempotencyKey!)).toEqual(admissions[0]!.run);
+    expect(await runtime.findRunByIdempotencyKey(project.projectId, run.requestIdentity.idempotencyKey))
+      .toEqual(admissions[0]!.run);
     const conflict = makeRun(project.projectId, makeSampling(project.projectId, sample.sampleId), dataset.datasetId, {
-      requestIdentity: { ...run.requestIdentity!, requestFingerprint: "other facts" },
+      requestIdentity: { ...run.requestIdentity, requestFingerprint: "other facts" },
     });
     await expect(runtime.createRunWithSamplings(conflict, [makeSampling(project.projectId, sample.sampleId, conflict.samplingIds[0]!)], []))
       .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
 
-    const unrelatedSampling = makeSampling(project.projectId, sample.sampleId);
-    const unrelated = makeRun(project.projectId, unrelatedSampling, dataset.datasetId);
-    await runtime.createRunWithSamplings(unrelated, [unrelatedSampling], []);
-    const ambiguousSampling = makeSampling(project.projectId, sample.sampleId);
-    const ambiguous = makeRun(project.projectId, ambiguousSampling, dataset.datasetId, {
-      requestIdentity: {
-        requestId: run.requestIdentity!.requestId,
-        idempotencyKey: unrelated.requestIdentity!.idempotencyKey!,
-        requestFingerprint: run.requestIdentity!.requestFingerprint,
-      },
-    });
-    await expect(runtime.createRunWithSamplings(ambiguous, [ambiguousSampling], []))
-      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
-    expect(await runtime.getRun(ambiguous.runId)).toBeNull();
-
     const good = makeSampling(project.projectId, sample.sampleId);
     const bad = makeSampling(project.projectId, "missing-sample");
     const invalid = makeRun(project.projectId, good, dataset.datasetId, {
-      samplingIds: [good.samplingId, bad.samplingId], requestIdentity: {
-        requestId: crypto.randomUUID(), requestFingerprint: "invalid scope",
-      },
+      samplingIds: [good.samplingId, bad.samplingId],
+      requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "invalid scope" },
     });
     await expect(runtime.createRunWithSamplings(invalid, [good, bad], [])).rejects.toThrow();
     expect(await runtime.getRun(invalid.runId)).toBeNull();
     expect(await runtime.getSampling(good.samplingId)).toBeNull();
     expect(await runtime.getSampling(bad.samplingId)).toBeNull();
     expect(await catalog.getSample(sample.sampleId)).not.toBeNull();
+  });
+
+  it("lists and selects every successful Sampling in the owned Project with stable order", async () => {
+    const { catalog, runtime, project, dataset, data, sample } = await setup();
+    const otherSample = await catalog.createSample(data.dataId);
+    const records = [
+      makeSampling(project.projectId, sample.sampleId, "sampling-a"),
+      makeSampling(project.projectId, otherSample.sampleId, "sampling-b"),
+      makeSampling(project.projectId, sample.sampleId, "sampling-c"),
+    ];
+    for (const record of records) {
+      await runtime.createRunWithSamplings(makeRun(project.projectId, record, dataset.datasetId), [record], []);
+    }
+    for (const record of records.slice(0, 2)) {
+      await runtime.updateSampling({ ...record, execution: { status: "succeeded" } }, record);
+    }
+    await runtime.updateSampling({ ...records[2]!, execution: { status: "failed" } }, records[2]!);
+
+    expect(await catalog.listSuccessfulSamplings(project.projectId, { limit: 1 })).toEqual({
+      samplings: [{ samplingId: "sampling-a", sampleId: sample.sampleId }],
+      nextCursor: "sampling-a",
+    });
+    expect(await catalog.listSuccessfulSamplings(project.projectId, {
+      afterSamplingId: "sampling-a",
+      limit: 1,
+    })).toEqual({
+      samplings: [{ samplingId: "sampling-b", sampleId: otherSample.sampleId }],
+      nextCursor: null,
+    });
+    expect(await catalog.selectAllSuccessfulSamplingIds(project.projectId)).toEqual([
+      "sampling-a", "sampling-b",
+    ]);
+    expect(await catalog.selectAllSuccessfulSamplingIds(project.projectId, {
+      sampleId: otherSample.sampleId,
+    })).toEqual(["sampling-b"]);
+    const foreignCatalog = createPostgresCatalog(database.db, "user-B", {
+      async listAgents() { return []; },
+    });
+    expect(await foreignCatalog.listSuccessfulSamplings(project.projectId)).toEqual({
+      samplings: [], nextCursor: null,
+    });
+    expect(await foreignCatalog.selectAllSuccessfulSamplingIds(project.projectId)).toEqual([]);
+  });
+
+  it("admits one independent EvaluationRecord for concurrent requests with the same key", async () => {
+    const { runtime, project, dataset, sample } = await setup();
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    await runtime.createRunWithSamplings(makeRun(project.projectId, sampling, dataset.datasetId), [sampling], []);
+    const succeeded = { ...sampling, execution: { status: "succeeded" as const } };
+    await runtime.updateSampling(succeeded, sampling);
+
+    const key = crypto.randomUUID();
+    const firstJudge = makeEvaluation(sampling.samplingId);
+    const secondJudge = makeEvaluation(sampling.samplingId);
+    const evaluationRun = (judge: EvaluationRecord) => makeRun(project.projectId, succeeded, dataset.datasetId, {
+      phases: ["evaluation"],
+      config: evaluationConfig,
+      evaluationIds: [judge.evaluationId],
+      requestIdentity: { idempotencyKey: key, requestFingerprint: "same evaluation facts" },
+    });
+    const [first, concurrent] = await Promise.all([
+      runtime.createRunWithSamplings(evaluationRun(firstJudge), [succeeded], [firstJudge]),
+      runtime.createRunWithSamplings(evaluationRun(secondJudge), [succeeded], [secondJudge]),
+    ]);
+    expect(first.run).toEqual(concurrent.run);
+    expect([first.created, concurrent.created].filter(Boolean)).toHaveLength(1);
+    expect(await runtime.listEvaluations(sampling.samplingId)).toHaveLength(1);
+
+    const changedJudge = makeEvaluation(sampling.samplingId);
+    const changed = evaluationRun(changedJudge);
+    await expect(runtime.createRunWithSamplings({
+      ...changed,
+      requestIdentity: { idempotencyKey: key, requestFingerprint: "changed evaluation facts" },
+    }, [succeeded], [changedJudge])).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    expect(await runtime.listEvaluations(sampling.samplingId)).toHaveLength(1);
+
+    const deliberateJudge = makeEvaluation(sampling.samplingId);
+    const deliberate = evaluationRun(deliberateJudge);
+    await runtime.createRunWithSamplings({
+      ...deliberate,
+      requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "same evaluation facts" },
+    }, [succeeded], [deliberateJudge]);
+    expect(await runtime.listEvaluations(sampling.samplingId)).toHaveLength(2);
   });
 
   it("notifies committed Runs and finds unfinished execution and evaluation without a Run status column", async () => {
@@ -319,6 +384,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
         runId: crypto.randomUUID(), projectId: project.projectId,
         samplingIds: [first.samplingId], evaluationIds: [judge.evaluationId],
         phases: ["evaluation"], config: evaluationConfig,
+        requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "evaluation facts" },
       };
       await runtime.createRunWithSamplings(evaluationRun, [succeeded], [judge]);
       expect(await runtime.listRecoverableRunIds()).toEqual([secondRun.runId, evaluationRun.runId].sort());
@@ -579,8 +645,9 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       VALUES (${crypto.randomUUID()}, ${"user-A"}, ${project.projectId}, ${otherSample.sampleId}, '{}'::jsonb)
     `));
     await expectForeignKeyFailure(database.db.execute(sql`
-      INSERT INTO eval_runs (run_id, owner_user_id, project_id, phases, config)
-      VALUES (${crypto.randomUUID()}, ${"user-A"}, ${other.projectId}, '["execution"]'::jsonb, '{}'::jsonb)
+      INSERT INTO eval_runs (run_id, owner_user_id, project_id, phases, config, idempotency_key, request_fingerprint)
+      VALUES (${crypto.randomUUID()}, ${"user-A"}, ${other.projectId}, '["execution"]'::jsonb, '{}'::jsonb,
+        ${crypto.randomUUID()}, ${"foreign project"})
     `));
     await expectForeignKeyFailure(database.db.execute(sql`
       INSERT INTO eval_run_samplings (owner_user_id, run_id, sampling_id, position)
@@ -592,45 +659,41 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await userRuntime.getRun(runA.runId)).toEqual(runA);
     expect(await userRuntime.getRun(runB.runId)).toBeNull();
     expect(await userRuntime.getSampling(samplingB.samplingId)).toBeNull();
-    expect(await userRuntime.findRunByRequestId(runB.requestIdentity!.requestId)).toBeNull();
-    expect(await userRuntime.findRunByIdempotencyKey(runB.requestIdentity!.idempotencyKey!)).toBeNull();
+    expect(await userRuntime.findRunByIdempotencyKey(other.projectId, runB.requestIdentity.idempotencyKey)).toBeNull();
     expect(await otherRuntime.getRun(runB.runId)).toEqual(runB);
     await expect(userRuntime.updateSampling(samplingB, samplingB)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
     await expect(userRuntime.createRunWithSamplings(runB, [samplingB], [])).rejects.toThrow("Unknown Project");
     const collisionSampling = makeSampling(project.projectId, sample.sampleId);
     const collision = makeRun(project.projectId, collisionSampling, dataset.datasetId, {
-      requestIdentity: runB.requestIdentity!,
+      requestIdentity: runB.requestIdentity,
     });
     await expect(userRuntime.createRunWithSamplings(collision, [collisionSampling], []))
       .resolves.toEqual({ run: collision, created: true });
-    expect(await userRuntime.findRunByRequestId(runB.requestIdentity!.requestId)).toEqual(collision);
-    expect(await userRuntime.findRunByIdempotencyKey(runB.requestIdentity!.idempotencyKey!)).toEqual(collision);
-    expect(await otherRuntime.findRunByRequestId(runB.requestIdentity!.requestId)).toEqual(runB);
-    await expect(runtime.findRunByRequestId(runB.requestIdentity!.requestId))
-      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    expect(await userRuntime.findRunByIdempotencyKey(project.projectId, runB.requestIdentity.idempotencyKey))
+      .toEqual(collision);
+    expect(await otherRuntime.findRunByIdempotencyKey(other.projectId, runB.requestIdentity.idempotencyKey))
+      .toEqual(runB);
     expect(await runtime.listRecoverableRunIds()).toContain(runB.runId);
     const siblingProject = await catalog.createProject({ name: "same owner's other project" });
     const siblingSampling = makeSampling(siblingProject.projectId, sample.sampleId);
     const siblingRun = makeRun(siblingProject.projectId, siblingSampling, dataset.datasetId, {
-      requestIdentity: runA.requestIdentity!,
+      requestIdentity: runA.requestIdentity,
     });
     await expect(userRuntime.createRunWithSamplings(siblingRun, [siblingSampling], []))
-      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
-    const independentSiblingRun = makeRun(siblingProject.projectId, siblingSampling, dataset.datasetId);
-    await userRuntime.createRunWithSamplings(independentSiblingRun, [siblingSampling], []);
-    expect(await readRunRecords(database.db, [independentSiblingRun.runId], {
+      .resolves.toEqual({ run: siblingRun, created: true });
+    expect(await readRunRecords(database.db, [siblingRun.runId], {
       kind: "project", ownerUserId: "user-A", projectId: project.projectId,
     })).toEqual([]);
-    expect(await readRunRecords(database.db, [independentSiblingRun.runId], {
+    expect(await readRunRecords(database.db, [siblingRun.runId], {
       kind: "project", ownerUserId: "user-A", projectId: siblingProject.projectId,
-    })).toEqual([independentSiblingRun]);
+    })).toEqual([siblingRun]);
     await expect(source.read({ projectId: other.projectId })).rejects.toBeInstanceOf(MetricsQueryError);
     const facts = await source.read({ projectId: project.projectId, runIds: [runA.runId] });
     expect(facts.samplings.map((record) => record.samplingId)).toEqual([samplingA.samplingId]);
     expect(facts.runs.map((run) => run.runId)).toEqual([runA.runId]);
     await expect(source.read({ projectId: project.projectId, runIds: [runB.runId] }))
       .rejects.toBeInstanceOf(MetricsQueryError);
-    await expect(source.read({ projectId: project.projectId, runIds: [independentSiblingRun.runId] }))
+    await expect(source.read({ projectId: project.projectId, runIds: [siblingRun.runId] }))
       .rejects.toBeInstanceOf(MetricsQueryError);
   });
 

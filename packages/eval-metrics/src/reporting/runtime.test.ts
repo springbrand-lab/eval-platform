@@ -20,8 +20,11 @@ function runtimeFixture() {
   const evaluations = new Map<string, EvaluationRecord>();
   const store: RuntimeStore = {
     async getRun(id) { return structuredClone(runs.get(id) ?? null); },
-    async findRunByRequestId(id) { return structuredClone([...runs.values()].find((run) => run.requestIdentity?.requestId === id) ?? null); },
-    async findRunByIdempotencyKey(key) { return structuredClone([...runs.values()].find((run) => run.requestIdentity?.idempotencyKey === key) ?? null); },
+    async findRunByIdempotencyKey(projectId, key) {
+      return structuredClone([...runs.values()].find(
+        (run) => run.projectId === projectId && run.requestIdentity.idempotencyKey === key,
+      ) ?? null);
+    },
     async createRunWithSamplings(run, records, judges) {
       runs.set(run.runId, structuredClone(run));
       for (const record of records) samplings.set(record.samplingId, structuredClone(record));
@@ -139,7 +142,9 @@ function runtimeFixture() {
 describe("Runtime public-query integration", () => {
   it("reports five independently executed/evaluated Agents from persisted raw facts, then retains an independent re-evaluation", async () => {
     const fixture = runtimeFixture();
-    const pipeline = await fixture.runtime.pipeline({ requestId: "request-1", projectId: PROJECT.projectId, pipelineConfigId: "pipeline-config" });
+    const pipeline = await fixture.runtime.pipeline({
+      idempotencyKey: "request-1", projectId: PROJECT.projectId, pipelineConfigId: "pipeline-config",
+    });
     fixture.handles.push(pipeline);
     await fixture.runtime.resume(pipeline.runId);
     expect((await fixture.runtime.getRun(pipeline.runId)).status).toBe("succeeded");
@@ -172,7 +177,10 @@ describe("Runtime public-query integration", () => {
     expect(fixture.initialized).toHaveBeenCalledTimes(10);
     expect(fixture.materializedTrajectory).toHaveBeenCalledTimes(5);
 
-    const rerun = await fixture.runtime.evaluate({ projectId: PROJECT.projectId, samplingIds: [stored.samplingId], evaluationConfigId: "evaluation-config" });
+    const rerun = await fixture.runtime.evaluate({
+      idempotencyKey: "re-evaluation-1",
+      projectId: PROJECT.projectId, samplingIds: [stored.samplingId], evaluationConfigId: "evaluation-config",
+    });
     fixture.handles.push(rerun);
     await fixture.runtime.resume(rerun.runId);
     expect((await fixture.runtime.getRun(rerun.runId)).status).toBe("succeeded");

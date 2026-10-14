@@ -13,10 +13,8 @@ import type {
   StartRunRequest,
 } from "@eval-platform/eval-contracts";
 import type {
-  ExecutionConfig,
   ResolvedEvaluationConfig,
   ResolvedExecutionConfig,
-  ResolvedPipelineConfig,
   RunConfigSnapshot,
 } from "../config/index.js";
 
@@ -288,6 +286,10 @@ class RunResumer implements EvalRunResumer {
 class RuntimeCoordinator extends RunResumer implements EvalRuntime {
   readonly #catalog: RuntimeCatalog;
   readonly #configResolver: EvalRuntimeDependencies["configResolver"];
+  readonly #pendingAdmissions = new Map<string, {
+    readonly requestFacts: string;
+    readonly promise: Promise<RunHandle>;
+  }>();
 
   constructor(dependencies: EvalRuntimeDependencies) {
     super({ ...dependencies, getSample: dependencies.catalog.getSample.bind(dependencies.catalog) });
@@ -317,11 +319,18 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
 
   async start(request: StartRunRequest): Promise<RunHandle> {
     this.validateStartRequest(request);
+    const admissionRequest = { ...request };
+    return this.withPendingAdmission("start", admissionRequest, () => this.admitStart(admissionRequest));
+  }
+
+  private async admitStart(request: StartRunRequest): Promise<RunHandle> {
+    const existingRun = await this.findExistingRun("start", request);
+    if (existingRun) return this.runHandle(existingRun);
+
     const config = await this.#configResolver.resolveExecutionConfig(request.executionConfigId);
     const subjectAgent = requireSpHarness(config.harness, "subject").agentConfig;
-    const requestIdentity = await createRunRequestIdentity("start", request, config);
-    const existingRun = await this.findExistingRun(requestIdentity);
-    if (existingRun) return this.runHandle(existingRun);
+    const runConfig = { operation: "execution", execution: config } as const;
+    const requestIdentity = await createRunRequestIdentity("start", request, runConfig);
 
     const samples = await this.resolveSamples(config.datasetId, config.sampleIds);
     const contexts = samples.flatMap((sample) => Array.from(
@@ -334,7 +343,7 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
       records.map(({ samplingId }) => samplingId),
       ["execution"],
       [],
-      { operation: "execution", execution: config },
+      runConfig,
       requestIdentity,
     );
 
@@ -344,6 +353,14 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
 
   async evaluate(request: EvaluateRequest): Promise<RunHandle> {
     this.validateEvaluateRequest(request);
+    const admissionRequest = { ...request, samplingIds: [...request.samplingIds] };
+    return this.withPendingAdmission("evaluate", admissionRequest, () => this.admitEvaluation(admissionRequest));
+  }
+
+  private async admitEvaluation(request: EvaluateRequest): Promise<RunHandle> {
+    const existingRun = await this.findExistingRun("evaluate", request);
+    if (existingRun) return this.runHandle(existingRun);
+
     const config = await this.#configResolver.resolveEvaluationConfig(request.evaluationConfigId);
     const evaluationAgent = requireSpHarness(config.evaluationHarness, "evaluator").agentConfig;
     const records = await this.loadSamplingRecords(request.samplingIds);
@@ -359,12 +376,15 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
     const evaluations = contexts.map(({ state }) => (
       this.createEvaluationRecord(state.samplingId, evaluationAgent)
     ));
+    const runConfig = { operation: "evaluation", evaluation: config } as const;
+    const requestIdentity = await createRunRequestIdentity("evaluate", request, runConfig);
     const run = this.createRun(
       request.projectId,
       records.map(({ samplingId }) => samplingId),
       ["evaluation"],
       evaluations.map(({ evaluationId }) => evaluationId),
-      { operation: "evaluation", evaluation: config },
+      runConfig,
+      requestIdentity,
     );
     const admission = await this.store.createRunWithSamplings(run, records, evaluations);
     return this.runHandle(admission.run);
@@ -372,15 +392,27 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
 
   async pipeline(request: PipelineRequest): Promise<RunHandle> {
     this.validatePipelineRequest(request);
+    const admissionRequest = { ...request };
+    return this.withPendingAdmission("pipeline", admissionRequest, () => this.admitPipeline(admissionRequest));
+  }
+
+  private async admitPipeline(request: PipelineRequest): Promise<RunHandle> {
+    const existingRun = await this.findExistingRun("pipeline", request);
+    if (existingRun) return this.runHandle(existingRun);
+
     const config = await this.#configResolver.resolvePipelineConfig(request.pipelineConfigId);
     const subjectAgent = requireSpHarness(config.execution.harness, "subject").agentConfig;
     const evaluationAgent = requireSpHarness(
       config.evaluation.evaluationHarness,
       "evaluator",
     ).agentConfig;
-    const requestIdentity = await createRunRequestIdentity("pipeline", request, config);
-    const existingRun = await this.findExistingRun(requestIdentity);
-    if (existingRun) return this.runHandle(existingRun);
+    const runConfig = {
+      operation: "pipeline",
+      pipeline: config.pipeline,
+      execution: config.execution,
+      evaluation: config.evaluation,
+    } as const;
+    const requestIdentity = await createRunRequestIdentity("pipeline", request, runConfig);
 
     const samples = await this.resolveSamples(config.execution.datasetId, config.execution.sampleIds);
     const contexts = samples.flatMap((sample) => Array.from(
@@ -396,12 +428,7 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
       records.map(({ samplingId }) => samplingId),
       ["execution", "evaluation"],
       evaluations.map(({ evaluationId }) => evaluationId),
-      {
-        operation: "pipeline",
-        pipeline: config.pipeline,
-        execution: config.execution,
-        evaluation: config.evaluation,
-      },
+      runConfig,
       requestIdentity,
     );
 
@@ -434,15 +461,13 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
   }
 
   private validateStartRequest(request: StartRunRequest): void {
-    if (!request.requestId) throw new Error("requestId is required");
-    if (request.idempotencyKey !== undefined && !request.idempotencyKey) {
-      throw new Error("idempotencyKey must not be empty");
-    }
+    requireIdempotencyKey(request.idempotencyKey);
     if (!request.projectId) throw new Error("projectId is required");
     if (!request.executionConfigId) throw new Error("executionConfigId is required");
   }
 
   private validateEvaluateRequest(request: EvaluateRequest): void {
+    requireIdempotencyKey(request.idempotencyKey);
     if (!request.projectId) throw new Error("projectId is required");
     if (request.samplingIds.length === 0) throw new Error("samplingIds must not be empty");
     requireDistinctIds(request.samplingIds, "samplingIds");
@@ -450,10 +475,7 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
   }
 
   private validatePipelineRequest(request: PipelineRequest): void {
-    if (!request.requestId) throw new Error("requestId is required");
-    if (request.idempotencyKey !== undefined && !request.idempotencyKey) {
-      throw new Error("idempotencyKey must not be empty");
-    }
+    requireIdempotencyKey(request.idempotencyKey);
     if (!request.projectId) throw new Error("projectId is required");
     if (!request.pipelineConfigId) throw new Error("pipelineConfigId is required");
   }
@@ -514,7 +536,7 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
     phases: RunPhases,
     evaluationIds: readonly string[],
     config: RunConfigSnapshot,
-    requestIdentity?: RuntimeRunRequestIdentity,
+    requestIdentity: RuntimeRunRequestIdentity,
   ): RuntimeRunRecord {
     return {
       runId: this.idFactory(),
@@ -523,7 +545,7 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
       phases,
       evaluationIds: [...evaluationIds],
       config,
-      ...(requestIdentity ? { requestIdentity } : {}),
+      requestIdentity,
     };
   }
 
@@ -535,26 +557,44 @@ class RuntimeCoordinator extends RunResumer implements EvalRuntime {
     return this.store.createRunWithSamplings(run, records, evaluations);
   }
 
-  private async findExistingRun(
-    requestIdentity: RuntimeRunRequestIdentity,
-  ): Promise<RuntimeRunRecord | null> {
-    const byRequestId = await this.store.findRunByRequestId(requestIdentity.requestId);
-    const byIdempotencyKey = requestIdentity.idempotencyKey === undefined
-      ? null
-      : await this.store.findRunByIdempotencyKey(requestIdentity.idempotencyKey);
-
-    if (
-      byRequestId &&
-      byIdempotencyKey &&
-      byRequestId.runId !== byIdempotencyKey.runId
-    ) {
-      throw new RuntimeRunIdentityConflictError(
-        "requestId and idempotencyKey refer to different evaluation runs",
-      );
+  private withPendingAdmission(
+    operation: RunRequestOperation,
+    request: RunRequest,
+    admit: () => Promise<RunHandle>,
+  ): Promise<RunHandle> {
+    const key = JSON.stringify([request.projectId, request.idempotencyKey]);
+    const requestFacts = JSON.stringify(sortObjectKeys({
+      operation,
+      projectId: request.projectId,
+      selector: requestSelector(operation, request),
+    }));
+    const pending = this.#pendingAdmissions.get(key);
+    if (pending) {
+      if (pending.requestFacts !== requestFacts) {
+        throw new RuntimeRunIdentityConflictError("idempotency key is already bound to different Run facts");
+      }
+      return pending.promise.then((handle) => ({ runId: handle.runId, samplingIds: [...handle.samplingIds] }));
     }
 
-    const existingRun = byIdempotencyKey ?? byRequestId;
+    const promise = Promise.resolve().then(admit);
+    this.#pendingAdmissions.set(key, { requestFacts, promise });
+    const clear = () => {
+      if (this.#pendingAdmissions.get(key)?.promise === promise) this.#pendingAdmissions.delete(key);
+    };
+    void promise.then(clear, clear);
+    return promise;
+  }
+
+  private async findExistingRun(
+    operation: RunRequestOperation,
+    request: RunRequest,
+  ): Promise<RuntimeRunRecord | null> {
+    const existingRun = await this.store.findRunByIdempotencyKey(
+      request.projectId,
+      request.idempotencyKey,
+    );
     if (!existingRun) return null;
+    const requestIdentity = await createRunRequestIdentity(operation, request, existingRun.config);
     assertRequestIdentity(existingRun, requestIdentity);
     return existingRun;
   }
@@ -614,24 +654,45 @@ export function createEvalRunResumer(
   return new RunResumer(dependencies);
 }
 
-type RunRequestOperation = "start" | "pipeline";
+type RunRequestOperation = "start" | "evaluate" | "pipeline";
+type RunRequest = StartRunRequest | EvaluateRequest | PipelineRequest;
+
+function requireIdempotencyKey(key: unknown): asserts key is string {
+  if (typeof key !== "string" || key.length === 0 || key.trim() !== key) {
+    throw new Error("idempotencyKey must be a non-empty key without surrounding whitespace");
+  }
+}
+
+function requestSelector(operation: RunRequestOperation, request: RunRequest): unknown {
+  switch (operation) {
+    case "start":
+      return { executionConfigId: (request as StartRunRequest).executionConfigId };
+    case "evaluate": {
+      const evaluation = request as EvaluateRequest;
+      return {
+        evaluationConfigId: evaluation.evaluationConfigId,
+        samplingIds: evaluation.samplingIds,
+      };
+    }
+    case "pipeline":
+      return { pipelineConfigId: (request as PipelineRequest).pipelineConfigId };
+  }
+}
 
 async function createRunRequestIdentity(
   operation: RunRequestOperation,
-  request: StartRunRequest | PipelineRequest,
-  config: ExecutionConfig | ResolvedPipelineConfig,
+  request: RunRequest,
+  config: RunConfigSnapshot,
 ): Promise<RuntimeRunRequestIdentity> {
   const requestFingerprint = await fingerprintRequest({
     operation,
     projectId: request.projectId,
+    selector: requestSelector(operation, request),
     config,
   });
 
   return {
-    requestId: request.requestId,
-    ...(request.idempotencyKey === undefined
-      ? {}
-      : { idempotencyKey: request.idempotencyKey }),
+    idempotencyKey: request.idempotencyKey,
     requestFingerprint,
   };
 }
@@ -641,10 +702,10 @@ function assertRequestIdentity(
   requestIdentity: RuntimeRunRequestIdentity,
 ): void {
   if (
-    existingRun.requestIdentity?.requestFingerprint !== requestIdentity.requestFingerprint
+    existingRun.requestIdentity.requestFingerprint !== requestIdentity.requestFingerprint
   ) {
     throw new RuntimeRunIdentityConflictError(
-      "request identity is already bound to different evaluation run facts",
+      "idempotency key is already bound to different Run facts",
     );
   }
 }

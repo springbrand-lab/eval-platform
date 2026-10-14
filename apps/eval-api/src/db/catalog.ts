@@ -1,16 +1,46 @@
 import type { AgentRole, Project } from "@eval-platform/eval-contracts";
 import { DatasetEntityNotFoundError, dataSchema } from "@eval-platform/eval-dataset";
 import type { RuntimeCatalog, Sample } from "@eval-platform/eval-runtime";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { isForeignKeyFailure, type EvalDb } from "./client.js";
 import { createPostgresDatasetStore } from "./dataset.js";
 import { requireOwnerUserId } from "./owner.js";
-import { data, projects, samples } from "./schema.js";
+import { data, projects, samples, samplings } from "./schema.js";
+
+export interface SuccessfulSamplingOption {
+  readonly samplingId: string;
+  readonly sampleId: string;
+}
+
+export interface SuccessfulSamplingPage {
+  readonly samplings: readonly SuccessfulSamplingOption[];
+  readonly nextCursor: string | null;
+}
+
+export interface SuccessfulSamplingFilter {
+  readonly sampleId?: string;
+}
+
+export interface SuccessfulSamplingPageRequest extends SuccessfulSamplingFilter {
+  readonly afterSamplingId?: string;
+  readonly limit?: number;
+}
 
 export interface PostgresCatalog extends RuntimeCatalog {
   createProject(input: Pick<Project, "name">): Promise<Project>;
   getProject(projectId: string): Promise<Project | null>;
   createSample(dataId: string): Promise<Sample>;
+  listSuccessfulSamplings(projectId: string, input?: SuccessfulSamplingPageRequest): Promise<SuccessfulSamplingPage>;
+  selectAllSuccessfulSamplingIds(projectId: string, filter?: SuccessfulSamplingFilter): Promise<readonly string[]>;
+}
+
+function successfulSamplingCondition(projectId: string, ownerUserId: string, sampleId?: string) {
+  return and(
+    eq(projects.projectId, projectId),
+    eq(projects.ownerUserId, ownerUserId),
+    sql`${samplings.facts}->'execution'->>'status' = 'succeeded'`,
+    sampleId === undefined ? undefined : eq(samplings.sampleId, sampleId),
+  );
 }
 
 function toSample(row: { sampleId: string; dataId: string; content: typeof data.$inferSelect.content }): Sample {
@@ -87,6 +117,33 @@ export function createPostgresCatalog(
     },
     async getSample(sampleId) {
       return (await readSamples(db, owner, [sampleId]))[0] ?? null;
+    },
+    async listSuccessfulSamplings(projectId, input = {}) {
+      const limit = input.limit ?? 100;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+        throw new TypeError("Successful Sampling page size must be between 1 and 1000");
+      }
+      const rows = await db.select({
+        samplingId: samplings.samplingId,
+        sampleId: samplings.sampleId,
+      }).from(samplings).innerJoin(projects, eq(samplings.projectId, projects.projectId))
+        .where(and(
+          successfulSamplingCondition(projectId, owner, input.sampleId),
+          input.afterSamplingId === undefined ? undefined : gt(samplings.samplingId, input.afterSamplingId),
+        ))
+        .orderBy(samplings.samplingId).limit(limit + 1);
+      const page = rows.slice(0, limit);
+      return {
+        samplings: page,
+        nextCursor: rows.length > limit ? page.at(-1)!.samplingId : null,
+      };
+    },
+    async selectAllSuccessfulSamplingIds(projectId, filter = {}) {
+      const rows = await db.select({ samplingId: samplings.samplingId })
+        .from(samplings).innerJoin(projects, eq(samplings.projectId, projects.projectId))
+        .where(successfulSamplingCondition(projectId, owner, filter.sampleId))
+        .orderBy(samplings.samplingId);
+      return rows.map(({ samplingId }) => samplingId);
     },
   };
 }

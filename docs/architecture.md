@@ -53,6 +53,14 @@ eval-metrics: evaluators/ aggregation/ reporting/
 
 `eval-contracts` 只定义评估域的稳定契约，不复制 SP 的 Agent、Submission 或 Trajectory 内部实现；SP 公共契约在 Harness 边界消费。`eval-metrics` 负责已有评估结果整理、资源统计、聚合和四层查询。证据与解释由评估 Agent 输出，不引入独立归因流程。
 
+## Run 准入与独立评估
+
+`start()`、`evaluate()` 和 `pipeline()` 共用 Run 准入规则。请求必须提供在 Project 内唯一的 `idempotencyKey`；请求指纹绑定操作、配置 ID、独立评估时确定且有序的 Sampling ID 列表，以及本次解析出的生效配置。首次准入在同一事务中保存 Run、生效配置快照及关联记录：新执行创建 Sampling，需要评估的 Run 创建 EvaluationRecord；独立评估复用并校验既有 Sampling。PostgreSQL 的 `(project_id, idempotency_key)` 唯一约束保证同一意图只创建一批。相同 key 和事实返回原 Run，不同事实冲突；有意再次执行或重评估使用新 key。已准入后的重放依据原 Run 快照校验，不重新读取已编辑的配置，也不引入单独的配置 version。
+
+同一 Runtime 实例内，待准入的相同 Project/key 请求先比较调用方选择的事实：一致则共用首次提交的 Promise 与配置快照，即使提交期间配置被编辑也只返回同一个 Run；不一致立即冲突。请求结束后清理内存条目；持久化 Store 仍负责最终查重，内存不是权威状态。跨实例的唯一约束仍阻止重复建批，但进程内同步不保证配置同时变更时跨实例调用获得相同响应。
+
+Eval API 的用户范围 Catalog 以同一 Project、可选 Sample 和执行成功状态筛选 Sampling，并提供分页与按 ID 稳定排序的全选查询。控制面接入时把全选得到的固定 ID 列表交给 `evaluate()`，重试沿用原列表与 key，不重新解析动态筛选条件；HTTP 调用尚未接入。选择、提交和错误语义见 [独立评估入口契约](eval-independent-evaluation-entry.md)。
+
 ## 核心实体
 
 ```text

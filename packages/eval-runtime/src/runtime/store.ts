@@ -6,10 +6,8 @@ import { RuntimeRecordConflictError, RuntimeRecordPersistenceError, type Runtime
 export { RuntimeRecordConflictError, RuntimeRecordPersistenceError } from "./record-errors.js";
 
 export interface RuntimeRunRequestIdentity {
-  /** Stable caller identity for one Runtime admission request. */
-  readonly requestId: string;
-  /** Optional business retry identity that can outlive a transport request. */
-  readonly idempotencyKey?: string;
+  /** Stable caller intent within one Project, reused on retries. */
+  readonly idempotencyKey: string;
   /** Hash of the immutable facts that define the requested Run. */
   readonly requestFingerprint: string;
 }
@@ -22,7 +20,7 @@ export interface RuntimeRunRecord {
   readonly evaluationIds: readonly string[];
   /** Immutable effective configuration captured when this Run is admitted. */
   readonly config: RunConfigSnapshot;
-  readonly requestIdentity?: RuntimeRunRequestIdentity;
+  readonly requestIdentity: RuntimeRunRequestIdentity;
 }
 
 export interface RuntimeRunAdmission {
@@ -44,9 +42,8 @@ export type SamplingState = Sampling;
 
 export interface RuntimeStore {
   getRun(runId: string): Promise<RuntimeRunRecord | null>;
-  /** Persistent lookup used before expensive Dataset/Sample preparation. */
-  findRunByRequestId(requestId: string): Promise<RuntimeRunRecord | null>;
-  findRunByIdempotencyKey(idempotencyKey: string): Promise<RuntimeRunRecord | null>;
+  /** Persistent Project-scoped lookup used before mutable Config/Sample resolution. */
+  findRunByIdempotencyKey(projectId: string, idempotencyKey: string): Promise<RuntimeRunRecord | null>;
   /**
    * Atomically rechecks request identity and commits Run, Sampling, EvaluationRecord and
    * effective-config snapshot data.

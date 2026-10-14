@@ -94,16 +94,13 @@ export const runs = pgTable("eval_runs", {
   projectId: text("project_id").notNull(),
   phases: jsonb("phases").$type<RunPhases>().notNull(),
   config: jsonb("config").$type<RunConfigSnapshot>().notNull(),
-  requestId: text("request_id"),
-  idempotencyKey: text("idempotency_key"),
-  requestFingerprint: text("request_fingerprint"),
+  idempotencyKey: text("idempotency_key").notNull(),
+  requestFingerprint: text("request_fingerprint").notNull(),
 }, (table) => [
   unique("eval_runs_owner_id_uq").on(table.ownerUserId, table.runId),
-  unique("eval_runs_owner_request_id_uq").on(table.ownerUserId, table.requestId),
-  unique("eval_runs_owner_idempotency_key_uq").on(table.ownerUserId, table.idempotencyKey),
   foreignKey({ columns: [table.ownerUserId, table.projectId], foreignColumns: [projects.ownerUserId, projects.projectId] }).onDelete("restrict"),
   index("eval_runs_project_idx").on(table.projectId),
-  check("eval_runs_request_identity_ck", sql`(${table.requestId} IS NULL) = (${table.requestFingerprint} IS NULL)`),
+  unique("eval_runs_project_idempotency_uq").on(table.projectId, table.idempotencyKey),
   check("eval_runs_phases_ck", sql`${table.phases} IN ('["execution"]'::jsonb, '["evaluation"]'::jsonb, '["execution", "evaluation"]'::jsonb)`),
 ]);
 

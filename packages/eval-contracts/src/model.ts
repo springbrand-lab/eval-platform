@@ -149,21 +149,20 @@ export interface Sampling {
 }
 
 export interface StartRunRequest {
-  readonly requestId: string;
-  readonly idempotencyKey?: string;
+  readonly idempotencyKey: string;
   readonly projectId: string;
   readonly executionConfigId: string;
 }
 
 export interface EvaluateRequest {
+  readonly idempotencyKey: string;
   readonly projectId: string;
   readonly samplingIds: readonly string[];
   readonly evaluationConfigId: string;
 }
 
 export interface PipelineRequest {
-  readonly requestId: string;
-  readonly idempotencyKey?: string;
+  readonly idempotencyKey: string;
   readonly projectId: string;
   readonly pipelineConfigId: string;
 }

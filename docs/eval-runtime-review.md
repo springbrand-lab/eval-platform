@@ -319,7 +319,7 @@ Subject 的产物和完整轨迹只在 `Sampling` 中保留一份，作为唯一
 
 ---
 
-### R-09：`start()` 和 `pipeline()` 缺少请求级幂等（已处理）
+### R-09：三个 Run 入口缺少统一的请求级幂等（已处理）
 
 **现象**
 
@@ -347,11 +347,12 @@ Subject 的产物和完整轨迹只在 `Sampling` 中保留一份，作为唯一
 
 **已落实**
 
-- `StartRunRequest` / `PipelineRequest` 要求调用方提供 `requestId`，并支持可选 `idempotencyKey`；`evaluate()` 保持独立的主动重评估语义。
-- Runtime 在解析 Dataset/Sample 前按 `idempotencyKey` 优先、`requestId` 其次快速查重；重复请求直接返回原 `RunHandle`。
-- Runtime 为请求事实生成稳定指纹，避免同一身份被不同项目、Dataset、Sample、采样次数、并发参数或 Agent 配置静默复用。
+- `StartRunRequest`、`EvaluateRequest` 和 `PipelineRequest` 都要求调用方提供同一次意图稳定的 `idempotencyKey`；主动重评估使用新 key。
+- Runtime 按 Project 和 key 在解析可变 Config/Dataset/Sample 前快速查重；以已保存的 Run 配置快照校验请求事实，重复请求直接返回原 `RunHandle`。
+- 同一 Runtime 实例中，同一 Project/key 的并发提交先按调用方事实同步：相同事实共用首次提交的 Promise 与配置快照，不同事实冲突；提交结束清理内存条目。持久化 Store 仍是最终幂等依据。
+- Runtime 为操作、配置 ID、已准入的生效配置及独立评估的确定 Sampling ID 列表生成稳定指纹，避免同一身份被不同事实静默复用。
 - `RuntimeStore.createRunWithSamplings()` 返回原子准入结果；Store 必须在持久化事务内再次查重，竞争请求只有一个能创建 Run/Sampling，其余复用原 Run。
-- `requestId` 与 `idempotencyKey` 指向不同 Run，或同一身份对应不同请求事实时，直接返回不可重试的冲突错误。
+- 同一 Project 的 key 对应不同请求事实时，直接返回不可重试的冲突错误。
 - 幂等映射必须由 Store 持久化并用唯一约束兜底，不能用 Runtime 进程内 Map 代替。
 - `packages/eval-runtime/src/runtime/index.test.ts` 覆盖重复请求、幂等键重试、请求事实冲突和并发准入场景。
 
