@@ -1,5 +1,5 @@
 {
-  "id": "3d40b37c-092a-42c4-b256-e54e3fe978ef",
+  "id": "dedcffbb-bfd7-488f-a475-9bacb21e661b",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -208,6 +208,46 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.eval_evaluation_configs": {
+      "name": "eval_evaluation_configs",
+      "schema": "",
+      "columns": {
+        "config_id": {
+          "name": "config_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "settings": {
+          "name": "settings",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "eval_evaluation_configs_owner_id_uq": {
+          "name": "eval_evaluation_configs_owner_id_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "owner_user_id",
+            "config_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.eval_evaluations": {
       "name": "eval_evaluations",
       "schema": "",
@@ -271,6 +311,145 @@
           "columns": [
             "evaluation_id",
             "sampling_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.eval_execution_configs": {
+      "name": "eval_execution_configs",
+      "schema": "",
+      "columns": {
+        "config_id": {
+          "name": "config_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "dataset_id": {
+          "name": "dataset_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "settings": {
+          "name": "settings",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "eval_execution_configs_owner_user_id_dataset_id_eval_datasets_owner_user_id_dataset_id_fk": {
+          "name": "eval_execution_configs_owner_user_id_dataset_id_eval_datasets_owner_user_id_dataset_id_fk",
+          "tableFrom": "eval_execution_configs",
+          "tableTo": "eval_datasets",
+          "columnsFrom": [
+            "owner_user_id",
+            "dataset_id"
+          ],
+          "columnsTo": [
+            "owner_user_id",
+            "dataset_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "eval_execution_configs_owner_id_uq": {
+          "name": "eval_execution_configs_owner_id_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "owner_user_id",
+            "config_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.eval_pipeline_configs": {
+      "name": "eval_pipeline_configs",
+      "schema": "",
+      "columns": {
+        "config_id": {
+          "name": "config_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "execution_config_id": {
+          "name": "execution_config_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "evaluation_config_id": {
+          "name": "evaluation_config_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "eval_pipeline_configs_owner_user_id_execution_config_id_eval_execution_configs_owner_user_id_config_id_fk": {
+          "name": "eval_pipeline_configs_owner_user_id_execution_config_id_eval_execution_configs_owner_user_id_config_id_fk",
+          "tableFrom": "eval_pipeline_configs",
+          "tableTo": "eval_execution_configs",
+          "columnsFrom": [
+            "owner_user_id",
+            "execution_config_id"
+          ],
+          "columnsTo": [
+            "owner_user_id",
+            "config_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "eval_pipeline_configs_owner_user_id_evaluation_config_id_eval_evaluation_configs_owner_user_id_config_id_fk": {
+          "name": "eval_pipeline_configs_owner_user_id_evaluation_config_id_eval_evaluation_configs_owner_user_id_config_id_fk",
+          "tableFrom": "eval_pipeline_configs",
+          "tableTo": "eval_evaluation_configs",
+          "columnsFrom": [
+            "owner_user_id",
+            "evaluation_config_id"
+          ],
+          "columnsTo": [
+            "owner_user_id",
+            "config_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "eval_pipeline_configs_owner_id_uq": {
+          "name": "eval_pipeline_configs_owner_id_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "owner_user_id",
+            "config_id"
           ]
         }
       },

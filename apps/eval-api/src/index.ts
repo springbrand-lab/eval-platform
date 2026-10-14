@@ -8,6 +8,8 @@ export {
   type SuccessfulSamplingPageRequest,
 } from "./db/catalog.js";
 export { createPostgresDatasetStore } from "./db/dataset.js";
+export { createPostgresConfigStore, ConfigEntityNotFoundError, ConfigIdentityConflictError, ConfigReferenceError } from "./db/config.js";
+export type { PostgresConfigStore } from "./db/config.js";
 export { createPostgresRuntimeStore, createPostgresWorkerRuntimeStore } from "./db/runtime.js";
 export { createPostgresMetricsSource } from "./db/metrics.js";
 export { createPostgresRunNotifications, startEvalRunWorker } from "./worker.js";

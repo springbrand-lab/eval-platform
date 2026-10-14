@@ -1,6 +1,6 @@
 import type { EvaluationRecord, RunPhases, Sampling } from "@eval-platform/eval-contracts";
 import type { Data } from "@eval-platform/eval-dataset";
-import type { RunConfigSnapshot } from "@eval-platform/eval-runtime";
+import type { EvaluationConfig, ExecutionConfig, RunConfigSnapshot } from "@eval-platform/eval-runtime";
 import { sql } from "drizzle-orm";
 import {
   check,
@@ -32,6 +32,35 @@ export const datasets = pgTable("eval_datasets", {
 }, (table) => [
   unique("eval_datasets_owner_id_uq").on(table.ownerUserId, table.datasetId),
   index("eval_datasets_owner_idx").on(table.ownerUserId),
+]);
+
+export const executionConfigs = pgTable("eval_execution_configs", {
+  configId: text("config_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
+  datasetId: uuid("dataset_id").notNull(),
+  settings: jsonb("settings").$type<Omit<ExecutionConfig, "configId" | "datasetId">>().notNull(),
+}, (table) => [
+  unique("eval_execution_configs_owner_id_uq").on(table.ownerUserId, table.configId),
+  foreignKey({ columns: [table.ownerUserId, table.datasetId], foreignColumns: [datasets.ownerUserId, datasets.datasetId] }).onDelete("restrict"),
+]);
+
+export const evaluationConfigs = pgTable("eval_evaluation_configs", {
+  configId: text("config_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
+  settings: jsonb("settings").$type<Omit<EvaluationConfig, "configId">>().notNull(),
+}, (table) => [
+  unique("eval_evaluation_configs_owner_id_uq").on(table.ownerUserId, table.configId),
+]);
+
+export const pipelineConfigs = pgTable("eval_pipeline_configs", {
+  configId: text("config_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
+  executionConfigId: text("execution_config_id").notNull(),
+  evaluationConfigId: text("evaluation_config_id").notNull(),
+}, (table) => [
+  unique("eval_pipeline_configs_owner_id_uq").on(table.ownerUserId, table.configId),
+  foreignKey({ columns: [table.ownerUserId, table.executionConfigId], foreignColumns: [executionConfigs.ownerUserId, executionConfigs.configId] }).onDelete("restrict"),
+  foreignKey({ columns: [table.ownerUserId, table.evaluationConfigId], foreignColumns: [evaluationConfigs.ownerUserId, evaluationConfigs.configId] }).onDelete("restrict"),
 ]);
 
 export const data = pgTable("eval_data", {

@@ -2,12 +2,12 @@ import path from "node:path";
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError } from "@eval-platform/eval-dataset";
 import { createMetrics, MetricsQueryError } from "@eval-platform/eval-metrics";
-import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
+import { createConfigResolver, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createEvalDb, createPostgresCatalog, createPostgresDatasetStore, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, startEvalRunWorker } from "../index.js";
+import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigStore, createPostgresDatasetStore, createPostgresMetricsSource, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, startEvalRunWorker } from "../index.js";
 import { isForeignKeyFailure } from "./client.js";
 import { readRunRecords } from "./runtime.js";
 
@@ -106,7 +106,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
   }, 30_000);
 
   beforeEach(async () => {
-    await database.db.execute(sql`TRUNCATE TABLE eval_projects, eval_datasets, eval_data RESTART IDENTITY CASCADE`);
+    await database.db.execute(sql`TRUNCATE TABLE eval_projects, eval_datasets, eval_data,
+      eval_execution_configs, eval_evaluation_configs, eval_pipeline_configs RESTART IDENTITY CASCADE`);
   });
 
   afterAll(async () => {
@@ -136,6 +137,114 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const sample = await services.catalog.createSample(data.dataId);
     return { ...services, project, dataset, data, sample };
   }
+
+  it("saves, lists, edits and resolves owner-scoped Execution, Evaluation and Pipeline configs", async () => {
+    const { dataset, sample } = await setup();
+    const store = createPostgresConfigStore(database.db, "user-A");
+    const executionInput = {
+      datasetId: dataset.datasetId, sampleIds: [sample.sampleId], samplingCount: 1, executionConcurrency: 2,
+      harness: { kind: "sp" as const, framework: "sp" as const,
+        agentConfig: { ownerUserId: "user-A", userAgentId: "subject" } },
+    };
+    const evaluationInput = {
+      evaluationConcurrency: 1,
+      evaluationHarness: { kind: "sp" as const, framework: "sp" as const,
+        agentConfig: { ownerUserId: "user-A", userAgentId: "evaluator" } },
+    };
+    const execution = await store.createExecutionConfig(executionInput);
+    const evaluation = await store.createEvaluationConfig(evaluationInput);
+    const pipeline = await store.createPipelineConfig({
+      executionConfigId: execution.configId, evaluationConfigId: evaluation.configId,
+    });
+    expect(await store.listExecutionConfigs()).toEqual([execution]);
+    expect(await store.listEvaluationConfigs()).toEqual([evaluation]);
+    expect(await store.listPipelineConfigs()).toEqual([pipeline]);
+    const resolver = createConfigResolver(store);
+    const original = await resolver.resolvePipelineConfig(pipeline.configId);
+    expect(original).toMatchObject({ pipeline, execution, evaluation });
+
+    const edited = await store.updateExecutionConfig(execution.configId, { ...executionInput, samplingCount: 3 });
+    expect(await store.getExecutionConfig(execution.configId)).toEqual(edited);
+    expect((await resolver.resolvePipelineConfig(pipeline.configId)).execution.samplingCount).toBe(3);
+    expect(original.execution.samplingCount).toBe(1);
+    const editedEvaluation = await store.updateEvaluationConfig(evaluation.configId, {
+      ...evaluationInput, evaluationConcurrency: 4,
+    });
+    expect(await store.getEvaluationConfig(evaluation.configId)).toEqual(editedEvaluation);
+    const editedPipeline = await store.updatePipelineConfig(pipeline.configId, {
+      executionConfigId: execution.configId, evaluationConfigId: editedEvaluation.configId,
+    });
+    expect(await store.getPipelineConfig(pipeline.configId)).toEqual(editedPipeline);
+  });
+
+  it("rejects foreign config references and hides another user's configs", async () => {
+    const { catalog, datasetService, dataset, sample } = await setup();
+    const owned = createPostgresConfigStore(database.db, "user-A");
+    const foreign = createPostgresConfigStore(database.db, "user-B");
+    const foreignService = createDatasetService(createPostgresDatasetStore(database.db, "user-B"));
+    const foreignCatalog = createPostgresCatalog(database.db, "user-B", { async listAgents() { return []; } });
+    const foreignDataset = await foreignService.createDataset({ name: "foreign" });
+    const foreignData = await foreignService.createData({ userPrompt: "foreign task" });
+    const foreignSample = await foreignCatalog.createSample(foreignData.dataId);
+    const executionInput = {
+      datasetId: dataset.datasetId, sampleIds: [sample.sampleId], samplingCount: 1, executionConcurrency: 1,
+      harness: { kind: "sp" as const, framework: "sp" as const,
+        agentConfig: { ownerUserId: "user-A", userAgentId: "subject" } },
+    };
+    const evaluationInput = {
+      evaluationConcurrency: 1,
+      evaluationHarness: { kind: "sp" as const, framework: "sp" as const,
+        agentConfig: { ownerUserId: "user-A", userAgentId: "evaluator" } },
+    };
+    const execution = await owned.createExecutionConfig(executionInput);
+    const evaluation = await owned.createEvaluationConfig(evaluationInput);
+    const pipeline = await owned.createPipelineConfig({
+      executionConfigId: execution.configId, evaluationConfigId: evaluation.configId,
+    });
+    const foreignEvaluation = await foreign.createEvaluationConfig({
+      ...evaluationInput,
+      evaluationHarness: { ...evaluationInput.evaluationHarness,
+        agentConfig: { ownerUserId: "user-B", userAgentId: "evaluator" } },
+    });
+    expect(await foreign.getExecutionConfig(execution.configId)).toBeNull();
+    expect(await foreign.getEvaluationConfig(evaluation.configId)).toBeNull();
+    expect(await foreign.getPipelineConfig(pipeline.configId)).toBeNull();
+    expect(await foreign.listExecutionConfigs()).toEqual([]);
+    expect(await foreign.listPipelineConfigs()).toEqual([]);
+    const { sampleIds: _sampleIds, ...foreignExecutionInput } = executionInput;
+    await expect(foreign.updateExecutionConfig(execution.configId, {
+      ...foreignExecutionInput, datasetId: foreignDataset.datasetId,
+      harness: { ...executionInput.harness,
+        agentConfig: { ownerUserId: "user-B", userAgentId: "subject" } },
+    })).rejects.toBeInstanceOf(ConfigEntityNotFoundError);
+    await expect(owned.createExecutionConfig({ ...executionInput, datasetId: foreignDataset.datasetId }))
+      .rejects.toBeInstanceOf(ConfigReferenceError);
+    await expect(owned.createExecutionConfig({ ...executionInput, sampleIds: [foreignSample.sampleId] }))
+      .rejects.toBeInstanceOf(ConfigReferenceError);
+    const unlinkedData = await datasetService.createData({ userPrompt: "not in selected dataset" });
+    const unlinkedSample = await catalog.createSample(unlinkedData.dataId);
+    await expect(owned.createExecutionConfig({ ...executionInput, sampleIds: [unlinkedSample.sampleId] }))
+      .rejects.toBeInstanceOf(ConfigReferenceError);
+    await expect(owned.createEvaluationConfig({
+      ...evaluationInput,
+      evaluationHarness: { ...evaluationInput.evaluationHarness,
+        agentConfig: { ownerUserId: "user-B", userAgentId: "evaluator" } },
+    })).rejects.toBeInstanceOf(ConfigReferenceError);
+    await expect(foreign.createPipelineConfig({
+      executionConfigId: execution.configId, evaluationConfigId: evaluation.configId,
+    })).rejects.toBeInstanceOf(ConfigReferenceError);
+    await expectForeignKeyFailure(database.db.execute(sql`
+      INSERT INTO eval_execution_configs (config_id, owner_user_id, dataset_id, settings)
+      VALUES (${crypto.randomUUID()}, ${"user-A"}, ${foreignDataset.datasetId}, '{}'::jsonb)
+    `));
+    await expectForeignKeyFailure(database.db.execute(sql`
+      INSERT INTO eval_pipeline_configs (config_id, owner_user_id, execution_config_id, evaluation_config_id)
+      VALUES (${crypto.randomUUID()}, ${"user-A"}, ${execution.configId}, ${foreignEvaluation.configId})
+    `));
+    await expect(owned.updatePipelineConfig("missing", {
+      executionConfigId: execution.configId, evaluationConfigId: evaluation.configId,
+    })).rejects.toBeInstanceOf(ConfigEntityNotFoundError);
+  });
 
   it("shares Data within one user and rejects cross-user Dataset, Data and Sample access", async () => {
     const { catalog, datasetService, project, data, sample } = await setup();
