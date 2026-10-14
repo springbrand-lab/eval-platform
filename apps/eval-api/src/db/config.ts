@@ -9,7 +9,7 @@ import type {
   PipelineConfigInput,
 } from "@eval-platform/eval-runtime";
 import { createEvaluationConfig, createExecutionConfig, createPipelineConfig } from "@eval-platform/eval-runtime";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { isForeignKeyFailure, type EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import { datasetData, datasets, evaluationConfigs, executionConfigs, pipelineConfigs, samples } from "./schema.js";
@@ -143,7 +143,8 @@ export function createPostgresConfigStore(
 
   async function lockDataset(reader: Pick<EvalDb, "select">, datasetId: string): Promise<void> {
     const [dataset] = await reader.select({ datasetId: datasets.datasetId }).from(datasets)
-      .where(and(eq(datasets.ownerUserId, owner), eq(datasets.datasetId, datasetId))).for("share");
+      .where(and(eq(datasets.ownerUserId, owner), eq(datasets.datasetId, datasetId),
+        isNull(datasets.deletedAt))).for("share");
     if (!dataset) throw new ConfigReferenceError("Dataset", datasetId);
   }
 

@@ -3,6 +3,7 @@ import type {
   AgentConfigRef,
   AgentRole,
   ArtifactRef,
+  EvaluationOutputSchema,
   EvaluationRecord,
   EvaluateRequest,
   ExecutionAttempt,
@@ -59,7 +60,8 @@ export interface AgentOption {
 
 export interface RuntimeCatalog {
   listProjects(): Promise<readonly Project[]>;
-  getProject(projectId: string): Promise<Project | null>;
+  /** Resolve the Project's output-format ID to its immutable Schema for Worker use. */
+  getProject(projectId: string): Promise<(Project & { readonly evaluationOutputSchema?: EvaluationOutputSchema }) | null>;
   listAgents(role?: AgentRole): Promise<readonly AgentOption[]>;
   listDatasets(): Promise<readonly Dataset[]>;
   listData(datasetId: string): Promise<readonly Data[]>;

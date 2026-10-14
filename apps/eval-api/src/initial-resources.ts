@@ -8,11 +8,12 @@ import {
   type InitialMaterialsRef,
   type InitialSessionRef,
 } from "@eval-platform/eval-dataset";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { EvalDb } from "./db/client.js";
 import { requireOwnerUserId } from "./db/owner.js";
+import { assertMaterialSelectable, assertSessionSelectable } from "./db/resource-catalog.js";
 import { data } from "./db/schema.js";
-import type { BundleDirectory, MaterialFile, SessionContent } from "./sp/bundle-directory.js";
+import type { BundleDirectory } from "./sp/bundle-directory.js";
 
 export interface DataInitialResourcePatch {
   readonly initialMaterials?: InitialMaterialsRef | null;
@@ -20,20 +21,10 @@ export interface DataInitialResourcePatch {
   readonly initialSession?: InitialSessionRef | null;
 }
 
-/** Authenticated API composition: upload resources separately, then bind existing ones to a Data. */
+/** Authenticated API composition: bind existing catalog entries to a Data row. */
 export function createInitialResourceApi(db: EvalDb, ownerUserId: string, bundles: BundleDirectory) {
   const owner = requireOwnerUserId(ownerUserId);
   return {
-    async uploadMaterials(reference: InitialMaterialsRef, files: readonly MaterialFile[]): Promise<InitialMaterialsRef> {
-      const selected = initialMaterialsRefSchema.parse(reference);
-      await bundles.uploadInitialMaterials(owner, selected, files);
-      return selected;
-    },
-    async uploadSession(reference: InitialSessionRef, context: SessionContent): Promise<InitialSessionRef> {
-      const selected = initialSessionRefSchema.parse(reference);
-      await bundles.uploadInitialSession(owner, selected, context);
-      return selected;
-    },
     async bindData(dataId: string, patch: DataInitialResourcePatch): Promise<Data> {
       if (!patch || typeof patch !== "object" || Array.isArray(patch) ||
         Object.keys(patch).length === 0 || Object.keys(patch).some((key) =>
@@ -53,8 +44,12 @@ export function createInitialResourceApi(db: EvalDb, ownerUserId: string, bundle
       if (materials) await bundles.resolveInitialMaterials(owner, materials);
       if (evalMaterials) await bundles.resolveInitialMaterials(owner, evalMaterials);
       return db.transaction(async (transaction) => {
+        if (materials) await assertMaterialSelectable(transaction, owner, materials);
+        if (evalMaterials) await assertMaterialSelectable(transaction, owner, evalMaterials);
+        if (session) await assertSessionSelectable(transaction, owner, session);
         const [row] = await transaction.select({ content: data.content }).from(data)
-          .where(and(eq(data.ownerUserId, owner), eq(data.dataId, selectedId))).for("update");
+          .where(and(eq(data.ownerUserId, owner), eq(data.dataId, selectedId),
+            isNull(data.deletedAt))).for("update");
         if (!row) throw new DatasetEntityNotFoundError("data", selectedId);
         const next: Record<string, unknown> = { ...row.content };
         if (Object.hasOwn(patch, "initialMaterials")) {

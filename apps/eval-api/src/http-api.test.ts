@@ -29,6 +29,7 @@ function setup() {
   const createProject = vi.fn(async ({ name }: { name: string }) => ({ projectId: "project-1", ownerUserId: owner, name }));
   const createDataset = vi.fn(async ({ name }: { name: string }) => ({ datasetId, name }));
   const importDataset = vi.fn(async () => ({ dataset: { datasetId: "dataset-1", name: "Cases" }, data: [] }));
+  const importPromptDataset = vi.fn(async () => ({ dataset: { datasetId: "dataset-2", name: "Prompt cases" }, data: [] }));
   const exportDataset = vi.fn(async () => "dataset:\n  name: Cases\ndata: []\n");
   const getData = vi.fn(async () => null);
   const createExecutionConfig = vi.fn(async () => ({ configId: "config-1", datasetId }));
@@ -37,10 +38,12 @@ function setup() {
   const getRun = vi.fn(async () => ({ runId: "run-1", samplingIds: ["sampling-1"], status: "queued" }));
   const getProjectOverview = vi.fn(async () => ({ project: { projectId: "project-1" }, counts: { samplings: 1 } }));
   const forOwner = vi.fn((_owner: string, _token: string) => ({
-    catalog: { createProject, getProject: async () => ({ projectId: "project-1", ownerUserId: owner, name: "Tasks" }),
+    catalog: { createProject, getProject: async () => ({ projectId: "project-1", ownerUserId: owner,
+      name: "Tasks", evaluationOutputSchemaId: "00000000-0000-4000-8000-000000000002",
+      evaluationOutputSchema: { type: "object" } }),
       listProjects: async () => [], listAgents: async () => [],
       selectAllSuccessfulSamplingIds: async () => ["sampling-1"] },
-    datasets: { createDataset, importDataset, exportDataset, getData, listDatasets: async () => [] },
+    datasets: { createDataset, importDataset, importPromptDataset, exportDataset, getData, listDatasets: async () => [] },
     configs: { createExecutionConfig },
     runtime: { start, evaluate, getRun },
     metrics: { getProjectOverview },
@@ -63,7 +66,7 @@ function setup() {
     }),
   });
   const handler = createEvalApiHandler({ sp, forOwner, initialResources, independentEvaluation });
-  return { handler, sp, verifySession, forOwner, initialResources, createProject, createDataset, importDataset,
+  return { handler, sp, verifySession, forOwner, initialResources, createProject, createDataset, importDataset, importPromptDataset,
     exportDataset, getData, createExecutionConfig, start, evaluate, getRun, getProjectOverview };
 }
 
@@ -82,32 +85,45 @@ describe("Eval HTTP control plane", () => {
     expect(app.initialResources).toHaveBeenCalledWith(expect.any(Request), owner);
   });
 
-  it("mounts the real Bundle upload handler after authentication", async () => {
+  it("mounts the Bundle handler and rejects malformed JSON before storage access", async () => {
     const app = setup();
-    const uploadInitialMaterials = vi.fn(async () => undefined);
-    const bundles = { uploadInitialMaterials } as unknown as BundleDirectory;
+    const bundles = {} as BundleDirectory;
     const handler = createEvalApiHandler({
       sp: app.sp,
       forOwner: app.forOwner,
       initialResources: createInitialResourceHttpHandler({} as EvalDb, bundles),
     });
-    const files = [{ path: "/brief.txt", mediaType: "text/plain", contentBase64: "SGk=" }];
-    const response = await handler(request("/api/bundles/project%2Fassets/materials/brief", "PUT", { files }));
-    expect(response.status).toBe(200);
-    expect(uploadInitialMaterials).toHaveBeenCalledWith(owner,
-      { bundleId: "project/assets", materialId: "brief" }, files);
-    const duplicate = await handler(new Request("http://eval.test/api/bundles/a/materials/b", {
-      method: "PUT", headers: { Authorization: "Bearer session", "Content-Type": "application/json" },
-      body: '{"files":[],"files":[]}',
+    const duplicate = await handler(new Request("http://eval.test/api/bundles", {
+      method: "POST", headers: { Authorization: "Bearer session", "Content-Type": "application/json" },
+      body: '{"name":"a","name":"b","description":"c"}',
     }));
     expect(duplicate.status).toBe(400);
-    expect(uploadInitialMaterials).toHaveBeenCalledTimes(1);
-    const invalidUtf8 = await handler(new Request("http://eval.test/api/bundles/a/materials/b", {
-      method: "PUT", headers: { Authorization: "Bearer session", "Content-Type": "application/json" },
+    const invalidUtf8 = await handler(new Request("http://eval.test/api/bundles", {
+      method: "POST", headers: { Authorization: "Bearer session", "Content-Type": "application/json" },
       body: new Uint8Array([0xff]),
     }));
     expect(invalidUtf8.status).toBe(400);
-    expect(uploadInitialMaterials).toHaveBeenCalledTimes(1);
+    expect((await handler(request("/api/bundles/a/materials/b", "PUT", { files: [] }))).status).toBe(405);
+  });
+
+  it("accepts Data-only prompt files with Dataset metadata alongside the upload", async () => {
+    const app = setup();
+    const body = { name: "Tasks", description: "Review cases", format: "jsonl",
+      content: '{"name":"Case","description":"One","userPrompt":"Start","evalPrompt":"Judge"}' };
+    const response = await app.handler(request("/api/datasets/prompt-import", "POST", body));
+    expect(response.status).toBe(201);
+    expect(app.importPromptDataset).toHaveBeenCalledWith(body);
+  });
+
+  it("exposes only the bound output-format ID in Project reads", async () => {
+    const app = setup();
+    const response = await app.handler(request("/api/projects/project-1"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      projectId: "project-1", evaluationOutputSchemaId: "00000000-0000-4000-8000-000000000002",
+    });
+    expect(await (await app.handler(request("/api/projects/project-1"))).json())
+      .not.toHaveProperty("evaluationOutputSchema");
   });
 
   it("returns request errors for invalid, oversized and locked Project JSON Schemas", async () => {

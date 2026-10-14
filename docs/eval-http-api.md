@@ -19,11 +19,12 @@ Sampling and Evaluation responses retain artifact and complete trajectory refere
 | Agent choices | `GET /api/agents?role=subject|evaluator` | Optional role |
 | Projects | `GET, POST /api/projects`; `GET /api/projects/{id}` | Create: `{name}` |
 | Current Run and stop | `GET /api/projects/{id}/runs/current`; `POST /api/projects/{id}/runs/{runId}/stop` | Stop has no body; `202 {runId,stopRequested:true}` |
-| Project evaluation output Schema | `PUT /api/projects/{id}/evaluation-output-schema` | Raw draft 2020-12 JSON Schema object; may be corrected until the first Evaluation Run |
+| Project evaluation output format | `PUT /api/projects/{id}/evaluation-output-schema` | `{outputSchemaId}`; ID may change until the first Evaluation Run |
 | Successful Samplings | `GET /api/projects/{id}/samplings/successful`; `GET /api/projects/{id}/samplings/successful/ids` | Existing [independent evaluation contract](eval-independent-evaluation-entry.md) |
 | Datasets | `GET, POST /api/datasets`; `GET, PUT, DELETE /api/datasets/{id}` | Dataset input on create/full replacement |
 | Dataset membership | `GET, POST, DELETE /api/datasets/{id}/data` | POST/DELETE: `{dataIds:[...]}` |
-| Dataset documents | `POST /api/datasets/import?format=json|yaml`; `GET /api/datasets/{id}/export?format=json|yaml` | Import body is the raw document text |
+| Dataset documents | `POST /api/datasets/import?format=json|yaml`; `GET /api/datasets/{id}/export?format=json|yaml` | General import body is the raw document text |
+| Prompt Dataset upload | `POST /api/datasets/prompt-import` | Dataset metadata plus JSON/JSONL Data file content; see [Dataset upload](eval-dataset-upload.md) |
 | Data | `GET, POST /api/data`; `GET, PUT, DELETE /api/data/{id}` | Data input on create/full replacement; optional `datasetId` query on list |
 | Samples | `GET, POST /api/samples`; `GET /api/samples/{id}` | List requires `dataId` query; create: `{dataId}` |
 | Configs | `GET, POST /api/configs/{execution|evaluation|pipeline}`; `GET, PUT /api/configs/{kind}/{id}` | Existing public Config input; PUT fully replaces editable fields |
@@ -31,6 +32,7 @@ Sampling and Evaluation responses retain artifact and complete trajectory refere
 | Independent evaluation | `POST /api/projects/{id}/evaluations`; `GET /api/projects/{id}/runs/{runId}`; `GET /api/projects/{id}/runs/{runId}/evaluations` | Existing [independent evaluation contract](eval-independent-evaluation-entry.md), including `202` submission, `8 MiB` body and `10,000` ID limits |
 | Run and result facts | `GET /api/runs/{id}`; `GET /api/samplings/{id}`; `GET /api/evaluations/{id}`; `GET /api/samplings/{id}/evaluations` | — |
 | Metrics | `GET /api/metrics/projects/{id}` and `/datasets/{datasetId}`, `/samples/{sampleId}`, `/samplings/{samplingId}` beneath that Project | Optional repeated `runId` query filters |
-| Initial resources | `PUT /api/bundles/{bundleId}/materials/{materialId}`; `PUT /api/bundles/{bundleId}/sessions/{sessionId}`; `PATCH /api/data/{dataId}/initial-resources` | See [Harness protocol](eval-sp-harness-protocol.md) |
+| Initial-resource catalog | `GET, POST /api/bundles`; `GET, PATCH, DELETE /api/bundles/{bundleId}`; `GET, POST /api/bundles/{bundleId}/materials|sessions`; `GET, PATCH, DELETE` on each individual Material/Session; `PATCH /api/data/{dataId}/initial-resources` | See [Dataset upload](eval-dataset-upload.md) |
+| Output-format catalog | `GET, POST /api/evaluation-output-schemas`; `GET, PATCH, DELETE /api/evaluation-output-schemas/{outputSchemaId}` | Standalone named JSON Schema upload, metadata editing, soft deletion |
 
 The API's `start:api` process requires `DATABASE_URL`, `EVAL_SP_API_ORIGIN`, `EVAL_SP_WRITE_ORIGIN`, `EVAL_SP_SOURCE_BRANCH`, `EVAL_SP_SOURCE_COMMIT` and `EVAL_BUNDLE_DIR`. `EVAL_API_HOST` defaults to `127.0.0.1`; `EVAL_API_PORT` defaults to `8788`. `EVAL_WEB_ORIGIN` optionally restricts browser origins on the independent-evaluation routes. The API and Run Worker mount the same Bundle directory and use the same Eval SP release. The API does not hold the Agent Worker service token or run admitted work inline; PostgreSQL Run admission notifies the separate single-instance Worker.

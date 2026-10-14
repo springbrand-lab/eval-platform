@@ -25,6 +25,8 @@ import {
   type PostgresConfigStore,
 } from "./db/config.js";
 import { DatasetInUseError } from "./db/dataset.js";
+import { OutputSchemaNotFoundError } from "./db/output-schemas.js";
+import { BundleResourceNotFoundError } from "./db/resource-catalog.js";
 import { EvaluationSelectionTooLargeError } from "./independent-evaluation-limits.js";
 import { matchesIndependentEvaluationPath, type IndependentEvaluationApi } from "./independent-evaluation-api.js";
 import { EvalSpApiError, EvalSpTransportError, type EvalSpClient } from "./sp/client.js";
@@ -119,10 +121,10 @@ async function readText(request: Request, maxBytes: number): Promise<string> {
   return text;
 }
 
-async function readObject(request: Request): Promise<Record<string, unknown>> {
+async function readObject(request: Request, maxBytes = JSON_BODY_LIMIT): Promise<Record<string, unknown>> {
   let value: unknown;
   try {
-    value = parseStrictJson(await readText(request, JSON_BODY_LIMIT));
+    value = parseStrictJson(await readText(request, maxBytes));
   } catch (error) {
     if (error instanceof HttpInputError) throw error;
     throw new HttpInputError("Request body must be valid JSON with unique fields");
@@ -199,7 +201,8 @@ function runIds(url: URL): readonly string[] | undefined {
 
 function mappedError(error: unknown, onError?: (error: Error) => void): Response {
   if (error instanceof HttpInputError) return errorResponse(error.status, error.status === 404 ? "not_found" : "invalid_request", error.message);
-  if (error instanceof DatasetEntityNotFoundError || error instanceof ConfigEntityNotFoundError) {
+  if (error instanceof DatasetEntityNotFoundError || error instanceof ConfigEntityNotFoundError ||
+    error instanceof BundleResourceNotFoundError || error instanceof OutputSchemaNotFoundError) {
     return errorResponse(404, "not_found", error.message);
   }
   if (error instanceof ConfigNotFoundError || error instanceof RuntimeRunNotFoundError) {
@@ -249,7 +252,7 @@ function mappedError(error: unknown, onError?: (error: Error) => void): Response
     (error instanceof Error && (error.name === "ZodError" || error.name === "YAMLParseError" || error.name === "YAMLWarning"))) {
     return errorResponse(400, "invalid_request", "Request body or Dataset document is invalid");
   }
-  if (error instanceof TypeError && /^(?:Project name must not be blank|Successful Sampling page size must be between 1 and 1000|Initial resource binding must specify materials or Session|Material upload requires only a files array|Session upload accepts only format and content|JSON body is required|JSON object is required|YAML mapping keys must be strings|Expected a JSON value|JSON values must not depend on toJSON transformations)$/u.test(error.message)) {
+  if (error instanceof TypeError && /^(?:Project name must not be blank|Successful Sampling page size must be between 1 and 1000|Initial resource binding must specify materials or Session|JSON body is required|JSON object is required|YAML mapping keys must be strings|Expected a JSON value|JSON values must not depend on toJSON transformations|Prompt data file|Expected fields:|Metadata patch must|(?:name|description) must|content must|outputSchemaId must)/u.test(error.message)) {
     return errorResponse(400, "invalid_request", error.message);
   }
   if (error instanceof TypeError && error.message.startsWith("Evaluation output JSON Schema")) {
@@ -331,8 +334,11 @@ export function createEvalApiHandler(options: EvalApiHandlerOptions): (request: 
           }
           return methodNotAllowed("GET, POST");
         }
-        if (parts.length === 3 && id) return method === "GET"
-          ? json(found(await services.catalog.getProject(id), "Project")) : methodNotAllowed("GET");
+        if (parts.length === 3 && id) {
+          if (method !== "GET") return methodNotAllowed("GET");
+          const { evaluationOutputSchema: _schema, ...project } = found(await services.catalog.getProject(id), "Project");
+          return json(project);
+        }
       }
 
       if (area === "datasets") {
@@ -344,6 +350,17 @@ export function createEvalApiHandler(options: EvalApiHandlerOptions): (request: 
         if (parts.length === 3 && id === "import") {
           if (method !== "POST") return methodNotAllowed("POST");
           return json(await services.datasets.importDataset(await readText(request, DOCUMENT_BODY_LIMIT), documentFormat(url)), 201);
+        }
+        if (parts.length === 3 && id === "prompt-import") {
+          if (method !== "POST") return methodNotAllowed("POST");
+          const body = await readObject(request, 20_000_000);
+          exactKeys(body, ["name", "description", "format", "content"]);
+          if (typeof body.content !== "string" || Buffer.byteLength(body.content, "utf8") > 10_000_000) {
+            throw new HttpInputError("Prompt file is too large", 413);
+          }
+          return json(await services.datasets.importPromptDataset(body as unknown as {
+            name: string; description: string; format: "json" | "jsonl"; content: string;
+          }), 201);
         }
         if (parts.length === 3 && id) {
           if (method === "GET") return json(found(await services.datasets.getDataset(id), "Dataset"));

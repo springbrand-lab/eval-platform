@@ -7,10 +7,10 @@ import {
   dataSchema,
   datasetSchema,
 } from "@eval-platform/eval-dataset";
-import { and, eq, inArray } from "drizzle-orm";
-import { isForeignKeyFailure, type EvalDb } from "./client.js";
+import { and, eq, inArray, isNull } from "drizzle-orm";
+import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
-import { data, datasetData, datasets } from "./schema.js";
+import { data, datasetData, datasets, executionConfigs, samples } from "./schema.js";
 
 type DatasetReader = Pick<EvalDb, "select">;
 
@@ -45,7 +45,8 @@ export async function readDatasetSnapshots(
 ): Promise<readonly DatasetSnapshot[]> {
   if (datasetIds.length === 0) return [];
   const rows = await reader.select().from(datasets)
-    .where(and(eq(datasets.ownerUserId, ownerUserId), inArray(datasets.datasetId, datasetIds)))
+    .where(and(eq(datasets.ownerUserId, ownerUserId), inArray(datasets.datasetId, datasetIds),
+      isNull(datasets.deletedAt)))
     .orderBy(datasets.datasetId);
   if (rows.length === 0) return [];
   const members = await reader.select({ datasetId: datasetData.datasetId, dataId: data.dataId, content: data.content })
@@ -79,27 +80,36 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
       const record = datasetSchema.parse(dataset);
       const updated = await db.update(datasets)
         .set({ name: record.name, description: record.description ?? null })
-        .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, record.datasetId)))
+        .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, record.datasetId),
+          isNull(datasets.deletedAt)))
         .returning({ datasetId: datasets.datasetId });
       if (updated.length === 0) throw new DatasetEntityNotFoundError("dataset", record.datasetId);
     },
     async getDataset(datasetId) {
       const [row] = await db.select().from(datasets)
-        .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId)));
+        .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId),
+          isNull(datasets.deletedAt)));
       return row ? datasetFromRow(row) : null;
     },
     async listDatasets() {
       const rows = await db.select().from(datasets)
-        .where(eq(datasets.ownerUserId, ownerUserId)).orderBy(datasets.datasetId);
+        .where(and(eq(datasets.ownerUserId, ownerUserId), isNull(datasets.deletedAt)))
+        .orderBy(datasets.datasetId);
       return rows.map(datasetFromRow);
     },
     async deleteDataset(datasetId) {
-      try {
-        await db.delete(datasets).where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId)));
-      } catch (error) {
-        if (isForeignKeyFailure(error)) throw new DatasetInUseError(datasetId);
-        throw error;
-      }
+      await db.transaction(async (transaction) => {
+        const [row] = await transaction.select({ datasetId: datasets.datasetId }).from(datasets)
+          .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId),
+            isNull(datasets.deletedAt))).for("update");
+        if (!row) return;
+        const [config] = await transaction.select({ configId: executionConfigs.configId })
+          .from(executionConfigs).where(and(eq(executionConfigs.ownerUserId, ownerUserId),
+            eq(executionConfigs.datasetId, datasetId))).limit(1);
+        if (config) throw new DatasetInUseError(datasetId);
+        await transaction.update(datasets).set({ deletedAt: new Date() })
+          .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId)));
+      });
     },
     async createData(record) {
       const entry = dataSchema.parse(record);
@@ -110,18 +120,21 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
     async updateData(record) {
       const entry = dataSchema.parse(record);
       const updated = await db.update(data).set({ content: dataContent(entry) })
-        .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, entry.dataId)))
+        .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, entry.dataId),
+          isNull(data.deletedAt)))
         .returning({ dataId: data.dataId });
       if (updated.length === 0) throw new DatasetEntityNotFoundError("data", entry.dataId);
     },
     async getData(dataId) {
       const [row] = await db.select().from(data)
-        .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, dataId)));
+        .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, dataId),
+          isNull(data.deletedAt)));
       return row ? dataFromRow(row) : null;
     },
     async listData(datasetId) {
       if (datasetId === undefined) {
-        const rows = await db.select().from(data).where(eq(data.ownerUserId, ownerUserId)).orderBy(data.dataId);
+        const rows = await db.select().from(data).where(and(eq(data.ownerUserId, ownerUserId),
+          isNull(data.deletedAt))).orderBy(data.dataId);
         return rows.map(dataFromRow);
       }
       return db.transaction(async (transaction) => {
@@ -131,23 +144,35 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
       }, { isolationLevel: "repeatable read", accessMode: "read only" });
     },
     async deleteData(dataId) {
-      try {
-        await db.delete(data).where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, dataId)));
-      } catch (error) {
-        if (isForeignKeyFailure(error)) throw new DataInUseError(dataId);
-        throw error;
-      }
+      await db.transaction(async (transaction) => {
+        const [row] = await transaction.select({ dataId: data.dataId }).from(data)
+          .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, dataId),
+            isNull(data.deletedAt))).for("update");
+        if (!row) return;
+        const [member] = await transaction.select({ dataId: datasetData.dataId }).from(datasetData)
+          .innerJoin(datasets, and(eq(datasetData.datasetId, datasets.datasetId),
+            eq(datasetData.ownerUserId, datasets.ownerUserId)))
+          .where(and(eq(datasetData.ownerUserId, ownerUserId), eq(datasetData.dataId, dataId),
+            isNull(datasets.deletedAt))).limit(1);
+        const [sample] = await transaction.select({ sampleId: samples.sampleId }).from(samples)
+          .where(and(eq(samples.ownerUserId, ownerUserId), eq(samples.dataId, dataId))).limit(1);
+        if (member || sample) throw new DataInUseError(dataId);
+        await transaction.update(data).set({ deletedAt: new Date() })
+          .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, dataId)));
+      });
     },
     async attachData(datasetId, dataIds) {
       await db.transaction(async (transaction) => {
         const [dataset] = await transaction.select({ datasetId: datasets.datasetId }).from(datasets)
-          .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId))).for("update");
+          .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId),
+            isNull(datasets.deletedAt))).for("update");
         if (!dataset) throw new DatasetEntityNotFoundError("dataset", datasetId);
         const uniqueIds = [...new Set(dataIds)].sort();
         if (uniqueIds.length === 0) return;
         const existing = await transaction.select({ dataId: data.dataId }).from(data)
-          .where(and(eq(data.ownerUserId, ownerUserId), inArray(data.dataId, uniqueIds)))
-          .orderBy(data.dataId).for("key share");
+          .where(and(eq(data.ownerUserId, ownerUserId), inArray(data.dataId, uniqueIds),
+            isNull(data.deletedAt)))
+          .orderBy(data.dataId).for("share");
         const found = new Set(existing.map((row) => row.dataId));
         const missing = uniqueIds.find((id) => !found.has(id));
         if (missing) throw new DatasetEntityNotFoundError("data", missing);
@@ -158,7 +183,8 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
     async detachData(datasetId, dataIds) {
       await db.transaction(async (transaction) => {
         const [dataset] = await transaction.select({ datasetId: datasets.datasetId }).from(datasets)
-          .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId))).for("update");
+          .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId),
+            isNull(datasets.deletedAt))).for("update");
         if (!dataset) throw new DatasetEntityNotFoundError("dataset", datasetId);
         if (dataIds.length > 0) {
           await transaction.delete(datasetData).where(and(
@@ -189,7 +215,7 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
           existing = inserted ?? (await transaction.select().from(datasets)
             .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, incoming.datasetId))).for("update"))[0];
         }
-        if (!existing || !isDeepStrictEqual(datasetFromRow(existing), incoming)) {
+        if (!existing || existing.deletedAt !== null || !isDeepStrictEqual(datasetFromRow(existing), incoming)) {
           throw new DatasetIdentityConflictError("dataset", incoming.datasetId);
         }
 
@@ -211,7 +237,7 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
             existingData = inserted ?? (await transaction.select().from(data)
               .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, entry.dataId))).for("update"))[0];
           }
-          if (!existingData || !isDeepStrictEqual(dataFromRow(existingData), entry)) {
+          if (!existingData || existingData.deletedAt !== null || !isDeepStrictEqual(dataFromRow(existingData), entry)) {
             throw new DatasetIdentityConflictError("data", entry.dataId);
           }
         }

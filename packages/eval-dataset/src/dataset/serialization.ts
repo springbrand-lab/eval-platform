@@ -1,9 +1,52 @@
 import { printParseErrorCode, visit as visitJson } from "jsonc-parser";
 import { isScalar, parseDocument, stringify, visit } from "yaml";
+import { z } from "zod";
 import type { DatasetDocument } from "./model.js";
-import { datasetDocumentSchema } from "./model.js";
+import { dataInputSchema, datasetDocumentSchema } from "./model.js";
 
 export type DatasetFormat = "json" | "yaml";
+export type PromptDatasetFormat = "json" | "jsonl";
+export interface PromptDatasetUploadInput {
+  readonly name: string;
+  readonly description: string;
+  readonly format: PromptDatasetFormat;
+  readonly content: string;
+}
+
+const requiredLabel = z.string().trim().min(1);
+const promptUploadSchema = z.strictObject({
+  name: requiredLabel,
+  description: requiredLabel,
+  format: z.enum(["json", "jsonl"]),
+  content: z.string().min(1),
+});
+const promptRowLabelsSchema = z.object({
+  name: requiredLabel,
+  description: requiredLabel,
+  evalPrompt: z.string().refine((value) => value.trim().length > 0),
+}).passthrough();
+
+/** Parse a Data-only file and separately supplied Dataset metadata. */
+export function parsePromptDatasetUpload(input: PromptDatasetUploadInput): DatasetDocument {
+  const upload = promptUploadSchema.parse(input);
+  const rawRows: unknown = upload.format === "json"
+    ? parseJsonDocument(upload.content)
+    : upload.content.split(/\r?\n/u).filter((line) => line.trim()).map(parseJsonDocument);
+  if (!Array.isArray(rawRows) || rawRows.length === 0) {
+    throw new TypeError("Prompt data file must contain a nonempty array of rows");
+  }
+  const rows = rawRows.map((raw) => {
+    const row = dataInputSchema.parse(raw);
+    if ("initialMaterials" in row || "evalInitialMaterials" in row || "initialSession" in row) {
+      throw new TypeError("Prompt data file rows must not contain initial resource references");
+    }
+    return promptRowLabelsSchema.parse(row);
+  });
+  return datasetDocumentSchema.parse({
+    dataset: { name: upload.name, description: upload.description },
+    data: rows,
+  });
+}
 
 export function parseDatasetDocument(source: string, format: DatasetFormat): DatasetDocument {
   if (typeof source !== "string") throw new TypeError("Dataset source must be a string");

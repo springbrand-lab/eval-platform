@@ -2,6 +2,7 @@ import { link, lstat, mkdir, readFile, realpath, stat, unlink, writeFile } from 
 import { dirname, isAbsolute, join, sep } from "node:path";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import { SpHarnessError, type SpHarnessOptions } from "./harness.js";
+import { parseStrictJson } from "../strict-json.js";
 
 const MAX_MATERIAL_MANIFEST_BYTES = 27_000_000;
 const MAX_SESSION_FILE_BYTES = 2_500_000;
@@ -21,6 +22,8 @@ export interface BundleDirectory {
     files: readonly MaterialFile[]): Promise<void>;
   uploadInitialSession(ownerUserId: string, reference: InitialSessionRef,
     context: SessionContent): Promise<void>;
+  removeInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef): Promise<void>;
+  removeInitialSession(ownerUserId: string, reference: InitialSessionRef): Promise<void>;
 }
 
 /** Open the deployment-owned Bundle directory shared by uploads and the Run Worker. */
@@ -106,6 +109,16 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
       await writeResource(resourceLocation(ownerUserId, reference.bundleId, "sessions",
         reference.sessionId, "json"), bytes, MAX_SESSION_FILE_BYTES);
     },
+    async removeInitialMaterials(ownerUserId, reference) {
+      const location = resourceLocation(ownerUserId, reference.bundleId, "materials", reference.materialId, "json");
+      try { await unlink(location.path); }
+      catch (error) { if (!isMissing(error)) throw error; }
+    },
+    async removeInitialSession(ownerUserId, reference) {
+      const location = resourceLocation(ownerUserId, reference.bundleId, "sessions", reference.sessionId, "json");
+      try { await unlink(location.path); }
+      catch (error) { if (!isMissing(error)) throw error; }
+    },
     async resolveInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef) {
       const bytes = await readResource(resourceLocation(ownerUserId, reference.bundleId, "materials",
         reference.materialId, "json"), MAX_MATERIAL_MANIFEST_BYTES);
@@ -148,8 +161,8 @@ async function ensureDirectory(path: string): Promise<void> {
 }
 
 function validateMaterialFiles(value: unknown): readonly MaterialFile[] {
-  if (!Array.isArray(value) || value.length > 500) {
-    throw new SpHarnessError("Initial materials must contain at most 500 files", false);
+  if (!Array.isArray(value) || value.length === 0 || value.length > 500) {
+    throw new SpHarnessError("Initial materials must contain between 1 and 500 files", false);
   }
   let total = 0;
   const paths = new Set<string>();
@@ -180,8 +193,8 @@ function validateSessionContent(value: unknown): SessionContent {
   let snapshot: unknown;
   try {
     snapshot = value.format === "json"
-      ? JSON.parse(value.content)
-      : { entries: value.content.split(/\r?\n/u).filter((line) => line.trim()).map((line) => JSON.parse(line)) };
+      ? parseStrictJson(value.content)
+      : { entries: value.content.split(/\r?\n/u).filter((line) => line.trim()).map(parseStrictJson) };
   } catch {
     throw new SpHarnessError("Initial Session content is not valid JSON or JSONL", false);
   }

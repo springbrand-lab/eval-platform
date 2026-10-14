@@ -307,6 +307,25 @@ describe("Dataset service", () => {
 });
 
 describe("Dataset import and export", () => {
+  it("imports a prompt file with separate Dataset metadata in one Store command", async () => {
+    const store = new TestDatasetStore();
+    const service = createDatasetService(store);
+    const importStore = vi.spyOn(store, "importDataset");
+    const result = await service.importPromptDataset({
+      name: "Prompts", description: "Required metadata", format: "jsonl",
+      content: '{"name":"First","description":"Task one","userPrompt":"build","evalPrompt":"review"}\n',
+    });
+    expect(result.dataset).toMatchObject({ name: "Prompts", description: "Required metadata" });
+    expect(result.data[0]).toMatchObject({ name: "First", description: "Task one",
+      userPrompt: "build", evalPrompt: "review" });
+    expect(result.dataset.datasetId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(result.data[0]!.dataId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(importStore).toHaveBeenCalledExactlyOnceWith(result);
+    await expect(service.importPromptDataset({ name: "Prompts", description: "Required metadata",
+      format: "jsonl", content: '{"name":"First","description":"Task one","userPrompt":"build"}\n',
+    })).rejects.toThrow();
+    expect(importStore).toHaveBeenCalledTimes(1);
+  });
   it.each([
     { format: "json", source: '{"dataset":{"name":"tasks"},"data":[{"userPrompt":"task","externalDataId":9007199254740993}]}' },
     { format: "yaml", source: 'dataset: { name: tasks }\ndata: [{ userPrompt: task, externalDataId: 9007199254740993 }]' },

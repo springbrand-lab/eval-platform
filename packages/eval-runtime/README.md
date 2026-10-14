@@ -1,6 +1,6 @@
 # @eval-platform/eval-runtime
 
-评估运行从 Project 读取已绑定的 JSON Schema，并在每个 Eval Agent 初始化时交给 Harness，作为素材根目录下的 `evaluation-output.schema.json` 写入该 Agent 的 Workspace。执行数据只带 `initialMaterials`；评估数据只带 `evalInitialMaterials`（映射为初始化材料）并沿用 `evalPrompt`。两种材料不互相泄露。
+Project 只保存输出格式 ID；Runtime Catalog 在读取 Project 时按 ID 解析不可变的 JSON Schema，运行时把解析结果交给 Harness，作为素材根目录下的 `evaluation-output.schema.json` 写入每个 Eval Agent 的 Workspace。执行数据只带 `initialMaterials`；评估数据只带 `evalInitialMaterials`（映射为初始化材料）并沿用 `evalPrompt`。两种材料不互相泄露。
 
 评估运行时的控制面和执行编排。它只依赖 SP 的公开 Harness 边界，不复制 SP Runtime，也不直接读取 Durable Object 存储。
 

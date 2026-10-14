@@ -28,10 +28,10 @@ Uploads and Data associations are separate authenticated operations. The control
 
 | Operation | Route | Body / result |
 | --- | --- | --- |
-| Upload material resource | `PUT /api/bundles/{bundleId}/materials/{materialId}` | `{files:[{path,mediaType,contentBase64}]}` / `{bundleId,materialId}` |
-| Upload Session context | `PUT /api/bundles/{bundleId}/sessions/{sessionId}` | `{format:"json"|"jsonl",content}` / `{bundleId,sessionId}` |
+| Upload material resource | `POST /api/bundles/{bundleId}/materials` | `{name,description,files:[{path,mediaType,contentBase64}]}` / `{bundleId,materialId,name,description}` |
+| Upload Session context | `POST /api/bundles/{bundleId}/sessions` | `{name,description,format:"json"|"jsonl",content}` / `{bundleId,sessionId,name,description,format}` |
 | Bind existing resources to one Data | `PATCH /api/data/{dataId}/initial-resources` | `{initialMaterials?,evalInitialMaterials?,initialSession?}` / updated Data; omit a field to preserve it, `null` to clear it |
 
-`PUT /api/projects/{projectId}/evaluation-output-schema` uploads a bounded draft 2020-12 JSON Schema object as the raw JSON request body and returns the updated Project. The owner may correct it before the first Evaluation Run; after admission it is immutable. Evaluation Run admission requires a bound Schema.
+`POST /api/evaluation-output-schemas` uploads a standalone named draft 2020-12 JSON Schema file and returns a generated output-format ID. `PUT /api/projects/{projectId}/evaluation-output-schema` binds `{outputSchemaId}` and returns the updated Project. The owner may change the selected ID before the first Evaluation Run; after admission it is immutable. Evaluation Run admission requires a bound ID, and the Worker resolves that ID to the saved Schema content.
 
 Uploads write only to the authenticated user's Bundle directory. Repeating identical content is safe; changing content under the same ID conflicts. The binding operation checks that supplied materials exist for that user; a Session reference may be bound without an uploaded context file. It then updates only the chosen Data references atomically. It never uploads bytes. Resource upload never edits Data.

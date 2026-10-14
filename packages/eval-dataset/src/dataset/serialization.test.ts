@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DatasetDocument } from "./model.js";
-import { parseDatasetDocument, serializeDatasetDocument } from "./serialization.js";
+import { parseDatasetDocument, parsePromptDatasetUpload, serializeDatasetDocument } from "./serialization.js";
 
 const document: DatasetDocument = {
   dataset: { datasetId: crypto.randomUUID(), name: "网页任务", description: "内部数据" },
@@ -26,6 +26,27 @@ const document: DatasetDocument = {
 };
 
 describe("Dataset serialization", () => {
+  it.each(["json", "jsonl"] as const)("parses Data-only prompt upload in %s", (format) => {
+    const row = { name: "First", description: "Case one", userPrompt: "  build it  ",
+      evalPrompt: "  review it  ", requirements: ["accessible"] };
+    const content = format === "json" ? JSON.stringify([row]) : `${JSON.stringify(row)}\n`;
+    expect(parsePromptDatasetUpload({ name: " Tasks ", description: " Cases ", format, content }))
+      .toEqual({ dataset: { name: "Tasks", description: "Cases" }, data: [row] });
+  });
+
+  it("rejects incomplete prompt metadata, resource refs, IDs and duplicate JSONL keys", () => {
+    const row = { name: "First", description: "Case", userPrompt: "build", evalPrompt: "judge" };
+    const input = { name: "Tasks", description: "Cases", format: "jsonl" as const };
+    expect(() => parsePromptDatasetUpload({ ...input, content: JSON.stringify({ ...row, evalPrompt: "" }) })).toThrow();
+    expect(() => parsePromptDatasetUpload({ ...input, content: JSON.stringify({ ...row, description: " " }) })).toThrow();
+    expect(() => parsePromptDatasetUpload({ ...input, description: " ", content: JSON.stringify(row) })).toThrow();
+    expect(() => parsePromptDatasetUpload({ ...input, content: JSON.stringify({ ...row, dataId: crypto.randomUUID() }) })).toThrow();
+    expect(() => parsePromptDatasetUpload({ ...input, content: JSON.stringify({ ...row,
+      initialMaterials: { bundleId: "bundle", materialId: "material" } }) })).toThrow();
+    expect(() => parsePromptDatasetUpload({ ...input, content: '{"name":"first","name":"second"}' }))
+      .toThrow(/Duplicate JSON field/u);
+    expect(() => parsePromptDatasetUpload({ ...input, format: "json", content: JSON.stringify(row) })).toThrow();
+  });
   it.each(["json", "yaml"] as const)("round-trips every input block through %s", (format) => {
     const source = serializeDatasetDocument(document, format);
     expect(parseDatasetDocument(source, format)).toEqual(document);

@@ -1,7 +1,7 @@
 import type { EvaluationRecord, ProjectInitialLaunch, Sampling } from "@eval-platform/eval-contracts";
 import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
 import { RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, RuntimeRunStoppedError } from "@eval-platform/eval-runtime";
-import { and, eq, exists, gt, inArray, not, or, sql } from "drizzle-orm";
+import { and, eq, exists, gt, inArray, isNull, not, or, sql } from "drizzle-orm";
 import { sqlBatches } from "./batch.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
@@ -251,7 +251,8 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
         const [project] = await transaction.select({
           ownerUserId: projects.ownerUserId,
           sourceBranch: projects.sourceBranch,
-          evaluationOutputSchema: projects.evaluationOutputSchema,
+          evaluationOutputSchemaId: projects.evaluationOutputSchemaId,
+          evaluationOutputSchemaLocked: projects.evaluationOutputSchemaLocked,
           initialLaunch: projects.initialLaunch,
         })
           .from(projects)
@@ -272,7 +273,7 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
           || run.sourceCommit !== scope.release.sourceCommit)) {
           throw new Error("Project source branch or Run source commit differs from the active Eval SP release");
         }
-        if (run.config.operation !== "execution" && project.evaluationOutputSchema === null) {
+        if (run.config.operation !== "execution" && project.evaluationOutputSchemaId === null) {
           throw new Error("Project evaluation output JSON Schema must be bound before evaluation admission");
         }
         const launch = launchFor(run);
@@ -302,6 +303,7 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
             .from(datasets).where(and(
               eq(datasets.ownerUserId, project.ownerUserId),
               eq(datasets.datasetId, run.config.execution.datasetId),
+              isNull(datasets.deletedAt),
             )).for("share");
           if (dataset?.ownerUserId !== project.ownerUserId) {
             throw new Error("Run uses a Dataset outside its Project owner scope");
@@ -384,8 +386,12 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
             await transaction.insert(runEvaluations).values(batch);
           }
         }
-        if (project.initialLaunch === null && launch !== null) {
-          await transaction.update(projects).set({ initialLaunch: launch })
+        if ((project.initialLaunch === null && launch !== null) ||
+          (run.config.operation !== "execution" && !project.evaluationOutputSchemaLocked)) {
+          await transaction.update(projects).set({
+            ...(project.initialLaunch === null && launch !== null ? { initialLaunch: launch } : {}),
+            ...(run.config.operation !== "execution" ? { evaluationOutputSchemaLocked: true } : {}),
+          })
             .where(eq(projects.projectId, run.projectId));
         }
         await transaction.execute(sql`select pg_notify('eval_run_created', ${run.runId})`);

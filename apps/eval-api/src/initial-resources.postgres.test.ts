@@ -15,11 +15,14 @@ import { openBundleDirectory } from "./sp/bundle-directory.js";
 const connection = process.env.DATABASE_URL;
 const owner = "11111111-1111-4111-8111-111111111111";
 const otherOwner = "22222222-2222-4222-8222-222222222222";
-const materials = { bundleId: "project-assets", materialId: "brief" };
-const evalMaterials = { bundleId: "project-assets", materialId: "judge-rubric" };
-const session = { bundleId: "old-sessions", sessionId: "seed" };
 
-describe.skipIf(!connection)("Data initial resource association", () => {
+function request(path: string, method: string, body?: unknown): Request {
+  return new Request(`http://eval.test${path}`, {
+    method, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+}
+
+describe.skipIf(!connection)("Dataset resource catalog", () => {
   let pool: Pool;
   let databaseName: string;
   let bundleRoot: string;
@@ -50,89 +53,112 @@ describe.skipIf(!connection)("Data initial resource association", () => {
     }
   });
 
-  it("uploads resources without editing Data and binds only existing owned references", async () => {
+  it("creates, edits, lists and soft-deletes individual resources while existing Data keeps its refs", async () => {
     const db = createEvalDb(pool);
     const dataset = createDatasetService(createPostgresDatasetStore(db, owner));
     const original = await dataset.createData({ userPrompt: "Build page", metadata: { priority: 3 } });
     const bundles = await openBundleDirectory(bundleRoot);
-    const api = createInitialResourceApi(db, owner, bundles);
     const handle = createInitialResourceHttpHandler(db, bundles);
-    await expect(handle(new Request(
-      `http://eval.test/api/bundles/${materials.bundleId}/materials/${materials.materialId}`, {
-        method: "PUT", body: JSON.stringify({ files: [], ownerUserId: otherOwner }),
-      }), owner)).rejects.toThrow(/only a files array/u);
-    const materialResponse = await handle(new Request(
-      `http://eval.test/api/bundles/${materials.bundleId}/materials/${materials.materialId}`, {
-        method: "PUT", body: JSON.stringify({ files: [
-          { path: "/brief.txt", mediaType: "text/plain", contentBase64: "SGVsbG8=" },
-        ] }),
-      }), owner);
-    expect(materialResponse?.status).toBe(200);
-    await api.uploadMaterials(evalMaterials, [
-      { path: "/rubric.md", mediaType: "text/markdown", contentBase64: "UnVicmlj" },
-    ]);
-    const sessionResponse = await handle(new Request(
-      `http://eval.test/api/bundles/${session.bundleId}/sessions/${session.sessionId}`, {
-        method: "PUT", body: JSON.stringify({ format: "json", content: JSON.stringify({
-      entries: [{ id: "m1", message: { role: "user", content: "Earlier task" }, createdAt: 1 }],
-    }) }),
-      }), owner);
-    expect(sessionResponse?.status).toBe(200);
-    expect(await dataset.getData(original.dataId)).toEqual(original);
-
-    await expect(handle(new Request(`http://eval.test/api/data/${original.dataId}/initial-resources`, {
-      method: "PATCH", body: JSON.stringify({ initialMaterials: materials, ownerUserId: otherOwner }),
-    }), owner)).rejects.toThrow(/must specify materials or Session/u);
-    expect(await dataset.getData(original.dataId)).toEqual(original);
-
-    const bindResponse = await handle(new Request(
-      `http://eval.test/api/data/${original.dataId}/initial-resources`, {
-        method: "PATCH", body: JSON.stringify({ initialMaterials: materials,
-          evalInitialMaterials: evalMaterials, initialSession: session }),
-      }), owner);
-    expect(bindResponse?.status).toBe(200);
-    const bound = await dataset.getData(original.dataId);
-    expect(bound).toMatchObject({ metadata: { priority: 3 }, initialMaterials: materials,
-      evalInitialMaterials: evalMaterials, initialSession: session });
-    const cleared = await api.bindData(original.dataId, { initialMaterials: null });
-    expect(cleared).not.toHaveProperty("initialMaterials");
-    expect(cleared.initialSession).toEqual(session);
-    expect(cleared.evalInitialMaterials).toEqual(evalMaterials);
-
-    await expect(api.bindData(original.dataId, {
-      initialMaterials: { bundleId: "missing", materialId: "file" },
-    })).rejects.toThrow(/missing/u);
-    expect(await dataset.getData(original.dataId)).toEqual(cleared);
-    const referenceOnlySession = { bundleId: "old-sessions", sessionId: "no-context-file" };
-    const referenceResponse = await handle(new Request(`http://eval.test/api/data/${original.dataId}/initial-resources`, {
-      method: "PATCH", body: JSON.stringify({ initialSession: referenceOnlySession }),
+    const created = await handle(request("/api/bundles", "POST", {
+      name: "Assets", description: "Seed assets",
     }), owner);
-    expect(referenceResponse?.status).toBe(200);
-    expect(await dataset.getData(original.dataId)).toMatchObject({ initialSession: referenceOnlySession });
-    await expect(bundles.resolveInitialSession(owner, referenceOnlySession)).resolves.toBeUndefined();
+    expect(created?.status).toBe(201);
+    const bundle = await created!.json() as { bundleId: string };
+    expect(bundle.bundleId).toMatch(/^[0-9a-f-]{36}$/u);
+    const root = `/api/bundles/${bundle.bundleId}`;
+    expect((await handle(request(root, "PATCH", { description: "Updated assets" }), owner))?.status).toBe(200);
+    expect(await (await handle(request("/api/bundles", "GET"), owner))!.json())
+      .toContainEqual(expect.objectContaining({ bundleId: bundle.bundleId, description: "Updated assets" }));
+
+    const materialResponse = await handle(request(`${root}/materials`, "POST", {
+      name: "Brief", description: "Execution input", files: [
+        { path: "/brief/brief.txt", mediaType: "text/plain", contentBase64: "SGVsbG8=" },
+      ],
+    }), owner);
+    expect(materialResponse?.status).toBe(201);
+    const uploadedMaterial = await materialResponse!.json() as { bundleId: string; materialId: string };
+    const material = { bundleId: uploadedMaterial.bundleId, materialId: uploadedMaterial.materialId };
+    const evalResponse = await handle(request(`${root}/materials`, "POST", {
+      name: "Rubric", description: "Evaluation input", files: [
+        { path: "/rubric.md", mediaType: "text/markdown", contentBase64: "UnVicmlj" },
+      ],
+    }), owner);
+    const uploadedEvalMaterial = await evalResponse!.json() as { bundleId: string; materialId: string };
+    const evalMaterial = { bundleId: uploadedEvalMaterial.bundleId, materialId: uploadedEvalMaterial.materialId };
+    const sessionResponse = await handle(request(`${root}/sessions`, "POST", {
+      name: "Prior chat", description: "Execution history", format: "json", content: JSON.stringify({
+        entries: [{ id: "m1", message: { role: "user", content: "Earlier task" }, createdAt: 1 }],
+      }),
+    }), owner);
+    expect(sessionResponse?.status).toBe(201);
+    const uploadedSession = await sessionResponse!.json() as { bundleId: string; sessionId: string };
+    const session = { bundleId: uploadedSession.bundleId, sessionId: uploadedSession.sessionId };
+    expect((await handle(request(`${root}/materials/${material.materialId}`, "PATCH", {
+      name: "Updated brief",
+    }), owner))?.status).toBe(200);
+    expect((await handle(request(`${root}/sessions/${session.sessionId}`, "PATCH", {
+      description: "Updated history",
+    }), owner))?.status).toBe(200);
+    expect(await (await handle(request(`${root}/materials`, "GET"), owner))!.json()).toHaveLength(2);
+    expect(await (await handle(request(`${root}/sessions`, "GET"), owner))!.json()).toHaveLength(1);
+
+    const api = createInitialResourceApi(db, owner, bundles);
+    const bound = await api.bindData(original.dataId, {
+      initialMaterials: material, evalInitialMaterials: evalMaterial, initialSession: session,
+    });
+    expect(bound).toMatchObject({ initialMaterials: material, evalInitialMaterials: evalMaterial,
+      initialSession: session });
     await expect(createInitialResourceApi(db, otherOwner, bundles)
       .bindData(original.dataId, { initialMaterials: null })).rejects.toThrow(/Unknown data/u);
+    expect((await handle(request(`${root}/materials/${material.materialId}`, "DELETE"), owner))?.status).toBe(204);
+    expect(await (await handle(request(`${root}/materials`, "GET"), owner))!.json()).toHaveLength(1);
+    await expect(api.bindData(original.dataId, { initialMaterials: material })).rejects.toThrow(/Unknown Material/u);
+    expect(await dataset.getData(original.dataId)).toMatchObject({ initialMaterials: material });
+    await expect(bundles.resolveInitialMaterials(owner, material)).resolves.toHaveLength(1);
+    expect((await handle(request(root, "DELETE"), owner))?.status).toBe(204);
+    expect(await (await handle(request("/api/bundles", "GET"), owner))!.json()).toEqual([]);
+    await expect(api.bindData(original.dataId, { initialSession: session })).rejects.toThrow(/Unknown Session/u);
+    await expect(bundles.resolveInitialSession(owner, session)).resolves.toBeDefined();
   });
 
-  it("binds an uploaded Project JSON Schema once and scopes it to its owner", async () => {
+  it("uploads a standalone output format and binds only its ID to Project", async () => {
     const db = createEvalDb(pool);
     const catalog = createPostgresProjectCatalog(db, owner, {
       sourceBranch: "release-2.0.0", sourceCommit: "a".repeat(40),
     });
     const project = await catalog.createProject({ name: "Schema project" });
     const handle = createInitialResourceHttpHandler(db, await openBundleDirectory(bundleRoot));
-    const url = `http://eval.test/api/projects/${project.projectId}/evaluation-output-schema`;
     const schema = { type: "object", required: ["score"], properties: { score: { type: "number" } } };
-    const request = () => new Request(url, { method: "PUT", body: JSON.stringify(schema) });
-    const response = await handle(request(), owner);
-    expect(response?.status).toBe(200);
-    expect(await response?.json()).toMatchObject({ evaluationOutputSchema: schema });
+    const upload = await handle(request("/api/evaluation-output-schemas", "POST", {
+      name: "Score format", description: "Evaluator result", content: JSON.stringify(schema),
+    }), owner);
+    expect(upload?.status).toBe(201);
+    const output = await upload!.json() as { outputSchemaId: string };
+    expect(output.outputSchemaId).toMatch(/^[0-9a-f-]{36}$/u);
+    const item = `/api/evaluation-output-schemas/${output.outputSchemaId}`;
+    expect((await handle(request(item, "PATCH", { name: "Score v1" }), owner))?.status).toBe(200);
+    expect(await (await handle(request(item, "GET"), owner))!.json()).toMatchObject({
+      name: "Score v1", description: "Evaluator result", schema,
+    });
+    await expect(handle(request(item, "PATCH", { content: '{"type":"string"}' }), owner))
+      .rejects.toThrow(/Metadata patch/u);
+    const binding = `/api/projects/${project.projectId}/evaluation-output-schema`;
+    const result = await handle(request(binding, "PUT", { outputSchemaId: output.outputSchemaId }), owner);
+    expect(await result?.json()).toMatchObject({ evaluationOutputSchemaId: output.outputSchemaId });
+    expect(await catalog.listProjects()).toContainEqual(expect.objectContaining({
+      projectId: project.projectId, evaluationOutputSchemaId: output.outputSchemaId,
+    }));
+    expect(await catalog.getProject(project.projectId)).toMatchObject({
+      evaluationOutputSchemaId: output.outputSchemaId, evaluationOutputSchema: schema,
+    });
+    expect((await handle(request(item, "DELETE"), owner))?.status).toBe(204);
+    expect(await (await handle(request("/api/evaluation-output-schemas", "GET"), owner))!.json()).toEqual([]);
     expect(await catalog.getProject(project.projectId)).toMatchObject({ evaluationOutputSchema: schema });
-    expect((await handle(request(), owner))?.status).toBe(200);
-    const corrected = { type: "object", properties: { passed: { type: "boolean" } } };
-    expect((await handle(new Request(url, { method: "PUT", body: JSON.stringify(corrected) }), owner))?.status)
-      .toBe(200);
-    expect(await catalog.getProject(project.projectId)).toMatchObject({ evaluationOutputSchema: corrected });
-    await expect(handle(request(), otherOwner)).rejects.toThrow(/Unknown Project/u);
+    const another = await catalog.createProject({ name: "Another" });
+    await expect(handle(request(`/api/projects/${another.projectId}/evaluation-output-schema`, "PUT", {
+      outputSchemaId: output.outputSchemaId,
+    }), owner)).rejects.toThrow(/Unknown output format/u);
+    await expect(handle(request(binding, "PUT", { outputSchemaId: output.outputSchemaId }), otherOwner))
+      .rejects.toThrow(/Unknown Project/u);
   });
 });

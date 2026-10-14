@@ -4,13 +4,15 @@ import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, Datas
 import { createMetrics, MetricsQueryError } from "@eval-platform/eval-metrics";
 import { createConfigResolver, createEvalRunResumer, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, RuntimeRunStoppedError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresProjectRunControl, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, ProjectRunStopConflictError, startEvalRunWorker } from "../index.js";
 import { isForeignKeyFailure } from "./client.js";
+import { createOutputSchemaCatalog } from "./output-schemas.js";
 import { createPostgresProjectRunReader } from "./run-view.js";
 import { readRunRecords } from "./runtime.js";
+import { data as dataTable, datasets as datasetsTable } from "./schema.js";
 
 const connection = process.env.DATABASE_URL;
 const subjectAgent = { ownerUserId: "owner", userAgentId: "subject" };
@@ -109,7 +111,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
   }, 30_000);
 
   beforeEach(async () => {
-    await database.db.execute(sql`TRUNCATE TABLE eval_projects, eval_datasets, eval_data,
+    await database.db.execute(sql`TRUNCATE TABLE eval_projects, eval_evaluation_output_schemas, eval_datasets, eval_data,
       eval_execution_configs, eval_evaluation_configs, eval_pipeline_configs RESTART IDENTITY CASCADE`);
   });
 
@@ -139,9 +141,11 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
   async function setup() {
     const services = stores();
     const createdProject = await services.catalog.createProject({ name: "my project" });
-    const project = await services.catalog.bindEvaluationOutputSchema(createdProject.projectId, {
-      type: "object", properties: { score: { type: "number" } },
+    const output = await createOutputSchemaCatalog(database.db, "user-A").create({
+      name: "Score", description: "Evaluation score",
+      content: JSON.stringify({ type: "object", properties: { score: { type: "number" } } }),
     });
+    const project = await services.catalog.bindEvaluationOutputSchema(createdProject.projectId, output.outputSchemaId);
     const dataset = await services.datasetService.createDataset({ name: "shared tasks" });
     const data = await services.datasetService.createData({
       userPrompt: "build a page", evalPrompt: "Judge the result",
@@ -157,12 +161,12 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
   it("fixes the first execution choice atomically and keeps later evaluation in the same Project", async () => {
     const { catalog, project, dataset, sample } = await setup();
     const runtime = createPostgresRuntimeStore(database.db, "user-A", release);
-    expect(await catalog.getProject(project.projectId)).toEqual(project);
+    expect(await catalog.getProject(project.projectId)).toMatchObject(project);
     const missing = makeSampling(project.projectId, "missing-sample");
     await expect(runtime.createRunWithSamplings(
       makeRun(project.projectId, missing, dataset.datasetId), [missing], [],
     )).rejects.toThrow("Sample outside its Project owner scope");
-    expect(await catalog.getProject(project.projectId)).toEqual(project);
+    expect(await catalog.getProject(project.projectId)).toMatchObject(project);
 
     const phantom = { ...makeSampling(project.projectId, sample.sampleId), execution: { status: "succeeded" as const } };
     const phantomJudge = makeEvaluation(phantom.samplingId);
@@ -171,13 +175,13 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     });
     await expect(runtime.createRunWithSamplings(evaluationOnly, [phantom], [phantomJudge]))
       .rejects.toThrow("An empty Project cannot start with evaluation-only");
-    expect(await catalog.getProject(project.projectId)).toEqual(project);
+    expect(await catalog.getProject(project.projectId)).toMatchObject(project);
 
     const sampling = makeSampling(project.projectId, sample.sampleId);
     const execution = makeRun(project.projectId, sampling, dataset.datasetId);
     await runtime.createRunWithSamplings(execution, [sampling], []);
     const selected = { operation: "execution", configId: "execution-config" };
-    expect(await catalog.getProject(project.projectId)).toEqual({ ...project, initialLaunch: selected });
+    expect(await catalog.getProject(project.projectId)).toMatchObject({ ...project, initialLaunch: selected });
     expect(await catalog.listProjects()).toContainEqual({ ...project, initialLaunch: selected });
     expect((await runtime.getRun(execution.runId))?.sourceCommit).toBe(release.sourceCommit);
 
@@ -188,7 +192,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       phases: ["evaluation"], evaluationIds: [judge.evaluationId], config: evaluationConfig,
     });
     await runtime.createRunWithSamplings(evaluation, [succeeded], [judge]);
-    expect(await catalog.getProject(project.projectId)).toEqual({ ...project, initialLaunch: selected });
+    expect(await catalog.getProject(project.projectId)).toMatchObject({ ...project, initialLaunch: selected });
     expect((await runtime.getRun(evaluation.runId))?.sourceCommit).toBe(release.sourceCommit);
     await runtime.updateEvaluation({ ...judge, status: { status: "succeeded" } }, judge);
 
@@ -211,7 +215,15 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       .rejects.toThrow("Project launch selection cannot change");
     expect(await runtime.getRun(changedConfig.runId)).toBeNull();
     expect(await runtime.getRun(changedOperation.runId)).toBeNull();
-    expect(await catalog.getProject(project.projectId)).toEqual({ ...project, initialLaunch: selected });
+    expect(await catalog.getProject(project.projectId)).toMatchObject({ ...project, initialLaunch: selected });
+    const replacementExecution = makeRun(project.projectId, changedSampling, dataset.datasetId);
+    await runtime.createRunWithSamplings(replacementExecution, [changedSampling], []);
+    expect(await runtime.getRun(evaluation.runId)).toBeNull();
+    const replacementFormat = await createOutputSchemaCatalog(database.db, "user-A").create({
+      name: "Replacement", description: "Later format", content: '{"type":"string"}',
+    });
+    await expect(catalog.bindEvaluationOutputSchema(project.projectId, replacementFormat.outputSchemaId))
+      .rejects.toThrow("cannot change after evaluation admission");
   });
 
   it("requires the Project JSON Schema before admitting a Pipeline", async () => {
@@ -233,10 +245,16 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     await expect(runtime.createRunWithSamplings(pipeline, [sampling], [judge]))
       .rejects.toThrow("Project evaluation output JSON Schema must be bound");
     expect(await catalog.getProject(project.projectId)).toEqual(project);
-    await catalog.bindEvaluationOutputSchema(project.projectId, { type: "object" });
+    const selected = await createOutputSchemaCatalog(database.db, "user-A").create({
+      name: "Object", description: "Object result", content: '{"type":"object"}',
+    });
+    await catalog.bindEvaluationOutputSchema(project.projectId, selected.outputSchemaId);
     await expect(runtime.createRunWithSamplings(pipeline, [sampling], [judge]))
       .resolves.toMatchObject({ created: true });
-    await expect(catalog.bindEvaluationOutputSchema(project.projectId, { type: "string" }))
+    const replacement = await createOutputSchemaCatalog(database.db, "user-A").create({
+      name: "String", description: "String result", content: '{"type":"string"}',
+    });
+    await expect(catalog.bindEvaluationOutputSchema(project.projectId, replacement.outputSchemaId))
       .rejects.toThrow("cannot change after evaluation admission");
   });
 
@@ -452,6 +470,26 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     await expect(datasetService.deleteData(data.dataId)).rejects.toBeInstanceOf(DataInUseError);
     await datasetService.deleteDataset(anotherDataset.datasetId);
     expect(await datasetService.getData(data.dataId)).not.toBeNull();
+  });
+
+  it("soft-deletes unused Dataset and Data without reusing their identities", async () => {
+    const { datasetService, catalog } = stores();
+    const dataset = await datasetService.createDataset({ name: "Temporary" });
+    const record = await datasetService.createData({ userPrompt: "Temporary task" });
+    await datasetService.attachData(dataset.datasetId, [record.dataId]);
+    await datasetService.deleteDataset(dataset.datasetId);
+    await datasetService.deleteData(record.dataId);
+    expect(await datasetService.getData(record.dataId)).toBeNull();
+    expect(await datasetService.getDataset(dataset.datasetId)).toBeNull();
+    expect(await datasetService.listData()).toEqual([]);
+    expect(await datasetService.listDatasets()).toEqual([]);
+    expect((await database.db.select().from(dataTable).where(eq(dataTable.dataId, record.dataId)))[0]?.deletedAt)
+      .toBeInstanceOf(Date);
+    expect((await database.db.select().from(datasetsTable).where(eq(datasetsTable.datasetId, dataset.datasetId)))[0]?.deletedAt)
+      .toBeInstanceOf(Date);
+    await expect(catalog.createSample(record.dataId)).rejects.toBeInstanceOf(DatasetEntityNotFoundError);
+    await expect(datasetService.importDataset(JSON.stringify({ dataset, data: [] }), "json"))
+      .rejects.toBeInstanceOf(DatasetIdentityConflictError);
   });
 
   it("imports a whole Dataset atomically, rejects conflicting reuse and admits simultaneous identical imports", async () => {

@@ -12,6 +12,7 @@ import {
   pgTable,
   primaryKey,
   text,
+  timestamp,
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -21,13 +22,74 @@ export const projects = pgTable("eval_projects", {
   ownerUserId: text("owner_user_id").notNull(),
   name: text("name").notNull(),
   sourceBranch: text("source_branch").notNull(),
-  evaluationOutputSchema: jsonb("evaluation_output_schema").$type<EvaluationOutputSchema>(),
+  evaluationOutputSchemaId: uuid("evaluation_output_schema_id"),
+  evaluationOutputSchemaLocked: boolean("evaluation_output_schema_locked").notNull().default(false),
   initialLaunch: jsonb("initial_launch").$type<ProjectInitialLaunch>(),
 }, (table) => [
   unique("eval_projects_owner_id_uq").on(table.ownerUserId, table.projectId),
   index("eval_projects_owner_idx").on(table.ownerUserId),
   check("eval_projects_source_branch_ck", sql`length(trim(${table.sourceBranch})) > 0`),
   check("eval_projects_initial_launch_ck", sql`${table.initialLaunch} IS NULL OR coalesce((jsonb_typeof(${table.initialLaunch}) = 'object' AND ${table.initialLaunch}->>'operation' IN ('execution', 'pipeline') AND length(${table.initialLaunch}->>'configId') > 0), false)`),
+  foreignKey({ columns: [table.ownerUserId, table.evaluationOutputSchemaId], foreignColumns: [evaluationOutputSchemas.ownerUserId, evaluationOutputSchemas.outputSchemaId] }).onDelete("restrict"),
+]);
+
+export const evaluationOutputSchemas = pgTable("eval_evaluation_output_schemas", {
+  outputSchemaId: uuid("output_schema_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
+  name: text("name").notNull(),
+  description: text("description").notNull(),
+  schema: jsonb("schema").$type<EvaluationOutputSchema>().notNull(),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+}, (table) => [
+  unique("eval_evaluation_output_schemas_owner_id_uq").on(table.ownerUserId, table.outputSchemaId),
+  index("eval_evaluation_output_schemas_owner_idx").on(table.ownerUserId),
+  check("eval_evaluation_output_schemas_name_ck", sql`length(trim(${table.name})) > 0`),
+  check("eval_evaluation_output_schemas_description_ck", sql`length(trim(${table.description})) > 0`),
+]);
+
+export const bundles = pgTable("eval_bundles", {
+  bundleId: uuid("bundle_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
+  name: text("name").notNull(),
+  description: text("description").notNull(),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+}, (table) => [
+  unique("eval_bundles_owner_id_uq").on(table.ownerUserId, table.bundleId),
+  index("eval_bundles_owner_idx").on(table.ownerUserId),
+  check("eval_bundles_name_ck", sql`length(trim(${table.name})) > 0`),
+  check("eval_bundles_description_ck", sql`length(trim(${table.description})) > 0`),
+]);
+
+export const bundleMaterials = pgTable("eval_bundle_materials", {
+  materialId: uuid("material_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
+  bundleId: uuid("bundle_id").notNull(),
+  name: text("name").notNull(),
+  description: text("description").notNull(),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+}, (table) => [
+  unique("eval_bundle_materials_owner_id_uq").on(table.ownerUserId, table.materialId),
+  foreignKey({ columns: [table.ownerUserId, table.bundleId], foreignColumns: [bundles.ownerUserId, bundles.bundleId] }).onDelete("restrict"),
+  index("eval_bundle_materials_bundle_idx").on(table.bundleId),
+  check("eval_bundle_materials_name_ck", sql`length(trim(${table.name})) > 0`),
+  check("eval_bundle_materials_description_ck", sql`length(trim(${table.description})) > 0`),
+]);
+
+export const bundleSessions = pgTable("eval_bundle_sessions", {
+  sessionId: uuid("session_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
+  bundleId: uuid("bundle_id").notNull(),
+  name: text("name").notNull(),
+  description: text("description").notNull(),
+  format: text("format").$type<"json" | "jsonl">().notNull(),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+}, (table) => [
+  unique("eval_bundle_sessions_owner_id_uq").on(table.ownerUserId, table.sessionId),
+  foreignKey({ columns: [table.ownerUserId, table.bundleId], foreignColumns: [bundles.ownerUserId, bundles.bundleId] }).onDelete("restrict"),
+  index("eval_bundle_sessions_bundle_idx").on(table.bundleId),
+  check("eval_bundle_sessions_name_ck", sql`length(trim(${table.name})) > 0`),
+  check("eval_bundle_sessions_description_ck", sql`length(trim(${table.description})) > 0`),
+  check("eval_bundle_sessions_format_ck", sql`${table.format} IN ('json', 'jsonl')`),
 ]);
 
 export const datasets = pgTable("eval_datasets", {
@@ -35,6 +97,7 @@ export const datasets = pgTable("eval_datasets", {
   ownerUserId: text("owner_user_id").notNull(),
   name: text("name").notNull(),
   description: text("description"),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
 }, (table) => [
   unique("eval_datasets_owner_id_uq").on(table.ownerUserId, table.datasetId),
   index("eval_datasets_owner_idx").on(table.ownerUserId),
@@ -73,6 +136,7 @@ export const data = pgTable("eval_data", {
   dataId: uuid("data_id").primaryKey(),
   ownerUserId: text("owner_user_id").notNull(),
   content: jsonb("content").$type<Omit<Data, "dataId">>().notNull(),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
 }, (table) => [
   unique("eval_data_owner_id_uq").on(table.ownerUserId, table.dataId),
   index("eval_data_owner_idx").on(table.ownerUserId),

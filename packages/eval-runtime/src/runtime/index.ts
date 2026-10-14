@@ -1,6 +1,7 @@
 import type {
   AgentConfigRef,
   AgentRole,
+  EvaluationOutputSchema,
   EvaluationRecord,
   EvaluateRequest,
   PipelineRequest,
@@ -281,7 +282,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
   private async runEvaluationPhase(
     contexts: readonly RuntimeEvaluationContext[],
     config: ResolvedEvaluationConfig,
-    evaluationOutputSchema: NonNullable<Project["evaluationOutputSchema"]> | undefined,
+    evaluationOutputSchema: EvaluationOutputSchema | undefined,
     runId: string,
     stopSignal?: AbortSignal,
   ): Promise<void> {

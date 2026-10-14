@@ -5,10 +5,10 @@ import type {
   AgentResourceSnapshot,
   AgentStatus,
   EvaluationAgentOutput,
+  EvaluationOutputSchema,
   ExecutionOutput,
   HarnessConfig,
   MaterializedDataBinding,
-  Project,
   TrajectoryRef,
 } from "@eval-platform/eval-contracts";
 import type { DataInput } from "@eval-platform/eval-dataset";
@@ -104,7 +104,7 @@ export interface MaterializeInitialDataInput {
   readonly idempotencyKey: string;
   readonly data: DataInput;
   /** Required for Evaluators; materialized as a file in their Workspace. */
-  readonly evaluationOutputSchema?: NonNullable<Project["evaluationOutputSchema"]>;
+  readonly evaluationOutputSchema?: EvaluationOutputSchema;
   readonly runtime?: HarnessRuntimeOptions;
 }
 

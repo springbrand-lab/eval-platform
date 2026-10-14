@@ -12,8 +12,8 @@ import {
   datasetSchema,
   datasetSnapshotSchema,
 } from "./model.js";
-import type { DatasetFormat } from "./serialization.js";
-import { parseDatasetDocument, serializeDatasetDocument } from "./serialization.js";
+import type { DatasetFormat, PromptDatasetUploadInput } from "./serialization.js";
+import { parseDatasetDocument, parsePromptDatasetUpload, serializeDatasetDocument } from "./serialization.js";
 import type { DatasetStore } from "./store.js";
 import { DatasetEntityNotFoundError } from "./store.js";
 
@@ -31,10 +31,22 @@ export interface DatasetService {
   attachData(datasetId: string, dataIds: readonly string[]): Promise<void>;
   detachData(datasetId: string, dataIds: readonly string[]): Promise<void>;
   importDataset(source: string, format: DatasetFormat): Promise<DatasetSnapshot>;
+  importPromptDataset(input: PromptDatasetUploadInput): Promise<DatasetSnapshot>;
   exportDataset(datasetId: string, format: DatasetFormat): Promise<string>;
 }
 
 export function createDatasetService(store: DatasetStore): DatasetService {
+  async function importDocument(document: import("./model.js").DatasetDocument): Promise<DatasetSnapshot> {
+    const snapshot = datasetSnapshotSchema.parse({
+      dataset: {
+        ...document.dataset,
+        datasetId: document.dataset.datasetId ?? crypto.randomUUID(),
+      },
+      data: document.data.map((record) => ({ ...record, dataId: record.dataId ?? crypto.randomUUID() })),
+    });
+    await store.importDataset(snapshot);
+    return datasetSnapshotSchema.parse(snapshot);
+  }
   return {
     async createDataset(input) {
       const fields = datasetInputSchema.parse(input);
@@ -92,16 +104,10 @@ export function createDatasetService(store: DatasetStore): DatasetService {
       await store.detachData(datasetIdSchema.parse(datasetId), dataIdSchema.array().parse(dataIds));
     },
     async importDataset(source, format) {
-      const document = parseDatasetDocument(source, format);
-      const snapshot = datasetSnapshotSchema.parse({
-        dataset: {
-          ...document.dataset,
-          datasetId: document.dataset.datasetId ?? crypto.randomUUID(),
-        },
-        data: document.data.map((data) => ({ ...data, dataId: data.dataId ?? crypto.randomUUID() })),
-      });
-      await store.importDataset(snapshot);
-      return datasetSnapshotSchema.parse(snapshot);
+      return importDocument(parseDatasetDocument(source, format));
+    },
+    async importPromptDataset(input) {
+      return importDocument(parsePromptDatasetUpload(input));
     },
     async exportDataset(datasetId, format) {
       const selectedId = datasetIdSchema.parse(datasetId);

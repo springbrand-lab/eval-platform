@@ -61,8 +61,8 @@ export interface Project {
   readonly name: string;
   /** SP source branch selected by the Eval deployment that created this Project. */
   readonly sourceBranch: string;
-  /** Bound once; every Evaluation Agent receives this as a JSON Schema file. */
-  readonly evaluationOutputSchema?: EvaluationOutputSchema;
+  /** Selected standalone output format; fixed after the first Evaluation Run. */
+  readonly evaluationOutputSchemaId?: string;
   /** Fixed by the first admitted Run; an empty Project has no initial launch yet. */
   readonly initialLaunch?: ProjectInitialLaunch;
 }

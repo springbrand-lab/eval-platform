@@ -2,8 +2,8 @@ import type {
   EvaluationAgentOutput,
   EvaluationAttempt,
   EvaluationRecord,
+  EvaluationOutputSchema,
   HarnessConfig,
-  Project,
   RetryPolicy,
   SamplingStatus,
 } from "@eval-platform/eval-contracts";
@@ -32,7 +32,7 @@ export interface EvaluateSamplingInput {
   readonly context: RuntimeEvaluationContext;
   readonly harnessConfig: HarnessConfig;
   readonly retryPolicy: RetryPolicy;
-  readonly evaluationOutputSchema: NonNullable<Project["evaluationOutputSchema"]>;
+  readonly evaluationOutputSchema: EvaluationOutputSchema;
 }
 
 export function requireEvaluationPrompt(sample: Sample): string {
