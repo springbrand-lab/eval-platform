@@ -6,13 +6,17 @@ export type OutputScalar = string | number | boolean;
 
 export type OutputValue = OutputScalar | null;
 
-/** What the Schema lets a field hold that Metrics aggregates. */
-export interface OutputFieldShape {
+/** Presentation metadata compiled from the Schema; never grants eligibility to an observation. */
+export interface OutputFieldDefinition {
+  readonly jsonPointer: string;
+  /** Schema title, falling back to the field pointer (`$` for the root). */
+  readonly title: string;
+  readonly description: string | null;
   /** In the order number/integer, boolean, enum; never both number and integer. */
   readonly kinds: readonly OutputFieldKind[];
   /** Declared boolean and enum values in Schema order. */
   readonly values: readonly OutputScalar[];
-  /** Whether the Schema allows null. */
+  /** Whether a statistical declaration allows null. */
   readonly nullable: boolean;
 }
 
@@ -51,7 +55,7 @@ export interface OutputObservation {
   readonly jsonPointer: string;
   /** Exact JSON Pointer of this value, e.g. `/scores/0/value`. */
   readonly instancePointer: string;
-  /** Kinds this value counts as; empty for null, which only counts toward the field's `nullCount`. */
+  /** Kinds supplied by declarations that actually matched this value; empty for null. */
   readonly kinds: readonly OutputFieldKind[];
   readonly value: OutputValue;
 }

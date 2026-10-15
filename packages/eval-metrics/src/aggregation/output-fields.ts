@@ -1,11 +1,12 @@
 import type { EvaluationRecord } from "@eval-platform/eval-contracts";
-import { EMPTY_SHAPE, isSucceededEvaluation, mergeShapes, type EvaluationOutputReader } from "../evaluators/index.js";
-import type { OutputFieldShape, OutputScalar } from "../evaluators/model.js";
+import { isSucceededEvaluation, type EvaluationOutputReader } from "../evaluators/index.js";
+import { selectOutputFields } from "../evaluators/fields.js";
+import type { OutputFieldDefinition, OutputScalar } from "../evaluators/model.js";
 import type { EvaluationOutputSummary, OutputFieldSummary, OutputMissingReason } from "./model.js";
 import { coverage, summarizeNumbers } from "./statistics.js";
 
 interface FieldValues {
-  readonly shape: OutputFieldShape;
+  readonly definition: OutputFieldDefinition;
   observations: number;
   nulls: number;
   readonly numbers: number[];
@@ -16,23 +17,21 @@ interface FieldValues {
 /** Why each evaluation cannot contribute any value; undefined for a succeeded, valid output. */
 function missingReason(record: EvaluationRecord, reader: EvaluationOutputReader): OutputMissingReason | undefined {
   if (!isSucceededEvaluation(record)) return "not-succeeded";
-  const { status } = reader.read(record).validation;
+  const { status } = reader.read(record).view.validation;
   return status === "invalid" ? "invalid-output" : status === "unavailable" ? "unavailable-output" : undefined;
 }
 
-/** Field shapes are the declared shapes united with every shape the outputs in scope reached. */
+/** Merge presentation definitions for the scope; observation eligibility was already decided by the plan. */
 function collectFields(reader: EvaluationOutputReader, evaluations: readonly EvaluationRecord[]): ReadonlyMap<string, FieldValues> {
-  const shapes = new Map(reader.declaredFields);
-  for (const record of evaluations) {
-    for (const [pointer, shape] of reader.reachedFields(record)) shapes.set(pointer, mergeShapes(shapes.get(pointer) ?? EMPTY_SHAPE, shape));
-  }
-  const fields = new Map([...shapes].map(([pointer, shape]): [string, FieldValues] => [pointer, {
-    shape, observations: 0, nulls: 0, numbers: [], contributors: new Set(),
-    entries: new Map(shape.values.map((value) => [value, { count: 0, evaluations: new Set<string>() }])),
+  const definitions = selectOutputFields([reader.fields, ...evaluations.map((record) => reader.read(record).facts.fields)]);
+  const fields = new Map([...definitions].map(([pointer, definition]): [string, FieldValues] => [pointer, {
+    definition, observations: 0, nulls: 0, numbers: [], contributors: new Set(),
+    entries: new Map(definition.values.map((value) => [value, { count: 0, evaluations: new Set<string>() }])),
   }]));
   for (const record of evaluations) {
-    for (const { jsonPointer, kinds, value } of reader.read(record).observations) {
-      const field = fields.get(jsonPointer)!;
+    for (const { jsonPointer, kinds, value } of reader.read(record).facts.observations) {
+      const field = fields.get(jsonPointer);
+      if (!field) continue;
       field.observations += 1;
       field.contributors.add(record.evaluationId);
       if (value === null) {
@@ -53,7 +52,7 @@ function collectFields(reader: EvaluationOutputReader, evaluations: readonly Eva
 /** Per-field statistics and distributions recomputed from the raw observations of the given evaluations. */
 export function summarizeOutputFields(reader: EvaluationOutputReader, evaluations: readonly EvaluationRecord[]): EvaluationOutputSummary {
   const validation = { valid: 0, invalid: 0, unavailable: 0 };
-  for (const record of evaluations) validation[reader.read(record).validation.status] += 1;
+  for (const record of evaluations) validation[reader.read(record).view.validation.status] += 1;
   if (reader.schema === null) return { schema: null, coverage: "unavailable", evaluations: evaluations.length, validation, fields: [] };
   const reasons = evaluations.map((record) => missingReason(record, reader));
   const usable = reasons.filter((reason) => reason === undefined).length;
@@ -69,16 +68,16 @@ export function summarizeOutputFields(reader: EvaluationOutputReader, evaluation
         missing.set(reason, (missing.get(reason) ?? 0) + 1);
       });
       return {
-        jsonPointer, kinds: field.shape.kinds,
+        jsonPointer, title: field.definition.title, description: field.definition.description, kinds: field.definition.kinds,
         observationCount: field.observations,
         contributingEvaluationCount: field.contributors.size,
         missingEvaluationCount: evaluations.length - field.contributors.size,
-        numeric: field.shape.kinds.some((kind) => kind === "number" || kind === "integer") ? summarizeNumbers(field.numbers) : null,
+        numeric: field.definition.kinds.some((kind) => kind === "number" || kind === "integer") ? summarizeNumbers(field.numbers) : null,
         distribution: [...field.entries].map(([value, entry]) => ({
           value, count: entry.count, share: field.observations === 0 ? null : entry.count / field.observations, evaluations: entry.evaluations.size,
         })),
-        ...field.shape.nullable ? { nullCount: field.nulls } : {},
-        coverage: coverage(complete, field.observations > 0),
+        ...field.definition.nullable ? { nullCount: field.nulls } : {},
+        coverage: coverage(field.observations > 0 && field.contributors.size === evaluations.length, field.observations > 0),
         diagnostics: [...missing].map(([reason, count]) => ({ reason, evaluations: count })),
       };
     }),

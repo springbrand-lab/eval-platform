@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { EvaluationRecord } from "@eval-platform/eval-contracts";
+import type { EvaluationOutputSchema, EvaluationRecord } from "@eval-platform/eval-contracts";
 import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
 import {
   collection, dataset, evaluation, facts, OUTPUT_SCHEMA, plan, PROJECT, projectSample, run, sampling, telemetry, usage,
@@ -171,6 +171,101 @@ describe("four-level reporting", () => {
       schema: null, coverage: "unavailable", evaluations: 0, validation: { valid: 0, invalid: 0, unavailable: 0 }, fields: [],
     });
     expect(result.summary.executionAgent.tokens.total.value).toBe(700);
+  });
+
+  it.each([
+    { type: "object", oneOf: [
+      { properties: { mode: { const: "measured" }, passed: { type: "boolean" } }, required: ["mode"] },
+      { properties: { mode: { const: "skipped" }, passed: { type: "null" } }, required: ["mode"] },
+    ] },
+    { type: "object", properties: { passed: { type: ["boolean", "null"], anyOf: [true, false] } } },
+    { type: "object", properties: { passed: { type: ["boolean", "null"], if: { const: true }, then: { const: true } } } },
+  ] satisfies EvaluationOutputSchema[])("uses the same nullable observations in every level and detail: %j", async (evaluationOutputSchema) => {
+    const metrics = metricsOf(facts({
+      plan: plan([dataset(D1, ["ps-1"])]), projectSamples: [projectSample("ps-1", [D1])],
+      samplings: [sampling()], evaluations: [
+        evaluation("e1", {}, { mode: "measured", passed: true }), evaluation("e2", {}, { mode: "skipped", passed: null }),
+      ],
+      evaluationOutputSchema,
+    }));
+    const views = await Promise.all([
+      metrics.getProjectOverview(scope), metrics.getDatasetOverview({ ...scope, datasetId: D1 }),
+      metrics.getSampleOverview({ ...scope, projectSampleId: "ps-1" }), metrics.getSamplingDetail({ ...scope, samplingId: "sampling-1" }),
+    ]);
+    for (const view of views) {
+      const field = view.summary.evaluationOutputs.fields.find((item) => item.jsonPointer === "/passed");
+      expect(field).toMatchObject({ observationCount: 2, contributingEvaluationCount: 2, missingEvaluationCount: 0, nullCount: 1, diagnostics: [] });
+      expect(field?.distribution).toEqual([
+        { value: true, count: 1, share: 0.5, evaluations: 1 }, { value: false, count: 0, share: 0, evaluations: 0 },
+      ]);
+    }
+    const detail = views[3]!;
+    expect(detail.evaluations[1]!.output.observations).toContainEqual({ jsonPointer: "/passed", instancePointer: "/passed", kinds: [], value: null });
+  });
+
+  it("excludes values admitted only by an undeclared branch from every level and detail", async () => {
+    const metrics = metricsOf(facts({
+      plan: plan([dataset(D1, ["ps-1"])]), projectSamples: [projectSample("ps-1", [D1])], samplings: [sampling()],
+      evaluations: [evaluation("e1", {}, { passed: false }), evaluation("e2", {}, { passed: true })],
+      evaluationOutputSchema: { type: "object", properties: { passed: { anyOf: [{ type: "boolean", not: { const: false } }, {}] } } },
+    }));
+    const views = await Promise.all([
+      metrics.getProjectOverview(scope), metrics.getDatasetOverview({ ...scope, datasetId: D1 }),
+      metrics.getSampleOverview({ ...scope, projectSampleId: "ps-1" }), metrics.getSamplingDetail({ ...scope, samplingId: "sampling-1" }),
+    ]);
+    for (const view of views) {
+      expect(view.summary.evaluationOutputs.validation).toEqual({ valid: 2, invalid: 0, unavailable: 0 });
+      expect(view.summary.evaluationOutputs.fields).toHaveLength(1);
+      expect(view.summary.evaluationOutputs.fields[0]).toMatchObject({
+        jsonPointer: "/passed", observationCount: 1, contributingEvaluationCount: 1, missingEvaluationCount: 1,
+        distribution: [{ value: true, count: 1, share: 1, evaluations: 1 }], diagnostics: [{ reason: "absent", evaluations: 1 }],
+      });
+    }
+    const detail = views[3]!;
+    expect(detail.evaluations[0]!.output).toMatchObject({ rawJson: { passed: false }, validation: { status: "valid" }, observations: [] });
+    expect(detail.evaluations[1]!.output.observations).toEqual([{ jsonPointer: "/passed", instancePointer: "/passed", value: true, kinds: ["boolean"] }]);
+  });
+
+  it("serves one Schema-derived presentation and observation contract through all four views", async () => {
+    const metrics = metricsOf(facts({
+      plan: plan([dataset(D1, ["ps-1"])]), projectSamples: [projectSample("ps-1", [D1])], samplings: [sampling()],
+      evaluations: [
+        evaluation("e1", {}, { verdict: "a", score: 2, passed: true }),
+        evaluation("e2", {}, { verdict: "b", score: 4, passed: false }),
+      ],
+      evaluationOutputSchema: {
+        $dynamicAnchor: "result", type: ["boolean", "object"],
+        $defs: { score: { $anchor: "score", title: "Quality", description: "Overall quality score", type: "number" } },
+        properties: {
+          verdict: { title: "Decision", if: { const: "a" }, then: { type: "string" }, else: { enum: ["a", "b"] } },
+          score: { $ref: "#score" }, passed: { title: "Passed", type: "boolean", $dynamicRef: "#result" },
+          optional: { type: "number" },
+        },
+      },
+    }));
+    const views = await Promise.all([
+      metrics.getProjectOverview(scope), metrics.getDatasetOverview({ ...scope, datasetId: D1 }),
+      metrics.getSampleOverview({ ...scope, projectSampleId: "ps-1" }), metrics.getSamplingDetail({ ...scope, samplingId: "sampling-1" }),
+    ]);
+    for (const view of views) {
+      const outputs = view.summary.evaluationOutputs;
+      expect(outputs.validation).toEqual({ valid: 2, invalid: 0, unavailable: 0 });
+      expect(outputs.fields.find((field) => field.jsonPointer === "/score")).toMatchObject({
+        title: "Quality", description: "Overall quality score", numeric: { count: 2, total: 6 }, coverage: "complete",
+      });
+      expect(outputs.fields.find((field) => field.jsonPointer === "/verdict")).toMatchObject({
+        title: "Decision", observationCount: 1, missingEvaluationCount: 1, coverage: "partial",
+        distribution: [{ value: "b", count: 1, share: 1, evaluations: 1 }],
+      });
+      expect(outputs.fields.find((field) => field.jsonPointer === "/passed")).toMatchObject({ title: "Passed", observationCount: 2, coverage: "complete" });
+      expect(outputs.fields.find((field) => field.jsonPointer === "/optional")).toMatchObject({
+        title: "/optional", description: null, observationCount: 0, missingEvaluationCount: 2, coverage: "unavailable",
+      });
+    }
+    const detail = views[3]!;
+    expect(detail.evaluations[0]!.output.rawJson).toMatchObject({ verdict: "a" });
+    expect(detail.evaluations[0]!.output.observations.map((observation) => observation.jsonPointer)).toEqual(["/score", "/passed"]);
+    expect(detail.evaluations[1]!.output.observations.map((observation) => observation.jsonPointer)).toEqual(["/verdict", "/score", "/passed"]);
   });
 
   it("validates queries and passes a detached copy to the source", async () => {

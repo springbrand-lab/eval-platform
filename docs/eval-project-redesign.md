@@ -293,7 +293,7 @@ EvaluationRecord 只保存 Evaluator 原始输出（`structuredOutput` 的文件
 - Schema 允许 null 时 null 由独立的 nullCount 计数，不进入分布与数值统计，不算 false 或任何枚举值，也不同于缺失；
 - 评估失败、缺字段、校验失败不按 0 或 false 参与。
 
-每个字段路径输出 kinds、observationCount、contributingEvaluationCount、missingEvaluationCount（附缺失原因）、数值字段的 total/min/max/mean/median、boolean/enum 分布条目（count、evaluations、share = count / observationCount）、Schema 允许 null 时的 nullCount 与 coverage。数组字段一条记录可产生多个观测，因此同时展示观测数和贡献记录数。
+Schema 编译为唯一的字段展示计划，保留声明来源、条件和根引用上下文。观察只来自实际命中的统计声明；展示定义的并集不能给观察补资格。每个字段路径输出 Schema 的 title（缺省为字段路径）、description、kinds、observationCount、contributingEvaluationCount、missingEvaluationCount（附缺失原因）、数值字段的 total/min/max/mean/median、boolean/enum 分布条目（count、evaluations、share = count / observationCount）、声明允许 null 时的 nullCount 与 coverage。无观察为 unavailable，有观察但部分评估未贡献为 partial，全部评估贡献时才 complete。数组字段一条记录可产生多个观测，因此同时展示观测数和贡献记录数。
 
 ### 5.6 公共模型
 

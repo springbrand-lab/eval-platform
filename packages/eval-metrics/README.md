@@ -5,10 +5,13 @@ Project 当前结果的只读统计与四层展示。只读取应用注入的一
 ```text
 src/
 ├── index.ts                  # 唯一入口：createMetrics、错误类和模型类型
-├── json.ts                   # 原始 JSON 记录/文本读取（包内共享）
+├── json.ts                   # 原始 JSON 读取、Pointer 与安全数值检查（包内共享）
 ├── evaluators/
-│   ├── model.ts              # 评估输出视图、Schema 校验结果、字段形态与观察
-│   └── index.ts              # 严格解析、Ajv 2020 校验、唯一的 Schema 遍历（字段形态与观察抽取）
+│   ├── model.ts              # 评估输出视图、校验结果、字段展示定义与观察
+│   ├── fields.ts             # 展示定义的唯一合并规则与范围内字段选择
+│   ├── plan.ts               # Schema 编译为保留来源、引用上下文和适用条件的展示计划
+│   ├── validation.ts         # 记录 Ajv 原始校验中的分支结果、引用目标与动态上下文
+│   └── index.ts              # 严格解析、校验与每条记录唯一的观察事实
 ├── aggregation/
 │   ├── model.ts              # 资源、轨迹、Agent 视图、输出字段、阶段与层级汇总模型
 │   ├── agents.ts             # Subject/Evaluator 分视角、Attempt 与 Agent 时长
@@ -56,18 +59,28 @@ Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sam
 
 每条评估的 `structuredOutput.content` 先严格解析（拒绝重复键），再用 Ajv 2020 按 Project 锁定的 Schema 校验：`valid`、`invalid`（`invalid-json`、`unsafe-number`、`schema-mismatch`）或 `unavailable`（`no-output`、`no-structured-output`、`no-schema`、`invalid-schema`）。NaN/Infinity/超出安全整数范围使整份输出无效。只有成功评估的有效输出才产生观察。
 
-字段形态（`OutputFieldShape`）由一个 Schema 遍历得出：节点自身、其本地 `$ref` 目标与 `allOf` 成员必须同时成立，取交集；`anyOf`/`oneOf` 的分支与 `then`/`else` 是备选，取并集。未声明 `type`/`enum`/`const` 的位置不声明任何取值，在交并中都不起作用。子实例同样如此：同一节点的 `properties`、匹配的 `patternProperties`（两者都不匹配时为 `additionalProperties`）、`prefixItems`/`items` 一并适用。抽取时对象和数组只走自身实际满足的 `anyOf`/`oneOf`/`if` 分支，标量值按其所在 Schema 位置的完整形态计种类。字段路径为 JSON Pointer，数组下标统一为 `*`（如 `/checks/*/passed`），`instancePointer` 保留实际下标。字段种类（`OutputFieldKind`）：
+链路固定为 Schema → 展示计划 → 单条观察事实 → 范围汇总。`CompiledOutputPlan` 在一次 Metrics 事实读取中编译一次，计划不持久化、不可单独编辑。计划保留每个统计声明的来源、交并关系、条件及引用上下文；Ajv 仍是唯一校验器，通过已注册的 Schema 和根文档/动态锚点上下文执行规则，不另建脱离根环境的子 Schema。编译器只在自己的 Schema 副本上加入无校验副作用的执行记录，保留根校验实际命中的分支、引用目标及当时的上下文；重新检查展示候选时不记录执行事实。JSON Pointer、本地锚点、嵌套 `$id`、`$dynamicRef` 和递归引用都由同一引用入口处理。
+
+`OutputFieldDefinition` 是计划的可展示投影：`jsonPointer`、`title`（没有 Schema 标题时为字段路径，根字段为 `$`）、`description`（未声明时为 null）、`kinds`、`values`、`nullable`。标题与说明优先取字段位置，再按引用及分支的声明顺序补充，字段与选项保持 Schema 顺序。计划的规则不暴露给应用；API 直接返回汇总中的标题、说明及统计类型，Web 无须解释 Schema。
+
+节点自身、引用目标及 `allOf` 必须同时满足；`anyOf`/`oneOf` 是备选，`if` 决定 `then`/`else`。未声明统计类型的位置只提供约束，不能产生统计资格。字段路径为 JSON Pointer，数组下标统一为 `*`（如 `/checks/*/passed`），`instancePointer` 保留实际下标。字段种类（`OutputFieldKind`）：
 
 - `number`/`integer`：`type` 允许的数值类型，或允许取值中的数字（全为整数时为 `integer`，如 `enum: [0.5, 1]` 为 `number`）；两者兼有时为 `number`。
 - `boolean`：允许 `true` 或 `false`（`type` 含 `boolean` 即两者，`enum`/`const` 只取列出的）；布尔值只按 boolean 汇总，不算 enum。
 - `enum`：允许取值中列出的字符串或数字（含 `oneOf`/`anyOf` 各分支的 `const`）。数字枚举同时得到数值汇总与分布。
 - 允许 null（`nullable`）：允许取值中含 null。null 不是种类，也不在 `values` 中，只计入该字段的 `nullCount`。
 
-例如 `{type:["string","null"],allOf:[{enum:["a"]}]}` 只允许 `"a"`，`{type:["number","boolean"],allOf:[{type:"number"}]}` 只有 `number`。一个字段可兼有多个种类（如 `type:["integer","boolean"]`），每个观察值进入与其类型相符的种类。至少有一个种类的字段才汇总：自由文本字符串、对象和只允许 null 的位置不汇总，仍可在单条评估详情的原始 JSON 中查看。枚举数组就是元素字段 `/tags/*` 上的 enum：每个条目同时给出出现次数和包含它的评估数，null 元素计入 `nullCount`，嵌套数组同理。
+例如 `{type:["string","null"],allOf:[{enum:["a"]}]}` 只允许 `"a"`，`{type:["number","boolean"],allOf:[{type:"number"}]}` 只有 `number`。一个字段可兼有多个种类（如 `type:["integer","boolean"]`），每个观察的种类只来自实际命中且允许该值的统计声明。自由文本 `type:string` 不声明统计类型，即使另一未命中的分支把相同字符串列为枚举，也不能借用该分支的资格。至少有一个种类的字段才汇总；对象和最终只允许 null 的字段也不汇总，原值仍在单条详情中。枚举数组就是元素字段 `/tags/*` 上的 enum。
+
+每个声明与其所在的完整约束组绑定，所有有限候选（boolean、enum、const、null）在原声明的约束组内由 Ajv 确认后才合并，包含 `const`/`enum`、数值范围、条件守卫和 `not` 等约束。宽松分支不能恢复其他分支排除的候选。数值类型的描述只用于选择数值展示类型，实际数值是否参与仍须命中声明并满足约束。数组在每个真实位置先合并所有适用的 `prefixItems`/`items`，再折叠成 `*`；`false` Schema 和超出 `maxItems` 的位置不能贡献声明。
+
+依赖执行时动态绑定的有限候选，留待实际根校验提供上下文后确认；预展示不在缺少绑定的环境执行动态引用。未使用的 `$defs`、默认值和示例不形成标量候选的执行依赖。命中的字典键先保留该位置的完整标量展示定义，再从实际命中的分支产生观察，因此未出现的枚举选项仍显示为 0。
+
+reader 每条记录只解析、校验和执行计划一次，保留全部观察事实，包括 null-only 分支、数组位置和 map 键上的 null。详情与聚合都消费事实：详情按该记录的字段定义选择，聚合按查询范围合并后的定义选择，不从详情反推观察。字段合并后仍无任何种类时才排除，因此 `[true,null]` 的同一 `*` 字段有两次观察，跨记录的 boolean/null map 也能正确计数。
 
 每条评估的 `observations` 列出其中被汇总的每个标量值：`jsonPointer`、`instancePointer`、`value`（number/boolean/string/null，原样记录）与该值计入的 `kinds`（null 为空数组，只计入字段的 `nullCount`）。
 
-每个字段（`OutputFieldSummary`）的形态是 Schema 静态声明的形态与范围内各评估实际到达该字段的 Schema 位置形态之并；后者使 map 键、`patternProperties` 与递归字段同样有声明的种类、取值与 nullable，判断“Schema 允许 null”只此一条规则。汇总：
+`OutputFieldSummary` 合并计划的静态字段定义及范围内实际展开的定义（map、`patternProperties`、递归）。合并仅决定展示元数据，不能给任何观察补统计资格。同一 JSON Pointer 的定义复用唯一合并规则：number 吸收 integer，种类与 nullable 取并集，取值保持首次声明顺序，标题/说明保留首次定义；字面对象键 `*` 与数组元素归入同一路径也如此。汇总直接包含 `title`、`description`，无须再查询一份展示配置。
 
 - `kinds`：该形态的种类。
 - `observationCount`：被汇总的值总数（含 null），数组字段一条评估可贡献多个；`contributingEvaluationCount` 为至少有一个值的评估数；`missingEvaluationCount` 按 not-succeeded/invalid-output/unavailable-output/absent 诊断。null 是被观察到的值，不是缺失。
@@ -75,9 +88,9 @@ Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sam
 - `distribution`：该形态的 boolean 与 enum 取值，按形态顺序全部列出（未出现时 count 为 0）；没有 boolean/enum 种类的字段为空数组（数字枚举仍有取值分布）。条目给出 `count`（出现次数）、`evaluations`（包含该值的评估数）与 `share = count / observationCount`（分母含 null 和不在分布中的值，如混合字段的数字；无观察时为 null）。
 - `nullCount`：null 出现次数，独立于 `distribution`；当且仅当形态允许 null 时存在（尚未出现 null 时为 0），否则省略。null 从不算作 false、任何枚举值或缺失。
 - 展示：`distribution` 各条目加一个由 `nullCount` 得出的固定 null 条目，占比为 `nullCount / observationCount`；只有每个非 null 值都在分布中时（纯 boolean、enum 字段），它与各条目 share 之和才为 1。boolean 字段排除 null 的通过率不是字段，由 true 的 count / (observationCount − nullCount) 得出。缺失评估（`missingEvaluationCount`）不进入 `observationCount`，与 null 不同。
-- `coverage`：全部评估都可用且字段有值时为 complete，有值时为 partial，否则 unavailable。
+- `coverage`：没有观察值为 unavailable；范围内每条评估都为该字段贡献成功、合法的观察时为 complete；有观察但存在缺失、失败或不可用输出时为 partial。输出整体的校验 coverage 与字段 coverage 分别计算。
 
-Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`、`allOf`、`anyOf`、`oneOf`、`then`、`else` 中的声明，逐层深度优先。字段按此顺序列出，再按首次出现顺序（评估顺序、文档顺序）列出静态遍历无法命名的字段。取值顺序同理：先 Schema 声明顺序，再按首次出现顺序列出到达的 Schema 位置新增的取值。缺失与失败从不按 0 或 false 计。没有评估计划时输出字段为 unavailable，执行指标照常。
+Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`、`allOf`、`anyOf`、`oneOf`、`then`、`else` 中的声明，逐层深度优先；数组先按前缀位置顺序合并完整约束，再处理尾项。字段按此顺序列出，再按首次出现顺序（评估顺序、文档顺序）列出静态遍历无法命名的字段。取值顺序同理：先 Schema 声明顺序，再按首次出现顺序列出到达的 Schema 位置新增的取值。缺失与失败从不按 0 或 false 计。没有评估计划时输出字段为 unavailable，执行指标照常。
 
 ## 错误
 

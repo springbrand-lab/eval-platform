@@ -10,7 +10,7 @@ import type {
   SamplingStatus,
   TrajectoryRef,
 } from "@eval-platform/eval-contracts";
-import type { EvaluationValidationStatus, OutputFieldKind, OutputScalar } from "../evaluators/model.js";
+import type { EvaluationValidationStatus, OutputFieldDefinition, OutputScalar } from "../evaluators/model.js";
 
 export interface MetricNumber {
   readonly value: number | null;
@@ -205,10 +205,7 @@ export interface OutputValueEntry {
   readonly evaluations: number;
 }
 
-export interface OutputFieldSummary {
-  readonly jsonPointer: string;
-  /** Kinds of the field shape: the declared shape united with the Schema shapes the outputs in scope reached. */
-  readonly kinds: readonly OutputFieldKind[];
+export interface OutputFieldSummary extends Pick<OutputFieldDefinition, "jsonPointer" | "title" | "description" | "kinds"> {
   /** Aggregated values including null; an array field can yield several per evaluation. */
   readonly observationCount: number;
   readonly contributingEvaluationCount: number;
