@@ -75,7 +75,7 @@ async function main(): Promise<void> {
         const catalog = createPostgresCatalog(db, ownerUserId, agents, release);
         const configs = createPostgresConfigStore(db, ownerUserId, sp, sessionToken);
         const datasets = createDatasetService(createPostgresDatasetStore(db, ownerUserId));
-        const queries = createPostgresRuntimeQueries(db, ownerUserId, release);
+        const queries = createPostgresRuntimeQueries(db, ownerUserId);
         const metrics = createMetrics({ source: createPostgresMetricsSource(db, ownerUserId) });
         const { admission, release: releaseAdmission } = admissions.acquire(ownerUserId);
         const runtime = { ...admission, ...queries };

@@ -2,13 +2,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createDatasetService } from "@eval-platform/eval-dataset";
+import { RuntimeEntityNotFoundError } from "@eval-platform/eval-runtime";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createEvalDb } from "./db/client.js";
 import { createPostgresProjectCatalog } from "./db/catalog.js";
 import { createPostgresDatasetStore } from "./db/dataset.js";
-import { BundleResourceInUseError, createResourceCatalog } from "./db/resource-catalog.js";
+import { BundleResourceInUseError } from "./db/errors.js";
+import { createResourceCatalog } from "./db/resource-catalog.js";
 import { createInitialResourceApi } from "./initial-resources.js";
 import { createInitialResourceHttpHandler } from "./initial-resources.http.js";
 import { openBundleDirectory } from "./sp/bundle-directory.js";
@@ -247,6 +249,6 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
       outputSchemaId: output.outputSchemaId,
     }), owner)).rejects.toThrow(/Unknown output format/u);
     await expect(handle(request(binding, "PUT", { outputSchemaId: output.outputSchemaId }), otherOwner))
-      .rejects.toThrow(/Unknown Project/u);
+      .rejects.toBeInstanceOf(RuntimeEntityNotFoundError);
   });
 });

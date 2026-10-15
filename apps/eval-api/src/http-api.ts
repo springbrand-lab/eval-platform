@@ -8,7 +8,7 @@ import {
   datasetIdSchema,
 } from "@eval-platform/eval-dataset";
 import type { Metrics } from "@eval-platform/eval-metrics";
-import { MetricsQueryError } from "@eval-platform/eval-metrics";
+import { MetricsEntityNotFoundError, MetricsQueryError } from "@eval-platform/eval-metrics";
 import type {
   EvalRunAdmission,
   EvalRuntime,
@@ -16,18 +16,20 @@ import type {
   ExecutionConfigInput,
   PipelineConfigInput,
 } from "@eval-platform/eval-runtime";
-import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRunIdentityConflictError, RuntimeRunNotFoundError } from "@eval-platform/eval-runtime";
+import { ConfigNotFoundError, RuntimeAdmissionConflictError, RuntimeEntityNotFoundError, RuntimeEvaluationSelectionError, RuntimeInputError, RuntimeProjectBusyError, RuntimeRunIdentityConflictError, RuntimeRunNotFoundError } from "@eval-platform/eval-runtime";
 import type { PostgresCatalog } from "./db/catalog.js";
+import type { PostgresConfigStore } from "./db/config.js";
 import {
-  ConfigEntityNotFoundError,
-  ConfigIdentityConflictError,
+  BundleResourceInUseError,
+  BundleResourceNotFoundError,
+  CatalogInputError,
+  CatalogPayloadTooLargeError,
   ConfigReferenceError,
-  type PostgresConfigStore,
-} from "./db/config.js";
-import { DatasetInUseError } from "./db/dataset.js";
-import { OutputSchemaInUseError, OutputSchemaNotFoundError } from "./db/output-schemas.js";
-import { BundleResourceInUseError, BundleResourceNotFoundError } from "./db/resource-catalog.js";
-import { EvaluationSelectionTooLargeError } from "./db/errors.js";
+  DatasetInUseError,
+  EvaluationSelectionTooLargeError,
+  OutputSchemaInUseError,
+  OutputSchemaNotFoundError,
+} from "./db/errors.js";
 import { matchesIndependentEvaluationPath, type IndependentEvaluationApi } from "./independent-evaluation-api.js";
 import { EvalSpApiError, EvalSpTransportError, type EvalSpClient } from "./sp/client.js";
 import { SpHarnessError } from "./sp/harness.js";
@@ -201,7 +203,8 @@ function runIds(url: URL): readonly string[] | undefined {
 
 function mappedError(error: unknown, onError?: (error: Error) => void): Response {
   if (error instanceof HttpInputError) return errorResponse(error.status, error.status === 404 ? "not_found" : "invalid_request", error.message);
-  if (error instanceof DatasetEntityNotFoundError || error instanceof ConfigEntityNotFoundError ||
+  if (error instanceof DatasetEntityNotFoundError || error instanceof RuntimeEntityNotFoundError ||
+    error instanceof MetricsEntityNotFoundError ||
     error instanceof BundleResourceNotFoundError || error instanceof OutputSchemaNotFoundError) {
     return errorResponse(404, "not_found", error.message);
   }
@@ -213,20 +216,21 @@ function mappedError(error: unknown, onError?: (error: Error) => void): Response
   }
   if (error instanceof DatasetIdentityConflictError || error instanceof DatasetInUseError ||
     error instanceof DataInUseError || error instanceof BundleResourceInUseError ||
-    error instanceof OutputSchemaInUseError || error instanceof ConfigIdentityConflictError ||
+    error instanceof OutputSchemaInUseError || error instanceof RuntimeAdmissionConflictError ||
     error instanceof RuntimeRunIdentityConflictError) {
     return errorResponse(409, "conflict", error.message);
   }
   if (error instanceof RuntimeEvaluationSelectionError) {
     return errorResponse(409, "conflict", "Selected Sampling is unavailable for evaluation");
   }
-  if (error instanceof EvaluationSelectionTooLargeError) {
+  if (error instanceof EvaluationSelectionTooLargeError || error instanceof CatalogPayloadTooLargeError) {
     return errorResponse(413, "invalid_request", error.message);
   }
   if (error instanceof MetricsQueryError && /^Unknown\b/u.test(error.message)) {
     return errorResponse(404, "not_found", error.message);
   }
-  if (error instanceof ConfigReferenceError || error instanceof MetricsQueryError) {
+  if (error instanceof ConfigReferenceError || error instanceof MetricsQueryError ||
+    error instanceof CatalogInputError || error instanceof RuntimeInputError) {
     return errorResponse(400, "invalid_request", error.message);
   }
   if (error instanceof EvalSpApiError) {
