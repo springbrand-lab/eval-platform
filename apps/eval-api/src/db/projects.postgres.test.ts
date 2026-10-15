@@ -14,6 +14,7 @@ import pino from "pino";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createAgentConfigService } from "../agent-configs.js";
 import { createOwnerServices } from "../owner-services.js";
+import { apiError } from "../lib/api-errors.js";
 import { createProjectService } from "../projects/service.js";
 import { createRunQueue, openRunBoss, RUN_QUEUE, type RunQueue } from "../run-worker-queue.js";
 import type { BundleDirectory } from "../sp/bundle-directory.js";
@@ -305,7 +306,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     it("finishes the first Run on replay after a crash between the creation transaction and admission", async () => {
       const body = await creationBody();
       const crashed = services(OWNER, { preview: planAdmission(OWNER).preview, async submit() { throw new Error("process crashed"); } });
-      const crashingStore = { ...crashed.store, deleteUnrun: async () => null };
+      const crashingStore = { ...crashed.store, deleteUnrun: async (): Promise<string[]> => [] };
       const service = createProjectService({
         ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: crashingStore,
         outputSchemas: crashed.outputSchemas, agentConfigs: crashed.agentConfigs,
@@ -326,7 +327,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       const committed = services();
       // Request A commits the creation transaction but has not admitted its first Run yet.
       const pending = createProjectService({
-        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...committed.store, deleteUnrun: async () => null },
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...committed.store, deleteUnrun: async (): Promise<string[]> => [] },
         outputSchemas: committed.outputSchemas, agentConfigs: committed.agentConfigs,
         admission: { preview: planAdmission(OWNER).preview, async submit() { throw new Error("A is still admitting"); } },
       });
@@ -366,7 +367,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       // The creator committed a second Project but crashed before admission; the user then started a Run.
       const crashed = { ...body, idempotencyKey: "crashed-create" };
       const creator = createProjectService({
-        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...s.store, deleteUnrun: async () => null },
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...s.store, deleteUnrun: async (): Promise<string[]> => [] },
         outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
         admission: { preview: planAdmission(OWNER).preview, async submit() { throw new Error("process crashed"); } },
       });
@@ -388,7 +389,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       const body = await creationBody();
       const s = services();
       const winner = createProjectService({
-        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...s.store, deleteUnrun: async () => null },
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...s.store, deleteUnrun: async (): Promise<string[]> => [] },
         outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
         admission: { preview: runtimeAdmission().preview, async submit() { throw new Error("winner still admitting"); } },
       });
@@ -456,11 +457,94 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       expect(view.currentRun).toEqual({ runId: run!.runId });
     });
 
+    it("never undoes a user soft-delete that lands before the creator's first Run", async () => {
+      const body = await creationBody();
+      const s = services();
+      const real = runtimeAdmission();
+      const creator = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: s.store,
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: {
+          async preview(request) {
+            await s.projects.delete(request.projectId);
+            return real.preview(request);
+          },
+          submit: real.submit,
+        },
+      });
+      await expect(creator.create(body)).rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "project" });
+      const [row] = await database.db.select().from(projects);
+      expect(row?.deletedAt).toBeInstanceOf(Date);
+      expect((await database.db.select().from(projectAgentConfigs)).map((config) => config.userAgentId)).toEqual(await copyIds());
+      expect(stub.calls.deleted).toEqual([]);
+      await expect(services().projects.create(body)).rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "project" });
+      expect((await database.db.select({ n: count() }).from(projects))[0]!.n).toBe(1);
+    });
+
+    it("returns the creation's own Run when it was admitted and superseded after the replay's lookup", async () => {
+      const body = await creationBody();
+      const s = services();
+      const crashed = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...s.store, deleteUnrun: async (): Promise<string[]> => [] },
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: { preview: runtimeAdmission().preview, async submit() { throw new Error("creator stalled"); } },
+      });
+      await expect(crashed.create(body)).rejects.toThrow("creator stalled");
+      const [project] = await s.projects.list();
+      const real = runtimeAdmission();
+      let creationRunId = "";
+      const replaying = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: s.store,
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: {
+          async preview(request) {
+            if (creationRunId === "") {
+              // The stalled creator finishes its first Run, then the user starts and finishes another one.
+              const { targets } = await real.preview(request);
+              const creationRun = await real.submit({ ...request, idempotencyKey: body.idempotencyKey, targets });
+              creationRunId = creationRun.runId;
+              await settle(s.worker, creationRun.samplingIds, "succeeded");
+              const userRun = await real.submit({ ...request, idempotencyKey: "user", targets: (await real.preview(request)).targets });
+              await settle(s.worker, userRun.samplingIds, "succeeded");
+            }
+            return real.preview(request);
+          },
+          submit: real.submit,
+        },
+      });
+      const replayed = await replaying.create(body);
+      expect(replayed.project).toEqual(project);
+      expect(replayed.run?.runId).toBe(creationRunId);
+      expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(2);
+    });
+
+    it("keeps a Project whose first Run kept meeting plan changes and finishes it on replay", async () => {
+      const body = await creationBody();
+      const s = services();
+      const changing = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: s.store,
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: {
+          preview: runtimeAdmission().preview,
+          async submit() { throw new RuntimeAdmissionConflictError("plan-changed", "Project plan changed after the Run was prepared"); },
+        },
+      });
+      const failure = await changing.create(body).then(() => null, (error: unknown) => error);
+      expect(failure).toMatchObject({ reason: "plan-changed" });
+      expect(apiError(failure as Error).code).toBe("PROJECT_PLAN_CHANGED");
+      const [project] = await s.projects.list();
+      expect(project).toBeDefined();
+      expect(stub.calls.deleted).toEqual([]);
+      const replayed = await services(OWNER, runtimeAdmission()).projects.create(body);
+      expect(replayed.project).toEqual(project);
+      expect(replayed.run?.samplingIds).toHaveLength(2);
+    });
+
     it.each(["active", "finished"] as const)("returns run: null when a %s user Run commits between the replay's lookup and its admission", async (state) => {
       const body = await creationBody();
       const s = services();
       const creator = createProjectService({
-        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...s.store, deleteUnrun: async () => null },
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...s.store, deleteUnrun: async (): Promise<string[]> => [] },
         outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
         admission: { preview: planAdmission(OWNER).preview, async submit() { throw new Error("process crashed"); } },
       });

@@ -10,6 +10,7 @@ import {
   RuntimeAdmissionConflictError,
   RuntimeEntityNotFoundError,
   RuntimeInputError,
+  RuntimeRunIdentityConflictError,
   digestExecutionPlan,
   digestJson,
   normalizeEvaluationPlan,
@@ -44,7 +45,17 @@ const CREATION_ATTEMPTS = 3;
 /** Bounds re-previews of a first Run whose plan changed between preview and admission. */
 const FIRST_RUN_ATTEMPTS = 3;
 
-/** Digest of the validated body without its key. */
+/**
+ * The single rule for removing a creation after its first Run failed: only a Project that is unusable or
+ * unwanted. A plan change means the Project is valid and being edited, and a superseded creation already
+ * has Runs; both are kept so a same-key replay can finish them.
+ */
+function compensates(error: unknown): boolean {
+  return !(error instanceof RuntimeAdmissionConflictError
+    && (error.reason === "plan-changed" || error.reason === "creation-superseded"));
+}
+
+/** The key identifies the request and the fingerprint its facts, so a retry with the same body matches. */
 function fingerprintOf(body: ProjectCreateBody): Promise<string> {
   const { idempotencyKey: _key, ...facts } = body;
   return digestJson(facts);
@@ -147,6 +158,11 @@ export function createProjectService(input: {
       // user soft-deleted keeps its row and stays 404.
       if (error instanceof RuntimeEntityNotFoundError && error.entity === "project"
         && await store.findCreation(body.idempotencyKey) === null) return null;
+      // The creator admitted the creation-key Run after our lookup and a user Run superseded it since.
+      if (error instanceof RuntimeRunIdentityConflictError) {
+        const again = await store.findCreation(body.idempotencyKey);
+        if (again?.run) return { project: again.project, run: again.run };
+      }
       throw error;
     }
   }
@@ -196,23 +212,24 @@ export function createProjectService(input: {
     try {
       return await admitFirstRun(project, body);
     } catch (error) {
-      await compensate(projectId, error);
+      if (compensates(error)) await compensate(projectId, error);
       throw error;
     }
   }
 
   /**
-   * Only the request that committed a Project compensates it, and only while it has no Run. A failed
-   * compensation can leave a visible Run-less Project, so it is reported together with the original failure.
+   * Only the request that committed a Project compensates it, and only while it has no Run and was not
+   * soft-deleted (the Store keeps those). A failed compensation can leave a visible Run-less Project, so it
+   * is reported together with the original failure.
    */
   async function compensate(projectId: string, failure: unknown): Promise<void> {
-    let removed: string[] | null;
+    let removed: string[];
     try {
       removed = await store.deleteUnrun(projectId);
     } catch (compensationError) {
       throw new AggregateError([failure, compensationError], "First Run admission failed and the Project could not be removed");
     }
-    if (removed) await agentConfigs.discard(removed);
+    await agentConfigs.discard(removed);
   }
 
   return {
@@ -226,6 +243,8 @@ export function createProjectService(input: {
      * The owner-scoped `idempotencyKey` replays an earlier creation with the same body.
      */
     async create(body: ProjectCreateBody): Promise<ProjectCreation> {
+      // Checked here, before any SP copy is frozen, so an invalid body creates nothing; Runtime admission
+      // enforces the same rule as evaluation-plan-required.
       if (body.run.operation === "pipeline" && body.evaluation === undefined) {
         throw new RuntimeInputError("A pipeline Run requires an evaluation plan", "evaluation");
       }

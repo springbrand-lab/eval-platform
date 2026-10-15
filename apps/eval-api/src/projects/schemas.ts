@@ -5,10 +5,9 @@ import { catalogLabelSchema } from "../db/catalog-metadata.js";
 import { RUN_TARGET_IDS, SAMPLING_COUNT_MAX } from "../limits.js";
 import { idempotencyKeySchema, unique } from "../routes/schemas.js";
 
-/**
- * The single definition of the Project creation and evaluation-plan request bodies. Routes validate with
- * these schemas and the service consumes their output types; plan value rules belong to Runtime.
- */
+// The single definition of the Project creation and evaluation-plan request bodies. Routes validate with
+// these schemas and the service consumes their output types; plan value rules belong to Runtime.
+
 /** A request size limit: the Samplings one ProjectSample creates per execution. */
 const samplingCountSchema = z.number().int().positive().max(SAMPLING_COUNT_MAX);
 

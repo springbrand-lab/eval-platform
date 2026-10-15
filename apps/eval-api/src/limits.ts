@@ -19,11 +19,6 @@ export const JSON_BODY_BYTES = 1_000_000;
 export const IDENTIFIER_CHARS = 512;
 /** Most Data a Project binds and most target IDs one Run selector or target list may carry. */
 export const RUN_TARGET_IDS = 10_000;
-
-/** The single check of RUN_TARGET_IDS for a Project's bound Data and an expanded Run selection. */
-export function requireRunTargetCount(count: number): void {
-  if (count > RUN_TARGET_IDS) throw new RunTargetsTooLargeError(RUN_TARGET_IDS);
-}
 /** Most Samplings one ProjectSample creates per execution. */
 export const SAMPLING_COUNT_MAX = 100;
 
@@ -52,3 +47,8 @@ export const RUN_PREVIEW_BODY_BYTES = RUN_TARGET_IDS * ID_ITEM_BYTES + jsonTextB
 export const RUN_BODY_BYTES = 2 * RUN_TARGET_IDS * ID_ITEM_BYTES + jsonTextBodyBytes(2 * IDENTIFIER_CHARS);
 /** Selected Data IDs and per-Data sampling counts, plus names, descriptions and both plans. */
 export const PROJECT_BODY_BYTES = 2 * RUN_TARGET_IDS * UUID_ENTRY_BYTES + JSON_BODY_BYTES;
+
+/** The single check of RUN_TARGET_IDS for a Project's bound Data and an expanded Run selection. */
+export function requireRunTargetCount(count: number): void {
+  if (count > RUN_TARGET_IDS) throw new RunTargetsTooLargeError(RUN_TARGET_IDS);
+}

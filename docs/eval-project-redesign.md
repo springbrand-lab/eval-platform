@@ -118,13 +118,13 @@ ProjectSample 是 Project 内固定的一条测试输入：`{ projectSampleId, p
 
 请求体顶层的 `idempotencyKey` 在用户内唯一，首个 Run 使用同一个 key；Project 保存 key 和校验后请求体（不含 key）的指纹。克隆副本之前先按 key 查找：
 
-- 同一请求体重放原 `{project, run}`；若上次在第 3 步后、第 4 步前中断，则重放时补交首个 Run；
+- 同一请求体重放原 `{project, run}`，`run` 是以创建 key 准入的首个 Run（之后有别的 Run 也返回它）；若首个 Run 从未准入，重放只在 Project 还没有任何 Run 时补交（在准入的 Project 行锁下判定），否则返回 `run: null`；
 - 不同请求体返回冲突；
 - key 对应的 Project 已软删除时，无论请求体都返回 not found，不会复活；
 - 并发的相同请求只有一个创建事务提交，落败者删除自己创建的副本后重放胜者；
 - 重放请求从不补偿：它的首个 Run 准入失败只返回错误，Project 留给下一次重放。
 
-补偿只由提交了该 Project 的创建请求执行：第 3 步之前任何失败都删除已建副本；首个 Run 准入失败时，若该 Project 仍没有任何 Run，就硬删除它的全部行并删除副本；已有 Run 时保留。补偿删除 Project 后，同一 key 会创建新的 Project。错误码见 [Eval HTTP 控制面](eval-http-api.md#projects)。
+补偿只由提交了该 Project 的创建请求执行，规则只有一条：只移除不可用或不需要的 Project。第 3 步之前任何失败都删除已建副本；首个 Run 准入失败时，未软删除且仍没有任何 Run 的 Project 硬删除全部行并删除副本，但 `plan-changed`（评估计划替换先落地，首个 Run 在有限次数内重新预览提交，用尽后返回冲突）和 `creation-superseded`（已有 Run）不补偿，用户已软删除的 Project 及其副本行也原样保留。补偿删除 Project 后，同一 key 会创建新的 Project；保留下来、没有 Run 的 Project 由同一 key 的重放补交首个 Run。错误码见 [Eval HTTP 控制面](eval-http-api.md#projects)。
 
 ### 3.2 评估计划补填与锁定
 

@@ -197,16 +197,14 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
     },
 
     /**
-     * Compensation for a creation whose first Run was never admitted. Returns `[]` when no such Project
-     * exists; `null`, keeping the Project, once it has any Run; otherwise removes every row of the Project
-     * and returns its frozen-copy IDs for SP deletion.
+     * Removes a non-deleted Project that never got a Run and returns its frozen-copy IDs for SP deletion;
+     * anything else (gone, soft-deleted by the user, or with a Run) is kept and yields `[]`.
      */
-    async deleteUnrun(projectId: string): Promise<string[] | null> {
+    async deleteUnrun(projectId: string): Promise<string[]> {
       return db.transaction(async (transaction) => {
         const [row] = await transaction.select({ projectId: projects.projectId }).from(projects)
-          .where(and(eq(projects.ownerUserId, owner), eq(projects.projectId, projectId))).for("update");
-        if (!row) return [];
-        if (await projectHasRun(transaction, projectId)) return null;
+          .where(visibleProject(projectId, owner)).for("update");
+        if (!row || await projectHasRun(transaction, projectId)) return [];
         const copies = await transaction.select({ userAgentId: projectAgentConfigs.userAgentId }).from(projectAgentConfigs)
           .where(eq(projectAgentConfigs.projectId, projectId));
         for (const table of [projectAgentConfigs, projectEvaluationPlans, projectExecutionPlans, projectSampleDatasets,
