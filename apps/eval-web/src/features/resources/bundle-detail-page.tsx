@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { Pencil, Plus, Trash2, X } from "lucide-react";
+import { ActionMenu } from "@/components/ui/menu";
 import { useState } from "react";
 import { toast } from "sonner";
 import {
@@ -162,8 +163,8 @@ export function BundleDetailPage({ bundleId }: { bundleId: string }) {
         crumbs={[{ label: "初始资源", to: "/resources" }]}
         actions={(
           <>
-            <Button icon={<Pencil className="size-4" />} onClick={() => setEditing(true)}>编辑</Button>
-            <Button variant="ghost" className="text-danger" icon={<Trash2 className="size-4" />} onClick={() => setPending({ kind: "bundle" })}>删除</Button>
+            <Button icon={<Pencil />} onClick={() => setEditing(true)}>编辑</Button>
+            <ActionMenu items={[{ label: "删除 Bundle", icon: <Trash2 />, danger: true, onSelect: () => setPending({ kind: "bundle" }) }]} />
           </>
         )}
       />
@@ -178,7 +179,7 @@ export function BundleDetailPage({ bundleId }: { bundleId: string }) {
               rowKey={(row) => row.materialId}
               empty={<EmptyState title="还没有素材" />}
               columns={[
-                { key: "name", header: "名称", cell: (row) => <span className="font-medium">{row.name}</span> },
+                { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span> },
                 { key: "description", header: "说明", cell: (row) => <span className="text-text-muted">{row.description}</span> },
                 { key: "id", header: "ID", cell: (row) => <CopyId value={row.materialId} /> },
                 { key: "actions", header: "", align: "right", cell: (row) => (
@@ -197,7 +198,7 @@ export function BundleDetailPage({ bundleId }: { bundleId: string }) {
               rowKey={(row) => row.sessionId}
               empty={<EmptyState title="还没有初始会话" />}
               columns={[
-                { key: "name", header: "名称", cell: (row) => <span className="font-medium">{row.name}</span> },
+                { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span> },
                 { key: "format", header: "格式", cell: (row) => row.format.toUpperCase() },
                 { key: "description", header: "说明", cell: (row) => <span className="text-text-muted">{row.description}</span> },
                 { key: "id", header: "ID", cell: (row) => <CopyId value={row.sessionId} /> },

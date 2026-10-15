@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { Download, Link2, Pencil, Plus, Trash2, Unlink } from "lucide-react";
+import { ActionMenu } from "@/components/ui/menu";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { dataKeys, listData } from "@/api-sdk/data-api";
@@ -28,7 +29,7 @@ export function dataTitle(data: Data): string {
 export function DataResourceBadges({ data }: { data: Data }) {
   return (
     <span className="flex flex-wrap gap-1">
-      {data.evalPrompt ? <Badge tone="primary">有评审要求</Badge> : <Badge>无评审要求</Badge>}
+      {data.evalPrompt ? <Badge tone="accent">有评审要求</Badge> : <Badge>无评审要求</Badge>}
       {data.initialMaterials && <Badge tone="info">素材</Badge>}
       {data.evalInitialMaterials && <Badge tone="info">评委素材</Badge>}
       {data.initialSession && <Badge tone="info">初始会话</Badge>}
@@ -122,13 +123,16 @@ export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
         crumbs={[{ label: "测试集", to: "/datasets" }]}
         actions={(
           <>
-            <Button icon={<Download className="size-4" />} onClick={() => void exportAs("json")}>导出 JSON</Button>
-            <Button icon={<Download className="size-4" />} onClick={() => void exportAs("yaml")}>导出 YAML</Button>
-            <Button icon={<Pencil className="size-4" />} onClick={() => {
+            <Button icon={<Pencil />} onClick={() => {
               setForm({ name: dataset.data?.name ?? "", description: dataset.data?.description ?? "" });
               setDialog("edit");
             }}>编辑</Button>
-            <Button variant="ghost" className="text-danger" icon={<Trash2 className="size-4" />} onClick={() => setDialog("delete")}>删除</Button>
+            <Button variant="primary" icon={<Plus />} onClick={() => void navigate({ to: "/data/new", search: { datasetId } })}>新建用例</Button>
+            <ActionMenu items={[
+              { label: "导出 JSON", icon: <Download />, onSelect: () => void exportAs("json") },
+              { label: "导出 YAML", icon: <Download />, onSelect: () => void exportAs("yaml") },
+              { label: "删除测试集", icon: <Trash2 />, danger: true, separated: true, onSelect: () => setDialog("delete") },
+            ]} />
           </>
         )}
       />
@@ -141,9 +145,7 @@ export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
               {selected.size > 0 && (
                 <Button size="sm" icon={<Unlink className="size-4" />} onClick={() => setDialog("detach")}>移出 {selected.size} 条</Button>
               )}
-              <Button size="sm" icon={<Link2 className="size-4" />} onClick={() => setDialog("attach")}>加入已有用例</Button>
-              <Button size="sm" variant="primary" icon={<Plus className="size-4" />}
-                onClick={() => void navigate({ to: "/data/new", search: { datasetId } })}>新建用例</Button>
+              <Button size="sm" icon={<Link2 />} onClick={() => setDialog("attach")}>加入已有用例</Button>
             </>
           )}
         />
@@ -158,8 +160,8 @@ export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
             onRowClick={(row) => void navigate({ to: "/data/$dataId", params: { dataId: row.dataId } })}
             empty={<EmptyState title="测试集还没有用例" />}
             columns={[
-              { key: "title", header: "用例", cell: (row) => <span className="line-clamp-2 font-medium">{dataTitle(row)}</span>, sortValue: dataTitle },
-              { key: "prompt", header: "userPrompt", cell: (row) => <span className="line-clamp-2 text-text-muted">{row.userPrompt}</span> },
+              { key: "title", header: "用例", className: "min-w-40", cell: (row) => <span className="line-clamp-2 font-semibold text-text-strong">{dataTitle(row)}</span>, sortValue: dataTitle },
+              { key: "prompt", header: "userPrompt", cell: (row) => <span className="line-clamp-2 max-w-2xl text-text-muted">{row.userPrompt}</span> },
               { key: "resources", header: "", cell: (row) => <DataResourceBadges data={row} /> },
               { key: "id", header: "ID", cell: (row) => <CopyId value={row.dataId} /> },
             ]}

@@ -124,10 +124,10 @@ function DataForm({ initial, datasetId }: { initial?: Data; datasetId?: string }
           <Field label="JSON">{(id) => <Textarea id={id} mono rows={8} value={draft.extra} onChange={(event) => set("extra", event.target.value)} />}</Field>
         </CardBody>
       </Card>
-      {typeof input === "string" && <p className="text-sm text-danger">{input}</p>}
-      <div className="flex items-center justify-between">
-        {initial ? <Button variant="ghost" className="text-danger" icon={<Trash2 className="size-4" />} onClick={() => setDeleting(true)}>删除用例</Button> : <span />}
-        <Button variant="primary" disabled={typeof input === "string"} loading={save.isPending} onClick={() => save.mutate()}>{initial ? "保存" : "创建"}</Button>
+      {typeof input === "string" && <p className="text-[13px] text-danger">{input}</p>}
+      <div className="sticky bottom-0 -mx-6 flex items-center justify-between gap-3 border-t border-border bg-bg/90 px-6 py-3 backdrop-blur">
+        {initial ? <Button variant="outline-danger" icon={<Trash2 />} onClick={() => setDeleting(true)}>删除用例</Button> : <span />}
+        <Button variant="primary" disabled={typeof input === "string"} loading={save.isPending} onClick={() => save.mutate()}>{initial ? "保存修改" : "创建用例"}</Button>
       </div>
       <ConfirmDialog open={deleting} onClose={() => setDeleting(false)} onConfirm={() => remove.mutate()} loading={remove.isPending} danger
         title="删除用例" description="仍在某个测试集中的用例不能删除，请先从测试集移出。已有 Project 不受影响。" confirmLabel="删除" />

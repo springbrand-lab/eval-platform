@@ -1,11 +1,11 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
-export type Tone = "neutral" | "primary" | "success" | "warning" | "danger" | "info";
+export type Tone = "neutral" | "accent" | "success" | "warning" | "danger" | "info";
 
 const tones: Record<Tone, string> = {
-  neutral: "bg-surface-muted text-text-muted",
-  primary: "bg-primary-soft text-primary",
+  neutral: "bg-surface-muted text-text-secondary",
+  accent: "bg-accent-soft text-accent",
   success: "bg-success-soft text-success",
   warning: "bg-warning-soft text-warning",
   danger: "bg-danger-soft text-danger",
@@ -16,7 +16,7 @@ export function Badge({ tone = "neutral", children, className, dot }: {
   tone?: Tone; children: ReactNode; className?: string; dot?: boolean;
 }) {
   return (
-    <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium", tones[tone], className)}>
+    <span className={cn("inline-flex h-5 items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-xs font-semibold", tones[tone], className)}>
       {dot && <span className="size-1.5 rounded-full bg-current" aria-hidden />}
       {children}
     </span>
@@ -33,7 +33,7 @@ const STATUS: Record<string, { label: string; tone: Tone }> = {
   failed: { label: "失败", tone: "danger" },
   interrupted: { label: "已中断", tone: "danger" },
   cancelled: { label: "已取消", tone: "neutral" },
-  "not-started": { label: "未开始", tone: "info" },
+  "not-started": { label: "未开始", tone: "neutral" },
   available: { label: "可查看", tone: "success" },
   synced: { label: "已同步", tone: "success" },
   valid: { label: "格式正确", tone: "success" },

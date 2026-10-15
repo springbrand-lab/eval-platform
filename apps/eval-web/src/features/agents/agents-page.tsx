@@ -31,7 +31,7 @@ export function AgentsPage() {
             empty={<EmptyState title="还没有 Agent 配置" description="被测 Agent 和评委都需要一个 Agent 配置。"
               action={<Button variant="primary" onClick={() => void navigate({ to: "/agents/new" })}>新建 Agent</Button>} />}
             columns={[
-              { key: "name", header: "名称", cell: (row) => <span className="font-medium">{row.name}</span>, sortValue: (row) => row.name },
+              { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span>, sortValue: (row) => row.name },
               { key: "slug", header: "Slug", cell: (row) => <span className="font-mono text-xs">{row.slug ?? "—"}</span> },
               { key: "description", header: "说明", cell: (row) => <span className="line-clamp-1 text-text-muted">{row.description || "—"}</span> },
               { key: "id", header: "ID", cell: (row) => <CopyId value={row.id} /> },

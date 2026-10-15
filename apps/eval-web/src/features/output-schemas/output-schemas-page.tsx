@@ -107,7 +107,7 @@ export function OutputSchemasPage() {
             empty={<EmptyState title="还没有评分格式" description={SCORE_CONVENTION}
               action={<Button variant="primary" onClick={() => setUploading(true)}>上传评分格式</Button>} />}
             columns={[
-              { key: "name", header: "名称", cell: (row) => <span className="font-medium">{row.name}</span>, sortValue: (row) => row.name },
+              { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span>, sortValue: (row) => row.name },
               { key: "description", header: "说明", cell: (row) => <span className="text-text-muted">{row.description}</span> },
               { key: "id", header: "ID", cell: (row) => <CopyId value={row.outputSchemaId} /> },
             ]}

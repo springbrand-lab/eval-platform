@@ -43,7 +43,7 @@ export function ResourcesPage() {
             onRowClick={(row) => void navigate({ to: "/resources/$bundleId", params: { bundleId: row.bundleId } })}
             empty={<EmptyState title="还没有 Bundle" action={<Button variant="primary" onClick={() => setCreating(true)}>新建 Bundle</Button>} />}
             columns={[
-              { key: "name", header: "名称", cell: (row) => <span className="font-medium">{row.name}</span>, sortValue: (row) => row.name },
+              { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span>, sortValue: (row) => row.name },
               { key: "description", header: "说明", cell: (row) => <span className="text-text-muted">{row.description}</span> },
               { key: "id", header: "ID", cell: (row) => <CopyId value={row.bundleId} /> },
             ]}

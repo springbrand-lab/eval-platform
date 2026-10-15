@@ -74,7 +74,7 @@ export function DataTable<T>({
   return (
     <div className="flex flex-col">
       {(searchText || toolbar) && (
-        <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
+        <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
           {searchText && (
             <div className="relative w-64">
               <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-text-muted" />
@@ -83,7 +83,7 @@ export function DataTable<T>({
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder={searchPlaceholder}
                 aria-label={searchPlaceholder}
-                className="h-8 w-full rounded-[var(--radius-control)] border border-border bg-surface pl-8 pr-2 text-[13px] focus:border-primary focus:outline-none"
+                className="h-8 w-full rounded-[var(--radius-control)] border border-input bg-surface pl-8 pr-2 text-[13px] text-text-strong placeholder:text-text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
               />
             </div>
           )}
@@ -96,18 +96,18 @@ export function DataTable<T>({
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-[13px]">
             <thead>
-              <tr className="border-b border-border bg-surface-muted text-left text-xs text-text-muted">
+              <tr className="border-b border-border text-left text-xs text-text-muted">
                 {selectable && (
-                  <th className="w-10 px-4 py-2">
-                    <input type="checkbox" aria-label="全选" checked={!!allSelected} onChange={toggleAll} className="accent-[var(--primary)]" />
+                  <th className="w-10 px-3 py-2">
+                    <input type="checkbox" aria-label="全选" checked={!!allSelected} onChange={toggleAll} className="cursor-pointer accent-[var(--primary)]" />
                   </th>
                 )}
                 {columns.map((column) => (
-                  <th key={column.key} className={cn("px-4 py-2 font-medium", column.align === "right" && "text-right", column.className)}>
+                  <th key={column.key} className={cn("h-9 whitespace-nowrap px-3 font-semibold", column.align === "right" && "text-right", column.className)}>
                     {column.sortValue ? (
                       <button
                         type="button"
-                        className="inline-flex items-center gap-1 hover:text-text"
+                        className="inline-flex items-center gap-1 hover:text-text-strong"
                         onClick={() => setSort((current) => current?.key === column.key
                           ? { key: column.key, desc: !current.desc } : { key: column.key, desc: false })}
                       >
@@ -126,15 +126,15 @@ export function DataTable<T>({
                   <tr
                     key={key}
                     onClick={onRowClick ? () => onRowClick(row) : undefined}
-                    className={cn("border-b border-border last:border-b-0", onRowClick && "cursor-pointer hover:bg-surface-muted/60")}
+                    className={cn("border-b border-border text-text last:border-b-0", onRowClick && "cursor-pointer hover:bg-surface-hover")}
                   >
                     {selectable && (
-                      <td className="px-4 py-2.5" onClick={(event) => event.stopPropagation()}>
-                        <input type="checkbox" aria-label="选择" checked={selected?.has(key) ?? false} onChange={() => toggle(key)} className="accent-[var(--primary)]" />
+                      <td className="px-3 py-2" onClick={(event) => event.stopPropagation()}>
+                        <input type="checkbox" aria-label="选择" checked={selected?.has(key) ?? false} onChange={() => toggle(key)} className="cursor-pointer accent-[var(--primary)]" />
                       </td>
                     )}
                     {columns.map((column) => (
-                      <td key={column.key} className={cn("px-4 py-2.5 align-middle", column.align === "right" && "text-right tabular", column.className)}>
+                      <td key={column.key} className={cn("h-11 px-3 py-2 align-middle", column.align === "right" && "text-right tabular", column.className)}>
                         {column.cell(row)}
                       </td>
                     ))}
@@ -146,7 +146,7 @@ export function DataTable<T>({
           {visible.length > shown.length && (
             <div className="flex items-center justify-center gap-3 border-t border-border py-3 text-[13px] text-text-muted">
               已显示 {shown.length} / {visible.length}
-              <button type="button" className="font-medium text-primary hover:underline" onClick={() => setLimit((value) => value + pageSize)}>
+              <button type="button" className="font-semibold text-link hover:underline" onClick={() => setLimit((value) => value + pageSize)}>
                 显示更多
               </button>
             </div>

@@ -15,6 +15,14 @@ export function formatNumber(value: number | null | undefined, digits: 0 | 2 = 0
   return (digits === 0 ? integer : decimal).format(value);
 }
 
+const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+
+/** Large counts such as tokens: 337,833 → 337.8K. */
+export function formatCompact(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  return Math.abs(value) < 10_000 ? integer.format(value) : compact.format(value);
+}
+
 export function formatPercent(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
   return `${(value * 100).toFixed(value === 1 || value === 0 ? 0 : 1)}%`;

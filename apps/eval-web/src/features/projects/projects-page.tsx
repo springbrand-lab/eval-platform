@@ -31,7 +31,7 @@ export function ProjectsPage() {
             empty={<EmptyState title="还没有 Project" description="先准备测试集、评分格式和 Agent，再新建 Project。"
               action={<Button variant="primary" onClick={() => void navigate({ to: "/projects/new" })}>新建 Project</Button>} />}
             columns={[
-              { key: "name", header: "名称", cell: (row) => <span className="font-medium">{row.name}</span>, sortValue: (row) => row.name },
+              { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span>, sortValue: (row) => row.name },
               { key: "description", header: "说明", cell: (row) => <span className="line-clamp-1 text-text-muted">{row.description || "—"}</span> },
               { key: "branch", header: "SP 分支", cell: (row) => <span className="font-mono text-xs">{row.sourceBranch}</span> },
               { key: "createdAt", header: "创建时间", cell: (row) => formatDateTime(row.createdAt), sortValue: (row) => row.createdAt },

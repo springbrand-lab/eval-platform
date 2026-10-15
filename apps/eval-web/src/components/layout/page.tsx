@@ -8,35 +8,41 @@ export interface Crumb {
   params?: Record<string, string>;
 }
 
-export function PageHeader({ title, description, crumbs, actions }: {
-  title: ReactNode; description?: ReactNode; crumbs?: readonly Crumb[]; actions?: ReactNode;
+/** Sticky page bar: breadcrumbs, title and actions above a hairline, as in Langfuse. */
+export function PageHeader({ title, description, crumbs, actions, meta }: {
+  title: ReactNode; description?: ReactNode; crumbs?: readonly Crumb[]; actions?: ReactNode; meta?: ReactNode;
 }) {
   useEffect(() => {
     if (typeof title === "string") document.title = `${title} · Eval`;
   }, [title]);
   return (
-    <header className="mb-5 flex flex-wrap items-end justify-between gap-4">
-      <div className="min-w-0">
-        {crumbs && crumbs.length > 0 && (
-          <nav aria-label="面包屑" className="mb-1.5 flex flex-wrap items-center gap-1 text-xs text-text-muted">
-            {crumbs.map((crumb, index) => (
-              <span key={index} className="inline-flex items-center gap-1">
-                {crumb.to
-                  ? <Link to={crumb.to} params={crumb.params as never} className="hover:text-text">{crumb.label}</Link>
-                  : <span>{crumb.label}</span>}
-                {index < crumbs.length - 1 && <ChevronRight className="size-3" />}
-              </span>
-            ))}
-          </nav>
-        )}
-        <h1 className="truncate text-xl font-semibold text-text">{title}</h1>
-        {description && <p className="mt-1 text-sm text-text-muted">{description}</p>}
+    <header className="sticky top-0 z-20 -mx-6 mb-5 border-b border-border bg-bg/90 px-6 py-3 backdrop-blur supports-[backdrop-filter]:bg-bg/75">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
+          {crumbs && crumbs.length > 0 && (
+            <nav aria-label="面包屑" className="mb-0.5 flex flex-wrap items-center gap-1 text-xs text-text-muted">
+              {crumbs.map((crumb, index) => (
+                <span key={index} className="inline-flex items-center gap-1">
+                  {crumb.to
+                    ? <Link to={crumb.to} params={crumb.params as never} className="hover:text-text-strong">{crumb.label}</Link>
+                    : <span>{crumb.label}</span>}
+                  <ChevronRight className="size-3 text-text-faint" />
+                </span>
+              ))}
+            </nav>
+          )}
+          <div className="flex min-w-0 items-center gap-2.5">
+            <h1 className="truncate text-lg font-semibold tracking-tight text-text-strong">{title}</h1>
+            {meta}
+          </div>
+          {description && <p className="mt-0.5 max-w-3xl text-[13px] text-text-muted">{description}</p>}
+        </div>
+        {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
-      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </header>
   );
 }
 
 export function Page({ children }: { children: ReactNode }) {
-  return <div className="mx-auto w-full max-w-[1440px] px-6 py-6">{children}</div>;
+  return <div className="mx-auto w-full max-w-[1600px] px-6 pb-10">{children}</div>;
 }

@@ -246,58 +246,60 @@ apps/eval-web/
 - **单条分数：** 在评估详情中显示分数 ID `eval-score:{evaluationId}`，并链接到对应的 session。
 - 链接都在新标签页打开（`target="_blank" rel="noopener"`）。在 takt 的 iframe 中也一样。
 
-## 7. 视觉设计
+## 7. 视觉设计（参考 Langfuse）
 
-定位：内部数据工具，以信息密度和可读性为先，保持克制、清晰、专业。
+定位：内部数据工具，信息密度优先。色彩与组件风格参考 Langfuse（`langfuse/langfuse` 的 `web/src/styles/globals.css`）。
 
-### 7.1 设计令牌（`styles/theme.css`，Tailwind v4 `@theme`）
+### 7.1 设计令牌（`styles/theme.css`）
 
-| 令牌 | 浅色 | 深色 | 用途 |
-| --- | --- | --- | --- |
-| `--color-bg` | `#F7F8FA` | `#0E1116` | 页面背景 |
-| `--color-surface` | `#FFFFFF` | `#161A21` | 卡片、表格、面板 |
-| `--color-surface-muted` | `#F1F3F6` | `#1C212A` | 表头、代码块、次级区域 |
-| `--color-border` | `#E3E6EB` | `#2A303B` | 分隔线、描边 |
-| `--color-text` | `#15181E` | `#E7EAF0` | 主文字 |
-| `--color-text-muted` | `#5F6775` | `#9AA3B2` | 次要文字、标签 |
-| `--color-primary` | `#3B5BDB` | `#748FFC` | 主操作、链接、选中态 |
-| `--color-success` | `#2B8A3E` | `#51CF66` | 成功、已同步 |
-| `--color-warning` | `#E67700` | `#FFA94D` | 进行中、重试中、计划已锁定 |
-| `--color-danger` | `#C92A2A` | `#FF6B6B` | 失败、删除 |
-| `--color-info` | `#1971C2` | `#4DABF7` | 排队、未开始 |
+- **中性灰为主：** 浅色用 zinc 灰阶，深色用完全中性的灰（饱和度 0，没有偏蓝）。
+- **主按钮：** 浅色下为近黑（zinc-900），深色下为近白（90%）。
+- **唯一的强调色：** 靛蓝，只用于链接、焦点环和选中态（浅色 `hsl(243 75% 59%)`，深色 `hsl(246 55% 70%)`）。
+- **深色层级：**
 
-- **字体：** 正文用 `Inter Variable`，数字使用等宽数字（`font-variant-numeric: tabular-nums`）。代码、ID 和 JSON 用 `Geist Mono Variable`。中文回退到系统字体（`PingFang SC`、`Microsoft YaHei`）。
-- **字号：** 正文 14px，表格 13px，页标题 20px，指标数字 28px。
-- **圆角：** 卡片 8px，按钮和输入框 6px，标签用胶囊形。
-- **间距：** 以 4px 为基数。页面左右内边距 24px，卡片之间间距 16px。
-- **阴影：** 只给浮层（弹窗、下拉、toast）使用。卡片用描边，不用阴影。
-- **深色模式：** 跟随系统设置，也可以手动切换，选择保存在 `localStorage`。嵌入 takt 时跟随系统设置，以后可以改为通过 URL 参数 `?theme=` 由 takt 指定。
+  | 层 | 亮度 |
+  | --- | --- |
+  | 侧边栏 | 4% |
+  | 页面 | 6% |
+  | 卡片 | 7.5% |
+  | 浅底（表头、分段控件） | 11.6% |
+  | 边框 | 16% |
 
-### 7.2 布局
+  正文用 76% 的灰，标题和数值用 91%，靠层级而不是纯白来拉开对比。
+- **状态色：** 成功、警告、危险、信息各用一对"浅底 + 深字"，深色下改为"暗底 + 亮字"，取值与 Langfuse 相同。
+- **字体：** Inter，等宽字体用 Geist Mono。字重只用 400 和 600。圆角为卡片 8px、控件 6px。
 
-- **左侧导航：** 宽 220px，可以折叠成 64px 的图标栏。
-- **右侧内容区：** 最大宽度 1440px，居中。
-- **页头：** 面包屑、页标题、主操作按钮（右对齐）。
-- **嵌入模式：** 隐藏品牌区和账户菜单，导航默认折叠，内容区占满宽度。
+令牌名：`bg`、`sidebar`、`surface`、`surface-muted`、`surface-hover`、`surface-code`、`border`、`border-strong`、`input`，`text-strong`、`text`、`text-secondary`、`text-muted`、`text-faint`，`primary`、`primary-fg`、`accent`、`accent-soft`、`link`，以及 `success`、`warning`、`danger`、`info` 和各自的 `-soft`。
 
-### 7.3 自建基础组件（`components/ui/`）
+### 7.2 布局与交互
+
+- **侧边栏：** 宽 224px，可以折叠成 56px。选中项用灰底加粗，不用彩色。底部是浅色、深色、跟随系统三段式主题切换。
+- **页头：** 吸顶，带底部分隔线。包含面包屑、标题、状态标签和操作区。
+- **页头操作：** 只放主要操作（主按钮放最右）。导出、删除等收进"⋯"菜单（`ActionMenu`），危险项标红并单独分组。
+- **长表单：** 底部固定操作栏，删除在左（描边危险样式），保存在右。
+- **选择方式：** 互斥选项用选项卡片（`RadioCard`）；范围、视图切换用分段控件（`Tabs`）。
+- **列表：** 表头不加底色，行悬停高亮，名称列加粗。
+- **指标卡：** 按屏宽 2/3/6 列排布，大数字用紧凑格式（如 338K），说明最多两行。
+- **进度：** 进行中的 Run 用分段进度条加图例，显示成功、进行中、排队、失败的数量。
+- **采样详情：** 用分段标签切换"评委结果 / 被测 Agent / 评委 Agent"，页头直接进入被测会话、评委会话和 Langfuse。
+- **深色模式：** 跟随系统变化。toast 和观察页的会话渲染（cloud-os）跟随页面主题。
+
+### 7.3 基础组件（`components/ui/`）
 
 | 组件 | 说明 |
 | --- | --- |
-| `Button` | 主要、次要、幽灵、危险四种样式，支持加载状态 |
-| `Input`、`Textarea`、`Select`、`Checkbox`、`Switch`、`NumberInput` | 与 `FormField`（标签 + 帮助说明 + 错误提示）配合使用 |
-| `Dialog`、`ConfirmDialog`、`Drawer` | 基于原生 `<dialog>`，统一管理焦点 |
-| `DataTable` | 列定义、本地排序和筛选、行选择、空状态；超过 500 行时虚拟滚动 |
-| `StatusBadge` | 状态统一映射：`queued` 蓝、`running`/`retrying` 橙、`succeeded` 绿、`failed` 红、`cancelled` 灰 |
-| `MetricCard`、`Stat` | 指标数字与对比 |
-| `ScoreBar` | 分数条：按评分格式中的最小值和最大值显示 |
-| `JsonViewer` | 可折叠、可复制，长字符串截断后可展开 |
-| `CodeBlock` | 等宽字体、可复制，大文本按需渲染 |
-| `FileDropzone` | 支持多文件和目录拖入，显示大小校验结果 |
-| `Tabs`、`Breadcrumb`、`EmptyState`、`Skeleton`、`CopyId` | 其他基础组件 |
-| `Stepper` | 新建 Project 等分步表单 |
+| `Button` | 主要、次要、幽灵、危险、描边危险五种样式；`xs`、`sm`、`md`、图标四种尺寸 |
+| `Input`、`Textarea`、`Select`、`Checkbox`、`RadioCard`、`Field` | 表单控件 |
+| `Dialog`、`ConfirmDialog` | 基于原生 `<dialog>` |
+| `ActionMenu` | 下拉菜单 |
+| `DataTable` | 本地搜索、排序、选择，每次显示 200 行，可"显示更多" |
+| `StatusBadge`、`Badge` | 状态和标签 |
+| `MetricCard`、`ScoreBar`、`ProgressBar` | 指标、分数和进度 |
+| `JsonViewer`、`CodeBlock`、`CopyId` | 数据展示 |
+| `Tabs`、`Stepper` | 分段控件和步骤条 |
+| `FileDropzone`、`EmptyState`、`Skeleton`、`Notice` | 上传、空状态和提示 |
 
-可访问性：所有交互都能用键盘完成，焦点要清晰可见，颜色对比度达到 WCAG AA。状态不能只靠颜色表达，`StatusBadge` 同时显示文字。
+可访问性：交互可以全部用键盘完成，焦点环用强调色；状态同时显示文字和颜色。
 
 ## 8. 配置与环境
 

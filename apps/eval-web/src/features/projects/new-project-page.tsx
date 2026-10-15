@@ -13,7 +13,7 @@ import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/car
 import { DataTable } from "@/components/ui/data-table";
 import { Stepper } from "@/components/ui/data-display";
 import { LoadingBlock, Notice } from "@/components/ui/feedback";
-import { Checkbox, Field, Input, Select } from "@/components/ui/form";
+import { Checkbox, Field, Input, RadioCard, Select } from "@/components/ui/form";
 import { dataTitle } from "@/features/datasets/dataset-detail-page";
 import { describeError } from "@/lib/errors";
 import { newIdempotencyKey } from "@/lib/files";
@@ -168,7 +168,7 @@ export function NewProjectPage() {
   return (
     <Page>
       <PageHeader title="新建 Project" crumbs={[{ label: "Project", to: "/projects" }]} />
-      <div className="mb-5"><Stepper steps={STEPS} current={step} /></div>
+      <div className="mb-5"><Stepper steps={STEPS} current={step} onSelect={setStep} /></div>
 
       {step === 0 && (
         <div className="flex flex-col gap-4">
@@ -189,16 +189,16 @@ export function NewProjectPage() {
                   return (
                     <div key={dataset.datasetId} className="px-4 py-3">
                       <div className="flex items-center justify-between gap-4">
-                        <Checkbox label={<span className="font-medium">{dataset.name}</span>} checked={!!choice}
+                        <Checkbox label={<span className="font-semibold">{dataset.name}</span>} checked={!!choice}
                           onChange={(event) => toggleDataset(dataset.datasetId, event.target.checked)} />
                         {choice && (
                           <div className="flex items-center gap-3 text-[13px]">
                             <label className="inline-flex items-center gap-1.5">
-                              <input type="radio" checked={!choice.dataIds} onChange={() => setChoice(dataset.datasetId, null)} className="accent-[var(--primary)]" />
+                              <input type="radio" checked={!choice.dataIds} onChange={() => setChoice(dataset.datasetId, null)} className="cursor-pointer accent-[var(--primary)]" />
                               全部用例（{list.length}）
                             </label>
                             <label className="inline-flex items-center gap-1.5">
-                              <input type="radio" checked={!!choice.dataIds} onChange={() => setChoice(dataset.datasetId, new Set(list.map((item) => item.dataId)))} className="accent-[var(--primary)]" />
+                              <input type="radio" checked={!!choice.dataIds} onChange={() => setChoice(dataset.datasetId, new Set(list.map((item) => item.dataId)))} className="cursor-pointer accent-[var(--primary)]" />
                               部分用例
                             </label>
                           </div>
@@ -314,17 +314,12 @@ export function NewProjectPage() {
             </CardBody>
           </Card>
           <Card>
-            <CardHeader title="首个 Run" />
-            <CardBody className="flex flex-col gap-2 text-sm">
-              <label className="inline-flex items-center gap-2">
-                <input type="radio" checked={draft.firstRun === "pipeline"} disabled={!draft.withEvaluation}
-                  onChange={() => update({ firstRun: "pipeline" })} className="accent-[var(--primary)]" />
-                执行 + 评估（推荐）
-              </label>
-              <label className="inline-flex items-center gap-2">
-                <input type="radio" checked={draft.firstRun === "execution"} onChange={() => update({ firstRun: "execution" })} className="accent-[var(--primary)]" />
-                只执行
-              </label>
+            <CardHeader title="首个 Run" description="创建后立即开始" />
+            <CardBody role="radiogroup" className="grid gap-3 md:grid-cols-2">
+              <RadioCard checked={draft.firstRun === "pipeline"} disabled={!draft.withEvaluation} onSelect={() => update({ firstRun: "pipeline" })}
+                title="执行 + 评估（推荐）" description="每个采样执行成功后由评委打分" />
+              <RadioCard checked={draft.firstRun === "execution"} onSelect={() => update({ firstRun: "execution" })}
+                title="只执行" description="先看产物，之后再单独发起评估" />
             </CardBody>
           </Card>
           <Card>
@@ -344,7 +339,7 @@ export function NewProjectPage() {
         </div>
       )}
 
-      <div className="mt-5 flex justify-between">
+      <div className="sticky bottom-0 -mx-6 mt-5 flex justify-between border-t border-border bg-bg/90 px-6 py-3 backdrop-blur">
         <Button disabled={step === 0} onClick={() => setStep(step - 1)}>上一步</Button>
         {step < STEPS.length - 1
           ? <Button variant="primary" disabled={!stepValid[step]} onClick={() => setStep(step + 1)}>下一步</Button>

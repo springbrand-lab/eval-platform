@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate } from "@tanstack/react-router";
-import { ExternalLink, RefreshCw, Square } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
+import { RefreshCw, Square } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { getProjectOverview, metricKeys } from "@/api-sdk/metrics-api";
@@ -10,9 +10,9 @@ import type { EvaluationRecord } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/card";
+import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
-import { CopyId, ScoreBar } from "@/components/ui/data-display";
+import { CopyId, ProgressBar, ScoreBar } from "@/components/ui/data-display";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
 import { formatDateTime, OPERATION_LABELS } from "@/lib/format";
@@ -69,24 +69,43 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
       <PageHeader
         title={`Run ${runId.slice(0, 8)}`}
         crumbs={[{ label: "Project", to: "/projects" }, { label: view.data?.project.name ?? "Project", to: "/projects/$projectId", params: { projectId } }]}
+        meta={snapshot && <><StatusBadge status={snapshot.status} />{active && <span className="text-[13px] text-text-muted">{runPhaseLabel(snapshot)}</span>}</>}
         actions={(
           <>
-            {unsynced > 0 && <Button icon={<RefreshCw className="size-4" />} loading={sync.isPending} onClick={() => sync.mutate()}>补同步 {unsynced} 个分数</Button>}
-            {active && !snapshot?.stopRequested && <Button variant="danger" icon={<Square className="size-4" />} onClick={() => setStopping(true)}>停止</Button>}
+            {unsynced > 0 && <Button icon={<RefreshCw />} loading={sync.isPending} onClick={() => sync.mutate()}>补同步 {unsynced} 个分数</Button>}
+            {active && !snapshot?.stopRequested && <Button variant="outline-danger" icon={<Square />} onClick={() => setStopping(true)}>停止</Button>}
           </>
         )}
       />
       {run.isPending ? <LoadingBlock /> : run.error ? <ErrorBlock error={run.error} /> : snapshot && (
         <div className="flex flex-col gap-5">
           <Card>
-            <CardBody>
-              <DescriptionList items={[
-                { label: "状态", value: <span className="flex items-center gap-2"><StatusBadge status={snapshot.status} />{active && <span className="text-text-muted">{runPhaseLabel(snapshot)}</span>}</span> },
+            <CardBody className="grid gap-x-8 gap-y-3 sm:grid-cols-2 xl:grid-cols-4">
+              {[
                 { label: "操作", value: OPERATION_LABELS[snapshot.operation] },
-                { label: "Eval SP commit", value: <span className="font-mono text-xs">{snapshot.sourceCommit}</span> },
                 { label: "采样 / 评估", value: `${snapshot.samplingIds.length} / ${snapshot.evaluationIds.length}` },
-                { label: "Run ID", value: <CopyId value={snapshot.runId} length={36} /> },
-              ]} />
+                { label: "Eval SP commit", value: <CopyId value={snapshot.sourceCommit} length={10} /> },
+                { label: "Run ID", value: <CopyId value={snapshot.runId} length={13} /> },
+              ].map((item) => (
+                <div key={item.label} className="min-w-0">
+                  <p className="text-xs text-text-muted">{item.label}</p>
+                  <div className="mt-1 text-[13px] font-semibold text-text-strong">{item.value}</div>
+                </div>
+              ))}
+              {overview.data && (
+                <div className="sm:col-span-2 xl:col-span-4">
+                  <ProgressBar
+                    total={overview.data.summary.counts.samplings + overview.data.summary.counts.evaluations}
+                    segments={[
+                      { label: "执行成功", value: overview.data.summary.execution.statuses.succeeded, tone: "success" },
+                      { label: "评估成功", value: overview.data.summary.evaluation.statuses.succeeded, tone: "success" },
+                      { label: "进行中", value: (["running", "starting", "retrying"] as const).reduce((sum, key) => sum + overview.data.summary.execution.statuses[key] + overview.data.summary.evaluation.statuses[key], 0), tone: "warning" },
+                      { label: "排队", value: overview.data.summary.execution.statuses.queued + overview.data.summary.evaluation.statuses.queued, tone: "neutral" },
+                      { label: "失败", value: overview.data.summary.execution.statuses.failed + overview.data.summary.evaluation.statuses.failed, tone: "danger" },
+                    ]}
+                  />
+                </div>
+              )}
             </CardBody>
           </Card>
           {snapshot.stopRequested && !isFinished(snapshot.status) && <Notice tone="warning">正在停止：正在中断已运行的 Agent，并收集已产生的结果。</Notice>}
@@ -110,13 +129,10 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
               />
             )}
           </Card>
-          <p className="text-xs text-text-muted">
+          <p className="text-xs text-text-faint">
             最后更新 {formatDateTime(new Date(run.dataUpdatedAt).toISOString())}
             {active && "，每 5 秒自动刷新"}
           </p>
-          <Link to="/projects/$projectId" params={{ projectId }} className="inline-flex items-center gap-1 text-sm text-primary hover:underline">
-            返回 Project <ExternalLink className="size-3.5" />
-          </Link>
         </div>
       )}
       <ConfirmDialog open={stopping} onClose={() => setStopping(false)} onConfirm={() => stop.mutate()} loading={stop.isPending} danger

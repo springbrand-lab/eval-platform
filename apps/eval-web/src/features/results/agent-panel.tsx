@@ -12,7 +12,7 @@ export function LangfuseLink({ chatId, label = "Langfuse 会话" }: { chatId: st
   const url = langfuseSessionUrl(chatId);
   if (!url) return null;
   return (
-    <a href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[13px] font-medium text-primary hover:underline">
+    <a href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[13px] font-semibold text-link hover:underline">
       {label}<ExternalLink className="size-3.5" />
     </a>
   );
@@ -33,7 +33,7 @@ export function AgentPanel({ title, agent, observe }: {
           <>
             <LangfuseLink chatId={agent.chatId} />
             {observe && agent.chatId && (
-              <Link to={observe.to} params={observe.params as never} className="inline-flex items-center gap-1 text-[13px] font-medium text-primary hover:underline">
+              <Link to={observe.to} params={observe.params as never} className="inline-flex items-center gap-1 text-[13px] font-semibold text-link hover:underline">
                 <Eye className="size-3.5" />查看会话
               </Link>
             )}
@@ -61,7 +61,7 @@ export function AgentPanel({ title, agent, observe }: {
         </div>
         {agent.attempts.items.length > 0 && (
           <div>
-            <p className="mb-2 text-xs font-medium text-text-muted">尝试（{agent.attempts.count}，重启 {agent.attempts.restarts} 次）</p>
+            <p className="mb-2 text-xs font-semibold text-text-muted">尝试（{agent.attempts.count}，重启 {agent.attempts.restarts} 次）</p>
             <div className="rounded-[var(--radius-control)] border border-border">
               <DataTable
                 rows={agent.attempts.items}
@@ -79,7 +79,7 @@ export function AgentPanel({ title, agent, observe }: {
         )}
         {agent.artifacts.length > 0 && (
           <div>
-            <p className="mb-2 text-xs font-medium text-text-muted">产物（{agent.artifacts.length}）</p>
+            <p className="mb-2 text-xs font-semibold text-text-muted">产物（{agent.artifacts.length}）</p>
             <ul className="flex flex-col gap-1 font-mono text-[13px]">
               {agent.artifacts.map((artifact) => (
                 <li key={artifact.artifactId} className="flex items-center gap-2">

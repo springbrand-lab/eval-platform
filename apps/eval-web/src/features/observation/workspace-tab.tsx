@@ -34,7 +34,7 @@ function TreeNode({ node, depth, selected, onSelect }: {
   }
   return (
     <button type="button" onClick={() => onSelect(node)} style={{ paddingLeft: depth * 12 + 26 }}
-      className={cn("flex w-full items-center gap-1.5 py-1 pr-2 text-left text-[13px] hover:bg-surface-muted", selected === node.path && "bg-primary-soft text-primary")}>
+      className={cn("flex w-full items-center gap-1.5 py-1 pr-2 text-left text-[13px] hover:bg-surface-muted", selected === node.path && "bg-accent-soft text-link")}>
       <File className="size-3.5 shrink-0 text-text-muted" />
       <span className="truncate">{node.name}</span>
     </button>

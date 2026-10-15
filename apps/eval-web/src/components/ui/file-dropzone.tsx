@@ -60,14 +60,14 @@ export function FileDropzone({ onFiles, multiple = true, directory = false, acce
       onDrop={(event) => void handleDrop(event)}
       className={cn(
         "flex flex-col items-center justify-center gap-2 rounded-[var(--radius-card)] border border-dashed px-6 py-8 text-center",
-        over ? "border-primary bg-primary-soft" : "border-border bg-surface-muted/50",
+        over ? "border-accent bg-accent-soft" : "border-border-strong bg-surface-muted/40 hover:bg-surface-muted/70",
         className,
       )}
     >
-      <Upload className="size-6 text-text-muted" />
-      <p className="text-sm text-text">
+      <Upload className="size-5 text-text-muted" />
+      <p className="text-[13px] text-text">
         拖入{directory ? "文件或文件夹" : "文件"}，或
-        <button type="button" className="ml-1 font-medium text-primary hover:underline" onClick={() => input.current?.click()}>选择文件</button>
+        <button type="button" className="ml-1 font-semibold text-link hover:underline" onClick={() => input.current?.click()}>选择文件</button>
       </p>
       {hint && <p className="text-xs text-text-muted">{hint}</p>}
       <input

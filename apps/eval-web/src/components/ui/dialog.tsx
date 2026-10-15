@@ -35,23 +35,23 @@ export function Dialog({ open, onClose, title, description, children, footer, si
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClick={(event) => { if (event.target === ref.current) onClose(); }}
       className={cn(
-        "m-auto w-[calc(100%-2rem)] rounded-[var(--radius-card)] border border-border bg-surface p-0 text-text shadow-xl backdrop:bg-black/40",
+        "m-auto w-[calc(100%-2rem)] rounded-xl border border-border bg-surface p-0 text-text shadow-[var(--shadow)] backdrop:bg-[var(--overlay)] backdrop:backdrop-blur-[1px]",
         widths[size],
       )}
     >
       {open && (
         <div className="flex max-h-[85vh] flex-col">
-          <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+          <div className="flex items-start justify-between gap-4 px-5 pt-5 pb-3">
             <div>
-              <h2 className="text-base font-semibold">{title}</h2>
-              {description && <p className="mt-1 text-sm text-text-muted">{description}</p>}
+              <h2 className="text-base font-semibold text-text-strong">{title}</h2>
+              {description && <p className="mt-1 text-[13px] leading-relaxed text-text-muted">{description}</p>}
             </div>
-            <button type="button" aria-label="关闭" onClick={onClose} className="rounded p-1 text-text-muted hover:bg-surface-muted">
+            <button type="button" aria-label="关闭" onClick={onClose} className="-mr-1 rounded-md p-1 text-text-muted hover:bg-surface-muted hover:text-text-strong">
               <X className="size-4" />
             </button>
           </div>
-          {children && <div className="overflow-y-auto px-5 py-4">{children}</div>}
-          {footer && <div className="flex justify-end gap-2 border-t border-border px-5 py-3">{footer}</div>}
+          {children && <div className="overflow-y-auto px-5 pb-4">{children}</div>}
+          {footer && <div className="flex justify-end gap-2 border-t border-border bg-surface-muted/40 px-5 py-3">{footer}</div>}
         </div>
       )}
     </dialog>
@@ -76,12 +76,12 @@ export function ConfirmDialog({ open, onClose, onConfirm, title, description, co
       size="sm"
       footer={(
         <>
-          <Button onClick={onClose}>取消</Button>
-          <Button variant={danger ? "danger" : "primary"} loading={loading} onClick={onConfirm}>{confirmLabel}</Button>
+          <Button size="sm" onClick={onClose}>取消</Button>
+          <Button size="sm" variant={danger ? "danger" : "primary"} loading={loading} onClick={onConfirm}>{confirmLabel}</Button>
         </>
       )}
     >
-      <div className="text-sm text-text-muted">{description}</div>
+      <div className="text-[13px] leading-relaxed text-text-secondary">{description}</div>
     </Dialog>
   );
 }

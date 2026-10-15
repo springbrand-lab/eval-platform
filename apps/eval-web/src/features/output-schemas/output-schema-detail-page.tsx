@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { Trash2 } from "lucide-react";
+import { ActionMenu } from "@/components/ui/menu";
 import { useState } from "react";
 import { toast } from "sonner";
 import { deleteOutputSchema, getOutputSchema, outputSchemaKeys, updateOutputSchema } from "@/api-sdk/output-schemas-api";
@@ -42,7 +43,7 @@ export function OutputSchemaDetailPage({ outputSchemaId }: { outputSchemaId: str
       <PageHeader
         title={data?.name ?? "评分格式"}
         crumbs={[{ label: "评分格式", to: "/output-schemas" }]}
-        actions={<Button variant="ghost" className="text-danger" icon={<Trash2 className="size-4" />} onClick={() => setDeleting(true)}>删除</Button>}
+        actions={<ActionMenu items={[{ label: "删除评分格式", icon: <Trash2 />, danger: true, onSelect: () => setDeleting(true) }]} />}
       />
       {record.isPending ? <LoadingBlock /> : record.error ? <ErrorBlock error={record.error} /> : form && (
         <div className="grid gap-4 lg:grid-cols-[360px_1fr]">

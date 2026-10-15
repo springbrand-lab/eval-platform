@@ -9,8 +9,9 @@ import { Page, PageHeader } from "@/components/layout/page";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
+import { Tabs } from "@/components/ui/data-display";
 import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
-import { Checkbox, Textarea } from "@/components/ui/form";
+import { Checkbox, RadioCard, Textarea } from "@/components/ui/form";
 import { dataTitle } from "@/features/datasets/dataset-detail-page";
 import { ApiError } from "@/api-sdk/client";
 import { describeError } from "@/lib/errors";
@@ -82,32 +83,26 @@ export function NewRunPage({ projectId }: { projectId: string }) {
           {view.data!.currentRun && <Notice tone="warning">当前还有未结束的 Run，结束后才能提交新的 Run。</Notice>}
           <Card>
             <CardHeader title="1. 操作" />
-            <CardBody className="flex flex-col gap-2 text-sm">
-              {(["pipeline", "execution", "evaluation"] as const).map((value) => (
-                <label key={value} className="flex items-start gap-2">
-                  <input type="radio" className="mt-1 accent-[var(--primary)]" checked={operation === value}
-                    disabled={value !== "execution" && !hasPlan}
-                    onChange={() => { setOperation(value); reset(); if (value === "evaluation" && scope === "samples") setScope("all"); }} />
-                  <span>
-                    <span className="font-medium">{OPERATION_LABELS[value]}</span>
-                    <span className="block text-text-muted">{OPERATION_HELP[value]}</span>
-                  </span>
-                </label>
-              ))}
-              {!hasPlan && <p className="text-text-muted">还没有评估计划，只能选择「只执行」。</p>}
+            <CardBody className="flex flex-col gap-3">
+              <div role="radiogroup" className="grid gap-3 lg:grid-cols-3">
+                {(["pipeline", "execution", "evaluation"] as const).map((value) => (
+                  <RadioCard key={value} checked={operation === value} disabled={value !== "execution" && !hasPlan}
+                    title={OPERATION_LABELS[value]} description={OPERATION_HELP[value]}
+                    onSelect={() => { setOperation(value); reset(); if (value === "evaluation" && scope === "samples") setScope("all"); }} />
+                ))}
+              </div>
+              {!hasPlan && <p className="text-[13px] text-text-muted">还没有评估计划，只能选择「只执行」。</p>}
             </CardBody>
           </Card>
           <Card>
             <CardHeader title="2. 范围" />
             <CardBody className="flex flex-col gap-3 text-sm">
-              <div className="flex flex-wrap gap-4">
-                {([["all", "全部用例"], ["datasets", "按测试集"], ["samples", "按用例"], ["samplings", "按采样 ID"]] as const).map(([value, label]) => (
-                  <label key={value} className="inline-flex items-center gap-1.5">
-                    <input type="radio" className="accent-[var(--primary)]" checked={scope === value} onChange={() => { setScope(value); reset(); }} />
-                    {label}
-                  </label>
-                ))}
-              </div>
+              <Tabs<Scope> value={scope} onChange={(value) => { setScope(value); reset(); }} tabs={[
+                { value: "all", label: "全部用例" },
+                { value: "datasets", label: "按测试集" },
+                ...(operation === "evaluation" ? [] : [{ value: "samples" as const, label: "按用例" }]),
+                { value: "samplings", label: "按采样 ID" },
+              ]} />
               {scope === "datasets" && (
                 <div className="flex flex-col gap-2">
                   {view.data!.datasets.map((dataset) => (

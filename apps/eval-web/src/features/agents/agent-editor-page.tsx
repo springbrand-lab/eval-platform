@@ -69,7 +69,7 @@ function AgentForm({ initial, onSaved }: { initial?: AgentConfig; onSaved: (conf
     <div className="flex flex-col gap-4">
       {frozen && (
         <Notice tone="warning">
-          <span className="inline-flex items-center gap-1.5 font-medium"><Lock className="size-4" />这是某个 Project 的冻结副本</span>
+          <span className="inline-flex items-center gap-1.5 font-semibold"><Lock className="size-4" />这是某个 Project 的冻结副本</span>
           ，只能查看，不能修改或删除。
         </Notice>
       )}
@@ -96,11 +96,9 @@ function AgentForm({ initial, onSaved }: { initial?: AgentConfig; onSaved: (conf
         </CardBody>
       </Card>
       {!frozen && (
-        <div className="flex items-center justify-between">
-          {initial ? (
-            <Button variant="ghost" icon={<Trash2 className="size-4" />} className="text-danger" onClick={() => setDeleting(true)}>删除</Button>
-          ) : <span />}
-          <Button variant="primary" disabled={!valid} loading={save.isPending} onClick={() => save.mutate()}>{initial ? "保存" : "创建"}</Button>
+        <div className="sticky bottom-0 -mx-6 flex items-center justify-between gap-3 border-t border-border bg-bg/90 px-6 py-3 backdrop-blur">
+          {initial ? <Button variant="outline-danger" icon={<Trash2 />} onClick={() => setDeleting(true)}>删除 Agent</Button> : <span />}
+          <Button variant="primary" disabled={!valid} loading={save.isPending} onClick={() => save.mutate()}>{initial ? "保存修改" : "创建 Agent"}</Button>
         </div>
       )}
       <ConfirmDialog

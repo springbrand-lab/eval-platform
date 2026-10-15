@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ClipboardCheck, Lock, Play, Square, Trash2 } from "lucide-react";
+import { ArrowRight, ClipboardCheck, Lock, Play, Square, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { getProjectOverview, metricKeys } from "@/api-sdk/metrics-api";
@@ -10,11 +10,12 @@ import type { ProjectView } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/card";
+import { Card, CardBody, CardHeader, DescriptionList, SectionLabel } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
-import { CopyId } from "@/components/ui/data-display";
+import { CopyId, ProgressBar, ScoreBar } from "@/components/ui/data-display";
 import { ConfirmDialog } from "@/components/ui/dialog";
-import { ErrorBlock, LoadingBlock, Notice, Spinner } from "@/components/ui/feedback";
+import { EmptyState, ErrorBlock, LoadingBlock, Spinner } from "@/components/ui/feedback";
+import { ActionMenu } from "@/components/ui/menu";
 import { formatDateTime, formatDuration, formatNumber, formatPercent, OPERATION_LABELS } from "@/lib/format";
 import { scoreField, SummaryCards } from "@/features/metrics/summary";
 import { runPhaseLabel } from "@/features/runs/run-status";
@@ -25,6 +26,12 @@ function CurrentRunBanner({ projectId }: { projectId: string }) {
   const current = useCurrentRun(projectId);
   const runId = current.data?.run?.runId;
   const run = useRun(projectId, runId);
+  const overview = useQuery({
+    queryKey: metricKeys.project(projectId, runId ? [runId] : []),
+    queryFn: ({ signal }) => getProjectOverview(projectId, [runId!], signal),
+    enabled: !!runId,
+    refetchInterval: 5_000,
+  });
   const [stopping, setStopping] = useState(false);
   const wasActive = useRef(false);
   // When the current Run finishes, refresh the Project and its metrics once.
@@ -46,59 +53,96 @@ function CurrentRunBanner({ projectId }: { projectId: string }) {
   });
   if (!runId) return null;
   const snapshot = run.data?.run;
+  const summary = overview.data?.summary;
+  const execution = summary?.execution.statuses;
+  const evaluation = summary?.evaluation.statuses;
   return (
-    <Notice tone="warning">
-      <div className="flex flex-wrap items-center gap-3">
-        <Spinner className="text-warning" />
-        <span className="font-medium">{snapshot ? runPhaseLabel(snapshot) : "运行中"}</span>
-        {snapshot && <span className="text-text-muted">{OPERATION_LABELS[snapshot.operation]} · {snapshot.samplingIds.length} 个采样 · {snapshot.evaluationIds.length} 个评估</span>}
-        <Link to="/projects/$projectId/runs/$runId" params={{ projectId, runId }} className="font-medium text-primary hover:underline">查看进度</Link>
-        {!current.data?.run?.stopRequested && (
-          <Button size="sm" variant="ghost" className="ml-auto text-danger" icon={<Square className="size-3.5" />} onClick={() => setStopping(true)}>停止</Button>
+    <Card className="border-warning/30">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3">
+        <div className="flex items-center gap-2.5">
+          <Spinner className="text-warning" />
+          <span className="text-sm font-semibold text-text-strong">{snapshot ? runPhaseLabel(snapshot) : "运行中"}</span>
+          {snapshot && <span className="text-[13px] text-text-muted">{OPERATION_LABELS[snapshot.operation]}</span>}
+        </div>
+        {execution && evaluation && (
+          <div className="min-w-64 flex-1">
+            <ProgressBar
+              total={summary.counts.samplings + summary.counts.evaluations}
+              segments={[
+                { label: "执行成功", value: execution.succeeded, tone: "success" },
+                { label: "评估成功", value: evaluation.succeeded, tone: "success" },
+                { label: "进行中", value: execution.running + execution.starting + execution.retrying + evaluation.running + evaluation.starting + evaluation.retrying, tone: "warning" },
+                { label: "排队", value: execution.queued + evaluation.queued, tone: "neutral" },
+                { label: "失败", value: execution.failed + evaluation.failed, tone: "danger" },
+              ]}
+            />
+          </div>
         )}
+        <div className="ml-auto flex items-center gap-2">
+          <Link to="/projects/$projectId/runs/$runId" params={{ projectId, runId }}>
+            <Button size="sm" icon={<ArrowRight />}>查看进度</Button>
+          </Link>
+          {!current.data?.run?.stopRequested && (
+            <Button size="sm" variant="outline-danger" icon={<Square />} onClick={() => setStopping(true)}>停止</Button>
+          )}
+        </div>
       </div>
       <ConfirmDialog open={stopping} onClose={() => setStopping(false)} onConfirm={() => stop.mutate()} loading={stop.isPending} danger
         title="停止 Run" description="已在执行的 Agent 会被中断，未开始的采样和评估不再执行。已完成的结果会保留。" confirmLabel="停止" />
-    </Notice>
+    </Card>
   );
 }
 
 function PlanCard({ view }: { view: ProjectView }) {
   const execution = view.execution;
   const evaluation = view.evaluation;
+  const projectId = view.project.projectId;
   return (
     <Card>
-      <CardHeader title="计划" actions={(
-        <Link to="/projects/$projectId/evaluation-plan" params={{ projectId: view.project.projectId }} className="text-[13px] font-medium text-primary hover:underline">
-          {evaluation ? (evaluation.lockedAt ? "查看评估计划" : "修改评估计划") : "填写评估计划"}
-        </Link>
-      )} />
+      <CardHeader title="计划" description="执行计划创建后固定；评估计划在首个评估 Run 之后锁定" />
       <CardBody className="grid gap-6 md:grid-cols-2">
         <div>
-          <p className="mb-2 text-xs font-medium text-text-muted">执行计划（创建后固定）</p>
+          <SectionLabel>执行</SectionLabel>
           <DescriptionList items={[
             { label: "被测 Agent", value: execution.subjectAgentConfig.name },
             { label: "执行并发", value: execution.executionConcurrency },
             { label: "重试", value: `最多 ${execution.retryPolicy.maxRestarts} 次` },
-            { label: "超时", value: execution.harness.runtime?.timeoutMs ? formatDuration(execution.harness.runtime.timeoutMs) : "默认" },
+            { label: "单次超时", value: execution.harness.runtime?.timeoutMs ? formatDuration(execution.harness.runtime.timeoutMs) : "默认" },
           ]} />
         </div>
         <div>
-          <p className="mb-2 flex items-center gap-2 text-xs font-medium text-text-muted">
-            评估计划
-            {evaluation?.lockedAt && <Badge tone="warning"><Lock className="size-3" />已锁定</Badge>}
-          </p>
+          <SectionLabel actions={(
+            <Link to="/projects/$projectId/evaluation-plan" params={{ projectId }} className="text-xs font-semibold text-link hover:underline">
+              {evaluation ? (evaluation.lockedAt ? "查看" : "修改") : "填写"}
+            </Link>
+          )}>
+            <span className="inline-flex items-center gap-2">评估{evaluation?.lockedAt && <Badge tone="neutral"><Lock className="size-3" />已锁定</Badge>}</span>
+          </SectionLabel>
           {evaluation ? (
             <DescriptionList items={[
               { label: "评委 Agent", value: evaluation.plan.evaluatorAgentConfig.name },
               { label: "评估并发", value: evaluation.plan.evaluationConcurrency },
-              { label: "评分格式", value: <CopyId value={evaluation.plan.outputSchema.outputSchemaId} /> },
+              { label: "评分格式", value: <Link to="/output-schemas/$outputSchemaId" params={{ outputSchemaId: evaluation.plan.outputSchema.outputSchemaId }} className="text-link hover:underline">查看</Link> },
               { label: "锁定时间", value: formatDateTime(evaluation.lockedAt) },
             ]} />
-          ) : <p className="text-sm text-text-muted">还没有评估计划，只能执行，不能评估。</p>}
+          ) : <p className="text-[13px] text-text-muted">还没有评估计划，只能执行，不能评估。</p>}
         </div>
       </CardBody>
     </Card>
+  );
+}
+
+function RunRow({ projectId, runId }: { projectId: string; runId: string }) {
+  const run = useRun(projectId, runId);
+  const snapshot = run.data?.run;
+  return (
+    <Link to="/projects/$projectId/runs/$runId" params={{ projectId, runId }}
+      className="flex items-center gap-4 border-b border-border px-4 py-2.5 text-[13px] last:border-b-0 hover:bg-surface-hover">
+      {snapshot ? <StatusBadge status={snapshot.status} /> : <Spinner />}
+      <span className="w-24 font-semibold text-text-strong">{snapshot ? OPERATION_LABELS[snapshot.operation] : "—"}</span>
+      <span className="text-text-muted">{snapshot ? `${snapshot.samplingIds.length} 个采样 · ${snapshot.evaluationIds.length} 个评估` : ""}</span>
+      <span className="ml-auto font-mono text-xs text-text-faint">{runId.slice(0, 8)}</span>
+    </Link>
   );
 }
 
@@ -121,19 +165,21 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
     },
   });
   const project = view.data?.project;
+  const busy = !!view.data?.currentRun;
   return (
     <Page>
       <PageHeader
         title={project?.name ?? "Project"}
         description={project?.description}
         crumbs={[{ label: "Project", to: "/projects" }]}
+        meta={project && <Badge>{project.sourceBranch}</Badge>}
         actions={(
           <>
-            <Button variant="primary" icon={<Play className="size-4" />} disabled={!!view.data?.currentRun}
-              title={view.data?.currentRun ? "当前 Run 结束后才能发起新的 Run" : undefined}
+            <Button icon={<ClipboardCheck />} onClick={() => void navigate({ to: "/projects/$projectId/evaluation-plan", params: { projectId } })}>评估计划</Button>
+            <Button variant="primary" icon={<Play />} disabled={busy}
+              title={busy ? "当前 Run 结束后才能发起新的 Run" : undefined}
               onClick={() => void navigate({ to: "/projects/$projectId/runs/new", params: { projectId } })}>发起 Run</Button>
-            <Button icon={<ClipboardCheck className="size-4" />} onClick={() => void navigate({ to: "/projects/$projectId/evaluation-plan", params: { projectId } })}>评估计划</Button>
-            <Button variant="ghost" className="text-danger" icon={<Trash2 className="size-4" />} onClick={() => setDeleting(true)}>删除</Button>
+            <ActionMenu items={[{ label: "删除 Project", icon: <Trash2 />, danger: true, disabled: busy, onSelect: () => setDeleting(true) }]} />
           </>
         )}
       />
@@ -148,44 +194,29 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
               rowKey={(row) => row.dataset.datasetId}
               onRowClick={(row) => void navigate({ to: "/projects/$projectId/datasets/$datasetId", params: { projectId, datasetId: row.dataset.datasetId } })}
               columns={[
-                { key: "name", header: "测试集", cell: (row) => <span className="font-medium">{row.dataset.name}</span> },
+                { key: "name", header: "测试集", cell: (row) => <span className="font-semibold text-text-strong">{row.dataset.name}</span> },
                 { key: "samples", header: "用例", align: "right", cell: (row) => formatNumber(row.summary.counts.projectSamples) },
                 { key: "samplings", header: "采样", align: "right", cell: (row) => formatNumber(row.summary.counts.samplings) },
                 { key: "execution", header: "执行成功率", align: "right", cell: (row) => formatPercent(row.summary.execution.successRate) },
                 { key: "evaluation", header: "评估成功率", align: "right", cell: (row) => formatPercent(row.summary.evaluation.successRate) },
-                { key: "score", header: "平均分", align: "right", cell: (row) => formatNumber(scoreField(row.summary.numericOutputs)?.summary.mean, 2) },
+                { key: "score", header: "平均分", cell: (row) => <ScoreBar value={scoreField(row.summary.numericOutputs)?.summary.mean} /> },
               ]}
             />
           </Card>
-          {view.data && <PlanCard view={view.data} />}
-          <Card>
-            <CardHeader title="Run" description="仍有当前结果的 Run；被后续 Run 替换掉全部结果的不再列出" />
-            <DataTable
-              rows={(overview.data?.runIds ?? []).map((runId) => ({ runId }))}
-              rowKey={(row) => row.runId}
-              onRowClick={(row) => void navigate({ to: "/projects/$projectId/runs/$runId", params: { projectId, runId: row.runId } })}
-              empty={<p className="px-4 py-6 text-sm text-text-muted">还没有 Run。</p>}
-              columns={[
-                { key: "runId", header: "Run", cell: (row) => <CopyId value={row.runId} length={12} /> },
-                { key: "status", header: "", cell: (row) => <RunStatusCell projectId={projectId} runId={row.runId} /> },
-              ]}
-            />
-          </Card>
+          <div className="grid gap-5 xl:grid-cols-[1fr_420px]">
+            {view.data && <PlanCard view={view.data} />}
+            <Card>
+              <CardHeader title="Run" description="仍有当前结果的 Run" />
+              {(overview.data?.runIds ?? []).length === 0
+                ? <EmptyState title="还没有 Run" />
+                : <div>{overview.data!.runIds.map((runId) => <RunRow key={runId} projectId={projectId} runId={runId} />)}</div>}
+            </Card>
+          </div>
+          {project && <p className="text-xs text-text-faint">创建于 {formatDateTime(project.createdAt)} · <CopyId value={project.projectId} /></p>}
         </div>
       )}
       <ConfirmDialog open={deleting} onClose={() => setDeleting(false)} onConfirm={() => remove.mutate()} loading={remove.isPending} danger
         title="删除 Project" description="Project 及其结果将不再显示。有未结束的 Run 时不能删除。" confirmLabel="删除" />
     </Page>
-  );
-}
-
-function RunStatusCell({ projectId, runId }: { projectId: string; runId: string }) {
-  const run = useRun(projectId, runId);
-  if (!run.data) return <Spinner />;
-  return (
-    <span className="flex items-center gap-2">
-      <StatusBadge status={run.data.run.status} />
-      <span className="text-text-muted">{OPERATION_LABELS[run.data.run.operation]}</span>
-    </span>
   );
 }

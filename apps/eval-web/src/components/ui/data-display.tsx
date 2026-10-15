@@ -16,7 +16,7 @@ export function CopyButton({ value, className, label = "复制" }: { value: stri
           setTimeout(() => setCopied(false), 1200);
         });
       }}
-      className={cn("rounded p-1 text-text-muted hover:bg-surface-muted hover:text-text", className)}
+      className={cn("rounded p-1 text-text-faint transition-colors hover:bg-surface-muted hover:text-text-strong", className)}
     >
       {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
     </button>
@@ -35,47 +35,52 @@ export function CopyId({ value, length = 8 }: { value: string; length?: number }
 
 export function CodeBlock({ value, className, maxHeight = "28rem" }: { value: string; className?: string; maxHeight?: string }) {
   return (
-    <div className={cn("relative rounded-[var(--radius-control)] border border-border bg-surface-muted", className)}>
-      <CopyButton value={value} className="absolute right-2 top-2" />
+    <div className={cn("group relative rounded-[var(--radius-control)] border border-border bg-surface-code", className)}>
+      <CopyButton value={value} className="absolute right-2 top-2 opacity-0 transition-opacity group-hover:opacity-100" />
       <pre className="overflow-auto p-3 pr-10 font-mono text-[12.5px] leading-relaxed text-text" style={{ maxHeight }}>{value}</pre>
     </div>
   );
 }
 
-function JsonNode({ name, value, depth }: { name?: string; value: unknown; depth: number }) {
-  const [open, setOpen] = useState(depth < 2);
-  const label = name !== undefined && <span className="text-primary">{name}: </span>;
-  if (value === null || typeof value !== "object") {
-    const text = typeof value === "string" ? JSON.stringify(value) : String(value);
-    const long = typeof value === "string" && value.length > 300;
-    const [expanded, setExpanded] = [open, setOpen];
+function JsonPrimitive({ value }: { value: unknown }) {
+  const [expanded, setExpanded] = useState(false);
+  if (typeof value === "string") {
+    const long = value.length > 300;
     return (
-      <div className="break-all">
-        {label}
-        <span className={typeof value === "string" ? "text-success" : "text-warning"}>
-          {long && !expanded ? `${text.slice(0, 300)}…` : text}
-        </span>
+      <span className="text-success">
+        {JSON.stringify(long && !expanded ? `${value.slice(0, 300)}…` : value)}
         {long && (
-          <button type="button" className="ml-1 text-xs text-primary" onClick={() => setExpanded(!expanded)}>
+          <button type="button" className="ml-1 font-sans text-xs text-link" onClick={() => setExpanded(!expanded)}>
             {expanded ? "收起" : "展开"}
           </button>
         )}
-      </div>
+      </span>
     );
+  }
+  if (typeof value === "number") return <span className="text-info">{String(value)}</span>;
+  if (typeof value === "boolean") return <span className="text-warning">{String(value)}</span>;
+  return <span className="text-text-faint">{String(value)}</span>;
+}
+
+function JsonNode({ name, value, depth }: { name?: string; value: unknown; depth: number }) {
+  const [open, setOpen] = useState(depth < 2);
+  const label = name !== undefined && <span className="text-text-secondary">{name}: </span>;
+  if (value === null || typeof value !== "object") {
+    return <div className="break-all py-px">{label}<JsonPrimitive value={value} /></div>;
   }
   const entries = Array.isArray(value) ? value.map((item, index) => [String(index), item] as const) : Object.entries(value);
   const brackets = Array.isArray(value) ? ["[", "]"] : ["{", "}"];
   return (
     <div>
-      <button type="button" className="inline-flex items-center text-left" onClick={() => setOpen(!open)}>
-        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+      <button type="button" className="inline-flex items-center py-px text-left hover:text-text-strong" onClick={() => setOpen(!open)}>
+        {open ? <ChevronDown className="size-3 text-text-faint" /> : <ChevronRight className="size-3 text-text-faint" />}
         {label}
-        <span className="text-text-muted">{brackets[0]}{!open && `${entries.length} 项${brackets[1]}`}</span>
+        <span className="text-text-faint">{brackets[0]}{!open && ` ${entries.length} 项 ${brackets[1]}`}</span>
       </button>
       {open && (
-        <div className="ml-4 border-l border-border pl-2">
+        <div className="ml-[5px] border-l border-border pl-3">
           {entries.map(([key, item]) => <JsonNode key={key} name={key} value={item} depth={depth + 1} />)}
-          <span className="text-text-muted">{brackets[1]}</span>
+          <span className="text-text-faint">{brackets[1]}</span>
         </div>
       )}
     </div>
@@ -84,46 +89,47 @@ function JsonNode({ name, value, depth }: { name?: string; value: unknown; depth
 
 export function JsonViewer({ value, className }: { value: unknown; className?: string }) {
   return (
-    <div className={cn("relative overflow-auto rounded-[var(--radius-control)] border border-border bg-surface-muted p-3 font-mono text-[12.5px] leading-relaxed", className)}>
-      <CopyButton value={JSON.stringify(value, null, 2)} className="absolute right-2 top-2" />
+    <div className={cn("group relative overflow-auto rounded-[var(--radius-control)] border border-border bg-surface-code p-3 font-mono text-[12.5px] leading-relaxed text-text", className)}>
+      <CopyButton value={JSON.stringify(value, null, 2)} className="absolute right-2 top-2 opacity-0 transition-opacity group-hover:opacity-100" />
       <JsonNode value={value} depth={0} />
     </div>
   );
 }
 
-export function MetricCard({ label, value, hint, tone }: {
-  label: ReactNode; value: ReactNode; hint?: ReactNode; tone?: "success" | "danger" | "warning";
+export function MetricCard({ label, value, hint, tone, icon }: {
+  label: ReactNode; value: ReactNode; hint?: ReactNode; tone?: "success" | "danger" | "warning"; icon?: ReactNode;
 }) {
-  const color = tone === "success" ? "text-success" : tone === "danger" ? "text-danger" : tone === "warning" ? "text-warning" : "text-text";
+  const color = tone === "success" ? "text-success" : tone === "danger" ? "text-danger" : tone === "warning" ? "text-warning" : "text-text-strong";
   return (
-    <div className="rounded-[var(--radius-card)] border border-border bg-surface px-4 py-3">
-      <p className="text-xs text-text-muted">{label}</p>
-      <p className={cn("mt-1 text-[28px] font-semibold leading-tight tabular", color)}>{value}</p>
-      {hint && <p className="mt-1 text-xs text-text-muted">{hint}</p>}
+    <div className="flex min-w-0 flex-col rounded-[var(--radius-card)] border border-border bg-surface px-4 py-3.5">
+      <p className="flex items-center gap-1.5 text-xs font-semibold text-text-muted [&_svg]:size-3.5">{icon}{label}</p>
+      <p className={cn("mt-2 truncate text-2xl font-semibold leading-none tracking-tight tabular", color)}>{value}</p>
+      {hint && <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-text-muted" title={typeof hint === "string" ? hint : undefined}>{hint}</p>}
     </div>
   );
 }
 
 /** A score on its Schema range; values outside the range are clamped for display only. */
 export function ScoreBar({ value, min = 0, max = 10 }: { value: number | null | undefined; min?: number; max?: number }) {
-  if (value === null || value === undefined) return <span className="text-text-muted">—</span>;
+  if (value === null || value === undefined) return <span className="text-text-faint">—</span>;
   const ratio = max > min ? Math.min(1, Math.max(0, (value - min) / (max - min))) : 0;
   const color = ratio >= 0.7 ? "bg-success" : ratio >= 0.4 ? "bg-warning" : "bg-danger";
   return (
     <span className="inline-flex items-center gap-2">
-      <span className="h-1.5 w-20 overflow-hidden rounded-full bg-surface-muted">
+      <span className="h-1.5 w-16 overflow-hidden rounded-full bg-surface-muted">
         <span className={cn("block h-full rounded-full", color)} style={{ width: `${ratio * 100}%` }} />
       </span>
-      <span className="font-medium tabular">{Number.isInteger(value) ? value : value.toFixed(2)}</span>
+      <span className="font-semibold text-text-strong tabular">{Number.isInteger(value) ? value : value.toFixed(2)}</span>
     </span>
   );
 }
 
+/** Segmented control, as in Langfuse's view switchers. */
 export function Tabs<T extends string>({ tabs, value, onChange }: {
-  tabs: readonly { value: T; label: ReactNode }[]; value: T; onChange: (value: T) => void;
+  tabs: readonly { value: T; label: ReactNode; count?: number }[]; value: T; onChange: (value: T) => void;
 }) {
   return (
-    <div role="tablist" className="flex gap-1 border-b border-border">
+    <div role="tablist" className="inline-flex h-9 items-center gap-0.5 rounded-lg bg-surface-muted p-1">
       {tabs.map((tab) => (
         <button
           key={tab.value}
@@ -132,32 +138,72 @@ export function Tabs<T extends string>({ tabs, value, onChange }: {
           aria-selected={tab.value === value}
           onClick={() => onChange(tab.value)}
           className={cn(
-            "-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors",
-            tab.value === value ? "border-primary text-text" : "border-transparent text-text-muted hover:text-text",
+            "inline-flex h-7 items-center gap-1.5 rounded-md px-3 text-[13px] font-semibold transition-colors",
+            tab.value === value ? "bg-surface text-text-strong shadow-sm" : "text-text-muted hover:text-text-strong",
           )}
         >
           {tab.label}
+          {tab.count !== undefined && <span className="text-xs text-text-faint tabular">{tab.count}</span>}
         </button>
       ))}
     </div>
   );
 }
 
-export function Stepper({ steps, current }: { steps: readonly string[]; current: number }) {
+export function Stepper({ steps, current, onSelect }: { steps: readonly string[]; current: number; onSelect?: (index: number) => void }) {
   return (
-    <ol className="flex flex-wrap items-center gap-2 text-sm">
-      {steps.map((step, index) => (
-        <li key={step} className="flex items-center gap-2">
-          <span className={cn(
-            "flex size-6 items-center justify-center rounded-full text-xs font-semibold",
-            index < current ? "bg-success text-white" : index === current ? "bg-primary text-white" : "bg-surface-muted text-text-muted",
-          )}>
-            {index < current ? <Check className="size-3.5" /> : index + 1}
-          </span>
-          <span className={index === current ? "font-medium text-text" : "text-text-muted"}>{step}</span>
-          {index < steps.length - 1 && <span className="mx-1 h-px w-6 bg-border" aria-hidden />}
-        </li>
-      ))}
+    <ol className="flex flex-wrap items-center gap-1 text-[13px]">
+      {steps.map((step, index) => {
+        const done = index < current;
+        const active = index === current;
+        return (
+          <li key={step} className="flex items-center gap-1">
+            <button
+              type="button"
+              disabled={!onSelect || index > current}
+              onClick={() => onSelect?.(index)}
+              className={cn(
+                "flex items-center gap-2 rounded-md px-2 py-1 transition-colors",
+                active ? "text-text-strong" : done ? "text-text-secondary hover:bg-surface-muted" : "text-text-faint",
+              )}
+            >
+              <span className={cn(
+                "flex size-5 items-center justify-center rounded-full text-[11px] font-semibold",
+                done ? "bg-success-soft text-success" : active ? "bg-primary text-primary-fg" : "border border-border-strong text-text-faint",
+              )}>
+                {done ? <Check className="size-3" /> : index + 1}
+              </span>
+              <span className={active ? "font-semibold" : undefined}>{step}</span>
+            </button>
+            {index < steps.length - 1 && <ChevronRight className="size-3.5 text-text-faint" aria-hidden />}
+          </li>
+        );
+      })}
     </ol>
+  );
+}
+
+/** A compact horizontal bar of status counts, e.g. a Run's progress. */
+export function ProgressBar({ segments, total }: {
+  segments: readonly { value: number; tone: "success" | "danger" | "warning" | "info" | "neutral"; label: string }[];
+  total: number;
+}) {
+  const colors = { success: "bg-success", danger: "bg-danger", warning: "bg-warning", info: "bg-info", neutral: "bg-border-strong" };
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-surface-muted">
+        {segments.filter((segment) => segment.value > 0).map((segment) => (
+          <span key={segment.label} className={colors[segment.tone]} style={{ width: `${total > 0 ? (segment.value / total) * 100 : 0}%` }} />
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted">
+        {segments.map((segment) => (
+          <span key={segment.label} className="inline-flex items-center gap-1.5">
+            <span className={cn("size-1.5 rounded-full", colors[segment.tone])} />
+            {segment.label} <span className="text-text-strong tabular">{segment.value}</span>
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }

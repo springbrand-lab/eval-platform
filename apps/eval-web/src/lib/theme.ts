@@ -24,3 +24,12 @@ export function saveThemePreference(preference: ThemePreference): void {
   }
   applyTheme(preference);
 }
+
+/** Re-apply "system" when the OS switches between light and dark. */
+export function watchSystemTheme(): () => void {
+  const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+  if (!media) return () => undefined;
+  const onChange = () => { if (readThemePreference() === "system") applyTheme("system"); };
+  media.addEventListener("change", onChange);
+  return () => media.removeEventListener("change", onChange);
+}

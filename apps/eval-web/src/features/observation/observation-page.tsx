@@ -61,7 +61,7 @@ export function ObservationPage({ projectId, target }: { projectId: string; targ
         <EmptyState title="Agent 还没有开始运行" description="开始运行后，这里会显示会话、工作区和轨迹。" icon={<StatusBadge status="not-started" />} />
       ) : (
         <div className="flex flex-col gap-4">
-          {target.role === "evaluator" && <Notice>评委在自己的工作区中评审：被测 Agent 的产物和完整轨迹以证据包的形式导入到 /evidence，评委把结果写在 /output/result.json。</Notice>}
+          {target.role === "evaluator" && <Notice tone="neutral">评委在自己的工作区中评审：被测 Agent 的产物和完整轨迹以证据包的形式导入到 /evidence，评委把结果写在 /output/result.json。</Notice>}
           <Tabs<Tab> value={tab} onChange={setTab} tabs={[
             { value: "messages", label: "会话" },
             { value: "workspace", label: "工作区" },

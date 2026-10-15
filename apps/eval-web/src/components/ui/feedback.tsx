@@ -4,13 +4,13 @@ import { cn } from "@/lib/cn";
 import { describeError } from "@/lib/errors";
 
 export function Skeleton({ className }: { className?: string }) {
-  return <div className={cn("animate-pulse rounded bg-surface-muted", className)} aria-hidden />;
+  return <div className={cn("animate-pulse rounded-md bg-surface-muted", className)} aria-hidden />;
 }
 
 export function LoadingBlock({ rows = 4 }: { rows?: number }) {
   return (
-    <div className="flex flex-col gap-3 p-4" role="status" aria-label="加载中">
-      {Array.from({ length: rows }, (_, index) => <Skeleton key={index} className="h-5 w-full" />)}
+    <div className="flex flex-col gap-2.5 p-4" role="status" aria-label="加载中">
+      {Array.from({ length: rows }, (_, index) => <Skeleton key={index} className={cn("h-4", index % 3 === 2 ? "w-2/3" : "w-full")} />)}
     </div>
   );
 }
@@ -23,10 +23,12 @@ export function EmptyState({ title, description, action, icon }: {
   title: ReactNode; description?: ReactNode; action?: ReactNode; icon?: ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-2 px-6 py-12 text-center">
-      <div className="text-text-muted">{icon ?? <Inbox className="size-8" />}</div>
-      <p className="text-sm font-medium text-text">{title}</p>
-      {description && <p className="max-w-md text-sm text-text-muted">{description}</p>}
+    <div className="flex flex-col items-center justify-center gap-2 px-6 py-14 text-center">
+      <div className="mb-1 flex size-10 items-center justify-center rounded-full bg-surface-muted text-text-muted [&_svg]:size-5">
+        {icon ?? <Inbox />}
+      </div>
+      <p className="text-sm font-semibold text-text-strong">{title}</p>
+      {description && <p className="max-w-md text-[13px] leading-relaxed text-text-muted">{description}</p>}
       {action && <div className="mt-2">{action}</div>}
     </div>
   );
@@ -34,24 +36,28 @@ export function EmptyState({ title, description, action, icon }: {
 
 export function ErrorBlock({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   return (
-    <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-danger/30 bg-danger-soft p-4 text-sm">
+    <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-danger/30 bg-danger-soft p-4 text-[13px]">
       <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" />
       <div className="flex-1">
-        <p className="font-medium text-danger">加载失败</p>
+        <p className="font-semibold text-danger">加载失败</p>
         <p className="mt-1 text-text">{describeError(error)}</p>
       </div>
-      {onRetry && (
-        <button type="button" onClick={onRetry} className="text-sm font-medium text-primary hover:underline">重试</button>
-      )}
+      {onRetry && <button type="button" onClick={onRetry} className="font-semibold text-link hover:underline">重试</button>}
     </div>
   );
 }
 
-export function Notice({ tone = "info", children }: { tone?: "info" | "warning" | "danger"; children: ReactNode }) {
+export function Notice({ tone = "info", children, icon }: { tone?: "info" | "warning" | "danger" | "neutral"; children: ReactNode; icon?: ReactNode }) {
   const styles = {
-    info: "border-info/30 bg-info-soft",
-    warning: "border-warning/30 bg-warning-soft",
-    danger: "border-danger/30 bg-danger-soft",
+    info: "border-info/20 bg-info-soft",
+    warning: "border-warning/25 bg-warning-soft",
+    danger: "border-danger/25 bg-danger-soft",
+    neutral: "border-border bg-surface-muted",
   };
-  return <div className={cn("rounded-[var(--radius-card)] border px-4 py-3 text-sm text-text", styles[tone])}>{children}</div>;
+  return (
+    <div className={cn("flex items-start gap-2.5 rounded-[var(--radius-card)] border px-3.5 py-2.5 text-[13px] leading-relaxed text-text", styles[tone])}>
+      {icon && <span className="mt-0.5 shrink-0 [&_svg]:size-4">{icon}</span>}
+      <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  );
 }

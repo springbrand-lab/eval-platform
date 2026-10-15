@@ -67,7 +67,7 @@ export function DatasetsPage() {
             empty={<EmptyState title="还没有测试集" description="最快的方式是导入一个提示词 JSONL 文件。"
               action={<Button variant="primary" onClick={() => setDialog("prompt")}>导入提示词</Button>} />}
             columns={[
-              { key: "name", header: "名称", cell: (row) => <span className="font-medium">{row.name}</span>, sortValue: (row) => row.name },
+              { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span>, sortValue: (row) => row.name },
               { key: "description", header: "说明", cell: (row) => <span className="line-clamp-1 text-text-muted">{row.description || "—"}</span> },
               { key: "id", header: "ID", cell: (row) => <CopyId value={row.datasetId} /> },
             ]}

@@ -10,7 +10,7 @@ import { formatDateTime } from "@/lib/format";
 
 function tone(type: string): Tone {
   if (type.startsWith("tool")) return "info";
-  if (type.startsWith("generation") || type.startsWith("model")) return "primary";
+  if (type.startsWith("generation") || type.startsWith("model")) return "accent";
   if (type.includes("error") || type.includes("failed")) return "danger";
   if (type.startsWith("approval") || type.startsWith("interaction")) return "warning";
   return "neutral";

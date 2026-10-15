@@ -6,11 +6,12 @@ import { toast } from "sonner";
 import { startAuth } from "@/auth/session";
 import { ApiError } from "@/api-sdk/client";
 import { describeError } from "@/lib/errors";
-import { applyTheme } from "@/lib/theme";
+import { applyTheme, watchSystemTheme } from "@/lib/theme";
 import { routeTree } from "./routeTree.gen";
 import "./styles/index.css";
 
 applyTheme();
+watchSystemTheme();
 startAuth();
 
 export const queryClient = new QueryClient({
