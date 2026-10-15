@@ -35,8 +35,9 @@ import type { RetryController, RetryOperation } from "./retry.js";
 import {
   createEvalRuntime as createRuntimeWithRelease,
   createEvalRunAdmission,
-  createEvalRunResumer,
+  createEvalRunResumer as createResumerWithReporter,
   toRunSnapshot,
+  type EvalRunResumerDependencies,
   type EvalRuntimeDependencies,
 } from "./index.js";
 const SESSIONS_BUNDLE_ID = "789d7cc3-bb3e-41cf-b7a8-0f55ab1e9efb";
@@ -63,8 +64,16 @@ const PIPELINE_CONFIG_ID = "pipeline-config-1";
 const PIPELINE_CONFIG_CONCURRENT_ID = "pipeline-config-concurrent";
 const SOURCE_COMMIT = "a".repeat(40);
 
-function createRuntime(dependencies: Omit<EvalRuntimeDependencies, "sourceCommit"> & { readonly sourceCommit?: string }) {
-  return createRuntimeWithRelease({ ...dependencies, sourceCommit: dependencies.sourceCommit ?? SOURCE_COMMIT });
+type WithDefaultReporter<T extends { readonly onError: unknown }> = Omit<T, "onError"> & { readonly onError?: T["onError"] };
+
+function createRuntime(dependencies: WithDefaultReporter<Omit<EvalRuntimeDependencies, "sourceCommit">> & { readonly sourceCommit?: string }) {
+  return createRuntimeWithRelease({
+    ...dependencies, sourceCommit: dependencies.sourceCommit ?? SOURCE_COMMIT, onError: dependencies.onError ?? console.error,
+  });
+}
+
+function createEvalRunResumer(dependencies: WithDefaultReporter<EvalRunResumerDependencies>) {
+  return createResumerWithReporter({ ...dependencies, onError: dependencies.onError ?? console.error });
 }
 
 const NO_RETRY = { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 } as const;
@@ -186,24 +195,25 @@ function makeConfigResolver(framework: AgentFramework = "sp"): ConfigResolver {
   return createConfigResolver(store);
 }
 
-type RuntimeTestDependencies = Omit<EvalRuntimeDependencies, "configResolver" | "sourceCommit"> & {
+type RuntimeTestDependencies = Omit<EvalRuntimeDependencies, "configResolver" | "sourceCommit" | "onError"> & {
   readonly configResolver?: ConfigResolver;
+  readonly onError?: EvalRuntimeDependencies["onError"];
 };
 
 function createEvalRuntime(dependencies: RuntimeTestDependencies) {
+  const onError = dependencies.onError ?? console.error;
   const store: RuntimeStore = Object.create(dependencies.store);
   let runtime!: ReturnType<typeof createRuntime>;
   store.createRunWithSamplings = async (run, records, evaluations) => {
     const admission = await dependencies.store.createRunWithSamplings(run, records, evaluations);
     if (admission.created) {
-      queueMicrotask(() => { void runtime.resume(admission.run.runId).catch((error: unknown) => {
-        (dependencies.onError ?? console.error)(error);
-      }); });
+      queueMicrotask(() => { void runtime.resume(admission.run.runId).catch(onError); });
     }
     return admission;
   };
   runtime = createRuntime({
     ...dependencies,
+    onError,
     store,
     configResolver: dependencies.configResolver ?? makeConfigResolver(),
   });

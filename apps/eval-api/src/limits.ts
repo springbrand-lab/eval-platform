@@ -16,6 +16,7 @@ export const JSON_BODY_BYTES = 1_000_000;
 /** Client-chosen identifiers such as idempotency keys and Runtime entity IDs. */
 export const IDENTIFIER_CHARS = 512;
 export const EVALUATION_SAMPLING_IDS = 10_000;
+export const SAMPLING_PAGE_SIZE_DEFAULT = 100;
 export const SAMPLING_PAGE_SIZE_MAX = 1_000;
 
 /** One JSON string escape (`\uXXXX`) is the most bytes a single text unit can occupy in a body. */

@@ -21,6 +21,7 @@ export {
   assertPromptDatasetMetadata,
   parseDatasetDocument,
   parseStrictJson,
+  promptDatasetUploadSchema,
   type DatasetFormat,
   type PromptDatasetUploadInput,
 } from "./dataset/serialization.js";

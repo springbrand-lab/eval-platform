@@ -6,8 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./http": "./src/http.ts",
-    "./http-errors": "./src/http-errors.ts",
-    "./model": "./src/model.ts"
+    "./http-errors": "./src/http-errors.ts"
   },
   "scripts": {
     "build": "tsc --noEmit",

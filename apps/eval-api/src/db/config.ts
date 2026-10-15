@@ -133,7 +133,7 @@ export function createPostgresConfigStore(
 
   async function saveExecutionConfig(input: ExecutionConfigInput, configId?: string): Promise<ExecutionConfig> {
     const config = configId === undefined ? createExecutionConfig(input) : createExecutionConfig(input, () => configId);
-    if (config.harness.kind === "sp") await requireAgentOwner(config.harness.agentConfig);
+    await requireAgentOwner(config.harness.agentConfig);
     const row = { datasetId: config.datasetId, settings: executionSettings(config) };
     return db.transaction(async (transaction) => {
       await lockDatasetSamples(transaction, config.datasetId, config.sampleIds);

@@ -14,7 +14,6 @@ import type { AgentHandle, AgentSubmission, Harness } from "../harness/model.js"
 import {
   agentOperationKey,
   errorMessage,
-  requireSpHarness,
   type AgentAttemptRecord,
   type AgentLifecycleStage,
   type StageDependencies,
@@ -65,7 +64,7 @@ function subjectHandle(sampling: SamplingState, harness: HarnessConfig): AgentHa
   if (!sampling.subjectChatId) return undefined;
   return {
     role: "subject",
-    framework: requireSpHarness(harness, "subject").framework,
+    framework: harness.framework,
     ownerUserId: sampling.subjectAgent.ownerUserId,
     chatId: sampling.subjectChatId,
     samplingId: sampling.samplingId,
@@ -80,7 +79,7 @@ function evaluatorHandle(
   if (!evaluation.chatId) return undefined;
   return {
     role: "evaluator",
-    framework: requireSpHarness(harness, "evaluator").framework,
+    framework: harness.framework,
     ownerUserId: evaluation.evaluator.ownerUserId,
     chatId: evaluation.chatId,
     samplingId: evaluation.samplingId,

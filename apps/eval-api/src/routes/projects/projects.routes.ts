@@ -3,6 +3,7 @@ import { platformIdSchema } from "@eval-platform/eval-dataset";
 import type { Project } from "@eval-platform/eval-contracts";
 import { responseSchema } from "@springbrand/http/catalog";
 import { jsonContent } from "stoker/openapi/helpers";
+import { catalogLabelSchema } from "../../db/catalog-metadata.js";
 import { jsonBody } from "../../lib/request-body.js";
 import { METADATA_BODY_BYTES } from "../../limits.js";
 import {
@@ -36,7 +37,7 @@ export const create = createRoute({
   tags: ["Project"],
   summary: "Create an empty Project on the deployed SP source branch",
   middleware: [jsonBody(METADATA_BODY_BYTES)],
-  request: { body: jsonBodyContent(z.strictObject({ name: z.string().trim().min(1) })) },
+  request: { body: jsonBodyContent(z.strictObject({ name: catalogLabelSchema })) },
   responses: {
     201: jsonContent(responseSchema(projectSchema), "Created Project"),
     ...bodyErrorResponses,

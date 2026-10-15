@@ -8,4 +8,4 @@
 
 当前不包含 React、Vite、路由、页面或对外产品能力。
 
-Dataset 页、初始资源管理和 Project 输出格式选择的后端现状与接入流程见 [Dataset 层改造与 Web 接入说明](../../docs/eval-dataset-web-handoff.md)。
+Web 只调用 Eval API；部署时 Web 来源须配置为 Eval API 的 `EVAL_WEB_ORIGIN`，响应信封、状态码和错误码见 [Eval HTTP 控制面](../../docs/eval-http-api.md)。Dataset 页、初始资源管理和 Project 输出格式选择的后端现状与接入流程见 [Dataset 层改造与 Web 接入说明](../../docs/eval-dataset-web-handoff.md)。

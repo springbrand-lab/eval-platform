@@ -17,7 +17,7 @@
 | Session | 必填的 `name`、`description` | Bundle 内的一份 JSON/JSONL 初始上下文。Data 绑定到具体 `bundleId + sessionId`，只用于 Subject 执行。 |
 | 输出格式 | 必填的 `name`、`description` | 单独上传的一份 JSON Schema 文件，没有 Bundle。Project 只保存其 `outputSchemaId`。 |
 
-ID 由后端生成，前端保存 ID 供请求使用，列表和选择器优先展示用户填写的名称、描述。Bundle、Material、Session 和输出格式的 ID 是 UUID；合法 UUID 引用可用大小写混合形式输入，保存和返回时统一为小写。资源元数据和 Data 绑定保存在 Eval 的 PostgreSQL；Material 文件和 Session 内容保存在 Eval 的 Bundle 目录。Web 只调用 Eval API，不直接访问该目录或 SP 的 DO 存储。
+ID 由后端生成，前端保存 ID 供请求使用，列表和选择器优先展示用户填写的名称、描述。Dataset、Data、Bundle、Material、Session 和输出格式的 ID 都是 UUID；路径和引用只接受 UUID（非 UUID 返回 `422`），可用大小写混合形式输入，保存和返回时统一为小写。资源元数据和 Data 绑定保存在 Eval 的 PostgreSQL；Material 文件和 Session 内容保存在 Eval 的 Bundle 目录。Web 只调用 Eval API，不直接访问该目录或 SP 的 DO 存储。
 
 ## 已完成的后端改造
 
@@ -62,7 +62,7 @@ Authorization: Bearer <Eval SP session token>
 
 `content` 是文件文本，不是解析后的数组，也不是 `multipart/form-data`。`json` 文件顶层必须是非空数组；`jsonl` 文件每个非空行是一条 JSON 对象。每条都要有非空白的 `name`、`description`、`userPrompt`、`evalPrompt`。Prompt 原文保留；其他可无损表示为 JSON 的业务字段可以保留。文件行不能带 `dataId` 或 `initialMaterials`、`evalInitialMaterials`、`initialSession`：资源在导入后逐条选择。重复 JSON 字段、注释和尾逗号会被拒绝。
 
-成功返回 `201 {dataset, data}`，其中 Dataset 和每条 Data 都已有服务端生成的 ID。导入是原子操作，失败时不会留下一部分样本。文件文本上限 10 MB，请求体上限 20 MB。列表用 `GET /api/datasets`；选中 Dataset 后用 `GET /api/datasets/{datasetId}/data` 读取其样本。全局 `GET /api/data` 可查当前用户的所有活动 Data，包括尚未关联 Dataset 的条目。通用 `POST /api/datasets/import?format=json|yaml` 是另一种包含 Dataset 外壳的导入格式，Dataset 页的新 Prompt 上传应使用 `prompt-import`。
+成功返回 `201`，信封的 `msg` 是 `{dataset, data}`，其中 Dataset 和每条 Data 都已有服务端生成的 ID。导入是原子操作，失败时不会留下一部分样本。文件文本上限 10 MB，超出时为 `422` 字段校验错误；请求体上限由文件上限推导，不必另行限制。列表用 `GET /api/datasets`；选中 Dataset 后用 `GET /api/datasets/{datasetId}/data` 读取其样本。全局 `GET /api/data` 可查当前用户的所有活动 Data，包括尚未关联 Dataset 的条目。通用 `POST /api/datasets/import?format=json|yaml` 是另一种包含 Dataset 外壳的导入格式，Dataset 页的新 Prompt 上传应使用 `prompt-import`。
 
 ### 2. 建资源目录，再逐条上传
 
@@ -74,7 +74,7 @@ Authorization: Bearer <Eval SP session token>
 | 上传与选择 Material | `POST /api/bundles/{bundleId}/materials`，`GET /api/bundles/{bundleId}/materials` | 每次上传一条；返回 `materialId`。 |
 | 上传与选择 Session | `POST /api/bundles/{bundleId}/sessions`，`GET /api/bundles/{bundleId}/sessions` | 每次上传一份上下文；返回 `sessionId`。 |
 
-Material 上传体是 `{name,description,files:[{path,mediaType,contentBase64}]}`。单文件也是长度为 1 的 `files`。目录上传时，Web 把选中的文件展开成数组，保留目录内相对路径；例如 `/brief.txt`、`/assets/logo.png`。`path` 必须以 `/` 开头，不接受空路径段、`.`、`..`、`.git` 或重复路径；空目录不能单独表示。`contentBase64` 是纯 Base64 字符串，不能带 `data:` 前缀；`mediaType` 必填。每条 Material 至少 1 个、最多 500 个文件，单文件最多 5 MB，总文件内容最多 20 MB。
+Material 上传体是 `{name,description,files:[{path,mediaType,contentBase64}]}`。单文件也是长度为 1 的 `files`。目录上传时，Web 把选中的文件展开成数组，保留目录内相对路径；例如 `/brief.txt`、`/assets/logo.png`。`path` 必须以 `/` 开头，不接受空路径段、`.`、`..`、`.git` 或重复路径；空目录不能单独表示。`contentBase64` 是纯 Base64 字符串，不能带 `data:` 前缀；`mediaType` 必填。文件数量和大小上限见 [Dataset 上传契约](eval-dataset-upload.md)；超过单文件或总量上限返回 `413`。
 
 Session 上传体是 `{name,description,format:"json"|"jsonl",content}`，`content` 同样是文件文本。JSON 格式的最小结构示例：
 
@@ -82,7 +82,7 @@ Session 上传体是 `{name,description,format:"json"|"jsonl",content}`，`conte
 {"entries":[{"id":"m1","createdAt":1,"message":{"role":"user","content":"之前的任务"}}]}
 ```
 
-JSONL 则每行一条这样的 entry，而不是外层 `entries` 对象。服务端检查规范历史格式：首条是 `user`，每条有不重复的 `id`、非负整数 `createdAt` 和允许的消息角色。Web 可先读取文件文本交给后端校验；不要把它当成普通 Prompt 字符串。Session 文本最多 200 万字符、最多 1 万条 entry。
+JSONL 则每行一条这样的 entry，而不是外层 `entries` 对象。服务端检查规范历史格式：首条是 `user`，每条有不重复的 `id`、非负整数 `createdAt` 和允许的消息角色。Web 可先读取文件文本交给后端校验；不要把它当成普通 Prompt 字符串。格式与上限由 SP 的规范历史规则决定，见 [Dataset 上传契约](eval-dataset-upload.md)。
 
 ### 3. 给每条 Data 选择资源
 
@@ -107,7 +107,7 @@ JSONL 则每行一条这样的 entry，而不是外层 `entries` 对象。服务
 
 ### 4. 管理评估输出格式与 Project 绑定
 
-输出格式是一个独立 JSON Schema 文件，不加入 Bundle，也不绑定到 Dataset 或 Data。上传时调用 `POST /api/evaluation-output-schemas`，体为 `{name,description,content}`；`content` 是 JSON Schema 文件文本。后端按 draft 2020-12 校验，保存解析后的 `schema`，返回 `outputSchemaId`。文件最多 1 MB。
+输出格式是一个独立 JSON Schema 文件，不加入 Bundle，也不绑定到 Dataset 或 Data。上传时调用 `POST /api/evaluation-output-schemas`，体为 `{name,description,content}`；`content` 是 JSON Schema 文件文本。后端按 draft 2020-12 校验，保存解析后的 `schema`，返回 `outputSchemaId`。文件上限见 [Dataset 上传契约](eval-dataset-upload.md)。
 
 Web 用 `GET /api/evaluation-output-schemas` 展示可选格式，再对 Project 调用 `PUT /api/projects/{projectId}/evaluation-output-schema`，体为 `{ "outputSchemaId": "<uuid>" }`。清空选择提交 `{ "outputSchemaId": null }`。Project 列表/详情展示所绑定的 ID；Web 可用格式列表按 ID 找到名称和描述。Project 不保存 Schema 正文。启动 Evaluation 或 Pipeline 前，Project 必须选定输出格式；首次 Evaluation Run 准入后，这个 ID 不能再改或清空，API 会返回 `409`。
 
@@ -122,7 +122,16 @@ Web 用 `GET /api/evaluation-output-schemas` 展示可选格式，再对 Project
 
 ## 接口与页面实现提示
 
-所有 `/api/*` 请求都带 Eval SP 会话的 `Authorization: Bearer`。Web 调用标准 Eval API 的 `start:api` 路由；当前 `eval-web` 还没有页面实现。创建成功通常返回 `201`，删除成功返回空体 `204`。错误体为 `{ "error": { "code": "...", "message": "..." } }`。`400` 表示格式或字段不合法，`401` 表示会话无效，`404` 表示资源不存在或不属于当前用户，`409` 表示仍有绑定等冲突，`413` 表示超过大小限制。删除收到 `409` 时保留当前列表状态，不要在 UI 中先把条目移除。
+所有 `/api/*` 请求都带 Eval SP 会话的 `Authorization: Bearer`，浏览器请求的 `Origin` 必须是部署配置的 Eval Web 来源，否则返回 `403`。JSON 请求体必须使用 `Content-Type: application/json`。当前 `eval-web` 还没有页面实现。信封、状态码和完整错误码目录以 [Eval HTTP 控制面](eval-http-api.md) 为准，要点如下：
+
+- 成功：`{ "success": true, "msg": <数据>, "errMsg": "", "code": "" }`；创建返回 `201`，删除和 Dataset 关联变更返回空体 `204`。
+- 失败：`{ "code", "errMsg", "requestId", "errors"? }`，响应头 `X-Request-ID` 与 `requestId` 相同，便于反馈问题。按 `code` 区分原因，不解析 `errMsg` 文本；可用 `@eval-platform/eval-contracts/http-errors` 的 `decodeError` 解码。
+- `422 REQUEST_VALIDATION_FAILED`：字段不合法，`errors[].path` 指向出错字段，可直接标注到表单。
+- `400`：JSON 格式错误或重复字段（`REQUEST_INVALID_JSON`），或通过格式校验后被业务规则拒绝（如 `DATASET_INPUT_INVALID`、`CATALOG_INPUT_INVALID`、`BUNDLE_FILE_INVALID`）。
+- `401`：会话无效，需重新登录；`404`：资源不存在或不属于当前用户；`409`：仍有绑定（如 `BUNDLE_RESOURCE_IN_USE`、`OUTPUT_SCHEMA_IN_USE`、`DATA_IN_USE`）或输出格式已锁定（`PROJECT_OUTPUT_SCHEMA_CONFLICT`）等冲突；`413`：超过大小限制；`415`：`Content-Type` 不是 JSON。
+- `503`：Eval SP、数据库或 Bundle 目录暂不可用，可稍后原样重试。
+
+删除收到 `409` 时保留当前列表状态，不要在 UI 中先把条目移除。
 
 Web 最少需要完成以下闭环：
 
@@ -130,6 +139,6 @@ Web 最少需要完成以下闭环：
 2. 创建 Bundle，分别上传、列出、选择 Material 和 Session；支持单文件与目录文件数组。
 3. 对每条 Data 独立绑定、改绑、清空执行素材、评估素材和执行上下文。
 4. 上传、列出输出格式，并在 Project 上绑定或清空其 ID。
-5. 提供元数据修改、关联解除和软删除入口；对 `409`、`404`、`413` 给出可操作的提示。
+5. 提供元数据修改、关联解除和软删除入口；对 `422`、`409`、`404`、`413` 给出可操作的提示。
 
-实现时可直接对照 [Dataset 模型](../packages/eval-dataset/src/dataset/model.ts)、[Prompt 文件解析](../packages/eval-dataset/src/dataset/serialization.ts)、[Dataset/Data HTTP 路由](../apps/eval-api/src/http-api.ts)、[资源 HTTP 路由](../apps/eval-api/src/initial-resources.http.ts)、[输出格式 HTTP 路由](../apps/eval-api/src/output-schemas.http.ts)和 [Bundle 文件校验](../apps/eval-api/src/sp/bundle-directory.ts)。后端已有单元及 PostgreSQL 集成测试；真实 Eval SP 跨部署联调仍需在接 Web 时验证。
+实现时可直接对照 [Dataset 模型](../packages/eval-dataset/src/dataset/model.ts)、[Prompt 文件解析](../packages/eval-dataset/src/dataset/serialization.ts)、[Dataset 路由](../apps/eval-api/src/routes/datasets/datasets.routes.ts)、[Data 路由](../apps/eval-api/src/routes/data/data.routes.ts)、[资源路由](../apps/eval-api/src/routes/bundles/bundles.routes.ts)、[输出格式路由](../apps/eval-api/src/routes/output-schemas/output-schemas.routes.ts)、[错误码目录](../packages/eval-contracts/src/http-errors.ts)和 [Bundle 文件校验](../apps/eval-api/src/sp/bundle-directory.ts)。后端已有单元及 PostgreSQL 集成测试；真实 Eval SP 跨部署联调仍需在接 Web 时验证。

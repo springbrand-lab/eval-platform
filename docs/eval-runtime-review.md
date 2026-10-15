@@ -587,9 +587,9 @@ Runtime 内部不再对同一份配置做分散、重复和不一致的临时判
 - Resolver 将省略的 `retryPolicy` 归一化为明确的默认策略，返回 `ResolvedExecutionConfig` / `ResolvedEvaluationConfig`；Runtime 阶段只接收这些有效配置。
 - Resolver 会剥离未参与契约的额外字段，并复制 Sample ID、Harness、运行参数和 RetryPolicy，避免配置 Store 的可变对象泄漏到运行时。
 - `RuntimeRunRecord.config` 保存本次 Run 的 `RunConfigSnapshot`：执行 Run 保存 Execution 配置，评估 Run 保存 Evaluation 配置，Pipeline 保存 Pipeline 及其解析后的两份阶段配置。
-- `SpHarnessConfig.runtime` 不只是快照字段；Runtime 将 `workspaceMode`、`timeoutMs` 作为 `HarnessRuntimeOptions` 贯穿 Subject/Evaluator 的创建、素材准备、提交、状态等待/校准、产物收集和评估输入准备调用。
-- `SpHarnessConfig.framework` 必填并支持 `sp | codex | cc`；Subject 可选择三者，EvaluationConfig 固定 SP 宿主和 SP 框架。框架经 Resolver 校验、归一化后保存在 Run 快照中，参与请求幂等指纹，并传入 `ensureAgent`；返回 Handle 必须绑定所选框架，之后的提交、重启和收集复用同一 Handle。缺少或非法框架直接拒绝，不兼容静默默认 SP。
-- 当前 Runtime 只实现 SP Harness；遇到 `RemoteHarnessConfig` 会明确报未实现错误，不会静默丢弃 `runOptions`。
+- `HarnessConfig.runtime` 不只是快照字段；Runtime 将其作为 `HarnessRuntimeOptions` 交给 Harness：SP Harness 在确保 Chat 和提交 Prompt 时发送给 SP，并用其中的超时约束终态等待。Evaluator 的 Workspace 绑定由 Runtime 在创建时给出，不是运行选项。
+- `HarnessConfig.framework` 必填并支持 `sp | codex | cc`；Subject 可选择三者，EvaluationConfig 固定 SP 宿主和 SP 框架。框架经 Resolver 校验、归一化后保存在 Run 快照中，参与请求幂等指纹，并传入 `ensureAgent`；返回 Handle 必须绑定所选框架，之后的提交、重启和收集复用同一 Handle。缺少或非法框架直接拒绝，不兼容静默默认 SP。
+- Harness 配置只有 SP 一种，没有未实现的远程 Harness 分支。
 - Run、Sampling、EvaluationRecord 和有效配置快照通过 `createRunWithSamplings()` 一次原子提交；后续配置 Store 的变化不会改变已创建 Run 的生效配置。
 - 不引入 version；配置 ID 保留在快照中，同时保存完整生效字段。
 - `packages/eval-runtime/src/runtime/index.test.ts` 覆盖 Subject 和 Evaluator 的运行参数确实到达 Harness 生命周期调用。

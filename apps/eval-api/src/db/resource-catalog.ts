@@ -1,6 +1,6 @@
 import type { Data, InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import { and, eq, isNull, or, sql, type SQL } from "drizzle-orm";
-import type { BundleDirectory, MaterialFile, SessionContent } from "../sp/bundle-directory.js";
+import type { BundleDirectory, MaterialFile } from "../sp/bundle-directory.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import { parseCatalogMetadataPatch, platformId, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";

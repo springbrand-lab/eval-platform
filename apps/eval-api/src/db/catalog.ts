@@ -3,12 +3,12 @@ import { DatasetEntityNotFoundError, dataSchema } from "@eval-platform/eval-data
 import type { RuntimeCatalog, Sample } from "@eval-platform/eval-runtime";
 import { RuntimeAdmissionConflictError, RuntimeEntityNotFoundError } from "@eval-platform/eval-runtime";
 import { and, eq, gt, inArray, isNull } from "drizzle-orm";
-import { EVALUATION_SAMPLING_IDS } from "../limits.js";
-import { isPageSize, MAX_PAGE_SIZE, selectByIds } from "./batch.js";
+import { EVALUATION_SAMPLING_IDS, SAMPLING_PAGE_SIZE_DEFAULT } from "../limits.js";
+import { selectByIds } from "./batch.js";
 import { platformId, requiredCatalogLabel } from "./catalog-metadata.js";
 import type { EvalDb } from "./client.js";
 import { createPostgresDatasetStore } from "./dataset.js";
-import { CatalogInputError, EvaluationSelectionTooLargeError, OutputSchemaNotFoundError } from "./errors.js";
+import { EvaluationSelectionTooLargeError, OutputSchemaNotFoundError } from "./errors.js";
 import { requireOwnerUserId } from "./owner.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
 import { samplingSucceeded, type RecordReader } from "./run-records.js";
@@ -194,10 +194,7 @@ export function createPostgresProjectCatalog(
       return readSamples(db, sampleIds, owner);
     },
     async listSuccessfulSamplings(projectId, input = {}) {
-      const limit = input.limit ?? 100;
-      if (!isPageSize(limit)) {
-        throw new CatalogInputError(`Successful Sampling page size must be between 1 and ${MAX_PAGE_SIZE}`, "limit");
-      }
+      const limit = input.limit ?? SAMPLING_PAGE_SIZE_DEFAULT;
       const rows = await db.select({
         samplingId: samplings.samplingId,
         sampleId: samplings.sampleId,

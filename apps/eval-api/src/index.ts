@@ -27,7 +27,7 @@ export type { EvalSpRelease } from "./db/release.js";
 export type { ProjectRunView } from "./db/run-view.js";
 export { createPostgresMetricsSource } from "./db/metrics.js";
 export { createRunJobHandler, RunStillActiveError, startEvalRunWorker } from "./worker.js";
-export type { EvalRunWorker, EvalRunWorkerOptions, RunJobHandlerOptions, RunWorkerStore } from "./worker.js";
+export type { EvalRunWorker, EvalRunWorkerOptions, RunJobHandlerOptions } from "./worker.js";
 export { createRunQueue, openRunBoss, RUN_QUEUE, RUN_QUEUE_OPTIONS, startRunQueue } from "./run-worker-queue.js";
 export type { RunJob, RunQueue, RunQueueProducer } from "./run-worker-queue.js";
 export { createEvalSpClient, EvalSpApiError, EvalSpTransportError } from "./sp/client.js";

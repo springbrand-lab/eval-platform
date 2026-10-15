@@ -2,7 +2,7 @@
 
 `eval-platform` 是独立的内部评估平台。它负责编排数据、被评估 Agent、评估 Agent 和评估结果，不把评估逻辑放回 `sp-platform`。
 
-当前阶段已完成包边界、公共契约、Dataset 管理、Runtime 编排、Metrics 四层查询，以及 `eval-api` 中的 PostgreSQL 持久化、HTTP 控制面和单实例 Run Worker。Web、CLI 仍是骨架；独立 SP 部署的真实端到端联调尚未完成。
+当前阶段已完成包边界、公共契约、Dataset 管理、Runtime 编排、Metrics 四层查询，以及 `eval-api` 中的 PostgreSQL 持久化、Hono HTTP 控制面和基于 pg-boss、可多实例部署的 Run Worker。Web、CLI 仍是骨架；独立 SP 部署的真实端到端联调尚未完成。
 
 已确定的部署目标是从固定 SP 分支的一次构建中独立发布 Eval SP API/数据库、Agent Worker、Space Worker、DO 命名空间和 R2；Eval 的登录、Agent Config 和全部 Agent 运行接口只指向这套 SP。Eval 业务事实仍在自己的 PostgreSQL 中。详见[独立 SP 部署方案](docs/eval-sp-deployment.md)和[SP 接口需求](docs/sp-eval-api-requirements.md)。
 
@@ -84,7 +84,7 @@ eval-contracts → eval-dataset → eval-runtime → eval-metrics
                        eval-api / eval-web / eval-cli
 ```
 
-`eval-runtime` 消费 `eval-dataset`，并将每个 `Sampling` 的执行产物、完整轨迹和评估输出交给 `eval-metrics`；应用层只消费四个顶层包的公共入口。Harness 契约属于 `eval-runtime`，具体 Eval SP HTTP/WebSocket 接线由 `eval-api` 组合，不新增 `eval-sp-adapter`。CC、Codex 等进程细节也不进入评估核心；未来需要时再通过统一远程 Harness 接入。
+`eval-runtime` 消费 `eval-dataset`，并将每个 `Sampling` 的执行产物、完整轨迹和评估输出交给 `eval-metrics`；应用层只消费四个顶层包的公共入口。Harness 契约属于 `eval-runtime`，具体 Eval SP HTTP/WebSocket 接线由 `eval-api` 组合，不新增 `eval-sp-adapter`。CC、Codex 等框架通过 SP Harness 的 `framework` 选择接入，进程细节不进入评估核心。
 
 ## 开发基线
 
@@ -95,7 +95,9 @@ eval-contracts → eval-dataset → eval-runtime → eval-metrics
 
 工程约定与 `sp-platform` 对齐：每个 workspace 都有独立的 package metadata、TypeScript 配置、README、公共入口和 Vitest 入口；应用额外拥有自己的 `CONTEXT.md`。`eval-api` 使用注入的 `pg` 连接池、Drizzle 和独立迁移；不复制 SP 私有数据库客户端或 Agent 内核。Eval 发布流程从固定 SP 源码部署独立的 SP 运行环境，Eval 代码不导入其私有源文件。可使用 `DATABASE_URL` 运行数据库集成测试。
 
-接入真实环境前，还需要部署独立的 Eval SP 与 Eval API/Worker，配置各服务地址、数据库和 Bundle 目录，并验证登录、Agent 初始化、执行、评估、证据和指标的完整链路。Project 分支绑定与 Run commit 来源记录已在类型和数据库中实现。
+本地安装与联调要求 sp-platform 检出在本仓库的同级目录 `../sp-platform` 并已执行 `pnpm install`：`@springbrand/eval-harness`、`@springbrand/utils` 当前以 `link:` 依赖其工作区包，发布计划见 [SP 共享包发布待办](docs/sp-package-publishing-todo.md)。
+
+接入真实环境前，还需要部署独立的 Eval SP 与 Eval API/Worker，配置各服务地址、数据库和 Bundle 目录（进程与环境变量见 [eval-api README](apps/eval-api/README.md)），并验证登录、Agent 初始化、执行、评估、证据和指标的完整链路。Project 分支绑定与 Run commit 来源记录已在类型和数据库中实现。
 
 ## CI
 

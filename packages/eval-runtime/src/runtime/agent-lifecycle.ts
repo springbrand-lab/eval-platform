@@ -7,7 +7,6 @@ import type {
   RetryPolicy,
   Sampling,
   SamplingStatus,
-  SpHarnessConfig,
 } from "@eval-platform/eval-contracts";
 import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 
@@ -27,7 +26,7 @@ import type {
 } from "./retry.js";
 import { validateResourceSnapshot } from "./resources.js";
 import type { RuntimeStore } from "./store.js";
-import { RuntimeInputError, RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
+import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 
 export type AgentLifecycleStage = "execution" | "evaluation";
 
@@ -64,7 +63,16 @@ export interface AgentLifecycleDependencies {
   readonly idFactory: () => string;
   readonly now: () => string;
   readonly sleep: (milliseconds: number) => Promise<void>;
-  readonly onError?: (error: Error) => void;
+  readonly onError: (error: Error) => void;
+}
+
+/** Report a failure that must not interrupt the Run; a reporter that throws is the last resort for stderr. */
+export function reportError(onError: (error: Error) => void, error: Error): void {
+  try {
+    onError(error);
+  } catch (reportingError) {
+    console.error(error, reportingError);
+  }
 }
 
 /** Everything an execution or evaluation stage needs to drive and persist one record. */
@@ -80,7 +88,7 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   readonly samplingId: string;
   readonly chatId: string;
   readonly evaluationWorkspace?: EvaluationWorkspaceBinding;
-  readonly harnessConfig: SpHarnessConfig;
+  readonly harnessConfig: HarnessConfig;
   readonly prompt: string;
   readonly retryController: RetryController;
   readonly attempts: readonly TAttempt[];
@@ -173,13 +181,6 @@ export function applyAttemptPatch<TAttempt extends AgentAttemptRecord>(
     ...(patch.error === undefined ? {} : { error: patch.error }),
     ...(patch.resources === undefined ? {} : { resources: patch.resources }),
   } as TAttempt;
-}
-
-export function requireSpHarness(harness: HarnessConfig, role: AgentRole): SpHarnessConfig {
-  if (harness.kind !== "sp") {
-    throw new RuntimeInputError(`${role} harness kind ${harness.kind} is not implemented`, "harness.kind");
-  }
-  return harness;
 }
 
 export function withExecutionStatus(
@@ -366,11 +367,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
               options.stage + " resource refresh failed for sampling " + options.samplingId
               + " and Chat " + resourceScope.chatId + ": " + resources.error,
             );
-            try {
-              (dependencies.onError ?? console.error)(reported);
-            } catch (reportingError) {
-              console.error(reported, reportingError);
-            }
+            reportError(dependencies.onError, reported);
           } else {
             attempt = await options.updateAttempt(attempt, {
               ...terminalPatch,

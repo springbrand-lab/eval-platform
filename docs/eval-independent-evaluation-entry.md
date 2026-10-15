@@ -15,7 +15,7 @@
 | 分页筛选 `listSuccessfulSamplings` | `projectId`；可选 `sampleId`、排他游标 `afterSamplingId`、`limit`（默认 100，范围 1–1000） | 按 `samplingId` 升序的 `{samplingId, sampleId}` 列表和 `nextCursor`；无后续页时为 `null` |
 | 全选 `selectAllSuccessfulSamplingIds` | `projectId`；可选 `sampleId` | 同一筛选条件下、按 `samplingId` 升序的全部 ID；无匹配时为空数组；超过单次提交上限时报错，不返回截断列表 |
 
-两个查询共用用户、Project、执行成功状态和可选 Sample 的条件。分页用于展示和手动选择；“一键全选”调用全选查询一次，取得确定的 ID 数组。单次全选或提交最多 10,000 个 ID；全选响应为提交保留 8 KiB 的字段空间，超出 8 MiB 请求上限时返回 413。超过上限时可按 Sample 筛选或分次手动选择，不会返回误称“全部”的截断列表。全选结果是查询时的候选集合，不是一个持续变化的筛选表达式，也不另存一份选择状态。
+两个查询共用用户、Project、执行成功状态和可选 Sample 的条件。分页用于展示和手动选择；“一键全选”调用全选查询一次，取得确定的 ID 数组。单次全选或提交最多 10,000 个 ID；全选超过上限时报错，可按 Sample 筛选或分次手动选择，不会返回误称“全部”的截断列表。提交的请求体上限由该 ID 数量推导，满额的合法列表不会因体积被拒。全选结果是查询时的候选集合，不是一个持续变化的筛选表达式，也不另存一份选择状态。
 
 ## 提交与重试
 
@@ -32,31 +32,17 @@
 
 手动选择与全选都传确定、非空、无重复的 `samplingIds`，并传本次用户意图的 `idempotencyKey`。一次意图从首次提交到超时重试、网络重发和重复点击，都复用**同一 ID 顺序、配置 ID、Project 和 key**；重试不能再次调用全选查询来生成新列表。若全选为空，不提交评估请求。API 将这份请求交给 Runtime `evaluate()`，并把其 `RunHandle` 返回调用方。
 
-幂等键在 Project 内唯一，`start()`、`pipeline()` 和 `evaluate()` 共用这条规则。当前 Run 的相同 key 与请求事实返回原 Run；同一 key 换操作、配置 ID 或 Sampling ID 列表（包括顺序）时报冲突。同一 Runtime 实例内，并发的同一意图共用第一次提交的 Promise，因此即使配置在两次点击之间改变，本次提交仍使用第一次解析并准入的生效配置。已准入后的重放用原 Run 保存的有效配置校验，不重新解析已修改的配置。全新的一次主动重跑或重评估需要新 key；已被替换的旧 key 留在仅保存请求身份的账本中，迟到重试返回 409，不会重新启动。Runtime 和 Store 在准入前后分别查重，数据库唯一约束兜底并发请求；只有新 Run 唤醒 Worker。内存同步只处理同一实例内的并发，不代替 Store 的持久化幂等。
+幂等键在 Project 内唯一，`start()`、`pipeline()` 和 `evaluate()` 共用这条规则。当前 Run 的相同 key 与请求事实返回原 Run；同一 key 换操作、配置 ID 或 Sampling ID 列表（包括顺序）时报冲突。同一 Runtime 实例内，并发的同一意图共用第一次提交的 Promise，因此即使配置在两次点击之间改变，本次提交仍使用第一次解析并准入的生效配置。已准入后的重放用原 Run 保存的有效配置校验，不重新解析已修改的配置。全新的一次主动重跑或重评估需要新 key；已被替换的旧 key 留在仅保存请求身份的账本中，迟到重试以冲突拒绝，不会重新启动。Runtime 和 Store 在准入前后分别查重，数据库唯一约束兜底并发请求；只有新 Run 投递 Worker 任务。内存同步只处理同一实例内的并发，不代替 Store 的持久化幂等。
 
-同一 Project 同时只允许一批未结束的 Run，执行、联跑和独立评估共用此限制。Store 在 Project 行锁内先处理同 key 重放，再检查是否有 `queued`、`starting`、`running` 或 `retrying` 的 Sampling 或 EvaluationRecord；新 key 遇到未结束 Run 返回 `409 PROJECT_BUSY`，且不产生新 Run 或评估记录。停止请求也必须完成证据收尾后才可重跑。原 Run 的所有阶段进入终态后，新 key 在同一事务中清掉被替换的运行状态并启动新批次。执行重跑中的 Sampling 未完成前，Project 忙碌检查阻止启动独立评估；未成功的 Sampling 本身也不进入候选集。配置在这段时间内可以编辑，当前 Run 和同 key 重放仍沿用原快照。
+同一 Project 同时只允许一批未结束的 Run，执行、联跑和独立评估共用此限制。Store 在 Project 行锁内先处理同 key 重放，再检查是否有 `queued`、`starting`、`running` 或 `retrying` 的 Sampling 或 EvaluationRecord；新 key 遇到未结束 Run 时被拒绝，且不产生新 Run 或评估记录。停止请求也必须完成证据收尾后才可重跑。原 Run 的所有阶段进入终态后，新 key 在同一事务中清掉被替换的运行状态并启动新批次。执行重跑中的 Sampling 未完成前，Project 忙碌检查阻止启动独立评估；未成功的 Sampling 本身也不进入候选集。配置在这段时间内可以编辑，当前 Run 和同 key 重放仍沿用原快照。
 
 提交时 Runtime 分批读取 Sampling 和不同 Sample 的输入，再检查每个 Sampling 属于该 Project、执行成功且输入可读取；Store 在原子准入中再次检查。选择后若候选已失效，整批提交失败，不留下半批 Run 或 EvaluationRecord。调用方需要重新选择并以新意图提交。
 
 ## HTTP 控制面
 
-所有路由都要求 `Authorization: Bearer <Eval SP session token>`。API 每次请求向固定的 Eval SP `/api/auth/me` 校验活动会话，再按返回的用户 ID 访问该用户的 Catalog 和 RuntimeStore；客户端不能提交用户 ID。无权访问的 Project 或 Run 返回 404。
+路由、请求体、状态码与错误码见 [Eval HTTP 控制面](eval-http-api.md)；停止当前 Run 的异步收尾语义见[架构方案](architecture.md#run-调度与停止)。控制面从已校验的 Eval SP 会话取得用户 ID，客户端不能提交用户 ID；无权访问的 Project 或 Run 按不存在处理。
 
-| 路由 | 请求 | 成功响应 |
-| --- | --- | --- |
-| `GET /api/projects/:projectId/samplings/successful` | 可选 `sampleId`、`afterSamplingId`、`limit` | `200 { samplings, nextCursor }` |
-| `GET /api/projects/:projectId/samplings/successful/ids` | 可选 `sampleId` | `200 { samplingIds }` |
-| `POST /api/projects/:projectId/evaluations` | JSON `{ evaluationConfigId, samplingIds, idempotencyKey }` | `202 { runId, samplingIds }`，重放也返回原 RunHandle |
-| `GET /api/projects/:projectId/runs/current` | 无请求体 | `200 { run: {runId, stopRequested?} \| null }` |
-| `POST /api/projects/:projectId/runs/:runId/stop` | 无请求体；路径明确本次 Run ID | `202 { runId, stopRequested: true }`；Worker 异步中断 SP Submission 并收尾 |
-| `GET /api/projects/:projectId/runs/:runId` | 无 | `200 { run }`，包含本次 Run 的 Evaluation ID 列表和状态 |
-| `GET /api/projects/:projectId/runs/:runId/evaluations` | 无 | `200 { evaluations }`，按 Run 的 Evaluation ID 顺序返回记录和结果 |
-
-提交接口只接受显式、非空、无重复的 ID 列表，不接受筛选表达式或“提交时全选”。查询时的一键全选结果由调用方固定后提交；同一意图重试发送原请求体。标识符和幂等键最多 512 字符，幂等键不能有首尾空白。POST 要求 `Content-Type: application/json`，请求体最多 8 MiB；超出 ID 数量或体积上限返回 413，格式不符返回 415。其他无效输入返回 400，缺失或失效会话返回 401，未找到的 Project/Run/评估配置返回 404，幂等身份冲突、Project 已有未结束 Run 或已失效的 Sampling 选择返回 409；未预期的内部错误返回 500，Eval SP 校验不可用返回 502。错误响应为 `{ "error": { "code": string, "message": string } }`。宿主可配置可信 Web Origin；配置后预检请求只对该 Origin 开放，其他 Origin 返回 403。
-
-停止接口只影响路径指定且当前正在运行或收尾的 Run；原 Run 尚未被替换时重复请求仍返回原结果，不会误停后续批次。替换后旧 Run 已删除，旧 ID 返回 404。可先通过 `GET .../runs/current` 查询当前 ID。未知或已被替换的 Run 返回 404，已自然终结的 Run 返回 `409 NO_ACTIVE_RUN`。停止请求落库后 Worker 立即向 Eval SP 请求中断正在运行的 Submission，未开始的阶段不再提交。取消后的 Subject 证据和完整轨迹尚未保存前，Project 仍视作运行中，不能提交下一批；即使阶段已经终结，仍须等 Worker 写入 `stopFinalized`。Run 查询先显示 `stopRequested`，收尾期间显示 `retrying`，全部完成后显示 `cancelled`。
-
-API 的服务工厂按 Eval SP 用户 ID 在活动请求期间共享一套用户范围内的 Project Catalog、ConfigStore/ConfigResolver 和 Runtime 准入接口；同一用户的并发提交由同一 Runtime 实例处理，空闲用户条目从内存移除。HTTP 路由只负责鉴权、输入校验、Project/Run 归属和组合调用；Run 准入与结果事实仍由 Runtime 和 Store 负责。Run 准入事务分批写入大量关联，保证全选列表不会触及单条 SQL 的参数上限；Run 状态与 Evaluation 结果在同一只读事务内分批读取和投影。标准 `start:api` 也挂载这五条既有路由；`start:independent-api` 保留独立入口。两个 API 进程都使用用户范围 PostgreSQL ConfigReader，不持有 SP Harness 服务凭证；独立 `start:worker` 进程用真实 Harness 执行已入库的 Run。
+同一用户的活动请求共享一套用户范围内的 Project Catalog、ConfigReader 和 Runtime 准入实例，因此并发的同一意图由同一 Runtime 实例合并；空闲用户条目从内存移除。Run 准入事务分批写入大量关联，全选列表不会触及单条 SQL 的参数上限；Run 状态与 Evaluation 结果在同一只读事务内分批读取和投影。准入成功时 Run 任务在同一事务内投递给独立的 Run Worker，HTTP 进程不持有 SP Harness 服务凭证。
 
 ## 控制面接入验收
 

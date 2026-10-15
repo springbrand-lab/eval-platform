@@ -3,14 +3,13 @@ import { platformIdSchema } from "@eval-platform/eval-dataset";
 import { evalInitialContextSchema } from "@springbrand/eval-harness";
 import { responseSchema } from "@springbrand/http/catalog";
 import { jsonContent } from "stoker/openapi/helpers";
+import { catalogLabelSchema, catalogMetadataPatchSchema } from "../../db/catalog-metadata.js";
 import type { BundleRecord, MaterialRecord, SessionRecord } from "../../db/resource-catalog.js";
 import { jsonBody } from "../../lib/request-body.js";
 import { MATERIAL_BODY_BYTES, METADATA_BODY_BYTES, SESSION_BODY_BYTES } from "../../limits.js";
 import { materialFilesSchema } from "../../sp/bundle-directory.js";
 import {
   bodyErrorResponses,
-  catalogLabelSchema,
-  catalogMetadataPatchSchema,
   conflictResponse,
   deletedResponse,
   errorResponses,

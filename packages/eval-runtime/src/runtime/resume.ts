@@ -7,7 +7,7 @@ import { isPendingSamplingStatus } from "@eval-platform/eval-contracts";
 import { createId } from "@springbrand/utils";
 import type { ResolvedEvaluationConfig, ResolvedExecutionConfig } from "../config/model.js";
 import type { Harness } from "../harness/model.js";
-import { errorMessage, type StageDependencies } from "./agent-lifecycle.js";
+import { errorMessage, reportError, type StageDependencies } from "./agent-lifecycle.js";
 import { RuntimeEntityNotFoundError, RuntimeRunStoppedError } from "./errors.js";
 import { evaluateSampling } from "./evaluation.js";
 import { executeSampling } from "./execution.js";
@@ -34,7 +34,7 @@ export class RunResumer implements EvalRunResumer {
     this.#harness = dependencies.harness;
     this.#getEvaluationOutputSchema = dependencies.getEvaluationOutputSchema;
     this.#createRetryController = dependencies.createRetryController ?? createRetryController;
-    this.#onError = dependencies.onError ?? ((error) => console.error(error));
+    this.#onError = dependencies.onError;
     this.#stage = {
       harness: dependencies.harness,
       store: dependencies.store,
@@ -261,11 +261,7 @@ export class RunResumer implements EvalRunResumer {
           [error, finalizationError],
           `Could not finalize evaluation ${evaluation.evaluationId} for sampling ${evaluation.samplingId}`,
         );
-        try {
-          this.#onError(reported);
-        } catch (reportingError) {
-          console.error(reported, reportingError);
-        }
+        reportError(this.#onError, reported);
       }
     }
   }

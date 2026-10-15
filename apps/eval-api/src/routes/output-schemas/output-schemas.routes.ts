@@ -3,12 +3,11 @@ import { platformIdSchema } from "@eval-platform/eval-dataset";
 import { responseSchema } from "@springbrand/http/catalog";
 import { jsonContent } from "stoker/openapi/helpers";
 import type { OutputSchemaRecord } from "../../db/output-schemas.js";
+import { catalogLabelSchema, catalogMetadataPatchSchema } from "../../db/catalog-metadata.js";
 import { jsonBody } from "../../lib/request-body.js";
 import { METADATA_BODY_BYTES, OUTPUT_SCHEMA_BODY_BYTES } from "../../limits.js";
 import {
   bodyErrorResponses,
-  catalogLabelSchema,
-  catalogMetadataPatchSchema,
   conflictResponse,
   deletedResponse,
   errorResponses,

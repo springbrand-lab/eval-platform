@@ -13,14 +13,6 @@ export const idempotencyKeySchema = z.string().min(1).max(IDENTIFIER_CHARS)
 /** Runtime entity IDs (Project, Run, Sample, Sampling, Evaluation, Config) are opaque path-safe text. */
 export const entityIdSchema = idempotencyKeySchema.refine((value) => !value.includes("/"), "must not contain '/'");
 
-/** Bundle, Material, Session and output-format names and descriptions. */
-export const catalogLabelSchema = z.string().trim().min(1);
-
-export const catalogMetadataPatchSchema = z.strictObject({
-  name: catalogLabelSchema.exactOptional(),
-  description: catalogLabelSchema.exactOptional(),
-}).refine((patch) => Object.keys(patch).length > 0, "Specify name or description");
-
 export function jsonBodyContent<T extends z.ZodType>(schema: T) {
   return { required: true, content: { "application/json": { schema } } } as const;
 }

@@ -1,41 +1,63 @@
 # @eval-platform/eval-api
 
-`pnpm --filter @eval-platform/eval-api start:api` starts the authenticated Node HTTP control plane. It verifies each bearer token against Eval SP, then composes owner-scoped Dataset, Catalog, Config, Run admission and Metrics services. It also mounts the established project-scoped independent evaluation routes, including their `202` response and selection limits. Run admissions persist work and notify the separate Worker. Routes, request bodies, responses and required environment variables are defined in [Eval HTTP control plane](../../docs/eval-http-api.md). The API process and Worker mount the same `EVAL_BUNDLE_DIR`; the API mounts the initial-resource upload and Data binding handler after authentication.
+内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、`RuntimeStore`、Project/Sample Catalog、Config 存储、只读 `MetricsSource`）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。
 
-Dataset 页的新上传流程见 [Dataset upload](../../docs/eval-dataset-upload.md)：Prompt JSON/JSONL 文件只含逐条 Data，Dataset 的 name/description 随导入请求提交；Bundle、Material、Session 的 ID 由服务端按 SP 的 UUID 规则生成，元数据由用户填写并按 owner 存在 PostgreSQL，原始素材与上下文仍存在共享 Bundle 目录。上传每条 Material 或 Session 后可查询清单，再给 Data 绑定具体引用。
+## 进程与环境变量
 
-评估输出格式通过 `POST /api/evaluation-output-schemas` 单独上传 JSON Schema 文件内容和必填的 name/description，服务端生成 UUID 并按 draft 2020-12 验证。`PUT /api/projects/{projectId}/evaluation-output-schema` 只绑定 `{outputSchemaId}`；首次评估 Run 准入前可切换，之后固定。评估 Run 准入要求已绑定格式。Worker 按 ID 取 Schema，再作为素材根目录下的 `evaluation-output.schema.json` 文件交给每个 Eval Agent。
+本文是环境变量的唯一完整列表。两个进程对接同一 Eval SP 发布，挂载同一个 `EVAL_BUNDLE_DIR`，配置无效时启动失败。日志统一使用 pino（API 请求日志用 `hono-pino`），错误经 `errorDiagnostics` 脱敏后记录。
 
-内部评估控制面的数据库与执行器组合层：PostgreSQL `DatasetStore`、`RuntimeStore`、Project/Sample Catalog、只读 `MetricsSource` 和单实例 Run Worker。连接池由宿主注入；数据库只有 `migrations-postgres/0000_initial.sql` 初始基线，用 `pnpm --filter @eval-platform/eval-api db:migrate` 应用（需 `DATABASE_URL`）。
+`pnpm --filter @eval-platform/eval-api start:api`（`src/server.ts`，配置见 `src/config/api.ts`）启动 HTTP 控制面：
 
-Catalog 提供 Project 下执行成功 Sampling 的分页查询及全选 ID 查询，二者使用同一 owner/Project/执行状态条件，按 Sampling ID 稳定排序。单次全选和提交最多 10,000 条 Sampling，POST 请求体最多 8 MiB；超过上限返回 413，不返回截断的“全选”列表。独立评估的 HTTP 处理器提供分页、全选 ID、显式 ID 提交、Run 状态和本次 Run 的 Evaluation 结果查询；路由和请求契约见[独立评估入口](../../docs/eval-independent-evaluation-entry.md)。提交时将已确定的 ID 列表交给 Runtime `evaluate()`；RuntimeStore 和 Catalog 按输入顺序批量读取 Sampling 与 Sample，再在同一事务内分批写入关联，查询和写入次数不会逐条增长。重试复用同一列表和 Project 范围内唯一的 `idempotencyKey`。三个 Run 入口的 key 与请求事实指纹在同一次 Run 准入事务中持久化，相同请求返回原 Run，冲突请求拒绝，只有新 Run 发送 Worker 通知。同一 Project 有未结束 Run 时，新 key 的执行、联跑或独立评估提交统一返回 409；当前 Run 的同 key 重放仍返回原 Run；全部阶段终结后，新 key 可覆盖旧状态，旧 key 随即返回冲突。
+| 变量 | 说明 |
+| --- | --- |
+| `DATABASE_URL` | Eval PostgreSQL；API 也以生产者身份连接 pg-boss |
+| `EVAL_SP_API_ORIGIN` | Eval SP API：会话校验与 Agent Config |
+| `EVAL_WEB_ORIGIN` | Eval Web 来源：唯一的 CORS 与受信 Origin，同时作为 Agent Config 写请求发给 SP 的 Origin |
+| `EVAL_SP_SOURCE_BRANCH`、`EVAL_SP_SOURCE_COMMIT` | 当前 Eval SP 发布的分支与完整 commit |
+| `EVAL_BUNDLE_DIR` | 共享 Bundle 目录，绝对路径 |
+| `EVAL_API_HOST`、`EVAL_API_PORT` | 可选，默认 `127.0.0.1`、`8788` |
 
-`createIndependentEvaluationApi({ spClient, createOwnerServices, webOrigin? })` 提供 Fetch `handle(Request)`；每个受保护请求都通过 Eval SP 校验 Bearer 会话。服务工厂按校验得到的用户 ID 在活动请求期间共享 Catalog/Run 准入接口，同一用户的并发提交共用 Runtime 的待准入请求；请求结束后移除内存条目，已完成准入的重放仍由 PostgreSQL 判断。`createPostgresIndependentEvaluationApi({ db, spClient, release, webOrigin? })` 使用同一用户的只读 `createPostgresConfigReader()`，并将同一份已校验的 SP 分支与 commit 交给 PostgreSQL Project Catalog、RuntimeStore 和准入接口；它不持有某次登录的 Bearer token 或 SP Harness 服务凭证。配置编辑后仍由当前 Run 的保存快照判断同 key 重放；被替换的 Run key 由身份账本拒绝。`createIndependentEvaluationHttpServer(api)` 是 Node 传输层。Run 状态和本次 Evaluation 结果在一个只读一致性事务中按批读取，查询次数随批次数增长，不对每条 Sampling 分别查询。
+收到 SIGINT/SIGTERM 后停止接收请求，等待活动请求结束，再关闭 Run 队列和数据库连接池。API 不持有 Agent Worker 服务凭证，也不在请求中运行 Agent。
 
-`pnpm --filter @eval-platform/eval-api start:independent-api` 启动当前独立评估路由的 Node 进程。必需环境变量：`DATABASE_URL`、`EVAL_SP_ORIGIN`、`EVAL_WEB_ORIGIN`、`EVAL_SP_SOURCE_BRANCH` 和完整的 `EVAL_SP_SOURCE_COMMIT`；后两者来自同一次 Eval SP 部署。可选 `EVAL_API_HOST`（默认 `0.0.0.0`）和 `EVAL_API_PORT`（默认 `3000`）。进程接到 SIGINT/SIGTERM 后停止接收新请求，等待活动请求结束，再关闭数据库连接。部署前先应用本包迁移；Run 的实际执行由持有 `EVAL_SP_SERVICE_TOKEN` 的独立 `start:worker` 进程负责。
+`pnpm --filter @eval-platform/eval-api start:worker`（`src/run-worker-main.ts`，配置见 `src/config/worker.ts`）启动 Run Worker：
 
-`GET /api/projects/{projectId}/runs/current` 查询当前未结束或仍在收尾的 Run；`POST /api/projects/{projectId}/runs/{runId}/stop` 必须指定这条 Run，在 Project 行锁下持久化停止请求并通知 Worker。同一 Run 尚未被替换时重复停止请求返回原结果；替换后旧 Run ID 为 404，不会误停后来新建的 Run。Worker 调用 Eval SP 的服务端停止路由中断活跃 Submission，收尾已提交任务的资源和证据，再将未完成阶段标记取消。停止请求是异步的；直到所有阶段终结且 Worker 写入 `stopFinalized` 前，新 key 的启动仍返回 Project 忙碌冲突。启动扫描也会恢复尚未写入 `stopFinalized` 的停止请求。SP HTTP 请求默认最多等待 60 秒，停止调用最多等待 10 秒；超时后保留停止意图并由 Worker 重试收尾。
+| 变量 | 说明 |
+| --- | --- |
+| `DATABASE_URL` | Eval PostgreSQL 与 pg-boss |
+| `EVAL_SP_AGENT_ORIGIN` | Eval SP Agent Worker，提供 `/internal/v1/eval-harness` 服务路由 |
+| `EVAL_SP_SERVICE_TOKEN` | Eval SP 服务凭证，作为 `X-Eval-Service-Token` 发送 |
+| `EVAL_BUNDLE_DIR` | 与 API 相同的 Bundle 目录 |
+| `EVAL_RUN_WORKER_CONCURRENCY` | 可选，每个实例同时处理的 Run 数，默认 `8` |
 
-目标应用组合层还负责 Eval 独立 SP 的登录校验、`user-agent` 配置列表/编辑、公开 Chat/Submission/Trajectory/Workspace HTTP 与 WebSocket 客户端，以及真实 SP Harness。所有 SP 地址均指向 Eval SP API/Agent/Space，不请求 dev/production SP。Eval SP API/数据库保存账户、Agent Config、计费、Action 等 SP 事实；本应用的 PostgreSQL 只保存评估业务、SP 身份/证据引用及已采集的原始资源快照。Project 绑定当前发布的 SP 分支；首次 Run 准入时在同一事务内固定 Project 的初始操作和配置，此后执行或 Pipeline 新 Run 必须沿用该选择。Run 记录本次发布的实际 SP commit。独立评估只能使用原 Project 已成功的 Sampling，新增评估 Run 不修改 Project 的初始选择；不增加第五个共享包。
+Worker 可多实例部署、滚动升级；收到信号后停止取任务，等待进行中的 Run 结束再关闭 pg-boss 和连接池。调度、恢复、停止语义和剩余风险见[架构方案](../../docs/architecture.md#run-调度与停止)。
 
-登录由 Eval SP 完成。浏览器从 Eval SP 的 `/api/auth/session` 获取会话 Bearer token，调用 Eval API 时携带该 token；Eval API 对每个受保护请求调用固定 Eval SP 地址的 `/api/auth/me` 校验活动会话，不能仅解码 JWT 或直接读 SP 数据库。Agent Config 的列表和编辑通过同一 token 调用 Eval SP 的 `/api/user-agent-configs`；写请求由宿主注入 Eval SP 已信任的 Web Origin，满足 SP 的来源校验。Eval 不保存配置正文，也不接受客户端自报的用户身份。
+## 本地开发
 
-`src/sp/harness.ts` 实现 Eval 侧 SP Harness：使用服务凭证确保 Inbox Chat、初始化、提交/重启、按键校准、收集完整产物/轨迹和原始资源。标准 `start:worker` 从必填的 `EVAL_BUNDLE_DIR` 只读目录按用户和每条 Data 的 Bundle 引用读取素材 JSON 清单；可选 Session JSON/JSONL 上下文。目录路径、文件格式和 ID 编码见协议文档。应用也可通过 `startSpEvalRunWorkerProcess` 的 `sp.resolveInitialMaterials`/`resolveInitialSession` 注入其他读取器。终态以 WebSocket 推送为主；Ping/Pong 检测静默失活，断线后按原 Chat/Submission 读取一次权威状态并有限重连，健康连接期间不轮询。当前真实接入只支持 `sp` 框架；`codex`、`cc` 明确拒绝。服务契约见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。SP 服务路由已在独立 SP 分支实现，真实跨部署联调仍需完成。有素材引用而文件缺失时初始化明确失败；无 Session 内容时只保留引用。
+`@springbrand/eval-harness` 通过 `link:` 依赖 sp-platform 工作区，要求 sp-platform 检出在 eval-platform 的同级目录并已执行 `pnpm install`；发布计划见 [SP 共享包发布待办](../../docs/sp-package-publishing-todo.md)。`@springbrand/http` 直接来自 npm，与 SP 使用同一精确版本。
 
-`createInitialResourceHttpHandler(db, bundles)` 挂载 Bundle、Material、Session 资源目录及独立的 `output-schemas.http.ts` 输出格式路由，提供创建、列表、详情、名称/描述修改、软删除，以及 Data 资源引用和 Project 输出格式 ID 的绑定。标准 `start:api` 在 Eval SP 会话校验后挂载它们；`start:independent-api` 只提供独立评估路由。请求体不能指定用户。上传操作只写该用户的 Bundle 目录且同 ID 内容不可变；Session 上下文按 SP 的规范历史结构校验。所有 Data 写入路径都检查资源归属和删除状态；仍被 Data 或 Project 绑定的资源禁止删除，解除绑定后才软删除。
+数据库只有 `migrations-postgres/0000_initial.sql` 一个初始基线，用 `pnpm --filter @eval-platform/eval-api db:migrate` 应用（需 `DATABASE_URL`）；本地旧库与新基线或新请求指纹不一致时清库重建。测试设置 `DATABASE_URL` 后为每次运行创建独立的临时数据库；不提供时跳过需数据库的测试。pg-boss 在同一数据库中自建 `pgboss` schema。
 
-`src/db/client.ts`、`schema.ts` 定义与 SP 一致的 Drizzle/`pg` 注入边界和表结构；`src/db/dataset.ts` 将 Dataset/Data 及事务导入限定到已认证用户，`src/db/catalog.ts` 将 Project/Sample 查询限定到同一用户。Sampling、Run 和 Run/Sampling 关联携带用户归属，PostgreSQL 组合外键保证 Project、Sample、Sampling 和 Run 同用户；每个 Run 必须有幂等键及请求事实指纹，键在 Project 内唯一。`createPostgresProjectCatalog(db, ownerUserId, release)` 给准入控制面提供不依赖 Agent 列表的 Project/Sample 读取；`createPostgresCatalog(db, ownerUserId, agents, release)` 保留完整 Catalog。它们和 `createPostgresRuntimeStore(db, ownerUserId, release)` 使用同一已解析的 `EvalSpRelease`（分支和完整 commit），`createPostgresMetricsSource(db, ownerUserId)` 供用户请求使用；`ownerUserId` 必须来自 Eval SP 会话校验。新 Run 的分支和 commit 必须匹配发布信息，旧 Run 的幂等重放仍返回原 Run。查询和条件写入直接按用户过滤，Metrics 的 Run、Sampling 和 Evaluation 读取也在 SQL 中限定 Project。仅 Worker 使用 `createPostgresWorkerRuntimeStore(db)` 跨用户恢复 Run，HTTP 路由不能注入该 Store。`src/db/runtime.ts` 在同一事务内分批写入大量 Run/Sampling/Evaluation 关联，避开单条 SQL 的参数上限，并拒绝跨用户 Dataset/Sample；`src/db/metrics.ts` 在单个只读、一致性事务中投影四层展示所需的原始事实。Run 当前状态复用 Runtime 公共投影，不在数据库存第二份。初始 Session/素材只存外部引用，Agent 工作区和完整轨迹只保留 Runtime 原始引用；数据迁移不触碰 SP DO。
+## HTTP 控制面
 
-`createPostgresConfigStore(db, ownerUserId, sp, sessionToken)` 实现 Runtime 只读 `ConfigStore`，并为 API 控制面提供 Execution、Evaluation、Pipeline 配置的创建、编辑、列表和单条查询。`ownerUserId` 必须来自已校验的 Eval SP 会话；配置 ID 由服务端生成，编辑时以路径 ID 为准。Execution 配置关联同一用户的 Dataset，指定的 Sample 必须在保存事务中仍属于该 Dataset；Pipeline 只能引用该用户的两个基础配置。保存时用当前会话向 Eval SP 查询 Agent Config，核对真实归属；数据库外键保证 Dataset/Pipeline 引用。被执行配置引用的 Dataset 不可删除，删除请求得到 `DatasetInUseError`。不保存 SP Agent Config 正文。修改配置只影响未来新 Run，已启动 Run 继续使用自己的有效配置快照。
+路由、信封、状态码、错误码和请求体规则只在 [Eval HTTP 控制面](../../docs/eval-http-api.md) 描述；独立评估的选择与提交语义见[独立评估入口](../../docs/eval-independent-evaluation-entry.md)，Dataset 上传、初始资源与输出格式见 [Dataset upload](../../docs/eval-dataset-upload.md)。内容上限的唯一来源是 `src/limits.ts`，各路由的请求体上限由其推导。
 
-`createPostgresConfigReader(db, ownerUserId)` 只提供 Runtime 所需的三种配置查询，使用同一用户范围的 SQL，不保留登录 token；写入仍必须使用上面的完整 Store 验证当前 SP Agent Config 归属。
+登录由 Eval SP 完成。浏览器从 Eval SP 的 `/api/auth/session` 获取会话 Bearer token，调用 Eval API 时携带该 token；Eval API 对每个受保护请求调用 Eval SP 的 `/api/auth/me` 校验活动会话，不仅解码 JWT，也不读 SP 数据库。Agent Config 的列表和编辑用同一 token 调用 Eval SP 的 `/api/user-agent-configs`，写请求带上 `EVAL_WEB_ORIGIN` 以满足 SP 的来源校验。Eval 不保存配置正文，也不接受客户端自报的用户身份。
 
-`src/worker.ts` 提供 `startEvalRunWorker({ runtime, store, notifications })` 和 `createPostgresRunNotifications(DATABASE_URL)`。新增 Run 与 `pg_notify` 在同一事务内提交；Worker 先监听、再分页扫描未完成 Run，连接恢复时及定时扫描补漏，进程内同一 Run 不并行处理。通知不是持久任务；Run/Attempt 事实仍由 PostgreSQL 和 SP 公开操作持久化。Worker 进程可同时处理多个 Run，各 Run 内仍按执行和评估配置分别控制 Agent 并发。
+`owner-services.ts` 按已校验的用户组装一次用户范围内的服务；同一用户的并发请求经 `active-owner-admission.ts` 共享 Run 准入实例，请求结束后释放。Run 准入使用不保留登录 token 的 `createPostgresConfigReader`；配置编辑使用 `createPostgresConfigStore`，保存时用当前会话向 Eval SP 核对 Agent Config 的真实归属。
 
-`pnpm --filter @eval-platform/eval-api start:worker` 启动常驻的、只恢复已入库 Run 的 Node 进程。必需环境变量为 `DATABASE_URL`、`EVAL_SP_ORIGIN`、`EVAL_SP_SERVICE_TOKEN`、`EVAL_BUNDLE_DIR`；可选 `EVAL_RUN_WORKER_CONCURRENCY`、`EVAL_RUN_WORKER_SCAN_MS`。进程使用独立 Eval SP 服务身份，不保存用户登录 token；启动扫描前注册 SIGINT/SIGTERM，收到信号后等待活动 Run 完成再关闭数据库。运行配置从已保存的 Run 快照读取，Worker 只注入 Sample 读取、Store 和 Harness；Config 创建/解析仍属于 API 控制面。部署只能同时运行一个 Worker 实例。
+## PostgreSQL 适配器
 
-RuntimeStore 的 Sampling/Evaluation 写入必须携带预期旧事实。PostgreSQL 使用同一条条件 `UPDATE` 对 JSONB `facts` 做比较后替换；条件未命中即报告冲突，由 Runtime 读回校准，不覆盖其他已提交的 Attempt、资源或终态。无需额外版本列或状态表。
+`src/db/client.ts`、`schema.ts` 定义与 SP 一致的 Drizzle/`pg` 注入边界和表结构；领域错误类集中在 `src/db/errors.ts`。Dataset/Data、Project/Sample、Sampling、Run、Evaluation 都携带用户归属，组合外键保证 Project、Sample、Sampling、Run 和 Evaluation 同用户；同一 Run 内每个 Sampling 只有一条 Evaluation，Run 阶段与请求身份由 CHECK 约束守护，违反时报告 `RuntimeInputError`。每个 Run 必须有幂等键与请求事实指纹，键在 Project 内唯一。
 
-部署时 Worker 必须是**同一时刻只有一个实例的常驻 Node 进程**；升级先停止旧实例，再启动新实例，新实例会自动接手未完成 Run。不能把它启动在每个 HTTP 请求里，也不能只靠进程内 `Set` 防止跨进程竞争。宿主负责注入真实 SP Harness、Sample 读取、RuntimeStore 和数据库连接；Catalog 与 ConfigResolver 由 API 控制面注入。停止时先中止启动扫描的继续派发，再等待 Worker 的 `close()` 完成已启动的 Run、关闭连接池并启动新实例；尚未接手的 Run 留待下次扫描。运行中的 Agent 不因此标记失败。
+- `createPostgresProjectCatalog`、`createPostgresCatalog`、`createPostgresRuntimeStore` 使用同一已校验的 `EvalSpRelease`；新 Run 的分支和 commit 必须匹配发布信息。`ownerUserId` 必须来自 Eval SP 会话校验。
+- `createPostgresWorkerRuntimeStore` 只供 Worker 跨用户恢复 Run，HTTP 路由不能注入它。Run 准入与停止请求在同一事务内经 `fromDrizzle(transaction)` 投递 pg-boss 任务。
+- Sampling/Evaluation 写入携带预期旧事实，PostgreSQL 用同一条条件 `UPDATE` 比较 JSONB `facts` 后替换；未命中即报告冲突，由 Runtime 读回校准，不新增版本列。大量 Run/Sampling/Evaluation 关联在同一事务内分批写入，避开单条 SQL 参数上限。
+- Execution 配置的 Dataset 检查在保存事务中加锁，Pipeline 引用只靠外键；被 Execution 配置引用的 Dataset 不可删除。修改配置只影响未来新 Run。
+- `createPostgresMetricsSource` 与 Run 视图读取在单个只读、一致性事务中批量投影，Run 状态复用 Runtime 公共投影，不存第二份。
+- 初始 Session/素材只存外部引用，Agent 工作区和完整轨迹只保留 Runtime 原始引用；迁移不触碰 SP DO。
 
-测试设置 `DATABASE_URL` 后使用独立的临时 PostgreSQL 数据库执行集成测试；不提供时跳过需数据库的测试。唯一的初始迁移直接创建按用户隔离的 Dataset/Data/Sample 和 Config 结构。Node HTTP Server 与完整生产路由由 `start:api` 提供；`start:independent-api` 保留只提供独立评估入口的兼容进程。SP Harness 服务路由已在独立 SP 分支实现，真实跨部署联调仍需完成。Dataset 不隶属于某个 Project，但属于一个 Eval SP 用户；Catalog 的 Agent 列表由 API 控制面注入，不在 Worker 里维护第二份 Agent 注册表。
+## SP Harness 与 Bundle 目录
+
+`src/sp/harness.ts` 用服务凭证确保 Inbox Chat、初始化、提交/重启、按键校准、收集完整产物/轨迹和原始资源；`sp/submission-observer.ts` 以 WebSocket 终态推送为主，Ping/Pong 检测静默失活，断线后读取一次权威状态并有限重连，健康连接期间不轮询。SP HTTP 请求默认最多等待 60 秒，停止调用最多 10 秒。当前只支持 `sp` 框架，`codex`、`cc` 明确拒绝。服务契约、Bundle 文件布局与校验规则见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。SP 服务路由已在独立 SP 分支实现，真实跨部署联调仍需完成。
+
+`src/sp/bundle-directory.ts` 的 `openBundleDirectory` 是 API 上传与 Worker 读取共用的唯一 Bundle 目录实现；文件错误以 `BundleFileError` 表达，只有 `unavailable` 可重试。

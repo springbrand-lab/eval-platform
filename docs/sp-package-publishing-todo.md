@@ -21,6 +21,7 @@
 ## 后续任务
 
 1. 在 sp-platform 中去掉这两个包的 `private: true`，补齐构建产物与 `exports`/类型入口，按 `@springbrand/http` 的流程发布到 npm（或内部 registry）。
-2. 发布版本满足依赖发布时长要求后，在 eval-platform 中把 `link:` 依赖替换为精确版本号，并更新 `pnpm-lock.yaml`。
-3. 删除本文件，并移除 README、`apps/eval-api/README.md` 中关于同级目录检出的说明。
-4. 确认 CI 不再需要 sp-platform 检出即可通过 `pnpm check` 与 `pnpm test`。
+2. 在 `@springbrand/eval-harness` 中导出 Material 文件数上限与初始 Session 字符数上限常量（目前只写在 schema 与 `readEvalCanonicalContext` 内部）。eval-api 的 `limits.ts` 现以 `SP_MATERIAL_MAX_FILES`、`SP_SESSION_CONTENT_CHARS` 镜像这两个值，仅用于推导请求体上限；SP 导出后改为直接引用并删除镜像。
+3. 发布版本满足依赖发布时长要求后，在 eval-platform 中把 `link:` 依赖替换为精确版本号，并更新 `pnpm-lock.yaml`。
+4. 删除本文件，并移除 README、`apps/eval-api/README.md` 中关于同级目录检出的说明。
+5. 确认 CI 不再需要 sp-platform 检出即可通过 `pnpm check` 与 `pnpm test`。

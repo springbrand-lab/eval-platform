@@ -11,37 +11,25 @@ It does not own Agent execution, SP Chat/DO storage, Dataset semantics or
 evaluation scoring logic.
 
 The API workspace owns PostgreSQL migrations and implementations of the public
-DatasetStore, RuntimeStore, ConfigStore and read-only MetricsSource ports. A caller supplies
-the `pg` Pool; these adapters never import SP's private database client. The
-Catalog stores user-owned Projects and Samples that reference the same user's
-Data, with Agent listing supplied separately. User-facing Runtime and Metrics
-adapters require the owner identity verified by Eval SP; only the Worker Store
-scans and resumes Runs across users. The Metrics projection uses one
-repeatable-read, read-only transaction and the Runtime's status projection.
-The owner-scoped Config adapter saves Execution, Evaluation and Pipeline configs;
-it verifies Agent Config references through the authenticated Eval SP client.
-The independent-evaluation HTTP handler verifies each Bearer session through
-Eval SP and composes an owner-scoped Catalog, token-free Config reader, and
-admission-only Runtime interface. The standard API process mounts this existing
-handler for its five project-scoped routes. A dedicated PostgreSQL adapter
-reads Run status and Evaluation records in sets under one consistent
-transaction. The separate worker owns the real SP Harness and executes
-admitted Runs.
+DatasetStore, RuntimeStore, ConfigStore and read-only MetricsSource ports. A
+caller supplies the `pg` Pool; these adapters never import SP's private
+database client. The Catalog stores user-owned Projects and Samples that
+reference the same user's Data, with Agent listing supplied separately.
+User-facing Runtime and Metrics adapters require the owner identity verified
+by Eval SP; only the Worker Store resumes Runs across users. Metrics and Run
+views read in sets under one repeatable-read, read-only transaction and reuse
+the Runtime's status projection.
 
-The Node HTTP control plane verifies every bearer token with Eval SP, composes
-owner-scoped services and routes Dataset, Config, Run and Metrics operations.
-Execution and Pipeline admissions share a token-free per-owner Runtime during
-active requests; Config editing uses the current request's Bearer token.
-Run admission persists and notifies the separate Worker; it never executes an
-Agent in the HTTP request. See `docs/eval-http-api.md` for the route contract.
+The Hono HTTP control plane (`start:api`) verifies every Bearer session with
+Eval SP, assembles owner-scoped services once per owner and routes Dataset,
+Config, Run, Metrics and initial-resource operations. Run admission and stop
+requests commit their facts and enqueue a pg-boss Run job in one transaction;
+the HTTP process never executes an Agent or holds the SP service credential.
+See `docs/eval-http-api.md` for the route contract.
 
-The API app also owns a single-instance Node Run worker. Run admission and
-PostgreSQL notification commit atomically; the worker listens, scans unfinished
-Runs on startup/reconnect and periodically, and calls the Runtime's `resume()`.
-It never runs the Agent locally or stores a second Run status. The worker
-process and Eval SP Harness client exist. The independent SP branch implements
-their service routes; deployment integration remains to be verified. A shared
-`EVAL_BUNDLE_DIR` stores each user's uploaded material and optional Session
-content. Uploads and Data association use separate authenticated API routes;
-the control-plane server mounts their handlers. At most one worker process may
-be deployed.
+The Run Worker (`start:worker`) consumes those jobs with the real Eval SP
+Harness and calls the Runtime's `resume()`; it never stores a second Run
+status. Several Worker instances may run at once. A shared `EVAL_BUNDLE_DIR`
+stores each user's uploaded material and optional Session content for both
+processes. Scheduling and stop semantics are recorded in
+`docs/architecture.md`; process configuration is in `README.md`.

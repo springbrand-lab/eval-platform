@@ -15,7 +15,7 @@ export type {
 } from "./model.js";
 export { DEFAULT_RETRY_POLICY } from "./model.js";
 
-import type { HarnessConfig, JsonValue, RetryPolicy, SpHarnessConfig } from "@eval-platform/eval-contracts";
+import type { HarnessConfig, RetryPolicy } from "@eval-platform/eval-contracts";
 import { AGENT_FRAMEWORKS } from "@eval-platform/eval-contracts";
 import { createId } from "@springbrand/utils";
 import { RuntimeEntityNotFoundError, RuntimeInputError } from "../runtime/errors.js";
@@ -58,42 +58,27 @@ function validateHarnessConfig(
   if (!isObjectRecord(harness)) {
     throw new RuntimeInputError(`${field} must be an object`, field);
   }
-  if (harness.kind === "sp") {
-    if (!(AGENT_FRAMEWORKS as readonly unknown[]).includes(harness.framework)) {
-      throw new RuntimeInputError(
-        `${field}.framework must be one of ${AGENT_FRAMEWORKS.join(", ")}`,
-        `${field}.framework`,
-      );
-    }
-    if (!isObjectRecord(harness.agentConfig)) {
-      throw new RuntimeInputError(`${field}.agentConfig must be an object`, `${field}.agentConfig`);
-    }
-    requireNonEmpty(harness.agentConfig.ownerUserId, `${field}.agentConfig.ownerUserId`);
-    requireNonEmpty(harness.agentConfig.userAgentId, `${field}.agentConfig.userAgentId`);
-    if (harness.runtime !== undefined && !isObjectRecord(harness.runtime)) {
-      throw new RuntimeInputError(`${field}.runtime must be an object`, `${field}.runtime`);
-    }
-    if (harness.runtime?.timeoutMs !== undefined) {
-      if (!Number.isFinite(harness.runtime.timeoutMs) || harness.runtime.timeoutMs < 1) {
-        throw new RuntimeInputError(
-          `${field}.runtime.timeoutMs must be a positive number`,
-          `${field}.runtime.timeoutMs`,
-        );
-      }
-    }
-    return;
+  if (harness.kind !== "sp") {
+    throw new RuntimeInputError(`${field}.kind must be sp`, `${field}.kind`);
   }
-
-  if (harness.kind === "remote") {
-    requireNonEmpty(harness.provider, `${field}.provider`);
-    requireNonEmpty(harness.agentRef, `${field}.agentRef`);
-    if (harness.runOptions !== undefined && !isObjectRecord(harness.runOptions)) {
-      throw new RuntimeInputError(`${field}.runOptions must be an object`, `${field}.runOptions`);
-    }
-    return;
+  if (!(AGENT_FRAMEWORKS as readonly unknown[]).includes(harness.framework)) {
+    throw new RuntimeInputError(
+      `${field}.framework must be one of ${AGENT_FRAMEWORKS.join(", ")}`,
+      `${field}.framework`,
+    );
   }
-
-  throw new RuntimeInputError(`${field}.kind is not supported`, `${field}.kind`);
+  if (!isObjectRecord(harness.agentConfig)) {
+    throw new RuntimeInputError(`${field}.agentConfig must be an object`, `${field}.agentConfig`);
+  }
+  requireNonEmpty(harness.agentConfig.ownerUserId, `${field}.agentConfig.ownerUserId`);
+  requireNonEmpty(harness.agentConfig.userAgentId, `${field}.agentConfig.userAgentId`);
+  if (harness.runtime !== undefined && !isObjectRecord(harness.runtime)) {
+    throw new RuntimeInputError(`${field}.runtime must be an object`, `${field}.runtime`);
+  }
+  if (harness.runtime?.timeoutMs !== undefined
+    && (!Number.isFinite(harness.runtime.timeoutMs) || harness.runtime.timeoutMs < 1)) {
+    throw new RuntimeInputError(`${field}.runtime.timeoutMs must be a positive number`, `${field}.runtime.timeoutMs`);
+  }
 }
 
 function normalizeExecutionConfig(config: ExecutionConfig): ResolvedExecutionConfig {
@@ -128,14 +113,14 @@ function normalizeEvaluationConfig(config: EvaluationConfig): ResolvedEvaluation
   requireNonEmpty(config.configId, "configId");
   requirePositiveInteger(config.evaluationConcurrency, "evaluationConcurrency");
   validateHarnessConfig(config.evaluationHarness, "evaluationHarness");
-  if (config.evaluationHarness.kind !== "sp" || config.evaluationHarness.framework !== "sp") {
-    throw new RuntimeInputError("evaluationHarness must use the SP host and framework", "evaluationHarness");
+  if (config.evaluationHarness.framework !== "sp") {
+    throw new RuntimeInputError("evaluationHarness must use the SP framework", "evaluationHarness.framework");
   }
   if (config.retryPolicy !== undefined) requireRetryPolicy(config.retryPolicy);
   return {
     configId: config.configId,
     evaluationHarness: {
-      ...cloneSpHarnessConfig(config.evaluationHarness),
+      ...cloneHarnessConfig(config.evaluationHarness),
       framework: config.evaluationHarness.framework,
     },
     evaluationConcurrency: config.evaluationConcurrency,
@@ -215,41 +200,10 @@ function normalizeRetryPolicy(policy: RetryPolicy | undefined): RetryPolicy {
 }
 
 function cloneHarnessConfig(harness: HarnessConfig): HarnessConfig {
-  if (harness.kind === "sp") {
-    return cloneSpHarnessConfig(harness);
-  }
-
-  return {
-    kind: "remote",
-    provider: harness.provider,
-    agentRef: harness.agentRef,
-    ...(harness.runOptions === undefined
-      ? {}
-      : { runOptions: cloneJsonRecord(harness.runOptions) }),
-  };
-}
-
-function cloneSpHarnessConfig(harness: SpHarnessConfig): SpHarnessConfig {
   return {
     kind: "sp",
     framework: harness.framework,
     agentConfig: { ...harness.agentConfig },
     ...(harness.runtime === undefined ? {} : { runtime: { ...harness.runtime } }),
   };
-}
-
-function cloneJsonRecord(
-  value: Readonly<Record<string, JsonValue>>,
-): Readonly<Record<string, JsonValue>> {
-  return Object.fromEntries(
-    Object.entries(value).map(([key, entryValue]) => [key, cloneJsonValue(entryValue)]),
-  );
-}
-
-function cloneJsonValue(value: JsonValue): JsonValue {
-  if (Array.isArray(value)) return value.map(cloneJsonValue);
-  if (value !== null && typeof value === "object") {
-    return cloneJsonRecord(value as Readonly<Record<string, JsonValue>>);
-  }
-  return value;
 }

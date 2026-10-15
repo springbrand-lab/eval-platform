@@ -1,11 +1,9 @@
 import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import { and, eq, isNull } from "drizzle-orm";
-import { parseStrictJson } from "@eval-platform/eval-dataset";
-import { OUTPUT_SCHEMA_BYTES } from "../limits.js";
 import { parseEvaluationOutputSchema } from "../project-output-schema.js";
 import type { EvalDb } from "./client.js";
 import { parseCatalogMetadataPatch, platformId, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";
-import { CatalogInputError, CatalogPayloadTooLargeError, OutputSchemaInUseError, OutputSchemaNotFoundError } from "./errors.js";
+import { OutputSchemaInUseError, OutputSchemaNotFoundError } from "./errors.js";
 import { requireOwnerUserId } from "./owner.js";
 import { evaluationOutputSchemas, projects } from "./schema.js";
 
@@ -25,18 +23,6 @@ function toRecord(row: typeof evaluationOutputSchemas.$inferSelect): OutputSchem
   };
 }
 
-function parseOutputSchemaFile(content: unknown): EvaluationOutputSchema {
-  if (typeof content !== "string") throw new CatalogInputError("content must be JSON Schema file text", "content");
-  if (Buffer.byteLength(content, "utf8") > OUTPUT_SCHEMA_BYTES) {
-    throw new CatalogPayloadTooLargeError("Evaluation output JSON Schema is too large");
-  }
-  try {
-    return parseEvaluationOutputSchema(parseStrictJson(content));
-  } catch (error) {
-    throw new CatalogInputError(error instanceof Error ? error.message : String(error), "content");
-  }
-}
-
 /** Owner-scoped immutable JSON Schema uploads; soft deletes hide entries from new selection. */
 export function createOutputSchemaCatalog(db: EvalDb, ownerUserId: string) {
   const owner = requireOwnerUserId(ownerUserId);
@@ -44,7 +30,7 @@ export function createOutputSchemaCatalog(db: EvalDb, ownerUserId: string) {
     async create(input: { name: string; description: string; content: string }): Promise<OutputSchemaRecord> {
       const name = requiredCatalogLabel(input.name, "name");
       const description = requiredCatalogLabel(input.description, "description");
-      const schema = parseOutputSchemaFile(input.content);
+      const schema = parseEvaluationOutputSchema(input.content);
       const record = { outputSchemaId: crypto.randomUUID(), ownerUserId: owner, name, description, schema };
       await db.insert(evaluationOutputSchemas).values(record);
       return toRecord({ ...record, deletedAt: null });

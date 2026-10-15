@@ -80,7 +80,7 @@ export interface AgentConfigRef {
 export const AGENT_FRAMEWORKS = ["sp", "codex", "cc"] as const;
 export type AgentFramework = (typeof AGENT_FRAMEWORKS)[number];
 
-export interface SpHarnessConfig {
+export interface HarnessConfig {
   readonly kind: "sp";
   readonly framework: AgentFramework;
   readonly agentConfig: AgentConfigRef;
@@ -88,15 +88,6 @@ export interface SpHarnessConfig {
     readonly timeoutMs?: number;
   };
 }
-
-export interface RemoteHarnessConfig {
-  readonly kind: "remote";
-  readonly provider: string;
-  readonly agentRef: string;
-  readonly runOptions?: Readonly<Record<string, JsonValue>>;
-}
-
-export type HarnessConfig = SpHarnessConfig | RemoteHarnessConfig;
 
 export interface MaterializedDataBinding {
   readonly bundleId: string;

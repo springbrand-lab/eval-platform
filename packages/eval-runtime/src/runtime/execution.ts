@@ -19,7 +19,7 @@ import {
   applyAttemptPatch,
   collectOutputWithRetry,
   describeAgentError,
-  requireSpHarness,
+  reportError,
   runAgentLifecycle,
   withExecutionStatus,
   type StageDependencies,
@@ -35,7 +35,7 @@ export async function executeSampling(
   dependencies: StageDependencies,
   input: ExecuteSamplingInput,
 ): Promise<RuntimeSamplingContext> {
-  const subjectHarness = requireSpHarness(input.harnessConfig, "subject");
+  const subjectHarness = input.harnessConfig;
   const harnessRuntime = subjectHarness.runtime;
   const { sample } = input.context;
   let current = input.context.state;
@@ -66,11 +66,7 @@ export async function executeSampling(
       `Execution evidence collection failed for Sampling ${current.samplingId}: ${describeAgentError(error).message}`,
       { cause: error },
     );
-    try {
-      (dependencies.onError ?? console.error)(reported);
-    } catch (reportingError) {
-      console.error(reported, reportingError);
-    }
+    reportError(dependencies.onError, reported);
   };
 
   const persist = async (sampling: Sampling): Promise<void> => {

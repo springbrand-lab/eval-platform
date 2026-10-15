@@ -5,10 +5,6 @@ import { errorCatalog } from "./http-errors.js";
 export const {
   ok,
   httpError,
-  httpErrorResponse,
-  httpUnauthorized,
   httpNotFound,
   httpValidationError,
-  httpRateLimited,
-  httpInternalError,
 } = createHonoHttp(errorCatalog);

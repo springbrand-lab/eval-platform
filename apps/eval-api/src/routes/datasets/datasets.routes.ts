@@ -2,6 +2,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import {
   datasetInputSchema,
   platformIdSchema,
+  promptDatasetUploadSchema,
   type Data,
   type Dataset,
   type DatasetSnapshot,
@@ -12,7 +13,6 @@ import { jsonBody } from "../../lib/request-body.js";
 import { JSON_BODY_BYTES, PROMPT_DATASET_FILE_BYTES, PROMPT_IMPORT_BODY_BYTES } from "../../limits.js";
 import {
   bodyErrorResponses,
-  catalogLabelSchema,
   conflictResponse,
   deletedResponse,
   errorResponses,
@@ -73,15 +73,10 @@ export const importPrompt = createRoute({
   summary: "Create a Prompt Dataset from metadata and a JSON or JSONL Data file",
   middleware: [jsonBody(PROMPT_IMPORT_BODY_BYTES)],
   request: {
-    body: jsonBodyContent(z.strictObject({
-      name: catalogLabelSchema,
-      description: catalogLabelSchema,
-      format: z.enum(["json", "jsonl"]),
-      content: z.string().min(1).refine(
-        (content) => Buffer.byteLength(content, "utf8") <= PROMPT_DATASET_FILE_BYTES,
-        `must be at most ${PROMPT_DATASET_FILE_BYTES} bytes`,
-      ),
-    })),
+    body: jsonBodyContent(promptDatasetUploadSchema.refine(
+      (upload) => Buffer.byteLength(upload.content, "utf8") <= PROMPT_DATASET_FILE_BYTES,
+      { path: ["content"], message: `must be at most ${PROMPT_DATASET_FILE_BYTES} bytes` },
+    )),
   },
   responses: {
     201: jsonContent(responseSchema(snapshotSchema), "Imported Dataset"),

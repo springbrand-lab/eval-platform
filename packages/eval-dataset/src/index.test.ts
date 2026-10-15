@@ -7,7 +7,7 @@ describe("@eval-platform/eval-dataset", () => {
       "assertPromptData", "assertPromptDatasetMetadata", "createDatasetService", "DataInUseError",
       "DatasetEntityNotFoundError", "DatasetIdentityConflictError", "DatasetInputError", "dataInputSchema",
       "dataSchema", "datasetInputSchema", "datasetSchema", "datasetSnapshotSchema", "initialMaterialsRefSchema", "initialSessionRefSchema",
-      "parseDatasetDocument", "parseStrictJson", "platformIdSchema",
+      "parseDatasetDocument", "parseStrictJson", "platformIdSchema", "promptDatasetUploadSchema",
     ].toSorted());
   });
 });

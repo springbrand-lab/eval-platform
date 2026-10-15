@@ -10,8 +10,8 @@ import {
   RuntimeRunIdentityConflictError,
   RuntimeRunStoppedError,
 } from "@eval-platform/eval-runtime";
-import { and, eq, gt, inArray, isNull, sql } from "drizzle-orm";
-import { isPageSize, MAX_PAGE_SIZE, selectByIds, sqlBatches } from "./batch.js";
+import { and, eq, inArray, isNull } from "drizzle-orm";
+import { selectByIds, sqlBatches } from "./batch.js";
 import type { RunQueue } from "../run-worker-queue.js";
 import { constraintViolation, type EvalDb } from "./client.js";
 import { ProjectRunStopConflictError } from "./errors.js";

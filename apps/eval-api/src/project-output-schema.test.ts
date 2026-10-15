@@ -4,21 +4,18 @@ import { OUTPUT_SCHEMA_BYTES } from "./limits.js";
 import { parseEvaluationOutputSchema } from "./project-output-schema.js";
 
 describe("Project evaluation output JSON Schema", () => {
-  it("keeps a detached JSON object for Project binding", () => {
-    const input = { type: "object", properties: { score: { type: "number", minimum: 0 } } };
-    const result = parseEvaluationOutputSchema(input);
-    input.properties.score.minimum = 10;
-    expect(result).toEqual({ type: "object", properties: { score: { type: "number", minimum: 0 } } });
+  it("parses a JSON Schema object for Project binding", () => {
+    expect(parseEvaluationOutputSchema('{"type":"object","properties":{"score":{"type":"number","minimum":0}}}'))
+      .toEqual({ type: "object", properties: { score: { type: "number", minimum: 0 } } });
   });
 
-  it.each([null, [], "{}", { type: 42 }, { properties: [] },
-    { minimum: Infinity }, { minimum: Number.MAX_SAFE_INTEGER + 1 },
-    { toJSON: () => ({}) }, { nested: new Date() }])("rejects non-JSON Schema file contents: %j", (value) => {
-    expect(() => parseEvaluationOutputSchema(value)).toThrow(CatalogInputError);
+  it.each(["null", "[]", '"{}"', '{"type":42}', '{"properties":[]}', '{"minimum":1e400}',
+    `{"minimum":${Number.MAX_SAFE_INTEGER + 2}}`, '{"a":1,"a":2}', "{"])("rejects invalid JSON Schema file contents: %s", (content) => {
+    expect(() => parseEvaluationOutputSchema(content)).toThrow(CatalogInputError);
   });
 
-  it("rejects a Schema beyond the output-format size limit", () => {
-    expect(() => parseEvaluationOutputSchema({ description: "a".repeat(OUTPUT_SCHEMA_BYTES) }))
+  it("rejects a Schema file beyond the output-format size limit", () => {
+    expect(() => parseEvaluationOutputSchema(JSON.stringify({ description: "a".repeat(OUTPUT_SCHEMA_BYTES) })))
       .toThrow(CatalogPayloadTooLargeError);
   });
 });

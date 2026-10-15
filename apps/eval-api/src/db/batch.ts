@@ -1,13 +1,6 @@
 /** Keeps multi-row writes and IN predicates far below PostgreSQL's 65,535 bind-parameter limit. */
 const SQL_BATCH_SIZE = 1_000;
 
-/** Largest page any keyset listing returns. */
-export const MAX_PAGE_SIZE = 1_000;
-
-export function isPageSize(limit: number): boolean {
-  return Number.isInteger(limit) && limit >= 1 && limit <= MAX_PAGE_SIZE;
-}
-
 export function* sqlBatches<T>(items: readonly T[]): Generator<T[]> {
   for (let offset = 0; offset < items.length; offset += SQL_BATCH_SIZE) {
     yield items.slice(offset, offset + SQL_BATCH_SIZE);

@@ -1,7 +1,7 @@
 import { defineErrorCatalog } from "@springbrand/http/catalog";
 
 /** The only Eval API error-code catalog; status codes and default public messages live here. */
-export const errorDefinitions = {
+const errorDefinitions = {
   REQUEST_INVALID_INPUT: { status: 400, message: "Request input is invalid" },
   REQUEST_INVALID_JSON: { status: 400, message: "Expected a JSON object with unique fields" },
   REQUEST_VALIDATION_FAILED: { status: 422, message: "Validation failed" },
@@ -79,15 +79,12 @@ export const errorCatalog = defineErrorCatalog(errorDefinitions);
 
 export const {
   HttpError,
-  parseInput,
   toHttpError,
-  isHttpErrorResponse,
   httpErrorSchema,
   validationErrorSchema,
   decodeError,
 } = errorCatalog;
 export type HttpError = InstanceType<typeof HttpError>;
 
-export type ApiErrorCode = keyof typeof errorDefinitions;
 /** Codes that can appear in an HTTP response; status-0 codes belong to the client only. */
 export type HttpErrorCode = (typeof errorCatalog.codes)[number];

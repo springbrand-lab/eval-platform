@@ -777,8 +777,9 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const control = createPostgresProjectRunControl(database.db, "user-A", runQueue);
     await control.stopRun(project.projectId, run.runId);
     const stopAgent = vi.fn(async () => {});
+    const onError = vi.fn();
     const resumer = createEvalRunResumer({
-      store: runtime,
+      store: runtime, onError,
       getEvaluationOutputSchema: async () => null,
       getSamples: async (ids) => ids.map(() => null),
       harness: { stopAgent } as unknown as Parameters<typeof createEvalRunResumer>[0]["harness"],
@@ -789,6 +790,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       expect((await runtime.getRun(run.runId))?.stopFinalized).toBe(true);
       expect((await runtime.getSampling(sampling.samplingId))?.execution.status).toBe("cancelled");
       expect(stopAgent).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
     } finally {
       await worker.close();
     }
@@ -955,6 +957,24 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     ] });
     expect((await send("bob-token", `/runs/${handle.runId}/evaluations`)).status).toBe(404);
     expect((await send("alice-token", "/runs/missing")).status).toBe(404);
+    const missingRun = await request("/api/runs/missing", authorized("alice-token"));
+    expect(missingRun.status).toBe(404);
+    expect(await missingRun.json()).toMatchObject({ code: "RUN_NOT_FOUND" });
+    const unavailable = await request(`${path}/evaluations`, jsonRequest("POST", {
+      evaluationConfigId: config.configId, samplingIds: ["missing-sampling"], idempotencyKey: "bad-selection",
+    }, "alice-token"));
+    expect(unavailable.status).toBe(409);
+    expect(await unavailable.json()).toMatchObject({ code: "SAMPLING_UNAVAILABLE" });
+    const missingConfig = await request(`${path}/evaluations`, jsonRequest("POST", {
+      evaluationConfigId: "missing", samplingIds: [sampling.samplingId], idempotencyKey: "missing-config",
+    }, "alice-token"));
+    expect(missingConfig.status).toBe(404);
+    expect(await missingConfig.json()).toMatchObject({ code: "CONFIG_NOT_FOUND" });
+    const foreignBinding = await send("bob-token", "/evaluation-output-schema", {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ outputSchemaId: null }),
+    });
+    expect(foreignBinding.status).toBe(404);
+    expect(await foreignBinding.json()).toMatchObject({ code: "PROJECT_NOT_FOUND" });
     expect((await runtime.listEvaluations(sampling.samplingId))).toHaveLength(1);
     expect((await runtime.listEvaluations(secondSampling.samplingId))).toHaveLength(1);
     expect((await send("bob-token", `/runs/${handle.runId}/stop`, { method: "POST" })).status).toBe(404);
@@ -1537,7 +1557,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     `));
     const userRuntime = createPostgresRuntimeStore(database.db, "user-A", release, runQueue);
     const otherRuntime = createPostgresRuntimeStore(database.db, "user-B", release, runQueue);
-    expect("isRunActive" in userRuntime).toBe(false);
+    expect(["isRunActive", "isRunStopRequested", "markRunStopFinalized"].filter((method) => method in userRuntime)).toEqual([]);
     expect(await userRuntime.getRun(runA.runId)).toEqual(runA);
     expect(await userRuntime.getRun(runB.runId)).toBeNull();
     expect(await userRuntime.getSampling(samplingB.samplingId)).toBeNull();

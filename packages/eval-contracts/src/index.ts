@@ -27,7 +27,6 @@ export type {
   PipelineRequest,
   Project,
   ProjectInitialLaunch,
-  RemoteHarnessConfig,
   RetryPolicy,
   RunPhase,
   RunPhases,
@@ -36,7 +35,6 @@ export type {
   Sampling,
   SamplingStageState,
   SamplingStatus,
-  SpHarnessConfig,
   StartRunRequest,
   TrajectoryRef,
 } from "./model.js";

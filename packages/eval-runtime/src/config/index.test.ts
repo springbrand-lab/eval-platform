@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import type { HarnessConfig } from "@eval-platform/eval-contracts";
 import type {
   ConfigStore,
   EvaluationConfig,
@@ -140,9 +139,6 @@ describe("runtime config", () => {
       expect(created.harness).toEqual(storedConfig.harness);
       expect(resolved.harness).toEqual(storedConfig.harness);
       expect(resolved.harness).not.toBe(storedConfig.harness);
-      if (resolved.harness.kind !== "sp" || storedConfig.harness.kind !== "sp") {
-        throw new Error("expected the SP host");
-      }
       expect(resolved.harness.agentConfig).not.toBe(storedConfig.harness.agentConfig);
       expect(resolved.harness.runtime).not.toBe(storedConfig.harness.runtime);
     },
@@ -154,7 +150,6 @@ describe("runtime config", () => {
     { framework: [] },
     { framework: {} },
     { framework: "claude-code" },
-    { framework: "remote" },
     { framework: "" },
   ])(
     "rejects a missing or unsupported framework %j without defaulting to SP",
@@ -186,7 +181,6 @@ describe("runtime config", () => {
   it.each([
     { kind: "sp", framework: "codex", agentConfig: EVALUATOR },
     { kind: "sp", framework: "cc", agentConfig: EVALUATOR },
-    { kind: "remote", provider: "provider-1", agentRef: "agent-1" },
   ])("rejects a non-SP evaluator %j", async (evaluationHarness) => {
     const invalidConfig = { ...evaluationConfig, evaluationHarness } as unknown as EvaluationConfig;
     const { configId, ...input } = invalidConfig;
@@ -198,14 +192,21 @@ describe("runtime config", () => {
     });
 
     expect(() => createEvaluationConfig(input)).toThrow(
-      "evaluationHarness must use the SP host and framework",
+      "evaluationHarness must use the SP framework",
     );
     await expect(resolver.resolveEvaluationConfig(configId)).rejects.toThrow(
-      "evaluationHarness must use the SP host and framework",
+      "evaluationHarness must use the SP framework",
     );
     await expect(resolver.resolvePipelineConfig(pipelineConfig.configId)).rejects.toThrow(
-      "evaluationHarness must use the SP host and framework",
+      "evaluationHarness must use the SP framework",
     );
+  });
+
+  it("rejects a Harness that is not hosted by SP", () => {
+    const { configId: _, ...input } = executionConfig;
+    const harness = { ...input.harness, kind: "local" } as unknown as ExecutionConfig["harness"];
+    expect(() => createExecutionConfig({ ...input, harness })).toThrow(RuntimeInputError);
+    expect(() => createExecutionConfig({ ...input, harness })).toThrow("harness.kind must be sp");
   });
 
   it("rejects unknown and invalid configs before Runtime starts", async () => {
@@ -253,29 +254,16 @@ describe("runtime config", () => {
         runtime: arrayOptions,
       },
     } as unknown as ExecutionConfig;
-    const invalidRunOptions = {
-      ...executionConfig,
-      harness: {
-        kind: "remote",
-        provider: "provider-1",
-        agentRef: "agent-1",
-        runOptions: arrayOptions,
-      } as unknown as HarnessConfig,
-    };
     const resolver = createConfigResolver({
       ...makeStore(),
       async getExecutionConfig(configId) {
         if (configId === "invalid-runtime") return invalidRuntime;
-        if (configId === "invalid-run-options") return invalidRunOptions;
         return makeStore().getExecutionConfig(configId);
       },
     });
 
     await expect(resolver.resolveExecutionConfig("invalid-runtime")).rejects.toThrow(
       "harness.runtime must be an object",
-    );
-    await expect(resolver.resolveExecutionConfig("invalid-run-options")).rejects.toThrow(
-      "harness.runOptions must be an object",
     );
   });
 });

@@ -14,12 +14,13 @@ const promptDatasetLabelsSchema = z.object({
   name: requiredLabel,
   description: requiredLabel,
 });
-const promptUploadSchema = z.strictObject({
+/** One Prompt Dataset upload: Dataset metadata plus a JSON or JSONL Data file. */
+export const promptDatasetUploadSchema = z.strictObject({
   ...promptDatasetLabelsSchema.shape,
   format: z.enum(["json", "jsonl"]),
   content: z.string().min(1),
 });
-export type PromptDatasetUploadInput = Readonly<z.input<typeof promptUploadSchema>>;
+export type PromptDatasetUploadInput = Readonly<z.input<typeof promptDatasetUploadSchema>>;
 const promptRowLabelsSchema = z.looseObject({
   name: requiredLabel,
   description: requiredLabel,
@@ -39,7 +40,7 @@ export function assertPromptData(data: Data): void {
 /** Parse a Data-only file and separately supplied Dataset metadata. */
 export function parsePromptDatasetUpload(input: PromptDatasetUploadInput): DatasetDocument {
   return parseInput(() => {
-    const upload = promptUploadSchema.parse(input);
+    const upload = promptDatasetUploadSchema.parse(input);
     const rawRows: unknown = upload.format === "json"
       ? parseStrictJson(upload.content)
       : upload.content.split(/\r?\n/u).filter((line) => line.trim()).map(parseStrictJson);

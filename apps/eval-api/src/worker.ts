@@ -7,11 +7,9 @@ import { RUN_QUEUE, type RunJob } from "./run-worker-queue.js";
 /** How often an active Run re-reads its persisted stop request, and repeats SP interrupts after one. */
 export const STOP_POLL_MS = 1_000;
 
-export type RunWorkerStore = RuntimeRecoveryStore;
-
 export interface RunJobHandlerOptions {
   readonly runtime: EvalRunResumer;
-  readonly store: RunWorkerStore;
+  readonly store: RuntimeRecoveryStore;
   readonly logger: Logger;
 }
 

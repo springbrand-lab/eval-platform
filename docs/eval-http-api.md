@@ -1,38 +1,82 @@
 # Eval HTTP control plane
 
-`apps/eval-api` exposes the existing Dataset, Catalog, Config, Runtime and Metrics services through a Node HTTP server. It owns request authentication and composition, not evaluation semantics or SP storage. Every `/api/*` request requires `Authorization: Bearer <Eval SP session token>`; the server calls the configured Eval SP `/api/auth/me` for every request and uses only the returned user ID to scope PostgreSQL operations. The client cannot select an owner. `GET /healthz` checks only that the HTTP process is serving.
+`apps/eval-api` exposes the Dataset, Catalog, Config, Runtime and Metrics services through one Hono application served by `@hono/node-server` (`start:api`, entry `src/server.ts`). It owns request authentication and composition, not evaluation semantics or SP storage. Process configuration is listed in the [eval-api README](../apps/eval-api/README.md). This document is the single source for routes, the response envelope, status codes and error codes.
 
-Requests and responses use JSON unless a Dataset document is imported or exported. Creation returns `201`, deletion returns `204`, missing resources on reads and updates return `404`, invalid inputs return `400`, conflicting identities return `409`, and an invalid or absent session returns `401`. Dataset and Data deletion is idempotent, so deleting an already absent record also returns `204`. JSON object bodies reject duplicate keys at every depth. Oversized bodies return `413`. Unexpected storage or network failures are reported without exposing internal error details. IDs in URL path segments are URL encoded.
+## Application structure
 
-Run admission uses a token-free, owner-scoped ConfigReader and `createEvalRunAdmission`; Config editing uses a separate Store with the current request's session token. Concurrent Execution and Pipeline requests for one user share an admission instance while active; the existing independent-evaluation handler separately shares its admission instance for concurrent evaluation requests. Each cache releases idle owners. Run and Sampling reads use owner-scoped PostgreSQL readers and Runtime's public projection functions. No Harness or Worker credentials are present in the HTTP process.
+The layout follows SP's `apps/api`: `lib/create-app.ts` installs request IDs, pino request logging (`hono-pino`), the trusted-Origin check, CORS, `notFound` and `onError` for every route; `lib/api-errors.ts` holds the single `apiError` translation; `middlewares/` holds session authentication, Origin trust and logging; each domain lives in `routes/<domain>/<domain>.routes.ts | .handlers.ts | .index.ts` with `@hono/zod-openapi` route definitions. Owner-scoped services are assembled once in `owner-services.ts`; concurrent requests of one owner share its admission instance through `active-owner-admission.ts`, and the entry is released when the owner has no active request.
 
-At most one unfinished Run may exist in a Project, regardless of its operation. Run admission locks that Project in PostgreSQL and checks the saved idempotency identity before checking for another unfinished Run. A matching replay returns the original Run; a new key while a Run is unfinished returns `409 project_busy` for Execution/Pipeline or `409 PROJECT_BUSY` for independent evaluation. The previous Run is finished only when all of its Sampling and EvaluationRecord phases are terminal. A new key is accepted after that and atomically replaces the Project state. Execution or Pipeline deletes old Runs, Samplings and Evaluations; independent evaluation keeps the current execution Samplings, selects only successful ones, and replaces old Runs and Evaluations. An old Run ID then returns 404, and its retired idempotency key returns 409 if retried. Editing a configuration does not change the current Run or its replay.
+## Authentication and Origin
 
-`GET /api/projects/{id}/runs/current` returns `200 {run:{runId,stopRequested?}}` or `{run:null}` for the authenticated user's Project. `POST /api/projects/{id}/runs/{runId}/stop` requests immediate interruption only if that exact Run is current and returns `202 {runId,stopRequested:true}`. Repeating the same named stop before replacement returns its original result without targeting a later Run; after replacement, the old Run ID returns 404. An unknown or replaced Run returns `404`; a terminal Run with no stop request returns `409 NO_ACTIVE_RUN`. A Project outside the owner scope returns `404`. Stage mutation starts are serialized with stop intent under a Run row lock that is released before waiting for SP. A committed stop blocks new starts. Preparation already in flight may finish its local work, but SP rejects initialization and Submission requests after its Chat stop latch is saved. The Worker cancels active Eval SP Submissions and settles their evidence and status asynchronously. `GET /api/projects/{id}/runs/{runId}` reports `stopRequested` while this is underway, `retrying` while final cleanup is pending after child stages finish, and `stopFinalized` with `cancelled` after stopped work is finalized. A new batch remains blocked until all stages are terminal and stop cleanup is confirmed; the API response alone does not unlock the Project.
+Every `/api/*` request requires `Authorization: Bearer <Eval SP session token>`. One session middleware calls the configured Eval SP `/api/auth/me` for every request and scopes all services to the returned user ID; the client cannot select an owner. A missing or rejected session is `401 AUTH_UNAUTHENTICATED`; an unreachable Eval SP is `503 EVAL_SP_UNAVAILABLE`, never a `401`. `GET /healthz` is unauthenticated and only reports that the process is serving.
 
-Sampling and Evaluation responses retain artifact and complete trajectory references. Their bytes remain behind Eval SP's public read-only Workspace and Trajectory APIs; this control plane does not read SP Durable Object storage.
+A request carrying an `Origin` other than `EVAL_WEB_ORIGIN` is rejected with `403 REQUEST_UNTRUSTED_ORIGIN` on every route; requests without `Origin` (non-browser clients) pass. CORS allows only that Origin and exposes `X-Request-ID`. The same Origin is sent as the trusted Origin on Eval SP Agent Config writes.
 
-| Operation | Route | Input |
+## Envelope
+
+Responses use `@springbrand/http` through `@eval-platform/eval-contracts/http` (`createHonoHttp`) with the catalog in `@eval-platform/eval-contracts/http-errors` (`defineErrorCatalog`).
+
+- Success: `{ "success": true, "msg": <payload>, "errMsg": "", "code": "" }`. Creation returns `201`, independent evaluation admission and stop return `202`, deletion and Dataset membership changes return `204` with no body. Dataset export returns the document text.
+- Failure: `{ "code", "errMsg", "requestId", "errors"?, "details"? }`; `errors` carries field-level `{path, errMsg}` items. Every response has the `X-Request-ID` header.
+
+Codes are uppercase `DOMAIN_REASON`. `packages/eval-contracts/src/http-errors.ts` is the complete list with each code's status and default message; handlers map errors only by class, never by message text. Unexpected failures return `500 INTERNAL_ERROR` without internal details and are logged through `errorDiagnostics`.
+
+| Situation | Status and code |
+| --- | --- |
+| Body or query fails its schema (including an explicit evaluation list over 10,000 IDs) | `422 REQUEST_VALIDATION_FAILED` with `errors` |
+| Non-JSON `Content-Type` on a JSON route | `415 REQUEST_UNSUPPORTED_MEDIA_TYPE` |
+| Malformed JSON, non-object body or duplicate field at any depth | `400 REQUEST_INVALID_JSON` |
+| Body is not valid UTF-8 | `400 REQUEST_INVALID_INPUT` |
+| Body over its route limit | `413 REQUEST_PAYLOAD_TOO_LARGE` |
+| Domain input rejected after schema validation | `400` `RUNTIME_INPUT_INVALID`, `DATASET_INPUT_INVALID`, `CATALOG_INPUT_INVALID`, `CONFIG_REFERENCE_INVALID`, `METRICS_QUERY_INVALID`, `BUNDLE_FILE_INVALID` |
+| Missing or other owner's entity | `404` `PROJECT_NOT_FOUND`, `RUN_NOT_FOUND`, `CONFIG_NOT_FOUND`, `DATASET_NOT_FOUND`, `DATA_NOT_FOUND`, `SAMPLE_NOT_FOUND`, `SAMPLING_NOT_FOUND`, `EVALUATION_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND`, `BUNDLE_FILE_NOT_FOUND`, `OUTPUT_SCHEMA_NOT_FOUND` |
+| Run admission conflicts | `409` `PROJECT_BUSY`, `RUN_IDEMPOTENCY_CONFLICT`, `PROJECT_SOURCE_BRANCH_CONFLICT`, `PROJECT_LAUNCH_SELECTION_CONFLICT`, `PROJECT_OUTPUT_SCHEMA_CONFLICT`, `PROJECT_EMPTY`, `SAMPLE_EVALUATION_PROMPT_MISSING`, `SAMPLING_UNAVAILABLE` |
+| Stop of a Run that has already finished | `409 PROJECT_NO_ACTIVE_RUN` |
+| Resource still referenced or content changed under one ID | `409` `DATASET_IN_USE`, `DATA_IN_USE`, `BUNDLE_RESOURCE_IN_USE`, `OUTPUT_SCHEMA_IN_USE`, `DATASET_IDENTITY_CONFLICT`, `BUNDLE_FILE_CONFLICT` |
+| Content over a catalog limit | `413` `CATALOG_PAYLOAD_TOO_LARGE`, `BUNDLE_FILE_TOO_LARGE`, `EVALUATION_SELECTION_TOO_LARGE` |
+| Eval SP rejected a relayed request | `EVAL_SP_FORBIDDEN`, `EVAL_SP_NOT_FOUND`, `EVAL_SP_CONFLICT`, `EVAL_SP_REQUEST_INVALID`, `EVAL_SP_REQUEST_FAILED`, `REQUEST_RATE_LIMITED` |
+| Dependency temporarily unavailable; retry the same request | `503` `EVAL_SP_UNAVAILABLE`, `DATABASE_UNAVAILABLE`, `BUNDLE_FILE_UNAVAILABLE`, `RUNTIME_PERSISTENCE_UNCONFIRMED` |
+
+## Request bodies
+
+Every JSON body goes through one reader: `readBytesLimited` caps the received bytes, the text must be strict UTF-8, and `parseStrictJson` rejects duplicate fields before the route schema validates it. Each route's byte limit is derived from the content limits in `apps/eval-api/src/limits.ts` (worst-case JSON escaping plus metadata framing), so a body that carries maximal valid content is never rejected for size; content limits themselves are enforced by the schemas and catalog. The stop route ignores any body. Dataset document import reads the raw JSON/YAML text through the same bounded UTF-8 reader. Runtime IDs and idempotency keys are 1–512 characters without surrounding whitespace or control characters; Bundle, Material, Session, output-format, Dataset and Data IDs are UUIDs (validated by `platformIdSchema`, case-insensitive on input and lowercase in responses), so a non-UUID path segment is a `422`.
+
+## Routes
+
+| Operation | Route | Input / result |
 | --- | --- | --- |
+| Health | `GET /healthz` | `{status:"ok"}`; no session |
 | Current user | `GET /api/me` | — |
 | SP Agent Configs | `GET, POST /api/agent-configs`; `GET, PATCH, DELETE /api/agent-configs/{id}` | SP's public Agent Config JSON on writes |
 | Agent choices | `GET /api/agents?role=subject|evaluator` | Optional role |
-| Projects | `GET, POST /api/projects`; `GET /api/projects/{id}` | Create: `{name}` |
-| Current Run and stop | `GET /api/projects/{id}/runs/current`; `POST /api/projects/{id}/runs/{runId}/stop` | Stop has no body; `202 {runId,stopRequested:true}` |
-| Project evaluation output format | `PUT /api/projects/{id}/evaluation-output-schema` | `{outputSchemaId}` or `{outputSchemaId:null}`; may change or clear until the first Evaluation Run |
-| Successful Samplings | `GET /api/projects/{id}/samplings/successful`; `GET /api/projects/{id}/samplings/successful/ids` | Existing [independent evaluation contract](eval-independent-evaluation-entry.md) |
-| Datasets | `GET, POST /api/datasets`; `GET, PUT, DELETE /api/datasets/{id}` | Dataset input on create/full replacement |
-| Dataset membership | `GET, POST, DELETE /api/datasets/{id}/data` | POST/DELETE: `{dataIds:[...]}` |
-| Dataset documents | `POST /api/datasets/import?format=json|yaml`; `GET /api/datasets/{id}/export?format=json|yaml` | General import body is the raw document text |
-| Prompt Dataset upload | `POST /api/datasets/prompt-import` | Dataset metadata plus JSON/JSONL Data file content; see [Dataset upload](eval-dataset-upload.md) |
-| Data | `GET, POST /api/data`; `GET, PUT, DELETE /api/data/{id}` | Data input on create/full replacement; optional `datasetId` query on list |
-| Samples | `GET, POST /api/samples`; `GET /api/samples/{id}` | List requires `dataId` query; create: `{dataId}` |
-| Configs | `GET, POST /api/configs/{execution|evaluation|pipeline}`; `GET, PUT /api/configs/{kind}/{id}` | Existing public Config input; PUT fully replaces editable fields |
-| Execution and Pipeline admission | `POST /api/runs/{execution|pipeline}` | Config ID with `projectId` and `idempotencyKey` |
-| Independent evaluation | `POST /api/projects/{id}/evaluations`; `GET /api/projects/{id}/runs/{runId}`; `GET /api/projects/{id}/runs/{runId}/evaluations` | Existing [independent evaluation contract](eval-independent-evaluation-entry.md), including `202` submission, `8 MiB` body and `10,000` ID limits |
-| Run and result facts | `GET /api/runs/{id}`; `GET /api/samplings/{id}`; `GET /api/evaluations/{id}`; `GET /api/samplings/{id}/evaluations` | — |
-| Metrics | `GET /api/metrics/projects/{id}` and `/datasets/{datasetId}`, `/samples/{sampleId}`, `/samplings/{samplingId}` beneath that Project | Optional repeated `runId` query filters |
-| Initial-resource catalog | `GET, POST /api/bundles`; `GET, PATCH, DELETE /api/bundles/{bundleId}`; `GET, POST /api/bundles/{bundleId}/materials|sessions`; `GET, PATCH, DELETE` on each individual Material/Session; `PATCH /api/data/{dataId}/initial-resources` | See [Dataset upload](eval-dataset-upload.md) |
-| Output-format catalog | `GET, POST /api/evaluation-output-schemas`; `GET, PATCH, DELETE /api/evaluation-output-schemas/{outputSchemaId}` | Standalone named JSON Schema upload, metadata editing, soft deletion |
+| Projects | `GET, POST /api/projects`; `GET /api/projects/{projectId}` | Create: `{name}` |
+| Project evaluation output format | `PUT /api/projects/{projectId}/evaluation-output-schema` | `{outputSchemaId}` or `{outputSchemaId:null}`; see [Dataset upload](eval-dataset-upload.md) |
+| Datasets | `GET, POST /api/datasets`; `GET, PUT, DELETE /api/datasets/{datasetId}` | Dataset input on create/full replacement |
+| Dataset membership | `GET, POST, DELETE /api/datasets/{datasetId}/data` | POST/DELETE: `{dataIds:[...]}` |
+| Dataset documents | `POST /api/datasets/import?format=json|yaml`; `GET /api/datasets/{datasetId}/export?format=json|yaml` | Import body is the raw document text |
+| Prompt Dataset upload | `POST /api/datasets/prompt-import` | `{name,description,format,content}`; see [Dataset upload](eval-dataset-upload.md) |
+| Data | `GET, POST /api/data`; `GET, PUT, DELETE /api/data/{dataId}` | Optional `datasetId` query on list |
+| Data initial resources | `PATCH /api/data/{dataId}/initial-resources` | See [Dataset upload](eval-dataset-upload.md) |
+| Samples | `GET, POST /api/samples`; `GET /api/samples/{sampleId}` | List requires `dataId` query; create: `{dataId}` |
+| Configs | `GET, POST /api/configs/{execution|evaluation|pipeline}`; `GET, PUT /api/configs/{kind}/{configId}` | PUT fully replaces editable fields |
+| Execution and Pipeline admission | `POST /api/runs/execution`, `POST /api/runs/pipeline` | `{projectId, executionConfigId|pipelineConfigId, idempotencyKey}` / `201 RunHandle` |
+| Independent evaluation admission | `POST /api/projects/{projectId}/evaluations` | `{evaluationConfigId, samplingIds, idempotencyKey}` / `202 {runId, samplingIds}` |
+| Successful Samplings | `GET /api/projects/{projectId}/samplings/successful`; `GET /api/projects/{projectId}/samplings/successful/ids` | Page: optional `sampleId`, `afterSamplingId`, `limit` (default 100, max 1,000) / `{samplings, nextCursor}`; all IDs: optional `sampleId` / `{samplingIds}` |
+| Current Run and stop | `GET /api/projects/{projectId}/runs/current`; `POST /api/projects/{projectId}/runs/{runId}/stop` | `{run:{runId, stopRequested?} | null}`; stop: `202 {runId, stopRequested:true}` |
+| Project Run views | `GET /api/projects/{projectId}/runs/{runId}`; `GET /api/projects/{projectId}/runs/{runId}/evaluations` | `{run}` with Evaluation IDs and status; `{evaluations}` in the Run's Evaluation ID order |
+| Run and result facts | `GET /api/runs/{runId}`; `GET /api/samplings/{samplingId}`; `GET /api/samplings/{samplingId}/evaluations`; `GET /api/evaluations/{evaluationId}` | — |
+| Metrics | `GET /api/metrics/projects/{projectId}` and `/datasets/{datasetId}`, `/samples/{sampleId}`, `/samplings/{samplingId}` beneath that Project | Optional repeated `runId` query |
+| Initial-resource catalog | `GET, POST /api/bundles`; `GET, PATCH, DELETE /api/bundles/{bundleId}`; `GET, POST /api/bundles/{bundleId}/materials|sessions`; `GET, PATCH, DELETE` on each Material/Session | See [Dataset upload](eval-dataset-upload.md) |
+| Output-format catalog | `GET, POST /api/evaluation-output-schemas`; `GET, PATCH, DELETE /api/evaluation-output-schemas/{outputSchemaId}` | See [Dataset upload](eval-dataset-upload.md) |
 
-The API's `start:api` process requires `DATABASE_URL`, `EVAL_SP_API_ORIGIN`, `EVAL_SP_WRITE_ORIGIN`, `EVAL_SP_SOURCE_BRANCH`, `EVAL_SP_SOURCE_COMMIT` and `EVAL_BUNDLE_DIR`. `EVAL_API_HOST` defaults to `127.0.0.1`; `EVAL_API_PORT` defaults to `8788`. `EVAL_WEB_ORIGIN` optionally restricts browser origins on the independent-evaluation routes. The API and Run Worker mount the same Bundle directory and use the same Eval SP release. The API does not hold the Agent Worker service token or run admitted work inline; PostgreSQL Run admission notifies the separate single-instance Worker.
+Selection and resubmission rules for independent evaluation are in [Independent evaluation entry](eval-independent-evaluation-entry.md). Selecting all IDs returns `413 EVALUATION_SELECTION_TOO_LARGE` instead of a truncated list when more than 10,000 match. Dataset and Data deletion is idempotent.
+
+## Run admission and stop
+
+Run admission uses a token-free, owner-scoped ConfigReader and `createEvalRunAdmission`; Config editing uses a separate Store with the current request's session token. The HTTP process holds no Harness credential and never runs Agents: admission and stop requests commit their Run facts and enqueue the Run job in the same PostgreSQL transaction (see [Run scheduling](architecture.md#run-调度与停止)).
+
+At most one unfinished Run may exist in a Project, regardless of operation. Admission locks the Project row and checks the saved idempotency identity first: a matching replay returns the original Run, a reused key with different facts is `RUN_IDEMPOTENCY_CONFLICT`, and a new key while a Run is unfinished is `PROJECT_BUSY`. After every stage of the previous Run is terminal and any stop is finalized, a new key atomically replaces the Project state: Execution or Pipeline deletes old Runs, Samplings and Evaluations; independent evaluation keeps the current execution Samplings and replaces old Runs and Evaluations. The old Run ID then returns `404`, and its retired key returns `409`. Editing a configuration does not change the current Run or its replay.
+
+`POST .../runs/{runId}/stop` targets only the named current Run. A repeat before replacement returns the original result; an unknown or replaced Run is `404`; a finished Run without a stop request is `409 PROJECT_NO_ACTIVE_RUN`. The response only records the request; the asynchronous stop lifecycle and when the Project unlocks are described in [Run scheduling and stop](architecture.md#run-调度与停止).
+
+Sampling and Evaluation responses retain artifact and complete trajectory references. Their bytes remain behind Eval SP's public read-only Workspace and Trajectory APIs; this control plane does not read SP Durable Object storage.

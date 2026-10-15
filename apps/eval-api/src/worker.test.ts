@@ -1,9 +1,9 @@
-import type { EvalRunResumer } from "@eval-platform/eval-runtime";
+import type { EvalRunResumer, RuntimeRecoveryStore } from "@eval-platform/eval-runtime";
 import type { Job, PgBoss } from "pg-boss";
 import pino from "pino";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RUN_QUEUE, type RunJob } from "./run-worker-queue.js";
-import { createRunJobHandler, RunStillActiveError, startEvalRunWorker, STOP_POLL_MS, type RunWorkerStore } from "./worker.js";
+import { createRunJobHandler, RunStillActiveError, startEvalRunWorker, STOP_POLL_MS } from "./worker.js";
 
 function fixture(input: { active?: boolean[]; stopRequested?: () => boolean } = {}) {
   const active = [...(input.active ?? [true, false])];
@@ -13,9 +13,9 @@ function fixture(input: { active?: boolean[]; stopRequested?: () => boolean } = 
     stop: vi.fn<EvalRunResumer["stop"]>(async () => undefined),
   };
   const store = {
-    isRunActive: vi.fn<RunWorkerStore["isRunActive"]>(async () => active.shift() ?? false),
-    isRunStopRequested: vi.fn<RunWorkerStore["isRunStopRequested"]>(async () => input.stopRequested?.() ?? false),
-    markRunStopFinalized: vi.fn<RunWorkerStore["markRunStopFinalized"]>(async () => true),
+    isRunActive: vi.fn<RuntimeRecoveryStore["isRunActive"]>(async () => active.shift() ?? false),
+    isRunStopRequested: vi.fn<RuntimeRecoveryStore["isRunStopRequested"]>(async () => input.stopRequested?.() ?? false),
+    markRunStopFinalized: vi.fn<RuntimeRecoveryStore["markRunStopFinalized"]>(async () => true),
   };
   const logger = pino({ level: "silent" });
   return { runtime, store, logger, handle: createRunJobHandler({ runtime, store, logger }) };

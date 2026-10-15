@@ -1,6 +1,6 @@
 import { EVALUATION_SAMPLING_IDS } from "../limits.js";
 
-/** A user-supplied catalog field (name, description, content, page size, reference) is invalid. */
+/** A user-supplied catalog field (name, description, content, reference) is invalid. */
 export class CatalogInputError extends Error {
   constructor(message: string, readonly field?: string) {
     super(message);

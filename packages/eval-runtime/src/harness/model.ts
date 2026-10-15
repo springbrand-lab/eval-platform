@@ -13,10 +13,7 @@ import type {
 } from "@eval-platform/eval-contracts";
 import type { DataInput } from "@eval-platform/eval-dataset";
 
-export type HarnessRuntimeOptions = NonNullable<Extract<
-  HarnessConfig,
-  { readonly kind: "sp" }
->["runtime"]>;
+export type HarnessRuntimeOptions = NonNullable<HarnessConfig["runtime"]>;
 
 /** The SP SpaceDO locator for the Subject Chat's Workspace. */
 export interface SubjectWorkspaceRef {

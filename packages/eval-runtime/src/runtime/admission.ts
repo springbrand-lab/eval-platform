@@ -9,7 +9,6 @@ import type {
 } from "@eval-platform/eval-contracts";
 import { canonicalJsonBytes, createId, equalJson, sha256Hex } from "@springbrand/utils";
 import type { ConfigResolver, ResolvedExecutionConfig, RunConfigSnapshot } from "../config/model.js";
-import { requireSpHarness } from "./agent-lifecycle.js";
 import {
   RuntimeAdmissionConflictError,
   RuntimeInputError,
@@ -145,7 +144,7 @@ export class RunAdmission implements EvalRunAdmission {
 
   async #planExecution(request: StartRunRequest): Promise<RunPlan> {
     const execution = await this.#configResolver.resolveExecutionConfig(request.executionConfigId);
-    const subject = requireSpHarness(execution.harness, "subject").agentConfig;
+    const subject = execution.harness.agentConfig;
     const samples = await this.#resolveSamples(execution);
     return {
       config: { operation: "execution", execution },
@@ -157,7 +156,7 @@ export class RunAdmission implements EvalRunAdmission {
 
   async #planEvaluation(request: EvaluateRequest): Promise<RunPlan> {
     const evaluation = await this.#configResolver.resolveEvaluationConfig(request.evaluationConfigId);
-    const evaluator = requireSpHarness(evaluation.evaluationHarness, "evaluator").agentConfig;
+    const evaluator = evaluation.evaluationHarness.agentConfig;
     const samplings = await this.#successfulSamplings(request);
     const sampleFor = await this.#records.samples(samplings, request.projectId);
     for (const sampling of samplings) requireEvaluationPrompt(sampleFor(sampling));
@@ -171,8 +170,8 @@ export class RunAdmission implements EvalRunAdmission {
 
   async #planPipeline(request: PipelineRequest): Promise<RunPlan> {
     const { pipeline, execution, evaluation } = await this.#configResolver.resolvePipelineConfig(request.pipelineConfigId);
-    const subject = requireSpHarness(execution.harness, "subject").agentConfig;
-    const evaluator = requireSpHarness(evaluation.evaluationHarness, "evaluator").agentConfig;
+    const subject = execution.harness.agentConfig;
+    const evaluator = evaluation.evaluationHarness.agentConfig;
     const samples = await this.#resolveSamples(execution);
     for (const sample of samples) requireEvaluationPrompt(sample);
     const samplings = this.#createSamplings(request.projectId, samples, execution.samplingCount, subject);

@@ -17,7 +17,6 @@ import {
   AgentOperationError,
   applyAttemptPatch,
   describeAgentError,
-  requireSpHarness,
   runAgentLifecycle,
   type StageDependencies,
 } from "./agent-lifecycle.js";
@@ -41,7 +40,7 @@ export async function evaluateSampling(
   dependencies: StageDependencies,
   input: EvaluateSamplingInput,
 ): Promise<RuntimeEvaluationContext> {
-  const evaluatorHarness = requireSpHarness(input.harnessConfig, "evaluator");
+  const evaluatorHarness = input.harnessConfig;
   const agentConfig = evaluatorHarness.agentConfig;
   const harnessRuntime = evaluatorHarness.runtime;
   const { sampling, evaluation, sample } = input.context;

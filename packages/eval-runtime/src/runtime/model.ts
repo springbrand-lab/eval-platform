@@ -87,7 +87,8 @@ export interface EvalRuntimeDependencies {
   readonly idFactory?: () => string;
   readonly now?: () => string;
   readonly sleep?: (milliseconds: number) => Promise<void>;
-  readonly onError?: (error: Error) => void;
+  /** Receives failures that must not interrupt the Run; it should not throw. */
+  readonly onError: (error: Error) => void;
 }
 
 /** Persists Run admissions only; Agent execution belongs to a separate resumer. */
