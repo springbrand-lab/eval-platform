@@ -30,7 +30,8 @@ async function readEligibleSampleIds(
   const dataIds = dataset.data.map((record) => record.dataId);
   if (dataIds.length === 0) return [];
   const rows = await reader.select({ sampleId: samples.sampleId }).from(samples)
-    .where(and(eq(samples.ownerUserId, ownerUserId), inArray(samples.dataId, dataIds)));
+    .where(and(eq(samples.ownerUserId, ownerUserId), inArray(samples.dataId, dataIds),
+      sampleId === undefined ? undefined : eq(samples.sampleId, sampleId)));
   return rows.map((row) => row.sampleId);
 }
 

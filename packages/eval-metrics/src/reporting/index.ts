@@ -144,7 +144,7 @@ function prepareFacts(facts: MetricsFacts, query: MetricsQuery) {
     const records = recordsForDataset(snapshot);
     return { dataset: snapshot.dataset, counts: countsFor(records, snapshot.data.map((data) => data.dataId), 1), summary: summaryFor(records) };
   };
-  return { facts, sampleById, datasetById, samplingById, samplings, evaluations, bySample, bySampling, summaryFor,
+  return { facts, sampleById, datasetById, samplingById, samplings, bySample, bySampling, summaryFor,
     countsFor, datasetIdsFor, runsFor, recordsForDataset, datasetRow };
 }
 

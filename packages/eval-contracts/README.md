@@ -4,6 +4,8 @@
 
 负责 Project、Sampling、EvaluationRecord、HarnessConfig、ExecutionOutput、EvaluationAgentOutput（评估产物、分数、证据和完整轨迹）、ArtifactRef、TrajectoryRef 和 EvidenceRef 等运行与评估类型边界。证据和解释属于评估 Agent 输出，没有独立的归因契约。SP Chat 是持久 Session：`Sampling.subjectChatId` 和 `EvaluationRecord.chatId` 标识各自的 Chat，每个 Attempt 的 `submissionId` 标识该 Chat 内的一次提交。`AgentResourceCollection` 在投递前按 `chatId + idempotencyKey` 登记，采集成功后保留真实 `submissionId`，只表达 `pending | collected | failed` 的采集状态。Dataset/Data 由 `eval-dataset` 拥有，Sample 由 `eval-runtime` 的运行时模型拥有。
 
+JSON 值与标识符规则也只在这里定义：`jsonValueSchema`、`jsonObjectSchema`（有限数、安全整数、无环纯数据）和 `identifierSchema`、`isIdentifier`、`IDENTIFIER_RULE`（非空且无首尾空白）。
+
 状态词表只在这里定义：`SAMPLING_STATUSES`、`PENDING_SAMPLING_STATUSES`、`AGENT_STATUSES`、`TERMINAL_AGENT_STATUSES` 及谓词 `isPendingSamplingStatus`、`isTerminalAgentStatus`，`SamplingStatus`、`AgentStatus` 由它们派生，SQL 使用同一常量。`AgentSubmission.status` 是 SP 归一化后的状态，SP 原始状态只在 Eval API 的 Harness 适配层映射一次。
 
 资源契约位于 `src/resources.ts`，通过包根入口导出。`AgentResourceSnapshot` 原样承载 SP 的 `usageEvents`、`telemetryEvents`、`billingSettlements`，记录是开放的 JSON 对象，而不是 Eval 重新设计的费用/Token/工具/Turn 事实模型。来源字段、缺失字段、`null`、事件顺序、重复事件、子 Agent 明细与汇总全部保留；Runtime 不补零、不换算、不抽取、不合并、不去重、不计算总量。

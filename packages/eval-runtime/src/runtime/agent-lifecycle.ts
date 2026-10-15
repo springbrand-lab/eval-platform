@@ -666,7 +666,7 @@ function inspectPersistedTerminalWithRetry<TAttempt extends AgentAttemptRecord, 
   });
 }
 
-export async function waitForTerminal(
+async function waitForTerminal(
   harness: Harness,
   handle: AgentHandle,
   idempotencyKey: string,

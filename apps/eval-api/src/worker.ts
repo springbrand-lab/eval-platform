@@ -91,15 +91,15 @@ export function createRunJobHandler(
 export async function startEvalRunWorker(options: EvalRunWorkerOptions): Promise<EvalRunWorker> {
   const { boss, logger } = options;
   const handle = createRunJobHandler(options);
-  await boss.work(RUN_QUEUE, { localConcurrency: options.concurrency, includeMetadata: true }, async (jobs: JobWithMetadata<RunJob>[]) => {
-    for (const { data: { runId }, retryCount, retryLimit } of jobs) {
-      try {
-        await handle(runId, { final: retryCount >= retryLimit });
-      } catch (error) {
-        if (error instanceof RunStillActiveError) logger.info({ runId }, "run_job_deferred");
-        else logger.error({ runId, error: errorDiagnostics(error) }, "run_job_failed");
-        throw error;
-      }
+  const work = { batchSize: 1, localConcurrency: options.concurrency, includeMetadata: true } as const;
+  await boss.work(RUN_QUEUE, work, async ([job]: JobWithMetadata<RunJob>[]) => {
+    const { data: { runId }, retryCount, retryLimit } = job!;
+    try {
+      await handle(runId, { final: retryCount >= retryLimit });
+    } catch (error) {
+      if (error instanceof RunStillActiveError) logger.info({ runId }, "run_job_deferred");
+      else logger.error({ runId, error: errorDiagnostics(error) }, "run_job_failed");
+      throw error;
     }
   });
   return { close: () => boss.offWork(RUN_QUEUE, { wait: true }) };

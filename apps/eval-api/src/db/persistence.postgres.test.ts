@@ -1518,6 +1518,10 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect((await metrics.getProjectOverview({ projectId: project.projectId })).counts)
       .toEqual({ datasets: 1, data: 1, samples: 1, samplings: 1, evaluations: 1 });
     await expect(metrics.getProjectOverview({ projectId: "not-a-project" })).rejects.toBeInstanceOf(MetricsEntityNotFoundError);
+    expect((await source.read({ projectId: project.projectId, datasetId: dataset.datasetId, sampleId: sample.sampleId })).samplings)
+      .toHaveLength(1);
+    expect((await source.read({ projectId: project.projectId, datasetId: dataset.datasetId, sampleId: "outside-dataset" })).samplings)
+      .toEqual([]);
   });
 
   it("derives queued, running and successful Pipeline progress from raw records instead of a saved Run status", async () => {

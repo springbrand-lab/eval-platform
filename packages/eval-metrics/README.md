@@ -12,7 +12,11 @@ src/
 │   └── index.ts             # 整理已有评估输出
 ├── aggregation/
 │   ├── model.ts             # 资源、状态与汇总统计模型
-│   ├── resources.ts         # 原始资源解析、去重、重叠处理
+│   ├── resources.ts         # 资源聚合编排
+│   ├── resource-facts.ts    # 诊断收集、数值校验与单个数据流读取
+│   ├── resource-usage.ts    # 用量统计与 Subagent 汇总
+│   ├── resource-billing.ts  # 结算统计
+│   ├── resource-telemetry.ts # 遥测操作统计
 │   ├── statistics.ts        # 分数与耗时的基础分布计算
 │   └── index.ts             # 单次采样及分组聚合
 └── reporting/

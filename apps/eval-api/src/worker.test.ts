@@ -156,7 +156,7 @@ describe("Run worker", () => {
     const source = fakeBoss();
     const { runtime, store, logger } = fixture({ active: [true, false] });
     const worker = await startEvalRunWorker({ boss: source.boss, runtime, store, logger, concurrency: 3 });
-    expect(source.work).toHaveBeenCalledExactlyOnceWith(RUN_QUEUE, { localConcurrency: 3, includeMetadata: true }, expect.any(Function));
+    expect(source.work).toHaveBeenCalledExactlyOnceWith(RUN_QUEUE, { batchSize: 1, localConcurrency: 3, includeMetadata: true }, expect.any(Function));
 
     await source.deliver("run-1");
     expect(runtime.resume).toHaveBeenCalledExactlyOnceWith("run-1", expect.any(AbortSignal));

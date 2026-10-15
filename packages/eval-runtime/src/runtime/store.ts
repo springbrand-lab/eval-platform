@@ -2,7 +2,7 @@ import type { EvaluationRecord, RunPhases, Sampling } from "@eval-platform/eval-
 import { equalJson } from "@springbrand/utils";
 import type { RunConfigSnapshot } from "../config/index.js";
 import { describeAgentError } from "./agent-lifecycle.js";
-import type { RetryController } from "./retry.js";
+import type { RetryController, RetryDecision } from "./retry.js";
 import {
   RuntimeRecordConflictError,
   RuntimeRecordPersistenceError,
@@ -115,7 +115,7 @@ export async function persistRuntimeRecord<TRecord extends SamplingState | Evalu
       if (outcome === "conflict" || !details.retryable) {
         throw new RuntimeRecordPersistenceError(details.message, outcome, error, record, expected);
       }
-      let decision;
+      let decision: RetryDecision;
       try {
         decision = await input.retryController.decide({
           operation: "persistence",
