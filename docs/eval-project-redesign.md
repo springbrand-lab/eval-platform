@@ -190,7 +190,7 @@ Worker resume(runId) 先读取 Run，再读取 ProjectPlanSnapshot 和目标记�
 
 Run dispatch gate 与 stop intent 在 Run 行锁下协调；停止后不能再发起新的 SP 操作。Worker 收到停止信号时中止本地 resume、调用 SP stop Chat/Submission、收尾 Attempt 与证据，然后写 stopFinalized。
 
-Worker 使用 PostgreSQL notification + 启动扫描 + 断线重扫 + 定时扫描恢复 Run。进程内 Set 只防同一实例重复，不承担跨进程锁；部署仍限制为一个 Worker，未来多 Worker 必须增加持久化协调。
+Worker 调度沿用已落地的 pg-boss 方案（见 [architecture](architecture.md) 的「Run 调度与停止」）：Run 准入与停止在同一事务内投递任务，每个 Run 同时只有一个任务，可部署多个 Worker。
 
 ### 5.7 Runtime 持久化改造
 

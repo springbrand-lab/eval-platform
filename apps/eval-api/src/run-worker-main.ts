@@ -1,9 +1,10 @@
 import { errorDiagnostics } from "@springbrand/http/server";
 import pino from "pino";
 import { loadWorkerConfig } from "./config/worker.js";
+import { loggerOptions } from "./middlewares/pino-logger.js";
 import { startSpEvalRunWorkerProcess } from "./run-worker-process.js";
 
-const logger = pino({ level: "info", base: null });
+const logger = pino(loggerOptions);
 
 try {
   const worker = await startSpEvalRunWorkerProcess(loadWorkerConfig(process.env), logger);

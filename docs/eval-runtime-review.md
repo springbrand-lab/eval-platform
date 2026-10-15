@@ -1,5 +1,7 @@
 # eval-runtime 评审记录
 
+> 历史快照：记录当时代码的事实，不代表当前实现；当前行为以 `packages/eval-runtime/README.md` 与 `docs/architecture.md` 为准。
+
 > 评审对象：`packages/eval-runtime`
 >
 > 记录日期：2026-10-06
