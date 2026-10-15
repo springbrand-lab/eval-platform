@@ -77,6 +77,12 @@ function affectedProjects(files, root = process.cwd()) {
       continue;
     }
 
+    // The API's deployment files ship in its image and compose stack.
+    if (normalized.startsWith("infra/aws/deploy/")) {
+      changedWorkspaces.add("@eval-platform/eval-api");
+      continue;
+    }
+
     if (normalized === "pnpm-lock.yaml") {
       lockfileChanged = true;
       continue;
