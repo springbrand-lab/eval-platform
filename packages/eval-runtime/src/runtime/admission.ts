@@ -9,8 +9,8 @@ import type {
   RunTargets,
 } from "@eval-platform/eval-contracts";
 import { RUN_OPERATIONS } from "@eval-platform/eval-contracts";
-import { canonicalJsonBytes, createId, equalJson, sha256Hex } from "@springbrand/utils";
-import { phasesOf, planProjectSampleIds } from "../plan/index.js";
+import { createId, equalJson } from "@springbrand/utils";
+import { digestJson, phasesOf, planProjectSampleIds } from "../plan/index.js";
 import {
   RuntimeAdmissionConflictError,
   RuntimeEntityNotFoundError,
@@ -336,7 +336,7 @@ function requireObject(value: unknown, field: string): void {
 
 function requestFingerprint(facts: RunRequestFacts, planDigests: RuntimeRunPlanDigests): Promise<string> {
   const { projectId, operation, selector, targets } = facts;
-  return sha256Hex(canonicalJsonBytes({ projectId, operation, selector, targets, planDigests }));
+  return digestJson({ projectId, operation, selector, targets, planDigests });
 }
 
 function copyHandle(run: RunHandle): RunHandle {

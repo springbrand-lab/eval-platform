@@ -73,7 +73,7 @@ export interface ProjectSnapshot {
 }
 
 /** A Project found by its creation key, deleted or not, with the first Run admitted under the same key. */
-export interface ProjectCreation {
+export interface StoredProjectCreation {
   readonly project: Project;
   readonly deleted: boolean;
   readonly fingerprint: string;
@@ -177,7 +177,7 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
     },
 
     /** The Project created under this key, deleted or not, and its first Run if one was admitted. */
-    findCreation(key: string): Promise<ProjectCreation | null> {
+    findCreation(key: string): Promise<StoredProjectCreation | null> {
       return db.transaction(async (transaction) => {
         const [row] = await transaction.select().from(projects)
           .where(and(eq(projects.ownerUserId, owner), eq(projects.creationKey, key)));
@@ -197,8 +197,9 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
     },
 
     /**
-     * Compensation for a creation whose first Run was never admitted: removes every row of the Project
-     * and returns its frozen-copy IDs for SP deletion. Returns null, keeping the Project, once it has any Run.
+     * Compensation for a creation whose first Run was never admitted. Returns `[]` when no such Project
+     * exists; `null`, keeping the Project, once it has any Run; otherwise removes every row of the Project
+     * and returns its frozen-copy IDs for SP deletion.
      */
     async deleteUnrun(projectId: string): Promise<string[] | null> {
       return db.transaction(async (transaction) => {
@@ -281,10 +282,8 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
       return db.transaction(async (transaction) => {
         const plan = await readProjectPlan(transaction, projectId, owner);
         if (!plan) return null;
-        const [samples, currentRun] = await Promise.all([
-          readAllProjectSamples(transaction, plan),
-          readCurrentRun(transaction, owner, projectId),
-        ]);
+        const samples = await readAllProjectSamples(transaction, plan);
+        const currentRun = await readCurrentRun(transaction, owner, projectId);
         return { ...plan, projectSamples: samples, currentRun };
       }, READ_SNAPSHOT);
     },

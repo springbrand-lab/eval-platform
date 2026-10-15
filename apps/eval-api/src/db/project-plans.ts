@@ -38,14 +38,14 @@ export function projectFromRow(row: typeof projects.$inferSelect): Project {
 export async function readProjectPlan(reader: RecordReader, projectId: string, ownerUserId?: string): Promise<ProjectPlan | null> {
   const [project] = await reader.select().from(projects).where(visibleProject(projectId, ownerUserId));
   if (!project) return null;
-  const [datasetRows, memberRows, [execution], [evaluation]] = await Promise.all([
-    reader.select().from(projectDatasets).where(eq(projectDatasets.projectId, projectId)).orderBy(asc(projectDatasets.position)),
-    reader.select({ datasetId: projectSampleDatasets.datasetId, projectSampleId: projectSampleDatasets.projectSampleId })
-      .from(projectSampleDatasets).where(eq(projectSampleDatasets.projectId, projectId))
-      .orderBy(projectSampleDatasets.datasetId, projectSampleDatasets.position),
-    reader.select().from(projectExecutionPlans).where(eq(projectExecutionPlans.projectId, projectId)),
-    reader.select().from(projectEvaluationPlans).where(eq(projectEvaluationPlans.projectId, projectId)),
-  ]);
+  // One transaction client runs one query at a time, so these reads stay sequential.
+  const datasetRows = await reader.select().from(projectDatasets)
+    .where(eq(projectDatasets.projectId, projectId)).orderBy(asc(projectDatasets.position));
+  const memberRows = await reader.select({ datasetId: projectSampleDatasets.datasetId, projectSampleId: projectSampleDatasets.projectSampleId })
+    .from(projectSampleDatasets).where(eq(projectSampleDatasets.projectId, projectId))
+    .orderBy(projectSampleDatasets.datasetId, projectSampleDatasets.position);
+  const [execution] = await reader.select().from(projectExecutionPlans).where(eq(projectExecutionPlans.projectId, projectId));
+  const [evaluation] = await reader.select().from(projectEvaluationPlans).where(eq(projectEvaluationPlans.projectId, projectId));
   if (!execution) throw new Error(`Project ${projectId} has no execution plan`);
   const members = new Map<string, string[]>();
   for (const row of memberRows) addToGroup(members, row.datasetId, row.projectSampleId);
@@ -112,7 +112,7 @@ export async function readAllProjectSamples(reader: RecordReader, plan: ProjectP
   return samples.sort((left, right) => (order.get(left.projectSampleId) ?? 0) - (order.get(right.projectSampleId) ?? 0));
 }
 
-/** Schema content by ID, ignoring catalog soft deletes. Omit the owner only for the Worker. */
+/** Schema content resolved through the Project's evaluation plan, ignoring catalog soft deletes. Omit the owner only for the Worker. */
 export async function readEvaluationOutputSchema(
   reader: RecordReader, projectId: string, ownerUserId?: string,
 ): Promise<EvaluationOutputSchema | null> {

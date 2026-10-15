@@ -1,6 +1,7 @@
 import { createDatasetService, DatasetEntityNotFoundError, type Data } from "@eval-platform/eval-dataset";
 import { createMetrics, MetricsEntityNotFoundError } from "@eval-platform/eval-metrics";
 import {
+  RuntimeAdmissionConflictError,
   digestExecutionPlan,
   RuntimeEntityNotFoundError,
   RuntimeProjectBusyError,
@@ -319,6 +320,37 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       expect(await services().projects.create(body)).toEqual({ project, run });
     });
 
+    it("never lets a replaying request compensate a Project another request committed", async () => {
+      const body = await creationBody();
+      const committed = services();
+      // Request A commits the creation transaction but has not admitted its first Run yet.
+      const pending = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...committed.store, deleteUnrun: async () => null },
+        outputSchemas: committed.outputSchemas, agentConfigs: committed.agentConfigs,
+        admission: { preview: planAdmission(OWNER).preview, async submit() { throw new Error("A is still admitting"); } },
+      });
+      await expect(pending.create(body)).rejects.toThrow("A is still admitting");
+      const [project] = await services().projects.list();
+      const copies = (await database.db.select().from(projectAgentConfigs)).map((row) => row.userAgentId);
+      expect(copies).toHaveLength(1);
+
+      // Request B replays the same key; its admission fails, but it must not remove A's Project or copies.
+      const replaying = services(OWNER, {
+        preview: planAdmission(OWNER).preview,
+        async submit() { throw new RuntimeAdmissionConflictError("source-branch", "release changed"); },
+      });
+      await expect(replaying.projects.create(body)).rejects.toMatchObject({ reason: "source-branch" });
+      expect(await services().projects.list()).toEqual([project]);
+      expect((await database.db.select().from(projectAgentConfigs)).map((row) => row.userAgentId)).toEqual(copies);
+      expect(stub.calls.deleted).toEqual([]);
+      expect(stub.configs.has(copies[0]!)).toBe(true);
+
+      const finished = await services().projects.create(body);
+      expect(finished.project).toEqual(project);
+      expect(await services().projects.create(body)).toEqual(finished);
+      expect(stub.sp.createAgentConfig).toHaveBeenCalledTimes(1);
+    });
+
     it("never resurrects a deleted creation and starts afresh after a compensated failure", async () => {
       const body = await creationBody();
       const failing = services(OWNER, { preview: planAdmission(OWNER).preview, async submit() { throw new RuntimeProjectBusyError("p", "r"); } });
@@ -329,11 +361,31 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       await settle(worker, run.samplingIds, "succeeded");
       await service.delete(project.projectId);
       await expect(service.create(body)).rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "project" });
-      await expect(service.create({ ...body, name: "Other" })).rejects.toBeInstanceOf(ProjectIdempotencyConflictError);
+      await expect(service.create({ ...body, name: "Other" })).rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "project" });
       const other = await services(OTHER).projects.create({ ...body, datasets: [{ datasetId: (await catalog(OTHER)).first.datasetId }],
         execution: { ...body.execution, userAgentId: stub.seed(OTHER, "Other subject") } });
       expect(other.project.projectId).not.toBe(project.projectId);
     });
+  });
+
+  it("treats an orphan frozen-slug copy without a Project row as frozen everywhere", async () => {
+    const { first } = await catalog();
+    const orphan = crypto.randomUUID();
+    stub.configs.set(orphan, {
+      id: orphan, user_id: OWNER, slug: `eval-frozen-${crypto.randomUUID()}`, name: "Lost (frozen)", description: null,
+      revision: 1, setting: { model: "lost" }, is_default: false,
+    });
+    const { agentConfigs, projects: service } = services();
+    expect((await agentConfigs.list()).map((config) => config.id)).not.toContain(orphan);
+    expect((await agentConfigs.listAgents()).map((agent) => agent.agentConfig.userAgentId)).not.toContain(orphan);
+    await expect(agentConfigs.update(orphan, { name: "edit" })).rejects.toBeInstanceOf(AgentConfigFrozenError);
+    await expect(agentConfigs.remove(orphan)).rejects.toBeInstanceOf(AgentConfigFrozenError);
+    await expect(service.create({
+      idempotencyKey: "orphan", name: "From orphan", datasets: [{ datasetId: first.datasetId }], samplingCount: 1,
+      execution: { userAgentId: orphan, framework: "sp", executionConcurrency: 1 }, run: { operation: "execution" },
+    })).rejects.toBeInstanceOf(AgentConfigFrozenError);
+    expect(stub.sp.createAgentConfig).not.toHaveBeenCalled();
+    expect((await agentConfigs.get(orphan)).id).toBe(orphan);
   });
 
   it("replaces the evaluation plan until the first evaluating Run locks it, retiring and hiding old copies", async () => {

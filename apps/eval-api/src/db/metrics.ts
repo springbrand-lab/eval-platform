@@ -74,25 +74,21 @@ export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): Me
           runIds === undefined ? undefined : inArray(samplings.samplingId, transaction
             .select({ id: runSamplings.samplingId }).from(runSamplings).where(inArray(runSamplings.runId, [...runIds]))),
         );
-        const [samplingRows, evaluationRows, runRows] = await Promise.all([
-          transaction.select().from(samplings).where(scope).orderBy(samplings.samplingId),
-          transaction.select({ evaluation: evaluations }).from(evaluations)
-            .innerJoin(samplings, and(eq(samplings.ownerUserId, evaluations.ownerUserId), eq(samplings.samplingId, evaluations.samplingId)))
-            .where(and(scope, runIds === undefined ? undefined : inArray(evaluations.evaluationId, transaction
-              .select({ id: runEvaluations.evaluationId }).from(runEvaluations).where(inArray(runEvaluations.runId, [...runIds])))))
-            .orderBy(evaluations.evaluationId),
-          runIds === undefined
-            ? transaction.selectDistinct({ runId: runSamplings.runId }).from(runSamplings)
-              .innerJoin(samplings, eq(samplings.samplingId, runSamplings.samplingId)).where(scope)
-            : Promise.resolve(runIds.map((runId) => ({ runId }))),
-        ]);
+        const samplingRows = await transaction.select().from(samplings).where(scope).orderBy(samplings.samplingId);
+        const evaluationRows = await transaction.select({ evaluation: evaluations }).from(evaluations)
+          .innerJoin(samplings, and(eq(samplings.ownerUserId, evaluations.ownerUserId), eq(samplings.samplingId, evaluations.samplingId)))
+          .where(and(scope, runIds === undefined ? undefined : inArray(evaluations.evaluationId, transaction
+            .select({ id: runEvaluations.evaluationId }).from(runEvaluations).where(inArray(runEvaluations.runId, [...runIds])))))
+          .orderBy(evaluations.evaluationId);
+        const runRows = runIds === undefined
+          ? await transaction.selectDistinct({ runId: runSamplings.runId }).from(runSamplings)
+            .innerJoin(samplings, eq(samplings.samplingId, runSamplings.samplingId)).where(scope)
+          : runIds.map((runId) => ({ runId }));
 
         const runRecords = await readRunRecords(transaction, runRows.map((row) => row.runId),
           { kind: "project", ownerUserId: owner, projectId });
-        const [memberSamplings, memberEvaluations] = await Promise.all([
-          readSamplings(transaction, runRecords.flatMap((run) => run.samplingIds), owner),
-          readEvaluations(transaction, runRecords.flatMap((run) => run.evaluationIds), owner),
-        ]);
+        const memberSamplings = await readSamplings(transaction, runRecords.flatMap((run) => run.samplingIds), owner);
+        const memberEvaluations = await readEvaluations(transaction, runRecords.flatMap((run) => run.evaluationIds), owner);
         const samplingById = byId<Sampling>(memberSamplings, (record) => record.samplingId);
         const evaluationById = byId<EvaluationRecord>(memberEvaluations, (record) => record.evaluationId);
         const runs = runRecords.map((run) => {

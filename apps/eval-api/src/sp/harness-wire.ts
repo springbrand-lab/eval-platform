@@ -144,7 +144,7 @@ const structuredOutputSchema = z.object({
   contentHash: id.exactOptional(),
 }) satisfies z.ZodType<EvaluationStructuredOutput>;
 
-/** Keeps the Evaluator's raw result file unchanged; unknown top-level fields such as a legacy score are dropped. */
+/** Keeps the Evaluator's raw result file unchanged; top-level fields outside the contract are dropped. */
 export function evaluationOutput(value: unknown): EvaluationAgentOutput {
   return response(z.object({
     status: outputStatusSchema,

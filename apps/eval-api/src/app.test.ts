@@ -185,20 +185,6 @@ describe("Eval API HTTP layer", () => {
       jsonRequest("PUT", { ...evaluationPlan, outputSchemaId: undefined }))).status).toBe(422);
   });
 
-  it("removes every other Project configuration write and the catalog Sample and Config routes", async () => {
-    const app = setup();
-    const removed = await Promise.all([
-      app.request("/api/projects/project-1", jsonRequest("PATCH", { name: "x" })),
-      app.request("/api/projects/project-1/evaluation-output-schema", jsonRequest("PUT", { outputSchemaId })),
-      app.request("/api/configs/execution", authorized()),
-      app.request(`/api/samples?dataId=${datasetId}`, authorized()),
-      app.request("/api/runs/execution", jsonRequest("POST", { projectId: "project-1" })),
-      app.request("/api/projects/project-1/evaluations", jsonRequest("POST", {})),
-      app.request("/api/projects/project-1/samplings/successful", authorized()),
-    ]);
-    expect(removed.map((response) => response.status)).toEqual([404, 404, 404, 404, 404, 404, 404]);
-  });
-
   it("reads every JSON body through one bounded, duplicate-free path before validation", async () => {
     const app = setup();
     const duplicate = await app.request("/api/datasets", jsonRequest("POST", '{"name":"a","nested":{"id":1,"id":2}}'));

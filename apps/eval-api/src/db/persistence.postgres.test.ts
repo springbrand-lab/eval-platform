@@ -74,6 +74,15 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     return jobs.findJobs<RunJob>(RUN_QUEUE, { key: runId });
   }
 
+  /**
+   * Makes a retrying job due now. `startAfter: new Date()` uses the Node clock, which can run a few
+   * milliseconds ahead of PostgreSQL's `now()`; a worker fetching immediately would then skip the job and,
+   * with LISTEN/NOTIFY active, not poll again for 30 seconds. A start time in the past is due on any clock.
+   */
+  async function makeJobDue(jobId: string): Promise<void> {
+    await jobs.update(RUN_QUEUE, undefined, { id: jobId, startAfter: new Date(Date.now() - 60_000) });
+  }
+
   async function runJobStates(runId: string): Promise<string[]> {
     return (await runJobs(runId)).map((job) => job.state);
   }
@@ -525,7 +534,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
         await vi.waitFor(async () => expect(await runJobStates(command.run.runId)).toEqual(["retry"]), { timeout: 10_000 });
         const [job] = await runJobs(command.run.runId);
         expect(job?.output).toMatchObject({ name: "RunStillActiveError" });
-        await jobs.update(RUN_QUEUE, undefined, { id: job!.id, startAfter: new Date() });
+        await makeJobDue(job!.id);
         // With LISTEN/NOTIFY active, pg-boss falls back to a 30-second poll for jobs that become due without a notification.
         await vi.waitFor(async () => expect(await runJobStates(command.run.runId)).toEqual(["completed"]), { timeout: 40_000 });
         expect(runtime.resume).toHaveBeenCalledTimes(2);
@@ -551,7 +560,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
           await monitor.supervise(RUN_QUEUE);
           expect(await runJobStates(command.run.runId)).toEqual(["retry"]);
         }, { timeout: 10_000, interval: 250 });
-        await jobs.update(RUN_QUEUE, undefined, { id: job!.id, startAfter: new Date() });
+        await makeJobDue(job!.id);
         const { runtime: recoveredRuntime } = heldRuntime();
         const recovered = await startWorker(recoveredRuntime);
         try {

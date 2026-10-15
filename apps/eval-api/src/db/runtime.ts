@@ -174,12 +174,10 @@ async function admitRun(
   }
 
   const evaluates = run.operation !== "execution";
-  const [[executionPlan], [evaluationPlan]] = await Promise.all([
-    transaction.select({ digest: projectExecutionPlans.digest }).from(projectExecutionPlans)
-      .where(eq(projectExecutionPlans.projectId, run.projectId)),
-    transaction.select({ digest: projectEvaluationPlans.digest, lockedAt: projectEvaluationPlans.lockedAt })
-      .from(projectEvaluationPlans).where(eq(projectEvaluationPlans.projectId, run.projectId)),
-  ]);
+  const [executionPlan] = await transaction.select({ digest: projectExecutionPlans.digest }).from(projectExecutionPlans)
+    .where(eq(projectExecutionPlans.projectId, run.projectId));
+  const [evaluationPlan] = await transaction.select({ digest: projectEvaluationPlans.digest, lockedAt: projectEvaluationPlans.lockedAt })
+    .from(projectEvaluationPlans).where(eq(projectEvaluationPlans.projectId, run.projectId));
   if (evaluates && !evaluationPlan) {
     throw new RuntimeAdmissionConflictError("evaluation-plan-required", "Project has no evaluation plan");
   }

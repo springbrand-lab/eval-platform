@@ -137,7 +137,7 @@ export interface EvaluationAttempt {
 export interface Sampling {
   readonly samplingId: string;
   readonly projectId: string;
-  /** The Project's own fixed input; never a live catalog Sample or Data. */
+  /** The Project's own fixed input; never live catalog Data. */
   readonly projectSampleId: string;
   readonly execution: SamplingStageState;
   readonly subjectAgent: AgentConfigRef;

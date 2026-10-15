@@ -37,7 +37,7 @@ export type MetricsQuery = MetricsScope & {
 
 /**
  * One repeatable-read snapshot of a Project. The hierarchy comes only from the fixed plan, never from
- * live dataset_data or catalog Samples.
+ * live catalog Datasets or Data.
  */
 export interface MetricsFacts {
   readonly plan: ProjectPlan;

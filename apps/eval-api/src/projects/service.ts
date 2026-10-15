@@ -74,8 +74,15 @@ function fingerprintOf(body: ProjectCreateBody): Promise<string> {
   return digestJson(facts);
 }
 
-function runtimeOf(timeoutMs: number | undefined) {
-  return timeoutMs === undefined ? {} : { runtime: { timeoutMs } };
+/** The harness and optional retry policy shared by the execution and evaluation plan inputs. */
+function agentPolicy<F extends AgentFramework>(ownerUserId: string, framework: F, userAgentId: string, body: AgentPolicy) {
+  return {
+    harness: {
+      kind: "sp" as const, framework, agentConfig: { ownerUserId, userAgentId },
+      ...(body.timeoutMs === undefined ? {} : { runtime: { timeoutMs: body.timeoutMs } }),
+    },
+    ...(body.retryPolicy === undefined ? {} : { retryPolicy: body.retryPolicy }),
+  };
 }
 
 /**
@@ -99,19 +106,18 @@ export function createProjectService(input: {
   }
 
   function evaluationPlan(body: EvaluationPlanBody, copy: FrozenCopy, outputSchema: EvaluationOutputSchemaRef): EvaluationPlan {
+    const { harness, ...retry } = agentPolicy(ownerUserId, "sp", copy.userAgentId, body);
     return normalizeEvaluationPlan({
-      evaluationHarness: {
-        kind: "sp", framework: "sp", agentConfig: { ownerUserId, userAgentId: copy.userAgentId }, ...runtimeOf(body.timeoutMs),
-      },
+      evaluationHarness: harness,
       evaluatorAgentConfig: copy.snapshot,
       evaluationConcurrency: body.evaluationConcurrency,
-      ...(body.retryPolicy === undefined ? {} : { retryPolicy: body.retryPolicy }),
+      ...retry,
       outputSchema,
     });
   }
 
   /** Builds the Dataset snapshots and one ProjectSample per distinct Data, in binding order. */
-  async function snapshotSources(body: ProjectCreateBody) {
+  async function snapshotSources(body: ProjectCreateBody, projectId: string) {
     const selected = await store.readSelection(body.datasets);
     const samples = new Map<string, ProjectSample & { datasetIds: string[] }>();
     const datasets: ProjectDatasetSnapshot[] = selected.map(({ dataset, data }) => ({
@@ -120,7 +126,7 @@ export function createProjectService(input: {
         let sample = samples.get(record.dataId);
         if (!sample) {
           sample = {
-            projectSampleId: crypto.randomUUID(), projectId: "", dataId: record.dataId, datasetIds: [],
+            projectSampleId: crypto.randomUUID(), projectId, dataId: record.dataId, datasetIds: [],
             samplingCount: body.samplingCounts?.[record.dataId] ?? body.samplingCount, data: record,
           };
           samples.set(record.dataId, sample);
@@ -138,43 +144,36 @@ export function createProjectService(input: {
     return { datasets, samples: [...samples.values()] };
   }
 
-  /**
-   * Admits the first Run under the creation key. A failure removes a Project that still has no Run,
-   * then its SP copies; a concurrent identical submission is replayed by Runtime instead.
-   */
+  /** Admits the first Run under the creation key; a concurrent identical submission is replayed by Runtime. */
   async function admitFirstRun(project: Project, body: ProjectCreateBody): Promise<ProjectCreation> {
     const { projectId } = project;
     const { operation } = body.run;
-    try {
-      const { targets } = await admission.preview({ projectId, operation, selector: { all: true } });
-      const run = await admission.submit({ idempotencyKey: body.idempotencyKey, projectId, operation, selector: { all: true }, targets });
-      return { project, run };
-    } catch (error) {
-      const removed = await store.deleteUnrun(projectId).catch(() => null);
-      if (removed) await agentConfigs.discard(removed);
-      throw error;
-    }
+    const { targets } = await admission.preview({ projectId, operation, selector: { all: true } });
+    const run = await admission.submit({ idempotencyKey: body.idempotencyKey, projectId, operation, selector: { all: true }, targets });
+    return { project, run };
   }
 
-  /** Replays a creation already committed under the key, finishing its first Run if a crash interrupted it. */
+  /**
+   * Replays a creation already committed under the key, finishing its first Run if a crash interrupted
+   * it. A replaying request never compensates: the Project belongs to the request that committed it.
+   */
   async function replay(body: ProjectCreateBody, fingerprint: string): Promise<ProjectCreation | null> {
     const found = await store.findCreation(body.idempotencyKey);
     if (!found) return null;
-    if (found.fingerprint !== fingerprint) throw new ProjectIdempotencyConflictError();
     if (found.deleted) throw new RuntimeEntityNotFoundError("project", found.project.projectId);
+    if (found.fingerprint !== fingerprint) throw new ProjectIdempotencyConflictError();
     return found.run ? { project: found.project, run: found.run } : admitFirstRun(found.project, body);
   }
 
   async function createOnce(body: ProjectCreateBody, fingerprint: string): Promise<ProjectCreation> {
-    const sources = await snapshotSources(body);
-    const outputSchema = body.evaluation && await schemaRef(body.evaluation.outputSchemaId);
     const projectId = crypto.randomUUID();
+    const { datasets, samples } = await snapshotSources(body, projectId);
+    const outputSchema = body.evaluation && await schemaRef(body.evaluation.outputSchemaId);
     const project: Project = {
       projectId, ownerUserId, name: body.name,
       ...(body.description === undefined ? {} : { description: body.description }),
       sourceBranch: input.sourceBranch, createdAt: new Date().toISOString(),
     };
-    const samples = sources.samples.map((sample) => ({ ...sample, projectId }));
     const copies: string[] = [];
     try {
       const subject = await agentConfigs.freeze(body.execution.userAgentId);
@@ -182,21 +181,17 @@ export function createProjectService(input: {
       const evaluator = body.evaluation && await agentConfigs.freeze(body.evaluation.userAgentId);
       if (evaluator) copies.push(evaluator.userAgentId);
       const execution = normalizeExecutionPlan({
-        harness: {
-          kind: "sp", framework: body.execution.framework,
-          agentConfig: { ownerUserId, userAgentId: subject.userAgentId }, ...runtimeOf(body.execution.timeoutMs),
-        },
+        ...agentPolicy(ownerUserId, body.execution.framework, subject.userAgentId, body.execution),
         subjectAgentConfig: subject.snapshot,
         executionConcurrency: body.execution.executionConcurrency,
-        ...(body.execution.retryPolicy === undefined ? {} : { retryPolicy: body.execution.retryPolicy }),
       });
       const evaluation = body.evaluation && evaluator && outputSchema
         ? evaluationPlan(body.evaluation, evaluator, outputSchema) : null;
       await store.create({
         project,
-        datasets: sources.datasets,
+        datasets,
         samples,
-        execution: { plan: execution, digest: await digestExecutionPlan({ execution, datasets: sources.datasets, samples }) },
+        execution: { plan: execution, digest: await digestExecutionPlan({ execution, datasets, samples }) },
         evaluation: evaluation && { plan: evaluation, digest: await digestEvaluationPlan(evaluation) },
         agentConfigs: [
           { userAgentId: subject.userAgentId, role: "subject", snapshot: subject.snapshot },
@@ -208,7 +203,14 @@ export function createProjectService(input: {
       await agentConfigs.discard(copies);
       throw error;
     }
-    return admitFirstRun(project, body);
+    try {
+      return await admitFirstRun(project, body);
+    } catch (error) {
+      // Only the request that committed this Project compensates it, and only while it has no Run.
+      const removed = await store.deleteUnrun(projectId).catch(() => null);
+      if (removed) await agentConfigs.discard(removed);
+      throw error;
+    }
   }
 
   return {

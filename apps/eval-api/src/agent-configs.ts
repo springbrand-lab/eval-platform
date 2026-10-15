@@ -45,14 +45,26 @@ export function createAgentConfigService(input: {
   readonly projects: Pick<PostgresProjectStore, "frozenAgentConfigIds">;
 }) {
   const { ownerUserId, sessionToken: token, sp, projects } = input;
-  async function requireEditable(id: string): Promise<void> {
+  /**
+   * The single definition of a frozen copy: recorded for a Project (current or retired), or carrying the
+   * frozen slug prefix, which also covers an orphan whose Project row was never written.
+   */
+  async function frozenIds(configs: readonly EvalSpAgentConfig[]): Promise<Set<string>> {
+    const recorded = await projects.frozenAgentConfigIds(configs.map((config) => config.id));
+    return new Set(configs.filter((config) => recorded.has(config.id)
+      || (typeof config.slug === "string" && config.slug.startsWith(FROZEN_SLUG_PREFIX))).map((config) => config.id));
+  }
+  /** Refuses a frozen copy and returns the editable Agent Config; recorded copies fail without reading SP. */
+  async function requireEditable(id: string): Promise<EvalSpAgentConfig> {
     if ((await projects.frozenAgentConfigIds([id])).has(id)) throw new AgentConfigFrozenError(id);
+    const config = await sp.getAgentConfig(token, id);
+    if ((await frozenIds([config])).has(config.id)) throw new AgentConfigFrozenError(id);
+    return config;
   }
   async function list(): Promise<EvalSpAgentConfig[]> {
     const configs = await sp.listAgentConfigs(token);
-    const frozen = await projects.frozenAgentConfigIds(configs.map((config) => config.id));
-    return configs.filter((config) => !frozen.has(config.id)
-      && !(typeof config.slug === "string" && config.slug.startsWith(FROZEN_SLUG_PREFIX)));
+    const frozen = await frozenIds(configs);
+    return configs.filter((config) => !frozen.has(config.id));
   }
   return {
     list,
@@ -73,8 +85,7 @@ export function createAgentConfigService(input: {
     },
     /** Clones a selectable Agent Config into a new SP Agent Config whose body never changes again. */
     async freeze(sourceUserAgentId: string): Promise<FrozenCopy> {
-      await requireEditable(sourceUserAgentId);
-      const source = await sp.getAgentConfig(token, sourceUserAgentId);
+      const source = await requireEditable(sourceUserAgentId);
       const copy = await sp.createAgentConfig(token, frozenCopyInput(source));
       // Plan normalization validates the body as plain JSON; the caller discards the copy on failure.
       return {
