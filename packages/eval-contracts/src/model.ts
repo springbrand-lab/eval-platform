@@ -21,14 +21,15 @@ export type EvaluationOutputSchema = Readonly<Record<string, JsonValue>>;
 
 export type AgentRole = "subject" | "evaluator";
 
-export type SamplingStatus =
-  | "queued"
-  | "starting"
-  | "running"
-  | "retrying"
-  | "succeeded"
-  | "failed"
-  | "cancelled";
+export const SAMPLING_STATUSES = ["queued", "starting", "running", "retrying", "succeeded", "failed", "cancelled"] as const;
+export type SamplingStatus = (typeof SAMPLING_STATUSES)[number];
+
+/** Statuses that keep a Run unfinished; persistence queries must use this same set. */
+export const PENDING_SAMPLING_STATUSES = ["queued", "starting", "running", "retrying"] as const satisfies readonly SamplingStatus[];
+
+export function isPendingSamplingStatus(status: SamplingStatus): boolean {
+  return (PENDING_SAMPLING_STATUSES as readonly SamplingStatus[]).includes(status);
+}
 
 export interface SamplingStageState {
   readonly status: SamplingStatus;
@@ -37,13 +38,14 @@ export interface SamplingStageState {
   readonly evidencePending?: boolean;
 }
 
-export type AgentStatus =
-  | "queued"
-  | "running"
-  | "completed"
-  | "failed"
-  | "interrupted"
-  | "cancelled";
+export const AGENT_STATUSES = ["queued", "running", "completed", "failed", "interrupted", "cancelled"] as const;
+export type AgentStatus = (typeof AGENT_STATUSES)[number];
+
+export const TERMINAL_AGENT_STATUSES = ["completed", "failed", "interrupted", "cancelled"] as const satisfies readonly AgentStatus[];
+
+export function isTerminalAgentStatus(status: AgentStatus): boolean {
+  return (TERMINAL_AGENT_STATUSES as readonly AgentStatus[]).includes(status);
+}
 
 export type EvaluatorResultStatus = "passed" | "failed" | "error" | "skipped";
 

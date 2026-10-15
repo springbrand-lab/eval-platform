@@ -1,4 +1,5 @@
 import type { EvaluationRecord, ProjectInitialLaunch, Sampling } from "@eval-platform/eval-contracts";
+import { PENDING_SAMPLING_STATUSES } from "@eval-platform/eval-contracts";
 import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
 import { RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, RuntimeRunStoppedError } from "@eval-platform/eval-runtime";
 import { and, eq, exists, gt, inArray, isNull, not, or, sql } from "drizzle-orm";
@@ -11,20 +12,19 @@ import { datasets, evaluations, projects, runEvaluations, runRequestKeys, runs, 
 export type RuntimeReader = Pick<EvalDb, "select">;
 
 function unfinishedRunCondition(reader: RuntimeReader) {
-  const unfinished = ["queued", "starting", "running", "retrying"];
   const executionPending = exists(reader.select({ samplingId: runSamplings.samplingId })
     .from(runSamplings)
     .innerJoin(samplings, eq(runSamplings.samplingId, samplings.samplingId))
     .where(and(
       eq(runSamplings.runId, runs.runId),
-      inArray(sql<string>`${samplings.facts}->'execution'->>'status'`, unfinished),
+      inArray(sql<string>`${samplings.facts}->'execution'->>'status'`, PENDING_SAMPLING_STATUSES),
     )));
   const evaluationPending = exists(reader.select({ evaluationId: runEvaluations.evaluationId })
     .from(runEvaluations)
     .innerJoin(evaluations, eq(runEvaluations.evaluationId, evaluations.evaluationId))
     .where(and(
       eq(runEvaluations.runId, runs.runId),
-      inArray(sql<string>`${evaluations.facts}->'status'->>'status'`, unfinished),
+      inArray(sql<string>`${evaluations.facts}->'status'->>'status'`, PENDING_SAMPLING_STATUSES),
     )));
   return or(executionPending, evaluationPending);
 }

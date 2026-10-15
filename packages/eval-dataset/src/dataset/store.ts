@@ -18,6 +18,14 @@ export interface DatasetStore {
   importDataset(snapshot: DatasetSnapshot, options?: { readonly kind: "prompt" }): Promise<void>;
 }
 
+/** A user-supplied Dataset document, upload or Data input is invalid. */
+export class DatasetInputError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "DatasetInputError";
+  }
+}
+
 export class DatasetEntityNotFoundError extends Error {
   constructor(readonly entity: "dataset" | "data", readonly entityId: string) {
     super(`Unknown ${entity}: ${entityId}`);

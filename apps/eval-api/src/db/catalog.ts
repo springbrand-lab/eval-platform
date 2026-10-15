@@ -8,7 +8,8 @@ import { requireOwnerUserId } from "./owner.js";
 import { sqlBatches } from "./batch.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
 import { data, evaluationOutputSchemas, projects, samples, samplings } from "./schema.js";
-import { EvaluationSelectionTooLargeError, MAX_EVALUATION_SAMPLING_IDS } from "../independent-evaluation-limits.js";
+import { EvaluationSelectionTooLargeError } from "./errors.js";
+import { EVALUATION_SAMPLING_IDS } from "../limits.js";
 import { catalogId } from "./catalog-metadata.js";
 import { OutputSchemaNotFoundError } from "./output-schemas.js";
 
@@ -216,8 +217,8 @@ export function createPostgresProjectCatalog(
       const rows = await db.select({ samplingId: samplings.samplingId })
         .from(samplings).innerJoin(projects, eq(samplings.projectId, projects.projectId))
         .where(successfulSamplingCondition(projectId, owner, filter.sampleId))
-        .orderBy(samplings.samplingId).limit(MAX_EVALUATION_SAMPLING_IDS + 1);
-      if (rows.length > MAX_EVALUATION_SAMPLING_IDS) throw new EvaluationSelectionTooLargeError();
+        .orderBy(samplings.samplingId).limit(EVALUATION_SAMPLING_IDS + 1);
+      if (rows.length > EVALUATION_SAMPLING_IDS) throw new EvaluationSelectionTooLargeError();
       return rows.map(({ samplingId }) => samplingId);
     },
   };

@@ -43,8 +43,8 @@ export function assertPromptData(data: Data): void {
 export function parsePromptDatasetUpload(input: PromptDatasetUploadInput): DatasetDocument {
   const upload = promptUploadSchema.parse(input);
   const rawRows: unknown = upload.format === "json"
-    ? parseJsonDocument(upload.content)
-    : upload.content.split(/\r?\n/u).filter((line) => line.trim()).map(parseJsonDocument);
+    ? parseStrictJson(upload.content)
+    : upload.content.split(/\r?\n/u).filter((line) => line.trim()).map(parseStrictJson);
   if (!Array.isArray(rawRows) || rawRows.length === 0) {
     throw new TypeError("Prompt data file must contain a nonempty array of rows");
   }
@@ -66,7 +66,7 @@ export function parseDatasetDocument(source: string, format: DatasetFormat): Dat
   let document: unknown;
   switch (format) {
     case "json":
-      document = parseJsonDocument(source);
+      document = parseStrictJson(source);
       break;
     case "yaml": {
       const parsed = parseDocument(source, {
@@ -104,7 +104,8 @@ export function parseDatasetDocument(source: string, format: DatasetFormat): Dat
   return datasetDocumentSchema.parse(document);
 }
 
-function parseJsonDocument(source: string): unknown {
+/** Parse JSON while rejecting duplicate decoded object keys, comments and trailing commas. */
+export function parseStrictJson(source: string): unknown {
   const objectKeys: Set<string>[] = [];
   visitJson(source, {
     onObjectBegin() {

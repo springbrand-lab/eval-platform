@@ -27,6 +27,7 @@
   "dependencies": {
     "@eval-platform/eval-contracts": "workspace:*",
     "@eval-platform/eval-dataset": "workspace:*",
+    "@springbrand/utils": "link:../../../sp-platform/packages/utils",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },

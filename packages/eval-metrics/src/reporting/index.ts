@@ -15,6 +15,14 @@ export class MetricsQueryError extends Error {
   }
 }
 
+/** A Metrics query named a Project, Dataset, Sample or Sampling outside the caller's scope. */
+export class MetricsEntityNotFoundError extends Error {
+  constructor(readonly entity: "project" | "dataset" | "sample" | "sampling", readonly id: string) {
+    super(`Unknown ${entity} ${id}`);
+    this.name = "MetricsEntityNotFoundError";
+  }
+}
+
 export class MetricsSourceError extends Error {
   constructor(message: string) {
     super(message);

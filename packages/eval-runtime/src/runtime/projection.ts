@@ -1,18 +1,12 @@
 import type { EvaluationRecord, RunPhase, RunPhases, RunSnapshot, SamplingStatus } from "@eval-platform/eval-contracts";
+import { isPendingSamplingStatus } from "@eval-platform/eval-contracts";
 import type { SamplingSnapshot } from "./model.js";
 import type { RuntimeRunRecord, SamplingState } from "./store.js";
-
-export function isPendingStatus(status: SamplingStatus): boolean {
-  return status === "queued"
-    || status === "starting"
-    || status === "running"
-    || status === "retrying";
-}
 
 export function currentRunPhase(records: readonly SamplingState[], phases: RunPhases): RunPhase {
   const firstPhase = phases[0];
   if (firstPhase === "execution" && phases.length === 2) {
-    if (records.some((state) => isPendingStatus(state.execution.status))) return "execution";
+    if (records.some((state) => isPendingSamplingStatus(state.execution.status))) return "execution";
     if (records.some((state) => state.execution.status === "succeeded")) return "evaluation";
   }
   return firstPhase;
@@ -33,7 +27,7 @@ function aggregateRunProgress(
       ? state.execution.status
       : evaluationBySamplingId.get(state.samplingId)?.status.status ?? "queued"
   ));
-  const pending = statuses.filter(isPendingStatus);
+  const pending = statuses.filter(isPendingSamplingStatus);
   const hasExecutionFailure = phases.length === 2
     && records.some((state) => (
       state.execution.status === "failed" || state.execution.status === "cancelled"
@@ -63,9 +57,9 @@ export function toRunSnapshot(
 ): RunSnapshot {
   const progress = aggregateRunProgress(records, evaluations, run.phases);
   const stopFinalizing = run.stopRequested === true && run.stopFinalized !== true
-    && !isPendingStatus(progress.status);
+    && !isPendingSamplingStatus(progress.status);
   const stopped = run.stopRequested === true && run.stopFinalized === true
-    && !isPendingStatus(progress.status);
+    && !isPendingSamplingStatus(progress.status);
   return {
     runId: run.runId,
     samplingIds: [...run.samplingIds],

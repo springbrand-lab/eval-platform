@@ -2,7 +2,7 @@ import { link, lstat, mkdir, readFile, realpath, stat, unlink, writeFile } from 
 import { dirname, isAbsolute, join, sep } from "node:path";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import { SpHarnessError, type SpHarnessOptions } from "./harness.js";
-import { parseStrictJson } from "../strict-json.js";
+import { parseStrictJson } from "@eval-platform/eval-dataset";
 
 const MAX_MATERIAL_MANIFEST_BYTES = 27_000_000;
 const MAX_SESSION_FILE_BYTES = 2_500_000;

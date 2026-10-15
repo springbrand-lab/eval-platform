@@ -8,6 +8,7 @@ import type {
   SamplingStatus,
   SpHarnessConfig,
 } from "@eval-platform/eval-contracts";
+import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 
 import type {
   AgentHandle,
@@ -144,7 +145,7 @@ class SubmissionStatusError extends AgentOperationError {
 export class ConfirmedSubmissionFailure extends AgentOperationError {
   constructor(stage: AgentLifecycleStage, submission: AgentSubmission) {
     super(
-      submission.error ?? `${stage} submission ended with ${submissionStatus(submission) ?? submission.status}`,
+      submission.error ?? `${stage} submission ended with ${submission.status}`,
       submission.retryable === true,
       normalizeFailureKind(submission.failureKind),
     );
@@ -286,7 +287,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
             if (!attempt.submissionId) {
               throw new AgentOperationError("Completed attempt has no Submission ID", false, "network");
             }
-            terminal = { submissionId: attempt.submissionId, status: "completed", normalizedStatus: "completed" };
+            terminal = { submissionId: attempt.submissionId, status: "completed" };
           } else {
             const inspection = await inspectPersistedTerminalWithRetry(
               dependencies, options, handle, idempotencyKey, retryController,
@@ -299,7 +300,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
               attempt = await options.updateAttempt(attempt, { submissionId: inspection.submissionId });
             }
             resourceScope = { ...resourceScope, submissionId: inspection.submissionId };
-            if (submissionStatus(inspection) !== attempt.status) {
+            if (inspection.status !== attempt.status) {
               throw new AgentOperationError("Agent operation disagrees with the persisted terminal status", false, "network");
             }
             terminal = inspection;
@@ -335,10 +336,8 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
           if (terminal.submissionId !== attempt.submissionId) {
             throw new AgentOperationError("Terminal status belongs to a different Submission", false, "network");
           }
-          const status = submissionStatus(terminal);
-          if (status === undefined) throw new Error(`${options.stage} submission has no terminal status`);
           terminalPatch = {
-            status,
+            status: terminal.status,
             completedAt: dependencies.now(),
             ...(isSuccessfulSubmission(terminal) ? {} : { error: submissionFailure(options.stage, terminal).message }),
           };
@@ -798,38 +797,12 @@ function requireSubmissionId(submission: AgentSubmission): void {
   }
 }
 
-function submissionStatus(submission: AgentSubmission): AgentStatus | undefined {
-  if (submission.normalizedStatus) return submission.normalizedStatus;
-  switch (submission.status) {
-    case "queued":
-      return "queued";
-    case "starting":
-    case "running":
-      return "running";
-    case "completed":
-    case "succeeded":
-      return "completed";
-    case "failed":
-      return "failed";
-    case "interrupted":
-      return "interrupted";
-    case "cancelled":
-      return "cancelled";
-    default:
-      return undefined;
-  }
-}
-
 function isTerminal(submission: AgentSubmission): boolean {
-  const status = submissionStatus(submission);
-  return status === "completed"
-    || status === "failed"
-    || status === "interrupted"
-    || status === "cancelled";
+  return isTerminalAgentStatus(submission.status);
 }
 
 function isSuccessfulSubmission(submission: AgentSubmission): boolean {
-  return submissionStatus(submission) === "completed";
+  return submission.status === "completed";
 }
 
 function submissionFailure(stage: AgentLifecycleStage, submission: AgentSubmission): AgentOperationError {

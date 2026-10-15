@@ -78,11 +78,11 @@ function runtimeFixture() {
     },
     materializeInitialData: initialized,
     materializeSubjectTrajectory: materializedTrajectory,
-    async submitAgent({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true, normalizedStatus: "completed" }; },
+    async submitAgent({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true }; },
     async restartAgent() { throw new Error("Successful agent must not restart"); },
-    async inspectAgentOperation({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true, normalizedStatus: "completed" }; },
+    async inspectAgentOperation({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true }; },
     async stopAgent() { return false; },
-    async waitForSubmission({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true, normalizedStatus: "completed" }; },
+    async waitForSubmission({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true }; },
     async collectExecution({ handle }) {
       return {
         samplingId: handle.samplingId, status: "succeeded", artifacts: [{ artifactId: `${handle.chatId}:page`, kind: "file", path: "/workspace/page.html" }],

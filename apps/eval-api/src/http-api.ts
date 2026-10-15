@@ -27,11 +27,11 @@ import {
 import { DatasetInUseError } from "./db/dataset.js";
 import { OutputSchemaInUseError, OutputSchemaNotFoundError } from "./db/output-schemas.js";
 import { BundleResourceInUseError, BundleResourceNotFoundError } from "./db/resource-catalog.js";
-import { EvaluationSelectionTooLargeError } from "./independent-evaluation-limits.js";
+import { EvaluationSelectionTooLargeError } from "./db/errors.js";
 import { matchesIndependentEvaluationPath, type IndependentEvaluationApi } from "./independent-evaluation-api.js";
 import { EvalSpApiError, EvalSpTransportError, type EvalSpClient } from "./sp/client.js";
 import { SpHarnessError } from "./sp/harness.js";
-import { parseStrictJson } from "./strict-json.js";
+import { parseStrictJson } from "@eval-platform/eval-dataset";
 
 const JSON_BODY_LIMIT = 1_000_000;
 const DOCUMENT_BODY_LIMIT = 10_000_000;

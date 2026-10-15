@@ -1,4 +1,4 @@
-import { parseStrictJson } from "./strict-json.js";
+import { parseStrictJson } from "@eval-platform/eval-dataset";
 
 export function methodNotAllowed(methods: string): Response {
   return new Response(null, { status: 405, headers: { Allow: methods } });

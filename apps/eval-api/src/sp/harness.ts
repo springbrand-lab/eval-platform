@@ -4,6 +4,7 @@ import type {
   ExecutionOutput,
   MaterializedDataBinding,
 } from "@eval-platform/eval-contracts";
+import { AGENT_STATUSES, isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import { createHash } from "node:crypto";
 import {
@@ -22,8 +23,6 @@ import { EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH } from "../project-output-schema
 
 const BASE_PATH = "/internal/v1/eval-harness";
 const SERVICE_HEADER = "X-Eval-Service-Token";
-const TERMINAL = new Set(["completed", "failed", "interrupted", "cancelled"]);
-const STATUSES = new Set(["queued", "running", ...TERMINAL]);
 const PING_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 10_000;
 const MAX_CONNECTION_ATTEMPTS = 3;
@@ -458,24 +457,21 @@ function agentHandle(value: unknown, input: EnsureAgentInput): AgentHandle {
   return result as unknown as AgentHandle;
 }
 
+/** Maps the SP receipt once: the domain status is SP's normalized status, never its raw status. */
 function submission(value: unknown): AgentSubmission {
-  const result = record(value, "Submission");
+  const { normalizedStatus, status: _rawStatus, ...result } = record(value, "Submission");
   nonempty(result.submissionId, "Submission ID");
-  nonempty(result.status, "Submission status");
-  if (result.normalizedStatus !== undefined && !STATUSES.has(String(result.normalizedStatus))) {
-    throw new SpHarnessError("Eval SP returned invalid normalized Submission status", false);
-  }
-  if (!STATUSES.has(String(result.normalizedStatus ?? result.status))) {
+  if (!(AGENT_STATUSES as readonly unknown[]).includes(normalizedStatus)) {
     throw new SpHarnessError("Eval SP returned unknown Submission status", false);
   }
   if (result.retryable !== undefined && typeof result.retryable !== "boolean") {
     throw new SpHarnessError("Eval SP returned invalid Submission retryability", false);
   }
-  return result as unknown as AgentSubmission;
+  return { ...result, status: normalizedStatus } as unknown as AgentSubmission;
 }
 
 function isTerminal(value: AgentSubmission): boolean {
-  return TERMINAL.has(value.normalizedStatus ?? value.status);
+  return isTerminalAgentStatus(value.status);
 }
 
 function dataBinding(value: unknown): MaterializedDataBinding {

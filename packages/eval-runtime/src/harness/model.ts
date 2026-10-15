@@ -44,9 +44,8 @@ export interface AgentHandle {
 export interface AgentSubmission {
   /** A single prompt submission within the Chat/Session. */
   readonly submissionId: string;
-  readonly status: string;
+  readonly status: AgentStatus;
   readonly accepted?: boolean;
-  readonly normalizedStatus?: AgentStatus;
   readonly createdAt?: number;
   readonly completedAt?: number;
   readonly retryable?: boolean;

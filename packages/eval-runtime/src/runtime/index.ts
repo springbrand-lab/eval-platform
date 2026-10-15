@@ -13,6 +13,7 @@ import type {
   Sampling,
   StartRunRequest,
 } from "@eval-platform/eval-contracts";
+import { isPendingSamplingStatus } from "@eval-platform/eval-contracts";
 import type {
   ResolvedEvaluationConfig,
   ResolvedExecutionConfig,
@@ -61,7 +62,7 @@ import {
   type RetryController,
 } from "./retry.js";
 import { createAgentScheduler, type AgentScheduler } from "./scheduler.js";
-import { isPendingStatus, toRunSnapshot, toSamplingSnapshot } from "./projection.js";
+import { toRunSnapshot, toSamplingSnapshot } from "./projection.js";
 
 type RuntimeStageDependencies = ExecutionStageDependencies & EvaluationStageDependencies;
 const STOP_IO_CONCURRENCY = 16;
@@ -208,13 +209,13 @@ class RunResumer extends RunReader implements EvalRunResumer {
 
     let samplings = await this.loadSamplingRecords(run.samplingIds);
     if (run.config.operation !== "evaluation") {
-      const unfinished = samplings.filter(({ execution }) => isPendingStatus(execution.status));
+      const unfinished = samplings.filter(({ execution }) => isPendingSamplingStatus(execution.status));
       if (unfinished.length > 0) {
         const contexts = await this.loadSamplingContexts(unfinished, run.projectId);
         await this.runExecutionPhase(contexts, run.config.execution, runId, stopSignal);
         samplings = await this.loadSamplingRecords(run.samplingIds);
       }
-      if (samplings.some(({ execution }) => isPendingStatus(execution.status))) return;
+      if (samplings.some(({ execution }) => isPendingSamplingStatus(execution.status))) return;
     }
 
     if (stopSignal?.aborted) return;
@@ -224,12 +225,12 @@ class RunResumer extends RunReader implements EvalRunResumer {
     const evaluations = await this.loadEvaluationRecords(run.evaluationIds);
     const samplingById = new Map(samplings.map((sampling) => [sampling.samplingId, sampling]));
     const toEvaluate = evaluations.filter((evaluation) => (
-      isPendingStatus(evaluation.status.status)
+      isPendingSamplingStatus(evaluation.status.status)
       && samplingById.get(evaluation.samplingId)?.execution.status === "succeeded"
     ));
     const toCancel = run.config.operation === "pipeline"
       ? evaluations.filter((evaluation) => (
-          isPendingStatus(evaluation.status.status)
+          isPendingSamplingStatus(evaluation.status.status)
           && samplingById.get(evaluation.samplingId)?.execution.status !== "succeeded"
         ))
       : [];
@@ -314,7 +315,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
     const handles: AgentHandle[] = [];
     if (run.config.operation !== "evaluation") {
       for (const sampling of samplings) {
-        if (!sampling.subjectChatId || !isPendingStatus(sampling.execution.status)) continue;
+        if (!sampling.subjectChatId || !isPendingSamplingStatus(sampling.execution.status)) continue;
         handles.push({
           role: "subject", framework: requireSpHarness(run.config.execution.harness, "subject").framework,
           ownerUserId: sampling.subjectAgent.ownerUserId,
@@ -325,7 +326,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
     if (run.config.operation !== "execution") {
       const evaluations = await this.loadEvaluationRecords(run.evaluationIds);
       for (const evaluation of evaluations) {
-        if (!evaluation.chatId || !isPendingStatus(evaluation.status.status)) continue;
+        if (!evaluation.chatId || !isPendingSamplingStatus(evaluation.status.status)) continue;
         handles.push({
           role: "evaluator", framework: run.config.evaluation.evaluationHarness.framework,
           ownerUserId: evaluation.evaluator.ownerUserId,
@@ -458,7 +459,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
       const attempt = sampling.executionAttempts.at(-1);
       return !!attempt && !attempt.submissionId && attempt.status !== "completed";
     };
-    const wasPending = isPendingStatus(initial.execution.status);
+    const wasPending = isPendingSamplingStatus(initial.execution.status);
     if (!wasPending
       && !(initial.execution.status === "failed" && (interrupted(initial) || unsubmitted(initial)))) return;
     let current = initial;
@@ -478,10 +479,10 @@ class RunResumer extends RunReader implements EvalRunResumer {
       );
       operationFound = receipt !== null;
       if (!receipt && attempt?.submissionId) throw new Error(`Subject Submission ${attempt.submissionId} disappeared`);
-      if (receipt && (receipt.normalizedStatus === "queued" || receipt.normalizedStatus === "running")) {
+      if (receipt && (receipt.status === "queued" || receipt.status === "running")) {
         throw new Error(`Stopped Subject Submission ${receipt.submissionId} is still active`);
       }
-      if (receipt && isPendingStatus(current.execution.status)) {
+      if (receipt && isPendingSamplingStatus(current.execution.status)) {
         const [context] = await this.loadSamplingContexts([current], run.projectId);
         await executeSampling(this.stopStageDependencies(), {
           context: context!, harnessConfig: executionConfig.harness,
@@ -511,7 +512,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
       await persist(next, current);
       current = next;
     }
-    if (!isPendingStatus(current.execution.status)
+    if (!isPendingSamplingStatus(current.execution.status)
       && !(current.execution.status === "failed"
         && (wasPending || interrupted(current) || (unsubmitted(current) && !operationFound)))) return;
     const last = current.executionAttempts.at(-1);
@@ -546,7 +547,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
       const attempt = evaluation.attempts.at(-1);
       return !!attempt && !attempt.submissionId && attempt.status !== "completed";
     };
-    const wasPending = isPendingStatus(initial.status.status);
+    const wasPending = isPendingSamplingStatus(initial.status.status);
     if (!wasPending
       && !(initial.status.status === "failed" && (interrupted(initial) || unsubmitted(initial)))) return;
     let current = initial;
@@ -570,10 +571,10 @@ class RunResumer extends RunReader implements EvalRunResumer {
       );
       operationFound = receipt !== null;
       if (!receipt && attempt?.submissionId) throw new Error(`Evaluator Submission ${attempt.submissionId} disappeared`);
-      if (receipt && (receipt.normalizedStatus === "queued" || receipt.normalizedStatus === "running")) {
+      if (receipt && (receipt.status === "queued" || receipt.status === "running")) {
         throw new Error(`Stopped Evaluator Submission ${receipt.submissionId} is still active`);
       }
-      if (receipt && isPendingStatus(current.status.status)) {
+      if (receipt && isPendingSamplingStatus(current.status.status)) {
         const [context] = await this.loadSamplingContexts([sampling], run.projectId);
         const project = await this.#getProject(run.projectId);
         if (!project?.evaluationOutputSchema) {
@@ -602,7 +603,7 @@ class RunResumer extends RunReader implements EvalRunResumer {
         current = next;
       }
     }
-    if (!isPendingStatus(current.status.status)
+    if (!isPendingSamplingStatus(current.status.status)
       && !(current.status.status === "failed"
         && (wasPending || interrupted(current) || (unsubmitted(current) && !operationFound)))) return;
     const last = current.attempts.at(-1);
@@ -1030,6 +1031,13 @@ export type {
 } from "./store.js";
 export { RuntimeProjectBusyError, RuntimeRunStoppedError, RuntimeRunIdentityConflictError, RuntimeRecordConflictError, RuntimeRecordPersistenceError } from "./store.js";
 export { toRunSnapshot, toSamplingSnapshot } from "./projection.js";
+export {
+  RuntimeAdmissionConflictError,
+  RuntimeEntityNotFoundError,
+  RuntimeInputError,
+  type RuntimeAdmissionConflictReason,
+  type RuntimeEntity,
+} from "./errors.js";
 export {
   DEFAULT_RETRY_POLICY,
   createRetryController,

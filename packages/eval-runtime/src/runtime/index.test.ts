@@ -373,7 +373,6 @@ function makeSubmission(status: AgentSubmission["status"] = "completed", submiss
     submissionId,
     status,
     accepted: true,
-    normalizedStatus: status === "completed" ? "completed" : "failed",
     retryable: false,
   };
 }
@@ -877,7 +876,6 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.submitAgent).mockResolvedValueOnce({
       submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
     });
     const decide = vi.fn<RetryController["decide"]>()
@@ -1000,7 +998,6 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.submitAgent).mockResolvedValueOnce({
       submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
     });
     const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore(), sleep: async () => undefined });
@@ -1019,7 +1016,6 @@ describe("eval runtime orchestration", () => {
       vi.mocked(harness.submitAgent).mockResolvedValueOnce({
         submissionId: "submission-1",
         status: "queued",
-        normalizedStatus: "queued",
       });
       vi.mocked(harness.waitForSubmission).mockResolvedValueOnce(makeSubmission());
       const runtime = createEvalRuntime({
@@ -1186,7 +1182,6 @@ describe("eval runtime orchestration", () => {
       vi.mocked(harness.submitAgent).mockResolvedValueOnce({
         submissionId: "submission-1",
         status: "failed",
-        normalizedStatus: "failed",
         retryable: true,
       });
       const runtime = createEvalRuntime({
@@ -1244,7 +1239,6 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.submitAgent).mockResolvedValueOnce({
       submissionId: "submission-1",
       status: "queued",
-      normalizedStatus: "queued",
       accepted: true,
       retryable: false,
     });
@@ -1288,7 +1282,6 @@ describe("eval runtime orchestration", () => {
         ? {
             submissionId: "submission-1",
             status: "queued",
-            normalizedStatus: "queued",
             accepted: true,
             retryable: false,
           }
@@ -1633,7 +1626,6 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.submitAgent).mockResolvedValue({
       submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       error: "agent task failed",
       retryable: true,
     });
@@ -1665,7 +1657,6 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.submitAgent).mockResolvedValue({
       submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       error: "agent task failed",
       retryable: true,
     });
@@ -1702,7 +1693,6 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.submitAgent).mockResolvedValue({
       submissionId: "submission-1",
       status: "queued",
-      normalizedStatus: "queued",
       retryable: true,
     });
     vi.mocked(harness.waitForSubmission).mockRejectedValue(new Error("status service unavailable"));
@@ -1726,13 +1716,11 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.submitAgent).mockResolvedValue({
       submissionId: "submission-1",
       status: "queued",
-      normalizedStatus: "queued",
       retryable: true,
     });
     vi.mocked(harness.waitForSubmission).mockResolvedValue({
       submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
       error: "temporary agent failure",
     });
@@ -2304,7 +2292,6 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.submitAgent).mockResolvedValueOnce(makeSubmission()).mockResolvedValueOnce({
       submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
       error: "temporary evaluator failure",
     });
@@ -2339,7 +2326,6 @@ describe("eval runtime orchestration", () => {
       .mockResolvedValueOnce({
         submissionId: "submission-1",
         status: "failed",
-        normalizedStatus: "failed",
         retryable: true,
         error: "temporary upstream failure",
       })
@@ -2370,7 +2356,6 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.submitAgent).mockResolvedValueOnce({
       submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
       error: "temporary upstream failure",
     });
@@ -2407,7 +2392,6 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.submitAgent).mockResolvedValueOnce({
       submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
       error: "temporary upstream failure",
     });
@@ -2417,7 +2401,6 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.inspectAgentOperation).mockResolvedValueOnce({
       submissionId: "submission-2",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
       error: "restart was rejected by the agent",
     });
@@ -2498,7 +2481,6 @@ describe("eval runtime orchestration", () => {
         return {
           submissionId: "submission-1",
           status: "failed",
-          normalizedStatus: "failed",
           retryable: false,
           error: "subject execution failed",
         };
@@ -2851,7 +2833,7 @@ describe("Project Run stop", () => {
     await store.updateSampling(active, queued);
     vi.mocked(harness.stopAgent).mockResolvedValue(true);
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
-      submissionId: "submission-1", status: "interrupted", normalizedStatus: "interrupted",
+      submissionId: "submission-1", status: "interrupted",
       retryable: false, error: "Evaluation Run stopped",
     });
     await resumer.stop(handle.runId);
@@ -2895,7 +2877,7 @@ describe("Project Run stop", () => {
     await store.updateEvaluation(active, initial);
     vi.mocked(harness.stopAgent).mockResolvedValue(true);
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
-      submissionId: "evaluation-submission-1", status: "interrupted", normalizedStatus: "interrupted",
+      submissionId: "evaluation-submission-1", status: "interrupted",
       retryable: false, error: "Evaluation Run stopped",
     });
     await resumer.stop(handle.runId);
@@ -2920,7 +2902,7 @@ describe("Project Run stop", () => {
     });
     const handle = await admission.start(startRequest("stop-active-retry"));
     vi.mocked(harness.submitAgent).mockResolvedValue({
-      submissionId: "active-submission", status: "running", normalizedStatus: "running",
+      submissionId: "active-submission", status: "running",
     });
     let finishWait!: (submission: AgentSubmission) => void;
     const waiting = new Promise<AgentSubmission>((resolve) => { finishWait = resolve; });
@@ -2932,8 +2914,7 @@ describe("Project Run stop", () => {
     const task = resumer.resume(handle.runId, controller.signal);
     await vi.waitFor(() => expect(harness.waitForSubmission).toHaveBeenCalledOnce());
     controller.abort();
-    finishWait({ submissionId: "active-submission", status: "interrupted",
-      normalizedStatus: "interrupted", retryable: true, error: "Run stopped" });
+    finishWait({ submissionId: "active-submission", status: "interrupted", retryable: true, error: "Run stopped" });
     await task;
     expect(harness.restartAgent).not.toHaveBeenCalled();
   });
@@ -2947,7 +2928,7 @@ describe("Project Run stop", () => {
     });
     const handle = await admission.start(startRequest("stop-stalled-terminal-wait"));
     vi.mocked(harness.submitAgent).mockResolvedValue({
-      submissionId: "stalled-submission", status: "running", normalizedStatus: "running",
+      submissionId: "stalled-submission", status: "running",
     });
     vi.mocked(harness.waitForSubmission).mockImplementation(async () => new Promise(() => undefined));
     const resumer = createEvalRunResumer({
@@ -3008,7 +2989,7 @@ describe("Project Run stop", () => {
     };
     await store.updateSampling(pending, queued);
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
-      submissionId: "terminal-submission", status: "interrupted", normalizedStatus: "interrupted",
+      submissionId: "terminal-submission", status: "interrupted",
     });
     vi.mocked(harness.collectExecution).mockRejectedValueOnce(new Error("evidence unavailable"));
     await resumer.stop(handle.runId);
@@ -3039,7 +3020,7 @@ describe("Project Run stop", () => {
     };
     await store.updateSampling(interrupted, queued);
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
-      submissionId: "interrupted-submission", status: "interrupted", normalizedStatus: "interrupted",
+      submissionId: "interrupted-submission", status: "interrupted",
     });
     const updateSampling = store.updateSampling.bind(store);
     let lostResponse = false;
@@ -3149,7 +3130,7 @@ describe("raw resource persistence", () => {
     const captured: AgentResourceSnapshot[] = [];
     vi.mocked(harness.submitAgent).mockResolvedValue({
       submissionId: "submission-1",
-      status, normalizedStatus: status, retryable: false, error: `subject ${status}`,
+      status, retryable: false, error: `subject ${status}`,
     });
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
       const resources = makeResources(input);
@@ -3175,7 +3156,7 @@ describe("raw resource persistence", () => {
     vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => (
       handle.role === "subject" ? makeSubmission() : {
         submissionId: "submission-1",
-        status, normalizedStatus: status, retryable: false, error: `evaluator ${status}`,
+        status, retryable: false, error: `evaluator ${status}`,
       }
     ));
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
@@ -3204,7 +3185,7 @@ describe("raw resource persistence", () => {
     vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => (
       handle.role !== role ? makeSubmission() : {
         submissionId: "submission-1",
-        status: "failed", normalizedStatus: "failed", retryable: true, error: "temporary LLM failure", failureKind: "llm",
+        status: "failed", retryable: true, error: "temporary LLM failure", failureKind: "llm",
       }
     ));
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
@@ -3299,7 +3280,7 @@ describe("raw resource persistence", () => {
     const harness = makeHarness();
     vi.mocked(harness.submitAgent).mockResolvedValue({
       submissionId: "submission-1",
-      status: "failed", normalizedStatus: "failed", retryable: false, error: "original agent failure",
+      status: "failed", retryable: false, error: "original agent failure",
     });
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("resource source unavailable"));
     const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
@@ -3350,7 +3331,7 @@ describe("raw resource persistence", () => {
 
   it("exposes pending collection while awaiting a pushed terminal state", async () => {
     const harness = makeHarness();
-    vi.mocked(harness.submitAgent).mockResolvedValue({ submissionId: "submission-1", status: "running", normalizedStatus: "running" });
+    vi.mocked(harness.submitAgent).mockResolvedValue({ submissionId: "submission-1", status: "running" });
     let release!: (submission: AgentSubmission) => void;
     let reachedWait!: () => void;
     const waiting = new Promise<void>((resolve) => { reachedWait = resolve; });
@@ -3382,9 +3363,9 @@ describe("raw resource persistence", () => {
       vi.mocked(harness.submitAgent).mockRejectedValue(new Error("submission response lost"));
       vi.mocked(harness.inspectAgentOperation).mockResolvedValue(null);
     } else {
-      vi.mocked(harness.submitAgent).mockResolvedValue({ submissionId: "submission-1", status: "running", normalizedStatus: "running" });
+      vi.mocked(harness.submitAgent).mockResolvedValue({ submissionId: "submission-1", status: "running" });
       vi.mocked(harness.waitForSubmission).mockRejectedValue(new Error("status source unavailable"));
-      vi.mocked(harness.inspectAgentOperation).mockResolvedValue({ submissionId: "submission-1", status: "running", normalizedStatus: "running" });
+      vi.mocked(harness.inspectAgentOperation).mockResolvedValue({ submissionId: "submission-1", status: "running" });
     }
     let captured!: AgentResourceSnapshot;
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
@@ -3522,7 +3503,7 @@ describe("raw resource persistence", () => {
     const repeatedSettlement = { accountId: "user-1", eventId: "original-source-id", debitedUnits: 1 };
     vi.mocked(harness.submitAgent).mockResolvedValue({
       submissionId: "submission-1",
-      status: "failed", normalizedStatus: "failed", retryable: true, error: "agent request failed",
+      status: "failed", retryable: true, error: "agent request failed",
     });
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => ({
       ...makeResources(input), usageEvents: [repeatedUsage], billingSettlements: [repeatedSettlement],
@@ -3725,7 +3706,7 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
     const onError = vi.fn();
     vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => handle.role === role ? {
       submissionId: "submission-1",
-      status: "interrupted", normalizedStatus: "interrupted", error: "original Agent interruption", retryable: false,
+      status: "interrupted", error: "original Agent interruption", retryable: false,
     } : makeSubmission());
     if (role === "subject") {
       const update = store.updateSampling.bind(store);
@@ -3762,7 +3743,7 @@ describe("pipeline cancellation isolation", () => {
     vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => {
       const sampling = await store.getSampling(handle.samplingId);
       return handle.role === "subject" && sampling?.sampleId !== "sample-a"
-        ? { submissionId: "submission-1", status: "failed", normalizedStatus: "failed", retryable: false, error: "subject failed" }
+        ? { submissionId: "submission-1", status: "failed", retryable: false, error: "subject failed" }
         : makeSubmission();
     });
     return harness;
@@ -4084,7 +4065,7 @@ describe("Run recovery from persisted facts", () => {
       }],
     }, original);
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
-      submissionId: "submission-1", status: "failed", normalizedStatus: "failed",
+      submissionId: "submission-1", status: "failed",
       error: "agent task failed", retryable: false,
     });
     vi.mocked(harness.collectExecution).mockResolvedValue({
@@ -4506,7 +4487,7 @@ describe("Run recovery from persisted facts", () => {
     });
     vi.mocked(harness.inspectAgentOperation).mockResolvedValueOnce(null).mockResolvedValueOnce({
       submissionId,
-      status: "failed", normalizedStatus: "failed", retryable: true,
+      status: "failed", retryable: true,
       failureKind: "llm", error: "upstream failed",
     });
 
@@ -4548,7 +4529,7 @@ describe("Run recovery from persisted facts", () => {
     vi.mocked(harness.inspectAgentOperation)
       .mockRejectedValueOnce(new Error("temporary SP 503"))
       .mockResolvedValueOnce({
-        submissionId, status: "failed", normalizedStatus: "failed",
+        submissionId, status: "failed",
         retryable: true, failureKind: "llm", error: "upstream failed",
       });
 

@@ -43,3 +43,11 @@ export type {
   StartRunRequest,
   TrajectoryRef,
 } from "./model.js";
+export {
+  AGENT_STATUSES,
+  PENDING_SAMPLING_STATUSES,
+  SAMPLING_STATUSES,
+  TERMINAL_AGENT_STATUSES,
+  isPendingSamplingStatus,
+  isTerminalAgentStatus,
+} from "./model.js";

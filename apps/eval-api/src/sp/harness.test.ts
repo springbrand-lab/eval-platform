@@ -300,12 +300,12 @@ describe("Eval SP Harness", () => {
   it("waits for the target Submission on a WebSocket and ignores another Submission", async () => {
     const socket = new FakeSocket();
     const openWebSocket = vi.fn((_url: string, _headers: Readonly<Record<string, string>>) => socket as unknown as WebSocket);
-    const fetcher = vi.fn(async () => Response.json({ submissionId: "submission-1", status: "running" }));
+    const fetcher = vi.fn(async () => Response.json({ submissionId: "submission-1", status: "running", normalizedStatus: "running" }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, openWebSocket });
     const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
     await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
-    socket.sendStatus({ submissionId: "another-submission", status: "completed" });
-    socket.sendStatus({ submissionId: "submission-1", status: "running" });
+    socket.sendStatus({ submissionId: "another-submission", status: "completed", normalizedStatus: "completed" });
+    socket.sendStatus({ submissionId: "submission-1", status: "running", normalizedStatus: "running" });
     socket.sendStatus({ submissionId: "submission-1", status: "completed", normalizedStatus: "completed" });
     await expect(waiting).resolves.toMatchObject({ submissionId: "submission-1", status: "completed" });
     expect(socket.closed).toBe(true);
@@ -318,8 +318,8 @@ describe("Eval SP Harness", () => {
     const socket = new FakeSocket();
     const openWebSocket = vi.fn((_url: string, _headers: Readonly<Record<string, string>>) => socket as unknown as WebSocket);
     const fetcher = vi.fn()
-      .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "running" }))
-      .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "completed" }));
+      .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "running", normalizedStatus: "running" }))
+      .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "completed", normalizedStatus: "completed" }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, openWebSocket });
     const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
     await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
@@ -334,8 +334,8 @@ describe("Eval SP Harness", () => {
       const socket = new FakeSocket();
       const openWebSocket = vi.fn(() => socket as unknown as WebSocket);
       const fetcher = vi.fn()
-        .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "running" }))
-        .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "failed" }));
+        .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "running", normalizedStatus: "running" }))
+        .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "error", normalizedStatus: "failed" }));
       const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, openWebSocket });
       const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
       await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
@@ -355,7 +355,7 @@ describe("Eval SP Harness", () => {
       const socket = new FakeSocket();
       socket.ping.mockImplementation(() => socket.sendPong());
       const openWebSocket = vi.fn(() => socket as unknown as WebSocket);
-      const fetcher = vi.fn(async () => Response.json({ submissionId: "submission-1", status: "running" }));
+      const fetcher = vi.fn(async () => Response.json({ submissionId: "submission-1", status: "running", normalizedStatus: "running" }));
       const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, openWebSocket });
       const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
       await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
@@ -363,7 +363,7 @@ describe("Eval SP Harness", () => {
       expect(socket.ping).toHaveBeenCalledTimes(4);
       expect(socket.closed).toBe(false);
       expect(fetcher).toHaveBeenCalledOnce();
-      socket.sendStatus({ submissionId: "submission-1", status: "completed" });
+      socket.sendStatus({ submissionId: "submission-1", status: "completed", normalizedStatus: "completed" });
       await expect(waiting).resolves.toMatchObject({ status: "completed" });
     } finally {
       vi.useRealTimers();
@@ -374,14 +374,14 @@ describe("Eval SP Harness", () => {
     const first = new FakeSocket();
     const sockets = [first, new FakeSocket()];
     const openWebSocket = vi.fn((_url: string, _headers: Readonly<Record<string, string>>) => sockets.shift() as unknown as WebSocket);
-    const fetcher = vi.fn(async () => Response.json({ submissionId: "submission-1", status: "running" }));
+    const fetcher = vi.fn(async () => Response.json({ submissionId: "submission-1", status: "running", normalizedStatus: "running" }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, openWebSocket });
     const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
     await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
     first.close();
     await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledTimes(2));
     const second = openWebSocket.mock.results[1]!.value as unknown as FakeSocket;
-    second.sendStatus({ submissionId: "submission-1", status: "completed" });
+    second.sendStatus({ submissionId: "submission-1", status: "completed", normalizedStatus: "completed" });
     await expect(waiting).resolves.toMatchObject({ status: "completed" });
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(openWebSocket.mock.calls[1]![0]).toBe(openWebSocket.mock.calls[0]![0]);
@@ -393,14 +393,14 @@ describe("Eval SP Harness", () => {
     const sockets = [first, second];
     const openWebSocket = vi.fn((_url: string, _headers: Readonly<Record<string, string>>) => sockets.shift() as unknown as WebSocket);
     const fetcher = vi.fn()
-      .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "running" }))
+      .mockResolvedValueOnce(Response.json({ submissionId: "submission-1", status: "running", normalizedStatus: "running" }))
       .mockResolvedValueOnce(new Response(null, { status: 503 }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, openWebSocket });
     const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
     await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
     first.close();
     await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledTimes(2));
-    second.sendStatus({ submissionId: "submission-1", status: "completed" });
+    second.sendStatus({ submissionId: "submission-1", status: "completed", normalizedStatus: "completed" });
     await expect(waiting).resolves.toMatchObject({ status: "completed" });
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
@@ -411,7 +411,7 @@ describe("Eval SP Harness", () => {
       queueMicrotask(() => socket.close());
       return socket as unknown as WebSocket;
     });
-    const fetcher = vi.fn(async () => Response.json({ submissionId: "submission-1", status: "running" }));
+    const fetcher = vi.fn(async () => Response.json({ submissionId: "submission-1", status: "running", normalizedStatus: "running" }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: fetcher, openWebSocket });
     await expect(harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" }))
       .rejects.toMatchObject({ retryable: true });
@@ -430,14 +430,14 @@ describe("Eval SP Harness", () => {
       receivedToken = Array.isArray(header) ? header[0] : header;
       socket.send(JSON.stringify({
         type: "submission.status",
-        submission: { submissionId: "submission-1", status: "completed" },
+        submission: { submissionId: "submission-1", status: "completed", normalizedStatus: "completed" },
       }));
     });
     try {
       const harness = createSpHarness({
         origin: `http://127.0.0.1:${address.port}`,
         serviceToken: "service-secret",
-        fetch: async () => Response.json({ submissionId: "submission-1", status: "running" }),
+        fetch: async () => Response.json({ submissionId: "submission-1", status: "running", normalizedStatus: "running" }),
       });
       await expect(harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" }))
         .resolves.toMatchObject({ status: "completed" });

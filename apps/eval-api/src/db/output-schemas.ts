@@ -1,7 +1,7 @@
 import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import { and, eq, isNull } from "drizzle-orm";
 import { parseEvaluationOutputSchema, MAX_EVALUATION_OUTPUT_SCHEMA_BYTES } from "../project-output-schema.js";
-import { parseStrictJson } from "../strict-json.js";
+import { parseStrictJson } from "@eval-platform/eval-dataset";
 import type { EvalDb } from "./client.js";
 import { catalogId, parseCatalogMetadataPatch, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";
 import { requireOwnerUserId } from "./owner.js";

@@ -3,14 +3,10 @@ import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeProjectBus
 import type { PostgresProjectCatalog } from "./db/catalog.js";
 import type { ProjectRunView } from "./db/run-view.js";
 import { ProjectRunStopConflictError } from "./db/runtime.js";
-import {
-  EvaluationSelectionTooLargeError,
-  MAX_EVALUATION_BODY_BYTES,
-  MAX_EVALUATION_SAMPLING_IDS,
-  MAX_SELECTION_RESPONSE_BYTES,
-} from "./independent-evaluation-limits.js";
+import { EvaluationSelectionTooLargeError } from "./db/errors.js";
+import { EVALUATION_BODY_BYTES, EVALUATION_SAMPLING_IDS, EVALUATION_SELECTION_RESPONSE_BYTES } from "./limits.js";
 import type { EvalSpClient } from "./sp/client.js";
-import { parseStrictJson } from "./strict-json.js";
+import { parseStrictJson } from "@eval-platform/eval-dataset";
 
 export interface IndependentEvaluationOwnerServices {
   /** Every reader and writer must be scoped to the verified Eval SP user. */
@@ -164,7 +160,7 @@ async function readJsonObject(request: Request): Promise<Record<string, unknown>
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_EVALUATION_BODY_BYTES) {
+      if (size > EVALUATION_BODY_BYTES) {
         throw new HttpError(413, "BODY_TOO_LARGE", "Evaluation request body exceeds 8 MiB");
       }
       chunks.push(value);
@@ -204,7 +200,7 @@ function evaluationInput(body: Record<string, unknown>): {
   if (!Array.isArray(body.samplingIds) || body.samplingIds.length === 0) {
     throw new HttpError(400, "INVALID_REQUEST", "samplingIds must be a non-empty array");
   }
-  if (body.samplingIds.length > MAX_EVALUATION_SAMPLING_IDS) {
+  if (body.samplingIds.length > EVALUATION_SAMPLING_IDS) {
     throw new HttpError(413, "SELECTION_TOO_LARGE", "Evaluation selection exceeds 10,000 Samplings");
   }
   const samplingIds = body.samplingIds.map((id) => validId(id, "samplingIds entry"));
@@ -335,8 +331,8 @@ export function createIndependentEvaluationApi(options: IndependentEvaluationApi
               const sampleId = optionalId(query.sampleId, "sampleId");
               const filter = sampleId === undefined ? {} : { sampleId };
               const samplingIds = await services.catalog.selectAllSuccessfulSamplingIds(route.projectId, filter);
-              if (samplingIds.length > MAX_EVALUATION_SAMPLING_IDS
-                || new TextEncoder().encode(JSON.stringify({ samplingIds })).byteLength > MAX_SELECTION_RESPONSE_BYTES) {
+              if (samplingIds.length > EVALUATION_SAMPLING_IDS
+                || new TextEncoder().encode(JSON.stringify({ samplingIds })).byteLength > EVALUATION_SELECTION_RESPONSE_BYTES) {
                 throw new HttpError(413, "SELECTION_TOO_LARGE", "Evaluation selection exceeds one request");
               }
               return json(200, { samplingIds }, corsOrigin);
