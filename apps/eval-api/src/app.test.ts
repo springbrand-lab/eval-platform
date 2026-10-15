@@ -2,7 +2,7 @@ import { RuntimeAdmissionConflictError, RuntimeInputError, RuntimeProjectBusyErr
 import { describe, expect, it, vi } from "vitest";
 import { AgentConfigFrozenError, ProjectEvaluationPlanLockedError } from "./db/errors.js";
 import type { ApiRuntime, OwnerServices } from "./lib/types.js";
-import { METADATA_BODY_BYTES, RUN_TARGET_IDS, SAMPLING_COUNT_MAX } from "./limits.js";
+import { METADATA_BODY_BYTES, RUN_TARGET_IDS, SAMPLING_COUNT_MAX, ZIP_BODY_BYTES } from "./limits.js";
 import { EvalSpApiError, EvalSpTransportError, type EvalSpClient } from "./sp/client.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "./test-support.js";
 
@@ -63,7 +63,11 @@ function setup() {
       getProjectOverview: vi.fn(async () => ({ projectId: "project-1" })),
       getSampleOverview: vi.fn(async () => ({ projectSampleId: "sample-1" })),
     },
-    resources: { createBundle: vi.fn(async () => ({ bundleId: datasetId, name: "A", description: "B" })) },
+    materialBundles: {
+      create: vi.fn(async () => ({ bundle: { bundleId: datasetId, name: "A", description: "B" }, imported: [] })),
+      update: vi.fn(),
+      import: vi.fn(),
+    },
     agentConfigs: {
       list: vi.fn(async () => [{ id: "agent-1", user_id: owner, name: "Agent" }]),
       create: vi.fn(async () => { throw new EvalSpApiError(422, { code: "AGENT_CONFIG_INVALID", errMsg: "Name is required" }); }),
@@ -193,13 +197,53 @@ describe("Eval API HTTP layer", () => {
     expect(await invalidUtf8.json()).toMatchObject({ code: "REQUEST_INVALID_INPUT" });
     const text = await app.request("/api/datasets", authorized("session", { method: "POST", body: '{"name":"a"}' }));
     expect(text.status).toBe(415);
-    const oversized = await app.request("/api/bundles", jsonRequest("POST", {
+    const oversized = await app.request(`/api/material-bundles/${datasetId}`, jsonRequest("PATCH", {
       name: "a".repeat(METADATA_BODY_BYTES), description: "b",
     }));
     expect(oversized.status).toBe(413);
     expect(await oversized.json()).toMatchObject({ code: "REQUEST_PAYLOAD_TOO_LARGE" });
     expect(app.services.datasets.createDataset).not.toHaveBeenCalled();
-    expect(app.services.resources.createBundle).not.toHaveBeenCalled();
+    expect(app.services.materialBundles.update).not.toHaveBeenCalled();
+  });
+
+  it("reads Bundle creation and ZIP import as bounded multipart bodies", async () => {
+    const app = setup();
+    const importPath = `/api/material-bundles/${datasetId}/import`;
+    for (const path of ["/api/material-bundles", importPath]) {
+      const json = await app.request(path, jsonRequest("POST", { name: "A", description: "B" }));
+      expect(json.status).toBe(415);
+      expect(await json.json()).toMatchObject({ code: "REQUEST_UNSUPPORTED_MEDIA_TYPE" });
+    }
+    const oversized = await app.request("/api/material-bundles", authorized("session", {
+      method: "POST", headers: { "Content-Type": "multipart/form-data; boundary=x" }, body: new Uint8Array(ZIP_BODY_BYTES + 1),
+    }));
+    expect(oversized.status).toBe(413);
+    expect(await oversized.json()).toMatchObject({ code: "REQUEST_PAYLOAD_TOO_LARGE" });
+    const malformed = await app.request(importPath, authorized("session", {
+      method: "POST", headers: { "Content-Type": "multipart/form-data; boundary=x" }, body: "not multipart",
+    }));
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ code: "REQUEST_INVALID_INPUT" });
+    const missingZip = await app.request(importPath, authorized("session", { method: "POST", body: new FormData() }));
+    expect(missingZip.status).toBe(422);
+    expect(await missingZip.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED", errors: [expect.objectContaining({ path: "zip" })] });
+    expect(app.services.materialBundles.import).not.toHaveBeenCalled();
+    const fields = new FormData();
+    fields.append("name", " A ");
+    fields.append("description", "B");
+    const created = await app.request("/api/material-bundles", authorized("session", { method: "POST", body: fields }));
+    expect(created.status).toBe(201);
+    expect(await created.json()).toMatchObject({ msg: { bundle: { bundleId: datasetId }, imported: [] } });
+    expect(app.services.materialBundles.create).toHaveBeenCalledWith({ name: "A", description: "B" }, []);
+  });
+
+  it("routes each Bundle kind only to its own resource kind", async () => {
+    const app = setup();
+    for (const path of [`/api/material-bundles/${datasetId}/sessions`, `/api/session-bundles/${datasetId}/materials`]) {
+      const response = await app.request(path, authorized());
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "REQUEST_NOT_FOUND" });
+    }
   });
 
   it("validates path, query and body with the route schemas", async () => {

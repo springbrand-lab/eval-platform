@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -43,13 +43,24 @@ describe("Eval Bundle directory", () => {
       .resolves.toEqual({ format: "jsonl", content: `${userEntry("m1")}\n` });
     await expect(source.resolveInitialMaterials(otherOwner, { bundleId, materialId })).rejects.toMatchObject(failure("not-found"));
     await expect(source.resolveInitialSession(owner, { bundleId, sessionId: resourceId(1) })).resolves.toBeUndefined();
-    await source.uploadInitialMaterials(owner, { bundleId, materialId }, files);
-    await expect(source.uploadInitialMaterials(owner, { bundleId, materialId }, [
-      { path: "/other.txt", mediaType: "text/plain", contentBase64: "SGk=" },
-    ])).rejects.toMatchObject(failure("conflict"));
     await source.removeInitialMaterials(owner, { bundleId, materialId });
     await source.removeInitialMaterials(owner, { bundleId, materialId });
     await expect(source.resolveInitialMaterials(owner, { bundleId, materialId })).rejects.toMatchObject(failure("not-found"));
+  });
+
+  it("never overwrites a resource and removes it together with its upload file", async () => {
+    const directory = await root();
+    const source = await openBundleDirectory(directory);
+    const materials = join(directory, owner, bundleId, "materials");
+    await source.uploadInitialMaterials(owner, { bundleId, materialId }, files);
+    await expect(readdir(materials)).resolves.toEqual([`${materialId}.json`]);
+    await expect(source.uploadInitialMaterials(owner, { bundleId, materialId }, [
+      { path: "/other.txt", mediaType: "text/plain", contentBase64: "SGk=" },
+    ])).rejects.toMatchObject(failure("unavailable"));
+    await expect(source.resolveInitialMaterials(owner, { bundleId, materialId })).resolves.toEqual(files);
+    await writeFile(join(materials, `${materialId}.json.upload`), "partial");
+    await source.removeInitialMaterials(owner, { bundleId, materialId });
+    await expect(readdir(materials)).resolves.toEqual([]);
   });
 
   it("addresses resources only by canonical platform identities", async () => {
@@ -123,28 +134,15 @@ describe("Eval Bundle directory", () => {
     }
   });
 
-  it("bounds each material file and the material in total", async () => {
-    const source = await openBundleDirectory(await root());
-    const file = (path: string, bytes: number) => ({
-      path, mediaType: "application/octet-stream", contentBase64: Buffer.alloc(bytes).toString("base64"),
-    });
-    await expect(source.uploadInitialMaterials(owner, { bundleId, materialId: resourceId(1) }, [file("/big.bin", 5_000_001)]))
-      .rejects.toMatchObject(failure("too-large"));
-    await expect(source.uploadInitialMaterials(owner, { bundleId, materialId: resourceId(2) },
-      Array.from({ length: 5 }, (_, index) => file(`/${index}.bin`, 4_000_001)))).rejects.toMatchObject(failure("too-large"));
-  });
-
-  it("rejects syntactically valid Session content that SP cannot import", async () => {
-    const source = await openBundleDirectory(await root());
-    for (const [index, context] of [
-      { format: "json", content: "{}" },
-      { format: "json", content: JSON.stringify({ entries: [{ id: "m1", message: { role: "assistant" }, createdAt: 1 }] }) },
-      { format: "jsonl", content: [userEntry("m1"), userEntry("m1")].join("\n") },
-      { format: "jsonl", content: "x".repeat(2_000_001) },
-    ].entries()) {
-      await expect(source.uploadInitialSession(owner, { bundleId, sessionId: resourceId(index) },
-        context as { format: "json" | "jsonl"; content: string })).rejects.toMatchObject(failure("invalid"));
-    }
+  it("rejects duplicate JSON keys in Session content when uploading and when reading", async () => {
+    const directory = await root();
+    const source = await openBundleDirectory(directory);
+    const duplicate = { format: "jsonl" as const, content: `{"id":"m1","id":"m2","message":{"role":"user"},"createdAt":1}` };
+    await expect(source.uploadInitialSession(owner, { bundleId, sessionId }, duplicate))
+      .rejects.toMatchObject({ ...failure("invalid"), details: [{ path: "content:1" }] });
+    await put(directory, `sessions/${sessionId}.json`, JSON.stringify(duplicate));
+    await expect(source.resolveInitialSession(owner, { bundleId, sessionId }))
+      .rejects.toMatchObject({ ...failure("invalid"), details: [{ path: "content:1" }] });
   });
 
   it("requires an absolute directory at startup", async () => {

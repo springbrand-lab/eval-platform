@@ -24,17 +24,6 @@ CREATE TABLE "eval_bundle_sessions" (
 	CONSTRAINT "eval_bundle_sessions_format_ck" CHECK ("eval_bundle_sessions"."format" IN ('json', 'jsonl'))
 );
 --> statement-breakpoint
-CREATE TABLE "eval_bundles" (
-	"bundle_id" uuid PRIMARY KEY NOT NULL,
-	"owner_user_id" text NOT NULL,
-	"name" text NOT NULL,
-	"description" text NOT NULL,
-	"deleted_at" timestamp with time zone,
-	CONSTRAINT "eval_bundles_owner_id_uq" UNIQUE("owner_user_id","bundle_id"),
-	CONSTRAINT "eval_bundles_name_ck" CHECK (length(trim("eval_bundles"."name")) > 0),
-	CONSTRAINT "eval_bundles_description_ck" CHECK (length(trim("eval_bundles"."description")) > 0)
-);
---> statement-breakpoint
 CREATE TABLE "eval_data" (
 	"data_id" uuid PRIMARY KEY NOT NULL,
 	"owner_user_id" text NOT NULL,
@@ -79,6 +68,17 @@ CREATE TABLE "eval_evaluations" (
 	"sampling_id" text NOT NULL,
 	"facts" jsonb NOT NULL,
 	CONSTRAINT "eval_evaluations_owner_identity_uq" UNIQUE("owner_user_id","evaluation_id","sampling_id")
+);
+--> statement-breakpoint
+CREATE TABLE "eval_material_bundles" (
+	"bundle_id" uuid PRIMARY KEY NOT NULL,
+	"owner_user_id" text NOT NULL,
+	"name" text NOT NULL,
+	"description" text NOT NULL,
+	"deleted_at" timestamp with time zone,
+	CONSTRAINT "eval_material_bundles_owner_id_uq" UNIQUE("owner_user_id","bundle_id"),
+	CONSTRAINT "eval_material_bundles_name_ck" CHECK (length(trim("eval_material_bundles"."name")) > 0),
+	CONSTRAINT "eval_material_bundles_description_ck" CHECK (length(trim("eval_material_bundles"."description")) > 0)
 );
 --> statement-breakpoint
 CREATE TABLE "eval_project_agent_configs" (
@@ -225,8 +225,19 @@ CREATE TABLE "eval_samplings" (
 	CONSTRAINT "eval_samplings_owner_id_uq" UNIQUE("owner_user_id","sampling_id")
 );
 --> statement-breakpoint
-ALTER TABLE "eval_bundle_materials" ADD CONSTRAINT "eval_bundle_materials_bundle_fk" FOREIGN KEY ("owner_user_id","bundle_id") REFERENCES "public"."eval_bundles"("owner_user_id","bundle_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_bundle_sessions" ADD CONSTRAINT "eval_bundle_sessions_bundle_fk" FOREIGN KEY ("owner_user_id","bundle_id") REFERENCES "public"."eval_bundles"("owner_user_id","bundle_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+CREATE TABLE "eval_session_bundles" (
+	"bundle_id" uuid PRIMARY KEY NOT NULL,
+	"owner_user_id" text NOT NULL,
+	"name" text NOT NULL,
+	"description" text NOT NULL,
+	"deleted_at" timestamp with time zone,
+	CONSTRAINT "eval_session_bundles_owner_id_uq" UNIQUE("owner_user_id","bundle_id"),
+	CONSTRAINT "eval_session_bundles_name_ck" CHECK (length(trim("eval_session_bundles"."name")) > 0),
+	CONSTRAINT "eval_session_bundles_description_ck" CHECK (length(trim("eval_session_bundles"."description")) > 0)
+);
+--> statement-breakpoint
+ALTER TABLE "eval_bundle_materials" ADD CONSTRAINT "eval_bundle_materials_bundle_fk" FOREIGN KEY ("owner_user_id","bundle_id") REFERENCES "public"."eval_material_bundles"("owner_user_id","bundle_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_bundle_sessions" ADD CONSTRAINT "eval_bundle_sessions_bundle_fk" FOREIGN KEY ("owner_user_id","bundle_id") REFERENCES "public"."eval_session_bundles"("owner_user_id","bundle_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_dataset_data" ADD CONSTRAINT "eval_dataset_data_dataset_fk" FOREIGN KEY ("owner_user_id","dataset_id") REFERENCES "public"."eval_datasets"("owner_user_id","dataset_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_dataset_data" ADD CONSTRAINT "eval_dataset_data_data_fk" FOREIGN KEY ("owner_user_id","data_id") REFERENCES "public"."eval_data"("owner_user_id","data_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_evaluations" ADD CONSTRAINT "eval_evaluations_sampling_fk" FOREIGN KEY ("owner_user_id","sampling_id") REFERENCES "public"."eval_samplings"("owner_user_id","sampling_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -247,15 +258,16 @@ ALTER TABLE "eval_runs" ADD CONSTRAINT "eval_runs_project_fk" FOREIGN KEY ("owne
 ALTER TABLE "eval_samplings" ADD CONSTRAINT "eval_samplings_project_sample_fk" FOREIGN KEY ("owner_user_id","project_id","project_sample_id") REFERENCES "public"."eval_project_samples"("owner_user_id","project_id","project_sample_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "eval_bundle_materials_bundle_idx" ON "eval_bundle_materials" USING btree ("bundle_id");--> statement-breakpoint
 CREATE INDEX "eval_bundle_sessions_bundle_idx" ON "eval_bundle_sessions" USING btree ("bundle_id");--> statement-breakpoint
-CREATE INDEX "eval_bundles_owner_idx" ON "eval_bundles" USING btree ("owner_user_id");--> statement-breakpoint
 CREATE INDEX "eval_data_owner_idx" ON "eval_data" USING btree ("owner_user_id");--> statement-breakpoint
 CREATE INDEX "eval_dataset_data_data_idx" ON "eval_dataset_data" USING btree ("data_id");--> statement-breakpoint
 CREATE INDEX "eval_datasets_owner_idx" ON "eval_datasets" USING btree ("owner_user_id");--> statement-breakpoint
 CREATE INDEX "eval_evaluation_output_schemas_owner_idx" ON "eval_evaluation_output_schemas" USING btree ("owner_user_id");--> statement-breakpoint
 CREATE INDEX "eval_evaluations_sampling_idx" ON "eval_evaluations" USING btree ("sampling_id");--> statement-breakpoint
+CREATE INDEX "eval_material_bundles_owner_idx" ON "eval_material_bundles" USING btree ("owner_user_id");--> statement-breakpoint
 CREATE INDEX "eval_project_agent_configs_owner_idx" ON "eval_project_agent_configs" USING btree ("owner_user_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "eval_project_agent_configs_current_uq" ON "eval_project_agent_configs" USING btree ("project_id","role") WHERE "eval_project_agent_configs"."retired_at" IS NULL;--> statement-breakpoint
 CREATE INDEX "eval_project_sample_datasets_sample_idx" ON "eval_project_sample_datasets" USING btree ("project_sample_id");--> statement-breakpoint
 CREATE INDEX "eval_projects_owner_idx" ON "eval_projects" USING btree ("owner_user_id");--> statement-breakpoint
 CREATE INDEX "eval_run_samplings_sampling_idx" ON "eval_run_samplings" USING btree ("sampling_id");--> statement-breakpoint
-CREATE INDEX "eval_samplings_project_sample_idx" ON "eval_samplings" USING btree ("project_id","project_sample_id");
+CREATE INDEX "eval_samplings_project_sample_idx" ON "eval_samplings" USING btree ("project_id","project_sample_id");--> statement-breakpoint
+CREATE INDEX "eval_session_bundles_owner_idx" ON "eval_session_bundles" USING btree ("owner_user_id");

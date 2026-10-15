@@ -19,7 +19,7 @@ import WebSocket from "ws";
 import { sha256Hex } from "@springbrand/utils";
 import { httpOriginSchema } from "../config/env.js";
 import { EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH } from "../project-output-schema.js";
-import type { MaterialFile, SessionContent } from "./bundle-directory.js";
+import type { MaterialFile, SessionContent } from "./bundle-content.js";
 import { SpHarnessError } from "./harness-error.js";
 import {
   agentHandle,

@@ -67,18 +67,24 @@ export const evaluationOutputSchemas = pgTable("eval_evaluation_output_schemas",
   check("eval_evaluation_output_schemas_description_ck", sql`length(trim(${table.description})) > 0`),
 ]);
 
-export const bundles = pgTable("eval_bundles", {
-  bundleId: uuid("bundle_id").primaryKey(),
-  ownerUserId: text("owner_user_id").notNull(),
-  name: text("name").notNull(),
-  description: text("description").notNull(),
-  deletedAt: timestamp("deleted_at", { withTimezone: true }),
-}, (table) => [
-  unique("eval_bundles_owner_id_uq").on(table.ownerUserId, table.bundleId),
-  index("eval_bundles_owner_idx").on(table.ownerUserId),
-  check("eval_bundles_name_ck", sql`length(trim(${table.name})) > 0`),
-  check("eval_bundles_description_ck", sql`length(trim(${table.description})) > 0`),
-]);
+/** Material Bundles and Session Bundles are independent owner-scoped catalogs with identical metadata. */
+function bundleTable<N extends string>(name: N) {
+  return pgTable(name, {
+    bundleId: uuid("bundle_id").primaryKey(),
+    ownerUserId: text("owner_user_id").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  }, (table) => [
+    unique(`${name}_owner_id_uq`).on(table.ownerUserId, table.bundleId),
+    index(`${name}_owner_idx`).on(table.ownerUserId),
+    check(`${name}_name_ck`, sql`length(trim(${table.name})) > 0`),
+    check(`${name}_description_ck`, sql`length(trim(${table.description})) > 0`),
+  ]);
+}
+
+export const materialBundles = bundleTable("eval_material_bundles");
+export const sessionBundles = bundleTable("eval_session_bundles");
 
 export const bundleMaterials = pgTable("eval_bundle_materials", {
   materialId: uuid("material_id").primaryKey(),
@@ -89,7 +95,7 @@ export const bundleMaterials = pgTable("eval_bundle_materials", {
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
 }, (table) => [
   unique("eval_bundle_materials_owner_id_uq").on(table.ownerUserId, table.materialId),
-  foreignKey({ name: "eval_bundle_materials_bundle_fk", columns: [table.ownerUserId, table.bundleId], foreignColumns: [bundles.ownerUserId, bundles.bundleId] }).onDelete("restrict"),
+  foreignKey({ name: "eval_bundle_materials_bundle_fk", columns: [table.ownerUserId, table.bundleId], foreignColumns: [materialBundles.ownerUserId, materialBundles.bundleId] }).onDelete("restrict"),
   index("eval_bundle_materials_bundle_idx").on(table.bundleId),
   check("eval_bundle_materials_name_ck", sql`length(trim(${table.name})) > 0`),
   check("eval_bundle_materials_description_ck", sql`length(trim(${table.description})) > 0`),
@@ -105,7 +111,7 @@ export const bundleSessions = pgTable("eval_bundle_sessions", {
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
 }, (table) => [
   unique("eval_bundle_sessions_owner_id_uq").on(table.ownerUserId, table.sessionId),
-  foreignKey({ name: "eval_bundle_sessions_bundle_fk", columns: [table.ownerUserId, table.bundleId], foreignColumns: [bundles.ownerUserId, bundles.bundleId] }).onDelete("restrict"),
+  foreignKey({ name: "eval_bundle_sessions_bundle_fk", columns: [table.ownerUserId, table.bundleId], foreignColumns: [sessionBundles.ownerUserId, sessionBundles.bundleId] }).onDelete("restrict"),
   index("eval_bundle_sessions_bundle_idx").on(table.bundleId),
   check("eval_bundle_sessions_name_ck", sql`length(trim(${table.name})) > 0`),
   check("eval_bundle_sessions_description_ck", sql`length(trim(${table.description})) > 0`),

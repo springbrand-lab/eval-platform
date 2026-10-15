@@ -69,7 +69,6 @@ describe("apiError", () => {
     [new MetricsEntityNotFoundError("project-sample", "s"), 404, "PROJECT_SAMPLE_NOT_FOUND"],
     [new MetricsEntityNotFoundError("sampling", "s"), 404, "SAMPLING_NOT_FOUND"],
     [new BundleFileError("not-found", "m"), 404, "BUNDLE_FILE_NOT_FOUND"],
-    [new BundleFileError("conflict", "m"), 409, "BUNDLE_FILE_CONFLICT"],
     [new BundleFileError("too-large", "m"), 413, "BUNDLE_FILE_TOO_LARGE"],
     [new BundleFileError("invalid", "m"), 400, "BUNDLE_FILE_INVALID"],
     [new BundleFileError("unavailable", "m"), 503, "BUNDLE_FILE_UNAVAILABLE"],
@@ -93,6 +92,15 @@ describe("apiError", () => {
     expect(apiError(new CatalogInputError("name must be a nonblank string", "name"))).toMatchObject({
       code: "CATALOG_INPUT_INVALID", errors: [{ path: "name", errMsg: "name must be a nonblank string" }],
     });
+    expect(apiError(new BundleFileError("invalid", "ZIP archive is invalid", {
+      details: [{ path: "a.jsonl:2", errMsg: "Invalid JSON at offset 6: ValueExpected" }],
+    }))).toMatchObject({
+      code: "BUNDLE_FILE_INVALID", message: "ZIP archive is invalid",
+      errors: [{ path: "a.jsonl:2", errMsg: "Invalid JSON at offset 6: ValueExpected" }],
+    });
+    expect(apiError(new BundleFileError("too-large", "m", { details: [{ path: "zip", errMsg: "too many entries" }] })))
+      .toMatchObject({ code: "BUNDLE_FILE_TOO_LARGE", status: 413, errors: [{ path: "zip", errMsg: "too many entries" }] });
+    expect(apiError(new BundleFileError("invalid", "m")).errors).toBeUndefined();
   });
 
   it("relays SP validation text but never persisted Runtime facts", () => {
@@ -129,5 +137,6 @@ describe("apiError", () => {
     expect(log).not.toContain("private");
     expect(apiError(new DrizzleQueryError("select 1", [], Object.assign(new Error("duplicate"), { code: "23505" }))).code)
       .toBe("INTERNAL_ERROR");
+    expect(apiError(Object.assign(new Error("terminating connection"), { code: "57P01" })).code).toBe("DATABASE_UNAVAILABLE");
   });
 });

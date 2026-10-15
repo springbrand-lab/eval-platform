@@ -1,10 +1,17 @@
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 import { parseStrictJson } from "@eval-platform/eval-dataset";
-import { readBytesLimited } from "@springbrand/http/server";
+import { limitRequestBody, readBytesLimited } from "@springbrand/http/server";
 import type { MiddlewareHandler } from "hono";
 import type { AppBindings } from "./types.js";
 
 const JSON_MEDIA_TYPE = /^application\/json(?:\s*;|$)/iu;
+const MULTIPART_MEDIA_TYPE = /^multipart\/form-data(?:\s*;|$)/iu;
+
+function requireMediaType(request: Request, pattern: RegExp, mediaType: string): void {
+  if (!pattern.test(request.headers.get("content-type") ?? "")) {
+    throw new HttpError("REQUEST_UNSUPPORTED_MEDIA_TYPE", `Content-Type must be ${mediaType}`);
+  }
+}
 
 function decodeUtf8(bytes: Uint8Array): string {
   try {
@@ -25,9 +32,7 @@ export async function readTextBody(request: Request, maxBytes: number): Promise<
  */
 export function jsonBody(maxBytes: number): MiddlewareHandler<AppBindings> {
   return async (c, next) => {
-    if (!JSON_MEDIA_TYPE.test(c.req.header("content-type") ?? "")) {
-      throw new HttpError("REQUEST_UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json");
-    }
+    requireMediaType(c.req.raw, JSON_MEDIA_TYPE, "application/json");
     const text = await readTextBody(c.req.raw, maxBytes);
     let value: unknown;
     try {
@@ -38,6 +43,15 @@ export function jsonBody(maxBytes: number): MiddlewareHandler<AppBindings> {
     }
     if (value === null || typeof value !== "object" || Array.isArray(value)) throw new HttpError("REQUEST_INVALID_JSON");
     c.req.raw = new Request(c.req.raw, { body: text });
+    await next();
+  };
+}
+
+/** The only multipart body reader: bounded bytes handed on unchanged to the route's form validator. */
+export function multipartBody(maxBytes: number): MiddlewareHandler<AppBindings> {
+  return async (c, next) => {
+    requireMediaType(c.req.raw, MULTIPART_MEDIA_TYPE, "multipart/form-data");
+    c.req.raw = await limitRequestBody(c.req.raw, maxBytes);
     await next();
   };
 }

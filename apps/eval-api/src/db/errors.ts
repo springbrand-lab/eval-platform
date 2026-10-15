@@ -46,7 +46,7 @@ export class AgentConfigFrozenError extends Error {
   }
 }
 
-export type BundleResourceKind = "Bundle" | "Material" | "Session";
+export type BundleResourceKind = "Material Bundle" | "Session Bundle" | "Material" | "Session";
 
 export class BundleResourceNotFoundError extends Error {
   constructor(readonly kind: BundleResourceKind, readonly id: string) {

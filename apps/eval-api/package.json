@@ -27,6 +27,7 @@
     "drizzle-orm": "^0.45.2",
     "hono": "4.12.33",
     "hono-pino": "0.10.3",
+    "mime-types": "3.0.2",
     "pg": "^8.23.0",
     "pg-boss": "12.28.0",
     "pino": "10.3.1",
@@ -36,9 +37,11 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@types/mime-types": "2.1.4",
     "@types/node": "26.1.2",
     "@types/pg": "^8.23.1",
     "@types/ws": "^8.18.2",
+    "@zip.js/zip.js": "2.8.41",
     "drizzle-kit": "^0.31.10",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"

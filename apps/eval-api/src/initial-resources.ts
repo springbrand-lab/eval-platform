@@ -11,7 +11,6 @@ import type { EvalDb } from "./db/client.js";
 import { requireOwnerUserId } from "./db/owner.js";
 import { assertMaterialSelectable, assertSessionSelectable } from "./db/resource-catalog.js";
 import { data } from "./db/schema.js";
-import type { BundleDirectory } from "./sp/bundle-directory.js";
 
 /** Each present field binds (reference) or clears (`null`) one initial resource of a Data row. */
 export const dataInitialResourcePatchSchema = z.strictObject({
@@ -27,13 +26,11 @@ export interface InitialResourceApi {
 }
 
 /** Binds existing owner-scoped catalog entries to a Data row. */
-export function createInitialResourceApi(db: EvalDb, ownerUserId: string, bundles: BundleDirectory): InitialResourceApi {
+export function createInitialResourceApi(db: EvalDb, ownerUserId: string): InitialResourceApi {
   const owner = requireOwnerUserId(ownerUserId);
   return {
     async bindData(dataId, patch) {
       const { initialMaterials: materials, evalInitialMaterials: evalMaterials, initialSession: session } = patch;
-      if (materials) await bundles.resolveInitialMaterials(owner, materials);
-      if (evalMaterials) await bundles.resolveInitialMaterials(owner, evalMaterials);
       return db.transaction(async (transaction) => {
         if (materials) await assertMaterialSelectable(transaction, owner, materials);
         if (evalMaterials) await assertMaterialSelectable(transaction, owner, evalMaterials);

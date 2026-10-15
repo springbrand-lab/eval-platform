@@ -57,7 +57,6 @@ const admissionConflictCodes = {
 
 const bundleFileCodes = {
   "not-found": "BUNDLE_FILE_NOT_FOUND",
-  conflict: "BUNDLE_FILE_CONFLICT",
   "too-large": "BUNDLE_FILE_TOO_LARGE",
   invalid: "BUNDLE_FILE_INVALID",
   unavailable: "BUNDLE_FILE_UNAVAILABLE",
@@ -135,8 +134,8 @@ function evalSpError(error: EvalSpApiError): HttpError {
   return new HttpError("EVAL_SP_REQUEST_FAILED", undefined, upstream);
 }
 
+/** SP transport failures are classified earlier, so a remaining unavailability code comes from PostgreSQL or its pool. */
 function isDatabaseUnavailable(error: Error): boolean {
-  if (!("query" in error)) return false;
   let cause: unknown = error;
   for (let depth = 0; depth < 5 && cause instanceof Error; depth++, cause = cause.cause) {
     if ("code" in cause && unavailableDatabaseCodes.has(String(cause.code))) return true;
@@ -163,7 +162,11 @@ export function apiError(error: Error): HttpError {
   if (error instanceof CatalogInputError) return fieldError("CATALOG_INPUT_INVALID", error);
   if (error instanceof DatasetEntityNotFoundError) return new HttpError(datasetEntityCodes[error.entity], error.message, { cause: error });
   if (error instanceof MetricsEntityNotFoundError) return new HttpError(metricsEntityCodes[error.entity], error.message, { cause: error });
-  if (error instanceof BundleFileError) return new HttpError(bundleFileCodes[error.reason], error.message, { cause: error });
+  if (error instanceof BundleFileError) {
+    return new HttpError(bundleFileCodes[error.reason], error.message, {
+      cause: error, ...(error.details === undefined ? {} : { errors: [...error.details] }),
+    });
+  }
   if (error instanceof EvalSpApiError) return evalSpError(error);
   if (error instanceof EvalSpTransportError) return new HttpError("EVAL_SP_UNAVAILABLE", undefined, { cause: error });
   for (const [type, code] of publicMessageCodes) {
@@ -172,7 +175,8 @@ export function apiError(error: Error): HttpError {
   for (const [type, code] of catalogMessageCodes) {
     if (error instanceof type) return new HttpError(code, undefined, { cause: error });
   }
-  if (error instanceof HTTPException && error.status === 400) return new HttpError("REQUEST_INVALID_JSON", undefined, { cause: error });
+  // JSON bodies are parsed before validation, so Hono's validator rejects only a malformed multipart body.
+  if (error instanceof HTTPException && error.status === 400) return new HttpError("REQUEST_INVALID_INPUT", undefined, { cause: error });
   if (isDatabaseUnavailable(error)) return new HttpError("DATABASE_UNAVAILABLE", undefined, { cause: error });
   return new HttpError("INTERNAL_ERROR", undefined, { cause: error });
 }

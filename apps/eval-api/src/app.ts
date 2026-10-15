@@ -3,14 +3,15 @@ import { createApp } from "./lib/create-app.js";
 import { sessionAuth } from "./middlewares/session-auth.js";
 import agentConfigRouter from "./routes/agent-configs/agent-configs.index.js";
 import agentRouter from "./routes/agents/agents.index.js";
-import bundleRouter from "./routes/bundles/bundles.index.js";
 import dataRouter from "./routes/data/data.index.js";
 import datasetRouter from "./routes/datasets/datasets.index.js";
 import healthRouter from "./routes/health/health.index.js";
+import materialBundleRouter from "./routes/material-bundles/material-bundles.index.js";
 import metricsRouter from "./routes/metrics/metrics.index.js";
 import outputSchemaRouter from "./routes/output-schemas/output-schemas.index.js";
 import projectRouter from "./routes/projects/projects.index.js";
 import runRouter from "./routes/runs/runs.index.js";
+import sessionBundleRouter from "./routes/session-bundles/session-bundles.index.js";
 import sessionRouter from "./routes/session/session.index.js";
 
 /** Builds the Eval API route table; every `/api/*` route requires a verified Eval SP session. */
@@ -26,7 +27,8 @@ export function createRoutes(logger: pino.Logger) {
   app.route("/api/datasets", datasetRouter);
   app.route("/api/data", dataRouter);
   app.route("/api/metrics", metricsRouter);
-  app.route("/api/bundles", bundleRouter);
+  app.route("/api/material-bundles", materialBundleRouter);
+  app.route("/api/session-bundles", sessionBundleRouter);
   app.route("/api/evaluation-output-schemas", outputSchemaRouter);
   return app;
 }

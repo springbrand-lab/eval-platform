@@ -23,12 +23,12 @@ Codes are uppercase `DOMAIN_REASON`. `packages/eval-contracts/src/http-errors.ts
 
 ## Request bodies and limits
 
-Every JSON body goes through one reader: the route requires `Content-Type: application/json` (`415 REQUEST_UNSUPPORTED_MEDIA_TYPE` otherwise), `readBytesLimited` caps the received bytes (`413 REQUEST_PAYLOAD_TOO_LARGE`), the text must be strict UTF-8 (`400 REQUEST_INVALID_INPUT`), and `parseStrictJson` requires a JSON object and rejects duplicate fields at any depth (`400 REQUEST_INVALID_JSON`) before the route schema validates it (`422 REQUEST_VALIDATION_FAILED` with `errors`; objects are strict, so unknown fields fail). The stop route ignores any body. Dataset document import reads the raw JSON/YAML text through the same bounded UTF-8 reader without a media-type check.
+Every JSON body goes through one reader: the route requires `Content-Type: application/json` (`415 REQUEST_UNSUPPORTED_MEDIA_TYPE` otherwise), `readBytesLimited` caps the received bytes (`413 REQUEST_PAYLOAD_TOO_LARGE`), the text must be strict UTF-8 (`400 REQUEST_INVALID_INPUT`), and `parseStrictJson` requires a JSON object and rejects duplicate fields at any depth (`400 REQUEST_INVALID_JSON`) before the route schema validates it (`422 REQUEST_VALIDATION_FAILED` with `errors`; objects are strict, so unknown fields fail). The stop route ignores any body. Dataset document import reads the raw JSON/YAML text through the same bounded UTF-8 reader without a media-type check. Bundle creation and ZIP import routes require `Content-Type: multipart/form-data` (`415 REQUEST_UNSUPPORTED_MEDIA_TYPE` otherwise); their body limit `ZIP_BODY_BYTES` is derived from the archive limit (`413 REQUEST_PAYLOAD_TOO_LARGE`), a malformed multipart body is `400 REQUEST_INVALID_INPUT`, and the route schema then validates the fields like a JSON body (`422 REQUEST_VALIDATION_FAILED`: a blank or missing `name` or `description`, a missing or non-file `zip` on import, or an unknown field). The archive itself follows [ZIP import](eval-dataset-upload.md#zip-import).
 
 Identifiers:
 
 - Runtime entity IDs in paths and Run bodies (Project, Run, ProjectSample, Sampling, Evaluation) are 1–512 characters without surrounding whitespace, control characters or `/` (`entityIdSchema`). Idempotency keys follow the same rule but may contain `/` (`idempotencyKeySchema`).
-- Dataset, Data, Bundle, Material, Session, output-format and Agent Config IDs are UUIDs (`platformIdSchema`): case-insensitive on input, lowercase in responses. A non-UUID path segment is a `422`.
+- Dataset, Data, Material Bundle, Session Bundle, Material, Session, output-format and Agent Config IDs are UUIDs (`platformIdSchema`): case-insensitive on input, lowercase in responses. A non-UUID path segment is a `422`.
 
 Content limits live only in `apps/eval-api/src/limits.ts`; body limits are derived from them (worst-case JSON escaping plus metadata framing), so a body carrying maximal valid content is never rejected for size.
 
@@ -40,10 +40,14 @@ Content limits live only in `apps/eval-api/src/limits.ts`; body limits are deriv
 | `DATASET_DOCUMENT_BYTES`, `PROMPT_DATASET_FILE_BYTES` | 10 MB each | Dataset document and Prompt Dataset file |
 | `MATERIAL_FILE_BYTES`, `MATERIAL_TOTAL_BYTES` | 5 MB, 20 MB | One Material file, one Material |
 | `OUTPUT_SCHEMA_BYTES` | 1 MB | One output-format file |
+| `ZIP_ARCHIVE_BYTES`, `ZIP_EXPANDED_BYTES` | 50 MB, 100 MB | One ZIP archive, its declared decompressed total |
+| `ZIP_ENTRIES`, `ZIP_RESOURCES` | 5,000, 500 | Entries in one archive; Material top-level entries or Session files in one archive |
+| `ZIP_PATH_CHARS` | 768 | Characters in one ZIP entry path |
+| `ZIP_ERRORS` | 100 | Most `errors` items one Bundle content or ZIP failure reports |
 
 | Body limit | Bytes | Routes |
 | --- | --- | --- |
-| `METADATA_BODY_BYTES` | 4,096 | Bundle create; Bundle/Material/Session/output-format metadata PATCH; Data initial-resources PATCH |
+| `METADATA_BODY_BYTES` | 4,096 | Material Bundle/Session Bundle/Material/Session/output-format metadata PATCH; Data initial-resources PATCH |
 | `JSON_BODY_BYTES` | 1,000,000 | Dataset create/PUT and membership; Data create/PUT; Agent Config POST/PATCH; evaluation-plan PUT |
 | `PROJECT_BODY_BYTES` | 5,540,000 | Project creation |
 | `RUN_PREVIEW_BODY_BYTES` | 30,757,168 | Run preview |
@@ -51,12 +55,13 @@ Content limits live only in `apps/eval-api/src/limits.ts`; body limits are deriv
 | `OUTPUT_SCHEMA_BODY_BYTES` | 6,004,096 | Output-format upload |
 | `SESSION_BODY_BYTES` | 12,004,096 | Session upload |
 | `MATERIAL_BODY_BYTES` | 28,718,764 | Material upload |
+| `ZIP_BODY_BYTES` | 50,004,096 | Material/Session Bundle creation and ZIP import |
 | `PROMPT_IMPORT_BODY_BYTES` | 60,004,096 | Prompt Dataset upload |
 | `DATASET_DOCUMENT_BYTES` | 10,000,000 | Raw Dataset document import |
 
 ## Routes
 
-All `/api/*` routes require the Bearer session and may additionally return `401`, `403`, `422`, `500` and `503` as described above. Routes with a JSON body may also return `400`, `413` and `415`. The tables list each route's success payload and its domain error codes.
+All `/api/*` routes require the Bearer session and may additionally return `401`, `403`, `422`, `500` and `503` as described above. Routes with a JSON or multipart body may also return `400`, `413` and `415`. The tables list each route's success payload and its domain error codes.
 
 ### Session and health
 
@@ -204,26 +209,28 @@ Datasets and Data are the user's editable source catalog; Projects copy what the
 | `GET /api/data/{dataId}` | `Data` | `404 DATA_NOT_FOUND` |
 | `PUT /api/data/{dataId}` | Data input / `Data` | `400 DATASET_INPUT_INVALID`; `404 DATA_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND` |
 | `DELETE /api/data/{dataId}` | `204`; soft delete, idempotent | `409 DATA_IN_USE` while an active Dataset contains it |
-| `PATCH /api/data/{dataId}/initial-resources` | `{initialMaterials?, evalInitialMaterials?, initialSession?}`, each a reference or `null` to clear / `Data`; see [Dataset upload](eval-dataset-upload.md) | `404 DATA_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND`, `BUNDLE_FILE_NOT_FOUND`; `503 BUNDLE_FILE_UNAVAILABLE` |
+| `PATCH /api/data/{dataId}/initial-resources` | `{initialMaterials?, evalInitialMaterials?, initialSession?}`, each a reference or `null` to clear / `Data`; see [Dataset upload](eval-dataset-upload.md) | `404 DATA_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND` |
 
 Data and reference validation rules are those of `@eval-platform/eval-dataset` and [Dataset upload](eval-dataset-upload.md).
 
 ### Initial-resource catalog and output formats
 
-Bundles group separately uploaded Materials and Sessions; output formats are standalone draft 2020-12 JSON Schema files. Metadata PATCH bodies are `{name?, description?}` with at least one nonblank field; uploaded content is immutable. All deletes are soft and hide the entry from lists and reads; file bytes are kept.
+A Material Bundle contains only Materials and a Session Bundle only Sessions; output formats are standalone draft 2020-12 JSON Schema files. Upload and ZIP import rules are in [Dataset upload](eval-dataset-upload.md). Metadata PATCH bodies are `{name?, description?}` with at least one nonblank field; uploaded content is immutable. All deletes are soft and hide the entry from lists and reads; file bytes are kept.
 
 | Route | Body / result | Domain errors |
 | --- | --- | --- |
-| `GET, POST /api/bundles` | POST `{name, description}` / `201 {bundleId, name, description}` | — |
-| `GET, PATCH, DELETE /api/bundles/{bundleId}` | Bundle; DELETE `204` and also deletes its resources | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` while active Data reference its resources |
-| `GET, POST /api/bundles/{bundleId}/materials` | POST `{name, description, files:[{path, mediaType, contentBase64}]}` / `201 {bundleId, materialId, name, description}` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `400 BUNDLE_FILE_INVALID`; `409 BUNDLE_FILE_CONFLICT`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
-| `GET, PATCH, DELETE /api/bundles/{bundleId}/materials/{materialId}` | Material; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` |
-| `GET, POST /api/bundles/{bundleId}/sessions` | POST `{name, description, format:"json"\|"jsonl", content}` / `201 {bundleId, sessionId, name, description, format}` | As for Materials |
-| `GET, PATCH, DELETE /api/bundles/{bundleId}/sessions/{sessionId}` | Session; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` |
+| `GET, POST /api/material-bundles` | GET `MaterialBundle[]` (`{bundleId, name, description}`); POST multipart `name`, `description`, optional `zip` / `201 {bundle, imported:[{source, material}]}` | `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
+| `GET, PATCH, DELETE /api/material-bundles/{bundleId}` | `MaterialBundle`; DELETE `204` and also deletes its Materials | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` while active Data reference its Materials |
+| `POST /api/material-bundles/{bundleId}/import` | Multipart `zip` / `201 {bundle, imported:[{source, material}]}` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
+| `GET, POST /api/material-bundles/{bundleId}/materials` | POST `{name, description, files:[{path, mediaType, contentBase64}]}` / `201 {bundleId, materialId, name, description}` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
+| `GET, PATCH, DELETE /api/material-bundles/{bundleId}/materials/{materialId}` | Material; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` |
+| `GET, POST /api/session-bundles`, `GET, PATCH, DELETE /api/session-bundles/{bundleId}`, `POST /api/session-bundles/{bundleId}/import` | As for Material Bundles, with `SessionBundle` and `imported:[{source, session}]` | As for Material Bundles |
+| `GET, POST /api/session-bundles/{bundleId}/sessions` | POST `{name, description, format:"json"\|"jsonl", content}` / `201 {bundleId, sessionId, name, description, format}` | As for Materials |
+| `GET, PATCH, DELETE /api/session-bundles/{bundleId}/sessions/{sessionId}` | Session; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` |
 | `GET, POST /api/evaluation-output-schemas` | POST `{name, description, content}` (Schema file text) / `201 {outputSchemaId, name, description, schema}` | `400 CATALOG_INPUT_INVALID`; `413 CATALOG_PAYLOAD_TOO_LARGE` |
 | `GET, PATCH, DELETE /api/evaluation-output-schemas/{outputSchemaId}` | Output format; DELETE `204` | `404 OUTPUT_SCHEMA_NOT_FOUND` (also for repeated DELETE) |
 
-Bundle, Material and Session names and descriptions are required nonblank text (`400 CATALOG_INPUT_INVALID`). An output format may be soft-deleted while an evaluation plan uses it; the plan keeps reading the Schema by ID, but the format can no longer be selected.
+Material Bundle, Session Bundle, Material and Session names and descriptions are required nonblank text (`422 REQUEST_VALIDATION_FAILED`). An output format may be soft-deleted while an evaluation plan uses it; the plan keeps reading the Schema by ID, but the format can no longer be selected.
 
 ## Run admission and stop
 
@@ -243,7 +250,7 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `REQUEST_INVALID_JSON` | 400 | Malformed JSON, non-object body or duplicate field |
 | `REQUEST_VALIDATION_FAILED` | 422 | Path, query or body fails its schema |
 | `REQUEST_PAYLOAD_TOO_LARGE` | 413 | Body over its route limit |
-| `REQUEST_UNSUPPORTED_MEDIA_TYPE` | 415 | Non-JSON `Content-Type` on a JSON route |
+| `REQUEST_UNSUPPORTED_MEDIA_TYPE` | 415 | Non-JSON `Content-Type` on a JSON route, or non-multipart on a Bundle creation or import route |
 | `REQUEST_UNTRUSTED_ORIGIN` | 403 | `Origin` other than `EVAL_WEB_ORIGIN` |
 | `REQUEST_NOT_FOUND` | 404 | Unknown route or method |
 | `REQUEST_RATE_LIMITED` | 429 | Eval SP rate-limited a relayed request |
@@ -287,12 +294,11 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `DATA_IN_USE` | 409 | Data deletion while an active Dataset contains it |
 | `CATALOG_INPUT_INVALID` | 400 | Catalog name, description, reference or Schema content invalid |
 | `CATALOG_PAYLOAD_TOO_LARGE` | 413 | Output-format content over its limit |
-| `BUNDLE_RESOURCE_NOT_FOUND` | 404 | Unknown or deleted Bundle, Material or Session |
-| `BUNDLE_RESOURCE_IN_USE` | 409 | Resource deletion while active Data reference it |
+| `BUNDLE_RESOURCE_NOT_FOUND` | 404 | Unknown or deleted Material Bundle, Session Bundle, Material or Session, including a reference whose `bundleId` names the other Bundle type |
+| `BUNDLE_RESOURCE_IN_USE` | 409 | Resource or Bundle deletion while active Data reference it or its resources |
 | `BUNDLE_FILE_NOT_FOUND` | 404 | Bundle file missing |
-| `BUNDLE_FILE_CONFLICT` | 409 | Different content under one file identity |
-| `BUNDLE_FILE_TOO_LARGE` | 413 | Material file over its limit |
-| `BUNDLE_FILE_INVALID` | 400 | Material or Session file invalid |
+| `BUNDLE_FILE_TOO_LARGE` | 413 | Material file, Material or ZIP archive over a limit; `errors` name the ZIP entries |
+| `BUNDLE_FILE_INVALID` | 400 | Material or Session content, ZIP archive or ZIP entry invalid; `errors` name the ZIP entries |
 | `BUNDLE_FILE_UNAVAILABLE` | 503 | Bundle directory unreadable; retry |
 | `OUTPUT_SCHEMA_NOT_FOUND` | 404 | Unknown or deleted output format |
 | `METRICS_QUERY_INVALID` | 400 | Invalid Metrics query |

@@ -1,7 +1,8 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createDatasetService } from "@eval-platform/eval-dataset";
+import { TextReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -10,7 +11,7 @@ import { createPostgresDatasetStore } from "./db/dataset.js";
 import { createPostgresProjectPlanReader } from "./db/project-plans.js";
 import { seedProject } from "./db/test-fixtures.js";
 import { BundleResourceInUseError, BundleResourceNotFoundError } from "./db/errors.js";
-import { createResourceCatalog } from "./db/resource-catalog.js";
+import { createBundleCatalogs } from "./db/resource-catalog.js";
 import { createInitialResourceApi } from "./initial-resources.js";
 import { createOwnerServices } from "./owner-services.js";
 import { openBundleDirectory, type BundleDirectory } from "./sp/bundle-directory.js";
@@ -31,8 +32,32 @@ const sp = {
 function httpClient(db: ReturnType<typeof createEvalDb>, bundles: BundleDirectory) {
   const send = requestApp({ webOrigin: WEB_ORIGIN, sp, ownerServices: createOwnerServices({ db, sp, bundles, release, runQueue: { async enqueue() {} } }) });
   return async (path: string, method: string, body?: unknown, token = "owner") => send(path,
-    body === undefined ? authorized(token, { method }) : jsonRequest(method, body, token));
+    body === undefined ? authorized(token, { method })
+      : body instanceof FormData ? authorized(token, { method, body }) : jsonRequest(method, body, token));
 }
+
+/** A multipart body; byte values become the uploaded file of their field. */
+function form(fields: Record<string, string | Buffer>): FormData {
+  const body = new FormData();
+  for (const [name, value] of Object.entries(fields)) {
+    body.append(name, typeof value === "string" ? value : new File([new Uint8Array(value)], `${name}.zip`));
+  }
+  return body;
+}
+
+async function zip(...entries: readonly (readonly [name: string, content: string])[]): Promise<Buffer> {
+  const writer = new ZipWriter(new Uint8ArrayWriter(), { useWebWorkers: false });
+  for (const [name, content] of entries) await writer.add(name, new TextReader(content));
+  return Buffer.from(await writer.close());
+}
+
+async function storedFiles(root: string): Promise<readonly string[]> {
+  return (await readdir(root, { recursive: true, withFileTypes: true }))
+    .filter((entry) => entry.isFile()).map((entry) => join(entry.parentPath, entry.name)).sort();
+}
+
+const sessionEntry = (id: string) => JSON.stringify({ id, message: { role: "user", content: "Earlier task" }, createdAt: 1 });
+const sessionFile = (id: string) => JSON.stringify({ entries: [JSON.parse(sessionEntry(id))] });
 
 async function msg<T>(response: Response): Promise<T> {
   return (await response.json() as { msg: T }).msg;
@@ -79,15 +104,22 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     const original = await dataset.createData({ userPrompt: "Build page", metadata: { priority: 3 } });
     const bundles = await openBundleDirectory(bundleRoot);
     const send = httpClient(db, bundles);
-    const created = await send("/api/bundles", "POST", { name: "Assets", description: "Seed assets" });
+    const created = await send("/api/material-bundles", "POST", form({ name: "Assets", description: "Seed assets" }));
     expect(created.status).toBe(201);
-    const bundle = await msg<{ bundleId: string }>(created);
-    expect(bundle.bundleId).toMatch(/^[0-9a-f-]{36}$/u);
-    const root = `/api/bundles/${bundle.bundleId}`;
+    const { bundle: materialBundle } = await msg<{ bundle: { bundleId: string } }>(created);
+    expect(materialBundle.bundleId).toMatch(/^[0-9a-f-]{36}$/u);
+    const root = `/api/material-bundles/${materialBundle.bundleId}`;
     expect((await send(root, "PATCH", { description: "Updated assets" })).status).toBe(200);
-    expect(await msg(await send("/api/bundles", "GET")))
-      .toContainEqual(expect.objectContaining({ bundleId: bundle.bundleId, description: "Updated assets" }));
-    expect(await msg(await send("/api/bundles", "GET", undefined, "other"))).toEqual([]);
+    expect(await msg(await send("/api/material-bundles", "GET")))
+      .toContainEqual(expect.objectContaining({ bundleId: materialBundle.bundleId, description: "Updated assets" }));
+    expect(await msg(await send("/api/material-bundles", "GET", undefined, "other"))).toEqual([]);
+    const { bundle: sessionBundle } = await msg<{ bundle: { bundleId: string } }>(
+      await send("/api/session-bundles", "POST", form({ name: "Histories", description: "Seed sessions" })));
+    const sessionRoot = `/api/session-bundles/${sessionBundle.bundleId}`;
+    expect(await msg(await send("/api/session-bundles", "GET")))
+      .toEqual([expect.objectContaining({ bundleId: sessionBundle.bundleId })]);
+    expect(await code(await send(`/api/material-bundles/${sessionBundle.bundleId}`, "GET"))).toBe("BUNDLE_RESOURCE_NOT_FOUND");
+    expect(await code(await send(`/api/session-bundles/${materialBundle.bundleId}`, "GET"))).toBe("BUNDLE_RESOURCE_NOT_FOUND");
 
     const materialResponse = await send(`${root}/materials`, "POST", {
       name: "Brief", description: "Execution input", files: [
@@ -104,7 +136,7 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     });
     const uploadedEvalMaterial = await msg<{ bundleId: string; materialId: string }>(evalResponse);
     const evalMaterial = { bundleId: uploadedEvalMaterial.bundleId, materialId: uploadedEvalMaterial.materialId };
-    const sessionResponse = await send(`${root}/sessions`, "POST", {
+    const sessionResponse = await send(`${sessionRoot}/sessions`, "POST", {
       name: "Prior chat", description: "Execution history", format: "json", content: JSON.stringify({
         entries: [{ id: "m1", message: { role: "user", content: "Earlier task" }, createdAt: 1 }],
       }),
@@ -113,11 +145,29 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     const uploadedSession = await msg<{ bundleId: string; sessionId: string }>(sessionResponse);
     const session = { bundleId: uploadedSession.bundleId, sessionId: uploadedSession.sessionId };
     expect((await send(`${root}/materials/${material.materialId}`, "PATCH", { name: "Updated brief" })).status).toBe(200);
-    expect((await send(`${root}/sessions/${session.sessionId}`, "PATCH", { description: "Updated history" })).status).toBe(200);
+    expect((await send(`${sessionRoot}/sessions/${session.sessionId}`, "PATCH", { description: "Updated history" })).status).toBe(200);
     expect(await msg(await send(`${root}/materials`, "GET"))).toHaveLength(2);
-    expect(await msg(await send(`${root}/sessions`, "GET"))).toHaveLength(1);
+    expect(await msg(await send(`${sessionRoot}/sessions`, "GET"))).toHaveLength(1);
 
     const bindingPath = `/api/data/${original.dataId}/initial-resources`;
+    const sessionInMaterialBundle = { bundleId: material.bundleId, sessionId: session.sessionId };
+    const materialInSessionBundle = { bundleId: session.bundleId, materialId: material.materialId };
+    for (const patch of [
+      { initialSession: sessionInMaterialBundle },
+      { initialMaterials: materialInSessionBundle },
+      { evalInitialMaterials: materialInSessionBundle },
+    ]) {
+      const response = await send(bindingPath, "PATCH", patch);
+      expect(response.status).toBe(404);
+      expect(await code(response)).toBe("BUNDLE_RESOURCE_NOT_FOUND");
+      await expect(dataset.createData({ userPrompt: "Cross", ...patch })).rejects.toBeInstanceOf(BundleResourceNotFoundError);
+      await expect(dataset.updateData(original.dataId, { userPrompt: "Build page", ...patch }))
+        .rejects.toBeInstanceOf(BundleResourceNotFoundError);
+      await expect(dataset.importDataset(JSON.stringify({
+        dataset: { name: "Cross refs" }, data: [{ userPrompt: "Cross", ...patch }],
+      }), "json")).rejects.toBeInstanceOf(BundleResourceNotFoundError);
+    }
+
     const bound = await send(bindingPath, "PATCH", {
       initialMaterials: material, evalInitialMaterials: evalMaterial, initialSession: session,
     });
@@ -125,16 +175,18 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
       initialSession: session });
     expect(await code(await send(bindingPath, "PATCH", {}))).toBe("REQUEST_VALIDATION_FAILED");
     expect(await code(await send(bindingPath, "PATCH", { initialMaterials: null }, "other"))).toBe("DATA_NOT_FOUND");
-    for (const path of [`${root}/materials/${material.materialId}`, `${root}/sessions/${session.sessionId}`, root]) {
+    for (const path of [`${root}/materials/${material.materialId}`, `${sessionRoot}/sessions/${session.sessionId}`, root, sessionRoot]) {
       const response = await send(path, "DELETE");
       expect(response.status).toBe(409);
       expect(await code(response)).toBe("BUNDLE_RESOURCE_IN_USE");
     }
     expect(await dataset.getData(original.dataId)).toMatchObject({ initialMaterials: material });
-    const api = createInitialResourceApi(db, owner, bundles);
-    await api.bindData(original.dataId, {
-      initialMaterials: null, evalInitialMaterials: null, initialSession: null,
-    });
+    const api = createInitialResourceApi(db, owner);
+    await api.bindData(original.dataId, { initialMaterials: null, initialSession: null });
+    const evalBlocked = await send(root, "DELETE");
+    expect(evalBlocked.status).toBe(409);
+    expect(await code(evalBlocked)).toBe("BUNDLE_RESOURCE_IN_USE");
+    await api.bindData(original.dataId, { evalInitialMaterials: null });
     const genericBound = await dataset.createData({ userPrompt: "Generic", initialMaterials: material });
     expect((await send(`${root}/materials/${material.materialId}`, "DELETE")).status).toBe(409);
     await dataset.updateData(genericBound.dataId, { userPrompt: "Generic" });
@@ -143,7 +195,9 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     expect(await code(await send(bindingPath, "PATCH", { initialMaterials: material }))).toBe("BUNDLE_RESOURCE_NOT_FOUND");
     await expect(bundles.resolveInitialMaterials(owner, material)).resolves.toHaveLength(1);
     expect((await send(root, "DELETE")).status).toBe(204);
-    expect(await msg(await send("/api/bundles", "GET"))).toEqual([]);
+    expect((await send(sessionRoot, "DELETE")).status).toBe(204);
+    expect(await msg(await send("/api/material-bundles", "GET"))).toEqual([]);
+    expect(await msg(await send("/api/session-bundles", "GET"))).toEqual([]);
     await expect(api.bindData(original.dataId, { initialSession: session })).rejects.toBeInstanceOf(BundleResourceNotFoundError);
     await expect(bundles.resolveInitialSession(owner, session)).resolves.toBeDefined();
     await expect(dataset.createData({ userPrompt: "New", initialMaterials: material }))
@@ -160,65 +214,190 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
   it("keeps UUID resource bindings effective when the client uses uppercase IDs", async () => {
     const db = createEvalDb(pool);
     const directory = await openBundleDirectory(bundleRoot);
-    const catalog = createResourceCatalog(db, owner, directory);
+    const { materialBundles, sessionBundles } = createBundleCatalogs(db, owner, directory);
     const dataset = createDatasetService(createPostgresDatasetStore(db, owner));
-    const bundle = await catalog.createBundle({ name: "Case bundle", description: "UUID case test" });
-    const material = await catalog.createMaterial(bundle.bundleId, {
+    const { bundle: materialBundle } = await materialBundles.create({ name: "Case materials", description: "UUID case test" });
+    const { bundle: sessionBundle } = await sessionBundles.create({ name: "Case sessions", description: "UUID case test" });
+    const material = await materialBundles.createResource(materialBundle.bundleId, {
       name: "Case material", description: "One file",
       files: [{ path: "/case.txt", mediaType: "text/plain", contentBase64: "Y2FzZQ==" }],
     });
-    const session = await catalog.createSession(bundle.bundleId, {
+    const session = await sessionBundles.createResource(sessionBundle.bundleId, {
       name: "Case session", description: "One history", format: "json",
       content: JSON.stringify({ entries: [{
         id: "m1", message: { role: "user", content: "Earlier task" }, createdAt: 1,
       }] }),
     });
     const upperRef = {
-      bundleId: bundle.bundleId.toUpperCase(), materialId: material.materialId.toUpperCase(),
+      bundleId: materialBundle.bundleId.toUpperCase(), materialId: material.materialId.toUpperCase(),
     };
     const upperSession = {
-      bundleId: bundle.bundleId.toUpperCase(), sessionId: session.sessionId.toUpperCase(),
+      bundleId: sessionBundle.bundleId.toUpperCase(), sessionId: session.sessionId.toUpperCase(),
     };
     const row = await dataset.createData({
       userPrompt: "Test case", initialMaterials: upperRef, initialSession: upperSession,
     });
 
-    await expect(catalog.deleteMaterial(bundle.bundleId, material.materialId))
+    await expect(materialBundles.deleteResource(materialBundle.bundleId, material.materialId))
       .rejects.toBeInstanceOf(BundleResourceInUseError);
-    await expect(catalog.deleteSession(bundle.bundleId, session.sessionId))
+    await expect(sessionBundles.deleteResource(sessionBundle.bundleId, session.sessionId))
       .rejects.toBeInstanceOf(BundleResourceInUseError);
-    await expect(catalog.deleteBundle(bundle.bundleId))
+    await expect(materialBundles.delete(materialBundle.bundleId))
+      .rejects.toBeInstanceOf(BundleResourceInUseError);
+    await expect(sessionBundles.delete(sessionBundle.bundleId))
       .rejects.toBeInstanceOf(BundleResourceInUseError);
     expect(await dataset.getData(row.dataId)).toMatchObject({
-      initialMaterials: { bundleId: bundle.bundleId, materialId: material.materialId },
-      initialSession: { bundleId: bundle.bundleId, sessionId: session.sessionId },
+      initialMaterials: { bundleId: materialBundle.bundleId, materialId: material.materialId },
+      initialSession: { bundleId: sessionBundle.bundleId, sessionId: session.sessionId },
     });
 
     const second = await dataset.createData({ userPrompt: "Bind later" });
-    const bound = await createInitialResourceApi(db, owner, directory)
+    const bound = await createInitialResourceApi(db, owner)
       .bindData(second.dataId, { evalInitialMaterials: upperRef });
     expect(bound.evalInitialMaterials).toEqual({
-      bundleId: bundle.bundleId, materialId: material.materialId,
+      bundleId: materialBundle.bundleId, materialId: material.materialId,
     });
     const imported = await dataset.importDataset(JSON.stringify({
       dataset: { name: "Imported case" },
       data: [{ userPrompt: "Import later", initialMaterials: upperRef }],
     }), "json");
     expect(imported.data[0]?.initialMaterials).toEqual({
-      bundleId: bundle.bundleId, materialId: material.materialId,
+      bundleId: materialBundle.bundleId, materialId: material.materialId,
     });
     const updated = await dataset.createData({ userPrompt: "Update later" });
     await dataset.updateData(updated.dataId, { userPrompt: "Update later", initialSession: upperSession });
     expect((await dataset.getData(updated.dataId))?.initialSession).toEqual({
-      bundleId: bundle.bundleId, sessionId: session.sessionId,
+      bundleId: sessionBundle.bundleId, sessionId: session.sessionId,
     });
     await dataset.updateData(row.dataId, { userPrompt: "Test case" });
     await dataset.updateData(second.dataId, { userPrompt: "Bind later" });
     await dataset.updateData(imported.data[0]!.dataId, { userPrompt: "Import later" });
     await dataset.updateData(updated.dataId, { userPrompt: "Update later" });
-    await catalog.deleteMaterial(bundle.bundleId, material.materialId);
-    await catalog.deleteSession(bundle.bundleId, session.sessionId);
-    await catalog.deleteBundle(bundle.bundleId);
+    await materialBundles.deleteResource(materialBundle.bundleId, material.materialId);
+    await sessionBundles.deleteResource(sessionBundle.bundleId, session.sessionId);
+    await materialBundles.delete(materialBundle.bundleId);
+    await sessionBundles.delete(sessionBundle.bundleId);
+  });
+
+  it("creates Bundles with their ZIP resources and imports more, all or nothing", async () => {
+    const db = createEvalDb(pool);
+    const bundles = await openBundleDirectory(bundleRoot);
+    const send = httpClient(db, bundles);
+    const jsonl = `${sessionEntry("m1")}\n${sessionEntry("m2")}\n`;
+    const sessionsCreated = await send("/api/session-bundles", "POST", form({
+      name: "Histories", description: "Seed sessions", zip: await zip(["a.json", sessionFile("m1")], ["b.jsonl", jsonl]),
+    }));
+    expect(sessionsCreated.status).toBe(201);
+    const sessions = await msg<{ bundle: { bundleId: string }; imported: { source: string; session: { sessionId: string } }[] }>(sessionsCreated);
+    const sessionRoot = `/api/session-bundles/${sessions.bundle.bundleId}`;
+    const created = { bundleId: sessions.bundle.bundleId, description: "Seed sessions" };
+    expect(sessions).toEqual({
+      bundle: { bundleId: expect.any(String), name: "Histories", description: "Seed sessions" },
+      imported: [
+        { source: "a.json", session: { ...created, sessionId: expect.any(String), name: "a.json", format: "json" } },
+        { source: "b.jsonl", session: { ...created, sessionId: expect.any(String), name: "b.jsonl", format: "jsonl" } },
+      ],
+    });
+    expect(await msg(await send(`${sessionRoot}/sessions`, "GET"))).toHaveLength(2);
+    const [, multiLine] = sessions.imported;
+    await expect(bundles.resolveInitialSession(owner, { bundleId: sessions.bundle.bundleId, sessionId: multiLine!.session.sessionId }))
+      .resolves.toEqual({ format: "jsonl", content: jsonl });
+
+    const materialsCreated = await send("/api/material-bundles", "POST", form({
+      name: "Assets", description: "Seed assets",
+      zip: await zip(["brief.txt", "Brief"], ["case-a/input.md", "Input"], ["case-a/assets/logo.svg", "<svg/>"]),
+    }));
+    expect(materialsCreated.status).toBe(201);
+    const materials = await msg<{ bundle: { bundleId: string }; imported: { source: string; material: { materialId: string } }[] }>(materialsCreated);
+    const materialRoot = `/api/material-bundles/${materials.bundle.bundleId}`;
+    expect(materials.imported.map(({ source }) => source)).toEqual(["brief.txt", "case-a"]);
+    expect(materials.imported.map(({ material }) => material)).toEqual([
+      expect.objectContaining({ name: "brief.txt", description: "Seed assets" }),
+      expect.objectContaining({ name: "case-a", description: "Seed assets" }),
+    ]);
+    expect(await msg(await send(`${materialRoot}/materials`, "GET"))).toHaveLength(2);
+    const [, caseA] = materials.imported;
+    expect((await bundles.resolveInitialMaterials(owner, { bundleId: materials.bundle.bundleId, materialId: caseA!.material.materialId }))
+      .map(({ path }) => path)).toEqual(["/assets/logo.svg", "/input.md"]);
+
+    const empty = await send("/api/material-bundles", "POST", form({ name: "Empty", description: "No archive" }));
+    expect(empty.status).toBe(201);
+    const emptyBundle = await msg<{ bundle: { bundleId: string }; imported: unknown[] }>(empty);
+    expect(emptyBundle.imported).toEqual([]);
+    expect(await msg(await send("/api/material-bundles", "GET"))).toContainEqual(emptyBundle.bundle);
+    expect(await code(await send("/api/material-bundles", "POST", form({ name: " ", description: "Blank" }))))
+      .toBe("REQUEST_VALIDATION_FAILED");
+
+    const sessionBundlesBefore = await msg(await send("/api/session-bundles", "GET"));
+    const filesBefore = await storedFiles(bundleRoot);
+    const rejected = await send("/api/session-bundles", "POST", form({
+      name: "Broken", description: "One bad file", zip: await zip(["good.json", sessionFile("m1")], ["bad.json", "{"]),
+    }));
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toMatchObject({ code: "BUNDLE_FILE_INVALID", errors: [{ path: "bad.json", errMsg: expect.any(String) }] });
+    expect(await msg(await send("/api/session-bundles", "GET"))).toEqual(sessionBundlesBefore);
+    expect(await storedFiles(bundleRoot)).toEqual(filesBefore);
+
+    const appended = await send(`${sessionRoot}/import`, "POST", form({ zip: await zip(["c.json", sessionFile("m3")]) }));
+    expect(appended.status).toBe(201);
+    expect(await msg(appended)).toEqual({
+      bundle: { bundleId: sessions.bundle.bundleId, name: "Histories", description: "Seed sessions" },
+      imported: [{ source: "c.json", session: { ...created, sessionId: expect.any(String), name: "c.json", format: "json" } }],
+    });
+    const listed = await msg(await send(`${sessionRoot}/sessions`, "GET"));
+    expect(listed).toHaveLength(3);
+    const failedImport = await send(`${sessionRoot}/import`, "POST", form({
+      zip: await zip(["d.json", sessionFile("m4")], ["e.json", "[]"]),
+    }));
+    expect(await code(failedImport)).toBe("BUNDLE_FILE_INVALID");
+    expect(await msg(await send(`${sessionRoot}/sessions`, "GET"))).toEqual(listed);
+
+    const filesBeforeMissing = await storedFiles(bundleRoot);
+    const otherKind = await send(`/api/session-bundles/${materials.bundle.bundleId}/import`, "POST",
+      form({ zip: await zip(["f.json", sessionFile("m5")]) }));
+    expect(otherKind.status).toBe(404);
+    expect(await code(otherKind)).toBe("BUNDLE_RESOURCE_NOT_FOUND");
+    expect((await send(`/api/material-bundles/${emptyBundle.bundle.bundleId}`, "DELETE")).status).toBe(204);
+    const deleted = await send(`/api/material-bundles/${emptyBundle.bundle.bundleId}/import`, "POST",
+      form({ zip: await zip(["late.txt", "Late"]) }));
+    expect(deleted.status).toBe(404);
+    expect(await code(deleted)).toBe("BUNDLE_RESOURCE_NOT_FOUND");
+    expect(await storedFiles(bundleRoot)).toEqual(filesBeforeMissing);
+  });
+
+  it("removes every file a batch wrote when the batch cannot commit", async () => {
+    const db = createEvalDb(pool);
+    const directory = await openBundleDirectory(bundleRoot);
+    const { sessionBundles } = createBundleCatalogs(db, owner, directory);
+    const input = (name: string) => ({ name, description: "Batch", format: "json" as const, content: sessionFile("m1") });
+    const rejected = { cause: expect.objectContaining({ message: "rejected by test" }) };
+    const listed = await sessionBundles.list();
+    const filesBefore = await storedFiles(bundleRoot);
+    await pool.query(`CREATE FUNCTION eval_test_reject() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.name = 'reject.json' THEN RAISE EXCEPTION 'rejected by test'; END IF; RETURN NEW; END $$`);
+    await pool.query("CREATE TRIGGER eval_test_reject BEFORE INSERT ON eval_bundle_sessions FOR EACH ROW EXECUTE FUNCTION eval_test_reject()");
+    try {
+      await expect(sessionBundles.create({ name: "Rejected", description: "Batch" }, [input("ok.json"), input("reject.json")]))
+        .rejects.toMatchObject(rejected);
+      expect(await sessionBundles.list()).toEqual(listed);
+      expect(await storedFiles(bundleRoot)).toEqual(filesBefore);
+
+      const { bundle } = await sessionBundles.create({ name: "Kept", description: "Batch" }, [input("first.json")]);
+      const kept = await storedFiles(bundleRoot);
+      await expect(sessionBundles.import(bundle.bundleId, [input("second.json"), input("reject.json")])).rejects.toMatchObject(rejected);
+      expect(await sessionBundles.listResources(bundle.bundleId)).toEqual([expect.objectContaining({ name: "first.json" })]);
+      expect(await storedFiles(bundleRoot)).toEqual(kept);
+
+      const stuck = createBundleCatalogs(db, owner, {
+        ...directory, removeInitialSession: async () => { throw new Error("disk unavailable"); },
+      }).sessionBundles;
+      const failure = await stuck.import(bundle.bundleId, [input("reject.json")]).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect((failure as AggregateError).errors).toEqual([expect.objectContaining(rejected), new Error("disk unavailable")]);
+    } finally {
+      await pool.query("DROP TRIGGER eval_test_reject ON eval_bundle_sessions");
+      await pool.query("DROP FUNCTION eval_test_reject()");
+    }
   });
 
   it("uploads standalone output formats that evaluation plans keep reading after a soft delete", async () => {
