@@ -167,7 +167,6 @@ Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产�
 ## 接入真实环境前的剩余事项
 
 1. 给 SP API、Agent、Space 配置 Eval 独立发布目标和持久资源；Eval 的全部 SP 地址指向这套部署，登录与 Agent Config 由 Eval SP 提供；
-2. 发布 `@springbrand/eval-harness`，把当前的 `link:` 本地依赖改为版本依赖，见[发布待办](sp-package-publishing-todo.md)；
-3. 在真实部署中联调证据导出与导入、Evaluator 结果文件收集、提交恢复、长连接终态、无人值守处理和原始资源读取；SP 仍需在服务端执行只读观察的访问控制，详见[接口需求](sp-eval-api-requirements.md)；
-4. 把 `eval-api` 的 API、Run Worker、PostgreSQL 迁移和共享 Bundle 目录部署到目标环境；
-5. SP 的公开 Agent 创建边界需支持 `framework` 选择和绑定，并实际提供 Codex/CC 云端运行；评估侧只传递选择，不重建这些启动器。
+2. 在真实部署中联调证据导出与导入、Evaluator 结果文件收集、提交恢复、长连接终态、无人值守处理和原始资源读取；SP 仍需在服务端执行只读观察的访问控制，详见[接口需求](sp-eval-api-requirements.md)；
+3. 把 `eval-api` 的 API、Run Worker、PostgreSQL 迁移和共享 Bundle 目录部署到目标环境；
+4. SP 的公开 Agent 创建边界需支持 `framework` 选择和绑定，并实际提供 Codex/CC 云端运行；评估侧只传递选择，不重建这些启动器。

@@ -29,8 +29,8 @@ importers:
         specifier: 1.5.1
         version: 1.5.1(hono@4.12.33)(zod@4.6.5)
       '@springbrand/eval-harness':
-        specifier: link:../../../sp-platform/packages/eval-harness
-        version: link:../../../sp-platform/packages/eval-harness
+        specifier: 0.1.0-alpha.0
+        version: 0.1.0-alpha.0
       '@springbrand/http':
         specifier: 0.1.0-alpha.4
         version: 0.1.0-alpha.4(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
@@ -2113,6 +2113,9 @@ packages:
 
   '@speed-highlight/core@1.2.24':
     resolution: {integrity: sha512-qeW2e1l78afw8VhRPfPQ1Gjj+KU5XFQ/OFV5ti6eTa9bruO7mJyZtA4vw0ofqmA3tKCkROE9xLk3VZoeRc98nw==}
+
+  '@springbrand/eval-harness@0.1.0-alpha.0':
+    resolution: {integrity: sha512-77EzqoOM6R926iH5FZKCsGfHm6l0dyqMwiytHkHg9VFXbCEilq0rnXzG/Fn4JLHCCvuqPc+8+/DgKmlHs8UliQ==}
 
   '@springbrand/http@0.1.0-alpha.4':
     resolution: {integrity: sha512-D6B7JStWfdbi7f8hKU9aSbk/2jPsafK9Y7kHwGIts5IbxWlCx3++6GhHox2uUoykL74/QOi8swcnWNl6XfHG0A==}
@@ -6383,6 +6386,10 @@ snapshots:
   '@sindresorhus/is@7.2.0': {}
 
   '@speed-highlight/core@1.2.24': {}
+
+  '@springbrand/eval-harness@0.1.0-alpha.0':
+    dependencies:
+      zod: 4.6.5
 
   '@springbrand/http@0.1.0-alpha.4(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)':
     dependencies:
