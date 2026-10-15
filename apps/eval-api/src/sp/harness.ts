@@ -1,36 +1,49 @@
-import type {
-  AgentResourceSnapshot,
-  EvaluationAgentOutput,
-  ExecutionOutput,
-  MaterializedDataBinding,
-} from "@eval-platform/eval-contracts";
-import { AGENT_STATUSES, isTerminalAgentStatus } from "@eval-platform/eval-contracts";
+import type { AgentFramework, EvaluationOutputSchema } from "@eval-platform/eval-contracts";
+import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
-import { createHash } from "node:crypto";
 import {
   AgentHandleNotFoundError,
   AgentIdentityConflictError,
-  type AgentFailureKind,
   type AgentHandle,
   type AgentSubmission,
-  type EnsureAgentInput,
   type Harness,
-  type HarnessRuntimeOptions,
-  type EvaluationWorkspaceBinding,
+  type SubmitAgentInput,
 } from "@eval-platform/eval-runtime/harness";
+import {
+  EVAL_HARNESS_PATH,
+  EVAL_SERVICE_HEADER,
+  type EvalInitialization,
+} from "@springbrand/eval-harness";
+import { ApiError } from "@springbrand/http/client";
+import { createHash } from "node:crypto";
 import WebSocket from "ws";
+import { httpOriginSchema } from "../config/env.js";
 import { EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH } from "../project-output-schema.js";
+import type { MaterialFile, SessionContent } from "./bundle-directory.js";
+import { SpHarnessError } from "./harness-error.js";
+import {
+  agentHandle,
+  dataBinding,
+  ensureChatRequest,
+  evaluationOutput,
+  executionOutput,
+  initializationRequest,
+  resourceSnapshot,
+  stopResult,
+  submission,
+  submitRequest,
+  trajectoryRequest,
+} from "./harness-wire.js";
+import { createSpHttpClient, type Fetch } from "./http.js";
+import { observeTerminalSubmission, type OpenWebSocket } from "./submission-observer.js";
 
-const BASE_PATH = "/internal/v1/eval-harness";
-const SERVICE_HEADER = "X-Eval-Service-Token";
-const PING_INTERVAL_MS = 30_000;
-const PONG_TIMEOUT_MS = 10_000;
-const MAX_CONNECTION_ATTEMPTS = 3;
-const BASE_RECONNECT_DELAY_MS = 100;
+export { SpHarnessError } from "./harness-error.js";
+
 const REQUEST_TIMEOUT_MS = 60_000;
 const STOP_TIMEOUT_MS = 10_000;
-
-type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+/** Resource snapshots carry every telemetry event of a Submission. */
+const RESPONSE_BYTES = 256 * 1024 * 1024;
+const OUTPUT_SCHEMA_BUNDLE_ID = "project-evaluation-output-schema";
 
 export interface SpHarnessOptions {
   readonly origin: string;
@@ -38,35 +51,41 @@ export interface SpHarnessOptions {
   readonly fetch?: Fetch;
   readonly requestTimeoutMs?: number;
   readonly stopTimeoutMs?: number;
-  readonly openWebSocket?: (url: string, headers: Readonly<Record<string, string>>) => WebSocket;
+  readonly openWebSocket?: OpenWebSocket;
   readonly resolveInitialMaterials?: (
     ownerUserId: string,
     reference: InitialMaterialsRef,
-  ) => Promise<readonly { path: string; mediaType: string; contentBase64: string }[]>;
+  ) => Promise<readonly MaterialFile[]>;
   readonly resolveInitialSession?: (
     ownerUserId: string,
     reference: InitialSessionRef,
-  ) => Promise<{ format: "json" | "jsonl"; content: string } | undefined>;
+  ) => Promise<SessionContent | undefined>;
 }
 
-export class SpHarnessError extends Error {
-  constructor(
-    message: string,
-    readonly retryable: boolean,
-    readonly failureKind: AgentFailureKind = "network",
-    readonly status?: number,
-  ) {
-    super(message);
-    this.name = "SpHarnessError";
-  }
+/** The SP Harness drives only SP Agents; any other framework is rejected before contacting SP. */
+function requireSp(framework: AgentFramework): void {
+  if (framework !== "sp") throw new SpHarnessError(`SP Harness cannot run ${framework} Agents`, false);
+}
+
+/** Harness operations are idempotent, so every transient SP failure may be retried. */
+function harnessError(error: unknown): unknown {
+  if (!(error instanceof ApiError)) return error;
+  const transient = error.kind === "network" || error.kind === "timeout"
+    || (error.kind === "http" && (error.status === 408 || error.status === 429 || error.status >= 500));
+  return new SpHarnessError(error.kind === "http" ? error.message : `Eval SP request failed: ${error.code}`,
+    transient, { ...(error.kind === "http" ? { status: error.status } : {}), cause: error });
+}
+
+function outputSchemaFile(schema: EvaluationOutputSchema): MaterialFile {
+  return {
+    path: EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH,
+    mediaType: "application/schema+json",
+    contentBase64: Buffer.from(`${JSON.stringify(schema, null, 2)}\n`, "utf8").toString("base64"),
+  };
 }
 
 export function createSpHarness(options: SpHarnessOptions): Harness {
-  const origin = new URL(options.origin);
-  if (!(["http:", "https:"] as string[]).includes(origin.protocol)
-    || origin.pathname !== "/" || origin.search || origin.hash || origin.username || origin.password) {
-    throw new TypeError("Eval SP origin must be an HTTP origin without path or credentials");
-  }
+  const origin = httpOriginSchema.parse(options.origin);
   if (!options.serviceToken) throw new TypeError("Eval SP service token is required");
   const requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
   const stopTimeoutMs = options.stopTimeoutMs ?? STOP_TIMEOUT_MS;
@@ -74,309 +93,146 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     || !Number.isFinite(stopTimeoutMs) || stopTimeoutMs <= 0) {
     throw new TypeError("Eval SP request timeouts must be positive finite numbers");
   }
-  const fetcher = options.fetch ?? globalThis.fetch;
+  const serviceHeaders = { [EVAL_SERVICE_HEADER]: options.serviceToken };
+  const http = createSpHttpClient({
+    origin,
+    responseMode: "json",
+    timeoutMs: requestTimeoutMs,
+    maxResponseBytes: RESPONSE_BYTES,
+    headers: serviceHeaders,
+    fetch: options.fetch,
+  });
   const openWebSocket = options.openWebSocket
     ?? ((url: string, headers: Readonly<Record<string, string>>) => new WebSocket(url, { headers }));
 
-  async function request(method: string, path: string, body?: unknown, timeoutMs = requestTimeoutMs): Promise<unknown> {
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        reject(new SpHarnessError("Eval SP request timed out", true));
-      }, timeoutMs);
-    });
-    const work = (async () => {
-      let response: Response;
-      try {
-        response = await fetcher(new URL(path, origin), {
-          method,
-          headers: {
-            [SERVICE_HEADER]: options.serviceToken,
-            ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-          },
-          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-          redirect: "error",
-          signal: controller.signal,
-        });
-      } catch (cause) {
-        throw new SpHarnessError(`Eval SP request failed: ${errorText(cause)}`, true);
-      }
-      if (!response.ok) {
-        const payload: unknown = await response.json().catch(() => null);
-        const message = isRecord(payload)
-          ? (typeof payload.errMsg === "string" ? payload.errMsg
-            : typeof payload.message === "string" ? payload.message
-              : `Eval SP returned ${response.status}`)
-          : `Eval SP returned ${response.status}`;
-        throw new SpHarnessError(
-          message,
-          response.status === 408 || response.status === 429 || response.status >= 500,
-          "network",
-          response.status,
-        );
-      }
-      if (response.status === 204) return undefined;
-      try {
-        return await response.json();
-      } catch {
-        throw new SpHarnessError("Eval SP returned invalid JSON", false);
-      }
-    })();
+  async function call(method: "GET" | "POST" | "PUT", path: string, body?: unknown, timeoutMs?: number): Promise<unknown> {
     try {
-      return await Promise.race([work, timedOut]);
-    } finally {
-      if (timer) clearTimeout(timer);
+      return (await http.request<unknown>(path, {
+        method,
+        ...(body === undefined ? {} : { body }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      })).data;
+    } catch (error) {
+      throw harnessError(error);
     }
   }
 
   const chatPath = (ownerUserId: string, chatId: string): string =>
-    `${BASE_PATH}/users/${encodeURIComponent(requiredId(ownerUserId, "owner user ID"))}` +
-    `/chats/${encodeURIComponent(requiredId(chatId, "Chat ID"))}`;
+    `${EVAL_HARNESS_PATH}/users/${encodeURIComponent(ownerUserId)}/chats/${encodeURIComponent(chatId)}`;
   const handlePath = (handle: AgentHandle): string => chatPath(handle.ownerUserId, handle.chatId);
-  const operationPath = (handle: AgentHandle, key: string): string =>
-    `${handlePath(handle)}/submissions/by-key/${encodeURIComponent(requiredId(key, "operation key"))}`;
+  const operationPath = (kind: "submissions" | "resources", handle: AgentHandle, key: string): string =>
+    `${handlePath(handle)}/${kind}/by-key/${encodeURIComponent(key)}`;
 
   async function inspect(handle: AgentHandle, idempotencyKey: string): Promise<AgentSubmission | null> {
+    let value: unknown;
     try {
-      const value = await request("GET", operationPath(handle, idempotencyKey));
-      return value === null ? null : submission(value);
+      value = await call("GET", operationPath("submissions", handle, idempotencyKey));
     } catch (error) {
-      if (error instanceof SpHarnessError && error.status === 404) {
-        throw new AgentHandleNotFoundError(handle.chatId);
-      }
+      if (error instanceof SpHarnessError && error.status === 404) throw new AgentHandleNotFoundError(handle.chatId);
       throw error;
     }
+    return value === null ? null : submission(value);
   }
 
-  async function submit(input: {
-    readonly handle: AgentHandle;
-    readonly idempotencyKey: string;
-    readonly prompt: string;
-    readonly runtime?: HarnessRuntimeOptions;
-  }): Promise<AgentSubmission> {
-    requireSp(input.handle);
-    return submission(await request("POST", `${handlePath(input.handle)}/submissions`, {
+  async function submit(input: SubmitAgentInput): Promise<AgentSubmission> {
+    requireSp(input.handle.framework);
+    return submission(await call("POST", `${handlePath(input.handle)}/submissions`, submitRequest({
       idempotencyKey: input.idempotencyKey,
       prompt: input.prompt,
-      ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
       unattended: true,
-    }));
-  }
-
-  async function observeTerminal(
-    handle: AgentHandle,
-    submissionId: string,
-    timeoutMs?: number,
-  ): Promise<AgentSubmission> {
-    const url = new URL(`${handlePath(handle)}/submissions/${encodeURIComponent(submissionId)}/events`, origin);
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    return new Promise((resolve, reject) => {
-      let socket: WebSocket;
-      try {
-        socket = openWebSocket(url.href, { [SERVICE_HEADER]: options.serviceToken });
-      } catch (cause) {
-        reject(new SpHarnessError(`Eval SP WebSocket could not open: ${errorText(cause)}`, true));
-        return;
-      }
-      let settled = false;
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      let connectTimeout: ReturnType<typeof setTimeout> | undefined;
-      let pingTimer: ReturnType<typeof setTimeout> | undefined;
-      let pongTimeout: ReturnType<typeof setTimeout> | undefined;
-      const finish = (result: AgentSubmission | SpHarnessError): void => {
-        if (settled) return;
-        settled = true;
-        if (timeout) clearTimeout(timeout);
-        if (connectTimeout) clearTimeout(connectTimeout);
-        if (pingTimer) clearTimeout(pingTimer);
-        if (pongTimeout) clearTimeout(pongTimeout);
-        try {
-          if (result instanceof SpHarnessError) socket.terminate();
-          else socket.close();
-        } catch { /* The result is already settled. */ }
-        if (result instanceof SpHarnessError) reject(result);
-        else resolve(result);
-      };
-      const schedulePing = (): void => {
-        pingTimer = setTimeout(() => {
-          pongTimeout = setTimeout(() => finish(new SpHarnessError("Submission WebSocket stopped responding", true)), PONG_TIMEOUT_MS);
-          try {
-            socket.ping();
-          } catch (cause) {
-            finish(new SpHarnessError(`Submission WebSocket ping failed: ${errorText(cause)}`, true));
-          }
-        }, PING_INTERVAL_MS);
-      };
-      let connectedOnce = false;
-      const connected = (): void => {
-        if (settled || connectedOnce) return;
-        connectedOnce = true;
-        if (connectTimeout) clearTimeout(connectTimeout);
-        schedulePing();
-      };
-      connectTimeout = setTimeout(() => finish(new SpHarnessError("Submission WebSocket could not connect", true)), PONG_TIMEOUT_MS);
-      socket.addEventListener("open", connected);
-      socket.on("pong", () => {
-        if (!pongTimeout || settled) return;
-        clearTimeout(pongTimeout);
-        pongTimeout = undefined;
-        schedulePing();
-      });
-      if (socket.readyState === WebSocket.OPEN) connected();
-      if (timeoutMs !== undefined) {
-        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-          finish(new SpHarnessError("Submission timeout must be positive", false));
-          return;
-        }
-        timeout = setTimeout(() => finish(new SpHarnessError("Submission WebSocket timed out", true, "submission-timeout")), timeoutMs);
-      }
-      socket.addEventListener("message", (event) => {
-        try {
-          if (typeof event.data !== "string") throw new Error("Submission event must be JSON text");
-          const envelope: unknown = JSON.parse(event.data);
-          if (!isRecord(envelope) || envelope.type !== "submission.status") return;
-          const current = submission(envelope.submission);
-          if (current.submissionId !== submissionId) return;
-          if (isTerminal(current)) finish(current);
-        } catch (cause) {
-          finish(new SpHarnessError(`Invalid Submission event: ${errorText(cause)}`, false));
-        }
-      });
-      socket.addEventListener("error", () => finish(new SpHarnessError("Submission WebSocket failed", true)));
-      socket.addEventListener("close", () => finish(new SpHarnessError("Submission WebSocket closed before terminal status", true)));
-    });
+      ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
+    })));
   }
 
   return {
     async ensureAgent(input) {
-      if (input.framework !== "sp") {
-        throw new SpHarnessError(`SP Harness does not support ${input.framework} yet`, false);
-      }
-      if ((input.role === "evaluator") !== (input.evaluationWorkspace !== undefined)) {
-        throw new SpHarnessError("Evaluator Workspace binding does not match Agent role", false);
-      }
+      requireSp(input.framework);
+      const chat = ensureChatRequest(input);
       let value: unknown;
       try {
-        value = await request("PUT", chatPath(input.agentConfig.ownerUserId, input.chatId), input);
+        value = await call("PUT", chatPath(chat.agentConfig.ownerUserId, chat.chatId), chat);
       } catch (error) {
-        if (error instanceof SpHarnessError && error.status === 409) {
-          throw new AgentIdentityConflictError(input.chatId);
-        }
+        if (error instanceof SpHarnessError && error.status === 409) throw new AgentIdentityConflictError(input.chatId);
         throw error;
       }
-      return agentHandle(value, input);
+      return agentHandle(value, chat);
     },
     async materializeInitialData(input) {
-      requireSp(input.handle);
+      requireSp(input.handle.framework);
       if ((input.handle.role === "evaluator") !== (input.evaluationOutputSchema !== undefined)) {
         throw new SpHarnessError("Evaluation output JSON Schema must be supplied only for an Evaluator", false);
       }
       const session = input.data.initialSession;
       const materials = input.data.initialMaterials;
-      if (materials && !options.resolveInitialMaterials) {
+      const { resolveInitialMaterials, resolveInitialSession } = options;
+      if (materials && !resolveInitialMaterials) {
         throw new SpHarnessError("Initial material bundle resolver is required for this Sample", false);
       }
-      const [files, context] = await Promise.all([
-        materials ? options.resolveInitialMaterials!(input.handle.ownerUserId, materials) : undefined,
-        session && options.resolveInitialSession
-          ? options.resolveInitialSession(input.handle.ownerUserId, session) : undefined,
+      const [files = [], context] = await Promise.all([
+        materials && resolveInitialMaterials?.(input.handle.ownerUserId, materials),
+        session && resolveInitialSession?.(input.handle.ownerUserId, session),
       ]);
-      const schemaBytes = input.evaluationOutputSchema === undefined ? undefined
-        : Buffer.from(`${JSON.stringify(input.evaluationOutputSchema, null, 2)}\n`, "utf8");
-      if (schemaBytes && files?.some((file) => file.path === EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH)) {
+      const schemaFile = input.evaluationOutputSchema === undefined
+        ? undefined : outputSchemaFile(input.evaluationOutputSchema);
+      if (schemaFile && files.some((file) => file.path === schemaFile.path)) {
         throw new SpHarnessError("Evaluator materials cannot overwrite the Project JSON Schema file", false);
       }
-      const combinedFiles = schemaBytes ? [
-        ...(files ?? []),
-        { path: EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH, mediaType: "application/schema+json",
-          contentBase64: schemaBytes.toString("base64") },
-      ] : files;
-      if (combinedFiles && (combinedFiles.length > 500 || combinedFiles.reduce((size, file) =>
-        size + Buffer.from(file.contentBase64, "base64").byteLength, 0) > 20_000_000)) {
-        throw new SpHarnessError("Evaluator initial materials and JSON Schema are too large", false);
-      }
-      const selectedMaterials = materials ?? (schemaBytes ? {
-        bundleId: "project-evaluation-output-schema",
-        materialId: createHash("sha256").update(schemaBytes).digest("hex"),
-      } : undefined);
-      return dataBinding(await request("POST", `${handlePath(input.handle)}/initialization`, {
+      const selectedMaterials = materials ?? (schemaFile && {
+        bundleId: OUTPUT_SCHEMA_BUNDLE_ID,
+        materialId: createHash("sha256").update(schemaFile.contentBase64, "base64").digest("hex"),
+      });
+      const body: EvalInitialization = {
         idempotencyKey: input.idempotencyKey,
-        data: selectedMaterials && !materials
-          ? { ...input.data, initialMaterials: selectedMaterials } : input.data,
+        data: materials || !selectedMaterials ? input.data : { ...input.data, initialMaterials: selectedMaterials },
         ...(session ? { initialSession: { ...session, ...(context ? { context } : {}) } } : {}),
-        ...(selectedMaterials ? { initialMaterials: { ...selectedMaterials, files: combinedFiles } } : {}),
-      }));
+        ...(selectedMaterials
+          ? { initialMaterials: { ...selectedMaterials, files: schemaFile ? [...files, schemaFile] : [...files] } }
+          : {}),
+      };
+      return dataBinding(await call("POST", `${handlePath(input.handle)}/initialization`, initializationRequest(body)));
     },
     submitAgent: submit,
     restartAgent: submit,
     inspectAgentOperation(input) {
-      requireSp(input.handle);
+      requireSp(input.handle.framework);
       return inspect(input.handle, input.idempotencyKey);
     },
     async stopAgent({ handle }) {
-      requireSp(handle);
-      let result: unknown;
+      requireSp(handle.framework);
       try {
-        result = await request("POST", `${handlePath(handle)}/submissions/stop`, undefined, stopTimeoutMs);
+        return stopResult(await call("POST", `${handlePath(handle)}/submissions/stop`, undefined, stopTimeoutMs));
       } catch (error) {
         if (error instanceof SpHarnessError && error.status === 404) return false;
         throw error;
       }
-      if (!isRecord(result) || typeof result.ok !== "boolean") {
-        throw new SpHarnessError("Eval SP returned invalid stop result", false);
-      }
-      return result.ok;
     },
     async waitForSubmission(input) {
-      requireSp(input.handle);
+      requireSp(input.handle.framework);
       const current = await inspect(input.handle, input.idempotencyKey);
       if (!current) throw new SpHarnessError("Submission operation was not found", true);
-      if (isTerminal(current)) return current;
+      if (isTerminalAgentStatus(current.status)) return current;
       const timeoutMs = input.runtime?.timeoutMs;
       if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
         throw new SpHarnessError("Submission timeout must be positive", false);
       }
-      const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
-      for (let attempt = 1; attempt <= MAX_CONNECTION_ATTEMPTS; attempt += 1) {
-        try {
-          return await observeTerminal(input.handle, current.submissionId,
-            deadline === undefined ? undefined : Math.max(1, deadline - Date.now()));
-        } catch (error) {
-          if (!(error instanceof SpHarnessError) || !error.retryable) throw error;
-          // A disconnected observer cannot establish the terminal fact. Read once,
-          // then reconnect to the same Submission; a healthy socket is never polled.
-          let reconciled: AgentSubmission | null = null;
-          let inspectionError: SpHarnessError | undefined;
-          try {
-            reconciled = await inspect(input.handle, input.idempotencyKey);
-          } catch (cause) {
-            if (!(cause instanceof SpHarnessError) || !cause.retryable) throw cause;
-            inspectionError = cause;
-          }
-          if (reconciled && reconciled.submissionId !== current.submissionId) {
-            throw new SpHarnessError("Submission operation changed during observation", false);
-          }
-          if (reconciled && isTerminal(reconciled)) return reconciled;
-          if ((!reconciled && !inspectionError) || attempt === MAX_CONNECTION_ATTEMPTS
-            || (deadline !== undefined && Date.now() >= deadline)) {
-            throw inspectionError ?? error;
-          }
-          const delay = Math.floor(Math.random() * BASE_RECONNECT_DELAY_MS * 2 ** (attempt - 1));
-          await new Promise<void>((resolve) => setTimeout(resolve, delay));
-        }
-      }
-      throw new SpHarnessError("Submission WebSocket retry budget exhausted", true);
+      const url = new URL(`${handlePath(input.handle)}/submissions/${encodeURIComponent(current.submissionId)}/events`,
+        origin);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      return observeTerminalSubmission({
+        open: () => openWebSocket(url.href, serviceHeaders),
+        inspect: () => inspect(input.handle, input.idempotencyKey),
+        current,
+        timeoutMs,
+      });
     },
     async collectExecution({ handle }) {
-      requireSp(handle);
+      requireSp(handle.framework);
       if (handle.role !== "subject") throw new SpHarnessError("Expected Subject Chat", false);
       const query = new URLSearchParams({ role: handle.role, samplingId: handle.samplingId });
-      return executionOutput(await request("GET", `${handlePath(handle)}/output?${query}`), handle.samplingId);
+      return executionOutput(await call("GET", `${handlePath(handle)}/output?${query}`), handle.samplingId);
     },
     async collectEvaluation({ handle }) {
-      requireSp(handle);
+      requireSp(handle.framework);
       if (handle.role !== "evaluator" || !handle.evaluationWorkspace) {
         throw new SpHarnessError("Expected Evaluator Chat", false);
       }
@@ -385,157 +241,23 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         samplingId: handle.samplingId,
         evaluationId: handle.evaluationWorkspace.evaluationId,
       });
-      return evaluationOutput(await request("GET", `${handlePath(handle)}/output?${query}`));
+      return evaluationOutput(await call("GET", `${handlePath(handle)}/output?${query}`));
     },
     async collectAgentResources(input) {
-      requireSp(input.handle);
-      const query = new URLSearchParams();
-      if (input.submissionId !== undefined) query.set("submissionId", input.submissionId);
-      const suffix = query.size > 0 ? `?${query}` : "";
-      return resourceSnapshot(await request("GET", `${handlePath(input.handle)}/resources/by-key/${encodeURIComponent(requiredId(input.idempotencyKey, "operation key"))}${suffix}`));
+      requireSp(input.handle.framework);
+      const query = input.submissionId === undefined ? "" : `?${new URLSearchParams({ submissionId: input.submissionId })}`;
+      return resourceSnapshot(await call("GET", `${operationPath("resources", input.handle, input.idempotencyKey)}${query}`));
     },
     async materializeSubjectTrajectory(input) {
       const { userId, chatId } = input.subjectWorkspace;
-      await request("POST", `${BASE_PATH}/workspaces/${encodeURIComponent(requiredId(userId, "user ID"))}/${encodeURIComponent(requiredId(chatId, "Chat ID"))}/trajectory`, {
-        idempotencyKey: input.idempotencyKey,
-        samplingId: input.samplingId,
-        trajectory: input.trajectory,
-      });
+      const { trajectoryId, path, contentHash } = input.trajectory;
+      await call("POST",
+        `${EVAL_HARNESS_PATH}/workspaces/${encodeURIComponent(userId)}/${encodeURIComponent(chatId)}/trajectory`,
+        trajectoryRequest({
+          idempotencyKey: input.idempotencyKey,
+          samplingId: input.samplingId,
+          trajectory: { trajectoryId, source: "subject", path, ...(contentHash === undefined ? {} : { contentHash }) },
+        }));
     },
   };
-}
-
-function requiredId(value: string, name: string): string {
-  if (typeof value !== "string" || !value) throw new SpHarnessError(`${name} is required`, false);
-  return value;
-}
-
-function requireSp(handle: AgentHandle): void {
-  if (handle.framework !== "sp") throw new SpHarnessError(`SP Harness does not support ${handle.framework} yet`, false);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function record(value: unknown, name: string): Record<string, unknown> {
-  if (!isRecord(value)) throw new SpHarnessError(`Eval SP returned invalid ${name}`, false);
-  return value;
-}
-
-function nonempty(value: unknown, name: string): string {
-  if (typeof value !== "string" || !value) throw new SpHarnessError(`Eval SP returned invalid ${name}`, false);
-  return value;
-}
-
-function sameWorkspace(a: EvaluationWorkspaceBinding | undefined, b: EvaluationWorkspaceBinding | undefined): boolean {
-  if (!a || !b) return a === b;
-  return a.evaluationId === b.evaluationId
-    && a.subject.userId === b.subject.userId
-    && a.subject.chatId === b.subject.chatId;
-}
-
-function evaluationWorkspace(value: unknown): EvaluationWorkspaceBinding | undefined {
-  if (value === undefined) return undefined;
-  const workspace = record(value, "Evaluator Workspace binding");
-  const subject = record(workspace.subject, "Subject Workspace reference");
-  nonempty(workspace.evaluationId, "Evaluation ID");
-  nonempty(subject.userId, "Subject user ID");
-  nonempty(subject.chatId, "Subject Chat ID");
-  return workspace as unknown as EvaluationWorkspaceBinding;
-}
-
-function agentHandle(value: unknown, input: EnsureAgentInput): AgentHandle {
-  const result = record(value, "Agent handle");
-  const workspace = evaluationWorkspace(result.evaluationWorkspace);
-  if (result.chatId !== input.chatId || result.role !== input.role
-    || result.framework !== input.framework || result.samplingId !== input.samplingId
-    || result.ownerUserId !== input.agentConfig.ownerUserId
-    || !sameWorkspace(workspace, input.evaluationWorkspace)) {
-    throw new SpHarnessError("Eval SP returned an Agent handle with different creation facts", false);
-  }
-  return result as unknown as AgentHandle;
-}
-
-/** Maps the SP receipt once: the domain status is SP's normalized status, never its raw status. */
-function submission(value: unknown): AgentSubmission {
-  const { normalizedStatus, status: _rawStatus, ...result } = record(value, "Submission");
-  nonempty(result.submissionId, "Submission ID");
-  if (!(AGENT_STATUSES as readonly unknown[]).includes(normalizedStatus)) {
-    throw new SpHarnessError("Eval SP returned unknown Submission status", false);
-  }
-  if (result.retryable !== undefined && typeof result.retryable !== "boolean") {
-    throw new SpHarnessError("Eval SP returned invalid Submission retryability", false);
-  }
-  return { ...result, status: normalizedStatus } as unknown as AgentSubmission;
-}
-
-function isTerminal(value: AgentSubmission): boolean {
-  return isTerminalAgentStatus(value.status);
-}
-
-function dataBinding(value: unknown): MaterializedDataBinding {
-  const result = record(value, "initialization binding");
-  nonempty(result.bundleId, "Bundle ID");
-  nonempty(result.manifestHash, "manifest hash");
-  nonempty(result.rootPath, "initialization root path");
-  if (result.target !== "workspace" && result.target !== "sandbox") {
-    throw new SpHarnessError("Eval SP returned invalid initialization target", false);
-  }
-  return result as unknown as MaterializedDataBinding;
-}
-
-function artifactList(value: unknown): void {
-  if (!Array.isArray(value) || value.some((item) => !isRecord(item)
-    || typeof item.artifactId !== "string" || !item.artifactId
-    || typeof item.kind !== "string" || !item.kind
-    || typeof item.path !== "string" || !item.path)) {
-    throw new SpHarnessError("Eval SP returned invalid artifact list", false);
-  }
-}
-
-function trajectory(value: unknown, source: "subject" | "evaluator"): void {
-  const result = record(value, "trajectory");
-  nonempty(result.trajectoryId, "trajectory ID");
-  nonempty(result.path, "trajectory path");
-  if (result.source !== source) throw new SpHarnessError("Eval SP returned trajectory for another role", false);
-}
-
-function executionOutput(value: unknown, samplingId: string): ExecutionOutput {
-  const result = record(value, "execution output");
-  if (result.samplingId !== samplingId || (result.status !== "succeeded" && result.status !== "failed")) {
-    throw new SpHarnessError("Eval SP returned execution output for another Sampling or status", false);
-  }
-  artifactList(result.artifacts);
-  trajectory(result.trajectory, "subject");
-  return result as unknown as ExecutionOutput;
-}
-
-function evaluationOutput(value: unknown): EvaluationAgentOutput {
-  const result = record(value, "evaluation output");
-  if (result.status !== "succeeded" && result.status !== "failed") {
-    throw new SpHarnessError("Eval SP returned invalid evaluation output status", false);
-  }
-  artifactList(result.artifacts);
-  trajectory(result.trajectory, "evaluator");
-  return result as unknown as EvaluationAgentOutput;
-}
-
-function resourceSnapshot(value: unknown): AgentResourceSnapshot {
-  const result = record(value, "resource snapshot");
-  const scope = record(result.scope, "resource scope");
-  nonempty(scope.chatId, "resource Chat ID");
-  nonempty(scope.idempotencyKey, "resource operation key");
-  nonempty(scope.submissionId, "resource Submission ID");
-  nonempty(result.observedAt, "resource observation time");
-  if (typeof result.finalized !== "boolean" || !isRecord(result.coverage)
-    || !Array.isArray(result.usageEvents) || !Array.isArray(result.telemetryEvents)
-    || !Array.isArray(result.billingSettlements)) {
-    throw new SpHarnessError("Eval SP returned invalid resource snapshot", false);
-  }
-  return result as unknown as AgentResourceSnapshot;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
