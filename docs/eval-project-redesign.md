@@ -83,7 +83,7 @@ Agent Config 在 Eval 中通过 `/api/agent-configs` 增删改查，Eval SP 只�
 - 创建 Project（Subject，以及填写时的 Evaluator）或保存评估计划（Evaluator）时，Eval API 读取所选 Agent Config，通过 SP 公开创建接口生成内容相同的副本（slug `eval-frozen-<uuid>`，名称追加 ` (frozen)`），计划引用副本的 `userAgentId`；
 - 计划同时保存 `AgentConfigSnapshot` 正文快照，只用于展示；运行始终通过副本引用调用 SP，不从正文重建配置；
 - `eval_project_agent_configs` 记录副本、角色、所属 Project 和正文快照；被替换的 Evaluator 副本标记 `retired_at`，行保留；
-- 冻结副本的判定只有一处：被某个 Project 记录（当前或 retired），或 slug 以 `eval-frozen-` 开头（覆盖创建响应丢失、Project 行从未写入的孤儿）。冻结副本不出现在 `/api/agent-configs` 与 `/api/agents` 列表中；PATCH/DELETE 以及以副本为冻结来源都返回 `AGENT_CONFIG_FROZEN`；GET 可只读查看；
+- 冻结副本的判定只有一处：被某个 Project 记录（当前或 retired），或 slug 以 `eval-frozen-` 开头（覆盖创建响应丢失、Project 行从未写入的孤儿）。冻结副本不出现在 `/api/agent-configs` 与 `/api/agents` 列表中；PATCH/DELETE 以及以副本为冻结来源都返回 `AGENT_CONFIG_FROZEN`；GET 可只读查看；`eval-frozen-` 前缀保留给副本，用户创建或修改 Agent Config 时 slug（去空白、不区分大小写）不能以它开头；
 - 修改原 Agent Config 只影响之后新建的 Project 或重新保存的未锁定评估计划；
 - 副本在 SP 中创建，不在 Eval 数据库事务内；补偿删除见 3.1、3.2，SP 删除尽力而为，残留的孤儿副本按上面的判定始终隐藏；
 - Runtime、Harness 和 SP ensureChat 合同不变，仍然接收 `{ownerUserId, userAgentId}`。

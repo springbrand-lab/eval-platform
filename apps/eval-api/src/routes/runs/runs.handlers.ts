@@ -1,6 +1,6 @@
 import { ok } from "@eval-platform/eval-contracts/http";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
-import { requireRunTargetCount } from "../../db/errors.js";
+import { requireRunTargetCount } from "../../limits.js";
 import type { AppRouteHandler, OwnerServices } from "../../lib/types.js";
 import type * as routes from "./runs.routes.js";
 

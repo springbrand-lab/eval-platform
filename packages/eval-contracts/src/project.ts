@@ -52,7 +52,7 @@ export interface ProjectPlan {
   /** In the order the user bound them. */
   readonly datasets: readonly ProjectDatasetSnapshot[];
   readonly execution: ExecutionPlan;
-  /** Covers the execution plan and every ProjectSample snapshot. */
+  /** Computed by eval-runtime `digestExecutionPlan`. */
   readonly executionPlanDigest: string;
   /** Null until the user fills in the evaluation plan. */
   readonly evaluation: ProjectEvaluation | null;

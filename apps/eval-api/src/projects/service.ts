@@ -3,11 +3,11 @@ import type {
   EvaluationOutputSchemaRef,
   EvaluationPlan,
   Project,
-  RetryPolicy,
   RunHandle,
 } from "@eval-platform/eval-contracts";
 import type { EvalRunAdmission } from "@eval-platform/eval-runtime";
 import {
+  RuntimeAdmissionConflictError,
   RuntimeEntityNotFoundError,
   RuntimeInputError,
   digestExecutionPlan,
@@ -21,43 +21,14 @@ import {
   OutputSchemaNotFoundError,
   ProjectCreationKeyTakenError,
   ProjectIdempotencyConflictError,
-  requireRunTargetCount,
 } from "../db/errors.js";
 import type { createOutputSchemaCatalog } from "../db/output-schemas.js";
-import type { DatasetSelection, PostgresProjectStore, ProjectView } from "../db/project-store.js";
+import type { PostgresProjectStore, ProjectView } from "../db/project-store.js";
+import type { EvaluationPlanBody, ProjectCreateBody } from "./schemas.js";
+import { requireRunTargetCount } from "../limits.js";
 import { bindProjectSamples } from "./snapshot.js";
 
-interface AgentPolicy {
-  readonly userAgentId: string;
-  readonly retryPolicy?: RetryPolicy;
-  readonly timeoutMs?: number;
-}
-
-export interface ExecutionPlanBody extends AgentPolicy {
-  readonly framework: AgentFramework;
-  readonly executionConcurrency: number;
-}
-
-export interface EvaluationPlanBody extends AgentPolicy {
-  readonly evaluationConcurrency: number;
-  readonly outputSchemaId: string;
-}
-
-export interface ProjectCreateBody {
-  /** Owner-scoped creation identity; the first Run is admitted under the same key. */
-  readonly idempotencyKey: string;
-  readonly name: string;
-  readonly description?: string;
-  readonly datasets: readonly DatasetSelection[];
-  /** Default Sampling count of every selected Data. */
-  readonly samplingCount: number;
-  /** Per-Data overrides; every key must be a selected Data. */
-  readonly samplingCounts?: Readonly<Record<string, number>>;
-  readonly execution: ExecutionPlanBody;
-  readonly evaluation?: EvaluationPlanBody;
-  /** The first Run; a new Project has no successful Sampling, so it cannot be evaluation-only. */
-  readonly run: { readonly operation: "execution" | "pipeline" };
-}
+type AgentPolicy = Pick<EvaluationPlanBody, "userAgentId" | "retryPolicy" | "timeoutMs">;
 
 export interface ProjectCreation {
   readonly project: Project;
@@ -139,9 +110,15 @@ export function createProjectService(input: {
   async function admitFirstRun(project: Project, body: ProjectCreateBody): Promise<ProjectCreation> {
     const { projectId } = project;
     const { operation } = body.run;
-    const { targets } = await admission.preview({ projectId, operation, selector: { all: true } });
-    const run = await admission.submit({ idempotencyKey: body.idempotencyKey, projectId, operation, selector: { all: true }, targets });
-    return { project, run };
+    try {
+      const { targets } = await admission.preview({ projectId, operation, selector: { all: true } });
+      const run = await admission.submit({ idempotencyKey: body.idempotencyKey, projectId, operation, selector: { all: true }, targets });
+      return { project, run };
+    } catch (error) {
+      // Under the admission lock a Run committed first: the creation no longer owns the first Run.
+      if (error instanceof RuntimeAdmissionConflictError && error.reason === "creation-superseded") return { project, run: null };
+      throw error;
+    }
   }
 
   /**

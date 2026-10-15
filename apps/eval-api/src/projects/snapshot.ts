@@ -1,7 +1,7 @@
 import type { ProjectDatasetSnapshot } from "@eval-platform/eval-contracts";
-import type { Data } from "@eval-platform/eval-dataset";
 import type { ProjectSample } from "@eval-platform/eval-runtime";
 import { createId } from "@springbrand/utils";
+import type { SelectedDataset } from "../db/project-store.js";
 
 /**
  * Binds Datasets to ProjectSamples in binding order: a Data shared by several Datasets becomes one
@@ -9,7 +9,7 @@ import { createId } from "@springbrand/utils";
  */
 export function bindProjectSamples(input: {
   readonly projectId: string;
-  readonly datasets: ReadonlyArray<{ readonly dataset: Omit<ProjectDatasetSnapshot, "projectSampleIds">; readonly data: readonly Data[] }>;
+  readonly datasets: readonly SelectedDataset[];
   readonly samplingCountOf: (dataId: string) => number;
 }): { datasets: ProjectDatasetSnapshot[]; samples: ProjectSample[] } {
   const samples = new Map<string, ProjectSample & { datasetIds: string[] }>();

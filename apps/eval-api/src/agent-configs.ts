@@ -66,7 +66,7 @@ export function createAgentConfigService(input: {
     const recorded = await projects.frozenAgentConfigIds([id]);
     if (recorded.has(id)) throw new AgentConfigFrozenError(id);
     const config = await sp.getAgentConfig(token, id);
-    if (isFrozen(config, recorded)) throw new AgentConfigFrozenError(id);
+    if (isReservedSlug(config.slug)) throw new AgentConfigFrozenError(id);
     return config;
   }
   async function list(): Promise<EvalSpAgentConfig[]> {

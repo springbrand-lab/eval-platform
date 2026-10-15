@@ -1,3 +1,5 @@
+import { RunTargetsTooLargeError } from "./db/errors.js";
+
 /**
  * Single source for Eval API content limits. Request body limits are derived from these values
  * rather than restated; validation and HTTP routing import the same constants.
@@ -17,6 +19,11 @@ export const JSON_BODY_BYTES = 1_000_000;
 export const IDENTIFIER_CHARS = 512;
 /** Most Data a Project binds and most target IDs one Run selector or target list may carry. */
 export const RUN_TARGET_IDS = 10_000;
+
+/** The single check of RUN_TARGET_IDS for a Project's bound Data and an expanded Run selection. */
+export function requireRunTargetCount(count: number): void {
+  if (count > RUN_TARGET_IDS) throw new RunTargetsTooLargeError(RUN_TARGET_IDS);
+}
 /** Most Samplings one ProjectSample creates per execution. */
 export const SAMPLING_COUNT_MAX = 100;
 

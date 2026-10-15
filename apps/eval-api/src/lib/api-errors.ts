@@ -27,6 +27,7 @@ import {
   CatalogInputError,
   CatalogPayloadTooLargeError,
   OutputSchemaNotFoundError,
+  ProjectCreationKeyTakenError,
   ProjectEvaluationPlanLockedError,
   ProjectIdempotencyConflictError,
   ProjectRunStopConflictError,
@@ -50,6 +51,7 @@ const admissionConflictCodes = {
   "plan-changed": "PROJECT_PLAN_CHANGED",
   "stale-targets": "RUN_TARGETS_STALE",
   "empty-targets": "RUN_TARGETS_EMPTY",
+  "creation-superseded": "RUN_IDEMPOTENCY_CONFLICT",
   "evaluation-prompt": "SAMPLE_EVALUATION_PROMPT_MISSING",
   "sampling-unavailable": "SAMPLING_UNAVAILABLE",
 } as const satisfies Record<RuntimeAdmissionConflictReason, HttpErrorCode>;
@@ -100,6 +102,7 @@ const publicMessageCodes = new Map<ErrorClass, HttpErrorCode>([
 /** Errors that describe persisted Runtime facts; the response keeps the catalog text. */
 const catalogMessageCodes = new Map<ErrorClass, HttpErrorCode>([
   [RuntimeRecordConflictError, "RUNTIME_RECORD_CONFLICT"],
+  [ProjectCreationKeyTakenError, "RUNTIME_RECORD_CONFLICT"],
   [RuntimeRecordPersistenceError, "RUNTIME_PERSISTENCE_UNCONFIRMED"],
 ]);
 

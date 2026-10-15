@@ -1,5 +1,4 @@
 import type {
-  AgentConfigSnapshot,
   AgentRole,
   EvaluationPlan,
   ExecutionPlan,
@@ -9,11 +8,12 @@ import type {
   RunHandle,
 } from "@eval-platform/eval-contracts";
 import { DatasetEntityNotFoundError, dataSchema, type Data } from "@eval-platform/eval-dataset";
-import { RuntimeEntityNotFoundError, RuntimeProjectBusyError, type ProjectSample } from "@eval-platform/eval-runtime";
+import { RuntimeEntityNotFoundError, RuntimeInputError, RuntimeProjectBusyError, type ProjectSample } from "@eval-platform/eval-runtime";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { addToGroup, sqlBatches } from "./batch.js";
+import type { FrozenCopy } from "../agent-configs.js";
+import type { DatasetSelection } from "../projects/schemas.js";
 import { constraintViolation, READ_SNAPSHOT, type EvalDb } from "./client.js";
-import { RuntimeInputError } from "@eval-platform/eval-runtime";
 import { ProjectCreationKeyTakenError, ProjectEvaluationPlanLockedError } from "./errors.js";
 import { requireOwnerUserId } from "./owner.js";
 import {
@@ -23,7 +23,7 @@ import {
   readProjectPlan,
   visibleProject,
 } from "./project-plans.js";
-import { readRunRecords, runActive } from "./run-records.js";
+import { projectHasRun, readRunRecords, runActive } from "./run-records.js";
 import { readCurrentRun, type CurrentRun } from "./runtime.js";
 import {
   data,
@@ -42,23 +42,13 @@ import {
 
 type Writer = Parameters<Parameters<EvalDb["transaction"]>[0]>[0];
 
-export interface DatasetSelection {
-  readonly datasetId: string;
-  /** Omitted: every current member. */
-  readonly dataIds?: readonly string[];
-}
-
 /** One selected source Dataset with its selected members in the Dataset's member order. */
 export interface SelectedDataset {
   readonly dataset: Omit<ProjectDatasetSnapshot, "projectSampleIds">;
   readonly data: readonly Data[];
 }
 
-export interface FrozenAgentConfig {
-  readonly userAgentId: string;
-  readonly role: AgentRole;
-  readonly snapshot: AgentConfigSnapshot;
-}
+export type FrozenAgentConfig = FrozenCopy & { readonly role: AgentRole };
 
 export interface ProjectSnapshot {
   readonly project: Project;
@@ -89,12 +79,6 @@ async function requireEvaluationPlanUnlocked(reader: Pick<EvalDb, "select">, pro
   if (plan?.lockedAt) throw new ProjectEvaluationPlanLockedError(projectId);
 }
 
-/** The single definition of "this Project has a Run", shared by creation replay and compensation. */
-async function projectHasRun(reader: Pick<EvalDb, "select">, projectId: string): Promise<boolean> {
-  const [run] = await reader.select({ runId: runs.runId }).from(runs).where(eq(runs.projectId, projectId)).limit(1);
-  return run !== undefined;
-}
-
 /** The fixed plan, every bound ProjectSample and the current Run. */
 export interface ProjectView extends ProjectPlan {
   readonly projectSamples: readonly ProjectSample[];
@@ -115,9 +99,9 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
     readSelection(selections: readonly DatasetSelection[]): Promise<SelectedDataset[]> {
       return db.transaction(async (transaction) => {
         const ids = selections.map((selection) => selection.datasetId);
-        const rows = ids.length === 0 ? [] : await transaction.select().from(datasets)
+        const rows = await transaction.select().from(datasets)
           .where(and(eq(datasets.ownerUserId, owner), inArray(datasets.datasetId, ids), isNull(datasets.deletedAt)));
-        const members = ids.length === 0 ? [] : await transaction
+        const members = await transaction
           .select({ datasetId: datasetData.datasetId, dataId: data.dataId, content: data.content }).from(datasetData)
           .innerJoin(data, and(eq(data.dataId, datasetData.dataId), eq(data.ownerUserId, datasetData.ownerUserId)))
           .where(and(eq(datasetData.ownerUserId, owner), inArray(datasetData.datasetId, ids), isNull(data.deletedAt)))
@@ -298,12 +282,11 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
       }, READ_SNAPSHOT);
     },
 
-    /** Every frozen copy of this owner, current or retired. */
-    async frozenAgentConfigIds(ids?: readonly string[]): Promise<Set<string>> {
-      if (ids?.length === 0) return new Set();
+    /** Which of these Agent Config IDs are this owner's frozen Project copies, current or retired. */
+    async frozenAgentConfigIds(ids: readonly string[]): Promise<Set<string>> {
+      if (ids.length === 0) return new Set();
       const rows = await db.select({ userAgentId: projectAgentConfigs.userAgentId }).from(projectAgentConfigs)
-        .where(and(eq(projectAgentConfigs.ownerUserId, owner),
-          ids === undefined ? undefined : inArray(projectAgentConfigs.userAgentId, [...ids])));
+        .where(and(eq(projectAgentConfigs.ownerUserId, owner), inArray(projectAgentConfigs.userAgentId, [...ids])));
       return new Set(rows.map((row) => row.userAgentId));
     },
   };

@@ -377,6 +377,41 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(runsBefore);
     });
 
+    it.each(["active", "finished"] as const)("returns run: null when a %s user Run commits between the replay's lookup and its admission", async (state) => {
+      const body = await creationBody();
+      const s = services();
+      const creator = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...s.store, deleteUnrun: async () => null },
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: { preview: planAdmission(OWNER).preview, async submit() { throw new Error("process crashed"); } },
+      });
+      await expect(creator.create(body)).rejects.toThrow("process crashed");
+      const [project] = await s.projects.list();
+      // The replay has already seen "no Run"; a user Run commits before its admission takes the lock.
+      let userRun: string[] = [];
+      const racing = planAdmission(OWNER);
+      const replaying = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: s.store,
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: {
+          async preview(request) {
+            const user = await buildCommand(s.plans, s.runtime, { projectId: project!.projectId, operation: "execution", idempotencyKey: "user" });
+            await s.runtime.admitRun(user);
+            userRun = [...user.run.samplingIds];
+            if (state === "finished") await settle(s.worker, userRun, "succeeded");
+            return racing.preview(request);
+          },
+          submit: racing.submit,
+        },
+      });
+      expect(await replaying.create(body)).toEqual({ project, run: null });
+      expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(1);
+      const kept = await s.runtime.getSamplings(userRun);
+      expect(kept.every((sampling) => sampling !== null)).toBe(true);
+      expect(kept.map((sampling) => sampling!.execution.status))
+        .toEqual(userRun.map(() => state === "finished" ? "succeeded" : "queued"));
+    });
+
     it("reports a failed compensation together with the admission failure", async () => {
       const body = await creationBody();
       const s = services();

@@ -34,6 +34,8 @@ export type RuntimeAdmissionConflictReason =
   | "plan-changed"
   /** Submitted targets no longer match the Project's current Samplings. */
   | "stale-targets"
+  /** A creation replay's first Run arrived after the Project already ran under another key. */
+  | "creation-superseded"
   | "empty-targets"
   | "evaluation-prompt"
   | "sampling-unavailable";

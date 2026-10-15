@@ -49,6 +49,12 @@ export function runActive(reader: RecordReader): SQL | undefined {
   return or(runUnfinished(reader), and(eq(runs.stopRequested, true), eq(runs.stopFinalized, false)));
 }
 
+/** The single definition of "this Project has a Run", shared by creation replay, admission and compensation. */
+export async function projectHasRun(reader: RecordReader, projectId: string): Promise<boolean> {
+  const [run] = await reader.select({ runId: runs.runId }).from(runs).where(eq(runs.projectId, projectId)).limit(1);
+  return run !== undefined;
+}
+
 export function samplingFromRow(row: typeof samplings.$inferSelect): Sampling {
   return { ...row.facts, samplingId: row.samplingId, projectId: row.projectId, projectSampleId: row.projectSampleId };
 }

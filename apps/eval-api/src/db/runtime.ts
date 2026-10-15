@@ -27,6 +27,7 @@ import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
 import {
   evaluationFacts,
   listSamplingEvaluations,
+  projectHasRun,
   readEvaluations,
   readRunRecords,
   readSamplings,
@@ -148,13 +149,16 @@ async function lockExecutionTargets(
 }
 
 /**
- * Locks the Project row and resolves the request identity: a replay returns the existing Run, a new key
- * needs an idle Project on the active release. Returns the owner for the remaining steps.
+ * Locks the Project row and resolves the request identity: a replay returns the existing Run, the
+ * creation key is refused once the Project has any Run, and a new key needs an idle Project on the
+ * active release. Returns the owner for the remaining steps.
  */
 async function lockForAdmission(
   transaction: AdmissionWriter, scope: RuntimeStoreScope, run: RuntimeRunRecord,
 ): Promise<{ readonly owner: string; readonly existing: RuntimeRunRecord | null }> {
-  const [project] = await transaction.select({ ownerUserId: projects.ownerUserId, sourceBranch: projects.sourceBranch })
+  const [project] = await transaction.select({
+    ownerUserId: projects.ownerUserId, sourceBranch: projects.sourceBranch, creationKey: projects.creationKey,
+  })
     .from(projects)
     .where(visibleProject(run.projectId, scope.kind === "user" ? scope.ownerUserId : undefined))
     .for("update");
@@ -162,6 +166,11 @@ async function lockForAdmission(
   const owner = project.ownerUserId;
   const existing = await findByIdentity(transaction, owner, run.projectId, run.requestIdentity);
   if (existing) return { owner, existing };
+  // A creation key admits only the Project's very first Run; once any Run exists the creation was superseded.
+  if (run.requestIdentity.idempotencyKey === project.creationKey && await projectHasRun(transaction, run.projectId)) {
+    throw new RuntimeAdmissionConflictError("creation-superseded",
+      `Project ${run.projectId} already has Runs; its creation no longer admits a first Run`);
+  }
   const [active] = await transaction.select({ runId: runs.runId }).from(runs)
     .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, run.projectId), runActive(transaction)))
     .limit(1);

@@ -1,5 +1,3 @@
-import { RUN_TARGET_IDS } from "../limits.js";
-
 /** A user-supplied catalog field (name, description, content, reference) is invalid. */
 export class CatalogInputError extends Error {
   constructor(message: string, readonly field?: string) {
@@ -18,15 +16,10 @@ export class CatalogPayloadTooLargeError extends Error {
 
 /** An expanded Run selection exceeds one admission request. */
 export class RunTargetsTooLargeError extends Error {
-  constructor() {
-    super(`Select at most ${RUN_TARGET_IDS} target IDs per Run`);
+  constructor(readonly limit: number) {
+    super(`Select at most ${limit} target IDs per Run`);
     this.name = "RunTargetsTooLargeError";
   }
-}
-
-/** The single bound on Data a Project binds and on target IDs one Run selects. */
-export function requireRunTargetCount(count: number): void {
-  if (count > RUN_TARGET_IDS) throw new RunTargetsTooLargeError();
 }
 
 /** Another creation request already committed a Project under this key; the caller replays it. */
