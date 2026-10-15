@@ -120,6 +120,7 @@ export async function seedProject(db: EvalDb, owner: string, input: {
       { userAgentId: `subject-${projectId}`, role: "subject", snapshot: subject },
       ...(evaluation ? [{ userAgentId: `evaluator-${projectId}`, role: "evaluator" as const, snapshot: evaluator }] : []),
     ],
+    creation: { key: `create-${projectId}`, fingerprint: "fingerprint" },
   });
   if (input.locked) {
     await db.update(projectEvaluationPlans).set({ lockedAt: new Date() }).where(eq(projectEvaluationPlans.projectId, projectId));

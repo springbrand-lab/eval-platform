@@ -43,6 +43,8 @@ export const evaluationPlanSchema = z.strictObject({
 });
 
 export const projectCreateSchema = z.strictObject({
+  /** Owner-scoped creation identity; the first Run is admitted under the same key. */
+  idempotencyKey: idempotencyKeySchema,
   name: catalogLabelSchema,
   description: catalogLabelSchema.exactOptional(),
   datasets: z.array(z.strictObject({
@@ -62,7 +64,7 @@ export const projectCreateSchema = z.strictObject({
     executionConcurrency: positiveInteger,
   }),
   evaluation: evaluationPlanSchema.exactOptional(),
-  run: z.strictObject({ operation: z.enum(["execution", "pipeline"]), idempotencyKey: idempotencyKeySchema }),
+  run: z.strictObject({ operation: z.enum(["execution", "pipeline"]) }),
 }).refine((body) => body.run.operation !== "pipeline" || body.evaluation !== undefined,
   { path: ["evaluation"], message: "A pipeline Run requires an evaluation plan" });
 
@@ -81,7 +83,7 @@ export const create = createRoute({
   method: "post",
   path: "/",
   tags: ["Project"],
-  summary: "Snapshot the selected Data, freeze the Agent Configs and admit the first Run",
+  summary: "Snapshot the selected Data, freeze the Agent Configs and admit the first Run; the key replays the same creation",
   middleware: [jsonBody(PROJECT_BODY_BYTES)],
   request: { body: jsonBodyContent(projectCreateSchema) },
   responses: {

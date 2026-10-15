@@ -81,16 +81,21 @@ export function digestExecutionPlan(input: {
       projectSampleId, dataId, datasetIds, samplingCount, data,
     }))
     .sort((left, right) => left.projectSampleId < right.projectSampleId ? -1 : left.projectSampleId > right.projectSampleId ? 1 : 0);
-  return sha256Hex(canonicalJsonBytes({ execution: input.execution, datasets: input.datasets, samples }));
+  return digestJson({ execution: input.execution, datasets: input.datasets, samples });
+}
+
+/** sha256 of canonical JSON: the single digest used for plans, Schemas and request fingerprints. */
+export function digestJson(value: unknown): Promise<string> {
+  return sha256Hex(canonicalJsonBytes(value));
 }
 
 export function digestEvaluationPlan(evaluation: EvaluationPlan): Promise<string> {
-  return sha256Hex(canonicalJsonBytes(evaluation));
+  return digestJson(evaluation);
 }
 
 /** The digest stored in EvaluationOutputSchemaRef. */
 export function digestEvaluationOutputSchema(schema: EvaluationOutputSchema): Promise<string> {
-  return sha256Hex(canonicalJsonBytes(schema));
+  return digestJson(schema);
 }
 
 function normalizeHarness(harness: HarnessConfig, field: string): HarnessConfig {

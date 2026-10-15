@@ -32,6 +32,22 @@ export class ProjectInputError extends Error {
   }
 }
 
+/** Another creation request already committed a Project under this key; the caller replays it. */
+export class ProjectCreationKeyTakenError extends Error {
+  constructor(readonly key: string) {
+    super("A Project was already created with this idempotency key");
+    this.name = "ProjectCreationKeyTakenError";
+  }
+}
+
+/** A creation key is bound to a different request body. */
+export class ProjectIdempotencyConflictError extends Error {
+  constructor() {
+    super("idempotency key was used to create a different Project");
+    this.name = "ProjectIdempotencyConflictError";
+  }
+}
+
 /** The evaluation plan was locked by the first evaluating Run and can no longer be replaced. */
 export class ProjectEvaluationPlanLockedError extends Error {
   constructor(readonly projectId: string) {

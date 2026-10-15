@@ -17,7 +17,13 @@ import type { BundleDirectory } from "../sp/bundle-directory.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "../test-support.js";
 import type { PgBoss } from "pg-boss";
 import { createPostgresDatasetStore } from "./dataset.js";
-import { AgentConfigFrozenError, OutputSchemaNotFoundError, ProjectEvaluationPlanLockedError, ProjectInputError } from "./errors.js";
+import {
+  AgentConfigFrozenError,
+  OutputSchemaNotFoundError,
+  ProjectEvaluationPlanLockedError,
+  ProjectIdempotencyConflictError,
+  ProjectInputError,
+} from "./errors.js";
 import { createPostgresMetricsSource } from "./metrics.js";
 import { createPostgresObservationReader } from "./observation.js";
 import { createOutputSchemaCatalog } from "./output-schemas.js";
@@ -35,6 +41,7 @@ import {
   projects,
   projectSampleDatasets,
   projectSamples,
+  runs,
 } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
 import { buildCommand, createStubSp, makeData, release, seedProject, settle } from "./test-fixtures.js";
@@ -143,7 +150,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       datasets: [{ datasetId: first.datasetId }, { datasetId: second.datasetId, dataIds: [d2.dataId] }],
       samplingCount: 1, samplingCounts: { [d2.dataId]: 3 },
       execution: { userAgentId: subject, framework: "sp", executionConcurrency: 2, timeoutMs: 60_000 },
-      run: { operation: "execution", idempotencyKey: "create" },
+      idempotencyKey: "create", run: { operation: "execution" },
     });
     expect(run.samplingIds).toHaveLength(4);
     const view = (await service.get(project.projectId))!;
@@ -193,12 +200,12 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     const body = {
       name: "Invalid", datasets: [{ datasetId: first.datasetId }], samplingCount: 1,
       execution: { userAgentId: subject, framework: "sp" as const, executionConcurrency: 1 },
-      run: { operation: "execution" as const, idempotencyKey: "k" },
+      idempotencyKey: "k", run: { operation: "execution" as const },
     };
     await expect(service.create({ ...body, datasets: [{ datasetId: first.datasetId, dataIds: [d3.dataId] }] }))
       .rejects.toMatchObject({ name: "ProjectInputError", field: "datasets.0.dataIds" });
     await expect(service.create({ ...body, samplingCounts: { [d3.dataId]: 2 } })).rejects.toBeInstanceOf(ProjectInputError);
-    await expect(service.create({ ...body, run: { operation: "pipeline", idempotencyKey: "k" } })).rejects.toBeInstanceOf(ProjectInputError);
+    await expect(service.create({ ...body, idempotencyKey: "k", run: { operation: "pipeline" } })).rejects.toBeInstanceOf(ProjectInputError);
     const empty = await datasets.createDataset({ name: "Empty" });
     await expect(service.create({ ...body, datasets: [{ datasetId: empty.datasetId }] })).rejects.toBeInstanceOf(ProjectInputError);
     await expect(services(OTHER).projects.create(body)).rejects.toBeInstanceOf(DatasetEntityNotFoundError);
@@ -225,7 +232,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       name: "Doomed", datasets: [{ datasetId: first.datasetId }], samplingCount: 1,
       execution: { userAgentId: subject, framework: "sp" as const, executionConcurrency: 1 },
       evaluation: { userAgentId: evaluator, evaluationConcurrency: 1, outputSchemaId: schema.outputSchemaId },
-      run: { operation: "pipeline" as const, idempotencyKey: "k" },
+      idempotencyKey: "k", run: { operation: "pipeline" as const },
     };
     await expect(service.create(body)).rejects.toBeInstanceOf(RuntimeProjectBusyError);
     const copies = await Promise.all(stub.sp.createAgentConfig.mock.results.map(async (result) => (await result.value).id));
@@ -245,13 +252,97 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     expect(await services().projects.list()).toEqual([]);
   });
 
+  describe("idempotent creation", () => {
+    async function creationBody() {
+      const { first, subject } = await catalog();
+      return {
+        idempotencyKey: "create-once", name: "Once", datasets: [{ datasetId: first.datasetId }], samplingCount: 1,
+        execution: { userAgentId: subject, framework: "sp" as const, executionConcurrency: 1 },
+        run: { operation: "execution" as const },
+      };
+    }
+    const copyIds = async () => Promise.all(stub.sp.createAgentConfig.mock.results.map(async (result) => (await result.value).id as string));
+
+    it("replays the same body without new SP copies and rejects a different body under the key", async () => {
+      const body = await creationBody();
+      const { projects: service } = services();
+      const created = await service.create(body);
+      const replayed = await service.create(body);
+      expect(replayed).toEqual(created);
+      expect(stub.sp.createAgentConfig).toHaveBeenCalledTimes(1);
+      await expect(service.create({ ...body, samplingCount: 2 })).rejects.toBeInstanceOf(ProjectIdempotencyConflictError);
+      await expect(service.create({ ...body, run: { operation: "pipeline" } })).rejects.toBeInstanceOf(ProjectInputError);
+      expect(await service.list()).toHaveLength(1);
+      expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(1);
+    });
+
+    it("keeps one Project, one first Run and one set of copies when identical requests race", async () => {
+      const body = await creationBody();
+      let arrived = 0;
+      let open!: () => void;
+      const barrier = new Promise<void>((resolve) => { open = resolve; });
+      const create = stub.sp.createAgentConfig.getMockImplementation()!;
+      stub.sp.createAgentConfig.mockImplementation(async (token: string, input: unknown) => {
+        arrived += 1;
+        if (arrived === 2) open();
+        await barrier;
+        return create(token, input);
+      });
+      const [left, right] = await Promise.all([services().projects.create(body), services().projects.create(body)]);
+      expect(left).toEqual(right);
+      expect((await database.db.select({ n: count() }).from(projects))[0]!.n).toBe(1);
+      expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(1);
+      const copies = await copyIds();
+      expect(copies).toHaveLength(2);
+      const kept = (await database.db.select().from(projectAgentConfigs)).map((row) => row.userAgentId);
+      expect(kept).toHaveLength(1);
+      expect(stub.calls.deleted).toEqual(copies.filter((id) => !kept.includes(id)));
+      expect(stub.configs.has(kept[0]!)).toBe(true);
+    });
+
+    it("finishes the first Run on replay after a crash between the creation transaction and admission", async () => {
+      const body = await creationBody();
+      const crashed = services(OWNER, { preview: planAdmission(OWNER).preview, async submit() { throw new Error("process crashed"); } });
+      const crashingStore = { ...crashed.store, deleteUnrun: async () => null };
+      const service = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: crashingStore,
+        outputSchemas: crashed.outputSchemas, agentConfigs: crashed.agentConfigs,
+        admission: { preview: planAdmission(OWNER).preview, async submit() { throw new Error("process crashed"); } },
+      });
+      await expect(service.create(body)).rejects.toThrow("process crashed");
+      const [orphan] = await services().projects.list();
+      expect(orphan).toBeDefined();
+      const { project, run } = await services().projects.create(body);
+      expect(project).toEqual(orphan);
+      expect(run.samplingIds).toHaveLength(2);
+      expect(stub.sp.createAgentConfig).toHaveBeenCalledTimes(1);
+      expect(await services().projects.create(body)).toEqual({ project, run });
+    });
+
+    it("never resurrects a deleted creation and starts afresh after a compensated failure", async () => {
+      const body = await creationBody();
+      const failing = services(OWNER, { preview: planAdmission(OWNER).preview, async submit() { throw new RuntimeProjectBusyError("p", "r"); } });
+      await expect(failing.projects.create(body)).rejects.toBeInstanceOf(RuntimeProjectBusyError);
+      expect(await services().projects.list()).toEqual([]);
+      const { projects: service, worker } = services();
+      const { project, run } = await service.create(body);
+      await settle(worker, run.samplingIds, "succeeded");
+      await service.delete(project.projectId);
+      await expect(service.create(body)).rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "project" });
+      await expect(service.create({ ...body, name: "Other" })).rejects.toBeInstanceOf(ProjectIdempotencyConflictError);
+      const other = await services(OTHER).projects.create({ ...body, datasets: [{ datasetId: (await catalog(OTHER)).first.datasetId }],
+        execution: { ...body.execution, userAgentId: stub.seed(OTHER, "Other subject") } });
+      expect(other.project.projectId).not.toBe(project.projectId);
+    });
+  });
+
   it("replaces the evaluation plan until the first evaluating Run locks it, retiring and hiding old copies", async () => {
     const { first, subject, evaluator, schema } = await catalog();
     const { projects: service, agentConfigs, worker, runtime, plans } = services();
     const { project, run } = await service.create({
       name: "Later evaluation", datasets: [{ datasetId: first.datasetId }], samplingCount: 1,
       execution: { userAgentId: subject, framework: "sp", executionConcurrency: 1 },
-      run: { operation: "execution", idempotencyKey: "create" },
+      idempotencyKey: "create", run: { operation: "execution" },
     });
     const plan = { userAgentId: evaluator, evaluationConcurrency: 2, outputSchemaId: schema.outputSchemaId };
     const firstView = await service.replaceEvaluationPlan(project.projectId, plan);
@@ -280,7 +371,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     await expect(service.create({
       name: "From copy", datasets: [{ datasetId: first.datasetId }], samplingCount: 1,
       execution: { userAgentId: subjectCopy, framework: "sp", executionConcurrency: 1 },
-      run: { operation: "execution", idempotencyKey: "copy" },
+      idempotencyKey: "copy", run: { operation: "execution" },
     })).rejects.toBeInstanceOf(AgentConfigFrozenError);
     expect((await agentConfigs.get(subjectCopy)).id).toBe(subjectCopy);
 
@@ -435,7 +526,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       name: "HTTP", datasets: [{ datasetId: first.datasetId }, { datasetId: second.datasetId }], samplingCount: 1,
       execution: { userAgentId: subject, framework: "sp", executionConcurrency: 1 },
       evaluation: { userAgentId: evaluator, evaluationConcurrency: 1, outputSchemaId: schema.outputSchemaId },
-      run: { operation: "pipeline", idempotencyKey: "create" },
+      idempotencyKey: "create", run: { operation: "pipeline" },
     }, OWNER));
     expect(created.status).toBe(201);
     const { project, run } = (await created.json() as { msg: { project: { projectId: string }; run: { runId: string; samplingIds: string[] } } }).msg;

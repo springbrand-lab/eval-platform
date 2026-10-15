@@ -6,13 +6,14 @@ import type {
   Project,
   ProjectDatasetSnapshot,
   ProjectPlan,
+  RunHandle,
 } from "@eval-platform/eval-contracts";
 import { DatasetEntityNotFoundError, dataSchema, type Data } from "@eval-platform/eval-dataset";
 import { RuntimeEntityNotFoundError, RuntimeProjectBusyError, type ProjectSample } from "@eval-platform/eval-runtime";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { addToGroup, sqlBatches } from "./batch.js";
-import type { EvalDb } from "./client.js";
-import { ProjectEvaluationPlanLockedError, ProjectInputError } from "./errors.js";
+import { constraintViolation, type EvalDb } from "./client.js";
+import { ProjectCreationKeyTakenError, ProjectEvaluationPlanLockedError, ProjectInputError } from "./errors.js";
 import { requireOwnerUserId } from "./owner.js";
 import {
   projectExists,
@@ -22,7 +23,7 @@ import {
   readProjectPlan,
   visibleProject,
 } from "./project-plans.js";
-import { runActive } from "./run-records.js";
+import { readRunRecords, runActive } from "./run-records.js";
 import { readCurrentRun, type CurrentRun } from "./runtime.js";
 import {
   data,
@@ -32,6 +33,7 @@ import {
   projectDatasets,
   projectEvaluationPlans,
   projectExecutionPlans,
+  PROJECT_CREATION_KEY_UQ,
   projects,
   projectSampleDatasets,
   projectSamples,
@@ -66,6 +68,16 @@ export interface ProjectSnapshot {
   readonly execution: { readonly plan: ExecutionPlan; readonly digest: string };
   readonly evaluation: { readonly plan: EvaluationPlan; readonly digest: string } | null;
   readonly agentConfigs: readonly FrozenAgentConfig[];
+  /** The creation request's idempotency key and body fingerprint. */
+  readonly creation: { readonly key: string; readonly fingerprint: string };
+}
+
+/** A Project found by its creation key, deleted or not, with the first Run admitted under the same key. */
+export interface ProjectCreation {
+  readonly project: Project;
+  readonly deleted: boolean;
+  readonly fingerprint: string;
+  readonly run: RunHandle | null;
 }
 
 /** The fixed plan, every bound ProjectSample and the current Run. */
@@ -132,6 +144,10 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
         await transaction.insert(projects).values({
           projectId, ownerUserId: owner, name: project.name, description: project.description ?? null,
           sourceBranch: project.sourceBranch, createdAt: new Date(project.createdAt),
+          creationKey: snapshot.creation.key, creationFingerprint: snapshot.creation.fingerprint,
+        }).catch((error: unknown) => {
+          if (constraintViolation(error)?.constraint === PROJECT_CREATION_KEY_UQ) throw new ProjectCreationKeyTakenError(snapshot.creation.key);
+          throw error;
         });
         const datasetRows = snapshot.datasets.map((dataset, position) => ({
           ownerUserId: owner, projectId, datasetId: dataset.datasetId, position,
@@ -160,23 +176,45 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
       });
     },
 
+    /** The Project created under this key, deleted or not, and its first Run if one was admitted. */
+    findCreation(key: string): Promise<ProjectCreation | null> {
+      return db.transaction(async (transaction) => {
+        const [row] = await transaction.select().from(projects)
+          .where(and(eq(projects.ownerUserId, owner), eq(projects.creationKey, key)));
+        if (!row) return null;
+        const [first] = await transaction.select({ runId: runs.runId }).from(runs)
+          .where(and(eq(runs.projectId, row.projectId), eq(runs.idempotencyKey, key)));
+        const [record] = first
+          ? await readRunRecords(transaction, [first.runId], { kind: "project", ownerUserId: owner, projectId: row.projectId })
+          : [];
+        return {
+          project: projectFromRow(row),
+          deleted: row.deletedAt !== null,
+          fingerprint: row.creationFingerprint,
+          run: record ? { runId: record.runId, samplingIds: [...record.samplingIds] } : null,
+        };
+      }, READ_SNAPSHOT);
+    },
+
     /**
-     * Compensation for a creation whose first Run was never admitted: removes every row of the Project.
-     * Returns false, keeping the Project, once it has any Run.
+     * Compensation for a creation whose first Run was never admitted: removes every row of the Project
+     * and returns its frozen-copy IDs for SP deletion. Returns null, keeping the Project, once it has any Run.
      */
-    async deleteUnrun(projectId: string): Promise<boolean> {
+    async deleteUnrun(projectId: string): Promise<string[] | null> {
       return db.transaction(async (transaction) => {
         const [row] = await transaction.select({ projectId: projects.projectId }).from(projects)
           .where(and(eq(projects.ownerUserId, owner), eq(projects.projectId, projectId))).for("update");
-        if (!row) return true;
+        if (!row) return [];
         const [run] = await transaction.select({ runId: runs.runId }).from(runs).where(eq(runs.projectId, projectId)).limit(1);
-        if (run) return false;
+        if (run) return null;
+        const copies = await transaction.select({ userAgentId: projectAgentConfigs.userAgentId }).from(projectAgentConfigs)
+          .where(eq(projectAgentConfigs.projectId, projectId));
         for (const table of [projectAgentConfigs, projectEvaluationPlans, projectExecutionPlans, projectSampleDatasets,
           projectSamples, projectDatasets, runRequestKeys]) {
           await transaction.delete(table).where(eq(table.projectId, projectId));
         }
         await transaction.delete(projects).where(eq(projects.projectId, projectId));
-        return true;
+        return copies.map((copy) => copy.userAgentId);
       });
     },
 

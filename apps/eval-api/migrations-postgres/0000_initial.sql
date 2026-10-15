@@ -156,9 +156,13 @@ CREATE TABLE "eval_projects" (
 	"name" text NOT NULL,
 	"description" text,
 	"source_branch" text NOT NULL,
+	"creation_key" text NOT NULL,
+	"creation_fingerprint" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"deleted_at" timestamp with time zone,
 	CONSTRAINT "eval_projects_owner_id_uq" UNIQUE("owner_user_id","project_id"),
+	CONSTRAINT "eval_projects_creation_key_uq" UNIQUE("owner_user_id","creation_key"),
+	CONSTRAINT "eval_projects_creation_ck" CHECK (length("eval_projects"."creation_key") > 0 AND length("eval_projects"."creation_fingerprint") > 0),
 	CONSTRAINT "eval_projects_name_ck" CHECK (length(trim("eval_projects"."name")) > 0),
 	CONSTRAINT "eval_projects_description_ck" CHECK ("eval_projects"."description" IS NULL OR length(trim("eval_projects"."description")) > 0),
 	CONSTRAINT "eval_projects_source_branch_ck" CHECK (length(trim("eval_projects"."source_branch")) > 0)

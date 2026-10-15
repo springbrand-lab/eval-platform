@@ -1,5 +1,5 @@
 {
-  "id": "3087cf6c-9d39-46c2-a1ff-4d75c8404193",
+  "id": "277ad04b-c7fb-4efc-9d66-f5264851f281",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -1282,6 +1282,18 @@
           "primaryKey": false,
           "notNull": true
         },
+        "creation_key": {
+          "name": "creation_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "creation_fingerprint": {
+          "name": "creation_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1323,10 +1335,22 @@
             "owner_user_id",
             "project_id"
           ]
+        },
+        "eval_projects_creation_key_uq": {
+          "name": "eval_projects_creation_key_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "owner_user_id",
+            "creation_key"
+          ]
         }
       },
       "policies": {},
       "checkConstraints": {
+        "eval_projects_creation_ck": {
+          "name": "eval_projects_creation_ck",
+          "value": "length(\"eval_projects\".\"creation_key\") > 0 AND length(\"eval_projects\".\"creation_fingerprint\") > 0"
+        },
         "eval_projects_name_ck": {
           "name": "eval_projects_name_ck",
           "value": "length(trim(\"eval_projects\".\"name\")) > 0"

@@ -96,13 +96,14 @@ Creation body:
 
 ```text
 {
+  idempotencyKey,                             owner-scoped creation key; the first Run uses the same key
   name, description?,                         nonblank text
   datasets: [{ datasetId, dataIds? }],        1..RUN_TARGET_IDS distinct Datasets; dataIds omitted = every current member
   samplingCount,                              1..SAMPLING_COUNT_MAX, default for every selected Data
   samplingCounts?: { [dataId]: count },       per-Data overrides; every key must be selected
   execution: { userAgentId, framework: "sp"|"codex"|"cc", executionConcurrency, retryPolicy?, timeoutMs? },
   evaluation?: <evaluation plan body>,         required when run.operation is "pipeline"
-  run: { operation: "execution"|"pipeline", idempotencyKey }
+  run: { operation: "execution"|"pipeline" }
 }
 ```
 
@@ -110,11 +111,13 @@ Evaluation plan body: `{userAgentId, evaluationConcurrency, retryPolicy?, timeou
 
 Creation reads the selected owned, non-deleted Datasets and their current members in one consistent snapshot; a Data shared by several selected Datasets becomes one ProjectSample. It clones the Subject (and Evaluator) Agent Config, stores the snapshot, both plans and the copies in one transaction, then previews and submits the first Run with selector `{all:true}`. If any step fails, nothing remains visible: rows of a Project without a Run are removed and the copies are deleted. Cancelling the form calls no route.
 
+Creation is idempotent per owner and `idempotencyKey`. The Project stores the key and a fingerprint (sha256 of the canonical JSON of the validated body without the key). A request whose key already created a Project is answered before any Agent Config is cloned: with the same body it returns `201` with the same `{project, run}`, first admitting the Run if an earlier request committed the Project but never admitted it; with a different body it is `409 PROJECT_IDEMPOTENCY_CONFLICT`; if that Project was deleted, the same body is `404 PROJECT_NOT_FOUND` and a different body is still `409`. When identical requests race, one creation commits and the others delete their own copies and replay it. After a first-Run admission failure has removed the Project, the same key creates a new Project.
+
 `ProjectView` is the fixed plan plus current state: `{project, datasets: [{datasetId, name, description?, kind, projectSampleIds}], execution, executionPlanDigest, evaluation | null, evaluationPlanDigest | null, evaluationPlanLockedAt | null, projectSamples: [{projectSampleId, projectId, dataId, datasetIds, samplingCount, data}], currentRun: {runId, stopRequested?} | null}`. `execution.subjectAgentConfig` and `evaluation.evaluatorAgentConfig` are the Agent Config bodies as frozen; `harness.agentConfig` names the frozen copy. `evaluation.outputSchema` is `{outputSchemaId, digest}`.
 
 | Route | Domain errors |
 | --- | --- |
-| Create | `400 PROJECT_INPUT_INVALID` (Data not a current member, override for unselected Data, no Data, more than `RUN_TARGET_IDS` Data, pipeline without evaluation plan); `400 RUNTIME_INPUT_INVALID` (plan values); `404 DATASET_NOT_FOUND`, `OUTPUT_SCHEMA_NOT_FOUND`; `409 AGENT_CONFIG_FROZEN` (a frozen copy selected as source); relayed SP errors; every first-Run admission error of [Run submission](#runs) |
+| Create | `404 PROJECT_NOT_FOUND` (key of a deleted creation); `409 PROJECT_IDEMPOTENCY_CONFLICT`; `400 PROJECT_INPUT_INVALID` (Data not a current member, override for unselected Data, no Data, more than `RUN_TARGET_IDS` Data, pipeline without evaluation plan); `400 RUNTIME_INPUT_INVALID` (plan values); `404 DATASET_NOT_FOUND`, `OUTPUT_SCHEMA_NOT_FOUND`; `409 AGENT_CONFIG_FROZEN` (a frozen copy selected as source); relayed SP errors; every first-Run admission error of [Run submission](#runs) |
 | Detail | `404 PROJECT_NOT_FOUND` |
 | Delete | `404 PROJECT_NOT_FOUND`; `409 PROJECT_BUSY` while a Run is active or its stop is not finalized |
 | Evaluation plan | `404 PROJECT_NOT_FOUND`, `OUTPUT_SCHEMA_NOT_FOUND`; `409 PROJECT_EVALUATION_PLAN_LOCKED`, `AGENT_CONFIG_FROZEN`; `400 RUNTIME_INPUT_INVALID`; relayed SP errors |
@@ -260,6 +263,7 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `PROJECT_NOT_FOUND` | 404 | Unknown, another owner's or soft-deleted Project |
 | `PROJECT_INPUT_INVALID` | 400 | Project creation selection invalid against the catalog |
 | `PROJECT_BUSY` | 409 | New Run key or deletion while a Run is unfinished |
+| `PROJECT_IDEMPOTENCY_CONFLICT` | 409 | Creation key reused with a different body |
 | `PROJECT_NO_ACTIVE_RUN` | 409 | Stop of a finished Run without a stop request |
 | `PROJECT_SOURCE_BRANCH_CONFLICT` | 409 | Project belongs to another Eval SP source branch |
 | `PROJECT_EVALUATION_PLAN_REQUIRED` | 409 | pipeline/evaluation on a Project without an evaluation plan |

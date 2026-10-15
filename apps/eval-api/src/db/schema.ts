@@ -29,16 +29,23 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
+export const PROJECT_CREATION_KEY_UQ = "eval_projects_creation_key_uq";
+
 export const projects = pgTable("eval_projects", {
   projectId: text("project_id").primaryKey(),
   ownerUserId: text("owner_user_id").notNull(),
   name: text("name").notNull(),
   description: text("description"),
   sourceBranch: text("source_branch").notNull(),
+  /** The creation request's idempotency key and the fingerprint of its validated body. */
+  creationKey: text("creation_key").notNull(),
+  creationFingerprint: text("creation_fingerprint").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
 }, (table) => [
   unique("eval_projects_owner_id_uq").on(table.ownerUserId, table.projectId),
+  unique(PROJECT_CREATION_KEY_UQ).on(table.ownerUserId, table.creationKey),
+  check("eval_projects_creation_ck", sql`length(${table.creationKey}) > 0 AND length(${table.creationFingerprint}) > 0`),
   index("eval_projects_owner_idx").on(table.ownerUserId),
   check("eval_projects_name_ck", sql`length(trim(${table.name})) > 0`),
   check("eval_projects_description_ck", sql`${table.description} IS NULL OR length(trim(${table.description})) > 0`),

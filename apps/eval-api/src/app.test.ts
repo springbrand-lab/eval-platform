@@ -18,7 +18,8 @@ const createBody = {
   datasets: [{ datasetId: datasetId.toUpperCase() }],
   samplingCount: 2,
   execution: { userAgentId: agentId, framework: "sp", executionConcurrency: 2 },
-  run: { operation: "execution", idempotencyKey: "create-1" },
+  idempotencyKey: "create-1",
+  run: { operation: "execution" },
 };
 const preview = {
   projectId: "project-1", operation: "execution", selector: { all: true },
@@ -133,15 +134,18 @@ describe("Eval API HTTP layer", () => {
     const app = setup();
     await app.request("/api/projects", jsonRequest("POST", {
       ...createBody, samplingCounts: { [datasetId.toUpperCase()]: 3 }, evaluation: evaluationPlan,
-      run: { operation: "pipeline", idempotencyKey: "create-1" },
+      run: { operation: "pipeline" },
     }));
     expect(app.services.projects.create).toHaveBeenCalledWith({
       ...createBody, name: "Tasks", datasets: [{ datasetId }], samplingCounts: { [datasetId]: 3 }, evaluation: evaluationPlan,
-      run: { operation: "pipeline", idempotencyKey: "create-1" },
+      run: { operation: "pipeline" },
     });
     const invalid = [
-      { ...createBody, run: { operation: "pipeline", idempotencyKey: "k" } },
-      { ...createBody, run: { operation: "evaluation", idempotencyKey: "k" } },
+      { ...createBody, run: { operation: "pipeline" } },
+      { ...createBody, run: { operation: "evaluation" } },
+      { ...createBody, run: { operation: "execution", idempotencyKey: "k" } },
+      { ...createBody, idempotencyKey: " padded " },
+      { ...createBody, idempotencyKey: undefined },
       { ...createBody, datasets: [{ datasetId }, { datasetId }] },
       { ...createBody, datasets: [] },
       { ...createBody, datasets: [{ datasetId, dataIds: [] }] },
