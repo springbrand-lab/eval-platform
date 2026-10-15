@@ -17,6 +17,10 @@
     "@fontsource-variable/inter": "^5.3.0",
     "@springbrand/http": "0.1.0-alpha.4",
     "@springbrand/message-panel": "0.3.0-alpha.16",
+    "@streamdown/cjk": "1.0.4",
+    "@streamdown/code": "1.1.1",
+    "@streamdown/math": "1.0.3",
+    "@streamdown/mermaid": "1.0.3",
     "@tanstack/react-query": "^5.104.1",
     "@tanstack/react-router": "^1.170.35",
     "ai": "7.0.56",
@@ -25,7 +29,9 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "sonner": "^2.0.7",
+    "streamdown": "2.7.0",
     "tailwind-merge": "^3.6.0",
+    "tw-animate-css": "1.4.0",
     "zod": "4.6.5"
   },
   "devDependencies": {

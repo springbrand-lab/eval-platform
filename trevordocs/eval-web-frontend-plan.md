@@ -367,7 +367,7 @@ Eval API 的 `EVAL_WEB_ORIGIN` 设置为 eval-web 的域名。Worker 转发请�
 **与方案的差异：**
 
 - 列表没有做虚拟滚动，改为每次显示 200 行、点击"显示更多"继续加载；当前数据量下足够。
-- 会话复用 `@springbrand/message-panel`；文件预览和轨迹使用自建的简单版本（文本/代码、图片、沙箱中预览 HTML；事件时间线），等 SP 发布 `file-renderers`、`trajectory-plugin` 后再替换。
+- 会话复用 SP 聊天页同一套渲染（`@springbrand/message-panel/cloud-os` 的 `CloudOsChatMessages`，按包的宿主要求接入 Tailwind 与 CSS）；文件预览和轨迹使用自建的简单版本（文本/代码、图片、沙箱中预览 HTML；事件时间线），等 SP 发布 `file-renderers`、`trajectory-plugin` 后再替换。
 - 只读观察请求以 `EVAL_SP_TRUSTED_ORIGIN`（Eval SP 已信任的 `https://devrapp.springbrand.ai`）为 Origin，由 Eval API 服务端发出，不需要修改 Eval SP 的 CORS 配置。
 - 评委不再绑定被测工作区（见 `evaluation-evidence-decoupling.md`），观察页按证据包方式说明。
 

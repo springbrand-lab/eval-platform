@@ -16,7 +16,7 @@
       "@/*": [
         "./src/*"
       ],
-      "@springbrand/message-panel": [
+      "@springbrand/message-panel/cloud-os": [
         "./src/types/message-panel.d.ts"
       ]
     }
