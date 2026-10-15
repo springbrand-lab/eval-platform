@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Eval API and Run Worker deployment resources. They run on Eval SP's existing EC2 instance
+  and RDS instance; this stack only adds what eval-platform owns.
+
+Parameters:
+  ExistingEc2InstanceId:
+    Type: AWS::EC2::Instance::Id
+    Default: i-066109bf4a9a9e1a5
+  ExistingInstanceRoleName:
+    Type: String
+    Default: sp-platform-api-instance
+    Description: Role of the EC2 instance profile; it is granted read access to this stack's secrets and log group.
+  GitHubOidcProviderArn:
+    Type: String
+    Default: arn:aws:iam::635288116097:oidc-provider/token.actions.githubusercontent.com
+  GitHubSubject:
+    Type: String
+    Default: repo:springbrand-lab@264779836/eval-platform@1418295357:ref:refs/heads/main
+
+Resources:
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: eval-platform-api
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Keep 20 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":20},"action":{"type":"expire"}}]}'
+
+  AppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: eval-platform/api/production
+      Description: Runtime configuration of the Eval API and Run Worker; populated after stack creation.
+      SecretString: "{}"
+
+  DatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: eval-platform/database/production
+      Description: Credentials for the eval_platform_app role and its eval-platform database on the existing RDS instance.
+      SecretString: "{}"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /springbrand/eval-platform/production
+      RetentionInDays: 30
+
+  InstanceRuntimePolicy:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !Ref ExistingInstanceRoleName
+      PolicyName: EvalPlatformRuntime
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              - !Ref AppSecret
+              - !Ref DatabaseSecret
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:DescribeLogStreams
+              - logs:PutLogEvents
+            Resource: !Sub ${LogGroup.Arn}:*
+
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: eval-platform-api-github
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Ref GitHubSubject
+      Policies:
+        - PolicyName: DeployEvalApi
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !GetAtt EcrRepository.Arn
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript
+                  - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${ExistingEc2InstanceId}
+              - Effect: Allow
+                Action:
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: "*"
+
+Outputs:
+  AwsRoleArn:
+    Description: GitHub repository variable AWS_ROLE_ARN
+    Value: !GetAtt GitHubActionsRole.Arn
+  EcrRepositoryName:
+    Description: GitHub repository variable AWS_ECR_REPOSITORY
+    Value: !Ref EcrRepository
+  Ec2InstanceId:
+    Description: GitHub repository variable AWS_EC2_INSTANCE_ID
+    Value: !Ref ExistingEc2InstanceId
