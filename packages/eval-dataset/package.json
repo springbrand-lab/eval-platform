@@ -4,12 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./dataset": "./src/dataset/index.ts",
-    "./dataset/model": "./src/dataset/model.ts",
-    "./dataset/serialization": "./src/dataset/serialization.ts",
-    "./dataset/store": "./src/dataset/store.ts",
-    "./model": "./src/model.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "build": "tsc --noEmit",

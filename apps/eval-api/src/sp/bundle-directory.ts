@@ -1,23 +1,27 @@
 import { link, lstat, mkdir, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, sep } from "node:path";
-import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
-import { SpHarnessError, type SpHarnessOptions } from "./harness.js";
-import { parseStrictJson } from "@eval-platform/eval-dataset";
+import { platformIdSchema, type InitialMaterialsRef, type InitialSessionRef } from "@eval-platform/eval-dataset";
+import {
+  evalInitialContextSchema,
+  evalInitializationSchema,
+  evalMaterialFileSchema,
+  evalMaterialPath,
+  readEvalCanonicalContext,
+} from "@springbrand/eval-harness";
+import type { z } from "zod";
+import { MATERIAL_FILE_BYTES, MATERIAL_TOTAL_BYTES } from "../limits.js";
+import { BundleFileError } from "./bundle-errors.js";
 
-const MAX_MATERIAL_MANIFEST_BYTES = 27_000_000;
-const MAX_SESSION_FILE_BYTES = 2_500_000;
-const MAX_SESSION_CONTENT_LENGTH = 2_000_000;
-const MAX_MATERIAL_BYTES = 20_000_000;
-const MAX_SINGLE_MATERIAL_BYTES = 5_000_000;
-const OWNER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
-
-export type MaterialFile = { readonly path: string; readonly mediaType: string; readonly contentBase64: string };
-export type SessionContent = { readonly format: "json" | "jsonl"; readonly content: string };
+export type MaterialFile = z.output<typeof evalMaterialFileSchema>;
+export type SessionContent = z.output<typeof evalInitialContextSchema>;
 type ResourceLocation = { readonly path: string; readonly ownerDirectory: string };
 
+/** SP's initialization contract owns the per-material file count and file shape. */
+const materialFilesSchema = evalInitializationSchema.shape.initialMaterials.unwrap().shape.files.min(1);
+
 export interface BundleDirectory {
-  resolveInitialMaterials: NonNullable<SpHarnessOptions["resolveInitialMaterials"]>;
-  resolveInitialSession: NonNullable<SpHarnessOptions["resolveInitialSession"]>;
+  resolveInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef): Promise<readonly MaterialFile[]>;
+  resolveInitialSession(ownerUserId: string, reference: InitialSessionRef): Promise<SessionContent | undefined>;
   uploadInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef,
     files: readonly MaterialFile[]): Promise<void>;
   uploadInitialSession(ownerUserId: string, reference: InitialSessionRef,
@@ -33,118 +37,104 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
   if (!(await stat(root)).isDirectory()) throw new Error("EVAL_BUNDLE_DIR must be a directory");
 
   const resourceLocation = (ownerUserId: string, bundleId: string, kind: "materials" | "sessions",
-    resourceId: string, extension: "json" | "jsonl"): ResourceLocation => {
-    if (!OWNER_ID.test(ownerUserId)) throw new SpHarnessError("Invalid Bundle owner identity", false);
-    const ownerDirectory = join(root, ownerUserId.toLowerCase());
+    resourceId: string): ResourceLocation => {
+    const ownerDirectory = join(root, platformId(ownerUserId, "Bundle owner"));
     return {
       ownerDirectory,
-      path: join(ownerDirectory, encodeId(bundleId), kind, `${encodeId(resourceId)}.${extension}`),
+      path: join(ownerDirectory, platformId(bundleId, "Bundle"), kind, `${platformId(resourceId, "resource")}.json`),
     };
   };
+  const materialsLocation = (ownerUserId: string, reference: InitialMaterialsRef): ResourceLocation =>
+    resourceLocation(ownerUserId, reference.bundleId, "materials", reference.materialId);
+  const sessionLocation = (ownerUserId: string, reference: InitialSessionRef): ResourceLocation =>
+    resourceLocation(ownerUserId, reference.bundleId, "sessions", reference.sessionId);
 
-  async function readResource(location: ResourceLocation, maxBytes: number): Promise<Uint8Array | undefined> {
+  async function readResource(location: ResourceLocation): Promise<unknown> {
     let resolved: string;
     try {
       resolved = await realpath(location.path);
     } catch (error) {
       if (isMissing(error)) return undefined;
-      throw new SpHarnessError("Initial Bundle resource could not be read", true);
+      throw unavailable(error);
     }
     if (!insideRoot(location.ownerDirectory, resolved)) {
-      throw new SpHarnessError("Initial Bundle resource escapes its owner directory", false);
+      throw new BundleFileError("invalid", "Initial Bundle resource escapes its owner directory");
+    }
+    let bytes: Uint8Array;
+    try {
+      if (!(await stat(resolved)).isFile()) throw new BundleFileError("invalid", "Initial Bundle resource is not a file");
+      bytes = await readFile(resolved);
+    } catch (error) {
+      if (error instanceof BundleFileError) throw error;
+      throw unavailable(error);
     }
     try {
-      const info = await stat(resolved);
-      if (!info.isFile() || info.size > maxBytes) {
-        throw new SpHarnessError("Initial Bundle resource is not a bounded file", false);
-      }
-      const bytes = await readFile(resolved);
-      if (bytes.byteLength > maxBytes) {
-        throw new SpHarnessError("Initial Bundle resource is too large", false);
-      }
-      return bytes;
-    } catch (error) {
-      if (error instanceof SpHarnessError) throw error;
-      throw new SpHarnessError("Initial Bundle resource could not be read", true);
+      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    } catch (cause) {
+      throw new BundleFileError("invalid", "Initial Bundle resource is not valid JSON", { cause });
     }
   }
 
-  async function writeResource(location: ResourceLocation, bytes: Uint8Array, maxBytes: number): Promise<void> {
-    if (bytes.byteLength > maxBytes) throw new SpHarnessError("Initial Bundle resource is too large", false);
+  async function writeResource(location: ResourceLocation, value: unknown): Promise<void> {
+    const serialized = JSON.stringify(value);
     const parent = dirname(location.path);
-    await ensureDirectory(location.ownerDirectory);
-    await ensureDirectory(dirname(parent));
-    await ensureDirectory(parent);
-    const resolvedParent = await realpath(parent);
-    if (!insideRoot(location.ownerDirectory, resolvedParent)) {
-      throw new SpHarnessError("Initial Bundle resource escapes its owner directory", false);
-    }
-    const temporary = join(parent, `.${crypto.randomUUID()}.upload`);
-    await writeFile(temporary, bytes, { flag: "wx", mode: 0o600 });
     try {
+      await ensureDirectory(location.ownerDirectory);
+      await ensureDirectory(dirname(parent));
+      await ensureDirectory(parent);
+      if (!insideRoot(location.ownerDirectory, await realpath(parent))) {
+        throw new BundleFileError("invalid", "Initial Bundle resource escapes its owner directory");
+      }
+      const temporary = join(parent, `.${crypto.randomUUID()}.upload`);
+      await writeFile(temporary, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
       try {
         await link(temporary, location.path);
       } catch (error) {
         if (!isExisting(error)) throw error;
-        const existing = await readResource(location, maxBytes);
-        if (!existing || !Buffer.from(existing).equals(bytes)) {
-          throw new SpHarnessError("Initial Bundle resource already has different content", false);
+        if (JSON.stringify(await readResource(location)) !== serialized) {
+          throw new BundleFileError("conflict", "Initial Bundle resource already has different content");
         }
+      } finally {
+        await unlink(temporary);
       }
-    } finally {
-      await unlink(temporary);
+    } catch (error) {
+      if (error instanceof BundleFileError) throw error;
+      throw unavailable(error);
+    }
+  }
+
+  async function removeResource(location: ResourceLocation): Promise<void> {
+    try {
+      await unlink(location.path);
+    } catch (error) {
+      if (!isMissing(error)) throw unavailable(error);
     }
   }
 
   return {
     async uploadInitialMaterials(ownerUserId, reference, files) {
-      const validated = validateMaterialFiles(files);
-      const bytes = Buffer.from(JSON.stringify({ files: validated }), "utf8");
-      await writeResource(resourceLocation(ownerUserId, reference.bundleId, "materials",
-        reference.materialId, "json"), bytes, MAX_MATERIAL_MANIFEST_BYTES);
+      await writeResource(materialsLocation(ownerUserId, reference), { files: validateMaterialFiles(files) });
     },
     async uploadInitialSession(ownerUserId, reference, context) {
-      const validated = validateSessionContent(context);
-      const bytes = Buffer.from(JSON.stringify(validated), "utf8");
-      await writeResource(resourceLocation(ownerUserId, reference.bundleId, "sessions",
-        reference.sessionId, "json"), bytes, MAX_SESSION_FILE_BYTES);
+      await writeResource(sessionLocation(ownerUserId, reference), validateSessionContent(context));
     },
     async removeInitialMaterials(ownerUserId, reference) {
-      const location = resourceLocation(ownerUserId, reference.bundleId, "materials", reference.materialId, "json");
-      try { await unlink(location.path); }
-      catch (error) { if (!isMissing(error)) throw error; }
+      await removeResource(materialsLocation(ownerUserId, reference));
     },
     async removeInitialSession(ownerUserId, reference) {
-      const location = resourceLocation(ownerUserId, reference.bundleId, "sessions", reference.sessionId, "json");
-      try { await unlink(location.path); }
-      catch (error) { if (!isMissing(error)) throw error; }
+      await removeResource(sessionLocation(ownerUserId, reference));
     },
-    async resolveInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef) {
-      const bytes = await readResource(resourceLocation(ownerUserId, reference.bundleId, "materials",
-        reference.materialId, "json"), MAX_MATERIAL_MANIFEST_BYTES);
-      if (!bytes) throw new SpHarnessError("Initial material is missing from its Bundle", false);
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-      } catch {
-        throw new SpHarnessError("Initial material manifest is invalid JSON", false);
+    async resolveInitialMaterials(ownerUserId, reference) {
+      const manifest = await readResource(materialsLocation(ownerUserId, reference));
+      if (manifest === undefined) throw new BundleFileError("not-found", "Initial material is missing from its Bundle");
+      if (!isRecord(manifest) || Object.keys(manifest).length !== 1 || !("files" in manifest)) {
+        throw new BundleFileError("invalid", "Initial material manifest must contain only files");
       }
-      if (!isRecord(parsed) || Object.keys(parsed).length !== 1) {
-        throw new SpHarnessError("Initial material manifest must contain files", false);
-      }
-      return validateMaterialFiles(parsed.files);
+      return validateMaterialFiles(manifest.files);
     },
-    async resolveInitialSession(ownerUserId: string, reference: InitialSessionRef) {
-      const bytes = await readResource(resourceLocation(ownerUserId, reference.bundleId, "sessions",
-        reference.sessionId, "json"), MAX_SESSION_FILE_BYTES);
-      if (!bytes) return undefined;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-      } catch {
-        throw new SpHarnessError("Initial Session content is invalid", false);
-      }
-      return validateSessionContent(parsed);
+    async resolveInitialSession(ownerUserId, reference) {
+      const context = await readResource(sessionLocation(ownerUserId, reference));
+      return context === undefined ? undefined : validateSessionContent(context);
     },
   };
 }
@@ -156,71 +146,51 @@ async function ensureDirectory(path: string): Promise<void> {
     if (!isExisting(error)) throw error;
   }
   if (!(await lstat(path)).isDirectory()) {
-    throw new SpHarnessError("Initial Bundle directory must not be a symbolic link", false);
+    throw new BundleFileError("invalid", "Initial Bundle directory must not be a symbolic link");
   }
 }
 
 function validateMaterialFiles(value: unknown): readonly MaterialFile[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 500) {
-    throw new SpHarnessError("Initial materials must contain between 1 and 500 files", false);
+  let files: readonly MaterialFile[];
+  try {
+    files = materialFilesSchema.parse(value);
+    for (const file of files) evalMaterialPath("", file.path);
+  } catch (cause) {
+    throw new BundleFileError("invalid", "Initial material files are invalid", { cause });
+  }
+  if (new Set(files.map((file) => file.path)).size !== files.length) {
+    throw new BundleFileError("invalid", "Initial material file paths must be unique");
   }
   let total = 0;
-  const paths = new Set<string>();
-  for (const file of value) {
-    if (!isRecord(file) ||
-      Object.keys(file).some((key) => key !== "path" && key !== "mediaType" && key !== "contentBase64") ||
-      !validMaterialPath(file.path) || typeof file.mediaType !== "string" || !file.mediaType.trim() ||
-      !canonicalBase64(file.contentBase64) || paths.has(file.path)) {
-      throw new SpHarnessError("Initial material file is invalid or duplicated", false);
-    }
-    paths.add(file.path);
-    const size = Buffer.from(file.contentBase64, "base64").byteLength;
+  for (const file of files) {
+    const size = Buffer.byteLength(file.contentBase64, "base64");
     total += size;
-    if (size > MAX_SINGLE_MATERIAL_BYTES || total > MAX_MATERIAL_BYTES) {
-      throw new SpHarnessError("Initial materials are too large", false);
+    if (size > MATERIAL_FILE_BYTES || total > MATERIAL_TOTAL_BYTES) {
+      throw new BundleFileError("too-large", "Initial materials are too large");
     }
   }
-  return value as readonly MaterialFile[];
+  return files;
 }
 
+/** SP imports the Session; its canonical-context reader is the single validity rule. */
 function validateSessionContent(value: unknown): SessionContent {
-  if (!isRecord(value) || Object.keys(value).some((key) => key !== "format" && key !== "content") ||
-    (value.format !== "json" && value.format !== "jsonl") ||
-    typeof value.content !== "string" || !value.content.trim() ||
-    value.content.length > MAX_SESSION_CONTENT_LENGTH) {
-    throw new SpHarnessError("Initial Session content is invalid or too large", false);
-  }
-  let snapshot: unknown;
   try {
-    snapshot = value.format === "json"
-      ? parseStrictJson(value.content)
-      : { entries: value.content.split(/\r?\n/u).filter((line) => line.trim()).map(parseStrictJson) };
-  } catch {
-    throw new SpHarnessError("Initial Session content is not valid JSON or JSONL", false);
+    const context = evalInitialContextSchema.parse(value);
+    readEvalCanonicalContext(context);
+    return context;
+  } catch (cause) {
+    throw new BundleFileError("invalid", "Initial Session content cannot be imported by SP", { cause });
   }
-  if (!isRecord(snapshot) || !Array.isArray(snapshot.entries) || snapshot.entries.length > 10_000) {
-    throw new SpHarnessError("Initial Session must contain canonical entries", false);
-  }
-  const seen = new Set<string>();
-  for (const [index, entry] of snapshot.entries.entries()) {
-    if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id || seen.has(entry.id) ||
-      typeof entry.createdAt !== "number" || !Number.isSafeInteger(entry.createdAt) || entry.createdAt < 0 ||
-      !isRecord(entry.message) || typeof entry.message.role !== "string" ||
-      !["user", "assistant", "toolResult"].includes(entry.message.role) ||
-      (index === 0 && entry.message.role !== "user")) {
-      throw new SpHarnessError("Initial Session contains invalid canonical entries", false);
-    }
-    seen.add(entry.id);
-  }
-  return { format: value.format, content: value.content };
 }
 
-function encodeId(id: string): string {
-  try {
-    return encodeURIComponent(id).replaceAll(".", "%2E");
-  } catch {
-    throw new SpHarnessError("Initial Bundle resource ID is invalid", false);
-  }
+function platformId(value: string, name: string): string {
+  const parsed = platformIdSchema.safeParse(value);
+  if (!parsed.success) throw new BundleFileError("invalid", `Invalid ${name} identity`, { cause: parsed.error });
+  return parsed.data;
+}
+
+function unavailable(cause: unknown): BundleFileError {
+  return new BundleFileError("unavailable", "Initial Bundle resource is unavailable", { cause });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -231,20 +201,10 @@ function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
-function insideRoot(root: string, path: string): boolean {
-  return path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
-}
-
 function isExisting(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "EEXIST";
 }
 
-function canonicalBase64(value: unknown): value is string {
-  return typeof value === "string" && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value);
-}
-
-function validMaterialPath(path: unknown): path is string {
-  return typeof path === "string" && path.startsWith("/") && path.length > 1 &&
-    path.split("/").slice(1).every((segment) => segment && segment !== "." &&
-      segment !== ".." && segment !== ".git" && !segment.includes("\\") && !segment.includes("\0"));
+function insideRoot(root: string, path: string): boolean {
+  return path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
 }

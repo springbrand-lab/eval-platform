@@ -1,3 +1,8 @@
+import { ApiError } from "@springbrand/http/client";
+import { z } from "zod";
+import { httpOriginSchema } from "../config/env.js";
+import { createSpHttpClient, type Fetch } from "./http.js";
+
 export interface EvalSpUser {
   readonly id: string;
   readonly role: "user" | "admin" | "super_admin";
@@ -10,19 +15,22 @@ export interface EvalSpAgentConfig {
   readonly [field: string]: unknown;
 }
 
+/** Eval SP answered with an HTTP failure; `payload` is its error response body. */
 export class EvalSpApiError extends Error {
   constructor(
     readonly status: number,
     readonly payload: unknown,
+    options?: ErrorOptions,
   ) {
-    super(`Eval SP API returned ${status}`);
+    super(`Eval SP API returned ${status}`, options);
     this.name = "EvalSpApiError";
   }
 }
 
+/** Eval SP could not be reached or did not return a usable response. */
 export class EvalSpTransportError extends Error {
   constructor(cause: unknown) {
-    super("Eval SP request could not be sent", { cause });
+    super("Eval SP request failed", { cause });
     this.name = "EvalSpTransportError";
   }
 }
@@ -36,41 +44,20 @@ export interface EvalSpClient {
   deleteAgentConfig(token: string, id: string): Promise<unknown>;
 }
 
-type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+const sessionSchema = z.object({
+  user: z.object({ id: z.string().min(1), role: z.enum(["user", "admin", "super_admin"]) }),
+});
+const agentConfigSchema = z.looseObject({ id: z.string().min(1), user_id: z.string().min(1), name: z.string() });
 
-function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+function read<T>(schema: z.ZodType<T>, value: unknown): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw new EvalSpTransportError(parsed.error);
+  return parsed.data;
 }
 
-function user(value: unknown): EvalSpUser {
-  if (!record(value) || typeof value.id !== "string" || value.id.length === 0
-    || (value.role !== "user" && value.role !== "admin" && value.role !== "super_admin")) {
-    throw new Error("Eval SP returned an invalid user identity");
-  }
-  return { id: value.id, role: value.role };
-}
-
-function agentConfig(value: unknown): EvalSpAgentConfig {
-  if (!record(value) || typeof value.id !== "string" || value.id.length === 0
-    || typeof value.user_id !== "string" || value.user_id.length === 0
-    || typeof value.name !== "string") {
-    throw new Error("Eval SP returned an invalid Agent Config");
-  }
-  return value as EvalSpAgentConfig;
-}
-
-function pathId(value: string): string {
-  if (typeof value !== "string" || value.length === 0) throw new TypeError("Agent Config ID is required");
-  return encodeURIComponent(value);
-}
-
-function httpOrigin(value: string, field: string): URL {
-  const origin = new URL(value);
-  if ((origin.protocol !== "https:" && origin.protocol !== "http:")
-    || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== "/") {
-    throw new TypeError(`${field} must be an HTTP origin without a path, query or credentials`);
-  }
-  return origin;
+function configPath(id: string): string {
+  if (typeof id !== "string" || id.length === 0) throw new TypeError("Agent Config ID is required");
+  return `/api/user-agent-configs/${encodeURIComponent(id)}`;
 }
 
 export function createEvalSpClient(input: {
@@ -78,64 +65,54 @@ export function createEvalSpClient(input: {
   readonly writeOrigin: string;
   readonly fetch?: Fetch;
 }): EvalSpClient {
-  const origin = httpOrigin(input.origin, "Eval SP origin");
-  const writeOrigin = httpOrigin(input.writeOrigin, "Eval SP write Origin");
-  const fetcher = input.fetch ?? globalThis.fetch;
+  const http = createSpHttpClient({ origin: input.origin, responseMode: "envelope", fetch: input.fetch });
+  const writeOrigin = httpOriginSchema.parse(input.writeOrigin);
 
-  async function request(token: string, path: string, method = "GET", body?: unknown): Promise<unknown> {
+  async function request(token: string, path: string, method: "GET" | "POST" | "PATCH" | "DELETE" = "GET",
+    body?: unknown): Promise<unknown> {
     if (typeof token !== "string" || token.length === 0) throw new TypeError("Session token is required");
-    let response: Response;
     try {
-      response = await fetcher(new URL(path, origin), {
+      const result = await http.request<unknown>(path, {
         method,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          ...(method === "GET" ? {} : { Origin: writeOrigin.origin }),
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        redirect: "error",
-        credentials: "omit",
+        headers: { Authorization: `Bearer ${token}`, ...(method === "GET" ? {} : { Origin: writeOrigin }) },
+        ...(body === undefined ? {} : { body }),
       });
-    } catch (cause) {
-      throw new EvalSpTransportError(cause);
+      return result.data;
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.kind === "input" || error.kind === "runtime") throw error;
+      if (error.kind !== "http") throw new EvalSpTransportError(error);
+      throw new EvalSpApiError(error.status, {
+        code: error.code,
+        errMsg: error.message,
+        ...(error.requestId === undefined ? {} : { requestId: error.requestId }),
+        ...(error.errors === undefined ? {} : { errors: error.errors }),
+      }, { cause: error });
     }
-    const payload: unknown = await response.json().catch(() => null);
-    if (!response.ok) throw new EvalSpApiError(response.status, payload);
-    if (!record(payload) || payload.success !== true || !("msg" in payload)) {
-      throw new Error("Eval SP returned an invalid response envelope");
-    }
-    return payload.msg;
   }
 
   return {
     async verifySession(token) {
-      let identity: unknown;
       try {
-        identity = await request(token, "/api/auth/me");
+        return read(sessionSchema, await request(token, "/api/auth/me")).user;
       } catch (error) {
         if (error instanceof EvalSpApiError && error.status === 401) return null;
         throw error;
       }
-      if (!record(identity)) throw new Error("Eval SP returned an invalid session");
-      return user(identity.user);
     },
     async listAgentConfigs(token) {
-      const configs = await request(token, "/api/user-agent-configs");
-      if (!Array.isArray(configs)) throw new Error("Eval SP returned an invalid Agent Config list");
-      return configs.map(agentConfig);
+      return read(z.array(agentConfigSchema), await request(token, "/api/user-agent-configs"));
     },
     async getAgentConfig(token, id) {
-      return agentConfig(await request(token, `/api/user-agent-configs/${pathId(id)}`));
+      return read(agentConfigSchema, await request(token, configPath(id)));
     },
-    async createAgentConfig(token, input) {
-      return agentConfig(await request(token, "/api/user-agent-configs", "POST", input));
+    async createAgentConfig(token, body) {
+      return read(agentConfigSchema, await request(token, "/api/user-agent-configs", "POST", body));
     },
-    async updateAgentConfig(token, id, input) {
-      return agentConfig(await request(token, `/api/user-agent-configs/${pathId(id)}`, "PATCH", input));
+    async updateAgentConfig(token, id, body) {
+      return read(agentConfigSchema, await request(token, configPath(id), "PATCH", body));
     },
     deleteAgentConfig(token, id) {
-      return request(token, `/api/user-agent-configs/${pathId(id)}`, "DELETE");
+      return request(token, configPath(id), "DELETE");
     },
   };
 }

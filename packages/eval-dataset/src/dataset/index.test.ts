@@ -1,14 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
 import { describe, expect, it, vi } from "vitest";
-import type { Data, DataInput, Dataset, DatasetSnapshot, DatasetStore } from "./index.js";
-import {
-  createDatasetService,
-  DataInUseError,
-  DatasetEntityNotFoundError,
-  DatasetIdentityConflictError,
-  parseDatasetDocument,
-  serializeDatasetDocument,
-} from "./index.js";
+import { createDatasetService } from "./index.js";
+import type { Data, DataInput, Dataset, DatasetSnapshot } from "./model.js";
+import { parseDatasetDocument, serializeDatasetDocument } from "./serialization.js";
+import type { DatasetStore } from "./store.js";
+import { DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError, DatasetInputError } from "./store.js";
 
 function persisted<Value>(value: Value): Value {
   return JSON.parse(JSON.stringify(value)) as Value;
@@ -125,8 +121,8 @@ class TestDatasetStore implements DatasetStore {
   }
 }
 
-const initialSession = { bundleId: "Session-Bundle/1", sessionId: "external-session" };
-const initialMaterials = { bundleId: "Materials-Bundle/2", materialId: "external-files" };
+const initialSession = { bundleId: "1c82ed86-888c-4720-8424-6f38825f6e0c", sessionId: "a8ffecab-9deb-42a4-8c67-990bdb3fd40c" };
+const initialMaterials = { bundleId: "69258daa-9897-4756-8ba4-66066a95a19b", materialId: "af593744-2f6b-4d37-84ee-83c29c8ca4fb" };
 
 describe("Dataset service", () => {
   it("generates only Dataset/Data entity IDs and preserves both external resource identities", async () => {
@@ -145,7 +141,7 @@ describe("Dataset service", () => {
     }
   });
 
-  it("canonicalizes UUID resource references and preserves other external IDs", async () => {
+  it("canonicalizes UUID resource references and rejects any other resource identity", async () => {
     const service = createDatasetService(new TestDatasetStore());
     const bundleId = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
     const materialId = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB";
@@ -162,8 +158,8 @@ describe("Dataset service", () => {
       evalInitialMaterials: { bundleId: bundleId.toLowerCase(), materialId: materialId.toLowerCase() },
       initialSession: { bundleId: bundleId.toLowerCase(), sessionId: sessionId.toLowerCase() },
     });
-    const opaque = await service.createData({ userPrompt: "task", initialSession });
-    expect(opaque.initialSession).toEqual(initialSession);
+    await expect(service.createData({ userPrompt: "task", initialSession: { bundleId: "Session-Bundle/1", sessionId } }))
+      .rejects.toBeInstanceOf(DatasetInputError);
   });
 
   it("fully replaces editable fields without changing entity identity", async () => {
@@ -207,8 +203,8 @@ describe("Dataset service", () => {
     const createData = vi.spyOn(store, "createData");
     const updateData = vi.spyOn(store, "updateData");
     const invalid = { userPrompt: "task", expectedOutput: { ids: [Number.MAX_SAFE_INTEGER + 1] } };
-    await expect(service.createData(invalid)).rejects.toThrow();
-    await expect(service.updateData(existing.dataId, invalid)).rejects.toThrow();
+    await expect(service.createData(invalid)).rejects.toBeInstanceOf(DatasetInputError);
+    await expect(service.updateData(existing.dataId, invalid)).rejects.toBeInstanceOf(DatasetInputError);
     expect(createData).not.toHaveBeenCalled();
     expect(updateData).not.toHaveBeenCalled();
     expect(store.data.size).toBe(1);
@@ -294,10 +290,10 @@ describe("Dataset service", () => {
     const store = new TestDatasetStore();
     const service = createDatasetService(store);
     const createData = vi.spyOn(store, "createData");
-    await expect(service.createData({ userPrompt: "task", initialSession: { sessionId: "external-session" } } as DataInput))
-      .rejects.toThrow();
-    await expect(service.createData({ userPrompt: "task", initialMaterials: { bundleId: "external-bundle" } } as DataInput))
-      .rejects.toThrow();
+    await expect(service.createData({ userPrompt: "task", initialSession: { sessionId: "a8ffecab-9deb-42a4-8c67-990bdb3fd40c" } } as DataInput))
+      .rejects.toBeInstanceOf(DatasetInputError);
+    await expect(service.createData({ userPrompt: "task", initialMaterials: { bundleId: "debddf36-3eeb-41c6-819b-b1f75e365dc2" } } as DataInput))
+      .rejects.toBeInstanceOf(DatasetInputError);
     expect(createData).not.toHaveBeenCalled();
     expect(store.data.size).toBe(0);
   });
@@ -323,7 +319,28 @@ describe("Dataset service", () => {
     vi.spyOn(store, "listDatasets").mockRejectedValue(unavailable);
     await expect(service.listDatasets()).rejects.toBe(unavailable);
     vi.spyOn(store, "getData").mockResolvedValue({ dataId: crypto.randomUUID(), userPrompt: "task", json: Infinity });
-    await expect(service.getData(crypto.randomUUID())).rejects.toThrow();
+    const invalidStored = service.getData(crypto.randomUUID());
+    await expect(invalidStored).rejects.toThrow();
+    await expect(invalidStored).rejects.not.toBeInstanceOf(DatasetInputError);
+  });
+});
+
+describe("Dataset input boundary", () => {
+  it("reports malformed caller input as DatasetInputError and keeps the parser failure as its cause", async () => {
+    const service = createDatasetService(new TestDatasetStore());
+    for (const attempt of [
+      service.getDataset("not-a-uuid"),
+      service.attachData(crypto.randomUUID(), ["not-a-uuid"]),
+      service.createDataset({ name: " " }),
+      service.importDataset("{", "json"),
+      service.importDataset("dataset: [", "yaml"),
+      service.importDataset("{}", "toml" as "json"),
+      service.importPromptDataset({ name: "Prompts", description: "Rows", format: "jsonl", content: "[]" }),
+    ]) {
+      const error = await attempt.then(() => undefined, (reason: unknown) => reason);
+      expect(error).toBeInstanceOf(DatasetInputError);
+      expect((error as Error).cause).toBeDefined();
+    }
   });
 });
 
@@ -344,7 +361,7 @@ describe("Dataset import and export", () => {
     expect(importStore).toHaveBeenCalledExactlyOnceWith(result, { kind: "prompt" });
     await expect(service.importPromptDataset({ name: "Prompts", description: "Required metadata",
       format: "jsonl", content: '{"name":"First","description":"Task one","userPrompt":"build"}\n',
-    })).rejects.toThrow();
+    })).rejects.toBeInstanceOf(DatasetInputError);
     expect(importStore).toHaveBeenCalledTimes(1);
   });
   it.each([
@@ -359,7 +376,7 @@ describe("Dataset import and export", () => {
     const importDataset = vi.spyOn(store, "importDataset");
     const generateId = vi.spyOn(crypto, "randomUUID");
     try {
-      await expect(service.importDataset(source, format)).rejects.toThrow();
+      await expect(service.importDataset(source, format)).rejects.toBeInstanceOf(DatasetInputError);
       expect(importDataset).not.toHaveBeenCalled();
       expect(generateId).not.toHaveBeenCalled();
       expect(store.datasets.size).toBe(0);
@@ -438,7 +455,7 @@ describe("Dataset import and export", () => {
     const existing = await service.createData({ userPrompt: "original", initialSession, initialMaterials });
     const document = {
       dataset: { name: "tasks" },
-      data: [{ userPrompt: "new" }, { ...existing, initialSession: { ...initialSession, sessionId: "different" } }],
+      data: [{ userPrompt: "new" }, { ...existing, initialSession: { ...initialSession, sessionId: "517d5a72-4086-4ec2-87fa-07542a7bf747" } }],
     };
     await expect(service.importDataset(JSON.stringify(document), "json"))
       .rejects.toBeInstanceOf(DatasetIdentityConflictError);
@@ -470,8 +487,8 @@ describe("Dataset import and export", () => {
     try {
       await expect(service.importDataset(JSON.stringify({
         dataset: { name: "tasks" },
-        data: [{ userPrompt: "task", initialMaterials: { bundleId: "external-bundle" } }],
-      }), "json")).rejects.toThrow();
+        data: [{ userPrompt: "task", initialMaterials: { bundleId: "debddf36-3eeb-41c6-819b-b1f75e365dc2" } }],
+      }), "json")).rejects.toBeInstanceOf(DatasetInputError);
       expect(importDataset).not.toHaveBeenCalled();
       expect(generateId).not.toHaveBeenCalled();
     } finally {
