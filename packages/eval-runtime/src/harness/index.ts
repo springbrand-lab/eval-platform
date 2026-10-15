@@ -15,6 +15,7 @@ export type {
   SubjectWorkspaceRef,
   WaitForSubmissionInput,
 } from "./model.js";
+export { AGENT_FAILURE_KINDS } from "./model.js";
 
 export class AgentIdentityConflictError extends Error {
   readonly retryable = false;

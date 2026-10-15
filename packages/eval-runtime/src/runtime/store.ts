@@ -1,10 +1,9 @@
 import type { EvaluationRecord, RunPhases, Sampling } from "@eval-platform/eval-contracts";
+import { equalJson } from "@springbrand/utils";
 import type { RunConfigSnapshot } from "../config/index.js";
 import { describeAgentError } from "./agent-lifecycle.js";
 import type { RetryController } from "./retry.js";
-import { RuntimeRecordConflictError, RuntimeRecordPersistenceError, type RuntimePersistenceOutcome } from "./record-errors.js";
-export { RuntimeRecordConflictError, RuntimeRecordPersistenceError } from "./record-errors.js";
-export { RuntimeRunStoppedError } from "./stop-errors.js";
+import { RuntimeRecordConflictError, RuntimeRecordPersistenceError, type RuntimePersistenceOutcome } from "./errors.js";
 
 export interface RuntimeRunRequestIdentity {
   /** Stable caller intent within one Project, reused on retries. */
@@ -33,24 +32,6 @@ export interface RuntimeRunAdmission {
   readonly run: RuntimeRunRecord;
   /** False means the Store found and returned the already-created Run. */
   readonly created: boolean;
-}
-
-export class RuntimeRunIdentityConflictError extends Error {
-  readonly retryable = false;
-
-  constructor(message: string) {
-    super(message);
-    this.name = "RuntimeRunIdentityConflictError";
-  }
-}
-
-export class RuntimeProjectBusyError extends Error {
-  readonly retryable = false;
-
-  constructor(readonly projectId: string, readonly activeRunId: string) {
-    super(`Project ${projectId} already has unfinished Run ${activeRunId}`);
-    this.name = "RuntimeProjectBusyError";
-  }
 }
 
 export type SamplingState = Sampling;
@@ -113,13 +94,13 @@ export async function persistRuntimeRecord<TRecord extends SamplingState | Evalu
       } catch {
         readFailed = true;
       }
-      if (sameRuntimeRecordFacts(stored, record)) return;
+      if (equalJson(stored, record)) return;
 
       const outcome: RuntimePersistenceOutcome = error instanceof RuntimeRecordConflictError
         ? "conflict"
         : readFailed || stored === null
           ? "unknown"
-          : !sameRuntimeRecordFacts(stored, expected)
+          : !equalJson(stored, expected)
             ? "conflict"
             : "not-committed";
       const details = describeAgentError(error);
@@ -158,24 +139,4 @@ export async function persistRuntimeRecord<TRecord extends SamplingState | Evalu
       }
     }
   }
-}
-
-export function sameRuntimeRecordFacts(left: unknown, right: unknown): boolean {
-  if (left === right) return true;
-  if (Array.isArray(left) || Array.isArray(right)) {
-    return Array.isArray(left)
-      && Array.isArray(right)
-      && left.length === right.length
-      && left.every((value, index) => sameRuntimeRecordFacts(value, right[index]));
-  }
-  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
-
-  const leftRecord = left as Record<string, unknown>;
-  const rightRecord = right as Record<string, unknown>;
-  const leftKeys = Object.keys(leftRecord).filter((key) => leftRecord[key] !== undefined);
-  const rightKeys = Object.keys(rightRecord).filter((key) => rightRecord[key] !== undefined);
-  return leftKeys.length === rightKeys.length
-    && leftKeys.every((key) => (
-      Object.hasOwn(rightRecord, key) && sameRuntimeRecordFacts(leftRecord[key], rightRecord[key])
-    ));
 }

@@ -45,3 +45,73 @@ export class RuntimeAdmissionConflictError extends Error {
     this.name = "RuntimeAdmissionConflictError";
   }
 }
+
+/** A matching idempotency key is bound to different Run facts. */
+export class RuntimeRunIdentityConflictError extends Error {
+  readonly retryable = false;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "RuntimeRunIdentityConflictError";
+  }
+}
+
+/** A new Run key was rejected because its Project still has an unfinished Run. */
+export class RuntimeProjectBusyError extends Error {
+  readonly retryable = false;
+
+  constructor(readonly projectId: string, readonly activeRunId: string) {
+    super(`Project ${projectId} already has unfinished Run ${activeRunId}`);
+    this.name = "RuntimeProjectBusyError";
+  }
+}
+
+/** A committed Run stop prevented a new SP stage mutation. */
+export class RuntimeRunStoppedError extends Error {
+  readonly retryable = false;
+
+  constructor(readonly runId: string) {
+    super(`Run ${runId} has been stopped`);
+    this.name = "RuntimeRunStoppedError";
+  }
+}
+
+/** A conditional Store write found different persisted facts. */
+export class RuntimeRecordConflictError extends Error {
+  readonly retryable = false;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "RuntimeRecordConflictError";
+  }
+}
+
+export type RuntimePersistenceOutcome = "unknown" | "not-committed" | "conflict";
+
+/** The requested facts were not confirmed after the persistence retry budget. */
+export class RuntimeRecordPersistenceError extends Error {
+  readonly retryable = false;
+  #attemptedRecord: unknown;
+  #expectedRecord: unknown;
+
+  constructor(
+    message: string,
+    readonly outcome: RuntimePersistenceOutcome,
+    readonly cause: unknown,
+    attemptedRecord: unknown,
+    expectedRecord: unknown,
+  ) {
+    super(message);
+    this.name = "RuntimeRecordPersistenceError";
+    this.#attemptedRecord = attemptedRecord;
+    this.#expectedRecord = expectedRecord;
+  }
+
+  get attemptedRecord(): unknown {
+    return this.#attemptedRecord;
+  }
+
+  get expectedRecord(): unknown {
+    return this.#expectedRecord;
+  }
+}

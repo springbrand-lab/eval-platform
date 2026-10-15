@@ -8,25 +8,19 @@ import type {
   SamplingStatus,
 } from "@eval-platform/eval-contracts";
 import { dataInputSchema } from "@eval-platform/eval-dataset";
+import { equalJson } from "@springbrand/utils";
 
 import type { RuntimeEvaluationContext, Sample } from "./model.js";
-import type { RuntimeStore } from "./store.js";
-import { RuntimeRecordPersistenceError, persistRuntimeRecord, sameRuntimeRecordFacts } from "./store.js";
-import { RuntimeRunStoppedError } from "./stop-errors.js";
-import type { RetryController } from "./retry.js";
+import { persistRuntimeRecord } from "./store.js";
+import { RuntimeAdmissionConflictError, RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 import {
   AgentOperationError,
   applyAttemptPatch,
   describeAgentError,
   requireSpHarness,
   runAgentLifecycle,
-  type AgentLifecycleDependencies,
+  type StageDependencies,
 } from "./agent-lifecycle.js";
-
-export interface EvaluationStageDependencies extends AgentLifecycleDependencies {
-  readonly store: RuntimeStore;
-  readonly createRetryController: (policy?: RetryPolicy) => RetryController;
-}
 
 export interface EvaluateSamplingInput {
   readonly context: RuntimeEvaluationContext;
@@ -36,16 +30,15 @@ export interface EvaluateSamplingInput {
 }
 
 export function requireEvaluationPrompt(sample: Sample): string {
-  const prompt = sample.data && typeof sample.data === "object" && !Array.isArray(sample.data)
-    ? sample.data.evalPrompt : undefined;
-  if (typeof prompt !== "string" || prompt.trim().length === 0) {
-    throw new TypeError(`Sample ${sample.sampleId} requires a nonblank evalPrompt`);
+  const prompt = sample.data.evalPrompt;
+  if (prompt === undefined) {
+    throw new RuntimeAdmissionConflictError("evaluation-prompt", `Sample ${sample.sampleId} has no evalPrompt`);
   }
   return prompt;
 }
 
 export async function evaluateSampling(
-  dependencies: EvaluationStageDependencies,
+  dependencies: StageDependencies,
   input: EvaluateSamplingInput,
 ): Promise<RuntimeEvaluationContext> {
   const evaluatorHarness = requireSpHarness(input.harnessConfig, "evaluator");
@@ -87,9 +80,6 @@ export async function evaluateSampling(
   };
 
   try {
-    if (!sample.data || typeof sample.data !== "object" || Array.isArray(sample.data)) {
-      throw new AgentOperationError("Sample data must be an object", false, "network");
-    }
     const evalPrompt = requireEvaluationPrompt(sample);
     const {
       dataId: _dataId, initialSession: _initialSession,
@@ -202,7 +192,7 @@ export async function evaluateSampling(
     if (error instanceof RuntimeRecordPersistenceError) {
       const expected = error.expectedRecord as EvaluationRecord;
       const attempted = error.attemptedRecord as EvaluationRecord;
-      if (sameRuntimeRecordFacts(stored, expected)) {
+      if (equalJson(stored, expected)) {
         const observedAttempt = attempted.attempts.at(-1);
         const savedAttempt = stored.attempts.find((item) => (
           item.evaluationAttemptId === observedAttempt?.evaluationAttemptId
@@ -211,7 +201,7 @@ export async function evaluateSampling(
           (observedAttempt?.completedAt !== undefined && savedAttempt?.completedAt === undefined)
           || (attempted.output !== undefined && stored.output === undefined)
         ) failureBase = attempted;
-      } else if (!sameRuntimeRecordFacts(stored, attempted)) throw error;
+      } else if (!equalJson(stored, attempted)) throw error;
     }
     currentEvaluation = stored;
     if (currentEvaluation.status.status === "succeeded") return { ...input.context, evaluation: currentEvaluation };

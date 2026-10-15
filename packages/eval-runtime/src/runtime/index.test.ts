@@ -22,7 +22,15 @@ import type {
   SamplingState,
   RuntimeStore,
 } from "./store.js";
-import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError, RuntimeRunStoppedError, sameRuntimeRecordFacts } from "./store.js";
+import { equalJson } from "@springbrand/utils";
+import {
+  RuntimeAdmissionConflictError,
+  RuntimeEntityNotFoundError,
+  RuntimeInputError,
+  RuntimeRecordConflictError,
+  RuntimeRunIdentityConflictError,
+  RuntimeRunStoppedError,
+} from "./errors.js";
 import type { RetryController, RetryOperation } from "./retry.js";
 import {
   createEvalRuntime as createRuntimeWithRelease,
@@ -254,8 +262,9 @@ function makeCatalog(samples: readonly Sample[] = [makeSample("sample-1")]): Run
     listProjects: async () => [],
     getProject: async (projectId) => ({
       projectId, ownerUserId: "owner", name: "test", sourceBranch: "release-2.0.0",
-      evaluationOutputSchema: { type: "object", properties: { score: { type: "number" } } },
+      evaluationOutputSchemaId: "output-schema-1",
     }),
+    getEvaluationOutputSchema: async () => ({ type: "object", properties: { score: { type: "number" } } }),
     listAgents: async () => [],
     listDatasets: async () => [],
     listData: async () => [{ dataId: "data-1", userPrompt: "Execute data", json: { task: "data" } }],
@@ -327,7 +336,7 @@ function makeStore(options: StoreOptions = {}): RuntimeStore {
       return { run, created: true } satisfies RuntimeRunAdmission;
     },
     async updateEvaluation(record, expected) {
-      if (!sameRuntimeRecordFacts(evaluations.get(record.evaluationId), expected)) {
+      if (!equalJson(evaluations.get(record.evaluationId), expected)) {
         throw new RuntimeRecordConflictError("Evaluation changed before update");
       }
       evaluations.set(record.evaluationId, record);
@@ -342,7 +351,7 @@ function makeStore(options: StoreOptions = {}): RuntimeStore {
       return [...evaluations.values()].filter((evaluation) => evaluation.samplingId === samplingId);
     },
     async updateSampling(state, expected) {
-      if (!sameRuntimeRecordFacts(samplings.get(state.samplingId), expected)) {
+      if (!equalJson(samplings.get(state.samplingId), expected)) {
         throw new RuntimeRecordConflictError("Sampling changed before update");
       }
       samplings.set(state.samplingId, state);
@@ -418,7 +427,7 @@ function makeHarness(): Harness {
       const submissionId = submissionIdFor(handle, idempotencyKey);
       return submissionId ? makeSubmission("completed", submissionId) : null;
     }),
-    stopAgent: vi.fn(async () => false),
+    stopAgent: vi.fn(async () => undefined),
     collectExecution: vi.fn(async ({ handle }) => ({
       samplingId: handle.samplingId,
       status: "succeeded" as const,
@@ -618,17 +627,6 @@ describe("eval runtime orchestration", () => {
         expect(state).not.toHaveProperty("sample");
       },
     );
-  });
-
-  it("rejects the former flattened Sample shape rather than silently stripping business identity", async () => {
-    const sample = { sampleId: "sample-1", ...makeSample("sample-1").data } as unknown as Sample;
-    const harness = makeHarness();
-    const runtime = createEvalRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
-    const run = await runtime.start(startRequest("flattened-sample"));
-    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
-    expect(harness.ensureAgent).not.toHaveBeenCalled();
-    expect(harness.materializeInitialData).not.toHaveBeenCalled();
-    expect(harness.submitAgent).not.toHaveBeenCalled();
   });
 
   it("rejects unsafe integer business fields before creating an execution Agent", async () => {
@@ -982,15 +980,98 @@ describe("eval runtime orchestration", () => {
     const runtime = createEvalRuntime({ catalog: makeCatalog([sample]), harness, store });
 
     const pipeline = pipelineRequest("missing-evaluation-prompt");
-    await expect(runtime.pipeline(pipeline)).rejects.toThrow("requires a nonblank evalPrompt");
+    await expect(runtime.pipeline(pipeline)).rejects.toThrow(RuntimeAdmissionConflictError);
+    await expect(runtime.pipeline(pipeline)).rejects.toMatchObject({ reason: "evaluation-prompt" });
     expect(await store.findRunByIdempotencyKey(pipeline.projectId, pipeline.idempotencyKey)).toBeNull();
 
     const execution = await runtime.start(startRequest("execution-without-evaluation-prompt"));
     await expect(waitForTerminal(runtime, execution.runId)).resolves.toMatchObject({ status: "succeeded" });
     const evaluation = evaluateRequest(execution.samplingIds);
-    await expect(runtime.evaluate(evaluation)).rejects.toThrow("requires a nonblank evalPrompt");
+    await expect(runtime.evaluate(evaluation)).rejects.toThrow(RuntimeAdmissionConflictError);
+    await expect(runtime.evaluate(evaluation)).rejects.toMatchObject({ reason: "evaluation-prompt" });
     expect(await store.findRunByIdempotencyKey(evaluation.projectId, evaluation.idempotencyKey)).toBeNull();
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
+  });
+
+  describe("typed caller errors", () => {
+    it.each([
+      [{ ...startRequest("blank-project"), projectId: " " }, "projectId"],
+      [{ ...startRequest("padded"), idempotencyKey: " padded " }, "idempotencyKey"],
+      [{ ...startRequest("missing-config"), executionConfigId: "" }, "executionConfigId"],
+    ])("rejects invalid start request %j as input on %s", async (request, field) => {
+      const runtime = createEvalRuntime({ catalog: makeCatalog(), harness: makeHarness(), store: makeStore() });
+      await expect(runtime.start(request)).rejects.toThrow(RuntimeInputError);
+      await expect(runtime.start(request)).rejects.toMatchObject({ field });
+    });
+
+    it.each([
+      [[], "samplingIds"],
+      [["sampling-1", "sampling-1"], "samplingIds"],
+    ])("rejects evaluation selection %j as input", async (samplingIds, field) => {
+      const runtime = createEvalRuntime({ catalog: makeCatalog(), harness: makeHarness(), store: makeStore() });
+      await expect(runtime.evaluate(evaluateRequest(samplingIds))).rejects.toMatchObject({
+        name: "RuntimeInputError", field,
+      });
+    });
+
+    it("rejects a selected Sample outside the configured Dataset as input", async () => {
+      const configResolver = createConfigResolver({
+        getExecutionConfig: async (configId) => makeExecutionConfig(configId, { sampleIds: ["other-sample"] }),
+        getEvaluationConfig: async () => null,
+        getPipelineConfig: async () => null,
+      });
+      const runtime = createEvalRuntime({
+        catalog: makeCatalog(), harness: makeHarness(), store: makeStore(), configResolver,
+      });
+      await expect(runtime.start(startRequest("outside-dataset"))).rejects.toMatchObject({
+        name: "RuntimeInputError", field: "sampleIds",
+      });
+    });
+
+    it("reports an unknown config as a missing entity", async () => {
+      const runtime = createEvalRuntime({ catalog: makeCatalog(), harness: makeHarness(), store: makeStore() });
+      await expect(runtime.start(startRequest("unknown-config", "missing-config"))).rejects.toThrow(
+        RuntimeEntityNotFoundError,
+      );
+      await expect(runtime.start(startRequest("unknown-config", "missing-config"))).rejects.toMatchObject({
+        entity: "execution-config", id: "missing-config",
+      });
+    });
+
+    it.each(["unknown", "unsuccessful"] as const)(
+      "rejects an %s Sampling selection as unavailable for evaluation",
+      async (selection) => {
+        const harness = makeHarness();
+        vi.mocked(harness.collectExecution).mockResolvedValueOnce({
+          samplingId: "ignored", status: "failed", error: "subject failed",
+          artifacts: [], trajectory: { trajectoryId: "trajectory-1", source: "subject", path: "/trajectory.jsonl" },
+        });
+        const store = makeStore();
+        const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store });
+        const execution = await runtime.start(startRequest("unavailable-selection"));
+        await waitForTerminal(runtime, execution.runId);
+        const samplingIds = selection === "unknown" ? ["missing-sampling"] : execution.samplingIds;
+        const request = evaluateRequest(samplingIds);
+        await expect(runtime.evaluate(request)).rejects.toThrow(RuntimeAdmissionConflictError);
+        await expect(runtime.evaluate(request)).rejects.toMatchObject({ reason: "sampling-unavailable" });
+        expect(await store.findRunByIdempotencyKey(request.projectId, request.idempotencyKey)).toBeNull();
+      },
+    );
+
+    it("reports unknown Run, Sampling and Evaluation reads as missing entities", async () => {
+      const store = makeStore();
+      const runtime = createEvalRuntime({ catalog: makeCatalog(), harness: makeHarness(), store });
+      const resumer = createEvalRunResumer({
+        getEvaluationOutputSchema: makeCatalog().getEvaluationOutputSchema,
+        getSamples: makeCatalog().getSamples, harness: makeHarness(), store,
+      });
+      await expect(runtime.getRun("missing")).rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "run" });
+      await expect(runtime.getSampling("missing")).rejects.toMatchObject({ entity: "sampling", id: "missing" });
+      await expect(runtime.getEvaluation("missing")).rejects.toMatchObject({ entity: "evaluation", id: "missing" });
+      await expect(resumer.resume("missing")).rejects.toThrow(RuntimeEntityNotFoundError);
+      await expect(resumer.interrupt("missing")).rejects.toThrow(RuntimeEntityNotFoundError);
+      await expect(resumer.stop("missing")).rejects.toThrow(RuntimeEntityNotFoundError);
+    });
   });
 
   it("continues the Agent Session after a restart without reapplying its seed", async () => {
@@ -1678,7 +1759,7 @@ describe("eval runtime orchestration", () => {
       trajectory: { trajectoryId: "full-trajectory", source: "subject", path: "/eval/trajectory.jsonl" },
     });
     await createEvalRunResumer({ getSamples: makeCatalog().getSamples,
-      getProject: makeCatalog().getProject, harness, store }).resume(run.runId);
+      getEvaluationOutputSchema: makeCatalog().getEvaluationOutputSchema, harness, store }).resume(run.runId);
     await expect(runtime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
       execution: { status: "failed", lastError: "agent task failed" },
       artifacts: [{ artifactId: "partial" }],
@@ -2576,7 +2657,7 @@ describe("Project Run stop", () => {
       return record ? { ...record, stopRequested: true } : null;
     };
     const resumer = createEvalRunResumer({
-      getProject: catalog.getProject, getSamples: catalog.getSamples, harness, store, onError: vi.fn(),
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store, onError: vi.fn(),
     });
     return { store, harness, admission, resumer };
   }
@@ -2634,7 +2715,7 @@ describe("Project Run stop", () => {
       return run && stopped ? { ...run, stopRequested: true } : run;
     };
     const resumer = createEvalRunResumer({
-      getProject: catalog.getProject, getSamples: catalog.getSamples, harness, store,
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store,
     });
 
     await resumer.resume(handle.runId);
@@ -2671,7 +2752,7 @@ describe("Project Run stop", () => {
       return run && stopped ? { ...run, stopRequested: true } : run;
     };
     const resumer = createEvalRunResumer({
-      getProject: catalog.getProject, getSamples: catalog.getSamples, harness, store,
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store,
     });
 
     await resumer.resume(handle.runId);
@@ -2716,7 +2797,7 @@ describe("Project Run stop", () => {
       return run && stopped ? { ...run, stopRequested: true } : run;
     };
     const resumer = createEvalRunResumer({
-      getProject: catalog.getProject, getSamples: catalog.getSamples, harness, store,
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store,
     });
 
     await resumer.resume(handle.runId);
@@ -2831,7 +2912,7 @@ describe("Project Run stop", () => {
       }],
     };
     await store.updateSampling(active, queued);
-    vi.mocked(harness.stopAgent).mockResolvedValue(true);
+    vi.mocked(harness.stopAgent).mockResolvedValue();
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
       submissionId: "submission-1", status: "interrupted",
       retryable: false, error: "Evaluation Run stopped",
@@ -2875,7 +2956,7 @@ describe("Project Run stop", () => {
       }],
     };
     await store.updateEvaluation(active, initial);
-    vi.mocked(harness.stopAgent).mockResolvedValue(true);
+    vi.mocked(harness.stopAgent).mockResolvedValue();
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
       submissionId: "evaluation-submission-1", status: "interrupted",
       retryable: false, error: "Evaluation Run stopped",
@@ -2908,7 +2989,7 @@ describe("Project Run stop", () => {
     const waiting = new Promise<AgentSubmission>((resolve) => { finishWait = resolve; });
     vi.mocked(harness.waitForSubmission).mockImplementation(async () => waiting);
     const resumer = createEvalRunResumer({
-      getProject: catalog.getProject, getSamples: catalog.getSamples, harness, store,
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store,
     });
     const controller = new AbortController();
     const task = resumer.resume(handle.runId, controller.signal);
@@ -2932,7 +3013,7 @@ describe("Project Run stop", () => {
     });
     vi.mocked(harness.waitForSubmission).mockImplementation(async () => new Promise(() => undefined));
     const resumer = createEvalRunResumer({
-      getProject: catalog.getProject, getSamples: catalog.getSamples, harness, store,
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store,
     });
     const controller = new AbortController();
     const task = resumer.resume(handle.runId, controller.signal);
@@ -2957,7 +3038,7 @@ describe("Project Run stop", () => {
     const handle = await admission.start(startRequest("stop-hung-preparation"));
     vi.mocked(harness.materializeInitialData).mockImplementation(async () => new Promise(() => undefined));
     const resumer = createEvalRunResumer({
-      getProject: catalog.getProject, getSamples: catalog.getSamples, harness, store,
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store,
     });
     const controller = new AbortController();
     const task = resumer.resume(handle.runId, controller.signal);
@@ -4030,7 +4111,7 @@ describe("Run recovery from persisted facts", () => {
     const run = await admitted.start(startRequest("narrow-run-resumer"));
     const resumer = createEvalRunResumer({
       getSamples: makeCatalog().getSamples,
-      getProject: makeCatalog().getProject,
+      getEvaluationOutputSchema: makeCatalog().getEvaluationOutputSchema,
       harness,
       store,
     });
@@ -4075,7 +4156,7 @@ describe("Run recovery from persisted facts", () => {
     });
 
     await createEvalRunResumer({ getSamples: makeCatalog().getSamples,
-      getProject: makeCatalog().getProject, harness, store }).resume(run.runId);
+      getEvaluationOutputSchema: makeCatalog().getEvaluationOutputSchema, harness, store }).resume(run.runId);
 
     expect((await store.getSampling(samplingId))?.execution).toEqual({ status: "failed", lastError: "agent task failed" });
     expect((await store.getSampling(samplingId))?.trajectory?.trajectoryId).toBe("complete-trace");
