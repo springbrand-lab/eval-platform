@@ -27,7 +27,6 @@ import {
   CatalogInputError,
   CatalogPayloadTooLargeError,
   OutputSchemaNotFoundError,
-  ProjectCreationKeyTakenError,
   ProjectEvaluationPlanLockedError,
   ProjectIdempotencyConflictError,
   ProjectRunStopConflictError,
@@ -102,7 +101,6 @@ const publicMessageCodes = new Map<ErrorClass, HttpErrorCode>([
 /** Errors that describe persisted Runtime facts; the response keeps the catalog text. */
 const catalogMessageCodes = new Map<ErrorClass, HttpErrorCode>([
   [RuntimeRecordConflictError, "RUNTIME_RECORD_CONFLICT"],
-  [ProjectCreationKeyTakenError, "RUNTIME_RECORD_CONFLICT"],
   [RuntimeRecordPersistenceError, "RUNTIME_PERSISTENCE_UNCONFIRMED"],
 ]);
 

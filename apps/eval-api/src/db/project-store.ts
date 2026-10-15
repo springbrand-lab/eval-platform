@@ -68,8 +68,8 @@ export interface StoredProjectCreation {
   readonly fingerprint: string;
   /** The first Run admitted under the creation key. */
   readonly run: RunHandle | null;
-  /** Whether the Project has any Run at all. */
-  readonly hasRun: boolean;
+  /** No Run was admitted under the creation key, but the Project already has other Runs. */
+  readonly superseded: boolean;
 }
 
 /** The single definition of an editable evaluation plan: absent, or not yet locked by an evaluating Run. */
@@ -191,7 +191,7 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
           deleted: row.deletedAt !== null,
           fingerprint: row.creationFingerprint,
           run: record ? { runId: record.runId, samplingIds: [...record.samplingIds] } : null,
-          hasRun: record !== undefined || await projectHasRun(transaction, row.projectId),
+          superseded: record === undefined && await projectHasRun(transaction, row.projectId),
         };
       }, READ_SNAPSHOT);
     },

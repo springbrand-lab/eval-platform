@@ -518,6 +518,37 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(2);
     });
 
+    it("returns the creation's own Run to a stalled creator after a replay admitted it and a user Run superseded it", async () => {
+      const body = await creationBody();
+      const s = services();
+      const real = runtimeAdmission();
+      let creationRunId = "";
+      const creator = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: s.store,
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: {
+          async preview(request) {
+            if (creationRunId === "") {
+              // The creator stalls after its commit: a same-key replay admits the creation Run, then the user starts another one.
+              const replayed = await services(OWNER, runtimeAdmission()).projects.create(body);
+              creationRunId = replayed.run!.runId;
+              await settle(s.worker, replayed.run!.samplingIds, "succeeded");
+              const userRun = await real.submit({ ...request, idempotencyKey: "user", targets: (await real.preview(request)).targets });
+              await settle(s.worker, userRun.samplingIds, "succeeded");
+            }
+            return real.preview(request);
+          },
+          submit: real.submit,
+        },
+      });
+      const created = await creator.create(body);
+      expect(created.run?.runId).toBe(creationRunId);
+      expect(await s.projects.list()).toEqual([created.project]);
+      expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(2);
+      expect(stub.calls.deleted).toEqual([]);
+      expect(stub.sp.createAgentConfig).toHaveBeenCalledTimes(1);
+    });
+
     it("keeps a Project whose first Run kept meeting plan changes and finishes it on replay", async () => {
       const body = await creationBody();
       const s = services();
