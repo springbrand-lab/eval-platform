@@ -5,16 +5,27 @@ export type {
   CollectAgentInput,
   CollectAgentResourcesInput,
   EnsureAgentInput,
-  EvaluationWorkspaceBinding,
+  EvidenceBundleReader,
+  EvidenceFileReader,
+  EvidenceStore,
+  ExportEvidenceInput,
+  ExportedArtifact,
+  ExportedEvidence,
   Harness,
   HarnessRuntimeOptions,
   InspectAgentOperationInput,
+  ImportEvidenceInput,
   MaterializeInitialDataInput,
+  SaveEvidenceInput,
   SubmitAgentInput,
-  SubjectTrajectoryMaterializationInput,
-  SubjectWorkspaceRef,
   WaitForSubmissionInput,
 } from "./model.js";
+export {
+  applyEvidenceLimits,
+  createEvidenceStore,
+  EvidenceIntegrityError,
+  type EvidenceBlobStore,
+} from "./evidence.js";
 export { AGENT_FAILURE_KINDS } from "./model.js";
 
 export class AgentIdentityConflictError extends Error {

@@ -1,3 +1,4 @@
+import type { EvidenceBundleRef } from "./evidence.js";
 import type { AgentResourceCollection } from "./resources.js";
 
 export type {
@@ -145,7 +146,10 @@ export interface Sampling {
   readonly subjectChatId?: string;
   readonly executionAttempts: readonly ExecutionAttempt[];
   readonly artifacts?: readonly ArtifactRef[];
+  /** Points into the evidence bundle once one was exported. */
   readonly trajectory?: TrajectoryRef;
+  /** The frozen artifacts and trajectory every Evaluation of this Sampling reads; absent when not evaluable. */
+  readonly evidence?: EvidenceBundleRef;
 }
 
 /** Chosen per Run; never persisted on the Project. */
@@ -216,6 +220,8 @@ export interface ExecutionOutput {
   readonly status: "succeeded" | "failed";
   readonly artifacts: readonly ArtifactRef[];
   readonly trajectory: TrajectoryRef;
+  /** Set by the runtime after it exported and stored a succeeded Subject's evidence. */
+  readonly evidence?: EvidenceBundleRef;
   readonly error?: string;
 }
 
@@ -227,7 +233,7 @@ export interface EvidenceRef {
 
 /** The Evaluator's raw result file, unchanged; Metrics validates it against the Project Schema. */
 export interface EvaluationStructuredOutput {
-  /** Workspace path below the Evaluator's own `/evaluations/<evaluationId>/` directory. */
+  /** Path of the result file in the Evaluator's own Space. */
   readonly path: string;
   /** Original UTF-8 file text, not a parsed copy. */
   readonly content: string;

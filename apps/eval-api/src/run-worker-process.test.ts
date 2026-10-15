@@ -14,8 +14,10 @@ const mocks = vi.hoisted(() => {
   const harness = {};
   const runtime = {};
   const bundles = { resolveInitialMaterials: vi.fn(), resolveInitialSession: vi.fn() };
+  const evidence = {};
   return {
-    order, pool, boss, worker, db, store, plans, runQueue, harness, runtime, bundles,
+    order, pool, boss, worker, db, store, plans, runQueue, harness, runtime, bundles, evidence,
+    openEvidenceStore: vi.fn(async (_config: unknown) => evidence),
     Pool: vi.fn(function Pool() { return pool; }),
     openBundleDirectory: vi.fn(async () => bundles),
     openRunBoss: vi.fn(async () => boss),
@@ -31,6 +33,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("pg", () => ({ Pool: mocks.Pool }));
 vi.mock("./sp/bundle-directory.js", () => ({ openBundleDirectory: mocks.openBundleDirectory }));
+vi.mock("./evidence/store.js", () => ({ openEvidenceStore: mocks.openEvidenceStore }));
 vi.mock("./run-worker-queue.js", () => ({ openRunBoss: mocks.openRunBoss, createRunQueue: mocks.createRunQueue }));
 vi.mock("./db/client.js", () => ({ createEvalDb: mocks.createEvalDb }));
 vi.mock("./db/runtime.js", () => ({ createPostgresWorkerRuntimeStore: mocks.createPostgresWorkerRuntimeStore }));
@@ -72,7 +75,10 @@ describe("Eval SP Run worker process", () => {
     });
     const dependencies = mocks.createEvalRunResumer.mock.calls[0]![0];
     expect(mocks.createPostgresWorkerProjectPlanReader).toHaveBeenCalledExactlyOnceWith(mocks.db);
-    expect(dependencies).toMatchObject({ store: mocks.store, harness: mocks.harness, plans: mocks.plans });
+    expect(mocks.openEvidenceStore).toHaveBeenCalledExactlyOnceWith(config);
+    expect(dependencies).toMatchObject({
+      store: mocks.store, harness: mocks.harness, plans: mocks.plans, evidence: mocks.evidence,
+    });
     expect(dependencies).not.toHaveProperty("configResolver");
     expect(dependencies).not.toHaveProperty("getSamples");
     expect(mocks.startEvalRunWorker).toHaveBeenCalledExactlyOnceWith({

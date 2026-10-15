@@ -5,7 +5,7 @@ const output = (result?: unknown, content = JSON.stringify(result)) => ({
   status: "succeeded" as const,
   artifacts: [],
   trajectory: { trajectoryId: "chat-2", source: "evaluator" as const, path: "/api/chats/chat-2/trajectory" },
-  ...(result === undefined ? {} : { structuredOutput: { path: "/evaluations/e/result.json", content } }),
+  ...(result === undefined ? {} : { structuredOutput: { path: "/output/result.json", content } }),
 });
 const schema = { type: "object" };
 const accept = { validate: () => [] };

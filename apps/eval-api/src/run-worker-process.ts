@@ -9,6 +9,7 @@ import { createLangfuseScorePublisher } from "./langfuse/scores.js";
 import { validateEvaluationResult } from "./project-output-schema.js";
 import { createPostgresWorkerRuntimeStore } from "./db/runtime.js";
 import { createRunQueue, openRunBoss } from "./run-worker-queue.js";
+import { openEvidenceStore } from "./evidence/store.js";
 import { openBundleDirectory } from "./sp/bundle-directory.js";
 import { createSpHarness } from "./sp/harness.js";
 import { startEvalRunWorker } from "./worker.js";
@@ -21,6 +22,7 @@ export interface SpEvalRunWorkerProcess {
 /** Runs admitted, persisted Runs from their Project plans. Admission belongs to the API process. */
 export async function startSpEvalRunWorkerProcess(config: WorkerConfig, logger: Logger): Promise<SpEvalRunWorkerProcess> {
   const bundles = await openBundleDirectory(config.EVAL_BUNDLE_DIR);
+  const evidence = await openEvidenceStore(config);
   const boss = await openRunBoss(config.DATABASE_URL, logger, { useListenNotify: true });
   const pool = new Pool({ connectionString: config.DATABASE_URL });
   try {
@@ -36,6 +38,7 @@ export async function startSpEvalRunWorkerProcess(config: WorkerConfig, logger: 
         resolveInitialSession: bundles.resolveInitialSession,
       }),
       store,
+      evidence,
       scores: {
         validate: validateEvaluationResult,
         ...(config.langfuse === undefined ? {} : { publish: createLangfuseScorePublisher({ config: config.langfuse }) }),

@@ -13,18 +13,20 @@ SP branch @ commit ──一次发布流程──> Eval SP API + 独立数据库
                                  ├──> Eval SP Space Worker + SpaceDO + R2
                                  └──> Eval SP Agent Worker + Inbox/Chat DO
 
-Eval Web/CLI ──> Eval API ──> Eval SP 的公开 API 与长连接
-                       └──> Eval PostgreSQL
+Eval Web/CLI ──> Eval API ──> Eval SP 的公开 API
+                       └──> Eval PostgreSQL <── Run Worker ──> Eval SP 的 eval-harness 服务路由与长连接
+                                                    └──> Eval 证据存储（Eval 专用 R2 桶或本地目录）
 ```
 
-两个数据库的职责不同：Eval SP 数据库属于 SP 账户和 Agent 运行面；Eval PostgreSQL 属于评估业务。Eval 不直接访问 SP 数据库、DO SQLite 或 R2，只使用 SP 公开的 Chat、Submission、Trajectory、Workspace 等接口。
+两个数据库的职责不同：Eval SP 数据库属于 SP 账户和 Agent 运行面；Eval PostgreSQL 属于评估业务。Eval 不直接访问 SP 数据库、DO SQLite 或 SP 的 R2，只使用 SP 公开的 Chat、Submission、Trajectory、Workspace 等接口。
 
 ## 数据归属
 
 | 所属系统 | 长期保存的事实 |
 | --- | --- |
 | Eval SP | 登录与用户账户、`user-agent` 配置、Inbox/Chat/Session/Submission、完整轨迹、Workspace 及文件、计费结算、Action 执行和 Creation 记录。Agent 与 Space 使用 Eval 专用 DO 命名空间和 R2。 |
-| Eval PostgreSQL | Dataset、Data、资源目录与输出格式；Project 及其执行/评估计划、Dataset/ProjectSample 快照和冻结 Agent Config 副本引用；Run、Sampling、EvaluationRecord、Attempt、指标所需的原始资源快照与评估原始输出，以及 SP Chat/Submission/产物/轨迹引用。 |
+| Eval PostgreSQL | Dataset、Data、资源目录与输出格式；Project 及其执行/评估计划、Dataset/ProjectSample 快照和冻结 Agent Config 副本引用；Run、Sampling、EvaluationRecord、Attempt、指标所需的原始资源快照与评估原始输出，以及 SP Chat/Submission 引用和证据包引用（`Sampling.evidence`）。 |
+| Eval 证据存储 | Subject 证据包：`evidence/<evidence hex>/manifest.json` 与按 sha256 去重的 `evidence/blobs/<sha256>`（产物文件和轨迹 JSONL），写入后不可变。Run Worker 同时配置 `EVAL_EVIDENCE_R2_ENDPOINT`、`EVAL_EVIDENCE_R2_BUCKET`、`EVAL_EVIDENCE_R2_ACCESS_KEY_ID`、`EVAL_EVIDENCE_R2_SECRET_ACCESS_KEY` 时经 S3 API 使用 Eval 专用 R2 桶，否则使用 `<EVAL_BUNDLE_DIR>/evidence/` 本地目录。 |
 
 Eval 的 Agent Config 列表、创建、编辑和运行时解析均使用 **Eval SP 自己的** `user-agent` 库；Eval 使用的固定服务账号也建在 Eval SP 中。切换或更新 SP 源码不重建该数据库，因此不会改变已有用户配置或 Eval 业务记录。不从 dev/production 在线读取、写入或同步账户与配置。已有环境中的配置不会自动出现在 Eval SP；如需复用具体配置，应另行通过公开接口显式导入，然后在 Eval SP 中维护。
 
@@ -32,7 +34,7 @@ Eval 的 Agent Config 列表、创建、编辑和运行时解析均使用 **Eval
 
 - 分支绑定在 **Project**：固定分支阶段，Project 只能绑定当前部署的 SP 分支。每次 Run 记录发布时实际使用的 SP commit，作为执行或评估的代码来源；Sampling 不存分支。
 - Subject 和 Evaluator 都使用 Eval SP 的**普通 Inbox/Chat 生命周期**。Eval 预先分配 Chat ID，SP 在自己的 Inbox 中按该 ID 幂等确保 Chat；不新增脱离 Inbox 的 `ensureEvalChat`、影子 Inbox 或专用 Chat 存储。Eval API 通过 Run、Sampling 和 EvaluationRecord 关联这些 Chat，Eval Web 不提供普通 Inbox 管理入口。
-- 每个 Sampling 拥有独立 Subject Chat/Session。每个 EvaluationRecord 拥有独立 Evaluator Chat/Session，但其物理 Workspace 绑定 Subject 的 SpaceDO，仅向 `/evaluations/<evaluationId>/` 写入。一次 Chat 中每次 Prompt 提交产生自己的 Submission ID；Eval 在各 Attempt 上保存真实 ID。Subject 产物留在原位，SP 把完整 Subject 轨迹物化到同一个 SpaceDO；Eval 保存引用与运行事实。
+- 每个 Sampling 拥有独立 Subject Chat/Session。每个 EvaluationRecord 拥有独立 Evaluator Chat/Session 和自己的 Space，不绑定 Subject。一次 Chat 中每次 Prompt 提交产生自己的 Submission ID；Eval 在各 Attempt 上保存真实 ID。Subject 执行成功后，Eval 经 SP 导出产物与完整轨迹，固化为不可变证据包；评估时导入 Evaluator Space 的 `/evidence/`，Evaluator 结果写在 `/output/result.json`。Eval 保存引用与运行事实。
 - Eval 中打开 Subject 或 Evaluator Chat 时只能查看 Chat、Workspace 和轨迹。交互式用户不得发消息、取消、审批或调用写入接口；Eval Run Worker 可通过受控服务身份提交任务，SP 在提交/长连接内部自动处理审批和 `ask_user`。独立部署解决环境与 Chat 存储隔离，不自动实现只读访问控制。
 
 ## 包与部署边界

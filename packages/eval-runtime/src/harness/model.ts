@@ -6,26 +6,19 @@ import type {
   AgentStatus,
   EvaluationAgentOutput,
   EvaluationOutputSchema,
+  EvidenceBundleRef,
+  EvidenceLimits,
+  EvidenceManifest,
+  EvidenceOmission,
+  EvidenceSource,
   ExecutionOutput,
   HarnessConfig,
   MaterializedDataBinding,
-  TrajectoryRef,
+  TrajectoryEvent,
 } from "@eval-platform/eval-contracts";
 import type { DataInput } from "@eval-platform/eval-dataset";
 
 export type HarnessRuntimeOptions = NonNullable<HarnessConfig["runtime"]>;
-
-/** The SP SpaceDO locator for the Subject Chat's Workspace. */
-export interface SubjectWorkspaceRef {
-  readonly userId: string;
-  readonly chatId: string;
-}
-
-/** An Evaluator owns its Chat but writes only to its directory in this Workspace. */
-export interface EvaluationWorkspaceBinding {
-  readonly subject: SubjectWorkspaceRef;
-  readonly evaluationId: string;
-}
 
 /** Stable SP Chat/Session identity; a Submission exists only after dispatch. */
 export interface AgentHandle {
@@ -35,7 +28,8 @@ export interface AgentHandle {
   readonly ownerUserId: string;
   readonly chatId: string;
   readonly samplingId: string;
-  readonly evaluationWorkspace?: EvaluationWorkspaceBinding;
+  /** Only an Evaluator has one; it still owns an ordinary Agent with its own Space. */
+  readonly evaluationId?: string;
 }
 
 export interface AgentSubmission {
@@ -60,7 +54,7 @@ export interface EnsureAgentInput {
   readonly samplingId: string;
   readonly agentConfig: AgentConfigRef;
   readonly projectId: string;
-  readonly evaluationWorkspace?: EvaluationWorkspaceBinding;
+  readonly evaluationId?: string;
   readonly runtime?: HarnessRuntimeOptions;
 }
 
@@ -105,11 +99,63 @@ export interface MaterializeInitialDataInput {
   readonly runtime?: HarnessRuntimeOptions;
 }
 
-export interface SubjectTrajectoryMaterializationInput {
+/** Reads one exported artifact's bytes as a stream. */
+export type EvidenceFileReader = (path: string) => Promise<ReadableStream<Uint8Array>>;
+
+/** An artifact as the framework lists it, before its bytes are read and hashed. */
+export interface ExportedArtifact {
+  readonly path: string;
+  readonly size: number;
+  readonly mediaType: string;
+}
+
+export interface ExportEvidenceInput {
+  readonly handle: AgentHandle;
+  readonly limits: EvidenceLimits;
+  readonly runtime?: HarnessRuntimeOptions;
+}
+
+/** What one framework exports from a finished Agent; the evidence store freezes it. */
+export interface ExportedEvidence {
+  readonly source: EvidenceSource;
+  /** Already within `limits`; everything left out is listed in `omitted`. */
+  readonly artifacts: readonly ExportedArtifact[];
+  readonly omitted: readonly EvidenceOmission[];
+  readonly readFile: EvidenceFileReader;
+  /** Normalized events in order; the adapter pages through its source. */
+  readonly trajectory: AsyncIterable<TrajectoryEvent>;
+  readonly trajectoryComplete: boolean;
+  readonly trajectoryIncompleteReason?: string;
+}
+
+/** A stored bundle, verified against its reference when opened. */
+export interface EvidenceBundleReader {
+  readonly ref: EvidenceBundleRef;
+  readonly manifest: EvidenceManifest;
+  /** The manifest exactly as stored, so every Evaluator reads the same bytes. */
+  readonly manifestBytes: Uint8Array;
+  readBlob(sha256: string): Promise<ReadableStream<Uint8Array>>;
+}
+
+export interface ImportEvidenceInput {
+  /** The Evaluator. */
+  readonly handle: AgentHandle;
   readonly idempotencyKey: string;
-  readonly samplingId: string;
-  readonly subjectWorkspace: SubjectWorkspaceRef;
-  readonly trajectory: TrajectoryRef;
+  readonly evidence: EvidenceBundleReader;
+  readonly root: "/evidence";
+  readonly runtime?: HarnessRuntimeOptions;
+}
+
+export interface SaveEvidenceInput {
+  readonly evidence: ExportedEvidence;
+  readonly limits: EvidenceLimits;
+}
+
+/** Content-addressed bundle storage; implemented by the application (R2 or a local directory). */
+export interface EvidenceStore {
+  /** Writes blobs by hash, then the manifest; an identical manifest that already exists is reused. */
+  save(input: SaveEvidenceInput): Promise<EvidenceBundleRef>;
+  open(ref: EvidenceBundleRef): Promise<EvidenceBundleReader>;
 }
 
 export interface Harness {
@@ -127,5 +173,8 @@ export interface Harness {
   collectExecution(input: CollectAgentInput): Promise<ExecutionOutput>;
   collectEvaluation(input: CollectAgentInput): Promise<EvaluationAgentOutput>;
   collectAgentResources(input: CollectAgentResourcesInput): Promise<AgentResourceSnapshot>;
-  materializeSubjectTrajectory(input: SubjectTrajectoryMaterializationInput): Promise<void>;
+  /** Export a finished Agent's artifacts and complete trajectory; read-only. */
+  exportEvidence(input: ExportEvidenceInput): Promise<ExportedEvidence>;
+  /** Place a stored bundle into this Agent's own Space under `root`; repeating it is a no-op. */
+  importEvidence(input: ImportEvidenceInput): Promise<void>;
 }

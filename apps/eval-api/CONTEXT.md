@@ -33,5 +33,8 @@ The Run Worker (`start:worker`) consumes those jobs with the real Eval SP
 Harness and calls the Runtime's `resume()`; it never stores a second Run
 status. Several Worker instances may run at once. A shared `EVAL_BUNDLE_DIR`
 stores each user's uploaded material and optional Session content for both
-processes. Scheduling and stop semantics are recorded in
+processes. The Worker alone owns the evidence store (`src/evidence/`): an
+Eval-only R2 bucket, or `evidence/` under that directory, holding each
+succeeded Subject's content-addressed evidence bundle that Evaluators import
+into their own Space. Scheduling and stop semantics are recorded in
 `docs/architecture.md`; process configuration is in `README.md`.

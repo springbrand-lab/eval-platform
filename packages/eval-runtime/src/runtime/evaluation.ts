@@ -1,3 +1,10 @@
+import {
+  EVALUATION_RESULT_PATH,
+  EVIDENCE_ARTIFACTS_ROOT,
+  EVIDENCE_MANIFEST_PATH,
+  EVIDENCE_ROOT,
+  EVIDENCE_TRAJECTORY_PATH,
+} from "@eval-platform/eval-contracts";
 import type {
   EvaluationAgentOutput,
   EvaluationAttempt,
@@ -29,6 +36,13 @@ export interface EvaluateSamplingInput {
   readonly evaluationOutputSchema: EvaluationOutputSchema;
 }
 
+/** Eval Platform, not the Evaluator's framework, says where evidence is and where the result goes. */
+export function evaluatorPrompt(evalPrompt: string): string {
+  return `${evalPrompt}
+
+The evidence to evaluate is in ${EVIDENCE_ROOT}/ of your own Workspace. ${EVIDENCE_MANIFEST_PATH} lists every Subject artifact with its size and SHA-256, and any file that was omitted and why. The artifacts are under ${EVIDENCE_ARTIFACTS_ROOT}/ at their original paths. ${EVIDENCE_TRAJECTORY_PATH} is the Subject's trajectory in eval-trajectory/v1, one JSON event per line; the manifest says whether it is complete. Finish by writing your result as one JSON object to ${EVALUATION_RESULT_PATH}, following the evaluation-output.schema.json in your initial materials.`;
+}
+
 export function requireEvaluationPrompt(sample: ProjectSample): string {
   const prompt = sample.data.evalPrompt;
   if (prompt === undefined) {
@@ -58,26 +72,22 @@ export async function evaluateSampling(
     });
     currentEvaluation = next;
   };
-  const { artifacts, trajectory } = sampling;
-  if (
-    sampling.execution.status !== "succeeded"
-    || artifacts === undefined
-    || trajectory === undefined
-  ) {
+  if (sampling.execution.status !== "succeeded" || sampling.artifacts === undefined || sampling.trajectory === undefined) {
     await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no successful execution output"));
     return { ...input.context, evaluation: currentEvaluation };
   }
+  const evidenceRef = sampling.evidence;
+  if (evidenceRef === undefined) {
+    await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no evidence bundle"));
+    return { ...input.context, evaluation: currentEvaluation };
+  }
 
+  // The score is synced to the Subject Chat's session; the Evaluator never touches that Chat.
   const subjectChatId = sampling.subjectChatId;
   if (!subjectChatId) {
     await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject Chat"));
     return { ...input.context, evaluation: currentEvaluation };
   }
-  // SP creates the Subject Chat under the selected user-agent Config owner.
-  const subjectWorkspace = {
-    userId: sampling.subjectAgent.ownerUserId,
-    chatId: subjectChatId,
-  };
 
   const scoreOf = (output: EvaluationAgentOutput) => (
     readEvaluationScore(output, input.evaluationOutputSchema, dependencies.scores)
@@ -114,12 +124,9 @@ export async function evaluateSampling(
       projectId: sampling.projectId,
       samplingId: sampling.samplingId,
       chatId,
-      evaluationWorkspace: {
-        subject: subjectWorkspace,
-        evaluationId: currentEvaluation.evaluationId,
-      },
+      evaluationId: currentEvaluation.evaluationId,
       harnessConfig: evaluatorHarness,
-      prompt: evalPrompt,
+      prompt: evaluatorPrompt(evalPrompt),
       retryController,
       attempts: currentEvaluation.attempts,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({
@@ -160,11 +167,12 @@ export async function evaluateSampling(
           evaluationOutputSchema: input.evaluationOutputSchema,
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
-        await dependencies.harness.materializeSubjectTrajectory({
-          idempotencyKey: `subject-trajectory:${subjectWorkspace.chatId}`,
-          samplingId: sampling.samplingId,
-          subjectWorkspace,
-          trajectory,
+        await dependencies.harness.importEvidence({
+          handle,
+          idempotencyKey: `evidence:${evidenceRef.evidenceId}:${currentEvaluation.evaluationId}`,
+          evidence: await dependencies.evidence.open(evidenceRef),
+          root: EVIDENCE_ROOT,
+          ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
       },
       collectOutput: (handle) => dependencies.harness.collectEvaluation({

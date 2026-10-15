@@ -15,7 +15,7 @@ describe("evaluation output validation", () => {
     const view = read(content);
     expect(view).toMatchObject({
       validation: { status: "valid", reason: "valid", errors: [] }, content,
-      rawJson: { score: 7.5, summary: "fine" }, path: "/evaluations/evaluation-1/result.json",
+      rawJson: { score: 7.5, summary: "fine" }, path: "/output/result.json",
       evidenceRefs: [{ kind: "artifact", ref: "/workspace/page.html" }], trajectory: { source: "evaluator" },
     });
     expect(numbers(view)).toEqual([

@@ -4,6 +4,7 @@ import type {
   HarnessConfig,
   RetryPolicy,
   Sampling,
+  TrajectoryRef,
 } from "@eval-platform/eval-contracts";
 import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 import { dataInputSchema } from "@eval-platform/eval-dataset";
@@ -41,24 +42,50 @@ export async function executeSampling(
   const retryController = dependencies.createRetryController(input.retryPolicy);
   let observedOutput: ExecutionOutput | undefined;
 
-  const collectEvidence = (chatId: string): Promise<ExecutionOutput> => {
-    const handle: AgentHandle = {
-      ownerUserId: subjectHarness.agentConfig.ownerUserId,
-      chatId,
-      samplingId: current.samplingId,
-      role: "subject",
-      framework: subjectHarness.framework,
-    };
-    return collectOutputWithRetry({
-      stage: "execution",
-      retryController,
-      sleep: dependencies.sleep,
-      collect: () => dependencies.harness.collectExecution({
-        handle,
+  const subjectHandle = (chatId: string): AgentHandle => ({
+    ownerUserId: subjectHarness.agentConfig.ownerUserId,
+    chatId,
+    samplingId: current.samplingId,
+    role: "subject",
+    framework: subjectHarness.framework,
+  });
+
+  const collectEvidence = (chatId: string): Promise<ExecutionOutput> => collectOutputWithRetry({
+    stage: "execution",
+    retryController,
+    sleep: dependencies.sleep,
+    collect: () => dependencies.harness.collectExecution({
+      handle: subjectHandle(chatId),
+      ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
+    }),
+  });
+
+  /**
+   * A succeeded execution is evaluable only once its artifacts and complete trajectory are frozen
+   * in an evidence bundle; the bundle's trajectory then replaces the framework-local reference.
+   * Export shares the execution retry policy; if it never succeeds, the Sampling fails.
+   */
+  const freezeEvidence = (chatId: string, output: ExecutionOutput): Promise<ExecutionOutput> => collectOutputWithRetry({
+    stage: "execution",
+    retryController,
+    sleep: dependencies.sleep,
+    collect: async () => {
+      const exported = await dependencies.harness.exportEvidence({
+        handle: subjectHandle(chatId),
+        limits: dependencies.evidenceLimits,
         ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
-      }),
-    });
-  };
+      });
+      const evidence = await dependencies.evidence.save({ evidence: exported, limits: dependencies.evidenceLimits });
+      const { manifest } = await dependencies.evidence.open(evidence);
+      const trajectory: TrajectoryRef = {
+        trajectoryId: evidence.evidenceId,
+        source: "subject",
+        path: `evidence:${evidence.evidenceId}/trajectory.jsonl`,
+        contentHash: `sha256:${manifest.trajectory.sha256}`,
+      };
+      return { ...output, trajectory, evidence };
+    },
+  });
 
   const reportEvidenceError = (error: unknown): void => {
     const reported = new Error(
@@ -94,11 +121,21 @@ export async function executeSampling(
         return { state: current, sample };
       }
       const succeeded = attempt.status === "completed" && output.status === "succeeded";
+      if (succeeded) {
+        try {
+          output = await freezeEvidence(current.subjectChatId, output);
+        } catch (exportError) {
+          await persist({
+            ...withExecutionStatus(current, "failed", describeAgentError(exportError).message),
+            ...executionEvidence(output),
+          });
+          return { state: current, sample };
+        }
+      }
       await persist({
         ...withExecutionStatus(current, succeeded ? "succeeded" : "failed",
           succeeded ? undefined : attempt.error ?? output.error ?? current.execution.lastError ?? "execution failed"),
-        artifacts: output.artifacts,
-        trajectory: output.trajectory,
+        ...executionEvidence(output),
       });
       return { state: current, sample };
     }
@@ -179,10 +216,10 @@ export async function executeSampling(
       deferFailureStatus: true,
     });
 
+    const frozen = await freezeEvidence(chatId, result.output);
     await persist({
       ...withExecutionStatus(current, "succeeded"),
-      artifacts: result.output.artifacts,
-      trajectory: result.output.trajectory,
+      ...executionEvidence(frozen),
     });
     return { state: current, sample };
   } catch (error) {
@@ -191,7 +228,7 @@ export async function executeSampling(
       read: () => dependencies.store.getSampling(current.samplingId),
       attempts: (record) => record.executionAttempts,
       attemptId: (attempt) => attempt.executionAttemptId,
-      evidence: (record) => [record.artifacts, record.trajectory],
+      evidence: (record) => [record.artifacts, record.trajectory, record.evidence],
     });
     current = stored;
     if (current.execution.status === "succeeded") return { state: current, sample };
@@ -221,11 +258,16 @@ export async function executeSampling(
     }
     await persist({
       ...withExecutionStatus(failureBase, "failed", details.message),
-      ...(observedOutput === undefined ? {} : {
-        artifacts: observedOutput.artifacts,
-        trajectory: observedOutput.trajectory,
-      }),
+      ...(observedOutput === undefined ? {} : executionEvidence(observedOutput)),
     });
     return { state: current, sample };
   }
+}
+
+function executionEvidence(output: ExecutionOutput): Pick<Sampling, "artifacts" | "trajectory" | "evidence"> {
+  return {
+    artifacts: output.artifacts,
+    trajectory: output.trajectory,
+    ...(output.evidence === undefined ? {} : { evidence: output.evidence }),
+  };
 }

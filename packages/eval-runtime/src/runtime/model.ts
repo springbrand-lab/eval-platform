@@ -2,6 +2,7 @@ import type { Data } from "@eval-platform/eval-dataset";
 import type {
   EvaluationOutputSchema,
   EvaluationRecord,
+  EvidenceLimits,
   ProjectPlan,
   RetryPolicy,
   RunHandle,
@@ -12,7 +13,7 @@ import type {
   RunTargets,
   Sampling,
 } from "@eval-platform/eval-contracts";
-import type { Harness } from "../harness/model.js";
+import type { EvidenceStore, Harness } from "../harness/model.js";
 import type { RetryController } from "./retry.js";
 import type { SamplingState, RuntimeStore } from "./store.js";
 import type { EvaluationScorePort } from "./scores.js";
@@ -106,6 +107,9 @@ export interface EvalRunResumerDependencies {
   readonly plans: ProjectPlanReader;
   readonly harness: Harness;
   readonly store: RuntimeStore;
+  /** Freezes each succeeded Subject's evidence; every Evaluation reads only from it. */
+  readonly evidence: EvidenceStore;
+  readonly evidenceLimits?: EvidenceLimits;
   readonly createRetryController?: (policy?: RetryPolicy) => RetryController;
   readonly idFactory?: () => string;
   readonly now?: () => string;

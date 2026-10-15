@@ -60,6 +60,29 @@ export {
   isPendingSamplingStatus,
   isTerminalAgentStatus,
 } from "./model.js";
+export type {
+  EvidenceArtifact,
+  EvidenceBundleRef,
+  EvidenceLimits,
+  EvidenceManifest,
+  EvidenceOmission,
+  EvidenceOmissionReason,
+  EvidenceSource,
+  TrajectoryEvent,
+  TrajectoryEventType,
+} from "./evidence.js";
+export {
+  DEFAULT_EVIDENCE_LIMITS,
+  EVALUATION_RESULT_PATH,
+  EVAL_TRAJECTORY_FORMAT,
+  EVIDENCE_ARTIFACTS_ROOT,
+  EVIDENCE_MANIFEST_PATH,
+  EVIDENCE_OMISSION_REASONS,
+  EVIDENCE_ROOT,
+  EVIDENCE_SCHEMA_VERSION,
+  EVIDENCE_TRAJECTORY_PATH,
+  TRAJECTORY_EVENT_TYPES,
+} from "./evidence.js";
 export { IDENTIFIER_RULE, identifierSchema, isIdentifier } from "./identifier.js";
 export { canonicalJsonBytes, createId, equalJson, sha256Hex } from "./canonical.js";
 export { jsonObjectSchema, jsonValueSchema } from "./json.js";

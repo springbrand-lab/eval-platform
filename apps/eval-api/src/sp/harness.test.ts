@@ -1,5 +1,12 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { AgentHandleNotFoundError, AgentIdentityConflictError, type AgentHandle } from "@eval-platform/eval-runtime";
+import { DEFAULT_EVIDENCE_LIMITS, type TrajectoryEvent } from "@eval-platform/eval-contracts";
+import {
+  AgentHandleNotFoundError,
+  AgentIdentityConflictError,
+  type AgentHandle,
+  type EvidenceBundleReader,
+} from "@eval-platform/eval-runtime";
 import WebSocket, { WebSocketServer } from "ws";
 import { createSpHarness, SpHarnessError } from "./harness.js";
 
@@ -24,10 +31,7 @@ const evaluator: AgentHandle = {
   samplingId: "sampling-1",
   role: "evaluator",
   framework: "sp",
-  evaluationWorkspace: {
-    subject: { userId: OWNER, chatId: SUBJECT_CHAT },
-    evaluationId: "evaluation-1",
-  },
+  evaluationId: "evaluation-1",
 };
 const executionOutput = {
   samplingId: "sampling-1",
@@ -163,7 +167,6 @@ describe("Eval SP Harness", () => {
       }
       if (request.method === "GET" && url.pathname.endsWith("/output")) return Response.json(executionOutput);
       if (request.method === "GET" && url.pathname.includes("/resources/by-key/")) return Response.json(resources);
-      if (request.method === "POST" && url.pathname.endsWith("/trajectory")) return new Response(null, { status: 204 });
       throw new Error(`Unexpected ${request.method} ${url}`);
     });
     const resolveInitialMaterials = vi.fn(async () => [
@@ -183,17 +186,9 @@ describe("Eval SP Harness", () => {
     expect(await harness.collectExecution({ handle: subject })).toEqual(executionOutput);
     expect(await harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
       .toEqual(resources);
-    await harness.materializeSubjectTrajectory({
-      subjectWorkspace: { userId: OWNER, chatId: SUBJECT_CHAT },
-      samplingId: subject.samplingId,
-      trajectory: executionOutput.trajectory as typeof executionOutput.trajectory & { source: "subject" },
-      idempotencyKey: "subject-trajectory:subject-chat",
-    });
 
-    expect(requests).toHaveLength(7);
-    expect(requests.slice(0, 6).every((request) => new URL(request.url).pathname.startsWith(CHAT_PATH))).toBe(true);
-    expect(new URL(requests[6]!.url).pathname)
-      .toBe(`/internal/v1/eval-harness/workspaces/${OWNER}/${SUBJECT_CHAT}/trajectory`);
+    expect(requests).toHaveLength(6);
+    expect(requests.every((request) => new URL(request.url).pathname.startsWith(CHAT_PATH))).toBe(true);
     expect(requests.every((request) => request.headers.get("X-Eval-Service-Token") === "service-secret")).toBe(true);
     expect(await requests[0]!.json()).toEqual(ensureInput(subject));
     expect(await requests[1]!.json()).toEqual({
@@ -205,27 +200,25 @@ describe("Eval SP Harness", () => {
     expect(resolveInitialMaterials).toHaveBeenCalledWith(OWNER, { bundleId: "bundle-1", materialId: "material-1" });
     expect(await requests[2]!.json()).toEqual({ idempotencyKey: "execution:sampling-1", prompt: "Build a project", unattended: true });
     expect(new URL(requests[5]!.url).searchParams.get("submissionId")).toBe("submission-1");
-    expect(await requests[6]!.json()).toEqual({
-      idempotencyKey: "subject-trajectory:subject-chat", samplingId: "sampling-1", trajectory: executionOutput.trajectory,
-    });
   });
 
-  it("ensures an evaluator Chat with its immutable Subject Workspace binding", async () => {
+  it("ensures an evaluator Chat with only its Evaluation ID and reads the result from its own Space", async () => {
     const { fetch, requests } = spFetch((request) => new URL(request.url).pathname.endsWith("/output")
       ? Response.json({
         status: "succeeded",
-        artifacts: [{ artifactId: "judge-output", kind: "evaluation", path: "/evaluations/evaluation-1/result.json" }],
-        structuredOutput: { path: "/evaluations/evaluation-1/result.json", content: '{ "score": 1.50 }', contentHash: "sha256:abc" },
-        trajectory: { trajectoryId: "judge-trace", source: "evaluator", path: "/evaluations/evaluation-1/trajectory.jsonl" },
+        artifacts: [{ artifactId: "judge-output", kind: "evaluation", path: "/output/result.json" }],
+        structuredOutput: { path: "/output/result.json", content: '{ "score": 1.50 }', contentHash: "sha256:abc" },
+        trajectory: { trajectoryId: "judge-trace", source: "evaluator", path: `/api/chats/${EVALUATOR_CHAT}/trajectory` },
         unknownField: { kept: false },
       })
       : Response.json(evaluator));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
     expect(await harness.ensureAgent(ensureInput(evaluator))).toEqual(evaluator);
+    expect(await requests[0]!.json()).toEqual(ensureInput(evaluator));
     const output = await harness.collectEvaluation({ handle: evaluator });
     expect(output.trajectory.source).toBe("evaluator");
     expect(output.structuredOutput).toEqual({
-      path: "/evaluations/evaluation-1/result.json", content: '{ "score": 1.50 }', contentHash: "sha256:abc",
+      path: "/output/result.json", content: '{ "score": 1.50 }', contentHash: "sha256:abc",
     });
     expect(output).not.toHaveProperty("unknownField");
     expect(new URL(requests[1]!.url).searchParams.get("evaluationId")).toBe("evaluation-1");
@@ -234,7 +227,7 @@ describe("Eval SP Harness", () => {
   it("rejects a request that violates the SP contract before contacting SP", async () => {
     const fetch = vi.fn();
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
-    const { evaluationWorkspace: _binding, ...unbound } = ensureInput(evaluator);
+    const { evaluationId: _evaluationId, ...unbound } = ensureInput(evaluator);
     await expect(harness.ensureAgent(unbound))
       .rejects.toMatchObject({ name: "SpHarnessError", retryable: false });
     await expect(harness.ensureAgent({ ...ensureInput(subject), chatId: "not-a-uuid" }))
@@ -246,7 +239,7 @@ describe("Eval SP Harness", () => {
 
   it("uploads the Project JSON Schema with evaluator-only materials before submission", async () => {
     const { fetch, requests } = spFetch(() => Response.json(binding("eval-bundle",
-      "/evaluations/evaluation-1/initial-materials/eval-bundle/judge-brief")));
+      "/initial-materials/eval-bundle/judge-brief")));
     const resolveInitialMaterials = vi.fn(async () => [
       { path: "/brief.txt", mediaType: "text/plain", contentBase64: "SnVkZ2U=" },
     ]);
@@ -263,7 +256,7 @@ describe("Eval SP Harness", () => {
     expect(body.initialMaterials.files.map((file: { path: string }) => file.path))
       .toEqual(["/brief.txt", "/evaluation-output.schema.json"]);
     expect(`${materialized.rootPath}${body.initialMaterials.files[1].path}`).toBe(
-      "/evaluations/evaluation-1/initial-materials/eval-bundle/judge-brief/evaluation-output.schema.json",
+      "/initial-materials/eval-bundle/judge-brief/evaluation-output.schema.json",
     );
     expect(JSON.parse(Buffer.from(body.initialMaterials.files[1].contentBase64, "base64").toString("utf8")))
       .toEqual({ type: "object", properties: { score: { type: "number" } } });
@@ -271,7 +264,7 @@ describe("Eval SP Harness", () => {
   });
 
   it("materializes a schema even without evaluator materials and reserves its path", async () => {
-    const { fetch, requests } = spFetch(() => Response.json(binding("schema", "/evaluations/evaluation-1")));
+    const { fetch, requests } = spFetch(() => Response.json(binding("schema", "/")));
     const schema = { type: "object" };
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
     await harness.materializeInitialData({ handle: evaluator, idempotencyKey: "init", data: { userPrompt: "Judge" },
@@ -515,5 +508,102 @@ describe("Eval SP Harness", () => {
     const { fetch } = queuedFetch(Response.json({ samplingId: "sampling-1", status: "succeeded", artifacts: [] }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
     await expect(harness.collectExecution({ handle: subject })).rejects.toBeInstanceOf(SpHarnessError);
+  });
+
+  it("exports Subject artifacts within limits and its complete trajectory, page by page", async () => {
+    const event = (ingestSeq: number, type: string, payload: Record<string, unknown>) => ({
+      ingestSeq,
+      event: {
+        schemaVersion: 1, type, eventId: `event-${ingestSeq}`, operationId: `operation-${ingestSeq}`,
+        submissionId: "submission-1", occurredAt: 1_760_000_000_000 + ingestSeq,
+        resource: { sessionId: SUBJECT_CHAT, agentName: "severn", agentId: "agent", serviceName: "sp" }, payload,
+      },
+    });
+    const { fetch, requests } = spFetch((request) => {
+      const url = new URL(request.url);
+      if (url.pathname.endsWith("/evidence/artifacts")) {
+        return Response.json({ artifacts: [
+          { path: "/index.html", size: 11, mediaType: "text/html" },
+          { path: "/node_modules/x/index.js", size: 1, mediaType: "text/javascript" },
+          { path: "/video.mp4", size: 30_000_000, mediaType: "video/mp4" },
+        ] });
+      }
+      if (url.pathname.endsWith("/evidence/trajectory")) {
+        return url.searchParams.get("afterSeq") === "0"
+          ? Response.json({ events: [event(1, "turn.admitted", { prompt: "Build" }), event(2, "tool.started", { toolName: "write", input: { path: "/index.html" } })], nextAfterSeq: 2 })
+          : Response.json({ events: [event(3, "context.compacted", { removedMessages: 3 })], nextAfterSeq: null });
+      }
+      if (url.pathname.endsWith("/evidence/files")) return new Response("<h1>Hi</h1>", { headers: { "Content-Type": "text/html" } });
+      throw new Error(`Unexpected ${request.method} ${url}`);
+    });
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    const exported = await harness.exportEvidence({ handle: subject, limits: DEFAULT_EVIDENCE_LIMITS });
+
+    expect(exported.source).toEqual({ framework: "sp", samplingId: "sampling-1", agentRef: { ownerUserId: OWNER, chatId: SUBJECT_CHAT } });
+    expect(exported.artifacts).toEqual([{ path: "/index.html", size: 11, mediaType: "text/html" }]);
+    expect(exported.omitted).toEqual([
+      { path: "/node_modules/x/index.js", reason: "excluded" },
+      { path: "/video.mp4", reason: "too-large" },
+    ]);
+    expect(exported.trajectoryComplete).toBe(true);
+    await expect(new Response(await exported.readFile("/index.html")).text()).resolves.toBe("<h1>Hi</h1>");
+    const events: TrajectoryEvent[] = [];
+    for await (const item of exported.trajectory) events.push(item);
+    expect(events.map(({ seq, type }) => [seq, type])).toEqual([[1, "user-message"], [2, "tool-call"], [3, "other"]]);
+    expect(events[0]).toMatchObject({ submissionId: "submission-1", content: { prompt: "Build" }, raw: { eventId: "event-1" } });
+    expect(events[1]!.content).toEqual({ event: "tool.started", toolName: "write", input: { path: "/index.html" } });
+    const fileRequest = requests.find((request) => new URL(request.url).pathname.endsWith("/evidence/files"))!;
+    expect(new URL(fileRequest.url).searchParams.get("path")).toBe("/index.html");
+    expect(requests.every((request) => request.headers.get("X-Eval-Service-Token") === "secret")).toBe(true);
+    expect(requests.every((request) => new URL(request.url).pathname.startsWith(CHAT_PATH))).toBe(true);
+  });
+
+  it("imports every evidence file into the Evaluator's own Space, manifest last", async () => {
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    const content: Record<string, string> = { [sha("<h1>Hi</h1>")]: "<h1>Hi</h1>", [sha("{}\n")]: "{}\n" };
+    const manifestBytes = new TextEncoder().encode('{"manifest":true}');
+    const evidence = {
+      ref: { evidenceId: `sha256:${"a".repeat(64)}`, manifestSha256: sha('{"manifest":true}'), exportedAt: "2026-10-15T00:00:00.000Z" },
+      manifestBytes,
+      manifest: {
+        artifacts: [{ path: "/site/index.html", size: 11, mediaType: "text/html", sha256: sha("<h1>Hi</h1>") }],
+        trajectory: { sha256: sha("{}\n") },
+      },
+      readBlob: async (hash: string) => new Response(content[hash]).body!,
+    } as unknown as EvidenceBundleReader;
+    const { fetch, requests } = spFetch(async (request) => {
+      const body = new Uint8Array(await request.arrayBuffer());
+      return Response.json({
+        path: `/evidence${new URL(request.url).searchParams.get("path")}`,
+        size: body.byteLength,
+        sha256: createHash("sha256").update(body).digest("hex"),
+      });
+    });
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    await harness.importEvidence({ handle: evaluator, idempotencyKey: "evidence:x:evaluation-1", evidence, root: "/evidence" });
+
+    expect(requests.map((request) => [request.method, new URL(request.url).pathname,
+      new URL(request.url).searchParams.get("path"), request.headers.get("X-Eval-Content-Sha256")])).toEqual([
+      ["PUT", `/internal/v1/eval-harness/users/${OWNER}/chats/${EVALUATOR_CHAT}/evidence/files`, "/artifacts/site/index.html", sha("<h1>Hi</h1>")],
+      ["PUT", `/internal/v1/eval-harness/users/${OWNER}/chats/${EVALUATOR_CHAT}/evidence/files`, "/trajectory.jsonl", sha("{}\n")],
+      ["PUT", `/internal/v1/eval-harness/users/${OWNER}/chats/${EVALUATOR_CHAT}/evidence/files`, "/manifest.json", sha('{"manifest":true}')],
+    ]);
+    await expect(harness.importEvidence({ handle: subject, idempotencyKey: "x", evidence, root: "/evidence" }))
+      .rejects.toMatchObject({ name: "SpHarnessError", retryable: false });
+  });
+
+  it("treats a rejected evidence write as retryable only for transient SP statuses", async () => {
+    const evidence = {
+      ref: { evidenceId: `sha256:${"a".repeat(64)}`, manifestSha256: "b".repeat(64), exportedAt: "x" },
+      manifestBytes: new Uint8Array(),
+      manifest: { artifacts: [], trajectory: { sha256: "c".repeat(64) } },
+      readBlob: async () => new Response("").body!,
+    } as unknown as EvidenceBundleReader;
+    for (const [status, retryable] of [[503, true], [409, false]] as const) {
+      const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
+        fetch: queuedFetch(new Response("no", { status })).fetch });
+      await expect(harness.importEvidence({ handle: evaluator, idempotencyKey: "k", evidence, root: "/evidence" }))
+        .rejects.toMatchObject({ name: "SpHarnessError", retryable, status });
+    }
   });
 });

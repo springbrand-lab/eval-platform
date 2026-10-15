@@ -72,11 +72,7 @@ function subjectHandle(sampling: SamplingState, harness: HarnessConfig): AgentHa
   };
 }
 
-function evaluatorHandle(
-  evaluation: EvaluationRecord,
-  harness: HarnessConfig,
-  sampling: SamplingState,
-): AgentHandle | undefined {
+function evaluatorHandle(evaluation: EvaluationRecord, harness: HarnessConfig): AgentHandle | undefined {
   if (!evaluation.chatId) return undefined;
   return {
     role: "evaluator",
@@ -84,10 +80,7 @@ function evaluatorHandle(
     ownerUserId: evaluation.evaluator.ownerUserId,
     chatId: evaluation.chatId,
     samplingId: evaluation.samplingId,
-    ...(sampling.subjectChatId ? { evaluationWorkspace: {
-      subject: { userId: sampling.subjectAgent.ownerUserId, chatId: sampling.subjectChatId },
-      evaluationId: evaluation.evaluationId,
-    } } : {}),
+    evaluationId: evaluation.evaluationId,
   };
 }
 
@@ -106,7 +99,7 @@ export async function interruptRun(context: StopContext, run: RuntimeRunRecord, 
     for (const evaluation of await context.records.evaluations(run.evaluationIds)) {
       const sampling = samplingById.get(evaluation.samplingId);
       if (!sampling) throw new Error(`Run ${run.runId} is missing Sampling ${evaluation.samplingId}`);
-      const handle = evaluatorHandle(evaluation, plans.evaluation.evaluationHarness, sampling);
+      const handle = evaluatorHandle(evaluation, plans.evaluation.evaluationHarness);
       if (handle && isPendingSamplingStatus(evaluation.status.status)) handles.push(handle);
     }
   }
@@ -213,7 +206,7 @@ function stoppedEvaluation(
     retryPolicy: config.retryPolicy,
     status: (record) => record.status.status,
     attempts: (record) => record.attempts,
-    handle: (record) => evaluatorHandle(record, config.evaluationHarness, sampling),
+    handle: (record) => evaluatorHandle(record, config.evaluationHarness),
     write: (record, expected) => context.store.updateEvaluation(record, expected),
     read: (record) => context.store.getEvaluation(record.evaluationId),
     async resumeObserved(record) {
@@ -228,7 +221,7 @@ function stoppedEvaluation(
       return requireRecord(await context.store.getEvaluation(record.evaluationId), "evaluation", record.evaluationId);
     },
     async collectEvidence(record, operationFound, persist) {
-      const handle = evaluatorHandle(record, config.evaluationHarness, sampling);
+      const handle = evaluatorHandle(record, config.evaluationHarness);
       if (!handle || !operationFound || !wasInterrupted(record.attempts) || record.output) return record;
       let output;
       try {
