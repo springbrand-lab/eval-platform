@@ -10,8 +10,11 @@ export const idempotencyKeySchema = z.string().min(1).max(IDENTIFIER_CHARS)
   .refine((value) => value === value.trim(), "must not have surrounding whitespace")
   .refine((value) => !CONTROL_CHARACTERS.test(value), "must not contain control characters");
 
-/** Runtime entity IDs (Project, Run, Sample, Sampling, Evaluation, Config) are opaque path-safe text. */
+/** Runtime entity IDs (Project, ProjectSample, Run, Sampling, Evaluation) are opaque path-safe text. */
 export const entityIdSchema = idempotencyKeySchema.refine((value) => !value.includes("/"), "must not contain '/'");
+
+/** ID lists that must not repeat an entry. */
+export const unique = (ids: readonly string[]) => new Set(ids).size === ids.length;
 
 export function jsonBodyContent<T extends z.ZodType>(schema: T) {
   return { required: true, content: { "application/json": { schema } } } as const;

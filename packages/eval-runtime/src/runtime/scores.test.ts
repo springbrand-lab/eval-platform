@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { publishEvaluationScore, readEvaluationScore, syncRunScores } from "./scores.js";
 
-const output = (result?: Record<string, unknown>) => ({
+const output = (result?: unknown, content = JSON.stringify(result)) => ({
   status: "succeeded" as const,
   artifacts: [],
   trajectory: { trajectoryId: "chat-2", source: "evaluator" as const, path: "/api/chats/chat-2/trajectory" },
-  ...(result === undefined ? {} : { result: result as never }),
+  ...(result === undefined ? {} : { structuredOutput: { path: "/evaluations/e/result.json", content } }),
 });
 const schema = { type: "object" };
 const accept = { validate: () => [] };
@@ -18,12 +18,18 @@ describe("Evaluator score", () => {
   });
 
   it.each([
-    [undefined, "has no result"],
+    [undefined, "has no result file"],
+    [[1], "must contain a JSON object"],
     [{ reason: "missing" }, "no numeric score"],
     [{ score: "8" }, "no numeric score"],
     [{ score: 8, reason: 1 }, "reason must be a string"],
   ])("explains why %j has no score", (result, problem) => {
     expect(readEvaluationScore(output(result), schema, accept)).toEqual({ problem: expect.stringContaining(problem) });
+  });
+
+  it("rejects a result file that is not strict JSON", () => {
+    expect(readEvaluationScore(output({}, '{"score":1,"score":2}'), schema, accept))
+      .toEqual({ problem: expect.stringContaining("not valid JSON") });
   });
 
   it("reports schema problems before reading the score", () => {
@@ -33,7 +39,7 @@ describe("Evaluator score", () => {
 
   it("describes a delivered and an undelivered score", async () => {
     const score = {
-      evaluationId: "e", samplingId: "s", projectId: "p", sampleId: "x", subjectChatId: "c1", evaluatorChatId: "c2", score: 1,
+      evaluationId: "e", samplingId: "s", projectId: "p", projectSampleId: "x", subjectChatId: "c1", evaluatorChatId: "c2", score: 1,
     };
     await expect(publishEvaluationScore(async () => undefined, score, () => "t")).resolves.toEqual({ status: "synced", at: "t" });
     await expect(publishEvaluationScore(async () => { throw new Error("down"); }, score, () => "t"))
@@ -63,7 +69,7 @@ describe("Run score re-sync", () => {
         getRun: async () => ({ evaluationIds: ["e1", "e2", "e3"] }) as never,
         getEvaluations: async () => records,
         getSamplings: async (ids) => ids.map((samplingId) => ({
-          samplingId, projectId: "p", sampleId: "x", subjectChatId: `subject-${samplingId}`,
+          samplingId, projectId: "p", projectSampleId: "x", subjectChatId: `subject-${samplingId}`,
         }) as never),
         updateEvaluation,
       },

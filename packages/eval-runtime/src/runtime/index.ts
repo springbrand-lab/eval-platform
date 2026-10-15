@@ -8,21 +8,21 @@ import type {
 import { RunResumer } from "./resume.js";
 
 export type {
-  AgentOption,
   EvalRunAdmission,
   EvalRunAdmissionDependencies,
   EvalRunQueries,
   EvalRunResumer,
   EvalRunResumerDependencies,
-  RuntimeAdmissionCatalog,
-  RuntimeCatalog,
-  RuntimeEvaluationContext,
-  Sample,
+  ProjectPlanReader,
+  ProjectSample,
+  RunPreview,
+  RunPreviewRequest,
   SamplingSnapshot,
-  RuntimeSamplingContext,
 } from "./model.js";
 export type {
   RuntimeRunAdmission,
+  RuntimeRunAdmissionCommand,
+  RuntimeRunPlanDigests,
   RuntimeRunRequestIdentity,
   RuntimeRunRecord,
   RuntimeRecoveryStore,
@@ -44,12 +44,7 @@ export {
   type RuntimeEntity,
   type RuntimePersistenceOutcome,
 } from "./errors.js";
-export {
-  createRetryController,
-  type RetryController,
-  type RetryDecision,
-  type RetryOperation,
-} from "./retry.js";
+export type { RetryController, RetryDecision, RetryOperation } from "./retry.js";
 export {
   publishEvaluationScore,
   readEvaluationScore,
@@ -58,18 +53,12 @@ export {
   type EvaluationScorePort,
   type ScoreSyncSummary,
 } from "./scores.js";
-export {
-  createAgentScheduler,
-  type AgentScheduler,
-  type AgentSchedulerOptions,
-} from "./scheduler.js";
 
 export function createEvalRunAdmission(dependencies: EvalRunAdmissionDependencies): EvalRunAdmission {
   const admission = new RunAdmission(dependencies);
   return {
-    start: (request) => admission.start(request),
-    evaluate: (request) => admission.evaluate(request),
-    pipeline: (request) => admission.pipeline(request),
+    preview: (request) => admission.preview(request),
+    submit: (request) => admission.submit(request),
   };
 }
 

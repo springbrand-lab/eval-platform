@@ -1,12 +1,13 @@
 import type { MetricNumber, ModelStatistics, ResourceDiagnostic, TokenStatistics } from "./model.js";
-import { identity, record, text, type FactEntry, type FactStream, type ResourceDiagnostics } from "./resource-facts.js";
+import { record, text } from "../json.js";
+import { identity, type FactEntry, type FactStream, type ResourceDiagnostics } from "./resource-facts.js";
 
 const USAGE_KINDS = new Set(["assistant_model", "compaction", "subagent", "chat_title"]);
 const TOKEN_BUCKETS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
 const USAGE_METRICS = [...TOKEN_BUCKETS, "reasoningTokens", "totalTokens", "providerUsd"] as const;
 type UsageMetric = (typeof USAGE_METRICS)[number];
 
-export interface UsageStatistics {
+interface UsageStatistics {
   readonly tokens: TokenStatistics;
   readonly providerUsd: MetricNumber;
   readonly byModel: readonly ModelStatistics[];

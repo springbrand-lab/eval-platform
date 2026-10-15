@@ -1,6 +1,12 @@
-import type { EvaluationRecord, RunPhases, Sampling } from "@eval-platform/eval-contracts";
+import type {
+  EvaluationRecord,
+  RunOperation,
+  RunPhases,
+  RunTargetSelector,
+  RunTargets,
+  Sampling,
+} from "@eval-platform/eval-contracts";
 import { equalJson } from "@eval-platform/eval-contracts";
-import type { RunConfigSnapshot } from "../config/index.js";
 import { describeAgentError } from "./agent-lifecycle.js";
 import type { RetryController, RetryDecision } from "./retry.js";
 import {
@@ -17,20 +23,46 @@ export interface RuntimeRunRequestIdentity {
   readonly requestFingerprint: string;
 }
 
+/** Plan digests a Run was admitted against; the Run stores no configuration body. */
+export interface RuntimeRunPlanDigests {
+  readonly execution: string;
+  /** Present for pipeline/evaluation Runs. */
+  readonly evaluation?: string;
+}
+
 export interface RuntimeRunRecord {
   readonly runId: string;
-  readonly samplingIds: readonly string[];
   readonly projectId: string;
   readonly sourceCommit: string;
+  readonly operation: RunOperation;
+  /** Derived from operation: execution, evaluation, or execution then evaluation. */
   readonly phases: RunPhases;
+  readonly selector: RunTargetSelector;
+  readonly targets: RunTargets;
+  /** execution/pipeline: the new Samplings; evaluation: the selected existing Samplings. */
+  readonly samplingIds: readonly string[];
+  /** The new EvaluationRecords, one per Sampling for pipeline/evaluation. */
   readonly evaluationIds: readonly string[];
-  /** Immutable effective configuration captured when this Run is admitted. */
-  readonly config: RunConfigSnapshot;
+  readonly planDigests: RuntimeRunPlanDigests;
   readonly requestIdentity: RuntimeRunRequestIdentity;
   /** Persisted stop intent; omitted until a stop is requested. */
   readonly stopRequested?: true;
   /** Stop cleanup completed; admission may open after all child stages are terminal. */
   readonly stopFinalized?: true;
+}
+
+/** Everything one admission transaction replaces and inserts. */
+export interface RuntimeRunAdmissionCommand {
+  readonly run: RuntimeRunRecord;
+  /**
+   * execution/pipeline: every current Sampling of `run.targets.projectSampleIds` plus
+   * `run.targets.samplingIds`, as read before the transaction; empty for evaluation.
+   */
+  readonly replacedSamplingIds: readonly string[];
+  /** New Samplings (execution/pipeline only). */
+  readonly samplings: readonly SamplingState[];
+  /** New EvaluationRecords (pipeline/evaluation only). */
+  readonly evaluations: readonly EvaluationRecord[];
 }
 
 export interface RuntimeRunAdmission {
@@ -45,19 +77,31 @@ export interface RuntimeStore {
   getRun(runId: string): Promise<RuntimeRunRecord | null>;
   /** Serialize the start of remote stage mutations with a saved stop request. */
   withRunDispatchGate<T>(runId: string, dispatch: () => Promise<T>): Promise<T>;
-  /** Persistent Project-scoped lookup used before mutable Config/Sample resolution. */
+  /** Persistent Project-scoped lookup used before reading the plan or current Samplings. */
   findRunByIdempotencyKey(projectId: string, idempotencyKey: string): Promise<RuntimeRunRecord | null>;
+  /** Current Samplings of these ProjectSamples, grouped in input order, each group ordered by samplingId. */
+  listProjectSamplings(projectId: string, projectSampleIds: readonly string[]): Promise<readonly SamplingState[]>;
   /**
-   * Atomically rechecks request identity and commits Run, Sampling, EvaluationRecord and
-   * effective-config snapshot data. A matching-key replay returns its original Run even
-   * while it is active; a new key is rejected if this Project has an unfinished Run.
-   * Implementations must use durable uniqueness constraints, not an in-memory map.
+   * One transaction under the Project row lock. It must:
+   * - reject a missing or soft-deleted Project, and a source-release mismatch for user Stores;
+   * - replay the Run of a matching key (same fingerprint) even while active, reject a different
+   *   fingerprint and a key whose Run a later Run superseded, then reject a new key while the
+   *   Project has an active Run;
+   * - refuse a Run carrying the Project's creation key once the Project has any Run
+   *   (`creation-superseded`);
+   * - recheck `run.planDigests` against the current plan, and for pipeline/evaluation require an
+   *   evaluation plan (else `evaluation-plan-required`);
+   * - recheck that `replacedSamplingIds` equals the current Sampling set of the targets (else
+   *   `stale-targets`), and for evaluation that every target Sampling still succeeded;
+   * - delete replaced Samplings with their EvaluationRecords and Run memberships, or for evaluation
+   *   only the targets' current EvaluationRecords; never touch unselected records;
+   * - insert the Run with the next Project sequence, its Samplings, EvaluationRecords and memberships
+   *   in SQL batches;
+   * - lock the evaluation plan for the first pipeline/evaluation Run, then enqueue the Worker job.
+   * A durable unique (project, idempotency key) constraint and the Run sequence, not process memory,
+   * enforce identity.
    */
-  createRunWithSamplings(
-    run: RuntimeRunRecord,
-    records: readonly SamplingState[],
-    evaluations: readonly EvaluationRecord[],
-  ): Promise<RuntimeRunAdmission>;
+  admitRun(command: RuntimeRunAdmissionCommand): Promise<RuntimeRunAdmission>;
   /** Atomically update only while the supplied previous facts still match. */
   updateEvaluation(record: EvaluationRecord, expected: EvaluationRecord): Promise<void>;
   getEvaluation(evaluationId: string): Promise<EvaluationRecord | null>;

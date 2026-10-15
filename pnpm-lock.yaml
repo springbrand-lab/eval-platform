@@ -186,6 +186,9 @@ importers:
       '@eval-platform/eval-runtime':
         specifier: workspace:*
         version: link:../eval-runtime
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
     devDependencies:
       typescript:
         specifier: ^7.0.2

@@ -9,7 +9,7 @@ import type {
 } from "@eval-platform/eval-contracts";
 import { dataInputSchema } from "@eval-platform/eval-dataset";
 
-import type { RuntimeEvaluationContext, Sample } from "./model.js";
+import type { ProjectSample, RuntimeEvaluationContext } from "./model.js";
 import { persistRuntimeRecord, readStageFailure } from "./store.js";
 import { RuntimeAdmissionConflictError } from "./errors.js";
 import {
@@ -29,10 +29,10 @@ export interface EvaluateSamplingInput {
   readonly evaluationOutputSchema: EvaluationOutputSchema;
 }
 
-export function requireEvaluationPrompt(sample: Sample): string {
+export function requireEvaluationPrompt(sample: ProjectSample): string {
   const prompt = sample.data.evalPrompt;
   if (prompt === undefined) {
-    throw new RuntimeAdmissionConflictError("evaluation-prompt", `Sample ${sample.sampleId} has no evalPrompt`);
+    throw new RuntimeAdmissionConflictError("evaluation-prompt", `ProjectSample ${sample.projectSampleId} has no evalPrompt`);
   }
   return prompt;
 }
@@ -171,30 +171,29 @@ export async function evaluateSampling(
         handle,
         ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
       }),
-      // A result that breaks the output schema is retried like any other failed Evaluator output.
-      isSuccessfulOutput: (output) => output.status === "succeeded" && "score" in scoreOf(output),
-      outputFailure: (output) => {
-        const scored = output.status === "succeeded" ? scoreOf(output) : undefined;
-        const message = scored && "problem" in scored ? scored.problem : output.error ?? "evaluation output failed";
-        return new AgentOperationError(message, true, "llm");
-      },
+      isSuccessfulOutput: (output) => output.status === "succeeded",
+      outputFailure: (output) => new AgentOperationError(
+        output.error ?? "evaluation output failed",
+        true,
+        "llm",
+      ),
     });
 
+    // The raw result file stays the record of truth (Metrics validates it); only a valid score is synced.
     const scored = scoreOf(result.output);
-    if (!("score" in scored)) throw new AgentOperationError(scored.problem, false, "llm");
     await persistEvaluation({
       ...currentEvaluation,
       evaluator: agentConfig,
       status: { status: "succeeded" },
-      output: { ...result.output, ...scored },
+      output: "score" in scored ? { ...result.output, ...scored } : result.output,
     });
     const publish = dependencies.scores?.publish?.bind(dependencies.scores);
-    if (publish) {
+    if (publish && "score" in scored) {
       const scoreSync = await publishEvaluationScore(publish, {
         evaluationId: currentEvaluation.evaluationId,
         samplingId: sampling.samplingId,
         projectId: sampling.projectId,
-        sampleId: sampling.sampleId,
+        projectSampleId: sampling.projectSampleId,
         subjectChatId,
         evaluatorChatId: chatId,
         ...scored,

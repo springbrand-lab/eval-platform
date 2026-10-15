@@ -21,16 +21,17 @@ import {
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import {
+  AgentConfigFrozenError,
   BundleResourceInUseError,
   BundleResourceNotFoundError,
   CatalogInputError,
   CatalogPayloadTooLargeError,
-  ConfigReferenceError,
-  DatasetInUseError,
-  EvaluationSelectionTooLargeError,
-  OutputSchemaInUseError,
   OutputSchemaNotFoundError,
+  ProjectCreationKeyTakenError,
+  ProjectEvaluationPlanLockedError,
+  ProjectIdempotencyConflictError,
   ProjectRunStopConflictError,
+  RunTargetsTooLargeError,
 } from "../db/errors.js";
 import { BundleFileError, type BundleFileErrorReason } from "../sp/bundle-errors.js";
 import { EvalSpApiError, EvalSpTransportError } from "../sp/client.js";
@@ -38,20 +39,20 @@ import { EvalSpApiError, EvalSpTransportError } from "../sp/client.js";
 const runtimeEntityCodes = {
   project: "PROJECT_NOT_FOUND",
   run: "RUN_NOT_FOUND",
-  sample: "SAMPLE_NOT_FOUND",
+  dataset: "DATASET_NOT_FOUND",
+  "project-sample": "PROJECT_SAMPLE_NOT_FOUND",
   sampling: "SAMPLING_NOT_FOUND",
   evaluation: "EVALUATION_NOT_FOUND",
-  "execution-config": "CONFIG_NOT_FOUND",
-  "evaluation-config": "CONFIG_NOT_FOUND",
-  "pipeline-config": "CONFIG_NOT_FOUND",
 } as const satisfies Record<RuntimeEntity, HttpErrorCode>;
 
 const admissionConflictCodes = {
   "source-branch": "PROJECT_SOURCE_BRANCH_CONFLICT",
-  "launch-selection": "PROJECT_LAUNCH_SELECTION_CONFLICT",
-  "output-schema": "PROJECT_OUTPUT_SCHEMA_CONFLICT",
-  "empty-project": "PROJECT_EMPTY",
-  "evaluation-prompt": "SAMPLE_EVALUATION_PROMPT_MISSING",
+  "evaluation-plan-required": "PROJECT_EVALUATION_PLAN_REQUIRED",
+  "plan-changed": "PROJECT_PLAN_CHANGED",
+  "stale-targets": "RUN_TARGETS_STALE",
+  "empty-targets": "RUN_TARGETS_EMPTY",
+  "creation-superseded": "RUN_IDEMPOTENCY_CONFLICT",
+  "evaluation-prompt": "PROJECT_SAMPLE_EVALUATION_PROMPT_MISSING",
   "sampling-unavailable": "SAMPLING_UNAVAILABLE",
 } as const satisfies Record<RuntimeAdmissionConflictReason, HttpErrorCode>;
 
@@ -67,7 +68,7 @@ const metricsEntityCodes = {
   project: "PROJECT_NOT_FOUND",
   run: "RUN_NOT_FOUND",
   dataset: "DATASET_NOT_FOUND",
-  sample: "SAMPLE_NOT_FOUND",
+  "project-sample": "PROJECT_SAMPLE_NOT_FOUND",
   sampling: "SAMPLING_NOT_FOUND",
 } as const satisfies Record<MetricsEntityNotFoundError["entity"], HttpErrorCode>;
 
@@ -84,16 +85,16 @@ const publicMessageCodes = new Map<ErrorClass, HttpErrorCode>([
   [RuntimeRunIdentityConflictError, "RUN_IDEMPOTENCY_CONFLICT"],
   [RuntimeRunStoppedError, "RUN_STOPPED"],
   [ProjectRunStopConflictError, "PROJECT_NO_ACTIVE_RUN"],
+  [ProjectEvaluationPlanLockedError, "PROJECT_EVALUATION_PLAN_LOCKED"],
+  [ProjectIdempotencyConflictError, "PROJECT_IDEMPOTENCY_CONFLICT"],
+  [AgentConfigFrozenError, "AGENT_CONFIG_FROZEN"],
   [DatasetIdentityConflictError, "DATASET_IDENTITY_CONFLICT"],
-  [DatasetInUseError, "DATASET_IN_USE"],
   [DataInUseError, "DATA_IN_USE"],
-  [ConfigReferenceError, "CONFIG_REFERENCE_INVALID"],
   [CatalogPayloadTooLargeError, "CATALOG_PAYLOAD_TOO_LARGE"],
-  [EvaluationSelectionTooLargeError, "EVALUATION_SELECTION_TOO_LARGE"],
+  [RunTargetsTooLargeError, "RUN_TARGETS_TOO_LARGE"],
   [BundleResourceNotFoundError, "BUNDLE_RESOURCE_NOT_FOUND"],
   [BundleResourceInUseError, "BUNDLE_RESOURCE_IN_USE"],
   [OutputSchemaNotFoundError, "OUTPUT_SCHEMA_NOT_FOUND"],
-  [OutputSchemaInUseError, "OUTPUT_SCHEMA_IN_USE"],
   [DatasetInputError, "DATASET_INPUT_INVALID"],
   [MetricsQueryError, "METRICS_QUERY_INVALID"],
 ]);
@@ -101,6 +102,7 @@ const publicMessageCodes = new Map<ErrorClass, HttpErrorCode>([
 /** Errors that describe persisted Runtime facts; the response keeps the catalog text. */
 const catalogMessageCodes = new Map<ErrorClass, HttpErrorCode>([
   [RuntimeRecordConflictError, "RUNTIME_RECORD_CONFLICT"],
+  [ProjectCreationKeyTakenError, "RUNTIME_RECORD_CONFLICT"],
   [RuntimeRecordPersistenceError, "RUNTIME_PERSISTENCE_UNCONFIRMED"],
 ]);
 
@@ -150,6 +152,13 @@ export { errorDiagnostics } from "@springbrand/http/server";
 export function apiError(error: Error): HttpError {
   const http = toHttpError(error);
   if (http) return http;
+  // A failure followed by a failed compensation answers as the failure and logs both.
+  if (error instanceof AggregateError && error.errors[0] instanceof Error) {
+    const primary = apiError(error.errors[0]);
+    return new HttpError(primary.code, primary.message, {
+      cause: error, ...(primary.errors === undefined ? {} : { errors: primary.errors }),
+    });
+  }
   if (error instanceof RuntimeEntityNotFoundError) return new HttpError(runtimeEntityCodes[error.entity], error.message, { cause: error });
   if (error instanceof RuntimeAdmissionConflictError) return new HttpError(admissionConflictCodes[error.reason], error.message, { cause: error });
   if (error instanceof RuntimeInputError) return fieldError("RUNTIME_INPUT_INVALID", error);

@@ -116,7 +116,7 @@ export const remove = createRoute({
   method: "delete",
   path: "/{datasetId}",
   tags: ["Dataset"],
-  summary: "Soft-delete an unreferenced Dataset; deleting an absent Dataset succeeds",
+  summary: "Soft-delete a Dataset; Project snapshots are unaffected and deleting an absent Dataset succeeds",
   request: { params },
   responses: {
     ...deletedResponse,

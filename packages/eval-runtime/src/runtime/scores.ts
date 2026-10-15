@@ -1,4 +1,5 @@
 import type { EvaluationAgentOutput, EvaluationOutputSchema, ScoreSyncState } from "@eval-platform/eval-contracts";
+import { parseStrictJson } from "@eval-platform/eval-dataset";
 import type { RuntimeStore } from "./store.js";
 
 /** One scored Evaluation, addressed to the Subject's SP Chat (the Langfuse session of its traces). */
@@ -6,7 +7,7 @@ export interface EvaluationScore {
   readonly evaluationId: string;
   readonly samplingId: string;
   readonly projectId: string;
-  readonly sampleId: string;
+  readonly projectSampleId: string;
   readonly subjectChatId: string;
   readonly evaluatorChatId: string;
   readonly score: number;
@@ -15,19 +16,29 @@ export interface EvaluationScore {
 
 export interface EvaluationScorePort {
   /** Problems found checking a result against the Project's output schema; empty when it conforms. */
-  validate(schema: EvaluationOutputSchema, result: NonNullable<EvaluationAgentOutput["result"]>): readonly string[];
+  validate(schema: EvaluationOutputSchema, result: unknown): readonly string[];
   /** Deliver one score; repeating it for the same Evaluation must overwrite, not duplicate. */
   publish?(score: EvaluationScore): Promise<void>;
 }
 
-/** Read the score from a succeeded Evaluator output, or say why it has none. */
+/** Read the judge score from the Evaluator's raw result file, or say why it has none. */
 export function readEvaluationScore(
   output: EvaluationAgentOutput,
   schema: EvaluationOutputSchema,
   port: EvaluationScorePort | undefined,
 ): { readonly score: number; readonly reason?: string } | { readonly problem: string } {
-  const result = output.result;
-  if (result === undefined) return { problem: "Evaluator output has no result" };
+  const content = output.structuredOutput?.content;
+  if (content === undefined) return { problem: "Evaluator output has no result file" };
+  let parsed: unknown;
+  try {
+    parsed = parseStrictJson(content);
+  } catch (error) {
+    return { problem: `Evaluator result file is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { problem: "Evaluator result file must contain a JSON object" };
+  }
+  const result = parsed as Readonly<Record<string, unknown>>;
   const problems = port?.validate(schema, result) ?? [];
   if (problems.length > 0) {
     return { problem: `Evaluator result does not follow the output schema: ${problems.join("; ")}` };
@@ -87,7 +98,7 @@ export async function syncRunScores(input: {
       evaluationId: evaluation.evaluationId,
       samplingId: sampling.samplingId,
       projectId: sampling.projectId,
-      sampleId: sampling.sampleId,
+      projectSampleId: sampling.projectSampleId,
       subjectChatId: sampling.subjectChatId,
       evaluatorChatId: evaluation.chatId,
       score,

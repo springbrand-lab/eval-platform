@@ -1,6 +1,12 @@
-import type { EvaluationRecord, ProjectInitialLaunch, Sampling } from "@eval-platform/eval-contracts";
-import { DatasetEntityNotFoundError } from "@eval-platform/eval-dataset";
-import type { RuntimeRecoveryStore, RuntimeRunAdmission, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
+import type { RunSnapshot } from "@eval-platform/eval-contracts";
+import type {
+  RuntimeRecoveryStore,
+  RuntimeRunAdmission,
+  RuntimeRunAdmissionCommand,
+  RuntimeRunRecord,
+  RuntimeStore,
+  SamplingState,
+} from "@eval-platform/eval-runtime";
 import {
   RuntimeAdmissionConflictError,
   RuntimeEntityNotFoundError,
@@ -10,27 +16,39 @@ import {
   RuntimeRunIdentityConflictError,
   RuntimeRunStoppedError,
 } from "@eval-platform/eval-runtime";
-import { and, eq, inArray, isNull } from "drizzle-orm";
-import { selectByIds, sqlBatches } from "./batch.js";
+import { and, eq, gt, inArray, max } from "drizzle-orm";
+import { addToGroup, selectByIds, sqlBatches } from "./batch.js";
 import type { RunQueue } from "../run-worker-queue.js";
-import { constraintViolation, type EvalDb } from "./client.js";
+import { constraintViolation, READ_SNAPSHOT, type EvalDb } from "./client.js";
 import { ProjectRunStopConflictError } from "./errors.js";
 import { requireOwnerUserId } from "./owner.js";
+import { visibleProject } from "./project-plans.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
 import {
   evaluationFacts,
   listSamplingEvaluations,
+  projectHasRun,
   readEvaluations,
   readRunRecords,
   readSamplings,
   runActive,
   runFinished,
   samplingFacts,
+  samplingFromRow,
   samplingSucceeded,
   type RecordReader,
   type RunRecordScope,
 } from "./run-records.js";
-import { datasets, evaluations, projects, runEvaluations, runRequestKeys, runs, runSamplings, samplings } from "./schema.js";
+import {
+  evaluations,
+  projectEvaluationPlans,
+  projectExecutionPlans,
+  projects,
+  runEvaluations,
+  runs,
+  runSamplings,
+  samplings,
+} from "./schema.js";
 
 type RuntimeStoreScope =
   | { readonly kind: "worker" }
@@ -38,58 +56,64 @@ type RuntimeStoreScope =
 
 type AdmissionWriter = Parameters<Parameters<EvalDb["transaction"]>[0]>[0];
 
-function launchFor(run: RuntimeRunRecord): ProjectInitialLaunch | null {
-  switch (run.config.operation) {
-    case "execution": return { operation: "execution", configId: run.config.execution.configId };
-    case "pipeline": return { operation: "pipeline", configId: run.config.pipeline.configId };
-    case "evaluation": return null;
-  }
-}
+export type CurrentRun = Pick<RunSnapshot, "runId" | "stopRequested">;
 
 function sameIds(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
+function sameIdSet(left: readonly string[], right: readonly string[]): boolean {
+  const set = new Set(left);
+  return set.size === new Set(right).size && right.every((id) => set.has(id));
+}
+
 /** Checks the submitted facts against each other; PostgreSQL constraints guard everything they can express. */
-function validateAdmission(run: RuntimeRunRecord, records: readonly Sampling[], judges: readonly EvaluationRecord[]): void {
+function validateAdmission({ run, samplings: records, evaluations: newEvaluations, replacedSamplingIds }: RuntimeRunAdmissionCommand): void {
   if (run.stopRequested || run.stopFinalized) {
     throw new RuntimeInputError("New Run cannot be stopped at admission", "stopRequested");
   }
-  if (records.length === 0) throw new RuntimeInputError("Run must contain Samplings", "samplingIds");
-  if (!sameIds(run.samplingIds, records.map((record) => record.samplingId))) {
-    throw new RuntimeInputError("Run Sampling scope must match the submitted records", "samplingIds");
+  if (run.samplingIds.length === 0) throw new RuntimeAdmissionConflictError("empty-targets", "Run selects no Samplings");
+  const evaluates = run.operation !== "execution";
+  if ((run.planDigests.evaluation !== undefined) !== evaluates) {
+    throw new RuntimeInputError("Run must record an evaluation plan digest exactly when it evaluates", "planDigests");
   }
-  if (!sameIds(run.evaluationIds, judges.map((judge) => judge.evaluationId))) {
+  if (run.operation === "evaluation") {
+    if (records.length > 0 || replacedSamplingIds.length > 0 || run.targets.projectSampleIds.length > 0
+      || !sameIds(run.samplingIds, run.targets.samplingIds)) {
+      throw new RuntimeInputError("Evaluation Runs reuse exactly their target Samplings", "samplingIds");
+    }
+  } else {
+    if (!sameIds(run.samplingIds, records.map((record) => record.samplingId))) {
+      throw new RuntimeInputError("Run Sampling scope must match the submitted records", "samplingIds");
+    }
+    if (records.some((record) => record.projectId !== run.projectId)) {
+      throw new RuntimeInputError("Run contains Samplings outside its Project", "projectId");
+    }
+  }
+  if (!sameIds(run.evaluationIds, newEvaluations.map((evaluation) => evaluation.evaluationId))) {
     throw new RuntimeInputError("Run Evaluation scope must match the submitted records", "evaluationIds");
   }
-  if (records.some((record) => record.projectId !== run.projectId)) {
-    throw new RuntimeInputError("Run contains Samplings outside its Project", "projectId");
-  }
-  if (judges.length !== (run.config.operation === "execution" ? 0 : records.length)) {
+  if (evaluates ? !sameIds(newEvaluations.map((evaluation) => evaluation.samplingId), run.samplingIds) : newEvaluations.length > 0) {
     throw new RuntimeInputError("Run must evaluate each Sampling exactly when it includes evaluation", "evaluationIds");
   }
 }
 
+/** The Run bound to a Project-scoped key; a key whose Run a later admission superseded may not replay. */
 async function findRunByKey(
   reader: RecordReader,
   projectId: string,
   idempotencyKey: string,
   ownerUserId: string | undefined,
 ): Promise<RuntimeRunRecord | null> {
-  const [row] = await reader.select({ runId: runs.runId, ownerUserId: runs.ownerUserId }).from(runs)
+  const [row] = await reader.select({ runId: runs.runId, ownerUserId: runs.ownerUserId, sequence: runs.sequence }).from(runs)
     .where(and(eq(runs.projectId, projectId), eq(runs.idempotencyKey, idempotencyKey),
       ownerUserId === undefined ? undefined : eq(runs.ownerUserId, ownerUserId)));
-  if (row) {
-    const [record] = await readRunRecords(reader, [row.runId], {
-      kind: "project", ownerUserId: row.ownerUserId, projectId,
-    });
-    return record ?? null;
-  }
-  const [retired] = await reader.select({ idempotencyKey: runRequestKeys.idempotencyKey }).from(runRequestKeys)
-    .where(and(eq(runRequestKeys.projectId, projectId), eq(runRequestKeys.idempotencyKey, idempotencyKey),
-      ownerUserId === undefined ? undefined : eq(runRequestKeys.ownerUserId, ownerUserId)));
-  if (retired) throw new RuntimeRunIdentityConflictError("idempotency key belongs to a superseded Run");
-  return null;
+  if (!row) return null;
+  const [later] = await reader.select({ runId: runs.runId }).from(runs)
+    .where(and(eq(runs.projectId, projectId), gt(runs.sequence, row.sequence))).limit(1);
+  if (later) throw new RuntimeRunIdentityConflictError("idempotency key belongs to a superseded Run");
+  const [record] = await readRunRecords(reader, [row.runId], { kind: "project", ownerUserId: row.ownerUserId, projectId });
+  return record ?? null;
 }
 
 async function findByIdentity(
@@ -105,30 +129,51 @@ async function findByIdentity(
   return record;
 }
 
-/** Replaces the Project's prior Runs and evaluations, then inserts the new Run in one transaction. */
-async function admitRun(
-  transaction: AdmissionWriter,
-  scope: RuntimeStoreScope,
-  runQueue: RunQueue,
-  run: RuntimeRunRecord,
-  records: readonly Sampling[],
-  judges: readonly EvaluationRecord[],
-): Promise<RuntimeRunAdmission> {
+/** Locks and returns the current Samplings of execution targets, keyed by Sampling ID with their ProjectSample. */
+async function lockExecutionTargets(
+  transaction: AdmissionWriter, owner: string, run: RuntimeRunRecord,
+): Promise<Map<string, string>> {
+  const current = new Map<string, string>();
+  const fields = { samplingId: samplings.samplingId, projectSampleId: samplings.projectSampleId };
+  const scoped = and(eq(samplings.ownerUserId, owner), eq(samplings.projectId, run.projectId));
+  for (const batch of sqlBatches(run.targets.projectSampleIds)) {
+    for (const row of await transaction.select(fields).from(samplings)
+      .where(and(scoped, inArray(samplings.projectSampleId, batch))).for("update")) current.set(row.samplingId, row.projectSampleId);
+  }
+  for (const batch of sqlBatches(run.targets.samplingIds)) {
+    for (const row of await transaction.select(fields).from(samplings)
+      .where(and(scoped, inArray(samplings.samplingId, batch))).for("update")) current.set(row.samplingId, row.projectSampleId);
+  }
+  return current;
+}
+
+/**
+ * Locks the Project row and resolves the request identity: a replay returns the existing Run, the
+ * creation key is refused once the Project has any Run, and a new key needs an idle Project on the
+ * active release. Returns the owner for the remaining steps.
+ */
+async function lockForAdmission(
+  transaction: AdmissionWriter, scope: RuntimeStoreScope, run: RuntimeRunRecord,
+): Promise<{ readonly owner: string; readonly executionPlanDigest: string; readonly existing: RuntimeRunRecord | null }> {
+  // Every Project row is written with its execution plan in the creation transaction.
   const [project] = await transaction.select({
-    ownerUserId: projects.ownerUserId,
-    sourceBranch: projects.sourceBranch,
-    evaluationOutputSchemaId: projects.evaluationOutputSchemaId,
-    evaluationOutputSchemaLocked: projects.evaluationOutputSchemaLocked,
-    initialLaunch: projects.initialLaunch,
+    ownerUserId: projects.ownerUserId, sourceBranch: projects.sourceBranch, creationKey: projects.creationKey,
+    executionPlanDigest: projectExecutionPlans.digest,
   })
     .from(projects)
-    .where(and(eq(projects.projectId, run.projectId),
-      scope.kind === "user" ? eq(projects.ownerUserId, scope.ownerUserId) : undefined))
-    .for("update");
+    .innerJoin(projectExecutionPlans, eq(projectExecutionPlans.projectId, projects.projectId))
+    .where(visibleProject(run.projectId, scope.kind === "user" ? scope.ownerUserId : undefined))
+    .for("update", { of: projects });
   if (!project) throw new RuntimeEntityNotFoundError("project", run.projectId);
   const owner = project.ownerUserId;
+  const { executionPlanDigest } = project;
   const existing = await findByIdentity(transaction, owner, run.projectId, run.requestIdentity);
-  if (existing) return { run: existing, created: false };
+  if (existing) return { owner, executionPlanDigest, existing };
+  // A creation key admits only the Project's very first Run; once any Run exists the creation was superseded.
+  if (run.requestIdentity.idempotencyKey === project.creationKey && await projectHasRun(transaction, run.projectId)) {
+    throw new RuntimeAdmissionConflictError("creation-superseded",
+      `Project ${run.projectId} already has Runs; its creation no longer admits a first Run`);
+  }
   const [active] = await transaction.select({ runId: runs.runId }).from(runs)
     .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, run.projectId), runActive(transaction)))
     .limit(1);
@@ -138,90 +183,139 @@ async function admitRun(
     throw new RuntimeAdmissionConflictError("source-branch",
       "Project source branch or Run source commit differs from the active Eval SP release");
   }
-  if (run.config.operation !== "execution" && project.evaluationOutputSchemaId === null) {
-    throw new RuntimeAdmissionConflictError("output-schema",
-      "Project evaluation output JSON Schema must be bound before evaluation admission");
-  }
-  const launch = launchFor(run);
-  if (project.initialLaunch === null && launch === null) {
-    throw new RuntimeAdmissionConflictError("empty-project",
-      "An empty Project cannot start with evaluation-only; select successful Samplings in an existing Project");
-  }
-  if (project.initialLaunch !== null && launch !== null
-    && (project.initialLaunch.operation !== launch.operation || project.initialLaunch.configId !== launch.configId)) {
-    throw new RuntimeAdmissionConflictError("launch-selection", "Project launch selection cannot change after its first Run");
-  }
-  if (run.config.operation !== "evaluation") {
-    const { datasetId } = run.config.execution;
-    const [dataset] = await transaction.select({ datasetId: datasets.datasetId }).from(datasets)
-      .where(and(eq(datasets.ownerUserId, owner), eq(datasets.datasetId, datasetId), isNull(datasets.deletedAt)))
-      .for("share");
-    if (!dataset) throw new DatasetEntityNotFoundError("dataset", datasetId);
-  }
+  return { owner, executionPlanDigest, existing: null };
+}
 
-  const projectSamplingIds = transaction.select({ samplingId: samplings.samplingId }).from(samplings)
-    .where(and(eq(samplings.ownerUserId, owner), eq(samplings.projectId, run.projectId)));
-  await transaction.delete(runs).where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, run.projectId)));
-  await transaction.delete(evaluations)
-    .where(and(eq(evaluations.ownerUserId, owner), inArray(evaluations.samplingId, projectSamplingIds)));
-  if (run.config.operation !== "evaluation") {
-    await transaction.delete(samplings).where(and(eq(samplings.ownerUserId, owner), eq(samplings.projectId, run.projectId)));
+/** Rechecks the plan digests the Run was prepared against; returns whether the evaluation plan still needs locking. */
+async function checkPlanDigests(
+  transaction: AdmissionWriter, run: RuntimeRunRecord, executionPlanDigest: string,
+): Promise<{ readonly lockEvaluationPlan: boolean }> {
+  const evaluates = run.operation !== "execution";
+  const [evaluationPlan] = await transaction.select({ digest: projectEvaluationPlans.digest, lockedAt: projectEvaluationPlans.lockedAt })
+    .from(projectEvaluationPlans).where(eq(projectEvaluationPlans.projectId, run.projectId));
+  if (evaluates && !evaluationPlan) {
+    throw new RuntimeAdmissionConflictError("evaluation-plan-required", "Project has no evaluation plan");
   }
-  await transaction.insert(runRequestKeys).values({
-    ownerUserId: owner, projectId: run.projectId, idempotencyKey: run.requestIdentity.idempotencyKey,
-  });
-  const [inserted] = await transaction.insert(runs).values({
-    runId: run.runId,
-    ownerUserId: owner,
-    projectId: run.projectId,
-    sourceCommit: run.sourceCommit,
-    phases: run.phases,
-    config: run.config,
-    idempotencyKey: run.requestIdentity.idempotencyKey,
-    requestFingerprint: run.requestIdentity.requestFingerprint,
-  }).onConflictDoNothing().returning({ runId: runs.runId });
-  if (!inserted) throw new RuntimeRunIdentityConflictError(`Run identity already exists: ${run.runId}`);
+  if (executionPlanDigest !== run.planDigests.execution
+    || (evaluates && evaluationPlan?.digest !== run.planDigests.evaluation)) {
+    throw new RuntimeAdmissionConflictError("plan-changed", "Project plan changed after the Run was prepared");
+  }
+  return { lockEvaluationPlan: evaluates && evaluationPlan?.lockedAt === null };
+}
 
-  if (run.config.operation === "evaluation") {
+/**
+ * Locks the target records and rechecks them against the current Project state. Target ProjectSamples
+ * need no separate pass: the unchanged execution digest covers them, and the Sampling → ProjectSample
+ * foreign key rejects a new Sampling of an unknown one.
+ */
+async function lockTargets(transaction: AdmissionWriter, owner: string, command: RuntimeRunAdmissionCommand): Promise<void> {
+  const { run, replacedSamplingIds, samplings: newSamplings } = command;
+
+  if (run.operation === "evaluation") {
     const available = await selectByIds(run.samplingIds, (batch) => transaction.select({ samplingId: samplings.samplingId })
       .from(samplings).where(and(eq(samplings.ownerUserId, owner), eq(samplings.projectId, run.projectId),
-        inArray(samplings.samplingId, batch), samplingSucceeded())).for("share"), (row) => row.samplingId);
+        inArray(samplings.samplingId, batch), samplingSucceeded())).for("update"), (row) => row.samplingId);
     const unavailable = run.samplingIds.find((_samplingId, index) => available[index] === null);
     if (unavailable !== undefined) {
       throw new RuntimeAdmissionConflictError("sampling-unavailable",
         `Sampling ${unavailable} has no successful execution in Project ${run.projectId}`);
     }
-  } else {
-    for (const batch of sqlBatches(records)) {
-      await transaction.insert(samplings).values(batch.map((record) => ({
-        samplingId: record.samplingId, ownerUserId: owner, projectId: record.projectId,
-        sampleId: record.sampleId, facts: samplingFacts(record),
-      })));
-    }
+    return;
+  }
+  const current = await lockExecutionTargets(transaction, owner, run);
+  if (run.targets.samplingIds.some((samplingId) => !current.has(samplingId))
+    || !sameIdSet([...current.keys()], replacedSamplingIds)) {
+    throw new RuntimeAdmissionConflictError("stale-targets", "Run targets no longer match the Project's current Samplings");
+  }
+  const allowed = new Set([...run.targets.projectSampleIds, ...current.values()]);
+  if (newSamplings.some((record) => !allowed.has(record.projectSampleId))) {
+    throw new RuntimeInputError("New Samplings must belong to the Run targets", "samplings");
+  }
+}
+
+/** Deletes only the selected records: replaced Samplings with their Evaluations and memberships, or for evaluation the targets' Evaluations. */
+async function clearSelected(transaction: AdmissionWriter, owner: string, command: RuntimeRunAdmissionCommand): Promise<void> {
+  const { run } = command;
+  const cleared = run.operation === "evaluation" ? run.samplingIds : command.replacedSamplingIds;
+  for (const batch of sqlBatches(cleared)) {
+    await transaction.delete(runEvaluations).where(and(eq(runEvaluations.ownerUserId, owner), inArray(runEvaluations.samplingId, batch)));
+    await transaction.delete(evaluations).where(and(eq(evaluations.ownerUserId, owner), inArray(evaluations.samplingId, batch)));
+    if (run.operation === "evaluation") continue;
+    await transaction.delete(runSamplings).where(and(eq(runSamplings.ownerUserId, owner), inArray(runSamplings.samplingId, batch)));
+    await transaction.delete(samplings).where(and(eq(samplings.ownerUserId, owner), inArray(samplings.samplingId, batch)));
+  }
+}
+
+/** Inserts the Run with the next Project sequence, its new records and memberships, in SQL batches. */
+async function insertRun(transaction: AdmissionWriter, owner: string, command: RuntimeRunAdmissionCommand): Promise<void> {
+  const { run, samplings: newSamplings, evaluations: newEvaluations } = command;
+  const [{ latest } = { latest: null }] = await transaction.select({ latest: max(runs.sequence) }).from(runs)
+    .where(eq(runs.projectId, run.projectId));
+  const [inserted] = await transaction.insert(runs).values({
+    runId: run.runId,
+    ownerUserId: owner,
+    projectId: run.projectId,
+    sequence: (latest ?? 0) + 1,
+    sourceCommit: run.sourceCommit,
+    operation: run.operation,
+    phases: run.phases,
+    selector: run.selector,
+    targets: run.targets,
+    executionPlanDigest: run.planDigests.execution,
+    evaluationPlanDigest: run.planDigests.evaluation ?? null,
+    idempotencyKey: run.requestIdentity.idempotencyKey,
+    requestFingerprint: run.requestIdentity.requestFingerprint,
+  }).onConflictDoNothing().returning({ runId: runs.runId });
+  if (!inserted) throw new RuntimeRunIdentityConflictError(`Run identity already exists: ${run.runId}`);
+
+  for (const batch of sqlBatches(newSamplings)) {
+    await transaction.insert(samplings).values(batch.map((record) => ({
+      samplingId: record.samplingId, ownerUserId: owner, projectId: record.projectId,
+      projectSampleId: record.projectSampleId, facts: samplingFacts(record),
+    })));
   }
   const memberships = run.samplingIds.map((samplingId, position) => ({
     ownerUserId: owner, runId: run.runId, samplingId, position,
   }));
   for (const batch of sqlBatches(memberships)) await transaction.insert(runSamplings).values(batch);
-  for (const batch of sqlBatches(judges)) {
-    await transaction.insert(evaluations).values(batch.map((judge) => ({
-      evaluationId: judge.evaluationId, ownerUserId: owner, samplingId: judge.samplingId, facts: evaluationFacts(judge),
+  for (const batch of sqlBatches(newEvaluations)) {
+    await transaction.insert(evaluations).values(batch.map((evaluation) => ({
+      evaluationId: evaluation.evaluationId, ownerUserId: owner, samplingId: evaluation.samplingId, facts: evaluationFacts(evaluation),
     })));
   }
-  const evaluationMemberships = judges.map((judge, position) => ({
-    ownerUserId: owner, runId: run.runId, evaluationId: judge.evaluationId, samplingId: judge.samplingId, position,
+  const evaluationMemberships = newEvaluations.map((evaluation, position) => ({
+    ownerUserId: owner, runId: run.runId, evaluationId: evaluation.evaluationId, samplingId: evaluation.samplingId, position,
   }));
   for (const batch of sqlBatches(evaluationMemberships)) await transaction.insert(runEvaluations).values(batch);
-  if ((project.initialLaunch === null && launch !== null) ||
-    (run.config.operation !== "execution" && !project.evaluationOutputSchemaLocked)) {
-    await transaction.update(projects).set({
-      ...(project.initialLaunch === null && launch !== null ? { initialLaunch: launch } : {}),
-      ...(run.config.operation !== "execution" ? { evaluationOutputSchemaLocked: true } : {}),
-    })
-      .where(eq(projects.projectId, run.projectId));
+}
+
+/** Replaces only the selected records and inserts the new Run in one transaction under the Project row lock. */
+async function admitRun(
+  transaction: AdmissionWriter,
+  scope: RuntimeStoreScope,
+  runQueue: RunQueue,
+  command: RuntimeRunAdmissionCommand,
+): Promise<RuntimeRunAdmission> {
+  const { run } = command;
+  const { owner, executionPlanDigest, existing } = await lockForAdmission(transaction, scope, run);
+  if (existing) return { run: existing, created: false };
+  const { lockEvaluationPlan } = await checkPlanDigests(transaction, run, executionPlanDigest);
+  await lockTargets(transaction, owner, command);
+  await clearSelected(transaction, owner, command);
+  await insertRun(transaction, owner, command);
+  if (lockEvaluationPlan) {
+    await transaction.update(projectEvaluationPlans).set({ lockedAt: new Date() })
+      .where(eq(projectEvaluationPlans.projectId, run.projectId));
   }
   await runQueue.enqueue(transaction, run.runId);
   return { run: structuredClone(run), created: true };
+}
+
+/** The Project's unfinished Run, if any. */
+export async function readCurrentRun(reader: RecordReader, ownerUserId: string, projectId: string): Promise<CurrentRun | null> {
+  const [active] = await reader.select({ runId: runs.runId, stopRequested: runs.stopRequested })
+    .from(runs).where(and(eq(runs.ownerUserId, ownerUserId), eq(runs.projectId, projectId), runActive(reader))).limit(1);
+  return active ? { runId: active.runId, ...(active.stopRequested ? { stopRequested: true as const } : {}) } : null;
 }
 
 function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope, runQueue: RunQueue): RuntimeStore {
@@ -251,18 +345,30 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope, runQueue: RunQ
     async getRun(runId) {
       return db.transaction(async (transaction) => (
         await readRunRecords(transaction, [runId], recordScope)
-      )[0] ?? null, { isolationLevel: "repeatable read", accessMode: "read only" });
+      )[0] ?? null, READ_SNAPSHOT);
     },
     async findRunByIdempotencyKey(projectId, idempotencyKey) {
       return db.transaction(
         (transaction) => findRunByKey(transaction, projectId, idempotencyKey, owner),
-        { isolationLevel: "repeatable read", accessMode: "read only" },
+        READ_SNAPSHOT,
       );
     },
-    async createRunWithSamplings(run, records, judges) {
-      validateAdmission(run, records, judges);
+    async listProjectSamplings(projectId, projectSampleIds) {
+      const byProjectSample = new Map<string, SamplingState[]>();
+      for (const batch of sqlBatches([...new Set(projectSampleIds)])) {
+        const rows = await db.select().from(samplings).where(and(eq(samplings.projectId, projectId),
+          inArray(samplings.projectSampleId, batch), owner === undefined ? undefined : eq(samplings.ownerUserId, owner)))
+          .orderBy(samplings.samplingId);
+        for (const row of rows) {
+          addToGroup(byProjectSample, row.projectSampleId, samplingFromRow(row));
+        }
+      }
+      return [...new Set(projectSampleIds)].flatMap((id) => byProjectSample.get(id) ?? []);
+    },
+    async admitRun(command) {
+      validateAdmission(command);
       try {
-        return await db.transaction((transaction) => admitRun(transaction, scope, runQueue, run, records, judges));
+        return await db.transaction((transaction) => admitRun(transaction, scope, runQueue, command));
       } catch (error) {
         const violation = constraintViolation(error);
         if (violation === null) throw error;
@@ -271,12 +377,12 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope, runQueue: RunQ
     },
     async updateSampling(record, expected) {
       if (record.samplingId !== expected.samplingId
-        || record.projectId !== expected.projectId || record.sampleId !== expected.sampleId) {
+        || record.projectId !== expected.projectId || record.projectSampleId !== expected.projectSampleId) {
         throw new RuntimeRecordConflictError("Sampling identity changed before update");
       }
       const updated = await db.update(samplings).set({ facts: samplingFacts(record) })
         .where(and(eq(samplings.samplingId, record.samplingId), eq(samplings.projectId, record.projectId),
-          eq(samplings.sampleId, record.sampleId),
+          eq(samplings.projectSampleId, record.projectSampleId),
           owner === undefined ? undefined : eq(samplings.ownerUserId, owner),
           eq(samplings.facts, samplingFacts(expected))))
         .returning({ samplingId: samplings.samplingId });
@@ -358,18 +464,13 @@ export function createPostgresRuntimeStore(
 export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string, runQueue: RunQueue) {
   const owner = requireOwnerUserId(ownerUserId);
   return {
-    async getCurrentRun(projectId: string): Promise<{ runId: string; stopRequested?: true } | null> {
-      const [active] = await db.select({ runId: runs.runId, stopRequested: runs.stopRequested })
-        .from(runs).where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId),
-          runActive(db))).limit(1);
-      return active ? { runId: active.runId,
-        ...(active.stopRequested ? { stopRequested: true as const } : {}) } : null;
+    getCurrentRun(projectId: string): Promise<CurrentRun | null> {
+      return readCurrentRun(db, owner, projectId);
     },
     async stopRun(projectId: string, runId: string): Promise<{ runId: string; stopRequested: true } | null> {
       return db.transaction(async (transaction) => {
         const [project] = await transaction.select({ projectId: projects.projectId }).from(projects)
-          .where(and(eq(projects.projectId, projectId), eq(projects.ownerUserId, owner)))
-          .for("update");
+          .where(visibleProject(projectId, owner)).for("update");
         if (!project) return null;
         const [target] = await transaction.select({ stopRequested: runs.stopRequested })
           .from(runs).where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId),

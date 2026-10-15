@@ -2,22 +2,84 @@ import type {
   AgentResourceCollection,
   AgentResourceFact,
   AgentResourceSnapshot,
+  EvaluationOutputSchema,
   EvaluationRecord,
+  JsonValue,
+  ProjectDatasetSnapshot,
+  ProjectPlan,
+  RunSnapshot,
 } from "@eval-platform/eval-contracts";
-import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
-import type { ResourceInput } from "./aggregation/model.js";
+import type { ProjectSample, SamplingSnapshot } from "@eval-platform/eval-runtime";
+import type { ResourceInput } from "./aggregation/resources.js";
+import type { MetricsFacts } from "./reporting/model.js";
 
-export const PROJECT = { projectId: "project-1", ownerUserId: "owner-1", name: "Product evaluation", sourceBranch: "release-2.0.0" };
-export const SUBJECT = { ownerUserId: "owner-1", userAgentId: "subject-1" };
-export const EVALUATOR = { ownerUserId: "owner-1", userAgentId: "judge-1" };
-export const DATA = {
+export const PROJECT = {
+  projectId: "project-1", ownerUserId: "owner-1", name: "Product evaluation",
+  sourceBranch: "release-2.0.0", createdAt: "2026-10-01T00:00:00.000Z",
+};
+const SUBJECT = { ownerUserId: "owner-1", userAgentId: "subject-1" };
+const EVALUATOR = { ownerUserId: "owner-1", userAgentId: "judge-1" };
+const DATA = {
   dataId: "10000000-0000-4000-8000-000000000001", userPrompt: "Build a page",
   evalPrompt: "Judge the finished page", category: "frontend",
-  initialSession: { bundleId: "30000000-0000-4000-8000-000000000001", sessionId: "30000000-0000-4000-8000-000000000002" },
-  initialMaterials: { bundleId: "30000000-0000-4000-8000-000000000003", materialId: "30000000-0000-4000-8000-000000000004" },
 };
-export const SAMPLE = { sampleId: "sample-1", data: DATA };
-export const DATASET = { datasetId: "20000000-0000-4000-8000-000000000001", name: "Web tasks" };
+export const SCHEMA_REF = { outputSchemaId: "30000000-0000-4000-8000-000000000001", digest: "a".repeat(64) };
+export const OUTPUT_SCHEMA: EvaluationOutputSchema = {
+  type: "object",
+  required: ["score"],
+  properties: {
+    score: { type: "number" },
+    summary: { type: "string" },
+    scores: { type: "array", items: { $ref: "#/$defs/criterion" } },
+  },
+  $defs: { criterion: { type: "object", properties: { name: { type: "string" }, value: { type: "integer" } }, required: ["value"] } },
+};
+
+export function projectSample(projectSampleId: string, datasetIds: readonly string[], dataId = DATA.dataId, samplingCount = 1): ProjectSample {
+  return { projectSampleId, projectId: PROJECT.projectId, dataId, datasetIds, samplingCount, data: { ...DATA, dataId } };
+}
+
+export function dataset(datasetId: string, projectSampleIds: readonly string[]): ProjectDatasetSnapshot {
+  return { datasetId, name: `Dataset ${datasetId}`, kind: "general", projectSampleIds };
+}
+
+export function plan(datasets: readonly ProjectDatasetSnapshot[], evaluation = true): ProjectPlan {
+  const retryPolicy = { maxRestarts: 1, initialBackoffMs: 10, maxBackoffMs: 100 };
+  const snapshot = (sourceUserAgentId: string) => ({ sourceUserAgentId, name: sourceUserAgentId, body: {} });
+  return {
+    project: PROJECT, datasets,
+    execution: {
+      harness: { kind: "sp", framework: "sp", agentConfig: SUBJECT }, subjectAgentConfig: snapshot("subject-source"),
+      executionConcurrency: 2, retryPolicy,
+    },
+    executionPlanDigest: "b".repeat(64),
+    evaluation: evaluation
+      ? {
+        plan: {
+          evaluationHarness: { kind: "sp", framework: "sp", agentConfig: EVALUATOR }, evaluatorAgentConfig: snapshot("judge-source"),
+          evaluationConcurrency: 2, retryPolicy, outputSchema: SCHEMA_REF,
+        },
+        digest: "c".repeat(64), lockedAt: "2026-10-02T00:00:00.000Z",
+      }
+      : null,
+  };
+}
+
+export function run(runId: string, patch: Partial<RunSnapshot> = {}): RunSnapshot {
+  return {
+    runId, projectId: PROJECT.projectId, sourceCommit: "d".repeat(40), operation: "pipeline",
+    phases: ["execution", "evaluation"], phase: "evaluation", status: "succeeded",
+    selector: { all: true }, targets: { projectSampleIds: [], samplingIds: [] },
+    samplingIds: [], evaluationIds: [], ...patch,
+  };
+}
+
+export function facts(patch: Partial<MetricsFacts> & Pick<MetricsFacts, "plan" | "projectSamples">): MetricsFacts {
+  return {
+    evaluationOutputSchema: patch.plan.evaluation ? OUTPUT_SCHEMA : null,
+    samplings: [], evaluations: [], runs: [], ...patch,
+  };
+}
 
 export function collection(patch: Partial<AgentResourceSnapshot> = {}): AgentResourceCollection {
   return {
@@ -50,8 +112,12 @@ export function telemetry(
   payload: AgentResourceFact = {},
   occurredAt = 100,
   sessionId = "session-1",
+  parentOperationId?: string,
 ): AgentResourceFact {
-  return { eventId, type, operationId, occurredAt, resource: { sessionId }, payload };
+  return {
+    eventId, type, operationId, occurredAt, resource: { sessionId }, payload,
+    ...(parentOperationId === undefined ? {} : { parentOperationId }),
+  };
 }
 
 export function settlement(eventId: string, patch: AgentResourceFact = {}): AgentResourceFact {
@@ -63,7 +129,7 @@ export function settlement(eventId: string, patch: AgentResourceFact = {}): Agen
 
 export function sampling(samplingId = "sampling-1", patch: Partial<SamplingSnapshot> = {}): SamplingSnapshot {
   return {
-    samplingId, projectId: PROJECT.projectId, sampleId: SAMPLE.sampleId, subjectAgent: SUBJECT,
+    samplingId, projectId: PROJECT.projectId, projectSampleId: "ps-1", subjectAgent: SUBJECT,
     subjectChatId: `subject:${samplingId}`, execution: { status: "succeeded" },
     executionAttempts: [{
       executionAttemptId: `attempt:${samplingId}`, samplingId, attemptNumber: 1,
@@ -79,7 +145,8 @@ export function sampling(samplingId = "sampling-1", patch: Partial<SamplingSnaps
   };
 }
 
-export function evaluation(evaluationId = "evaluation-1", patch: Partial<EvaluationRecord> = {}): EvaluationRecord {
+/** A succeeded EvaluationRecord whose structured output is `result` written as JSON text (or raw text). */
+export function evaluation(evaluationId = "evaluation-1", patch: Partial<EvaluationRecord> = {}, result: JsonValue | string = { score: 80 }): EvaluationRecord {
   return {
     evaluationId, samplingId: "sampling-1", evaluator: EVALUATOR, chatId: `judge:${evaluationId}`,
     status: { status: "succeeded" },
@@ -89,11 +156,15 @@ export function evaluation(evaluationId = "evaluation-1", patch: Partial<Evaluat
       startedAt: "2026-10-08T00:00:02.000Z", completedAt: "2026-10-08T00:00:04.000Z",
       resources: collection({ scope: {
         chatId: `judge:${evaluationId}`, submissionId: `judge-submission:${evaluationId}`,
-        idempotencyKey: "evaluation:sampling-1",
+        idempotencyKey: `evaluation:${evaluationId}`,
       } }),
     }],
     output: {
-      status: "succeeded", score: 80, reason: "The produced page meets the task.",
+      status: "succeeded",
+      structuredOutput: {
+        path: `/evaluations/${evaluationId}/result.json`,
+        content: typeof result === "string" ? result : JSON.stringify(result),
+      },
       artifacts: [{ artifactId: `report:${evaluationId}`, kind: "report", path: "/evaluation.json" }],
       evidenceRefs: [{ kind: "artifact", ref: "/workspace/page.html" }],
       trajectory: { trajectoryId: `trajectory:${evaluationId}`, source: "evaluator", path: "/judge-trajectory.json" },

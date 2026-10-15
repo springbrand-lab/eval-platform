@@ -1,14 +1,15 @@
 import type {
   EvaluationAttempt,
   EvaluationOutputSchema,
+  EvaluationPlan,
   EvaluationRecord,
   ExecutionAttempt,
+  ExecutionPlan,
   HarnessConfig,
   RetryPolicy,
   SamplingStatus,
 } from "@eval-platform/eval-contracts";
 import { isPendingSamplingStatus, isTerminalAgentStatus } from "@eval-platform/eval-contracts";
-import type { ResolvedEvaluationConfig, ResolvedExecutionConfig } from "../config/model.js";
 import { AgentHandleNotFoundError } from "../harness/index.js";
 import type { AgentHandle, AgentSubmission, Harness } from "../harness/model.js";
 import {
@@ -21,7 +22,7 @@ import {
 import { RuntimeEntityNotFoundError } from "./errors.js";
 import { evaluateSampling } from "./evaluation.js";
 import { executeSampling } from "./execution.js";
-import type { RunRecords } from "./records.js";
+import type { RunRecords, RunStagePlans } from "./records.js";
 import type { RetryController } from "./retry.js";
 import { createAgentScheduler } from "./scheduler.js";
 import { persistRuntimeRecord, type RuntimeRunRecord, type RuntimeStore, type SamplingState } from "./store.js";
@@ -91,22 +92,21 @@ function evaluatorHandle(
 }
 
 /** Interrupt every SP Submission of a stop-requested Run that may still be active. */
-export async function interruptRun(context: StopContext, run: RuntimeRunRecord): Promise<void> {
-  const { config } = run;
+export async function interruptRun(context: StopContext, run: RuntimeRunRecord, plans: RunStagePlans): Promise<void> {
   const samplings = await context.records.samplings(run.samplingIds);
   const handles: AgentHandle[] = [];
-  if (config.operation !== "evaluation") {
+  if (plans.operation !== "evaluation") {
     for (const sampling of samplings) {
-      const handle = subjectHandle(sampling, config.execution.harness);
+      const handle = subjectHandle(sampling, plans.execution.harness);
       if (handle && isPendingSamplingStatus(sampling.execution.status)) handles.push(handle);
     }
   }
-  if (config.operation !== "execution") {
+  if (plans.operation !== "execution") {
     const samplingById = new Map(samplings.map((sampling) => [sampling.samplingId, sampling]));
     for (const evaluation of await context.records.evaluations(run.evaluationIds)) {
       const sampling = samplingById.get(evaluation.samplingId);
       if (!sampling) throw new Error(`Run ${run.runId} is missing Sampling ${evaluation.samplingId}`);
-      const handle = evaluatorHandle(evaluation, config.evaluation.evaluationHarness, sampling);
+      const handle = evaluatorHandle(evaluation, plans.evaluation.evaluationHarness, sampling);
       if (handle && isPendingSamplingStatus(evaluation.status.status)) handles.push(handle);
     }
   }
@@ -117,22 +117,22 @@ export async function interruptRun(context: StopContext, run: RuntimeRunRecord):
 }
 
 /** Cancel, or collect the evidence of, every stage interrupted by a persisted stop. */
-export async function finishStoppedRun(context: StopContext, run: RuntimeRunRecord): Promise<void> {
-  const { config } = run;
+export async function finishStoppedRun(context: StopContext, run: RuntimeRunRecord, plans: RunStagePlans): Promise<void> {
   const samplings = await context.records.samplings(run.samplingIds);
   const tasks: (() => Promise<void>)[] = [];
-  if (config.operation !== "evaluation") {
+  if (plans.operation !== "evaluation") {
     tasks.push(...samplings.map((sampling) => () => finishStoppedStage(
-      context, stoppedExecution(context, run.projectId, config.execution, sampling),
+      context, stoppedExecution(context, run.projectId, plans.execution, sampling),
     )));
   }
-  if (config.operation !== "execution") {
+  if (plans.operation !== "execution") {
+    const evaluationPlan = plans.evaluation;
     const samplingById = new Map(samplings.map((sampling) => [sampling.samplingId, sampling]));
     const evaluations = await context.records.evaluations(run.evaluationIds);
     tasks.push(...evaluations.map((evaluation) => async () => {
       const sampling = samplingById.get(evaluation.samplingId);
       if (!sampling) throw new Error(`Run ${run.runId} is missing Sampling ${evaluation.samplingId}`);
-      await finishStoppedStage(context, stoppedEvaluation(context, run.projectId, config.evaluation, sampling, evaluation));
+      await finishStoppedStage(context, stoppedEvaluation(context, run.projectId, evaluationPlan, sampling, evaluation));
     }));
   }
   await settleAll(tasks, `Could not finalize stopped Run ${run.runId}`);
@@ -153,7 +153,7 @@ async function settleAll(tasks: readonly (() => Promise<void>)[], message: strin
 function stoppedExecution(
   context: StopContext,
   projectId: string,
-  config: ResolvedExecutionConfig,
+  config: ExecutionPlan,
   initial: SamplingState,
 ): StoppedStage<SamplingState, ExecutionAttempt> {
   return {
@@ -203,7 +203,7 @@ function stoppedExecution(
 function stoppedEvaluation(
   context: StopContext,
   projectId: string,
-  config: ResolvedEvaluationConfig,
+  config: EvaluationPlan,
   sampling: SamplingState,
   initial: EvaluationRecord,
 ): StoppedStage<EvaluationRecord, EvaluationAttempt> {

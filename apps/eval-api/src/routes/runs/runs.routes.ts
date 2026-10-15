@@ -1,12 +1,12 @@
 import { createRoute, z } from "@hono/zod-openapi";
-import type { EvaluationRecord, RunHandle, RunSnapshot } from "@eval-platform/eval-contracts";
+import { RUN_OPERATIONS, type EvaluationRecord, type RunHandle, type RunSnapshot } from "@eval-platform/eval-contracts";
 import { httpErrorSchema } from "@eval-platform/eval-contracts/http-errors";
-import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
+import { platformIdSchema } from "@eval-platform/eval-dataset";
+import type { RunPreview, SamplingSnapshot } from "@eval-platform/eval-runtime";
 import { responseSchema } from "@springbrand/http/catalog";
 import { jsonContent } from "stoker/openapi/helpers";
-import type { SuccessfulSamplingPage } from "../../db/catalog.js";
 import { jsonBody } from "../../lib/request-body.js";
-import { EVALUATION_BODY_BYTES, EVALUATION_SAMPLING_IDS, JSON_BODY_BYTES, SAMPLING_PAGE_SIZE_MAX } from "../../limits.js";
+import { RUN_BODY_BYTES, RUN_PREVIEW_BODY_BYTES, RUN_TARGET_IDS } from "../../limits.js";
 import {
   bodyErrorResponses,
   conflictResponse,
@@ -15,6 +15,7 @@ import {
   idempotencyKeySchema,
   jsonBodyContent,
   notFoundResponse,
+  unique,
 } from "../schemas.js";
 
 const runHandleSchema = z.custom<RunHandle>();
@@ -24,60 +25,58 @@ const samplingSchema = z.custom<SamplingSnapshot>();
 const currentRunSchema = z.object({ runId: z.string(), stopRequested: z.literal(true).exactOptional() });
 const projectParams = z.object({ projectId: entityIdSchema });
 const projectRunParams = projectParams.extend({ runId: entityIdSchema });
-const sampleFilter = { sampleId: entityIdSchema.exactOptional() };
-const admissionErrors = { ...bodyErrorResponses, ...notFoundResponse, ...conflictResponse } as const;
+const admissionErrors = {
+  ...bodyErrorResponses, ...notFoundResponse, ...conflictResponse,
+  413: jsonContent(httpErrorSchema, "Request body or expanded selection is too large"),
+} as const;
+const idList = z.array(entityIdSchema).max(RUN_TARGET_IDS);
 
-export const startExecution = createRoute({
+/** What the user picked inside the Project snapshot; expansion and deduplication belong to Runtime. */
+const selectorSchema = z.strictObject({
+  all: z.literal(true).exactOptional(),
+  datasetIds: z.array(platformIdSchema).min(1).max(RUN_TARGET_IDS).exactOptional(),
+  projectSampleIds: idList.min(1).exactOptional(),
+  samplingIds: idList.min(1).exactOptional(),
+}).refine((selector) => Object.keys(selector).length > 0, "Select at least one target")
+  .refine((selector) => (selector.datasetIds?.length ?? 0) + (selector.projectSampleIds?.length ?? 0)
+    + (selector.samplingIds?.length ?? 0) <= RUN_TARGET_IDS, `Select at most ${RUN_TARGET_IDS} IDs`);
+
+/** The fixed targets a preview returned, submitted unchanged. */
+const targetsSchema = z.strictObject({
+  projectSampleIds: idList.refine(unique, "must not contain duplicates"),
+  samplingIds: idList.refine(unique, "must not contain duplicates"),
+}).refine((targets) => targets.projectSampleIds.length + targets.samplingIds.length <= RUN_TARGET_IDS,
+  `Submit at most ${RUN_TARGET_IDS} target IDs`);
+
+export const previewRun = createRoute({
   method: "post",
-  path: "/runs/execution",
+  path: "/projects/{projectId}/runs/preview",
   tags: ["Run"],
-  summary: "Admit an Execution Run for a Project",
-  middleware: [jsonBody(JSON_BODY_BYTES)],
+  summary: "Expand a selection inside the Project snapshot into the fixed targets to submit",
+  middleware: [jsonBody(RUN_PREVIEW_BODY_BYTES)],
   request: {
-    body: jsonBodyContent(z.strictObject({
-      idempotencyKey: idempotencyKeySchema,
-      projectId: entityIdSchema,
-      executionConfigId: entityIdSchema,
-    })),
+    params: projectParams,
+    body: jsonBodyContent(z.strictObject({ operation: z.enum(RUN_OPERATIONS), selector: selectorSchema })),
   },
   responses: {
-    201: jsonContent(responseSchema(runHandleSchema), "Admitted Run"),
+    200: jsonContent(responseSchema(z.custom<RunPreview>()), "Run preview"),
     ...admissionErrors,
   },
 });
 
-export const startPipeline = createRoute({
+export const submitRun = createRoute({
   method: "post",
-  path: "/runs/pipeline",
+  path: "/projects/{projectId}/runs",
   tags: ["Run"],
-  summary: "Admit an Execution-then-Evaluation Run for a Project",
-  middleware: [jsonBody(JSON_BODY_BYTES)],
-  request: {
-    body: jsonBodyContent(z.strictObject({
-      idempotencyKey: idempotencyKeySchema,
-      projectId: entityIdSchema,
-      pipelineConfigId: entityIdSchema,
-    })),
-  },
-  responses: {
-    201: jsonContent(responseSchema(runHandleSchema), "Admitted Run"),
-    ...admissionErrors,
-  },
-});
-
-export const evaluate = createRoute({
-  method: "post",
-  path: "/projects/{projectId}/evaluations",
-  tags: ["Run"],
-  summary: "Admit an independent Evaluation Run over selected successful Samplings",
-  middleware: [jsonBody(EVALUATION_BODY_BYTES)],
+  summary: "Admit a Run over previewed targets",
+  middleware: [jsonBody(RUN_BODY_BYTES)],
   request: {
     params: projectParams,
     body: jsonBodyContent(z.strictObject({
-      evaluationConfigId: entityIdSchema,
-      samplingIds: z.array(entityIdSchema).min(1).max(EVALUATION_SAMPLING_IDS)
-        .refine((ids) => new Set(ids).size === ids.length, "must not contain duplicates"),
       idempotencyKey: idempotencyKeySchema,
+      operation: z.enum(RUN_OPERATIONS),
+      selector: selectorSchema,
+      targets: targetsSchema,
     })),
   },
   responses: {
@@ -164,40 +163,6 @@ export const listProjectRunEvaluations = createRoute({
     200: jsonContent(responseSchema(z.object({ evaluations: z.array(evaluationSchema).readonly() })), "Evaluations"),
     ...errorResponses,
     ...notFoundResponse,
-  },
-});
-
-export const listSuccessfulSamplings = createRoute({
-  method: "get",
-  path: "/projects/{projectId}/samplings/successful",
-  tags: ["Run"],
-  summary: "Page through the Project's successful Samplings",
-  request: {
-    params: projectParams,
-    query: z.strictObject({
-      ...sampleFilter,
-      afterSamplingId: entityIdSchema.exactOptional(),
-      limit: z.coerce.number().int().min(1).max(SAMPLING_PAGE_SIZE_MAX).exactOptional(),
-    }),
-  },
-  responses: {
-    200: jsonContent(responseSchema(z.custom<SuccessfulSamplingPage>()), "Successful Samplings"),
-    ...errorResponses,
-    ...notFoundResponse,
-  },
-});
-
-export const selectSuccessfulSamplingIds = createRoute({
-  method: "get",
-  path: "/projects/{projectId}/samplings/successful/ids",
-  tags: ["Run"],
-  summary: "Select every successful Sampling ID that fits one evaluation request",
-  request: { params: projectParams, query: z.strictObject(sampleFilter) },
-  responses: {
-    200: jsonContent(responseSchema(z.object({ samplingIds: z.array(z.string()).readonly() })), "Sampling IDs"),
-    ...errorResponses,
-    ...notFoundResponse,
-    413: jsonContent(httpErrorSchema, "Selection exceeds one evaluation request"),
   },
 });
 

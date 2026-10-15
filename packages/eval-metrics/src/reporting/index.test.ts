@@ -1,223 +1,235 @@
 import { describe, expect, it, vi } from "vitest";
-import type { DatasetSnapshot } from "@eval-platform/eval-dataset";
-import { DATA, DATASET, EVALUATOR, PROJECT, SAMPLE, evaluation, sampling } from "../test-support.js";
-import { createMetrics, MetricsQueryError, MetricsSourceError } from "./index.js";
-import type { MetricsFacts, MetricsSource } from "./model.js";
+import type { EvaluationRecord } from "@eval-platform/eval-contracts";
+import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
+import {
+  collection, dataset, evaluation, facts, OUTPUT_SCHEMA, plan, PROJECT, projectSample, run, sampling, telemetry, usage,
+} from "../test-support.js";
+import { createMetrics, MetricsEntityNotFoundError, MetricsQueryError, MetricsSourceError } from "./index.js";
+import type { MetricSummary } from "../aggregation/model.js";
+import type { MetricsFacts, MetricsQuery, MetricsSource } from "./model.js";
 
-const OTHER_DATA = { dataId: "10000000-0000-4000-8000-000000000002", userPrompt: "Build an API" };
-const UNUSED_DATA = { dataId: "10000000-0000-4000-8000-000000000003", userPrompt: "Build a game" };
-const SHARED_DATASET = { datasetId: "20000000-0000-4000-8000-000000000002", name: "Shared tasks" };
+const D1 = "dataset-1";
+const D2 = "dataset-2";
+const PS1 = projectSample("ps-1", [D1, D2], "10000000-0000-4000-8000-000000000001", 2);
+const PS2 = projectSample("ps-2", [D1], "10000000-0000-4000-8000-000000000002");
+const PS3 = projectSample("ps-3", [D1], "10000000-0000-4000-8000-000000000003");
+const PLAN = plan([dataset(D1, ["ps-1", "ps-2", "ps-3"]), dataset(D2, ["ps-1"])]);
 
-function facts(): MetricsFacts {
-  const baseSamplings = Array.from({ length: 5 }, (_, index) => sampling(`sampling-${index + 1}`));
-  const baseEvaluations = baseSamplings.map((subject, index) => evaluation(`evaluation-${index + 1}`, {
-    samplingId: subject.samplingId,
-    output: { ...evaluation().output!, score: 60 + index * 10 },
-  }));
-  return {
-    project: PROJECT,
-    datasets: [{ dataset: DATASET, data: [DATA, OTHER_DATA, UNUSED_DATA] }, { dataset: SHARED_DATASET, data: [DATA] }],
-    samples: [SAMPLE, { sampleId: "sample-shared", data: DATA }, { sampleId: "sample-other", data: OTHER_DATA }],
-    samplings: [...baseSamplings, sampling("sampling-shared", { sampleId: "sample-shared" }), sampling("sampling-other", { sampleId: "sample-other" })],
-    evaluations: [...baseEvaluations, evaluation("reevaluation-1"), evaluation("reevaluation-2", { evaluator: { ...EVALUATOR, userAgentId: "other-judge" } })],
-    runs: [
-      { runId: "pipeline-run", projectId: PROJECT.projectId, sourceCommit: "a".repeat(40), samplingIds: baseSamplings.map((subject) => subject.samplingId),
-        evaluationIds: baseEvaluations.map((judge) => judge.evaluationId), phases: ["execution", "evaluation"], phase: "evaluation", status: "succeeded" },
-      { runId: "execution-run", projectId: PROJECT.projectId, sourceCommit: "a".repeat(40), samplingIds: ["sampling-shared", "sampling-other"],
-        evaluationIds: [], phases: ["execution"], phase: "execution", status: "succeeded" },
-      { runId: "reevaluation-run-1", projectId: PROJECT.projectId, sourceCommit: "a".repeat(40), samplingIds: ["sampling-1"],
-        evaluationIds: ["reevaluation-1"], phases: ["evaluation"], phase: "evaluation", status: "succeeded" },
-      { runId: "reevaluation-run-2", projectId: PROJECT.projectId, sourceCommit: "a".repeat(40), samplingIds: ["sampling-1"],
-        evaluationIds: ["reevaluation-2"], phases: ["evaluation"], phase: "evaluation", status: "succeeded" },
-    ],
-  };
+function tokens(total: number, eventId: string) {
+  return collection({ usageEvents: [usage(eventId, { metrics: { totalTokens: total } })] });
 }
 
-function metricsFrom(input: MetricsFacts = facts()) {
-  const read = vi.fn<MetricsSource["read"]>(async () => input);
-  return { metrics: createMetrics({ source: { read } }), read, input };
+function subjectRun(samplingId: string, projectSampleId: string, total: number): SamplingSnapshot {
+  const base = sampling(samplingId, { projectSampleId });
+  return { ...base, executionAttempts: [{ ...base.executionAttempts[0]!, resources: tokens(total, `usage:${samplingId}`) }] };
 }
+
+function judge(evaluationId: string, samplingId: string, score: number, total = 1): EvaluationRecord {
+  const base = evaluation(evaluationId, { samplingId }, { score, scores: [{ value: score / 10 }] });
+  return { ...base, attempts: [{ ...base.attempts[0]!, resources: tokens(total, `usage:${evaluationId}`) }] };
+}
+
+const SAMPLINGS = [subjectRun("s1a", "ps-1", 100), subjectRun("s1b", "ps-1", 200), subjectRun("s2", "ps-2", 400)];
+const PIPELINE = run("pipeline-run", { samplingIds: ["s1a", "s1b", "s2"], evaluationIds: ["e1b", "e2"] });
+const REEVALUATION = run("reevaluation-run", {
+  operation: "evaluation", phases: ["evaluation"], samplingIds: ["s1a"], evaluationIds: ["e1a2"],
+  targets: { projectSampleIds: [], samplingIds: ["s1a"] },
+});
+/** After an evaluation-only Run replaced e1a (score 10) with e1a2 (score 50); the rest is untouched. */
+const CURRENT = facts({
+  plan: PLAN, projectSamples: [PS1, PS2, PS3], samplings: SAMPLINGS,
+  evaluations: [judge("e1a2", "s1a", 50, 7), judge("e1b", "s1b", 20), judge("e2", "s2", 90)], runs: [PIPELINE, REEVALUATION],
+});
+
+/** Mirrors the application source: fixed bindings for the scope, current results filtered by runIds. */
+function sourceOf(all: MetricsFacts): MetricsSource & { read: ReturnType<typeof vi.fn<MetricsSource["read"]>> } {
+  return { read: vi.fn<MetricsSource["read"]>(async (query: MetricsQuery) => {
+    const ids = query.datasetId !== undefined
+      ? all.plan.datasets.find((item) => item.datasetId === query.datasetId)?.projectSampleIds ?? []
+      : query.projectSampleId !== undefined ? [query.projectSampleId]
+        : query.samplingId !== undefined ? all.samplings.filter((item) => item.samplingId === query.samplingId).map((item) => item.projectSampleId)
+          : all.projectSamples.map((item) => item.projectSampleId);
+    const runs = query.runIds === undefined ? undefined : all.runs.filter((item) => query.runIds!.includes(item.runId));
+    const samplings = all.samplings.filter((item) => ids.includes(item.projectSampleId)
+      && (!runs || runs.some((selected) => selected.samplingIds.includes(item.samplingId))));
+    const evaluations = all.evaluations.filter((item) => samplings.some((selected) => selected.samplingId === item.samplingId)
+      && (!runs || runs.some((selected) => selected.evaluationIds.includes(item.evaluationId))));
+    return { ...all, projectSamples: all.projectSamples.filter((item) => ids.includes(item.projectSampleId)), samplings, evaluations };
+  }) };
+}
+
+const metricsOf = (all: MetricsFacts = CURRENT) => createMetrics({ source: sourceOf(all) });
+const scope = { projectId: PROJECT.projectId };
+const scoreOf = (summary: MetricSummary) => summary.numericOutputs.fields.find((field) => field.jsonPointer === "/score")!;
 
 describe("four-level reporting", () => {
-  it("aggregates the Project directly, not by adding overlapping Dataset subtotals", async () => {
-    const { metrics } = metricsFrom();
-    const result = await metrics.getProjectOverview({ projectId: PROJECT.projectId });
-    expect(result.counts).toEqual({ datasets: 2, data: 2, samples: 3, samplings: 7, evaluations: 7 });
-    expect(result.summary).toMatchObject({ samplingCount: 7, evaluationCount: 7 });
-    expect(result.datasets).toHaveLength(2);
-    expect(result.datasets.map((item) => item.summary.samplingCount)).toEqual([7, 6]);
-    expect(result.runIds).toEqual(["execution-run", "pipeline-run", "reevaluation-run-1", "reevaluation-run-2"]);
-    expect(result.project.ownerUserId).toBe(PROJECT.ownerUserId);
-    expect(result.datasets[0]!.dataset).not.toHaveProperty("ownerUserId");
+  it("builds the Project from the fixed plan and deduplicates shared ProjectSamples", async () => {
+    const result = await metricsOf().getProjectOverview(scope);
+    expect(result.project).toEqual(PROJECT);
+    expect(result.runIds).toEqual(["pipeline-run", "reevaluation-run"]);
+    expect(result.summary.counts).toEqual({ datasets: 2, data: 3, projectSamples: 3, samplings: 3, evaluations: 3 });
+    expect(result.datasets.map((row) => [row.dataset.datasetId, row.dataset.name, row.summary.counts])).toEqual([
+      [D1, `Dataset ${D1}`, { datasets: 1, data: 3, projectSamples: 3, samplings: 3, evaluations: 3 }],
+      [D2, `Dataset ${D2}`, { datasets: 1, data: 1, projectSamples: 1, samplings: 2, evaluations: 2 }],
+    ]);
+    expect(scoreOf(result.summary)).toMatchObject({ observationCount: 3, contributingEvaluationCount: 3, summary: { total: 160 } });
+    expect(result.summary.executionAgent.tokens.total.value).toBe(700);
+    expect(result.summary.evaluationAgents.tokens.total.value).toBe(9);
   });
 
-  it("shows complete Dataset membership and groups different Samples of the same Data separately", async () => {
-    const { metrics } = metricsFrom();
-    const result = await metrics.getDatasetOverview({ projectId: PROJECT.projectId, datasetId: DATASET.datasetId });
-    expect(result.counts).toEqual({ datasets: 1, data: 3, samples: 3, samplings: 7, evaluations: 7 });
-    expect(result.dataIds).toEqual([DATA.dataId, OTHER_DATA.dataId, UNUSED_DATA.dataId]);
-    expect(result.samples).toHaveLength(3);
-    expect(result.samples.find((item) => item.sampleId === SAMPLE.sampleId)).toMatchObject({ dataId: DATA.dataId, summary: { samplingCount: 5 } });
-    expect(result.samples.find((item) => item.sampleId === "sample-shared")).toMatchObject({ dataId: DATA.dataId, summary: { samplingCount: 1 } });
+  it("recomputes every level from raw observations instead of averaging child averages", async () => {
+    const metrics = metricsOf();
+    const datasetView = await metrics.getDatasetOverview({ ...scope, datasetId: D1 });
+    expect(scoreOf(datasetView.summary).summary).toMatchObject({ count: 3, total: 160, mean: 160 / 3, median: 50 });
+    const [first, second] = datasetView.projectSamples;
+    expect(scoreOf(first!.summary).summary.mean).toBe(35);
+    expect(scoreOf(second!.summary).summary.mean).toBe(90);
+    expect(datasetView.summary.execution.agentDurationMs).toMatchObject({ count: 3, total: 3_000 });
   });
 
-  it("shows all five independent Samplings and their execution outputs at the Sample level", async () => {
-    const { metrics } = metricsFrom();
-    const result = await metrics.getSampleOverview({ projectId: PROJECT.projectId, sampleId: SAMPLE.sampleId });
-    expect(result.sample).toEqual(SAMPLE);
-    expect(result.sample.data.initialSession).toEqual(DATA.initialSession);
-    expect(result.sample.data.initialMaterials).toEqual(DATA.initialMaterials);
-    expect(result.sample.data.category).toBe("frontend");
-    expect(result.datasetIds).toEqual([DATASET.datasetId, SHARED_DATASET.datasetId]);
-    expect(result.counts).toEqual({ datasets: 2, data: 1, samples: 1, samplings: 5, evaluations: 7 });
-    expect(result.samplings).toHaveLength(5);
-    expect(result.samplings[0]).toMatchObject({ samplingId: "sampling-1", artifactCount: 1, hasTrajectory: true, summary: { evaluationCount: 3 } });
+  it("shows never-run ProjectSamples with unavailable values instead of zero", async () => {
+    const metrics = metricsOf();
+    const datasetView = await metrics.getDatasetOverview({ ...scope, datasetId: D1 });
+    expect(datasetView.projectSamples.map((row) => [row.projectSampleId, row.samplingCount, row.summary.counts.samplings])).toEqual([
+      ["ps-1", 2, 2], ["ps-2", 1, 1], ["ps-3", 1, 0],
+    ]);
+    const never = await metrics.getSampleOverview({ ...scope, projectSampleId: "ps-3" });
+    expect(never).toMatchObject({ projectSample: PS3, samplings: [], runIds: [] });
+    expect(never.summary.counts).toEqual({ datasets: 1, data: 1, projectSamples: 1, samplings: 0, evaluations: 0 });
+    expect(never.summary.executionAgent.tokens.total).toEqual({ value: null, coverage: "unavailable" });
+    expect(never.summary.execution.successRate).toBeNull();
+    expect(scoreOf(never.summary)).toMatchObject({ observationCount: 0, coverage: "unavailable", summary: { total: null } });
   });
 
-  it("preserves original Sampling, attempts, artifacts, full trajectory and all judge outputs", async () => {
-    const { metrics, input } = metricsFrom();
-    const result = await metrics.getSamplingDetail({ projectId: PROJECT.projectId, samplingId: "sampling-1" });
-    expect(result.sampling).toEqual(input.samplings[0]);
-    expect(result.sampling.executionAttempts[0]!.resources).toBeDefined();
-    expect(result.sampling.artifacts).toHaveLength(1);
-    expect(result.sampling.trajectory?.source).toBe("subject");
-    expect(result.evaluations).toHaveLength(3);
-    expect(result.evaluations[0]!.result).toMatchObject({ outputStatus: "succeeded", score: { value: 60 }, trajectory: { source: "evaluator" } });
-    expect(result.evaluations[0]!.record.attempts).toHaveLength(1);
-    expect(result.evaluations[0]!.resources.collections.collected).toBe(1);
-    expect(result.summary.scores).toHaveLength(2);
+  it("repeats a shared ProjectSample in each Dataset view", async () => {
+    const view = await metricsOf().getDatasetOverview({ ...scope, datasetId: D2 });
+    expect(view.dataset).toEqual(PLAN.datasets[1]);
+    expect(view.projectSamples.map((row) => [row.projectSampleId, row.datasetIds])).toEqual([["ps-1", [D1, D2]]]);
+    expect(scoreOf(view.summary).summary.total).toBe(70);
   });
 
-  it("restricts both Sampling and Evaluation identities to selected Runs without counting execution twice", async () => {
-    const { metrics } = metricsFrom();
-    const query = { projectId: PROJECT.projectId, runIds: ["pipeline-run", "reevaluation-run-1"] };
-    const project = await metrics.getProjectOverview(query);
-    expect(project.summary).toMatchObject({ samplingCount: 5, evaluationCount: 6 });
-    expect(project.summary.execution.attempts).toBe(5);
-    expect(project.summary.evaluation.attempts).toBe(6);
-    expect(project.summary.scores).toHaveLength(1);
-    const detail = await metrics.getSamplingDetail({ ...query, samplingId: "sampling-1" });
-    expect(detail.evaluations.map((item) => item.record.evaluationId)).toEqual(["evaluation-1", "reevaluation-1"]);
-    await expect(metrics.getSamplingDetail({ ...query, samplingId: "sampling-other" }))
-      .rejects.toMatchObject({ name: "MetricsEntityNotFoundError", entity: "sampling", id: "sampling-other" });
+  it("keeps unselected results by default and filters only current results by runIds", async () => {
+    const metrics = metricsOf();
+    const filtered = await metrics.getProjectOverview({ ...scope, runIds: ["reevaluation-run"] });
+    expect(filtered.runIds).toEqual(["reevaluation-run"]);
+    expect(filtered.summary.counts).toEqual({ datasets: 2, data: 3, projectSamples: 3, samplings: 1, evaluations: 1 });
+    expect(filtered.datasets.map((row) => row.dataset.datasetId)).toEqual([D1, D2]);
+    expect(scoreOf(filtered.summary).summary.total).toBe(50);
+    const pipeline = await metrics.getProjectOverview({ ...scope, runIds: ["pipeline-run"] });
+    expect(pipeline.summary.counts).toMatchObject({ samplings: 3, evaluations: 2 });
+    const datasetView = await metrics.getDatasetOverview({ ...scope, datasetId: D1, runIds: ["reevaluation-run"] });
+    expect(datasetView.projectSamples).toHaveLength(3);
   });
 
-  it("shows only the Run's evaluations for an evaluation-only selection", async () => {
-    const { metrics } = metricsFrom();
-    const result = await metrics.getSampleOverview({ projectId: PROJECT.projectId, sampleId: SAMPLE.sampleId, runIds: ["reevaluation-run-2"] });
-    expect(result.summary).toMatchObject({ samplingCount: 1, evaluationCount: 1 });
-    expect(result.summary.scores[0]!.evaluator.userAgentId).toBe("other-judge");
+  it("replaces only the re-evaluated numbers and leaves execution metrics unchanged", async () => {
+    const before = facts({ ...CURRENT, evaluations: [judge("e1a", "s1a", 10), ...CURRENT.evaluations.slice(1)], runs: [PIPELINE] });
+    const [old, current] = await Promise.all([metricsOf(before).getProjectOverview(scope), metricsOf().getProjectOverview(scope)]);
+    expect(scoreOf(old.summary).summary.total).toBe(120);
+    expect(scoreOf(current.summary).summary.total).toBe(160);
+    expect(current.summary.executionAgent).toEqual(old.summary.executionAgent);
+    expect(current.summary.execution).toEqual(old.summary.execution);
+    const [oldDetail, currentDetail] = await Promise.all([
+      metricsOf(before).getSamplingDetail({ ...scope, samplingId: "s1a" }), metricsOf().getSamplingDetail({ ...scope, samplingId: "s1a" }),
+    ]);
+    expect(currentDetail.subject).toEqual(oldDetail.subject);
+    expect(currentDetail.evaluations.map((item) => item.record.evaluationId)).toEqual(["e1a2"]);
   });
 
-  it("supports a known Sample with no Samplings and a known Dataset with no executed Data", async () => {
-    const input: MetricsFacts = { ...facts(), samples: [SAMPLE], samplings: [], evaluations: [], runs: [] };
-    const { metrics } = metricsFrom(input);
-    const sample = await metrics.getSampleOverview({ projectId: PROJECT.projectId, sampleId: SAMPLE.sampleId });
-    expect(sample.counts).toMatchObject({ samples: 1, samplings: 0, evaluations: 0 });
-    expect(sample.summary.execution.successRate).toBeNull();
-    expect(sample.summary.resources.total.costs.chargedUnits.value).toBeNull();
-    const dataset = await metrics.getDatasetOverview({ projectId: PROJECT.projectId, datasetId: DATASET.datasetId });
-    expect(dataset.counts).toMatchObject({ data: 3, samples: 0, samplings: 0 });
-    expect(dataset.samples).toEqual([]);
-    const project = await metrics.getProjectOverview({ projectId: PROJECT.projectId });
-    expect(project.counts).toEqual({ datasets: 0, data: 0, samples: 0, samplings: 0, evaluations: 0 });
-  });
-
-  it("allows a child projection to omit unrelated Run facts but not mix in another judge", async () => {
-    const input = facts();
-    const target: MetricsFacts = { ...input, samples: [SAMPLE], samplings: [input.samplings[0]!], evaluations: [input.evaluations[0]!, input.evaluations[5]!, input.evaluations[6]!] };
-    const { metrics } = metricsFrom(target);
-    const result = await metrics.getSamplingDetail({ projectId: PROJECT.projectId, samplingId: "sampling-1", runIds: ["pipeline-run"] });
-    expect(result.summary).toMatchObject({ samplingCount: 1, evaluationCount: 1 });
-  });
-
-  it("uses one consistent source read and detaches queries, source facts and returned nested objects", async () => {
-    const input = facts();
-    const before = structuredClone(input);
-    const query = { projectId: PROJECT.projectId, samplingId: "sampling-1", runIds: ["pipeline-run"] };
-    const read = vi.fn<MetricsSource["read"]>(async (received) => {
-      Object.assign(received, { projectId: "source-mutated" });
-      return input;
+  it("separates the Subject from each Evaluator and exposes full JSON only in Sampling detail", async () => {
+    const subject = SAMPLINGS[0]!;
+    const withTrajectory = facts({ ...CURRENT, samplings: [{ ...subject, executionAttempts: [{ ...subject.executionAttempts[0]!, resources: collection({
+      usageEvents: [usage("u", { metrics: { totalTokens: 100 } })],
+      telemetryEvents: [
+        telemetry("t:s", "turn.started", "turn", {}, 0), telemetry("t:f", "turn.finished", "turn", { outcome: "completed" }, 9),
+        telemetry("x:s", "tool.started", "tool", { toolName: "browser", input: { url: "a" } }, 1, "session-1", "turn"),
+      ],
+    }) }] }, ...SAMPLINGS.slice(1)], evaluations: [...CURRENT.evaluations, judge("e1a3", "s1a", 70, 3)] });
+    const detail = await metricsOf(withTrajectory).getSamplingDetail({ ...scope, samplingId: "s1a" });
+    expect(detail.projectSample).toEqual(PS1);
+    expect(detail.subject).toMatchObject({ role: "subject", chatId: "subject:s1a", resources: { tokens: { total: { value: 100 } } } });
+    expect(detail.subject.resources.trajectory).toMatchObject({ turns: { count: { value: 1 } }, tools: { count: { value: 1 } }, nonToolTurns: { value: 0 } });
+    expect(detail.evaluations.map((item) => [item.agent.role, item.agent.chatId, item.agent.resources.tokens.total.value])).toEqual([
+      ["evaluator", "judge:e1a2", 7], ["evaluator", "judge:e1a3", 3],
+    ]);
+    expect(detail.evaluations[0]!.output).toMatchObject({
+      rawJson: { score: 50, scores: [{ value: 5 }] }, validation: { status: "valid" },
+      numericObservations: [{ jsonPointer: "/score", value: 50 }, { jsonPointer: "/scores/*/value", instancePointer: "/scores/0/value", value: 5 }],
     });
-    const result = await createMetrics({ source: { read } }).getSamplingDetail(query);
-    expect(read).toHaveBeenCalledTimes(1);
-    expect(query).toEqual({ projectId: PROJECT.projectId, samplingId: "sampling-1", runIds: ["pipeline-run"] });
-    Object.assign(result.project, { name: "changed" });
-    Object.assign(result.sample.data.initialSession!, { sessionId: "changed" });
-    Object.assign(result.sampling.artifacts![0]!, { path: "/changed" });
-    Object.assign(result.evaluations[0]!.record.evaluator, { userAgentId: "changed" });
-    expect(input).toEqual(before);
+    expect(detail.summary.evaluationAgents.tokens.total.value).toBe(10);
+    expect(detail.summary.executionAgent.tokens.total.value).toBe(100);
+    const sampleView = await metricsOf(withTrajectory).getSampleOverview({ ...scope, projectSampleId: "ps-1" });
+    expect(sampleView.samplings.map((row) => [row.samplingId, row.summary.counts.evaluations, row.artifactCount, row.hasTrajectory])).toEqual([
+      ["s1a", 2, 1, true], ["s1b", 1, 1, true],
+    ]);
+    expect(sampleView.samplings[0]).not.toHaveProperty("evaluations");
+  });
+
+  it("shows execution metrics without an evaluation plan and marks numbers unavailable", async () => {
+    const result = await metricsOf(facts({ plan: plan(PLAN.datasets, false), projectSamples: [PS1, PS2, PS3], samplings: SAMPLINGS }))
+      .getProjectOverview(scope);
+    expect(result.summary.numericOutputs).toEqual({
+      schema: null, coverage: "unavailable", evaluations: 0, validation: { valid: 0, invalid: 0, unavailable: 0 }, fields: [],
+    });
+    expect(result.summary.executionAgent.tokens.total.value).toBe(700);
+  });
+
+  it("validates queries and passes a detached copy to the source", async () => {
+    const source = sourceOf(CURRENT);
+    const metrics = createMetrics({ source });
+    await expect(metrics.getProjectOverview({ projectId: "" })).rejects.toBeInstanceOf(MetricsQueryError);
+    await expect(metrics.getProjectOverview({ ...scope, runIds: [] })).rejects.toBeInstanceOf(MetricsQueryError);
+    await expect(metrics.getProjectOverview({ ...scope, runIds: ["r", "r"] })).rejects.toBeInstanceOf(MetricsQueryError);
+    await expect(metrics.getSampleOverview({ ...scope, projectSampleId: "" })).rejects.toBeInstanceOf(MetricsQueryError);
+    expect(source.read).not.toHaveBeenCalled();
+    const query = { ...scope, projectSampleId: "ps-1", extra: true };
+    await metrics.getSampleOverview(query);
+    expect(source.read).toHaveBeenCalledWith({ projectId: PROJECT.projectId, projectSampleId: "ps-1" });
+    expect(source.read.mock.calls[0]![0]).not.toBe(query);
   });
 
   it.each([
-    null, [], { projectId: "" }, { projectId: " project-1" }, { projectId: "project-1", runIds: [] },
-    { projectId: "project-1", runIds: "pipeline-run" }, { projectId: "project-1", runIds: ["pipeline-run", "pipeline-run"] },
-  ])("rejects malformed query before reading the source: %j", async (query) => {
-    const { metrics, read } = metricsFrom();
-    await expect(metrics.getProjectOverview(query as never)).rejects.toThrow(MetricsQueryError);
-    expect(read).not.toHaveBeenCalled();
+    ["dataset", (metrics: ReturnType<typeof metricsOf>) => metrics.getDatasetOverview({ ...scope, datasetId: "missing" })],
+    ["project-sample", (metrics: ReturnType<typeof metricsOf>) => metrics.getSampleOverview({ ...scope, projectSampleId: "missing" })],
+    ["sampling", (metrics: ReturnType<typeof metricsOf>) => metrics.getSamplingDetail({ ...scope, samplingId: "missing" })],
+    ["run", (metrics: ReturnType<typeof metricsOf>) => metrics.getProjectOverview({ ...scope, runIds: ["missing"] })],
+  ] as const)("reports an unknown %s", async (entity, query) => {
+    await expect(query(metricsOf())).rejects.toMatchObject({ name: "MetricsEntityNotFoundError", entity, id: "missing" });
   });
 
-  it("does not forward unknown query fields as another source selection", async () => {
-    const { metrics, read } = metricsFrom();
-    await metrics.getProjectOverview({ projectId: PROJECT.projectId, datasetId: "unexpected" } as never);
-    expect(read).toHaveBeenCalledWith({ projectId: PROJECT.projectId });
-  });
-
-  it("reports unknown targets and unknown Runs as missing entities", async () => {
-    const { metrics } = metricsFrom();
-    const missing = (entity: string) => ({ name: "MetricsEntityNotFoundError", entity, id: "absent" });
-    await expect(metrics.getDatasetOverview({ projectId: PROJECT.projectId, datasetId: "absent" })).rejects.toMatchObject(missing("dataset"));
-    await expect(metrics.getSampleOverview({ projectId: PROJECT.projectId, sampleId: "absent" })).rejects.toMatchObject(missing("sample"));
-    await expect(metrics.getSamplingDetail({ projectId: PROJECT.projectId, samplingId: "absent" })).rejects.toMatchObject(missing("sampling"));
-    await expect(metrics.getProjectOverview({ projectId: PROJECT.projectId, runIds: ["absent"] })).rejects.toMatchObject(missing("run"));
+  it("reports a Sampling filtered out by runIds as not found", async () => {
+    await expect(metricsOf().getSamplingDetail({ ...scope, samplingId: "s2", runIds: ["reevaluation-run"] }))
+      .rejects.toBeInstanceOf(MetricsEntityNotFoundError);
   });
 
   it.each([
-    ["wrong Project", (input: MetricsFacts): MetricsFacts => ({ ...input, project: { ...PROJECT, projectId: "foreign" } })],
-    ["foreign Sampling", (input: MetricsFacts): MetricsFacts => ({ ...input, samplings: [{ ...input.samplings[0]!, projectId: "foreign" }] })],
-    ["foreign Run", (input: MetricsFacts): MetricsFacts => ({ ...input, runs: [{ ...input.runs[0]!, projectId: "foreign" }] })],
-    ["duplicate Sample", (input: MetricsFacts): MetricsFacts => ({ ...input, samples: [...input.samples, input.samples[0]!] })],
-    ["duplicate Dataset", (input: MetricsFacts): MetricsFacts => ({ ...input, datasets: [...input.datasets, input.datasets[0]!] })],
-    ["duplicate Sampling", (input: MetricsFacts): MetricsFacts => ({ ...input, samplings: [...input.samplings, input.samplings[0]!] })],
-    ["duplicate Evaluation", (input: MetricsFacts): MetricsFacts => ({ ...input, evaluations: [...input.evaluations, input.evaluations[0]!] })],
-    ["duplicate Run", (input: MetricsFacts): MetricsFacts => ({ ...input, runs: [...input.runs, input.runs[0]!] })],
-    ["orphan Sampling", (input: MetricsFacts): MetricsFacts => ({ ...input, samplings: [{ ...input.samplings[0]!, sampleId: "absent" }] })],
-    ["orphan Evaluation", (input: MetricsFacts): MetricsFacts => ({ ...input, evaluations: [{ ...input.evaluations[0]!, samplingId: "absent" }] })],
-    ["duplicate Dataset Data", (input: MetricsFacts): MetricsFacts => ({ ...input, datasets: [{ dataset: DATASET, data: [DATA, DATA] }] })],
-  ] as const)("rejects inconsistent source facts: %s", async (_label, change) => {
-    const { metrics } = metricsFrom(change(facts()));
-    await expect(metrics.getProjectOverview({ projectId: PROJECT.projectId })).rejects.toThrow(MetricsSourceError);
+    ["wrong Project", { plan: { ...PLAN, project: { ...PROJECT, projectId: "other" } } }],
+    ["Schema without plan", { evaluationOutputSchema: null }],
+    ["missing bound ProjectSample", { projectSamples: [PS1, PS2] }],
+    ["duplicate ProjectSample", { projectSamples: [PS1, PS2, PS3, PS3] }],
+    ["unbound ProjectSample", { projectSamples: [PS1, PS2, PS3, projectSample("ps-x", [D1])] }],
+    ["drifted Dataset binding", { projectSamples: [{ ...PS1, datasetIds: [D1] }, PS2, PS3] }],
+    ["duplicate Dataset member", { plan: plan([dataset(D1, ["ps-1", "ps-1", "ps-2", "ps-3"]), dataset(D2, ["ps-1"])]) }],
+    ["Sampling outside scope", { samplings: [...SAMPLINGS, subjectRun("sx", "ps-x", 1)] }],
+    ["Sampling of another Project", { samplings: [{ ...SAMPLINGS[0]!, projectId: "other" }] }],
+    ["duplicate Sampling", { samplings: [...SAMPLINGS, SAMPLINGS[0]!] }],
+    ["orphan Evaluation", { evaluations: [judge("ex", "missing", 1)] }],
+    ["duplicate Evaluation", { evaluations: [...CURRENT.evaluations, CURRENT.evaluations[0]!] }],
+    ["duplicate Run", { runs: [PIPELINE, PIPELINE] }],
+  ] as const)("rejects inconsistent source facts: %s", async (_, patch) => {
+    const read = vi.fn<MetricsSource["read"]>(async () => ({ ...CURRENT, ...patch } as MetricsFacts));
+    await expect(createMetrics({ source: { read } }).getProjectOverview(scope)).rejects.toBeInstanceOf(MetricsSourceError);
   });
 
-  it("rejects missing required facts for a whole-Run projection", async () => {
-    const input = facts();
-    const { metrics } = metricsFrom({ ...input, evaluations: input.evaluations.slice(1) });
-    await expect(metrics.getProjectOverview({ projectId: PROJECT.projectId, runIds: ["pipeline-run"] }))
-      .rejects.toThrow("omitted required facts");
+  it("rejects a Dataset view missing one of its bound ProjectSamples", async () => {
+    const read = vi.fn<MetricsSource["read"]>(async () => ({ ...CURRENT, projectSamples: [PS1, PS2] }));
+    await expect(createMetrics({ source: { read } }).getDatasetOverview({ ...scope, datasetId: D1 })).rejects.toBeInstanceOf(MetricsSourceError);
   });
 
-  it("rejects duplicate Run scope identities and an evaluation linked outside its Run", async () => {
-    const input = facts();
-    const duplicate = metricsFrom({ ...input, runs: [{ ...input.runs[0]!, samplingIds: ["sampling-1", "sampling-1"] }] });
-    await expect(duplicate.metrics.getProjectOverview({ projectId: PROJECT.projectId, runIds: ["pipeline-run"] })).rejects.toThrow("duplicate scope");
-    const outside = metricsFrom({ ...input, runs: [{ ...input.runs[0]!, samplingIds: ["sampling-2"], evaluationIds: ["evaluation-1"] }] });
-    await expect(outside.metrics.getProjectOverview({ projectId: PROJECT.projectId, runIds: ["pipeline-run"] })).rejects.toThrow("outside Run");
-  });
-
-  it("propagates source failures without returning an empty successful view", async () => {
-    const error = new Error("Read transaction failed");
-    const metrics = createMetrics({ source: { async read() { throw error; } } });
-    await expect(metrics.getProjectOverview({ projectId: PROJECT.projectId })).rejects.toBe(error);
-  });
-
-  it("uses current global Dataset membership rather than inventing Dataset ownership or versions", async () => {
-    const input = facts();
-    const datasets: DatasetSnapshot[] = [{ dataset: DATASET, data: [OTHER_DATA] }, { dataset: SHARED_DATASET, data: [DATA] }];
-    const { metrics } = metricsFrom({ ...input, datasets });
-    const dataset = await metrics.getDatasetOverview({ projectId: PROJECT.projectId, datasetId: DATASET.datasetId });
-    expect(dataset.summary.samplingCount).toBe(1);
-    const sample = await metrics.getSampleOverview({ projectId: PROJECT.projectId, sampleId: SAMPLE.sampleId });
-    expect(sample.datasetIds).toEqual([SHARED_DATASET.datasetId]);
+  it("does not mutate source facts", async () => {
+    const snapshot = structuredClone(CURRENT);
+    const detail = await metricsOf().getSamplingDetail({ ...scope, samplingId: "s1a" });
+    Object.assign(detail.sampling, { samplingId: "changed" });
+    expect(CURRENT).toEqual(snapshot);
+    expect(OUTPUT_SCHEMA).toEqual(snapshot.evaluationOutputSchema);
   });
 });

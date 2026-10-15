@@ -2,27 +2,29 @@
 
 `eval-api` is the internal control-plane application for evaluation projects.
 
-It exposes authenticated operations for Project, Dataset, Sample, Sampling,
-Execution, Evaluation, Artifact, Trajectory and Metric views. It consumes
-package public exports and delegates execution/evaluation orchestration to
-`@eval-platform/eval-runtime`.
+It exposes authenticated operations for Project, Dataset, Data, initial
+resources, Agent Config, Run, Sampling, Evaluation, read-only observation and
+Metric views. It consumes package public exports and delegates
+execution/evaluation orchestration to `@eval-platform/eval-runtime`.
 
-It does not own Agent execution, SP Chat/DO storage, Dataset semantics or
-evaluation scoring logic.
+It does not own Agent execution, SP Chat/DO storage, Dataset semantics,
+evaluation-output validation or metric aggregation.
 
 The API workspace owns PostgreSQL migrations and implementations of the public
-DatasetStore, RuntimeStore, ConfigStore and read-only MetricsSource ports. A
-caller supplies the `pg` Pool; these adapters never import SP's private
-database client. The Catalog stores user-owned Projects and Samples that
-reference the same user's Data, with Agent listing supplied separately.
+DatasetStore, ProjectPlanReader, RuntimeStore and read-only MetricsSource
+ports. A caller supplies the `pg` Pool; these adapters never import SP's
+private database client. A Project is created once from a snapshot of the
+user's Datasets and Data plus frozen SP Agent Config copies; only its
+evaluation plan may be replaced, until the first evaluating Run locks it.
 User-facing Runtime and Metrics adapters require the owner identity verified
-by Eval SP; only the Worker Store resumes Runs across users. Metrics and Run
+by Eval SP; only the Worker Store and plan reader cross users. Metrics and Run
 views read in sets under one repeatable-read, read-only transaction and reuse
 the Runtime's status projection.
 
 The Hono HTTP control plane (`start:api`) runs as one fixed Eval SP service
 account verified once at startup, assembles owner-scoped services once per owner and routes Dataset,
-Config, Run, Metrics and initial-resource operations. Run admission and stop
+Project, Run, Metrics, observation, Agent Config, credit and initial-resource
+operations. Run admission and stop
 requests commit their facts and enqueue a pg-boss Run job in one transaction;
 the HTTP process never executes an Agent or holds the SP service credential.
 See `docs/eval-http-api.md` for the route contract.

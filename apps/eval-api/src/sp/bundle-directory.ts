@@ -9,6 +9,7 @@ import {
   readEvalCanonicalContext,
 } from "@springbrand/eval-harness";
 import type { z } from "zod";
+import { createId } from "@eval-platform/eval-contracts";
 import { MATERIAL_FILE_BYTES, MATERIAL_TOTAL_BYTES } from "../limits.js";
 import { BundleFileError } from "./bundle-errors.js";
 
@@ -85,7 +86,7 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
       if (!insideRoot(location.ownerDirectory, await realpath(parent))) {
         throw new BundleFileError("invalid", "Initial Bundle resource escapes its owner directory");
       }
-      const temporary = join(parent, `.${crypto.randomUUID()}.upload`);
+      const temporary = join(parent, `.${createId()}.upload`);
       await writeFile(temporary, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
       try {
         await link(temporary, location.path);

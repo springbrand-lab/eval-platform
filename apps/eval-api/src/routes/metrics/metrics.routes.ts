@@ -42,10 +42,10 @@ export const datasetOverview = createRoute({
 
 export const sampleOverview = createRoute({
   method: "get",
-  path: "/projects/{projectId}/samples/{sampleId}",
+  path: "/projects/{projectId}/samples/{projectSampleId}",
   tags: ["Metrics"],
-  summary: "Sample metrics within a Project",
-  request: { params: projectParams.extend({ sampleId: entityIdSchema }), query: scopeQuery },
+  summary: "ProjectSample metrics within a Project",
+  request: { params: projectParams.extend({ projectSampleId: entityIdSchema }), query: scopeQuery },
   responses: {
     200: jsonContent(responseSchema(z.custom<SampleOverview>()), "Sample overview"),
     ...queryErrors,

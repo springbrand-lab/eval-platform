@@ -1,60 +1,108 @@
 import { describe, expect, it } from "vitest";
-import { evaluation } from "../test-support.js";
-import { readEvaluationMetrics } from "./index.js";
+import type { EvaluationOutputSchema, EvaluationRecord, JsonValue } from "@eval-platform/eval-contracts";
+import { evaluation, OUTPUT_SCHEMA, SCHEMA_REF } from "../test-support.js";
+import { createEvaluationOutputReader } from "./index.js";
 
-describe("evaluation output interpretation", () => {
-  it.each([0, -5, 0.75, 95, 1_000])("preserves score %s without assuming a scale", (score) => {
-    const record = evaluation();
-    expect(readEvaluationMetrics({ ...record, output: { ...record.output!, score } }).score)
-      .toEqual({ status: "available", value: score });
+const read = (result: JsonValue | string, schema: EvaluationOutputSchema | null = OUTPUT_SCHEMA, patch: Partial<EvaluationRecord> = {}) =>
+  createEvaluationOutputReader(schema && SCHEMA_REF, schema).read(evaluation("evaluation-1", patch, result));
+const numbers = (view: ReturnType<typeof read>) => view.numericObservations.map(({ jsonPointer, instancePointer, schemaType, value }) => (
+  [jsonPointer, instancePointer, schemaType, value]
+));
+
+describe("evaluation output validation", () => {
+  it("parses, validates and extracts nested, array and $ref numbers with stable pointers", () => {
+    const content = JSON.stringify({ score: 7.5, summary: "fine", scores: [{ name: "a", value: 3 }, { name: "b", value: 4 }] });
+    const view = read(content);
+    expect(view).toMatchObject({
+      validation: { status: "valid", reason: "valid", errors: [] }, content,
+      rawJson: { score: 7.5, summary: "fine" }, path: "/evaluations/evaluation-1/result.json",
+      evidenceRefs: [{ kind: "artifact", ref: "/workspace/page.html" }], trajectory: { source: "evaluator" },
+    });
+    expect(numbers(view)).toEqual([
+      ["/score", "/score", "number", 7.5], ["/scores/*/value", "/scores/0/value", "integer", 3], ["/scores/*/value", "/scores/1/value", "integer", 4],
+    ]);
   });
 
-  it("keeps an unreported score separate from zero", () => {
-    const record = evaluation();
-    const { score: omitted, ...output } = record.output!;
-    expect(omitted).toBe(80);
-    expect(readEvaluationMetrics({ ...record, output }).score).toEqual({ status: "unavailable", value: null });
-    const { output: absent, ...pending } = record;
-    expect(absent).toBeDefined();
-    expect(readEvaluationMetrics({ ...pending, status: { status: "queued" } })).toMatchObject({
-      score: { status: "unavailable", value: null }, outputStatus: null, trajectory: null, artifacts: [], evidenceRefs: [],
+  it("ignores string numbers, booleans and undeclared fields", () => {
+    const view = read({ score: 1, extra: 5, scores: [{ value: 2, weight: 9 }], summary: "10" });
+    expect(numbers(view).map(([pointer]) => pointer)).toEqual(["/score", "/scores/*/value"]);
+    const strings = read({ score: "10" });
+    expect(strings.validation).toMatchObject({ status: "invalid", reason: "schema-mismatch" });
+    expect(strings.validation.errors[0]).toMatchObject({ instancePath: "/score", keyword: "type" });
+    expect(strings.numericObservations).toEqual([]);
+  });
+
+  it("follows only the oneOf/anyOf branches that validate the value", () => {
+    const schema: EvaluationOutputSchema = {
+      type: "object",
+      properties: {
+        result: { oneOf: [
+          { type: "object", properties: { kind: { const: "pass" }, points: { type: "integer" } }, required: ["kind"] },
+          { type: "object", properties: { kind: { const: "fail" }, penalty: { type: "number" } }, required: ["kind"] },
+        ] },
+        metric: { anyOf: [{ type: "number" }, { type: "string" }] },
+        mixed: { anyOf: [{ type: "integer" }, { type: "number", minimum: 0 }] },
+      },
+    };
+    expect(numbers(read({ result: { kind: "fail", penalty: 2, points: 9 }, metric: 1.5, mixed: 3 }, schema))).toEqual([
+      ["/result/penalty", "/result/penalty", "number", 2], ["/metric", "/metric", "number", 1.5], ["/mixed", "/mixed", "number", 3],
+    ]);
+    expect(numbers(read({ result: { kind: "pass", points: 9 }, metric: "x", mixed: -1 }, schema))).toEqual([
+      ["/result/points", "/result/points", "integer", 9], ["/mixed", "/mixed", "integer", -1],
+    ]);
+  });
+
+  it("handles allOf, prefixItems, additionalProperties and recursive $ref", () => {
+    const schema: EvaluationOutputSchema = {
+      $defs: { node: { type: "object", properties: { weight: { type: "number" }, children: { type: "array", items: { $ref: "#/$defs/node" } } } } },
+      type: "object",
+      allOf: [{ properties: { total: { type: "integer" } } }],
+      properties: {
+        tree: { $ref: "#/$defs/node" },
+        pair: { type: "array", prefixItems: [{ type: "string" }, { type: "number" }] },
+        byCriterion: { type: "object", additionalProperties: { type: "number" } },
+      },
+    };
+    const view = read({ total: 3, tree: { weight: 1, children: [{ weight: 2, children: [] }] }, pair: ["x", 0.5], byCriterion: { "a/b": 4 } }, schema);
+    expect(numbers(view)).toEqual([
+      ["/total", "/total", "integer", 3], ["/tree/weight", "/tree/weight", "number", 1],
+      ["/tree/children/*/weight", "/tree/children/0/weight", "number", 2], ["/pair/*", "/pair/1", "number", 0.5],
+      ["/byCriterion/a~1b", "/byCriterion/a~1b", "number", 4],
+    ]);
+    const declared = [...createEvaluationOutputReader(SCHEMA_REF, schema).declaredFields.keys()];
+    expect(declared).toEqual(["/total", "/tree/weight", "/pair/*"]);
+  });
+
+  it("reports a missing output or result file as unavailable", () => {
+    const reader = createEvaluationOutputReader(SCHEMA_REF, OUTPUT_SCHEMA);
+    const { output, ...pending } = evaluation();
+    const { structuredOutput: _file, ...withoutFile } = output!;
+    expect(reader.read(pending).validation).toEqual({ status: "unavailable", reason: "no-output", errors: [] });
+    expect(reader.read({ ...pending, evaluationId: "e2", output: withoutFile })).toMatchObject({
+      validation: { status: "unavailable", reason: "no-structured-output" }, content: null, rawJson: null, artifacts: output!.artifacts,
     });
   });
 
-  it.each([NaN, Infinity, -Infinity])("reports invalid score %s without turning it into zero", (score) => {
-    const record = evaluation();
-    expect(readEvaluationMetrics({ ...record, output: { ...record.output!, score } }).score)
-      .toEqual({ status: "invalid", value: null });
+  it.each([
+    ['{"score": 1,}', "invalid-json"],
+    ['{"score": 1, "score": 2}', "invalid-json"],
+    ["", "invalid-json"],
+    ['{"score": 1e400}', "unsafe-number"],
+    ['{"score": 9007199254740993}', "unsafe-number"],
+  ])("rejects malformed or unrepresentable output %j without numbers", (content, reason) => {
+    const view = read(content);
+    expect(view).toMatchObject({ rawJson: null, numericObservations: [], validation: { status: "invalid", reason } });
+    expect(view.validation.errors).toHaveLength(1);
   });
 
-  it("separates runtime finalization failure from a successful agent output", () => {
-    const result = readEvaluationMetrics(evaluation("evaluation-1", {
-      status: { status: "failed", lastError: "Database unavailable during finalization" },
-    }));
-    expect(result.stage).toEqual({ status: "failed", lastError: "Database unavailable during finalization" });
-    expect(result.outputStatus).toBe("succeeded");
-    expect(result.score).toEqual({ status: "available", value: 80 });
-    expect(result.reason).toContain("produced page");
-    expect(result.evidenceRefs).toEqual([{ kind: "artifact", ref: "/workspace/page.html" }]);
+  it("keeps parsed JSON visible but unvalidated without a Schema or with an invalid one", () => {
+    expect(read({ score: 1 }, null)).toMatchObject({ rawJson: { score: 1 }, validation: { status: "unavailable", reason: "no-schema" }, numericObservations: [] });
+    expect(read({ score: 1 }, { type: "nope" })).toMatchObject({ validation: { status: "unavailable", reason: "invalid-schema" } });
   });
 
-  it("preserves failed agent output and its evidence without inventing a passing threshold", () => {
-    const record = evaluation();
-    const result = readEvaluationMetrics({ ...record, output: { ...record.output!, status: "failed", error: "Test failed", score: 0 } });
-    expect(result).toMatchObject({ outputStatus: "failed", outputError: "Test failed", score: { status: "available", value: 0 } });
-    expect(result).not.toHaveProperty("passed");
-  });
-
-  it("detaches all nested output fields from the original record", () => {
-    const record = evaluation();
-    const before = structuredClone(record);
-    const result = readEvaluationMetrics(record);
-    expect(result.evaluator).not.toBe(record.evaluator);
-    expect(result.stage).not.toBe(record.status);
-    expect(result.artifacts[0]).not.toBe(record.output!.artifacts[0]);
-    expect(result.trajectory).not.toBe(record.output!.trajectory);
-    Object.assign(result.evidenceRefs[0]!, { ref: "/changed" });
-    Object.assign(result.evaluator, { userAgentId: "changed" });
-    expect(record).toEqual(before);
+  it("extracts no numbers from a failed evaluation even when its output is valid", () => {
+    const view = read({ score: 1 }, OUTPUT_SCHEMA, { status: { status: "failed", lastError: "boom" } });
+    expect(view.validation.status).toBe("valid");
+    expect(view.numericObservations).toEqual([]);
   });
 });

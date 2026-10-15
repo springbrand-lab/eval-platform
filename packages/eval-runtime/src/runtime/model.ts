@@ -1,78 +1,94 @@
-import type { Data, Dataset } from "@eval-platform/eval-dataset";
+import type { Data } from "@eval-platform/eval-dataset";
 import type {
-  AgentConfigRef,
-  AgentRole,
   EvaluationOutputSchema,
   EvaluationRecord,
-  EvaluateRequest,
-  PipelineRequest,
-  Project,
+  ProjectPlan,
   RetryPolicy,
   RunHandle,
+  RunOperation,
+  RunRequest,
   RunSnapshot,
+  RunTargetSelector,
+  RunTargets,
   Sampling,
-  StartRunRequest,
 } from "@eval-platform/eval-contracts";
-import type { ConfigResolver } from "../config/model.js";
 import type { Harness } from "../harness/model.js";
 import type { RetryController } from "./retry.js";
 import type { SamplingState, RuntimeStore } from "./store.js";
 import type { EvaluationScorePort } from "./scores.js";
 
-export interface Sample {
-  readonly sampleId: string;
+/**
+ * One fixed test input of a Project: a full copy of its source Data taken at creation. Shared Data
+ * bound by several Datasets is one ProjectSample. Later catalog edits never change it.
+ */
+export interface ProjectSample {
+  readonly projectSampleId: string;
+  readonly projectId: string;
+  /** Source Data identity, kept for display and Dataset grouping only. */
+  readonly dataId: string;
+  /** Every bound Dataset containing this Data, in Project binding order. */
+  readonly datasetIds: readonly string[];
+  readonly samplingCount: number;
   readonly data: Data;
+}
+
+/**
+ * Read-only view of Project plans. The API process injects an owner-scoped reader; the Worker injects
+ * an all-owner reader. Runtime never reads live Dataset/Data or editable Agent Configs.
+ */
+export interface ProjectPlanReader {
+  /** Null for an unknown or soft-deleted Project. */
+  getProjectPlan(projectId: string): Promise<ProjectPlan | null>;
+  /** One ProjectSample or null per input ID, in the same order. */
+  getProjectSamples(projectId: string, projectSampleIds: readonly string[]): Promise<readonly (ProjectSample | null)[]>;
+  /** Schema content referenced by `ProjectPlan.evaluation`; null when the Project has no evaluation plan. */
+  getEvaluationOutputSchema(projectId: string): Promise<EvaluationOutputSchema | null>;
 }
 
 export interface RuntimeSamplingContext {
   readonly state: SamplingState;
-  readonly sample: Sample;
+  readonly sample: ProjectSample;
 }
 
 export interface RuntimeEvaluationContext {
   readonly sampling: SamplingState;
   readonly evaluation: EvaluationRecord;
-  readonly sample: Sample;
+  readonly sample: ProjectSample;
 }
 
 /** A detached copy of persisted Sampling facts returned by Runtime reads. */
 export type SamplingSnapshot = Sampling;
 
-export interface AgentOption {
-  readonly agentConfig: AgentConfigRef;
-  readonly name: string;
-  readonly role: AgentRole;
+export interface RunPreviewRequest {
+  readonly projectId: string;
+  readonly operation: RunOperation;
+  readonly selector: RunTargetSelector;
 }
 
-export interface RuntimeCatalog {
-  listProjects(): Promise<readonly Project[]>;
-  getProject(projectId: string): Promise<Project | null>;
-  /** Resolve the Project's selected output-format ID to its immutable Schema; null when none is selected. */
-  getEvaluationOutputSchema(projectId: string): Promise<EvaluationOutputSchema | null>;
-  listAgents(role?: AgentRole): Promise<readonly AgentOption[]>;
-  listDatasets(): Promise<readonly Dataset[]>;
-  listData(datasetId: string): Promise<readonly Data[]>;
-  listSamples(dataId: string): Promise<readonly Sample[]>;
-  getSample(sampleId: string): Promise<Sample | null>;
-  /** Return one Sample or null per input ID, in the same order. */
-  getSamples(sampleIds: readonly string[]): Promise<readonly (Sample | null)[]>;
+/** Fixed targets the caller must submit unchanged; a retry reuses them instead of re-expanding. */
+export interface RunPreview extends RunPreviewRequest {
+  readonly targets: RunTargets;
+  /** Samplings this Run would delete (execution/pipeline only). */
+  readonly replacedSamplingCount: number;
+  /** Samplings this Run would create (execution/pipeline only). */
+  readonly newSamplingCount: number;
+  /** EvaluationRecords this Run would create. */
+  readonly evaluationCount: number;
+  readonly executionPlanDigest: string;
+  /** `ProjectEvaluation.digest`; null for execution. */
+  readonly evaluationPlanDigest: string | null;
 }
-
-/** Catalog reads needed to resolve a new Run; no Agent listing or UI queries. */
-export type RuntimeAdmissionCatalog = Pick<RuntimeCatalog, "listData" | "listSamples" | "getSamples">;
 
 /** Persists Run admissions only; Agent execution belongs to a separate resumer. */
 export interface EvalRunAdmission {
-  start(request: StartRunRequest): Promise<RunHandle>;
-  evaluate(request: EvaluateRequest): Promise<RunHandle>;
-  pipeline(request: PipelineRequest): Promise<RunHandle>;
+  preview(request: RunPreviewRequest): Promise<RunPreview>;
+  submit(request: RunRequest): Promise<RunHandle>;
 }
 
 export interface EvalRunAdmissionDependencies {
   /** Resolved SP source commit of this Eval deployment; saved on newly admitted Runs. */
   readonly sourceCommit: string;
-  readonly catalog: RuntimeAdmissionCatalog;
-  readonly configResolver: ConfigResolver;
+  readonly plans: ProjectPlanReader;
   readonly store: RuntimeStore;
   readonly idFactory?: () => string;
 }
@@ -85,10 +101,9 @@ export interface EvalRunQueries {
   listEvaluations(samplingId: string): Promise<readonly EvaluationRecord[]>;
 }
 
-/** Recovery reads persisted Run facts; admission APIs and Config resolution stay in the API process. */
+/** Recovery reads persisted Run facts and the Project plan; admission stays in the API process. */
 export interface EvalRunResumerDependencies {
-  readonly getSamples: RuntimeCatalog["getSamples"];
-  readonly getEvaluationOutputSchema: RuntimeCatalog["getEvaluationOutputSchema"];
+  readonly plans: ProjectPlanReader;
   readonly harness: Harness;
   readonly store: RuntimeStore;
   readonly createRetryController?: (policy?: RetryPolicy) => RetryController;

@@ -40,7 +40,7 @@ export function createLangfuseScorePublisher(input: {
       ...(config.environment === undefined ? {} : { environment: config.environment }),
       metadata: {
         projectId: score.projectId,
-        sampleId: score.sampleId,
+        projectSampleId: score.projectSampleId,
         samplingId: score.samplingId,
         evaluationId: score.evaluationId,
         evaluatorChatId: score.evaluatorChatId,

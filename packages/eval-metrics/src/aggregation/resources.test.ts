@@ -10,8 +10,8 @@ describe("resource statistics", () => {
     const complete = aggregateResources([resourceInput()]);
     expect(complete.tokens.total).toEqual({ value: 0, coverage: "complete" });
     expect(complete.costs.chargedUnits).toEqual({ value: 0, coverage: "complete" });
-    expect(complete.tools.count).toEqual({ value: 0, coverage: "complete" });
-    expect(complete.collections).toEqual({ collected: 1, pending: 0, failed: 0, unsubmitted: 0, finalized: 1 });
+    expect(complete.trajectory.tools.count).toEqual({ value: 0, coverage: "complete" });
+    expect(complete.collections).toEqual({ collected: 1, pending: 0, failed: 0, uncollected: 0, unsubmitted: 0, finalized: 1 });
     expect(aggregateResources([]).tokens.total).toEqual({ value: null, coverage: "unavailable" });
   });
 
@@ -23,7 +23,7 @@ describe("resource statistics", () => {
     ]);
     expect(result.collections).toMatchObject({ collected: 0, pending: 1, failed: 1, unsubmitted: 1 });
     expect(result.tokens.input).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.turns.count).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.turns.count).toEqual({ value: null, coverage: "unavailable" });
   });
 
   it("marks observed values partial when another attempt's resources are missing", () => {
@@ -33,7 +33,7 @@ describe("resource statistics", () => {
     ]);
     expect(result.tokens.total).toEqual({ value: 35, coverage: "partial" });
     expect(result.costs.providerUsd).toEqual({ value: 0.5, coverage: "partial" });
-    expect(result.tools.count).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
   });
 
   it.each(["partial", "unavailable"] as const)("does not treat declared %s sources as complete", (coverage) => {
@@ -48,7 +48,7 @@ describe("resource statistics", () => {
     const result = aggregateResources([resourceInput({ finalized: false, usageEvents: [usage("usage-1")] })]);
     expect(result.collections.finalized).toBe(0);
     expect(result.tokens.input).toEqual({ value: 10, coverage: "partial" });
-    expect(result.tools.count).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
   });
 
   it("keeps missing token fields unknown and reasoning separate from total tokens", () => {
@@ -78,7 +78,7 @@ describe("resource statistics", () => {
       resourceInput({ usageEvents: [event], telemetryEvents: [{ ingestSeq: 123, event: started }], billingSettlements: [settlement("usage-1")] }),
     ]);
     expect(result.tokens.total.value).toBe(35);
-    expect(result.tools.count.value).toBe(1);
+    expect(result.trajectory.tools.count.value).toBe(1);
     expect(result.costs.modelDebitedUnits.value).toBe(8);
     expect(result.duplicateRecords).toEqual({ usageEvents: 2, telemetryEvents: 1, billingSettlements: 1 });
   });
@@ -110,7 +110,7 @@ describe("resource statistics", () => {
       billingSettlements: [{ eventId: "missing-account", debitedUnits: 5 }],
     })]);
     expect(result.tokens.input).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.tools.count).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
     expect(result.costs.modelDebitedUnits).toEqual({ value: null, coverage: "unavailable" });
     expect(result.diagnostics).toEqual(expect.arrayContaining([
       expect.objectContaining({ stream: "billingSettlements", kind: "missing-identity" }),
@@ -269,10 +269,10 @@ describe("resource statistics", () => {
       telemetry("tool-end", "tool.finished", "tool-1", { toolName: "browser", outcome: "completed" }, 240),
     ];
     const result = aggregateResources([resourceInput({ telemetryEvents: events.toReversed() })]);
-    expect(result.turns).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 500 } });
+    expect(result.trajectory.turns).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 500 } });
     expect(result.modelRequests).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 1, failed: 1, durationMs: { mean: 15 } });
-    expect(result.tools).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 40 } });
-    expect(result.byTool[0]).toMatchObject({ toolName: "browser", count: { value: 1 }, durationMs: { total: 40 } });
+    expect(result.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 40 } });
+    expect(result.trajectory.byTool[0]).toMatchObject({ toolName: "browser", count: { value: 1 }, durationMs: { total: 40 } });
   });
 
   it("keeps cancelled, unknown and in-progress operations distinct", () => {
@@ -282,8 +282,8 @@ describe("resource statistics", () => {
       telemetry("start", "tool.started", "tool-2", { toolName: "browser" }),
       telemetry("other", "approval.requested", "approval-1"),
     ] })]);
-    expect(result.turns.cancelled).toBe(1);
-    expect(result.tools).toMatchObject({ count: { value: 2 }, unknown: 1, inProgress: 1, failed: 0, durationMs: { count: 1, missing: 1, mean: 7 } });
+    expect(result.trajectory.turns.cancelled).toBe(1);
+    expect(result.trajectory.tools).toMatchObject({ count: { value: 2 }, unknown: 1, inProgress: 1, failed: 0, durationMs: { count: 1, missing: 1, mean: 7 } });
   });
 
   it("does not select an arbitrary winner for contradictory operation kind, outcome or tool name", () => {
@@ -294,10 +294,10 @@ describe("resource statistics", () => {
       telemetry("name-1", "tool.started", "conflicting-name", { toolName: "browser" }),
       telemetry("name-2", "tool.finished", "conflicting-name", { toolName: "shell", outcome: "completed" }),
     ] })]);
-    expect(result.tools).toMatchObject({ count: { value: 2, coverage: "partial" }, unknown: 1, completed: 1 });
-    expect(result.turns.count.value).toBeNull();
-    expect(result.byTool.find((item) => item.toolName === "browser")!.durationMs.count).toBe(0);
-    expect(result.byTool.some((item) => item.toolName === null)).toBe(true);
+    expect(result.trajectory.tools).toMatchObject({ count: { value: 2, coverage: "partial" }, unknown: 1, completed: 1 });
+    expect(result.trajectory.turns.count.value).toBeNull();
+    expect(result.trajectory.byTool.find((item) => item.toolName === "browser")!.durationMs.count).toBe(0);
+    expect(result.trajectory.byTool.some((item) => item.toolName === null)).toBe(true);
     expect(result.diagnostics.filter((item) => item.kind === "conflicting-identity")).toHaveLength(3);
   });
 

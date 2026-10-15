@@ -6,7 +6,7 @@ const score = {
   evaluationId: "evaluation-1",
   samplingId: "sampling-1",
   projectId: "project-1",
-  sampleId: "sample-1",
+  projectSampleId: "sample-1",
   subjectChatId: "11111111-1111-4111-8111-111111111111",
   evaluatorChatId: "22222222-2222-4222-8222-222222222222",
   score: 8,
@@ -32,7 +32,7 @@ describe("Langfuse score publisher", () => {
       environment: "dev",
       metadata: {
         projectId: "project-1",
-        sampleId: "sample-1",
+        projectSampleId: "sample-1",
         samplingId: "sampling-1",
         evaluationId: "evaluation-1",
         evaluatorChatId: score.evaluatorChatId,

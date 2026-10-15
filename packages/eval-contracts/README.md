@@ -2,7 +2,7 @@
 
 评估平台跨包共享的稳定契约层，公共契约从包根入口导入。`./http-errors` 是 Eval API 唯一的错误码目录（`defineErrorCatalog`），`./http` 是基于它的 Hono 响应器（`createHonoHttp`）；只有这两个 HTTP 边界子路径依赖 `@springbrand/http` 与 `hono`，包根不加载它们。HTTP 契约见 [Eval HTTP 控制面](../../docs/eval-http-api.md)。
 
-负责 Project、Sampling、EvaluationRecord、HarnessConfig、ExecutionOutput、EvaluationAgentOutput（评估产物、分数、证据和完整轨迹）、ArtifactRef、TrajectoryRef 和 EvidenceRef 等运行与评估类型边界。证据和解释属于评估 Agent 输出，没有独立的归因契约。SP Chat 是持久 Session：`Sampling.subjectChatId` 和 `EvaluationRecord.chatId` 标识各自的 Chat，每个 Attempt 的 `submissionId` 标识该 Chat 内的一次提交。`AgentResourceCollection` 在投递前按 `chatId + idempotencyKey` 登记，采集成功后保留真实 `submissionId`，只表达 `pending | collected | failed` 的采集状态。Dataset/Data 由 `eval-dataset` 拥有，Sample 由 `eval-runtime` 的运行时模型拥有。
+负责 Project 与其固定计划（`src/project.ts`：`ProjectPlan`、`ExecutionPlan`、`EvaluationPlan`、`ProjectDatasetSnapshot`、`AgentConfigSnapshot`、`EvaluationOutputSchemaRef`）、Sampling、EvaluationRecord、Run 选择与目标、HarnessConfig、ExecutionOutput、EvaluationAgentOutput（评估产物、原始结构化输出、证据和完整轨迹）、AgentObservationRef、ArtifactRef、TrajectoryRef 和 EvidenceRef 等运行与评估类型边界。证据和解释属于评估 Agent 输出，没有独立的归因契约。SP Chat 是持久 Session：`Sampling.subjectChatId` 和 `EvaluationRecord.chatId` 标识各自的 Chat，每个 Attempt 的 `submissionId` 标识该 Chat 内的一次提交。`AgentResourceCollection` 在投递前按 `chatId + idempotencyKey` 登记，采集成功后保留真实 `submissionId`，只表达 `pending | collected | failed` 的采集状态。Dataset/Data 由 `eval-dataset` 拥有，ProjectSample（Project 创建时的完整 Data 副本）由 `eval-runtime` 的运行时模型拥有；`Sampling.projectSampleId` 指向它。
 
 JSON 值与标识符规则也只在这里定义：`jsonValueSchema`、`jsonObjectSchema`（有限数、安全整数、无环纯数据）和 `identifierSchema`、`isIdentifier`、`IDENTIFIER_RULE`（非空且无首尾空白）。
 
@@ -16,17 +16,21 @@ JSON 值与标识符规则也只在这里定义：`jsonValueSchema`、`jsonObjec
 
 Subject 的产物和完整轨迹是执行终态的必需证据。`Sampling.execution.evidencePending` 表示 Agent 已终结、证据尚未完整保存；此时执行保持非终态，恢复进程只补收证据，不再次提交或重启 Agent。证据与执行终态在同一次 Sampling 写入中保存；原 Agent 错误保留在 Attempt 和阶段错误中。
 
-`RunPhase` 只有 `execution | evaluation`。`RunPhases` 表示 Run 关联的实际阶段范围：只执行、只评估或顺序执行后评估；`RunSnapshot.phases` 返回该范围，`phase` 和 `status` 返回从 Sampling 推导的当前进度。Pipeline 只负责组合两阶段，没有第三种阶段、Run kind 或独立的 Pipeline 数据模型。
+`RunOperation` 为 `execution | pipeline | evaluation`，由每次启动选择，不写入 Project。`RunPhase` 只有 `execution | evaluation`；`RunPhases` 由 operation 推导：只执行、只评估或顺序执行后评估。`RunSnapshot` 返回 `operation`、`phases`、`selector`、`targets`、`samplingIds`、`evaluationIds`，`phase` 和 `status` 从子记录推导。Pipeline 只负责组合两阶段，没有第三种阶段或独立的 Pipeline 数据模型。
 
-`RunSnapshot.stopRequested` 表示 Project 当前 Run 已请求停止；停止期间与收尾后的 Run 状态见[架构方案](../../docs/architecture.md#run-调度与停止)。
+`RunRequest` 只包含 `idempotencyKey`、`projectId`、`operation`、`selector` 和 `targets`，不携带任何配置 ID 或 Dataset/Data 内容。`RunTargetSelector` 是 `all`、`datasetIds`、`projectSampleIds`、`samplingIds` 的组合，只在 Project 快照内展开；`RunTargets` 是 preview 返回的固定、去重结果（`projectSampleIds` 与 `samplingIds`），提交和重试时原样带回。evaluation 的 `projectSampleIds` 为空，`samplingIds` 为要重新评估的成功 Sampling。
 
-三个运行请求都要求调用方提供同一次意图稳定复用的 `idempotencyKey`。`StartRunRequest` 使用 `executionConfigId`，`EvaluateRequest` 使用 `evaluationConfigId` 和确定的 `samplingIds`，`PipelineRequest` 使用 `pipelineConfigId`。具体 Dataset、Agent、并发和重试策略属于 `eval-runtime/config`，不在请求契约中复制。
+`RunSnapshot.stopRequested` 表示 Run 已请求停止；停止期间与收尾后的 Run 状态见[架构方案](../../docs/architecture.md#run-调度与停止)。
 
-每次部署选定一个 SP 分支并独立发布整套 Eval SP。Project 绑定该分支，并记录首次成功创建 Run 时选定的执行或 Pipeline 操作及配置；后续执行必须沿用这项选择。空 Project 不能以只评估启动；已有成功 Sampling 的 Project 可新增独立评估 Run，而不改首次选择。Run 记录准入时该发布使用的 SP commit；Sampling 不存分支。Agent Config 引用指向 Eval SP 自己的 `user-agent` 库，不跨 dev/production 实时共享配置。
+每次部署选定一个 SP 分支并独立发布整套 Eval SP。`Project` 只含元数据和该分支；Run 记录准入时该发布使用的 SP commit；Sampling 不存分支。
 
-Project 只绑定评估输出格式的 ID。格式本身是 Eval API 中独立上传的一份带名称和描述的 draft 2020-12 JSON Schema 文件。首次评估 Run 准入后绑定不可修改；所有评估 Run 必须有格式 ID，Runtime 按 ID 读取 Schema 内容，每个 Eval Agent 初始化前在自己的 Workspace 的素材根目录下收到 `evaluation-output.schema.json`。
+`ProjectPlan` 是一次一致读取的 Project 计划：`project`、按绑定顺序的 `datasets`（每个含创建时成员顺序的 `projectSampleIds`）、`execution` 与 `executionPlanDigest`，以及可空的 `evaluation: ProjectEvaluation`（`plan`、`digest`、`lockedAt` 只能一起存在）。`ExecutionPlan` 创建后不可修改，含 Subject `harness`、`subjectAgentConfig`、`executionConcurrency` 和 `retryPolicy`；`EvaluationPlan` 含 SP 框架的 `evaluationHarness`、`evaluatorAgentConfig`、`evaluationConcurrency`、`retryPolicy` 和 `outputSchema`（Schema ID 与规范 JSON 的 sha256），在首个 pipeline/evaluation Run 准入时锁定，锁定前可整体替换。Harness 中的 `agentConfig` 是 Project 的冻结副本引用，指向 Eval SP 自己的 `user-agent` 库；`AgentConfigSnapshot` 是冻结时的正文快照，只用于展示，运行从不用它重建配置。
 
-`AgentFramework` 为 `sp | codex | cc`。`HarnessConfig.kind` 表示统一的 SP 云端宿主，必填的 `framework` 表示所运行的 Agent 框架；三种框架都引用 SP 管理的 Agent Config，复用同一 Chat/Submission/Workspace 边界。执行配置可选择三者，评估配置固定 SP 框架，不由本包实现进程启动或云端部署。
+评估输出格式是 Eval API 中独立上传的一份带名称和描述的 draft 2020-12 JSON Schema 文件，正文不可变。每个 Evaluator 初始化前在自己 Workspace 的素材根目录下收到 `evaluation-output.schema.json`。`EvaluationAgentOutput.structuredOutput` 是 Evaluator 写在 `/evaluations/<evaluationId>/` 下的结果文件：路径、原始 UTF-8 文本和可选 hash，不是解析后的副本；缺失时由 Metrics 报告为 unavailable，不当作 0。
+
+`AgentObservationRef` 是 Sampling（Subject）或 EvaluationRecord（Evaluator）的只读观察目标：角色、Project、Sampling、可选 Evaluation、Chat 所属用户、可选 Chat ID 和 `not-started | available`。它不包含可写 Chat URL。
+
+`AgentFramework` 为 `sp | codex | cc`。`HarnessConfig.kind` 表示统一的 SP 云端宿主，必填的 `framework` 表示所运行的 Agent 框架；三种框架都引用 SP 管理的 Agent Config，复用同一 Chat/Submission/Workspace 边界。执行计划可选择三者，评估计划固定 SP 框架，不由本包实现进程启动或云端部署。
 
 每个 Evaluator 仍有独立 Chat、Submission 和轨迹，但通过执行 Chat 的 `{userId, chatId}` 关联同一个物理 SpaceDO。Subject 产物留在原 Workspace；SP 将完整 Subject 轨迹物化进去，Evaluator 的材料与结果写在 `/evaluations/<evaluationId>/`。Workspace 绑定由 Runtime 在创建 Evaluator Chat 时给出，不是 Harness 配置项。
 

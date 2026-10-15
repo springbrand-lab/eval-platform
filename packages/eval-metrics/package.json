@@ -14,7 +14,8 @@
   "dependencies": {
     "@eval-platform/eval-contracts": "workspace:*",
     "@eval-platform/eval-dataset": "workspace:*",
-    "@eval-platform/eval-runtime": "workspace:*"
+    "@eval-platform/eval-runtime": "workspace:*",
+    "ajv": "^8.20.0"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

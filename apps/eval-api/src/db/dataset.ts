@@ -10,11 +10,10 @@ import {
   datasetSchema,
 } from "@eval-platform/eval-dataset";
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import type { EvalDb } from "./client.js";
-import { DatasetInUseError } from "./errors.js";
+import { READ_SNAPSHOT, type EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import { assertDataReferencesSelectable } from "./resource-catalog.js";
-import { data, datasetData, datasets, executionConfigs, samples } from "./schema.js";
+import { data, datasetData, datasets } from "./schema.js";
 
 type DatasetReader = Pick<EvalDb, "select">;
 
@@ -103,10 +102,6 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
           .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId),
             isNull(datasets.deletedAt))).for("update");
         if (!row) return;
-        const [config] = await transaction.select({ configId: executionConfigs.configId })
-          .from(executionConfigs).where(and(eq(executionConfigs.ownerUserId, ownerUserId),
-            eq(executionConfigs.datasetId, datasetId))).limit(1);
-        if (config) throw new DatasetInUseError(datasetId);
         await transaction.update(datasets).set({ deletedAt: new Date() })
           .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId)));
       });
@@ -156,7 +151,7 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
         const snapshot = (await readDatasetSnapshots(transaction, ownerUserId, [datasetId]))[0];
         if (!snapshot) throw new DatasetEntityNotFoundError("dataset", datasetId);
         return snapshot.data;
-      }, { isolationLevel: "repeatable read", accessMode: "read only" });
+      }, READ_SNAPSHOT);
     },
     async deleteData(dataId) {
       await db.transaction(async (transaction) => {
@@ -169,9 +164,7 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
             eq(datasetData.ownerUserId, datasets.ownerUserId)))
           .where(and(eq(datasetData.ownerUserId, ownerUserId), eq(datasetData.dataId, dataId),
             isNull(datasets.deletedAt))).limit(1);
-        const [sample] = await transaction.select({ sampleId: samples.sampleId }).from(samples)
-          .where(and(eq(samples.ownerUserId, ownerUserId), eq(samples.dataId, dataId))).limit(1);
-        if (member || sample) throw new DataInUseError(dataId);
+        if (member) throw new DataInUseError(dataId);
         await transaction.update(data).set({ deletedAt: new Date() })
           .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, dataId)));
       });
@@ -215,7 +208,7 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
     async getDatasetSnapshot(datasetId) {
       return db.transaction(
         async (transaction) => (await readDatasetSnapshots(transaction, ownerUserId, [datasetId]))[0] ?? null,
-        { isolationLevel: "repeatable read", accessMode: "read only" },
+        READ_SNAPSHOT,
       );
     },
     async importDataset(snapshot, options) {

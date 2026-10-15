@@ -14,16 +14,17 @@ import {
 import { DrizzleQueryError } from "drizzle-orm/errors";
 import { describe, expect, it } from "vitest";
 import {
+  AgentConfigFrozenError,
   BundleResourceInUseError,
   BundleResourceNotFoundError,
   CatalogInputError,
   CatalogPayloadTooLargeError,
-  ConfigReferenceError,
-  DatasetInUseError,
-  EvaluationSelectionTooLargeError,
-  OutputSchemaInUseError,
   OutputSchemaNotFoundError,
+  ProjectCreationKeyTakenError,
+  ProjectEvaluationPlanLockedError,
+  ProjectIdempotencyConflictError,
   ProjectRunStopConflictError,
+  RunTargetsTooLargeError,
 } from "../db/errors.js";
 import { BundleFileError } from "../sp/bundle-errors.js";
 import { EvalSpApiError, EvalSpTransportError } from "../sp/client.js";
@@ -35,35 +36,39 @@ describe("apiError", () => {
   it.each([
     [new RuntimeEntityNotFoundError("project", "p"), 404, "PROJECT_NOT_FOUND"],
     [new RuntimeEntityNotFoundError("run", "r"), 404, "RUN_NOT_FOUND"],
-    [new RuntimeEntityNotFoundError("sample", "s"), 404, "SAMPLE_NOT_FOUND"],
+    [new RuntimeEntityNotFoundError("dataset", id), 404, "DATASET_NOT_FOUND"],
+    [new RuntimeEntityNotFoundError("project-sample", "s"), 404, "PROJECT_SAMPLE_NOT_FOUND"],
     [new RuntimeEntityNotFoundError("sampling", "s"), 404, "SAMPLING_NOT_FOUND"],
     [new RuntimeEntityNotFoundError("evaluation", "e"), 404, "EVALUATION_NOT_FOUND"],
-    [new RuntimeEntityNotFoundError("pipeline-config", "c"), 404, "CONFIG_NOT_FOUND"],
     [new RuntimeAdmissionConflictError("source-branch", "m"), 409, "PROJECT_SOURCE_BRANCH_CONFLICT"],
-    [new RuntimeAdmissionConflictError("launch-selection", "m"), 409, "PROJECT_LAUNCH_SELECTION_CONFLICT"],
-    [new RuntimeAdmissionConflictError("output-schema", "m"), 409, "PROJECT_OUTPUT_SCHEMA_CONFLICT"],
-    [new RuntimeAdmissionConflictError("empty-project", "m"), 409, "PROJECT_EMPTY"],
-    [new RuntimeAdmissionConflictError("evaluation-prompt", "m"), 409, "SAMPLE_EVALUATION_PROMPT_MISSING"],
+    [new RuntimeAdmissionConflictError("evaluation-plan-required", "m"), 409, "PROJECT_EVALUATION_PLAN_REQUIRED"],
+    [new RuntimeAdmissionConflictError("plan-changed", "m"), 409, "PROJECT_PLAN_CHANGED"],
+    [new RuntimeAdmissionConflictError("stale-targets", "m"), 409, "RUN_TARGETS_STALE"],
+    [new RuntimeAdmissionConflictError("empty-targets", "m"), 409, "RUN_TARGETS_EMPTY"],
+    [new RuntimeAdmissionConflictError("creation-superseded", "m"), 409, "RUN_IDEMPOTENCY_CONFLICT"],
+    [new ProjectCreationKeyTakenError(), 409, "RUNTIME_RECORD_CONFLICT"],
+    [new RuntimeAdmissionConflictError("evaluation-prompt", "m"), 409, "PROJECT_SAMPLE_EVALUATION_PROMPT_MISSING"],
     [new RuntimeAdmissionConflictError("sampling-unavailable", "m"), 409, "SAMPLING_UNAVAILABLE"],
     [new RuntimeProjectBusyError("p", "r"), 409, "PROJECT_BUSY"],
     [new RuntimeRunIdentityConflictError("m"), 409, "RUN_IDEMPOTENCY_CONFLICT"],
     [new RuntimeRunStoppedError("r"), 409, "RUN_STOPPED"],
     [new ProjectRunStopConflictError(), 409, "PROJECT_NO_ACTIVE_RUN"],
+    [new ProjectEvaluationPlanLockedError("p"), 409, "PROJECT_EVALUATION_PLAN_LOCKED"],
+    [new ProjectIdempotencyConflictError(), 409, "PROJECT_IDEMPOTENCY_CONFLICT"],
+    [new AgentConfigFrozenError(id), 409, "AGENT_CONFIG_FROZEN"],
     [new DatasetEntityNotFoundError("dataset", id), 404, "DATASET_NOT_FOUND"],
     [new DatasetEntityNotFoundError("data", id), 404, "DATA_NOT_FOUND"],
     [new DatasetInputError("m"), 400, "DATASET_INPUT_INVALID"],
     [new DatasetIdentityConflictError("data", id), 409, "DATASET_IDENTITY_CONFLICT"],
-    [new DatasetInUseError(id), 409, "DATASET_IN_USE"],
     [new DataInUseError(id), 409, "DATA_IN_USE"],
-    [new ConfigReferenceError("Dataset", id), 400, "CONFIG_REFERENCE_INVALID"],
     [new CatalogPayloadTooLargeError("m"), 413, "CATALOG_PAYLOAD_TOO_LARGE"],
-    [new EvaluationSelectionTooLargeError(), 413, "EVALUATION_SELECTION_TOO_LARGE"],
+    [new RunTargetsTooLargeError(10_000), 413, "RUN_TARGETS_TOO_LARGE"],
     [new BundleResourceNotFoundError("Material", id), 404, "BUNDLE_RESOURCE_NOT_FOUND"],
     [new BundleResourceInUseError("Session", id), 409, "BUNDLE_RESOURCE_IN_USE"],
     [new OutputSchemaNotFoundError(id), 404, "OUTPUT_SCHEMA_NOT_FOUND"],
-    [new OutputSchemaInUseError(id), 409, "OUTPUT_SCHEMA_IN_USE"],
     [new MetricsQueryError("m"), 400, "METRICS_QUERY_INVALID"],
     [new MetricsEntityNotFoundError("dataset", id), 404, "DATASET_NOT_FOUND"],
+    [new MetricsEntityNotFoundError("project-sample", "s"), 404, "PROJECT_SAMPLE_NOT_FOUND"],
     [new MetricsEntityNotFoundError("sampling", "s"), 404, "SAMPLING_NOT_FOUND"],
     [new BundleFileError("not-found", "m"), 404, "BUNDLE_FILE_NOT_FOUND"],
     [new BundleFileError("conflict", "m"), 409, "BUNDLE_FILE_CONFLICT"],
@@ -101,6 +106,12 @@ describe("apiError", () => {
     });
     expect(apiError(new RuntimeRecordPersistenceError("private", "unknown", null, {}, {})).code)
       .toBe("RUNTIME_PERSISTENCE_UNCONFIRMED");
+  });
+
+  it("answers a failure followed by a failed compensation as the failure and keeps both for diagnostics", () => {
+    const failure = new RuntimeProjectBusyError("p", "r");
+    const aggregate = new AggregateError([failure, new Error("database unavailable")], "compensation failed");
+    expect(apiError(aggregate)).toMatchObject({ code: "PROJECT_BUSY", status: 409, cause: aggregate });
   });
 
   it("passes catalog errors through and keeps unknown failures internal with their cause", () => {

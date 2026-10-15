@@ -17,7 +17,7 @@ export type RunRecordScope =
 const samplingStatus = sql<string>`${samplings.facts}->'execution'->>'status'`;
 const evaluationStatus = sql<string>`${evaluations.facts}->'status'->>'status'`;
 
-/** The single definition of a Sampling that may be selected for independent evaluation. */
+/** The single definition of a Sampling that may be evaluated on its own. */
 export function samplingSucceeded(): SQL {
   return eq(samplingStatus, "succeeded");
 }
@@ -49,8 +49,14 @@ export function runActive(reader: RecordReader): SQL | undefined {
   return or(runUnfinished(reader), and(eq(runs.stopRequested, true), eq(runs.stopFinalized, false)));
 }
 
+/** The single definition of "this Project has a Run", shared by creation replay, admission and compensation. */
+export async function projectHasRun(reader: RecordReader, projectId: string): Promise<boolean> {
+  const [run] = await reader.select({ runId: runs.runId }).from(runs).where(eq(runs.projectId, projectId)).limit(1);
+  return run !== undefined;
+}
+
 export function samplingFromRow(row: typeof samplings.$inferSelect): Sampling {
-  return { ...row.facts, samplingId: row.samplingId, projectId: row.projectId, sampleId: row.sampleId };
+  return { ...row.facts, samplingId: row.samplingId, projectId: row.projectId, projectSampleId: row.projectSampleId };
 }
 
 export function evaluationFromRow(row: typeof evaluations.$inferSelect): EvaluationRecord {
@@ -58,7 +64,7 @@ export function evaluationFromRow(row: typeof evaluations.$inferSelect): Evaluat
 }
 
 export function samplingFacts(record: Sampling): typeof samplings.$inferInsert.facts {
-  const { samplingId: _samplingId, projectId: _projectId, sampleId: _sampleId, ...facts } = record;
+  const { samplingId: _samplingId, projectId: _projectId, projectSampleId: _projectSampleId, ...facts } = record;
   return facts;
 }
 
@@ -133,22 +139,26 @@ export async function readRunRecords(
     .orderBy(runs.runId);
   if (selected.length === 0) return [];
   const ids = selected.map((row) => row.runId);
-  const [memberships, judges] = await Promise.all([
-    reader.select().from(runSamplings).where(inArray(runSamplings.runId, ids))
-      .orderBy(runSamplings.runId, runSamplings.position),
-    reader.select().from(runEvaluations).where(inArray(runEvaluations.runId, ids))
-      .orderBy(runEvaluations.runId, runEvaluations.position),
-  ]);
+  const memberships = await reader.select().from(runSamplings).where(inArray(runSamplings.runId, ids))
+    .orderBy(runSamplings.runId, runSamplings.position);
+  const evaluationMemberships = await reader.select().from(runEvaluations).where(inArray(runEvaluations.runId, ids))
+    .orderBy(runEvaluations.runId, runEvaluations.position);
   const samplingIdsByRun = groupIds(memberships, (member) => member.samplingId);
-  const evaluationIdsByRun = groupIds(judges, (judge) => judge.evaluationId);
+  const evaluationIdsByRun = groupIds(evaluationMemberships, (member) => member.evaluationId);
   return selected.map((row) => ({
     runId: row.runId,
     projectId: row.projectId,
     sourceCommit: row.sourceCommit,
+    operation: row.operation,
     phases: row.phases,
-    config: row.config,
+    selector: row.selector,
+    targets: row.targets,
     samplingIds: samplingIdsByRun.get(row.runId) ?? [],
     evaluationIds: evaluationIdsByRun.get(row.runId) ?? [],
+    planDigests: {
+      execution: row.executionPlanDigest,
+      ...(row.evaluationPlanDigest === null ? {} : { evaluation: row.evaluationPlanDigest }),
+    },
     requestIdentity: {
       idempotencyKey: row.idempotencyKey,
       requestFingerprint: row.requestFingerprint,

@@ -6,8 +6,9 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createEvalDb } from "./db/client.js";
-import { createPostgresProjectCatalog } from "./db/catalog.js";
 import { createPostgresDatasetStore } from "./db/dataset.js";
+import { createPostgresProjectPlanReader } from "./db/project-plans.js";
+import { seedProject } from "./db/test-fixtures.js";
 import { BundleResourceInUseError, BundleResourceNotFoundError } from "./db/errors.js";
 import { createResourceCatalog } from "./db/resource-catalog.js";
 import { createInitialResourceApi } from "./initial-resources.js";
@@ -225,10 +226,8 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     await catalog.deleteBundle(bundle.bundleId);
   });
 
-  it("uploads a standalone output format and binds only its ID to Project", async () => {
+  it("uploads standalone output formats that evaluation plans keep reading after a soft delete", async () => {
     const db = createEvalDb(pool);
-    const catalog = createPostgresProjectCatalog(db, owner, release);
-    const project = await catalog.createProject({ name: "Schema project" });
     const send = httpClient(db, await openBundleDirectory(bundleRoot));
     const schema = { type: "object", required: ["score"], properties: { score: { type: "number" } } };
     const upload = await send("/api/evaluation-output-schemas", "POST", {
@@ -244,26 +243,20 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     expect(await code(invalid)).toBe("CATALOG_INPUT_INVALID");
     const item = `/api/evaluation-output-schemas/${output.outputSchemaId}`;
     expect((await send(item, "PATCH", { name: "Score v1" })).status).toBe(200);
-    expect(await msg(await send(item, "GET"))).toMatchObject({
-      name: "Score v1", description: "Evaluator result", schema,
-    });
+    expect(await msg(await send(item, "GET"))).toMatchObject({ name: "Score v1", description: "Evaluator result", schema });
     expect(await code(await send(item, "PATCH", { content: '{"type":"string"}' }))).toBe("REQUEST_VALIDATION_FAILED");
-    const binding = `/api/projects/${project.projectId}/evaluation-output-schema`;
-    const result = await send(binding, "PUT", { outputSchemaId: output.outputSchemaId });
-    expect(await msg(result)).toEqual({ ...project, evaluationOutputSchemaId: output.outputSchemaId });
-    expect(await msg(await send(`/api/projects/${project.projectId}`, "GET")))
-      .toEqual({ ...project, evaluationOutputSchemaId: output.outputSchemaId });
-    expect(await catalog.getEvaluationOutputSchema(project.projectId)).toEqual(schema);
-    const inUse = await send(item, "DELETE");
-    expect(inUse.status).toBe(409);
-    expect(await code(inUse)).toBe("OUTPUT_SCHEMA_IN_USE");
-    expect((await send(binding, "PUT", { outputSchemaId: null })).status).toBe(200);
-    expect(await catalog.getProject(project.projectId)).not.toHaveProperty("evaluationOutputSchemaId");
     expect((await send(item, "DELETE")).status).toBe(204);
+    expect(await code(await send(item, "DELETE"))).toBe("OUTPUT_SCHEMA_NOT_FOUND");
+
+    const project = await seedProject(db, owner, { datasets: [{ data: [{ dataId: crypto.randomUUID(), userPrompt: "task" }] }], evaluation: true });
+    const plans = createPostgresProjectPlanReader(db, owner);
+    const bound = (await plans.getProjectPlan(project.projectId))!.evaluation!.plan.outputSchema.outputSchemaId;
+    expect((await send(`/api/evaluation-output-schemas/${bound}`, "DELETE")).status).toBe(204);
     expect(await msg(await send("/api/evaluation-output-schemas", "GET"))).toEqual([]);
-    const another = await catalog.createProject({ name: "Another" });
-    expect(await code(await send(`/api/projects/${another.projectId}/evaluation-output-schema`, "PUT", {
-      outputSchemaId: output.outputSchemaId,
-    }))).toBe("OUTPUT_SCHEMA_NOT_FOUND");
+    expect(await plans.getEvaluationOutputSchema(project.projectId)).toMatchObject({ type: "object" });
+    const replaced = await send(`/api/projects/${project.projectId}/evaluation-plan`, "PUT", {
+      userAgentId: crypto.randomUUID(), evaluationConcurrency: 1, outputSchemaId: bound,
+    });
+    expect(await code(replaced)).toBe("OUTPUT_SCHEMA_NOT_FOUND");
   });
 });

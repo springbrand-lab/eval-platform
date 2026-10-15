@@ -1,24 +1,41 @@
-import { RuntimeProjectBusyError } from "@eval-platform/eval-runtime";
+import { RuntimeAdmissionConflictError, RuntimeInputError, RuntimeProjectBusyError } from "@eval-platform/eval-runtime";
 import { describe, expect, it, vi } from "vitest";
+import { AgentConfigFrozenError, ProjectEvaluationPlanLockedError } from "./db/errors.js";
 import type { ApiRuntime, OwnerServices } from "./lib/types.js";
-import { EVALUATION_SAMPLING_IDS, METADATA_BODY_BYTES } from "./limits.js";
+import { METADATA_BODY_BYTES, RUN_TARGET_IDS, SAMPLING_COUNT_MAX } from "./limits.js";
 import { EvalSpApiError, type EvalSpClient } from "./sp/client.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "./test-support.js";
 
 const owner = "11111111-1111-4111-8111-111111111111";
 const datasetId = "00000000-0000-4000-8000-000000000001";
 const outputSchemaId = "00000000-0000-4000-8000-000000000002";
-const project = { projectId: "project-1", ownerUserId: owner, name: "Tasks", sourceBranch: "release" };
+const agentId = "00000000-0000-4000-8000-000000000003";
+const project = { projectId: "project-1", ownerUserId: owner, name: "Tasks", sourceBranch: "release", createdAt: "2026-01-01T00:00:00.000Z" };
+const view = { project, datasets: [], projectSamples: [], currentRun: null, evaluation: null };
+const evaluationPlan = { userAgentId: agentId, evaluationConcurrency: 1, outputSchemaId };
+const createBody = {
+  name: " Tasks ",
+  datasets: [{ datasetId: datasetId.toUpperCase() }],
+  samplingCount: 2,
+  execution: { userAgentId: agentId, framework: "sp", executionConcurrency: 2 },
+  idempotencyKey: "create-1",
+  run: { operation: "execution" },
+};
+const preview = {
+  projectId: "project-1", operation: "execution", selector: { all: true },
+  targets: { projectSampleIds: ["sample-1"], samplingIds: [] as string[] },
+  replacedSamplingCount: 0, newSamplingCount: 1, evaluationCount: 0, executionPlanDigest: "d", evaluationPlanDigest: null,
+};
 
 function setup() {
   const services = {
-    catalog: {
-      listProjects: vi.fn(async () => [project]),
-      createProject: vi.fn(async ({ name }: { name: string }) => ({ ...project, name })),
-      getProject: vi.fn(async (projectId: string) => projectId === "project-1"
-        ? { ...project, evaluationOutputSchemaId: outputSchemaId }
-        : null),
-      selectAllSuccessfulSamplingIds: vi.fn(async () => ["sampling-1"]),
+    projects: {
+      list: vi.fn(async () => [project]),
+      create: vi.fn(async (body: { name: string }) => ({ project: { ...project, name: body.name }, run: { runId: "run-1", samplingIds: ["s-1"] } })),
+      get: vi.fn(async (projectId: string) => projectId === "project-1" ? view : null),
+      exists: vi.fn(async (projectId: string) => projectId === "project-1"),
+      delete: vi.fn(async () => undefined),
+      replaceEvaluationPlan: vi.fn(async () => view),
     },
     datasets: {
       createDataset: vi.fn(async ({ name }: { name: string }) => ({ datasetId, name })),
@@ -26,20 +43,35 @@ function setup() {
       exportDataset: vi.fn(async () => "dataset:\n  name: Cases\ndata: []\n"),
     },
     admission: {
-      start: vi.fn(async () => ({ runId: "run-1", samplingIds: ["sampling-1"] })),
-      evaluate: vi.fn(async () => ({ runId: "run-2", samplingIds: ["sampling-1"] })),
+      preview: vi.fn(async () => preview),
+      submit: vi.fn(async () => ({ runId: "run-2", samplingIds: ["s-2"] })),
     },
     results: { getRun: vi.fn(async () => ({ runId: "run-1" })) },
     projectRuns: {
       getCurrentRun: vi.fn(async () => null),
       stopRun: vi.fn(async (_projectId: string, runId: string) => runId === "run-1" ? { runId, stopRequested: true as const } : null),
     },
-    metrics: { getProjectOverview: vi.fn(async () => ({ projectId: "project-1" })) },
+    observations: {
+      subject: vi.fn(async (projectId: string, samplingId: string) => ({
+        role: "subject", projectId, samplingId, ownerUserId: owner, chatId: "chat-1", state: "available",
+      })),
+      evaluator: vi.fn(async (projectId: string, evaluationId: string) => ({
+        role: "evaluator", projectId, samplingId: "s-1", evaluationId, ownerUserId: owner, state: "not-started",
+      })),
+    },
+    metrics: {
+      getProjectOverview: vi.fn(async () => ({ projectId: "project-1" })),
+      getSampleOverview: vi.fn(async () => ({ projectSampleId: "sample-1" })),
+    },
     resources: { createBundle: vi.fn(async () => ({ bundleId: datasetId, name: "A", description: "B" })) },
+    agentConfigs: {
+      list: vi.fn(async () => [{ id: "agent-1", user_id: owner, name: "Agent" }]),
+      create: vi.fn(async () => { throw new EvalSpApiError(422, { code: "AGENT_CONFIG_INVALID", errMsg: "Name is required" }); }),
+      update: vi.fn(async (id: string) => { throw new AgentConfigFrozenError(id); }),
+      listAgents: vi.fn(async () => []),
+    },
   };
   const sp = {
-    listAgentConfigs: vi.fn(async () => [{ id: "agent-1", user_id: owner, name: "Agent" }]),
-    createAgentConfig: vi.fn(async () => { throw new EvalSpApiError(422, { code: "AGENT_CONFIG_INVALID", errMsg: "Name is required" }); }),
     getCreditBalance: vi.fn(async () => ({ availableUnits: 500, topupRemainingUnits: 0, otherRemainingUnits: 500 })),
     grantCredits: vi.fn(async (_token: string, input: { email: string; units: number; adjustmentId: string }) =>
       ({ userId: owner, email: input.email, adjustmentId: input.adjustmentId, units: input.units, replayed: false })),
@@ -94,9 +126,9 @@ describe("Eval API HTTP layer", () => {
 
   it("scopes services to the verified user and releases them after every request", async () => {
     const app = setup();
-    const created = await app.request("/api/projects", jsonRequest("POST", { name: " Tasks " }));
+    const created = await app.request("/api/projects", jsonRequest("POST", createBody));
     expect(created.status).toBe(201);
-    expect(await created.json()).toMatchObject({ success: true, msg: { name: "Tasks" } });
+    expect(await created.json()).toMatchObject({ success: true, msg: { project: { name: "Tasks" }, run: { runId: "run-1" } } });
     expect(app.ownerServices).toHaveBeenCalledWith({ id: owner, role: "user" }, "service-session");
     app.services.results.getRun.mockRejectedValueOnce(new Error("database password is secret"));
     const failed = await app.request("/api/runs/run-1", authorized());
@@ -105,12 +137,58 @@ describe("Eval API HTTP layer", () => {
     expect(app.release).toHaveBeenCalledTimes(2);
   });
 
-  it("returns the owned Project", async () => {
+  it("creates a Project from a validated snapshot request with canonical IDs", async () => {
+    const app = setup();
+    await app.request("/api/projects", jsonRequest("POST", {
+      ...createBody, samplingCounts: { [datasetId.toUpperCase()]: 3 }, evaluation: evaluationPlan,
+      run: { operation: "pipeline" },
+    }));
+    expect(app.services.projects.create).toHaveBeenCalledWith({
+      ...createBody, name: "Tasks", datasets: [{ datasetId }], samplingCounts: { [datasetId]: 3 }, evaluation: evaluationPlan,
+      run: { operation: "pipeline" },
+    });
+    const invalid = [
+      { ...createBody, run: { operation: "evaluation" } },
+      { ...createBody, run: { operation: "execution", idempotencyKey: "k" } },
+      { ...createBody, idempotencyKey: " padded " },
+      { ...createBody, idempotencyKey: undefined },
+      { ...createBody, datasets: [{ datasetId }, { datasetId }] },
+      { ...createBody, datasets: [] },
+      { ...createBody, datasets: [{ datasetId, dataIds: [] }] },
+      { ...createBody, samplingCount: SAMPLING_COUNT_MAX + 1 },
+      { ...createBody, samplingCount: 0 },
+      { ...createBody, ownerUserId: "other" },
+      { ...createBody, execution: { ...createBody.execution, framework: "other" } },
+    ];
+    for (const body of invalid) {
+      const response = await app.request("/api/projects", jsonRequest("POST", body));
+      expect(response.status).toBe(422);
+    }
+    expect(app.services.projects.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns the owned Project plan view and soft-deletes it", async () => {
     const app = setup();
     const response = await app.request("/api/projects/project-1", authorized());
-    const body = await response.json() as { msg: Record<string, unknown> };
-    expect(body.msg).toEqual({ ...project, evaluationOutputSchemaId: outputSchemaId });
+    expect((await response.json() as { msg: unknown }).msg).toEqual(view);
     expect((await app.request("/api/projects/missing", authorized())).status).toBe(404);
+    expect((await app.request("/api/projects/project-1", authorized("session", { method: "DELETE" }))).status).toBe(204);
+    app.services.projects.delete.mockRejectedValueOnce(new RuntimeProjectBusyError("project-1", "run-1"));
+    const busy = await app.request("/api/projects/project-1", authorized("session", { method: "DELETE" }));
+    expect(await busy.json()).toMatchObject({ code: "PROJECT_BUSY" });
+  });
+
+  it("replaces only the evaluation plan and reports a locked plan", async () => {
+    const app = setup();
+    const replaced = await app.request("/api/projects/project-1/evaluation-plan", jsonRequest("PUT", evaluationPlan));
+    expect(replaced.status).toBe(200);
+    expect(app.services.projects.replaceEvaluationPlan).toHaveBeenCalledWith("project-1", evaluationPlan);
+    app.services.projects.replaceEvaluationPlan.mockRejectedValueOnce(new ProjectEvaluationPlanLockedError("project-1"));
+    const locked = await app.request("/api/projects/project-1/evaluation-plan", jsonRequest("PUT", evaluationPlan));
+    expect(locked.status).toBe(409);
+    expect(await locked.json()).toMatchObject({ code: "PROJECT_EVALUATION_PLAN_LOCKED" });
+    expect((await app.request("/api/projects/project-1/evaluation-plan",
+      jsonRequest("PUT", { ...evaluationPlan, outputSchemaId: undefined }))).status).toBe(422);
   });
 
   it("reads every JSON body through one bounded, duplicate-free path before validation", async () => {
@@ -133,14 +211,8 @@ describe("Eval API HTTP layer", () => {
 
   it("validates path, query and body with the route schemas", async () => {
     const app = setup();
-    const spoofed = await app.request("/api/projects", jsonRequest("POST", { name: "Tasks", ownerUserId: "other" }));
-    expect(spoofed.status).toBe(422);
-    expect(await spoofed.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED", errors: [expect.objectContaining({ path: "" })] });
-    expect(app.services.catalog.createProject).not.toHaveBeenCalled();
     expect((await app.request("/api/datasets/not-a-uuid/data", authorized())).status).toBe(422);
-    expect((await app.request("/api/samples?dataId=not-a-uuid", authorized())).status).toBe(422);
-    expect((await app.request("/api/projects/project-1/samplings/successful?limit=1001", authorized())).status).toBe(422);
-    expect((await app.request("/api/projects/project-1/samplings/successful/ids?extra=1", authorized())).status).toBe(422);
+    expect((await app.request("/api/metrics/projects/project-1?extra=1", authorized())).status).toBe(422);
     expect((await app.request("/api/datasets/import", authorized("session", { method: "POST", body: "{}" }))).status).toBe(422);
   });
 
@@ -155,48 +227,82 @@ describe("Eval API HTTP layer", () => {
     expect(await exported.text()).toBe("dataset:\n  name: Cases\ndata: []\n");
   });
 
-  it("admits independent evaluation only for a known Project and a bounded unique selection", async () => {
+  it("previews a selection and submits its fixed targets unchanged", async () => {
     const app = setup();
-    const body = { evaluationConfigId: "judge", samplingIds: ["sampling-1"], idempotencyKey: "click-1" };
-    const accepted = await app.request("/api/projects/project-1/evaluations", jsonRequest("POST", body));
-    expect(accepted.status).toBe(202);
-    expect(app.services.admission.evaluate).toHaveBeenCalledWith({ projectId: "project-1", ...body });
-    const missing = await app.request("/api/projects/missing/evaluations", jsonRequest("POST", body));
-    expect(await missing.json()).toMatchObject({ code: "PROJECT_NOT_FOUND" });
-    const duplicate = await app.request("/api/projects/project-1/evaluations", jsonRequest("POST", { ...body, samplingIds: ["a", "a"] }));
-    expect(duplicate.status).toBe(422);
-    const tooMany = Array.from({ length: EVALUATION_SAMPLING_IDS + 1 }, (_, index) => `s-${index}`);
-    expect((await app.request("/api/projects/project-1/evaluations", jsonRequest("POST", { ...body, samplingIds: tooMany }))).status).toBe(422);
-    expect(app.services.admission.evaluate).toHaveBeenCalledTimes(1);
+    const selector = { datasetIds: [datasetId], samplingIds: ["s-9"] };
+    const previewed = await app.request("/api/projects/project-1/runs/preview", jsonRequest("POST", { operation: "pipeline", selector }));
+    expect(previewed.status).toBe(200);
+    expect(await previewed.json()).toMatchObject({ msg: preview });
+    expect(app.services.admission.preview).toHaveBeenCalledWith({ projectId: "project-1", operation: "pipeline", selector });
+    const body = { idempotencyKey: "click-1", operation: "execution", selector: { all: true }, targets: preview.targets };
+    const submitted = await app.request("/api/projects/project-1/runs", jsonRequest("POST", body));
+    expect(submitted.status).toBe(202);
+    expect(app.services.admission.submit).toHaveBeenCalledWith({ projectId: "project-1", ...body });
+
+    for (const invalid of [
+      { ...body, selector: {} },
+      { ...body, selector: { all: false } },
+      { ...body, targets: { projectSampleIds: ["a", "a"], samplingIds: [] } },
+      { ...body, targets: { projectSampleIds: [] } },
+      { ...body, targets: { projectSampleIds: Array.from({ length: RUN_TARGET_IDS }, (_, i) => `p-${i}`), samplingIds: ["s"] } },
+    ]) {
+      expect((await app.request("/api/projects/project-1/runs", jsonRequest("POST", invalid))).status).toBe(422);
+    }
+    expect(app.services.admission.submit).toHaveBeenCalledTimes(1);
   });
 
-  it("serves the current Run, targeted stop and Run admission conflicts", async () => {
+  it("refuses an expanded selection beyond one request and maps admission conflicts", async () => {
+    const app = setup();
+    app.services.admission.preview.mockResolvedValueOnce({
+      ...preview, targets: { projectSampleIds: [], samplingIds: Array.from({ length: RUN_TARGET_IDS + 1 }, (_, i) => `s-${i}`) },
+    });
+    const tooLarge = await app.request("/api/projects/project-1/runs/preview", jsonRequest("POST", { operation: "evaluation", selector: { all: true } }));
+    expect(tooLarge.status).toBe(413);
+    expect(await tooLarge.json()).toMatchObject({ code: "RUN_TARGETS_TOO_LARGE" });
+    const body = { idempotencyKey: "k", operation: "evaluation", selector: { all: true }, targets: preview.targets };
+    for (const [error, code] of [
+      [new RuntimeAdmissionConflictError("evaluation-plan-required", "m"), "PROJECT_EVALUATION_PLAN_REQUIRED"],
+      [new RuntimeAdmissionConflictError("stale-targets", "m"), "RUN_TARGETS_STALE"],
+      [new RuntimeAdmissionConflictError("plan-changed", "m"), "PROJECT_PLAN_CHANGED"],
+      [new RuntimeProjectBusyError("project-1", "active-run"), "PROJECT_BUSY"],
+    ] as const) {
+      app.services.admission.submit.mockRejectedValueOnce(error);
+      const response = await app.request("/api/projects/project-1/runs", jsonRequest("POST", body));
+      expect([response.status, (await response.json() as { code: string }).code]).toEqual([409, code]);
+    }
+  });
+
+  it("serves the current Run and targeted stop", async () => {
     const app = setup();
     expect(await (await app.request("/api/projects/project-1/runs/current", authorized())).json())
       .toMatchObject({ msg: { run: null } });
+    expect((await app.request("/api/projects/missing/runs/current", authorized())).status).toBe(404);
     const stopped = await app.request("/api/projects/project-1/runs/run-1/stop", authorized("session", { method: "POST" }));
     expect(stopped.status).toBe(202);
     expect(await stopped.json()).toMatchObject({ msg: { runId: "run-1", stopRequested: true } });
     const unknown = await app.request("/api/projects/project-1/runs/old/stop", authorized("session", { method: "POST" }));
     expect(await unknown.json()).toMatchObject({ code: "RUN_NOT_FOUND" });
-    app.services.admission.start.mockRejectedValueOnce(new RuntimeProjectBusyError("project-1", "active-run"));
-    const busy = await app.request("/api/runs/execution", jsonRequest("POST", {
-      idempotencyKey: "new-run", projectId: "project-1", executionConfigId: "config-1",
-    }));
-    expect(busy.status).toBe(409);
-    expect(await busy.json()).toMatchObject({
-      code: "PROJECT_BUSY", errMsg: "Project project-1 already has unfinished Run active-run",
-    });
   });
 
-  it("passes repeated Run filters to Metrics", async () => {
+  it("resolves read-only Chat observation targets", async () => {
+    const app = setup();
+    const subject = await app.request("/api/projects/project-1/samplings/s-1/observation", authorized());
+    expect(await subject.json()).toMatchObject({ msg: { role: "subject", chatId: "chat-1", state: "available" } });
+    const evaluator = await app.request("/api/projects/project-1/evaluations/e-1/observation", authorized());
+    expect(await evaluator.json()).toMatchObject({ msg: { role: "evaluator", evaluationId: "e-1", state: "not-started" } });
+    expect(app.services.observations.evaluator).toHaveBeenCalledWith("project-1", "e-1");
+  });
+
+  it("passes repeated Run filters and ProjectSample IDs to Metrics", async () => {
     const app = setup();
     await app.request("/api/metrics/projects/project-1?runId=run-1&runId=run-2", authorized());
     await app.request("/api/metrics/projects/project-1", authorized());
+    await app.request("/api/metrics/projects/project-1/samples/sample-1?runId=run-1", authorized());
     expect(app.services.metrics.getProjectOverview.mock.calls).toEqual([
       [{ projectId: "project-1", runIds: ["run-1", "run-2"] }],
       [{ projectId: "project-1" }],
     ]);
+    expect(app.services.metrics.getSampleOverview).toHaveBeenCalledWith({ projectId: "project-1", runIds: ["run-1"], projectSampleId: "sample-1" });
   });
 
   it("reads the balance and grants credits only to the service account", async () => {
@@ -217,13 +323,34 @@ describe("Eval API HTTP layer", () => {
     expect(app.sp.listCreditGrants).toHaveBeenCalledWith("admin-token", { email: "eval-service@test", limit: 5 });
   });
 
-  it("proxies Agent Configs with the service session and relays SP validation text", async () => {
+  it("proxies Agent Configs, rejects frozen copy writes and relays SP validation text", async () => {
     const app = setup();
     const listed = await app.request("/api/agent-configs", authorized());
     expect(await listed.json()).toMatchObject({ msg: [{ id: "agent-1" }] });
-    expect(app.sp.listAgentConfigs).toHaveBeenCalledWith("service-session");
     const rejected = await app.request("/api/agent-configs", jsonRequest("POST", { name: "" }));
     expect(rejected.status).toBe(422);
     expect(await rejected.json()).toMatchObject({ code: "EVAL_SP_REQUEST_INVALID", errMsg: "Name is required" });
+    const frozen = await app.request(`/api/agent-configs/${agentId}`, jsonRequest("PATCH", { name: "x", revision: 1 }));
+    expect(frozen.status).toBe(409);
+    expect(await frozen.json()).toMatchObject({ code: "AGENT_CONFIG_FROZEN" });
+    for (const [method, path] of [["POST", "/api/agent-configs"], ["PATCH", `/api/agent-configs/${agentId}`]] as const) {
+      const reserved = await app.request(path, jsonRequest(method, { slug: " Eval-Frozen-mine ", name: "Mine" }));
+      expect(reserved.status).toBe(422);
+      expect(await reserved.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED", errors: [expect.objectContaining({ path: "slug" })] });
+    }
+    expect(app.services.agentConfigs.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves plan semantics to the service: pipeline without evaluation and plan values return 400", async () => {
+    const app = setup();
+    app.services.projects.create.mockRejectedValueOnce(new RuntimeInputError("A pipeline Run requires an evaluation plan", "evaluation"));
+    const pipeline = await app.request("/api/projects", jsonRequest("POST", { ...createBody, run: { operation: "pipeline" } }));
+    expect(pipeline.status).toBe(400);
+    expect(await pipeline.json()).toMatchObject({ code: "RUNTIME_INPUT_INVALID", errors: [{ path: "evaluation" }] });
+    const values = await app.request("/api/projects", jsonRequest("POST", {
+      ...createBody, execution: { ...createBody.execution, executionConcurrency: 1.5, timeoutMs: 0, retryPolicy: { maxRestarts: -1, initialBackoffMs: 5, maxBackoffMs: 1 } },
+    }));
+    expect(values.status).toBe(201);
+    expect(app.services.projects.create).toHaveBeenCalledTimes(2);
   });
 });

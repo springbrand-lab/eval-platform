@@ -1,15 +1,19 @@
 import type {
+  EvaluationOutputSchema,
   EvaluationRecord,
   Project,
+  ProjectDatasetSnapshot,
+  ProjectPlan,
   RunSnapshot,
+  SamplingStageState,
 } from "@eval-platform/eval-contracts";
-import type { Dataset, DatasetSnapshot } from "@eval-platform/eval-dataset";
-import type { Sample, SamplingSnapshot } from "@eval-platform/eval-runtime";
-import type { MetricSummary, ResourceStatistics } from "../aggregation/model.js";
-import type { EvaluationMetrics } from "../evaluators/model.js";
+import type { ProjectSample, SamplingSnapshot } from "@eval-platform/eval-runtime";
+import type { AgentMetricView, MetricSummary } from "../aggregation/model.js";
+import type { EvaluationOutputView } from "../evaluators/model.js";
 
 export interface MetricsScope {
   readonly projectId: string;
+  /** Optional "this batch" filter on Samplings and EvaluationRecords; never changes the fixed hierarchy. */
   readonly runIds?: readonly string[];
 }
 
@@ -18,7 +22,7 @@ export interface DatasetMetricsQuery extends MetricsScope {
 }
 
 export interface SampleMetricsQuery extends MetricsScope {
-  readonly sampleId: string;
+  readonly projectSampleId: string;
 }
 
 export interface SamplingMetricsQuery extends MetricsScope {
@@ -27,16 +31,28 @@ export interface SamplingMetricsQuery extends MetricsScope {
 
 export type MetricsQuery = MetricsScope & {
   readonly datasetId?: string;
-  readonly sampleId?: string;
+  readonly projectSampleId?: string;
   readonly samplingId?: string;
 };
 
+/**
+ * One repeatable-read snapshot of a Project. The hierarchy comes only from the fixed plan, never from
+ * live catalog Datasets or Data.
+ */
 export interface MetricsFacts {
-  readonly project: Project;
-  readonly datasets: readonly DatasetSnapshot[];
-  readonly samples: readonly Sample[];
+  readonly plan: ProjectPlan;
+  /** Content of the evaluation plan's Schema; null without an evaluation plan. */
+  readonly evaluationOutputSchema: EvaluationOutputSchema | null;
+  /**
+   * Every bound ProjectSample in the queried scope, including never-run ones: all of the Project's for
+   * a Project query, the Dataset's for a Dataset query, and the single target for Sample/Sampling queries.
+   */
+  readonly projectSamples: readonly ProjectSample[];
+  /** Current Samplings of `projectSamples`, restricted to `runIds` when given. */
   readonly samplings: readonly SamplingSnapshot[];
+  /** Current EvaluationRecords of `samplings`, restricted to `runIds` when given. */
   readonly evaluations: readonly EvaluationRecord[];
+  /** Selected Runs, or every Run that still has a current member in scope. */
   readonly runs: readonly RunSnapshot[];
 }
 
@@ -44,71 +60,62 @@ export interface MetricsSource {
   read(query: MetricsQuery): Promise<MetricsFacts>;
 }
 
-export interface OverviewCounts {
-  readonly datasets: number;
-  readonly data: number;
-  readonly samples: number;
-  readonly samplings: number;
-  readonly evaluations: number;
-}
-
+/** A Dataset as bound in the Project plan, summarized over its bound ProjectSamples. */
 export interface DatasetMetricRow {
-  readonly dataset: Dataset;
-  readonly counts: OverviewCounts;
+  readonly dataset: ProjectDatasetSnapshot;
   readonly summary: MetricSummary;
 }
 
-export interface SampleMetricRow {
-  readonly sampleId: string;
+export interface ProjectSampleMetricRow {
+  readonly projectSampleId: string;
   readonly dataId: string;
+  readonly datasetIds: readonly string[];
+  /** Fixed planned Samplings per execution; `summary.counts.samplings` is the current number. */
+  readonly samplingCount: number;
   readonly summary: MetricSummary;
 }
 
 export interface SamplingMetricRow {
   readonly samplingId: string;
+  readonly execution: SamplingStageState;
   readonly summary: MetricSummary;
   readonly artifactCount: number;
   readonly hasTrajectory: boolean;
 }
 
-export interface ProjectOverview {
+interface ScopedView {
   readonly project: Project;
+  /** The selected Runs, or every Run with a current member in this view. */
   readonly runIds: readonly string[];
-  readonly counts: OverviewCounts;
   readonly summary: MetricSummary;
+}
+
+/** Shared ProjectSamples appear in every Dataset row; the Project summary counts each Sampling once. */
+export interface ProjectOverview extends ScopedView {
   readonly datasets: readonly DatasetMetricRow[];
 }
 
-export interface DatasetOverview extends DatasetMetricRow {
-  readonly project: Project;
-  readonly runIds: readonly string[];
-  readonly dataIds: readonly string[];
-  readonly samples: readonly SampleMetricRow[];
+export interface DatasetOverview extends ScopedView {
+  readonly dataset: ProjectDatasetSnapshot;
+  /** Every bound ProjectSample in Dataset member order, including never-run ones. */
+  readonly projectSamples: readonly ProjectSampleMetricRow[];
 }
 
-export interface SampleOverview {
-  readonly project: Project;
-  readonly runIds: readonly string[];
-  readonly sample: Sample;
-  readonly datasetIds: readonly string[];
-  readonly counts: OverviewCounts;
-  readonly summary: MetricSummary;
+export interface SampleOverview extends ScopedView {
+  readonly projectSample: ProjectSample;
   readonly samplings: readonly SamplingMetricRow[];
 }
 
 export interface EvaluationDetail {
   readonly record: EvaluationRecord;
-  readonly result: EvaluationMetrics;
-  readonly resources: ResourceStatistics;
+  readonly agent: AgentMetricView;
+  readonly output: EvaluationOutputView;
 }
 
-export interface SamplingDetail {
-  readonly project: Project;
-  readonly runIds: readonly string[];
-  readonly sample: Sample;
-  readonly datasetIds: readonly string[];
+export interface SamplingDetail extends ScopedView {
+  readonly projectSample: ProjectSample;
   readonly sampling: SamplingSnapshot;
-  readonly summary: MetricSummary;
+  readonly subject: AgentMetricView;
   readonly evaluations: readonly EvaluationDetail[];
 }
 

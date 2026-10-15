@@ -9,18 +9,20 @@ const mocks = vi.hoisted(() => {
   const worker = { close: vi.fn(async () => { order.push("worker.close"); }) };
   const db = {};
   const store = {};
+  const plans = {};
   const runQueue = {};
   const harness = {};
   const runtime = {};
   const bundles = { resolveInitialMaterials: vi.fn(), resolveInitialSession: vi.fn() };
   return {
-    order, pool, boss, worker, db, store, runQueue, harness, runtime, bundles,
+    order, pool, boss, worker, db, store, plans, runQueue, harness, runtime, bundles,
     Pool: vi.fn(function Pool() { return pool; }),
     openBundleDirectory: vi.fn(async () => bundles),
     openRunBoss: vi.fn(async () => boss),
     createRunQueue: vi.fn(() => runQueue),
     createEvalDb: vi.fn(() => db),
     createPostgresWorkerRuntimeStore: vi.fn(() => store),
+    createPostgresWorkerProjectPlanReader: vi.fn(() => plans),
     createSpHarness: vi.fn(() => harness),
     createEvalRunResumer: vi.fn((_dependencies: unknown) => runtime),
     startEvalRunWorker: vi.fn(async (_options: unknown) => worker),
@@ -32,6 +34,7 @@ vi.mock("./sp/bundle-directory.js", () => ({ openBundleDirectory: mocks.openBund
 vi.mock("./run-worker-queue.js", () => ({ openRunBoss: mocks.openRunBoss, createRunQueue: mocks.createRunQueue }));
 vi.mock("./db/client.js", () => ({ createEvalDb: mocks.createEvalDb }));
 vi.mock("./db/runtime.js", () => ({ createPostgresWorkerRuntimeStore: mocks.createPostgresWorkerRuntimeStore }));
+vi.mock("./db/project-plans.js", () => ({ createPostgresWorkerProjectPlanReader: mocks.createPostgresWorkerProjectPlanReader }));
 vi.mock("./sp/harness.js", () => ({ createSpHarness: mocks.createSpHarness }));
 vi.mock("@eval-platform/eval-runtime", () => ({ createEvalRunResumer: mocks.createEvalRunResumer }));
 vi.mock("./worker.js", () => ({ startEvalRunWorker: mocks.startEvalRunWorker }));
@@ -52,7 +55,7 @@ describe("Eval SP Run worker process", () => {
     vi.clearAllMocks();
   });
 
-  it("composes the cross-user Store, Eval SP Harness and Run resumer on one pg-boss instance", async () => {
+  it("composes the cross-user Store, plan reader, Eval SP Harness and Run resumer on one pg-boss instance", async () => {
     const logger = pino({ level: "silent" });
     await startSpEvalRunWorkerProcess(config, logger);
 
@@ -68,10 +71,10 @@ describe("Eval SP Run worker process", () => {
       resolveInitialSession: mocks.bundles.resolveInitialSession,
     });
     const dependencies = mocks.createEvalRunResumer.mock.calls[0]![0];
-    expect(dependencies).toMatchObject({ store: mocks.store, harness: mocks.harness });
-    expect(dependencies).toHaveProperty("getSamples", expect.any(Function));
+    expect(mocks.createPostgresWorkerProjectPlanReader).toHaveBeenCalledExactlyOnceWith(mocks.db);
+    expect(dependencies).toMatchObject({ store: mocks.store, harness: mocks.harness, plans: mocks.plans });
     expect(dependencies).not.toHaveProperty("configResolver");
-    expect(dependencies).not.toHaveProperty("catalog");
+    expect(dependencies).not.toHaveProperty("getSamples");
     expect(mocks.startEvalRunWorker).toHaveBeenCalledExactlyOnceWith({
       boss: mocks.boss, runtime: mocks.runtime, store: mocks.store, logger, concurrency: 3,
     });

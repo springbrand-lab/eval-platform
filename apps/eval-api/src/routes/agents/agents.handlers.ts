@@ -3,4 +3,4 @@ import type { AppRouteHandler } from "../../lib/types.js";
 import type * as routes from "./agents.routes.js";
 
 export const list: AppRouteHandler<typeof routes.list> = async (c) =>
-  ok(c, await c.var.services.catalog.listAgents(c.req.valid("query").role));
+  ok(c, await c.var.services.agentConfigs.listAgents(c.req.valid("query").role));

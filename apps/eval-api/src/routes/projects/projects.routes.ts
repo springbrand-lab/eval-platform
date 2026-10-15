@@ -1,25 +1,25 @@
 import { createRoute, z } from "@hono/zod-openapi";
-import { platformIdSchema } from "@eval-platform/eval-dataset";
-import type { Project } from "@eval-platform/eval-contracts";
+import type { AgentObservationRef, Project, RunHandle } from "@eval-platform/eval-contracts";
 import { responseSchema } from "@springbrand/http/catalog";
 import { jsonContent } from "stoker/openapi/helpers";
-import { catalogLabelSchema } from "../../db/catalog-metadata.js";
+import type { ProjectView } from "../../db/project-store.js";
 import { jsonBody } from "../../lib/request-body.js";
-import { METADATA_BODY_BYTES } from "../../limits.js";
+import { JSON_BODY_BYTES, PROJECT_BODY_BYTES } from "../../limits.js";
+import { evaluationPlanSchema, projectCreateSchema } from "../../projects/schemas.js";
 import {
   bodyErrorResponses,
   conflictResponse,
+  deletedResponse,
   entityIdSchema,
   errorResponses,
   jsonBodyContent,
   notFoundResponse,
 } from "../schemas.js";
 
-/** The public Project contract; the bound output format is exposed only by its ID. */
 const projectSchema = z.custom<Project>();
-
+const projectViewSchema = z.custom<ProjectView>();
+const observationSchema = z.custom<AgentObservationRef>();
 const params = z.object({ projectId: entityIdSchema });
-
 export const list = createRoute({
   method: "get",
   path: "/",
@@ -35,12 +35,14 @@ export const create = createRoute({
   method: "post",
   path: "/",
   tags: ["Project"],
-  summary: "Create an empty Project on the deployed SP source branch",
-  middleware: [jsonBody(METADATA_BODY_BYTES)],
-  request: { body: jsonBodyContent(z.strictObject({ name: catalogLabelSchema })) },
+  summary: "Snapshot the selected Data, freeze the Agent Configs and admit the first Run; the key replays the same creation",
+  middleware: [jsonBody(PROJECT_BODY_BYTES)],
+  request: { body: jsonBodyContent(projectCreateSchema) },
   responses: {
-    201: jsonContent(responseSchema(projectSchema), "Created Project"),
+    201: jsonContent(responseSchema(z.object({ project: projectSchema, run: z.custom<RunHandle>().nullable() })), "Created or replayed Project and its first Run"),
     ...bodyErrorResponses,
+    ...notFoundResponse,
+    ...conflictResponse,
   },
 });
 
@@ -48,26 +50,66 @@ export const get = createRoute({
   method: "get",
   path: "/{projectId}",
   tags: ["Project"],
-  summary: "Get a Project",
+  summary: "Get a Project's fixed plan, bound ProjectSamples and current Run",
   request: { params },
   responses: {
-    200: jsonContent(responseSchema(projectSchema), "Project"),
+    200: jsonContent(responseSchema(projectViewSchema), "Project"),
     ...errorResponses,
     ...notFoundResponse,
   },
 });
 
-export const bindOutputSchema = createRoute({
-  method: "put",
-  path: "/{projectId}/evaluation-output-schema",
+export const remove = createRoute({
+  method: "delete",
+  path: "/{projectId}",
   tags: ["Project"],
-  summary: "Select or clear the Project's evaluation output format before its first Evaluation Run",
-  middleware: [jsonBody(METADATA_BODY_BYTES)],
-  request: { params, body: jsonBodyContent(z.strictObject({ outputSchemaId: platformIdSchema.nullable() })) },
+  summary: "Soft-delete a Project without an active Run",
+  request: { params },
   responses: {
-    200: jsonContent(responseSchema(projectSchema), "Project"),
+    ...deletedResponse,
+    ...errorResponses,
+    ...notFoundResponse,
+    ...conflictResponse,
+  },
+});
+
+export const replaceEvaluationPlan = createRoute({
+  method: "put",
+  path: "/{projectId}/evaluation-plan",
+  tags: ["Project"],
+  summary: "Replace the evaluation plan until the first evaluating Run locks it",
+  middleware: [jsonBody(JSON_BODY_BYTES)],
+  request: { params, body: jsonBodyContent(evaluationPlanSchema) },
+  responses: {
+    200: jsonContent(responseSchema(projectViewSchema), "Project"),
     ...bodyErrorResponses,
     ...notFoundResponse,
     ...conflictResponse,
+  },
+});
+
+export const observeSampling = createRoute({
+  method: "get",
+  path: "/{projectId}/samplings/{samplingId}/observation",
+  tags: ["Project"],
+  summary: "Resolve the read-only Subject Chat observation of a current Sampling",
+  request: { params: params.extend({ samplingId: entityIdSchema }) },
+  responses: {
+    200: jsonContent(responseSchema(observationSchema), "Observation target"),
+    ...errorResponses,
+    ...notFoundResponse,
+  },
+});
+
+export const observeEvaluation = createRoute({
+  method: "get",
+  path: "/{projectId}/evaluations/{evaluationId}/observation",
+  tags: ["Project"],
+  summary: "Resolve the read-only Evaluator Chat observation of a current Evaluation",
+  request: { params: params.extend({ evaluationId: entityIdSchema }) },
+  responses: {
+    200: jsonContent(responseSchema(observationSchema), "Observation target"),
+    ...errorResponses,
+    ...notFoundResponse,
   },
 });

@@ -215,16 +215,37 @@ describe("Eval SP Harness", () => {
       ? Response.json({
         status: "succeeded",
         artifacts: [{ artifactId: "judge-output", kind: "evaluation", path: "/evaluations/evaluation-1/result.json" }],
+        structuredOutput: { path: "/evaluations/evaluation-1/result.json", content: '{ "score": 1.50 }', contentHash: "sha256:abc" },
         trajectory: { trajectoryId: "judge-trace", source: "evaluator", path: "/evaluations/evaluation-1/trajectory.jsonl" },
-        result: { score: 8, reason: "Complete page", dimensions: [{ name: "layout", score: 7 }] },
+        unknownField: { kept: false },
       })
       : Response.json(evaluator));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
     expect(await harness.ensureAgent(ensureInput(evaluator))).toEqual(evaluator);
     const output = await harness.collectEvaluation({ handle: evaluator });
     expect(output.trajectory.source).toBe("evaluator");
-    expect(output.result).toEqual({ score: 8, reason: "Complete page", dimensions: [{ name: "layout", score: 7 }] });
+    expect(output.structuredOutput).toEqual({
+      path: "/evaluations/evaluation-1/result.json", content: '{ "score": 1.50 }', contentHash: "sha256:abc",
+    });
+    expect(output).not.toHaveProperty("unknownField");
     expect(new URL(requests[1]!.url).searchParams.get("evaluationId")).toBe("evaluation-1");
+  });
+
+  it("stands the current Eval SP parsed result in for a missing raw result file", async () => {
+    const { fetch } = spFetch((request) => new URL(request.url).pathname.endsWith("/output")
+      ? Response.json({
+        status: "succeeded",
+        artifacts: [],
+        trajectory: { trajectoryId: "judge-trace", source: "evaluator", path: "/evaluations/evaluation-1/trajectory.jsonl" },
+        result: { score: 8, reason: "Complete page" },
+      })
+      : Response.json(evaluator));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    const output = await harness.collectEvaluation({ handle: evaluator });
+    expect(output.structuredOutput).toEqual({
+      path: "/evaluations/evaluation-1/result.json", content: '{"score":8,"reason":"Complete page"}',
+    });
+    expect(output).not.toHaveProperty("result");
   });
 
   it("rejects a request that violates the SP contract before contacting SP", async () => {
