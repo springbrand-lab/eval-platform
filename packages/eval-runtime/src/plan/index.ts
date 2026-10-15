@@ -5,6 +5,7 @@ import type {
   ExecutionPlan,
   HarnessConfig,
   ProjectDatasetSnapshot,
+  ProjectPlan,
   RetryPolicy,
   RunOperation,
   RunPhases,
@@ -21,6 +22,11 @@ export { DEFAULT_RETRY_POLICY };
 /** Caller input; `retryPolicy` defaults to DEFAULT_RETRY_POLICY. */
 export type ExecutionPlanInput = Omit<ExecutionPlan, "retryPolicy"> & { readonly retryPolicy?: RetryPolicy };
 export type EvaluationPlanInput = Omit<EvaluationPlan, "retryPolicy"> & { readonly retryPolicy?: RetryPolicy };
+
+/** Every ProjectSample of the plan once, in Dataset binding order then member order. */
+export function planProjectSampleIds(plan: ProjectPlan): readonly string[] {
+  return [...new Set(plan.datasets.flatMap(({ projectSampleIds }) => projectSampleIds))];
+}
 
 export function phasesOf(operation: RunOperation): RunPhases {
   switch (operation) {

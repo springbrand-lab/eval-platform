@@ -1,12 +1,11 @@
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { MetricsEntityNotFoundError, MetricsSourceError } from "@eval-platform/eval-metrics";
 import type { MetricsFacts, MetricsQuery, MetricsSource } from "@eval-platform/eval-metrics";
-import { toRunSnapshot, toSamplingSnapshot, type ProjectSample } from "@eval-platform/eval-runtime";
+import { planProjectSampleIds, toRunSnapshot, toSamplingSnapshot, type ProjectSample } from "@eval-platform/eval-runtime";
 import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import {
-  planSampleIds,
   READ_SNAPSHOT,
   readAllProjectSamples,
   readEvaluationOutputSchema,
@@ -59,7 +58,7 @@ export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): Me
               .where(and(eq(samplings.ownerUserId, owner), eq(samplings.projectId, projectId), eq(samplings.samplingId, query.samplingId!)));
             projectSampleId = row?.projectSampleId;
           }
-          const bound = projectSampleId !== undefined && planSampleIds(plan).includes(projectSampleId);
+          const bound = projectSampleId !== undefined && planProjectSampleIds(plan).includes(projectSampleId);
           projectSamples = bound
             ? (await readProjectSamples(transaction, projectId, [projectSampleId!])).filter((sample) => sample !== null) : [];
           sampleScope = bound ? eq(samplings.projectSampleId, projectSampleId!) : sql`false`;

@@ -10,7 +10,7 @@ import type {
 } from "@eval-platform/eval-contracts";
 import { RUN_OPERATIONS } from "@eval-platform/eval-contracts";
 import { canonicalJsonBytes, createId, equalJson, sha256Hex } from "@springbrand/utils";
-import { phasesOf } from "../plan/index.js";
+import { phasesOf, planProjectSampleIds } from "../plan/index.js";
 import {
   RuntimeAdmissionConflictError,
   RuntimeEntityNotFoundError,
@@ -179,7 +179,7 @@ export class RunAdmission implements EvalRunAdmission {
   /** Expand inside the Project snapshot; evaluation keeps only successful current Samplings. */
   async #expand(plan: ProjectPlan, operation: RunOperation, selector: RunTargetSelector): Promise<RunTargets> {
     const { projectId } = plan.project;
-    const bound = boundProjectSampleIds(plan);
+    const bound = planProjectSampleIds(plan);
     const selected = new Set<string>(selector.all ? bound : []);
     for (const datasetId of selector.datasetIds ?? []) {
       const dataset = plan.datasets.find((item) => item.datasetId === datasetId);
@@ -217,7 +217,7 @@ export class RunAdmission implements EvalRunAdmission {
     if (operation === "evaluation" && targets.projectSampleIds.length > 0) {
       throw new RuntimeInputError("evaluation targets must list Samplings only", "targets.projectSampleIds");
     }
-    const known = new Set(boundProjectSampleIds(plan));
+    const known = new Set(planProjectSampleIds(plan));
     for (const projectSampleId of targets.projectSampleIds) {
       if (!known.has(projectSampleId)) throw new RuntimeEntityNotFoundError("project-sample", projectSampleId);
     }
@@ -283,11 +283,6 @@ export class RunAdmission implements EvalRunAdmission {
       attempts: [],
     };
   }
-}
-
-/** Every ProjectSample of the plan once, in Dataset binding order then member order. */
-function boundProjectSampleIds(plan: ProjectPlan): readonly string[] {
-  return [...new Set(plan.datasets.flatMap(({ projectSampleIds }) => projectSampleIds))];
 }
 
 function requirePreviewRequest(request: RunPreviewRequest): RunPreviewRequest {

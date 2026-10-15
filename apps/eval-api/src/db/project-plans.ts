@@ -1,5 +1,5 @@
 import type { EvaluationOutputSchema, Project, ProjectDatasetSnapshot, ProjectPlan } from "@eval-platform/eval-contracts";
-import type { ProjectPlanReader, ProjectSample } from "@eval-platform/eval-runtime";
+import { planProjectSampleIds, type ProjectPlanReader, type ProjectSample } from "@eval-platform/eval-runtime";
 import { and, asc, eq, inArray, isNull, type SQL } from "drizzle-orm";
 import { addToGroup, selectByIds, sqlBatches } from "./batch.js";
 import type { EvalDb } from "./client.js";
@@ -67,11 +67,6 @@ export async function readProjectPlan(reader: RecordReader, projectId: string, o
   };
 }
 
-/** Every ProjectSample ID in plan binding order: Datasets in order, then each Dataset's member order. */
-export function planSampleIds(plan: ProjectPlan): string[] {
-  return [...new Set(plan.datasets.flatMap((dataset) => dataset.projectSampleIds))];
-}
-
 async function attachDatasetIds(
   reader: RecordReader, projectId: string, rows: readonly (typeof projectSamples.$inferSelect)[],
 ): Promise<ProjectSample[]> {
@@ -112,7 +107,7 @@ export async function readProjectSamples(
 /** Every ProjectSample of a Project in plan binding order. */
 export async function readAllProjectSamples(reader: RecordReader, plan: ProjectPlan): Promise<ProjectSample[]> {
   const rows = await reader.select().from(projectSamples).where(eq(projectSamples.projectId, plan.project.projectId));
-  const order = new Map(planSampleIds(plan).map((id, index) => [id, index]));
+  const order = new Map(planProjectSampleIds(plan).map((id, index) => [id, index]));
   const samples = await attachDatasetIds(reader, plan.project.projectId, rows);
   return samples.sort((left, right) => (order.get(left.projectSampleId) ?? 0) - (order.get(right.projectSampleId) ?? 0));
 }

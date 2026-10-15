@@ -154,11 +154,9 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
             projectId, ownerUserId: owner, ...evaluation, outputSchemaId: evaluation.plan.outputSchema.outputSchemaId,
           });
         }
-        for (const config of snapshot.agentConfigs) {
-          await transaction.insert(projectAgentConfigs).values({
-            ...config, ownerUserId: owner, projectId, sourceUserAgentId: config.snapshot.sourceUserAgentId,
-          });
-        }
+        await transaction.insert(projectAgentConfigs).values(snapshot.agentConfigs.map((config) => ({
+          ...config, ownerUserId: owner, projectId, sourceUserAgentId: config.snapshot.sourceUserAgentId,
+        })));
       });
     },
 

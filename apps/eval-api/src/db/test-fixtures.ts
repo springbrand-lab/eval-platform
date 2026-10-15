@@ -13,7 +13,7 @@ import { vi } from "vitest";
 import { EvalSpApiError, type EvalSpAgentConfig, type EvalSpClient } from "../sp/client.js";
 import type { EvalDb } from "./client.js";
 import { createOutputSchemaCatalog } from "./output-schemas.js";
-import { planSampleIds } from "./project-plans.js";
+import { planProjectSampleIds } from "@eval-platform/eval-runtime";
 import { createPostgresProjectStore } from "./project-store.js";
 import { projectEvaluationPlans } from "./schema.js";
 
@@ -148,10 +148,10 @@ export async function buildCommand(plans: ProjectPlanReader, store: RuntimeStore
   if (!plan) throw new Error(`Unknown Project ${input.projectId}`);
   const evaluates = input.operation !== "execution";
   const projectSampleIds = input.operation === "evaluation" ? []
-    : input.projectSampleIds ?? (input.samplingIds === undefined ? planSampleIds(plan) : []);
+    : input.projectSampleIds ?? (input.samplingIds === undefined ? planProjectSampleIds(plan) : []);
   let samplingIds = [...input.samplingIds ?? []];
   if (input.operation === "evaluation" && input.samplingIds === undefined) {
-    samplingIds = (await store.listProjectSamplings(input.projectId, planSampleIds(plan)))
+    samplingIds = (await store.listProjectSamplings(input.projectId, planProjectSampleIds(plan)))
       .filter((sampling) => sampling.execution.status === "succeeded").map((sampling) => sampling.samplingId);
   }
   const targets = { projectSampleIds, samplingIds };
