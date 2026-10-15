@@ -12,7 +12,8 @@ describe("request logging", () => {
     const services = { results: { async getRun() { throw new Error("leaked token=private-token"); } } };
     const runtime: ApiRuntime = {
       webOrigin: "https://eval-web.test",
-      sp: { verifySession: async () => ({ id: "user-1", role: "user" }) } as unknown as EvalSpClient,
+      sp: {} as EvalSpClient,
+      serviceAccount: { user: { id: "user-1", role: "user" }, sessionToken: "private-service-token" },
       ownerServices: () => ({ services: services as unknown as OwnerServices, release() {} }),
     };
     const response = await createRoutes(logger).request("/api/runs/run-1", {
@@ -28,5 +29,6 @@ describe("request logging", () => {
     });
     expect(lines[0]).not.toContain("private-token");
     expect(lines[0]).not.toContain("private-bearer");
+    expect(lines[0]).not.toContain("private-service-token");
   });
 });

@@ -12,7 +12,7 @@ import type { createPostgresProjectRunControl } from "../db/runtime.js";
 import type { InitialResourceApi } from "../initial-resources.js";
 import type { EvalSpClient, EvalSpUser } from "../sp/client.js";
 
-/** Every service a request may use, already scoped to the verified Eval SP user. */
+/** Every service a request may use, already scoped to the Eval SP service account. */
 export interface OwnerServices {
   readonly datasets: DatasetService;
   readonly catalog: PostgresCatalog;
@@ -39,6 +39,8 @@ export interface ApiRuntime {
   /** The Eval Web origin: the only browser origin allowed to call this API. */
   readonly webOrigin: string;
   readonly sp: EvalSpClient;
+  /** The fixed Eval SP account and its long-lived session, verified once at startup. */
+  readonly serviceAccount: { readonly user: EvalSpUser; readonly sessionToken: string };
   readonly ownerServices: (user: EvalSpUser, sessionToken: string) => OwnerServicesLease;
 }
 

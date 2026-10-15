@@ -2,7 +2,7 @@ import { RuntimeProjectBusyError } from "@eval-platform/eval-runtime";
 import { describe, expect, it, vi } from "vitest";
 import type { ApiRuntime, OwnerServices } from "./lib/types.js";
 import { EVALUATION_SAMPLING_IDS, METADATA_BODY_BYTES } from "./limits.js";
-import { EvalSpApiError, EvalSpTransportError, type EvalSpClient } from "./sp/client.js";
+import { EvalSpApiError, type EvalSpClient } from "./sp/client.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "./test-support.js";
 
 const owner = "11111111-1111-4111-8111-111111111111";
@@ -38,13 +38,17 @@ function setup() {
     resources: { createBundle: vi.fn(async () => ({ bundleId: datasetId, name: "A", description: "B" })) },
   };
   const sp = {
-    verifySession: vi.fn(async (token: string) => token === "session" ? { id: owner, role: "user" as const } : null),
     listAgentConfigs: vi.fn(async () => [{ id: "agent-1", user_id: owner, name: "Agent" }]),
     createAgentConfig: vi.fn(async () => { throw new EvalSpApiError(422, { code: "AGENT_CONFIG_INVALID", errMsg: "Name is required" }); }),
   };
   const release = vi.fn();
   const ownerServices = vi.fn(() => ({ services: services as unknown as OwnerServices, release }));
-  const runtime: ApiRuntime = { webOrigin: WEB_ORIGIN, sp: sp as unknown as EvalSpClient, ownerServices };
+  const runtime: ApiRuntime = {
+    webOrigin: WEB_ORIGIN,
+    sp: sp as unknown as EvalSpClient,
+    serviceAccount: { user: { id: owner, role: "user" }, sessionToken: "service-session" },
+    ownerServices,
+  };
   return { request: requestApp(runtime), services, sp, ownerServices, release };
 }
 
@@ -56,17 +60,15 @@ describe("Eval API HTTP layer", () => {
     expect(await response.json()).toEqual({ success: true, msg: { status: "ok" }, errMsg: "", code: "" });
   });
 
-  it("requires a verified Eval SP session before composing owner services", async () => {
+  it("runs every request as the fixed service account without request credentials", async () => {
     const app = setup();
-    const missing = await app.request("/api/projects");
-    const invalid = await app.request("/api/projects", authorized("expired"));
-    expect([missing.status, invalid.status]).toEqual([401, 401]);
-    expect(await invalid.json()).toMatchObject({ code: "AUTH_UNAUTHENTICATED", requestId: invalid.headers.get("x-request-id") });
-    expect(app.ownerServices).not.toHaveBeenCalled();
-    app.sp.verifySession.mockRejectedValueOnce(new EvalSpTransportError(new Error("connect refused")));
-    const unavailable = await app.request("/api/projects", authorized());
-    expect(unavailable.status).toBe(503);
-    expect(await unavailable.json()).toMatchObject({ code: "EVAL_SP_UNAVAILABLE" });
+    const anonymous = await app.request("/api/projects");
+    const otherToken = await app.request("/api/projects", authorized("someone-else"));
+    expect([anonymous.status, otherToken.status]).toEqual([200, 200]);
+    expect(app.ownerServices).toHaveBeenNthCalledWith(1, { id: owner, role: "user" }, "service-session");
+    expect(app.ownerServices).toHaveBeenNthCalledWith(2, { id: owner, role: "user" }, "service-session");
+    const me = await app.request("/api/me");
+    expect(await me.json()).toMatchObject({ msg: { id: owner } });
   });
 
   it("admits only the Eval Web browser origin and keeps CORS headers on failures", async () => {
@@ -90,7 +92,7 @@ describe("Eval API HTTP layer", () => {
     const created = await app.request("/api/projects", jsonRequest("POST", { name: " Tasks " }));
     expect(created.status).toBe(201);
     expect(await created.json()).toMatchObject({ success: true, msg: { name: "Tasks" } });
-    expect(app.ownerServices).toHaveBeenCalledWith({ id: owner, role: "user" }, "session");
+    expect(app.ownerServices).toHaveBeenCalledWith({ id: owner, role: "user" }, "service-session");
     app.services.results.getRun.mockRejectedValueOnce(new Error("database password is secret"));
     const failed = await app.request("/api/runs/run-1", authorized());
     expect(failed.status).toBe(500);
@@ -192,11 +194,11 @@ describe("Eval API HTTP layer", () => {
     ]);
   });
 
-  it("proxies Agent Configs with the caller's session and relays SP validation text", async () => {
+  it("proxies Agent Configs with the service session and relays SP validation text", async () => {
     const app = setup();
     const listed = await app.request("/api/agent-configs", authorized());
     expect(await listed.json()).toMatchObject({ msg: [{ id: "agent-1" }] });
-    expect(app.sp.listAgentConfigs).toHaveBeenCalledWith("session");
+    expect(app.sp.listAgentConfigs).toHaveBeenCalledWith("service-session");
     const rejected = await app.request("/api/agent-configs", jsonRequest("POST", { name: "" }));
     expect(rejected.status).toBe(422);
     expect(await rejected.json()).toMatchObject({ code: "EVAL_SP_REQUEST_INVALID", errMsg: "Name is required" });

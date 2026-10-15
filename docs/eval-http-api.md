@@ -4,11 +4,11 @@
 
 ## Application structure
 
-The layout follows SP's `apps/api`: `lib/create-app.ts` installs request IDs, pino request logging (`hono-pino`), the trusted-Origin check, CORS, `notFound` and `onError` for every route; `lib/api-errors.ts` holds the single `apiError` translation; `middlewares/` holds session authentication, Origin trust and logging; each domain lives in `routes/<domain>/<domain>.routes.ts | .handlers.ts | .index.ts` with `@hono/zod-openapi` route definitions. Owner-scoped services are assembled once in `owner-services.ts`; concurrent requests of one owner share its admission instance through `active-owner-admission.ts`, and the entry is released when the owner has no active request.
+The layout follows SP's `apps/api`: `lib/create-app.ts` installs request IDs, pino request logging (`hono-pino`), the trusted-Origin check, CORS, `notFound` and `onError` for every route; `lib/api-errors.ts` holds the single `apiError` translation; `middlewares/` holds the service-account scope, Origin trust and logging; each domain lives in `routes/<domain>/<domain>.routes.ts | .handlers.ts | .index.ts` with `@hono/zod-openapi` route definitions. Owner-scoped services are assembled once in `owner-services.ts`; concurrent requests of one owner share its admission instance through `active-owner-admission.ts`, and the entry is released when the owner has no active request.
 
 ## Authentication and Origin
 
-Every `/api/*` request requires `Authorization: Bearer <Eval SP session token>`. One session middleware calls the configured Eval SP `/api/auth/me` for every request and scopes all services to the returned user ID; the client cannot select an owner. A missing or rejected session is `401 AUTH_UNAUTHENTICATED`; an unreachable Eval SP is `503 EVAL_SP_UNAVAILABLE`, never a `401`. `GET /healthz` is unauthenticated and only reports that the process is serving.
+The Eval API runs as one fixed Eval SP service account; there is no interactive login. `EVAL_SP_SERVICE_USER_ID` names that account and `EVAL_SP_SERVICE_SESSION_TOKEN` is its long-lived service session, issued by SP's `bootstrap-eval-service-account` script. At startup the process verifies the token once through Eval SP `/api/auth/me` and refuses to start unless it resolves to the configured user. One middleware then scopes every `/api/*` request to that account; requests carry no `Authorization` header and the client cannot select an owner. Agent Config calls to Eval SP use the service session. `GET /healthz` only reports that the process is serving. The API is an internal service and must only be reachable from trusted networks.
 
 A request carrying an `Origin` other than `EVAL_WEB_ORIGIN` is rejected with `403 REQUEST_UNTRUSTED_ORIGIN` on every route; requests without `Origin` (non-browser clients) pass. CORS allows only that Origin and exposes `X-Request-ID`. The same Origin is sent as the trusted Origin on Eval SP Agent Config writes.
 
@@ -73,7 +73,7 @@ Selection and resubmission rules for independent evaluation are in [Independent 
 
 ## Run admission and stop
 
-Run admission uses a token-free, owner-scoped ConfigReader and `createEvalRunAdmission`; Config editing uses a separate Store with the current request's session token. The HTTP process holds no Harness credential and never runs Agents: admission and stop requests commit their Run facts and enqueue the Run job in the same PostgreSQL transaction (see [Run scheduling](architecture.md#run-调度与停止)).
+Run admission uses a token-free, owner-scoped ConfigReader and `createEvalRunAdmission`; Config editing uses a separate Store with the service session token. The HTTP process holds no Harness credential and never runs Agents: admission and stop requests commit their Run facts and enqueue the Run job in the same PostgreSQL transaction (see [Run scheduling](architecture.md#run-调度与停止)).
 
 Admission responses follow the rules in [Run admission](architecture.md#run-准入与独立评估): a matching replay returns the original Run; a reused key with different facts, or a key retired by a replaced Run, is `409 RUN_IDEMPOTENCY_CONFLICT`; a new key while the Project has an unfinished Run is `409 PROJECT_BUSY`; a replaced Run ID is `404 RUN_NOT_FOUND`.
 

@@ -159,14 +159,21 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     }, ownerUserId);
   }
 
-  /** The full HTTP stack over this database; each Bearer token names its verified owner. */
+  /** One full HTTP stack per service account over this database; the Bearer token picks which one. */
   function httpApi(users: Readonly<Record<string, string>>) {
     const sp = {
-      async verifySession(token: string) { return users[token] ? { id: users[token], role: "user" as const } : null; },
       async getAgentConfig(token: string, id: string) { return { id, user_id: users[token]!, name: id }; },
     } as EvalSpClient;
     const ownerServices = createOwnerServices({ db: database.db, sp, bundles: {} as BundleDirectory, release, runQueue });
-    return requestApp({ webOrigin: WEB_ORIGIN, sp, ownerServices });
+    const apps = new Map(Object.entries(users).map(([token, id]) => [token, requestApp({
+      webOrigin: WEB_ORIGIN, sp, ownerServices, serviceAccount: { user: { id, role: "user" }, sessionToken: token },
+    })]));
+    return (path: string, init: RequestInit = {}) => {
+      const token = /^Bearer (.+)$/u.exec(new Headers(init.headers).get("authorization") ?? "")?.[1] ?? "";
+      const app = apps.get(token);
+      if (!app) throw new Error(`No service account for test token ${token}`);
+      return app(path, init);
+    };
   }
 
   async function setup() {

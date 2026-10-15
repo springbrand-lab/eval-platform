@@ -22,14 +22,18 @@ const otherOwner = "22222222-2222-4222-8222-222222222222";
 
 const release = { sourceBranch: "release-2.0.0", sourceCommit: "a".repeat(40) };
 const sp = {
-  async verifySession(token: string) { return { id: token === "other" ? otherOwner : owner, role: "user" as const }; },
   async getAgentConfig(_token: string, id: string) { return { id, user_id: owner, name: id }; },
 } as EvalSpClient;
 
-/** The full HTTP stack over PostgreSQL; the Bearer token selects the verified owner. */
+/** One full HTTP stack per service account over PostgreSQL; `token` picks the account. */
 function httpClient(db: ReturnType<typeof createEvalDb>, bundles: BundleDirectory) {
-  const send = requestApp({ webOrigin: WEB_ORIGIN, sp, ownerServices: createOwnerServices({ db, sp, bundles, release, runQueue: { async enqueue() {} } }) });
-  return async (path: string, method: string, body?: unknown, token = "owner") => send(path,
+  const ownerServices = createOwnerServices({ db, sp, bundles, release, runQueue: { async enqueue() {} } });
+  const send = (token: string) => requestApp({
+    webOrigin: WEB_ORIGIN, sp, ownerServices,
+    serviceAccount: { user: { id: token === "other" ? otherOwner : owner, role: "user" }, sessionToken: token },
+  });
+  const apps = { owner: send("owner"), other: send("other") };
+  return async (path: string, method: string, body?: unknown, token: "owner" | "other" = "owner") => apps[token](path,
     body === undefined ? authorized(token, { method }) : jsonRequest(method, body, token));
 }
 

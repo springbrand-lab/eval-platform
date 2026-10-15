@@ -10,8 +10,12 @@ import {
 } from "./env.js";
 
 const apiEnvSchema = databaseEnvSchema.extend({
-  /** Eval SP API: session verification and Agent Config. */
+  /** Eval SP API: service session verification and Agent Config. */
   EVAL_SP_API_ORIGIN: httpOriginSchema,
+  /** The fixed Eval SP service account that owns every Eval record. */
+  EVAL_SP_SERVICE_USER_ID: z.uuid().transform((value) => value.toLowerCase()),
+  /** Long-lived session of that account, issued by SP's eval:bootstrap-service-account. */
+  EVAL_SP_SERVICE_SESSION_TOKEN: requiredStringSchema,
   /** Eval Web: the only CORS origin and the trusted Origin of SP write requests. */
   EVAL_WEB_ORIGIN: httpOriginSchema,
   EVAL_SP_SOURCE_BRANCH: requiredStringSchema,

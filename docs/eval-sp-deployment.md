@@ -26,7 +26,7 @@ Eval Web/CLI ──> Eval API ──> Eval SP 的公开 API 与长连接
 | Eval SP | 登录与用户账户、`user-agent` 配置、Inbox/Chat/Session/Submission、完整轨迹、Workspace 及文件、计费结算、Action 执行和 Creation 记录。Agent 与 Space 使用 Eval 专用 DO 命名空间和 R2。 |
 | Eval PostgreSQL | Project、Dataset、Data、Sample、执行/评估配置、Run、Sampling、EvaluationRecord、Attempt、指标所需的原始资源快照，以及 SP Chat/Submission/产物/轨迹引用。 |
 
-Eval 的 Agent Config 列表、创建、编辑和运行时解析均使用 **Eval SP 自己的** `user-agent` 库；登录也走 Eval SP。切换或更新 SP 源码不重建该数据库，因此不会改变已有用户配置或 Eval 业务记录。不从 dev/production 在线读取、写入或同步账户与配置。已有环境中的配置不会自动出现在 Eval SP；如需复用具体配置，应另行通过公开接口显式导入，然后在 Eval SP 中维护。
+Eval 的 Agent Config 列表、创建、编辑和运行时解析均使用 **Eval SP 自己的** `user-agent` 库；Eval 使用的固定服务账号也建在 Eval SP 中。切换或更新 SP 源码不重建该数据库，因此不会改变已有用户配置或 Eval 业务记录。不从 dev/production 在线读取、写入或同步账户与配置。已有环境中的配置不会自动出现在 Eval SP；如需复用具体配置，应另行通过公开接口显式导入，然后在 Eval SP 中维护。
 
 ## Project、Run 与 Chat
 

@@ -20,8 +20,8 @@ by Eval SP; only the Worker Store resumes Runs across users. Metrics and Run
 views read in sets under one repeatable-read, read-only transaction and reuse
 the Runtime's status projection.
 
-The Hono HTTP control plane (`start:api`) verifies every Bearer session with
-Eval SP, assembles owner-scoped services once per owner and routes Dataset,
+The Hono HTTP control plane (`start:api`) runs as one fixed Eval SP service
+account verified once at startup, assembles owner-scoped services once per owner and routes Dataset,
 Config, Run, Metrics and initial-resource operations. Run admission and stop
 requests commit their facts and enqueue a pg-boss Run job in one transaction;
 the HTTP process never executes an Agent or holds the SP service credential.

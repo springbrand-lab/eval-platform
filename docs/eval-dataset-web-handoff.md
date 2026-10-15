@@ -66,7 +66,7 @@ Authorization: Bearer <Eval SP session token>
 
 ### 2. 建资源目录，再逐条上传
 
-用户可在导入 Dataset 前后管理资源。资源按当前登录用户共享，不属于某个 Dataset。流程是创建 Bundle，然后在该 Bundle 下每次上传一条 Material 或 Session。
+用户可在导入 Dataset 前后管理资源。资源按 Eval 服务账号共享，不属于某个 Dataset。流程是创建 Bundle，然后在该 Bundle 下每次上传一条 Material 或 Session。
 
 | 操作 | 请求 | Web 处理 |
 | --- | --- | --- |
@@ -128,7 +128,7 @@ Web 用 `GET /api/evaluation-output-schemas` 展示可选格式，再对 Project
 - 失败：`{ "code", "errMsg", "requestId", "errors"? }`，响应头 `X-Request-ID` 与 `requestId` 相同，便于反馈问题。按 `code` 区分原因，不解析 `errMsg` 文本；可用 `@eval-platform/eval-contracts/http-errors` 的 `decodeError` 解码。
 - `422 REQUEST_VALIDATION_FAILED`：字段不合法，`errors[].path` 指向出错字段，可直接标注到表单。
 - `400`：JSON 格式错误或重复字段（`REQUEST_INVALID_JSON`），或通过格式校验后被业务规则拒绝（如 `DATASET_INPUT_INVALID`、`CATALOG_INPUT_INVALID`、`BUNDLE_FILE_INVALID`）。
-- `401`：会话无效，需重新登录；`404`：资源不存在或不属于当前用户；`409`：仍有绑定（如 `BUNDLE_RESOURCE_IN_USE`、`OUTPUT_SCHEMA_IN_USE`、`DATA_IN_USE`）或输出格式已锁定（`PROJECT_OUTPUT_SCHEMA_CONFLICT`）等冲突；`413`：超过大小限制；`415`：`Content-Type` 不是 JSON。
+- `404`：资源不存在或不属于当前用户；`409`：仍有绑定（如 `BUNDLE_RESOURCE_IN_USE`、`OUTPUT_SCHEMA_IN_USE`、`DATA_IN_USE`）或输出格式已锁定（`PROJECT_OUTPUT_SCHEMA_CONFLICT`）等冲突；`413`：超过大小限制；`415`：`Content-Type` 不是 JSON。
 - `503`：Eval SP、数据库或 Bundle 目录暂不可用，可稍后原样重试。
 
 删除收到 `409` 时保留当前列表状态，不要在 UI 中先把条目移除。
