@@ -27,7 +27,7 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 
 数值使用有限的 JavaScript Number；整数必须在 `Number.MIN_SAFE_INTEGER` 到 `Number.MAX_SAFE_INTEGER` 之间。超出范围的大整数业务 ID 必须由调用方以字符串提供，解析、创建、修改和导出都直接拒绝不安全整数，不自动截断、舍入或转换为字符串。YAML 整数先按 BigInt 解析，确认安全范围后才转为 Number。
 
-业务字段 `sampleId` 可以正常使用。Runtime 的 ProjectSample 采用 `{ projectSampleId, projectId, dataId, datasetIds, samplingCount, data: Data }`，平台身份与 Project 创建时的完整 Data 副本分开，不覆盖或删除 `data.sampleId`；Sampling 只持久化 `projectSampleId`，不再复制 Data。
+业务字段 `sampleId` 可以正常使用。Runtime 的 ProjectSample 采用 `{ projectSampleId, projectId, dataId, datasetIds, samplingCount, data: Data }`，平台身份与 Project 创建时的完整 Data 副本分开，不覆盖或删除 `data.sampleId`；Sampling 只持久化 `projectSampleId`，不复制 Data。
 
 如提供 `externalDataId`、`metadata` 等字段，它们也是用户自定义 JSON 业务字段，不作为平台主键或全局唯一约束。素材和 Session 正文不嵌入引用。本包不上传文件、不访问 R2、不直接读写 DO，不生成 manifest 或 hash，也不建立第二套 Session 存储。Runtime/Harness 使用 SP 的公开初始化能力，把输入物化到 Agent 的存储中。
 

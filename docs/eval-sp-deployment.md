@@ -24,7 +24,7 @@ Eval Web/CLI ──> Eval API ──> Eval SP 的公开 API 与长连接
 | 所属系统 | 长期保存的事实 |
 | --- | --- |
 | Eval SP | 登录与用户账户、`user-agent` 配置、Inbox/Chat/Session/Submission、完整轨迹、Workspace 及文件、计费结算、Action 执行和 Creation 记录。Agent 与 Space 使用 Eval 专用 DO 命名空间和 R2。 |
-| Eval PostgreSQL | Project、Dataset、Data、Sample、执行/评估配置、Run、Sampling、EvaluationRecord、Attempt、指标所需的原始资源快照，以及 SP Chat/Submission/产物/轨迹引用。 |
+| Eval PostgreSQL | Dataset、Data、资源目录与输出格式；Project 及其执行/评估计划、Dataset/ProjectSample 快照和冻结 Agent Config 副本引用；Run、Sampling、EvaluationRecord、Attempt、指标所需的原始资源快照与评估原始输出，以及 SP Chat/Submission/产物/轨迹引用。 |
 
 Eval 的 Agent Config 列表、创建、编辑和运行时解析均使用 **Eval SP 自己的** `user-agent` 库；登录也走 Eval SP。切换或更新 SP 源码不重建该数据库，因此不会改变已有用户配置或 Eval 业务记录。不从 dev/production 在线读取、写入或同步账户与配置。已有环境中的配置不会自动出现在 Eval SP；如需复用具体配置，应另行通过公开接口显式导入，然后在 Eval SP 中维护。
 
@@ -37,7 +37,7 @@ Eval 的 Agent Config 列表、创建、编辑和运行时解析均使用 **Eval
 
 ## 包与部署边界
 
-Eval 保持 `eval-contracts`、`eval-dataset`、`eval-runtime`、`eval-metrics` 四个 workspace 包，不增加 `eval-sp-adapter` 或 `eval-driver` 包。`eval-runtime` 定义 Harness 契约并编排运行；`apps/eval-api` 组合 SP 公开接口的客户端、登录鉴权、Config 存储、PostgreSQL 适配器和 Run Worker；Web/CLI 只消费 Eval 控制面。发布脚本或锁定 SP commit 的清单属于仓库级 `deploy/`，不是运行时包。
+Eval 保持 `eval-contracts`、`eval-dataset`、`eval-runtime`、`eval-metrics` 四个 workspace 包，不增加 `eval-sp-adapter` 或 `eval-driver` 包。`eval-runtime` 定义 Harness 契约并编排运行；`apps/eval-api` 组合 SP 公开接口的客户端、登录鉴权、Agent Config 转发与冻结副本、PostgreSQL 适配器和 Run Worker；Web/CLI 只消费 Eval 控制面。发布脚本或锁定 SP commit 的清单属于仓库级 `deploy/`，不是运行时包。
 
 SP 仓库保留 Agent、Space、API 的实现并提供 Eval 部署配置与正式接口。Eval 发布流程从指定 SP commit 调用其部署目标，不导入 `sp-platform/agent/src/*` 私有源码，也不把评估业务逻辑搬进 SP。运行所需的新 SP 能力见 [接口需求](sp-eval-api-requirements.md)。
 

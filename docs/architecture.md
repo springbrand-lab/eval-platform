@@ -12,7 +12,7 @@ Agent Config 存在 Eval SP 自己的 `user-agent` 库，但只在 Eval 内通�
 
 ## 第一阶段包边界
 
-当前包边界保持四个 workspace；`eval-runtime` 已开始实现运行编排，其他包继续作为稳定契约和结果层基础：
+包边界保持四个 workspace：契约、来源目录、运行编排和结果统计各占一个：
 
 ```text
 packages/
@@ -41,7 +41,7 @@ eval-metrics: evaluators/ aggregation/ reporting/
 
 ## Project 计划
 
-Project 由两部分组成，完整目标行为见 [Project、Runtime 与 Metrics 改造方向](eval-project-redesign.md)：
+Project 由两部分组成，设计记录见 [Project、Runtime 与 Metrics 设计](eval-project-redesign.md)：
 
 - **执行计划**在创建事务中确定，之后没有任何修改入口：元数据、source branch、绑定的 Dataset 快照（名称、描述、kind、创建时成员顺序）、ProjectSample、Subject Harness（框架、冻结副本引用、超时）、`executionConcurrency`、`retryPolicy` 和 Subject Agent Config 正文快照（仅展示）。`executionPlanDigest` 覆盖执行计划、Dataset 绑定和全部 ProjectSample。
 - **评估计划**可在创建时填写，也可之后补填；未锁定时只有一份当前值，可通过 `PUT /api/projects/:id/evaluation-plan` 整体替换（重新保存会生成新 Evaluator 副本并删除旧副本）。内容是 Evaluator Harness、`evaluationConcurrency`、`retryPolicy`、评估输出 JSON Schema 的 ID 与内容摘要和 Evaluator 正文快照，摘要为 `evaluationPlanDigest`。首个 pipeline/evaluation Run 在准入事务内写入 `evaluationPlanLockedAt`，之后 Run 停止或失败也不解锁，替换返回冲突。
@@ -79,7 +79,7 @@ ProjectSample 是 Project 自己的固定输入：来源 Data 的完整副本、
 | pipeline | 同上；新 Sampling 执行成功后各自评估 | 随旧 Sampling 删除 | 原样保留 |
 | evaluation | 完全保留 Sampling、Chat、Attempt、产物、轨迹和资源 | 删除选中 Sampling 的当前评估，新建 EvaluationRecord | 原样保留 |
 
-Project 只保留当前结果集合，它不等于最近 Run 的成员；全 Project 重跑就是选中全部目标。准入失败时旧结果不变；新 Run 停止后不恢复已完成的替换。Run 保存 operation、phases、selector、targets、`samplingIds`、`evaluationIds`、`planDigests`、source commit、请求身份和停止标记，不保存配置正文；Run 状态从子记录推导，没有第二份可变状态。同一 Project 同时最多一个未结束 Run：任一 Sampling 或 EvaluationRecord 处于 `queued`、`starting`、`running` 或 `retrying`，或停止尚未收尾。Web 可以禁用启动按钮作反馈，但并发边界是 Store。HTTP 契约见 [Eval HTTP 控制面](eval-http-api.md)。
+Project 只保留当前结果集合，它不等于最近 Run 的成员；全 Project 重跑就是选中全部目标。准入失败时旧结果不变；新 Run 停止后不恢复已完成的替换。Run 保存 operation、phases、selector、targets、`samplingIds`、`evaluationIds`、`planDigests`、Project 内递增的序号、source commit、请求身份和停止标记，不保存配置正文；Run 行从不删除，作为来源记录保留，其被后续 Run 替换的 Sampling/EvaluationRecord 从关联中移除；Run 状态从子记录推导，没有第二份可变状态。同一 Project 同时最多一个未结束 Run：任一 Sampling 或 EvaluationRecord 处于 `queued`、`starting`、`running` 或 `retrying`，或停止尚未收尾。Web 可以禁用启动按钮作反馈，但并发边界是 Store。HTTP 契约见 [Eval HTTP 控制面](eval-http-api.md)。
 
 ## Run 调度与停止
 

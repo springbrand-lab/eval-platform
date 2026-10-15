@@ -1,6 +1,6 @@
 # @eval-platform/eval-api
 
-内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。行为目标见 [Project、Runtime 与 Metrics 改造方向](../../docs/eval-project-redesign.md)。
+内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。设计见 [Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
 
 ## 进程与环境变量
 
@@ -59,10 +59,10 @@ Worker 可多实例部署、滚动升级；收到信号后停止取任务，等�
 
 `src/db/client.ts`、`schema.ts` 定义与 SP 一致的 Drizzle/`pg` 注入边界和表结构；领域错误类集中在 `src/db/errors.ts`。所有记录都携带用户归属，组合外键保证 Project、ProjectSample、Sampling、Run 和 Evaluation 同用户。
 
-表：`eval_projects`（元数据、source branch、创建幂等键与指纹、`deleted_at`）；`eval_project_datasets`、`eval_project_samples`（完整 Data 副本与 `sampling_count`）、`eval_project_sample_datasets`（成员顺序与多 Dataset 共享）——快照表不引用实时目录；`eval_project_execution_plans`（创建后不更新）；`eval_project_evaluation_plans`（可整体替换直到 `locked_at`，`output_schema_id` 外键只防物理删除）；`eval_project_agent_configs`（冻结副本、角色、正文快照、`retired_at`）；`eval_samplings`（外键到 ProjectSample）、`eval_evaluations`；`eval_runs`（operation、phases、selector、targets、两个计划摘要、Project 内递增 `sequence`、幂等键与指纹、停止标志）；`eval_run_samplings`、`eval_run_evaluations`、`eval_run_request_keys`。目录侧的 Dataset/Data/Bundle/Material/Session/输出格式软删除不再被 Project 阻挡：快照复制了 Data，Worker 按 ID 读取素材文件和 Schema。
+表：`eval_projects`（元数据、source branch、创建幂等键与指纹、`deleted_at`）；`eval_project_datasets`、`eval_project_samples`（完整 Data 副本与 `sampling_count`）、`eval_project_sample_datasets`（成员顺序与多 Dataset 共享）——快照表不引用实时目录；`eval_project_execution_plans`（创建后不更新）；`eval_project_evaluation_plans`（可整体替换直到 `locked_at`，`output_schema_id` 外键只防物理删除）；`eval_project_agent_configs`（冻结副本、角色、正文快照、`retired_at`）；`eval_samplings`（外键到 ProjectSample）、`eval_evaluations`；`eval_runs`（operation、phases、selector、targets、两个计划摘要、Project 内递增 `sequence`、幂等键与指纹、停止标志）；`eval_run_samplings`、`eval_run_evaluations`、`eval_run_request_keys`。目录侧的 Dataset/Data/Bundle/Material/Session/输出格式软删除从不被 Project 阻挡：快照复制了 Data，Worker 按 ID 读取素材文件和 Schema。
 
 - `createPostgresProjectStore` 写 Project 快照、替换评估计划、软删除（存在活动 Run 时拒绝）和读取计划视图；`createPostgresProjectPlanReader`（用户范围）与 `createPostgresWorkerProjectPlanReader`（仅 Worker）实现 Runtime 的 `ProjectPlanReader`，已软删除的 Project 读为不存在，详情、预览、Run、Metrics 和观察入口因此一律 404。
-- `createPostgresRuntimeStore` 与 HTTP 路由使用同一已校验的 `EvalSpRelease`；`admitRun` 在 Project 行锁下完成重放/冲突（同 key 只能重放 Project 最新的 Run）、忙碌检查、发布校验、计划摘要与评估计划复核、目标与当前 Sampling 集合复核、只删除选中记录及其 Run 关联、分批插入、首次评估锁定评估计划，并在同一事务内经 `fromDrizzle(transaction)` 投递 pg-boss 任务。Run 不再删除，被替换的成员从其 Run 关联中移除。
+- `createPostgresRuntimeStore` 与 HTTP 路由使用同一已校验的 `EvalSpRelease`；`admitRun` 在 Project 行锁下完成重放/冲突（同 key 只能重放 Project 最新的 Run）、忙碌检查、发布校验、计划摘要与评估计划复核、目标与当前 Sampling 集合复核、只删除选中记录及其 Run 关联、分批插入、首次评估锁定评估计划，并在同一事务内经 `fromDrizzle(transaction)` 投递 pg-boss 任务。Run 行从不删除，被替换的成员从其 Run 关联中移除。
 - `createPostgresWorkerRuntimeStore` 只供 Worker 跨用户恢复 Run，HTTP 路由不能注入它。
 - Sampling/Evaluation 写入携带预期旧事实，PostgreSQL 用同一条条件 `UPDATE` 比较 JSONB `facts` 后替换；未命中即报告冲突，由 Runtime 读回校准，不新增版本列。
 - `createPostgresMetricsSource` 在一个 repeatable-read 只读事务内按固定计划读取范围内全部 ProjectSample（含从未运行的）、当前 Sampling/Evaluation（可按 `runIds` 过滤）和相关 Run 投影，全部为集合查询，不用实时 `dataset_data` 推断归属。`createPostgresObservationReader` 校验 Project 与当前记录后返回只读观察引用，从不返回可写 Chat URL。

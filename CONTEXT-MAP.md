@@ -3,7 +3,7 @@
 | Area | Entry point | Responsibility |
 | --- | --- | --- |
 | Architecture | `docs/architecture.md` | Overall evaluation model, Project plan, Run admission and SP boundary |
-| Project redesign | `docs/eval-project-redesign.md` | Target behavior of Project snapshots, Runtime and Metrics |
+| Project design | `docs/eval-project-redesign.md` | Design record of Project snapshots and creation, Runtime admission and Metrics |
 | Deployment | `docs/eval-sp-deployment.md` | Independent Eval SP release, storage and identity ownership |
 | Package graph | `docs/package-boundaries.md` | Package ownership and dependency direction |
 | Runtime | `packages/eval-runtime/README.md` | Plan validation and digests, Run preview/admission, execution, evaluation and pipeline orchestration seam |

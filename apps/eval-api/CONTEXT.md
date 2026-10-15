@@ -2,13 +2,13 @@
 
 `eval-api` is the internal control-plane application for evaluation projects.
 
-It exposes authenticated operations for Project, Dataset, ProjectSample,
-Sampling, Execution, Evaluation, Artifact, Trajectory, read-only observation
-and Metric views. It consumes package public exports and delegates
+It exposes authenticated operations for Project, Dataset, Data, initial
+resources, Agent Config, Run, Sampling, Evaluation, read-only observation and
+Metric views. It consumes package public exports and delegates
 execution/evaluation orchestration to `@eval-platform/eval-runtime`.
 
-It does not own Agent execution, SP Chat/DO storage, Dataset semantics or
-evaluation scoring logic.
+It does not own Agent execution, SP Chat/DO storage, Dataset semantics,
+evaluation-output validation or metric aggregation.
 
 The API workspace owns PostgreSQL migrations and implementations of the public
 DatasetStore, ProjectPlanReader, RuntimeStore and read-only MetricsSource

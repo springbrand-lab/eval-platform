@@ -2,7 +2,7 @@
 
 评估运行时的控制面和执行编排。它只依赖 SP 的公开 Harness 边界，不复制 SP Runtime，也不直接读取 Durable Object 存储。
 
-目标部署中的 SP 是 Eval 独立发布的 API/数据库、Agent Worker 和 Space Worker；登录、Agent Config 及 Agent 生命周期全部由这套 SP 提供。Harness 使用该部署的普通 Inbox/Chat 生命周期，具体 HTTP/WebSocket 客户端由 `apps/eval-api` 组合。部署分支绑定 Project；Runtime 从当前发布信息取得 commit 并写入新 Run，恢复时只读 Run 已保存的 commit。见[部署方案](../../docs/eval-sp-deployment.md)与[Project 改造方向](../../docs/eval-project-redesign.md)。
+目标部署中的 SP 是 Eval 独立发布的 API/数据库、Agent Worker 和 Space Worker；登录、Agent Config 及 Agent 生命周期全部由这套 SP 提供。Harness 使用该部署的普通 Inbox/Chat 生命周期，具体 HTTP/WebSocket 客户端由 `apps/eval-api` 组合。部署分支绑定 Project；Runtime 从当前发布信息取得 commit 并写入新 Run，恢复时只读 Run 已保存的 commit。见[部署方案](../../docs/eval-sp-deployment.md)与[Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
 
 ## 对外边界
 
@@ -14,7 +14,7 @@
 - `createEvalRunResumer({ plans, harness, store, onError, ... })`：Worker 入口，提供 `resume(runId, stopSignal?)`、`interrupt(runId)` 和 `stop(runId)`。每次先读取 Run，再读取 Project 计划并核对 `run.planDigests`；摘要不一致直接拒绝，绝不用另一份计划运行。执行使用执行计划的 Harness、`executionConcurrency` 和 `retryPolicy`，评估使用评估计划的对应字段；ProjectSample 按不同 ID 批量读取并校验身份。
 - 结果读取实现 `EvalRunQueries`（`getRun`、`getSampling`、`getEvaluation`、`listEvaluations`），由宿主基于自身存储提供；`toRunSnapshot` 投影 `operation`、`selector`、`targets` 与派生的 `phase/status`。
 
-`RuntimeStore.admitRun()` 是 Store 侧的准入事务合同（见 `runtime/store.ts`）：在 Project 行锁内拒绝缺失/软删除 Project；同 key 同指纹重放、不同指纹或被替换的 key 拒绝，新 key 遇到未完成 Run 抛出 `RuntimeProjectBusyError`；复核计划摘要和评估计划存在；复核 `replacedSamplingIds` 仍等于目标的当前 Sampling（否则 `stale-targets`），evaluation 复核目标仍执行成功；execution/pipeline 删除被替换的 Sampling 及其评估和 Run 关联，evaluation 只删除目标 Sampling 的当前评估，绝不触碰未选中结果；批量插入新事实与 key ledger；首个 pipeline/evaluation Run 锁定评估计划，提交后才通知 Worker。
+`RuntimeStore.admitRun()` 是 Store 侧的准入事务合同（见 `runtime/store.ts`）：在 Project 行锁内拒绝缺失/软删除 Project；同 key 同指纹只在其 Run 仍是 Project 最新 Run 时重放，不同指纹或已被后续 Run 取代的 key 拒绝，新 key 遇到未完成 Run 抛出 `RuntimeProjectBusyError`；复核计划摘要和评估计划存在；复核 `replacedSamplingIds` 仍等于目标的当前 Sampling（否则 `stale-targets`），evaluation 复核目标仍执行成功；execution/pipeline 删除被替换的 Sampling 及其评估和 Run 关联，evaluation 只删除目标 Sampling 的当前评估，绝不触碰未选中结果；批量插入新事实与 key ledger；首个 pipeline/evaluation Run 锁定评估计划，提交后才通知 Worker。
 
 ## 文件职责
 
@@ -57,7 +57,7 @@ Runtime 将计划中 Harness 的 `runtime` 选项传给 Harness；SP Harness 在
 
 类型化错误由 `runtime/errors.ts` 统一定义：找不到实体（`project`、`run`、`dataset`、`project-sample`、`sampling`、`evaluation`）抛出 `RuntimeEntityNotFoundError(entity, id)`；输入或计划校验失败抛出 `RuntimeInputError(message, field?)`；准入前提不满足抛出带 `reason` 的 `RuntimeAdmissionConflictError`（`evaluation-plan-required`、`plan-changed`、`stale-targets`、`empty-targets`、`evaluation-prompt`、`sampling-unavailable`、`source-branch`）；另有 `RuntimeProjectBusyError`、`RuntimeRunIdentityConflictError`、`RuntimeRunStoppedError`、`RuntimeRecordConflictError`、`RuntimeRecordPersistenceError`。控制面只按错误类映射 HTTP 响应。
 
-SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harness，`framework` 必须显式选择 `sp`、`codex` 或 `cc`（Claude Code）。三者使用同一套生命周期，由 `ensureAgent` 将所选框架和 Agent Config 交给 SP 创建；返回的 Handle 必须对应请求的框架，后续提交、重启、等待和收集沿用该 Handle。评估 Agent 固定 `kind: "sp", framework: "sp"`。框架属于执行计划并进入执行计划摘要，不存在静默降级或旧配置兼容默认值。当前只完成评估侧契约和接线，SP 云端启动 Codex/CC 的实现仍由 SP 提供。
+SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harness，`framework` 必须显式选择 `sp`、`codex` 或 `cc`（Claude Code）。三者使用同一套生命周期，由 `ensureAgent` 将所选框架和 Agent Config 交给 SP 创建；返回的 Handle 必须对应请求的框架，后续提交、重启、等待和收集沿用该 Handle。评估 Agent 固定 `kind: "sp", framework: "sp"`。框架属于执行计划并进入执行计划摘要，没有默认框架或静默降级。当前只完成评估侧契约和接线，SP 云端启动 Codex/CC 的实现仍由 SP 提供。
 
 ## 重要约束
 

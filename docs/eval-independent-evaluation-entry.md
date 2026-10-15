@@ -2,7 +2,7 @@
 
 ## 范围
 
-仅评估（`operation: "evaluation"`）在原 Project 中为执行成功的 Sampling 重新评估，不重新执行 Subject。它与 execution、pipeline 使用同一组准入接口，选择始终在 Project 快照内展开；准入、幂等键、单一未结束 Run 和结果替换规则的唯一完整描述见[架构方案](architecture.md#run-准入与独立评估)，目标行为见 [Project、Runtime 与 Metrics 改造方向](eval-project-redesign.md)。
+仅评估（`operation: "evaluation"`）在原 Project 中为执行成功的 Sampling 重新评估，不重新执行 Subject。它与 execution、pipeline 使用同一组准入接口，选择始终在 Project 快照内展开；准入、幂等键、单一未结束 Run 和结果替换规则的唯一完整描述见[架构方案](architecture.md#run-准入与独立评估)，设计记录见 [Project、Runtime 与 Metrics 设计](eval-project-redesign.md)。
 
 前提：
 

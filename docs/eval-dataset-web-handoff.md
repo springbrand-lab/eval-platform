@@ -1,12 +1,12 @@
-# Dataset 层改造与 Web 接入说明
+# Dataset 层与 Web 接入说明
 
-本文给后续实现 Dataset 页和 Project 输出格式选择的 Web 开发使用。接口事实以 [Dataset 上传契约](eval-dataset-upload.md)、[Eval HTTP 接口](eval-http-api.md)和当前代码为准。当前仓库的 `eval-web` 仍是骨架；本文描述的是已经实现的后端能力和 Web 需要接上的操作。
+本文给后续实现 Dataset 页、资源目录和评估输出格式选择的 Web 开发使用。接口事实以 [Dataset 上传契约](eval-dataset-upload.md)、[Eval HTTP 接口](eval-http-api.md)和当前代码为准。当前仓库的 `eval-web` 仍是骨架；本文描述的是已经实现的后端能力和 Web 需要接上的操作。
 
 ## 背景与目的
 
-一次评估需要两类输入：每条样本的启动和评估 Prompt，以及可选的初始素材和初始上下文。用户要管理的是有名称、描述的 Dataset 和资源，运行时使用的是服务端生成的 ID。Project 还可以选择一份评估结果的 JSON Schema，约束评估 Agent 的输出格式。
+一次评估需要两类输入：每条样本的启动和评估 Prompt，以及可选的初始素材和初始上下文。用户要管理的是有名称、描述的 Dataset 和资源，运行时使用的是服务端生成的 ID。Project 的评估计划还要选择一份评估结果的 JSON Schema（输出格式），约束评估 Agent 的输出。
 
-这次改造把这些东西拆清楚了：
+各对象的关系如下：
 
 | 对象 | 用户看到什么 | 关系与用途 |
 | --- | --- | --- |
@@ -15,16 +15,16 @@
 | Bundle | 必填的 `name`、`description` | 资源分组。先创建空 Bundle，再逐条上传其中的资源；没有“上传整个 Bundle”的接口。 |
 | Material | 必填的 `name`、`description` | Bundle 内的一条素材，可以是一个文件，也可以是一个目录下的多个文件。Data 绑定到具体 `bundleId + materialId`。 |
 | Session | 必填的 `name`、`description` | Bundle 内的一份 JSON/JSONL 初始上下文。Data 绑定到具体 `bundleId + sessionId`，只用于 Subject 执行。 |
-| 输出格式 | 必填的 `name`、`description` | 单独上传的一份 JSON Schema 文件，没有 Bundle。Project 只保存其 `outputSchemaId`。 |
+| 输出格式 | 必填的 `name`、`description` | 单独上传的一份 JSON Schema 文件，没有 Bundle。Project 评估计划保存其 `outputSchemaId` 和内容摘要。 |
 
 ID 由后端生成，前端保存 ID 供请求使用，列表和选择器优先展示用户填写的名称、描述。Dataset、Data、Bundle、Material、Session 和输出格式的 ID 都是 UUID；路径和引用只接受 UUID（非 UUID 返回 `422`），可用大小写混合形式输入，保存和返回时统一为小写。资源元数据和 Data 绑定保存在 Eval 的 PostgreSQL；Material 文件和 Session 内容保存在 Eval 的 Bundle 目录。Web 只调用 Eval API，不直接访问该目录或 SP 的 DO 存储。
 
-## 已完成的后端改造
+## 后端能力
 
 - `eval-dataset` 已支持独立的 Prompt JSON/JSONL 上传解析、Dataset/Data 关联和通用 JSON/YAML 导入导出。Prompt Dataset 在导入后继续约束自身描述及成员 Data 的名称、描述和两个 Prompt；资源引用中的 UUID 在模型入口统一成小写。
-- 标准 Eval API 已提供 Dataset/Data、Bundle/Material/Session、输出格式和 Project 格式绑定的路由。资源由已认证用户隔离；通用 Data 创建、修改和导入也会校验引用的资源属于该用户且仍可选。
-- 相关数据库表、关联和软删除字段都在 `apps/eval-api/migrations-postgres/0000_initial.sql` 初始基线内。仍有活动绑定时阻止删除，并返回冲突；无级联清空绑定。
-- API 上传的文件由 Eval Bundle 目录保存，标准 Run Worker 按 Data 的具体 Material/Session 引用取用；评估输出格式按 Project 保存的 ID 解析。执行和评估仍通过 SP 公开接口完成，Web 不需要实现文件目录或 SP 内部存储协议。
+- 标准 Eval API 已提供 Dataset/Data、Bundle/Material/Session 和输出格式的路由；Project 在评估计划中选择输出格式。资源由已认证用户隔离；通用 Data 创建、修改和导入也会校验引用的资源属于该用户且仍可选。
+- 相关数据库表、关联和软删除字段都在 `apps/eval-api/migrations-postgres/0000_initial.sql` 初始基线内。删除规则见下文“编辑、关联与删除规则”。
+- API 上传的文件由 Eval Bundle 目录保存，Run Worker 按 Project 快照中 Data 副本的 Material/Session 引用取用；评估输出格式按 Project 评估计划保存的 ID 解析。执行和评估仍通过 SP 公开接口完成，Web 不需要实现文件目录或 SP 内部存储协议。
 
 ## Web 应实现的主流程
 
@@ -105,11 +105,18 @@ JSONL 则每行一条这样的 entry，而不是外层 `entries` 对象。服务
 
 请求只需包含本次要改变的字段；省略表示保持原绑定，`null` 表示清空，至少要提交一个字段。返回更新后的完整 Data。后端会检查资源存在、未删除且属于当前用户；Material 还会检查已上传文件可读取。选择器应使用 Bundle/Material/Session 列表的 `name` 和 `description`，不要让用户填写 ID。
 
-### 4. 管理评估输出格式与 Project 绑定
+### 4. 管理评估输出格式并在评估计划中选择
 
 输出格式是一个独立 JSON Schema 文件，不加入 Bundle，也不绑定到 Dataset 或 Data。上传时调用 `POST /api/evaluation-output-schemas`，体为 `{name,description,content}`；`content` 是 JSON Schema 文件文本。后端按 draft 2020-12 校验，保存解析后的 `schema`，返回 `outputSchemaId`。文件上限见 [Dataset 上传契约](eval-dataset-upload.md)。
 
-Web 用 `GET /api/evaluation-output-schemas` 展示可选格式，再对 Project 调用 `PUT /api/projects/{projectId}/evaluation-output-schema`，体为 `{ "outputSchemaId": "<uuid>" }`。清空选择提交 `{ "outputSchemaId": null }`。Project 列表/详情展示所绑定的 ID；Web 可用格式列表按 ID 找到名称和描述。Project 不保存 Schema 正文。启动 Evaluation 或 Pipeline 前，Project 必须选定输出格式；首次 Evaluation Run 准入后，这个 ID 不能再改或清空，API 会返回 `409`。
+Web 用 `GET /api/evaluation-output-schemas` 展示可选格式。输出格式是 Project 评估计划的一部分，评估计划体为 `{userAgentId, evaluationConcurrency, retryPolicy?, timeoutMs?, outputSchemaId}`：
+
+- 创建 Project 时可放在 `POST /api/projects` 的 `evaluation` 字段中；首个 Run 选择执行并评估（`run.operation: "pipeline"`）时必填。
+- 之后用 `PUT /api/projects/{projectId}/evaluation-plan` 整体替换评估计划，返回更新后的 Project 详情；没有“清空”操作。
+- Project 详情的 `evaluation.outputSchema` 是 `{outputSchemaId, digest}`；Web 用格式列表按 ID 找到名称和描述。
+- 没有评估计划的 Project 启动执行并评估或仅评估返回 `409 PROJECT_EVALUATION_PLAN_REQUIRED`；首个带评估的 Run 准入后评估计划锁定，再替换返回 `409 PROJECT_EVALUATION_PLAN_LOCKED`，详情页应改为只读展示。
+
+完整请求体、Project 详情结构和错误码见 [Eval HTTP 控制面](eval-http-api.md#projects)；评估计划的设计见 [Project、Runtime 与 Metrics 设计](eval-project-redesign.md)。
 
 ## 编辑、关联与删除规则
 
@@ -117,8 +124,8 @@ Web 用 `GET /api/evaluation-output-schemas` 展示可选格式，再对 Project
 - Dataset 用 `PUT /api/datasets/{datasetId}` 全量替换可编辑字段。Prompt Dataset 的 `name`、`description` 始终必填。Data 用 `PUT /api/data/{dataId}` 全量替换；Web 必须从当前 Data 合并未改字段再提交，否则省略的 Prompt、业务字段或资源引用会被移除。Prompt Dataset 成员的名称、描述和两个 Prompt 不能被改成空值。只改资源 ID 时优先用上面的专用 `PATCH`。
 - Data 可被同一用户的多个 Dataset 复用。`POST /api/datasets/{datasetId}/data` 用 `{dataIds:[...]}` 关联已有 Data；同一路径的 `DELETE` 解除关联。修改共享 Data 会影响所有引用它的 Dataset。
 - 删除都是软删除，列表和详情不再返回已删除的资源，上传文件字节仍留在目录。只要任一**活动 Data** 仍引用 Material、Session 或 Bundle 内的资源，相应删除就返回 `409`；即使该 Data 当前不属于任何 Dataset，也算绑定。Web 应先清空或改绑相关 Data，再重试删除。删除 Bundle 会把其 Material 和 Session 一起标记删除。
-- 输出格式仍被任一 Project 绑定时，删除返回 `409`。先将 Project 改绑或清空；如果该 Project 已有 Evaluation Run，绑定已锁定，清空也会返回 `409`。
-- Data 被活动 Dataset 或 Sample 引用时不能删除；先解除 Dataset 关联。当前没有 Sample 删除接口，已有 Sample 引用的 Data 不能通过本页删除。Dataset 被 Execution Config 选用时不能删除。`DELETE /api/datasets/{id}` 不会顺带删除可复用 Data。
+- 输出格式的删除总是允许：已选用它的评估计划继续按 ID 读取 Schema，只是它不能再被新选择。
+- Data 仍属于任一未删除 Dataset 时不能删除（`409 DATA_IN_USE`），先解除 Dataset 关联。Dataset 删除不受限制，也不会顺带删除可复用 Data。Project 保存的是 Dataset/Data 快照，目录中的修改和删除都不影响已有 Project，也从不因 Project 被阻止。
 
 ## 接口与页面实现提示
 
@@ -128,7 +135,7 @@ Web 用 `GET /api/evaluation-output-schemas` 展示可选格式，再对 Project
 - 失败：`{ "code", "errMsg", "requestId", "errors"? }`，响应头 `X-Request-ID` 与 `requestId` 相同，便于反馈问题。按 `code` 区分原因，不解析 `errMsg` 文本；可用 `@eval-platform/eval-contracts/http-errors` 的 `decodeError` 解码。
 - `422 REQUEST_VALIDATION_FAILED`：字段不合法，`errors[].path` 指向出错字段，可直接标注到表单。
 - `400`：JSON 格式错误或重复字段（`REQUEST_INVALID_JSON`），或通过格式校验后被业务规则拒绝（如 `DATASET_INPUT_INVALID`、`CATALOG_INPUT_INVALID`、`BUNDLE_FILE_INVALID`）。
-- `401`：会话无效，需重新登录；`404`：资源不存在或不属于当前用户；`409`：仍有绑定（如 `BUNDLE_RESOURCE_IN_USE`、`OUTPUT_SCHEMA_IN_USE`、`DATA_IN_USE`）或输出格式已锁定（`PROJECT_OUTPUT_SCHEMA_CONFLICT`）等冲突；`413`：超过大小限制；`415`：`Content-Type` 不是 JSON。
+- `401`：会话无效，需重新登录；`404`：资源不存在或不属于当前用户；`409`：仍有绑定（`BUNDLE_RESOURCE_IN_USE`、`DATA_IN_USE`）或评估计划已锁定（`PROJECT_EVALUATION_PLAN_LOCKED`）等冲突；`413`：超过大小限制；`415`：`Content-Type` 不是 JSON。
 - `503`：Eval SP、数据库或 Bundle 目录暂不可用，可稍后原样重试。
 
 删除收到 `409` 时保留当前列表状态，不要在 UI 中先把条目移除。
@@ -138,7 +145,7 @@ Web 最少需要完成以下闭环：
 1. 上传 Prompt JSON/JSONL，并在 Dataset 列表和详情中显示 Dataset、Data 的名称与描述。
 2. 创建 Bundle，分别上传、列出、选择 Material 和 Session；支持单文件与目录文件数组。
 3. 对每条 Data 独立绑定、改绑、清空执行素材、评估素材和执行上下文。
-4. 上传、列出输出格式，并在 Project 上绑定或清空其 ID。
+4. 上传、列出输出格式，并在 Project 创建或评估计划替换中选择其 ID；评估计划锁定后只读展示。
 5. 提供元数据修改、关联解除和软删除入口；对 `422`、`409`、`404`、`413` 给出可操作的提示。
 
-实现时可直接对照 [Dataset 模型](../packages/eval-dataset/src/dataset/model.ts)、[Prompt 文件解析](../packages/eval-dataset/src/dataset/serialization.ts)、[Dataset 路由](../apps/eval-api/src/routes/datasets/datasets.routes.ts)、[Data 路由](../apps/eval-api/src/routes/data/data.routes.ts)、[资源路由](../apps/eval-api/src/routes/bundles/bundles.routes.ts)、[输出格式路由](../apps/eval-api/src/routes/output-schemas/output-schemas.routes.ts)、[错误码目录](../packages/eval-contracts/src/http-errors.ts)和 [Bundle 文件校验](../apps/eval-api/src/sp/bundle-directory.ts)。后端已有单元及 PostgreSQL 集成测试；真实 Eval SP 跨部署联调仍需在接 Web 时验证。
+实现时可直接对照 [Dataset 模型](../packages/eval-dataset/src/dataset/model.ts)、[Prompt 文件解析](../packages/eval-dataset/src/dataset/serialization.ts)、[Dataset 路由](../apps/eval-api/src/routes/datasets/datasets.routes.ts)、[Data 路由](../apps/eval-api/src/routes/data/data.routes.ts)、[资源路由](../apps/eval-api/src/routes/bundles/bundles.routes.ts)、[输出格式路由](../apps/eval-api/src/routes/output-schemas/output-schemas.routes.ts)、[Project 路由](../apps/eval-api/src/routes/projects/projects.routes.ts)、[错误码目录](../packages/eval-contracts/src/http-errors.ts)和 [Bundle 文件校验](../apps/eval-api/src/sp/bundle-directory.ts)。后端已有单元及 PostgreSQL 集成测试；真实 Eval SP 跨部署联调仍需在接 Web 时验证。

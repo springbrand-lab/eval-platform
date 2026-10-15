@@ -1,6 +1,6 @@
 # Eval HTTP control plane
 
-`apps/eval-api` exposes the Dataset, initial-resource catalog, Agent Config, Project, Run, observation and Metrics services through one Hono application served by `@hono/node-server` (`start:api`, entry `src/server.ts`). It owns request authentication and composition, not evaluation semantics or SP storage. Process configuration is listed in the [eval-api README](../apps/eval-api/README.md); the Project, Runtime and Metrics behavior behind these routes is specified in [Project、Runtime 与 Metrics 改造方向](eval-project-redesign.md). This document is the single source for routes, the response envelope, status codes and error codes.
+`apps/eval-api` exposes the Dataset, initial-resource catalog, Agent Config, Project, Run, observation and Metrics services through one Hono application served by `@hono/node-server` (`start:api`, entry `src/server.ts`). It owns request authentication and composition, not evaluation semantics or SP storage. Process configuration is listed in the [eval-api README](../apps/eval-api/README.md); the Project, Runtime and Metrics design behind these routes is recorded in [Project、Runtime 与 Metrics 设计](eval-project-redesign.md). This document is the single source for routes, the response envelope, status codes and error codes.
 
 ## Application structure
 
@@ -121,8 +121,6 @@ Creation is idempotent per owner and `idempotencyKey`. The Project stores the ke
 | Detail | `404 PROJECT_NOT_FOUND` |
 | Delete | `404 PROJECT_NOT_FOUND`; `409 PROJECT_BUSY` while a Run is active or its stop is not finalized |
 | Evaluation plan | `404 PROJECT_NOT_FOUND`, `OUTPUT_SCHEMA_NOT_FOUND`; `409 PROJECT_EVALUATION_PLAN_LOCKED`, `AGENT_CONFIG_FROZEN`; `400 RUNTIME_INPUT_INVALID`; relayed SP errors |
-
-A soft-deleted output format cannot be newly selected, but a saved evaluation plan keeps reading its Schema by ID.
 
 ### Runs
 
