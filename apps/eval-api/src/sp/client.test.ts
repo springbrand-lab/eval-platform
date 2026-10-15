@@ -25,7 +25,7 @@ describe("Eval SP public API client", () => {
     );
     const client = createEvalSpClient({ ...origins, fetch });
 
-    await expect(client.verifySession("session-token")).resolves.toEqual({ id: "user-1", role: "admin" });
+    await expect(client.verifySession("session-token")).resolves.toEqual({ id: "user-1", role: "admin", email: "private" });
     await expect(client.verifySession("session-token")).resolves.toBeNull();
     await expect(client.verifySession("session-token")).rejects.toMatchObject({
       name: "EvalSpApiError", status: 503, payload: { code: "DATABASE_UNAVAILABLE" },
@@ -34,6 +34,28 @@ describe("Eval SP public API client", () => {
       request.credentials, request.redirect])).toEqual(Array.from({ length: 3 }, () => [
       "GET", "https://eval-sp.example.test/api/auth/me", "Bearer session-token", "omit", "manual",
     ]));
+  });
+
+  it("reads the session balance and grants credits with the admin token", async () => {
+    const grant = { userId: "user-1", email: "svc@test", adjustmentId: "eval-platform:k1", units: 50, replayed: false };
+    const record = { id: "g1", userId: "user-1", email: "svc@test", adjustmentId: "eval-platform:k1", units: 50, note: null, createdAt: "2026-10-15T00:00:00Z" };
+    const { fetch, requests } = recordingFetch(
+      ok({ creditAccount: { availableUnits: 50, topupRemainingUnits: 0, otherRemainingUnits: 50 }, plan: { id: "free-v1" } }),
+      ok(grant),
+      ok({ grants: [record] }),
+    );
+    const client = createEvalSpClient({ ...origins, fetch });
+
+    await expect(client.getCreditBalance("session")).resolves.toEqual({ availableUnits: 50, topupRemainingUnits: 0, otherRemainingUnits: 50 });
+    await expect(client.grantCredits("admin", { email: "svc@test", units: 50, adjustmentId: "eval-platform:k1" })).resolves.toEqual(grant);
+    await expect(client.listCreditGrants("admin", { email: "svc@test", limit: 5 })).resolves.toEqual([record]);
+    expect(requests.map((request) => [request.method, new URL(request.url).pathname + new URL(request.url).search,
+      request.headers.get("Authorization"), request.headers.get("Origin")])).toEqual([
+      ["GET", "/api/account/snapshot", "Bearer session", null],
+      ["POST", "/api/admin/credits/grants", "Bearer admin", origins.writeOrigin],
+      ["GET", "/api/admin/credits/grants?email=svc%40test&limit=5", "Bearer admin", null],
+    ]);
+    expect(await requests[1]!.json()).toEqual({ email: "svc@test", units: 50, adjustmentId: "eval-platform:k1" });
   });
 
   it("uses only Eval SP Agent Config endpoints with the caller's Bearer token", async () => {

@@ -47,6 +47,7 @@ Every JSON body goes through one reader: `readBytesLimited` caps the received by
 | --- | --- | --- |
 | Health | `GET /healthz` | `{status:"ok"}`; no session |
 | Current user | `GET /api/me` | — |
+| Credits | `GET /api/credits`; `GET, POST /api/credits/grants` | Service account balance and manual credit grants; see [Credits](#credits) |
 | SP Agent Configs | `GET, POST /api/agent-configs`; `GET, PATCH, DELETE /api/agent-configs/{id}` | SP's public Agent Config JSON on writes |
 | Agent choices | `GET /api/agents?role=subject|evaluator` | Optional role |
 | Projects | `GET, POST /api/projects`; `GET /api/projects/{projectId}` | Create: `{name}` |
@@ -70,6 +71,16 @@ Every JSON body goes through one reader: `readBytesLimited` caps the received by
 | Output-format catalog | `GET, POST /api/evaluation-output-schemas`; `GET, PATCH, DELETE /api/evaluation-output-schemas/{outputSchemaId}` | See [Dataset upload](eval-dataset-upload.md) |
 
 Selection and resubmission rules for independent evaluation are in [Independent evaluation entry](eval-independent-evaluation-entry.md). Selecting all IDs returns `413 EVALUATION_SELECTION_TOO_LARGE` instead of a truncated list when more than 10,000 match. Dataset and Data deletion is idempotent.
+
+## Credits
+
+Eval SP charges every Agent turn and paid Action against the service account's credits; Eval never bypasses that billing. Credits are added explicitly from the Eval back office, never by an automatic allowance:
+
+- `GET /api/credits` returns the service account's `creditAccount` from Eval SP `/api/account/snapshot` (`availableUnits`, `topupRemainingUnits`, `otherRemainingUnits`).
+- `POST /api/credits/grants` with `{units, idempotencyKey, note?}` grants `units` (positive integer) to the service account through Eval SP's admin credit grant, recorded as a non-expiring `system_adjustment`. The SP adjustment ID is `eval-platform:<idempotencyKey>`, so retrying one key grants once and reusing it with different facts is `409`. `idempotencyKey` is 1–200 characters without control characters; `note` is at most 500 characters. Credits can only be added.
+- `GET /api/credits/grants?limit=` lists the service account's manual grants, newest first (`limit` 1–100, default 20).
+
+The target account is always the service account; the client cannot name another user. Grants use `EVAL_SP_ADMIN_TOKEN`, the Eval SP deployment's own `RESOURCE_ADMIN_TOKEN`, which must not be shared with dev or production.
 
 ## Run admission and stop
 

@@ -166,7 +166,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     } as EvalSpClient;
     const ownerServices = createOwnerServices({ db: database.db, sp, bundles: {} as BundleDirectory, release, runQueue });
     const apps = new Map(Object.entries(users).map(([token, id]) => [token, requestApp({
-      webOrigin: WEB_ORIGIN, sp, ownerServices, serviceAccount: { user: { id, role: "user" }, sessionToken: token },
+      webOrigin: WEB_ORIGIN, sp, ownerServices, spAdminToken: "admin-token",
+      serviceAccount: { user: { id, role: "user" }, email: `${id}@test`, sessionToken: token },
     })]));
     return (path: string, init: RequestInit = {}) => {
       const token = /^Bearer (.+)$/u.exec(new Headers(init.headers).get("authorization") ?? "")?.[1] ?? "";

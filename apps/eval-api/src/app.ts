@@ -5,6 +5,7 @@ import agentConfigRouter from "./routes/agent-configs/agent-configs.index.js";
 import agentRouter from "./routes/agents/agents.index.js";
 import bundleRouter from "./routes/bundles/bundles.index.js";
 import configRouter from "./routes/configs/configs.index.js";
+import creditRouter from "./routes/credits/credits.index.js";
 import dataRouter from "./routes/data/data.index.js";
 import datasetRouter from "./routes/datasets/datasets.index.js";
 import healthRouter from "./routes/health/health.index.js";
@@ -23,6 +24,7 @@ export function createRoutes(logger: pino.Logger) {
   app.route("/api/me", sessionRouter);
   app.route("/api/agent-configs", agentConfigRouter);
   app.route("/api/agents", agentRouter);
+  app.route("/api/credits", creditRouter);
   app.route("/api/projects", projectRouter);
   app.route("/api", runRouter);
   app.route("/api/datasets", datasetRouter);

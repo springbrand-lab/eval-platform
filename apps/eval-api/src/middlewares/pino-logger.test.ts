@@ -13,7 +13,8 @@ describe("request logging", () => {
     const runtime: ApiRuntime = {
       webOrigin: "https://eval-web.test",
       sp: {} as EvalSpClient,
-      serviceAccount: { user: { id: "user-1", role: "user" }, sessionToken: "private-service-token" },
+      serviceAccount: { user: { id: "user-1", role: "user" }, email: "user-1@test", sessionToken: "private-service-token" },
+      spAdminToken: "private-admin-token",
       ownerServices: () => ({ services: services as unknown as OwnerServices, release() {} }),
     };
     const response = await createRoutes(logger).request("/api/runs/run-1", {
@@ -30,5 +31,6 @@ describe("request logging", () => {
     expect(lines[0]).not.toContain("private-token");
     expect(lines[0]).not.toContain("private-bearer");
     expect(lines[0]).not.toContain("private-service-token");
+    expect(lines[0]).not.toContain("private-admin-token");
   });
 });

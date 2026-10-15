@@ -30,7 +30,8 @@ function httpClient(db: ReturnType<typeof createEvalDb>, bundles: BundleDirector
   const ownerServices = createOwnerServices({ db, sp, bundles, release, runQueue: { async enqueue() {} } });
   const send = (token: string) => requestApp({
     webOrigin: WEB_ORIGIN, sp, ownerServices,
-    serviceAccount: { user: { id: token === "other" ? otherOwner : owner, role: "user" }, sessionToken: token },
+    spAdminToken: "admin-token",
+    serviceAccount: { user: { id: token === "other" ? otherOwner : owner, role: "user" }, email: `${token}@test`, sessionToken: token },
   });
   const apps = { owner: send("owner"), other: send("other") };
   return async (path: string, method: string, body?: unknown, token: "owner" | "other" = "owner") => apps[token](path,

@@ -40,13 +40,18 @@ function setup() {
   const sp = {
     listAgentConfigs: vi.fn(async () => [{ id: "agent-1", user_id: owner, name: "Agent" }]),
     createAgentConfig: vi.fn(async () => { throw new EvalSpApiError(422, { code: "AGENT_CONFIG_INVALID", errMsg: "Name is required" }); }),
+    getCreditBalance: vi.fn(async () => ({ availableUnits: 500, topupRemainingUnits: 0, otherRemainingUnits: 500 })),
+    grantCredits: vi.fn(async (_token: string, input: { email: string; units: number; adjustmentId: string }) =>
+      ({ userId: owner, email: input.email, adjustmentId: input.adjustmentId, units: input.units, replayed: false })),
+    listCreditGrants: vi.fn(async () => []),
   };
   const release = vi.fn();
   const ownerServices = vi.fn(() => ({ services: services as unknown as OwnerServices, release }));
   const runtime: ApiRuntime = {
     webOrigin: WEB_ORIGIN,
     sp: sp as unknown as EvalSpClient,
-    serviceAccount: { user: { id: owner, role: "user" }, sessionToken: "service-session" },
+    serviceAccount: { user: { id: owner, role: "user" }, email: "eval-service@test", sessionToken: "service-session" },
+    spAdminToken: "admin-token",
     ownerServices,
   };
   return { request: requestApp(runtime), services, sp, ownerServices, release };
@@ -192,6 +197,24 @@ describe("Eval API HTTP layer", () => {
       [{ projectId: "project-1", runIds: ["run-1", "run-2"] }],
       [{ projectId: "project-1" }],
     ]);
+  });
+
+  it("reads the balance and grants credits only to the service account", async () => {
+    const app = setup();
+    const balance = await app.request("/api/credits");
+    expect(await balance.json()).toMatchObject({ msg: { availableUnits: 500 } });
+    expect(app.sp.getCreditBalance).toHaveBeenCalledWith("service-session");
+    const granted = await app.request("/api/credits/grants", jsonRequest("POST", { units: 1000, idempotencyKey: "topup-1", note: "first batch" }));
+    expect(granted.status).toBe(200);
+    expect(app.sp.grantCredits).toHaveBeenCalledWith("admin-token", {
+      email: "eval-service@test", units: 1000, adjustmentId: "eval-platform:topup-1", note: "first batch",
+    });
+    const foreign = await app.request("/api/credits/grants", jsonRequest("POST", { units: 1, idempotencyKey: "k", email: "other@test" }));
+    const negative = await app.request("/api/credits/grants", jsonRequest("POST", { units: -5, idempotencyKey: "k" }));
+    expect([foreign.status, negative.status]).toEqual([422, 422]);
+    expect(app.sp.grantCredits).toHaveBeenCalledTimes(1);
+    await app.request("/api/credits/grants?limit=5");
+    expect(app.sp.listCreditGrants).toHaveBeenCalledWith("admin-token", { email: "eval-service@test", limit: 5 });
   });
 
   it("proxies Agent Configs with the service session and relays SP validation text", async () => {

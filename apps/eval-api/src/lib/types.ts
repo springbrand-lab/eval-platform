@@ -40,7 +40,9 @@ export interface ApiRuntime {
   readonly webOrigin: string;
   readonly sp: EvalSpClient;
   /** The fixed Eval SP account and its long-lived session, verified once at startup. */
-  readonly serviceAccount: { readonly user: EvalSpUser; readonly sessionToken: string };
+  readonly serviceAccount: { readonly user: EvalSpUser; readonly email: string; readonly sessionToken: string };
+  /** The Eval SP RESOURCE_ADMIN_TOKEN; only credit grants to the service account use it. */
+  readonly spAdminToken: string;
   readonly ownerServices: (user: EvalSpUser, sessionToken: string) => OwnerServicesLease;
 }
 

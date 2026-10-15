@@ -16,6 +16,8 @@ const apiEnvSchema = databaseEnvSchema.extend({
   EVAL_SP_SERVICE_USER_ID: z.uuid().transform((value) => value.toLowerCase()),
   /** Long-lived session of that account, issued by SP's eval:bootstrap-service-account. */
   EVAL_SP_SERVICE_SESSION_TOKEN: requiredStringSchema,
+  /** The Eval SP deployment's own RESOURCE_ADMIN_TOKEN, used only to grant the service account credits. */
+  EVAL_SP_ADMIN_TOKEN: requiredStringSchema,
   /** Eval Web: the only CORS origin and the trusted Origin of SP write requests. */
   EVAL_WEB_ORIGIN: httpOriginSchema,
   EVAL_SP_SOURCE_BRANCH: requiredStringSchema,

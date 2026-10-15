@@ -19,13 +19,14 @@ const pool = new Pool({ connectionString: config.DATABASE_URL });
 const runQueue = await startRunQueue(config.DATABASE_URL, logger);
 const sp = createEvalSpClient({ origin: config.EVAL_SP_API_ORIGIN, writeOrigin: config.EVAL_WEB_ORIGIN });
 const serviceUser = await sp.verifySession(config.EVAL_SP_SERVICE_SESSION_TOKEN);
-if (serviceUser?.id !== config.EVAL_SP_SERVICE_USER_ID) {
+if (serviceUser?.id !== config.EVAL_SP_SERVICE_USER_ID || !serviceUser.email) {
   throw new Error("EVAL_SP_SERVICE_SESSION_TOKEN does not belong to EVAL_SP_SERVICE_USER_ID");
 }
 const runtime: ApiRuntime = {
   webOrigin: config.EVAL_WEB_ORIGIN,
   sp,
-  serviceAccount: { user: serviceUser, sessionToken: config.EVAL_SP_SERVICE_SESSION_TOKEN },
+  serviceAccount: { user: serviceUser, email: serviceUser.email, sessionToken: config.EVAL_SP_SERVICE_SESSION_TOKEN },
+  spAdminToken: config.EVAL_SP_ADMIN_TOKEN,
   ownerServices: createOwnerServices({ db: createEvalDb(pool), sp, bundles, release: config.release, runQueue }),
 };
 const app = createRoutes(logger);

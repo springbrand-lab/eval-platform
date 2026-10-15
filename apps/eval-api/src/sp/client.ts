@@ -6,6 +6,40 @@ import { createSpHttpClient, type Fetch } from "./http.js";
 export interface EvalSpUser {
   readonly id: string;
   readonly role: "user" | "admin" | "super_admin";
+  /** Present when read from Eval SP; credit grants address the account by email. */
+  readonly email?: string | undefined;
+}
+
+/** The credit balance of one Eval SP account. */
+export interface EvalSpCreditBalance {
+  readonly availableUnits: number;
+  readonly topupRemainingUnits: number;
+  readonly otherRemainingUnits: number;
+}
+
+export interface EvalSpCreditGrantInput {
+  readonly email: string;
+  readonly units: number;
+  readonly adjustmentId: string;
+  readonly note?: string;
+}
+
+export interface EvalSpCreditGrant {
+  readonly userId: string;
+  readonly email: string;
+  readonly adjustmentId: string;
+  readonly units: number;
+  readonly replayed: boolean;
+}
+
+export interface EvalSpCreditGrantRecord {
+  readonly id: string;
+  readonly userId: string;
+  readonly email: string;
+  readonly adjustmentId: string;
+  readonly units: number;
+  readonly note: string | null;
+  readonly createdAt: string;
 }
 
 export interface EvalSpAgentConfig {
@@ -42,10 +76,26 @@ export interface EvalSpClient {
   createAgentConfig(token: string, input: unknown): Promise<EvalSpAgentConfig>;
   updateAgentConfig(token: string, id: string, input: unknown): Promise<EvalSpAgentConfig>;
   deleteAgentConfig(token: string, id: string): Promise<unknown>;
+  getCreditBalance(token: string): Promise<EvalSpCreditBalance>;
+  /** `adminToken` is the Eval SP RESOURCE_ADMIN_TOKEN. */
+  grantCredits(adminToken: string, input: EvalSpCreditGrantInput): Promise<EvalSpCreditGrant>;
+  listCreditGrants(adminToken: string, query: { readonly email: string; readonly limit: number }):
+    Promise<readonly EvalSpCreditGrantRecord[]>;
 }
 
 const sessionSchema = z.object({
-  user: z.object({ id: z.string().min(1), role: z.enum(["user", "admin", "super_admin"]) }),
+  user: z.object({ id: z.string().min(1), role: z.enum(["user", "admin", "super_admin"]), email: z.string().optional() }),
+});
+const units = z.number().int().nonnegative();
+const creditBalanceSchema = z.object({
+  creditAccount: z.object({ availableUnits: z.number().int(), topupRemainingUnits: units, otherRemainingUnits: units }),
+});
+const creditGrantSchema = z.object({
+  userId: z.string(), email: z.string(), adjustmentId: z.string(), units: z.number().int().positive(), replayed: z.boolean(),
+});
+const creditGrantRecordSchema = z.object({
+  id: z.string(), userId: z.string(), email: z.string(), adjustmentId: z.string(),
+  units: z.number().int(), note: z.string().nullable(), createdAt: z.string(),
 });
 const agentConfigSchema = z.looseObject({ id: z.string().min(1), user_id: z.string().min(1), name: z.string() });
 
@@ -113,6 +163,19 @@ export function createEvalSpClient(input: {
     },
     deleteAgentConfig(token, id) {
       return request(token, configPath(id), "DELETE");
+    },
+    async getCreditBalance(token) {
+      const { availableUnits, topupRemainingUnits, otherRemainingUnits } =
+        read(creditBalanceSchema, await request(token, "/api/account/snapshot")).creditAccount;
+      return { availableUnits, topupRemainingUnits, otherRemainingUnits };
+    },
+    async grantCredits(adminToken, input) {
+      return read(creditGrantSchema, await request(adminToken, "/api/admin/credits/grants", "POST", input));
+    },
+    async listCreditGrants(adminToken, { email, limit }) {
+      const query = new URLSearchParams({ email, limit: String(limit) });
+      return read(z.object({ grants: z.array(creditGrantRecordSchema) }),
+        await request(adminToken, `/api/admin/credits/grants?${query}`)).grants;
     },
   };
 }
