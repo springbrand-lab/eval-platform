@@ -81,6 +81,8 @@ ProjectSample 是 Project 自己的固定输入：来源 Data 的完整副本、
 
 Project 只保留当前结果集合，它不等于最近 Run 的成员；全 Project 重跑就是选中全部目标。准入失败时旧结果不变；新 Run 停止后不恢复已完成的替换。Run 保存 operation、phases、selector、targets、`samplingIds`、`evaluationIds`、`planDigests`、Project 内递增的序号、source commit、请求身份和停止标记，不保存配置正文；Run 行从不删除，作为来源记录保留，其被后续 Run 替换的 Sampling/EvaluationRecord 从关联中移除；Run 状态从子记录推导，没有第二份可变状态。同一 Project 同时最多一个未结束 Run：任一 Sampling 或 EvaluationRecord 处于 `queued`、`starting`、`running` 或 `retrying`，或停止尚未收尾。Web 可以禁用启动按钮作反馈，但并发边界是 Store。HTTP 契约见 [Eval HTTP 控制面](eval-http-api.md)。
 
+**有意保留的语义**：每个 Sampling 只有一条当前 EvaluationRecord，重跑评估即替换，不保留多份评估或评估历史；评估计划在首个 pipeline/evaluation Run 锁定后不再变更，也不做版本化。调整评估标准或输出 Schema 需要新建 Project 并重新执行；评估者一致性、人工校准等评估可信度分析通过多个 Project 的对比在 Project 之外完成，不改变上述模型。
+
 ## Run 调度与停止
 
 **决策：Run Worker 使用 pg-boss 队列调度。** SP 的 `apps/api` 已用 pg-boss 处理后台任务，Eval 使用同一库与版本（`apps/eval-api/src/run-worker-queue.ts`），不手写调度协议。
