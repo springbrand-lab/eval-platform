@@ -3,7 +3,7 @@ import { inspectStrictZip, StrictZipError, type StrictZipEntry, type StrictZipEn
 import { lookup } from "mime-types";
 import { isCatalogLabel } from "../db/catalog-metadata.js";
 import {
-  MATERIAL_FILE_BYTES, ZIP_ARCHIVE_BYTES, ZIP_ENTRIES, ZIP_ERRORS, ZIP_EXPANDED_BYTES, ZIP_PATH_CHARS, ZIP_RESOURCES,
+  MATERIAL_FILE_BYTES, ZIP_ARCHIVE_BYTES, ZIP_ENTRIES, BUNDLE_ERROR_DETAILS, ZIP_EXPANDED_BYTES, ZIP_PATH_CHARS, ZIP_RESOURCES,
 } from "../limits.js";
 import { BundleFileError, type BundleFileErrorDetail } from "../sp/bundle-errors.js";
 import { validateMaterialFiles, validateSessionContent, type MaterialFile, type SessionContent } from "../sp/bundle-content.js";
@@ -17,13 +17,13 @@ const tooLargeCodes: ReadonlySet<StrictZipErrorCode> = new Set(["too-many-entrie
 const sessionFormats: Readonly<Record<string, SessionContent["format"]>> = { ".json": "json", ".jsonl": "jsonl" };
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 
-/** Collects entry errors and rejects the whole archive once ZIP_ERRORS are known. */
+/** Collects entry errors and rejects the whole archive once BUNDLE_ERROR_DETAILS are known. */
 class ZipErrors {
   private readonly details: BundleFileErrorDetail[] = [];
 
   add(path: string, errMsg: string): void {
     this.details.push({ path, errMsg });
-    if (this.details.length >= ZIP_ERRORS) this.throwIfAny();
+    if (this.details.length >= BUNDLE_ERROR_DETAILS) this.throwIfAny();
   }
 
   /** Record an invalid-content error of one resource; every other failure, including limits, ends the import. */
@@ -35,7 +35,7 @@ class ZipErrors {
 
   throwIfAny(): void {
     if (this.details.length > 0) {
-      throw zipError("invalid", this.details.slice(0, ZIP_ERRORS));
+      throw zipError("invalid", this.details.slice(0, BUNDLE_ERROR_DETAILS));
     }
   }
 }
@@ -73,7 +73,13 @@ export async function readMaterialZip(bytes: Uint8Array): Promise<readonly Mater
     maxBytes: MATERIAL_FILE_BYTES,
     message: `A material file may contain at most ${MATERIAL_FILE_BYTES} bytes`,
   }));
-  requireResourceCount(new Set(entries.map(({ path }) => path.split("/", 1)[0])).size);
+  const topLevel = (path: string) => path.split("/", 1)[0]!;
+  const sources = new Set(entries.map(({ path }) => topLevel(path)));
+  requireResourceCount(sources.size);
+  const fileSources = new Set(entries.flatMap(({ path, directory }) => directory ? [] : [topLevel(path)]));
+  for (const source of sources) {
+    if (!fileSources.has(source)) errors.add(source, "A Material directory must contain at least one file");
+  }
   const directories = new Set(entries.flatMap(({ path, directory }) => {
     const segments = path.split("/");
     return segments.slice(0, directory ? undefined : -1).map((_, index) => segments.slice(0, index + 1).join("/"));

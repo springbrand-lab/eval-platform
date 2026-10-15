@@ -77,7 +77,7 @@ Authorization: Bearer <Eval SP session token>
 
 创建 Bundle 用 `multipart/form-data`：字段 `name`、`description` 必填，文件字段 `zip` 可选。带 `zip` 时 Bundle 与其中的资源在一次原子操作中创建；不带时得到空 Bundle。导入已有 Bundle 时只提交 `zip` 字段。两者都返回 `201 {bundle, imported:[{source, material}]}`（上下文 Bundle 为 `{source, session}`），`source` 是 ZIP 中对应的顶层条目名，Web 可据此展示导入结果。ZIP 的目录结构、命名、格式与上限只以 [ZIP 导入规则](eval-dataset-upload.md#zip-import)为准；要点是：上下文 ZIP 只能在根目录放 `.json`/`.jsonl` 文件（扩展名前须有文件名，名为 `.json` 的文件会被拒绝），每个文件成为一个 Session；素材 ZIP 的每个顶层目录成为一个 Material，每个根目录文件成为一个单文件 Material。导入的资源名为顶层条目名（去空白后不能为空），描述沿用 Bundle 描述，之后都可修改。
 
-ZIP 任一条目不合格时整个请求失败，不会创建 Bundle 或任何资源，Web 不需要做部分回滚。失败响应为 `400 BUNDLE_FILE_INVALID` 或 `413 BUNDLE_FILE_TOO_LARGE`，`errors[]` 的 `path` 是 ZIP 内的条目名（JSONL 某行出错时附 `:<行号>`；整个 Material 不合格时，如文件数或总大小超限，则是该 Material 的顶层名），`errMsg` 是原因；Web 应逐条列出这些错误，让用户修正后重新上传整个 ZIP。导入没有幂等键：响应丢失后重试可能产生第二个 Bundle 或重复资源，应先刷新列表确认，再由用户删除多余项。
+ZIP 任一条目不合格时整个请求失败，不会创建 Bundle 或任何资源，Web 不需要做部分回滚。失败响应为 `400 BUNDLE_FILE_INVALID` 或 `413 BUNDLE_FILE_TOO_LARGE`，`errors[]` 的 `path` 是 ZIP 内的条目名（JSONL 某行出错时附 `:<行号>`；整个 Material 不合格时，如文件数或总大小超限，则是该 Material 的顶层名），`errMsg` 是原因；遇到第一个超限项时只返回该项（`413`）。素材 ZIP 中没有任何文件的顶层目录会被拒绝。Web 应逐条列出这些错误，让用户修正后重新上传整个 ZIP。导入没有幂等键：响应丢失后重试可能产生第二个 Bundle 或重复资源，应先刷新列表确认，再由用户删除多余项。
 
 逐条上传的 Material 上传体是 `{name,description,files:[{path,mediaType,contentBase64}]}`。单文件也是长度为 1 的 `files`。目录上传时，Web 把选中的文件展开成数组，保留目录内相对路径；例如 `/brief.txt`、`/assets/logo.png`。`path` 必须以 `/` 开头，不接受空路径段、`.`、`..`、`.git` 或重复路径；空目录不能单独表示。`contentBase64` 是纯 Base64 字符串，不能带 `data:` 前缀；`mediaType` 必填。文件数量和大小上限见 [Dataset 上传契约](eval-dataset-upload.md)；超过单文件或总量上限返回 `413`。
 

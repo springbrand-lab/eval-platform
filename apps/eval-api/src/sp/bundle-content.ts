@@ -7,7 +7,7 @@ import {
   readEvalCanonicalContext,
 } from "@springbrand/eval-harness";
 import type { z } from "zod";
-import { MATERIAL_FILE_BYTES, MATERIAL_TOTAL_BYTES, ZIP_ERRORS } from "../limits.js";
+import { MATERIAL_FILE_BYTES, MATERIAL_TOTAL_BYTES, BUNDLE_ERROR_DETAILS } from "../limits.js";
 import { BundleFileError, errorMessage, type BundleFileErrorDetail } from "./bundle-errors.js";
 
 export type MaterialFile = z.output<typeof evalMaterialFileSchema>;
@@ -71,7 +71,7 @@ export function validateSessionContent(value: unknown, label = "content"): Sessi
       parseStrictJson(document);
     } catch (error) {
       details.push({ path: context.format === "json" ? label : `${label}:${index + 1}`, errMsg: errorMessage(error) });
-      if (details.length >= ZIP_ERRORS) break;
+      if (details.length >= BUNDLE_ERROR_DETAILS) break;
     }
   }
   if (details.length > 0) throw invalid(message, details);
@@ -84,7 +84,7 @@ export function validateSessionContent(value: unknown, label = "content"): Sessi
 }
 
 function invalid(message: string, details: readonly BundleFileErrorDetail[]): BundleFileError {
-  return new BundleFileError("invalid", message, { details: details.slice(0, ZIP_ERRORS) });
+  return new BundleFileError("invalid", message, { details: details.slice(0, BUNDLE_ERROR_DETAILS) });
 }
 
 function tooLarge(path: string, errMsg: string): BundleFileError {

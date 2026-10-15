@@ -1,6 +1,6 @@
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter, type ZipWriterAddDataOptions } from "@zip.js/zip.js";
 import { describe, expect, it } from "vitest";
-import { MATERIAL_FILE_BYTES, ZIP_ARCHIVE_BYTES, ZIP_ENTRIES, ZIP_ERRORS, ZIP_EXPANDED_BYTES, ZIP_RESOURCES } from "../limits.js";
+import { MATERIAL_FILE_BYTES, ZIP_ARCHIVE_BYTES, ZIP_ENTRIES, BUNDLE_ERROR_DETAILS, ZIP_EXPANDED_BYTES, ZIP_RESOURCES } from "../limits.js";
 import { readMaterialZip, readSessionZip } from "./bundle-zip.js";
 
 type ZipEntry = readonly [name: string, content?: string | Uint8Array, options?: ZipWriterAddDataOptions];
@@ -76,10 +76,10 @@ describe("Session ZIP", () => {
   });
 
   it("caps the reported entry errors", async () => {
-    const entries = Array.from({ length: ZIP_ERRORS + 20 }, (_, index): ZipEntry => [`${index}.txt`]);
+    const entries = Array.from({ length: BUNDLE_ERROR_DETAILS + 20 }, (_, index): ZipEntry => [`${index}.txt`]);
     const failure = await readSessionZip(await zip(...entries)).catch((error: unknown) => error);
     expect(failure).toMatchObject({ reason: "invalid" });
-    expect((failure as { details: unknown[] }).details).toHaveLength(ZIP_ERRORS);
+    expect((failure as { details: unknown[] }).details).toHaveLength(BUNDLE_ERROR_DETAILS);
   });
 
   it("counts every file in the archive against the resource limit", async () => {
@@ -133,9 +133,10 @@ describe("Material ZIP", () => {
     await expect(readMaterialZip(Buffer.from("not a zip archive"))).rejects.toMatchObject(invalid({ path: "zip" }));
   });
 
-  it("rejects empty archives", async () => {
+  it("rejects empty archives and top-level directories without files", async () => {
     await expect(readMaterialZip(await zip())).rejects.toMatchObject(invalid({ path: "zip" }));
-    await expect(readMaterialZip(await zip(["d/"]))).rejects.toMatchObject(invalid({ path: "zip" }));
+    await expect(readMaterialZip(await zip(["a.txt", "x"], ["d/"], ["d/e/"])))
+      .rejects.toMatchObject(invalid({ path: "d", errMsg: "A Material directory must contain at least one file" }));
   });
 
   it("rejects archives past their size limits before inflating them", async () => {

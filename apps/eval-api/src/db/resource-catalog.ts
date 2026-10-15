@@ -140,7 +140,7 @@ async function activeDataBinding(
   return bound !== undefined;
 }
 
-function bundleRecord(row: typeof materialBundles.$inferSelect): BundleRecord {
+function bundleRecord(row: BundleRecord): BundleRecord {
   return { bundleId: row.bundleId, name: row.name, description: row.description };
 }
 

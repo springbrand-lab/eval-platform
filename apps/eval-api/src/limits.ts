@@ -10,14 +10,15 @@ export const OUTPUT_SCHEMA_BYTES = 1_000_000;
 /** Eval SP enforces these through `@springbrand/eval-harness`; they only size request bodies here. */
 export const SP_MATERIAL_MAX_FILES = 500;
 export const SP_SESSION_CONTENT_CHARS = 2_000_000;
+/** Most error details one Bundle content validation or ZIP import reports. */
+export const BUNDLE_ERROR_DETAILS = 100;
+/** One Bundle ZIP import. */
 export const ZIP_ARCHIVE_BYTES = 50_000_000;
 /** Declared decompressed bytes of one archive; SP's strict-ZIP inspector verifies each against the inflated size. */
 export const ZIP_EXPANDED_BYTES = 100_000_000;
 export const ZIP_ENTRIES = 5_000;
 export const ZIP_PATH_CHARS = 768;
 export const ZIP_RESOURCES = 500;
-/** Most error details one Bundle content validation or ZIP import reports. */
-export const ZIP_ERRORS = 100;
 /** Name, description, short identifiers and JSON framing around one request's content. */
 export const METADATA_BODY_BYTES = 4_096;
 export const JSON_BODY_BYTES = 1_000_000;

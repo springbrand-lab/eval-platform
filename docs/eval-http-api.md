@@ -43,7 +43,7 @@ Content limits live only in `apps/eval-api/src/limits.ts`; body limits are deriv
 | `ZIP_ARCHIVE_BYTES`, `ZIP_EXPANDED_BYTES` | 50 MB, 100 MB | One ZIP archive, its declared decompressed total |
 | `ZIP_ENTRIES`, `ZIP_RESOURCES` | 5,000, 500 | Entries in one archive; Material top-level entries or Session files in one archive |
 | `ZIP_PATH_CHARS` | 768 | Characters in one ZIP entry path |
-| `ZIP_ERRORS` | 100 | Most `errors` items one Bundle content or ZIP failure reports |
+| `BUNDLE_ERROR_DETAILS` | 100 | Most `errors` items one Bundle content or ZIP failure reports |
 
 | Body limit | Bytes | Routes |
 | --- | --- | --- |
@@ -292,7 +292,7 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `DATASET_IDENTITY_CONFLICT` | 409 | Dataset or Data identity reused with different content |
 | `DATA_NOT_FOUND` | 404 | Unknown or deleted Data |
 | `DATA_IN_USE` | 409 | Data deletion while an active Dataset contains it |
-| `CATALOG_INPUT_INVALID` | 400 | Catalog name, description, reference or Schema content invalid |
+| `CATALOG_INPUT_INVALID` | 400 | Catalog reference or output-format Schema content invalid, or a name or description rejected after request validation |
 | `CATALOG_PAYLOAD_TOO_LARGE` | 413 | Output-format content over its limit |
 | `BUNDLE_RESOURCE_NOT_FOUND` | 404 | Unknown or deleted Material Bundle, Session Bundle, Material or Session, including a reference whose `bundleId` names the other Bundle type |
 | `BUNDLE_RESOURCE_IN_USE` | 409 | Resource or Bundle deletion while active Data reference it or its resources |

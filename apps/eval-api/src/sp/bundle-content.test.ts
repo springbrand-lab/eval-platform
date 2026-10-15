@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ZIP_ERRORS } from "../limits.js";
+import { BUNDLE_ERROR_DETAILS } from "../limits.js";
 import { validateMaterialFiles, validateSessionContent } from "./bundle-content.js";
 
 const userEntry = (id: string) => JSON.stringify({ id, message: { role: "user", content: "Hi" }, createdAt: 1 });
@@ -49,9 +49,9 @@ describe("Session content", () => {
       )));
     expect(() => validateSessionContent({ format: "json", content: `{"entries":[],"entries":[]}` }))
       .toThrow(expect.objectContaining(failure("invalid", { path: "content" })));
-    const lines = Array.from({ length: ZIP_ERRORS + 5 }, () => "x").join("\n");
+    const lines = Array.from({ length: BUNDLE_ERROR_DETAILS + 5 }, () => "x").join("\n");
     expect(() => validateSessionContent({ format: "jsonl", content: lines }))
-      .toThrow(expect.objectContaining({ details: Array.from({ length: ZIP_ERRORS }, () => expect.anything()) }));
+      .toThrow(expect.objectContaining({ details: Array.from({ length: BUNDLE_ERROR_DETAILS }, () => expect.anything()) }));
   });
 
   it("rejects syntactically valid Session content that SP cannot import, with SP's reason", () => {
