@@ -53,7 +53,7 @@ const jsonRecordSchema = jsonValueSchema.pipe(z.custom<Readonly<Record<string, J
 ));
 
 // Match SP packages/http/src/mcp-observation.ts for UUID identities persisted in PostgreSQL.
-const platformIdSchema = z.uuid().transform((value) => value.toLowerCase());
+export const platformIdSchema = z.uuid().transform((value) => value.toLowerCase());
 export const datasetIdSchema = platformIdSchema;
 export const dataIdSchema = platformIdSchema;
 const resourceReferenceIdSchema = z.union([platformIdSchema, identifierSchema]);
