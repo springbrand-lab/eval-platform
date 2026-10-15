@@ -1,10 +1,12 @@
 import type { Server } from "node:http";
 import { Pool } from "pg";
+import pino from "pino";
 import { createEvalDb } from "./db/client.js";
 import { requireEvalSpRelease } from "./db/release.js";
 import { createIndependentEvaluationHttpServer } from "./independent-evaluation-http.js";
 import { createPostgresIndependentEvaluationApi } from "./independent-evaluation-postgres.js";
 import { createEvalSpClient } from "./sp/client.js";
+import { startRunQueue } from "./run-worker-queue.js";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -50,9 +52,11 @@ async function main(): Promise<void> {
   const host = process.env.EVAL_API_HOST ?? "0.0.0.0";
   const port = portEnv();
   const pool = new Pool({ connectionString: databaseUrl });
+  const runQueue = await startRunQueue(databaseUrl, pino({ level: "info", base: null }));
   const api = createPostgresIndependentEvaluationApi({
     db: createEvalDb(pool),
     release,
+    runQueue,
     spClient: createEvalSpClient({ origin: spOrigin, writeOrigin: webOrigin }),
     webOrigin,
   });
@@ -60,6 +64,7 @@ async function main(): Promise<void> {
   try {
     await listen(server, host, port);
   } catch (error) {
+    await runQueue.close();
     await pool.end();
     throw error;
   }
@@ -69,6 +74,7 @@ async function main(): Promise<void> {
   const stop = (): Promise<void> => {
     closing ??= (async () => {
       await close(server);
+      await runQueue.close();
       await pool.end();
     })();
     return closing;

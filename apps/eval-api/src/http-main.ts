@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import pino from "pino";
 import { createDatasetService } from "@eval-platform/eval-dataset";
 import { createMetrics } from "@eval-platform/eval-metrics";
 import { createConfigResolver, createEvalRunAdmission, type AgentOption } from "@eval-platform/eval-runtime";
@@ -18,6 +19,7 @@ import { createActiveOwnerAdmission } from "./active-owner-admission.js";
 import { createInitialResourceHttpHandler } from "./initial-resources.http.js";
 import { openBundleDirectory } from "./sp/bundle-directory.js";
 import { createEvalSpClient } from "./sp/client.js";
+import { startRunQueue } from "./run-worker-queue.js";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -43,6 +45,7 @@ async function main(): Promise<void> {
   });
   const bundles = await openBundleDirectory(requiredEnv("EVAL_BUNDLE_DIR"));
   const pool = new Pool({ connectionString: databaseUrl });
+  const runQueue = await startRunQueue(databaseUrl, pino({ level: "info", base: null }));
   try {
     const db = createEvalDb(pool);
     const sp = createEvalSpClient({ origin: apiOrigin, writeOrigin });
@@ -50,13 +53,13 @@ async function main(): Promise<void> {
       sourceCommit: release.sourceCommit,
       catalog: createPostgresProjectCatalog(db, ownerUserId, release),
       configResolver: createConfigResolver(createPostgresConfigReader(db, ownerUserId)),
-      store: createPostgresRuntimeStore(db, ownerUserId, release),
+      store: createPostgresRuntimeStore(db, ownerUserId, release, runQueue),
     }));
     const handler = createEvalApiHandler({
       sp,
       initialResources: createInitialResourceHttpHandler(db, bundles),
       independentEvaluation: createPostgresIndependentEvaluationApi({
-        db, release, spClient: sp,
+        db, release, runQueue, spClient: sp,
         ...(process.env.EVAL_WEB_ORIGIN ? { webOrigin: process.env.EVAL_WEB_ORIGIN } : {}),
         onError: (error) => console.error(error),
       }),
@@ -75,7 +78,7 @@ async function main(): Promise<void> {
         const catalog = createPostgresCatalog(db, ownerUserId, agents, release);
         const configs = createPostgresConfigStore(db, ownerUserId, sp, sessionToken);
         const datasets = createDatasetService(createPostgresDatasetStore(db, ownerUserId));
-        const queries = createPostgresRuntimeQueries(db, ownerUserId, release);
+        const queries = createPostgresRuntimeQueries(db, ownerUserId, release, runQueue);
         const metrics = createMetrics({ source: createPostgresMetricsSource(db, ownerUserId) });
         const { admission, release: releaseAdmission } = admissions.acquire(ownerUserId);
         const runtime = { ...admission, ...queries };
@@ -91,7 +94,7 @@ async function main(): Promise<void> {
     const stop = (): void => {
       if (stopping) return;
       stopping = true;
-      void server.close().then(() => pool.end()).catch((error) => {
+      void server.close().then(() => runQueue.close()).then(() => pool.end()).catch((error) => {
         console.error(error);
         process.exitCode = 1;
       });
@@ -99,6 +102,7 @@ async function main(): Promise<void> {
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
   } catch (error) {
+    await runQueue.close();
     await pool.end();
     throw error;
   }

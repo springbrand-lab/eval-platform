@@ -2,12 +2,14 @@ import path from "node:path";
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError } from "@eval-platform/eval-dataset";
 import { createMetrics, MetricsQueryError } from "@eval-platform/eval-metrics";
-import { createConfigResolver, createEvalRunResumer, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, RuntimeRunStoppedError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
+import { createConfigResolver, createEvalRunResumer, type EvalRunResumer, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, RuntimeRunStoppedError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { eq, sql } from "drizzle-orm";
 import { Pool } from "pg";
+import { PgBoss, type JobWithMetadata } from "pg-boss";
+import pino from "pino";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresProjectRunControl, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, ProjectRunStopConflictError, startEvalRunWorker } from "../index.js";
+import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, createRunQueue, DatasetInUseError, EvalSpApiError, openRunBoss, ProjectRunStopConflictError, RUN_QUEUE, RUN_QUEUE_OPTIONS, startEvalRunWorker, type RunJob, type RunQueue } from "../index.js";
 import { isForeignKeyFailure } from "./client.js";
 import { createOutputSchemaCatalog } from "./output-schemas.js";
 import { createPostgresProjectRunReader } from "./run-view.js";
@@ -15,6 +17,7 @@ import { readRunRecords } from "./runtime.js";
 import { data as dataTable, datasets as datasetsTable } from "./schema.js";
 
 const connection = process.env.DATABASE_URL;
+const silent = pino({ level: "silent" });
 const subjectAgent = { ownerUserId: "owner", userAgentId: "subject" };
 const evaluator = { ownerUserId: "owner", userAgentId: "evaluator" };
 const release = { sourceBranch: "release-2.0.0", sourceCommit: "a".repeat(40) };
@@ -105,17 +108,23 @@ async function testDatabase(url: string) {
 
 describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
   let database: Awaited<ReturnType<typeof testDatabase>>;
+  let jobs: PgBoss;
+  let runQueue: RunQueue;
 
   beforeAll(async () => {
     database = await testDatabase(connection!);
+    jobs = await openRunBoss(database.connectionString, silent, { supervise: false });
+    runQueue = createRunQueue(jobs);
   }, 30_000);
 
   beforeEach(async () => {
     await database.db.execute(sql`TRUNCATE TABLE eval_projects, eval_evaluation_output_schemas, eval_datasets, eval_data,
       eval_execution_configs, eval_evaluation_configs, eval_pipeline_configs RESTART IDENTITY CASCADE`);
+    await jobs.deleteAllJobs(RUN_QUEUE);
   });
 
   afterAll(async () => {
+    await jobs?.stop();
     if (database) await database.destroy();
   }, 30_000);
 
@@ -124,7 +133,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     return {
       catalog: createPostgresCatalog(db, "user-A", { async listAgents() { return []; } }, release),
       datasetService: createDatasetService(createPostgresDatasetStore(db, "user-A")),
-      runtime: createPostgresWorkerRuntimeStore(db),
+      runtime: createPostgresWorkerRuntimeStore(db, runQueue),
       source: createPostgresMetricsSource(db, "user-A"),
     };
   }
@@ -158,7 +167,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
   it("fixes the first execution choice atomically and keeps later evaluation in the same Project", async () => {
     const { catalog, project, dataset, sample } = await setup();
-    const runtime = createPostgresRuntimeStore(database.db, "user-A", release);
+    const runtime = createPostgresRuntimeStore(database.db, "user-A", release, runQueue);
     expect(await catalog.getProject(project.projectId)).toMatchObject(project);
     const missing = makeSampling(project.projectId, "missing-sample");
     await expect(runtime.createRunWithSamplings(
@@ -239,7 +248,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
         evaluation: evaluationConfig.evaluation,
       },
     });
-    const runtime = createPostgresRuntimeStore(database.db, "user-A", release);
+    const runtime = createPostgresRuntimeStore(database.db, "user-A", release, runQueue);
     await expect(runtime.createRunWithSamplings(pipeline, [sampling], [judge]))
       .rejects.toThrow("Project evaluation output JSON Schema must be bound");
     expect(await catalog.getProject(project.projectId)).toEqual(project);
@@ -260,14 +269,14 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
   it("keeps Project on its source branch while recording each Run's deployed commit", async () => {
     const { catalog, project, dataset, sample } = await setup();
-    const originalStore = createPostgresRuntimeStore(database.db, "user-A", release);
+    const originalStore = createPostgresRuntimeStore(database.db, "user-A", release, runQueue);
     const firstSampling = makeSampling(project.projectId, sample.sampleId);
     const first = makeRun(project.projectId, firstSampling, dataset.datasetId);
     await originalStore.createRunWithSamplings(first, [firstSampling], []);
     await originalStore.updateSampling({ ...firstSampling, execution: { status: "succeeded" } }, firstSampling);
 
     const nextRelease = { ...release, sourceCommit: "b".repeat(40) };
-    const nextStore = createPostgresRuntimeStore(database.db, "user-A", nextRelease);
+    const nextStore = createPostgresRuntimeStore(database.db, "user-A", nextRelease, runQueue);
     const nextSampling = makeSampling(project.projectId, sample.sampleId);
     const next = makeRun(project.projectId, nextSampling, dataset.datasetId, { sourceCommit: nextRelease.sourceCommit });
     await nextStore.createRunWithSamplings(next, [nextSampling], []);
@@ -280,7 +289,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
     const wrongBranch = createPostgresRuntimeStore(database.db, "user-A", {
       ...nextRelease, sourceBranch: "another-release",
-    });
+    }, runQueue);
     await expect(wrongBranch.createRunWithSamplings(first, [firstSampling], []))
       .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
     const rejectedSampling = makeSampling(project.projectId, sample.sampleId);
@@ -297,7 +306,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
   it("allows only one first Project launch selection under concurrent submissions", async () => {
     const { catalog, project, dataset, sample } = await setup();
-    const runtime = createPostgresRuntimeStore(database.db, "user-A", release);
+    const runtime = createPostgresRuntimeStore(database.db, "user-A", release, runQueue);
     const firstSampling = makeSampling(project.projectId, sample.sampleId);
     const secondSampling = makeSampling(project.projectId, sample.sampleId);
     const first = makeRun(project.projectId, firstSampling, dataset.datasetId);
@@ -598,7 +607,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const competing = makeRun(project.projectId, second, dataset.datasetId, { requestIdentity: run.requestIdentity });
     const admissions = await Promise.all([
       runtime.createRunWithSamplings(run, [first], []),
-      createPostgresWorkerRuntimeStore(database.db).createRunWithSamplings(competing, [second], []),
+      createPostgresWorkerRuntimeStore(database.db, runQueue).createRunWithSamplings(competing, [second], []),
     ]);
     expect(admissions.filter((result) => result.created)).toHaveLength(1);
     expect(admissions[0]!.run).toEqual(admissions[1]!.run);
@@ -687,8 +696,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
 
   it("persists an idempotent Project stop under the admission lock", async () => {
     const { runtime, project, dataset, sample } = await setup();
-    const control = createPostgresProjectRunControl(database.db, "user-A");
-    const foreign = createPostgresProjectRunControl(database.db, "user-B");
+    const control = createPostgresProjectRunControl(database.db, "user-A", runQueue);
+    const foreign = createPostgresProjectRunControl(database.db, "user-B", runQueue);
     expect(await control.getCurrentRun(project.projectId)).toBeNull();
     expect(await control.stopRun(project.projectId, "missing")).toBeNull();
     const priorSampling = makeSampling(project.projectId, sample.sampleId);
@@ -731,7 +740,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const sampling = makeSampling(project.projectId, sample.sampleId);
     const run = makeRun(project.projectId, sampling, dataset.datasetId);
     await runtime.createRunWithSamplings(run, [sampling], []);
-    const control = createPostgresProjectRunControl(database.db, "user-A");
+    const control = createPostgresProjectRunControl(database.db, "user-A", runQueue);
     await control.stopRun(project.projectId, run.runId);
     const stopAgent = vi.fn(async () => false);
     const resumer = createEvalRunResumer({
@@ -740,13 +749,10 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       getSamples: async (ids) => ids.map(() => null),
       harness: { stopAgent } as unknown as Parameters<typeof createEvalRunResumer>[0]["harness"],
     });
-    const worker = await startEvalRunWorker({
-      runtime: resumer, store: runtime,
-      notifications: createPostgresRunNotifications(database.connectionString),
-      scanIntervalMs: 60_000,
-    });
+    const worker = await startWorker(resumer);
     try {
-      await vi.waitFor(async () => expect((await runtime.getRun(run.runId))?.stopFinalized).toBe(true));
+      await vi.waitFor(async () => expect(await runJobStates(run.runId)).toEqual(["completed"]), { timeout: 10_000 });
+      expect((await runtime.getRun(run.runId))?.stopFinalized).toBe(true);
       expect((await runtime.getSampling(sampling.samplingId))?.execution.status).toBe("cancelled");
       expect(stopAgent).not.toHaveBeenCalled();
     } finally {
@@ -756,14 +762,14 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const nextRun = makeRun(project.projectId, nextSampling, dataset.datasetId);
     await runtime.createRunWithSamplings(nextRun, [nextSampling], []);
     expect(await runtime.getRun(nextRun.runId)).toEqual(nextRun);
-  });
+  }, 20_000);
 
   it("commits a stop without waiting for SP and blocks later stage dispatch", async () => {
     const { runtime, project, dataset, sample } = await setup();
     const sampling = makeSampling(project.projectId, sample.sampleId);
     const run = makeRun(project.projectId, sampling, dataset.datasetId);
     await runtime.createRunWithSamplings(run, [sampling], []);
-    const control = createPostgresProjectRunControl(database.db, "user-A");
+    const control = createPostgresProjectRunControl(database.db, "user-A", runQueue);
     let entered!: () => void;
     let release!: () => void;
     const dispatchEntered = new Promise<void>((resolve) => { entered = resolve; });
@@ -868,6 +874,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const api = createPostgresIndependentEvaluationApi({
       db: database.db,
       release,
+      runQueue,
       spClient: {
         async verifySession(token) {
           if (token === "alice-token") return { id: "user-A", role: "user" };
@@ -997,7 +1004,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       evaluationConcurrency: 1,
     });
     const api = createPostgresIndependentEvaluationApi({
-      db: database.db, release,
+      db: database.db, release, runQueue,
       spClient: { async verifySession() { return { id: "user-A", role: "user" }; } },
     });
     const path = `http://eval-api.test/api/projects/${project.projectId}`;
@@ -1032,7 +1039,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
         '{"execution":{"status":"succeeded"},"subjectAgent":{"ownerUserId":"owner","userAgentId":"subject"},"executionAttempts":[]}'::jsonb
       FROM generate_series(1, 10001) AS n`);
     const api = createPostgresIndependentEvaluationApi({
-      db: database.db, release,
+      db: database.db, release, runQueue,
       spClient: { async verifySession() { return { id: "user-A", role: "user" }; } },
     });
     const response = await api.handle(new Request(
@@ -1091,134 +1098,272 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await runtime.getEvaluation(createdJudge.evaluationId)).toBeNull();
   });
 
-  it("notifies committed Runs and finds unfinished execution and evaluation without a Run status column", async () => {
-    const { catalog, runtime, project, dataset, sample } = await setup();
-    const listener = await database.db.$client.connect();
-    const observed: string[] = [];
-    const onNotification = (message: { channel: string; payload?: string | undefined }) => {
-      if (message.channel === "eval_run_created" && message.payload) observed.push(message.payload);
+  async function startWorker(runtime: EvalRunResumer, concurrency = 2) {
+    const boss = await openRunBoss(database.connectionString, silent, { useListenNotify: true });
+    const store = createPostgresWorkerRuntimeStore(database.db, createRunQueue(boss));
+    const worker = await startEvalRunWorker({ boss, runtime, store, logger: silent, concurrency });
+    return {
+      async close() {
+        await worker.close();
+        await boss.stop();
+      },
     };
-    listener.on("notification", onNotification);
-    try {
-      await listener.query("LISTEN eval_run_created");
-      const first = makeSampling(project.projectId, sample.sampleId);
-      const secondProject = await catalog.createProject({ name: "concurrent project" });
-      const second = makeSampling(secondProject.projectId, sample.sampleId);
-      const firstRun = makeRun(project.projectId, first, dataset.datasetId);
-      const secondRun = makeRun(secondProject.projectId, second, dataset.datasetId);
-      await runtime.createRunWithSamplings(firstRun, [first], []);
-      await runtime.createRunWithSamplings(secondRun, [second], []);
-      await vi.waitFor(() => expect(observed).toEqual(expect.arrayContaining([firstRun.runId, secondRun.runId])));
+  }
 
-      const ids = [firstRun.runId, secondRun.runId].sort();
-      expect(await runtime.listRecoverableRunIds()).toEqual(ids);
-      expect(await runtime.listRecoverableRunIds(undefined, 1)).toEqual(ids.slice(0, 1));
-      expect(await runtime.listRecoverableRunIds(ids[0], 1)).toEqual(ids.slice(1));
+  async function runJobs(runId: string): Promise<JobWithMetadata<RunJob>[]> {
+    return jobs.findJobs<RunJob>(RUN_QUEUE, { key: runId });
+  }
 
-      const succeeded = { ...first, execution: { status: "succeeded" as const } };
-      await runtime.updateSampling(succeeded, first);
-      const judge = makeEvaluation(first.samplingId);
-      const evaluationRun: RuntimeRunRecord = {
-        runId: crypto.randomUUID(), projectId: project.projectId,
-        sourceCommit: release.sourceCommit,
-        samplingIds: [first.samplingId], evaluationIds: [judge.evaluationId],
-        phases: ["evaluation"], config: evaluationConfig,
-        requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "evaluation facts" },
-      };
-      await runtime.createRunWithSamplings(evaluationRun, [succeeded], [judge]);
-      expect(await runtime.listRecoverableRunIds()).toEqual([secondRun.runId, evaluationRun.runId].sort());
+  async function runJobStates(runId: string): Promise<string[]> {
+    return (await runJobs(runId)).map((job) => job.state);
+  }
 
-      await runtime.updateSampling({ ...second, execution: { status: "failed" } }, second);
-      await runtime.updateEvaluation({ ...judge, status: { status: "succeeded" } }, judge);
-      expect(await runtime.listRecoverableRunIds()).toEqual([]);
-    } finally {
-      listener.removeListener("notification", onNotification);
-      await listener.query("UNLISTEN eval_run_created");
-      listener.release();
+  async function settleSamplings(
+    store: ReturnType<typeof createPostgresWorkerRuntimeStore>,
+    runId: string,
+    status: "succeeded" | "cancelled",
+  ): Promise<void> {
+    const run = await store.getRun(runId);
+    if (!run) throw new Error(`Unknown Run ${runId}`);
+    for (const samplingId of run.samplingIds) {
+      const sampling = await store.getSampling(samplingId);
+      if (!sampling) throw new Error(`Unknown Sampling ${samplingId}`);
+      await store.updateSampling({ ...sampling, execution: { status } }, sampling);
     }
-  });
+  }
 
-  it("delivers Run notifications to the application worker subscription", async () => {
-    const { project, dataset, sample, runtime } = await setup();
-    const received: string[] = [];
-    const onError = vi.fn();
-    const onConnected = vi.fn();
-    const subscription = await createPostgresRunNotifications(database.connectionString).subscribe({
-      onRunId: (runId) => received.push(runId), onConnected, onError,
+  function heldRuntime(store: ReturnType<typeof createPostgresWorkerRuntimeStore>, heldRunId?: string) {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const runtime = {
+      resume: vi.fn(async (runId: string, _signal?: AbortSignal) => {
+        if (runId === heldRunId) await held;
+        await settleSamplings(store, runId, "succeeded");
+      }),
+      interrupt: vi.fn(async (_runId: string) => undefined),
+      stop: vi.fn(async (_runId: string) => undefined),
+    };
+    return { runtime, release };
+  }
+
+  it("enqueues one Run job inside admission and stop transactions, never for a rolled-back write", async () => {
+    const { runtime, project, dataset, sample } = await setup();
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    const run = makeRun(project.projectId, sampling, dataset.datasetId);
+    const rollback: RunQueue = {
+      async enqueue(transaction, runId) {
+        await runQueue.enqueue(transaction, runId);
+        throw new Error("commit aborted");
+      },
+    };
+    await expect(createPostgresWorkerRuntimeStore(database.db, rollback).createRunWithSamplings(run, [sampling], []))
+      .rejects.toThrow("commit aborted");
+    expect(await runtime.getRun(run.runId)).toBeNull();
+    expect(await runJobs(run.runId)).toEqual([]);
+
+    expect(await runtime.createRunWithSamplings(run, [sampling], [])).toEqual({ run, created: true });
+    expect(await runtime.createRunWithSamplings(run, [sampling], [])).toEqual({ run, created: false });
+    const [job, ...duplicates] = await runJobs(run.runId);
+    expect(duplicates).toEqual([]);
+    expect(job).toMatchObject({
+      state: "created", data: { runId: run.runId }, singletonKey: run.runId, policy: RUN_QUEUE_OPTIONS.policy,
+      heartbeatSeconds: RUN_QUEUE_OPTIONS.heartbeatSeconds, expireInSeconds: RUN_QUEUE_OPTIONS.expireInSeconds,
+      retryLimit: RUN_QUEUE_OPTIONS.retryLimit, retryBackoff: true,
     });
-    try {
-      const sampling = makeSampling(project.projectId, sample.sampleId);
-      const run = makeRun(project.projectId, sampling, dataset.datasetId);
-      await runtime.createRunWithSamplings(run, [sampling], []);
-      await vi.waitFor(() => expect(received).toEqual([run.runId]));
-      expect(onConnected).toHaveBeenCalledOnce();
-      expect(onError).not.toHaveBeenCalled();
-    } finally {
-      await subscription.close();
-    }
+
+    // A Run whose job is gone (for example, retries exhausted) gets a new job from its stop request.
+    await jobs.deleteJob(RUN_QUEUE, job!.id);
+    await expect(createPostgresProjectRunControl(database.db, "user-A", rollback).stopRun(project.projectId, run.runId))
+      .rejects.toThrow("commit aborted");
+    expect((await runtime.getRun(run.runId))?.stopRequested).toBeUndefined();
+    expect(await runJobs(run.runId)).toEqual([]);
+    const control = createPostgresProjectRunControl(database.db, "user-A", runQueue);
+    expect(await control.stopRun(project.projectId, run.runId)).toEqual({ runId: run.runId, stopRequested: true });
+    expect(await runJobStates(run.runId)).toEqual(["created"]);
+    await database.db.transaction((transaction) => runQueue.enqueue(transaction, run.runId));
+    expect(await runJobStates(run.runId)).toEqual(["created"]);
   });
 
-  it("reconnects the Run listener after its PostgreSQL session is terminated", async () => {
-    const { project, dataset, sample, runtime } = await setup();
-    const received: string[] = [];
-    const onConnected = vi.fn();
-    const onError = vi.fn();
-    const listenerName = `eval_run_listener_${crypto.randomUUID()}`;
-    const listenerUrl = new URL(database.connectionString);
-    listenerUrl.searchParams.set("application_name", listenerName);
-    const subscription = await createPostgresRunNotifications(listenerUrl.toString()).subscribe({
-      onRunId: (runId) => received.push(runId), onConnected, onError,
-    });
-    try {
-      const result = await database.db.$client.query<{ stopped: boolean }>(
-        "SELECT pg_terminate_backend(pid) AS stopped FROM pg_stat_activity WHERE application_name = $1",
-        [listenerName],
-      );
-      expect(result.rows).toEqual([{ stopped: true }]);
-      await vi.waitFor(() => expect(onConnected).toHaveBeenCalledTimes(2), { timeout: 5_000 });
+  it("derives whether a Run is active from unfinished stages and pending stop cleanup", async () => {
+    const { catalog, runtime, project, dataset, sample } = await setup();
+    const first = makeSampling(project.projectId, sample.sampleId);
+    const secondProject = await catalog.createProject({ name: "concurrent project" });
+    const second = makeSampling(secondProject.projectId, sample.sampleId);
+    const firstRun = makeRun(project.projectId, first, dataset.datasetId);
+    const secondRun = makeRun(secondProject.projectId, second, dataset.datasetId);
+    await runtime.createRunWithSamplings(firstRun, [first], []);
+    await runtime.createRunWithSamplings(secondRun, [second], []);
+    expect(await runtime.isRunActive(firstRun.runId)).toBe(true);
+    expect(await runtime.isRunActive(secondRun.runId)).toBe(true);
+    expect(await runtime.isRunActive(crypto.randomUUID())).toBe(false);
 
-      const sampling = makeSampling(project.projectId, sample.sampleId);
-      const run = makeRun(project.projectId, sampling, dataset.datasetId);
-      await runtime.createRunWithSamplings(run, [sampling], []);
-      await vi.waitFor(() => expect(received).toEqual([run.runId]));
-    } finally {
-      await subscription.close();
-    }
+    const succeeded = { ...first, execution: { status: "succeeded" as const } };
+    await runtime.updateSampling(succeeded, first);
+    expect(await runtime.isRunActive(firstRun.runId)).toBe(false);
+    const judge = makeEvaluation(first.samplingId);
+    const evaluationRun: RuntimeRunRecord = {
+      runId: crypto.randomUUID(), projectId: project.projectId,
+      sourceCommit: release.sourceCommit,
+      samplingIds: [first.samplingId], evaluationIds: [judge.evaluationId],
+      phases: ["evaluation"], config: evaluationConfig,
+      requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "evaluation facts" },
+    };
+    await runtime.createRunWithSamplings(evaluationRun, [succeeded], [judge]);
+    expect(await runtime.isRunActive(evaluationRun.runId)).toBe(true);
+    await runtime.updateEvaluation({ ...judge, status: { status: "succeeded" } }, judge);
+    expect(await runtime.isRunActive(evaluationRun.runId)).toBe(false);
+
+    await createPostgresProjectRunControl(database.db, "user-A", runQueue).stopRun(secondProject.projectId, secondRun.runId);
+    await runtime.updateSampling({ ...second, execution: { status: "cancelled" } }, second);
+    expect(await runtime.isRunActive(secondRun.runId)).toBe(true);
+    expect(await runtime.markRunStopFinalized(secondRun.runId)).toBe(true);
+    expect(await runtime.isRunActive(secondRun.runId)).toBe(false);
   });
 
-  it("recovers an admitted Run on startup and executes the next Run from its notification", async () => {
-    const { project, dataset, sample, runtime } = await setup();
+  it("executes admitted Runs from durable jobs, holding each Run on one worker at a time", async () => {
+    const { catalog, project, dataset, sample, runtime } = await setup();
     const first = makeSampling(project.projectId, sample.sampleId);
     const firstRun = makeRun(project.projectId, first, dataset.datasetId);
     await runtime.createRunWithSamplings(firstRun, [first], []);
-
-    const resume = vi.fn(async (runId: string) => {
-      const run = await runtime.getRun(runId);
-      if (!run) throw new Error(`Unknown Run ${runId}`);
-      for (const samplingId of run.samplingIds) {
-        const sampling = await runtime.getSampling(samplingId);
-        if (!sampling) throw new Error(`Unknown Sampling ${samplingId}`);
-        await runtime.updateSampling({ ...sampling, execution: { status: "succeeded" } }, sampling);
-      }
-    });
-    const worker = await startEvalRunWorker({
-      runtime: { resume, interrupt: async () => undefined, stop: async () => undefined }, store: runtime,
-      notifications: createPostgresRunNotifications(database.connectionString),
-      scanIntervalMs: 60_000,
-    });
+    const { runtime: resumer, release } = heldRuntime(runtime, firstRun.runId);
+    const workers = [await startWorker(resumer), await startWorker(resumer)];
     try {
-      await vi.waitFor(() => expect(resume).toHaveBeenCalledWith(firstRun.runId, expect.any(AbortSignal)));
-      await vi.waitFor(async () => expect((await runtime.getSampling(first.samplingId))?.execution.status).toBe("succeeded"));
-      const second = makeSampling(project.projectId, sample.sampleId);
-      const secondRun = makeRun(project.projectId, second, dataset.datasetId);
+      await vi.waitFor(() => expect(resumer.resume).toHaveBeenCalledWith(firstRun.runId, expect.any(AbortSignal)));
+      await database.db.transaction((transaction) => runQueue.enqueue(transaction, firstRun.runId));
+      expect(await runJobStates(firstRun.runId)).toEqual(["active"]);
+
+      const secondProject = await catalog.createProject({ name: "next project" });
+      const second = makeSampling(secondProject.projectId, sample.sampleId);
+      const secondRun = makeRun(secondProject.projectId, second, dataset.datasetId);
       await runtime.createRunWithSamplings(secondRun, [second], []);
-      await vi.waitFor(() => expect(resume).toHaveBeenCalledWith(secondRun.runId, expect.any(AbortSignal)));
-      await vi.waitFor(async () => expect(await runtime.listRecoverableRunIds()).toEqual([]));
-      expect(resume).toHaveBeenCalledTimes(2);
+      await vi.waitFor(async () => expect(await runJobStates(secondRun.runId)).toEqual(["completed"]), { timeout: 10_000 });
+      expect(await runJobStates(firstRun.runId)).toEqual(["active"]);
+
+      release();
+      await vi.waitFor(async () => expect(await runJobStates(firstRun.runId)).toEqual(["completed"]), { timeout: 10_000 });
+      expect(resumer.resume.mock.calls.map(([runId]) => runId).sort()).toEqual([firstRun.runId, secondRun.runId].sort());
+    } finally {
+      release();
+      await Promise.all(workers.map((worker) => worker.close()));
+    }
+  }, 20_000);
+
+  it("retries a Run that is still active after a pass", async () => {
+    const { project, dataset, sample, runtime } = await setup();
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    const run = makeRun(project.projectId, sampling, dataset.datasetId);
+    await runtime.createRunWithSamplings(run, [sampling], []);
+    const { runtime: resumer } = heldRuntime(runtime);
+    resumer.resume.mockImplementationOnce(async () => undefined);
+    const worker = await startWorker(resumer);
+    try {
+      await vi.waitFor(async () => expect(await runJobStates(run.runId)).toEqual(["retry"]), { timeout: 10_000 });
+      const [job] = await runJobs(run.runId);
+      expect(job?.output).toMatchObject({ name: "RunStillActiveError" });
+      await jobs.update(RUN_QUEUE, undefined, { id: job!.id, startAfter: new Date() });
+      await vi.waitFor(async () => expect(await runJobStates(run.runId)).toEqual(["completed"]), { timeout: 10_000 });
+      expect(resumer.resume).toHaveBeenCalledTimes(2);
     } finally {
       await worker.close();
     }
-  });
+  }, 20_000);
+
+  it("redelivers a Run whose worker stopped heartbeating", async () => {
+    const { project, dataset, sample, runtime } = await setup();
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    const run = makeRun(project.projectId, sampling, dataset.datasetId);
+    await runtime.createRunWithSamplings(run, [sampling], []);
+    const crashedRuntime = heldRuntime(runtime, run.runId);
+    const crashed = await startWorker(crashedRuntime.runtime, 1);
+    const monitor = new PgBoss({
+      connectionString: database.connectionString, supervise: false, schedule: false, monitorIntervalSeconds: 1,
+    });
+    const monitorErrors = vi.fn();
+    monitor.on("error", monitorErrors);
+    await monitor.start();
+    try {
+      await vi.waitFor(() => expect(crashedRuntime.runtime.resume).toHaveBeenCalledOnce());
+      const [job] = await runJobs(run.runId);
+      expect(job?.state).toBe("active");
+      // Stands in for a crashed process whose heartbeat stopped longer than the queue allows.
+      await database.db.execute(sql`UPDATE pgboss.job SET heartbeat_on = now() - interval '1 hour' WHERE id = ${job!.id}`);
+      await vi.waitFor(async () => {
+        await monitor.supervise(RUN_QUEUE);
+        expect(await runJobStates(run.runId)).toEqual(["retry"]);
+      }, { timeout: 10_000, interval: 250 });
+      await jobs.update(RUN_QUEUE, undefined, { id: job!.id, startAfter: new Date() });
+
+      const { runtime: recoveredRuntime } = heldRuntime(runtime);
+      const recovered = await startWorker(recoveredRuntime);
+      try {
+        await vi.waitFor(async () => expect(await runJobStates(run.runId)).toEqual(["completed"]), { timeout: 10_000 });
+        expect(recoveredRuntime.resume).toHaveBeenCalledExactlyOnceWith(run.runId, expect.any(AbortSignal));
+        expect((await runtime.getSampling(sampling.samplingId))?.execution.status).toBe("succeeded");
+      } finally {
+        await recovered.close();
+      }
+      expect(monitorErrors).not.toHaveBeenCalled();
+    } finally {
+      await monitor.stop();
+      crashedRuntime.release();
+      await crashed.close();
+    }
+  }, 30_000);
+
+  it("wakes the worker holding a Run on a persisted stop and finalizes the stop", async () => {
+    const { project, dataset, sample, runtime } = await setup();
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    const run = makeRun(project.projectId, sampling, dataset.datasetId);
+    await runtime.createRunWithSamplings(run, [sampling], []);
+    const resumer = {
+      resume: vi.fn((_runId: string, signal?: AbortSignal) => new Promise<void>((resolve) => {
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      })),
+      interrupt: vi.fn(async (_runId: string) => undefined),
+      stop: vi.fn((runId: string) => settleSamplings(runtime, runId, "cancelled")),
+    };
+    const worker = await startWorker(resumer);
+    try {
+      await vi.waitFor(() => expect(resumer.resume).toHaveBeenCalledOnce());
+      await createPostgresProjectRunControl(database.db, "user-A", runQueue).stopRun(project.projectId, run.runId);
+      await vi.waitFor(async () => expect(await runJobStates(run.runId)).toEqual(["completed"]), { timeout: 10_000 });
+      expect(resumer.interrupt).toHaveBeenCalledWith(run.runId);
+      expect(resumer.stop).toHaveBeenCalledExactlyOnceWith(run.runId);
+      expect((await runtime.getRun(run.runId))?.stopFinalized).toBe(true);
+      expect(resumer.resume).toHaveBeenCalledOnce();
+    } finally {
+      await worker.close();
+    }
+  }, 20_000);
+
+  it("stops fetching on shutdown and waits for the active Run before closing", async () => {
+    const { catalog, project, dataset, sample, runtime } = await setup();
+    const first = makeSampling(project.projectId, sample.sampleId);
+    const firstRun = makeRun(project.projectId, first, dataset.datasetId);
+    await runtime.createRunWithSamplings(firstRun, [first], []);
+    const { runtime: resumer, release } = heldRuntime(runtime, firstRun.runId);
+    const worker = await startWorker(resumer);
+    try {
+      await vi.waitFor(() => expect(resumer.resume).toHaveBeenCalledOnce());
+      let closed = false;
+      const closing = worker.close().then(() => { closed = true; });
+      const secondProject = await catalog.createProject({ name: "after shutdown" });
+      const second = makeSampling(secondProject.projectId, sample.sampleId);
+      const secondRun = makeRun(secondProject.projectId, second, dataset.datasetId);
+      await runtime.createRunWithSamplings(secondRun, [second], []);
+      expect(await runJobStates(firstRun.runId)).toEqual(["active"]);
+      expect(closed).toBe(false);
+
+      release();
+      await closing;
+      expect(await runJobStates(firstRun.runId)).toEqual(["completed"]);
+      expect(await runJobStates(secondRun.runId)).toEqual(["created"]);
+      expect(resumer.resume).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      await worker.close();
+    }
+  }, 20_000);
 
   it("rejects stale Sampling and Evaluation replacements after newer facts commit", async () => {
     const { runtime, project, dataset, sample } = await setup();
@@ -1311,7 +1456,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       phases: ["evaluation"], evaluationIds: [secondJudge.evaluationId], config: evaluationConfig,
     });
     await runtime.createRunWithSamplings(secondRun, [original], [secondJudge]);
-    const restored = createPostgresWorkerRuntimeStore(database.db);
+    const restored = createPostgresWorkerRuntimeStore(database.db, runQueue);
     expect(await restored.getSampling(original.samplingId)).toEqual(finished);
     expect(await restored.listEvaluations(original.samplingId)).toEqual([secondJudge]);
     expect(await restored.getEvaluation(firstJudge.evaluationId)).toBeNull();
@@ -1395,8 +1540,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       INSERT INTO eval_run_samplings (owner_user_id, run_id, sampling_id, position)
       VALUES (${"user-A"}, ${runA.runId}, ${samplingB.samplingId}, ${1})
     `));
-    const userRuntime = createPostgresRuntimeStore(database.db, "user-A", release);
-    const otherRuntime = createPostgresRuntimeStore(database.db, "user-B", release);
+    const userRuntime = createPostgresRuntimeStore(database.db, "user-A", release, runQueue);
+    const otherRuntime = createPostgresRuntimeStore(database.db, "user-B", release, runQueue);
     expect("listRecoverableRunIds" in userRuntime).toBe(false);
     expect(await userRuntime.getRun(runA.runId)).toEqual(runA);
     expect(await userRuntime.getRun(runB.runId)).toBeNull();
@@ -1461,8 +1606,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       }, execution: executionConfig(dataset.datasetId).execution, evaluation: evaluationConfig.evaluation },
     });
     await runtime.createRunWithSamplings(pipeline, [record], [judge]);
-    const userRuntime = createPostgresRuntimeStore(database.db, "user-A", release);
-    const foreignRuntime = createPostgresRuntimeStore(database.db, "user-B", release);
+    const userRuntime = createPostgresRuntimeStore(database.db, "user-A", release, runQueue);
+    const foreignRuntime = createPostgresRuntimeStore(database.db, "user-B", release, runQueue);
     expect(await userRuntime.getEvaluation(judge.evaluationId)).toEqual(judge);
     expect(await userRuntime.getEvaluations(["missing", judge.evaluationId])).toEqual([null, judge]);
     expect(await userRuntime.listEvaluations(record.samplingId)).toEqual([judge]);

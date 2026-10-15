@@ -3,6 +3,7 @@ import { PENDING_SAMPLING_STATUSES } from "@eval-platform/eval-contracts";
 import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
 import { RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, RuntimeRunStoppedError } from "@eval-platform/eval-runtime";
 import { and, eq, exists, gt, inArray, isNull, not, or, sql } from "drizzle-orm";
+import type { RunQueue } from "../run-worker-queue.js";
 import { sqlBatches } from "./batch.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
@@ -163,7 +164,7 @@ function validateAdmission(
   }
 }
 
-function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore {
+function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope, runQueue: RunQueue): RuntimeStore {
   const ownerScope = scope.kind === "user" ? {
     project: eq(projects.ownerUserId, scope.ownerUserId),
     run: eq(runs.ownerUserId, scope.ownerUserId),
@@ -394,7 +395,7 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
           })
             .where(eq(projects.projectId, run.projectId));
         }
-        await transaction.execute(sql`select pg_notify('eval_run_created', ${run.runId})`);
+        await runQueue.enqueue(transaction, run.runId);
         return { run: structuredClone(run), created: true };
       });
     },
@@ -475,9 +476,17 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope): RuntimeStore 
   };
 }
 
-export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRecoveryStore {
+export function createPostgresWorkerRuntimeStore(
+  db: EvalDb,
+  runQueue: RunQueue,
+): RuntimeStore & RuntimeRecoveryStore & { isRunActive(runId: string): Promise<boolean> } {
   return {
-    ...createRuntimeStore(db, { kind: "worker" }),
+    ...createRuntimeStore(db, { kind: "worker" }, runQueue),
+    async isRunActive(runId) {
+      const [row] = await db.select({ runId: runs.runId }).from(runs)
+        .where(and(eq(runs.runId, runId), activeRunCondition(db)));
+      return row !== undefined;
+    },
     async isRunStopRequested(runId) {
       const [row] = await db.select({ stopRequested: runs.stopRequested }).from(runs)
         .where(eq(runs.runId, runId));
@@ -502,10 +511,15 @@ export function createPostgresWorkerRuntimeStore(db: EvalDb): RuntimeStore & Run
   };
 }
 
-export function createPostgresRuntimeStore(db: EvalDb, ownerUserId: string, release: EvalSpRelease): RuntimeStore {
+export function createPostgresRuntimeStore(
+  db: EvalDb,
+  ownerUserId: string,
+  release: EvalSpRelease,
+  runQueue: RunQueue,
+): RuntimeStore {
   return createRuntimeStore(db, {
     kind: "user", ownerUserId: requireOwnerUserId(ownerUserId), release: requireEvalSpRelease(release),
-  });
+  }, runQueue);
 }
 
 export class ProjectRunStopConflictError extends Error {
@@ -516,7 +530,7 @@ export class ProjectRunStopConflictError extends Error {
 }
 
 /** Stop intent is serialized with Run admission through the owned Project row. */
-export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string) {
+export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string, runQueue: RunQueue) {
   const owner = requireOwnerUserId(ownerUserId);
   return {
     async getCurrentRun(projectId: string): Promise<{ runId: string; stopRequested?: true } | null> {
@@ -544,7 +558,7 @@ export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string)
           .limit(1);
         if (!active) throw new ProjectRunStopConflictError();
         await transaction.update(runs).set({ stopRequested: true }).where(eq(runs.runId, runId));
-        await transaction.execute(sql`select pg_notify('eval_run_created', ${runId})`);
+        await runQueue.enqueue(transaction, runId);
         return { runId, stopRequested: true };
       });
     },
