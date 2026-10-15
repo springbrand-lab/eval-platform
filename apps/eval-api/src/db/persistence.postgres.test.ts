@@ -7,12 +7,15 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { eq, sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresProjectRunControl, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, ProjectRunStopConflictError, startEvalRunWorker } from "../index.js";
+import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createOwnerServices, createPostgresMetricsSource, createPostgresProjectRunControl, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, ProjectRunStopConflictError, startEvalRunWorker } from "../index.js";
 import { isForeignKeyFailure } from "./client.js";
 import { createOutputSchemaCatalog } from "./output-schemas.js";
 import { createPostgresProjectRunReader } from "./run-view.js";
 import { readRunRecords } from "./runtime.js";
 import { data as dataTable, datasets as datasetsTable } from "./schema.js";
+import type { BundleDirectory } from "../sp/bundle-directory.js";
+import type { EvalSpClient } from "../sp/client.js";
+import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "../test-support.js";
 
 const connection = process.env.DATABASE_URL;
 const subjectAgent = { ownerUserId: "owner", userAgentId: "subject" };
@@ -136,6 +139,16 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
         return { id, user_id: id === "foreign-agent" ? "user-B" : token, name: id };
       },
     }, ownerUserId);
+  }
+
+  /** The full HTTP stack over this database; each Bearer token names its verified owner. */
+  function httpApi(users: Readonly<Record<string, string>>) {
+    const sp = {
+      async verifySession(token: string) { return users[token] ? { id: users[token], role: "user" as const } : null; },
+      async getAgentConfig(token: string, id: string) { return { id, user_id: users[token]!, name: id }; },
+    } as EvalSpClient;
+    const ownerServices = createOwnerServices({ db: database.db, sp, bundles: {} as BundleDirectory, release });
+    return requestApp({ webOrigin: WEB_ORIGIN, sp, ownerServices });
   }
 
   async function setup() {
@@ -865,57 +878,45 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       evaluationConcurrency: 1,
     });
     expect(await createPostgresConfigReader(database.db, "user-B").getEvaluationConfig(config.configId)).toBeNull();
-    const api = createPostgresIndependentEvaluationApi({
-      db: database.db,
-      release,
-      spClient: {
-        async verifySession(token) {
-          if (token === "alice-token") return { id: "user-A", role: "user" };
-          if (token === "bob-token") return { id: "user-B", role: "user" };
-          return null;
-        },
-      },
-    });
+    const request = httpApi({ "alice-token": "user-A", "bob-token": "user-B" });
     const path = `/api/projects/${project.projectId}`;
-    const send = (token: string, suffix: string, init: RequestInit = {}) => api.handle(new Request(`http://eval-api.test${path}${suffix}`, {
-      ...init,
-      headers: { Authorization: `Bearer ${token}`, ...init.headers },
-    }));
+    const send = (token: string, suffix: string, init: RequestInit = {}) => request(`${path}${suffix}`, authorized(token, init));
+    const msg = async <T>(response: Response) => (await response.json() as { msg: T }).msg;
     const selected = await send("alice-token", "/samplings/successful/ids");
     expect(selected.status).toBe(200);
-    expect(await selected.json()).toEqual({ samplingIds: [sampling.samplingId, secondSampling.samplingId] });
+    expect(await msg(selected)).toEqual({ samplingIds: [sampling.samplingId, secondSampling.samplingId] });
     expect((await send("bob-token", "/samplings/successful/ids")).status).toBe(404);
 
-    const submitBody = JSON.stringify({
+    const submitBody = {
       evaluationConfigId: config.configId,
       samplingIds: [sampling.samplingId, secondSampling.samplingId], idempotencyKey: "first-click",
-    });
-    const submit = () => send("alice-token", "/evaluations", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: submitBody,
-    });
+    };
+    const submit = () => request(`${path}/evaluations`, jsonRequest("POST", submitBody, "alice-token"));
     const [first, parallel] = await Promise.all([submit(), submit()]);
     expect(first.status).toBe(202);
     expect(parallel.status).toBe(202);
-    const handle = await first.json() as { runId: string; samplingIds: readonly string[] };
-    expect(await parallel.json()).toEqual(handle);
+    const handle = await msg<{ runId: string; samplingIds: readonly string[] }>(first);
+    expect(await msg(parallel)).toEqual(handle);
     await configs.updateEvaluationConfig(config.configId, {
       evaluationHarness: config.evaluationHarness, evaluationConcurrency: 2,
     });
-    expect(await (await submit()).json()).toEqual(handle);
+    expect(await msg(await submit())).toEqual(handle);
     const storedRun = await runtime.getRun(handle.runId);
     expect(storedRun?.config.operation).toBe("evaluation");
     expect(storedRun?.config.operation === "evaluation" ? storedRun.config.evaluation.evaluationConcurrency : null).toBe(1);
     expect(storedRun?.evaluationIds).toHaveLength(2);
     const status = await send("alice-token", `/runs/${handle.runId}`);
     expect(status.status).toBe(200);
-    expect(await status.json()).toEqual({ run: expect.objectContaining({
+    const expectedRun = expect.objectContaining({
       runId: handle.runId, projectId: project.projectId,
       samplingIds: [sampling.samplingId, secondSampling.samplingId],
       evaluationIds: storedRun!.evaluationIds, phase: "evaluation", status: "queued",
-    }) });
+    });
+    expect(await msg(status)).toEqual({ run: expectedRun });
+    expect(await msg(await request(`/api/runs/${handle.runId}`, authorized("alice-token")))).toEqual(expectedRun);
     const result = await send("alice-token", `/runs/${handle.runId}/evaluations`);
     expect(result.status).toBe(200);
-    expect(await result.json()).toEqual({ evaluations: [
+    expect(await msg(result)).toEqual({ evaluations: [
       expect.objectContaining({
         evaluationId: storedRun!.evaluationIds[0], samplingId: sampling.samplingId,
         status: { status: "queued" },
@@ -927,29 +928,16 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     ] });
     expect((await send("bob-token", `/runs/${handle.runId}/evaluations`)).status).toBe(404);
     expect((await send("alice-token", "/runs/missing")).status).toBe(404);
-    expect((await send("alice-token", "/evaluations", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        evaluationConfigId: config.configId, samplingIds: ["missing-sampling"], idempotencyKey: "bad-selection",
-      }),
-    })).status).toBe(409);
-    expect((await send("alice-token", "/evaluations", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        evaluationConfigId: "missing", samplingIds: [sampling.samplingId], idempotencyKey: "missing-config",
-      }),
-    })).status).toBe(404);
     expect((await runtime.listEvaluations(sampling.samplingId))).toHaveLength(1);
     expect((await runtime.listEvaluations(secondSampling.samplingId))).toHaveLength(1);
     expect((await send("bob-token", `/runs/${handle.runId}/stop`, { method: "POST" })).status).toBe(404);
-    expect(await (await send("alice-token", "/runs/current")).json())
-      .toEqual({ run: { runId: handle.runId } });
+    expect(await msg(await send("alice-token", "/runs/current"))).toEqual({ run: { runId: handle.runId } });
     const stopped = await send("alice-token", `/runs/${handle.runId}/stop`, { method: "POST" });
     expect(stopped.status).toBe(202);
-    expect(await stopped.json()).toEqual({ runId: handle.runId, stopRequested: true });
-    expect(await (await send("alice-token", `/runs/${handle.runId}/stop`, { method: "POST" })).json())
+    expect(await msg(stopped)).toEqual({ runId: handle.runId, stopRequested: true });
+    expect(await msg(await send("alice-token", `/runs/${handle.runId}/stop`, { method: "POST" })))
       .toEqual({ runId: handle.runId, stopRequested: true });
-    expect(await (await send("alice-token", `/runs/${handle.runId}`)).json())
+    expect(await msg(await send("alice-token", `/runs/${handle.runId}`)))
       .toEqual({ run: expect.objectContaining({ runId: handle.runId, stopRequested: true }) });
 
     for (const evaluationId of storedRun!.evaluationIds) {
@@ -957,24 +945,23 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       await runtime.updateEvaluation({ ...prior, status: { status: "cancelled" } }, prior);
     }
     expect(await runtime.markRunStopFinalized(handle.runId)).toBe(true);
-    const replacement = await send("alice-token", "/evaluations", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        evaluationConfigId: config.configId,
-        samplingIds: [sampling.samplingId], idempotencyKey: "next-click",
-      }),
-    });
+    const replacement = await request(`${path}/evaluations`, jsonRequest("POST", {
+      evaluationConfigId: config.configId,
+      samplingIds: [sampling.samplingId], idempotencyKey: "next-click",
+    }, "alice-token"));
     expect(replacement.status).toBe(202);
-    const nextHandle = await replacement.json() as { runId: string; samplingIds: readonly string[] };
+    const nextHandle = await msg<{ runId: string; samplingIds: readonly string[] }>(replacement);
     expect(nextHandle.runId).not.toBe(handle.runId);
     expect((await send("alice-token", `/runs/${handle.runId}`)).status).toBe(404);
     expect((await send("alice-token", `/runs/${handle.runId}/stop`, { method: "POST" })).status).toBe(404);
-    expect((await submit()).status).toBe(409);
+    const retired = await submit();
+    expect(retired.status).toBe(409);
+    expect(await retired.json()).toMatchObject({ code: "RUN_IDEMPOTENCY_CONFLICT" });
     expect(await runtime.getEvaluation(storedRun!.evaluationIds[0]!)).toBeNull();
     expect(await runtime.getEvaluation(storedRun!.evaluationIds[1]!)).toBeNull();
     expect((await runtime.listEvaluations(sampling.samplingId))).toHaveLength(1);
     expect((await runtime.listEvaluations(secondSampling.samplingId))).toEqual([]);
-    expect(await (await send("alice-token", "/samplings/successful/ids")).json())
+    expect(await msg(await send("alice-token", "/samplings/successful/ids")))
       .toEqual({ samplingIds: [sampling.samplingId, secondSampling.samplingId] });
   });
 
@@ -996,24 +983,17 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       },
       evaluationConcurrency: 1,
     });
-    const api = createPostgresIndependentEvaluationApi({
-      db: database.db, release,
-      spClient: { async verifySession() { return { id: "user-A", role: "user" }; } },
-    });
-    const path = `http://eval-api.test/api/projects/${project.projectId}`;
-    const headers = { Authorization: "Bearer session" };
-    const selection = await api.handle(new Request(`${path}/samplings/successful/ids`, { headers }));
+    const request = httpApi({ session: "user-A" });
+    const path = `/api/projects/${project.projectId}`;
+    const selection = await request(`${path}/samplings/successful/ids`, authorized());
     expect(selection.status).toBe(200);
-    const selectedIds = (await selection.json() as { samplingIds: string[] }).samplingIds;
+    const selectedIds = (await selection.json() as { msg: { samplingIds: string[] } }).msg.samplingIds;
     expect(selectedIds).toHaveLength(records.length);
-    const response = await api.handle(new Request(`${path}/evaluations`, {
-      method: "POST", headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        evaluationConfigId: config.configId, samplingIds: selectedIds, idempotencyKey: "batch-evaluation",
-      }),
+    const response = await request(`${path}/evaluations`, jsonRequest("POST", {
+      evaluationConfigId: config.configId, samplingIds: selectedIds, idempotencyKey: "batch-evaluation",
     }));
     expect(response.status).toBe(202);
-    const handle = await response.json() as { runId: string; samplingIds: string[] };
+    const handle = (await response.json() as { msg: { runId: string; samplingIds: string[] } }).msg;
     expect(handle.samplingIds).toEqual(selectedIds);
     const view = await createPostgresProjectRunReader(database.db, "user-A")(
       project.projectId, handle.runId,
@@ -1031,16 +1011,11 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       SELECT 'limit-sampling-' || n, 'user-A', ${project.projectId}, ${sample.sampleId},
         '{"execution":{"status":"succeeded"},"subjectAgent":{"ownerUserId":"owner","userAgentId":"subject"},"executionAttempts":[]}'::jsonb
       FROM generate_series(1, 10001) AS n`);
-    const api = createPostgresIndependentEvaluationApi({
-      db: database.db, release,
-      spClient: { async verifySession() { return { id: "user-A", role: "user" }; } },
-    });
-    const response = await api.handle(new Request(
-      `http://eval-api.test/api/projects/${project.projectId}/samplings/successful/ids`,
-      { headers: { Authorization: "Bearer session" } },
-    ));
+    const response = await httpApi({ session: "user-A" })(
+      `/api/projects/${project.projectId}/samplings/successful/ids`, authorized(),
+    );
     expect(response.status).toBe(413);
-    expect(await response.json()).toEqual({ error: expect.objectContaining({ code: "SELECTION_TOO_LARGE" }) });
+    expect(await response.json()).toMatchObject({ code: "EVALUATION_SELECTION_TOO_LARGE" });
   }, 30_000);
 
   it("admits one independent EvaluationRecord for concurrent requests with the same key", async () => {

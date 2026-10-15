@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { CatalogInputError, CatalogPayloadTooLargeError } from "./db/errors.js";
+import { OUTPUT_SCHEMA_BYTES } from "./limits.js";
 import { parseEvaluationOutputSchema } from "./project-output-schema.js";
 
 describe("Project evaluation output JSON Schema", () => {
@@ -12,6 +14,11 @@ describe("Project evaluation output JSON Schema", () => {
   it.each([null, [], "{}", { type: 42 }, { properties: [] },
     { minimum: Infinity }, { minimum: Number.MAX_SAFE_INTEGER + 1 },
     { toJSON: () => ({}) }, { nested: new Date() }])("rejects non-JSON Schema file contents: %j", (value) => {
-    expect(() => parseEvaluationOutputSchema(value)).toThrow();
+    expect(() => parseEvaluationOutputSchema(value)).toThrow(CatalogInputError);
+  });
+
+  it("rejects a Schema beyond the output-format size limit", () => {
+    expect(() => parseEvaluationOutputSchema({ description: "a".repeat(OUTPUT_SCHEMA_BYTES) }))
+      .toThrow(CatalogPayloadTooLargeError);
   });
 });

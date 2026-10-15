@@ -5,6 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./http": "./src/http.ts",
+    "./http-errors": "./src/http-errors.ts",
     "./model": "./src/model.ts"
   },
   "scripts": {
@@ -13,6 +15,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@springbrand/http": "0.1.0-alpha.4",
+    "hono": "4.12.33",
     "zod": "^4.4.3"
   },
   "devDependencies": {

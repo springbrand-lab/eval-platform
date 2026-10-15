@@ -1,46 +1,37 @@
 import {
   DatasetEntityNotFoundError,
-  dataIdSchema,
   dataSchema,
   initialMaterialsRefSchema,
   initialSessionRefSchema,
   type Data,
-  type InitialMaterialsRef,
-  type InitialSessionRef,
 } from "@eval-platform/eval-dataset";
 import { and, eq, isNull } from "drizzle-orm";
+import { z } from "zod";
 import type { EvalDb } from "./db/client.js";
 import { requireOwnerUserId } from "./db/owner.js";
 import { assertMaterialSelectable, assertSessionSelectable } from "./db/resource-catalog.js";
 import { data } from "./db/schema.js";
 import type { BundleDirectory } from "./sp/bundle-directory.js";
 
-export interface DataInitialResourcePatch {
-  readonly initialMaterials?: InitialMaterialsRef | null;
-  readonly evalInitialMaterials?: InitialMaterialsRef | null;
-  readonly initialSession?: InitialSessionRef | null;
+/** Each present field binds (reference) or clears (`null`) one initial resource of a Data row. */
+export const dataInitialResourcePatchSchema = z.strictObject({
+  initialMaterials: initialMaterialsRefSchema.nullable().exactOptional(),
+  evalInitialMaterials: initialMaterialsRefSchema.nullable().exactOptional(),
+  initialSession: initialSessionRefSchema.nullable().exactOptional(),
+}).refine((patch) => Object.keys(patch).length > 0, "Specify initialMaterials, evalInitialMaterials or initialSession");
+
+export type DataInitialResourcePatch = z.output<typeof dataInitialResourcePatchSchema>;
+
+export interface InitialResourceApi {
+  bindData(dataId: string, patch: DataInitialResourcePatch): Promise<Data>;
 }
 
-/** Authenticated API composition: bind existing catalog entries to a Data row. */
-export function createInitialResourceApi(db: EvalDb, ownerUserId: string, bundles: BundleDirectory) {
+/** Binds existing owner-scoped catalog entries to a Data row. */
+export function createInitialResourceApi(db: EvalDb, ownerUserId: string, bundles: BundleDirectory): InitialResourceApi {
   const owner = requireOwnerUserId(ownerUserId);
   return {
-    async bindData(dataId: string, patch: DataInitialResourcePatch): Promise<Data> {
-      if (!patch || typeof patch !== "object" || Array.isArray(patch) ||
-        Object.keys(patch).length === 0 || Object.keys(patch).some((key) =>
-          key !== "initialMaterials" && key !== "evalInitialMaterials" && key !== "initialSession") ||
-        (Object.hasOwn(patch, "initialMaterials") && patch.initialMaterials === undefined) ||
-        (Object.hasOwn(patch, "evalInitialMaterials") && patch.evalInitialMaterials === undefined) ||
-        (Object.hasOwn(patch, "initialSession") && patch.initialSession === undefined)) {
-        throw new TypeError("Initial resource binding must specify materials or Session");
-      }
-      const selectedId = dataIdSchema.parse(dataId);
-      const materials = patch.initialMaterials === undefined || patch.initialMaterials === null
-        ? patch.initialMaterials : initialMaterialsRefSchema.parse(patch.initialMaterials);
-      const evalMaterials = patch.evalInitialMaterials === undefined || patch.evalInitialMaterials === null
-        ? patch.evalInitialMaterials : initialMaterialsRefSchema.parse(patch.evalInitialMaterials);
-      const session = patch.initialSession === undefined || patch.initialSession === null
-        ? patch.initialSession : initialSessionRefSchema.parse(patch.initialSession);
+    async bindData(dataId, patch) {
+      const { initialMaterials: materials, evalInitialMaterials: evalMaterials, initialSession: session } = patch;
       if (materials) await bundles.resolveInitialMaterials(owner, materials);
       if (evalMaterials) await bundles.resolveInitialMaterials(owner, evalMaterials);
       return db.transaction(async (transaction) => {
@@ -48,26 +39,18 @@ export function createInitialResourceApi(db: EvalDb, ownerUserId: string, bundle
         if (evalMaterials) await assertMaterialSelectable(transaction, owner, evalMaterials);
         if (session) await assertSessionSelectable(transaction, owner, session);
         const [row] = await transaction.select({ content: data.content }).from(data)
-          .where(and(eq(data.ownerUserId, owner), eq(data.dataId, selectedId),
+          .where(and(eq(data.ownerUserId, owner), eq(data.dataId, dataId),
             isNull(data.deletedAt))).for("update");
-        if (!row) throw new DatasetEntityNotFoundError("data", selectedId);
+        if (!row) throw new DatasetEntityNotFoundError("data", dataId);
         const next: Record<string, unknown> = { ...row.content };
-        if (Object.hasOwn(patch, "initialMaterials")) {
-          if (materials) next.initialMaterials = materials;
-          else delete next.initialMaterials;
+        for (const [field, value] of Object.entries(patch)) {
+          if (value) next[field] = value;
+          else delete next[field];
         }
-        if (Object.hasOwn(patch, "evalInitialMaterials")) {
-          if (evalMaterials) next.evalInitialMaterials = evalMaterials;
-          else delete next.evalInitialMaterials;
-        }
-        if (Object.hasOwn(patch, "initialSession")) {
-          if (session) next.initialSession = session;
-          else delete next.initialSession;
-        }
-        const updated = dataSchema.parse({ ...next, dataId: selectedId });
+        const updated = dataSchema.parse({ ...next, dataId });
         const { dataId: _dataId, ...content } = updated;
         await transaction.update(data).set({ content })
-          .where(and(eq(data.ownerUserId, owner), eq(data.dataId, selectedId)));
+          .where(and(eq(data.ownerUserId, owner), eq(data.dataId, dataId)));
         return updated;
       });
     },
