@@ -47,7 +47,7 @@ describe("apiError", () => {
     [new RuntimeAdmissionConflictError("empty-targets", "m"), 409, "RUN_TARGETS_EMPTY"],
     [new RuntimeAdmissionConflictError("creation-superseded", "m"), 409, "RUN_IDEMPOTENCY_CONFLICT"],
     [new ProjectCreationKeyTakenError(), 409, "RUNTIME_RECORD_CONFLICT"],
-    [new RuntimeAdmissionConflictError("evaluation-prompt", "m"), 409, "SAMPLE_EVALUATION_PROMPT_MISSING"],
+    [new RuntimeAdmissionConflictError("evaluation-prompt", "m"), 409, "PROJECT_SAMPLE_EVALUATION_PROMPT_MISSING"],
     [new RuntimeAdmissionConflictError("sampling-unavailable", "m"), 409, "SAMPLING_UNAVAILABLE"],
     [new RuntimeProjectBusyError("p", "r"), 409, "PROJECT_BUSY"],
     [new RuntimeRunIdentityConflictError("m"), 409, "RUN_IDEMPOTENCY_CONFLICT"],

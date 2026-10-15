@@ -44,7 +44,6 @@ import {
   projectEvaluationPlans,
   projectExecutionPlans,
   projects,
-  projectSamples,
   runEvaluations,
   runs,
   runSamplings,
@@ -155,17 +154,21 @@ async function lockExecutionTargets(
  */
 async function lockForAdmission(
   transaction: AdmissionWriter, scope: RuntimeStoreScope, run: RuntimeRunRecord,
-): Promise<{ readonly owner: string; readonly existing: RuntimeRunRecord | null }> {
+): Promise<{ readonly owner: string; readonly executionPlanDigest: string; readonly existing: RuntimeRunRecord | null }> {
+  // Every Project row is written with its execution plan in the creation transaction.
   const [project] = await transaction.select({
     ownerUserId: projects.ownerUserId, sourceBranch: projects.sourceBranch, creationKey: projects.creationKey,
+    executionPlanDigest: projectExecutionPlans.digest,
   })
     .from(projects)
+    .innerJoin(projectExecutionPlans, eq(projectExecutionPlans.projectId, projects.projectId))
     .where(visibleProject(run.projectId, scope.kind === "user" ? scope.ownerUserId : undefined))
-    .for("update");
+    .for("update", { of: projects });
   if (!project) throw new RuntimeEntityNotFoundError("project", run.projectId);
   const owner = project.ownerUserId;
+  const { executionPlanDigest } = project;
   const existing = await findByIdentity(transaction, owner, run.projectId, run.requestIdentity);
-  if (existing) return { owner, existing };
+  if (existing) return { owner, executionPlanDigest, existing };
   // A creation key admits only the Project's very first Run; once any Run exists the creation was superseded.
   if (run.requestIdentity.idempotencyKey === project.creationKey && await projectHasRun(transaction, run.projectId)) {
     throw new RuntimeAdmissionConflictError("creation-superseded",
@@ -180,35 +183,33 @@ async function lockForAdmission(
     throw new RuntimeAdmissionConflictError("source-branch",
       "Project source branch or Run source commit differs from the active Eval SP release");
   }
-  return { owner, existing: null };
+  return { owner, executionPlanDigest, existing: null };
 }
 
 /** Rechecks the plan digests the Run was prepared against; returns whether the evaluation plan still needs locking. */
-async function checkPlanDigests(transaction: AdmissionWriter, run: RuntimeRunRecord): Promise<{ readonly lockEvaluationPlan: boolean }> {
+async function checkPlanDigests(
+  transaction: AdmissionWriter, run: RuntimeRunRecord, executionPlanDigest: string,
+): Promise<{ readonly lockEvaluationPlan: boolean }> {
   const evaluates = run.operation !== "execution";
-  const [executionPlan] = await transaction.select({ digest: projectExecutionPlans.digest }).from(projectExecutionPlans)
-    .where(eq(projectExecutionPlans.projectId, run.projectId));
   const [evaluationPlan] = await transaction.select({ digest: projectEvaluationPlans.digest, lockedAt: projectEvaluationPlans.lockedAt })
     .from(projectEvaluationPlans).where(eq(projectEvaluationPlans.projectId, run.projectId));
   if (evaluates && !evaluationPlan) {
     throw new RuntimeAdmissionConflictError("evaluation-plan-required", "Project has no evaluation plan");
   }
-  if (executionPlan?.digest !== run.planDigests.execution
+  if (executionPlanDigest !== run.planDigests.execution
     || (evaluates && evaluationPlan?.digest !== run.planDigests.evaluation)) {
     throw new RuntimeAdmissionConflictError("plan-changed", "Project plan changed after the Run was prepared");
   }
   return { lockEvaluationPlan: evaluates && evaluationPlan?.lockedAt === null };
 }
 
-/** Locks the target records and rechecks them against the current Project state. */
+/**
+ * Locks the target records and rechecks them against the current Project state. Target ProjectSamples
+ * need no separate pass: the unchanged execution digest covers them, and the Sampling → ProjectSample
+ * foreign key rejects a new Sampling of an unknown one.
+ */
 async function lockTargets(transaction: AdmissionWriter, owner: string, command: RuntimeRunAdmissionCommand): Promise<void> {
   const { run, replacedSamplingIds, samplings: newSamplings } = command;
-  const targetSamples = await selectByIds(run.targets.projectSampleIds, (batch) => transaction
-    .select({ projectSampleId: projectSamples.projectSampleId }).from(projectSamples)
-    .where(and(eq(projectSamples.projectId, run.projectId), inArray(projectSamples.projectSampleId, batch))),
-  (row) => row.projectSampleId);
-  const missingSample = run.targets.projectSampleIds.find((_id, index) => targetSamples[index] === null);
-  if (missingSample !== undefined) throw new RuntimeEntityNotFoundError("project-sample", missingSample);
 
   if (run.operation === "evaluation") {
     const available = await selectByIds(run.samplingIds, (batch) => transaction.select({ samplingId: samplings.samplingId })
@@ -296,9 +297,9 @@ async function admitRun(
   command: RuntimeRunAdmissionCommand,
 ): Promise<RuntimeRunAdmission> {
   const { run } = command;
-  const { owner, existing } = await lockForAdmission(transaction, scope, run);
+  const { owner, executionPlanDigest, existing } = await lockForAdmission(transaction, scope, run);
   if (existing) return { run: existing, created: false };
-  const { lockEvaluationPlan } = await checkPlanDigests(transaction, run);
+  const { lockEvaluationPlan } = await checkPlanDigests(transaction, run, executionPlanDigest);
   await lockTargets(transaction, owner, command);
   await clearSelected(transaction, owner, command);
   await insertRun(transaction, owner, command);

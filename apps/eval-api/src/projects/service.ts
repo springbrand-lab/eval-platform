@@ -41,6 +41,8 @@ export interface ProjectCreation {
 
 /** Concurrent creations losing the key race replay the winner; this bounds rare winner compensation loops. */
 const CREATION_ATTEMPTS = 3;
+/** Bounds re-previews of a first Run whose plan changed between preview and admission. */
+const FIRST_RUN_ATTEMPTS = 3;
 
 /** Digest of the validated body without its key. */
 function fingerprintOf(body: ProjectCreateBody): Promise<string> {
@@ -110,14 +112,18 @@ export function createProjectService(input: {
   async function admitFirstRun(project: Project, body: ProjectCreateBody): Promise<ProjectCreation> {
     const { projectId } = project;
     const { operation } = body.run;
-    try {
-      const { targets } = await admission.preview({ projectId, operation, selector: { all: true } });
-      const run = await admission.submit({ idempotencyKey: body.idempotencyKey, projectId, operation, selector: { all: true }, targets });
-      return { project, run };
-    } catch (error) {
-      // Under the admission lock a Run committed first: the creation no longer owns the first Run.
-      if (error instanceof RuntimeAdmissionConflictError && error.reason === "creation-superseded") return { project, run: null };
-      throw error;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        const { targets } = await admission.preview({ projectId, operation, selector: { all: true } });
+        const run = await admission.submit({ idempotencyKey: body.idempotencyKey, projectId, operation, selector: { all: true }, targets });
+        return { project, run };
+      } catch (error) {
+        if (!(error instanceof RuntimeAdmissionConflictError)) throw error;
+        // Under the admission lock a Run committed first: the creation no longer owns the first Run.
+        if (error.reason === "creation-superseded") return { project, run: null };
+        // An evaluation-plan replacement landed between preview and admission; the Project is valid, so preview again.
+        if (error.reason !== "plan-changed" || attempt >= FIRST_RUN_ATTEMPTS) throw error;
+      }
     }
   }
 
@@ -133,7 +139,16 @@ export function createProjectService(input: {
     if (found.deleted) throw new RuntimeEntityNotFoundError("project", found.project.projectId);
     if (found.fingerprint !== fingerprint) throw new ProjectIdempotencyConflictError();
     if (found.run) return { project: found.project, run: found.run };
-    return found.hasRun ? { project: found.project, run: null } : admitFirstRun(found.project, body);
+    if (found.hasRun) return { project: found.project, run: null };
+    try {
+      return await admitFirstRun(found.project, body);
+    } catch (error) {
+      // The creator compensated meanwhile and its rows are gone: the key is free again. A Project the
+      // user soft-deleted keeps its row and stays 404.
+      if (error instanceof RuntimeEntityNotFoundError && error.entity === "project"
+        && await store.findCreation(body.idempotencyKey) === null) return null;
+      throw error;
+    }
   }
 
   async function createOnce(body: ProjectCreateBody, fingerprint: string): Promise<ProjectCreation> {

@@ -85,16 +85,21 @@ export interface RuntimeStore {
    * One transaction under the Project row lock. It must:
    * - reject a missing or soft-deleted Project, and a source-release mismatch for user Stores;
    * - replay the Run of a matching key (same fingerprint) even while active, reject a different
-   *   fingerprint and any superseded key, then reject a new key while the Project has an active Run;
+   *   fingerprint and a key whose Run a later Run superseded, then reject a new key while the
+   *   Project has an active Run;
+   * - refuse a Run carrying the Project's creation key once the Project has any Run
+   *   (`creation-superseded`);
    * - recheck `run.planDigests` against the current plan, and for pipeline/evaluation require an
    *   evaluation plan (else `evaluation-plan-required`);
    * - recheck that `replacedSamplingIds` equals the current Sampling set of the targets (else
    *   `stale-targets`), and for evaluation that every target Sampling still succeeded;
    * - delete replaced Samplings with their EvaluationRecords and Run memberships, or for evaluation
    *   only the targets' current EvaluationRecords; never touch unselected records;
-   * - insert the Run, Samplings, EvaluationRecords, memberships and the key ledger in SQL batches;
+   * - insert the Run with the next Project sequence, its Samplings, EvaluationRecords and memberships
+   *   in SQL batches;
    * - lock the evaluation plan for the first pipeline/evaluation Run, then enqueue the Worker job.
-   * Durable uniqueness constraints, not process memory, enforce identity.
+   * A durable unique (project, idempotency key) constraint and the Run sequence, not process memory,
+   * enforce identity.
    */
   admitRun(command: RuntimeRunAdmissionCommand): Promise<RuntimeRunAdmission>;
   /** Atomically update only while the supplied previous facts still match. */

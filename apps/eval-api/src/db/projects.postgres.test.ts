@@ -1,6 +1,7 @@
 import { createDatasetService, DatasetEntityNotFoundError, type Data } from "@eval-platform/eval-dataset";
 import { createMetrics, MetricsEntityNotFoundError } from "@eval-platform/eval-metrics";
 import {
+  createEvalRunAdmission,
   RuntimeAdmissionConflictError,
   RuntimeInputError,
   digestExecutionPlan,
@@ -375,6 +376,84 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       const runsBefore = (await database.db.select({ n: count() }).from(runs))[0]!.n;
       expect(await s.projects.create(crashed)).toEqual({ project: orphan, run: null });
       expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(runsBefore);
+    });
+
+    /** The Runtime admission, so a vanished Project surfaces as RuntimeEntityNotFoundError like in production. */
+    function runtimeAdmission(): EvalRunAdmission {
+      const s = services();
+      return createEvalRunAdmission({ sourceCommit: release.sourceCommit, plans: s.plans, store: s.runtime });
+    }
+
+    it.each(["compensated", "soft-deleted"] as const)("handles a replay whose winning creation was %s before the replay admitted", async (fate) => {
+      const body = await creationBody();
+      const s = services();
+      const winner = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...s.store, deleteUnrun: async () => null },
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: { preview: runtimeAdmission().preview, async submit() { throw new Error("winner still admitting"); } },
+      });
+      await expect(winner.create(body)).rejects.toThrow("winner still admitting");
+      const [first] = await s.projects.list();
+      const real = runtimeAdmission();
+      let removed = false;
+      const replaying = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: s.store,
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: {
+          async preview(request) {
+            if (!removed) {
+              removed = true;
+              if (fate === "compensated") expect(await s.store.deleteUnrun(first!.projectId)).toEqual(expect.any(Array));
+              else await s.projects.delete(first!.projectId);
+            }
+            return real.preview(request);
+          },
+          submit: real.submit,
+        },
+      });
+      if (fate === "soft-deleted") {
+        await expect(replaying.create(body)).rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "project" });
+        return;
+      }
+      const created = await replaying.create(body);
+      expect(created.project.projectId).not.toBe(first!.projectId);
+      expect(created.run?.samplingIds).toHaveLength(2);
+      expect((await s.projects.list()).map((project) => project.projectId)).toEqual([created.project.projectId]);
+    });
+
+    it("re-previews the creator's first Run when an evaluation-plan replacement changed the plan first", async () => {
+      const body = await creationBody();
+      const { evaluator, schema } = await catalog();
+      const s = services();
+      const real = runtimeAdmission();
+      let previews = 0;
+      let raced = false;
+      const service = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: s.store,
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: {
+          async preview(request) {
+            previews += 1;
+            return real.preview(request);
+          },
+          async submit(request) {
+            if (!raced) {
+              raced = true;
+              await s.projects.replaceEvaluationPlan(request.projectId, {
+                userAgentId: evaluator, evaluationConcurrency: 1, outputSchemaId: schema.outputSchemaId,
+              });
+              throw new RuntimeAdmissionConflictError("plan-changed", "Project plan changed after the Run was prepared");
+            }
+            return real.submit(request);
+          },
+        },
+      });
+      const { project, run } = await service.create(body);
+      expect(run).not.toBeNull();
+      expect(previews).toBe(2);
+      const view = (await s.projects.get(project.projectId))!;
+      expect(view.evaluation).not.toBeNull();
+      expect(view.currentRun).toEqual({ runId: run!.runId });
     });
 
     it.each(["active", "finished"] as const)("returns run: null when a %s user Run commits between the replay's lookup and its admission", async (state) => {

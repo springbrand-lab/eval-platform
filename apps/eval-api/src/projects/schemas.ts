@@ -53,5 +53,4 @@ export const projectCreateSchema = z.strictObject({
 
 export type EvaluationPlanBody = z.output<typeof evaluationPlanSchema>;
 export type ProjectCreateBody = z.output<typeof projectCreateSchema>;
-export type ExecutionPlanBody = ProjectCreateBody["execution"];
 export type DatasetSelection = ProjectCreateBody["datasets"][number];

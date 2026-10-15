@@ -42,7 +42,7 @@ const errorDefinitions = {
   RUNTIME_INPUT_INVALID: { status: 400, message: "Run or configuration input is invalid" },
   RUNTIME_RECORD_CONFLICT: { status: 409, message: "Run records changed concurrently. Refresh and try again" },
   RUNTIME_PERSISTENCE_UNCONFIRMED: { status: 503, message: "Run records could not be confirmed. Retry with the same idempotency key" },
-  SAMPLE_EVALUATION_PROMPT_MISSING: { status: 409, message: "Selected Samples need an evaluation prompt" },
+  PROJECT_SAMPLE_EVALUATION_PROMPT_MISSING: { status: 409, message: "Selected ProjectSamples need an evaluation prompt" },
   SAMPLING_NOT_FOUND: { status: 404, message: "Sampling not found" },
   SAMPLING_UNAVAILABLE: { status: 409, message: "Selected Sampling is unavailable for evaluation" },
   EVALUATION_NOT_FOUND: { status: 404, message: "Evaluation not found" },

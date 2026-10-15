@@ -220,8 +220,12 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
         .rejects.toMatchObject({ reason: "evaluation-plan-required" });
       await expect(store.admitRun({ ...base, run: { ...base.run, samplingIds: [] }, samplings: [] }))
         .rejects.toMatchObject({ reason: "empty-targets" });
-      await expect(store.admitRun({ ...base, run: { ...base.run, targets: { projectSampleIds: ["missing"], samplingIds: [] } } }))
-        .rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "project-sample" });
+      // An unknown target ProjectSample is rejected by the Sampling → ProjectSample foreign key as invalid input.
+      const unknown = base.samplings.map((sampling) => ({ ...sampling, projectSampleId: "missing" }));
+      await expect(store.admitRun({
+        ...base, samplings: unknown, replacedSamplingIds: [],
+        run: { ...base.run, targets: { projectSampleIds: ["missing"], samplingIds: [] } },
+      })).rejects.toMatchObject({ name: "RuntimeInputError", message: expect.stringContaining("eval_samplings_project_sample_fk") });
       await expect(store.admitRun({ ...base, run: { ...base.run, phases: ["evaluation"] } }))
         .rejects.toMatchObject({ name: "RuntimeInputError", message: expect.stringContaining("eval_runs_phases_ck") });
 

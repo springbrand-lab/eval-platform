@@ -52,7 +52,7 @@ const admissionConflictCodes = {
   "stale-targets": "RUN_TARGETS_STALE",
   "empty-targets": "RUN_TARGETS_EMPTY",
   "creation-superseded": "RUN_IDEMPOTENCY_CONFLICT",
-  "evaluation-prompt": "SAMPLE_EVALUATION_PROMPT_MISSING",
+  "evaluation-prompt": "PROJECT_SAMPLE_EVALUATION_PROMPT_MISSING",
   "sampling-unavailable": "SAMPLING_UNAVAILABLE",
 } as const satisfies Record<RuntimeAdmissionConflictReason, HttpErrorCode>;
 

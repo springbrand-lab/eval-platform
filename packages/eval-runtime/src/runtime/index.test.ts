@@ -7,8 +7,8 @@ import type {
   ExecutionPlan,
   ProjectDatasetSnapshot,
   RunOperation,
+  RunRequest,
   RunTargetSelector,
-  RunTargets,
 } from "@eval-platform/eval-contracts";
 import { isPendingSamplingStatus } from "@eval-platform/eval-contracts";
 import { digestExecutionPlan, digestJson } from "../plan/index.js";
@@ -19,7 +19,7 @@ import type {
   Harness,
 } from "../harness/index.js";
 import { AgentHandleNotFoundError } from "../harness/index.js";
-import type { EvalRunAdmission, ProjectPlanReader, ProjectSample } from "./model.js";
+import type { ProjectPlanReader, ProjectSample } from "./model.js";
 import type {
   RuntimeRunAdmission,
   RuntimeRunRecord,
@@ -56,19 +56,6 @@ const EVAL_MATERIAL_ID = "fa32ac9f-ec04-4821-ac67-3438a8b7b1d8";
 const PROJECT_ID = "project-1";
 const SUBJECT = { ownerUserId: "user-1", userAgentId: "subject-agent" };
 const EVALUATOR = { ownerUserId: "user-1", userAgentId: "evaluator-agent" };
-const EXECUTION_PLAN_ID = "execution-plan-1";
-const EXECUTION_PLAN_TWO_SAMPLES_ID = "execution-plan-two-samples";
-const EXECUTION_PLAN_TWO_CONCURRENT_ID = "execution-plan-two-concurrent";
-const EXECUTION_PLAN_THREE_CONCURRENT_ID = "execution-plan-three-concurrent";
-const EXECUTION_PLAN_RETRY_ONE_ID = "execution-plan-retry-one";
-const EXECUTION_PLAN_RETRY_TWO_ID = "execution-plan-retry-two";
-const EXECUTION_PLAN_RUNTIME_ID = "execution-plan-runtime";
-const EVALUATION_PLAN_ID = "evaluation-plan-1";
-const EVALUATION_PLAN_TWO_CONCURRENT_ID = "evaluation-plan-two-concurrent";
-const EVALUATION_PLAN_RETRY_ONE_ID = "evaluation-plan-retry-one";
-const EVALUATION_PLAN_RUNTIME_ID = "evaluation-plan-runtime";
-const PIPELINE_PLAN_ID = "pipeline-plan-1";
-const PIPELINE_PLAN_CONCURRENT_ID = "pipeline-plan-concurrent";
 const SOURCE_COMMIT = "a".repeat(40);
 const OUTPUT_SCHEMA = { type: "object", properties: { score: { type: "number" } } } as const;
 
@@ -79,8 +66,6 @@ type RuntimeDependencies = WithDefaultReporter<Omit<EvalRunResumerDependencies, 
   readonly store: TestStore;
   /** Bound to the Store; later Runtimes on the same Store reuse them. */
   readonly plans?: TestPlans;
-  /** Subject framework of the default execution plan preset. */
-  readonly framework?: AgentFramework;
 };
 
 function createRunQueries(store: RuntimeStore, records: RunRecords): EvalRunQueries {
@@ -111,7 +96,6 @@ function createRuntime(dependencies: RuntimeDependencies) {
   const { store } = dependencies;
   if (dependencies.plans) store.usePlans(dependencies.plans);
   const plans = store.plans();
-  if (dependencies.framework) plans.framework = dependencies.framework;
   const resumer = createEvalRunResumer({ ...dependencies, plans, store });
   const admission = createEvalRunAdmission({
     sourceCommit: dependencies.sourceCommit ?? SOURCE_COMMIT, plans, store,
@@ -119,7 +103,6 @@ function createRuntime(dependencies: RuntimeDependencies) {
   });
   return {
     ...admission,
-    ...requestsFor(admission, plans),
     ...createRunQueries(store, new RunRecords(store, plans)),
     plans,
     resume: (runId: string) => resumer.resume(runId),
@@ -132,9 +115,7 @@ function createEvalRunResumer(dependencies: WithDefaultReporter<EvalRunResumerDe
 
 /** Admission bound to a test Store and its Project plans. */
 function createTestAdmission(store: TestStore) {
-  const plans = store.plans();
-  const admission = createEvalRunAdmission({ sourceCommit: SOURCE_COMMIT, plans, store });
-  return { ...admission, ...requestsFor(admission, plans) };
+  return createEvalRunAdmission({ sourceCommit: SOURCE_COMMIT, plans: store.plans(), store });
 }
 
 /** A resumer bound to a test Store and its Project plans. */
@@ -167,152 +148,83 @@ function evaluationPlan(overrides: Partial<EvaluationPlan> = {}): EvaluationPlan
   };
 }
 
-/** Plan presets a test picks per Run; `samplingCount` overrides every ProjectSample's own count. */
-const EXECUTION_PRESETS: Readonly<Record<string, { readonly samplingCount?: number; readonly plan: ExecutionPlan }>> = {
-  [EXECUTION_PLAN_ID]: { plan: executionPlan() },
-  [EXECUTION_PLAN_TWO_SAMPLES_ID]: { samplingCount: 2, plan: executionPlan() },
-  [EXECUTION_PLAN_TWO_CONCURRENT_ID]: { samplingCount: 2, plan: executionPlan({ executionConcurrency: 2 }) },
-  [EXECUTION_PLAN_THREE_CONCURRENT_ID]: { plan: executionPlan({ executionConcurrency: 3 }) },
-  [EXECUTION_PLAN_RETRY_ONE_ID]: { plan: executionPlan({ retryPolicy: { maxRestarts: 1, initialBackoffMs: 0, maxBackoffMs: 0 } }) },
-  [EXECUTION_PLAN_RETRY_TWO_ID]: { plan: executionPlan({ retryPolicy: { maxRestarts: 2, initialBackoffMs: 0, maxBackoffMs: 0 } }) },
-  [EXECUTION_PLAN_RUNTIME_ID]: {
-    plan: executionPlan({ harness: { kind: "sp", framework: "sp", agentConfig: SUBJECT, runtime: EXECUTION_RUNTIME } }),
-  },
-};
+const RETRY_ONE = { maxRestarts: 1, initialBackoffMs: 0, maxBackoffMs: 0 } as const;
+const RETRY_TWO = { maxRestarts: 2, initialBackoffMs: 0, maxBackoffMs: 0 } as const;
 
-const EVALUATION_PRESETS: Readonly<Record<string, EvaluationPlan>> = {
-  [EVALUATION_PLAN_ID]: evaluationPlan(),
-  [EVALUATION_PLAN_TWO_CONCURRENT_ID]: evaluationPlan({ evaluationConcurrency: 2 }),
-  [EVALUATION_PLAN_RETRY_ONE_ID]: evaluationPlan({ retryPolicy: { maxRestarts: 1, initialBackoffMs: 0, maxBackoffMs: 0 } }),
-  [EVALUATION_PLAN_RUNTIME_ID]: evaluationPlan({
-    evaluationHarness: { kind: "sp", framework: "sp", agentConfig: EVALUATOR, runtime: EVALUATION_RUNTIME },
-  }),
-};
+function subjectHarness(framework: AgentFramework = "sp", runtime?: typeof EXECUTION_RUNTIME): ExecutionPlan["harness"] {
+  return { kind: "sp", framework, agentConfig: SUBJECT, ...(runtime === undefined ? {} : { runtime }) };
+}
 
-const PIPELINE_PRESETS: Readonly<Record<string, { readonly execution: string; readonly evaluation: string }>> = {
-  [PIPELINE_PLAN_ID]: { execution: EXECUTION_PLAN_ID, evaluation: EVALUATION_PLAN_ID },
-  [PIPELINE_PLAN_CONCURRENT_ID]: { execution: EXECUTION_PLAN_THREE_CONCURRENT_ID, evaluation: EVALUATION_PLAN_TWO_CONCURRENT_ID },
-};
-
-/** An in-memory Project plan. Tests switch presets between Runs; a real execution plan never changes. */
+/** An in-memory Project plan. Tests replace its fields between Runs; a real execution plan never changes. */
 interface TestPlans extends ProjectPlanReader {
-  readonly samples: readonly ProjectSample[];
-  framework: AgentFramework;
-  use(presets: { readonly execution?: string; readonly evaluation?: string | null }): void;
+  samples: readonly ProjectSample[];
+  execution: ExecutionPlan;
+  evaluation: EvaluationPlan | null;
   lock(): void;
 }
 
 function makePlans(
   samples: readonly ProjectSample[] = [makeSample("sample-1")],
-  options: { readonly datasets?: readonly ProjectDatasetSnapshot[]; readonly evaluation?: string | null } = {},
+  options: {
+    readonly datasets?: readonly ProjectDatasetSnapshot[];
+    readonly execution?: ExecutionPlan;
+    readonly evaluation?: EvaluationPlan | null;
+  } = {},
 ): TestPlans {
-  let execution = EXECUTION_PLAN_ID;
-  let evaluation = options.evaluation === undefined ? EVALUATION_PLAN_ID : options.evaluation;
   let lockedAt: string | null = null;
   const datasets = options.datasets ?? [{
     datasetId: "dataset-1", name: "Dataset 1", kind: "general" as const,
     projectSampleIds: samples.map(({ projectSampleId }) => projectSampleId),
   }];
-  const preset = (id: string) => {
-    const value = EXECUTION_PRESETS[id];
-    if (!value) throw new Error(`Unknown execution preset ${id}`);
-    return value;
-  };
-  const currentSamples = () => {
-    const { samplingCount } = preset(execution);
-    return samples.map((sample) => samplingCount === undefined ? sample : { ...sample, samplingCount });
-  };
-  const currentEvaluation = () => {
-    if (evaluation === null) return null;
-    const value = EVALUATION_PRESETS[evaluation];
-    if (!value) throw new Error(`Unknown evaluation preset ${evaluation}`);
-    return value;
-  };
   const plans: TestPlans = {
     samples,
-    framework: "sp",
-    use(presets) {
-      if (presets.execution !== undefined) execution = preset(presets.execution) && presets.execution;
-      if (presets.evaluation !== undefined) evaluation = presets.evaluation;
-    },
+    execution: options.execution ?? executionPlan(),
+    evaluation: options.evaluation === undefined ? evaluationPlan() : options.evaluation,
     lock() {
       lockedAt ??= "2026-10-15T00:00:00.000Z";
     },
     async getProjectPlan(projectId) {
       if (projectId !== PROJECT_ID) return null;
-      const base = preset(execution).plan;
-      const plan = execution === EXECUTION_PLAN_ID ? { ...base, harness: { ...base.harness, framework: plans.framework } } : base;
-      const evaluationValue = currentEvaluation();
+      const { execution, evaluation } = plans;
       return {
         project: {
           projectId, ownerUserId: "owner", name: "test", sourceBranch: "release-2.0.0", createdAt: "2026-10-01T00:00:00.000Z",
         },
         datasets,
-        execution: plan,
-        executionPlanDigest: await digestExecutionPlan({ execution: plan, datasets, samples: currentSamples() }),
-        evaluation: evaluationValue && { plan: evaluationValue, digest: await digestJson(evaluationValue), lockedAt },
+        execution,
+        executionPlanDigest: await digestExecutionPlan({ execution, datasets, samples: plans.samples }),
+        evaluation: evaluation && { plan: evaluation, digest: await digestJson(evaluation), lockedAt },
       };
     },
     async getProjectSamples(projectId, projectSampleIds) {
-      const current = currentSamples();
       return projectSampleIds.map((id) => (
-        projectId === PROJECT_ID ? current.find((sample) => sample.projectSampleId === id) ?? null : null
+        projectId === PROJECT_ID ? plans.samples.find((sample) => sample.projectSampleId === id) ?? null : null
       ));
     },
     async getEvaluationOutputSchema(projectId) {
-      return projectId === PROJECT_ID && evaluation !== null ? OUTPUT_SCHEMA : null;
+      return projectId === PROJECT_ID && plans.evaluation !== null ? OUTPUT_SCHEMA : null;
     },
   };
   return plans;
 }
 
-interface TestStartRequest {
-  readonly idempotencyKey: string;
-  readonly projectId: string;
-  readonly executionPlan: string;
-}
-
-interface TestEvaluateRequest {
-  readonly idempotencyKey: string;
-  readonly projectId: string;
-  readonly samplingIds: readonly string[];
-  readonly evaluationPlan: string;
-}
-
-interface TestPipelineRequest {
-  readonly idempotencyKey: string;
-  readonly projectId: string;
-  readonly pipelinePlan: string;
-}
-
-/** Whole-Project execution/pipeline Runs and Sampling evaluations over the test plan presets. */
-function requestsFor(admission: EvalRunAdmission, plans: TestPlans) {
-  const submit = (idempotencyKey: string, projectId: string, operation: RunOperation, targets: RunTargets) => (
-    admission.submit({
-      idempotencyKey, projectId, operation, targets,
-      selector: operation === "evaluation" ? { samplingIds: targets.samplingIds } : { all: true },
-    })
-  );
-  const allSamples = (): RunTargets => ({
-    projectSampleIds: plans.samples.map(({ projectSampleId }) => projectSampleId), samplingIds: [],
-  });
+/** A whole-Project execution or pipeline request over these ProjectSamples. */
+function projectRequest(
+  operation: "execution" | "pipeline",
+  idempotencyKey: string,
+  projectSampleIds: readonly string[] = ["sample-1"],
+): RunRequest {
   return {
-    async start(request: TestStartRequest) {
-      plans.use({ execution: request.executionPlan });
-      return submit(request.idempotencyKey, request.projectId, "execution", allSamples());
-    },
-    async evaluate(request: TestEvaluateRequest) {
-      plans.use({ evaluation: request.evaluationPlan });
-      return submit(request.idempotencyKey, request.projectId, "evaluation", {
-        projectSampleIds: [], samplingIds: [...request.samplingIds],
-      });
-    },
-    async pipeline(request: TestPipelineRequest) {
-      const preset = PIPELINE_PRESETS[request.pipelinePlan];
-      if (!preset) throw new Error(`Unknown pipeline preset ${request.pipelinePlan}`);
-      plans.use(preset);
-      return submit(request.idempotencyKey, request.projectId, "pipeline", allSamples());
-    },
+    idempotencyKey, projectId: PROJECT_ID, operation, selector: { all: true },
+    targets: { projectSampleIds: [...projectSampleIds], samplingIds: [] },
+  };
+}
+
+/** An evaluation request for these Samplings. */
+function evaluationRequest(samplingIds: readonly string[], idempotencyKey: string = crypto.randomUUID()): RunRequest {
+  return {
+    idempotencyKey, projectId: PROJECT_ID, operation: "evaluation", selector: { samplingIds: [...samplingIds] },
+    targets: { projectSampleIds: [], samplingIds: [...samplingIds] },
   };
 }
 
@@ -329,30 +241,6 @@ function createAutoResumingRuntime(dependencies: RuntimeDependencies) {
   };
   runtime = createRuntime({ ...dependencies, onError, store });
   return runtime;
-}
-
-function startRequest(
-  intentKey: string,
-  executionPlan: string = EXECUTION_PLAN_ID,
-  idempotencyKey: string = intentKey,
-): TestStartRequest {
-  return { idempotencyKey, projectId: PROJECT_ID, executionPlan };
-}
-
-function evaluateRequest(
-  samplingIds: readonly string[],
-  evaluationPlan: string = EVALUATION_PLAN_ID,
-  idempotencyKey: string = crypto.randomUUID(),
-): TestEvaluateRequest {
-  return { idempotencyKey, projectId: PROJECT_ID, samplingIds, evaluationPlan };
-}
-
-function pipelineRequest(
-  intentKey: string,
-  pipelinePlan: string = PIPELINE_PLAN_ID,
-  idempotencyKey: string = intentKey,
-): TestPipelineRequest {
-  return { idempotencyKey, projectId: PROJECT_ID, pipelinePlan };
 }
 
 function makeSample(projectSampleId: string, overrides: Partial<ProjectSample> = {}): ProjectSample {
@@ -696,9 +584,8 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.start(
-      startRequest("test-request", EXECUTION_PLAN_TWO_SAMPLES_ID),
-    );
+    runtime.plans.samples = [makeSample("sample-1", { samplingCount: 2 })];
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
     const snapshot = await waitForTerminal(runtime, run.runId);
 
     expect(snapshot.status).toBe("succeeded");
@@ -737,11 +624,11 @@ describe("eval runtime orchestration", () => {
         const store = makeStore();
         const runtime = createAutoResumingRuntime({ plans: makePlans([sample]), harness, store });
         const execution = operation === "pipeline"
-          ? await runtime.pipeline(pipelineRequest("business-sample-id-pipeline"))
-          : await runtime.start(startRequest("business-sample-id-execution"));
+          ? await runtime.submit(projectRequest("pipeline", "business-sample-id-pipeline"))
+          : await runtime.submit(projectRequest("execution", "business-sample-id-execution"));
         await expect(waitForTerminal(runtime, execution.runId)).resolves.toMatchObject({ status: "succeeded" });
         if (operation === "independent") {
-          const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+          const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
           await expect(waitForTerminal(runtime, evaluation.runId)).resolves.toMatchObject({ status: "succeeded" });
         }
 
@@ -779,7 +666,7 @@ describe("eval runtime orchestration", () => {
     };
     const harness = makeHarness();
     const runtime = createAutoResumingRuntime({ plans: makePlans([sample]), harness, store: makeStore() });
-    const run = await runtime.start(startRequest("unsafe-sample-number"));
+    const run = await runtime.submit(projectRequest("execution", "unsafe-sample-number"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
     expect(harness.ensureAgent).not.toHaveBeenCalled();
     expect(harness.materializeInitialData).not.toHaveBeenCalled();
@@ -800,7 +687,7 @@ describe("eval runtime orchestration", () => {
     };
     const harness = makeHarness();
     const runtime = createAutoResumingRuntime({ plans: makePlans([sample]), harness, store: makeStore() });
-    const run = await runtime.start(startRequest("standalone-prompt"));
+    const run = await runtime.submit(projectRequest("execution", "standalone-prompt"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
     const preparation = vi.mocked(harness.materializeInitialData).mock.calls[0]![0];
     expect(preparation.data).toEqual({
@@ -829,7 +716,7 @@ describe("eval runtime orchestration", () => {
       return { bundleId: "prepared-input", manifestHash: "hash", target: "workspace", rootPath: "/eval/input" };
     });
     const runtime = createAutoResumingRuntime({ harness, store: makeStore() });
-    const run = await runtime.start(startRequest("wait-for-session"));
+    const run = await runtime.submit(projectRequest("execution", "wait-for-session"));
     await started;
     expect(harness.submitAgent).not.toHaveBeenCalled();
     expect(harness.collectExecution).not.toHaveBeenCalled();
@@ -844,7 +731,7 @@ describe("eval runtime orchestration", () => {
       const sample = { ...makeSample("sample-1"), data: { ...makeSample("sample-1").data, userPrompt } } as unknown as ProjectSample;
       const harness = makeHarness();
       const runtime = createAutoResumingRuntime({ plans: makePlans([sample]), harness, store: makeStore() });
-      const run = await runtime.start(startRequest("invalid-prompt"));
+      const run = await runtime.submit(projectRequest("execution", "invalid-prompt"));
       await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
       expect(harness.ensureAgent).not.toHaveBeenCalled();
       expect(harness.materializeInitialData).not.toHaveBeenCalled();
@@ -861,7 +748,7 @@ describe("eval runtime orchestration", () => {
       } as unknown as ProjectSample;
       const harness = makeHarness();
       const runtime = createAutoResumingRuntime({ plans: makePlans([sample]), harness, store: makeStore() });
-      const run = await runtime.start(startRequest("incomplete-reference"));
+      const run = await runtime.submit(projectRequest("execution", "incomplete-reference"));
       await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
       expect(harness.ensureAgent).not.toHaveBeenCalled();
       expect(harness.materializeInitialData).not.toHaveBeenCalled();
@@ -873,7 +760,7 @@ describe("eval runtime orchestration", () => {
     const harness = makeHarness();
     vi.mocked(harness.materializeInitialData).mockRejectedValueOnce(new Error("initial Session is unavailable"));
     const runtime = createAutoResumingRuntime({ harness, store: makeStore() });
-    const run = await runtime.start(startRequest("missing-session"));
+    const run = await runtime.submit(projectRequest("execution", "missing-session"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
     expect(harness.submitAgent).not.toHaveBeenCalled();
     expect(harness.restartAgent).not.toHaveBeenCalled();
@@ -901,14 +788,14 @@ describe("eval runtime orchestration", () => {
         expect(harness.restartAgent).not.toHaveBeenCalled();
       });
       const runtime = createAutoResumingRuntime({
-        framework,
+        plans: makePlans(undefined, { execution: executionPlan({ harness: subjectHarness(framework) }) }),
         harness,
         store: makeStore(),
         sleep,
         createRetryController: () => ({ decide }),
       });
 
-      const run = await runtime.start(startRequest(`initialization-response-lost-${framework}`));
+      const run = await runtime.submit(projectRequest("execution", `initialization-response-lost-${framework}`));
       await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
 
       expect(committedKeys.size).toBe(1);
@@ -955,7 +842,8 @@ describe("eval runtime orchestration", () => {
       createRetryController: () => ({ decide }),
     });
 
-    const run = await runtime.start(startRequest("initialization-exhausted", EXECUTION_PLAN_RETRY_TWO_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_TWO });
+    const run = await runtime.submit(projectRequest("execution", "initialization-exhausted"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
 
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
@@ -996,7 +884,7 @@ describe("eval runtime orchestration", () => {
       createRetryController: () => ({ decide }),
     });
 
-    const run = await runtime.start(startRequest("initialization-conflict"));
+    const run = await runtime.submit(projectRequest("execution", "initialization-conflict"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
 
     expect(harness.materializeInitialData).toHaveBeenCalledTimes(1);
@@ -1028,7 +916,8 @@ describe("eval runtime orchestration", () => {
       createRetryController: () => ({ decide }),
     });
 
-    const run = await runtime.start(startRequest("initialization-then-restart", EXECUTION_PLAN_RETRY_ONE_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "initialization-then-restart"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
 
     expect(decide.mock.calls.map(([input]) => input)).toEqual([
@@ -1060,7 +949,7 @@ describe("eval runtime orchestration", () => {
     };
     const harness = makeHarness();
     const runtime = createAutoResumingRuntime({ plans: makePlans([sample]), harness, store: makeStore() });
-    const run = await runtime.pipeline(pipelineRequest("independent-evaluator-session"));
+    const run = await runtime.submit(projectRequest("pipeline", "independent-evaluator-session"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
     const inputs = vi.mocked(harness.materializeInitialData).mock.calls.map(([input]) => input);
     const subject = inputs.find((input) => input.handle.role === "subject")!;
@@ -1095,9 +984,10 @@ describe("eval runtime orchestration", () => {
   it("passes one Project JSON Schema to every Evaluator in a multi-Sampling evaluation", async () => {
     const harness = makeHarness();
     const runtime = createAutoResumingRuntime({ harness, store: makeStore() });
-    const execution = await runtime.start(startRequest("schema-multi-execution", EXECUTION_PLAN_TWO_SAMPLES_ID));
+    runtime.plans.samples = [makeSample("sample-1", { samplingCount: 2 })];
+    const execution = await runtime.submit(projectRequest("execution", "schema-multi-execution"));
     await expect(waitForTerminal(runtime, execution.runId)).resolves.toMatchObject({ status: "succeeded" });
-    const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
     await expect(waitForTerminal(runtime, evaluation.runId)).resolves.toMatchObject({ status: "succeeded" });
     const evaluatorInputs = vi.mocked(harness.materializeInitialData).mock.calls
       .map(([input]) => input).filter((input) => input.handle.role === "evaluator");
@@ -1118,16 +1008,16 @@ describe("eval runtime orchestration", () => {
     const store = makeStore();
     const runtime = createAutoResumingRuntime({ plans: makePlans([sample]), harness, store });
 
-    const pipeline = pipelineRequest("missing-evaluation-prompt");
-    await expect(runtime.pipeline(pipeline)).rejects.toThrow(RuntimeAdmissionConflictError);
-    await expect(runtime.pipeline(pipeline)).rejects.toMatchObject({ reason: "evaluation-prompt" });
+    const pipeline = projectRequest("pipeline", "missing-evaluation-prompt");
+    await expect(runtime.submit(pipeline)).rejects.toThrow(RuntimeAdmissionConflictError);
+    await expect(runtime.submit(pipeline)).rejects.toMatchObject({ reason: "evaluation-prompt" });
     expect(await store.findRunByIdempotencyKey(pipeline.projectId, pipeline.idempotencyKey)).toBeNull();
 
-    const execution = await runtime.start(startRequest("execution-without-evaluation-prompt"));
+    const execution = await runtime.submit(projectRequest("execution", "execution-without-evaluation-prompt"));
     await expect(waitForTerminal(runtime, execution.runId)).resolves.toMatchObject({ status: "succeeded" });
-    const evaluation = evaluateRequest(execution.samplingIds);
-    await expect(runtime.evaluate(evaluation)).rejects.toThrow(RuntimeAdmissionConflictError);
-    await expect(runtime.evaluate(evaluation)).rejects.toMatchObject({ reason: "evaluation-prompt" });
+    const evaluation = evaluationRequest(execution.samplingIds);
+    await expect(runtime.submit(evaluation)).rejects.toThrow(RuntimeAdmissionConflictError);
+    await expect(runtime.submit(evaluation)).rejects.toMatchObject({ reason: "evaluation-prompt" });
     expect(await store.findRunByIdempotencyKey(evaluation.projectId, evaluation.idempotencyKey)).toBeNull();
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
   });
@@ -1198,11 +1088,11 @@ describe("eval runtime orchestration", () => {
         });
         const store = makeStore();
         const runtime = createAutoResumingRuntime({ harness, store });
-        const execution = await runtime.start(startRequest("unavailable-selection"));
+        const execution = await runtime.submit(projectRequest("execution", "unavailable-selection"));
         await waitForTerminal(runtime, execution.runId);
         const samplingIds = selection === "unknown" ? ["missing-sampling"] : execution.samplingIds;
-        const request = evaluateRequest(samplingIds);
-        await expect(runtime.evaluate(request)).rejects.toMatchObject(selection === "unknown"
+        const request = evaluationRequest(samplingIds);
+        await expect(runtime.submit(request)).rejects.toMatchObject(selection === "unknown"
           ? { name: "RuntimeEntityNotFoundError", entity: "sampling" }
           : { name: "RuntimeAdmissionConflictError", reason: "sampling-unavailable" });
         await expect(runtime.preview({ projectId: PROJECT_ID, operation: "evaluation", selector: { samplingIds } }))
@@ -1232,7 +1122,8 @@ describe("eval runtime orchestration", () => {
       retryable: true,
     });
     const runtime = createAutoResumingRuntime({ harness, store: makeStore(), sleep: async () => undefined });
-    const run = await runtime.start(startRequest("keep-restored-session", EXECUTION_PLAN_RETRY_ONE_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "keep-restored-session"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
     expect(harness.materializeInitialData).toHaveBeenCalledTimes(1);
     expect(harness.restartAgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ prompt: "Execute sample-1" }));
@@ -1250,13 +1141,13 @@ describe("eval runtime orchestration", () => {
       });
       vi.mocked(harness.waitForSubmission).mockResolvedValueOnce(makeSubmission());
       const runtime = createAutoResumingRuntime({
-        framework,
+        plans: makePlans(undefined, { execution: executionPlan({ harness: subjectHarness(framework) }) }),
         harness,
         store,
         sleep: async () => undefined,
       });
 
-      const run = await runtime.start(startRequest(`framework-${framework}`));
+      const run = await runtime.submit(projectRequest("execution", `framework-${framework}`));
       await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
         status: "succeeded",
       });
@@ -1296,13 +1187,13 @@ describe("eval runtime orchestration", () => {
       const harness = makeHarness();
       const store = makeStore();
       const runtime = createAutoResumingRuntime({
-        framework,
+        plans: makePlans(undefined, { execution: executionPlan({ harness: subjectHarness(framework) }) }),
         harness,
         store,
         sleep: async () => undefined,
       });
 
-      const run = await runtime.pipeline(pipelineRequest(`pipeline-${framework}`));
+      const run = await runtime.submit(projectRequest("pipeline", `pipeline-${framework}`));
       await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
         status: "succeeded",
       });
@@ -1343,14 +1234,14 @@ describe("eval runtime orchestration", () => {
       chatId: input.chatId,
     }));
     const runtime = createAutoResumingRuntime({
-      framework: "codex",
+      plans: makePlans(undefined, { execution: executionPlan({ harness: subjectHarness("codex") }) }),
       harness,
       store: makeStore(),
       sleep: async () => undefined,
       createRetryController: makeRetryControllerFactory({ creation: 1 }),
     });
 
-    const run = await runtime.start(startRequest("wrong-framework"));
+    const run = await runtime.submit(projectRequest("execution", "wrong-framework"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
     expect(harness.materializeInitialData).not.toHaveBeenCalled();
@@ -1370,7 +1261,7 @@ describe("eval runtime orchestration", () => {
       harness, store: makeStore(), sleep: async () => undefined,
       createRetryController: makeRetryControllerFactory({ creation: 1 }),
     });
-    const run = await runtime.start(startRequest("wrong-chat-owner"));
+    const run = await runtime.submit(projectRequest("execution", "wrong-chat-owner"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
     expect(harness.materializeInitialData).not.toHaveBeenCalled();
     expect(harness.submitAgent).not.toHaveBeenCalled();
@@ -1391,7 +1282,7 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.pipeline(pipelineRequest("missing-evaluator-workspace-binding"));
+    const run = await runtime.submit(projectRequest("pipeline", "missing-evaluator-workspace-binding"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
     expect(harness.materializeSubjectTrajectory).not.toHaveBeenCalled();
     expect(vi.mocked(harness.submitAgent).mock.calls.filter(
@@ -1410,14 +1301,14 @@ describe("eval runtime orchestration", () => {
         retryable: true,
       });
       const runtime = createAutoResumingRuntime({
-        framework,
+        plans: makePlans(undefined, { execution: executionPlan({ harness: subjectHarness(framework) }) }),
         harness,
         store: makeStore(),
         sleep: async () => undefined,
         createRetryController: makeRetryControllerFactory({ creation: 1, restart: 1 }),
       });
 
-      const run = await runtime.start(startRequest(`retry-${framework}`));
+      const run = await runtime.submit(projectRequest("execution", `retry-${framework}`));
       await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
 
       const ensureCalls = vi.mocked(harness.ensureAgent).mock.calls;
@@ -1435,19 +1326,17 @@ describe("eval runtime orchestration", () => {
   it("replays the original Run for its key without reading the current plan again", async () => {
     const harness = makeHarness();
     const runtime = createAutoResumingRuntime({
-      framework: "codex",
+      plans: makePlans(undefined, { execution: executionPlan({ harness: subjectHarness("codex") }) }),
       harness,
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const run = await runtime.start(startRequest("framework-request", EXECUTION_PLAN_ID, "framework-key"));
+    const run = await runtime.submit(projectRequest("execution", "framework-key"));
     await waitForTerminal(runtime, run.runId);
 
-    runtime.plans.framework = "cc";
+    runtime.plans.execution = executionPlan({ harness: subjectHarness("cc") });
     const getProjectPlan = vi.spyOn(runtime.plans, "getProjectPlan");
-    await expect(runtime.start(
-      startRequest("another-framework-request", EXECUTION_PLAN_ID, "framework-key"),
-    )).resolves.toEqual(run);
+    await expect(runtime.submit(projectRequest("execution", "framework-key"))).resolves.toEqual(run);
     expect(getProjectPlan).not.toHaveBeenCalled();
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
   });
@@ -1467,7 +1356,8 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.start(startRequest("execution-runtime-options", EXECUTION_PLAN_RUNTIME_ID));
+    runtime.plans.execution = executionPlan({ harness: subjectHarness("sp", EXECUTION_RUNTIME) });
+    const run = await runtime.submit(projectRequest("execution", "execution-runtime-options"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
       status: "succeeded",
     });
@@ -1511,11 +1401,10 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const execution = await runtime.start(startRequest("evaluation-runtime-execution"));
+    const execution = await runtime.submit(projectRequest("execution", "evaluation-runtime-execution"));
     await waitForTerminal(runtime, execution.runId);
-    const evaluation = await runtime.evaluate(
-      evaluateRequest(execution.samplingIds, EVALUATION_PLAN_RUNTIME_ID),
-    );
+    runtime.plans.evaluation = evaluationPlan({ evaluationHarness: { ...evaluationPlan().evaluationHarness, runtime: EVALUATION_RUNTIME } });
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
     await expect(waitForTerminal(runtime, evaluation.runId)).resolves.toMatchObject({
       status: "succeeded",
     });
@@ -1557,7 +1446,7 @@ describe("eval runtime orchestration", () => {
     });
     const plan = (await runtime.plans.getProjectPlan(PROJECT_ID))!;
 
-    const execution = await runtime.start(startRequest("plan-digest-execution"));
+    const execution = await runtime.submit(projectRequest("execution", "plan-digest-execution"));
     const executionRecord = await store.getRun(execution.runId);
     expect(executionRecord).toMatchObject({
       operation: "execution", phases: ["execution"], selector: { all: true },
@@ -1571,7 +1460,7 @@ describe("eval runtime orchestration", () => {
     });
 
     await waitForTerminal(runtime, execution.runId);
-    const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
     await expect(store.getRun(evaluation.runId)).resolves.toMatchObject({
       operation: "evaluation", phases: ["evaluation"], samplingIds: execution.samplingIds,
       selector: { samplingIds: execution.samplingIds },
@@ -1580,7 +1469,7 @@ describe("eval runtime orchestration", () => {
     });
 
     await waitForTerminal(runtime, evaluation.runId);
-    const pipeline = await runtime.pipeline(pipelineRequest("plan-digest-pipeline"));
+    const pipeline = await runtime.submit(projectRequest("pipeline", "plan-digest-pipeline"));
     await expect(store.getRun(pipeline.runId)).resolves.toMatchObject({
       operation: "pipeline", phases: ["execution", "evaluation"],
       planDigests: { execution: plan.executionPlanDigest, evaluation: plan.evaluation!.digest },
@@ -1593,9 +1482,8 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const run = await runtime.start(
-      startRequest("sample-record-request", EXECUTION_PLAN_TWO_SAMPLES_ID),
-    );
+    runtime.plans.samples = [makeSample("sample-1", { samplingCount: 2 })];
+    const run = await runtime.submit(projectRequest("execution", "sample-record-request"));
     await waitForTerminal(runtime, run.runId);
 
     const records = await Promise.all(
@@ -1613,10 +1501,10 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const request = startRequest("request-1");
+    const request = projectRequest("execution", "request-1");
 
-    const firstRun = await runtime.start(request);
-    const retriedRun = await runtime.start(request);
+    const firstRun = await runtime.submit(request);
+    const retriedRun = await runtime.submit(request);
 
     expect(retriedRun).toEqual(firstRun);
     await expect(waitForTerminal(runtime, firstRun.runId)).resolves.toMatchObject({
@@ -1632,8 +1520,8 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const firstRun = await runtime.start(startRequest("request-1", EXECUTION_PLAN_ID, "run-key-1"));
-    const retriedRun = await runtime.start(startRequest("request-2", EXECUTION_PLAN_ID, "run-key-1"));
+    const firstRun = await runtime.submit(projectRequest("execution", "run-key-1"));
+    const retriedRun = await runtime.submit(projectRequest("execution", "run-key-1"));
 
     expect(retriedRun).toEqual(firstRun);
     await expect(waitForTerminal(runtime, firstRun.runId)).resolves.toMatchObject({
@@ -1648,10 +1536,10 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    await runtime.start(startRequest("request-1", EXECUTION_PLAN_ID, "run-key-1"));
+    await runtime.submit(projectRequest("execution", "run-key-1"));
 
     await expect(
-      runtime.pipeline(pipelineRequest("pipeline-request", PIPELINE_PLAN_ID, "run-key-1")),
+      runtime.submit(projectRequest("pipeline", "run-key-1")),
     ).rejects.toThrow(RuntimeRunIdentityConflictError);
   });
 
@@ -1662,7 +1550,7 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const first = await runtime.start(startRequest("request-1", EXECUTION_PLAN_ID, "run-key-1"));
+    const first = await runtime.submit(projectRequest("execution", "run-key-1", ["sample-1", "sample-2"]));
     const request = {
       idempotencyKey: "run-key-1", projectId: PROJECT_ID, operation: "execution" as const,
       selector: { all: true as const }, targets: { projectSampleIds: ["sample-1", "sample-2"], samplingIds: [] },
@@ -1694,10 +1582,10 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const request = startRequest("request-1", EXECUTION_PLAN_ID, "run-key-1");
+    const request = projectRequest("execution", "run-key-1");
 
-    const firstAdmission = runtime.start(request);
-    const secondAdmission = runtime.start(request);
+    const firstAdmission = runtime.submit(request);
+    const secondAdmission = runtime.submit(request);
     releasePlan();
     const [firstRun, secondRun] = await Promise.all([firstAdmission, secondAdmission]);
 
@@ -1715,10 +1603,10 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const request = pipelineRequest("pipeline-request-1", PIPELINE_PLAN_ID, "pipeline-key-1");
+    const request = projectRequest("pipeline", "pipeline-key-1");
 
-    const firstRun = await runtime.pipeline(request);
-    const retriedRun = await runtime.pipeline(request);
+    const firstRun = await runtime.submit(request);
+    const retriedRun = await runtime.submit(request);
 
     expect(retriedRun).toEqual(firstRun);
     await expect(waitForTerminal(runtime, firstRun.runId)).resolves.toMatchObject({
@@ -1735,7 +1623,7 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.start(startRequest("test-request"));
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
     await waitForTerminal(runtime, run.runId);
 
     await expect(runtime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
@@ -1756,7 +1644,7 @@ describe("eval runtime orchestration", () => {
       createRetryController: makeRetryControllerFactory({ collection: 1 }),
     });
 
-    const run = await runtime.start(startRequest("test-request"));
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
 
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
       status: "succeeded",
@@ -1779,7 +1667,8 @@ describe("eval runtime orchestration", () => {
       createRetryController: makeRetryControllerFactory({ collection: 1 }),
     });
 
-    const run = await runtime.start(startRequest("test-request", EXECUTION_PLAN_RETRY_TWO_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_TWO });
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
 
     await expect.poll(async () => (await runtime.getSampling(run.samplingIds[0]!)).execution.evidencePending).toBe(true);
     expect((await runtime.getRun(run.runId)).status).toBe("retrying");
@@ -1815,7 +1704,8 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.start(startRequest("test-request", EXECUTION_PLAN_RETRY_TWO_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_TWO });
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
 
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
       status: "failed",
@@ -1843,7 +1733,7 @@ describe("eval runtime orchestration", () => {
     }));
     const runtime = createAutoResumingRuntime({ harness, store: makeStore() });
 
-    const run = await runtime.start(startRequest("failed-subject-evidence"));
+    const run = await runtime.submit(projectRequest("execution", "failed-subject-evidence"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
 
     expect(harness.collectExecution).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
@@ -1869,7 +1759,7 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.collectExecution).mockRejectedValue(new Error("workspace unavailable"));
     const runtime = createAutoResumingRuntime({ harness, store, onError });
 
-    const run = await runtime.start(startRequest("failed-subject-evidence-unavailable"));
+    const run = await runtime.submit(projectRequest("execution", "failed-subject-evidence-unavailable"));
     await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
 
     await expect(runtime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
@@ -1908,7 +1798,8 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.start(startRequest("test-request", EXECUTION_PLAN_RETRY_TWO_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_TWO });
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
 
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
     expect(harness.restartAgent).not.toHaveBeenCalled();
@@ -1934,7 +1825,8 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.start(startRequest("test-request", EXECUTION_PLAN_RETRY_ONE_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
 
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
       status: "succeeded",
@@ -1952,10 +1844,10 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const execution = await runtime.start(startRequest("test-request"));
+    const execution = await runtime.submit(projectRequest("execution", "test-request"));
     await waitForTerminal(runtime, execution.runId);
 
-    const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
     const snapshot = await waitForTerminal(runtime, evaluation.runId);
     const evaluationRecord = await runtime.getEvaluation(snapshot.evaluationIds[0]!);
 
@@ -2003,13 +1895,13 @@ describe("eval runtime orchestration", () => {
       store,
       sleep: async () => undefined,
     });
-    const execution = await runtime.start(startRequest("repeated-evaluation-execution"));
+    const execution = await runtime.submit(projectRequest("execution", "repeated-evaluation-execution"));
     await waitForTerminal(runtime, execution.runId);
 
-    const firstEvaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const firstEvaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
     const firstSnapshot = await waitForTerminal(runtime, firstEvaluation.runId);
 
-    const secondEvaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const secondEvaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
     const secondSnapshot = await waitForTerminal(runtime, secondEvaluation.runId);
     const evaluations = await runtime.listEvaluations(execution.samplingIds[0]!);
 
@@ -2040,20 +1932,18 @@ describe("eval runtime orchestration", () => {
     const getSamplings = vi.spyOn(store, "getSamplings");
     const admission = createTestAdmission(store);
     expect("resume" in admission).toBe(false);
-    const execution = await admission.start(startRequest("admission-only-execution"));
+    const execution = await admission.submit(projectRequest("execution", "admission-only-execution"));
     const sampling = await store.getSampling(execution.samplingIds[0]!);
     expect(sampling?.execution.status).toBe("queued");
     await store.updateSampling({ ...sampling!, execution: { status: "succeeded" } }, sampling!);
 
-    const evaluation = await admission.evaluate(evaluateRequest(
-      execution.samplingIds, EVALUATION_PLAN_ID, "admission-only-evaluation",
-    ));
+    const evaluation = await admission.submit(evaluationRequest(execution.samplingIds, "admission-only-evaluation"));
     expect(getSamplings).toHaveBeenCalledWith(execution.samplingIds);
     const evaluationIds = (await store.getRun(evaluation.runId))!.evaluationIds;
     expect(evaluationIds).toHaveLength(1);
     const queued = (await store.getEvaluation(evaluationIds[0]!))!;
     await store.updateEvaluation({ ...queued, status: { status: "succeeded" } }, queued);
-    const pipeline = await admission.pipeline(pipelineRequest("admission-only-pipeline"));
+    const pipeline = await admission.submit(projectRequest("pipeline", "admission-only-pipeline"));
     expect((await store.getRun(pipeline.runId))?.phases).toEqual(["execution", "evaluation"]);
     await expect(store.getSampling(execution.samplingIds[0]!)).resolves.toBeNull();
     await expect(store.getEvaluation(evaluationIds[0]!)).resolves.toBeNull();
@@ -2066,27 +1956,27 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const execution = await runtime.start(startRequest("evaluation-intent-execution"));
+    const execution = await runtime.submit(projectRequest("execution", "evaluation-intent-execution"));
     await waitForTerminal(runtime, execution.runId);
 
-    const request = evaluateRequest(execution.samplingIds, EVALUATION_PLAN_ID, "evaluation-intent");
+    const request = evaluationRequest(execution.samplingIds, "evaluation-intent");
     const [first, concurrent] = await Promise.all([
-      runtime.evaluate(request),
-      runtime.evaluate(request),
+      runtime.submit(request),
+      runtime.submit(request),
     ]);
     expect(concurrent).toEqual(first);
     await waitForTerminal(runtime, first.runId);
 
     const getProjectPlan = vi.spyOn(runtime.plans, "getProjectPlan")
       .mockRejectedValue(new Error("the plan must not be read on replay"));
-    await expect(runtime.evaluate(request)).resolves.toEqual(first);
+    await expect(runtime.submit(request)).resolves.toEqual(first);
     expect(getProjectPlan).not.toHaveBeenCalled();
     getProjectPlan.mockRestore();
     expect(await runtime.listEvaluations(execution.samplingIds[0]!)).toHaveLength(1);
     expect(vi.mocked(harness.ensureAgent).mock.calls.filter(([input]) => input.role === "evaluator"))
       .toHaveLength(1);
 
-    const deliberate = await runtime.evaluate({
+    const deliberate = await runtime.submit({
       ...request,
       idempotencyKey: "new-evaluation-intent",
     });
@@ -2104,7 +1994,7 @@ describe("eval runtime orchestration", () => {
       store,
       sleep: async () => undefined,
     });
-    const execution = await runtime.start(startRequest("plan-read-execution"));
+    const execution = await runtime.submit(projectRequest("execution", "plan-read-execution"));
     await waitForTerminal(runtime, execution.runId);
 
     let enteredRead!: () => void;
@@ -2121,16 +2011,16 @@ describe("eval runtime orchestration", () => {
       }
       return getProjectPlan(projectId);
     });
-    const request = evaluateRequest(execution.samplingIds, EVALUATION_PLAN_ID, "plan-read-key");
-    const firstAdmission = runtime.evaluate(request);
+    const request = evaluationRequest(execution.samplingIds, "plan-read-key");
+    const firstAdmission = runtime.submit(request);
     await reading;
 
-    const retry = runtime.evaluate(request);
+    const retry = runtime.submit(request);
     await expect(runtime.submit({
       idempotencyKey: request.idempotencyKey, projectId: PROJECT_ID, operation: "evaluation",
-      selector: { all: true }, targets: { projectSampleIds: [], samplingIds: [...request.samplingIds] },
+      selector: { all: true }, targets: request.targets,
     })).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
-    await expect(runtime.start(startRequest("other-operation", EXECUTION_PLAN_ID, request.idempotencyKey)))
+    await expect(runtime.submit(projectRequest("execution", request.idempotencyKey)))
       .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
     releaseRead();
 
@@ -2141,8 +2031,8 @@ describe("eval runtime orchestration", () => {
 
     const failedRequest = { ...request, idempotencyKey: "retry-after-plan-error" };
     readPlan.mockRejectedValueOnce(new Error("temporary plan error"));
-    await expect(runtime.evaluate(failedRequest)).rejects.toThrow("temporary plan error");
-    await expect(runtime.evaluate(failedRequest)).resolves.toMatchObject({ runId: expect.any(String) });
+    await expect(runtime.submit(failedRequest)).rejects.toThrow("temporary plan error");
+    await expect(runtime.submit(failedRequest)).resolves.toMatchObject({ runId: expect.any(String) });
   });
 
   it("rejects a changed evaluation selection under an admitted key", async () => {
@@ -2151,22 +2041,17 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const execution = await runtime.start(startRequest(
-      "evaluation-selection-execution",
-      EXECUTION_PLAN_TWO_CONCURRENT_ID,
-    ));
+    runtime.plans.samples = [makeSample("sample-1", { samplingCount: 2 })];
+    runtime.plans.execution = executionPlan({ executionConcurrency: 2 });
+    const execution = await runtime.submit(projectRequest("execution", "evaluation-selection-execution"));
     await waitForTerminal(runtime, execution.runId);
-    const request = evaluateRequest(execution.samplingIds, EVALUATION_PLAN_ID, "evaluation-selection");
-    await runtime.evaluate(request);
+    const request = evaluationRequest(execution.samplingIds, "evaluation-selection");
+    await runtime.submit(request);
 
-    await expect(runtime.evaluate({
-      ...request,
-      samplingIds: [...request.samplingIds].reverse(),
-    })).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
-    await expect(runtime.evaluate({
-      ...request,
-      samplingIds: request.samplingIds.slice(0, 1),
-    })).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(runtime.submit(evaluationRequest([...execution.samplingIds].reverse(), request.idempotencyKey)))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(runtime.submit(evaluationRequest(execution.samplingIds.slice(0, 1), request.idempotencyKey)))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
     expect(await runtime.listEvaluations(execution.samplingIds[0]!)).toHaveLength(1);
   });
 
@@ -2180,14 +2065,13 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const execution = await runtime.start(
-      startRequest("shared-sample-execution", EXECUTION_PLAN_TWO_CONCURRENT_ID),
-    );
+    runtime.plans.samples = [makeSample("sample-1", { samplingCount: 2 })];
+    runtime.plans.execution = executionPlan({ executionConcurrency: 2 });
+    const execution = await runtime.submit(projectRequest("execution", "shared-sample-execution"));
     await waitForTerminal(runtime, execution.runId);
 
-    const evaluation = await runtime.evaluate(
-      evaluateRequest(execution.samplingIds, EVALUATION_PLAN_TWO_CONCURRENT_ID),
-    );
+    runtime.plans.evaluation = evaluationPlan({ evaluationConcurrency: 2 });
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
     await waitForTerminal(runtime, evaluation.runId);
 
     expect(getSamples).toHaveBeenCalledTimes(4);
@@ -2208,15 +2092,15 @@ describe("eval runtime orchestration", () => {
       store,
       sleep: async () => undefined,
     });
-    const execution = await runtime.start(startRequest("test-request"));
+    const execution = await runtime.submit(projectRequest("execution", "test-request"));
     await waitForTerminal(runtime, execution.runId);
 
-    const firstEvaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const firstEvaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
     await waitForTerminal(runtime, firstEvaluation.runId);
     const before = await runtime.getSampling(execution.samplingIds[0]!);
 
     failEvaluationRun = true;
-    await expect(runtime.evaluate(evaluateRequest(execution.samplingIds)))
+    await expect(runtime.submit(evaluationRequest(execution.samplingIds)))
       .rejects.toThrow("evaluation run preparation failed");
 
     await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.toEqual(before);
@@ -2234,7 +2118,7 @@ describe("eval runtime orchestration", () => {
       createRetryController: makeRetryControllerFactory({ creation: 1 }),
     });
 
-    const run = await runtime.start(startRequest("test-request"));
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
       status: "succeeded",
     });
@@ -2258,11 +2142,12 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
       createRetryController: makeRetryControllerFactory({ initialization: 1 }),
     });
-    const execution = await runtime.start(startRequest("evaluator-initialization-execution"));
+    const execution = await runtime.submit(projectRequest("execution", "evaluator-initialization-execution"));
     await waitForTerminal(runtime, execution.runId);
     vi.mocked(harness.materializeInitialData).mockRejectedValueOnce(new Error("evaluator initialization response lost"));
 
-    const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds, EVALUATION_PLAN_RUNTIME_ID));
+    runtime.plans.evaluation = evaluationPlan({ evaluationHarness: { ...evaluationPlan().evaluationHarness, runtime: EVALUATION_RUNTIME } });
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
     const snapshot = await waitForTerminal(runtime, evaluation.runId);
     expect(snapshot.status).toBe("succeeded");
 
@@ -2307,7 +2192,7 @@ describe("eval runtime orchestration", () => {
       createRetryController: makeRetryControllerFactory({ initialization: 1 }),
     });
 
-    const run = await runtime.pipeline(pipelineRequest("evidence-copy-response-lost"));
+    const run = await runtime.submit(projectRequest("pipeline", "evidence-copy-response-lost"));
     await started;
     const evaluatorSubmissions = () => vi.mocked(harness.submitAgent).mock.calls
       .filter(([input]) => input.handle.role === "evaluator");
@@ -2358,10 +2243,11 @@ describe("eval runtime orchestration", () => {
         sleep,
         createRetryController: () => ({ decide }),
       });
-      const execution = await runtime.start(startRequest(`evidence-failure-execution-${retryable}`));
+      const execution = await runtime.submit(projectRequest("execution", `evidence-failure-execution-${retryable}`));
       await waitForTerminal(runtime, execution.runId);
 
-      const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds, EVALUATION_PLAN_RETRY_ONE_ID));
+      runtime.plans.evaluation = evaluationPlan({ retryPolicy: RETRY_ONE });
+      const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
       const snapshot = await waitForTerminal(runtime, evaluation.runId);
       expect(snapshot.status).toBe("failed");
 
@@ -2402,10 +2288,10 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const execution = await runtime.start(startRequest("test-request"));
+    const execution = await runtime.submit(projectRequest("execution", "test-request"));
     await waitForTerminal(runtime, execution.runId);
 
-    const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
     const evaluationSnapshot = await waitForTerminal(runtime, evaluation.runId);
     await expect(evaluationSnapshot).toMatchObject({
       status: "failed",
@@ -2431,12 +2317,12 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
       createRetryController: makeRetryControllerFactory({ collection: 1 }),
     });
-    const execution = await runtime.start(startRequest("test-request"));
+    const execution = await runtime.submit(projectRequest("execution", "test-request"));
     await waitForTerminal(runtime, execution.runId);
 
     vi.mocked(harness.collectEvaluation)
       .mockRejectedValueOnce(new Error("temporary evaluation artifact fetch failure"));
-    const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
 
     await expect(waitForTerminal(runtime, evaluation.runId)).resolves.toMatchObject({
       status: "succeeded",
@@ -2454,7 +2340,7 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.start(startRequest("test-request"));
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
     await waitForTerminal(runtime, run.runId);
 
     const restoredRuntime = createAutoResumingRuntime({
@@ -2487,12 +2373,11 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const execution = await runtime.start(startRequest("test-request"));
+    const execution = await runtime.submit(projectRequest("execution", "test-request"));
     await waitForTerminal(runtime, execution.runId);
 
-    const evaluation = await runtime.evaluate(
-      evaluateRequest(execution.samplingIds, EVALUATION_PLAN_RETRY_ONE_ID),
-    );
+    runtime.plans.evaluation = evaluationPlan({ retryPolicy: RETRY_ONE });
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
     const snapshot = await waitForTerminal(runtime, evaluation.runId);
     expect(snapshot.status).toBe("succeeded");
     const evaluator = await runtime.getEvaluation(snapshot.evaluationIds[0]!);
@@ -2522,7 +2407,8 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.start(startRequest("test-request", EXECUTION_PLAN_RETRY_ONE_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
     const snapshot = await waitForTerminal(runtime, run.runId);
 
     expect(snapshot.status).toBe("succeeded");
@@ -2554,7 +2440,8 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.start(startRequest("test-request", EXECUTION_PLAN_RETRY_ONE_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
 
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
       status: "succeeded",
@@ -2594,7 +2481,8 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.start(startRequest("test-request", EXECUTION_PLAN_RETRY_TWO_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_TWO });
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
 
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
       status: "succeeded",
@@ -2622,7 +2510,8 @@ describe("eval runtime orchestration", () => {
       createRetryController: makeRetryControllerFactory({ collection: 1 }),
     });
 
-    const run = await runtime.start(startRequest("test-request", EXECUTION_PLAN_RETRY_ONE_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "test-request"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({
       status: "succeeded",
     });
@@ -2642,7 +2531,7 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.pipeline(pipelineRequest("test-request"));
+    const run = await runtime.submit(projectRequest("pipeline", "test-request"));
     await expect(runtime.getRun(run.runId)).resolves.toMatchObject({ status: "queued" });
     const snapshot = await waitForTerminal(runtime, run.runId);
 
@@ -2703,9 +2592,9 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.pipeline(
-      pipelineRequest("test-request", PIPELINE_PLAN_CONCURRENT_ID),
-    );
+    runtime.plans.execution = executionPlan({ executionConcurrency: 3 });
+    runtime.plans.evaluation = evaluationPlan({ evaluationConcurrency: 2 });
+    const run = await runtime.submit(projectRequest("pipeline", "test-request", ["sample-1", "sample-2", "sample-3"]));
 
     await evaluationStarted;
     await expect(runtime.getRun(run.runId)).resolves.toMatchObject({ status: "running" });
@@ -2748,7 +2637,7 @@ describe("Project Run targets and partial replacement", () => {
     { datasetId: "dataset-b", name: "B", kind: "prompt", projectSampleIds: ["sample-2", "sample-3"] },
   ];
 
-  function projectPlans(options: { readonly evaluation?: string | null } = {}) {
+  function projectPlans(options: { readonly evaluation?: null } = {}) {
     return makePlans([
       makeSample("sample-1", { datasetIds: ["dataset-a"] }),
       makeSample("sample-2", { datasetIds: ["dataset-a", "dataset-b"], samplingCount: 2 }),
@@ -2953,10 +2842,9 @@ describe("Project Run targets and partial replacement", () => {
   it.each(["execution", "evaluation"] as const)("never resumes a Run whose %s plan digest changed", async (stage) => {
     const store = makeStore({ plans: projectPlans() });
     const harness = makeHarness();
-    const handle = await createTestAdmission(store).pipeline(pipelineRequest(`changed-${stage}`));
-    store.plans().use(stage === "execution"
-      ? { execution: EXECUTION_PLAN_RETRY_ONE_ID }
-      : { evaluation: EVALUATION_PLAN_TWO_CONCURRENT_ID });
+    const handle = await createTestAdmission(store).submit(projectRequest("pipeline", `changed-${stage}`));
+    if (stage === "execution") store.plans().execution = executionPlan({ retryPolicy: RETRY_ONE });
+    else store.plans().evaluation = evaluationPlan({ evaluationConcurrency: 2 });
     const resumer = createTestResumer(store, harness);
 
     await expect(resumer.resume(handle.runId)).rejects.toThrow("was admitted against a different plan");
@@ -2973,7 +2861,10 @@ describe("Project Run targets and partial replacement", () => {
       await gate;
       return { bundleId: "bundle-1", manifestHash: "manifest-1", target: "workspace", rootPath: "/eval/input" };
     });
-    const handle = await createTestAdmission(store).start(startRequest("plan-concurrency", EXECUTION_PLAN_TWO_CONCURRENT_ID));
+    store.plans().samples = store.plans().samples.map((sample) => ({ ...sample, samplingCount: 2 }));
+    store.plans().execution = executionPlan({ executionConcurrency: 2 });
+    const handle = await createTestAdmission(store)
+      .submit(projectRequest("execution", "plan-concurrency", ["sample-1", "sample-2", "sample-3"]));
     expect(handle.samplingIds).toHaveLength(6);
     const task = createTestResumer(store, harness).resume(handle.runId);
     await vi.waitFor(() => expect(harness.materializeInitialData).toHaveBeenCalledTimes(2));
@@ -3003,7 +2894,7 @@ describe("Project Run stop", () => {
 
   it("cancels an unstarted Pipeline without dispatching either phase", async () => {
     const { store, harness, admission, resumer } = stoppedRun();
-    const handle = await admission.pipeline(pipelineRequest("stop-queued-pipeline"));
+    const handle = await admission.submit(projectRequest("pipeline", "stop-queued-pipeline"));
     await resumer.stop(handle.runId);
     const run = (await store.getRun(handle.runId))!;
     const sampling = (await store.getSampling(handle.samplingIds[0]!))!;
@@ -3019,7 +2910,7 @@ describe("Project Run stop", () => {
 
   it("reports an accepted stop as cancelled even if the last stage finished naturally", async () => {
     const { store, admission } = stoppedRun();
-    const handle = await admission.start(startRequest("stop-natural-completion-race"));
+    const handle = await admission.submit(projectRequest("execution", "stop-natural-completion-race"));
     const run = (await store.getRun(handle.runId))!;
     const queued = (await store.getSampling(handle.samplingIds[0]!))!;
     const succeeded: SamplingState = { ...queued, execution: { status: "succeeded" } };
@@ -3033,7 +2924,7 @@ describe("Project Run stop", () => {
     const store = makeStore();
     const harness = makeHarness();
     const admission = createTestAdmission(store);
-    const handle = await admission.start(startRequest("stop-before-submission"));
+    const handle = await admission.submit(projectRequest("execution", "stop-before-submission"));
     const originalGate = store.withRunDispatchGate.bind(store);
     const originalGetRun = store.getRun.bind(store);
     let calls = 0;
@@ -3071,7 +2962,7 @@ describe("Project Run stop", () => {
     const store = makeStore();
     const harness = makeHarness();
     const admission = createTestAdmission(store);
-    const handle = await admission.start(startRequest("stop-sp-latch-race"));
+    const handle = await admission.submit(projectRequest("execution", "stop-sp-latch-race"));
     let stopped = false;
     vi.mocked(harness.submitAgent).mockImplementation(async () => {
       stopped = true;
@@ -3101,7 +2992,7 @@ describe("Project Run stop", () => {
     const store = makeStore();
     const harness = makeHarness();
     const admission = createTestAdmission(store);
-    const execution = await admission.start(startRequest("stop-evaluator-seed"));
+    const execution = await admission.submit(projectRequest("execution", "stop-evaluator-seed"));
     const samplingId = execution.samplingIds[0]!;
     const queued = (await store.getSampling(samplingId))!;
     await store.updateSampling({
@@ -3111,7 +3002,7 @@ describe("Project Run stop", () => {
       artifacts: [{ artifactId: "subject-file", kind: "file", path: "/subject.txt" }],
       trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
     }, queued);
-    const handle = await admission.evaluate(evaluateRequest([samplingId], EVALUATION_PLAN_ID, "stop-evaluator-latch"));
+    const handle = await admission.submit(evaluationRequest([samplingId], "stop-evaluator-latch"));
     let stopped = false;
     vi.mocked(harness.submitAgent).mockImplementation(async () => {
       stopped = true;
@@ -3140,7 +3031,7 @@ describe("Project Run stop", () => {
 
   it("cancels a failed Subject creation when the SP Chat does not exist", async () => {
     const { store, harness, admission, resumer } = stoppedRun();
-    const handle = await admission.start(startRequest("stop-missing-subject-chat"));
+    const handle = await admission.submit(projectRequest("execution", "stop-missing-subject-chat"));
     const samplingId = handle.samplingIds[0]!;
     const queued = (await store.getSampling(samplingId))!;
     await store.updateSampling({
@@ -3165,7 +3056,7 @@ describe("Project Run stop", () => {
 
   it("cancels a failed Evaluator creation when its SP Chat does not exist", async () => {
     const { store, harness, admission, resumer } = stoppedRun();
-    const execution = await admission.start(startRequest("stop-missing-evaluator-seed"));
+    const execution = await admission.submit(projectRequest("execution", "stop-missing-evaluator-seed"));
     const samplingId = execution.samplingIds[0]!;
     const queued = (await store.getSampling(samplingId))!;
     await store.updateSampling({
@@ -3174,7 +3065,7 @@ describe("Project Run stop", () => {
       artifacts: [{ artifactId: "subject-file", kind: "file", path: "/subject.txt" }],
       trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
     }, queued);
-    const handle = await admission.evaluate(evaluateRequest([samplingId], EVALUATION_PLAN_ID, "stop-missing-evaluator-chat"));
+    const handle = await admission.submit(evaluationRequest([samplingId], "stop-missing-evaluator-chat"));
     const run = (await store.getRun(handle.runId))!;
     const evaluationId = run.evaluationIds[0]!;
     const initial = (await store.getEvaluation(evaluationId))!;
@@ -3200,7 +3091,7 @@ describe("Project Run stop", () => {
 
   it("does not erase a saved Submission ID when its SP Chat is missing", async () => {
     const { store, harness, admission, resumer } = stoppedRun();
-    const handle = await admission.start(startRequest("stop-missing-claimed-submission"));
+    const handle = await admission.submit(projectRequest("execution", "stop-missing-claimed-submission"));
     const samplingId = handle.samplingIds[0]!;
     const queued = (await store.getSampling(samplingId))!;
     const claimed: SamplingState = {
@@ -3223,7 +3114,7 @@ describe("Project Run stop", () => {
 
   it("interrupts a live Subject and preserves its artifacts, trajectory and resource facts", async () => {
     const { store, harness, admission, resumer } = stoppedRun();
-    const handle = await admission.start(startRequest("stop-running-subject"));
+    const handle = await admission.submit(projectRequest("execution", "stop-running-subject"));
     const samplingId = handle.samplingIds[0]!;
     const queued = (await store.getSampling(samplingId))!;
     const active: SamplingState = {
@@ -3257,7 +3148,7 @@ describe("Project Run stop", () => {
 
   it("interrupts a live Evaluator and keeps its result and resource snapshot", async () => {
     const { store, harness, admission, resumer } = stoppedRun();
-    const execution = await admission.start(startRequest("stop-evaluation-seed"));
+    const execution = await admission.submit(projectRequest("execution", "stop-evaluation-seed"));
     const samplingId = execution.samplingIds[0]!;
     const queued = (await store.getSampling(samplingId))!;
     const succeeded: SamplingState = {
@@ -3266,7 +3157,7 @@ describe("Project Run stop", () => {
       trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
     };
     await store.updateSampling(succeeded, queued);
-    const handle = await admission.evaluate(evaluateRequest([samplingId], EVALUATION_PLAN_ID, "stop-evaluation"));
+    const handle = await admission.submit(evaluationRequest([samplingId], "stop-evaluation"));
     const run = (await store.getRun(handle.runId))!;
     const evaluationId = run.evaluationIds[0]!;
     const initial = (await store.getEvaluation(evaluationId))!;
@@ -3302,7 +3193,7 @@ describe("Project Run stop", () => {
     const store = makeStore();
     const harness = makeHarness();
     const admission = createTestAdmission(store);
-    const handle = await admission.start(startRequest("stop-active-retry"));
+    const handle = await admission.submit(projectRequest("execution", "stop-active-retry"));
     vi.mocked(harness.submitAgent).mockResolvedValue({
       submissionId: "active-submission", status: "running",
     });
@@ -3323,7 +3214,7 @@ describe("Project Run stop", () => {
     const store = makeStore();
     const harness = makeHarness();
     const admission = createTestAdmission(store);
-    const handle = await admission.start(startRequest("stop-stalled-terminal-wait"));
+    const handle = await admission.submit(projectRequest("execution", "stop-stalled-terminal-wait"));
     vi.mocked(harness.submitAgent).mockResolvedValue({
       submissionId: "stalled-submission", status: "running",
     });
@@ -3346,7 +3237,7 @@ describe("Project Run stop", () => {
     const store = makeStore();
     const harness = makeHarness();
     const admission = createTestAdmission(store);
-    const handle = await admission.start(startRequest("stop-hung-preparation"));
+    const handle = await admission.submit(projectRequest("execution", "stop-hung-preparation"));
     vi.mocked(harness.materializeInitialData).mockImplementation(async () => new Promise(() => undefined));
     const resumer = createTestResumer(store, harness);
     const controller = new AbortController();
@@ -3367,7 +3258,7 @@ describe("Project Run stop", () => {
 
   it("keeps a stopped Subject pending until its complete evidence can be saved", async () => {
     const { store, harness, admission, resumer } = stoppedRun();
-    const handle = await admission.start(startRequest("stop-evidence-retry"));
+    const handle = await admission.submit(projectRequest("execution", "stop-evidence-retry"));
     const samplingId = handle.samplingIds[0]!;
     const queued = (await store.getSampling(samplingId))!;
     const pending: SamplingState = {
@@ -3395,7 +3286,7 @@ describe("Project Run stop", () => {
 
   it("confirms saved evidence after the store loses its write response", async () => {
     const { store, harness, admission, resumer } = stoppedRun();
-    const handle = await admission.start(startRequest("stop-evidence-write-response-lost"));
+    const handle = await admission.submit(projectRequest("execution", "stop-evidence-write-response-lost"));
     const samplingId = handle.samplingIds[0]!;
     const queued = (await store.getSampling(samplingId))!;
     const interrupted: SamplingState = {
@@ -3464,7 +3355,7 @@ describe("raw resource persistence", () => {
       };
     });
     const runtime = createAutoResumingRuntime({ harness, store });
-    const run = await runtime.pipeline(pipelineRequest("raw-pipeline"));
+    const run = await runtime.submit(projectRequest("pipeline", "raw-pipeline"));
     const completed = await waitForTerminal(runtime, run.runId);
 
     expect(completed.status).toBe("succeeded");
@@ -3489,7 +3380,7 @@ describe("raw resource persistence", () => {
     const harness = makeHarness();
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => makeResources(input));
     const runtime = createAutoResumingRuntime({ harness, store });
-    const run = await runtime.pipeline(pipelineRequest("cold-raw-query"));
+    const run = await runtime.submit(projectRequest("pipeline", "cold-raw-query"));
     const completed = await waitForTerminal(runtime, run.runId);
     const originalSampling = await store.getSampling(run.samplingIds[0]!);
     const originalEvaluation = await store.getEvaluation(completed.evaluationIds[0]!);
@@ -3528,7 +3419,7 @@ describe("raw resource persistence", () => {
       return resources;
     });
     const runtime = createAutoResumingRuntime({ harness, store: makeStore() });
-    const run = await runtime.start(startRequest(`raw-subject-${status}`));
+    const run = await runtime.submit(projectRequest("execution", `raw-subject-${status}`));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
@@ -3555,7 +3446,7 @@ describe("raw resource persistence", () => {
       return resources;
     });
     const runtime = createAutoResumingRuntime({ harness, store: makeStore() });
-    const run = await runtime.pipeline(pipelineRequest(`raw-evaluator-${status}`));
+    const run = await runtime.submit(projectRequest("pipeline", `raw-evaluator-${status}`));
     const completed = await waitForTerminal(runtime, run.runId);
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
@@ -3591,9 +3482,11 @@ describe("raw resource persistence", () => {
       return makeSubmission();
     });
     const runtime = createAutoResumingRuntime({ harness, store, sleep: async () => undefined });
-    const execution = await runtime.start(startRequest("raw-before-restart", role === "subject" ? EXECUTION_PLAN_RETRY_ONE_ID : EXECUTION_PLAN_ID));
+    if (role === "subject") runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const execution = await runtime.submit(projectRequest("execution", "raw-before-restart"));
     await waitForTerminal(runtime, execution.runId);
-    const run = role === "subject" ? execution : await runtime.evaluate(evaluateRequest(execution.samplingIds, EVALUATION_PLAN_RETRY_ONE_ID));
+    runtime.plans.evaluation = evaluationPlan({ retryPolicy: RETRY_ONE });
+    const run = role === "subject" ? execution : await runtime.submit(evaluationRequest(execution.samplingIds));
     const completed = await waitForTerminal(runtime, run.runId);
     const attempts = role === "subject"
       ? (await runtime.getSampling(run.samplingIds[0]!)).executionAttempts
@@ -3629,7 +3522,7 @@ describe("raw resource persistence", () => {
       harness, store, sleep: async () => undefined,
       createRetryController: makeRetryControllerFactory({ resources: 1, collection: 1, persistence: 1 }),
     });
-    const run = await runtime.start(startRequest("independent-resource-retry"));
+    const run = await runtime.submit(projectRequest("execution", "independent-resource-retry"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
 
     const reads = vi.mocked(harness.collectAgentResources).mock.calls;
@@ -3649,7 +3542,7 @@ describe("raw resource persistence", () => {
       harness, store: makeStore(), sleep: async () => undefined,
       createRetryController: makeRetryControllerFactory({ resources: 1 }),
     });
-    const run = await runtime.pipeline(pipelineRequest("missing-resources-pipeline"));
+    const run = await runtime.submit(projectRequest("pipeline", "missing-resources-pipeline"));
     const completed = await waitForTerminal(runtime, run.runId);
     expect(completed.status).toBe("succeeded");
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
@@ -3674,7 +3567,7 @@ describe("raw resource persistence", () => {
     });
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("resource source unavailable"));
     const runtime = createAutoResumingRuntime({ harness, store: makeStore() });
-    const run = await runtime.start(startRequest("agent-and-resources-failed"));
+    const run = await runtime.submit(projectRequest("execution", "agent-and-resources-failed"));
     await waitForTerminal(runtime, run.runId);
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
 
@@ -3693,7 +3586,7 @@ describe("raw resource persistence", () => {
     const runtime = createAutoResumingRuntime({
       harness, store: makeStore(), createRetryController: () => ({ decide }),
     });
-    const run = await runtime.start(startRequest("wrong-resource-scope"));
+    const run = await runtime.submit(projectRequest("execution", "wrong-resource-scope"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
 
     const resources = (await runtime.getSampling(run.samplingIds[0]!)).executionAttempts[0]!.resources;
@@ -3711,7 +3604,7 @@ describe("raw resource persistence", () => {
       vi.mocked(harness.materializeInitialData).mockRejectedValue(new Error("initialization failed"));
     }
     const runtime = createAutoResumingRuntime({ harness, store: makeStore() });
-    const run = await runtime.start(startRequest(`no-resources-before-${operation}`));
+    const run = await runtime.submit(projectRequest("execution", `no-resources-before-${operation}`));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
 
     expect(harness.collectAgentResources).not.toHaveBeenCalled();
@@ -3732,7 +3625,7 @@ describe("raw resource persistence", () => {
     });
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => makeResources(input));
     const runtime = createAutoResumingRuntime({ harness, store: makeStore() });
-    const run = await runtime.start(startRequest("pending-resources"));
+    const run = await runtime.submit(projectRequest("execution", "pending-resources"));
     await waiting;
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
@@ -3767,7 +3660,7 @@ describe("raw resource persistence", () => {
       return captured;
     });
     const runtime = createAutoResumingRuntime({ harness, store: makeStore() });
-    const run = await runtime.start(startRequest(`uncertain-${operation}-raw-data`));
+    const run = await runtime.submit(projectRequest("execution", `uncertain-${operation}-raw-data`));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
@@ -3783,13 +3676,13 @@ describe("raw resource persistence", () => {
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => makeResources(input));
     const store = makeStore();
     const runtime = createAutoResumingRuntime({ harness, store });
-    const execution = await runtime.start(startRequest("raw-execution-for-reevaluation"));
+    const execution = await runtime.submit(projectRequest("execution", "raw-execution-for-reevaluation"));
     await waitForTerminal(runtime, execution.runId);
     const subjectBefore = await runtime.getSampling(execution.samplingIds[0]!);
-    const first = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const first = await runtime.submit(evaluationRequest(execution.samplingIds));
     const firstRun = await waitForTerminal(runtime, first.runId);
     const firstBefore = await runtime.getEvaluation(firstRun.evaluationIds[0]!);
-    const second = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const second = await runtime.submit(evaluationRequest(execution.samplingIds));
     const secondRun = await waitForTerminal(runtime, second.runId);
     const secondEvaluation = await runtime.getEvaluation(secondRun.evaluationIds[0]!);
 
@@ -3817,7 +3710,7 @@ describe("raw resource persistence", () => {
     });
     const onError = vi.fn();
     const runtime = createAutoResumingRuntime({ harness, store, onError });
-    const run = await runtime.pipeline(pipelineRequest("retain-raw-on-store-error"));
+    const run = await runtime.submit(projectRequest("pipeline", "retain-raw-on-store-error"));
     await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
     const pending = await runtime.getRun(run.runId);
     expect(pending.status).toBe("running");
@@ -3850,7 +3743,8 @@ describe("raw resource persistence", () => {
     });
     const onError = vi.fn();
     const runtime = createAutoResumingRuntime({ harness, store, onError });
-    const run = await runtime.start(startRequest("raw-store-failed", EXECUTION_PLAN_RETRY_ONE_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "raw-store-failed"));
     await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
@@ -3875,7 +3769,8 @@ describe("raw resource persistence", () => {
     });
     vi.mocked(harness.collectExecution).mockRejectedValue(new Error("artifact read unavailable"));
     const runtime = createAutoResumingRuntime({ harness, store: makeStore() });
-    const run = await runtime.start(startRequest("raw-before-output-failure", EXECUTION_PLAN_RETRY_ONE_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "raw-before-output-failure"));
     await expect.poll(async () => (await runtime.getSampling(run.samplingIds[0]!)).execution.evidencePending).toBe(true);
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
@@ -3900,7 +3795,8 @@ describe("raw resource persistence", () => {
       ...makeResources(input), usageEvents: [repeatedUsage], billingSettlements: [repeatedSettlement],
     }));
     const runtime = createAutoResumingRuntime({ harness, store: makeStore(), sleep: async () => undefined });
-    const run = await runtime.start(startRequest("raw-source-repeats", EXECUTION_PLAN_RETRY_ONE_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "raw-source-repeats"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
@@ -3942,9 +3838,9 @@ describe("raw resource persistence", () => {
       });
     }
     const runtime = createAutoResumingRuntime({ harness, store });
-    const execution = await runtime.start(startRequest(`lost-${role}-raw-store-response`));
+    const execution = await runtime.submit(projectRequest("execution", `lost-${role}-raw-store-response`));
     await waitForTerminal(runtime, execution.runId);
-    const run = role === "subject" ? execution : await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const run = role === "subject" ? execution : await runtime.submit(evaluationRequest(execution.samplingIds));
     const completed = await waitForTerminal(runtime, run.runId);
     const attempts = role === "subject"
       ? (await runtime.getSampling(run.samplingIds[0]!)).executionAttempts
@@ -4011,8 +3907,8 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
       createRetryController: () => ({ decide }),
     });
     const run = role === "subject"
-      ? await runtime.start(startRequest(`retry-${role}-${step}`))
-      : await runtime.pipeline(pipelineRequest(`retry-${role}-${step}`));
+      ? await runtime.submit(projectRequest("execution", `retry-${role}-${step}`))
+      : await runtime.submit(projectRequest("pipeline", `retry-${role}-${step}`));
     const completed = await waitForTerminal(runtime, run.runId);
     const attempts = role === "subject"
       ? (await runtime.getSampling(run.samplingIds[0]!)).executionAttempts
@@ -4067,8 +3963,8 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
       createRetryController: makeRetryControllerFactory({ persistence: 1, restart: 1 }),
     });
     const run = role === "subject"
-      ? await runtime.start(startRequest(`exhausted-${role}-persistence`))
-      : await runtime.pipeline(pipelineRequest(`exhausted-${role}-persistence`));
+      ? await runtime.submit(projectRequest("execution", `exhausted-${role}-persistence`))
+      : await runtime.submit(projectRequest("pipeline", `exhausted-${role}-persistence`));
     if (role === "subject") await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
     const completed = role === "subject" ? await runtime.getRun(run.runId) : await waitForTerminal(runtime, run.runId);
     const record = role === "subject"
@@ -4114,8 +4010,8 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
     }
     const runtime = createAutoResumingRuntime({ harness, store, onError });
     const run = role === "subject"
-      ? await runtime.start(startRequest(`failed-${role}-resource-persistence`))
-      : await runtime.pipeline(pipelineRequest(`failed-${role}-resource-persistence`));
+      ? await runtime.submit(projectRequest("execution", `failed-${role}-resource-persistence`))
+      : await runtime.submit(projectRequest("pipeline", `failed-${role}-resource-persistence`));
     if (role === "subject") await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
     const completed = role === "subject" ? await runtime.getRun(run.runId) : await waitForTerminal(runtime, run.runId);
     const attempts = role === "subject"
@@ -4159,7 +4055,9 @@ describe("pipeline cancellation isolation", () => {
       harness, store, onError, sleep: async () => undefined,
       createRetryController: makeRetryControllerFactory({ persistence: 1 }),
     });
-    const run = await runtime.pipeline(pipelineRequest(`cancel-${failure}`, PIPELINE_PLAN_CONCURRENT_ID));
+    runtime.plans.execution = executionPlan({ executionConcurrency: 3 });
+    runtime.plans.evaluation = evaluationPlan({ evaluationConcurrency: 2 });
+    const run = await runtime.submit(projectRequest("pipeline", `cancel-${failure}`, ["sample-a", "sample-b"]));
     const completed = await waitForTerminal(runtime, run.runId);
     const [evaluationA] = await runtime.listEvaluations(run.samplingIds[0]!);
     await expect.poll(async () => (await runtime.listEvaluations(run.samplingIds[1]!))[0]!.status.status).toBe("cancelled");
@@ -4193,7 +4091,9 @@ describe("pipeline cancellation isolation", () => {
       plans: makePlans([makeSample("sample-a"), makeSample("sample-b")]), harness, store, sleep,
       createRetryController: makeRetryControllerFactory({ persistence: 1 }),
     });
-    const run = await runtime.pipeline(pipelineRequest("cancel-retry-gate", PIPELINE_PLAN_CONCURRENT_ID));
+    runtime.plans.execution = executionPlan({ executionConcurrency: 3 });
+    runtime.plans.evaluation = evaluationPlan({ evaluationConcurrency: 2 });
+    const run = await runtime.submit(projectRequest("pipeline", "cancel-retry-gate", ["sample-a", "sample-b"]));
     try {
       await expect.poll(async () => (await runtime.listEvaluations(run.samplingIds[0]!))[0]!.status.status).toBe("succeeded");
       expect(sleep).toHaveBeenCalledTimes(1);
@@ -4219,7 +4119,9 @@ describe("pipeline cancellation isolation", () => {
       plans: makePlans([makeSample("sample-a"), makeSample("sample-b")]), harness, store, onError,
       sleep: async () => undefined, createRetryController: makeRetryControllerFactory({ persistence: 1 }),
     });
-    const run = await runtime.pipeline(pipelineRequest(`cancel-exhausted-${retryable}`, PIPELINE_PLAN_CONCURRENT_ID));
+    runtime.plans.execution = executionPlan({ executionConcurrency: 3 });
+    runtime.plans.evaluation = evaluationPlan({ evaluationConcurrency: 2 });
+    const run = await runtime.submit(projectRequest("pipeline", `cancel-exhausted-${retryable}`, ["sample-a", "sample-b"]));
     await waitForTerminal(runtime, run.runId);
     await expect.poll(async () => (await runtime.listEvaluations(run.samplingIds[1]!))[0]!.status.status).toBe("failed");
     const [evaluationA] = await runtime.listEvaluations(run.samplingIds[0]!);
@@ -4246,7 +4148,9 @@ describe("pipeline cancellation isolation", () => {
     const runtime = createAutoResumingRuntime({
       plans: makePlans([makeSample("sample-a"), makeSample("sample-b")]), harness, store, onError,
     });
-    const run = await runtime.pipeline(pipelineRequest("cancel-report", PIPELINE_PLAN_CONCURRENT_ID));
+    runtime.plans.execution = executionPlan({ executionConcurrency: 3 });
+    runtime.plans.evaluation = evaluationPlan({ evaluationConcurrency: 2 });
+    const run = await runtime.submit(projectRequest("pipeline", "cancel-report", ["sample-a", "sample-b"]));
     await waitForTerminal(runtime, run.runId);
     await expect.poll(() => onError.mock.calls.length).toBe(1);
     const [evaluationA] = await runtime.listEvaluations(run.samplingIds[0]!);
@@ -4288,7 +4192,9 @@ describe("pipeline cancellation isolation", () => {
     const runtime = createAutoResumingRuntime({
       plans: makePlans([makeSample("sample-a"), makeSample("sample-b")]), harness, store, onError,
     });
-    const run = await runtime.pipeline(pipelineRequest("cancel-read-failed", PIPELINE_PLAN_CONCURRENT_ID));
+    runtime.plans.execution = executionPlan({ executionConcurrency: 3 });
+    runtime.plans.evaluation = evaluationPlan({ evaluationConcurrency: 2 });
+    const run = await runtime.submit(projectRequest("pipeline", "cancel-read-failed", ["sample-a", "sample-b"]));
     await waitForTerminal(runtime, run.runId);
     expect((await runtime.listEvaluations(run.samplingIds[0]!))[0]!.status.status).toBe("succeeded");
     expect((await runtime.listEvaluations(run.samplingIds[1]!))[0]!.status.status).toBe("cancelled");
@@ -4310,7 +4216,9 @@ describe("pipeline cancellation isolation", () => {
     const runtime = createAutoResumingRuntime({
       plans: makePlans([makeSample("sample-b"), makeSample("sample-c")]), harness, store,
     });
-    const run = await runtime.pipeline(pipelineRequest("all-executions-failed", PIPELINE_PLAN_CONCURRENT_ID));
+    runtime.plans.execution = executionPlan({ executionConcurrency: 3 });
+    runtime.plans.evaluation = evaluationPlan({ evaluationConcurrency: 2 });
+    const run = await runtime.submit(projectRequest("pipeline", "all-executions-failed", ["sample-b", "sample-c"]));
     await waitForTerminal(runtime, run.runId);
     await expect.poll(async () => (await runtime.listEvaluations(run.samplingIds[0]!))[0]!.status.status).toBe("failed");
     await expect.poll(async () => (await runtime.listEvaluations(run.samplingIds[1]!))[0]!.status.status).toBe("cancelled");
@@ -4335,7 +4243,9 @@ describe("pipeline cancellation isolation", () => {
         plans: makePlans([makeSample("sample-a"), makeSample("sample-b")]), harness, store,
         ...(reporter === "throwing" ? { onError: () => { throw new Error("reporter unavailable"); } } : {}),
       });
-      const run = await runtime.pipeline(pipelineRequest(`cancel-reporter-${reporter}`, PIPELINE_PLAN_CONCURRENT_ID));
+      runtime.plans.execution = executionPlan({ executionConcurrency: 3 });
+      runtime.plans.evaluation = evaluationPlan({ evaluationConcurrency: 2 });
+      const run = await runtime.submit(projectRequest("pipeline", `cancel-reporter-${reporter}`, ["sample-a", "sample-b"]));
       await waitForTerminal(runtime, run.runId);
       await expect.poll(() => logged.mock.calls.length).toBe(1);
       expect((await runtime.listEvaluations(run.samplingIds[0]!))[0]!.status.status).toBe("succeeded");
@@ -4353,7 +4263,7 @@ describe("SP Chat and Submission identities", () => {
     const runtime = createRuntime({
       harness, store,
     });
-    const run = await runtime.start(startRequest("missing-chat-on-recovery"));
+    const run = await runtime.submit(projectRequest("execution", "missing-chat-on-recovery"));
     const samplingId = run.samplingIds[0]!;
     const original = (await store.getSampling(samplingId))!;
     await store.updateSampling({
@@ -4389,7 +4299,8 @@ describe("SP Chat and Submission identities", () => {
       createRetryController: makeRetryControllerFactory({ restart: 1 }),
     });
 
-    const run = await runtime.start(startRequest("separate-chat-and-submissions", EXECUTION_PLAN_RETRY_ONE_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "separate-chat-and-submissions"));
     expect((await waitForTerminal(runtime, run.runId)).status).toBe("succeeded");
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
@@ -4417,7 +4328,7 @@ describe("Run recovery from persisted facts", () => {
     const store = makeStore();
     const harness = makeHarness();
     const admitted = dormantRuntime(store, harness);
-    const run = await admitted.start(startRequest("narrow-run-resumer"));
+    const run = await admitted.submit(projectRequest("execution", "narrow-run-resumer"));
     const resumer = createTestResumer(store, harness);
     expect("start" in resumer).toBe(false);
     expect("submit" in resumer).toBe(false);
@@ -4433,7 +4344,7 @@ describe("Run recovery from persisted facts", () => {
     const store = makeStore();
     const harness = makeHarness();
     const admitted = dormantRuntime(store, harness);
-    const run = await admitted.start(startRequest("failed-evidence-crash-gap"));
+    const run = await admitted.submit(projectRequest("execution", "failed-evidence-crash-gap"));
     const samplingId = run.samplingIds[0]!;
     const chatId = "subject-after-crash";
     const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, chatId, samplingId, role: "subject", framework: "sp" };
@@ -4499,8 +4410,8 @@ describe("Run recovery from persisted facts", () => {
       createRetryController: makeRetryControllerFactory({ persistence: 1 }),
     });
     const run = role === "subject"
-      ? await runtime.start(startRequest("uncommitted-subject-" + step))
-      : await runtime.pipeline(pipelineRequest("uncommitted-evaluator-" + step));
+      ? await runtime.submit(projectRequest("execution", "uncommitted-subject-" + step))
+      : await runtime.submit(projectRequest("pipeline", "uncommitted-evaluator-" + step));
     if (role === "subject") {
       await expect(runtime.resume(run.runId)).rejects.toThrow("Execution phase could not persist its progress");
     } else {
@@ -4562,8 +4473,8 @@ describe("Run recovery from persisted facts", () => {
       createRetryController: makeRetryControllerFactory({ persistence: 1 }),
     });
     const run = role === "subject"
-      ? await runtime.start(startRequest("uncertain-subject-" + step))
-      : await runtime.pipeline(pipelineRequest("uncertain-evaluator-" + step));
+      ? await runtime.submit(projectRequest("execution", "uncertain-subject-" + step))
+      : await runtime.submit(projectRequest("pipeline", "uncertain-evaluator-" + step));
     await expect(runtime.resume(run.runId)).rejects.toThrow(
       role === "subject" ? "Execution phase could not persist its progress" : "Evaluation phase could not persist its progress",
     );
@@ -4592,7 +4503,7 @@ describe("Run recovery from persisted facts", () => {
       harness, store,
       sleep: async () => undefined, onError: reported,
     });
-    const run = await runtime.start(startRequest("partial-resource-refresh-fails"));
+    const run = await runtime.submit(projectRequest("execution", "partial-resource-refresh-fails"));
     const samplingId = run.samplingIds[0]!;
     const chatId = "subject-chat";
     const submissionId = "submission-1";
@@ -4632,7 +4543,7 @@ describe("Run recovery from persisted facts", () => {
       harness, store,
       sleep: async () => undefined, onError: reported,
     });
-    const run = await runtime.pipeline(pipelineRequest("evaluator-resource-refresh-fails"));
+    const run = await runtime.submit(projectRequest("pipeline", "evaluator-resource-refresh-fails"));
     const samplingId = run.samplingIds[0]!;
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
@@ -4679,7 +4590,7 @@ describe("Run recovery from persisted facts", () => {
       harness, store,
       sleep: async () => undefined, onError: reported,
     });
-    const run = await runtime.start(startRequest("finalized-resource-recovery"));
+    const run = await runtime.submit(projectRequest("execution", "finalized-resource-recovery"));
     const samplingId = run.samplingIds[0]!;
     const chatId = "subject-chat";
     const submissionId = "submission-1";
@@ -4710,7 +4621,7 @@ describe("Run recovery from persisted facts", () => {
     const store = makeStore();
     const harness = makeHarness();
     const original = dormantRuntime(store, harness);
-    const run = await original.start(startRequest("admitted-only"));
+    const run = await original.submit(projectRequest("execution", "admitted-only"));
 
     expect((await original.getRun(run.runId)).status).toBe("queued");
     expect(harness.ensureAgent).not.toHaveBeenCalled();
@@ -4727,7 +4638,7 @@ describe("Run recovery from persisted facts", () => {
   it("reconciles a submitted Attempt by its original key instead of submitting again", async () => {
     const store = makeStore();
     const harness = makeHarness();
-    const run = await dormantRuntime(store, harness).start(startRequest("submitted-before-crash"));
+    const run = await dormantRuntime(store, harness).submit(projectRequest("execution", "submitted-before-crash"));
     const samplingId = run.samplingIds[0]!;
     const record = (await store.getSampling(samplingId))!;
     const chatId = "subject-chat";
@@ -4760,7 +4671,7 @@ describe("Run recovery from persisted facts", () => {
   it("rejects a recovered Attempt bound to a different submission without changing its identity", async () => {
     const store = makeStore();
     const harness = makeHarness();
-    const run = await dormantRuntime(store, harness).start(startRequest("conflicting-attempt-identity"));
+    const run = await dormantRuntime(store, harness).submit(projectRequest("execution", "conflicting-attempt-identity"));
     const samplingId = run.samplingIds[0]!;
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
@@ -4786,7 +4697,7 @@ describe("Run recovery from persisted facts", () => {
   it("refreshes resources collected before the terminal state was confirmed", async () => {
     const store = makeStore();
     const harness = makeHarness();
-    const run = await dormantRuntime(store, harness).start(startRequest("uncertain-before-crash"));
+    const run = await dormantRuntime(store, harness).submit(projectRequest("execution", "uncertain-before-crash"));
     const samplingId = run.samplingIds[0]!;
     const chatId = "subject-chat";
     const submissionId = "submission-1";
@@ -4828,7 +4739,7 @@ describe("Run recovery from persisted facts", () => {
       await originalWrite(record, expected);
     });
     const original = dormantRuntime(store, harness);
-    const run = await original.start(startRequest("resource-save-before-crash"));
+    const run = await original.submit(projectRequest("execution", "resource-save-before-crash"));
     await expect(original.resume(run.runId)).rejects.toThrow("Execution phase could not persist its progress");
 
     const before = (await store.getSampling(run.samplingIds[0]!))!;
@@ -4849,7 +4760,8 @@ describe("Run recovery from persisted facts", () => {
   it("restarts after a persisted failure only when SP confirms that same operation", async () => {
     const store = makeStore();
     const harness = makeHarness();
-    const run = await dormantRuntime(store, harness).start(startRequest("resume-restart", EXECUTION_PLAN_RETRY_ONE_ID));
+    store.plans().execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await dormantRuntime(store, harness).submit(projectRequest("execution", "resume-restart"));
     const samplingId = run.samplingIds[0]!;
     const chatId = "subject-chat";
     const submissionId = "submission-1";
@@ -4890,7 +4802,8 @@ describe("Run recovery from persisted facts", () => {
     const store = makeStore();
     const harness = makeHarness();
     const runtime = dormantRuntime(store, harness);
-    const run = await runtime.start(startRequest("retry-after-status-outage", EXECUTION_PLAN_RETRY_ONE_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "retry-after-status-outage"));
     const samplingId = run.samplingIds[0]!;
     const chatId = "subject-chat";
     const submissionId = "submission-1";
@@ -4932,7 +4845,8 @@ describe("Run recovery from persisted facts", () => {
     const store = makeStore();
     const harness = makeHarness();
     const runtime = dormantRuntime(store, harness);
-    const run = await runtime.start(startRequest("unconfirmed-restart", EXECUTION_PLAN_RETRY_ONE_ID));
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "unconfirmed-restart"));
     const samplingId = run.samplingIds[0]!;
     const chatId = "subject-chat";
     const submissionId = "submission-1";
@@ -4962,7 +4876,7 @@ describe("Run recovery from persisted facts", () => {
   it("resumes a pipeline at evaluation without launching its completed Subject again", async () => {
     const store = makeStore();
     const harness = makeHarness();
-    const run = await dormantRuntime(store, harness).pipeline(pipelineRequest("pipeline-handoff"));
+    const run = await dormantRuntime(store, harness).submit(projectRequest("pipeline", "pipeline-handoff"));
     const samplingId = run.samplingIds[0]!;
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
@@ -4986,9 +4900,9 @@ describe("Run recovery from persisted facts", () => {
     const store = makeStore();
     const harness = makeHarness();
     const original = dormantRuntime(store, harness);
-    const execution = await original.start(startRequest("execution-before-evaluation-recovery"));
+    const execution = await original.submit(projectRequest("execution", "execution-before-evaluation-recovery"));
     await original.resume(execution.runId);
-    const run = await original.evaluate(evaluateRequest(execution.samplingIds));
+    const run = await original.submit(evaluationRequest(execution.samplingIds));
     const evaluationId = (await store.getRun(run.runId))!.evaluationIds[0]!;
     const evaluation = (await store.getEvaluation(evaluationId))!;
     const chatId = "evaluator-chat";
