@@ -1,4 +1,4 @@
-import { EVALUATION_SAMPLING_IDS } from "../limits.js";
+import { RUN_TARGET_IDS } from "../limits.js";
 
 /** A user-supplied catalog field (name, description, content, reference) is invalid. */
 export class CatalogInputError extends Error {
@@ -16,18 +16,35 @@ export class CatalogPayloadTooLargeError extends Error {
   }
 }
 
-/** An all-selection or explicit evaluation selection exceeds one admission request. */
-export class EvaluationSelectionTooLargeError extends Error {
+/** An expanded Run selection exceeds one admission request. */
+export class RunTargetsTooLargeError extends Error {
   constructor() {
-    super(`Select at most ${EVALUATION_SAMPLING_IDS} Samplings per evaluation`);
-    this.name = "EvaluationSelectionTooLargeError";
+    super(`Select at most ${RUN_TARGET_IDS} target IDs per Run`);
+    this.name = "RunTargetsTooLargeError";
   }
 }
 
-export class DatasetInUseError extends Error {
-  constructor(readonly datasetId: string) {
-    super(`Dataset is still referenced: ${datasetId}`);
-    this.name = "DatasetInUseError";
+/** A Project creation or evaluation-plan field is invalid against the current catalog. */
+export class ProjectInputError extends Error {
+  constructor(message: string, readonly field?: string) {
+    super(message);
+    this.name = "ProjectInputError";
+  }
+}
+
+/** The evaluation plan was locked by the first evaluating Run and can no longer be replaced. */
+export class ProjectEvaluationPlanLockedError extends Error {
+  constructor(readonly projectId: string) {
+    super(`Project ${projectId} evaluation plan is locked`);
+    this.name = "ProjectEvaluationPlanLockedError";
+  }
+}
+
+/** A frozen Project Agent Config copy cannot be edited, deleted or selected again. */
+export class AgentConfigFrozenError extends Error {
+  constructor(readonly userAgentId: string) {
+    super(`Agent Config ${userAgentId} is a frozen Project copy`);
+    this.name = "AgentConfigFrozenError";
   }
 }
 
@@ -51,23 +68,6 @@ export class OutputSchemaNotFoundError extends Error {
   constructor(readonly outputSchemaId: string) {
     super(`Unknown output format ${outputSchemaId}`);
     this.name = "OutputSchemaNotFoundError";
-  }
-}
-
-export class OutputSchemaInUseError extends Error {
-  constructor(readonly outputSchemaId: string) {
-    super(`Output format is still bound to a Project: ${outputSchemaId}`);
-    this.name = "OutputSchemaInUseError";
-  }
-}
-
-export type ConfigReference = "Agent Config" | "Dataset" | "Dataset Sample" | "Execution Config" | "Evaluation Config";
-
-/** A saved config would reference an entity outside its owner's scope. */
-export class ConfigReferenceError extends Error {
-  constructor(readonly reference: ConfigReference, readonly id: string) {
-    super(`${reference} ${id} is outside the config owner scope or does not exist`);
-    this.name = "ConfigReferenceError";
   }
 }
 

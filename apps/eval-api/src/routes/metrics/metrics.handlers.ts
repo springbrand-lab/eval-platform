@@ -18,8 +18,8 @@ export const datasetOverview: AppRouteHandler<typeof routes.datasetOverview> = a
 };
 
 export const sampleOverview: AppRouteHandler<typeof routes.sampleOverview> = async (c) => {
-  const { projectId, sampleId } = c.req.valid("param");
-  return ok(c, await c.var.services.metrics.getSampleOverview({ ...scope(projectId, c.req.valid("query").runId), sampleId }));
+  const { projectId, projectSampleId } = c.req.valid("param");
+  return ok(c, await c.var.services.metrics.getSampleOverview({ ...scope(projectId, c.req.valid("query").runId), projectSampleId }));
 };
 
 export const samplingDetail: AppRouteHandler<typeof routes.samplingDetail> = async (c) => {

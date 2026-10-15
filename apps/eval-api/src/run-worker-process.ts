@@ -3,8 +3,8 @@ import { errorDiagnostics } from "@springbrand/http/server";
 import { Pool } from "pg";
 import type { Logger } from "pino";
 import type { WorkerConfig } from "./config/worker.js";
-import { readEvaluationOutputSchema, readSamples } from "./db/catalog.js";
 import { createEvalDb } from "./db/client.js";
+import { createPostgresWorkerProjectPlanReader } from "./db/project-plans.js";
 import { createPostgresWorkerRuntimeStore } from "./db/runtime.js";
 import { createRunQueue, openRunBoss } from "./run-worker-queue.js";
 import { openBundleDirectory } from "./sp/bundle-directory.js";
@@ -16,7 +16,7 @@ export interface SpEvalRunWorkerProcess {
   close(): Promise<void>;
 }
 
-/** Runs admitted, persisted Runs. Admission and Config editing belong to the API process. */
+/** Runs admitted, persisted Runs from their Project plans. Admission belongs to the API process. */
 export async function startSpEvalRunWorkerProcess(config: WorkerConfig, logger: Logger): Promise<SpEvalRunWorkerProcess> {
   const bundles = await openBundleDirectory(config.EVAL_BUNDLE_DIR);
   const boss = await openRunBoss(config.DATABASE_URL, logger, { useListenNotify: true });
@@ -25,9 +25,8 @@ export async function startSpEvalRunWorkerProcess(config: WorkerConfig, logger: 
     const db = createEvalDb(pool);
     const store = createPostgresWorkerRuntimeStore(db, createRunQueue(boss));
     const runtime = createEvalRunResumer({
-      // Only trusted, persisted Run facts reach these cross-user recovery readers.
-      getEvaluationOutputSchema: (projectId) => readEvaluationOutputSchema(db, projectId),
-      getSamples: (sampleIds) => readSamples(db, sampleIds),
+      // Only trusted, persisted Run facts reach this cross-user plan reader.
+      plans: createPostgresWorkerProjectPlanReader(db),
       harness: createSpHarness({
         origin: config.EVAL_SP_AGENT_ORIGIN,
         serviceToken: config.EVAL_SP_SERVICE_TOKEN,

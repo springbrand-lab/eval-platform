@@ -79,7 +79,7 @@ export const remove = createRoute({
   method: "delete",
   path: "/{outputSchemaId}",
   tags: ["Output format"],
-  summary: "Soft-delete an output format that no Project selects",
+  summary: "Soft-delete an output format; Projects that already use it keep reading it by ID",
   request: { params },
   responses: {
     ...deletedResponse,

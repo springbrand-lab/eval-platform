@@ -1,5 +1,5 @@
 import { createRoute, z } from "@hono/zod-openapi";
-import type { AgentOption } from "@eval-platform/eval-runtime";
+import type { AgentOption } from "../../agent-configs.js";
 import { responseSchema } from "@springbrand/http/catalog";
 import { jsonContent } from "stoker/openapi/helpers";
 import { errorResponses } from "../schemas.js";

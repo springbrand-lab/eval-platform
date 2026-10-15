@@ -8,21 +8,23 @@ import type {
 import { RunResumer } from "./resume.js";
 
 export type {
-  AgentOption,
   EvalRunAdmission,
   EvalRunAdmissionDependencies,
   EvalRunQueries,
   EvalRunResumer,
   EvalRunResumerDependencies,
-  RuntimeAdmissionCatalog,
-  RuntimeCatalog,
+  ProjectPlanReader,
+  ProjectSample,
+  RunPreview,
+  RunPreviewRequest,
   RuntimeEvaluationContext,
-  Sample,
   SamplingSnapshot,
   RuntimeSamplingContext,
 } from "./model.js";
 export type {
   RuntimeRunAdmission,
+  RuntimeRunAdmissionCommand,
+  RuntimeRunPlanDigests,
   RuntimeRunRequestIdentity,
   RuntimeRunRecord,
   RuntimeRecoveryStore,
@@ -59,9 +61,8 @@ export {
 export function createEvalRunAdmission(dependencies: EvalRunAdmissionDependencies): EvalRunAdmission {
   const admission = new RunAdmission(dependencies);
   return {
-    start: (request) => admission.start(request),
-    evaluate: (request) => admission.evaluate(request),
-    pipeline: (request) => admission.pipeline(request),
+    preview: (request) => admission.preview(request),
+    submit: (request) => admission.submit(request),
   };
 }
 

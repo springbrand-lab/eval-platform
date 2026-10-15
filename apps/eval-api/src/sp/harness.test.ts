@@ -215,12 +215,21 @@ describe("Eval SP Harness", () => {
       ? Response.json({
         status: "succeeded",
         artifacts: [{ artifactId: "judge-output", kind: "evaluation", path: "/evaluations/evaluation-1/result.json" }],
+        structuredOutput: { path: "/evaluations/evaluation-1/result.json", content: '{ "score": 1.50 }', contentHash: "sha256:abc" },
         trajectory: { trajectoryId: "judge-trace", source: "evaluator", path: "/evaluations/evaluation-1/trajectory.jsonl" },
+        score: 1.5,
+        reason: "legacy",
       })
       : Response.json(evaluator));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
     expect(await harness.ensureAgent(ensureInput(evaluator))).toEqual(evaluator);
-    expect((await harness.collectEvaluation({ handle: evaluator })).trajectory.source).toBe("evaluator");
+    const output = await harness.collectEvaluation({ handle: evaluator });
+    expect(output.trajectory.source).toBe("evaluator");
+    expect(output.structuredOutput).toEqual({
+      path: "/evaluations/evaluation-1/result.json", content: '{ "score": 1.50 }', contentHash: "sha256:abc",
+    });
+    expect(output).not.toHaveProperty("score");
+    expect(output).not.toHaveProperty("reason");
     expect(new URL(requests[1]!.url).searchParams.get("evaluationId")).toBe("evaluation-1");
   });
 

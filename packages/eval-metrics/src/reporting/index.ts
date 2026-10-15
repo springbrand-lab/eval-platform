@@ -1,10 +1,9 @@
-import { IDENTIFIER_RULE, isIdentifier, type EvaluationRecord } from "@eval-platform/eval-contracts";
-import type { DatasetSnapshot } from "@eval-platform/eval-dataset";
-import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
-import { aggregateMetrics } from "../aggregation/index.js";
-import { aggregateResources } from "../aggregation/resources.js";
-import { readEvaluationMetrics } from "../evaluators/index.js";
-import type { DatasetMetricRow, Metrics, MetricsFacts, MetricsQuery, MetricsSource, OverviewCounts } from "./model.js";
+import { IDENTIFIER_RULE, isIdentifier, type EvaluationRecord, type ProjectDatasetSnapshot } from "@eval-platform/eval-contracts";
+import type { ProjectSample, SamplingSnapshot } from "@eval-platform/eval-runtime";
+import { evaluatorAgent, subjectAgent } from "../aggregation/agents.js";
+import { aggregateMetrics, type MetricInput } from "../aggregation/index.js";
+import { createEvaluationOutputReader } from "../evaluators/index.js";
+import type { DatasetMetricRow, Metrics, MetricsFacts, MetricsQuery, MetricsSource } from "./model.js";
 
 export class MetricsQueryError extends Error {
   constructor(message: string) {
@@ -13,9 +12,9 @@ export class MetricsQueryError extends Error {
   }
 }
 
-/** A Metrics query named a Project, Run, Dataset, Sample or Sampling outside the caller's scope. */
+/** A Metrics query named a Project, Run, Dataset, ProjectSample or Sampling outside the caller's scope. */
 export class MetricsEntityNotFoundError extends Error {
-  constructor(readonly entity: "project" | "run" | "dataset" | "sample" | "sampling", readonly id: string) {
+  constructor(readonly entity: "project" | "run" | "dataset" | "project-sample" | "sampling", readonly id: string) {
     super(`Unknown ${entity} ${id}`);
     this.name = "MetricsEntityNotFoundError";
   }
@@ -28,12 +27,14 @@ export class MetricsSourceError extends Error {
   }
 }
 
+type Target = "datasetId" | "projectSampleId" | "samplingId";
+
 function identifier(value: unknown, name: string): string {
   if (!isIdentifier(value)) throw new MetricsQueryError(`${name} ${IDENTIFIER_RULE}`);
   return value;
 }
 
-function validateQuery(input: MetricsQuery, target?: "datasetId" | "sampleId" | "samplingId"): MetricsQuery {
+function validateQuery(input: MetricsQuery, target?: Target): MetricsQuery {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new MetricsQueryError("Metric query must be an object");
   const projectId = identifier(input.projectId, "projectId");
   let runIds: readonly string[] | undefined;
@@ -61,138 +62,146 @@ function indexBy<Value>(values: readonly Value[], key: (value: Value) => string,
 
 function groupBy<Value>(values: readonly Value[], key: (value: Value) => string): Map<string, readonly Value[]> {
   const groups = new Map<string, Value[]>();
-  for (const value of values) {
-    const id = key(value);
-    const group = groups.get(id) ?? [];
-    group.push(value);
-    groups.set(id, group);
-  }
+  for (const value of values) groups.set(key(value), [...groups.get(key(value)) ?? [], value]);
   return groups;
 }
 
+/** Fixed Dataset bindings of every bound ProjectSample, in plan order. */
+function readBindings(facts: MetricsFacts): Map<string, string[]> {
+  const bindings = new Map<string, string[]>();
+  for (const dataset of facts.plan.datasets) {
+    if (new Set(dataset.projectSampleIds).size !== dataset.projectSampleIds.length) {
+      throw new MetricsSourceError(`Duplicate ProjectSample in Dataset ${dataset.datasetId}`);
+    }
+    for (const id of dataset.projectSampleIds) bindings.set(id, [...bindings.get(id) ?? [], dataset.datasetId]);
+  }
+  return bindings;
+}
+
+function expectedSamples(query: MetricsQuery, facts: MetricsFacts, bindings: ReadonlyMap<string, readonly string[]>): readonly string[] | undefined {
+  if (query.datasetId !== undefined) {
+    const dataset = facts.plan.datasets.find((item) => item.datasetId === query.datasetId);
+    if (!dataset) throw new MetricsEntityNotFoundError("dataset", query.datasetId);
+    return dataset.projectSampleIds;
+  }
+  if (query.projectSampleId !== undefined) {
+    if (!bindings.has(query.projectSampleId)) throw new MetricsEntityNotFoundError("project-sample", query.projectSampleId);
+    return [query.projectSampleId];
+  }
+  return query.samplingId === undefined ? [...bindings.keys()] : undefined;
+}
+
 function prepareFacts(facts: MetricsFacts, query: MetricsQuery) {
-  if (facts.project.projectId !== query.projectId) throw new MetricsSourceError("Source returned the wrong Project");
-  if (facts.samplings.some((sampling) => sampling.projectId !== query.projectId)
-    || facts.runs.some((run) => run.projectId !== query.projectId)) {
+  const { plan } = facts;
+  const projectId = query.projectId;
+  if (plan.project.projectId !== projectId) throw new MetricsSourceError("Source returned the wrong Project");
+  if ((plan.evaluation === null) !== (facts.evaluationOutputSchema === null)) {
+    throw new MetricsSourceError("Source returned an evaluation output Schema that does not match the evaluation plan");
+  }
+  indexBy(plan.datasets, (dataset) => dataset.datasetId, "Dataset");
+  const bindings = readBindings(facts);
+  const sampleById = indexBy(facts.projectSamples, (sample) => sample.projectSampleId, "ProjectSample");
+  for (const sample of facts.projectSamples) {
+    const datasetIds = bindings.get(sample.projectSampleId);
+    if (sample.projectId !== projectId || !datasetIds) {
+      throw new MetricsSourceError(`ProjectSample ${sample.projectSampleId} is not bound to the Project`);
+    }
+    if (datasetIds.length !== sample.datasetIds.length || datasetIds.some((id, index) => sample.datasetIds[index] !== id)) {
+      throw new MetricsSourceError(`ProjectSample ${sample.projectSampleId} disagrees with the plan's Dataset bindings`);
+    }
+  }
+  const expected = expectedSamples(query, facts, bindings);
+  if (expected && (expected.length !== facts.projectSamples.length || expected.some((id) => !sampleById.has(id)))) {
+    throw new MetricsSourceError("Source did not return exactly the bound ProjectSamples in scope");
+  }
+  if (facts.samplings.some((sampling) => sampling.projectId !== projectId) || facts.runs.some((run) => run.projectId !== projectId)) {
     throw new MetricsSourceError("Source returned Runtime facts outside the Project scope");
   }
-  const sampleById = indexBy(facts.samples, (sample) => sample.sampleId, "Sample");
-  const datasetById = indexBy(facts.datasets, (snapshot) => snapshot.dataset.datasetId, "Dataset");
   const samplingById = indexBy(facts.samplings, (sampling) => sampling.samplingId, "Sampling");
-  const evaluationById = indexBy(facts.evaluations, (evaluation) => evaluation.evaluationId, "Evaluation");
+  indexBy(facts.evaluations, (evaluation) => evaluation.evaluationId, "Evaluation");
   const runById = indexBy(facts.runs, (run) => run.runId, "Run");
   for (const sampling of facts.samplings) {
-    if (!sampleById.has(sampling.sampleId)) throw new MetricsSourceError(`Missing Sample for Sampling ${sampling.samplingId}`);
+    if (!sampleById.has(sampling.projectSampleId)) {
+      throw new MetricsSourceError(`Sampling ${sampling.samplingId} is outside the ProjectSamples in scope`);
+    }
   }
   for (const evaluation of facts.evaluations) {
     if (!samplingById.has(evaluation.samplingId)) throw new MetricsSourceError(`Missing Sampling for Evaluation ${evaluation.evaluationId}`);
-  }
-  for (const snapshot of facts.datasets) {
-    if (new Set(snapshot.data.map((data) => data.dataId)).size !== snapshot.data.length) {
-      throw new MetricsSourceError(`Duplicate Data in Dataset ${snapshot.dataset.datasetId}`);
-    }
   }
   const selectedRuns = query.runIds?.map((runId) => {
     const run = runById.get(runId);
     if (!run) throw new MetricsEntityNotFoundError("run", runId);
     return run;
   });
-  const samplingIds = selectedRuns === undefined ? undefined : new Set(selectedRuns.flatMap((run) => run.samplingIds));
-  const evaluationIds = selectedRuns === undefined ? undefined : new Set(selectedRuns.flatMap((run) => run.evaluationIds));
-  if (selectedRuns) {
-    for (const run of selectedRuns) {
-      if (new Set(run.samplingIds).size !== run.samplingIds.length || new Set(run.evaluationIds).size !== run.evaluationIds.length) {
-        throw new MetricsSourceError(`Run ${run.runId} has duplicate scope identities`);
-      }
-      for (const evaluationId of run.evaluationIds) {
-        const evaluation = evaluationById.get(evaluationId);
-        if (evaluation && !run.samplingIds.includes(evaluation.samplingId)) {
-          throw new MetricsSourceError(`Evaluation ${evaluationId} is outside Run ${run.runId}`);
-        }
-      }
-      if (query.datasetId === undefined && query.sampleId === undefined && query.samplingId === undefined) {
-        if (run.samplingIds.some((id) => !samplingById.has(id)) || run.evaluationIds.some((id) => !evaluationById.has(id))) {
-          throw new MetricsSourceError(`Source omitted required facts for Run ${run.runId}`);
-        }
-      }
-    }
-  }
-  const samplings = facts.samplings.filter((sampling) => samplingIds === undefined || samplingIds.has(sampling.samplingId));
-  const inScopeSamplingIds = new Set(samplings.map((sampling) => sampling.samplingId));
-  const evaluations = facts.evaluations.filter((evaluation) => inScopeSamplingIds.has(evaluation.samplingId)
-    && (evaluationIds === undefined || evaluationIds.has(evaluation.evaluationId)));
-  const bySample = groupBy(samplings, (sampling) => sampling.sampleId);
+  const runSamplings = selectedRuns && new Set(selectedRuns.flatMap((run) => run.samplingIds));
+  const runEvaluations = selectedRuns && new Set(selectedRuns.flatMap((run) => run.evaluationIds));
+  const samplings = facts.samplings.filter((sampling) => !runSamplings || runSamplings.has(sampling.samplingId));
+  const inScope = new Set(samplings.map((sampling) => sampling.samplingId));
+  const evaluations = facts.evaluations.filter((evaluation) => inScope.has(evaluation.samplingId)
+    && (!runEvaluations || runEvaluations.has(evaluation.evaluationId)));
+  const bySample = groupBy(samplings, (sampling) => sampling.projectSampleId);
   const bySampling = groupBy(evaluations, (evaluation) => evaluation.samplingId);
-  const evaluationsFor = (records: readonly SamplingSnapshot[]): readonly EvaluationRecord[] => records.flatMap((sampling) => bySampling.get(sampling.samplingId) ?? []);
-  const summaryFor = (records: readonly SamplingSnapshot[]) => aggregateMetrics({ samplings: records, evaluations: evaluationsFor(records) });
-  const datasetIdsFor = (dataId: string): readonly string[] => facts.datasets.filter((snapshot) => snapshot.data.some((data) => data.dataId === dataId))
-    .map((snapshot) => snapshot.dataset.datasetId).sort();
-  const runsFor = (records: readonly SamplingSnapshot[]): readonly string[] => {
+  const outputs = createEvaluationOutputReader(plan.evaluation?.outputSchema ?? null, facts.evaluationOutputSchema);
+  const samplingsOf = (samples: readonly ProjectSample[]): readonly SamplingSnapshot[] => samples
+    .flatMap((sample) => [...bySample.get(sample.projectSampleId) ?? []].sort((left, right) => left.samplingId.localeCompare(right.samplingId)));
+  const evaluationsOf = (records: readonly SamplingSnapshot[]): readonly EvaluationRecord[] => records
+    .flatMap((sampling) => [...bySampling.get(sampling.samplingId) ?? []].sort((left, right) => left.evaluationId.localeCompare(right.evaluationId)));
+  const summarize = (bindings: MetricInput["bindings"], records: readonly SamplingSnapshot[]) => aggregateMetrics({
+    bindings, samplings: records, evaluations: evaluationsOf(records), outputs,
+  });
+  const summarizeSamples = (samples: readonly ProjectSample[], datasets: number) => summarize({
+    datasets, data: new Set(samples.map((sample) => sample.dataId)).size, projectSamples: samples.length,
+  }, samplingsOf(samples));
+  const runIdsOf = (records: readonly SamplingSnapshot[]): readonly string[] => {
     if (selectedRuns) return selectedRuns.map((run) => run.runId).sort();
     const ids = new Set(records.map((sampling) => sampling.samplingId));
     return facts.runs.filter((run) => run.samplingIds.some((id) => ids.has(id))).map((run) => run.runId).sort();
   };
-  const countsFor = (records: readonly SamplingSnapshot[], dataIds: readonly string[], datasets: number): OverviewCounts => ({
-    datasets, data: new Set(dataIds).size, samples: new Set(records.map((sampling) => sampling.sampleId)).size,
-    samplings: records.length, evaluations: evaluationsFor(records).length,
-  });
-  const recordsForDataset = (snapshot: DatasetSnapshot): readonly SamplingSnapshot[] => {
-    const dataIds = new Set(snapshot.data.map((data) => data.dataId));
-    return samplings.filter((sampling) => dataIds.has(sampleById.get(sampling.sampleId)!.data.dataId));
+  const samplesOf = (dataset: ProjectDatasetSnapshot) => dataset.projectSampleIds.map((id) => sampleById.get(id)!);
+  const datasetRow = (dataset: ProjectDatasetSnapshot): DatasetMetricRow => ({ dataset, summary: summarizeSamples(samplesOf(dataset), 1) });
+  return {
+    project: plan.project, plan, sampleById, samplings, outputs,
+    samplingsOf, evaluationsOf, summarize, summarizeSamples, runIdsOf, samplesOf, datasetRow,
   };
-  const datasetRow = (snapshot: DatasetSnapshot): DatasetMetricRow => {
-    const records = recordsForDataset(snapshot);
-    return { dataset: snapshot.dataset, counts: countsFor(records, snapshot.data.map((data) => data.dataId), 1), summary: summaryFor(records) };
-  };
-  return { facts, sampleById, datasetById, samplingById, samplings, bySample, bySampling, summaryFor,
-    countsFor, datasetIdsFor, runsFor, recordsForDataset, datasetRow };
 }
 
 export function createMetrics(dependencies: { readonly source: MetricsSource }): Metrics {
   const load = async (query: MetricsQuery) => prepareFacts(structuredClone(await dependencies.source.read(structuredClone(query))), query);
+  const sampleBindings = (sample: ProjectSample) => ({ datasets: sample.datasetIds.length, data: 1, projectSamples: 1 });
   return {
     async getProjectOverview(input) {
-      const query = validateQuery(input);
-      const view = await load(query);
-      const dataIds = [...new Set(view.samplings.map((sampling) => view.sampleById.get(sampling.sampleId)!.data.dataId))];
-      const datasets = view.facts.datasets.filter((snapshot) => snapshot.data.some((data) => dataIds.includes(data.dataId)))
-        .toSorted((left, right) => left.dataset.datasetId.localeCompare(right.dataset.datasetId));
+      const view = await load(validateQuery(input));
+      const samples = [...view.sampleById.values()];
       return {
-        project: view.facts.project, runIds: view.runsFor(view.samplings),
-        counts: view.countsFor(view.samplings, dataIds, datasets.length), summary: view.summaryFor(view.samplings),
-        datasets: datasets.map(view.datasetRow),
+        project: view.project, runIds: view.runIdsOf(view.samplings),
+        summary: view.summarizeSamples(samples, view.plan.datasets.length),
+        datasets: view.plan.datasets.map(view.datasetRow),
       };
     },
     async getDatasetOverview(input) {
       const query = validateQuery(input, "datasetId");
       const view = await load(query);
-      const snapshot = view.datasetById.get(query.datasetId!);
-      if (!snapshot) throw new MetricsEntityNotFoundError("dataset", query.datasetId!);
-      const samplings = view.recordsForDataset(snapshot);
-      const sampleIds = [...new Set(samplings.map((sampling) => sampling.sampleId))].sort();
+      const dataset = view.plan.datasets.find((item) => item.datasetId === query.datasetId)!;
+      const samples = view.samplesOf(dataset);
       return {
-        project: view.facts.project, runIds: view.runsFor(samplings), ...view.datasetRow(snapshot),
-        dataIds: snapshot.data.map((data) => data.dataId).sort(),
-        samples: sampleIds.map((sampleId) => ({
-          sampleId,
-          dataId: view.sampleById.get(sampleId)!.data.dataId,
-          summary: view.summaryFor(view.bySample.get(sampleId) ?? []),
+        project: view.project, runIds: view.runIdsOf(view.samplingsOf(samples)), ...view.datasetRow(dataset),
+        projectSamples: samples.map((sample) => ({
+          projectSampleId: sample.projectSampleId, dataId: sample.dataId, datasetIds: sample.datasetIds,
+          samplingCount: sample.samplingCount, summary: view.summarizeSamples([sample], sample.datasetIds.length),
         })),
       };
     },
     async getSampleOverview(input) {
-      const query = validateQuery(input, "sampleId");
+      const query = validateQuery(input, "projectSampleId");
       const view = await load(query);
-      const sample = view.sampleById.get(query.sampleId!);
-      if (!sample) throw new MetricsEntityNotFoundError("sample", query.sampleId!);
-      const samplings = view.bySample.get(sample.sampleId) ?? [];
-      const datasetIds = view.datasetIdsFor(sample.data.dataId);
+      const projectSample = view.sampleById.get(query.projectSampleId!)!;
+      const samplings = view.samplingsOf([projectSample]);
       return {
-        project: view.facts.project, runIds: view.runsFor(samplings), sample, datasetIds,
-        counts: { ...view.countsFor(samplings, [sample.data.dataId], datasetIds.length), samples: 1 },
-        summary: view.summaryFor(samplings),
-        samplings: samplings.toSorted((left, right) => left.samplingId.localeCompare(right.samplingId)).map((sampling) => ({
-          samplingId: sampling.samplingId, summary: view.summaryFor([sampling]),
+        project: view.project, runIds: view.runIdsOf(samplings), projectSample,
+        summary: view.summarize(sampleBindings(projectSample), samplings),
+        samplings: samplings.map((sampling) => ({
+          samplingId: sampling.samplingId, execution: sampling.execution,
+          summary: view.summarize(sampleBindings(projectSample), [sampling]),
           artifactCount: sampling.artifacts?.length ?? 0, hasTrajectory: sampling.trajectory !== undefined,
         })),
       };
@@ -202,15 +211,14 @@ export function createMetrics(dependencies: { readonly source: MetricsSource }):
       const view = await load(query);
       const sampling = view.samplings.find((item) => item.samplingId === query.samplingId);
       if (!sampling) throw new MetricsEntityNotFoundError("sampling", query.samplingId!);
-      const sample = view.sampleById.get(sampling.sampleId)!;
+      const projectSample = view.sampleById.get(sampling.projectSampleId)!;
       return {
-        project: view.facts.project, runIds: view.runsFor([sampling]), sample, datasetIds: view.datasetIdsFor(sample.data.dataId),
-        sampling, summary: view.summaryFor([sampling]),
-        evaluations: [...view.bySampling.get(sampling.samplingId) ?? []]
-          .sort((left, right) => left.evaluationId.localeCompare(right.evaluationId)).map((evaluation) => ({
-            record: evaluation, result: readEvaluationMetrics(evaluation),
-            resources: aggregateResources(evaluation.attempts.map((attempt) => ({ ownerUserId: evaluation.evaluator.ownerUserId, collection: attempt.resources }))),
-          })),
+        project: view.project, runIds: view.runIdsOf([sampling]), projectSample, sampling,
+        summary: view.summarize(sampleBindings(projectSample), [sampling]),
+        subject: subjectAgent(sampling),
+        evaluations: view.evaluationsOf([sampling]).map((record) => ({
+          record, agent: evaluatorAgent(record), output: view.outputs.read(record),
+        })),
       };
     },
   };

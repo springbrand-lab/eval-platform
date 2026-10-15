@@ -1,10 +1,10 @@
 # @eval-platform/eval-dataset
 
-Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给评估 Agent。两者都是同样的 owner-scoped Bundle 材料引用，上传和绑定方式相同；评估输出 JSON Schema 由 Project 绑定，不存在 Data 内。
+Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给评估 Agent。两者都是同样的 owner-scoped Bundle 材料引用，上传和绑定方式相同；评估输出 JSON Schema 由 Project 的评估计划引用，不存在 Data 内。
 
 ## 职责与文件
 
-本包只管理 Dataset、可复用 Data 及二者的关联，不管理用户、Project、Sample、Sampling、Agent 或评估结果，不引入 version。Eval API 注入按已认证用户限定的 Store；同一用户的 Data 可复用于其多个 Dataset，不可跨用户关联。用户身份与授权由应用和 PostgreSQL 保证，不写进 Data 业务 JSON。
+本包只管理可编辑的来源 Dataset、可复用 Data 及二者的关联，不管理用户、Project、ProjectSample、Sampling、Agent 或评估结果，不引入 version。创建 Project 时 Eval API 在一次一致读取中把所选 Dataset 元数据、成员顺序和完整 Data 复制进 Project 快照；之后对 Dataset/Data 的修改、解除关联或软删除都不影响已有 Project。Eval API 注入按已认证用户限定的 Store；同一用户的 Data 可复用于其多个 Dataset，不可跨用户关联。用户身份与授权由应用和 PostgreSQL 保证，不写进 Data 业务 JSON。
 
 - `dataset/model.ts`：严格 Zod schema、模型和输入类型，以及所有平台 UUID 共用的 `platformIdSchema`。模型从 schema 推导，不维护第二份校验规则。
 - `dataset/input.ts`：把任何用户输入失败统一为 `DatasetInputError`，保留原始 cause。
@@ -19,7 +19,7 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 每条 Data 的输入约定：
 
 - `userPrompt`：必填的当前用户任务，必须是非空白字符串，保留原始文本，不从其他字段推导。
-- `evalPrompt`：可选的本条 Data 的评估任务提示词；提供时必须是非空白字符串并原样保存。只执行不要求此字段；启动 Pipeline 或独立评估时每条选中 Data 都必须提供，不能退回使用 Subject 的 `userPrompt`。
+- `evalPrompt`：可选的本条 Data 的评估任务提示词；提供时必须是非空白字符串并原样保存。只执行不要求此字段；启动 pipeline 或 evaluation Run 时，涉及的每个 ProjectSample 的 Data 副本都必须提供，不能退回使用 Subject 的 `userPrompt`。
 - `initialSession`：可选的初始 Session 引用，必须包含 Eval API 资源目录生成的 `bundleId` 和 `sessionId`；上下文由 Eval 的独立 Bundle 上传接口保存为 JSON/JSONL，可为空，SP 仅在提供时导入目标 Chat。
 - `initialMaterials`：可选的 Subject 初始素材集合引用，必须包含资源目录生成的 `bundleId` 和 `materialId`，定位 Bundle 内的具体素材资源。
 - `evalInitialMaterials`：可选的 Evaluator 初始素材引用，结构与上传方式相同，与 Subject 素材分开。
@@ -27,7 +27,7 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 
 数值使用有限的 JavaScript Number；整数必须在 `Number.MIN_SAFE_INTEGER` 到 `Number.MAX_SAFE_INTEGER` 之间。超出范围的大整数业务 ID 必须由调用方以字符串提供，解析、创建、修改和导出都直接拒绝不安全整数，不自动截断、舍入或转换为字符串。YAML 整数先按 BigInt 解析，确认安全范围后才转为 Number。
 
-业务字段 `sampleId` 可以正常使用。Runtime 的平台 Sample 采用 `{ sampleId, data: Data }`，平台身份与完整业务内容分开，不覆盖或删除 `data.sampleId`；Sampling 仍只持久化平台身份，不复制 Data。
+业务字段 `sampleId` 可以正常使用。Runtime 的 ProjectSample 采用 `{ projectSampleId, projectId, dataId, datasetIds, samplingCount, data: Data }`，平台身份与 Project 创建时的完整 Data 副本分开，不覆盖或删除 `data.sampleId`；Sampling 只持久化 `projectSampleId`，不再复制 Data。
 
 如提供 `externalDataId`、`metadata` 等字段，它们也是用户自定义 JSON 业务字段，不作为平台主键或全局唯一约束。素材和 Session 正文不嵌入引用。本包不上传文件、不访问 R2、不直接读写 DO，不生成 manifest 或 hash，也不建立第二套 Session 存储。Runtime/Harness 使用 SP 的公开初始化能力，把输入物化到 Agent 的存储中。
 
@@ -40,11 +40,11 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 }
 ```
 
-`bundleId` 定位 Bundle，`sessionId` / `materialId` 定位其中的具体资源；引用中的 ID 都必须是 `platformIdSchema` 接受的 UUID，规范为小写，Dataset 核心不会生成、推导或补齐。不接受只有 Bundle 的引用、内嵌正文或生成器配置。生产用的 Eval API Store 还会校验资源属于当前用户且未删除，通用 Data 创建、修改、导入也不能绕过该检查。
+`bundleId` 定位 Bundle，`sessionId` / `materialId` 定位其中的具体资源；引用中的 ID 都必须是 `platformIdSchema` 接受的 UUID，规范为小写，Dataset 核心不会生成、推导或补齐。不接受只有 Bundle 的引用、内嵌正文或生成器配置。生产用的 Eval API Store 还会校验资源属于当前用户且未删除，通用 Data 创建、修改、导入也不能绕过该检查；已被 Project 快照引用的资源在目录中软删除后仍可按 ID 读取。
 
 `sessionId` 标识已保存的初始化 Session 资源，不是此次运行的 Chat/Submission ID。Dataset 只校验和保存引用，不解析原生 Session 或维护消息格式。`userPrompt` 表示当前新任务；初始 Session 表示已有历史，不作为新任务再次发送。
 
-启动时 Harness 按每条 Data 的引用从 Eval Bundle 目录读取素材，并通过 SP 公开接口写入目标 Chat 的 Workspace。存在初始 Session 上下文时，通过同一初始化调用导入 Chat；没有正文时只保留引用。准备完成后才能提交新任务。每个 Sampling 独立物化，不能直接操作共享源 Session；eval 不实现框架恢复或 SP 内核。
+启动时 Harness 按 ProjectSample 中 Data 副本的引用从 Eval Bundle 目录读取素材，并通过 SP 公开接口写入目标 Chat 的 Workspace。存在初始 Session 上下文时，通过同一初始化调用导入 Chat；没有正文时只保留引用。准备完成后才能提交新任务。每个 Sampling 独立物化，不能直接操作共享源 Session；eval 不实现框架恢复或 SP 内核。
 
 ## 管理入口
 
@@ -58,7 +58,7 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 
 Dataset/Data 的新实体 ID 使用原生 `crypto.randomUUID()`，与 SP 的 ID 生成方式一致；Bundle、Session 和素材 ID 由 Eval API 资源目录生成。平台 Dataset/Data ID 与资源引用 ID 都由同一个 `platformIdSchema` 按 SP 的 Zod UUID 校验与小写规范化模式处理：导入可接受大小写混合的 UUID，查重、Store 比较、目录读取、绑定删除检查、查询和返回值统一使用小写身份；Data 业务字段保持原值。创建实体时输入不允许调用方覆盖实体 ID。修改是全量替换可编辑字段，不是 PATCH；省略可选字段表示移除该字段。查询不存在的单个实体返回 null。数据库读写失败原样抛出，不能转成空结果。
 
-Data 可以关联到同一用户的多个 Dataset，关联不复制 Data。修改 Data 会影响该用户所有引用它的 Dataset。重复关联和重复解除关联不报错，批量关联必须全成功或全失败。Eval API 删除 Dataset/Data 时设置 `deleted_at`，不删除行；被活动 Dataset 或 Sample 引用的 Data 不能删除。删除已不存在的实体是无操作。列表必须按实体 ID 稳定排序；查询不存在 Dataset 的 Data 列表应抛出 `DatasetEntityNotFoundError`，不能伪装成空集合。
+Data 可以关联到同一用户的多个 Dataset，关联不复制 Data。修改 Data 会影响该用户所有引用它的 Dataset，但不影响已有 Project。重复关联和重复解除关联不报错，批量关联必须全成功或全失败。Eval API 删除 Dataset/Data 时设置 `deleted_at`，不删除行；被活动 Dataset 引用的 Data 不能删除，Project 保存的是 Data 副本，不阻止删除。删除已不存在的实体是无操作。列表必须按实体 ID 稳定排序；查询不存在 Dataset 的 Data 列表应抛出 `DatasetEntityNotFoundError`，不能伪装成空集合。
 
 ## 文档格式
 

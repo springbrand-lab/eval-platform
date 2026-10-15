@@ -4,6 +4,6 @@
 | --- | --- |
 | `eval-api` | Internal API control plane |
 | `eval-web` | Internal evaluation UI |
-| `eval-cli` | Configuration and automation CLI |
+| `eval-cli` | Automation CLI |
 
 The applications share the same runtime and contract packages. None of these entries is an external product surface.

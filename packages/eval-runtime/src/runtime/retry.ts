@@ -1,7 +1,12 @@
 import type { RetryPolicy } from "@eval-platform/eval-contracts";
-import { DEFAULT_RETRY_POLICY } from "../config/model.js";
 import type { AgentFailureKind } from "../harness/model.js";
 import { RuntimeInputError } from "./errors.js";
+
+export const DEFAULT_RETRY_POLICY = {
+  maxRestarts: 2,
+  initialBackoffMs: 250,
+  maxBackoffMs: 5_000,
+} as const satisfies RetryPolicy;
 
 export type RetryOperation = "creation" | "initialization" | "submission" | "status" | "collection" | "resources" | "persistence" | "restart";
 

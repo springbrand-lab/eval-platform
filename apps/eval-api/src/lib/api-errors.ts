@@ -21,16 +21,16 @@ import {
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import {
+  AgentConfigFrozenError,
   BundleResourceInUseError,
   BundleResourceNotFoundError,
   CatalogInputError,
   CatalogPayloadTooLargeError,
-  ConfigReferenceError,
-  DatasetInUseError,
-  EvaluationSelectionTooLargeError,
-  OutputSchemaInUseError,
   OutputSchemaNotFoundError,
+  ProjectEvaluationPlanLockedError,
+  ProjectInputError,
   ProjectRunStopConflictError,
+  RunTargetsTooLargeError,
 } from "../db/errors.js";
 import { BundleFileError, type BundleFileErrorReason } from "../sp/bundle-errors.js";
 import { EvalSpApiError, EvalSpTransportError } from "../sp/client.js";
@@ -38,19 +38,18 @@ import { EvalSpApiError, EvalSpTransportError } from "../sp/client.js";
 const runtimeEntityCodes = {
   project: "PROJECT_NOT_FOUND",
   run: "RUN_NOT_FOUND",
-  sample: "SAMPLE_NOT_FOUND",
+  dataset: "DATASET_NOT_FOUND",
+  "project-sample": "PROJECT_SAMPLE_NOT_FOUND",
   sampling: "SAMPLING_NOT_FOUND",
   evaluation: "EVALUATION_NOT_FOUND",
-  "execution-config": "CONFIG_NOT_FOUND",
-  "evaluation-config": "CONFIG_NOT_FOUND",
-  "pipeline-config": "CONFIG_NOT_FOUND",
 } as const satisfies Record<RuntimeEntity, HttpErrorCode>;
 
 const admissionConflictCodes = {
   "source-branch": "PROJECT_SOURCE_BRANCH_CONFLICT",
-  "launch-selection": "PROJECT_LAUNCH_SELECTION_CONFLICT",
-  "output-schema": "PROJECT_OUTPUT_SCHEMA_CONFLICT",
-  "empty-project": "PROJECT_EMPTY",
+  "evaluation-plan-required": "PROJECT_EVALUATION_PLAN_REQUIRED",
+  "plan-changed": "PROJECT_PLAN_CHANGED",
+  "stale-targets": "RUN_TARGETS_STALE",
+  "empty-targets": "RUN_TARGETS_EMPTY",
   "evaluation-prompt": "SAMPLE_EVALUATION_PROMPT_MISSING",
   "sampling-unavailable": "SAMPLING_UNAVAILABLE",
 } as const satisfies Record<RuntimeAdmissionConflictReason, HttpErrorCode>;
@@ -67,7 +66,7 @@ const metricsEntityCodes = {
   project: "PROJECT_NOT_FOUND",
   run: "RUN_NOT_FOUND",
   dataset: "DATASET_NOT_FOUND",
-  sample: "SAMPLE_NOT_FOUND",
+  "project-sample": "PROJECT_SAMPLE_NOT_FOUND",
   sampling: "SAMPLING_NOT_FOUND",
 } as const satisfies Record<MetricsEntityNotFoundError["entity"], HttpErrorCode>;
 
@@ -84,16 +83,15 @@ const publicMessageCodes = new Map<ErrorClass, HttpErrorCode>([
   [RuntimeRunIdentityConflictError, "RUN_IDEMPOTENCY_CONFLICT"],
   [RuntimeRunStoppedError, "RUN_STOPPED"],
   [ProjectRunStopConflictError, "PROJECT_NO_ACTIVE_RUN"],
+  [ProjectEvaluationPlanLockedError, "PROJECT_EVALUATION_PLAN_LOCKED"],
+  [AgentConfigFrozenError, "AGENT_CONFIG_FROZEN"],
   [DatasetIdentityConflictError, "DATASET_IDENTITY_CONFLICT"],
-  [DatasetInUseError, "DATASET_IN_USE"],
   [DataInUseError, "DATA_IN_USE"],
-  [ConfigReferenceError, "CONFIG_REFERENCE_INVALID"],
   [CatalogPayloadTooLargeError, "CATALOG_PAYLOAD_TOO_LARGE"],
-  [EvaluationSelectionTooLargeError, "EVALUATION_SELECTION_TOO_LARGE"],
+  [RunTargetsTooLargeError, "RUN_TARGETS_TOO_LARGE"],
   [BundleResourceNotFoundError, "BUNDLE_RESOURCE_NOT_FOUND"],
   [BundleResourceInUseError, "BUNDLE_RESOURCE_IN_USE"],
   [OutputSchemaNotFoundError, "OUTPUT_SCHEMA_NOT_FOUND"],
-  [OutputSchemaInUseError, "OUTPUT_SCHEMA_IN_USE"],
   [DatasetInputError, "DATASET_INPUT_INVALID"],
   [MetricsQueryError, "METRICS_QUERY_INVALID"],
 ]);
@@ -112,7 +110,10 @@ const spErrorSchema = z.object({
   errors: z.array(z.object({ path: z.string(), errMsg: z.string() })).optional(),
 });
 
-function fieldError(code: "RUNTIME_INPUT_INVALID" | "CATALOG_INPUT_INVALID", error: RuntimeInputError | CatalogInputError): HttpError {
+function fieldError(
+  code: "RUNTIME_INPUT_INVALID" | "CATALOG_INPUT_INVALID" | "PROJECT_INPUT_INVALID",
+  error: RuntimeInputError | CatalogInputError | ProjectInputError,
+): HttpError {
   return new HttpError(code, error.message, {
     cause: error,
     ...(error.field === undefined ? {} : { errors: [{ path: error.field, errMsg: error.message }] }),
@@ -154,6 +155,7 @@ export function apiError(error: Error): HttpError {
   if (error instanceof RuntimeAdmissionConflictError) return new HttpError(admissionConflictCodes[error.reason], error.message, { cause: error });
   if (error instanceof RuntimeInputError) return fieldError("RUNTIME_INPUT_INVALID", error);
   if (error instanceof CatalogInputError) return fieldError("CATALOG_INPUT_INVALID", error);
+  if (error instanceof ProjectInputError) return fieldError("PROJECT_INPUT_INVALID", error);
   if (error instanceof DatasetEntityNotFoundError) return new HttpError(datasetEntityCodes[error.entity], error.message, { cause: error });
   if (error instanceof MetricsEntityNotFoundError) return new HttpError(metricsEntityCodes[error.entity], error.message, { cause: error });
   if (error instanceof BundleFileError) return new HttpError(bundleFileCodes[error.reason], error.message, { cause: error });

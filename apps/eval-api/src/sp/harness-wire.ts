@@ -2,6 +2,8 @@ import { AGENT_STATUSES } from "@eval-platform/eval-contracts";
 import type {
   AgentResourceSnapshot,
   EvaluationAgentOutput,
+  EvaluationStructuredOutput,
+  EvidenceKind,
   ExecutionOutput,
   MaterializedDataBinding,
 } from "@eval-platform/eval-contracts";
@@ -134,10 +136,25 @@ export function executionOutput(value: unknown, samplingId: string): ExecutionOu
   }), value, "execution output");
 }
 
+const EVIDENCE_KINDS = ["artifact", "workspace", "test-report", "trajectory", "judge-output", "metric"] as const satisfies readonly EvidenceKind[];
+
+const structuredOutputSchema = z.object({
+  path: id,
+  content: z.string(),
+  contentHash: id.exactOptional(),
+}) satisfies z.ZodType<EvaluationStructuredOutput>;
+
+/** Keeps the Evaluator's raw result file unchanged; unknown top-level fields such as a legacy score are dropped. */
 export function evaluationOutput(value: unknown): EvaluationAgentOutput {
-  return response(z.looseObject({
+  return response(z.object({
     status: outputStatusSchema,
     artifacts: artifactsSchema,
+    structuredOutput: structuredOutputSchema.exactOptional(),
+    evidenceRefs: z.array(z.object({
+      kind: z.enum(EVIDENCE_KINDS),
+      ref: id,
+      contentHash: id.exactOptional(),
+    })).exactOptional(),
     trajectory: trajectorySchema("evaluator"),
     error: z.string().exactOptional(),
   }), value, "evaluation output");

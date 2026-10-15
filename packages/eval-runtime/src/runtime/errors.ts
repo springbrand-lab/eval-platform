@@ -1,12 +1,10 @@
 export type RuntimeEntity =
   | "project"
   | "run"
-  | "sample"
+  | "dataset"
+  | "project-sample"
   | "sampling"
-  | "evaluation"
-  | "execution-config"
-  | "evaluation-config"
-  | "pipeline-config";
+  | "evaluation";
 
 /** A Runtime read or admission named an entity that is absent from the caller's scope. */
 export class RuntimeEntityNotFoundError extends Error {
@@ -30,9 +28,13 @@ export class RuntimeInputError extends Error {
 
 export type RuntimeAdmissionConflictReason =
   | "source-branch"
-  | "launch-selection"
-  | "output-schema"
-  | "empty-project"
+  /** pipeline/evaluation on a Project without an evaluation plan. */
+  | "evaluation-plan-required"
+  /** The plan digest changed between preview/read and the admission transaction. */
+  | "plan-changed"
+  /** Submitted targets no longer match the Project's current Samplings. */
+  | "stale-targets"
+  | "empty-targets"
   | "evaluation-prompt"
   | "sampling-unavailable";
 

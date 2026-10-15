@@ -9,7 +9,7 @@ import type {
 } from "@eval-platform/eval-contracts";
 import { dataInputSchema } from "@eval-platform/eval-dataset";
 
-import type { RuntimeEvaluationContext, Sample } from "./model.js";
+import type { ProjectSample, RuntimeEvaluationContext } from "./model.js";
 import { persistRuntimeRecord, readStageFailure } from "./store.js";
 import { RuntimeAdmissionConflictError } from "./errors.js";
 import {
@@ -27,10 +27,10 @@ export interface EvaluateSamplingInput {
   readonly evaluationOutputSchema: EvaluationOutputSchema;
 }
 
-export function requireEvaluationPrompt(sample: Sample): string {
+export function requireEvaluationPrompt(sample: ProjectSample): string {
   const prompt = sample.data.evalPrompt;
   if (prompt === undefined) {
-    throw new RuntimeAdmissionConflictError("evaluation-prompt", `Sample ${sample.sampleId} has no evalPrompt`);
+    throw new RuntimeAdmissionConflictError("evaluation-prompt", `ProjectSample ${sample.projectSampleId} has no evalPrompt`);
   }
   return prompt;
 }

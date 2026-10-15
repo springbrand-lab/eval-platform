@@ -17,7 +17,7 @@ export type RunRecordScope =
 const samplingStatus = sql<string>`${samplings.facts}->'execution'->>'status'`;
 const evaluationStatus = sql<string>`${evaluations.facts}->'status'->>'status'`;
 
-/** The single definition of a Sampling that may be selected for independent evaluation. */
+/** The single definition of a Sampling that may be evaluated on its own. */
 export function samplingSucceeded(): SQL {
   return eq(samplingStatus, "succeeded");
 }
@@ -50,7 +50,7 @@ export function runActive(reader: RecordReader): SQL | undefined {
 }
 
 export function samplingFromRow(row: typeof samplings.$inferSelect): Sampling {
-  return { ...row.facts, samplingId: row.samplingId, projectId: row.projectId, sampleId: row.sampleId };
+  return { ...row.facts, samplingId: row.samplingId, projectId: row.projectId, projectSampleId: row.projectSampleId };
 }
 
 export function evaluationFromRow(row: typeof evaluations.$inferSelect): EvaluationRecord {
@@ -58,7 +58,7 @@ export function evaluationFromRow(row: typeof evaluations.$inferSelect): Evaluat
 }
 
 export function samplingFacts(record: Sampling): typeof samplings.$inferInsert.facts {
-  const { samplingId: _samplingId, projectId: _projectId, sampleId: _sampleId, ...facts } = record;
+  const { samplingId: _samplingId, projectId: _projectId, projectSampleId: _projectSampleId, ...facts } = record;
   return facts;
 }
 
@@ -145,10 +145,16 @@ export async function readRunRecords(
     runId: row.runId,
     projectId: row.projectId,
     sourceCommit: row.sourceCommit,
+    operation: row.operation,
     phases: row.phases,
-    config: row.config,
+    selector: row.selector,
+    targets: row.targets,
     samplingIds: samplingIdsByRun.get(row.runId) ?? [],
     evaluationIds: evaluationIdsByRun.get(row.runId) ?? [],
+    planDigests: {
+      execution: row.executionPlanDigest,
+      ...(row.evaluationPlanDigest === null ? {} : { evaluation: row.evaluationPlanDigest }),
+    },
     requestIdentity: {
       idempotencyKey: row.idempotencyKey,
       requestFingerprint: row.requestFingerprint,

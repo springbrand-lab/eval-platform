@@ -55,21 +55,15 @@ export type EvidenceKind =
   | "judge-output"
   | "metric";
 
+/** Project metadata; its plan lives in ProjectPlan and is never edited after creation. */
 export interface Project {
   readonly projectId: string;
   readonly ownerUserId: string;
   readonly name: string;
+  readonly description?: string;
   /** SP source branch selected by the Eval deployment that created this Project. */
   readonly sourceBranch: string;
-  /** Selected standalone output format; fixed after the first Evaluation Run. */
-  readonly evaluationOutputSchemaId?: string;
-  /** Fixed by the first admitted Run; an empty Project has no initial launch yet. */
-  readonly initialLaunch?: ProjectInitialLaunch;
-}
-
-export interface ProjectInitialLaunch {
-  readonly operation: "execution" | "pipeline";
-  readonly configId: string;
+  readonly createdAt: string;
 }
 
 export interface AgentConfigRef {
@@ -143,7 +137,8 @@ export interface EvaluationAttempt {
 export interface Sampling {
   readonly samplingId: string;
   readonly projectId: string;
-  readonly sampleId: string;
+  /** The Project's own fixed input; never a live catalog Sample or Data. */
+  readonly projectSampleId: string;
   readonly execution: SamplingStageState;
   readonly subjectAgent: AgentConfigRef;
   /** SP Chat is the Subject Session; all execution attempts submit within it. */
@@ -153,23 +148,39 @@ export interface Sampling {
   readonly trajectory?: TrajectoryRef;
 }
 
-export interface StartRunRequest {
-  readonly idempotencyKey: string;
-  readonly projectId: string;
-  readonly executionConfigId: string;
+/** Chosen per Run; never persisted on the Project. */
+export const RUN_OPERATIONS = ["execution", "pipeline", "evaluation"] as const;
+export type RunOperation = (typeof RUN_OPERATIONS)[number];
+
+/**
+ * What the user picked. Expansion happens inside the Project snapshot, never the live catalog:
+ * `all` and `datasetIds` expand to ProjectSamples; for evaluation every ProjectSample expands
+ * further to its current successful Samplings.
+ */
+export interface RunTargetSelector {
+  readonly all?: true;
+  readonly datasetIds?: readonly string[];
+  readonly projectSampleIds?: readonly string[];
+  readonly samplingIds?: readonly string[];
 }
 
-export interface EvaluateRequest {
-  readonly idempotencyKey: string;
-  readonly projectId: string;
+/**
+ * The fixed, deduplicated result of expanding a selector, returned by preview and submitted unchanged.
+ * execution/pipeline: each ProjectSample replaces all its current Samplings with `samplingCount` new ones;
+ * each Sampling (whose ProjectSample is not listed) is replaced one-for-one.
+ * evaluation: `projectSampleIds` is empty and `samplingIds` lists successful Samplings to re-evaluate.
+ */
+export interface RunTargets {
+  readonly projectSampleIds: readonly string[];
   readonly samplingIds: readonly string[];
-  readonly evaluationConfigId: string;
 }
 
-export interface PipelineRequest {
+export interface RunRequest {
   readonly idempotencyKey: string;
   readonly projectId: string;
-  readonly pipelineConfigId: string;
+  readonly operation: RunOperation;
+  readonly selector: RunTargetSelector;
+  readonly targets: RunTargets;
 }
 
 export type RunPhase = "execution" | "evaluation";
@@ -191,7 +202,10 @@ export interface RunSnapshot extends RunHandle {
   readonly stopFinalized?: true;
   readonly projectId: string;
   readonly sourceCommit: string;
+  readonly operation: RunOperation;
   readonly phases: RunPhases;
+  readonly selector: RunTargetSelector;
+  readonly targets: RunTargets;
   readonly evaluationIds: readonly string[];
   readonly phase: RunPhase;
   readonly status: SamplingStatus;
@@ -211,14 +225,37 @@ export interface EvidenceRef {
   readonly contentHash?: string;
 }
 
+/** The Evaluator's raw result file, unchanged; Metrics validates it against the Project Schema. */
+export interface EvaluationStructuredOutput {
+  /** Workspace path below the Evaluator's own `/evaluations/<evaluationId>/` directory. */
+  readonly path: string;
+  /** Original UTF-8 file text, not a parsed copy. */
+  readonly content: string;
+  readonly contentHash?: string;
+}
+
 export interface EvaluationAgentOutput {
   readonly status: "succeeded" | "failed";
   readonly artifacts: readonly ArtifactRef[];
-  readonly score?: number;
-  readonly reason?: string;
+  /** Absent when SP found no result file; Metrics reports it as unavailable, never as zero. */
+  readonly structuredOutput?: EvaluationStructuredOutput;
   readonly evidenceRefs?: readonly EvidenceRef[];
   readonly trajectory: TrajectoryRef;
   readonly error?: string;
+}
+
+/** Where a read-only Chat observation page points; Web never receives a writable Chat URL. */
+export interface AgentObservationRef {
+  readonly role: AgentRole;
+  readonly projectId: string;
+  readonly samplingId: string;
+  readonly evaluationId?: string;
+  /** SP Inbox owner of the Chat. */
+  readonly ownerUserId: string;
+  /** Absent while the Agent has not been assigned a Chat yet. */
+  readonly chatId?: string;
+  /** `not-started` until the first Submission; the page then shows an empty, read-only state. */
+  readonly state: "not-started" | "available";
 }
 
 export interface EvaluationRecord {

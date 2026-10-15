@@ -2,6 +2,7 @@ import type { EvaluationRecord, RunSnapshot } from "@eval-platform/eval-contract
 import { toRunSnapshot } from "@eval-platform/eval-runtime";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
+import { projectExists, READ_SNAPSHOT } from "./project-plans.js";
 import { readEvaluations, readRunRecords, readSamplings, requireMembers, type RecordReader } from "./run-records.js";
 
 export interface ProjectRunView {
@@ -13,10 +14,13 @@ export type RunViewScope =
   | { readonly kind: "owner"; readonly ownerUserId: string }
   | { readonly kind: "project"; readonly ownerUserId: string; readonly projectId: string };
 
-/** Reads one owned Run and its member records in bounded SQL batches; call inside one read-only snapshot. */
+/**
+ * Reads one owned Run of a non-deleted Project and its current member records in bounded SQL
+ * batches; call inside one read-only snapshot.
+ */
 export async function readRunView(reader: RecordReader, runId: string, scope: RunViewScope): Promise<ProjectRunView | null> {
   const [record] = await readRunRecords(reader, [runId], scope);
-  if (!record) return null;
+  if (!record || !await projectExists(reader, record.projectId, scope.ownerUserId)) return null;
   const [samplingRows, evaluationRows] = await Promise.all([
     readSamplings(reader, record.samplingIds, scope.ownerUserId),
     readEvaluations(reader, record.evaluationIds, scope.ownerUserId),
@@ -31,6 +35,6 @@ export function createPostgresProjectRunReader(db: EvalDb, ownerUserId: string) 
   const owner = requireOwnerUserId(ownerUserId);
   return (projectId: string, runId: string): Promise<ProjectRunView | null> => db.transaction(
     (transaction) => readRunView(transaction, runId, { kind: "project", ownerUserId: owner, projectId }),
-    { isolationLevel: "repeatable read", accessMode: "read only" },
+    READ_SNAPSHOT,
   );
 }

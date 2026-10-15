@@ -23,7 +23,7 @@ export const list = createRoute({
   method: "get",
   path: "/",
   tags: ["Agent Config"],
-  summary: "List the user's Eval SP Agent Configs",
+  summary: "List the user's Eval SP Agent Configs, excluding frozen Project copies",
   responses: {
     200: jsonContent(responseSchema(z.array(agentConfigSchema).readonly()), "Agent Configs"),
     ...errorResponses,
@@ -48,7 +48,7 @@ export const get = createRoute({
   method: "get",
   path: "/{id}",
   tags: ["Agent Config"],
-  summary: "Get an Eval SP Agent Config",
+  summary: "Get an Eval SP Agent Config, including a frozen Project copy (read-only)",
   request: { params },
   responses: {
     200: jsonContent(responseSchema(agentConfigSchema), "Agent Config"),
@@ -61,7 +61,7 @@ export const update = createRoute({
   method: "patch",
   path: "/{id}",
   tags: ["Agent Config"],
-  summary: "Update an Eval SP Agent Config",
+  summary: "Update an Eval SP Agent Config; frozen Project copies are rejected",
   middleware: [jsonBody(JSON_BODY_BYTES)],
   request: { params, body: jsonBodyContent(agentConfigInputSchema) },
   responses: {
@@ -76,7 +76,7 @@ export const remove = createRoute({
   method: "delete",
   path: "/{id}",
   tags: ["Agent Config"],
-  summary: "Delete an Eval SP Agent Config",
+  summary: "Delete an Eval SP Agent Config; frozen Project copies are rejected",
   request: { params },
   responses: {
     ...deletedResponse,

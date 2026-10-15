@@ -15,9 +15,10 @@ export const METADATA_BODY_BYTES = 4_096;
 export const JSON_BODY_BYTES = 1_000_000;
 /** Client-chosen identifiers such as idempotency keys and Runtime entity IDs. */
 export const IDENTIFIER_CHARS = 512;
-export const EVALUATION_SAMPLING_IDS = 10_000;
-export const SAMPLING_PAGE_SIZE_DEFAULT = 100;
-export const SAMPLING_PAGE_SIZE_MAX = 1_000;
+/** Most Data a Project binds and most target IDs one Run selector or target list may carry. */
+export const RUN_TARGET_IDS = 10_000;
+/** Most Samplings one ProjectSample creates per execution. */
+export const SAMPLING_COUNT_MAX = 100;
 
 /** One JSON string escape (`\uXXXX`) is the most bytes a single text unit can occupy in a body. */
 const JSON_ESCAPED_UNIT_BYTES = 6;
@@ -34,6 +35,13 @@ export const OUTPUT_SCHEMA_BODY_BYTES = jsonTextBodyBytes(OUTPUT_SCHEMA_BYTES);
 /** Base64 files plus each file's path and media type. */
 export const MATERIAL_BODY_BYTES = Math.ceil(MATERIAL_TOTAL_BYTES / 3) * 4
   + (SP_MATERIAL_MAX_FILES + 1) * METADATA_BODY_BYTES;
-export const EVALUATION_BODY_BYTES = EVALUATION_SAMPLING_IDS
-  * (IDENTIFIER_CHARS * JSON_ESCAPED_UNIT_BYTES + JSON_ARRAY_ITEM_FRAMING_BYTES)
-  + jsonTextBodyBytes(2 * IDENTIFIER_CHARS);
+const UUID_CHARS = 36;
+/** Room for one escaped ID array item, or for one `"<uuid>":<count>` sampling-count entry. */
+const ID_ITEM_BYTES = IDENTIFIER_CHARS * JSON_ESCAPED_UNIT_BYTES + JSON_ARRAY_ITEM_FRAMING_BYTES;
+const UUID_ENTRY_BYTES = UUID_CHARS * JSON_ESCAPED_UNIT_BYTES + JSON_ARRAY_ITEM_FRAMING_BYTES + 8;
+/** A selector carries at most RUN_TARGET_IDS IDs. */
+export const RUN_PREVIEW_BODY_BYTES = RUN_TARGET_IDS * ID_ITEM_BYTES + jsonTextBodyBytes(IDENTIFIER_CHARS);
+/** A selector plus its fixed targets. */
+export const RUN_BODY_BYTES = 2 * RUN_TARGET_IDS * ID_ITEM_BYTES + jsonTextBodyBytes(2 * IDENTIFIER_CHARS);
+/** Selected Data IDs and per-Data sampling counts, plus names, descriptions and both plans. */
+export const PROJECT_BODY_BYTES = 2 * RUN_TARGET_IDS * UUID_ENTRY_BYTES + JSON_BODY_BYTES;

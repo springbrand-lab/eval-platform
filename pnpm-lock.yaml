@@ -189,6 +189,9 @@ importers:
       '@springbrand/utils':
         specifier: link:../../../sp-platform/packages/utils
         version: link:../../../sp-platform/packages/utils
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
     devDependencies:
       typescript:
         specifier: ^7.0.2
