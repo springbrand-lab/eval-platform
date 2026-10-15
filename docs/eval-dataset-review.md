@@ -2,7 +2,7 @@
 
 > 历史快照：记录当时代码的事实，不代表当前实现；当前行为以 `packages/eval-dataset/README.md` 为准。
 
-> 评审对象：`packages/eval-dataset`
+> 评审对象：`packages/eval-dataset`；2026-10-10 追加 `apps/eval-api/src/db/dataset.ts` 的 PostgreSQL 实现评审。
 >
 > 记录日期：2026-10-08
 >
@@ -32,6 +32,7 @@
 | D-01 | JSON/YAML 导入大整数时静默丢失精度 | 已修复，复审通过 |
 | D-02 | JSON 导入接受同一对象内的重复字段名，并静默覆盖前值 | 已修复，复审通过 |
 | D-03 | Data 接受业务字段 sampleId，但 Runtime 的同名身份字段与其冲突，Agent 输入丢失该字段 | 已修复，复审通过 |
+| D-04 | PostgreSQL 导入将合法的大写 Dataset/Data UUID 误判为身份冲突，首次导入也失败 | 已修复，待复审 |
 
 ## 逐项记录
 
@@ -273,3 +274,47 @@ interface Sample {
 - 再次运行全仓 `pnpm check` 和 `pnpm test`，全部通过，共 275 个测试；`git diff --check` 通过。
 - 独立复验只注入记录参数的 Store/Harness，不宣称已验证真实数据库或 SP 生产化接入，这些不属于本次三项修复的评审范围。
 - 本次仅更新本评审 Markdown，没有修改业务代码、测试或 CI，也没有提交 Git。
+
+## PostgreSQL 实现评审（2026-10-10）
+
+**评审范围**：新提交 `c8e5e6c` 的 Dataset PostgreSQL 实现；以当前 HEAD `564c974` 复现。不是把尚未接入 Store 当作问题，而是审核已经加入的持久化生产代码。原 D-01、D-02、D-03 的通过结论不变。
+
+### D-04：合法的大写 UUID 在首次导入时被误报身份冲突（已修复，待复审）
+
+**严重程度**：P2。正式输入契约接受的 Dataset 导入被错误拒绝；没有覆盖旧数据或部分提交。
+
+**相关位置**
+
+- `packages/eval-dataset/src/dataset/model.ts:55`：Dataset/Data 身份使用 `z.uuid()`，接受大写 UUID，但保留原大小写。
+- `apps/eval-api/src/db/schema.ts:24`：Dataset 身份使用 PostgreSQL `uuid` 列，Data 身份同样使用该列类型。
+- `apps/eval-api/src/db/dataset.ts:170`：直接比较数据库返回的 Dataset 与原导入对象，比较包含 UUID 字符串。
+- `apps/eval-api/src/db/dataset.ts:192`：Data 使用相同的完整对象比较。
+
+**大白话**
+
+导入文件里的 UUID 带大写字母是合法输入，前面的校验也接受。数据库保存后返回小写 UUID，后面的代码却把大小写不同当成两份内容不一致。因此数据库里原本没有任何同 ID 记录，第一次导入也会报“身份冲突”。Dataset ID 或任意 Data ID 带大写都能触发。
+
+**独立复现**
+
+1. 真实 `datasetSnapshotSchema` 接受大写 Dataset/Data UUID，并返回未改变大小写的身份。
+2. 使用独立临时 PostgreSQL 数据库，应用仓库现有迁移，调用真实 `createDatasetService(createPostgresDatasetStore(db)).importDataset()`。
+3. 对照组：Dataset/Data ID 都为小写，导入成功。
+4. 仅 Dataset ID 为大写：首次导入抛出 `DatasetIdentityConflictError`，提示 Dataset 身份冲突。
+5. Dataset ID 为小写、仅 Data ID 为大写：首次导入抛出 `DatasetIdentityConflictError`，提示 Data 身份冲突。
+6. 两个故障组均确认事务回滚，Dataset 没有残留；复现完成后删除临时数据库，既有应用数据库未改动。
+
+**判断边界**
+
+- 触发点是现有正式 JSON 导入入口及其已经接受的 UUID，不依赖非契约字段、假设功能或并发 Worker。
+- 原子回滚有效；问题是正常输入被误拒绝，不是数据损坏。
+- 不是要求版本、CAS、额外实体或另一套身份；根因是校验入口的 UUID 表示与数据库的权威身份表示不一致。
+
+**已确认的处理原则**：复用 SP 的身份生成与校验方案，使导入、查重、查询返回及数据库身份使用同一套规则；不自行编写另一套 UUID 生成、校验或大小写处理逻辑。遵守既定公开集成边界，不跨仓库导入 SP 私有实现。具体接线实现需要另行授权，本轮只记录评审结论。
+
+**用户结论**：2026-10-10 已确认。用户明确表示：“是，这个复用sp的生成和校验方案，不要自己写，下一个”。
+
+**本次修改范围**：只追加评审 Markdown；没有修改生产代码、测试、Agent 或 CI，没有提交 Git。
+
+**后续修复记录（2026-10-10）**：上述复现与“本次修改范围”保留为原评审时的历史记录。对照指定 SP 工作树中 `packages/http/src/mcp-observation.ts` 的 `z.uuid().transform((value) => value.toLowerCase())` 模式，在 Dataset/Data 平台 ID schema 边界统一规范为小写。大写或混合大小写的导入仍被接受；文档解析、重复 Data ID 检查、Store 比较、查询和导出使用同一平台身份表示。外部资源引用及 Data 业务字段保持原值，不引入跨仓库私有源码依赖。
+
+新增 schema 回归覆盖大小写规范化、仅大小写不同的重复 Data ID，以及业务 ID/资源引用不变；真实 PostgreSQL 回归分别覆盖 Dataset ID、Data ID 为大写时的首次导入、重复导入、查询、导出及真实内容冲突。修复前两个 PostgreSQL 用例分别在 Dataset/Data 比较处复现 `DatasetIdentityConflictError`，修复后通过。Dataset 包 171 个测试、PostgreSQL 集成 14 个测试通过。
