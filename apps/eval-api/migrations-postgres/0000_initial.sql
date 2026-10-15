@@ -53,7 +53,7 @@ CREATE TABLE "eval_dataset_data" (
 CREATE TABLE "eval_datasets" (
 	"dataset_id" uuid PRIMARY KEY NOT NULL,
 	"owner_user_id" text NOT NULL,
-	"kind" text DEFAULT 'general' NOT NULL,
+	"kind" text NOT NULL,
 	"name" text NOT NULL,
 	"description" text,
 	"deleted_at" timestamp with time zone,
@@ -82,9 +82,10 @@ CREATE TABLE "eval_evaluation_output_schemas" (
 --> statement-breakpoint
 CREATE TABLE "eval_evaluations" (
 	"evaluation_id" text PRIMARY KEY NOT NULL,
+	"owner_user_id" text NOT NULL,
 	"sampling_id" text NOT NULL,
 	"facts" jsonb NOT NULL,
-	CONSTRAINT "eval_evaluations_identity_sampling_uq" UNIQUE("evaluation_id","sampling_id")
+	CONSTRAINT "eval_evaluations_owner_identity_uq" UNIQUE("owner_user_id","evaluation_id","sampling_id")
 );
 --> statement-breakpoint
 CREATE TABLE "eval_execution_configs" (
@@ -112,18 +113,21 @@ CREATE TABLE "eval_projects" (
 	"evaluation_output_schema_locked" boolean DEFAULT false NOT NULL,
 	"initial_launch" jsonb,
 	CONSTRAINT "eval_projects_owner_id_uq" UNIQUE("owner_user_id","project_id"),
+	CONSTRAINT "eval_projects_name_ck" CHECK (length(trim("eval_projects"."name")) > 0),
 	CONSTRAINT "eval_projects_source_branch_ck" CHECK (length(trim("eval_projects"."source_branch")) > 0),
 	CONSTRAINT "eval_projects_initial_launch_ck" CHECK ("eval_projects"."initial_launch" IS NULL OR coalesce((jsonb_typeof("eval_projects"."initial_launch") = 'object' AND "eval_projects"."initial_launch"->>'operation' IN ('execution', 'pipeline') AND length("eval_projects"."initial_launch"->>'configId') > 0), false))
 );
 --> statement-breakpoint
 CREATE TABLE "eval_run_evaluations" (
+	"owner_user_id" text NOT NULL,
 	"run_id" text NOT NULL,
 	"evaluation_id" text NOT NULL,
 	"sampling_id" text NOT NULL,
 	"position" integer NOT NULL,
 	CONSTRAINT "eval_run_evaluations_run_id_evaluation_id_pk" PRIMARY KEY("run_id","evaluation_id"),
 	CONSTRAINT "eval_run_evaluations_identity_uq" UNIQUE("evaluation_id"),
-	CONSTRAINT "eval_run_evaluations_position_uq" UNIQUE("run_id","position")
+	CONSTRAINT "eval_run_evaluations_position_uq" UNIQUE("run_id","position"),
+	CONSTRAINT "eval_run_evaluations_sampling_uq" UNIQUE("run_id","sampling_id")
 );
 --> statement-breakpoint
 CREATE TABLE "eval_run_request_keys" (
@@ -155,7 +159,8 @@ CREATE TABLE "eval_runs" (
 	"stop_finalized" boolean DEFAULT false NOT NULL,
 	CONSTRAINT "eval_runs_owner_id_uq" UNIQUE("owner_user_id","run_id"),
 	CONSTRAINT "eval_runs_project_idempotency_uq" UNIQUE("project_id","idempotency_key"),
-	CONSTRAINT "eval_runs_phases_ck" CHECK ("eval_runs"."phases" IN ('["execution"]'::jsonb, '["evaluation"]'::jsonb, '["execution", "evaluation"]'::jsonb)),
+	CONSTRAINT "eval_runs_phases_ck" CHECK (("eval_runs"."phases", "eval_runs"."config"->>'operation') IN (('["execution"]'::jsonb, 'execution'), ('["evaluation"]'::jsonb, 'evaluation'), ('["execution", "evaluation"]'::jsonb, 'pipeline'))),
+	CONSTRAINT "eval_runs_request_identity_ck" CHECK (length("eval_runs"."idempotency_key") > 0 AND length("eval_runs"."request_fingerprint") > 0),
 	CONSTRAINT "eval_runs_source_commit_ck" CHECK ("eval_runs"."source_commit" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$')
 );
 --> statement-breakpoint
@@ -175,25 +180,25 @@ CREATE TABLE "eval_samplings" (
 	CONSTRAINT "eval_samplings_owner_id_uq" UNIQUE("owner_user_id","sampling_id")
 );
 --> statement-breakpoint
-ALTER TABLE "eval_bundle_materials" ADD CONSTRAINT "eval_bundle_materials_owner_user_id_bundle_id_eval_bundles_owner_user_id_bundle_id_fk" FOREIGN KEY ("owner_user_id","bundle_id") REFERENCES "public"."eval_bundles"("owner_user_id","bundle_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_bundle_sessions" ADD CONSTRAINT "eval_bundle_sessions_owner_user_id_bundle_id_eval_bundles_owner_user_id_bundle_id_fk" FOREIGN KEY ("owner_user_id","bundle_id") REFERENCES "public"."eval_bundles"("owner_user_id","bundle_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_dataset_data" ADD CONSTRAINT "eval_dataset_data_owner_user_id_dataset_id_eval_datasets_owner_user_id_dataset_id_fk" FOREIGN KEY ("owner_user_id","dataset_id") REFERENCES "public"."eval_datasets"("owner_user_id","dataset_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_dataset_data" ADD CONSTRAINT "eval_dataset_data_owner_user_id_data_id_eval_data_owner_user_id_data_id_fk" FOREIGN KEY ("owner_user_id","data_id") REFERENCES "public"."eval_data"("owner_user_id","data_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_evaluations" ADD CONSTRAINT "eval_evaluations_sampling_id_eval_samplings_sampling_id_fk" FOREIGN KEY ("sampling_id") REFERENCES "public"."eval_samplings"("sampling_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_execution_configs" ADD CONSTRAINT "eval_execution_configs_owner_user_id_dataset_id_eval_datasets_owner_user_id_dataset_id_fk" FOREIGN KEY ("owner_user_id","dataset_id") REFERENCES "public"."eval_datasets"("owner_user_id","dataset_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_pipeline_configs" ADD CONSTRAINT "eval_pipeline_configs_owner_user_id_execution_config_id_eval_execution_configs_owner_user_id_config_id_fk" FOREIGN KEY ("owner_user_id","execution_config_id") REFERENCES "public"."eval_execution_configs"("owner_user_id","config_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_pipeline_configs" ADD CONSTRAINT "eval_pipeline_configs_owner_user_id_evaluation_config_id_eval_evaluation_configs_owner_user_id_config_id_fk" FOREIGN KEY ("owner_user_id","evaluation_config_id") REFERENCES "public"."eval_evaluation_configs"("owner_user_id","config_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_projects" ADD CONSTRAINT "eval_projects_owner_user_id_evaluation_output_schema_id_eval_evaluation_output_schemas_owner_user_id_output_schema_id_fk" FOREIGN KEY ("owner_user_id","evaluation_output_schema_id") REFERENCES "public"."eval_evaluation_output_schemas"("owner_user_id","output_schema_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_run_evaluations" ADD CONSTRAINT "eval_run_evaluations_run_id_eval_runs_run_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."eval_runs"("run_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_run_evaluations" ADD CONSTRAINT "eval_run_evaluations_run_id_sampling_id_eval_run_samplings_run_id_sampling_id_fk" FOREIGN KEY ("run_id","sampling_id") REFERENCES "public"."eval_run_samplings"("run_id","sampling_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_run_evaluations" ADD CONSTRAINT "eval_run_evaluations_evaluation_id_sampling_id_eval_evaluations_evaluation_id_sampling_id_fk" FOREIGN KEY ("evaluation_id","sampling_id") REFERENCES "public"."eval_evaluations"("evaluation_id","sampling_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_run_request_keys" ADD CONSTRAINT "eval_run_request_keys_owner_user_id_project_id_eval_projects_owner_user_id_project_id_fk" FOREIGN KEY ("owner_user_id","project_id") REFERENCES "public"."eval_projects"("owner_user_id","project_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_run_samplings" ADD CONSTRAINT "eval_run_samplings_owner_user_id_run_id_eval_runs_owner_user_id_run_id_fk" FOREIGN KEY ("owner_user_id","run_id") REFERENCES "public"."eval_runs"("owner_user_id","run_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_run_samplings" ADD CONSTRAINT "eval_run_samplings_owner_user_id_sampling_id_eval_samplings_owner_user_id_sampling_id_fk" FOREIGN KEY ("owner_user_id","sampling_id") REFERENCES "public"."eval_samplings"("owner_user_id","sampling_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_runs" ADD CONSTRAINT "eval_runs_owner_user_id_project_id_eval_projects_owner_user_id_project_id_fk" FOREIGN KEY ("owner_user_id","project_id") REFERENCES "public"."eval_projects"("owner_user_id","project_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_samples" ADD CONSTRAINT "eval_samples_owner_user_id_data_id_eval_data_owner_user_id_data_id_fk" FOREIGN KEY ("owner_user_id","data_id") REFERENCES "public"."eval_data"("owner_user_id","data_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_samplings" ADD CONSTRAINT "eval_samplings_owner_user_id_project_id_eval_projects_owner_user_id_project_id_fk" FOREIGN KEY ("owner_user_id","project_id") REFERENCES "public"."eval_projects"("owner_user_id","project_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_samplings" ADD CONSTRAINT "eval_samplings_owner_user_id_sample_id_eval_samples_owner_user_id_sample_id_fk" FOREIGN KEY ("owner_user_id","sample_id") REFERENCES "public"."eval_samples"("owner_user_id","sample_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_bundle_materials" ADD CONSTRAINT "eval_bundle_materials_bundle_fk" FOREIGN KEY ("owner_user_id","bundle_id") REFERENCES "public"."eval_bundles"("owner_user_id","bundle_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_bundle_sessions" ADD CONSTRAINT "eval_bundle_sessions_bundle_fk" FOREIGN KEY ("owner_user_id","bundle_id") REFERENCES "public"."eval_bundles"("owner_user_id","bundle_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_dataset_data" ADD CONSTRAINT "eval_dataset_data_dataset_fk" FOREIGN KEY ("owner_user_id","dataset_id") REFERENCES "public"."eval_datasets"("owner_user_id","dataset_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_dataset_data" ADD CONSTRAINT "eval_dataset_data_data_fk" FOREIGN KEY ("owner_user_id","data_id") REFERENCES "public"."eval_data"("owner_user_id","data_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_evaluations" ADD CONSTRAINT "eval_evaluations_sampling_fk" FOREIGN KEY ("owner_user_id","sampling_id") REFERENCES "public"."eval_samplings"("owner_user_id","sampling_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_execution_configs" ADD CONSTRAINT "eval_execution_configs_dataset_fk" FOREIGN KEY ("owner_user_id","dataset_id") REFERENCES "public"."eval_datasets"("owner_user_id","dataset_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_pipeline_configs" ADD CONSTRAINT "eval_pipeline_configs_execution_config_fk" FOREIGN KEY ("owner_user_id","execution_config_id") REFERENCES "public"."eval_execution_configs"("owner_user_id","config_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_pipeline_configs" ADD CONSTRAINT "eval_pipeline_configs_evaluation_config_fk" FOREIGN KEY ("owner_user_id","evaluation_config_id") REFERENCES "public"."eval_evaluation_configs"("owner_user_id","config_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_projects" ADD CONSTRAINT "eval_projects_output_schema_fk" FOREIGN KEY ("owner_user_id","evaluation_output_schema_id") REFERENCES "public"."eval_evaluation_output_schemas"("owner_user_id","output_schema_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_run_evaluations" ADD CONSTRAINT "eval_run_evaluations_run_fk" FOREIGN KEY ("owner_user_id","run_id") REFERENCES "public"."eval_runs"("owner_user_id","run_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_run_evaluations" ADD CONSTRAINT "eval_run_evaluations_membership_fk" FOREIGN KEY ("run_id","sampling_id") REFERENCES "public"."eval_run_samplings"("run_id","sampling_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_run_evaluations" ADD CONSTRAINT "eval_run_evaluations_evaluation_fk" FOREIGN KEY ("owner_user_id","evaluation_id","sampling_id") REFERENCES "public"."eval_evaluations"("owner_user_id","evaluation_id","sampling_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_run_request_keys" ADD CONSTRAINT "eval_run_request_keys_project_fk" FOREIGN KEY ("owner_user_id","project_id") REFERENCES "public"."eval_projects"("owner_user_id","project_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_run_samplings" ADD CONSTRAINT "eval_run_samplings_run_fk" FOREIGN KEY ("owner_user_id","run_id") REFERENCES "public"."eval_runs"("owner_user_id","run_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_run_samplings" ADD CONSTRAINT "eval_run_samplings_sampling_fk" FOREIGN KEY ("owner_user_id","sampling_id") REFERENCES "public"."eval_samplings"("owner_user_id","sampling_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_runs" ADD CONSTRAINT "eval_runs_project_fk" FOREIGN KEY ("owner_user_id","project_id") REFERENCES "public"."eval_projects"("owner_user_id","project_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_samples" ADD CONSTRAINT "eval_samples_data_fk" FOREIGN KEY ("owner_user_id","data_id") REFERENCES "public"."eval_data"("owner_user_id","data_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_samplings" ADD CONSTRAINT "eval_samplings_project_fk" FOREIGN KEY ("owner_user_id","project_id") REFERENCES "public"."eval_projects"("owner_user_id","project_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "eval_samplings" ADD CONSTRAINT "eval_samplings_sample_fk" FOREIGN KEY ("owner_user_id","sample_id") REFERENCES "public"."eval_samples"("owner_user_id","sample_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "eval_bundle_materials_bundle_idx" ON "eval_bundle_materials" USING btree ("bundle_id");--> statement-breakpoint
 CREATE INDEX "eval_bundle_sessions_bundle_idx" ON "eval_bundle_sessions" USING btree ("bundle_id");--> statement-breakpoint
 CREATE INDEX "eval_bundles_owner_idx" ON "eval_bundles" USING btree ("owner_user_id");--> statement-breakpoint

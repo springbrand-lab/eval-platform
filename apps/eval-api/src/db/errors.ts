@@ -23,3 +23,57 @@ export class EvaluationSelectionTooLargeError extends Error {
     this.name = "EvaluationSelectionTooLargeError";
   }
 }
+
+export class DatasetInUseError extends Error {
+  constructor(readonly datasetId: string) {
+    super(`Dataset is still referenced: ${datasetId}`);
+    this.name = "DatasetInUseError";
+  }
+}
+
+export type BundleResourceKind = "Bundle" | "Material" | "Session";
+
+export class BundleResourceNotFoundError extends Error {
+  constructor(readonly kind: BundleResourceKind, readonly id: string) {
+    super(`Unknown ${kind} ${id}`);
+    this.name = "BundleResourceNotFoundError";
+  }
+}
+
+export class BundleResourceInUseError extends Error {
+  constructor(readonly kind: BundleResourceKind, readonly id: string) {
+    super(`${kind} is still bound to Data: ${id}`);
+    this.name = "BundleResourceInUseError";
+  }
+}
+
+export class OutputSchemaNotFoundError extends Error {
+  constructor(readonly outputSchemaId: string) {
+    super(`Unknown output format ${outputSchemaId}`);
+    this.name = "OutputSchemaNotFoundError";
+  }
+}
+
+export class OutputSchemaInUseError extends Error {
+  constructor(readonly outputSchemaId: string) {
+    super(`Output format is still bound to a Project: ${outputSchemaId}`);
+    this.name = "OutputSchemaInUseError";
+  }
+}
+
+export type ConfigReference = "Agent Config" | "Dataset" | "Dataset Sample" | "Execution Config" | "Evaluation Config";
+
+/** A saved config would reference an entity outside its owner's scope. */
+export class ConfigReferenceError extends Error {
+  constructor(readonly reference: ConfigReference, readonly id: string) {
+    super(`${reference} ${id} is outside the config owner scope or does not exist`);
+    this.name = "ConfigReferenceError";
+  }
+}
+
+export class ProjectRunStopConflictError extends Error {
+  constructor() {
+    super("Project has no unfinished Run");
+    this.name = "ProjectRunStopConflictError";
+  }
+}

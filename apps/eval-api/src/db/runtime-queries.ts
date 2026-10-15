@@ -1,38 +1,37 @@
 import type { EvalRuntime } from "@eval-platform/eval-runtime";
-import { RuntimeRunNotFoundError, toSamplingSnapshot } from "@eval-platform/eval-runtime";
+import { RuntimeEntityNotFoundError, toSamplingSnapshot } from "@eval-platform/eval-runtime";
 import type { EvalDb } from "./client.js";
-import { createPostgresProjectRunReader } from "./run-view.js";
-import { createPostgresRuntimeStore } from "./runtime.js";
-import type { EvalSpRelease } from "./release.js";
+import { requireOwnerUserId } from "./owner.js";
+import { listSamplingEvaluations, readEvaluations, readSamplings } from "./run-records.js";
+import { readRunView } from "./run-view.js";
 
 /** Owner-scoped result reads without a Worker Harness or mutable ConfigStore. */
 export function createPostgresRuntimeQueries(
   db: EvalDb,
   ownerUserId: string,
-  release: EvalSpRelease,
 ): Pick<EvalRuntime, "getRun" | "getSampling" | "getEvaluation" | "listEvaluations"> {
-  const store = createPostgresRuntimeStore(db, ownerUserId, release);
-  const readRun = createPostgresProjectRunReader(db, ownerUserId);
+  const owner = requireOwnerUserId(ownerUserId);
   return {
     async getRun(runId) {
-      const record = await store.getRun(runId);
-      if (!record) throw new RuntimeRunNotFoundError(runId);
-      const view = await readRun(record.projectId, runId);
-      if (!view) throw new RuntimeRunNotFoundError(runId);
+      const view = await db.transaction(
+        (transaction) => readRunView(transaction, runId, { kind: "owner", ownerUserId: owner }),
+        { isolationLevel: "repeatable read", accessMode: "read only" },
+      );
+      if (!view) throw new RuntimeEntityNotFoundError("run", runId);
       return view.run;
     },
     async getSampling(samplingId) {
-      const record = await store.getSampling(samplingId);
-      if (!record) throw new Error(`Unknown sampling ${samplingId}`);
+      const [record] = await readSamplings(db, [samplingId], owner);
+      if (!record) throw new RuntimeEntityNotFoundError("sampling", samplingId);
       return toSamplingSnapshot(record);
     },
     async getEvaluation(evaluationId) {
-      const record = await store.getEvaluation(evaluationId);
-      if (!record) throw new Error(`Unknown evaluation ${evaluationId}`);
+      const [record] = await readEvaluations(db, [evaluationId], owner);
+      if (!record) throw new RuntimeEntityNotFoundError("evaluation", evaluationId);
       return record;
     },
-    async listEvaluations(samplingId) {
-      return store.listEvaluations(samplingId);
+    listEvaluations(samplingId) {
+      return listSamplingEvaluations(db, samplingId, owner);
     },
   };
 }

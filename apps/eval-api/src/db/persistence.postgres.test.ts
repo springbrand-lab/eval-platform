@@ -1,17 +1,23 @@
 import path from "node:path";
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError } from "@eval-platform/eval-dataset";
-import { createMetrics, MetricsQueryError } from "@eval-platform/eval-metrics";
-import { createConfigResolver, createEvalRunResumer, RuntimeEvaluationSelectionError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, RuntimeRunStoppedError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
+import { createMetrics, MetricsEntityNotFoundError, MetricsQueryError } from "@eval-platform/eval-metrics";
+import { createConfigResolver, createEvalRunResumer, RuntimeEntityNotFoundError, RuntimeInputError, RuntimeProjectBusyError, RuntimeRecordConflictError, RuntimeRunIdentityConflictError, RuntimeRunStoppedError, type RuntimeRunRecord } from "@eval-platform/eval-runtime";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { eq, sql } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConfigEntityNotFoundError, ConfigReferenceError, createEvalDb, createPostgresCatalog, createPostgresConfigReader, createPostgresConfigStore, createPostgresDatasetStore, createPostgresIndependentEvaluationApi, createPostgresMetricsSource, createPostgresProjectRunControl, createPostgresRunNotifications, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, DatasetInUseError, EvalSpApiError, ProjectRunStopConflictError, startEvalRunWorker } from "../index.js";
-import { isForeignKeyFailure } from "./client.js";
+import { createPostgresIndependentEvaluationApi, createPostgresRunNotifications, EvalSpApiError, startEvalRunWorker } from "../index.js";
+import { createPostgresCatalog } from "./catalog.js";
+import { constraintViolation, createEvalDb } from "./client.js";
+import { createPostgresConfigReader, createPostgresConfigStore } from "./config.js";
+import { createPostgresDatasetStore } from "./dataset.js";
+import { ConfigReferenceError, DatasetInUseError, ProjectRunStopConflictError } from "./errors.js";
+import { createPostgresMetricsSource } from "./metrics.js";
 import { createOutputSchemaCatalog } from "./output-schemas.js";
+import { readRunRecords } from "./run-records.js";
 import { createPostgresProjectRunReader } from "./run-view.js";
-import { readRunRecords } from "./runtime.js";
+import { createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore } from "./runtime.js";
 import { data as dataTable, datasets as datasetsTable } from "./schema.js";
 
 const connection = process.env.DATABASE_URL;
@@ -61,7 +67,7 @@ function makeEvaluation(samplingId: string, evaluationId: string = crypto.random
 
 async function expectForeignKeyFailure(operation: Promise<unknown>): Promise<void> {
   const error = await operation.then(() => null, (reason: unknown) => reason);
-  expect(isForeignKeyFailure(error)).toBe(true);
+  expect(constraintViolation(error)?.kind).toBe("foreign-key");
 }
 
 async function testDatabase(url: string) {
@@ -163,7 +169,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const missing = makeSampling(project.projectId, "missing-sample");
     await expect(runtime.createRunWithSamplings(
       makeRun(project.projectId, missing, dataset.datasetId), [missing], [],
-    )).rejects.toThrow("Sample outside its Project owner scope");
+    )).rejects.toBeInstanceOf(RuntimeInputError);
     expect(await catalog.getProject(project.projectId)).toMatchObject(project);
 
     const phantom = { ...makeSampling(project.projectId, sample.sampleId), execution: { status: "succeeded" as const } };
@@ -172,7 +178,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       phases: ["evaluation"], evaluationIds: [phantomJudge.evaluationId], config: evaluationConfig,
     });
     await expect(runtime.createRunWithSamplings(evaluationOnly, [phantom], [phantomJudge]))
-      .rejects.toThrow("An empty Project cannot start with evaluation-only");
+      .rejects.toMatchObject({ name: "RuntimeAdmissionConflictError", reason: "empty-project" });
     expect(await catalog.getProject(project.projectId)).toMatchObject(project);
 
     const sampling = makeSampling(project.projectId, sample.sampleId);
@@ -201,7 +207,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       } },
     });
     await expect(runtime.createRunWithSamplings(changedConfig, [changedSampling], []))
-      .rejects.toThrow("Project launch selection cannot change");
+      .rejects.toMatchObject({ name: "RuntimeAdmissionConflictError", reason: "launch-selection" });
     const changedOperation = makeRun(project.projectId, changedSampling, dataset.datasetId, {
       phases: ["execution", "evaluation"], evaluationIds: [crypto.randomUUID()],
       config: { operation: "pipeline", pipeline: {
@@ -210,7 +216,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     });
     const changedJudge = makeEvaluation(changedSampling.samplingId, changedOperation.evaluationIds[0]!);
     await expect(runtime.createRunWithSamplings(changedOperation, [changedSampling], [changedJudge]))
-      .rejects.toThrow("Project launch selection cannot change");
+      .rejects.toMatchObject({ name: "RuntimeAdmissionConflictError", reason: "launch-selection" });
     expect(await runtime.getRun(changedConfig.runId)).toBeNull();
     expect(await runtime.getRun(changedOperation.runId)).toBeNull();
     expect(await catalog.getProject(project.projectId)).toMatchObject({ ...project, initialLaunch: selected });
@@ -221,7 +227,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       name: "Replacement", description: "Later format", content: '{"type":"string"}',
     });
     await expect(catalog.bindEvaluationOutputSchema(project.projectId, replacementFormat.outputSchemaId))
-      .rejects.toThrow("cannot change after evaluation admission");
+      .rejects.toMatchObject({ name: "RuntimeAdmissionConflictError", reason: "output-schema" });
   });
 
   it("requires the Project JSON Schema before admitting a Pipeline", async () => {
@@ -241,7 +247,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     });
     const runtime = createPostgresRuntimeStore(database.db, "user-A", release);
     await expect(runtime.createRunWithSamplings(pipeline, [sampling], [judge]))
-      .rejects.toThrow("Project evaluation output JSON Schema must be bound");
+      .rejects.toMatchObject({ name: "RuntimeAdmissionConflictError", reason: "output-schema" });
     expect(await catalog.getProject(project.projectId)).toEqual(project);
     const selected = await createOutputSchemaCatalog(database.db, "user-A").create({
       name: "Object", description: "Object result", content: '{"type":"object"}',
@@ -253,9 +259,9 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       name: "String", description: "String result", content: '{"type":"string"}',
     });
     await expect(catalog.bindEvaluationOutputSchema(project.projectId, replacement.outputSchemaId))
-      .rejects.toThrow("cannot change after evaluation admission");
+      .rejects.toMatchObject({ name: "RuntimeAdmissionConflictError", reason: "output-schema" });
     await expect(catalog.bindEvaluationOutputSchema(project.projectId, null))
-      .rejects.toThrow("cannot change after evaluation admission");
+      .rejects.toMatchObject({ name: "RuntimeAdmissionConflictError", reason: "output-schema" });
   });
 
   it("keeps Project on its source branch while recording each Run's deployed commit", async () => {
@@ -288,10 +294,10 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       sourceCommit: nextRelease.sourceCommit,
     });
     await expect(wrongBranch.createRunWithSamplings(rejected, [rejectedSampling], []))
-      .rejects.toThrow("differs from the active Eval SP release");
+      .rejects.toMatchObject({ name: "RuntimeAdmissionConflictError", reason: "source-branch" });
     await expect(nextStore.createRunWithSamplings(
       { ...rejected, sourceCommit: release.sourceCommit }, [rejectedSampling], [],
-    )).rejects.toThrow("differs from the active Eval SP release");
+    )).rejects.toMatchObject({ name: "RuntimeAdmissionConflictError", reason: "source-branch" });
     expect(await nextStore.getRun(rejected.runId)).toBeNull();
   });
 
@@ -406,7 +412,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       ...foreignExecutionInput, datasetId: foreignDataset.datasetId,
       harness: { ...executionInput.harness,
         agentConfig: { ownerUserId: "user-B", userAgentId: "subject" } },
-    })).rejects.toBeInstanceOf(ConfigEntityNotFoundError);
+    })).rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "execution-config" });
     await expect(owned.createExecutionConfig({ ...executionInput, datasetId: foreignDataset.datasetId }))
       .rejects.toBeInstanceOf(ConfigReferenceError);
     await expect(owned.createExecutionConfig({ ...executionInput, sampleIds: [foreignSample.sampleId] }))
@@ -440,7 +446,16 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     `));
     await expect(owned.updatePipelineConfig("missing", {
       executionConfigId: execution.configId, evaluationConfigId: evaluation.configId,
-    })).rejects.toBeInstanceOf(ConfigEntityNotFoundError);
+    })).rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "pipeline-config" });
+    await expect(owned.updateExecutionConfig("missing", executionInput)).rejects.toBeInstanceOf(RuntimeEntityNotFoundError);
+    await expect(owned.updateEvaluationConfig("missing", evaluationInput))
+      .rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "evaluation-config" });
+    await expect(owned.createPipelineConfig({
+      executionConfigId: execution.configId, evaluationConfigId: foreignEvaluation.configId,
+    })).rejects.toMatchObject({ name: "ConfigReferenceError", reference: "Evaluation Config" });
+    await expect(owned.updatePipelineConfig(pipeline.configId, {
+      executionConfigId: "missing", evaluationConfigId: evaluation.configId,
+    })).rejects.toMatchObject({ name: "ConfigReferenceError", reference: "Execution Config" });
   });
 
   it("shares Data within one user and rejects cross-user Dataset, Data and Sample access", async () => {
@@ -621,11 +636,17 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       samplingIds: [good.samplingId, bad.samplingId],
       requestIdentity: { idempotencyKey: crypto.randomUUID(), requestFingerprint: "invalid scope" },
     });
-    await expect(runtime.createRunWithSamplings(invalid, [good, bad], [])).rejects.toThrow();
+    await expect(runtime.createRunWithSamplings(invalid, [good, bad], [])).rejects.toBeInstanceOf(RuntimeInputError);
     expect(await runtime.getRun(invalid.runId)).toBeNull();
     expect(await runtime.getSampling(good.samplingId)).toBeNull();
     expect(await runtime.getSampling(bad.samplingId)).toBeNull();
     expect(await catalog.getSample(sample.sampleId)).not.toBeNull();
+
+    const mismatched = makeSampling(project.projectId, sample.sampleId);
+    const mismatchedRun = makeRun(project.projectId, mismatched, dataset.datasetId, { phases: ["evaluation"] });
+    await expect(runtime.createRunWithSamplings(mismatchedRun, [mismatched], []))
+      .rejects.toMatchObject({ name: "RuntimeInputError", message: expect.stringContaining("eval_runs_phases_ck") });
+    expect(await runtime.getRun(mismatchedRun.runId)).toBeNull();
   });
 
   it("allows only one unfinished Run per Project across execution and evaluation", async () => {
@@ -853,7 +874,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       requestIdentity: { idempotencyKey: "stale-selection", requestFingerprint: "stale-selection" },
     });
     await expect(runtime.createRunWithSamplings(rejectedRun, [staleSelection], [rejectedEvaluation]))
-      .rejects.toBeInstanceOf(RuntimeEvaluationSelectionError);
+      .rejects.toMatchObject({ name: "RuntimeAdmissionConflictError", reason: "sampling-unavailable" });
     expect(await runtime.getRun(rejectedRun.runId)).toBeNull();
     await runtime.updateSampling({ ...sampling, execution: { status: "succeeded" } }, failed);
 
@@ -1336,7 +1357,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       .toMatchObject({ samplingCount: 1, evaluationCount: 1 });
     expect((await metrics.getProjectOverview({ projectId: project.projectId })).counts)
       .toEqual({ datasets: 1, data: 1, samples: 1, samplings: 1, evaluations: 1 });
-    await expect(metrics.getProjectOverview({ projectId: "not-a-project" })).rejects.toBeInstanceOf(MetricsQueryError);
+    await expect(metrics.getProjectOverview({ projectId: "not-a-project" })).rejects.toBeInstanceOf(MetricsEntityNotFoundError);
   });
 
   it("derives queued, running and successful Pipeline progress from raw records instead of a saved Run status", async () => {
@@ -1375,7 +1396,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     const foreignSampling = makeSampling(other.projectId, sample.sampleId);
     await expect(runtime.createRunWithSamplings(
       makeRun(other.projectId, foreignSampling, otherDataset.datasetId), [foreignSampling], [],
-    )).rejects.toThrow("outside its Project owner scope");
+    )).rejects.toMatchObject({ name: "RuntimeInputError", message: expect.stringContaining("eval_samplings_sample_fk") });
     const samplingA = makeSampling(project.projectId, sample.sampleId);
     const samplingB = makeSampling(other.projectId, otherSample.sampleId);
     const runA = makeRun(project.projectId, samplingA, dataset.datasetId);
@@ -1388,7 +1409,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     `));
     await expectForeignKeyFailure(database.db.execute(sql`
       INSERT INTO eval_runs (run_id, owner_user_id, project_id, source_commit, phases, config, idempotency_key, request_fingerprint)
-      VALUES (${crypto.randomUUID()}, ${"user-A"}, ${other.projectId}, ${release.sourceCommit}, '["execution"]'::jsonb, '{}'::jsonb,
+      VALUES (${crypto.randomUUID()}, ${"user-A"}, ${other.projectId}, ${release.sourceCommit}, '["execution"]'::jsonb, '{"operation":"execution"}'::jsonb,
         ${crypto.randomUUID()}, ${"foreign project"})
     `));
     await expectForeignKeyFailure(database.db.execute(sql`
@@ -1410,7 +1431,8 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await userRuntime.findRunByIdempotencyKey(other.projectId, runB.requestIdentity.idempotencyKey)).toBeNull();
     expect(await otherRuntime.getRun(runB.runId)).toEqual(runB);
     await expect(userRuntime.updateSampling(samplingB, samplingB)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
-    await expect(userRuntime.createRunWithSamplings(runB, [samplingB], [])).rejects.toThrow("Unknown Project");
+    await expect(userRuntime.createRunWithSamplings(runB, [samplingB], []))
+      .rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "project" });
     await runtime.updateSampling({ ...samplingA, execution: { status: "succeeded" } }, samplingA);
     const collisionSampling = makeSampling(project.projectId, sample.sampleId);
     const collision = makeRun(project.projectId, collisionSampling, dataset.datasetId, {
@@ -1436,7 +1458,7 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await readRunRecords(database.db, [siblingRun.runId], {
       kind: "project", ownerUserId: "user-A", projectId: siblingProject.projectId,
     })).toEqual([siblingRun]);
-    await expect(source.read({ projectId: other.projectId })).rejects.toBeInstanceOf(MetricsQueryError);
+    await expect(source.read({ projectId: other.projectId })).rejects.toBeInstanceOf(MetricsEntityNotFoundError);
     expect(await userRuntime.getRun(runA.runId)).toBeNull();
     expect(await userRuntime.getSampling(samplingA.samplingId)).toBeNull();
     await expect(source.read({ projectId: project.projectId, runIds: [runA.runId] }))

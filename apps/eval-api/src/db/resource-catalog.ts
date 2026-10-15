@@ -3,7 +3,8 @@ import { and, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { BundleDirectory, MaterialFile, SessionContent } from "../sp/bundle-directory.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
-import { catalogId, parseCatalogMetadataPatch, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";
+import { parseCatalogMetadataPatch, platformId, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";
+import { BundleResourceInUseError, BundleResourceNotFoundError } from "./errors.js";
 import { bundleMaterials, bundleSessions, bundles, data } from "./schema.js";
 
 export interface BundleRecord {
@@ -25,20 +26,6 @@ export interface SessionRecord {
   readonly name: string;
   readonly description: string;
   readonly format: "json" | "jsonl";
-}
-
-export class BundleResourceNotFoundError extends Error {
-  constructor(kind: "Bundle" | "Material" | "Session", id: string) {
-    super(`Unknown ${kind} ${id}`);
-    this.name = "BundleResourceNotFoundError";
-  }
-}
-
-export class BundleResourceInUseError extends Error {
-  constructor(kind: "Bundle" | "Material" | "Session", id: string) {
-    super(`${kind} is still bound to Data: ${id}`);
-    this.name = "BundleResourceInUseError";
-  }
 }
 
 function resourceBundleCondition(field: "initialMaterials" | "evalInitialMaterials" | "initialSession", bundleId: string) {
@@ -76,7 +63,7 @@ function sessionRecord(row: typeof bundleSessions.$inferSelect): SessionRecord {
 export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory: BundleDirectory) {
   const owner = requireOwnerUserId(ownerUserId);
   const activeBundle = (bundleId: string) => and(
-    eq(bundles.ownerUserId, owner), eq(bundles.bundleId, catalogId(bundleId)), isNull(bundles.deletedAt),
+    eq(bundles.ownerUserId, owner), eq(bundles.bundleId, platformId(bundleId, "bundleId")), isNull(bundles.deletedAt),
   );
   async function requireBundle(bundleId: string): Promise<BundleRecord> {
     const [row] = await db.select().from(bundles).where(activeBundle(bundleId));
@@ -118,14 +105,14 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
     },
     getBundle: requireBundle,
     async updateBundle(bundleId: string, input: CatalogMetadataPatch): Promise<BundleRecord> {
-      const id = catalogId(bundleId);
+      const id = platformId(bundleId, "bundleId");
       const [row] = await db.update(bundles).set(parseCatalogMetadataPatch(input))
         .where(activeBundle(id)).returning();
       if (!row) throw new BundleResourceNotFoundError("Bundle", id);
       return bundleRecord(row);
     },
     async deleteBundle(bundleId: string): Promise<void> {
-      const id = catalogId(bundleId);
+      const id = platformId(bundleId, "bundleId");
       await db.transaction(async (transaction) => {
         const [selected] = await transaction.select({ bundleId: bundles.bundleId }).from(bundles)
           .where(activeBundle(id)).for("update");
@@ -148,7 +135,7 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       });
     },
     async createMaterial(bundleId: string, input: { name: string; description: string; files: readonly MaterialFile[] }): Promise<MaterialRecord> {
-      const id = catalogId(bundleId);
+      const id = platformId(bundleId, "bundleId");
       const name = requiredCatalogLabel(input.name, "name");
       const description = requiredCatalogLabel(input.description, "description");
       const reference = { bundleId: id, materialId: crypto.randomUUID() };
@@ -163,7 +150,7 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       );
     },
     async listMaterials(bundleId: string): Promise<readonly MaterialRecord[]> {
-      const id = catalogId(bundleId);
+      const id = platformId(bundleId, "bundleId");
       await requireBundle(id);
       return (await db.select().from(bundleMaterials).where(and(
         eq(bundleMaterials.ownerUserId, owner), eq(bundleMaterials.bundleId, id),
@@ -171,8 +158,8 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       )).orderBy(bundleMaterials.materialId)).map(materialRecord);
     },
     async getMaterial(bundleId: string, materialId: string): Promise<MaterialRecord> {
-      const id = catalogId(bundleId);
-      const childId = catalogId(materialId);
+      const id = platformId(bundleId, "bundleId");
+      const childId = platformId(materialId, "materialId");
       await requireBundle(id);
       const [row] = await db.select().from(bundleMaterials).where(and(
         eq(bundleMaterials.ownerUserId, owner), eq(bundleMaterials.bundleId, id),
@@ -182,8 +169,8 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       return materialRecord(row);
     },
     async updateMaterial(bundleId: string, materialId: string, input: CatalogMetadataPatch): Promise<MaterialRecord> {
-      const id = catalogId(bundleId);
-      const childId = catalogId(materialId);
+      const id = platformId(bundleId, "bundleId");
+      const childId = platformId(materialId, "materialId");
       const patch = parseCatalogMetadataPatch(input);
       return db.transaction(async (transaction) => {
         const [bundle] = await transaction.select({ bundleId: bundles.bundleId }).from(bundles)
@@ -198,8 +185,8 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       });
     },
     async deleteMaterial(bundleId: string, materialId: string): Promise<void> {
-      const id = catalogId(bundleId);
-      const childId = catalogId(materialId);
+      const id = platformId(bundleId, "bundleId");
+      const childId = platformId(materialId, "materialId");
       await db.transaction(async (transaction) => {
         const [bundle] = await transaction.select({ bundleId: bundles.bundleId }).from(bundles)
           .where(activeBundle(id)).for("update");
@@ -221,7 +208,7 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       });
     },
     async createSession(bundleId: string, input: { name: string; description: string; format: "json" | "jsonl"; content: string }): Promise<SessionRecord> {
-      const id = catalogId(bundleId);
+      const id = platformId(bundleId, "bundleId");
       const name = requiredCatalogLabel(input.name, "name");
       const description = requiredCatalogLabel(input.description, "description");
       const reference = { bundleId: id, sessionId: crypto.randomUUID() };
@@ -236,7 +223,7 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       );
     },
     async listSessions(bundleId: string): Promise<readonly SessionRecord[]> {
-      const id = catalogId(bundleId);
+      const id = platformId(bundleId, "bundleId");
       await requireBundle(id);
       return (await db.select().from(bundleSessions).where(and(
         eq(bundleSessions.ownerUserId, owner), eq(bundleSessions.bundleId, id),
@@ -244,8 +231,8 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       )).orderBy(bundleSessions.sessionId)).map(sessionRecord);
     },
     async getSession(bundleId: string, sessionId: string): Promise<SessionRecord> {
-      const id = catalogId(bundleId);
-      const childId = catalogId(sessionId);
+      const id = platformId(bundleId, "bundleId");
+      const childId = platformId(sessionId, "sessionId");
       await requireBundle(id);
       const [row] = await db.select().from(bundleSessions).where(and(
         eq(bundleSessions.ownerUserId, owner), eq(bundleSessions.bundleId, id),
@@ -255,8 +242,8 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       return sessionRecord(row);
     },
     async updateSession(bundleId: string, sessionId: string, input: CatalogMetadataPatch): Promise<SessionRecord> {
-      const id = catalogId(bundleId);
-      const childId = catalogId(sessionId);
+      const id = platformId(bundleId, "bundleId");
+      const childId = platformId(sessionId, "sessionId");
       const patch = parseCatalogMetadataPatch(input);
       return db.transaction(async (transaction) => {
         const [bundle] = await transaction.select({ bundleId: bundles.bundleId }).from(bundles)
@@ -271,8 +258,8 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       });
     },
     async deleteSession(bundleId: string, sessionId: string): Promise<void> {
-      const id = catalogId(bundleId);
-      const childId = catalogId(sessionId);
+      const id = platformId(bundleId, "bundleId");
+      const childId = platformId(sessionId, "sessionId");
       await db.transaction(async (transaction) => {
         const [bundle] = await transaction.select({ bundleId: bundles.bundleId }).from(bundles)
           .where(activeBundle(id)).for("update");
@@ -302,8 +289,8 @@ export async function assertMaterialSelectable(
   reader: Pick<EvalDb, "select">, ownerUserId: string, reference: InitialMaterialsRef,
 ): Promise<void> {
   const owner = requireOwnerUserId(ownerUserId);
-  const bundleId = catalogId(reference.bundleId);
-  const materialId = catalogId(reference.materialId);
+  const bundleId = platformId(reference.bundleId, "bundleId");
+  const materialId = platformId(reference.materialId, "materialId");
   const [row] = await reader.select({ materialId: bundleMaterials.materialId }).from(bundleMaterials)
     .innerJoin(bundles, and(eq(bundles.bundleId, bundleMaterials.bundleId),
       eq(bundles.ownerUserId, bundleMaterials.ownerUserId)))
@@ -317,8 +304,8 @@ export async function assertSessionSelectable(
   reader: Pick<EvalDb, "select">, ownerUserId: string, reference: InitialSessionRef,
 ): Promise<void> {
   const owner = requireOwnerUserId(ownerUserId);
-  const bundleId = catalogId(reference.bundleId);
-  const sessionId = catalogId(reference.sessionId);
+  const bundleId = platformId(reference.bundleId, "bundleId");
+  const sessionId = platformId(reference.sessionId, "sessionId");
   const [row] = await reader.select({ sessionId: bundleSessions.sessionId }).from(bundleSessions)
     .innerJoin(bundles, and(eq(bundles.bundleId, bundleSessions.bundleId),
       eq(bundles.ownerUserId, bundleSessions.ownerUserId)))

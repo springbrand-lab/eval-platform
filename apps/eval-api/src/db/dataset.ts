@@ -11,18 +11,12 @@ import {
 } from "@eval-platform/eval-dataset";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
+import { DatasetInUseError } from "./errors.js";
 import { requireOwnerUserId } from "./owner.js";
 import { assertDataReferencesSelectable } from "./resource-catalog.js";
 import { data, datasetData, datasets, executionConfigs, samples } from "./schema.js";
 
 type DatasetReader = Pick<EvalDb, "select">;
-
-export class DatasetInUseError extends Error {
-  constructor(readonly datasetId: string) {
-    super(`Dataset is still referenced: ${datasetId}`);
-    this.name = "DatasetInUseError";
-  }
-}
 
 function datasetFromRow(row: typeof datasets.$inferSelect): Dataset {
   return datasetSchema.parse({
@@ -75,7 +69,7 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
     async createDataset(dataset) {
       const record = datasetSchema.parse(dataset);
       const inserted = await db.insert(datasets).values({
-        datasetId: record.datasetId, ownerUserId, name: record.name, description: record.description ?? null,
+        datasetId: record.datasetId, ownerUserId, kind: "general", name: record.name, description: record.description ?? null,
       }).onConflictDoNothing().returning({ datasetId: datasets.datasetId });
       if (inserted.length === 0) throw new DatasetIdentityConflictError("dataset", record.datasetId);
     },
