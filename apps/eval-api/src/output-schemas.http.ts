@@ -1,7 +1,8 @@
 import type { EvalDb } from "./db/client.js";
 import { bindProjectEvaluationOutputSchema } from "./db/catalog.js";
 import type { CatalogMetadataPatch } from "./db/catalog-metadata.js";
-import { createOutputSchemaCatalog, OutputSchemaNotFoundError } from "./db/output-schemas.js";
+import { OutputSchemaNotFoundError } from "./db/errors.js";
+import { createOutputSchemaCatalog } from "./db/output-schemas.js";
 import { methodNotAllowed, onlyFields, readJsonObject } from "./catalog-http-body.js";
 
 const OUTPUT_SCHEMAS_ROUTE = /^\/api\/evaluation-output-schemas$/u;

@@ -9,15 +9,15 @@ export {
   type SuccessfulSamplingPage,
   type SuccessfulSamplingPageRequest,
 } from "./db/catalog.js";
-export { createPostgresDatasetStore, DatasetInUseError } from "./db/dataset.js";
-export { createResourceCatalog, BundleResourceNotFoundError, BundleResourceInUseError } from "./db/resource-catalog.js";
+export { createPostgresDatasetStore } from "./db/dataset.js";
+export { createResourceCatalog } from "./db/resource-catalog.js";
 export type { BundleRecord, MaterialRecord, SessionRecord } from "./db/resource-catalog.js";
-export { createOutputSchemaCatalog, OutputSchemaNotFoundError, OutputSchemaInUseError } from "./db/output-schemas.js";
+export { createOutputSchemaCatalog } from "./db/output-schemas.js";
 export type { OutputSchemaRecord } from "./db/output-schemas.js";
 export type { CatalogMetadataPatch } from "./db/catalog-metadata.js";
-export { createPostgresConfigReader, createPostgresConfigStore, ConfigEntityNotFoundError, ConfigIdentityConflictError, ConfigReferenceError } from "./db/config.js";
+export { createPostgresConfigReader, createPostgresConfigStore } from "./db/config.js";
 export type { PostgresConfigStore } from "./db/config.js";
-export { createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, ProjectRunStopConflictError } from "./db/runtime.js";
+export { createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore } from "./db/runtime.js";
 export { createPostgresRuntimeQueries } from "./db/runtime-queries.js";
 export type { EvalSpRelease } from "./db/release.js";
 export type { ProjectRunView } from "./db/run-view.js";
@@ -40,7 +40,18 @@ export type { SpHarnessOptions } from "./sp/harness.js";
 export { startSpEvalRunWorkerProcess } from "./run-worker-process.js";
 export type { SpEvalRunWorkerProcessOptions } from "./run-worker-process.js";
 export { createIndependentEvaluationApi } from "./independent-evaluation-api.js";
-export { EvaluationSelectionTooLargeError } from "./db/errors.js";
+export {
+  BundleResourceInUseError,
+  BundleResourceNotFoundError,
+  CatalogInputError,
+  CatalogPayloadTooLargeError,
+  ConfigReferenceError,
+  DatasetInUseError,
+  EvaluationSelectionTooLargeError,
+  OutputSchemaInUseError,
+  OutputSchemaNotFoundError,
+  ProjectRunStopConflictError,
+} from "./db/errors.js";
 export { EVALUATION_SAMPLING_IDS, EVALUATION_BODY_BYTES } from "./limits.js";
 export type {
   IndependentEvaluationApi,

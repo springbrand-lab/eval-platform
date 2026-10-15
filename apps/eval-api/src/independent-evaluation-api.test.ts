@@ -2,7 +2,7 @@ import { ConfigNotFoundError, RuntimeEvaluationSelectionError, RuntimeProjectBus
 import { describe, expect, it, vi } from "vitest";
 import { createIndependentEvaluationApi } from "./independent-evaluation-api.js";
 import { createIndependentEvaluationHttpServer } from "./independent-evaluation-http.js";
-import { ProjectRunStopConflictError } from "./db/runtime.js";
+import { ProjectRunStopConflictError } from "./db/errors.js";
 
 const project = { projectId: "project-1", ownerUserId: "alice", name: "Evaluation", sourceBranch: "release-2.0.0" };
 const samplingIds = ["sampling-1", "sampling-2"];

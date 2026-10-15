@@ -1,16 +1,37 @@
-import { MetricsQueryError, MetricsSourceError } from "@eval-platform/eval-metrics";
+import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
+import type { DatasetSnapshot } from "@eval-platform/eval-dataset";
+import { MetricsEntityNotFoundError, MetricsQueryError, MetricsSourceError } from "@eval-platform/eval-metrics";
 import type { MetricsFacts, MetricsQuery, MetricsSource } from "@eval-platform/eval-metrics";
 import { toRunSnapshot, toSamplingSnapshot } from "@eval-platform/eval-runtime";
-import { and, eq, inArray, type SQL } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
 import { projectFromRow, readSamples } from "./catalog.js";
 import { readDatasetSnapshots } from "./dataset.js";
 import { requireOwnerUserId } from "./owner.js";
-import { evaluationFromRow, readRunRecords, samplingFromRow } from "./runtime.js";
-import { datasetData, evaluations, projects, runs, runSamplings, samples, samplings } from "./schema.js";
+import {
+  evaluationFromRow,
+  readEvaluations,
+  readRunRecords,
+  readSamplings,
+  requireMembers,
+  samplingFromRow,
+  type RecordReader,
+} from "./run-records.js";
+import { datasetData, evaluations, projects, runSamplings, samples, samplings } from "./schema.js";
 
-function unique(ids: readonly string[]): string[] {
-  return [...new Set(ids)];
+function byId<T>(records: readonly (T | null)[], idOf: (record: T) => string): Map<string, T> {
+  return new Map(records.flatMap((record) => record === null ? [] : [[idOf(record), record] as const]));
+}
+
+async function readEligibleSampleIds(
+  reader: RecordReader, ownerUserId: string, dataset: DatasetSnapshot | undefined, sampleId: string | undefined,
+): Promise<string[] | undefined> {
+  if (dataset === undefined) return sampleId === undefined ? undefined : [sampleId];
+  const dataIds = dataset.data.map((record) => record.dataId);
+  if (dataIds.length === 0) return [];
+  const rows = await reader.select({ sampleId: samples.sampleId }).from(samples)
+    .where(and(eq(samples.ownerUserId, ownerUserId), inArray(samples.dataId, dataIds)));
+  return rows.map((row) => row.sampleId);
 }
 
 export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): MetricsSource {
@@ -20,107 +41,81 @@ export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): Me
       return db.transaction(async (transaction) => {
         const [project] = await transaction.select().from(projects)
           .where(and(eq(projects.projectId, query.projectId), eq(projects.ownerUserId, owner)));
-        if (!project) throw new MetricsQueryError(`Unknown Project ${query.projectId}`);
-        const projectScope = { kind: "project" as const, ownerUserId: project.ownerUserId, projectId: project.projectId };
-        const samplingScopeConditions: readonly SQL[] = [
-          eq(samplings.ownerUserId, project.ownerUserId), eq(samplings.projectId, project.projectId),
-        ];
-        const selectProjectEvaluations = (...conditions: SQL[]) => transaction.select({
-          evaluationId: evaluations.evaluationId, samplingId: evaluations.samplingId, facts: evaluations.facts,
-        }).from(evaluations).innerJoin(samplings, eq(evaluations.samplingId, samplings.samplingId))
-          .where(and(...samplingScopeConditions, ...conditions));
+        if (!project) throw new MetricsEntityNotFoundError("project", query.projectId);
+        const projectScope = { kind: "project" as const, ownerUserId: owner, projectId: project.projectId };
 
-        const requestedRunIds = query.runIds;
-        const selectedRuns = requestedRunIds === undefined
-          ? undefined : await readRunRecords(transaction, requestedRunIds, projectScope);
-        if (selectedRuns && selectedRuns.length !== requestedRunIds?.length) {
-          throw new MetricsQueryError("Unknown Run in Project scope");
+        const selectedRuns = query.runIds === undefined
+          ? undefined : await readRunRecords(transaction, query.runIds, projectScope);
+        if (query.runIds !== undefined && selectedRuns !== undefined) {
+          const found = new Set(selectedRuns.map((run) => run.runId));
+          const missing = query.runIds.find((runId) => !found.has(runId));
+          if (missing !== undefined) throw new MetricsQueryError(`Unknown Run ${missing} in Project scope`);
         }
-        const runSamplingIds = selectedRuns === undefined
-          ? undefined : unique(selectedRuns.flatMap((run) => run.samplingIds));
+        const runSamplingIds = selectedRuns?.flatMap((run) => run.samplingIds);
 
         const requestedDataset = query.datasetId === undefined
-          ? undefined : (await readDatasetSnapshots(transaction, project.ownerUserId, [query.datasetId]))[0];
-        let eligibleSampleIds: string[] | undefined;
-        if (query.datasetId !== undefined) {
-          if (!requestedDataset) throw new MetricsQueryError(`Unknown Dataset ${query.datasetId}`);
-          const dataIds = requestedDataset.data.map((record) => record.dataId);
-          const associatedSamples = dataIds.length === 0 ? [] : await transaction
-            .select({ sampleId: samples.sampleId }).from(samples)
-            .where(and(eq(samples.ownerUserId, project.ownerUserId), inArray(samples.dataId, dataIds)));
-          eligibleSampleIds = associatedSamples.map((row) => row.sampleId);
-        } else if (query.sampleId !== undefined) {
-          eligibleSampleIds = [query.sampleId];
+          ? undefined : (await readDatasetSnapshots(transaction, owner, [query.datasetId]))[0];
+        if (query.datasetId !== undefined && requestedDataset === undefined) {
+          throw new MetricsEntityNotFoundError("dataset", query.datasetId);
         }
+        const eligibleSampleIds = await readEligibleSampleIds(transaction, owner, requestedDataset, query.sampleId);
 
-        const samplingConditions: SQL[] = [...samplingScopeConditions];
-        if (query.samplingId !== undefined) samplingConditions.push(eq(samplings.samplingId, query.samplingId));
-        if (eligibleSampleIds !== undefined && eligibleSampleIds.length > 0) {
-          samplingConditions.push(inArray(samplings.sampleId, eligibleSampleIds));
-        }
-        if (runSamplingIds !== undefined && runSamplingIds.length > 0) {
-          samplingConditions.push(inArray(samplings.samplingId, runSamplingIds));
-        }
-        const selectedSamplings = (eligibleSampleIds?.length === 0 || runSamplingIds?.length === 0)
-          ? [] : await transaction.select().from(samplings)
-            .where(and(...samplingConditions)).orderBy(samplings.samplingId);
+        const selectedSamplings = eligibleSampleIds?.length === 0 || runSamplingIds?.length === 0
+          ? [] : await transaction.select().from(samplings).where(and(
+            eq(samplings.ownerUserId, owner),
+            eq(samplings.projectId, project.projectId),
+            query.samplingId === undefined ? undefined : eq(samplings.samplingId, query.samplingId),
+            eligibleSampleIds === undefined ? undefined : inArray(samplings.sampleId, eligibleSampleIds),
+            runSamplingIds === undefined ? undefined : inArray(samplings.samplingId, runSamplingIds),
+          )).orderBy(samplings.samplingId);
         const selectedSamplingIds = selectedSamplings.map((row) => row.samplingId);
-        const samplesInScope = await readSamples(transaction, project.ownerUserId, unique([
+        const sampleIds = [...new Set([
           ...selectedSamplings.map((row) => row.sampleId),
           ...(query.sampleId === undefined ? [] : [query.sampleId]),
-        ]));
+        ])].sort();
+        const samplesInScope = (await readSamples(transaction, sampleIds, owner))
+          .filter((sample) => sample !== null);
 
-        let datasetsInScope;
+        let datasetsInScope: readonly DatasetSnapshot[];
         if (requestedDataset) {
           datasetsInScope = [requestedDataset];
         } else {
-          const dataIds = unique(samplesInScope.map((sample) => sample.data.dataId));
+          const dataIds = samplesInScope.map((sample) => sample.data.dataId);
           const memberships = dataIds.length === 0 ? [] : await transaction
             .selectDistinct({ datasetId: datasetData.datasetId }).from(datasetData)
-            .where(and(eq(datasetData.ownerUserId, project.ownerUserId), inArray(datasetData.dataId, dataIds)));
-          datasetsInScope = await readDatasetSnapshots(transaction, project.ownerUserId, memberships.map((row) => row.datasetId));
+            .where(and(eq(datasetData.ownerUserId, owner), inArray(datasetData.dataId, dataIds)));
+          datasetsInScope = await readDatasetSnapshots(transaction, owner, memberships.map((row) => row.datasetId));
         }
 
         let runRecords = selectedRuns;
         if (runRecords === undefined) {
           const memberships = selectedSamplingIds.length === 0 ? [] : await transaction
             .selectDistinct({ runId: runSamplings.runId }).from(runSamplings)
-            .innerJoin(runs, eq(runSamplings.runId, runs.runId))
-            .where(and(eq(runs.ownerUserId, project.ownerUserId), eq(runs.projectId, project.projectId),
-              inArray(runSamplings.samplingId, selectedSamplingIds)));
+            .where(and(eq(runSamplings.ownerUserId, owner), inArray(runSamplings.samplingId, selectedSamplingIds)));
           runRecords = await readRunRecords(transaction, memberships.map((row) => row.runId), projectScope);
         }
 
-        const allowedEvaluationIds = selectedRuns === undefined
-          ? undefined : unique(selectedRuns.flatMap((run) => run.evaluationIds));
+        const allowedEvaluationIds = selectedRuns?.flatMap((run) => run.evaluationIds);
         const selectedEvaluations = selectedSamplingIds.length === 0 || allowedEvaluationIds?.length === 0
-          ? [] : await selectProjectEvaluations(
+          ? [] : await transaction.select().from(evaluations).where(and(
+            eq(evaluations.ownerUserId, owner),
             inArray(evaluations.samplingId, selectedSamplingIds),
-            ...(allowedEvaluationIds === undefined ? [] : [inArray(evaluations.evaluationId, allowedEvaluationIds)]),
-          ).orderBy(evaluations.evaluationId);
+            allowedEvaluationIds === undefined ? undefined : inArray(evaluations.evaluationId, allowedEvaluationIds),
+          )).orderBy(evaluations.evaluationId);
 
-        const fullSamplingIds = unique(runRecords.flatMap((run) => run.samplingIds));
-        const fullEvaluationIds = unique(runRecords.flatMap((run) => run.evaluationIds));
-        const [fullSamplingRows, fullEvaluationRows] = await Promise.all([
-          fullSamplingIds.length === 0 ? [] : transaction.select().from(samplings)
-            .where(and(...samplingScopeConditions, inArray(samplings.samplingId, fullSamplingIds))),
-          fullEvaluationIds.length === 0 ? []
-            : selectProjectEvaluations(inArray(evaluations.evaluationId, fullEvaluationIds)),
+        const [memberSamplings, memberEvaluations] = await Promise.all([
+          readSamplings(transaction, runRecords.flatMap((run) => run.samplingIds), owner),
+          readEvaluations(transaction, runRecords.flatMap((run) => run.evaluationIds), owner),
         ]);
-        const samplingById = new Map(fullSamplingRows.map((row) => [row.samplingId, samplingFromRow(row)]));
-        const evaluationById = new Map(fullEvaluationRows.map((row) => [row.evaluationId, evaluationFromRow(row)]));
+        const samplingById = byId<Sampling>(memberSamplings, (record) => record.samplingId);
+        const evaluationById = byId<EvaluationRecord>(memberEvaluations, (record) => record.evaluationId);
         const runSnapshots = runRecords.map((run) => {
-          const members = run.samplingIds.map((id) => {
-            const member = samplingById.get(id);
-            if (!member) throw new MetricsSourceError(`Run ${run.runId} is missing Sampling ${id}`);
-            return member;
-          });
-          const judges = run.evaluationIds.map((id) => {
-            const judge = evaluationById.get(id);
-            if (!judge) throw new MetricsSourceError(`Run ${run.runId} is missing Evaluation ${id}`);
-            return judge;
-          });
-          return toRunSnapshot(run, members, judges);
+          const missing = (kind: string) => (id: string) => new MetricsSourceError(`Run ${run.runId} is missing ${kind} ${id}`);
+          return toRunSnapshot(
+            run,
+            requireMembers(run.samplingIds.map((id) => samplingById.get(id) ?? null), run.samplingIds, missing("Sampling")),
+            requireMembers(run.evaluationIds.map((id) => evaluationById.get(id) ?? null), run.evaluationIds, missing("Evaluation")),
+          );
         });
 
         return {

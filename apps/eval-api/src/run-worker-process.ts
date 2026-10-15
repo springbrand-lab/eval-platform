@@ -1,12 +1,8 @@
 import { createEvalRunResumer } from "@eval-platform/eval-runtime";
-import { dataSchema } from "@eval-platform/eval-dataset";
-import { and, eq, inArray } from "drizzle-orm";
 import type { Pool } from "pg";
+import { readProject, readSamples } from "./db/catalog.js";
 import { createEvalDb } from "./db/client.js";
-import { projectWithOutputSchema } from "./db/catalog.js";
-import { sqlBatches } from "./db/batch.js";
 import { createPostgresWorkerRuntimeStore } from "./db/runtime.js";
-import { data, projects, samples } from "./db/schema.js";
 import { createSpHarness, type SpHarnessOptions } from "./sp/harness.js";
 import { createPostgresRunNotifications, startEvalRunWorker, type EvalRunWorker } from "./worker.js";
 
@@ -25,31 +21,9 @@ export async function startSpEvalRunWorkerProcess(options: SpEvalRunWorkerProces
   const db = createEvalDb(options.pool);
   const store = createPostgresWorkerRuntimeStore(db);
   const runtime = createEvalRunResumer({
-    async getProject(projectId) {
-      const [row] = await db.select().from(projects).where(eq(projects.projectId, projectId));
-      return row ? projectWithOutputSchema(db, row) : null;
-    },
-    async getSamples(sampleIds) {
-      // Only trusted, persisted Run facts reach this cross-user recovery reader.
-      const byId = new Map<string, { sampleId: string; data: ReturnType<typeof dataSchema.parse> }>();
-      for (const batch of sqlBatches([...new Set(sampleIds)])) {
-        const rows = await db.select({
-          sampleId: samples.sampleId,
-          dataId: data.dataId,
-          content: data.content,
-        }).from(samples).innerJoin(data, and(
-          eq(samples.dataId, data.dataId),
-          eq(samples.ownerUserId, data.ownerUserId),
-        )).where(inArray(samples.sampleId, batch));
-        for (const row of rows) {
-          byId.set(row.sampleId, {
-            sampleId: row.sampleId,
-            data: dataSchema.parse({ ...row.content, dataId: row.dataId }),
-          });
-        }
-      }
-      return sampleIds.map((sampleId) => byId.get(sampleId) ?? null);
-    },
+    // Only trusted, persisted Run facts reach these cross-user recovery readers.
+    getProject: (projectId) => readProject(db, projectId),
+    getSamples: (sampleIds) => readSamples(db, sampleIds),
     harness: createSpHarness(options.sp),
     store,
     ...(options.onError === undefined ? {} : { onError: options.onError }),

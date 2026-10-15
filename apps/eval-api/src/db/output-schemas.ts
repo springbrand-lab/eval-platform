@@ -1,9 +1,11 @@
 import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import { and, eq, isNull } from "drizzle-orm";
-import { parseEvaluationOutputSchema, MAX_EVALUATION_OUTPUT_SCHEMA_BYTES } from "../project-output-schema.js";
 import { parseStrictJson } from "@eval-platform/eval-dataset";
+import { OUTPUT_SCHEMA_BYTES } from "../limits.js";
+import { parseEvaluationOutputSchema } from "../project-output-schema.js";
 import type { EvalDb } from "./client.js";
-import { catalogId, parseCatalogMetadataPatch, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";
+import { parseCatalogMetadataPatch, platformId, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";
+import { CatalogInputError, CatalogPayloadTooLargeError, OutputSchemaInUseError, OutputSchemaNotFoundError } from "./errors.js";
 import { requireOwnerUserId } from "./owner.js";
 import { evaluationOutputSchemas, projects } from "./schema.js";
 
@@ -12,20 +14,6 @@ export interface OutputSchemaRecord {
   readonly name: string;
   readonly description: string;
   readonly schema: EvaluationOutputSchema;
-}
-
-export class OutputSchemaNotFoundError extends Error {
-  constructor(outputSchemaId: string) {
-    super(`Unknown output format ${outputSchemaId}`);
-    this.name = "OutputSchemaNotFoundError";
-  }
-}
-
-export class OutputSchemaInUseError extends Error {
-  constructor(outputSchemaId: string) {
-    super(`Output format is still bound to a Project: ${outputSchemaId}`);
-    this.name = "OutputSchemaInUseError";
-  }
 }
 
 function toRecord(row: typeof evaluationOutputSchemas.$inferSelect): OutputSchemaRecord {
@@ -37,6 +25,18 @@ function toRecord(row: typeof evaluationOutputSchemas.$inferSelect): OutputSchem
   };
 }
 
+function parseOutputSchemaFile(content: unknown): EvaluationOutputSchema {
+  if (typeof content !== "string") throw new CatalogInputError("content must be JSON Schema file text", "content");
+  if (Buffer.byteLength(content, "utf8") > OUTPUT_SCHEMA_BYTES) {
+    throw new CatalogPayloadTooLargeError("Evaluation output JSON Schema is too large");
+  }
+  try {
+    return parseEvaluationOutputSchema(parseStrictJson(content));
+  } catch (error) {
+    throw new CatalogInputError(error instanceof Error ? error.message : String(error), "content");
+  }
+}
+
 /** Owner-scoped immutable JSON Schema uploads; soft deletes hide entries from new selection. */
 export function createOutputSchemaCatalog(db: EvalDb, ownerUserId: string) {
   const owner = requireOwnerUserId(ownerUserId);
@@ -44,11 +44,7 @@ export function createOutputSchemaCatalog(db: EvalDb, ownerUserId: string) {
     async create(input: { name: string; description: string; content: string }): Promise<OutputSchemaRecord> {
       const name = requiredCatalogLabel(input.name, "name");
       const description = requiredCatalogLabel(input.description, "description");
-      if (typeof input.content !== "string") throw new TypeError("content must be JSON Schema file text");
-      if (Buffer.byteLength(input.content, "utf8") > MAX_EVALUATION_OUTPUT_SCHEMA_BYTES) {
-        throw new RangeError("Evaluation output JSON Schema is too large");
-      }
-      const schema = parseEvaluationOutputSchema(parseStrictJson(input.content));
+      const schema = parseOutputSchemaFile(input.content);
       const record = { outputSchemaId: crypto.randomUUID(), ownerUserId: owner, name, description, schema };
       await db.insert(evaluationOutputSchemas).values(record);
       return toRecord({ ...record, deletedAt: null });
@@ -62,13 +58,13 @@ export function createOutputSchemaCatalog(db: EvalDb, ownerUserId: string) {
     async get(outputSchemaId: string): Promise<OutputSchemaRecord | null> {
       const [row] = await db.select().from(evaluationOutputSchemas).where(and(
         eq(evaluationOutputSchemas.ownerUserId, owner),
-        eq(evaluationOutputSchemas.outputSchemaId, catalogId(outputSchemaId)),
+        eq(evaluationOutputSchemas.outputSchemaId, platformId(outputSchemaId, "outputSchemaId")),
         isNull(evaluationOutputSchemas.deletedAt),
       ));
       return row ? toRecord(row) : null;
     },
     async updateMetadata(outputSchemaId: string, input: CatalogMetadataPatch): Promise<OutputSchemaRecord> {
-      const id = catalogId(outputSchemaId);
+      const id = platformId(outputSchemaId, "outputSchemaId");
       const patch = parseCatalogMetadataPatch(input);
       const [row] = await db.update(evaluationOutputSchemas).set(patch).where(and(
         eq(evaluationOutputSchemas.ownerUserId, owner), eq(evaluationOutputSchemas.outputSchemaId, id),
@@ -78,7 +74,7 @@ export function createOutputSchemaCatalog(db: EvalDb, ownerUserId: string) {
       return toRecord(row);
     },
     async delete(outputSchemaId: string): Promise<void> {
-      const id = catalogId(outputSchemaId);
+      const id = platformId(outputSchemaId, "outputSchemaId");
       await db.transaction(async (transaction) => {
         const [selected] = await transaction.select({ outputSchemaId: evaluationOutputSchemas.outputSchemaId })
           .from(evaluationOutputSchemas).where(and(
