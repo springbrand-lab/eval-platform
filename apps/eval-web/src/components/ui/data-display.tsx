@@ -68,12 +68,13 @@ const jsonStyles = {
   stringifyStringValues: false,
 };
 
-export function JsonViewer({ value, className }: { value: unknown; className?: string }) {
+/** Expanded to every level by default; nodes can still be collapsed by hand. */
+export function JsonViewer({ value, className, expandLevels = Infinity }: { value: unknown; className?: string; expandLevels?: number }) {
   const data = value !== null && typeof value === "object" ? value as object : { value };
   return (
     <div className={cn("group relative overflow-auto rounded-[var(--radius-control)] border border-border bg-surface-code p-3", className)}>
       <CopyButton value={JSON.stringify(value, null, 2)} className="absolute right-2 top-2 opacity-0 transition-opacity group-hover:opacity-100" />
-      <JsonView data={data} shouldExpandNode={(level) => level < 2} style={jsonStyles} />
+      <JsonView data={data} shouldExpandNode={(level) => level < expandLevels} style={jsonStyles} />
     </div>
   );
 }

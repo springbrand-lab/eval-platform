@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { MessagesSquare, Scale } from "lucide-react";
-import { useState } from "react";
 import { getSamplingDetail, metricKeys } from "@/api-sdk/metrics-api";
 import { getProject, projectKeys } from "@/api-sdk/projects-api";
 import { listSamplingEvaluations, runKeys } from "@/api-sdk/runs-api";
@@ -9,7 +8,7 @@ import type { EvaluationDetail } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
 import { StatusBadge } from "@/components/ui/badge";
 import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/card";
-import { CodeBlock, JsonViewer, ScoreBar, Tabs } from "@/components/ui/data-display";
+import { CodeBlock, JsonViewer, ScoreBar } from "@/components/ui/data-display";
 import { Button } from "@/components/ui/button";
 import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
 import { dataTitle } from "@/features/datasets/dataset-detail-page";
@@ -74,8 +73,6 @@ export function SamplingDetailPage({ projectId, samplingId }: { projectId: strin
   const sample = data?.projectSample;
   const subjectChatId = data?.subject.chatId ?? null;
   const firstEvaluation = data?.evaluations[0];
-  const [tab, setTab] = useState<"judge" | "subject" | "evaluator">("judge");
-  const shownTab = !firstEvaluation && tab !== "subject" ? "subject" : tab;
   return (
     <Page>
       <PageHeader
@@ -105,18 +102,14 @@ export function SamplingDetailPage({ projectId, samplingId }: { projectId: strin
       />
       {detail.isPending ? <LoadingBlock /> : detail.error ? <ErrorBlock error={detail.error} /> : data && (
         <div className="flex flex-col gap-4">
-          <Tabs value={shownTab} onChange={setTab} tabs={[
-            ...(firstEvaluation ? [{ value: "judge" as const, label: "评委结果" }] : []),
-            { value: "subject" as const, label: "被测 Agent" },
-            ...(firstEvaluation ? [{ value: "evaluator" as const, label: "评委 Agent" }] : []),
-          ]} />
+          {/* Everything on one page, the judge's result first. */}
           {!firstEvaluation && <Notice tone="neutral">这个采样还没有评估。</Notice>}
-          {shownTab === "judge" && data.evaluations.map((evaluation) => {
+          {data.evaluations.map((evaluation) => {
             const record = records.data?.find((item) => item.evaluationId === evaluation.record.evaluationId) ?? evaluation.record;
             return <JudgeResult key={record.evaluationId} detail={{ ...evaluation, record }} subjectChatId={subjectChatId} />;
           })}
-          {shownTab === "subject" && <AgentPanel title="被测 Agent" agent={data.subject} />}
-          {shownTab === "evaluator" && data.evaluations.map((evaluation) => (
+          <AgentPanel title="被测 Agent" agent={data.subject} />
+          {data.evaluations.map((evaluation) => (
             <AgentPanel key={evaluation.record.evaluationId} title="评委 Agent" agent={evaluation.agent} />
           ))}
         </div>
