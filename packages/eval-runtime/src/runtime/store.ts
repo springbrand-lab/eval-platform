@@ -70,6 +70,8 @@ export interface RuntimeRecoveryStore {
   /** True while a stage is unfinished or a stop request is not yet finalized. */
   isRunActive(runId: string): Promise<boolean>;
   isRunStopRequested(runId: string): Promise<boolean>;
+  /** Persist a system stop for an active Run whose scheduling budget is exhausted. */
+  requestRunStop(runId: string): Promise<void>;
   markRunStopFinalized(runId: string): Promise<boolean>;
 }
 

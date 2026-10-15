@@ -60,27 +60,34 @@ export interface RuntimeCatalog {
 /** Catalog reads needed to resolve a new Run; no Agent listing or UI queries. */
 export type RuntimeAdmissionCatalog = Pick<RuntimeCatalog, "listData" | "listSamples" | "getSamples">;
 
-export interface EvalRuntime {
-  listProjects(): Promise<readonly Project[]>;
-  listAgents(role?: AgentRole): Promise<readonly AgentOption[]>;
-  listDatasets(): Promise<readonly Dataset[]>;
-  listData(datasetId: string): Promise<readonly Data[]>;
-  listSamples(dataId: string): Promise<readonly Sample[]>;
+/** Persists Run admissions only; Agent execution belongs to a separate resumer. */
+export interface EvalRunAdmission {
   start(request: StartRunRequest): Promise<RunHandle>;
   evaluate(request: EvaluateRequest): Promise<RunHandle>;
   pipeline(request: PipelineRequest): Promise<RunHandle>;
-  resume(runId: string): Promise<void>;
+}
+
+export interface EvalRunAdmissionDependencies {
+  /** Resolved SP source commit of this Eval deployment; saved on newly admitted Runs. */
+  readonly sourceCommit: string;
+  readonly catalog: RuntimeAdmissionCatalog;
+  readonly configResolver: ConfigResolver;
+  readonly store: RuntimeStore;
+  readonly idFactory?: () => string;
+}
+
+/** Detached, projected reads of persisted Run, Sampling and Evaluation facts. */
+export interface EvalRunQueries {
   getRun(runId: string): Promise<RunSnapshot>;
   getSampling(samplingId: string): Promise<SamplingSnapshot>;
   getEvaluation(evaluationId: string): Promise<EvaluationRecord>;
   listEvaluations(samplingId: string): Promise<readonly EvaluationRecord[]>;
 }
 
-export interface EvalRuntimeDependencies {
-  /** Resolved SP source commit of this Eval deployment; saved on newly admitted Runs. */
-  readonly sourceCommit: string;
-  readonly catalog: RuntimeCatalog;
-  readonly configResolver: ConfigResolver;
+/** Recovery reads persisted Run facts; admission APIs and Config resolution stay in the API process. */
+export interface EvalRunResumerDependencies {
+  readonly getSamples: RuntimeCatalog["getSamples"];
+  readonly getEvaluationOutputSchema: RuntimeCatalog["getEvaluationOutputSchema"];
   readonly harness: Harness;
   readonly store: RuntimeStore;
   readonly createRetryController?: (policy?: RetryPolicy) => RetryController;
@@ -89,20 +96,6 @@ export interface EvalRuntimeDependencies {
   readonly sleep?: (milliseconds: number) => Promise<void>;
   /** Receives failures that must not interrupt the Run; it should not throw. */
   readonly onError: (error: Error) => void;
-}
-
-/** Persists Run admissions only; Agent execution belongs to a separate resumer. */
-export type EvalRunAdmission = Pick<EvalRuntime, "start" | "evaluate" | "pipeline">;
-
-export type EvalRunAdmissionDependencies = Pick<
-  EvalRuntimeDependencies,
-  "sourceCommit" | "configResolver" | "store" | "idFactory"
-> & { readonly catalog: RuntimeAdmissionCatalog };
-
-/** Recovery reads persisted Run facts; admission APIs and Config resolution stay in the API process. */
-export interface EvalRunResumerDependencies extends Omit<EvalRuntimeDependencies, "catalog" | "configResolver" | "sourceCommit"> {
-  readonly getSamples: RuntimeCatalog["getSamples"];
-  readonly getEvaluationOutputSchema: RuntimeCatalog["getEvaluationOutputSchema"];
 }
 
 export interface EvalRunResumer {

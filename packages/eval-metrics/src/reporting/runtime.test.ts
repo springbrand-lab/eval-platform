@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentResourceSnapshot, EvaluationRecord, RunHandle } from "@eval-platform/eval-contracts";
 import { datasetSnapshotSchema } from "@eval-platform/eval-dataset";
-import { createConfigResolver, createEvalRuntime } from "@eval-platform/eval-runtime";
+import { createConfigResolver, createEvalRunAdmission, createEvalRunResumer, toRunSnapshot, toSamplingSnapshot } from "@eval-platform/eval-runtime";
 import type {
   ConfigStore,
   Harness,
@@ -124,12 +124,25 @@ function runtimeFixture() {
   const onError = vi.fn();
   let nextId = 0;
   let clock = 0;
-  const runtime = createEvalRuntime({
-    store, catalog, configResolver: createConfigResolver(configs), harness, onError,
-    sourceCommit: "a".repeat(40),
-    idFactory: () => `runtime-id-${++nextId}`,
+  const idFactory = () => `runtime-id-${++nextId}`;
+  const resumer = createEvalRunResumer({
+    store, harness, onError, idFactory,
+    getSamples: catalog.getSamples, getEvaluationOutputSchema: catalog.getEvaluationOutputSchema,
     now: () => new Date(Date.UTC(2026, 9, 8) + ++clock).toISOString(),
   });
+  const runtime = {
+    ...createEvalRunAdmission({
+      store, catalog, configResolver: createConfigResolver(configs), sourceCommit: "a".repeat(40), idFactory,
+    }),
+    resume: (runId: string) => resumer.resume(runId),
+    async getRun(runId: string) {
+      const run = (await store.getRun(runId))!;
+      const [runSamplings, runEvaluations] = await Promise.all([store.getSamplings(run.samplingIds), store.getEvaluations(run.evaluationIds)]);
+      return toRunSnapshot(run, runSamplings.map((record) => record!), runEvaluations.map((record) => record!));
+    },
+    getSampling: async (samplingId: string) => toSamplingSnapshot((await store.getSampling(samplingId))!),
+    listEvaluations: (samplingId: string) => store.listEvaluations(samplingId),
+  };
   const handles: RunHandle[] = [];
   const source: MetricsSource = {
     async read() {

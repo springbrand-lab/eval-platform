@@ -25,7 +25,7 @@ Project 只保存输出格式 ID；`RuntimeCatalog.getProject()` 只返回 Proje
 
 这些接口属于运行时控制面，不绑定具体的 HTTP、Web 或 CLI 实现。
 
-只负责 Run 准入的 API 进程使用 `createEvalRunAdmission({ sourceCommit, catalog, configResolver, store })`，取得 `start()`、`evaluate()`、`pipeline()` 三个提交接口；`sourceCommit` 是当前 Eval SP 发布的完整 commit，随新 Run 保存。准入进程不持有 SP Harness 凭证，也不能调用 `resume()`。执行器仍使用带真实 Harness 的 `createEvalRunResumer()`。完整 `createEvalRuntime()` 保留两类能力的组合入口。
+只负责 Run 准入的 API 进程使用 `createEvalRunAdmission({ sourceCommit, catalog, configResolver, store })`，取得 `start()`、`evaluate()`、`pipeline()` 三个提交接口；`sourceCommit` 是当前 Eval SP 发布的完整 commit，随新 Run 保存。准入进程不持有 SP Harness 凭证，也不能调用 `resume()`。执行器仍使用带真实 Harness 的 `createEvalRunResumer()`。两类能力不存在组合入口；结果读取实现 `EvalRunQueries`（`getRun`、`getSampling`、`getEvaluation`、`listEvaluations`），由宿主基于自身存储提供。
 
 ## 文件职责
 
@@ -39,11 +39,10 @@ src/
 │   └── index.ts             # Harness 子模块入口与 Harness 错误
 ├── runtime/
 │   ├── model.ts             # 控制面、Catalog 和临时 Sampling Context
-│   ├── index.ts             # createEvalRuntime / createEvalRunAdmission / createEvalRunResumer 组合
+│   ├── index.ts             # createEvalRunAdmission / createEvalRunResumer 入口
 │   ├── admission.ts         # Run 准入、请求指纹与同实例并发合并
 │   ├── resume.ts            # 断点续跑和阶段编排
 │   ├── stop.ts              # 中断与停止收尾
-│   ├── queries.ts           # getRun / getSampling / Evaluation 查询
 │   ├── records.ts           # 按序、校验身份的 Run 事实批量读取
 │   ├── input.ts             # 请求输入校验辅助
 │   ├── errors.ts            # 类型化错误
@@ -64,7 +63,7 @@ src/
 
 配置、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。`RuntimeStore` 是持久化端口，实际实现由 API/DO/数据库层注入；Run、Sampling、EvaluationRecord 和本次生效配置快照的聚合写入必须由 Store 在一个持久化边界内原子完成。Store 对同 Project 的新执行或联跑先删除旧运行与结果，再保存全新状态；新独立评估保留本轮执行的全部 Sampling 事实，只能选其中成功者，并替换旧 Run 与评估记录。旧 Run 的请求 key 留在身份账本中拒绝迟到重试，但不保留旧结果。
 
-三个启动入口只原子提交运行事实并返回 `RunHandle`，不在请求进程里执行 Agent。Run Worker 用 `createEvalRunResumer({ getSamples, getEvaluationOutputSchema, store, harness, onError? })` 取得 `resume(runId, stopSignal?)`、`interrupt(runId)` 和 `stop(runId)`，无需注入启动接口的 Catalog 与 ConfigResolver；调度与停止流程见[架构方案](../../docs/architecture.md#run-调度与停止)。恢复时使用 Run 已保存的生效配置和 Sample 引用，跳过已完成的阶段，并按 Attempt 原 `submissionId`、操作类型和幂等键向 SP 校准。已完成 Agent 的资源或产物保存失败只补收尾，不重新提交或重启。进程中断后遗留的未完成阶段由执行器接手；已保存的失败 Attempt 若 SP 校准暂不可用，仍保持待恢复，不能代替重启决策进入证据收尾。只有确认失败且重试决策拒绝后，Subject 证据保存完才写为 `failed`。后续处理轮次对已终结 Agent 只补收未完成证据，不隐式重试 Agent。`RuntimeRecoveryStore` 只提供 `isRunActive`、`isRunStopRequested`、`markRunStopFinalized`，Run 当前状态仍只从子记录推导。
+三个启动入口只原子提交运行事实并返回 `RunHandle`，不在请求进程里执行 Agent。Run Worker 用 `createEvalRunResumer({ getSamples, getEvaluationOutputSchema, store, harness, onError })` 取得 `resume(runId, stopSignal?)`、`interrupt(runId)` 和 `stop(runId)`，无需注入启动接口的 Catalog 与 ConfigResolver；调度与停止流程见[架构方案](../../docs/architecture.md#run-调度与停止)。恢复时使用 Run 已保存的生效配置和 Sample 引用，跳过已完成的阶段，并按 Attempt 原 `submissionId`、操作类型和幂等键向 SP 校准。已完成 Agent 的资源或产物保存失败只补收尾，不重新提交或重启。进程中断后遗留的未完成阶段由执行器接手；已保存的失败 Attempt 若 SP 校准暂不可用，仍保持待恢复，不能代替重启决策进入证据收尾。只有确认失败且重试决策拒绝后，Subject 证据保存完才写为 `failed`。后续处理轮次对已终结 Agent 只补收未完成证据，不隐式重试 Agent。`RuntimeRecoveryStore` 只提供 `isRunActive`、`isRunStopRequested`、`requestRunStop`、`markRunStopFinalized`，Run 当前状态仍只从子记录推导。
 
 `ExecutionConfig` 是完整的执行方案，包含 Dataset、可选 Sample 子集、Sampling 次数、Subject Harness、执行并发和重试策略。`EvaluationConfig` 包含 Evaluation Harness、评估并发和重试策略。`PipelineConfig` 只组合一个 ExecutionConfig 和一个 EvaluationConfig，不是新的 Runtime 阶段。Config ID 由配置创建函数自动生成；实际运行请求只引用 `executionConfigId`、`evaluationConfigId` 或 `pipelineConfigId`，不再重复携带这些配置字段。`ConfigResolver` 在启动前统一读取、校验和归一化配置，输出带明确默认值的 `Resolved*Config`；Run 同时保存本次实际生效的不可变配置快照，不引入 version。Runtime 将 `runtime` 选项传给 Harness；SP Harness 在创建 Chat 和提交 Prompt 时将其发送给 SP，在等待终态时使用其中的超时设置。素材准备的 SP 接口不接收 `runtime`，校准和产物收集也不使用这些选项。Subject 轨迹物化按 Subject Chat 身份幂等，不把评估运行选项计入物化身份。`HarnessConfig` 只有 `kind: "sp"` 一种。
 
@@ -105,7 +104,7 @@ SP 宿主与 Agent 框架分别配置：`kind: "sp"` 表示统一的云端 Harne
 22. 资源读取单独使用 `resources` 重试预算，与产物收集和 Agent 重启无关。采集状态只有 `pending | collected | failed`；`collected` 表示快照已保存，不表示来源完整。读取失败不能覆盖原 Agent 错误或使成功产物变成失败。Store 将 Attempt 与原始资源快照原子保存；查询从持久化记录读取，Metrics 不直接访问 SP/DO/私有数据库，而是读取 Runtime 原始内容进行解析、去重和所有统计。完整轨迹和大产物继续存引用，资源事件不构成另一份 Workspace/Session 副本。
 23. 后续 Attempt 状态补丁基于当前执行上下文的最新 Attempt，而不是调用方的旧副本；原始快照写入已提交但响应丢失时，失败处理不能用旧 `pending` 覆盖它。运行时收尾异常先读取 Store 的最新事实，不以启动时的 `queued` 副本重写整个记录，也不把未确认的 Agent 操作误判为失败。查询只读取持久化结果，不从执行上下文的内存副本返回数据。
 24. 一旦观察到 Agent 终态，立即固定 Attempt 的状态和完成时间，并先保存终态再收集资源，避免资源保存异常抹掉已确认事实。Agent 错误属于 Attempt，Runtime 收尾失败属于执行/评估阶段的 `lastError`，不得把已完成 Agent 记为失败。记录写入使用独立 `persistence` 重试，与生命周期共用本阶段的 RetryController：同一份记录固定后，保存失败先读取最新持久化事实确认提交；未确认且策略允许时只重写同一份记录，不能重新采集已有快照/产物、创建 Attempt、提交或重启 Agent。确认不依赖 JSON 对象键顺序，但不忽略数组顺序、重复记录或 null。次数和退避由注入策略决定，不新增默认政策。
-25. Pipeline 中失败执行的评估取消独立收尾，不占用评估 Agent 并发槽、不成为成功样本评估的门槛。取消保存失败只校准/重试对应 EvaluationRecord；仍失败时把收尾错误写入该记录，已经保存的取消事实不降级。无法连错误记录也保存时，经 `EvalRuntimeDependencies.onError(error)` 上报带 Evaluation/Sampling 身份的错误；未注入回调时默认使用 `console.error`。不吞错、不把错误记在其他样本上，也不因取消收尾异常调用整批失败处理。
+25. Pipeline 中失败执行的评估取消独立收尾，不占用评估 Agent 并发槽、不成为成功样本评估的门槛。取消保存失败只校准/重试对应 EvaluationRecord；仍失败时把收尾错误写入该记录，已经保存的取消事实不降级。无法连错误记录也保存时，经 `EvalRunResumerDependencies.onError(error)` 上报带 Evaluation/Sampling 身份的错误；未注入回调时默认使用 `console.error`。不吞错、不把错误记在其他样本上，也不因取消收尾异常调用整批失败处理。
 
 26. Sampling/Evaluation 的每次更新携带预期旧事实，Store 原子校验后写入；记录已变化时只读回校准，不用旧的整条记录覆盖。保存响应和读回都失败直到重试耗尽时，提交结果未知，Lifecycle 不写失败状态或补丁；上报异常并保留可恢复进度。确认写入未发生时，失败收尾仍须先读最新记录再更新。此条件写入不新增版本字段。
 27. 已有 `resources: collected` 的 Attempt 补采失败时保留原始快照及其 `coverage/finalized`，单独经 `onError` 上报刷新错误；首次采集失败仍保存 `resources: failed`。已 `finalized` 的快照不再刷新。

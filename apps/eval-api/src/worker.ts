@@ -1,6 +1,6 @@
 import type { EvalRunResumer, RuntimeRecoveryStore } from "@eval-platform/eval-runtime";
 import { errorDiagnostics } from "@springbrand/http/server";
-import type { PgBoss } from "pg-boss";
+import type { JobWithMetadata, PgBoss } from "pg-boss";
 import type { Logger } from "pino";
 import { RUN_QUEUE, type RunJob } from "./run-worker-queue.js";
 
@@ -31,8 +31,15 @@ export class RunStillActiveError extends Error {
   }
 }
 
+export interface RunJobAttempt {
+  /** The job has no retries left; an active Run is stopped and cleaned up instead of retried. */
+  readonly final: boolean;
+}
+
 /** Processes one Run job: resume, interrupt on a persisted stop, then finalize that stop. */
-export function createRunJobHandler({ runtime, store, logger }: RunJobHandlerOptions): (runId: string) => Promise<void> {
+export function createRunJobHandler(
+  { runtime, store, logger }: RunJobHandlerOptions,
+): (runId: string, attempt: RunJobAttempt) => Promise<void> {
   async function watchStop(runId: string, stop: AbortController, settled: AbortSignal): Promise<void> {
     while (!stop.signal.aborted) {
       await pause(STOP_POLL_MS, settled);
@@ -66,9 +73,13 @@ export function createRunJobHandler({ runtime, store, logger }: RunJobHandlerOpt
     }
   }
 
-  return async (runId) => {
+  return async (runId, attempt) => {
     if (!await store.isRunActive(runId)) return;
     if (!await store.isRunStopRequested(runId)) await resumeUntilStopped(runId);
+    if (attempt.final && await store.isRunActive(runId) && !await store.isRunStopRequested(runId)) {
+      logger.warn({ runId }, "run_retry_budget_exhausted");
+      await store.requestRunStop(runId);
+    }
     if (await store.isRunStopRequested(runId)) {
       await runtime.stop(runId);
       await store.markRunStopFinalized(runId);
@@ -80,10 +91,10 @@ export function createRunJobHandler({ runtime, store, logger }: RunJobHandlerOpt
 export async function startEvalRunWorker(options: EvalRunWorkerOptions): Promise<EvalRunWorker> {
   const { boss, logger } = options;
   const handle = createRunJobHandler(options);
-  await boss.work<RunJob>(RUN_QUEUE, { localConcurrency: options.concurrency }, async (jobs) => {
-    for (const { data: { runId } } of jobs) {
+  await boss.work(RUN_QUEUE, { localConcurrency: options.concurrency, includeMetadata: true }, async (jobs: JobWithMetadata<RunJob>[]) => {
+    for (const { data: { runId }, retryCount, retryLimit } of jobs) {
       try {
-        await handle(runId);
+        await handle(runId, { final: retryCount >= retryLimit });
       } catch (error) {
         if (error instanceof RunStillActiveError) logger.info({ runId }, "run_job_deferred");
         else logger.error({ runId, error: errorDiagnostics(error) }, "run_job_failed");

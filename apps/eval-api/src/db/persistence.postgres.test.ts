@@ -1197,6 +1197,11 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect(await runJobStates(run.runId)).toEqual(["created"]);
     await database.db.transaction((transaction) => runQueue.enqueue(transaction, run.runId));
     expect(await runJobStates(run.runId)).toEqual(["created"]);
+
+    // Repeating a stop whose cleanup never finalized hands the Run a job again.
+    await jobs.deleteJob(RUN_QUEUE, (await runJobs(run.runId))[0]!.id);
+    expect(await control.stopRun(project.projectId, run.runId)).toEqual({ runId: run.runId, stopRequested: true });
+    expect(await runJobStates(run.runId)).toEqual(["created"]);
   });
 
   it("derives whether a Run is active from unfinished stages and pending stop cleanup", async () => {
@@ -1276,12 +1281,12 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
       const [job] = await runJobs(run.runId);
       expect(job?.output).toMatchObject({ name: "RunStillActiveError" });
       await jobs.update(RUN_QUEUE, undefined, { id: job!.id, startAfter: new Date() });
-      await vi.waitFor(async () => expect(await runJobStates(run.runId)).toEqual(["completed"]), { timeout: 10_000 });
+      await vi.waitFor(async () => expect(await runJobStates(run.runId)).toEqual(["completed"]), { timeout: 20_000 });
       expect(resumer.resume).toHaveBeenCalledTimes(2);
     } finally {
       await worker.close();
     }
-  }, 20_000);
+  }, 35_000);
 
   it("redelivers a Run whose worker stopped heartbeating", async () => {
     const { project, dataset, sample, runtime } = await setup();

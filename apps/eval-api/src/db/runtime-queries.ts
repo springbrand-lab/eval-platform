@@ -1,4 +1,4 @@
-import type { EvalRuntime } from "@eval-platform/eval-runtime";
+import type { EvalRunQueries } from "@eval-platform/eval-runtime";
 import { RuntimeEntityNotFoundError, toSamplingSnapshot } from "@eval-platform/eval-runtime";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
@@ -9,7 +9,7 @@ import { readRunView } from "./run-view.js";
 export function createPostgresRuntimeQueries(
   db: EvalDb,
   ownerUserId: string,
-): Pick<EvalRuntime, "getRun" | "getSampling" | "getEvaluation" | "listEvaluations"> {
+): EvalRunQueries {
   const owner = requireOwnerUserId(ownerUserId);
   return {
     async getRun(runId) {

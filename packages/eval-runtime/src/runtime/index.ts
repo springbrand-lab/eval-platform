@@ -4,19 +4,14 @@ import type {
   EvalRunAdmissionDependencies,
   EvalRunResumer,
   EvalRunResumerDependencies,
-  EvalRuntime,
-  EvalRuntimeDependencies,
 } from "./model.js";
-import { createRunQueries } from "./queries.js";
-import { RunRecords } from "./records.js";
 import { RunResumer } from "./resume.js";
 
 export type {
   AgentOption,
-  EvalRuntime,
-  EvalRuntimeDependencies,
   EvalRunAdmission,
   EvalRunAdmissionDependencies,
+  EvalRunQueries,
   EvalRunResumer,
   EvalRunResumerDependencies,
   RuntimeAdmissionCatalog,
@@ -60,27 +55,6 @@ export {
   type AgentScheduler,
   type AgentSchedulerOptions,
 } from "./scheduler.js";
-
-export function createEvalRuntime(dependencies: EvalRuntimeDependencies): EvalRuntime {
-  const { catalog, store } = dependencies;
-  const getSamples = catalog.getSamples.bind(catalog);
-  const admission = createEvalRunAdmission(dependencies);
-  const resumer = new RunResumer({
-    ...dependencies,
-    getSamples,
-    getEvaluationOutputSchema: catalog.getEvaluationOutputSchema.bind(catalog),
-  });
-  return {
-    listProjects: () => catalog.listProjects(),
-    listAgents: (role) => catalog.listAgents(role),
-    listDatasets: () => catalog.listDatasets(),
-    listData: (datasetId) => catalog.listData(datasetId),
-    listSamples: (dataId) => catalog.listSamples(dataId),
-    ...admission,
-    ...createRunQueries(store, new RunRecords(store, getSamples)),
-    resume: (runId) => resumer.resume(runId),
-  };
-}
 
 export function createEvalRunAdmission(dependencies: EvalRunAdmissionDependencies): EvalRunAdmission {
   const admission = new RunAdmission(dependencies);

@@ -1,7 +1,7 @@
 import type { RouteConfig, RouteHandler } from "@hono/zod-openapi";
 import type { DatasetService } from "@eval-platform/eval-dataset";
 import type { Metrics } from "@eval-platform/eval-metrics";
-import type { EvalRunAdmission, EvalRuntime } from "@eval-platform/eval-runtime";
+import type { EvalRunAdmission, EvalRunQueries } from "@eval-platform/eval-runtime";
 import type { Env as PinoEnv } from "hono-pino";
 import type { PostgresCatalog } from "../db/catalog.js";
 import type { PostgresConfigStore } from "../db/config.js";
@@ -17,8 +17,8 @@ export interface OwnerServices {
   readonly datasets: DatasetService;
   readonly catalog: PostgresCatalog;
   readonly configs: PostgresConfigStore;
-  readonly admission: Pick<EvalRunAdmission, "start" | "pipeline" | "evaluate">;
-  readonly results: Pick<EvalRuntime, "getRun" | "getSampling" | "getEvaluation" | "listEvaluations">;
+  readonly admission: EvalRunAdmission;
+  readonly results: EvalRunQueries;
   readonly projectRuns: ReturnType<typeof createPostgresProjectRunControl> & {
     readRun(projectId: string, runId: string): Promise<ProjectRunView | null>;
   };

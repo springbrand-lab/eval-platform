@@ -1,9 +1,12 @@
 import type { EvalRunResumer, RuntimeRecoveryStore } from "@eval-platform/eval-runtime";
-import type { Job, PgBoss } from "pg-boss";
+import type { JobWithMetadata, PgBoss } from "pg-boss";
 import pino from "pino";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RUN_QUEUE, type RunJob } from "./run-worker-queue.js";
 import { createRunJobHandler, RunStillActiveError, startEvalRunWorker, STOP_POLL_MS } from "./worker.js";
+
+const retry = { final: false };
+const finalRetry = { final: true };
 
 function fixture(input: { active?: boolean[]; stopRequested?: () => boolean } = {}) {
   const active = [...(input.active ?? [true, false])];
@@ -15,6 +18,7 @@ function fixture(input: { active?: boolean[]; stopRequested?: () => boolean } = 
   const store = {
     isRunActive: vi.fn<RuntimeRecoveryStore["isRunActive"]>(async () => active.shift() ?? false),
     isRunStopRequested: vi.fn<RuntimeRecoveryStore["isRunStopRequested"]>(async () => input.stopRequested?.() ?? false),
+    requestRunStop: vi.fn<RuntimeRecoveryStore["requestRunStop"]>(async () => undefined),
     markRunStopFinalized: vi.fn<RuntimeRecoveryStore["markRunStopFinalized"]>(async () => true),
   };
   const logger = pino({ level: "silent" });
@@ -27,14 +31,14 @@ describe("Run job handler", () => {
 
   it("completes a job whose Run is no longer active without resuming it", async () => {
     const { runtime, handle } = fixture({ active: [false] });
-    await handle("run-1");
+    await handle("run-1", retry);
     expect(runtime.resume).not.toHaveBeenCalled();
     expect(runtime.stop).not.toHaveBeenCalled();
   });
 
   it("resumes an active Run and completes once every stage is terminal", async () => {
     const { runtime, handle } = fixture({ active: [true, false] });
-    await handle("run-1");
+    await handle("run-1", retry);
     expect(runtime.resume).toHaveBeenCalledExactlyOnceWith("run-1", expect.any(AbortSignal));
     expect(runtime.resume.mock.calls[0]![1]!.aborted).toBe(false);
     expect(runtime.stop).not.toHaveBeenCalled();
@@ -42,7 +46,7 @@ describe("Run job handler", () => {
 
   it("fails the job for a backoff retry while the Run stays active", async () => {
     const { handle } = fixture({ active: [true, true] });
-    await expect(handle("run-1")).rejects.toBeInstanceOf(RunStillActiveError);
+    await expect(handle("run-1", retry)).rejects.toBeInstanceOf(RunStillActiveError);
   });
 
   it("interrupts an active Run on a persisted stop request, then finalizes the stop", async () => {
@@ -50,7 +54,7 @@ describe("Run job handler", () => {
     const { runtime, store, handle } = fixture({ active: [true, false], stopRequested: () => stopRequested });
     let finish!: () => void;
     runtime.resume.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
-    const handling = handle("run-1");
+    const handling = handle("run-1", retry);
     await vi.waitFor(() => expect(runtime.resume).toHaveBeenCalledOnce());
     const signal = runtime.resume.mock.calls[0]![1]!;
 
@@ -74,7 +78,7 @@ describe("Run job handler", () => {
 
   it("finalizes a stop requested before the job ran without resuming work", async () => {
     const { runtime, store, handle } = fixture({ active: [true, false], stopRequested: () => true });
-    await handle("run-1");
+    await handle("run-1", retry);
     expect(runtime.resume).not.toHaveBeenCalled();
     expect(runtime.stop).toHaveBeenCalledExactlyOnceWith("run-1");
     expect(store.markRunStopFinalized).toHaveBeenCalledExactlyOnceWith("run-1");
@@ -83,7 +87,25 @@ describe("Run job handler", () => {
   it("retries a stop whose cleanup could not be finalized yet", async () => {
     const { store, handle } = fixture({ active: [true, true], stopRequested: () => true });
     store.markRunStopFinalized.mockResolvedValue(false);
-    await expect(handle("run-1")).rejects.toBeInstanceOf(RunStillActiveError);
+    await expect(handle("run-1", retry)).rejects.toBeInstanceOf(RunStillActiveError);
+  });
+
+  it("stops and cleans up a Run that is still active on the final retry", async () => {
+    let stopRequested = false;
+    const { runtime, store, handle } = fixture({ active: [true, true, false], stopRequested: () => stopRequested });
+    store.requestRunStop.mockImplementation(async () => { stopRequested = true; });
+    await handle("run-1", finalRetry);
+    expect(runtime.resume).toHaveBeenCalledOnce();
+    expect(store.requestRunStop).toHaveBeenCalledExactlyOnceWith("run-1");
+    expect(runtime.stop).toHaveBeenCalledExactlyOnceWith("run-1");
+    expect(store.markRunStopFinalized).toHaveBeenCalledExactlyOnceWith("run-1");
+  });
+
+  it("does not request a system stop when the final pass finishes the Run", async () => {
+    const { runtime, store, handle } = fixture({ active: [true, false] });
+    await handle("run-1", finalRetry);
+    expect(store.requestRunStop).not.toHaveBeenCalled();
+    expect(runtime.stop).not.toHaveBeenCalled();
   });
 
   it("keeps watching for a stop after a transient stop-check failure", async () => {
@@ -97,7 +119,7 @@ describe("Run job handler", () => {
     });
     let finish!: () => void;
     runtime.resume.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
-    const handling = handle("run-1");
+    const handling = handle("run-1", retry);
     await vi.waitFor(() => expect(runtime.resume).toHaveBeenCalledOnce());
     await vi.advanceTimersByTimeAsync(STOP_POLL_MS);
     expect(logged).toHaveBeenCalledWith(expect.objectContaining({ runId: "run-1" }), "run_stop_check_failed");
@@ -111,7 +133,7 @@ describe("Run job handler", () => {
 
 describe("Run worker", () => {
   function fakeBoss() {
-    let handler: ((jobs: Job<RunJob>[]) => Promise<unknown>) | undefined;
+    let handler: ((jobs: JobWithMetadata<RunJob>[]) => Promise<unknown>) | undefined;
     const boss = {
       work: vi.fn(async (_name: string, _options: object, registered: typeof handler) => {
         handler = registered;
@@ -119,12 +141,14 @@ describe("Run worker", () => {
       }),
       offWork: vi.fn(async () => undefined),
     };
-    const job = (runId: string) => ({ id: `job-${runId}`, name: RUN_QUEUE, data: { runId } }) as Job<RunJob>;
+    const job = (runId: string, retryCount: number) => ({
+      id: `job-${runId}`, name: RUN_QUEUE, data: { runId }, retryCount, retryLimit: 2,
+    }) as JobWithMetadata<RunJob>;
     return {
       boss: boss as unknown as Pick<PgBoss, "work" | "offWork">,
       work: boss.work,
       offWork: boss.offWork,
-      deliver: (runId: string) => handler!([job(runId)]),
+      deliver: (runId: string, retryCount = 0) => handler!([job(runId, retryCount)]),
     };
   }
 
@@ -132,7 +156,7 @@ describe("Run worker", () => {
     const source = fakeBoss();
     const { runtime, store, logger } = fixture({ active: [true, false] });
     const worker = await startEvalRunWorker({ boss: source.boss, runtime, store, logger, concurrency: 3 });
-    expect(source.work).toHaveBeenCalledExactlyOnceWith(RUN_QUEUE, { localConcurrency: 3 }, expect.any(Function));
+    expect(source.work).toHaveBeenCalledExactlyOnceWith(RUN_QUEUE, { localConcurrency: 3, includeMetadata: true }, expect.any(Function));
 
     await source.deliver("run-1");
     expect(runtime.resume).toHaveBeenCalledExactlyOnceWith("run-1", expect.any(AbortSignal));
@@ -149,6 +173,17 @@ describe("Run worker", () => {
     await expect(source.deliver("run-1")).rejects.toBeInstanceOf(RunStillActiveError);
     expect(info).toHaveBeenCalledWith({ runId: "run-1" }, "run_job_deferred");
     expect(error).not.toHaveBeenCalled();
+  });
+
+  it("marks the job's last retry as final", async () => {
+    const source = fakeBoss();
+    let stopRequested = false;
+    const { runtime, store, logger } = fixture({ active: [true, true, false], stopRequested: () => stopRequested });
+    store.requestRunStop.mockImplementation(async () => { stopRequested = true; });
+    await startEvalRunWorker({ boss: source.boss, runtime, store, logger, concurrency: 1 });
+    await source.deliver("run-1", 2);
+    expect(store.requestRunStop).toHaveBeenCalledExactlyOnceWith("run-1");
+    expect(runtime.stop).toHaveBeenCalledExactlyOnceWith("run-1");
   });
 
   it("logs a failed Run pass with redacted diagnostics and rethrows it", async () => {
