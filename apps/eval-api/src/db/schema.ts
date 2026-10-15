@@ -1,6 +1,7 @@
 import type {
   AgentConfigSnapshot,
   AgentRole,
+  DatasetKind,
   EvaluationOutputSchema,
   EvaluationPlan,
   EvaluationRecord,
@@ -114,7 +115,7 @@ export const bundleSessions = pgTable("eval_bundle_sessions", {
 export const datasets = pgTable("eval_datasets", {
   datasetId: uuid("dataset_id").primaryKey(),
   ownerUserId: text("owner_user_id").notNull(),
-  kind: text("kind").$type<"general" | "prompt">().notNull(),
+  kind: text("kind").$type<DatasetKind>().notNull(),
   name: text("name").notNull(),
   description: text("description"),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
@@ -153,7 +154,7 @@ export const projectDatasets = pgTable("eval_project_datasets", {
   position: integer("position").notNull(),
   name: text("name").notNull(),
   description: text("description"),
-  kind: text("kind").$type<"general" | "prompt">().notNull(),
+  kind: text("kind").$type<DatasetKind>().notNull(),
 }, (table) => [
   primaryKey({ columns: [table.projectId, table.datasetId] }),
   unique("eval_project_datasets_position_uq").on(table.projectId, table.position),

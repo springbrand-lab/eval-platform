@@ -64,11 +64,11 @@ ProjectSample 是 Project 自己的固定输入：来源 Data 的完整副本、
 
 ## Run 准入与独立评估
 
-**准入、幂等键与替换规则**（本节是唯一完整描述）：每次启动选择本次操作 `execution`、`pipeline` 或 `evaluation`；操作属于 Run，不写回 Project。创建 Project 时同一事务提交首个 Run，只能是 execution 或 pipeline；新 Project 没有成功 Sampling，不能以仅评估开始。
+**准入、幂等键与替换规则**（本节是唯一完整描述）：每次启动选择本次操作 `execution`、`pipeline` 或 `evaluation`；操作属于 Run，不写回 Project。创建 Project 时先提交 Project，再在独立事务中准入首个 Run，只能是 execution 或 pipeline；新 Project 没有成功 Sampling，不能以仅评估开始。首个 Run 准入失败时的补偿见 [Project 创建](eval-project-redesign.md#31-创建)。
 
 准入分两步，都由 `EvalRunAdmission` 完成：
 
-1. `preview({projectId, operation, selector})` 在 Project 快照内展开选择器（`all`、`datasetIds`、`projectSampleIds`、`samplingIds` 的组合），返回去重、顺序稳定的固定 `targets`、将替换/新建的 Sampling 数、将创建的评估数和计划摘要。`all`/Dataset 按 Dataset 绑定顺序和成员顺序展开为 ProjectSample。execution/pipeline 中，ProjectSample 目标替换其当前全部 Sampling 并按 `samplingCount` 新建（从未运行过的同样新建），Sampling 目标一对一替换，其 ProjectSample 已被整条选中时被吸收。evaluation 中，ProjectSample 展开为其当前执行成功的 Sampling（过滤其他状态），显式指定的 Sampling 必须执行成功。
+1. `preview({projectId, operation, selector})` 在 Project 快照内展开选择器（`all`、`datasetIds`、`projectSampleIds`、`samplingIds` 的组合），返回去重、顺序稳定的固定 `targets`（展开为空时拒绝）、将替换/新建的 Sampling 数、将创建的评估数和计划摘要。`all`/Dataset 按 Dataset 绑定顺序和成员顺序展开为 ProjectSample。execution/pipeline 中，ProjectSample 目标替换其当前全部 Sampling 并按 `samplingCount` 新建（从未运行过的同样新建），Sampling 目标一对一替换，其 ProjectSample 已被整条选中时被吸收。evaluation 中，ProjectSample 展开为其当前执行成功的 Sampling（过滤其他状态），显式指定的 Sampling 必须执行成功。
 2. `submit({idempotencyKey, projectId, operation, selector, targets})` 以 preview 返回的 `targets` 为准校验，不重新展开；重试沿用同一 `targets` 和 key。
 
 请求指纹覆盖 `projectId`、operation、selector、targets 和计划摘要（执行计划摘要，pipeline/evaluation 另含评估计划摘要）。`RuntimeStore.admitRun()` 在 Project 行锁下的一个事务内完成：拒绝缺失或软删除的 Project 和 source release 不符；同 key 同指纹重放原 Run（即使仍在运行），不同指纹或已被后续 Run 取代的 key（以 Project 内递增的 `sequence` 判定）返回冲突；Project 创建 key 只能准入 Project 的第一个 Run，Project 已有任何 Run 时返回 `creation-superseded`（创建重放据此返回 `run: null`）；新 key 遇到未完成 Run 返回 `RuntimeProjectBusyError`；复核计划摘要，pipeline/evaluation 要求评估计划已填写（否则 `evaluation-plan-required`）；复核被替换的 Sampling 仍等于目标的当前 Sampling（否则 `stale-targets`），evaluation 复核目标仍执行成功；然后按批删除与插入，首个带评估的 Run 锁定评估计划，并在同一事务内投递 Worker 任务。PostgreSQL 的 `(project_id, idempotency_key)` 唯一约束保证同一意图只创建一批；同一 Runtime 实例内相同 Project/key 的并发提交先在内存合并，但内存不是权威状态。
@@ -108,7 +108,7 @@ Dataset ──> Data ──(创建 Project 时复制)──> ProjectSample
 - `Dataset` 属于一个 Eval SP 用户；同一用户的 Data 可在多个 Dataset 间复用，Dataset/Data 是可编辑的来源目录；
 - `Data.userPrompt` 是必填的当前任务，其余 JSON 业务字段自由提供并完整保留；`initialSession` 与 `initialMaterials` 都可选，引用内的 Bundle ID 和资源 ID 必须由外部提供；
 - `initialSession` 只引用独立保存的初始化 Session，启动时由 Harness 复制到目标 DO 并交给所选框架加载、重建 Context；准备完成后发送原始 `userPrompt`；
-- `ProjectSample` 是 Project 内固定的一条测试输入，结构为 `{ projectSampleId, projectId, dataId, datasetIds, samplingCount, data: Data }`；`data` 是创建时的完整 Data 副本，Data 内任意同名业务字段完整保留，Sampling 不重复持久化 Data；
+- `ProjectSample` 是 Project 内固定的一条测试输入，结构见[包边界](package-boundaries.md#eval-runtime)；
 - `Sampling` 是一次独立运行，引用自己的 `projectSampleId`，拥有自己的 Subject Chat / Workspace；
 - `Run` 是一次提交的工作范围，只包含本次实际处理的 Sampling/EvaluationRecord；Project 当前结果集合不等于最近 Run 的成员；
 - 评估使用独立 Evaluation Chat / Session，但 Workspace 绑定 Subject Chat 的同一个物理 SpaceDO；每次评估产生独立 `EvaluationRecord`，材料和结果写入自己的 `/evaluations/<evaluationId>/` 目录。

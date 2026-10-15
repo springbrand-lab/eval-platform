@@ -12,6 +12,7 @@ export type {
   AgentRole,
   AgentStatus,
   ArtifactRef,
+  DatasetKind,
   EvaluationAgentOutput,
   EvaluationOutputSchema,
   EvaluationRecord,
@@ -52,6 +53,7 @@ export type {
 export {
   AGENT_FRAMEWORKS,
   AGENT_STATUSES,
+  DATASET_KINDS,
   EVIDENCE_KINDS,
   PENDING_SAMPLING_STATUSES,
   RUN_OPERATIONS,

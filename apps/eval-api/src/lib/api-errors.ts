@@ -30,8 +30,8 @@ import {
   ProjectEvaluationPlanLockedError,
   ProjectIdempotencyConflictError,
   ProjectRunStopConflictError,
-  RunTargetsTooLargeError,
 } from "../db/errors.js";
+import { RunTargetsTooLargeError } from "../limits.js";
 import { BundleFileError, type BundleFileErrorReason } from "../sp/bundle-errors.js";
 import { EvalSpApiError, EvalSpTransportError } from "../sp/client.js";
 

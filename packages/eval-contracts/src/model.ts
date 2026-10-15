@@ -50,6 +50,9 @@ export function isTerminalAgentStatus(status: AgentStatus): boolean {
 export const EVIDENCE_KINDS = ["artifact", "workspace", "test-report", "trajectory", "evaluation-output", "metric"] as const;
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
 
+export const DATASET_KINDS = ["general", "prompt"] as const;
+export type DatasetKind = (typeof DATASET_KINDS)[number];
+
 /** Project metadata; its plan lives in ProjectPlan and is never edited after creation. */
 export interface Project {
   readonly projectId: string;

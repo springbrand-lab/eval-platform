@@ -14,14 +14,6 @@ export class CatalogPayloadTooLargeError extends Error {
   }
 }
 
-/** An expanded Run selection exceeds one admission request. */
-export class RunTargetsTooLargeError extends Error {
-  constructor(readonly limit: number) {
-    super(`Select at most ${limit} target IDs per Run`);
-    this.name = "RunTargetsTooLargeError";
-  }
-}
-
 /** Another creation request already committed a Project under this key; the caller replays it. */
 export class ProjectCreationKeyTakenError extends Error {
   constructor() {

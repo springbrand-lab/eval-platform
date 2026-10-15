@@ -82,7 +82,7 @@ Relayed SP errors: SP `401` → `401 AUTH_UNAUTHENTICATED`; `403` → `EVAL_SP_F
 
 ### Projects
 
-A Project's execution plan, Dataset/Data snapshot and Sampling counts are fixed at creation; the only configuration write afterwards is the evaluation plan, replaceable until the first pipeline or evaluation Run locks it. Soft-deleted Projects are `404 PROJECT_NOT_FOUND` on every Project, Run, result, observation and Metrics route.
+A Project's execution plan, Dataset/Data snapshot and Sampling counts are fixed at creation; the only configuration write afterwards is the evaluation plan, replaceable until the first pipeline or evaluation Run locks it. A soft-deleted Project is `404 PROJECT_NOT_FOUND` on every Project, Run preview/submit/current, observation and Metrics route; routes addressed by a Run, Sampling or Evaluation ID answer with that entity's not-found code (`RUN_NOT_FOUND`, `SAMPLING_NOT_FOUND`, `EVALUATION_NOT_FOUND`).
 
 | Route | Body / result |
 | --- | --- |
@@ -109,7 +109,7 @@ Creation body:
 
 Evaluation plan body: `{userAgentId, evaluationConcurrency, retryPolicy?, timeoutMs?, outputSchemaId}`. The route checks only shape and numeric types; Runtime's plan normalization is the single source of the value rules and rejects violations with `400 RUNTIME_INPUT_INVALID`: concurrencies are positive integers, `timeoutMs` is a finite number of at least 1, and `retryPolicy` is `{maxRestarts, initialBackoffMs, maxBackoffMs}` with a non-negative integer `maxRestarts`, non-negative `initialBackoffMs` and `maxBackoffMs >= initialBackoffMs`. The creation service rejects a pipeline first Run without an evaluation plan before cloning any Agent Config.
 
-Creation reads the selected owned, non-deleted Datasets and their current members in one consistent snapshot; a Data shared by several selected Datasets becomes one ProjectSample. It clones the Subject (and Evaluator) Agent Config, stores the snapshot, both plans and the copies in one transaction, then previews and submits the first Run with selector `{all:true}`. If any step fails, nothing remains visible: rows of a Project without a Run are removed and the copies are deleted. Cancelling the form calls no route.
+Creation reads the selected owned, non-deleted Datasets and their current members in one consistent snapshot; a Data shared by several selected Datasets becomes one ProjectSample. It clones the Subject (and Evaluator) Agent Config, stores the snapshot, both plans and the copies in one transaction, then previews and submits the first Run with selector `{all:true}`; which failures remove the Project and its copies and which keep it is defined in [Project 创建](eval-project-redesign.md#31-创建). Cancelling the form calls no route.
 
 Creation is idempotent per owner and `idempotencyKey`; the replay, race and compensation rules are defined once in [Project 创建](eval-project-redesign.md#31-创建). On the wire: creation and a matching replay return `201 {project, run}` (a replay clones no Agent Config), where `run` is the creation's own first Run or `null` when the Project already has other Runs; a different body under the key is `409 PROJECT_IDEMPOTENCY_CONFLICT`; a key whose Project was soft-deleted is `404 PROJECT_NOT_FOUND`; a first Run that keeps meeting evaluation-plan changes ends in `409 PROJECT_PLAN_CHANGED` with the Project kept for a same-key replay.
 
@@ -135,7 +135,7 @@ Each Run is chosen per request: `operation` is `execution`, `pipeline` or `evalu
 | `GET /api/projects/{projectId}/runs/{runId}` | `{run: RunSnapshot}` |
 | `GET /api/projects/{projectId}/runs/{runId}/evaluations` | `{evaluations: EvaluationRecord[]}` in the Run's admission order |
 
-Expansion rules: `all` and `datasetIds` expand to the Project's bound ProjectSamples. For execution and pipeline, each target ProjectSample replaces all its current Samplings with `samplingCount` new ones, and each target Sampling whose ProjectSample is not a target is replaced one for one. For evaluation, `targets.projectSampleIds` is empty and `targets.samplingIds` lists the current successful Samplings; explicitly selected Samplings must have succeeded. Unselected Samplings and Evaluations are never touched; evaluation keeps every Subject fact and replaces only the targets' EvaluationRecords. The first pipeline or evaluation Run locks the evaluation plan.
+Expansion and replacement follow [Run admission](architecture.md#run-准入与独立评估). On the wire, evaluation `targets.projectSampleIds` is always empty and `targets.samplingIds` lists the Samplings to evaluate.
 
 `RunSnapshot` is `{runId, projectId, sourceCommit, operation, phases, selector, targets, samplingIds, evaluationIds, phase, status, stopRequested?, stopFinalized?}`. `samplingIds` and `evaluationIds` list the Run's records that are still current; records replaced by later Runs drop out, and Runs are never deleted.
 

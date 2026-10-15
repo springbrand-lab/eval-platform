@@ -1,5 +1,3 @@
-import { RunTargetsTooLargeError } from "./db/errors.js";
-
 /**
  * Single source for Eval API content limits. Request body limits are derived from these values
  * rather than restated; validation and HTTP routing import the same constants.
@@ -47,6 +45,14 @@ export const RUN_PREVIEW_BODY_BYTES = RUN_TARGET_IDS * ID_ITEM_BYTES + jsonTextB
 export const RUN_BODY_BYTES = 2 * RUN_TARGET_IDS * ID_ITEM_BYTES + jsonTextBodyBytes(2 * IDENTIFIER_CHARS);
 /** Selected Data IDs and per-Data sampling counts, plus names, descriptions and both plans. */
 export const PROJECT_BODY_BYTES = 2 * RUN_TARGET_IDS * UUID_ENTRY_BYTES + JSON_BODY_BYTES;
+
+/** An expanded Run selection exceeds one admission request. */
+export class RunTargetsTooLargeError extends Error {
+  constructor(readonly limit: number) {
+    super(`Select at most ${limit} target IDs per Run`);
+    this.name = "RunTargetsTooLargeError";
+  }
+}
 
 /** The single check of RUN_TARGET_IDS for a Project's bound Data and an expanded Run selection. */
 export function requireRunTargetCount(count: number): void {

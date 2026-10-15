@@ -90,7 +90,7 @@ Agent Config 在 Eval 中通过 `/api/agent-configs` 增删改查，Eval SP 只�
 
 ### 2.4 ProjectSample 是 Project 自己的输入
 
-ProjectSample 是 Project 内固定的一条测试输入：`{ projectSampleId, projectId, dataId, datasetIds, samplingCount, data }`。`dataId` 只用于展示和 Dataset 分组；`datasetIds` 是包含该 Data 的全部绑定 Dataset（按绑定顺序）；`data` 是创建时的完整 Data 副本，其中的 Material/Session 引用按 ID 读取。
+ProjectSample 是 Project 内固定的一条测试输入，结构见[包边界](package-boundaries.md#eval-runtime)。`dataId` 只用于展示和 Dataset 分组；`data` 中的 Material/Session 引用按 ID 读取。
 
 同一个 Data 被多个所选 Dataset 绑定时，Project 内只生成一个 ProjectSample，Sampling 只执行一份；它出现在每个所属 Dataset 视图中，Project 总计按 Sampling/Evaluation 去重。来源 Dataset/Data 之后被改名、改内容、解除关联或软删除，不改变 ProjectSample。
 
@@ -118,7 +118,7 @@ ProjectSample 是 Project 内固定的一条测试输入：`{ projectSampleId, p
 
 请求体顶层的 `idempotencyKey` 在用户内唯一，首个 Run 使用同一个 key；Project 保存 key 和校验后请求体（不含 key）的指纹。克隆副本之前先按 key 查找：
 
-- 同一请求体重放原 `{project, run}`，`run` 是以创建 key 准入的首个 Run（之后有别的 Run 也返回它）；若首个 Run 从未准入，重放只在 Project 还没有任何 Run 时补交（在准入的 Project 行锁下判定），否则返回 `run: null`；
+- 同一请求体重放原 `{project, run}`，`run` 是以创建 key 准入的首个 Run 的 handle（之后有别的 Run 也返回它），其 `samplingIds` 只列出该 Run 仍为当前的成员 Sampling，被后续 Run 替换的不再出现；若首个 Run 从未准入，重放只在 Project 还没有任何 Run 时补交（在准入的 Project 行锁下判定），否则返回 `run: null`；
 - 不同请求体返回冲突；
 - key 对应的 Project 已软删除时，无论请求体都返回 not found，不会复活；
 - 并发的相同请求只有一个创建事务提交，落败者删除自己创建的副本后重放胜者；
@@ -138,22 +138,11 @@ ProjectSample 是 Project 内固定的一条测试输入：`{ projectSampleId, p
 1. `preview({projectId, operation, selector})`：选择器是 `all`、`datasetIds`、`projectSampleIds`、`samplingIds` 的组合，在 Project 快照内展开为固定 `targets: {projectSampleIds, samplingIds}`，并返回将替换/新建的 Sampling 数、评估数和计划摘要；
 2. `submit({idempotencyKey, projectId, operation, selector, targets})`：原样带回 preview 的 `targets`，Runtime 只校验、不重新展开；重试沿用同一 `targets` 和 key。
 
-请求不携带任何配置 ID 或实时 Dataset/Data 内容；Sampling 次数取各 ProjectSample 的 `samplingCount`，Agent、并发与重试全部来自 Project 计划。展开规则：
-
-- `all` 和 Dataset 按绑定顺序和成员顺序展开为 ProjectSample；
-- execution/pipeline：目标 ProjectSample 替换其当前全部 Sampling，按 `samplingCount` 新建（从未运行过的同样新建）；目标 Sampling 一对一替换，其 ProjectSample 已被整条选中时被吸收；
-- evaluation：`targets.projectSampleIds` 为空；ProjectSample 展开为其当前执行成功的 Sampling（其他状态静默过滤），显式 Sampling 必须执行成功，否则拒绝；
-- 结果去重、顺序稳定，展开为空时拒绝。
+请求不携带任何配置 ID 或实时 Dataset/Data 内容；Sampling 次数取各 ProjectSample 的 `samplingCount`，Agent、并发与重试全部来自 Project 计划。展开与替换规则见[架构方案](architecture.md#run-准入与独立评估)。
 
 ### 3.4 结果替换规则
 
-| 操作 | 选中旧执行 | 选中旧评估 | 未选中执行 | 未选中评估 |
-| --- | --- | --- | --- | --- |
-| 仅执行 | 删除旧 Sampling，创建新的 Sampling | 随旧 Sampling 删除；新 Sampling 没有评估 | 原样保留 | 原样保留 |
-| 执行并评估 | 删除旧 Sampling，创建新的 Sampling；成功后各自评估 | 随旧 Sampling 删除 | 原样保留 | 原样保留 |
-| 仅评估 | **完全保留 Sampling、Chat、Attempt、产物、轨迹和资源** | 删除选中 Sampling 的当前 EvaluationRecord，新建评估 | 原样保留 | 原样保留 |
-
-全 Project 重跑就是选中全部目标。替换在 Run 准入事务内完成；准入失败时旧结果不变；新 Run 停止后不恢复已完成的替换。
+各操作对选中与未选中执行、评估的处理见[架构方案](architecture.md#run-准入与独立评估)；仅评估完全保留 Subject 的执行事实。
 
 ### 3.5 幂等键
 
