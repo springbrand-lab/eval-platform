@@ -13,8 +13,8 @@ export const EVALUATOR = { ownerUserId: "owner-1", userAgentId: "judge-1" };
 export const DATA = {
   dataId: "10000000-0000-4000-8000-000000000001", userPrompt: "Build a page",
   evalPrompt: "Judge the finished page", category: "frontend",
-  initialSession: { bundleId: "session-bundle", sessionId: "seed-session" },
-  initialMaterials: { bundleId: "material-bundle", materialId: "seed-files" },
+  initialSession: { bundleId: "30000000-0000-4000-8000-000000000001", sessionId: "30000000-0000-4000-8000-000000000002" },
+  initialMaterials: { bundleId: "30000000-0000-4000-8000-000000000003", materialId: "30000000-0000-4000-8000-000000000004" },
 };
 export const SAMPLE = { sampleId: "sample-1", data: DATA };
 export const DATASET = { datasetId: "20000000-0000-4000-8000-000000000001", name: "Web tasks" };

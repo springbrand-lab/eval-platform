@@ -6,8 +6,6 @@ import { aggregateResources } from "../aggregation/resources.js";
 import { readEvaluationMetrics } from "../evaluators/index.js";
 import type { DatasetMetricRow, Metrics, MetricsFacts, MetricsQuery, MetricsSource, OverviewCounts } from "./model.js";
 
-export type * from "./model.js";
-
 export class MetricsQueryError extends Error {
   constructor(message: string) {
     super(message);
@@ -15,9 +13,9 @@ export class MetricsQueryError extends Error {
   }
 }
 
-/** A Metrics query named a Project, Dataset, Sample or Sampling outside the caller's scope. */
+/** A Metrics query named a Project, Run, Dataset, Sample or Sampling outside the caller's scope. */
 export class MetricsEntityNotFoundError extends Error {
-  constructor(readonly entity: "project" | "dataset" | "sample" | "sampling", readonly id: string) {
+  constructor(readonly entity: "project" | "run" | "dataset" | "sample" | "sampling", readonly id: string) {
     super(`Unknown ${entity} ${id}`);
     this.name = "MetricsEntityNotFoundError";
   }
@@ -98,7 +96,7 @@ function prepareFacts(facts: MetricsFacts, query: MetricsQuery) {
   }
   const selectedRuns = query.runIds?.map((runId) => {
     const run = runById.get(runId);
-    if (!run) throw new MetricsQueryError(`Unknown Run ${runId}`);
+    if (!run) throw new MetricsEntityNotFoundError("run", runId);
     return run;
   });
   const samplingIds = selectedRuns === undefined ? undefined : new Set(selectedRuns.flatMap((run) => run.samplingIds));
@@ -171,7 +169,7 @@ export function createMetrics(dependencies: { readonly source: MetricsSource }):
       const query = validateQuery(input, "datasetId");
       const view = await load(query);
       const snapshot = view.datasetById.get(query.datasetId!);
-      if (!snapshot) throw new MetricsQueryError(`Unknown Dataset ${query.datasetId}`);
+      if (!snapshot) throw new MetricsEntityNotFoundError("dataset", query.datasetId!);
       const samplings = view.recordsForDataset(snapshot);
       const sampleIds = [...new Set(samplings.map((sampling) => sampling.sampleId))].sort();
       return {
@@ -188,7 +186,7 @@ export function createMetrics(dependencies: { readonly source: MetricsSource }):
       const query = validateQuery(input, "sampleId");
       const view = await load(query);
       const sample = view.sampleById.get(query.sampleId!);
-      if (!sample) throw new MetricsQueryError(`Unknown Sample ${query.sampleId}`);
+      if (!sample) throw new MetricsEntityNotFoundError("sample", query.sampleId!);
       const samplings = view.bySample.get(sample.sampleId) ?? [];
       const datasetIds = view.datasetIdsFor(sample.data.dataId);
       return {
@@ -205,7 +203,7 @@ export function createMetrics(dependencies: { readonly source: MetricsSource }):
       const query = validateQuery(input, "samplingId");
       const view = await load(query);
       const sampling = view.samplings.find((item) => item.samplingId === query.samplingId);
-      if (!sampling) throw new MetricsQueryError(`Unknown Sampling in query scope: ${query.samplingId}`);
+      if (!sampling) throw new MetricsEntityNotFoundError("sampling", query.samplingId!);
       const sample = view.sampleById.get(sampling.sampleId)!;
       return {
         project: view.facts.project, runIds: view.runsFor([sampling]), sample, datasetIds: view.datasetIdsFor(sample.data.dataId),

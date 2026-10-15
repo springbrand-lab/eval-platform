@@ -1,4 +1,5 @@
 import type { AgentResourceScope, AgentResourceSnapshot, JsonValue } from "@eval-platform/eval-contracts";
+import { equalJson } from "@springbrand/utils";
 import type {
   MetricNumber,
   ModelStatistics,
@@ -41,15 +42,6 @@ function identity(...values: readonly string[]): string {
   return JSON.stringify(values);
 }
 
-function canonical(value: JsonValue): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const object = value as JsonRecord;
-    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonical(object[key]!)}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
 export function aggregateResources(inputs: readonly ResourceInput[]): ResourceStatistics {
   const diagnostics: ResourceDiagnostic[] = [];
   const collections = { collected: 0, pending: 0, failed: 0, unsubmitted: 0, finalized: 0 };
@@ -75,7 +67,7 @@ export function aggregateResources(inputs: readonly ResourceInput[]): ResourceSt
   const readStream = (stream: Stream): FactStream => {
     let complete = snapshots.length > 0 && collections.pending === 0 && collections.failed === 0;
     let duplicates = 0;
-    const byIdentity = new Map<string, { readonly entry: FactEntry; readonly signature: string } | null>();
+    const byIdentity = new Map<string, FactEntry | null>();
     for (const { ownerUserId, snapshot } of snapshots) {
       if (!snapshot.finalized || snapshot.coverage[stream] !== "complete") complete = false;
       for (const rawFact of snapshot[stream]) {
@@ -96,21 +88,20 @@ export function aggregateResources(inputs: readonly ResourceInput[]): ResourceSt
           diagnose("missing-identity", stream, entry, `Cannot identify ${stream} record`);
           continue;
         }
-        const signature = canonical(fact);
         const existing = byIdentity.get(key);
         if (existing !== undefined) {
           duplicates += 1;
-          if (existing && existing.signature !== signature) {
+          if (existing && !equalJson(existing.fact, fact)) {
             complete = false;
             diagnose("conflicting-identity", stream, entry, "The same source identity has contradictory facts");
             byIdentity.set(key, null);
           }
           continue;
         }
-        byIdentity.set(key, { entry, signature });
+        byIdentity.set(key, entry);
       }
     }
-    return { entries: [...byIdentity.values()].flatMap((value) => value === null ? [] : [value.entry]), complete, duplicates };
+    return { entries: [...byIdentity.values()].filter((entry) => entry !== null), complete, duplicates };
   };
 
   const numeric = (entry: FactEntry, stream: Stream, value: JsonValue | undefined, field: string, integer: boolean): number | null => {

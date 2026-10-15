@@ -1,8 +1,6 @@
 import type { EvaluationRecord } from "@eval-platform/eval-contracts";
 import type { EvaluationMetrics } from "./model.js";
 
-export type { EvaluationMetrics } from "./model.js";
-
 export function readEvaluationMetrics(record: EvaluationRecord): EvaluationMetrics {
   const score = record.output?.score;
   const scoreStatus = score === undefined ? "unavailable" : Number.isFinite(score) ? "available" : "invalid";
