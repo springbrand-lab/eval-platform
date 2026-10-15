@@ -371,24 +371,18 @@ export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string,
           .where(and(eq(projects.projectId, projectId), eq(projects.ownerUserId, owner)))
           .for("update");
         if (!project) return null;
-        const [target] = await transaction.select({ runId: runs.runId, stopRequested: runs.stopRequested })
+        const [target] = await transaction.select({ stopRequested: runs.stopRequested })
           .from(runs).where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId),
             eq(runs.runId, runId)));
         if (!target) return null;
-        if (target.stopRequested) {
-          // A stop whose cleanup has not finalized gets its job back, e.g. after an exhausted retry budget.
-          const [unfinalized] = await transaction.select({ runId: runs.runId }).from(runs)
-            .where(and(eq(runs.runId, runId), runActive(transaction)));
-          if (unfinalized) await runQueue.enqueue(transaction, runId);
-          return { runId, stopRequested: true };
+        const [active] = await transaction.select({ runId: runs.runId }).from(runs)
+          .where(and(eq(runs.runId, runId), runActive(transaction)));
+        if (!active) {
+          if (target.stopRequested) return { runId, stopRequested: true };
+          throw new ProjectRunStopConflictError();
         }
-        const [active] = await transaction.select({ runId: runs.runId, stopRequested: runs.stopRequested })
-          .from(runs)
-          .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId),
-            runActive(transaction)))
-          .limit(1);
-        if (!active) throw new ProjectRunStopConflictError();
-        await transaction.update(runs).set({ stopRequested: true }).where(eq(runs.runId, runId));
+        if (!target.stopRequested) await transaction.update(runs).set({ stopRequested: true }).where(eq(runs.runId, runId));
+        // A stop whose cleanup has not finalized gets its job back, e.g. after an exhausted retry budget.
         await runQueue.enqueue(transaction, runId);
         return { runId, stopRequested: true };
       });

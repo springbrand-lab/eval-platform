@@ -9,7 +9,10 @@ import { Pool } from "pg";
 import { PgBoss, type JobWithMetadata } from "pg-boss";
 import pino from "pino";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createOwnerServices, createRunQueue, EvalSpApiError, openRunBoss, RUN_QUEUE, RUN_QUEUE_OPTIONS, startEvalRunWorker, type RunJob, type RunQueue } from "../index.js";
+import { createOwnerServices } from "../owner-services.js";
+import { createRunQueue, openRunBoss, RUN_QUEUE, RUN_QUEUE_OPTIONS, type RunJob, type RunQueue } from "../run-worker-queue.js";
+import { EvalSpApiError } from "../sp/client.js";
+import { startEvalRunWorker } from "../worker.js";
 import { createPostgresCatalog } from "./catalog.js";
 import { constraintViolation, createEvalDb } from "./client.js";
 import { createPostgresConfigReader, createPostgresConfigStore } from "./config.js";
@@ -767,6 +770,19 @@ describe.skipIf(!connection)("PostgreSQL evaluation persistence", () => {
     expect((await runtime.getRun(nextRun.runId))?.stopRequested).toBeUndefined();
     expect(await control.stopRun(project.projectId, run.runId)).toBeNull();
     expect((await runtime.getRun(nextRun.runId))?.stopRequested).toBeUndefined();
+  });
+
+  it("rejects stopping a Run that has already ended", async () => {
+    const { runtime, project, dataset, sample } = await setup();
+    const sampling = makeSampling(project.projectId, sample.sampleId);
+    const run = makeRun(project.projectId, sampling, dataset.datasetId);
+    await runtime.createRunWithSamplings(run, [sampling], []);
+    await runtime.updateSampling({ ...sampling, execution: { status: "succeeded" } }, sampling);
+    const enqueue = vi.fn<RunQueue["enqueue"]>(async () => {});
+    await expect(createPostgresProjectRunControl(database.db, "user-A", { enqueue }).stopRun(project.projectId, run.runId))
+      .rejects.toBeInstanceOf(ProjectRunStopConflictError);
+    expect((await runtime.getRun(run.runId))?.stopRequested).toBeUndefined();
+    expect(enqueue).not.toHaveBeenCalled();
   });
 
   it("recovers a stopped queued Run and opens Project admission only after cleanup", async () => {

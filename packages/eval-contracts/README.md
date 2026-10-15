@@ -16,7 +16,7 @@ Subject 的产物和完整轨迹是执行终态的必需证据。`Sampling.execu
 
 `RunPhase` 只有 `execution | evaluation`。`RunPhases` 表示 Run 关联的实际阶段范围：只执行、只评估或顺序执行后评估；`RunSnapshot.phases` 返回该范围，`phase` 和 `status` 返回从 Sampling 推导的当前进度。Pipeline 只负责组合两阶段，没有第三种阶段、Run kind 或独立的 Pipeline 数据模型。
 
-`RunSnapshot.stopRequested` 表示 Project 当前 Run 已请求停止；该标志不改变幂等身份或配置快照。正在收集取消后的证据或等待 Worker 写入 `stopFinalized` 时仍保持非终态；包含被取消阶段的 Run 在全部收尾完成后显示为 `cancelled`。已经自然完成的阶段及其证据保留原样。
+`RunSnapshot.stopRequested` 表示 Project 当前 Run 已请求停止；停止期间与收尾后的 Run 状态见[架构方案](../../docs/architecture.md#run-调度与停止)。
 
 三个运行请求都要求调用方提供同一次意图稳定复用的 `idempotencyKey`。`StartRunRequest` 使用 `executionConfigId`，`EvaluateRequest` 使用 `evaluationConfigId` 和确定的 `samplingIds`，`PipelineRequest` 使用 `pipelineConfigId`。具体 Dataset、Agent、并发和重试策略属于 `eval-runtime/config`，不在请求契约中复制。
 

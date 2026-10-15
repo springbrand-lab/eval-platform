@@ -1,5 +1,7 @@
 import type { Data, InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import { and, eq, isNull, or, sql, type SQL } from "drizzle-orm";
+import type { SelectedFieldsFlat } from "drizzle-orm/pg-core";
+import type { SelectResultFields } from "drizzle-orm/query-builders/select.types";
 import type { BundleDirectory, MaterialFile } from "../sp/bundle-directory.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
@@ -11,21 +13,6 @@ export interface BundleRecord {
   readonly bundleId: string;
   readonly name: string;
   readonly description: string;
-}
-
-export interface MaterialRecord {
-  readonly bundleId: string;
-  readonly materialId: string;
-  readonly name: string;
-  readonly description: string;
-}
-
-export interface SessionRecord {
-  readonly bundleId: string;
-  readonly sessionId: string;
-  readonly name: string;
-  readonly description: string;
-  readonly format: "json" | "jsonl";
 }
 
 function resourceBundleCondition(field: "initialMaterials" | "evalInitialMaterials" | "initialSession", bundleId: string) {
@@ -50,13 +37,57 @@ function bundleRecord(row: typeof bundles.$inferSelect): BundleRecord {
   return { bundleId: row.bundleId, name: row.name, description: row.description };
 }
 
-function materialRecord(row: typeof bundleMaterials.$inferSelect): MaterialRecord {
-  return { bundleId: row.bundleId, materialId: row.materialId, name: row.name, description: row.description };
+type ChildTable = typeof bundleMaterials | typeof bundleSessions;
+
+/** Materials and Sessions are soft-deletable Bundle children that share every metadata rule. */
+interface ChildResource<F extends SelectedFieldsFlat> {
+  readonly kind: "Material" | "Session";
+  readonly idField: "materialId" | "sessionId";
+  readonly table: ChildTable;
+  readonly id: typeof bundleMaterials.materialId | typeof bundleSessions.sessionId;
+  /** The public record columns. */
+  readonly fields: F;
+  /** Matches active Data rows that reference this resource. */
+  readonly dataBinding: (bundleId: string, resourceId: string) => SQL | undefined;
 }
 
-function sessionRecord(row: typeof bundleSessions.$inferSelect): SessionRecord {
-  return { bundleId: row.bundleId, sessionId: row.sessionId, name: row.name,
-    description: row.description, format: row.format };
+const materialResource = {
+  kind: "Material",
+  idField: "materialId",
+  table: bundleMaterials,
+  id: bundleMaterials.materialId,
+  fields: { bundleId: bundleMaterials.bundleId, materialId: bundleMaterials.materialId,
+    name: bundleMaterials.name, description: bundleMaterials.description },
+  dataBinding: (bundleId: string, materialId: string) => or(
+    materialCondition("initialMaterials", bundleId, materialId),
+    materialCondition("evalInitialMaterials", bundleId, materialId),
+  ),
+} as const satisfies ChildResource<SelectedFieldsFlat>;
+
+const sessionResource = {
+  kind: "Session",
+  idField: "sessionId",
+  table: bundleSessions,
+  id: bundleSessions.sessionId,
+  fields: { bundleId: bundleSessions.bundleId, sessionId: bundleSessions.sessionId,
+    name: bundleSessions.name, description: bundleSessions.description, format: bundleSessions.format },
+  dataBinding: (bundleId: string, sessionId: string) => and(
+    resourceBundleCondition("initialSession", bundleId),
+    sql`${data.content} -> 'initialSession' ->> 'sessionId' = ${sessionId}`,
+  ),
+} as const satisfies ChildResource<SelectedFieldsFlat>;
+
+export type MaterialRecord = SelectResultFields<typeof materialResource.fields>;
+export type SessionRecord = SelectResultFields<typeof sessionResource.fields>;
+
+function activeChildren(table: ChildTable, owner: string, bundleId: string) {
+  return and(eq(table.ownerUserId, owner), eq(table.bundleId, bundleId), isNull(table.deletedAt));
+}
+
+function activeChild(
+  resource: ChildResource<SelectedFieldsFlat>, owner: string, bundleId: string, resourceId: string,
+) {
+  return and(activeChildren(resource.table, owner, bundleId), eq(resource.id, resourceId));
 }
 
 /** Owner-scoped Bundle metadata. Bytes remain in BundleDirectory, untouched by soft deletes. */
@@ -70,6 +101,11 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
     if (!row) throw new BundleResourceNotFoundError("Bundle", bundleId);
     return bundleRecord(row);
   }
+  async function lockBundle(transaction: Pick<EvalDb, "select">, bundleId: string): Promise<void> {
+    const [bundle] = await transaction.select({ bundleId: bundles.bundleId }).from(bundles)
+      .where(activeBundle(bundleId)).for("update");
+    if (!bundle) throw new BundleResourceNotFoundError("Bundle", bundleId);
+  }
   async function uploadOneResource<T>(
     bundleId: string,
     upload: () => Promise<void>,
@@ -80,9 +116,7 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
     await upload();
     try {
       return await db.transaction(async (transaction) => {
-        const [bundle] = await transaction.select({ bundleId: bundles.bundleId }).from(bundles)
-          .where(activeBundle(bundleId)).for("update");
-        if (!bundle) throw new BundleResourceNotFoundError("Bundle", bundleId);
+        await lockBundle(transaction, bundleId);
         return insert(transaction);
       });
     } catch (error) {
@@ -90,6 +124,55 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       throw error;
     }
   }
+  function childResourceCatalog<F extends SelectedFieldsFlat>(resource: ChildResource<F>) {
+    return {
+      async list(bundleId: string): Promise<readonly SelectResultFields<F>[]> {
+        const id = platformId(bundleId, "bundleId");
+        await requireBundle(id);
+        // Drizzle leaves rows of a generic selection unresolved; `resource.fields` fixes their shape.
+        return await db.select(resource.fields).from(resource.table)
+          .where(activeChildren(resource.table, owner, id)).orderBy(resource.id) as SelectResultFields<F>[];
+      },
+      async get(bundleId: string, resourceId: string): Promise<SelectResultFields<F>> {
+        const id = platformId(bundleId, "bundleId");
+        const childId = platformId(resourceId, resource.idField);
+        await requireBundle(id);
+        const [row] = await db.select(resource.fields).from(resource.table)
+          .where(activeChild(resource, owner, id, childId));
+        if (!row) throw new BundleResourceNotFoundError(resource.kind, childId);
+        return row;
+      },
+      async update(bundleId: string, resourceId: string, input: CatalogMetadataPatch): Promise<SelectResultFields<F>> {
+        const id = platformId(bundleId, "bundleId");
+        const childId = platformId(resourceId, resource.idField);
+        const patch = parseCatalogMetadataPatch(input);
+        return db.transaction(async (transaction) => {
+          await lockBundle(transaction, id);
+          const [row] = await transaction.update(resource.table).set(patch)
+            .where(activeChild(resource, owner, id, childId)).returning(resource.fields) as SelectResultFields<F>[];
+          if (!row) throw new BundleResourceNotFoundError(resource.kind, childId);
+          return row;
+        });
+      },
+      async delete(bundleId: string, resourceId: string): Promise<void> {
+        const id = platformId(bundleId, "bundleId");
+        const childId = platformId(resourceId, resource.idField);
+        await db.transaction(async (transaction) => {
+          await lockBundle(transaction, id);
+          const [selected] = await transaction.select({ id: resource.id }).from(resource.table)
+            .where(activeChild(resource, owner, id, childId)).for("update");
+          if (!selected) throw new BundleResourceNotFoundError(resource.kind, childId);
+          if (await activeDataBinding(transaction, owner, resource.dataBinding(id, childId))) {
+            throw new BundleResourceInUseError(resource.kind, childId);
+          }
+          await transaction.update(resource.table).set({ deletedAt: new Date() })
+            .where(activeChild(resource, owner, id, childId));
+        });
+      },
+    };
+  }
+  const materials = childResourceCatalog(materialResource);
+  const sessions = childResourceCatalog(sessionResource);
   return {
     async createBundle(input: { name: string; description: string }): Promise<BundleRecord> {
       const row = { bundleId: crypto.randomUUID(), ownerUserId: owner,
@@ -114,23 +197,16 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
     async deleteBundle(bundleId: string): Promise<void> {
       const id = platformId(bundleId, "bundleId");
       await db.transaction(async (transaction) => {
-        const [selected] = await transaction.select({ bundleId: bundles.bundleId }).from(bundles)
-          .where(activeBundle(id)).for("update");
-        if (!selected) throw new BundleResourceNotFoundError("Bundle", id);
+        await lockBundle(transaction, id);
         if (await activeDataBinding(transaction, owner, or(
           resourceBundleCondition("initialMaterials", id),
           resourceBundleCondition("evalInitialMaterials", id),
           resourceBundleCondition("initialSession", id),
         ))) throw new BundleResourceInUseError("Bundle", id);
         const deletedAt = new Date();
-        await transaction.update(bundleMaterials).set({ deletedAt }).where(and(
-          eq(bundleMaterials.ownerUserId, owner), eq(bundleMaterials.bundleId, id),
-          isNull(bundleMaterials.deletedAt),
-        ));
-        await transaction.update(bundleSessions).set({ deletedAt }).where(and(
-          eq(bundleSessions.ownerUserId, owner), eq(bundleSessions.bundleId, id),
-          isNull(bundleSessions.deletedAt),
-        ));
+        for (const table of [bundleMaterials, bundleSessions]) {
+          await transaction.update(table).set({ deletedAt }).where(activeChildren(table, owner, id));
+        }
         await transaction.update(bundles).set({ deletedAt }).where(activeBundle(id));
       });
     },
@@ -142,71 +218,17 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       return uploadOneResource(id,
         () => directory.uploadInitialMaterials(owner, reference, input.files),
         async (writer) => {
-          const row = { ...reference, ownerUserId: owner, name, description };
-          await writer.insert(bundleMaterials).values(row);
-          return materialRecord({ ...row, deletedAt: null });
+          const record = { ...reference, name, description };
+          await writer.insert(bundleMaterials).values({ ...record, ownerUserId: owner });
+          return record;
         },
         () => directory.removeInitialMaterials(owner, reference),
       );
     },
-    async listMaterials(bundleId: string): Promise<readonly MaterialRecord[]> {
-      const id = platformId(bundleId, "bundleId");
-      await requireBundle(id);
-      return (await db.select().from(bundleMaterials).where(and(
-        eq(bundleMaterials.ownerUserId, owner), eq(bundleMaterials.bundleId, id),
-        isNull(bundleMaterials.deletedAt),
-      )).orderBy(bundleMaterials.materialId)).map(materialRecord);
-    },
-    async getMaterial(bundleId: string, materialId: string): Promise<MaterialRecord> {
-      const id = platformId(bundleId, "bundleId");
-      const childId = platformId(materialId, "materialId");
-      await requireBundle(id);
-      const [row] = await db.select().from(bundleMaterials).where(and(
-        eq(bundleMaterials.ownerUserId, owner), eq(bundleMaterials.bundleId, id),
-        eq(bundleMaterials.materialId, childId), isNull(bundleMaterials.deletedAt),
-      ));
-      if (!row) throw new BundleResourceNotFoundError("Material", childId);
-      return materialRecord(row);
-    },
-    async updateMaterial(bundleId: string, materialId: string, input: CatalogMetadataPatch): Promise<MaterialRecord> {
-      const id = platformId(bundleId, "bundleId");
-      const childId = platformId(materialId, "materialId");
-      const patch = parseCatalogMetadataPatch(input);
-      return db.transaction(async (transaction) => {
-        const [bundle] = await transaction.select({ bundleId: bundles.bundleId }).from(bundles)
-          .where(activeBundle(id)).for("update");
-        if (!bundle) throw new BundleResourceNotFoundError("Bundle", id);
-        const [row] = await transaction.update(bundleMaterials).set(patch).where(and(
-          eq(bundleMaterials.ownerUserId, owner), eq(bundleMaterials.bundleId, id),
-          eq(bundleMaterials.materialId, childId), isNull(bundleMaterials.deletedAt),
-        )).returning();
-        if (!row) throw new BundleResourceNotFoundError("Material", childId);
-        return materialRecord(row);
-      });
-    },
-    async deleteMaterial(bundleId: string, materialId: string): Promise<void> {
-      const id = platformId(bundleId, "bundleId");
-      const childId = platformId(materialId, "materialId");
-      await db.transaction(async (transaction) => {
-        const [bundle] = await transaction.select({ bundleId: bundles.bundleId }).from(bundles)
-          .where(activeBundle(id)).for("update");
-        if (!bundle) throw new BundleResourceNotFoundError("Bundle", id);
-        const [selected] = await transaction.select({ materialId: bundleMaterials.materialId })
-          .from(bundleMaterials).where(and(
-            eq(bundleMaterials.ownerUserId, owner), eq(bundleMaterials.bundleId, id),
-            eq(bundleMaterials.materialId, childId), isNull(bundleMaterials.deletedAt),
-          )).for("update");
-        if (!selected) throw new BundleResourceNotFoundError("Material", childId);
-        if (await activeDataBinding(transaction, owner, or(
-          materialCondition("initialMaterials", id, childId),
-          materialCondition("evalInitialMaterials", id, childId),
-        ))) throw new BundleResourceInUseError("Material", childId);
-        await transaction.update(bundleMaterials).set({ deletedAt: new Date() }).where(and(
-          eq(bundleMaterials.ownerUserId, owner), eq(bundleMaterials.bundleId, id),
-          eq(bundleMaterials.materialId, childId), isNull(bundleMaterials.deletedAt),
-        ));
-      });
-    },
+    listMaterials: materials.list,
+    getMaterial: materials.get,
+    updateMaterial: materials.update,
+    deleteMaterial: materials.delete,
     async createSession(bundleId: string, input: { name: string; description: string; format: "json" | "jsonl"; content: string }): Promise<SessionRecord> {
       const id = platformId(bundleId, "bundleId");
       const name = requiredCatalogLabel(input.name, "name");
@@ -215,104 +237,44 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       return uploadOneResource(id,
         () => directory.uploadInitialSession(owner, reference, { format: input.format, content: input.content }),
         async (writer) => {
-          const row = { ...reference, ownerUserId: owner, name, description, format: input.format };
-          await writer.insert(bundleSessions).values(row);
-          return sessionRecord({ ...row, deletedAt: null });
+          const record = { ...reference, name, description, format: input.format };
+          await writer.insert(bundleSessions).values({ ...record, ownerUserId: owner });
+          return record;
         },
         () => directory.removeInitialSession(owner, reference),
       );
     },
-    async listSessions(bundleId: string): Promise<readonly SessionRecord[]> {
-      const id = platformId(bundleId, "bundleId");
-      await requireBundle(id);
-      return (await db.select().from(bundleSessions).where(and(
-        eq(bundleSessions.ownerUserId, owner), eq(bundleSessions.bundleId, id),
-        isNull(bundleSessions.deletedAt),
-      )).orderBy(bundleSessions.sessionId)).map(sessionRecord);
-    },
-    async getSession(bundleId: string, sessionId: string): Promise<SessionRecord> {
-      const id = platformId(bundleId, "bundleId");
-      const childId = platformId(sessionId, "sessionId");
-      await requireBundle(id);
-      const [row] = await db.select().from(bundleSessions).where(and(
-        eq(bundleSessions.ownerUserId, owner), eq(bundleSessions.bundleId, id),
-        eq(bundleSessions.sessionId, childId), isNull(bundleSessions.deletedAt),
-      ));
-      if (!row) throw new BundleResourceNotFoundError("Session", childId);
-      return sessionRecord(row);
-    },
-    async updateSession(bundleId: string, sessionId: string, input: CatalogMetadataPatch): Promise<SessionRecord> {
-      const id = platformId(bundleId, "bundleId");
-      const childId = platformId(sessionId, "sessionId");
-      const patch = parseCatalogMetadataPatch(input);
-      return db.transaction(async (transaction) => {
-        const [bundle] = await transaction.select({ bundleId: bundles.bundleId }).from(bundles)
-          .where(activeBundle(id)).for("update");
-        if (!bundle) throw new BundleResourceNotFoundError("Bundle", id);
-        const [row] = await transaction.update(bundleSessions).set(patch).where(and(
-          eq(bundleSessions.ownerUserId, owner), eq(bundleSessions.bundleId, id),
-          eq(bundleSessions.sessionId, childId), isNull(bundleSessions.deletedAt),
-        )).returning();
-        if (!row) throw new BundleResourceNotFoundError("Session", childId);
-        return sessionRecord(row);
-      });
-    },
-    async deleteSession(bundleId: string, sessionId: string): Promise<void> {
-      const id = platformId(bundleId, "bundleId");
-      const childId = platformId(sessionId, "sessionId");
-      await db.transaction(async (transaction) => {
-        const [bundle] = await transaction.select({ bundleId: bundles.bundleId }).from(bundles)
-          .where(activeBundle(id)).for("update");
-        if (!bundle) throw new BundleResourceNotFoundError("Bundle", id);
-        const [selected] = await transaction.select({ sessionId: bundleSessions.sessionId })
-          .from(bundleSessions).where(and(
-            eq(bundleSessions.ownerUserId, owner), eq(bundleSessions.bundleId, id),
-            eq(bundleSessions.sessionId, childId), isNull(bundleSessions.deletedAt),
-          )).for("update");
-        if (!selected) throw new BundleResourceNotFoundError("Session", childId);
-        if (await activeDataBinding(transaction, owner, and(
-          resourceBundleCondition("initialSession", id),
-          sql`${data.content} -> 'initialSession' ->> 'sessionId' = ${childId}`,
-        ))) {
-          throw new BundleResourceInUseError("Session", childId);
-        }
-        await transaction.update(bundleSessions).set({ deletedAt: new Date() }).where(and(
-          eq(bundleSessions.ownerUserId, owner), eq(bundleSessions.bundleId, id),
-          eq(bundleSessions.sessionId, childId), isNull(bundleSessions.deletedAt),
-        ));
-      });
-    },
+    listSessions: sessions.list,
+    getSession: sessions.get,
+    updateSession: sessions.update,
+    deleteSession: sessions.delete,
   };
 }
 
-export async function assertMaterialSelectable(
-  reader: Pick<EvalDb, "select">, ownerUserId: string, reference: InitialMaterialsRef,
+async function assertChildSelectable(
+  resource: ChildResource<SelectedFieldsFlat>, reader: Pick<EvalDb, "select">, ownerUserId: string,
+  bundleId: string, resourceId: string,
 ): Promise<void> {
   const owner = requireOwnerUserId(ownerUserId);
-  const bundleId = platformId(reference.bundleId, "bundleId");
-  const materialId = platformId(reference.materialId, "materialId");
-  const [row] = await reader.select({ materialId: bundleMaterials.materialId }).from(bundleMaterials)
-    .innerJoin(bundles, and(eq(bundles.bundleId, bundleMaterials.bundleId),
-      eq(bundles.ownerUserId, bundleMaterials.ownerUserId)))
-    .where(and(eq(bundleMaterials.ownerUserId, owner), eq(bundleMaterials.bundleId, bundleId),
-      eq(bundleMaterials.materialId, materialId), isNull(bundleMaterials.deletedAt),
-      isNull(bundles.deletedAt))).for("share");
-  if (!row) throw new BundleResourceNotFoundError("Material", materialId);
+  const id = platformId(resourceId, resource.idField);
+  const [row] = await reader.select({ id: resource.id }).from(resource.table)
+    .innerJoin(bundles, and(eq(bundles.bundleId, resource.table.bundleId),
+      eq(bundles.ownerUserId, resource.table.ownerUserId)))
+    .where(and(activeChild(resource, owner, platformId(bundleId, "bundleId"), id), isNull(bundles.deletedAt)))
+    .for("share");
+  if (!row) throw new BundleResourceNotFoundError(resource.kind, id);
 }
 
-export async function assertSessionSelectable(
+export function assertMaterialSelectable(
+  reader: Pick<EvalDb, "select">, ownerUserId: string, reference: InitialMaterialsRef,
+): Promise<void> {
+  return assertChildSelectable(materialResource, reader, ownerUserId, reference.bundleId, reference.materialId);
+}
+
+export function assertSessionSelectable(
   reader: Pick<EvalDb, "select">, ownerUserId: string, reference: InitialSessionRef,
 ): Promise<void> {
-  const owner = requireOwnerUserId(ownerUserId);
-  const bundleId = platformId(reference.bundleId, "bundleId");
-  const sessionId = platformId(reference.sessionId, "sessionId");
-  const [row] = await reader.select({ sessionId: bundleSessions.sessionId }).from(bundleSessions)
-    .innerJoin(bundles, and(eq(bundles.bundleId, bundleSessions.bundleId),
-      eq(bundles.ownerUserId, bundleSessions.ownerUserId)))
-    .where(and(eq(bundleSessions.ownerUserId, owner), eq(bundleSessions.bundleId, bundleId),
-      eq(bundleSessions.sessionId, sessionId), isNull(bundleSessions.deletedAt),
-      isNull(bundles.deletedAt))).for("share");
-  if (!row) throw new BundleResourceNotFoundError("Session", sessionId);
+  return assertChildSelectable(sessionResource, reader, ownerUserId, reference.bundleId, reference.sessionId);
 }
 
 /** Validate every resource reference before a Data row is created or replaced. */

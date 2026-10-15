@@ -8,7 +8,7 @@ import { allowedCorsOrigin, trustedOrigin } from "../middlewares/trusted-origin.
 import { apiError } from "./api-errors.js";
 import type { AppBindings } from "./types.js";
 
-export const validationHook = (
+const validationHook = (
   result: { success: boolean; error?: { issues: Array<{ path: PropertyKey[]; message: string }> } },
   c: Parameters<typeof httpValidationError>[0],
 ) => {

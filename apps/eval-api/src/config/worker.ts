@@ -8,7 +8,7 @@ import {
   requiredStringSchema,
 } from "./env.js";
 
-export const workerEnvSchema = databaseEnvSchema.extend({
+const workerEnvSchema = databaseEnvSchema.extend({
   EVAL_SP_AGENT_ORIGIN: httpOriginSchema,
   EVAL_SP_SERVICE_TOKEN: requiredStringSchema,
   EVAL_BUNDLE_DIR: absolutePathSchema,

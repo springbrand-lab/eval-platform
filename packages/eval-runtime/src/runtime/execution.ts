@@ -7,11 +7,10 @@ import type {
 } from "@eval-platform/eval-contracts";
 import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 import { dataInputSchema } from "@eval-platform/eval-dataset";
-import { equalJson } from "@springbrand/utils";
 import type { AgentHandle } from "../harness/model.js";
 
-import { persistRuntimeRecord } from "./store.js";
-import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
+import { persistRuntimeRecord, readStageFailure } from "./store.js";
+import { RuntimeRecordPersistenceError } from "./errors.js";
 import type { RuntimeSamplingContext } from "./model.js";
 import {
   AgentOperationError,
@@ -187,27 +186,13 @@ export async function executeSampling(
     });
     return { state: current, sample };
   } catch (error) {
-    if (error instanceof RuntimeRunStoppedError) throw error;
-    if (error instanceof RuntimeRecordPersistenceError && error.outcome !== "not-committed") throw error;
     const details = describeAgentError(error);
-    const stored = await dependencies.store.getSampling(current.samplingId);
-    if (!stored) throw error;
-    let failureBase = stored;
-    if (error instanceof RuntimeRecordPersistenceError) {
-      const expected = error.expectedRecord as Sampling;
-      const attempted = error.attemptedRecord as Sampling;
-      if (equalJson(stored, expected)) {
-        const observedAttempt = attempted.executionAttempts.at(-1);
-        const savedAttempt = stored.executionAttempts.find((item) => (
-          item.executionAttemptId === observedAttempt?.executionAttemptId
-        ));
-        if (
-          (observedAttempt?.completedAt !== undefined && savedAttempt?.completedAt === undefined)
-          || (attempted.artifacts !== undefined && stored.artifacts === undefined)
-          || (attempted.trajectory !== undefined && stored.trajectory === undefined)
-        ) failureBase = attempted;
-      } else if (!equalJson(stored, attempted)) throw error;
-    }
+    const { stored, failureBase } = await readStageFailure(error, {
+      read: () => dependencies.store.getSampling(current.samplingId),
+      attempts: (record) => record.executionAttempts,
+      attemptId: (attempt) => attempt.executionAttemptId,
+      evidence: (record) => [record.artifacts, record.trajectory],
+    });
     current = stored;
     if (current.execution.status === "succeeded") return { state: current, sample };
     const lastAttempt = failureBase.executionAttempts.at(-1);

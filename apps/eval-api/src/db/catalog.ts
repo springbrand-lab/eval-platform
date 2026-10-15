@@ -68,7 +68,7 @@ export function projectFromRow(row: typeof projects.$inferSelect): Project {
 }
 
 /** Omit the owner only for the Worker. */
-export async function readProject(
+async function readProject(
   reader: RecordReader, projectId: string, ownerUserId?: string,
 ): Promise<Project | null> {
   const [row] = await reader.select().from(projects).where(and(eq(projects.projectId, projectId),
@@ -102,7 +102,7 @@ export async function readSamples(
   return rows.map((row) => row && toSample(row));
 }
 
-export async function bindProjectEvaluationOutputSchema(
+async function bindProjectEvaluationOutputSchema(
   db: EvalDb,
   ownerUserId: string,
   projectId: string,

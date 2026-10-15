@@ -1,6 +1,6 @@
+import { IDENTIFIER_RULE, isIdentifier } from "@eval-platform/eval-contracts";
+
 export function requireOwnerUserId(value: string): string {
-  if (typeof value !== "string" || value.length === 0 || value.trim() !== value) {
-    throw new TypeError("ownerUserId must be a non-empty identifier without surrounding whitespace");
-  }
+  if (!isIdentifier(value)) throw new TypeError(`ownerUserId ${IDENTIFIER_RULE}`);
   return value;
 }

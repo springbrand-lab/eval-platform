@@ -1,6 +1,6 @@
 import { link, lstat, mkdir, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, sep } from "node:path";
-import { platformIdSchema, type InitialMaterialsRef, type InitialSessionRef } from "@eval-platform/eval-dataset";
+import { parseStrictJson, platformIdSchema, type InitialMaterialsRef, type InitialSessionRef } from "@eval-platform/eval-dataset";
 import {
   evalInitialContextSchema,
   evalInitializationSchema,
@@ -69,7 +69,7 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
       throw unavailable(error);
     }
     try {
-      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      return parseStrictJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     } catch (cause) {
       throw new BundleFileError("invalid", "Initial Bundle resource is not valid JSON", { cause });
     }

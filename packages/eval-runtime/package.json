@@ -8,9 +8,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./config": "./src/config/index.ts",
-    "./harness": "./src/harness/index.ts",
-    "./runtime": "./src/runtime/index.ts"
+    "./harness": "./src/harness/index.ts"
   },
   "scripts": {
     "build": "tsc --noEmit -p tsconfig.json",

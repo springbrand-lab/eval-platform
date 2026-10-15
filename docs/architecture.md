@@ -55,7 +55,9 @@ eval-metrics: evaluators/ aggregation/ reporting/
 
 ## Run 准入与独立评估
 
-`start()`、`evaluate()` 和 `pipeline()` 共用 Run 准入规则。请求必须提供在 Project 内唯一的 `idempotencyKey`；请求指纹绑定操作、配置 ID、独立评估时确定且有序的 Sampling ID 列表，以及本次解析出的生效配置。首次准入在同一事务中保存 Run、生效配置快照及关联记录：新执行创建 Sampling，需要评估的 Run 创建 EvaluationRecord；独立评估复用并校验既有 Sampling。PostgreSQL 的 `(project_id, idempotency_key)` 唯一约束保证同一意图只创建一批。相同 key 和事实返回原 Run，不同事实冲突；有意再次执行或重评估使用新 key。已准入后的重放依据原 Run 快照校验，不重新读取已编辑的配置，也不引入单独的配置 version。
+**准入、幂等键与替换规则**（本节是唯一完整描述）：`start()`、`evaluate()` 和 `pipeline()` 共用 Run 准入规则。请求必须提供在 Project 内唯一的 `idempotencyKey`；请求指纹绑定操作、配置 ID、独立评估时确定且有序的 Sampling ID 列表，以及本次解析出的生效配置。首次准入在同一事务中保存 Run、生效配置快照及关联记录：新执行创建 Sampling，需要评估的 Run 创建 EvaluationRecord；独立评估复用并校验既有 Sampling。Store 在原子准入中再次查重，PostgreSQL 的 `(project_id, idempotency_key)` 唯一约束保证同一意图只创建一批。当前 Run 的相同 key 和事实返回原 Run，不同事实（包括 Sampling ID 顺序）冲突；有意再次执行或重评估使用新 key。已准入后的重放依据原 Run 快照校验，不重新读取已编辑的配置或 Sample 输入，也不引入单独的配置 version。只有新准入的 Run 投递 Worker 任务。
+
+同一 Project 同时最多一个未结束 Run，执行、联跑和独立评估共用此限制。Store 锁住 Project 行后先处理同 key 重放，再以与 Worker 恢复相同的未结束判断（任一 Sampling 或 EvaluationRecord 处于 `queued`、`starting`、`running` 或 `retrying`，或停止尚未收尾）拒绝新 key（`RuntimeProjectBusyError`），不产生新 Run 或评估记录；没有单独保存的可变 Run 状态。原 Run 全部阶段终结且停止已收尾后，新 key 在同一事务中替换 Project 状态：执行或联跑删除旧 Run、Sampling 和 EvaluationRecord；独立评估保留当前执行 Sampling，替换旧 Run 和 EvaluationRecord。Project 只保留最新状态；被替换的旧 Run ID 不再可查，旧 key 留在仅保存请求身份的账本中，迟到重放以冲突拒绝，不会再启动批次。Web 可以禁用启动按钮作反馈，但并发边界是 Store。
 
 同一 Runtime 实例内，待准入的相同 Project/key 请求先比较调用方选择的事实：一致则共用首次提交的 Promise 与配置快照，即使提交期间配置被编辑也只返回同一个 Run；不一致立即冲突。请求结束后清理内存条目；持久化 Store 仍负责最终查重，内存不是权威状态。跨实例的唯一约束仍阻止重复建批，但进程内同步不保证配置同时变更时跨实例调用获得相同响应。
 

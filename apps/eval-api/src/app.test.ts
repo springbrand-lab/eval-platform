@@ -16,7 +16,7 @@ function setup() {
       listProjects: vi.fn(async () => [project]),
       createProject: vi.fn(async ({ name }: { name: string }) => ({ ...project, name })),
       getProject: vi.fn(async (projectId: string) => projectId === "project-1"
-        ? { ...project, evaluationOutputSchemaId: outputSchemaId, evaluationOutputSchema: { type: "object" } }
+        ? { ...project, evaluationOutputSchemaId: outputSchemaId }
         : null),
       selectAllSuccessfulSamplingIds: vi.fn(async () => ["sampling-1"]),
     },
@@ -98,7 +98,7 @@ describe("Eval API HTTP layer", () => {
     expect(app.release).toHaveBeenCalledTimes(2);
   });
 
-  it("returns the public Project projection without the resolved output Schema", async () => {
+  it("returns the owned Project", async () => {
     const app = setup();
     const response = await app.request("/api/projects/project-1", authorized());
     const body = await response.json() as { msg: Record<string, unknown> };

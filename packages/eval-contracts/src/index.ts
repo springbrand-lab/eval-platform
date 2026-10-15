@@ -47,3 +47,5 @@ export {
   isPendingSamplingStatus,
   isTerminalAgentStatus,
 } from "./model.js";
+export { IDENTIFIER_RULE, identifierSchema, isIdentifier } from "./identifier.js";
+export { jsonObjectSchema, jsonValueSchema } from "./json.js";

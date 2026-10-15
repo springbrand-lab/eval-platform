@@ -1,9 +1,8 @@
+import { IDENTIFIER_RULE, isIdentifier } from "@eval-platform/eval-contracts";
 import { RuntimeInputError } from "./errors.js";
 
-export function requireNonEmpty(value: unknown, field: string): asserts value is string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new RuntimeInputError(`${field} is required`, field);
-  }
+export function requireIdentifier(value: unknown, field: string): asserts value is string {
+  if (!isIdentifier(value)) throw new RuntimeInputError(`${field} ${IDENTIFIER_RULE}`, field);
 }
 
 export function requireDistinctIds(ids: readonly string[], field: string): void {

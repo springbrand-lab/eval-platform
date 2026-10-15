@@ -52,12 +52,7 @@ Project ──> Run ──> Sampling ──> Subject Chat / Workspace
 Dataset ──> Data ──> Sample ──(输入引用)──> Sampling
 ```
 
-- `samplingCount` 创建多个独立 `Sampling`，不是一次执行的重试次数。
-- `executionConcurrency` 是执行阶段同时启动的最大 DO 数量，一个 Subject Agent 对应一个 DO。
-- `evaluationConcurrency` 是评估阶段同时启动的最大 DO 数量，一个 Evaluation Agent 对应一个 DO。
-- 网络、模型或网站临时故障重试同一个 `Sampling`，不创建新的采样。
-- 每次执行都完整收集 Subject 产物和轨迹；产物留在 Subject 的 SpaceDO，完整轨迹由 SP 物化到同一 SpaceDO，Evaluator 绑定该 Workspace。评估以产物为主，轨迹作为补充证据。
-- 每条 `Data` 必须提供 `userPrompt`，可以附带任意其他 JSON 业务字段；`initialSession` 与 `initialMaterials` 都可选，正文独立保存，启动时由 SP 初始化能力恢复 Context。
+每个 Sampling 是一次独立运行，完整收集 Subject 产物与轨迹（产物为主，轨迹为补充证据）；实体定义见[核心实体](docs/architecture.md#核心实体)，并发、重试与证据语义见[生命周期语义](docs/architecture.md#生命周期语义)。
 
 ## SP 对齐边界
 
@@ -93,7 +88,7 @@ eval-contracts → eval-dataset → eval-runtime → eval-metrics
 - TypeScript `7.x`
 - ESM + Bundler module resolution
 
-工程约定与 `sp-platform` 对齐：每个 workspace 都有独立的 package metadata、TypeScript 配置、README、公共入口和 Vitest 入口；应用额外拥有自己的 `CONTEXT.md`。`eval-api` 使用注入的 `pg` 连接池、Drizzle 和独立迁移；不复制 SP 私有数据库客户端或 Agent 内核。Eval 发布流程从固定 SP 源码部署独立的 SP 运行环境，Eval 代码不导入其私有源文件。可使用 `DATABASE_URL` 运行数据库集成测试。
+工程约定与 `sp-platform` 对齐：每个 workspace 都有独立的 package metadata、TypeScript 配置、README 和 Vitest 入口；共享包提供 `src/index.ts` 公共入口，应用只提供进程入口，并额外拥有自己的 `CONTEXT.md`。`eval-api` 使用注入的 `pg` 连接池、Drizzle 和独立迁移；不复制 SP 私有数据库客户端或 Agent 内核。Eval 发布流程从固定 SP 源码部署独立的 SP 运行环境，Eval 代码不导入其私有源文件。可使用 `DATABASE_URL` 运行数据库集成测试。
 
 本地安装与联调要求 sp-platform 检出在本仓库的同级目录 `../sp-platform` 并已执行 `pnpm install`：`@springbrand/eval-harness`、`@springbrand/utils` 当前以 `link:` 依赖其工作区包，发布计划见 [SP 共享包发布待办](docs/sp-package-publishing-todo.md)。
 

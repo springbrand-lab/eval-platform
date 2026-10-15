@@ -8,11 +8,10 @@ import type {
   SamplingStatus,
 } from "@eval-platform/eval-contracts";
 import { dataInputSchema } from "@eval-platform/eval-dataset";
-import { equalJson } from "@springbrand/utils";
 
 import type { RuntimeEvaluationContext, Sample } from "./model.js";
-import { persistRuntimeRecord } from "./store.js";
-import { RuntimeAdmissionConflictError, RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
+import { persistRuntimeRecord, readStageFailure } from "./store.js";
+import { RuntimeAdmissionConflictError } from "./errors.js";
 import {
   AgentOperationError,
   applyAttemptPatch,
@@ -182,26 +181,13 @@ export async function evaluateSampling(
     });
     return { ...input.context, evaluation: currentEvaluation };
   } catch (error) {
-    if (error instanceof RuntimeRunStoppedError) throw error;
-    if (error instanceof RuntimeRecordPersistenceError && error.outcome !== "not-committed") throw error;
     const details = describeAgentError(error);
-    const stored = await dependencies.store.getEvaluation(currentEvaluation.evaluationId);
-    if (!stored) throw error;
-    let failureBase = stored;
-    if (error instanceof RuntimeRecordPersistenceError) {
-      const expected = error.expectedRecord as EvaluationRecord;
-      const attempted = error.attemptedRecord as EvaluationRecord;
-      if (equalJson(stored, expected)) {
-        const observedAttempt = attempted.attempts.at(-1);
-        const savedAttempt = stored.attempts.find((item) => (
-          item.evaluationAttemptId === observedAttempt?.evaluationAttemptId
-        ));
-        if (
-          (observedAttempt?.completedAt !== undefined && savedAttempt?.completedAt === undefined)
-          || (attempted.output !== undefined && stored.output === undefined)
-        ) failureBase = attempted;
-      } else if (!equalJson(stored, attempted)) throw error;
-    }
+    const { stored, failureBase } = await readStageFailure(error, {
+      read: () => dependencies.store.getEvaluation(currentEvaluation.evaluationId),
+      attempts: (record) => record.attempts,
+      attemptId: (attempt) => attempt.evaluationAttemptId,
+      evidence: (record) => [record.output],
+    });
     currentEvaluation = stored;
     if (currentEvaluation.status.status === "succeeded") return { ...input.context, evaluation: currentEvaluation };
     await persistEvaluation({

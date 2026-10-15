@@ -15,7 +15,7 @@
 
 - Keep dependencies flowing from contracts toward adapters and applications.
 - Add behavior only after the package boundary and public contract are documented.
-- Keep package metadata, `tsconfig.json`, `README.md`, `src/index.ts` and focused tests together.
+- Keep package metadata, `tsconfig.json`, `README.md` and focused tests together; shared packages expose `src/index.ts`, applications expose only their process entry points.
 - Do not commit generated output, local secrets or Durable Object state.
 
 ## Verification

@@ -1,4 +1,4 @@
-import type { EvaluationRecord } from "@eval-platform/eval-contracts";
+import { IDENTIFIER_RULE, isIdentifier, type EvaluationRecord } from "@eval-platform/eval-contracts";
 import type { DatasetSnapshot } from "@eval-platform/eval-dataset";
 import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
 import { aggregateMetrics } from "../aggregation/index.js";
@@ -29,9 +29,7 @@ export class MetricsSourceError extends Error {
 }
 
 function identifier(value: unknown, name: string): string {
-  if (typeof value !== "string" || value.length === 0 || value !== value.trim()) {
-    throw new MetricsQueryError(`${name} must be a non-empty identifier without surrounding whitespace`);
-  }
+  if (!isIdentifier(value)) throw new MetricsQueryError(`${name} ${IDENTIFIER_RULE}`);
   return value;
 }
 

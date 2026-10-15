@@ -2,7 +2,7 @@
 
 ## 范围与现状
 
-执行成功的 Sampling 可以在原 Project 下单独发起评估，不重新执行 Subject。新建的空 Project 不能以只评估启动，也不能引用其他 Project 的 Sampling。Project 只保留当前状态：新执行或联跑原子删除旧 Run、Sampling 和 EvaluationRecord，再从零启动；新独立评估保留本轮执行的全部 Sampling 事实（仅成功者可入选评估），原子替换旧 Run 和 EvaluationRecord。旧 Run ID 的结果查询在替换后返回 404。
+执行成功的 Sampling 可以在原 Project 下单独发起评估，不重新执行 Subject。新建的空 Project 不能以只评估启动，也不能引用其他 Project 的 Sampling。Project 只保留当前状态；新独立评估保留本轮执行的 Sampling，替换旧 Run 和 EvaluationRecord，替换规则见[架构方案](architecture.md#run-准入与独立评估)。
 
 当前已实现 Catalog 的选择查询、Runtime `evaluate()`、PostgreSQL 幂等准入和 Eval API 的独立评估 HTTP 路由。Runtime 只接收调用方确定的 Sampling ID 列表，不根据筛选条件重新选一批。
 
@@ -32,9 +32,7 @@
 
 手动选择与全选都传确定、非空、无重复的 `samplingIds`，并传本次用户意图的 `idempotencyKey`。一次意图从首次提交到超时重试、网络重发和重复点击，都复用**同一 ID 顺序、配置 ID、Project 和 key**；重试不能再次调用全选查询来生成新列表。若全选为空，不提交评估请求。API 将这份请求交给 Runtime `evaluate()`，并把其 `RunHandle` 返回调用方。
 
-幂等键在 Project 内唯一，`start()`、`pipeline()` 和 `evaluate()` 共用这条规则。当前 Run 的相同 key 与请求事实返回原 Run；同一 key 换操作、配置 ID 或 Sampling ID 列表（包括顺序）时报冲突。同一 Runtime 实例内，并发的同一意图共用第一次提交的 Promise，因此即使配置在两次点击之间改变，本次提交仍使用第一次解析并准入的生效配置。已准入后的重放用原 Run 保存的有效配置校验，不重新解析已修改的配置。全新的一次主动重跑或重评估需要新 key；已被替换的旧 key 留在仅保存请求身份的账本中，迟到重试以冲突拒绝，不会重新启动。Runtime 和 Store 在准入前后分别查重，数据库唯一约束兜底并发请求；只有新 Run 投递 Worker 任务。内存同步只处理同一实例内的并发，不代替 Store 的持久化幂等。
-
-同一 Project 同时只允许一批未结束的 Run，执行、联跑和独立评估共用此限制。Store 在 Project 行锁内先处理同 key 重放，再检查是否有 `queued`、`starting`、`running` 或 `retrying` 的 Sampling 或 EvaluationRecord；新 key 遇到未结束 Run 时被拒绝，且不产生新 Run 或评估记录。停止请求也必须完成证据收尾后才可重跑。原 Run 的所有阶段进入终态后，新 key 在同一事务中清掉被替换的运行状态并启动新批次。执行重跑中的 Sampling 未完成前，Project 忙碌检查阻止启动独立评估；未成功的 Sampling 本身也不进入候选集。配置在这段时间内可以编辑，当前 Run 和同 key 重放仍沿用原快照。
+幂等键、同一 Project 仅一个未结束 Run 和新批次替换旧状态的规则与 `start()`、`pipeline()` 共用，唯一完整描述见[架构方案](architecture.md#run-准入与独立评估)。对独立评估而言，Sampling ID 列表（包括顺序）属于请求事实；执行重跑未结束前不能启动独立评估，未成功的 Sampling 也不进入候选集。
 
 提交时 Runtime 分批读取 Sampling 和不同 Sample 的输入，再检查每个 Sampling 属于该 Project、执行成功且输入可读取；Store 在原子准入中再次检查。选择后若候选已失效，整批提交失败，不留下半批 Run 或 EvaluationRecord。调用方需要重新选择并以新意图提交。
 

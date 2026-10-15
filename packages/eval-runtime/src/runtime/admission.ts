@@ -15,7 +15,7 @@ import {
   RuntimeRunIdentityConflictError,
 } from "./errors.js";
 import { requireEvaluationPrompt } from "./evaluation.js";
-import { requireDistinctIds, requireNonEmpty } from "./input.js";
+import { requireDistinctIds, requireIdentifier } from "./input.js";
 import type { EvalRunAdmission, EvalRunAdmissionDependencies, RuntimeAdmissionCatalog, Sample } from "./model.js";
 import { RunRecords } from "./records.js";
 import type { RuntimeRunRecord, RuntimeRunRequestIdentity, RuntimeStore, SamplingState } from "./store.js";
@@ -68,7 +68,7 @@ export class RunAdmission implements EvalRunAdmission {
   async start(request: StartRunRequest): Promise<RunHandle> {
     const admitted = { ...request };
     requireRunRequest(admitted);
-    requireNonEmpty(admitted.executionConfigId, "executionConfigId");
+    requireIdentifier(admitted.executionConfigId, "executionConfigId");
     return this.#admit(admitted, {
       operation: "start",
       projectId: admitted.projectId,
@@ -81,7 +81,7 @@ export class RunAdmission implements EvalRunAdmission {
     requireRunRequest(admitted);
     if (admitted.samplingIds.length === 0) throw new RuntimeInputError("samplingIds must not be empty", "samplingIds");
     requireDistinctIds(admitted.samplingIds, "samplingIds");
-    requireNonEmpty(admitted.evaluationConfigId, "evaluationConfigId");
+    requireIdentifier(admitted.evaluationConfigId, "evaluationConfigId");
     return this.#admit(admitted, {
       operation: "evaluate",
       projectId: admitted.projectId,
@@ -92,7 +92,7 @@ export class RunAdmission implements EvalRunAdmission {
   async pipeline(request: PipelineRequest): Promise<RunHandle> {
     const admitted = { ...request };
     requireRunRequest(admitted);
-    requireNonEmpty(admitted.pipelineConfigId, "pipelineConfigId");
+    requireIdentifier(admitted.pipelineConfigId, "pipelineConfigId");
     return this.#admit(admitted, {
       operation: "pipeline",
       projectId: admitted.projectId,
@@ -246,14 +246,8 @@ export class RunAdmission implements EvalRunAdmission {
 }
 
 function requireRunRequest(request: RunRequest): void {
-  const key: unknown = request.idempotencyKey;
-  if (typeof key !== "string" || key.length === 0 || key.trim() !== key) {
-    throw new RuntimeInputError(
-      "idempotencyKey must be a non-empty key without surrounding whitespace",
-      "idempotencyKey",
-    );
-  }
-  requireNonEmpty(request.projectId, "projectId");
+  requireIdentifier(request.idempotencyKey, "idempotencyKey");
+  requireIdentifier(request.projectId, "projectId");
 }
 
 async function requestIdentity(

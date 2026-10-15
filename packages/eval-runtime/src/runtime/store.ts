@@ -3,7 +3,12 @@ import { equalJson } from "@springbrand/utils";
 import type { RunConfigSnapshot } from "../config/index.js";
 import { describeAgentError } from "./agent-lifecycle.js";
 import type { RetryController } from "./retry.js";
-import { RuntimeRecordConflictError, RuntimeRecordPersistenceError, type RuntimePersistenceOutcome } from "./errors.js";
+import {
+  RuntimeRecordConflictError,
+  RuntimeRecordPersistenceError,
+  RuntimeRunStoppedError,
+  type RuntimePersistenceOutcome,
+} from "./errors.js";
 
 export interface RuntimeRunRequestIdentity {
   /** Stable caller intent within one Project, reused on retries. */
@@ -142,4 +147,46 @@ export async function persistRuntimeRecord<TRecord extends SamplingState | Evalu
       }
     }
   }
+}
+
+/** A stage record reread after its stage failed. */
+export interface StageFailureRecords<TRecord> {
+  /** The record as committed. */
+  readonly stored: TRecord;
+  /** The record the failure write extends: the attempted one when it carries Agent facts the Store never saved. */
+  readonly failureBase: TRecord;
+}
+
+/**
+ * Rereads a stage record after `error` and rethrows the errors a failure write must not mask:
+ * Run stops, committed or conflicting persistence, and a record changed by another writer.
+ */
+export async function readStageFailure<
+  TRecord extends SamplingState | EvaluationRecord,
+  TAttempt extends { readonly completedAt?: string },
+>(error: unknown, record: {
+  readonly read: () => Promise<TRecord | null>;
+  readonly attempts: (record: TRecord) => readonly TAttempt[];
+  readonly attemptId: (attempt: TAttempt) => string;
+  /** Agent evidence fields, in a fixed order. */
+  readonly evidence: (record: TRecord) => readonly unknown[];
+}): Promise<StageFailureRecords<TRecord>> {
+  if (error instanceof RuntimeRunStoppedError) throw error;
+  if (error instanceof RuntimeRecordPersistenceError && error.outcome !== "not-committed") throw error;
+  const stored = await record.read();
+  if (!stored) throw error;
+  if (!(error instanceof RuntimeRecordPersistenceError)) return { stored, failureBase: stored };
+  const attempted = error.attemptedRecord as TRecord;
+  if (!equalJson(stored, error.expectedRecord)) {
+    if (equalJson(stored, attempted)) return { stored, failureBase: stored };
+    throw error;
+  }
+  const observedAttempt = record.attempts(attempted).at(-1);
+  const savedAttempt = observedAttempt && record.attempts(stored).find((attempt) => (
+    record.attemptId(attempt) === record.attemptId(observedAttempt)
+  ));
+  const storedEvidence = record.evidence(stored);
+  const unsaved = (observedAttempt?.completedAt !== undefined && savedAttempt?.completedAt === undefined)
+    || record.evidence(attempted).some((value, index) => value !== undefined && storedEvidence[index] === undefined);
+  return { stored, failureBase: unsaved ? attempted : stored };
 }

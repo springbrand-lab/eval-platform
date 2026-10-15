@@ -9,7 +9,7 @@ import {
   requiredStringSchema,
 } from "./env.js";
 
-export const apiEnvSchema = databaseEnvSchema.extend({
+const apiEnvSchema = databaseEnvSchema.extend({
   /** Eval SP API: session verification and Agent Config. */
   EVAL_SP_API_ORIGIN: httpOriginSchema,
   /** Eval Web: the only CORS origin and the trusted Origin of SP write requests. */
