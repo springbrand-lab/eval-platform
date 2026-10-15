@@ -29,7 +29,6 @@ import {
   OutputSchemaNotFoundError,
   ProjectEvaluationPlanLockedError,
   ProjectIdempotencyConflictError,
-  ProjectInputError,
   ProjectRunStopConflictError,
   RunTargetsTooLargeError,
 } from "../db/errors.js";
@@ -112,10 +111,7 @@ const spErrorSchema = z.object({
   errors: z.array(z.object({ path: z.string(), errMsg: z.string() })).optional(),
 });
 
-function fieldError(
-  code: "RUNTIME_INPUT_INVALID" | "CATALOG_INPUT_INVALID" | "PROJECT_INPUT_INVALID",
-  error: RuntimeInputError | CatalogInputError | ProjectInputError,
-): HttpError {
+function fieldError(code: "RUNTIME_INPUT_INVALID" | "CATALOG_INPUT_INVALID", error: RuntimeInputError | CatalogInputError): HttpError {
   return new HttpError(code, error.message, {
     cause: error,
     ...(error.field === undefined ? {} : { errors: [{ path: error.field, errMsg: error.message }] }),
@@ -153,11 +149,17 @@ export { errorDiagnostics } from "@springbrand/http/server";
 export function apiError(error: Error): HttpError {
   const http = toHttpError(error);
   if (http) return http;
+  // A failure followed by a failed compensation answers as the failure and logs both.
+  if (error instanceof AggregateError && error.errors[0] instanceof Error) {
+    const primary = apiError(error.errors[0]);
+    return new HttpError(primary.code, primary.message, {
+      cause: error, ...(primary.errors === undefined ? {} : { errors: primary.errors }),
+    });
+  }
   if (error instanceof RuntimeEntityNotFoundError) return new HttpError(runtimeEntityCodes[error.entity], error.message, { cause: error });
   if (error instanceof RuntimeAdmissionConflictError) return new HttpError(admissionConflictCodes[error.reason], error.message, { cause: error });
   if (error instanceof RuntimeInputError) return fieldError("RUNTIME_INPUT_INVALID", error);
   if (error instanceof CatalogInputError) return fieldError("CATALOG_INPUT_INVALID", error);
-  if (error instanceof ProjectInputError) return fieldError("PROJECT_INPUT_INVALID", error);
   if (error instanceof DatasetEntityNotFoundError) return new HttpError(datasetEntityCodes[error.entity], error.message, { cause: error });
   if (error instanceof MetricsEntityNotFoundError) return new HttpError(metricsEntityCodes[error.entity], error.message, { cause: error });
   if (error instanceof BundleFileError) return new HttpError(bundleFileCodes[error.reason], error.message, { cause: error });

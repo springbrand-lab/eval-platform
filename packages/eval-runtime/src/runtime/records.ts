@@ -57,21 +57,19 @@ export class RunRecords {
     });
   }
 
-  /** Load each distinct ProjectSample of a Project once, in input order. */
-  async projectSamples(projectId: string, projectSampleIds: readonly string[]): Promise<ReadonlyMap<string, ProjectSample>> {
-    const ids = [...new Set(projectSampleIds)];
-    const samples = ids.length === 0 ? [] : await this.#plans.getProjectSamples(projectId, ids);
-    if (samples.length !== ids.length) throw new Error("Plan reader returned an incomplete ProjectSample batch");
-    const byId = new Map<string, ProjectSample>();
-    ids.forEach((projectSampleId, index) => {
+  /** Load distinct ProjectSamples of a Project, in input order. */
+  async projectSamples(projectId: string, projectSampleIds: readonly string[]): Promise<readonly ProjectSample[]> {
+    if (projectSampleIds.length === 0) return [];
+    const samples = await this.#plans.getProjectSamples(projectId, projectSampleIds);
+    if (samples.length !== projectSampleIds.length) throw new Error("Plan reader returned an incomplete ProjectSample batch");
+    return projectSampleIds.map((projectSampleId, index) => {
       const sample = samples[index];
       if (!sample) throw new RuntimeEntityNotFoundError("project-sample", projectSampleId);
       if (sample.projectSampleId !== projectSampleId || sample.projectId !== projectId) {
         throw new Error(`Plan reader returned ProjectSample ${sample.projectSampleId} for ${projectSampleId}`);
       }
-      byId.set(projectSampleId, sample);
+      return sample;
     });
-    return byId;
   }
 
   /** Load each distinct ProjectSample once and return a lookup for these Project Samplings. */
@@ -84,7 +82,8 @@ export class RunRecords {
         throw new Error(`Sampling ${record.samplingId} does not belong to project ${projectId}`);
       }
     }
-    const byId = await this.projectSamples(projectId, records.map((record) => record.projectSampleId));
+    const samples = await this.projectSamples(projectId, [...new Set(records.map((record) => record.projectSampleId))]);
+    const byId = new Map(samples.map((sample) => [sample.projectSampleId, sample]));
     return (record) => {
       const sample = byId.get(record.projectSampleId);
       if (!sample) throw new Error(`ProjectSample ${record.projectSampleId} was not loaded for Sampling ${record.samplingId}`);

@@ -25,7 +25,6 @@ const errorDefinitions = {
   AGENT_CONFIG_FROZEN: { status: 409, message: "Agent Config is a frozen Project copy and cannot be changed" },
 
   PROJECT_NOT_FOUND: { status: 404, message: "Project not found" },
-  PROJECT_INPUT_INVALID: { status: 400, message: "Project input is invalid" },
   PROJECT_BUSY: { status: 409, message: "Project already has an unfinished Run" },
   PROJECT_IDEMPOTENCY_CONFLICT: { status: 409, message: "Idempotency key was used to create a different Project" },
   PROJECT_NO_ACTIVE_RUN: { status: 409, message: "Project has no unfinished Run" },

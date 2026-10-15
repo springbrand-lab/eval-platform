@@ -1,8 +1,8 @@
 import type { EvaluationRecord, RunSnapshot } from "@eval-platform/eval-contracts";
 import { toRunSnapshot } from "@eval-platform/eval-runtime";
-import type { EvalDb } from "./client.js";
+import { READ_SNAPSHOT, type EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
-import { projectExists, READ_SNAPSHOT } from "./project-plans.js";
+import { projectExists } from "./project-plans.js";
 import { readEvaluations, readRunRecords, readSamplings, requireMembers, type RecordReader } from "./run-records.js";
 
 export interface ProjectRunView {
@@ -25,8 +25,8 @@ export async function readRunView(reader: RecordReader, runId: string, scope: Ru
   const evaluationRows = await readEvaluations(reader, record.evaluationIds, scope.ownerUserId);
   const missing = (kind: string) => (id: string) => new Error(`Run ${runId} is missing ${kind} ${id}`);
   const members = requireMembers(samplingRows, record.samplingIds, missing("Sampling"));
-  const judges = requireMembers(evaluationRows, record.evaluationIds, missing("Evaluation"));
-  return { run: toRunSnapshot(record, members, judges), evaluations: judges };
+  const evaluationRecords = requireMembers(evaluationRows, record.evaluationIds, missing("Evaluation"));
+  return { run: toRunSnapshot(record, members, evaluationRecords), evaluations: evaluationRecords };
 }
 
 export function createPostgresProjectRunReader(db: EvalDb, ownerUserId: string) {

@@ -91,7 +91,8 @@ function expectedSamples(query: MetricsQuery, facts: MetricsFacts, bindings: Rea
   return query.samplingId === undefined ? [...bindings.keys()] : undefined;
 }
 
-function prepareFacts(facts: MetricsFacts, query: MetricsQuery) {
+/** Rejects source facts that contradict the plan, the query scope or each other. */
+function validateFacts(facts: MetricsFacts, query: MetricsQuery) {
   const { plan } = facts;
   const projectId = query.projectId;
   if (plan.project.projectId !== projectId) throw new MetricsSourceError("Source returned the wrong Project");
@@ -128,6 +129,12 @@ function prepareFacts(facts: MetricsFacts, query: MetricsQuery) {
   for (const evaluation of facts.evaluations) {
     if (!samplingById.has(evaluation.samplingId)) throw new MetricsSourceError(`Missing Sampling for Evaluation ${evaluation.evaluationId}`);
   }
+  return { sampleById, runById };
+}
+
+function prepareFacts(facts: MetricsFacts, query: MetricsQuery) {
+  const { plan } = facts;
+  const { sampleById, runById } = validateFacts(facts, query);
   const selectedRuns = query.runIds?.map((runId) => {
     const run = runById.get(runId);
     if (!run) throw new MetricsEntityNotFoundError("run", runId);

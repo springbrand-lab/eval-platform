@@ -1,5 +1,6 @@
 import type {
   AgentConfigRef,
+  EvaluationPlan,
   EvaluationRecord,
   ProjectPlan,
   RunHandle,
@@ -18,7 +19,7 @@ import {
   RuntimeRunIdentityConflictError,
 } from "./errors.js";
 import { requireEvaluationPrompt } from "./evaluation.js";
-import { requireDistinctIds, requireIdentifier } from "./input.js";
+import { requireDistinctIds, requireIdentifier, requireObject } from "./input.js";
 import type {
   EvalRunAdmission,
   EvalRunAdmissionDependencies,
@@ -33,11 +34,13 @@ import type { RuntimeRunPlanDigests, RuntimeRunRecord, RuntimeStore, SamplingSta
 /** The immutable caller intent bound to one idempotency key. */
 type RunRequestFacts = Omit<RunRequest, "idempotencyKey">;
 
+/** The ProjectPlan contract sets `evaluation` and `evaluationPlanDigest` together. */
+type EvaluatingProjectPlan = ProjectPlan & { readonly evaluation: EvaluationPlan; readonly evaluationPlanDigest: string };
+
 /** A Project plan that may run the requested operation. */
-interface AdmissionPlan {
-  readonly plan: ProjectPlan;
-  readonly planDigests: RuntimeRunPlanDigests;
-}
+type AdmissionPlan =
+  | { readonly operation: "execution"; readonly plan: ProjectPlan }
+  | { readonly operation: "pipeline" | "evaluation"; readonly plan: EvaluatingProjectPlan };
 
 /** Validated targets with the current facts they replace or evaluate. */
 interface RunWork {
@@ -78,7 +81,8 @@ export class RunAdmission implements EvalRunAdmission {
   /** Expand a selector inside the Project snapshot into the fixed targets a submit must carry. */
   async preview(request: RunPreviewRequest): Promise<RunPreview> {
     const { projectId, operation, selector } = requirePreviewRequest(request);
-    const { plan, planDigests } = await this.#plan(projectId, operation);
+    const admitted = await this.#plan(projectId, operation);
+    const { plan } = admitted;
     const targets = await this.#expand(plan, operation, selector);
     const { samples, replaced, samplings } = await this.#work(plan, operation, targets);
     const executes = operation !== "evaluation";
@@ -93,8 +97,8 @@ export class RunAdmission implements EvalRunAdmission {
       replacedSamplingCount: executes ? replaced.length + samplings.length : 0,
       newSamplingCount,
       evaluationCount: operation === "pipeline" ? newSamplingCount : operation === "evaluation" ? samplings.length : 0,
-      executionPlanDigest: planDigests.execution,
-      evaluationPlanDigest: planDigests.evaluation ?? null,
+      executionPlanDigest: plan.executionPlanDigest,
+      evaluationPlanDigest: admitted.operation === "execution" ? null : admitted.plan.evaluationPlanDigest,
     };
   }
 
@@ -126,7 +130,9 @@ export class RunAdmission implements EvalRunAdmission {
     }
 
     const { projectId, operation, targets } = facts;
-    const { plan, planDigests } = await this.#plan(projectId, operation);
+    const admitted = await this.#plan(projectId, operation);
+    const { plan } = admitted;
+    const planDigests = planDigestsOf(admitted);
     const { samples, replaced, samplings } = await this.#work(plan, operation, targets);
     const subjectAgent = plan.execution.harness.agentConfig;
     const created = operation === "evaluation" ? [] : [
@@ -137,10 +143,9 @@ export class RunAdmission implements EvalRunAdmission {
       ...samplings.map((sampling) => this.#createSampling(projectId, sampling.projectSampleId, subjectAgent)),
     ];
     const runSamplings = operation === "evaluation" ? samplings : created;
-    const evaluator = plan.evaluation?.evaluationHarness.agentConfig;
-    const evaluations = evaluator && operation !== "execution"
-      ? runSamplings.map(({ samplingId }) => this.#createEvaluation(samplingId, evaluator))
-      : [];
+    const evaluations = admitted.operation === "execution" ? [] : runSamplings.map(({ samplingId }) => (
+      this.#createEvaluation(samplingId, admitted.plan.evaluation.evaluationHarness.agentConfig)
+    ));
     const run: RuntimeRunRecord = {
       runId: this.#idFactory(),
       projectId,
@@ -166,14 +171,14 @@ export class RunAdmission implements EvalRunAdmission {
   async #plan(projectId: string, operation: RunOperation): Promise<AdmissionPlan> {
     const plan = await this.#plans.getProjectPlan(projectId);
     if (!plan) throw new RuntimeEntityNotFoundError("project", projectId);
-    if (operation === "execution") return { plan, planDigests: { execution: plan.executionPlanDigest } };
-    if (!plan.evaluation || plan.evaluationPlanDigest === null) {
+    if (operation === "execution") return { operation, plan };
+    if (!hasEvaluationPlan(plan)) {
       throw new RuntimeAdmissionConflictError(
         "evaluation-plan-required",
         `Project ${projectId} needs an evaluation plan before ${operation}`,
       );
     }
-    return { plan, planDigests: { execution: plan.executionPlanDigest, evaluation: plan.evaluationPlanDigest } };
+    return { operation, plan };
   }
 
   /** Expand inside the Project snapshot; evaluation keeps only successful current Samplings. */
@@ -237,16 +242,12 @@ export class RunAdmission implements EvalRunAdmission {
         );
       }
     }
-    const byId = await this.#records.projectSamples(projectId, [
+    const involved = await this.#records.projectSamples(projectId, [...new Set([
       ...targets.projectSampleIds,
       ...samplings.map(({ projectSampleId }) => projectSampleId),
-    ]);
-    if (operation !== "execution") for (const sample of byId.values()) requireEvaluationPrompt(sample);
-    const samples = targets.projectSampleIds.map((projectSampleId) => {
-      const sample = byId.get(projectSampleId);
-      if (!sample) throw new RuntimeEntityNotFoundError("project-sample", projectSampleId);
-      return sample;
-    });
+    ])]);
+    if (operation !== "execution") for (const sample of involved) requireEvaluationPrompt(sample);
+    const samples = involved.slice(0, targets.projectSampleIds.length);
     const replaced = operation === "evaluation" || samples.length === 0
       ? []
       : await this.#store.listProjectSamplings(projectId, targets.projectSampleIds);
@@ -283,6 +284,15 @@ export class RunAdmission implements EvalRunAdmission {
       attempts: [],
     };
   }
+}
+
+function hasEvaluationPlan(plan: ProjectPlan): plan is EvaluatingProjectPlan {
+  return plan.evaluation !== null;
+}
+
+function planDigestsOf(admitted: AdmissionPlan): RuntimeRunPlanDigests {
+  const execution = admitted.plan.executionPlanDigest;
+  return admitted.operation === "execution" ? { execution } : { execution, evaluation: admitted.plan.evaluationPlanDigest };
 }
 
 function requirePreviewRequest(request: RunPreviewRequest): RunPreviewRequest {
@@ -326,12 +336,6 @@ function requireIds(ids: unknown, field: string): string[] {
   for (const id of ids) requireIdentifier(id, field);
   requireDistinctIds(ids, field);
   return [...ids];
-}
-
-function requireObject(value: unknown, field: string): void {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new RuntimeInputError(`${field} must be an object`, field);
-  }
 }
 
 function requestFingerprint(facts: RunRequestFacts, planDigests: RuntimeRunPlanDigests): Promise<string> {

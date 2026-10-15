@@ -1,16 +1,16 @@
 import type {
   AgentConfigRef,
-  AgentResourceCollection,
   AgentResourceCompleteness,
   AgentResourceScope,
   AgentRole,
   AgentStatus,
   ArtifactRef,
+  EvaluationOutputSchemaRef,
   SamplingStageState,
   SamplingStatus,
   TrajectoryRef,
 } from "@eval-platform/eval-contracts";
-import type { NumericOutputSummary } from "../evaluators/model.js";
+import type { EvaluationValidationStatus, NumericSchemaType } from "../evaluators/model.js";
 
 export interface MetricNumber {
   readonly value: number | null;
@@ -133,13 +133,6 @@ export interface ResourceStatistics {
   readonly diagnostics: readonly ResourceDiagnostic[];
 }
 
-export interface ResourceInput {
-  readonly ownerUserId: string;
-  readonly collection: AgentResourceCollection | undefined;
-  /** The Attempt reached SP, so a missing collection is a gap rather than nothing to collect. */
-  readonly submitted?: boolean;
-}
-
 export interface AttemptMetric {
   readonly attemptId: string;
   readonly attemptNumber: number;
@@ -198,6 +191,31 @@ export interface MetricCounts {
   /** Current results in scope. */
   readonly samplings: number;
   readonly evaluations: number;
+}
+
+export type NumericMissingReason = "not-succeeded" | "invalid-output" | "unavailable-output" | "absent";
+
+export interface NumericObservationSummary {
+  readonly jsonPointer: string;
+  readonly schemaType: NumericSchemaType;
+  /** Values; an array field can yield several per evaluation. */
+  readonly observationCount: number;
+  readonly contributingEvaluationCount: number;
+  readonly missingEvaluationCount: number;
+  readonly summary: NumericSummary;
+  readonly coverage: AgentResourceCompleteness;
+  /** Why evaluations in scope did not contribute; only non-zero reasons. */
+  readonly diagnostics: readonly { readonly reason: NumericMissingReason; readonly evaluations: number }[];
+}
+
+export interface NumericOutputSummary {
+  /** The locked Project Schema; null without an evaluation plan. */
+  readonly schema: EvaluationOutputSchemaRef | null;
+  readonly coverage: AgentResourceCompleteness;
+  readonly evaluations: number;
+  readonly validation: Readonly<Record<EvaluationValidationStatus, number>>;
+  /** Schema-declared numeric fields in Schema order, then observed fields the static walk cannot name (map keys, recursion). */
+  readonly fields: readonly NumericObservationSummary[];
 }
 
 /** Every field is recomputed from the raw records in scope, never from child summaries. */

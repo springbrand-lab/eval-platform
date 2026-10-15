@@ -207,7 +207,7 @@ Runtime 只用 Project 计划中冻结副本的 `AgentConfigRef` 调用 Eval SP�
 4. 复核计划摘要；pipeline/evaluation 要求评估计划已填写；
 5. 复核目标 ProjectSample 属于 Project；evaluation 复核目标仍执行成功；execution/pipeline 复核被替换集合仍等于目标的当前 Sampling；
 6. execution/pipeline 删除被替换 Sampling 的评估、Run 关联和 Sampling；evaluation 只删除目标 Sampling 的当前评估及其 Run 关联；
-7. 写入 key ledger、新 Run、新 Sampling、新 EvaluationRecord 和 Run 关联；
+7. 写入新 Run（Project 内递增 `sequence`，`(project_id, idempotency_key)` 唯一）、新 Sampling、新 EvaluationRecord 和 Run 关联；
 8. pipeline/evaluation 且评估计划未锁定时写入锁定时间；
 9. 在同一事务内投递 Worker 任务。
 
@@ -241,8 +241,7 @@ Worker `resume(runId)` 先读取 Run，再读取 Project 计划并核对 Run 保
 - `eval_samplings`：`project_sample_id` 与执行事实（含 Attempt 和原始资源快照）；
 - `eval_evaluations`：评估事实（含 Attempt、原始资源快照和原始评估输出）；
 - `eval_runs`：operation、phases、selector、targets、两个计划摘要、`sequence`、幂等键与指纹、停止标志；
-- `eval_run_samplings`、`eval_run_evaluations`：Run 的当前成员；
-- `eval_run_request_keys`：Project 内的 key ledger。
+- `eval_run_samplings`、`eval_run_evaluations`：Run 的当前成员。
 
 组合外键保证 owner、Project、ProjectSample、Sampling、Evaluation 与 Run 的归属。结果替换只删除选中记录及其关联，不级联删除未选中结果。
 

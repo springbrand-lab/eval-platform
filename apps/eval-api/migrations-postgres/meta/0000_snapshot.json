@@ -1,5 +1,5 @@
 {
-  "id": "277ad04b-c7fb-4efc-9d66-f5264851f281",
+  "id": "ffe5aa0f-407b-48ea-a263-11892cb2c191",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -1485,61 +1485,6 @@
           ]
         }
       },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.eval_run_request_keys": {
-      "name": "eval_run_request_keys",
-      "schema": "",
-      "columns": {
-        "owner_user_id": {
-          "name": "owner_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "project_id": {
-          "name": "project_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "idempotency_key": {
-          "name": "idempotency_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "eval_run_request_keys_project_fk": {
-          "name": "eval_run_request_keys_project_fk",
-          "tableFrom": "eval_run_request_keys",
-          "tableTo": "eval_projects",
-          "columnsFrom": [
-            "owner_user_id",
-            "project_id"
-          ],
-          "columnsTo": [
-            "owner_user_id",
-            "project_id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "eval_run_request_keys_project_id_idempotency_key_pk": {
-          "name": "eval_run_request_keys_project_id_idempotency_key_pk",
-          "columns": [
-            "project_id",
-            "idempotency_key"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

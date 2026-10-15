@@ -16,29 +16,26 @@ import {
   idempotencyKeySchema,
   jsonBodyContent,
   notFoundResponse,
+  unique,
 } from "../schemas.js";
 
 const projectSchema = z.custom<Project>();
 const projectViewSchema = z.custom<ProjectView>();
 const observationSchema = z.custom<AgentObservationRef>();
 const params = z.object({ projectId: entityIdSchema });
-const positiveInteger = z.number().int().positive();
-const samplingCountSchema = positiveInteger.max(SAMPLING_COUNT_MAX);
-const unique = (ids: readonly string[]) => new Set(ids).size === ids.length;
+/** A request size limit: the Samplings one ProjectSample creates per execution. */
+const samplingCountSchema = z.number().int().positive().max(SAMPLING_COUNT_MAX);
 
+/** Shape only; concurrency, retry and timeout rules belong to Runtime's plan normalization. */
 const agentPolicy = {
   userAgentId: platformIdSchema,
-  retryPolicy: z.strictObject({
-    maxRestarts: z.number().int().min(0),
-    initialBackoffMs: z.number().int().min(0),
-    maxBackoffMs: z.number().int().min(0),
-  }).exactOptional(),
-  timeoutMs: positiveInteger.exactOptional(),
+  retryPolicy: z.strictObject({ maxRestarts: z.number(), initialBackoffMs: z.number(), maxBackoffMs: z.number() }).exactOptional(),
+  timeoutMs: z.number().exactOptional(),
 };
 
 export const evaluationPlanSchema = z.strictObject({
   ...agentPolicy,
-  evaluationConcurrency: positiveInteger,
+  evaluationConcurrency: z.number(),
   outputSchemaId: platformIdSchema,
 });
 
@@ -61,12 +58,11 @@ export const projectCreateSchema = z.strictObject({
   execution: z.strictObject({
     ...agentPolicy,
     framework: z.enum(AGENT_FRAMEWORKS),
-    executionConcurrency: positiveInteger,
+    executionConcurrency: z.number(),
   }),
   evaluation: evaluationPlanSchema.exactOptional(),
   run: z.strictObject({ operation: z.enum(["execution", "pipeline"]) }),
-}).refine((body) => body.run.operation !== "pipeline" || body.evaluation !== undefined,
-  { path: ["evaluation"], message: "A pipeline Run requires an evaluation plan" });
+});
 
 export const list = createRoute({
   method: "get",
@@ -87,7 +83,7 @@ export const create = createRoute({
   middleware: [jsonBody(PROJECT_BODY_BYTES)],
   request: { body: jsonBodyContent(projectCreateSchema) },
   responses: {
-    201: jsonContent(responseSchema(z.object({ project: projectSchema, run: z.custom<RunHandle>() })), "Created Project and its first Run"),
+    201: jsonContent(responseSchema(z.object({ project: projectSchema, run: z.custom<RunHandle>().nullable() })), "Created or replayed Project and its first Run"),
     ...bodyErrorResponses,
     ...notFoundResponse,
     ...conflictResponse,

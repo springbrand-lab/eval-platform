@@ -21,7 +21,7 @@ import { ProjectRunStopConflictError } from "./errors.js";
 import { createPostgresProjectPlanReader, createPostgresWorkerProjectPlanReader } from "./project-plans.js";
 import { createPostgresProjectRunReader } from "./run-view.js";
 import { createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore } from "./runtime.js";
-import { data as dataTable, datasets as datasetsTable, evaluations, projectEvaluationPlans, runRequestKeys, runs, samplings } from "./schema.js";
+import { data as dataTable, datasets as datasetsTable, evaluations, projectEvaluationPlans, runs, samplings } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
 import { buildCommand, makeData, release, seedProject, settle } from "./test-fixtures.js";
 
@@ -92,11 +92,11 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
       const { datasetService } = stores();
       const other = stores("user-B").datasetService;
       const dataset = await datasetService.createDataset({ name: "shared tasks" });
-      const record = await datasetService.createData({ userPrompt: "build a page", evalPrompt: "judge", extra: { nullable: null } });
+      const record = await datasetService.createData({ userPrompt: "build a page", evalPrompt: "evaluation", extra: { nullable: null } });
       const another = await datasetService.createDataset({ name: "another shared set" });
       await datasetService.attachData(dataset.datasetId, [record.dataId]);
       await datasetService.attachData(another.datasetId, [record.dataId, record.dataId]);
-      await datasetService.updateData(record.dataId, { userPrompt: "updated", evalPrompt: "  judge the result  " });
+      await datasetService.updateData(record.dataId, { userPrompt: "updated", evalPrompt: "  evaluation the result  " });
       expect((await datasetService.listData(another.datasetId))[0]).toEqual(await datasetService.getData(record.dataId));
       const foreignDataset = await other.createDataset({ name: "other user's set" });
       expect(await other.getDataset(another.datasetId)).toBeNull();
@@ -196,7 +196,6 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
       await expect(store.admitRun(replay)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
       // Runs are never deleted; the replaced Run simply has no current members.
       expect(await store.getRun(command.run.runId)).toMatchObject({ runId: command.run.runId, samplingIds: [] });
-      expect((await database.db.select({ n: count() }).from(runRequestKeys))[0]!.n).toBe(2);
     });
 
     it("admits one Run for concurrent same-key requests across Stores", async () => {
@@ -365,19 +364,19 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
       const { store } = stores();
       const { command } = await admit({ operation: "pipeline" });
       const initial = command.samplings[0]!;
-      const judge = command.evaluations[0]!;
+      const evaluation = command.evaluations[0]!;
       const running: Sampling = { ...initial, subjectChatId: "subject-chat", execution: { status: "running" } };
       await store.updateSampling(running, initial);
       await expect(store.updateSampling({ ...initial, execution: { status: "failed" } }, initial)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
       await expect(store.updateSampling(running, { ...running, projectSampleId: "other" })).rejects.toBeInstanceOf(RuntimeRecordConflictError);
       expect(await store.getSampling(initial.samplingId)).toEqual(running);
-      const judged: EvaluationRecord = { ...judge, chatId: "judge-chat", status: { status: "running" } };
-      await store.updateEvaluation(judged, judge);
-      await expect(store.updateEvaluation({ ...judge, status: { status: "failed" } }, judge)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
+      const updated: EvaluationRecord = { ...evaluation, chatId: "evaluator-chat", status: { status: "running" } };
+      await store.updateEvaluation(updated, evaluation);
+      await expect(store.updateEvaluation({ ...evaluation, status: { status: "failed" } }, evaluation)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
       const foreign = stores("user-B").store;
-      expect(await foreign.getEvaluation(judge.evaluationId)).toBeNull();
+      expect(await foreign.getEvaluation(evaluation.evaluationId)).toBeNull();
       expect(await foreign.listEvaluations(initial.samplingId)).toEqual([]);
-      await expect(foreign.updateEvaluation(judged, judged)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
+      await expect(foreign.updateEvaluation(updated, updated)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
     });
   });
 
@@ -470,8 +469,8 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
       expect(await worker.isRunActive(execution.run.runId)).toBe(false);
       const { command: evaluation } = await admit({ operation: "evaluation" });
       expect(await worker.isRunActive(evaluation.run.runId)).toBe(true);
-      const [judge] = await worker.getEvaluations(evaluation.run.evaluationIds);
-      await worker.updateEvaluation({ ...judge!, status: { status: "succeeded" } }, judge!);
+      const [record] = await worker.getEvaluations(evaluation.run.evaluationIds);
+      await worker.updateEvaluation({ ...record!, status: { status: "succeeded" } }, record!);
       expect(await worker.isRunActive(evaluation.run.runId)).toBe(false);
     });
 

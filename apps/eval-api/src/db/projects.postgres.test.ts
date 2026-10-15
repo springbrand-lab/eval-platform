@@ -2,6 +2,7 @@ import { createDatasetService, DatasetEntityNotFoundError, type Data } from "@ev
 import { createMetrics, MetricsEntityNotFoundError } from "@eval-platform/eval-metrics";
 import {
   RuntimeAdmissionConflictError,
+  RuntimeInputError,
   digestExecutionPlan,
   RuntimeEntityNotFoundError,
   RuntimeProjectBusyError,
@@ -23,7 +24,6 @@ import {
   OutputSchemaNotFoundError,
   ProjectEvaluationPlanLockedError,
   ProjectIdempotencyConflictError,
-  ProjectInputError,
 } from "./errors.js";
 import { createPostgresMetricsSource } from "./metrics.js";
 import { createPostgresObservationReader } from "./observation.js";
@@ -122,7 +122,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
 
   async function catalog(owner = OWNER) {
     const { datasets, outputSchemas } = services(owner);
-    const data = await Promise.all([1, 2, 3].map((index) => datasets.createData({ userPrompt: `task ${index}`, evalPrompt: "judge" })));
+    const data = await Promise.all([1, 2, 3].map((index) => datasets.createData({ userPrompt: `task ${index}`, evalPrompt: "evaluation" })));
     const [d1, d2, d3] = data.sort((left, right) => left.dataId.localeCompare(right.dataId)) as [Data, Data, Data];
     const first = await datasets.createDataset({ name: "First", description: "first set" });
     const second = await datasets.createDataset({ name: "Second" });
@@ -153,7 +153,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       execution: { userAgentId: subject, framework: "sp", executionConcurrency: 2, timeoutMs: 60_000 },
       idempotencyKey: "create", run: { operation: "execution" },
     });
-    expect(run.samplingIds).toHaveLength(4);
+    expect(run!.samplingIds).toHaveLength(4);
     const view = (await service.get(project.projectId))!;
     expect(view.project).toEqual(project);
     const [ps1, ps2] = view.projectSamples;
@@ -165,7 +165,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       { datasetId: second.datasetId, name: "Second", kind: "general", projectSampleIds: [ps2!.projectSampleId] },
     ]);
     expect(view.evaluation).toBeNull();
-    expect(view.currentRun).toEqual({ runId: run.runId });
+    expect(view.currentRun).toEqual({ runId: run!.runId });
 
     const [copyBody] = stub.calls.created;
     expect(copyBody).toEqual({
@@ -204,11 +204,11 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       idempotencyKey: "k", run: { operation: "execution" as const },
     };
     await expect(service.create({ ...body, datasets: [{ datasetId: first.datasetId, dataIds: [d3.dataId] }] }))
-      .rejects.toMatchObject({ name: "ProjectInputError", field: "datasets.0.dataIds" });
-    await expect(service.create({ ...body, samplingCounts: { [d3.dataId]: 2 } })).rejects.toBeInstanceOf(ProjectInputError);
-    await expect(service.create({ ...body, idempotencyKey: "k", run: { operation: "pipeline" } })).rejects.toBeInstanceOf(ProjectInputError);
+      .rejects.toMatchObject({ name: "RuntimeInputError", field: "datasets.0.dataIds" });
+    await expect(service.create({ ...body, samplingCounts: { [d3.dataId]: 2 } })).rejects.toBeInstanceOf(RuntimeInputError);
+    await expect(service.create({ ...body, idempotencyKey: "k", run: { operation: "pipeline" } })).rejects.toBeInstanceOf(RuntimeInputError);
     const empty = await datasets.createDataset({ name: "Empty" });
-    await expect(service.create({ ...body, datasets: [{ datasetId: empty.datasetId }] })).rejects.toBeInstanceOf(ProjectInputError);
+    await expect(service.create({ ...body, datasets: [{ datasetId: empty.datasetId }] })).rejects.toBeInstanceOf(RuntimeInputError);
     await expect(services(OTHER).projects.create(body)).rejects.toBeInstanceOf(DatasetEntityNotFoundError);
     await datasets.deleteDataset(second.datasetId);
     await expect(service.create({ ...body, datasets: [{ datasetId: second.datasetId }] })).rejects.toBeInstanceOf(DatasetEntityNotFoundError);
@@ -219,7 +219,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     expect(stub.sp.createAgentConfig).not.toHaveBeenCalled();
     expect(await service.list()).toEqual([]);
     await expect(service.create({ ...body, datasets: [{ datasetId: first.datasetId, dataIds: [d1.dataId, d1.dataId.toUpperCase()] }] }))
-      .rejects.toBeInstanceOf(ProjectInputError);
+      .rejects.toBeInstanceOf(RuntimeInputError);
   });
 
   it("compensates a failed creation: no Project rows remain and SP copies are deleted", async () => {
@@ -272,7 +272,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       expect(replayed).toEqual(created);
       expect(stub.sp.createAgentConfig).toHaveBeenCalledTimes(1);
       await expect(service.create({ ...body, samplingCount: 2 })).rejects.toBeInstanceOf(ProjectIdempotencyConflictError);
-      await expect(service.create({ ...body, run: { operation: "pipeline" } })).rejects.toBeInstanceOf(ProjectInputError);
+      await expect(service.create({ ...body, run: { operation: "pipeline" } })).rejects.toBeInstanceOf(RuntimeInputError);
       expect(await service.list()).toHaveLength(1);
       expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(1);
     });
@@ -315,7 +315,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       expect(orphan).toBeDefined();
       const { project, run } = await services().projects.create(body);
       expect(project).toEqual(orphan);
-      expect(run.samplingIds).toHaveLength(2);
+      expect(run!.samplingIds).toHaveLength(2);
       expect(stub.sp.createAgentConfig).toHaveBeenCalledTimes(1);
       expect(await services().projects.create(body)).toEqual({ project, run });
     });
@@ -351,6 +351,48 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       expect(stub.sp.createAgentConfig).toHaveBeenCalledTimes(1);
     });
 
+    it("replays the creation's own first Run after later Runs and never submits it once other Runs exist", async () => {
+      const body = await creationBody();
+      const s = services();
+      const created = await s.projects.create(body);
+      await settle(s.worker, created.run!.samplingIds, "succeeded");
+      const later = await buildCommand(s.plans, s.runtime, { projectId: created.project.projectId, operation: "execution", idempotencyKey: "later" });
+      await s.runtime.admitRun(later);
+      const replayed = await s.projects.create(body);
+      expect(replayed.project).toEqual(created.project);
+      expect(replayed.run?.runId).toBe(created.run!.runId);
+
+      // The creator committed a second Project but crashed before admission; the user then started a Run.
+      const crashed = { ...body, idempotencyKey: "crashed-create" };
+      const creator = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: { ...s.store, deleteUnrun: async () => null },
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: { preview: planAdmission(OWNER).preview, async submit() { throw new Error("process crashed"); } },
+      });
+      await expect(creator.create(crashed)).rejects.toThrow("process crashed");
+      const orphan = (await s.projects.list()).find((project) => project.projectId !== created.project.projectId)!;
+      await s.runtime.admitRun(await buildCommand(s.plans, s.runtime, { projectId: orphan.projectId, operation: "execution", idempotencyKey: "user-run" }));
+      const runsBefore = (await database.db.select({ n: count() }).from(runs))[0]!.n;
+      expect(await s.projects.create(crashed)).toEqual({ project: orphan, run: null });
+      expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(runsBefore);
+    });
+
+    it("reports a failed compensation together with the admission failure", async () => {
+      const body = await creationBody();
+      const s = services();
+      const service = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch,
+        store: { ...s.store, deleteUnrun: async () => { throw new Error("database unavailable"); } },
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: { preview: planAdmission(OWNER).preview, async submit() { throw new RuntimeProjectBusyError("p", "r"); } },
+      });
+      const failure = await service.create(body).then(() => null, (error: unknown) => error);
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect((failure as AggregateError).errors.map((error: Error) => error.message))
+        .toEqual([expect.stringContaining("unfinished Run"), "database unavailable"]);
+      expect(stub.calls.deleted).toEqual([]);
+    });
+
     it("never resurrects a deleted creation and starts afresh after a compensated failure", async () => {
       const body = await creationBody();
       const failing = services(OWNER, { preview: planAdmission(OWNER).preview, async submit() { throw new RuntimeProjectBusyError("p", "r"); } });
@@ -358,7 +400,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       expect(await services().projects.list()).toEqual([]);
       const { projects: service, worker } = services();
       const { project, run } = await service.create(body);
-      await settle(worker, run.samplingIds, "succeeded");
+      await settle(worker, run!.samplingIds, "succeeded");
       await service.delete(project.projectId);
       await expect(service.create(body)).rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "project" });
       await expect(service.create({ ...body, name: "Other" })).rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "project" });
@@ -427,7 +469,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     })).rejects.toBeInstanceOf(AgentConfigFrozenError);
     expect((await agentConfigs.get(subjectCopy)).id).toBe(subjectCopy);
 
-    await settle(worker, run.samplingIds, "succeeded");
+    await settle(worker, run!.samplingIds, "succeeded");
     const evaluation = await buildCommand(plans, runtime, { projectId: project.projectId, operation: "evaluation" });
     await runtime.admitRun(evaluation);
     expect((await service.get(project.projectId))!.evaluationPlanLockedAt).toEqual(expect.any(String));
@@ -543,7 +585,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     const pipeline = await buildCommand(s.plans, s.runtime, { projectId: seeded.projectId, operation: "pipeline" });
     await s.runtime.admitRun(pipeline);
     const sampling = pipeline.samplings[0]!;
-    const judge = pipeline.evaluations[0]!;
+    const evaluation = pipeline.evaluations[0]!;
     expect(await s.observations.subject(seeded.projectId, sampling.samplingId)).toEqual({
       role: "subject", projectId: seeded.projectId, samplingId: sampling.samplingId, ownerUserId: OWNER, state: "not-started",
     });
@@ -555,11 +597,11 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     expect(await s.observations.subject(seeded.projectId, sampling.samplingId)).toMatchObject({
       chatId: started.subjectChatId, state: "available", ownerUserId: sampling.subjectAgent.ownerUserId,
     });
-    const judged = { ...judge, chatId: crypto.randomUUID(), status: { status: "failed" as const } };
-    await s.runtime.updateEvaluation(judged, judge);
-    expect(await s.observations.evaluator(seeded.projectId, judge.evaluationId)).toEqual({
-      role: "evaluator", projectId: seeded.projectId, samplingId: sampling.samplingId, evaluationId: judge.evaluationId,
-      ownerUserId: judge.evaluator.ownerUserId, chatId: judged.chatId, state: "not-started",
+    const updated = { ...evaluation, chatId: crypto.randomUUID(), status: { status: "failed" as const } };
+    await s.runtime.updateEvaluation(updated, evaluation);
+    expect(await s.observations.evaluator(seeded.projectId, evaluation.evaluationId)).toEqual({
+      role: "evaluator", projectId: seeded.projectId, samplingId: sampling.samplingId, evaluationId: evaluation.evaluationId,
+      ownerUserId: evaluation.evaluator.ownerUserId, chatId: updated.chatId, state: "not-started",
     });
     const other = await seedProject(database.db, OWNER, { datasets: [{ data: [makeData()] }] });
     await expect(s.observations.subject(other.projectId, sampling.samplingId)).rejects.toMatchObject({ entity: "sampling" });
@@ -567,7 +609,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
 
     await s.runtime.admitRun(await buildCommand(s.plans, s.runtime, { projectId: seeded.projectId, operation: "execution", samplingIds: [sampling.samplingId] }));
     await expect(s.observations.subject(seeded.projectId, sampling.samplingId)).rejects.toMatchObject({ entity: "sampling" });
-    await expect(s.observations.evaluator(seeded.projectId, judge.evaluationId)).rejects.toMatchObject({ entity: "evaluation" });
+    await expect(s.observations.evaluator(seeded.projectId, evaluation.evaluationId)).rejects.toMatchObject({ entity: "evaluation" });
   });
 
   it("creates a Project and runs it through the HTTP control plane with the Runtime admission", async () => {

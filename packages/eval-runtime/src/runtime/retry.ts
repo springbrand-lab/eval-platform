@@ -1,6 +1,7 @@
 import type { RetryPolicy } from "@eval-platform/eval-contracts";
 import type { AgentFailureKind } from "../harness/model.js";
 import { RuntimeInputError } from "./errors.js";
+import { requireObject } from "./input.js";
 
 export const DEFAULT_RETRY_POLICY = {
   maxRestarts: 2,
@@ -25,9 +26,7 @@ export interface RetryController {
 }
 
 export function requireRetryPolicy(policy: unknown): asserts policy is RetryPolicy {
-  if (policy === null || typeof policy !== "object" || Array.isArray(policy)) {
-    throw new RuntimeInputError("retryPolicy must be an object", "retryPolicy");
-  }
+  requireObject(policy, "retryPolicy");
   const { maxRestarts, initialBackoffMs, maxBackoffMs } = policy as Partial<Record<keyof RetryPolicy, unknown>>;
   if (typeof maxRestarts !== "number" || !Number.isInteger(maxRestarts) || maxRestarts < 0) {
     throw new RuntimeInputError("retryPolicy.maxRestarts must be a non-negative integer", "retryPolicy.maxRestarts");

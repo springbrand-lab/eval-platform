@@ -24,17 +24,14 @@ export class RunTargetsTooLargeError extends Error {
   }
 }
 
-/** A Project creation or evaluation-plan field is invalid against the current catalog. */
-export class ProjectInputError extends Error {
-  constructor(message: string, readonly field?: string) {
-    super(message);
-    this.name = "ProjectInputError";
-  }
+/** The single bound on Data a Project binds and on target IDs one Run selects. */
+export function requireRunTargetCount(count: number): void {
+  if (count > RUN_TARGET_IDS) throw new RunTargetsTooLargeError();
 }
 
 /** Another creation request already committed a Project under this key; the caller replays it. */
 export class ProjectCreationKeyTakenError extends Error {
-  constructor(readonly key: string) {
+  constructor() {
     super("A Project was already created with this idempotency key");
     this.name = "ProjectCreationKeyTakenError";
   }

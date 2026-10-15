@@ -135,10 +135,10 @@ export async function readRunRecords(
   const ids = selected.map((row) => row.runId);
   const memberships = await reader.select().from(runSamplings).where(inArray(runSamplings.runId, ids))
     .orderBy(runSamplings.runId, runSamplings.position);
-  const judges = await reader.select().from(runEvaluations).where(inArray(runEvaluations.runId, ids))
+  const evaluationMemberships = await reader.select().from(runEvaluations).where(inArray(runEvaluations.runId, ids))
     .orderBy(runEvaluations.runId, runEvaluations.position);
   const samplingIdsByRun = groupIds(memberships, (member) => member.samplingId);
-  const evaluationIdsByRun = groupIds(judges, (judge) => judge.evaluationId);
+  const evaluationIdsByRun = groupIds(evaluationMemberships, (member) => member.evaluationId);
   return selected.map((row) => ({
     runId: row.runId,
     projectId: row.projectId,

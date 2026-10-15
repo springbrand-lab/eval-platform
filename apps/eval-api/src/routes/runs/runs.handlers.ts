@@ -1,8 +1,7 @@
 import { ok } from "@eval-platform/eval-contracts/http";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
-import { RunTargetsTooLargeError } from "../../db/errors.js";
+import { requireRunTargetCount } from "../../db/errors.js";
 import type { AppRouteHandler, OwnerServices } from "../../lib/types.js";
-import { RUN_TARGET_IDS } from "../../limits.js";
 import type * as routes from "./runs.routes.js";
 
 async function requireProject(services: OwnerServices, projectId: string): Promise<void> {
@@ -17,9 +16,7 @@ async function requireProjectRun(services: OwnerServices, projectId: string, run
 
 export const previewRun: AppRouteHandler<typeof routes.previewRun> = async (c) => {
   const preview = await c.var.services.admission.preview({ projectId: c.req.valid("param").projectId, ...c.req.valid("json") });
-  if (preview.targets.projectSampleIds.length + preview.targets.samplingIds.length > RUN_TARGET_IDS) {
-    throw new RunTargetsTooLargeError();
-  }
+  requireRunTargetCount(preview.targets.projectSampleIds.length + preview.targets.samplingIds.length);
   return ok(c, preview);
 };
 

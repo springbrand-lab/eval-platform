@@ -3,10 +3,9 @@ import { MetricsEntityNotFoundError, MetricsSourceError } from "@eval-platform/e
 import type { MetricsFacts, MetricsQuery, MetricsSource } from "@eval-platform/eval-metrics";
 import { planProjectSampleIds, toRunSnapshot, toSamplingSnapshot, type ProjectSample } from "@eval-platform/eval-runtime";
 import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
-import type { EvalDb } from "./client.js";
+import { READ_SNAPSHOT, type EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import {
-  READ_SNAPSHOT,
   readAllProjectSamples,
   readEvaluationOutputSchema,
   readProjectPlan,

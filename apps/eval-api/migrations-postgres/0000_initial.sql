@@ -180,13 +180,6 @@ CREATE TABLE "eval_run_evaluations" (
 	CONSTRAINT "eval_run_evaluations_sampling_uq" UNIQUE("run_id","sampling_id")
 );
 --> statement-breakpoint
-CREATE TABLE "eval_run_request_keys" (
-	"owner_user_id" text NOT NULL,
-	"project_id" text NOT NULL,
-	"idempotency_key" text NOT NULL,
-	CONSTRAINT "eval_run_request_keys_project_id_idempotency_key_pk" PRIMARY KEY("project_id","idempotency_key")
-);
---> statement-breakpoint
 CREATE TABLE "eval_run_samplings" (
 	"owner_user_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -248,7 +241,6 @@ ALTER TABLE "eval_project_samples" ADD CONSTRAINT "eval_project_samples_project_
 ALTER TABLE "eval_run_evaluations" ADD CONSTRAINT "eval_run_evaluations_run_fk" FOREIGN KEY ("owner_user_id","run_id") REFERENCES "public"."eval_runs"("owner_user_id","run_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_run_evaluations" ADD CONSTRAINT "eval_run_evaluations_membership_fk" FOREIGN KEY ("run_id","sampling_id") REFERENCES "public"."eval_run_samplings"("run_id","sampling_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_run_evaluations" ADD CONSTRAINT "eval_run_evaluations_evaluation_fk" FOREIGN KEY ("owner_user_id","evaluation_id","sampling_id") REFERENCES "public"."eval_evaluations"("owner_user_id","evaluation_id","sampling_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "eval_run_request_keys" ADD CONSTRAINT "eval_run_request_keys_project_fk" FOREIGN KEY ("owner_user_id","project_id") REFERENCES "public"."eval_projects"("owner_user_id","project_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_run_samplings" ADD CONSTRAINT "eval_run_samplings_run_fk" FOREIGN KEY ("owner_user_id","run_id") REFERENCES "public"."eval_runs"("owner_user_id","run_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_run_samplings" ADD CONSTRAINT "eval_run_samplings_sampling_fk" FOREIGN KEY ("owner_user_id","sampling_id") REFERENCES "public"."eval_samplings"("owner_user_id","sampling_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "eval_runs" ADD CONSTRAINT "eval_runs_project_fk" FOREIGN KEY ("owner_user_id","project_id") REFERENCES "public"."eval_projects"("owner_user_id","project_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint

@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { ProjectDatasetSnapshot } from "@eval-platform/eval-contracts";
 import { RuntimeInputError } from "../runtime/errors.js";
 import type { ProjectSample } from "../runtime/model.js";
+import { DEFAULT_RETRY_POLICY } from "../runtime/retry.js";
 import {
-  DEFAULT_RETRY_POLICY,
-  digestEvaluationPlan,
   digestExecutionPlan,
+  digestJson,
   normalizeEvaluationPlan,
   normalizeExecutionPlan,
   phasesOf,
@@ -130,12 +130,12 @@ describe("project plan", () => {
       .resolves.not.toBe(first);
   });
 
-  it("digests the evaluation plan independently of object key order", async () => {
+  it("digests an evaluation plan with digestJson independently of object key order", async () => {
     const plan = normalizeEvaluationPlan(evaluation);
-    const digest = await digestEvaluationPlan(plan);
+    const digest = await digestJson(plan);
     const { outputSchema, ...rest } = plan;
-    await expect(digestEvaluationPlan({ outputSchema: { digest: outputSchema.digest, outputSchemaId: outputSchema.outputSchemaId }, ...rest }))
+    await expect(digestJson({ outputSchema: { digest: outputSchema.digest, outputSchemaId: outputSchema.outputSchemaId }, ...rest }))
       .resolves.toBe(digest);
-    await expect(digestEvaluationPlan({ ...plan, evaluationConcurrency: 5 })).resolves.not.toBe(digest);
+    await expect(digestJson({ ...plan, evaluationConcurrency: 5 })).resolves.not.toBe(digest);
   });
 });

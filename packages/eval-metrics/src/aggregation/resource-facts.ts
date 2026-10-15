@@ -1,9 +1,10 @@
 import type { AgentResourceScope, AgentResourceSnapshot, JsonValue } from "@eval-platform/eval-contracts";
 import { equalJson } from "@springbrand/utils";
+import { record, text, type JsonRecord } from "../json.js";
 import type { MetricNumber, ResourceDiagnostic } from "./model.js";
+import { coverage } from "./statistics.js";
 
 export type Stream = ResourceDiagnostic["stream"];
-export type JsonRecord = Readonly<Record<string, JsonValue>>;
 
 export interface FactEntry {
   readonly fact: JsonRecord;
@@ -21,14 +22,6 @@ export interface FactStream {
 export interface OwnedSnapshot {
   readonly ownerUserId: string;
   readonly snapshot: AgentResourceSnapshot;
-}
-
-export function record(value: JsonValue | undefined): JsonRecord | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : undefined;
-}
-
-export function text(value: JsonValue | undefined): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 export function identity(...values: readonly (string | null)[]): string {
@@ -70,7 +63,7 @@ export class ResourceDiagnostics {
     read: (entry: FactEntry) => number | null,
   ): MetricNumber {
     const [first] = entries;
-    if (first === undefined) return { value: complete ? 0 : null, coverage: complete ? "complete" : "unavailable" };
+    if (first === undefined) return { value: complete ? 0 : null, coverage: coverage(complete, false) };
     const values = entries.map(read);
     const available = values.filter((value): value is number => value !== null);
     if (available.length === 0) return { value: null, coverage: "unavailable" };
@@ -79,7 +72,7 @@ export class ResourceDiagnostics {
       this.report("invalid-value", stream, first, `${field} aggregate exceeds the safe number range`);
       return { value: null, coverage: "unavailable" };
     }
-    return { value: total, coverage: complete && available.length === values.length ? "complete" : "partial" };
+    return { value: total, coverage: coverage(complete && available.length === values.length, true) };
   }
 
   list(): readonly ResourceDiagnostic[] {

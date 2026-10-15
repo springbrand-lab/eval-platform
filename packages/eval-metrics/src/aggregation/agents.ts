@@ -5,8 +5,8 @@ import {
   type ExecutionAttempt,
 } from "@eval-platform/eval-contracts";
 import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
-import type { AgentMetricView, AttemptMetric, ResourceInput } from "./model.js";
-import { aggregateResources } from "./resources.js";
+import type { AgentMetricView, AttemptMetric } from "./model.js";
+import { aggregateResources, type ResourceInput } from "./resources.js";
 
 type Attempt = ExecutionAttempt | EvaluationAttempt;
 
@@ -27,14 +27,13 @@ export function attemptResources(ownerUserId: string, attempts: readonly Attempt
 
 /** First valid start to last terminal completion; null while the latest Attempt is not terminal. */
 export function agentSpan(attempts: readonly Attempt[]): Pick<AgentMetricView, "firstStartedAt" | "lastCompletedAt" | "agentDurationMs"> {
-  const ordered = attempts.toSorted((left, right) => left.attemptNumber - right.attemptNumber);
-  const extreme = (values: readonly (string | undefined)[], pick: (left: number, right: number) => boolean) => values
+  const chronological = (values: readonly (string | undefined)[]) => values
     .filter((value): value is string => Number.isFinite(time(value)))
-    .reduce<string | null>((chosen, value) => chosen === null || pick(time(value), time(chosen)) ? value : chosen, null);
-  const firstStartedAt = extreme(ordered.map((attempt) => attempt.startedAt), (left, right) => left < right);
-  const latest = ordered.at(-1);
+    .toSorted((left, right) => time(left) - time(right));
+  const latest = attempts.toSorted((left, right) => left.attemptNumber - right.attemptNumber).at(-1);
+  const firstStartedAt = chronological(attempts.map((attempt) => attempt.startedAt))[0] ?? null;
   const lastCompletedAt = latest && isTerminalAgentStatus(latest.status)
-    ? extreme(ordered.filter((attempt) => isTerminalAgentStatus(attempt.status)).map((attempt) => attempt.completedAt), (left, right) => left > right)
+    ? chronological(attempts.filter((attempt) => isTerminalAgentStatus(attempt.status)).map((attempt) => attempt.completedAt)).at(-1) ?? null
     : null;
   const duration = firstStartedAt === null || lastCompletedAt === null ? null : time(lastCompletedAt) - time(firstStartedAt);
   return { firstStartedAt, lastCompletedAt, agentDurationMs: duration !== null && duration >= 0 ? duration : null };
@@ -50,16 +49,19 @@ function attemptMetric(attemptId: string, attempt: Attempt): AttemptMetric {
   };
 }
 
-function agentView(
+function agentView<Item extends Attempt>(
   base: Pick<AgentMetricView, "role" | "agentConfigRef" | "chatId" | "samplingId" | "evaluationId" | "stage" | "artifacts" | "trajectory">,
-  attempts: readonly AttemptMetric[],
-  raw: readonly Attempt[],
+  attempts: readonly Item[],
+  attemptId: (attempt: Item) => string,
 ): AgentMetricView {
   return {
     ...base,
-    attempts: { count: attempts.length, restarts: Math.max(0, attempts.length - 1), items: attempts },
-    ...agentSpan(raw),
-    resources: aggregateResources(attemptResources(base.agentConfigRef.ownerUserId, raw)),
+    attempts: {
+      count: attempts.length, restarts: Math.max(0, attempts.length - 1),
+      items: attempts.map((attempt) => attemptMetric(attemptId(attempt), attempt)),
+    },
+    ...agentSpan(attempts),
+    resources: aggregateResources(attemptResources(base.agentConfigRef.ownerUserId, attempts)),
   };
 }
 
@@ -68,7 +70,7 @@ export function subjectAgent(sampling: SamplingSnapshot): AgentMetricView {
     role: "subject", agentConfigRef: sampling.subjectAgent, chatId: sampling.subjectChatId ?? null,
     samplingId: sampling.samplingId, evaluationId: null, stage: sampling.execution,
     artifacts: sampling.artifacts ?? [], trajectory: sampling.trajectory ?? null,
-  }, sampling.executionAttempts.map((attempt) => attemptMetric(attempt.executionAttemptId, attempt)), sampling.executionAttempts);
+  }, sampling.executionAttempts, (attempt) => attempt.executionAttemptId);
 }
 
 export function evaluatorAgent(record: EvaluationRecord): AgentMetricView {
@@ -76,5 +78,5 @@ export function evaluatorAgent(record: EvaluationRecord): AgentMetricView {
     role: "evaluator", agentConfigRef: record.evaluator, chatId: record.chatId ?? null,
     samplingId: record.samplingId, evaluationId: record.evaluationId, stage: record.status,
     artifacts: record.output?.artifacts ?? [], trajectory: record.output?.trajectory ?? null,
-  }, record.attempts.map((attempt) => attemptMetric(attempt.evaluationAttemptId, attempt)), record.attempts);
+  }, record.attempts, (attempt) => attempt.evaluationAttemptId);
 }

@@ -291,16 +291,6 @@ export const runs = pgTable("eval_runs", {
   check("eval_runs_sequence_ck", sql`${table.sequence} > 0`),
 ]);
 
-/** Project-scoped immutable idempotency ledger. */
-export const runRequestKeys = pgTable("eval_run_request_keys", {
-  ownerUserId: text("owner_user_id").notNull(),
-  projectId: text("project_id").notNull(),
-  idempotencyKey: text("idempotency_key").notNull(),
-}, (table) => [
-  primaryKey({ columns: [table.projectId, table.idempotencyKey] }),
-  foreignKey({ name: "eval_run_request_keys_project_fk", columns: [table.ownerUserId, table.projectId], foreignColumns: [projects.ownerUserId, projects.projectId] }),
-]);
-
 export const runSamplings = pgTable("eval_run_samplings", {
   ownerUserId: text("owner_user_id").notNull(),
   runId: text("run_id").notNull(),

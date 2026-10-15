@@ -1,5 +1,6 @@
 import type { JsonValue } from "@eval-platform/eval-contracts";
 import { canonicalJsonBytes } from "@springbrand/utils";
+import { record, text } from "../json.js";
 import type {
   CoveredNumericSummary,
   MetricNumber,
@@ -8,8 +9,8 @@ import type {
   ToolMetric,
   TrajectorySummary,
 } from "./model.js";
-import { identity, record, text, type FactEntry, type FactStream, type ResourceDiagnostics } from "./resource-facts.js";
-import { summarizeNumbers } from "./statistics.js";
+import { identity, type FactEntry, type FactStream, type ResourceDiagnostics } from "./resource-facts.js";
+import { coverage, summarizeNumbers } from "./statistics.js";
 
 type OperationKind = "generation" | "turn" | "tool";
 type OperationStatus = "completed" | "failed" | "cancelled" | "inProgress" | "unknown";
@@ -44,6 +45,11 @@ interface ObservedOperation {
   readonly consistent: boolean;
 }
 
+/** Operations are identified within their session; parentOperationId uses the same scope. */
+function operationKey(sessionId: string, operationId: string): string {
+  return identity(sessionId, operationId);
+}
+
 /** Model requests and trajectory metrics from telemetry events merged across Attempts and pages. */
 export function aggregateTelemetry(
   stream: FactStream,
@@ -59,7 +65,7 @@ export function aggregateTelemetry(
   return {
     modelRequests: operationStatistics(ofKind("generation"), complete),
     trajectory: {
-      coverage: complete ? "complete" : observed.length > 0 ? "partial" : "unavailable",
+      coverage: coverage(complete, observed.length > 0),
       turns: operationStatistics(ofKind("turn"), complete),
       tools: operationStatistics(tools, complete),
       byTool: [...toolGroups.entries()]
@@ -100,7 +106,7 @@ function groupOperations(
       diagnostics.report("missing-identity", "telemetryEvents", entry, "Telemetry record has no operation identity");
       continue;
     }
-    const key = identity(sessionId, operationId);
+    const key = operationKey(sessionId, operationId);
     if (conflicting.has(key)) continue;
     const existing = operations.get(key);
     if (existing && existing.kind !== kind) {
@@ -161,7 +167,7 @@ function inspectOperation(operation: OperationEvents, diagnostics: ResourceDiagn
     status,
     duration: outcomes.size > 1 ? null : duration,
     toolName: toolNames.size === 1 ? [...toolNames][0] ?? null : null,
-    parentKey: parents.size === 1 ? identity(operation.sessionId, [...parents][0]!) : null,
+    parentKey: parents.size === 1 ? operationKey(operation.sessionId, [...parents][0]!) : null,
     first,
     start,
     terminal,
@@ -191,10 +197,7 @@ function operationDuration(
 function operationStatistics(observed: readonly ObservedOperation[], complete: boolean): OperationStatistics {
   const count = (status: OperationStatus): number => observed.filter((item) => item.status === status).length;
   return {
-    count: {
-      value: observed.length > 0 || complete ? observed.length : null,
-      coverage: complete ? "complete" : observed.length > 0 ? "partial" : "unavailable",
-    },
+    count: { value: observed.length > 0 || complete ? observed.length : null, coverage: coverage(complete, observed.length > 0) },
     completed: count("completed"),
     failed: count("failed"),
     cancelled: count("cancelled"),
@@ -212,8 +215,7 @@ function bodyLength(value: JsonValue | undefined): number | null {
 
 function lengthSummary(values: readonly (number | null)[], complete: boolean): CoveredNumericSummary {
   const summary = summarizeNumbers(values);
-  const coverage = complete && summary.missing === 0 ? "complete" : summary.count > 0 ? "partial" : "unavailable";
-  return { ...summary, coverage };
+  return { ...summary, coverage: coverage(complete && summary.missing === 0, summary.count > 0) };
 }
 
 function toolMetric(toolName: string | null, operations: readonly ObservedOperation[], complete: boolean): ToolMetric {
@@ -221,11 +223,9 @@ function toolMetric(toolName: string | null, operations: readonly ObservedOperat
   return {
     toolName,
     ...operationStatistics(operations, complete),
-    inputLength: lengthSummary(operations.map((operation) => (
-      operation.start?.fact.type === "tool.started" ? bodyLength(payload(operation.start)?.input) : null
-    )), complete),
+    inputLength: lengthSummary(operations.map((operation) => bodyLength(payload(operation.start)?.input)), complete),
     outputLength: lengthSummary(operations.map((operation) => {
-      const finished = operation.terminal?.fact.type === "tool.finished" ? payload(operation.terminal) : undefined;
+      const finished = payload(operation.terminal);
       return bodyLength(finished?.output) ?? bodyLength(finished?.response);
     }), complete),
   };
@@ -245,41 +245,40 @@ function owningTurn(operation: ObservedOperation, byKey: ReadonlyMap<string, Obs
   return null;
 }
 
+/** Operations of one kind with the Turn each resolves to, and how many resolve to none. */
+function linkToTurns(observed: readonly ObservedOperation[], kind: "tool" | "generation") {
+  const byKey = new Map(observed.map((operation) => [operation.key, operation]));
+  const linked = new Map<ObservedOperation, string>();
+  let unlinked = 0;
+  for (const operation of observed) {
+    if (operation.kind !== kind) continue;
+    const turn = owningTurn(operation, byKey);
+    if (turn === null) unlinked += 1;
+    else linked.set(operation, turn);
+  }
+  return { linked, unlinked };
+}
+
 function nonToolTurns(
   observed: readonly ObservedOperation[],
   complete: boolean,
   diagnostics: ResourceDiagnostics,
 ): Pick<TrajectorySummary, "nonToolTurns" | "nonToolTurnTokens" | "unlinkedOperations"> {
-  const byKey = new Map(observed.map((operation) => [operation.key, operation]));
   const turns = observed.filter((operation) => operation.kind === "turn");
-  const toolTurns = new Set<string>();
-  let unlinkedTools = 0;
-  let toolCount = 0;
-  for (const operation of observed) {
-    if (operation.kind !== "tool") continue;
-    toolCount += 1;
-    const turn = owningTurn(operation, byKey);
-    if (turn === null) unlinkedTools += 1;
-    else toolTurns.add(turn);
-  }
+  const tools = linkToTurns(observed, "tool");
+  const generations = linkToTurns(observed, "generation");
+  const toolTurns = new Set(tools.linked.values());
   const nonTool = new Set(turns.filter((turn) => !toolTurns.has(turn.key)).map((turn) => turn.key));
   const count: MetricNumber = turns.length === 0
-    ? { value: complete ? 0 : null, coverage: complete ? "complete" : "unavailable" }
-    : toolCount > 0 && unlinkedTools === toolCount
+    ? { value: complete ? 0 : null, coverage: coverage(complete, false) }
+    : tools.unlinked > 0 && tools.linked.size === 0
       ? { value: null, coverage: "unavailable" }
-      : { value: nonTool.size, coverage: complete && unlinkedTools === 0 ? "complete" : "partial" };
-  const generations: FactEntry[] = [];
-  let unlinkedGenerations = 0;
-  for (const operation of observed) {
-    if (operation.kind !== "generation") continue;
-    const turn = owningTurn(operation, byKey);
-    if (turn === null) unlinkedGenerations += 1;
-    else if (nonTool.has(turn)) generations.push(operation.terminal ?? operation.first);
-  }
-  const tokensComplete = count.coverage === "complete" && unlinkedGenerations === 0;
+      : { value: nonTool.size, coverage: coverage(complete && tools.unlinked === 0, true) };
+  const nonToolGenerations = [...generations.linked].filter(([, turn]) => nonTool.has(turn)).map(([operation]) => operation);
+  const tokensComplete = count.coverage === "complete" && generations.unlinked === 0;
   const tokens = (field: "inputTokens" | "outputTokens" | "totalTokens"): MetricNumber => count.value === null
     ? { value: null, coverage: "unavailable" }
-    : diagnostics.sum(generations, tokensComplete, "telemetryEvents", field, true, (entry) => (
+    : diagnostics.sum(nonToolGenerations.map((operation) => operation.terminal ?? operation.first), tokensComplete, "telemetryEvents", field, true, (entry) => (
       entry.fact.type === "generation.finished"
         ? diagnostics.number(entry, "telemetryEvents", record(entry.fact.payload)?.[field], field, true)
         : null
@@ -287,6 +286,6 @@ function nonToolTurns(
   return {
     nonToolTurns: count,
     nonToolTurnTokens: { input: tokens("inputTokens"), output: tokens("outputTokens"), total: tokens("totalTokens") },
-    unlinkedOperations: { tools: unlinkedTools, generations: unlinkedGenerations },
+    unlinkedOperations: { tools: tools.unlinked, generations: generations.unlinked },
   };
 }

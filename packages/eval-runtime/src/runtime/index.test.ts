@@ -11,7 +11,7 @@ import type {
   RunTargets,
 } from "@eval-platform/eval-contracts";
 import { isPendingSamplingStatus } from "@eval-platform/eval-contracts";
-import { digestEvaluationPlan, digestExecutionPlan } from "../plan/index.js";
+import { digestExecutionPlan, digestJson } from "../plan/index.js";
 import type {
   AgentHandle,
   AgentSubmission,
@@ -251,7 +251,7 @@ function makePlans(
         execution: plan,
         executionPlanDigest: await digestExecutionPlan({ execution: plan, datasets, samples: currentSamples() }),
         evaluation: evaluationValue,
-        evaluationPlanDigest: evaluationValue && await digestEvaluationPlan(evaluationValue),
+        evaluationPlanDigest: evaluationValue && await digestJson(evaluationValue),
         evaluationPlanLockedAt: lockedAt,
       };
     },

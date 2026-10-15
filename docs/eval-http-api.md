@@ -67,14 +67,14 @@ All `/api/*` routes require the Bearer session and may additionally return `401`
 
 ### Agent Configs
 
-Agent Configs are created, read, edited and deleted in Eval; the independent Eval SP only hosts them. Requests are relayed with the caller's session to Eval SP `/api/user-agent-configs`; bodies are SP's public Agent Config JSON, forwarded unchanged (any JSON object). Project creation and evaluation-plan saving clone the selected Agent Configs into frozen copies (slug `eval-frozen-<uuid>`, name `<name> (frozen)`). A copy counts as frozen when a Project records it (current or retired) or its slug starts with `eval-frozen-`, which also covers an orphan whose Project row was never written. Frozen copies never appear in `GET /api/agent-configs` or `GET /api/agents`, their edit and deletion are refused, and they cannot be selected as the source of a new copy.
+Agent Configs are created, read, edited and deleted in Eval; the independent Eval SP only hosts them. Requests are relayed with the caller's session to Eval SP `/api/user-agent-configs`; bodies are SP's public Agent Config JSON, forwarded unchanged (any JSON object). Project creation and evaluation-plan saving clone the selected Agent Configs into frozen copies (slug `eval-frozen-<uuid>`, name `<name> (frozen)`). A copy counts as frozen when a Project records it (current or retired) or its slug starts with `eval-frozen-`, which also covers an orphan whose Project row was never written. Frozen copies never appear in `GET /api/agent-configs` or `GET /api/agents`, their edit and deletion are refused, and they cannot be selected as the source of a new copy. The `eval-frozen-` prefix is reserved: a `POST` or `PATCH` body whose `slug` starts with it (after trimming, case-insensitive) is `422 REQUEST_VALIDATION_FAILED`.
 
 | Route | Body / result | Domain errors |
 | --- | --- | --- |
 | `GET /api/agent-configs` | SP Agent Config list without frozen copies | Relayed SP errors |
-| `POST /api/agent-configs` | SP create body / `201` SP Agent Config | Relayed SP errors |
+| `POST /api/agent-configs` | SP create body / `201` SP Agent Config | `422 REQUEST_VALIDATION_FAILED` (reserved slug); relayed SP errors |
 | `GET /api/agent-configs/{id}` | SP Agent Config; a frozen copy is readable | Relayed SP errors |
-| `PATCH /api/agent-configs/{id}` | SP update body / SP Agent Config | `409 AGENT_CONFIG_FROZEN`; relayed SP errors |
+| `PATCH /api/agent-configs/{id}` | SP update body / SP Agent Config | `409 AGENT_CONFIG_FROZEN`; `422 REQUEST_VALIDATION_FAILED` (reserved slug); relayed SP errors |
 | `DELETE /api/agent-configs/{id}` | `204` | `409 AGENT_CONFIG_FROZEN`; relayed SP errors |
 | `GET /api/agents?role=subject\|evaluator` | `[{agentConfig:{ownerUserId,userAgentId}, name, role}]`, one entry per role unless `role` is given; frozen copies excluded | Relayed SP errors |
 
@@ -87,7 +87,7 @@ A Project's execution plan, Dataset/Data snapshot and Sampling counts are fixed 
 | Route | Body / result |
 | --- | --- |
 | `GET /api/projects` | Non-deleted `Project[]` (`{projectId, ownerUserId, name, description?, sourceBranch, createdAt}`), newest first |
-| `POST /api/projects` | Creation body below / `201 {project: Project, run: RunHandle}` |
+| `POST /api/projects` | Creation body below / `201 {project: Project, run: RunHandle \| null}` |
 | `GET /api/projects/{projectId}` | `ProjectView` below |
 | `DELETE /api/projects/{projectId}` | `204` |
 | `PUT /api/projects/{projectId}/evaluation-plan` | Evaluation plan body below / `ProjectView` |
@@ -107,17 +107,17 @@ Creation body:
 }
 ```
 
-Evaluation plan body: `{userAgentId, evaluationConcurrency, retryPolicy?, timeoutMs?, outputSchemaId}`. Concurrencies and `timeoutMs` are positive integers; `retryPolicy` is `{maxRestarts, initialBackoffMs, maxBackoffMs}` with non-negative integers and `maxBackoffMs >= initialBackoffMs`.
+Evaluation plan body: `{userAgentId, evaluationConcurrency, retryPolicy?, timeoutMs?, outputSchemaId}`. The route checks only shape and numeric types; Runtime's plan normalization is the single source of the value rules and rejects violations with `400 RUNTIME_INPUT_INVALID`: concurrencies are positive integers, `timeoutMs` is a finite number of at least 1, and `retryPolicy` is `{maxRestarts, initialBackoffMs, maxBackoffMs}` with a non-negative integer `maxRestarts`, non-negative `initialBackoffMs` and `maxBackoffMs >= initialBackoffMs`. The creation service rejects a pipeline first Run without an evaluation plan before cloning any Agent Config.
 
 Creation reads the selected owned, non-deleted Datasets and their current members in one consistent snapshot; a Data shared by several selected Datasets becomes one ProjectSample. It clones the Subject (and Evaluator) Agent Config, stores the snapshot, both plans and the copies in one transaction, then previews and submits the first Run with selector `{all:true}`. If any step fails, nothing remains visible: rows of a Project without a Run are removed and the copies are deleted. Cancelling the form calls no route.
 
-Creation is idempotent per owner and `idempotencyKey`. The Project stores the key and a fingerprint (sha256 of the canonical JSON of the validated body without the key). A request whose key already created a Project is answered before any Agent Config is cloned: with the same body it returns `201` with the same `{project, run}`, first admitting the Run if an earlier request committed the Project but never admitted it; with a different body it is `409 PROJECT_IDEMPOTENCY_CONFLICT`; if that Project was deleted, any body is `404 PROJECT_NOT_FOUND`. A replaying request never removes the Project when its own first-Run admission fails; the error is returned and the Project stays for the next replay. When identical requests race, one creation commits and the others delete their own copies and replay it. After a first-Run admission failure has removed the Project, the same key creates a new Project.
+Creation is idempotent per owner and `idempotencyKey`. The Project stores the key and a fingerprint (sha256 of the canonical JSON of the validated body without the key). A request whose key already created a Project is answered before any Agent Config is cloned: with the same body it returns `201` with the same `{project, run}`. `run` is the creation's own first Run, admitted under the creation key, even when later Runs exist; the creation key never re-submits work. If an earlier request committed the Project but never admitted that Run, the replay admits it only while the Project has no Run at all; once the Project has other Runs, the replay returns `run: null`; with a different body it is `409 PROJECT_IDEMPOTENCY_CONFLICT`; if that Project was deleted, any body is `404 PROJECT_NOT_FOUND`. A replaying request never removes the Project when its own first-Run admission fails; the error is returned and the Project stays for the next replay. When identical requests race, one creation commits and the others delete their own copies and replay it. After a first-Run admission failure has removed the Project, the same key creates a new Project.
 
 `ProjectView` is the fixed plan plus current state: `{project, datasets: [{datasetId, name, description?, kind, projectSampleIds}], execution, executionPlanDigest, evaluation | null, evaluationPlanDigest | null, evaluationPlanLockedAt | null, projectSamples: [{projectSampleId, projectId, dataId, datasetIds, samplingCount, data}], currentRun: {runId, stopRequested?} | null}`. `execution.subjectAgentConfig` and `evaluation.evaluatorAgentConfig` are the Agent Config bodies as frozen; `harness.agentConfig` names the frozen copy. `evaluation.outputSchema` is `{outputSchemaId, digest}`.
 
 | Route | Domain errors |
 | --- | --- |
-| Create | `404 PROJECT_NOT_FOUND` (key of a deleted creation, whatever the body); `409 PROJECT_IDEMPOTENCY_CONFLICT`; `400 PROJECT_INPUT_INVALID` (Data not a current member, override for unselected Data, no Data, more than `RUN_TARGET_IDS` Data, pipeline without evaluation plan); `400 RUNTIME_INPUT_INVALID` (plan values); `404 DATASET_NOT_FOUND`, `OUTPUT_SCHEMA_NOT_FOUND`; `409 AGENT_CONFIG_FROZEN` (a frozen copy selected as source); relayed SP errors; every first-Run admission error of [Run submission](#runs) |
+| Create | `404 PROJECT_NOT_FOUND` (key of a deleted creation, whatever the body); `409 PROJECT_IDEMPOTENCY_CONFLICT`; `400 RUNTIME_INPUT_INVALID` (pipeline without evaluation plan, Data not a current member, override for unselected Data, no Data, plan values such as concurrency, retry policy and timeout); `413 RUN_TARGETS_TOO_LARGE` (more than `RUN_TARGET_IDS` Data); `404 DATASET_NOT_FOUND`, `OUTPUT_SCHEMA_NOT_FOUND`; `409 AGENT_CONFIG_FROZEN` (a frozen copy selected as source); relayed SP errors; every first-Run admission error of [Run submission](#runs) |
 | Detail | `404 PROJECT_NOT_FOUND` |
 | Delete | `404 PROJECT_NOT_FOUND`; `409 PROJECT_BUSY` while a Run is active or its stop is not finalized |
 | Evaluation plan | `404 PROJECT_NOT_FOUND`, `OUTPUT_SCHEMA_NOT_FOUND`; `409 PROJECT_EVALUATION_PLAN_LOCKED`, `AGENT_CONFIG_FROZEN`; `400 RUNTIME_INPUT_INVALID`; relayed SP errors |
@@ -259,7 +259,6 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `EVAL_SP_UNAVAILABLE` | 503 | Eval SP unreachable; retry |
 | `AGENT_CONFIG_FROZEN` | 409 | Edit, deletion or source selection of a frozen Project copy |
 | `PROJECT_NOT_FOUND` | 404 | Unknown, another owner's or soft-deleted Project |
-| `PROJECT_INPUT_INVALID` | 400 | Project creation selection invalid against the catalog |
 | `PROJECT_BUSY` | 409 | New Run key or deletion while a Run is unfinished |
 | `PROJECT_IDEMPOTENCY_CONFLICT` | 409 | Creation key reused with a different body |
 | `PROJECT_NO_ACTIVE_RUN` | 409 | Stop of a finished Run without a stop request |
@@ -273,8 +272,8 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `RUN_STOPPED` | 409 | Runtime refused a stage after a committed stop (Worker side) |
 | `RUN_TARGETS_STALE` | 409 | Submitted targets no longer match the current Samplings |
 | `RUN_TARGETS_EMPTY` | 409 | Selection or targets contain no work |
-| `RUN_TARGETS_TOO_LARGE` | 413 | Expanded selection exceeds `RUN_TARGET_IDS` |
-| `RUNTIME_INPUT_INVALID` | 400 | Run request or plan values rejected by Runtime |
+| `RUN_TARGETS_TOO_LARGE` | 413 | Expanded selection, or the Data a new Project binds, exceeds `RUN_TARGET_IDS` |
+| `RUNTIME_INPUT_INVALID` | 400 | Run request, Project creation selection or plan values rejected (including pipeline creation without an evaluation plan) |
 | `RUNTIME_RECORD_CONFLICT` | 409 | Run records changed concurrently (Runtime persistence) |
 | `RUNTIME_PERSISTENCE_UNCONFIRMED` | 503 | Run records could not be confirmed; retry with the same key |
 | `SAMPLE_EVALUATION_PROMPT_MISSING` | 409 | An evaluated ProjectSample has no `evalPrompt` |

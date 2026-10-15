@@ -1,6 +1,5 @@
 import type {
   AgentConfigSnapshot,
-  EvaluationOutputSchema,
   EvaluationPlan,
   ExecutionPlan,
   HarnessConfig,
@@ -13,11 +12,9 @@ import type {
 import { AGENT_FRAMEWORKS, jsonObjectSchema } from "@eval-platform/eval-contracts";
 import { canonicalJsonBytes, sha256Hex } from "@springbrand/utils";
 import { RuntimeInputError } from "../runtime/errors.js";
-import { requireIdentifier } from "../runtime/input.js";
+import { requireIdentifier, requireObject } from "../runtime/input.js";
 import type { ProjectSample } from "../runtime/model.js";
 import { DEFAULT_RETRY_POLICY, requireRetryPolicy } from "../runtime/retry.js";
-
-export { DEFAULT_RETRY_POLICY };
 
 /** Caller input; `retryPolicy` defaults to DEFAULT_RETRY_POLICY. */
 export type ExecutionPlanInput = Omit<ExecutionPlan, "retryPolicy"> & { readonly retryPolicy?: RetryPolicy };
@@ -89,15 +86,6 @@ export function digestJson(value: unknown): Promise<string> {
   return sha256Hex(canonicalJsonBytes(value));
 }
 
-export function digestEvaluationPlan(evaluation: EvaluationPlan): Promise<string> {
-  return digestJson(evaluation);
-}
-
-/** The digest stored in EvaluationOutputSchemaRef. */
-export function digestEvaluationOutputSchema(schema: EvaluationOutputSchema): Promise<string> {
-  return digestJson(schema);
-}
-
 function normalizeHarness(harness: HarnessConfig, field: string): HarnessConfig {
   requireObject(harness, field);
   if (harness.kind !== "sp") throw new RuntimeInputError(`${field}.kind must be sp`, `${field}.kind`);
@@ -127,12 +115,6 @@ function normalizeAgentConfigSnapshot(snapshot: AgentConfigSnapshot, field: stri
   const body = jsonObjectSchema.safeParse(snapshot.body);
   if (!body.success) throw new RuntimeInputError(`${field}.body must be a JSON object`, `${field}.body`);
   return { sourceUserAgentId: snapshot.sourceUserAgentId, name: snapshot.name, body: body.data };
-}
-
-function requireObject(value: unknown, field: string): void {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new RuntimeInputError(`${field} must be an object`, field);
-  }
 }
 
 function requirePositiveInteger(value: unknown, field: string): void {

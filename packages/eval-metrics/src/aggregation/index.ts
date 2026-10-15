@@ -1,9 +1,10 @@
 import type { EvaluationAttempt, EvaluationRecord, ExecutionAttempt, SamplingStatus } from "@eval-platform/eval-contracts";
 import { SAMPLING_STATUSES } from "@eval-platform/eval-contracts";
 import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
-import { summarizeNumericOutputs, type EvaluationOutputReader } from "../evaluators/index.js";
+import type { EvaluationOutputReader } from "../evaluators/index.js";
 import { agentSpan, attemptDuration, attemptResources } from "./agents.js";
 import type { MetricCounts, MetricSummary, StageStatistics } from "./model.js";
+import { summarizeNumericOutputs } from "./numeric-outputs.js";
 import { aggregateResources } from "./resources.js";
 import { summarizeNumbers } from "./statistics.js";
 
@@ -42,13 +43,6 @@ function stageStatistics(records: readonly StageRecord[]): StageStatistics {
 
 /** Summarizes one level directly from its raw Samplings, EvaluationRecords and Attempt resources. */
 export function aggregateMetrics(input: MetricInput): MetricSummary {
-  const samplingIds = new Set(input.samplings.map((sampling) => sampling.samplingId));
-  if (samplingIds.size !== input.samplings.length) throw new Error("Duplicate Sampling identity in metric input");
-  const evaluationIds = new Set(input.evaluations.map((evaluation) => evaluation.evaluationId));
-  if (evaluationIds.size !== input.evaluations.length) throw new Error("Duplicate Evaluation identity in metric input");
-  if (input.evaluations.some((evaluation) => !samplingIds.has(evaluation.samplingId))) {
-    throw new Error("Evaluation does not belong to the metric Sampling scope");
-  }
   return {
     counts: { ...input.bindings, samplings: input.samplings.length, evaluations: input.evaluations.length },
     execution: stageStatistics(input.samplings.map((sampling) => ({ status: sampling.execution.status, attempts: sampling.executionAttempts }))),

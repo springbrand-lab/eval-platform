@@ -2,7 +2,7 @@ import type { EvaluationRecord, ProjectDatasetSnapshot, RunOperation, RunTargetS
 import type { Data } from "@eval-platform/eval-dataset";
 import type { ProjectPlanReader, ProjectSample, RuntimeRunAdmissionCommand, RuntimeStore, SamplingState } from "@eval-platform/eval-runtime";
 import {
-  digestEvaluationPlan,
+  digestJson,
   digestExecutionPlan,
   normalizeEvaluationPlan,
   normalizeExecutionPlan,
@@ -14,6 +14,7 @@ import { EvalSpApiError, type EvalSpAgentConfig, type EvalSpClient } from "../sp
 import type { EvalDb } from "./client.js";
 import { createOutputSchemaCatalog } from "./output-schemas.js";
 import { planProjectSampleIds } from "@eval-platform/eval-runtime";
+import { bindProjectSamples } from "../projects/snapshot.js";
 import { createPostgresProjectStore } from "./project-store.js";
 import { projectEvaluationPlans } from "./schema.js";
 
@@ -76,21 +77,13 @@ export async function seedProject(db: EvalDb, owner: string, input: {
   readonly locked?: boolean;
 }): Promise<{ projectId: string; samples: ProjectSample[]; datasets: ProjectDatasetSnapshot[] }> {
   const projectId = crypto.randomUUID();
-  const samples = new Map<string, ProjectSample & { datasetIds: string[] }>();
-  const datasets = input.datasets.map((dataset, index): ProjectDatasetSnapshot => {
-    const datasetId = dataset.datasetId ?? crypto.randomUUID();
-    return {
-      datasetId, name: `Dataset ${index}`, kind: "general",
-      projectSampleIds: dataset.data.map((data) => {
-        let sample = samples.get(data.dataId);
-        if (!sample) {
-          sample = { projectSampleId: crypto.randomUUID(), projectId, dataId: data.dataId, datasetIds: [], samplingCount: input.samplingCount ?? 1, data };
-          samples.set(data.dataId, sample);
-        }
-        sample.datasetIds.push(datasetId);
-        return sample.projectSampleId;
-      }),
-    };
+  const { datasets, samples: values } = bindProjectSamples({
+    projectId,
+    datasets: input.datasets.map((dataset, index) => ({
+      dataset: { datasetId: dataset.datasetId ?? crypto.randomUUID(), name: `Dataset ${index}`, kind: "general" as const },
+      data: dataset.data,
+    })),
+    samplingCountOf: () => input.samplingCount ?? 1,
   });
   const subject = { sourceUserAgentId: "source-subject", name: "Subject", body: { name: "Subject" } };
   const evaluator = { sourceUserAgentId: "source-evaluator", name: "Evaluator", body: { name: "Evaluator" } };
@@ -98,18 +91,17 @@ export async function seedProject(db: EvalDb, owner: string, input: {
     harness: { kind: "sp", framework: "sp", agentConfig: { ownerUserId: owner, userAgentId: `subject-${projectId}` } },
     subjectAgentConfig: subject, executionConcurrency: 1, retryPolicy,
   });
-  const values = [...samples.values()];
   const store = createPostgresProjectStore(db, owner);
   let evaluation = null;
   if (input.evaluation) {
-    const { outputSchemaId } = await createOutputSchemaCatalog(db, owner).create({
+    const { outputSchemaId, schema } = await createOutputSchemaCatalog(db, owner).create({
       name: "Score", description: "Score", content: JSON.stringify({ type: "object", properties: { score: { type: "number" } } }),
     });
     const plan = normalizeEvaluationPlan({
       evaluationHarness: { kind: "sp", framework: "sp", agentConfig: { ownerUserId: owner, userAgentId: `evaluator-${projectId}` } },
-      evaluatorAgentConfig: evaluator, evaluationConcurrency: 1, retryPolicy, outputSchema: { outputSchemaId, digest: "schema-digest" },
+      evaluatorAgentConfig: evaluator, evaluationConcurrency: 1, retryPolicy, outputSchema: { outputSchemaId, digest: await digestJson(schema) },
     });
-    evaluation = { plan, digest: await digestEvaluationPlan(plan) };
+    evaluation = { plan, digest: await digestJson(plan) };
   }
   await store.create({
     project: { projectId, ownerUserId: owner, name: "Project", sourceBranch: release.sourceBranch, createdAt: new Date().toISOString() },

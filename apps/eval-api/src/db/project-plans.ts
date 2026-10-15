@@ -1,8 +1,8 @@
 import type { EvaluationOutputSchema, Project, ProjectDatasetSnapshot, ProjectPlan } from "@eval-platform/eval-contracts";
-import { planProjectSampleIds, type ProjectPlanReader, type ProjectSample } from "@eval-platform/eval-runtime";
+import { digestJson, planProjectSampleIds, type ProjectPlanReader, type ProjectSample } from "@eval-platform/eval-runtime";
 import { and, asc, eq, inArray, isNull, type SQL } from "drizzle-orm";
 import { addToGroup, selectByIds, sqlBatches } from "./batch.js";
-import type { EvalDb } from "./client.js";
+import { READ_SNAPSHOT, type EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import type { RecordReader } from "./run-records.js";
 import {
@@ -14,8 +14,6 @@ import {
   projectSampleDatasets,
   projectSamples,
 } from "./schema.js";
-
-export const READ_SNAPSHOT = { isolationLevel: "repeatable read", accessMode: "read only" } as const;
 
 /** A non-deleted Project; omit the owner only for the Worker. */
 export function visibleProject(projectId: string, ownerUserId?: string): SQL | undefined {
@@ -36,17 +34,19 @@ export function projectFromRow(row: typeof projects.$inferSelect): Project {
 
 /** Reads one consistent Project plan; call inside a repeatable-read snapshot. Omit the owner only for the Worker. */
 export async function readProjectPlan(reader: RecordReader, projectId: string, ownerUserId?: string): Promise<ProjectPlan | null> {
-  const [project] = await reader.select().from(projects).where(visibleProject(projectId, ownerUserId));
-  if (!project) return null;
+  // The execution plan is written in the creation transaction, so every Project row has one.
+  const [found] = await reader.select({ project: projects, execution: projectExecutionPlans }).from(projects)
+    .innerJoin(projectExecutionPlans, eq(projectExecutionPlans.projectId, projects.projectId))
+    .where(visibleProject(projectId, ownerUserId));
+  if (!found) return null;
+  const { project, execution } = found;
   // One transaction client runs one query at a time, so these reads stay sequential.
   const datasetRows = await reader.select().from(projectDatasets)
     .where(eq(projectDatasets.projectId, projectId)).orderBy(asc(projectDatasets.position));
   const memberRows = await reader.select({ datasetId: projectSampleDatasets.datasetId, projectSampleId: projectSampleDatasets.projectSampleId })
     .from(projectSampleDatasets).where(eq(projectSampleDatasets.projectId, projectId))
     .orderBy(projectSampleDatasets.datasetId, projectSampleDatasets.position);
-  const [execution] = await reader.select().from(projectExecutionPlans).where(eq(projectExecutionPlans.projectId, projectId));
   const [evaluation] = await reader.select().from(projectEvaluationPlans).where(eq(projectEvaluationPlans.projectId, projectId));
-  if (!execution) throw new Error(`Project ${projectId} has no execution plan`);
   const members = new Map<string, string[]>();
   for (const row of memberRows) addToGroup(members, row.datasetId, row.projectSampleId);
   const datasets = datasetRows.map((row): ProjectDatasetSnapshot => ({
@@ -109,21 +109,28 @@ export async function readAllProjectSamples(reader: RecordReader, plan: ProjectP
   const rows = await reader.select().from(projectSamples).where(eq(projectSamples.projectId, plan.project.projectId));
   const order = new Map(planProjectSampleIds(plan).map((id, index) => [id, index]));
   const samples = await attachDatasetIds(reader, plan.project.projectId, rows);
-  return samples.sort((left, right) => (order.get(left.projectSampleId) ?? 0) - (order.get(right.projectSampleId) ?? 0));
+  return samples.sort((left, right) => order.get(left.projectSampleId)! - order.get(right.projectSampleId)!);
 }
 
-/** Schema content resolved through the Project's evaluation plan, ignoring catalog soft deletes. Omit the owner only for the Worker. */
+/**
+ * Schema content resolved through the Project's evaluation plan, ignoring catalog soft deletes, and
+ * checked against the digest the plan recorded. Omit the owner only for the Worker.
+ */
 export async function readEvaluationOutputSchema(
   reader: RecordReader, projectId: string, ownerUserId?: string,
 ): Promise<EvaluationOutputSchema | null> {
-  const [row] = await reader.select({ schema: evaluationOutputSchemas.schema }).from(projects)
+  const [row] = await reader.select({ schema: evaluationOutputSchemas.schema, plan: projectEvaluationPlans.plan }).from(projects)
     .innerJoin(projectEvaluationPlans, eq(projectEvaluationPlans.projectId, projects.projectId))
     .innerJoin(evaluationOutputSchemas, and(
       eq(evaluationOutputSchemas.ownerUserId, projectEvaluationPlans.ownerUserId),
       eq(evaluationOutputSchemas.outputSchemaId, projectEvaluationPlans.outputSchemaId),
     ))
     .where(visibleProject(projectId, ownerUserId));
-  return row?.schema ?? null;
+  if (!row) return null;
+  if (await digestJson(row.schema) !== row.plan.outputSchema.digest) {
+    throw new Error(`Project ${projectId} evaluation output Schema does not match its recorded digest`);
+  }
+  return row.schema;
 }
 
 export async function projectExists(reader: RecordReader, projectId: string, ownerUserId?: string): Promise<boolean> {

@@ -94,12 +94,6 @@ describe("execution/evaluation aggregation", () => {
     const result = summarize({ samplings: [{ ...subject, executionAttempts: [{ ...subject.executionAttempts[0]!, ...patch }] }], evaluations: [] });
     expect(result.execution.agentDurationMs).toMatchObject({ count: 0, missing: 1, total: null });
   });
-
-  it("rejects duplicate and orphan identities before counting", () => {
-    expect(() => summarize({ samplings: [sampling(), sampling()], evaluations: [] })).toThrow("Duplicate Sampling");
-    expect(() => summarize({ samplings: [sampling()], evaluations: [evaluation(), evaluation()] })).toThrow("Duplicate Evaluation");
-    expect(() => summarize({ samplings: [], evaluations: [evaluation()] })).toThrow("Sampling scope");
-  });
 });
 
 describe("agent views", () => {

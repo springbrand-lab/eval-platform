@@ -1,9 +1,9 @@
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import type { EvalRunQueries } from "@eval-platform/eval-runtime";
 import { RuntimeEntityNotFoundError, toSamplingSnapshot } from "@eval-platform/eval-runtime";
-import type { EvalDb } from "./client.js";
+import { READ_SNAPSHOT, type EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
-import { projectExists, READ_SNAPSHOT } from "./project-plans.js";
+import { projectExists } from "./project-plans.js";
 import { listSamplingEvaluations, readEvaluations, readSamplings, type RecordReader } from "./run-records.js";
 import { readRunView } from "./run-view.js";
 

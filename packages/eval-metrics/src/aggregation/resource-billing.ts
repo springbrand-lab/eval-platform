@@ -1,6 +1,7 @@
 import type { JsonValue } from "@eval-platform/eval-contracts";
 import type { CostStatistics, MetricNumber } from "./model.js";
-import { record, text, type FactEntry, type FactStream, type JsonRecord, type ResourceDiagnostics } from "./resource-facts.js";
+import { record, text, type JsonRecord } from "../json.js";
+import type { FactEntry, FactStream, ResourceDiagnostics } from "./resource-facts.js";
 
 const ACTION_SETTLED_STATUSES = new Set(["succeeded", "failed", "outcome_unknown"]);
 const MODEL_SETTLED_STATUSES = new Set(["settled", "platform_owned", "anomaly"]);

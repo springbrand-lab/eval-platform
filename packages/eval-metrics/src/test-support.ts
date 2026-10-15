@@ -10,16 +10,16 @@ import type {
   RunSnapshot,
 } from "@eval-platform/eval-contracts";
 import type { ProjectSample, SamplingSnapshot } from "@eval-platform/eval-runtime";
-import type { ResourceInput } from "./aggregation/model.js";
+import type { ResourceInput } from "./aggregation/resources.js";
 import type { MetricsFacts } from "./reporting/model.js";
 
 export const PROJECT = {
   projectId: "project-1", ownerUserId: "owner-1", name: "Product evaluation",
   sourceBranch: "release-2.0.0", createdAt: "2026-10-01T00:00:00.000Z",
 };
-export const SUBJECT = { ownerUserId: "owner-1", userAgentId: "subject-1" };
-export const EVALUATOR = { ownerUserId: "owner-1", userAgentId: "judge-1" };
-export const DATA = {
+const SUBJECT = { ownerUserId: "owner-1", userAgentId: "subject-1" };
+const EVALUATOR = { ownerUserId: "owner-1", userAgentId: "judge-1" };
+const DATA = {
   dataId: "10000000-0000-4000-8000-000000000001", userPrompt: "Build a page",
   evalPrompt: "Judge the finished page", category: "frontend",
 };

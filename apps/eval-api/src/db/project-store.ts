@@ -12,13 +12,13 @@ import { DatasetEntityNotFoundError, dataSchema, type Data } from "@eval-platfor
 import { RuntimeEntityNotFoundError, RuntimeProjectBusyError, type ProjectSample } from "@eval-platform/eval-runtime";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { addToGroup, sqlBatches } from "./batch.js";
-import { constraintViolation, type EvalDb } from "./client.js";
-import { ProjectCreationKeyTakenError, ProjectEvaluationPlanLockedError, ProjectInputError } from "./errors.js";
+import { constraintViolation, READ_SNAPSHOT, type EvalDb } from "./client.js";
+import { RuntimeInputError } from "@eval-platform/eval-runtime";
+import { ProjectCreationKeyTakenError, ProjectEvaluationPlanLockedError } from "./errors.js";
 import { requireOwnerUserId } from "./owner.js";
 import {
   projectExists,
   projectFromRow,
-  READ_SNAPSHOT,
   readAllProjectSamples,
   readProjectPlan,
   visibleProject,
@@ -37,7 +37,6 @@ import {
   projects,
   projectSampleDatasets,
   projectSamples,
-  runRequestKeys,
   runs,
 } from "./schema.js";
 
@@ -77,7 +76,23 @@ export interface StoredProjectCreation {
   readonly project: Project;
   readonly deleted: boolean;
   readonly fingerprint: string;
+  /** The first Run admitted under the creation key. */
   readonly run: RunHandle | null;
+  /** Whether the Project has any Run at all. */
+  readonly hasRun: boolean;
+}
+
+/** The single definition of an editable evaluation plan: absent, or not yet locked by an evaluating Run. */
+async function requireEvaluationPlanUnlocked(reader: Pick<EvalDb, "select">, projectId: string): Promise<void> {
+  const [plan] = await reader.select({ lockedAt: projectEvaluationPlans.lockedAt })
+    .from(projectEvaluationPlans).where(eq(projectEvaluationPlans.projectId, projectId));
+  if (plan?.lockedAt) throw new ProjectEvaluationPlanLockedError(projectId);
+}
+
+/** The single definition of "this Project has a Run", shared by creation replay and compensation. */
+async function projectHasRun(reader: Pick<EvalDb, "select">, projectId: string): Promise<boolean> {
+  const [run] = await reader.select({ runId: runs.runId }).from(runs).where(eq(runs.projectId, projectId)).limit(1);
+  return run !== undefined;
 }
 
 /** The fixed plan, every bound ProjectSample and the current Run. */
@@ -122,7 +137,7 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
             selected = current.filter((record) => wanted.delete(record.dataId));
             const [missing] = wanted;
             if (missing !== undefined) {
-              throw new ProjectInputError(`Data ${missing} is not a current member of Dataset ${row.datasetId}`, `datasets.${index}.dataIds`);
+              throw new RuntimeInputError(`Data ${missing} is not a current member of Dataset ${row.datasetId}`, `datasets.${index}.dataIds`);
             }
           }
           return {
@@ -146,7 +161,7 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
           sourceBranch: project.sourceBranch, createdAt: new Date(project.createdAt),
           creationKey: snapshot.creation.key, creationFingerprint: snapshot.creation.fingerprint,
         }).catch((error: unknown) => {
-          if (constraintViolation(error)?.constraint === PROJECT_CREATION_KEY_UQ) throw new ProjectCreationKeyTakenError(snapshot.creation.key);
+          if (constraintViolation(error)?.constraint === PROJECT_CREATION_KEY_UQ) throw new ProjectCreationKeyTakenError();
           throw error;
         });
         const datasetRows = snapshot.datasets.map((dataset, position) => ({
@@ -192,6 +207,7 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
           deleted: row.deletedAt !== null,
           fingerprint: row.creationFingerprint,
           run: record ? { runId: record.runId, samplingIds: [...record.samplingIds] } : null,
+          hasRun: record !== undefined || await projectHasRun(transaction, row.projectId),
         };
       }, READ_SNAPSHOT);
     },
@@ -206,12 +222,11 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
         const [row] = await transaction.select({ projectId: projects.projectId }).from(projects)
           .where(and(eq(projects.ownerUserId, owner), eq(projects.projectId, projectId))).for("update");
         if (!row) return [];
-        const [run] = await transaction.select({ runId: runs.runId }).from(runs).where(eq(runs.projectId, projectId)).limit(1);
-        if (run) return null;
+        if (await projectHasRun(transaction, projectId)) return null;
         const copies = await transaction.select({ userAgentId: projectAgentConfigs.userAgentId }).from(projectAgentConfigs)
           .where(eq(projectAgentConfigs.projectId, projectId));
         for (const table of [projectAgentConfigs, projectEvaluationPlans, projectExecutionPlans, projectSampleDatasets,
-          projectSamples, projectDatasets, runRequestKeys]) {
+          projectSamples, projectDatasets]) {
           await transaction.delete(table).where(eq(table.projectId, projectId));
         }
         await transaction.delete(projects).where(eq(projects.projectId, projectId));
@@ -221,11 +236,8 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
 
     /** Fails early, before any SP copy is made, when the evaluation plan can no longer be replaced. */
     async requireEvaluationPlanEditable(projectId: string): Promise<void> {
-      const [row] = await db.select({ lockedAt: projectEvaluationPlans.lockedAt }).from(projects)
-        .leftJoin(projectEvaluationPlans, eq(projectEvaluationPlans.projectId, projects.projectId))
-        .where(visibleProject(projectId, owner));
-      if (!row) throw new RuntimeEntityNotFoundError("project", projectId);
-      if (row.lockedAt) throw new ProjectEvaluationPlanLockedError(projectId);
+      if (!await projectExists(db, projectId, owner)) throw new RuntimeEntityNotFoundError("project", projectId);
+      await requireEvaluationPlanUnlocked(db, projectId);
     },
 
     /**
@@ -239,9 +251,7 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
     }): Promise<string[]> {
       return db.transaction(async (transaction) => {
         await lockProject(transaction, owner, projectId);
-        const [current] = await transaction.select({ lockedAt: projectEvaluationPlans.lockedAt })
-          .from(projectEvaluationPlans).where(eq(projectEvaluationPlans.projectId, projectId));
-        if (current?.lockedAt) throw new ProjectEvaluationPlanLockedError(projectId);
+        await requireEvaluationPlanUnlocked(transaction, projectId);
         const row = { plan: evaluation.plan, digest: evaluation.digest, outputSchemaId: evaluation.plan.outputSchema.outputSchemaId };
         await transaction.insert(projectEvaluationPlans).values({ projectId, ownerUserId: owner, ...row })
           .onConflictDoUpdate({ target: projectEvaluationPlans.projectId, set: row });

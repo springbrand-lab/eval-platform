@@ -1,4 +1,4 @@
-import { RuntimeAdmissionConflictError, RuntimeProjectBusyError } from "@eval-platform/eval-runtime";
+import { RuntimeAdmissionConflictError, RuntimeInputError, RuntimeProjectBusyError } from "@eval-platform/eval-runtime";
 import { describe, expect, it, vi } from "vitest";
 import { AgentConfigFrozenError, ProjectEvaluationPlanLockedError } from "./db/errors.js";
 import type { ApiRuntime, OwnerServices } from "./lib/types.js";
@@ -141,7 +141,6 @@ describe("Eval API HTTP layer", () => {
       run: { operation: "pipeline" },
     });
     const invalid = [
-      { ...createBody, run: { operation: "pipeline" } },
       { ...createBody, run: { operation: "evaluation" } },
       { ...createBody, run: { operation: "execution", idempotencyKey: "k" } },
       { ...createBody, idempotencyKey: " padded " },
@@ -309,5 +308,24 @@ describe("Eval API HTTP layer", () => {
     const frozen = await app.request(`/api/agent-configs/${agentId}`, jsonRequest("PATCH", { name: "x", revision: 1 }));
     expect(frozen.status).toBe(409);
     expect(await frozen.json()).toMatchObject({ code: "AGENT_CONFIG_FROZEN" });
+    for (const [method, path] of [["POST", "/api/agent-configs"], ["PATCH", `/api/agent-configs/${agentId}`]] as const) {
+      const reserved = await app.request(path, jsonRequest(method, { slug: " Eval-Frozen-mine ", name: "Mine" }));
+      expect(reserved.status).toBe(422);
+      expect(await reserved.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED", errors: [expect.objectContaining({ path: "slug" })] });
+    }
+    expect(app.services.agentConfigs.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves plan semantics to the service: pipeline without evaluation and plan values return 400", async () => {
+    const app = setup();
+    app.services.projects.create.mockRejectedValueOnce(new RuntimeInputError("A pipeline Run requires an evaluation plan", "evaluation"));
+    const pipeline = await app.request("/api/projects", jsonRequest("POST", { ...createBody, run: { operation: "pipeline" } }));
+    expect(pipeline.status).toBe(400);
+    expect(await pipeline.json()).toMatchObject({ code: "RUNTIME_INPUT_INVALID", errors: [{ path: "evaluation" }] });
+    const values = await app.request("/api/projects", jsonRequest("POST", {
+      ...createBody, execution: { ...createBody.execution, executionConcurrency: 1.5, timeoutMs: 0, retryPolicy: { maxRestarts: -1, initialBackoffMs: 5, maxBackoffMs: 1 } },
+    }));
+    expect(values.status).toBe(201);
+    expect(app.services.projects.create).toHaveBeenCalledTimes(2);
   });
 });

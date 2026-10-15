@@ -17,9 +17,7 @@ export type {
   ProjectSample,
   RunPreview,
   RunPreviewRequest,
-  RuntimeEvaluationContext,
   SamplingSnapshot,
-  RuntimeSamplingContext,
 } from "./model.js";
 export type {
   RuntimeRunAdmission,
@@ -46,17 +44,7 @@ export {
   type RuntimeEntity,
   type RuntimePersistenceOutcome,
 } from "./errors.js";
-export {
-  createRetryController,
-  type RetryController,
-  type RetryDecision,
-  type RetryOperation,
-} from "./retry.js";
-export {
-  createAgentScheduler,
-  type AgentScheduler,
-  type AgentSchedulerOptions,
-} from "./scheduler.js";
+export type { RetryController, RetryDecision, RetryOperation } from "./retry.js";
 
 export function createEvalRunAdmission(dependencies: EvalRunAdmissionDependencies): EvalRunAdmission {
   const admission = new RunAdmission(dependencies);

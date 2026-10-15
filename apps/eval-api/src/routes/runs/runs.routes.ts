@@ -15,6 +15,7 @@ import {
   idempotencyKeySchema,
   jsonBodyContent,
   notFoundResponse,
+  unique,
 } from "../schemas.js";
 
 const runHandleSchema = z.custom<RunHandle>();
@@ -29,7 +30,6 @@ const admissionErrors = {
   413: jsonContent(httpErrorSchema, "Request body or expanded selection is too large"),
 } as const;
 const idList = z.array(entityIdSchema).max(RUN_TARGET_IDS);
-const unique = (ids: readonly string[]) => new Set(ids).size === ids.length;
 
 /** What the user picked inside the Project snapshot; expansion and deduplication belong to Runtime. */
 const selectorSchema = z.strictObject({

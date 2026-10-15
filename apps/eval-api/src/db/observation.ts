@@ -1,9 +1,9 @@
 import type { AgentObservationRef } from "@eval-platform/eval-contracts";
 import { RuntimeEntityNotFoundError } from "@eval-platform/eval-runtime";
 import { and, eq } from "drizzle-orm";
-import type { EvalDb } from "./client.js";
+import { READ_SNAPSHOT, type EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
-import { projectExists, READ_SNAPSHOT } from "./project-plans.js";
+import { projectExists } from "./project-plans.js";
 import { evaluationFromRow, samplingFromRow } from "./run-records.js";
 import { evaluations, samplings } from "./schema.js";
 

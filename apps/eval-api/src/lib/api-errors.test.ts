@@ -22,7 +22,6 @@ import {
   OutputSchemaNotFoundError,
   ProjectEvaluationPlanLockedError,
   ProjectIdempotencyConflictError,
-  ProjectInputError,
   ProjectRunStopConflictError,
   RunTargetsTooLargeError,
 } from "../db/errors.js";
@@ -93,9 +92,6 @@ describe("apiError", () => {
     expect(apiError(new CatalogInputError("name must be a nonblank string", "name"))).toMatchObject({
       code: "CATALOG_INPUT_INVALID", errors: [{ path: "name", errMsg: "name must be a nonblank string" }],
     });
-    expect(apiError(new ProjectInputError("Data d is not selected", "samplingCounts.d"))).toMatchObject({
-      code: "PROJECT_INPUT_INVALID", status: 400, errors: [{ path: "samplingCounts.d" }],
-    });
   });
 
   it("relays SP validation text but never persisted Runtime facts", () => {
@@ -107,6 +103,12 @@ describe("apiError", () => {
     });
     expect(apiError(new RuntimeRecordPersistenceError("private", "unknown", null, {}, {})).code)
       .toBe("RUNTIME_PERSISTENCE_UNCONFIRMED");
+  });
+
+  it("answers a failure followed by a failed compensation as the failure and keeps both for diagnostics", () => {
+    const failure = new RuntimeProjectBusyError("p", "r");
+    const aggregate = new AggregateError([failure, new Error("database unavailable")], "compensation failed");
+    expect(apiError(aggregate)).toMatchObject({ code: "PROJECT_BUSY", status: 409, cause: aggregate });
   });
 
   it("passes catalog errors through and keeps unknown failures internal with their cause", () => {

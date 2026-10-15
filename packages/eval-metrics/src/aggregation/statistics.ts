@@ -1,4 +1,10 @@
+import type { AgentResourceCompleteness } from "@eval-platform/eval-contracts";
 import type { NumericSummary } from "./model.js";
+
+/** The one coverage rule: complete when proven complete, partial when something is available, otherwise unavailable. */
+export function coverage(complete: boolean, available: boolean): AgentResourceCompleteness {
+  return complete ? "complete" : available ? "partial" : "unavailable";
+}
 
 export function summarizeNumbers(values: readonly (number | null)[]): NumericSummary {
   const available = values.filter((value): value is number => value !== null && Number.isFinite(value));

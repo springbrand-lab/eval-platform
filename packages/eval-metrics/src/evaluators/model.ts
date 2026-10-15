@@ -1,12 +1,4 @@
-import type {
-  AgentResourceCompleteness,
-  ArtifactRef,
-  EvaluationOutputSchemaRef,
-  EvidenceRef,
-  JsonValue,
-  TrajectoryRef,
-} from "@eval-platform/eval-contracts";
-import type { NumericSummary } from "../aggregation/model.js";
+import type { ArtifactRef, EvidenceRef, JsonValue, TrajectoryRef } from "@eval-platform/eval-contracts";
 
 export type NumericSchemaType = "number" | "integer";
 
@@ -67,29 +59,4 @@ export interface EvaluationOutputView {
   readonly artifacts: readonly ArtifactRef[];
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly trajectory: TrajectoryRef | null;
-}
-
-export type NumericMissingReason = "not-succeeded" | "invalid-output" | "unavailable-output" | "absent";
-
-export interface NumericObservationSummary {
-  readonly jsonPointer: string;
-  readonly schemaType: NumericSchemaType;
-  /** Values; an array field can yield several per evaluation. */
-  readonly observationCount: number;
-  readonly contributingEvaluationCount: number;
-  readonly missingEvaluationCount: number;
-  readonly summary: NumericSummary;
-  readonly coverage: AgentResourceCompleteness;
-  /** Why evaluations in scope did not contribute; only non-zero reasons. */
-  readonly diagnostics: readonly { readonly reason: NumericMissingReason; readonly evaluations: number }[];
-}
-
-export interface NumericOutputSummary {
-  /** The locked Project Schema; null without an evaluation plan. */
-  readonly schema: EvaluationOutputSchemaRef | null;
-  readonly coverage: AgentResourceCompleteness;
-  readonly evaluations: number;
-  readonly validation: Readonly<Record<EvaluationValidationStatus, number>>;
-  /** Schema-declared numeric fields in Schema order, then observed fields the static walk cannot name (map keys, recursion). */
-  readonly fields: readonly NumericObservationSummary[];
 }

@@ -4,6 +4,9 @@ import * as schema from "./schema.js";
 
 export type EvalDb = NodePgDatabase<typeof schema> & { $client: Pool };
 
+/** Every read that must see one consistent snapshot uses this transaction mode. */
+export const READ_SNAPSHOT = { isolationLevel: "repeatable read", accessMode: "read only" } as const;
+
 export function createEvalDb(pool: Pool): EvalDb {
   return drizzle(pool, { schema });
 }

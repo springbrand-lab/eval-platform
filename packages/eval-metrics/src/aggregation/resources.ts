@@ -1,8 +1,17 @@
-import type { ResourceInput, ResourceStatistics } from "./model.js";
+import type { AgentResourceCollection } from "@eval-platform/eval-contracts";
+import type { ResourceStatistics } from "./model.js";
 import { aggregateBilling } from "./resource-billing.js";
 import { ResourceDiagnostics, readStream, type OwnedSnapshot } from "./resource-facts.js";
 import { aggregateTelemetry } from "./resource-telemetry.js";
 import { aggregateUsage } from "./resource-usage.js";
+import { coverage } from "./statistics.js";
+
+export interface ResourceInput {
+  readonly ownerUserId: string;
+  readonly collection: AgentResourceCollection | undefined;
+  /** The Attempt reached SP, so a missing collection is a gap rather than nothing to collect. */
+  readonly submitted?: boolean;
+}
 
 function readCollections(inputs: readonly ResourceInput[]): {
   readonly collections: ResourceStatistics["collections"];
@@ -38,7 +47,7 @@ export function aggregateResources(inputs: readonly ResourceInput[]): ResourceSt
   const issues = diagnostics.list();
   const streamsComplete = usageEvents.complete && telemetryEvents.complete && billingSettlements.complete;
   return {
-    coverage: snapshots.length === 0 ? "unavailable" : streamsComplete && issues.length === 0 ? "complete" : "partial",
+    coverage: coverage(streamsComplete && issues.length === 0, snapshots.length > 0),
     collections,
     duplicateRecords: {
       usageEvents: usageEvents.duplicates,

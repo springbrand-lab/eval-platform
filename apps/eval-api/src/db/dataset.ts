@@ -10,7 +10,7 @@ import {
   datasetSchema,
 } from "@eval-platform/eval-dataset";
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import type { EvalDb } from "./client.js";
+import { READ_SNAPSHOT, type EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import { assertDataReferencesSelectable } from "./resource-catalog.js";
 import { data, datasetData, datasets } from "./schema.js";
@@ -151,7 +151,7 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
         const snapshot = (await readDatasetSnapshots(transaction, ownerUserId, [datasetId]))[0];
         if (!snapshot) throw new DatasetEntityNotFoundError("dataset", datasetId);
         return snapshot.data;
-      }, { isolationLevel: "repeatable read", accessMode: "read only" });
+      }, READ_SNAPSHOT);
     },
     async deleteData(dataId) {
       await db.transaction(async (transaction) => {
@@ -208,7 +208,7 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
     async getDatasetSnapshot(datasetId) {
       return db.transaction(
         async (transaction) => (await readDatasetSnapshots(transaction, ownerUserId, [datasetId]))[0] ?? null,
-        { isolationLevel: "repeatable read", accessMode: "read only" },
+        READ_SNAPSHOT,
       );
     },
     async importDataset(snapshot, options) {

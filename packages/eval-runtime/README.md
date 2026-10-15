@@ -6,7 +6,7 @@
 
 ## 对外边界
 
-- `plan`：`normalizeExecutionPlan` / `normalizeEvaluationPlan` 是计划校验与归一化的唯一入口（`retryPolicy` 默认 `DEFAULT_RETRY_POLICY`，Evaluator 必须 `framework: "sp"`）；`digestExecutionPlan` 覆盖执行计划、Dataset 绑定和全部 ProjectSample 快照，`digestEvaluationPlan` 覆盖评估计划，两者与对象键顺序和 ProjectSample 输入顺序无关；`phasesOf(operation)` 推导 Run 阶段。
+- `plan`：`normalizeExecutionPlan` / `normalizeEvaluationPlan` 是计划校验与归一化的唯一入口（`retryPolicy` 缺省时使用 Runtime 默认重启策略，Evaluator 必须 `framework: "sp"`）；`digestExecutionPlan` 覆盖执行计划、Dataset 绑定和全部 ProjectSample 快照，与 ProjectSample 输入顺序无关；评估计划摘要和评估输出 Schema 摘要直接使用 `digestJson`（canonical JSON 的 sha256，与对象键顺序无关）；`planProjectSampleIds(plan)` 按 Dataset 绑定顺序再按成员顺序列出全部 ProjectSample；`phasesOf(operation)` 推导 Run 阶段。
 - `ProjectPlanReader`：Runtime 唯一的 Project 输入，提供 `getProjectPlan`（固定执行计划、可空评估计划、两个摘要和锁定时间）、`getProjectSamples`（按输入顺序返回完整 Data 快照）和 `getEvaluationOutputSchema`。Runtime 不读取实时 Dataset/Data、可编辑 Agent Config 或任何配置表。
 - `createEvalRunAdmission({ sourceCommit, plans, store, idFactory? })`：API 进程的准入入口，不持有 Harness 凭证。
   - `preview({ projectId, operation, selector })` 在 Project 快照内展开选择：`all`/`datasetIds` 按 Dataset 绑定顺序再按成员顺序展开为 ProjectSample，与显式 `projectSampleIds` 合并去重；execution/pipeline 的显式 Sampling 若其 ProjectSample 已被整条选中则被吸收；evaluation 把 ProjectSample 展开为当前执行成功的 Sampling（静默过滤失败/未完成），显式 Sampling 必须执行成功。返回固定 `targets`、替换/新建 Sampling 数、评估数和计划摘要。

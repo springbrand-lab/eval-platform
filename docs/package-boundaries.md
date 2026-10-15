@@ -120,7 +120,7 @@ The recognized billing facts are SP's model settlement receipt with its authorit
 
 Ambiguous subagent summaries and cyclic parent relationships are diagnosed and cannot suppress trustworthy child details. Contradictory terminal outcomes or tool names remain unknown instead of picking a winner. Binding counts (Datasets, Data, ProjectSamples) describe the Project snapshot, including Data without runs.
 
-The implemented files are `evaluators/model.ts`, `evaluators/schema.ts`, `evaluators/index.ts`, `aggregation/model.ts`, `aggregation/agents.ts`, `aggregation/resources.ts`, `aggregation/resource-facts.ts`, `aggregation/resource-usage.ts`, `aggregation/resource-billing.ts`, `aggregation/resource-telemetry.ts`, `aggregation/statistics.ts`, `aggregation/index.ts`, `reporting/model.ts` and `reporting/index.ts`, plus focused tests and the root entry `index.ts`, which exports `createMetrics`, the error classes (`MetricsEntityNotFoundError` for an unknown Project, Run, Dataset, ProjectSample or Sampling, `MetricsQueryError`, `MetricsSourceError`) and the model types. Experiment comparison, metric persistence/caches and application UIs are not introduced in this phase.
+The file layout lives in [packages/eval-metrics/README.md](../packages/eval-metrics/README.md). The root entry exports `createMetrics`, the error classes (`MetricsEntityNotFoundError` for an unknown Project, Run, Dataset, ProjectSample or Sampling, `MetricsQueryError`, `MetricsSourceError`) and the model types. Experiment comparison, metric persistence/caches and application UIs are not introduced.
 
 ### `apps/eval-api`
 

@@ -5,24 +5,27 @@ Project 当前结果的只读统计与四层展示。只读取应用注入的一
 ```text
 src/
 ├── index.ts                  # 唯一入口：createMetrics、错误类和模型类型
+├── json.ts                   # 原始 JSON 记录/文本读取（包内共享）
 ├── evaluators/
-│   ├── model.ts              # 评估输出视图、Schema 校验、数值观察与汇总
-│   ├── schema.ts             # 严格解析、Ajv 2020 校验、按 Schema 抽取数值
-│   └── index.ts              # 数值字段逐层汇总
+│   ├── model.ts              # 评估输出视图、Schema 校验结果与数值观察
+│   └── index.ts              # 严格解析、Ajv 2020 校验、按 Schema 抽取数值
 ├── aggregation/
-│   ├── model.ts              # 资源、轨迹、Agent 视图、阶段与层级汇总模型
+│   ├── model.ts              # 资源、轨迹、Agent 视图、数值字段、阶段与层级汇总模型
 │   ├── agents.ts             # Subject/Evaluator 分视角、Attempt 与 Agent 时长
 │   ├── resources.ts          # 资源聚合编排与 coverage
 │   ├── resource-facts.ts     # 诊断、数值校验与按来源身份去重
 │   ├── resource-usage.ts     # Token/Provider USD 与 Subagent 覆盖
 │   ├── resource-billing.ts   # 模型与 Action 结算
 │   ├── resource-telemetry.ts # 模型请求、Turn、工具、长度与非工具轮
-│   ├── statistics.ts         # NumericSummary
+│   ├── numeric-outputs.ts    # JSON Schema 数值字段汇总
+│   ├── statistics.ts         # NumericSummary 与唯一的 coverage 规则
 │   └── index.ts              # 单层汇总
 └── reporting/
     ├── model.ts              # 查询、MetricsFacts/MetricsSource、四层视图
     └── index.ts              # 事实校验、固定层级与四层视图
 ```
+
+依赖方向为 evaluators → aggregation → reporting：evaluators 只解读单条评估输出，aggregation 负责所有分组统计（含数值字段），两者共用的 JSON 读取在 `json.ts`。
 
 ```ts
 const metrics = createMetrics({ source });

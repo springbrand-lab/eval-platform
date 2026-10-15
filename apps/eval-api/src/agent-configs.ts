@@ -7,8 +7,16 @@ const AGENT_ROLES: readonly AgentRole[] = ["subject", "evaluator"];
 /** SP's `createUserAgentConfigInputSchema` bounds the name to 200 characters. */
 const AGENT_CONFIG_NAME_CHARS = 200;
 const FROZEN_SUFFIX = " (frozen)";
-/** Every frozen copy's slug starts with this, so even an orphan whose creation response was lost stays hidden. */
-const FROZEN_SLUG_PREFIX = "eval-frozen-";
+/**
+ * Every frozen copy's slug starts with this, so even an orphan whose creation response was lost stays
+ * hidden. The prefix is reserved: user-written Agent Configs cannot use it.
+ */
+export const FROZEN_SLUG_PREFIX = "eval-frozen-";
+
+/** True when a user-supplied slug falls under the reserved frozen-copy prefix (SP trims and lowercases slugs). */
+export function isReservedSlug(slug: unknown): boolean {
+  return typeof slug === "string" && slug.trim().toLowerCase().startsWith(FROZEN_SLUG_PREFIX);
+}
 
 export interface AgentOption {
   readonly agentConfig: AgentConfigRef;
@@ -25,7 +33,7 @@ export interface FrozenCopy {
  * SP create body for an identical copy. A fresh slug is required: SP replays an existing
  * account-scoped slug instead of creating another Agent Config, and copies are never default.
  */
-export function frozenCopyInput(source: EvalSpAgentConfig) {
+function frozenCopyInput(source: EvalSpAgentConfig) {
   return {
     slug: `${FROZEN_SLUG_PREFIX}${crypto.randomUUID()}`,
     name: `${source.name.trim().slice(0, AGENT_CONFIG_NAME_CHARS - FROZEN_SUFFIX.length)}${FROZEN_SUFFIX}`,
@@ -49,22 +57,21 @@ export function createAgentConfigService(input: {
    * The single definition of a frozen copy: recorded for a Project (current or retired), or carrying the
    * frozen slug prefix, which also covers an orphan whose Project row was never written.
    */
-  async function frozenIds(configs: readonly EvalSpAgentConfig[]): Promise<Set<string>> {
-    const recorded = await projects.frozenAgentConfigIds(configs.map((config) => config.id));
-    return new Set(configs.filter((config) => recorded.has(config.id)
-      || (typeof config.slug === "string" && config.slug.startsWith(FROZEN_SLUG_PREFIX))).map((config) => config.id));
+  function isFrozen(config: EvalSpAgentConfig, recorded: ReadonlySet<string>): boolean {
+    return recorded.has(config.id) || isReservedSlug(config.slug);
   }
-  /** Refuses a frozen copy and returns the editable Agent Config; recorded copies fail without reading SP. */
+  /** Refuses a frozen copy and returns the editable Agent Config; a recorded copy fails before reading SP. */
   async function requireEditable(id: string): Promise<EvalSpAgentConfig> {
-    if ((await projects.frozenAgentConfigIds([id])).has(id)) throw new AgentConfigFrozenError(id);
+    const recorded = await projects.frozenAgentConfigIds([id]);
+    if (recorded.has(id)) throw new AgentConfigFrozenError(id);
     const config = await sp.getAgentConfig(token, id);
-    if ((await frozenIds([config])).has(config.id)) throw new AgentConfigFrozenError(id);
+    if (isFrozen(config, recorded)) throw new AgentConfigFrozenError(id);
     return config;
   }
   async function list(): Promise<EvalSpAgentConfig[]> {
     const configs = await sp.listAgentConfigs(token);
-    const frozen = await frozenIds(configs);
-    return configs.filter((config) => !frozen.has(config.id));
+    const recorded = await projects.frozenAgentConfigIds(configs.map((config) => config.id));
+    return configs.filter((config) => !isFrozen(config, recorded));
   }
   return {
     list,

@@ -12,7 +12,7 @@
 
 ## 选择
 
-选择器是 `all`、`datasetIds`、`projectSampleIds`、`samplingIds` 的组合，至少一项，ID 总数不超过 10,000：
+选择器是 `all`、`datasetIds`、`projectSampleIds`、`samplingIds` 的组合，至少一项，ID 总数上限见 [Eval HTTP 控制面](eval-http-api.md#request-bodies-and-limits) 的 `RUN_TARGET_IDS`：
 
 - `all` 与 Dataset 按 Project 绑定顺序和成员顺序展开为 ProjectSample，与显式 `projectSampleIds` 合并去重；
 - 每个 ProjectSample 再展开为其当前执行成功的 Sampling，其他状态静默过滤；
