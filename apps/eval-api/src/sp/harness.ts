@@ -1,4 +1,4 @@
-import type { AgentFramework, EvaluationOutputSchema } from "@eval-platform/eval-contracts";
+import type { AgentFramework } from "@eval-platform/eval-contracts";
 import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import {
@@ -16,9 +16,7 @@ import {
 } from "@springbrand/eval-harness";
 import { ApiError } from "@springbrand/http/client";
 import WebSocket from "ws";
-import { sha256Hex } from "@springbrand/utils";
 import { httpOriginSchema } from "../config/env.js";
-import { EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH } from "../project-output-schema.js";
 import type { MaterialFile, SessionContent } from "./bundle-content.js";
 import { SpHarnessError } from "./harness-error.js";
 import {
@@ -43,7 +41,6 @@ const REQUEST_TIMEOUT_MS = 60_000;
 const STOP_TIMEOUT_MS = 10_000;
 /** Resource snapshots carry every telemetry event of a Submission. */
 const RESPONSE_BYTES = 256 * 1024 * 1024;
-const OUTPUT_SCHEMA_BUNDLE_ID = "project-evaluation-output-schema";
 
 export interface SpHarnessOptions {
   readonly origin: string;
@@ -74,14 +71,6 @@ function harnessError(error: unknown): unknown {
     || (error.kind === "http" && (error.status === 408 || error.status === 429 || error.status >= 500));
   return new SpHarnessError(error.kind === "http" ? error.message : `Eval SP request failed: ${error.code}`,
     transient, { ...(error.kind === "http" ? { status: error.status } : {}), cause: error });
-}
-
-function outputSchemaFile(schema: EvaluationOutputSchema): MaterialFile {
-  return {
-    path: EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH,
-    mediaType: "application/schema+json",
-    contentBase64: Buffer.from(`${JSON.stringify(schema, null, 2)}\n`, "utf8").toString("base64"),
-  };
 }
 
 export function createSpHarness(options: SpHarnessOptions): Harness {
@@ -162,32 +151,22 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       if ((input.handle.role === "evaluator") !== (input.evaluationOutputSchema !== undefined)) {
         throw new SpHarnessError("Evaluation output JSON Schema must be supplied only for an Evaluator", false);
       }
-      const session = input.data.initialSession;
-      const materials = input.data.initialMaterials;
+      const { initialSession: session, initialMaterials: materials } = input.data;
       const { resolveInitialMaterials, resolveInitialSession } = options;
       if (materials && !resolveInitialMaterials) {
         throw new SpHarnessError("Initial material bundle resolver is required for this Sample", false);
       }
-      const [files = [], context] = await Promise.all([
-        materials && resolveInitialMaterials?.(input.handle.ownerUserId, materials),
+      const [files, context] = await Promise.all([
+        Promise.all((materials ?? []).map((material) => resolveInitialMaterials!(input.handle.ownerUserId, material))),
         session && resolveInitialSession?.(input.handle.ownerUserId, session),
       ]);
-      const schemaFile = input.evaluationOutputSchema === undefined
-        ? undefined : outputSchemaFile(input.evaluationOutputSchema);
-      if (schemaFile && files.some((file) => file.path === schemaFile.path)) {
-        throw new SpHarnessError("Evaluator materials cannot overwrite the Project JSON Schema file", false);
-      }
-      const selectedMaterials = materials ?? (schemaFile && {
-        bundleId: OUTPUT_SCHEMA_BUNDLE_ID,
-        materialId: await sha256Hex(Buffer.from(schemaFile.contentBase64, "base64")),
-      });
       const body: EvalInitialization = {
         idempotencyKey: input.idempotencyKey,
-        data: materials || !selectedMaterials ? input.data : { ...input.data, initialMaterials: selectedMaterials },
+        data: input.data,
         ...(session ? { initialSession: { ...session, ...(context ? { context } : {}) } } : {}),
-        ...(selectedMaterials
-          ? { initialMaterials: { ...selectedMaterials, files: schemaFile ? [...files, schemaFile] : [...files] } }
-          : {}),
+        ...(materials ? { initialMaterials: materials.map((material, index) => ({ ...material, files: [...files[index]!] })) } : {}),
+        ...(input.evaluationOutputSchema === undefined
+          ? {} : { evaluationOutputSchema: { content: `${JSON.stringify(input.evaluationOutputSchema, null, 2)}\n` } }),
       };
       return dataBinding(await call("POST", `${handlePath(input.handle)}/initialization`, initializationRequest(body)));
     },

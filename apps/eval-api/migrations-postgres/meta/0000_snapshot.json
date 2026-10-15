@@ -38,6 +38,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "byte_size": {
+          "name": "byte_size",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
         "deleted_at": {
           "name": "deleted_at",
           "type": "timestamp with time zone",
@@ -99,6 +105,10 @@
         "eval_bundle_materials_description_ck": {
           "name": "eval_bundle_materials_description_ck",
           "value": "length(trim(\"eval_bundle_materials\".\"description\")) > 0"
+        },
+        "eval_bundle_materials_byte_size_ck": {
+          "name": "eval_bundle_materials_byte_size_ck",
+          "value": "\"eval_bundle_materials\".\"byte_size\" > 0"
         }
       },
       "isRLSEnabled": false

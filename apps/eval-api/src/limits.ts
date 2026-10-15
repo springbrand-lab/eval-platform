@@ -1,15 +1,16 @@
+import {
+  EVAL_INITIALIZATION_MAX_BYTES,
+  EVAL_MATERIAL_MAX_FILES,
+  EVAL_SESSION_CONTENT_MAX_CHARS,
+} from "@springbrand/eval-harness";
+
 /**
  * Single source for Eval API content limits. Request body limits are derived from these values
  * rather than restated; validation and HTTP routing import the same constants.
  */
 export const DATASET_DOCUMENT_BYTES = 10_000_000;
 export const PROMPT_DATASET_FILE_BYTES = 10_000_000;
-export const MATERIAL_FILE_BYTES = 5_000_000;
-export const MATERIAL_TOTAL_BYTES = 20_000_000;
 export const OUTPUT_SCHEMA_BYTES = 1_000_000;
-/** Eval SP enforces these through `@springbrand/eval-harness`; they only size request bodies here. */
-export const SP_MATERIAL_MAX_FILES = 500;
-export const SP_SESSION_CONTENT_CHARS = 2_000_000;
 /** Most error details one Bundle content validation or ZIP import reports. */
 export const BUNDLE_ERROR_DETAILS = 100;
 /** One Bundle ZIP import. */
@@ -39,11 +40,11 @@ function jsonTextBodyBytes(contentUnits: number): number {
 }
 
 export const PROMPT_IMPORT_BODY_BYTES = jsonTextBodyBytes(PROMPT_DATASET_FILE_BYTES);
-export const SESSION_BODY_BYTES = jsonTextBodyBytes(SP_SESSION_CONTENT_CHARS);
+export const SESSION_BODY_BYTES = jsonTextBodyBytes(EVAL_SESSION_CONTENT_MAX_CHARS);
 export const OUTPUT_SCHEMA_BODY_BYTES = jsonTextBodyBytes(OUTPUT_SCHEMA_BYTES);
 /** Base64 files plus each file's path and media type. */
-export const MATERIAL_BODY_BYTES = Math.ceil(MATERIAL_TOTAL_BYTES / 3) * 4
-  + (SP_MATERIAL_MAX_FILES + 1) * METADATA_BODY_BYTES;
+export const MATERIAL_BODY_BYTES = Math.ceil(EVAL_INITIALIZATION_MAX_BYTES / 3) * 4
+  + (EVAL_MATERIAL_MAX_FILES + 1) * METADATA_BODY_BYTES;
 /** One multipart archive plus its boundaries, part headers and metadata fields. */
 export const ZIP_BODY_BYTES = ZIP_ARCHIVE_BYTES + METADATA_BODY_BYTES;
 const UUID_CHARS = 36;

@@ -4,8 +4,6 @@ import Ajv2020 from "ajv/dist/2020.js";
 import { CatalogInputError, CatalogPayloadTooLargeError } from "./db/errors.js";
 import { OUTPUT_SCHEMA_BYTES } from "./limits.js";
 
-/** A material-relative path; SP writes it below the returned materialization root. */
-export const EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH = "/evaluation-output.schema.json";
 const schemaValidator = new Ajv2020({ strict: false, allErrors: true });
 
 /** Parse one uploaded JSON Schema file into a bounded JSON object whose numbers round-trip exactly. */

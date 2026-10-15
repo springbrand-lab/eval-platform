@@ -1,9 +1,10 @@
 import { extname } from "node:path";
+import { EVAL_INITIAL_FILE_MAX_BYTES } from "@springbrand/eval-harness";
 import { inspectStrictZip, StrictZipError, type StrictZipEntry, type StrictZipEntryLimit, type StrictZipErrorCode } from "@springbrand/utils";
 import { lookup } from "mime-types";
 import { isCatalogLabel } from "../db/catalog-metadata.js";
 import {
-  MATERIAL_FILE_BYTES, ZIP_ARCHIVE_BYTES, ZIP_ENTRIES, BUNDLE_ERROR_DETAILS, ZIP_EXPANDED_BYTES, ZIP_PATH_CHARS, ZIP_RESOURCES,
+  ZIP_ARCHIVE_BYTES, ZIP_ENTRIES, BUNDLE_ERROR_DETAILS, ZIP_EXPANDED_BYTES, ZIP_PATH_CHARS, ZIP_RESOURCES,
 } from "../limits.js";
 import { BundleFileError, type BundleFileErrorDetail } from "../sp/bundle-errors.js";
 import { validateMaterialFiles, validateSessionContent, type MaterialFile, type SessionContent } from "../sp/bundle-content.js";
@@ -70,8 +71,8 @@ async function inspect(bytes: Uint8Array, entryLimit?: StrictZipEntryLimit): Pro
 export async function readMaterialZip(bytes: Uint8Array): Promise<readonly MaterialZipResource[]> {
   const errors = new ZipErrors();
   const entries = await inspect(bytes, () => ({
-    maxBytes: MATERIAL_FILE_BYTES,
-    message: `A material file may contain at most ${MATERIAL_FILE_BYTES} bytes`,
+    maxBytes: EVAL_INITIAL_FILE_MAX_BYTES,
+    message: `A material file may contain at most ${EVAL_INITIAL_FILE_MAX_BYTES} bytes`,
   }));
   const topLevel = (path: string) => path.split("/", 1)[0]!;
   const sources = new Set(entries.map(({ path }) => topLevel(path)));
@@ -109,7 +110,7 @@ export async function readMaterialZip(bytes: Uint8Array): Promise<readonly Mater
   const resources: MaterialZipResource[] = [];
   for (const [source, { names, files }] of groups) {
     try {
-      resources.push({ source, files: validateMaterialFiles(files, { files: source, file: (index) => names[index] ?? source }) });
+      resources.push({ source, files: validateMaterialFiles(files, { files: source, file: (index) => names[index] ?? source }).files });
     } catch (error) {
       errors.addInvalid(error, source);
     }

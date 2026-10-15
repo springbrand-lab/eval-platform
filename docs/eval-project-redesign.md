@@ -209,7 +209,7 @@ Runtime 只用 Project 计划中冻结副本的 `AgentConfigRef` 调用 Eval SP�
 - **pipeline**：先执行新 Sampling；每条执行成功的 Sampling 单独进入评估。失败或取消的 Subject 不提交 Evaluator，其 EvaluationRecord 取消；一个 Subject 失败不阻塞其他成功 Sampling 的评估。
 - **evaluation**：只创建新的 EvaluationRecord，复用选中 Sampling 的 ProjectSample、Subject Chat、产物和轨迹；Subject 的 Attempt、资源、产物、轨迹和状态不被改动。Evaluator 只读取固定 ProjectSample 的 `evalPrompt`、`evalInitialMaterials`、评估输出 Schema 和 Subject 证据。
 
-评估输出 Schema 由 `getEvaluationOutputSchema` 读取，作为 `evaluation-output.schema.json` 写入每个 Evaluator 的初始化素材根目录；Evaluator 输出原样保存，Runtime 不解析、不校验。
+评估输出 Schema 由 `getEvaluationOutputSchema` 读取，随初始化写入每个 Evaluator 的固定路径 `/evaluations/<evaluationId>/evaluation-output.schema.json`（见 [SP Harness 协议](eval-sp-harness-protocol.md#initialization)）；Evaluator 输出原样保存，Runtime 不解析、不校验。
 
 ### 4.5 恢复、重试与证据
 

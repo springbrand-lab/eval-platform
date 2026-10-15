@@ -4,10 +4,12 @@ CREATE TABLE "eval_bundle_materials" (
 	"bundle_id" uuid NOT NULL,
 	"name" text NOT NULL,
 	"description" text NOT NULL,
+	"byte_size" integer NOT NULL,
 	"deleted_at" timestamp with time zone,
 	CONSTRAINT "eval_bundle_materials_owner_id_uq" UNIQUE("owner_user_id","material_id"),
 	CONSTRAINT "eval_bundle_materials_name_ck" CHECK (length(trim("eval_bundle_materials"."name")) > 0),
-	CONSTRAINT "eval_bundle_materials_description_ck" CHECK (length(trim("eval_bundle_materials"."description")) > 0)
+	CONSTRAINT "eval_bundle_materials_description_ck" CHECK (length(trim("eval_bundle_materials"."description")) > 0),
+	CONSTRAINT "eval_bundle_materials_byte_size_ck" CHECK ("eval_bundle_materials"."byte_size" > 0)
 );
 --> statement-breakpoint
 CREATE TABLE "eval_bundle_sessions" (

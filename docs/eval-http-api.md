@@ -30,7 +30,7 @@ Identifiers:
 - Runtime entity IDs in paths and Run bodies (Project, Run, ProjectSample, Sampling, Evaluation) are 1–512 characters without surrounding whitespace, control characters or `/` (`entityIdSchema`). Idempotency keys follow the same rule but may contain `/` (`idempotencyKeySchema`).
 - Dataset, Data, Material Bundle, Session Bundle, Material, Session, output-format and Agent Config IDs are UUIDs (`platformIdSchema`): case-insensitive on input, lowercase in responses. A non-UUID path segment is a `422`.
 
-Content limits live only in `apps/eval-api/src/limits.ts`; body limits are derived from them (worst-case JSON escaping plus metadata framing), so a body carrying maximal valid content is never rejected for size.
+Content limits live only in `apps/eval-api/src/limits.ts`, except the Material and Session limits, which are SP's `@springbrand/eval-harness` constants imported unchanged; body limits are derived from them (worst-case JSON escaping plus metadata framing), so a body carrying maximal valid content is never rejected for size.
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
@@ -38,7 +38,9 @@ Content limits live only in `apps/eval-api/src/limits.ts`; body limits are deriv
 | `SAMPLING_COUNT_MAX` | 100 | Largest `samplingCount` per Data |
 | `IDENTIFIER_CHARS` | 512 | Longest Runtime ID or idempotency key |
 | `DATASET_DOCUMENT_BYTES`, `PROMPT_DATASET_FILE_BYTES` | 10 MB each | Dataset document and Prompt Dataset file |
-| `MATERIAL_FILE_BYTES`, `MATERIAL_TOTAL_BYTES` | 5 MB, 20 MB | One Material file, one Material |
+| `EVAL_INITIAL_FILE_MAX_BYTES`, `EVAL_INITIALIZATION_MAX_BYTES` (SP) | 5 MB, 20 MB | One Material file; SP's whole-initialization budget, applied to one Material and to the Materials one Data field binds |
+| `EVAL_MATERIAL_MAX_FILES` (SP) | 500 | Files in one Material |
+| `EVAL_SESSION_CONTENT_MAX_CHARS`, `EVAL_SESSION_MAX_ENTRIES` (SP) | 2,000,000, 10,000 | Characters and canonical entries in one Session |
 | `OUTPUT_SCHEMA_BYTES` | 1 MB | One output-format file |
 | `ZIP_ARCHIVE_BYTES`, `ZIP_EXPANDED_BYTES` | 50 MB, 100 MB | One ZIP archive, its declared decompressed total |
 | `ZIP_ENTRIES`, `ZIP_RESOURCES` | 5,000, 500 | Entries in one archive; Material top-level entries or Session files in one archive |
@@ -47,8 +49,8 @@ Content limits live only in `apps/eval-api/src/limits.ts`; body limits are deriv
 
 | Body limit | Bytes | Routes |
 | --- | --- | --- |
-| `METADATA_BODY_BYTES` | 4,096 | Material Bundle/Session Bundle/Material/Session/output-format metadata PATCH; Data initial-resources PATCH |
-| `JSON_BODY_BYTES` | 1,000,000 | Dataset create/PUT and membership; Data create/PUT; Agent Config POST/PATCH; evaluation-plan PUT |
+| `METADATA_BODY_BYTES` | 4,096 | Material Bundle/Session Bundle/Material/Session/output-format metadata PATCH |
+| `JSON_BODY_BYTES` | 1,000,000 | Dataset create/PUT and membership; Data create/PUT and initial-resources PATCH; Agent Config POST/PATCH; evaluation-plan PUT |
 | `PROJECT_BODY_BYTES` | 5,540,000 | Project creation |
 | `RUN_PREVIEW_BODY_BYTES` | 30,757,168 | Run preview |
 | `RUN_BODY_BYTES` | 61,510,240 | Run submission |
@@ -201,15 +203,15 @@ Datasets and Data are the user's editable source catalog; Projects copy what the
 | `GET /api/datasets/{datasetId}/data` | Member `Data[]` | `404 DATASET_NOT_FOUND` |
 | `POST /api/datasets/{datasetId}/data` | `{dataIds}` / `204`; atomic attach | `400 DATASET_INPUT_INVALID`; `404 DATASET_NOT_FOUND`, `DATA_NOT_FOUND` |
 | `DELETE /api/datasets/{datasetId}/data` | `{dataIds}` / `204` | `404 DATASET_NOT_FOUND` |
-| `POST /api/datasets/import?format=json\|yaml` | Raw document text / `201 {dataset, data}` | `400 DATASET_INPUT_INVALID`, `REQUEST_INVALID_INPUT`; `409 DATASET_IDENTITY_CONFLICT` |
+| `POST /api/datasets/import?format=json\|yaml` | Raw document text / `201 {dataset, data}` | `400 DATASET_INPUT_INVALID`, `REQUEST_INVALID_INPUT`; `404 BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`); `409 DATASET_IDENTITY_CONFLICT` |
 | `GET /api/datasets/{datasetId}/export?format=json\|yaml` | Document text with `application/json` or `application/yaml` | `404 DATASET_NOT_FOUND` |
 | `POST /api/datasets/prompt-import` | `{name, description, format:"json"\|"jsonl", content}` / `201 {dataset, data}`; see [Dataset upload](eval-dataset-upload.md) | `400 DATASET_INPUT_INVALID` |
 | `GET /api/data?datasetId=` | Non-deleted `Data[]`, optionally one Dataset's members | `404 DATASET_NOT_FOUND` |
-| `POST /api/data` | Data input / `201 Data` | `400 DATASET_INPUT_INVALID`; `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 DATASET_IDENTITY_CONFLICT` |
+| `POST /api/data` | Data input / `201 Data` | `400 DATASET_INPUT_INVALID`; `404 BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`); `409 DATASET_IDENTITY_CONFLICT` |
 | `GET /api/data/{dataId}` | `Data` | `404 DATA_NOT_FOUND` |
-| `PUT /api/data/{dataId}` | Data input / `Data` | `400 DATASET_INPUT_INVALID`; `404 DATA_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND` |
+| `PUT /api/data/{dataId}` | Data input / `Data` | `400 DATASET_INPUT_INVALID`; `404 DATA_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`) |
 | `DELETE /api/data/{dataId}` | `204`; soft delete, idempotent | `409 DATA_IN_USE` while an active Dataset contains it |
-| `PATCH /api/data/{dataId}/initial-resources` | `{initialMaterials?, evalInitialMaterials?, initialSession?}`, each a reference or `null` to clear / `Data`; see [Dataset upload](eval-dataset-upload.md) | `404 DATA_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND` |
+| `PATCH /api/data/{dataId}/initial-resources` | `{initialMaterials?, evalInitialMaterials?, initialSession?}`; each present field replaces the whole value (a reference array for the two material fields, one reference for `initialSession`) or `null` clears it / `Data`; see [Dataset upload](eval-dataset-upload.md) | `404 DATA_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`) |
 
 Data and reference validation rules are those of `@eval-platform/eval-dataset` and [Dataset upload](eval-dataset-upload.md).
 
@@ -222,7 +224,7 @@ A Material Bundle contains only Materials and a Session Bundle only Sessions; ou
 | `GET, POST /api/material-bundles` | GET `MaterialBundle[]` (`{bundleId, name, description}`); POST multipart `name`, `description`, optional `zip` / `201 {bundle, imported:[{source, material}]}` | `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
 | `GET, PATCH, DELETE /api/material-bundles/{bundleId}` | `MaterialBundle`; DELETE `204` and also deletes its Materials | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` while active Data reference its Materials |
 | `POST /api/material-bundles/{bundleId}/import` | Multipart `zip` / `201 {bundle, imported:[{source, material}]}` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
-| `GET, POST /api/material-bundles/{bundleId}/materials` | POST `{name, description, files:[{path, mediaType, contentBase64}]}` / `201 {bundleId, materialId, name, description}` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
+| `GET, POST /api/material-bundles/{bundleId}/materials` | POST `{name, description, files:[{path, mediaType, contentBase64}]}` / `201 {bundleId, materialId, name, description, byteSize}` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
 | `GET, PATCH, DELETE /api/material-bundles/{bundleId}/materials/{materialId}` | Material; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` |
 | `GET, POST /api/session-bundles`, `GET, PATCH, DELETE /api/session-bundles/{bundleId}`, `POST /api/session-bundles/{bundleId}/import` | As for Material Bundles, with `SessionBundle` and `imported:[{source, session}]` | As for Material Bundles |
 | `GET, POST /api/session-bundles/{bundleId}/sessions` | POST `{name, description, format:"json"\|"jsonl", content}` / `201 {bundleId, sessionId, name, description, format}` | As for Materials |
@@ -297,7 +299,7 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `BUNDLE_RESOURCE_NOT_FOUND` | 404 | Unknown or deleted Material Bundle, Session Bundle, Material or Session, including a reference whose `bundleId` names the other Bundle type |
 | `BUNDLE_RESOURCE_IN_USE` | 409 | Resource or Bundle deletion while active Data reference it or its resources |
 | `BUNDLE_FILE_NOT_FOUND` | 404 | Bundle file missing |
-| `BUNDLE_FILE_TOO_LARGE` | 413 | Material file, Material or ZIP archive over a limit; `errors` name the ZIP entries |
+| `BUNDLE_FILE_TOO_LARGE` | 413 | Material file, Material, one Data field's bound Materials or ZIP archive over a limit; `errors` name the ZIP entries or the Data field |
 | `BUNDLE_FILE_INVALID` | 400 | Material or Session content, ZIP archive or ZIP entry invalid; `errors` name the ZIP entries |
 | `BUNDLE_FILE_UNAVAILABLE` | 503 | Bundle directory unreadable; retry |
 | `OUTPUT_SCHEMA_NOT_FOUND` | 404 | Unknown or deleted output format |

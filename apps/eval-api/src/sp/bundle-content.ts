@@ -1,55 +1,50 @@
 import { parseStrictJson } from "@eval-platform/eval-dataset";
 import {
+  EVAL_INITIALIZATION_MAX_BYTES,
   evalInitialContextSchema,
-  evalInitializationSchema,
-  evalMaterialFileSchema,
-  evalMaterialPath,
+  evalMaterialFilesSchema,
   readEvalCanonicalContext,
+  type EvalInitialMaterial,
 } from "@springbrand/eval-harness";
-import type { z } from "zod";
-import { MATERIAL_FILE_BYTES, MATERIAL_TOTAL_BYTES, BUNDLE_ERROR_DETAILS } from "../limits.js";
+import { z } from "zod";
+import { BUNDLE_ERROR_DETAILS } from "../limits.js";
 import { BundleFileError, errorMessage, type BundleFileErrorDetail } from "./bundle-errors.js";
 
-export type MaterialFile = z.output<typeof evalMaterialFileSchema>;
+export type MaterialFile = EvalInitialMaterial["files"][number];
+/** One Material's validated files and their total decoded bytes. */
+export type MaterialContent = { readonly files: readonly MaterialFile[]; readonly byteSize: number };
 export type SessionContent = z.output<typeof evalInitialContextSchema>;
 /** How error details name one material's file list and each file in it. */
 type MaterialLabels = { readonly files: string; readonly file: (index: number) => string };
 
-/** SP's initialization contract owns the per-material file count and file shape. */
-export const materialFilesSchema = evalInitializationSchema.shape.initialMaterials.unwrap().shape.files.min(1);
+/** SP's Material files rule; Eval also requires a file. */
+const filesSchema = evalMaterialFilesSchema.min(1, "A material must contain at least one file");
 
 const listLabels: MaterialLabels = { files: "files", file: (index) => `files.${index}` };
 
 /** The single Material content rule for uploads, ZIP imports and stored manifests. */
-export function validateMaterialFiles(value: unknown, labels: MaterialLabels = listLabels): readonly MaterialFile[] {
-  const parsed = materialFilesSchema.safeParse(value);
+export function validateMaterialFiles(value: unknown, labels: MaterialLabels = listLabels): MaterialContent {
+  const parsed = filesSchema.safeParse(value);
   if (!parsed.success) {
-    throw invalid("Initial material files are invalid", parsed.error.issues.map(({ path, message }) =>
-      typeof path[0] === "number"
-        ? { path: labels.file(path[0]), errMsg: issueMessage(path.slice(1), message) }
-        : { path: labels.files, errMsg: issueMessage(path, message) }));
+    const details = (issues: readonly z.core.$ZodIssue[]) => issues.map(({ path: [index, ...path], message }) =>
+      typeof index === "number"
+        ? { path: labels.file(index), errMsg: issueMessage(path, message) }
+        : { path: labels.files, errMsg: message });
+    const tooBig = parsed.error.issues.filter(({ code }) => code === "too_big");
+    if (tooBig.length > 0) throw tooLarge(details(tooBig));
+    throw invalid("Initial material files are invalid", details(parsed.error.issues));
   }
   const files = parsed.data;
-  const details: BundleFileErrorDetail[] = [];
-  const paths = new Set<string>();
-  for (const [index, file] of files.entries()) {
-    try {
-      evalMaterialPath("", file.path);
-    } catch (error) {
-      details.push({ path: labels.file(index), errMsg: errorMessage(error) });
-    }
-    if (paths.has(file.path)) details.push({ path: labels.file(index), errMsg: `Duplicate material file path ${file.path}` });
-    paths.add(file.path);
+  const byteSize = files.reduce((sum, file) => sum + Buffer.byteLength(file.contentBase64, "base64"), 0);
+  requireInitializationBudget(byteSize, labels.files);
+  return { files, byteSize };
+}
+
+/** SP's whole-initialization budget, applied to one Material and to the Materials one Data field binds. */
+export function requireInitializationBudget(byteSize: number, path: string): void {
+  if (byteSize > EVAL_INITIALIZATION_MAX_BYTES) {
+    throw tooLarge([{ path, errMsg: `Initial materials may contain at most ${EVAL_INITIALIZATION_MAX_BYTES} bytes` }]);
   }
-  if (details.length > 0) throw invalid("Initial material files are invalid", details);
-  let total = 0;
-  for (const [index, file] of files.entries()) {
-    const size = Buffer.byteLength(file.contentBase64, "base64");
-    total += size;
-    if (size > MATERIAL_FILE_BYTES) throw tooLarge(labels.file(index), `A material file may contain at most ${MATERIAL_FILE_BYTES} bytes`);
-    if (total > MATERIAL_TOTAL_BYTES) throw tooLarge(labels.files, `A material may contain at most ${MATERIAL_TOTAL_BYTES} bytes`);
-  }
-  return files;
 }
 
 /**
@@ -87,8 +82,8 @@ function invalid(message: string, details: readonly BundleFileErrorDetail[]): Bu
   return new BundleFileError("invalid", message, { details: details.slice(0, BUNDLE_ERROR_DETAILS) });
 }
 
-function tooLarge(path: string, errMsg: string): BundleFileError {
-  return new BundleFileError("too-large", "Initial materials are too large", { details: [{ path, errMsg }] });
+function tooLarge(details: readonly BundleFileErrorDetail[]): BundleFileError {
+  return new BundleFileError("too-large", "Initial materials are too large", { details: details.slice(0, BUNDLE_ERROR_DETAILS) });
 }
 
 function issueMessage(path: readonly PropertyKey[], message: string): string {

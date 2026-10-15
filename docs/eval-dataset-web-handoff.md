@@ -11,7 +11,7 @@
 | 对象 | 用户看到什么 | 关系与用途 |
 | --- | --- | --- |
 | Dataset | 必填的 `name`、`description` | 一次 Prompt JSON/JSONL 导入产生一个 Dataset；它关联多条 Data，不隶属于 Project。 |
-| Data | 每条必填的 `name`、`description`、`userPrompt`、`evalPrompt` | 一条可复用样本；可额外绑定执行素材、评估素材、执行上下文。同一用户的 Data 可以属于多个 Dataset。 |
+| Data | 每条必填的 `name`、`description`、`userPrompt`、`evalPrompt` | 一条可复用样本；可额外绑定多个执行素材、多个评估素材和一个执行上下文。同一用户的 Data 可以属于多个 Dataset。 |
 | 素材 Bundle（Material Bundle） | 必填的 `name`、`description` | 只装 Material。创建时可直接附带一个 ZIP 一次导入，之后也可再导入 ZIP 或逐条上传。 |
 | 上下文 Bundle（Session Bundle） | 必填的 `name`、`description` | 只装 Session，没有文件夹概念。创建、导入和逐条上传方式与素材 Bundle 相同。两类 Bundle 是互相独立的资源，不能混放。 |
 | Material | 必填的 `name`、`description` | 素材 Bundle 内的一条素材，可以是一个文件，也可以是一个目录下的多个文件。Data 绑定到具体 `bundleId + materialId`。 |
@@ -79,7 +79,7 @@ Authorization: Bearer <Eval SP session token>
 
 ZIP 任一条目不合格时整个请求失败，不会创建 Bundle 或任何资源，Web 不需要做部分回滚。失败响应为 `400 BUNDLE_FILE_INVALID` 或 `413 BUNDLE_FILE_TOO_LARGE`，`errors[]` 的 `path` 是 ZIP 内的条目名（JSONL 某行出错时附 `:<行号>`；整个 Material 不合格时，如文件数或总大小超限，则是该 Material 的顶层名），`errMsg` 是原因；遇到第一个超限项时只返回该项（`413`）。素材 ZIP 中没有任何文件的顶层目录会被拒绝。Web 应逐条列出这些错误，让用户修正后重新上传整个 ZIP。导入没有幂等键：响应丢失后重试可能产生第二个 Bundle 或重复资源，应先刷新列表确认，再由用户删除多余项。
 
-逐条上传的 Material 上传体是 `{name,description,files:[{path,mediaType,contentBase64}]}`。单文件也是长度为 1 的 `files`。目录上传时，Web 把选中的文件展开成数组，保留目录内相对路径；例如 `/brief.txt`、`/assets/logo.png`。`path` 必须以 `/` 开头，不接受空路径段、`.`、`..`、`.git` 或重复路径；空目录不能单独表示。`contentBase64` 是纯 Base64 字符串，不能带 `data:` 前缀；`mediaType` 必填。文件数量和大小上限见 [Dataset 上传契约](eval-dataset-upload.md)；超过单文件或总量上限返回 `413`。
+逐条上传的 Material 上传体是 `{name,description,files:[{path,mediaType,contentBase64}]}`。单文件也是长度为 1 的 `files`。目录上传时，Web 把选中的文件展开成数组，保留目录内相对路径；例如 `/brief.txt`、`/assets/logo.png`。`path` 必须以 `/` 开头，不接受空路径段、`.`、`..`、`.git` 或重复路径；空目录不能单独表示。`contentBase64` 是纯 Base64 字符串，不能带 `data:` 前缀；`mediaType` 必填。文件数量和大小上限见 [Dataset 上传契约](eval-dataset-upload.md)；超过单文件或总量上限返回 `413`。上传成功返回的 Material 带 `byteSize`（解码后字节数）。
 
 Session 上传体是 `{name,description,format:"json"|"jsonl",content}`，`content` 同样是文件文本。JSON 格式的最小结构示例：
 
@@ -93,22 +93,26 @@ JSONL 则每行一条这样的 entry，而不是外层 `entries` 对象，整个
 
 导入成功后，在每条 Data 上提供三个独立的可选选择器：
 
-| Data 字段 | 选择粒度 | 可选来源 | 使用阶段 |
-| --- | --- | --- | --- |
-| `initialMaterials` | `{bundleId,materialId}` | 只列素材 Bundle 及其 Material | Subject 执行 |
-| `evalInitialMaterials` | `{bundleId,materialId}` | 只列素材 Bundle 及其 Material | Evaluator 评估 |
-| `initialSession` | `{bundleId,sessionId}` | 只列上下文 Bundle 及其 Session | Subject 执行 |
+| Data 字段 | 选择方式 | 值 | 可选来源 | 使用阶段 |
+| --- | --- | --- | --- | --- |
+| `initialMaterials`（执行素材） | 多选、有序 | `[{bundleId,materialId}, ...]` | 只列素材 Bundle 及其 Material | Subject 执行 |
+| `evalInitialMaterials`（评估素材） | 多选、有序 | `[{bundleId,materialId}, ...]` | 只列素材 Bundle 及其 Material | Evaluator 评估 |
+| `initialSession`（上下文） | 单选 | `{bundleId,sessionId}` | 只列上下文 Bundle 及其 Session | Subject 执行 |
 
-素材选择器从 `GET /api/material-bundles` 选 Bundle、再从其 `materials` 选 Material；上下文选择器从 `GET /api/session-bundles` 选 Bundle、再从其 `sessions` 选 Session。三个选择器可以选择不同 Bundle 下的资源。`bundleId` 填成另一类 Bundle 时后端返回 `404 BUNDLE_RESOURCE_NOT_FOUND`。上下文只有执行阶段可选，没有评估上下文字段。提交到 `PATCH /api/data/{dataId}/initial-resources`：
+素材选择器从 `GET /api/material-bundles` 选 Bundle、再从其 `materials` 选 Material，同一个选择器可以从不同素材 Bundle 中累加选择；上下文选择器从 `GET /api/session-bundles` 选 Bundle、再从其 `sessions` 选一个 Session。素材列表按用户排列的顺序提交，顺序会被保存；同一个 Material 在一个字段中只能出现一次，选择器应禁止重复选择。没有选中任何素材时提交 `null` 清空，不要提交空数组（`[]` 会被拒绝）。数组形状规则只以[包边界](package-boundaries.md#eval-dataset)为准。`bundleId` 填成另一类 Bundle 时后端返回 `404 BUNDLE_RESOURCE_NOT_FOUND`。上下文只有执行阶段可选，没有评估上下文字段。提交到 `PATCH /api/data/{dataId}/initial-resources`：
 
 ```json
 {
-  "initialMaterials": { "bundleId": "<uuid>", "materialId": "<uuid>" },
-  "evalInitialMaterials": null
+  "initialMaterials": [
+    { "bundleId": "<uuid>", "materialId": "<uuid>" },
+    { "bundleId": "<另一个 uuid>", "materialId": "<uuid>" }
+  ],
+  "evalInitialMaterials": null,
+  "initialSession": { "bundleId": "<uuid>", "sessionId": "<uuid>" }
 }
 ```
 
-请求只需包含本次要改变的字段；省略表示保持原绑定，`null` 表示清空，至少要提交一个字段。返回更新后的完整 Data。后端会检查资源存在、未删除且属于当前用户。选择器应使用两类 Bundle、Material、Session 列表的 `name` 和 `description`，不要让用户填写 ID。
+请求只需包含本次要改变的字段；省略表示保持原绑定，`null` 表示清空，至少要提交一个字段。提交的素材数组整体替换该字段原有的全部素材，Web 增删其中一项时要提交完整的新数组。返回更新后的完整 Data。后端会检查资源存在、未删除且属于当前用户。同一字段绑定的所有 Material 解码后总大小不能超过 20 MB（SP 的 `EVAL_INITIALIZATION_MAX_BYTES`），超出时返回 `413 BUNDLE_FILE_TOO_LARGE`，`errors[0].path` 是该字段名；Material 记录的 `byteSize` 即其字节数，选择器可据此提前提示。通用 Data 创建、修改和导入同样执行这项检查。选择器应使用两类 Bundle、Material、Session 列表的 `name` 和 `description`，不要让用户填写 ID。
 
 ### 4. 管理评估输出格式并在评估计划中选择
 
@@ -128,7 +132,7 @@ Web 用 `GET /api/evaluation-output-schemas` 展示可选格式。输出格式�
 - 两类 Bundle、Material、Session 和输出格式的 `name`、`description` 可通过各自详情路由的 `PATCH` 修改，提交其中一个或两个字段即可，值必须非空白。详情路由分别是 `/api/material-bundles/{bundleId}`、`/api/material-bundles/{bundleId}/materials/{materialId}`、`/api/session-bundles/{bundleId}`、`/api/session-bundles/{bundleId}/sessions/{sessionId}`、`/api/evaluation-output-schemas/{outputSchemaId}`；它们也支持 `GET` 和 `DELETE`。上传后的文件或 Schema 正文不能修改；要换内容，创建新资源后重新绑定。
 - Dataset 用 `PUT /api/datasets/{datasetId}` 全量替换可编辑字段。Prompt Dataset 的 `name`、`description` 始终必填。Data 用 `PUT /api/data/{dataId}` 全量替换；Web 必须从当前 Data 合并未改字段再提交，否则省略的 Prompt、业务字段或资源引用会被移除。Prompt Dataset 成员的名称、描述和两个 Prompt 不能被改成空值。只改资源 ID 时优先用上面的专用 `PATCH`。
 - Data 可被同一用户的多个 Dataset 复用。`POST /api/datasets/{datasetId}/data` 用 `{dataIds:[...]}` 关联已有 Data；同一路径的 `DELETE` 解除关联。修改共享 Data 会影响所有引用它的 Dataset。
-- 删除都是软删除，列表和详情不再返回已删除的资源，上传文件字节仍留在目录。只要任一**活动 Data** 仍引用某个 Material 或 Session，删除它或它所在的 Bundle 就返回 `409`；即使该 Data 当前不属于任何 Dataset，也算绑定。Web 应先清空或改绑相关 Data，再重试删除。删除素材 Bundle 会把其 Material 一起标记删除，删除上下文 Bundle 会把其 Session 一起标记删除。
+- 删除都是软删除，列表和详情不再返回已删除的资源，上传文件字节仍留在目录。只要任一**活动 Data** 仍引用某个 Material（在执行素材或评估素材任一列表中）或 Session，删除它或它所在的 Bundle 就返回 `409`；即使该 Data 当前不属于任何 Dataset，也算绑定。Web 应先清空或改绑相关 Data，再重试删除。删除素材 Bundle 会把其 Material 一起标记删除，删除上下文 Bundle 会把其 Session 一起标记删除。
 - 输出格式的删除总是允许：已选用它的评估计划继续按 ID 读取 Schema，只是它不能再被新选择。
 - Data 仍属于任一未删除 Dataset 时不能删除（`409 DATA_IN_USE`），先解除 Dataset 关联。Dataset 删除不受限制，也不会顺带删除可复用 Data。Project 保存的是 Dataset/Data 快照，目录中的修改和删除都不影响已有 Project，也从不因 Project 被阻止。
 
@@ -149,7 +153,7 @@ Web 最少需要完成以下闭环：
 
 1. 上传 Prompt JSON/JSONL，并在 Dataset 列表和详情中显示 Dataset、Data 的名称与描述。
 2. 分开的素材 Bundle 与上下文 Bundle 入口：创建（可附 ZIP）、导入 ZIP、逐条上传、列出 Material 或 Session，逐条上传素材支持单文件与目录文件数组；ZIP 失败时逐条展示条目错误。
-3. 对每条 Data 独立绑定、改绑、清空执行素材、评估素材和执行上下文。
+3. 对每条 Data 独立绑定、改绑、清空执行素材（多选）、评估素材（多选）和执行上下文（单选）。
 4. 上传、列出输出格式，并在 Project 创建或评估计划替换中选择其 ID；评估计划锁定后只读展示。
 5. 提供元数据修改、关联解除和软删除入口；对 `422`、`409`、`404`、`413` 给出可操作的提示。
 

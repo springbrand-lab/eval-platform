@@ -9,8 +9,9 @@ type ResourceLocation = { readonly path: string; readonly ownerDirectory: string
 export interface BundleDirectory {
   resolveInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef): Promise<readonly MaterialFile[]>;
   resolveInitialSession(ownerUserId: string, reference: InitialSessionRef): Promise<SessionContent | undefined>;
+  /** Validate and store one Material's files; resolves to their total decoded bytes. */
   uploadInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef,
-    files: readonly MaterialFile[]): Promise<void>;
+    files: readonly MaterialFile[]): Promise<number>;
   uploadInitialSession(ownerUserId: string, reference: InitialSessionRef,
     context: SessionContent): Promise<void>;
   removeInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef): Promise<void>;
@@ -96,8 +97,10 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
   }
 
   return {
-    async uploadInitialMaterials(ownerUserId, reference, files) {
-      await writeResource(materialsLocation(ownerUserId, reference), { files: validateMaterialFiles(files) });
+    async uploadInitialMaterials(ownerUserId, reference, input) {
+      const { files, byteSize } = validateMaterialFiles(input);
+      await writeResource(materialsLocation(ownerUserId, reference), { files });
+      return byteSize;
     },
     async uploadInitialSession(ownerUserId, reference, context) {
       await writeResource(sessionLocation(ownerUserId, reference), validateSessionContent(context));
@@ -114,7 +117,7 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
       if (!isRecord(manifest) || Object.keys(manifest).length !== 1 || !("files" in manifest)) {
         throw new BundleFileError("invalid", "Initial material manifest must contain only files");
       }
-      return validateMaterialFiles(manifest.files);
+      return validateMaterialFiles(manifest.files).files;
     },
     async resolveInitialSession(ownerUserId, reference) {
       const context = await readResource(sessionLocation(ownerUserId, reference));

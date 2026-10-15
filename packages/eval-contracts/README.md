@@ -26,7 +26,7 @@ Subject 的产物和完整轨迹是执行终态的必需证据。`Sampling.execu
 
 `ProjectPlan` 是一次一致读取的 Project 计划：`project`、按绑定顺序的 `datasets`（每个含创建时成员顺序的 `projectSampleIds`）、`execution` 与 `executionPlanDigest`，以及可空的 `evaluation: ProjectEvaluation`（`plan`、`digest`、`lockedAt` 只能一起存在）。`ExecutionPlan` 创建后不可修改，含 Subject `harness`、`subjectAgentConfig`、`executionConcurrency` 和 `retryPolicy`；`EvaluationPlan` 含 SP 框架的 `evaluationHarness`、`evaluatorAgentConfig`、`evaluationConcurrency`、`retryPolicy` 和 `outputSchema`（Schema ID 与规范 JSON 的 sha256），在首个 pipeline/evaluation Run 准入时锁定，锁定前可整体替换。Harness 中的 `agentConfig` 是 Project 的冻结副本引用，指向 Eval SP 自己的 `user-agent` 库；`AgentConfigSnapshot` 是冻结时的正文快照，只用于展示，运行从不用它重建配置。
 
-评估输出格式是 Eval API 中独立上传的一份带名称和描述的 draft 2020-12 JSON Schema 文件，正文不可变。每个 Evaluator 初始化前在自己 Workspace 的素材根目录下收到 `evaluation-output.schema.json`。`EvaluationAgentOutput.structuredOutput` 是 Evaluator 写在 `/evaluations/<evaluationId>/` 下的结果文件：路径、原始 UTF-8 文本和可选 hash，不是解析后的副本；缺失时由 Metrics 报告为 unavailable，不当作 0。
+评估输出格式是 Eval API 中独立上传的一份带名称和描述的 draft 2020-12 JSON Schema 文件，正文不可变。每个 Evaluator 初始化前在自己 Workspace 的固定路径 `/evaluations/<evaluationId>/evaluation-output.schema.json` 收到它（见 [SP Harness 协议](../../docs/eval-sp-harness-protocol.md#initialization)）。`EvaluationAgentOutput.structuredOutput` 是 Evaluator 写在 `/evaluations/<evaluationId>/` 下的结果文件：路径、原始 UTF-8 文本和可选 hash，不是解析后的副本；缺失时由 Metrics 报告为 unavailable，不当作 0。
 
 `AgentObservationRef` 是 Sampling（Subject）或 EvaluationRecord（Evaluator）的只读观察目标：角色、Project、Sampling、可选 Evaluation、Chat 所属用户、可选 Chat ID 和 `not-started | available`。它不包含可写 Chat URL。
 

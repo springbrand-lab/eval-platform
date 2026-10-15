@@ -14,6 +14,16 @@ export const initialMaterialsRefSchema = z.strictObject({
   materialId: platformIdSchema,
 }).readonly();
 
+/** A non-empty, ordered material list naming each `(bundleId, materialId)` at most once. */
+export const initialMaterialsRefsSchema = z.array(initialMaterialsRefSchema).min(1).superRefine((refs, context) => {
+  const seen = new Set<string>();
+  refs.forEach(({ bundleId, materialId }, index) => {
+    const key = `${bundleId}/${materialId}`;
+    if (seen.has(key)) context.addIssue({ code: "custom", path: [index], message: `Duplicate material reference: ${key}` });
+    seen.add(key);
+  });
+}).readonly();
+
 const datasetFieldsSchema = z.strictObject({
   name: z.string().trim().min(1),
   description: z.string().optional(),
@@ -27,8 +37,8 @@ const dataFieldsSchema = z.object({
     message: "evalPrompt must not be blank",
   }).optional(),
   initialSession: initialSessionRefSchema.optional(),
-  initialMaterials: initialMaterialsRefSchema.optional(),
-  evalInitialMaterials: initialMaterialsRefSchema.optional(),
+  initialMaterials: initialMaterialsRefsSchema.optional(),
+  evalInitialMaterials: initialMaterialsRefsSchema.optional(),
 });
 
 export const datasetInputSchema = datasetFieldsSchema.readonly();

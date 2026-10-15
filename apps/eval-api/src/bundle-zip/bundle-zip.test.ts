@@ -1,6 +1,7 @@
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter, type ZipWriterAddDataOptions } from "@zip.js/zip.js";
+import { EVAL_INITIAL_FILE_MAX_BYTES } from "@springbrand/eval-harness";
 import { describe, expect, it } from "vitest";
-import { MATERIAL_FILE_BYTES, ZIP_ARCHIVE_BYTES, ZIP_ENTRIES, BUNDLE_ERROR_DETAILS, ZIP_EXPANDED_BYTES, ZIP_RESOURCES } from "../limits.js";
+import { ZIP_ARCHIVE_BYTES, ZIP_ENTRIES, BUNDLE_ERROR_DETAILS, ZIP_EXPANDED_BYTES, ZIP_RESOURCES } from "../limits.js";
 import { readMaterialZip, readSessionZip } from "./bundle-zip.js";
 
 type ZipEntry = readonly [name: string, content?: string | Uint8Array, options?: ZipWriterAddDataOptions];
@@ -141,7 +142,7 @@ describe("Material ZIP", () => {
 
   it("rejects archives past their size limits before inflating them", async () => {
     await expect(readMaterialZip(new Uint8Array(ZIP_ARCHIVE_BYTES + 1))).rejects.toMatchObject(tooLarge());
-    await expect(readMaterialZip(await zip(["big.bin", new Uint8Array(MATERIAL_FILE_BYTES + 1)])))
+    await expect(readMaterialZip(await zip(["big.bin", new Uint8Array(EVAL_INITIAL_FILE_MAX_BYTES + 1)])))
       .rejects.toMatchObject(tooLarge("big.bin"));
     await expect(readMaterialZip(await zip(...Array.from({ length: ZIP_ENTRIES + 1 }, (_, index): ZipEntry => [`${index}.txt`]))))
       .rejects.toMatchObject(tooLarge());

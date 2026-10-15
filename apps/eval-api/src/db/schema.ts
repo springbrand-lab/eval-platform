@@ -92,6 +92,7 @@ export const bundleMaterials = pgTable("eval_bundle_materials", {
   bundleId: uuid("bundle_id").notNull(),
   name: text("name").notNull(),
   description: text("description").notNull(),
+  byteSize: integer("byte_size").notNull(),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
 }, (table) => [
   unique("eval_bundle_materials_owner_id_uq").on(table.ownerUserId, table.materialId),
@@ -99,6 +100,7 @@ export const bundleMaterials = pgTable("eval_bundle_materials", {
   index("eval_bundle_materials_bundle_idx").on(table.bundleId),
   check("eval_bundle_materials_name_ck", sql`length(trim(${table.name})) > 0`),
   check("eval_bundle_materials_description_ck", sql`length(trim(${table.description})) > 0`),
+  check("eval_bundle_materials_byte_size_ck", sql`${table.byteSize} > 0`),
 ]);
 
 export const bundleSessions = pgTable("eval_bundle_sessions", {

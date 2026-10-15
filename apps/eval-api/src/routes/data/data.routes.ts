@@ -4,7 +4,7 @@ import { responseSchema } from "@springbrand/http/catalog";
 import { jsonContent } from "stoker/openapi/helpers";
 import { dataInitialResourcePatchSchema } from "../../initial-resources.js";
 import { jsonBody } from "../../lib/request-body.js";
-import { JSON_BODY_BYTES, METADATA_BODY_BYTES } from "../../limits.js";
+import { JSON_BODY_BYTES } from "../../limits.js";
 import {
   bodyErrorResponses,
   conflictResponse,
@@ -88,7 +88,7 @@ export const bindInitialResources = createRoute({
   path: "/{dataId}/initial-resources",
   tags: ["Data"],
   summary: "Bind or clear the Data's initial Materials and Session",
-  middleware: [jsonBody(METADATA_BODY_BYTES)],
+  middleware: [jsonBody(JSON_BODY_BYTES)],
   request: { params, body: jsonBodyContent(dataInitialResourcePatchSchema) },
   responses: {
     200: jsonContent(responseSchema(dataSchema), "Data"),

@@ -3,7 +3,7 @@ import { and, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { SelectedFieldsFlat } from "drizzle-orm/pg-core";
 import type { SelectResultFields } from "drizzle-orm/query-builders/select.types";
 import { createId } from "@springbrand/utils";
-import type { MaterialFile, SessionContent } from "../sp/bundle-content.js";
+import { requireInitializationBudget, type MaterialFile, type SessionContent } from "../sp/bundle-content.js";
 import type { BundleDirectory } from "../sp/bundle-directory.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
@@ -50,12 +50,15 @@ export interface BundleCatalog<R, I> {
 
 type CatalogWriter = Pick<EvalDb, "select" | "insert">;
 
-type DataReferenceField = "initialMaterials" | "evalInitialMaterials" | "initialSession";
+/** A Data field holding references to one Bundle kind's resources: a list, or a single reference. */
+interface DataReferenceField {
+  readonly field: "initialMaterials" | "evalInitialMaterials" | "initialSession";
+  readonly list: boolean;
+}
 
-/** A new resource's public record plus the BundleDirectory writes that store and undo its bytes. */
+/** The BundleDirectory writes that store a new resource's bytes, yielding its record, and undo them. */
 interface PreparedResource<R> {
-  readonly record: R;
-  readonly upload: () => Promise<void>;
+  readonly upload: () => Promise<R>;
   readonly remove: () => Promise<void>;
 }
 
@@ -83,19 +86,19 @@ function labels(input: CatalogLabels): CatalogLabels {
 const materialBundle = {
   kind: "Material Bundle",
   table: materialBundles,
-  dataFields: ["initialMaterials", "evalInitialMaterials"],
+  dataFields: [{ field: "initialMaterials", list: true }, { field: "evalInitialMaterials", list: true }],
   resource: {
     kind: "Material",
     idField: "materialId",
     table: bundleMaterials,
     id: bundleMaterials.materialId,
     fields: { bundleId: bundleMaterials.bundleId, materialId: bundleMaterials.materialId,
-      name: bundleMaterials.name, description: bundleMaterials.description },
+      name: bundleMaterials.name, description: bundleMaterials.description, byteSize: bundleMaterials.byteSize },
     prepare: (directory: BundleDirectory, owner: string, bundleId: string, input: MaterialInput) => {
       const reference = { bundleId, materialId: createId() };
+      const record = { ...reference, ...labels(input) };
       return {
-        record: { ...reference, ...labels(input) },
-        upload: () => directory.uploadInitialMaterials(owner, reference, input.files),
+        upload: async () => ({ ...record, byteSize: await directory.uploadInitialMaterials(owner, reference, input.files) }),
         remove: () => directory.removeInitialMaterials(owner, reference),
       };
     },
@@ -105,7 +108,7 @@ const materialBundle = {
 const sessionBundle = {
   kind: "Session Bundle",
   table: sessionBundles,
-  dataFields: ["initialSession"],
+  dataFields: [{ field: "initialSession", list: false }],
   resource: {
     kind: "Session",
     idField: "sessionId",
@@ -115,9 +118,12 @@ const sessionBundle = {
       name: bundleSessions.name, description: bundleSessions.description, format: bundleSessions.format },
     prepare: (directory: BundleDirectory, owner: string, bundleId: string, input: SessionInput) => {
       const reference = { bundleId, sessionId: createId() };
+      const record = { ...reference, ...labels(input), format: input.format };
       return {
-        record: { ...reference, ...labels(input), format: input.format },
-        upload: () => directory.uploadInitialSession(owner, reference, { format: input.format, content: input.content }),
+        upload: async () => {
+          await directory.uploadInitialSession(owner, reference, { format: input.format, content: input.content });
+          return record;
+        },
         remove: () => directory.removeInitialSession(owner, reference),
       };
     },
@@ -127,8 +133,9 @@ const sessionBundle = {
 export type MaterialRecord = SelectResultFields<typeof materialBundle.resource.fields>;
 export type SessionRecord = SelectResultFields<typeof sessionBundle.resource.fields>;
 
-function referenceCondition(field: DataReferenceField, key: string, id: string) {
-  return sql`${data.content} -> ${field} ->> ${key} = ${id}`;
+/** Data content containing a reference with these IDs, as the field itself or as one element of its list. */
+function referenceCondition({ field, list }: DataReferenceField, reference: Readonly<Record<string, string>>) {
+  return sql`${data.content} @> ${JSON.stringify({ [field]: list ? [reference] : reference })}::jsonb`;
 }
 
 async function activeDataBinding(
@@ -160,10 +167,8 @@ function createBundleCatalog<F extends SelectedFieldsFlat, I>(
     eq(table.ownerUserId, owner), eq(table.bundleId, bundleId), isNull(table.deletedAt),
   );
   const resourceRow = (bundleId: string, resourceId?: string) => activeResource(bundle, owner, bundleId, resourceId);
-  const dataBinding = (bundleId: string, resourceId?: string) => or(...bundle.dataFields.map((field) => and(
-    referenceCondition(field, "bundleId", bundleId),
-    resourceId === undefined ? undefined : referenceCondition(field, resource.idField, resourceId),
-  )));
+  const dataBinding = (bundleId: string, resourceId?: string) => or(...bundle.dataFields.map((field) =>
+    referenceCondition(field, { bundleId, ...(resourceId === undefined ? {} : { [resource.idField]: resourceId }) })));
   async function requireBundle(bundleId: string): Promise<BundleRecord> {
     const id = platformId(bundleId, "bundleId");
     const [row] = await db.select().from(table).where(activeBundle(id));
@@ -185,14 +190,14 @@ function createBundleCatalog<F extends SelectedFieldsFlat, I>(
     const prepared = inputs.map((input) => resource.prepare(directory, owner, bundleId, input));
     const written: PreparedResource<ResourceRecord>[] = [];
     try {
+      const imported: ResourceRecord[] = [];
       for (const item of prepared) {
         written.push(item);
-        await item.upload();
+        imported.push(await item.upload());
       }
       return await db.transaction(async (transaction) => {
         const claimed = await claim(transaction);
-        const imported = prepared.map(({ record }) => record);
-        // Drizzle cannot type an insert into a generic table; `prepare` builds each record from the same columns.
+        // Drizzle cannot type an insert into a generic table; each upload yields a record of the same columns.
         if (imported.length > 0) {
           await transaction.insert(resource.table).values(imported.map((record) => ({ ...record, ownerUserId: owner })) as never);
         }
@@ -304,38 +309,50 @@ export function createBundleCatalogs(db: EvalDb, ownerUserId: string, directory:
 
 export type BundleCatalogs = ReturnType<typeof createBundleCatalogs>;
 
-async function assertResourceSelectable(
-  bundle: BundleKind<SelectedFieldsFlat, never>, reader: Pick<EvalDb, "select">, ownerUserId: string,
+/** Lock an active, newly referenceable resource and return its public record. */
+async function selectableResource<F extends SelectedFieldsFlat>(
+  bundle: BundleKind<F, never>, reader: Pick<EvalDb, "select">, ownerUserId: string,
   bundleId: string, resourceId: string,
-): Promise<void> {
+): Promise<SelectResultFields<F>> {
   const owner = requireOwnerUserId(ownerUserId);
   const { table, resource } = bundle;
   const id = platformId(resourceId, resource.idField);
-  const [row] = await reader.select({ id: resource.id }).from(resource.table)
+  const fields: SelectedFieldsFlat = resource.fields;
+  const [row] = await reader.select(fields).from(resource.table)
     .innerJoin(table, and(eq(table.bundleId, resource.table.bundleId),
       eq(table.ownerUserId, resource.table.ownerUserId)))
     .where(and(activeResource(bundle, owner, platformId(bundleId, "bundleId"), id), isNull(table.deletedAt)))
     .for("share");
   if (!row) throw new BundleResourceNotFoundError(resource.kind, id);
+  // Drizzle leaves rows of a generic selection unresolved; `resource.fields` fixes their shape.
+  return row as SelectResultFields<F>;
 }
 
-export function assertMaterialSelectable(
-  reader: Pick<EvalDb, "select">, ownerUserId: string, reference: InitialMaterialsRef,
+/** Validate one Data field's Material references; together they must fit one SP initialization. */
+export async function assertMaterialsSelectable(
+  reader: Pick<EvalDb, "select">, ownerUserId: string,
+  field: "initialMaterials" | "evalInitialMaterials", references: readonly InitialMaterialsRef[],
 ): Promise<void> {
-  return assertResourceSelectable(materialBundle, reader, ownerUserId, reference.bundleId, reference.materialId);
+  let byteSize = 0;
+  for (const { bundleId, materialId } of references) {
+    byteSize += (await selectableResource(materialBundle, reader, ownerUserId, bundleId, materialId)).byteSize;
+  }
+  requireInitializationBudget(byteSize, field);
 }
 
-export function assertSessionSelectable(
+export async function assertSessionSelectable(
   reader: Pick<EvalDb, "select">, ownerUserId: string, reference: InitialSessionRef,
 ): Promise<void> {
-  return assertResourceSelectable(sessionBundle, reader, ownerUserId, reference.bundleId, reference.sessionId);
+  await selectableResource(sessionBundle, reader, ownerUserId, reference.bundleId, reference.sessionId);
 }
 
 /** Validate every resource reference before a Data row is created or replaced. */
 export async function assertDataReferencesSelectable(
   reader: Pick<EvalDb, "select">, ownerUserId: string, record: Data,
 ): Promise<void> {
-  if (record.initialMaterials) await assertMaterialSelectable(reader, ownerUserId, record.initialMaterials);
-  if (record.evalInitialMaterials) await assertMaterialSelectable(reader, ownerUserId, record.evalInitialMaterials);
+  for (const field of ["initialMaterials", "evalInitialMaterials"] as const) {
+    const references = record[field];
+    if (references) await assertMaterialsSelectable(reader, ownerUserId, field, references);
+  }
   if (record.initialSession) await assertSessionSelectable(reader, ownerUserId, record.initialSession);
 }

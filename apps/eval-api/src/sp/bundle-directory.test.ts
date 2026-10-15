@@ -36,7 +36,7 @@ afterEach(async () => {
 describe("Eval Bundle directory", () => {
   it("uploads and reads one user's material and optional JSONL Session independently", async () => {
     const source = await openBundleDirectory(await root());
-    await source.uploadInitialMaterials(owner, { bundleId, materialId }, files);
+    await expect(source.uploadInitialMaterials(owner, { bundleId, materialId }, files)).resolves.toBe(5);
     await source.uploadInitialSession(owner, { bundleId, sessionId }, { format: "jsonl", content: `${userEntry("m1")}\n` });
     await expect(source.resolveInitialMaterials(owner, { bundleId, materialId })).resolves.toEqual(files);
     await expect(source.resolveInitialSession(owner, { bundleId, sessionId }))
@@ -123,14 +123,14 @@ describe("Eval Bundle directory", () => {
       [{ path: "/brief.txt", mediaType: "text/plain", contentBase64: "not base64" }],
       [{ path: "/brief.txt", mediaType: " ", contentBase64: "SGk=" }],
       [...files, ...files],
-      Array.from({ length: 501 }, (_, index) => ({ path: `/${index}.txt`, mediaType: "text/plain", contentBase64: "SGk=" })),
-    ];
-    for (const [index, value] of invalid.entries()) {
+    ].map((value) => [value, "invalid"] as const);
+    const tooMany = Array.from({ length: 501 }, (_, index) => ({ path: `/${index}.txt`, mediaType: "text/plain", contentBase64: "SGk=" }));
+    for (const [index, [value, reason]] of [...invalid, [tooMany, "too-large"] as const].entries()) {
       await expect(source.uploadInitialMaterials(owner, { bundleId, materialId: resourceId(index) }, value))
-        .rejects.toMatchObject(failure("invalid"));
+        .rejects.toMatchObject(failure(reason));
       await put(directory, `materials/${resourceId(index)}.json`, JSON.stringify({ files: value }));
       await expect(source.resolveInitialMaterials(owner, { bundleId, materialId: resourceId(index) }))
-        .rejects.toMatchObject(failure("invalid"));
+        .rejects.toMatchObject(failure(reason));
     }
   });
 

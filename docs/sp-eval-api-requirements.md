@@ -15,7 +15,7 @@
 | --- | --- | --- |
 | 登录与 Agent Config | Eval Web/API 使用 Eval SP 的用户认证、配置读取、创建、编辑、删除及运行时解析；冻结副本是一次普通创建，内容与原配置相同，之后不被修改；Evaluator 副本被替换或 Project 创建失败时由 Eval 删除。创建 Chat 时 SP 校验配置归属与可用性。 | 复用 SP API 现有账户与 `user-agent` 能力，给 Eval 域名和服务身份配置访问权限；不新增跨环境配置代理或版本历史。 |
 | Chat 幂等创建 | Eval 预分配 Chat ID，按相同用户、配置、框架和创建事实重复确保原 Chat；冲突事实返回明确错误。Subject 与 Evaluator 均在 Eval SP Inbox 中。 | 复用 `Inbox.createChat(..., chatId)`/普通 Chat 生命周期；确认服务身份接入与重试冲突校验。无需绕开 Inbox。 |
-| 初始 Session 与材料 | 按 Data 中可选的 `bundleId + sessionId/materialId` 幂等准备目标 Chat，在首次提交前由对应 Agent 框架恢复 Context；重启不重复装载。 | 需要正式的材料/Session 准备接口；具体 Bundle 来源和各框架装载能力仍需在 SP 核实。 |
+| 初始 Session 与材料 | 按 Data 中可选的单个 `bundleId + sessionId` 和有序的多个 `bundleId + materialId`，在一次初始化中幂等准备目标 Chat（见 [SP Harness 协议](eval-sp-harness-protocol.md#initialization)），在首次提交前由对应 Agent 框架恢复 Context；重启不重复装载。 | 需要正式的材料/Session 准备接口；具体 Bundle 来源和各框架装载能力仍需在 SP 核实。 |
 | 提交与恢复 | 按 Chat 与幂等键提交 Prompt，返回真实 Submission ID 和回执；响应不确定时按键找回原 Submission。重启产生同一 Chat 的新 Submission/Attempt，不产生新 Sampling。 | 复用 SP Submission 能力，补足 Eval Run Worker 可调用的服务边界和按键查询。Eval 契约已将 Chat ID 与 Attempt Submission ID 拆开，Eval 侧 SP Harness 已按[服务契约](eval-sp-harness-protocol.md)接线，待跨部署联调。 |
 | 长连接终态 | Chat WebSocket 在连接及重连时给目标 Submission 的持久状态快照，在状态变化时推送带真实 Submission ID 的事件；断线后可校准，正常流程不轮询。 | 复用现有 Chat WebSocket，补足可靠的 Submission 身份与状态快照。 |
 | 无人值守 | 由提交/长连接所属的运行模式在 SP 服务端自动处理等待：所有审批给 `allow_once`，`ask_user` 返回“随意，由你全权决定”。覆盖临时子 Agent，并把决策纳入同一轨迹。 | 需要 SP Runtime 支持；不能依赖观察者在线，也不新增独立审批服务。 |

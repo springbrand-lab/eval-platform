@@ -108,7 +108,7 @@ Dataset ──> Data ──(创建 Project 时复制)──> ProjectSample
 
 - `Project` 属于用户并绑定 SP Git 分支；当前固定分支阶段仅能绑定已部署分支，Run 记录实际 commit。Project 删除是软删除，存在未完成 Run 或停止收尾时拒绝；
 - `Dataset` 属于一个 Eval SP 用户；同一用户的 Data 可在多个 Dataset 间复用，Dataset/Data 是可编辑的来源目录；
-- `Data.userPrompt` 是必填的当前任务，其余 JSON 业务字段自由提供并完整保留；`initialSession` 与 `initialMaterials` 都可选，引用内的 Bundle ID 和资源 ID 必须由外部提供；
+- `Data.userPrompt` 是必填的当前任务，其余 JSON 业务字段自由提供并完整保留；单个 `initialSession` 引用与 `initialMaterials`、`evalInitialMaterials` 两个有序素材引用数组都可选（规则见[包边界](package-boundaries.md#eval-dataset)），引用内的 Bundle ID 和资源 ID 必须由外部提供；
 - `initialSession` 只引用独立保存的初始化 Session，启动时由 Harness 复制到目标 DO 并交给所选框架加载、重建 Context；准备完成后发送原始 `userPrompt`；
 - `ProjectSample` 是 Project 内固定的一条测试输入，结构见[包边界](package-boundaries.md#eval-runtime)；
 - `Sampling` 是一次独立运行，引用自己的 `projectSampleId`，拥有自己的 Subject Chat / Workspace；

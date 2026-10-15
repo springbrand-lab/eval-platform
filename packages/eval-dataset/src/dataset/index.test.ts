@@ -122,7 +122,10 @@ class TestDatasetStore implements DatasetStore {
 }
 
 const initialSession = { bundleId: "1c82ed86-888c-4720-8424-6f38825f6e0c", sessionId: "a8ffecab-9deb-42a4-8c67-990bdb3fd40c" };
-const initialMaterials = { bundleId: "69258daa-9897-4756-8ba4-66066a95a19b", materialId: "af593744-2f6b-4d37-84ee-83c29c8ca4fb" };
+const initialMaterials = [
+  { bundleId: "69258daa-9897-4756-8ba4-66066a95a19b", materialId: "af593744-2f6b-4d37-84ee-83c29c8ca4fb" },
+  { bundleId: "5d3c2b1a-0f9e-4d8c-8b7a-6f5e4d3c2b1a", materialId: "af593744-2f6b-4d37-84ee-83c29c8ca4fb" },
+];
 
 describe("Dataset service", () => {
   it("generates only Dataset/Data entity IDs and preserves both external resource identities", async () => {
@@ -148,14 +151,14 @@ describe("Dataset service", () => {
     const sessionId = "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC";
     const created = await service.createData({
       userPrompt: "task", externalCode: "ABC",
-      initialMaterials: { bundleId, materialId },
-      evalInitialMaterials: { bundleId, materialId },
+      initialMaterials: [{ bundleId, materialId }],
+      evalInitialMaterials: [{ bundleId, materialId }],
       initialSession: { bundleId, sessionId },
     });
     expect(created).toMatchObject({
       externalCode: "ABC",
-      initialMaterials: { bundleId: bundleId.toLowerCase(), materialId: materialId.toLowerCase() },
-      evalInitialMaterials: { bundleId: bundleId.toLowerCase(), materialId: materialId.toLowerCase() },
+      initialMaterials: [{ bundleId: bundleId.toLowerCase(), materialId: materialId.toLowerCase() }],
+      evalInitialMaterials: [{ bundleId: bundleId.toLowerCase(), materialId: materialId.toLowerCase() }],
       initialSession: { bundleId: bundleId.toLowerCase(), sessionId: sessionId.toLowerCase() },
     });
     await expect(service.createData({ userPrompt: "task", initialSession: { bundleId: "Session-Bundle/1", sessionId } }))
@@ -292,7 +295,7 @@ describe("Dataset service", () => {
     const createData = vi.spyOn(store, "createData");
     await expect(service.createData({ userPrompt: "task", initialSession: { sessionId: "a8ffecab-9deb-42a4-8c67-990bdb3fd40c" } } as DataInput))
       .rejects.toBeInstanceOf(DatasetInputError);
-    await expect(service.createData({ userPrompt: "task", initialMaterials: { bundleId: "debddf36-3eeb-41c6-819b-b1f75e365dc2" } } as DataInput))
+    await expect(service.createData({ userPrompt: "task", initialMaterials: [{ bundleId: "debddf36-3eeb-41c6-819b-b1f75e365dc2" }] } as unknown as DataInput))
       .rejects.toBeInstanceOf(DatasetInputError);
     expect(createData).not.toHaveBeenCalled();
     expect(store.data.size).toBe(0);
@@ -487,7 +490,7 @@ describe("Dataset import and export", () => {
     try {
       await expect(service.importDataset(JSON.stringify({
         dataset: { name: "tasks" },
-        data: [{ userPrompt: "task", initialMaterials: { bundleId: "debddf36-3eeb-41c6-819b-b1f75e365dc2" } }],
+        data: [{ userPrompt: "task", initialMaterials: [{ bundleId: "debddf36-3eeb-41c6-819b-b1f75e365dc2" }] }],
       }), "json")).rejects.toBeInstanceOf(DatasetInputError);
       expect(importDataset).not.toHaveBeenCalled();
       expect(generateId).not.toHaveBeenCalled();

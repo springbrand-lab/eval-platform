@@ -82,10 +82,14 @@ export interface HarnessConfig {
 }
 
 export interface MaterializedDataBinding {
-  readonly bundleId: string;
   readonly manifestHash: string;
-  readonly target: "workspace" | "sandbox";
-  readonly rootPath: string;
+  readonly target: "workspace";
+  readonly materials: readonly {
+    readonly bundleId: string;
+    readonly materialId: string;
+    readonly rootPath: string;
+  }[];
+  readonly evaluationOutputSchemaPath?: string;
 }
 
 export interface ArtifactRef {

@@ -5,7 +5,7 @@ export {
   datasetInputSchema,
   datasetSchema,
   datasetSnapshotSchema,
-  initialMaterialsRefSchema,
+  initialMaterialsRefsSchema,
   initialSessionRefSchema,
   platformIdSchema,
   type Data,

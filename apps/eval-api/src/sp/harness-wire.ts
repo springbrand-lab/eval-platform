@@ -9,12 +9,14 @@ import type {
 import type { AgentHandle, AgentSubmission, EnsureAgentInput } from "@eval-platform/eval-runtime/harness";
 import {
   evalEnsureChatSchema,
+  evalInitializationResultSchema,
   evalInitializationSchema,
   evalSubmitSchema,
   evalTrajectoryMaterializationSchema,
   stableEvalFacts,
   type EvalEnsureChat,
   type EvalInitialization,
+  type EvalInitializationResult,
   type EvalSubmissionReceipt,
   type EvalSubmit,
   type EvalTrajectoryMaterialization,
@@ -101,15 +103,8 @@ export function requireStopResult(value: unknown): void {
   response(z.object({ ok: z.boolean() }), value, "stop result");
 }
 
-const dataBindingSchema = z.object({
-  bundleId: id,
-  manifestHash: id,
-  target: z.enum(["workspace", "sandbox"]),
-  rootPath: id,
-}) satisfies z.ZodType<MaterializedDataBinding>;
-
 export function dataBinding(value: unknown): MaterializedDataBinding {
-  return response(dataBindingSchema, value, "initialization binding");
+  return response<EvalInitializationResult>(evalInitializationResultSchema, value, "initialization binding");
 }
 
 const artifactsSchema = z.array(z.looseObject({

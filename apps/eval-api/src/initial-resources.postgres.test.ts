@@ -2,6 +2,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createDatasetService } from "@eval-platform/eval-dataset";
+import { EVAL_INITIAL_FILE_MAX_BYTES, EVAL_INITIALIZATION_MAX_BYTES, EVAL_MATERIAL_MAX_FILES } from "@springbrand/eval-harness";
 import { TextReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
@@ -12,6 +13,7 @@ import { createPostgresProjectPlanReader } from "./db/project-plans.js";
 import { seedProject } from "./db/test-fixtures.js";
 import { BundleResourceInUseError, BundleResourceNotFoundError } from "./db/errors.js";
 import { createBundleCatalogs } from "./db/resource-catalog.js";
+import { bundleMaterials } from "./db/schema.js";
 import { createInitialResourceApi } from "./initial-resources.js";
 import { createOwnerServices } from "./owner-services.js";
 import { openBundleDirectory, type BundleDirectory } from "./sp/bundle-directory.js";
@@ -127,6 +129,7 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
       ],
     });
     expect(materialResponse.status).toBe(201);
+    expect(await materialResponse.clone().json()).toMatchObject({ msg: { byteSize: 5 } });
     const uploadedMaterial = await msg<{ bundleId: string; materialId: string }>(materialResponse);
     const material = { bundleId: uploadedMaterial.bundleId, materialId: uploadedMaterial.materialId };
     const evalResponse = await send(`${root}/materials`, "POST", {
@@ -136,6 +139,27 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     });
     const uploadedEvalMaterial = await msg<{ bundleId: string; materialId: string }>(evalResponse);
     const evalMaterial = { bundleId: uploadedEvalMaterial.bundleId, materialId: uploadedEvalMaterial.materialId };
+    const rejectedUpload = (path: string, bytes: number) => send(`${root}/materials`, "POST", {
+      name: "Rejected", description: "Not stored",
+      files: [{ path, mediaType: "application/octet-stream", contentBase64: Buffer.alloc(bytes).toString("base64") }],
+    });
+    const oversized = await rejectedUpload("/big.bin", EVAL_INITIAL_FILE_MAX_BYTES + 1);
+    expect(oversized.status).toBe(413);
+    expect(await oversized.json()).toMatchObject({ code: "BUNDLE_FILE_TOO_LARGE", errors: [{ path: "files.0" }] });
+    const misplaced = await rejectedUpload("/../escape.bin", 1);
+    expect(misplaced.status).toBe(400);
+    expect(await misplaced.json()).toMatchObject({ code: "BUNDLE_FILE_INVALID", errors: [{ path: "files.0" }] });
+    const crowded = await send(`${root}/materials`, "POST", {
+      name: "Rejected", description: "Not stored", files: Array.from({ length: EVAL_MATERIAL_MAX_FILES + 1 },
+        (_, index) => ({ path: `/${index}.txt`, mediaType: "text/plain", contentBase64: "YQ==" })),
+    });
+    expect(crowded.status).toBe(413);
+    expect(await crowded.json()).toMatchObject({ code: "BUNDLE_FILE_TOO_LARGE", errors: [{ path: "files" }] });
+    const empty = await send(`${root}/materials`, "POST", { name: "Rejected", description: "Not stored", files: [] });
+    expect(empty.status).toBe(400);
+    expect(await empty.json()).toMatchObject({ code: "BUNDLE_FILE_INVALID", errors: [{ path: "files" }] });
+    const shapeless = await send(`${root}/materials`, "POST", { name: "Rejected", description: "Not stored", files: [{ path: 1 }] });
+    expect(shapeless.status).toBe(422);
     const sessionResponse = await send(`${sessionRoot}/sessions`, "POST", {
       name: "Prior chat", description: "Execution history", format: "json", content: JSON.stringify({
         entries: [{ id: "m1", message: { role: "user", content: "Earlier task" }, createdAt: 1 }],
@@ -154,8 +178,8 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     const materialInSessionBundle = { bundleId: session.bundleId, materialId: material.materialId };
     for (const patch of [
       { initialSession: sessionInMaterialBundle },
-      { initialMaterials: materialInSessionBundle },
-      { evalInitialMaterials: materialInSessionBundle },
+      { initialMaterials: [materialInSessionBundle] },
+      { evalInitialMaterials: [materialInSessionBundle] },
     ]) {
       const response = await send(bindingPath, "PATCH", patch);
       expect(response.status).toBe(404);
@@ -169,30 +193,32 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     }
 
     const bound = await send(bindingPath, "PATCH", {
-      initialMaterials: material, evalInitialMaterials: evalMaterial, initialSession: session,
+      initialMaterials: [material], evalInitialMaterials: [evalMaterial], initialSession: session,
     });
-    expect(await msg(bound)).toMatchObject({ initialMaterials: material, evalInitialMaterials: evalMaterial,
+    expect(await msg(bound)).toMatchObject({ initialMaterials: [material], evalInitialMaterials: [evalMaterial],
       initialSession: session });
-    expect(await code(await send(bindingPath, "PATCH", {}))).toBe("REQUEST_VALIDATION_FAILED");
+    for (const patch of [{}, { initialMaterials: [] }, { initialMaterials: [material, material] }, { initialSession: [session] }]) {
+      expect(await code(await send(bindingPath, "PATCH", patch))).toBe("REQUEST_VALIDATION_FAILED");
+    }
     expect(await code(await send(bindingPath, "PATCH", { initialMaterials: null }, "other"))).toBe("DATA_NOT_FOUND");
     for (const path of [`${root}/materials/${material.materialId}`, `${sessionRoot}/sessions/${session.sessionId}`, root, sessionRoot]) {
       const response = await send(path, "DELETE");
       expect(response.status).toBe(409);
       expect(await code(response)).toBe("BUNDLE_RESOURCE_IN_USE");
     }
-    expect(await dataset.getData(original.dataId)).toMatchObject({ initialMaterials: material });
+    expect(await dataset.getData(original.dataId)).toMatchObject({ initialMaterials: [material] });
     const api = createInitialResourceApi(db, owner);
     await api.bindData(original.dataId, { initialMaterials: null, initialSession: null });
     const evalBlocked = await send(root, "DELETE");
     expect(evalBlocked.status).toBe(409);
     expect(await code(evalBlocked)).toBe("BUNDLE_RESOURCE_IN_USE");
     await api.bindData(original.dataId, { evalInitialMaterials: null });
-    const genericBound = await dataset.createData({ userPrompt: "Generic", initialMaterials: material });
+    const genericBound = await dataset.createData({ userPrompt: "Generic", initialMaterials: [material] });
     expect((await send(`${root}/materials/${material.materialId}`, "DELETE")).status).toBe(409);
     await dataset.updateData(genericBound.dataId, { userPrompt: "Generic" });
     expect((await send(`${root}/materials/${material.materialId}`, "DELETE")).status).toBe(204);
     expect(await msg(await send(`${root}/materials`, "GET"))).toHaveLength(1);
-    expect(await code(await send(bindingPath, "PATCH", { initialMaterials: material }))).toBe("BUNDLE_RESOURCE_NOT_FOUND");
+    expect(await code(await send(bindingPath, "PATCH", { initialMaterials: [material] }))).toBe("BUNDLE_RESOURCE_NOT_FOUND");
     await expect(bundles.resolveInitialMaterials(owner, material)).resolves.toHaveLength(1);
     expect((await send(root, "DELETE")).status).toBe(204);
     expect((await send(sessionRoot, "DELETE")).status).toBe(204);
@@ -200,13 +226,13 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     expect(await msg(await send("/api/session-bundles", "GET"))).toEqual([]);
     await expect(api.bindData(original.dataId, { initialSession: session })).rejects.toBeInstanceOf(BundleResourceNotFoundError);
     await expect(bundles.resolveInitialSession(owner, session)).resolves.toBeDefined();
-    await expect(dataset.createData({ userPrompt: "New", initialMaterials: material }))
+    await expect(dataset.createData({ userPrompt: "New", initialMaterials: [material] }))
       .rejects.toBeInstanceOf(BundleResourceNotFoundError);
     await expect(dataset.updateData(original.dataId, { userPrompt: "Build page", initialSession: session }))
       .rejects.toBeInstanceOf(BundleResourceNotFoundError);
     const datasetsBefore = await dataset.listDatasets();
     await expect(dataset.importDataset(JSON.stringify({
-      dataset: { name: "Invalid refs" }, data: [{ userPrompt: "New", initialMaterials: material }],
+      dataset: { name: "Invalid refs" }, data: [{ userPrompt: "New", initialMaterials: [material] }],
     }), "json")).rejects.toBeInstanceOf(BundleResourceNotFoundError);
     expect(await dataset.listDatasets()).toEqual(datasetsBefore);
   });
@@ -235,7 +261,7 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
       bundleId: sessionBundle.bundleId.toUpperCase(), sessionId: session.sessionId.toUpperCase(),
     };
     const row = await dataset.createData({
-      userPrompt: "Test case", initialMaterials: upperRef, initialSession: upperSession,
+      userPrompt: "Test case", initialMaterials: [upperRef], initialSession: upperSession,
     });
 
     await expect(materialBundles.deleteResource(materialBundle.bundleId, material.materialId))
@@ -247,23 +273,23 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     await expect(sessionBundles.delete(sessionBundle.bundleId))
       .rejects.toBeInstanceOf(BundleResourceInUseError);
     expect(await dataset.getData(row.dataId)).toMatchObject({
-      initialMaterials: { bundleId: materialBundle.bundleId, materialId: material.materialId },
+      initialMaterials: [{ bundleId: materialBundle.bundleId, materialId: material.materialId }],
       initialSession: { bundleId: sessionBundle.bundleId, sessionId: session.sessionId },
     });
 
     const second = await dataset.createData({ userPrompt: "Bind later" });
     const bound = await createInitialResourceApi(db, owner)
-      .bindData(second.dataId, { evalInitialMaterials: upperRef });
-    expect(bound.evalInitialMaterials).toEqual({
+      .bindData(second.dataId, { evalInitialMaterials: [upperRef] });
+    expect(bound.evalInitialMaterials).toEqual([{
       bundleId: materialBundle.bundleId, materialId: material.materialId,
-    });
+    }]);
     const imported = await dataset.importDataset(JSON.stringify({
       dataset: { name: "Imported case" },
-      data: [{ userPrompt: "Import later", initialMaterials: upperRef }],
+      data: [{ userPrompt: "Import later", initialMaterials: [upperRef] }],
     }), "json");
-    expect(imported.data[0]?.initialMaterials).toEqual({
+    expect(imported.data[0]?.initialMaterials).toEqual([{
       bundleId: materialBundle.bundleId, materialId: material.materialId,
-    });
+    }]);
     const updated = await dataset.createData({ userPrompt: "Update later" });
     await dataset.updateData(updated.dataId, { userPrompt: "Update later", initialSession: upperSession });
     expect((await dataset.getData(updated.dataId))?.initialSession).toEqual({
@@ -277,6 +303,79 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     await sessionBundles.deleteResource(sessionBundle.bundleId, session.sessionId);
     await materialBundles.delete(materialBundle.bundleId);
     await sessionBundles.delete(sessionBundle.bundleId);
+  });
+
+  it("rejects binding one field's Materials whose catalog sizes together exceed one SP initialization", async () => {
+    const db = createEvalDb(pool);
+    const bundles = await openBundleDirectory(bundleRoot);
+    const send = httpClient(db, bundles);
+    const { materialBundles } = createBundleCatalogs(db, owner, bundles);
+    const dataset = createDatasetService(createPostgresDatasetStore(db, owner));
+    const { bundle } = await materialBundles.create({ name: "Budget", description: "Combined size" });
+    const small = await materialBundles.createResource(bundle.bundleId, {
+      name: "Small", description: "One byte", files: [{ path: "/a.txt", mediaType: "text/plain", contentBase64: "YQ==" }],
+    });
+    expect(small.byteSize).toBe(1);
+    // Binding reads only catalog sizes, so the full-budget Material needs no stored files.
+    const large = { bundleId: bundle.bundleId, materialId: crypto.randomUUID() };
+    await db.insert(bundleMaterials).values({
+      ...large, ownerUserId: owner, name: "Large", description: "Full budget", byteSize: EVAL_INITIALIZATION_MAX_BYTES,
+    });
+    const smallRef = { bundleId: small.bundleId, materialId: small.materialId };
+    const target = await dataset.createData({ userPrompt: "Budget" });
+    const bindingPath = `/api/data/${target.dataId}/initial-resources`;
+    expect((await send(bindingPath, "PATCH", { initialMaterials: [large], evalInitialMaterials: [smallRef] })).status)
+      .toBe(200);
+    expect((await send("/api/data", "POST", { userPrompt: "Within", initialMaterials: [large], evalInitialMaterials: [smallRef] }))
+      .status).toBe(201);
+    for (const field of ["initialMaterials", "evalInitialMaterials"]) {
+      const tooLarge = { code: "BUNDLE_FILE_TOO_LARGE", errors: [{ path: field }] };
+      const bound = await send(bindingPath, "PATCH", { [field]: [large, smallRef] });
+      expect(bound.status).toBe(413);
+      expect(await bound.json()).toMatchObject(tooLarge);
+      const created = await send("/api/data", "POST", { userPrompt: "Generic", [field]: [smallRef, large] });
+      expect(created.status).toBe(413);
+      expect(await created.json()).toMatchObject(tooLarge);
+      const replaced = await send(`/api/data/${target.dataId}`, "PUT", { userPrompt: "Budget", [field]: [smallRef, large] });
+      expect(replaced.status).toBe(413);
+    }
+    expect(await dataset.getData(target.dataId)).toMatchObject({ initialMaterials: [large], evalInitialMaterials: [smallRef] });
+  });
+
+  it("blocks deleting a Material listed at any position of either material list", async () => {
+    const db = createEvalDb(pool);
+    const { materialBundles } = createBundleCatalogs(db, owner, await openBundleDirectory(bundleRoot));
+    const dataset = createDatasetService(createPostgresDatasetStore(db, owner));
+    const api = createInitialResourceApi(db, owner);
+    const files = [{ path: "/note.txt", mediaType: "text/plain", contentBase64: "bm90ZQ==" }];
+    const upload = async (bundleId: string, name: string) => {
+      const { materialId } = await materialBundles.createResource(bundleId, { name, description: "Listed", files });
+      return { bundleId, materialId };
+    };
+    const { bundle: first } = await materialBundles.create({ name: "First", description: "Lists" });
+    const { bundle: second } = await materialBundles.create({ name: "Second", description: "Lists" });
+    const a1 = await upload(first.bundleId, "a1");
+    const a2 = await upload(first.bundleId, "a2");
+    const b1 = await upload(second.bundleId, "b1");
+    const b2 = await upload(second.bundleId, "b2");
+    const subject = await dataset.createData({ userPrompt: "Subject" });
+    expect((await api.bindData(subject.dataId, { initialMaterials: [b1, a1] })).initialMaterials).toEqual([b1, a1]);
+    expect((await api.bindData(subject.dataId, { initialMaterials: [a1, b1] })).initialMaterials).toEqual([a1, b1]);
+    const evaluator = await dataset.createData({ userPrompt: "Evaluator", evalInitialMaterials: [a1, a2] });
+
+    await expect(materialBundles.deleteResource(second.bundleId, b1.materialId)).rejects.toBeInstanceOf(BundleResourceInUseError);
+    await expect(materialBundles.delete(second.bundleId)).rejects.toBeInstanceOf(BundleResourceInUseError);
+    await expect(materialBundles.deleteResource(first.bundleId, a2.materialId)).rejects.toBeInstanceOf(BundleResourceInUseError);
+    await materialBundles.deleteResource(second.bundleId, b2.materialId);
+
+    await api.bindData(subject.dataId, { initialMaterials: [a1] });
+    await materialBundles.delete(second.bundleId);
+    await expect(materialBundles.delete(first.bundleId)).rejects.toBeInstanceOf(BundleResourceInUseError);
+    await api.bindData(subject.dataId, { initialMaterials: null });
+    await expect(materialBundles.deleteResource(first.bundleId, a1.materialId)).rejects.toBeInstanceOf(BundleResourceInUseError);
+    await dataset.updateData(evaluator.dataId, { userPrompt: "Evaluator" });
+    await materialBundles.deleteResource(first.bundleId, a2.materialId);
+    await materialBundles.delete(first.bundleId);
   });
 
   it("creates Bundles with their ZIP resources and imports more, all or nothing", async () => {

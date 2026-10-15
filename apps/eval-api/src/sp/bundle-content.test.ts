@@ -1,4 +1,10 @@
 import { describe, expect, it } from "vitest";
+import {
+  EVAL_INITIAL_FILE_MAX_BYTES,
+  EVAL_INITIALIZATION_MAX_BYTES,
+  EVAL_MATERIAL_MAX_FILES,
+  EVAL_SESSION_CONTENT_MAX_CHARS,
+} from "@springbrand/eval-harness";
 import { BUNDLE_ERROR_DETAILS } from "../limits.js";
 import { validateMaterialFiles, validateSessionContent } from "./bundle-content.js";
 
@@ -18,19 +24,29 @@ describe("Material content", () => {
     expect(() => validateMaterialFiles([
       { path: "/a.txt", mediaType: "text/plain", contentBase64: "not base64" },
       { path: "/../b.txt", mediaType: "text/plain", contentBase64: "SGk=" },
-    ])).toThrow(expect.objectContaining(failure("invalid", { path: "files.0", errMsg: expect.stringMatching(/^contentBase64: /u) })));
-    expect(() => validateMaterialFiles([file("/a", 1), file("/../b", 1), file("/a", 1)], {
-      files: "docs", file: (index) => `docs/${index}`,
-    })).toThrow(expect.objectContaining(failure("invalid",
-      { path: "docs/1", errMsg: "Invalid initial material path" },
-      { path: "docs/2", errMsg: "Duplicate material file path /a" },
+    ])).toThrow(expect.objectContaining(failure("invalid",
+      { path: "files.0", errMsg: expect.stringMatching(/^contentBase64: /u) },
+      { path: "files.1", errMsg: "path: Invalid initial material path" },
     )));
+    const labels = { files: "docs", file: (index: number) => `docs/${index}` };
+    expect(() => validateMaterialFiles([file("/a", 1), file("/../b", 1)], labels))
+      .toThrow(expect.objectContaining(failure("invalid", { path: "docs/1", errMsg: "path: Invalid initial material path" })));
+    expect(() => validateMaterialFiles([file("/a", 1), file("/b", 1), file("/a", 1)], labels))
+      .toThrow(expect.objectContaining(failure("invalid", { path: "docs/2", errMsg: "path: Duplicate material path" })));
   });
 
-  it("bounds each material file and the material in total", () => {
-    expect(() => validateMaterialFiles([file("/big.bin", 5_000_001)]))
+  it("bounds each material file and the material in total, reporting the decoded total", () => {
+    const big = EVAL_INITIAL_FILE_MAX_BYTES + 1;
+    expect(() => validateMaterialFiles([file("/small.bin", 1), file("/big.bin", big)]))
+      .toThrow(expect.objectContaining(failure("too-large", { path: "files.1" })));
+    expect(() => validateMaterialFiles([file("/big.bin", big), file("/../bad", 1)]))
       .toThrow(expect.objectContaining(failure("too-large", { path: "files.0" })));
-    expect(() => validateMaterialFiles(Array.from({ length: 5 }, (_, index) => file(`/${index}.bin`, 4_000_001))))
+    expect(() => validateMaterialFiles(Array.from({ length: EVAL_MATERIAL_MAX_FILES + 1 }, (_, index) => file(`/${index}.bin`, 1))))
+      .toThrow(expect.objectContaining(failure("too-large", { path: "files" })));
+    const full = EVAL_INITIALIZATION_MAX_BYTES / EVAL_INITIAL_FILE_MAX_BYTES;
+    const files = Array.from({ length: full }, (_, index) => file(`/${index}.bin`, EVAL_INITIAL_FILE_MAX_BYTES));
+    expect(validateMaterialFiles(files).byteSize).toBe(EVAL_INITIALIZATION_MAX_BYTES);
+    expect(() => validateMaterialFiles([...files, file("/extra.bin", 1)]))
       .toThrow(expect.objectContaining(failure("too-large", { path: "files" })));
   });
 });
@@ -60,7 +76,7 @@ describe("Session content", () => {
       [{ format: "json", content: JSON.stringify({ entries: [{ id: "m1", message: { role: "assistant" }, createdAt: 1 }] }) },
         "Initial context must begin with a user message"],
       [{ format: "jsonl", content: [userEntry("m1"), userEntry("m1")].join("\n") }, "Invalid or duplicate canonical context entry"],
-      [{ format: "jsonl", content: `${userEntry("m1")}\n${" ".repeat(2_000_000)}` }, "Initial context is too large"],
+      [{ format: "jsonl", content: `${userEntry("m1")}\n${" ".repeat(EVAL_SESSION_CONTENT_MAX_CHARS)}` }, "Initial context is too large"],
       [{ format: "jsonl", content: "" }, expect.stringMatching(/^content: /u)],
       [{ format: "yaml", content: "a: 1" }, expect.stringMatching(/^format: /u)],
     ] as const) {
