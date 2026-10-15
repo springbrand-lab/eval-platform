@@ -15,6 +15,7 @@ describe("request logging", () => {
       sp: {} as EvalSpClient,
       serviceAccount: { user: { id: "user-1", role: "user" }, email: "user-1@test", sessionToken: "private-service-token" },
       spAdminToken: "private-admin-token",
+      observation: {} as never,
       ownerServices: () => ({ services: services as unknown as OwnerServices, release() {} }),
     };
     const response = await createRoutes(logger).request("/api/runs/run-1", {

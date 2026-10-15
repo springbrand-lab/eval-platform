@@ -817,7 +817,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     const { first, second, subject, evaluator, schema } = await catalog();
     const ownerServices = createOwnerServices({ db: database.db, sp: stub.sp, bundles: {} as BundleDirectory, release, runQueue });
     const send = requestApp({
-      webOrigin: WEB_ORIGIN, sp: stub.sp, ownerServices, spAdminToken: "admin-token",
+      webOrigin: WEB_ORIGIN, sp: stub.sp, ownerServices, spAdminToken: "admin-token", observation: {} as never,
       serviceAccount: { user: { id: OWNER, role: "user" }, email: "owner@test", sessionToken: OWNER },
     });
     const created = await send("/api/projects", jsonRequest("POST", {

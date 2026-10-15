@@ -1,6 +1,7 @@
 import type pino from "pino";
 import { createApp } from "./lib/create-app.js";
 import { serviceAccountScope } from "./middlewares/service-account.js";
+import { webGateway } from "./middlewares/web-gateway.js";
 import agentConfigRouter from "./routes/agent-configs/agent-configs.index.js";
 import agentRouter from "./routes/agents/agents.index.js";
 import bundleRouter from "./routes/bundles/bundles.index.js";
@@ -14,9 +15,10 @@ import projectRouter from "./routes/projects/projects.index.js";
 import runRouter from "./routes/runs/runs.index.js";
 import sessionRouter from "./routes/session/session.index.js";
 
-/** Builds the Eval API route table; every `/api/*` route runs as the fixed Eval SP service account. */
+/** Builds the Eval API route table; every `/api/*` route passes the Web gateway and runs as the fixed Eval SP service account. */
 export function createRoutes(logger: pino.Logger) {
   const app = createApp(logger);
+  app.use("/api/*", webGateway);
   app.use("/api/*", serviceAccountScope);
   app.route("/", healthRouter);
   app.route("/api/me", sessionRouter);

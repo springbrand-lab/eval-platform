@@ -10,6 +10,8 @@ The layout follows SP's `apps/api`: `lib/create-app.ts` installs request IDs, pi
 
 The Eval API runs as one fixed Eval SP service account; there is no interactive login. `EVAL_SP_SERVICE_USER_ID` names that account and `EVAL_SP_SERVICE_SESSION_TOKEN` is its long-lived service session, issued by SP's `bootstrap-eval-service-account` script. At startup the process verifies the token once through Eval SP `/api/auth/me` and refuses to start unless it resolves to the configured user. One middleware then scopes every `/api/*` request to that account; requests carry no `Authorization` header and the client cannot select an owner. Agent Config calls to Eval SP use the service session. `GET /healthz` only reports that the process is serving. The API is an internal service and must only be reachable from trusted networks.
 
+Deployed behind eval-web, every `/api/*` request must carry `X-Eval-Web-Token` equal to `EVAL_WEB_API_TOKEN`, otherwise it is `401 AUTH_UNAUTHENTICATED`. The eval-web Worker adds it after verifying the takt login, together with `X-Eval-Actor` (URI-encoded JSON `{id, name}` of the takt user). The actor is used only for audit, such as the credit-grant note prefix, and never selects an owner. Without `EVAL_WEB_API_TOKEN` (local development only) the header is not required.
+
 A request carrying an `Origin` other than `EVAL_WEB_ORIGIN` is rejected with `403 REQUEST_UNTRUSTED_ORIGIN` on every route; requests without `Origin` (non-browser clients) pass. CORS allows only that Origin, the `Authorization` and `Content-Type` headers, and exposes `X-Request-ID`. The same Origin is sent as the trusted Origin on Eval SP Agent Config writes.
 
 ## Envelope
@@ -174,8 +176,12 @@ Replaced Samplings and Evaluations no longer exist and read as `404`. Sampling a
 | --- | --- | --- |
 | `GET /api/projects/{projectId}/samplings/{samplingId}/observation` | `AgentObservationRef` for the Subject | `404 PROJECT_NOT_FOUND`, `SAMPLING_NOT_FOUND` |
 | `GET /api/projects/{projectId}/evaluations/{evaluationId}/observation` | `AgentObservationRef` for the Evaluator | `404 PROJECT_NOT_FOUND`, `EVALUATION_NOT_FOUND` |
+| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/messages` | The Chat's UI messages, as Eval SP returns them | As above; `404 EVAL_SP_NOT_FOUND` before the Agent starts; relayed SP errors |
+| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/tree` | The Chat Workspace tree (`WorkspaceTreeNode[]`) | As above |
+| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/trajectory?limit=&beforeSeq=` | One trajectory page `{events:[{ingestSeq, event}], beforeSeq, hasOlder}`, newest first; `limit` 1–200 | As above |
+| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/file?path=` | Raw file bytes as an attachment under `Content-Security-Policy: default-src 'none'; sandbox`; at most 10 MB | As above; `413 CATALOG_PAYLOAD_TOO_LARGE` |
 
-`AgentObservationRef` is `{role, projectId, samplingId, evaluationId?, ownerUserId, chatId?, state}`. The API checks the owner, a non-deleted Project and that the Sampling or Evaluation is current in that Project. The Subject entry uses `Sampling.subjectChatId` and the Subject Agent Config owner; the Evaluator entry uses `EvaluationRecord.chatId` and the Evaluator owner. `state` is `available` when a Chat ID and at least one attempt exist, otherwise `not-started`. The entry is available in every Run state. No writable Chat URL is returned; the read-only Chat, Context, Workspace and Trajectory pages are served by Eval SP.
+The observation data routes read the service account's Chat from Eval SP server-side with the service session and `EVAL_SP_TRUSTED_ORIGIN`; they are GET-only and cannot drive an Agent. `AgentObservationRef` is `{role, projectId, samplingId, evaluationId?, ownerUserId, chatId?, state}`. The API checks the owner, a non-deleted Project and that the Sampling or Evaluation is current in that Project. The Subject entry uses `Sampling.subjectChatId` and the Subject Agent Config owner; the Evaluator entry uses `EvaluationRecord.chatId` and the Evaluator owner. `state` is `available` when a Chat ID and at least one attempt exist, otherwise `not-started`. The entry is available in every Run state. No writable Chat URL is returned; the read-only Chat, Context, Workspace and Trajectory pages are served by Eval SP.
 
 ### Metrics
 
@@ -269,7 +275,7 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `REQUEST_UNTRUSTED_ORIGIN` | 403 | `Origin` other than `EVAL_WEB_ORIGIN` |
 | `REQUEST_NOT_FOUND` | 404 | Unknown route or method |
 | `REQUEST_RATE_LIMITED` | 429 | Eval SP rate-limited a relayed request |
-| `AUTH_UNAUTHENTICATED` | 401 | Reserved; the service-account API never raises it |
+| `AUTH_UNAUTHENTICATED` | 401 | Missing or wrong `X-Eval-Web-Token` when one is configured |
 | `INTERNAL_ERROR` | 500 | Unexpected failure |
 | `DATABASE_UNAVAILABLE` | 503 | PostgreSQL unreachable; retry the same request |
 | `RESPONSE_INVALID` | 502 | Client only: the response is not a valid envelope |

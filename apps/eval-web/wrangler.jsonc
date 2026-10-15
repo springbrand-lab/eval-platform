@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "eval-web",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "evalrapp.springbrand.ai", "custom_domain": true }],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  // Public values only. Secrets: EVAL_WEB_API_TOKEN (`wrangler secret put EVAL_WEB_API_TOKEN`).
+  // VITE_* values are read at build time by vite (see .env.production).
+  "vars": {
+    "TAKT_ORIGIN": "https://takt.cuecue.cc",
+    "TAKT_EVAL_MENU_ID": "eval",
+    "EVAL_API_ORIGIN": "https://evalapi.springbrand.ai",
+    "EVAL_WEB_ORIGIN": "https://evalrapp.springbrand.ai",
+    "FRAME_ANCESTORS": "https://takt.cuecue.cc"
+  }
+}

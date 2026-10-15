@@ -113,3 +113,40 @@ export const observeEvaluation = createRoute({
     ...notFoundResponse,
   },
 });
+
+const observedParams = params.extend({
+  kind: z.enum(["samplings", "evaluations"]),
+  id: entityIdSchema,
+});
+
+export const observeChat = createRoute({
+  method: "get",
+  path: "/{projectId}/{kind}/{id}/observation/{part}",
+  tags: ["Project"],
+  summary: "Read the Subject or Evaluator Chat's messages, Workspace tree or trajectory page (read-only)",
+  request: {
+    params: observedParams.extend({ part: z.enum(["messages", "tree", "trajectory"]) }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).optional(),
+      beforeSeq: z.coerce.number().int().positive().optional(),
+    }),
+  },
+  responses: {
+    200: jsonContent(responseSchema(z.unknown()), "Observed Chat data"),
+    ...errorResponses,
+    ...notFoundResponse,
+  },
+});
+
+export const observeFile = createRoute({
+  method: "get",
+  path: "/{projectId}/{kind}/{id}/observation/file",
+  tags: ["Project"],
+  summary: "Download one Workspace file of the observed Chat (read-only, never rendered inline)",
+  request: { params: observedParams, query: z.object({ path: z.string().min(1).max(4096) }) },
+  responses: {
+    200: { description: "File bytes", content: { "application/octet-stream": { schema: z.string() } } },
+    ...errorResponses,
+    ...notFoundResponse,
+  },
+});

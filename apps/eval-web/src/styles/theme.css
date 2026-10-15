@@ -1,0 +1,63 @@
+/* Design tokens: light by default, dark under html.dark. Components use only these names. */
+:root {
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-muted: #f1f3f6;
+  --border: #e3e6eb;
+  --text: #15181e;
+  --text-muted: #5f6775;
+  --primary: #3b5bdb;
+  --primary-soft: #edf2ff;
+  --success: #2b8a3e;
+  --success-soft: #ebfbee;
+  --warning: #e67700;
+  --warning-soft: #fff4e6;
+  --danger: #c92a2a;
+  --danger-soft: #fff5f5;
+  --info: #1971c2;
+  --info-soft: #e7f5ff;
+  color-scheme: light;
+}
+
+html.dark {
+  --bg: #0e1116;
+  --surface: #161a21;
+  --surface-muted: #1c212a;
+  --border: #2a303b;
+  --text: #e7eaf0;
+  --text-muted: #9aa3b2;
+  --primary: #748ffc;
+  --primary-soft: #1d2440;
+  --success: #51cf66;
+  --success-soft: #13261a;
+  --warning: #ffa94d;
+  --warning-soft: #2b1f10;
+  --danger: #ff6b6b;
+  --danger-soft: #2d1515;
+  --info: #4dabf7;
+  --info-soft: #102434;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-primary: var(--primary);
+  --color-primary-soft: var(--primary-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --font-sans: "Inter Variable", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, "SFMono-Regular", monospace;
+  --radius-card: 8px;
+  --radius-control: 6px;
+}

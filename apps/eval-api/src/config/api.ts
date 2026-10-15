@@ -26,6 +26,12 @@ const apiEnvSchema = databaseEnvSchema.extend({
   EVAL_SP_SOURCE_BRANCH: requiredStringSchema,
   EVAL_SP_SOURCE_COMMIT: requiredStringSchema,
   EVAL_BUNDLE_DIR: absolutePathSchema,
+  /** Eval SP Agent Worker: read-only Chat messages and Workspace for observation. */
+  EVAL_SP_AGENT_ORIGIN: httpOriginSchema,
+  /** An Origin Eval SP's Agent Worker trusts; observation reads are made server-side with the service session. */
+  EVAL_SP_TRUSTED_ORIGIN: httpOriginSchema,
+  /** Shared with the eval-web Worker. Set in every deployment; omit only for local development. */
+  EVAL_WEB_API_TOKEN: z.string().min(32).optional(),
   EVAL_API_HOST: requiredStringSchema.default("127.0.0.1"),
   EVAL_API_PORT: portSchema.default(8788),
   /** Lets the API re-sync a Run's scores; the Run Worker syncs them as Evaluations finish. */

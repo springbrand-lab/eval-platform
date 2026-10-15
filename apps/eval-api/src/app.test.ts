@@ -77,6 +77,12 @@ function setup() {
       ({ userId: owner, email: input.email, adjustmentId: input.adjustmentId, units: input.units, replayed: false })),
     listCreditGrants: vi.fn(async () => []),
   };
+  const observation = {
+    messages: vi.fn(async () => [{ id: "m1", role: "user", parts: [{ type: "text", text: "Build a page" }] }]),
+    tree: vi.fn(async () => [{ name: "index.html", path: "/index.html", type: "file" }]),
+    trajectory: vi.fn(async () => ({ events: [], beforeSeq: null, hasOlder: false })),
+    file: vi.fn(async () => ({ body: new Blob(["<h1>Hi</h1>"]).stream(), contentType: "text/html", contentLength: "11" })),
+  };
   const release = vi.fn();
   const ownerServices = vi.fn(() => ({ services: services as unknown as OwnerServices, release }));
   const runtime: ApiRuntime = {
@@ -85,8 +91,9 @@ function setup() {
     serviceAccount: { user: { id: owner, role: "user" }, email: "eval-service@test", sessionToken: "service-session" },
     spAdminToken: "admin-token",
     ownerServices,
+    observation,
   };
-  return { request: requestApp(runtime), services, sp, ownerServices, release };
+  return { request: requestApp(runtime), services, sp, ownerServices, release, observation, runtime };
 }
 
 describe("Eval API HTTP layer", () => {
@@ -303,6 +310,40 @@ describe("Eval API HTTP layer", () => {
       [{ projectId: "project-1" }],
     ]);
     expect(app.services.metrics.getSampleOverview).toHaveBeenCalledWith({ projectId: "project-1", runIds: ["run-1"], projectSampleId: "sample-1" });
+  });
+
+  it("accepts only requests carrying the eval-web token once one is configured, and records the actor", async () => {
+    const app = setup();
+    const runtime = { ...app.runtime, webApiToken: "w".repeat(40) };
+    const request = requestApp(runtime);
+    expect((await request("/api/projects")).status).toBe(401);
+    expect((await request("/api/projects", { headers: { "X-Eval-Web-Token": "x".repeat(40) } })).status).toBe(401);
+    expect((await request("/api/projects", { headers: { "X-Eval-Web-Token": "w".repeat(40) } })).status).toBe(200);
+    const granted = await request("/api/credits/grants", jsonRequest("POST", { units: 5, idempotencyKey: "k-actor", note: "batch" }, undefined, {
+      "X-Eval-Web-Token": "w".repeat(40),
+      "X-Eval-Actor": encodeURIComponent(JSON.stringify({ id: "ou_1", name: "张三" })),
+    }));
+    expect(granted.status).toBe(200);
+    expect(app.sp.grantCredits).toHaveBeenLastCalledWith("admin-token", expect.objectContaining({ note: "[张三] batch" }));
+    expect((await app.request("/healthz")).status).toBe(200);
+  });
+
+  it("proxies read-only Chat observation and serves Workspace files as sandboxed attachments", async () => {
+    const app = setup();
+    const messages = await app.request("/api/projects/project-1/samplings/s-1/observation/messages");
+    expect(await messages.json()).toMatchObject({ success: true, msg: [{ id: "m1" }] });
+    expect(app.observation.messages).toHaveBeenCalledWith({ ownerUserId: owner, chatId: "chat-1" });
+    const page = await app.request("/api/projects/project-1/samplings/s-1/observation/trajectory?limit=50&beforeSeq=9");
+    expect(page.status).toBe(200);
+    expect(app.observation.trajectory).toHaveBeenCalledWith({ ownerUserId: owner, chatId: "chat-1" }, { limit: 50, beforeSeq: 9 });
+    const file = await app.request("/api/projects/project-1/samplings/s-1/observation/file?path=%2Findex.html");
+    expect(file.status).toBe(200);
+    expect(file.headers.get("content-disposition")).toBe("attachment");
+    expect(file.headers.get("content-security-policy")).toContain("sandbox");
+    expect(await file.text()).toBe("<h1>Hi</h1>");
+    const notStarted = await app.request("/api/projects/project-1/evaluations/e-1/observation/tree");
+    expect(notStarted.status).toBe(404);
+    expect((await app.request("/api/projects/project-1/samplings/s-1/observation/history")).status).toBe(422);
   });
 
   it("reads the balance and grants credits only to the service account", async () => {

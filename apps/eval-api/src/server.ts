@@ -12,6 +12,7 @@ import { createOwnerServices } from "./owner-services.js";
 import { startRunQueue } from "./run-worker-queue.js";
 import { openBundleDirectory } from "./sp/bundle-directory.js";
 import { createEvalSpClient } from "./sp/client.js";
+import { createSpObservationClient } from "./sp/observation.js";
 
 const logger = pino(loggerOptions);
 const config = loadApiConfig(process.env);
@@ -25,7 +26,14 @@ if (serviceUser?.id !== config.EVAL_SP_SERVICE_USER_ID || !serviceUser.email) {
 }
 const runtime: ApiRuntime = {
   webOrigin: config.EVAL_WEB_ORIGIN,
+  ...(config.EVAL_WEB_API_TOKEN === undefined ? {} : { webApiToken: config.EVAL_WEB_API_TOKEN }),
   sp,
+  observation: createSpObservationClient({
+    agentOrigin: config.EVAL_SP_AGENT_ORIGIN,
+    apiOrigin: config.EVAL_SP_API_ORIGIN,
+    trustedOrigin: config.EVAL_SP_TRUSTED_ORIGIN,
+    sessionToken: config.EVAL_SP_SERVICE_SESSION_TOKEN,
+  }),
   serviceAccount: { user: serviceUser, email: serviceUser.email, sessionToken: config.EVAL_SP_SERVICE_SESSION_TOKEN },
   spAdminToken: config.EVAL_SP_ADMIN_TOKEN,
   ownerServices: createOwnerServices({

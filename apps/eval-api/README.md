@@ -18,6 +18,9 @@
 | `EVAL_WEB_ORIGIN` | Eval Web 来源：唯一的 CORS 与受信 Origin，同时作为 Agent Config 写请求发给 SP 的 Origin |
 | `EVAL_SP_SOURCE_BRANCH`、`EVAL_SP_SOURCE_COMMIT` | 当前 Eval SP 发布的分支与完整 commit |
 | `EVAL_BUNDLE_DIR` | 共享 Bundle 目录，绝对路径 |
+| `EVAL_SP_AGENT_ORIGIN` | Eval SP Agent Worker：只读观察时读取 Chat 消息与工作区 |
+| `EVAL_SP_TRUSTED_ORIGIN` | 只读观察请求发给 Eval SP 时携带的 Origin，必须是 Eval SP Agent 信任的来源（eval 部署为 `https://devrapp.springbrand.ai`） |
+| `EVAL_WEB_API_TOKEN` | 与 eval-web Worker 共享的令牌（至少 32 个字符）。配置后 `/api/*` 只接受带正确 `X-Eval-Web-Token` 的请求；只有本地开发可以不配 |
 | `EVAL_API_HOST`、`EVAL_API_PORT` | 可选，默认 `127.0.0.1`、`8788` |
 | `LANGFUSE_BASE_URL`、`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、`LANGFUSE_ENVIRONMENT` | 可选，与 Worker 相同；配置后才能调用 Run 的分数补同步接口 |
 

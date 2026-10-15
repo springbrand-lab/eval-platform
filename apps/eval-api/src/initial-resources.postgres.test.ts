@@ -32,6 +32,7 @@ function httpClient(db: ReturnType<typeof createEvalDb>, bundles: BundleDirector
   const send = (token: string) => requestApp({
     webOrigin: WEB_ORIGIN, sp, ownerServices,
     spAdminToken: "admin-token",
+    observation: {} as never,
     serviceAccount: { user: { id: token === "other" ? otherOwner : owner, role: "user" }, email: `${token}@test`, sessionToken: token },
   });
   const apps = { owner: send("owner"), other: send("other") };

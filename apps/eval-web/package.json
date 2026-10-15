@@ -4,18 +4,45 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit",
-    "check": "tsc --noEmit",
-    "test": "vitest run"
+    "dev": "vite --port 5176 --strictPort",
+    "build": "vite build",
+    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p worker/tsconfig.json",
+    "test": "vitest run",
+    "worker:dev": "wrangler dev",
+    "deploy": "vite build && wrangler deploy"
   },
   "dependencies": {
     "@eval-platform/eval-contracts": "workspace:*",
-    "@eval-platform/eval-dataset": "workspace:*",
-    "@eval-platform/eval-metrics": "workspace:*",
-    "@eval-platform/eval-runtime": "workspace:*"
+    "@fontsource-variable/geist-mono": "^5.3.0",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@springbrand/http": "0.1.0-alpha.4",
+    "@springbrand/message-panel": "0.3.0-alpha.16",
+    "@tanstack/react-query": "^5.104.1",
+    "@tanstack/react-router": "^1.170.35",
+    "ai": "7.0.56",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.484.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "^3.6.0",
+    "zod": "4.6.5"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260101.0",
+    "@eval-platform/eval-dataset": "workspace:*",
+    "@eval-platform/eval-metrics": "workspace:*",
+    "@eval-platform/eval-runtime": "workspace:*",
+    "@tailwindcss/vite": "^4.3.3",
+    "@tanstack/router-plugin": "^1.168.23",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.0.5",
+    "jsdom": "^26.1.0",
+    "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vite": "^8.2.0",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.149.0"
   }
 }

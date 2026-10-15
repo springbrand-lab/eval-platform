@@ -13,6 +13,7 @@ import type { InitialResourceApi } from "../initial-resources.js";
 import type { ProjectService } from "../projects/service.js";
 import type { EvalSpClient, EvalSpUser } from "../sp/client.js";
 import type { ScoreSyncSummary } from "@eval-platform/eval-runtime";
+import type { SpObservationClient } from "../sp/observation.js";
 
 /** Every service a request may use, already scoped to the Eval SP service account. */
 export interface OwnerServices {
@@ -41,11 +42,20 @@ export interface OwnerServicesLease {
   readonly release: () => void;
 }
 
+export interface WebActor {
+  readonly id: string;
+  readonly name: string;
+}
+
 /** Process-wide dependencies passed to every request as Hono bindings. */
 export interface ApiRuntime {
   /** The Eval Web origin: the only browser origin allowed to call this API. */
   readonly webOrigin: string;
+  /** Shared with the eval-web Worker; absent in local development. */
+  readonly webApiToken?: string;
   readonly sp: EvalSpClient;
+  /** Read-only views of the service account's Eval SP Chats. */
+  readonly observation: SpObservationClient;
   /** The fixed Eval SP account and its long-lived session, verified once at startup. */
   readonly serviceAccount: { readonly user: EvalSpUser; readonly email: string; readonly sessionToken: string };
   /** The Eval SP RESOURCE_ADMIN_TOKEN; only credit grants to the service account use it. */
@@ -59,6 +69,8 @@ export type AppBindings = {
     user: EvalSpUser;
     sessionToken: string;
     services: OwnerServices;
+    /** The takt user behind an eval-web request, for audit only; never an owner. */
+    actor?: WebActor;
   };
 } & PinoEnv;
 
