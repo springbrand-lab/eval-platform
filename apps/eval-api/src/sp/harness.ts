@@ -241,8 +241,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         samplingId: handle.samplingId,
         evaluationId: handle.evaluationWorkspace.evaluationId,
       });
-      return evaluationOutput(await call("GET", `${handlePath(handle)}/output?${query}`),
-        handle.evaluationWorkspace.evaluationId);
+      return evaluationOutput(await call("GET", `${handlePath(handle)}/output?${query}`));
     },
     async collectAgentResources(input) {
       requireSp(input.handle.framework);
