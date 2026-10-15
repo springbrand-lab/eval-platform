@@ -244,7 +244,7 @@ export interface EvidenceStore {
 
 ## 10. 实现记录（2026-10-15）
 
-eval-platform 在 `main` 工作区，sp-platform 在本地检出的 `zixian/eval-sp-api-20261014` 分支（均未提交）。
+eval-platform 在 `main`（`b57ff44`），sp-platform 在 `eval` 分支（`035318f0`）；原 `zixian/eval-sp-api-20261014` 已合入 `eval` 并删除，后续 SP 改动直接在 `eval` 上进行。
 
 | 位置 | 内容 |
 | --- | --- |
@@ -267,5 +267,11 @@ eval-platform 在 `main` 工作区，sp-platform 在本地检出的 `zixian/eval
 - **排除规则**不可在执行计划中覆盖，暂用 `DEFAULT_EVIDENCE_LIMITS`（`EvalRunResumerDependencies.evidenceLimits` 可在组装时替换）。
 - **旧 Sampling**：没有证据包的 Sampling 评估时直接失败（"sampling has no evidence bundle"），未提供补导出命令。
 
-未完成：Eval SP 的部署与 hello 用例端到端验证、R2 桶与凭证配置、补导出命令、第 6 阶段。
+验证记录（2026-10-15）：
+
+- sp-platform `035318f0` 合入 `eval` 分支（快进），`deploy-eval` 部署成功（API、Space Worker、Agent、smoke）。
+- 证据包存入 Eval SP 已有的 `sp-platform-content-eval-enam` 桶（`evidence/` 前缀），使用 Eval SP API 的同一把 R2 key，没有新建桶。
+- 本地新建 `eval_evidence` 库（原 `eval` 库是重构前的 schema，保留未动），重建 hello 用例并跑 pipeline：Run 成功；Sampling 带 `evidence` 引用，manifest 列出 `/index.html`（217 字节），轨迹 13 条、`complete: true`；评委在自己的 Space 读取 `/evidence/manifest.json` 与产物后写 `/output/result.json`，得分 10，Langfuse 分数 `synced`；评委产物只有 `/output/result.json`。
+
+未完成：补导出命令、第 6 阶段。
 
