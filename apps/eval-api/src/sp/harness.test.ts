@@ -128,8 +128,9 @@ describe("Eval SP Harness", () => {
 
   it("bounds a stuck SP stop request with the stop timeout", async () => {
     const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      const { signal } = new Request(input, init);
-      signal.addEventListener("abort", () => reject(signal.reason));
+      // Listen on the caller's signal: a dropped `new Request(...)` clone can be collected and stop following it.
+      const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+      signal?.addEventListener("abort", () => reject(signal.reason));
     }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, stopTimeoutMs: 10 });
     await expect(harness.stopAgent({ handle: subject })).rejects.toMatchObject({

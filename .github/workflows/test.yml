@@ -87,11 +87,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # eval-api links @springbrand/eval-harness from a sibling sp-platform checkout
+      # (docs/sp-package-publishing-todo.md). sp-platform is private, so this needs a
+      # read-only token; actions/checkout only writes inside the workspace, hence the move.
+      - name: Require sp-platform read token
+        env:
+          SP_PLATFORM_TOKEN: ${{ secrets.SP_PLATFORM_TOKEN }}
+        run: |
+          if [[ -z "$SP_PLATFORM_TOKEN" ]]; then
+            echo "::error::Add the SP_PLATFORM_TOKEN secret (Contents: read on springbrand-lab/sp-platform) to check out eval-harness."
+            exit 1
+          fi
+
+      - name: Checkout sp-platform
+        uses: actions/checkout@v6
+        with:
+          repository: springbrand-lab/sp-platform
+          ref: eval
+          path: .sp-platform
+          token: ${{ secrets.SP_PLATFORM_TOKEN }}
+          persist-credentials: false
+
+      - name: Place sp-platform next to the repository
+        run: mv .sp-platform ../sp-platform
+
       - name: Prepare tests
         uses: ./.github/actions/prepare-workspace
         with:
           package-filter: "@eval-platform/eval-api"
           cache-scope: api
+
+      - name: Install eval-harness dependencies
+        working-directory: ../sp-platform
+        run: pnpm --filter @springbrand/eval-harness install --frozen-lockfile --prod
 
       - name: Restore Vitest cache
         uses: actions/cache@v6

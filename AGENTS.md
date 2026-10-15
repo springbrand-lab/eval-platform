@@ -20,5 +20,5 @@
 
 ## Verification
 
-- Local installs require a sibling `../sp-platform` checkout with `pnpm install` done (linked SP packages; see `docs/sp-package-publishing-todo.md`).
+- Local installs require a sibling `../sp-platform` checkout with `pnpm install` done (linked SP packages; see `docs/sp-package-publishing-todo.md`). CI's `api` job checks out sp-platform's `eval` branch there using the `SP_PLATFORM_TOKEN` secret.
 - `pnpm check`, then `DATABASE_URL=postgres://<user>:<pass>@<host>:<port>/<db> pnpm -r --no-bail test`; without `DATABASE_URL` the PostgreSQL integration tests are skipped.
