@@ -7,7 +7,6 @@
 | 包 | sp-platform 源码 | eval-platform 消费方 | 用途 |
 | --- | --- | --- | --- |
 | `@springbrand/eval-harness` | `packages/eval-harness` | `apps/eval-api` | Eval SP 服务路由、`X-Eval-Service-Token` 头、请求 schema、Submission 回执、Session 规范化校验和 Material 路径规则的唯一定义 |
-| `@springbrand/utils` | `packages/utils` | `packages/eval-runtime`、`packages/eval-metrics` | `canonicalJsonStringify` 等运行时无关工具 |
 
 依赖写法为 `link:../../../sp-platform/packages/<name>`，要求 sp-platform 检出在 eval-platform 的同级目录 `../sp-platform`，并已在 sp-platform 根目录执行过 `pnpm install`（被链接包从自身目录解析 `zod` 等依赖）。
 

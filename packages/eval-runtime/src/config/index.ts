@@ -17,7 +17,7 @@ export { DEFAULT_RETRY_POLICY } from "./model.js";
 
 import type { HarnessConfig, RetryPolicy } from "@eval-platform/eval-contracts";
 import { AGENT_FRAMEWORKS } from "@eval-platform/eval-contracts";
-import { createId } from "@springbrand/utils";
+import { createId } from "@eval-platform/eval-contracts";
 import { RuntimeEntityNotFoundError, RuntimeInputError } from "../runtime/errors.js";
 import { requireDistinctIds, requireIdentifier } from "../runtime/input.js";
 import { requireRetryPolicy } from "../runtime/retry.js";

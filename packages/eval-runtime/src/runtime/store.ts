@@ -1,5 +1,5 @@
 import type { EvaluationRecord, RunPhases, Sampling } from "@eval-platform/eval-contracts";
-import { equalJson } from "@springbrand/utils";
+import { equalJson } from "@eval-platform/eval-contracts";
 import type { RunConfigSnapshot } from "../config/index.js";
 import { describeAgentError } from "./agent-lifecycle.js";
 import type { RetryController, RetryDecision } from "./retry.js";

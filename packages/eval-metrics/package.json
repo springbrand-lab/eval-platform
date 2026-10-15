@@ -14,8 +14,7 @@
   "dependencies": {
     "@eval-platform/eval-contracts": "workspace:*",
     "@eval-platform/eval-dataset": "workspace:*",
-    "@eval-platform/eval-runtime": "workspace:*",
-    "@springbrand/utils": "link:../../../sp-platform/packages/utils"
+    "@eval-platform/eval-runtime": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

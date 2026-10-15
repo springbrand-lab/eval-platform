@@ -4,7 +4,7 @@ import type {
   RetryPolicy,
 } from "@eval-platform/eval-contracts";
 import { isPendingSamplingStatus } from "@eval-platform/eval-contracts";
-import { createId } from "@springbrand/utils";
+import { createId } from "@eval-platform/eval-contracts";
 import type { ResolvedEvaluationConfig, ResolvedExecutionConfig } from "../config/model.js";
 import type { Harness } from "../harness/model.js";
 import { errorMessage, reportError, type StageDependencies } from "./agent-lifecycle.js";

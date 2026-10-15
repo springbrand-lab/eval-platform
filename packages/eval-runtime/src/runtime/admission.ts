@@ -7,7 +7,7 @@ import type {
   RunPhases,
   StartRunRequest,
 } from "@eval-platform/eval-contracts";
-import { canonicalJsonBytes, createId, equalJson, sha256Hex } from "@springbrand/utils";
+import { canonicalJsonBytes, createId, equalJson, sha256Hex } from "@eval-platform/eval-contracts";
 import type { ConfigResolver, ResolvedExecutionConfig, RunConfigSnapshot } from "../config/model.js";
 import {
   RuntimeAdmissionConflictError,

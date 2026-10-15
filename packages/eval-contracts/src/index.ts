@@ -48,4 +48,5 @@ export {
   isTerminalAgentStatus,
 } from "./model.js";
 export { IDENTIFIER_RULE, identifierSchema, isIdentifier } from "./identifier.js";
+export { canonicalJsonBytes, createId, equalJson, sha256Hex } from "./canonical.js";
 export { jsonObjectSchema, jsonValueSchema } from "./json.js";

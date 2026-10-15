@@ -22,7 +22,7 @@ import type {
   SamplingState,
   RuntimeStore,
 } from "./store.js";
-import { equalJson } from "@springbrand/utils";
+import { equalJson } from "@eval-platform/eval-contracts";
 import {
   RuntimeAdmissionConflictError,
   RuntimeEntityNotFoundError,

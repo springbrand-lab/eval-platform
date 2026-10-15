@@ -18,7 +18,6 @@
   "dependencies": {
     "@eval-platform/eval-contracts": "workspace:*",
     "@eval-platform/eval-dataset": "workspace:*",
-    "@springbrand/utils": "link:../../../sp-platform/packages/utils",
     "zod": "^4.4.3"
   },
   "devDependencies": {

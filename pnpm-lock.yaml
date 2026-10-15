@@ -186,9 +186,6 @@ importers:
       '@eval-platform/eval-runtime':
         specifier: workspace:*
         version: link:../eval-runtime
-      '@springbrand/utils':
-        specifier: link:../../../sp-platform/packages/utils
-        version: link:../../../sp-platform/packages/utils
     devDependencies:
       typescript:
         specifier: ^7.0.2
@@ -205,9 +202,6 @@ importers:
       '@eval-platform/eval-dataset':
         specifier: workspace:*
         version: link:../eval-dataset
-      '@springbrand/utils':
-        specifier: link:../../../sp-platform/packages/utils
-        version: link:../../../sp-platform/packages/utils
       zod:
         specifier: ^4.4.3
         version: 4.6.5

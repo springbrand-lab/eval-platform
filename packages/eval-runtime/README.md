@@ -57,7 +57,7 @@ src/
 └── index.ts                 # 包统一导出
 ```
 
-包入口为根 `.` 与 `./harness`。请求指纹为 `sha256Hex(canonicalJsonBytes(...))`，来自 `@springbrand/utils`（本地 `link:` 依赖，见 [SP 共享包发布待办](../../docs/sp-package-publishing-todo.md)）；指纹算法变化后本地开发库需清库重建。
+包入口为根 `.` 与 `./harness`。请求指纹为 `sha256Hex(canonicalJsonBytes(...))`，来自 `@eval-platform/eval-contracts`；指纹算法变化后本地开发库需清库重建。
 
 四个顶层包及其内部文件均保持在当前仓库中；内部目录是模块，不是新的 workspace package。
 
