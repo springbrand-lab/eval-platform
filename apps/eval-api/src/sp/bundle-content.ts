@@ -5,15 +5,15 @@ import {
   evalMaterialFilesByteSize,
   evalMaterialFilesSchema,
   readEvalCanonicalContext,
-  type EvalInitialMaterial,
+  type EvalMaterialFile,
 } from "@springbrand/eval-harness";
 import { z } from "zod";
 import { BUNDLE_ERROR_DETAILS } from "../limits.js";
 import { BundleFileError, errorMessage, type BundleFileErrorDetail } from "./bundle-errors.js";
 
-export type MaterialFile = EvalInitialMaterial["files"][number];
+export type MaterialFile = EvalMaterialFile;
 /** One Material's validated files and their total decoded bytes. */
-export type MaterialContent = { readonly files: readonly MaterialFile[]; readonly byteSize: number };
+type MaterialContent = { readonly files: readonly MaterialFile[]; readonly byteSize: number };
 export type SessionContent = z.output<typeof evalInitialContextSchema>;
 /** How error details name one material's file list and each file in it. */
 type MaterialLabels = { readonly files: string; readonly file: (index: number) => string };

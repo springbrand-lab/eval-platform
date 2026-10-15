@@ -329,7 +329,7 @@ async function selectableResource<F extends SelectedFieldsFlat>(
 }
 
 /** Validate one Data field's Material references; together they must fit one SP initialization. */
-export async function assertMaterialsSelectable(
+async function assertMaterialsSelectable(
   reader: Pick<EvalDb, "select">, ownerUserId: string,
   field: "initialMaterials" | "evalInitialMaterials", references: readonly InitialMaterialsRef[],
 ): Promise<void> {
@@ -340,7 +340,7 @@ export async function assertMaterialsSelectable(
   requireInitializationBudget(byteSize, field);
 }
 
-export async function assertSessionSelectable(
+async function assertSessionSelectable(
   reader: Pick<EvalDb, "select">, ownerUserId: string, reference: InitialSessionRef,
 ): Promise<void> {
   await selectableResource(sessionBundle, reader, ownerUserId, reference.bundleId, reference.sessionId);
@@ -348,7 +348,8 @@ export async function assertSessionSelectable(
 
 /** Validate every resource reference before a Data row is created or replaced. */
 export async function assertDataReferencesSelectable(
-  reader: Pick<EvalDb, "select">, ownerUserId: string, record: Data,
+  reader: Pick<EvalDb, "select">, ownerUserId: string,
+  record: { readonly [K in "initialMaterials" | "evalInitialMaterials" | "initialSession"]?: Data[K] | null },
 ): Promise<void> {
   for (const field of ["initialMaterials", "evalInitialMaterials"] as const) {
     const references = record[field];

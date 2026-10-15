@@ -9,7 +9,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import type { EvalDb } from "./db/client.js";
 import { requireOwnerUserId } from "./db/owner.js";
-import { assertMaterialsSelectable, assertSessionSelectable } from "./db/resource-catalog.js";
+import { assertDataReferencesSelectable } from "./db/resource-catalog.js";
 import { data } from "./db/schema.js";
 
 /** Each present field replaces (references) or clears (`null`) one whole initial resource field of a Data row. */
@@ -31,11 +31,7 @@ export function createInitialResourceApi(db: EvalDb, ownerUserId: string): Initi
   return {
     async bindData(dataId, patch) {
       return db.transaction(async (transaction) => {
-        for (const field of ["initialMaterials", "evalInitialMaterials"] as const) {
-          const references = patch[field];
-          if (references) await assertMaterialsSelectable(transaction, owner, field, references);
-        }
-        if (patch.initialSession) await assertSessionSelectable(transaction, owner, patch.initialSession);
+        await assertDataReferencesSelectable(transaction, owner, patch);
         const [row] = await transaction.select({ content: data.content }).from(data)
           .where(and(eq(data.ownerUserId, owner), eq(data.dataId, dataId),
             isNull(data.deletedAt))).for("update");
