@@ -47,8 +47,6 @@ export function isTerminalAgentStatus(status: AgentStatus): boolean {
   return (TERMINAL_AGENT_STATUSES as readonly AgentStatus[]).includes(status);
 }
 
-export type EvaluatorResultStatus = "passed" | "failed" | "error" | "skipped";
-
 export type EvidenceKind =
   | "artifact"
   | "workspace"
@@ -79,7 +77,8 @@ export interface AgentConfigRef {
   readonly userAgentId: string;
 }
 
-export type AgentFramework = "sp" | "codex" | "cc";
+export const AGENT_FRAMEWORKS = ["sp", "codex", "cc"] as const;
+export type AgentFramework = (typeof AGENT_FRAMEWORKS)[number];
 
 export interface SpHarnessConfig {
   readonly kind: "sp";
@@ -221,13 +220,6 @@ export interface EvidenceRef {
   readonly contentHash?: string;
 }
 
-export interface EvaluatorResult {
-  readonly evaluatorId: string;
-  readonly status: EvaluatorResultStatus;
-  readonly score?: number;
-  readonly details?: JsonValue;
-}
-
 export interface EvaluationAgentOutput {
   readonly status: "succeeded" | "failed";
   readonly artifacts: readonly ArtifactRef[];
@@ -247,11 +239,4 @@ export interface EvaluationRecord {
   readonly status: SamplingStageState;
   readonly attempts: readonly EvaluationAttempt[];
   readonly output?: EvaluationAgentOutput;
-}
-
-export interface EvaluationResult {
-  readonly sampleId: string;
-  readonly samplingId: string;
-  readonly evaluatorResults: readonly EvaluatorResult[];
-  readonly evidenceRefs: readonly EvidenceRef[];
 }

@@ -6,8 +6,8 @@ import type {
   ExecutionConfig,
   PipelineConfig,
 } from "./model.js";
+import { RuntimeEntityNotFoundError, RuntimeInputError } from "../runtime/errors.js";
 import {
-  ConfigNotFoundError,
   DEFAULT_RETRY_POLICY,
   createConfigResolver,
   createEvaluationConfig,
@@ -148,18 +148,6 @@ describe("runtime config", () => {
     },
   );
 
-  it("rejects the obsolete workspace mode so evaluator binding is explicit", () => {
-    expect(() => createEvaluationConfig({
-      evaluationHarness: {
-        kind: "sp",
-        framework: "sp",
-        agentConfig: EVALUATOR,
-        runtime: { workspaceMode: "isolated" },
-      } as unknown as EvaluationConfig["evaluationHarness"],
-      evaluationConcurrency: 1,
-    })).toThrow("evaluationHarness.runtime.workspaceMode is no longer supported");
-  });
-
   it.each([
     { framework: undefined },
     { framework: null },
@@ -184,13 +172,13 @@ describe("runtime config", () => {
       });
 
       expect(() => createExecutionConfig(input)).toThrow(
-        "harness.framework must be sp, codex or cc",
+        "harness.framework must be one of sp, codex, cc",
       );
       await expect(resolver.resolveExecutionConfig(configId)).rejects.toThrow(
-        "harness.framework must be sp, codex or cc",
+        "harness.framework must be one of sp, codex, cc",
       );
       await expect(resolver.resolvePipelineConfig(pipelineConfig.configId)).rejects.toThrow(
-        "harness.framework must be sp, codex or cc",
+        "harness.framework must be one of sp, codex, cc",
       );
     },
   );
@@ -235,18 +223,21 @@ describe("runtime config", () => {
     });
 
     await expect(resolver.resolveExecutionConfig("missing")).rejects.toThrow(
-      "Unknown execution config missing",
+      "Unknown execution-config missing",
     );
-    await expect(resolver.resolveExecutionConfig("missing")).rejects.toBeInstanceOf(ConfigNotFoundError);
+    await expect(resolver.resolveExecutionConfig("missing")).rejects.toBeInstanceOf(RuntimeEntityNotFoundError);
     await expect(resolver.resolveEvaluationConfig("missing")).rejects.toMatchObject({
-      name: "ConfigNotFoundError", kind: "evaluation",
+      name: "RuntimeEntityNotFoundError", entity: "evaluation-config", id: "missing",
     });
     await expect(resolver.resolveExecutionConfig("invalid")).rejects.toThrow(
       "samplingCount must be a positive integer",
     );
-    await expect(resolver.resolvePipelineConfig("missing")).rejects.toThrow(
-      "Unknown pipeline config missing",
-    );
+    await expect(resolver.resolveExecutionConfig("invalid")).rejects.toMatchObject({
+      name: "RuntimeInputError", field: "samplingCount",
+    });
+    await expect(resolver.resolvePipelineConfig("missing")).rejects.toMatchObject({
+      name: "RuntimeEntityNotFoundError", entity: "pipeline-config",
+    });
   });
 
   it.each([

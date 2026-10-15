@@ -16,6 +16,11 @@ export type {
 export { DEFAULT_RETRY_POLICY } from "./model.js";
 
 import type { HarnessConfig, JsonValue, RetryPolicy, SpHarnessConfig } from "@eval-platform/eval-contracts";
+import { AGENT_FRAMEWORKS } from "@eval-platform/eval-contracts";
+import { createId } from "@springbrand/utils";
+import { RuntimeEntityNotFoundError, RuntimeInputError } from "../runtime/errors.js";
+import { requireDistinctIds, requireNonEmpty } from "../runtime/input.js";
+import { requireRetryPolicy } from "../runtime/retry.js";
 import type {
   ConfigIdFactory,
   ConfigResolver,
@@ -32,26 +37,9 @@ import type {
 } from "./model.js";
 import { DEFAULT_RETRY_POLICY } from "./model.js";
 
-export class ConfigNotFoundError extends Error {
-  constructor(readonly kind: "execution" | "evaluation" | "pipeline", configId: string) {
-    super(`Unknown ${kind} config ${configId}`);
-    this.name = "ConfigNotFoundError";
-  }
-}
-
-function defaultConfigIdFactory(): string {
-  return crypto.randomUUID();
-}
-
-function requireNonEmpty(value: unknown, field: string): asserts value is string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`${field} is required`);
-  }
-}
-
 function requirePositiveInteger(value: number, field: string): void {
   if (!Number.isInteger(value) || value < 1) {
-    throw new Error(`${field} must be a positive integer`);
+    throw new RuntimeInputError(`${field} must be a positive integer`, field);
   }
 }
 
@@ -59,22 +47,8 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function validateRetryPolicy(
-  policy: RetryPolicy | undefined,
-): void {
-  if (policy === undefined) return;
-  if (!isObjectRecord(policy)) {
-    throw new Error("retryPolicy must be an object");
-  }
-  if (!Number.isInteger(policy.maxRestarts) || policy.maxRestarts < 0) {
-    throw new Error("retryPolicy.maxRestarts must be a non-negative integer");
-  }
-  if (!Number.isFinite(policy.initialBackoffMs) || policy.initialBackoffMs < 0) {
-    throw new Error("retryPolicy.initialBackoffMs must be non-negative");
-  }
-  if (!Number.isFinite(policy.maxBackoffMs) || policy.maxBackoffMs < policy.initialBackoffMs) {
-    throw new Error("retryPolicy.maxBackoffMs must be at least initialBackoffMs");
-  }
+function requireConfigObject(config: unknown): void {
+  if (!isObjectRecord(config)) throw new RuntimeInputError("config must be an object");
 }
 
 function validateHarnessConfig(
@@ -82,32 +56,29 @@ function validateHarnessConfig(
   field: string,
 ): void {
   if (!isObjectRecord(harness)) {
-    throw new Error(`${field} must be an object`);
+    throw new RuntimeInputError(`${field} must be an object`, field);
   }
   if (harness.kind === "sp") {
-    if (
-      harness.framework !== "sp"
-      && harness.framework !== "codex"
-      && harness.framework !== "cc"
-    ) {
-      throw new Error(`${field}.framework must be sp, codex or cc`);
+    if (!(AGENT_FRAMEWORKS as readonly unknown[]).includes(harness.framework)) {
+      throw new RuntimeInputError(
+        `${field}.framework must be one of ${AGENT_FRAMEWORKS.join(", ")}`,
+        `${field}.framework`,
+      );
     }
     if (!isObjectRecord(harness.agentConfig)) {
-      throw new Error(`${field}.agentConfig must be an object`);
+      throw new RuntimeInputError(`${field}.agentConfig must be an object`, `${field}.agentConfig`);
     }
     requireNonEmpty(harness.agentConfig.ownerUserId, `${field}.agentConfig.ownerUserId`);
     requireNonEmpty(harness.agentConfig.userAgentId, `${field}.agentConfig.userAgentId`);
-    if (harness.runtime !== undefined) {
-      if (!isObjectRecord(harness.runtime)) {
-        throw new Error(`${field}.runtime must be an object`);
-      }
-      if ("workspaceMode" in harness.runtime) {
-        throw new Error(`${field}.runtime.workspaceMode is no longer supported`);
-      }
+    if (harness.runtime !== undefined && !isObjectRecord(harness.runtime)) {
+      throw new RuntimeInputError(`${field}.runtime must be an object`, `${field}.runtime`);
     }
     if (harness.runtime?.timeoutMs !== undefined) {
       if (!Number.isFinite(harness.runtime.timeoutMs) || harness.runtime.timeoutMs < 1) {
-        throw new Error(`${field}.runtime.timeoutMs must be a positive number`);
+        throw new RuntimeInputError(
+          `${field}.runtime.timeoutMs must be a positive number`,
+          `${field}.runtime.timeoutMs`,
+        );
       }
     }
     return;
@@ -117,32 +88,30 @@ function validateHarnessConfig(
     requireNonEmpty(harness.provider, `${field}.provider`);
     requireNonEmpty(harness.agentRef, `${field}.agentRef`);
     if (harness.runOptions !== undefined && !isObjectRecord(harness.runOptions)) {
-      throw new Error(`${field}.runOptions must be an object`);
+      throw new RuntimeInputError(`${field}.runOptions must be an object`, `${field}.runOptions`);
     }
     return;
   }
 
-  throw new Error(`${field}.kind is not supported`);
+  throw new RuntimeInputError(`${field}.kind is not supported`, `${field}.kind`);
 }
 
 function normalizeExecutionConfig(config: ExecutionConfig): ResolvedExecutionConfig {
-  if (!isObjectRecord(config)) throw new Error("config must be an object");
+  requireConfigObject(config);
   requireNonEmpty(config.configId, "configId");
   requireNonEmpty(config.datasetId, "datasetId");
   if (config.sampleIds !== undefined) {
-    if (!Array.isArray(config.sampleIds)) throw new Error("sampleIds must be an array");
-    if (config.sampleIds.length === 0) throw new Error("sampleIds must not be empty");
+    if (!Array.isArray(config.sampleIds)) throw new RuntimeInputError("sampleIds must be an array", "sampleIds");
+    if (config.sampleIds.length === 0) throw new RuntimeInputError("sampleIds must not be empty", "sampleIds");
     config.sampleIds.forEach((sampleId, index) => {
       requireNonEmpty(sampleId, `sampleIds[${index}]`);
     });
-    if (new Set(config.sampleIds).size !== config.sampleIds.length) {
-      throw new Error("sampleIds must not contain duplicate ids");
-    }
+    requireDistinctIds(config.sampleIds, "sampleIds");
   }
   requirePositiveInteger(config.samplingCount, "samplingCount");
   requirePositiveInteger(config.executionConcurrency, "executionConcurrency");
   validateHarnessConfig(config.harness, "harness");
-  validateRetryPolicy(config.retryPolicy);
+  if (config.retryPolicy !== undefined) requireRetryPolicy(config.retryPolicy);
   return {
     configId: config.configId,
     datasetId: config.datasetId,
@@ -155,14 +124,14 @@ function normalizeExecutionConfig(config: ExecutionConfig): ResolvedExecutionCon
 }
 
 function normalizeEvaluationConfig(config: EvaluationConfig): ResolvedEvaluationConfig {
-  if (!isObjectRecord(config)) throw new Error("config must be an object");
+  requireConfigObject(config);
   requireNonEmpty(config.configId, "configId");
   requirePositiveInteger(config.evaluationConcurrency, "evaluationConcurrency");
   validateHarnessConfig(config.evaluationHarness, "evaluationHarness");
   if (config.evaluationHarness.kind !== "sp" || config.evaluationHarness.framework !== "sp") {
-    throw new Error("evaluationHarness must use the SP host and framework");
+    throw new RuntimeInputError("evaluationHarness must use the SP host and framework", "evaluationHarness");
   }
-  validateRetryPolicy(config.retryPolicy);
+  if (config.retryPolicy !== undefined) requireRetryPolicy(config.retryPolicy);
   return {
     configId: config.configId,
     evaluationHarness: {
@@ -175,7 +144,7 @@ function normalizeEvaluationConfig(config: EvaluationConfig): ResolvedEvaluation
 }
 
 function normalizePipelineConfig(config: PipelineConfig): PipelineConfig {
-  if (!isObjectRecord(config)) throw new Error("config must be an object");
+  requireConfigObject(config);
   requireNonEmpty(config.configId, "configId");
   requireNonEmpty(config.executionConfigId, "executionConfigId");
   requireNonEmpty(config.evaluationConfigId, "evaluationConfigId");
@@ -188,21 +157,21 @@ function normalizePipelineConfig(config: PipelineConfig): PipelineConfig {
 
 export function createExecutionConfig(
   input: ExecutionConfigInput,
-  idFactory: ConfigIdFactory = defaultConfigIdFactory,
+  idFactory: ConfigIdFactory = createId,
 ): ResolvedExecutionConfig {
   return normalizeExecutionConfig({ ...input, configId: idFactory() });
 }
 
 export function createEvaluationConfig(
   input: EvaluationConfigInput,
-  idFactory: ConfigIdFactory = defaultConfigIdFactory,
+  idFactory: ConfigIdFactory = createId,
 ): ResolvedEvaluationConfig {
   return normalizeEvaluationConfig({ ...input, configId: idFactory() });
 }
 
 export function createPipelineConfig(
   input: PipelineConfigInput,
-  idFactory: ConfigIdFactory = defaultConfigIdFactory,
+  idFactory: ConfigIdFactory = createId,
 ): PipelineConfig {
   return normalizePipelineConfig({ ...input, configId: idFactory() });
 }
@@ -211,14 +180,14 @@ export function createConfigResolver(store: ConfigStore): ConfigResolver {
   async function resolveExecutionConfig(configId: string): Promise<ResolvedExecutionConfig> {
     requireNonEmpty(configId, "executionConfigId");
     const config = await store.getExecutionConfig(configId);
-    if (!config) throw new ConfigNotFoundError("execution", configId);
+    if (!config) throw new RuntimeEntityNotFoundError("execution-config", configId);
     return normalizeExecutionConfig(config);
   }
 
   async function resolveEvaluationConfig(configId: string): Promise<ResolvedEvaluationConfig> {
     requireNonEmpty(configId, "evaluationConfigId");
     const config = await store.getEvaluationConfig(configId);
-    if (!config) throw new ConfigNotFoundError("evaluation", configId);
+    if (!config) throw new RuntimeEntityNotFoundError("evaluation-config", configId);
     return normalizeEvaluationConfig(config);
   }
 
@@ -228,7 +197,7 @@ export function createConfigResolver(store: ConfigStore): ConfigResolver {
     async resolvePipelineConfig(configId) {
       requireNonEmpty(configId, "pipelineConfigId");
       const storedPipeline = await store.getPipelineConfig(configId);
-      if (!storedPipeline) throw new ConfigNotFoundError("pipeline", configId);
+      if (!storedPipeline) throw new RuntimeEntityNotFoundError("pipeline-config", configId);
       const pipeline = normalizePipelineConfig(storedPipeline);
       const [execution, evaluation] = await Promise.all([
         resolveExecutionConfig(pipeline.executionConfigId),

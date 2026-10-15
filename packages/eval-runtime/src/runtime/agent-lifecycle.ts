@@ -4,6 +4,7 @@ import type {
   AgentResourceScope,
   AgentStatus,
   HarnessConfig,
+  RetryPolicy,
   Sampling,
   SamplingStatus,
   SpHarnessConfig,
@@ -11,21 +12,22 @@ import type {
 import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 
 import type {
+  AgentFailureKind,
   AgentHandle,
   AgentSubmission,
   EnsureAgentInput,
   EvaluationWorkspaceBinding,
   Harness,
   HarnessRuntimeOptions,
-} from "../harness/index.js";
+} from "../harness/model.js";
+import { AGENT_FAILURE_KINDS } from "../harness/model.js";
 import type {
   RetryController,
   RetryOperation,
-  RetryableFailureKind,
 } from "./retry.js";
 import { validateResourceSnapshot } from "./resources.js";
-import { RuntimeRecordPersistenceError } from "./record-errors.js";
-import { RuntimeRunStoppedError } from "./stop-errors.js";
+import type { RuntimeStore } from "./store.js";
+import { RuntimeInputError, RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 
 export type AgentLifecycleStage = "execution" | "evaluation";
 
@@ -65,6 +67,12 @@ export interface AgentLifecycleDependencies {
   readonly onError?: (error: Error) => void;
 }
 
+/** Everything an execution or evaluation stage needs to drive and persist one record. */
+export interface StageDependencies extends AgentLifecycleDependencies {
+  readonly store: RuntimeStore;
+  readonly createRetryController: (policy?: RetryPolicy) => RetryController;
+}
+
 export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOutput> {
   readonly stage: AgentLifecycleStage;
   readonly role: AgentRole;
@@ -101,7 +109,7 @@ export class AgentOperationError extends Error {
   constructor(
     message: string,
     readonly retryable: boolean,
-    readonly failureKind: RetryableFailureKind,
+    readonly failureKind: AgentFailureKind,
     readonly cause?: unknown,
   ) {
     super(message);
@@ -169,10 +177,7 @@ export function applyAttemptPatch<TAttempt extends AgentAttemptRecord>(
 
 export function requireSpHarness(harness: HarnessConfig, role: AgentRole): SpHarnessConfig {
   if (harness.kind !== "sp") {
-    throw new Error(`${role} harness kind ${harness.kind} is not implemented`);
-  }
-  if (harness.runtime && "workspaceMode" in harness.runtime) {
-    throw new Error(`${role} harness runtime.workspaceMode is no longer supported`);
+    throw new RuntimeInputError(`${role} harness kind ${harness.kind} is not implemented`, "harness.kind");
   }
   return harness;
 }
@@ -191,7 +196,7 @@ export function withExecutionStatus(
 export function describeAgentError(error: unknown): {
   readonly message: string;
   readonly retryable: boolean;
-  readonly failureKind: RetryableFailureKind;
+  readonly failureKind: AgentFailureKind;
 } {
   if (error instanceof AgentOperationError) {
     return {
@@ -339,7 +344,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
           terminalPatch = {
             status: terminal.status,
             completedAt: dependencies.now(),
-            ...(isSuccessfulSubmission(terminal) ? {} : { error: submissionFailure(options.stage, terminal).message }),
+            ...(isSuccessfulSubmission(terminal) ? {} : { error: new ConfirmedSubmissionFailure(options.stage, terminal).message }),
           };
           attempt = await options.updateAttempt(attempt, terminalPatch);
         }
@@ -379,13 +384,14 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
       }
       if (!terminal) throw new Error(`${options.stage} submission has no confirmed status`);
       if (!isSuccessfulSubmission(terminal)) {
-        throw submissionFailure(options.stage, terminal);
+        throw new ConfirmedSubmissionFailure(options.stage, terminal);
       }
 
       await options.setSamplingStatus("running");
+      const outputHandle = handle;
       const output = await collectOutputWithRetry({
         stage: options.stage,
-        collect: () => options.collectOutput(handle!),
+        collect: () => options.collectOutput(outputHandle),
         retryController,
         sleep: dependencies.sleep,
         onRetry: (message) => options.setSamplingStatus("retrying", message),
@@ -784,11 +790,8 @@ export async function waitForTerminal(
   }
 }
 
-function normalizeFailureKind(value: unknown): RetryableFailureKind {
-  if (value === "llm" || value === "website" || value === "submission-timeout") {
-    return value;
-  }
-  return "network";
+function normalizeFailureKind(value: unknown): AgentFailureKind {
+  return AGENT_FAILURE_KINDS.find((kind) => kind === value) ?? "network";
 }
 
 function requireSubmissionId(submission: AgentSubmission): void {
@@ -803,8 +806,4 @@ function isTerminal(submission: AgentSubmission): boolean {
 
 function isSuccessfulSubmission(submission: AgentSubmission): boolean {
   return submission.status === "completed";
-}
-
-function submissionFailure(stage: AgentLifecycleStage, submission: AgentSubmission): AgentOperationError {
-  return new ConfirmedSubmissionFailure(stage, submission);
 }

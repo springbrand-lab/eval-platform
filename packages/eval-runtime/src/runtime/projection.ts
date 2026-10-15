@@ -76,21 +76,5 @@ export function toRunSnapshot(
 }
 
 export function toSamplingSnapshot(state: SamplingState): SamplingSnapshot {
-  return {
-    samplingId: state.samplingId,
-    projectId: state.projectId,
-    sampleId: state.sampleId,
-    execution: { ...state.execution },
-    subjectAgent: { ...state.subjectAgent },
-    ...(state.subjectChatId === undefined
-      ? {}
-      : { subjectChatId: state.subjectChatId }),
-    executionAttempts: structuredClone(state.executionAttempts),
-    ...(state.artifacts === undefined
-      ? {}
-      : { artifacts: state.artifacts.map((artifact) => ({ ...artifact })) }),
-    ...(state.trajectory === undefined
-      ? {}
-      : { trajectory: { ...state.trajectory } }),
-  };
+  return structuredClone(state);
 }

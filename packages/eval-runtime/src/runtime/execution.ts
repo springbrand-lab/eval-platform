@@ -5,14 +5,14 @@ import type {
   RetryPolicy,
   Sampling,
 } from "@eval-platform/eval-contracts";
+import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 import { dataInputSchema } from "@eval-platform/eval-dataset";
-import type { AgentHandle } from "../harness/index.js";
+import { equalJson } from "@springbrand/utils";
+import type { AgentHandle } from "../harness/model.js";
 
-import type { RuntimeStore } from "./store.js";
-import { RuntimeRecordPersistenceError, persistRuntimeRecord, sameRuntimeRecordFacts } from "./store.js";
-import { RuntimeRunStoppedError } from "./stop-errors.js";
+import { persistRuntimeRecord } from "./store.js";
+import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 import type { RuntimeSamplingContext } from "./model.js";
-import type { RetryController } from "./retry.js";
 import {
   AgentOperationError,
   ConfirmedSubmissionFailure,
@@ -22,13 +22,8 @@ import {
   requireSpHarness,
   runAgentLifecycle,
   withExecutionStatus,
-  type AgentLifecycleDependencies,
+  type StageDependencies,
 } from "./agent-lifecycle.js";
-
-export interface ExecutionStageDependencies extends AgentLifecycleDependencies {
-  readonly store: RuntimeStore;
-  readonly createRetryController: (policy?: RetryPolicy) => RetryController;
-}
 
 export interface ExecuteSamplingInput {
   readonly context: RuntimeSamplingContext;
@@ -37,7 +32,7 @@ export interface ExecuteSamplingInput {
 }
 
 export async function executeSampling(
-  dependencies: ExecutionStageDependencies,
+  dependencies: StageDependencies,
   input: ExecuteSamplingInput,
 ): Promise<RuntimeSamplingContext> {
   const subjectHarness = requireSpHarness(input.harnessConfig, "subject");
@@ -113,9 +108,6 @@ export async function executeSampling(
       return { state: current, sample };
     }
 
-    if (!sample.data || typeof sample.data !== "object" || Array.isArray(sample.data)) {
-      throw new AgentOperationError("Sample data must be an object", false, "network");
-    }
     const { dataId: _dataId, evalPrompt: _evalPrompt, evalInitialMaterials: _evalMaterials, ...data } = sample.data;
     const input = dataInputSchema.safeParse(data);
     if (!input.success) throw new AgentOperationError(input.error.message, false, "network");
@@ -208,7 +200,7 @@ export async function executeSampling(
     if (error instanceof RuntimeRecordPersistenceError) {
       const expected = error.expectedRecord as Sampling;
       const attempted = error.attemptedRecord as Sampling;
-      if (sameRuntimeRecordFacts(stored, expected)) {
+      if (equalJson(stored, expected)) {
         const observedAttempt = attempted.executionAttempts.at(-1);
         const savedAttempt = stored.executionAttempts.find((item) => (
           item.executionAttemptId === observedAttempt?.executionAttemptId
@@ -218,22 +210,21 @@ export async function executeSampling(
           || (attempted.artifacts !== undefined && stored.artifacts === undefined)
           || (attempted.trajectory !== undefined && stored.trajectory === undefined)
         ) failureBase = attempted;
-      } else if (!sameRuntimeRecordFacts(stored, attempted)) throw error;
+      } else if (!equalJson(stored, attempted)) throw error;
     }
     current = stored;
     if (current.execution.status === "succeeded") return { state: current, sample };
     const lastAttempt = failureBase.executionAttempts.at(-1);
-    const hasTerminalSubmission = !!(failureBase.subjectChatId && lastAttempt?.submissionId && lastAttempt.completedAt
-      && (lastAttempt.status === "completed" || lastAttempt.status === "failed"
-        || lastAttempt.status === "interrupted" || lastAttempt.status === "cancelled"));
-    if (error instanceof RuntimeRecordPersistenceError && hasTerminalSubmission) throw error;
-    if (hasTerminalSubmission && lastAttempt?.status !== "completed"
+    const terminalChatId = failureBase.subjectChatId && lastAttempt?.submissionId && lastAttempt.completedAt
+      && isTerminalAgentStatus(lastAttempt.status) ? failureBase.subjectChatId : undefined;
+    if (error instanceof RuntimeRecordPersistenceError && terminalChatId) throw error;
+    if (terminalChatId && lastAttempt?.status !== "completed"
       && !(error instanceof ConfirmedSubmissionFailure)) {
       // A persisted failed Attempt still needs SP calibration and the restart decision.
       // A status outage cannot turn it into final evidence collection.
       throw error;
     }
-    if (hasTerminalSubmission && !observedOutput) {
+    if (terminalChatId && !observedOutput) {
       // Persist the finalization boundary before another read, so a crash cannot restart the Agent.
       await persist({
         ...failureBase,
@@ -241,7 +232,7 @@ export async function executeSampling(
       });
       if (lastAttempt?.status === "completed") return { state: current, sample };
       try {
-        observedOutput = await collectEvidence(failureBase.subjectChatId!);
+        observedOutput = await collectEvidence(terminalChatId);
       } catch (collectionError) {
         reportEvidenceError(collectionError);
         return { state: current, sample };

@@ -2,25 +2,19 @@ import type { Data, Dataset } from "@eval-platform/eval-dataset";
 import type {
   AgentConfigRef,
   AgentRole,
-  ArtifactRef,
   EvaluationOutputSchema,
   EvaluationRecord,
   EvaluateRequest,
-  ExecutionAttempt,
   PipelineRequest,
   Project,
+  RetryPolicy,
   RunHandle,
   RunSnapshot,
   Sampling,
-  SamplingStageState,
   StartRunRequest,
-  TrajectoryRef,
 } from "@eval-platform/eval-contracts";
-import type {
-  ConfigResolver,
-} from "../config/index.js";
-
-import type { Harness } from "../harness/index.js";
+import type { ConfigResolver } from "../config/model.js";
+import type { Harness } from "../harness/model.js";
 import type { RetryController } from "./retry.js";
 import type { SamplingState, RuntimeStore } from "./store.js";
 
@@ -40,17 +34,8 @@ export interface RuntimeEvaluationContext {
   readonly sample: Sample;
 }
 
-export interface SamplingSnapshot {
-  readonly samplingId: Sampling["samplingId"];
-  readonly projectId: Sampling["projectId"];
-  readonly sampleId: Sampling["sampleId"];
-  readonly execution: SamplingStageState;
-  readonly subjectAgent: Sampling["subjectAgent"];
-  readonly subjectChatId?: Sampling["subjectChatId"];
-  readonly executionAttempts: readonly ExecutionAttempt[];
-  readonly artifacts?: readonly ArtifactRef[];
-  readonly trajectory?: TrajectoryRef;
-}
+/** A detached copy of persisted Sampling facts returned by Runtime reads. */
+export type SamplingSnapshot = Sampling;
 
 export interface AgentOption {
   readonly agentConfig: AgentConfigRef;
@@ -60,8 +45,9 @@ export interface AgentOption {
 
 export interface RuntimeCatalog {
   listProjects(): Promise<readonly Project[]>;
-  /** Resolve the Project's output-format ID to its immutable Schema for Worker use. */
-  getProject(projectId: string): Promise<(Project & { readonly evaluationOutputSchema?: EvaluationOutputSchema }) | null>;
+  getProject(projectId: string): Promise<Project | null>;
+  /** Resolve the Project's selected output-format ID to its immutable Schema; null when none is selected. */
+  getEvaluationOutputSchema(projectId: string): Promise<EvaluationOutputSchema | null>;
   listAgents(role?: AgentRole): Promise<readonly AgentOption[]>;
   listDatasets(): Promise<readonly Dataset[]>;
   listData(datasetId: string): Promise<readonly Data[]>;
@@ -97,9 +83,7 @@ export interface EvalRuntimeDependencies {
   readonly configResolver: ConfigResolver;
   readonly harness: Harness;
   readonly store: RuntimeStore;
-  readonly createRetryController?: (
-    policy?: import("@eval-platform/eval-contracts").RetryPolicy,
-  ) => RetryController;
+  readonly createRetryController?: (policy?: RetryPolicy) => RetryController;
   readonly idFactory?: () => string;
   readonly now?: () => string;
   readonly sleep?: (milliseconds: number) => Promise<void>;
@@ -117,7 +101,7 @@ export type EvalRunAdmissionDependencies = Pick<
 /** Recovery reads persisted Run facts; admission APIs and Config resolution stay in the API process. */
 export interface EvalRunResumerDependencies extends Omit<EvalRuntimeDependencies, "catalog" | "configResolver" | "sourceCommit"> {
   readonly getSamples: RuntimeCatalog["getSamples"];
-  readonly getProject: RuntimeCatalog["getProject"];
+  readonly getEvaluationOutputSchema: RuntimeCatalog["getEvaluationOutputSchema"];
 }
 
 export interface EvalRunResumer {

@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EvaluationRecord } from "@eval-platform/eval-contracts";
 import type { RetryController } from "./retry.js";
-import { RuntimeRecordConflictError, persistRuntimeRecord } from "./store.js";
+import { RuntimeRecordConflictError } from "./errors.js";
+import { persistRuntimeRecord } from "./store.js";
 
 function makeRecord(): EvaluationRecord {
   return {

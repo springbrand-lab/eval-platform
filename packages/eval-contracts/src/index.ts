@@ -16,13 +16,10 @@ export type {
   EvaluationRecord,
   EvaluationAttempt,
   EvaluateRequest,
-  EvaluationResult,
   EvidenceKind,
   EvidenceRef,
   ExecutionAttempt,
   ExecutionOutput,
-  EvaluatorResult,
-  EvaluatorResultStatus,
   HarnessConfig,
   JsonPrimitive,
   JsonValue,
@@ -44,6 +41,7 @@ export type {
   TrajectoryRef,
 } from "./model.js";
 export {
+  AGENT_FRAMEWORKS,
   AGENT_STATUSES,
   PENDING_SAMPLING_STATUSES,
   SAMPLING_STATUSES,

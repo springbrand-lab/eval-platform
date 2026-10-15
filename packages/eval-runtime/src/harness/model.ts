@@ -53,7 +53,8 @@ export interface AgentSubmission {
   readonly error?: string;
 }
 
-export type AgentFailureKind = "network" | "llm" | "website" | "submission-timeout";
+export const AGENT_FAILURE_KINDS = ["network", "llm", "website", "submission-timeout"] as const;
+export type AgentFailureKind = (typeof AGENT_FAILURE_KINDS)[number];
 
 export interface EnsureAgentInput {
   readonly chatId: string;
@@ -120,8 +121,11 @@ export interface Harness {
   submitAgent(input: SubmitAgentInput): Promise<AgentSubmission>;
   waitForSubmission(input: WaitForSubmissionInput): Promise<AgentSubmission>;
   inspectAgentOperation(input: InspectAgentOperationInput): Promise<AgentSubmission | null>;
-  /** Interrupt every unfinished Submission in this Eval-bound Chat. */
-  stopAgent(input: { readonly handle: AgentHandle }): Promise<boolean>;
+  /**
+   * Interrupt every unfinished Submission in this Eval-bound Chat. Resolves once SP has handled
+   * the stop, including when nothing was active or the Chat does not exist.
+   */
+  stopAgent(input: { readonly handle: AgentHandle }): Promise<void>;
   restartAgent(input: SubmitAgentInput): Promise<AgentSubmission>;
   collectExecution(input: CollectAgentInput): Promise<ExecutionOutput>;
   collectEvaluation(input: CollectAgentInput): Promise<EvaluationAgentOutput>;
