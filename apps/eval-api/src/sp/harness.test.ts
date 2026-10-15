@@ -112,11 +112,11 @@ describe("Eval SP Harness", () => {
       ? Response.json({ code: "REQUEST_NOT_FOUND", errMsg: "Resource not found" }, { status: 404 })
       : Response.json({ ok: true }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
-    expect(await harness.stopAgent({ handle: subject })).toBe(true);
+    await expect(harness.stopAgent({ handle: subject })).resolves.toBeUndefined();
     expect([requests[0]!.method, requests[0]!.url, requests[0]!.headers.get("X-Eval-Service-Token")]).toEqual([
       "POST", `https://eval-sp.test${CHAT_PATH}/submissions/stop`, "secret",
     ]);
-    expect(await harness.stopAgent({ handle: { ...subject, chatId: MISSING_CHAT } })).toBe(false);
+    await expect(harness.stopAgent({ handle: { ...subject, chatId: MISSING_CHAT } })).resolves.toBeUndefined();
     await expect(harness.inspectAgentOperation({
       handle: { ...subject, chatId: MISSING_CHAT }, idempotencyKey: "execution:sampling-1",
     })).rejects.toBeInstanceOf(AgentHandleNotFoundError);

@@ -67,7 +67,8 @@ export interface RuntimeStore {
 }
 
 export interface RuntimeRecoveryStore {
-  listRecoverableRunIds(afterRunId?: string, limit?: number): Promise<readonly string[]>;
+  /** True while a stage is unfinished or a stop request is not yet finalized. */
+  isRunActive(runId: string): Promise<boolean>;
   isRunStopRequested(runId: string): Promise<boolean>;
   markRunStopFinalized(runId: string): Promise<boolean>;
 }

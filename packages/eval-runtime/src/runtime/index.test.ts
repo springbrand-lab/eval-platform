@@ -39,6 +39,12 @@ import {
   toRunSnapshot,
   type EvalRuntimeDependencies,
 } from "./index.js";
+const SESSIONS_BUNDLE_ID = "789d7cc3-bb3e-41cf-b7a8-0f55ab1e9efb";
+const SESSION_ID = "3e76a4ff-8352-4de5-b8cd-ce072b8ffa69";
+const MATERIALS_BUNDLE_ID = "41f13a32-61d8-4d4d-bc19-723e976688a4";
+const MATERIAL_ID = "0325f6ed-2649-425b-b121-12d25a2d3bf3";
+const EVAL_BUNDLE_ID = "676556c9-32bd-41cf-ad54-63e1b03ce1ea";
+const EVAL_MATERIAL_ID = "fa32ac9f-ec04-4821-ac67-3438a8b7b1d8";
 
 const SUBJECT = { ownerUserId: "user-1", userAgentId: "subject-agent" };
 const EVALUATOR = { ownerUserId: "user-1", userAgentId: "evaluator-agent" };
@@ -249,9 +255,9 @@ function makeSample(sampleId: string): Sample {
       userPrompt: `Execute ${sampleId}`,
       evalPrompt: `Evaluate ${sampleId}`,
       json: { task: sampleId },
-      initialSession: { bundleId: "sessions-bundle", sessionId: "session-seed" },
-      initialMaterials: { bundleId: "materials-bundle", materialId: "materials-1" },
-      evalInitialMaterials: { bundleId: "eval-bundle", materialId: "judge-brief" },
+      initialSession: { bundleId: SESSIONS_BUNDLE_ID, sessionId: SESSION_ID },
+      initialMaterials: { bundleId: MATERIALS_BUNDLE_ID, materialId: MATERIAL_ID },
+      evalInitialMaterials: { bundleId: EVAL_BUNDLE_ID, materialId: EVAL_MATERIAL_ID },
       metadata: { source: "test" },
     },
   };
@@ -568,8 +574,8 @@ describe("eval runtime orchestration", () => {
     expect(new Set(preparationInputs.map((input) => input.idempotencyKey)).size).toBe(2);
     for (const input of preparationInputs) {
       expect(input.idempotencyKey).toBe(`initial-data:${input.handle.chatId}`);
-      expect(input.data.initialSession).toEqual({ bundleId: "sessions-bundle", sessionId: "session-seed" });
-      expect(input.data.initialMaterials).toEqual({ bundleId: "materials-bundle", materialId: "materials-1" });
+      expect(input.data.initialSession).toEqual({ bundleId: SESSIONS_BUNDLE_ID, sessionId: SESSION_ID });
+      expect(input.data.initialMaterials).toEqual({ bundleId: MATERIALS_BUNDLE_ID, materialId: MATERIAL_ID });
       expect(input.data).not.toHaveProperty("evalInitialMaterials");
       expect(input.data).not.toHaveProperty("sampleId");
       expect(input.data).not.toHaveProperty("dataId");
@@ -779,8 +785,8 @@ describe("eval runtime orchestration", () => {
         idempotencyKey: `initial-data:${first![0].handle.chatId}`,
         data: {
           userPrompt: "Execute sample-1",
-          initialSession: { bundleId: "sessions-bundle", sessionId: "session-seed" },
-          initialMaterials: { bundleId: "materials-bundle", materialId: "materials-1" },
+          initialSession: { bundleId: SESSIONS_BUNDLE_ID, sessionId: SESSION_ID },
+          initialMaterials: { bundleId: MATERIALS_BUNDLE_ID, materialId: MATERIAL_ID },
         },
       });
       expect(decide).toHaveBeenCalledExactlyOnceWith({
@@ -967,7 +973,7 @@ describe("eval runtime orchestration", () => {
       expect(input.evaluationOutputSchema).toEqual({
         type: "object", properties: { score: { type: "number" } },
       });
-      expect(input.data.initialMaterials).toEqual({ bundleId: "eval-bundle", materialId: "judge-brief" });
+      expect(input.data.initialMaterials).toEqual({ bundleId: EVAL_BUNDLE_ID, materialId: EVAL_MATERIAL_ID });
       expect(input.data).not.toHaveProperty("evalInitialMaterials");
     }
   });

@@ -22,8 +22,10 @@ export { createPostgresRuntimeQueries } from "./db/runtime-queries.js";
 export type { EvalSpRelease } from "./db/release.js";
 export type { ProjectRunView } from "./db/run-view.js";
 export { createPostgresMetricsSource } from "./db/metrics.js";
-export { createPostgresRunNotifications, startEvalRunWorker } from "./worker.js";
-export type { EvalRunWorker, EvalRunWorkerOptions, RunNotifications } from "./worker.js";
+export { createRunJobHandler, RunStillActiveError, startEvalRunWorker } from "./worker.js";
+export type { EvalRunWorker, EvalRunWorkerOptions, RunJobHandlerOptions, RunWorkerStore } from "./worker.js";
+export { createRunQueue, openRunBoss, RUN_QUEUE, RUN_QUEUE_OPTIONS, startRunQueue } from "./run-worker-queue.js";
+export type { RunJob, RunQueue, RunQueueProducer } from "./run-worker-queue.js";
 export { createEvalSpClient, EvalSpApiError, EvalSpTransportError } from "./sp/client.js";
 export { createEvalApiHandler } from "./http-api.js";
 export type { EvalApiHandlerOptions, EvalApiOwnerServices } from "./http-api.js";
@@ -38,7 +40,9 @@ export { createInitialResourceHttpHandler } from "./initial-resources.http.js";
 export type { DataInitialResourcePatch } from "./initial-resources.js";
 export type { SpHarnessOptions } from "./sp/harness.js";
 export { startSpEvalRunWorkerProcess } from "./run-worker-process.js";
-export type { SpEvalRunWorkerProcessOptions } from "./run-worker-process.js";
+export type { SpEvalRunWorkerProcess } from "./run-worker-process.js";
+export { loadWorkerConfig, workerEnvSchema } from "./config/worker.js";
+export type { WorkerConfig } from "./config/worker.js";
 export { createIndependentEvaluationApi } from "./independent-evaluation-api.js";
 export {
   BundleResourceInUseError,

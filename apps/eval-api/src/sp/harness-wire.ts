@@ -96,8 +96,8 @@ export function submission(value: unknown): AgentSubmission {
   return { ...receipt, status: normalizedStatus };
 }
 
-export function stopResult(value: unknown): boolean {
-  return response(z.object({ ok: z.boolean() }), value, "stop result").ok;
+export function requireStopResult(value: unknown): void {
+  response(z.object({ ok: z.boolean() }), value, "stop result");
 }
 
 const dataBindingSchema = z.object({

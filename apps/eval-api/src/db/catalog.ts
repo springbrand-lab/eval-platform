@@ -43,8 +43,6 @@ export interface PostgresCatalog extends RuntimeCatalog {
 
 export type PostgresProjectCatalog = Omit<PostgresCatalog, "listAgents">;
 
-export type ProjectWithOutputSchema = Project & { readonly evaluationOutputSchema?: EvaluationOutputSchema };
-
 function successfulSamplingCondition(projectId: string, ownerUserId: string, sampleId?: string) {
   return and(
     eq(samplings.ownerUserId, ownerUserId),
@@ -69,20 +67,27 @@ export function projectFromRow(row: typeof projects.$inferSelect): Project {
   };
 }
 
-/** Project persists only the output-format ID; this resolves its immutable file content. Omit the owner only for the Worker. */
+/** Omit the owner only for the Worker. */
 export async function readProject(
   reader: RecordReader, projectId: string, ownerUserId?: string,
-): Promise<ProjectWithOutputSchema | null> {
-  const [row] = await reader.select({ project: projects, schema: evaluationOutputSchemas.schema }).from(projects)
-    .leftJoin(evaluationOutputSchemas, and(
+): Promise<Project | null> {
+  const [row] = await reader.select().from(projects).where(and(eq(projects.projectId, projectId),
+    ownerUserId === undefined ? undefined : eq(projects.ownerUserId, ownerUserId)));
+  return row ? projectFromRow(row) : null;
+}
+
+/** Project persists only the output-format ID; this resolves its immutable file content. Omit the owner only for the Worker. */
+export async function readEvaluationOutputSchema(
+  reader: RecordReader, projectId: string, ownerUserId?: string,
+): Promise<EvaluationOutputSchema | null> {
+  const [row] = await reader.select({ schema: evaluationOutputSchemas.schema }).from(projects)
+    .innerJoin(evaluationOutputSchemas, and(
       eq(evaluationOutputSchemas.ownerUserId, projects.ownerUserId),
       eq(evaluationOutputSchemas.outputSchemaId, projects.evaluationOutputSchemaId),
     ))
     .where(and(eq(projects.projectId, projectId),
       ownerUserId === undefined ? undefined : eq(projects.ownerUserId, ownerUserId)));
-  if (!row) return null;
-  const project = projectFromRow(row.project);
-  return row.schema === null ? project : { ...project, evaluationOutputSchema: row.schema };
+  return row?.schema ?? null;
 }
 
 /** One Sample or null per requested ID, in request order. Omit the owner only for the Worker. */
@@ -146,6 +151,9 @@ export function createPostgresProjectCatalog(
     },
     getProject(projectId) {
       return readProject(db, projectId, owner);
+    },
+    getEvaluationOutputSchema(projectId) {
+      return readEvaluationOutputSchema(db, projectId, owner);
     },
     async bindEvaluationOutputSchema(projectId, outputSchemaId) {
       return bindProjectEvaluationOutputSchema(db, owner, projectId, outputSchemaId);

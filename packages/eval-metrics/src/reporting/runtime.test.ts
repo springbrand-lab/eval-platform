@@ -42,8 +42,8 @@ function runtimeFixture() {
   };
   const catalog: RuntimeCatalog = {
     async listProjects() { return [PROJECT]; },
-    async getProject(id) { return id === PROJECT.projectId
-      ? { ...PROJECT, evaluationOutputSchema: { type: "object" } } : null; },
+    async getProject(id) { return id === PROJECT.projectId ? PROJECT : null; },
+    async getEvaluationOutputSchema(id) { return id === PROJECT.projectId ? { type: "object" } : null; },
     async listAgents() { return [{ agentConfig: SUBJECT, name: "Subject", role: "subject" }, { agentConfig: EVALUATOR, name: "Judge", role: "evaluator" }]; },
     async listDatasets() { return [DATASET]; },
     async listData() { return [DATA]; },
@@ -81,7 +81,7 @@ function runtimeFixture() {
     async submitAgent({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true }; },
     async restartAgent() { throw new Error("Successful agent must not restart"); },
     async inspectAgentOperation({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true }; },
-    async stopAgent() { return false; },
+    async stopAgent() {},
     async waitForSubmission({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true }; },
     async collectExecution({ handle }) {
       return {

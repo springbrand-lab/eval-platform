@@ -29,7 +29,7 @@ import {
   executionOutput,
   initializationRequest,
   resourceSnapshot,
-  stopResult,
+  requireStopResult,
   submission,
   submitRequest,
   trajectoryRequest,
@@ -200,9 +200,9 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     async stopAgent({ handle }) {
       requireSp(handle.framework);
       try {
-        return stopResult(await call("POST", `${handlePath(handle)}/submissions/stop`, undefined, stopTimeoutMs));
+        requireStopResult(await call("POST", `${handlePath(handle)}/submissions/stop`, undefined, stopTimeoutMs));
       } catch (error) {
-        if (error instanceof SpHarnessError && error.status === 404) return false;
+        if (error instanceof SpHarnessError && error.status === 404) return;
         throw error;
       }
     },

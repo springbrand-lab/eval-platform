@@ -8,6 +8,7 @@ import { createPostgresConfigReader } from "./db/config.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./db/release.js";
 import { createPostgresProjectRunReader } from "./db/run-view.js";
 import { createPostgresProjectRunControl, createPostgresRuntimeStore } from "./db/runtime.js";
+import type { RunQueue } from "./run-worker-queue.js";
 import {
   createIndependentEvaluationApi,
   type IndependentEvaluationApi,
@@ -17,6 +18,7 @@ import {
 export interface PostgresIndependentEvaluationApiOptions extends Omit<IndependentEvaluationApiOptions, "createOwnerServices"> {
   readonly db: EvalDb;
   readonly release: EvalSpRelease;
+  readonly runQueue: RunQueue;
 }
 
 /** Wires the authenticated route set to owner-scoped PostgreSQL and Runtime services. */
@@ -31,12 +33,12 @@ export function createPostgresIndependentEvaluationApi(
     createOwnerServices(ownerUserId) {
       const configStore = createPostgresConfigReader(options.db, ownerUserId);
       const catalog = createPostgresProjectCatalog(options.db, ownerUserId, release);
-      const runControl = createPostgresProjectRunControl(options.db, ownerUserId);
+      const runControl = createPostgresProjectRunControl(options.db, ownerUserId, options.runQueue);
       const runtime = createEvalRunAdmission({
         sourceCommit: release.sourceCommit,
         catalog,
         configResolver: createConfigResolver(configStore),
-        store: createPostgresRuntimeStore(options.db, ownerUserId, release),
+        store: createPostgresRuntimeStore(options.db, ownerUserId, release, options.runQueue),
       });
       return {
         catalog,
