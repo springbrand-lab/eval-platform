@@ -11,7 +11,7 @@ x-eval-runtime: &eval-runtime
 services:
   api:
     <<: *eval-runtime
-    command: ["node_modules/.bin/tsx", "src/server.ts"]
+    command: ["node", "dist/server.js"]
     environment:
       EVAL_API_HOST: 0.0.0.0
       EVAL_API_PORT: "8788"
@@ -42,7 +42,7 @@ services:
 
   run-worker:
     <<: *eval-runtime
-    command: ["node_modules/.bin/tsx", "src/run-worker-main.ts"]
+    command: ["node", "dist/run-worker-main.js"]
     # Let in-progress Runs finish before the container is replaced.
     stop_grace_period: 5m
     environment:

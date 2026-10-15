@@ -53,7 +53,7 @@ Worker 可多实例部署、滚动升级；收到信号后停止取任务，等�
 
 ## 部署
 
-`Dockerfile`（在仓库根目录构建）产出一个镜像，同时承载 API（`src/server.ts`）、Run Worker（`src/run-worker-main.ts`）和迁移（`src/migrate.ts`，用 drizzle-orm 应用 `migrations-postgres`）。生产环境与 Eval SP 共用 AWS 资源：
+`pnpm --filter @eval-platform/eval-api build` 用 esbuild 把 `src/server.ts`、`src/run-worker-main.ts` 和 `src/migrate.ts`（用 drizzle-orm 应用 `migrations-postgres`）打包为 `dist/*.js`，只把 `pg` 留作外部依赖；`scripts/runtime-package.mjs` 据此从锁文件生成只含这些依赖的运行时包。`Dockerfile`（在仓库根目录构建）的运行时镜像只有 `dist/`、迁移目录和这些生产依赖，不含 TypeScript 源码和 tsx，分别以 `node dist/server.js`、`node dist/run-worker-main.js`、`node dist/migrate.js` 运行。本地开发仍用 `start:api`、`start:worker`（tsx）。生产环境与 Eval SP 共用 AWS 资源：
 
 - 运行在 Eval SP 所在的 EC2 实例上，compose 项目 `eval-platform`（`/opt/eval-platform/production`），服务 `api` 与 `run-worker` 共享 `bundles` 卷作为 `EVAL_BUNDLE_DIR`；日志写入 CloudWatch `/springbrand/eval-platform/production`。
 - 数据库是 Eval SP RDS 实例上的 `eval-platform` 库，角色 `eval_platform_app`。

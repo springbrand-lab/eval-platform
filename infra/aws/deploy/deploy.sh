@@ -102,7 +102,7 @@ aws ecr get-login-password --region "$AWS_REGION" \
 
 compose=(docker compose -p eval-platform -f "$DEPLOY_DIR/compose.yaml" -f "$TEMP_DIR/secrets.compose.json")
 "${compose[@]}" pull --quiet
-"${compose[@]}" run --rm --no-deps api node_modules/.bin/tsx src/migrate.ts
+"${compose[@]}" run --rm --no-deps api node dist/migrate.js
 "${compose[@]}" up -d --pull never --remove-orphans --wait
 "${compose[@]}" exec -T api node -e \
   "fetch('http://127.0.0.1:8788/healthz').then(async r=>{console.log(await r.text());if(!r.ok)process.exit(1)}).catch(e=>{console.error(e);process.exit(1)})"

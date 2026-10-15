@@ -58,9 +58,6 @@ importers:
       stoker:
         specifier: 2.0.1
         version: 2.0.1(@asteasolutions/zod-to-openapi@8.5.0(zod@4.6.5))(@hono/zod-openapi@1.5.1(hono@4.12.33)(zod@4.6.5))(hono@4.12.33)(openapi3-ts@4.6.1)
-      tsx:
-        specifier: ^4.23.15
-        version: 4.23.15
       ws:
         specifier: ^8.22.0
         version: 8.22.0
@@ -80,12 +77,21 @@ importers:
       drizzle-kit:
         specifier: ^0.31.10
         version: 0.31.11
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
+      tsx:
+        specifier: ^4.23.15
+        version: 4.23.15
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
       vitest:
         specifier: ^4.1.10
         version: 4.1.11(@types/node@26.1.2)(jsdom@26.1.0)(vite@8.3.2(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1))
+      yaml:
+        specifier: ^2.9.1
+        version: 2.9.1
 
   apps/eval-cli:
     dependencies:
