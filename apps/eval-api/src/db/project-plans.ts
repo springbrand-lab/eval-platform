@@ -61,9 +61,9 @@ export async function readProjectPlan(reader: RecordReader, projectId: string, o
     datasets,
     execution: execution.plan,
     executionPlanDigest: execution.digest,
-    evaluation: evaluation?.plan ?? null,
-    evaluationPlanDigest: evaluation?.digest ?? null,
-    evaluationPlanLockedAt: evaluation?.lockedAt?.toISOString() ?? null,
+    evaluation: evaluation
+      ? { plan: evaluation.plan, digest: evaluation.digest, lockedAt: evaluation.lockedAt?.toISOString() ?? null }
+      : null,
   };
 }
 

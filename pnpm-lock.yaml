@@ -34,6 +34,9 @@ importers:
       '@springbrand/http':
         specifier: 0.1.0-alpha.4
         version: 0.1.0-alpha.4(hono@4.12.33)(zod@4.6.5)
+      '@springbrand/utils':
+        specifier: link:../../../sp-platform/packages/utils
+        version: link:../../../sp-platform/packages/utils
       ajv:
         specifier: ^8.20.0
         version: 8.20.0

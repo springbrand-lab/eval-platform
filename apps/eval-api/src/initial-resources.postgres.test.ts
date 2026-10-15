@@ -245,7 +245,7 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
 
     const project = await seedProject(db, owner, { datasets: [{ data: [{ dataId: crypto.randomUUID(), userPrompt: "task" }] }], evaluation: true });
     const plans = createPostgresProjectPlanReader(db, owner);
-    const bound = (await plans.getProjectPlan(project.projectId))!.evaluation!.outputSchema.outputSchemaId;
+    const bound = (await plans.getProjectPlan(project.projectId))!.evaluation!.plan.outputSchema.outputSchemaId;
     expect((await send(`/api/evaluation-output-schemas/${bound}`, "DELETE")).status).toBe(204);
     expect(await msg(await send("/api/evaluation-output-schemas", "GET"))).toEqual([]);
     expect(await plans.getEvaluationOutputSchema(project.projectId)).toMatchObject({ type: "object" });

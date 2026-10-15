@@ -250,9 +250,7 @@ function makePlans(
         datasets,
         execution: plan,
         executionPlanDigest: await digestExecutionPlan({ execution: plan, datasets, samples: currentSamples() }),
-        evaluation: evaluationValue,
-        evaluationPlanDigest: evaluationValue && await digestJson(evaluationValue),
-        evaluationPlanLockedAt: lockedAt,
+        evaluation: evaluationValue && { plan: evaluationValue, digest: await digestJson(evaluationValue), lockedAt },
       };
     },
     async getProjectSamples(projectId, projectSampleIds) {
@@ -445,7 +443,7 @@ function makeStore(options: StoreOptions = {}): TestStore {
         throw new RuntimeAdmissionConflictError("evaluation-plan-required", "evaluation plan required");
       }
       if (plan.executionPlanDigest !== run.planDigests.execution
-        || (evaluates && plan.evaluationPlanDigest !== run.planDigests.evaluation)) {
+        || (evaluates && plan.evaluation?.digest !== run.planDigests.evaluation)) {
         throw new RuntimeAdmissionConflictError("plan-changed", "Project plan changed");
       }
       if (run.operation === "evaluation") {
@@ -1578,14 +1576,14 @@ describe("eval runtime orchestration", () => {
       operation: "evaluation", phases: ["evaluation"], samplingIds: execution.samplingIds,
       selector: { samplingIds: execution.samplingIds },
       targets: { projectSampleIds: [], samplingIds: execution.samplingIds },
-      planDigests: { execution: plan.executionPlanDigest, evaluation: plan.evaluationPlanDigest },
+      planDigests: { execution: plan.executionPlanDigest, evaluation: plan.evaluation!.digest },
     });
 
     await waitForTerminal(runtime, evaluation.runId);
     const pipeline = await runtime.pipeline(pipelineRequest("plan-digest-pipeline"));
     await expect(store.getRun(pipeline.runId)).resolves.toMatchObject({
       operation: "pipeline", phases: ["execution", "evaluation"],
-      planDigests: { execution: plan.executionPlanDigest, evaluation: plan.evaluationPlanDigest },
+      planDigests: { execution: plan.executionPlanDigest, evaluation: plan.evaluation!.digest },
     });
   });
 
@@ -2793,7 +2791,7 @@ describe("Project Run targets and partial replacement", () => {
       projectId: PROJECT_ID, operation: "pipeline", selector: { datasetIds: ["dataset-b", "dataset-a"], projectSampleIds: ["sample-2"] },
     })).resolves.toMatchObject({
       targets: { projectSampleIds: ["sample-2", "sample-3", "sample-1"], samplingIds: [] },
-      newSamplingCount: 4, evaluationCount: 4, evaluationPlanDigest: plan.evaluationPlanDigest,
+      newSamplingCount: 4, evaluationCount: 4, evaluationPlanDigest: plan.evaluation!.digest,
     });
 
     const { handle: first } = await run(runtime, "first-pipeline", "pipeline", { all: true });
@@ -2893,7 +2891,7 @@ describe("Project Run targets and partial replacement", () => {
     }
     const { handle } = await run(runtime, "execution-only", "execution", { all: true });
     expect(handle.samplingIds).toHaveLength(4);
-    expect((await store.plans().getProjectPlan(PROJECT_ID))?.evaluationPlanLockedAt).toBeNull();
+    expect((await store.plans().getProjectPlan(PROJECT_ID))?.evaluation).toBeNull();
 
     const fresh = createAutoResumingRuntime({ harness: makeHarness(), store: makeStore({ plans: projectPlans() }) });
     await expect(fresh.preview({ projectId: PROJECT_ID, operation: "evaluation", selector: { all: true } }))
@@ -2911,14 +2909,14 @@ describe("Project Run targets and partial replacement", () => {
       idempotencyKey: "first-execution", projectId: PROJECT_ID, operation: "execution",
       selector: { projectSampleIds: ["sample-1"] }, targets: { projectSampleIds: ["sample-1"], samplingIds: [] },
     });
-    expect((await store.plans().getProjectPlan(PROJECT_ID))?.evaluationPlanLockedAt).toBeNull();
+    expect((await store.plans().getProjectPlan(PROJECT_ID))?.evaluation?.lockedAt).toBeNull();
     const queued = (await store.getSampling(handle.samplingIds[0]!))!;
     await store.updateSampling({ ...queued, execution: { status: "succeeded" } }, queued);
     await admission.submit({
       idempotencyKey: "first-evaluation", projectId: PROJECT_ID, operation: "evaluation",
       selector: { samplingIds: handle.samplingIds }, targets: { projectSampleIds: [], samplingIds: [...handle.samplingIds] },
     });
-    expect((await store.plans().getProjectPlan(PROJECT_ID))?.evaluationPlanLockedAt).toEqual(expect.any(String));
+    expect((await store.plans().getProjectPlan(PROJECT_ID))?.evaluation?.lockedAt).toEqual(expect.any(String));
   });
 
   it("rejects a new key while the Project has an unfinished Run and targets that changed before the transaction", async () => {

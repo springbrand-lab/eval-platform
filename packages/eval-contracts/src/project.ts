@@ -54,8 +54,14 @@ export interface ProjectPlan {
   readonly execution: ExecutionPlan;
   /** Covers the execution plan and every ProjectSample snapshot. */
   readonly executionPlanDigest: string;
-  readonly evaluation: EvaluationPlan | null;
-  readonly evaluationPlanDigest: string | null;
+  /** Null until the user fills in the evaluation plan. */
+  readonly evaluation: ProjectEvaluation | null;
+}
+
+/** The evaluation plan with its digest; they exist only together. */
+export interface ProjectEvaluation {
+  readonly plan: EvaluationPlan;
+  readonly digest: string;
   /** Set in the admission transaction of the first pipeline/evaluation Run; never cleared. */
-  readonly evaluationPlanLockedAt: string | null;
+  readonly lockedAt: string | null;
 }

@@ -167,7 +167,7 @@ export async function buildCommand(plans: ProjectPlanReader, store: RuntimeStore
     ];
     runSamplingIds = samplings.map((sampling) => sampling.samplingId);
   }
-  const evaluator = plan.evaluation?.evaluationHarness.agentConfig ?? { ownerUserId: "none", userAgentId: "none" };
+  const evaluator = plan.evaluation?.plan.evaluationHarness.agentConfig ?? { ownerUserId: "none", userAgentId: "none" };
   const evaluations: EvaluationRecord[] = evaluates ? runSamplingIds.map((samplingId) => ({
     evaluationId: crypto.randomUUID(), samplingId, evaluator, status: { status: "queued" }, attempts: [],
   })) : [];
@@ -178,7 +178,7 @@ export async function buildCommand(plans: ProjectPlanReader, store: RuntimeStore
       samplingIds: runSamplingIds, evaluationIds: evaluations.map((evaluation) => evaluation.evaluationId),
       planDigests: {
         execution: plan.executionPlanDigest,
-        ...(evaluates && plan.evaluationPlanDigest !== null ? { evaluation: plan.evaluationPlanDigest } : {}),
+        ...(evaluates && plan.evaluation ? { evaluation: plan.evaluation.digest } : {}),
       },
       requestIdentity: { idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(), requestFingerprint: input.requestFingerprint ?? "facts" },
     },

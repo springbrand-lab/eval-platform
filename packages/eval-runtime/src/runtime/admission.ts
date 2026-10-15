@@ -1,7 +1,7 @@
 import type {
   AgentConfigRef,
-  EvaluationPlan,
   EvaluationRecord,
+  ProjectEvaluation,
   ProjectPlan,
   RunHandle,
   RunOperation,
@@ -34,13 +34,10 @@ import type { RuntimeRunPlanDigests, RuntimeRunRecord, RuntimeStore, SamplingSta
 /** The immutable caller intent bound to one idempotency key. */
 type RunRequestFacts = Omit<RunRequest, "idempotencyKey">;
 
-/** The ProjectPlan contract sets `evaluation` and `evaluationPlanDigest` together. */
-type EvaluatingProjectPlan = ProjectPlan & { readonly evaluation: EvaluationPlan; readonly evaluationPlanDigest: string };
-
-/** A Project plan that may run the requested operation. */
+/** A Project plan that may run the requested operation; evaluating operations carry its evaluation. */
 type AdmissionPlan =
   | { readonly operation: "execution"; readonly plan: ProjectPlan }
-  | { readonly operation: "pipeline" | "evaluation"; readonly plan: EvaluatingProjectPlan };
+  | { readonly operation: "pipeline" | "evaluation"; readonly plan: ProjectPlan; readonly evaluation: ProjectEvaluation };
 
 /** Validated targets with the current facts they replace or evaluate. */
 interface RunWork {
@@ -98,7 +95,7 @@ export class RunAdmission implements EvalRunAdmission {
       newSamplingCount,
       evaluationCount: operation === "pipeline" ? newSamplingCount : operation === "evaluation" ? samplings.length : 0,
       executionPlanDigest: plan.executionPlanDigest,
-      evaluationPlanDigest: admitted.operation === "execution" ? null : admitted.plan.evaluationPlanDigest,
+      evaluationPlanDigest: admitted.operation === "execution" ? null : admitted.evaluation.digest,
     };
   }
 
@@ -144,7 +141,7 @@ export class RunAdmission implements EvalRunAdmission {
     ];
     const runSamplings = operation === "evaluation" ? samplings : created;
     const evaluations = admitted.operation === "execution" ? [] : runSamplings.map(({ samplingId }) => (
-      this.#createEvaluation(samplingId, admitted.plan.evaluation.evaluationHarness.agentConfig)
+      this.#createEvaluation(samplingId, admitted.evaluation.plan.evaluationHarness.agentConfig)
     ));
     const run: RuntimeRunRecord = {
       runId: this.#idFactory(),
@@ -172,13 +169,14 @@ export class RunAdmission implements EvalRunAdmission {
     const plan = await this.#plans.getProjectPlan(projectId);
     if (!plan) throw new RuntimeEntityNotFoundError("project", projectId);
     if (operation === "execution") return { operation, plan };
-    if (!hasEvaluationPlan(plan)) {
+    const { evaluation } = plan;
+    if (!evaluation) {
       throw new RuntimeAdmissionConflictError(
         "evaluation-plan-required",
         `Project ${projectId} needs an evaluation plan before ${operation}`,
       );
     }
-    return { operation, plan };
+    return { operation, plan, evaluation };
   }
 
   /** Expand inside the Project snapshot; evaluation keeps only successful current Samplings. */
@@ -286,13 +284,9 @@ export class RunAdmission implements EvalRunAdmission {
   }
 }
 
-function hasEvaluationPlan(plan: ProjectPlan): plan is EvaluatingProjectPlan {
-  return plan.evaluation !== null;
-}
-
 function planDigestsOf(admitted: AdmissionPlan): RuntimeRunPlanDigests {
   const execution = admitted.plan.executionPlanDigest;
-  return admitted.operation === "execution" ? { execution } : { execution, evaluation: admitted.plan.evaluationPlanDigest };
+  return admitted.operation === "execution" ? { execution } : { execution, evaluation: admitted.evaluation.digest };
 }
 
 function requirePreviewRequest(request: RunPreviewRequest): RunPreviewRequest {

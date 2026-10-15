@@ -1,6 +1,7 @@
 import type { ProjectDatasetSnapshot } from "@eval-platform/eval-contracts";
 import type { Data } from "@eval-platform/eval-dataset";
 import type { ProjectSample } from "@eval-platform/eval-runtime";
+import { createId } from "@springbrand/utils";
 
 /**
  * Binds Datasets to ProjectSamples in binding order: a Data shared by several Datasets becomes one
@@ -18,7 +19,7 @@ export function bindProjectSamples(input: {
       let sample = samples.get(record.dataId);
       if (!sample) {
         sample = {
-          projectSampleId: crypto.randomUUID(), projectId: input.projectId, dataId: record.dataId, datasetIds: [],
+          projectSampleId: createId(), projectId: input.projectId, dataId: record.dataId, datasetIds: [],
           samplingCount: input.samplingCountOf(record.dataId), data: record,
         };
         samples.set(record.dataId, sample);

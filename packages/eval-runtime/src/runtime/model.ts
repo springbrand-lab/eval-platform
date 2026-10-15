@@ -40,7 +40,7 @@ export interface ProjectPlanReader {
   getProjectPlan(projectId: string): Promise<ProjectPlan | null>;
   /** One ProjectSample or null per input ID, in the same order. */
   getProjectSamples(projectId: string, projectSampleIds: readonly string[]): Promise<readonly (ProjectSample | null)[]>;
-  /** Schema content referenced by the evaluation plan; null when the Project has no evaluation plan. */
+  /** Schema content referenced by `ProjectPlan.evaluation`; null when the Project has no evaluation plan. */
   getEvaluationOutputSchema(projectId: string): Promise<EvaluationOutputSchema | null>;
 }
 
@@ -74,7 +74,7 @@ export interface RunPreview extends RunPreviewRequest {
   /** EvaluationRecords this Run would create. */
   readonly evaluationCount: number;
   readonly executionPlanDigest: string;
-  /** Null for execution, or when the Project has no evaluation plan yet. */
+  /** `ProjectEvaluation.digest`; null for execution. */
   readonly evaluationPlanDigest: string | null;
 }
 

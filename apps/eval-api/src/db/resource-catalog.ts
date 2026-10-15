@@ -2,6 +2,7 @@ import type { Data, InitialMaterialsRef, InitialSessionRef } from "@eval-platfor
 import { and, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { SelectedFieldsFlat } from "drizzle-orm/pg-core";
 import type { SelectResultFields } from "drizzle-orm/query-builders/select.types";
+import { createId } from "@springbrand/utils";
 import type { BundleDirectory, MaterialFile } from "../sp/bundle-directory.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
@@ -175,7 +176,7 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
   const sessions = childResourceCatalog(sessionResource);
   return {
     async createBundle(input: { name: string; description: string }): Promise<BundleRecord> {
-      const row = { bundleId: crypto.randomUUID(), ownerUserId: owner,
+      const row = { bundleId: createId(), ownerUserId: owner,
         name: requiredCatalogLabel(input.name, "name"),
         description: requiredCatalogLabel(input.description, "description") };
       await db.insert(bundles).values(row);
@@ -214,7 +215,7 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       const id = platformId(bundleId, "bundleId");
       const name = requiredCatalogLabel(input.name, "name");
       const description = requiredCatalogLabel(input.description, "description");
-      const reference = { bundleId: id, materialId: crypto.randomUUID() };
+      const reference = { bundleId: id, materialId: createId() };
       return uploadOneResource(id,
         () => directory.uploadInitialMaterials(owner, reference, input.files),
         async (writer) => {
@@ -233,7 +234,7 @@ export function createResourceCatalog(db: EvalDb, ownerUserId: string, directory
       const id = platformId(bundleId, "bundleId");
       const name = requiredCatalogLabel(input.name, "name");
       const description = requiredCatalogLabel(input.description, "description");
-      const reference = { bundleId: id, sessionId: crypto.randomUUID() };
+      const reference = { bundleId: id, sessionId: createId() };
       return uploadOneResource(id,
         () => directory.uploadInitialSession(owner, reference, { format: input.format, content: input.content }),
         async (writer) => {

@@ -55,12 +55,13 @@ export function plan(datasets: readonly ProjectDatasetSnapshot[], evaluation = t
     executionPlanDigest: "b".repeat(64),
     evaluation: evaluation
       ? {
-        evaluationHarness: { kind: "sp", framework: "sp", agentConfig: EVALUATOR }, evaluatorAgentConfig: snapshot("judge-source"),
-        evaluationConcurrency: 2, retryPolicy, outputSchema: SCHEMA_REF,
+        plan: {
+          evaluationHarness: { kind: "sp", framework: "sp", agentConfig: EVALUATOR }, evaluatorAgentConfig: snapshot("judge-source"),
+          evaluationConcurrency: 2, retryPolicy, outputSchema: SCHEMA_REF,
+        },
+        digest: "c".repeat(64), lockedAt: "2026-10-02T00:00:00.000Z",
       }
       : null,
-    evaluationPlanDigest: evaluation ? "c".repeat(64) : null,
-    evaluationPlanLockedAt: evaluation ? "2026-10-02T00:00:00.000Z" : null,
   };
 }
 

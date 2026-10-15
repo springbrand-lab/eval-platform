@@ -440,17 +440,20 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     });
     const plan = { userAgentId: evaluator, evaluationConcurrency: 2, outputSchemaId: schema.outputSchemaId };
     const firstView = await service.replaceEvaluationPlan(project.projectId, plan);
-    const firstCopy = firstView.evaluation!.evaluationHarness.agentConfig.userAgentId;
+    const firstCopy = firstView.evaluation!.plan.evaluationHarness.agentConfig.userAgentId;
     expect(firstView.evaluation).toMatchObject({
-      evaluatorAgentConfig: { sourceUserAgentId: evaluator, name: "Evaluator" },
-      outputSchema: { outputSchemaId: schema.outputSchemaId, digest: expect.stringMatching(/^[0-9a-f]{64}$/u) },
-      evaluationConcurrency: 2,
+      plan: {
+        evaluatorAgentConfig: { sourceUserAgentId: evaluator, name: "Evaluator" },
+        outputSchema: { outputSchemaId: schema.outputSchemaId, digest: expect.stringMatching(/^[0-9a-f]{64}$/u) },
+        evaluationConcurrency: 2,
+      },
+      digest: expect.stringMatching(/^[0-9a-f]{64}$/u),
     });
-    expect(firstView.evaluationPlanLockedAt).toBeNull();
+    expect(firstView.evaluation!.lockedAt).toBeNull();
     const secondView = await service.replaceEvaluationPlan(project.projectId, { ...plan, evaluationConcurrency: 3 });
-    const secondCopy = secondView.evaluation!.evaluationHarness.agentConfig.userAgentId;
+    const secondCopy = secondView.evaluation!.plan.evaluationHarness.agentConfig.userAgentId;
     expect(secondCopy).not.toBe(firstCopy);
-    expect(secondView.evaluationPlanDigest).not.toBe(firstView.evaluationPlanDigest);
+    expect(secondView.evaluation!.digest).not.toBe(firstView.evaluation!.digest);
     expect(stub.calls.deleted).toEqual([firstCopy]);
     const rows = await database.db.select().from(projectAgentConfigs).where(eq(projectAgentConfigs.projectId, project.projectId));
     expect(rows.find((row) => row.userAgentId === firstCopy)?.retiredAt).toBeInstanceOf(Date);
@@ -472,7 +475,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     await settle(worker, run!.samplingIds, "succeeded");
     const evaluation = await buildCommand(plans, runtime, { projectId: project.projectId, operation: "evaluation" });
     await runtime.admitRun(evaluation);
-    expect((await service.get(project.projectId))!.evaluationPlanLockedAt).toEqual(expect.any(String));
+    expect((await service.get(project.projectId))!.evaluation!.lockedAt).toEqual(expect.any(String));
     const created = stub.calls.created.length;
     await expect(service.replaceEvaluationPlan(project.projectId, plan)).rejects.toBeInstanceOf(ProjectEvaluationPlanLockedError);
     expect(stub.calls.created).toHaveLength(created);
@@ -626,8 +629,8 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     const { project, run } = (await created.json() as { msg: { project: { projectId: string }; run: { runId: string; samplingIds: string[] } } }).msg;
     expect(run.samplingIds).toHaveLength(3);
     const path = `/api/projects/${project.projectId}`;
-    const view = (await (await send(path, authorized(OWNER))).json() as { msg: { evaluationPlanLockedAt: string | null; currentRun: unknown } }).msg;
-    expect(view.evaluationPlanLockedAt).toEqual(expect.any(String));
+    const view = (await (await send(path, authorized(OWNER))).json() as { msg: { evaluation: { lockedAt: string | null }; currentRun: unknown } }).msg;
+    expect(view.evaluation.lockedAt).toEqual(expect.any(String));
     expect(view.currentRun).toEqual({ runId: run.runId });
     expect(await (await send(`${path}/evaluation-plan`, jsonRequest("PUT", {
       userAgentId: evaluator, evaluationConcurrency: 1, outputSchemaId: schema.outputSchemaId,

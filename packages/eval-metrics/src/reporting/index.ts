@@ -148,7 +148,7 @@ function prepareFacts(facts: MetricsFacts, query: MetricsQuery) {
     && (!runEvaluations || runEvaluations.has(evaluation.evaluationId)));
   const bySample = groupBy(samplings, (sampling) => sampling.projectSampleId);
   const bySampling = groupBy(evaluations, (evaluation) => evaluation.samplingId);
-  const outputs = createEvaluationOutputReader(plan.evaluation?.outputSchema ?? null, facts.evaluationOutputSchema);
+  const outputs = createEvaluationOutputReader(plan.evaluation?.plan.outputSchema ?? null, facts.evaluationOutputSchema);
   const samplingsOf = (samples: readonly ProjectSample[]): readonly SamplingSnapshot[] => samples
     .flatMap((sample) => [...bySample.get(sample.projectSampleId) ?? []].sort((left, right) => left.samplingId.localeCompare(right.samplingId)));
   const evaluationsOf = (records: readonly SamplingSnapshot[]): readonly EvaluationRecord[] => records

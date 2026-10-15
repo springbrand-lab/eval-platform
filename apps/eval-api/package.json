@@ -22,6 +22,7 @@
     "@hono/zod-openapi": "1.5.1",
     "@springbrand/eval-harness": "link:../../../sp-platform/packages/eval-harness",
     "@springbrand/http": "0.1.0-alpha.4",
+    "@springbrand/utils": "link:../../../sp-platform/packages/utils",
     "ajv": "^8.20.0",
     "drizzle-orm": "^0.45.2",
     "hono": "4.12.33",

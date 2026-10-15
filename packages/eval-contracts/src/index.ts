@@ -46,6 +46,7 @@ export type {
   EvaluationPlan,
   ExecutionPlan,
   ProjectDatasetSnapshot,
+  ProjectEvaluation,
   ProjectPlan,
 } from "./project.js";
 export {

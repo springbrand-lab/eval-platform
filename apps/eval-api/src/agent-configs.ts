@@ -1,4 +1,5 @@
 import type { AgentConfigRef, AgentConfigSnapshot, AgentRole, JsonValue } from "@eval-platform/eval-contracts";
+import { createId } from "@springbrand/utils";
 import { AgentConfigFrozenError } from "./db/errors.js";
 import type { PostgresProjectStore } from "./db/project-store.js";
 import type { EvalSpAgentConfig, EvalSpClient } from "./sp/client.js";
@@ -35,7 +36,7 @@ export interface FrozenCopy {
  */
 function frozenCopyInput(source: EvalSpAgentConfig) {
   return {
-    slug: `${FROZEN_SLUG_PREFIX}${crypto.randomUUID()}`,
+    slug: `${FROZEN_SLUG_PREFIX}${createId()}`,
     name: `${source.name.trim().slice(0, AGENT_CONFIG_NAME_CHARS - FROZEN_SUFFIX.length)}${FROZEN_SUFFIX}`,
     description: typeof source.description === "string" ? source.description : null,
     setting: source.setting,

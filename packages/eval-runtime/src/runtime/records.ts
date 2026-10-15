@@ -29,8 +29,9 @@ export class RunRecords {
     const mismatch = () => new Error(`Run ${run.runId} was admitted against a different plan of Project ${run.projectId}`);
     if (plan.executionPlanDigest !== run.planDigests.execution) throw mismatch();
     if (run.operation === "execution") return { operation: run.operation, execution: plan.execution };
-    if (!plan.evaluation || plan.evaluationPlanDigest !== run.planDigests.evaluation) throw mismatch();
-    return { operation: run.operation, execution: plan.execution, evaluation: plan.evaluation };
+    const { evaluation } = plan;
+    if (!evaluation || evaluation.digest !== run.planDigests.evaluation) throw mismatch();
+    return { operation: run.operation, execution: plan.execution, evaluation: evaluation.plan };
   }
 
   async samplings(samplingIds: readonly string[]): Promise<readonly SamplingState[]> {

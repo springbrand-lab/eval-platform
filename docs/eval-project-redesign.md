@@ -28,7 +28,7 @@
 
 ### 2.1 ProjectPlan：执行计划与评估计划
 
-Project 的一次一致读取是 `ProjectPlan`（`packages/eval-contracts/src/project.ts`）：`project` 元数据、按绑定顺序的 `datasets`、`execution` 与 `executionPlanDigest`、可空的 `evaluation` 与 `evaluationPlanDigest`，以及 `evaluationPlanLockedAt`。ProjectSample 不在 ProjectPlan 内，按 ID 分批读取。
+Project 的一次一致读取是 `ProjectPlan`（`packages/eval-contracts/src/project.ts`）：`project` 元数据、按绑定顺序的 `datasets`、`execution` 与 `executionPlanDigest`，以及可空的 `evaluation: ProjectEvaluation`（`{plan, digest, lockedAt}`，计划与摘要只同时存在）。ProjectSample 不在 ProjectPlan 内，按 ID 分批读取。
 
 | 部分 | 内容 | 确定时机 | 锁定时机 |
 | --- | --- | --- | --- |
@@ -43,17 +43,17 @@ Project 的一次一致读取是 `ProjectPlan`（`packages/eval-contracts/src/pr
 - `ExecutionPlan`：Subject `harness`（框架、冻结副本 `AgentConfigRef`、可选超时）、`subjectAgentConfig` 正文快照、`executionConcurrency`、`retryPolicy`；
 - `executionPlanDigest`：覆盖执行计划、Dataset 绑定和全部 ProjectSample 快照。
 
-评估计划（可为空）：
+评估计划（可为空，`ProjectEvaluation`）：
 
-- `EvaluationPlan`：SP 框架的 `evaluationHarness`（冻结 Evaluator 副本引用、可选超时）、`evaluatorAgentConfig` 正文快照、`evaluationConcurrency`、`retryPolicy`、`outputSchema`（Schema ID 与规范 JSON 的 sha256）；
-- `evaluationPlanDigest`；
-- `evaluationPlanLockedAt`：未锁定时为空。
+- `plan`（`EvaluationPlan`）：SP 框架的 `evaluationHarness`（冻结 Evaluator 副本引用、可选超时）、`evaluatorAgentConfig` 正文快照、`evaluationConcurrency`、`retryPolicy`、`outputSchema`（Schema ID 与规范 JSON 的 sha256）；
+- `digest`：评估计划摘要；
+- `lockedAt`：未锁定时为空。
 
 评估计划规则：
 
 - 未锁定时只有一份当前值，可整体替换任意次；
 - 未填写时，pipeline 和 evaluation 准入返回 `evaluation-plan-required`；
-- 首个 pipeline/evaluation Run 在准入事务内写入 `evaluationPlanLockedAt`；该 Run 之后停止或失败也不解锁；
+- 首个 pipeline/evaluation Run 在准入事务内写入 `evaluation.lockedAt`；该 Run 之后停止或失败也不解锁；
 - 锁定后替换返回冲突；
 - 执行计划没有任何修改入口。
 

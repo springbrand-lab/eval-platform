@@ -15,6 +15,7 @@ import {
   normalizeEvaluationPlan,
   normalizeExecutionPlan,
 } from "@eval-platform/eval-runtime";
+import { createId } from "@springbrand/utils";
 import type { AgentConfigService, FrozenCopy } from "../agent-configs.js";
 import {
   OutputSchemaNotFoundError,
@@ -159,7 +160,7 @@ export function createProjectService(input: {
   }
 
   async function createOnce(body: ProjectCreateBody, fingerprint: string): Promise<ProjectCreation> {
-    const projectId = crypto.randomUUID();
+    const projectId = createId();
     const { datasets, samples } = await snapshotSources(body, projectId);
     const evaluationInput = body.evaluation
       ? { body: body.evaluation, outputSchema: await schemaRef(body.evaluation.outputSchemaId) }

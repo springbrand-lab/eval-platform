@@ -15,8 +15,8 @@ import {
   type EvalInitialization,
 } from "@springbrand/eval-harness";
 import { ApiError } from "@springbrand/http/client";
-import { createHash } from "node:crypto";
 import WebSocket from "ws";
+import { sha256Hex } from "@springbrand/utils";
 import { httpOriginSchema } from "../config/env.js";
 import { EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH } from "../project-output-schema.js";
 import type { MaterialFile, SessionContent } from "./bundle-directory.js";
@@ -179,7 +179,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       }
       const selectedMaterials = materials ?? (schemaFile && {
         bundleId: OUTPUT_SCHEMA_BUNDLE_ID,
-        materialId: createHash("sha256").update(schemaFile.contentBase64, "base64").digest("hex"),
+        materialId: await sha256Hex(Buffer.from(schemaFile.contentBase64, "base64")),
       });
       const body: EvalInitialization = {
         idempotencyKey: input.idempotencyKey,

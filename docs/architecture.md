@@ -44,7 +44,7 @@ eval-metrics: evaluators/ aggregation/ reporting/
 Project 由两部分组成，设计记录见 [Project、Runtime 与 Metrics 设计](eval-project-redesign.md)：
 
 - **执行计划**在创建事务中确定，之后没有任何修改入口：元数据、source branch、绑定的 Dataset 快照（名称、描述、kind、创建时成员顺序）、ProjectSample、Subject Harness（框架、冻结副本引用、超时）、`executionConcurrency`、`retryPolicy` 和 Subject Agent Config 正文快照（仅展示）。`executionPlanDigest` 覆盖执行计划、Dataset 绑定和全部 ProjectSample。
-- **评估计划**可在创建时填写，也可之后补填；未锁定时只有一份当前值，可通过 `PUT /api/projects/:id/evaluation-plan` 整体替换（重新保存会生成新 Evaluator 副本并删除旧副本）。内容是 Evaluator Harness、`evaluationConcurrency`、`retryPolicy`、评估输出 JSON Schema 的 ID 与内容摘要和 Evaluator 正文快照，摘要为 `evaluationPlanDigest`。首个 pipeline/evaluation Run 在准入事务内写入 `evaluationPlanLockedAt`，之后 Run 停止或失败也不解锁，替换返回冲突。
+- **评估计划**可在创建时填写，也可之后补填；未锁定时只有一份当前值，可通过 `PUT /api/projects/:id/evaluation-plan` 整体替换（重新保存会生成新 Evaluator 副本并删除旧副本）。内容是 Evaluator Harness、`evaluationConcurrency`、`retryPolicy`、评估输出 JSON Schema 的 ID 与内容摘要和 Evaluator 正文快照。读取时是一个 `ProjectEvaluation`（`plan`、`digest`、`lockedAt`），未填写时整体为 null。首个 pipeline/evaluation Run 在准入事务内写入 `lockedAt`，之后 Run 停止或失败也不解锁，替换返回冲突。
 
 ProjectSample 是 Project 自己的固定输入：来源 Data 的完整副本、所属 Dataset ID 列表（按绑定顺序）和 `samplingCount`。同一 Data 被多个所选 Dataset 绑定时只生成一个 ProjectSample。Material/Session/Schema 只保存引用：正文不可变，软删除只让它们退出目录，已有 Project 仍按 ID 读取。来源 Dataset/Data 之后被修改、解除关联或软删除，以及原 Agent Config 被修改，都不影响已有 Project。
 

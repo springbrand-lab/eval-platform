@@ -1,5 +1,6 @@
 import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import { and, eq, isNull } from "drizzle-orm";
+import { createId } from "@springbrand/utils";
 import { parseEvaluationOutputSchema } from "../project-output-schema.js";
 import type { EvalDb } from "./client.js";
 import { parseCatalogMetadataPatch, platformId, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";
@@ -34,7 +35,7 @@ export function createOutputSchemaCatalog(db: EvalDb, ownerUserId: string) {
       const name = requiredCatalogLabel(input.name, "name");
       const description = requiredCatalogLabel(input.description, "description");
       const schema = parseEvaluationOutputSchema(input.content);
-      const record = { outputSchemaId: crypto.randomUUID(), ownerUserId: owner, name, description, schema };
+      const record = { outputSchemaId: createId(), ownerUserId: owner, name, description, schema };
       await db.insert(evaluationOutputSchemas).values(record);
       return toRecord({ ...record, deletedAt: null });
     },

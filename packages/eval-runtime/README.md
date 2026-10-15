@@ -7,14 +7,14 @@
 ## 对外边界
 
 - `plan`：`normalizeExecutionPlan` / `normalizeEvaluationPlan` 是计划校验与归一化的唯一入口（`retryPolicy` 缺省时使用 Runtime 默认重启策略，Evaluator 必须 `framework: "sp"`）；`digestExecutionPlan` 覆盖执行计划、Dataset 绑定和全部 ProjectSample 快照，与 ProjectSample 输入顺序无关；评估计划摘要和评估输出 Schema 摘要直接使用 `digestJson`（canonical JSON 的 sha256，与对象键顺序无关）；`planProjectSampleIds(plan)` 按 Dataset 绑定顺序再按成员顺序列出全部 ProjectSample；`phasesOf(operation)` 推导 Run 阶段。
-- `ProjectPlanReader`：Runtime 唯一的 Project 输入，提供 `getProjectPlan`（固定执行计划、可空评估计划、两个摘要和锁定时间）、`getProjectSamples`（按输入顺序返回完整 Data 快照）和 `getEvaluationOutputSchema`。Runtime 不读取实时 Dataset/Data、可编辑 Agent Config 或任何配置表。
+- `ProjectPlanReader`：Runtime 唯一的 Project 输入，提供 `getProjectPlan`（固定执行计划及其摘要；`evaluation` 为 `ProjectEvaluation | null`，评估计划 `plan`、摘要 `digest` 和锁定时间 `lockedAt` 只能一起存在）、`getProjectSamples`（按输入顺序返回完整 Data 快照）和 `getEvaluationOutputSchema`。Runtime 不读取实时 Dataset/Data、可编辑 Agent Config 或任何配置表。
 - `createEvalRunAdmission({ sourceCommit, plans, store, idFactory? })`：API 进程的准入入口，不持有 Harness 凭证。
   - `preview({ projectId, operation, selector })` 在 Project 快照内展开选择：`all`/`datasetIds` 按 Dataset 绑定顺序再按成员顺序展开为 ProjectSample，与显式 `projectSampleIds` 合并去重；execution/pipeline 的显式 Sampling 若其 ProjectSample 已被整条选中则被吸收；evaluation 把 ProjectSample 展开为当前执行成功的 Sampling（静默过滤失败/未完成），显式 Sampling 必须执行成功。返回固定 `targets`、替换/新建 Sampling 数、评估数和计划摘要。
   - `submit({ idempotencyKey, projectId, operation, selector, targets })` 以 `targets` 为准校验（不重新展开），构造新 Sampling（每个目标 ProjectSample 按 `samplingCount` 新建，每个目标 Sampling 一对一新建）、EvaluationRecord（pipeline 每个新 Sampling 一条，evaluation 每个目标 Sampling 一条）和 Run，并调用一次 `RuntimeStore.admitRun()`。请求指纹为 `digestJson({ projectId, operation, selector, targets, planDigests })`，`planDigests` 含执行计划摘要，pipeline/evaluation 另含评估计划摘要；同 key 先按已存 Run 的摘要比对，事实相同即重放原 Run，不再读取计划。
 - `createEvalRunResumer({ plans, harness, store, onError, ... })`：Worker 入口，提供 `resume(runId, stopSignal?)`、`interrupt(runId)` 和 `stop(runId)`。每次先读取 Run，再读取 Project 计划并核对 `run.planDigests`；摘要不一致直接拒绝，绝不用另一份计划运行。执行使用执行计划的 Harness、`executionConcurrency` 和 `retryPolicy`，评估使用评估计划的对应字段；ProjectSample 按不同 ID 批量读取并校验身份。
 - 结果读取实现 `EvalRunQueries`（`getRun`、`getSampling`、`getEvaluation`、`listEvaluations`），由宿主基于自身存储提供；`toRunSnapshot` 投影 `operation`、`selector`、`targets` 与派生的 `phase/status`。
 
-`RuntimeStore.admitRun()` 是 Store 侧的准入事务合同（见 `runtime/store.ts`）：在 Project 行锁内拒绝缺失/软删除 Project；同 key 同指纹只在其 Run 仍是 Project 最新 Run 时重放，不同指纹或已被后续 Run 取代的 key 拒绝，新 key 遇到未完成 Run 抛出 `RuntimeProjectBusyError`；复核计划摘要和评估计划存在；复核 `replacedSamplingIds` 仍等于目标的当前 Sampling（否则 `stale-targets`），evaluation 复核目标仍执行成功；execution/pipeline 删除被替换的 Sampling 及其评估和 Run 关联，evaluation 只删除目标 Sampling 的当前评估，绝不触碰未选中结果；批量插入新事实与 key ledger；首个 pipeline/evaluation Run 锁定评估计划，提交后才通知 Worker。
+`RuntimeStore.admitRun()` 是 Store 侧的准入事务合同（见 `runtime/store.ts`）：在 Project 行锁内拒绝缺失/软删除 Project；同 key 同指纹只在其 Run 仍是 Project 最新 Run 时重放，不同指纹或已被后续 Run 取代的 key 拒绝，新 key 遇到未完成 Run 抛出 `RuntimeProjectBusyError`；复核计划摘要和评估计划存在；复核 `replacedSamplingIds` 仍等于目标的当前 Sampling（否则 `stale-targets`），evaluation 复核目标仍执行成功；execution/pipeline 删除被替换的 Sampling 及其评估和 Run 关联，evaluation 只删除目标 Sampling 的当前评估，绝不触碰未选中结果；批量插入新事实与 key ledger；首个 pipeline/evaluation Run 写入 `ProjectEvaluation.lockedAt`，提交后才通知 Worker。
 
 ## 文件职责
 
