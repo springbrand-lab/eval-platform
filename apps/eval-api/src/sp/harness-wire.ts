@@ -1,9 +1,8 @@
-import { AGENT_STATUSES } from "@eval-platform/eval-contracts";
+import { AGENT_STATUSES, EVIDENCE_KINDS } from "@eval-platform/eval-contracts";
 import type {
   AgentResourceSnapshot,
   EvaluationAgentOutput,
   EvaluationStructuredOutput,
-  EvidenceKind,
   ExecutionOutput,
   MaterializedDataBinding,
 } from "@eval-platform/eval-contracts";
@@ -135,8 +134,6 @@ export function executionOutput(value: unknown, samplingId: string): ExecutionOu
     error: z.string().exactOptional(),
   }), value, "execution output");
 }
-
-const EVIDENCE_KINDS = ["artifact", "workspace", "test-report", "trajectory", "judge-output", "metric"] as const satisfies readonly EvidenceKind[];
 
 const structuredOutputSchema = z.object({
   path: id,

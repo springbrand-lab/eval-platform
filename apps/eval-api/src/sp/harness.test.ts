@@ -214,7 +214,7 @@ describe("Eval SP Harness", () => {
     const { fetch, requests } = spFetch((request) => new URL(request.url).pathname.endsWith("/output")
       ? Response.json({
         status: "succeeded",
-        artifacts: [{ artifactId: "judge-output", kind: "evaluation", path: "/evaluations/evaluation-1/result.json" }],
+        artifacts: [{ artifactId: "evaluation-result", kind: "evaluation", path: "/evaluations/evaluation-1/result.json" }],
         structuredOutput: { path: "/evaluations/evaluation-1/result.json", content: '{ "score": 1.50 }', contentHash: "sha256:abc" },
         trajectory: { trajectoryId: "judge-trace", source: "evaluator", path: "/evaluations/evaluation-1/trajectory.jsonl" },
         unknownField: { kept: false },

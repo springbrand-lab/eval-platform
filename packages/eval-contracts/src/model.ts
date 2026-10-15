@@ -47,13 +47,8 @@ export function isTerminalAgentStatus(status: AgentStatus): boolean {
   return (TERMINAL_AGENT_STATUSES as readonly AgentStatus[]).includes(status);
 }
 
-export type EvidenceKind =
-  | "artifact"
-  | "workspace"
-  | "test-report"
-  | "trajectory"
-  | "judge-output"
-  | "metric";
+export const EVIDENCE_KINDS = ["artifact", "workspace", "test-report", "trajectory", "evaluation-output", "metric"] as const;
+export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
 
 /** Project metadata; its plan lives in ProjectPlan and is never edited after creation. */
 export interface Project {

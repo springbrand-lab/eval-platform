@@ -85,10 +85,15 @@ export interface ProjectView extends ProjectPlan {
   readonly currentRun: CurrentRun | null;
 }
 
-async function lockProject(transaction: Writer, owner: string, projectId: string): Promise<void> {
+/** Locks the visible Project row; false when it is gone or soft-deleted. */
+async function tryLockProject(transaction: Writer, owner: string, projectId: string): Promise<boolean> {
   const [row] = await transaction.select({ projectId: projects.projectId }).from(projects)
     .where(visibleProject(projectId, owner)).for("update");
-  if (!row) throw new RuntimeEntityNotFoundError("project", projectId);
+  return row !== undefined;
+}
+
+async function lockProject(transaction: Writer, owner: string, projectId: string): Promise<void> {
+  if (!await tryLockProject(transaction, owner, projectId)) throw new RuntimeEntityNotFoundError("project", projectId);
 }
 
 /** Owner-scoped Project snapshot persistence; the plan is written once, only the evaluation plan is replaceable. */
@@ -202,9 +207,7 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
      */
     async deleteUnrun(projectId: string): Promise<string[]> {
       return db.transaction(async (transaction) => {
-        const [row] = await transaction.select({ projectId: projects.projectId }).from(projects)
-          .where(visibleProject(projectId, owner)).for("update");
-        if (!row || await projectHasRun(transaction, projectId)) return [];
+        if (!await tryLockProject(transaction, owner, projectId) || await projectHasRun(transaction, projectId)) return [];
         const copies = await transaction.select({ userAgentId: projectAgentConfigs.userAgentId }).from(projectAgentConfigs)
           .where(eq(projectAgentConfigs.projectId, projectId));
         for (const table of [projectAgentConfigs, projectEvaluationPlans, projectExecutionPlans, projectSampleDatasets,
