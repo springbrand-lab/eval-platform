@@ -1,10 +1,6 @@
 import type { JsonValue } from "@eval-platform/eval-contracts";
 import { z } from "zod";
 
-const identifierSchema = z.string().min(1).refine((value) => value === value.trim(), {
-  message: "Identifiers must not have leading or trailing whitespace",
-});
-
 const jsonValueSchema: z.ZodType<JsonValue> = z.unknown().transform((input, context) => {
   try {
     const serialized = JSON.stringify(input, function (
@@ -54,18 +50,15 @@ const jsonRecordSchema = jsonValueSchema.pipe(z.custom<Readonly<Record<string, J
 
 // Match SP packages/http/src/mcp-observation.ts for UUID identities persisted in PostgreSQL.
 export const platformIdSchema = z.uuid().transform((value) => value.toLowerCase());
-export const datasetIdSchema = platformIdSchema;
-export const dataIdSchema = platformIdSchema;
-const resourceReferenceIdSchema = z.union([platformIdSchema, identifierSchema]);
 
 export const initialSessionRefSchema = z.strictObject({
-  bundleId: resourceReferenceIdSchema,
-  sessionId: resourceReferenceIdSchema,
+  bundleId: platformIdSchema,
+  sessionId: platformIdSchema,
 }).readonly();
 
 export const initialMaterialsRefSchema = z.strictObject({
-  bundleId: resourceReferenceIdSchema,
-  materialId: resourceReferenceIdSchema,
+  bundleId: platformIdSchema,
+  materialId: platformIdSchema,
 }).readonly();
 
 const datasetFieldsSchema = z.strictObject({
@@ -89,15 +82,15 @@ export const datasetInputSchema = datasetFieldsSchema.readonly();
 export const dataInputSchema = createDataRecordSchema(
   dataFieldsSchema.extend({ dataId: z.never().optional() }),
 );
-export const datasetSchema = datasetFieldsSchema.extend({ datasetId: datasetIdSchema }).readonly();
+export const datasetSchema = datasetFieldsSchema.extend({ datasetId: platformIdSchema }).readonly();
 export const dataSchema = createDataRecordSchema(
-  dataFieldsSchema.extend({ dataId: dataIdSchema }),
+  dataFieldsSchema.extend({ dataId: platformIdSchema }),
 );
 
 export const datasetDocumentSchema = z.strictObject({
-  dataset: datasetFieldsSchema.extend({ datasetId: datasetIdSchema.optional() }).readonly(),
+  dataset: datasetFieldsSchema.extend({ datasetId: platformIdSchema.optional() }).readonly(),
   data: z.array(createDataRecordSchema(
-    dataFieldsSchema.extend({ dataId: dataIdSchema.optional() }),
+    dataFieldsSchema.extend({ dataId: platformIdSchema.optional() }),
   )).readonly(),
 }).readonly().superRefine((document, context) => rejectDuplicateDataIds(document.data, context));
 

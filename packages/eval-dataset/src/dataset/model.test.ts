@@ -13,8 +13,8 @@ describe("Dataset inputs", () => {
     const input = {
       userPrompt: "Build the homepage",
       json: { task: "build homepage", requirements: ["responsive", true, null, 3] },
-      initialSession: { bundleId: "sessions-bundle", sessionId: "session-seed" },
-      initialMaterials: { bundleId: "project-assets", materialId: "homepage-files" },
+      initialSession: { bundleId: "401c23cf-d812-43f4-8404-d76e22cb0a66", sessionId: "a2047fbe-4917-4658-81ca-68f82ebe6071" },
+      initialMaterials: { bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0", materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af" },
       metadata: { source: "internal", labels: ["web"] },
     };
     const parsed = dataInputSchema.parse(input);
@@ -22,7 +22,7 @@ describe("Dataset inputs", () => {
     input.json.requirements.push("changed");
     input.initialSession.sessionId = "changed";
     expect(parsed.json).toEqual({ task: "build homepage", requirements: ["responsive", true, null, 3] });
-    expect(parsed.initialSession).toEqual({ bundleId: "sessions-bundle", sessionId: "session-seed" });
+    expect(parsed.initialSession).toEqual({ bundleId: "401c23cf-d812-43f4-8404-d76e22cb0a66", sessionId: "a2047fbe-4917-4658-81ca-68f82ebe6071" });
   });
 
   it("preserves the external Bundle and concrete material identity", () => {
@@ -30,15 +30,15 @@ describe("Dataset inputs", () => {
       userPrompt: "Build the homepage",
       json: null,
       initialMaterials: {
-        bundleId: "project-assets",
-        materialId: "homepage-files",
+        bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0",
+        materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af",
       },
     })).toEqual({
       userPrompt: "Build the homepage",
       json: null,
       initialMaterials: {
-        bundleId: "project-assets",
-        materialId: "homepage-files",
+        bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0",
+        materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af",
       },
     });
   });
@@ -114,8 +114,7 @@ describe("Dataset inputs", () => {
     [],
     {},
     { dataId: crypto.randomUUID(), userPrompt: "task" },
-    { userPrompt: "task", initialMaterials: { kind: "file-bundle", bundleId: " " } },
-    { userPrompt: "task", initialMaterials: { kind: "generated", generatorId: "fixture", parameters: [] } },
+    { userPrompt: "task", initialMaterials: { bundleId: " " } },
   ])("rejects invalid Data input: %j", (input) => {
     expect(dataInputSchema.safeParse(input).success).toBe(false);
   });
@@ -149,12 +148,12 @@ describe("Current user prompt and extension fields", () => {
 
   it("keeps evaluator materials separate from Subject materials", () => {
     const data = dataInputSchema.parse({ userPrompt: "Build", evalPrompt: "Judge",
-      initialMaterials: { bundleId: "subject", materialId: "brief" },
-      evalInitialMaterials: { bundleId: "evaluator", materialId: "rubric" } });
-    expect(data.evalInitialMaterials).toEqual({ bundleId: "evaluator", materialId: "rubric" });
-    expect(data.initialMaterials).toEqual({ bundleId: "subject", materialId: "brief" });
+      initialMaterials: { bundleId: "335ce16b-3fe4-4346-8c3a-f2a4efce2ef0", materialId: "57c8ddb0-90f6-45c0-85c9-19758bfb53af" },
+      evalInitialMaterials: { bundleId: "b49b3f03-2a47-4314-8c98-03ac96738979", materialId: "56230a91-7786-4fe6-8eb0-83b53fac7bcd" } });
+    expect(data.evalInitialMaterials).toEqual({ bundleId: "b49b3f03-2a47-4314-8c98-03ac96738979", materialId: "56230a91-7786-4fe6-8eb0-83b53fac7bcd" });
+    expect(data.initialMaterials).toEqual({ bundleId: "335ce16b-3fe4-4346-8c3a-f2a4efce2ef0", materialId: "57c8ddb0-90f6-45c0-85c9-19758bfb53af" });
     expect(dataInputSchema.safeParse({ userPrompt: "Build",
-      evalInitialMaterials: { bundleId: "evaluator" } }).success).toBe(false);
+      evalInitialMaterials: { bundleId: "b49b3f03-2a47-4314-8c98-03ac96738979" } }).success).toBe(false);
   });
 
   it("preserves extension keys that object-schema parsers commonly strip", () => {
@@ -185,7 +184,7 @@ describe("Current user prompt and extension fields", () => {
 
 describe("InitialSessionRef", () => {
   it("keeps only the independent initialization resource identity", () => {
-    const reference = { bundleId: "sessions-bundle", sessionId: "session-seed" };
+    const reference = { bundleId: "401c23cf-d812-43f4-8404-d76e22cb0a66", sessionId: "a2047fbe-4917-4658-81ca-68f82ebe6071" };
     expect(initialSessionRefSchema.parse(reference)).toEqual(reference);
     expect(dataInputSchema.parse({ userPrompt: "Continue the project", initialSession: reference }))
       .toEqual({ userPrompt: "Continue the project", initialSession: reference });
@@ -203,23 +202,18 @@ describe("InitialSessionRef", () => {
     {},
     [],
     "session-seed",
-    { bundleId: "sessions-bundle" },
-    { sessionId: "session-seed" },
+    { bundleId: "401c23cf-d812-43f4-8404-d76e22cb0a66" },
+    { sessionId: "a2047fbe-4917-4658-81ca-68f82ebe6071" },
     { sessionId: "" },
     { sessionId: " " },
     { sessionId: 123 },
-    { bundleId: "", sessionId: "session-seed" },
-    { bundleId: "sessions-bundle", sessionId: "" },
-    { bundleId: "sessions-bundle", sessionId: " session-seed " },
-    { bundleId: " sessions-bundle ", sessionId: "session-seed" },
-    { bundleId: "sessions-bundle", sessionId: "session-seed", version: 1 },
-    { bundleId: "sessions-bundle", sessionId: "session-seed", content: "inline history" },
-    { bundleId: "sessions-bundle", sessionId: "session-seed", entries: [{ role: "user", content: "task" }] },
-    { submissionId: "source-chat" },
-    { messages: [{ role: "user", content: "task" }] },
-    { conversations: [{ role: "user", content: "task" }] },
-    [{ role: "user", content: "task" }],
-  ])("rejects inline Session bodies and invalid references: %j", (initialSession) => {
+    { bundleId: "", sessionId: "a2047fbe-4917-4658-81ca-68f82ebe6071" },
+    { bundleId: "401c23cf-d812-43f4-8404-d76e22cb0a66", sessionId: "" },
+    { bundleId: "401c23cf-d812-43f4-8404-d76e22cb0a66", sessionId: " session-seed " },
+    { bundleId: " sessions-bundle ", sessionId: "a2047fbe-4917-4658-81ca-68f82ebe6071" },
+    { bundleId: "sessions-bundle", sessionId: "a2047fbe-4917-4658-81ca-68f82ebe6071" },
+    { bundleId: "401c23cf-d812-43f4-8404-d76e22cb0a66", sessionId: "a2047fbe-4917-4658-81ca-68f82ebe6071", extra: 1 },
+  ])("rejects invalid Session references: %j", (initialSession) => {
     expect(initialSessionRefSchema.safeParse(initialSession).success).toBe(false);
     expect(dataInputSchema.safeParse({ userPrompt: "task", initialSession }).success).toBe(false);
   });
@@ -231,36 +225,35 @@ describe("InitialMaterialsRef", () => {
     [],
     {},
     "homepage-files",
-    { bundleId: "project-assets" },
-    { materialId: "homepage-files" },
-    { bundleId: "", materialId: "homepage-files" },
-    { bundleId: "project-assets", materialId: " " },
-    { bundleId: "project-assets", materialId: 123 },
-    { bundleId: "project-assets", materialId: " homepage-files " },
-    { bundleId: " project-assets ", materialId: "homepage-files" },
-    { bundleId: "project-assets", materialId: "homepage-files", files: ["inline content"] },
-    { kind: "generated", generatorId: "fixture", parameters: {} },
-  ])("rejects incomplete, transformed or inline material references: %j", (initialMaterials) => {
+    { bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0" },
+    { materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af" },
+    { bundleId: "", materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af" },
+    { bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0", materialId: " " },
+    { bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0", materialId: 123 },
+    { bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0", materialId: " homepage-files " },
+    { bundleId: " project-assets ", materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af" },
+    { bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0", materialId: "homepage-files" },
+    { bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0", materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af", extra: 1 },
+  ])("rejects invalid material references: %j", (initialMaterials) => {
     expect(initialMaterialsRefSchema.safeParse(initialMaterials).success).toBe(false);
     expect(dataInputSchema.safeParse({ userPrompt: "task", initialMaterials }).success).toBe(false);
   });
 });
 
 describe("Dataset documents", () => {
-  it("canonicalizes platform UUIDs before duplicate detection without changing business IDs or resource references", () => {
+  it("canonicalizes platform UUIDs before duplicate detection without changing business IDs", () => {
     const datasetId = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
     const dataId = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB";
+    const bundleId = "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC";
+    const sessionId = "DDDDDDDD-DDDD-4DDD-8DDD-DDDDDDDDDDDD";
     const document = datasetDocumentSchema.parse({
       dataset: { datasetId, name: "tasks" },
-      data: [{
-        dataId, userPrompt: "task", sampleId: "BUSINESS-ID",
-        initialSession: { bundleId: "BUNDLE-ID", sessionId: "SESSION-ID" },
-      }],
+      data: [{ dataId, userPrompt: "task", sampleId: "BUSINESS-ID", initialSession: { bundleId, sessionId } }],
     });
     expect(document.dataset.datasetId).toBe(datasetId.toLowerCase());
     expect(document.data[0]).toMatchObject({
       dataId: dataId.toLowerCase(), sampleId: "BUSINESS-ID",
-      initialSession: { bundleId: "BUNDLE-ID", sessionId: "SESSION-ID" },
+      initialSession: { bundleId: bundleId.toLowerCase(), sessionId: sessionId.toLowerCase() },
     });
     expect(datasetSnapshotSchema.parse(document)).toEqual(document);
 
