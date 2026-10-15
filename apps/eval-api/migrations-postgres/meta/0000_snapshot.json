@@ -108,7 +108,7 @@
         },
         "eval_bundle_materials_byte_size_ck": {
           "name": "eval_bundle_materials_byte_size_ck",
-          "value": "\"eval_bundle_materials\".\"byte_size\" > 0"
+          "value": "\"eval_bundle_materials\".\"byte_size\" >= 0"
         }
       },
       "isRLSEnabled": false

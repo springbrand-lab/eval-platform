@@ -130,6 +130,11 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     });
     expect(materialResponse.status).toBe(201);
     expect(await materialResponse.clone().json()).toMatchObject({ msg: { byteSize: 5 } });
+    const emptyFile = await send(`${root}/materials`, "POST", {
+      name: "Placeholder", description: "Empty file", files: [{ path: "/.keep", mediaType: "text/plain", contentBase64: "" }],
+    });
+    expect(emptyFile.status).toBe(201);
+    expect(await emptyFile.json()).toMatchObject({ msg: { byteSize: 0 } });
     const uploadedMaterial = await msg<{ bundleId: string; materialId: string }>(materialResponse);
     const material = { bundleId: uploadedMaterial.bundleId, materialId: uploadedMaterial.materialId };
     const evalResponse = await send(`${root}/materials`, "POST", {
@@ -170,7 +175,7 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     const session = { bundleId: uploadedSession.bundleId, sessionId: uploadedSession.sessionId };
     expect((await send(`${root}/materials/${material.materialId}`, "PATCH", { name: "Updated brief" })).status).toBe(200);
     expect((await send(`${sessionRoot}/sessions/${session.sessionId}`, "PATCH", { description: "Updated history" })).status).toBe(200);
-    expect(await msg(await send(`${root}/materials`, "GET"))).toHaveLength(2);
+    expect(await msg(await send(`${root}/materials`, "GET"))).toHaveLength(3);
     expect(await msg(await send(`${sessionRoot}/sessions`, "GET"))).toHaveLength(1);
 
     const bindingPath = `/api/data/${original.dataId}/initial-resources`;
@@ -217,7 +222,7 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     expect((await send(`${root}/materials/${material.materialId}`, "DELETE")).status).toBe(409);
     await dataset.updateData(genericBound.dataId, { userPrompt: "Generic" });
     expect((await send(`${root}/materials/${material.materialId}`, "DELETE")).status).toBe(204);
-    expect(await msg(await send(`${root}/materials`, "GET"))).toHaveLength(1);
+    expect(await msg(await send(`${root}/materials`, "GET"))).toHaveLength(2);
     expect(await code(await send(bindingPath, "PATCH", { initialMaterials: [material] }))).toBe("BUNDLE_RESOURCE_NOT_FOUND");
     await expect(bundles.resolveInitialMaterials(owner, material)).resolves.toHaveLength(1);
     expect((await send(root, "DELETE")).status).toBe(204);
@@ -338,6 +343,12 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
       expect(await created.json()).toMatchObject(tooLarge);
       const replaced = await send(`/api/data/${target.dataId}`, "PUT", { userPrompt: "Budget", [field]: [smallRef, large] });
       expect(replaced.status).toBe(413);
+      expect(await replaced.json()).toMatchObject(tooLarge);
+      const imported = await send("/api/datasets/import?format=json", "POST", JSON.stringify({
+        dataset: { name: "Over budget" }, data: [{ userPrompt: "Imported", [field]: [smallRef, large] }],
+      }));
+      expect(imported.status).toBe(413);
+      expect(await imported.json()).toMatchObject(tooLarge);
     }
     expect(await dataset.getData(target.dataId)).toMatchObject({ initialMaterials: [large], evalInitialMaterials: [smallRef] });
   });
@@ -418,6 +429,9 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     const [, caseA] = materials.imported;
     expect((await bundles.resolveInitialMaterials(owner, { bundleId: materials.bundle.bundleId, materialId: caseA!.material.materialId }))
       .map(({ path }) => path)).toEqual(["/assets/logo.svg", "/input.md"]);
+    const emptyFiles = await send(`${materialRoot}/import`, "POST", form({ zip: await zip(["blank/.keep", ""]) }));
+    expect(emptyFiles.status).toBe(201);
+    expect(await msg(emptyFiles)).toMatchObject({ imported: [{ source: "blank", material: { byteSize: 0 } }] });
 
     const empty = await send("/api/material-bundles", "POST", form({ name: "Empty", description: "No archive" }));
     expect(empty.status).toBe(201);

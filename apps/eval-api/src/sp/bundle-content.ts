@@ -2,6 +2,7 @@ import { parseStrictJson } from "@eval-platform/eval-dataset";
 import {
   EVAL_INITIALIZATION_MAX_BYTES,
   evalInitialContextSchema,
+  evalMaterialFilesByteSize,
   evalMaterialFilesSchema,
   readEvalCanonicalContext,
   type EvalInitialMaterial,
@@ -35,7 +36,7 @@ export function validateMaterialFiles(value: unknown, labels: MaterialLabels = l
     throw invalid("Initial material files are invalid", details(parsed.error.issues));
   }
   const files = parsed.data;
-  const byteSize = files.reduce((sum, file) => sum + Buffer.byteLength(file.contentBase64, "base64"), 0);
+  const byteSize = evalMaterialFilesByteSize(files);
   requireInitializationBudget(byteSize, labels.files);
   return { files, byteSize };
 }

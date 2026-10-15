@@ -100,7 +100,7 @@ export const bundleMaterials = pgTable("eval_bundle_materials", {
   index("eval_bundle_materials_bundle_idx").on(table.bundleId),
   check("eval_bundle_materials_name_ck", sql`length(trim(${table.name})) > 0`),
   check("eval_bundle_materials_description_ck", sql`length(trim(${table.description})) > 0`),
-  check("eval_bundle_materials_byte_size_ck", sql`${table.byteSize} > 0`),
+  check("eval_bundle_materials_byte_size_ck", sql`${table.byteSize} >= 0`),
 ]);
 
 export const bundleSessions = pgTable("eval_bundle_sessions", {

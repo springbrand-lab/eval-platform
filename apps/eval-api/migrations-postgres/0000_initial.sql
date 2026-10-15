@@ -9,7 +9,7 @@ CREATE TABLE "eval_bundle_materials" (
 	CONSTRAINT "eval_bundle_materials_owner_id_uq" UNIQUE("owner_user_id","material_id"),
 	CONSTRAINT "eval_bundle_materials_name_ck" CHECK (length(trim("eval_bundle_materials"."name")) > 0),
 	CONSTRAINT "eval_bundle_materials_description_ck" CHECK (length(trim("eval_bundle_materials"."description")) > 0),
-	CONSTRAINT "eval_bundle_materials_byte_size_ck" CHECK ("eval_bundle_materials"."byte_size" > 0)
+	CONSTRAINT "eval_bundle_materials_byte_size_ck" CHECK ("eval_bundle_materials"."byte_size" >= 0)
 );
 --> statement-breakpoint
 CREATE TABLE "eval_bundle_sessions" (
