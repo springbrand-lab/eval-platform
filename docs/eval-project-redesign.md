@@ -1,6 +1,8 @@
 # Project、Runtime 与 Metrics 改造方向
 
-> 状态：需求设计稿，尚未实现。本文是 Project 全链路的目标行为，重点补全 Runtime 和 Metrics 的改造范围。当前代码中的首次启动锁定、整批删除、实时 Dataset 归类和 Run 配置快照，都以本文为准替换。
+> 状态：需求设计稿，尚未实现。本文是 Project 全链路的目标行为，重点补全 Runtime 和 Metrics 的改造范围。当前代码中的首次启动锁定、整批删除、实时 Dataset 归类、可编辑 Execution/Evaluation/Pipeline Config 和 Run 配置快照，都以本文为准替换。
+>
+> 已确认方向（2026-10-15）：Project 不支持配置修改，删除全部 Project 修改逻辑；唯一例外是评估计划，它可以在创建时填写或之后补填，锁定前可反复修改，首个带评估的 Run 准入后锁定。Project 引用的快照必须固定，来源 Dataset/Data/Agent Config 后续被修改或软删除都不影响 Project。Agent Config 在 Eval 内增删改查（Eval SP 只是承载层，不会有人直接在 SP 操作），Project 通过冻结副本保证稳定。
 
 ## 一、背景
 
@@ -14,8 +16,8 @@
 
 ### 目标
 
-1. Project 创建时一次固定完整计划和输入快照。Project 创建后不支持任何配置修改。
-2. Project 后续运行只使用自己的快照，不读取来源 Dataset/Data 的新内容。
+1. Project 创建时一次固定执行计划和输入快照，执行计划创建后不支持任何修改。评估计划可在创建时填写或之后补填，锁定前可反复修改，首个带评估的 Run 准入后不可修改。
+2. Project 后续运行只使用自己的快照，不读取来源 Dataset/Data/Agent Config 的新内容。
 3. 每次启动时选择本次操作：仅执行、执行并评估、仅评估。操作模式不是 Project 配置，不写回 Project。
 4. 支持 Project、Dataset、Sample、Sampling 四级选择和局部替换。
 5. 局部重跑保留未选中的执行和评估；清理选中范围的旧评估；仅评估不清理执行事实。
@@ -25,29 +27,73 @@
 
 ### 不在本次范围
 
-- Project 配置编辑、草稿、Discard、当前配置与 Run 时配置的双状态。
+- Project 配置编辑、草稿、Discard、当前配置与 Run 时配置的双状态（锁定前的评估计划填写除外，它只有一份当前值，没有草稿）。
 - Project 结果历史版本或可回滚版本。Project 只保留当前结果集合；旧 Run 的身份账本只用于拒绝迟到重试。
-- Eval 平台复制 SP Agent Config 正文、读取 SP 私有数据库或 Durable Object。
+- 读取 SP 私有数据库或 Durable Object；要求 SP 提供 Agent Config 版本历史。
 - 另建一个独立的 Chat、Workspace、Trajectory 或 Metrics 持久化系统替代 SP。
 
 ## 三、领域模型
 
-### 3.1 Project 是不可修改的计划
+### 3.1 Project 由执行计划和评估计划组成
 
-Project 创建后不可修改，以下内容在创建事务中确定：
+Project 分两部分，锁定时机不同：
+
+| 部分 | 内容 | 确定时机 | 锁定时机 |
+| --- | --- | --- | --- |
+| 执行计划 | 元数据、Dataset/Data 快照、Sampling 次数、Subject 策略 | 创建事务 | 创建时即锁定，永不可改 |
+| 评估计划 | Evaluator 策略、评估输出 JSON Schema | 创建时可选填写，或之后补填 | 首个带评估（pipeline 或 evaluation）的 Run 准入事务内锁定 |
+
+执行计划在创建事务中确定：
 
 - Project ID、名称、描述、owner、Eval SP source branch；
 - 绑定的 Dataset 快照：Dataset ID、名称、描述、kind、创建时的成员顺序；
 - 绑定的 Data 快照：Data ID、完整业务字段、userPrompt、evalPrompt、初始 Session 引用、初始材料引用；
 - 每条 Data 的 Sampling 次数；
-- Subject 执行策略：框架、Agent Config 的固定公开引用/版本身份、并发、重试、超时；
-- Evaluator 策略：Evaluator Agent Config 的固定公开引用/版本身份、并发、重试、超时；
-- 评估输出 JSON Schema 的不可变 ID、内容摘要和完整 Schema 内容引用；
-- Project 快照摘要和版本校验值。
+- Subject 执行策略：框架、冻结的 Subject Agent Config 副本引用及正文快照、并发、重试、超时；
+- 执行计划摘要（executionPlanDigest）。
 
-Eval 不能保存 Agent Config 正文。SP 必须提供可固定的 Agent Config revision 或 immutable snapshot identity；只有 userAgentId 而没有版本身份时，Project 不能声称配置稳定。Project 创建时解析并保存 Eval 自己的执行策略快照，后续 Runtime 不再读取可编辑 ConfigStore。Run 也不保存第二份 config snapshot。
+评估计划（可为空）：
 
-### 3.2 ProjectSample 是 Project 自己的输入
+- Evaluator 策略：冻结的 Evaluator Agent Config 副本引用及正文快照、并发、重试、超时；
+- 评估输出 JSON Schema 的 ID 和内容摘要；
+- 评估计划摘要（evaluationPlanDigest）；
+- evaluationPlanLockedAt：未锁定时为空。
+
+评估计划规则：
+
+- 未锁定时只有一份当前值，可整体替换任意次，没有草稿或 Discard；
+- 未填写时，pipeline 和 evaluation 准入返回 `EVALUATION_PLAN_REQUIRED`；
+- 首个 pipeline/evaluation Run 准入时，在同一事务内写入 evaluationPlanLockedAt；该 Run 之后被停止或失败也不解锁；
+- 锁定后替换评估计划返回冲突；
+- 执行计划没有任何修改入口。
+
+Runtime 不再读取可编辑 ConfigStore，所有参数来自 Project 计划。Run 不保存第二份 config snapshot。
+
+### 3.2 引用稳定性
+
+| 来源对象 | 来源是否可变 | Project 的保存方式 |
+| --- | --- | --- |
+| Dataset 元数据和成员 | 可整体替换、attach/detach、软删除 | 复制进 Project 快照 |
+| Data 内容 | 可原地替换、软删除 | 复制完整内容进 ProjectSample |
+| Material / Session 文件 | 正文创建后不可变；软删除只打标记，不删文件；Worker 按 ID 从 Bundle 存储读取，不检查 deletedAt | 只保存引用，不复制 |
+| 评估输出 JSON Schema | 正文不可变，只能修改元数据；软删除不影响按 ID 读取 | 保存 ID 和内容摘要 |
+| Agent Config | 在 Eval 内增删改查，SP 侧原地更新，没有版本历史 | 冻结副本，见 3.3 |
+
+软删除的来源对象仍可被已有 Project 引用和执行。软删除只让它们不再出现在目录中，也不能被新的 Data 或 Project 选择。
+
+### 3.3 Agent Config 冻结副本
+
+Agent Config 在 Eval 中通过 `/api/agent-configs` 增删改查，Eval SP 只是承载层。由于 SP 原地更新配置，Project 不能直接引用用户的可编辑 Agent Config：
+
+- 创建 Project（Subject）或保存评估计划（Evaluator）时，Eval API 读取选中的 Agent Config，通过 SP 公开创建接口生成一份内容相同的副本，Project 计划引用副本的 `userAgentId`；
+- Project 计划同时保存配置正文快照，用于展示 Project 当时的配置；运行仍通过副本引用调用 SP，不从正文重建配置；
+- Eval 维护冻结副本与 Project 的对应表。`/api/agent-configs` 列表不返回冻结副本，对副本的 PATCH/DELETE 拒绝；
+- 用户修改原 Agent Config 只影响之后新建的 Project 或重新保存的未锁定评估计划；
+- 未锁定的评估计划重新保存时生成新副本，并删除旧的 Evaluator 副本；
+- 副本创建发生在 SP，不在 Eval 数据库事务内。Eval 事务失败时，必须补偿删除已创建的副本；补偿失败的孤儿副本对用户不可见，可由后台清理；
+- Runtime、Harness 和 SP ensureChat 合同不变，仍然接收 `{ownerUserId, userAgentId}`。
+
+### 3.4 ProjectSample 是 Project 自己的输入
 
 ProjectSample 是 Project 内部固定的一条测试输入，不等同于来源目录中会变化的 Sample。它至少包含：
 
@@ -60,9 +106,9 @@ ProjectSample 是 Project 内部固定的一条测试输入，不等同于来源
 
 同一个 Data 被多个所选 Dataset 绑定时，在一个 Project 内只生成一个 ProjectSample，Sampling 只执行一份。它可以在多个 Dataset 视图中出现，但 Project 总计按 ProjectSample/Sampling 去重。
 
-来源 Dataset/Data 后续被改名、改内容、解除关联或软删除，不改变 ProjectSample。仍被 Project 快照引用的材料必须保持可读取；删除操作需要被 Project 引用约束拦截或只允许删除目录元数据而保留不可变内容。
+来源 Dataset/Data 后续被改名、改内容、解除关联或软删除，不改变 ProjectSample。被 Project 快照引用的 Material/Session 在目录中软删除后仍可按 ID 读取；不允许为了目录删除而物理删除这些文件。
 
-### 3.3 Sampling、EvaluationRecord 与 Run
+### 3.5 Sampling、EvaluationRecord 与 Run
 
 - Sampling 是一次 Subject 执行，拥有独立 Subject Chat、Attempt、产物、完整轨迹和原始资源。
 - EvaluationRecord 是一次 Evaluator 执行，拥有独立 Evaluator Chat、Attempt、完整轨迹、评估输出和证据。
@@ -73,35 +119,41 @@ ProjectSample 是 Project 内部固定的一条测试输入，不等同于来源
 
 ### 4.1 创建与取消
 
-创建表单填写 name、description，选择多个 Dataset；每个 Dataset 可选择全部 Data 或明确 Data 子集；每条入选 Data 填正整数 Sampling 次数。Subject 策略、Evaluator 策略和 JSON Schema 在创建时一起确定。
+创建表单填写 name、description，选择多个 Dataset；每个 Dataset 可选择全部 Data 或明确 Data 子集；每条入选 Data 填正整数 Sampling 次数；选择 Subject Agent Config 和执行策略。评估信息（Evaluator Agent Config、评估策略、JSON Schema）可以在创建时直接填写，也可以先不填。
 
-创建 Project 不选择并持久化某个“首次启动模式”。用户点击本次 Run 时才选择仅执行、执行并评估或仅评估。若产品需要创建后立即启动，创建 Project 和首个 Run 可以在一个事务中提交，但 operation 仍然属于该 Run，不写入 Project 计划。
+创建时选择首个 Run 的操作：仅执行，或执行并评估。选择执行并评估时必须同时填写评估信息；选择仅执行时可以不填。operation 属于该 Run，不写入 Project 计划，也不限制之后的 Run。
 
-点击 Cancel 不调用写接口。点击 Run 时，Project 快照、固定资源校验和首个 Run 必须原子提交；校验或准入失败不能留下半个 Project。空 Project 可以创建，但不能提交仅评估。
+点击 Cancel 不调用写接口，无事发生。点击 Run 时，Project 快照、冻结 Agent Config 副本、固定资源校验和首个 Run 必须一起提交；校验或准入失败不能留下半个 Project，已创建的副本按 3.3 补偿删除。新 Project 没有成功 Sampling，因此首个 Run 不能是仅评估。
 
-### 4.2 后续启动
+### 4.2 评估计划补填与锁定
+
+没有评估计划或评估计划尚未锁定的 Project，可以在详情页填写或修改评估信息。保存是整体替换，替换后立即成为当前评估计划。首次启动执行并评估或仅评估后，评估计划锁定，详情页只读展示。执行计划始终只读。
+
+### 4.3 后续启动
 
 每次启动提交：
 
 - projectId；
 - operation：execution、pipeline 或 evaluation；
 - 选择器：全 Project、Dataset、ProjectSample、Sampling ID 的组合；
-- 一次提交的确定 target IDs；
+- 一次提交的确定 target IDs：展开后的 projectSampleIds（整条 Sample 重跑）和 samplingIds（单条 Sampling 重跑或评估）；
 - idempotencyKey。
 
-不提交 executionConfigId、evaluationConfigId、pipelineConfigId 或实时 Dataset/Data 内容。所有执行参数从 Project 唯一快照读取。
+不提交 executionConfigId、evaluationConfigId、pipelineConfigId 或实时 Dataset/Data 内容。所有执行参数从 Project 计划读取；pipeline 和 evaluation 还要求评估计划已填写。
 
 选择规则：
 
 - Dataset 选择展开为该 Project 中绑定到该 Dataset 的全部 ProjectSample；
-- ProjectSample 选择展开为该 Sample 当前保留的全部 Sampling；
+- execution/pipeline 选中 ProjectSample 时，删除该 Sample 当前全部 Sampling，按固定 samplingCount 新建；从未运行过的 ProjectSample 同样新建 samplingCount 条；
+- execution/pipeline 选中单条 Sampling 时，一对一替换为一条新 Sampling；
+- evaluation 选中 ProjectSample 时，展开为该 Sample 当前执行成功的全部 Sampling；
 - Sampling 选择只选该条；
 - 重叠选择去重，顺序稳定；
 - Dataset/Data 的展开基于 Project 快照，不基于实时目录；
 - 仅评估只能选择执行成功的 Sampling；Dataset/ProjectSample 展开时过滤成功者，明确指定失败或未完成 Sampling 必须拒绝；
 - API 在提交前返回最终 ID 列表、数量和快照摘要；重试沿用原列表，不能重新全选。
 
-### 4.3 结果替换规则
+### 4.4 结果替换规则
 
 | 操作 | 选中旧执行 | 选中旧评估 | 未选中执行 | 未选中评估 |
 | --- | --- | --- | --- | --- |
@@ -111,7 +163,7 @@ ProjectSample 是 Project 内部固定的一条测试输入，不等同于来源
 
 全 Project 重跑就是选中了全部 Sampling，因此结果整体替换。局部操作不能删除未选中记录。替换在 Run 准入事务内完成；准入失败时旧结果保持不变。新 Run 停止后不恢复已完成的替换，未选中记录继续保留。
 
-### 4.4 停止与删除
+### 4.5 停止与删除
 
 停止请求必须带具体 Run ID，只停止这一批 Run 的全部在途 Subject/Evaluator 工作，不支持局部停止。Worker 立即中断活跃 SP Submission，未开始的目标不再提交；已经结束的目标不回滚。
 
@@ -125,10 +177,12 @@ Project 删除是软删除。只要存在 queued、starting、running、retrying
 
 Runtime 不再把独立 ConfigStore 作为已创建 Project 的运行来源。需要新增一个只读 ProjectPlanReader：
 
-- getProjectPlan(projectId)：返回唯一不可修改的 ProjectPlanSnapshot；
+- getProjectPlan(projectId)：返回 ProjectPlanSnapshot，包括固定执行计划和当前评估计划（可为空，带锁定状态）；
 - getProjectSamples(projectId, IDs)：按输入顺序返回 ProjectSample 快照；
 - expandTarget(projectId, selector)：在 Project 快照内展开并去重；
-- getEvaluationSchema(projectId)：返回已固定 Schema 和内容摘要。
+- getEvaluationSchema(projectId)：返回评估计划中的 Schema 和内容摘要。
+
+Worker 恢复 pipeline/evaluation Run 时，评估计划必然已锁定，读取的就是准入时锁定的内容。
 
 Runtime 的 Admission Catalog 不再通过 Dataset ID 回查实时 Data 和 Sample。创建 Project 时由 API/Store 完成来源快照校验；Worker 恢复时只读取 ProjectPlanReader。
 
@@ -136,15 +190,19 @@ Runtime 的 Admission Catalog 不再通过 Dataset ID 回查实时 Data 和 Samp
 
 新增或调整以下公共类型：
 
-- ProjectPlanSnapshot：Project 元数据、DatasetSnapshot、ProjectSampleSnapshot、固定 ExecutionPlan、EvaluationPlan、SchemaRef；
+- ProjectPlanSnapshot：Project 元数据、DatasetSnapshot、ProjectSampleSnapshot、ExecutionPlan、`EvaluationPlan | null`、evaluationPlanLockedAt；
+- ExecutionPlan：framework、冻结 Subject AgentConfigRef 和正文快照、并发、重试、超时、executionPlanDigest；
+- EvaluationPlan：冻结 Evaluator AgentConfigRef 和正文快照、并发、重试、超时、SchemaRef（ID + digest）、evaluationPlanDigest；
 - RunOperation：execution、pipeline、evaluation；
 - RunTarget：all、dataset、projectSample、sampling；
-- RunRequest：projectId、operation、targets、expandedSamplingIds、idempotencyKey；
+- RunRequest：projectId、operation、targets、expandedProjectSampleIds、expandedSamplingIds、idempotencyKey；
 - RuntimeRunRecord：operation、phase、samplingIds、evaluationIds、sourceCommit、requestIdentity、stop flags；删除 config 字段；
 - SamplingState：增加 projectSampleId 和固定输入摘要；
 - EvaluationRecord：增加 schemaValidation、rawStructuredOutput、numericObservations。
 
-Agent Config 引用仍走 Eval SP 公开接口；Runtime 只使用 Project 快照中的固定 revision。不得把 Agent Config 正文复制进 Eval，也不得在每次恢复时读取可编辑的最新正文。
+删除 ProjectInitialLaunch、StartRunRequest/EvaluateRequest/PipelineRequest 中的 configId，以及 RunConfigSnapshot、ConfigStore、ConfigResolver 作为运行来源。
+
+Runtime 只使用 Project 计划中冻结副本的 AgentConfigRef 调用 Eval SP；Agent Config 正文快照只用于展示，不在恢复时读取用户可编辑的原配置。
 
 ### 5.3 Admission 原子流程
 
@@ -152,15 +210,19 @@ Agent Config 引用仍走 Eval SP 公开接口；Runtime 只使用 Project 快�
 
 1. 校验 owner、Project 未删除和 source release；
 2. 先按 projectId + idempotencyKey 查找现有 Run；
-3. 比对 operation、固定 target IDs、Project plan digest 和 request fingerprint；
+3. 比对 operation、固定 target IDs、计划摘要和 request fingerprint。fingerprint 包含 executionPlanDigest；pipeline/evaluation 还包含 evaluationPlanDigest；
 4. 相同事实返回原 Run；不同事实返回 identity conflict；
 5. 新 key 检查 Project 没有未完成 Run；
-6. 在 Project 快照内验证 target，并读取目标当前 Sampling 状态；
-7. evaluation 只接受 execution.succeeded；
-8. 局部重跑删除选中旧 Sampling 的旧 Run 关联和 EvaluationRecord；
-9. 仅评估只删除选中 Sampling 的旧 EvaluationRecord，不动 Sampling；
-10. 插入新 Sampling、新 EvaluationRecord、新 Run 关联和 key ledger；
-11. 事务提交后才通知 Worker。
+6. pipeline/evaluation 检查评估计划已填写，否则返回 `EVALUATION_PLAN_REQUIRED`；
+7. 在 Project 快照内验证 target，并读取目标当前 Sampling 状态；
+8. evaluation 只接受 execution.succeeded；
+9. 局部重跑删除选中旧 Sampling 的旧 Run 关联和 EvaluationRecord；
+10. 仅评估只删除选中 Sampling 的旧 EvaluationRecord，不动 Sampling；
+11. 插入新 Sampling、新 EvaluationRecord、新 Run 关联和 key ledger；
+12. pipeline/evaluation 且评估计划未锁定时，写入 evaluationPlanLockedAt；
+13. 事务提交后才通知 Worker。
+
+评估计划的保存与 admission 使用同一 Project 行锁：保存时如已锁定返回冲突，保证不会出现准入使用的评估计划与锁定内容不一致。
 
 删除与插入必须按批处理，不能因为大批量全选触发 SQL 参数上限。任何一步失败都不能留下半批 Sampling、孤儿 Evaluation 或已经清理但没有新 Run 的状态。
 
@@ -197,17 +259,21 @@ Worker 调度沿用已落地的 pg-boss 方案（见 [architecture](architecture
 删除：
 
 - projects.initialLaunch；
-- projects.evaluationOutputSchemaLocked；
+- projects.evaluationOutputSchemaLocked 和 projects.evaluationOutputSchemaId（并入评估计划）；
 - runs.config；
 - 依赖 runs.config 恢复的代码；
-- Project 输出格式后绑定和 Project 配置修改路由。
+- eval_execution_configs、eval_evaluation_configs、eval_pipeline_configs 表，`/configs` 路由，ConfigStore/ConfigResolver 的 PostgreSQL 适配；
+- eval_samples 作为运行输入（由 ProjectSample 取代）；
+- Project 输出格式后绑定路由（`PUT /projects/:id/evaluation-output-schema`）和所有 Project 配置修改路由。
 
 新增：
 
-- Project 固定计划/快照表；
+- Project 执行计划表；
+- Project 评估计划表（可空，带 evaluationPlanLockedAt）；
 - Project Dataset 快照及 Data 成员快照；
 - ProjectSample 表及 Dataset 关联表；
-- Project 计划的 digest 和不可变 Schema 引用；
+- 冻结 Agent Config 副本与 Project 的对应表；
+- 执行计划和评估计划的 digest，以及 Schema 引用；
 - Sampling 到 ProjectSample 的外键；
 - EvaluationRecord 的结构化输出、Schema 校验和数值观察；
 - 目标范围和 Run/结果当前关联；
@@ -218,8 +284,12 @@ Worker 调度沿用已落地的 pg-boss 方案（见 [architecture](architecture
 至少覆盖：
 
 - 创建快照后修改来源 Data，重跑仍使用旧内容；
+- 来源 Data、Material、Session、Schema 软删除后，已有 Project 仍可重跑；
+- 创建后修改原 Agent Config，重跑仍使用冻结副本；
+- 评估计划为空时 pipeline/evaluation 被拒绝；锁定前可反复替换；首个带评估的 Run 准入后锁定，Run 停止后仍锁定；锁定后替换被拒绝；
+- 评估计划保存与 admission 并发时不会出现未锁定内容被使用；
 - 同一 Data 被多个 Dataset 绑定只创建一组 Sampling；
-- 首次 Run 的三种 operation 行为；
+- 首次 Run 的仅执行、执行并评估行为，以及新 Project 首次仅评估被拒绝；
 - Dataset、ProjectSample、单条 Sampling 选择展开和去重；
 - 局部重跑保留未选中执行/评估；
 - 仅评估保留全部执行事实，只替换选中评估；
@@ -237,7 +307,7 @@ Worker 调度沿用已落地的 pg-boss 方案（见 [architecture](architecture
 
 Metrics 是只读统计和展示模块，不负责启动 Agent、停止 Run、读取 SP 私有存储或决定 Project 归属。它读取一次一致的 MetricsFacts：
 
-- ProjectPlanSnapshot：固定 Dataset/Data/ProjectSample 层级和 Schema；
+- ProjectPlanSnapshot：固定 Dataset/Data/ProjectSample 层级、执行计划和评估计划（含 Schema，可为空）；
 - 当前保留的 Sampling；
 - 当前保留的 EvaluationRecord；
 - Run 的查询范围和状态；
@@ -325,7 +395,7 @@ EvaluationRecord 必须保存：
 - validationErrors；
 - 从有效输出抽取的 numericObservations。
 
-Schema 不是只给 Evaluator 的初始化材料，也必须用于结果读取和统计。Schema 变化不允许影响已创建 Project；Project 固定 Schema 内容摘要，评估使用该版本。
+Schema 不是只给 Evaluator 的初始化材料，也必须用于结果读取和统计。Schema 属于评估计划，首个带评估的 Run 准入后锁定；Project 固定 Schema 内容摘要，所有 EvaluationRecord 都使用该版本，因此同一 Project 内的数值路径不会混用不同 Schema。评估计划未填写时，数值结果显示 unavailable，执行指标照常展示。
 
 数值提取规则：
 
@@ -397,7 +467,8 @@ createPostgresMetricsSource 改为：
 
 至少覆盖：
 
-- 来源 Dataset/Data 改动后 Project 固定层级不变；
+- 来源 Dataset/Data 改动或软删除后 Project 固定层级不变；
+- 没有评估计划的 Project 正常展示执行指标，数值结果为 unavailable；
 - 未运行 Data/ProjectSample 仍出现在 Dataset/Project；
 - 多 Dataset 共享 Data 时 Dataset 视图可重复、Project 数值不重复；
 - 未选中结果保留在默认 Project 指标；
@@ -416,45 +487,51 @@ createPostgresMetricsSource 改为：
 
 ### API
 
-- POST /api/projects：创建完整 Project 快照；不接受后续 PATCH/PUT。
+- POST /api/projects：创建 Project 执行计划快照、可选评估计划和首个 Run（仅执行或执行并评估），冻结 Agent Config 副本。执行计划不接受后续 PATCH/PUT。
+- PUT /api/projects/:id/evaluation-plan：整体替换评估计划；仅在未锁定时可用，锁定后返回冲突。这是唯一的 Project 写配置接口。
 - POST /api/projects/:id/runs：提交 operation、targets、expanded IDs、idempotencyKey。
 - POST /api/projects/:id/runs/:runId/stop：停止当前 Run 全部目标。
 - DELETE /api/projects/:id：运行中拒绝，其他情况软删除。
-- GET Project 列表/详情：返回固定计划、固定绑定、当前 Run 和结果概览。
+- GET Project 列表/详情：返回执行计划、评估计划及锁定状态、固定绑定、Agent Config 正文快照、当前 Run 和结果概览。
 - GET 选择预览：返回 Project 快照下的最终 ID 集合，提交时必须带回。
 - GET 四层 Metrics 和 Sampling/Evaluation 详情。
 - GET 只读 Chat 观察入口。
+- `/api/agent-configs` 继续提供 Agent Config 增删改查，但不返回冻结副本，对冻结副本的 PATCH/DELETE 拒绝。
 
-删除所有 Project 配置修改、输出格式后绑定、initialLaunch 修改和 Run config 读取路由。
+删除除评估计划外的所有 Project 配置修改、`PUT /projects/:id/evaluation-output-schema`、`/configs` 下的 Execution/Evaluation/Pipeline Config 路由、initialLaunch 修改和 Run config 读取路由。
 
 ### 数据库基线
 
 这是全新功能，直接修改 0000_initial.sql，不设计 legacy/version1 迁移。建议结构：
 
-- eval_projects：元数据、source branch、plan digest、deletedAt；
+- eval_projects：元数据、source branch、deletedAt；
 - eval_project_datasets：Dataset 固定元数据快照；
 - eval_project_samples：Data 完整快照、samplingCount、固定资源引用；
 - eval_project_sample_datasets：ProjectSample 与 Dataset 的固定关联；
-- eval_project_plans：ExecutionPlan、EvaluationPlan、SchemaRef 的唯一快照；
+- eval_project_execution_plans：ExecutionPlan 唯一快照和 executionPlanDigest，创建后不可更新；
+- eval_project_evaluation_plans：当前 EvaluationPlan、SchemaRef、evaluationPlanDigest、evaluationPlanLockedAt；未锁定时可整体替换，锁定后不可更新；
+- eval_project_agent_configs：冻结 Agent Config 副本 ID、角色、所属 Project、正文快照；
 - eval_samplings：projectSampleId、当前执行事实和 Subject Chat；
 - eval_evaluations：当前评估、Evaluator Chat、完整 JSON 输出、Schema 校验和数值观察；
 - eval_runs：operation、phase、目标 IDs、source commit、stop facts、request fingerprint；
 - eval_run_request_keys：Project-scoped immutable idempotency ledger；
 - Run/Sampling/Evaluation 关联表和 Attempt 事实表。
 
-外键保证 owner、Project、ProjectSample、Sampling、Evaluation 的归属；固定引用的材料和 Schema 不得被破坏。结果替换只删除选中关系和记录，不能级联删除未选中结果。
+删除 eval_execution_configs、eval_evaluation_configs、eval_pipeline_configs，以及 eval_projects 的 evaluation_output_schema_id、evaluation_output_schema_locked、initial_launch 和 eval_runs.config。
+
+外键保证 owner、Project、ProjectSample、Sampling、Evaluation 的归属；固定引用的材料和 Schema 只允许软删除，不得被物理删除。结果替换只删除选中关系和记录，不能级联删除未选中结果。
 
 ### 包职责
 
 | 模块 | 改造 |
 | --- | --- |
-| eval-contracts | ProjectPlanSnapshot、ProjectSampleSnapshot、RunOperation/Target、结构化 EvaluationOutput、观察入口引用。 |
+| eval-contracts | ProjectPlanSnapshot、ExecutionPlan、EvaluationPlan、ProjectSampleSnapshot、RunOperation/Target、结构化 EvaluationOutput、观察入口引用。 |
 | eval-dataset | 继续管理可编辑来源 Dataset/Data；提供创建时一致读取，不保存 Project 结果。 |
-| eval-runtime | 固定计划读取、目标展开、局部准入、三种 operation、停止、幂等、Worker 恢复、Chat/证据身份。 |
+| eval-runtime | 计划读取、目标展开、局部准入、三种 operation、评估计划必填校验与锁定、停止、幂等、Worker 恢复、Chat/证据身份。 |
 | eval-metrics | 固定层级读取、资源/轨迹统计、四层数值聚合、Schema 数值抽取和 coverage。 |
-| eval-api | Project 快照写入、Run 事务、MetricsSource、观察入口归属校验、HTTP 错误语义。 |
-| eval-web | 创建、运行选择、停止、删除、四层 Metrics、只读 Chat/Workspace/Trajectory 展示；没有 Project 编辑页。 |
-| Eval SP | 公开 Chat/Context/Workspace/Trajectory 只读访问、完整结构化输出、固定 Agent Config revision、服务端写权限隔离。 |
+| eval-api | Project 快照写入、Agent Config 冻结副本及补偿、评估计划保存、Run 事务、MetricsSource、观察入口归属校验、HTTP 错误语义。 |
+| eval-web | 创建、评估计划补填/修改（锁定前）、运行选择、停止、删除、四层 Metrics、只读 Chat/Workspace/Trajectory 展示；没有执行计划编辑页。 |
+| Eval SP | 公开 Chat/Context/Workspace/Trajectory 只读访问、完整结构化输出、服务端写权限隔离。Agent Config 沿用现有公开增删改查，不需要版本历史。 |
 
 ## 八、验收场景与实现顺序
 
@@ -471,11 +548,15 @@ createPostgresMetricsSource 改为：
 9. Sampling 详情分别展示 Subject/Evaluator 的 credit、Token、时长、轨迹轮数、工具成功失败和输入/返回长度。
 10. JSON Schema 有嵌套数值、数组数值、字符串数字和无效输出时，只有有效声明数值逐级聚合。
 11. 点击 Sampling 可进入 Subject Chat，点击评估可进入 Evaluator Chat；Context、Workspace、Trajectory 可读，消息、steer、审批、停止和 Workspace 写入均被 SP 服务端拒绝。
+12. 创建 Project 后在 Eval 中修改原 Agent Config，重跑仍使用创建时的配置；冻结副本不出现在 Agent Config 列表，也不能被编辑或删除。
+13. 来源 Data、Material、Session、Schema 软删除后，已有 Project 仍可重跑和评估。
+14. 仅执行创建的 Project 不填评估信息也能运行；之后补填、修改评估计划，启动评估后评估计划变为只读；未填写时启动评估被拒绝。
+15. Cancel 创建不产生任何 Project、副本或 Run。
 
 ### 实现顺序
 
-1. 先改 contracts，删除 ProjectInitialLaunch 和 RunConfigSnapshot 作为运行来源，增加 ProjectPlanSnapshot、目标选择和结构化输出。
-2. 修改 0000 数据库基线，实现 Project 快照、ProjectSample、不可变计划和局部替换事务。
+1. 先改 contracts，删除 ProjectInitialLaunch 和 RunConfigSnapshot 作为运行来源，增加 ProjectPlanSnapshot（执行计划 + 可空评估计划）、目标选择和结构化输出。
+2. 修改 0000 数据库基线，实现 Project 快照、ProjectSample、执行计划、评估计划与锁定、Agent Config 冻结副本表和局部替换事务；删除三类 Config 表。
 3. 修改 Runtime admission/resume/stop/worker，所有运行从 Project 快照读取，补齐幂等、局部保留和证据恢复测试。
 4. 修改 eval-metrics 模型、轨迹摘要、资源统计、Schema 数值抽取和四层聚合测试。
 5. 修改 eval-api MetricsSource、Run API、观察入口和归属校验。
