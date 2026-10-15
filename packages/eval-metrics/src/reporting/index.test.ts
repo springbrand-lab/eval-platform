@@ -21,13 +21,13 @@ function facts(): MetricsFacts {
     samplings: [...baseSamplings, sampling("sampling-shared", { sampleId: "sample-shared" }), sampling("sampling-other", { sampleId: "sample-other" })],
     evaluations: [...baseEvaluations, evaluation("reevaluation-1"), evaluation("reevaluation-2", { evaluator: { ...EVALUATOR, userAgentId: "other-judge" } })],
     runs: [
-      { runId: "pipeline-run", projectId: PROJECT.projectId, samplingIds: baseSamplings.map((subject) => subject.samplingId),
+      { runId: "pipeline-run", projectId: PROJECT.projectId, sourceCommit: "a".repeat(40), samplingIds: baseSamplings.map((subject) => subject.samplingId),
         evaluationIds: baseEvaluations.map((judge) => judge.evaluationId), phases: ["execution", "evaluation"], phase: "evaluation", status: "succeeded" },
-      { runId: "execution-run", projectId: PROJECT.projectId, samplingIds: ["sampling-shared", "sampling-other"],
+      { runId: "execution-run", projectId: PROJECT.projectId, sourceCommit: "a".repeat(40), samplingIds: ["sampling-shared", "sampling-other"],
         evaluationIds: [], phases: ["execution"], phase: "execution", status: "succeeded" },
-      { runId: "reevaluation-run-1", projectId: PROJECT.projectId, samplingIds: ["sampling-1"],
+      { runId: "reevaluation-run-1", projectId: PROJECT.projectId, sourceCommit: "a".repeat(40), samplingIds: ["sampling-1"],
         evaluationIds: ["reevaluation-1"], phases: ["evaluation"], phase: "evaluation", status: "succeeded" },
-      { runId: "reevaluation-run-2", projectId: PROJECT.projectId, samplingIds: ["sampling-1"],
+      { runId: "reevaluation-run-2", projectId: PROJECT.projectId, sourceCommit: "a".repeat(40), samplingIds: ["sampling-1"],
         evaluationIds: ["reevaluation-2"], phases: ["evaluation"], phase: "evaluation", status: "succeeded" },
     ],
   };
@@ -98,7 +98,8 @@ describe("four-level reporting", () => {
     expect(project.summary.scores).toHaveLength(1);
     const detail = await metrics.getSamplingDetail({ ...query, samplingId: "sampling-1" });
     expect(detail.evaluations.map((item) => item.record.evaluationId)).toEqual(["evaluation-1", "reevaluation-1"]);
-    await expect(metrics.getSamplingDetail({ ...query, samplingId: "sampling-other" })).rejects.toThrow(MetricsQueryError);
+    await expect(metrics.getSamplingDetail({ ...query, samplingId: "sampling-other" }))
+      .rejects.toMatchObject({ name: "MetricsEntityNotFoundError", entity: "sampling", id: "sampling-other" });
   });
 
   it("shows only the Run's evaluations for an evaluation-only selection", async () => {
@@ -163,12 +164,13 @@ describe("four-level reporting", () => {
     expect(read).toHaveBeenCalledWith({ projectId: PROJECT.projectId });
   });
 
-  it("reports unknown targets and unknown Runs explicitly", async () => {
+  it("reports unknown targets and unknown Runs as missing entities", async () => {
     const { metrics } = metricsFrom();
-    await expect(metrics.getDatasetOverview({ projectId: PROJECT.projectId, datasetId: "absent" })).rejects.toThrow("Unknown Dataset");
-    await expect(metrics.getSampleOverview({ projectId: PROJECT.projectId, sampleId: "absent" })).rejects.toThrow("Unknown Sample");
-    await expect(metrics.getSamplingDetail({ projectId: PROJECT.projectId, samplingId: "absent" })).rejects.toThrow("Unknown Sampling");
-    await expect(metrics.getProjectOverview({ projectId: PROJECT.projectId, runIds: ["absent"] })).rejects.toThrow("Unknown Run");
+    const missing = (entity: string) => ({ name: "MetricsEntityNotFoundError", entity, id: "absent" });
+    await expect(metrics.getDatasetOverview({ projectId: PROJECT.projectId, datasetId: "absent" })).rejects.toMatchObject(missing("dataset"));
+    await expect(metrics.getSampleOverview({ projectId: PROJECT.projectId, sampleId: "absent" })).rejects.toMatchObject(missing("sample"));
+    await expect(metrics.getSamplingDetail({ projectId: PROJECT.projectId, samplingId: "absent" })).rejects.toMatchObject(missing("sampling"));
+    await expect(metrics.getProjectOverview({ projectId: PROJECT.projectId, runIds: ["absent"] })).rejects.toMatchObject(missing("run"));
   });
 
   it.each([

@@ -9,6 +9,7 @@ contexts.
 /
 ├── CONTEXT-MAP.md
 ├── docs/architecture.md
+├── docs/eval-sp-deployment.md
 ├── docs/package-boundaries.md
 ├── apps/
 │   ├── eval-api/CONTEXT.md

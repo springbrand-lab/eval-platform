@@ -1,5 +1,7 @@
 # Eval Metrics Code Review
 
+> 历史快照：记录当时代码的事实，不代表当前实现；当前行为以 `packages/eval-metrics/README.md` 为准。
+
 ## 评审范围与约定
 
 - 日期：2026-10-08。
@@ -75,7 +77,7 @@
 - `packages/eval-metrics/src/aggregation/resources.test.ts` 覆盖：摘要无可信 Token/Provider 成本、摘要只有 Token、Provider 成本从 child detail 保留，以及既有父子汇总去重。
 - Metric 包测试结果：6 个测试文件，95 个测试通过。
 
-**处理状态**：已修复，尚未提交本轮改动。
+**处理状态**：已修复。
 
 ### M-02：未提交 Attempt 被误认为资源缺失（已撤回）
 
@@ -92,4 +94,4 @@
 - `pnpm --filter @eval-platform/eval-metrics check` 通过。
 - `pnpm --filter @eval-platform/eval-metrics test` 通过：6 个测试文件，95 个测试。
 - `pnpm check`、`pnpm test`、`pnpm build`、packages no-unused 检查和 `git diff --check` 均通过。
-- 未修改 SP、CI 或 Runtime 原始数据契约；本轮修改了 Metrics 聚合代码、回归测试和本评审记录，尚未提交 Git。
+- 未修改 SP、CI 或 Runtime 原始数据契约；本轮修改了 Metrics 聚合代码、回归测试和本评审记录。

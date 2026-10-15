@@ -15,12 +15,23 @@ export type {
   SubjectWorkspaceRef,
   WaitForSubmissionInput,
 } from "./model.js";
+export { AGENT_FAILURE_KINDS } from "./model.js";
 
 export class AgentIdentityConflictError extends Error {
   readonly retryable = false;
 
-  constructor(readonly submissionId: string) {
-    super(`Agent identity ${submissionId} is already bound to different creation facts`);
+  constructor(readonly chatId: string) {
+    super(`Chat identity ${chatId} is already bound to different creation facts`);
     this.name = "AgentIdentityConflictError";
+  }
+}
+
+/** The persisted Chat handle no longer resolves through the public SP seam. */
+export class AgentHandleNotFoundError extends Error {
+  readonly retryable = false;
+
+  constructor(readonly chatId: string) {
+    super(`Chat ${chatId} was not found`);
+    this.name = "AgentHandleNotFoundError";
   }
 }

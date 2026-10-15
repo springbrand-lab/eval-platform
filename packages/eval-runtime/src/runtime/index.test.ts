@@ -14,6 +14,7 @@ import type {
   CollectAgentResourcesInput,
   Harness,
 } from "../harness/index.js";
+import { AgentHandleNotFoundError } from "../harness/index.js";
 import type { RuntimeCatalog, Sample } from "./model.js";
 import type {
   RuntimeRunAdmission,
@@ -21,12 +22,31 @@ import type {
   SamplingState,
   RuntimeStore,
 } from "./store.js";
-import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError, sameRuntimeRecordFacts } from "./store.js";
+import { equalJson } from "@springbrand/utils";
+import {
+  RuntimeAdmissionConflictError,
+  RuntimeEntityNotFoundError,
+  RuntimeInputError,
+  RuntimeRecordConflictError,
+  RuntimeRunIdentityConflictError,
+  RuntimeRunStoppedError,
+} from "./errors.js";
 import type { RetryController, RetryOperation } from "./retry.js";
 import {
-  createEvalRuntime as createRuntime,
-  type EvalRuntimeDependencies,
+  createEvalRunAdmission,
+  createEvalRunResumer as createResumerWithReporter,
+  toRunSnapshot,
+  toSamplingSnapshot,
+  type EvalRunQueries,
+  type EvalRunResumerDependencies,
 } from "./index.js";
+import { RunRecords } from "./records.js";
+const SESSIONS_BUNDLE_ID = "789d7cc3-bb3e-41cf-b7a8-0f55ab1e9efb";
+const SESSION_ID = "3e76a4ff-8352-4de5-b8cd-ce072b8ffa69";
+const MATERIALS_BUNDLE_ID = "41f13a32-61d8-4d4d-bc19-723e976688a4";
+const MATERIAL_ID = "0325f6ed-2649-425b-b121-12d25a2d3bf3";
+const EVAL_BUNDLE_ID = "676556c9-32bd-41cf-ad54-63e1b03ce1ea";
+const EVAL_MATERIAL_ID = "fa32ac9f-ec04-4821-ac67-3438a8b7b1d8";
 
 const SUBJECT = { ownerUserId: "user-1", userAgentId: "subject-agent" };
 const EVALUATOR = { ownerUserId: "user-1", userAgentId: "evaluator-agent" };
@@ -43,6 +63,61 @@ const EVALUATION_CONFIG_RETRY_ONE_ID = "evaluation-config-retry-one";
 const EVALUATION_CONFIG_RUNTIME_ID = "evaluation-config-runtime";
 const PIPELINE_CONFIG_ID = "pipeline-config-1";
 const PIPELINE_CONFIG_CONCURRENT_ID = "pipeline-config-concurrent";
+const SOURCE_COMMIT = "a".repeat(40);
+
+type WithDefaultReporter<T extends { readonly onError: unknown }> = Omit<T, "onError"> & { readonly onError?: T["onError"] };
+
+type RuntimeDependencies = WithDefaultReporter<Omit<EvalRunResumerDependencies, "getSamples" | "getEvaluationOutputSchema">> & {
+  readonly sourceCommit?: string;
+  readonly catalog: RuntimeCatalog;
+  readonly configResolver: ConfigResolver;
+};
+
+function createRunQueries(store: RuntimeStore, records: RunRecords): EvalRunQueries {
+  return {
+    async getRun(runId) {
+      const run = await store.getRun(runId);
+      if (!run) throw new RuntimeEntityNotFoundError("run", runId);
+      return toRunSnapshot(run, await records.samplings(run.samplingIds), await records.evaluations(run.evaluationIds));
+    },
+    async getSampling(samplingId) {
+      const sampling = await store.getSampling(samplingId);
+      if (!sampling) throw new RuntimeEntityNotFoundError("sampling", samplingId);
+      return toSamplingSnapshot(sampling);
+    },
+    async getEvaluation(evaluationId) {
+      const evaluation = await store.getEvaluation(evaluationId);
+      if (!evaluation) throw new RuntimeEntityNotFoundError("evaluation", evaluationId);
+      return structuredClone(evaluation);
+    },
+    async listEvaluations(samplingId) {
+      return structuredClone(await store.listEvaluations(samplingId));
+    },
+  };
+}
+
+/** Composes the production admission and resumer entries with Store-backed reads, as API and Worker do. */
+function createRuntime(dependencies: RuntimeDependencies) {
+  const { catalog, configResolver, store } = dependencies;
+  const getSamples = catalog.getSamples.bind(catalog);
+  const resumer = createEvalRunResumer({
+    ...dependencies,
+    getSamples,
+    getEvaluationOutputSchema: catalog.getEvaluationOutputSchema.bind(catalog),
+  });
+  return {
+    ...createEvalRunAdmission({
+      sourceCommit: dependencies.sourceCommit ?? SOURCE_COMMIT, catalog, configResolver, store,
+      ...(dependencies.idFactory ? { idFactory: dependencies.idFactory } : {}),
+    }),
+    ...createRunQueries(store, new RunRecords(store, getSamples)),
+    resume: (runId: string) => resumer.resume(runId),
+  };
+}
+
+function createEvalRunResumer(dependencies: WithDefaultReporter<EvalRunResumerDependencies>) {
+  return createResumerWithReporter({ ...dependencies, onError: dependencies.onError ?? console.error });
+}
 
 const NO_RETRY = { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 } as const;
 const EXECUTION_RUNTIME = { timeoutMs: 1_234 } as const;
@@ -163,24 +238,24 @@ function makeConfigResolver(framework: AgentFramework = "sp"): ConfigResolver {
   return createConfigResolver(store);
 }
 
-type RuntimeTestDependencies = Omit<EvalRuntimeDependencies, "configResolver"> & {
+type RuntimeTestDependencies = Omit<RuntimeDependencies, "configResolver"> & {
   readonly configResolver?: ConfigResolver;
 };
 
-function createEvalRuntime(dependencies: RuntimeTestDependencies) {
+function createAutoResumingRuntime(dependencies: RuntimeTestDependencies) {
+  const onError = dependencies.onError ?? console.error;
   const store: RuntimeStore = Object.create(dependencies.store);
   let runtime!: ReturnType<typeof createRuntime>;
   store.createRunWithSamplings = async (run, records, evaluations) => {
     const admission = await dependencies.store.createRunWithSamplings(run, records, evaluations);
     if (admission.created) {
-      queueMicrotask(() => { void runtime.resume(admission.run.runId).catch((error: unknown) => {
-        (dependencies.onError ?? console.error)(error);
-      }); });
+      queueMicrotask(() => { void runtime.resume(admission.run.runId).catch(onError); });
     }
     return admission;
   };
   runtime = createRuntime({
     ...dependencies,
+    onError,
     store,
     configResolver: dependencies.configResolver ?? makeConfigResolver(),
   });
@@ -188,13 +263,12 @@ function createEvalRuntime(dependencies: RuntimeTestDependencies) {
 }
 
 function startRequest(
-  requestId: string,
+  intentKey: string,
   executionConfigId: string = EXECUTION_CONFIG_ID,
-  idempotencyKey?: string,
+  idempotencyKey: string = intentKey,
 ) {
   return {
-    requestId,
-    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+    idempotencyKey,
     projectId: "project-1",
     executionConfigId,
   };
@@ -203,8 +277,10 @@ function startRequest(
 function evaluateRequest(
   samplingIds: readonly string[],
   evaluationConfigId: string = EVALUATION_CONFIG_ID,
+  idempotencyKey: string = crypto.randomUUID(),
 ) {
   return {
+    idempotencyKey,
     projectId: "project-1",
     samplingIds,
     evaluationConfigId,
@@ -212,13 +288,12 @@ function evaluateRequest(
 }
 
 function pipelineRequest(
-  requestId: string,
+  intentKey: string,
   pipelineConfigId: string = PIPELINE_CONFIG_ID,
-  idempotencyKey?: string,
+  idempotencyKey: string = intentKey,
 ) {
   return {
-    requestId,
-    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+    idempotencyKey,
     projectId: "project-1",
     pipelineConfigId,
   };
@@ -230,9 +305,11 @@ function makeSample(sampleId: string): Sample {
     data: {
       dataId: "data-1",
       userPrompt: `Execute ${sampleId}`,
+      evalPrompt: `Evaluate ${sampleId}`,
       json: { task: sampleId },
-      initialSession: { bundleId: "sessions-bundle", sessionId: "session-seed" },
-      initialMaterials: { bundleId: "materials-bundle", materialId: "materials-1" },
+      initialSession: { bundleId: SESSIONS_BUNDLE_ID, sessionId: SESSION_ID },
+      initialMaterials: { bundleId: MATERIALS_BUNDLE_ID, materialId: MATERIAL_ID },
+      evalInitialMaterials: { bundleId: EVAL_BUNDLE_ID, materialId: EVAL_MATERIAL_ID },
       metadata: { source: "test" },
     },
   };
@@ -241,11 +318,19 @@ function makeSample(sampleId: string): Sample {
 function makeCatalog(samples: readonly Sample[] = [makeSample("sample-1")]): RuntimeCatalog {
   return {
     listProjects: async () => [],
+    getProject: async (projectId) => ({
+      projectId, ownerUserId: "owner", name: "test", sourceBranch: "release-2.0.0",
+      evaluationOutputSchemaId: "output-schema-1",
+    }),
+    getEvaluationOutputSchema: async () => ({ type: "object", properties: { score: { type: "number" } } }),
     listAgents: async () => [],
     listDatasets: async () => [],
     listData: async () => [{ dataId: "data-1", userPrompt: "Execute data", json: { task: "data" } }],
     listSamples: async () => samples,
     getSample: async (sampleId) => samples.find((sample) => sample.sampleId === sampleId) ?? null,
+    getSamples: async (sampleIds) => sampleIds.map((sampleId) => (
+      samples.find((sample) => sample.sampleId === sampleId) ?? null
+    )),
   };
 }
 
@@ -258,45 +343,27 @@ function makeStore(options: StoreOptions = {}): RuntimeStore {
   const samplings = new Map<string, SamplingState>();
   const evaluations = new Map<string, EvaluationRecord>();
   return {
+    async withRunDispatchGate(runId, dispatch) {
+      if (runs.get(runId)?.stopRequested) throw new RuntimeRunStoppedError(runId);
+      return dispatch();
+    },
     async getRun(runId) {
       return runs.get(runId) ?? null;
     },
-    async findRunByRequestId(requestId) {
+    async findRunByIdempotencyKey(projectId, idempotencyKey) {
       return [...runs.values()].find(
-        (run) => run.requestIdentity?.requestId === requestId,
-      ) ?? null;
-    },
-    async findRunByIdempotencyKey(idempotencyKey) {
-      return [...runs.values()].find(
-        (run) => run.requestIdentity?.idempotencyKey === idempotencyKey,
+        (run) => run.projectId === projectId && run.requestIdentity.idempotencyKey === idempotencyKey,
       ) ?? null;
     },
     async createRunWithSamplings(run, records, evaluationRecords) {
-      const byRequestId = run.requestIdentity?.requestId === undefined
-        ? null
-        : [...runs.values()].find(
-            (existingRun) => existingRun.requestIdentity?.requestId === run.requestIdentity?.requestId,
-          ) ?? null;
-      const byIdempotencyKey = run.requestIdentity?.idempotencyKey === undefined
-        ? null
-        : [...runs.values()].find(
-            (existingRun) => existingRun.requestIdentity?.idempotencyKey === run.requestIdentity?.idempotencyKey,
-          ) ?? null;
-      if (
-        byRequestId &&
-        byIdempotencyKey &&
-        byRequestId.runId !== byIdempotencyKey.runId
-      ) {
-        throw new RuntimeRunIdentityConflictError(
-          "requestId and idempotencyKey refer to different evaluation runs",
-        );
-      }
-
-      const existingRun = byIdempotencyKey ?? byRequestId;
+      const existingRun = [...runs.values()].find(
+        (existing) => existing.projectId === run.projectId
+          && existing.requestIdentity.idempotencyKey === run.requestIdentity.idempotencyKey,
+      );
       if (existingRun) {
         if (
-          existingRun.requestIdentity?.requestFingerprint
-          !== run.requestIdentity?.requestFingerprint
+          existingRun.requestIdentity.requestFingerprint
+          !== run.requestIdentity.requestFingerprint
         ) {
           throw new RuntimeRunIdentityConflictError(
             "request identity is already bound to different evaluation run facts",
@@ -327,7 +394,7 @@ function makeStore(options: StoreOptions = {}): RuntimeStore {
       return { run, created: true } satisfies RuntimeRunAdmission;
     },
     async updateEvaluation(record, expected) {
-      if (!sameRuntimeRecordFacts(evaluations.get(record.evaluationId), expected)) {
+      if (!equalJson(evaluations.get(record.evaluationId), expected)) {
         throw new RuntimeRecordConflictError("Evaluation changed before update");
       }
       evaluations.set(record.evaluationId, record);
@@ -335,17 +402,23 @@ function makeStore(options: StoreOptions = {}): RuntimeStore {
     async getEvaluation(evaluationId) {
       return evaluations.get(evaluationId) ?? null;
     },
+    async getEvaluations(evaluationIds) {
+      return evaluationIds.map((evaluationId) => evaluations.get(evaluationId) ?? null);
+    },
     async listEvaluations(samplingId) {
       return [...evaluations.values()].filter((evaluation) => evaluation.samplingId === samplingId);
     },
     async updateSampling(state, expected) {
-      if (!sameRuntimeRecordFacts(samplings.get(state.samplingId), expected)) {
+      if (!equalJson(samplings.get(state.samplingId), expected)) {
         throw new RuntimeRecordConflictError("Sampling changed before update");
       }
       samplings.set(state.samplingId, state);
     },
     async getSampling(samplingId) {
       return samplings.get(samplingId) ?? null;
+    },
+    async getSamplings(samplingIds) {
+      return samplingIds.map((samplingId) => samplings.get(samplingId) ?? null);
     },
   };
 }
@@ -362,22 +435,37 @@ async function seedEvaluation(store: RuntimeStore, record: EvaluationRecord): Pr
   await store.updateEvaluation(record, expected);
 }
 
-function makeSubmission(status: AgentSubmission["status"] = "completed"): AgentSubmission {
+function makeSubmission(status: AgentSubmission["status"] = "completed", submissionId = "submission-1"): AgentSubmission {
   return {
+    submissionId,
     status,
     accepted: true,
-    normalizedStatus: status === "completed" ? "completed" : "failed",
     retryable: false,
   };
 }
 
 function makeHarness(): Harness {
+  const submissionIds = new Map<string, string>();
+  const operationKey = (handle: AgentHandle, idempotencyKey: string) =>
+    JSON.stringify([handle.chatId, idempotencyKey]);
+  const submissionIdFor = (handle: AgentHandle, idempotencyKey: string) =>
+    submissionIds.get(operationKey(handle, idempotencyKey));
+  const submit = (handle: AgentHandle, idempotencyKey: string): AgentSubmission => {
+    const key = operationKey(handle, idempotencyKey);
+    let submissionId = submissionIds.get(key);
+    if (!submissionId) {
+      submissionId = `generated-submission-${submissionIds.size + 1}`;
+      submissionIds.set(key, submissionId);
+    }
+    return makeSubmission("completed", submissionId);
+  };
   return {
-    ensureAgent: vi.fn(async ({ role, framework, samplingId, submissionId, evaluationWorkspace }): Promise<AgentHandle> => ({
+    ensureAgent: vi.fn(async ({ role, framework, samplingId, chatId, evaluationWorkspace, agentConfig }): Promise<AgentHandle> => ({
+      ownerUserId: agentConfig.ownerUserId,
       role,
       framework,
       samplingId,
-      submissionId,
+      chatId,
       ...(evaluationWorkspace === undefined ? {} : { evaluationWorkspace }),
     })),
     materializeInitialData: vi.fn(async () => ({
@@ -386,10 +474,18 @@ function makeHarness(): Harness {
       target: "workspace" as const,
       rootPath: "/eval/input",
     })),
-    submitAgent: vi.fn(async () => makeSubmission()),
-    restartAgent: vi.fn(async () => makeSubmission()),
-    waitForSubmission: vi.fn(async () => makeSubmission()),
-    inspectAgentOperation: vi.fn(async () => makeSubmission()),
+    submitAgent: vi.fn(async ({ handle, idempotencyKey }) => submit(handle, idempotencyKey)),
+    restartAgent: vi.fn(async ({ handle, idempotencyKey }) => submit(handle, idempotencyKey)),
+    waitForSubmission: vi.fn(async ({ handle, idempotencyKey }) => {
+      const submissionId = submissionIdFor(handle, idempotencyKey);
+      if (!submissionId) throw new Error("Cannot wait for an unknown submission");
+      return makeSubmission("completed", submissionId);
+    }),
+    inspectAgentOperation: vi.fn(async ({ handle, idempotencyKey }) => {
+      const submissionId = submissionIdFor(handle, idempotencyKey);
+      return submissionId ? makeSubmission("completed", submissionId) : null;
+    }),
+    stopAgent: vi.fn(async () => undefined),
     collectExecution: vi.fn(async ({ handle }) => ({
       samplingId: handle.samplingId,
       status: "succeeded" as const,
@@ -402,26 +498,31 @@ function makeHarness(): Harness {
       score: 0.9,
       trajectory: { trajectoryId: "trajectory-2", source: "evaluator" as const, path: "/eval/evaluation.jsonl" },
     })),
-    collectAgentResources: vi.fn(async ({ handle, idempotencyKey }) => ({
-      scope: { submissionId: handle.submissionId, idempotencyKey },
-      observedAt: "2026-10-08T00:00:00.000Z",
-      finalized: true,
-      coverage: {
-        usageEvents: "complete" as const,
-        telemetryEvents: "complete" as const,
-        billingSettlements: "complete" as const,
-      },
-      usageEvents: [],
-      telemetryEvents: [],
-      billingSettlements: [],
-    })),
+    collectAgentResources: vi.fn(async ({ handle, idempotencyKey, submissionId }) => {
+      const resolvedSubmissionId = submissionId ?? submissionIdFor(handle, idempotencyKey);
+      if (!resolvedSubmissionId) throw new Error("Cannot collect resources for an unknown submission");
+      return {
+        scope: { chatId: handle.chatId, submissionId: resolvedSubmissionId, idempotencyKey },
+        observedAt: "2026-10-08T00:00:00.000Z",
+        finalized: true,
+        coverage: {
+          usageEvents: "complete" as const,
+          telemetryEvents: "complete" as const,
+          billingSettlements: "complete" as const,
+        },
+        usageEvents: [],
+        telemetryEvents: [],
+        billingSettlements: [],
+      };
+    }),
     materializeSubjectTrajectory: vi.fn(async () => undefined),
   };
 }
 
 function makeResources(input: CollectAgentResourcesInput): AgentResourceSnapshot {
   const { handle, idempotencyKey } = input;
-  const eventId = `${handle.submissionId}:${idempotencyKey}:usage`;
+  const submissionId = input.submissionId ?? "submission-1";
+  const eventId = `${submissionId}:${idempotencyKey}:usage`;
   const usage = {
     eventId,
     runId: idempotencyKey,
@@ -433,15 +534,15 @@ function makeResources(input: CollectAgentResourcesInput): AgentResourceSnapshot
     sourceExtension: { retained: [true, null, "original"] },
   };
   const event = (type: string, operationId: string, occurredAt: number, payload: Record<string, string | number>) => ({
-    eventId: `${handle.submissionId}:${idempotencyKey}:${type}`,
+    eventId: `${submissionId}:${idempotencyKey}:${type}`,
     operationId,
     type,
     occurredAt,
-    resource: { sessionId: handle.submissionId },
+    resource: { sessionId: handle.chatId },
     payload,
   });
   return {
-    scope: { submissionId: handle.submissionId, idempotencyKey },
+    scope: { chatId: handle.chatId, submissionId, idempotencyKey },
     observedAt: "2026-10-08T00:00:00.000Z",
     finalized: true,
     coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
@@ -490,7 +591,7 @@ function makeRetryControllerFactory(
   };
 }
 
-async function waitForTerminal(runtime: ReturnType<typeof createEvalRuntime>, runId: string) {
+async function waitForTerminal(runtime: ReturnType<typeof createAutoResumingRuntime>, runId: string) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const snapshot = await runtime.getRun(runId);
     if (snapshot.status === "succeeded" || snapshot.status === "failed") return snapshot;
@@ -502,7 +603,7 @@ async function waitForTerminal(runtime: ReturnType<typeof createEvalRuntime>, ru
 describe("eval runtime orchestration", () => {
   it("runs independent samplings and collects initial data, artifacts and trajectory", async () => {
     const harness = makeHarness();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -515,17 +616,19 @@ describe("eval runtime orchestration", () => {
     const snapshot = await waitForTerminal(runtime, run.runId);
 
     expect(snapshot.status).toBe("succeeded");
+    expect(snapshot.sourceCommit).toBe(SOURCE_COMMIT);
     expect(run.samplingIds).toHaveLength(2);
     expect(harness.ensureAgent).toHaveBeenCalledTimes(2);
     expect(harness.materializeInitialData).toHaveBeenCalledTimes(2);
     expect(harness.collectExecution).toHaveBeenCalledTimes(2);
     const preparationInputs = vi.mocked(harness.materializeInitialData).mock.calls.map(([input]) => input);
-    expect(new Set(preparationInputs.map((input) => input.handle.submissionId)).size).toBe(2);
+    expect(new Set(preparationInputs.map((input) => input.handle.chatId)).size).toBe(2);
     expect(new Set(preparationInputs.map((input) => input.idempotencyKey)).size).toBe(2);
     for (const input of preparationInputs) {
-      expect(input.idempotencyKey).toBe(`initial-data:${input.handle.submissionId}`);
-      expect(input.data.initialSession).toEqual({ bundleId: "sessions-bundle", sessionId: "session-seed" });
-      expect(input.data.initialMaterials).toEqual({ bundleId: "materials-bundle", materialId: "materials-1" });
+      expect(input.idempotencyKey).toBe(`initial-data:${input.handle.chatId}`);
+      expect(input.data.initialSession).toEqual({ bundleId: SESSIONS_BUNDLE_ID, sessionId: SESSION_ID });
+      expect(input.data.initialMaterials).toEqual({ bundleId: MATERIALS_BUNDLE_ID, materialId: MATERIAL_ID });
+      expect(input.data).not.toHaveProperty("evalInitialMaterials");
       expect(input.data).not.toHaveProperty("sampleId");
       expect(input.data).not.toHaveProperty("dataId");
     }
@@ -546,7 +649,7 @@ describe("eval runtime orchestration", () => {
         };
         const harness = makeHarness();
         const store = makeStore();
-        const runtime = createEvalRuntime({ catalog: makeCatalog([sample]), harness, store });
+        const runtime = createAutoResumingRuntime({ catalog: makeCatalog([sample]), harness, store });
         const execution = operation === "pipeline"
           ? await runtime.pipeline(pipelineRequest("business-sample-id-pipeline"))
           : await runtime.start(startRequest("business-sample-id-execution"));
@@ -560,15 +663,20 @@ describe("eval runtime orchestration", () => {
         expect(preparations).toHaveLength(2);
         const subject = preparations.find((input) => input.handle.role === "subject")!;
         const evaluator = preparations.find((input) => input.handle.role === "evaluator")!;
-        const { dataId: _dataId, ...expectedSubject } = sample.data;
-        const { initialSession: _initialSession, ...expectedEvaluator } = expectedSubject;
+        const { dataId: _dataId, evalPrompt: _evalPrompt,
+          evalInitialMaterials: _evalMaterials, ...expectedSubject } = sample.data;
+        const { initialSession: _initialSession, userPrompt: _subjectPrompt,
+          initialMaterials: _subjectMaterials, ...evaluationFields } = expectedSubject;
+        const expectedEvaluator = {
+          ...evaluationFields, userPrompt: sample.data.evalPrompt,
+          initialMaterials: sample.data.evalInitialMaterials,
+        };
         expect(subject.data).toEqual(expectedSubject);
         expect(evaluator.data).toEqual(expectedEvaluator);
         expect(subject.data.sampleId).toEqual(businessSampleId);
         expect(evaluator.data.sampleId).toEqual(businessSampleId);
         expect(subject.data).not.toHaveProperty("dataId");
         expect(evaluator.data).not.toHaveProperty("dataId");
-        await expect(runtime.listSamples(sample.data.dataId)).resolves.toEqual([sample]);
         await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.toMatchObject({ sampleId: "sample-1" });
         const state = await store.getSampling(execution.samplingIds[0]!);
         expect(state?.sampleId).toBe(sample.sampleId);
@@ -578,24 +686,13 @@ describe("eval runtime orchestration", () => {
     );
   });
 
-  it("rejects the former flattened Sample shape rather than silently stripping business identity", async () => {
-    const sample = { sampleId: "sample-1", ...makeSample("sample-1").data } as unknown as Sample;
-    const harness = makeHarness();
-    const runtime = createEvalRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
-    const run = await runtime.start(startRequest("flattened-sample"));
-    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
-    expect(harness.ensureAgent).not.toHaveBeenCalled();
-    expect(harness.materializeInitialData).not.toHaveBeenCalled();
-    expect(harness.submitAgent).not.toHaveBeenCalled();
-  });
-
   it("rejects unsafe integer business fields before creating an execution Agent", async () => {
     const sample: Sample = {
       sampleId: "sample-1",
       data: { ...makeSample("sample-1").data, externalDataId: Number.MAX_SAFE_INTEGER + 1 },
     };
     const harness = makeHarness();
-    const runtime = createEvalRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
     const run = await runtime.start(startRequest("unsafe-sample-number"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
     expect(harness.ensureAgent).not.toHaveBeenCalled();
@@ -616,7 +713,7 @@ describe("eval runtime orchestration", () => {
       },
     };
     const harness = makeHarness();
-    const runtime = createEvalRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
     const run = await runtime.start(startRequest("standalone-prompt"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
     const preparation = vi.mocked(harness.materializeInitialData).mock.calls[0]![0];
@@ -645,7 +742,7 @@ describe("eval runtime orchestration", () => {
       await pending;
       return { bundleId: "prepared-input", manifestHash: "hash", target: "workspace", rootPath: "/eval/input" };
     });
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
     const run = await runtime.start(startRequest("wait-for-session"));
     await started;
     expect(harness.submitAgent).not.toHaveBeenCalled();
@@ -660,7 +757,7 @@ describe("eval runtime orchestration", () => {
     async (userPrompt) => {
       const sample = { sampleId: "sample-1", data: { ...makeSample("sample-1").data, userPrompt } } as unknown as Sample;
       const harness = makeHarness();
-      const runtime = createEvalRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
+      const runtime = createAutoResumingRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
       const run = await runtime.start(startRequest("invalid-prompt"));
       await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
       expect(harness.ensureAgent).not.toHaveBeenCalled();
@@ -677,7 +774,7 @@ describe("eval runtime orchestration", () => {
         data: { ...makeSample("sample-1").data, [field]: { bundleId: "bundle-only" } },
       } as unknown as Sample;
       const harness = makeHarness();
-      const runtime = createEvalRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
+      const runtime = createAutoResumingRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
       const run = await runtime.start(startRequest("incomplete-reference"));
       await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
       expect(harness.ensureAgent).not.toHaveBeenCalled();
@@ -689,7 +786,7 @@ describe("eval runtime orchestration", () => {
   it("does not fall back to a fresh Session when SP initialization fails", async () => {
     const harness = makeHarness();
     vi.mocked(harness.materializeInitialData).mockRejectedValueOnce(new Error("initial Session is unavailable"));
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
     const run = await runtime.start(startRequest("missing-session"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
     expect(harness.submitAgent).not.toHaveBeenCalled();
@@ -717,7 +814,7 @@ describe("eval runtime orchestration", () => {
         expect(harness.submitAgent).not.toHaveBeenCalled();
         expect(harness.restartAgent).not.toHaveBeenCalled();
       });
-      const runtime = createEvalRuntime({
+      const runtime = createAutoResumingRuntime({
         catalog: makeCatalog(),
         configResolver: makeConfigResolver(framework),
         harness,
@@ -736,11 +833,11 @@ describe("eval runtime orchestration", () => {
       expect(second![0]).toEqual(first![0]);
       expect(first![0]).toMatchObject({
         handle: { framework },
-        idempotencyKey: `initial-data:${first![0].handle.submissionId}`,
+        idempotencyKey: `initial-data:${first![0].handle.chatId}`,
         data: {
           userPrompt: "Execute sample-1",
-          initialSession: { bundleId: "sessions-bundle", sessionId: "session-seed" },
-          initialMaterials: { bundleId: "materials-bundle", materialId: "materials-1" },
+          initialSession: { bundleId: SESSIONS_BUNDLE_ID, sessionId: SESSION_ID },
+          initialMaterials: { bundleId: MATERIALS_BUNDLE_ID, materialId: MATERIAL_ID },
         },
       });
       expect(decide).toHaveBeenCalledExactlyOnceWith({
@@ -753,7 +850,7 @@ describe("eval runtime orchestration", () => {
       expect(harness.restartAgent).not.toHaveBeenCalled();
       expect(harness.inspectAgentOperation).not.toHaveBeenCalled();
       const sampling = await runtime.getSampling(run.samplingIds[0]!);
-      expect(sampling.subjectSubmissionId).toBe(first![0].handle.submissionId);
+      expect(sampling.subjectChatId).toBe(first![0].handle.chatId);
       expect(sampling.executionAttempts).toHaveLength(1);
     },
   );
@@ -766,7 +863,7 @@ describe("eval runtime orchestration", () => {
       .mockResolvedValueOnce({ shouldRetry: true, backoffMs: 10 })
       .mockResolvedValue({ shouldRetry: false });
     const sleep = vi.fn(async () => undefined);
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -808,7 +905,7 @@ describe("eval runtime orchestration", () => {
     ));
     const decide = vi.fn<RetryController["decide"]>().mockResolvedValue({ shouldRetry: true, backoffMs: 0 });
     const sleep = vi.fn(async () => undefined);
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -832,8 +929,8 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.ensureAgent).mockRejectedValueOnce(new Error("connection lost after agent ensure"));
     vi.mocked(harness.materializeInitialData).mockRejectedValueOnce(new Error("temporary initialization failure"));
     vi.mocked(harness.submitAgent).mockResolvedValueOnce({
+      submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
     });
     const decide = vi.fn<RetryController["decide"]>()
@@ -841,7 +938,7 @@ describe("eval runtime orchestration", () => {
       .mockResolvedValueOnce({ shouldRetry: true, backoffMs: 0 })
       .mockResolvedValueOnce({ shouldRetry: true, backoffMs: 0 })
       .mockResolvedValue({ shouldRetry: false });
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -873,25 +970,39 @@ describe("eval runtime orchestration", () => {
   it("keeps the Subject seed out of the evaluator Session while preserving task evidence and extra fields", async () => {
     const sample: Sample = {
       sampleId: "sample-1",
-      data: { ...makeSample("sample-1").data, expectedOutput: { pages: 3 }, labels: ["web"] },
+      data: {
+        ...makeSample("sample-1").data,
+        evalPrompt: "  Inspect the page artifacts and score accessibility.  ",
+        expectedOutput: { pages: 3 }, labels: ["web"],
+      },
     };
     const harness = makeHarness();
-    const runtime = createEvalRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog([sample]), harness, store: makeStore() });
     const run = await runtime.pipeline(pipelineRequest("independent-evaluator-session"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
     const inputs = vi.mocked(harness.materializeInitialData).mock.calls.map(([input]) => input);
     const subject = inputs.find((input) => input.handle.role === "subject")!;
     const evaluator = inputs.find((input) => input.handle.role === "evaluator")!;
     expect(subject.data.initialSession).toEqual(sample.data.initialSession);
+    expect(subject.data).not.toHaveProperty("evalPrompt");
+    expect(subject.data.userPrompt).toBe(sample.data.userPrompt);
     expect(evaluator.data).not.toHaveProperty("initialSession");
+    expect(evaluator.data).not.toHaveProperty("evalPrompt");
     expect(evaluator.data).toMatchObject({
-      userPrompt: sample.data.userPrompt,
-      initialMaterials: sample.data.initialMaterials,
+      userPrompt: sample.data.evalPrompt,
+      initialMaterials: sample.data.evalInitialMaterials,
       expectedOutput: sample.data.expectedOutput,
       labels: sample.data.labels,
     });
-    expect(evaluator.idempotencyKey).toBe(`initial-data:${evaluator.handle.submissionId}`);
-    expect(evaluator.handle.submissionId).not.toBe(subject.handle.submissionId);
+    expect(evaluator.idempotencyKey).toBe(`initial-data:${evaluator.handle.chatId}`);
+    expect(evaluator.evaluationOutputSchema).toEqual({
+      type: "object", properties: { score: { type: "number" } },
+    });
+    expect(evaluator.handle.chatId).not.toBe(subject.handle.chatId);
+    expect(vi.mocked(harness.submitAgent).mock.calls.find(([call]) => call.handle.role === "subject")?.[0].prompt)
+      .toBe(sample.data.userPrompt);
+    expect(vi.mocked(harness.submitAgent).mock.calls.find(([call]) => call.handle.role === "evaluator")?.[0].prompt)
+      .toBe(sample.data.evalPrompt);
     const evaluationSubmitIndex = vi.mocked(harness.submitAgent).mock.calls.findIndex(
       ([input]) => input.handle.role === "evaluator",
     );
@@ -899,14 +1010,135 @@ describe("eval runtime orchestration", () => {
       .toBeLessThan(vi.mocked(harness.submitAgent).mock.invocationCallOrder[evaluationSubmitIndex]!);
   });
 
+  it("passes one Project JSON Schema to every Evaluator in a multi-Sampling evaluation", async () => {
+    const harness = makeHarness();
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const execution = await runtime.start(startRequest("schema-multi-execution", EXECUTION_CONFIG_TWO_SAMPLES_ID));
+    await expect(waitForTerminal(runtime, execution.runId)).resolves.toMatchObject({ status: "succeeded" });
+    const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    await expect(waitForTerminal(runtime, evaluation.runId)).resolves.toMatchObject({ status: "succeeded" });
+    const evaluatorInputs = vi.mocked(harness.materializeInitialData).mock.calls
+      .map(([input]) => input).filter((input) => input.handle.role === "evaluator");
+    expect(evaluatorInputs).toHaveLength(2);
+    for (const input of evaluatorInputs) {
+      expect(input.evaluationOutputSchema).toEqual({
+        type: "object", properties: { score: { type: "number" } },
+      });
+      expect(input.data.initialMaterials).toEqual({ bundleId: EVAL_BUNDLE_ID, materialId: EVAL_MATERIAL_ID });
+      expect(input.data).not.toHaveProperty("evalInitialMaterials");
+    }
+  });
+
+  it("allows execution-only Data without evalPrompt but rejects evaluation admission", async () => {
+    const { evalPrompt: _evalPrompt, ...executionData } = makeSample("sample-1").data;
+    const sample: Sample = { sampleId: "sample-1", data: executionData };
+    const harness = makeHarness();
+    const store = makeStore();
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog([sample]), harness, store });
+
+    const pipeline = pipelineRequest("missing-evaluation-prompt");
+    await expect(runtime.pipeline(pipeline)).rejects.toThrow(RuntimeAdmissionConflictError);
+    await expect(runtime.pipeline(pipeline)).rejects.toMatchObject({ reason: "evaluation-prompt" });
+    expect(await store.findRunByIdempotencyKey(pipeline.projectId, pipeline.idempotencyKey)).toBeNull();
+
+    const execution = await runtime.start(startRequest("execution-without-evaluation-prompt"));
+    await expect(waitForTerminal(runtime, execution.runId)).resolves.toMatchObject({ status: "succeeded" });
+    const evaluation = evaluateRequest(execution.samplingIds);
+    await expect(runtime.evaluate(evaluation)).rejects.toThrow(RuntimeAdmissionConflictError);
+    await expect(runtime.evaluate(evaluation)).rejects.toMatchObject({ reason: "evaluation-prompt" });
+    expect(await store.findRunByIdempotencyKey(evaluation.projectId, evaluation.idempotencyKey)).toBeNull();
+    expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
+  });
+
+  describe("typed caller errors", () => {
+    it.each([
+      [{ ...startRequest("blank-project"), projectId: " " }, "projectId"],
+      [{ ...startRequest("padded"), idempotencyKey: " padded " }, "idempotencyKey"],
+      [{ ...startRequest("missing-config"), executionConfigId: "" }, "executionConfigId"],
+    ])("rejects invalid start request %j as input on %s", async (request, field) => {
+      const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness: makeHarness(), store: makeStore() });
+      await expect(runtime.start(request)).rejects.toThrow(RuntimeInputError);
+      await expect(runtime.start(request)).rejects.toMatchObject({ field });
+    });
+
+    it.each([
+      [[], "samplingIds"],
+      [["sampling-1", "sampling-1"], "samplingIds"],
+    ])("rejects evaluation selection %j as input", async (samplingIds, field) => {
+      const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness: makeHarness(), store: makeStore() });
+      await expect(runtime.evaluate(evaluateRequest(samplingIds))).rejects.toMatchObject({
+        name: "RuntimeInputError", field,
+      });
+    });
+
+    it("rejects a selected Sample outside the configured Dataset as input", async () => {
+      const configResolver = createConfigResolver({
+        getExecutionConfig: async (configId) => makeExecutionConfig(configId, { sampleIds: ["other-sample"] }),
+        getEvaluationConfig: async () => null,
+        getPipelineConfig: async () => null,
+      });
+      const runtime = createAutoResumingRuntime({
+        catalog: makeCatalog(), harness: makeHarness(), store: makeStore(), configResolver,
+      });
+      await expect(runtime.start(startRequest("outside-dataset"))).rejects.toMatchObject({
+        name: "RuntimeInputError", field: "sampleIds",
+      });
+    });
+
+    it("reports an unknown config as a missing entity", async () => {
+      const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness: makeHarness(), store: makeStore() });
+      await expect(runtime.start(startRequest("unknown-config", "missing-config"))).rejects.toThrow(
+        RuntimeEntityNotFoundError,
+      );
+      await expect(runtime.start(startRequest("unknown-config", "missing-config"))).rejects.toMatchObject({
+        entity: "execution-config", id: "missing-config",
+      });
+    });
+
+    it.each(["unknown", "unsuccessful"] as const)(
+      "rejects an %s Sampling selection as unavailable for evaluation",
+      async (selection) => {
+        const harness = makeHarness();
+        vi.mocked(harness.collectExecution).mockResolvedValueOnce({
+          samplingId: "ignored", status: "failed", error: "subject failed",
+          artifacts: [], trajectory: { trajectoryId: "trajectory-1", source: "subject", path: "/trajectory.jsonl" },
+        });
+        const store = makeStore();
+        const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store });
+        const execution = await runtime.start(startRequest("unavailable-selection"));
+        await waitForTerminal(runtime, execution.runId);
+        const samplingIds = selection === "unknown" ? ["missing-sampling"] : execution.samplingIds;
+        const request = evaluateRequest(samplingIds);
+        await expect(runtime.evaluate(request)).rejects.toThrow(RuntimeAdmissionConflictError);
+        await expect(runtime.evaluate(request)).rejects.toMatchObject({ reason: "sampling-unavailable" });
+        expect(await store.findRunByIdempotencyKey(request.projectId, request.idempotencyKey)).toBeNull();
+      },
+    );
+
+    it("reports unknown Run, Sampling and Evaluation reads as missing entities", async () => {
+      const store = makeStore();
+      const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness: makeHarness(), store });
+      const resumer = createEvalRunResumer({
+        getEvaluationOutputSchema: makeCatalog().getEvaluationOutputSchema,
+        getSamples: makeCatalog().getSamples, harness: makeHarness(), store,
+      });
+      await expect(runtime.getRun("missing")).rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "run" });
+      await expect(runtime.getSampling("missing")).rejects.toMatchObject({ entity: "sampling", id: "missing" });
+      await expect(runtime.getEvaluation("missing")).rejects.toMatchObject({ entity: "evaluation", id: "missing" });
+      await expect(resumer.resume("missing")).rejects.toThrow(RuntimeEntityNotFoundError);
+      await expect(resumer.interrupt("missing")).rejects.toThrow(RuntimeEntityNotFoundError);
+      await expect(resumer.stop("missing")).rejects.toThrow(RuntimeEntityNotFoundError);
+    });
+  });
+
   it("continues the Agent Session after a restart without reapplying its seed", async () => {
     const harness = makeHarness();
     vi.mocked(harness.submitAgent).mockResolvedValueOnce({
+      submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
     });
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore(), sleep: async () => undefined });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore(), sleep: async () => undefined });
     const run = await runtime.start(startRequest("keep-restored-session", EXECUTION_CONFIG_RETRY_ONE_ID));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
     expect(harness.materializeInitialData).toHaveBeenCalledTimes(1);
@@ -920,10 +1152,11 @@ describe("eval runtime orchestration", () => {
       const harness = makeHarness();
       const store = makeStore();
       vi.mocked(harness.submitAgent).mockResolvedValueOnce({
+        submissionId: "submission-1",
         status: "queued",
-        normalizedStatus: "queued",
       });
-      const runtime = createEvalRuntime({
+      vi.mocked(harness.waitForSubmission).mockResolvedValueOnce(makeSubmission());
+      const runtime = createAutoResumingRuntime({
         catalog: makeCatalog(),
         configResolver: makeConfigResolver(framework),
         harness,
@@ -970,7 +1203,7 @@ describe("eval runtime orchestration", () => {
     async (framework) => {
       const harness = makeHarness();
       const store = makeStore();
-      const runtime = createEvalRuntime({
+      const runtime = createAutoResumingRuntime({
         catalog: makeCatalog(),
         configResolver: makeConfigResolver(framework),
         harness,
@@ -1015,11 +1248,12 @@ describe("eval runtime orchestration", () => {
     const harness = makeHarness();
     vi.mocked(harness.ensureAgent).mockImplementation(async (input) => ({
       role: input.role,
+      ownerUserId: input.agentConfig.ownerUserId,
       framework: "sp",
       samplingId: input.samplingId,
-      submissionId: input.submissionId,
+      chatId: input.chatId,
     }));
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       configResolver: makeConfigResolver("codex"),
       harness,
@@ -1035,15 +1269,35 @@ describe("eval runtime orchestration", () => {
     expect(harness.submitAgent).not.toHaveBeenCalled();
   });
 
+  it("rejects an Agent handle belonging to another user before initializing it", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.ensureAgent).mockImplementation(async (input) => ({
+      role: input.role,
+      ownerUserId: "another-user",
+      framework: input.framework,
+      samplingId: input.samplingId,
+      chatId: input.chatId,
+    }));
+    const runtime = createAutoResumingRuntime({
+      catalog: makeCatalog(), harness, store: makeStore(), sleep: async () => undefined,
+      createRetryController: makeRetryControllerFactory({ creation: 1 }),
+    });
+    const run = await runtime.start(startRequest("wrong-chat-owner"));
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
+    expect(harness.materializeInitialData).not.toHaveBeenCalled();
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+  });
+
   it("rejects an evaluator Chat that did not bind the Subject Workspace", async () => {
     const harness = makeHarness();
     vi.mocked(harness.ensureAgent).mockImplementation(async (input) => ({
       role: input.role,
+      ownerUserId: input.agentConfig.ownerUserId,
       framework: input.framework,
       samplingId: input.samplingId,
-      submissionId: input.submissionId,
+      chatId: input.chatId,
     }));
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1064,11 +1318,11 @@ describe("eval runtime orchestration", () => {
       const harness = makeHarness();
       vi.mocked(harness.ensureAgent).mockRejectedValueOnce(new Error("ensure response lost"));
       vi.mocked(harness.submitAgent).mockResolvedValueOnce({
+        submissionId: "submission-1",
         status: "failed",
-        normalizedStatus: "failed",
         retryable: true,
       });
-      const runtime = createEvalRuntime({
+      const runtime = createAutoResumingRuntime({
         catalog: makeCatalog(),
         configResolver: makeConfigResolver(framework),
         harness,
@@ -1092,10 +1346,10 @@ describe("eval runtime orchestration", () => {
     },
   );
 
-  it("rejects a reused run identity when the selected framework changes", async () => {
+  it("replays the original run from its saved config when the live config changes", async () => {
     const harness = makeHarness();
     const configResolver = makeConfigResolver("codex");
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       configResolver,
       harness,
@@ -1106,26 +1360,28 @@ describe("eval runtime orchestration", () => {
     await waitForTerminal(runtime, run.runId);
 
     const config = await configResolver.resolveExecutionConfig(EXECUTION_CONFIG_ID);
-    vi.spyOn(configResolver, "resolveExecutionConfig").mockResolvedValue({
+    const resolve = vi.spyOn(configResolver, "resolveExecutionConfig").mockResolvedValue({
       ...config,
       harness: { kind: "sp", framework: "cc", agentConfig: SUBJECT },
     });
 
     await expect(runtime.start(
       startRequest("another-framework-request", EXECUTION_CONFIG_ID, "framework-key"),
-    )).rejects.toThrow(RuntimeRunIdentityConflictError);
+    )).resolves.toEqual(run);
+    expect(resolve).not.toHaveBeenCalled();
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
   });
 
   it("passes execution harness runtime options through the subject lifecycle", async () => {
     const harness = makeHarness();
     vi.mocked(harness.submitAgent).mockResolvedValueOnce({
+      submissionId: "submission-1",
       status: "queued",
-      normalizedStatus: "queued",
       accepted: true,
       retryable: false,
     });
-    const runtime = createEvalRuntime({
+    vi.mocked(harness.waitForSubmission).mockResolvedValueOnce(makeSubmission());
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1162,14 +1418,15 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => (
       handle.role === "evaluator"
         ? {
+            submissionId: "submission-1",
             status: "queued",
-            normalizedStatus: "queued",
             accepted: true,
             retryable: false,
           }
         : makeSubmission()
     ));
-    const runtime = createEvalRuntime({
+    vi.mocked(harness.waitForSubmission).mockResolvedValueOnce(makeSubmission());
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1215,7 +1472,7 @@ describe("eval runtime orchestration", () => {
 
   it("persists the effective config snapshot for every run operation", async () => {
     const store = makeStore();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness: makeHarness(),
       store,
@@ -1260,7 +1517,7 @@ describe("eval runtime orchestration", () => {
   });
 
   it("keeps static sample input out of persisted sampling records", async () => {
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness: makeHarness(),
       store: makeStore(),
@@ -1281,7 +1538,7 @@ describe("eval runtime orchestration", () => {
 
   it("returns the original run when the same request is retried", async () => {
     const harness = makeHarness();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1301,7 +1558,7 @@ describe("eval runtime orchestration", () => {
 
   it("returns the original run when a retry uses the same idempotency key", async () => {
     const harness = makeHarness();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1317,23 +1574,22 @@ describe("eval runtime orchestration", () => {
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects a request and key that are already bound to different runs", async () => {
-    const runtime = createEvalRuntime({
+  it("rejects a key reused for another Run operation in the same Project", async () => {
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness: makeHarness(),
       store: makeStore(),
       sleep: async () => undefined,
     });
     await runtime.start(startRequest("request-1", EXECUTION_CONFIG_ID, "run-key-1"));
-    await runtime.start(startRequest("request-2", EXECUTION_CONFIG_ID, "run-key-2"));
 
     await expect(
-      runtime.start(startRequest("request-1", EXECUTION_CONFIG_ID, "run-key-2")),
+      runtime.pipeline(pipelineRequest("pipeline-request", PIPELINE_CONFIG_ID, "run-key-1")),
     ).rejects.toThrow(RuntimeRunIdentityConflictError);
   });
 
   it("rejects a reused idempotency key when request facts change", async () => {
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness: makeHarness(),
       store: makeStore(),
@@ -1353,7 +1609,7 @@ describe("eval runtime orchestration", () => {
       releaseSamples = resolve;
     });
     const baseCatalog = makeCatalog();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: {
         ...baseCatalog,
         async listData(datasetId) {
@@ -1381,7 +1637,7 @@ describe("eval runtime orchestration", () => {
 
   it("returns the original pipeline run when the request is retried", async () => {
     const harness = makeHarness();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1401,7 +1657,7 @@ describe("eval runtime orchestration", () => {
 
   it("keeps evaluation state absent when only execution is requested", async () => {
     const harness = makeHarness();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1422,7 +1678,7 @@ describe("eval runtime orchestration", () => {
     const harness = makeHarness();
     vi.mocked(harness.collectExecution)
       .mockRejectedValueOnce(new Error("temporary artifact fetch failure"));
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1442,23 +1698,33 @@ describe("eval runtime orchestration", () => {
 
   it("does not restart a completed Agent when output collection retries are exhausted", async () => {
     const harness = makeHarness();
+    const store = makeStore();
     vi.mocked(harness.collectExecution).mockRejectedValue(
       new Error("artifact storage unavailable"),
     );
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
-      store: makeStore(),
+      store,
       sleep: async () => undefined,
       createRetryController: makeRetryControllerFactory({ collection: 1 }),
     });
 
     const run = await runtime.start(startRequest("test-request", EXECUTION_CONFIG_RETRY_TWO_ID));
 
-    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
+    await expect.poll(async () => (await runtime.getSampling(run.samplingIds[0]!)).execution.evidencePending).toBe(true);
+    expect((await runtime.getRun(run.runId)).status).toBe("retrying");
     expect(harness.submitAgent).toHaveBeenCalledTimes(1);
     expect(harness.restartAgent).not.toHaveBeenCalled();
     expect(harness.collectExecution).toHaveBeenCalledTimes(2);
+    vi.mocked(harness.collectExecution).mockResolvedValue({
+      samplingId: run.samplingIds[0]!, status: "succeeded",
+      artifacts: [{ artifactId: "recovered", kind: "project", path: "/eval/output" }],
+      trajectory: { trajectoryId: "full-trajectory", source: "subject", path: "/eval/trajectory.jsonl" },
+    });
+    await runtime.resume(run.runId);
+    expect((await runtime.getRun(run.runId)).status).toBe("succeeded");
+    expect(harness.submitAgent).toHaveBeenCalledOnce();
   });
 
   it("does not restart an agent when output collection returns a failed result", async () => {
@@ -1474,7 +1740,7 @@ describe("eval runtime orchestration", () => {
       },
       error: "artifact collection failed",
     });
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1487,18 +1753,89 @@ describe("eval runtime orchestration", () => {
       status: "failed",
     });
     expect(harness.restartAgent).not.toHaveBeenCalled();
+    await expect(runtime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
+      artifacts: [],
+      trajectory: { trajectoryId: "trajectory-1", source: "subject" },
+    });
+  });
+
+  it("preserves Subject artifacts and complete trajectory after a failed Submission", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.submitAgent).mockResolvedValue({
+      submissionId: "submission-1",
+      status: "failed",
+      error: "agent task failed",
+      retryable: true,
+    });
+    vi.mocked(harness.collectExecution).mockImplementation(async ({ handle }) => ({
+      samplingId: handle.samplingId,
+      status: "failed",
+      artifacts: [{ artifactId: "partial-project", kind: "project", path: "/eval/partial" }],
+      trajectory: { trajectoryId: "full-trajectory", source: "subject", path: "/eval/trajectory.jsonl" },
+    }));
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+
+    const run = await runtime.start(startRequest("failed-subject-evidence"));
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
+
+    expect(harness.collectExecution).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      handle: expect.objectContaining({ role: "subject", chatId: expect.any(String) }),
+    }));
+    await expect(runtime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
+      execution: { status: "failed", lastError: "agent task failed" },
+      artifacts: [{ artifactId: "partial-project" }],
+      trajectory: { trajectoryId: "full-trajectory", source: "subject" },
+    });
+  });
+
+  it("keeps the original failed Submission error when evidence collection is unavailable", async () => {
+    const harness = makeHarness();
+    const onError = vi.fn();
+    const store = makeStore();
+    vi.mocked(harness.submitAgent).mockResolvedValue({
+      submissionId: "submission-1",
+      status: "failed",
+      error: "agent task failed",
+      retryable: true,
+    });
+    vi.mocked(harness.collectExecution).mockRejectedValue(new Error("workspace unavailable"));
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store, onError });
+
+    const run = await runtime.start(startRequest("failed-subject-evidence-unavailable"));
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+
+    await expect(runtime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
+      execution: { status: "retrying", lastError: "agent task failed", evidencePending: true },
+    });
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining("workspace unavailable"),
+    }));
+    vi.mocked(harness.collectExecution).mockResolvedValue({
+      samplingId: run.samplingIds[0]!, status: "failed",
+      artifacts: [{ artifactId: "partial", kind: "project", path: "/eval/partial" }],
+      trajectory: { trajectoryId: "full-trajectory", source: "subject", path: "/eval/trajectory.jsonl" },
+    });
+    await createEvalRunResumer({ getSamples: makeCatalog().getSamples,
+      getEvaluationOutputSchema: makeCatalog().getEvaluationOutputSchema, harness, store }).resume(run.runId);
+    await expect(runtime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
+      execution: { status: "failed", lastError: "agent task failed" },
+      artifacts: [{ artifactId: "partial" }],
+      trajectory: { trajectoryId: "full-trajectory" },
+    });
+    expect(harness.submitAgent).toHaveBeenCalledOnce();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
   });
 
   it("does not restart an agent when submission status cannot be confirmed", async () => {
     const harness = makeHarness();
     vi.mocked(harness.submitAgent).mockResolvedValue({
+      submissionId: "submission-1",
       status: "queued",
-      normalizedStatus: "queued",
       retryable: true,
     });
     vi.mocked(harness.waitForSubmission).mockRejectedValue(new Error("status service unavailable"));
     vi.mocked(harness.inspectAgentOperation).mockRejectedValue(new Error("inspection service unavailable"));
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1515,17 +1852,17 @@ describe("eval runtime orchestration", () => {
   it("restarts only after status observation confirms a failed submission", async () => {
     const harness = makeHarness();
     vi.mocked(harness.submitAgent).mockResolvedValue({
+      submissionId: "submission-1",
       status: "queued",
-      normalizedStatus: "queued",
       retryable: true,
     });
     vi.mocked(harness.waitForSubmission).mockResolvedValue({
+      submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
       error: "temporary agent failure",
     });
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1543,8 +1880,8 @@ describe("eval runtime orchestration", () => {
   it("evaluates completed executions in new evaluator submissions", async () => {
     const harness = makeHarness();
     const catalog = makeCatalog();
-    const getSample = vi.spyOn(catalog, "getSample");
-    const runtime = createEvalRuntime({
+    const getSamples = vi.spyOn(catalog, "getSamples");
+    const runtime = createAutoResumingRuntime({
       catalog,
       harness,
       store: makeStore(),
@@ -1563,7 +1900,7 @@ describe("eval runtime orchestration", () => {
     expect(evaluationRecord.evaluator).toEqual(EVALUATOR);
     expect(evaluationRecord.status).toEqual({ status: "succeeded" });
     expect(harness.collectEvaluation).toHaveBeenCalledTimes(1);
-    expect(getSample).toHaveBeenCalledWith("sample-1");
+    expect(getSamples).toHaveBeenCalledWith(["sample-1"]);
     expect(harness.materializeInitialData).toHaveBeenCalledTimes(2);
     expect(harness.materializeSubjectTrajectory).toHaveBeenCalledWith(expect.objectContaining({
       subjectWorkspace: { userId: SUBJECT.ownerUserId, chatId: expect.any(String) },
@@ -1574,14 +1911,14 @@ describe("eval runtime orchestration", () => {
       },
     }));
     const sampling = await runtime.getSampling(execution.samplingIds[0]!);
-    expect(sampling.subjectSubmissionId).toEqual(expect.any(String));
-    expect(evaluationRecord.submissionId).toEqual(expect.any(String));
-    expect(evaluationRecord.submissionId).not.toBe(sampling.subjectSubmissionId);
+    expect(sampling.subjectChatId).toEqual(expect.any(String));
+    expect(evaluationRecord.chatId).toEqual(expect.any(String));
+    expect(evaluationRecord.chatId).not.toBe(sampling.subjectChatId);
     const trajectoryInput = vi.mocked(harness.materializeSubjectTrajectory).mock.calls[0]?.[0];
-    expect(trajectoryInput?.subjectWorkspace.chatId).toBe(sampling.subjectSubmissionId);
-    expect(trajectoryInput?.idempotencyKey).toBe(`subject-trajectory:${sampling.subjectSubmissionId}`);
+    expect(trajectoryInput?.subjectWorkspace.chatId).toBe(sampling.subjectChatId);
+    expect(trajectoryInput?.idempotencyKey).toBe(`subject-trajectory:${sampling.subjectChatId}`);
     expect(harness.ensureAgent).toHaveBeenCalledWith(expect.objectContaining({
-      submissionId: evaluationRecord.submissionId,
+      chatId: evaluationRecord.chatId,
       evaluationWorkspace: {
         subject: trajectoryInput?.subjectWorkspace,
         evaluationId: evaluationRecord.evaluationId,
@@ -1595,7 +1932,7 @@ describe("eval runtime orchestration", () => {
 
   it("keeps independent evaluation records for repeated evaluations", async () => {
     const harness = makeHarness();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1634,11 +1971,151 @@ describe("eval runtime orchestration", () => {
     );
   });
 
+  it("admits execution, evaluation and pipeline Runs without a Harness credential", async () => {
+    const store = makeStore();
+    const getSamplings = vi.spyOn(store, "getSamplings");
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog: makeCatalog(), configResolver: makeConfigResolver(), store,
+    });
+    expect("resume" in admission).toBe(false);
+    const execution = await admission.start(startRequest("admission-only-execution"));
+    const sampling = await store.getSampling(execution.samplingIds[0]!);
+    expect(sampling?.execution.status).toBe("queued");
+    await store.updateSampling({ ...sampling!, execution: { status: "succeeded" } }, sampling!);
+
+    const evaluation = await admission.evaluate(evaluateRequest(
+      execution.samplingIds, EVALUATION_CONFIG_ID, "admission-only-evaluation",
+    ));
+    expect(getSamplings).toHaveBeenCalledWith(execution.samplingIds);
+    expect((await store.getRun(evaluation.runId))?.evaluationIds).toHaveLength(1);
+    const pipeline = await admission.pipeline({
+      projectId: "project-1", pipelineConfigId: PIPELINE_CONFIG_ID, idempotencyKey: "admission-only-pipeline",
+    });
+    expect((await store.getRun(pipeline.runId))?.phases).toEqual(["execution", "evaluation"]);
+  });
+
+  it("admits one independent evaluation when the same intent races or is retried", async () => {
+    const harness = makeHarness();
+    const configResolver = makeConfigResolver();
+    const runtime = createAutoResumingRuntime({
+      catalog: makeCatalog(),
+      configResolver,
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+    });
+    const execution = await runtime.start(startRequest("evaluation-intent-execution"));
+    await waitForTerminal(runtime, execution.runId);
+
+    const request = evaluateRequest(execution.samplingIds, EVALUATION_CONFIG_ID, "evaluation-intent");
+    const [first, concurrent] = await Promise.all([
+      runtime.evaluate(request),
+      runtime.evaluate(request),
+    ]);
+    expect(concurrent).toEqual(first);
+    await waitForTerminal(runtime, first.runId);
+
+    const resolve = vi.spyOn(configResolver, "resolveEvaluationConfig")
+      .mockRejectedValue(new Error("live config must not be read on replay"));
+    await expect(runtime.evaluate(request)).resolves.toEqual(first);
+    expect(resolve).not.toHaveBeenCalled();
+    resolve.mockRestore();
+    expect(await runtime.listEvaluations(execution.samplingIds[0]!)).toHaveLength(1);
+    expect(vi.mocked(harness.ensureAgent).mock.calls.filter(([input]) => input.role === "evaluator"))
+      .toHaveLength(1);
+
+    const deliberate = await runtime.evaluate({
+      ...request,
+      idempotencyKey: "new-evaluation-intent",
+    });
+    expect(deliberate.runId).not.toBe(first.runId);
+    expect(await runtime.listEvaluations(execution.samplingIds[0]!)).toHaveLength(2);
+  });
+
+  it("shares a pending evaluation admission even when its live config changes", async () => {
+    const store = makeStore();
+    const configResolver = makeConfigResolver();
+    const runtime = createAutoResumingRuntime({
+      catalog: makeCatalog(),
+      configResolver,
+      harness: makeHarness(),
+      store,
+      sleep: async () => undefined,
+    });
+    const execution = await runtime.start(startRequest("config-change-execution"));
+    await waitForTerminal(runtime, execution.runId);
+
+    const originalConfig = await configResolver.resolveEvaluationConfig(EVALUATION_CONFIG_ID);
+    let enteredResolution!: () => void;
+    const resolving = new Promise<void>((resolve) => { enteredResolution = resolve; });
+    let releaseResolution!: () => void;
+    const resolutionGate = new Promise<void>((resolve) => { releaseResolution = resolve; });
+    const resolveConfig = vi.spyOn(configResolver, "resolveEvaluationConfig")
+      .mockImplementation(async () => {
+        enteredResolution();
+        await resolutionGate;
+        return originalConfig;
+      });
+    const request = evaluateRequest(execution.samplingIds, EVALUATION_CONFIG_ID, "config-change-key");
+    const firstAdmission = runtime.evaluate(request);
+    await resolving;
+
+    resolveConfig.mockResolvedValue({ ...originalConfig, evaluationConcurrency: 2 });
+    const retry = runtime.evaluate(request);
+    await expect(runtime.evaluate({
+      ...request, evaluationConfigId: EVALUATION_CONFIG_TWO_CONCURRENT_ID,
+    })).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(runtime.start(startRequest("other-operation", EXECUTION_CONFIG_ID, request.idempotencyKey)))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    releaseResolution();
+
+    const [first, repeated] = await Promise.all([firstAdmission, retry]);
+    expect(repeated).toEqual(first);
+    expect(resolveConfig).toHaveBeenCalledTimes(1);
+    expect((await store.getRun(first.runId))?.config).toEqual({
+      operation: "evaluation", evaluation: originalConfig,
+    });
+    expect(await runtime.listEvaluations(execution.samplingIds[0]!)).toHaveLength(1);
+    await waitForTerminal(runtime, first.runId);
+
+    const failedRequest = { ...request, idempotencyKey: "retry-after-config-error" };
+    resolveConfig.mockRejectedValueOnce(new Error("temporary config error"));
+    await expect(runtime.evaluate(failedRequest)).rejects.toThrow("temporary config error");
+    resolveConfig.mockResolvedValue(originalConfig);
+    await expect(runtime.evaluate(failedRequest)).resolves.toMatchObject({ runId: expect.any(String) });
+  });
+
+  it("rejects changed evaluation selection or config under an admitted key", async () => {
+    const runtime = createAutoResumingRuntime({
+      catalog: makeCatalog(),
+      harness: makeHarness(),
+      store: makeStore(),
+      sleep: async () => undefined,
+    });
+    const execution = await runtime.start(startRequest(
+      "evaluation-selection-execution",
+      EXECUTION_CONFIG_TWO_CONCURRENT_ID,
+    ));
+    await waitForTerminal(runtime, execution.runId);
+    const request = evaluateRequest(execution.samplingIds, EVALUATION_CONFIG_ID, "evaluation-selection");
+    await runtime.evaluate(request);
+
+    await expect(runtime.evaluate({
+      ...request,
+      samplingIds: [...request.samplingIds].reverse(),
+    })).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(runtime.evaluate({
+      ...request,
+      evaluationConfigId: EVALUATION_CONFIG_TWO_CONCURRENT_ID,
+    })).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    expect(await runtime.listEvaluations(execution.samplingIds[0]!)).toHaveLength(1);
+  });
+
   it("resolves a shared sample once per admission and execution stage", async () => {
     const harness = makeHarness();
     const catalog = makeCatalog();
-    const getSample = vi.spyOn(catalog, "getSample");
-    const runtime = createEvalRuntime({
+    const getSamples = vi.spyOn(catalog, "getSamples");
+    const runtime = createAutoResumingRuntime({
       catalog,
       harness,
       store: makeStore(),
@@ -1654,8 +2131,8 @@ describe("eval runtime orchestration", () => {
     );
     await waitForTerminal(runtime, evaluation.runId);
 
-    expect(getSample).toHaveBeenCalledTimes(3);
-    expect(getSample).toHaveBeenCalledWith("sample-1");
+    expect(getSamples).toHaveBeenCalledTimes(3);
+    expect(getSamples).toHaveBeenCalledWith(["sample-1"]);
   });
 
   it("keeps the previous evaluation when atomic evaluation preparation fails", async () => {
@@ -1667,7 +2144,7 @@ describe("eval runtime orchestration", () => {
         }
       },
     });
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness: makeHarness(),
       store,
@@ -1692,7 +2169,7 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.ensureAgent).mockRejectedValueOnce(
       new Error("connection lost after agent ensure"),
     );
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1710,7 +2187,7 @@ describe("eval runtime orchestration", () => {
     const secondInput = vi.mocked(harness.ensureAgent).mock.calls[1]?.[0];
     expect(secondInput).toEqual(firstInput);
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
-    expect(sampling.subjectSubmissionId).toBe(firstInput?.submissionId);
+    expect(sampling.subjectChatId).toBe(firstInput?.chatId);
     expect(sampling.execution.status).toBe("succeeded");
     expect(sampling.executionAttempts).toHaveLength(1);
     expect(harness.restartAgent).not.toHaveBeenCalled();
@@ -1718,7 +2195,7 @@ describe("eval runtime orchestration", () => {
 
   it("retries evaluator initial data with the same identity, runtime options and initialization key", async () => {
     const harness = makeHarness();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1740,7 +2217,7 @@ describe("eval runtime orchestration", () => {
     expect(inputs[1]).toEqual(inputs[0]);
     expect(inputs[0]).toMatchObject({
       runtime: EVALUATION_RUNTIME,
-      idempotencyKey: `initial-data:${inputs[0]!.handle.submissionId}`,
+      idempotencyKey: `initial-data:${inputs[0]!.handle.chatId}`,
     });
     expect(inputs[0]!.data).not.toHaveProperty("initialSession");
     expect(harness.ensureAgent).toHaveBeenCalledTimes(2);
@@ -1749,7 +2226,7 @@ describe("eval runtime orchestration", () => {
     expect(harness.inspectAgentOperation).not.toHaveBeenCalled();
     const record = await runtime.getEvaluation(snapshot.evaluationIds[0]!);
     expect(record.attempts).toHaveLength(1);
-    expect(record.submissionId).toBe(inputs[0]!.handle.submissionId);
+    expect(record.chatId).toBe(inputs[0]!.handle.chatId);
   });
 
   it("retries Subject trajectory materialization with the same key before evaluator submission", async () => {
@@ -1767,7 +2244,7 @@ describe("eval runtime orchestration", () => {
       copyRetryStarted();
       await pending;
     });
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1820,7 +2297,7 @@ describe("eval runtime orchestration", () => {
         .mockResolvedValueOnce({ shouldRetry: true, backoffMs: 0 })
         .mockResolvedValue({ shouldRetry: false });
       const sleep = vi.fn(async () => undefined);
-      const runtime = createEvalRuntime({
+      const runtime = createAutoResumingRuntime({
         catalog: makeCatalog(),
         harness,
         store: makeStore(),
@@ -1866,7 +2343,7 @@ describe("eval runtime orchestration", () => {
       },
       error: "evaluation output failed",
     });
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1895,7 +2372,7 @@ describe("eval runtime orchestration", () => {
 
   it("retries evaluation output collection without restarting the evaluator", async () => {
     const harness = makeHarness();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1920,7 +2397,7 @@ describe("eval runtime orchestration", () => {
     const harness = makeHarness();
     const store = makeStore();
     const catalog = makeCatalog();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog,
       harness,
       store,
@@ -1930,7 +2407,7 @@ describe("eval runtime orchestration", () => {
     const run = await runtime.start(startRequest("test-request"));
     await waitForTerminal(runtime, run.runId);
 
-    const restoredRuntime = createEvalRuntime({
+    const restoredRuntime = createAutoResumingRuntime({
       catalog,
       harness,
       store,
@@ -1943,7 +2420,7 @@ describe("eval runtime orchestration", () => {
     });
     await expect(restoredRuntime.getSampling(run.samplingIds[0]!)).resolves.toMatchObject({
       execution: { status: "succeeded" },
-      subjectSubmissionId: expect.any(String),
+      subjectChatId: expect.any(String),
     });
     await expect(restoredRuntime.getSampling(run.samplingIds[0]!)).resolves.not.toHaveProperty("sample");
   });
@@ -1951,12 +2428,12 @@ describe("eval runtime orchestration", () => {
   it("restarts an evaluator submission without creating another evaluator agent", async () => {
     const harness = makeHarness();
     vi.mocked(harness.submitAgent).mockResolvedValueOnce(makeSubmission()).mockResolvedValueOnce({
+      submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
       error: "temporary evaluator failure",
     });
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1968,9 +2445,14 @@ describe("eval runtime orchestration", () => {
     const evaluation = await runtime.evaluate(
       evaluateRequest(execution.samplingIds, EVALUATION_CONFIG_RETRY_ONE_ID),
     );
-    await expect(waitForTerminal(runtime, evaluation.runId)).resolves.toMatchObject({
-      status: "succeeded",
-    });
+    const snapshot = await waitForTerminal(runtime, evaluation.runId);
+    expect(snapshot.status).toBe("succeeded");
+    const evaluator = await runtime.getEvaluation(snapshot.evaluationIds[0]!);
+    const submissionIds = evaluator.attempts.map((attempt) => attempt.submissionId);
+    expect(submissionIds).toHaveLength(2);
+    expect(submissionIds[0]).toBe("submission-1");
+    expect(submissionIds[1]).toBeDefined();
+    expect(submissionIds[1]).not.toBe(submissionIds[0]);
     expect(harness.ensureAgent).toHaveBeenCalledTimes(2);
     expect(harness.restartAgent).toHaveBeenCalledTimes(1);
   });
@@ -1980,13 +2462,13 @@ describe("eval runtime orchestration", () => {
     const submitAgent = vi.mocked(harness.submitAgent);
     submitAgent
       .mockResolvedValueOnce({
+        submissionId: "submission-1",
         status: "failed",
-        normalizedStatus: "failed",
         retryable: true,
         error: "temporary upstream failure",
       })
       .mockResolvedValueOnce(makeSubmission());
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -1998,22 +2480,28 @@ describe("eval runtime orchestration", () => {
 
     expect(snapshot.status).toBe("succeeded");
     expect(run.samplingIds).toHaveLength(1);
+    const sampling = await runtime.getSampling(run.samplingIds[0]!);
+    const submissionIds = sampling.executionAttempts.map((attempt) => attempt.submissionId);
+    expect(submissionIds).toHaveLength(2);
+    expect(submissionIds[0]).toBe("submission-1");
+    expect(submissionIds[1]).toBeDefined();
+    expect(submissionIds[1]).not.toBe(submissionIds[0]);
     expect(harness.restartAgent).toHaveBeenCalledTimes(1);
   });
 
   it("reuses the restart idempotency key when the restart response is lost", async () => {
     const harness = makeHarness();
     vi.mocked(harness.submitAgent).mockResolvedValueOnce({
+      submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
       error: "temporary upstream failure",
     });
     vi.mocked(harness.restartAgent)
       .mockRejectedValueOnce(new Error("connection lost after restart"))
-      .mockResolvedValueOnce(makeSubmission());
+      .mockResolvedValueOnce(makeSubmission("completed", "submission-2"));
     vi.mocked(harness.inspectAgentOperation).mockResolvedValueOnce(null);
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -2032,26 +2520,29 @@ describe("eval runtime orchestration", () => {
     expect(harness.inspectAgentOperation).toHaveBeenCalledWith(expect.objectContaining({
       idempotencyKey: firstCall?.idempotencyKey,
     }));
+    const sampling = await runtime.getSampling(run.samplingIds[0]!);
+    expect(sampling.executionAttempts.map((attempt) => attempt.submissionId))
+      .toEqual(["submission-1", "submission-2"]);
   });
 
   it("creates a new restart key only after the previous key is confirmed failed", async () => {
     const harness = makeHarness();
     vi.mocked(harness.submitAgent).mockResolvedValueOnce({
+      submissionId: "submission-1",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
       error: "temporary upstream failure",
     });
     vi.mocked(harness.restartAgent)
       .mockRejectedValueOnce(new Error("connection lost after restart"))
-      .mockResolvedValueOnce(makeSubmission());
+      .mockResolvedValueOnce(makeSubmission("completed", "submission-3"));
     vi.mocked(harness.inspectAgentOperation).mockResolvedValueOnce({
+      submissionId: "submission-2",
       status: "failed",
-      normalizedStatus: "failed",
       retryable: true,
       error: "restart was rejected by the agent",
     });
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -2067,14 +2558,19 @@ describe("eval runtime orchestration", () => {
     const firstCall = vi.mocked(harness.restartAgent).mock.calls[0]?.[0];
     const secondCall = vi.mocked(harness.restartAgent).mock.calls[1]?.[0];
     expect(firstCall?.idempotencyKey).not.toBe(secondCall?.idempotencyKey);
+    const sampling = await runtime.getSampling(run.samplingIds[0]!);
+    expect(sampling.executionAttempts.map((attempt) => attempt.submissionId))
+      .toEqual(["submission-1", "submission-2", "submission-3"]);
   });
 
   it("reconciles an uncertain submission before retrying", async () => {
     const harness = makeHarness();
     vi.mocked(harness.submitAgent).mockRejectedValueOnce(new Error("connection lost after submit"));
+    vi.mocked(harness.inspectAgentOperation)
+      .mockResolvedValueOnce(makeSubmission("completed", "submission-1"));
     vi.mocked(harness.collectExecution)
       .mockRejectedValueOnce(new Error("temporary artifact fetch failure"));
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -2089,12 +2585,14 @@ describe("eval runtime orchestration", () => {
     expect(harness.submitAgent).toHaveBeenCalledTimes(1);
     expect(harness.restartAgent).not.toHaveBeenCalled();
     expect(harness.inspectAgentOperation).toHaveBeenCalledTimes(1);
+    expect((await runtime.getSampling(run.samplingIds[0]!)).executionAttempts[0]!.submissionId)
+      .toBe("submission-1");
     expect(harness.collectExecution).toHaveBeenCalledTimes(2);
   });
 
   it("chains execution and evaluation with separate harness stages", async () => {
     const harness = makeHarness();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(),
       harness,
       store: makeStore(),
@@ -2119,8 +2617,8 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => {
       if (handle.role === "subject" && subjectSubmissionCount++ === 0) {
         return {
+          submissionId: "submission-1",
           status: "failed",
-          normalizedStatus: "failed",
           retryable: false,
           error: "subject execution failed",
         };
@@ -2151,7 +2649,7 @@ describe("eval runtime orchestration", () => {
       };
     });
 
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog([
         makeSample("sample-1"),
         makeSample("sample-2"),
@@ -2201,6 +2699,487 @@ describe("eval runtime orchestration", () => {
   });
 });
 
+describe("Project Run stop", () => {
+  function stoppedRun() {
+    const store = makeStore();
+    const catalog = makeCatalog();
+    const harness = makeHarness();
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog,
+      configResolver: makeConfigResolver(), store,
+    });
+    const savedGetRun = store.getRun.bind(store);
+    store.getRun = async (runId) => {
+      const record = await savedGetRun(runId);
+      return record ? { ...record, stopRequested: true } : null;
+    };
+    const resumer = createEvalRunResumer({
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store, onError: vi.fn(),
+    });
+    return { store, harness, admission, resumer };
+  }
+
+  it("cancels an unstarted Pipeline without dispatching either phase", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const handle = await admission.pipeline(pipelineRequest("stop-queued-pipeline"));
+    await resumer.stop(handle.runId);
+    const run = (await store.getRun(handle.runId))!;
+    const sampling = (await store.getSampling(handle.samplingIds[0]!))!;
+    const evaluation = (await store.getEvaluation(run.evaluationIds[0]!))!;
+    expect(sampling.execution.status).toBe("cancelled");
+    expect(evaluation.status.status).toBe("cancelled");
+    expect(toRunSnapshot({ ...run, stopFinalized: true }, [sampling], [evaluation])).toMatchObject({
+      stopRequested: true, stopFinalized: true, status: "cancelled",
+    });
+    expect(harness.ensureAgent).not.toHaveBeenCalled();
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+  });
+
+  it("reports an accepted stop as cancelled even if the last stage finished naturally", async () => {
+    const { store, admission } = stoppedRun();
+    const handle = await admission.start(startRequest("stop-natural-completion-race"));
+    const run = (await store.getRun(handle.runId))!;
+    const queued = (await store.getSampling(handle.samplingIds[0]!))!;
+    const succeeded: SamplingState = { ...queued, execution: { status: "succeeded" } };
+    await store.updateSampling(succeeded, queued);
+    expect(toRunSnapshot({ ...run, stopFinalized: true }, [succeeded], [])).toMatchObject({
+      stopRequested: true, stopFinalized: true, status: "cancelled",
+    });
+  });
+
+  it("leaves a blocked submission for stop cleanup without inventing resource facts", async () => {
+    const store = makeStore();
+    const catalog = makeCatalog();
+    const harness = makeHarness();
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog, configResolver: makeConfigResolver(), store,
+    });
+    const handle = await admission.start(startRequest("stop-before-submission"));
+    const originalGate = store.withRunDispatchGate.bind(store);
+    const originalGetRun = store.getRun.bind(store);
+    let calls = 0;
+    let stopped = false;
+    store.withRunDispatchGate = async (runId, dispatch) => {
+      calls += 1;
+      if (calls === 3) {
+        stopped = true;
+        throw new RuntimeRunStoppedError(runId);
+      }
+      return originalGate(runId, dispatch);
+    };
+    store.getRun = async (runId) => {
+      const run = await originalGetRun(runId);
+      return run && stopped ? { ...run, stopRequested: true } : run;
+    };
+    const resumer = createEvalRunResumer({
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store,
+    });
+
+    await resumer.resume(handle.runId);
+    const beforeCleanup = (await store.getSampling(handle.samplingIds[0]!))!;
+    expect(stopped).toBe(true);
+    expect(beforeCleanup.execution.status).toBe("starting");
+    expect(beforeCleanup.executionAttempts[0]?.resources?.status).toBe("pending");
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect(harness.collectAgentResources).not.toHaveBeenCalled();
+
+    await resumer.stop(handle.runId);
+    const final = (await store.getSampling(handle.samplingIds[0]!))!;
+    expect(final.execution.status).toBe("cancelled");
+    expect(final.executionAttempts[0]).toMatchObject({ status: "cancelled" });
+    expect(final.executionAttempts[0]?.resources).toBeUndefined();
+  });
+
+  it("cancels a stage when SP rejects an in-flight submission after stop", async () => {
+    const store = makeStore();
+    const catalog = makeCatalog();
+    const harness = makeHarness();
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog, configResolver: makeConfigResolver(), store,
+    });
+    const handle = await admission.start(startRequest("stop-sp-latch-race"));
+    let stopped = false;
+    vi.mocked(harness.submitAgent).mockImplementation(async () => {
+      stopped = true;
+      throw Object.assign(new Error("SP rejected the stopped Chat"), { retryable: false, status: 409 });
+    });
+    const originalGetRun = store.getRun.bind(store);
+    store.getRun = async (runId) => {
+      const run = await originalGetRun(runId);
+      return run && stopped ? { ...run, stopRequested: true } : run;
+    };
+    const resumer = createEvalRunResumer({
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store,
+    });
+
+    await resumer.resume(handle.runId);
+    const beforeCleanup = (await store.getSampling(handle.samplingIds[0]!))!;
+    expect(beforeCleanup.execution.status).toBe("failed");
+    expect(beforeCleanup.executionAttempts[0]?.submissionId).toBeUndefined();
+
+    await resumer.stop(handle.runId);
+    const final = (await store.getSampling(handle.samplingIds[0]!))!;
+    expect(final.execution.status).toBe("cancelled");
+    expect(final.executionAttempts[0]).toMatchObject({ status: "cancelled" });
+    expect(final.executionAttempts[0]?.resources).toBeUndefined();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("cancels an Evaluator rejected by the stopped SP Chat latch", async () => {
+    const store = makeStore();
+    const catalog = makeCatalog();
+    const harness = makeHarness();
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog, configResolver: makeConfigResolver(), store,
+    });
+    const execution = await admission.start(startRequest("stop-evaluator-seed"));
+    const samplingId = execution.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    await store.updateSampling({
+      ...queued,
+      subjectChatId: "subject-chat-1",
+      execution: { status: "succeeded" },
+      artifacts: [{ artifactId: "subject-file", kind: "file", path: "/subject.txt" }],
+      trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
+    }, queued);
+    const handle = await admission.evaluate(evaluateRequest([samplingId], EVALUATION_CONFIG_ID, "stop-evaluator-latch"));
+    let stopped = false;
+    vi.mocked(harness.submitAgent).mockImplementation(async () => {
+      stopped = true;
+      throw Object.assign(new Error("SP rejected the stopped Chat"), { retryable: false, status: 409 });
+    });
+    const originalGetRun = store.getRun.bind(store);
+    store.getRun = async (runId) => {
+      const run = await originalGetRun(runId);
+      return run && stopped ? { ...run, stopRequested: true } : run;
+    };
+    const resumer = createEvalRunResumer({
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store,
+    });
+
+    await resumer.resume(handle.runId);
+    const run = (await store.getRun(handle.runId))!;
+    const beforeCleanup = (await store.getEvaluation(run.evaluationIds[0]!))!;
+    expect(beforeCleanup.status.status).toBe("failed");
+    expect(beforeCleanup.attempts[0]?.submissionId).toBeUndefined();
+
+    await resumer.stop(handle.runId);
+    const final = (await store.getEvaluation(run.evaluationIds[0]!))!;
+    expect(final.status.status).toBe("cancelled");
+    expect(final.attempts[0]).toMatchObject({ status: "cancelled" });
+    expect(final.attempts[0]?.resources).toBeUndefined();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("cancels a failed Subject creation when the SP Chat does not exist", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const handle = await admission.start(startRequest("stop-missing-subject-chat"));
+    const samplingId = handle.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    await store.updateSampling({
+      ...queued, subjectChatId: "missing-subject-chat",
+      execution: { status: "failed", lastError: "Chat creation failed" },
+      executionAttempts: [{
+        executionAttemptId: "attempt-before-chat", samplingId,
+        attemptNumber: 1, status: "failed", completedAt: "2026-10-14T00:00:00.000Z",
+      }],
+    }, queued);
+    vi.mocked(harness.inspectAgentOperation).mockRejectedValue(
+      new AgentHandleNotFoundError("missing-subject-chat"),
+    );
+
+    await resumer.stop(handle.runId);
+
+    const final = (await store.getSampling(samplingId))!;
+    expect(final.execution.status).toBe("cancelled");
+    expect(final.executionAttempts[0]?.status).toBe("cancelled");
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+  });
+
+  it("cancels a failed Evaluator creation when its SP Chat does not exist", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const execution = await admission.start(startRequest("stop-missing-evaluator-seed"));
+    const samplingId = execution.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    await store.updateSampling({
+      ...queued,
+      subjectChatId: "subject-chat-1", execution: { status: "succeeded" },
+      artifacts: [{ artifactId: "subject-file", kind: "file", path: "/subject.txt" }],
+      trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
+    }, queued);
+    const handle = await admission.evaluate(evaluateRequest([samplingId], EVALUATION_CONFIG_ID, "stop-missing-evaluator-chat"));
+    const run = (await store.getRun(handle.runId))!;
+    const evaluationId = run.evaluationIds[0]!;
+    const initial = (await store.getEvaluation(evaluationId))!;
+    await store.updateEvaluation({
+      ...initial, chatId: "missing-evaluator-chat",
+      status: { status: "failed", lastError: "Chat creation failed" },
+      attempts: [{
+        evaluationAttemptId: "attempt-before-chat", evaluationId,
+        attemptNumber: 1, status: "failed", completedAt: "2026-10-14T00:00:00.000Z",
+      }],
+    }, initial);
+    vi.mocked(harness.inspectAgentOperation).mockRejectedValue(
+      new AgentHandleNotFoundError("missing-evaluator-chat"),
+    );
+
+    await resumer.stop(handle.runId);
+
+    const final = (await store.getEvaluation(evaluationId))!;
+    expect(final.status.status).toBe("cancelled");
+    expect(final.attempts[0]?.status).toBe("cancelled");
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+  });
+
+  it("does not erase a saved Submission ID when its SP Chat is missing", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const handle = await admission.start(startRequest("stop-missing-claimed-submission"));
+    const samplingId = handle.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    const claimed: SamplingState = {
+      ...queued, subjectChatId: "missing-claimed-chat",
+      execution: { status: "starting" },
+      executionAttempts: [{
+        executionAttemptId: "claimed-attempt", samplingId, attemptNumber: 1,
+        submissionId: "claimed-submission", status: "running",
+      }],
+    };
+    await store.updateSampling(claimed, queued);
+    vi.mocked(harness.inspectAgentOperation).mockRejectedValue(
+      new AgentHandleNotFoundError("missing-claimed-chat"),
+    );
+
+    await expect(resumer.stop(handle.runId)).rejects.toBeInstanceOf(AggregateError);
+    expect((await store.getSampling(samplingId))?.executionAttempts[0]?.submissionId)
+      .toBe("claimed-submission");
+  });
+
+  it("interrupts a live Subject and preserves its artifacts, trajectory and resource facts", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const handle = await admission.start(startRequest("stop-running-subject"));
+    const samplingId = handle.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    const active: SamplingState = {
+      ...queued, subjectChatId: "subject-chat-1", execution: { status: "running" },
+      executionAttempts: [{
+        executionAttemptId: "attempt-1", samplingId, attemptNumber: 1,
+        status: "running", resources: { status: "pending", scope: {
+          chatId: "subject-chat-1", idempotencyKey: `execution:${samplingId}`,
+        } },
+      }],
+    };
+    await store.updateSampling(active, queued);
+    vi.mocked(harness.stopAgent).mockResolvedValue();
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
+      submissionId: "submission-1", status: "interrupted",
+      retryable: false, error: "Evaluation Run stopped",
+    });
+    await resumer.stop(handle.runId);
+    const result = (await store.getSampling(samplingId))!;
+    expect(result.execution.status).toBe("cancelled");
+    expect(result.artifacts).toHaveLength(1);
+    expect(result.trajectory?.source).toBe("subject");
+    expect(result.executionAttempts[0]).toMatchObject({
+      submissionId: "submission-1", status: "interrupted", completedAt: expect.any(String),
+      resources: { status: "collected" },
+    });
+    expect(harness.stopAgent).toHaveBeenCalledWith({ handle: expect.objectContaining({ chatId: "subject-chat-1" }) });
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("interrupts a live Evaluator and keeps its result and resource snapshot", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const execution = await admission.start(startRequest("stop-evaluation-seed"));
+    const samplingId = execution.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    const succeeded: SamplingState = {
+      ...queued, subjectChatId: "subject-chat-1", execution: { status: "succeeded" },
+      artifacts: [{ artifactId: "subject-file", kind: "file", path: "/subject.txt" }],
+      trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
+    };
+    await store.updateSampling(succeeded, queued);
+    const handle = await admission.evaluate(evaluateRequest([samplingId], EVALUATION_CONFIG_ID, "stop-evaluation"));
+    const run = (await store.getRun(handle.runId))!;
+    const evaluationId = run.evaluationIds[0]!;
+    const initial = (await store.getEvaluation(evaluationId))!;
+    const active: EvaluationRecord = {
+      ...initial, chatId: "evaluation-chat-1", status: { status: "running" },
+      attempts: [{
+        evaluationAttemptId: "evaluation-attempt-1", evaluationId,
+        attemptNumber: 1, status: "running", resources: { status: "pending", scope: {
+          chatId: "evaluation-chat-1", idempotencyKey: `evaluation:${samplingId}`,
+        } },
+      }],
+    };
+    await store.updateEvaluation(active, initial);
+    vi.mocked(harness.stopAgent).mockResolvedValue();
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
+      submissionId: "evaluation-submission-1", status: "interrupted",
+      retryable: false, error: "Evaluation Run stopped",
+    });
+    await resumer.stop(handle.runId);
+    const result = (await store.getEvaluation(evaluationId))!;
+    expect(result.status.status).toBe("cancelled");
+    expect(result.output?.artifacts).toHaveLength(1);
+    expect(result.output?.trajectory.source).toBe("evaluator");
+    expect(result.attempts[0]).toMatchObject({
+      submissionId: "evaluation-submission-1", status: "interrupted", completedAt: expect.any(String),
+      resources: { status: "collected" },
+    });
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("does not restart a retryable Submission after the active Run receives a stop signal", async () => {
+    const store = makeStore();
+    const catalog = makeCatalog();
+    const harness = makeHarness();
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog, configResolver: makeConfigResolver(), store,
+    });
+    const handle = await admission.start(startRequest("stop-active-retry"));
+    vi.mocked(harness.submitAgent).mockResolvedValue({
+      submissionId: "active-submission", status: "running",
+    });
+    let finishWait!: (submission: AgentSubmission) => void;
+    const waiting = new Promise<AgentSubmission>((resolve) => { finishWait = resolve; });
+    vi.mocked(harness.waitForSubmission).mockImplementation(async () => waiting);
+    const resumer = createEvalRunResumer({
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store,
+    });
+    const controller = new AbortController();
+    const task = resumer.resume(handle.runId, controller.signal);
+    await vi.waitFor(() => expect(harness.waitForSubmission).toHaveBeenCalledOnce());
+    controller.abort();
+    finishWait({ submissionId: "active-submission", status: "interrupted", retryable: true, error: "Run stopped" });
+    await task;
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("exits a stalled terminal wait on stop without marking raw resources failed", async () => {
+    const store = makeStore();
+    const catalog = makeCatalog();
+    const harness = makeHarness();
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog, configResolver: makeConfigResolver(), store,
+    });
+    const handle = await admission.start(startRequest("stop-stalled-terminal-wait"));
+    vi.mocked(harness.submitAgent).mockResolvedValue({
+      submissionId: "stalled-submission", status: "running",
+    });
+    vi.mocked(harness.waitForSubmission).mockImplementation(async () => new Promise(() => undefined));
+    const resumer = createEvalRunResumer({
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store,
+    });
+    const controller = new AbortController();
+    const task = resumer.resume(handle.runId, controller.signal);
+    await vi.waitFor(() => expect(harness.waitForSubmission).toHaveBeenCalledOnce());
+
+    controller.abort();
+    await task;
+
+    const sampling = (await store.getSampling(handle.samplingIds[0]!))!;
+    expect(sampling.execution.status).toBe("starting");
+    expect(sampling.executionAttempts[0]?.resources?.status).toBe("pending");
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("leaves a hung SP preparation when the Worker signals stop", async () => {
+    const store = makeStore();
+    const catalog = makeCatalog();
+    const harness = makeHarness();
+    const admission = createEvalRunAdmission({
+      sourceCommit: SOURCE_COMMIT, catalog, configResolver: makeConfigResolver(), store,
+    });
+    const handle = await admission.start(startRequest("stop-hung-preparation"));
+    vi.mocked(harness.materializeInitialData).mockImplementation(async () => new Promise(() => undefined));
+    const resumer = createEvalRunResumer({
+      getEvaluationOutputSchema: catalog.getEvaluationOutputSchema, getSamples: catalog.getSamples, harness, store,
+    });
+    const controller = new AbortController();
+    const task = resumer.resume(handle.runId, controller.signal);
+    await vi.waitFor(() => expect(harness.materializeInitialData).toHaveBeenCalledOnce());
+    const originalGetRun = store.getRun.bind(store);
+    store.getRun = async (runId) => {
+      const run = await originalGetRun(runId);
+      return run ? { ...run, stopRequested: true } : null;
+    };
+    controller.abort();
+    await task;
+    await resumer.stop(handle.runId);
+
+    expect((await store.getSampling(handle.samplingIds[0]!))?.execution.status).toBe("cancelled");
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+  });
+
+  it("keeps a stopped Subject pending until its complete evidence can be saved", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const handle = await admission.start(startRequest("stop-evidence-retry"));
+    const samplingId = handle.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    const pending: SamplingState = {
+      ...queued, subjectChatId: "evidence-chat", execution: { status: "retrying", evidencePending: true },
+      executionAttempts: [{
+        executionAttemptId: "terminal-attempt", samplingId, attemptNumber: 1,
+        submissionId: "terminal-submission", status: "interrupted", completedAt: "2026-10-14T00:00:00.000Z",
+      }],
+    };
+    await store.updateSampling(pending, queued);
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
+      submissionId: "terminal-submission", status: "interrupted",
+    });
+    vi.mocked(harness.collectExecution).mockRejectedValueOnce(new Error("evidence unavailable"));
+    await resumer.stop(handle.runId);
+    expect((await store.getSampling(samplingId))?.execution).toMatchObject({
+      status: "retrying", evidencePending: true,
+    });
+    await resumer.stop(handle.runId);
+    const completed = (await store.getSampling(samplingId))!;
+    expect(completed.execution.status).toBe("cancelled");
+    expect(completed.artifacts).toHaveLength(1);
+    expect(completed.trajectory?.source).toBe("subject");
+  });
+
+  it("confirms saved evidence after the store loses its write response", async () => {
+    const { store, harness, admission, resumer } = stoppedRun();
+    const handle = await admission.start(startRequest("stop-evidence-write-response-lost"));
+    const samplingId = handle.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    const interrupted: SamplingState = {
+      ...queued,
+      subjectChatId: "interrupted-chat",
+      execution: { status: "failed", lastError: "Submission interrupted" },
+      executionAttempts: [{
+        executionAttemptId: "interrupted-attempt", samplingId, attemptNumber: 1,
+        submissionId: "interrupted-submission", status: "interrupted",
+        completedAt: "2026-10-14T00:00:00.000Z",
+      }],
+    };
+    await store.updateSampling(interrupted, queued);
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
+      submissionId: "interrupted-submission", status: "interrupted",
+    });
+    const updateSampling = store.updateSampling.bind(store);
+    let lostResponse = false;
+    store.updateSampling = async (next, expected) => {
+      await updateSampling(next, expected);
+      if (!lostResponse && next.artifacts && next.trajectory) {
+        lostResponse = true;
+        throw new Error("write response lost after commit");
+      }
+    };
+
+    await resumer.stop(handle.runId);
+
+    const saved = (await store.getSampling(samplingId))!;
+    expect(lostResponse).toBe(true);
+    expect(saved.execution.status).toBe("cancelled");
+    expect(saved.artifacts).toHaveLength(1);
+    expect(saved.trajectory?.source).toBe("subject");
+  });
+});
+
 describe("raw resource persistence", () => {
   it("persists scopes before dispatch and saves unchanged subject/evaluator records before output collection", async () => {
     const store = makeStore();
@@ -2212,7 +3191,7 @@ describe("raw resource persistence", () => {
         : (await store.listEvaluations(handle.samplingId))[0]!.attempts;
       expect(attempts[0]!.resources).toEqual({
         status: "pending",
-        scope: { submissionId: handle.submissionId, idempotencyKey },
+        scope: { chatId: handle.chatId, idempotencyKey },
       });
       return makeSubmission();
     });
@@ -2232,7 +3211,7 @@ describe("raw resource persistence", () => {
         trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/eval/trace" },
       };
     });
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store });
     const run = await runtime.pipeline(pipelineRequest("raw-pipeline"));
     const completed = await waitForTerminal(runtime, run.runId);
 
@@ -2242,9 +3221,11 @@ describe("raw resource persistence", () => {
     const evaluation = await runtime.getEvaluation(completed.evaluationIds[0]!);
     expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot: captured[0] });
     expect(evaluation.attempts[0]!.resources).toEqual({ status: "collected", snapshot: captured[1] });
-    expect(captured[0]!.scope.submissionId).toBe(sampling.subjectSubmissionId);
-    expect(captured[1]!.scope.submissionId).toBe(evaluation.submissionId);
-    expect(captured[1]!.scope.submissionId).not.toBe(captured[0]!.scope.submissionId);
+    expect(captured[0]!.scope.chatId).toBe(sampling.subjectChatId);
+    expect(captured[1]!.scope.chatId).toBe(evaluation.chatId);
+    expect(captured[1]!.scope.chatId).not.toBe(captured[0]!.scope.chatId);
+    expect(captured[0]!.scope.submissionId).toBe(sampling.executionAttempts[0]!.submissionId);
+    expect(captured[1]!.scope.submissionId).toBe(evaluation.attempts[0]!.submissionId);
     expect(vi.mocked(harness.collectAgentResources).mock.invocationCallOrder[0]!)
       .toBeLessThan(vi.mocked(collectExecution).mock.invocationCallOrder[0]!);
     expect(vi.mocked(harness.collectAgentResources).mock.invocationCallOrder[1]!)
@@ -2255,13 +3236,13 @@ describe("raw resource persistence", () => {
     const store = makeStore();
     const harness = makeHarness();
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => makeResources(input));
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store });
     const run = await runtime.pipeline(pipelineRequest("cold-raw-query"));
     const completed = await waitForTerminal(runtime, run.runId);
     const originalSampling = await store.getSampling(run.samplingIds[0]!);
     const originalEvaluation = await store.getEvaluation(completed.evaluationIds[0]!);
     const coldHarness = makeHarness();
-    const cold = createEvalRuntime({ catalog: makeCatalog(), harness: coldHarness, store });
+    const cold = createAutoResumingRuntime({ catalog: makeCatalog(), harness: coldHarness, store });
 
     const sampling = await cold.getSampling(run.samplingIds[0]!);
     const evaluation = await cold.getEvaluation(completed.evaluationIds[0]!);
@@ -2286,21 +3267,24 @@ describe("raw resource persistence", () => {
     const harness = makeHarness();
     const captured: AgentResourceSnapshot[] = [];
     vi.mocked(harness.submitAgent).mockResolvedValue({
-      status, normalizedStatus: status, retryable: false, error: `subject ${status}`,
+      submissionId: "submission-1",
+      status, retryable: false, error: `subject ${status}`,
     });
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
       const resources = makeResources(input);
       captured.push(resources);
       return resources;
     });
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
     const run = await runtime.start(startRequest(`raw-subject-${status}`));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
     expect(sampling.execution.lastError).toBe(`subject ${status}`);
     expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot: captured[0] });
-    expect(harness.collectExecution).not.toHaveBeenCalled();
+    expect(harness.collectExecution).toHaveBeenCalledOnce();
+    expect(sampling.artifacts).toEqual([{ artifactId: "artifact-1", kind: "project", path: "/eval/output" }]);
+    expect(sampling.trajectory).toEqual({ trajectoryId: "trajectory-1", source: "subject", path: "/eval/trajectory.jsonl" });
     expect(harness.restartAgent).not.toHaveBeenCalled();
   });
 
@@ -2309,7 +3293,8 @@ describe("raw resource persistence", () => {
     const captured: AgentResourceSnapshot[] = [];
     vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => (
       handle.role === "subject" ? makeSubmission() : {
-        status, normalizedStatus: status, retryable: false, error: `evaluator ${status}`,
+        submissionId: "submission-1",
+        status, retryable: false, error: `evaluator ${status}`,
       }
     ));
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
@@ -2317,7 +3302,7 @@ describe("raw resource persistence", () => {
       captured.push(resources);
       return resources;
     });
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
     const run = await runtime.pipeline(pipelineRequest(`raw-evaluator-${status}`));
     const completed = await waitForTerminal(runtime, run.runId);
 
@@ -2337,7 +3322,8 @@ describe("raw resource persistence", () => {
     const captured: AgentResourceSnapshot[] = [];
     vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => (
       handle.role !== role ? makeSubmission() : {
-        status: "failed", normalizedStatus: "failed", retryable: true, error: "temporary LLM failure", failureKind: "llm",
+        submissionId: "submission-1",
+        status: "failed", retryable: true, error: "temporary LLM failure", failureKind: "llm",
       }
     ));
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
@@ -2352,7 +3338,7 @@ describe("raw resource persistence", () => {
       expect(attempts[0]!.resources?.status).toBe("collected");
       return makeSubmission();
     });
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store, sleep: async () => undefined });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store, sleep: async () => undefined });
     const execution = await runtime.start(startRequest("raw-before-restart", role === "subject" ? EXECUTION_CONFIG_RETRY_ONE_ID : EXECUTION_CONFIG_ID));
     await waitForTerminal(runtime, execution.runId);
     const run = role === "subject" ? execution : await runtime.evaluate(evaluateRequest(execution.samplingIds, EVALUATION_CONFIG_RETRY_ONE_ID));
@@ -2387,7 +3373,7 @@ describe("raw resource persistence", () => {
       }
       await update(record, expected);
     });
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(), harness, store, sleep: async () => undefined,
       createRetryController: makeRetryControllerFactory({ resources: 1, collection: 1, persistence: 1 }),
     });
@@ -2407,7 +3393,7 @@ describe("raw resource persistence", () => {
   it("does not turn successful execution/evaluation into failure when resource reads are exhausted", async () => {
     const harness = makeHarness();
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("resource source unavailable"));
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(), harness, store: makeStore(), sleep: async () => undefined,
       createRetryController: makeRetryControllerFactory({ resources: 1 }),
     });
@@ -2431,10 +3417,11 @@ describe("raw resource persistence", () => {
   it("preserves the original Agent failure when its resource read also fails", async () => {
     const harness = makeHarness();
     vi.mocked(harness.submitAgent).mockResolvedValue({
-      status: "failed", normalizedStatus: "failed", retryable: false, error: "original agent failure",
+      submissionId: "submission-1",
+      status: "failed", retryable: false, error: "original agent failure",
     });
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("resource source unavailable"));
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
     const run = await runtime.start(startRequest("agent-and-resources-failed"));
     await waitForTerminal(runtime, run.runId);
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
@@ -2449,9 +3436,9 @@ describe("raw resource persistence", () => {
     const harness = makeHarness();
     const decide = vi.fn(async () => ({ shouldRetry: true, backoffMs: 0 }));
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => ({
-      ...makeResources(input), scope: { submissionId: "different-agent", idempotencyKey: input.idempotencyKey },
+      ...makeResources(input), scope: { chatId: input.handle.chatId, submissionId: "different-submission", idempotencyKey: input.idempotencyKey },
     }));
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(), harness, store: makeStore(), createRetryController: () => ({ decide }),
     });
     const run = await runtime.start(startRequest("wrong-resource-scope"));
@@ -2471,7 +3458,7 @@ describe("raw resource persistence", () => {
     } else {
       vi.mocked(harness.materializeInitialData).mockRejectedValue(new Error("initialization failed"));
     }
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
     const run = await runtime.start(startRequest(`no-resources-before-${operation}`));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
 
@@ -2482,7 +3469,7 @@ describe("raw resource persistence", () => {
 
   it("exposes pending collection while awaiting a pushed terminal state", async () => {
     const harness = makeHarness();
-    vi.mocked(harness.submitAgent).mockResolvedValue({ status: "running", normalizedStatus: "running" });
+    vi.mocked(harness.submitAgent).mockResolvedValue({ submissionId: "submission-1", status: "running" });
     let release!: (submission: AgentSubmission) => void;
     let reachedWait!: () => void;
     const waiting = new Promise<void>((resolve) => { reachedWait = resolve; });
@@ -2492,14 +3479,15 @@ describe("raw resource persistence", () => {
       return terminal;
     });
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => makeResources(input));
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
     const run = await runtime.start(startRequest("pending-resources"));
     await waiting;
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
+    expect(sampling.executionAttempts[0]!.submissionId).toBe("submission-1");
     expect(sampling.executionAttempts[0]!.resources).toEqual({
       status: "pending",
-      scope: { submissionId: sampling.subjectSubmissionId, idempotencyKey: `execution:${sampling.samplingId}` },
+      scope: { chatId: sampling.subjectChatId, idempotencyKey: `execution:${sampling.samplingId}` },
     });
     expect(harness.collectAgentResources).not.toHaveBeenCalled();
     release(makeSubmission());
@@ -2513,9 +3501,9 @@ describe("raw resource persistence", () => {
       vi.mocked(harness.submitAgent).mockRejectedValue(new Error("submission response lost"));
       vi.mocked(harness.inspectAgentOperation).mockResolvedValue(null);
     } else {
-      vi.mocked(harness.submitAgent).mockResolvedValue({ status: "running", normalizedStatus: "running" });
+      vi.mocked(harness.submitAgent).mockResolvedValue({ submissionId: "submission-1", status: "running" });
       vi.mocked(harness.waitForSubmission).mockRejectedValue(new Error("status source unavailable"));
-      vi.mocked(harness.inspectAgentOperation).mockResolvedValue({ status: "running", normalizedStatus: "running" });
+      vi.mocked(harness.inspectAgentOperation).mockResolvedValue({ submissionId: "submission-1", status: "running" });
     }
     let captured!: AgentResourceSnapshot;
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
@@ -2526,12 +3514,13 @@ describe("raw resource persistence", () => {
       };
       return captured;
     });
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
     const run = await runtime.start(startRequest(`uncertain-${operation}-raw-data`));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
     expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot: captured });
+    expect(sampling.executionAttempts[0]!.submissionId).toBe(captured.scope.submissionId);
     expect(sampling.execution.lastError).toContain(operation === "submission" ? "submission response lost" : "status source unavailable");
     expect(harness.collectExecution).not.toHaveBeenCalled();
     expect(harness.restartAgent).not.toHaveBeenCalled();
@@ -2540,7 +3529,7 @@ describe("raw resource persistence", () => {
   it("keeps deliberate re-evaluations and execution raw records separate", async () => {
     const harness = makeHarness();
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => makeResources(input));
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
     const execution = await runtime.start(startRequest("raw-execution-for-reevaluation"));
     await waitForTerminal(runtime, execution.runId);
     const subjectBefore = await runtime.getSampling(execution.samplingIds[0]!);
@@ -2554,9 +3543,9 @@ describe("raw resource persistence", () => {
     expect(await runtime.getSampling(execution.samplingIds[0]!)).toEqual(subjectBefore);
     expect(await runtime.getEvaluation(firstBefore.evaluationId)).toEqual(firstBefore);
     expect(await runtime.listEvaluations(execution.samplingIds[0]!)).toEqual([firstBefore, secondEvaluation]);
-    expect(secondEvaluation.submissionId).not.toBe(firstBefore.submissionId);
-    expect(firstBefore.attempts[0]!.resources).toMatchObject({ snapshot: { scope: { submissionId: firstBefore.submissionId } } });
-    expect(secondEvaluation.attempts[0]!.resources).toMatchObject({ snapshot: { scope: { submissionId: secondEvaluation.submissionId } } });
+    expect(secondEvaluation.chatId).not.toBe(firstBefore.chatId);
+    expect(firstBefore.attempts[0]!.resources).toMatchObject({ snapshot: { scope: { chatId: firstBefore.chatId, submissionId: firstBefore.attempts[0]!.submissionId } } });
+    expect(secondEvaluation.attempts[0]!.resources).toMatchObject({ snapshot: { scope: { chatId: secondEvaluation.chatId, submissionId: secondEvaluation.attempts[0]!.submissionId } } });
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(3);
   });
 
@@ -2574,7 +3563,7 @@ describe("raw resource persistence", () => {
       await update(record, expected);
     });
     const onError = vi.fn();
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store, onError });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store, onError });
     const run = await runtime.pipeline(pipelineRequest("retain-raw-on-store-error"));
     await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
     const pending = await runtime.getRun(run.runId);
@@ -2599,23 +3588,29 @@ describe("raw resource persistence", () => {
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => makeResources(input));
     const store = makeStore();
     const update = store.updateSampling.bind(store);
+    let unavailable = true;
     vi.spyOn(store, "updateSampling").mockImplementation(async (state, expected) => {
-      if (state.executionAttempts.some((attempt) => attempt.resources?.status === "collected")) {
+      if (unavailable && state.executionAttempts.some((attempt) => attempt.resources?.status === "collected")) {
         throw new Error("raw resource persistence failed");
       }
       await update(state, expected);
     });
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store });
+    const onError = vi.fn();
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store, onError });
     const run = await runtime.start(startRequest("raw-store-failed", EXECUTION_CONFIG_RETRY_ONE_ID));
-    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
-    expect(sampling.execution.lastError).toBe("raw resource persistence failed");
+    expect((await runtime.getRun(run.runId)).status).toBe("running");
     expect(sampling.executionAttempts[0]!.status).toBe("completed");
     expect(sampling.executionAttempts[0]).not.toHaveProperty("error");
     expect(sampling.executionAttempts[0]!.resources?.status).toBe("pending");
     expect(harness.collectExecution).not.toHaveBeenCalled();
     expect(harness.restartAgent).not.toHaveBeenCalled();
+    unavailable = false;
+    await runtime.resume(run.runId);
+    expect((await runtime.getRun(run.runId)).status).toBe("succeeded");
+    expect(harness.submitAgent).toHaveBeenCalledOnce();
   });
 
   it("retains raw data when completed Agent output collection fails", async () => {
@@ -2626,15 +3621,16 @@ describe("raw resource persistence", () => {
       return captured;
     });
     vi.mocked(harness.collectExecution).mockRejectedValue(new Error("artifact read unavailable"));
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore() });
     const run = await runtime.start(startRequest("raw-before-output-failure", EXECUTION_CONFIG_RETRY_ONE_ID));
-    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
+    await expect.poll(async () => (await runtime.getSampling(run.samplingIds[0]!)).execution.evidencePending).toBe(true);
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
     expect(sampling.executionAttempts[0]!.status).toBe("completed");
     expect(sampling.executionAttempts[0]).not.toHaveProperty("error");
     expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot: captured });
     expect(sampling.execution.lastError).toContain("artifact read unavailable");
+    expect(sampling.execution.status).toBe("retrying");
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(1);
     expect(harness.restartAgent).not.toHaveBeenCalled();
   });
@@ -2644,12 +3640,13 @@ describe("raw resource persistence", () => {
     const repeatedUsage = { eventId: "original-source-id", metrics: { inputTokens: 10 }, providerSpecificField: null };
     const repeatedSettlement = { accountId: "user-1", eventId: "original-source-id", debitedUnits: 1 };
     vi.mocked(harness.submitAgent).mockResolvedValue({
-      status: "failed", normalizedStatus: "failed", retryable: true, error: "agent request failed",
+      submissionId: "submission-1",
+      status: "failed", retryable: true, error: "agent request failed",
     });
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => ({
       ...makeResources(input), usageEvents: [repeatedUsage], billingSettlements: [repeatedSettlement],
     }));
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store: makeStore(), sleep: async () => undefined });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store: makeStore(), sleep: async () => undefined });
     const run = await runtime.start(startRequest("raw-source-repeats", EXECUTION_CONFIG_RETRY_ONE_ID));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
 
@@ -2691,7 +3688,7 @@ describe("raw resource persistence", () => {
         }
       });
     }
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store });
     const execution = await runtime.start(startRequest(`lost-${role}-raw-store-response`));
     await waitForTerminal(runtime, execution.runId);
     const run = role === "subject" ? execution : await runtime.evaluate(evaluateRequest(execution.samplingIds));
@@ -2755,7 +3752,7 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
     const decide = vi.fn<RetryController["decide"]>(async ({ operation }) => ({ shouldRetry: operation === "persistence", backoffMs: 37 }));
     const sleep = vi.fn(async () => undefined);
     let tick = 0;
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(), harness, store, sleep,
       now: () => new Date(Date.UTC(2026, 9, 8, 0, 0, tick++)).toISOString(),
       createRetryController: () => ({ decide }),
@@ -2793,6 +3790,7 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
   it("keeps completion when resource persistence retries are exhausted", async () => {
     const harness = makeHarness();
     const store = makeStore();
+    const onError = vi.fn();
     if (role === "subject") {
       const update = store.updateSampling.bind(store);
       vi.spyOn(store, "updateSampling").mockImplementation(async (record, expected) => {
@@ -2810,21 +3808,28 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
         await update(record, expected);
       });
     }
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog(), harness, store, sleep: async () => undefined,
+      onError,
       createRetryController: makeRetryControllerFactory({ persistence: 1, restart: 1 }),
     });
     const run = role === "subject"
       ? await runtime.start(startRequest(`exhausted-${role}-persistence`))
       : await runtime.pipeline(pipelineRequest(`exhausted-${role}-persistence`));
-    const completed = await waitForTerminal(runtime, run.runId);
+    if (role === "subject") await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const completed = role === "subject" ? await runtime.getRun(run.runId) : await waitForTerminal(runtime, run.runId);
     const record = role === "subject"
       ? await runtime.getSampling(run.samplingIds[0]!)
       : await runtime.getEvaluation(completed.evaluationIds[0]!);
     const attempts = "executionAttempts" in record ? record.executionAttempts : record.attempts;
     const stage = "execution" in record ? record.execution : record.status;
 
-    expect(stage).toEqual({ status: "failed", lastError: "resource store unavailable" });
+    if (role === "subject") {
+      expect(completed.status).toBe("running");
+      expect(stage.status).toBe("starting");
+    } else {
+      expect(stage).toEqual({ status: "failed", lastError: "resource store unavailable" });
+    }
     expect(attempts).toHaveLength(1);
     expect(attempts[0]).toMatchObject({ status: "completed", completedAt: expect.any(String), resources: { status: "pending" } });
     expect(attempts[0]).not.toHaveProperty("error");
@@ -2836,8 +3841,10 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
   it("keeps the original failed Agent facts when resource saving fails", async () => {
     const harness = makeHarness();
     const store = makeStore();
+    const onError = vi.fn();
     vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => handle.role === role ? {
-      status: "interrupted", normalizedStatus: "interrupted", error: "original Agent interruption", retryable: false,
+      submissionId: "submission-1",
+      status: "interrupted", error: "original Agent interruption", retryable: false,
     } : makeSubmission());
     if (role === "subject") {
       const update = store.updateSampling.bind(store);
@@ -2852,16 +3859,17 @@ describe.each(["subject", "evaluator"] as const)("%s finalization", (role) => {
         await update(record, expected);
       });
     }
-    const runtime = createEvalRuntime({ catalog: makeCatalog(), harness, store });
+    const runtime = createAutoResumingRuntime({ catalog: makeCatalog(), harness, store, onError });
     const run = role === "subject"
       ? await runtime.start(startRequest(`failed-${role}-resource-persistence`))
       : await runtime.pipeline(pipelineRequest(`failed-${role}-resource-persistence`));
-    const completed = await waitForTerminal(runtime, run.runId);
+    if (role === "subject") await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const completed = role === "subject" ? await runtime.getRun(run.runId) : await waitForTerminal(runtime, run.runId);
     const attempts = role === "subject"
       ? (await runtime.getSampling(run.samplingIds[0]!)).executionAttempts
       : (await runtime.getEvaluation(completed.evaluationIds[0]!)).attempts;
 
-    expect(completed.status).toBe("failed");
+    expect(completed.status).toBe(role === "subject" ? "running" : "failed");
     expect(attempts[0]).toMatchObject({ status: "interrupted", error: "original Agent interruption", completedAt: expect.any(String) });
     expect(harness.restartAgent).not.toHaveBeenCalled();
   });
@@ -2873,7 +3881,7 @@ describe("pipeline cancellation isolation", () => {
     vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => {
       const sampling = await store.getSampling(handle.samplingId);
       return handle.role === "subject" && sampling?.sampleId !== "sample-a"
-        ? { status: "failed", normalizedStatus: "failed", retryable: false, error: "subject failed" }
+        ? { submissionId: "submission-1", status: "failed", retryable: false, error: "subject failed" }
         : makeSubmission();
     });
     return harness;
@@ -2893,7 +3901,7 @@ describe("pipeline cancellation isolation", () => {
       await update(record, expected);
     });
     const onError = vi.fn();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog([makeSample("sample-a"), makeSample("sample-b")]),
       harness, store, onError, sleep: async () => undefined,
       createRetryController: makeRetryControllerFactory({ persistence: 1 }),
@@ -2928,7 +3936,7 @@ describe("pipeline cancellation isolation", () => {
     let releaseRetry!: () => void;
     const gate = new Promise<void>((resolve) => { releaseRetry = resolve; });
     const sleep = vi.fn(async () => gate);
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog([makeSample("sample-a"), makeSample("sample-b")]), harness, store, sleep,
       createRetryController: makeRetryControllerFactory({ persistence: 1 }),
     });
@@ -2954,7 +3962,7 @@ describe("pipeline cancellation isolation", () => {
       await update(record, expected);
     });
     const onError = vi.fn();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog([makeSample("sample-a"), makeSample("sample-b")]), harness, store, onError,
       sleep: async () => undefined, createRetryController: makeRetryControllerFactory({ persistence: 1 }),
     });
@@ -2982,7 +3990,7 @@ describe("pipeline cancellation isolation", () => {
       await update(record, expected);
     });
     const onError = vi.fn();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog([makeSample("sample-a"), makeSample("sample-b")]), harness, store, onError,
     });
     const run = await runtime.pipeline(pipelineRequest("cancel-report", PIPELINE_CONFIG_CONCURRENT_ID));
@@ -3024,7 +4032,7 @@ describe("pipeline cancellation isolation", () => {
       return read(evaluationId);
     });
     const onError = vi.fn();
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog([makeSample("sample-a"), makeSample("sample-b")]), harness, store, onError,
     });
     const run = await runtime.pipeline(pipelineRequest("cancel-read-failed", PIPELINE_CONFIG_CONCURRENT_ID));
@@ -3046,7 +4054,7 @@ describe("pipeline cancellation isolation", () => {
       }
       await update(record, expected);
     });
-    const runtime = createEvalRuntime({
+    const runtime = createAutoResumingRuntime({
       catalog: makeCatalog([makeSample("sample-b"), makeSample("sample-c")]), harness, store,
     });
     const run = await runtime.pipeline(pipelineRequest("all-executions-failed", PIPELINE_CONFIG_CONCURRENT_ID));
@@ -3070,7 +4078,7 @@ describe("pipeline cancellation isolation", () => {
     });
     const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      const runtime = createEvalRuntime({
+      const runtime = createAutoResumingRuntime({
         catalog: makeCatalog([makeSample("sample-a"), makeSample("sample-b")]), harness, store,
         ...(reporter === "throwing" ? { onError: () => { throw new Error("reporter unavailable"); } } : {}),
       });
@@ -3085,10 +4093,133 @@ describe("pipeline cancellation isolation", () => {
   });
 });
 
+describe("SP Chat and Submission identities", () => {
+  it("does not create a replacement Chat when recovering an Attempt without its Chat ID", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const runtime = createRuntime({
+      catalog: makeCatalog(), harness, store, configResolver: makeConfigResolver(),
+    });
+    const run = await runtime.start(startRequest("missing-chat-on-recovery"));
+    const samplingId = run.samplingIds[0]!;
+    const original = (await store.getSampling(samplingId))!;
+    await store.updateSampling({
+      ...original,
+      execution: { status: "running" },
+      executionAttempts: [{
+        executionAttemptId: "existing-attempt", samplingId, attemptNumber: 1,
+        status: "running", startedAt: "2026-10-09T00:00:00.000Z",
+      }],
+    }, original);
+
+    await runtime.resume(run.runId);
+
+    expect((await runtime.getSampling(samplingId)).execution.status).toBe("failed");
+    expect(harness.ensureAgent).not.toHaveBeenCalled();
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+  });
+
+  it("keeps one Chat/Session while each restart receives a new Submission ID", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.submitAgent).mockResolvedValueOnce({
+      ...makeSubmission("failed", "turn-1"),
+      retryable: true,
+      failureKind: "llm",
+      error: "temporary model failure",
+    });
+    vi.mocked(harness.restartAgent).mockResolvedValueOnce(makeSubmission("completed", "turn-2"));
+    vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => makeResources(input));
+    const runtime = createAutoResumingRuntime({
+      catalog: makeCatalog(),
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+      createRetryController: makeRetryControllerFactory({ restart: 1 }),
+    });
+
+    const run = await runtime.start(startRequest("separate-chat-and-submissions", EXECUTION_CONFIG_RETRY_ONE_ID));
+    expect((await waitForTerminal(runtime, run.runId)).status).toBe("succeeded");
+
+    const sampling = await runtime.getSampling(run.samplingIds[0]!);
+    expect(sampling.subjectChatId).toEqual(expect.any(String));
+    expect(sampling.executionAttempts.map((attempt) => attempt.submissionId)).toEqual(["turn-1", "turn-2"]);
+    expect(sampling.subjectChatId).not.toBe("turn-1");
+    expect(sampling.subjectChatId).not.toBe("turn-2");
+    expect(sampling.executionAttempts.map((attempt) => (
+      attempt.resources?.status === "collected" ? attempt.resources.snapshot.scope : undefined
+    ))).toEqual([
+      { chatId: sampling.subjectChatId, submissionId: "turn-1", idempotencyKey: `execution:${sampling.samplingId}` },
+      { chatId: sampling.subjectChatId, submissionId: "turn-2", idempotencyKey: `execution:${sampling.samplingId}:restart:2` },
+    ]);
+    expect(harness.ensureAgent).toHaveBeenCalledOnce();
+    expect(harness.restartAgent).toHaveBeenCalledOnce();
+  });
+});
+
 describe("Run recovery from persisted facts", () => {
   function dormantRuntime(store: RuntimeStore, harness: Harness, configResolver = makeConfigResolver()) {
     return createRuntime({ catalog: makeCatalog(), harness, store, configResolver, sleep: async () => undefined });
   }
+
+  it("resumes a persisted Run with only Sample lookup, Store and Harness", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const admitted = dormantRuntime(store, harness);
+    const run = await admitted.start(startRequest("narrow-run-resumer"));
+    const resumer = createEvalRunResumer({
+      getSamples: makeCatalog().getSamples,
+      getEvaluationOutputSchema: makeCatalog().getEvaluationOutputSchema,
+      harness,
+      store,
+    });
+    expect("start" in resumer).toBe(false);
+    expect("listProjects" in resumer).toBe(false);
+
+    await resumer.resume(run.runId);
+
+    expect((await store.getSampling(run.samplingIds[0]!))?.execution.status).toBe("succeeded");
+    expect(harness.submitAgent).toHaveBeenCalledOnce();
+  });
+
+  it("collects failed Subject evidence after a crash without resubmitting its terminal Submission", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const admitted = dormantRuntime(store, harness);
+    const run = await admitted.start(startRequest("failed-evidence-crash-gap"));
+    const samplingId = run.samplingIds[0]!;
+    const chatId = "subject-after-crash";
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, chatId, samplingId, role: "subject", framework: "sp" };
+    const idempotencyKey = `execution:${samplingId}`;
+    const original = (await store.getSampling(samplingId))!;
+    await store.updateSampling({
+      ...original,
+      subjectChatId: chatId,
+      execution: { status: "starting" },
+      executionAttempts: [{
+        executionAttemptId: "failed-before-crash", samplingId, attemptNumber: 1,
+        submissionId: "submission-1", status: "failed", error: "agent task failed",
+        completedAt: "2026-10-14T00:00:00.000Z",
+        resources: { status: "collected", snapshot: makeResources({ handle, idempotencyKey }) },
+      }],
+    }, original);
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
+      submissionId: "submission-1", status: "failed",
+      error: "agent task failed", retryable: false,
+    });
+    vi.mocked(harness.collectExecution).mockResolvedValue({
+      samplingId, status: "failed",
+      artifacts: [{ artifactId: "partial", kind: "project", path: "/eval/partial" }],
+      trajectory: { trajectoryId: "complete-trace", source: "subject", path: "/eval/trace.jsonl" },
+    });
+
+    await createEvalRunResumer({ getSamples: makeCatalog().getSamples,
+      getEvaluationOutputSchema: makeCatalog().getEvaluationOutputSchema, harness, store }).resume(run.runId);
+
+    expect((await store.getSampling(samplingId))?.execution).toEqual({ status: "failed", lastError: "agent task failed" });
+    expect((await store.getSampling(samplingId))?.trajectory?.trajectoryId).toBe("complete-trace");
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
 
   it.each((["subject", "evaluator"] as const).flatMap((role) => (
     (["terminal", "resources"] as const).map((step) => ({ role, step }))
@@ -3123,17 +4254,20 @@ describe("Run recovery from persisted facts", () => {
     const run = role === "subject"
       ? await runtime.start(startRequest("uncommitted-subject-" + step))
       : await runtime.pipeline(pipelineRequest("uncommitted-evaluator-" + step));
-    await runtime.resume(run.runId);
+    if (role === "subject") {
+      await expect(runtime.resume(run.runId)).rejects.toThrow("Execution phase could not persist its progress");
+    } else {
+      await runtime.resume(run.runId);
+    }
     const snapshot = await runtime.getRun(run.runId);
     const record = role === "subject"
       ? await store.getSampling(run.samplingIds[0]!)
       : await store.getEvaluation(snapshot.evaluationIds[0]!);
     const attempt = record && "executionAttempts" in record ? record.executionAttempts[0] : record?.attempts[0];
-    expect(snapshot.status).toBe("failed");
-    expect(attempt).toMatchObject({
-      status: "completed", completedAt: expect.any(String),
-      resources: { status: "pending" },
-    });
+    expect(snapshot.status).toBe(role === "subject" ? "running" : "failed");
+    expect(attempt).toMatchObject(role === "subject" && step === "terminal"
+      ? { status: "running", resources: { status: "pending" } }
+      : { status: "completed", completedAt: expect.any(String), resources: { status: "pending" } });
     await runtime.resume(run.runId);
     expect(harness.submitAgent).toHaveBeenCalledTimes(role === "subject" ? 1 : 2);
     expect(harness.restartAgent).not.toHaveBeenCalled();
@@ -3213,9 +4347,10 @@ describe("Run recovery from persisted facts", () => {
     });
     const run = await runtime.start(startRequest("partial-resource-refresh-fails"));
     const samplingId = run.samplingIds[0]!;
-    const submissionId = "subject-submission";
+    const chatId = "subject-chat";
+    const submissionId = "submission-1";
     const idempotencyKey = "execution:" + samplingId;
-    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, submissionId };
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, role: "subject", framework: "sp", samplingId, chatId };
     const snapshot = {
       ...makeResources({ handle, idempotencyKey }),
       finalized: false,
@@ -3223,7 +4358,7 @@ describe("Run recovery from persisted facts", () => {
     };
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
-      subjectSubmissionId: submissionId,
+      subjectChatId: chatId,
       execution: { status: "retrying" },
       executionAttempts: [{
         executionAttemptId: "attempt-before-recovery", samplingId, attemptNumber: 1,
@@ -3231,6 +4366,7 @@ describe("Run recovery from persisted facts", () => {
         resources: { status: "collected", snapshot },
       }],
     });
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("refresh unavailable"));
     await runtime.resume(run.runId);
     const saved = (await store.getSampling(samplingId))!;
@@ -3253,22 +4389,23 @@ describe("Run recovery from persisted facts", () => {
     const samplingId = run.samplingIds[0]!;
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
-      subjectSubmissionId: "subject-submission",
+      subjectChatId: "subject-chat",
       execution: { status: "succeeded" },
       artifacts: [{ artifactId: "subject-artifact", kind: "project", path: "/output" }],
       trajectory: { trajectoryId: "subject-trajectory", source: "subject", path: "/trajectory" },
     });
     const evaluation = (await store.listEvaluations(samplingId))[0]!;
-    const submissionId = "evaluator-submission";
+    const chatId = "evaluator-chat";
+    const submissionId = "submission-1";
     const idempotencyKey = "evaluation:" + samplingId;
-    const handle: AgentHandle = { role: "evaluator", framework: "sp", samplingId, submissionId };
+    const handle: AgentHandle = { ownerUserId: EVALUATOR.ownerUserId, role: "evaluator", framework: "sp", samplingId, chatId };
     const snapshot = {
       ...makeResources({ handle, idempotencyKey }),
       finalized: false,
       coverage: { usageEvents: "partial" as const, telemetryEvents: "partial" as const, billingSettlements: "partial" as const },
     };
     await seedEvaluation(store, {
-      ...evaluation, submissionId, status: { status: "retrying" },
+      ...evaluation, chatId, status: { status: "retrying" },
       attempts: [{
         evaluationAttemptId: "judge-before-recovery", evaluationId: evaluation.evaluationId,
         attemptNumber: 1, submissionId, status: "running",
@@ -3276,6 +4413,7 @@ describe("Run recovery from persisted facts", () => {
         resources: { status: "collected", snapshot },
       }],
     });
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("evaluator refresh unavailable"));
     await runtime.resume(run.runId);
     const saved = (await store.getEvaluation(evaluation.evaluationId))!;
@@ -3296,13 +4434,14 @@ describe("Run recovery from persisted facts", () => {
     });
     const run = await runtime.start(startRequest("finalized-resource-recovery"));
     const samplingId = run.samplingIds[0]!;
-    const submissionId = "subject-submission";
+    const chatId = "subject-chat";
+    const submissionId = "submission-1";
     const idempotencyKey = "execution:" + samplingId;
-    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, submissionId };
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, role: "subject", framework: "sp", samplingId, chatId };
     const snapshot = makeResources({ handle, idempotencyKey });
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
-      subjectSubmissionId: submissionId,
+      subjectChatId: chatId,
       execution: { status: "retrying" },
       executionAttempts: [{
         executionAttemptId: "finalized-before-recovery", samplingId, attemptNumber: 1,
@@ -3310,6 +4449,7 @@ describe("Run recovery from persisted facts", () => {
         resources: { status: "collected", snapshot },
       }],
     });
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("should not refresh"));
     await runtime.resume(run.runId);
     const saved = (await store.getSampling(samplingId))!;
@@ -3348,16 +4488,17 @@ describe("Run recovery from persisted facts", () => {
     const run = await dormantRuntime(store, harness).start(startRequest("submitted-before-crash"));
     const samplingId = run.samplingIds[0]!;
     const record = (await store.getSampling(samplingId))!;
-    const submissionId = "subject-submission";
+    const chatId = "subject-chat";
+    const submissionId = "submission-1";
     const idempotencyKey = `execution:${samplingId}`;
     await seedSampling(store, {
       ...record,
-      subjectSubmissionId: submissionId,
+      subjectChatId: chatId,
       execution: { status: "running" },
       executionAttempts: [{
         executionAttemptId: "attempt-before-crash", samplingId, attemptNumber: 1,
         submissionId, status: "running", startedAt: "2026-10-09T00:00:00.000Z",
-        resources: { status: "pending", scope: { submissionId, idempotencyKey } },
+        resources: { status: "pending", scope: { chatId, submissionId, idempotencyKey } },
       }],
     });
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
@@ -3381,7 +4522,7 @@ describe("Run recovery from persisted facts", () => {
     const samplingId = run.samplingIds[0]!;
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
-      subjectSubmissionId: "correct-submission",
+      subjectChatId: "correct-chat",
       execution: { status: "running" },
       executionAttempts: [{
         executionAttemptId: "conflicting-attempt", samplingId, attemptNumber: 1,
@@ -3389,13 +4530,14 @@ describe("Run recovery from persisted facts", () => {
         startedAt: "2026-10-09T00:00:00.000Z",
       }],
     });
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
 
     await dormantRuntime(store, harness).resume(run.runId);
 
     const stored = (await store.getSampling(samplingId))!;
     expect(stored.execution.status).toBe("failed");
     expect(stored.executionAttempts[0]!.submissionId).toBe("another-submission");
-    expect(harness.ensureAgent).not.toHaveBeenCalled();
+    expect(harness.ensureAgent).toHaveBeenCalledOnce();
     expect(harness.submitAgent).not.toHaveBeenCalled();
   });
 
@@ -3404,12 +4546,13 @@ describe("Run recovery from persisted facts", () => {
     const harness = makeHarness();
     const run = await dormantRuntime(store, harness).start(startRequest("uncertain-before-crash"));
     const samplingId = run.samplingIds[0]!;
-    const submissionId = "subject-submission";
+    const chatId = "subject-chat";
+    const submissionId = "submission-1";
     const idempotencyKey = `execution:${samplingId}`;
-    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, submissionId };
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, role: "subject", framework: "sp", samplingId, chatId };
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
-      subjectSubmissionId: submissionId,
+      subjectChatId: chatId,
       execution: { status: "retrying" },
       executionAttempts: [{
         executionAttemptId: "uncertain-attempt", samplingId, attemptNumber: 1,
@@ -3466,12 +4609,13 @@ describe("Run recovery from persisted facts", () => {
     const harness = makeHarness();
     const run = await dormantRuntime(store, harness).start(startRequest("resume-restart", EXECUTION_CONFIG_RETRY_ONE_ID));
     const samplingId = run.samplingIds[0]!;
-    const submissionId = "subject-submission";
+    const chatId = "subject-chat";
+    const submissionId = "submission-1";
     const idempotencyKey = `execution:${samplingId}`;
-    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, submissionId };
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, role: "subject", framework: "sp", samplingId, chatId };
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
-      subjectSubmissionId: submissionId,
+      subjectChatId: chatId,
       execution: { status: "retrying" },
       executionAttempts: [{
         executionAttemptId: "failed-attempt", samplingId, attemptNumber: 1, submissionId,
@@ -3480,7 +4624,8 @@ describe("Run recovery from persisted facts", () => {
       }],
     });
     vi.mocked(harness.inspectAgentOperation).mockResolvedValueOnce(null).mockResolvedValueOnce({
-      status: "failed", normalizedStatus: "failed", retryable: true,
+      submissionId,
+      status: "failed", retryable: true,
       failureKind: "llm", error: "upstream failed",
     });
 
@@ -3499,17 +4644,60 @@ describe("Run recovery from persisted facts", () => {
     expect((await store.getSampling(samplingId))!.executionAttempts).toHaveLength(2);
   });
 
+  it("keeps a persisted retryable failure pending through one SP status outage, then restarts it", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const runtime = dormantRuntime(store, harness);
+    const run = await runtime.start(startRequest("retry-after-status-outage", EXECUTION_CONFIG_RETRY_ONE_ID));
+    const samplingId = run.samplingIds[0]!;
+    const chatId = "subject-chat";
+    const submissionId = "submission-1";
+    const idempotencyKey = `execution:${samplingId}`;
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, role: "subject", framework: "sp", samplingId, chatId };
+    await seedSampling(store, {
+      ...(await store.getSampling(samplingId))!,
+      subjectChatId: chatId,
+      execution: { status: "retrying" },
+      executionAttempts: [{
+        executionAttemptId: "failed-before-recovery", samplingId, attemptNumber: 1, submissionId,
+        status: "failed", error: "upstream failed", completedAt: "2026-10-09T00:00:00.000Z",
+        resources: { status: "collected", snapshot: makeResources({ handle, idempotencyKey }) },
+      }],
+    });
+    vi.mocked(harness.inspectAgentOperation)
+      .mockRejectedValueOnce(new Error("temporary SP 503"))
+      .mockResolvedValueOnce({
+        submissionId, status: "failed",
+        retryable: true, failureKind: "llm", error: "upstream failed",
+      });
+
+    await expect(runtime.resume(run.runId)).rejects.toThrow("Execution phase could not persist its progress");
+    const pending = (await store.getSampling(samplingId))!;
+    expect(pending.execution).toEqual({ status: "retrying" });
+    expect(harness.collectExecution).not.toHaveBeenCalled();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+
+    await runtime.resume(run.runId);
+    expect((await runtime.getRun(run.runId)).status).toBe("succeeded");
+    expect(harness.restartAgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      idempotencyKey: `execution:${samplingId}:restart:2`,
+    }));
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect((await store.getSampling(samplingId))!.executionAttempts).toHaveLength(2);
+  });
+
   it("does not restart a persisted failure when its operation cannot be confirmed", async () => {
     const store = makeStore();
     const harness = makeHarness();
     const runtime = dormantRuntime(store, harness);
     const run = await runtime.start(startRequest("unconfirmed-restart", EXECUTION_CONFIG_RETRY_ONE_ID));
     const samplingId = run.samplingIds[0]!;
-    const submissionId = "subject-submission";
-    const handle: AgentHandle = { role: "subject", framework: "sp", samplingId, submissionId };
+    const chatId = "subject-chat";
+    const submissionId = "submission-1";
+    const handle: AgentHandle = { ownerUserId: SUBJECT.ownerUserId, role: "subject", framework: "sp", samplingId, chatId };
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
-      subjectSubmissionId: submissionId,
+      subjectChatId: chatId,
       execution: { status: "retrying" },
       executionAttempts: [{
         executionAttemptId: "unconfirmed-attempt", samplingId, attemptNumber: 1, submissionId,
@@ -3519,12 +4707,13 @@ describe("Run recovery from persisted facts", () => {
     });
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue(null);
 
-    await runtime.resume(run.runId);
-    await runtime.resume(run.runId);
+    await expect(runtime.resume(run.runId)).rejects.toThrow("Execution phase could not persist its progress");
+    await expect(runtime.resume(run.runId)).rejects.toThrow("Execution phase could not persist its progress");
 
-    expect((await runtime.getRun(run.runId)).status).toBe("failed");
-    expect(harness.inspectAgentOperation).toHaveBeenCalledOnce();
+    expect((await runtime.getRun(run.runId)).status).toBe("retrying");
+    expect(harness.inspectAgentOperation).toHaveBeenCalledTimes(2);
     expect(harness.restartAgent).not.toHaveBeenCalled();
+    expect(harness.collectExecution).not.toHaveBeenCalled();
     expect((await store.getSampling(samplingId))!.executionAttempts).toHaveLength(1);
   });
 
@@ -3535,7 +4724,7 @@ describe("Run recovery from persisted facts", () => {
     const samplingId = run.samplingIds[0]!;
     await seedSampling(store, {
       ...(await store.getSampling(samplingId))!,
-      subjectSubmissionId: "completed-subject",
+      subjectChatId: "completed-subject",
       execution: { status: "succeeded" },
       artifacts: [{ artifactId: "artifact-1", kind: "project", path: "/output" }],
       trajectory: { trajectoryId: "subject-trajectory", source: "subject", path: "/trajectory" },
@@ -3560,16 +4749,17 @@ describe("Run recovery from persisted facts", () => {
     const run = await original.evaluate(evaluateRequest(execution.samplingIds));
     const evaluationId = (await store.getRun(run.runId))!.evaluationIds[0]!;
     const evaluation = (await store.getEvaluation(evaluationId))!;
-    const submissionId = "evaluator-submission";
+    const chatId = "evaluator-chat";
+    const submissionId = "submission-1";
     const idempotencyKey = `evaluation:${evaluation.samplingId}`;
     await seedEvaluation(store, {
       ...evaluation,
-      submissionId,
+      chatId,
       status: { status: "running" },
       attempts: [{
         evaluationAttemptId: "existing-evaluation-attempt", evaluationId: evaluation.evaluationId,
         attemptNumber: 1, submissionId, status: "completed", completedAt: "2026-10-09T00:00:00.000Z",
-        resources: { status: "pending", scope: { submissionId, idempotencyKey } },
+        resources: { status: "pending", scope: { chatId, submissionId, idempotencyKey } },
       }],
     });
     vi.mocked(harness.submitAgent).mockClear();

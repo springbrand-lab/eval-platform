@@ -15,5 +15,10 @@
 
 - Keep dependencies flowing from contracts toward adapters and applications.
 - Add behavior only after the package boundary and public contract are documented.
-- Keep package metadata, `tsconfig.json`, `README.md`, `src/index.ts` and focused tests together.
+- Keep package metadata, `tsconfig.json`, `README.md` and focused tests together; shared packages expose `src/index.ts`, applications expose only their process entry points.
 - Do not commit generated output, local secrets or Durable Object state.
+
+## Verification
+
+- Local installs require a sibling `../sp-platform` checkout with `pnpm install` done (linked SP packages; see `docs/sp-package-publishing-todo.md`).
+- `pnpm check`, then `DATABASE_URL=postgres://<user>:<pass>@<host>:<port>/<db> pnpm -r --no-bail test`; without `DATABASE_URL` the PostgreSQL integration tests are skipped.

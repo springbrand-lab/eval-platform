@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentResourceSnapshot } from "@eval-platform/eval-contracts";
 import { AgentResourceValidationError, validateResourceSnapshot } from "./resources.js";
 
-const SCOPE = { submissionId: "agent-1", idempotencyKey: "execution:sampling-1" };
+const SCOPE = { chatId: "chat-1", submissionId: "submission-1", idempotencyKey: "execution:sampling-1" };
 
 function snapshot(): AgentResourceSnapshot {
   return {
@@ -17,6 +17,14 @@ function snapshot(): AgentResourceSnapshot {
 }
 
 describe("raw resource snapshot validation", () => {
+  it("accepts a pre-dispatch Chat/key scope while requiring the snapshot's real Submission ID", () => {
+    const input = snapshot();
+    expect(validateResourceSnapshot(input, {
+      chatId: SCOPE.chatId,
+      idempotencyKey: SCOPE.idempotencyKey,
+    })).toEqual(input);
+  });
+
   it("preserves source shapes, missing/null values, order, repeats and signed adjustments without processing", () => {
     const usage = {
       eventId: "usage-1",
@@ -57,7 +65,7 @@ describe("raw resource snapshot validation", () => {
     expect(validateResourceSnapshot(input, SCOPE)).toEqual(input);
   });
 
-  it.each(["submissionId", "idempotencyKey"] as const)("rejects a different %s", (field) => {
+  it.each(["chatId", "submissionId", "idempotencyKey"] as const)("rejects a different %s", (field) => {
     expect(() => validateResourceSnapshot({
       ...snapshot(), scope: { ...SCOPE, [field]: "other-operation" },
     }, SCOPE)).toThrow("does not match the requested operation scope");

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentResourceSnapshot, EvaluationRecord, RunHandle } from "@eval-platform/eval-contracts";
 import { datasetSnapshotSchema } from "@eval-platform/eval-dataset";
-import { createConfigResolver, createEvalRuntime } from "@eval-platform/eval-runtime";
+import { createConfigResolver, createEvalRunAdmission, createEvalRunResumer, toRunSnapshot, toSamplingSnapshot } from "@eval-platform/eval-runtime";
 import type {
   ConfigStore,
   Harness,
@@ -19,9 +19,13 @@ function runtimeFixture() {
   const samplings = new Map<string, SamplingState>();
   const evaluations = new Map<string, EvaluationRecord>();
   const store: RuntimeStore = {
+    async withRunDispatchGate(_runId, dispatch) { return dispatch(); },
     async getRun(id) { return structuredClone(runs.get(id) ?? null); },
-    async findRunByRequestId(id) { return structuredClone([...runs.values()].find((run) => run.requestIdentity?.requestId === id) ?? null); },
-    async findRunByIdempotencyKey(key) { return structuredClone([...runs.values()].find((run) => run.requestIdentity?.idempotencyKey === key) ?? null); },
+    async findRunByIdempotencyKey(projectId, key) {
+      return structuredClone([...runs.values()].find(
+        (run) => run.projectId === projectId && run.requestIdentity.idempotencyKey === key,
+      ) ?? null);
+    },
     async createRunWithSamplings(run, records, judges) {
       runs.set(run.runId, structuredClone(run));
       for (const record of records) samplings.set(record.samplingId, structuredClone(record));
@@ -30,17 +34,22 @@ function runtimeFixture() {
     },
     async updateSampling(record) { samplings.set(record.samplingId, structuredClone(record)); },
     async getSampling(id) { return structuredClone(samplings.get(id) ?? null); },
+    async getSamplings(ids) { return ids.map((id) => structuredClone(samplings.get(id) ?? null)); },
     async updateEvaluation(record) { evaluations.set(record.evaluationId, structuredClone(record)); },
     async getEvaluation(id) { return structuredClone(evaluations.get(id) ?? null); },
+    async getEvaluations(ids) { return ids.map((id) => structuredClone(evaluations.get(id) ?? null)); },
     async listEvaluations(id) { return structuredClone([...evaluations.values()].filter((judge) => judge.samplingId === id)); },
   };
   const catalog: RuntimeCatalog = {
     async listProjects() { return [PROJECT]; },
+    async getProject(id) { return id === PROJECT.projectId ? PROJECT : null; },
+    async getEvaluationOutputSchema(id) { return id === PROJECT.projectId ? { type: "object" } : null; },
     async listAgents() { return [{ agentConfig: SUBJECT, name: "Subject", role: "subject" }, { agentConfig: EVALUATOR, name: "Judge", role: "evaluator" }]; },
     async listDatasets() { return [DATASET]; },
     async listData() { return [DATA]; },
     async listSamples() { return [SAMPLE]; },
     async getSample(id) { return id === SAMPLE.sampleId ? SAMPLE : null; },
+    async getSamples(ids) { return ids.map((id) => id === SAMPLE.sampleId ? SAMPLE : null); },
   };
   const configs: ConfigStore = {
     async getExecutionConfig(configId) {
@@ -60,7 +69,8 @@ function runtimeFixture() {
     async ensureAgent(input) {
       return {
         samplingId: input.samplingId,
-        submissionId: input.submissionId,
+        chatId: input.chatId,
+        ownerUserId: input.agentConfig.ownerUserId,
         role: input.role,
         framework: input.framework,
         ...(input.evaluationWorkspace === undefined ? {} : { evaluationWorkspace: input.evaluationWorkspace }),
@@ -68,26 +78,27 @@ function runtimeFixture() {
     },
     materializeInitialData: initialized,
     materializeSubjectTrajectory: materializedTrajectory,
-    async submitAgent() { return { status: "completed", accepted: true, normalizedStatus: "completed" }; },
+    async submitAgent({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true }; },
     async restartAgent() { throw new Error("Successful agent must not restart"); },
-    async inspectAgentOperation() { return { status: "completed", accepted: true, normalizedStatus: "completed" }; },
-    async waitForSubmission() { return { status: "completed", accepted: true, normalizedStatus: "completed" }; },
+    async inspectAgentOperation({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true }; },
+    async stopAgent() {},
+    async waitForSubmission({ idempotencyKey }) { return { submissionId: idempotencyKey, status: "completed", accepted: true }; },
     async collectExecution({ handle }) {
       return {
-        samplingId: handle.samplingId, status: "succeeded", artifacts: [{ artifactId: `${handle.submissionId}:page`, kind: "file", path: "/workspace/page.html" }],
-        trajectory: { trajectoryId: handle.submissionId, source: "subject", path: "/trajectory.json" },
+        samplingId: handle.samplingId, status: "succeeded", artifacts: [{ artifactId: `${handle.chatId}:page`, kind: "file", path: "/workspace/page.html" }],
+        trajectory: { trajectoryId: handle.chatId, source: "subject", path: "/trajectory.json" },
       };
     },
     async collectEvaluation({ handle }) {
       return {
-        status: "succeeded", score: 90, reason: "The produced page passes the checks.", artifacts: [{ artifactId: handle.submissionId, kind: "report", path: "/evaluation.json" }],
+        status: "succeeded", score: 90, reason: "The produced page passes the checks.", artifacts: [{ artifactId: handle.chatId, kind: "report", path: "/evaluation.json" }],
         evidenceRefs: [{ kind: "artifact", ref: "/workspace/page.html" }],
-        trajectory: { trajectoryId: handle.submissionId, source: "evaluator", path: "/trajectory.json" },
+        trajectory: { trajectoryId: handle.chatId, source: "evaluator", path: "/trajectory.json" },
       };
     },
-    async collectAgentResources({ handle, idempotencyKey }): Promise<AgentResourceSnapshot> {
+    async collectAgentResources({ handle, idempotencyKey, submissionId }): Promise<AgentResourceSnapshot> {
       const isExecution = handle.role === "subject";
-      const event = usage(`${handle.submissionId}:usage`, {
+      const event = usage(`${handle.chatId}:usage`, {
         runId: idempotencyKey,
         metrics: isExecution
           ? { inputTokens: 20, outputTokens: 10, cacheReadTokens: 3, cacheWriteTokens: 2, reasoningTokens: 4 }
@@ -95,16 +106,16 @@ function runtimeFixture() {
         providerCostUsd: { total: isExecution ? 0.5 : 0.1 },
       });
       return {
-        scope: { submissionId: handle.submissionId, idempotencyKey }, observedAt: "2026-10-08T00:01:00.000Z",
+        scope: { chatId: handle.chatId, submissionId: submissionId ?? idempotencyKey, idempotencyKey }, observedAt: "2026-10-08T00:01:00.000Z",
         finalized: true, coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
         usageEvents: [event, event],
         telemetryEvents: [
-          telemetry("turn-start", "turn.started", "turn-1", {}, 0, handle.submissionId),
-          telemetry("turn-end", "turn.finished", "turn-1", { outcome: "completed" }, 1_000, handle.submissionId),
-          telemetry("request-start", "generation.started", "request-1", {}, 100, handle.submissionId),
-          telemetry("request-end", "generation.finished", "request-1", { outcome: "completed" }, 200, handle.submissionId),
-          telemetry("tool-start", "tool.started", "tool-1", { toolName: isExecution ? "browser" : "test" }, 300, handle.submissionId),
-          telemetry("tool-end", "tool.finished", "tool-1", { toolName: isExecution ? "browser" : "test", outcome: "completed" }, 400, handle.submissionId),
+          telemetry("turn-start", "turn.started", "turn-1", {}, 0, handle.chatId),
+          telemetry("turn-end", "turn.finished", "turn-1", { outcome: "completed" }, 1_000, handle.chatId),
+          telemetry("request-start", "generation.started", "request-1", {}, 100, handle.chatId),
+          telemetry("request-end", "generation.finished", "request-1", { outcome: "completed" }, 200, handle.chatId),
+          telemetry("tool-start", "tool.started", "tool-1", { toolName: isExecution ? "browser" : "test" }, 300, handle.chatId),
+          telemetry("tool-end", "tool.finished", "tool-1", { toolName: isExecution ? "browser" : "test", outcome: "completed" }, 400, handle.chatId),
         ],
         billingSettlements: [settlement(event.eventId as string, { debitedUnits: isExecution ? 10 : 3 })],
       };
@@ -113,11 +124,25 @@ function runtimeFixture() {
   const onError = vi.fn();
   let nextId = 0;
   let clock = 0;
-  const runtime = createEvalRuntime({
-    store, catalog, configResolver: createConfigResolver(configs), harness, onError,
-    idFactory: () => `runtime-id-${++nextId}`,
+  const idFactory = () => `runtime-id-${++nextId}`;
+  const resumer = createEvalRunResumer({
+    store, harness, onError, idFactory,
+    getSamples: catalog.getSamples, getEvaluationOutputSchema: catalog.getEvaluationOutputSchema,
     now: () => new Date(Date.UTC(2026, 9, 8) + ++clock).toISOString(),
   });
+  const runtime = {
+    ...createEvalRunAdmission({
+      store, catalog, configResolver: createConfigResolver(configs), sourceCommit: "a".repeat(40), idFactory,
+    }),
+    resume: (runId: string) => resumer.resume(runId),
+    async getRun(runId: string) {
+      const run = (await store.getRun(runId))!;
+      const [runSamplings, runEvaluations] = await Promise.all([store.getSamplings(run.samplingIds), store.getEvaluations(run.evaluationIds)]);
+      return toRunSnapshot(run, runSamplings.map((record) => record!), runEvaluations.map((record) => record!));
+    },
+    getSampling: async (samplingId: string) => toSamplingSnapshot((await store.getSampling(samplingId))!),
+    listEvaluations: (samplingId: string) => store.listEvaluations(samplingId),
+  };
   const handles: RunHandle[] = [];
   const source: MetricsSource = {
     async read() {
@@ -139,7 +164,9 @@ function runtimeFixture() {
 describe("Runtime public-query integration", () => {
   it("reports five independently executed/evaluated Agents from persisted raw facts, then retains an independent re-evaluation", async () => {
     const fixture = runtimeFixture();
-    const pipeline = await fixture.runtime.pipeline({ requestId: "request-1", projectId: PROJECT.projectId, pipelineConfigId: "pipeline-config" });
+    const pipeline = await fixture.runtime.pipeline({
+      idempotencyKey: "request-1", projectId: PROJECT.projectId, pipelineConfigId: "pipeline-config",
+    });
     fixture.handles.push(pipeline);
     await fixture.runtime.resume(pipeline.runId);
     expect((await fixture.runtime.getRun(pipeline.runId)).status).toBe("succeeded");
@@ -172,7 +199,10 @@ describe("Runtime public-query integration", () => {
     expect(fixture.initialized).toHaveBeenCalledTimes(10);
     expect(fixture.materializedTrajectory).toHaveBeenCalledTimes(5);
 
-    const rerun = await fixture.runtime.evaluate({ projectId: PROJECT.projectId, samplingIds: [stored.samplingId], evaluationConfigId: "evaluation-config" });
+    const rerun = await fixture.runtime.evaluate({
+      idempotencyKey: "re-evaluation-1",
+      projectId: PROJECT.projectId, samplingIds: [stored.samplingId], evaluationConfigId: "evaluation-config",
+    });
     fixture.handles.push(rerun);
     await fixture.runtime.resume(rerun.runId);
     expect((await fixture.runtime.getRun(rerun.runId)).status).toBe("succeeded");

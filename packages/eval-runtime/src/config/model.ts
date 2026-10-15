@@ -1,4 +1,4 @@
-import type { HarnessConfig, RetryPolicy, SpHarnessConfig } from "@eval-platform/eval-contracts";
+import type { HarnessConfig, RetryPolicy } from "@eval-platform/eval-contracts";
 
 export interface ExecutionConfig {
   readonly configId: string;
@@ -12,7 +12,7 @@ export interface ExecutionConfig {
 
 export interface EvaluationConfig {
   readonly configId: string;
-  readonly evaluationHarness: SpHarnessConfig & { readonly framework: "sp" };
+  readonly evaluationHarness: HarnessConfig & { readonly framework: "sp" };
   readonly evaluationConcurrency: number;
   readonly retryPolicy?: RetryPolicy;
 }

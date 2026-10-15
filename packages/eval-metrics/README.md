@@ -6,14 +6,17 @@
 
 ```text
 src/
-├── model.ts                 # 统一类型出口
-├── index.ts                 # 统一函数出口
+├── index.ts                 # 唯一入口：createMetrics、错误类和模型类型
 ├── evaluators/
 │   ├── model.ts             # 评估结果与分数统计
 │   └── index.ts             # 整理已有评估输出
 ├── aggregation/
 │   ├── model.ts             # 资源、状态与汇总统计模型
-│   ├── resources.ts         # 原始资源解析、去重、重叠处理
+│   ├── resources.ts         # 资源聚合编排
+│   ├── resource-facts.ts    # 诊断收集、数值校验与单个数据流读取
+│   ├── resource-usage.ts    # 用量统计与 Subagent 汇总
+│   ├── resource-billing.ts  # 结算统计
+│   ├── resource-telemetry.ts # 遥测操作统计
 │   ├── statistics.ts        # 分数与耗时的基础分布计算
 │   └── index.ts             # 单次采样及分组聚合
 └── reporting/
@@ -21,7 +24,7 @@ src/
     └── index.ts             # 关联数据并返回四层视图
 ```
 
-`createMetrics({ source })` 提供 `getProjectOverview()`、`getDatasetOverview()`、`getSampleOverview()`、`getSamplingDetail()`。所有查询显式指定 Project；Dataset 仍是全局共享实体。可选 `runIds` 同时限制采样和该 Run 的评估记录；省略时保留所有重评记录，不默认挑最后一次。共享 Data 在不同 Dataset 中可分别展示，但项目总计直接对采样去重，不能相加 Dataset 小计。
+`createMetrics({ source })` 提供 `getProjectOverview()`、`getDatasetOverview()`、`getSampleOverview()`、`getSamplingDetail()`。所有查询显式指定 Project；Dataset 属于用户，不隶属于 Project。可选 `runIds` 同时限制采样和该 Run 的评估记录；省略时保留所有重评记录，不默认挑最后一次。共享 Data 在不同 Dataset 中可分别展示，但项目总计直接对采样去重，不能相加 Dataset 小计。
 
 应用注入 `MetricsSource` 后，四层共用同一组查询语义：
 
@@ -46,4 +49,6 @@ Project 的 Data 数量表示当前查询中已有采样的数据；Dataset 的 
 
 评估分数不假设 0～1，不设置通过阈值，不把未知或失败当作 0，不跨评估 Agent 混算平均分。阶段成功率分母只包含终态记录；Agent 耗时不冒充并发批次墙钟时间。默认保留失败、取消、重启和历次重评的资源。
 
-本阶段不实现实验对比、归因、缓存、指标持久化或 API/Web/CLI。模型从包根入口、`./model` 和各子模块入口导出。
+查询范围内找不到 Project、Run、Dataset、Sample 或 Sampling 时抛出 `MetricsEntityNotFoundError`（带实体种类和 ID），非法查询抛出 `MetricsQueryError`，来源返回不一致事实时抛出 `MetricsSourceError`。
+
+本阶段不实现实验对比、归因、缓存、指标持久化或 API/Web/CLI。本包只有包根入口。

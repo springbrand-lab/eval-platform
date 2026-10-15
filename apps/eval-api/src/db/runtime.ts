@@ -1,232 +1,273 @@
-import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
-import type { RuntimeRecoveryStore, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
-import { RuntimeRecordConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
-import { and, eq, exists, gt, inArray, or, sql } from "drizzle-orm";
-import type { EvalDb } from "./client.js";
-import { evaluations, runEvaluations, runs, runSamplings, samplings } from "./schema.js";
+import type { EvaluationRecord, ProjectInitialLaunch, Sampling } from "@eval-platform/eval-contracts";
+import { DatasetEntityNotFoundError } from "@eval-platform/eval-dataset";
+import type { RuntimeRecoveryStore, RuntimeRunAdmission, RuntimeRunRecord, RuntimeStore } from "@eval-platform/eval-runtime";
+import {
+  RuntimeAdmissionConflictError,
+  RuntimeEntityNotFoundError,
+  RuntimeInputError,
+  RuntimeProjectBusyError,
+  RuntimeRecordConflictError,
+  RuntimeRunIdentityConflictError,
+  RuntimeRunStoppedError,
+} from "@eval-platform/eval-runtime";
+import { and, eq, inArray, isNull } from "drizzle-orm";
+import { selectByIds, sqlBatches } from "./batch.js";
+import type { RunQueue } from "../run-worker-queue.js";
+import { constraintViolation, type EvalDb } from "./client.js";
+import { ProjectRunStopConflictError } from "./errors.js";
+import { requireOwnerUserId } from "./owner.js";
+import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
+import {
+  evaluationFacts,
+  listSamplingEvaluations,
+  readEvaluations,
+  readRunRecords,
+  readSamplings,
+  runActive,
+  runFinished,
+  samplingFacts,
+  samplingSucceeded,
+  type RecordReader,
+  type RunRecordScope,
+} from "./run-records.js";
+import { datasets, evaluations, projects, runEvaluations, runRequestKeys, runs, runSamplings, samplings } from "./schema.js";
 
-export type RuntimeReader = Pick<EvalDb, "select">;
+type RuntimeStoreScope =
+  | { readonly kind: "worker" }
+  | { readonly kind: "user"; readonly ownerUserId: string; readonly release: EvalSpRelease };
 
-export function samplingFromRow(row: typeof samplings.$inferSelect): Sampling {
-  return { ...row.facts, samplingId: row.samplingId, projectId: row.projectId, sampleId: row.sampleId };
-}
+type AdmissionWriter = Parameters<Parameters<EvalDb["transaction"]>[0]>[0];
 
-export function evaluationFromRow(row: typeof evaluations.$inferSelect): EvaluationRecord {
-  return { ...row.facts, evaluationId: row.evaluationId, samplingId: row.samplingId };
-}
-
-function samplingFacts(record: Sampling): typeof samplings.$inferInsert.facts {
-  const { samplingId: _samplingId, projectId: _projectId, sampleId: _sampleId, ...facts } = record;
-  return facts;
-}
-
-function evaluationFacts(record: EvaluationRecord): typeof evaluations.$inferInsert.facts {
-  const { evaluationId: _evaluationId, samplingId: _samplingId, ...facts } = record;
-  return facts;
-}
-
-export async function readRunRecords(reader: RuntimeReader, runIds: readonly string[]): Promise<readonly RuntimeRunRecord[]> {
-  if (runIds.length === 0) return [];
-  const selected = await reader.select().from(runs).where(inArray(runs.runId, runIds)).orderBy(runs.runId);
-  if (selected.length === 0) return [];
-  const ids = selected.map((row) => row.runId);
-  const [memberships, judges] = await Promise.all([
-    reader.select().from(runSamplings).where(inArray(runSamplings.runId, ids))
-      .orderBy(runSamplings.runId, runSamplings.position),
-    reader.select().from(runEvaluations).where(inArray(runEvaluations.runId, ids))
-      .orderBy(runEvaluations.runId, runEvaluations.position),
-  ]);
-  const samplingIdsByRun = new Map<string, string[]>();
-  const evaluationIdsByRun = new Map<string, string[]>();
-  for (const member of memberships) {
-    const entries = samplingIdsByRun.get(member.runId) ?? [];
-    entries.push(member.samplingId);
-    samplingIdsByRun.set(member.runId, entries);
+function launchFor(run: RuntimeRunRecord): ProjectInitialLaunch | null {
+  switch (run.config.operation) {
+    case "execution": return { operation: "execution", configId: run.config.execution.configId };
+    case "pipeline": return { operation: "pipeline", configId: run.config.pipeline.configId };
+    case "evaluation": return null;
   }
-  for (const judge of judges) {
-    const entries = evaluationIdsByRun.get(judge.runId) ?? [];
-    entries.push(judge.evaluationId);
-    evaluationIdsByRun.set(judge.runId, entries);
+}
+
+function sameIds(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+/** Checks the submitted facts against each other; PostgreSQL constraints guard everything they can express. */
+function validateAdmission(run: RuntimeRunRecord, records: readonly Sampling[], judges: readonly EvaluationRecord[]): void {
+  if (run.stopRequested || run.stopFinalized) {
+    throw new RuntimeInputError("New Run cannot be stopped at admission", "stopRequested");
   }
-  return selected.map((row) => ({
-    runId: row.runId,
-    projectId: row.projectId,
-    phases: row.phases,
-    config: row.config,
-    samplingIds: samplingIdsByRun.get(row.runId) ?? [],
-    evaluationIds: evaluationIdsByRun.get(row.runId) ?? [],
-    ...(row.requestId === null ? {} : {
-      requestIdentity: {
-        requestId: row.requestId,
-        ...(row.idempotencyKey === null ? {} : { idempotencyKey: row.idempotencyKey }),
-        requestFingerprint: row.requestFingerprint!,
-      },
-    }),
-  }));
+  if (records.length === 0) throw new RuntimeInputError("Run must contain Samplings", "samplingIds");
+  if (!sameIds(run.samplingIds, records.map((record) => record.samplingId))) {
+    throw new RuntimeInputError("Run Sampling scope must match the submitted records", "samplingIds");
+  }
+  if (!sameIds(run.evaluationIds, judges.map((judge) => judge.evaluationId))) {
+    throw new RuntimeInputError("Run Evaluation scope must match the submitted records", "evaluationIds");
+  }
+  if (records.some((record) => record.projectId !== run.projectId)) {
+    throw new RuntimeInputError("Run contains Samplings outside its Project", "projectId");
+  }
+  if (judges.length !== (run.config.operation === "execution" ? 0 : records.length)) {
+    throw new RuntimeInputError("Run must evaluate each Sampling exactly when it includes evaluation", "evaluationIds");
+  }
 }
 
-function requireDistinct(ids: readonly string[], field: string): void {
-  if (new Set(ids).size !== ids.length) throw new Error(`${field} must not contain duplicates`);
+async function findRunByKey(
+  reader: RecordReader,
+  projectId: string,
+  idempotencyKey: string,
+  ownerUserId: string | undefined,
+): Promise<RuntimeRunRecord | null> {
+  const [row] = await reader.select({ runId: runs.runId, ownerUserId: runs.ownerUserId }).from(runs)
+    .where(and(eq(runs.projectId, projectId), eq(runs.idempotencyKey, idempotencyKey),
+      ownerUserId === undefined ? undefined : eq(runs.ownerUserId, ownerUserId)));
+  if (row) {
+    const [record] = await readRunRecords(reader, [row.runId], {
+      kind: "project", ownerUserId: row.ownerUserId, projectId,
+    });
+    return record ?? null;
+  }
+  const [retired] = await reader.select({ idempotencyKey: runRequestKeys.idempotencyKey }).from(runRequestKeys)
+    .where(and(eq(runRequestKeys.projectId, projectId), eq(runRequestKeys.idempotencyKey, idempotencyKey),
+      ownerUserId === undefined ? undefined : eq(runRequestKeys.ownerUserId, ownerUserId)));
+  if (retired) throw new RuntimeRunIdentityConflictError("idempotency key belongs to a superseded Run");
+  return null;
 }
 
-function validateAdmission(
+async function findByIdentity(
+  reader: RecordReader,
+  ownerUserId: string,
+  projectId: string,
+  identity: RuntimeRunRecord["requestIdentity"],
+): Promise<RuntimeRunRecord | null> {
+  const record = await findRunByKey(reader, projectId, identity.idempotencyKey, ownerUserId);
+  if (record && record.requestIdentity.requestFingerprint !== identity.requestFingerprint) {
+    throw new RuntimeRunIdentityConflictError("idempotency key is already bound to different Run facts");
+  }
+  return record;
+}
+
+/** Replaces the Project's prior Runs and evaluations, then inserts the new Run in one transaction. */
+async function admitRun(
+  transaction: AdmissionWriter,
+  scope: RuntimeStoreScope,
+  runQueue: RunQueue,
   run: RuntimeRunRecord,
   records: readonly Sampling[],
   judges: readonly EvaluationRecord[],
-): void {
-  if (run.samplingIds.length === 0) throw new Error("Run must contain Samplings");
-  if (run.samplingIds.length !== records.length || run.samplingIds.some((id, index) => id !== records[index]?.samplingId)) {
-    throw new Error("Run Sampling scope must match the submitted records");
+): Promise<RuntimeRunAdmission> {
+  const [project] = await transaction.select({
+    ownerUserId: projects.ownerUserId,
+    sourceBranch: projects.sourceBranch,
+    evaluationOutputSchemaId: projects.evaluationOutputSchemaId,
+    evaluationOutputSchemaLocked: projects.evaluationOutputSchemaLocked,
+    initialLaunch: projects.initialLaunch,
+  })
+    .from(projects)
+    .where(and(eq(projects.projectId, run.projectId),
+      scope.kind === "user" ? eq(projects.ownerUserId, scope.ownerUserId) : undefined))
+    .for("update");
+  if (!project) throw new RuntimeEntityNotFoundError("project", run.projectId);
+  const owner = project.ownerUserId;
+  const existing = await findByIdentity(transaction, owner, run.projectId, run.requestIdentity);
+  if (existing) return { run: existing, created: false };
+  const [active] = await transaction.select({ runId: runs.runId }).from(runs)
+    .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, run.projectId), runActive(transaction)))
+    .limit(1);
+  if (active) throw new RuntimeProjectBusyError(run.projectId, active.runId);
+  if (scope.kind === "user" && (project.sourceBranch !== scope.release.sourceBranch
+    || run.sourceCommit !== scope.release.sourceCommit)) {
+    throw new RuntimeAdmissionConflictError("source-branch",
+      "Project source branch or Run source commit differs from the active Eval SP release");
   }
-  if (run.evaluationIds.length !== judges.length || run.evaluationIds.some((id, index) => id !== judges[index]?.evaluationId)) {
-    throw new Error("Run Evaluation scope must match the submitted records");
+  if (run.config.operation !== "execution" && project.evaluationOutputSchemaId === null) {
+    throw new RuntimeAdmissionConflictError("output-schema",
+      "Project evaluation output JSON Schema must be bound before evaluation admission");
   }
-  requireDistinct(run.samplingIds, "samplingIds");
-  requireDistinct(run.evaluationIds, "evaluationIds");
-  requireDistinct(judges.map((judge) => judge.samplingId), "evaluation samplingIds");
-  if (records.some((record) => record.projectId !== run.projectId)
-    || judges.some((judge) => !run.samplingIds.includes(judge.samplingId))) {
-    throw new Error("Run contains records outside its Project or Sampling scope");
+  const launch = launchFor(run);
+  if (project.initialLaunch === null && launch === null) {
+    throw new RuntimeAdmissionConflictError("empty-project",
+      "An empty Project cannot start with evaluation-only; select successful Samplings in an existing Project");
   }
-  if (run.phases.length === 1 && run.phases[0] === "execution") {
-    if (run.config.operation !== "execution" || judges.length !== 0 || !run.requestIdentity) {
-      throw new Error("Invalid execution Run scope");
-    }
-  } else if (run.phases.length === 1 && run.phases[0] === "evaluation") {
-    if (run.config.operation !== "evaluation" || judges.length !== records.length || run.requestIdentity) {
-      throw new Error("Invalid evaluation Run scope");
-    }
-  } else if (run.phases.length === 2 && run.phases[0] === "execution" && run.phases[1] === "evaluation") {
-    if (run.config.operation !== "pipeline" || judges.length !== records.length || !run.requestIdentity) {
-      throw new Error("Invalid pipeline Run scope");
+  if (project.initialLaunch !== null && launch !== null
+    && (project.initialLaunch.operation !== launch.operation || project.initialLaunch.configId !== launch.configId)) {
+    throw new RuntimeAdmissionConflictError("launch-selection", "Project launch selection cannot change after its first Run");
+  }
+  if (run.config.operation !== "evaluation") {
+    const { datasetId } = run.config.execution;
+    const [dataset] = await transaction.select({ datasetId: datasets.datasetId }).from(datasets)
+      .where(and(eq(datasets.ownerUserId, owner), eq(datasets.datasetId, datasetId), isNull(datasets.deletedAt)))
+      .for("share");
+    if (!dataset) throw new DatasetEntityNotFoundError("dataset", datasetId);
+  }
+
+  const projectSamplingIds = transaction.select({ samplingId: samplings.samplingId }).from(samplings)
+    .where(and(eq(samplings.ownerUserId, owner), eq(samplings.projectId, run.projectId)));
+  await transaction.delete(runs).where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, run.projectId)));
+  await transaction.delete(evaluations)
+    .where(and(eq(evaluations.ownerUserId, owner), inArray(evaluations.samplingId, projectSamplingIds)));
+  if (run.config.operation !== "evaluation") {
+    await transaction.delete(samplings).where(and(eq(samplings.ownerUserId, owner), eq(samplings.projectId, run.projectId)));
+  }
+  await transaction.insert(runRequestKeys).values({
+    ownerUserId: owner, projectId: run.projectId, idempotencyKey: run.requestIdentity.idempotencyKey,
+  });
+  const [inserted] = await transaction.insert(runs).values({
+    runId: run.runId,
+    ownerUserId: owner,
+    projectId: run.projectId,
+    sourceCommit: run.sourceCommit,
+    phases: run.phases,
+    config: run.config,
+    idempotencyKey: run.requestIdentity.idempotencyKey,
+    requestFingerprint: run.requestIdentity.requestFingerprint,
+  }).onConflictDoNothing().returning({ runId: runs.runId });
+  if (!inserted) throw new RuntimeRunIdentityConflictError(`Run identity already exists: ${run.runId}`);
+
+  if (run.config.operation === "evaluation") {
+    const available = await selectByIds(run.samplingIds, (batch) => transaction.select({ samplingId: samplings.samplingId })
+      .from(samplings).where(and(eq(samplings.ownerUserId, owner), eq(samplings.projectId, run.projectId),
+        inArray(samplings.samplingId, batch), samplingSucceeded())).for("share"), (row) => row.samplingId);
+    const unavailable = run.samplingIds.find((_samplingId, index) => available[index] === null);
+    if (unavailable !== undefined) {
+      throw new RuntimeAdmissionConflictError("sampling-unavailable",
+        `Sampling ${unavailable} has no successful execution in Project ${run.projectId}`);
     }
   } else {
-    throw new Error("Invalid Run phases");
+    for (const batch of sqlBatches(records)) {
+      await transaction.insert(samplings).values(batch.map((record) => ({
+        samplingId: record.samplingId, ownerUserId: owner, projectId: record.projectId,
+        sampleId: record.sampleId, facts: samplingFacts(record),
+      })));
+    }
   }
-  if (run.requestIdentity && (!run.requestIdentity.requestId || !run.requestIdentity.requestFingerprint
-    || run.requestIdentity.idempotencyKey === "")) {
-    throw new Error("Incomplete Run request identity");
+  const memberships = run.samplingIds.map((samplingId, position) => ({
+    ownerUserId: owner, runId: run.runId, samplingId, position,
+  }));
+  for (const batch of sqlBatches(memberships)) await transaction.insert(runSamplings).values(batch);
+  for (const batch of sqlBatches(judges)) {
+    await transaction.insert(evaluations).values(batch.map((judge) => ({
+      evaluationId: judge.evaluationId, ownerUserId: owner, samplingId: judge.samplingId, facts: evaluationFacts(judge),
+    })));
   }
+  const evaluationMemberships = judges.map((judge, position) => ({
+    ownerUserId: owner, runId: run.runId, evaluationId: judge.evaluationId, samplingId: judge.samplingId, position,
+  }));
+  for (const batch of sqlBatches(evaluationMemberships)) await transaction.insert(runEvaluations).values(batch);
+  if ((project.initialLaunch === null && launch !== null) ||
+    (run.config.operation !== "execution" && !project.evaluationOutputSchemaLocked)) {
+    await transaction.update(projects).set({
+      ...(project.initialLaunch === null && launch !== null ? { initialLaunch: launch } : {}),
+      ...(run.config.operation !== "execution" ? { evaluationOutputSchemaLocked: true } : {}),
+    })
+      .where(eq(projects.projectId, run.projectId));
+  }
+  await runQueue.enqueue(transaction, run.runId);
+  return { run: structuredClone(run), created: true };
 }
 
-export function createPostgresRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRecoveryStore {
-  const findByIdentity = async (
-    reader: RuntimeReader,
-    identity: NonNullable<RuntimeRunRecord["requestIdentity"]>,
-  ): Promise<RuntimeRunRecord | null> => {
-    const predicates = [eq(runs.requestId, identity.requestId)];
-    if (identity.idempotencyKey !== undefined) predicates.push(eq(runs.idempotencyKey, identity.idempotencyKey));
-    const matched = await reader.select({ runId: runs.runId }).from(runs).where(or(...predicates));
-    if (matched.length === 0) return null;
-    if (matched.length > 1) {
-      throw new RuntimeRunIdentityConflictError("requestId and idempotencyKey refer to different evaluation runs");
-    }
-    const [record] = await readRunRecords(reader, [matched[0]!.runId]);
-    if (record?.requestIdentity?.requestFingerprint !== identity.requestFingerprint) {
-      throw new RuntimeRunIdentityConflictError("request identity is already bound to different evaluation run facts");
-    }
-    return record ?? null;
-  };
+function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope, runQueue: RunQueue): RuntimeStore {
+  const owner = scope.kind === "user" ? scope.ownerUserId : undefined;
+  const recordScope: RunRecordScope = owner === undefined ? { kind: "worker" } : { kind: "owner", ownerUserId: owner };
+  const ownedRun = owner === undefined ? undefined : eq(runs.ownerUserId, owner);
 
   return {
+    async withRunDispatchGate(runId, dispatch) {
+      const started = await db.transaction(async (transaction) => {
+        const [run] = await transaction.select({ runId: runs.runId, stopRequested: runs.stopRequested })
+          .from(runs).where(and(eq(runs.runId, runId), ownedRun)).for("update");
+        if (!run) throw new RuntimeEntityNotFoundError("run", runId);
+        if (run.stopRequested) throw new RuntimeRunStoppedError(runId);
+        // Start the remote call before releasing the lock. Its response can be
+        // arbitrarily slow, so do not hold the transaction while awaiting it.
+        const outcome = dispatch().then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+        return { outcome };
+      });
+      const outcome = await started.outcome;
+      if (!outcome.ok) throw outcome.error;
+      return outcome.value;
+    },
     async getRun(runId) {
       return db.transaction(async (transaction) => (
-        await readRunRecords(transaction, [runId])
+        await readRunRecords(transaction, [runId], recordScope)
       )[0] ?? null, { isolationLevel: "repeatable read", accessMode: "read only" });
     },
-    async findRunByRequestId(requestId) {
-      return db.transaction(async (transaction) => {
-        const [row] = await transaction.select({ runId: runs.runId }).from(runs).where(eq(runs.requestId, requestId));
-        return row ? (await readRunRecords(transaction, [row.runId]))[0] ?? null : null;
-      }, { isolationLevel: "repeatable read", accessMode: "read only" });
-    },
-    async findRunByIdempotencyKey(idempotencyKey) {
-      return db.transaction(async (transaction) => {
-        const [row] = await transaction.select({ runId: runs.runId }).from(runs)
-          .where(eq(runs.idempotencyKey, idempotencyKey));
-        return row ? (await readRunRecords(transaction, [row.runId]))[0] ?? null : null;
-      }, { isolationLevel: "repeatable read", accessMode: "read only" });
+    async findRunByIdempotencyKey(projectId, idempotencyKey) {
+      return db.transaction(
+        (transaction) => findRunByKey(transaction, projectId, idempotencyKey, owner),
+        { isolationLevel: "repeatable read", accessMode: "read only" },
+      );
     },
     async createRunWithSamplings(run, records, judges) {
       validateAdmission(run, records, judges);
-      return db.transaction(async (transaction) => {
-        const identity = run.requestIdentity;
-        if (identity) {
-          const existing = await findByIdentity(transaction, identity);
-          if (existing) return { run: existing, created: false };
-        }
-        const [inserted] = await transaction.insert(runs).values({
-          runId: run.runId,
-          projectId: run.projectId,
-          phases: run.phases,
-          config: run.config,
-          requestId: identity?.requestId ?? null,
-          idempotencyKey: identity?.idempotencyKey ?? null,
-          requestFingerprint: identity?.requestFingerprint ?? null,
-        }).onConflictDoNothing().returning({ runId: runs.runId });
-        if (!inserted) {
-          if (identity) {
-            const existing = await findByIdentity(transaction, identity);
-            if (existing) return { run: existing, created: false };
-          }
-          throw new RuntimeRunIdentityConflictError(`Run identity already exists: ${run.runId}`);
-        }
-
-        if (run.phases[0] === "evaluation") {
-          const existingRecords = await transaction.select().from(samplings)
-            .where(inArray(samplings.samplingId, run.samplingIds)).for("share");
-          const byId = new Map(existingRecords.map((row) => [row.samplingId, row]));
-          for (const record of records) {
-            const stored = byId.get(record.samplingId);
-            if (!stored || stored.projectId !== run.projectId || stored.sampleId !== record.sampleId
-              || stored.facts.execution.status !== "succeeded") {
-              throw new Error(`Sampling ${record.samplingId} has no successful execution in Project ${run.projectId}`);
-            }
-          }
-        } else {
-          await transaction.insert(samplings).values(records.map((record) => ({
-            samplingId: record.samplingId, projectId: record.projectId,
-            sampleId: record.sampleId, facts: samplingFacts(record),
-          })));
-        }
-        await transaction.insert(runSamplings).values(run.samplingIds.map((samplingId, position) => ({
-          runId: run.runId, samplingId, position,
-        })));
-        if (judges.length > 0) {
-          await transaction.insert(evaluations).values(judges.map((judge) => ({
-            evaluationId: judge.evaluationId, samplingId: judge.samplingId, facts: evaluationFacts(judge),
-          })));
-          await transaction.insert(runEvaluations).values(judges.map((judge, position) => ({
-            runId: run.runId, evaluationId: judge.evaluationId, samplingId: judge.samplingId, position,
-          })));
-        }
-        await transaction.execute(sql`select pg_notify('eval_run_created', ${run.runId})`);
-        return { run: structuredClone(run), created: true };
-      });
-    },
-    async listRecoverableRunIds(afterRunId, limit = 100) {
-      if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
-        throw new Error("Recovery page size must be between 1 and 1000");
+      try {
+        return await db.transaction((transaction) => admitRun(transaction, scope, runQueue, run, records, judges));
+      } catch (error) {
+        const violation = constraintViolation(error);
+        if (violation === null) throw error;
+        throw new RuntimeInputError(`Run facts violate ${violation.constraint}`);
       }
-      const unfinished = ["queued", "starting", "running", "retrying"];
-      const executionPending = exists(db.select({ samplingId: runSamplings.samplingId })
-        .from(runSamplings)
-        .innerJoin(samplings, eq(runSamplings.samplingId, samplings.samplingId))
-        .where(and(
-          eq(runSamplings.runId, runs.runId),
-          inArray(sql<string>`${samplings.facts}->'execution'->>'status'`, unfinished),
-        )));
-      const evaluationPending = exists(db.select({ evaluationId: runEvaluations.evaluationId })
-        .from(runEvaluations)
-        .innerJoin(evaluations, eq(runEvaluations.evaluationId, evaluations.evaluationId))
-        .where(and(
-          eq(runEvaluations.runId, runs.runId),
-          inArray(sql<string>`${evaluations.facts}->'status'->>'status'`, unfinished),
-        )));
-      const rows = await db.select({ runId: runs.runId }).from(runs)
-        .where(and(afterRunId === undefined ? undefined : gt(runs.runId, afterRunId), or(executionPending, evaluationPending)))
-        .orderBy(runs.runId).limit(limit);
-      return rows.map(({ runId }) => runId);
     },
     async updateSampling(record, expected) {
       if (record.samplingId !== expected.samplingId
@@ -236,6 +277,7 @@ export function createPostgresRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRe
       const updated = await db.update(samplings).set({ facts: samplingFacts(record) })
         .where(and(eq(samplings.samplingId, record.samplingId), eq(samplings.projectId, record.projectId),
           eq(samplings.sampleId, record.sampleId),
+          owner === undefined ? undefined : eq(samplings.ownerUserId, owner),
           eq(samplings.facts, samplingFacts(expected))))
         .returning({ samplingId: samplings.samplingId });
       if (updated.length === 0) {
@@ -243,8 +285,10 @@ export function createPostgresRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRe
       }
     },
     async getSampling(samplingId) {
-      const [row] = await db.select().from(samplings).where(eq(samplings.samplingId, samplingId));
-      return row ? samplingFromRow(row) : null;
+      return (await readSamplings(db, [samplingId], owner))[0] ?? null;
+    },
+    getSamplings(samplingIds) {
+      return readSamplings(db, samplingIds, owner);
     },
     async updateEvaluation(record, expected) {
       if (record.evaluationId !== expected.evaluationId || record.samplingId !== expected.samplingId) {
@@ -252,6 +296,7 @@ export function createPostgresRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRe
       }
       const updated = await db.update(evaluations).set({ facts: evaluationFacts(record) })
         .where(and(eq(evaluations.evaluationId, record.evaluationId), eq(evaluations.samplingId, record.samplingId),
+          owner === undefined ? undefined : eq(evaluations.ownerUserId, owner),
           eq(evaluations.facts, evaluationFacts(expected))))
         .returning({ evaluationId: evaluations.evaluationId });
       if (updated.length === 0) {
@@ -259,13 +304,88 @@ export function createPostgresRuntimeStore(db: EvalDb): RuntimeStore & RuntimeRe
       }
     },
     async getEvaluation(evaluationId) {
-      const [row] = await db.select().from(evaluations).where(eq(evaluations.evaluationId, evaluationId));
-      return row ? evaluationFromRow(row) : null;
+      return (await readEvaluations(db, [evaluationId], owner))[0] ?? null;
     },
-    async listEvaluations(samplingId) {
-      const rows = await db.select().from(evaluations)
-        .where(eq(evaluations.samplingId, samplingId)).orderBy(evaluations.evaluationId);
-      return rows.map(evaluationFromRow);
+    getEvaluations(evaluationIds) {
+      return readEvaluations(db, evaluationIds, owner);
+    },
+    listEvaluations(samplingId) {
+      return listSamplingEvaluations(db, samplingId, owner);
+    },
+  };
+}
+
+export function createPostgresWorkerRuntimeStore(
+  db: EvalDb,
+  runQueue: RunQueue,
+): RuntimeStore & RuntimeRecoveryStore {
+  return {
+    ...createRuntimeStore(db, { kind: "worker" }, runQueue),
+    async isRunActive(runId) {
+      const [row] = await db.select({ runId: runs.runId }).from(runs)
+        .where(and(eq(runs.runId, runId), runActive(db)));
+      return row !== undefined;
+    },
+    async isRunStopRequested(runId) {
+      const [row] = await db.select({ stopRequested: runs.stopRequested }).from(runs)
+        .where(eq(runs.runId, runId));
+      return row?.stopRequested ?? false;
+    },
+    async requestRunStop(runId) {
+      await db.update(runs).set({ stopRequested: true }).where(and(eq(runs.runId, runId), runActive(db)));
+    },
+    async markRunStopFinalized(runId) {
+      const [updated] = await db.update(runs).set({ stopFinalized: true })
+        .where(and(eq(runs.runId, runId), eq(runs.stopRequested, true), runFinished(db)))
+        .returning({ runId: runs.runId });
+      return updated !== undefined;
+    },
+  };
+}
+
+export function createPostgresRuntimeStore(
+  db: EvalDb,
+  ownerUserId: string,
+  release: EvalSpRelease,
+  runQueue: RunQueue,
+): RuntimeStore {
+  return createRuntimeStore(db, {
+    kind: "user", ownerUserId: requireOwnerUserId(ownerUserId), release: requireEvalSpRelease(release),
+  }, runQueue);
+}
+
+/** Stop intent is serialized with Run admission through the owned Project row. */
+export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string, runQueue: RunQueue) {
+  const owner = requireOwnerUserId(ownerUserId);
+  return {
+    async getCurrentRun(projectId: string): Promise<{ runId: string; stopRequested?: true } | null> {
+      const [active] = await db.select({ runId: runs.runId, stopRequested: runs.stopRequested })
+        .from(runs).where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId),
+          runActive(db))).limit(1);
+      return active ? { runId: active.runId,
+        ...(active.stopRequested ? { stopRequested: true as const } : {}) } : null;
+    },
+    async stopRun(projectId: string, runId: string): Promise<{ runId: string; stopRequested: true } | null> {
+      return db.transaction(async (transaction) => {
+        const [project] = await transaction.select({ projectId: projects.projectId }).from(projects)
+          .where(and(eq(projects.projectId, projectId), eq(projects.ownerUserId, owner)))
+          .for("update");
+        if (!project) return null;
+        const [target] = await transaction.select({ stopRequested: runs.stopRequested })
+          .from(runs).where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId),
+            eq(runs.runId, runId)));
+        if (!target) return null;
+        const [active] = await transaction.select({ runId: runs.runId }).from(runs)
+          .where(and(eq(runs.runId, runId), runActive(transaction)));
+        if (!active) {
+          if (target.stopRequested) return { runId, stopRequested: true };
+          throw new ProjectRunStopConflictError();
+        }
+        if (!target.stopRequested) await transaction.update(runs).set({ stopRequested: true }).where(eq(runs.runId, runId));
+        // A stop whose cleanup has not finalized gets its job back, e.g. after an exhausted retry budget.
+        await runQueue.enqueue(transaction, runId);
+        return { runId, stopRequested: true };
+      });
     },
   };
 }

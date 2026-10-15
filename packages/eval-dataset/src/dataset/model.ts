@@ -1,70 +1,17 @@
-import type { JsonValue } from "@eval-platform/eval-contracts";
+import { jsonObjectSchema, type JsonValue } from "@eval-platform/eval-contracts";
 import { z } from "zod";
 
-const identifierSchema = z.string().min(1).refine((value) => value === value.trim(), {
-  message: "Identifiers must not have leading or trailing whitespace",
-});
-
-const jsonValueSchema: z.ZodType<JsonValue> = z.unknown().transform((input, context) => {
-  try {
-    const serialized = JSON.stringify(input, function (
-      this: Record<string, unknown>,
-      key: string,
-      value: unknown,
-    ) {
-      const original = this[key];
-      if (!Object.is(original, value)) {
-        throw new TypeError("JSON values must not depend on toJSON transformations");
-      }
-      if (
-        original === null
-        || typeof original === "string"
-        || typeof original === "boolean"
-        || (
-          typeof original === "number"
-          && Number.isFinite(original)
-          && (!Number.isInteger(original) || Number.isSafeInteger(original))
-        )
-      ) {
-        return original;
-      }
-      if (typeof original === "object") {
-        const prototype = Object.getPrototypeOf(original);
-        if (Array.isArray(original) || prototype === Object.prototype || prototype === null) {
-          return original;
-        }
-      }
-      throw new TypeError("Expected a JSON value");
-    });
-    if (serialized === undefined) throw new TypeError("Expected a JSON value");
-    return JSON.parse(serialized) as JsonValue;
-  } catch {
-    context.addIssue({
-      code: "custom",
-      message: "Expected finite, acyclic JSON values with safe integers and without unsupported types or toJSON conversions; encode large integers as strings",
-    });
-    return z.NEVER;
-  }
-});
-
-const jsonRecordSchema = jsonValueSchema.pipe(z.custom<Readonly<Record<string, JsonValue>>>(
-  (value) => value !== null && typeof value === "object" && !Array.isArray(value),
-  "Expected a JSON object",
-));
-
 // Match SP packages/http/src/mcp-observation.ts for UUID identities persisted in PostgreSQL.
-const platformIdSchema = z.uuid().transform((value) => value.toLowerCase());
-export const datasetIdSchema = platformIdSchema;
-export const dataIdSchema = platformIdSchema;
+export const platformIdSchema = z.uuid().transform((value) => value.toLowerCase());
 
 export const initialSessionRefSchema = z.strictObject({
-  bundleId: identifierSchema,
-  sessionId: identifierSchema,
+  bundleId: platformIdSchema,
+  sessionId: platformIdSchema,
 }).readonly();
 
 export const initialMaterialsRefSchema = z.strictObject({
-  bundleId: identifierSchema,
-  materialId: identifierSchema,
+  bundleId: platformIdSchema,
+  materialId: platformIdSchema,
 }).readonly();
 
 const datasetFieldsSchema = z.strictObject({
@@ -76,23 +23,27 @@ const dataFieldsSchema = z.object({
   userPrompt: z.string().refine((value) => value.trim().length > 0, {
     message: "userPrompt must not be blank",
   }),
+  evalPrompt: z.string().refine((value) => value.trim().length > 0, {
+    message: "evalPrompt must not be blank",
+  }).optional(),
   initialSession: initialSessionRefSchema.optional(),
   initialMaterials: initialMaterialsRefSchema.optional(),
+  evalInitialMaterials: initialMaterialsRefSchema.optional(),
 });
 
 export const datasetInputSchema = datasetFieldsSchema.readonly();
 export const dataInputSchema = createDataRecordSchema(
   dataFieldsSchema.extend({ dataId: z.never().optional() }),
 );
-export const datasetSchema = datasetFieldsSchema.extend({ datasetId: datasetIdSchema }).readonly();
+export const datasetSchema = datasetFieldsSchema.extend({ datasetId: platformIdSchema }).readonly();
 export const dataSchema = createDataRecordSchema(
-  dataFieldsSchema.extend({ dataId: dataIdSchema }),
+  dataFieldsSchema.extend({ dataId: platformIdSchema }),
 );
 
 export const datasetDocumentSchema = z.strictObject({
-  dataset: datasetFieldsSchema.extend({ datasetId: datasetIdSchema.optional() }).readonly(),
+  dataset: datasetFieldsSchema.extend({ datasetId: platformIdSchema.optional() }).readonly(),
   data: z.array(createDataRecordSchema(
-    dataFieldsSchema.extend({ dataId: dataIdSchema.optional() }),
+    dataFieldsSchema.extend({ dataId: platformIdSchema.optional() }),
   )).readonly(),
 }).readonly().superRefine((document, context) => rejectDuplicateDataIds(document.data, context));
 
@@ -111,7 +62,7 @@ export type DatasetDocument = z.infer<typeof datasetDocumentSchema>;
 export type DatasetSnapshot = z.infer<typeof datasetSnapshotSchema>;
 
 function createDataRecordSchema<Schema extends z.ZodType<Record<string, unknown>>>(fields: Schema) {
-  return jsonRecordSchema.transform((data, context) => {
+  return jsonObjectSchema.transform((data, context) => {
     const parsed = fields.safeParse(data);
     if (!parsed.success) {
       for (const issue of parsed.error.issues) context.addIssue({ ...issue });

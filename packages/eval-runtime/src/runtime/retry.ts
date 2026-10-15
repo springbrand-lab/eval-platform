@@ -1,41 +1,42 @@
+import type { RetryPolicy } from "@eval-platform/eval-contracts";
 import { DEFAULT_RETRY_POLICY } from "../config/model.js";
-
-export { DEFAULT_RETRY_POLICY } from "../config/model.js";
-
-export type RetryableFailureKind = "network" | "llm" | "website" | "submission-timeout";
+import type { AgentFailureKind } from "../harness/model.js";
+import { RuntimeInputError } from "./errors.js";
 
 export type RetryOperation = "creation" | "initialization" | "submission" | "status" | "collection" | "resources" | "persistence" | "restart";
 
 export interface RetryDecision {
   readonly shouldRetry: boolean;
-  readonly reason?: RetryableFailureKind;
+  readonly reason?: AgentFailureKind;
   readonly backoffMs?: number;
 }
 
 export interface RetryController {
   decide(input: {
     readonly operation: RetryOperation;
-    readonly failureKind: RetryableFailureKind;
+    readonly failureKind: AgentFailureKind;
     readonly attemptNumber: number;
   }): Promise<RetryDecision>;
 }
 
-export function createRetryController(
-  policy: {
-    readonly maxRestarts: number;
-    readonly initialBackoffMs: number;
-    readonly maxBackoffMs: number;
-  } = DEFAULT_RETRY_POLICY,
-): RetryController {
-  if (!Number.isInteger(policy.maxRestarts) || policy.maxRestarts < 0) {
-    throw new Error("maxRestarts must be a non-negative integer");
+export function requireRetryPolicy(policy: unknown): asserts policy is RetryPolicy {
+  if (policy === null || typeof policy !== "object" || Array.isArray(policy)) {
+    throw new RuntimeInputError("retryPolicy must be an object", "retryPolicy");
   }
-  if (!Number.isFinite(policy.initialBackoffMs) || policy.initialBackoffMs < 0) {
-    throw new Error("initialBackoffMs must be non-negative");
+  const { maxRestarts, initialBackoffMs, maxBackoffMs } = policy as Partial<Record<keyof RetryPolicy, unknown>>;
+  if (typeof maxRestarts !== "number" || !Number.isInteger(maxRestarts) || maxRestarts < 0) {
+    throw new RuntimeInputError("retryPolicy.maxRestarts must be a non-negative integer", "retryPolicy.maxRestarts");
   }
-  if (!Number.isFinite(policy.maxBackoffMs) || policy.maxBackoffMs < policy.initialBackoffMs) {
-    throw new Error("maxBackoffMs must be at least initialBackoffMs");
+  if (typeof initialBackoffMs !== "number" || !Number.isFinite(initialBackoffMs) || initialBackoffMs < 0) {
+    throw new RuntimeInputError("retryPolicy.initialBackoffMs must be non-negative", "retryPolicy.initialBackoffMs");
   }
+  if (typeof maxBackoffMs !== "number" || !Number.isFinite(maxBackoffMs) || maxBackoffMs < initialBackoffMs) {
+    throw new RuntimeInputError("retryPolicy.maxBackoffMs must be at least initialBackoffMs", "retryPolicy.maxBackoffMs");
+  }
+}
+
+export function createRetryController(policy: RetryPolicy = DEFAULT_RETRY_POLICY): RetryController {
+  requireRetryPolicy(policy);
 
   return {
     async decide(input) {

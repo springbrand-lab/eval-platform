@@ -1,145 +1,219 @@
-import { describe, expect, it, vi } from "vitest";
-import type { EvalRunWorkerOptions, RunNotifications } from "./worker.js";
-import { startEvalRunWorker } from "./worker.js";
+import type { EvalRunResumer, RuntimeRecoveryStore } from "@eval-platform/eval-runtime";
+import type { JobWithMetadata, PgBoss } from "pg-boss";
+import pino from "pino";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { RUN_QUEUE, type RunJob } from "./run-worker-queue.js";
+import { createRunJobHandler, RunStillActiveError, startEvalRunWorker, STOP_POLL_MS } from "./worker.js";
 
-function makeNotifications() {
-  let handlers: Parameters<RunNotifications["subscribe"]>[0] | undefined;
-  const close = vi.fn(async () => undefined);
-  const notifications: RunNotifications = {
-    async subscribe(registered) {
-      handlers = registered;
-      registered.onConnected();
-      return { close };
-    },
+const retry = { final: false };
+const finalRetry = { final: true };
+
+function fixture(input: { active?: boolean[]; stopRequested?: () => boolean } = {}) {
+  const active = [...(input.active ?? [true, false])];
+  const runtime = {
+    resume: vi.fn<EvalRunResumer["resume"]>(async () => undefined),
+    interrupt: vi.fn<EvalRunResumer["interrupt"]>(async () => undefined),
+    stop: vi.fn<EvalRunResumer["stop"]>(async () => undefined),
   };
-  return {
-    notifications,
-    close,
-    notify(runId: string) { handlers?.onRunId(runId); },
-    reconnect() { handlers?.onConnected(); },
+  const store = {
+    isRunActive: vi.fn<RuntimeRecoveryStore["isRunActive"]>(async () => active.shift() ?? false),
+    isRunStopRequested: vi.fn<RuntimeRecoveryStore["isRunStopRequested"]>(async () => input.stopRequested?.() ?? false),
+    requestRunStop: vi.fn<RuntimeRecoveryStore["requestRunStop"]>(async () => undefined),
+    markRunStopFinalized: vi.fn<RuntimeRecoveryStore["markRunStopFinalized"]>(async () => true),
   };
+  const logger = pino({ level: "silent" });
+  return { runtime, store, logger, handle: createRunJobHandler({ runtime, store, logger }) };
 }
 
-function workerOptions(
-  notifications: RunNotifications,
-  runIds: readonly string[],
-  resume: EvalRunWorkerOptions["runtime"]["resume"],
-): EvalRunWorkerOptions {
-  return {
-    notifications,
-    runtime: { resume },
-    store: { listRecoverableRunIds: vi.fn(async (afterRunId?: string, limit = 100) => (
-      runIds.filter((runId) => afterRunId === undefined || runId > afterRunId).slice(0, limit)
-    )) },
-    scanIntervalMs: 60_000,
-  };
-}
+describe("Run job handler", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
 
-describe("single-instance Run worker", () => {
-  it("scans after subscribing and does not execute an active Run twice", async () => {
-    const source = makeNotifications();
+  it("completes a job whose Run is no longer active without resuming it", async () => {
+    const { runtime, handle } = fixture({ active: [false] });
+    await handle("run-1", retry);
+    expect(runtime.resume).not.toHaveBeenCalled();
+    expect(runtime.stop).not.toHaveBeenCalled();
+  });
+
+  it("resumes an active Run and completes once every stage is terminal", async () => {
+    const { runtime, handle } = fixture({ active: [true, false] });
+    await handle("run-1", retry);
+    expect(runtime.resume).toHaveBeenCalledExactlyOnceWith("run-1", expect.any(AbortSignal));
+    expect(runtime.resume.mock.calls[0]![1]!.aborted).toBe(false);
+    expect(runtime.stop).not.toHaveBeenCalled();
+  });
+
+  it("fails the job for a backoff retry while the Run stays active", async () => {
+    const { handle } = fixture({ active: [true, true] });
+    await expect(handle("run-1", retry)).rejects.toBeInstanceOf(RunStillActiveError);
+  });
+
+  it("interrupts an active Run on a persisted stop request, then finalizes the stop", async () => {
+    let stopRequested = false;
+    const { runtime, store, handle } = fixture({ active: [true, false], stopRequested: () => stopRequested });
     let finish!: () => void;
-    const gate = new Promise<void>((resolve) => { finish = resolve; });
-    const resume = vi.fn(async (_runId: string) => gate);
-    const worker = await startEvalRunWorker(workerOptions(source.notifications, ["run-1"], resume));
-    try {
-      await vi.waitFor(() => expect(resume).toHaveBeenCalledExactlyOnceWith("run-1"));
-      source.notify("run-1");
-      await worker.scan();
-      expect(resume).toHaveBeenCalledTimes(1);
-    } finally {
-      finish();
-      await worker.close();
-    }
-    expect(source.close).toHaveBeenCalledOnce();
+    runtime.resume.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const handling = handle("run-1", retry);
+    await vi.waitFor(() => expect(runtime.resume).toHaveBeenCalledOnce());
+    const signal = runtime.resume.mock.calls[0]![1]!;
+
+    await vi.advanceTimersByTimeAsync(STOP_POLL_MS);
+    expect(signal.aborted).toBe(false);
+    stopRequested = true;
+    await vi.advanceTimersByTimeAsync(STOP_POLL_MS);
+    expect(signal.aborted).toBe(true);
+    expect(runtime.interrupt).toHaveBeenCalledExactlyOnceWith("run-1");
+    await vi.advanceTimersByTimeAsync(STOP_POLL_MS);
+    expect(runtime.interrupt).toHaveBeenCalledTimes(2);
+    expect(runtime.stop).not.toHaveBeenCalled();
+
+    finish();
+    await handling;
+    expect(runtime.stop).toHaveBeenCalledExactlyOnceWith("run-1");
+    expect(store.markRunStopFinalized).toHaveBeenCalledExactlyOnceWith("run-1");
+    await vi.advanceTimersByTimeAsync(STOP_POLL_MS * 3);
+    expect(runtime.interrupt).toHaveBeenCalledTimes(2);
   });
 
-  it("re-scans on reconnection and recovers a Run after its first attempt fails", async () => {
-    const source = makeNotifications();
-    const runIds: string[] = [];
-    const resume = vi.fn<() => Promise<void>>()
-      .mockRejectedValueOnce(new Error("temporary database outage"))
-      .mockResolvedValue(undefined);
-    const onError = vi.fn();
-    const worker = await startEvalRunWorker({
-      ...workerOptions(source.notifications, runIds, resume),
-      onError,
+  it("finalizes a stop requested before the job ran without resuming work", async () => {
+    const { runtime, store, handle } = fixture({ active: [true, false], stopRequested: () => true });
+    await handle("run-1", retry);
+    expect(runtime.resume).not.toHaveBeenCalled();
+    expect(runtime.stop).toHaveBeenCalledExactlyOnceWith("run-1");
+    expect(store.markRunStopFinalized).toHaveBeenCalledExactlyOnceWith("run-1");
+  });
+
+  it("retries a stop whose cleanup could not be finalized yet", async () => {
+    const { store, handle } = fixture({ active: [true, true], stopRequested: () => true });
+    store.markRunStopFinalized.mockResolvedValue(false);
+    await expect(handle("run-1", retry)).rejects.toBeInstanceOf(RunStillActiveError);
+  });
+
+  it("stops and cleans up a Run that is still active on the final retry", async () => {
+    let stopRequested = false;
+    const { runtime, store, handle } = fixture({ active: [true, true, false], stopRequested: () => stopRequested });
+    store.requestRunStop.mockImplementation(async () => { stopRequested = true; });
+    await handle("run-1", finalRetry);
+    expect(runtime.resume).toHaveBeenCalledOnce();
+    expect(store.requestRunStop).toHaveBeenCalledExactlyOnceWith("run-1");
+    expect(runtime.stop).toHaveBeenCalledExactlyOnceWith("run-1");
+    expect(store.markRunStopFinalized).toHaveBeenCalledExactlyOnceWith("run-1");
+  });
+
+  it("still stops and cleans up when the final pass throws", async () => {
+    let stopRequested = false;
+    const { runtime, store, handle } = fixture({ active: [true, true, false], stopRequested: () => stopRequested });
+    runtime.resume.mockRejectedValue(new Error("Eval SP unavailable"));
+    store.requestRunStop.mockImplementation(async () => { stopRequested = true; });
+    await handle("run-1", finalRetry);
+    expect(store.requestRunStop).toHaveBeenCalledExactlyOnceWith("run-1");
+    expect(runtime.stop).toHaveBeenCalledExactlyOnceWith("run-1");
+    expect(store.markRunStopFinalized).toHaveBeenCalledExactlyOnceWith("run-1");
+  });
+
+  it("rethrows a failing pass before the final retry", async () => {
+    const { runtime, store, handle } = fixture({ active: [true] });
+    runtime.resume.mockRejectedValue(new Error("Eval SP unavailable"));
+    await expect(handle("run-1", retry)).rejects.toThrow("Eval SP unavailable");
+    expect(store.requestRunStop).not.toHaveBeenCalled();
+  });
+
+  it("does not request a system stop when the final pass finishes the Run", async () => {
+    const { runtime, store, handle } = fixture({ active: [true, false] });
+    await handle("run-1", finalRetry);
+    expect(store.requestRunStop).not.toHaveBeenCalled();
+    expect(runtime.stop).not.toHaveBeenCalled();
+  });
+
+  it("keeps watching for a stop after a transient stop-check failure", async () => {
+    let checks = 0;
+    const { runtime, store, logger, handle } = fixture({ active: [true, false] });
+    const logged = vi.spyOn(logger, "error");
+    store.isRunStopRequested.mockImplementation(async () => {
+      checks += 1;
+      if (checks === 2) throw new Error("connection reset");
+      return checks > 2;
     });
-    try {
-      runIds.push("run-1");
-      source.notify("run-1");
-      await vi.waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-        message: "temporary database outage",
-      })));
-      source.reconnect();
-      await vi.waitFor(() => expect(resume).toHaveBeenCalledTimes(2));
-      expect(resume).toHaveBeenNthCalledWith(2, "run-1");
-    } finally {
-      await worker.close();
-    }
+    let finish!: () => void;
+    runtime.resume.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const handling = handle("run-1", retry);
+    await vi.waitFor(() => expect(runtime.resume).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(STOP_POLL_MS);
+    expect(logged).toHaveBeenCalledWith(expect.objectContaining({ runId: "run-1" }), "run_stop_check_failed");
+    await vi.advanceTimersByTimeAsync(STOP_POLL_MS);
+    expect(runtime.resume.mock.calls[0]![1]!.aborted).toBe(true);
+    finish();
+    await handling;
+    expect(runtime.stop).toHaveBeenCalledOnce();
   });
+});
 
-  it("pages through unfinished Runs and stops receiving work after close", async () => {
-    const source = makeNotifications();
-    const runIds = Array.from({ length: 101 }, (_unused, index) => `run-${String(index).padStart(3, "0")}`);
-    const resume = vi.fn(async (_runId: string) => undefined);
-    const options = workerOptions(source.notifications, runIds, resume);
-    const worker = await startEvalRunWorker(options);
-    await vi.waitFor(() => expect(resume).toHaveBeenCalledTimes(101));
-    expect(options.store.listRecoverableRunIds).toHaveBeenCalledWith("run-099", 100);
+describe("Run worker", () => {
+  function fakeBoss() {
+    let handler: ((jobs: JobWithMetadata<RunJob>[]) => Promise<unknown>) | undefined;
+    const boss = {
+      work: vi.fn(async (_name: string, _options: object, registered: typeof handler) => {
+        handler = registered;
+        return "worker-id";
+      }),
+      offWork: vi.fn(async () => undefined),
+    };
+    const job = (runId: string, retryCount: number) => ({
+      id: `job-${runId}`, name: RUN_QUEUE, data: { runId }, retryCount, retryLimit: 2,
+    }) as JobWithMetadata<RunJob>;
+    return {
+      boss: boss as unknown as Pick<PgBoss, "work" | "offWork">,
+      work: boss.work,
+      offWork: boss.offWork,
+      deliver: (runId: string, retryCount = 0) => handler!([job(runId, retryCount)]),
+    };
+  }
+
+  it("consumes Run jobs with the configured local concurrency and stops fetching on close", async () => {
+    const source = fakeBoss();
+    const { runtime, store, logger } = fixture({ active: [true, false] });
+    const worker = await startEvalRunWorker({ boss: source.boss, runtime, store, logger, concurrency: 3 });
+    expect(source.work).toHaveBeenCalledExactlyOnceWith(RUN_QUEUE, { batchSize: 1, localConcurrency: 3, includeMetadata: true }, expect.any(Function));
+
+    await source.deliver("run-1");
+    expect(runtime.resume).toHaveBeenCalledExactlyOnceWith("run-1", expect.any(AbortSignal));
     await worker.close();
-    source.notify("run-102");
-    await worker.scan();
-    expect(resume).toHaveBeenCalledTimes(101);
+    expect(source.offWork).toHaveBeenCalledExactlyOnceWith(RUN_QUEUE, { wait: true });
   });
 
-  it("limits active Runs without serializing all work into one Run", async () => {
-    const source = makeNotifications();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const resume = vi.fn(async (_runId: string) => gate);
-    const worker = await startEvalRunWorker({
-      ...workerOptions(source.notifications, ["run-1", "run-2", "run-3"], resume),
-      maxConcurrentRuns: 2,
-    });
-    try {
-      await vi.waitFor(() => expect(resume).toHaveBeenCalledTimes(2));
-      expect(resume.mock.calls.map(([runId]) => runId)).toEqual(["run-1", "run-2"]);
-      release();
-      await vi.waitFor(() => expect(resume).toHaveBeenCalledTimes(3));
-    } finally {
-      await worker.close();
-      release();
-    }
+  it("reports a deferred Run without an error log and rethrows so pg-boss retries it", async () => {
+    const source = fakeBoss();
+    const { runtime, store, logger } = fixture({ active: [true, true] });
+    const info = vi.spyOn(logger, "info");
+    const error = vi.spyOn(logger, "error");
+    await startEvalRunWorker({ boss: source.boss, runtime, store, logger, concurrency: 1 });
+    await expect(source.deliver("run-1")).rejects.toBeInstanceOf(RunStillActiveError);
+    expect(info).toHaveBeenCalledWith({ runId: "run-1" }, "run_job_deferred");
+    expect(error).not.toHaveBeenCalled();
   });
 
-  it("rejects an unavailable listener before running the startup scan", async () => {
-    const options = workerOptions({
-      async subscribe() { throw new Error("cannot connect to PostgreSQL"); },
-    }, ["run-1"], vi.fn(async () => undefined));
-    await expect(startEvalRunWorker(options)).rejects.toThrow("cannot connect to PostgreSQL");
-    expect(options.store.listRecoverableRunIds).not.toHaveBeenCalled();
+  it("marks the job's last retry as final", async () => {
+    const source = fakeBoss();
+    let stopRequested = false;
+    const { runtime, store, logger } = fixture({ active: [true, true, false], stopRequested: () => stopRequested });
+    store.requestRunStop.mockImplementation(async () => { stopRequested = true; });
+    await startEvalRunWorker({ boss: source.boss, runtime, store, logger, concurrency: 1 });
+    await source.deliver("run-1", 2);
+    expect(store.requestRunStop).toHaveBeenCalledExactlyOnceWith("run-1");
+    expect(runtime.stop).toHaveBeenCalledExactlyOnceWith("run-1");
   });
 
-  it("drains active Runs before closing and ignores new wakeups during shutdown", async () => {
-    const source = makeNotifications();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const resume = vi.fn(async (_runId: string) => gate);
-    const worker = await startEvalRunWorker(workerOptions(source.notifications, ["run-1"], resume));
-    await vi.waitFor(() => expect(resume).toHaveBeenCalledExactlyOnceWith("run-1"));
-
-    let closed = false;
-    const closing = worker.close().then(() => { closed = true; });
-    await vi.waitFor(() => expect(source.close).toHaveBeenCalledOnce());
-    source.notify("run-2");
-    expect(closed).toBe(false);
-    expect(resume).toHaveBeenCalledTimes(1);
-
-    release();
-    await closing;
-    await worker.close();
-    expect(closed).toBe(true);
-    expect(resume).toHaveBeenCalledTimes(1);
+  it("logs a failed Run pass with redacted diagnostics and rethrows it", async () => {
+    const source = fakeBoss();
+    const { runtime, store, logger } = fixture({ active: [true] });
+    runtime.resume.mockRejectedValue(new Error("request to https://user:secret@sp.test failed"));
+    const error = vi.spyOn(logger, "error");
+    await startEvalRunWorker({ boss: source.boss, runtime, store, logger, concurrency: 1 });
+    await expect(source.deliver("run-1")).rejects.toThrow("failed");
+    expect(error).toHaveBeenCalledWith({
+      runId: "run-1",
+      error: expect.objectContaining({ message: "request to https://[Redacted]@sp.test failed" }),
+    }, "run_job_failed");
   });
 });

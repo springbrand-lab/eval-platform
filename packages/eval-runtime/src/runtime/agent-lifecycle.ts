@@ -4,28 +4,41 @@ import type {
   AgentResourceScope,
   AgentStatus,
   HarnessConfig,
+  RetryPolicy,
   Sampling,
   SamplingStatus,
-  SpHarnessConfig,
 } from "@eval-platform/eval-contracts";
+import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 
 import type {
+  AgentFailureKind,
   AgentHandle,
   AgentSubmission,
   EnsureAgentInput,
   EvaluationWorkspaceBinding,
   Harness,
   HarnessRuntimeOptions,
-} from "../harness/index.js";
+} from "../harness/model.js";
+import { AGENT_FAILURE_KINDS } from "../harness/model.js";
 import type {
   RetryController,
   RetryOperation,
-  RetryableFailureKind,
 } from "./retry.js";
 import { validateResourceSnapshot } from "./resources.js";
-import { RuntimeRecordPersistenceError } from "./record-errors.js";
+import type { RuntimeStore } from "./store.js";
+import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 
 export type AgentLifecycleStage = "execution" | "evaluation";
+
+export function agentOperationKey(
+  stage: AgentLifecycleStage,
+  samplingId: string,
+  attemptNumber: number,
+): string {
+  return attemptNumber === 1
+    ? `${stage}:${samplingId}`
+    : `${stage}:${samplingId}:restart:${attemptNumber}`;
+}
 
 export interface AgentAttemptRecord {
   readonly attemptNumber: number;
@@ -50,7 +63,22 @@ export interface AgentLifecycleDependencies {
   readonly idFactory: () => string;
   readonly now: () => string;
   readonly sleep: (milliseconds: number) => Promise<void>;
-  readonly onError?: (error: Error) => void;
+  readonly onError: (error: Error) => void;
+}
+
+/** Report a failure that must not interrupt the Run; a reporter that throws is the last resort for stderr. */
+export function reportError(onError: (error: Error) => void, error: Error): void {
+  try {
+    onError(error);
+  } catch (reportingError) {
+    console.error(error, reportingError);
+  }
+}
+
+/** Everything an execution or evaluation stage needs to drive and persist one record. */
+export interface StageDependencies extends AgentLifecycleDependencies {
+  readonly store: RuntimeStore;
+  readonly createRetryController: (policy?: RetryPolicy) => RetryController;
 }
 
 export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOutput> {
@@ -58,9 +86,9 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   readonly role: AgentRole;
   readonly projectId: string;
   readonly samplingId: string;
-  readonly submissionId: string;
+  readonly chatId: string;
   readonly evaluationWorkspace?: EvaluationWorkspaceBinding;
-  readonly harnessConfig: SpHarnessConfig;
+  readonly harnessConfig: HarnessConfig;
   readonly prompt: string;
   readonly retryController: RetryController;
   readonly attempts: readonly TAttempt[];
@@ -76,6 +104,8 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   readonly collectOutput: (handle: AgentHandle) => Promise<TOutput>;
   readonly isSuccessfulOutput: (output: TOutput) => boolean;
   readonly outputFailure: (output: TOutput) => AgentOperationError;
+  /** The caller atomically persists the final stage state with required evidence. */
+  readonly deferFailureStatus?: boolean;
 }
 
 export interface AgentLifecycleResult<TOutput> {
@@ -87,7 +117,7 @@ export class AgentOperationError extends Error {
   constructor(
     message: string,
     readonly retryable: boolean,
-    readonly failureKind: RetryableFailureKind,
+    readonly failureKind: AgentFailureKind,
     readonly cause?: unknown,
   ) {
     super(message);
@@ -98,7 +128,7 @@ export class AgentOperationError extends Error {
 class OutputCollectionError extends AgentOperationError {
   constructor(
     stage: AgentLifecycleStage,
-    details: ReturnType<typeof describeAgentError>,
+    details: AgentErrorDetails,
     cause: unknown,
     retryable = details.retryable,
   ) {
@@ -115,7 +145,7 @@ class OutputCollectionError extends AgentOperationError {
 class SubmissionStatusError extends AgentOperationError {
   constructor(
     stage: AgentLifecycleStage,
-    details: ReturnType<typeof describeAgentError>,
+    details: AgentErrorDetails,
     cause: unknown,
   ) {
     super(
@@ -128,12 +158,12 @@ class SubmissionStatusError extends AgentOperationError {
   }
 }
 
-class ConfirmedSubmissionFailure extends AgentOperationError {
+export class ConfirmedSubmissionFailure extends AgentOperationError {
   constructor(stage: AgentLifecycleStage, submission: AgentSubmission) {
     super(
-      submission.error ?? `${stage} submission ended with ${submissionStatus(submission) ?? submission.status}`,
+      submission.error ?? `${stage} submission ended with ${submission.status}`,
       submission.retryable === true,
-      normalizeFailureKind(submission.failureKind),
+      submission.failureKind ?? "network",
     );
     this.name = "ConfirmedSubmissionFailure";
   }
@@ -153,16 +183,6 @@ export function applyAttemptPatch<TAttempt extends AgentAttemptRecord>(
   } as TAttempt;
 }
 
-export function requireSpHarness(harness: HarnessConfig, role: AgentRole): SpHarnessConfig {
-  if (harness.kind !== "sp") {
-    throw new Error(`${role} harness kind ${harness.kind} is not implemented`);
-  }
-  if (harness.runtime && "workspaceMode" in harness.runtime) {
-    throw new Error(`${role} harness runtime.workspaceMode is no longer supported`);
-  }
-  return harness;
-}
-
 export function withExecutionStatus(
   sampling: Sampling,
   status: SamplingStatus,
@@ -174,11 +194,13 @@ export function withExecutionStatus(
   };
 }
 
-export function describeAgentError(error: unknown): {
+interface AgentErrorDetails {
   readonly message: string;
   readonly retryable: boolean;
-  readonly failureKind: RetryableFailureKind;
-} {
+  readonly failureKind: AgentFailureKind;
+}
+
+export function describeAgentError(error: unknown): AgentErrorDetails {
   if (error instanceof AgentOperationError) {
     return {
       message: error.message,
@@ -195,7 +217,7 @@ export function describeAgentError(error: unknown): {
     return {
       message: error.message,
       retryable: typeof candidate.retryable === "boolean" ? candidate.retryable : true,
-      failureKind: normalizeFailureKind(candidate.failureKind),
+      failureKind: AGENT_FAILURE_KINDS.find((kind) => kind === candidate.failureKind) ?? "network",
     };
   }
 
@@ -232,35 +254,33 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
     let terminalPatch: AttemptPatch | undefined = attempt.completedAt === undefined
       ? undefined
       : { status: attempt.status, completedAt: attempt.completedAt };
+    let dispatchBlocked = false;
 
     try {
       if (attempt.completedAt && !attempt.resources) {
         throw new AgentOperationError(attempt.error ?? "Agent failed before submission", false, "network");
       }
-      if (attempt.submissionId && attempt.submissionId !== options.submissionId) {
-        throw new AgentOperationError("Attempt belongs to a different Agent submission", false, "network");
-      }
       if (!handle) {
-        handle = await ensureAgentWithRetry(dependencies, options, retryController);
-      }
-
-      if (!attempt.submissionId) {
-        attempt = await options.updateAttempt(attempt, { submissionId: handle.submissionId });
+        handle = await ensureAgentWithRetry(dependencies, options);
       }
 
       if (attemptNumber === 1 && !attempt.resources) {
-        await prepareAgentWithRetry(dependencies, options, handle, retryController);
+        await prepareAgentWithRetry(dependencies, options, handle);
       }
 
-      const idempotencyKey = attemptNumber === 1
-        ? `${options.stage}:${options.samplingId}`
-        : `${options.stage}:${options.samplingId}:restart:${attemptNumber}`;
-      const resourceScope = { submissionId: handle.submissionId, idempotencyKey };
+      const idempotencyKey = agentOperationKey(options.stage, options.samplingId, attemptNumber);
+      let resourceScope: AgentResourceScope = {
+        chatId: handle.chatId,
+        idempotencyKey,
+        ...(attempt.submissionId === undefined ? {} : { submissionId: attempt.submissionId }),
+      };
       const storedScope = attempt.resources?.status === "collected"
         ? attempt.resources.snapshot.scope
         : attempt.resources?.scope;
-      if (storedScope && (storedScope.submissionId !== resourceScope.submissionId
-        || storedScope.idempotencyKey !== resourceScope.idempotencyKey)) {
+      if (storedScope && (storedScope.chatId !== resourceScope.chatId
+        || storedScope.idempotencyKey !== resourceScope.idempotencyKey
+        || (storedScope.submissionId !== undefined && resourceScope.submissionId !== undefined
+          && storedScope.submissionId !== resourceScope.submissionId))) {
         throw new AgentOperationError("Attempt resource scope does not match the submitted operation", false, "network");
       }
       if (!attempt.resources) {
@@ -272,12 +292,20 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
       try {
         if (attempt.completedAt) {
           if (attempt.status === "completed") {
-            terminal = { status: "completed", normalizedStatus: "completed" };
+            if (!attempt.submissionId) {
+              throw new AgentOperationError("Completed attempt has no Submission ID", false, "network");
+            }
+            terminal = { submissionId: attempt.submissionId, status: "completed" };
           } else {
-            const inspection = await inspectPersistedTerminalWithRetry(
-              dependencies, options, handle, idempotencyKey, retryController,
-            );
-            if (submissionStatus(inspection) !== attempt.status) {
+            const inspection = await inspectPersistedTerminalWithRetry(dependencies, options, handle, idempotencyKey);
+            if (attempt.submissionId && attempt.submissionId !== inspection.submissionId) {
+              throw new AgentOperationError("Persisted terminal belongs to a different Submission", false, "network");
+            }
+            if (!attempt.submissionId) {
+              attempt = await options.updateAttempt(attempt, { submissionId: inspection.submissionId });
+            }
+            resourceScope = { ...resourceScope, submissionId: inspection.submissionId };
+            if (inspection.status !== attempt.status) {
               throw new AgentOperationError("Agent operation disagrees with the persisted terminal status", false, "network");
             }
             terminal = inspection;
@@ -292,53 +320,72 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
               handle,
               idempotencyKey,
               attemptNumber === 1 ? "submission" : "restart",
-              retryController,
-            );
+            ).catch((error: unknown) => {
+              if (error instanceof RuntimeRunStoppedError) dispatchBlocked = true;
+              throw error;
+            });
+          if (attempt.submissionId && attempt.submissionId !== submission.submissionId) {
+            throw new AgentOperationError("Attempt belongs to a different Submission", false, "network");
+          }
+          if (!attempt.submissionId) {
+            attempt = await options.updateAttempt(attempt, { submissionId: submission.submissionId });
+          }
+          resourceScope = { ...resourceScope, submissionId: submission.submissionId };
           terminal = isTerminal(submission)
             ? submission
-            : await waitForTerminalWithRetry(
-                dependencies, options, handle, idempotencyKey, retryController,
-              );
-          const status = submissionStatus(terminal);
-          if (status === undefined) throw new Error(`${options.stage} submission has no terminal status`);
+            : await waitForTerminalWithRetry(dependencies, options, handle, idempotencyKey);
+          if (terminal.submissionId !== attempt.submissionId) {
+            throw new AgentOperationError("Terminal status belongs to a different Submission", false, "network");
+          }
           terminalPatch = {
-            status,
+            status: terminal.status,
             completedAt: dependencies.now(),
-            ...(isSuccessfulSubmission(terminal) ? {} : { error: submissionFailure(options.stage, terminal).message }),
+            ...(isSuccessfulSubmission(terminal) ? {} : { error: new ConfirmedSubmissionFailure(options.stage, terminal).message }),
           };
           attempt = await options.updateAttempt(attempt, terminalPatch);
         }
       } finally {
         const terminalSaved = terminalPatch === undefined || attempt.completedAt !== undefined;
-        const needsResources = attempt.resources?.status === "pending"
+        const needsResources = !dispatchBlocked && (attempt.resources?.status === "pending"
           || (attempt.resources?.status === "collected" && terminal !== undefined
-            && !attempt.resources.snapshot.finalized);
+            && !attempt.resources.snapshot.finalized));
         if (terminalSaved && needsResources) {
-          const resources = await collectResourcesWithRetry(
-            dependencies, options, handle, resourceScope, retryController,
-          );
+          const resources = await collectResourcesWithRetry(dependencies, options, handle, resourceScope);
+          if (resources.status === "collected" && attempt.submissionId
+            && resources.snapshot.scope.submissionId !== attempt.submissionId) {
+            throw new AgentOperationError("Resources belong to a different Submission", false, "network");
+          }
           if (attempt.resources?.status === "collected" && resources.status === "failed") {
             const reported = new Error(
               options.stage + " resource refresh failed for sampling " + options.samplingId
-              + " and submission " + resourceScope.submissionId + ": " + resources.error,
+              + " and Chat " + resourceScope.chatId + ": " + resources.error,
             );
-            try {
-              (dependencies.onError ?? console.error)(reported);
-            } catch (reportingError) {
-              console.error(reported, reportingError);
-            }
+            reportError(dependencies.onError, reported);
           } else {
-            attempt = await options.updateAttempt(attempt, { ...terminalPatch, resources });
+            attempt = await options.updateAttempt(attempt, {
+              ...terminalPatch,
+              ...(resources.status === "collected" && !attempt.submissionId
+                ? { submissionId: resources.snapshot.scope.submissionId }
+                : {}),
+              resources,
+            });
           }
         }
       }
       if (!terminal) throw new Error(`${options.stage} submission has no confirmed status`);
       if (!isSuccessfulSubmission(terminal)) {
-        throw submissionFailure(options.stage, terminal);
+        throw new ConfirmedSubmissionFailure(options.stage, terminal);
       }
 
       await options.setSamplingStatus("running");
-      const output = await collectOutputWithRetry(dependencies, options, handle, retryController);
+      const outputHandle = handle;
+      const output = await collectOutputWithRetry({
+        stage: options.stage,
+        collect: () => options.collectOutput(outputHandle),
+        retryController,
+        sleep: dependencies.sleep,
+        onRetry: (message) => options.setSamplingStatus("retrying", message),
+      });
       if (!options.isSuccessfulOutput(output)) {
         const failure = options.outputFailure(output);
         throw new OutputCollectionError(options.stage, describeAgentError(failure), failure, false);
@@ -346,24 +393,23 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
 
       return { handle, output };
     } catch (error) {
-      if (error instanceof RuntimeRecordPersistenceError) throw error;
+      if (error instanceof RuntimeRecordPersistenceError || error instanceof RuntimeRunStoppedError) throw error;
       const details = describeAgentError(error);
       if (terminalPatch === undefined && attempt.resources === undefined) {
         await options.updateAttempt(attempt, {
           status: "failed",
           completedAt: dependencies.now(),
-          ...(attempt.submissionId === undefined && handle ? { submissionId: handle.submissionId } : {}),
           error: details.message,
         });
       }
 
       if (!(error instanceof ConfirmedSubmissionFailure)) {
-        await options.setSamplingStatus("failed", details.message);
+        if (!options.deferFailureStatus) await options.setSamplingStatus("failed", details.message);
         throw error;
       }
 
       if (!details.retryable) {
-        await options.setSamplingStatus("failed", details.message);
+        if (!options.deferFailureStatus) await options.setSamplingStatus("failed", details.message);
         throw error;
       }
 
@@ -373,7 +419,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
         attemptNumber,
       });
       if (!decision.shouldRetry) {
-        await options.setSamplingStatus("failed", details.message);
+        if (!options.deferFailureStatus) await options.setSamplingStatus("failed", details.message);
         throw error;
       }
 
@@ -384,30 +430,84 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
   }
 }
 
+interface RetryLoop<TResult> {
+  readonly operation: RetryOperation;
+  readonly retryController: RetryController;
+  readonly sleep: (milliseconds: number) => Promise<void>;
+  readonly run: () => Promise<TResult>;
+  /** Resolves a failed attempt from the Harness before any retry decision. */
+  readonly reconcile?: () => Promise<TResult | undefined>;
+  /** Reports a retry before its backoff. */
+  readonly onRetry?: (message: string) => Promise<void>;
+  /** The error thrown when the failure is unretryable or retries are exhausted. */
+  readonly fail?: (error: unknown, details: AgentErrorDetails) => unknown;
+}
+
+/** Repeats one idempotent Agent operation while its failures are retryable and the controller allows it. */
+async function retryAgentOperation<TResult>(loop: RetryLoop<TResult>): Promise<TResult> {
+  for (let attemptNumber = 1; ; attemptNumber += 1) {
+    try {
+      return await loop.run();
+    } catch (error) {
+      if (error instanceof RuntimeRunStoppedError) throw error;
+      const reconciled = await loop.reconcile?.();
+      if (reconciled !== undefined) return reconciled;
+      const details = describeAgentError(error);
+      const decision = details.retryable
+        ? await loop.retryController.decide({
+          operation: loop.operation,
+          failureKind: details.failureKind,
+          attemptNumber,
+        })
+        : undefined;
+      if (!decision?.shouldRetry) throw loop.fail?.(error, details) ?? error;
+      await loop.onRetry?.(details.message);
+      await loop.sleep(decision.backoffMs ?? 0);
+    }
+  }
+}
+
+/** Retry settings shared by operations that report retries on the Sampling status. */
+function samplingRetry<TAttempt extends AgentAttemptRecord, TOutput>(
+  dependencies: AgentLifecycleDependencies,
+  options: AgentLifecycleOptions<TAttempt, TOutput>,
+): Pick<RetryLoop<never>, "retryController" | "sleep" | "onRetry"> {
+  return {
+    retryController: options.retryController,
+    sleep: dependencies.sleep,
+    onRetry: (message) => options.setSamplingStatus("retrying", message),
+  };
+}
+
+function runtimeOption(runtime: HarnessRuntimeOptions | undefined): { readonly runtime?: HarnessRuntimeOptions } {
+  return runtime === undefined ? {} : { runtime };
+}
+
 async function ensureAgentWithRetry<TAttempt extends AgentAttemptRecord, TOutput>(
   dependencies: AgentLifecycleDependencies,
   options: AgentLifecycleOptions<TAttempt, TOutput>,
-  retryController: RetryController,
 ): Promise<AgentHandle> {
   if ((options.role === "evaluator") !== (options.evaluationWorkspace !== undefined)) {
     throw new AgentOperationError("Evaluator Workspace binding does not match Agent role", false, "network");
   }
   const input: EnsureAgentInput = {
-    submissionId: options.submissionId,
+    chatId: options.chatId,
     role: options.role,
     samplingId: options.samplingId,
     framework: options.harnessConfig.framework,
     agentConfig: options.harnessConfig.agentConfig,
     projectId: options.projectId,
     ...(options.evaluationWorkspace === undefined ? {} : { evaluationWorkspace: options.evaluationWorkspace }),
-    ...(options.harnessConfig.runtime === undefined ? {} : { runtime: options.harnessConfig.runtime }),
+    ...runtimeOption(options.harnessConfig.runtime),
   };
-
-  for (let creationAttemptNumber = 1; ; creationAttemptNumber += 1) {
-    try {
+  return retryAgentOperation({
+    ...samplingRetry(dependencies, options),
+    operation: "creation",
+    run: async () => {
       const handle = await dependencies.harness.ensureAgent(input);
       if (
-        handle.submissionId !== input.submissionId
+        handle.chatId !== input.chatId
+        || handle.ownerUserId !== input.agentConfig.ownerUserId
         || handle.role !== input.role
         || handle.framework !== input.framework
         || handle.samplingId !== input.samplingId
@@ -420,21 +520,8 @@ async function ensureAgentWithRetry<TAttempt extends AgentAttemptRecord, TOutput
         );
       }
       return handle;
-    } catch (error) {
-      const details = describeAgentError(error);
-      if (!details.retryable) throw error;
-
-      const decision = await retryController.decide({
-        operation: "creation",
-        failureKind: details.failureKind,
-        attemptNumber: creationAttemptNumber,
-      });
-      if (!decision.shouldRetry) throw error;
-
-      await options.setSamplingStatus("retrying", details.message);
-      await dependencies.sleep(decision.backoffMs ?? 0);
-    }
-  }
+    },
+  });
 }
 
 function sameEvaluationWorkspace(
@@ -451,27 +538,12 @@ async function prepareAgentWithRetry<TAttempt extends AgentAttemptRecord, TOutpu
   dependencies: AgentLifecycleDependencies,
   options: AgentLifecycleOptions<TAttempt, TOutput>,
   handle: AgentHandle,
-  retryController: RetryController,
 ): Promise<void> {
-  for (let initializationAttemptNumber = 1; ; initializationAttemptNumber += 1) {
-    try {
-      await options.prepare(handle);
-      return;
-    } catch (error) {
-      const details = describeAgentError(error);
-      if (!details.retryable) throw error;
-
-      const decision = await retryController.decide({
-        operation: "initialization",
-        failureKind: details.failureKind,
-        attemptNumber: initializationAttemptNumber,
-      });
-      if (!decision.shouldRetry) throw error;
-
-      await options.setSamplingStatus("retrying", details.message);
-      await dependencies.sleep(decision.backoffMs ?? 0);
-    }
-  }
+  await retryAgentOperation({
+    ...samplingRetry(dependencies, options),
+    operation: "initialization",
+    run: () => options.prepare(handle),
+  });
 }
 
 async function submitWithReconciliation<TAttempt extends AgentAttemptRecord, TOutput>(
@@ -480,105 +552,51 @@ async function submitWithReconciliation<TAttempt extends AgentAttemptRecord, TOu
   handle: AgentHandle,
   idempotencyKey: string,
   operation: Extract<RetryOperation, "submission" | "restart">,
-  retryController: RetryController,
 ): Promise<AgentSubmission> {
-  for (let attemptNumber = 1; ; attemptNumber += 1) {
-    try {
-      const input = {
-        handle,
-        idempotencyKey,
-        prompt: options.prompt,
-        ...(options.harnessConfig.runtime === undefined ? {} : { runtime: options.harnessConfig.runtime }),
-      };
-      return operation === "restart"
-        ? await dependencies.harness.restartAgent(input)
-        : await dependencies.harness.submitAgent(input);
-    } catch (error) {
-      const reconciliation = await inspectUncertainOperation(
-        dependencies.harness,
-        handle,
-        idempotencyKey,
-        options.harnessConfig.runtime,
-      );
-      if (reconciliation) return reconciliation;
-
-      const details = describeAgentError(error);
-      if (!details.retryable) throw error;
-
-      const decision = await retryController.decide({
-        operation,
-        failureKind: details.failureKind,
-        attemptNumber,
-      });
-      if (!decision.shouldRetry) throw error;
-
-      await options.setSamplingStatus("retrying", details.message);
-      await dependencies.sleep(decision.backoffMs ?? 0);
-    }
-  }
+  const input = {
+    handle,
+    idempotencyKey,
+    prompt: options.prompt,
+    ...runtimeOption(options.harnessConfig.runtime),
+  };
+  return retryAgentOperation({
+    ...samplingRetry(dependencies, options),
+    operation,
+    run: () => operation === "restart"
+      ? dependencies.harness.restartAgent(input)
+      : dependencies.harness.submitAgent(input),
+    reconcile: () => inspectUncertainOperation(dependencies.harness, handle, idempotencyKey, options.harnessConfig.runtime),
+  });
 }
 
-async function waitForTerminalWithRetry<TAttempt extends AgentAttemptRecord, TOutput>(
+function waitForTerminalWithRetry<TAttempt extends AgentAttemptRecord, TOutput>(
   dependencies: AgentLifecycleDependencies,
   options: AgentLifecycleOptions<TAttempt, TOutput>,
   handle: AgentHandle,
   idempotencyKey: string,
-  retryController: RetryController,
 ): Promise<AgentSubmission> {
-  for (let attemptNumber = 1; ; attemptNumber += 1) {
-    try {
-      return await waitForTerminal(
-        dependencies.harness,
-        handle,
-        idempotencyKey,
-        options.stage,
-        options.harnessConfig.runtime,
-      );
-    } catch (error) {
-      const details = describeAgentError(error);
-      if (!details.retryable) throw error;
-
-      const decision = await retryController.decide({
-        operation: "status",
-        failureKind: details.failureKind,
-        attemptNumber,
-      });
-      if (!decision.shouldRetry) throw error;
-
-      await options.setSamplingStatus("retrying", details.message);
-      await dependencies.sleep(decision.backoffMs ?? 0);
-    }
-  }
+  return retryAgentOperation({
+    ...samplingRetry(dependencies, options),
+    operation: "status",
+    run: () => waitForTerminal(dependencies.harness, handle, idempotencyKey, options.stage, options.harnessConfig.runtime),
+  });
 }
 
-async function collectOutputWithRetry<TAttempt extends AgentAttemptRecord, TOutput>(
-  dependencies: AgentLifecycleDependencies,
-  options: AgentLifecycleOptions<TAttempt, TOutput>,
-  handle: AgentHandle,
-  retryController: RetryController,
-): Promise<TOutput> {
-  for (let collectionAttemptNumber = 1; ; collectionAttemptNumber += 1) {
-    try {
-      return await options.collectOutput(handle);
-    } catch (error) {
-      const details = describeAgentError(error);
-      if (!details.retryable) {
-        throw new OutputCollectionError(options.stage, details, error);
-      }
-
-      const decision = await retryController.decide({
-        operation: "collection",
-        failureKind: details.failureKind,
-        attemptNumber: collectionAttemptNumber,
-      });
-      if (!decision.shouldRetry) {
-        throw new OutputCollectionError(options.stage, details, error);
-      }
-
-      await options.setSamplingStatus("retrying", details.message);
-      await dependencies.sleep(decision.backoffMs ?? 0);
-    }
-  }
+export function collectOutputWithRetry<TOutput>(input: {
+  readonly stage: AgentLifecycleStage;
+  readonly collect: () => Promise<TOutput>;
+  readonly retryController: RetryController;
+  readonly sleep: (milliseconds: number) => Promise<void>;
+  readonly onRetry?: (message: string) => Promise<void>;
+}): Promise<TOutput> {
+  return retryAgentOperation({
+    operation: "collection",
+    retryController: input.retryController,
+    sleep: input.sleep,
+    run: input.collect,
+    ...(input.onRetry === undefined ? {} : { onRetry: input.onRetry }),
+    fail: (error, details) => new OutputCollectionError(input.stage, details, error),
+  });
 }
 
 async function collectResourcesWithRetry<TAttempt extends AgentAttemptRecord, TOutput>(
@@ -586,30 +604,24 @@ async function collectResourcesWithRetry<TAttempt extends AgentAttemptRecord, TO
   options: AgentLifecycleOptions<TAttempt, TOutput>,
   handle: AgentHandle,
   scope: AgentResourceScope,
-  retryController: RetryController,
 ): Promise<AgentResourceCollection> {
   try {
-    for (let attemptNumber = 1; ; attemptNumber += 1) {
-      try {
+    return await retryAgentOperation<AgentResourceCollection>({
+      operation: "resources",
+      retryController: options.retryController,
+      sleep: dependencies.sleep,
+      run: async () => {
         const snapshot = await dependencies.harness.collectAgentResources({
           handle,
           idempotencyKey: scope.idempotencyKey,
-          ...(options.harnessConfig.runtime === undefined ? {} : { runtime: options.harnessConfig.runtime }),
+          ...(scope.submissionId === undefined ? {} : { submissionId: scope.submissionId }),
+          ...runtimeOption(options.harnessConfig.runtime),
         });
         return { status: "collected", snapshot: validateResourceSnapshot(snapshot, scope) };
-      } catch (error) {
-        const details = describeAgentError(error);
-        if (!details.retryable) throw error;
-        const decision = await retryController.decide({
-          operation: "resources",
-          failureKind: details.failureKind,
-          attemptNumber,
-        });
-        if (!decision.shouldRetry) throw error;
-        await dependencies.sleep(decision.backoffMs ?? 0);
-      }
-    }
+      },
+    });
   } catch (error) {
+    if (error instanceof RuntimeRunStoppedError) throw error;
     return {
       status: "failed",
       scope,
@@ -626,53 +638,35 @@ async function inspectUncertainOperation(
   runtime?: HarnessRuntimeOptions,
 ): Promise<AgentSubmission | undefined> {
   try {
-    return (await harness.inspectAgentOperation({
-      handle,
-      idempotencyKey,
-      ...(runtime === undefined ? {} : { runtime }),
-    })) ?? undefined;
+    return (await harness.inspectAgentOperation({ handle, idempotencyKey, ...runtimeOption(runtime) })) ?? undefined;
   } catch {
     return undefined;
   }
 }
 
-async function inspectPersistedTerminalWithRetry<TAttempt extends AgentAttemptRecord, TOutput>(
+function inspectPersistedTerminalWithRetry<TAttempt extends AgentAttemptRecord, TOutput>(
   dependencies: AgentLifecycleDependencies,
   options: AgentLifecycleOptions<TAttempt, TOutput>,
   handle: AgentHandle,
   idempotencyKey: string,
-  retryController: RetryController,
 ): Promise<AgentSubmission> {
-  for (let attemptNumber = 1; ; attemptNumber += 1) {
-    let details: ReturnType<typeof describeAgentError> = {
-      message: "Persisted Agent failure could not be confirmed",
-      retryable: true,
-      failureKind: "submission-timeout",
-    };
-    try {
+  return retryAgentOperation({
+    ...samplingRetry(dependencies, options),
+    operation: "status",
+    run: async () => {
       const inspection = await dependencies.harness.inspectAgentOperation({
         handle,
         idempotencyKey,
-        ...(options.harnessConfig.runtime === undefined ? {} : { runtime: options.harnessConfig.runtime }),
+        ...runtimeOption(options.harnessConfig.runtime),
       });
       if (inspection && isTerminal(inspection)) return inspection;
-    } catch (error) {
-      details = describeAgentError(error);
-      if (!details.retryable) throw error;
-    }
-
-    const decision = await retryController.decide({
-      operation: "status",
-      failureKind: details.failureKind,
-      attemptNumber,
-    });
-    if (!decision.shouldRetry) throw new SubmissionStatusError(options.stage, details, undefined);
-    await options.setSamplingStatus("retrying", details.message);
-    await dependencies.sleep(decision.backoffMs ?? 0);
-  }
+      throw new AgentOperationError("Persisted Agent failure could not be confirmed", true, "submission-timeout");
+    },
+    fail: (error, details) => details.retryable ? new SubmissionStatusError(options.stage, details, undefined) : error,
+  });
 }
 
-export async function waitForTerminal(
+async function waitForTerminal(
   harness: Harness,
   handle: AgentHandle,
   idempotencyKey: string,
@@ -727,47 +721,10 @@ export async function waitForTerminal(
   }
 }
 
-function normalizeFailureKind(value: unknown): RetryableFailureKind {
-  if (value === "llm" || value === "website" || value === "submission-timeout") {
-    return value;
-  }
-  return "network";
-}
-
-function submissionStatus(submission: AgentSubmission): AgentStatus | undefined {
-  if (submission.normalizedStatus) return submission.normalizedStatus;
-  switch (submission.status) {
-    case "queued":
-      return "queued";
-    case "starting":
-    case "running":
-      return "running";
-    case "completed":
-    case "succeeded":
-      return "completed";
-    case "failed":
-      return "failed";
-    case "interrupted":
-      return "interrupted";
-    case "cancelled":
-      return "cancelled";
-    default:
-      return undefined;
-  }
-}
-
 function isTerminal(submission: AgentSubmission): boolean {
-  const status = submissionStatus(submission);
-  return status === "completed"
-    || status === "failed"
-    || status === "interrupted"
-    || status === "cancelled";
+  return isTerminalAgentStatus(submission.status);
 }
 
 function isSuccessfulSubmission(submission: AgentSubmission): boolean {
-  return submissionStatus(submission) === "completed";
-}
-
-function submissionFailure(stage: AgentLifecycleStage, submission: AgentSubmission): AgentOperationError {
-  return new ConfirmedSubmissionFailure(stage, submission);
+  return submission.status === "completed";
 }

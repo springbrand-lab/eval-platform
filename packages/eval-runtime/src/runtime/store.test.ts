@@ -1,25 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EvaluationRecord } from "@eval-platform/eval-contracts";
 import type { RetryController } from "./retry.js";
-import { RuntimeRecordConflictError, persistRuntimeRecord } from "./store.js";
+import { RuntimeRecordConflictError } from "./errors.js";
+import { persistRuntimeRecord } from "./store.js";
 
 function makeRecord(): EvaluationRecord {
   return {
     evaluationId: "evaluation-1",
     samplingId: "sampling-1",
     evaluator: { ownerUserId: "user-1", userAgentId: "agent-1" },
-    submissionId: "submission-1",
+    chatId: "chat-1",
     status: { status: "running" },
     attempts: [{
       evaluationAttemptId: "attempt-1",
       evaluationId: "evaluation-1",
       attemptNumber: 1,
+      submissionId: "submission-1",
       status: "completed",
       completedAt: "2026-10-08T00:00:00.000Z",
       resources: {
         status: "collected",
         snapshot: {
-          scope: { submissionId: "submission-1", idempotencyKey: "evaluation:sampling-1" },
+          scope: { chatId: "chat-1", submissionId: "submission-1", idempotencyKey: "evaluation:sampling-1" },
           observedAt: "2026-10-08T00:00:01.000Z",
           finalized: false,
           coverage: { usageEvents: "partial", telemetryEvents: "complete", billingSettlements: "unavailable" },

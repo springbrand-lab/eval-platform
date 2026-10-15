@@ -1,5 +1,7 @@
 # eval-runtime 评审记录
 
+> 历史快照：记录当时代码的事实，不代表当前实现；当前行为以 `packages/eval-runtime/README.md` 与 `docs/architecture.md` 为准。
+
 > 评审对象：`packages/eval-runtime`
 >
 > 记录日期：2026-10-06
@@ -319,7 +321,7 @@ Subject 的产物和完整轨迹只在 `Sampling` 中保留一份，作为唯一
 
 ---
 
-### R-09：`start()` 和 `pipeline()` 缺少请求级幂等（已处理）
+### R-09：三个 Run 入口缺少统一的请求级幂等（已处理）
 
 **现象**
 
@@ -347,11 +349,12 @@ Subject 的产物和完整轨迹只在 `Sampling` 中保留一份，作为唯一
 
 **已落实**
 
-- `StartRunRequest` / `PipelineRequest` 要求调用方提供 `requestId`，并支持可选 `idempotencyKey`；`evaluate()` 保持独立的主动重评估语义。
-- Runtime 在解析 Dataset/Sample 前按 `idempotencyKey` 优先、`requestId` 其次快速查重；重复请求直接返回原 `RunHandle`。
-- Runtime 为请求事实生成稳定指纹，避免同一身份被不同项目、Dataset、Sample、采样次数、并发参数或 Agent 配置静默复用。
+- `StartRunRequest`、`EvaluateRequest` 和 `PipelineRequest` 都要求调用方提供同一次意图稳定的 `idempotencyKey`；主动重评估使用新 key。
+- Runtime 按 Project 和 key 在解析可变 Config/Dataset/Sample 前快速查重；以已保存的 Run 配置快照校验请求事实，重复请求直接返回原 `RunHandle`。
+- 同一 Runtime 实例中，同一 Project/key 的并发提交先按调用方事实同步：相同事实共用首次提交的 Promise 与配置快照，不同事实冲突；提交结束清理内存条目。持久化 Store 仍是最终幂等依据。
+- Runtime 为操作、配置 ID、已准入的生效配置及独立评估的确定 Sampling ID 列表生成稳定指纹，避免同一身份被不同事实静默复用。
 - `RuntimeStore.createRunWithSamplings()` 返回原子准入结果；Store 必须在持久化事务内再次查重，竞争请求只有一个能创建 Run/Sampling，其余复用原 Run。
-- `requestId` 与 `idempotencyKey` 指向不同 Run，或同一身份对应不同请求事实时，直接返回不可重试的冲突错误。
+- 同一 Project 的 key 对应不同请求事实时，直接返回不可重试的冲突错误。
 - 幂等映射必须由 Store 持久化并用唯一约束兜底，不能用 Runtime 进程内 Map 代替。
 - `packages/eval-runtime/src/runtime/index.test.ts` 覆盖重复请求、幂等键重试、请求事实冲突和并发准入场景。
 
@@ -586,9 +589,9 @@ Runtime 内部不再对同一份配置做分散、重复和不一致的临时判
 - Resolver 将省略的 `retryPolicy` 归一化为明确的默认策略，返回 `ResolvedExecutionConfig` / `ResolvedEvaluationConfig`；Runtime 阶段只接收这些有效配置。
 - Resolver 会剥离未参与契约的额外字段，并复制 Sample ID、Harness、运行参数和 RetryPolicy，避免配置 Store 的可变对象泄漏到运行时。
 - `RuntimeRunRecord.config` 保存本次 Run 的 `RunConfigSnapshot`：执行 Run 保存 Execution 配置，评估 Run 保存 Evaluation 配置，Pipeline 保存 Pipeline 及其解析后的两份阶段配置。
-- `SpHarnessConfig.runtime` 不只是快照字段；Runtime 将 `workspaceMode`、`timeoutMs` 作为 `HarnessRuntimeOptions` 贯穿 Subject/Evaluator 的创建、素材准备、提交、状态等待/校准、产物收集和评估输入准备调用。
-- `SpHarnessConfig.framework` 必填并支持 `sp | codex | cc`；Subject 可选择三者，EvaluationConfig 固定 SP 宿主和 SP 框架。框架经 Resolver 校验、归一化后保存在 Run 快照中，参与请求幂等指纹，并传入 `ensureAgent`；返回 Handle 必须绑定所选框架，之后的提交、重启和收集复用同一 Handle。缺少或非法框架直接拒绝，不兼容静默默认 SP。
-- 当前 Runtime 只实现 SP Harness；遇到 `RemoteHarnessConfig` 会明确报未实现错误，不会静默丢弃 `runOptions`。
+- `HarnessConfig.runtime` 不只是快照字段；Runtime 将其作为 `HarnessRuntimeOptions` 交给 Harness：SP Harness 在确保 Chat 和提交 Prompt 时发送给 SP，并用其中的超时约束终态等待。Evaluator 的 Workspace 绑定由 Runtime 在创建时给出，不是运行选项。
+- `HarnessConfig.framework` 必填并支持 `sp | codex | cc`；Subject 可选择三者，EvaluationConfig 固定 SP 宿主和 SP 框架。框架经 Resolver 校验、归一化后保存在 Run 快照中，参与请求幂等指纹，并传入 `ensureAgent`；返回 Handle 必须绑定所选框架，之后的提交、重启和收集复用同一 Handle。缺少或非法框架直接拒绝，不兼容静默默认 SP。
+- Harness 配置只有 SP 一种，没有未实现的远程 Harness 分支。
 - Run、Sampling、EvaluationRecord 和有效配置快照通过 `createRunWithSamplings()` 一次原子提交；后续配置 Store 的变化不会改变已创建 Run 的生效配置。
 - 不引入 version；配置 ID 保留在快照中，同时保存完整生效字段。
 - `packages/eval-runtime/src/runtime/index.test.ts` 覆盖 Subject 和 Evaluator 的运行参数确实到达 Harness 生命周期调用。

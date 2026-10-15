@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { SamplingStatus } from "@eval-platform/eval-contracts";
 import { collection, evaluation, sampling, usage } from "../test-support.js";
-import { aggregateMetrics, summarizeNumbers } from "./index.js";
+import { aggregateMetrics } from "./index.js";
+import { summarizeNumbers } from "./statistics.js";
 
 describe("numeric summaries", () => {
   it("keeps missing/non-finite observations out of the denominator", () => {

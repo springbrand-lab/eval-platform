@@ -1,12 +1,9 @@
 import type { AgentConfigRef, EvaluationRecord, ExecutionAttempt, EvaluationAttempt, SamplingStatus } from "@eval-platform/eval-contracts";
+import { SAMPLING_STATUSES } from "@eval-platform/eval-contracts";
 import { readEvaluationMetrics } from "../evaluators/index.js";
 import type { EvaluatorScoreStatistics, MetricInput, MetricSummary, ResourceInput, StageStatistics } from "./model.js";
 import { aggregateResources } from "./resources.js";
 import { summarizeNumbers } from "./statistics.js";
-
-export type * from "./model.js";
-export { aggregateResources } from "./resources.js";
-export { summarizeNumbers } from "./statistics.js";
 
 interface StageRecord {
   readonly status: SamplingStatus;
@@ -14,7 +11,7 @@ interface StageRecord {
 }
 
 function stageStatistics(records: readonly StageRecord[]): StageStatistics {
-  const statuses: Record<SamplingStatus, number> = { queued: 0, starting: 0, running: 0, retrying: 0, succeeded: 0, failed: 0, cancelled: 0 };
+  const statuses = Object.fromEntries(SAMPLING_STATUSES.map((status) => [status, 0])) as Record<SamplingStatus, number>;
   for (const item of records) statuses[item.status] += 1;
   const terminalRecords = statuses.succeeded + statuses.failed + statuses.cancelled;
   const attempts = records.flatMap((item) => item.attempts);

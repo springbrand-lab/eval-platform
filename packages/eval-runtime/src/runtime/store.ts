@@ -1,15 +1,18 @@
 import type { EvaluationRecord, RunPhases, Sampling } from "@eval-platform/eval-contracts";
+import { equalJson } from "@springbrand/utils";
 import type { RunConfigSnapshot } from "../config/index.js";
 import { describeAgentError } from "./agent-lifecycle.js";
-import type { RetryController } from "./retry.js";
-import { RuntimeRecordConflictError, RuntimeRecordPersistenceError, type RuntimePersistenceOutcome } from "./record-errors.js";
-export { RuntimeRecordConflictError, RuntimeRecordPersistenceError } from "./record-errors.js";
+import type { RetryController, RetryDecision } from "./retry.js";
+import {
+  RuntimeRecordConflictError,
+  RuntimeRecordPersistenceError,
+  RuntimeRunStoppedError,
+  type RuntimePersistenceOutcome,
+} from "./errors.js";
 
 export interface RuntimeRunRequestIdentity {
-  /** Stable caller identity for one Runtime admission request. */
-  readonly requestId: string;
-  /** Optional business retry identity that can outlive a transport request. */
-  readonly idempotencyKey?: string;
+  /** Stable caller intent within one Project, reused on retries. */
+  readonly idempotencyKey: string;
   /** Hash of the immutable facts that define the requested Run. */
   readonly requestFingerprint: string;
 }
@@ -18,11 +21,16 @@ export interface RuntimeRunRecord {
   readonly runId: string;
   readonly samplingIds: readonly string[];
   readonly projectId: string;
+  readonly sourceCommit: string;
   readonly phases: RunPhases;
   readonly evaluationIds: readonly string[];
   /** Immutable effective configuration captured when this Run is admitted. */
   readonly config: RunConfigSnapshot;
-  readonly requestIdentity?: RuntimeRunRequestIdentity;
+  readonly requestIdentity: RuntimeRunRequestIdentity;
+  /** Persisted stop intent; omitted until a stop is requested. */
+  readonly stopRequested?: true;
+  /** Stop cleanup completed; admission may open after all child stages are terminal. */
+  readonly stopFinalized?: true;
 }
 
 export interface RuntimeRunAdmission {
@@ -31,25 +39,18 @@ export interface RuntimeRunAdmission {
   readonly created: boolean;
 }
 
-export class RuntimeRunIdentityConflictError extends Error {
-  readonly retryable = false;
-
-  constructor(message: string) {
-    super(message);
-    this.name = "RuntimeRunIdentityConflictError";
-  }
-}
-
 export type SamplingState = Sampling;
 
 export interface RuntimeStore {
   getRun(runId: string): Promise<RuntimeRunRecord | null>;
-  /** Persistent lookup used before expensive Dataset/Sample preparation. */
-  findRunByRequestId(requestId: string): Promise<RuntimeRunRecord | null>;
-  findRunByIdempotencyKey(idempotencyKey: string): Promise<RuntimeRunRecord | null>;
+  /** Serialize the start of remote stage mutations with a saved stop request. */
+  withRunDispatchGate<T>(runId: string, dispatch: () => Promise<T>): Promise<T>;
+  /** Persistent Project-scoped lookup used before mutable Config/Sample resolution. */
+  findRunByIdempotencyKey(projectId: string, idempotencyKey: string): Promise<RuntimeRunRecord | null>;
   /**
    * Atomically rechecks request identity and commits Run, Sampling, EvaluationRecord and
-   * effective-config snapshot data.
+   * effective-config snapshot data. A matching-key replay returns its original Run even
+   * while it is active; a new key is rejected if this Project has an unfinished Run.
    * Implementations must use durable uniqueness constraints, not an in-memory map.
    */
   createRunWithSamplings(
@@ -60,14 +61,23 @@ export interface RuntimeStore {
   /** Atomically update only while the supplied previous facts still match. */
   updateEvaluation(record: EvaluationRecord, expected: EvaluationRecord): Promise<void>;
   getEvaluation(evaluationId: string): Promise<EvaluationRecord | null>;
+  /** Return one Evaluation or null per input ID, in the same order. */
+  getEvaluations(evaluationIds: readonly string[]): Promise<readonly (EvaluationRecord | null)[]>;
   listEvaluations(samplingId: string): Promise<readonly EvaluationRecord[]>;
   /** Atomically update only while the supplied previous facts still match. */
   updateSampling(state: SamplingState, expected: SamplingState): Promise<void>;
   getSampling(samplingId: string): Promise<SamplingState | null>;
+  /** Return one Sampling or null per input ID, in the same order. */
+  getSamplings(samplingIds: readonly string[]): Promise<readonly (SamplingState | null)[]>;
 }
 
 export interface RuntimeRecoveryStore {
-  listRecoverableRunIds(afterRunId?: string, limit?: number): Promise<readonly string[]>;
+  /** True while a stage is unfinished or a stop request is not yet finalized. */
+  isRunActive(runId: string): Promise<boolean>;
+  isRunStopRequested(runId: string): Promise<boolean>;
+  /** Persist a system stop for an active Run whose scheduling budget is exhausted. */
+  requestRunStop(runId: string): Promise<void>;
+  markRunStopFinalized(runId: string): Promise<boolean>;
 }
 
 export async function persistRuntimeRecord<TRecord extends SamplingState | EvaluationRecord>(input: {
@@ -92,20 +102,20 @@ export async function persistRuntimeRecord<TRecord extends SamplingState | Evalu
       } catch {
         readFailed = true;
       }
-      if (sameRuntimeRecordFacts(stored, record)) return;
+      if (equalJson(stored, record)) return;
 
       const outcome: RuntimePersistenceOutcome = error instanceof RuntimeRecordConflictError
         ? "conflict"
         : readFailed || stored === null
           ? "unknown"
-          : !sameRuntimeRecordFacts(stored, expected)
+          : !equalJson(stored, expected)
             ? "conflict"
             : "not-committed";
       const details = describeAgentError(error);
       if (outcome === "conflict" || !details.retryable) {
         throw new RuntimeRecordPersistenceError(details.message, outcome, error, record, expected);
       }
-      let decision;
+      let decision: RetryDecision;
       try {
         decision = await input.retryController.decide({
           operation: "persistence",
@@ -139,22 +149,44 @@ export async function persistRuntimeRecord<TRecord extends SamplingState | Evalu
   }
 }
 
-export function sameRuntimeRecordFacts(left: unknown, right: unknown): boolean {
-  if (left === right) return true;
-  if (Array.isArray(left) || Array.isArray(right)) {
-    return Array.isArray(left)
-      && Array.isArray(right)
-      && left.length === right.length
-      && left.every((value, index) => sameRuntimeRecordFacts(value, right[index]));
-  }
-  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+/** A stage record reread after its stage failed. */
+export interface StageFailureRecords<TRecord> {
+  /** The record as committed. */
+  readonly stored: TRecord;
+  /** The record the failure write extends: the attempted one when it carries Agent facts the Store never saved. */
+  readonly failureBase: TRecord;
+}
 
-  const leftRecord = left as Record<string, unknown>;
-  const rightRecord = right as Record<string, unknown>;
-  const leftKeys = Object.keys(leftRecord).filter((key) => leftRecord[key] !== undefined);
-  const rightKeys = Object.keys(rightRecord).filter((key) => rightRecord[key] !== undefined);
-  return leftKeys.length === rightKeys.length
-    && leftKeys.every((key) => (
-      Object.hasOwn(rightRecord, key) && sameRuntimeRecordFacts(leftRecord[key], rightRecord[key])
-    ));
+/**
+ * Rereads a stage record after `error` and rethrows the errors a failure write must not mask:
+ * Run stops, committed or conflicting persistence, and a record changed by another writer.
+ */
+export async function readStageFailure<
+  TRecord extends SamplingState | EvaluationRecord,
+  TAttempt extends { readonly completedAt?: string },
+>(error: unknown, record: {
+  readonly read: () => Promise<TRecord | null>;
+  readonly attempts: (record: TRecord) => readonly TAttempt[];
+  readonly attemptId: (attempt: TAttempt) => string;
+  /** Agent evidence fields, in a fixed order. */
+  readonly evidence: (record: TRecord) => readonly unknown[];
+}): Promise<StageFailureRecords<TRecord>> {
+  if (error instanceof RuntimeRunStoppedError) throw error;
+  if (error instanceof RuntimeRecordPersistenceError && error.outcome !== "not-committed") throw error;
+  const stored = await record.read();
+  if (!stored) throw error;
+  if (!(error instanceof RuntimeRecordPersistenceError)) return { stored, failureBase: stored };
+  const attempted = error.attemptedRecord as TRecord;
+  if (!equalJson(stored, error.expectedRecord)) {
+    if (equalJson(stored, attempted)) return { stored, failureBase: stored };
+    throw error;
+  }
+  const observedAttempt = record.attempts(attempted).at(-1);
+  const savedAttempt = observedAttempt && record.attempts(stored).find((attempt) => (
+    record.attemptId(attempt) === record.attemptId(observedAttempt)
+  ));
+  const storedEvidence = record.evidence(stored);
+  const unsaved = (observedAttempt?.completedAt !== undefined && savedAttempt?.completedAt === undefined)
+    || record.evidence(attempted).some((value, index) => value !== undefined && storedEvidence[index] === undefined);
+  return { stored, failureBase: unsaved ? attempted : stored };
 }

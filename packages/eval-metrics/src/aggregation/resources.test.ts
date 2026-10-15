@@ -3,7 +3,7 @@ import type { AgentResourceFact, AgentResourceScope } from "@eval-platform/eval-
 import { resourceInput, settlement, telemetry, usage } from "../test-support.js";
 import { aggregateResources } from "./resources.js";
 
-const SCOPE: AgentResourceScope = { submissionId: "subject-chat", idempotencyKey: "execution:sampling-1" };
+const SCOPE = { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "execution:sampling-1" } satisfies AgentResourceScope;
 
 describe("resource statistics", () => {
   it("proves zero only from complete finalized empty sources", () => {

@@ -2,41 +2,44 @@ import type {
   EvaluationAgentOutput,
   EvaluationAttempt,
   EvaluationRecord,
+  EvaluationOutputSchema,
   HarnessConfig,
   RetryPolicy,
   SamplingStatus,
 } from "@eval-platform/eval-contracts";
 import { dataInputSchema } from "@eval-platform/eval-dataset";
 
-import type { RuntimeEvaluationContext } from "./model.js";
-import type { RuntimeStore } from "./store.js";
-import { RuntimeRecordPersistenceError, persistRuntimeRecord, sameRuntimeRecordFacts } from "./store.js";
-import type { RetryController } from "./retry.js";
+import type { RuntimeEvaluationContext, Sample } from "./model.js";
+import { persistRuntimeRecord, readStageFailure } from "./store.js";
+import { RuntimeAdmissionConflictError } from "./errors.js";
 import {
   AgentOperationError,
   applyAttemptPatch,
   describeAgentError,
-  requireSpHarness,
   runAgentLifecycle,
-  type AgentLifecycleDependencies,
+  type StageDependencies,
 } from "./agent-lifecycle.js";
-
-export interface EvaluationStageDependencies extends AgentLifecycleDependencies {
-  readonly store: RuntimeStore;
-  readonly createRetryController: (policy?: RetryPolicy) => RetryController;
-}
 
 export interface EvaluateSamplingInput {
   readonly context: RuntimeEvaluationContext;
   readonly harnessConfig: HarnessConfig;
   readonly retryPolicy: RetryPolicy;
+  readonly evaluationOutputSchema: EvaluationOutputSchema;
+}
+
+export function requireEvaluationPrompt(sample: Sample): string {
+  const prompt = sample.data.evalPrompt;
+  if (prompt === undefined) {
+    throw new RuntimeAdmissionConflictError("evaluation-prompt", `Sample ${sample.sampleId} has no evalPrompt`);
+  }
+  return prompt;
 }
 
 export async function evaluateSampling(
-  dependencies: EvaluationStageDependencies,
+  dependencies: StageDependencies,
   input: EvaluateSamplingInput,
 ): Promise<RuntimeEvaluationContext> {
-  const evaluatorHarness = requireSpHarness(input.harnessConfig, "evaluator");
+  const evaluatorHarness = input.harnessConfig;
   const agentConfig = evaluatorHarness.agentConfig;
   const harnessRuntime = evaluatorHarness.runtime;
   const { sampling, evaluation, sample } = input.context;
@@ -63,32 +66,39 @@ export async function evaluateSampling(
     return { ...input.context, evaluation: currentEvaluation };
   }
 
-  const subjectSubmissionId = sampling.subjectSubmissionId
-    ?? latestSubmissionId(sampling);
-  if (!subjectSubmissionId) {
-    await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject submission"));
+  const subjectChatId = sampling.subjectChatId;
+  if (!subjectChatId) {
+    await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject Chat"));
     return { ...input.context, evaluation: currentEvaluation };
   }
   // SP creates the Subject Chat under the selected user-agent Config owner.
   const subjectWorkspace = {
     userId: sampling.subjectAgent.ownerUserId,
-    chatId: subjectSubmissionId,
+    chatId: subjectChatId,
   };
 
   try {
-    if (!sample.data || typeof sample.data !== "object" || Array.isArray(sample.data)) {
-      throw new AgentOperationError("Sample data must be an object", false, "network");
-    }
-    const { dataId: _dataId, initialSession: _initialSession, ...data } = sample.data;
-    const parsed = dataInputSchema.safeParse(data);
+    const evalPrompt = requireEvaluationPrompt(sample);
+    const {
+      dataId: _dataId, initialSession: _initialSession,
+      userPrompt: _subjectPrompt, evalPrompt: _evalPrompt,
+      initialMaterials: _subjectMaterials, evalInitialMaterials, ...data
+    } = sample.data;
+    const parsed = dataInputSchema.safeParse({
+      ...data, userPrompt: evalPrompt,
+      ...(evalInitialMaterials === undefined ? {} : { initialMaterials: evalInitialMaterials }),
+    });
     if (!parsed.success) throw new AgentOperationError(parsed.error.message, false, "network");
     const initialData = parsed.data;
-    const submissionId = currentEvaluation.submissionId ?? dependencies.idFactory();
-    if (currentEvaluation.submissionId === undefined) {
+    if (currentEvaluation.chatId === undefined && currentEvaluation.attempts.length > 0) {
+      throw new AgentOperationError("Cannot resume an Evaluation Attempt without its Chat ID", false, "network");
+    }
+    const chatId = currentEvaluation.chatId ?? dependencies.idFactory();
+    if (currentEvaluation.chatId === undefined) {
       await persistEvaluation({
         ...currentEvaluation,
         evaluator: agentConfig,
-        submissionId,
+        chatId,
       });
     }
 
@@ -97,13 +107,13 @@ export async function evaluateSampling(
       role: "evaluator",
       projectId: sampling.projectId,
       samplingId: sampling.samplingId,
-      submissionId,
+      chatId,
       evaluationWorkspace: {
         subject: subjectWorkspace,
         evaluationId: currentEvaluation.evaluationId,
       },
       harnessConfig: evaluatorHarness,
-      prompt: buildEvaluationPrompt(sampling.samplingId),
+      prompt: evalPrompt,
       retryController,
       attempts: currentEvaluation.attempts,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({
@@ -139,8 +149,9 @@ export async function evaluateSampling(
       prepare: async (handle) => {
         await dependencies.harness.materializeInitialData({
           handle,
-          idempotencyKey: `initial-data:${handle.submissionId}`,
+          idempotencyKey: `initial-data:${handle.chatId}`,
           data: initialData,
+          evaluationOutputSchema: input.evaluationOutputSchema,
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
         await dependencies.harness.materializeSubjectTrajectory({
@@ -170,25 +181,13 @@ export async function evaluateSampling(
     });
     return { ...input.context, evaluation: currentEvaluation };
   } catch (error) {
-    if (error instanceof RuntimeRecordPersistenceError && error.outcome !== "not-committed") throw error;
     const details = describeAgentError(error);
-    const stored = await dependencies.store.getEvaluation(currentEvaluation.evaluationId);
-    if (!stored) throw error;
-    let failureBase = stored;
-    if (error instanceof RuntimeRecordPersistenceError) {
-      const expected = error.expectedRecord as EvaluationRecord;
-      const attempted = error.attemptedRecord as EvaluationRecord;
-      if (sameRuntimeRecordFacts(stored, expected)) {
-        const observedAttempt = attempted.attempts.at(-1);
-        const savedAttempt = stored.attempts.find((item) => (
-          item.evaluationAttemptId === observedAttempt?.evaluationAttemptId
-        ));
-        if (
-          (observedAttempt?.completedAt !== undefined && savedAttempt?.completedAt === undefined)
-          || (attempted.output !== undefined && stored.output === undefined)
-        ) failureBase = attempted;
-      } else if (!sameRuntimeRecordFacts(stored, attempted)) throw error;
-    }
+    const { stored, failureBase } = await readStageFailure(error, {
+      read: () => dependencies.store.getEvaluation(currentEvaluation.evaluationId),
+      attempts: (record) => record.attempts,
+      attemptId: (attempt) => attempt.evaluationAttemptId,
+      evidence: (record) => [record.output],
+    });
     currentEvaluation = stored;
     if (currentEvaluation.status.status === "succeeded") return { ...input.context, evaluation: currentEvaluation };
     await persistEvaluation({
@@ -198,24 +197,6 @@ export async function evaluateSampling(
     });
     return { ...input.context, evaluation: currentEvaluation };
   }
-}
-
-function latestSubmissionId(
-  sampling: RuntimeEvaluationContext["sampling"],
-): string | undefined {
-  for (let index = sampling.executionAttempts.length - 1; index >= 0; index -= 1) {
-    const submissionId = sampling.executionAttempts[index]?.submissionId;
-    if (submissionId) return submissionId;
-  }
-  return undefined;
-}
-
-function buildEvaluationPrompt(samplingId: string): string {
-  return JSON.stringify({
-    kind: "eval-evaluation",
-    samplingId,
-    instruction: "Evaluate the subject agent's artifacts. The artifacts and complete trajectory are available in the current workspace.",
-  }, null, 2);
 }
 
 function withEvaluationStatus(

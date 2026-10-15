@@ -7,13 +7,14 @@ import type {
 import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
 import type { ResourceInput } from "./aggregation/model.js";
 
-export const PROJECT = { projectId: "project-1", ownerUserId: "owner-1", name: "Product evaluation" };
+export const PROJECT = { projectId: "project-1", ownerUserId: "owner-1", name: "Product evaluation", sourceBranch: "release-2.0.0" };
 export const SUBJECT = { ownerUserId: "owner-1", userAgentId: "subject-1" };
 export const EVALUATOR = { ownerUserId: "owner-1", userAgentId: "judge-1" };
 export const DATA = {
-  dataId: "10000000-0000-4000-8000-000000000001", userPrompt: "Build a page", category: "frontend",
-  initialSession: { bundleId: "session-bundle", sessionId: "seed-session" },
-  initialMaterials: { bundleId: "material-bundle", materialId: "seed-files" },
+  dataId: "10000000-0000-4000-8000-000000000001", userPrompt: "Build a page",
+  evalPrompt: "Judge the finished page", category: "frontend",
+  initialSession: { bundleId: "30000000-0000-4000-8000-000000000001", sessionId: "30000000-0000-4000-8000-000000000002" },
+  initialMaterials: { bundleId: "30000000-0000-4000-8000-000000000003", materialId: "30000000-0000-4000-8000-000000000004" },
 };
 export const SAMPLE = { sampleId: "sample-1", data: DATA };
 export const DATASET = { datasetId: "20000000-0000-4000-8000-000000000001", name: "Web tasks" };
@@ -22,7 +23,7 @@ export function collection(patch: Partial<AgentResourceSnapshot> = {}): AgentRes
   return {
     status: "collected",
     snapshot: {
-      scope: { submissionId: "subject-chat", idempotencyKey: "execution:sampling-1" },
+      scope: { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "execution:sampling-1" },
       observedAt: "2026-10-08T00:00:01.000Z", finalized: true,
       coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
       usageEvents: [], telemetryEvents: [], billingSettlements: [], ...patch,
@@ -63,11 +64,15 @@ export function settlement(eventId: string, patch: AgentResourceFact = {}): Agen
 export function sampling(samplingId = "sampling-1", patch: Partial<SamplingSnapshot> = {}): SamplingSnapshot {
   return {
     samplingId, projectId: PROJECT.projectId, sampleId: SAMPLE.sampleId, subjectAgent: SUBJECT,
-    subjectSubmissionId: `subject:${samplingId}`, execution: { status: "succeeded" },
+    subjectChatId: `subject:${samplingId}`, execution: { status: "succeeded" },
     executionAttempts: [{
       executionAttemptId: `attempt:${samplingId}`, samplingId, attemptNumber: 1,
-      submissionId: `subject:${samplingId}`, status: "completed",
-      startedAt: "2026-10-08T00:00:00.000Z", completedAt: "2026-10-08T00:00:01.000Z", resources: collection(),
+      submissionId: `subject-submission:${samplingId}`, status: "completed",
+      startedAt: "2026-10-08T00:00:00.000Z", completedAt: "2026-10-08T00:00:01.000Z",
+      resources: collection({ scope: {
+        chatId: `subject:${samplingId}`, submissionId: `subject-submission:${samplingId}`,
+        idempotencyKey: `execution:${samplingId}`,
+      } }),
     }],
     artifacts: [{ artifactId: `artifact:${samplingId}`, kind: "file", path: "/workspace/page.html" }],
     trajectory: { trajectoryId: `trajectory:${samplingId}`, source: "subject", path: "/trajectory.json" }, ...patch,
@@ -76,12 +81,16 @@ export function sampling(samplingId = "sampling-1", patch: Partial<SamplingSnaps
 
 export function evaluation(evaluationId = "evaluation-1", patch: Partial<EvaluationRecord> = {}): EvaluationRecord {
   return {
-    evaluationId, samplingId: "sampling-1", evaluator: EVALUATOR, submissionId: `judge:${evaluationId}`,
+    evaluationId, samplingId: "sampling-1", evaluator: EVALUATOR, chatId: `judge:${evaluationId}`,
     status: { status: "succeeded" },
     attempts: [{
       evaluationAttemptId: `attempt:${evaluationId}`, evaluationId, attemptNumber: 1,
-      submissionId: `judge:${evaluationId}`, status: "completed",
-      startedAt: "2026-10-08T00:00:02.000Z", completedAt: "2026-10-08T00:00:04.000Z", resources: collection(),
+      submissionId: `judge-submission:${evaluationId}`, status: "completed",
+      startedAt: "2026-10-08T00:00:02.000Z", completedAt: "2026-10-08T00:00:04.000Z",
+      resources: collection({ scope: {
+        chatId: `judge:${evaluationId}`, submissionId: `judge-submission:${evaluationId}`,
+        idempotencyKey: "evaluation:sampling-1",
+      } }),
     }],
     output: {
       status: "succeeded", score: 80, reason: "The produced page meets the task.",

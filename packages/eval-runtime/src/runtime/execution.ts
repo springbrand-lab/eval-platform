@@ -5,26 +5,24 @@ import type {
   RetryPolicy,
   Sampling,
 } from "@eval-platform/eval-contracts";
+import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 import { dataInputSchema } from "@eval-platform/eval-dataset";
+import type { AgentHandle } from "../harness/model.js";
 
-import type { RuntimeStore } from "./store.js";
-import { RuntimeRecordPersistenceError, persistRuntimeRecord, sameRuntimeRecordFacts } from "./store.js";
+import { persistRuntimeRecord, readStageFailure } from "./store.js";
+import { RuntimeRecordPersistenceError } from "./errors.js";
 import type { RuntimeSamplingContext } from "./model.js";
-import type { RetryController } from "./retry.js";
 import {
   AgentOperationError,
+  ConfirmedSubmissionFailure,
   applyAttemptPatch,
+  collectOutputWithRetry,
   describeAgentError,
-  requireSpHarness,
+  reportError,
   runAgentLifecycle,
   withExecutionStatus,
-  type AgentLifecycleDependencies,
+  type StageDependencies,
 } from "./agent-lifecycle.js";
-
-export interface ExecutionStageDependencies extends AgentLifecycleDependencies {
-  readonly store: RuntimeStore;
-  readonly createRetryController: (policy?: RetryPolicy) => RetryController;
-}
 
 export interface ExecuteSamplingInput {
   readonly context: RuntimeSamplingContext;
@@ -33,14 +31,42 @@ export interface ExecuteSamplingInput {
 }
 
 export async function executeSampling(
-  dependencies: ExecutionStageDependencies,
+  dependencies: StageDependencies,
   input: ExecuteSamplingInput,
 ): Promise<RuntimeSamplingContext> {
-  const subjectHarness = requireSpHarness(input.harnessConfig, "subject");
+  const subjectHarness = input.harnessConfig;
   const harnessRuntime = subjectHarness.runtime;
   const { sample } = input.context;
   let current = input.context.state;
   const retryController = dependencies.createRetryController(input.retryPolicy);
+  let observedOutput: ExecutionOutput | undefined;
+
+  const collectEvidence = (chatId: string): Promise<ExecutionOutput> => {
+    const handle: AgentHandle = {
+      ownerUserId: subjectHarness.agentConfig.ownerUserId,
+      chatId,
+      samplingId: current.samplingId,
+      role: "subject",
+      framework: subjectHarness.framework,
+    };
+    return collectOutputWithRetry({
+      stage: "execution",
+      retryController,
+      sleep: dependencies.sleep,
+      collect: () => dependencies.harness.collectExecution({
+        handle,
+        ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
+      }),
+    });
+  };
+
+  const reportEvidenceError = (error: unknown): void => {
+    const reported = new Error(
+      `Execution evidence collection failed for Sampling ${current.samplingId}: ${describeAgentError(error).message}`,
+      { cause: error },
+    );
+    reportError(dependencies.onError, reported);
+  };
 
   const persist = async (sampling: Sampling): Promise<void> => {
     await persistRuntimeRecord({
@@ -55,16 +81,38 @@ export async function executeSampling(
   };
 
   try {
-    if (!sample.data || typeof sample.data !== "object" || Array.isArray(sample.data)) {
-      throw new AgentOperationError("Sample data must be an object", false, "network");
+    if (current.execution.evidencePending) {
+      const attempt = current.executionAttempts.at(-1);
+      if (!current.subjectChatId || !attempt?.submissionId || !attempt.completedAt) {
+        throw new AgentOperationError("Pending Subject evidence has no terminal Submission", false, "network");
+      }
+      let output: ExecutionOutput;
+      try {
+        output = await collectEvidence(current.subjectChatId);
+      } catch (collectionError) {
+        reportEvidenceError(collectionError);
+        return { state: current, sample };
+      }
+      const succeeded = attempt.status === "completed" && output.status === "succeeded";
+      await persist({
+        ...withExecutionStatus(current, succeeded ? "succeeded" : "failed",
+          succeeded ? undefined : attempt.error ?? output.error ?? current.execution.lastError ?? "execution failed"),
+        artifacts: output.artifacts,
+        trajectory: output.trajectory,
+      });
+      return { state: current, sample };
     }
-    const { dataId: _dataId, ...data } = sample.data;
+
+    const { dataId: _dataId, evalPrompt: _evalPrompt, evalInitialMaterials: _evalMaterials, ...data } = sample.data;
     const input = dataInputSchema.safeParse(data);
     if (!input.success) throw new AgentOperationError(input.error.message, false, "network");
     const initialData = input.data;
-    const submissionId = current.subjectSubmissionId ?? dependencies.idFactory();
-    if (current.subjectSubmissionId === undefined) {
-      await persist({ ...current, subjectSubmissionId: submissionId });
+    if (current.subjectChatId === undefined && current.executionAttempts.length > 0) {
+      throw new AgentOperationError("Cannot resume an execution Attempt without its Subject Chat ID", false, "network");
+    }
+    const chatId = current.subjectChatId ?? dependencies.idFactory();
+    if (current.subjectChatId === undefined) {
+      await persist({ ...current, subjectChatId: chatId });
     }
 
     const result = await runAgentLifecycle<ExecutionAttempt, ExecutionOutput>(dependencies, {
@@ -72,7 +120,7 @@ export async function executeSampling(
       role: "subject",
       projectId: current.projectId,
       samplingId: current.samplingId,
-      submissionId,
+      chatId,
       harnessConfig: subjectHarness,
       prompt: initialData.userPrompt,
       retryController,
@@ -110,21 +158,25 @@ export async function executeSampling(
       prepare: async (handle) => {
         await dependencies.harness.materializeInitialData({
           handle,
-          idempotencyKey: `initial-data:${handle.submissionId}`,
+          idempotencyKey: `initial-data:${handle.chatId}`,
           data: initialData,
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
       },
-      collectOutput: (handle) => dependencies.harness.collectExecution({
-        handle,
-        ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
-      }),
+      collectOutput: async (handle) => {
+        observedOutput = await dependencies.harness.collectExecution({
+          handle,
+          ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
+        });
+        return observedOutput;
+      },
       isSuccessfulOutput: (output) => output.status === "succeeded",
       outputFailure: (output) => new AgentOperationError(
         output.error ?? "execution output failed",
         true,
         "network",
       ),
+      deferFailureStatus: true,
     });
 
     await persist({
@@ -134,29 +186,46 @@ export async function executeSampling(
     });
     return { state: current, sample };
   } catch (error) {
-    if (error instanceof RuntimeRecordPersistenceError && error.outcome !== "not-committed") throw error;
     const details = describeAgentError(error);
-    const stored = await dependencies.store.getSampling(current.samplingId);
-    if (!stored) throw error;
-    let failureBase = stored;
-    if (error instanceof RuntimeRecordPersistenceError) {
-      const expected = error.expectedRecord as Sampling;
-      const attempted = error.attemptedRecord as Sampling;
-      if (sameRuntimeRecordFacts(stored, expected)) {
-        const observedAttempt = attempted.executionAttempts.at(-1);
-        const savedAttempt = stored.executionAttempts.find((item) => (
-          item.executionAttemptId === observedAttempt?.executionAttemptId
-        ));
-        if (
-          (observedAttempt?.completedAt !== undefined && savedAttempt?.completedAt === undefined)
-          || (attempted.artifacts !== undefined && stored.artifacts === undefined)
-          || (attempted.trajectory !== undefined && stored.trajectory === undefined)
-        ) failureBase = attempted;
-      } else if (!sameRuntimeRecordFacts(stored, attempted)) throw error;
-    }
+    const { stored, failureBase } = await readStageFailure(error, {
+      read: () => dependencies.store.getSampling(current.samplingId),
+      attempts: (record) => record.executionAttempts,
+      attemptId: (attempt) => attempt.executionAttemptId,
+      evidence: (record) => [record.artifacts, record.trajectory],
+    });
     current = stored;
     if (current.execution.status === "succeeded") return { state: current, sample };
-    await persist(withExecutionStatus(failureBase, "failed", details.message));
+    const lastAttempt = failureBase.executionAttempts.at(-1);
+    const terminalChatId = failureBase.subjectChatId && lastAttempt?.submissionId && lastAttempt.completedAt
+      && isTerminalAgentStatus(lastAttempt.status) ? failureBase.subjectChatId : undefined;
+    if (error instanceof RuntimeRecordPersistenceError && terminalChatId) throw error;
+    if (terminalChatId && lastAttempt?.status !== "completed"
+      && !(error instanceof ConfirmedSubmissionFailure)) {
+      // A persisted failed Attempt still needs SP calibration and the restart decision.
+      // A status outage cannot turn it into final evidence collection.
+      throw error;
+    }
+    if (terminalChatId && !observedOutput) {
+      // Persist the finalization boundary before another read, so a crash cannot restart the Agent.
+      await persist({
+        ...failureBase,
+        execution: { status: "retrying", lastError: lastAttempt?.error ?? details.message, evidencePending: true },
+      });
+      if (lastAttempt?.status === "completed") return { state: current, sample };
+      try {
+        observedOutput = await collectEvidence(terminalChatId);
+      } catch (collectionError) {
+        reportEvidenceError(collectionError);
+        return { state: current, sample };
+      }
+    }
+    await persist({
+      ...withExecutionStatus(failureBase, "failed", details.message),
+      ...(observedOutput === undefined ? {} : {
+        artifacts: observedOutput.artifacts,
+        trajectory: observedOutput.trajectory,
+      }),
+    });
     return { state: current, sample };
   }
 }
