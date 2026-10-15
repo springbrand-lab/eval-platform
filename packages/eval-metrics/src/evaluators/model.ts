@@ -1,6 +1,20 @@
 import type { ArtifactRef, EvidenceRef, JsonValue, TrajectoryRef } from "@eval-platform/eval-contracts";
 
-export type NumericSchemaType = "number" | "integer";
+export type OutputFieldKind = "number" | "integer" | "boolean" | "enum";
+
+export type OutputScalar = string | number | boolean;
+
+export type OutputValue = OutputScalar | null;
+
+/** What the Schema lets a field hold that Metrics aggregates. */
+export interface OutputFieldShape {
+  /** In the order number/integer, boolean, enum; never both number and integer. */
+  readonly kinds: readonly OutputFieldKind[];
+  /** Declared boolean and enum values in Schema order. */
+  readonly values: readonly OutputScalar[];
+  /** Whether the Schema allows null. */
+  readonly nullable: boolean;
+}
 
 export type EvaluationValidationStatus = "valid" | "invalid" | "unavailable";
 
@@ -32,13 +46,14 @@ export interface EvaluationValidation {
   readonly errors: readonly EvaluationValidationError[];
 }
 
-export interface NumericObservation {
+export interface OutputObservation {
   /** Stable field path: object keys as JSON Pointer tokens and every array index as the token `*`. */
   readonly jsonPointer: string;
   /** Exact JSON Pointer of this value, e.g. `/scores/0/value`. */
   readonly instancePointer: string;
-  readonly schemaType: NumericSchemaType;
-  readonly value: number;
+  /** Kinds this value counts as; empty for null, which only counts toward the field's `nullCount`. */
+  readonly kinds: readonly OutputFieldKind[];
+  readonly value: OutputValue;
 }
 
 /** The Evaluator's result exactly as written, plus how it reads against the Project Schema. */
@@ -55,7 +70,7 @@ export interface EvaluationOutputView {
   readonly rawJson: JsonValue | null;
   readonly validation: EvaluationValidation;
   /** Only from valid outputs of succeeded evaluations. */
-  readonly numericObservations: readonly NumericObservation[];
+  readonly observations: readonly OutputObservation[];
   readonly artifacts: readonly ArtifactRef[];
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly trajectory: TrajectoryRef | null;

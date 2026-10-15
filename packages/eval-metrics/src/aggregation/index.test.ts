@@ -52,7 +52,7 @@ describe("execution/evaluation aggregation", () => {
     });
     expect(result.execution).toMatchObject({ statuses: { failed: 1 }, completedAttempts: 1, failedAttempts: 0, successRate: 0 });
     expect(result.evaluation).toMatchObject({ statuses: { failed: 1 }, completedAttempts: 1, failedAttempts: 0 });
-    expect(result.numericOutputs.fields[0]).toMatchObject({ jsonPointer: "/score", observationCount: 0, diagnostics: [{ reason: "not-succeeded", evaluations: 1 }] });
+    expect(result.evaluationOutputs.fields[0]).toMatchObject({ jsonPointer: "/score", observationCount: 0, diagnostics: [{ reason: "not-succeeded", evaluations: 1 }] });
   });
 
   it("keeps Subject and Evaluator resources separate and counts failed, cancelled and restarted attempts", () => {

@@ -278,25 +278,26 @@ Sampling 明细把 Subject 和每个当前 Evaluator 分开为 `AgentMetricView`
 
 ### 5.5 JSON Schema 评估结果
 
-EvaluationRecord 只保存 Evaluator 原始输出（`structuredOutput` 的文件路径、原始文本和可选 hash）。Schema 校验和数值抽取在 `eval-metrics` 读取时完成：
+EvaluationRecord 只保存 Evaluator 原始输出（`structuredOutput` 的文件路径、原始文本和可选 hash）。Schema 校验和输出字段抽取在 `eval-metrics` 读取时完成：
 
 - `content` 严格解析（拒绝重复键），再按评估计划锁定的 Schema 用 draft 2020-12 校验；结果为 valid、invalid 或 unavailable，并给出原因和校验错误；
 - Schema 属于评估计划，首个带评估的 Run 准入后锁定，同一 Project 的全部 EvaluationRecord 使用同一版本；
-- 没有评估计划时数值结果为 unavailable，执行指标照常展示。
+- 没有评估计划时输出字段结果为 unavailable，执行指标照常展示。
 
-数值提取规则：
+输出字段规则（完整定义见 [eval-metrics README](../packages/eval-metrics/README.md)）：
 
-- 只从成功评估的有效输出中提取 Schema 声明为 `number`/`integer` 的字段；
+- 只从成功评估的有效输出中提取 Schema 声明为 `number`/`integer`、`boolean` 或 `enum`/`const` 的字段，枚举数组即元素路径上的 enum；自由文本字符串和对象不汇总；
 - 解析本地 `$ref`；`oneOf`/`anyOf`/`if` 只走实际通过校验的分支，`allOf` 全部生效；
 - 字段路径为 JSON Pointer，数组下标统一为 `*`，同时保留实际实例路径；
-- 字符串数字、布尔值和未声明字段不转换；NaN、Infinity、超出安全整数范围使整份输出无效；
-- 评估失败、缺字段、校验失败不按 0 参与。
+- 字符串数字和未声明字段不转换；NaN、Infinity、超出安全整数范围使整份输出无效；
+- Schema 允许 null 时 null 由独立的 nullCount 计数，不进入分布与数值统计，不算 false 或任何枚举值，也不同于缺失；
+- 评估失败、缺字段、校验失败不按 0 或 false 参与。
 
-每个数值路径输出 observationCount、contributingEvaluationCount、missingEvaluationCount（附缺失原因）、total/min/max/mean/median 与 coverage。数组字段一条记录可产生多个观测，因此同时展示观测数和贡献记录数。
+每个字段路径输出 kinds、observationCount、contributingEvaluationCount、missingEvaluationCount（附缺失原因）、数值字段的 total/min/max/mean/median、boolean/enum 分布条目（count、evaluations、share = count / observationCount）、Schema 允许 null 时的 nullCount 与 coverage。数组字段一条记录可产生多个观测，因此同时展示观测数和贡献记录数。
 
 ### 5.6 公共模型
 
-字段级定义是 `@eval-platform/eval-metrics` 的公共类型：`MetricSummary`、`AgentMetricView`、`ResourceStatistics`、`TrajectorySummary`、`ToolMetric`、`EvaluationOutputView`、`NumericOutputSummary`、`NumericObservationSummary`，以及四层视图 `ProjectOverview`、`DatasetOverview`、`SampleOverview`、`SamplingDetail`。各层视图都含数值汇总；只有 `SamplingDetail` 返回每条评估的原始文本、解析后的 JSON、校验结果、数值观察和轨迹引用。
+字段级定义是 `@eval-platform/eval-metrics` 的公共类型：`MetricSummary`、`AgentMetricView`、`ResourceStatistics`、`TrajectorySummary`、`ToolMetric`、`EvaluationOutputView`、`EvaluationOutputSummary`、`OutputFieldSummary`，以及四层视图 `ProjectOverview`、`DatasetOverview`、`SampleOverview`、`SamplingDetail`。各层视图都含输出字段汇总；只有 `SamplingDetail` 返回每条评估的原始文本、解析后的 JSON、校验结果、字段观察和轨迹引用。
 
 ### 5.7 只读观察
 
@@ -315,7 +316,7 @@ EvaluationRecord 只保存 Evaluator 原始输出（`structuredOutput` 的文件
 | eval-contracts | ProjectPlan、ExecutionPlan、EvaluationPlan、ProjectDatasetSnapshot、AgentConfigSnapshot、RunOperation/Selector/Targets、原始 `structuredOutput`、AgentObservationRef。 |
 | eval-dataset | 可编辑来源 Dataset/Data；不保存 Project 或结果。 |
 | eval-runtime | 计划校验与摘要、ProjectSample、目标展开、准入、三种 operation、停止、幂等、Worker 恢复、Chat/证据身份。 |
-| eval-metrics | 固定层级、资源与轨迹统计、Schema 校验与数值抽取、四层聚合和 coverage。 |
+| eval-metrics | 固定层级、资源与轨迹统计、Schema 校验与输出字段汇总、四层聚合和 coverage。 |
 | eval-api | Project 快照写入、冻结副本及补偿、评估计划保存、Run 事务、MetricsSource、观察入口、HTTP 错误语义。 |
 | eval-web | 创建、评估计划补填/修改（锁定前）、运行选择、停止、删除、四层 Metrics、只读观察展示；没有执行计划编辑页。 |
 | Eval SP | 公开 Chat/Context/Workspace/Trajectory 只读访问、Evaluator 原始结构化输出、服务端写权限隔离；Agent Config 沿用公开增删改查。 |

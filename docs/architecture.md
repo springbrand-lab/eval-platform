@@ -155,11 +155,11 @@ SP 根据执行 Chat 的 `{userId, chatId}` 定位同一 SpaceDO，按 Subject C
 - 网络、LLM、网站等临时故障先查询原 Submission，再决定是否重启同一个 Chat / Workspace；
 - 手动取消、鉴权失败、配置错误不自动重启；
 - 每次执行和评估都完整收集对应 Agent 的产物与轨迹；SP 把完整 Subject 轨迹物化到原 SpaceDO，评估直接读取留在原处的 Subject 产物；结果评估以产物为主，轨迹作为补充证据；
-- Evaluator 输出中的 `structuredOutput` 是 Evaluator 写入评估目录的原始结果文件文本，Runtime 原样保存；`eval-metrics` 读取时按评估计划锁定的 Schema 校验并抽取数值。
+- Evaluator 输出中的 `structuredOutput` 是 Evaluator 写入评估目录的原始结果文件文本，Runtime 原样保存；`eval-metrics` 读取时按评估计划锁定的 Schema 校验并抽取输出字段。
 
 ## Metrics 与只读观察
 
-`eval-metrics` 从应用注入的一致事实快照（Project 计划、ProjectSample、当前 Sampling/EvaluationRecord、Run）聚合，层级固定为 Project → Dataset → ProjectSample → Sampling，来自 Project 快照而不是实时目录；未运行的 ProjectSample 照常出现，共享 ProjectSample 在 Project 汇总中按 Sampling/Evaluation 身份去重。Subject 与每个 Evaluator 分别给出 `AgentMetricView`（资源、Attempt、时长、轨迹）。轨迹指标来自 Attempt 已保存的 SP telemetry 事件：Turn 数、按工具的调用数/结果/输入与返回字节长度、非工具轮及经 `parentOperationId` 明确归属的 generation Token。评估结果按 Schema 声明的 number/integer 字段逐层汇总，没有评估计划时为 unavailable。
+`eval-metrics` 从应用注入的一致事实快照（Project 计划、ProjectSample、当前 Sampling/EvaluationRecord、Run）聚合，层级固定为 Project → Dataset → ProjectSample → Sampling，来自 Project 快照而不是实时目录；未运行的 ProjectSample 照常出现，共享 ProjectSample 在 Project 汇总中按 Sampling/Evaluation 身份去重。Subject 与每个 Evaluator 分别给出 `AgentMetricView`（资源、Attempt、时长、轨迹）。轨迹指标来自 Attempt 已保存的 SP telemetry 事件：Turn 数、按工具的调用数/结果/输入与返回字节长度、非工具轮及经 `parentOperationId` 明确归属的 generation Token。评估结果按 Schema 声明的 number/integer、boolean、enum（含枚举数组元素）字段逐层汇总：数值字段给出数值统计，boolean/enum 给出按声明顺序的非 null 分布条目；Schema 允许 null 时另给独立的 `nullCount`，不进入分布与数值统计、不算 false 或任何枚举值，也不同于缺失。规则见 [eval-metrics README](../packages/eval-metrics/README.md)。没有评估计划时为 unavailable。
 
 每个 Sampling 和 EvaluationRecord 在任何 Run 状态下都有只读观察入口：Eval API 校验 owner、Project 与当前 Sampling/Evaluation 身份后返回 `AgentObservationRef`（角色、Chat 所属用户、Chat ID、`not-started | available`），不向浏览器暴露可写 Chat URL。Context、Workspace 和 Trajectory 的读接口由 Eval SP 提供，交互式观察的只读权限由 SP 服务端执行。
 

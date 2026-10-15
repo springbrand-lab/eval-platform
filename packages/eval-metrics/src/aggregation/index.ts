@@ -4,7 +4,7 @@ import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
 import type { EvaluationOutputReader } from "../evaluators/index.js";
 import { agentSpan, attemptDuration, attemptResources } from "./agents.js";
 import type { MetricCounts, MetricSummary, StageStatistics } from "./model.js";
-import { summarizeNumericOutputs } from "./numeric-outputs.js";
+import { summarizeOutputFields } from "./output-fields.js";
 import { aggregateResources } from "./resources.js";
 import { summarizeNumbers } from "./statistics.js";
 
@@ -49,6 +49,6 @@ export function aggregateMetrics(input: MetricInput): MetricSummary {
     evaluation: stageStatistics(input.evaluations.map((evaluation) => ({ status: evaluation.status.status, attempts: evaluation.attempts }))),
     executionAgent: aggregateResources(input.samplings.flatMap((sampling) => attemptResources(sampling.subjectAgent.ownerUserId, sampling.executionAttempts))),
     evaluationAgents: aggregateResources(input.evaluations.flatMap((evaluation) => attemptResources(evaluation.evaluator.ownerUserId, evaluation.attempts))),
-    numericOutputs: summarizeNumericOutputs(input.outputs, input.evaluations),
+    evaluationOutputs: summarizeOutputFields(input.outputs, input.evaluations),
   };
 }
