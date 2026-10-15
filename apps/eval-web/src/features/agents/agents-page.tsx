@@ -17,7 +17,6 @@ export function AgentsPage() {
     <Page>
       <PageHeader
         title="Agent"
-        description="Eval SP 中服务账号的 Agent 配置。创建 Project 时会冻结所选配置的副本，副本不在这里列出。"
         actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => void navigate({ to: "/agents/new" })}>新建 Agent</Button>}
       />
       <Card>
@@ -28,7 +27,7 @@ export function AgentsPage() {
             searchText={(row) => `${row.name} ${row.slug ?? ""} ${row.description ?? ""}`}
             searchPlaceholder="搜索名称或 slug"
             onRowClick={(row) => void navigate({ to: "/agents/$id", params: { id: row.id } })}
-            empty={<EmptyState title="还没有 Agent 配置" description="被测 Agent 和评委都需要一个 Agent 配置。"
+            empty={<EmptyState title="还没有 Agent 配置"
               action={<Button variant="primary" onClick={() => void navigate({ to: "/agents/new" })}>新建 Agent</Button>} />}
             columns={[
               { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span>, sortValue: (row) => row.name },

@@ -1,7 +1,19 @@
-import { ArrowDown, ArrowUp, Search } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import {
+  flexRender,
+  getCoreRowModel,
+  getFilteredRowModel,
+  getSortedRowModel,
+  useReactTable,
+  type ColumnDef,
+  type RowSelectionState,
+  type SortingState,
+} from "@tanstack/react-table";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { ArrowDown, ArrowUp, ArrowUpDown, Search } from "lucide-react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { EmptyState } from "./feedback";
+import { Checkbox } from "./form";
 
 export interface Column<T> {
   key: string;
@@ -26,50 +38,82 @@ export interface DataTableProps<T> {
   selectable?: boolean;
   selected?: ReadonlySet<string>;
   onSelectedChange?: (next: Set<string>) => void;
-  /** Rows rendered at most at once; the rest load on "show more". */
-  pageSize?: number;
 }
 
+/** Rows above this count render through a virtualized, height-bounded body. */
+const VIRTUAL_FROM = 100;
+const ROW_HEIGHT = 44;
+
+/** TanStack Table with local sorting, search and selection; long lists are virtualized with TanStack Virtual. */
 export function DataTable<T>({
   rows, columns, rowKey, searchText, searchPlaceholder = "搜索", onRowClick, empty, toolbar,
-  selectable, selected, onSelectedChange, pageSize = 200,
+  selectable, selected, onSelectedChange,
 }: DataTableProps<T>) {
+  const [sorting, setSorting] = useState<SortingState>([]);
   const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<{ key: string; desc: boolean } | null>(null);
-  const [limit, setLimit] = useState(pageSize);
+  const rowSelection = useMemo<RowSelectionState>(
+    () => Object.fromEntries([...(selected ?? [])].map((key) => [key, true])), [selected],
+  );
 
-  const visible = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    let result = needle && searchText ? rows.filter((row) => searchText(row).toLowerCase().includes(needle)) : [...rows];
-    const column = sort && columns.find((item) => item.key === sort.key);
-    if (sort && column?.sortValue) {
-      const value = column.sortValue;
-      result = result.sort((left, right) => {
-        const a = value(left) ?? "";
-        const b = value(right) ?? "";
-        const order = a < b ? -1 : a > b ? 1 : 0;
-        return sort.desc ? -order : order;
+  const definitions = useMemo<ColumnDef<T>[]>(() => {
+    const defs: ColumnDef<T>[] = columns.map((column) => ({
+      id: column.key,
+      header: () => column.header,
+      cell: ({ row }) => column.cell(row.original),
+      enableSorting: !!column.sortValue,
+      sortDescFirst: false,
+      ...(column.sortValue ? { accessorFn: (row: T) => column.sortValue!(row) ?? "", sortUndefined: "last" as const } : {}),
+      meta: { className: column.className, align: column.align },
+    }));
+    if (selectable) {
+      defs.unshift({
+        id: "__select",
+        header: ({ table }) => (
+          <Checkbox aria-label="全选"
+            checked={table.getIsAllRowsSelected() ? true : table.getIsSomeRowsSelected() ? "indeterminate" : false}
+            onCheckedChange={(value) => table.toggleAllRowsSelected(value)} />
+        ),
+        cell: ({ row }) => <Checkbox aria-label="选择" checked={row.getIsSelected()} onCheckedChange={(value) => row.toggleSelected(value)} />,
+        meta: { className: "w-10" },
       });
     }
-    return result;
-  }, [rows, query, sort, columns, searchText]);
+    return defs;
+  }, [columns, selectable]);
 
-  const shown = visible.slice(0, limit);
-  const allSelected = selectable && shown.length > 0 && shown.every((row) => selected?.has(rowKey(row)));
-  const toggleAll = () => {
-    const next = new Set(selected);
-    for (const row of shown) {
-      if (allSelected) next.delete(rowKey(row));
-      else next.add(rowKey(row));
-    }
-    onSelectedChange?.(next);
-  };
-  const toggle = (key: string) => {
-    const next = new Set(selected);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    onSelectedChange?.(next);
-  };
+  const table = useReactTable({
+    data: rows as T[],
+    columns: definitions,
+    getRowId: (row) => rowKey(row),
+    state: { sorting, globalFilter: query, rowSelection },
+    onSortingChange: setSorting,
+    onGlobalFilterChange: setQuery,
+    globalFilterFn: (row, _columnId, value: string) =>
+      !searchText || searchText(row.original).toLowerCase().includes(value.trim().toLowerCase()),
+    enableRowSelection: !!selectable,
+    onRowSelectionChange: (updater) => {
+      const next = typeof updater === "function" ? updater(rowSelection) : updater;
+      onSelectedChange?.(new Set(Object.keys(next).filter((key) => next[key])));
+    },
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+  });
+
+  const visible = table.getRowModel().rows;
+  const scroller = useRef<HTMLDivElement>(null);
+  const virtual = visible.length > VIRTUAL_FROM;
+  const virtualizer = useVirtualizer({
+    count: visible.length,
+    getScrollElement: () => scroller.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 12,
+    enabled: virtual,
+  });
+  const items = virtual ? virtualizer.getVirtualItems() : [];
+  const padTop = virtual && items.length > 0 ? items[0]!.start : 0;
+  const padBottom = virtual && items.length > 0 ? virtualizer.getTotalSize() - items[items.length - 1]!.end : 0;
+  const shownRows = virtual ? items.map((item) => visible[item.index]!) : visible;
+  const columnCount = table.getVisibleLeafColumns().length;
 
   return (
     <div className="flex flex-col">
@@ -77,13 +121,13 @@ export function DataTable<T>({
         <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
           {searchText && (
             <div className="relative w-64">
-              <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-text-muted" />
+              <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-text-faint" />
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder={searchPlaceholder}
                 aria-label={searchPlaceholder}
-                className="h-8 w-full rounded-[var(--radius-control)] border border-input bg-surface pl-8 pr-2 text-[13px] text-text-strong placeholder:text-text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
+                className="h-8 w-full rounded-[var(--radius-control)] border border-input bg-surface pl-8 pr-2 text-[13px] text-text-strong placeholder:text-text-faint focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
               />
             </div>
           )}
@@ -93,64 +137,55 @@ export function DataTable<T>({
       {visible.length === 0 ? (
         empty ?? <EmptyState title={query ? "没有匹配的结果" : "暂无数据"} />
       ) : (
-        <div className="overflow-x-auto">
+        <div ref={scroller} className={cn("overflow-x-auto", virtual && "max-h-[70vh] overflow-y-auto")}>
           <table className="w-full border-collapse text-[13px]">
-            <thead>
-              <tr className="border-b border-border text-left text-xs text-text-muted">
-                {selectable && (
-                  <th className="w-10 px-3 py-2">
-                    <input type="checkbox" aria-label="全选" checked={!!allSelected} onChange={toggleAll} className="cursor-pointer accent-[var(--primary)]" />
-                  </th>
-                )}
-                {columns.map((column) => (
-                  <th key={column.key} className={cn("h-9 whitespace-nowrap px-3 font-semibold", column.align === "right" && "text-right", column.className)}>
-                    {column.sortValue ? (
-                      <button
-                        type="button"
-                        className="inline-flex items-center gap-1 hover:text-text-strong"
-                        onClick={() => setSort((current) => current?.key === column.key
-                          ? { key: column.key, desc: !current.desc } : { key: column.key, desc: false })}
-                      >
-                        {column.header}
-                        {sort?.key === column.key && (sort.desc ? <ArrowDown className="size-3" /> : <ArrowUp className="size-3" />)}
-                      </button>
-                    ) : column.header}
-                  </th>
-                ))}
-              </tr>
+            <thead className={cn(virtual && "sticky top-0 z-10 bg-surface")}>
+              {table.getHeaderGroups().map((group) => (
+                <tr key={group.id} className="border-b border-border text-left text-xs text-text-muted">
+                  {group.headers.map((header) => {
+                    const meta = header.column.columnDef.meta as { className?: string; align?: string } | undefined;
+                    const sorted = header.column.getIsSorted();
+                    return (
+                      <th key={header.id} className={cn("h-9 whitespace-nowrap px-3 font-semibold", meta?.align === "right" && "text-right", meta?.className)}>
+                        {header.column.getCanSort() ? (
+                          <button type="button" onClick={header.column.getToggleSortingHandler()}
+                            className={cn("inline-flex items-center gap-1 hover:text-text-strong", meta?.align === "right" && "flex-row-reverse")}>
+                            {flexRender(header.column.columnDef.header, header.getContext())}
+                            {sorted === "asc" ? <ArrowUp className="size-3" /> : sorted === "desc" ? <ArrowDown className="size-3" /> : <ArrowUpDown className="size-3 opacity-40" />}
+                          </button>
+                        ) : flexRender(header.column.columnDef.header, header.getContext())}
+                      </th>
+                    );
+                  })}
+                </tr>
+              ))}
             </thead>
             <tbody>
-              {shown.map((row) => {
-                const key = rowKey(row);
-                return (
-                  <tr
-                    key={key}
-                    onClick={onRowClick ? () => onRowClick(row) : undefined}
-                    className={cn("border-b border-border text-text last:border-b-0", onRowClick && "cursor-pointer hover:bg-surface-hover")}
-                  >
-                    {selectable && (
-                      <td className="px-3 py-2" onClick={(event) => event.stopPropagation()}>
-                        <input type="checkbox" aria-label="选择" checked={selected?.has(key) ?? false} onChange={() => toggle(key)} className="cursor-pointer accent-[var(--primary)]" />
+              {padTop > 0 && <tr style={{ height: padTop }}><td colSpan={columnCount} /></tr>}
+              {shownRows.map((row) => (
+                <tr
+                  key={row.id}
+                  data-state={row.getIsSelected() ? "selected" : undefined}
+                  onClick={onRowClick ? () => onRowClick(row.original) : undefined}
+                  className={cn(
+                    "border-b border-border text-text last:border-b-0 data-[state=selected]:bg-surface-muted",
+                    onRowClick && "cursor-pointer hover:bg-surface-hover",
+                  )}
+                >
+                  {row.getVisibleCells().map((cell) => {
+                    const meta = cell.column.columnDef.meta as { className?: string; align?: string } | undefined;
+                    return (
+                      <td key={cell.id} onClick={cell.column.id === "__select" ? (event) => event.stopPropagation() : undefined}
+                        className={cn("h-11 px-3 py-2 align-middle", meta?.align === "right" && "text-right tabular", meta?.className)}>
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>
-                    )}
-                    {columns.map((column) => (
-                      <td key={column.key} className={cn("h-11 px-3 py-2 align-middle", column.align === "right" && "text-right tabular", column.className)}>
-                        {column.cell(row)}
-                      </td>
-                    ))}
-                  </tr>
-                );
-              })}
+                    );
+                  })}
+                </tr>
+              ))}
+              {padBottom > 0 && <tr style={{ height: padBottom }}><td colSpan={columnCount} /></tr>}
             </tbody>
           </table>
-          {visible.length > shown.length && (
-            <div className="flex items-center justify-center gap-3 border-t border-border py-3 text-[13px] text-text-muted">
-              已显示 {shown.length} / {visible.length}
-              <button type="button" className="font-semibold text-link hover:underline" onClick={() => setLimit((value) => value + pageSize)}>
-                显示更多
-              </button>
-            </div>
-          )}
         </div>
       )}
     </div>

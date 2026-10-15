@@ -111,7 +111,7 @@ function DataForm({ initial, datasetId }: { initial?: Data; datasetId?: string }
         </CardBody>
       </Card>
       <Card>
-        <CardHeader title="初始资源" description="执行前放入工作区的素材，以及预置的对话历史" />
+        <CardHeader title="初始资源" />
         <CardBody className="flex flex-col gap-4">
           <Field label="被测 Agent 的素材">{() => <ResourcePicker kind="material" value={draft.initialMaterials} onChange={(value) => set("initialMaterials", value)} />}</Field>
           <Field label="评委的素材">{() => <ResourcePicker kind="material" value={draft.evalInitialMaterials} onChange={(value) => set("evalInitialMaterials", value)} />}</Field>
@@ -119,7 +119,7 @@ function DataForm({ initial, datasetId }: { initial?: Data; datasetId?: string }
         </CardBody>
       </Card>
       <Card>
-        <CardHeader title="业务字段" description="name、description 等其他字段，原样保存；提示词测试集中的用例必须有 name 和 description" />
+        <CardHeader title="其他字段" actions={<span className="text-xs text-text-muted">JSON，原样保存</span>} />
         <CardBody>
           <Field label="JSON">{(id) => <Textarea id={id} mono rows={8} value={draft.extra} onChange={(event) => set("extra", event.target.value)} />}</Field>
         </CardBody>
@@ -130,7 +130,7 @@ function DataForm({ initial, datasetId }: { initial?: Data; datasetId?: string }
         <Button variant="primary" disabled={typeof input === "string"} loading={save.isPending} onClick={() => save.mutate()}>{initial ? "保存修改" : "创建用例"}</Button>
       </div>
       <ConfirmDialog open={deleting} onClose={() => setDeleting(false)} onConfirm={() => remove.mutate()} loading={remove.isPending} danger
-        title="删除用例" description="仍在某个测试集中的用例不能删除，请先从测试集移出。已有 Project 不受影响。" confirmLabel="删除" />
+        title="删除用例" description="需要先从所有测试集移出。已有 Project 不受影响。" confirmLabel="删除" />
     </div>
   );
 }

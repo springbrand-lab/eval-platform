@@ -12,7 +12,7 @@ export function LangfuseLink({ chatId, label = "Langfuse 会话" }: { chatId: st
   const url = langfuseSessionUrl(chatId);
   if (!url) return null;
   return (
-    <a href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[13px] font-semibold text-link hover:underline">
+    <a href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[13px] link font-semibold">
       {label}<ExternalLink className="size-3.5" />
     </a>
   );
@@ -33,7 +33,7 @@ export function AgentPanel({ title, agent, observe }: {
           <>
             <LangfuseLink chatId={agent.chatId} />
             {observe && agent.chatId && (
-              <Link to={observe.to} params={observe.params as never} className="inline-flex items-center gap-1 text-[13px] font-semibold text-link hover:underline">
+              <Link to={observe.to} params={observe.params as never} className="inline-flex items-center gap-1 text-[13px] link font-semibold">
                 <Eye className="size-3.5" />查看会话
               </Link>
             )}

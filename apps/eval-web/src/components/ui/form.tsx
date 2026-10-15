@@ -1,9 +1,11 @@
-import { forwardRef, useId, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { Check, ChevronDown } from "lucide-react";
+import { Checkbox as CheckboxPrimitive, RadioGroup as RadioPrimitive, Select as SelectPrimitive } from "radix-ui";
+import { forwardRef, useId, type InputHTMLAttributes, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { cn } from "@/lib/cn";
 
 const control = cn(
   "w-full rounded-[var(--radius-control)] border border-input bg-surface px-3 text-sm text-text-strong shadow-sm transition-colors",
-  "placeholder:text-text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20",
+  "placeholder:text-text-faint focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25",
   "disabled:cursor-not-allowed disabled:bg-surface-muted disabled:text-text-muted aria-[invalid=true]:border-danger",
 );
 
@@ -17,49 +19,101 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<H
   },
 );
 
-export const Select = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HTMLSelectElement>>(function Select({ className, children, ...props }, ref) {
-  return <select ref={ref} className={cn(control, "h-9 cursor-pointer pr-8", className)} {...props}>{children}</select>;
-});
+export interface SelectOption { value: string; label: ReactNode }
 
-export function Checkbox({ label, description, className, ...props }: InputHTMLAttributes<HTMLInputElement> & { label?: ReactNode; description?: ReactNode }) {
+/** Radix Select; an empty `value` shows the placeholder. */
+export function Select({ id, value, onValueChange, options, placeholder = "请选择", disabled, className, "aria-label": ariaLabel }: {
+  id?: string;
+  value: string;
+  onValueChange: (value: string) => void;
+  options: readonly SelectOption[];
+  placeholder?: string;
+  disabled?: boolean;
+  className?: string;
+  "aria-label"?: string;
+}) {
   return (
-    <label className={cn("inline-flex cursor-pointer items-start gap-2.5 text-sm text-text", className)}>
-      <input type="checkbox" className="mt-0.5 size-4 shrink-0 cursor-pointer rounded border-input accent-[var(--primary)]" {...props} />
-      {(label || description) && (
-        <span className="flex flex-col">
-          {label && <span className="text-text-strong">{label}</span>}
-          {description && <span className="text-xs text-text-muted">{description}</span>}
-        </span>
-      )}
-    </label>
+    <SelectPrimitive.Root value={value || undefined} onValueChange={onValueChange} disabled={disabled}>
+      <SelectPrimitive.Trigger id={id} aria-label={ariaLabel}
+        className={cn(control, "flex h-9 items-center justify-between gap-2 text-left data-[placeholder]:text-text-faint", className)}>
+        <SelectPrimitive.Value placeholder={placeholder} />
+        <SelectPrimitive.Icon><ChevronDown className="size-4 text-text-muted" /></SelectPrimitive.Icon>
+      </SelectPrimitive.Trigger>
+      <SelectPrimitive.Portal>
+        <SelectPrimitive.Content position="popper" sideOffset={4}
+          className="z-50 max-h-72 min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-lg border border-border bg-surface shadow-[var(--shadow)] data-[state=open]:animate-in data-[state=open]:fade-in-0">
+          <SelectPrimitive.Viewport className="p-1">
+            {options.length === 0 && <div className="px-2 py-1.5 text-[13px] text-text-muted">没有可选项</div>}
+            {options.map((option) => (
+              <SelectPrimitive.Item key={option.value} value={option.value}
+                className="relative flex cursor-default select-none items-center rounded-md py-1.5 pl-2 pr-8 text-[13px] text-text outline-none data-[highlighted]:bg-surface-muted data-[highlighted]:text-text-strong">
+                <SelectPrimitive.ItemText>{option.label}</SelectPrimitive.ItemText>
+                <SelectPrimitive.ItemIndicator className="absolute right-2"><Check className="size-3.5" /></SelectPrimitive.ItemIndicator>
+              </SelectPrimitive.Item>
+            ))}
+          </SelectPrimitive.Viewport>
+        </SelectPrimitive.Content>
+      </SelectPrimitive.Portal>
+    </SelectPrimitive.Root>
   );
 }
 
-/** A selectable option card for exclusive choices (operation, scope, first Run). */
-export function RadioCard({ checked, onSelect, title, description, disabled }: {
-  checked: boolean; onSelect: () => void; title: ReactNode; description?: ReactNode; disabled?: boolean;
+export function Checkbox({ id, checked, onCheckedChange, label, description, disabled, className, "aria-label": ariaLabel }: {
+  id?: string;
+  checked: boolean | "indeterminate";
+  onCheckedChange: (checked: boolean) => void;
+  label?: ReactNode;
+  description?: ReactNode;
+  disabled?: boolean;
+  className?: string;
+  "aria-label"?: string;
+}) {
+  const generated = useId();
+  const boxId = id ?? generated;
+  const box = (
+    <CheckboxPrimitive.Root id={boxId} checked={checked} disabled={disabled} aria-label={ariaLabel}
+      onCheckedChange={(next) => onCheckedChange(next === true)}
+      onClick={(event) => event.stopPropagation()}
+      className="peer mt-px flex size-4 shrink-0 items-center justify-center rounded-[4px] border border-border-strong bg-surface shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-50 data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-fg data-[state=indeterminate]:border-primary data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-fg">
+      <CheckboxPrimitive.Indicator>
+        {checked === "indeterminate" ? <span className="block h-0.5 w-2 rounded bg-current" /> : <Check className="size-3" strokeWidth={3} />}
+      </CheckboxPrimitive.Indicator>
+    </CheckboxPrimitive.Root>
+  );
+  if (!label && !description) return box;
+  return (
+    <div className={cn("inline-flex items-start gap-2.5", className)}>
+      {box}
+      <label htmlFor={boxId} className="flex cursor-pointer flex-col text-sm">
+        {label && <span className="text-text-strong">{label}</span>}
+        {description && <span className="text-xs text-text-muted">{description}</span>}
+      </label>
+    </div>
+  );
+}
+
+/** Exclusive choices shown as option cards (operation, first Run). */
+export function RadioCards<T extends string>({ value, onValueChange, options, className }: {
+  value: T;
+  onValueChange: (value: T) => void;
+  options: readonly { value: T; title: ReactNode; description?: ReactNode; disabled?: boolean }[];
+  className?: string;
 }) {
   return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={checked}
-      disabled={disabled}
-      onClick={onSelect}
-      className={cn(
-        "flex w-full items-start gap-3 rounded-[var(--radius-card)] border px-3.5 py-3 text-left transition-colors",
-        checked ? "border-accent bg-accent-soft" : "border-border bg-surface hover:bg-surface-hover",
-        disabled && "cursor-not-allowed opacity-50",
-      )}
-    >
-      <span className={cn("mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border", checked ? "border-accent" : "border-border-strong")}>
-        {checked && <span className="size-2 rounded-full bg-accent" />}
-      </span>
-      <span className="flex min-w-0 flex-col gap-0.5">
-        <span className="text-sm font-semibold text-text-strong">{title}</span>
-        {description && <span className="text-xs leading-relaxed text-text-muted">{description}</span>}
-      </span>
-    </button>
+    <RadioPrimitive.Root value={value} onValueChange={(next) => onValueChange(next as T)} className={cn("grid gap-3", className)}>
+      {options.map((option) => (
+        <RadioPrimitive.Item key={option.value} value={option.value} disabled={option.disabled}
+          className="group flex w-full items-start gap-3 rounded-[var(--radius-card)] border border-border bg-surface px-3.5 py-3 text-left transition-colors hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:border-text-strong data-[state=checked]:bg-surface-muted">
+          <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border border-border-strong group-data-[state=checked]:border-text-strong">
+            <RadioPrimitive.Indicator className="size-2 rounded-full bg-text-strong" />
+          </span>
+          <span className="flex min-w-0 flex-col gap-0.5">
+            <span className="text-sm font-semibold text-text-strong">{option.title}</span>
+            {option.description && <span className="text-xs leading-relaxed text-text-muted">{option.description}</span>}
+          </span>
+        </RadioPrimitive.Item>
+      ))}
+    </RadioPrimitive.Root>
   );
 }
 

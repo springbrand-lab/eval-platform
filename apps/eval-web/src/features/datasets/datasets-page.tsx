@@ -48,7 +48,6 @@ export function DatasetsPage() {
     <Page>
       <PageHeader
         title="测试集"
-        description="测试集由用例组成。同一条用例可以属于多个测试集；创建 Project 时会复制一份，之后的修改不影响已有 Project。"
         actions={(
           <>
             <Button icon={<FileUp className="size-4" />} onClick={() => setDialog("document")}>导入文档</Button>
@@ -64,7 +63,7 @@ export function DatasetsPage() {
             rowKey={(row) => row.datasetId}
             searchText={(row) => `${row.name} ${row.description ?? ""}`}
             onRowClick={(row) => void navigate({ to: "/datasets/$datasetId", params: { datasetId: row.datasetId } })}
-            empty={<EmptyState title="还没有测试集" description="最快的方式是导入一个提示词 JSONL 文件。"
+            empty={<EmptyState title="还没有测试集"
               action={<Button variant="primary" onClick={() => setDialog("prompt")}>导入提示词</Button>} />}
             columns={[
               { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span>, sortValue: (row) => row.name },

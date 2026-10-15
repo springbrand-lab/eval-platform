@@ -18,7 +18,6 @@ export function ProjectsPage() {
     <Page>
       <PageHeader
         title="Project"
-        description="一个 Project 固定一组用例、被测 Agent 和评估计划，可以反复发起 Run 并对比结果。"
         actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => void navigate({ to: "/projects/new" })}>新建 Project</Button>}
       />
       <Card>
@@ -28,7 +27,7 @@ export function ProjectsPage() {
             rowKey={(row) => row.projectId}
             searchText={(row) => `${row.name} ${row.description ?? ""}`}
             onRowClick={(row) => void navigate({ to: "/projects/$projectId", params: { projectId: row.projectId } })}
-            empty={<EmptyState title="还没有 Project" description="先准备测试集、评分格式和 Agent，再新建 Project。"
+            empty={<EmptyState title="还没有 Project"
               action={<Button variant="primary" onClick={() => void navigate({ to: "/projects/new" })}>新建 Project</Button>} />}
             columns={[
               { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span>, sortValue: (row) => row.name },

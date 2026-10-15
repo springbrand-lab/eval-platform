@@ -1,5 +1,5 @@
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { toast } from "sonner";
 import { agentKeys, listAgentOptions } from "@/api-sdk/agent-configs-api";
@@ -11,15 +11,15 @@ import { Page, PageHeader } from "@/components/layout/page";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
-import { Stepper } from "@/components/ui/data-display";
-import { LoadingBlock, Notice } from "@/components/ui/feedback";
-import { Checkbox, Field, Input, RadioCard, Select } from "@/components/ui/form";
+import { Stepper, Tabs } from "@/components/ui/data-display";
+import { EmptyState, LoadingBlock, Notice } from "@/components/ui/feedback";
+import { Checkbox, Field, Input, RadioCards, Select } from "@/components/ui/form";
 import { dataTitle } from "@/features/datasets/dataset-detail-page";
 import { describeError } from "@/lib/errors";
 import { newIdempotencyKey } from "@/lib/files";
 import { RUN_TARGET_IDS, SAMPLING_COUNT_MAX } from "@/lib/limits";
 
-const STEPS = ["基本信息与用例", "采样次数", "被测 Agent", "评估计划与首个 Run"];
+const STEPS = ["用例", "采样次数", "被测 Agent", "评估与运行"];
 
 interface DatasetChoice {
   /** null: every current member. */
@@ -165,6 +165,9 @@ export function NewProjectPage() {
     typeof result !== "string",
   ];
 
+  const agentOptions = (agents.data ?? []).map((option) => ({ value: option.agentConfig.userAgentId, label: option.name }));
+  const schemaOptions = (schemas.data ?? []).map((schema) => ({ value: schema.outputSchemaId, label: schema.name }));
+
   return (
     <Page>
       <PageHeader title="新建 Project" crumbs={[{ label: "Project", to: "/projects" }]} />
@@ -173,15 +176,16 @@ export function NewProjectPage() {
       {step === 0 && (
         <div className="flex flex-col gap-4">
           <Card>
-            <CardHeader title="基本信息" />
             <CardBody className="grid gap-4 md:grid-cols-2">
               <Field label="名称" required>{(id) => <Input id={id} value={draft.name} onChange={(event) => update({ name: event.target.value })} />}</Field>
               <Field label="说明">{(id) => <Input id={id} value={draft.description} onChange={(event) => update({ description: event.target.value })} />}</Field>
             </CardBody>
           </Card>
           <Card>
-            <CardHeader title="选择测试集" description="Project 会复制所选用例，之后测试集的修改不影响这个 Project。同一用例出现在多个测试集中只算一次。" />
-            {datasets.isPending ? <LoadingBlock rows={3} /> : (
+            <CardHeader title="测试集" actions={<span className="text-xs text-text-muted tabular">已选 {selectedData.length} 条用例</span>} />
+            {datasets.isPending ? <LoadingBlock rows={3} /> : (datasets.data ?? []).length === 0 ? (
+              <EmptyState title="还没有测试集" action={<Link to="/datasets" className="link text-[13px] font-semibold">去导入</Link>} />
+            ) : (
               <div className="divide-y divide-border">
                 {(datasets.data ?? []).map((dataset) => {
                   const choice = draft.datasets.get(dataset.datasetId);
@@ -189,23 +193,16 @@ export function NewProjectPage() {
                   return (
                     <div key={dataset.datasetId} className="px-4 py-3">
                       <div className="flex items-center justify-between gap-4">
-                        <Checkbox label={<span className="font-semibold">{dataset.name}</span>} checked={!!choice}
-                          onChange={(event) => toggleDataset(dataset.datasetId, event.target.checked)} />
+                        <Checkbox label={dataset.name} checked={!!choice} onCheckedChange={(checked) => toggleDataset(dataset.datasetId, checked)} />
                         {choice && (
-                          <div className="flex items-center gap-3 text-[13px]">
-                            <label className="inline-flex items-center gap-1.5">
-                              <input type="radio" checked={!choice.dataIds} onChange={() => setChoice(dataset.datasetId, null)} className="cursor-pointer accent-[var(--primary)]" />
-                              全部用例（{list.length}）
-                            </label>
-                            <label className="inline-flex items-center gap-1.5">
-                              <input type="radio" checked={!!choice.dataIds} onChange={() => setChoice(dataset.datasetId, new Set(list.map((item) => item.dataId)))} className="cursor-pointer accent-[var(--primary)]" />
-                              部分用例
-                            </label>
-                          </div>
+                          <Tabs<"all" | "some"> value={choice.dataIds ? "some" : "all"} tabs={[
+                            { value: "all", label: "全部", count: list.length },
+                            { value: "some", label: "部分", ...(choice.dataIds ? { count: choice.dataIds.size } : {}) },
+                          ]} onChange={(value) => setChoice(dataset.datasetId, value === "all" ? null : new Set(list.map((item) => item.dataId)))} />
                         )}
                       </div>
                       {choice?.dataIds && (
-                        <div className="mt-3 rounded-[var(--radius-control)] border border-border">
+                        <div className="mt-3 overflow-hidden rounded-[var(--radius-control)] border border-border">
                           <DataTable<Data>
                             rows={list}
                             rowKey={(row) => row.dataId}
@@ -220,23 +217,21 @@ export function NewProjectPage() {
                     </div>
                   );
                 })}
-                {datasets.data?.length === 0 && <p className="px-4 py-6 text-sm text-text-muted">还没有测试集，请先在「测试集」中导入。</p>}
               </div>
             )}
           </Card>
-          <p className="text-sm text-text-muted">已选择 {selectedData.length} 条用例。</p>
+          <p className="text-xs text-text-muted">用例会复制进 Project，之后修改测试集不影响它。</p>
         </div>
       )}
 
       {step === 1 && (
         <Card>
-          <CardHeader title="采样次数" description="每条用例每次执行会生成多少次独立的运行（采样）。可以按用例单独设置。" />
           <CardBody className="flex flex-col gap-4">
-            <Field label="默认次数" required hint={`1–${SAMPLING_COUNT_MAX}`} className="max-w-xs">
+            <Field label="每条用例采样次数" required hint={`1–${SAMPLING_COUNT_MAX}，下表可逐条覆盖`} className="max-w-xs">
               {(id) => <Input id={id} type="number" min={1} max={SAMPLING_COUNT_MAX} value={draft.samplingCount}
                 onChange={(event) => update({ samplingCount: Number(event.target.value) })} />}
             </Field>
-            <div className="rounded-[var(--radius-control)] border border-border">
+            <div className="overflow-hidden rounded-[var(--radius-control)] border border-border">
               <DataTable<Data>
                 rows={selectedData}
                 rowKey={(row) => row.dataId}
@@ -251,27 +246,21 @@ export function NewProjectPage() {
                 ]}
               />
             </div>
-            <p className="text-sm text-text-muted">首次执行共 {totalSamplings} 次采样。</p>
+            <p className="text-xs text-text-muted tabular">首次执行共 {totalSamplings} 次采样</p>
           </CardBody>
         </Card>
       )}
 
       {step === 2 && (
         <Card>
-          <CardHeader title="被测 Agent" description="创建时会冻结所选 Agent 配置的副本，之后修改原配置不影响这个 Project。" />
           <CardBody className="grid gap-4 md:grid-cols-3">
-            <Field label="Agent 配置" required>
-              {(id) => (
-                <Select id={id} value={draft.subjectAgentId} onChange={(event) => update({ subjectAgentId: event.target.value })}>
-                  <option value="">请选择</option>
-                  {agents.data?.map((option) => <option key={option.agentConfig.userAgentId} value={option.agentConfig.userAgentId}>{option.name}</option>)}
-                </Select>
-              )}
+            <Field label="被测 Agent" required hint="会冻结一份副本，之后改原配置不影响">
+              {(id) => <Select id={id} value={draft.subjectAgentId} onValueChange={(value) => update({ subjectAgentId: value })} options={agentOptions} />}
             </Field>
-            <Field label="执行并发" required hint="同时运行的采样数">
+            <Field label="执行并发" required>
               {(id) => <Input id={id} type="number" min={1} value={draft.executionConcurrency} onChange={(event) => update({ executionConcurrency: Number(event.target.value) })} />}
             </Field>
-            <Field label="单次超时（分钟）" hint="留空使用默认值">
+            <Field label="单次超时（分钟）" hint="留空用默认值">
               {(id) => <Input id={id} inputMode="decimal" value={draft.executionTimeoutMinutes} onChange={(event) => update({ executionTimeoutMinutes: event.target.value })} />}
             </Field>
           </CardBody>
@@ -281,69 +270,59 @@ export function NewProjectPage() {
       {step === 3 && (
         <div className="flex flex-col gap-4">
           <Card>
-            <CardHeader title="评估计划" description="可以先不填，之后在 Project 中补填；首个评估 Run 之后锁定。" />
-            <CardBody className="flex flex-col gap-4">
-              <Checkbox label="现在填写评估计划" checked={draft.withEvaluation}
-                onChange={(event) => update({ withEvaluation: event.target.checked, firstRun: event.target.checked ? draft.firstRun : "execution" })} />
-              {draft.withEvaluation && (
+            <CardHeader title="评估计划" actions={(
+              <Checkbox label="现在填写" checked={draft.withEvaluation}
+                onCheckedChange={(checked) => update({ withEvaluation: checked, firstRun: checked ? draft.firstRun : "execution" })} />
+            )} />
+            {draft.withEvaluation ? (
+              <CardBody className="flex flex-col gap-4">
                 <div className="grid gap-4 md:grid-cols-3">
                   <Field label="评委 Agent" required>
-                    {(id) => (
-                      <Select id={id} value={draft.evaluatorAgentId} onChange={(event) => update({ evaluatorAgentId: event.target.value })}>
-                        <option value="">请选择</option>
-                        {agents.data?.map((option) => <option key={option.agentConfig.userAgentId} value={option.agentConfig.userAgentId}>{option.name}</option>)}
-                      </Select>
-                    )}
+                    {(id) => <Select id={id} value={draft.evaluatorAgentId} onValueChange={(value) => update({ evaluatorAgentId: value })} options={agentOptions} />}
                   </Field>
                   <Field label="评估并发" required>
                     {(id) => <Input id={id} type="number" min={1} value={draft.evaluationConcurrency} onChange={(event) => update({ evaluationConcurrency: Number(event.target.value) })} />}
                   </Field>
                   <Field label="评分格式" required>
-                    {(id) => (
-                      <Select id={id} value={draft.outputSchemaId} onChange={(event) => update({ outputSchemaId: event.target.value })}>
-                        <option value="">请选择</option>
-                        {schemas.data?.map((schema) => <option key={schema.outputSchemaId} value={schema.outputSchemaId}>{schema.name}</option>)}
-                      </Select>
-                    )}
+                    {(id) => <Select id={id} value={draft.outputSchemaId} onValueChange={(value) => update({ outputSchemaId: value })} options={schemaOptions} />}
                   </Field>
                 </div>
-              )}
-              {draft.withEvaluation && missingEvalPrompt > 0 && (
-                <Notice tone="warning">有 {missingEvalPrompt} 条用例没有评审要求（evalPrompt），评估时会被拒绝。</Notice>
-              )}
+                {missingEvalPrompt > 0 && <Notice tone="warning">{missingEvalPrompt} 条用例没有 evalPrompt，评估时会被拒绝。</Notice>}
+              </CardBody>
+            ) : <CardBody className="text-[13px] text-text-muted">可以之后在 Project 里补填，首个评估 Run 之后锁定。</CardBody>}
+          </Card>
+          <Card>
+            <CardHeader title="首个 Run" />
+            <CardBody>
+              <RadioCards<"pipeline" | "execution"> className="md:grid-cols-2" value={draft.firstRun} onValueChange={(value) => update({ firstRun: value })} options={[
+                { value: "pipeline", title: "执行 + 评估", description: "采样成功后由评委打分", disabled: !draft.withEvaluation },
+                { value: "execution", title: "只执行", description: "之后再单独评估" },
+              ]} />
             </CardBody>
           </Card>
           <Card>
-            <CardHeader title="首个 Run" description="创建后立即开始" />
-            <CardBody role="radiogroup" className="grid gap-3 md:grid-cols-2">
-              <RadioCard checked={draft.firstRun === "pipeline"} disabled={!draft.withEvaluation} onSelect={() => update({ firstRun: "pipeline" })}
-                title="执行 + 评估（推荐）" description="每个采样执行成功后由评委打分" />
-              <RadioCard checked={draft.firstRun === "execution"} onSelect={() => update({ firstRun: "execution" })}
-                title="只执行" description="先看产物，之后再单独发起评估" />
-            </CardBody>
-          </Card>
-          <Card>
-            <CardHeader title="确认" />
             <CardBody>
               <DescriptionList items={[
                 { label: "名称", value: draft.name || "—" },
-                { label: "用例", value: `${selectedData.length} 条，首次执行 ${totalSamplings} 次采样` },
-                { label: "被测 Agent", value: agents.data?.find((item) => item.agentConfig.userAgentId === draft.subjectAgentId)?.name ?? "—" },
-                { label: "评估", value: draft.withEvaluation ? "已填写评估计划" : "暂不评估" },
+                { label: "用例", value: `${selectedData.length} 条 · 首次 ${totalSamplings} 次采样` },
+                { label: "被测 Agent", value: agentOptions.find((item) => item.value === draft.subjectAgentId)?.label ?? "—" },
+                { label: "评委 Agent", value: draft.withEvaluation ? agentOptions.find((item) => item.value === draft.evaluatorAgentId)?.label ?? "—" : "不评估" },
               ]} />
-              <Notice tone="warning">提交后会立即开始运行，按每轮 Agent 对话消耗服务账号的积分。</Notice>
             </CardBody>
           </Card>
-          {typeof result === "string" && <p className="text-sm text-danger">{result}</p>}
+          {typeof result === "string" && <p className="text-[13px] text-danger">{result}</p>}
           {create.error && <Notice tone="danger">{describeError(create.error)}</Notice>}
         </div>
       )}
 
-      <div className="sticky bottom-0 -mx-6 mt-5 flex justify-between border-t border-border bg-bg/90 px-6 py-3 backdrop-blur">
+      <div className="sticky bottom-0 -mx-6 mt-5 flex items-center justify-between gap-3 border-t border-border bg-bg/90 px-6 py-3 backdrop-blur">
         <Button disabled={step === 0} onClick={() => setStep(step - 1)}>上一步</Button>
-        {step < STEPS.length - 1
-          ? <Button variant="primary" disabled={!stepValid[step]} onClick={() => setStep(step + 1)}>下一步</Button>
-          : <Button variant="primary" disabled={typeof result === "string"} loading={create.isPending} onClick={() => create.mutate()}>创建并开始运行</Button>}
+        <div className="flex items-center gap-3">
+          {step === STEPS.length - 1 && <span className="text-xs text-text-muted">提交后立即开始运行，会消耗积分</span>}
+          {step < STEPS.length - 1
+            ? <Button variant="primary" disabled={!stepValid[step]} onClick={() => setStep(step + 1)}>下一步</Button>
+            : <Button variant="primary" disabled={typeof result === "string"} loading={create.isPending} onClick={() => create.mutate()}>创建并运行</Button>}
+        </div>
       </div>
     </Page>
   );

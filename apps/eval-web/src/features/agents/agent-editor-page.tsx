@@ -88,7 +88,7 @@ function AgentForm({ initial, onSaved }: { initial?: AgentConfig; onSaved: (conf
         </CardBody>
       </Card>
       <Card>
-        <CardHeader title="Agent 设置（setting）" description="与 Eval SP user-agent-configs 接口的 setting 字段一致：模型、行为、工具等。" />
+        <CardHeader title="setting" actions={<span className="text-xs text-text-muted">与 Eval SP user-agent-configs 一致</span>} />
         <CardBody>
           <Field label="setting JSON" error={settingError ?? errors.setting}>
             {(id) => <Textarea id={id} mono rows={18} value={setting} disabled={frozen} onChange={(event) => setSetting(event.target.value)} />}
@@ -108,7 +108,7 @@ function AgentForm({ initial, onSaved }: { initial?: AgentConfig; onSaved: (conf
         loading={remove.isPending}
         danger
         title="删除 Agent 配置"
-        description="删除后不能恢复。已创建的 Project 使用的是冻结副本，不受影响。"
+        description="删除后不能恢复，已有 Project 不受影响。"
         confirmLabel="删除"
       />
     </div>

@@ -9,8 +9,8 @@ import { useDarkMode } from "@/lib/use-dark";
 export function MessagesTab({ messages, running }: { messages: readonly unknown[]; running: boolean }) {
   const dark = useDarkMode();
   return (
-    <div className="h-[72vh] overflow-hidden rounded-[var(--radius-card)] border border-border">
-      <CloudOsRoot mode={dark ? "dark" : "light"} className="flex h-full min-h-0 flex-col overflow-hidden">
+    <div className="eval-chat flex min-h-0 flex-1 flex-col">
+      <CloudOsRoot mode={dark ? "dark" : "light"} className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <CloudOsChatMessages
           messages={messages as UIMessage[]}
           status={running ? "streaming" : "ready"}

@@ -56,7 +56,7 @@ export function OutputSchemaDetailPage({ outputSchemaId }: { outputSchemaId: str
             </CardBody>
           </Card>
           <Card>
-            <CardHeader title="Schema" description="正文上传后不可修改" />
+            <CardHeader title="Schema" />
             <CardBody className="flex flex-col gap-3">
               <Notice>{SCORE_CONVENTION}</Notice>
               <JsonViewer value={data!.schema} />

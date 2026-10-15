@@ -38,7 +38,7 @@ function GrantDialog({ open, onClose }: { open: boolean; onClose: () => void }) 
       open={open}
       onClose={onClose}
       title="加积分"
-      description="积分加到 Eval SP 服务账号，只能增加，不能扣减。"
+      description="加到 Eval SP 服务账号，只能增加。"
       size="sm"
       footer={(
         <>
@@ -67,7 +67,6 @@ export function CreditsPage() {
     <Page>
       <PageHeader
         title="积分"
-        description="Eval SP 按每轮 Agent 对话和付费 Action 扣减服务账号的积分。积分不会自动发放。"
         actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setGranting(true)}>加积分</Button>}
       />
       {balance.error ? <ErrorBlock error={balance.error} onRetry={() => void balance.refetch()} /> : (
@@ -80,7 +79,7 @@ export function CreditsPage() {
         </div>
       )}
       <Card>
-        <CardHeader title="加积分记录" description="最近 100 条，最新的在前" />
+        <CardHeader title="加积分记录" actions={<span className="text-xs text-text-muted">最近 100 条</span>} />
         {grants.isPending ? <LoadingBlock /> : grants.error ? <div className="p-4"><ErrorBlock error={grants.error} /></div> : (
           <DataTable<CreditGrantRecord>
             rows={grants.data}

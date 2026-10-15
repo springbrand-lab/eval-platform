@@ -4,6 +4,7 @@ import {
 } from "lucide-react";
 import { useState, type ComponentType } from "react";
 import { isEmbedded } from "@/auth/session";
+import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { readThemePreference, saveThemePreference, type ThemePreference } from "@/lib/theme";
 
@@ -66,10 +67,9 @@ export function AppShell() {
                 const active = pathname === item.to || pathname.startsWith(`${item.to}/`);
                 const Icon = item.icon;
                 return (
+                  <Tooltip key={item.to} content={collapsed ? item.label : null} side="right">
                   <Link
-                    key={item.to}
                     to={item.to}
-                    title={collapsed ? item.label : undefined}
                     className={cn(
                       "mb-px flex h-8 items-center gap-2.5 rounded-md px-2 text-[13px] transition-colors",
                       active ? "bg-surface-muted font-semibold text-text-strong" : "text-text-secondary hover:bg-surface-muted/70 hover:text-text-strong",
@@ -79,6 +79,7 @@ export function AppShell() {
                     <Icon className={cn("size-4 shrink-0", active ? "text-text-strong" : "text-text-muted")} />
                     {!collapsed && item.label}
                   </Link>
+                  </Tooltip>
                 );
               })}
             </div>
@@ -99,12 +100,12 @@ export function AppShell() {
               {THEMES.map((item) => {
                 const Icon = item.icon;
                 return (
+                  <Tooltip key={item.value} content={item.label}>
                   <button
-                    key={item.value}
                     type="button"
                     role="radio"
+                    aria-label={item.label}
                     aria-checked={theme === item.value}
-                    title={item.label}
                     onClick={() => choose(item.value)}
                     className={cn(
                       "flex h-7 flex-1 items-center justify-center rounded-[5px] transition-colors",
@@ -113,6 +114,7 @@ export function AppShell() {
                   >
                     <Icon className="size-3.5" />
                   </button>
+                  </Tooltip>
                 );
               })}
             </div>

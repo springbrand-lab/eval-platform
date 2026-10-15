@@ -8,7 +8,7 @@ function Message({ icon, title, children }: { icon: ReactNode; title: string; ch
   return (
     <div className="flex h-full items-center justify-center p-6">
       <div className="max-w-md rounded-[var(--radius-card)] border border-border bg-surface p-8 text-center">
-        <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-full bg-accent-soft text-link">{icon}</div>
+        <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-full bg-accent-soft link">{icon}</div>
         <h1 className="text-base font-semibold">{title}</h1>
         <div className="mt-2 text-sm text-text-muted">{children}</div>
       </div>
@@ -28,14 +28,14 @@ export function AuthGate({ children }: { children: ReactNode }) {
       return (
         <Message icon={<ExternalLink className="size-5" />} title="请从 takt 打开 Eval">
           Eval 与 takt 共用登录，需要在 takt 中打开。
-          <a href={`${TAKT_ORIGIN}/dashboard/eval`} className="mt-3 block font-semibold text-link hover:underline">前往 takt 的 Eval 页面</a>
+          <a href={`${TAKT_ORIGIN}/dashboard/eval`} className="mt-3 block link font-semibold">前往 takt 的 Eval 页面</a>
         </Message>
       );
     case "unauthorized":
       return (
         <Message icon={<LogIn className="size-5" />} title="登录已失效">
           请在 takt 中重新登录后再打开 Eval。
-          <button type="button" onClick={() => requestToken()} className="mt-3 block w-full font-semibold text-link hover:underline">已重新登录，重试</button>
+          <button type="button" onClick={() => requestToken()} className="mt-3 block w-full link font-semibold">已重新登录，重试</button>
         </Message>
       );
     case "forbidden":

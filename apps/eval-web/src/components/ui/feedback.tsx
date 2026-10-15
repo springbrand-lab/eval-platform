@@ -42,7 +42,7 @@ export function ErrorBlock({ error, onRetry }: { error: unknown; onRetry?: () =>
         <p className="font-semibold text-danger">加载失败</p>
         <p className="mt-1 text-text">{describeError(error)}</p>
       </div>
-      {onRetry && <button type="button" onClick={onRetry} className="font-semibold text-link hover:underline">重试</button>}
+      {onRetry && <button type="button" onClick={onRetry} className=" link font-semibold">重试</button>}
     </div>
   );
 }

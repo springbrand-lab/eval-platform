@@ -1,25 +1,11 @@
 import { Upload } from "lucide-react";
-import { useRef, useState, type DragEvent } from "react";
+import { useDropzone } from "react-dropzone";
 import { cn } from "@/lib/cn";
 
 export interface PickedFile {
   /** Path relative to the dropped or chosen folder, starting with "/". */
   readonly path: string;
   readonly file: File;
-}
-
-async function readEntry(entry: FileSystemEntry, prefix: string, out: PickedFile[]): Promise<void> {
-  if (entry.isFile) {
-    const file = await new Promise<File>((resolve, reject) => (entry as FileSystemFileEntry).file(resolve, reject));
-    out.push({ path: `${prefix}/${entry.name}`, file });
-    return;
-  }
-  const reader = (entry as FileSystemDirectoryEntry).createReader();
-  for (;;) {
-    const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
-    if (batch.length === 0) break;
-    for (const child of batch) await readEntry(child, `${prefix}/${entry.name}`, out);
-  }
 }
 
 /** Strip one shared top-level folder so a dropped folder's contents land at the material root. */
@@ -30,62 +16,42 @@ export function normalizePaths(files: PickedFile[]): PickedFile[] {
   return files.map((item) => ({ ...item, path: `/${item.path.split("/").slice(2).join("/")}` }));
 }
 
-export function FileDropzone({ onFiles, multiple = true, directory = false, accept, hint, className }: {
+/** react-dropzone keeps a dropped folder's relative path on `file.path` (e.g. "./site/index.html"). */
+export function pickedPath(file: File & { path?: string; relativePath?: string }): string {
+  const raw = file.relativePath || file.path || file.webkitRelativePath || file.name;
+  return `/${raw.replace(/^\.?\/+/u, "")}`;
+}
+
+export function FileDropzone({ onFiles, multiple = true, accept, hint, className }: {
   onFiles: (files: PickedFile[]) => void;
   multiple?: boolean;
-  directory?: boolean;
+  /** File extensions such as ".json,.jsonl"; omitted accepts anything. */
   accept?: string;
   hint?: string;
   className?: string;
 }) {
-  const input = useRef<HTMLInputElement>(null);
-  const [over, setOver] = useState(false);
-  const handleDrop = async (event: DragEvent) => {
-    event.preventDefault();
-    setOver(false);
-    const items = [...event.dataTransfer.items];
-    const entries = items.map((item) => item.webkitGetAsEntry?.()).filter((entry): entry is FileSystemEntry => !!entry);
-    const out: PickedFile[] = [];
-    if (entries.length > 0) {
-      for (const entry of entries) await readEntry(entry, "", out);
-    } else {
-      for (const file of event.dataTransfer.files) out.push({ path: `/${file.name}`, file });
-    }
-    onFiles(normalizePaths(out));
-  };
+  const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
+    multiple,
+    noClick: true,
+    ...(accept ? { accept: { "application/octet-stream": accept.split(",").map((item) => item.trim()) } } : {}),
+    onDrop: (accepted) => onFiles(normalizePaths(accepted.map((file) => ({ path: pickedPath(file), file })))),
+  });
   return (
     <div
-      onDragOver={(event) => { event.preventDefault(); setOver(true); }}
-      onDragLeave={() => setOver(false)}
-      onDrop={(event) => void handleDrop(event)}
+      {...getRootProps()}
       className={cn(
-        "flex flex-col items-center justify-center gap-2 rounded-[var(--radius-card)] border border-dashed px-6 py-8 text-center",
-        over ? "border-accent bg-accent-soft" : "border-border-strong bg-surface-muted/40 hover:bg-surface-muted/70",
+        "flex flex-col items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-dashed px-6 py-6 text-center transition-colors",
+        isDragActive ? "border-text-strong bg-surface-muted" : "border-border-strong bg-surface-muted/40",
         className,
       )}
     >
-      <Upload className="size-5 text-text-muted" />
+      <input {...getInputProps()} />
+      <Upload className="size-4 text-text-muted" />
       <p className="text-[13px] text-text">
-        拖入{directory ? "文件或文件夹" : "文件"}，或
-        <button type="button" className="ml-1 font-semibold text-link hover:underline" onClick={() => input.current?.click()}>选择文件</button>
+        拖入{multiple ? "文件或文件夹" : "文件"}，或
+        <button type="button" className="link ml-1 font-semibold" onClick={open}>选择文件</button>
       </p>
       {hint && <p className="text-xs text-text-muted">{hint}</p>}
-      <input
-        ref={input}
-        type="file"
-        hidden
-        multiple={multiple}
-        accept={accept}
-        {...(directory ? { webkitdirectory: "" } : {})}
-        onChange={(event) => {
-          const files = [...(event.target.files ?? [])].map((file) => ({
-            path: `/${(file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name}`,
-            file,
-          }));
-          onFiles(normalizePaths(files));
-          event.target.value = "";
-        }}
-      />
     </div>
   );
 }

@@ -9,7 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Notice } from "@/components/ui/feedback";
 import { FileDropzone } from "@/components/ui/file-dropzone";
-import { Field, Input, Select, Textarea } from "@/components/ui/form";
+import { Field, Input, Textarea } from "@/components/ui/form";
+import { Tabs } from "@/components/ui/data-display";
 import { describeError } from "@/lib/errors";
 import { formatBytes } from "@/lib/format";
 import { DATASET_DOCUMENT_BYTES } from "@/lib/limits";
@@ -43,7 +44,7 @@ export function PromptImportDialog({ open, onClose }: { open: boolean; onClose: 
   const tooLarge = new Blob([content]).size > DATASET_DOCUMENT_BYTES;
   return (
     <Dialog open={open} onClose={onClose} size="lg" title="导入提示词测试集"
-      description="每条用例包含 name、description、userPrompt（给被测 Agent）和 evalPrompt（给评委），可以带其他业务字段。"
+      description="每条用例需要 name、description、userPrompt、evalPrompt，可带其他字段。"
       footer={(
         <>
           <Button onClick={onClose}>取消</Button>
@@ -56,12 +57,7 @@ export function PromptImportDialog({ open, onClose }: { open: boolean; onClose: 
           <Field label="测试集名称" required>{(id) => <Input id={id} value={name} onChange={(event) => setName(event.target.value)} />}</Field>
           <Field label="说明" required>{(id) => <Input id={id} value={description} onChange={(event) => setDescription(event.target.value)} />}</Field>
           <Field label="格式">
-            {(id) => (
-              <Select id={id} value={format} onChange={(event) => setFormat(event.target.value as "json" | "jsonl")}>
-                <option value="jsonl">JSONL（每行一条）</option>
-                <option value="json">JSON 数组</option>
-              </Select>
-            )}
+            {() => <Tabs<"json" | "jsonl"> value={format} onChange={setFormat} tabs={[{ value: "jsonl", label: "JSONL" }, { value: "json", label: "JSON 数组" }]} />}
           </Field>
         </div>
         <FileDropzone multiple={false} accept=".json,.jsonl" hint={`上限 ${formatBytes(DATASET_DOCUMENT_BYTES)}`} onFiles={(files) => {
@@ -88,7 +84,7 @@ export function DocumentImportDialog({ open, onClose }: { open: boolean; onClose
   const mutation = useMutation({ mutationFn: () => importDataset(format, content), onSuccess: done, meta: { silent: true } });
   return (
     <Dialog open={open} onClose={onClose} size="lg" title="导入测试集文档"
-      description="导入完整的测试集文档（JSON 或 YAML），格式与导出相同：{dataset, data}。"
+      description="与导出格式相同：{dataset, data}。"
       footer={(
         <>
           <Button onClick={onClose}>取消</Button>
@@ -97,12 +93,7 @@ export function DocumentImportDialog({ open, onClose }: { open: boolean; onClose
       )}>
       <div className="flex flex-col gap-4">
         <Field label="格式">
-          {(id) => (
-            <Select id={id} value={format} onChange={(event) => setFormat(event.target.value as DatasetFormat)}>
-              <option value="json">JSON</option>
-              <option value="yaml">YAML</option>
-            </Select>
-          )}
+          {() => <Tabs<DatasetFormat> value={format} onChange={setFormat} tabs={[{ value: "json", label: "JSON" }, { value: "yaml", label: "YAML" }]} />}
         </Field>
         <FileDropzone multiple={false} accept=".json,.yaml,.yml" onFiles={(files) => {
           const first = files[0];

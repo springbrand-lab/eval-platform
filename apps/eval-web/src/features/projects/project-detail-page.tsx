@@ -16,6 +16,7 @@ import { CopyId, ProgressBar, ScoreBar } from "@/components/ui/data-display";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { EmptyState, ErrorBlock, LoadingBlock, Spinner } from "@/components/ui/feedback";
 import { ActionMenu } from "@/components/ui/menu";
+import { Tooltip } from "@/components/ui/tooltip";
 import { formatDateTime, formatDuration, formatNumber, formatPercent, OPERATION_LABELS } from "@/lib/format";
 import { scoreField, SummaryCards } from "@/features/metrics/summary";
 import { runPhaseLabel } from "@/features/runs/run-status";
@@ -88,7 +89,7 @@ function CurrentRunBanner({ projectId }: { projectId: string }) {
         </div>
       </div>
       <ConfirmDialog open={stopping} onClose={() => setStopping(false)} onConfirm={() => stop.mutate()} loading={stop.isPending} danger
-        title="停止 Run" description="已在执行的 Agent 会被中断，未开始的采样和评估不再执行。已完成的结果会保留。" confirmLabel="停止" />
+        title="停止 Run" description="中断正在运行的 Agent，不再开始新的采样和评估。已完成的结果保留。" confirmLabel="停止" />
     </Card>
   );
 }
@@ -99,7 +100,7 @@ function PlanCard({ view }: { view: ProjectView }) {
   const projectId = view.project.projectId;
   return (
     <Card>
-      <CardHeader title="计划" description="执行计划创建后固定；评估计划在首个评估 Run 之后锁定" />
+      <CardHeader title="计划" />
       <CardBody className="grid gap-6 md:grid-cols-2">
         <div>
           <SectionLabel>执行</SectionLabel>
@@ -112,7 +113,7 @@ function PlanCard({ view }: { view: ProjectView }) {
         </div>
         <div>
           <SectionLabel actions={(
-            <Link to="/projects/$projectId/evaluation-plan" params={{ projectId }} className="text-xs font-semibold text-link hover:underline">
+            <Link to="/projects/$projectId/evaluation-plan" params={{ projectId }} className="text-xs link font-semibold">
               {evaluation ? (evaluation.lockedAt ? "查看" : "修改") : "填写"}
             </Link>
           )}>
@@ -122,7 +123,7 @@ function PlanCard({ view }: { view: ProjectView }) {
             <DescriptionList items={[
               { label: "评委 Agent", value: evaluation.plan.evaluatorAgentConfig.name },
               { label: "评估并发", value: evaluation.plan.evaluationConcurrency },
-              { label: "评分格式", value: <Link to="/output-schemas/$outputSchemaId" params={{ outputSchemaId: evaluation.plan.outputSchema.outputSchemaId }} className="text-link hover:underline">查看</Link> },
+              { label: "评分格式", value: <Link to="/output-schemas/$outputSchemaId" params={{ outputSchemaId: evaluation.plan.outputSchema.outputSchemaId }} className=" link">查看</Link> },
               { label: "锁定时间", value: formatDateTime(evaluation.lockedAt) },
             ]} />
           ) : <p className="text-[13px] text-text-muted">还没有评估计划，只能执行，不能评估。</p>}
@@ -176,9 +177,12 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
         actions={(
           <>
             <Button icon={<ClipboardCheck />} onClick={() => void navigate({ to: "/projects/$projectId/evaluation-plan", params: { projectId } })}>评估计划</Button>
-            <Button variant="primary" icon={<Play />} disabled={busy}
-              title={busy ? "当前 Run 结束后才能发起新的 Run" : undefined}
-              onClick={() => void navigate({ to: "/projects/$projectId/runs/new", params: { projectId } })}>发起 Run</Button>
+            <Tooltip content={busy ? "当前 Run 结束后才能发起" : null}>
+              <span>
+                <Button variant="primary" icon={<Play />} disabled={busy}
+                  onClick={() => void navigate({ to: "/projects/$projectId/runs/new", params: { projectId } })}>发起 Run</Button>
+              </span>
+            </Tooltip>
             <ActionMenu items={[{ label: "删除 Project", icon: <Trash2 />, danger: true, disabled: busy, onSelect: () => setDeleting(true) }]} />
           </>
         )}
@@ -188,7 +192,7 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
           <CurrentRunBanner projectId={projectId} />
           {overview.data ? <SummaryCards summary={overview.data.summary} /> : overview.error ? <ErrorBlock error={overview.error} /> : <LoadingBlock rows={2} />}
           <Card>
-            <CardHeader title="测试集" description="点击查看每条用例的结果" />
+            <CardHeader title="测试集" />
             <DataTable
               rows={overview.data?.datasets ?? []}
               rowKey={(row) => row.dataset.datasetId}
@@ -206,7 +210,7 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
           <div className="grid gap-5 xl:grid-cols-[1fr_420px]">
             {view.data && <PlanCard view={view.data} />}
             <Card>
-              <CardHeader title="Run" description="仍有当前结果的 Run" />
+              <CardHeader title="Run" />
               {(overview.data?.runIds ?? []).length === 0
                 ? <EmptyState title="还没有 Run" />
                 : <div>{overview.data!.runIds.map((runId) => <RunRow key={runId} projectId={projectId} runId={runId} />)}</div>}
@@ -216,7 +220,7 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
         </div>
       )}
       <ConfirmDialog open={deleting} onClose={() => setDeleting(false)} onConfirm={() => remove.mutate()} loading={remove.isPending} danger
-        title="删除 Project" description="Project 及其结果将不再显示。有未结束的 Run 时不能删除。" confirmLabel="删除" />
+        title="删除 Project" description="Project 及其结果将不再显示。" confirmLabel="删除" />
     </Page>
   );
 }

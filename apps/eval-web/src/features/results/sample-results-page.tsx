@@ -28,11 +28,11 @@ export function SampleResultsPage({ projectId, projectSampleId }: { projectId: s
           <SummaryCards summary={overview.data.summary} />
           <div className="grid gap-4 lg:grid-cols-2">
             <Card>
-              <CardHeader title="userPrompt" description="被测 Agent 收到的任务" />
+              <CardHeader title="userPrompt" />
               <CardBody><CodeBlock value={sample!.data.userPrompt} maxHeight="16rem" /></CardBody>
             </Card>
             <Card>
-              <CardHeader title="evalPrompt" description="评委收到的评审要求" />
+              <CardHeader title="evalPrompt" />
               <CardBody>{sample!.data.evalPrompt ? <CodeBlock value={sample!.data.evalPrompt} maxHeight="16rem" /> : <p className="text-sm text-text-muted">无</p>}</CardBody>
             </Card>
           </div>

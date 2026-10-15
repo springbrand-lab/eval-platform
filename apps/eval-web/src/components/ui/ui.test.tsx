@@ -25,24 +25,22 @@ describe("DataTable", () => {
       <DataTable rows={rows} columns={columns} rowKey={(row) => row.id} searchText={(row) => row.name}
         selectable selected={new Set()} onSelectedChange={onSelectedChange} />,
     );
-    const headers = view.container.querySelectorAll("thead button");
-    await click(headers[1]);
+    const sortBy = (label: string) => [...view.container.querySelectorAll("thead button")].find((button) => button.textContent === label);
+    await click(sortBy("分数"));
     expect(names(view.container)).toEqual(["2", "5", "9"].map((score) => rows.find((row) => String(row.score) === score)!.name));
-    await click(headers[1]);
+    await click(sortBy("分数"));
     expect(names(view.container)[0]).toBe("Alpha");
     await type(view.container.querySelector("input[aria-label='搜索']"), "gam");
     expect(names(view.container)).toEqual(["Gamma"]);
-    await click(view.container.querySelector("input[aria-label='全选']"));
+    await click(view.container.querySelector("[aria-label='全选']"));
     expect(onSelectedChange).toHaveBeenCalledWith(new Set(["c"]));
     await view.unmount();
   });
 
-  it("shows only the first page until asked for more", async () => {
-    const many = Array.from({ length: 5 }, (_, index) => ({ id: String(index), name: `n${index}`, score: index }));
-    const view = await render(<DataTable rows={many} columns={columns} rowKey={(row) => row.id} pageSize={2} />);
-    expect(view.container.querySelectorAll("tbody tr")).toHaveLength(2);
-    await click([...view.container.querySelectorAll("button")].find((button) => button.textContent === "显示更多"));
-    expect(view.container.querySelectorAll("tbody tr")).toHaveLength(4);
+  it("virtualizes long lists instead of rendering every row", async () => {
+    const many = Array.from({ length: 500 }, (_, index) => ({ id: String(index), name: `n${index}`, score: index }));
+    const view = await render(<DataTable rows={many} columns={columns} rowKey={(row) => row.id} />);
+    expect(view.container.querySelectorAll("tbody tr").length).toBeLessThan(100);
     await view.unmount();
   });
 });

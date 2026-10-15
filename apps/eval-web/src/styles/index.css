@@ -33,10 +33,47 @@
     -webkit-font-smoothing: antialiased;
   }
   :focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--ring);
     outline-offset: 2px;
   }
   .tabular {
     font-variant-numeric: tabular-nums;
   }
+}
+
+@layer components {
+  /* Neutral links: the underline, not a hue, marks them. */
+  .link {
+    color: var(--text-strong);
+    text-decoration: underline;
+    text-decoration-color: var(--border-strong);
+    text-underline-offset: 3px;
+    transition: text-decoration-color 120ms;
+  }
+  .link:hover {
+    text-decoration-color: currentColor;
+  }
+}
+
+/* The embedded SP chat view (cloud-os) ships a warm-grey light palette and a purple-tinted (hue 285) dark
+   one. Inside Eval its neutral surfaces, lines and text follow Eval's own greys; brand and status colours stay. */
+.eval-chat .cloud-os-root[data-mode] {
+  --color-kumo-base: var(--surface);
+  --color-kumo-elevated: var(--surface-muted);
+  --color-kumo-tint: var(--surface-muted);
+  --color-kumo-overlay: var(--surface);
+  --color-kumo-recessed: var(--surface-code);
+  --color-kumo-control: var(--surface);
+  --color-kumo-fill: var(--surface-muted);
+  --color-kumo-fill-hover: var(--border);
+  --color-kumo-interact: var(--border-strong);
+  --color-kumo-line: var(--border);
+  --color-kumo-ring: var(--ring);
+  --color-kumo-bubble-user: var(--surface-muted);
+  --color-kumo-tip-stroke: var(--border);
+  --text-color-kumo-default: var(--text);
+  --text-color-kumo-default-hover: var(--text-strong);
+  --text-color-kumo-strong: var(--text-strong);
+  --text-color-kumo-subtle: var(--text-muted);
+  --text-color-kumo-inactive: var(--text-faint);
 }

@@ -1,6 +1,7 @@
 /*
  * Design tokens, modelled on Langfuse: neutral zinc greys, a near-black (light) / near-white (dark) primary,
- * one indigo accent for links, focus and selection, and paired soft-fill/strong-text status colours.
+ * a neutral accent (no hue) for selection and links, and paired soft-fill/strong-text status colours.
+ * The only hues in the app are the status colours and the brand mark.
  * Dark mode is fully neutral (no blue cast) and keeps body text at ~70% so headings carry the contrast.
  * Components use only these names.
  */
@@ -22,9 +23,10 @@
   --primary: hsl(240 5.9% 10%);
   --primary-hover: hsl(240 5.2% 26%);
   --primary-fg: hsl(0 0% 98%);
-  --accent: hsl(243 75.4% 58.6%);
-  --accent-soft: hsl(243 80% 96.5%);
-  --link: hsl(246 40% 50%);
+  --accent: hsl(240 5.9% 10%);
+  --accent-soft: hsl(240 4.8% 95.9%);
+  --link: hsl(240 5.9% 10%);
+  --ring: hsl(240 5% 64.9%);
   --success: oklch(43.2% 0.095 166.913);
   --success-soft: oklch(95% 0.052 163.051 / 0.7);
   --warning: oklch(47.6% 0.114 61.907);
@@ -56,9 +58,10 @@ html.dark {
   --primary: hsl(0 0% 90%);
   --primary-hover: hsl(0 0% 78%);
   --primary-fg: hsl(0 0% 6%);
-  --accent: hsl(246 55% 70%);
-  --accent-soft: hsl(246 30% 16%);
-  --link: hsl(246 55% 72%);
+  --accent: hsl(0 0% 91%);
+  --accent-soft: hsl(0 0% 13%);
+  --link: hsl(0 0% 91%);
+  --ring: hsl(0 0% 40%);
   --success: oklch(76.5% 0.177 163.223);
   --success-soft: oklch(37.8% 0.077 168.94 / 0.45);
   --warning: oklch(79.5% 0.184 86.047);
@@ -93,6 +96,7 @@ html.dark {
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
   --color-link: var(--link);
+  --color-ring: var(--ring);
   --color-success: var(--success);
   --color-success-soft: var(--success-soft);
   --color-warning: var(--warning);

@@ -26,13 +26,17 @@ export function dataTitle(data: Data): string {
   return data.userPrompt.length > 60 ? `${data.userPrompt.slice(0, 60)}…` : data.userPrompt;
 }
 
+/** Only what needs attention gets a badge; attached resources are plain text. */
 export function DataResourceBadges({ data }: { data: Data }) {
+  const resources = [
+    data.initialMaterials && "素材",
+    data.evalInitialMaterials && "评委素材",
+    data.initialSession && "初始会话",
+  ].filter(Boolean);
   return (
-    <span className="flex flex-wrap gap-1">
-      {data.evalPrompt ? <Badge tone="accent">有评审要求</Badge> : <Badge>无评审要求</Badge>}
-      {data.initialMaterials && <Badge tone="info">素材</Badge>}
-      {data.evalInitialMaterials && <Badge tone="info">评委素材</Badge>}
-      {data.initialSession && <Badge tone="info">初始会话</Badge>}
+    <span className="flex flex-wrap items-center gap-2 whitespace-nowrap text-xs text-text-muted">
+      {!data.evalPrompt && <Badge tone="warning">缺 evalPrompt</Badge>}
+      {resources.join(" · ")}
     </span>
   );
 }
@@ -179,7 +183,7 @@ export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
       <ConfirmDialog open={dialog === "detach"} onClose={() => setDialog(null)} onConfirm={() => detach.mutate()} loading={detach.isPending}
         title="移出用例" description={`从测试集移出 ${selected.size} 条用例。用例本身不会删除，已有 Project 不受影响。`} confirmLabel="移出" />
       <ConfirmDialog open={dialog === "delete"} onClose={() => setDialog(null)} onConfirm={() => remove.mutate()} loading={remove.isPending} danger
-        title="删除测试集" description="测试集会被删除，其中的用例保留。已创建的 Project 使用的是创建时的副本，不受影响。" confirmLabel="删除" />
+        title="删除测试集" description="用例会保留，已有 Project 不受影响。" confirmLabel="删除" />
     </Page>
   );
 }

@@ -61,7 +61,7 @@ function UploadDialog({ open, onClose }: { open: boolean; onClose: () => void })
       onClose={onClose}
       size="lg"
       title="上传评分格式"
-      description="draft 2020-12 JSON Schema。上传后正文不能修改，只能改名称和说明。"
+      description="draft 2020-12 JSON Schema，上传后正文不可改。"
       footer={(
         <>
           <Button onClick={onClose}>取消</Button>
@@ -94,7 +94,6 @@ export function OutputSchemasPage() {
     <Page>
       <PageHeader
         title="评分格式"
-        description="评委结果文件的 JSON Schema。评估计划选定一个评分格式，首个评估 Run 之后锁定。"
         actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setUploading(true)}>上传评分格式</Button>}
       />
       <Card>

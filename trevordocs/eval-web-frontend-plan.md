@@ -254,7 +254,7 @@ apps/eval-web/
 
 - **中性灰为主：** 浅色用 zinc 灰阶，深色用完全中性的灰（饱和度 0，没有偏蓝）。
 - **主按钮：** 浅色下为近黑（zinc-900），深色下为近白（90%）。
-- **唯一的强调色：** 靛蓝，只用于链接、焦点环和选中态（浅色 `hsl(243 75% 59%)`，深色 `hsl(246 55% 70%)`）。
+- **没有强调色：** 选中、焦点和链接都用中性色。选中靠深色描边和浅底，链接靠下划线（`.link`）。整个界面只有状态色和品牌标志带色相。
 - **深色层级：**
 
   | 层 | 亮度 |
@@ -282,22 +282,32 @@ apps/eval-web/
 - **指标卡：** 按屏宽 2/3/6 列排布，大数字用紧凑格式（如 338K），说明最多两行。
 - **进度：** 进行中的 Run 用分段进度条加图例，显示成功、进行中、排队、失败的数量。
 - **采样详情：** 用分段标签切换"评委结果 / 被测 Agent / 评委 Agent"，页头直接进入被测会话、评委会话和 Langfuse。
-- **深色模式：** 跟随系统变化。toast 和观察页的会话渲染（cloud-os）跟随页面主题。
+- **深色模式：** 跟随系统变化。toast 和观察页的会话渲染（cloud-os）跟随页面主题。cloud-os 自带暖灰色的浅色主题和偏紫的深色主题（色相 285），在 Eval 里把它的中性面、线条和文字映射到 Eval 的灰阶。
+- **文案：** 列表页没有副标题，卡片不加描述；只在确认对话框说明后果，在字段提示里说明约束；措辞简短。
+- **观察页：** 全高布局，分段标签在页头右侧，会话直接铺满页头以下的区域。
 
-### 7.3 基础组件（`components/ui/`）
+### 7.3 组件：能用现成库的都用库
 
-| 组件 | 说明 |
+| 用途 | 来源 |
 | --- | --- |
-| `Button` | 主要、次要、幽灵、危险、描边危险五种样式；`xs`、`sm`、`md`、图标四种尺寸 |
-| `Input`、`Textarea`、`Select`、`Checkbox`、`RadioCard`、`Field` | 表单控件 |
-| `Dialog`、`ConfirmDialog` | 基于原生 `<dialog>` |
-| `ActionMenu` | 下拉菜单 |
-| `DataTable` | 本地搜索、排序、选择，每次显示 200 行，可"显示更多" |
-| `StatusBadge`、`Badge` | 状态和标签 |
-| `MetricCard`、`ScoreBar`、`ProgressBar` | 指标、分数和进度 |
-| `JsonViewer`、`CodeBlock`、`CopyId` | 数据展示 |
-| `Tabs`、`Stepper` | 分段控件和步骤条 |
-| `FileDropzone`、`EmptyState`、`Skeleton`、`Notice` | 上传、空状态和提示 |
+| 对话框、确认框 | Radix `Dialog`、`AlertDialog` |
+| 下拉菜单（"⋯" 操作） | Radix `DropdownMenu` |
+| 下拉选择 | Radix `Select` |
+| 复选框、单选卡片 | Radix `Checkbox`、`RadioGroup` |
+| 分段控件 | Radix `Tabs` |
+| 提示 | Radix `Tooltip` |
+| 表格 | TanStack Table（排序、搜索、选择） |
+| 长列表 | 超过 100 行时用 TanStack Virtual 虚拟滚动 |
+| 文件和文件夹拖放 | react-dropzone |
+| JSON 查看 | react-json-view-lite |
+| 会话 | SP 的 `@springbrand/message-panel/cloud-os` |
+| toast | sonner |
+
+Radix 通过 `radix-ui` 包引入，按 shadcn/ui 的写法套用我们的设计令牌。
+
+只自己写的几类：
+- 没有逻辑的样式组件：`Button`、`Badge`、`Card`、`Input`、`Textarea`、`Field`、`MetricCard`、`ScoreBar`、`ProgressBar`、`Stepper`、`EmptyState`、`Notice`；
+- 页面骨架：`PageHeader`、`AppShell`。
 
 可访问性：交互可以全部用键盘完成，焦点环用强调色；状态同时显示文字和颜色。
 
@@ -368,7 +378,7 @@ Eval API 的 `EVAL_WEB_ORIGIN` 设置为 eval-web 的域名。Worker 转发请�
 
 **与方案的差异：**
 
-- 列表没有做虚拟滚动，改为每次显示 200 行、点击"显示更多"继续加载；当前数据量下足够。
+- 表格用 TanStack Table，超过 100 行时用 TanStack Virtual 虚拟滚动。
 - 会话复用 SP 聊天页同一套渲染（`@springbrand/message-panel/cloud-os` 的 `CloudOsChatMessages`，按包的宿主要求接入 Tailwind 与 CSS）；文件预览和轨迹使用自建的简单版本（文本/代码、图片、沙箱中预览 HTML；事件时间线），等 SP 发布 `file-renderers`、`trajectory-plugin` 后再替换。
 - 只读观察请求以 `EVAL_SP_TRUSTED_ORIGIN`（Eval SP 已信任的 `https://devrapp.springbrand.ai`）为 Origin，由 Eval API 服务端发出，不需要修改 Eval SP 的 CORS 配置。
 - 评委不再绑定被测工作区（见 `evaluation-evidence-decoupling.md`），观察页按证据包方式说明。

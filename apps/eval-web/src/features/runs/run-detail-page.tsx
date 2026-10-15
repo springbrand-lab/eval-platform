@@ -111,7 +111,7 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
           {snapshot.stopRequested && !isFinished(snapshot.status) && <Notice tone="warning">正在停止：正在中断已运行的 Agent，并收集已产生的结果。</Notice>}
           {overview.data && <SummaryCards summary={overview.data.summary} />}
           <Card>
-            <CardHeader title={`评估（${records.length}）`} description="评委对每个采样的打分；分数同时写到 Langfuse 中被测 Agent 的会话上" />
+            <CardHeader title={`评估（${records.length}）`} />
             {evaluations.isPending ? <LoadingBlock /> : evaluations.error ? <div className="p-4"><ErrorBlock error={evaluations.error} /></div> : (
               <DataTable<EvaluationRecord>
                 rows={records}
@@ -136,7 +136,7 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
         </div>
       )}
       <ConfirmDialog open={stopping} onClose={() => setStopping(false)} onConfirm={() => stop.mutate()} loading={stop.isPending} danger
-        title="停止 Run" description="已在执行的 Agent 会被中断，未开始的采样和评估不再执行。已完成的结果会保留。" confirmLabel="停止" />
+        title="停止 Run" description="中断正在运行的 Agent，不再开始新的采样和评估。已完成的结果保留。" confirmLabel="停止" />
     </Page>
   );
 }

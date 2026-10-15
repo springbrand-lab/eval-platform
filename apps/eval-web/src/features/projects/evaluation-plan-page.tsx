@@ -35,15 +35,13 @@ function PlanForm({ view }: { view: ProjectView }) {
   });
   return (
     <Card>
-      <CardHeader title={current ? "替换评估计划" : "填写评估计划"} description="保存时会重新冻结所选评委 Agent 的副本。" />
+      <CardHeader title={current ? "替换评估计划" : "填写评估计划"} />
       <CardBody className="flex flex-col gap-4">
         <div className="grid gap-4 md:grid-cols-3">
           <Field label="评委 Agent" required>
             {(id) => (
-              <Select id={id} value={agentId} onChange={(event) => setAgentId(event.target.value)}>
-                <option value="">请选择</option>
-                {agents.data?.map((option) => <option key={option.agentConfig.userAgentId} value={option.agentConfig.userAgentId}>{option.name}</option>)}
-              </Select>
+              <Select id={id} value={agentId} onValueChange={setAgentId}
+                options={(agents.data ?? []).map((option) => ({ value: option.agentConfig.userAgentId, label: option.name }))} />
             )}
           </Field>
           <Field label="评估并发" required>
@@ -51,15 +49,13 @@ function PlanForm({ view }: { view: ProjectView }) {
           </Field>
           <Field label="评分格式" required>
             {(id) => (
-              <Select id={id} value={schemaId} onChange={(event) => setSchemaId(event.target.value)}>
-                <option value="">请选择</option>
-                {schemas.data?.map((schema) => <option key={schema.outputSchemaId} value={schema.outputSchemaId}>{schema.name}</option>)}
-              </Select>
+              <Select id={id} value={schemaId} onValueChange={setSchemaId}
+                options={(schemas.data ?? []).map((schema) => ({ value: schema.outputSchemaId, label: schema.name }))} />
             )}
           </Field>
         </div>
         <div className="flex justify-end">
-          <Button variant="primary" disabled={!valid} loading={save.isPending} onClick={() => save.mutate()}>保存评估计划</Button>
+          <Button variant="primary" disabled={!valid} loading={save.isPending} onClick={() => save.mutate()}>保存</Button>
         </div>
       </CardBody>
     </Card>

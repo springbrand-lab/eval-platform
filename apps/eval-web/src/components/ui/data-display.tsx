@@ -1,14 +1,17 @@
-import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
+import { Check, ChevronRight, Copy } from "lucide-react";
+import { Tabs as TabsPrimitive } from "radix-ui";
+import { JsonView } from "react-json-view-lite";
 import { useState, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { Tooltip } from "./tooltip";
 
 export function CopyButton({ value, className, label = "复制" }: { value: string; className?: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   return (
+    <Tooltip content={copied ? "已复制" : label}>
     <button
       type="button"
       aria-label={label}
-      title={label}
       onClick={(event) => {
         event.stopPropagation();
         void navigator.clipboard?.writeText(value).then(() => {
@@ -20,13 +23,14 @@ export function CopyButton({ value, className, label = "复制" }: { value: stri
     >
       {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
     </button>
+    </Tooltip>
   );
 }
 
 /** A long ID shown short in monospace, with copy. */
 export function CopyId({ value, length = 8 }: { value: string; length?: number }) {
   return (
-    <span className="inline-flex items-center gap-0.5 font-mono text-xs text-text-muted" title={value}>
+    <span className="inline-flex items-center gap-0.5 font-mono text-xs text-text-muted">
       {value.length > length ? `${value.slice(0, length)}…` : value}
       <CopyButton value={value} label="复制 ID" />
     </span>
@@ -42,56 +46,34 @@ export function CodeBlock({ value, className, maxHeight = "28rem" }: { value: st
   );
 }
 
-function JsonPrimitive({ value }: { value: unknown }) {
-  const [expanded, setExpanded] = useState(false);
-  if (typeof value === "string") {
-    const long = value.length > 300;
-    return (
-      <span className="text-success">
-        {JSON.stringify(long && !expanded ? `${value.slice(0, 300)}…` : value)}
-        {long && (
-          <button type="button" className="ml-1 font-sans text-xs text-link" onClick={() => setExpanded(!expanded)}>
-            {expanded ? "收起" : "展开"}
-          </button>
-        )}
-      </span>
-    );
-  }
-  if (typeof value === "number") return <span className="text-info">{String(value)}</span>;
-  if (typeof value === "boolean") return <span className="text-warning">{String(value)}</span>;
-  return <span className="text-text-faint">{String(value)}</span>;
-}
-
-function JsonNode({ name, value, depth }: { name?: string; value: unknown; depth: number }) {
-  const [open, setOpen] = useState(depth < 2);
-  const label = name !== undefined && <span className="text-text-secondary">{name}: </span>;
-  if (value === null || typeof value !== "object") {
-    return <div className="break-all py-px">{label}<JsonPrimitive value={value} /></div>;
-  }
-  const entries = Array.isArray(value) ? value.map((item, index) => [String(index), item] as const) : Object.entries(value);
-  const brackets = Array.isArray(value) ? ["[", "]"] : ["{", "}"];
-  return (
-    <div>
-      <button type="button" className="inline-flex items-center py-px text-left hover:text-text-strong" onClick={() => setOpen(!open)}>
-        {open ? <ChevronDown className="size-3 text-text-faint" /> : <ChevronRight className="size-3 text-text-faint" />}
-        {label}
-        <span className="text-text-faint">{brackets[0]}{!open && ` ${entries.length} 项 ${brackets[1]}`}</span>
-      </button>
-      {open && (
-        <div className="ml-[5px] border-l border-border pl-3">
-          {entries.map(([key, item]) => <JsonNode key={key} name={key} value={item} depth={depth + 1} />)}
-          <span className="text-text-faint">{brackets[1]}</span>
-        </div>
-      )}
-    </div>
-  );
-}
+const jsonStyles = {
+  container: "font-mono text-[12.5px] leading-relaxed text-text",
+  basicChildStyle: "pl-4",
+  childFieldsContainer: "",
+  label: "mr-1 text-text-secondary",
+  clickableLabel: "mr-1 cursor-pointer text-text-secondary",
+  nullValue: "text-text-faint",
+  undefinedValue: "text-text-faint",
+  stringValue: "break-all text-success",
+  booleanValue: "text-warning",
+  numberValue: "text-info",
+  otherValue: "text-text",
+  punctuation: "text-text-faint",
+  expandIcon: "mr-1 inline-block w-3 text-text-faint after:content-['▸']",
+  collapseIcon: "mr-1 inline-block w-3 text-text-faint after:content-['▾']",
+  collapsedContent: "px-1 text-text-faint after:content-['…']",
+  noQuotesForStringValues: false,
+  quotesForFieldNames: false,
+  ariaLables: { collapseJson: "折叠", expandJson: "展开" },
+  stringifyStringValues: false,
+};
 
 export function JsonViewer({ value, className }: { value: unknown; className?: string }) {
+  const data = value !== null && typeof value === "object" ? value as object : { value };
   return (
-    <div className={cn("group relative overflow-auto rounded-[var(--radius-control)] border border-border bg-surface-code p-3 font-mono text-[12.5px] leading-relaxed text-text", className)}>
+    <div className={cn("group relative overflow-auto rounded-[var(--radius-control)] border border-border bg-surface-code p-3", className)}>
       <CopyButton value={JSON.stringify(value, null, 2)} className="absolute right-2 top-2 opacity-0 transition-opacity group-hover:opacity-100" />
-      <JsonNode value={value} depth={0} />
+      <JsonView data={data} shouldExpandNode={(level) => level < 2} style={jsonStyles} />
     </div>
   );
 }
@@ -124,29 +106,25 @@ export function ScoreBar({ value, min = 0, max = 10 }: { value: number | null | 
   );
 }
 
-/** Segmented control, as in Langfuse's view switchers. */
+/** Segmented control (Radix Tabs list); the caller renders the selected view. */
 export function Tabs<T extends string>({ tabs, value, onChange }: {
   tabs: readonly { value: T; label: ReactNode; count?: number }[]; value: T; onChange: (value: T) => void;
 }) {
   return (
-    <div role="tablist" className="inline-flex h-9 items-center gap-0.5 rounded-lg bg-surface-muted p-1">
-      {tabs.map((tab) => (
-        <button
-          key={tab.value}
-          type="button"
-          role="tab"
-          aria-selected={tab.value === value}
-          onClick={() => onChange(tab.value)}
-          className={cn(
-            "inline-flex h-7 items-center gap-1.5 rounded-md px-3 text-[13px] font-semibold transition-colors",
-            tab.value === value ? "bg-surface text-text-strong shadow-sm" : "text-text-muted hover:text-text-strong",
-          )}
-        >
-          {tab.label}
-          {tab.count !== undefined && <span className="text-xs text-text-faint tabular">{tab.count}</span>}
-        </button>
-      ))}
-    </div>
+    <TabsPrimitive.Root value={value} onValueChange={(next) => onChange(next as T)}>
+      <TabsPrimitive.List className="inline-flex h-9 items-center gap-0.5 rounded-lg bg-surface-muted p-1">
+        {tabs.map((tab) => (
+          <TabsPrimitive.Trigger
+            key={tab.value}
+            value={tab.value}
+            className="inline-flex h-7 items-center gap-1.5 rounded-md px-3 text-[13px] font-semibold text-text-muted transition-colors hover:text-text-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=active]:bg-surface data-[state=active]:text-text-strong data-[state=active]:shadow-sm"
+          >
+            {tab.label}
+            {tab.count !== undefined && <span className="text-xs text-text-faint tabular">{tab.count}</span>}
+          </TabsPrimitive.Trigger>
+        ))}
+      </TabsPrimitive.List>
+    </TabsPrimitive.Root>
   );
 }
 

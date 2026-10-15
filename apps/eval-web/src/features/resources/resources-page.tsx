@@ -31,7 +31,6 @@ export function ResourcesPage() {
     <Page>
       <PageHeader
         title="初始资源"
-        description="用例开始前放进 Agent 工作区的素材文件，以及预置的对话历史（初始会话）。按 Bundle 分组管理，在用例中绑定。"
         actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setCreating(true)}>新建 Bundle</Button>}
       />
       <Card>

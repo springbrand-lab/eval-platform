@@ -7,11 +7,11 @@ import { previewRun, runKeys, submitRun } from "@/api-sdk/runs-api";
 import type { ProjectSample, RunOperation, RunPreview, RunTargetSelector } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
 import { Button } from "@/components/ui/button";
-import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/card";
+import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
 import { Tabs } from "@/components/ui/data-display";
 import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
-import { Checkbox, RadioCard, Textarea } from "@/components/ui/form";
+import { Checkbox, RadioCards, Textarea } from "@/components/ui/form";
 import { dataTitle } from "@/features/datasets/dataset-detail-page";
 import { ApiError } from "@/api-sdk/client";
 import { describeError } from "@/lib/errors";
@@ -21,9 +21,9 @@ import { OPERATION_LABELS } from "@/lib/format";
 type Scope = "all" | "datasets" | "samples" | "samplings";
 
 const OPERATION_HELP: Record<RunOperation, string> = {
-  execution: "重新执行所选用例：每条用例的现有采样会被替换成新的采样。",
-  pipeline: "重新执行所选用例，并在每个采样成功后由评委打分。",
-  evaluation: "不重新执行，只对所选的成功采样重新打分，替换原来的评估。",
+  execution: "重新执行，替换现有采样",
+  pipeline: "重新执行，成功后评委打分",
+  evaluation: "不执行，只给成功的采样重新打分",
 };
 
 export function buildSelector(scope: Scope, datasets: ReadonlySet<string>, samples: ReadonlySet<string>, samplingText: string): RunTargetSelector | string {
@@ -80,90 +80,92 @@ export function NewRunPage({ projectId }: { projectId: string }) {
       <PageHeader title="发起 Run" crumbs={[{ label: "Project", to: "/projects" }, { label: view.data?.project.name ?? "Project", to: "/projects/$projectId", params: { projectId } }]} />
       {view.isPending ? <LoadingBlock /> : view.error ? <ErrorBlock error={view.error} /> : (
         <div className="flex flex-col gap-4">
-          {view.data!.currentRun && <Notice tone="warning">当前还有未结束的 Run，结束后才能提交新的 Run。</Notice>}
+          {view.data!.currentRun && <Notice tone="warning">当前 Run 结束后才能提交。</Notice>}
           <Card>
-            <CardHeader title="1. 操作" />
-            <CardBody className="flex flex-col gap-3">
-              <div role="radiogroup" className="grid gap-3 lg:grid-cols-3">
-                {(["pipeline", "execution", "evaluation"] as const).map((value) => (
-                  <RadioCard key={value} checked={operation === value} disabled={value !== "execution" && !hasPlan}
-                    title={OPERATION_LABELS[value]} description={OPERATION_HELP[value]}
-                    onSelect={() => { setOperation(value); reset(); if (value === "evaluation" && scope === "samples") setScope("all"); }} />
-                ))}
-              </div>
-              {!hasPlan && <p className="text-[13px] text-text-muted">还没有评估计划，只能选择「只执行」。</p>}
+            <CardHeader title="操作" />
+            <CardBody>
+              <RadioCards<RunOperation> className="lg:grid-cols-3" value={operation}
+                onValueChange={(value) => { setOperation(value); reset(); if (value === "evaluation" && scope === "samples") setScope("all"); }}
+                options={(["pipeline", "execution", "evaluation"] as const).map((value) => ({
+                  value, title: OPERATION_LABELS[value], description: OPERATION_HELP[value], disabled: value !== "execution" && !hasPlan,
+                }))} />
             </CardBody>
           </Card>
           <Card>
-            <CardHeader title="2. 范围" />
-            <CardBody className="flex flex-col gap-3 text-sm">
+            <CardHeader title="范围" actions={(
               <Tabs<Scope> value={scope} onChange={(value) => { setScope(value); reset(); }} tabs={[
-                { value: "all", label: "全部用例" },
-                { value: "datasets", label: "按测试集" },
-                ...(operation === "evaluation" ? [] : [{ value: "samples" as const, label: "按用例" }]),
-                { value: "samplings", label: "按采样 ID" },
+                { value: "all", label: "全部" },
+                { value: "datasets", label: "测试集" },
+                ...(operation === "evaluation" ? [] : [{ value: "samples" as const, label: "用例" }]),
+                { value: "samplings", label: "采样 ID" },
               ]} />
-              {scope === "datasets" && (
-                <div className="flex flex-col gap-2">
-                  {view.data!.datasets.map((dataset) => (
-                    <Checkbox key={dataset.datasetId} label={`${dataset.name}（${dataset.projectSampleIds.length} 条）`}
-                      checked={datasets.has(dataset.datasetId)}
-                      onChange={(event) => {
-                        const next = new Set(datasets);
-                        if (event.target.checked) next.add(dataset.datasetId); else next.delete(dataset.datasetId);
-                        setDatasets(next);
-                        reset();
-                      }} />
-                  ))}
-                </div>
-              )}
-              {scope === "samples" && (
-                <div className="rounded-[var(--radius-control)] border border-border">
-                  <DataTable<ProjectSample>
-                    rows={view.data!.projectSamples}
-                    rowKey={(row) => row.projectSampleId}
-                    selectable
-                    selected={samples}
-                    onSelectedChange={(next) => { setSamples(next); reset(); }}
-                    searchText={(row) => `${dataTitle(row.data)} ${row.data.userPrompt}`}
-                    columns={[
-                      { key: "title", header: "用例", cell: (row) => <span className="line-clamp-1">{dataTitle(row.data)}</span> },
-                      { key: "count", header: "采样次数", align: "right", cell: (row) => row.samplingCount },
-                    ]}
-                  />
-                </div>
-              )}
-              {scope === "samplings" && (
+            )} />
+            {scope === "all" && <CardBody className="text-[13px] text-text-muted">全部 {view.data!.projectSamples.length} 条用例</CardBody>}
+            {scope === "datasets" && (
+              <CardBody className="flex flex-col gap-2.5">
+                {view.data!.datasets.map((dataset) => (
+                  <Checkbox key={dataset.datasetId} label={dataset.name} description={`${dataset.projectSampleIds.length} 条用例`}
+                    checked={datasets.has(dataset.datasetId)}
+                    onCheckedChange={(checked) => {
+                      const next = new Set(datasets);
+                      if (checked) next.add(dataset.datasetId); else next.delete(dataset.datasetId);
+                      setDatasets(next);
+                      reset();
+                    }} />
+                ))}
+              </CardBody>
+            )}
+            {scope === "samples" && (
+              <DataTable<ProjectSample>
+                rows={view.data!.projectSamples}
+                rowKey={(row) => row.projectSampleId}
+                selectable
+                selected={samples}
+                onSelectedChange={(next) => { setSamples(next); reset(); }}
+                searchText={(row) => `${dataTitle(row.data)} ${row.data.userPrompt}`}
+                columns={[
+                  { key: "title", header: "用例", cell: (row) => <span className="line-clamp-1">{dataTitle(row.data)}</span> },
+                  { key: "count", header: "采样次数", align: "right", cell: (row) => row.samplingCount },
+                ]}
+              />
+            )}
+            {scope === "samplings" && (
+              <CardBody>
                 <Textarea mono rows={4} placeholder="每行一个采样 ID，或用逗号分隔" value={samplingText}
                   onChange={(event) => { setSamplingText(event.target.value); reset(); }} />
-              )}
-              {typeof selector === "string" && scope !== "all" && <p className="text-xs text-text-muted">{selector}</p>}
-            </CardBody>
+              </CardBody>
+            )}
           </Card>
           <Card>
-            <CardHeader title="3. 预览并提交" actions={(
-              <Button disabled={typeof selector === "string"} loading={runPreview.isPending} onClick={() => runPreview.mutate()}>预览</Button>
+            <CardHeader title="预览" actions={(
+              <Button size="sm" disabled={typeof selector === "string"} loading={runPreview.isPending} onClick={() => runPreview.mutate()}>
+                {preview ? "重新预览" : "预览"}
+              </Button>
             )} />
             <CardBody className="flex flex-col gap-3">
               {runPreview.error && <Notice tone="danger">{describeError(runPreview.error)}</Notice>}
               {submit.error && <Notice tone="danger">{describeError(submit.error)}</Notice>}
               {preview ? (
-                <>
-                  <DescriptionList items={[
-                    { label: "操作", value: OPERATION_LABELS[preview.operation] },
-                    { label: "用例", value: `${preview.targets.projectSampleIds.length} 条` },
-                    { label: "替换的采样", value: preview.replacedSamplingCount },
-                    { label: "新建的采样", value: preview.newSamplingCount },
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  {[
+                    { label: "用例", value: preview.targets.projectSampleIds.length },
+                    { label: "新建采样", value: preview.newSamplingCount },
+                    { label: "替换采样", value: preview.replacedSamplingCount },
                     { label: "评估", value: preview.evaluationCount },
-                  ]} />
-                  {preview.replacedSamplingCount > 0 && <Notice tone="warning">被替换的采样和它们的评估结果将不再计入指标。</Notice>}
-                  <div className="flex justify-end">
-                    <Button variant="primary" loading={submit.isPending} disabled={!!view.data!.currentRun} onClick={() => submit.mutate()}>提交 Run</Button>
-                  </div>
-                </>
-              ) : <p className="text-sm text-text-muted">选择操作和范围后点击「预览」，确认影响范围再提交。</p>}
+                  ].map((item) => (
+                    <div key={item.label} className="rounded-[var(--radius-control)] bg-surface-muted px-3 py-2">
+                      <p className="text-xs text-text-muted">{item.label}</p>
+                      <p className="mt-0.5 text-lg font-semibold text-text-strong tabular">{item.value}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : <p className="text-[13px] text-text-muted">{typeof selector === "string" ? selector : "预览后再提交"}</p>}
+              {preview && preview.replacedSamplingCount > 0 && <p className="text-xs text-text-muted">被替换的采样及其评估不再计入指标。</p>}
             </CardBody>
           </Card>
+          <div className="sticky bottom-0 -mx-6 flex justify-end border-t border-border bg-bg/90 px-6 py-3 backdrop-blur">
+            <Button variant="primary" loading={submit.isPending} disabled={!preview || !!view.data!.currentRun} onClick={() => submit.mutate()}>提交 Run</Button>
+          </div>
         </div>
       )}
     </Page>

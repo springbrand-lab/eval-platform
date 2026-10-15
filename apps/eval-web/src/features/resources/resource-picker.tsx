@@ -3,6 +3,7 @@ import { bundleKeys, listBundles, listMaterials, listSessions } from "@/api-sdk/
 import { Select } from "@/components/ui/form";
 
 export type ResourceKind = "material" | "session";
+const NONE = "__none";
 export interface PickedResource { bundleId: string; id: string }
 
 /** Choose a Bundle, then one Material or Session in it; an empty Bundle choice clears the binding. */
@@ -23,18 +24,13 @@ export function ResourcePicker({ kind, value, onChange, disabled }: {
   });
   return (
     <div className="grid gap-2 sm:grid-cols-2">
-      <Select aria-label="Bundle" disabled={disabled} value={bundleId} onChange={(event) => {
-        const next = event.target.value;
-        onChange(next ? { bundleId: next, id: "" } : null);
-      }}>
-        <option value="">不绑定</option>
-        {bundles.data?.map((bundle) => <option key={bundle.bundleId} value={bundle.bundleId}>{bundle.name}</option>)}
-      </Select>
+      <Select aria-label="Bundle" disabled={disabled} value={bundleId || NONE} placeholder="不绑定"
+        onValueChange={(next) => onChange(next === NONE ? null : { bundleId: next, id: "" })}
+        options={[{ value: NONE, label: "不绑定" }, ...(bundles.data ?? []).map((bundle) => ({ value: bundle.bundleId, label: bundle.name }))]} />
       <Select aria-label={kind === "material" ? "素材" : "初始会话"} disabled={disabled || !bundleId} value={value?.id ?? ""}
-        onChange={(event) => onChange({ bundleId, id: event.target.value })}>
-        <option value="">{bundleId ? "请选择" : "先选择 Bundle"}</option>
-        {items.data?.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-      </Select>
+        placeholder={bundleId ? "请选择" : "先选择 Bundle"}
+        onValueChange={(next) => onChange({ bundleId, id: next })}
+        options={(items.data ?? []).map((item) => ({ value: item.id, label: item.name }))} />
     </div>
   );
 }

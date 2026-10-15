@@ -15,9 +15,10 @@ import { Card, CardHeader } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
 import { CopyId } from "@/components/ui/data-display";
 import { ConfirmDialog } from "@/components/ui/dialog";
-import { EmptyState, ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
+import { EmptyState, ErrorBlock, LoadingBlock } from "@/components/ui/feedback";
 import { FileDropzone, type PickedFile } from "@/components/ui/file-dropzone";
-import { Field, Select, Textarea } from "@/components/ui/form";
+import { Field, Textarea } from "@/components/ui/form";
+import { Tabs } from "@/components/ui/data-display";
 import { fileToBase64, guessMediaType } from "@/lib/files";
 import { formatBytes } from "@/lib/format";
 import { MATERIAL_FILE_BYTES, MATERIAL_TOTAL_BYTES, SP_MATERIAL_MAX_FILES, SP_SESSION_CONTENT_CHARS } from "@/lib/limits";
@@ -59,8 +60,8 @@ function MaterialUpload({ bundleId, open, onClose }: { bundleId: string; open: b
   return (
     <MetadataDialog open={open} onClose={onClose} title="上传素材" submitLabel="上传" loading={create.isPending}
       extraValid={!problem} onSubmit={(value) => create.mutate(value)}>
-      <FileDropzone directory onFiles={(picked) => setFiles((current) => [...current, ...picked])}
-        hint={`拖入文件夹会保留相对路径；单个文件 ≤ ${formatBytes(MATERIAL_FILE_BYTES)}，合计 ≤ ${formatBytes(MATERIAL_TOTAL_BYTES)}`} />
+      <FileDropzone onFiles={(picked) => setFiles((current) => [...current, ...picked])}
+        hint={`保留文件夹内的相对路径 · 单个 ≤ ${formatBytes(MATERIAL_FILE_BYTES)} · 合计 ≤ ${formatBytes(MATERIAL_TOTAL_BYTES)}`} />
       {files.length > 0 && (
         <div className="max-h-56 overflow-y-auto rounded-[var(--radius-control)] border border-border">
           {files.map((item, index) => (
@@ -96,14 +97,8 @@ function SessionUpload({ bundleId, open, onClose }: { bundleId: string; open: bo
   return (
     <MetadataDialog open={open} onClose={onClose} title="上传初始会话" submitLabel="上传" loading={create.isPending}
       extraValid={content.trim().length > 0 && !tooLong} onSubmit={(value) => create.mutate(value)}>
-      <Notice>每一项是 SP 的规范消息：<code className="font-mono">{"{id, message: {role, …}, createdAt}"}</code>，第一条必须是 user 消息。JSON 格式为 <code className="font-mono">{"{entries: [...]}"}</code>，JSONL 为每行一项。</Notice>
-      <Field label="格式">
-        {(id) => (
-          <Select id={id} value={format} onChange={(event) => setFormat(event.target.value as "json" | "jsonl")}>
-            <option value="jsonl">JSONL</option>
-            <option value="json">JSON</option>
-          </Select>
-        )}
+      <Field label="格式" hint={<>每项 <code className="font-mono">{"{id, message: {role, …}, createdAt}"}</code>，首条为 user 消息；JSON 为 <code className="font-mono">{"{entries: [...]}"}</code></>}>
+        {() => <Tabs<"json" | "jsonl"> value={format} onChange={setFormat} tabs={[{ value: "jsonl", label: "JSONL" }, { value: "json", label: "JSON" }]} />}
       </Field>
       <FileDropzone multiple={false} accept=".json,.jsonl" onFiles={(picked) => {
         const first = picked[0];
@@ -171,7 +166,7 @@ export function BundleDetailPage({ bundleId }: { bundleId: string }) {
       {bundle.error && <ErrorBlock error={bundle.error} />}
       <div className="flex flex-col gap-4">
         <Card>
-          <CardHeader title="素材" description="执行前写入 Agent 工作区的文件"
+          <CardHeader title="素材"
             actions={<Button size="sm" variant="primary" icon={<Plus className="size-4" />} onClick={() => setUploadingMaterial(true)}>上传素材</Button>} />
           {materials.isPending ? <LoadingBlock rows={2} /> : materials.error ? <div className="p-4"><ErrorBlock error={materials.error} /></div> : (
             <DataTable<MaterialRecord>
@@ -190,7 +185,7 @@ export function BundleDetailPage({ bundleId }: { bundleId: string }) {
           )}
         </Card>
         <Card>
-          <CardHeader title="初始会话" description="执行前导入到 Agent 会话中的对话历史"
+          <CardHeader title="初始会话"
             actions={<Button size="sm" variant="primary" icon={<Plus className="size-4" />} onClick={() => setUploadingSession(true)}>上传初始会话</Button>} />
           {sessions.isPending ? <LoadingBlock rows={2} /> : sessions.error ? <div className="p-4"><ErrorBlock error={sessions.error} /></div> : (
             <DataTable<SessionRecord>

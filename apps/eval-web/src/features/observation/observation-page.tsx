@@ -4,10 +4,9 @@ import {
   getMessages, getObservationRef, getWorkspaceTree, observationKeys, type ObservedKind,
 } from "@/api-sdk/observations-api";
 import { getProject, projectKeys } from "@/api-sdk/projects-api";
-import { Page, PageHeader } from "@/components/layout/page";
-import { StatusBadge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/layout/page";
 import { CopyId, Tabs } from "@/components/ui/data-display";
-import { EmptyState, ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
+import { EmptyState, ErrorBlock, LoadingBlock } from "@/components/ui/feedback";
 import { LangfuseLink } from "@/features/results/agent-panel";
 import { MessagesTab } from "./messages-tab";
 import { TrajectoryTab } from "./trajectory-tab";
@@ -40,38 +39,44 @@ export function ObservationPage({ projectId, target }: { projectId: string; targ
   });
   const samplingId = ref.data?.samplingId;
   const title = target.role === "subject" ? "被测 Agent 会话" : "评委会话";
+  const tabs = (
+    <Tabs<Tab> value={tab} onChange={setTab} tabs={[
+      { value: "messages", label: "会话" },
+      { value: "workspace", label: "工作区" },
+      { value: "trajectory", label: "轨迹" },
+    ]} />
+  );
   return (
-    <Page>
-      <PageHeader
-        title={title}
-        description="只读查看，不能在这里发送消息或操作 Agent。"
-        crumbs={[
-          { label: "Project", to: "/projects" },
-          { label: view.data?.project.name ?? "Project", to: "/projects/$projectId", params: { projectId } },
-          ...(samplingId ? [{ label: `采样 ${samplingId.slice(0, 8)}`, to: "/projects/$projectId/samplings/$samplingId", params: { projectId, samplingId } }] : []),
-        ]}
-        actions={ref.data?.chatId && (
-          <span className="flex items-center gap-3">
-            <CopyId value={ref.data.chatId} />
-            <LangfuseLink chatId={ref.data.chatId} />
-          </span>
-        )}
-      />
-      {ref.isPending ? <LoadingBlock /> : ref.error ? <ErrorBlock error={ref.error} /> : !started ? (
-        <EmptyState title="Agent 还没有开始运行" description="开始运行后，这里会显示会话、工作区和轨迹。" icon={<StatusBadge status="not-started" />} />
+    <div className="flex h-full flex-col">
+      <div className="px-6">
+        <PageHeader
+          flush
+          title={title}
+          crumbs={[
+            { label: "Project", to: "/projects" },
+            { label: view.data?.project.name ?? "Project", to: "/projects/$projectId", params: { projectId } },
+            ...(samplingId ? [{ label: `采样 ${samplingId.slice(0, 8)}`, to: "/projects/$projectId/samplings/$samplingId", params: { projectId, samplingId } }] : []),
+          ]}
+          meta={ref.data?.chatId && <CopyId value={ref.data.chatId} />}
+          actions={started && (
+            <>
+              <LangfuseLink chatId={ref.data!.chatId} label="Langfuse" />
+              {tabs}
+            </>
+          )}
+        />
+      </div>
+      {ref.isPending ? <LoadingBlock /> : ref.error ? <div className="p-6"><ErrorBlock error={ref.error} /></div> : !started ? (
+        <EmptyState title="Agent 还没有开始运行" />
+      ) : tab === "messages" ? (
+        messages.isPending ? <LoadingBlock /> : messages.error ? <div className="p-6"><ErrorBlock error={messages.error} /></div>
+          : <MessagesTab messages={messages.data} running={running} />
       ) : (
-        <div className="flex flex-col gap-4">
-          {target.role === "evaluator" && <Notice tone="neutral">评委在自己的工作区中评审：被测 Agent 的产物和完整轨迹以证据包的形式导入到 /evidence，评委把结果写在 /output/result.json。</Notice>}
-          <Tabs<Tab> value={tab} onChange={setTab} tabs={[
-            { value: "messages", label: "会话" },
-            { value: "workspace", label: "工作区" },
-            { value: "trajectory", label: "轨迹" },
-          ]} />
-          {tab === "messages" && (messages.isPending ? <LoadingBlock /> : messages.error ? <ErrorBlock error={messages.error} /> : <MessagesTab messages={messages.data} running={running} />)}
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
           {tab === "workspace" && (tree.isPending ? <LoadingBlock /> : tree.error ? <ErrorBlock error={tree.error} /> : <WorkspaceTab projectId={projectId} kind={kind} id={target.id} tree={tree.data} />)}
           {tab === "trajectory" && <TrajectoryTab projectId={projectId} kind={kind} id={target.id} />}
         </div>
       )}
-    </Page>
+    </div>
   );
 }
