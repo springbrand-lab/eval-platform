@@ -17,7 +17,7 @@ export type SessionContent = z.output<typeof evalInitialContextSchema>;
 type ResourceLocation = { readonly path: string; readonly ownerDirectory: string };
 
 /** SP's initialization contract owns the per-material file count and file shape. */
-const materialFilesSchema = evalInitializationSchema.shape.initialMaterials.unwrap().shape.files.min(1);
+export const materialFilesSchema = evalInitializationSchema.shape.initialMaterials.unwrap().shape.files.min(1);
 
 export interface BundleDirectory {
   resolveInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef): Promise<readonly MaterialFile[]>;

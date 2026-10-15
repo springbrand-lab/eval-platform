@@ -6,7 +6,7 @@ describe("@eval-platform/eval-dataset", () => {
     expect(Object.keys(entry).toSorted()).toEqual([
       "assertPromptData", "assertPromptDatasetMetadata", "createDatasetService", "DataInUseError",
       "DatasetEntityNotFoundError", "DatasetIdentityConflictError", "DatasetInputError", "dataInputSchema",
-      "dataSchema", "datasetSchema", "datasetSnapshotSchema", "initialMaterialsRefSchema", "initialSessionRefSchema",
+      "dataSchema", "datasetInputSchema", "datasetSchema", "datasetSnapshotSchema", "initialMaterialsRefSchema", "initialSessionRefSchema",
       "parseDatasetDocument", "parseStrictJson", "platformIdSchema",
     ].toSorted());
   });

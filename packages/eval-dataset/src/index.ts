@@ -2,6 +2,7 @@ export { createDatasetService, type DatasetService } from "./dataset/index.js";
 export {
   dataInputSchema,
   dataSchema,
+  datasetInputSchema,
   datasetSchema,
   datasetSnapshotSchema,
   initialMaterialsRefSchema,

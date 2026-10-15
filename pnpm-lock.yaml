@@ -133,6 +133,12 @@ importers:
 
   packages/eval-contracts:
     dependencies:
+      '@springbrand/http':
+        specifier: 0.1.0-alpha.4
+        version: 0.1.0-alpha.4(hono@4.12.33)(zod@4.6.5)
+      hono:
+        specifier: 4.12.33
+        version: 4.12.33
       zod:
         specifier: ^4.4.3
         version: 4.6.5
