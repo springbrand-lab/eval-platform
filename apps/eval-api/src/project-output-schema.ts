@@ -37,3 +37,17 @@ function hasOnlySafeNumbers(value: unknown): boolean {
   if (value === null || typeof value !== "object") return true;
   return Object.values(value).every(hasOnlySafeNumbers);
 }
+
+const resultValidators = new Map<string, ReturnType<typeof schemaValidator.compile>>();
+
+/** Check an Evaluator result against its Project's output schema; an empty list means it conforms. */
+export function validateEvaluationResult(schema: EvaluationOutputSchema, result: unknown): readonly string[] {
+  const key = JSON.stringify(schema);
+  let validate = resultValidators.get(key);
+  if (!validate) {
+    validate = schemaValidator.compile(schema);
+    resultValidators.set(key, validate);
+  }
+  if (validate(result)) return [];
+  return (validate.errors ?? []).map((error) => `${error.instancePath || "/"} ${error.message ?? "is invalid"}`);
+}

@@ -17,6 +17,7 @@ import type { ConfigResolver } from "../config/model.js";
 import type { Harness } from "../harness/model.js";
 import type { RetryController } from "./retry.js";
 import type { SamplingState, RuntimeStore } from "./store.js";
+import type { EvaluationScorePort } from "./scores.js";
 
 export interface Sample {
   readonly sampleId: string;
@@ -94,6 +95,8 @@ export interface EvalRunResumerDependencies {
   readonly idFactory?: () => string;
   readonly now?: () => string;
   readonly sleep?: (milliseconds: number) => Promise<void>;
+  /** Checks Evaluator results and delivers their scores; without it results are not schema-checked. */
+  readonly scores?: EvaluationScorePort;
   /** Receives failures that must not interrupt the Run; it should not throw. */
   readonly onError: (error: Error) => void;
 }

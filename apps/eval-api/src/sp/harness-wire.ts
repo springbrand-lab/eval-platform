@@ -139,6 +139,7 @@ export function evaluationOutput(value: unknown): EvaluationAgentOutput {
     status: outputStatusSchema,
     artifacts: artifactsSchema,
     trajectory: trajectorySchema("evaluator"),
+    result: z.record(z.string(), z.json()).exactOptional(),
     error: z.string().exactOptional(),
   }), value, "evaluation output");
 }

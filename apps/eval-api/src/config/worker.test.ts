@@ -17,6 +17,20 @@ describe("Run worker configuration", () => {
     });
   });
 
+  it("groups the Langfuse score settings only when all are set", () => {
+    const langfuse = {
+      LANGFUSE_BASE_URL: "https://us.cloud.langfuse.com/",
+      LANGFUSE_PUBLIC_KEY: "pk-lf",
+      LANGFUSE_SECRET_KEY: "sk-lf",
+      LANGFUSE_ENVIRONMENT: "dev",
+    };
+    expect(loadWorkerConfig({ ...required, ...langfuse }).langfuse).toEqual({
+      baseUrl: "https://us.cloud.langfuse.com", publicKey: "pk-lf", secretKey: "sk-lf", environment: "dev",
+    });
+    expect(loadWorkerConfig({ ...required, LANGFUSE_ENVIRONMENT: "dev" })).not.toHaveProperty("langfuse");
+    expect(() => loadWorkerConfig({ ...required, LANGFUSE_PUBLIC_KEY: "pk-lf" })).toThrow("must be set together");
+  });
+
   it("parses an explicit Run concurrency", () => {
     expect(loadWorkerConfig({ ...required, EVAL_RUN_WORKER_CONCURRENCY: "3" }).EVAL_RUN_WORKER_CONCURRENCY).toBe(3);
   });

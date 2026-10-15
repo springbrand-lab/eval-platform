@@ -91,7 +91,7 @@ function runtimeFixture() {
     },
     async collectEvaluation({ handle }) {
       return {
-        status: "succeeded", score: 90, reason: "The produced page passes the checks.", artifacts: [{ artifactId: handle.chatId, kind: "report", path: "/evaluation.json" }],
+        status: "succeeded", result: { score: 90, reason: "The produced page passes the checks." }, artifacts: [{ artifactId: handle.chatId, kind: "report", path: "/evaluation.json" }],
         evidenceRefs: [{ kind: "artifact", ref: "/workspace/page.html" }],
         trajectory: { trajectoryId: handle.chatId, source: "evaluator", path: "/trajectory.json" },
       };

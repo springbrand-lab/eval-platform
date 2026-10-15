@@ -51,6 +51,14 @@ export {
   type RetryOperation,
 } from "./retry.js";
 export {
+  publishEvaluationScore,
+  readEvaluationScore,
+  syncRunScores,
+  type EvaluationScore,
+  type EvaluationScorePort,
+  type ScoreSyncSummary,
+} from "./scores.js";
+export {
   createAgentScheduler,
   type AgentScheduler,
   type AgentSchedulerOptions,

@@ -41,6 +41,15 @@ export const stopRun: AppRouteHandler<typeof routes.stopRun> = async (c) => {
   return ok(c, stopped, 202);
 };
 
+export const syncRunScores: AppRouteHandler<typeof routes.syncRunScores> = async (c) => {
+  const { projectId, runId } = c.req.valid("param");
+  const scores = c.var.services.scores;
+  if (!scores) throw new HttpError("SCORE_SYNC_UNCONFIGURED");
+  const summary = await scores.syncRun(projectId, runId);
+  if (!summary) throw new HttpError("RUN_NOT_FOUND");
+  return ok(c, summary);
+};
+
 export const getProjectRun: AppRouteHandler<typeof routes.getProjectRun> = async (c) => {
   const { projectId, runId } = c.req.valid("param");
   return ok(c, { run: (await requireProjectRun(c.var.services, projectId, runId)).run });

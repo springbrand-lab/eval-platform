@@ -4,9 +4,12 @@ import {
   absolutePathSchema,
   databaseEnvSchema,
   httpOriginSchema,
+  langfuseEnvShape,
   loadEnv,
   portSchema,
+  refineLangfuseEnv,
   requiredStringSchema,
+  takeLangfuseConfig,
 } from "./env.js";
 
 const apiEnvSchema = databaseEnvSchema.extend({
@@ -25,15 +28,18 @@ const apiEnvSchema = databaseEnvSchema.extend({
   EVAL_BUNDLE_DIR: absolutePathSchema,
   EVAL_API_HOST: requiredStringSchema.default("127.0.0.1"),
   EVAL_API_PORT: portSchema.default(8788),
-});
+  /** Lets the API re-sync a Run's scores; the Run Worker syncs them as Evaluations finish. */
+  ...langfuseEnvShape,
+}).superRefine(refineLangfuseEnv);
 
-export type ApiConfig = Omit<z.output<typeof apiEnvSchema>, "EVAL_SP_SOURCE_BRANCH" | "EVAL_SP_SOURCE_COMMIT"> & {
+export type ApiConfig = Omit<ReturnType<typeof takeLangfuseConfig<z.output<typeof apiEnvSchema>>>,
+  "EVAL_SP_SOURCE_BRANCH" | "EVAL_SP_SOURCE_COMMIT"> & {
   readonly release: EvalSpRelease;
 };
 
 /** Parse the API process environment once; invalid configuration stops startup. */
 export function loadApiConfig(environment: Record<string, string | undefined>): ApiConfig {
-  const { EVAL_SP_SOURCE_BRANCH, EVAL_SP_SOURCE_COMMIT, ...config } = loadEnv(apiEnvSchema, environment);
+  const { EVAL_SP_SOURCE_BRANCH, EVAL_SP_SOURCE_COMMIT, ...config } = takeLangfuseConfig(loadEnv(apiEnvSchema, environment));
   return {
     ...config,
     release: requireEvalSpRelease({ sourceBranch: EVAL_SP_SOURCE_BRANCH, sourceCommit: EVAL_SP_SOURCE_COMMIT }),

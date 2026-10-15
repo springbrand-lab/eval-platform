@@ -11,6 +11,7 @@ import type { ProjectRunView } from "../db/run-view.js";
 import type { createPostgresProjectRunControl } from "../db/runtime.js";
 import type { InitialResourceApi } from "../initial-resources.js";
 import type { EvalSpClient, EvalSpUser } from "../sp/client.js";
+import type { ScoreSyncSummary } from "@eval-platform/eval-runtime";
 
 /** Every service a request may use, already scoped to the Eval SP service account. */
 export interface OwnerServices {
@@ -26,6 +27,10 @@ export interface OwnerServices {
   readonly resources: ReturnType<typeof createResourceCatalog>;
   readonly outputSchemas: ReturnType<typeof createOutputSchemaCatalog>;
   readonly initialResources: InitialResourceApi;
+  /** Absent when Langfuse is not configured. */
+  readonly scores?: {
+    syncRun(projectId: string, runId: string): Promise<ScoreSyncSummary | null>;
+  };
 }
 
 /** Holds owner services for one request; `release` frees the shared per-owner admission. */

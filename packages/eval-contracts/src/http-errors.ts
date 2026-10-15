@@ -63,6 +63,7 @@ const errorDefinitions = {
   BUNDLE_FILE_UNAVAILABLE: { status: 503, message: "Bundle file could not be read. Try again shortly" },
   OUTPUT_SCHEMA_NOT_FOUND: { status: 404, message: "Output format not found" },
   OUTPUT_SCHEMA_IN_USE: { status: 409, message: "Output format is still bound to a Project" },
+  SCORE_SYNC_UNCONFIGURED: { status: 503, message: "Langfuse score sync is not configured" },
 
   METRICS_QUERY_INVALID: { status: 400, message: "Metrics query is invalid" },
 

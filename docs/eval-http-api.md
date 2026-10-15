@@ -36,6 +36,7 @@ Codes are uppercase `DOMAIN_REASON`. `packages/eval-contracts/src/http-errors.ts
 | Content over a catalog limit | `413` `CATALOG_PAYLOAD_TOO_LARGE`, `BUNDLE_FILE_TOO_LARGE`, `EVALUATION_SELECTION_TOO_LARGE` |
 | Eval SP rejected a relayed request | `EVAL_SP_FORBIDDEN`, `EVAL_SP_NOT_FOUND`, `EVAL_SP_CONFLICT`, `EVAL_SP_REQUEST_INVALID`, `EVAL_SP_REQUEST_FAILED`, `REQUEST_RATE_LIMITED` |
 | Dependency temporarily unavailable; retry the same request | `503` `EVAL_SP_UNAVAILABLE`, `DATABASE_UNAVAILABLE`, `BUNDLE_FILE_UNAVAILABLE`, `RUNTIME_PERSISTENCE_UNCONFIRMED` |
+| Optional integration not configured on this deployment | `503` `SCORE_SYNC_UNCONFIGURED` |
 
 ## Request bodies
 
@@ -64,6 +65,7 @@ Every JSON body goes through one reader: `readBytesLimited` caps the received by
 | Independent evaluation admission | `POST /api/projects/{projectId}/evaluations` | `{evaluationConfigId, samplingIds, idempotencyKey}` / `202 {runId, samplingIds}` |
 | Successful Samplings | `GET /api/projects/{projectId}/samplings/successful`; `GET /api/projects/{projectId}/samplings/successful/ids` | Page: optional `sampleId`, `afterSamplingId`, `limit` (default 100, max 1,000) / `{samplings, nextCursor}`; all IDs: optional `sampleId` / `{samplingIds}` |
 | Current Run and stop | `GET /api/projects/{projectId}/runs/current`; `POST /api/projects/{projectId}/runs/{runId}/stop` | `{run:{runId, stopRequested?} | null}`; stop: `202 {runId, stopRequested:true}` |
+| Score re-sync | `POST /api/projects/{projectId}/runs/{runId}/score-sync` | `200 {synced, failed, skipped}` |
 | Project Run views | `GET /api/projects/{projectId}/runs/{runId}`; `GET /api/projects/{projectId}/runs/{runId}/evaluations` | `{run}` with Evaluation IDs and status; `{evaluations}` in the Run's Evaluation ID order |
 | Run and result facts | `GET /api/runs/{runId}`; `GET /api/samplings/{samplingId}`; `GET /api/samplings/{samplingId}/evaluations`; `GET /api/evaluations/{evaluationId}` | — |
 | Metrics | `GET /api/metrics/projects/{projectId}` and `/datasets/{datasetId}`, `/samples/{sampleId}`, `/samplings/{samplingId}` beneath that Project | Optional repeated `runId` query |
@@ -89,5 +91,7 @@ Run admission uses a token-free, owner-scoped ConfigReader and `createEvalRunAdm
 Admission responses follow the rules in [Run admission](architecture.md#run-准入与独立评估): a matching replay returns the original Run; a reused key with different facts, or a key retired by a replaced Run, is `409 RUN_IDEMPOTENCY_CONFLICT`; a new key while the Project has an unfinished Run is `409 PROJECT_BUSY`; a replaced Run ID is `404 RUN_NOT_FOUND`.
 
 `POST .../runs/{runId}/stop` targets only the named current Run and returns `202 {runId, stopRequested:true}`, including for a repeat before replacement; an unknown or replaced Run is `404 RUN_NOT_FOUND`; a finished Run without a stop request is `409 PROJECT_NO_ACTIVE_RUN`. The response only records the request; stop semantics are described in [Run scheduling and stop](architecture.md#run-调度与停止).
+
+`POST .../runs/{runId}/score-sync` re-sends to Langfuse every succeeded, scored Evaluation of the Run whose `scoreSync` is not `synced`, and records each outcome. An unknown Run is `404 RUN_NOT_FOUND`; without Langfuse settings it is `503 SCORE_SYNC_UNCONFIGURED`.
 
 Sampling and Evaluation responses retain artifact and complete trajectory references. Their bytes remain behind Eval SP's public read-only Workspace and Trajectory APIs; this control plane does not read SP Durable Object storage.

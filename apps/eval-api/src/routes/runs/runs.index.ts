@@ -9,6 +9,7 @@ router.openapi(routes.getRun, handlers.getRun);
 router.openapi(routes.evaluate, handlers.evaluate);
 router.openapi(routes.getCurrentRun, handlers.getCurrentRun);
 router.openapi(routes.stopRun, handlers.stopRun);
+router.openapi(routes.syncRunScores, handlers.syncRunScores);
 router.openapi(routes.getProjectRun, handlers.getProjectRun);
 router.openapi(routes.listProjectRunEvaluations, handlers.listProjectRunEvaluations);
 router.openapi(routes.listSuccessfulSamplings, handlers.listSuccessfulSamplings);

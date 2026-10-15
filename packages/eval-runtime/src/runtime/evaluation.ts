@@ -16,9 +16,11 @@ import {
   AgentOperationError,
   applyAttemptPatch,
   describeAgentError,
+  reportError,
   runAgentLifecycle,
   type StageDependencies,
 } from "./agent-lifecycle.js";
+import { publishEvaluationScore, readEvaluationScore } from "./scores.js";
 
 export interface EvaluateSamplingInput {
   readonly context: RuntimeEvaluationContext;
@@ -76,6 +78,10 @@ export async function evaluateSampling(
     userId: sampling.subjectAgent.ownerUserId,
     chatId: subjectChatId,
   };
+
+  const scoreOf = (output: EvaluationAgentOutput) => (
+    readEvaluationScore(output, input.evaluationOutputSchema, dependencies.scores)
+  );
 
   try {
     const evalPrompt = requireEvaluationPrompt(sample);
@@ -165,20 +171,39 @@ export async function evaluateSampling(
         handle,
         ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
       }),
-      isSuccessfulOutput: (output) => output.status === "succeeded",
-      outputFailure: (output) => new AgentOperationError(
-        output.error ?? "evaluation output failed",
-        true,
-        "llm",
-      ),
+      // A result that breaks the output schema is retried like any other failed Evaluator output.
+      isSuccessfulOutput: (output) => output.status === "succeeded" && "score" in scoreOf(output),
+      outputFailure: (output) => {
+        const scored = output.status === "succeeded" ? scoreOf(output) : undefined;
+        const message = scored && "problem" in scored ? scored.problem : output.error ?? "evaluation output failed";
+        return new AgentOperationError(message, true, "llm");
+      },
     });
 
+    const scored = scoreOf(result.output);
+    if (!("score" in scored)) throw new AgentOperationError(scored.problem, false, "llm");
     await persistEvaluation({
       ...currentEvaluation,
       evaluator: agentConfig,
       status: { status: "succeeded" },
-      output: result.output,
+      output: { ...result.output, ...scored },
     });
+    const publish = dependencies.scores?.publish?.bind(dependencies.scores);
+    if (publish) {
+      const scoreSync = await publishEvaluationScore(publish, {
+        evaluationId: currentEvaluation.evaluationId,
+        samplingId: sampling.samplingId,
+        projectId: sampling.projectId,
+        sampleId: sampling.sampleId,
+        subjectChatId,
+        evaluatorChatId: chatId,
+        ...scored,
+      }, dependencies.now);
+      if (scoreSync.lastError !== undefined) {
+        reportError(dependencies.onError, new Error(`Evaluation ${currentEvaluation.evaluationId} score was not synced: ${scoreSync.lastError}`));
+      }
+      await persistEvaluation({ ...currentEvaluation, scoreSync });
+    }
     return { ...input.context, evaluation: currentEvaluation };
   } catch (error) {
     const details = describeAgentError(error);

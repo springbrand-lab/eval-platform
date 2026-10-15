@@ -4,6 +4,7 @@ import pino from "pino";
 import { createRoutes } from "./app.js";
 import { loadApiConfig } from "./config/api.js";
 import { createEvalDb } from "./db/client.js";
+import { createLangfuseScorePublisher } from "./langfuse/scores.js";
 import { errorDiagnostics } from "./lib/api-errors.js";
 import type { ApiRuntime } from "./lib/types.js";
 import { loggerOptions } from "./middlewares/pino-logger.js";
@@ -27,7 +28,10 @@ const runtime: ApiRuntime = {
   sp,
   serviceAccount: { user: serviceUser, email: serviceUser.email, sessionToken: config.EVAL_SP_SERVICE_SESSION_TOKEN },
   spAdminToken: config.EVAL_SP_ADMIN_TOKEN,
-  ownerServices: createOwnerServices({ db: createEvalDb(pool), sp, bundles, release: config.release, runQueue }),
+  ownerServices: createOwnerServices({
+    db: createEvalDb(pool), sp, bundles, release: config.release, runQueue,
+    ...(config.langfuse === undefined ? {} : { publishScore: createLangfuseScorePublisher({ config: config.langfuse }) }),
+  }),
 };
 const app = createRoutes(logger);
 const server = serve({

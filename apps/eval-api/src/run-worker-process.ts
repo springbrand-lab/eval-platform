@@ -5,6 +5,8 @@ import type { Logger } from "pino";
 import type { WorkerConfig } from "./config/worker.js";
 import { readEvaluationOutputSchema, readSamples } from "./db/catalog.js";
 import { createEvalDb } from "./db/client.js";
+import { createLangfuseScorePublisher } from "./langfuse/scores.js";
+import { validateEvaluationResult } from "./project-output-schema.js";
 import { createPostgresWorkerRuntimeStore } from "./db/runtime.js";
 import { createRunQueue, openRunBoss } from "./run-worker-queue.js";
 import { openBundleDirectory } from "./sp/bundle-directory.js";
@@ -35,6 +37,10 @@ export async function startSpEvalRunWorkerProcess(config: WorkerConfig, logger: 
         resolveInitialSession: bundles.resolveInitialSession,
       }),
       store,
+      scores: {
+        validate: validateEvaluationResult,
+        ...(config.langfuse === undefined ? {} : { publish: createLangfuseScorePublisher({ config: config.langfuse }) }),
+      },
       onError: (error) => logger.error({ error: errorDiagnostics(error) }, "run_runtime_error"),
     });
     const worker = await startEvalRunWorker({

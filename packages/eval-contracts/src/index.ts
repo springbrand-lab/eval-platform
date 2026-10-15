@@ -14,6 +14,7 @@ export type {
   EvaluationAgentOutput,
   EvaluationOutputSchema,
   EvaluationRecord,
+  ScoreSyncState,
   EvaluationAttempt,
   EvaluateRequest,
   EvidenceKind,

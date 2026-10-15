@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CatalogInputError, CatalogPayloadTooLargeError } from "./db/errors.js";
 import { OUTPUT_SCHEMA_BYTES } from "./limits.js";
-import { parseEvaluationOutputSchema } from "./project-output-schema.js";
+import { parseEvaluationOutputSchema, validateEvaluationResult } from "./project-output-schema.js";
 
 describe("Project evaluation output JSON Schema", () => {
   it("parses a JSON Schema object for Project binding", () => {
@@ -17,5 +17,24 @@ describe("Project evaluation output JSON Schema", () => {
   it("rejects a Schema file beyond the output-format size limit", () => {
     expect(() => parseEvaluationOutputSchema(JSON.stringify({ description: "a".repeat(OUTPUT_SCHEMA_BYTES) })))
       .toThrow(CatalogPayloadTooLargeError);
+  });
+});
+
+describe("Evaluator result validation", () => {
+  const schema = parseEvaluationOutputSchema(JSON.stringify({
+    type: "object",
+    required: ["score", "reason"],
+    properties: { score: { type: "number", minimum: 0, maximum: 10 }, reason: { type: "string" } },
+  }));
+
+  it("accepts a conforming result", () => {
+    expect(validateEvaluationResult(schema, { score: 8, reason: "ok" })).toEqual([]);
+  });
+
+  it("lists every problem with its location", () => {
+    expect(validateEvaluationResult(schema, { score: 11 })).toEqual([
+      "/ must have required property 'reason'",
+      "/score must be <= 10",
+    ]);
   });
 });

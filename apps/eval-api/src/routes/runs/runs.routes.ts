@@ -126,6 +126,21 @@ export const stopRun = createRoute({
   },
 });
 
+export const syncRunScores = createRoute({
+  method: "post",
+  path: "/projects/{projectId}/runs/{runId}/score-sync",
+  tags: ["Run"],
+  summary: "Sync the Run's Evaluator scores that are not yet in Langfuse",
+  request: { params: projectRunParams },
+  responses: {
+    200: jsonContent(responseSchema(z.object({
+      synced: z.number().int(), failed: z.number().int(), skipped: z.number().int(),
+    })), "Sync outcome"),
+    ...errorResponses,
+    ...notFoundResponse,
+  },
+});
+
 export const getProjectRun = createRoute({
   method: "get",
   path: "/projects/{projectId}/runs/{runId}",

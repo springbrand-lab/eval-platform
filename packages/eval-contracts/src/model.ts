@@ -214,6 +214,9 @@ export interface EvidenceRef {
 export interface EvaluationAgentOutput {
   readonly status: "succeeded" | "failed";
   readonly artifacts: readonly ArtifactRef[];
+  /** The Evaluator's result file, following the Project's Evaluation output schema. */
+  readonly result?: { readonly [key: string]: JsonValue };
+  /** Read from `result` once it conforms to the output schema. */
   readonly score?: number;
   readonly reason?: string;
   readonly evidenceRefs?: readonly EvidenceRef[];
@@ -230,4 +233,12 @@ export interface EvaluationRecord {
   readonly status: SamplingStageState;
   readonly attempts: readonly EvaluationAttempt[];
   readonly output?: EvaluationAgentOutput;
+  /** Delivery of the score to the external score store (Langfuse); absent when none is configured. */
+  readonly scoreSync?: ScoreSyncState;
+}
+
+export interface ScoreSyncState {
+  readonly status: "synced" | "failed";
+  readonly at: string;
+  readonly lastError?: string;
 }

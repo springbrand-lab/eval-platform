@@ -27,6 +27,7 @@ import type {
 import { validateResourceSnapshot } from "./resources.js";
 import type { RuntimeStore } from "./store.js";
 import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
+import type { EvaluationScorePort } from "./scores.js";
 
 export type AgentLifecycleStage = "execution" | "evaluation";
 
@@ -79,6 +80,7 @@ export function reportError(onError: (error: Error) => void, error: Error): void
 export interface StageDependencies extends AgentLifecycleDependencies {
   readonly store: RuntimeStore;
   readonly createRetryController: (policy?: RetryPolicy) => RetryController;
+  readonly scores?: EvaluationScorePort;
 }
 
 export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOutput> {

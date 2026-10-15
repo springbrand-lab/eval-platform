@@ -19,6 +19,7 @@
 | `EVAL_SP_SOURCE_BRANCH`、`EVAL_SP_SOURCE_COMMIT` | 当前 Eval SP 发布的分支与完整 commit |
 | `EVAL_BUNDLE_DIR` | 共享 Bundle 目录，绝对路径 |
 | `EVAL_API_HOST`、`EVAL_API_PORT` | 可选，默认 `127.0.0.1`、`8788` |
+| `LANGFUSE_BASE_URL`、`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、`LANGFUSE_ENVIRONMENT` | 可选，与 Worker 相同；配置后才能调用 Run 的分数补同步接口 |
 
 收到 SIGINT/SIGTERM 后停止接收请求，等待活动请求结束，再关闭 Run 队列和数据库连接池。API 不持有 Agent Worker 服务凭证，也不在请求中运行 Agent。
 
@@ -31,6 +32,10 @@
 | `EVAL_SP_SERVICE_TOKEN` | Eval SP 服务凭证，作为 `X-Eval-Service-Token` 发送 |
 | `EVAL_BUNDLE_DIR` | 与 API 相同的 Bundle 目录 |
 | `EVAL_RUN_WORKER_CONCURRENCY` | 可选，每个实例同时处理的 Run 数，默认 `8` |
+| `LANGFUSE_BASE_URL`、`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY` | 可选，三者同时设置：Eval SP 上报 trace 的同一个 Langfuse 项目。设置后评委分数同步为被测 Chat 的 session 分数 |
+| `LANGFUSE_ENVIRONMENT` | 可选，必须与 Eval SP trace 的 environment 一致（eval 部署为 `dev`） |
+
+评委把结果写进 `/evaluations/<evaluationId>/result.json`，SP 在评委输出里以 `result` 返回。Worker 用 Project 的输出格式（JSON Schema）校验它，读取顶层的 `score`（数字）和 `reason`（字符串）写入评估记录；不符合时按重试策略重跑评委，最终记为失败。分数写入后再同步到 Langfuse：`sessionId` 为被测 Chat ID，名称 `judge-score`，ID 固定为 `eval-score:<evaluationId>`，重复同步只会覆盖。同步失败不影响评估结果，记录在评估的 `scoreSync` 中，可用补同步接口重试。
 
 Worker 可多实例部署、滚动升级；收到信号后停止取任务，等待进行中的 Run 结束再关闭 pg-boss 和连接池。调度、恢复、停止语义和剩余风险见[架构方案](../../docs/architecture.md#run-调度与停止)。
 

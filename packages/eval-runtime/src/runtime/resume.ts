@@ -43,6 +43,7 @@ export class RunResumer implements EvalRunResumer {
       sleep: dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
       onError: this.#onError,
       createRetryController: this.#createRetryController,
+      ...(dependencies.scores === undefined ? {} : { scores: dependencies.scores }),
     };
     this.#stop = {
       store: this.#store,

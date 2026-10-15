@@ -495,7 +495,7 @@ function makeHarness(): Harness {
     collectEvaluation: vi.fn(async () => ({
       status: "succeeded" as const,
       artifacts: [{ artifactId: "evaluation-artifact-1", kind: "evaluation", path: "/eval/result" }],
-      score: 0.9,
+      result: { score: 0.9 },
       trajectory: { trajectoryId: "trajectory-2", source: "evaluator" as const, path: "/eval/evaluation.jsonl" },
     })),
     collectAgentResources: vi.fn(async ({ handle, idempotencyKey, submissionId }) => {
@@ -2370,6 +2370,84 @@ describe("eval runtime orchestration", () => {
     await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.not.toHaveProperty("sample");
   });
 
+  it("records the Evaluator score and syncs it to the Subject session", async () => {
+    const harness = makeHarness();
+    const publish = vi.fn(async () => undefined);
+    const runtime = createAutoResumingRuntime({
+      catalog: makeCatalog(),
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+      scores: { validate: () => [], publish },
+    });
+    const execution = await runtime.start(startRequest("test-request"));
+    await waitForTerminal(runtime, execution.runId);
+    const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const snapshot = await waitForTerminal(runtime, evaluation.runId);
+
+    const sampling = await runtime.getSampling(execution.samplingIds[0]!);
+    const record = await runtime.getEvaluation(snapshot.evaluationIds[0]!);
+    expect(record).toMatchObject({
+      status: { status: "succeeded" },
+      output: { result: { score: 0.9 }, score: 0.9 },
+      scoreSync: { status: "synced" },
+    });
+    expect(publish).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      evaluationId: record!.evaluationId,
+      subjectChatId: sampling!.subjectChatId,
+      evaluatorChatId: record!.chatId,
+      score: 0.9,
+    }));
+  });
+
+  it("keeps a succeeded Evaluation when its score cannot be synced", async () => {
+    const onError = vi.fn();
+    const runtime = createAutoResumingRuntime({
+      catalog: makeCatalog(),
+      harness: makeHarness(),
+      store: makeStore(),
+      sleep: async () => undefined,
+      onError,
+      scores: { validate: () => [], publish: async () => { throw new Error("Langfuse unavailable"); } },
+    });
+    const execution = await runtime.start(startRequest("test-request"));
+    await waitForTerminal(runtime, execution.runId);
+    const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const snapshot = await waitForTerminal(runtime, evaluation.runId);
+
+    await expect(runtime.getEvaluation(snapshot.evaluationIds[0]!)).resolves.toMatchObject({
+      status: { status: "succeeded" },
+      output: { score: 0.9 },
+      scoreSync: { status: "failed", lastError: "Langfuse unavailable" },
+    });
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining("score was not synced"),
+    }));
+  });
+
+  it("fails an Evaluation whose result breaks the output schema", async () => {
+    const publish = vi.fn(async () => undefined);
+    const runtime = createAutoResumingRuntime({
+      catalog: makeCatalog(),
+      harness: makeHarness(),
+      store: makeStore(),
+      sleep: async () => undefined,
+      scores: { validate: () => ["/score must be <= 0.5"], publish },
+    });
+    const execution = await runtime.start(startRequest("test-request"));
+    await waitForTerminal(runtime, execution.runId);
+    const evaluation = await runtime.evaluate(evaluateRequest(execution.samplingIds));
+    const snapshot = await waitForTerminal(runtime, evaluation.runId);
+
+    await expect(runtime.getEvaluation(snapshot.evaluationIds[0]!)).resolves.toMatchObject({
+      status: {
+        status: "failed",
+        lastError: expect.stringContaining("does not follow the output schema: /score must be <= 0.5"),
+      },
+    });
+    expect(publish).not.toHaveBeenCalled();
+  });
+
   it("retries evaluation output collection without restarting the evaluator", async () => {
     const harness = makeHarness();
     const runtime = createAutoResumingRuntime({
@@ -2640,7 +2718,7 @@ describe("eval runtime orchestration", () => {
       return {
         status: "succeeded",
         artifacts: [{ artifactId: "evaluation-artifact-1", kind: "evaluation", path: "/eval/result" }],
-        score: 0.9,
+        result: { score: 0.9 },
         trajectory: {
           trajectoryId: "trajectory-2",
           source: "evaluator",
