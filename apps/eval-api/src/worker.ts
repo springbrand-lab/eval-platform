@@ -75,7 +75,15 @@ export function createRunJobHandler(
 
   return async (runId, attempt) => {
     if (!await store.isRunActive(runId)) return;
-    if (!await store.isRunStopRequested(runId)) await resumeUntilStopped(runId);
+    if (!await store.isRunStopRequested(runId)) {
+      try {
+        await resumeUntilStopped(runId);
+      } catch (error) {
+        // The last attempt still cleans up: a failing pass must not leave the Project busy.
+        if (!attempt.final) throw error;
+        logger.error({ runId, error: errorDiagnostics(error) }, "run_final_pass_failed");
+      }
+    }
     if (attempt.final && await store.isRunActive(runId) && !await store.isRunStopRequested(runId)) {
       logger.warn({ runId }, "run_retry_budget_exhausted");
       await store.requestRunStop(runId);
@@ -92,14 +100,15 @@ export async function startEvalRunWorker(options: EvalRunWorkerOptions): Promise
   const { boss, logger } = options;
   const handle = createRunJobHandler(options);
   const work = { batchSize: 1, localConcurrency: options.concurrency, includeMetadata: true } as const;
-  await boss.work(RUN_QUEUE, work, async ([job]: JobWithMetadata<RunJob>[]) => {
-    const { data: { runId }, retryCount, retryLimit } = job!;
-    try {
-      await handle(runId, { final: retryCount >= retryLimit });
-    } catch (error) {
-      if (error instanceof RunStillActiveError) logger.info({ runId }, "run_job_deferred");
-      else logger.error({ runId, error: errorDiagnostics(error) }, "run_job_failed");
-      throw error;
+  await boss.work(RUN_QUEUE, work, async (jobs: JobWithMetadata<RunJob>[]) => {
+    for (const { data: { runId }, retryCount, retryLimit } of jobs) {
+      try {
+        await handle(runId, { final: retryCount >= retryLimit });
+      } catch (error) {
+        if (error instanceof RunStillActiveError) logger.info({ runId }, "run_job_deferred");
+        else logger.error({ runId, error: errorDiagnostics(error) }, "run_job_failed");
+        throw error;
+      }
     }
   });
   return { close: () => boss.offWork(RUN_QUEUE, { wait: true }) };

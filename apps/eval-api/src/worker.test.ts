@@ -101,6 +101,24 @@ describe("Run job handler", () => {
     expect(store.markRunStopFinalized).toHaveBeenCalledExactlyOnceWith("run-1");
   });
 
+  it("still stops and cleans up when the final pass throws", async () => {
+    let stopRequested = false;
+    const { runtime, store, handle } = fixture({ active: [true, true, false], stopRequested: () => stopRequested });
+    runtime.resume.mockRejectedValue(new Error("Eval SP unavailable"));
+    store.requestRunStop.mockImplementation(async () => { stopRequested = true; });
+    await handle("run-1", finalRetry);
+    expect(store.requestRunStop).toHaveBeenCalledExactlyOnceWith("run-1");
+    expect(runtime.stop).toHaveBeenCalledExactlyOnceWith("run-1");
+    expect(store.markRunStopFinalized).toHaveBeenCalledExactlyOnceWith("run-1");
+  });
+
+  it("rethrows a failing pass before the final retry", async () => {
+    const { runtime, store, handle } = fixture({ active: [true] });
+    runtime.resume.mockRejectedValue(new Error("Eval SP unavailable"));
+    await expect(handle("run-1", retry)).rejects.toThrow("Eval SP unavailable");
+    expect(store.requestRunStop).not.toHaveBeenCalled();
+  });
+
   it("does not request a system stop when the final pass finishes the Run", async () => {
     const { runtime, store, handle } = fixture({ active: [true, false] });
     await handle("run-1", finalRetry);
