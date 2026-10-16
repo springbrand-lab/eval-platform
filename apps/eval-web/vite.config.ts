@@ -14,7 +14,10 @@ export default defineConfig(({ mode }) => {
       react(),
       tailwindcss(),
     ],
-    resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },
+    resolve: {
+      alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+      dedupe: ["react", "react-dom"],
+    },
     server: {
       proxy: {
         "/api": {

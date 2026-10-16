@@ -146,6 +146,8 @@ Projects have an ownerUserId and bind the deployed SP Git branch. Dataset and Da
 
 ### `apps/eval-web`
 
+Initial Material/Context resources expose a catalog detail route and a directory derived from `InitialResourceFile` paths. Resource files and observed Workspace files share one read-only preview host; format selection, limits, parsing, rendering and URL-reference-to-inventory-path resolution come only from the public `@springbrand/file-renderers` package. Eval owns authenticated byte reads scoped to one resource, cancellation and Blob lifetimes, without copying SP parsers or using private SP code/storage. Query caches original Blobs; renderer state and linked reads live only with the active selection.
+
 Web reads upload and selection bounds from authenticated `GET /api/input-limits` (`EvalInputLimits` in `eval-contracts`). The API projects its actual validation constants, including public SP Harness limits. Web does not mirror numeric limits or import server implementation files; the API remains the enforcing boundary.
 
 Future internal UI entry point. It will create Projects (Datasets, Data subsets, Sampling counts, Subject Agent and execution policy, optional evaluation plan), fill or replace the evaluation plan until it locks, preview and submit Runs over Project/Dataset/ProjectSample/Sampling selections, stop and delete, and render the four-level metrics and read-only Chat/Workspace/Trajectory views. There is no execution-plan editor.

@@ -23,12 +23,11 @@ afterEach(() => vi.unstubAllGlobals());
 
 function textBlob(content: string | Promise<string>): Blob {
   const blob = new Blob([], { type: "text/plain" });
-  Object.defineProperty(blob, "text", { value: () => Promise.resolve(content) });
+  Object.defineProperty(blob, "arrayBuffer", { value: async () => new TextEncoder().encode(await content).buffer });
   return blob;
 }
 const file = (path: string, version = 1): WorkspaceTreeNode => ({ path, name: path.split("/").at(-1)!, type: "file", updatedAt: version });
 const button = (name: string) => [...document.querySelectorAll("button")].find((node) => node.textContent === name)!;
-async function settle() { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); }); }
 
 async function mount(initial: readonly WorkspaceTreeNode[], running = false) {
   let update!: (tree: readonly WorkspaceTreeNode[]) => void;
@@ -45,7 +44,7 @@ async function mount(initial: readonly WorkspaceTreeNode[], running = false) {
   };
 }
 
-it("uses the current tree version and cancels a slow old text decode before it can replace the preview", async () => {
+it("uses the current tree version and discards a slow old text decode before it can replace the preview", async () => {
   let finishOld!: (text: string) => void;
   const oldBlob = textBlob(new Promise((resolve) => { finishOld = resolve; }));
   const latestBlob = textBlob("LATEST CONTENT");
@@ -53,25 +52,24 @@ it("uses the current tree version and cancels a slow old text decode before it c
   const view = await mount([file("/result.txt")]);
   try {
     await click(button("result.txt"));
-    expect(getFile).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(createUrl).toHaveBeenCalledWith(oldBlob));
     await view.update([file("/result.txt", 2)]);
-    await settle();
+    await vi.waitFor(() => expect(document.querySelector("pre")?.textContent).toBe("LATEST CONTENT"));
     expect(getFile).toHaveBeenCalledTimes(2);
-    expect((getFile.mock.calls[0]![4] as AbortSignal).aborted).toBe(true);
+    await act(async () => finishOld("STALE CONTENT"));
     expect(document.querySelector("pre")?.textContent).toBe("LATEST CONTENT");
-    await act(async () => finishOld("STALE CONTENT")); await settle();
-    expect(document.querySelector("pre")?.textContent).toBe("LATEST CONTENT");
-    expect(createUrl).toHaveBeenCalledExactlyOnceWith(latestBlob);
+    expect(createUrl).toHaveBeenCalledWith(latestBlob);
   } finally { await view.cleanup(); }
-  expect(revokeUrl).toHaveBeenCalledExactlyOnceWith("blob:preview-1");
+  expect(revokeUrl).toHaveBeenCalledWith("blob:preview-1");
+  expect(revokeUrl).toHaveBeenCalledWith("blob:preview-2");
 });
 
 it("drops a removed selection and releases its download URL when the directory tree changes", async () => {
   getFile.mockResolvedValue(textBlob("CURRENT"));
   const view = await mount([{ name: "nested", path: "/nested", type: "directory", children: [file("/nested/result.txt")] }]);
   try {
-    await click(button("result.txt")); await settle();
-    expect(document.querySelector("pre")?.textContent).toBe("CURRENT");
+    await click(button("result.txt"));
+    await vi.waitFor(() => expect(document.querySelector("pre")?.textContent).toBe("CURRENT"));
     const download = document.querySelector("a[download]")!;
     expect(download.getAttribute("download")).toBe("result.txt");
     expect(download.querySelector("button")).toBeNull();
@@ -83,17 +81,17 @@ it("drops a removed selection and releases its download URL when the directory t
   } finally { await view.cleanup(); }
 });
 
-it("reports decode failures through the file Query and retries the complete read", async () => {
+it("reports parse read failures, preserves original download and retries the complete read", async () => {
   const unreadable = new Blob([], { type: "text/plain" });
-  Object.defineProperty(unreadable, "text", { value: async () => { throw new Error("文本读取失败"); } });
+  Object.defineProperty(unreadable, "arrayBuffer", { value: async () => { throw new Error("文本读取失败"); } });
   getFile.mockResolvedValueOnce(unreadable).mockResolvedValueOnce(textBlob("RECOVERED"));
   const view = await mount([file("/result.txt")]);
   try {
-    await click(button("result.txt")); await settle();
-    expect(document.body.textContent).toContain("文本读取失败");
-    expect(createUrl).not.toHaveBeenCalled();
-    await click(button("重试")); await settle();
-    expect(document.querySelector("pre")?.textContent).toBe("RECOVERED");
+    await click(button("result.txt"));
+    await vi.waitFor(() => expect(document.body.textContent).toContain("文本读取失败"));
+    expect(document.querySelector("a[download]")).not.toBeNull();
+    await click(button("重试"));
+    await vi.waitFor(() => expect(document.querySelector("pre")?.textContent).toBe("RECOVERED"));
     expect(getFile).toHaveBeenCalledTimes(2);
   } finally { await view.cleanup(); }
 });
@@ -102,25 +100,30 @@ it("keeps the selected HTML view on new content and keeps the preview sandbox re
   getFile.mockResolvedValueOnce(textBlob("<h1>old</h1>")).mockResolvedValueOnce(textBlob("<h1>latest</h1>"));
   const view = await mount([file("/index.html")]);
   try {
-    await click(button("index.html")); await settle();
-    await click(button("预览页面"));
-    expect(document.querySelector("iframe")?.getAttribute("sandbox")).toBe("");
-    expect(document.querySelector("iframe")?.getAttribute("srcdoc")).toBe("<h1>old</h1>");
-    await view.update([file("/index.html", 2)]); await settle();
-    expect(document.querySelector("iframe")?.getAttribute("srcdoc")).toBe("<h1>latest</h1>");
-    expect(document.querySelector("iframe")?.getAttribute("sandbox")).toBe("");
+    await click(button("index.html"));
+    await vi.waitFor(() => expect(button("Source")).toBeDefined());
+    await click(button("Source"));
+    expect(document.querySelector("pre")?.textContent).toBe("<h1>old</h1>");
+    await view.update([file("/index.html", 2)]);
+    await vi.waitFor(() => expect(document.querySelector("pre")?.textContent).toBe("<h1>latest</h1>"));
+    await click(button("Preview"));
+    await vi.waitFor(() => expect(document.querySelector("iframe")?.getAttribute("srcdoc")).toContain("<h1>latest</h1>"));
+    expect(document.querySelector("iframe")?.getAttribute("sandbox")).toBe("allow-scripts");
+    expect(document.querySelector("iframe")?.getAttribute("sandbox")).not.toContain("allow-same-origin");
     expect(revokeUrl).toHaveBeenCalledWith("blob:preview-1");
   } finally { await view.cleanup(); }
   expect(revokeUrl).toHaveBeenCalledWith("blob:preview-2");
 });
 
 it("refreshes a running file even when optional mtime and size cannot identify changed content", async () => {
-  getFile.mockResolvedValueOnce(textBlob("OLD")).mockResolvedValue(textBlob("NEW"));
+  let changed = false;
+  getFile.mockImplementation(async () => textBlob(changed ? "NEW" : "OLD"));
   const node: WorkspaceTreeNode = { path: "/result.txt", name: "result.txt", type: "file", size: 3 };
   const view = await mount([node], true);
   try {
-    await click(button("result.txt")); await settle();
-    expect(document.querySelector("pre")?.textContent).toBe("OLD");
+    await click(button("result.txt"));
+    await vi.waitFor(() => expect(document.querySelector("pre")?.textContent).toBe("OLD"));
+    changed = true;
     await vi.waitFor(() => expect(document.querySelector("pre")?.textContent).toBe("NEW"));
     expect(getFile.mock.calls.length).toBeGreaterThan(1);
   } finally { await view.cleanup(); }

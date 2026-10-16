@@ -27,12 +27,13 @@ import { Route as AuthenticatedProjectsProjectIdIndexRouteImport } from './route
 import { Route as AuthenticatedProjectsProjectIdEvaluationPlanRouteImport } from './routes/_authenticated/projects/$projectId/evaluation-plan'
 import { Route as AuthenticatedProjectsProjectIdOutputSchemaRouteImport } from './routes/_authenticated/projects/$projectId/output-schema'
 import { Route as AuthenticatedResourcesKindIndexRouteImport } from './routes/_authenticated/resources/$kind/index'
-import { Route as AuthenticatedResourcesKindBundleIdRouteImport } from './routes/_authenticated/resources/$kind/$bundleId'
 import { Route as AuthenticatedDatasetsDatasetIdDataNewRouteImport } from './routes/_authenticated/datasets/$datasetId/data/new'
 import { Route as AuthenticatedProjectsProjectIdDatasetsDatasetIdRouteImport } from './routes/_authenticated/projects/$projectId/datasets/$datasetId'
 import { Route as AuthenticatedProjectsProjectIdRunsRunIdRouteImport } from './routes/_authenticated/projects/$projectId/runs/$runId'
 import { Route as AuthenticatedProjectsProjectIdRunsNewRouteImport } from './routes/_authenticated/projects/$projectId/runs/new'
 import { Route as AuthenticatedProjectsProjectIdSamplesProjectSampleIdRouteImport } from './routes/_authenticated/projects/$projectId/samples/$projectSampleId'
+import { Route as AuthenticatedResourcesKindBundleIdIndexRouteImport } from './routes/_authenticated/resources/$kind/$bundleId/index'
+import { Route as AuthenticatedResourcesKindBundleIdResourceIdRouteImport } from './routes/_authenticated/resources/$kind/$bundleId/$resourceId'
 import { Route as AuthenticatedProjectsProjectIdEvaluationsEvaluationIdObserveRouteImport } from './routes/_authenticated/projects/$projectId/evaluations/$evaluationId/observe'
 import { Route as AuthenticatedProjectsProjectIdSamplingsSamplingIdIndexRouteImport } from './routes/_authenticated/projects/$projectId/samplings/$samplingId/index'
 import { Route as AuthenticatedProjectsProjectIdSamplingsSamplingIdObserveRouteImport } from './routes/_authenticated/projects/$projectId/samplings/$samplingId/observe'
@@ -138,12 +139,6 @@ const AuthenticatedResourcesKindIndexRoute =
     path: '/resources/$kind/',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
-const AuthenticatedResourcesKindBundleIdRoute =
-  AuthenticatedResourcesKindBundleIdRouteImport.update({
-    id: '/resources/$kind/$bundleId',
-    path: '/resources/$kind/$bundleId',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
 const AuthenticatedDatasetsDatasetIdDataNewRoute =
   AuthenticatedDatasetsDatasetIdDataNewRouteImport.update({
     id: '/datasets/$datasetId/data/new',
@@ -172,6 +167,18 @@ const AuthenticatedProjectsProjectIdSamplesProjectSampleIdRoute =
   AuthenticatedProjectsProjectIdSamplesProjectSampleIdRouteImport.update({
     id: '/projects/$projectId/samples/$projectSampleId',
     path: '/projects/$projectId/samples/$projectSampleId',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedResourcesKindBundleIdIndexRoute =
+  AuthenticatedResourcesKindBundleIdIndexRouteImport.update({
+    id: '/resources/$kind/$bundleId/',
+    path: '/resources/$kind/$bundleId/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedResourcesKindBundleIdResourceIdRoute =
+  AuthenticatedResourcesKindBundleIdResourceIdRouteImport.update({
+    id: '/resources/$kind/$bundleId/$resourceId',
+    path: '/resources/$kind/$bundleId/$resourceId',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
 const AuthenticatedProjectsProjectIdEvaluationsEvaluationIdObserveRoute =
@@ -210,7 +217,6 @@ export interface FileRoutesByFullPath {
   '/projects/': typeof AuthenticatedProjectsIndexRoute
   '/projects/$projectId/evaluation-plan': typeof AuthenticatedProjectsProjectIdEvaluationPlanRoute
   '/projects/$projectId/output-schema': typeof AuthenticatedProjectsProjectIdOutputSchemaRoute
-  '/resources/$kind/$bundleId': typeof AuthenticatedResourcesKindBundleIdRoute
   '/datasets/$datasetId/': typeof AuthenticatedDatasetsDatasetIdIndexRoute
   '/projects/$projectId/': typeof AuthenticatedProjectsProjectIdIndexRoute
   '/resources/$kind/': typeof AuthenticatedResourcesKindIndexRoute
@@ -219,6 +225,8 @@ export interface FileRoutesByFullPath {
   '/projects/$projectId/runs/$runId': typeof AuthenticatedProjectsProjectIdRunsRunIdRoute
   '/projects/$projectId/runs/new': typeof AuthenticatedProjectsProjectIdRunsNewRoute
   '/projects/$projectId/samples/$projectSampleId': typeof AuthenticatedProjectsProjectIdSamplesProjectSampleIdRoute
+  '/resources/$kind/$bundleId/$resourceId': typeof AuthenticatedResourcesKindBundleIdResourceIdRoute
+  '/resources/$kind/$bundleId/': typeof AuthenticatedResourcesKindBundleIdIndexRoute
   '/projects/$projectId/evaluations/$evaluationId/observe': typeof AuthenticatedProjectsProjectIdEvaluationsEvaluationIdObserveRoute
   '/projects/$projectId/samplings/$samplingId/observe': typeof AuthenticatedProjectsProjectIdSamplingsSamplingIdObserveRoute
   '/projects/$projectId/samplings/$samplingId/': typeof AuthenticatedProjectsProjectIdSamplingsSamplingIdIndexRoute
@@ -238,7 +246,6 @@ export interface FileRoutesByTo {
   '/projects': typeof AuthenticatedProjectsIndexRoute
   '/projects/$projectId/evaluation-plan': typeof AuthenticatedProjectsProjectIdEvaluationPlanRoute
   '/projects/$projectId/output-schema': typeof AuthenticatedProjectsProjectIdOutputSchemaRoute
-  '/resources/$kind/$bundleId': typeof AuthenticatedResourcesKindBundleIdRoute
   '/datasets/$datasetId': typeof AuthenticatedDatasetsDatasetIdIndexRoute
   '/projects/$projectId': typeof AuthenticatedProjectsProjectIdIndexRoute
   '/resources/$kind': typeof AuthenticatedResourcesKindIndexRoute
@@ -247,6 +254,8 @@ export interface FileRoutesByTo {
   '/projects/$projectId/runs/$runId': typeof AuthenticatedProjectsProjectIdRunsRunIdRoute
   '/projects/$projectId/runs/new': typeof AuthenticatedProjectsProjectIdRunsNewRoute
   '/projects/$projectId/samples/$projectSampleId': typeof AuthenticatedProjectsProjectIdSamplesProjectSampleIdRoute
+  '/resources/$kind/$bundleId/$resourceId': typeof AuthenticatedResourcesKindBundleIdResourceIdRoute
+  '/resources/$kind/$bundleId': typeof AuthenticatedResourcesKindBundleIdIndexRoute
   '/projects/$projectId/evaluations/$evaluationId/observe': typeof AuthenticatedProjectsProjectIdEvaluationsEvaluationIdObserveRoute
   '/projects/$projectId/samplings/$samplingId/observe': typeof AuthenticatedProjectsProjectIdSamplingsSamplingIdObserveRoute
   '/projects/$projectId/samplings/$samplingId': typeof AuthenticatedProjectsProjectIdSamplingsSamplingIdIndexRoute
@@ -268,7 +277,6 @@ export interface FileRoutesById {
   '/_authenticated/projects/': typeof AuthenticatedProjectsIndexRoute
   '/_authenticated/projects/$projectId/evaluation-plan': typeof AuthenticatedProjectsProjectIdEvaluationPlanRoute
   '/_authenticated/projects/$projectId/output-schema': typeof AuthenticatedProjectsProjectIdOutputSchemaRoute
-  '/_authenticated/resources/$kind/$bundleId': typeof AuthenticatedResourcesKindBundleIdRoute
   '/_authenticated/datasets/$datasetId/': typeof AuthenticatedDatasetsDatasetIdIndexRoute
   '/_authenticated/projects/$projectId/': typeof AuthenticatedProjectsProjectIdIndexRoute
   '/_authenticated/resources/$kind/': typeof AuthenticatedResourcesKindIndexRoute
@@ -277,6 +285,8 @@ export interface FileRoutesById {
   '/_authenticated/projects/$projectId/runs/$runId': typeof AuthenticatedProjectsProjectIdRunsRunIdRoute
   '/_authenticated/projects/$projectId/runs/new': typeof AuthenticatedProjectsProjectIdRunsNewRoute
   '/_authenticated/projects/$projectId/samples/$projectSampleId': typeof AuthenticatedProjectsProjectIdSamplesProjectSampleIdRoute
+  '/_authenticated/resources/$kind/$bundleId/$resourceId': typeof AuthenticatedResourcesKindBundleIdResourceIdRoute
+  '/_authenticated/resources/$kind/$bundleId/': typeof AuthenticatedResourcesKindBundleIdIndexRoute
   '/_authenticated/projects/$projectId/evaluations/$evaluationId/observe': typeof AuthenticatedProjectsProjectIdEvaluationsEvaluationIdObserveRoute
   '/_authenticated/projects/$projectId/samplings/$samplingId/observe': typeof AuthenticatedProjectsProjectIdSamplingsSamplingIdObserveRoute
   '/_authenticated/projects/$projectId/samplings/$samplingId/': typeof AuthenticatedProjectsProjectIdSamplingsSamplingIdIndexRoute
@@ -298,7 +308,6 @@ export interface FileRouteTypes {
     | '/projects/'
     | '/projects/$projectId/evaluation-plan'
     | '/projects/$projectId/output-schema'
-    | '/resources/$kind/$bundleId'
     | '/datasets/$datasetId/'
     | '/projects/$projectId/'
     | '/resources/$kind/'
@@ -307,6 +316,8 @@ export interface FileRouteTypes {
     | '/projects/$projectId/runs/$runId'
     | '/projects/$projectId/runs/new'
     | '/projects/$projectId/samples/$projectSampleId'
+    | '/resources/$kind/$bundleId/$resourceId'
+    | '/resources/$kind/$bundleId/'
     | '/projects/$projectId/evaluations/$evaluationId/observe'
     | '/projects/$projectId/samplings/$samplingId/observe'
     | '/projects/$projectId/samplings/$samplingId/'
@@ -326,7 +337,6 @@ export interface FileRouteTypes {
     | '/projects'
     | '/projects/$projectId/evaluation-plan'
     | '/projects/$projectId/output-schema'
-    | '/resources/$kind/$bundleId'
     | '/datasets/$datasetId'
     | '/projects/$projectId'
     | '/resources/$kind'
@@ -335,6 +345,8 @@ export interface FileRouteTypes {
     | '/projects/$projectId/runs/$runId'
     | '/projects/$projectId/runs/new'
     | '/projects/$projectId/samples/$projectSampleId'
+    | '/resources/$kind/$bundleId/$resourceId'
+    | '/resources/$kind/$bundleId'
     | '/projects/$projectId/evaluations/$evaluationId/observe'
     | '/projects/$projectId/samplings/$samplingId/observe'
     | '/projects/$projectId/samplings/$samplingId'
@@ -355,7 +367,6 @@ export interface FileRouteTypes {
     | '/_authenticated/projects/'
     | '/_authenticated/projects/$projectId/evaluation-plan'
     | '/_authenticated/projects/$projectId/output-schema'
-    | '/_authenticated/resources/$kind/$bundleId'
     | '/_authenticated/datasets/$datasetId/'
     | '/_authenticated/projects/$projectId/'
     | '/_authenticated/resources/$kind/'
@@ -364,6 +375,8 @@ export interface FileRouteTypes {
     | '/_authenticated/projects/$projectId/runs/$runId'
     | '/_authenticated/projects/$projectId/runs/new'
     | '/_authenticated/projects/$projectId/samples/$projectSampleId'
+    | '/_authenticated/resources/$kind/$bundleId/$resourceId'
+    | '/_authenticated/resources/$kind/$bundleId/'
     | '/_authenticated/projects/$projectId/evaluations/$evaluationId/observe'
     | '/_authenticated/projects/$projectId/samplings/$samplingId/observe'
     | '/_authenticated/projects/$projectId/samplings/$samplingId/'
@@ -501,13 +514,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedResourcesKindIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
-    '/_authenticated/resources/$kind/$bundleId': {
-      id: '/_authenticated/resources/$kind/$bundleId'
-      path: '/resources/$kind/$bundleId'
-      fullPath: '/resources/$kind/$bundleId'
-      preLoaderRoute: typeof AuthenticatedResourcesKindBundleIdRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
     '/_authenticated/datasets/$datasetId/data/new': {
       id: '/_authenticated/datasets/$datasetId/data/new'
       path: '/datasets/$datasetId/data/new'
@@ -541,6 +547,20 @@ declare module '@tanstack/react-router' {
       path: '/projects/$projectId/samples/$projectSampleId'
       fullPath: '/projects/$projectId/samples/$projectSampleId'
       preLoaderRoute: typeof AuthenticatedProjectsProjectIdSamplesProjectSampleIdRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/resources/$kind/$bundleId/': {
+      id: '/_authenticated/resources/$kind/$bundleId/'
+      path: '/resources/$kind/$bundleId'
+      fullPath: '/resources/$kind/$bundleId/'
+      preLoaderRoute: typeof AuthenticatedResourcesKindBundleIdIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/resources/$kind/$bundleId/$resourceId': {
+      id: '/_authenticated/resources/$kind/$bundleId/$resourceId'
+      path: '/resources/$kind/$bundleId/$resourceId'
+      fullPath: '/resources/$kind/$bundleId/$resourceId'
+      preLoaderRoute: typeof AuthenticatedResourcesKindBundleIdResourceIdRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/projects/$projectId/evaluations/$evaluationId/observe': {
@@ -582,7 +602,6 @@ interface AuthenticatedRouteChildren {
   AuthenticatedProjectsIndexRoute: typeof AuthenticatedProjectsIndexRoute
   AuthenticatedProjectsProjectIdEvaluationPlanRoute: typeof AuthenticatedProjectsProjectIdEvaluationPlanRoute
   AuthenticatedProjectsProjectIdOutputSchemaRoute: typeof AuthenticatedProjectsProjectIdOutputSchemaRoute
-  AuthenticatedResourcesKindBundleIdRoute: typeof AuthenticatedResourcesKindBundleIdRoute
   AuthenticatedDatasetsDatasetIdIndexRoute: typeof AuthenticatedDatasetsDatasetIdIndexRoute
   AuthenticatedProjectsProjectIdIndexRoute: typeof AuthenticatedProjectsProjectIdIndexRoute
   AuthenticatedResourcesKindIndexRoute: typeof AuthenticatedResourcesKindIndexRoute
@@ -591,6 +610,8 @@ interface AuthenticatedRouteChildren {
   AuthenticatedProjectsProjectIdRunsRunIdRoute: typeof AuthenticatedProjectsProjectIdRunsRunIdRoute
   AuthenticatedProjectsProjectIdRunsNewRoute: typeof AuthenticatedProjectsProjectIdRunsNewRoute
   AuthenticatedProjectsProjectIdSamplesProjectSampleIdRoute: typeof AuthenticatedProjectsProjectIdSamplesProjectSampleIdRoute
+  AuthenticatedResourcesKindBundleIdResourceIdRoute: typeof AuthenticatedResourcesKindBundleIdResourceIdRoute
+  AuthenticatedResourcesKindBundleIdIndexRoute: typeof AuthenticatedResourcesKindBundleIdIndexRoute
   AuthenticatedProjectsProjectIdEvaluationsEvaluationIdObserveRoute: typeof AuthenticatedProjectsProjectIdEvaluationsEvaluationIdObserveRoute
   AuthenticatedProjectsProjectIdSamplingsSamplingIdObserveRoute: typeof AuthenticatedProjectsProjectIdSamplingsSamplingIdObserveRoute
   AuthenticatedProjectsProjectIdSamplingsSamplingIdIndexRoute: typeof AuthenticatedProjectsProjectIdSamplingsSamplingIdIndexRoute
@@ -614,8 +635,6 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
     AuthenticatedProjectsProjectIdEvaluationPlanRoute,
   AuthenticatedProjectsProjectIdOutputSchemaRoute:
     AuthenticatedProjectsProjectIdOutputSchemaRoute,
-  AuthenticatedResourcesKindBundleIdRoute:
-    AuthenticatedResourcesKindBundleIdRoute,
   AuthenticatedDatasetsDatasetIdIndexRoute:
     AuthenticatedDatasetsDatasetIdIndexRoute,
   AuthenticatedProjectsProjectIdIndexRoute:
@@ -631,6 +650,10 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
     AuthenticatedProjectsProjectIdRunsNewRoute,
   AuthenticatedProjectsProjectIdSamplesProjectSampleIdRoute:
     AuthenticatedProjectsProjectIdSamplesProjectSampleIdRoute,
+  AuthenticatedResourcesKindBundleIdResourceIdRoute:
+    AuthenticatedResourcesKindBundleIdResourceIdRoute,
+  AuthenticatedResourcesKindBundleIdIndexRoute:
+    AuthenticatedResourcesKindBundleIdIndexRoute,
   AuthenticatedProjectsProjectIdEvaluationsEvaluationIdObserveRoute:
     AuthenticatedProjectsProjectIdEvaluationsEvaluationIdObserveRoute,
   AuthenticatedProjectsProjectIdSamplingsSamplingIdObserveRoute:

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { Pencil, Plus, Trash2, X } from "lucide-react";
 import { ActionMenu } from "@/components/ui/menu";
 import { useId, useState } from "react";
@@ -192,7 +192,8 @@ export function BundleDetailPage({ kind, bundleId }: { kind: ResourceKind; bundl
       {items.isPending ? <LoadingBlock /> : items.error ? <ErrorBlock error={items.error} /> : <DataTable<ResourceRecord>
         rows={items.data} rowKey={idOf} empty={<EmptyState title={`还没有${label}`} />}
         columns={[
-          { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span> },
+          { key: "name", header: "名称", cell: (row) => <Link to="/resources/$kind/$bundleId/$resourceId"
+            params={{ kind, bundleId, resourceId: idOf(row) }} className="link font-semibold">{row.name}</Link> },
           { key: "description", header: "描述", cell: (row) => row.description },
           { key: "format", header: "格式", cell: (row) => "format" in row ? row.format.toUpperCase() : "素材文件" },
           { key: "id", header: "ID", cell: (row) => <CopyId value={idOf(row)} /> },

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildDataInput } from "./datasets/data-editor-page";
 import { eventSummary } from "./observation/trajectory-tab";
-import { isTextFile } from "./observation/workspace-tab";
 import { checkMaterialFiles } from "./resources/bundle-detail-page";
 import { buildSelector } from "./runs/new-run-page";
 import { normalizePaths } from "@/components/ui/file-dropzone";
@@ -61,12 +60,6 @@ describe("Material upload", () => {
 });
 
 describe("Observation helpers", () => {
-  it("recognizes previewable text files", () => {
-    expect(isTextFile("/index.html", "")).toBe(true);
-    expect(isTextFile("/data.bin", "application/json")).toBe(true);
-    expect(isTextFile("/logo.png", "image/png")).toBe(false);
-  });
-
   it("summarizes a trajectory event", () => {
     expect(eventSummary({ eventId: "e", occurredAt: 0, type: "tool.started", payload: { toolName: "write_file" } })).toBe("工具 write_file");
     expect(eventSummary({ eventId: "e", occurredAt: 0, type: "x" })).toBe("");

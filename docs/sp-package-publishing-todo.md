@@ -8,7 +8,7 @@
 - Material 数量、单文件/初始化总量、上下文字符数等真实校验上限及相关公开 helper；Eval API 直接引用，Web 经 `GET /api/input-limits` 获取。
 - 原始 Subject 输入、Artifact、Trajectory 证据路径及 Schema 固定路径 helper。
 - 由 eval-harness 公开的 ZIP 工具：`inspectStrictZip`、`StrictZipError`、`StrictZipEntry`、`StrictZipEntryLimit`、`StrictZipErrorCode`。Eval API 不直接依赖 SP 的 utils 实现。
-- 发布 `@springbrand/file-renderers` 的公开文件预览入口：`contracts`、`format`、`preview-content`、`preview-host`、`preview-surface`。Eval Web 负责目录、鉴权读取、取消请求和资源内相对路径解析，文件格式解析与只读渲染由共享包负责。
+- 发布 `@springbrand/file-renderers` 的公开文件预览入口：`contracts`、`format`、`preview-content`、`preview-host`、`preview-surface`、`preview-error-boundary`、`resource-path`。Eval Web 负责目录、鉴权读取和取消请求，资源链接解析、文件格式解析与只读渲染由共享包负责。`reference` 统一使用原始 URL 引用，由 `rendererResourcePath` 转为精确文件路径；HTML 与 Markdown 不保留两套路径语义。
 - `file-renderers` 的 `@silurus/ooxml` 当前引用仓库内 `vendor/*.tgz`；发布包必须包含可安装的依赖，不能让消费者依赖 SP 本地文件。`workspace:*` 依赖也必须在发布时解析到真实公开版本。
 
 ## 升级与交付
@@ -25,10 +25,10 @@
 
 已完成素材、上下文共用的只读文件清单与精确路径内容接口，以及 Web SDK。使用已有 Bundle 内容，不复制文件、目录索引或预览状态。
 
-`file-renderers` 发布后继续完成以下页面工作，当前不以临时自制预览代替共享实现：
+按用户要求先本地连接 sibling 的 `file-renderers` 公开包，完成下面的页面和本地联调，并在 SP 尚未发包时先推送当前开发分支。分支暂保留本地 link 以记录真实联调依赖；它不能用于远端干净安装或发布。SP 正式发包后必须替换为精确 npm 版本并更新锁文件，再验证 CI。SP 本地公共包中的路径契约修正也须纳入该次发包：
 
 1. 素材、上下文名称使用链接进入 `/resources/$kind/$bundleId/$resourceId`；目录页的编辑、删除仍是独立操作。
 2. 左侧由文件清单生成目录树，右侧展示选中文件；上下文按现有规范文件展示 JSON/JSONL。目录来自导入后的资源路径，不声称重建原 ZIP。
-3. 通过公开 `parseFile`、`FileRendererPreview` 等入口进行只读预览；同一资源内的 HTML/CSS/图片等相对引用由宿主通过同一已鉴权内容接口解析。链接不能越过资源根目录；不读取 SP 私有实现或存储。
+3. 通过公开 `parseFile`、`FileRendererPreview` 等入口进行只读预览；同一资源内的 HTML/CSS/图片等相对引用由共享包解析路径，宿主通过同一已鉴权内容接口读取。链接不能越过资源根目录；不读取 SP 私有实现或存储。
 4. 文件请求、解析、相对资源读取、Blob URL 共用当前选择的取消生命周期；切换资源、文件或卸载时清理，旧响应不能回填。保留源码切换与原文件下载，预览失败可重试。
 5. 使用真实发布版本和锁文件验证干净安装，完成素材与上下文的目录点击、图片/文本/HTML 相对资源、JSON/JSONL、失败重试及切换取消的测试和浏览器验收，再标记页面交付。
