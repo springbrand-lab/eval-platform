@@ -20,6 +20,7 @@ import { Page, PageHeader } from "@/components/layout/page";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { ErrorBlock, LoadingBlock } from "@/components/ui/feedback";
+import { AgentMcpServers } from "./agent-mcp-servers";
 
 const FROZEN_PREFIX = "eval-frozen-";
 type SaveRequest = { kind: "create"; input: CreateUserAgentConfigInput }
@@ -126,13 +127,14 @@ function AgentForm({ initial, template, userId, onSaved }: {
     },
     onBack: () => { if (!save.isPending) { allowNavigation.current = true; void navigate({ to: "/agents" }); } },
   };
-  return <>
+  return <div className="agent-editor-layout">
     <AgentEditorProvider client={agentEditorClient} connectorReturnTo={base ? `/agents/${encodeURIComponent(base.id)}` : "/agents/new"}>
       {base ? <AgentEditor mode="edit" {...common} agent={base} dirty={dirty}
         checkingDelete={deletionCheck.isPending} deleteBlocker={deleteBlocker}
         deleteCheckError={deletionCheck.error ? deletionErrorFeedback(deletionCheck.error).message : null}
         onDelete={() => { if (!readOnly) deletionCheck.mutate(); }} /> : <AgentEditor mode="create" {...common} />}
     </AgentEditorProvider>
+    <AgentMcpServers selections={draft.setting.mcpServers} />
     <ConfirmDialog open={deleting} onClose={() => { if (!remove.isPending) setDeleting(false); }}
       onConfirm={() => remove.mutate()} loading={remove.isPending} danger title="删除 Agent 配置"
       description={<>{remove.error ? <span role="alert">{deletionErrorFeedback(remove.error).message}</span> : "已有项目的执行配置不受影响。"}</>} confirmLabel="删除" />
@@ -140,7 +142,7 @@ function AgentForm({ initial, template, userId, onSaved }: {
       onConfirm={() => { if (!save.isPending && blocker.status === "blocked") { allowNavigation.current = true; blocker.proceed(); } }}
       loading={save.isPending} title={save.isPending ? "正在保存 Agent" : "放弃未保存的修改？"}
       description={save.isPending ? "请等待保存完成。" : "离开后，本次未提交的修改会丢弃。"} confirmLabel="放弃修改" />
-  </>;
+  </div>;
 }
 
 export function AgentEditorPage({ id }: { id?: string }) {
@@ -151,9 +153,9 @@ export function AgentEditorPage({ id }: { id?: string }) {
   const source = id ? config : template;
   const failed = me.error ? me : source.error ? source : null;
   const ready = !!me.data && (id ? !!config.data : !!template.data);
-  return <Page narrow>
-    <PageHeader title={id ? config.data?.name ?? "Agent" : "新建 Agent"} crumbs={[{ label: "Agent", to: "/agents" }]}
-      description="先定义行为与模型，再按任务选择能力和参考资料。保存后可在项目的执行或评估计划中使用。" />
+  return <Page>
+    <PageHeader compact title={id ? config.data?.name ?? "Agent" : "新建 Agent"} crumbs={[{ label: "Agent 管理", to: "/agents" }]}
+      description="配置行为、模型与可用能力。修改后保存，供项目执行或评估使用。" />
     {failed && <ErrorBlock error={failed.error} onRetry={() => void failed.refetch()} />}
     {ready ? <AgentForm key={id ?? "new"} initial={config.data} template={template.data} userId={me.data!.id}
       onSaved={(saved) => { if (!id) void navigate({ to: "/agents/$id", params: { id: saved.id } }); }} /> : !failed && <LoadingBlock />}

@@ -14,7 +14,8 @@ import { COST_FIELDS } from "./metric-labels";
 import { ResourceDistributionPanel } from "./resource-distribution";
 import { StatisticsTable } from "./statistics-table";
 
-function MetricDisclosure({ title, description, children }: { title: string; description: string; children: ReactNode }) {
+function MetricDisclosure({ title, description, children, expanded = false }: { title: string; description: string; children: ReactNode; expanded?: boolean }) {
+  if (expanded) return <section className="min-w-0 space-y-2 border-t border-border pt-3"><h3 className="text-xs font-semibold">{title}</h3><p className="text-xs text-text-muted">{description}</p>{children}</section>;
   return <Collapsible className="rounded-lg border border-border">
     <CollapsibleTrigger asChild>
       <Button type="button" variant="ghost" className="group h-auto w-full justify-between gap-4 whitespace-normal rounded-lg px-4 py-3 text-left">
@@ -46,7 +47,7 @@ function OperationsTable({ label, caption, rows }: { label: string; caption: str
   </div>;
 }
 
-function TrajectoryMetrics({ trajectory, modelRequests }: Pick<ResourceStatistics, "trajectory" | "modelRequests">) {
+function TrajectoryMetrics({ trajectory, modelRequests, report = false }: Pick<ResourceStatistics, "trajectory" | "modelRequests"> & { report?: boolean }) {
   const bytes = (value: number) => value < 1024 ? `${formatStatistic(value)} B` : formatBytes(value);
   const operations = [
     { label: "轨迹轮数", value: trajectory.turns },
@@ -56,7 +57,7 @@ function TrajectoryMetrics({ trajectory, modelRequests }: Pick<ResourceStatistic
   return <section aria-label="轨迹统计" className="flex min-w-0 flex-col gap-4">
     <div><h3 className="text-sm font-semibold text-text-strong">轨迹与调用</h3><p className="mt-1 text-xs text-text-muted">先看操作结果，耗时与工具大小按需展开。</p></div>
     <OperationsTable label="轨迹操作" caption="轮数按 Turn 计数，工具和模型按调用操作计数。" rows={operations} />
-    <MetricDisclosure title="操作耗时" description="按单次操作查看累计、典型耗时和范围。累计不代表并行运行的墙钟时间。">
+    <MetricDisclosure expanded={report} title="操作耗时" description="按单次操作查看累计、典型耗时和范围。累计不代表并行运行的墙钟时间。">
       <StatisticsTable label="操作耗时分布" total description="观察单位：每次轮次、工具或模型操作；各项分别保留有效 N 和缺失。" rows={operations.map(({ label, value }) => ({
         label, unit: "毫秒", summary: value.durationMs, format: formatDuration,
       }))} />
@@ -64,7 +65,7 @@ function TrajectoryMetrics({ trajectory, modelRequests }: Pick<ResourceStatistic
     <div className="mt-2"><h3 className="mb-3 text-sm font-semibold text-text-strong">工具类型</h3>
       <OperationsTable label="工具类型统计" caption="每种工具的累计调用结果；未知不计为成功或失败。" rows={trajectory.byTool.map((tool) => ({ label: tool.toolName ?? "未识别工具", value: tool }))} />
     </div>
-    {trajectory.byTool.length > 0 && <MetricDisclosure title="工具长度与耗时" description="按单次工具调用统计。调用和返回长度使用 UTF-8 字节，不换算为 Token。">
+    {trajectory.byTool.length > 0 && <MetricDisclosure expanded={report} title="工具长度与耗时" description="按单次工具调用统计。调用和返回长度使用 UTF-8 字节，不换算为 Token。">
       <StatisticsTable label="工具长度与耗时分布" total description="累计与单次调用分布分列展示；未获得或脱敏正文不按零计数。" rows={trajectory.byTool.flatMap((tool) => [
         { label: `${tool.toolName ?? "未识别工具"} · 调用长度`, unit: "字节", summary: tool.inputLength, format: bytes },
         { label: `${tool.toolName ?? "未识别工具"} · 返回长度`, unit: "字节", summary: tool.outputLength, format: bytes },
@@ -87,48 +88,50 @@ function TrajectoryMetrics({ trajectory, modelRequests }: Pick<ResourceStatistic
 }
 
 /** The same raw-fact projection for one Agent and every aggregation scope. */
-export function ResourceMetrics({ statistics, distribution, durations, showCoverage = true }: {
+export function ResourceMetrics({ statistics, distribution, durations, showCoverage = true, report = false }: {
   statistics: ResourceStatistics; distribution?: ResourceDistribution;
   durations?: Pick<StageStatistics, "agentDurationMs" | "attemptDurationMs">;
   showCoverage?: boolean;
+  /** A continuous, compact report with every section visible, without view tabs. */
+  report?: boolean;
 }) {
   const [distributionVisited, setDistributionVisited] = useState(false);
-  const totals = <div className="flex min-w-0 flex-col gap-6">
+  const totals = <div className={report ? "grid min-w-0 gap-3 md:grid-cols-2 [&>section:last-child]:col-span-full" : "flex min-w-0 flex-col gap-6"}>
     <section aria-label="费用" className="flex flex-col gap-3">
       <h3 className="text-sm font-semibold text-text-strong">费用</h3>
       <dl className="grid grid-cols-1 gap-4 rounded-lg bg-surface-muted/60 p-4 sm:grid-cols-2">
         <div><dt className="text-xs text-text-muted">实际积分</dt><dd className="mt-2 text-xl font-semibold tabular-nums"><MetricValue metric={statistics.costs.chargedUnits} format={formatStatistic} /></dd></div>
         <div><dt className="text-xs text-text-muted">模型成本 · USD</dt><dd className="mt-2 text-xl font-semibold tabular-nums"><MetricValue metric={statistics.costs.providerUsd} format={formatUsd} /></dd></div>
       </dl>
-      <MetricDisclosure title="积分构成与计价记录" description="模型、Action、计价与实际扣除分别记录，不将这些字段重复相加。">
+      <MetricDisclosure expanded={report} title="积分构成与计价记录" description="模型、Action、计价与实际扣除分别记录，不将这些字段重复相加。">
         <DescriptionList items={COST_FIELDS.filter(([key]) => key !== "chargedUnits" && key !== "providerUsd").map(([key, label]) => ({
           label, value: <MetricValue metric={statistics.costs[key]} format={formatStatistic} />,
         }))} />
       </MetricDisclosure>
     </section>
     <TokenMetrics statistics={statistics} />
-    <TrajectoryMetrics trajectory={statistics.trajectory} modelRequests={statistics.modelRequests} />
+    <TrajectoryMetrics report={report} trajectory={statistics.trajectory} modelRequests={statistics.modelRequests} />
   </div>;
-  return <div className="flex min-w-0 flex-col gap-5">
+  const distributionContent = <div className="flex min-w-0 flex-col gap-4">
+    {durations && <StatisticsTable label="Agent 与尝试耗时" total description="累计耗时不代表并行批次的墙钟时间。" rows={[
+      { label: "Agent 耗时", unit: "毫秒", summary: durations.agentDurationMs, format: formatDuration },
+      { label: "单次尝试耗时", unit: "毫秒", summary: durations.attemptDurationMs, format: formatDuration },
+    ]} />}
+    {distribution && <ResourceDistributionPanel distribution={distribution} />}
+  </div>;
+  return <div className={report ? "flex min-w-0 flex-col gap-3 [&_td]:px-2 [&_td]:py-1.5 [&_th]:px-2 [&_th]:py-1.5 [&_th]:h-8 [&_dd]:text-sm [&_dd]:mt-1 [&_dl]:gap-2 [&_dl]:p-2 [&_dl]:grid-cols-2 [&_table]:text-xs [&_td]:whitespace-nowrap" : "flex min-w-0 flex-col gap-5"}>
     {showCoverage && <dl className="flex flex-wrap items-center gap-2 text-xs"><dt className="text-text-muted">资源完整性</dt><dd><StatusBadge status={statistics.coverage} /></dd></dl>}
-    {distribution ? <Tabs defaultValue="totals" onValueChange={(value) => { if (value === "distribution") setDistributionVisited(true); }}>
+    {report ? <>{totals}{distributionContent}</> : distribution ? <Tabs defaultValue="totals" onValueChange={(value) => { if (value === "distribution") setDistributionVisited(true); }}>
       <TabsList variant="line" aria-label="统计视图" className="mb-4 w-full justify-start border-b border-border">
         <TabsTrigger value="totals" className="flex-none px-4">累计概览</TabsTrigger>
         <TabsTrigger value="distribution" className="flex-none px-4">分布统计</TabsTrigger>
       </TabsList>
       <TabsContent value="totals" keepMounted>{totals}</TabsContent>
       <TabsContent value="distribution" keepMounted>
-        {distributionVisited && <div className="flex min-w-0 flex-col gap-7">
-          {durations && <StatisticsTable label="Agent 与尝试耗时" total
-            description="Agent 耗时按单个 Agent 统计；尝试耗时按每次尝试统计。累计是耗时之和，不代表并行批次的墙钟时间。" rows={[
-              { label: "Agent 耗时", unit: "毫秒", summary: durations.agentDurationMs, format: formatDuration },
-              { label: "单次尝试耗时", unit: "毫秒", summary: durations.attemptDurationMs, format: formatDuration },
-            ]} />}
-          <ResourceDistributionPanel distribution={distribution} />
-        </div>}
+        {distributionVisited && distributionContent}
       </TabsContent>
     </Tabs> : totals}
-    {statistics.diagnostics.length > 0 && <MetricDisclosure title={`统计诊断（${statistics.diagnostics.length}）`} description="查看缺失来源、重复记录和其他统计诊断。">
+    {statistics.diagnostics.length > 0 && <MetricDisclosure expanded={report} title={`统计诊断（${statistics.diagnostics.length}）`} description="查看缺失来源、重复记录和其他统计诊断。">
       <ul className="list-inside list-disc text-xs leading-6 text-text-muted">{statistics.diagnostics.map((item, index) => <li key={index}>{item.stream} · {item.eventId ?? item.kind} · {item.message}</li>)}</ul>
     </MetricDisclosure>}
   </div>;

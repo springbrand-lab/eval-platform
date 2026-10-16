@@ -58,6 +58,10 @@ describe("SP Agent editor in Eval", () => {
       if (path === "/api/agent-library/user-agent-configs/agent-a/deletion-check") return {
         allowed: true, activeChatIds: [], enabledScheduleIds: [], unfinishedRunIds: [],
       };
+      if (path === "/api/agent-library/mcp-servers/platform-mcp") return {
+        id: "platform-mcp", name: "Eval 结果提交", description: "submit_evaluation", status: "active", source: "user",
+        url: "https://evalapi.example/mcp/evaluation-results", authType: "bearer",
+      };
       throw new Error(`Unexpected GET ${path}`);
     });
     transport.request.mockImplementation(async (path: string) => {
@@ -80,6 +84,21 @@ describe("SP Agent editor in Eval", () => {
       return structuredClone(stored);
     });
     window.scrollTo = vi.fn();
+  });
+
+  it("shows selected MCP Servers read-only and keeps them on save", async () => {
+    const view = await mount("/agents/agent-a");
+    try {
+      await settle(() => expect(view.container.textContent).toContain("MCP Servers (1)"));
+      await settle(() => expect(view.container.textContent).toContain("Eval 结果提交"));
+      expect(view.container.textContent).toContain("https://evalapi.example/mcp/evaluation-results");
+      await type(name(), "Renamed");
+      await click(button("Save changes"));
+      await settle(() => expect(transport.patch).toHaveBeenCalledTimes(1));
+      expect(transport.patch.mock.calls[0]![1]).toMatchObject({ setting: { mcpServers: [{ serverId: "platform-mcp" }] } });
+    } finally {
+      await view.close();
+    }
   });
 
   it("creates with the SP template, prompt dialog, resource selector and validated settings", async () => {

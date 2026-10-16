@@ -10,6 +10,7 @@ import { Page, PageHeader } from "@/components/layout/page";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, DescriptionList, SectionLabel } from "@/components/ui/card";
+import { ProjectStatistics } from "./project-statistics";
 import { ProjectResults } from "./project-results";
 import { CopyId, ProgressBar, Tabs } from "@/components/ui/data-display";
 import { ConfirmDialog } from "@/components/ui/dialog";
@@ -171,6 +172,7 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
           <Tabs variant="line" value={tab} onChange={setTab} tabs={[{ value: "results", label: "结果" }, { value: "runs", label: "运行记录" }, { value: "settings", label: "项目设置" }]} />
           {tab === "results" && (overview.data ? <>
             <ProjectResults key={projectId} projectId={projectId} view={view.data!} overview={overview.data} />
+            <ProjectStatistics summary={overview.data.summary} />
           </> : overview.error ? <ErrorBlock error={overview.error} onRetry={() => void overview.refetch()} /> : <LoadingBlock rows={2} />)}
           {tab === "settings" && view.data && <><PlanCard view={view.data} /><Card><CardHeader title="测试范围" description="项目使用创建时的数据副本，之后修改数据集不会改变已有项目。" /><CardBody><ul>{view.data.datasets.map((dataset) => <li key={dataset.datasetId}><Link className="link" to="/projects/$projectId/datasets/$datasetId" params={{ projectId, datasetId: dataset.datasetId }}>{dataset.name}</Link></li>)}</ul></CardBody></Card></>}
           {tab === "runs" && <Card>
