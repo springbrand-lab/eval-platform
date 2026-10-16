@@ -16,7 +16,7 @@ export default defineConfig(({ mode }) => {
     ],
     resolve: {
       alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
-      dedupe: ["react", "react-dom"],
+      dedupe: ["react", "react-dom", "@tanstack/react-query", "@springbrand/http", "@springbrand/site-block"],
     },
     server: {
       proxy: {

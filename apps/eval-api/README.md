@@ -74,6 +74,8 @@ Project 视图的 `runSequence` 和 `currentRun` 从同一最新 Run 行及其�
 
 Eval API 不做交互式登录，固定以一个 Eval SP 服务账号运行。服务账号与它的长期会话由 sp-platform 的 `pnpm --filter sp-platform-api eval:bootstrap-service-account` 在 `sp-platform-eval` 库中创建，可重复执行，每次轮换会话。进程启动时用 `EVAL_SP_SERVICE_SESSION_TOKEN` 调用一次 Eval SP 的 `/api/auth/me`，结果必须是 `EVAL_SP_SERVICE_USER_ID`，否则拒绝启动；之后每个 `/api/*` 请求都归属这个账号，请求不需要携带 `Authorization`，客户端也不能指定用户。Agent Config 的增删改查用服务会话调用 Eval SP 的 `/api/user-agent-configs`，写请求带上 `EVAL_WEB_ORIGIN` 以满足 SP 的来源校验。Eval 不保存配置正文。服务账号的积分不自动发放，由 `/api/credits/grants` 用 `EVAL_SP_ADMIN_TOKEN` 调用 Eval SP 的管理员加积分接口手动添加（见 HTTP 契约的 Credits 一节）。API 是内部服务，只能部署在受信网络内。
 
+共享 Agent 编辑器的默认模板、模型和资源库经 `/api/agent-library` 的显式方法/路径表转发；资源库正文由 SP 公共接口校验，Eval 统一执行请求体限长、JSON 唯一字段、Origin 与固定服务账号规则。配置写入不在此转发表内，仍经过已有冻结副本服务。传输层从 Eval HTTP 目录解码公开编辑器错误，保留验证后的删除阻挡详情；SP 服务会话失效始终是依赖不可用，不能触发浏览器重新登录。接口列表与字节限制见 HTTP 契约。
+
 `owner-services.ts` 按服务账号组装一次用户范围内的服务；同一用户的并发请求经 `active-owner-admission.ts` 共享 Run 准入实例（`createEvalRunAdmission` + 用户范围的 `createPostgresProjectPlanReader` 与 `RuntimeStore`），请求结束后释放；准入不持有登录 token。
 
 ### Project 创建、评估计划与冻结副本

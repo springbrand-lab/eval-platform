@@ -474,7 +474,7 @@ describe("Eval API HTTP layer", () => {
     expect(await listed.json()).toMatchObject({ msg: [{ id: "agent-1" }] });
     const rejected = await app.request("/api/agent-configs", jsonRequest("POST", { name: "" }));
     expect(rejected.status).toBe(422);
-    expect(await rejected.json()).toMatchObject({ code: "EVAL_SP_REQUEST_INVALID", errMsg: "Name is required" });
+    expect(await rejected.json()).toMatchObject({ code: "AGENT_CONFIG_INVALID", errMsg: "Name is required" });
     const frozen = await app.request(`/api/agent-configs/${agentId}`, jsonRequest("PATCH", { name: "x", revision: 1 }));
     expect(frozen.status).toBe(409);
     expect(await frozen.json()).toMatchObject({ code: "AGENT_CONFIG_FROZEN" });

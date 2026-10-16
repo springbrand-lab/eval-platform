@@ -1,4 +1,4 @@
-import { HttpError, toHttpError, type HttpErrorCode } from "@eval-platform/eval-contracts/http-errors";
+import { decodeError, HttpError, isSpEditorErrorCode, spEditorErrorDefinitions, toHttpError, type HttpErrorCode } from "@eval-platform/eval-contracts/http-errors";
 import {
   DataInUseError,
   DatasetEntityNotFoundError,
@@ -122,6 +122,16 @@ function fieldError(code: "RUNTIME_INPUT_INVALID" | "CATALOG_INPUT_INVALID", err
 function evalSpError(error: EvalSpApiError): HttpError {
   const upstream = { cause: error, upstreamStatus: error.status };
   if (error.status === 401) return new HttpError("EVAL_SP_UNAVAILABLE", undefined, upstream);
+  const decoded = decodeError(error.payload, { status: error.status, headers: {} });
+  const relayed = toHttpError(decoded);
+  if (relayed && isSpEditorErrorCode(relayed.code) && spEditorErrorDefinitions[relayed.code].status === error.status) {
+    return new HttpError(relayed.code, relayed.message, {
+      ...upstream,
+      ...(decoded.requestId === undefined ? {} : { upstreamRequestId: decoded.requestId }),
+      ...(relayed.errors === undefined ? {} : { errors: relayed.errors }),
+      ...(relayed.details === undefined ? {} : { details: relayed.details }),
+    });
+  }
   if (error.status === 403) return new HttpError("EVAL_SP_FORBIDDEN", undefined, upstream);
   if (error.status === 404) return new HttpError("EVAL_SP_NOT_FOUND", undefined, upstream);
   if (error.status === 429) return new HttpError("REQUEST_RATE_LIMITED", undefined, upstream);
@@ -155,6 +165,7 @@ export function apiError(error: Error): HttpError {
     const primary = apiError(error.errors[0]);
     return new HttpError(primary.code, primary.message, {
       cause: error, ...(primary.errors === undefined ? {} : { errors: primary.errors }),
+      ...(primary.details === undefined ? {} : { details: primary.details }),
     });
   }
   if (error instanceof RuntimeEntityNotFoundError) return new HttpError(runtimeEntityCodes[error.entity], error.message, { cause: error });

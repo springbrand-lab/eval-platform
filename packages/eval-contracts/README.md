@@ -6,6 +6,10 @@
 
 评估平台跨包共享的稳定契约层，公共契约从包根入口导入。`./http-errors` 是 Eval API 唯一的错误码目录（`defineErrorCatalog`），`./http` 是基于它的 Hono 响应器（`createHonoHttp`）；只有这两个 HTTP 边界子路径依赖 `@springbrand/http` 与 `hono`，包根不加载它们。HTTP 契约见 [Eval HTTP 控制面](../../docs/eval-http-api.md)。
 
+Agent 编辑器使用的 SP 领域错误由 `sp-editor-errors.ts` 从 SP 公开错误目录选取，状态码、默认文案和删除阻挡详情 Schema 均复用上游定义。仅 HTTP 子路径加载这些契约；服务账号认证失败仍由 API 翻译为依赖不可用，不要求浏览器重新登录。
+
+`./web-gateway-errors` 是 Worker 与完整 HTTP 目录共用的轻量错误定义入口，拥有 takt 登录、Eval 权限及 Web 网关依赖不可用的错误；Worker 不加载完整 HTTP 目录或 SP 契约。浏览器解码既保留领域详情，也保留这些网关错误及认证语义。
+
 负责 Project 与其固定计划（`src/project.ts`：`ProjectPlan`、`ExecutionPlan`、`EvaluationPlan`、`ProjectDatasetSnapshot`、`AgentConfigSnapshot`、`EvaluationOutputSchemaRef`）、Sampling、EvaluationRecord、Run 选择与目标、HarnessConfig、ExecutionOutput、EvaluationAgentOutput（评估产物、原始结构化输出、证据和完整轨迹）、AgentObservationRef、ArtifactRef、TrajectoryRef 和 EvidenceRef 等运行与评估类型边界。Subject 证据包契约位于 `src/evidence.ts`：`EvidenceBundleRef`（`Sampling.evidence`）、`EvidenceManifest`、`EvidenceArtifact`、`EvidenceOmission`、`TrajectoryEvent`（`sp-trajectory/v1` 原始轨迹）、`EvidenceLimits` 与 `DEFAULT_EVIDENCE_LIMITS`，以及 `EVIDENCE_ROOT`、`EVIDENCE_MANIFEST_PATH`、`EVIDENCE_ARTIFACTS_ROOT`、`EVIDENCE_TRAJECTORY_ROOT`、`EVALUATION_RESULT_PATH` 等路径常量；`EvidenceRef` 仍是评委输出中的证据引用，两者不同。证据和解释属于评估 Agent 输出，没有独立的归因契约。SP Chat 是持久 Session：`Sampling.subjectChatId` 和 `EvaluationRecord.chatId` 标识各自的 Chat，每个 Attempt 的 `submissionId` 标识该 Chat 内的一次提交。`AgentResourceCollection` 在投递前按 `chatId + idempotencyKey` 登记，采集成功后保留真实 `submissionId`，只表达 `pending | collected | failed` 的采集状态。Dataset/Data 由 `eval-dataset` 拥有，ProjectSample（Project 创建时的完整 Data 副本）由 `eval-runtime` 的运行时模型拥有；`Sampling.projectSampleId` 指向它。
 
 JSON 值与标识符规则也只在这里定义：`jsonValueSchema`、`jsonObjectSchema`（有限数、安全整数、无环纯数据）和 `identifierSchema`、`isIdentifier`、`IDENTIFIER_RULE`（非空且无首尾空白）。

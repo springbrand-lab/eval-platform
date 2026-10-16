@@ -61,16 +61,7 @@ export interface Me {
   readonly role: "user" | "admin" | "super_admin";
 }
 
-export interface AgentConfig {
-  readonly id: string;
-  readonly user_id: string;
-  readonly name: string;
-  readonly slug?: string;
-  readonly description?: string | null;
-  readonly revision?: number;
-  readonly setting?: unknown;
-  readonly [field: string]: unknown;
-}
+export type { UserAgentConfig as AgentConfig } from "@springbrand/agent-config-editor/client";
 
 export interface AgentOption {
   readonly agentConfig: AgentConfigRef;

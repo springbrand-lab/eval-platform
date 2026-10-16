@@ -88,7 +88,7 @@ All `/api/*` routes run as the service account and may additionally return `403`
 
 ### Agent Configs
 
-Agent Configs are created, read, edited and deleted in Eval; the independent Eval SP only hosts them. Requests are relayed with the caller's session to Eval SP `/api/user-agent-configs`; bodies are SP's public Agent Config JSON, forwarded unchanged (any JSON object). Project creation and evaluation-plan saving clone the selected Agent Configs into frozen copies; which copies count as frozen and the reserved `eval-frozen-` slug prefix are defined in [Agent Config 冻结副本](eval-project-redesign.md#23-agent-config-冻结副本). On the wire: frozen copies are omitted from both lists, `PATCH`/`DELETE` of one and selecting one as a creation or evaluation-plan source are `409 AGENT_CONFIG_FROZEN`, and a `POST`/`PATCH` body with a reserved `slug` is `422 REQUEST_VALIDATION_FAILED`.
+Agent Configs are created, read, edited and deleted in Eval; the independent Eval SP only hosts them. Requests are relayed with the fixed service account's session to Eval SP `/api/user-agent-configs`; bodies are SP's public Agent Config JSON, forwarded unchanged (any JSON object). Project creation and evaluation-plan saving clone the selected Agent Configs into frozen copies; which copies count as frozen and the reserved `eval-frozen-` slug prefix are defined in [Agent Config 冻结副本](eval-project-redesign.md#23-agent-config-冻结副本). On the wire: frozen copies are omitted from both lists, `PATCH`/`DELETE` of one and selecting one as a creation or evaluation-plan source are `409 AGENT_CONFIG_FROZEN`, and a `POST`/`PATCH` body with a reserved `slug` is `422 REQUEST_VALIDATION_FAILED`.
 
 | Route | Body / result | Domain errors |
 | --- | --- | --- |
@@ -99,7 +99,33 @@ Agent Configs are created, read, edited and deleted in Eval; the independent Eva
 | `DELETE /api/agent-configs/{id}` | `204` | `409 AGENT_CONFIG_FROZEN`; relayed SP errors |
 | `GET /api/agents?role=subject\|evaluator` | `[{agentConfig:{ownerUserId,userAgentId}, name, role}]`, one entry per role unless `role` is given; frozen copies excluded | Relayed SP errors |
 
-Relayed SP errors: SP `401` → `401 AUTH_UNAUTHENTICATED`; `403` → `EVAL_SP_FORBIDDEN`; `404` → `EVAL_SP_NOT_FOUND`; `409` → `EVAL_SP_CONFLICT`; `400`/`422` → `422 EVAL_SP_REQUEST_INVALID`; `429` → `REQUEST_RATE_LIMITED`; other statuses → `502 EVAL_SP_REQUEST_FAILED`. For `400`, `409` and `422`, SP's `errMsg` and field `errors` are relayed. An unreachable SP is `503 EVAL_SP_UNAVAILABLE`.
+Public Agent editor domain errors retain the codes, statuses and messages selected from SP's public catalog in `eval-contracts/src/sp-editor-errors.ts`; no second definition of those SP errors exists in Eval. The three deletion blocker codes (`AGENT_CONFIG_ACTIVE_CHAT`, `AGENT_CONFIG_ACTIVE_SCHEDULE_RUN`, `AGENT_CONFIG_ENABLED_SCHEDULE`) may carry SP's validated `AgentConfigDeletionCheck` details. Invalid or unregistered details are discarded. This applies when a deletion blocker appears after a successful deletion preflight as well as to resource-library errors.
+
+Other relayed SP errors: SP `401` → `503 EVAL_SP_UNAVAILABLE` (the service session failed, not the browser login); `403` → `EVAL_SP_FORBIDDEN`; `404` → `EVAL_SP_NOT_FOUND`; `409` → `EVAL_SP_CONFLICT`; `400`/`422` → `422 EVAL_SP_REQUEST_INVALID`; `429` → `REQUEST_RATE_LIMITED`; other statuses → `502 EVAL_SP_REQUEST_FAILED`. For `400`, `409` and `422`, SP's `errMsg` and field `errors` are relayed. An unreachable SP is `503 EVAL_SP_UNAVAILABLE`.
+
+### Agent editor library
+
+`/api/agent-library` supplies the shared SP/Eval Agent editor. All routes use the existing Web gateway, Origin policy and fixed service account. Each successful operation returns the standard envelope with the public SP result as `msg` (HTTP 200). Filters and pagination query parameters are forwarded unchanged. SP owns resource eligibility, upload validation and domain schemas.
+
+| Eval suffix | Methods | Public SP target |
+| --- | --- | --- |
+| `/default-template` | GET | `/api/user-agent-configs/default-template` |
+| `/models` | GET | `/api/model-catalog` |
+| `/skills` | GET, POST (raw `application/zip`) | `/api/skills` |
+| `/skills/{id}/files` | GET | `/api/skills/{id}/files` |
+| `/skills/{id}` | DELETE | `/api/skills/{id}` |
+| `/actions`, `/actions/group-actions`, `/actions/{id}` | GET | Same suffix under `/api` |
+| `/components` | GET | `/api/components` |
+| `/connectors` | GET | `/api/connectors` |
+| `/connectors/attempts` | POST (JSON) | `/api/connectors/attempts` |
+| `/connectors/attempts/{id}` | GET | `/api/connectors/attempts/{id}` |
+| `/user-references` | GET, POST (JSON) | `/api/user-references` |
+| `/user-references/{id}` | GET, PATCH (JSON), DELETE | `/api/user-references/{id}` |
+| `/user-references/{id}/content` | PUT (JSON) | `/api/user-references/{id}/content` |
+| `/inbox/attachments` | POST (multipart), DELETE | `/api/inbox/attachments` |
+| `/user-agent-configs/{id}/deletion-check` | GET | Same suffix under `/api` |
+
+JSON bodies use `JSON_BODY_BYTES` and the same bounded, duplicate-field-free JSON parser as Config writes. Skill archives use `ZIP_ARCHIVE_BYTES`, counting actual bytes received. Reference multipart uploads use `ZIP_BODY_BYTES` and the public attachment fields `file`, `name`, `clientAttachmentId`. Resource IDs are nonempty, bounded segments without `/`, not a duplicate UUID restriction on SP catalog IDs. Request cancellation propagates to the SP client. There is no arbitrary URL relay and no Config creation/update/deletion route in this library; those operations remain behind Eval's frozen-copy service.
 
 ### Projects
 

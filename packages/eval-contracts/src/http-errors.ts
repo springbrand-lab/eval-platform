@@ -1,7 +1,13 @@
 import { defineErrorCatalog } from "@springbrand/http/catalog";
+import { spEditorErrorDefinitions, spEditorErrorDetails } from "./sp-editor-errors.js";
+import { webGatewayErrorDefinitions } from "./web-gateway-errors.js";
+
+export { isSpEditorErrorCode, spEditorErrorDefinitions } from "./sp-editor-errors.js";
 
 /** The only Eval API error-code catalog; status codes and default public messages live here. */
 const errorDefinitions = {
+  ...spEditorErrorDefinitions,
+  ...webGatewayErrorDefinitions,
   REQUEST_INVALID_INPUT: { status: 400, message: "Request input is invalid" },
   REQUEST_INVALID_JSON: { status: 400, message: "Expected a JSON object with unique fields" },
   REQUEST_VALIDATION_FAILED: { status: 422, message: "Validation failed" },
@@ -10,7 +16,6 @@ const errorDefinitions = {
   REQUEST_UNTRUSTED_ORIGIN: { status: 403, message: "Request origin is not allowed" },
   REQUEST_NOT_FOUND: { status: 404, message: "Resource not found" },
   REQUEST_RATE_LIMITED: { status: 429, message: "Too many requests" },
-  AUTH_UNAUTHENTICATED: { status: 401, message: "An Eval SP Bearer session is required" },
   INTERNAL_ERROR: { status: 500, message: "Internal server error" },
   DATABASE_UNAVAILABLE: { status: 503, message: "The service is temporarily unavailable. Try again shortly" },
   RESPONSE_INVALID: { status: 502, message: "The server returned an invalid response" },
@@ -76,7 +81,7 @@ const errorDefinitions = {
   HTTP_ERROR: { status: 0, message: "The request could not be completed. Check and try again" },
 } as const;
 
-export const errorCatalog = defineErrorCatalog(errorDefinitions);
+export const errorCatalog = defineErrorCatalog(errorDefinitions, { details: spEditorErrorDetails });
 
 export const {
   HttpError,

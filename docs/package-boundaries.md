@@ -146,6 +146,8 @@ Projects have an ownerUserId and bind the deployed SP Git branch. Dataset and Da
 
 ### `apps/eval-web`
 
+Agent creation and editing consume the public `@springbrand/agent-config-editor` module shared with SP Web. It owns the actual form, resource selectors, library dialogs and public SP schema conversions. Eval owns its authenticated transport, routes, edit sessions and frozen Project copy rules. The API exposes only the editor's explicit public resource operations through its existing fixed service-account scope; it never exposes that account's session token to the browser. See [Agent Config editor alignment](agent-config-editor-alignment.md).
+
 Initial Material/Context resources expose a catalog detail route and a directory derived from `InitialResourceFile` paths. Resource files and observed Workspace files share one read-only preview host; format selection, limits, parsing, rendering and URL-reference-to-inventory-path resolution come only from the public `@springbrand/file-renderers` package. Eval owns authenticated byte reads scoped to one resource, cancellation and Blob lifetimes, without copying SP parsers or using private SP code/storage. Query caches original Blobs; renderer state and linked reads live only with the active selection.
 
 Web reads upload and selection bounds from authenticated `GET /api/input-limits` (`EvalInputLimits` in `eval-contracts`). The API projects its actual validation constants, including public SP Harness limits. Web does not mirror numeric limits or import server implementation files; the API remains the enforcing boundary.

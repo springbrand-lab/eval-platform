@@ -138,6 +138,9 @@ importers:
       '@fontsource-variable/inter':
         specifier: ^5.3.0
         version: 5.3.0
+      '@springbrand/agent-config-editor':
+        specifier: link:../../../sp-platform/packages/agent-config-editor
+        version: link:../../../sp-platform/packages/agent-config-editor
       '@springbrand/file-renderers':
         specifier: link:../../../sp-platform/packages/file-renderers
         version: link:../../../sp-platform/packages/file-renderers
@@ -265,6 +268,9 @@ importers:
 
   packages/eval-contracts:
     dependencies:
+      '@springbrand/contracts':
+        specifier: link:../../../sp-platform/packages/contracts
+        version: link:../../../sp-platform/packages/contracts
       '@springbrand/http':
         specifier: 0.1.0-alpha.4
         version: 0.1.0-alpha.4(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)

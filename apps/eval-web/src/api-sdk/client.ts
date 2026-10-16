@@ -1,4 +1,5 @@
 import { ApiError, createHttpClient, type HttpRequestOptions } from "@springbrand/http/client";
+import { decodeError } from "@eval-platform/eval-contracts/http-errors";
 import { currentToken, markForbidden, markUnauthorized } from "@/auth/session";
 
 export { ApiError };
@@ -9,6 +10,7 @@ export const ACCESS_DENIED_CODE = "EVAL_ACCESS_DENIED";
 const client = createHttpClient({
   baseUrl: typeof window === "undefined" ? "http://localhost" : window.location.origin,
   responseMode: "envelope",
+  decodeError,
   timeoutMs: 60_000,
   getToken: currentToken,
   onUnauthorized: () => markUnauthorized(),
@@ -22,6 +24,7 @@ function watch<T>(pending: Promise<T>): Promise<T> {
 }
 
 export const api = {
+  request: <T>(path: string, options?: HttpRequestOptions) => watch(client.request<T>(path, options)).then((result) => result.data),
   get: <T>(path: string, options?: HttpRequestOptions) => watch(client.get<T>(path, options)),
   post: <T>(path: string, body?: unknown, options?: HttpRequestOptions) => watch(client.post<T>(path, body, options)),
   put: <T>(path: string, body?: unknown, options?: HttpRequestOptions) => watch(client.put<T>(path, body, options)),

@@ -1,4 +1,5 @@
-import { ApiError, createHttpClient, type HttpClient } from "@springbrand/http/client";
+import { ApiError, createHttpClient, parseHttpError, type HttpClient } from "@springbrand/http/client";
+import { decodeError, isSpEditorErrorCode } from "@eval-platform/eval-contracts/http-errors";
 import { httpOriginSchema } from "../config/env.js";
 
 export type Fetch = typeof globalThis.fetch;
@@ -27,6 +28,7 @@ export function throwSpClientError(error: unknown): never {
     errMsg: error.message,
     ...(error.requestId === undefined ? {} : { requestId: error.requestId }),
     ...(error.errors === undefined ? {} : { errors: error.errors }),
+    ...(error.details === undefined ? {} : { details: error.details }),
   }, { cause: error });
 }
 
@@ -43,6 +45,10 @@ export function createSpHttpClient(input: {
   return createHttpClient({
     baseUrl: httpOriginSchema.parse(input.origin),
     responseMode: input.responseMode,
+    decodeError: (data, info) => {
+      const parsed = parseHttpError(data, info);
+      return isSpEditorErrorCode(parsed.code) ? decodeError(data, info) : parsed;
+    },
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(maxResponseBytes === undefined ? {} : { maxResponseBytes }),
     ...(headers === undefined ? {} : { getHeaders: () => ({ ...headers }) }),

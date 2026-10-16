@@ -1,5 +1,6 @@
 import { api, enc } from "./client";
 import type { AgentConfig, AgentOption, AgentRole } from "./types";
+import type { CreateUserAgentConfigInput, UpdateUserAgentConfigInput } from "@springbrand/agent-config-editor/client";
 
 export const agentKeys = {
   all: ["agent-configs"] as const,
@@ -8,17 +9,12 @@ export const agentKeys = {
   options: (role?: AgentRole) => ["agents", role ?? "all"] as const,
 };
 
-export interface AgentConfigInput {
-  readonly slug: string;
-  readonly name: string;
-  readonly description?: string | null;
-  readonly setting: unknown;
-}
+export type AgentConfigInput = CreateUserAgentConfigInput;
 
 export const listAgentConfigs = (signal?: AbortSignal) => api.get<AgentConfig[]>("/api/agent-configs", { signal });
 export const getAgentConfig = (id: string, signal?: AbortSignal) => api.get<AgentConfig>(`/api/agent-configs/${enc(id)}`, { signal });
 export const createAgentConfig = (input: AgentConfigInput) => api.post<AgentConfig>("/api/agent-configs", input);
-export const updateAgentConfig = (id: string, input: Partial<AgentConfigInput> & { revision: number }) =>
+export const updateAgentConfig = (id: string, input: UpdateUserAgentConfigInput) =>
   api.patch<AgentConfig>(`/api/agent-configs/${enc(id)}`, input);
 export const deleteAgentConfig = (id: string) => api.delete(`/api/agent-configs/${enc(id)}`);
 export const listAgentOptions = (role?: AgentRole, signal?: AbortSignal) =>

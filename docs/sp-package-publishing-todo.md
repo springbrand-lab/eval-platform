@@ -10,6 +10,8 @@
 - 由 eval-harness 公开的 ZIP 工具：`inspectStrictZip`、`StrictZipError`、`StrictZipEntry`、`StrictZipEntryLimit`、`StrictZipErrorCode`。Eval API 不直接依赖 SP 的 utils 实现。
 - 发布 `@springbrand/file-renderers` 的公开文件预览入口：`contracts`、`format`、`preview-content`、`preview-host`、`preview-surface`、`preview-error-boundary`、`resource-path`。Eval Web 负责目录、鉴权读取和取消请求，资源链接解析、文件格式解析与只读渲染由共享包负责。`reference` 统一使用原始 URL 引用，由 `rendererResourcePath` 转为精确文件路径；HTML 与 Markdown 不保留两套路径语义。
 - `file-renderers` 的 `@silurus/ooxml` 当前引用仓库内 `vendor/*.tgz`；发布包必须包含可安装的依赖，不能让消费者依赖 SP 本地文件。`workspace:*` 依赖也必须在发布时解析到真实公开版本。
+- 发布 `@springbrand/agent-config-editor` 的根入口、`client`、`draft` 与 `connector-authorization`：SP Web 与 Eval Web 已共用同一套 Agent 表单、资源库、公共客户端和创建重放流程。其 `agent-contracts`、`contracts`、`utils`、`file-renderers` 依赖须同时解析成真实公开版本；SP 应用只保留宿主导航、传输与保存流程。
+- Eval HTTP 目录复用 `@springbrand/contracts/errors` 与 `agent-config-deletion` 的公开 Agent 编辑器错误定义和详情 Schema。此 contracts 包也需发布，替换 `eval-contracts` 中的本地 link；不能通过复制错误码/Schema 或丢弃 domain code 绕过发包。
 
 ## 升级与交付
 
