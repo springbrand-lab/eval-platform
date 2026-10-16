@@ -8,7 +8,7 @@ import {
 import { BUNDLE_ERROR_DETAILS } from "../limits.js";
 import { validateMaterialFiles, validateSessionContent } from "./bundle-content.js";
 
-const userEntry = (id: string) => JSON.stringify({ id, message: { role: "user", content: "Hi" }, createdAt: 1 });
+const userEntry = (id: string) => JSON.stringify({ id, message: { role: "user", content: "Hi", timestamp: 1 }, createdAt: 1 });
 const file = (path: string, bytes: number) => ({
   path, mediaType: "application/octet-stream", contentBase64: Buffer.alloc(bytes).toString("base64"),
 });
@@ -72,10 +72,14 @@ describe("Session content", () => {
 
   it("rejects syntactically valid Session content that SP cannot import, with SP's reason", () => {
     for (const [context, errMsg] of [
-      [{ format: "json", content: "{}" }, "Initial context must contain canonical entries"],
-      [{ format: "json", content: JSON.stringify({ entries: [{ id: "m1", message: { role: "assistant" }, createdAt: 1 }] }) },
-        "Initial context must begin with a user message"],
-      [{ format: "jsonl", content: [userEntry("m1"), userEntry("m1")].join("\n") }, "Invalid or duplicate canonical context entry"],
+      [{ format: "json", content: "{}" }, expect.stringContaining("Invalid canonical context: entries:")],
+      [{ format: "json", content: JSON.stringify({ entries: [{ id: "m1", message: {
+        role: "assistant", content: [], timestamp: 1, api: "openai-completions", provider: "openai", model: "test", stopReason: "stop",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      }, createdAt: 1 }] }) },
+        "Invalid canonical context: entries.0.message.role: Canonical history must begin with a user message"],
+      [{ format: "jsonl", content: [userEntry("m1"), userEntry("m1")].join("\n") }, "Invalid canonical context: entries.1.id: Duplicate canonical message ID"],
       [{ format: "jsonl", content: `${userEntry("m1")}\n${" ".repeat(EVAL_SESSION_CONTENT_MAX_CHARS)}` }, "Initial context is too large"],
       [{ format: "jsonl", content: "" }, expect.stringMatching(/^content: /u)],
       [{ format: "yaml", content: "a: 1" }, expect.stringMatching(/^format: /u)],

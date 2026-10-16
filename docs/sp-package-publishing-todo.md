@@ -4,14 +4,16 @@ Eval 使用下面四个 npm 包的精确版本，版本与完整性由消费方 
 
 | 包 | 版本 | 消费方与公开入口 |
 | --- | --- | --- |
-| `@springbrand/eval-harness` | `0.1.0-alpha.2` | Eval API：初始化、证据路径、上限，以及 `inspectStrictZip`、`StrictZipError` 和 ZIP 类型 |
+| `@springbrand/eval-harness` | `0.1.0-alpha.3` | Eval API：初始化、证据路径、上限，以及 `inspectStrictZip`、`StrictZipError` 和 ZIP 类型 |
 | `@springbrand/file-renderers` | `0.1.0-alpha.1` | Eval Web：文件解析、预览、`resource-path` 与格式 CSS Module |
 | `@springbrand/contracts` | `0.1.0-alpha.0` | Eval HTTP 目录：SP 编辑器领域错误、删除阻挡详情 Schema |
 | `@springbrand/agent-config-editor` | `0.1.0-alpha.0` | Eval Web：根入口、`client`、`draft` 与 `connector-authorization` |
 
-SP 内部 `utils`、`resource`、`agent-contracts` 的实现与声明由发布产物携带，不作为 Eval 的额外依赖。ZIP 的唯一公开入口是 eval-harness；Eval 不导入 SP utils。`file-renderers` 的安装依赖不引用 SP 仓库中的 `vendor/*.tgz`。
+SP 内部 `utils`、`resource`、`agent-contracts` 及 Runtime 公开 canonical 校验器的实现与声明由发布产物携带，不作为 Eval 的额外依赖。ZIP 的唯一公开入口是 eval-harness；Eval 不导入 SP utils。`file-renderers` 的安装依赖不引用 SP 仓库中的 `vendor/*.tgz`。
 
 Web 的 Tailwind 扫描 `file-renderers/dist/**/*.js` 与 `agent-config-editor/dist/**/*.js`，不扫描 SP 源码。格式 CSS Module 由文件预览模块导入。React、React DOM、TanStack Query、HTTP 与 site-block 在 Vite 中去重，保持宿主 Context 和错误类一致。
+
+本次原生上下文修复的待发布版本为 `@springbrand/agent-runtime@0.3.0-alpha.23`、`@springbrand/eval-harness@0.1.0-alpha.3`，均使用 `alpha` 标签。Runtime 先发，harness 后发；Eval 消费精确版本与已经验证的 tarball 校验值。发布已验证的原始 tarball，避免重新打包后字节变化导致完整性不匹配。修复不会改写已有 Project 快照。
 
 ## 升级与验证
 

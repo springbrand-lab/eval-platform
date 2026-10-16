@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDataInput } from "./datasets/data-editor-page";
+import { buildDataInput } from "./datasets/data-draft-fields";
 import { eventSummary } from "./observation/trajectory-tab";
 import { checkMaterialFiles } from "./resources/bundle-detail-page";
 import { buildSelector } from "./runs/new-run-page";
@@ -7,11 +7,11 @@ import { normalizePaths } from "@/components/ui/file-dropzone";
 import { inputLimits } from "@/test/input-limits";
 
 describe("Run selector", () => {
-  it("builds each scope and rejects empty choices", () => {
-    expect(buildSelector("all", new Set(), new Set(), new Set())).toEqual({ all: true });
-    expect(buildSelector("datasets", new Set(["d"]), new Set(), new Set())).toEqual({ datasetIds: ["d"] });
-    expect(buildSelector("samples", new Set(), new Set(), new Set())).toEqual(expect.stringContaining("用例"));
-    expect(buildSelector("samplings", new Set(), new Set(), new Set(["s1", "s2"]))).toEqual({ samplingIds: ["s1", "s2"] });
+  it("canonicalizes mixed hierarchy choices and rejects empty selection", () => {
+    expect(buildSelector({ all: true, samplingIds: ["s"] })).toEqual({ all: true });
+    expect(buildSelector({ datasetIds: ["d"], projectSampleIds: [] })).toEqual({ datasetIds: ["d"] });
+    expect(buildSelector({ samplingIds: [] })).toEqual(expect.stringContaining("用例"));
+    expect(buildSelector({ datasetIds: ["d"], samplingIds: ["s2", "s1", "s1"] })).toEqual({ datasetIds: ["d"], samplingIds: ["s1", "s2"] });
   });
 });
 
@@ -28,7 +28,7 @@ describe("Data editor", () => {
 
   it.each([
     [{ name: " " }, "名称"],
-    [{ description: " " }, "描述"],
+    [{ description: " " }, "说明"],
     [{ userPrompt: " " }, "userPrompt"],
     [{ evalPrompt: " " }, "evalPrompt"],
     [{ extra: "{" }, "JSON 格式错误"],

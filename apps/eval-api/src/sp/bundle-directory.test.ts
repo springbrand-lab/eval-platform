@@ -12,7 +12,7 @@ const materialId = "44444444-4444-4444-8444-444444444444";
 const sessionId = "55555555-5555-4555-8555-555555555555";
 const resourceId = (n: number) => `66666666-6666-4666-8666-${String(n).padStart(12, "0")}`;
 const files = [{ path: "/brief.txt", mediaType: "text/plain", contentBase64: "SGVsbG8=" }];
-const userEntry = (id: string) => JSON.stringify({ id, message: { role: "user", content: "Hi" }, createdAt: 1 });
+const userEntry = (id: string) => JSON.stringify({ id, message: { role: "user", content: "Hi", timestamp: 1 }, createdAt: 1 });
 const roots: string[] = [];
 
 const failure = (reason: BundleFileErrorReason) => ({ name: "BundleFileError", reason, retryable: reason === "unavailable" });
@@ -137,7 +137,7 @@ describe("Eval Bundle directory", () => {
   it("rejects duplicate JSON keys in Session content when uploading and when reading", async () => {
     const directory = await root();
     const source = await openBundleDirectory(directory);
-    const duplicate = { format: "jsonl" as const, content: `{"id":"m1","id":"m2","message":{"role":"user"},"createdAt":1}` };
+    const duplicate = { format: "jsonl" as const, content: `{"id":"m1","id":"m2","message":{"role":"user","content":"Hi","timestamp":1},"createdAt":1}` };
     await expect(source.uploadInitialSession(owner, { bundleId, sessionId }, duplicate))
       .rejects.toMatchObject({ ...failure("invalid"), details: [{ path: "content:1" }] });
     await put(directory, `sessions/${sessionId}.json`, JSON.stringify(duplicate));

@@ -43,7 +43,7 @@ export function useTextImport(initialContent = "") {
       if (!signal.aborted) setDraft({ content, reading: false, error: "" });
     } catch {
       if (!signal.aborted) {
-        setDraft({ content: "", reading: false, error: "无法读取「" + file.name + "」，请重新选择文件或直接填写内容。" });
+        setDraft({ content: "", reading: false, error: "无法读取「" + file.name + "」，请重新选择文件。" });
       }
     }
   }

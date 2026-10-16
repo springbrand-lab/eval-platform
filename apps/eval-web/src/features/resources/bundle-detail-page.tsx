@@ -64,7 +64,7 @@ function MaterialUpload({ bundleId, open, onClose }: { bundleId: string; open: b
     },
   });
   return (
-    <MetadataDialog open={open} onClose={onClose} title="上传素材" submitLabel="上传" loading={create.isPending}
+    <MetadataDialog open={open} onClose={onClose} title="新建素材" submitLabel="创建" loading={create.isPending}
       extraValid={!problem && !extracting && !isWriteOutcomeUnknown(create.error)} onSubmit={(value) => create.mutate(value)}>
       <CatalogWriteFeedback error={create.error} />
       {limits.error && <ErrorBlock error={limits.error} onRetry={() => void limits.refetch()} />}
@@ -107,7 +107,7 @@ function SessionUpload({ bundleId, open, onClose }: { bundleId: string; open: bo
     },
   });
   return (
-    <MetadataDialog open={open} onClose={onClose} title="上传初始上下文" submitLabel="上传" loading={create.isPending}
+    <MetadataDialog open={open} onClose={onClose} title="新建上下文" submitLabel="创建" loading={create.isPending}
       extraValid={!!limits.data && content.trim().length > 0 && !draft.reading && !draft.error && !tooLong && !isWriteOutcomeUnknown(create.error)} onSubmit={(value) => create.mutate(value)}>
       <CatalogWriteFeedback error={create.error} />
       {limits.error && <ErrorBlock error={limits.error} onRetry={() => void limits.refetch()} />}
@@ -181,24 +181,25 @@ export function BundleDetailPage({ kind, bundleId }: { kind: ResourceKind; bundl
   return <Page>
     <PageHeader title={bundle.data.name} description={bundle.data.description}
       crumbs={[{ label: "数据集", to: "/datasets" }, { label: `初始${label}`, to: "/resources/$kind", params: { kind } }]}
-      actions={<><Button icon={<Pencil />} onClick={() => { update.reset(); setEditing({}); }}>编辑名称与描述</Button>
+      actions={<><Button icon={<Pencil />} onClick={() => { update.reset(); setEditing({}); }}>编辑名称与说明</Button>
         <ActionMenu items={[{ label: "删除包", icon: <Trash2 />, danger: true, onSelect: () => { remove.reset(); setPending({}); } }]} /></>} />
     {bundle.error && <ErrorBlock error={bundle.error} onRetry={() => void bundle.refetch()} />}
     <Card>
-      <CardHeader title={`${label}（${items.data?.length ?? 0}）`} actions={<>
+      <CardHeader title={`${label}（${items.data?.length ?? 0}）`}
+        description={kind === "material" ? "新建时上传文件或文件夹，创建后素材不可编辑。" : "新建时可上传文件或手动填写上下文；已有条目可编辑名称与说明。"} actions={<>
         <Button size="sm" onClick={() => { importZip.reset(); setImporting(true); }}>导入 ZIP</Button>
-        <Button size="sm" variant="primary" icon={<Plus className="size-4" />} onClick={() => setUploading(true)}>上传{label}</Button>
+        <Button size="sm" variant="primary" icon={<Plus className="size-4" />} onClick={() => setUploading(true)}>新建{label}</Button>
       </>} />
       {items.isPending ? <LoadingBlock /> : items.error ? <ErrorBlock error={items.error} /> : <DataTable<ResourceRecord>
         rows={items.data} rowKey={idOf} empty={<EmptyState title={`还没有${label}`} />}
         columns={[
           { key: "name", header: "名称", cell: (row) => <Link to="/resources/$kind/$bundleId/$resourceId"
             params={{ kind, bundleId, resourceId: idOf(row) }} className="link font-semibold">{row.name}</Link> },
-          { key: "description", header: "描述", cell: (row) => row.description },
+          { key: "description", header: "说明", cell: (row) => row.description },
           { key: "format", header: "格式", cell: (row) => "format" in row ? row.format.toUpperCase() : "素材文件" },
           { key: "id", header: "ID", cell: (row) => <CopyId value={idOf(row)} /> },
           { key: "actions", header: "操作", cell: (row) => <div className="flex gap-2">
-            <Button size="sm" onClick={() => { update.reset(); setEditing({ record: row }); }}>编辑</Button>
+            {kind === "session" && <Button size="sm" onClick={() => { update.reset(); setEditing({ record: row }); }}>编辑名称与说明</Button>}
             <Button size="sm" variant="outline-danger" onClick={() => { remove.reset(); setPending({ record: row }); }}>删除</Button>
           </div> },
         ]} />}
@@ -212,7 +213,7 @@ export function BundleDetailPage({ kind, bundleId }: { kind: ResourceKind; bundl
     <Dialog open={importing} onClose={() => { if (!importZip.isPending) { setImporting(false); setZip(null); } }} title={`导入${label} ZIP`}
       footer={<><Button disabled={importZip.isPending} onClick={() => { setImporting(false); setZip(null); }}>取消</Button>
         <Button variant="primary" loading={importZip.isPending} disabled={!zip || extractingZip || !limits.data || zip.size > limits.data.zipArchiveBytes || isWriteOutcomeUnknown(importZip.error)} onClick={() => importZip.mutate()}>导入</Button></>}>
-      <p className="mb-3 text-sm text-text-muted">导入条目使用包的描述，导入后可逐条编辑。</p>
+      <p className="mb-3 text-sm text-text-muted">导入条目使用包的说明。{kind === "session" ? "导入后可逐条编辑名称与说明。" : "素材创建后不可编辑。"}</p>
       {limits.error && <ErrorBlock error={limits.error} onRetry={() => void limits.refetch()} />}
       <FileDropzone disabled={importZip.isPending} onExtractingChange={setExtractingZip} multiple={false} accept={{ "application/zip": [".zip"] }} onRejected={() => setZip(null)} maxBytes={limits.data?.zipArchiveBytes} onFiles={(files) => setZip(files[0]?.file ?? null)} />
       {zip && <p className="mt-2 text-sm">{zip.name}</p>}

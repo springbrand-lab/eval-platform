@@ -52,6 +52,23 @@ export function AgentPanel({ title, agent, observe }: {
             { label: "Chat", value: agent.chatId ? <CopyId value={agent.chatId} /> : "—" },
           ]} />
         </div>
+        {agent.artifacts.length > 0 ? (
+          <section aria-label={`${title}产物`}>
+            <h3 className="mb-3 text-sm font-semibold text-text-strong">产物证据 · {agent.artifacts.length}</h3>
+            <ul className="divide-y divide-border rounded-lg border border-border">
+              {agent.artifacts.map((artifact) => (
+                <li key={artifact.artifactId} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
+                  <span className="min-w-0 break-all font-mono text-[13px]">{artifact.path}</span>
+                  <span className="text-xs text-text-muted">{artifact.kind}</span>
+                </li>
+              ))}
+            </ul>
+            {observe && agent.chatId && <p className="mt-2 text-xs text-text-muted">在「查看会话 → Workspace」中检查文件内容，轨迹用于辅助核对执行过程。</p>}
+          </section>
+        ) : <p className="text-sm text-text-muted">尚无已收集的产物。</p>}
+        <details className="rounded-lg border border-border">
+          <summary className="cursor-pointer px-4 py-3 text-sm font-medium">资源与尝试明细</summary>
+          <div className="flex flex-col gap-5 border-t border-border p-4">
         <ResourceMetrics statistics={resources} />
         {agent.attempts.items.length > 0 && (
           <div>
@@ -71,19 +88,8 @@ export function AgentPanel({ title, agent, observe }: {
             </div>
           </div>
         )}
-        {agent.artifacts.length > 0 && (
-          <div>
-            <p className="mb-2 text-xs font-semibold text-text-muted">产物（{agent.artifacts.length}）</p>
-            <ul className="flex flex-col gap-1 font-mono text-[13px]">
-              {agent.artifacts.map((artifact) => (
-                <li key={artifact.artifactId} className="flex items-center gap-2">
-                  <span className="truncate">{artifact.path}</span>
-                  <span className="text-xs text-text-muted">{artifact.kind}</span>
-                </li>
-              ))}
-            </ul>
           </div>
-        )}
+        </details>
       </CardBody>
     </Card>
   );

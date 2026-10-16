@@ -40,7 +40,7 @@ export function CopyId({ value, length = 8 }: { value: string; length?: number }
 export function CodeBlock({ value, className, maxHeight = "28rem" }: { value: string; className?: string; maxHeight?: string }) {
   return (
     <div className={cn("group relative rounded-[var(--radius-control)] border border-border bg-surface-code", className)}>
-      <CopyButton value={value} className="absolute right-2 top-2 opacity-0 transition-opacity group-hover:opacity-100" />
+      <CopyButton value={value} className="absolute right-2 top-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100" />
       <pre className="overflow-auto p-3 pr-10 font-mono text-[12.5px] leading-relaxed text-text" style={{ maxHeight }}>{value}</pre>
     </div>
   );
@@ -73,7 +73,7 @@ export function JsonViewer({ value, className, expandLevels = Infinity }: { valu
   const data = value !== null && typeof value === "object" ? value as object : { value };
   return (
     <div className={cn("group relative overflow-auto rounded-[var(--radius-control)] border border-border bg-surface-code p-3", className)}>
-      <CopyButton value={JSON.stringify(value, null, 2)} className="absolute right-2 top-2 opacity-0 transition-opacity group-hover:opacity-100" />
+      <CopyButton value={JSON.stringify(value, null, 2)} className="absolute right-2 top-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100" />
       <JsonView data={data} shouldExpandNode={(level) => level < expandLevels} style={jsonStyles} />
     </div>
   );
@@ -84,9 +84,9 @@ export function MetricCard({ label, value, hint, tone, icon }: {
 }) {
   const color = tone === "success" ? "text-success" : tone === "danger" ? "text-danger" : tone === "warning" ? "text-warning" : "text-text-strong";
   return (
-    <div className="flex min-w-0 flex-col rounded-[var(--radius-card)] border border-border bg-surface px-4 py-3.5">
+    <div className="flex min-w-0 flex-col rounded-[var(--radius-card)] border border-border bg-surface px-5 py-5">
       <p className="flex items-center gap-1.5 text-xs font-semibold text-text-muted [&_svg]:size-3.5">{icon}{label}</p>
-      <p className={cn("mt-2 truncate text-2xl font-semibold leading-none tracking-tight tabular", color)}>{value}</p>
+      <div className={cn("mt-3 text-2xl font-semibold leading-tight tracking-tight tabular", color)}>{value}</div>
       {hint && <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-text-muted" title={typeof hint === "string" ? hint : undefined}>{hint}</p>}
     </div>
   );

@@ -9,13 +9,13 @@ import { EvaluationPlanPage } from "./evaluation-plan-page";
 
 const mocks = vi.hoisted(() => ({ project: vi.fn(), save: vi.fn(), navigate: vi.fn() }));
 vi.mock("@/api-sdk/projects-api", async (original) => ({ ...await original<object>(), getProject: mocks.project, replaceEvaluationPlan: mocks.save }));
-vi.mock("@/api-sdk/agent-configs-api", async (original) => ({ ...await original<object>(), listAgentOptions: async () => [{ name: "评委", agentConfig: { userAgentId: "evaluator" } }] }));
+vi.mock("@/api-sdk/agent-configs-api", async (original) => ({ ...await original<object>(), listAgentOptions: async () => [{ name: "评估 Agent", agentConfig: { userAgentId: "evaluator" } }] }));
 vi.mock("@/api-sdk/output-schemas-api", async (original) => ({ ...await original<object>(), listOutputSchemas: async () => [{ outputSchemaId: "schema", name: "评分" }] }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => mocks.navigate, Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));
 
 function project(lockedAt: string | null = null) {
   return { project: { projectId: "project", name: "项目" }, currentRun: { runId: "execution" },
-    evaluation: { lockedAt, plan: { evaluatorAgentConfig: { sourceUserAgentId: "evaluator", name: "评委" }, evaluationConcurrency: 2, outputSchema: { outputSchemaId: "schema" } } } };
+    evaluation: { lockedAt, plan: { evaluatorAgentConfig: { sourceUserAgentId: "evaluator", name: "评估 Agent" }, evaluationConcurrency: 2, outputSchema: { outputSchemaId: "schema" } } } };
 }
 const flush = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
 const control = (container: HTMLElement, text: string) => document.getElementById([...container.querySelectorAll("label")].find((item) => item.textContent === text)!.htmlFor)!;

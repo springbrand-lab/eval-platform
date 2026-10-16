@@ -31,12 +31,16 @@ export const materials = [
 ];
 
 const entries = [
-  { id: "demo-user-1", message: { role: "user", content: "我们准备制作一个中文任务清单，主题色使用绿色。" }, createdAt: 1 },
-  { id: "demo-assistant-1", message: { role: "assistant", content: "好的，页面标题为春日任务清单，保留清楚的任务列表，并适配移动端。" }, createdAt: 2 },
+  { id: "demo-user-1", message: { role: "user", content: "我们准备制作一个中文任务清单，主题色使用绿色。", timestamp: 1 }, createdAt: 1 },
+  { id: "demo-assistant-1", message: {
+    role: "assistant", content: [{ type: "text", text: "好的，页面标题为春日任务清单，保留清楚的任务列表，并适配移动端。" }],
+    api: "openai-completions", provider: "openai", model: "eval-demo-context", stopReason: "stop", timestamp: 2,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+  }, createdAt: 2 },
 ];
 export const sessions = [
-  { name: "页面需求上下文", description: "JSON 格式的执行历史上下文", format: "json", content: JSON.stringify({ entries }, null, 2) },
-  { name: "任务清单上下文", description: "JSONL 格式的执行历史上下文", format: "jsonl", content: entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n" },
+  { name: "页面需求上下文（原生消息）", description: "JSON 格式的 Pi 原生消息，assistant 使用内容块数组", format: "json", content: JSON.stringify({ entries }, null, 2) },
+  { name: "任务清单上下文（原生消息）", description: "JSONL 格式的 Pi 原生消息，包含时间、模型与历史用量字段", format: "jsonl", content: entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n" },
 ];
 
 export const outputSchema = {
@@ -63,7 +67,7 @@ export const outputSchema = {
 const evalPrompt = "读取被测产物和评估参考素材，按评分 Schema 输出客观结果。score 为 0–100，passed 表示是否达到 60 分，grade 为 A/B/C；optionalScore 没有依据时用 null，reason 用中文说明。分项完整性、正确性、可读性的满分分别为 40、40、20。";
 export const promptDatasets = [
   {
-    name: "联调示例 · 页面任务 JSON", description: "三条样本，覆盖素材多选、评估素材与可选上下文", format: "json",
+    name: "联调示例 · 页面任务 JSON（原生上下文）", description: "三条样本，覆盖素材多选、评估素材与可选上下文", format: "json",
     data: [
       { name: "带完整初始化的页面任务", description: "执行素材多选、独立评估素材和单个执行上下文", userPrompt: "参考素材实现春日任务清单，包含至少三条任务，使用绿色主题并适配移动端。将页面文件保存到工作区。", evalPrompt, category: "page", expectedTaskCount: 3, resources: "full" },
       { name: "仅绑定执行素材的页面任务", description: "不绑定上下文，直接从当前 prompt 开始", userPrompt: "根据页面参考素材制作一个中文任务列表，支持添加任务和标记完成，保存 HTML、CSS 和必要脚本。", evalPrompt, category: "page", expectedTaskCount: 3, resources: "material" },
@@ -71,7 +75,7 @@ export const promptDatasets = [
     ],
   },
   {
-    name: "联调示例 · 清单任务 JSONL", description: "两条样本，覆盖 JSONL 上传及上下文选择", format: "jsonl",
+    name: "联调示例 · 清单任务 JSONL（原生上下文）", description: "两条样本，覆盖 JSONL 上传及上下文选择", format: "jsonl",
     data: [
       { name: "JSONL 上下文任务", description: "使用 JSONL 初始上下文和执行/评估素材", userPrompt: "延续上下文，为春日任务清单补充任务筛选功能，保存可打开的页面。", evalPrompt, category: "page", resources: "jsonl" },
       { name: "独立 JSONL 文本任务", description: "JSONL 中的第二条完整样本", userPrompt: "整理三条页面验收标准，保存到 acceptance.md。", evalPrompt, category: "text", resources: "none" },

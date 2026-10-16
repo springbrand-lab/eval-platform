@@ -9,18 +9,18 @@ export function CardHeader({ title, description, actions, className }: {
   title: ReactNode; description?: ReactNode; actions?: ReactNode; className?: string;
 }) {
   return (
-    <div className={cn("flex min-h-12 items-center justify-between gap-4 border-b border-border px-4 py-2.5", className)}>
+    <div className={cn("flex min-h-14 flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4", className)}>
       <div className="min-w-0">
         <h2 className="text-sm font-semibold text-text-strong">{title}</h2>
-        {description && <p className="mt-0.5 text-xs text-text-muted">{description}</p>}
+        {description && <p className="mt-1 text-[13px] leading-relaxed text-text-muted">{description}</p>}
       </div>
-      {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </div>
   );
 }
 
 export function CardBody({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("p-4", className)} {...props} />;
+  return <div className={cn("p-5", className)} {...props} />;
 }
 
 /** Two-column label/value list for detail panels. */

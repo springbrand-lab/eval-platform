@@ -1,17 +1,12 @@
-import { ApiError } from "@springbrand/http/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { inputLimits } from "@/test/input-limits";
 import { click, render, type } from "@/test/render";
-import { DatasetsPage } from "./datasets/datasets-page";
-import { EXAMPLE_SCHEMA, OutputSchemasPage } from "./output-schemas/output-schemas-page";
 import { BundleDetailPage } from "./resources/bundle-detail-page";
 
-const api = vi.hoisted(() => ({ prompt: vi.fn(), document: vi.fn(), schema: vi.fn(), session: vi.fn(), listDatasets: vi.fn(), listSchemas: vi.fn() }));
-vi.mock("@/api-sdk/datasets-api", async (original) => ({ ...await original<object>(), importPromptDataset: api.prompt, importDataset: api.document, listDatasets: api.listDatasets }));
-vi.mock("@/api-sdk/output-schemas-api", async (original) => ({ ...await original<object>(), createOutputSchema: api.schema, listOutputSchemas: api.listSchemas }));
+const api = vi.hoisted(() => ({ session: vi.fn() }));
 vi.mock("@/api-sdk/bundles-api", async (original) => {
   const actual = await original<typeof import("@/api-sdk/bundles-api")>();
   const catalog = { ...actual.sessionBundles, createResource: api.session, get: async () => ({ bundleId: "bundle", name: "上下文包", description: "说明" }), listResources: async () => [] };
@@ -22,16 +17,12 @@ vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn(), Link: ({ 
 
 beforeEach(() => {
   Object.values(api).forEach((mock) => mock.mockReset());
-  api.listDatasets.mockResolvedValue([]); api.listSchemas.mockResolvedValue([]);
-  [api.prompt, api.document, api.schema, api.session].forEach((mock) => mock.mockImplementation(() => new Promise(() => {})));
+  api.session.mockImplementation(() => new Promise(() => {}));
 });
 afterEach(() => vi.unstubAllGlobals());
 
 const cases = [
-  { feature: "prompt", open: "导入提示词", submit: "导入", contentLabel: "内容", mock: api.prompt },
-  { feature: "document", open: "导入文档", submit: "导入", contentLabel: "内容", mock: api.document },
-  { feature: "schema", open: "上传评分格式", submit: "上传", contentLabel: "Schema 内容", mock: api.schema },
-  { feature: "session", open: "上传上下文", submit: "上传", contentLabel: "内容", mock: api.session },
+  { feature: "session", open: "新建上下文", submit: "创建", contentLabel: "内容", mock: api.session },
 ] as const;
 
 function deferredFile(name: string, type = "application/json") {
@@ -52,18 +43,20 @@ async function choose(file: File) {
   await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
 }
 
+async function openImport(config: typeof cases[number]) {
+  await vi.waitFor(() => expect(button(config.open)).toBeDefined());
+  await click(button(config.open));
+}
+
 async function openForm(config: typeof cases[number]) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const view = await render(<TooltipProvider><QueryClientProvider client={client}>
-    {config.feature === "schema" ? <OutputSchemasPage /> : config.feature === "session" ? <BundleDetailPage kind="session" bundleId="bundle" /> : <DatasetsPage />}
+    <BundleDetailPage kind="session" bundleId="bundle" />
   </QueryClientProvider></TooltipProvider>);
-  await vi.waitFor(() => expect(button(config.open)).toBeDefined());
-  await click(button(config.open));
+  await openImport(config);
   await vi.waitFor(() => expect(control(config.contentLabel)).toBeDefined());
   // Complete platform metadata so only file state gates submission.
-  if (config.feature === "prompt") { await type(control("测试集名称"), "测试集"); await type(control("说明"), "描述"); }
-  if (config.feature === "schema") { await type(control("名称"), "Schema"); await type(control("说明"), "描述"); }
-  if (config.feature === "session") { await type(control("名称"), "上下文"); await type(control("描述"), "描述"); }
+  await type(control("名称"), "上下文"); await type(control("说明"), "说明");
   return { ...view, cleanup: async () => { await view.unmount(); client.clear(); }, client };
 }
 
@@ -71,7 +64,7 @@ it.each(cases)("$feature submits the latest file with its format and blocks subm
   const view = await openForm(config);
   try {
     const first = deferredFile("first.json");
-    const second = deferredFile(config.feature === "schema" ? "latest.json" : config.feature === "document" ? "latest.yaml" : "latest.jsonl");
+    const second = deferredFile("latest.jsonl");
     await type(control(config.contentLabel), '{"previous":true}');
     await choose(first.file); await choose(second.file);
     expect((control(config.contentLabel) as HTMLTextAreaElement).value).toBe("");
@@ -82,12 +75,9 @@ it.each(cases)("$feature submits the latest file with its format and blocks subm
     await click(button(config.submit));
     await vi.waitFor(() => expect(config.mock).toHaveBeenCalledTimes(1));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
-    if (config.feature === "document") expect(config.mock.mock.calls[0]).toEqual(["yaml", '{"latest":true}']);
-    else {
-      const body = config.mock.mock.calls[0]![config.feature === "session" ? 1 : 0];
-      expect(body.content).toBe('{"latest":true}');
-      if (config.feature !== "schema") expect(body.format).toBe("jsonl");
-    }
+    const body = config.mock.mock.calls[0]![1];
+    expect(body.content).toBe('{"latest":true}');
+    expect(body.format).toBe("jsonl");
     expect(control(config.contentLabel).matches(":disabled")).toBe(true);
     expect((document.querySelector('input[type="file"]') as HTMLInputElement).disabled).toBe(true);
   } finally { await view.cleanup(); }
@@ -111,26 +101,10 @@ it.each(cases)("$feature handles failed reads, lets edits supersede reads and re
     expect(button(config.submit).disabled).toBe(false);
     const closed = deferredFile("closed.json");
     await choose(closed.file); await click(button("取消"));
-    await click(button(config.open));
+    await openImport(config);
     await act(async () => closed.resolve('{"closed":true}'));
-    expect((control(config.contentLabel) as HTMLTextAreaElement).value).toBe(config.feature === "schema" ? EXAMPLE_SCHEMA : "");
+    expect((control(config.contentLabel) as HTMLTextAreaElement).value).toBe("");
     expect(config.mock).not.toHaveBeenCalled();
-  } finally { await view.cleanup(); }
-});
-
-it.each(cases.filter((config) => config.feature !== "session"))("$feature refreshes the catalog and blocks repeats after an unknown write outcome", async (config) => {
-  config.mock.mockRejectedValue(new ApiError({ code: "NETWORK_ERROR", kind: "network", status: 0, message: "ack lost" }));
-  const view = await openForm(config);
-  try {
-    const invalidate = vi.spyOn(view.client, "invalidateQueries");
-    await type(control(config.contentLabel), '{"valid":true}');
-    await click(button(config.submit));
-    await vi.waitFor(() => expect(document.body.textContent).toContain("提交结果尚未确认"));
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: [config.feature === "schema" ? "output-schemas" : "datasets"] });
-    expect(button(config.submit).disabled).toBe(true);
-    await click(button(config.submit));
-    expect(config.mock).toHaveBeenCalledTimes(1);
-    expect(button("取消").disabled).toBe(false);
   } finally { await view.cleanup(); }
 });
 
@@ -149,15 +123,14 @@ it.each(cases)("$feature invalidates a slow older read when a replacement is rej
   } finally { await view.cleanup(); }
 });
 
-it.each(cases.filter((config) => config.feature !== "schema"))("$feature recognizes accepted uppercase file extensions", async (config) => {
+it.each(cases)("$feature recognizes accepted uppercase file extensions", async (config) => {
   const view = await openForm(config);
   try {
-    const file = deferredFile(config.feature === "document" ? "DATASET.YAML" : "DATA.JSON");
+    const file = deferredFile("DATA.JSON");
     await choose(file.file); await act(async () => file.resolve('{"content":true}'));
     await click(button(config.submit));
     await vi.waitFor(() => expect(config.mock).toHaveBeenCalledTimes(1));
-    if (config.feature === "document") expect(config.mock.mock.calls[0]).toEqual(["yaml", '{"content":true}']);
-    else expect(config.mock.mock.calls[0]![config.feature === "session" ? 1 : 0].format).toBe("json");
+    expect(config.mock.mock.calls[0]![1].format).toBe("json");
   } finally { await view.cleanup(); }
 });
 
@@ -184,7 +157,7 @@ it.each(cases)("$feature supersedes an older file while the browser is still ext
     const old = deferredFile("old.json");
     const extraction = await delayedDrop(old.file);
     expect(button(config.submit).disabled).toBe(true);
-    const latest = deferredFile(config.feature === "document" ? "latest.yaml" : "latest.json");
+    const latest = deferredFile("latest.json");
     await choose(latest.file); await act(async () => latest.resolve('{"latest":true}'));
     await act(async () => extraction.finish());
     expect(old.read).not.toHaveBeenCalled();
@@ -221,12 +194,12 @@ it.each(cases)("$feature exits the reading state after browser extraction fails"
   } finally { await view.cleanup(); }
 });
 
-it.each(cases.filter((config) => config.feature !== "schema"))("$feature recognizes an accepted MIME when the filename has no format extension", async (config) => {
+it.each(cases)("$feature recognizes an accepted MIME when the filename has no format extension", async (config) => {
   const view = await openForm(config);
   try {
-    const file = deferredFile("download.data", config.feature === "document" ? "application/yaml" : "application/json");
+    const file = deferredFile("download.data", "application/json");
     await choose(file.file); await act(async () => file.resolve('{"content":true}'));
-    expect((control("格式") as HTMLSelectElement).value).toBe(config.feature === "document" ? "yaml" : "json");
+    expect((control("格式") as HTMLSelectElement).value).toBe("json");
     await click(button(config.submit));
     await vi.waitFor(() => expect(config.mock).toHaveBeenCalledTimes(1));
   } finally { await view.cleanup(); }
@@ -254,22 +227,22 @@ it("does not change a draft on hover and ends an empty-folder selection", async 
   } finally { await view.cleanup(); }
 });
 
-it("keeps platform metadata entered while the prompt file handle is still extracting", async () => {
+it("keeps platform metadata entered while the session file handle is still extracting", async () => {
   const view = await openForm(cases[0]);
   try {
-    await type(control("测试集名称"), "");
+    await type(control("名称"), "");
     const file = deferredFile("filename.json");
     const extraction = await delayedDrop(file.file);
     expect(control("格式").matches(":disabled")).toBe(true);
-    await type(control("测试集名称"), "平台填写的名称");
+    await type(control("名称"), "平台填写的名称");
     await type(control("说明"), "平台填写的说明");
     await act(async () => extraction.finish());
     await act(async () => file.resolve('{"content":true}'));
-    expect((control("测试集名称") as HTMLInputElement).value).toBe("平台填写的名称");
+    expect((control("名称") as HTMLInputElement).value).toBe("平台填写的名称");
     expect((control("说明") as HTMLInputElement).value).toBe("平台填写的说明");
     expect(control("格式").matches(":disabled")).toBe(false);
-    await click(button("导入"));
-    await vi.waitFor(() => expect(api.prompt).toHaveBeenCalledTimes(1));
-    expect(api.prompt.mock.calls[0]![0]).toMatchObject({ name: "平台填写的名称", description: "平台填写的说明", format: "json" });
+    await click(button("创建"));
+    await vi.waitFor(() => expect(api.session).toHaveBeenCalledTimes(1));
+    expect(api.session.mock.calls[0]![1]).toMatchObject({ name: "平台填写的名称", description: "平台填写的说明", format: "json" });
   } finally { await view.cleanup(); }
 });

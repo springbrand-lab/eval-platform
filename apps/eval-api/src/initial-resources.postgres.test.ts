@@ -65,7 +65,7 @@ async function storedFiles(root: string): Promise<readonly string[]> {
     .filter((entry) => entry.isFile()).map((entry) => join(entry.parentPath, entry.name)).sort();
 }
 
-const sessionEntry = (id: string) => JSON.stringify({ id, message: { role: "user", content: "Earlier task" }, createdAt: 1 });
+const sessionEntry = (id: string) => JSON.stringify({ id, message: { role: "user", content: "Earlier task", timestamp: 1 }, createdAt: 1 });
 const sessionFile = (id: string) => JSON.stringify({ entries: [JSON.parse(sessionEntry(id))] });
 
 async function msg<T>(response: Response): Promise<T> {
@@ -160,7 +160,7 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     expect(shapeless.status).toBe(422);
     const sessionResponse = await send(`${sessionRoot}/sessions`, "POST", {
       name: "Prior chat", description: "Execution history", format: "json", content: JSON.stringify({
-        entries: [{ id: "m1", message: { role: "user", content: "Earlier task" }, createdAt: 1 }],
+        entries: [{ id: "m1", message: { role: "user", content: "Earlier task", timestamp: 1 }, createdAt: 1 }],
       }),
     });
     expect(sessionResponse.status).toBe(201);
@@ -249,7 +249,7 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     const session = await sessionBundles.createResource(sessionBundle.bundleId, {
       name: "Case session", description: "One history", format: "json",
       content: JSON.stringify({ entries: [{
-        id: "m1", message: { role: "user", content: "Earlier task" }, createdAt: 1,
+        id: "m1", message: { role: "user", content: "Earlier task", timestamp: 1 }, createdAt: 1,
       }] }),
     });
     const upperRef = {
@@ -469,6 +469,52 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     expect(deleted.status).toBe(404);
     expect(await code(deleted)).toBe("BUNDLE_RESOURCE_NOT_FOUND");
     expect(await storedFiles(bundleRoot)).toEqual(filesBeforeMissing);
+  });
+
+  it.each(["json", "jsonl"] as const)("rejects malformed native %s contexts at upload without saving resources or ZIP prefixes", async (format) => {
+    const bundles = await openBundleDirectory(bundleRoot);
+    const send = httpClient(database.db, bundles);
+    const { bundle } = await msg<{ bundle: { bundleId: string } }>(await send("/api/session-bundles", "POST",
+      form({ name: `Native ${format}`, description: "Upload validation" })));
+    const root = `/api/session-bundles/${bundle.bundleId}`;
+    const user = JSON.parse(sessionEntry("prior-user"));
+    const assistant = { id: "prior-assistant", createdAt: 2, message: {
+      role: "assistant", content: [{ type: "text", text: "Previous answer" }], timestamp: 2,
+      api: "openai-completions", provider: "openai", model: "test", stopReason: "stop",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    } };
+    const content = (entry: unknown) => format === "json" ? JSON.stringify({ entries: [user, entry] })
+      : [user, entry].map((row) => JSON.stringify(row)).join("\n");
+    const filesBefore = await storedFiles(bundleRoot);
+    const catalogsBefore = await msg(await send("/api/session-bundles", "GET"));
+    for (const entry of [
+      { ...assistant, message: { ...assistant.message, content: "Previous answer" } },
+      { ...assistant, message: { ...assistant.message, content: [{ type: "thinking", thinking: "Thought", thinkingSignature: 42 }] } },
+      { ...assistant, message: { ...assistant.message, protocolResponse: { output: "invalid" } } },
+      { ...user, id: "bad-sidecar", userSidecar: { parts: {} } },
+    ]) {
+      const rejected = await send(`${root}/sessions`, "POST", { name: "Bad history", description: "Invalid native entry", format, content: content(entry) });
+      expect(rejected.status).toBe(400);
+      expect(await rejected.json()).toMatchObject({ code: "BUNDLE_FILE_INVALID", errors: [{ path: "content", errMsg: expect.stringContaining("entries.1") }] });
+      const archive = await zip([`good.${format}`, content(assistant)], [`bad.${format}`, content(entry)]);
+      for (const [path, fields] of [
+        ["/api/session-bundles", { name: "Rejected ZIP", description: "All or nothing", zip: archive }],
+        [`${root}/import`, { zip: archive }],
+      ] as const) {
+        const failedZip = await send(path, "POST", form(fields));
+        expect(failedZip.status).toBe(400);
+        expect(await failedZip.json()).toMatchObject({ code: "BUNDLE_FILE_INVALID", errors: [{ path: `bad.${format}`, errMsg: expect.stringContaining("entries.1") }] });
+      }
+      expect(await msg(await send(`${root}/sessions`, "GET"))).toEqual([]);
+      expect(await msg(await send("/api/session-bundles", "GET"))).toEqual(catalogsBefore);
+      expect(await storedFiles(bundleRoot)).toEqual(filesBefore);
+    }
+    const valid = await send(`${root}/sessions`, "POST", { name: "Valid history", description: "Native entries", format, content: content(assistant) });
+    expect(valid.status).toBe(201);
+    const resource = await msg<{ sessionId: string }>(valid);
+    expect(await bundles.resolveInitialSession(owner, { bundleId: bundle.bundleId, sessionId: resource.sessionId }))
+      .toEqual({ format, content: content(assistant) });
   });
 
   it("reads exact resource files without exposing another catalog, resource or owner", async () => {

@@ -19,8 +19,8 @@ it("keeps metadata drafts on background changes, saves platform labels and reset
       return document.getElementById(node.htmlFor) as HTMLInputElement;
     };
     expect(control("名称").required).toBe(true);
-    expect(control("描述").required).toBe(true);
-    await type(control("名称"), "本地名称"); await type(control("描述"), "本地描述");
+    expect(control("说明").required).toBe(true);
+    await type(control("名称"), "本地名称"); await type(control("说明"), "本地描述");
     await act(async () => refresh());
     expect(control("名称").value).toBe("本地名称");
     await click([...document.querySelectorAll("button")].find((item) => item.textContent === "保存"));

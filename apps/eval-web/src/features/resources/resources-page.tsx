@@ -44,15 +44,16 @@ export function ResourcesPage({ kind }: { kind: ResourceKind }) {
   const close = () => { if (!create.isPending) { setCreating(false); setZip(null); create.reset(); } };
   return <Page>
     <PageHeader title={label} crumbs={[{ label: "数据集", to: "/datasets" }]}
+      description={kind === "material" ? "创建素材包后上传文件或文件夹，也可以在创建时一次导入 ZIP。素材可复用于多个用例。" : "上传执行前的会话上下文。创建时可通过 ZIP 批量导入 JSON / JSONL 文件。"}
       actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setCreating(true)}>新建{label}包</Button>} />
     <Card>
       {bundles.isPending ? <LoadingBlock /> : bundles.error ? <ErrorBlock error={bundles.error} onRetry={() => void bundles.refetch()} /> : <DataTable<BundleRecord>
         rows={bundles.data} rowKey={(row) => row.bundleId} searchText={(row) => `${row.name} ${row.description}`}
         onRowClick={(row) => void navigate({ to: "/resources/$kind/$bundleId", params: { kind, bundleId: row.bundleId } })}
-        empty={<EmptyState title={`还没有${label}包`} action={<Button onClick={() => setCreating(true)}>新建</Button>} />}
+        empty={<EmptyState title={`还没有${label}包`} description="先创建一个包来组织资源，可同时选择 ZIP 导入，也可进入包后逐条添加。" action={<Button variant="primary" onClick={() => setCreating(true)}>新建{label}包</Button>} />}
         columns={[
           { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span>, sortValue: (row) => row.name },
-          { key: "description", header: "描述", cell: (row) => row.description },
+          { key: "description", header: "说明", cell: (row) => row.description },
           { key: "id", header: "ID", cell: (row) => <CopyId value={row.bundleId} /> },
         ]} />}
     </Card>

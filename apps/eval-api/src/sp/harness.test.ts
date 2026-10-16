@@ -324,7 +324,7 @@ describe("Eval SP Harness", () => {
     const { fetch, requests } = spFetch(() => Response.json(binding()));
     const resolveInitialSession = vi.fn(async () => ({
       format: "jsonl" as const,
-      content: '{"id":"m1","message":{"role":"user","content":"Hi"},"createdAt":1}',
+      content: '{"id":"m1","message":{"role":"user","content":"Hi","timestamp":1},"createdAt":1}',
     }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, resolveInitialSession });
     await harness.materializeInitialData({
@@ -504,7 +504,7 @@ describe("Eval SP Harness", () => {
   });
 
   it("sends service authentication on a real WebSocket upgrade", async () => {
-    const server = new WebSocketServer({ port: 0 });
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     await new Promise<void>((resolve) => server.once("listening", resolve));
     const address = server.address();
     if (typeof address === "string" || !address) throw new Error("WebSocket server did not bind a TCP port");

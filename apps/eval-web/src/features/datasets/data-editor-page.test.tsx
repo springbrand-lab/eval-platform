@@ -34,7 +34,7 @@ function control(container: HTMLElement, label: string) {
 }
 
 async function fillNewData(container: HTMLElement) {
-  for (const [label, value] of [["名称", "Case"], ["描述", "Task"], ["启动 Prompt", "Execute"], ["评估 Prompt", "Judge"]]) {
+  for (const [label, value] of [["名称", "Case"], ["说明", "Task"], ["启动 Prompt", "Execute"], ["评估 Prompt", "Judge"]]) {
     await type(control(container, label!), value!);
   }
 }
@@ -92,7 +92,7 @@ describe("uploaded sample editor", () => {
         if (!element) throw new Error(`Missing label ${label}`);
         return view.container.ownerDocument.getElementById(element.htmlFor) as HTMLInputElement | HTMLTextAreaElement;
       };
-      for (const [label, value] of [["名称", "新名称"], ["描述", "新描述"], ["启动 Prompt", "新启动\n原文"], ["评估 Prompt", "新评估\n原文"]]) {
+      for (const [label, value] of [["名称", "新名称"], ["说明", "新描述"], ["启动 Prompt", "新启动\n原文"], ["评估 Prompt", "新评估\n原文"]]) {
         expect(control(label!).required).toBe(true);
         await type(control(label!), value!);
       }

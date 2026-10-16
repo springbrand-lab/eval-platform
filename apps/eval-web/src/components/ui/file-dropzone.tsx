@@ -92,18 +92,20 @@ export function FileDropzone({ onFiles, onSelectionStart, onRejected, onExtracti
     <div
       {...getRootProps()}
       className={cn(
-        "flex flex-col items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-dashed px-6 py-6 text-center transition-colors",
-        isDragActive ? "border-text-strong bg-surface-muted" : "border-border-strong bg-surface-muted/40",
+        "flex flex-col items-center justify-center gap-2 rounded-[var(--radius-card)] border-2 border-dashed px-6 py-8 text-center transition-colors",
+        isDragActive ? "border-text-strong bg-surface-muted" : "border-border-strong bg-surface-muted/30",
+        disabled && "opacity-60",
         className,
       )}
     >
       <input {...getInputProps({ disabled })} />
-      <Upload className="size-4 text-text-muted" />
-      <p className="text-[13px] text-text">
-        拖入{multiple ? "文件或文件夹" : "文件"}，或
+      <span className="mb-1 flex size-10 items-center justify-center rounded-xl border border-border bg-surface"><Upload className="size-5 text-text-secondary" /></span>
+      <p className="text-sm text-text">
+        {isDragActive ? "松开以读取" : "拖入"}{multiple ? "文件或文件夹" : "文件"}，或
         <Button type="button" variant="link" className="ml-1 h-auto p-0 font-semibold" disabled={disabled} onClick={open}>选择文件</Button>
       </p>
       {hint && <p className="text-xs text-text-muted">{hint}</p>}
+      {accept && <p className="text-xs text-text-muted">{Object.values(accept).flat().join(" / ")}{maxBytes !== undefined ? ` · 单文件不超过 ${formatBytes(maxBytes)}` : ""}</p>}
       {error && <p role="alert" className="text-xs text-danger">{error}</p>}
     </div>
   );

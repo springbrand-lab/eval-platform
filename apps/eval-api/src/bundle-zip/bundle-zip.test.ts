@@ -6,7 +6,14 @@ import { readMaterialZip, readSessionZip } from "./bundle-zip.js";
 
 type ZipEntry = readonly [name: string, content?: string | Uint8Array, options?: ZipWriterAddDataOptions];
 
-const entry = (id: string, role = "user") => JSON.stringify({ id, message: { role, content: "Hi" }, createdAt: 1 });
+const entry = (id: string, role: "user" | "assistant" = "user") => JSON.stringify({ id, createdAt: 1,
+  message: role === "user" ? { role, content: "Hi", timestamp: 1 } : {
+    role, content: [{ type: "text", text: "Hello" }], timestamp: 1,
+    api: "openai-completions", provider: "openai", model: "test", stopReason: "stop",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+  },
+});
 const sessionJson = (...ids: string[]) => JSON.stringify({ entries: ids.map((id) => JSON.parse(entry(id))) });
 
 /** Entries named with a trailing slash are directories; the rest are files. */

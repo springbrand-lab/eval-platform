@@ -1,12 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { Download, Link2, Pencil, Plus, Trash2, Unlink } from "lucide-react";
+import { Download, Pencil, Plus, Trash2, Unlink } from "lucide-react";
 import { ActionMenu } from "@/components/ui/menu";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
-import { dataKeys, listData } from "@/api-sdk/data-api";
 import {
-  attachData, datasetKeys, deleteDataset, detachData, exportDataset, getDataset, listDatasetData, updateDataset,
+  datasetKeys, deleteDataset, detachData, exportDataset, getDataset, listDatasetData, updateDataset,
 } from "@/api-sdk/datasets-api";
 import type { Data } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
@@ -30,7 +29,7 @@ export function dataTitle(data: Data): string {
 export function DataResourceBadges({ data }: { data: Data }) {
   const resources = [
     data.initialMaterials && "素材",
-    data.evalInitialMaterials && "评委素材",
+    data.evalInitialMaterials && "评估 Agent 素材",
     data.initialSession && "初始会话",
   ].filter(Boolean);
   return (
@@ -41,53 +40,14 @@ export function DataResourceBadges({ data }: { data: Data }) {
   );
 }
 
-function AttachDialog({ datasetId, memberIds, open, onClose }: {
-  datasetId: string; memberIds: ReadonlySet<string>; open: boolean; onClose: () => void;
-}) {
-  const queryClient = useQueryClient();
-  const all = useQuery({ queryKey: dataKeys.list(), queryFn: ({ signal }) => listData(undefined, signal), enabled: open });
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const candidates = useMemo(() => (all.data ?? []).filter((item) => !memberIds.has(item.dataId)), [all.data, memberIds]);
-  const attach = useMutation({
-    mutationFn: () => attachData(datasetId, [...selected]),
-    onSuccess: async () => {
-      toast.success(`已加入 ${selected.size} 条用例`);
-      setSelected(new Set());
-      await queryClient.invalidateQueries({ queryKey: datasetKeys.members(datasetId) });
-      onClose();
-    },
-  });
-  return (
-    <Dialog open={open} onClose={onClose} size="lg" title="加入已有用例"
-      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={selected.size === 0} loading={attach.isPending} onClick={() => attach.mutate()}>加入 {selected.size || ""} 条</Button></>}>
-      {all.isPending ? <LoadingBlock /> : (
-        <DataTable<Data>
-          rows={candidates}
-          rowKey={(row) => row.dataId}
-          selectable
-          selected={selected}
-          onSelectedChange={setSelected}
-          searchText={(row) => `${dataTitle(row)} ${row.userPrompt}`}
-          empty={<EmptyState title="没有可加入的用例" />}
-          columns={[
-            { key: "title", header: "用例", cell: (row) => <span className="line-clamp-2">{dataTitle(row)}</span> },
-            { key: "resources", header: "", cell: (row) => <DataResourceBadges data={row} /> },
-          ]}
-        />
-      )}
-    </Dialog>
-  );
-}
-
 export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const dataset = useQuery({ queryKey: datasetKeys.detail(datasetId), queryFn: ({ signal }) => getDataset(datasetId, signal) });
   const members = useQuery({ queryKey: datasetKeys.members(datasetId), queryFn: ({ signal }) => listDatasetData(datasetId, signal) });
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [dialog, setDialog] = useState<"edit" | "attach" | "detach" | "delete" | null>(null);
+  const [dialog, setDialog] = useState<"edit" | "detach" | "delete" | null>(null);
   const [form, setForm] = useState({ name: "", description: "" });
-  const memberIds = useMemo(() => new Set((members.data ?? []).map((item) => item.dataId)), [members.data]);
 
   const update = useMutation({
     mutationFn: () => updateDataset(datasetId, { name: form.name.trim(), ...(form.description.trim() ? { description: form.description.trim() } : {}) }),
@@ -149,7 +109,6 @@ export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
               {selected.size > 0 && (
                 <Button size="sm" icon={<Unlink className="size-4" />} onClick={() => setDialog("detach")}>移出 {selected.size} 条</Button>
               )}
-              <Button size="sm" icon={<Link2 />} onClick={() => setDialog("attach")}>加入已有用例</Button>
             </>
           )}
         />
@@ -165,7 +124,7 @@ export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
             empty={<EmptyState title="测试集还没有用例" />}
             columns={[
               { key: "title", header: "名称", className: "min-w-40", cell: (row) => <span className="line-clamp-2 font-semibold text-text-strong">{dataTitle(row)}</span>, sortValue: dataTitle },
-              { key: "description", header: "描述", cell: (row) => <span className="line-clamp-2 max-w-sm text-text-muted">{typeof row.description === "string" ? row.description : "未填写"}</span> },
+              { key: "description", header: "说明", cell: (row) => <span className="line-clamp-2 max-w-sm text-text-muted">{typeof row.description === "string" ? row.description : "未填写"}</span> },
               { key: "prompt", header: "启动 Prompt", cell: (row) => <span className="line-clamp-2 max-w-md text-text-muted">{row.userPrompt}</span> },
               { key: "evalPrompt", header: "评估 Prompt", cell: (row) => <span className="line-clamp-2 max-w-md text-text-muted">{row.evalPrompt ?? "未填写"}</span> },
               { key: "resources", header: "", cell: (row) => <DataResourceBadges data={row} /> },
@@ -181,7 +140,6 @@ export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
           <Field label="说明">{(id) => <Textarea id={id} rows={3} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />}</Field>
         </div>
       </Dialog>
-      <AttachDialog datasetId={datasetId} memberIds={memberIds} open={dialog === "attach"} onClose={() => setDialog(null)} />
       <ConfirmDialog open={dialog === "detach"} onClose={() => setDialog(null)} onConfirm={() => detach.mutate()} loading={detach.isPending}
         title="移出用例" description={`从测试集移出 ${selected.size} 条用例。用例本身不会删除，已有 Project 不受影响。`} confirmLabel="移出" />
       <ConfirmDialog open={dialog === "delete"} onClose={() => setDialog(null)} onConfirm={() => remove.mutate()} loading={remove.isPending} danger

@@ -114,40 +114,43 @@ export function DataTable<T>({
 
   return (
     <div className="flex flex-col">
-      {(searchText || toolbar) && (
-        <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+      <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-3">
           {searchText && (
-            <div className="relative w-64">
+            <div className="relative w-full sm:w-72">
               <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-text-faint" />
               <Input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder={searchPlaceholder}
                 aria-label={searchPlaceholder}
-                className="h-8 w-full rounded-[var(--radius-control)] border border-input bg-surface pl-8 pr-2 text-[13px] text-text-strong placeholder:text-text-faint focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
+                className="h-9 w-full rounded-[var(--radius-control)] border border-input bg-surface pl-8 pr-2 text-sm text-text-strong placeholder:text-text-faint focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
               />
             </div>
           )}
-          <div className="ml-auto flex items-center gap-2">{toolbar}</div>
-        </div>
-      )}
+          <span role="status" className="text-xs tabular text-text-muted">{query.trim() ? `${visible.length} / ${rows.length}` : rows.length} 条记录</span>
+          <div className="ml-auto flex flex-wrap items-center gap-2">{toolbar}</div>
+      </div>
       {visible.length === 0 ? (
-        empty ?? <EmptyState title={query ? "没有匹配的结果" : "暂无数据"} />
+        query.trim()
+          ? <EmptyState title="没有匹配的结果" description="试试其他关键词，或清空搜索查看全部记录。"
+            action={<Button type="button" variant="outline" onClick={() => setQuery("")}>清空搜索</Button>} />
+          : empty ?? <EmptyState title="暂无数据" />
       ) : (
         <div className={virtual ? "[&>[data-slot=table-container]]:max-h-[70vh] [&>[data-slot=table-container]]:overflow-y-auto" : undefined}>
-          <Table ref={connectViewport} className="w-full border-collapse text-[13px]">
-            <TableHeader className={cn(virtual && "sticky top-0 z-10 bg-surface")}>
+          <Table ref={connectViewport} className="w-full border-collapse text-sm">
+            <TableHeader className={cn("bg-surface-muted/60", virtual && "sticky top-0 z-10 bg-surface-muted")}>
               {table.getHeaderGroups().map((group) => (
                 <TableRow key={group.id} className="border-b border-border text-left text-xs text-text-muted">
                   {group.headers.map((header) => {
                     const meta = header.column.columnDef.meta as { className?: string; align?: string } | undefined;
                     const sorted = header.column.getIsSorted();
                     return (
-                      <TableHead key={header.id} className={cn("h-9 whitespace-nowrap px-3 font-semibold", meta?.align === "right" && "text-right", meta?.className)}>
+                      <TableHead key={header.id} aria-sort={sorted ? (sorted === "asc" ? "ascending" : "descending") : undefined}
+                        className={cn("h-10 whitespace-nowrap px-4 font-medium", meta?.align === "right" && "text-right", meta?.className)}>
                         {header.column.id === "__select" ? <Checkbox aria-label="全选" checked={table.getIsAllRowsSelected()}
                           indeterminate={!table.getIsAllRowsSelected() && table.getIsSomeRowsSelected()} onCheckedChange={(value) => table.toggleAllRowsSelected(value)} /> : header.column.getCanSort() ? (
                           <Button type="button" variant="ghost" size="sm" onClick={header.column.getToggleSortingHandler()}
-                            className={cn("inline-flex items-center gap-1 hover:text-text-strong", meta?.align === "right" && "flex-row-reverse")}>
+                            className={cn("inline-flex h-auto items-center gap-1 px-0 py-1 text-xs font-medium hover:text-text-strong", meta?.align === "right" && "flex-row-reverse")}>
                             {columnsByKey.get(header.column.id)!.header}
                             {sorted === "asc" ? <ArrowUp className="size-3" /> : sorted === "desc" ? <ArrowDown className="size-3" /> : <ArrowUpDown className="size-3 opacity-40" />}
                           </Button>
@@ -160,21 +163,30 @@ export function DataTable<T>({
             </TableHeader>
             <TableBody>
               {padTop > 0 && <TableRow style={{ height: padTop }}><TableCell colSpan={columnCount} /></TableRow>}
-              {shownRows.map((row) => (
+              {shownRows.map((row, index) => (
                 <TableRow
                   key={row.id}
+                  data-index={virtual ? items[index]?.index : undefined}
+                  ref={virtual ? virtualizer.measureElement : undefined}
                   data-state={row.getIsSelected() ? "selected" : undefined}
+                  tabIndex={onRowClick ? 0 : undefined}
                   onClick={onRowClick ? () => onRowClick(row.original) : undefined}
+                  onKeyDown={onRowClick ? (event) => {
+                    if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+                      event.preventDefault();
+                      onRowClick(row.original);
+                    }
+                  } : undefined}
                   className={cn(
                     "border-b border-border text-text last:border-b-0 data-[state=selected]:bg-surface-muted",
-                    onRowClick && "cursor-pointer hover:bg-surface-hover",
+                    onRowClick && "cursor-pointer hover:bg-surface-hover focus-visible:bg-surface-muted focus-visible:outline-offset-[-2px]",
                   )}
                 >
                   {row.getVisibleCells().map((cell) => {
                     const meta = cell.column.columnDef.meta as { className?: string; align?: string } | undefined;
                     return (
                       <TableCell key={cell.id} onClick={cell.column.id === "__select" ? (event) => event.stopPropagation() : undefined}
-                        className={cn("h-11 px-3 py-2 align-middle", meta?.align === "right" && "text-right tabular", meta?.className)}>
+                        className={cn("h-11 px-4 py-2 align-middle", meta?.align === "right" && "text-right tabular", meta?.className)}>
                         {cell.column.id === "__select" ? <Checkbox aria-label="选择" checked={row.getIsSelected()} onCheckedChange={(value) => row.toggleSelected(value)} />
                           : columnsByKey.get(cell.column.id)!.cell(row.original)}
                       </TableCell>
