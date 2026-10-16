@@ -71,8 +71,8 @@ function AgentForm({ initial, template, userId, onSaved }: {
     onError: (failure) => {
       setError(failure instanceof AgentCreationError ? describeAgentCreationError(failure)
         : failure instanceof ApiError && failure.status === 409
-          ? "This Agent changed elsewhere. Your edits are still here. Reload the page to load its latest settings."
-          : failure instanceof Error ? failure.message : "Could not save this Agent. Your edits are still here.");
+          ? "此 Agent 已在其他位置更新。你的修改仍然保留，请重新加载页面获取最新配置。"
+          : failure instanceof Error ? failure.message : "保存失败。你的修改仍然保留，请重试。");
     },
     onSettled: () => {
       submitting.current = false;
@@ -110,7 +110,7 @@ function AgentForm({ initial, template, userId, onSaved }: {
         : { kind: "create", input: createInputFromDraft(draft, slug) };
     } catch (failure) {
       const issue = failure instanceof ZodError ? failure.issues[0] : undefined;
-      setError(issue ? `${issue.path.join(".") || "Agent settings"}: ${issue.message}` : "Check the Agent settings before saving.");
+      setError(issue ? `${issue.path.join(".") || "Agent 配置"}: ${issue.message}` : "请检查配置后再保存。");
       return;
     }
     submitting.current = true;
@@ -118,6 +118,7 @@ function AgentForm({ initial, template, userId, onSaved }: {
     save.mutate(request);
   }
   const common = {
+    supplementaryContent: <AgentMcpServers selections={draft.setting.mcpServers} />,
     userId, draft, models: models.data ?? [], modelsLoading: models.isPending, modelsError: models.isError,
     readOnly, saving: save.isPending, error, onSave: submit,
     onDraftChange: (update: (current: AgentDraft) => AgentDraft) => {
@@ -134,7 +135,6 @@ function AgentForm({ initial, template, userId, onSaved }: {
         deleteCheckError={deletionCheck.error ? deletionErrorFeedback(deletionCheck.error).message : null}
         onDelete={() => { if (!readOnly) deletionCheck.mutate(); }} /> : <AgentEditor mode="create" {...common} />}
     </AgentEditorProvider>
-    <AgentMcpServers selections={draft.setting.mcpServers} />
     <ConfirmDialog open={deleting} onClose={() => { if (!remove.isPending) setDeleting(false); }}
       onConfirm={() => remove.mutate()} loading={remove.isPending} danger title="删除 Agent 配置"
       description={<>{remove.error ? <span role="alert">{deletionErrorFeedback(remove.error).message}</span> : "已有项目的执行配置不受影响。"}</>} confirmLabel="删除" />

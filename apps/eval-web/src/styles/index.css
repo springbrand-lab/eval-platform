@@ -95,26 +95,34 @@
   padding: 0 0 24px;
 }
 .agent-editor-layout > main > form > fieldset > * { margin-block: 0; min-width: 0; }
-.agent-editor-layout > main > form > fieldset > header { grid-column: 1 / -1; }
+.agent-editor-layout > main > form > fieldset > header,
+.agent-editor-layout > main > form > fieldset > .agent-mcp-section { grid-column: 1 / -1; }
 .agent-editor-layout > main > form > fieldset > header h1 { display: none; }
 .agent-editor-layout > main > form > fieldset > header p { font-size: 12px; }
 .agent-editor-layout > main > form > fieldset > div:not([role="alert"]) { border: 0; border-radius: 0; background: transparent; box-shadow: none; border-top: 1px solid var(--border); padding-top: 12px; }
 .agent-editor-layout > main > form > fieldset > div > div:first-child { min-height: 32px; border-radius: 0; background: transparent; padding-inline: 0; }
 .agent-editor-layout > main > form > fieldset > div > div:last-child { padding: 8px 0 0; }
 .agent-editor-layout > main > form > fieldset > div > div:first-child button { box-shadow: none; }
-.agent-editor-layout > main > form > fieldset > div > div:first-child button[aria-label^="Add "] { border-color: transparent; background: transparent; }
+.agent-editor-layout > main > form > fieldset > div > div:first-child button[aria-label^="添加"] { border-color: transparent; background: transparent; }
 .agent-editor-layout > main > form > fieldset label,
 .agent-editor-layout > main > form > fieldset button,
 .agent-editor-layout > main > form > fieldset p { font-size: 12px; }
-.agent-editor-layout > main > form > div:last-child { padding: 10px 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; }
+.agent-editor-layout > main > form > div:last-child { padding: 10px 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: var(--bg); box-shadow: none; }
 .agent-editor-layout > main > form > div:last-child > div { max-width: none; gap: 8px; }
+.agent-editor-layout > main > form > fieldset > [data-agent-identity],
+.agent-editor-layout > main > form > fieldset > [data-agent-capabilities],
+.agent-editor-layout > main > form > fieldset > [role="alert"] { grid-column: 1 / -1; }
+.agent-editor-layout [data-agent-runtime] > .grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.agent-editor-layout > main > form > fieldset > [data-agent-capabilities] { border-top: 1px solid var(--border); padding-top: 16px; }
+.agent-editor-layout > main > form > fieldset > div[data-agent-empty]:not([role="alert"]) { border: 0; padding: 0; }
+.agent-editor-layout > main > form > fieldset > [data-agent-empty] > div { padding: 0; min-height: 32px; }
+.agent-editor-layout > main > form > fieldset > [data-agent-empty] h3 { font-size: 12px; }
+@media (min-width: 800px) {
+  .agent-editor-layout > main > form > fieldset { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 20px 24px; }
+  .agent-editor-layout > main > form > fieldset > div { grid-column: span 3; }
+  .agent-editor-layout [data-agent-prompt] { grid-column: span 4; }
+  .agent-editor-layout [data-agent-runtime] { grid-column: span 2; padding-left: 20px; border-left: 1px solid var(--border); align-self: stretch; }
+}
 @media (min-width: 1100px) {
-  .agent-editor-layout > main > form > fieldset { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 24px 28px; }
   .agent-editor-layout > main > form > fieldset > div { grid-column: span 2; }
-  .agent-editor-layout > main > form > fieldset > div:has(#agent-name) { grid-column: span 4; border-top: 0; padding-top: 0; }
-  .agent-editor-layout > main > form > fieldset > div:has(#agent-model) { grid-column: span 2; border-top: 0; border-left: 1px solid var(--border); padding: 0 0 0 24px; align-self: stretch; }
-  .agent-editor-layout > main > form > fieldset > div:has(#agent-model) .grid { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-  .agent-editor-layout > main > form > fieldset > [role="alert"] { grid-column: 1 / -1; }
-  .agent-editor-layout > main > form > fieldset > div:has(#agent-name) button:has(.line-clamp-3) { min-height: 160px; }
-  .agent-editor-layout > main > form > fieldset > div:has(#agent-name) .line-clamp-3 { -webkit-line-clamp: 5; line-clamp: 5; }
 }
