@@ -11,7 +11,7 @@
     "start:worker": "tsx src/run-worker-main.ts",
     "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
     "db:check": "drizzle-kit check --config=drizzle.config.ts",
-    "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts"
+    "db:migrate": "tsx src/migrate.ts"
   },
   "dependencies": {
     "@eval-platform/eval-contracts": "workspace:*",
