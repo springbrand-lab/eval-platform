@@ -34,6 +34,8 @@ const apiEnvSchema = databaseEnvSchema.extend({
   EVAL_WEB_API_TOKEN: z.string().min(32).optional(),
   EVAL_API_HOST: requiredStringSchema.default("127.0.0.1"),
   EVAL_API_PORT: portSchema.default(8788),
+  /** Bearer token of the Evaluator result submission MCP Server; also keys every per-Evaluation submit token. */
+  EVAL_RESULT_MCP_TOKEN: z.string().min(32).optional(),
   /** Lets the API re-sync a Run's scores; the Run Worker syncs them as Evaluations finish. */
   ...langfuseEnvShape,
 }).superRefine(refineLangfuseEnv);

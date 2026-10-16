@@ -14,8 +14,13 @@ export const EVIDENCE_ARTIFACTS_ROOT = "/evidence/artifacts";
 export const EVIDENCE_TRAJECTORY_ROOT = "/evidence/trajectory";
 export const EVIDENCE_SUBJECT_INPUTS_ROOT = "/evidence/subject-inputs";
 export const EVALUATION_OUTPUT_SCHEMA_PATH = "/evaluation-output.schema.json";
-/** Where every Evaluator writes its result, in its own Space. */
+/** Where an Evaluator without the submission tool writes its result, in its own Space. */
 export const EVALUATION_RESULT_PATH = "/output/result.json";
+/** The Eval MCP tool an Evaluator calls to hand its result to the platform. */
+export const EVALUATION_SUBMIT_TOOL = "submit_evaluation";
+/** `structuredOutput.path` of a result submitted through that tool or recovered from the final reply. */
+export const EVALUATION_SUBMISSION_PATH = "mcp:submit_evaluation";
+export const EVALUATION_FINAL_REPLY_PATH = "final-reply";
 
 /** Stored on the Sampling; the bundle itself lives in the evidence store. */
 export interface EvidenceBundleRef {

@@ -47,6 +47,7 @@ export class RunResumer implements EvalRunResumer {
       onError: this.#onError,
       createRetryController: this.#createRetryController,
       ...(dependencies.scores === undefined ? {} : { scores: dependencies.scores }),
+      ...(dependencies.results === undefined ? {} : { results: dependencies.results }),
     };
     this.#stop = {
       store: this.#store,
@@ -229,6 +230,7 @@ export class RunResumer implements EvalRunResumer {
       stopAgent: (input) => observe(harness.stopAgent(input)),
       collectExecution: (input) => observe(harness.collectExecution(input)),
       collectEvaluation: (input) => observe(harness.collectEvaluation(input)),
+      readFinalReply: (input) => observe(harness.readFinalReply(input)),
       collectAgentResources: (input) => observe(harness.collectAgentResources(input)),
       exportEvidence: (input) => observe(harness.exportEvidence(input)),
     };

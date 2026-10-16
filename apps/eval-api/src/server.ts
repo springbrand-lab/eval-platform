@@ -4,6 +4,7 @@ import pino from "pino";
 import { createRoutes } from "./app.js";
 import { loadApiConfig } from "./config/api.js";
 import { createEvalDb } from "./db/client.js";
+import { createPostgresEvaluationSubmissions } from "./db/evaluation-submissions.js";
 import { createLangfuseScorePublisher } from "./langfuse/scores.js";
 import { errorDiagnostics } from "./lib/api-errors.js";
 import type { ApiRuntime } from "./lib/types.js";
@@ -24,6 +25,7 @@ const serviceUser = await sp.verifySession(config.EVAL_SP_SERVICE_SESSION_TOKEN)
 if (serviceUser?.id !== config.EVAL_SP_SERVICE_USER_ID || !serviceUser.email) {
   throw new Error("EVAL_SP_SERVICE_SESSION_TOKEN does not belong to EVAL_SP_SERVICE_USER_ID");
 }
+const db = createEvalDb(pool);
 const runtime: ApiRuntime = {
   webOrigin: config.EVAL_WEB_ORIGIN,
   ...(config.EVAL_WEB_API_TOKEN === undefined ? {} : { webApiToken: config.EVAL_WEB_API_TOKEN }),
@@ -37,9 +39,13 @@ const runtime: ApiRuntime = {
   serviceAccount: { user: serviceUser, email: serviceUser.email, sessionToken: config.EVAL_SP_SERVICE_SESSION_TOKEN },
   spAdminToken: config.EVAL_SP_ADMIN_TOKEN,
   ownerServices: createOwnerServices({
-    db: createEvalDb(pool), sp, bundles, release: config.release, runQueue,
+    db, sp, bundles, release: config.release, runQueue,
     ...(config.langfuse === undefined ? {} : { publishScore: createLangfuseScorePublisher({ config: config.langfuse }) }),
   }),
+  ...(config.EVAL_RESULT_MCP_TOKEN === undefined ? {} : { evaluationResults: {
+    token: config.EVAL_RESULT_MCP_TOKEN,
+    submissions: createPostgresEvaluationSubmissions(db),
+  } }),
 };
 const app = createRoutes(logger);
 const server = serve({

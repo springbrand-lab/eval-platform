@@ -38,6 +38,7 @@ import {
   evidenceFileReceipt,
   evidenceTrajectoryPage,
   executionOutput,
+  finalReplyText,
   initializationRequest,
   resourceSnapshot,
   requireStopResult,
@@ -156,6 +157,26 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
   const operationPath = (kind: "submissions" | "resources", handle: AgentHandle, key: string): string =>
     `${handlePath(handle)}/${kind}/by-key/${encodeURIComponent(key)}`;
 
+  /** Every trajectory event of one Chat, oldest first; SP serves it only after the last Submission is terminal. */
+  async function* trajectoryEvents(handle: AgentHandle): AsyncGenerator<{ ingestSeq: number; event: Record<string, JsonValue> }> {
+    const path = `${handlePath(handle)}/evidence/trajectory`;
+    let afterSeq: number | null = 0;
+    while (afterSeq !== null) {
+      const query = new URLSearchParams({ afterSeq: String(afterSeq), limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX) });
+      const page = evidenceTrajectoryPage(await call("GET", `${path}?${query}`));
+      let last: number = afterSeq;
+      for (const event of page.events) {
+        if (event.ingestSeq <= last) throw new SpHarnessError("Eval SP trajectory events are out of order", false);
+        yield event;
+        last = event.ingestSeq;
+      }
+      if (page.nextAfterSeq !== null && (page.events.length === 0 || page.nextAfterSeq !== last)) {
+        throw new SpHarnessError("Eval SP returned an invalid trajectory cursor", false);
+      }
+      afterSeq = page.nextAfterSeq;
+    }
+  }
+
   async function inspect(handle: AgentHandle, idempotencyKey: string): Promise<AgentSubmission | null> {
     let value: unknown;
     try {
@@ -269,6 +290,12 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       });
       return evaluationOutput(await call("GET", `${handlePath(handle)}/output?${query}`));
     },
+    async readFinalReply({ handle }) {
+      requireSp(handle.framework);
+      let reply: string | undefined;
+      for await (const { event } of trajectoryEvents(handle)) reply = finalReplyText(event) ?? reply;
+      return reply;
+    },
     async collectAgentResources(input) {
       requireSp(input.handle.framework);
       const query = input.submissionId === undefined ? "" : `?${new URLSearchParams({ submissionId: input.submissionId })}`;
@@ -293,23 +320,6 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       const { artifacts, omitted } = applyEvidenceLimits(listed, {
         ...limits, maxFileBytes: Math.min(limits.maxFileBytes, EVAL_EVIDENCE_FILE_MAX_BYTES),
       });
-      async function* trajectory(): AsyncGenerator<JsonValue> {
-        let afterSeq: number | null = 0;
-        while (afterSeq !== null) {
-          const query = new URLSearchParams({ afterSeq: String(afterSeq), limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX) });
-          const page = evidenceTrajectoryPage(await call("GET", `${path}/trajectory?${query}`));
-          let last: number = afterSeq;
-          for (const event of page.events) {
-            if (event.ingestSeq <= last) throw new SpHarnessError("Eval SP trajectory events are out of order", false);
-            yield event;
-            last = event.ingestSeq;
-          }
-          if (page.nextAfterSeq !== null && (page.events.length === 0 || page.nextAfterSeq !== last)) {
-            throw new SpHarnessError("Eval SP returned an invalid trajectory cursor", false);
-          }
-          afterSeq = page.nextAfterSeq;
-        }
-      }
       return {
         source: { framework: "sp", samplingId: handle.samplingId, agentRef: { ownerUserId: handle.ownerUserId, chatId: handle.chatId } },
         artifacts,
@@ -320,7 +330,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           if (!response.body) throw new SpHarnessError(`Eval SP returned no bytes for ${file}`, true);
           return response.body;
         },
-        trajectory: trajectory(),
+        trajectory: trajectoryEvents(handle),
         trajectoryFormat: "sp-trajectory/v1",
         // SP reads `trajectory_events` only after the Submission ended and every event was delivered.
         trajectoryComplete: true,

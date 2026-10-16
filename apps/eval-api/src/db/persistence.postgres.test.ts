@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError, DatasetInputError } from "@eval-platform/eval-dataset";
 import {
@@ -20,9 +21,10 @@ import { createPostgresDatasetStore } from "./dataset.js";
 import { ProjectRunStopConflictError } from "./errors.js";
 import { createPostgresProjectPlanReader, createPostgresWorkerProjectPlanReader } from "./project-plans.js";
 import { createPostgresProjectRunReader } from "./run-view.js";
-import { createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore } from "./runtime.js";
+import { createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, readProjectRunState } from "./runtime.js";
 import { data as dataTable, datasets as datasetsTable, evaluations, projectEvaluationPlans, runs, samplings } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
+import { createPostgresEvaluationSubmissions } from "./evaluation-submissions.js";
 import { buildCommand, makeData, release, seedProject, settle } from "./test-fixtures.js";
 
 const connection = process.env.DATABASE_URL;
@@ -87,7 +89,95 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     return (await runJobs(runId)).map((job) => job.state);
   }
 
+  it("queues collection atomically, deduplicates requests and discovers an older recovered Run", async () => {
+    const seeded = await project({ datasets: [{ data: [makeData(), makeData()] }] });
+    const { store, worker, control } = stores();
+    const first = await seeded.admit({ operation: "execution", projectSampleIds: [seeded.samples[0]!.projectSampleId] });
+    const id = first.command.run.samplingIds[0]!;
+    const original = (await store.getSampling(id))!;
+    const completed = { ...original, subjectChatId: "chat", execution: { status: "failed" as const, lastError: "output unavailable" }, executionAttempts: [{ executionAttemptId: "attempt", samplingId: id, attemptNumber: 1, status: "completed" as const, submissionId: "submission", startedAt: "2026-10-16T00:00:00Z", completedAt: "2026-10-16T00:00:01Z" }] };
+    await worker.updateSampling(completed, original);
+    const second = await seeded.admit({ operation: "execution", projectSampleIds: [seeded.samples[1]!.projectSampleId] });
+    await expect(control.recollect(seeded.projectId, "execution", id)).rejects.toBeInstanceOf(RuntimeProjectBusyError);
+    await settle(worker, second.command.run.samplingIds, "succeeded");
+    await expect(stores("other-owner").control.recollect(seeded.projectId, "execution", id)).rejects.toBeInstanceOf(RuntimeEntityNotFoundError);
+    const requests = await Promise.all([control.recollect(seeded.projectId, "execution", id), control.recollect(seeded.projectId, "execution", id)]);
+    expect(requests).toEqual([{ runId: first.command.run.runId, queued: true }, { runId: first.command.run.runId, queued: true }]);
+    expect(await readProjectRunState(database.db, OWNER, seeded.projectId)).toEqual({ runSequence: 2, currentRun: { runId: first.command.run.runId } });
+    const pending = (await store.getSampling(id))!;
+    expect(pending.execution).toEqual({ status: "retrying", collectionPending: true });
+    expect(pending.executionAttempts).toEqual(completed.executionAttempts);
+    expect(await jobs.findJobs(RUN_QUEUE, { key: `collection:${first.command.run.runId}` })).toHaveLength(1);
+    await worker.updateSampling({ ...pending, execution: { status: "succeeded" } }, pending);
+    expect(await control.recollect(seeded.projectId, "execution", id)).toEqual({ runId: first.command.run.runId, queued: false });
+    expect(await control.getCurrentRun(seeded.projectId)).toBeNull();
+  });
+
+  it("keeps the latest submitted Evaluator result and resolves its locked Schema", async () => {
+    const seeded = await project({ datasets: [{ data: [makeData()] }], evaluation: true });
+    const { admission, command } = await seeded.admit({ operation: "pipeline" });
+    expect(admission.created).toBe(true);
+    const evaluationId = command.run.evaluationIds[0]!;
+    const submissions = createPostgresEvaluationSubmissions(database.db);
+    expect(await submissions.read(evaluationId)).toBeUndefined();
+    expect(await submissions.target("missing")).toBeNull();
+    expect(await submissions.target(evaluationId)).toEqual({
+      ownerUserId: OWNER, status: "queued", schema: { type: "object", properties: { score: { type: "number" } } },
+    });
+    await submissions.save({ evaluationId, ownerUserId: OWNER, content: '{"score":1}', submittedAt: new Date() });
+    await submissions.save({ evaluationId, ownerUserId: OWNER, content: '{"score":2}', submittedAt: new Date() });
+    expect(await submissions.read(evaluationId)).toEqual({
+      path: "mcp:submit_evaluation", content: '{"score":2}',
+      contentHash: "sha256:" + createHash("sha256").update('{"score":2}').digest("hex"),
+    });
+  });
+
+  it("queues only the selected completed evaluation and leaves its sampling untouched", async () => {
+    const seeded = await project({ datasets: [{ data: [makeData()] }], evaluation: true });
+    const { store, worker, control } = stores();
+    const first = await seeded.admit({ operation: "pipeline" });
+    const id = first.command.run.samplingIds[0]!;
+    await settle(worker, [id], "failed");
+    const sampling = (await store.getSampling(id))!;
+    const ready = { ...sampling, execution: { status: "succeeded" as const }, evidence: { evidenceId: "evidence", manifestSha256: "a".repeat(64), exportedAt: "2026-10-16T00:00:00Z" } };
+    await worker.updateSampling(ready, sampling);
+    const evaluation = (await store.getEvaluation(first.command.run.evaluationIds[0]!))!;
+    const completed = { ...evaluation, chatId: "evaluator-chat", attempts: [{ evaluationAttemptId: "eval-attempt", evaluationId: evaluation.evaluationId, attemptNumber: 1, status: "completed" as const, submissionId: "eval-submission", startedAt: "2026-10-16T00:00:00Z", completedAt: "2026-10-16T00:00:01Z" }] };
+    await worker.updateEvaluation(completed, evaluation);
+    expect(await control.recollect(seeded.projectId, "evaluation", evaluation.evaluationId)).toEqual({ runId: first.command.run.runId, queued: true });
+    expect((await store.getEvaluation(evaluation.evaluationId))!.status).toEqual({ status: "retrying", collectionPending: true });
+    expect(await store.getSampling(id)).toEqual(ready);
+    const foreignProject = await project();
+    await expect(control.recollect(foreignProject.projectId, "evaluation", evaluation.evaluationId)).rejects.toBeInstanceOf(RuntimeEntityNotFoundError);
+  });
+
+  it("rejects collection of an unfinished Agent or a stopped Run", async () => {
+    const seeded = await project(); const { store, worker, control } = stores();
+    const first = await seeded.admit({ operation: "execution" }); const id = first.command.run.samplingIds[0]!;
+    await settle(worker, [id], "failed");
+    await expect(control.recollect(seeded.projectId, "execution", id)).rejects.toMatchObject({ name: "ResultCollectionConflictError" });
+    const row = (await store.getSampling(id))!;
+    await worker.updateSampling({ ...row, subjectChatId: "chat", executionAttempts: [{ executionAttemptId: "attempt", samplingId: id, attemptNumber: 1, status: "completed", submissionId: "submission", startedAt: "2026-10-16T00:00:00Z", completedAt: "2026-10-16T00:00:01Z" }] }, row);
+    await database.db.update(runs).set({ stopRequested: true, stopFinalized: true }).where(eq(runs.runId, first.command.run.runId));
+    await expect(control.recollect(seeded.projectId, "execution", id)).rejects.toMatchObject({ name: "ResultCollectionConflictError" });
+  });
+
   describe("Dataset catalog", () => {
+    it("appends cases atomically and rejects invalid references and foreign targets without partial writes", async () => {
+      const { datasetService } = stores();
+      const target = await datasetService.createDataset({ name: "batch" });
+      const original = await datasetService.createData({ userPrompt: "original" }, { datasetId: target.datasetId });
+      const foreign = await stores("user-B").datasetService.createDataset({ name: "foreign" });
+      await expect(datasetService.addData(foreign.datasetId, [{ userPrompt: "blocked" }])).rejects.toBeInstanceOf(DatasetEntityNotFoundError);
+      await expect(datasetService.addData(target.datasetId, [
+        { userPrompt: "valid" },
+        { userPrompt: "invalid resource", initialMaterials: [{ bundleId: crypto.randomUUID(), materialId: crypto.randomUUID() }] },
+      ])).rejects.toThrow();
+      expect(await datasetService.listData()).toEqual([original]);
+      const added = await datasetService.addData(target.datasetId, [{ userPrompt: "one" }, { userPrompt: "two" }]);
+      expect(await datasetService.listData(target.datasetId)).toHaveLength(3);
+      expect(added).toHaveLength(2);
+    });
     it("creates and attaches one Data atomically, rejecting foreign, deleted and invalid Prompt targets", async () => {
       const { datasetService } = stores();
       const target = await datasetService.createDataset({ name: "tasks" });

@@ -269,6 +269,21 @@ export const evaluations = pgTable("eval_evaluations", {
   index("eval_evaluations_sampling_idx").on(table.samplingId),
 ]);
 
+/**
+ * The latest valid result an Evaluator handed over through the submission tool; one row per
+ * Evaluation, overwritten by a later valid submission. Never part of `eval_evaluations.facts`, so the
+ * Worker's compare-and-set writes do not race the API's tool calls.
+ */
+export const evaluationSubmissions = pgTable("eval_evaluation_submissions", {
+  evaluationId: text("evaluation_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
+  content: text("content").notNull(),
+  contentHash: text("content_hash").notNull(),
+  submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  foreignKey({ name: "eval_evaluation_submissions_evaluation_fk", columns: [table.evaluationId], foreignColumns: [evaluations.evaluationId] }).onDelete("cascade"),
+]);
+
 /** Runs are never deleted; replacement removes only the selected records and their memberships. */
 export const runs = pgTable("eval_runs", {
   runId: text("run_id").primaryKey(),

@@ -46,6 +46,8 @@ app = json.loads(Path(os.environ["APP_SECRET_PATH"]).read_text())
 database = json.loads(Path(os.environ["DB_SECRET_PATH"]).read_text())
 
 langfuse = ["LANGFUSE_BASE_URL", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_ENVIRONMENT"]
+# Optional; the API serves the Evaluator result MCP Server and the Worker derives submit tokens from it.
+result_mcp = ["EVAL_RESULT_MCP_TOKEN"]
 evidence_r2 = [
     "EVAL_EVIDENCE_R2_ENDPOINT",
     "EVAL_EVIDENCE_R2_BUCKET",
@@ -89,8 +91,8 @@ def pick(names):
 
 print(json.dumps({
     "services": {
-        "api": {"environment": {"DATABASE_URL": database_url, **pick(api_required + langfuse)}},
-        "run-worker": {"environment": {"DATABASE_URL": database_url, **pick(worker_required + evidence_r2 + langfuse)}},
+        "api": {"environment": {"DATABASE_URL": database_url, **pick(api_required + langfuse + result_mcp)}},
+        "run-worker": {"environment": {"DATABASE_URL": database_url, **pick(worker_required + evidence_r2 + langfuse + result_mcp)}},
     }
 }))
 PY

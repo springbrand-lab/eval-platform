@@ -17,6 +17,7 @@ import type { EvidenceStore, Harness } from "../harness/model.js";
 import type { RetryController } from "./retry.js";
 import type { SamplingState, RuntimeStore } from "./store.js";
 import type { EvaluationScorePort } from "./scores.js";
+import type { EvaluationResultPort } from "./results.js";
 
 /**
  * One fixed test input of a Project: a full copy of its source Data taken at creation. Shared Data
@@ -130,6 +131,8 @@ export interface EvalRunResumerDependencies {
   readonly sleep?: (milliseconds: number) => Promise<void>;
   /** Optional score integration. Metrics interprets the raw output; Runtime only delivers scores. */
   readonly scores?: EvaluationScorePort;
+  /** Result submission and Schema checking; only a valid result makes an Evaluation succeed. */
+  readonly results?: EvaluationResultPort;
   /** Receives failures that must not interrupt the Run; it should not throw. */
   readonly onError: (error: Error) => void;
 }

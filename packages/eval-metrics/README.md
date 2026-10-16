@@ -62,7 +62,7 @@ Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sam
 
 ## JSON Schema 输出字段
 
-每条评估的 `structuredOutput.content` 先严格解析（拒绝重复键），再用 Ajv 2020 按 Project 锁定的 Schema 校验：`valid`、`invalid`（`invalid-json`、`unsafe-number`、`schema-mismatch`）或 `unavailable`（`no-output`、`no-structured-output`、`no-schema`、`invalid-schema`）。NaN/Infinity/超出安全整数范围使整份输出无效。只有成功评估的有效输出才产生观察。
+每条评估的 `structuredOutput.content` 先严格解析（拒绝重复键），再用 Ajv 2020 按 Project 锁定的 Schema 校验：`valid`、`invalid`（`invalid-json`、`unsafe-number`、`schema-mismatch`）或 `unavailable`（`no-output`、`no-structured-output`、`no-schema`、`invalid-schema`）。NaN/Infinity/超出安全整数范围使整份输出无效。只有成功评估的有效输出才产生观察。`createEvaluationResultValidator()` 以同一套解析与校验规则检查单段原始文本，供结果提交工具和 Runtime 判定评估是否成功。
 
 链路固定为 Schema → 展示计划 → 单条观察事实 → 范围汇总。`CompiledOutputPlan` 在一次 Metrics 事实读取中编译一次，计划不持久化、不可单独编辑。计划保留每个统计声明的来源、交并关系、条件及引用上下文；Ajv 仍是唯一校验器，通过已注册的 Schema 和根文档/动态锚点上下文执行规则，不另建脱离根环境的子 Schema。编译器只在自己的 Schema 副本上加入无校验副作用的执行记录，保留根校验实际命中的分支、引用目标及当时的上下文；重新检查展示候选时不记录执行事实。JSON Pointer、本地锚点、嵌套 `$id`、`$dynamicRef` 和递归引用都由同一引用入口处理。
 
@@ -104,3 +104,6 @@ Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`�
 不实现实验对比、归因、查询缓存、指标持久化或 API/Web/CLI；本包只有包根入口。
 
 `createEvaluationScoreReader()` 为可选 Langfuse 集成提供只读派生接口：复用同一个 Schema presentation plan、严格 JSON 解析和安全数值校验，只从成功且校验通过的原始输出读取顶层 numeric score 与可选字符串 reason。每个 Schema 独立编译，复用 `$id` 不冲突；不保存另一份解析结果到 Runtime。
+
+
+项目结果工作台：ProjectOverview 额外返回去重的 projectSamples 行及每行当前 samplingIds，沿用同一事实快照和 Metrics 聚合口径，不由前端合计子层统计。默认是当前有效采样及评估结果，非历史运行总和；指定运行的范围仍由 runIds 控制。Web 将数据集作为筛选，按用例聚合、展开采样，单次采样直接打开结果抽屉；运行记录与配置分开展示。采样详情和抽屉共用结果组件，评估内容与产物优先、技术统计按需展开，文件预览复用已有只读 Workspace API 和公共渲染器，不读取 SP 私有存储。

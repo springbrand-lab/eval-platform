@@ -6,6 +6,7 @@ import type { Env as PinoEnv } from "hono-pino";
 import type { AgentConfigService } from "../agent-configs.js";
 import type { createPostgresObservationReader } from "../db/observation.js";
 import type { createOutputSchemaCatalog } from "../db/output-schemas.js";
+import type { EvaluationSubmissionStore } from "../db/evaluation-submissions.js";
 import type { BundleCatalogs } from "../db/resource-catalog.js";
 import type { ProjectRunView } from "../db/run-view.js";
 import type { createPostgresProjectRunControl } from "../db/runtime.js";
@@ -62,6 +63,11 @@ export interface ApiRuntime {
   /** The Eval SP RESOURCE_ADMIN_TOKEN; only credit grants to the service account use it. */
   readonly spAdminToken: string;
   readonly ownerServices: (user: EvalSpUser, sessionToken: string) => OwnerServicesLease;
+  /** The Evaluator result submission MCP Server; absent when EVAL_RESULT_MCP_TOKEN is not set. */
+  readonly evaluationResults?: {
+    readonly token: string;
+    readonly submissions: Pick<EvaluationSubmissionStore, "target" | "save">;
+  };
 }
 
 export type AppBindings = {

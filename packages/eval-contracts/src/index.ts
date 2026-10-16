@@ -19,6 +19,7 @@ export type {
   ScoreSyncState,
   EvaluationAttempt,
   EvaluationStructuredOutput,
+  EvaluationResultSource,
   EvidenceKind,
   EvidenceRef,
   ExecutionAttempt,
@@ -56,6 +57,7 @@ export {
   AGENT_FRAMEWORKS,
   AGENT_STATUSES,
   DATASET_KINDS,
+  EVALUATION_RESULT_SOURCES,
   EVIDENCE_KINDS,
   PENDING_SAMPLING_STATUSES,
   RUN_OPERATIONS,
@@ -77,7 +79,10 @@ export type {
 } from "./evidence.js";
 export {
   DEFAULT_EVIDENCE_LIMITS,
+  EVALUATION_FINAL_REPLY_PATH,
   EVALUATION_RESULT_PATH,
+  EVALUATION_SUBMISSION_PATH,
+  EVALUATION_SUBMIT_TOOL,
   EVALUATION_OUTPUT_SCHEMA_PATH,
   EVIDENCE_ARTIFACTS_ROOT,
   EVIDENCE_MANIFEST_PATH,

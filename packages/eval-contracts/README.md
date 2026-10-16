@@ -34,7 +34,7 @@ Subject 的产物和完整轨迹是执行终态的必需证据。`Sampling.execu
 
 `ProjectPlan` 是一次一致读取的 Project 计划：`project`、按绑定顺序的 `datasets`（每个含创建时成员顺序的 `projectSampleIds`）、`execution` 与 `executionPlanDigest`，以及可空的 `evaluation: ProjectEvaluation`（`plan`、`digest`、`lockedAt` 只能一起存在）。`ExecutionPlan` 创建后不可修改，含 Subject `harness`、`subjectAgentConfig`、`executionConcurrency` 和 `retryPolicy`；`EvaluationPlan` 含 SP 框架的 `evaluationHarness`、`evaluatorAgentConfig`、`evaluationConcurrency`、`retryPolicy` 和 `outputSchema`（Schema ID 与规范 JSON 的 sha256），在首个 pipeline/evaluation Run 准入时锁定，锁定前可整体替换。Harness 中的 `agentConfig` 是 Project 的冻结副本引用，指向 Eval SP 自己的 `user-agent` 库；`AgentConfigSnapshot` 是冻结时的正文快照，只用于展示，运行从不用它重建配置。
 
-评估输出格式是 Eval API 中独立上传的一份带名称和描述的 draft 2020-12 JSON Schema 文件，正文不可变。每个 Evaluator 初始化时通过专用字段在自己 Workspace 的固定路径 `/evaluation-output.schema.json` 收到 Schema，与素材目录分开。`EvaluationAgentOutput.structuredOutput` 是 Evaluator 写在自己 Space `/output/result.json` 的结果文件：路径、原始 UTF-8 文本和可选 hash，不是解析后的副本；缺失时由 Metrics 报告为 unavailable，不当作 0。
+评估输出格式是 Eval API 中独立上传的一份带名称和描述的 draft 2020-12 JSON Schema 文件，正文不可变。每个 Evaluator 初始化时通过专用字段在自己 Workspace 的固定路径 `/evaluation-output.schema.json` 收到 Schema，与素材目录分开。`EvaluationAgentOutput.structuredOutput` 是 Evaluator 的原始结果：路径（结果文件路径或 `mcp:submit_evaluation` / `final-reply`）、原始 UTF-8 文本、可选 hash 和可选来源 `source`（`submission | result-file | final-reply`，旧记录缺省即结果文件），不是解析后的副本；缺失时由 Metrics 报告为 unavailable，不当作 0。
 
 `EvaluationOutputSchemaDocument` 把同一次读取的 `reference`（Schema ID 与摘要）和 `content` 绑定在一起，供 Project 只读查看；目录软删除不改变引用，也不增加可编辑的 Schema 副本。
 
@@ -46,6 +46,9 @@ Subject 执行成功后导出一份不可变证据包：`manifest.json`（`schem
 
 原始 `structuredOutput` 是评估输出的唯一事实。可选 Langfuse 分数由 Metrics 同一 Schema reader 派生，不在 `EvaluationAgentOutput` 再保存 `score` 或 `reason`。`scoreSync` 只记录外部投递结果。
 
-每个 Evaluator 是普通 Agent，拥有独立 Chat、Submission、轨迹和自己的 Space，不绑定 Subject。证据包导入到 `/evidence/`（`manifest.json`、`artifacts/<原路径>`、`trajectory/events-000001.jsonl` 等有序分片），结果写到 `/output/result.json`。
+每个 Evaluator 是普通 Agent，拥有独立 Chat、Submission、轨迹和自己的 Space，不绑定 Subject。证据包导入到 `/evidence/`（`manifest.json`、`artifacts/<原路径>`、`trajectory/events-000001.jsonl` 等有序分片），结果通过 `submit_evaluation` 工具提交（见[评估结果提交](../../docs/eval-evaluation-result-submission.md)），未配置该工具时写到 `/output/result.json`。
 
 本包不负责运行 Agent、读取 SP Workspace、访问 R2、持久化数据库或实现 API/Web/CLI。
+
+
+手动重新收集结果：POST /api/projects/{projectId}/samplings/{samplingId}/collect 与 /evaluations/{evaluationId}/collect 返回 202 {runId, queued}。仅接受归属匹配、最后 Attempt 为 completed 且有 Chat/Submission 的失败阶段；已成功为幂等无操作，重复待收集请求不重复入队，项目忙或 Run 已停止时拒绝。API 在 Project 行锁内设置 retrying + collectionPending，并原子提交原 Run 队列任务。Worker 只读取已有输出，不创建或重启 Agent/Attempt；执行侧必须归档产物和完整轨迹，评估侧保存原始结果并沿用校验和同步。失败清除待收集标记并保留错误，支持再次补收。补收执行不自动启动之前已取消的评估。当前运行查询允许旧 Run 因补收重新活跃，runSequence 仍是最大创建序号。

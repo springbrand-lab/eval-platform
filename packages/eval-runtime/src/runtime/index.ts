@@ -55,6 +55,13 @@ export {
   type EvaluationScorePort,
   type ScoreSyncSummary,
 } from "./scores.js";
+export {
+  RESULT_INVALID_PREFIX,
+  RESULT_NOT_SUBMITTED,
+  extractFinalReplyResult,
+  type EvaluationResultCheck,
+  type EvaluationResultPort,
+} from "./results.js";
 
 export function createEvalRunAdmission(dependencies: EvalRunAdmissionDependencies): EvalRunAdmission {
   const admission = new RunAdmission(dependencies);

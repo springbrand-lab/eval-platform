@@ -75,4 +75,26 @@ describe("SP evidence export, persistence and import", () => {
     await expect((async () => { for await (const _event of exported.trajectory) { /* Consume the entire source. */ } })())
       .rejects.toMatchObject({ name: "SpHarnessError", retryable: false });
   });
+
+  it("reads the Evaluator's last finished reply across trajectory pages", async () => {
+    const turn = (ingestSeq: number, content: unknown[]) => ({ ingestSeq,
+      event: { type: "turn.finished", payload: { outcome: "completed", output: { role: "assistant", content } } } });
+    const pages = [
+      { events: [turn(1, [{ type: "text", text: "first answer" }]), { ingestSeq: 2, event: { type: "tool.started", payload: {} } }], nextAfterSeq: 2 },
+      { events: [turn(3, [{ type: "thinking", thinking: "hidden" }, { type: "text", text: "final" }, { type: "text", text: "```json\n{}\n```" }]),
+        turn(4, [{ type: "thinking", thinking: "no text" }])], nextAfterSeq: null },
+    ];
+    const paths: string[] = [];
+    const harness = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
+      fetch: async (input, init) => {
+        const url = new URL(new Request(input, init).url);
+        paths.push(url.pathname);
+        return Response.json(pages[url.searchParams.get("afterSeq") === "0" ? 0 : 1]);
+      } });
+    await expect(harness.readFinalReply({ handle: evaluator })).resolves.toBe("final\n```json\n{}\n```");
+    expect(paths.every((path) => path.endsWith(`/chats/${evaluator.chatId}/evidence/trajectory`))).toBe(true);
+    const empty = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
+      fetch: async () => Response.json({ events: [], nextAfterSeq: null }) });
+    await expect(empty.readFinalReply({ handle: evaluator })).resolves.toBeUndefined();
+  });
 });
