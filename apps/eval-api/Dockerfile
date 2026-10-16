@@ -7,6 +7,8 @@ WORKDIR /app
 
 FROM build-tools AS build
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+# pnpm-workspace.yaml lists patched dependencies; a frozen install verifies every patch file.
+COPY patches patches
 COPY apps/eval-api/package.json apps/eval-api/
 COPY packages/eval-contracts/package.json packages/eval-contracts/
 COPY packages/eval-dataset/package.json packages/eval-dataset/

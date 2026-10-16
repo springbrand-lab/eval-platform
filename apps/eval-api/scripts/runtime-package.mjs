@@ -52,6 +52,16 @@ export async function writeRuntimePackage(root, app, destination) {
     pending.push(...Object.entries(snapshot.dependencies ?? {}), ...Object.entries(snapshot.optionalDependencies ?? {}));
   }
 
+  // Patches of packages outside the runtime set (e.g. Web-only editors) have no file in the runtime image.
+  const runtimePatches = (patches) => patches === undefined ? undefined
+    : Object.fromEntries(Object.entries(patches).filter(([key]) => packages[key] !== undefined));
+  const patchedDependencies = runtimePatches(lock.patchedDependencies);
+  if (patchedDependencies && Object.keys(patchedDependencies).length > 0) {
+    throw new Error(`Runtime dependencies are patched (${Object.keys(patchedDependencies).join(", ")}); copy their patch files into the runtime package`);
+  }
+  const { patchedDependencies: _lockPatches, ...runtimeLock } = lock;
+  const { patchedDependencies: _workspacePatches, ...runtimeWorkspace } = workspace;
+
   await mkdir(destination, { recursive: true });
   await Promise.all([
     writeFile(path.join(destination, "package.json"), JSON.stringify({
@@ -63,8 +73,8 @@ export async function writeRuntimePackage(root, app, destination) {
       dependencies,
     }, null, 2) + "\n"),
     // Keep the source resolutions and integrity hashes; installation walks only these externals.
-    writeFile(path.join(destination, "pnpm-lock.yaml"), stringify({ ...lock, importers: { ".": { dependencies: locked } }, packages, snapshots })),
-    writeFile(path.join(destination, "pnpm-workspace.yaml"), stringify({ ...workspace, packages: ["."] })),
+    writeFile(path.join(destination, "pnpm-lock.yaml"), stringify({ ...runtimeLock, importers: { ".": { dependencies: locked } }, packages, snapshots })),
+    writeFile(path.join(destination, "pnpm-workspace.yaml"), stringify({ ...runtimeWorkspace, packages: ["."] })),
   ]);
 }
 
