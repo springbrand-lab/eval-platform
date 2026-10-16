@@ -36,9 +36,11 @@ export function ResourcePicker({ kind, value, onChange, disabled, label, exclude
   const catalog = resourceCatalog(kind);
   const [creating, setCreating] = useState(false);
   const bundles = useQuery({ queryKey: catalog.keys.list(), queryFn: ({ signal }) => catalog.list(signal) });
+  // BundleDetailPage shares these query keys: the cache keeps complete API records and the options are a projection.
   const lists = useQueries({ queries: (bundles.data ?? []).map((bundle) => ({
     queryKey: catalog.keys.resources(bundle.bundleId),
-    queryFn: async ({ signal }: { signal: AbortSignal }) => (await catalog.listResources(bundle.bundleId, signal)).map((item) => ({
+    queryFn: ({ signal }: { signal: AbortSignal }) => catalog.listResources(bundle.bundleId, signal),
+    select: (resources: Awaited<ReturnType<typeof catalog.listResources>>) => resources.map((item) => ({
       bundleId: bundle.bundleId, id: "materialId" in item ? item.materialId : item.sessionId, name: item.name, description: item.description,
     })),
   })) });

@@ -139,7 +139,7 @@ index 865fb4e6113c1219f95a007788f5bfbbef64ce15..a13c183e7edeb21fc6a4324223582e55
      models: readonly ModelPresetAccess[];
      modelsLoading: boolean;
 diff --git a/dist/agent-config-editor/src/agent-editor.js b/dist/agent-config-editor/src/agent-editor.js
-index cc5833eea8c215bb02ce95f479cd378809fb6d65..8d424b788b5ed66ed416c230e77948b6ee92fa5b 100644
+index cc5833eea8c215bb02ce95f479cd378809fb6d65..ab6e77a184eebe8ff369302421de0367d6f2a41d 100644
 --- a/dist/agent-config-editor/src/agent-editor.js
 +++ b/dist/agent-config-editor/src/agent-editor.js
 @@ -27,8 +27,6 @@ export function AgentEditor(props) {
@@ -163,7 +163,7 @@ index cc5833eea8c215bb02ce95f479cd378809fb6d65..8d424b788b5ed66ed416c230e77948b6
 +                                            : "参考资料的修改对新会话生效，已有会话仍保留原文件。" })] }), _jsx("section", { "aria-label": "基本信息", "data-agent-identity": true, children: _jsxs("div", { className: 'grid gap-4 sm:grid-cols-2', children: [_jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-name', children: "名称" }), _jsx(Input, { id: 'agent-name', disabled: readOnlySelections, required: true, maxLength: 200, value: draft.name, onChange: (event) => onDraftChange((current) => ({ ...current, name: event.target.value })) })] }), _jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-description', children: "用途说明" }), _jsx(Input, { id: 'agent-description', disabled: readOnlySelections, maxLength: 2000, value: draft.description, onChange: (event) => onDraftChange((current) => ({ ...current, description: event.target.value })) })] })] }) }), _jsxs("section", { "data-agent-prompt": true, className: "space-y-2", children: [
 +  _jsx(FieldLabel, { htmlFor: "agent-system-prompt", children: "工作指令" }),
 +  _jsx(Textarea, { id: "agent-system-prompt", "aria-label": "完整工作指令", rows: 12, maxLength: 50000, readOnly: readOnly, value: draft.setting.systemPrompt ?? "", className: "min-h-64 w-full resize-y text-sm leading-6", placeholder: "说明 Agent 的职责、工作步骤和注意事项", onChange: (event) => updateSetting((setting) => ({ ...setting, systemPrompt: event.target.value || null })) }),
-+  _jsx("p", { className: "text-xs text-muted-foreground", children: "直接编辑，点击保存修改后生效。" }),
++  _jsx("p", { className: "text-xs text-muted-foreground", children: readOnly ? "这是项目使用的固定配置，只能查看。" : "直接编辑，点击保存修改后生效。" }),
 +] }), _jsxs("section", { "data-agent-runtime": true, className: "space-y-3", children: [_jsx("h2", { className: "text-sm font-semibold", children: "运行设置" }), _jsxs("div", { className: 'grid gap-4 sm:grid-cols-2', children: [_jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-model', children: "模型" }), _jsxs(NativeSelect, { id: 'agent-model', value: selectedModel, disabled: readOnly || modelsLoading || modelsError, onChange: (event) => {
                                                              const presetId = event.target.value;
                                                              updateSetting((setting) => {
