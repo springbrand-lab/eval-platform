@@ -29,12 +29,12 @@ const promptRowLabelsSchema = z.looseObject({
 
 /** Store-level invariant for Datasets created through prompt upload. */
 export function assertPromptDatasetMetadata(dataset: Dataset): void {
-  promptDatasetLabelsSchema.parse(dataset);
+  parseInput(() => promptDatasetLabelsSchema.parse(dataset));
 }
 
 /** Store-level invariant for every active member of a Prompt Dataset. */
 export function assertPromptData(data: Data): void {
-  promptRowLabelsSchema.parse(data);
+  parseInput(() => promptRowLabelsSchema.parse(data));
 }
 
 /** Parse a Data-only file and separately supplied Dataset metadata. */

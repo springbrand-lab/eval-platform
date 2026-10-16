@@ -1,4 +1,4 @@
-import type { EvaluationOutputSchema, Project, ProjectDatasetSnapshot, ProjectPlan } from "@eval-platform/eval-contracts";
+import type { EvaluationOutputSchema, EvaluationOutputSchemaDocument, Project, ProjectDatasetSnapshot, ProjectPlan } from "@eval-platform/eval-contracts";
 import { digestJson, planProjectSampleIds, type ProjectPlanReader, type ProjectSample } from "@eval-platform/eval-runtime";
 import { and, asc, eq, inArray, isNull, type SQL } from "drizzle-orm";
 import { addToGroup, selectByIds, sqlBatches } from "./batch.js";
@@ -116,9 +116,9 @@ export async function readAllProjectSamples(reader: RecordReader, plan: ProjectP
  * Schema content resolved through the Project's evaluation plan, ignoring catalog soft deletes, and
  * checked against the digest the plan recorded. Omit the owner only for the Worker.
  */
-export async function readEvaluationOutputSchema(
+export async function readEvaluationOutputSchemaDocument(
   reader: RecordReader, projectId: string, ownerUserId?: string,
-): Promise<EvaluationOutputSchema | null> {
+): Promise<EvaluationOutputSchemaDocument | null> {
   const [row] = await reader.select({ schema: evaluationOutputSchemas.schema, plan: projectEvaluationPlans.plan }).from(projects)
     .innerJoin(projectEvaluationPlans, eq(projectEvaluationPlans.projectId, projects.projectId))
     .innerJoin(evaluationOutputSchemas, and(
@@ -130,7 +130,12 @@ export async function readEvaluationOutputSchema(
   if (await digestJson(row.schema) !== row.plan.outputSchema.digest) {
     throw new Error(`Project ${projectId} evaluation output Schema does not match its recorded digest`);
   }
-  return row.schema;
+  return { reference: row.plan.outputSchema, content: row.schema };
+}
+
+/** Worker and Metrics consume the content of the same digest-checked document. */
+export async function readEvaluationOutputSchema(reader: RecordReader, projectId: string, ownerUserId?: string): Promise<EvaluationOutputSchema | null> {
+  return (await readEvaluationOutputSchemaDocument(reader, projectId, ownerUserId))?.content ?? null;
 }
 
 export async function projectExists(reader: RecordReader, projectId: string, ownerUserId?: string): Promise<boolean> {

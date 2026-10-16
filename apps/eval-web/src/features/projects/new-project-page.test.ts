@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Data } from "@/api-sdk/types";
 import { buildProjectInput, type ProjectDraft } from "./new-project-page";
+import { inputLimits } from "@/test/input-limits";
 
 const data = (dataId: string, evalPrompt?: string) => ({ dataId, userPrompt: `do ${dataId}`, ...(evalPrompt ? { evalPrompt } : {}) }) as Data;
 const members = new Map([["ds-1", [data("a", "judge"), data("b", "judge")]], ["ds-2", [data("b", "judge"), data("c")]]]);
@@ -20,7 +21,7 @@ describe("Project creation body", () => {
       datasets: new Map([["ds-1", { dataIds: null }], ["ds-2", { dataIds: new Set(["c"]) }]]),
       samplingCounts: { a: 2, c: 5, zzz: 9 },
       executionTimeoutMinutes: "1.5",
-    }), "key-1", members);
+    }), "key-1", members, inputLimits);
     expect(body).toEqual({
       idempotencyKey: "key-1",
       name: "Hello",
@@ -40,13 +41,15 @@ describe("Project creation body", () => {
     [{ samplingCount: 0 }, "默认采样次数"],
     [{ subjectAgentId: "" }, "被测 Agent"],
     [{ outputSchemaId: "" }, "评分格式"],
+    [{ executionTimeoutMinutes: "1e308" }, "超时时间"],
+    [{ executionTimeoutMinutes: "0.0000001" }, "超时时间"],
     [{ withEvaluation: false, firstRun: "pipeline" as const }, "评估计划"],
   ])("explains %j", (patch, message) => {
-    expect(buildProjectInput(draft(patch), "k", members)).toEqual(expect.stringContaining(message));
+    expect(buildProjectInput(draft(patch), "k", members, inputLimits)).toEqual(expect.stringContaining(message));
   });
 
   it("omits the evaluation plan for an execution-only Project", () => {
-    const body = buildProjectInput(draft({ withEvaluation: false, firstRun: "execution" }), "k", members);
+    const body = buildProjectInput(draft({ withEvaluation: false, firstRun: "execution" }), "k", members, inputLimits);
     expect(body).toMatchObject({ run: { operation: "execution" } });
     expect(body).not.toHaveProperty("evaluation");
   });

@@ -46,14 +46,16 @@ export function exportedEvidence(input: {
       path, size: encoder.encode(content).byteLength, mediaType: "text/html",
     })),
     omitted: [],
+    subjectInputs: [],
     async readFile(path) {
       const content = files[path];
       if (content === undefined) throw new Error(`No exported file ${path}`);
       return new Response(content).body!;
     },
     trajectory: (async function* () {
-      yield { seq: 1, at: "2026-10-15T00:00:00.000Z", type: "user-message" as const, content: { text: "Build" }, raw: {} };
+      yield { ingestSeq: 1, event: { type: "turn.admitted", payload: { prompt: "Build" } } };
     })(),
+    trajectoryFormat: "sp-trajectory/v1",
     trajectoryComplete: true,
   };
 }

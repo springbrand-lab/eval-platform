@@ -10,7 +10,8 @@ import {
 } from "@eval-platform/eval-runtime";
 import { eq } from "drizzle-orm";
 import { vi } from "vitest";
-import { EvalSpApiError, type EvalSpAgentConfig, type EvalSpClient } from "../sp/client.js";
+import type { EvalSpAgentConfig, EvalSpClient } from "../sp/client.js";
+import { EvalSpApiError } from "../sp/http.js";
 import type { EvalDb } from "./client.js";
 import { createOutputSchemaCatalog } from "./output-schemas.js";
 import { planProjectSampleIds } from "@eval-platform/eval-runtime";

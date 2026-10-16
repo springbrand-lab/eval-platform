@@ -10,7 +10,7 @@ import type {
   SamplingStatus,
   TrajectoryRef,
 } from "@eval-platform/eval-contracts";
-import type { EvaluationValidationStatus, NumericSchemaType } from "../evaluators/model.js";
+import type { EvaluationValidationStatus, OutputFieldDefinition, OutputScalar } from "../evaluators/model.js";
 
 export interface MetricNumber {
   readonly value: number | null;
@@ -25,6 +25,8 @@ export interface NumericSummary {
   readonly min: number | null;
   readonly max: number | null;
   readonly mean: number | null;
+  /** Population variance over available values only (divide by `count`), in squared units. */
+  readonly variance: number | null;
   readonly median: number | null;
 }
 
@@ -133,6 +135,43 @@ export interface ResourceStatistics {
   readonly diagnostics: readonly ResourceDiagnostic[];
 }
 
+export type NumericDistributions<T> = { readonly [K in keyof T]: CoveredNumericSummary };
+
+export interface OperationDistributions {
+  readonly count: CoveredNumericSummary;
+  readonly completed: CoveredNumericSummary;
+  readonly failed: CoveredNumericSummary;
+  readonly cancelled: CoveredNumericSummary;
+  readonly inProgress: CoveredNumericSummary;
+  readonly unknown: CoveredNumericSummary;
+}
+
+/** Single-Agent observations, never observations made from child-scope aggregates. */
+export interface ResourceDistribution {
+  readonly unit: "agent";
+  readonly records: number;
+  readonly tokens: NumericDistributions<TokenStatistics>;
+  readonly costs: NumericDistributions<CostStatistics>;
+  readonly modelRequests: OperationDistributions;
+  readonly trajectory: {
+    readonly turns: OperationDistributions;
+    readonly tools: OperationDistributions;
+    readonly nonToolTurns: CoveredNumericSummary;
+    readonly nonToolTurnTokens: NumericDistributions<NonToolTurnTokens>;
+    readonly byTool: readonly { readonly toolName: string | null; readonly operations: OperationDistributions }[];
+  };
+  readonly byModel: readonly {
+    readonly provider: string | null;
+    readonly model: string | null;
+    readonly tokens: NumericDistributions<TokenStatistics>;
+    readonly providerUsd: CoveredNumericSummary;
+  }[];
+}
+
+export interface AggregatedResourceStatistics extends ResourceStatistics {
+  readonly distribution: ResourceDistribution;
+}
+
 export interface AttemptMetric {
   readonly attemptId: string;
   readonly attemptNumber: number;
@@ -193,29 +232,42 @@ export interface MetricCounts {
   readonly evaluations: number;
 }
 
-export type NumericMissingReason = "not-succeeded" | "invalid-output" | "unavailable-output" | "absent";
+export type OutputMissingReason = "not-succeeded" | "invalid-output" | "unavailable-output" | "absent";
 
-export interface NumericObservationSummary {
-  readonly jsonPointer: string;
-  readonly schemaType: NumericSchemaType;
-  /** Values; an array field can yield several per evaluation. */
+export interface OutputValueEntry {
+  readonly value: OutputScalar;
+  /** Occurrences; an array field can hold several per evaluation. */
+  readonly count: number;
+  /** `count / observationCount`, whose denominator includes nulls and values outside the distribution; null without observations. */
+  readonly share: number | null;
+  /** Evaluations containing the value at least once. */
+  readonly evaluations: number;
+}
+
+export interface OutputFieldSummary extends Pick<OutputFieldDefinition, "jsonPointer" | "title" | "description" | "kinds"> {
+  /** Aggregated values including null; an array field can yield several per evaluation. */
   readonly observationCount: number;
   readonly contributingEvaluationCount: number;
   readonly missingEvaluationCount: number;
-  readonly summary: NumericSummary;
+  /** Over numeric values only; null when the field has no number/integer kind. */
+  readonly numeric: NumericSummary | null;
+  /** Boolean and enum values of the field shape: declared values in Schema order, then reached values in first-seen order. */
+  readonly distribution: readonly OutputValueEntry[];
+  /** Null occurrences; present exactly when the field shape allows null. */
+  readonly nullCount?: number;
   readonly coverage: AgentResourceCompleteness;
   /** Why evaluations in scope did not contribute; only non-zero reasons. */
-  readonly diagnostics: readonly { readonly reason: NumericMissingReason; readonly evaluations: number }[];
+  readonly diagnostics: readonly { readonly reason: OutputMissingReason; readonly evaluations: number }[];
 }
 
-export interface NumericOutputSummary {
+export interface EvaluationOutputSummary {
   /** The locked Project Schema; null without an evaluation plan. */
   readonly schema: EvaluationOutputSchemaRef | null;
   readonly coverage: AgentResourceCompleteness;
   readonly evaluations: number;
   readonly validation: Readonly<Record<EvaluationValidationStatus, number>>;
-  /** Schema-declared numeric fields in Schema order, then observed fields the static walk cannot name (map keys, recursion). */
-  readonly fields: readonly NumericObservationSummary[];
+  /** Aggregated fields in Schema order, then fields the static walk cannot name (map keys, recursion) in first-seen order. */
+  readonly fields: readonly OutputFieldSummary[];
 }
 
 /** Every field is recomputed from the raw records in scope, never from child summaries. */
@@ -223,7 +275,7 @@ export interface MetricSummary {
   readonly counts: MetricCounts;
   readonly execution: StageStatistics;
   readonly evaluation: StageStatistics;
-  readonly executionAgent: ResourceStatistics;
-  readonly evaluationAgents: ResourceStatistics;
-  readonly numericOutputs: NumericOutputSummary;
+  readonly executionAgent: AggregatedResourceStatistics;
+  readonly evaluationAgents: AggregatedResourceStatistics;
+  readonly evaluationOutputs: EvaluationOutputSummary;
 }

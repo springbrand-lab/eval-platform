@@ -274,4 +274,3 @@ eval-platform 在 `main`（`b57ff44`），sp-platform 在 `eval` 分支（`03531
 - 本地新建 `eval_evidence` 库（原 `eval` 库是重构前的 schema，保留未动），重建 hello 用例并跑 pipeline：Run 成功；Sampling 带 `evidence` 引用，manifest 列出 `/index.html`（217 字节），轨迹 13 条、`complete: true`；评委在自己的 Space 读取 `/evidence/manifest.json` 与产物后写 `/output/result.json`，得分 10，Langfuse 分数 `synced`；评委产物只有 `/output/result.json`。
 
 未完成：补导出命令、第 6 阶段。
-

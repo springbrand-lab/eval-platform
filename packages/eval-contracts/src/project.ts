@@ -1,4 +1,4 @@
-import type { HarnessConfig, JsonValue, Project, RetryPolicy } from "./model.js";
+import type { DatasetKind, EvaluationOutputSchema, HarnessConfig, JsonValue, Project, RetryPolicy } from "./model.js";
 
 /**
  * Display-only copy of an Agent Config taken when it was frozen for a Project. Runs always use the
@@ -13,7 +13,7 @@ export interface AgentConfigSnapshot {
 
 /** Fixed at Project creation and never edited. */
 export interface ExecutionPlan {
-  /** `agentConfig` is the Project's frozen copy, never the user's editable Agent Config. */
+  /** `harness.agentConfig` is the Project's frozen copy, never the user's editable Agent Config. */
   readonly harness: HarnessConfig;
   readonly subjectAgentConfig: AgentConfigSnapshot;
   readonly executionConcurrency: number;
@@ -26,9 +26,15 @@ export interface EvaluationOutputSchemaRef {
   readonly digest: string;
 }
 
+/** A Project-bound Schema's identity and content from one digest-checked read, including deleted catalog entries. */
+export interface EvaluationOutputSchemaDocument {
+  readonly reference: EvaluationOutputSchemaRef;
+  readonly content: EvaluationOutputSchema;
+}
+
 /** Optional at creation; replaceable as a whole until the first evaluating Run locks it. */
 export interface EvaluationPlan {
-  /** `agentConfig` is the Project's frozen Evaluator copy. */
+  /** `evaluationHarness.agentConfig` is the Project's frozen Evaluator copy. */
   readonly evaluationHarness: HarnessConfig & { readonly framework: "sp" };
   readonly evaluatorAgentConfig: AgentConfigSnapshot;
   readonly evaluationConcurrency: number;
@@ -41,7 +47,7 @@ export interface ProjectDatasetSnapshot {
   readonly datasetId: string;
   readonly name: string;
   readonly description?: string;
-  readonly kind: "general" | "prompt";
+  readonly kind: DatasetKind;
   /** The bound ProjectSamples in the Dataset's member order at creation. */
   readonly projectSampleIds: readonly string[];
 }

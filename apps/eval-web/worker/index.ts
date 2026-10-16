@@ -1,4 +1,5 @@
 // eval-web Worker: serves the SPA and forwards /api/* to the Eval API after verifying the takt login.
+import { webGatewayErrorDefinitions, type WebGatewayErrorCode } from "@eval-platform/eval-contracts/web-gateway-errors";
 
 export interface Env {
   readonly ASSETS: { fetch(request: Request): Promise<Response> };
@@ -28,8 +29,9 @@ const CACHE_TTL_MS = 5 * 60_000;
 const CACHE_LIMIT = 1_000;
 const cache = new Map<string, CacheEntry>();
 
-function errorResponse(status: number, code: string, errMsg: string): Response {
-  return Response.json({ code, errMsg }, { status, headers: { "Cache-Control": "no-store" } });
+function errorResponse(code: WebGatewayErrorCode, message?: string): Response {
+  const { status, message: defaultMessage } = webGatewayErrorDefinitions[code];
+  return Response.json({ code, errMsg: message ?? defaultMessage }, { status, headers: { "Cache-Control": "no-store" } });
 }
 
 async function cacheKey(token: string): Promise<string> {
@@ -111,15 +113,15 @@ export async function handle(request: Request, env: Env, fetcher: typeof fetch =
   if (url.pathname === "/healthz") return Response.json({ status: "ok" });
   if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
     const token = /^Bearer\s+(\S+)$/iu.exec(request.headers.get("authorization") ?? "")?.[1];
-    if (!token) return errorResponse(401, "AUTH_UNAUTHENTICATED", "请在 takt 中登录后打开 Eval");
+    if (!token) return errorResponse("AUTH_UNAUTHENTICATED", "请在 takt 中登录后打开 Eval");
     const verified = await verifyTaktToken(token, env, fetcher);
-    if (verified === "unauthorized") return errorResponse(401, "AUTH_UNAUTHENTICATED", "takt 登录已失效");
-    if (verified === "forbidden") return errorResponse(403, "EVAL_ACCESS_DENIED", "没有 Eval 访问权限");
-    if (verified === "unavailable") return errorResponse(503, "TAKT_UNAVAILABLE", "暂时无法连接 takt，请稍后重试");
+    if (verified === "unauthorized") return errorResponse("AUTH_UNAUTHENTICATED", "takt 登录已失效");
+    if (verified === "forbidden") return errorResponse("EVAL_ACCESS_DENIED");
+    if (verified === "unavailable") return errorResponse("TAKT_UNAVAILABLE");
     try {
       return await proxyApi(request, env, verified, fetcher);
     } catch {
-      return errorResponse(503, "EVAL_API_UNAVAILABLE", "Eval API 暂时不可用");
+      return errorResponse("EVAL_API_UNAVAILABLE");
     }
   }
   return withSecurityHeaders(await env.ASSETS.fetch(request), env);

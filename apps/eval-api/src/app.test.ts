@@ -1,9 +1,11 @@
-import { RuntimeAdmissionConflictError, RuntimeInputError, RuntimeProjectBusyError } from "@eval-platform/eval-runtime";
+import { RuntimeAdmissionConflictError, RuntimeEntityNotFoundError, RuntimeInputError, RuntimeProjectBusyError } from "@eval-platform/eval-runtime";
+import { DatasetEntityNotFoundError, type DataInput } from "@eval-platform/eval-dataset";
 import { describe, expect, it, vi } from "vitest";
 import { AgentConfigFrozenError, ProjectEvaluationPlanLockedError } from "./db/errors.js";
 import type { ApiRuntime, OwnerServices } from "./lib/types.js";
-import { METADATA_BODY_BYTES, RUN_TARGET_IDS, SAMPLING_COUNT_MAX } from "./limits.js";
-import { EvalSpApiError, type EvalSpClient } from "./sp/client.js";
+import { INPUT_LIMITS, METADATA_BODY_BYTES, RUN_TARGET_IDS, SAMPLING_COUNT_MAX, ZIP_BODY_BYTES } from "./limits.js";
+import type { EvalSpClient } from "./sp/client.js";
+import { EvalSpApiError } from "./sp/http.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "./test-support.js";
 
 const owner = "11111111-1111-4111-8111-111111111111";
@@ -11,7 +13,8 @@ const datasetId = "00000000-0000-4000-8000-000000000001";
 const outputSchemaId = "00000000-0000-4000-8000-000000000002";
 const agentId = "00000000-0000-4000-8000-000000000003";
 const project = { projectId: "project-1", ownerUserId: owner, name: "Tasks", sourceBranch: "release", createdAt: "2026-01-01T00:00:00.000Z" };
-const view = { project, datasets: [], projectSamples: [], currentRun: null, evaluation: null };
+const view = { project, datasets: [], projectSamples: [], runSequence: 0, currentRun: null, evaluation: null };
+const schemaDocument = { reference: { outputSchemaId, digest: "a".repeat(64) }, content: { type: "object" } };
 const evaluationPlan = { userAgentId: agentId, evaluationConcurrency: 1, outputSchemaId };
 const createBody = {
   name: " Tasks ",
@@ -33,11 +36,16 @@ function setup() {
       list: vi.fn(async () => [project]),
       create: vi.fn(async (body: { name: string }) => ({ project: { ...project, name: body.name }, run: { runId: "run-1", samplingIds: ["s-1"] } })),
       get: vi.fn(async (projectId: string) => projectId === "project-1" ? view : null),
+      getEvaluationOutputSchema: vi.fn(async (projectId: string) => {
+        if (projectId === "missing") throw new RuntimeEntityNotFoundError("project", projectId);
+        return projectId === "no-evaluation" ? null : schemaDocument;
+      }),
       exists: vi.fn(async (projectId: string) => projectId === "project-1"),
       delete: vi.fn(async () => undefined),
       replaceEvaluationPlan: vi.fn(async () => view),
     },
     datasets: {
+      createData: vi.fn(async (input: DataInput, _options: { datasetId?: string }) => ({ ...input, dataId: agentId })),
       createDataset: vi.fn(async ({ name }: { name: string }) => ({ datasetId, name })),
       importDataset: vi.fn(async () => ({ dataset: { datasetId, name: "Cases" }, data: [] })),
       exportDataset: vi.fn(async () => "dataset:\n  name: Cases\ndata: []\n"),
@@ -63,7 +71,11 @@ function setup() {
       getProjectOverview: vi.fn(async () => ({ projectId: "project-1" })),
       getSampleOverview: vi.fn(async () => ({ projectSampleId: "sample-1" })),
     },
-    resources: { createBundle: vi.fn(async () => ({ bundleId: datasetId, name: "A", description: "B" })) },
+    materialBundles: {
+      create: vi.fn(async () => ({ bundle: { bundleId: datasetId, name: "A", description: "B" }, imported: [] })),
+      update: vi.fn(),
+      import: vi.fn(),
+    },
     agentConfigs: {
       list: vi.fn(async () => [{ id: "agent-1", user_id: owner, name: "Agent" }]),
       create: vi.fn(async () => { throw new EvalSpApiError(422, { code: "AGENT_CONFIG_INVALID", errMsg: "Name is required" }); }),
@@ -97,6 +109,58 @@ function setup() {
 }
 
 describe("Eval API HTTP layer", () => {
+  it("passes one validated optional Dataset target to the atomic Data create command", async () => {
+    const app = setup();
+    const input = { name: "Case", description: "Task", userPrompt: "Execute", evalPrompt: "Judge", custom: [true, null] };
+    const target = "ABCDEF00-0000-4000-8000-000000000001";
+    const bound = await app.request(`/api/data?datasetId=${target}`, jsonRequest("POST", input));
+    expect(bound.status).toBe(201);
+    expect(await bound.json()).toMatchObject({ success: true, msg: { ...input, dataId: agentId } });
+    expect(app.services.datasets.createData).toHaveBeenLastCalledWith(input, { datasetId: target.toLowerCase() });
+    const standalone = await app.request("/api/data", jsonRequest("POST", input));
+    expect(standalone.status).toBe(201);
+    expect(app.services.datasets.createData).toHaveBeenLastCalledWith(input, {});
+    for (const query of ["datasetId=invalid", "datasetId=", `datasetId=${datasetId}&unexpected=true`]) {
+      expect((await app.request(`/api/data?${query}`, jsonRequest("POST", input))).status).toBe(422);
+    }
+    expect(app.services.datasets.createData).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports an inaccessible Dataset target without returning a created Data", async () => {
+    const app = setup();
+    app.services.datasets.createData.mockRejectedValueOnce(new DatasetEntityNotFoundError("dataset", datasetId));
+    const response = await app.request(`/api/data?datasetId=${datasetId}`, jsonRequest("POST", { userPrompt: "Execute" }));
+    expect(response.status).toBe(404);
+    const error = await response.json();
+    expect(error).toMatchObject({ code: "DATASET_NOT_FOUND" });
+    expect(error).not.toHaveProperty("msg");
+  });
+
+  it("reads a Project Schema document, preserves an absent plan and maps inaccessible Projects", async () => {
+    const app = setup();
+    const document = await app.request("/api/projects/project-1/evaluation-output-schema");
+    expect(document.status).toBe(200);
+    expect(await document.json()).toMatchObject({ success: true, msg: schemaDocument });
+    const absent = await app.request("/api/projects/no-evaluation/evaluation-output-schema");
+    expect(await absent.json()).toMatchObject({ success: true, msg: null });
+    const missing = await app.request("/api/projects/missing/evaluation-output-schema");
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ code: "PROJECT_NOT_FOUND" });
+    app.services.projects.getEvaluationOutputSchema.mockRejectedValueOnce(new Error("database password is secret"));
+    const unavailable = await app.request("/api/projects/project-1/evaluation-output-schema");
+    expect(unavailable.status).toBe(500);
+    expect(JSON.stringify(await unavailable.json())).not.toContain("secret");
+  });
+
+  it("publishes actual input bounds through the authenticated control plane", async () => {
+    const app = setup();
+    const response = await app.request("/api/input-limits");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: true, msg: INPUT_LIMITS, errMsg: "", code: "" });
+    const foreign = await app.request("/api/input-limits", { headers: { Origin: "https://other.test" } });
+    expect(foreign.status).toBe(403);
+  });
+
   it("serves health without a session and wraps success in the SP envelope", async () => {
     const app = setup();
     const response = await app.request("/healthz");
@@ -207,13 +271,53 @@ describe("Eval API HTTP layer", () => {
     expect(await invalidUtf8.json()).toMatchObject({ code: "REQUEST_INVALID_INPUT" });
     const text = await app.request("/api/datasets", authorized("session", { method: "POST", body: '{"name":"a"}' }));
     expect(text.status).toBe(415);
-    const oversized = await app.request("/api/bundles", jsonRequest("POST", {
+    const oversized = await app.request(`/api/material-bundles/${datasetId}`, jsonRequest("PATCH", {
       name: "a".repeat(METADATA_BODY_BYTES), description: "b",
     }));
     expect(oversized.status).toBe(413);
     expect(await oversized.json()).toMatchObject({ code: "REQUEST_PAYLOAD_TOO_LARGE" });
     expect(app.services.datasets.createDataset).not.toHaveBeenCalled();
-    expect(app.services.resources.createBundle).not.toHaveBeenCalled();
+    expect(app.services.materialBundles.update).not.toHaveBeenCalled();
+  });
+
+  it("reads Bundle creation and ZIP import as bounded multipart bodies", async () => {
+    const app = setup();
+    const importPath = `/api/material-bundles/${datasetId}/import`;
+    for (const path of ["/api/material-bundles", importPath]) {
+      const json = await app.request(path, jsonRequest("POST", { name: "A", description: "B" }));
+      expect(json.status).toBe(415);
+      expect(await json.json()).toMatchObject({ code: "REQUEST_UNSUPPORTED_MEDIA_TYPE" });
+    }
+    const oversized = await app.request("/api/material-bundles", authorized("session", {
+      method: "POST", headers: { "Content-Type": "multipart/form-data; boundary=x" }, body: new Uint8Array(ZIP_BODY_BYTES + 1),
+    }));
+    expect(oversized.status).toBe(413);
+    expect(await oversized.json()).toMatchObject({ code: "REQUEST_PAYLOAD_TOO_LARGE" });
+    const malformed = await app.request(importPath, authorized("session", {
+      method: "POST", headers: { "Content-Type": "multipart/form-data; boundary=x" }, body: "not multipart",
+    }));
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ code: "REQUEST_INVALID_INPUT" });
+    const missingZip = await app.request(importPath, authorized("session", { method: "POST", body: new FormData() }));
+    expect(missingZip.status).toBe(422);
+    expect(await missingZip.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED", errors: [expect.objectContaining({ path: "zip" })] });
+    expect(app.services.materialBundles.import).not.toHaveBeenCalled();
+    const fields = new FormData();
+    fields.append("name", " A ");
+    fields.append("description", "B");
+    const created = await app.request("/api/material-bundles", authorized("session", { method: "POST", body: fields }));
+    expect(created.status).toBe(201);
+    expect(await created.json()).toMatchObject({ msg: { bundle: { bundleId: datasetId }, imported: [] } });
+    expect(app.services.materialBundles.create).toHaveBeenCalledWith({ name: "A", description: "B" }, []);
+  });
+
+  it("routes each Bundle kind only to its own resource kind", async () => {
+    const app = setup();
+    for (const path of [`/api/material-bundles/${datasetId}/sessions`, `/api/session-bundles/${datasetId}/materials`]) {
+      const response = await app.request(path, authorized());
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "REQUEST_NOT_FOUND" });
+    }
   });
 
   it("validates path, query and body with the route schemas", async () => {
@@ -370,7 +474,7 @@ describe("Eval API HTTP layer", () => {
     expect(await listed.json()).toMatchObject({ msg: [{ id: "agent-1" }] });
     const rejected = await app.request("/api/agent-configs", jsonRequest("POST", { name: "" }));
     expect(rejected.status).toBe(422);
-    expect(await rejected.json()).toMatchObject({ code: "EVAL_SP_REQUEST_INVALID", errMsg: "Name is required" });
+    expect(await rejected.json()).toMatchObject({ code: "AGENT_CONFIG_INVALID", errMsg: "Name is required" });
     const frozen = await app.request(`/api/agent-configs/${agentId}`, jsonRequest("PATCH", { name: "x", revision: 1 }));
     expect(frozen.status).toBe(409);
     expect(await frozen.json()).toMatchObject({ code: "AGENT_CONFIG_FROZEN" });

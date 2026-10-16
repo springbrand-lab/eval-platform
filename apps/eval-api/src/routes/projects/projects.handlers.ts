@@ -1,5 +1,6 @@
 import { ok } from "@eval-platform/eval-contracts/http";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
+import { fileResponse } from "../../lib/file-response.js";
 import type { AppRouteHandler } from "../../lib/types.js";
 import type * as routes from "./projects.routes.js";
 
@@ -19,6 +20,9 @@ export const remove: AppRouteHandler<typeof routes.remove> = async (c) => {
   await c.var.services.projects.delete(c.req.valid("param").projectId);
   return c.body(null, 204);
 };
+
+export const evaluationOutputSchema: AppRouteHandler<typeof routes.evaluationOutputSchema> = async (c) =>
+  ok(c, await c.var.services.projects.getEvaluationOutputSchema(c.req.valid("param").projectId));
 
 export const replaceEvaluationPlan: AppRouteHandler<typeof routes.replaceEvaluationPlan> = async (c) =>
   ok(c, await c.var.services.projects.replaceEvaluationPlan(c.req.valid("param").projectId, c.req.valid("json")));
@@ -59,13 +63,5 @@ export const observeFile: AppRouteHandler<typeof routes.observeFile> = async (c)
   const { projectId, kind, id } = c.req.valid("param");
   const chat = await observedChat(c, projectId, kind, id);
   const file = await c.env.observation.file(chat, c.req.valid("query").path);
-  const headers = new Headers({
-    "Content-Type": file.contentType,
-    "Content-Disposition": "attachment",
-    "Content-Security-Policy": "default-src 'none'; sandbox",
-    "X-Content-Type-Options": "nosniff",
-    "Cache-Control": "private, no-store",
-  });
-  if (file.contentLength !== null) headers.set("Content-Length", file.contentLength);
-  return new Response(file.body, { status: 200, headers }) as never;
+  return fileResponse(file) as never;
 };

@@ -20,14 +20,13 @@ import {
   CatalogInputError,
   CatalogPayloadTooLargeError,
   OutputSchemaNotFoundError,
-  ProjectCreationKeyTakenError,
   ProjectEvaluationPlanLockedError,
   ProjectIdempotencyConflictError,
   ProjectRunStopConflictError,
-  RunTargetsTooLargeError,
 } from "../db/errors.js";
+import { RunTargetsTooLargeError } from "../limits.js";
 import { BundleFileError } from "../sp/bundle-errors.js";
-import { EvalSpApiError, EvalSpTransportError } from "../sp/client.js";
+import { EvalSpApiError, EvalSpTransportError } from "../sp/http.js";
 import { apiError, errorDiagnostics } from "./api-errors.js";
 
 const id = "00000000-0000-4000-8000-000000000001";
@@ -46,7 +45,6 @@ describe("apiError", () => {
     [new RuntimeAdmissionConflictError("stale-targets", "m"), 409, "RUN_TARGETS_STALE"],
     [new RuntimeAdmissionConflictError("empty-targets", "m"), 409, "RUN_TARGETS_EMPTY"],
     [new RuntimeAdmissionConflictError("creation-superseded", "m"), 409, "RUN_IDEMPOTENCY_CONFLICT"],
-    [new ProjectCreationKeyTakenError(), 409, "RUNTIME_RECORD_CONFLICT"],
     [new RuntimeAdmissionConflictError("evaluation-prompt", "m"), 409, "PROJECT_SAMPLE_EVALUATION_PROMPT_MISSING"],
     [new RuntimeAdmissionConflictError("sampling-unavailable", "m"), 409, "SAMPLING_UNAVAILABLE"],
     [new RuntimeProjectBusyError("p", "r"), 409, "PROJECT_BUSY"],
@@ -71,11 +69,11 @@ describe("apiError", () => {
     [new MetricsEntityNotFoundError("project-sample", "s"), 404, "PROJECT_SAMPLE_NOT_FOUND"],
     [new MetricsEntityNotFoundError("sampling", "s"), 404, "SAMPLING_NOT_FOUND"],
     [new BundleFileError("not-found", "m"), 404, "BUNDLE_FILE_NOT_FOUND"],
-    [new BundleFileError("conflict", "m"), 409, "BUNDLE_FILE_CONFLICT"],
     [new BundleFileError("too-large", "m"), 413, "BUNDLE_FILE_TOO_LARGE"],
     [new BundleFileError("invalid", "m"), 400, "BUNDLE_FILE_INVALID"],
+    [new BundleFileError("corrupt", "private stored content"), 500, "BUNDLE_FILE_CORRUPT"],
     [new BundleFileError("unavailable", "m"), 503, "BUNDLE_FILE_UNAVAILABLE"],
-    [new EvalSpApiError(401, null), 401, "AUTH_UNAUTHENTICATED"],
+    [new EvalSpApiError(401, null), 503, "EVAL_SP_UNAVAILABLE"],
     [new EvalSpApiError(403, null), 403, "EVAL_SP_FORBIDDEN"],
     [new EvalSpApiError(404, null), 404, "EVAL_SP_NOT_FOUND"],
     [new EvalSpApiError(409, null), 409, "EVAL_SP_CONFLICT"],
@@ -95,6 +93,15 @@ describe("apiError", () => {
     expect(apiError(new CatalogInputError("name must be a nonblank string", "name"))).toMatchObject({
       code: "CATALOG_INPUT_INVALID", errors: [{ path: "name", errMsg: "name must be a nonblank string" }],
     });
+    expect(apiError(new BundleFileError("invalid", "ZIP archive is invalid", {
+      details: [{ path: "a.jsonl:2", errMsg: "Invalid JSON at offset 6: ValueExpected" }],
+    }))).toMatchObject({
+      code: "BUNDLE_FILE_INVALID", message: "ZIP archive is invalid",
+      errors: [{ path: "a.jsonl:2", errMsg: "Invalid JSON at offset 6: ValueExpected" }],
+    });
+    expect(apiError(new BundleFileError("too-large", "m", { details: [{ path: "zip", errMsg: "too many entries" }] })))
+      .toMatchObject({ code: "BUNDLE_FILE_TOO_LARGE", status: 413, errors: [{ path: "zip", errMsg: "too many entries" }] });
+    expect(apiError(new BundleFileError("invalid", "m")).errors).toBeUndefined();
   });
 
   it("relays SP validation text but never persisted Runtime facts", () => {
@@ -128,8 +135,10 @@ describe("apiError", () => {
     expect(translated.code).toBe("DATABASE_UNAVAILABLE");
     const log = JSON.stringify(errorDiagnostics(translated));
     expect(log).toContain("ECONNREFUSED");
-    expect(log).not.toContain("private");
+    expect(log).not.toContain("private_column");
+    expect(log).not.toContain("private-value");
     expect(apiError(new DrizzleQueryError("select 1", [], Object.assign(new Error("duplicate"), { code: "23505" }))).code)
       .toBe("INTERNAL_ERROR");
+    expect(apiError(Object.assign(new Error("terminating connection"), { code: "57P01" })).code).toBe("DATABASE_UNAVAILABLE");
   });
 });

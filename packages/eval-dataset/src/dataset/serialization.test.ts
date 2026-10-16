@@ -14,7 +14,14 @@ const document: DatasetDocument = {
       requirements: ["responsive", "accessible"],
       expectedOutput: { files: ["src/index.ts"] },
       initialSession: { bundleId: "401c23cf-d812-43f4-8404-d76e22cb0a66", sessionId: "2d1f19f1-7ab0-4037-8322-a149171e8351" },
-      initialMaterials: { bundleId: "f558ce88-fd69-4b57-8918-8938ab711cdf", materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af" },
+      initialMaterials: [
+        { bundleId: "f558ce88-fd69-4b57-8918-8938ab711cdf", materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af" },
+        { bundleId: "0b5e8c3a-7d2f-4e1a-9c6b-3f8d2a1e5c47", materialId: "6e4d2c1b-9a8f-4e7d-8c6b-5a4f3e2d1c0b" },
+      ],
+      evalInitialMaterials: [
+        { bundleId: "0b5e8c3a-7d2f-4e1a-9c6b-3f8d2a1e5c47", materialId: "6e4d2c1b-9a8f-4e7d-8c6b-5a4f3e2d1c0b" },
+        { bundleId: "f558ce88-fd69-4b57-8918-8938ab711cdf", materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af" },
+      ],
       metadata: JSON.parse('{"__proto__":{"label":"important"}}'),
     },
     {
@@ -43,7 +50,7 @@ describe("Dataset serialization", () => {
     expect(() => parsePromptDatasetUpload({ ...input, description: " ", content: JSON.stringify(row) })).toThrow();
     expect(() => parsePromptDatasetUpload({ ...input, content: JSON.stringify({ ...row, dataId: crypto.randomUUID() }) })).toThrow();
     expect(() => parsePromptDatasetUpload({ ...input, content: JSON.stringify({ ...row,
-      initialMaterials: { bundleId: "d59795de-8a4d-4383-8e52-5b589b2bb0c1", materialId: "97912524-f347-43ab-8302-e4b51be6391c" } }) })).toThrow();
+      initialMaterials: [{ bundleId: "d59795de-8a4d-4383-8e52-5b589b2bb0c1", materialId: "97912524-f347-43ab-8302-e4b51be6391c" }] }) })).toThrow();
     expect(() => parsePromptDatasetUpload({ ...input, content: '{"name":"first","name":"second"}' }))
       .toThrow(/Duplicate JSON field/u);
     expect(() => parsePromptDatasetUpload({ ...input, format: "json", content: JSON.stringify(row) })).toThrow();
@@ -122,7 +129,7 @@ describe("Dataset serialization", () => {
     '{"userPrompt":"first","userPrompt":"second"}',
     '{"userPrompt":"task","externalDataId":"first","externalDataId":"second"}',
     '{"userPrompt":"task","initialSession":{"bundleId":"781791f5-4cc0-46d0-8ef3-bc9b19e578a3","sessionId":"e0996a37-c13d-44c3-8060-74939d43fa37","sessionId":"352f7829-a238-4b00-8cc1-2b0c2613c756"}}',
-    '{"userPrompt":"task","initialMaterials":{"bundleId":"e0996a37-c13d-44c3-8060-74939d43fa37","bundleId":"352f7829-a238-4b00-8cc1-2b0c2613c756","materialId":"a1f13b3b-c20a-496e-88c2-12be9c56c706"}}',
+    '{"userPrompt":"task","initialMaterials":[{"bundleId":"e0996a37-c13d-44c3-8060-74939d43fa37","bundleId":"352f7829-a238-4b00-8cc1-2b0c2613c756","materialId":"a1f13b3b-c20a-496e-88c2-12be9c56c706"}]}',
     '{"userPrompt":"task","expectedOutput":[{"id":1,"id":2}]}',
     '{"userPrompt":"first","user\\u0050rompt":"second"}',
     '{"userPrompt":"task","__proto__":{"first":true},"__proto__":{"second":true}}',

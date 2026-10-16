@@ -1,6 +1,7 @@
-import type { Data, DataInput, Dataset, DatasetDocument, DatasetInput, DatasetSnapshot } from "./model.js";
+import type { Data, DataCreateOptions, DataInput, Dataset, DatasetDocument, DatasetInput, DatasetSnapshot } from "./model.js";
 import {
   dataInputSchema,
+  dataCreateOptionsSchema,
   dataSchema,
   datasetInputSchema,
   datasetSchema,
@@ -19,7 +20,7 @@ export interface DatasetService {
   getDataset(datasetId: string): Promise<Dataset | null>;
   listDatasets(): Promise<readonly Dataset[]>;
   deleteDataset(datasetId: string): Promise<void>;
-  createData(input: DataInput): Promise<Data>;
+  createData(input: DataInput, options?: DataCreateOptions): Promise<Data>;
   updateData(dataId: string, input: DataInput): Promise<Data>;
   getData(dataId: string): Promise<Data | null>;
   listData(datasetId?: string): Promise<readonly Data[]>;
@@ -76,10 +77,11 @@ export function createDatasetService(store: DatasetStore): DatasetService {
     async deleteDataset(datasetId) {
       await store.deleteDataset(platformId(datasetId));
     },
-    async createData(input) {
+    async createData(input, options) {
       const fields = parseInput(() => dataInputSchema.parse(input));
+      const target = parseInput(() => dataCreateOptionsSchema.parse(options ?? {}));
       const data = dataSchema.parse({ ...fields, dataId: crypto.randomUUID() });
-      await store.createData(data);
+      await store.createData(data, target);
       return dataSchema.parse(data);
     },
     async updateData(dataId, input) {

@@ -14,9 +14,9 @@ import type {
   ExecutionOutput,
   HarnessConfig,
   MaterializedDataBinding,
-  TrajectoryEvent,
+  JsonValue,
 } from "@eval-platform/eval-contracts";
-import type { DataInput } from "@eval-platform/eval-dataset";
+import type { DataInput, InitialMaterialsRef } from "@eval-platform/eval-dataset";
 
 export type HarnessRuntimeOptions = NonNullable<HarnessConfig["runtime"]>;
 
@@ -112,7 +112,14 @@ export interface ExportedArtifact {
 export interface ExportEvidenceInput {
   readonly handle: AgentHandle;
   readonly limits: EvidenceLimits;
+  readonly initialMaterials?: readonly InitialMaterialsRef[];
   readonly runtime?: HarnessRuntimeOptions;
+}
+
+export interface ExportedSubjectInput extends ExportedArtifact {
+  readonly bundleId: string;
+  readonly materialId: string;
+  read(): Promise<ReadableStream<Uint8Array>>;
 }
 
 /** What one framework exports from a finished Agent; the evidence store freezes it. */
@@ -120,10 +127,12 @@ export interface ExportedEvidence {
   readonly source: EvidenceSource;
   /** Already within `limits`; everything left out is listed in `omitted`. */
   readonly artifacts: readonly ExportedArtifact[];
+  readonly subjectInputs: readonly ExportedSubjectInput[];
   readonly omitted: readonly EvidenceOmission[];
   readonly readFile: EvidenceFileReader;
-  /** Normalized events in order; the adapter pages through its source. */
-  readonly trajectory: AsyncIterable<TrajectoryEvent>;
+  /** Complete raw events in order; the adapter pages through its source without projection. */
+  readonly trajectory: AsyncIterable<JsonValue>;
+  readonly trajectoryFormat: string;
   readonly trajectoryComplete: boolean;
   readonly trajectoryIncompleteReason?: string;
 }

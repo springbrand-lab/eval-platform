@@ -31,7 +31,7 @@ import { createPostgresMetricsSource } from "./metrics.js";
 import { createPostgresObservationReader } from "./observation.js";
 import { createOutputSchemaCatalog } from "./output-schemas.js";
 import { createPostgresProjectPlanReader } from "./project-plans.js";
-import { EvalSpApiError } from "../sp/client.js";
+import { EvalSpApiError } from "../sp/http.js";
 import { createPostgresProjectStore } from "./project-store.js";
 import { createPostgresProjectRunReader } from "./run-view.js";
 import { createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore } from "./runtime.js";
@@ -195,6 +195,32 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     const after = (await service.get(project.projectId))!;
     expect({ ...after, currentRun: null }).toEqual({ ...view, currentRun: null });
     expect(stub.configs.get(copyId)?.setting).toEqual({ model: "Subject" });
+  });
+
+  it("keeps Project Schema reads and Run sequence authoritative after source deletion and short Runs", async () => {
+    const { first, subject, evaluator, schema } = await catalog();
+    const { projects: service, outputSchemas, worker, runtime, plans } = services();
+    const { project, run } = await service.create({
+      name: "Schema read", datasets: [{ datasetId: first.datasetId }], samplingCount: 1,
+      execution: { userAgentId: subject, framework: "sp", executionConcurrency: 1 },
+      evaluation: { userAgentId: evaluator, evaluationConcurrency: 1, outputSchemaId: schema.outputSchemaId },
+      idempotencyKey: "schema-read", run: { operation: "execution" },
+    });
+    expect((await service.get(project.projectId))!.runSequence).toBe(1);
+    const document = await service.getEvaluationOutputSchema(project.projectId);
+    expect(document).toEqual({ reference: (await service.get(project.projectId))!.evaluation!.plan.outputSchema, content: JSON.parse(scoreSchema) });
+    await outputSchemas.delete(schema.outputSchemaId);
+    expect(await outputSchemas.get(schema.outputSchemaId)).toBeNull();
+    expect(await service.getEvaluationOutputSchema(project.projectId)).toEqual(document);
+    await expect(services(OTHER).projects.getEvaluationOutputSchema(project.projectId)).rejects.toBeInstanceOf(RuntimeEntityNotFoundError);
+    await settle(worker, run!.samplingIds, "succeeded");
+    expect(await service.get(project.projectId)).toMatchObject({ runSequence: 1, currentRun: null });
+    const next = await buildCommand(plans, runtime, { projectId: project.projectId, operation: "execution", idempotencyKey: "second" });
+    await runtime.admitRun(next);
+    await settle(worker, next.run.samplingIds, "succeeded");
+    expect(await service.get(project.projectId)).toMatchObject({ runSequence: 2, currentRun: null });
+    await service.delete(project.projectId);
+    await expect(service.getEvaluationOutputSchema(project.projectId)).rejects.toBeInstanceOf(RuntimeEntityNotFoundError);
   });
 
   it("rejects invalid selections before any SP copy is made", async () => {
@@ -516,6 +542,37 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       expect(replayed.project).toEqual(project);
       expect(replayed.run?.runId).toBe(creationRunId);
       expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(2);
+    });
+
+    it("returns the creation's own Run to a stalled creator after a replay admitted it and a user Run superseded it", async () => {
+      const body = await creationBody();
+      const s = services();
+      const real = runtimeAdmission();
+      let creationRunId = "";
+      const creator = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: s.store,
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: {
+          async preview(request) {
+            if (creationRunId === "") {
+              // The creator stalls after its commit: a same-key replay admits the creation Run, then the user starts another one.
+              const replayed = await services(OWNER, runtimeAdmission()).projects.create(body);
+              creationRunId = replayed.run!.runId;
+              await settle(s.worker, replayed.run!.samplingIds, "succeeded");
+              const userRun = await real.submit({ ...request, idempotencyKey: "user", targets: (await real.preview(request)).targets });
+              await settle(s.worker, userRun.samplingIds, "succeeded");
+            }
+            return real.preview(request);
+          },
+          submit: real.submit,
+        },
+      });
+      const created = await creator.create(body);
+      expect(created.run?.runId).toBe(creationRunId);
+      expect(await s.projects.list()).toEqual([created.project]);
+      expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(2);
+      expect(stub.calls.deleted).toEqual([]);
+      expect(stub.sp.createAgentConfig).toHaveBeenCalledTimes(1);
     });
 
     it("keeps a Project whose first Run kept meeting plan changes and finishes it on replay", async () => {

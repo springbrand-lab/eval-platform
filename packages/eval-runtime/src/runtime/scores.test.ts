@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { publishEvaluationScore, readEvaluationScore, syncRunScores } from "./scores.js";
+import { publishEvaluationScore, syncRunScores } from "./scores.js";
 
 const output = (result?: unknown, content = JSON.stringify(result)) => ({
   status: "succeeded" as const,
@@ -7,36 +7,7 @@ const output = (result?: unknown, content = JSON.stringify(result)) => ({
   trajectory: { trajectoryId: "chat-2", source: "evaluator" as const, path: "/api/chats/chat-2/trajectory" },
   ...(result === undefined ? {} : { structuredOutput: { path: "/output/result.json", content } }),
 });
-const schema = { type: "object" };
-const accept = { validate: () => [] };
-
-describe("Evaluator score", () => {
-  it("reads score and reason from a conforming result", () => {
-    expect(readEvaluationScore(output({ score: 8, reason: "ok", extra: [1] }), schema, accept))
-      .toEqual({ score: 8, reason: "ok" });
-    expect(readEvaluationScore(output({ score: 0 }), schema, undefined)).toEqual({ score: 0 });
-  });
-
-  it.each([
-    [undefined, "has no result file"],
-    [[1], "must contain a JSON object"],
-    [{ reason: "missing" }, "no numeric score"],
-    [{ score: "8" }, "no numeric score"],
-    [{ score: 8, reason: 1 }, "reason must be a string"],
-  ])("explains why %j has no score", (result, problem) => {
-    expect(readEvaluationScore(output(result), schema, accept)).toEqual({ problem: expect.stringContaining(problem) });
-  });
-
-  it("rejects a result file that is not strict JSON", () => {
-    expect(readEvaluationScore(output({}, '{"score":1,"score":2}'), schema, accept))
-      .toEqual({ problem: expect.stringContaining("not valid JSON") });
-  });
-
-  it("reports schema problems before reading the score", () => {
-    expect(readEvaluationScore(output({ score: 8 }), schema, { validate: () => ["/score too high", "/reason required"] }))
-      .toEqual({ problem: "Evaluator result does not follow the output schema: /score too high; /reason required" });
-  });
-
+describe("Evaluator score delivery", () => {
   it("describes a delivered and an undelivered score", async () => {
     const score = {
       evaluationId: "e", samplingId: "s", projectId: "p", projectSampleId: "x", subjectChatId: "c1", evaluatorChatId: "c2", score: 1,
@@ -55,7 +26,7 @@ describe("Run score re-sync", () => {
     chatId: `judge-${evaluationId}`,
     status: { status: "succeeded" as const },
     attempts: [],
-    output: { ...output({ score: 7 }), score: 7, reason: "fine" },
+    output: output({ score: 7, reason: "fine" }),
     ...(scoreSync === undefined ? {} : { scoreSync }),
   });
   const failedEvaluation = { ...scored("e3"), status: { status: "failed" as const } };
@@ -75,6 +46,8 @@ describe("Run score re-sync", () => {
       },
       runId: "run-1",
       publish,
+      schema: {},
+      read: () => ({ score: 7, reason: "fine" }),
       now: () => "t1",
     });
 
@@ -88,7 +61,7 @@ describe("Run score re-sync", () => {
 
   it("returns null for an unknown Run", async () => {
     await expect(syncRunScores({
-      store: { getRun: async () => null } as never, runId: "missing", publish: async () => undefined, now: () => "t",
+      store: { getRun: async () => null } as never, runId: "missing", publish: async () => undefined, read: () => undefined, schema: {}, now: () => "t",
     })).resolves.toBeNull();
   });
 });

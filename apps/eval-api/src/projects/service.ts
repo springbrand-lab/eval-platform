@@ -5,11 +5,12 @@ import type {
   Project,
   RunHandle,
 } from "@eval-platform/eval-contracts";
-import type { EvalRunAdmission } from "@eval-platform/eval-runtime";
+import type { EvalRunAdmission, ProjectView } from "@eval-platform/eval-runtime";
 import {
   RuntimeAdmissionConflictError,
   RuntimeEntityNotFoundError,
   RuntimeInputError,
+  RuntimeRecordConflictError,
   RuntimeRunIdentityConflictError,
   digestExecutionPlan,
   digestJson,
@@ -24,7 +25,7 @@ import {
   ProjectIdempotencyConflictError,
 } from "../db/errors.js";
 import type { createOutputSchemaCatalog } from "../db/output-schemas.js";
-import type { PostgresProjectStore, ProjectView } from "../db/project-store.js";
+import type { PostgresProjectStore, StoredProjectCreation } from "../db/project-store.js";
 import type { EvaluationPlanBody, ProjectCreateBody } from "./schemas.js";
 import { requireRunTargetCount } from "../limits.js";
 import { bindProjectSamples } from "./snapshot.js";
@@ -34,25 +35,23 @@ type AgentPolicy = Pick<EvaluationPlanBody, "userAgentId" | "retryPolicy" | "tim
 export interface ProjectCreation {
   readonly project: Project;
   /**
-   * The creation's own first Run, admitted under the creation key, even after later Runs. Null when a
-   * replay finds the Project already has other Runs but never admitted its first one.
+   * The creation's own first Run, admitted under the creation key, even after later Runs. Null when the
+   * Project got other Runs before the creation admitted its first one.
    */
   readonly run: RunHandle | null;
 }
 
-/** Concurrent creations losing the key race replay the winner; this bounds rare winner compensation loops. */
+/**
+ * Bounds the creation loop: each pass re-reads the key after losing the key race, after the winner's Project
+ * vanished, or after the creation-key Run was superseded during admission.
+ */
 const CREATION_ATTEMPTS = 3;
 /** Bounds re-previews of a first Run whose plan changed between preview and admission. */
 const FIRST_RUN_ATTEMPTS = 3;
 
-/**
- * The single rule for removing a creation after its first Run failed: only a Project that is unusable or
- * unwanted. A plan change means the Project is valid and being edited, and a superseded creation already
- * has Runs; both are kept so a same-key replay can finish them.
- */
+/** A plan change means the Project is valid and being edited, so it is kept for a same-key replay. */
 function compensates(error: unknown): boolean {
-  return !(error instanceof RuntimeAdmissionConflictError
-    && (error.reason === "plan-changed" || error.reason === "creation-superseded"));
+  return !(error instanceof RuntimeAdmissionConflictError && error.reason === "plan-changed");
 }
 
 /** The key identifies the request and the fingerprint its facts, so a retry with the same body matches. */
@@ -119,8 +118,12 @@ export function createProjectService(input: {
     return bound;
   }
 
-  /** Admits the first Run under the creation key; a concurrent identical submission is replayed by Runtime. */
-  async function admitFirstRun(project: Project, body: ProjectCreateBody): Promise<ProjectCreation> {
+  /**
+   * Admits the first Run under the creation key; a concurrent identical submission is replayed by Runtime.
+   * Returns null when the key must be read again: the Project row is gone (compensated or soft-deleted), or
+   * the creation-key Run was admitted meanwhile and already superseded.
+   */
+  async function admitFirstRun(project: Project, body: ProjectCreateBody): Promise<ProjectCreation | null> {
     const { projectId } = project;
     const { operation } = body.run;
     for (let attempt = 1; ; attempt += 1) {
@@ -129,6 +132,8 @@ export function createProjectService(input: {
         const run = await admission.submit({ idempotencyKey: body.idempotencyKey, projectId, operation, selector: { all: true }, targets });
         return { project, run };
       } catch (error) {
+        if ((error instanceof RuntimeEntityNotFoundError && error.entity === "project")
+          || error instanceof RuntimeRunIdentityConflictError) return null;
         if (!(error instanceof RuntimeAdmissionConflictError)) throw error;
         // Under the admission lock a Run committed first: the creation no longer owns the first Run.
         if (error.reason === "creation-superseded") return { project, run: null };
@@ -141,33 +146,19 @@ export function createProjectService(input: {
   /**
    * Replays a creation already committed under the key. Its own first Run is returned when it exists;
    * a Project without any Run (the creator crashed before admission) gets its first Run now; a Project
-   * that meanwhile has other Runs returns `run: null`. A replaying request never compensates: the
-   * Project belongs to the request that committed it.
+   * that meanwhile has other Runs returns `run: null`. Null asks the caller to read the key again. A
+   * replaying request never compensates: the Project belongs to the request that committed it.
    */
-  async function replay(body: ProjectCreateBody, fingerprint: string): Promise<ProjectCreation | null> {
-    const found = await store.findCreation(body.idempotencyKey);
-    if (!found) return null;
+  async function replay(found: StoredProjectCreation, body: ProjectCreateBody, fingerprint: string): Promise<ProjectCreation | null> {
     if (found.deleted) throw new RuntimeEntityNotFoundError("project", found.project.projectId);
     if (found.fingerprint !== fingerprint) throw new ProjectIdempotencyConflictError();
     if (found.run) return { project: found.project, run: found.run };
-    if (found.hasRun) return { project: found.project, run: null };
-    try {
-      return await admitFirstRun(found.project, body);
-    } catch (error) {
-      // The creator compensated meanwhile and its rows are gone: the key is free again. A Project the
-      // user soft-deleted keeps its row and stays 404.
-      if (error instanceof RuntimeEntityNotFoundError && error.entity === "project"
-        && await store.findCreation(body.idempotencyKey) === null) return null;
-      // The creator admitted the creation-key Run after our lookup and a user Run superseded it since.
-      if (error instanceof RuntimeRunIdentityConflictError) {
-        const again = await store.findCreation(body.idempotencyKey);
-        if (again?.run) return { project: again.project, run: again.run };
-      }
-      throw error;
-    }
+    if (found.superseded) return { project: found.project, run: null };
+    return admitFirstRun(found.project, body);
   }
 
-  async function createOnce(body: ProjectCreateBody, fingerprint: string): Promise<ProjectCreation> {
+  /** Returns null, for the caller to read the key again, when another request committed under it first or admission says so. */
+  async function createOnce(body: ProjectCreateBody, fingerprint: string): Promise<ProjectCreation | null> {
     const projectId = createId();
     const { datasets, samples } = await snapshotSources(body, projectId);
     const evaluationInput = body.evaluation
@@ -207,6 +198,7 @@ export function createProjectService(input: {
       });
     } catch (error) {
       await agentConfigs.discard(copies);
+      if (error instanceof ProjectCreationKeyTakenError) return null;
       throw error;
     }
     try {
@@ -236,6 +228,7 @@ export function createProjectService(input: {
     list: () => store.list(),
     exists: (projectId: string) => store.exists(projectId),
     get: (projectId: string) => store.get(projectId),
+    getEvaluationOutputSchema: (projectId: string) => store.getEvaluationOutputSchema(projectId),
     delete: (projectId: string) => store.softDelete(projectId),
 
     /**
@@ -249,15 +242,12 @@ export function createProjectService(input: {
         throw new RuntimeInputError("A pipeline Run requires an evaluation plan", "evaluation");
       }
       const fingerprint = await fingerprintOf(body);
-      for (let attempt = 1; ; attempt += 1) {
-        const replayed = await replay(body, fingerprint);
-        if (replayed) return replayed;
-        try {
-          return await createOnce(body, fingerprint);
-        } catch (error) {
-          if (!(error instanceof ProjectCreationKeyTakenError) || attempt >= CREATION_ATTEMPTS) throw error;
-        }
+      for (let attempt = 1; attempt <= CREATION_ATTEMPTS; attempt += 1) {
+        const found = await store.findCreation(body.idempotencyKey);
+        const created = found ? await replay(found, body, fingerprint) : await createOnce(body, fingerprint);
+        if (created) return created;
       }
+      throw new RuntimeRecordConflictError("Project creation kept racing the same idempotency key");
     },
 
     /** The only Project configuration write: replace the unlocked evaluation plan as a whole. */

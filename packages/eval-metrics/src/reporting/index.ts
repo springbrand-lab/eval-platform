@@ -224,7 +224,7 @@ export function createMetrics(dependencies: { readonly source: MetricsSource }):
         summary: view.summarize(sampleBindings(projectSample), [sampling]),
         subject: subjectAgent(sampling),
         evaluations: view.evaluationsOf([sampling]).map((record) => ({
-          record, agent: evaluatorAgent(record), output: view.outputs.read(record),
+          record, agent: evaluatorAgent(record), output: view.outputs.read(record).view,
         })),
       };
     },

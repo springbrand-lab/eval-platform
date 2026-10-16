@@ -6,7 +6,6 @@ import type {
   EvaluationOutputSchema,
   EvaluationRecord,
   Project,
-  ProjectPlan,
   RetryPolicy,
   RunHandle,
   RunOperation,
@@ -34,45 +33,35 @@ export type {
   RunTargets,
   Sampling,
 };
+export type { ProjectView } from "@eval-platform/eval-runtime";
 export type {
   DatasetOverview,
   EvaluationDetail,
   MetricSummary,
+  MetricNumber,
+  NumericSummary,
+  OperationStatistics,
   ProjectOverview,
   SampleOverview,
   SamplingDetail,
   AgentMetricView,
   ResourceStatistics,
+  AggregatedResourceStatistics,
+  ResourceDistribution,
+  CoveredNumericSummary,
+  OperationDistributions,
   EvaluationOutputView,
-  NumericOutputSummary,
+  EvaluationOutputSummary,
+  OutputFieldSummary,
   StageStatistics,
 } from "@eval-platform/eval-metrics";
-
-export interface CurrentRun {
-  readonly runId: string;
-  readonly stopRequested?: true;
-}
-
-export interface ProjectView extends ProjectPlan {
-  readonly projectSamples: readonly ProjectSample[];
-  readonly currentRun: CurrentRun | null;
-}
 
 export interface Me {
   readonly id: string;
   readonly role: "user" | "admin" | "super_admin";
 }
 
-export interface AgentConfig {
-  readonly id: string;
-  readonly user_id: string;
-  readonly name: string;
-  readonly slug?: string;
-  readonly description?: string | null;
-  readonly revision?: number;
-  readonly setting?: unknown;
-  readonly [field: string]: unknown;
-}
+export type { UserAgentConfig as AgentConfig } from "@springbrand/agent-config-editor/client";
 
 export interface AgentOption {
   readonly agentConfig: AgentConfigRef;

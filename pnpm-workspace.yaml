@@ -8,6 +8,9 @@ allowBuilds:
   esbuild: true
   workerd: true
 
-# Our own package, published from sp-platform's eval branch; it must not wait out the default release age.
+# Our own packages, published from sp-platform's eval branch; they must not wait out the default release age.
 minimumReleaseAgeExclude:
   - "@springbrand/eval-harness"
+  - "@springbrand/file-renderers"
+  - "@springbrand/contracts"
+  - "@springbrand/agent-config-editor"

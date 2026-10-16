@@ -1,5 +1,9 @@
 # Eval HTTP control plane
 
+## Input limits
+
+Authenticated `GET /api/input-limits` returns `EvalInputLimits`: positive integer fields `materialFileBytes`, `materialTotalBytes`, `materialMaxFiles`, `sessionContentChars`, `zipArchiveBytes`, `outputSchemaBytes`, `datasetDocumentBytes`, `promptDatasetFileBytes`, `runTargetIds`, `samplingCountMax`. Values come from the API's actual validation constants. Web enables the corresponding submit actions only after loading these bounds; it has no default numeric copy. The API continues enforcing every bound.
+
 `apps/eval-api` exposes the Dataset, initial-resource catalog, Agent Config, Project, Run, observation and Metrics services through one Hono application served by `@hono/node-server` (`start:api`, entry `src/server.ts`). It owns request authentication and composition, not evaluation semantics or SP storage. Process configuration is listed in the [eval-api README](../apps/eval-api/README.md); the Project, Runtime and Metrics design behind these routes is recorded in [Project、Runtime 与 Metrics 设计](eval-project-redesign.md). This document is the single source for routes, the response envelope, status codes and error codes.
 
 ## Application structure
@@ -25,14 +29,14 @@ Codes are uppercase `DOMAIN_REASON`. `packages/eval-contracts/src/http-errors.ts
 
 ## Request bodies and limits
 
-Every JSON body goes through one reader: the route requires `Content-Type: application/json` (`415 REQUEST_UNSUPPORTED_MEDIA_TYPE` otherwise), `readBytesLimited` caps the received bytes (`413 REQUEST_PAYLOAD_TOO_LARGE`), the text must be strict UTF-8 (`400 REQUEST_INVALID_INPUT`), and `parseStrictJson` requires a JSON object and rejects duplicate fields at any depth (`400 REQUEST_INVALID_JSON`) before the route schema validates it (`422 REQUEST_VALIDATION_FAILED` with `errors`; objects are strict, so unknown fields fail). The stop route ignores any body. Dataset document import reads the raw JSON/YAML text through the same bounded UTF-8 reader without a media-type check.
+Every JSON body goes through one reader: the route requires `Content-Type: application/json` (`415 REQUEST_UNSUPPORTED_MEDIA_TYPE` otherwise), `readBytesLimited` caps the received bytes (`413 REQUEST_PAYLOAD_TOO_LARGE`), the text must be strict UTF-8 (`400 REQUEST_INVALID_INPUT`), and `parseStrictJson` requires a JSON object and rejects duplicate fields at any depth (`400 REQUEST_INVALID_JSON`) before the route schema validates it (`422 REQUEST_VALIDATION_FAILED` with `errors`; objects are strict, so unknown fields fail). The stop route ignores any body. Dataset document import reads the raw JSON/YAML text through the same bounded UTF-8 reader without a media-type check. Bundle creation and ZIP import routes require `Content-Type: multipart/form-data` (`415 REQUEST_UNSUPPORTED_MEDIA_TYPE` otherwise); their body limit `ZIP_BODY_BYTES` is derived from the archive limit (`413 REQUEST_PAYLOAD_TOO_LARGE`), a malformed multipart body is `400 REQUEST_INVALID_INPUT`, and the route schema then validates the fields like a JSON body (`422 REQUEST_VALIDATION_FAILED`: a blank or missing `name` or `description`, a missing or non-file `zip` on import, or an unknown field). The archive itself follows [ZIP import](eval-dataset-upload.md#zip-import).
 
 Identifiers:
 
 - Runtime entity IDs in paths and Run bodies (Project, Run, ProjectSample, Sampling, Evaluation) are 1–512 characters without surrounding whitespace, control characters or `/` (`entityIdSchema`). Idempotency keys follow the same rule but may contain `/` (`idempotencyKeySchema`).
-- Dataset, Data, Bundle, Material, Session, output-format and Agent Config IDs are UUIDs (`platformIdSchema`): case-insensitive on input, lowercase in responses. A non-UUID path segment is a `422`.
+- Dataset, Data, Material Bundle, Session Bundle, Material, Session, output-format and Agent Config IDs are UUIDs (`platformIdSchema`): case-insensitive on input, lowercase in responses. A non-UUID path segment is a `422`.
 
-Content limits live only in `apps/eval-api/src/limits.ts`; body limits are derived from them (worst-case JSON escaping plus metadata framing), so a body carrying maximal valid content is never rejected for size.
+Content limits live only in `apps/eval-api/src/limits.ts`, except the Material and Session limits, which are SP's `@springbrand/eval-harness` constants imported unchanged; body limits are derived from them (worst-case JSON escaping plus metadata framing), so a body carrying maximal valid content is never rejected for size.
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
@@ -40,25 +44,32 @@ Content limits live only in `apps/eval-api/src/limits.ts`; body limits are deriv
 | `SAMPLING_COUNT_MAX` | 100 | Largest `samplingCount` per Data |
 | `IDENTIFIER_CHARS` | 512 | Longest Runtime ID or idempotency key |
 | `DATASET_DOCUMENT_BYTES`, `PROMPT_DATASET_FILE_BYTES` | 10 MB each | Dataset document and Prompt Dataset file |
-| `MATERIAL_FILE_BYTES`, `MATERIAL_TOTAL_BYTES` | 5 MB, 20 MB | One Material file, one Material |
+| `EVAL_INITIAL_FILE_MAX_BYTES`, `EVAL_INITIALIZATION_MAX_BYTES` (SP) | 5 MB, 20 MB | One Material file; SP's whole-initialization budget, applied to one Material and to the Materials one Data field binds |
+| `EVAL_MATERIAL_MAX_FILES` (SP) | 500 | Files in one Material |
+| `EVAL_SESSION_CONTENT_MAX_CHARS`, `EVAL_SESSION_MAX_ENTRIES` (SP) | 2,000,000, 10,000 | Characters and canonical entries in one Session |
 | `OUTPUT_SCHEMA_BYTES` | 1 MB | One output-format file |
+| `ZIP_ARCHIVE_BYTES`, `ZIP_EXPANDED_BYTES` | 50 MB, 100 MB | One ZIP archive, its declared decompressed total |
+| `ZIP_ENTRIES`, `ZIP_RESOURCES` | 5,000, 500 | Entries in one archive; Material top-level entries or Session files in one archive |
+| `ZIP_PATH_CHARS` | 768 | Characters in one ZIP entry path |
+| `BUNDLE_ERROR_DETAILS` | 100 | Most `errors` items one Bundle content or ZIP failure reports |
 
 | Body limit | Bytes | Routes |
 | --- | --- | --- |
-| `METADATA_BODY_BYTES` | 4,096 | Bundle create; Bundle/Material/Session/output-format metadata PATCH; Data initial-resources PATCH |
-| `JSON_BODY_BYTES` | 1,000,000 | Dataset create/PUT and membership; Data create/PUT; Agent Config POST/PATCH; evaluation-plan PUT |
+| `METADATA_BODY_BYTES` | 4,096 | Material Bundle/Session Bundle/Material/Session/output-format metadata PATCH |
+| `JSON_BODY_BYTES` | 1,000,000 | Dataset create/PUT and membership; Data create/PUT and initial-resources PATCH; Agent Config POST/PATCH; evaluation-plan PUT |
 | `PROJECT_BODY_BYTES` | 5,540,000 | Project creation |
 | `RUN_PREVIEW_BODY_BYTES` | 30,757,168 | Run preview |
 | `RUN_BODY_BYTES` | 61,510,240 | Run submission |
 | `OUTPUT_SCHEMA_BODY_BYTES` | 6,004,096 | Output-format upload |
 | `SESSION_BODY_BYTES` | 12,004,096 | Session upload |
 | `MATERIAL_BODY_BYTES` | 28,718,764 | Material upload |
+| `ZIP_BODY_BYTES` | 50,004,096 | Material/Session Bundle creation and ZIP import |
 | `PROMPT_IMPORT_BODY_BYTES` | 60,004,096 | Prompt Dataset upload |
 | `DATASET_DOCUMENT_BYTES` | 10,000,000 | Raw Dataset document import |
 
 ## Routes
 
-All `/api/*` routes run as the service account and may additionally return `403`, `422`, `500` and `503` as described above. Routes with a JSON body may also return `400`, `413` and `415`. The tables list each route's success payload and its domain error codes.
+All `/api/*` routes run as the service account and may additionally return `403`, `422`, `500` and `503` as described above. Routes with a JSON or multipart body may also return `400`, `413` and `415`. The tables list each route's success payload and its domain error codes.
 
 ### Credits
 
@@ -77,7 +88,7 @@ All `/api/*` routes run as the service account and may additionally return `403`
 
 ### Agent Configs
 
-Agent Configs are created, read, edited and deleted in Eval; the independent Eval SP only hosts them. Requests are relayed with the caller's session to Eval SP `/api/user-agent-configs`; bodies are SP's public Agent Config JSON, forwarded unchanged (any JSON object). Project creation and evaluation-plan saving clone the selected Agent Configs into frozen copies; which copies count as frozen and the reserved `eval-frozen-` slug prefix are defined in [Agent Config 冻结副本](eval-project-redesign.md#23-agent-config-冻结副本). On the wire: frozen copies are omitted from both lists, `PATCH`/`DELETE` of one and selecting one as a creation or evaluation-plan source are `409 AGENT_CONFIG_FROZEN`, and a `POST`/`PATCH` body with a reserved `slug` is `422 REQUEST_VALIDATION_FAILED`.
+Agent Configs are created, read, edited and deleted in Eval; the independent Eval SP only hosts them. Requests are relayed with the fixed service account's session to Eval SP `/api/user-agent-configs`; bodies are SP's public Agent Config JSON, forwarded unchanged (any JSON object). Project creation and evaluation-plan saving clone the selected Agent Configs into frozen copies; which copies count as frozen and the reserved `eval-frozen-` slug prefix are defined in [Agent Config 冻结副本](eval-project-redesign.md#23-agent-config-冻结副本). On the wire: frozen copies are omitted from both lists, `PATCH`/`DELETE` of one and selecting one as a creation or evaluation-plan source are `409 AGENT_CONFIG_FROZEN`, and a `POST`/`PATCH` body with a reserved `slug` is `422 REQUEST_VALIDATION_FAILED`.
 
 | Route | Body / result | Domain errors |
 | --- | --- | --- |
@@ -88,11 +99,37 @@ Agent Configs are created, read, edited and deleted in Eval; the independent Eva
 | `DELETE /api/agent-configs/{id}` | `204` | `409 AGENT_CONFIG_FROZEN`; relayed SP errors |
 | `GET /api/agents?role=subject\|evaluator` | `[{agentConfig:{ownerUserId,userAgentId}, name, role}]`, one entry per role unless `role` is given; frozen copies excluded | Relayed SP errors |
 
-Relayed SP errors: SP `401` → `401 AUTH_UNAUTHENTICATED`; `403` → `EVAL_SP_FORBIDDEN`; `404` → `EVAL_SP_NOT_FOUND`; `409` → `EVAL_SP_CONFLICT`; `400`/`422` → `422 EVAL_SP_REQUEST_INVALID`; `429` → `REQUEST_RATE_LIMITED`; other statuses → `502 EVAL_SP_REQUEST_FAILED`. For `400`, `409` and `422`, SP's `errMsg` and field `errors` are relayed. An unreachable SP is `503 EVAL_SP_UNAVAILABLE`.
+Public Agent editor domain errors retain the codes, statuses and messages selected from SP's public catalog in `eval-contracts/src/sp-editor-errors.ts`; no second definition of those SP errors exists in Eval. The three deletion blocker codes (`AGENT_CONFIG_ACTIVE_CHAT`, `AGENT_CONFIG_ACTIVE_SCHEDULE_RUN`, `AGENT_CONFIG_ENABLED_SCHEDULE`) may carry SP's validated `AgentConfigDeletionCheck` details. Invalid or unregistered details are discarded. This applies when a deletion blocker appears after a successful deletion preflight as well as to resource-library errors.
+
+Other relayed SP errors: SP `401` → `503 EVAL_SP_UNAVAILABLE` (the service session failed, not the browser login); `403` → `EVAL_SP_FORBIDDEN`; `404` → `EVAL_SP_NOT_FOUND`; `409` → `EVAL_SP_CONFLICT`; `400`/`422` → `422 EVAL_SP_REQUEST_INVALID`; `429` → `REQUEST_RATE_LIMITED`; other statuses → `502 EVAL_SP_REQUEST_FAILED`. For `400`, `409` and `422`, SP's `errMsg` and field `errors` are relayed. An unreachable SP is `503 EVAL_SP_UNAVAILABLE`.
+
+### Agent editor library
+
+`/api/agent-library` supplies the shared SP/Eval Agent editor. All routes use the existing Web gateway, Origin policy and fixed service account. Each successful operation returns the standard envelope with the public SP result as `msg` (HTTP 200). Filters and pagination query parameters are forwarded unchanged. SP owns resource eligibility, upload validation and domain schemas.
+
+| Eval suffix | Methods | Public SP target |
+| --- | --- | --- |
+| `/default-template` | GET | `/api/user-agent-configs/default-template` |
+| `/models` | GET | `/api/model-catalog` |
+| `/skills` | GET, POST (raw `application/zip`) | `/api/skills` |
+| `/skills/{id}/files` | GET | `/api/skills/{id}/files` |
+| `/skills/{id}` | DELETE | `/api/skills/{id}` |
+| `/actions`, `/actions/group-actions`, `/actions/{id}` | GET | Same suffix under `/api` |
+| `/components` | GET | `/api/components` |
+| `/connectors` | GET | `/api/connectors` |
+| `/connectors/attempts` | POST (JSON) | `/api/connectors/attempts` |
+| `/connectors/attempts/{id}` | GET | `/api/connectors/attempts/{id}` |
+| `/user-references` | GET, POST (JSON) | `/api/user-references` |
+| `/user-references/{id}` | GET, PATCH (JSON), DELETE | `/api/user-references/{id}` |
+| `/user-references/{id}/content` | PUT (JSON) | `/api/user-references/{id}/content` |
+| `/inbox/attachments` | POST (multipart), DELETE | `/api/inbox/attachments` |
+| `/user-agent-configs/{id}/deletion-check` | GET | Same suffix under `/api` |
+
+JSON bodies use `JSON_BODY_BYTES` and the same bounded, duplicate-field-free JSON parser as Config writes. Skill archives use `ZIP_ARCHIVE_BYTES`, counting actual bytes received. Reference multipart uploads use `ZIP_BODY_BYTES` and the public attachment fields `file`, `name`, `clientAttachmentId`. Resource IDs are nonempty, bounded segments without `/`, not a duplicate UUID restriction on SP catalog IDs. Request cancellation propagates to the SP client. There is no arbitrary URL relay and no Config creation/update/deletion route in this library; those operations remain behind Eval's frozen-copy service.
 
 ### Projects
 
-A Project's execution plan, Dataset/Data snapshot and Sampling counts are fixed at creation; the only configuration write afterwards is the evaluation plan, replaceable until the first pipeline or evaluation Run locks it. Soft-deleted Projects are `404 PROJECT_NOT_FOUND` on every Project, Run, result, observation and Metrics route.
+A Project's execution plan, Dataset/Data snapshot and Sampling counts are fixed at creation; the only configuration write afterwards is the evaluation plan, replaceable until the first pipeline or evaluation Run locks it. A soft-deleted Project is `404 PROJECT_NOT_FOUND` on every Project, Run preview/submit/current, observation and Metrics route; routes addressed by a Run, Sampling or Evaluation ID answer with that entity's not-found code (`RUN_NOT_FOUND`, `SAMPLING_NOT_FOUND`, `EVALUATION_NOT_FOUND`).
 
 | Route | Body / result |
 | --- | --- |
@@ -101,6 +138,7 @@ A Project's execution plan, Dataset/Data snapshot and Sampling counts are fixed 
 | `GET /api/projects/{projectId}` | `ProjectView` below |
 | `DELETE /api/projects/{projectId}` | `204` |
 | `PUT /api/projects/{projectId}/evaluation-plan` | Evaluation plan body below / `ProjectView` |
+| `GET /api/projects/{projectId}/evaluation-output-schema` | `EvaluationOutputSchemaDocument {reference:{outputSchemaId,digest}, content: JSON Schema}` or `null` without an evaluation plan; reads the Project reference even after catalog soft deletion |
 
 Creation body:
 
@@ -119,16 +157,16 @@ Creation body:
 
 Evaluation plan body: `{userAgentId, evaluationConcurrency, retryPolicy?, timeoutMs?, outputSchemaId}`. The route checks only shape and numeric types; Runtime's plan normalization is the single source of the value rules and rejects violations with `400 RUNTIME_INPUT_INVALID`: concurrencies are positive integers, `timeoutMs` is a finite number of at least 1, and `retryPolicy` is `{maxRestarts, initialBackoffMs, maxBackoffMs}` with a non-negative integer `maxRestarts`, non-negative `initialBackoffMs` and `maxBackoffMs >= initialBackoffMs`. The creation service rejects a pipeline first Run without an evaluation plan before cloning any Agent Config.
 
-Creation reads the selected owned, non-deleted Datasets and their current members in one consistent snapshot; a Data shared by several selected Datasets becomes one ProjectSample. It clones the Subject (and Evaluator) Agent Config, stores the snapshot, both plans and the copies in one transaction, then previews and submits the first Run with selector `{all:true}`. If any step fails, nothing remains visible: rows of a Project without a Run are removed and the copies are deleted. Cancelling the form calls no route.
+Creation reads the selected owned, non-deleted Datasets and their current members in one consistent snapshot; a Data shared by several selected Datasets becomes one ProjectSample. It clones the Subject (and Evaluator) Agent Config, stores the snapshot, both plans and the copies in one transaction, then previews and submits the first Run with selector `{all:true}`; which failures remove the Project and its copies and which keep it is defined in [Project 创建](eval-project-redesign.md#31-创建). Cancelling the form calls no route.
 
-Creation is idempotent per owner and `idempotencyKey`; the replay, race and compensation rules are defined once in [Project 创建](eval-project-redesign.md#31-创建). On the wire: a matching replay returns `201 {project, run}` without cloning any Agent Config, where `run` is the creation's own first Run or `null` when the Project already has other Runs; a different body under the key is `409 PROJECT_IDEMPOTENCY_CONFLICT`; a key whose Project was soft-deleted is `404 PROJECT_NOT_FOUND`; a first Run that keeps meeting evaluation-plan changes ends in `409 PROJECT_PLAN_CHANGED` with the Project kept for a same-key replay.
+Creation is idempotent per owner and `idempotencyKey`; the replay, race and compensation rules are defined once in [Project 创建](eval-project-redesign.md#31-创建). On the wire: creation and a matching replay return `201 {project, run}` (a replay clones no Agent Config), where `run` is the creation's own first Run or `null` when the Project already has other Runs; a different body under the key is `409 PROJECT_IDEMPOTENCY_CONFLICT`; a key whose Project was soft-deleted is `404 PROJECT_NOT_FOUND`; a first Run that keeps meeting evaluation-plan changes ends in `409 PROJECT_PLAN_CHANGED` with the Project kept for a same-key replay.
 
-`ProjectView` is the fixed plan plus current state: `{project, datasets: [{datasetId, name, description?, kind, projectSampleIds}], execution, executionPlanDigest, evaluation: {plan, digest, lockedAt | null} | null, projectSamples: [{projectSampleId, projectId, dataId, datasetIds, samplingCount, data}], currentRun: {runId, stopRequested?} | null}`. `execution.subjectAgentConfig` and `evaluation.plan.evaluatorAgentConfig` are the Agent Config bodies as frozen; `harness.agentConfig` names the frozen copy. `evaluation.plan.outputSchema` is `{outputSchemaId, digest}`; `evaluation.lockedAt` is set by the first pipeline or evaluation Run.
+`ProjectView` is the fixed plan plus current state: `{project, datasets: [{datasetId, name, description?, kind, projectSampleIds}], execution, executionPlanDigest, evaluation: {plan, digest, lockedAt | null} | null, projectSamples: [{projectSampleId, projectId, dataId, datasetIds, samplingCount, data}], runSequence, currentRun: {runId, stopRequested?} | null}`. `runSequence` is the latest admitted Run's existing sequence, or 0 before any Run; it is read with `currentRun` in the same snapshot and lets clients detect a Run that both started and finished between polls. It is not another persisted counter. `execution.subjectAgentConfig` and `evaluation.plan.evaluatorAgentConfig` are the Agent Config bodies as frozen; `harness.agentConfig` names the frozen copy. `evaluation.plan.outputSchema` is `{outputSchemaId, digest}`; `evaluation.lockedAt` is set by the first pipeline or evaluation Run.
 
 | Route | Domain errors |
 | --- | --- |
 | Create | `404 PROJECT_NOT_FOUND` (key of a deleted creation, whatever the body); `409 PROJECT_IDEMPOTENCY_CONFLICT`; `400 RUNTIME_INPUT_INVALID` (pipeline without evaluation plan, Data not a current member, override for unselected Data, no Data, plan values such as concurrency, retry policy and timeout); `413 RUN_TARGETS_TOO_LARGE` (more than `RUN_TARGET_IDS` Data); `404 DATASET_NOT_FOUND`, `OUTPUT_SCHEMA_NOT_FOUND`; `409 AGENT_CONFIG_FROZEN` (a frozen copy selected as source); `409 RUNTIME_RECORD_CONFLICT` (identical requests kept racing the same key; retry with the same key); relayed SP errors; every first-Run admission error of [Run submission](#runs) |
-| Detail | `404 PROJECT_NOT_FOUND` |
+| Detail / Project Schema | `404 PROJECT_NOT_FOUND` |
 | Delete | `404 PROJECT_NOT_FOUND`; `409 PROJECT_BUSY` while a Run is active or its stop is not finalized |
 | Evaluation plan | `404 PROJECT_NOT_FOUND`, `OUTPUT_SCHEMA_NOT_FOUND`; `409 PROJECT_EVALUATION_PLAN_LOCKED`, `AGENT_CONFIG_FROZEN`; `400 RUNTIME_INPUT_INVALID`; relayed SP errors |
 
@@ -146,7 +184,7 @@ Each Run is chosen per request: `operation` is `execution`, `pipeline` or `evalu
 | `GET /api/projects/{projectId}/runs/{runId}` | `{run: RunSnapshot}` |
 | `GET /api/projects/{projectId}/runs/{runId}/evaluations` | `{evaluations: EvaluationRecord[]}` in the Run's admission order |
 
-Expansion rules: `all` and `datasetIds` expand to the Project's bound ProjectSamples. For execution and pipeline, each target ProjectSample replaces all its current Samplings with `samplingCount` new ones, and each target Sampling whose ProjectSample is not a target is replaced one for one. For evaluation, `targets.projectSampleIds` is empty and `targets.samplingIds` lists the current successful Samplings; explicitly selected Samplings must have succeeded. Unselected Samplings and Evaluations are never touched; evaluation keeps every Subject fact and replaces only the targets' EvaluationRecords. The first pipeline or evaluation Run locks the evaluation plan.
+Expansion and replacement follow [Run admission](architecture.md#run-准入与独立评估). On the wire, evaluation `targets.projectSampleIds` is always empty and `targets.samplingIds` lists the Samplings to evaluate.
 
 `RunSnapshot` is `{runId, projectId, sourceCommit, operation, phases, selector, targets, samplingIds, evaluationIds, phase, status, stopRequested?, stopFinalized?}`. `samplingIds` and `evaluationIds` list the Run's records that are still current; records replaced by later Runs drop out, and Runs are never deleted.
 
@@ -194,7 +232,7 @@ All four routes are read-only views over one consistent snapshot of the Project'
 | `GET /api/metrics/projects/{projectId}/samples/{projectSampleId}` | `SampleOverview {project, runIds, summary, projectSample, samplings: [{samplingId, execution, summary, artifactCount, hasTrajectory}]}` |
 | `GET /api/metrics/projects/{projectId}/samplings/{samplingId}` | `SamplingDetail {project, runIds, summary, projectSample, sampling, subject: AgentMetricView, evaluations: [{record, agent: AgentMetricView, output: EvaluationOutputView}]}` |
 
-`runIds` is the selected Runs, or every Run with a current member in the view. Every `summary` is a `MetricSummary {counts, execution, evaluation, executionAgent, evaluationAgents, numericOutputs}` recomputed from raw records in scope: `counts` gives fixed `datasets`, `data`, `projectSamples` and current `samplings`, `evaluations`; `execution`/`evaluation` give status distributions, attempts and durations; `executionAgent`/`evaluationAgents` give separate Subject and Evaluator resources (tokens, cost, settlements, operations, trajectory summary, coverage, diagnostics); `numericOutputs` gives the evaluation plan's Schema reference, validation counts and per-JSON-Pointer numeric summaries. Never-run ProjectSamples are included with unavailable values; a shared ProjectSample appears in each of its Dataset rows but is counted once in the Project summary. `AgentMetricView` adds Chat ID, attempts, start/end times, Agent duration, artifacts and trajectory reference; `EvaluationOutputView` adds the raw output text, parsed JSON, Schema validation and numeric observations. Field-level definitions are the public types of `@eval-platform/eval-metrics`.
+`runIds` is the selected Runs, or every Run with a current member in the view. Every `summary` is a `MetricSummary {counts, execution, evaluation, executionAgent, evaluationAgents, evaluationOutputs}` recomputed from raw records in scope: `counts` gives fixed `datasets`, `data`, `projectSamples` and current `samplings`, `evaluations`; `execution`/`evaluation` give status distributions, attempts and durations; `executionAgent`/`evaluationAgents` give separate Subject and Evaluator resources (tokens, cost, settlements, operations, trajectory summary, coverage, diagnostics); `evaluationOutputs` gives the evaluation plan's Schema reference, validation counts and per-JSON-Pointer field summaries: Schema-derived `title` (pointer fallback, `$` for root), nullable `description`, `kinds` (`number | integer | boolean | enum`), counts, `numeric` statistics over numbers and a `distribution` of boolean/enum entries `{value, count, share, evaluations}` in Schema order, never containing null, plus `nullCount` only when a statistical declaration allows null. These presentation fields come from the compiled Schema plan, never a separate configuration or client-side Schema interpretation. Field coverage is unavailable without observations, partial when some evaluations do not contribute, complete only when every evaluation contributes. Never-run ProjectSamples are included with unavailable values; a shared ProjectSample appears in each of its Dataset rows but is counted once in the Project summary. `AgentMetricView` adds Chat ID, attempts, start/end times, Agent duration, artifacts and trajectory reference; `EvaluationOutputView` adds the raw output text, parsed JSON, Schema validation and field observations `{jsonPointer, instancePointer, kinds, value}`, with kinds supplied only by matching statistical declarations. Field-level definitions are the public types of `@eval-platform/eval-metrics`.
 
 Domain errors: `404 PROJECT_NOT_FOUND`, `DATASET_NOT_FOUND` (Dataset not bound by the Project), `PROJECT_SAMPLE_NOT_FOUND`, `SAMPLING_NOT_FOUND` (not a current Sampling in scope), `RUN_NOT_FOUND` (a `runId` outside the Project); `400 METRICS_QUERY_INVALID` (duplicate or invalid `runId`).
 
@@ -212,34 +250,41 @@ Datasets and Data are the user's editable source catalog; Projects copy what the
 | `GET /api/datasets/{datasetId}/data` | Member `Data[]` | `404 DATASET_NOT_FOUND` |
 | `POST /api/datasets/{datasetId}/data` | `{dataIds}` / `204`; atomic attach | `400 DATASET_INPUT_INVALID`; `404 DATASET_NOT_FOUND`, `DATA_NOT_FOUND` |
 | `DELETE /api/datasets/{datasetId}/data` | `{dataIds}` / `204` | `404 DATASET_NOT_FOUND` |
-| `POST /api/datasets/import?format=json\|yaml` | Raw document text / `201 {dataset, data}` | `400 DATASET_INPUT_INVALID`, `REQUEST_INVALID_INPUT`; `409 DATASET_IDENTITY_CONFLICT` |
+| `POST /api/datasets/import?format=json\|yaml` | Raw document text / `201 {dataset, data}` | `400 DATASET_INPUT_INVALID`, `REQUEST_INVALID_INPUT`; `404 BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`); `409 DATASET_IDENTITY_CONFLICT` |
 | `GET /api/datasets/{datasetId}/export?format=json\|yaml` | Document text with `application/json` or `application/yaml` | `404 DATASET_NOT_FOUND` |
 | `POST /api/datasets/prompt-import` | `{name, description, format:"json"\|"jsonl", content}` / `201 {dataset, data}`; see [Dataset upload](eval-dataset-upload.md) | `400 DATASET_INPUT_INVALID` |
 | `GET /api/data?datasetId=` | Non-deleted `Data[]`, optionally one Dataset's members | `404 DATASET_NOT_FOUND` |
-| `POST /api/data` | Data input / `201 Data` | `400 DATASET_INPUT_INVALID`; `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 DATASET_IDENTITY_CONFLICT` |
+| `POST /api/data?datasetId=...` | Data input / `201 Data`; optional Dataset binding is atomic with creation | `400 DATASET_INPUT_INVALID`; `404 DATASET_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`); `409 DATASET_IDENTITY_CONFLICT` |
 | `GET /api/data/{dataId}` | `Data` | `404 DATA_NOT_FOUND` |
-| `PUT /api/data/{dataId}` | Data input / `Data` | `400 DATASET_INPUT_INVALID`; `404 DATA_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND` |
+| `PUT /api/data/{dataId}` | Data input / `Data` | `400 DATASET_INPUT_INVALID`; `404 DATA_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`) |
 | `DELETE /api/data/{dataId}` | `204`; soft delete, idempotent | `409 DATA_IN_USE` while an active Dataset contains it |
-| `PATCH /api/data/{dataId}/initial-resources` | `{initialMaterials?, evalInitialMaterials?, initialSession?}`, each a reference or `null` to clear / `Data`; see [Dataset upload](eval-dataset-upload.md) | `404 DATA_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND`, `BUNDLE_FILE_NOT_FOUND`; `503 BUNDLE_FILE_UNAVAILABLE` |
+| `PATCH /api/data/{dataId}/initial-resources` | `{initialMaterials?, evalInitialMaterials?, initialSession?}`; each present field replaces the whole value (a reference array for the two material fields, one reference for `initialSession`) or `null` clears it / `Data`; see [Dataset upload](eval-dataset-upload.md) | `404 DATA_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`) |
 
 Data and reference validation rules are those of `@eval-platform/eval-dataset` and [Dataset upload](eval-dataset-upload.md).
 
 ### Initial-resource catalog and output formats
 
-Bundles group separately uploaded Materials and Sessions; output formats are standalone draft 2020-12 JSON Schema files. Metadata PATCH bodies are `{name?, description?}` with at least one nonblank field; uploaded content is immutable. All deletes are soft and hide the entry from lists and reads; file bytes are kept.
+A Material Bundle contains only Materials and a Session Bundle only Sessions; output formats are standalone draft 2020-12 JSON Schema files. Upload and ZIP import rules are in [Dataset upload](eval-dataset-upload.md). Metadata PATCH bodies are `{name?, description?}` with at least one nonblank field; uploaded content is immutable. All deletes are soft and hide the entry from lists and reads; file bytes are kept.
 
 | Route | Body / result | Domain errors |
 | --- | --- | --- |
-| `GET, POST /api/bundles` | POST `{name, description}` / `201 {bundleId, name, description}` | — |
-| `GET, PATCH, DELETE /api/bundles/{bundleId}` | Bundle; DELETE `204` and also deletes its resources | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` while active Data reference its resources |
-| `GET, POST /api/bundles/{bundleId}/materials` | POST `{name, description, files:[{path, mediaType, contentBase64}]}` / `201 {bundleId, materialId, name, description}` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `400 BUNDLE_FILE_INVALID`; `409 BUNDLE_FILE_CONFLICT`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
-| `GET, PATCH, DELETE /api/bundles/{bundleId}/materials/{materialId}` | Material; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` |
-| `GET, POST /api/bundles/{bundleId}/sessions` | POST `{name, description, format:"json"\|"jsonl", content}` / `201 {bundleId, sessionId, name, description, format}` | As for Materials |
-| `GET, PATCH, DELETE /api/bundles/{bundleId}/sessions/{sessionId}` | Session; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` |
+| `GET, POST /api/material-bundles` | GET `MaterialBundle[]` (`{bundleId, name, description}`); POST multipart `name`, `description`, optional `zip` / `201 {bundle, imported:[{source, material}]}` | `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
+| `GET, PATCH, DELETE /api/material-bundles/{bundleId}` | `MaterialBundle`; DELETE `204` and also deletes its Materials | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` while active Data reference its Materials |
+| `POST /api/material-bundles/{bundleId}/import` | Multipart `zip` / `201 {bundle, imported:[{source, material}]}` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
+| `GET, POST /api/material-bundles/{bundleId}/materials` | POST `{name, description, files:[{path, mediaType, contentBase64}]}` / `201 {bundleId, materialId, name, description, byteSize}` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
+| `GET, PATCH, DELETE /api/material-bundles/{bundleId}/materials/{materialId}` | Material; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` |
+| `GET /api/material-bundles/{bundleId}/materials/{materialId}/files` | `InitialResourceFile[]` (`{path, mediaType, byteSize}`), preserving the resource's stored absolute paths | `404 BUNDLE_RESOURCE_NOT_FOUND`, `BUNDLE_FILE_NOT_FOUND`; Bundle file read errors |
+| `GET /api/material-bundles/{bundleId}/materials/{materialId}/file?path=` | Exact stored file bytes, outside the JSON envelope; attachment under sandbox CSP | As for the file list; `404 BUNDLE_FILE_NOT_FOUND` for an unlisted path |
+| `GET, POST /api/session-bundles`, `GET, PATCH, DELETE /api/session-bundles/{bundleId}`, `POST /api/session-bundles/{bundleId}/import` | As for Material Bundles, with `SessionBundle` and `imported:[{source, session}]` | As for Material Bundles |
+| `GET, POST /api/session-bundles/{bundleId}/sessions` | POST `{name, description, format:"json"\|"jsonl", content}` / `201 {bundleId, sessionId, name, description, format}` | As for Materials |
+| `GET, PATCH, DELETE /api/session-bundles/{bundleId}/sessions/{sessionId}` | Session; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` |
+| `GET /api/session-bundles/{bundleId}/sessions/{sessionId}/files`, `GET .../file?path=` | Same read-only file contract; one `/context.json` or `/context.jsonl` file containing the original uploaded context text | As for Material file reads |
 | `GET, POST /api/evaluation-output-schemas` | POST `{name, description, content}` (Schema file text) / `201 {outputSchemaId, name, description, schema}` | `400 CATALOG_INPUT_INVALID`; `413 CATALOG_PAYLOAD_TOO_LARGE` |
 | `GET, PATCH, DELETE /api/evaluation-output-schemas/{outputSchemaId}` | Output format; DELETE `204` | `404 OUTPUT_SCHEMA_NOT_FOUND` (also for repeated DELETE) |
 
-Bundle, Material and Session names and descriptions are required nonblank text (`400 CATALOG_INPUT_INVALID`). An output format may be soft-deleted while an evaluation plan uses it; the plan keeps reading the Schema by ID, but the format can no longer be selected.
+Material Bundle, Session Bundle, Material and Session names and descriptions are required nonblank text (`422 REQUEST_VALIDATION_FAILED`). An output format may be soft-deleted while an evaluation plan uses it; the plan keeps reading the Schema by ID, but the format can no longer be selected.
+
+Catalog file reads first require an active Bundle and resource belonging to the service account, then use the existing Bundle directory and content validation. They never read SP storage or join a query path to the filesystem. `path` must exactly match a listed file; no decoding, normalization or traversal is performed by the reader. Directory structure is derived from these paths, not stored again. Material ZIP import strips the top-level resource directory as documented in Dataset upload; context ZIP import creates one resource per JSON/JSONL file. The original archive is not retained. Editing catalog labels never changes file identities or bytes. Soft-deleted catalog entries are no longer browsable, while existing Project references keep their separate Worker read semantics. Invalid stored content is `500 BUNDLE_FILE_CORRUPT`, distinct from upload validation failures; only unavailable I/O is retryable. All content responses use attachment disposition, a sandbox CSP, `nosniff` and `private, no-store` cache control. Media types that cannot be represented in an HTTP header are served as `application/octet-stream`; the inventory retains the uploaded media type.
 
 ## Credits
 
@@ -271,7 +316,7 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `REQUEST_INVALID_JSON` | 400 | Malformed JSON, non-object body or duplicate field |
 | `REQUEST_VALIDATION_FAILED` | 422 | Path, query or body fails its schema |
 | `REQUEST_PAYLOAD_TOO_LARGE` | 413 | Body over its route limit |
-| `REQUEST_UNSUPPORTED_MEDIA_TYPE` | 415 | Non-JSON `Content-Type` on a JSON route |
+| `REQUEST_UNSUPPORTED_MEDIA_TYPE` | 415 | Non-JSON `Content-Type` on a JSON route, or non-multipart on a Bundle creation or import route |
 | `REQUEST_UNTRUSTED_ORIGIN` | 403 | `Origin` other than `EVAL_WEB_ORIGIN` |
 | `REQUEST_NOT_FOUND` | 404 | Unknown route or method |
 | `REQUEST_RATE_LIMITED` | 429 | Eval SP rate-limited a relayed request |
@@ -313,14 +358,13 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `DATASET_IDENTITY_CONFLICT` | 409 | Dataset or Data identity reused with different content |
 | `DATA_NOT_FOUND` | 404 | Unknown or deleted Data |
 | `DATA_IN_USE` | 409 | Data deletion while an active Dataset contains it |
-| `CATALOG_INPUT_INVALID` | 400 | Catalog name, description, reference or Schema content invalid |
+| `CATALOG_INPUT_INVALID` | 400 | Catalog reference or output-format Schema content invalid, or a name or description rejected after request validation |
 | `CATALOG_PAYLOAD_TOO_LARGE` | 413 | Output-format content over its limit |
-| `BUNDLE_RESOURCE_NOT_FOUND` | 404 | Unknown or deleted Bundle, Material or Session |
-| `BUNDLE_RESOURCE_IN_USE` | 409 | Resource deletion while active Data reference it |
+| `BUNDLE_RESOURCE_NOT_FOUND` | 404 | Unknown or deleted Material Bundle, Session Bundle, Material or Session, including a reference whose `bundleId` names the other Bundle type |
+| `BUNDLE_RESOURCE_IN_USE` | 409 | Resource or Bundle deletion while active Data reference it or its resources |
 | `BUNDLE_FILE_NOT_FOUND` | 404 | Bundle file missing |
-| `BUNDLE_FILE_CONFLICT` | 409 | Different content under one file identity |
-| `BUNDLE_FILE_TOO_LARGE` | 413 | Material file over its limit |
-| `BUNDLE_FILE_INVALID` | 400 | Material or Session file invalid |
+| `BUNDLE_FILE_TOO_LARGE` | 413 | Material file, Material, one Data field's bound Materials or ZIP archive over a limit; `errors` name the ZIP entries or the Data field |
+| `BUNDLE_FILE_INVALID` | 400 | Material or Session content, ZIP archive or ZIP entry invalid; `errors` name the ZIP entries |
 | `BUNDLE_FILE_UNAVAILABLE` | 503 | Bundle directory unreadable; retry |
 | `OUTPUT_SCHEMA_NOT_FOUND` | 404 | Unknown or deleted output format |
 | `METRICS_QUERY_INVALID` | 400 | Invalid Metrics query |

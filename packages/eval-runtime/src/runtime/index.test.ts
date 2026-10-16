@@ -54,6 +54,14 @@ const MATERIALS_BUNDLE_ID = "41f13a32-61d8-4d4d-bc19-723e976688a4";
 const MATERIAL_ID = "0325f6ed-2649-425b-b121-12d25a2d3bf3";
 const EVAL_BUNDLE_ID = "676556c9-32bd-41cf-ad54-63e1b03ce1ea";
 const EVAL_MATERIAL_ID = "fa32ac9f-ec04-4821-ac67-3438a8b7b1d8";
+const SUBJECT_MATERIALS = [
+  { bundleId: MATERIALS_BUNDLE_ID, materialId: MATERIAL_ID },
+  { bundleId: EVAL_BUNDLE_ID, materialId: MATERIAL_ID },
+];
+const EVAL_MATERIALS = [
+  { bundleId: EVAL_BUNDLE_ID, materialId: EVAL_MATERIAL_ID },
+  { bundleId: MATERIALS_BUNDLE_ID, materialId: EVAL_MATERIAL_ID },
+];
 
 const PROJECT_ID = "project-1";
 const SUBJECT = { ownerUserId: "user-1", userAgentId: "subject-agent" };
@@ -271,8 +279,8 @@ function makeSample(projectSampleId: string, overrides: Partial<ProjectSample> =
       evalPrompt: `Evaluate ${projectSampleId}`,
       json: { task: projectSampleId },
       initialSession: { bundleId: SESSIONS_BUNDLE_ID, sessionId: SESSION_ID },
-      initialMaterials: { bundleId: MATERIALS_BUNDLE_ID, materialId: MATERIAL_ID },
-      evalInitialMaterials: { bundleId: EVAL_BUNDLE_ID, materialId: EVAL_MATERIAL_ID },
+      initialMaterials: SUBJECT_MATERIALS,
+      evalInitialMaterials: EVAL_MATERIALS,
       metadata: { source: "test" },
     },
     ...overrides,
@@ -462,10 +470,9 @@ function makeHarness(): Harness {
       ...(evaluationId === undefined ? {} : { evaluationId }),
     })),
     materializeInitialData: vi.fn(async () => ({
-      bundleId: "bundle-1",
       manifestHash: "manifest-1",
       target: "workspace" as const,
-      rootPath: "/eval/input",
+      materials: [],
     })),
     submitAgent: vi.fn(async ({ handle, idempotencyKey }) => submit(handle, idempotencyKey)),
     restartAgent: vi.fn(async ({ handle, idempotencyKey }) => submit(handle, idempotencyKey)),
@@ -619,7 +626,7 @@ describe("eval runtime orchestration", () => {
     for (const input of preparationInputs) {
       expect(input.idempotencyKey).toBe(`initial-data:${input.handle.chatId}`);
       expect(input.data.initialSession).toEqual({ bundleId: SESSIONS_BUNDLE_ID, sessionId: SESSION_ID });
-      expect(input.data.initialMaterials).toEqual({ bundleId: MATERIALS_BUNDLE_ID, materialId: MATERIAL_ID });
+      expect(input.data.initialMaterials).toEqual(SUBJECT_MATERIALS);
       expect(input.data).not.toHaveProperty("evalInitialMaterials");
       expect(input.data).not.toHaveProperty("sampleId");
       expect(input.data).not.toHaveProperty("dataId");
@@ -732,7 +739,7 @@ describe("eval runtime orchestration", () => {
     vi.mocked(harness.materializeInitialData).mockImplementation(async () => {
       preparationStarted();
       await pending;
-      return { bundleId: "prepared-input", manifestHash: "hash", target: "workspace", rootPath: "/eval/input" };
+      return { manifestHash: "hash", target: "workspace", materials: [] };
     });
     const runtime = createAutoResumingRuntime({ harness, store: makeStore() });
     const run = await runtime.submit(projectRequest("execution", "wait-for-session"));
@@ -758,12 +765,15 @@ describe("eval runtime orchestration", () => {
     },
   );
 
-  it.each(["initialSession", "initialMaterials"] as const)(
+  it.each([
+    ["initialSession", { bundleId: "bundle-only" }],
+    ["initialMaterials", [{ bundleId: "bundle-only" }]],
+  ] as const)(
     "rejects an incomplete %s reference without generating a replacement",
-    async (field) => {
+    async (field, reference) => {
       const sample = {
         ...makeSample("sample-1"),
-        data: { ...makeSample("sample-1").data, [field]: { bundleId: "bundle-only" } },
+        data: { ...makeSample("sample-1").data, [field]: reference },
       } as unknown as ProjectSample;
       const harness = makeHarness();
       const runtime = createAutoResumingRuntime({ plans: makePlans([sample]), harness, store: makeStore() });
@@ -797,7 +807,7 @@ describe("eval runtime orchestration", () => {
           committedKeys.add(idempotencyKey);
           throw new Error("connection lost after initialization committed");
         }
-        return { bundleId: "bundle-1", manifestHash: "manifest-1", target: "workspace", rootPath: "/eval/input" };
+        return { manifestHash: "manifest-1", target: "workspace", materials: [] };
       });
       const decide = vi.fn<RetryController["decide"]>()
         .mockResolvedValueOnce({ shouldRetry: true, backoffMs: 25 })
@@ -828,7 +838,7 @@ describe("eval runtime orchestration", () => {
         data: {
           userPrompt: "Execute sample-1",
           initialSession: { bundleId: SESSIONS_BUNDLE_ID, sessionId: SESSION_ID },
-          initialMaterials: { bundleId: MATERIALS_BUNDLE_ID, materialId: MATERIAL_ID },
+          initialMaterials: SUBJECT_MATERIALS,
         },
       });
       expect(decide).toHaveBeenCalledExactlyOnceWith({
@@ -1020,7 +1030,7 @@ describe("eval runtime orchestration", () => {
       expect(input.evaluationOutputSchema).toEqual({
         type: "object", properties: { score: { type: "number" } },
       });
-      expect(input.data.initialMaterials).toEqual({ bundleId: EVAL_BUNDLE_ID, materialId: EVAL_MATERIAL_ID });
+      expect(input.data.initialMaterials).toEqual(EVAL_MATERIALS);
       expect(input.data).not.toHaveProperty("evalInitialMaterials");
     }
   });
@@ -2310,8 +2320,8 @@ describe("eval runtime orchestration", () => {
     expect(sampling.trajectory).toEqual({
       trajectoryId: evidence.evidenceId,
       source: "subject",
-      path: `evidence:${evidence.evidenceId}/trajectory.jsonl`,
-      contentHash: `sha256:${manifest.trajectory.sha256}`,
+      path: `evidence:${evidence.evidenceId}/trajectory/`,
+      contentHash: `sha256:${evidence.manifestSha256}`,
     });
   });
 
@@ -2395,7 +2405,7 @@ describe("eval runtime orchestration", () => {
       harness,
       store: makeStore(),
       sleep: async () => undefined,
-      scores: { validate: () => [], publish },
+      scores: { read: () => ({ score: 0.9 }), publish },
     });
     const execution = await runtime.submit(projectRequest("execution", "test-request"));
     await waitForTerminal(runtime, execution.runId);
@@ -2406,7 +2416,7 @@ describe("eval runtime orchestration", () => {
     const record = await runtime.getEvaluation(snapshot.evaluationIds[0]!);
     expect(record).toMatchObject({
       status: { status: "succeeded" },
-      output: { structuredOutput: { content: '{"score":0.9}' }, score: 0.9 },
+      output: { structuredOutput: { content: '{"score":0.9}' } },
       scoreSync: { status: "synced" },
     });
     expect(publish).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
@@ -2424,7 +2434,7 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
       onError,
-      scores: { validate: () => [], publish: async () => { throw new Error("Langfuse unavailable"); } },
+      scores: { read: () => ({ score: 0.9 }), publish: async () => { throw new Error("Langfuse unavailable"); } },
     });
     const execution = await runtime.submit(projectRequest("execution", "test-request"));
     await waitForTerminal(runtime, execution.runId);
@@ -2433,7 +2443,7 @@ describe("eval runtime orchestration", () => {
 
     await expect(runtime.getEvaluation(snapshot.evaluationIds[0]!)).resolves.toMatchObject({
       status: { status: "succeeded" },
-      output: { score: 0.9 },
+      output: { structuredOutput: { content: '{"score":0.9}' } },
       scoreSync: { status: "failed", lastError: "Langfuse unavailable" },
     });
     expect(onError).toHaveBeenCalledWith(expect.objectContaining({
@@ -2447,7 +2457,7 @@ describe("eval runtime orchestration", () => {
       harness: makeHarness(),
       store: makeStore(),
       sleep: async () => undefined,
-      scores: { validate: () => ["/score must be <= 0.5"], publish },
+      scores: { read: () => undefined, publish },
     });
     const execution = await runtime.submit(projectRequest("execution", "test-request"));
     await waitForTerminal(runtime, execution.runId);
@@ -3011,7 +3021,7 @@ describe("Project Run targets and partial replacement", () => {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     vi.mocked(harness.materializeInitialData).mockImplementation(async () => {
       await gate;
-      return { bundleId: "bundle-1", manifestHash: "manifest-1", target: "workspace", rootPath: "/eval/input" };
+      return { manifestHash: "manifest-1", target: "workspace", materials: [] };
     });
     store.plans().samples = store.plans().samples.map((sample) => ({ ...sample, samplingCount: 2 }));
     store.plans().execution = executionPlan({ executionConcurrency: 2 });

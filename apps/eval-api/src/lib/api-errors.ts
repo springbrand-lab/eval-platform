@@ -1,4 +1,4 @@
-import { HttpError, toHttpError, type HttpErrorCode } from "@eval-platform/eval-contracts/http-errors";
+import { decodeError, HttpError, isSpEditorErrorCode, spEditorErrorDefinitions, toHttpError, type HttpErrorCode } from "@eval-platform/eval-contracts/http-errors";
 import {
   DataInUseError,
   DatasetEntityNotFoundError,
@@ -27,14 +27,13 @@ import {
   CatalogInputError,
   CatalogPayloadTooLargeError,
   OutputSchemaNotFoundError,
-  ProjectCreationKeyTakenError,
   ProjectEvaluationPlanLockedError,
   ProjectIdempotencyConflictError,
   ProjectRunStopConflictError,
-  RunTargetsTooLargeError,
 } from "../db/errors.js";
+import { RunTargetsTooLargeError } from "../limits.js";
 import { BundleFileError, type BundleFileErrorReason } from "../sp/bundle-errors.js";
-import { EvalSpApiError, EvalSpTransportError } from "../sp/client.js";
+import { EvalSpApiError, EvalSpTransportError } from "../sp/http.js";
 
 const runtimeEntityCodes = {
   project: "PROJECT_NOT_FOUND",
@@ -58,9 +57,9 @@ const admissionConflictCodes = {
 
 const bundleFileCodes = {
   "not-found": "BUNDLE_FILE_NOT_FOUND",
-  conflict: "BUNDLE_FILE_CONFLICT",
   "too-large": "BUNDLE_FILE_TOO_LARGE",
   invalid: "BUNDLE_FILE_INVALID",
+  corrupt: "BUNDLE_FILE_CORRUPT",
   unavailable: "BUNDLE_FILE_UNAVAILABLE",
 } as const satisfies Record<BundleFileErrorReason, HttpErrorCode>;
 
@@ -102,7 +101,6 @@ const publicMessageCodes = new Map<ErrorClass, HttpErrorCode>([
 /** Errors that describe persisted Runtime facts; the response keeps the catalog text. */
 const catalogMessageCodes = new Map<ErrorClass, HttpErrorCode>([
   [RuntimeRecordConflictError, "RUNTIME_RECORD_CONFLICT"],
-  [ProjectCreationKeyTakenError, "RUNTIME_RECORD_CONFLICT"],
   [RuntimeRecordPersistenceError, "RUNTIME_PERSISTENCE_UNCONFIRMED"],
 ]);
 
@@ -123,7 +121,17 @@ function fieldError(code: "RUNTIME_INPUT_INVALID" | "CATALOG_INPUT_INVALID", err
 
 function evalSpError(error: EvalSpApiError): HttpError {
   const upstream = { cause: error, upstreamStatus: error.status };
-  if (error.status === 401) return new HttpError("AUTH_UNAUTHENTICATED", "Eval SP session is invalid", upstream);
+  if (error.status === 401) return new HttpError("EVAL_SP_UNAVAILABLE", undefined, upstream);
+  const decoded = decodeError(error.payload, { status: error.status, headers: {} });
+  const relayed = toHttpError(decoded);
+  if (relayed && isSpEditorErrorCode(relayed.code) && spEditorErrorDefinitions[relayed.code].status === error.status) {
+    return new HttpError(relayed.code, relayed.message, {
+      ...upstream,
+      ...(decoded.requestId === undefined ? {} : { upstreamRequestId: decoded.requestId }),
+      ...(relayed.errors === undefined ? {} : { errors: relayed.errors }),
+      ...(relayed.details === undefined ? {} : { details: relayed.details }),
+    });
+  }
   if (error.status === 403) return new HttpError("EVAL_SP_FORBIDDEN", undefined, upstream);
   if (error.status === 404) return new HttpError("EVAL_SP_NOT_FOUND", undefined, upstream);
   if (error.status === 429) return new HttpError("REQUEST_RATE_LIMITED", undefined, upstream);
@@ -137,8 +145,8 @@ function evalSpError(error: EvalSpApiError): HttpError {
   return new HttpError("EVAL_SP_REQUEST_FAILED", undefined, upstream);
 }
 
+/** SP transport failures are classified earlier, so a remaining unavailability code comes from PostgreSQL or its pool. */
 function isDatabaseUnavailable(error: Error): boolean {
-  if (!("query" in error)) return false;
   let cause: unknown = error;
   for (let depth = 0; depth < 5 && cause instanceof Error; depth++, cause = cause.cause) {
     if ("code" in cause && unavailableDatabaseCodes.has(String(cause.code))) return true;
@@ -157,6 +165,7 @@ export function apiError(error: Error): HttpError {
     const primary = apiError(error.errors[0]);
     return new HttpError(primary.code, primary.message, {
       cause: error, ...(primary.errors === undefined ? {} : { errors: primary.errors }),
+      ...(primary.details === undefined ? {} : { details: primary.details }),
     });
   }
   if (error instanceof RuntimeEntityNotFoundError) return new HttpError(runtimeEntityCodes[error.entity], error.message, { cause: error });
@@ -165,7 +174,11 @@ export function apiError(error: Error): HttpError {
   if (error instanceof CatalogInputError) return fieldError("CATALOG_INPUT_INVALID", error);
   if (error instanceof DatasetEntityNotFoundError) return new HttpError(datasetEntityCodes[error.entity], error.message, { cause: error });
   if (error instanceof MetricsEntityNotFoundError) return new HttpError(metricsEntityCodes[error.entity], error.message, { cause: error });
-  if (error instanceof BundleFileError) return new HttpError(bundleFileCodes[error.reason], error.message, { cause: error });
+  if (error instanceof BundleFileError) {
+    return new HttpError(bundleFileCodes[error.reason], error.reason === "corrupt" ? undefined : error.message, {
+      cause: error, ...(error.details === undefined ? {} : { errors: [...error.details] }),
+    });
+  }
   if (error instanceof EvalSpApiError) return evalSpError(error);
   if (error instanceof EvalSpTransportError) return new HttpError("EVAL_SP_UNAVAILABLE", undefined, { cause: error });
   for (const [type, code] of publicMessageCodes) {
@@ -174,7 +187,8 @@ export function apiError(error: Error): HttpError {
   for (const [type, code] of catalogMessageCodes) {
     if (error instanceof type) return new HttpError(code, undefined, { cause: error });
   }
-  if (error instanceof HTTPException && error.status === 400) return new HttpError("REQUEST_INVALID_JSON", undefined, { cause: error });
+  // JSON bodies are parsed before validation, so Hono's validator rejects only a malformed multipart body.
+  if (error instanceof HTTPException && error.status === 400) return new HttpError("REQUEST_INVALID_INPUT", undefined, { cause: error });
   if (isDatabaseUnavailable(error)) return new HttpError("DATABASE_UNAVAILABLE", undefined, { cause: error });
   return new HttpError("INTERNAL_ERROR", undefined, { cause: error });
 }

@@ -1,15 +1,13 @@
 import { api, enc } from "./client";
 import type {
-  CurrentRun, EvaluationRecord, RunHandle, RunOperation, RunPreview, RunSnapshot, RunTargetSelector, RunTargets,
+  EvaluationRecord, RunHandle, RunOperation, RunPreview, RunSnapshot, RunTargetSelector, RunTargets,
   Sampling, ScoreSyncSummary,
 } from "./types";
 
 export const runKeys = {
-  current: (projectId: string) => ["runs", "current", projectId] as const,
   detail: (projectId: string, runId: string) => ["runs", "detail", projectId, runId] as const,
-  evaluations: (projectId: string, runId: string) => ["runs", "evaluations", projectId, runId] as const,
-  sampling: (samplingId: string) => ["samplings", samplingId] as const,
-  samplingEvaluations: (samplingId: string) => ["samplings", samplingId, "evaluations"] as const,
+  evaluations: (projectId: string, runId: string) => ["evaluations", projectId, "run", runId] as const,
+  samplingEvaluations: (projectId: string, samplingId: string) => ["evaluations", projectId, "sampling", samplingId] as const,
 };
 
 const base = (projectId: string) => `/api/projects/${enc(projectId)}/runs`;
@@ -19,8 +17,6 @@ export const previewRun = (projectId: string, input: { operation: RunOperation; 
 export const submitRun = (projectId: string, input: {
   idempotencyKey: string; operation: RunOperation; selector: RunTargetSelector; targets: RunTargets;
 }) => api.post<RunHandle>(base(projectId), input);
-export const getCurrentRun = (projectId: string, signal?: AbortSignal) =>
-  api.get<{ run: CurrentRun | null }>(`${base(projectId)}/current`, { signal });
 export const getProjectRun = (projectId: string, runId: string, signal?: AbortSignal) =>
   api.get<{ run: RunSnapshot }>(`${base(projectId)}/${enc(runId)}`, { signal });
 export const listRunEvaluations = (projectId: string, runId: string, signal?: AbortSignal) =>

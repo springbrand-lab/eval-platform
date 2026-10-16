@@ -1,15 +1,15 @@
-import { AGENT_STATUSES } from "@eval-platform/eval-contracts";
+import { AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectSchema } from "@eval-platform/eval-contracts";
 import type {
   AgentResourceSnapshot,
   EvaluationAgentOutput,
   EvaluationStructuredOutput,
-  EvidenceKind,
   ExecutionOutput,
   MaterializedDataBinding,
 } from "@eval-platform/eval-contracts";
 import type { AgentHandle, AgentSubmission, EnsureAgentInput } from "@eval-platform/eval-runtime/harness";
 import {
   evalEnsureChatSchema,
+  evalInitializationResultSchema,
   evalEvidenceArtifactsSchema,
   evalInitializationSchema,
   evalSubmitSchema,
@@ -17,13 +17,14 @@ import {
   type EvalEnsureChat,
   type EvalEvidenceArtifact,
   type EvalEvidenceFileReceipt,
+  type EvalEvidenceTrajectoryPage,
   type EvalInitialization,
+  type EvalInitializationResult,
   type EvalSubmissionReceipt,
   type EvalSubmit,
 } from "@springbrand/eval-harness";
 import { z } from "zod";
 import { SpHarnessError } from "./harness-error.js";
-import { storedTrajectoryEventSchema, type StoredTrajectoryEvent } from "./trajectory.js";
 
 /** Validate an outgoing request with SP's own contract so a rejection never costs a round trip. */
 function request<T>(schema: z.ZodType<T>, value: unknown, name: string): T {
@@ -100,15 +101,8 @@ export function requireStopResult(value: unknown): void {
   response(z.object({ ok: z.boolean() }), value, "stop result");
 }
 
-const dataBindingSchema = z.object({
-  bundleId: id,
-  manifestHash: id,
-  target: z.enum(["workspace", "sandbox"]),
-  rootPath: id,
-}) satisfies z.ZodType<MaterializedDataBinding>;
-
 export function dataBinding(value: unknown): MaterializedDataBinding {
-  return response(dataBindingSchema, value, "initialization binding");
+  return response<EvalInitializationResult>(evalInitializationResultSchema, value, "initialization binding");
 }
 
 const artifactsSchema = z.array(z.looseObject({
@@ -133,8 +127,6 @@ export function executionOutput(value: unknown, samplingId: string): ExecutionOu
     error: z.string().exactOptional(),
   }), value, "execution output");
 }
-
-const EVIDENCE_KINDS = ["artifact", "workspace", "test-report", "trajectory", "judge-output", "metric"] as const satisfies readonly EvidenceKind[];
 
 const structuredOutputSchema = z.object({
   path: id,
@@ -183,14 +175,11 @@ export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact
   return response(evalEvidenceArtifactsSchema, value, "evidence artifact list").artifacts;
 }
 
-export function evidenceTrajectoryPage(value: unknown): {
-  readonly events: readonly StoredTrajectoryEvent[];
-  readonly nextAfterSeq: number | null;
-} {
+export function evidenceTrajectoryPage(value: unknown) {
   return response(z.object({
-    events: z.array(storedTrajectoryEventSchema),
-    nextAfterSeq: z.number().int().nonnegative().nullable(),
-  }), value, "evidence trajectory page");
+    events: z.array(z.object({ ingestSeq: z.number().int().positive().safe(), event: jsonObjectSchema })),
+    nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
+  }) satisfies z.ZodType<EvalEvidenceTrajectoryPage>, value, "evidence trajectory page");
 }
 
 export function evidenceFileReceipt(value: unknown): EvalEvidenceFileReceipt {

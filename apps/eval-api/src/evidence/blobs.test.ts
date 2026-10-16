@@ -48,12 +48,14 @@ describe("local evidence blobs", () => {
       evidence: {
         source: { framework: "sp", samplingId: "s-1", agentRef: { chatId: "c-1" } },
         artifacts: [{ path: "/index.html", size: 2, mediaType: "text/html" }],
+        subjectInputs: [],
         omitted: [{ path: "/node_modules/a.js", reason: "excluded" }],
         readFile: async () => stream("hi"),
         trajectory: (async function* () {
           yield { seq: 1, at: "2026-10-15T00:00:00.000Z", type: "other" as const, content: {}, raw: null };
         })(),
         trajectoryComplete: true,
+        trajectoryFormat: "sp-trajectory/v1",
       },
     });
     const opened = await store.open(ref);

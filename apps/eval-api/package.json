@@ -11,7 +11,7 @@
     "start:worker": "tsx --env-file-if-exists=.env.eval src/run-worker-main.ts",
     "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
     "db:check": "drizzle-kit check --config=drizzle.config.ts",
-    "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts"
+    "db:migrate": "tsx src/migrate.ts"
   },
   "dependencies": {
     "@eval-platform/eval-contracts": "workspace:*",
@@ -20,12 +20,13 @@
     "@eval-platform/eval-runtime": "workspace:*",
     "@hono/node-server": "1.19.17",
     "@hono/zod-openapi": "1.5.1",
-    "@springbrand/eval-harness": "0.1.0-alpha.0",
+    "@springbrand/eval-harness": "0.1.0-alpha.2",
     "@springbrand/http": "0.1.0-alpha.4",
     "ajv": "^8.20.0",
     "drizzle-orm": "^0.45.2",
     "hono": "4.12.33",
     "hono-pino": "0.10.3",
+    "mime-types": "3.0.2",
     "pg": "^8.23.0",
     "pg-boss": "12.28.0",
     "pino": "10.3.1",
@@ -34,9 +35,11 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@types/mime-types": "2.1.4",
     "@types/node": "26.1.2",
     "@types/pg": "^8.23.1",
     "@types/ws": "^8.18.2",
+    "@zip.js/zip.js": "2.8.41",
     "drizzle-kit": "^0.31.10",
     "esbuild": "^0.28.2",
     "tsx": "^4.23.15",

@@ -48,13 +48,11 @@ export function isTerminalAgentStatus(status: AgentStatus): boolean {
   return (TERMINAL_AGENT_STATUSES as readonly AgentStatus[]).includes(status);
 }
 
-export type EvidenceKind =
-  | "artifact"
-  | "workspace"
-  | "test-report"
-  | "trajectory"
-  | "judge-output"
-  | "metric";
+export const EVIDENCE_KINDS = ["artifact", "workspace", "test-report", "trajectory", "evaluation-output", "metric"] as const;
+export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
+
+export const DATASET_KINDS = ["general", "prompt"] as const;
+export type DatasetKind = (typeof DATASET_KINDS)[number];
 
 /** Project metadata; its plan lives in ProjectPlan and is never edited after creation. */
 export interface Project {
@@ -85,10 +83,14 @@ export interface HarnessConfig {
 }
 
 export interface MaterializedDataBinding {
-  readonly bundleId: string;
   readonly manifestHash: string;
-  readonly target: "workspace" | "sandbox";
-  readonly rootPath: string;
+  readonly target: "workspace";
+  readonly materials: readonly {
+    readonly bundleId: string;
+    readonly materialId: string;
+    readonly rootPath: string;
+  }[];
+  readonly evaluationOutputSchemaPath?: string;
 }
 
 export interface ArtifactRef {
@@ -245,9 +247,6 @@ export interface EvaluationAgentOutput {
   readonly artifacts: readonly ArtifactRef[];
   /** Absent when SP found no result file; Metrics reports it as unavailable, never as zero. */
   readonly structuredOutput?: EvaluationStructuredOutput;
-  /** The judge score read from a schema-valid `structuredOutput`; synced as the Subject's Langfuse session score. */
-  readonly score?: number;
-  readonly reason?: string;
   readonly evidenceRefs?: readonly EvidenceRef[];
   readonly trajectory: TrajectoryRef;
   readonly error?: string;

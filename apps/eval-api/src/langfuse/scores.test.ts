@@ -49,10 +49,10 @@ describe("Langfuse score publisher", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
-  it("does not retry a rejected score and reports Langfuse's reason", async () => {
+  it("does not retry a rejected score or expose its response body", async () => {
     const fetch = vi.fn(async () => new Response("invalid sessionId", { status: 400 }));
     await expect(createLangfuseScorePublisher({ config, fetch, sleep })(score))
-      .rejects.toThrow("Langfuse rejected the score with HTTP 400: invalid sessionId");
+      .rejects.toThrow(/^Langfuse rejected the score with HTTP 400$/u);
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 

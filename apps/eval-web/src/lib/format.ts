@@ -3,11 +3,20 @@ const dateTime = new Intl.DateTimeFormat("zh-CN", {
 });
 const integer = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
 const decimal = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
+const statistic = new Intl.NumberFormat("zh-CN", { maximumSignificantDigits: 6 });
+const scientific = new Intl.NumberFormat("zh-CN", { notation: "scientific", maximumSignificantDigits: 6 });
 
-export function formatDateTime(value: string | null | undefined): string {
-  if (!value) return "—";
+/** Preserve small nonzero means/variances; large values stay readable in tables. */
+export function formatStatistic(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "未获得";
+  const magnitude = Math.abs(value);
+  return (magnitude > 0 && (magnitude < 0.0001 || magnitude >= 1e12) ? scientific : statistic).format(value);
+}
+
+export function formatDateTime(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "未获得";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : dateTime.format(date);
+  return Number.isNaN(date.getTime()) ? String(value) : dateTime.format(date);
 }
 
 export function formatNumber(value: number | null | undefined, digits: 0 | 2 = 0): string {
@@ -30,7 +39,7 @@ export function formatPercent(value: number | null | undefined): string {
 
 export function formatDuration(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return "—";
-  if (ms < 1000) return `${Math.round(ms)} 毫秒`;
+  if (ms < 1000) return `${formatStatistic(ms)} 毫秒`;
   const seconds = ms / 1000;
   if (seconds < 60) return `${seconds.toFixed(1)} 秒`;
   const minutes = Math.floor(seconds / 60);

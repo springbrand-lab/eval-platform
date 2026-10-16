@@ -2,20 +2,22 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { MessagesSquare, Scale } from "lucide-react";
 import { getSamplingDetail, metricKeys } from "@/api-sdk/metrics-api";
-import { getProject, projectKeys } from "@/api-sdk/projects-api";
 import { listSamplingEvaluations, runKeys } from "@/api-sdk/runs-api";
 import type { EvaluationDetail } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
 import { StatusBadge } from "@/components/ui/badge";
 import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/card";
-import { CodeBlock, JsonViewer, ScoreBar } from "@/components/ui/data-display";
-import { Button } from "@/components/ui/button";
+import { CodeBlock, JsonViewer } from "@/components/ui/data-display";
+import { Button } from "@springbrand/site-block";
 import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
 import { dataTitle } from "@/features/datasets/dataset-detail-page";
 import { ScoreSyncBadge } from "@/features/runs/run-detail-page";
 import { formatDateTime } from "@/lib/format";
 import { langfuseScoreId } from "@/lib/langfuse";
+import { SummaryCards } from "@/features/metrics/summary";
 import { AgentPanel, LangfuseLink } from "./agent-panel";
+import { useProject } from "@/features/projects/use-project";
+import { POLL_MS } from "@/features/runs/use-run-polling";
 
 const VALIDATION_REASON: Record<string, string> = {
   "invalid-json": "结果文件不是有效的 JSON",
@@ -39,8 +41,6 @@ function JudgeResult({ detail, subjectChatId }: { detail: EvaluationDetail; subj
       />
       <CardBody className="flex flex-col gap-4">
         <DescriptionList items={[
-          { label: "分数", value: <ScoreBar value={record.output?.score} /> },
-          { label: "理由", value: record.output?.reason ?? "—" },
           { label: "评分格式校验", value: (
             <span className="flex flex-wrap items-center gap-2">
               <StatusBadge status={validation.status} />
@@ -65,10 +65,11 @@ function JudgeResult({ detail, subjectChatId }: { detail: EvaluationDetail; subj
 }
 
 export function SamplingDetailPage({ projectId, samplingId }: { projectId: string; samplingId: string }) {
-  const view = useQuery({ queryKey: projectKeys.detail(projectId), queryFn: ({ signal }) => getProject(projectId, signal) });
-  const detail = useQuery({ queryKey: metricKeys.sampling(projectId, samplingId), queryFn: ({ signal }) => getSamplingDetail(projectId, samplingId, signal) });
+  const view = useProject(projectId);
+  const refresh = view.data?.currentRun ? POLL_MS : false;
+  const detail = useQuery({ queryKey: metricKeys.sampling(projectId, samplingId), queryFn: ({ signal }) => getSamplingDetail(projectId, samplingId, signal), enabled: !!view.data, staleTime: 0, refetchInterval: refresh });
   // Score sync state lives on the raw EvaluationRecord, read with the Metrics view.
-  const records = useQuery({ queryKey: runKeys.samplingEvaluations(samplingId), queryFn: ({ signal }) => listSamplingEvaluations(samplingId, signal) });
+  const records = useQuery({ queryKey: runKeys.samplingEvaluations(projectId, samplingId), queryFn: ({ signal }) => listSamplingEvaluations(samplingId, signal), enabled: !!view.data, staleTime: 0, refetchInterval: refresh });
   const data = detail.data;
   const sample = data?.projectSample;
   const subjectChatId = data?.subject.chatId ?? null;
@@ -86,31 +87,30 @@ export function SamplingDetailPage({ projectId, samplingId }: { projectId: strin
         meta={data && <StatusBadge status={data.subject.stage.status} />}
         actions={data && (
           <>
+            <Link className="link text-sm font-semibold" to="/projects/$projectId/runs/new" params={{ projectId }} search={{ samplingId }}>重跑 / 评估此采样</Link>
             <LangfuseLink chatId={subjectChatId} label="Langfuse" />
             {subjectChatId && (
-              <Link to="/projects/$projectId/samplings/$samplingId/observe" params={{ projectId, samplingId }}>
-                <Button icon={<MessagesSquare />}>被测会话</Button>
-              </Link>
+              <Button asChild variant="outline"><Link to="/projects/$projectId/samplings/$samplingId/observe" params={{ projectId, samplingId }}><MessagesSquare />被测会话</Link></Button>
             )}
             {firstEvaluation?.agent.chatId && (
-              <Link to="/projects/$projectId/evaluations/$evaluationId/observe" params={{ projectId, evaluationId: firstEvaluation.record.evaluationId }}>
-                <Button icon={<Scale />}>评委会话</Button>
-              </Link>
+              <Button asChild variant="outline"><Link to="/projects/$projectId/evaluations/$evaluationId/observe" params={{ projectId, evaluationId: firstEvaluation.record.evaluationId }}><Scale />评委会话</Link></Button>
             )}
           </>
         )}
       />
-      {detail.isPending ? <LoadingBlock /> : detail.error ? <ErrorBlock error={detail.error} /> : data && (
+      {view.error && <ErrorBlock error={view.error} onRetry={() => void view.refetch()} />}
+      {!view.data ? view.isPending && <LoadingBlock /> : detail.isPending ? <LoadingBlock /> : detail.error ? <ErrorBlock error={detail.error} onRetry={() => void detail.refetch()} /> : data && (
         <div className="flex flex-col gap-4">
-          {/* Everything on one page, the judge's result first. */}
+          <SummaryCards summary={data.summary} />
           {!firstEvaluation && <Notice tone="neutral">这个采样还没有评估。</Notice>}
           {data.evaluations.map((evaluation) => {
             const record = records.data?.find((item) => item.evaluationId === evaluation.record.evaluationId) ?? evaluation.record;
             return <JudgeResult key={record.evaluationId} detail={{ ...evaluation, record }} subjectChatId={subjectChatId} />;
           })}
-          <AgentPanel title="被测 Agent" agent={data.subject} />
+          <AgentPanel title="被测 Agent" agent={data.subject} observe={{ to: "/projects/$projectId/samplings/$samplingId/observe", params: { projectId, samplingId } }} />
           {data.evaluations.map((evaluation) => (
-            <AgentPanel key={evaluation.record.evaluationId} title="评委 Agent" agent={evaluation.agent} />
+            <AgentPanel key={evaluation.record.evaluationId} title="评委 Agent" agent={evaluation.agent}
+              observe={{ to: "/projects/$projectId/evaluations/$evaluationId/observe", params: { projectId, evaluationId: evaluation.record.evaluationId } }} />
           ))}
         </div>
       )}

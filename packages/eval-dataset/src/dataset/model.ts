@@ -14,6 +14,16 @@ export const initialMaterialsRefSchema = z.strictObject({
   materialId: platformIdSchema,
 }).readonly();
 
+/** A non-empty, ordered material list naming each `(bundleId, materialId)` at most once. */
+export const initialMaterialsRefsSchema = z.array(initialMaterialsRefSchema).min(1).superRefine((refs, context) => {
+  const seen = new Set<string>();
+  refs.forEach(({ bundleId, materialId }, index) => {
+    const key = `${bundleId}/${materialId}`;
+    if (seen.has(key)) context.addIssue({ code: "custom", path: [index], message: `Duplicate material reference: ${key}` });
+    seen.add(key);
+  });
+}).readonly();
+
 const datasetFieldsSchema = z.strictObject({
   name: z.string().trim().min(1),
   description: z.string().optional(),
@@ -27,11 +37,12 @@ const dataFieldsSchema = z.object({
     message: "evalPrompt must not be blank",
   }).optional(),
   initialSession: initialSessionRefSchema.optional(),
-  initialMaterials: initialMaterialsRefSchema.optional(),
-  evalInitialMaterials: initialMaterialsRefSchema.optional(),
+  initialMaterials: initialMaterialsRefsSchema.optional(),
+  evalInitialMaterials: initialMaterialsRefsSchema.optional(),
 });
 
 export const datasetInputSchema = datasetFieldsSchema.readonly();
+export const dataCreateOptionsSchema = z.strictObject({ datasetId: platformIdSchema.optional() });
 export const dataInputSchema = createDataRecordSchema(
   dataFieldsSchema.extend({ dataId: z.never().optional() }),
 );
@@ -58,6 +69,7 @@ export type InitialMaterialsRef = z.infer<typeof initialMaterialsRefSchema>;
 export type InitialSessionRef = z.infer<typeof initialSessionRefSchema>;
 export type DatasetInput = z.infer<typeof datasetInputSchema>;
 export type DataInput = z.infer<typeof dataInputSchema>;
+export type DataCreateOptions = z.infer<typeof dataCreateOptionsSchema>;
 export type DatasetDocument = z.infer<typeof datasetDocumentSchema>;
 export type DatasetSnapshot = z.infer<typeof datasetSnapshotSchema>;
 

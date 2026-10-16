@@ -73,15 +73,15 @@ export async function executeSampling(
       const exported = await dependencies.harness.exportEvidence({
         handle: subjectHandle(chatId),
         limits: dependencies.evidenceLimits,
+        ...(input.context.sample.data.initialMaterials === undefined ? {} : { initialMaterials: input.context.sample.data.initialMaterials }),
         ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
       });
       const evidence = await dependencies.evidence.save({ evidence: exported, limits: dependencies.evidenceLimits });
-      const { manifest } = await dependencies.evidence.open(evidence);
       const trajectory: TrajectoryRef = {
         trajectoryId: evidence.evidenceId,
         source: "subject",
-        path: `evidence:${evidence.evidenceId}/trajectory.jsonl`,
-        contentHash: `sha256:${manifest.trajectory.sha256}`,
+        path: `evidence:${evidence.evidenceId}/trajectory/`,
+        contentHash: `sha256:${evidence.manifestSha256}`,
       };
       return { ...output, trajectory, evidence };
     },

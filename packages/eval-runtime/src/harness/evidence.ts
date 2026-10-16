@@ -3,10 +3,10 @@ import type {
   EvidenceLimits,
   EvidenceManifest,
   EvidenceOmission,
-  TrajectoryEvent,
+  EvidenceTrajectoryPart,
+  JsonValue,
 } from "@eval-platform/eval-contracts";
 import {
-  EVAL_TRAJECTORY_FORMAT,
   EVIDENCE_OMISSION_REASONS,
   EVIDENCE_SCHEMA_VERSION,
   AGENT_FRAMEWORKS,
@@ -75,21 +75,36 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
       const exportedAt = now();
       const stored = await mapLimited(evidence.artifacts, UPLOAD_CONCURRENCY, async (artifact): Promise<EvidenceArtifact> => {
         const { sha256, size } = await blobs.putBlob(await evidence.readFile(artifact.path), limits.maxFileBytes);
+        if (size !== artifact.size) throw new EvidenceIntegrityError(`Evidence file ${artifact.path} size changed during export`);
         return { path: artifact.path, size, mediaType: artifact.mediaType, sha256 };
       });
       if (stored.reduce((total, artifact) => total + artifact.size, 0) > limits.maxTotalBytes) {
         throw new EvidenceIntegrityError("Exported evidence is larger than its limits allow");
       }
-      let events = 0;
-      const trajectory = await blobs.putBlob(jsonLines(evidence.trajectory, () => { events += 1; }), Number.MAX_SAFE_INTEGER);
+      const subjectInputs = await mapLimited(evidence.subjectInputs, UPLOAD_CONCURRENCY, async (file) => {
+        const { sha256, size } = await blobs.putBlob(await file.read(), limits.maxFileBytes);
+        if (size !== file.size) throw new EvidenceIntegrityError(`Subject input ${file.path} size changed during export`);
+        return { bundleId: file.bundleId, materialId: file.materialId, path: file.path, mediaType: file.mediaType, sha256, size };
+      });
+      const parts: EvidenceTrajectoryPart[] = [];
+      for await (const part of trajectoryParts(evidence.trajectory, limits.maxFileBytes)) {
+        const storedPart = await blobs.putBlob(new ReadableStream({
+          start(controller) {
+            for (const bytes of part.chunks) controller.enqueue(bytes);
+            controller.close();
+          },
+        }), limits.maxFileBytes);
+        parts.push({ ...storedPart, events: part.events });
+      }
       const body = {
         schemaVersion: EVIDENCE_SCHEMA_VERSION,
         source: { ...evidence.source, exportedAt },
         artifacts: stored,
+        subjectInputs,
         trajectory: {
-          format: EVAL_TRAJECTORY_FORMAT,
-          sha256: trajectory.sha256,
-          events,
+          format: evidence.trajectoryFormat,
+          parts,
+          events: parts.reduce((count, part) => count + part.events, 0),
           complete: evidence.trajectoryComplete,
           ...(evidence.trajectoryIncompleteReason === undefined
             ? {} : { incompleteReason: evidence.trajectoryIncompleteReason }),
@@ -147,9 +162,17 @@ const manifestSchema = z.object({
     mediaType: z.string().min(1),
     sha256,
   })),
-  trajectory: z.object({
-    format: z.literal(EVAL_TRAJECTORY_FORMAT),
+  subjectInputs: z.array(z.object({
+    bundleId: z.string().min(1),
+    materialId: z.string().min(1),
+    path: z.string().startsWith("/"),
+    size: z.number().int().nonnegative(),
+    mediaType: z.string().min(1),
     sha256,
+  })),
+  trajectory: z.object({
+    format: z.string().min(1),
+    parts: z.array(z.object({ sha256, size: z.number().int().positive(), events: z.number().int().positive() })),
     events: z.number().int().nonnegative(),
     complete: z.boolean(),
     incompleteReason: z.string().optional(),
@@ -161,24 +184,26 @@ function compare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-/** One JSON object per line, pulled from the source only as fast as the store reads. */
-function jsonLines(events: AsyncIterable<TrajectoryEvent>, onEvent: () => void): ReadableStream<Uint8Array> {
-  const iterator = events[Symbol.asyncIterator]();
+/** Parts retain complete lines and order, with at most one file's bytes buffered. */
+async function* trajectoryParts(events: AsyncIterable<JsonValue>, maxBytes: number): AsyncGenerator<{
+  readonly chunks: readonly Uint8Array[];
+  readonly events: number;
+}> {
   const encoder = new TextEncoder();
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      const next = await iterator.next();
-      if (next.done) {
-        controller.close();
-        return;
-      }
-      onEvent();
-      controller.enqueue(encoder.encode(`${JSON.stringify(next.value)}\n`));
-    },
-    async cancel(reason) {
-      await iterator.return?.(reason);
-    },
-  });
+  let chunks: Uint8Array[] = [];
+  let size = 0;
+  for await (const event of events) {
+    const bytes = encoder.encode(`${JSON.stringify(event)}\n`);
+    if (bytes.byteLength > maxBytes) throw new EvidenceIntegrityError("One trajectory event exceeds the evidence file byte limit");
+    if (size + bytes.byteLength > maxBytes) {
+      yield { chunks, events: chunks.length };
+      chunks = [];
+      size = 0;
+    }
+    chunks.push(bytes);
+    size += bytes.byteLength;
+  }
+  if (chunks.length > 0) yield { chunks, events: chunks.length };
 }
 
 async function mapLimited<T, R>(items: readonly T[], limit: number, map: (item: T) => Promise<R>): Promise<R[]> {

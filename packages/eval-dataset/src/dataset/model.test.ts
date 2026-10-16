@@ -14,7 +14,7 @@ describe("Dataset inputs", () => {
       userPrompt: "Build the homepage",
       json: { task: "build homepage", requirements: ["responsive", true, null, 3] },
       initialSession: { bundleId: "401c23cf-d812-43f4-8404-d76e22cb0a66", sessionId: "a2047fbe-4917-4658-81ca-68f82ebe6071" },
-      initialMaterials: { bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0", materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af" },
+      initialMaterials: [{ bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0", materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af" }],
       metadata: { source: "internal", labels: ["web"] },
     };
     const parsed = dataInputSchema.parse(input);
@@ -29,17 +29,17 @@ describe("Dataset inputs", () => {
     expect(dataInputSchema.parse({
       userPrompt: "Build the homepage",
       json: null,
-      initialMaterials: {
+      initialMaterials: [{
         bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0",
         materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af",
-      },
+      }],
     })).toEqual({
       userPrompt: "Build the homepage",
       json: null,
-      initialMaterials: {
+      initialMaterials: [{
         bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0",
         materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af",
-      },
+      }],
     });
   });
 
@@ -114,7 +114,7 @@ describe("Dataset inputs", () => {
     [],
     {},
     { dataId: crypto.randomUUID(), userPrompt: "task" },
-    { userPrompt: "task", initialMaterials: { bundleId: " " } },
+    { userPrompt: "task", initialMaterials: [{ bundleId: " " }] },
   ])("rejects invalid Data input: %j", (input) => {
     expect(dataInputSchema.safeParse(input).success).toBe(false);
   });
@@ -148,12 +148,12 @@ describe("Current user prompt and extension fields", () => {
 
   it("keeps evaluator materials separate from Subject materials", () => {
     const data = dataInputSchema.parse({ userPrompt: "Build", evalPrompt: "Judge",
-      initialMaterials: { bundleId: "335ce16b-3fe4-4346-8c3a-f2a4efce2ef0", materialId: "57c8ddb0-90f6-45c0-85c9-19758bfb53af" },
-      evalInitialMaterials: { bundleId: "b49b3f03-2a47-4314-8c98-03ac96738979", materialId: "56230a91-7786-4fe6-8eb0-83b53fac7bcd" } });
-    expect(data.evalInitialMaterials).toEqual({ bundleId: "b49b3f03-2a47-4314-8c98-03ac96738979", materialId: "56230a91-7786-4fe6-8eb0-83b53fac7bcd" });
-    expect(data.initialMaterials).toEqual({ bundleId: "335ce16b-3fe4-4346-8c3a-f2a4efce2ef0", materialId: "57c8ddb0-90f6-45c0-85c9-19758bfb53af" });
+      initialMaterials: [{ bundleId: "335ce16b-3fe4-4346-8c3a-f2a4efce2ef0", materialId: "57c8ddb0-90f6-45c0-85c9-19758bfb53af" }],
+      evalInitialMaterials: [{ bundleId: "b49b3f03-2a47-4314-8c98-03ac96738979", materialId: "56230a91-7786-4fe6-8eb0-83b53fac7bcd" }] });
+    expect(data.evalInitialMaterials).toEqual([{ bundleId: "b49b3f03-2a47-4314-8c98-03ac96738979", materialId: "56230a91-7786-4fe6-8eb0-83b53fac7bcd" }]);
+    expect(data.initialMaterials).toEqual([{ bundleId: "335ce16b-3fe4-4346-8c3a-f2a4efce2ef0", materialId: "57c8ddb0-90f6-45c0-85c9-19758bfb53af" }]);
     expect(dataInputSchema.safeParse({ userPrompt: "Build",
-      evalInitialMaterials: { bundleId: "b49b3f03-2a47-4314-8c98-03ac96738979" } }).success).toBe(false);
+      evalInitialMaterials: [{ bundleId: "b49b3f03-2a47-4314-8c98-03ac96738979" }] }).success).toBe(false);
   });
 
   it("preserves extension keys that object-schema parsers commonly strip", () => {
@@ -234,9 +234,33 @@ describe("InitialMaterialsRef", () => {
     { bundleId: " project-assets ", materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af" },
     { bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0", materialId: "homepage-files" },
     { bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0", materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af", extra: 1 },
-  ])("rejects invalid material references: %j", (initialMaterials) => {
-    expect(initialMaterialsRefSchema.safeParse(initialMaterials).success).toBe(false);
-    expect(dataInputSchema.safeParse({ userPrompt: "task", initialMaterials }).success).toBe(false);
+  ])("rejects invalid material references: %j", (reference) => {
+    expect(initialMaterialsRefSchema.safeParse(reference).success).toBe(false);
+    expect(dataInputSchema.safeParse({ userPrompt: "task", initialMaterials: [reference] }).success).toBe(false);
+  });
+
+  const first = { bundleId: "b80ca540-c5c3-47c5-854f-bf083d4afdb0", materialId: "01b65fa2-88f6-4c99-8bb6-245fea0588af" };
+  const second = { bundleId: "a3b1c2d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d", materialId: "c9d8e7f6-a5b4-4c3d-9e2f-1a0b9c8d7e6f" };
+
+  it.each(["initialMaterials", "evalInitialMaterials"])("requires %s to be a non-empty list", (field) => {
+    expect(dataInputSchema.safeParse({ userPrompt: "task", [field]: [] }).success).toBe(false);
+    expect(dataInputSchema.safeParse({ userPrompt: "task", [field]: first }).success).toBe(false);
+  });
+
+  it.each(["initialMaterials", "evalInitialMaterials"])("rejects a Material listed twice in %s at its index", (field) => {
+    const parsed = dataInputSchema.safeParse({ userPrompt: "task",
+      [field]: [first, second, { bundleId: first.bundleId.toUpperCase(), materialId: first.materialId }] });
+    expect(parsed.error?.issues).toEqual([expect.objectContaining({ path: [field, 2] })]);
+  });
+
+  it("keeps material order and accepts Materials of different Bundles in one field", () => {
+    expect(dataInputSchema.parse({ userPrompt: "task", initialMaterials: [second, first] }).initialMaterials)
+      .toEqual([second, first]);
+  });
+
+  it("accepts only a single Session reference", () => {
+    const session = { bundleId: first.bundleId, sessionId: first.materialId };
+    expect(dataInputSchema.safeParse({ userPrompt: "task", initialSession: [session] }).success).toBe(false);
   });
 });
 

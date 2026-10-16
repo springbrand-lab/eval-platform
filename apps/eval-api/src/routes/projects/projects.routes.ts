@@ -1,8 +1,8 @@
 import { createRoute, z } from "@hono/zod-openapi";
-import type { AgentObservationRef, Project, RunHandle } from "@eval-platform/eval-contracts";
+import type { AgentObservationRef, EvaluationOutputSchemaDocument, Project, RunHandle } from "@eval-platform/eval-contracts";
 import { responseSchema } from "@springbrand/http/catalog";
 import { jsonContent } from "stoker/openapi/helpers";
-import type { ProjectView } from "../../db/project-store.js";
+import type { ProjectView } from "@eval-platform/eval-runtime";
 import { jsonBody } from "../../lib/request-body.js";
 import { JSON_BODY_BYTES, PROJECT_BODY_BYTES } from "../../limits.js";
 import { evaluationPlanSchema, projectCreateSchema } from "../../projects/schemas.js";
@@ -54,6 +54,19 @@ export const get = createRoute({
   request: { params },
   responses: {
     200: jsonContent(responseSchema(projectViewSchema), "Project"),
+    ...errorResponses,
+    ...notFoundResponse,
+  },
+});
+
+export const evaluationOutputSchema = createRoute({
+  method: "get",
+  path: "/{projectId}/evaluation-output-schema",
+  tags: ["Project"],
+  summary: "Read the Project-bound output Schema and its reference, including soft-deleted catalog entries",
+  request: { params },
+  responses: {
+    200: jsonContent(responseSchema(z.custom<EvaluationOutputSchemaDocument>().nullable()), "Project Schema, or null without an evaluation plan"),
     ...errorResponses,
     ...notFoundResponse,
   },
