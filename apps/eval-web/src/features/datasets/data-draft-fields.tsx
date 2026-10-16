@@ -78,7 +78,7 @@ export function DataDraftFields({ draft, onChange, errors = {} }: {
         <Field label="说明" required error={errors.description}>
           {(id) => <Textarea id={id} required rows={3} value={draft.description} onChange={(event) => set("description", event.target.value)} />}
         </Field>
-        <Field label="启动 Prompt" required error={errors.userPrompt}>
+        <Field label="执行 Prompt" required error={errors.userPrompt}>
           {(id) => <Textarea id={id} required rows={6} value={draft.userPrompt} onChange={(event) => set("userPrompt", event.target.value)} />}
         </Field>
         <Field label="评估 Prompt" required error={errors.evalPrompt}>
