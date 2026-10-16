@@ -24,6 +24,8 @@ ZIP 与素材上传也等待 FileDropzone 的文件提取结束后再提交；�
 
 初始素材、初始上下文的文件读取共用 `bundles-api.ts` 的 `getResource`、`listFiles`、`getFile`；目录投影从 `eval-contracts` 的 `InitialResourceFile` 引入。Query key 包含资源种类、包、资源和文件路径，内容请求接受取消信号，路径作为 query 参数原样传递。格式预览的发布依赖与验证流程见 [SP 共享包接入与升级](../../docs/sp-package-publishing-todo.md)。
 
+资源选择器与 Bundle 详情共用资源列表缓存，缓存保存 API 返回的完整记录；选择器通过 Query 的 `select` 生成选项，不把 `{id, name}` 展示投影写回共享缓存。访问页面的先后顺序不影响资源 ID、描述或格式。
+
 素材、上下文名称进入 `/resources/$kind/$bundleId/$resourceId` 的只读目录页。资源与运行 Workspace 共用目录导航和 `@springbrand/file-renderers` 的格式选择、解析、预览、源码及下载；Web 仅负责鉴权文件读取、请求取消与 Blob URL 生命周期。文件夹和 ZIP 导入后的路径使用同一目录投影。HTML/CSS/图片等相对引用由公共 `rendererResourcePath` 统一解析，只读取当前资源根目录内的文件；Web 不另行解码链接。
 
 `file-renderers`、`agent-config-editor` 使用 npm 精确版本，Tailwind 扫描它们发布后的 `dist/**/*.js`；格式自身的 CSS Module 由包内 JS 导入。`file-renderers` 是包含资源 URL、CSS 和 Worker 的 ESM 包，开发时不参与依赖预打包，由 Vite 标准资源流水线处理；其包含 CommonJS 的依赖链仍显式参与预打包，按 [Vite 的嵌套依赖配置](https://vite.dev/config/dep-optimization-options.html#optimizedeps-exclude)转换，不能把原始 CommonJS 交给浏览器。Vite 对 React、React DOM、TanStack Query、HTTP 和 site-block 去重，避免产生第二份 Context 或错误类。依赖接入与独立安装验证见 [SP 共享包接入与升级](../../docs/sp-package-publishing-todo.md)。

@@ -34,7 +34,8 @@ export function ResourcePicker({ kind, value, onChange, disabled, label, exclude
   const bundleId = value?.bundleId ?? "";
   const items = useQuery({
     queryKey: catalog.keys.resources(bundleId),
-    queryFn: async ({ signal }) => (await catalog.listResources(bundleId, signal)).map((item) => ({
+    queryFn: async ({ signal }) => await catalog.listResources(bundleId, signal),
+    select: (resources) => resources.map((item) => ({
       id: "materialId" in item ? item.materialId : item.sessionId,
       name: `${item.name} · ${item.description}`,
     })),
