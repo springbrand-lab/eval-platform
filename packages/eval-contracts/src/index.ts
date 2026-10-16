@@ -12,6 +12,7 @@ export type {
   AgentRole,
   AgentStatus,
   ArtifactRef,
+  DatasetKind,
   EvaluationAgentOutput,
   EvaluationOutputSchema,
   EvaluationRecord,
@@ -44,6 +45,7 @@ export type {
 export type {
   AgentConfigSnapshot,
   EvaluationOutputSchemaRef,
+  EvaluationOutputSchemaDocument,
   EvaluationPlan,
   ExecutionPlan,
   ProjectDatasetSnapshot,
@@ -53,6 +55,8 @@ export type {
 export {
   AGENT_FRAMEWORKS,
   AGENT_STATUSES,
+  DATASET_KINDS,
+  EVIDENCE_KINDS,
   PENDING_SAMPLING_STATUSES,
   RUN_OPERATIONS,
   SAMPLING_STATUSES,
@@ -68,21 +72,25 @@ export type {
   EvidenceOmission,
   EvidenceOmissionReason,
   EvidenceSource,
-  TrajectoryEvent,
-  TrajectoryEventType,
+  EvidenceSubjectInput,
+  EvidenceTrajectoryPart,
 } from "./evidence.js";
 export {
   DEFAULT_EVIDENCE_LIMITS,
   EVALUATION_RESULT_PATH,
-  EVAL_TRAJECTORY_FORMAT,
+  EVALUATION_OUTPUT_SCHEMA_PATH,
   EVIDENCE_ARTIFACTS_ROOT,
   EVIDENCE_MANIFEST_PATH,
   EVIDENCE_OMISSION_REASONS,
   EVIDENCE_ROOT,
   EVIDENCE_SCHEMA_VERSION,
-  EVIDENCE_TRAJECTORY_PATH,
-  TRAJECTORY_EVENT_TYPES,
+  EVIDENCE_TRAJECTORY_ROOT,
+  EVIDENCE_SUBJECT_INPUTS_ROOT,
 } from "./evidence.js";
 export { IDENTIFIER_RULE, identifierSchema, isIdentifier } from "./identifier.js";
 export { canonicalJsonBytes, createId, equalJson, sha256Hex } from "./canonical.js";
 export { jsonObjectSchema, jsonValueSchema } from "./json.js";
+export { evalInputLimitsSchema } from "./input-limits.js";
+export type { EvalInputLimits } from "./input-limits.js";
+export { initialResourceFileSchema } from "./initial-resource-files.js";
+export type { InitialResourceFile } from "./initial-resource-files.js";

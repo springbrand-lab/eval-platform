@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_EVIDENCE_LIMITS, type TrajectoryEvent } from "@eval-platform/eval-contracts";
+import { DEFAULT_EVIDENCE_LIMITS, type JsonValue } from "@eval-platform/eval-contracts";
 import {
   AgentHandleNotFoundError,
   AgentIdentityConflictError,
   type AgentHandle,
   type EvidenceBundleReader,
 } from "@eval-platform/eval-runtime";
+import { EVAL_INITIAL_FILE_MAX_BYTES, EVAL_OUTPUT_SCHEMA_PATH as SCHEMA_PATH } from "@springbrand/eval-harness";
 import WebSocket, { WebSocketServer } from "ws";
 import { createSpHarness, SpHarnessError } from "./harness.js";
 
@@ -48,7 +49,25 @@ const resources = {
   telemetryEvents: [{ eventId: "event-1" }],
   billingSettlements: [{ eventId: "billing-1", chargedCredits: 7 }],
 };
-const binding = (bundleId: string, rootPath = "/") => ({ bundleId, manifestHash: "hash", target: "workspace", rootPath });
+type Ref = { readonly bundleId: string; readonly materialId: string };
+const subjectMaterials: readonly Ref[] = [
+  { bundleId: "bundle-1", materialId: "material-1" },
+  { bundleId: "bundle-2", materialId: "material-2" },
+];
+const evaluatorMaterials: readonly Ref[] = [
+  { bundleId: "eval-bundle", materialId: "judge-brief" },
+  { bundleId: "eval-bundle", materialId: "rubric" },
+];
+const binding = (materials: readonly Ref[] = [], root = "", extra: Record<string, unknown> = {}) => ({
+  manifestHash: "hash",
+  target: "workspace",
+  materials: materials.map((ref) => ({ ...ref, rootPath: `${root}/initial-materials/${ref.bundleId}/${ref.materialId}` })),
+  ...extra,
+});
+/** Each Material resolves to one file named after it. */
+const materialFiles = async (_owner: string, { materialId }: Ref) => [
+  { path: `/${materialId}.txt`, mediaType: "text/plain", contentBase64: Buffer.from(materialId).toString("base64") },
+];
 
 function receipt(normalizedStatus: string, submissionId = "submission-1") {
   const status = { queued: "pending", running: "running", completed: "completed", failed: "error" }[normalizedStatus];
@@ -160,7 +179,7 @@ describe("Eval SP Harness", () => {
       const url = new URL(request.url);
       if (request.method === "PUT" && url.pathname === CHAT_PATH) return Response.json(subject);
       if (request.method === "POST" && url.pathname.endsWith("/initialization")) {
-        return Response.json(binding("bundle-1", "/input"));
+        return Response.json(binding(subjectMaterials));
       }
       if (request.method === "POST" && url.pathname.endsWith("/submissions")) return Response.json(receipt("completed"));
       if (request.method === "GET" && url.pathname.includes("/submissions/by-key/")) {
@@ -170,16 +189,14 @@ describe("Eval SP Harness", () => {
       if (request.method === "GET" && url.pathname.includes("/resources/by-key/")) return Response.json(resources);
       throw new Error(`Unexpected ${request.method} ${url}`);
     });
-    const resolveInitialMaterials = vi.fn(async () => [
-      { path: "/brief.txt", mediaType: "text/plain", contentBase64: "SGVsbG8=" },
-    ]);
+    const resolveInitialMaterials = vi.fn(materialFiles);
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "service-secret", fetch, resolveInitialMaterials });
     expect(await harness.ensureAgent(ensureInput(subject))).toEqual(subject);
     expect(await harness.materializeInitialData({
       handle: subject,
       idempotencyKey: "initial-data:subject-chat",
-      data: { userPrompt: "Build a project", initialMaterials: { bundleId: "bundle-1", materialId: "material-1" } },
-    })).toMatchObject({ bundleId: "bundle-1", target: "workspace" });
+      data: { userPrompt: "Build a project", initialMaterials: subjectMaterials },
+    })).toEqual(binding(subjectMaterials));
     expect(await harness.submitAgent({ handle: subject, idempotencyKey: "execution:sampling-1", prompt: "Build a project" }))
       .toEqual({ submissionId: "submission-1", status: "completed", accepted: true, createdAt: 1 });
     expect((await harness.inspectAgentOperation({ handle: subject, idempotencyKey: "execution:sampling-1" }))?.submissionId)
@@ -194,11 +211,12 @@ describe("Eval SP Harness", () => {
     expect(await requests[0]!.json()).toEqual(ensureInput(subject));
     expect(await requests[1]!.json()).toEqual({
       idempotencyKey: "initial-data:subject-chat",
-      data: { userPrompt: "Build a project", initialMaterials: { bundleId: "bundle-1", materialId: "material-1" } },
-      initialMaterials: { bundleId: "bundle-1", materialId: "material-1",
-        files: [{ path: "/brief.txt", mediaType: "text/plain", contentBase64: "SGVsbG8=" }] },
+      data: { userPrompt: "Build a project", initialMaterials: subjectMaterials },
+      initialMaterials: subjectMaterials.map((ref) => ({ ...ref, files: [
+        { path: `/${ref.materialId}.txt`, mediaType: "text/plain", contentBase64: Buffer.from(ref.materialId).toString("base64") },
+      ] })),
     });
-    expect(resolveInitialMaterials).toHaveBeenCalledWith(OWNER, { bundleId: "bundle-1", materialId: "material-1" });
+    expect(resolveInitialMaterials.mock.calls).toEqual(subjectMaterials.map((ref) => [OWNER, ref]));
     expect(await requests[2]!.json()).toEqual({ idempotencyKey: "execution:sampling-1", prompt: "Build a project", unattended: true });
     expect(new URL(requests[5]!.url).searchParams.get("submissionId")).toBe("submission-1");
   });
@@ -238,53 +256,57 @@ describe("Eval SP Harness", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("uploads the Project JSON Schema with evaluator-only materials before submission", async () => {
-    const { fetch, requests } = spFetch(() => Response.json(binding("eval-bundle",
-      "/initial-materials/eval-bundle/judge-brief")));
-    const resolveInitialMaterials = vi.fn(async () => [
-      { path: "/brief.txt", mediaType: "text/plain", contentBase64: "SnVkZ2U=" },
-    ]);
-    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, resolveInitialMaterials });
-    const evalMaterials = { bundleId: "eval-bundle", materialId: "judge-brief" };
-    const materialized = await harness.materializeInitialData({
-      handle: evaluator, idempotencyKey: "initial-data:evaluator-chat",
-      data: { userPrompt: "Judge", initialMaterials: evalMaterials },
-      evaluationOutputSchema: { type: "object", properties: { score: { type: "number" } } },
-    });
-    expect(resolveInitialMaterials).toHaveBeenCalledWith(OWNER, evalMaterials);
-    const body = await requests[0]!.json();
-    expect(body.initialMaterials).toMatchObject(evalMaterials);
-    expect(body.initialMaterials.files.map((file: { path: string }) => file.path))
-      .toEqual(["/brief.txt", "/evaluation-output.schema.json"]);
-    expect(`${materialized.rootPath}${body.initialMaterials.files[1].path}`).toBe(
-      "/initial-materials/eval-bundle/judge-brief/evaluation-output.schema.json",
-    );
-    expect(JSON.parse(Buffer.from(body.initialMaterials.files[1].contentBase64, "base64").toString("utf8")))
-      .toEqual({ type: "object", properties: { score: { type: "number" } } });
-    expect(body.data).not.toHaveProperty("evalInitialMaterials");
-  });
+  it.each([[[]], [evaluatorMaterials]] as const)(
+    "sends the Project JSON Schema beside evaluator materials %j and no synthetic material",
+    async (materials) => {
+      const { fetch, requests } = spFetch(() => Response.json(binding(materials, "",
+        { evaluationOutputSchemaPath: SCHEMA_PATH })));
+      const resolveInitialMaterials = vi.fn(materialFiles);
+      const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, resolveInitialMaterials });
+      const schema = { type: "object", properties: { score: { type: "number" } } };
+      const materialized = await harness.materializeInitialData({
+        handle: evaluator, idempotencyKey: "initial-data:evaluator-chat",
+        data: { userPrompt: "Judge", ...(materials.length ? { initialMaterials: materials } : {}) },
+        evaluationOutputSchema: schema,
+      });
+      expect(materialized).toEqual(binding(materials, "", { evaluationOutputSchemaPath: SCHEMA_PATH }));
+      const body = await requests[0]!.json();
+      expect(JSON.parse(body.evaluationOutputSchema.content)).toEqual(schema);
+      expect(body.initialMaterials?.map(({ bundleId, materialId }: Ref) => ({ bundleId, materialId })))
+        .toEqual(materials.length ? materials : undefined);
+      expect(body.data.initialMaterials).toEqual(materials.length ? materials : undefined);
+      expect(resolveInitialMaterials.mock.calls).toEqual(materials.map((ref) => [OWNER, ref]));
+    },
+  );
 
-  it("materializes a schema even without evaluator materials and reserves its path", async () => {
-    const { fetch, requests } = spFetch(() => Response.json(binding("schema", "/")));
-    const schema = { type: "object" };
+  it("sends the output Schema only for an Evaluator", async () => {
+    const fetch = vi.fn();
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
-    await harness.materializeInitialData({ handle: evaluator, idempotencyKey: "init", data: { userPrompt: "Judge" },
-      evaluationOutputSchema: schema });
-    const body = await requests[0]!.json();
-    expect(body.initialMaterials.files).toHaveLength(1);
-    expect(body.initialMaterials.files[0].path).toBe("/evaluation-output.schema.json");
-    expect(body.data.initialMaterials).toMatchObject({ bundleId: "project-evaluation-output-schema" });
     await expect(harness.materializeInitialData({ handle: evaluator, idempotencyKey: "missing",
       data: { userPrompt: "Judge" } })).rejects.toMatchObject({ retryable: false });
-    expect(fetch).toHaveBeenCalledOnce();
+    await expect(harness.materializeInitialData({ handle: subject, idempotencyKey: "extra",
+      data: { userPrompt: "Build" }, evaluationOutputSchema: { type: "object" } })).rejects.toMatchObject({ retryable: false });
+    expect(fetch).not.toHaveBeenCalled();
+  });
 
-    const collision = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch,
-      resolveInitialMaterials: async () => [{ path: "/evaluation-output.schema.json",
-        mediaType: "application/json", contentBase64: "e30=" }] });
-    await expect(collision.materializeInitialData({ handle: evaluator, idempotencyKey: "collision",
-      data: { userPrompt: "Judge", initialMaterials: { bundleId: "bundle", materialId: "material" } },
-      evaluationOutputSchema: schema })).rejects.toMatchObject({ retryable: false });
-    expect(fetch).toHaveBeenCalledOnce();
+  it("rejects initialization files over SP's total budget before contacting SP", async () => {
+    const fetch = vi.fn();
+    const large = Buffer.alloc(EVAL_INITIAL_FILE_MAX_BYTES).toString("base64");
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch,
+      resolveInitialMaterials: async (_owner, { materialId }) => Array.from({ length: 2 }, (_, index) => ({
+        path: `/${materialId}-${index}.bin`, mediaType: "application/octet-stream", contentBase64: large,
+      })) });
+    const materials = [...subjectMaterials, { bundleId: "bundle-3", materialId: "material-3" }];
+    await expect(harness.materializeInitialData({ handle: subject, idempotencyKey: "too-large",
+      data: { userPrompt: "Build", initialMaterials: materials } })).rejects.toMatchObject({ retryable: false });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects an initialization result outside SP's contract", async () => {
+    const { fetch } = queuedFetch(Response.json({ bundleId: "bundle-1", manifestHash: "hash", target: "workspace", rootPath: "/" }));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    await expect(harness.materializeInitialData({ handle: subject, idempotencyKey: "init", data: { userPrompt: "Build" } }))
+      .rejects.toMatchObject({ name: "SpHarnessError", retryable: false });
   });
 
   it("does not submit a material reference without its per-Sample files", async () => {
@@ -293,13 +315,13 @@ describe("Eval SP Harness", () => {
     await expect(harness.materializeInitialData({
       handle: subject,
       idempotencyKey: "initial-data:subject-chat",
-      data: { userPrompt: "Build a project", initialMaterials: { bundleId: "bundle-1", materialId: "material-1" } },
+      data: { userPrompt: "Build a project", initialMaterials: subjectMaterials },
     })).rejects.toMatchObject({ retryable: false });
     expect(fetch).not.toHaveBeenCalled();
   });
 
   it("includes canonical Session content when a resolver supplies it", async () => {
-    const { fetch, requests } = spFetch(() => Response.json(binding("sessions")));
+    const { fetch, requests } = spFetch(() => Response.json(binding()));
     const resolveInitialSession = vi.fn(async () => ({
       format: "jsonl" as const,
       content: '{"id":"m1","message":{"role":"user","content":"Hi"},"createdAt":1}',
@@ -316,16 +338,14 @@ describe("Eval SP Harness", () => {
     });
   });
 
-  it("sends the Session reference when its optional context file is absent", async () => {
-    const { fetch, requests } = spFetch(() => Response.json(binding("sessions")));
-    const resolveInitialSession = vi.fn(async () => undefined);
-    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, resolveInitialSession });
-    await harness.materializeInitialData({
-      handle: subject,
-      idempotencyKey: "init-reference-only",
+  it("does not initialize a referenced Context without its resolver", async () => {
+    const { fetch, requests } = spFetch(() => Response.json(binding()));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    await expect(harness.materializeInitialData({
+      handle: subject, idempotencyKey: "init-missing-context",
       data: { userPrompt: "Continue", initialSession: { bundleId: "sessions", sessionId: "seed" } },
-    });
-    expect((await requests[0]!.json()).initialSession).toEqual({ bundleId: "sessions", sessionId: "seed" });
+    })).rejects.toMatchObject({ retryable: false, message: expect.stringContaining("context bundle resolver") });
+    expect(requests).toHaveLength(0);
   });
 
   it("maps immutable Chat conflicts and rejects other frameworks before contacting SP", async () => {
@@ -548,11 +568,13 @@ describe("Eval SP Harness", () => {
     ]);
     expect(exported.trajectoryComplete).toBe(true);
     await expect(new Response(await exported.readFile("/index.html")).text()).resolves.toBe("<h1>Hi</h1>");
-    const events: TrajectoryEvent[] = [];
+    const events: JsonValue[] = [];
     for await (const item of exported.trajectory) events.push(item);
-    expect(events.map(({ seq, type }) => [seq, type])).toEqual([[1, "user-message"], [2, "tool-call"], [3, "other"]]);
-    expect(events[0]).toMatchObject({ submissionId: "submission-1", content: { prompt: "Build" }, raw: { eventId: "event-1" } });
-    expect(events[1]!.content).toEqual({ event: "tool.started", toolName: "write", input: { path: "/index.html" } });
+    expect(events).toEqual([
+      event(1, "turn.admitted", { prompt: "Build" }),
+      event(2, "tool.started", { toolName: "write", input: { path: "/index.html" } }),
+      event(3, "context.compacted", { removedMessages: 3 }),
+    ]);
     const fileRequest = requests.find((request) => new URL(request.url).pathname.endsWith("/evidence/files"))!;
     expect(new URL(fileRequest.url).searchParams.get("path")).toBe("/index.html");
     expect(requests.every((request) => request.headers.get("X-Eval-Service-Token") === "secret")).toBe(true);
@@ -568,7 +590,8 @@ describe("Eval SP Harness", () => {
       manifestBytes,
       manifest: {
         artifacts: [{ path: "/site/index.html", size: 11, mediaType: "text/html", sha256: sha("<h1>Hi</h1>") }],
-        trajectory: { sha256: sha("{}\n") },
+        subjectInputs: [],
+        trajectory: { parts: [{ sha256: sha("{}\n"), size: 3, events: 1 }] },
       },
       readBlob: async (hash: string) => new Response(content[hash]).body!,
     } as unknown as EvidenceBundleReader;
@@ -583,12 +606,17 @@ describe("Eval SP Harness", () => {
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
     await harness.importEvidence({ handle: evaluator, idempotencyKey: "evidence:x:evaluation-1", evidence, root: "/evidence" });
 
-    expect(requests.map((request) => [request.method, new URL(request.url).pathname,
-      new URL(request.url).searchParams.get("path"), request.headers.get("X-Eval-Content-Sha256")])).toEqual([
+    const writes = requests.map((request) => [request.method, new URL(request.url).pathname,
+      new URL(request.url).searchParams.get("path"), request.headers.get("X-Eval-Content-Sha256")]);
+    expect(writes).toHaveLength(3);
+    // Evidence files upload concurrently; only the manifest must follow every file.
+    expect(writes.slice(0, -1)).toEqual(expect.arrayContaining([
       ["PUT", `/internal/v1/eval-harness/users/${OWNER}/chats/${EVALUATOR_CHAT}/evidence/files`, "/artifacts/site/index.html", sha("<h1>Hi</h1>")],
-      ["PUT", `/internal/v1/eval-harness/users/${OWNER}/chats/${EVALUATOR_CHAT}/evidence/files`, "/trajectory.jsonl", sha("{}\n")],
+      ["PUT", `/internal/v1/eval-harness/users/${OWNER}/chats/${EVALUATOR_CHAT}/evidence/files`, "/trajectory/events-000001.jsonl", sha("{}\n")],
+    ]));
+    expect(writes.at(-1)).toEqual(
       ["PUT", `/internal/v1/eval-harness/users/${OWNER}/chats/${EVALUATOR_CHAT}/evidence/files`, "/manifest.json", sha('{"manifest":true}')],
-    ]);
+    );
     await expect(harness.importEvidence({ handle: subject, idempotencyKey: "x", evidence, root: "/evidence" }))
       .rejects.toMatchObject({ name: "SpHarnessError", retryable: false });
   });
@@ -596,10 +624,11 @@ describe("Eval SP Harness", () => {
   it("treats a rejected evidence write as retryable only for transient SP statuses", async () => {
     const evidence = {
       ref: { evidenceId: `sha256:${"a".repeat(64)}`, manifestSha256: "b".repeat(64), exportedAt: "x" },
-      manifestBytes: new Uint8Array(),
-      manifest: { artifacts: [], trajectory: { sha256: "c".repeat(64) } },
+      manifestBytes: new TextEncoder().encode("manifest"),
+      manifest: { artifacts: [], subjectInputs: [], trajectory: { parts: [] } },
       readBlob: async () => new Response("").body!,
     } as unknown as EvidenceBundleReader;
+    Object.assign(evidence.ref, { manifestSha256: createHash("sha256").update(evidence.manifestBytes).digest("hex") });
     for (const [status, retryable] of [[503, true], [409, false]] as const) {
       const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
         fetch: queuedFetch(new Response("no", { status })).fetch });

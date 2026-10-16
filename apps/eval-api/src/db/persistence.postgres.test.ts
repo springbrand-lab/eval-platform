@@ -1,5 +1,5 @@
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
-import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError } from "@eval-platform/eval-dataset";
+import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError, DatasetInputError } from "@eval-platform/eval-dataset";
 import {
   RuntimeEntityNotFoundError,
   RuntimeInputError,
@@ -88,6 +88,41 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
   }
 
   describe("Dataset catalog", () => {
+    it("creates and attaches one Data atomically, rejecting foreign, deleted and invalid Prompt targets", async () => {
+      const { datasetService } = stores();
+      const target = await datasetService.createDataset({ name: "tasks" });
+      const created = await datasetService.createData({ userPrompt: "task", custom: { retained: true } }, { datasetId: target.datasetId });
+      expect(await datasetService.listData(target.datasetId)).toEqual([created]);
+      const foreign = await stores("user-B").datasetService.createDataset({ name: "foreign" });
+      const deleted = await datasetService.createDataset({ name: "deleted" });
+      await datasetService.deleteDataset(deleted.datasetId);
+      for (const datasetId of [foreign.datasetId, deleted.datasetId]) {
+        await expect(datasetService.createData({ userPrompt: "rejected" }, { datasetId }))
+          .rejects.toBeInstanceOf(DatasetEntityNotFoundError);
+      }
+      const prompt = await datasetService.importPromptDataset({
+        name: "Prompt", description: "description", format: "jsonl",
+        content: JSON.stringify({ name: "sample", description: "description", userPrompt: "execute", evalPrompt: "judge" }),
+      });
+      await expect(datasetService.createData({ userPrompt: "missing fields" }, { datasetId: prompt.dataset.datasetId }))
+        .rejects.toBeInstanceOf(DatasetInputError);
+      expect(await datasetService.listData()).toHaveLength(2);
+    });
+
+    it("rolls back the Data insert when its Dataset membership cannot commit", async () => {
+      const { datasetService } = stores();
+      const target = await datasetService.createDataset({ name: "tasks" });
+      // Fail the second write after Data was inserted, rather than only testing pre-write validation.
+      await database.db.execute(sql`ALTER TABLE eval_dataset_data ADD CONSTRAINT test_membership_failure CHECK (false)`);
+      try {
+        await expect(datasetService.createData({ userPrompt: "task" }, { datasetId: target.datasetId })).rejects.toThrow();
+        expect(await datasetService.listData()).toEqual([]);
+        expect(await datasetService.listData(target.datasetId)).toEqual([]);
+      } finally {
+        await database.db.execute(sql`ALTER TABLE eval_dataset_data DROP CONSTRAINT test_membership_failure`);
+      }
+    });
+
     it("shares Data within one user and rejects cross-user Dataset and Data access", async () => {
       const { datasetService } = stores();
       const other = stores("user-B").datasetService;
@@ -137,10 +172,17 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
         content: '{"name":"First","description":"Case one","userPrompt":"Start","evalPrompt":"Judge"}',
       });
       const row = imported.data[0]!;
-      await expect(datasetService.updateDataset(imported.dataset.datasetId, { name: "Renamed" })).rejects.toThrow();
-      await expect(datasetService.updateData(row.dataId, { name: "First", description: "Case one", userPrompt: "Start" })).rejects.toThrow();
+      await expect(datasetService.updateDataset(imported.dataset.datasetId, { name: "Renamed" })).rejects.toBeInstanceOf(DatasetInputError);
+      await expect(datasetService.updateData(row.dataId, { name: "First", description: "Case one", userPrompt: "Start" })).rejects.toBeInstanceOf(DatasetInputError);
+      const edited = { name: "Edited", description: "Edited description", userPrompt: "  New task\n", evalPrompt: "  New review\n", custom: [true, null, 3] };
+      await datasetService.updateData(row.dataId, edited);
+      expect(await datasetService.getData(row.dataId)).toEqual({ dataId: row.dataId, ...edited });
+      for (const field of ["name", "description", "userPrompt", "evalPrompt"] as const) {
+        await expect(datasetService.updateData(row.dataId, { ...edited, [field]: " " })).rejects.toBeInstanceOf(DatasetInputError);
+      }
+      expect(await datasetService.getData(row.dataId)).toEqual({ dataId: row.dataId, ...edited });
       const general = await datasetService.createData({ userPrompt: "Execution only" });
-      await expect(datasetService.attachData(imported.dataset.datasetId, [general.dataId])).rejects.toThrow();
+      await expect(datasetService.attachData(imported.dataset.datasetId, [general.dataId])).rejects.toBeInstanceOf(DatasetInputError);
       expect(await datasetService.listData(imported.dataset.datasetId)).toHaveLength(1);
     });
 

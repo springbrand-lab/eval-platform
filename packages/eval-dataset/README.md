@@ -1,6 +1,6 @@
 # @eval-platform/eval-dataset
 
-Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给评估 Agent。两者都是同样的 owner-scoped Bundle 材料引用，上传和绑定方式相同；评估输出 JSON Schema 由 Project 的评估计划引用，不存在 Data 内。
+Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给评估 Agent。两者都是同样形状的 owner-scoped 素材 Bundle（Material Bundle）素材引用列表，上传和绑定方式相同；评估输出 JSON Schema 由 Project 的评估计划引用，不存在 Data 内。
 
 ## 职责与文件
 
@@ -20,9 +20,9 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 
 - `userPrompt`：必填的当前用户任务，必须是非空白字符串，保留原始文本，不从其他字段推导。
 - `evalPrompt`：可选的本条 Data 的评估任务提示词；提供时必须是非空白字符串并原样保存。只执行不要求此字段；启动 pipeline 或 evaluation Run 时，涉及的每个 ProjectSample 的 Data 副本都必须提供，不能退回使用 Subject 的 `userPrompt`。
-- `initialSession`：可选的初始 Session 引用，必须包含 Eval API 资源目录生成的 `bundleId` 和 `sessionId`；上下文由 Eval 的独立 Bundle 上传接口保存为 JSON/JSONL，可为空，SP 仅在提供时导入目标 Chat。
-- `initialMaterials`：可选的 Subject 初始素材集合引用，必须包含资源目录生成的 `bundleId` 和 `materialId`，定位 Bundle 内的具体素材资源。
-- `evalInitialMaterials`：可选的 Evaluator 初始素材引用，结构与上传方式相同，与 Subject 素材分开。
+- `initialSession`：可选的初始 Session 引用，必须包含 Eval API 资源目录生成的上下文 Bundle（Session Bundle）`bundleId` 和 `sessionId`；上下文由 Eval 的上下文 Bundle 上传接口保存为 JSON/JSONL，可为空，SP 仅在提供时导入目标 Chat。
+- `initialMaterials`：可选的 Subject 初始素材引用数组，每项必须包含资源目录生成的素材 Bundle `bundleId` 和 `materialId`，定位该 Bundle 内的具体素材资源。数组非空、有序、同一字段内不重复，各项可来自不同素材 Bundle；完整规则见[包边界](../../docs/package-boundaries.md#eval-dataset)。
+- `evalInitialMaterials`：可选的 Evaluator 初始素材引用数组，规则与 `initialMaterials` 相同，与 Subject 素材分开。
 - 其他业务字段：可以直接放在 Data 上，例如 `requirements`、`expectedOutput`、`tags` 或 `json`，只要求值可无损表示为 JSON。创建、修改、持久化、导入导出和运行时输入准备都保留这些字段，不丢弃、不改名，也不强制放进某个额外容器。
 
 数值使用有限的 JavaScript Number；整数必须在 `Number.MIN_SAFE_INTEGER` 到 `Number.MAX_SAFE_INTEGER` 之间。超出范围的大整数业务 ID 必须由调用方以字符串提供，解析、创建、修改和导出都直接拒绝不安全整数，不自动截断、舍入或转换为字符串。YAML 整数先按 BigInt 解析，确认安全范围后才转为 Number。
@@ -40,7 +40,7 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 }
 ```
 
-`bundleId` 定位 Bundle，`sessionId` / `materialId` 定位其中的具体资源；引用中的 ID 都必须是 `platformIdSchema` 接受的 UUID，规范为小写，Dataset 核心不会生成、推导或补齐。不接受只有 Bundle 的引用、内嵌正文或生成器配置。生产用的 Eval API Store 还会校验资源属于当前用户且未删除，通用 Data 创建、修改、导入也不能绕过该检查；已被 Project 快照引用的资源在目录中软删除后仍可按 ID 读取。
+`bundleId` 定位 Bundle，`sessionId` / `materialId` 定位其中的具体资源；素材和 Session 分属两类互相独立的 Bundle，因此同一条 Data 的素材与 Session 引用使用不同的 `bundleId`（类型规则见 [Dataset upload](../../docs/eval-dataset-upload.md)）。引用中的 ID 都必须是 `platformIdSchema` 接受的 UUID，规范为小写，Dataset 核心不会生成、推导或补齐。不接受只有 Bundle 的引用、内嵌正文或生成器配置。生产用的 Eval API Store 还会校验资源属于当前用户且未删除，通用 Data 创建、修改、导入也不能绕过该检查；已被 Project 快照引用的资源在目录中软删除后仍可按 ID 读取。
 
 `sessionId` 标识已保存的初始化 Session 资源，不是此次运行的 Chat/Submission ID。Dataset 只校验和保存引用，不解析原生 Session 或维护消息格式。`userPrompt` 表示当前新任务；初始 Session 表示已有历史，不作为新任务再次发送。
 
@@ -51,12 +51,12 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 `createDatasetService(store)` 的公共方法：
 
 - `createDataset(input)`、`updateDataset(datasetId, input)`、`getDataset(datasetId)`、`listDatasets()`、`deleteDataset(datasetId)`。
-- `createData(input)`、`updateData(dataId, input)`、`getData(dataId)`、`listData(datasetId?)`、`deleteData(dataId)`。
+- `createData(input, options?)`、`updateData(dataId, input)`、`getData(dataId)`、`listData(datasetId?)`、`deleteData(dataId)`。可选 `options.datasetId` 让创建与加入目标 Dataset 在同一 Store 事务完成；目标必须自有且未软删除，Prompt Dataset 仍校验四个必选字段。任一步失败不留下孤立 Data。省略目标则独立创建 Data。
 - `attachData(datasetId, dataIds)`、`detachData(datasetId, dataIds)`。
 - `importDataset(source, format)`、`exportDataset(datasetId, format)`，format 必须明确为 `json` 或 `yaml`。
 - `importPromptDataset({name,description,format,content})`：Dataset 元数据独立于文件，JSON 文件是 Data 数组，JSONL 每行一条 Data；每条都要求 `name`、`description`、`userPrompt` 和 `evalPrompt`，一次原子导入。Store 记录 Prompt Dataset 的内部种类，后续修改和关联 Data 时继续校验这些必填字段。详见 [Dataset upload](../../docs/eval-dataset-upload.md)。
 
-Dataset/Data 的新实体 ID 使用原生 `crypto.randomUUID()`，与 SP 的 ID 生成方式一致；Bundle、Session 和素材 ID 由 Eval API 资源目录生成。平台 Dataset/Data ID 与资源引用 ID 都由同一个 `platformIdSchema` 按 SP 的 Zod UUID 校验与小写规范化模式处理：导入可接受大小写混合的 UUID，查重、Store 比较、目录读取、绑定删除检查、查询和返回值统一使用小写身份；Data 业务字段保持原值。创建实体时输入不允许调用方覆盖实体 ID。修改是全量替换可编辑字段，不是 PATCH；省略可选字段表示移除该字段。查询不存在的单个实体返回 null。数据库读写失败原样抛出，不能转成空结果。
+Dataset/Data 的新实体 ID 使用原生 `crypto.randomUUID()`，与 SP 的 ID 生成方式一致；两类 Bundle、Session 和素材 ID 由 Eval API 资源目录生成。平台 Dataset/Data ID 与资源引用 ID 都由同一个 `platformIdSchema` 按 SP 的 Zod UUID 校验与小写规范化模式处理：导入可接受大小写混合的 UUID，查重、Store 比较、目录读取、绑定删除检查、查询和返回值统一使用小写身份；Data 业务字段保持原值。创建实体时输入不允许调用方覆盖实体 ID。修改是全量替换可编辑字段，不是 PATCH；省略可选字段表示移除该字段。查询不存在的单个实体返回 null。数据库读写失败原样抛出，不能转成空结果。
 
 Data 可以关联到同一用户的多个 Dataset，关联不复制 Data。修改 Data 会影响该用户所有引用它的 Dataset，但不影响已有 Project。重复关联和重复解除关联不报错，批量关联必须全成功或全失败。Eval API 删除 Dataset/Data 时设置 `deleted_at`，不删除行；被活动 Dataset 引用的 Data 不能删除，Project 保存的是 Data 副本，不阻止删除。删除已不存在的实体是无操作。列表必须按实体 ID 稳定排序；查询不存在 Dataset 的 Data 列表应抛出 `DatasetEntityNotFoundError`，不能伪装成空集合。
 
@@ -76,10 +76,16 @@ JSON 和 YAML 使用同一个结构：
         "bundleId": "5b0f3c1e-8a52-4d6e-9f3a-2c7d1e4b6a90",
         "sessionId": "0e9d6c4b-3f1a-4b2e-8c7d-5a6f9e1b2c3d"
       },
-      "initialMaterials": {
-        "bundleId": "5b0f3c1e-8a52-4d6e-9f3a-2c7d1e4b6a90",
-        "materialId": "7c2a9e5f-1d3b-4a6c-8e0f-9b4d2c6a1e57"
-      }
+      "initialMaterials": [
+        {
+          "bundleId": "3a8d6f2b-9c41-4e7a-b5d0-6f1e2c9a4b83",
+          "materialId": "7c2a9e5f-1d3b-4a6c-8e0f-9b4d2c6a1e57"
+        },
+        {
+          "bundleId": "8f4e2a1c-6b3d-4c5e-9a7f-1d2b3c4e5f60",
+          "materialId": "2d6b8f1a-4c3e-4f7a-9b5d-0e1c2a3b4d5f"
+        }
+      ]
     }
   ]
 }

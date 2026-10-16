@@ -1,5 +1,5 @@
 import { z } from "@hono/zod-openapi";
-import { AGENT_FRAMEWORKS } from "@eval-platform/eval-contracts";
+import { AGENT_FRAMEWORKS, type RetryPolicy } from "@eval-platform/eval-contracts";
 import { platformIdSchema } from "@eval-platform/eval-dataset";
 import { catalogLabelSchema } from "../db/catalog-metadata.js";
 import { RUN_TARGET_IDS, SAMPLING_COUNT_MAX } from "../limits.js";
@@ -11,10 +11,16 @@ import { idempotencyKeySchema, unique } from "../routes/schemas.js";
 /** A request size limit: the Samplings one ProjectSample creates per execution. */
 const samplingCountSchema = z.number().int().positive().max(SAMPLING_COUNT_MAX);
 
+const retryPolicySchema = z.strictObject({
+  maxRestarts: z.number(),
+  initialBackoffMs: z.number(),
+  maxBackoffMs: z.number(),
+}) satisfies z.ZodType<RetryPolicy>;
+
 /** Shape only; concurrency, retry and timeout rules belong to Runtime's plan normalization. */
 const agentPolicy = {
   userAgentId: platformIdSchema,
-  retryPolicy: z.strictObject({ maxRestarts: z.number(), initialBackoffMs: z.number(), maxBackoffMs: z.number() }).exactOptional(),
+  retryPolicy: retryPolicySchema.exactOptional(),
   timeoutMs: z.number().exactOptional(),
 };
 

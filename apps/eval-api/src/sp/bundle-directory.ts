@@ -1,30 +1,17 @@
 import { link, lstat, mkdir, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, sep } from "node:path";
 import { parseStrictJson, platformIdSchema, type InitialMaterialsRef, type InitialSessionRef } from "@eval-platform/eval-dataset";
-import {
-  evalInitialContextSchema,
-  evalInitializationSchema,
-  evalMaterialFileSchema,
-  evalMaterialPath,
-  readEvalCanonicalContext,
-} from "@springbrand/eval-harness";
-import type { z } from "zod";
-import { createId } from "@eval-platform/eval-contracts";
-import { MATERIAL_FILE_BYTES, MATERIAL_TOTAL_BYTES } from "../limits.js";
+import { validateMaterialFiles, validateSessionContent, type MaterialFile, type SessionContent } from "./bundle-content.js";
 import { BundleFileError } from "./bundle-errors.js";
 
-export type MaterialFile = z.output<typeof evalMaterialFileSchema>;
-export type SessionContent = z.output<typeof evalInitialContextSchema>;
 type ResourceLocation = { readonly path: string; readonly ownerDirectory: string };
-
-/** SP's initialization contract owns the per-material file count and file shape. */
-export const materialFilesSchema = evalInitializationSchema.shape.initialMaterials.unwrap().shape.files.min(1);
 
 export interface BundleDirectory {
   resolveInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef): Promise<readonly MaterialFile[]>;
-  resolveInitialSession(ownerUserId: string, reference: InitialSessionRef): Promise<SessionContent | undefined>;
+  resolveInitialSession(ownerUserId: string, reference: InitialSessionRef): Promise<SessionContent>;
+  /** Validate and store one Material's files; resolves to their total decoded bytes. */
   uploadInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef,
-    files: readonly MaterialFile[]): Promise<void>;
+    files: readonly MaterialFile[]): Promise<number>;
   uploadInitialSession(ownerUserId: string, reference: InitialSessionRef,
     context: SessionContent): Promise<void>;
   removeInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef): Promise<void>;
@@ -59,11 +46,11 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
       throw unavailable(error);
     }
     if (!insideRoot(location.ownerDirectory, resolved)) {
-      throw new BundleFileError("invalid", "Initial Bundle resource escapes its owner directory");
+      throw new BundleFileError("corrupt", "Stored Bundle resource escapes its owner directory");
     }
     let bytes: Uint8Array;
     try {
-      if (!(await stat(resolved)).isFile()) throw new BundleFileError("invalid", "Initial Bundle resource is not a file");
+      if (!(await stat(resolved)).isFile()) throw new BundleFileError("corrupt", "Stored Bundle resource is not a file");
       bytes = await readFile(resolved);
     } catch (error) {
       if (error instanceof BundleFileError) throw error;
@@ -72,13 +59,14 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
     try {
       return parseStrictJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     } catch (cause) {
-      throw new BundleFileError("invalid", "Initial Bundle resource is not valid JSON", { cause });
+      throw new BundleFileError("corrupt", "Stored Bundle resource is not valid JSON", { cause });
     }
   }
 
+  /** Links a fully written sibling into place so a resource is never overwritten or seen half-written. */
   async function writeResource(location: ResourceLocation, value: unknown): Promise<void> {
-    const serialized = JSON.stringify(value);
     const parent = dirname(location.path);
+    const temporary = uploadPath(location);
     try {
       await ensureDirectory(location.ownerDirectory);
       await ensureDirectory(dirname(parent));
@@ -86,15 +74,9 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
       if (!insideRoot(location.ownerDirectory, await realpath(parent))) {
         throw new BundleFileError("invalid", "Initial Bundle resource escapes its owner directory");
       }
-      const temporary = join(parent, `.${createId()}.upload`);
-      await writeFile(temporary, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      await writeFile(temporary, JSON.stringify(value), { encoding: "utf8", flag: "wx", mode: 0o600 });
       try {
         await link(temporary, location.path);
-      } catch (error) {
-        if (!isExisting(error)) throw error;
-        if (JSON.stringify(await readResource(location)) !== serialized) {
-          throw new BundleFileError("conflict", "Initial Bundle resource already has different content");
-        }
       } finally {
         await unlink(temporary);
       }
@@ -105,16 +87,20 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
   }
 
   async function removeResource(location: ResourceLocation): Promise<void> {
-    try {
-      await unlink(location.path);
-    } catch (error) {
-      if (!isMissing(error)) throw unavailable(error);
+    for (const path of [location.path, uploadPath(location)]) {
+      try {
+        await unlink(path);
+      } catch (error) {
+        if (!isMissing(error)) throw unavailable(error);
+      }
     }
   }
 
   return {
-    async uploadInitialMaterials(ownerUserId, reference, files) {
-      await writeResource(materialsLocation(ownerUserId, reference), { files: validateMaterialFiles(files) });
+    async uploadInitialMaterials(ownerUserId, reference, input) {
+      const { files, byteSize } = validateMaterialFiles(input);
+      await writeResource(materialsLocation(ownerUserId, reference), { files });
+      return byteSize;
     },
     async uploadInitialSession(ownerUserId, reference, context) {
       await writeResource(sessionLocation(ownerUserId, reference), validateSessionContent(context));
@@ -129,15 +115,28 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
       const manifest = await readResource(materialsLocation(ownerUserId, reference));
       if (manifest === undefined) throw new BundleFileError("not-found", "Initial material is missing from its Bundle");
       if (!isRecord(manifest) || Object.keys(manifest).length !== 1 || !("files" in manifest)) {
-        throw new BundleFileError("invalid", "Initial material manifest must contain only files");
+        throw new BundleFileError("corrupt", "Stored material manifest must contain only files");
       }
-      return validateMaterialFiles(manifest.files);
+      return validateStoredContent(() => validateMaterialFiles(manifest.files).files);
     },
     async resolveInitialSession(ownerUserId, reference) {
       const context = await readResource(sessionLocation(ownerUserId, reference));
-      return context === undefined ? undefined : validateSessionContent(context);
+      if (context === undefined) throw new BundleFileError("not-found", "Initial context is missing from its Bundle");
+      return validateStoredContent(() => validateSessionContent(context));
     },
   };
+}
+
+/** The upload rule is shared, but an immutable stored value failing it is a server fault. */
+function validateStoredContent<T>(validate: () => T): T {
+  try {
+    return validate();
+  } catch (cause) {
+    if (cause instanceof BundleFileError && (cause.reason === "invalid" || cause.reason === "too-large")) {
+      throw new BundleFileError("corrupt", "Stored Bundle content is invalid. Contact the administrator", { cause });
+    }
+    throw cause;
+  }
 }
 
 async function ensureDirectory(path: string): Promise<void> {
@@ -147,40 +146,7 @@ async function ensureDirectory(path: string): Promise<void> {
     if (!isExisting(error)) throw error;
   }
   if (!(await lstat(path)).isDirectory()) {
-    throw new BundleFileError("invalid", "Initial Bundle directory must not be a symbolic link");
-  }
-}
-
-function validateMaterialFiles(value: unknown): readonly MaterialFile[] {
-  let files: readonly MaterialFile[];
-  try {
-    files = materialFilesSchema.parse(value);
-    for (const file of files) evalMaterialPath("", file.path);
-  } catch (cause) {
-    throw new BundleFileError("invalid", "Initial material files are invalid", { cause });
-  }
-  if (new Set(files.map((file) => file.path)).size !== files.length) {
-    throw new BundleFileError("invalid", "Initial material file paths must be unique");
-  }
-  let total = 0;
-  for (const file of files) {
-    const size = Buffer.byteLength(file.contentBase64, "base64");
-    total += size;
-    if (size > MATERIAL_FILE_BYTES || total > MATERIAL_TOTAL_BYTES) {
-      throw new BundleFileError("too-large", "Initial materials are too large");
-    }
-  }
-  return files;
-}
-
-/** SP imports the Session; its canonical-context reader is the single validity rule. */
-function validateSessionContent(value: unknown): SessionContent {
-  try {
-    const context = evalInitialContextSchema.parse(value);
-    readEvalCanonicalContext(context);
-    return context;
-  } catch (cause) {
-    throw new BundleFileError("invalid", "Initial Session content cannot be imported by SP", { cause });
+    throw new BundleFileError("invalid", "Initial Bundle directory path must be a directory, not a file or symbolic link");
   }
 }
 
@@ -188,6 +154,10 @@ function platformId(value: string, name: string): string {
   const parsed = platformIdSchema.safeParse(value);
   if (!parsed.success) throw new BundleFileError("invalid", `Invalid ${name} identity`, { cause: parsed.error });
   return parsed.data;
+}
+
+function uploadPath(location: ResourceLocation): string {
+  return `${location.path}.upload`;
 }
 
 function unavailable(cause: unknown): BundleFileError {

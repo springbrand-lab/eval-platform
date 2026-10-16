@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./http": "./src/http.ts",
-    "./http-errors": "./src/http-errors.ts"
+    "./http-errors": "./src/http-errors.ts",
+    "./web-gateway-errors": "./src/web-gateway-errors.ts"
   },
   "scripts": {
     "build": "tsc --noEmit",
@@ -14,6 +15,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@springbrand/contracts": "0.1.0-alpha.0",
     "@springbrand/http": "0.1.0-alpha.4",
     "hono": "4.12.33",
     "zod": "^4.4.3"

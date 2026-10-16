@@ -1,7 +1,7 @@
-import { ApiError } from "@springbrand/http/client";
 import { z } from "zod";
 import { httpOriginSchema } from "../config/env.js";
-import { createSpHttpClient, type Fetch } from "./http.js";
+import { createSpHttpClient, EvalSpApiError, EvalSpTransportError, throwSpClientError, type Fetch } from "./http.js";
+import { agentLibraryPath, type AgentLibraryRequest } from "./agent-library.js";
 
 export interface EvalSpUser {
   readonly id: string;
@@ -49,26 +49,6 @@ export interface EvalSpAgentConfig {
   readonly [field: string]: unknown;
 }
 
-/** Eval SP answered with an HTTP failure; `payload` is its error response body. */
-export class EvalSpApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly payload: unknown,
-    options?: ErrorOptions,
-  ) {
-    super(`Eval SP API returned ${status}`, options);
-    this.name = "EvalSpApiError";
-  }
-}
-
-/** Eval SP could not be reached or did not return a usable response. */
-export class EvalSpTransportError extends Error {
-  constructor(cause: unknown) {
-    super("Eval SP request failed", { cause });
-    this.name = "EvalSpTransportError";
-  }
-}
-
 export interface EvalSpClient {
   verifySession(token: string): Promise<EvalSpUser | null>;
   listAgentConfigs(token: string): Promise<readonly EvalSpAgentConfig[]>;
@@ -76,6 +56,7 @@ export interface EvalSpClient {
   createAgentConfig(token: string, input: unknown): Promise<EvalSpAgentConfig>;
   updateAgentConfig(token: string, id: string, input: unknown): Promise<EvalSpAgentConfig>;
   deleteAgentConfig(token: string, id: string): Promise<unknown>;
+  requestAgentLibrary(token: string, input: AgentLibraryRequest): Promise<unknown>;
   getCreditBalance(token: string): Promise<EvalSpCreditBalance>;
   /** `adminToken` is the Eval SP RESOURCE_ADMIN_TOKEN. */
   grantCredits(adminToken: string, input: EvalSpCreditGrantInput): Promise<EvalSpCreditGrant>;
@@ -118,25 +99,20 @@ export function createEvalSpClient(input: {
   const http = createSpHttpClient({ origin: input.origin, responseMode: "envelope", fetch: input.fetch });
   const writeOrigin = httpOriginSchema.parse(input.writeOrigin);
 
-  async function request(token: string, path: string, method: "GET" | "POST" | "PATCH" | "DELETE" = "GET",
-    body?: unknown): Promise<unknown> {
+  async function request(token: string, path: string, method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" = "GET",
+    body?: unknown, options: { signal?: AbortSignal; contentType?: string } = {}): Promise<unknown> {
     if (typeof token !== "string" || token.length === 0) throw new TypeError("Session token is required");
     try {
       const result = await http.request<unknown>(path, {
         method,
-        headers: { Authorization: `Bearer ${token}`, ...(method === "GET" ? {} : { Origin: writeOrigin }) },
+        headers: { Authorization: `Bearer ${token}`, ...(method === "GET" ? {} : { Origin: writeOrigin }),
+          ...(options.contentType === undefined ? {} : { "Content-Type": options.contentType }) },
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
         ...(body === undefined ? {} : { body }),
       });
       return result.data;
     } catch (error) {
-      if (!(error instanceof ApiError) || error.kind === "input" || error.kind === "runtime") throw error;
-      if (error.kind !== "http") throw new EvalSpTransportError(error);
-      throw new EvalSpApiError(error.status, {
-        code: error.code,
-        errMsg: error.message,
-        ...(error.requestId === undefined ? {} : { requestId: error.requestId }),
-        ...(error.errors === undefined ? {} : { errors: error.errors }),
-      }, { cause: error });
+      throwSpClientError(error);
     }
   }
 
@@ -163,6 +139,13 @@ export function createEvalSpClient(input: {
     },
     deleteAgentConfig(token, id) {
       return request(token, configPath(id), "DELETE");
+    },
+    requestAgentLibrary(token, input) {
+      const method = input.route.method === "get" ? "GET" : input.route.method === "post" ? "POST"
+        : input.route.method === "put" ? "PUT" : input.route.method === "patch" ? "PATCH" : "DELETE";
+      return request(token, agentLibraryPath(input), method, input.body, {
+        signal: input.signal, ...(input.route.body === "zip" ? { contentType: "application/zip" } : {}),
+      });
     },
     async getCreditBalance(token) {
       const { availableUnits, topupRemainingUnits, otherRemainingUnits } =

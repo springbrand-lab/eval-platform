@@ -92,21 +92,6 @@ export function MetricCard({ label, value, hint, tone, icon }: {
   );
 }
 
-/** A score on its Schema range; values outside the range are clamped for display only. */
-export function ScoreBar({ value, min = 0, max = 10 }: { value: number | null | undefined; min?: number; max?: number }) {
-  if (value === null || value === undefined) return <span className="text-text-faint">—</span>;
-  const ratio = max > min ? Math.min(1, Math.max(0, (value - min) / (max - min))) : 0;
-  const color = ratio >= 0.7 ? "bg-success" : ratio >= 0.4 ? "bg-warning" : "bg-danger";
-  return (
-    <span className="inline-flex items-center gap-2">
-      <span className="h-1.5 w-16 overflow-hidden rounded-full bg-surface-muted">
-        <span className={cn("block h-full rounded-full", color)} style={{ width: `${ratio * 100}%` }} />
-      </span>
-      <span className="font-semibold text-text-strong tabular">{Number.isInteger(value) ? value : value.toFixed(2)}</span>
-    </span>
-  );
-}
-
 /** Segmented control (Radix Tabs list); the caller renders the selected view. */
 export function Tabs<T extends string>({ tabs, value, onChange }: {
   tabs: readonly { value: T; label: ReactNode; count?: number }[]; value: T; onChange: (value: T) => void;

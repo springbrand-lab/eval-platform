@@ -45,8 +45,8 @@ export function runFinished(reader: RecordReader): SQL | undefined {
 }
 
 /** An active Run still has pending work or an unfinalized stop request. */
-export function runActive(reader: RecordReader): SQL | undefined {
-  return or(runUnfinished(reader), and(eq(runs.stopRequested, true), eq(runs.stopFinalized, false)));
+export function runActive(reader: RecordReader): SQL<boolean> {
+  return sql<boolean>`${or(runUnfinished(reader), and(eq(runs.stopRequested, true), eq(runs.stopFinalized, false)))}`;
 }
 
 /** The single definition of "this Project has a Run", shared by creation replay, admission and compensation. */

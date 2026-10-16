@@ -33,6 +33,20 @@ export interface ProjectSample {
   readonly data: Data;
 }
 
+/** The active Run identity and stop intent, projected from the public Run facts. */
+export type CurrentRun = Pick<RunSnapshot, "runId" | "stopRequested">;
+
+/** Latest admission sequence plus the active Run, derived by the host from its Run records. */
+export interface ProjectRunState {
+  readonly runSequence: number;
+  readonly currentRun: CurrentRun | null;
+}
+
+/** Shared read projection consumed by the API and Web, independent of persistence and HTTP. */
+export interface ProjectView extends ProjectPlan, ProjectRunState {
+  readonly projectSamples: readonly ProjectSample[];
+}
+
 /**
  * Read-only view of Project plans. The API process injects an owner-scoped reader; the Worker injects
  * an all-owner reader. Runtime never reads live Dataset/Data or editable Agent Configs.
@@ -114,7 +128,7 @@ export interface EvalRunResumerDependencies {
   readonly idFactory?: () => string;
   readonly now?: () => string;
   readonly sleep?: (milliseconds: number) => Promise<void>;
-  /** Checks Evaluator results and delivers their scores; without it results are not schema-checked. */
+  /** Optional score integration. Metrics interprets the raw output; Runtime only delivers scores. */
   readonly scores?: EvaluationScorePort;
   /** Receives failures that must not interrupt the Run; it should not throw. */
   readonly onError: (error: Error) => void;

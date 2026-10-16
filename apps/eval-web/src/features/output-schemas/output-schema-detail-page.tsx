@@ -71,7 +71,7 @@ export function OutputSchemaDetailPage({ outputSchemaId }: { outputSchemaId: str
         loading={remove.isPending}
         danger
         title="删除评分格式"
-        description="被 Project 评估计划引用的评分格式不能删除。"
+        description="删除后不再用于新选择，已有项目仍按原引用读取。"
         confirmLabel="删除"
       />
     </Page>

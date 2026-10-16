@@ -53,14 +53,15 @@ describe("evidence store", () => {
         { path: "/index.html", size: 11, mediaType: "text/html", sha256: await sha256Hex("<h1>Hi</h1>") },
         { path: "/copy.html", size: 11, mediaType: "text/html", sha256: await sha256Hex("<h1>Hi</h1>") },
       ],
-      trajectory: { format: "eval-trajectory/v1", events: 1, complete: true },
+      subjectInputs: [],
+      trajectory: { format: "sp-trajectory/v1", events: 1, complete: true },
       omitted: [],
     });
     expect(await sha256Hex(opened.manifestBytes)).toBe(ref.manifestSha256);
     await expect(text(await opened.readBlob(opened.manifest.artifacts[0]!.sha256))).resolves.toBe("<h1>Hi</h1>");
-    const trajectory = await text(await opened.readBlob(opened.manifest.trajectory.sha256));
+    const trajectory = await text(await opened.readBlob(opened.manifest.trajectory.parts[0]!.sha256));
     expect(trajectory.trimEnd().split("\n").map((line) => JSON.parse(line))).toEqual([
-      expect.objectContaining({ seq: 1, type: "user-message" }),
+      { ingestSeq: 1, event: { type: "turn.admitted", payload: { prompt: "Build" } } },
     ]);
 
     // The same export at the same moment is the same bundle.
@@ -86,5 +87,36 @@ describe("evidence store", () => {
       evidence: exportedEvidence({ samplingId: "s-3", files: { "/a.txt": "0123456789" } }),
       limits: { ...DEFAULT_EVIDENCE_LIMITS, maxFileBytes: 4 },
     })).rejects.toThrow(/too large/u);
+  });
+
+  it("splits raw trajectory on event boundaries and keeps original input bytes", async () => {
+    const blobs = createMemoryEvidenceBlobs();
+    const store = createEvidenceStore(blobs, () => NOW);
+    const events = Array.from({ length: 5 }, (_, index) => ({ ingestSeq: index + 1, event: { unknown: `原始-${index}`, payload: null } }));
+    const maxFileBytes = new TextEncoder().encode(`${JSON.stringify(events[0])}\n`).byteLength * 2;
+    const evidence = {
+      ...exportedEvidence({ samplingId: "split", files: {} }),
+      subjectInputs: [{ bundleId: "bundle", materialId: "material", path: "/brief.txt", mediaType: "text/plain", size: 8,
+        read: async () => new Response("original").body! }],
+      trajectory: (async function* () { yield* events; })(),
+    };
+    const opened = await store.open(await store.save({ evidence, limits: { ...DEFAULT_EVIDENCE_LIMITS, maxFileBytes } }));
+    expect(opened.manifest.trajectory.parts.map((part) => part.events)).toEqual([2, 2, 1]);
+    const saved: unknown[] = [];
+    for (const part of opened.manifest.trajectory.parts) {
+      expect(part.size).toBeLessThanOrEqual(maxFileBytes);
+      saved.push(...(await text(await opened.readBlob(part.sha256))).trimEnd().split("\n").map((line) => JSON.parse(line)));
+    }
+    expect(saved).toEqual(events);
+    expect(await text(await opened.readBlob(opened.manifest.subjectInputs[0]!.sha256))).toBe("original");
+  });
+
+  it("fails rather than truncating a trajectory event larger than one file", async () => {
+    const blobs = createMemoryEvidenceBlobs();
+    const evidence = { ...exportedEvidence({ samplingId: "large", files: {} }),
+      trajectory: (async function* () { yield { full: "x".repeat(100) }; })() };
+    await expect(createEvidenceStore(blobs).save({ evidence, limits: { ...DEFAULT_EVIDENCE_LIMITS, maxFileBytes: 50 } }))
+      .rejects.toThrow(/One trajectory event/u);
+    expect(blobs.manifests.size).toBe(0);
   });
 });

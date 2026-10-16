@@ -3,7 +3,9 @@ import {
   EVIDENCE_ARTIFACTS_ROOT,
   EVIDENCE_MANIFEST_PATH,
   EVIDENCE_ROOT,
-  EVIDENCE_TRAJECTORY_PATH,
+  EVIDENCE_TRAJECTORY_ROOT,
+  EVIDENCE_SUBJECT_INPUTS_ROOT,
+  EVALUATION_OUTPUT_SCHEMA_PATH,
 } from "@eval-platform/eval-contracts";
 import type {
   EvaluationAgentOutput,
@@ -27,7 +29,7 @@ import {
   runAgentLifecycle,
   type StageDependencies,
 } from "./agent-lifecycle.js";
-import { publishEvaluationScore, readEvaluationScore } from "./scores.js";
+import { publishEvaluationScore } from "./scores.js";
 
 export interface EvaluateSamplingInput {
   readonly context: RuntimeEvaluationContext;
@@ -40,7 +42,7 @@ export interface EvaluateSamplingInput {
 export function evaluatorPrompt(evalPrompt: string): string {
   return `${evalPrompt}
 
-The evidence to evaluate is in ${EVIDENCE_ROOT}/ of your own Workspace. ${EVIDENCE_MANIFEST_PATH} lists every Subject artifact with its size and SHA-256, and any file that was omitted and why. The artifacts are under ${EVIDENCE_ARTIFACTS_ROOT}/ at their original paths. ${EVIDENCE_TRAJECTORY_PATH} is the Subject's trajectory in eval-trajectory/v1, one JSON event per line; the manifest says whether it is complete. Finish by writing your result as one JSON object to ${EVALUATION_RESULT_PATH}, following the evaluation-output.schema.json in your initial materials.`;
+The evidence to evaluate is in ${EVIDENCE_ROOT}/ of your own Workspace. ${EVIDENCE_MANIFEST_PATH} lists the original Subject inputs, produced artifacts, ordered trajectory parts with sizes and SHA-256 hashes, and any omitted artifacts and why. The original inputs are under ${EVIDENCE_SUBJECT_INPUTS_ROOT}/<bundleId>/<materialId>/ and the produced artifacts are under ${EVIDENCE_ARTIFACTS_ROOT}/ at their original paths. Treat artifacts as the primary evidence and trajectory as supporting evidence. Read every numbered JSONL part under ${EVIDENCE_TRAJECTORY_ROOT}/ in order to see the complete raw Subject trajectory; the manifest declares its source format and completeness. Finish by writing one JSON value to ${EVALUATION_RESULT_PATH}, following the JSON Schema at ${EVALUATION_OUTPUT_SCHEMA_PATH}.`;
 }
 
 export function requireEvaluationPrompt(sample: ProjectSample): string {
@@ -88,10 +90,6 @@ export async function evaluateSampling(
     await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject Chat"));
     return { ...input.context, evaluation: currentEvaluation };
   }
-
-  const scoreOf = (output: EvaluationAgentOutput) => (
-    readEvaluationScore(output, input.evaluationOutputSchema, dependencies.scores)
-  );
 
   try {
     const evalPrompt = requireEvaluationPrompt(sample);
@@ -188,15 +186,20 @@ export async function evaluateSampling(
     });
 
     // The raw result file stays the record of truth (Metrics validates it); only a valid score is synced.
-    const scored = scoreOf(result.output);
     await persistEvaluation({
       ...currentEvaluation,
       evaluator: agentConfig,
       status: { status: "succeeded" },
-      output: "score" in scored ? { ...result.output, ...scored } : result.output,
+      output: result.output,
     });
     const publish = dependencies.scores?.publish?.bind(dependencies.scores);
-    if (publish && "score" in scored) {
+    let scored: ReturnType<NonNullable<typeof dependencies.scores>["read"]>;
+    try {
+      scored = publish ? dependencies.scores!.read(input.evaluationOutputSchema, currentEvaluation) : undefined;
+    } catch (cause) {
+      reportError(dependencies.onError, new Error(`Evaluation ${currentEvaluation.evaluationId} score could not be read`, { cause }));
+    }
+    if (publish && scored) {
       const scoreSync = await publishEvaluationScore(publish, {
         evaluationId: currentEvaluation.evaluationId,
         samplingId: sampling.samplingId,

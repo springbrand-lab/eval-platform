@@ -90,7 +90,7 @@ Agent Config 在 Eval 中通过 `/api/agent-configs` 增删改查，Eval SP 只�
 
 ### 2.4 ProjectSample 是 Project 自己的输入
 
-ProjectSample 是 Project 内固定的一条测试输入：`{ projectSampleId, projectId, dataId, datasetIds, samplingCount, data }`。`dataId` 只用于展示和 Dataset 分组；`datasetIds` 是包含该 Data 的全部绑定 Dataset（按绑定顺序）；`data` 是创建时的完整 Data 副本，其中的 Material/Session 引用按 ID 读取。
+ProjectSample 是 Project 内固定的一条测试输入，结构见[包边界](package-boundaries.md#eval-runtime)。`dataId` 只用于展示和 Dataset 分组；`data` 中的 Material/Session 引用按 ID 读取。
 
 同一个 Data 被多个所选 Dataset 绑定时，Project 内只生成一个 ProjectSample，Sampling 只执行一份；它出现在每个所属 Dataset 视图中，Project 总计按 Sampling/Evaluation 去重。来源 Dataset/Data 之后被改名、改内容、解除关联或软删除，不改变 ProjectSample。
 
@@ -118,13 +118,14 @@ ProjectSample 是 Project 内固定的一条测试输入：`{ projectSampleId, p
 
 请求体顶层的 `idempotencyKey` 在用户内唯一，首个 Run 使用同一个 key；Project 保存 key 和校验后请求体（不含 key）的指纹。克隆副本之前先按 key 查找：
 
-- 同一请求体重放原 `{project, run}`，`run` 是以创建 key 准入的首个 Run（之后有别的 Run 也返回它）；若首个 Run 从未准入，重放只在 Project 还没有任何 Run 时补交（在准入的 Project 行锁下判定），否则返回 `run: null`；
+- 同一请求体重放原 `{project, run}`，`run` 是以创建 key 准入的首个 Run 的 handle（之后有别的 Run 也返回它），其 `samplingIds` 只列出该 Run 仍为当前的成员 Sampling，被后续 Run 替换的不再出现；若首个 Run 从未准入，重放只在 Project 还没有任何 Run 时补交（在准入的 Project 行锁下判定），否则返回 `run: null`；
 - 不同请求体返回冲突；
 - key 对应的 Project 已软删除时，无论请求体都返回 not found，不会复活；
 - 并发的相同请求只有一个创建事务提交，落败者删除自己创建的副本后重放胜者；
+- 创建者或重放者准入首个 Run 时，若 Project 行已不在（胜者已补偿或用户已软删除）或创建 key 的 Run 已被准入并被后续 Run 取代，就重新按 key 查找：返回该创建自己的首个 Run、软删除时返回 not found、key 空闲时重新创建；整个创建在有限次数内循环，用尽后返回冲突；
 - 重放请求从不补偿：它的首个 Run 准入失败只返回错误，Project 留给下一次重放。
 
-补偿只由提交了该 Project 的创建请求执行，规则只有一条：只移除不可用或不需要的 Project。第 3 步之前任何失败都删除已建副本；首个 Run 准入失败时，未软删除且仍没有任何 Run 的 Project 硬删除全部行并删除副本，但 `plan-changed`（评估计划替换先落地，首个 Run 在有限次数内重新预览提交，用尽后返回冲突）和 `creation-superseded`（已有 Run）不补偿，用户已软删除的 Project 及其副本行也原样保留。补偿删除 Project 后，同一 key 会创建新的 Project；保留下来、没有 Run 的 Project 由同一 key 的重放补交首个 Run。错误码见 [Eval HTTP 控制面](eval-http-api.md#projects)。
+补偿只由提交了该 Project 的创建请求执行，规则只有一条：只移除不可用或不需要的 Project。第 3 步之前任何失败都删除已建副本；首个 Run 准入失败时，未软删除且仍没有任何 Run 的 Project 硬删除全部行并删除副本，但 `plan-changed`（评估计划替换先落地，首个 Run 在有限次数内重新预览提交，用尽后返回冲突）不补偿，Project 已有别的 Run 时不算失败而返回 `run: null`，用户已软删除的 Project 及其副本行也原样保留。补偿删除 Project 后，同一 key 会创建新的 Project；保留下来、没有 Run 的 Project 由同一 key 的重放补交首个 Run。错误码见 [Eval HTTP 控制面](eval-http-api.md#projects)。
 
 ### 3.2 评估计划补填与锁定
 
@@ -137,22 +138,11 @@ ProjectSample 是 Project 内固定的一条测试输入：`{ projectSampleId, p
 1. `preview({projectId, operation, selector})`：选择器是 `all`、`datasetIds`、`projectSampleIds`、`samplingIds` 的组合，在 Project 快照内展开为固定 `targets: {projectSampleIds, samplingIds}`，并返回将替换/新建的 Sampling 数、评估数和计划摘要；
 2. `submit({idempotencyKey, projectId, operation, selector, targets})`：原样带回 preview 的 `targets`，Runtime 只校验、不重新展开；重试沿用同一 `targets` 和 key。
 
-请求不携带任何配置 ID 或实时 Dataset/Data 内容；Sampling 次数取各 ProjectSample 的 `samplingCount`，Agent、并发与重试全部来自 Project 计划。展开规则：
-
-- `all` 和 Dataset 按绑定顺序和成员顺序展开为 ProjectSample；
-- execution/pipeline：目标 ProjectSample 替换其当前全部 Sampling，按 `samplingCount` 新建（从未运行过的同样新建）；目标 Sampling 一对一替换，其 ProjectSample 已被整条选中时被吸收；
-- evaluation：`targets.projectSampleIds` 为空；ProjectSample 展开为其当前执行成功的 Sampling（其他状态静默过滤），显式 Sampling 必须执行成功，否则拒绝；
-- 结果去重、顺序稳定，展开为空时拒绝。
+请求不携带任何配置 ID 或实时 Dataset/Data 内容；Sampling 次数取各 ProjectSample 的 `samplingCount`，Agent、并发与重试全部来自 Project 计划。展开与替换规则见[架构方案](architecture.md#run-准入与独立评估)。
 
 ### 3.4 结果替换规则
 
-| 操作 | 选中旧执行 | 选中旧评估 | 未选中执行 | 未选中评估 |
-| --- | --- | --- | --- | --- |
-| 仅执行 | 删除旧 Sampling，创建新的 Sampling | 随旧 Sampling 删除；新 Sampling 没有评估 | 原样保留 | 原样保留 |
-| 执行并评估 | 删除旧 Sampling，创建新的 Sampling；成功后各自评估 | 随旧 Sampling 删除 | 原样保留 | 原样保留 |
-| 仅评估 | **完全保留 Sampling、Chat、Attempt、产物、轨迹和资源** | 删除选中 Sampling 的当前 EvaluationRecord，新建评估 | 原样保留 | 原样保留 |
-
-全 Project 重跑就是选中全部目标。替换在 Run 准入事务内完成；准入失败时旧结果不变；新 Run 停止后不恢复已完成的替换。
+各操作对选中与未选中执行、评估的处理见[架构方案](architecture.md#run-准入与独立评估)；仅评估完全保留 Subject 的执行事实。
 
 ### 3.5 幂等键
 
@@ -219,7 +209,7 @@ Runtime 只用 Project 计划中冻结副本的 `AgentConfigRef` 调用 Eval SP�
 - **pipeline**：先执行新 Sampling；每条执行成功的 Sampling 单独进入评估。失败或取消的 Subject 不提交 Evaluator，其 EvaluationRecord 取消；一个 Subject 失败不阻塞其他成功 Sampling 的评估。
 - **evaluation**：只创建新的 EvaluationRecord，复用选中 Sampling 的 ProjectSample、Subject Chat、产物和轨迹；Subject 的 Attempt、资源、产物、轨迹和状态不被改动。Evaluator 只读取固定 ProjectSample 的 `evalPrompt`、`evalInitialMaterials`、评估输出 Schema 和 Subject 证据。
 
-评估输出 Schema 由 `getEvaluationOutputSchema` 读取，作为 `evaluation-output.schema.json` 写入每个 Evaluator 的初始化素材根目录；Evaluator 输出原样保存，Runtime 不解析、不校验。
+评估输出 Schema 由 `getEvaluationOutputSchema` 读取，随初始化写入每个 Evaluator 的固定路径 `/evaluations/<evaluationId>/evaluation-output.schema.json`（见 [SP Harness 协议](eval-sp-harness-protocol.md#initialization)）；Evaluator 输出原样保存，Runtime 不解析、不校验。
 
 ### 4.5 恢复、重试与证据
 
@@ -288,25 +278,26 @@ Sampling 明细把 Subject 和每个当前 Evaluator 分开为 `AgentMetricView`
 
 ### 5.5 JSON Schema 评估结果
 
-EvaluationRecord 只保存 Evaluator 原始输出（`structuredOutput` 的文件路径、原始文本和可选 hash）。Schema 校验和数值抽取在 `eval-metrics` 读取时完成：
+EvaluationRecord 只保存 Evaluator 原始输出（`structuredOutput` 的文件路径、原始文本和可选 hash）。Schema 校验和输出字段抽取在 `eval-metrics` 读取时完成：
 
 - `content` 严格解析（拒绝重复键），再按评估计划锁定的 Schema 用 draft 2020-12 校验；结果为 valid、invalid 或 unavailable，并给出原因和校验错误；
 - Schema 属于评估计划，首个带评估的 Run 准入后锁定，同一 Project 的全部 EvaluationRecord 使用同一版本；
-- 没有评估计划时数值结果为 unavailable，执行指标照常展示。
+- 没有评估计划时输出字段结果为 unavailable，执行指标照常展示。
 
-数值提取规则：
+输出字段规则（完整定义见 [eval-metrics README](../packages/eval-metrics/README.md)）：
 
-- 只从成功评估的有效输出中提取 Schema 声明为 `number`/`integer` 的字段；
+- 只从成功评估的有效输出中提取 Schema 声明为 `number`/`integer`、`boolean` 或 `enum`/`const` 的字段，枚举数组即元素路径上的 enum；自由文本字符串和对象不汇总；
 - 解析本地 `$ref`；`oneOf`/`anyOf`/`if` 只走实际通过校验的分支，`allOf` 全部生效；
 - 字段路径为 JSON Pointer，数组下标统一为 `*`，同时保留实际实例路径；
-- 字符串数字、布尔值和未声明字段不转换；NaN、Infinity、超出安全整数范围使整份输出无效；
-- 评估失败、缺字段、校验失败不按 0 参与。
+- 字符串数字和未声明字段不转换；NaN、Infinity、超出安全整数范围使整份输出无效；
+- Schema 允许 null 时 null 由独立的 nullCount 计数，不进入分布与数值统计，不算 false 或任何枚举值，也不同于缺失；
+- 评估失败、缺字段、校验失败不按 0 或 false 参与。
 
-每个数值路径输出 observationCount、contributingEvaluationCount、missingEvaluationCount（附缺失原因）、total/min/max/mean/median 与 coverage。数组字段一条记录可产生多个观测，因此同时展示观测数和贡献记录数。
+Schema 编译为唯一的字段展示计划，保留声明来源、条件和根引用上下文。观察只来自实际命中的统计声明；展示定义的并集不能给观察补资格。每个字段路径输出 Schema 的 title（缺省为字段路径）、description、kinds、observationCount、contributingEvaluationCount、missingEvaluationCount（附缺失原因）、数值字段的 total/min/max/mean/variance/median、boolean/enum 分布条目（count、evaluations、share = count / observationCount）、声明允许 null 时的 nullCount 与 coverage。无观察为 unavailable，有观察但部分评估未贡献为 partial，全部评估贡献时才 complete。数组字段一条记录可产生多个观测，因此同时展示观测数和贡献记录数。
 
 ### 5.6 公共模型
 
-字段级定义是 `@eval-platform/eval-metrics` 的公共类型：`MetricSummary`、`AgentMetricView`、`ResourceStatistics`、`TrajectorySummary`、`ToolMetric`、`EvaluationOutputView`、`NumericOutputSummary`、`NumericObservationSummary`，以及四层视图 `ProjectOverview`、`DatasetOverview`、`SampleOverview`、`SamplingDetail`。各层视图都含数值汇总；只有 `SamplingDetail` 返回每条评估的原始文本、解析后的 JSON、校验结果、数值观察和轨迹引用。
+字段级定义是 `@eval-platform/eval-metrics` 的公共类型：`MetricSummary`、`AgentMetricView`、`ResourceStatistics`、`TrajectorySummary`、`ToolMetric`、`EvaluationOutputView`、`EvaluationOutputSummary`、`OutputFieldSummary`，以及四层视图 `ProjectOverview`、`DatasetOverview`、`SampleOverview`、`SamplingDetail`。各层视图都含输出字段汇总；只有 `SamplingDetail` 返回每条评估的原始文本、解析后的 JSON、校验结果、字段观察和轨迹引用。
 
 ### 5.7 只读观察
 
@@ -325,7 +316,7 @@ EvaluationRecord 只保存 Evaluator 原始输出（`structuredOutput` 的文件
 | eval-contracts | ProjectPlan、ExecutionPlan、EvaluationPlan、ProjectDatasetSnapshot、AgentConfigSnapshot、RunOperation/Selector/Targets、原始 `structuredOutput`、AgentObservationRef。 |
 | eval-dataset | 可编辑来源 Dataset/Data；不保存 Project 或结果。 |
 | eval-runtime | 计划校验与摘要、ProjectSample、目标展开、准入、三种 operation、停止、幂等、Worker 恢复、Chat/证据身份。 |
-| eval-metrics | 固定层级、资源与轨迹统计、Schema 校验与数值抽取、四层聚合和 coverage。 |
+| eval-metrics | 固定层级、资源与轨迹统计、Schema 校验与输出字段汇总、四层聚合和 coverage。 |
 | eval-api | Project 快照写入、冻结副本及补偿、评估计划保存、Run 事务、MetricsSource、观察入口、HTTP 错误语义。 |
 | eval-web | 创建、评估计划补填/修改（锁定前）、运行选择、停止、删除、四层 Metrics、只读观察展示；没有执行计划编辑页。 |
 | Eval SP | 公开 Chat/Context/Workspace/Trajectory 只读访问、Evaluator 原始结构化输出、服务端写权限隔离；Agent Config 沿用公开增删改查。 |
@@ -372,5 +363,10 @@ Metrics：
 13. 来源 Data、Material、Session、Schema 软删除后，已有 Project 仍可重跑和评估。
 14. 仅执行创建的 Project 不填评估计划也能运行；之后补填、修改评估计划，启动评估后评估计划变为只读；未填写时启动评估被拒绝。
 15. Cancel 创建不产生任何 Project、副本或 Run。
+16. Run 预览请求尚未返回时改变操作或范围，旧响应不再允许提交；提交结果未确认时，只能以相同请求体和幂等键重试，不能通过修改目标产生重复 Run。
 
-场景 11 的只读页面与服务端写入拒绝，以及场景 9、10 所依赖的 Evaluator 原始结构化输出，待 Eval SP 与 Eval Web 完成（见 [SP 接口需求](sp-eval-api-requirements.md)）。
+## 本次交付待办
+
+- [x] 聚合数值指标展示均值、总体方差、中位数、最小值、最大值。消耗、轮数、工具次数按单次 Agent，工具长度和调用耗时按单次调用，Schema 数值按字段观察值统计。五项都只统计有值记录，均值和总体方差的分母 N 为有值数量；缺失不进分母也不补零，真实零参与。无值时统计为 null，单个有值记录的方差为 0；偶数个有效值的中位数取中间两个的平均。四层从范围内原始观察重算，不用下层均值再次求均值；保留有效数量和完整性信息，Web 只展示结果。
+
+上述页面、原始输出与本地公开接口读取已实现；跨部署和真实浏览器验收仍需完成。发布依赖见 [SP 包发布与升级](sp-package-publishing-todo.md)，SP 服务端契约见 [SP 接口需求](sp-eval-api-requirements.md)。

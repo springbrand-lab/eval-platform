@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createEvalSpClient, EvalSpApiError, EvalSpTransportError } from "./client.js";
+import { createEvalSpClient } from "./client.js";
+import { EvalSpApiError, EvalSpTransportError } from "./http.js";
 
 const ok = (msg: unknown) => Response.json({ success: true, msg, errMsg: "", code: "" });
 const failure = (status: number, code: string) => Response.json({ code, errMsg: code }, { status });

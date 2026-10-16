@@ -64,11 +64,11 @@ ProjectSample 是 Project 自己的固定输入：来源 Data 的完整副本、
 
 ## Run 准入与独立评估
 
-**准入、幂等键与替换规则**（本节是唯一完整描述）：每次启动选择本次操作 `execution`、`pipeline` 或 `evaluation`；操作属于 Run，不写回 Project。创建 Project 时同一事务提交首个 Run，只能是 execution 或 pipeline；新 Project 没有成功 Sampling，不能以仅评估开始。
+**准入、幂等键与替换规则**（本节是唯一完整描述）：每次启动选择本次操作 `execution`、`pipeline` 或 `evaluation`；操作属于 Run，不写回 Project。创建 Project 时先提交 Project，再在独立事务中准入首个 Run，只能是 execution 或 pipeline；新 Project 没有成功 Sampling，不能以仅评估开始。首个 Run 准入失败时的补偿见 [Project 创建](eval-project-redesign.md#31-创建)。
 
 准入分两步，都由 `EvalRunAdmission` 完成：
 
-1. `preview({projectId, operation, selector})` 在 Project 快照内展开选择器（`all`、`datasetIds`、`projectSampleIds`、`samplingIds` 的组合），返回去重、顺序稳定的固定 `targets`、将替换/新建的 Sampling 数、将创建的评估数和计划摘要。`all`/Dataset 按 Dataset 绑定顺序和成员顺序展开为 ProjectSample。execution/pipeline 中，ProjectSample 目标替换其当前全部 Sampling 并按 `samplingCount` 新建（从未运行过的同样新建），Sampling 目标一对一替换，其 ProjectSample 已被整条选中时被吸收。evaluation 中，ProjectSample 展开为其当前执行成功的 Sampling（过滤其他状态），显式指定的 Sampling 必须执行成功。
+1. `preview({projectId, operation, selector})` 在 Project 快照内展开选择器（`all`、`datasetIds`、`projectSampleIds`、`samplingIds` 的组合），返回去重、顺序稳定的固定 `targets`（展开为空时拒绝）、将替换/新建的 Sampling 数、将创建的评估数和计划摘要。`all`/Dataset 按 Dataset 绑定顺序和成员顺序展开为 ProjectSample。execution/pipeline 中，ProjectSample 目标替换其当前全部 Sampling 并按 `samplingCount` 新建（从未运行过的同样新建），Sampling 目标一对一替换，其 ProjectSample 已被整条选中时被吸收。evaluation 中，ProjectSample 展开为其当前执行成功的 Sampling（过滤其他状态），显式指定的 Sampling 必须执行成功。
 2. `submit({idempotencyKey, projectId, operation, selector, targets})` 以 preview 返回的 `targets` 为准校验，不重新展开；重试沿用同一 `targets` 和 key。
 
 请求指纹覆盖 `projectId`、operation、selector、targets 和计划摘要（执行计划摘要，pipeline/evaluation 另含评估计划摘要）。`RuntimeStore.admitRun()` 在 Project 行锁下的一个事务内完成：拒绝缺失或软删除的 Project 和 source release 不符；同 key 同指纹重放原 Run（即使仍在运行），不同指纹或已被后续 Run 取代的 key（以 Project 内递增的 `sequence` 判定）返回冲突；Project 创建 key 只能准入 Project 的第一个 Run，Project 已有任何 Run 时返回 `creation-superseded`（创建重放据此返回 `run: null`）；新 key 遇到未完成 Run 返回 `RuntimeProjectBusyError`；复核计划摘要，pipeline/evaluation 要求评估计划已填写（否则 `evaluation-plan-required`）；复核被替换的 Sampling 仍等于目标的当前 Sampling（否则 `stale-targets`），evaluation 复核目标仍执行成功；然后按批删除与插入，首个带评估的 Run 锁定评估计划，并在同一事务内投递 Worker 任务。PostgreSQL 的 `(project_id, idempotency_key)` 唯一约束保证同一意图只创建一批；同一 Runtime 实例内相同 Project/key 的并发提交先在内存合并，但内存不是权威状态。
@@ -80,6 +80,8 @@ ProjectSample 是 Project 自己的固定输入：来源 Data 的完整副本、
 | evaluation | 完全保留 Sampling、Chat、Attempt、产物、轨迹和资源 | 删除选中 Sampling 的当前评估，新建 EvaluationRecord | 原样保留 |
 
 Project 只保留当前结果集合，它不等于最近 Run 的成员；全 Project 重跑就是选中全部目标。准入失败时旧结果不变；新 Run 停止后不恢复已完成的替换。Run 保存 operation、phases、selector、targets、`samplingIds`、`evaluationIds`、`planDigests`、Project 内递增的序号、source commit、请求身份和停止标记，不保存配置正文；Run 行从不删除，作为来源记录保留，其被后续 Run 替换的 Sampling/EvaluationRecord 从关联中移除；Run 状态从子记录推导，没有第二份可变状态。同一 Project 同时最多一个未结束 Run：任一 Sampling 或 EvaluationRecord 处于 `queued`、`starting`、`running` 或 `retrying`，或停止尚未收尾。Web 可以禁用启动按钮作反馈，但并发边界是 Store。HTTP 契约见 [Eval HTTP 控制面](eval-http-api.md)。
+
+**有意保留的语义**：每个 Sampling 只有一条当前 EvaluationRecord，重跑评估即替换，不保留多份评估或评估历史；评估计划在首个 pipeline/evaluation Run 锁定后不再变更，也不做版本化。调整评估标准或输出 Schema 需要新建 Project 并重新执行；评估者一致性、人工校准等评估可信度分析当前尚未提供，后续补充时也不改变上述模型。
 
 ## Run 调度与停止
 
@@ -106,12 +108,12 @@ Dataset ──> Data ──(创建 Project 时复制)──> ProjectSample
 
 - `Project` 属于用户并绑定 SP Git 分支；当前固定分支阶段仅能绑定已部署分支，Run 记录实际 commit。Project 删除是软删除，存在未完成 Run 或停止收尾时拒绝；
 - `Dataset` 属于一个 Eval SP 用户；同一用户的 Data 可在多个 Dataset 间复用，Dataset/Data 是可编辑的来源目录；
-- `Data.userPrompt` 是必填的当前任务，其余 JSON 业务字段自由提供并完整保留；`initialSession` 与 `initialMaterials` 都可选，引用内的 Bundle ID 和资源 ID 必须由外部提供；
+- `Data.userPrompt` 是必填的当前任务，其余 JSON 业务字段自由提供并完整保留；单个 `initialSession` 引用与 `initialMaterials`、`evalInitialMaterials` 两个有序素材引用数组都可选（规则见[包边界](package-boundaries.md#eval-dataset)），引用内的 Bundle ID 和资源 ID 必须由外部提供；
 - `initialSession` 只引用独立保存的初始化 Session，启动时由 Harness 复制到目标 DO 并交给所选框架加载、重建 Context；准备完成后发送原始 `userPrompt`；
-- `ProjectSample` 是 Project 内固定的一条测试输入，结构为 `{ projectSampleId, projectId, dataId, datasetIds, samplingCount, data: Data }`；`data` 是创建时的完整 Data 副本，Data 内任意同名业务字段完整保留，Sampling 不重复持久化 Data；
+- `ProjectSample` 是 Project 内固定的一条测试输入，结构见[包边界](package-boundaries.md#eval-runtime)；
 - `Sampling` 是一次独立运行，引用自己的 `projectSampleId`，拥有自己的 Subject Chat / Workspace；
 - `Run` 是一次提交的工作范围，只包含本次实际处理的 Sampling/EvaluationRecord；Project 当前结果集合不等于最近 Run 的成员；
-- Subject 执行成功后导出一份不可变、按内容寻址的证据包（产物 + `eval-trajectory/v1` 轨迹），`Sampling.evidence` 保存其引用；
+- Subject 执行成功后导出一份不可变、按内容寻址的证据包（产物 + `sp-trajectory/v1` 原始轨迹 轨迹），`Sampling.evidence` 保存其引用；
 - 评估使用普通 Agent：独立 Evaluation Chat / Session 和自己的 Space，不绑定 Subject；每次评估产生独立 `EvaluationRecord`，证据导入自己 Space 的 `/evidence/`，结果写到 `/output/result.json`。
 
 ## SP Harness 对齐
@@ -135,12 +137,13 @@ Subject Space ──exportEvidence（产物 + 轨迹）──→ 证据包（R2 
                                                    ↓ importEvidence
                                         Evaluator 自己的 Space
                                           /evidence/manifest.json
+                                          /evidence/subject-inputs/…
                                           /evidence/artifacts/…
-                                          /evidence/trajectory.jsonl
+                                          /evidence/trajectory/events-000001.jsonl, …
                                           /output/result.json ← 评估结果
 ```
 
-Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产物清单、逐个文件和 SP `trajectory_events` 映射成的统一轨迹，按 `DEFAULT_EVIDENCE_LIMITS`（单文件 25 MB、总量 500 MB、20,000 个文件、排除 `node_modules` 等目录）写入证据包，未纳入的文件记入 `omitted`。导出与执行阶段共用重试策略，始终失败时 Sampling 为 `failed` 且不可评估；失败的执行不导出证据包。评估准备时 `Harness.importEvidence` 以 `evidence:<evidenceId>:<evaluationId>` 为幂等键把证据包写入 Evaluator 自己的 Space，manifest 最后写入；同一 Sampling 的多次评估复用同一证据包。Eval 不绕过 SP 的公开边界操作 DO。
+Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产物清单、逐个文件和 SP 完整原始 `trajectory_events` 的有序分片，按 `DEFAULT_EVIDENCE_LIMITS`（单文件 25 MB、总量 500 MB、20,000 个文件、排除 `node_modules` 等目录）写入证据包，未纳入的文件记入 `omitted`。导出与执行阶段共用重试策略，始终失败时 Sampling 为 `failed` 且不可评估；失败的执行不导出证据包。评估准备时 `Harness.importEvidence` 以 `evidence:<evidenceId>:<evaluationId>` 为幂等键把证据包写入 Evaluator 自己的 Space，manifest 最后写入；同一 Sampling 的多次评估复用同一证据包。Eval 不绕过 SP 的公开边界操作 DO。
 
 ## 生命周期语义
 
@@ -155,12 +158,12 @@ Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产�
 - 推送丢失、连接断开或运行时恢复时，有限次调用 `getSubmission()` 做校准；
 - 网络、LLM、网站等临时故障先查询原 Submission，再决定是否重启同一个 Chat / Workspace；
 - 手动取消、鉴权失败、配置错误不自动重启；
-- 每次执行和评估都完整收集对应 Agent 的产物与轨迹；Subject 证据导出为不可变证据包后导入 Evaluator 自己的 Space，评估不读取 Subject Workspace；没有证据包的 Sampling（包括本次改造前的旧 Sampling）不能评估；结果评估以产物为主，轨迹作为补充证据；
-- Evaluator 输出中的 `structuredOutput` 是 Evaluator 写入自己 Space `/output/result.json` 的原始结果文件文本，Runtime 原样保存；`eval-metrics` 读取时按评估计划锁定的 Schema 校验并抽取数值。
+- 每次执行和评估都完整收集对应 Agent 的产物与轨迹；Subject 证据导出为不可变证据包后导入 Evaluator 自己的 Space，评估不读取 Subject Workspace；没有证据包的 Sampling不能评估；结果评估以产物为主，轨迹作为补充证据；
+- Evaluator 输出中的 `structuredOutput` 是 Evaluator 写入自己 Space `/output/result.json` 的原始结果文件文本，Runtime 原样保存；`eval-metrics` 读取时按评估计划锁定的 Schema 校验并抽取可统计字段。
 
 ## Metrics 与只读观察
 
-`eval-metrics` 从应用注入的一致事实快照（Project 计划、ProjectSample、当前 Sampling/EvaluationRecord、Run）聚合，层级固定为 Project → Dataset → ProjectSample → Sampling，来自 Project 快照而不是实时目录；未运行的 ProjectSample 照常出现，共享 ProjectSample 在 Project 汇总中按 Sampling/Evaluation 身份去重。Subject 与每个 Evaluator 分别给出 `AgentMetricView`（资源、Attempt、时长、轨迹）。轨迹指标来自 Attempt 已保存的 SP telemetry 事件：Turn 数、按工具的调用数/结果/输入与返回字节长度、非工具轮及经 `parentOperationId` 明确归属的 generation Token。评估结果按 Schema 声明的 number/integer 字段逐层汇总，没有评估计划时为 unavailable。
+`eval-metrics` 从应用注入的一致事实快照（Project 计划、ProjectSample、当前 Sampling/EvaluationRecord、Run）聚合，层级固定为 Project → Dataset → ProjectSample → Sampling，来自 Project 快照而不是实时目录；未运行的 ProjectSample 照常出现，共享 ProjectSample 在 Project 汇总中按 Sampling/Evaluation 身份去重。Subject 与每个 Evaluator 分别给出 `AgentMetricView`（资源、Attempt、时长、轨迹）。轨迹指标来自 Attempt 已保存的 SP telemetry 事件：Turn 数、按工具的调用数/结果/输入与返回字节长度、非工具轮及经 `parentOperationId` 明确归属的 generation Token。评估结果按 Schema 声明的 number/integer、boolean、enum（含枚举数组元素）字段逐层汇总：数值字段给出数值统计，boolean/enum 给出按声明顺序的非 null 分布条目；Schema 允许 null 时另给独立的 `nullCount`，不进入分布与数值统计、不算 false 或任何枚举值，也不同于缺失。规则见 [eval-metrics README](../packages/eval-metrics/README.md)。没有评估计划时为 unavailable。
 
 每个 Sampling 和 EvaluationRecord 在任何 Run 状态下都有只读观察入口：Eval API 校验 owner、Project 与当前 Sampling/Evaluation 身份后返回 `AgentObservationRef`（角色、Chat 所属用户、Chat ID、`not-started | available`），不向浏览器暴露可写 Chat URL。Context、Workspace 和 Trajectory 的读接口由 Eval SP 提供，交互式观察的只读权限由 SP 服务端执行。
 

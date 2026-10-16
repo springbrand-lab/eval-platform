@@ -1,4 +1,5 @@
 import { createEvalRunResumer } from "@eval-platform/eval-runtime";
+import { createEvaluationScoreReader } from "@eval-platform/eval-metrics";
 import { errorDiagnostics } from "@springbrand/http/server";
 import { Pool } from "pg";
 import type { Logger } from "pino";
@@ -6,7 +7,6 @@ import type { WorkerConfig } from "./config/worker.js";
 import { createEvalDb } from "./db/client.js";
 import { createPostgresWorkerProjectPlanReader } from "./db/project-plans.js";
 import { createLangfuseScorePublisher } from "./langfuse/scores.js";
-import { validateEvaluationResult } from "./project-output-schema.js";
 import { createPostgresWorkerRuntimeStore } from "./db/runtime.js";
 import { createRunQueue, openRunBoss } from "./run-worker-queue.js";
 import { openEvidenceStore } from "./evidence/store.js";
@@ -39,10 +39,10 @@ export async function startSpEvalRunWorkerProcess(config: WorkerConfig, logger: 
       }),
       store,
       evidence,
-      scores: {
-        validate: validateEvaluationResult,
-        ...(config.langfuse === undefined ? {} : { publish: createLangfuseScorePublisher({ config: config.langfuse }) }),
-      },
+      ...(config.langfuse === undefined ? {} : { scores: {
+        read: createEvaluationScoreReader(),
+        publish: createLangfuseScorePublisher({ config: config.langfuse }),
+      } }),
       onError: (error) => logger.error({ error: errorDiagnostics(error) }, "run_runtime_error"),
     });
     const worker = await startEvalRunWorker({

@@ -30,8 +30,17 @@ export async function type(input: Element | null | undefined, value: string): Pr
   if (!input) throw new Error("Input not found");
   await act(async () => {
     const element = input as HTMLInputElement;
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")!.set!;
     setter.call(element, value);
     element.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+export async function select(input: Element | null | undefined, value: string): Promise<void> {
+  if (!(input instanceof HTMLSelectElement)) throw new Error("Select not found");
+  await act(async () => {
+    input.value = value;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
   });
 }

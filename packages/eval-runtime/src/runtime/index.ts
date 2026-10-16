@@ -14,6 +14,9 @@ export type {
   EvalRunResumer,
   EvalRunResumerDependencies,
   ProjectPlanReader,
+  CurrentRun,
+  ProjectRunState,
+  ProjectView,
   ProjectSample,
   RunPreview,
   RunPreviewRequest,
@@ -47,7 +50,6 @@ export {
 export type { RetryController, RetryDecision, RetryOperation } from "./retry.js";
 export {
   publishEvaluationScore,
-  readEvaluationScore,
   syncRunScores,
   type EvaluationScore,
   type EvaluationScorePort,

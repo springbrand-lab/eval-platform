@@ -9,13 +9,13 @@ export interface WorkspaceTreeNode {
   readonly type: "file" | "directory" | "symlink";
   readonly mime?: string;
   readonly size?: number;
-  readonly updatedAt?: string;
+  readonly updatedAt?: number;
   readonly children?: readonly WorkspaceTreeNode[];
 }
 
 export interface TrajectoryEvent {
   readonly eventId: string;
-  readonly occurredAt: string;
+  readonly occurredAt: number;
   readonly type: string;
   readonly operationId?: string;
   readonly parentOperationId?: string;

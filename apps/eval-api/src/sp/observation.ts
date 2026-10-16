@@ -1,5 +1,6 @@
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
-import type { Fetch } from "./http.js";
+import { ApiError, type HttpClient, type HttpRequestOptions } from "@springbrand/http/client";
+import { createSpHttpClient, throwSpClientError, type Fetch } from "./http.js";
 
 /** One Eval SP Chat of the service account. */
 export interface ChatRef {
@@ -30,14 +31,6 @@ const TIMEOUT_MS = 30_000;
 /** Workspace files above this size are offered for download only by Eval SP itself, never through Eval. */
 export const OBSERVATION_FILE_BYTES = 10_000_000;
 
-function relay(status: number): HttpError {
-  if (status === 401 || status === 403) return new HttpError("EVAL_SP_FORBIDDEN");
-  if (status === 404) return new HttpError("EVAL_SP_NOT_FOUND");
-  if (status === 429) return new HttpError("REQUEST_RATE_LIMITED");
-  if (status >= 500) return new HttpError("EVAL_SP_UNAVAILABLE");
-  return new HttpError("EVAL_SP_REQUEST_FAILED");
-}
-
 export function createSpObservationClient(input: {
   readonly agentOrigin: string;
   readonly apiOrigin: string;
@@ -46,56 +39,39 @@ export function createSpObservationClient(input: {
   readonly sessionToken: string;
   readonly fetch?: Fetch;
 }): SpObservationClient {
-  const send = input.fetch ?? globalThis.fetch;
   const headers = { Authorization: `Bearer ${input.sessionToken}`, Origin: input.trustedOrigin };
+  const agent = createSpHttpClient({ origin: input.agentOrigin, responseMode: "json", timeoutMs: TIMEOUT_MS,
+    maxResponseBytes: OBSERVATION_FILE_BYTES, headers, fetch: input.fetch });
+  const api = createSpHttpClient({ origin: input.apiOrigin, responseMode: "envelope", timeoutMs: TIMEOUT_MS,
+    maxResponseBytes: OBSERVATION_FILE_BYTES, headers, fetch: input.fetch });
   const chatPath = (chat: ChatRef, suffix: string) =>
     `/agents/inbox/${encodeURIComponent(chat.ownerUserId)}/chat-sockets/${encodeURIComponent(chat.chatId)}/${suffix}`;
 
-  async function get(url: URL): Promise<Response> {
-    let response: Response;
+  async function get<T>(http: HttpClient, path: string, options?: HttpRequestOptions) {
     try {
-      response = await send(url, { headers, redirect: "error", signal: AbortSignal.timeout(TIMEOUT_MS) });
-    } catch (cause) {
-      throw new HttpError("EVAL_SP_UNAVAILABLE", undefined, { cause });
+      return await http.request<T>(path, options);
+    } catch (error) {
+      if (options?.responseMode === "blob" && error instanceof ApiError && error.code === "RESPONSE_TOO_LARGE") {
+        throw new HttpError("CATALOG_PAYLOAD_TOO_LARGE", "Workspace file is too large to preview", { cause: error });
+      }
+      throwSpClientError(error);
     }
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw relay(response.status);
-    }
-    return response;
   }
 
   return {
     async messages(chat) {
-      const url = new URL(chatPath(chat, "get-messages"), input.agentOrigin);
-      url.searchParams.set("view", "hydration");
-      return (await get(url)).json();
+      return (await get(agent, chatPath(chat, "get-messages"), { params: { view: "hydration" } })).data;
     },
     async tree(chat) {
-      return (await get(new URL(chatPath(chat, "workspace/tree"), input.agentOrigin))).json();
+      return (await get(agent, chatPath(chat, "workspace/tree"))).data;
     },
     async file(chat, path) {
-      const url = new URL(chatPath(chat, "workspace/content"), input.agentOrigin);
-      url.searchParams.set("path", path);
-      const response = await get(url);
-      const length = response.headers.get("content-length");
-      if (length !== null && Number(length) > OBSERVATION_FILE_BYTES) {
-        await response.body?.cancel();
-        throw new HttpError("CATALOG_PAYLOAD_TOO_LARGE", "Workspace file is too large to preview");
-      }
-      return {
-        body: response.body,
-        contentType: response.headers.get("content-type") ?? "application/octet-stream",
-        contentLength: length,
-      };
+      // The shared transport counts actual streamed bytes before any response is relayed to Web.
+      const { data } = await get<Blob>(agent, chatPath(chat, "workspace/content"), { params: { path }, responseMode: "blob" });
+      return { body: data.stream(), contentType: data.type || "application/octet-stream", contentLength: String(data.size) };
     },
     async trajectory(chat, query) {
-      const url = new URL(`/api/chats/${encodeURIComponent(chat.chatId)}/trajectory`, input.apiOrigin);
-      if (query.limit !== undefined) url.searchParams.set("limit", String(query.limit));
-      if (query.beforeSeq !== undefined) url.searchParams.set("beforeSeq", String(query.beforeSeq));
-      const envelope = await (await get(url)).json() as { success?: boolean; msg?: unknown };
-      if (envelope.success !== true) throw new HttpError("EVAL_SP_REQUEST_FAILED");
-      return envelope.msg;
+      return (await get(api, `/api/chats/${encodeURIComponent(chat.chatId)}/trajectory`, { params: { ...query } })).data;
     },
   };
 }

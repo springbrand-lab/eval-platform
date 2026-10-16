@@ -20,6 +20,13 @@ export function jsonBodyContent<T extends z.ZodType>(schema: T) {
   return { required: true, content: { "application/json": { schema } } } as const;
 }
 
+export function multipartBodyContent<T extends z.ZodType>(schema: T) {
+  return { required: true, content: { "multipart/form-data": { schema } } } as const;
+}
+
+/** One uploaded file field of a multipart body. */
+export const fileSchema = z.custom<File>((value) => value instanceof File).openapi({ type: "string", format: "binary" });
+
 export const errorResponses = {
   401: jsonContent(httpErrorSchema, "Eval SP session is missing or invalid"),
   403: jsonContent(httpErrorSchema, "Origin or Eval SP access is denied"),

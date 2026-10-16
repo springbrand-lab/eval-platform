@@ -110,7 +110,7 @@ export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
     onSuccess: async () => {
       toast.success("已删除测试集");
       await queryClient.invalidateQueries({ queryKey: datasetKeys.all });
-      void navigate({ to: "/datasets" });
+      void navigate({ to: "/datasets/prompts" });
     },
   });
   const exportAs = async (format: "json" | "yaml") => {
@@ -124,14 +124,14 @@ export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
       <PageHeader
         title={dataset.data?.name ?? "测试集"}
         description={dataset.data?.description}
-        crumbs={[{ label: "测试集", to: "/datasets" }]}
+        crumbs={[{ label: "数据集", to: "/datasets" }, { label: "Prompt 数据集", to: "/datasets/prompts" }]}
         actions={(
           <>
             <Button icon={<Pencil />} onClick={() => {
               setForm({ name: dataset.data?.name ?? "", description: dataset.data?.description ?? "" });
               setDialog("edit");
             }}>编辑</Button>
-            <Button variant="primary" icon={<Plus />} onClick={() => void navigate({ to: "/data/new", search: { datasetId } })}>新建用例</Button>
+            <Button variant="primary" icon={<Plus />} onClick={() => void navigate({ to: "/datasets/$datasetId/data/new", params: { datasetId } })}>新建用例</Button>
             <ActionMenu items={[
               { label: "导出 JSON", icon: <Download />, onSelect: () => void exportAs("json") },
               { label: "导出 YAML", icon: <Download />, onSelect: () => void exportAs("yaml") },
@@ -160,12 +160,14 @@ export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
             selectable
             selected={selected}
             onSelectedChange={setSelected}
-            searchText={(row) => `${dataTitle(row)} ${row.userPrompt} ${row.evalPrompt ?? ""}`}
+            searchText={(row) => `${dataTitle(row)} ${row.description ?? ""} ${row.userPrompt} ${row.evalPrompt ?? ""}`}
             onRowClick={(row) => void navigate({ to: "/data/$dataId", params: { dataId: row.dataId } })}
             empty={<EmptyState title="测试集还没有用例" />}
             columns={[
-              { key: "title", header: "用例", className: "min-w-40", cell: (row) => <span className="line-clamp-2 font-semibold text-text-strong">{dataTitle(row)}</span>, sortValue: dataTitle },
-              { key: "prompt", header: "userPrompt", cell: (row) => <span className="line-clamp-2 max-w-2xl text-text-muted">{row.userPrompt}</span> },
+              { key: "title", header: "名称", className: "min-w-40", cell: (row) => <span className="line-clamp-2 font-semibold text-text-strong">{dataTitle(row)}</span>, sortValue: dataTitle },
+              { key: "description", header: "描述", cell: (row) => <span className="line-clamp-2 max-w-sm text-text-muted">{typeof row.description === "string" ? row.description : "未填写"}</span> },
+              { key: "prompt", header: "启动 Prompt", cell: (row) => <span className="line-clamp-2 max-w-md text-text-muted">{row.userPrompt}</span> },
+              { key: "evalPrompt", header: "评估 Prompt", cell: (row) => <span className="line-clamp-2 max-w-md text-text-muted">{row.evalPrompt ?? "未填写"}</span> },
               { key: "resources", header: "", cell: (row) => <DataResourceBadges data={row} /> },
               { key: "id", header: "ID", cell: (row) => <CopyId value={row.dataId} /> },
             ]}

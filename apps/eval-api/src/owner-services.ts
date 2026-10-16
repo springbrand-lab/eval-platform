@@ -1,5 +1,5 @@
 import { createDatasetService } from "@eval-platform/eval-dataset";
-import { createMetrics } from "@eval-platform/eval-metrics";
+import { createMetrics, createEvaluationScoreReader } from "@eval-platform/eval-metrics";
 import { createEvalRunAdmission, syncRunScores, type EvaluationScore } from "@eval-platform/eval-runtime";
 import { createActiveOwnerAdmission } from "./active-owner-admission.js";
 import { createAgentConfigService } from "./agent-configs.js";
@@ -11,7 +11,7 @@ import { createOutputSchemaCatalog } from "./db/output-schemas.js";
 import { createPostgresProjectPlanReader } from "./db/project-plans.js";
 import { createPostgresProjectStore } from "./db/project-store.js";
 import type { EvalSpRelease } from "./db/release.js";
-import { createResourceCatalog } from "./db/resource-catalog.js";
+import { createBundleCatalogs } from "./db/resource-catalog.js";
 import { createPostgresProjectRunReader } from "./db/run-view.js";
 import { createPostgresProjectRunControl, createPostgresRuntimeStore } from "./db/runtime.js";
 import { createPostgresRuntimeQueries } from "./db/runtime-queries.js";
@@ -49,10 +49,15 @@ export function createOwnerServices({ db, sp, bundles, release, runQueue, publis
     const scores = publishScore === undefined ? undefined : {
       async syncRun(projectId: string, runId: string) {
         if (!await readRun(projectId, runId)) return null;
+        const plans = createPostgresProjectPlanReader(db, ownerUserId);
+        const schema = await plans.getEvaluationOutputSchema(projectId);
+        if (!schema) return null;
         return syncRunScores({
           store: createPostgresRuntimeStore(db, ownerUserId, release, runQueue),
           runId,
           publish: publishScore,
+          read: createEvaluationScoreReader(),
+          schema,
           now: () => new Date().toISOString(),
         });
       },
@@ -71,9 +76,9 @@ export function createOwnerServices({ db, sp, bundles, release, runQueue, publis
       },
       observations: createPostgresObservationReader(db, ownerUserId),
       metrics: createMetrics({ source: createPostgresMetricsSource(db, ownerUserId) }),
-      resources: createResourceCatalog(db, ownerUserId, bundles),
+      ...createBundleCatalogs(db, ownerUserId, bundles),
       outputSchemas,
-      initialResources: createInitialResourceApi(db, ownerUserId, bundles),
+      initialResources: createInitialResourceApi(db, ownerUserId),
       ...(scores === undefined ? {} : { scores }),
     };
     return { services, release: releaseAdmission };

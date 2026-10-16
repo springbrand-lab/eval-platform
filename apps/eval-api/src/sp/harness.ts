@@ -1,4 +1,4 @@
-import type { AgentFramework, EvaluationOutputSchema, TrajectoryEvent } from "@eval-platform/eval-contracts";
+import type { AgentFramework, JsonValue } from "@eval-platform/eval-contracts";
 import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import {
@@ -14,16 +14,20 @@ import {
   EVAL_EVIDENCE_FILE_MAX_BYTES,
   EVAL_EVIDENCE_SHA256_HEADER,
   EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX,
+  EVAL_EVIDENCE_PATHS,
   EVAL_HARNESS_PATH,
   EVAL_SERVICE_HEADER,
+  evalArtifactEvidencePath,
+  evalEvidencePath,
+  evalSubjectInputEvidencePath,
+  evalTrajectoryEvidencePath,
   type EvalInitialization,
 } from "@springbrand/eval-harness";
 import { ApiError } from "@springbrand/http/client";
 import WebSocket from "ws";
 import { sha256Hex } from "@eval-platform/eval-contracts";
 import { httpOriginSchema } from "../config/env.js";
-import { EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH } from "../project-output-schema.js";
-import type { MaterialFile, SessionContent } from "./bundle-directory.js";
+import type { MaterialFile, SessionContent } from "./bundle-content.js";
 import { SpHarnessError } from "./harness-error.js";
 import {
   agentHandle,
@@ -40,7 +44,6 @@ import {
   submission,
   submitRequest,
 } from "./harness-wire.js";
-import { normalizeSpTrajectoryEvent } from "./trajectory.js";
 import { createSpHttpClient, type Fetch } from "./http.js";
 import { observeTerminalSubmission, type OpenWebSocket } from "./submission-observer.js";
 
@@ -50,7 +53,6 @@ const REQUEST_TIMEOUT_MS = 60_000;
 const STOP_TIMEOUT_MS = 10_000;
 /** Resource snapshots carry every telemetry event of a Submission. */
 const RESPONSE_BYTES = 256 * 1024 * 1024;
-const OUTPUT_SCHEMA_BUNDLE_ID = "project-evaluation-output-schema";
 const EVIDENCE_IMPORT_CONCURRENCY = 4;
 
 export interface SpHarnessOptions {
@@ -67,7 +69,7 @@ export interface SpHarnessOptions {
   readonly resolveInitialSession?: (
     ownerUserId: string,
     reference: InitialSessionRef,
-  ) => Promise<SessionContent | undefined>;
+  ) => Promise<SessionContent>;
 }
 
 /** The SP Harness drives only SP Agents; any other framework is rejected before contacting SP. */
@@ -86,14 +88,6 @@ function harnessError(error: unknown): unknown {
     || (error.kind === "http" && transientStatus(error.status));
   return new SpHarnessError(error.kind === "http" ? error.message : `Eval SP request failed: ${error.code}`,
     transient, { ...(error.kind === "http" ? { status: error.status } : {}), cause: error });
-}
-
-function outputSchemaFile(schema: EvaluationOutputSchema): MaterialFile {
-  return {
-    path: EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH,
-    mediaType: "application/schema+json",
-    contentBase64: Buffer.from(`${JSON.stringify(schema, null, 2)}\n`, "utf8").toString("base64"),
-  };
 }
 
 export function createSpHarness(options: SpHarnessOptions): Harness {
@@ -201,32 +195,25 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       if ((input.handle.role === "evaluator") !== (input.evaluationOutputSchema !== undefined)) {
         throw new SpHarnessError("Evaluation output JSON Schema must be supplied only for an Evaluator", false);
       }
-      const session = input.data.initialSession;
-      const materials = input.data.initialMaterials;
+      const { initialSession: session, initialMaterials: materials } = input.data;
       const { resolveInitialMaterials, resolveInitialSession } = options;
       if (materials && !resolveInitialMaterials) {
         throw new SpHarnessError("Initial material bundle resolver is required for this Sample", false);
       }
-      const [files = [], context] = await Promise.all([
-        materials && resolveInitialMaterials?.(input.handle.ownerUserId, materials),
-        session && resolveInitialSession?.(input.handle.ownerUserId, session),
-      ]);
-      const schemaFile = input.evaluationOutputSchema === undefined
-        ? undefined : outputSchemaFile(input.evaluationOutputSchema);
-      if (schemaFile && files.some((file) => file.path === schemaFile.path)) {
-        throw new SpHarnessError("Evaluator materials cannot overwrite the Project JSON Schema file", false);
+      if (session && !resolveInitialSession) {
+        throw new SpHarnessError("Initial context bundle resolver is required for this Sample", false);
       }
-      const selectedMaterials = materials ?? (schemaFile && {
-        bundleId: OUTPUT_SCHEMA_BUNDLE_ID,
-        materialId: await sha256Hex(Buffer.from(schemaFile.contentBase64, "base64")),
-      });
+      const [files, context] = await Promise.all([
+        Promise.all((materials ?? []).map((material) => resolveInitialMaterials!(input.handle.ownerUserId, material))),
+        session && resolveInitialSession!(input.handle.ownerUserId, session),
+      ]);
       const body: EvalInitialization = {
         idempotencyKey: input.idempotencyKey,
-        data: materials || !selectedMaterials ? input.data : { ...input.data, initialMaterials: selectedMaterials },
+        data: input.data,
         ...(session ? { initialSession: { ...session, ...(context ? { context } : {}) } } : {}),
-        ...(selectedMaterials
-          ? { initialMaterials: { ...selectedMaterials, files: schemaFile ? [...files, schemaFile] : [...files] } }
-          : {}),
+        ...(materials ? { initialMaterials: materials.map((material, index) => ({ ...material, files: [...files[index]!] })) } : {}),
+        ...(input.evaluationOutputSchema === undefined
+          ? {} : { evaluationOutputSchema: { content: `${JSON.stringify(input.evaluationOutputSchema, null, 2)}\n` } }),
       };
       return dataBinding(await call("POST", `${handlePath(input.handle)}/initialization`, initializationRequest(body)));
     },
@@ -287,26 +274,46 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       const query = input.submissionId === undefined ? "" : `?${new URLSearchParams({ submissionId: input.submissionId })}`;
       return resourceSnapshot(await call("GET", `${operationPath("resources", input.handle, input.idempotencyKey)}${query}`));
     },
-    async exportEvidence({ handle, limits }) {
+    async exportEvidence({ handle, limits, initialMaterials }) {
       requireSp(handle.framework);
+      if (handle.role !== "subject") throw new SpHarnessError("Only a Subject exports evidence", false);
+      if (initialMaterials?.length && !options.resolveInitialMaterials) {
+        throw new SpHarnessError("Initial material bundle resolver is required for Subject input evidence", false);
+      }
+      const subjectInputs = (await Promise.all((initialMaterials ?? []).map(async (reference) => {
+        const files = await options.resolveInitialMaterials!(handle.ownerUserId, reference);
+        return files.map(({ path, mediaType, contentBase64 }) => {
+          const bytes = new Uint8Array(Buffer.from(contentBase64, "base64"));
+          return { ...reference, path, mediaType, size: bytes.byteLength, read: async () => new Response(bytes).body! };
+        });
+      }))).flat();
       const path = `${handlePath(handle)}/evidence`;
       const listed = evidenceArtifacts(await call("GET", `${path}/artifacts`));
       // One SP file crosses one Durable Object RPC, so SP's own file limit bounds the plan's.
       const { artifacts, omitted } = applyEvidenceLimits(listed, {
         ...limits, maxFileBytes: Math.min(limits.maxFileBytes, EVAL_EVIDENCE_FILE_MAX_BYTES),
       });
-      async function* trajectory(): AsyncGenerator<TrajectoryEvent> {
+      async function* trajectory(): AsyncGenerator<JsonValue> {
         let afterSeq: number | null = 0;
         while (afterSeq !== null) {
           const query = new URLSearchParams({ afterSeq: String(afterSeq), limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX) });
           const page = evidenceTrajectoryPage(await call("GET", `${path}/trajectory?${query}`));
-          for (const event of page.events) yield normalizeSpTrajectoryEvent(event);
+          let last: number = afterSeq;
+          for (const event of page.events) {
+            if (event.ingestSeq <= last) throw new SpHarnessError("Eval SP trajectory events are out of order", false);
+            yield event;
+            last = event.ingestSeq;
+          }
+          if (page.nextAfterSeq !== null && (page.events.length === 0 || page.nextAfterSeq !== last)) {
+            throw new SpHarnessError("Eval SP returned an invalid trajectory cursor", false);
+          }
           afterSeq = page.nextAfterSeq;
         }
       }
       return {
         source: { framework: "sp", samplingId: handle.samplingId, agentRef: { ownerUserId: handle.ownerUserId, chatId: handle.chatId } },
         artifacts,
+        subjectInputs,
         omitted,
         async readFile(file) {
           const response = await callBytes("GET", `${path}/files?${new URLSearchParams({ path: file })}`);
@@ -314,6 +321,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           return response.body;
         },
         trajectory: trajectory(),
+        trajectoryFormat: "sp-trajectory/v1",
         // SP reads `trajectory_events` only after the Submission ended and every event was delivered.
         trajectoryComplete: true,
       };
@@ -324,25 +332,31 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       const { manifest } = evidence;
       const put = async (relative: string, mediaType: string, sha256: string, read: () => Promise<Uint8Array>) => {
         const body = await read();
+        if (body.byteLength > EVAL_EVIDENCE_FILE_MAX_BYTES || await sha256Hex(body) !== sha256) {
+          throw new SpHarnessError(`Evidence bytes do not match the import contract for ${relative}`, false);
+        }
         const receipt = evidenceFileReceipt(await (await callBytes("PUT",
           `${handlePath(handle)}/evidence/files?${new URLSearchParams({ path: relative })}`,
           { body, headers: { "Content-Type": mediaType, [EVAL_EVIDENCE_SHA256_HEADER]: sha256 } })).json());
-        if (receipt.sha256 !== sha256 || receipt.size !== body.byteLength) {
+        if (receipt.path !== evalEvidencePath(relative) || receipt.sha256 !== sha256 || receipt.size !== body.byteLength) {
           throw new SpHarnessError(`Eval SP stored different evidence for ${relative}`, false);
         }
       };
       const blob = (sha256: string) => async () => new Uint8Array(await new Response(await evidence.readBlob(sha256)).arrayBuffer());
       const files = [
-        ...manifest.artifacts.map((artifact) => () => put(`/artifacts${artifact.path}`, artifact.mediaType,
+        ...manifest.subjectInputs.map((file) => () => put(evalSubjectInputEvidencePath(file.bundleId, file.materialId, file.path), file.mediaType,
+          file.sha256, blob(file.sha256))),
+        ...manifest.artifacts.map((artifact) => () => put(evalArtifactEvidencePath(artifact.path), artifact.mediaType,
           artifact.sha256, blob(artifact.sha256))),
-        () => put("/trajectory.jsonl", "application/x-ndjson", manifest.trajectory.sha256, blob(manifest.trajectory.sha256)),
+        ...manifest.trajectory.parts.map((part, index) => () => put(evalTrajectoryEvidencePath(index + 1),
+          "application/x-ndjson", part.sha256, blob(part.sha256))),
       ];
       let next = 0;
       await Promise.all(Array.from({ length: Math.min(EVIDENCE_IMPORT_CONCURRENCY, files.length) }, async () => {
         while (next < files.length) await files[next++]!();
       }));
       // The manifest goes last, so its presence means every file it lists is already in place.
-      await put("/manifest.json", "application/json", evidence.ref.manifestSha256, async () => evidence.manifestBytes);
+      await put(EVAL_EVIDENCE_PATHS.manifest, "application/json", evidence.ref.manifestSha256, async () => evidence.manifestBytes);
     },
   };
 }

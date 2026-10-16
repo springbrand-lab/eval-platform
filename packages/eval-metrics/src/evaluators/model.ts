@@ -1,6 +1,24 @@
 import type { ArtifactRef, EvidenceRef, JsonValue, TrajectoryRef } from "@eval-platform/eval-contracts";
 
-export type NumericSchemaType = "number" | "integer";
+export type OutputFieldKind = "number" | "integer" | "boolean" | "enum";
+
+export type OutputScalar = string | number | boolean;
+
+export type OutputValue = OutputScalar | null;
+
+/** Presentation metadata compiled from the Schema; never grants eligibility to an observation. */
+export interface OutputFieldDefinition {
+  readonly jsonPointer: string;
+  /** Schema title, falling back to the field pointer (`$` for the root). */
+  readonly title: string;
+  readonly description: string | null;
+  /** In the order number/integer, boolean, enum; never both number and integer. */
+  readonly kinds: readonly OutputFieldKind[];
+  /** Declared boolean and enum values in Schema order. */
+  readonly values: readonly OutputScalar[];
+  /** Whether a statistical declaration allows null. */
+  readonly nullable: boolean;
+}
 
 export type EvaluationValidationStatus = "valid" | "invalid" | "unavailable";
 
@@ -32,13 +50,14 @@ export interface EvaluationValidation {
   readonly errors: readonly EvaluationValidationError[];
 }
 
-export interface NumericObservation {
+export interface OutputObservation {
   /** Stable field path: object keys as JSON Pointer tokens and every array index as the token `*`. */
   readonly jsonPointer: string;
   /** Exact JSON Pointer of this value, e.g. `/scores/0/value`. */
   readonly instancePointer: string;
-  readonly schemaType: NumericSchemaType;
-  readonly value: number;
+  /** Kinds supplied by declarations that actually matched this value; empty for null. */
+  readonly kinds: readonly OutputFieldKind[];
+  readonly value: OutputValue;
 }
 
 /** The Evaluator's result exactly as written, plus how it reads against the Project Schema. */
@@ -55,7 +74,7 @@ export interface EvaluationOutputView {
   readonly rawJson: JsonValue | null;
   readonly validation: EvaluationValidation;
   /** Only from valid outputs of succeeded evaluations. */
-  readonly numericObservations: readonly NumericObservation[];
+  readonly observations: readonly OutputObservation[];
   readonly artifacts: readonly ArtifactRef[];
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly trajectory: TrajectoryRef | null;

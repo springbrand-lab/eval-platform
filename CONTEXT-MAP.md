@@ -9,7 +9,7 @@
 | Runtime | `packages/eval-runtime/README.md` | Plan validation and digests, Run preview/admission, execution, evaluation and pipeline orchestration seam |
 | Contracts | `packages/eval-contracts/README.md` | Stable cross-package evaluation contracts, including Project plans and Run targets |
 | Dataset | `packages/eval-dataset/README.md` | Editable source Dataset, Data, JSON, initial context and initial-material references |
-| Metrics | `packages/eval-metrics/README.md` | Fixed four-level reporting, Agent resource and trajectory statistics, JSON Schema numeric outputs |
+| Metrics | `packages/eval-metrics/README.md` | Fixed four-level reporting, Agent resource and trajectory statistics, JSON Schema output field summaries |
 | API application | `apps/eval-api/README.md` | Processes and environment, PostgreSQL adapters, SP Harness and Bundle directory |
 | HTTP contract | `docs/eval-http-api.md` | Routes, response envelope, status and error codes |
 | Evaluation-only Runs | `docs/eval-independent-evaluation-entry.md` | Selection and submission of evaluation-only Runs |

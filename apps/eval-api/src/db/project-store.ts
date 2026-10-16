@@ -1,14 +1,14 @@
 import type {
   AgentRole,
   EvaluationPlan,
+  EvaluationOutputSchemaDocument,
   ExecutionPlan,
   Project,
   ProjectDatasetSnapshot,
-  ProjectPlan,
   RunHandle,
 } from "@eval-platform/eval-contracts";
 import { DatasetEntityNotFoundError, dataSchema, type Data } from "@eval-platform/eval-dataset";
-import { RuntimeEntityNotFoundError, RuntimeInputError, RuntimeProjectBusyError, type ProjectSample } from "@eval-platform/eval-runtime";
+import { RuntimeEntityNotFoundError, RuntimeInputError, RuntimeProjectBusyError, type ProjectSample, type ProjectView } from "@eval-platform/eval-runtime";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { addToGroup, sqlBatches } from "./batch.js";
 import type { FrozenCopy } from "../agent-configs.js";
@@ -20,11 +20,12 @@ import {
   projectExists,
   projectFromRow,
   readAllProjectSamples,
+  readEvaluationOutputSchemaDocument,
   readProjectPlan,
   visibleProject,
 } from "./project-plans.js";
 import { projectHasRun, readRunRecords, runActive } from "./run-records.js";
-import { readCurrentRun, type CurrentRun } from "./runtime.js";
+import { readProjectRunState } from "./runtime.js";
 import {
   data,
   datasetData,
@@ -68,8 +69,8 @@ export interface StoredProjectCreation {
   readonly fingerprint: string;
   /** The first Run admitted under the creation key. */
   readonly run: RunHandle | null;
-  /** Whether the Project has any Run at all. */
-  readonly hasRun: boolean;
+  /** No Run was admitted under the creation key, but the Project already has other Runs. */
+  readonly superseded: boolean;
 }
 
 /** The single definition of an editable evaluation plan: absent, or not yet locked by an evaluating Run. */
@@ -79,16 +80,15 @@ async function requireEvaluationPlanUnlocked(reader: Pick<EvalDb, "select">, pro
   if (plan?.lockedAt) throw new ProjectEvaluationPlanLockedError(projectId);
 }
 
-/** The fixed plan, every bound ProjectSample and the current Run. */
-export interface ProjectView extends ProjectPlan {
-  readonly projectSamples: readonly ProjectSample[];
-  readonly currentRun: CurrentRun | null;
+/** Locks the visible Project row; false when it is gone or soft-deleted. */
+async function tryLockProject(transaction: Writer, owner: string, projectId: string): Promise<boolean> {
+  const [row] = await transaction.select({ projectId: projects.projectId }).from(projects)
+    .where(visibleProject(projectId, owner)).for("update");
+  return row !== undefined;
 }
 
 async function lockProject(transaction: Writer, owner: string, projectId: string): Promise<void> {
-  const [row] = await transaction.select({ projectId: projects.projectId }).from(projects)
-    .where(visibleProject(projectId, owner)).for("update");
-  if (!row) throw new RuntimeEntityNotFoundError("project", projectId);
+  if (!await tryLockProject(transaction, owner, projectId)) throw new RuntimeEntityNotFoundError("project", projectId);
 }
 
 /** Owner-scoped Project snapshot persistence; the plan is written once, only the evaluation plan is replaceable. */
@@ -191,7 +191,7 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
           deleted: row.deletedAt !== null,
           fingerprint: row.creationFingerprint,
           run: record ? { runId: record.runId, samplingIds: [...record.samplingIds] } : null,
-          hasRun: record !== undefined || await projectHasRun(transaction, row.projectId),
+          superseded: record === undefined && await projectHasRun(transaction, row.projectId),
         };
       }, READ_SNAPSHOT);
     },
@@ -202,9 +202,7 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
      */
     async deleteUnrun(projectId: string): Promise<string[]> {
       return db.transaction(async (transaction) => {
-        const [row] = await transaction.select({ projectId: projects.projectId }).from(projects)
-          .where(visibleProject(projectId, owner)).for("update");
-        if (!row || await projectHasRun(transaction, projectId)) return [];
+        if (!await tryLockProject(transaction, owner, projectId) || await projectHasRun(transaction, projectId)) return [];
         const copies = await transaction.select({ userAgentId: projectAgentConfigs.userAgentId }).from(projectAgentConfigs)
           .where(eq(projectAgentConfigs.projectId, projectId));
         for (const table of [projectAgentConfigs, projectEvaluationPlans, projectExecutionPlans, projectSampleDatasets,
@@ -270,13 +268,20 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
       return projectExists(db, projectId, owner);
     },
 
+    getEvaluationOutputSchema(projectId: string): Promise<EvaluationOutputSchemaDocument | null> {
+      return db.transaction(async (transaction) => {
+        if (!await projectExists(transaction, projectId, owner)) throw new RuntimeEntityNotFoundError("project", projectId);
+        return readEvaluationOutputSchemaDocument(transaction, projectId, owner);
+      }, READ_SNAPSHOT);
+    },
+
     get(projectId: string): Promise<ProjectView | null> {
       return db.transaction(async (transaction) => {
         const plan = await readProjectPlan(transaction, projectId, owner);
         if (!plan) return null;
         const samples = await readAllProjectSamples(transaction, plan);
-        const currentRun = await readCurrentRun(transaction, owner, projectId);
-        return { ...plan, projectSamples: samples, currentRun };
+        const runState = await readProjectRunState(transaction, owner, projectId);
+        return { ...plan, projectSamples: samples, ...runState };
       }, READ_SNAPSHOT);
     },
 

@@ -1,4 +1,4 @@
-import type { Data, Dataset, DatasetSnapshot } from "./model.js";
+import type { Data, DataCreateOptions, Dataset, DatasetSnapshot } from "./model.js";
 
 export interface DatasetStore {
   createDataset(dataset: Dataset): Promise<void>;
@@ -6,7 +6,8 @@ export interface DatasetStore {
   getDataset(datasetId: string): Promise<Dataset | null>;
   listDatasets(): Promise<readonly Dataset[]>;
   deleteDataset(datasetId: string): Promise<void>;
-  createData(data: Data): Promise<void>;
+  /** Creates Data and its optional Dataset membership atomically, or writes neither. */
+  createData(data: Data, options?: DataCreateOptions): Promise<void>;
   updateData(data: Data): Promise<void>;
   getData(dataId: string): Promise<Data | null>;
   listData(datasetId?: string): Promise<readonly Data[]>;

@@ -1,11 +1,9 @@
-import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
+import { jsonObjectSchema, type EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import { parseStrictJson } from "@eval-platform/eval-dataset";
 import Ajv2020 from "ajv/dist/2020.js";
 import { CatalogInputError, CatalogPayloadTooLargeError } from "./db/errors.js";
 import { OUTPUT_SCHEMA_BYTES } from "./limits.js";
 
-/** A material-relative path; SP writes it below the returned materialization root. */
-export const EVALUATION_OUTPUT_SCHEMA_MATERIAL_PATH = "/evaluation-output.schema.json";
 const schemaValidator = new Ajv2020({ strict: false, allErrors: true });
 
 /** Parse one uploaded JSON Schema file into a bounded JSON object whose numbers round-trip exactly. */
@@ -23,31 +21,11 @@ export function parseEvaluationOutputSchema(content: string): EvaluationOutputSc
   if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
     throw new CatalogInputError("Evaluation output JSON Schema must be an object", "content");
   }
-  if (!hasOnlySafeNumbers(schema)) {
+  if (!jsonObjectSchema.safeParse(schema).success) {
     throw new CatalogInputError("Evaluation output JSON Schema must contain only finite, safe JSON numbers", "content");
   }
   if (!schemaValidator.validateSchema(schema)) {
     throw new CatalogInputError(`Evaluation output JSON Schema is invalid: ${schemaValidator.errorsText()}`, "content");
   }
   return schema as EvaluationOutputSchema;
-}
-
-function hasOnlySafeNumbers(value: unknown): boolean {
-  if (typeof value === "number") return Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value));
-  if (value === null || typeof value !== "object") return true;
-  return Object.values(value).every(hasOnlySafeNumbers);
-}
-
-const resultValidators = new Map<string, ReturnType<typeof schemaValidator.compile>>();
-
-/** Check an Evaluator result against its Project's output schema; an empty list means it conforms. */
-export function validateEvaluationResult(schema: EvaluationOutputSchema, result: unknown): readonly string[] {
-  const key = JSON.stringify(schema);
-  let validate = resultValidators.get(key);
-  if (!validate) {
-    validate = schemaValidator.compile(schema);
-    resultValidators.set(key, validate);
-  }
-  if (validate(result)) return [];
-  return (validate.errors ?? []).map((error) => `${error.instancePath || "/"} ${error.message ?? "is invalid"}`);
 }

@@ -1,4 +1,4 @@
-import type { AgentFramework, JsonValue } from "./model.js";
+import type { AgentFramework } from "./model.js";
 
 /**
  * An evidence bundle freezes what a Subject produced: its artifacts and its complete trajectory,
@@ -6,13 +6,14 @@ import type { AgentFramework, JsonValue } from "./model.js";
  * depends only on the bundle, never on where or how the Subject ran.
  */
 export const EVIDENCE_SCHEMA_VERSION = 1;
-export const EVAL_TRAJECTORY_FORMAT = "eval-trajectory/v1";
 
 /** Fixed layout of imported evidence inside an Evaluator's Space. */
 export const EVIDENCE_ROOT = "/evidence";
 export const EVIDENCE_MANIFEST_PATH = "/evidence/manifest.json";
 export const EVIDENCE_ARTIFACTS_ROOT = "/evidence/artifacts";
-export const EVIDENCE_TRAJECTORY_PATH = "/evidence/trajectory.jsonl";
+export const EVIDENCE_TRAJECTORY_ROOT = "/evidence/trajectory";
+export const EVIDENCE_SUBJECT_INPUTS_ROOT = "/evidence/subject-inputs";
+export const EVALUATION_OUTPUT_SCHEMA_PATH = "/evaluation-output.schema.json";
 /** Where every Evaluator writes its result, in its own Space. */
 export const EVALUATION_RESULT_PATH = "/output/result.json";
 
@@ -40,6 +41,18 @@ export interface EvidenceArtifact {
   readonly sha256: string;
 }
 
+/** The immutable input file, rather than the Subject's possibly modified Workspace copy. */
+export interface EvidenceSubjectInput extends EvidenceArtifact {
+  readonly bundleId: string;
+  readonly materialId: string;
+}
+
+export interface EvidenceTrajectoryPart {
+  readonly sha256: string;
+  readonly size: number;
+  readonly events: number;
+}
+
 export const EVIDENCE_OMISSION_REASONS = ["excluded", "too-large", "limit"] as const;
 export type EvidenceOmissionReason = (typeof EVIDENCE_OMISSION_REASONS)[number];
 
@@ -54,41 +67,17 @@ export interface EvidenceManifest {
   readonly evidenceId: string;
   readonly source: EvidenceSource & { readonly exportedAt: string };
   readonly artifacts: readonly EvidenceArtifact[];
+  readonly subjectInputs: readonly EvidenceSubjectInput[];
   readonly trajectory: {
-    readonly format: typeof EVAL_TRAJECTORY_FORMAT;
-    readonly sha256: string;
+    /** The source Harness declares the raw event format; Runtime does not interpret it. */
+    readonly format: string;
+    readonly parts: readonly EvidenceTrajectoryPart[];
     readonly events: number;
     /** False when the framework could not export its full trajectory; `incompleteReason` says why. */
     readonly complete: boolean;
     readonly incompleteReason?: string;
   };
   readonly omitted: readonly EvidenceOmission[];
-}
-
-export const TRAJECTORY_EVENT_TYPES = [
-  "user-message",
-  "assistant-message",
-  "tool-call",
-  "tool-result",
-  "approval",
-  "question",
-  "error",
-  "usage",
-  "other",
-] as const;
-export type TrajectoryEventType = (typeof TRAJECTORY_EVENT_TYPES)[number];
-
-/** One line of `eval-trajectory/v1`: the fields every framework shares, with its own event in `raw`. */
-export interface TrajectoryEvent {
-  readonly seq: number;
-  readonly at: string;
-  readonly type: TrajectoryEventType;
-  readonly submissionId?: string;
-  /** Relates a tool-call to its tool-result, and similar pairs. */
-  readonly operationId?: string;
-  readonly content: { readonly [key: string]: JsonValue };
-  /** The framework's original event, unchanged. */
-  readonly raw: JsonValue;
 }
 
 export interface EvidenceLimits {

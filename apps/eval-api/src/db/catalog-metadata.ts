@@ -5,6 +5,10 @@ import { CatalogInputError } from "./errors.js";
 /** Bundle, Material, Session, output-format and Project names and descriptions. */
 export const catalogLabelSchema = z.string().trim().min(1);
 
+export function isCatalogLabel(value: string): boolean {
+  return catalogLabelSchema.safeParse(value).success;
+}
+
 export const catalogMetadataPatchSchema = z.strictObject({
   name: catalogLabelSchema.exactOptional(),
   description: catalogLabelSchema.exactOptional(),

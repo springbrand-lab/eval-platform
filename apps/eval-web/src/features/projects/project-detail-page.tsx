@@ -1,56 +1,36 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, ClipboardCheck, Lock, Play, Square, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ArrowRight, ClipboardCheck, Play, Square, Trash2 } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { getProjectOverview, metricKeys } from "@/api-sdk/metrics-api";
-import { deleteProject, getProject, projectKeys } from "@/api-sdk/projects-api";
-import { runKeys, stopRun } from "@/api-sdk/runs-api";
+import { deleteProject, projectKeys } from "@/api-sdk/projects-api";
 import type { ProjectView } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, DescriptionList, SectionLabel } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
-import { CopyId, ProgressBar, ScoreBar } from "@/components/ui/data-display";
+import { CopyId, ProgressBar } from "@/components/ui/data-display";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { EmptyState, ErrorBlock, LoadingBlock, Spinner } from "@/components/ui/feedback";
 import { ActionMenu } from "@/components/ui/menu";
 import { Tooltip } from "@/components/ui/tooltip";
 import { formatDateTime, formatDuration, formatNumber, formatPercent, OPERATION_LABELS } from "@/lib/format";
-import { scoreField, SummaryCards } from "@/features/metrics/summary";
+import { OutputPreview, SummaryCards } from "@/features/metrics/summary";
 import { runPhaseLabel } from "@/features/runs/run-status";
-import { useCurrentRun, useRun } from "@/features/runs/use-run-polling";
+import { POLL_MS, useRun } from "@/features/runs/use-run-polling";
+import { useProject } from "./use-project";
+import { StopRunDialog, type StopRunTarget } from "@/features/runs/stop-run-dialog";
 
-function CurrentRunBanner({ projectId }: { projectId: string }) {
-  const queryClient = useQueryClient();
-  const current = useCurrentRun(projectId);
-  const runId = current.data?.run?.runId;
+function CurrentRunBanner({ projectId, current, onStop }: { projectId: string; current: ProjectView["currentRun"]; onStop: (target: StopRunTarget) => void }) {
+  const runId = current?.runId;
   const run = useRun(projectId, runId);
   const overview = useQuery({
     queryKey: metricKeys.project(projectId, runId ? [runId] : []),
     queryFn: ({ signal }) => getProjectOverview(projectId, [runId!], signal),
     enabled: !!runId,
-    refetchInterval: 5_000,
-  });
-  const [stopping, setStopping] = useState(false);
-  const wasActive = useRef(false);
-  // When the current Run finishes, refresh the Project and its metrics once.
-  useEffect(() => {
-    if (runId) wasActive.current = true;
-    else if (wasActive.current && current.data) {
-      wasActive.current = false;
-      void queryClient.invalidateQueries({ queryKey: ["metrics", projectId] });
-      void queryClient.invalidateQueries({ queryKey: projectKeys.detail(projectId) });
-    }
-  }, [runId, current.data, projectId, queryClient]);
-  const stop = useMutation({
-    mutationFn: () => stopRun(projectId, runId!),
-    onSuccess: async () => {
-      toast.success("已请求停止");
-      setStopping(false);
-      await queryClient.invalidateQueries({ queryKey: runKeys.current(projectId) });
-    },
+    refetchInterval: runId ? POLL_MS : false,
   });
   if (!runId) return null;
   const snapshot = run.data?.run;
@@ -83,13 +63,11 @@ function CurrentRunBanner({ projectId }: { projectId: string }) {
           <Link to="/projects/$projectId/runs/$runId" params={{ projectId, runId }}>
             <Button size="sm" icon={<ArrowRight />}>查看进度</Button>
           </Link>
-          {!current.data?.run?.stopRequested && (
-            <Button size="sm" variant="outline-danger" icon={<Square />} onClick={() => setStopping(true)}>停止</Button>
+          {!current?.stopRequested && (
+            <Button size="sm" variant="outline-danger" icon={<Square />} onClick={() => onStop({ projectId, runId })}>停止</Button>
           )}
         </div>
       </div>
-      <ConfirmDialog open={stopping} onClose={() => setStopping(false)} onConfirm={() => stop.mutate()} loading={stop.isPending} danger
-        title="停止 Run" description="中断正在运行的 Agent，不再开始新的采样和评估。已完成的结果保留。" confirmLabel="停止" />
     </Card>
   );
 }
@@ -117,14 +95,13 @@ function PlanCard({ view }: { view: ProjectView }) {
               {evaluation ? (evaluation.lockedAt ? "查看" : "修改") : "填写"}
             </Link>
           )}>
-            <span className="inline-flex items-center gap-2">评估{evaluation?.lockedAt && <Badge tone="neutral"><Lock className="size-3" />已锁定</Badge>}</span>
+            评估
           </SectionLabel>
           {evaluation ? (
             <DescriptionList items={[
               { label: "评委 Agent", value: evaluation.plan.evaluatorAgentConfig.name },
               { label: "评估并发", value: evaluation.plan.evaluationConcurrency },
-              { label: "评分格式", value: <Link to="/output-schemas/$outputSchemaId" params={{ outputSchemaId: evaluation.plan.outputSchema.outputSchemaId }} className=" link">查看</Link> },
-              { label: "锁定时间", value: formatDateTime(evaluation.lockedAt) },
+              { label: "评分 Schema", value: <Link to="/projects/$projectId/output-schema" params={{ projectId }} className="link">查看</Link> },
             ]} />
           ) : <p className="text-[13px] text-text-muted">还没有评估计划，只能执行，不能评估。</p>}
         </div>
@@ -150,13 +127,15 @@ function RunRow({ projectId, runId }: { projectId: string; runId: string }) {
 export function ProjectDetailPage({ projectId }: { projectId: string }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const view = useQuery({ queryKey: projectKeys.detail(projectId), queryFn: ({ signal }) => getProject(projectId, signal) });
+  const view = useProject(projectId);
   const overview = useQuery({
     queryKey: metricKeys.project(projectId, []),
     queryFn: ({ signal }) => getProjectOverview(projectId, [], signal),
+    enabled: !!view.data, staleTime: 0,
     refetchInterval: view.data?.currentRun ? 10_000 : false,
   });
   const [deleting, setDeleting] = useState(false);
+  const [stopTarget, setStopTarget] = useState<StopRunTarget | null>(null);
   const remove = useMutation({
     mutationFn: () => deleteProject(projectId),
     onSuccess: async () => {
@@ -189,7 +168,7 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
       />
       {view.isPending ? <LoadingBlock /> : view.error ? <ErrorBlock error={view.error} onRetry={() => void view.refetch()} /> : (
         <div className="flex flex-col gap-5">
-          <CurrentRunBanner projectId={projectId} />
+          <CurrentRunBanner projectId={projectId} current={view.data!.currentRun} onStop={setStopTarget} />
           {overview.data ? <SummaryCards summary={overview.data.summary} /> : overview.error ? <ErrorBlock error={overview.error} /> : <LoadingBlock rows={2} />}
           <Card>
             <CardHeader title="测试集" />
@@ -203,7 +182,7 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
                 { key: "samplings", header: "采样", align: "right", cell: (row) => formatNumber(row.summary.counts.samplings) },
                 { key: "execution", header: "执行成功率", align: "right", cell: (row) => formatPercent(row.summary.execution.successRate) },
                 { key: "evaluation", header: "评估成功率", align: "right", cell: (row) => formatPercent(row.summary.evaluation.successRate) },
-                { key: "score", header: "平均分", cell: (row) => <ScoreBar value={scoreField(row.summary.numericOutputs)?.summary.mean} /> },
+                { key: "output", header: "评估输出", cell: (row) => <OutputPreview outputs={row.summary.evaluationOutputs} /> },
               ]}
             />
           </Card>
@@ -219,6 +198,7 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
           {project && <p className="text-xs text-text-faint">创建于 {formatDateTime(project.createdAt)} · <CopyId value={project.projectId} /></p>}
         </div>
       )}
+      <StopRunDialog target={stopTarget} onClose={() => setStopTarget(null)} />
       <ConfirmDialog open={deleting} onClose={() => setDeleting(false)} onConfirm={() => remove.mutate()} loading={remove.isPending} danger
         title="删除 Project" description="Project 及其结果将不再显示。" confirmLabel="删除" />
     </Page>

@@ -68,7 +68,7 @@ describe("trajectory metrics", () => {
     ] })]);
     const [browser] = result.trajectory.byTool;
     expect(browser).toMatchObject({ count: { value: 3 }, inProgress: 1 });
-    expect(browser!.inputLength).toEqual({ count: 1, missing: 2, total: 4, min: 4, max: 4, mean: 4, median: 4, coverage: "partial" });
+    expect(browser!.inputLength).toEqual({ count: 1, missing: 2, total: 4, min: 4, max: 4, mean: 4, variance: 0, median: 4, coverage: "partial" });
     expect(browser!.outputLength).toMatchObject({ count: 1, missing: 2, total: 5, coverage: "partial" });
   });
 

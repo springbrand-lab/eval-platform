@@ -11,6 +11,7 @@ export type {
   ExportEvidenceInput,
   ExportedArtifact,
   ExportedEvidence,
+  ExportedSubjectInput,
   Harness,
   HarnessRuntimeOptions,
   InspectAgentOperationInput,

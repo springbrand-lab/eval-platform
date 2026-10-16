@@ -58,13 +58,13 @@ export function createLangfuseScorePublisher(input: {
           redirect: "error",
           signal: AbortSignal.timeout(TIMEOUT_MS),
         });
-      } catch (error) {
-        lastError = new Error(`Langfuse score request failed: ${error instanceof Error ? error.message : String(error)}`);
+      } catch (cause) {
+        lastError = new Error("Langfuse score request failed", { cause });
         continue;
       }
       if (response.ok) return;
-      const detail = (await response.text().catch(() => "")).slice(0, 500);
-      lastError = new Error(`Langfuse rejected the score with HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+      await response.body?.cancel();
+      lastError = new Error(`Langfuse rejected the score with HTTP ${response.status}`);
       if (response.status !== 429 && response.status < 500) break;
     }
     throw lastError!;

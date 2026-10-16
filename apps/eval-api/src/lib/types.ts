@@ -6,7 +6,7 @@ import type { Env as PinoEnv } from "hono-pino";
 import type { AgentConfigService } from "../agent-configs.js";
 import type { createPostgresObservationReader } from "../db/observation.js";
 import type { createOutputSchemaCatalog } from "../db/output-schemas.js";
-import type { createResourceCatalog } from "../db/resource-catalog.js";
+import type { BundleCatalogs } from "../db/resource-catalog.js";
 import type { ProjectRunView } from "../db/run-view.js";
 import type { createPostgresProjectRunControl } from "../db/runtime.js";
 import type { InitialResourceApi } from "../initial-resources.js";
@@ -27,7 +27,8 @@ export interface OwnerServices {
   };
   readonly observations: ReturnType<typeof createPostgresObservationReader>;
   readonly metrics: Metrics;
-  readonly resources: ReturnType<typeof createResourceCatalog>;
+  readonly materialBundles: BundleCatalogs["materialBundles"];
+  readonly sessionBundles: BundleCatalogs["sessionBundles"];
   readonly outputSchemas: ReturnType<typeof createOutputSchemaCatalog>;
   readonly initialResources: InitialResourceApi;
   /** Absent when Langfuse is not configured. */

@@ -14,19 +14,27 @@ const summarize = (input: Pick<MetricInput, "samplings" | "evaluations">) => agg
 describe("numeric summaries", () => {
   it("keeps missing/non-finite observations out of the denominator", () => {
     expect(summarizeNumbers([0, 10, 20, null, NaN, Infinity])).toEqual({
-      count: 3, missing: 3, total: 30, min: 0, max: 20, mean: 10, median: 10,
+      count: 3, missing: 3, total: 30, min: 0, max: 20, mean: 10, variance: 200 / 3, median: 10,
     });
-    expect(summarizeNumbers([null])).toEqual({ count: 0, missing: 1, total: null, min: null, max: null, mean: null, median: null });
+    expect(summarizeNumbers([null])).toEqual({ count: 0, missing: 1, total: null, min: null, max: null, mean: null, variance: null, median: null });
   });
 
   it("handles negative values and even-sized medians without sorting the input", () => {
     const input = [30, -10, 20, 0];
-    expect(summarizeNumbers(input)).toEqual({ count: 4, missing: 0, total: 40, min: -10, max: 30, mean: 10, median: 10 });
+    expect(summarizeNumbers(input)).toEqual({ count: 4, missing: 0, total: 40, min: -10, max: 30, mean: 10, variance: 250, median: 10 });
     expect(input).toEqual([30, -10, 20, 0]);
   });
 
   it("rejects overflow rather than returning an infinite aggregate", () => {
     expect(() => summarizeNumbers([Number.MAX_VALUE, Number.MAX_VALUE])).toThrow(RangeError);
+  });
+
+  it("uses population variance over available N and preserves small spreads at a large offset", () => {
+    expect(summarizeNumbers([null, 5, null])).toMatchObject({ count: 1, missing: 2, mean: 5, variance: 0 });
+    expect(summarizeNumbers([0, null, 2])).toMatchObject({ count: 2, missing: 1, mean: 1, variance: 1, min: 0, max: 2 });
+    expect(summarizeNumbers([1e12 + 1, 1e12 + 2, 1e12 + 3])).toMatchObject({ mean: 1e12 + 2, variance: 2 / 3 });
+    expect(summarizeNumbers([Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER]).variance).toBe(0.25);
+    expect(summarizeNumbers([3, null, 1, 4, 2]).median).toBe(2.5);
   });
 });
 
@@ -52,7 +60,7 @@ describe("execution/evaluation aggregation", () => {
     });
     expect(result.execution).toMatchObject({ statuses: { failed: 1 }, completedAttempts: 1, failedAttempts: 0, successRate: 0 });
     expect(result.evaluation).toMatchObject({ statuses: { failed: 1 }, completedAttempts: 1, failedAttempts: 0 });
-    expect(result.numericOutputs.fields[0]).toMatchObject({ jsonPointer: "/score", observationCount: 0, diagnostics: [{ reason: "not-succeeded", evaluations: 1 }] });
+    expect(result.evaluationOutputs.fields[0]).toMatchObject({ jsonPointer: "/score", observationCount: 0, diagnostics: [{ reason: "not-succeeded", evaluations: 1 }] });
   });
 
   it("keeps Subject and Evaluator resources separate and counts failed, cancelled and restarted attempts", () => {
@@ -79,7 +87,7 @@ describe("execution/evaluation aggregation", () => {
       { ...subject.executionAttempts[0]!, executionAttemptId: "restart", attemptNumber: 2, startedAt: "2026-10-08T00:00:03.000Z", completedAt: "2026-10-08T00:00:05.000Z" },
     ];
     const result = summarize({ samplings: [{ ...subject, executionAttempts: attempts }, sampling("sampling-2")], evaluations: [] });
-    expect(result.execution.agentDurationMs).toEqual({ count: 2, missing: 0, total: 6_000, min: 1_000, max: 5_000, mean: 3_000, median: 3_000 });
+    expect(result.execution.agentDurationMs).toEqual({ count: 2, missing: 0, total: 6_000, min: 1_000, max: 5_000, mean: 3_000, variance: 4_000_000, median: 3_000 });
     expect(result.execution.attemptDurationMs).toMatchObject({ count: 3, total: 4_000 });
     expect(result).not.toHaveProperty("runDurationMs");
   });
