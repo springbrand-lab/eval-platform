@@ -49,7 +49,7 @@ Worker 可多实例部署、滚动升级；收到信号后停止取任务，等�
 
 `@springbrand/eval-harness` 以精确版本从 npm 安装，版本需与 Eval SP 部署的契约一致；ZIP 检查、错误类型和初始化上限均从这个公开入口读取，不直接依赖 SP 的 utils。`@springbrand/http` 直接来自 npm，与 SP 使用同一精确版本。
 
-数据库只有 `migrations-postgres/0000_initial.sql` 一个初始基线，用 `pnpm --filter @eval-platform/eval-api db:migrate` 应用（需 `DATABASE_URL`）；本地旧库与新基线或新请求指纹不一致时清库重建。测试设置 `DATABASE_URL` 后为每次运行创建独立的临时数据库；不提供时跳过需数据库的测试。pg-boss 在同一数据库中自建 `pgboss` schema。
+数据库只有 `migrations-postgres/0000_initial.sql` 一个初始基线，用 `pnpm --filter @eval-platform/eval-api db:migrate` 应用于本地库（需 `DATABASE_URL`），与部署镜像共用同一迁移入口。命令先从实际连接输出库名、角色和服务地址，不输出连接串或凭据；迁移前校验已应用记录的时间与 SQL hash，迁移后用当前 Drizzle schema 验证所有表、列可读取。改写已应用 SQL、未知迁移或缺失结构都会阻断部署，不会因 Drizzle 跳过旧编号而报成功。命令不清库，也不兼容旧结构。本地旧库与新基线或新请求指纹不一致时清库重建；共享库必须经确认的数据恢复/升级操作处理，不能把本地命令指向共享库。测试设置 `DATABASE_URL` 后为每次运行创建独立的临时数据库；不提供时跳过需数据库的测试。pg-boss 在同一数据库中自建 `pgboss` schema。
 
 ## 部署
 

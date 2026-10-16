@@ -18,7 +18,7 @@ Web 的 Tailwind 扫描 `file-renderers/dist/**/*.js` 与 `agent-config-editor/d
 1. 检查四个精确版本的 npm 产物：导出及其目标文件存在，JS 和声明均不导入 SP 私有包，依赖不包含 `workspace:`、`link:` 或仓库外的 `file:` 路径。
 2. 更新消费方精确版本与锁文件。新发的这四个自有包在 `minimumReleaseAgeExclude` 中明确放行；不扩大到其他依赖。
 3. 在 SP 仓库外的新目录执行 `pnpm install --frozen-lockfile`，不能复制或链接现有 `node_modules`。独立安装后运行 `pnpm check`、带 PostgreSQL 的全仓测试和 API/Web 构建，确认类型、运行时、预览资源及样式都来自发布产物。
-4. 检查 Web 构建 CSS 包含共享 Agent 表单的工具类及文件预览的 CSS Module；不通过浏览器更改用户已验收的页面。
+4. 检查 Web 构建 CSS 包含共享 Agent 表单的工具类及文件预览的 CSS Module；开发模式还需强制重新预打包，验证实际预览模块及其动态依赖可作为浏览器 ESM 加载，不能只以服务启动和 HTTP 200 作为通过。保留预览包的资源转换，同时预打包其内层 CommonJS 依赖；不通过浏览器更改用户已验收的页面。
 5. CI 沿用 `.github/actions/prepare-workspace` 的 frozen install。推送开发分支验证依赖与构建；部署仍只通过现有 main 流程，不随依赖升级单独启动 Agent 或改写项目。
 
 素材与上下文共用只读文件清单和精确路径内容接口。目录来自导入后的 `InitialResourceFile` 路径；资源与运行 Workspace 使用同一公共文件解析、相对引用解析和预览实现。文件请求、解析、关联资源及 Blob URL 属于当前选择的取消生命周期。
