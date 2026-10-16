@@ -27,7 +27,7 @@ export interface RunJob {
 
 export interface RunQueue {
   /** Writes the Run job through the caller's transaction, so it commits or rolls back with the Run facts. */
-  enqueue(transaction: DrizzleTransactionLike, runId: string): Promise<void>;
+  enqueue(transaction: DrizzleTransactionLike, runId: string, reason?: "collection"): Promise<void>;
 }
 
 export interface RunQueueProducer extends RunQueue {
@@ -55,9 +55,11 @@ export async function openRunBoss(
 
 export function createRunQueue(boss: Pick<PgBoss, "send">): RunQueue {
   return {
-    async enqueue(transaction, runId) {
+    async enqueue(transaction, runId, reason) {
       const job: RunJob = { runId };
-      await boss.send(RUN_QUEUE, job, { singletonKey: runId, db: fromDrizzle(transaction, sql) });
+      // A completed stage can be recovered while its previous job is still settling.
+      // Give recovery its own deduplicated wake-up so that old job cannot absorb and lose it.
+      await boss.send(RUN_QUEUE, job, { singletonKey: reason === "collection" ? `collection:${runId}` : runId, db: fromDrizzle(transaction, sql) });
     },
   };
 }

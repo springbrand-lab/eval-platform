@@ -93,17 +93,17 @@ export function MetricCard({ label, value, hint, tone, icon }: {
 }
 
 /** Segmented control (Radix Tabs list); the caller renders the selected view. */
-export function Tabs<T extends string>({ tabs, value, onChange }: {
-  tabs: readonly { value: T; label: ReactNode; count?: number }[]; value: T; onChange: (value: T) => void;
+export function Tabs<T extends string>({ tabs, value, onChange, variant = "pills" }: {
+  tabs: readonly { value: T; label: ReactNode; count?: number }[]; value: T; onChange: (value: T) => void; variant?: "pills" | "line";
 }) {
   return (
     <TabsPrimitive.Root value={value} onValueChange={(next) => onChange(next as T)}>
-      <TabsPrimitive.List className="inline-flex h-9 items-center gap-0.5 rounded-lg bg-surface-muted p-1">
+      <TabsPrimitive.List className={cn("inline-flex items-center", variant === "line" ? "h-10 w-full gap-5 border-b border-border" : "h-9 gap-0.5 rounded-lg bg-surface-muted p-1")}>
         {tabs.map((tab) => (
           <TabsPrimitive.Trigger
             key={tab.value}
             value={tab.value}
-            className="inline-flex h-7 items-center gap-1.5 rounded-md px-3 text-[13px] font-semibold text-text-muted transition-colors hover:text-text-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=active]:bg-surface data-[state=active]:text-text-strong data-[state=active]:shadow-sm"
+            className={cn("inline-flex items-center gap-1.5 whitespace-nowrap text-[13px] font-medium text-text-muted transition-colors hover:text-text-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=active]:text-text-strong", variant === "line" ? "h-10 border-b-2 border-transparent px-0 data-[state=active]:border-text-strong" : "h-7 rounded-md px-3 font-semibold data-[state=active]:bg-surface data-[state=active]:shadow-sm")}
           >
             {tab.label}
             {tab.count !== undefined && <span className="text-xs text-text-faint tabular">{tab.count}</span>}

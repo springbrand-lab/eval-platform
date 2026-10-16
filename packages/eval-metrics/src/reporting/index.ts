@@ -183,6 +183,11 @@ export function createMetrics(dependencies: { readonly source: MetricsSource }):
         project: view.project, runIds: view.runIdsOf(view.samplings),
         summary: view.summarizeSamples(samples, view.plan.datasets.length),
         datasets: view.plan.datasets.map(view.datasetRow),
+        projectSamples: samples.map((sample) => ({
+          projectSampleId: sample.projectSampleId, dataId: sample.dataId, datasetIds: sample.datasetIds,
+          samplingCount: sample.samplingCount, samplingIds: view.samplingsOf([sample]).map((item) => item.samplingId),
+          summary: view.summarizeSamples([sample], sample.datasetIds.length),
+        })),
       };
     },
     async getDatasetOverview(input) {

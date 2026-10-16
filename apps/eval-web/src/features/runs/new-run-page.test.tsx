@@ -111,17 +111,17 @@ it("keeps hidden Dataset selections while searching and invalidates the preview 
     await click(picker(view.container));
     await click(choice("项目"));
     await click(choice("基础布局"));
-    await type(popup().querySelector('[aria-label="搜索测试集或用例"]'), "交互");
+    await type(popup().querySelector('[aria-label="搜索数据集或用例"]'), "交互");
     await click(choice("交互布局"));
-    expect(view.container.textContent).toContain("2 个测试集");
+    expect(view.container.textContent).toContain("2 个数据集");
     await click(picker(view.container));
     await click(button(view.container, "预览")); await flush();
     expect(mocks.preview.mock.calls.at(-1)?.[1]).toEqual({ operation: "execution", selector: { datasetIds: ["d1", "d2"] } });
     expect(button(view.container, "提交 Run").disabled).toBe(false);
     await click(picker(view.container));
-    await type(popup().querySelector('[aria-label="搜索测试集或用例"]'), "无匹配");
-    expect(popup().textContent).toContain("没有匹配的测试集或用例");
-    expect(view.container.textContent).toContain("2 个测试集");
+    await type(popup().querySelector('[aria-label="搜索数据集或用例"]'), "无匹配");
+    expect(popup().textContent).toContain("没有匹配的数据集或用例");
+    expect(view.container.textContent).toContain("2 个数据集");
     await click(button(popup(), "清空选择"));
     await click(picker(view.container));
     expect(button(view.container, "提交 Run").disabled).toBe(true);
@@ -174,7 +174,7 @@ it("freezes selection rows and clear actions while replaying an uncertain Datase
       expect(choice("交互布局").disabled).toBe(true);
       expect(button(popup(), "清空选择").disabled).toBe(true);
     }
-    expect(view.container.textContent).toContain("1 个测试集");
+    expect(view.container.textContent).toContain("1 个数据集");
     await click(button(view.container, "重试提交")); await flush();
     expect(mocks.submit.mock.calls[1]?.[1]).toEqual(command);
   } finally { await view.close(); }

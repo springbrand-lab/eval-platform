@@ -4,8 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import { click, render } from "@/test/render";
 import { MaterialPickerList, ResourcePicker, type PickedResource } from "./resource-picker";
 
+vi.mock("@tanstack/react-router", () => ({ Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));
+
 vi.mock("@/api-sdk/bundles-api", () => ({ resourceCatalog: (kind: string) => ({
-  keys: { list: () => [kind, "bundles"], resources: (id: string) => [kind, id] },
+  keys: { files: (bundle: string, id: string) => [kind, bundle, id, "files"], list: () => [kind, "bundles"], resources: (id: string) => [kind, id] },
+  listFiles: async () => [],
   list: async () => kind === "material"
     ? [{ bundleId: "a", name: "素材 A", description: "素材包描述" }, { bundleId: "b", name: "素材 B", description: "第二包" }]
     : [{ bundleId: "s", name: "上下文 S", description: "上下文包描述" }],
@@ -21,7 +24,7 @@ function Form() {
   return <>
     <MaterialPickerList label="执行素材" value={subject} onChange={setSubject} />
     <MaterialPickerList label="评估素材" value={evaluator} onChange={setEvaluator} />
-    <ResourcePicker kind="session" label="执行上下文" value={context} onChange={setContext} />
+    <ResourcePicker kind="session" label="执行初始对话" value={context} onChange={setContext} />
     <output aria-label="当前绑定">{JSON.stringify({ subject, evaluator, context })}</output>
   </>;
 }
@@ -38,23 +41,23 @@ describe("Data initial-resource choices", () => {
       };
       const button = (name: string) => [...view.container.querySelectorAll("button")].find((item) => item.getAttribute("aria-label") === name || item.textContent === name);
       await click(button("添加执行素材")); await settle();
-      await choose("执行素材 1包", "a"); await choose("执行素材 1", "m-a");
+      await choose("执行素材 1", "a/m-a");
       await click(button("添加执行素材")); await settle();
-      await choose("执行素材 2包", "a");
-      expect((view.container.querySelector('select[aria-label="执行素材 2"] option[value="m-a"]') as HTMLOptionElement).disabled).toBe(true);
-      await choose("执行素材 2包", "b"); await choose("执行素材 2", "m-b");
+
+      expect((view.container.querySelector('select[aria-label="执行素材 2"] option[value="a/m-a"]') as HTMLOptionElement).disabled).toBe(true);
+      await choose("执行素材 2", "b/m-b");
       await click(button("上移执行素材 2"));
       await click(button("添加评估素材")); await settle();
-      await choose("评估素材 1包", "a");
-      expect((view.container.querySelector('select[aria-label="评估素材 1"] option[value="m-a"]') as HTMLOptionElement).disabled).toBe(false);
-      await choose("评估素材 1", "m-a");
-      await choose("执行上下文包", "s"); await choose("执行上下文", "s-1"); await choose("执行上下文", "s-2");
+
+      expect((view.container.querySelector('select[aria-label="评估素材 1"] option[value="a/m-a"]') as HTMLOptionElement).disabled).toBe(false);
+      await choose("评估素材 1", "a/m-a");
+      await choose("执行初始对话", "s/s-1"); await choose("执行初始对话", "s/s-2");
       expect(JSON.parse(view.container.querySelector("output")!.textContent!)).toEqual({
         subject: [{ bundleId: "b", id: "m-b" }, { bundleId: "a", id: "m-a" }],
         evaluator: [{ bundleId: "a", id: "m-a" }], context: { bundleId: "s", id: "s-2" },
       });
       await click(button("移除执行素材 1"));
-      await choose("执行上下文包", "__none");
+      await choose("执行初始对话", "__none");
       expect(JSON.parse(view.container.querySelector("output")!.textContent!)).toMatchObject({ subject: [{ bundleId: "a", id: "m-a" }], context: null });
       expect(view.container.querySelector('select[aria-label="评估上下文"]')).toBeNull();
     } finally { await view.unmount(); client.clear(); }

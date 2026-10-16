@@ -48,6 +48,12 @@ class TestDatasetStore implements DatasetStore {
     if (options?.datasetId !== undefined) this.memberships.get(options.datasetId)!.add(data.dataId);
   }
 
+  async createDataBatch(datasetId: string, entries: readonly Data[]): Promise<void> {
+    this.requireDataset(datasetId);
+    for (const entry of entries) if (this.data.has(entry.dataId)) throw new DatasetIdentityConflictError("data", entry.dataId);
+    for (const entry of entries) await this.createData(entry, { datasetId });
+  }
+
   async updateData(data: Data): Promise<void> {
     if (!this.data.has(data.dataId)) throw new DatasetEntityNotFoundError("data", data.dataId);
     this.data.set(data.dataId, persisted(data));
@@ -530,4 +536,19 @@ describe("Dataset import and export", () => {
     expect(getDataset).not.toHaveBeenCalled();
     expect(listData).not.toHaveBeenCalled();
   });
+});
+
+it("validates every batch input before creating any case and preserves existing members", async () => {
+  const store = new TestDatasetStore();
+  const service = createDatasetService(store);
+  const dataset = await service.createDataset({ name: "batch" });
+  const original = await service.createData({ userPrompt: "original" }, { datasetId: dataset.datasetId });
+  const write = vi.spyOn(store, "createDataBatch");
+  await expect(service.addData(dataset.datasetId, [{ userPrompt: "valid" }, { userPrompt: " " }])).rejects.toBeInstanceOf(DatasetInputError);
+  expect(write).not.toHaveBeenCalled();
+  expect(await service.listData(dataset.datasetId)).toEqual([original]);
+  const added = await service.addData(dataset.datasetId, [{ userPrompt: "one" }, { userPrompt: "two" }]);
+  expect(write).toHaveBeenCalledTimes(1);
+  expect(new Set(added.map((row) => row.dataId)).size).toBe(2);
+  expect(await service.listData(dataset.datasetId)).toHaveLength(3);
 });

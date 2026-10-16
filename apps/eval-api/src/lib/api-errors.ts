@@ -1,3 +1,4 @@
+import { ResultCollectionConflictError } from "../db/errors.js";
 import { decodeError, HttpError, isSpEditorErrorCode, spEditorErrorDefinitions, toHttpError, type HttpErrorCode } from "@eval-platform/eval-contracts/http-errors";
 import {
   DataInUseError,
@@ -80,6 +81,7 @@ type ErrorClass = abstract new (...args: never[]) => Error;
 
 /** Errors whose message is safe public text about the caller's own request. */
 const publicMessageCodes = new Map<ErrorClass, HttpErrorCode>([
+  [ResultCollectionConflictError, "RESULT_COLLECTION_CONFLICT"],
   [RuntimeProjectBusyError, "PROJECT_BUSY"],
   [RuntimeRunIdentityConflictError, "RUN_IDEMPOTENCY_CONFLICT"],
   [RuntimeRunStoppedError, "RUN_STOPPED"],

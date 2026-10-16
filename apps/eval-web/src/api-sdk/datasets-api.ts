@@ -31,3 +31,6 @@ export const importPromptDataset = (input: { name: string; description: string; 
   api.post<DatasetSnapshot>("/api/datasets/prompt-import", input);
 export const exportDataset = (datasetId: string, format: DatasetFormat) =>
   api.text(`/api/datasets/${enc(datasetId)}/export`, { params: { format } });
+
+export const importDatasetData = (datasetId: string, input: { format: "json" | "jsonl"; content: string }) =>
+  api.post<Data[]>(`/api/datasets/${enc(datasetId)}/data/import`, input);

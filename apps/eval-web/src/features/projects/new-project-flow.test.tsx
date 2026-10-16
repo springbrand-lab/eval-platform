@@ -38,7 +38,7 @@ async function page() {
 
 async function prepare(container: HTMLElement) {
   await type(control(container, "名称"), "测试项目");
-  expect(button(container, "选择测试集与用例")).toBeUndefined();
+  expect(button(container, "选择数据集与用例")).toBeUndefined();
   expect(control(container, "样本")).toBeDefined();
   await click(control(container, "数据集")); await flush();
   await click(button(container, "下一步"));
@@ -98,7 +98,7 @@ it("shows groups inline, retains selection through collapse and search, and keep
   mocks.members.push({ ...mocks.members[0]!, dataId: "second", name: "第二用例" });
   const view = await page();
   try {
-    expect(button(view.container, "选择测试集与用例")).toBeUndefined();
+    expect(button(view.container, "选择数据集与用例")).toBeUndefined();
     await type(control(view.container, "名称"), "测试项目");
     await click(control(view.container, "样本"));
     await flush();
@@ -108,7 +108,7 @@ it("shows groups inline, retains selection through collapse and search, and keep
     await click(view.container.querySelector('[aria-label="展开 数据集"]'));
     await flush();
     expect(control(view.container, "样本").getAttribute("aria-checked")).toBe("true");
-    const search = view.container.querySelector<HTMLInputElement>('[aria-label="搜索测试集"]')!;
+    const search = view.container.querySelector<HTMLInputElement>('[aria-label="搜索数据集"]')!;
     await type(search, "没有匹配");
     expect(view.container.textContent).toContain("已选 1 条用例");
     await type(search, ""); await flush();
@@ -122,4 +122,15 @@ it("shows groups inline, retains selection through collapse and search, and keep
     await click(button(view.container, "创建并运行")); await flush();
     expect(mocks.create.mock.calls[0]?.[0].datasets).toEqual([{ datasetId: "dataset", dataIds: ["data", "second"] }]);
   } finally { await view.close(); }
+});
+
+it("preselects the source Dataset without creating a Project", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = await render(<TooltipProvider><QueryClientProvider client={client}><NewProjectPage datasetId="dataset" /></QueryClientProvider></TooltipProvider>);
+  try {
+    await vi.waitFor(() => expect(view.container.textContent).toContain("已选 1 条用例"));
+    expect(control(view.container, "样本").getAttribute("aria-checked")).toBe("true");
+    expect(view.container.textContent).toContain("不会更新已有项目");
+    expect(mocks.create).not.toHaveBeenCalled();
+  } finally { await view.unmount(); client.clear(); }
 });

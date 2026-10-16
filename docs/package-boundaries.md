@@ -181,3 +181,14 @@ The Eval UI reaches Chats through Sampling/Evaluation observation references rat
 The Chat ID is assigned before provisioning and reused after an uncertain creation response. `ensureAgent` retries retain the same creation facts and Chat ID; a separately requested re-evaluation receives a new Evaluator Chat and EvaluationRecord identity. Chat creation identity is distinct from the idempotency key used to submit or restart work inside that Chat.
 
 The eval project must not import SP private source files, use Web projections as facts, or read Durable Object SQLite directly.
+
+
+数据集维护：DatasetService.addData(datasetId, inputs) 校验全部输入并生成身份，DatasetStore.createDataBatch 在一个事务中创建全部 Data 及其关联，失败不保留部分用例。HTTP `POST /api/datasets/{datasetId}/data/import` 接受 `{format: "json" | "jsonl", content: string}`，采用用例列表的严格解析、资源引用限制及 prompt 文件/请求大小上限；返回 201 Data[]。原有完整文档导入的身份冲突和重放语义不变。Web 导航调整不改变 Subject/Evaluator、资源引用和项目冻结副本契约。
+
+
+项目结果工作台：ProjectOverview 额外返回去重的 projectSamples 行及每行当前 samplingIds，沿用同一事实快照和 Metrics 聚合口径，不由前端合计子层统计。默认是当前有效采样及评估结果，非历史运行总和；指定运行的范围仍由 runIds 控制。Web 将数据集作为筛选，按用例聚合、展开采样，单次采样直接打开结果抽屉；运行记录与配置分开展示。采样详情和抽屉共用结果组件，评估内容与产物优先、技术统计按需展开，文件预览复用已有只读 Workspace API 和公共渲染器，不读取 SP 私有存储。
+
+
+手动重新收集结果：POST /api/projects/{projectId}/samplings/{samplingId}/collect 与 /evaluations/{evaluationId}/collect 返回 202 {runId, queued}。仅接受归属匹配、最后 Attempt 为 completed 且有 Chat/Submission 的失败阶段；已成功为幂等无操作，重复待收集请求不重复入队，项目忙或 Run 已停止时拒绝。API 在 Project 行锁内设置 retrying + collectionPending，并原子提交原 Run 队列任务。Worker 只读取已有输出，不创建或重启 Agent/Attempt；执行侧必须归档产物和完整轨迹，评估侧保存原始结果并沿用校验和同步。失败清除待收集标记并保留错误，支持再次补收。补收执行不自动启动之前已取消的评估。当前运行查询允许旧 Run 因补收重新活跃，runSequence 仍是最大创建序号。
+
+Run evaluation lists omit optional output bodies and attempt resource snapshots at the HTTP boundary; full Evaluation details and persisted evidence remain unchanged. Runtime progress uses only evaluation memberships still owned by the Run; replaced evaluations do not become queued work.

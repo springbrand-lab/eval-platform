@@ -55,7 +55,11 @@ export const getProjectRun: AppRouteHandler<typeof routes.getProjectRun> = async
 
 export const listProjectRunEvaluations: AppRouteHandler<typeof routes.listProjectRunEvaluations> = async (c) => {
   const { projectId, runId } = c.req.valid("param");
-  return ok(c, { evaluations: (await requireProjectRun(c.var.services, projectId, runId)).evaluations });
+  const { evaluations } = await requireProjectRun(c.var.services, projectId, runId);
+  return ok(c, { evaluations: evaluations.map(({ output: _output, attempts, ...record }) => ({
+    ...record,
+    attempts: attempts.map(({ resources: _resources, ...attempt }) => attempt),
+  })) });
 };
 
 export const getSampling: AppRouteHandler<typeof routes.getSampling> = async (c) =>
@@ -69,3 +73,12 @@ export const listSamplingEvaluations: AppRouteHandler<typeof routes.listSampling
 
 export const getEvaluation: AppRouteHandler<typeof routes.getEvaluation> = async (c) =>
   ok(c, await c.var.services.results.getEvaluation(c.req.valid("param").evaluationId));
+
+export const collectExecution: AppRouteHandler<typeof routes.collectExecution> = async (c) => {
+  const { projectId, samplingId } = c.req.valid("param");
+  return ok(c, await c.var.services.projectRuns.recollect(projectId, "execution", samplingId), 202);
+};
+export const collectEvaluation: AppRouteHandler<typeof routes.collectEvaluation> = async (c) => {
+  const { projectId, evaluationId } = c.req.valid("param");
+  return ok(c, await c.var.services.projectRuns.recollect(projectId, "evaluation", evaluationId), 202);
+};

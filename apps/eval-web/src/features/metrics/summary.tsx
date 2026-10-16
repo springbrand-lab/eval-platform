@@ -29,7 +29,7 @@ export function OutputPreview({ outputs }: { outputs: EvaluationOutputSummary })
 
 export function OutputFields({ outputs }: { outputs: EvaluationOutputSummary }) {
   return <Card>
-    <CardHeader title="Schema 评估输出" description={`有效 ${outputs.validation.valid} · 无效 ${outputs.validation.invalid} · 未获得 ${outputs.validation.unavailable}`} />
+    <CardHeader title="评估指标统计" description={`有效 ${outputs.validation.valid} · 无效 ${outputs.validation.invalid} · 未获得 ${outputs.validation.unavailable}`} />
     <CardBody className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-4">
       {outputs.fields.length === 0 && <p className="text-sm text-text-muted">暂无可统计字段。原始结果可在采样详情查看。</p>}
       {outputs.fields.map((field) => <section key={field.jsonPointer} className="min-w-0 rounded-lg border border-border p-4">

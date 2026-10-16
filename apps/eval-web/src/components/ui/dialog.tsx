@@ -19,34 +19,36 @@ export interface DialogProps {
   children?: ReactNode;
   footer?: ReactNode;
   size?: "sm" | "md" | "lg";
+  placement?: "center" | "right";
+  compact?: boolean;
 }
 
-export function Dialog({ open, onClose, title, description, children, footer, size = "md" }: DialogProps) {
+export function Dialog({ open, onClose, title, description, children, footer, size = "md", placement = "center", compact = false }: DialogProps) {
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className={overlay} />
-        <DialogPrimitive.Content className={cn(content, widths[size])}>
-          <div className="flex items-start justify-between gap-4 px-5 pb-3 pt-5">
+        <DialogPrimitive.Content className={cn(content, widths[size], placement === "right" && "left-auto right-0 top-0 h-dvh max-h-dvh w-full max-w-5xl translate-x-0 translate-y-0 rounded-none")}>
+          <div className={cn("flex items-start justify-between gap-4 px-5 pb-3 pt-5", compact && "px-4 py-2")}>
             <div>
               <DialogPrimitive.Title className="text-base font-semibold text-text-strong">{title}</DialogPrimitive.Title>
               {description
-                ? <DialogPrimitive.Description className="mt-1 text-[13px] leading-relaxed text-text-muted">{description}</DialogPrimitive.Description>
+                ? <DialogPrimitive.Description className={compact ? "sr-only" : "mt-1 text-[13px] leading-relaxed text-text-muted"}>{description}</DialogPrimitive.Description>
                 : <DialogPrimitive.Description className="sr-only">{title}</DialogPrimitive.Description>}
             </div>
             <DialogPrimitive.Close className="-mr-1 rounded-md p-1 text-text-muted hover:bg-surface-muted hover:text-text-strong" aria-label="关闭">
               <X className="size-4" />
             </DialogPrimitive.Close>
           </div>
-          {children && <div className="overflow-y-auto px-5 pb-4">{children}</div>}
-          {footer && <div className="flex justify-end gap-2 border-t border-border px-5 py-3">{footer}</div>}
+          {children && <div className={cn("overflow-y-auto px-5 pb-4", compact && "px-4 pb-3")}>{children}</div>}
+          {footer && <div className={cn("flex justify-end gap-2 border-t border-border px-5 py-3", compact && "px-4 py-2")}>{footer}</div>}
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
   );
 }
 
-export function ConfirmDialog({ open, onClose, onConfirm, title, description, confirmLabel = "确认", danger, loading }: {
+export function ConfirmDialog({ open, onClose, onConfirm, title, description, confirmLabel = "确认", danger, loading, disabled }: {
   open: boolean;
   onClose: () => void;
   onConfirm: () => void;
@@ -55,6 +57,7 @@ export function ConfirmDialog({ open, onClose, onConfirm, title, description, co
   confirmLabel?: string;
   danger?: boolean;
   loading?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <AlertPrimitive.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
@@ -68,7 +71,7 @@ export function ConfirmDialog({ open, onClose, onConfirm, title, description, co
           <div className="flex justify-end gap-2 border-t border-border px-5 py-3">
             <AlertPrimitive.Cancel asChild><Button size="sm">取消</Button></AlertPrimitive.Cancel>
             {/* Not AlertPrimitive.Action: it would close before an async confirm can show its loading state. */}
-            <Button size="sm" variant={danger ? "danger" : "primary"} loading={loading} onClick={onConfirm}>{confirmLabel}</Button>
+            <Button size="sm" variant={danger ? "danger" : "primary"} loading={loading} disabled={disabled} onClick={onConfirm}>{confirmLabel}</Button>
           </div>
         </AlertPrimitive.Content>
       </AlertPrimitive.Portal>

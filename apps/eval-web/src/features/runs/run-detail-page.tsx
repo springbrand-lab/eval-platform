@@ -9,12 +9,13 @@ import type { EvaluationRecord } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardBody, CardHeader } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
-import { CopyId, ProgressBar } from "@/components/ui/data-display";
+import { CopyId } from "@/components/ui/data-display";
 import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
 import { formatDateTime, OPERATION_LABELS } from "@/lib/format";
-import { SummaryCards } from "@/features/metrics/summary";
+import { OutputFields } from "@/features/metrics/summary";
+import { ResourceMetrics } from "@/features/metrics/resource-metrics";
 import { isFinished, runPhaseLabel } from "./run-status";
 import { POLL_MS, useRun } from "./use-run-polling";
 import { useProject } from "@/features/projects/use-project";
@@ -60,70 +61,64 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
 
   return (
     <Page>
-      <PageHeader
+      <PageHeader compact
         title={`Run ${runId.slice(0, 8)}`}
-        crumbs={[{ label: "Project", to: "/projects" }, { label: view.data?.project.name ?? "Project", to: "/projects/$projectId", params: { projectId } }]}
+        crumbs={[{ label: "项目管理", to: "/projects" }, { label: view.data?.project.name ?? "返回项目", to: "/projects/$projectId", params: { projectId } }]}
         meta={snapshot && <><StatusBadge status={snapshot.status} />{active && <span className="text-[13px] text-text-muted">{runPhaseLabel(snapshot)}</span>}</>}
         actions={(
           <>
-            {unsynced > 0 && <Button icon={<RefreshCw />} loading={sync.isPending} onClick={() => sync.mutate()}>同步可用分数</Button>}
-            {active && !snapshot?.stopRequested && <Button variant="outline-danger" icon={<Square />} onClick={() => setStopTarget({ projectId, runId })}>停止</Button>}
+            {unsynced > 0 && <Button size="sm" variant="ghost" icon={<RefreshCw />} loading={sync.isPending} onClick={() => sync.mutate()}>同步可用分数</Button>}
+            {active && !snapshot?.stopRequested && <Button size="sm" variant="outline-danger" icon={<Square />} onClick={() => setStopTarget({ projectId, runId })}>停止</Button>}
           </>
         )}
       />
       {view.error && <ErrorBlock error={view.error} onRetry={() => void view.refetch()} />}
       {run.isPending ? <LoadingBlock /> : run.error ? <ErrorBlock error={run.error} onRetry={() => void run.refetch()} /> : snapshot && (
-        <div className="flex flex-col gap-5">
-          <Card>
-            <CardBody className="grid gap-x-8 gap-y-3 sm:grid-cols-2 xl:grid-cols-4">
-              {[
-                { label: "操作", value: OPERATION_LABELS[snapshot.operation] },
-                { label: "采样 / 评估", value: `${snapshot.samplingIds.length} / ${snapshot.evaluationIds.length}` },
-                { label: "Eval SP commit", value: <CopyId value={snapshot.sourceCommit} length={10} /> },
-                { label: "Run ID", value: <CopyId value={snapshot.runId} length={13} /> },
-              ].map((item) => (
-                <div key={item.label} className="min-w-0">
-                  <p className="text-xs text-text-muted">{item.label}</p>
-                  <div className="mt-1 text-[13px] font-semibold text-text-strong">{item.value}</div>
-                </div>
-              ))}
-              {overview.data && (
-                <div className="sm:col-span-2 xl:col-span-4">
-                  <ProgressBar
-                    total={overview.data.summary.counts.samplings + overview.data.summary.counts.evaluations}
-                    segments={[
-                      { label: "执行成功", value: overview.data.summary.execution.statuses.succeeded, tone: "success" },
-                      { label: "评估成功", value: overview.data.summary.evaluation.statuses.succeeded, tone: "success" },
-                      { label: "进行中", value: (["running", "starting", "retrying"] as const).reduce((sum, key) => sum + overview.data.summary.execution.statuses[key] + overview.data.summary.evaluation.statuses[key], 0), tone: "warning" },
-                      { label: "排队", value: overview.data.summary.execution.statuses.queued + overview.data.summary.evaluation.statuses.queued, tone: "neutral" },
-                      { label: "失败", value: overview.data.summary.execution.statuses.failed + overview.data.summary.evaluation.statuses.failed, tone: "danger" },
-                    ]}
-                  />
-                </div>
-              )}
-            </CardBody>
-          </Card>
+        <div className="flex flex-col gap-3">
+          <div aria-label="运行摘要" className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-text-muted">
+            <span>{OPERATION_LABELS[snapshot.operation]}</span>
+            <span>采样 <strong className="font-medium text-text-strong">{snapshot.samplingIds.length}</strong></span>
+            <span>评估 <strong className="font-medium text-text-strong">{snapshot.evaluationIds.length}</strong></span>
+            {overview.data && <><span>执行成功 {overview.data.summary.execution.statuses.succeeded}</span><span>评估成功 {overview.data.summary.evaluation.statuses.succeeded}</span><span>有效结果 {overview.data.summary.evaluationOutputs.validation.valid}</span></>}
+          </div>
           {snapshot.stopRequested && !isFinished(snapshot.status) && <Notice tone="warning">正在停止：正在中断已运行的 Agent，并收集已产生的结果。</Notice>}
-          {overview.data && <SummaryCards summary={overview.data.summary} />}
           <Card>
-            <CardHeader title={`评估（${records.length}）`} />
-            {evaluations.isPending ? <LoadingBlock /> : evaluations.error ? <div className="p-4"><ErrorBlock error={evaluations.error} /></div> : (
+            <div className="flex items-center justify-between border-b border-border px-3 py-2"><h2 className="text-xs font-semibold">评估列表</h2><span className="text-[11px] text-text-muted">点击记录查看采样结果</span></div>
+            {evaluations.isPending ? <LoadingBlock /> : evaluations.error ? <div className="p-3"><ErrorBlock error={evaluations.error} /></div> : (
               <DataTable<EvaluationRecord>
                 rows={records}
                 rowKey={(row) => row.evaluationId}
                 onRowClick={(row) => void navigate({ to: "/projects/$projectId/samplings/$samplingId", params: { projectId, samplingId: row.samplingId } })}
-                empty={<p className="px-4 py-6 text-sm text-text-muted">这个 Run 没有评估。</p>}
+                empty={<p className="px-3 py-4 text-xs text-text-muted">这个 Run 没有评估。</p>}
                 columns={[
                   { key: "sampling", header: "采样", cell: (row) => <CopyId value={row.samplingId} /> },
                   { key: "status", header: "状态", cell: (row) => <StatusBadge status={row.status.status} />, sortValue: (row) => row.status.status },
-                  { key: "result", header: "结果", cell: (row) => <span className="line-clamp-2 max-w-xl text-text-muted">{row.status.lastError ?? "无错误。点击查看 Schema 结果"}</span> },
+                  { key: "result", header: "异常信息", cell: (row) => <span className="line-clamp-2 max-w-xl text-text-muted">{row.status.lastError ?? "—"}</span> },
                   { key: "sync", header: "Langfuse", cell: (row) => <ScoreSyncBadge record={row} /> },
                   { key: "attempts", header: "尝试", align: "right", cell: (row) => row.attempts.length },
                 ]}
               />
             )}
           </Card>
-          <p className="text-xs text-text-faint">
+          {overview.error && <ErrorBlock error={overview.error} onRetry={() => void overview.refetch()} />}
+          {overview.data && <>
+            <details className="rounded-lg border border-border bg-surface">
+              <summary className="cursor-pointer px-3 py-2.5 text-xs font-medium">评估指标统计<span className="ml-3 font-normal text-text-muted">有效 {overview.data.summary.evaluationOutputs.validation.valid} · 无效 {overview.data.summary.evaluationOutputs.validation.invalid} · 未获得 {overview.data.summary.evaluationOutputs.validation.unavailable}</span></summary>
+              <div className="border-t border-border p-3"><OutputFields outputs={overview.data.summary.evaluationOutputs} /></div>
+            </details>
+            {([
+              ["执行 Agent", overview.data.summary.executionAgent, overview.data.summary.execution],
+              ["评估 Agent", overview.data.summary.evaluationAgents, overview.data.summary.evaluation],
+            ] as const).map(([title, statistics, stage]) => <details key={title} className="rounded-lg border border-border bg-surface">
+              <summary className="cursor-pointer px-3 py-2.5 text-xs font-medium">{title} · 资源统计<span className="ml-3 font-normal text-text-muted">已结束 {stage.terminalRecords} / {stage.records}</span></summary>
+              <div className="border-t border-border p-3"><ResourceMetrics statistics={statistics} distribution={statistics.distribution} durations={stage} /></div>
+            </details>)}
+          </>}
+          <details className="rounded-lg border border-border bg-surface">
+            <summary className="cursor-pointer px-3 py-2.5 text-xs font-medium">运行信息</summary>
+            <dl className="flex flex-wrap gap-x-8 gap-y-3 border-t border-border p-3 text-xs"><div><dt className="mb-1 text-text-muted">Run ID</dt><dd><CopyId value={snapshot.runId} /></dd></div><div><dt className="mb-1 text-text-muted">Eval SP commit</dt><dd><CopyId value={snapshot.sourceCommit} /></dd></div></dl>
+          </details>
+          <p className="text-[11px] text-text-faint">
             最后更新 {formatDateTime(new Date(run.dataUpdatedAt).toISOString())}
             {active && "，每 5 秒自动刷新"}
           </p>

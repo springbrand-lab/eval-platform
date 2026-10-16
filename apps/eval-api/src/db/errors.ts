@@ -75,3 +75,7 @@ export class ProjectRunStopConflictError extends Error {
     this.name = "ProjectRunStopConflictError";
   }
 }
+
+export class ResultCollectionConflictError extends Error {
+  constructor() { super("Only a failed stage with a completed Agent in a non-stopped Run can recollect results"); this.name = "ResultCollectionConflictError"; }
+}

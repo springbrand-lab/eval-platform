@@ -181,3 +181,14 @@ export const exportDocument = createRoute({
     ...notFoundResponse,
   },
 });
+
+export const importData = createRoute({
+  method: "post", path: "/{datasetId}/data/import", tags: ["Dataset"],
+  summary: "Atomically append a JSON or JSONL case list to a Dataset",
+  middleware: [jsonBody(PROMPT_IMPORT_BODY_BYTES)],
+  request: { params, body: jsonBodyContent(promptDatasetUploadSchema.omit({ name: true, description: true }).refine(
+    (upload) => Buffer.byteLength(upload.content, "utf8") <= PROMPT_DATASET_FILE_BYTES,
+    { path: ["content"], message: `must be at most ${PROMPT_DATASET_FILE_BYTES} bytes` },
+  )) },
+  responses: { 201: jsonContent(responseSchema(z.array(z.custom<Data>()).readonly()), "Imported cases"), ...bodyErrorResponses, ...notFoundResponse },
+});

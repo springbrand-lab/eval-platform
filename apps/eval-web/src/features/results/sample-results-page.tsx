@@ -30,8 +30,8 @@ export function SampleResultsPage({ projectId, projectSampleId }: { projectId: s
       {view.error && <ErrorBlock error={view.error} onRetry={() => void view.refetch()} />}
       {!view.data ? view.isPending && <LoadingBlock /> : overview.isPending ? <LoadingBlock /> : overview.error ? <ErrorBlock error={overview.error} onRetry={() => void overview.refetch()} /> : (
         <div className="flex flex-col gap-5">
-          <nav aria-label="所属测试集" className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="text-text-muted">所属测试集</span>
+          <nav aria-label="所属数据集" className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-text-muted">所属数据集</span>
             {view.data.datasets.filter((dataset) => sample?.datasetIds.includes(dataset.datasetId)).map((dataset) => (
               <Link key={dataset.datasetId} to="/projects/$projectId/datasets/$datasetId" params={{ projectId, datasetId: dataset.datasetId }}
                 className="rounded-md border border-border bg-surface px-2.5 py-1 text-text-strong hover:bg-surface-hover">{dataset.name}</Link>

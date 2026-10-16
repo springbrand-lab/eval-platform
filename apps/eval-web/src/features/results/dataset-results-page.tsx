@@ -21,9 +21,9 @@ export function DatasetResultsPage({ projectId, datasetId }: { projectId: string
   return (
     <Page>
       <PageHeader
-        title={overview.data?.dataset.name ?? "测试集"}
+        title={overview.data?.dataset.name ?? "数据集"}
         actions={<Button asChild><Link to="/projects/$projectId/runs/new" params={{ projectId }} search={{ datasetId }}>重跑 / 评估</Link></Button>}
-        description="测试集结果 · 查看每条用例的执行、评估与采样表现。"
+        description="数据集结果 · 查看每条用例的执行、评估与采样表现。"
         crumbs={[{ label: "项目管理", to: "/projects" }, { label: view.data?.project.name ?? "Project", to: "/projects/$projectId", params: { projectId } }]}
       />
       {view.error && <ErrorBlock error={view.error} onRetry={() => void view.refetch()} />}

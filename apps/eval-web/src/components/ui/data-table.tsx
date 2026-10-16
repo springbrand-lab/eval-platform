@@ -28,6 +28,7 @@ export interface DataTableProps<T> {
   rows: readonly T[];
   columns: readonly Column<T>[];
   rowKey: (row: T) => string;
+  rowLabel?: (row: T) => string;
   /** Present: a search box filters rows by this text. */
   searchText?: (row: T) => string;
   searchPlaceholder?: string;
@@ -45,7 +46,7 @@ const ROW_HEIGHT = 44;
 
 /** TanStack Table with local sorting, search and selection; long lists are virtualized with TanStack Virtual. */
 export function DataTable<T>({
-  rows, columns, rowKey, searchText, searchPlaceholder = "搜索", onRowClick, empty, toolbar,
+  rows, columns, rowKey, rowLabel, searchText, searchPlaceholder = "搜索", onRowClick, empty, toolbar,
   selectable, selected, onSelectedChange,
 }: DataTableProps<T>) {
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -187,7 +188,7 @@ export function DataTable<T>({
                     return (
                       <TableCell key={cell.id} onClick={cell.column.id === "__select" ? (event) => event.stopPropagation() : undefined}
                         className={cn("h-11 px-4 py-2 align-middle", meta?.align === "right" && "text-right tabular", meta?.className)}>
-                        {cell.column.id === "__select" ? <Checkbox aria-label="选择" checked={row.getIsSelected()} onCheckedChange={(value) => row.toggleSelected(value)} />
+                        {cell.column.id === "__select" ? <Checkbox aria-label={`选择 ${rowLabel?.(row.original) ?? rowKey(row.original)}`} checked={row.getIsSelected()} onCheckedChange={(value) => row.toggleSelected(value)} />
                           : columnsByKey.get(cell.column.id)!.cell(row.original)}
                       </TableCell>
                     );

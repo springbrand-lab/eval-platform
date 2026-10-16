@@ -1,3 +1,4 @@
+import { dataInputSchema, parsePromptDatasetUpload } from "@eval-platform/eval-dataset";
 import { ok } from "@eval-platform/eval-contracts/http";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 import { readTextBody } from "../../lib/request-body.js";
@@ -52,4 +53,9 @@ export const exportDocument: AppRouteHandler<typeof routes.exportDocument> = asy
   const { format } = c.req.valid("query");
   const document = await c.var.services.datasets.exportDataset(c.req.valid("param").datasetId, format);
   return c.body(document, 200, { "Content-Type": DOCUMENT_MEDIA_TYPES[format] });
+};
+
+export const importData: AppRouteHandler<typeof routes.importData> = async (c) => {
+  const document = parsePromptDatasetUpload({ ...c.req.valid("json"), name: "import", description: "import" });
+  return ok(c, await c.var.services.datasets.addData(c.req.valid("param").datasetId, dataInputSchema.array().parse(document.data)), 201);
 };

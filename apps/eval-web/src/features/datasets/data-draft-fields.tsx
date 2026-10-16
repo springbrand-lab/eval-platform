@@ -37,8 +37,8 @@ export function createDataDraft(data?: Data): DataDraft {
 export function buildDataInput(draft: DataDraft): DataInput | string {
   if (!draft.name.trim()) return "名称不能为空";
   if (!draft.description.trim()) return "说明不能为空";
-  if (!draft.userPrompt.trim()) return "userPrompt 不能为空";
-  if (!draft.evalPrompt.trim()) return "evalPrompt 不能为空";
+  if (!draft.userPrompt.trim()) return "请填写执行任务";
+  if (!draft.evalPrompt.trim()) return "请填写评估要求";
   let extra: unknown;
   try {
     extra = parseStrictJson(draft.extra || "{}");
@@ -48,7 +48,7 @@ export function buildDataInput(draft: DataDraft): DataInput | string {
   if (!extra || typeof extra !== "object" || Array.isArray(extra)) return "业务字段需要是一个 JSON 对象";
   const reserved = Object.keys(extra).find((key) => KNOWN.has(key));
   if (reserved) return `业务字段不能包含 ${reserved}`;
-  for (const [label, picked] of [...draft.initialMaterials.map((item) => ["素材", item] as const), ...draft.evalInitialMaterials.map((item) => ["评估 Agent 素材", item] as const), ["初始上下文", draft.initialSession] as const]) {
+  for (const [label, picked] of [...draft.initialMaterials.map((item) => ["素材", item] as const), ...draft.evalInitialMaterials.map((item) => ["评估 Agent 素材", item] as const), ["初始对话", draft.initialSession] as const]) {
     if (picked && !picked.id) return `请选择${label}，或取消绑定`;
   }
   const parsed = dataInputSchema.safeParse({
@@ -70,7 +70,7 @@ export function DataDraftFields({ draft, onChange, errors = {} }: {
   const set = <K extends keyof DataDraft>(key: K, value: DataDraft[K]) => onChange((current) => ({ ...current, [key]: value }));
   return <>
     <Card>
-      <CardHeader title="样本" />
+      <CardHeader title="用例" />
       <CardBody className="flex flex-col gap-4">
         <Field label="名称" required error={errors.name}>
           {(id) => <Input id={id} required value={draft.name} onChange={(event) => set("name", event.target.value)} />}
@@ -78,27 +78,28 @@ export function DataDraftFields({ draft, onChange, errors = {} }: {
         <Field label="说明" required error={errors.description}>
           {(id) => <Textarea id={id} required rows={3} value={draft.description} onChange={(event) => set("description", event.target.value)} />}
         </Field>
-        <Field label="启动 Prompt" required error={errors.userPrompt}>
+        <Field label="执行任务" required error={errors.userPrompt}>
           {(id) => <Textarea id={id} required rows={6} value={draft.userPrompt} onChange={(event) => set("userPrompt", event.target.value)} />}
         </Field>
-        <Field label="评估 Prompt" required error={errors.evalPrompt}>
+        <Field label="评估要求" required error={errors.evalPrompt}>
           {(id) => <Textarea id={id} required rows={6} value={draft.evalPrompt} onChange={(event) => set("evalPrompt", event.target.value)} />}
         </Field>
       </CardBody>
     </Card>
-    <Card>
-      <CardHeader title="初始资源" />
+    <details className="rounded-lg border border-border bg-surface" open={!!(draft.initialMaterials.length || draft.evalInitialMaterials.length || draft.initialSession)}>
+      <summary className="cursor-pointer p-4 text-sm font-medium">可选输入 · 素材与初始对话{(draft.initialMaterials.length + draft.evalInitialMaterials.length + (draft.initialSession ? 1 : 0)) > 0 && `（已添加 ${draft.initialMaterials.length + draft.evalInitialMaterials.length + (draft.initialSession ? 1 : 0)} 项）`}</summary>
+      <p className="px-4 pb-3 text-xs text-text-muted">需要文件或历史对话时再添加；执行与评估的素材分别提供给对应 Agent。</p>
       <CardBody className="flex flex-col gap-4">
         <Field label="执行 Agent 的素材">{() => <MaterialPickerList label="执行素材" value={draft.initialMaterials} onChange={(value) => set("initialMaterials", value)} />}</Field>
         <Field label="评估 Agent 的素材">{() => <MaterialPickerList label="评估素材" value={draft.evalInitialMaterials} onChange={(value) => set("evalInitialMaterials", value)} />}</Field>
-        <Field label="执行 Agent 的初始会话">{() => <ResourcePicker kind="session" label="执行上下文" value={draft.initialSession} onChange={(value) => set("initialSession", value)} />}</Field>
+        <Field label="执行 Agent 的初始对话">{() => <ResourcePicker kind="session" label="执行初始对话" value={draft.initialSession} onChange={(value) => set("initialSession", value)} />}</Field>
       </CardBody>
-    </Card>
-    <Card>
-      <CardHeader title="其他字段" actions={<span className="text-xs text-text-muted">JSON，原样保存</span>} />
+    </details>
+    <details className="rounded-lg border border-border bg-surface">
+      <summary className="cursor-pointer p-4 text-sm font-medium">高级设置 · 其他 JSON 字段</summary>
       <CardBody>
         <Field label="JSON">{(id) => <Textarea id={id} mono rows={8} value={draft.extra} onChange={(event) => set("extra", event.target.value)} />}</Field>
       </CardBody>
-    </Card>
+    </details>
   </>;
 }

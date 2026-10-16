@@ -108,16 +108,18 @@ export async function executeSampling(
   };
 
   try {
-    if (current.execution.evidencePending) {
+    if (current.execution.evidencePending || current.execution.collectionPending) {
       const attempt = current.executionAttempts.at(-1);
       if (!current.subjectChatId || !attempt?.submissionId || !attempt.completedAt) {
         throw new AgentOperationError("Pending Subject evidence has no terminal Submission", false, "network");
       }
+      if (current.execution.collectionPending && attempt.status !== "completed") throw new AgentOperationError("Only a completed Subject can recollect output", false, "network");
       let output: ExecutionOutput;
       try {
         output = await collectEvidence(current.subjectChatId);
       } catch (collectionError) {
         reportEvidenceError(collectionError);
+        if (current.execution.collectionPending) await persist(withExecutionStatus(current, "failed", `execution output collection failed: ${describeAgentError(collectionError).message}`));
         return { state: current, sample };
       }
       const succeeded = attempt.status === "completed" && output.status === "succeeded";

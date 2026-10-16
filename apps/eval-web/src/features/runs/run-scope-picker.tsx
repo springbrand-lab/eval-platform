@@ -61,7 +61,7 @@ export function RunScopePicker({ project, value, onChange, disabled, initialSamp
     onChange(next);
   };
   const summary = value.all ? `整个项目 · ${project.projectSamples.length} 条用例` : [
-    datasets.size > 0 && `${datasets.size} 个测试集`, samples.size > 0 && `${samples.size} 条用例`, samplings.size > 0 && `${samplings.size} 个采样`,
+    datasets.size > 0 && `${datasets.size} 个数据集`, samples.size > 0 && `${samples.size} 条用例`, samplings.size > 0 && `${samplings.size} 个采样`,
   ].filter(Boolean).join(" · ") || "请选择运行范围";
   const visible = project.datasets.map((dataset) => {
     const matches = `${dataset.name} ${dataset.description ?? ""}`.toLowerCase().includes(query);
@@ -72,9 +72,9 @@ export function RunScopePicker({ project, value, onChange, disabled, initialSamp
     return { dataset, cases, matches };
   }).filter(({ matches, cases }) => matches || cases.length > 0);
   return <div className="flex flex-col gap-3">
-    <HierarchyPicker summary={summary} disabled={disabled} path="项目 → 测试集 → 用例 → 已有采样">
+    <HierarchyPicker summary={summary} disabled={disabled} path="项目 → 数据集 → 用例 → 已有采样">
       <div className="flex items-center gap-2 border-b border-border p-3">
-        <Input aria-label="搜索测试集或用例" placeholder="搜索测试集或用例" value={search} disabled={disabled} onChange={(event) => setSearch(event.target.value)} />
+        <Input aria-label="搜索数据集或用例" placeholder="搜索数据集或用例" value={search} disabled={disabled} onChange={(event) => setSearch(event.target.value)} />
         <Button type="button" variant="ghost" size="sm" disabled={disabled || (!value.all && !datasets.size && !samples.size && !samplings.size)} onClick={() => !disabled && onChange({})}>清空选择</Button>
       </div>
       <div className="max-h-[min(55vh,28rem)] overflow-y-auto p-2">
@@ -85,7 +85,7 @@ export function RunScopePicker({ project, value, onChange, disabled, initialSamp
             const inherited = !!value.all;
             const full = inherited || datasets.has(dataset.datasetId);
             const partial = dataset.projectSampleIds.some((id) => samples.has(id) || inheritedSamples.has(id) || sampledCases.has(id));
-            return <HierarchyBranch key={dataset.datasetId} label={dataset.name} detail={`测试集 · ${dataset.projectSampleIds.length} 条用例`}
+            return <HierarchyBranch key={dataset.datasetId} label={dataset.name} detail={`数据集 · ${dataset.projectSampleIds.length} 条用例`}
               forceOpen={!!query} checked={full || (partial ? "indeterminate" : false)} disabled={disabled || inherited}
               onCheckedChange={(checked) => update("datasetIds", dataset.datasetId, checked)}>
               {cases.map((sample) => {
@@ -101,7 +101,7 @@ export function RunScopePicker({ project, value, onChange, disabled, initialSamp
               })}
             </HierarchyBranch>;
           })}
-          {visible.length === 0 && <p className="p-3 text-sm text-text-muted">没有匹配的测试集或用例。</p>}
+          {visible.length === 0 && <p className="p-3 text-sm text-text-muted">没有匹配的数据集或用例。</p>}
         </HierarchyBranch>
       </div>
       <div className="border-t border-border bg-surface-muted/50 px-4 py-3 text-xs leading-5 text-text-muted">

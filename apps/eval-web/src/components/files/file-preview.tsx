@@ -28,8 +28,8 @@ interface ParsedPreview {
 }
 
 /** Shared read-only host. Query caches bytes; renderer state and linked-resource work live only with this selection. */
-export function FilePreview({ file, queryKey, readFile, refetchInterval = false }: {
-  file: PreviewFile; queryKey: QueryKey; readFile: ReadPreviewFile; refetchInterval?: number | false;
+export function FilePreview({ file, queryKey, readFile, refetchInterval = false, compact = false }: {
+  file: PreviewFile; queryKey: QueryKey; readFile: ReadPreviewFile; refetchInterval?: number | false; compact?: boolean;
 }) {
   const request = useQuery({ queryKey, queryFn: ({ signal }) => readFile(file.path, signal), staleTime: 0, refetchInterval });
   const blob = request.data;
@@ -72,9 +72,9 @@ export function FilePreview({ file, queryKey, readFile, refetchInterval = false 
   const source = request.isSuccess ? (current?.status === "failed" ? current.text : preview?.text ?? null) : null;
   const mimeType = file.mediaType || blob?.type || "未知类型";
   const retry = () => { void request.refetch(); };
-  return <section aria-label="文件预览" className="flex min-w-0 flex-1 flex-col gap-3">
+  return <section aria-label="文件预览" className={`flex min-w-0 flex-1 flex-col ${compact ? "gap-2" : "gap-3"}`}>
     <header className="flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0"><h2 className="break-all font-mono text-sm">{file.path}</h2>
+      <div className="min-w-0"><h2 className={`break-all font-mono ${compact ? "text-xs" : "text-sm"}`}>{file.path}</h2>
         <p className="mt-1 text-xs text-text-muted">{mimeType}{(blob?.size ?? file.byteSize) !== undefined && ` · ${formatBytes(blob?.size ?? file.byteSize!)}`}</p></div>
       <div className="flex items-center gap-2">
         {source !== null && <FileViewSwitch mode={mode} onModeChange={setMode} />}
@@ -82,7 +82,7 @@ export function FilePreview({ file, queryKey, readFile, refetchInterval = false 
         {download && <Button asChild size="sm" variant="outline"><a href={download} download={file.name}><Download className="size-3.5" />下载</a></Button>}
       </div>
     </header>
-    <div className="min-h-[55dvh] min-w-0 rounded-[var(--radius-card)] border border-border bg-surface">
+    <div className={`min-w-0 rounded-[var(--radius-card)] border border-border bg-surface ${compact ? "h-[50dvh] min-h-64 overflow-auto" : "min-h-[55dvh]"}`}>
       {mode === "source" && source !== null ? <FileRendererSource text={source} />
         : failed ? <ErrorBlock error={error} onRetry={retry} /> : !preview ? <LoadingBlock rows={6} /> :
         <FileRendererErrorBoundary key={request.dataUpdatedAt} fallback={(failure) => <ErrorBlock error={failure} onRetry={retry} />}>

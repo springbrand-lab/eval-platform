@@ -17,16 +17,17 @@ import {
   RuntimeRunIdentityConflictError,
   RuntimeRunStoppedError,
 } from "@eval-platform/eval-runtime";
-import { and, desc, eq, gt, inArray, max } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, max, sql } from "drizzle-orm";
 import { addToGroup, selectByIds, sqlBatches } from "./batch.js";
 import type { RunQueue } from "../run-worker-queue.js";
 import { constraintViolation, READ_SNAPSHOT, type EvalDb } from "./client.js";
-import { ProjectRunStopConflictError } from "./errors.js";
+import { ProjectRunStopConflictError, ResultCollectionConflictError } from "./errors.js";
 import { requireOwnerUserId } from "./owner.js";
 import { visibleProject } from "./project-plans.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
 import {
   evaluationFacts,
+  evaluationFromRow,
   listSamplingEvaluations,
   projectHasRun,
   readEvaluations,
@@ -310,10 +311,10 @@ async function admitRun(
   return { run: structuredClone(run), created: true };
 }
 
-/** Admission serializes Runs, so only the latest one can still be active. */
+/** Collection recovery can reactivate an older Run; keep the creation sequence monotonic. */
 export async function readProjectRunState(reader: RecordReader, ownerUserId: string, projectId: string): Promise<ProjectRunState> {
-  const [latest] = await reader.select({ runId: runs.runId, sequence: runs.sequence, stopRequested: runs.stopRequested, active: runActive(reader) })
-    .from(runs).where(and(eq(runs.ownerUserId, ownerUserId), eq(runs.projectId, projectId))).orderBy(desc(runs.sequence)).limit(1);
+  const [latest] = await reader.select({ runId: runs.runId, sequence: sql<number>`max(${runs.sequence}) over ()`, stopRequested: runs.stopRequested, active: runActive(reader) })
+    .from(runs).where(and(eq(runs.ownerUserId, ownerUserId), eq(runs.projectId, projectId))).orderBy(desc(runActive(reader)), desc(runs.sequence)).limit(1);
   return {
     runSequence: latest?.sequence ?? 0,
     currentRun: latest?.active ? { runId: latest.runId, ...(latest.stopRequested ? { stopRequested: true as const } : {}) } : null,
@@ -468,6 +469,49 @@ export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string,
   return {
     async getCurrentRun(projectId: string): Promise<CurrentRun | null> {
       return (await readProjectRunState(db, owner, projectId)).currentRun;
+    },
+    async recollect(projectId: string, kind: "execution" | "evaluation", id: string): Promise<{ runId: string; queued: boolean }> {
+      return db.transaction(async (transaction) => {
+        const [project] = await transaction.select({ id: projects.projectId }).from(projects).where(visibleProject(projectId, owner)).for("update");
+        if (!project) throw new RuntimeEntityNotFoundError("project", projectId);
+        const [evaluationRow] = kind === "evaluation" ? await transaction.select().from(evaluations)
+          .where(and(eq(evaluations.ownerUserId, owner), eq(evaluations.evaluationId, id))).for("update") : [];
+        if (kind === "evaluation" && !evaluationRow) throw new RuntimeEntityNotFoundError("evaluation", id);
+        const [samplingRow] = await transaction.select().from(samplings).where(and(eq(samplings.ownerUserId, owner),
+          eq(samplings.projectId, projectId), eq(samplings.samplingId, evaluationRow?.samplingId ?? id))).for("update");
+        if (!samplingRow) throw new RuntimeEntityNotFoundError(kind === "evaluation" ? "evaluation" : "sampling", id);
+        const sampling = samplingFromRow(samplingRow);
+        const evaluation = evaluationRow ? evaluationFromRow(evaluationRow) : null;
+        const [run] = evaluation
+          ? await transaction.select({ runId: runs.runId, stopped: runs.stopRequested }).from(runs)
+            .innerJoin(runEvaluations, eq(runEvaluations.runId, runs.runId))
+            .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId), eq(runEvaluations.evaluationId, id))).limit(1)
+          : await transaction.select({ runId: runs.runId, stopped: runs.stopRequested }).from(runs)
+            .innerJoin(runSamplings, eq(runSamplings.runId, runs.runId))
+            .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId), eq(runSamplings.samplingId, id), inArray(runs.operation, ["execution", "pipeline"]))).orderBy(desc(runs.sequence)).limit(1);
+        if (!run) throw new ResultCollectionConflictError();
+        const stage = evaluation?.status ?? sampling.execution;
+        if (stage.status === "succeeded") return { runId: run.runId, queued: false };
+        if (run.stopped) throw new ResultCollectionConflictError();
+        const [active] = await transaction.select({ runId: runs.runId }).from(runs)
+          .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId), runActive(transaction))).limit(1);
+        if (stage.collectionPending && active?.runId === run.runId) {
+          await runQueue.enqueue(transaction, run.runId, "collection");
+          return { runId: run.runId, queued: true };
+        }
+        if (active) throw new RuntimeProjectBusyError(projectId, active.runId);
+        const attempt = evaluation ? evaluation.attempts.at(-1) : sampling.executionAttempts.at(-1);
+        if (stage.status !== "failed" || attempt?.status !== "completed" || !attempt.submissionId || !attempt.completedAt
+          || !(evaluation ? evaluation.chatId : sampling.subjectChatId)
+          || (evaluation && (sampling.execution.status !== "succeeded" || !sampling.evidence))) throw new ResultCollectionConflictError();
+        const pending = { status: "retrying" as const, collectionPending: true as const };
+        if (evaluation) await transaction.update(evaluations).set({ facts: evaluationFacts({ ...evaluation, status: pending }) })
+          .where(and(eq(evaluations.ownerUserId, owner), eq(evaluations.evaluationId, id)));
+        else await transaction.update(samplings).set({ facts: samplingFacts({ ...sampling, execution: pending }) })
+          .where(and(eq(samplings.ownerUserId, owner), eq(samplings.samplingId, id)));
+        await runQueue.enqueue(transaction, run.runId, "collection");
+        return { runId: run.runId, queued: true };
+      });
     },
     async stopRun(projectId: string, runId: string): Promise<{ runId: string; stopRequested: true } | null> {
       return db.transaction(async (transaction) => {

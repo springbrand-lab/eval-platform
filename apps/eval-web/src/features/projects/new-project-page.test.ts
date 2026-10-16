@@ -36,11 +36,11 @@ describe("Project creation body", () => {
 
   it.each([
     [{ name: " " }, "名称"],
-    [{ datasets: new Map() }, "至少选择一个测试集"],
+    [{ datasets: new Map() }, "至少选择一个数据集"],
     [{ datasets: new Map([["ds-1", { dataIds: new Set<string>() }]]) }, "没有勾选"],
     [{ samplingCount: 0 }, "默认采样次数"],
     [{ subjectAgentId: "" }, "执行 Agent"],
-    [{ outputSchemaId: "" }, "评分格式"],
+    [{ outputSchemaId: "" }, "评估结果格式"],
     [{ executionTimeoutMinutes: "1e308" }, "超时时间"],
     [{ executionTimeoutMinutes: "0.0000001" }, "超时时间"],
     [{ withEvaluation: false, firstRun: "pipeline" as const }, "评估计划"],

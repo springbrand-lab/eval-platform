@@ -33,7 +33,7 @@ it("edits evaluation settings while an execution-only Run is active", async () =
   const view = await page();
   try {
     await type(control(view.container, "评估并发"), "7");
-    await select(control(view.container, "评分 Schema"), "schema");
+    await select(control(view.container, "评估结果格式"), "schema");
     expect(saveButton(view.container).disabled).toBe(false);
     await click(saveButton(view.container)); await flush();
     expect(mocks.save).toHaveBeenCalledWith("project", { userAgentId: "evaluator", evaluationConcurrency: 7, outputSchemaId: "schema" });
