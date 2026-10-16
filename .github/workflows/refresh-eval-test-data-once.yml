@@ -11,6 +11,10 @@ on:
         description: 'Expected currently deployed Eval API/Worker image commit'
         required: true
         type: string
+      verify_backup:
+        description: 'Optional completed backup path: verify the existing refresh without deleting or uploading again'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -33,6 +37,7 @@ jobs:
         env:
           REFRESH_TARGET: ${{ inputs.target }}
           EXPECTED_IMAGE_TAG: ${{ inputs.image_tag }}
+          VERIFY_BACKUP: ${{ inputs.verify_backup }}
         run: |
           test "$REFRESH_TARGET" = all-test-data-authorized
           [[ "$EXPECTED_IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]
@@ -47,15 +52,16 @@ jobs:
           AWS_REGION: ${{ vars.AWS_REGION }}
           INSTANCE_ID: ${{ vars.AWS_EC2_INSTANCE_ID }}
           EXPECTED_IMAGE_TAG: ${{ inputs.image_tag }}
+          VERIFY_BACKUP: ${{ inputs.verify_backup }}
         shell: bash
         run: |
           set -Eeuo pipefail
           payload="$(tar -czf - fixtures/eval-demo/seed.mjs infra/aws/ops | base64 -w0)"
           remote_dir="/opt/eval-platform/production/test-refresh-$GITHUB_RUN_ID"
-          parameters="$(jq -nc --arg payload "$payload" --arg dir "$remote_dir" --arg id "$GITHUB_RUN_ID" --arg image "$EXPECTED_IMAGE_TAG" '{executionTimeout:["900"], commands:[
+          parameters="$(jq -nc --arg payload "$payload" --arg dir "$remote_dir" --arg id "$GITHUB_RUN_ID" --arg image "$EXPECTED_IMAGE_TAG" --arg backup "$VERIFY_BACKUP" '{executionTimeout:["900"], commands:[
             ("install -d -m 0700 " + ($dir|@sh)),
             ("printf %s " + ($payload|@sh) + " | base64 -d | tar -xzf - -C " + ($dir|@sh)),
-            ("EVAL_TEST_DATA_REFRESH=all-test-data-authorized REFRESH_RUN_ID=" + ($id|@sh) + " EXPECTED_IMAGE_TAG=" + ($image|@sh) + " bash " + ($dir|@sh) + "/infra/aws/ops/refresh-test-data.sh")
+            ("EVAL_TEST_DATA_REFRESH=all-test-data-authorized REFRESH_RUN_ID=" + ($id|@sh) + " EXPECTED_IMAGE_TAG=" + ($image|@sh) + " VERIFY_BACKUP=" + ($backup|@sh) + " bash " + ($dir|@sh) + "/infra/aws/ops/refresh-test-data.sh")
           ]}')"
           command_id="$(aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript --comment "Authorized refresh of disposable Eval inputs $GITHUB_RUN_ID" --parameters "$parameters" --query Command.CommandId --output text)"
           for ((attempt=0; attempt<180; attempt++)); do

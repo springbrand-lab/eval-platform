@@ -43,6 +43,34 @@ export function createTestDataRefresh({ origin, token, writeOrigin, ownerUserId,
   };
   return {
     inventory,
+    async verify(receipt) {
+      assert.equal(receipt.ownerUserId, ownerUserId);
+      const active = await inventory();
+      assert.deepEqual(counts(active), receipt.after);
+      assert.equal(active.materialBundles[0].bundleId, receipt.materialBundleId);
+      assert.equal(active.sessionBundles[0].bundleId, receipt.sessionBundleId);
+      assert.equal(active.outputSchemas[0].outputSchemaId, receipt.outputSchemaId);
+      assert.deepEqual(active.datasets.map(({ datasetId }) => datasetId).sort(), [...receipt.datasetIds].sort());
+      let checkedFiles = 0;
+      for (const [kind, bundleId, count] of [["materials", receipt.materialBundleId, receipt.materials], ["sessions", receipt.sessionBundleId, receipt.sessions]]) {
+        const base = `/api/${kind === "materials" ? "material" : "session"}-bundles/${bundleId}/${kind}`;
+        const resources = await request(base);
+        assert.equal(resources.length, count);
+        for (const record of resources) {
+          const path = `${base}/${record.materialId ?? record.sessionId}`;
+          for (const file of await request(`${path}/files`)) {
+            const response = await fetcher(`${origin}${path}/file?${new URLSearchParams({ path: file.path })}`, {
+              headers: { "X-Eval-Web-Token": token }, signal: AbortSignal.timeout(30_000),
+            });
+            assert.ok(response.ok, `Refreshed file read failed: ${path} ${response.status}`);
+            assert.equal((await response.arrayBuffer()).byteLength, file.byteSize);
+            checkedFiles++;
+          }
+        }
+      }
+      assert.equal(checkedFiles, receipt.checkedFiles);
+      log("Verified current HTTP catalogs and file reads:", JSON.stringify({ ...counts(active), checkedFiles }));
+    },
     async quiesce() {
       const before = await inventory();
       log("Existing test data:", JSON.stringify(counts(before)));
@@ -98,5 +126,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   } else if (mode === "--apply") {
     const receipt = await refresh.apply(JSON.parse(await readFile(snapshotPath, "utf8")));
     await writeFile(receiptPath, JSON.stringify(receipt), { mode: 0o600, flag: "wx" });
-  } else throw new Error("Expected --quiesce or --apply");
+  } else if (mode === "--verify") {
+    await refresh.verify(JSON.parse(await readFile(snapshotPath, "utf8")));
+  } else throw new Error("Expected --quiesce, --apply or --verify");
 }

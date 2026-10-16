@@ -34,10 +34,17 @@ for service in "$api" "$worker"; do
 done
 docker cp "$task_root/." "$api:$container_dir" >/dev/null
 operation="$container_dir/infra/aws/ops/refresh-test-data.mjs"
+backup_parent=/opt/eval-platform/production/backups
+if [[ -n "${VERIFY_BACKUP:-}" ]]; then
+  [[ "$VERIFY_BACKUP" =~ ^/opt/eval-platform/production/backups/[0-9]{8}T[0-9]{6}Z-test-refresh-[A-Za-z0-9]{6}$ ]]
+  backup_dir="$VERIFY_BACKUP"
+  test -s "$backup_dir/receipt.json"
+  (cd "$backup_dir" && sha256sum -c SHA256SUMS)
+  printf 'Verifying completed refresh from backup: %s\n' "$backup_dir"
+else
 docker exec -e EVAL_TEST_DATA_REFRESH=all-test-data-authorized "$api" \
   node "$operation" --quiesce "$container_dir/inventory.json"
 
-backup_parent=/opt/eval-platform/production/backups
 install -d -m 0700 "$backup_parent"
 backup_dir="$(mktemp -d "$backup_parent/$(date -u +%Y%m%dT%H%M%SZ)-test-refresh-XXXXXX")"
 docker cp "$api:$container_dir/inventory.json" "$backup_dir/inventory.json" >/dev/null
@@ -70,7 +77,12 @@ printf 'Database and Bundle backups verified: %s\n' "$backup_dir"
 docker exec -e EVAL_TEST_DATA_REFRESH=all-test-data-authorized "$api" \
   node "$operation" --apply "$container_dir/inventory.json" "$container_dir/receipt.json"
 docker cp "$api:$container_dir/receipt.json" "$backup_dir/receipt.json" >/dev/null
-docker cp "$backup_dir/receipt.json" "$worker:$container_dir/receipt.json" >/dev/null
+fi
+for service in "$api" "$worker"; do
+  docker exec -i "$service" sh -c 'umask 077; cat > "$1"' sh "$container_dir/receipt.json" < "$backup_dir/receipt.json"
+done
+docker exec -e EVAL_TEST_DATA_REFRESH=all-test-data-authorized "$api" \
+  node "$operation" --verify "$container_dir/receipt.json"
 cat > "$work_dir/verify-bundles.mjs" <<'JS'
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
