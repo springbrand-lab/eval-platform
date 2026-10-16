@@ -8,6 +8,7 @@
   },
   "type": "module",
   "scripts": {
+    "dev": "pnpm --parallel --filter @eval-platform/eval-web --filter @eval-platform/eval-api run \"/^(dev|start:api|start:worker)$/\"",
     "build": "pnpm -r --if-present build",
     "check": "pnpm -r --if-present check",
     "test": "pnpm -r --if-present test",

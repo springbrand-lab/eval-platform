@@ -7,8 +7,8 @@
     "build": "esbuild src/server.ts src/run-worker-main.ts src/migrate.ts --bundle --platform=node --format=esm --target=node24 --main-fields=module,main --outdir=dist --metafile=dist/build-meta.json --entry-names=[name] --external:pg --external:bufferutil --external:utf-8-validate --external:supports-color --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "start:api": "tsx src/server.ts",
-    "start:worker": "tsx src/run-worker-main.ts",
+    "start:api": "tsx --env-file-if-exists=.env.eval src/server.ts",
+    "start:worker": "tsx --env-file-if-exists=.env.eval src/run-worker-main.ts",
     "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
     "db:check": "drizzle-kit check --config=drizzle.config.ts",
     "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts"

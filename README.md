@@ -83,6 +83,10 @@ eval-contracts → eval-dataset → eval-runtime → eval-metrics
 
 ## 开发基线
 
+在根目录运行 `pnpm dev`，并行启动 Web（Vite，端口 `5176`）、Eval API 和 Run Worker，复用各应用现有的启动脚本。
+
+启动前，将 [API 与 Run Worker 的环境变量](apps/eval-api/README.md#进程与环境变量) 配置在 `apps/eval-api/.env.eval`（不提交），启动脚本会自动加载，已有 shell 环境变量优先；也可以只使用 shell 环境变量。按 [Web 本地开发说明](apps/eval-web/README.md#本地开发) 配置 `apps/eval-web/.env.local`。本地 API 建议设置 `EVAL_API_PORT=18788`，与 Web 默认代理地址一致；数据库需先完成迁移，根命令不自动执行迁移。
+
 - Node.js `>=24`
 - pnpm `11.6.0`
 - TypeScript `7.x`

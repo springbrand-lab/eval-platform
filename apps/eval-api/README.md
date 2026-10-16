@@ -47,6 +47,8 @@ Worker 可多实例部署、滚动升级；收到信号后停止取任务，等�
 
 ## 本地开发
 
+`start:api` 和 `start:worker` 自动加载本包目录下的 `.env.eval`（不提交），已有 shell 环境变量优先；文件不存在时只读取 shell 环境变量。根目录 `pnpm dev` 同时启动这两个进程与 Web。使用 Web 默认代理时，在 `.env.eval` 中设置 `EVAL_API_PORT=18788`，并确保 Web 的 `EVAL_API_ORIGIN` 指向该端口。
+
 `@springbrand/eval-harness` 以精确版本从 npm 安装，版本需与 Eval SP 部署的 sp-platform `eval` 分支一致。`@springbrand/http` 直接来自 npm，与 SP 使用同一精确版本。
 
 数据库只有 `migrations-postgres/0000_initial.sql` 一个初始基线，用 `pnpm --filter @eval-platform/eval-api db:migrate` 应用（需 `DATABASE_URL`）；本地旧库与新基线或新请求指纹不一致时清库重建。测试设置 `DATABASE_URL` 后为每次运行创建独立的临时数据库；不提供时跳过需数据库的测试。pg-boss 在同一数据库中自建 `pgboss` schema。
