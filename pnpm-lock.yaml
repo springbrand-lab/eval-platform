@@ -2519,7 +2519,7 @@ packages:
     resolution: {integrity: sha512-xbXVBmLAyaH0I11ofFvfR0b7Yx03YxyXirF1RR6G/Tc0CKiMwehSb5fV3H2GPZSo+W6cMNj7YW/vuA75mvUJzQ==}
 
   '@springbrand/eval-harness@0.1.0-alpha.3':
-    resolution: {integrity: sha512-j9VjjLvq9vs86GxbIPiwQJoqzwz47Zj3m//LhEPLXoxqRzO/l6ePZeIRDeUP3cXbHABLQmjh3RRWj4fMQjmWIQ==}
+    resolution: {integrity: sha512-wldX7kxbxBzWsqoII/eyaU834aIzzCsxs04Nirn/LglT+9tNmbkyhA2VTXP/sdrTm5sT8PrkXRJ1wcXgPyplcw==}
 
   '@springbrand/file-renderers@0.1.0-alpha.1':
     resolution: {integrity: sha512-TZLMxjTeEvRvzY8Ee3ZDmzKjSol2huHZYdIuclKxIBQirxkIQToPuPUGQU082ZdBdwCBDolWCMl3JBRFCdiJ/A==}
