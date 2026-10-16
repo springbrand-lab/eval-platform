@@ -42,6 +42,7 @@ const dataFieldsSchema = z.object({
 });
 
 export const datasetInputSchema = datasetFieldsSchema.readonly();
+export const dataCreateOptionsSchema = z.strictObject({ datasetId: platformIdSchema.optional() });
 export const dataInputSchema = createDataRecordSchema(
   dataFieldsSchema.extend({ dataId: z.never().optional() }),
 );
@@ -68,6 +69,7 @@ export type InitialMaterialsRef = z.infer<typeof initialMaterialsRefSchema>;
 export type InitialSessionRef = z.infer<typeof initialSessionRefSchema>;
 export type DatasetInput = z.infer<typeof datasetInputSchema>;
 export type DataInput = z.infer<typeof dataInputSchema>;
+export type DataCreateOptions = z.infer<typeof dataCreateOptionsSchema>;
 export type DatasetDocument = z.infer<typeof datasetDocumentSchema>;
 export type DatasetSnapshot = z.infer<typeof datasetSnapshotSchema>;
 

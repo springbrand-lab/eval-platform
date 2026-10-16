@@ -54,14 +54,17 @@ function operationKey(sessionId: string, operationId: string): string {
 export function aggregateTelemetry(
   stream: FactStream,
   diagnostics: ResourceDiagnostics,
+  requestedTools: readonly (string | null)[] = [],
 ): Pick<ResourceStatistics, "modelRequests"> & { readonly trajectory: Omit<TrajectorySummary, "diagnostics"> } {
   const grouped = groupOperations(stream.entries, diagnostics);
   const observed = grouped.operations.map((operation) => inspectOperation(operation, diagnostics));
   const complete = stream.complete && grouped.complete && observed.every((operation) => operation.consistent);
   const ofKind = (kind: OperationKind) => observed.filter((operation) => operation.kind === kind);
   const tools = ofKind("tool");
+  const toolNamesKnown = tools.every((operation) => operation.toolName !== null);
   const toolGroups = new Map<string | null, ObservedOperation[]>();
   for (const operation of tools) toolGroups.set(operation.toolName, [...toolGroups.get(operation.toolName) ?? [], operation]);
+  for (const toolName of requestedTools) if (!toolGroups.has(toolName)) toolGroups.set(toolName, []);
   return {
     modelRequests: operationStatistics(ofKind("generation"), complete),
     trajectory: {
@@ -69,7 +72,7 @@ export function aggregateTelemetry(
       turns: operationStatistics(ofKind("turn"), complete),
       tools: operationStatistics(tools, complete),
       byTool: [...toolGroups.entries()]
-        .map(([toolName, operations]) => toolMetric(toolName, operations, complete))
+        .map(([toolName, operations]) => toolMetric(toolName, operations, complete && (toolName === null || toolNamesKnown)))
         .sort((left, right) => (left.toolName ?? "").localeCompare(right.toolName ?? "")),
       ...nonToolTurns(observed, complete, diagnostics),
     },

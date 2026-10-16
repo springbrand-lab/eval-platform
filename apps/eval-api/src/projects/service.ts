@@ -5,7 +5,7 @@ import type {
   Project,
   RunHandle,
 } from "@eval-platform/eval-contracts";
-import type { EvalRunAdmission } from "@eval-platform/eval-runtime";
+import type { EvalRunAdmission, ProjectView } from "@eval-platform/eval-runtime";
 import {
   RuntimeAdmissionConflictError,
   RuntimeEntityNotFoundError,
@@ -25,7 +25,7 @@ import {
   ProjectIdempotencyConflictError,
 } from "../db/errors.js";
 import type { createOutputSchemaCatalog } from "../db/output-schemas.js";
-import type { PostgresProjectStore, ProjectView, StoredProjectCreation } from "../db/project-store.js";
+import type { PostgresProjectStore, StoredProjectCreation } from "../db/project-store.js";
 import type { EvaluationPlanBody, ProjectCreateBody } from "./schemas.js";
 import { requireRunTargetCount } from "../limits.js";
 import { bindProjectSamples } from "./snapshot.js";
@@ -228,6 +228,7 @@ export function createProjectService(input: {
     list: () => store.list(),
     exists: (projectId: string) => store.exists(projectId),
     get: (projectId: string) => store.get(projectId),
+    getEvaluationOutputSchema: (projectId: string) => store.getEvaluationOutputSchema(projectId),
     delete: (projectId: string) => store.softDelete(projectId),
 
     /**

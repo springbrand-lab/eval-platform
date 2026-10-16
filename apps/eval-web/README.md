@@ -4,7 +4,19 @@ Eval 的内部管理界面：准备测试集与初始资源、上传评分格式
 
 ## 技术栈
 
-与 sp-platform `apps/web` 对齐：React 19、Vite、TanStack Router（文件路由，生成 `src/routeTree.gen.ts`）、TanStack Query、Tailwind CSS v4、`@springbrand/http`（解析 Eval API 的 `{success, msg, errMsg, code}` 信封）、lucide-react、sonner。只读会话复用 SP 聊天页同一套渲染：`@springbrand/message-panel/cloud-os` 的 `CloudOsRoot` 与 `CloudOsChatMessages`（不传任何回调，审批禁用）。样式按该包的宿主要求接入：`src/styles/index.css` 中所有 `@import`（含 `tw-animate-css`、`streamdown/styles.css`、`cloud-os.css`）放在最前，并用显式 glob 把 `cloud-os` 源码与 streamdown 产物加入 `@source`。类型从 `@eval-platform/*` 包以 `import type` 引入，不打包运行时代码。
+与 sp-platform `apps/web` 对齐：React 19、Vite、TanStack Router（文件路由，生成 `src/routeTree.gen.ts`）、TanStack Query、Tailwind CSS v4、`@springbrand/http`（解析 Eval API 的 `{success, msg, errMsg, code}` 信封）、lucide-react、sonner。只读会话复用 SP 聊天页同一套渲染：`@springbrand/message-panel/cloud-os` 的 `CloudOsRoot` 与 `CloudOsChatMessages`（不传任何回调，审批禁用）。样式按该包的宿主要求接入：`src/styles/index.css` 中所有 `@import`（含 `tw-animate-css`、`streamdown/styles.css`、`cloud-os.css`）放在最前，并用显式 glob 把 `cloud-os` 源码与 streamdown 产物加入 `@source`。领域类型从 `@eval-platform/*` 包以 `import type` 引入。
+
+Data 表单与 Schema 上传复用 `eval-dataset` 公开的严格 JSON 解析和输入校验；这些运行时入口随 Web 打包。上传与 Project 选择上限只从 API 的 `GET /api/input-limits` 读取，没有浏览器数值副本。
+
+文本导入共用 `useTextImport` 草稿：从文件选择/拖入事件开始清空旧内容，仅接受最新选择的提取与读取；手动编辑接管草稿，关闭窗口销毁草稿。FileDropzone 复用 `react-dropzone` 的校验与 `file-selector` 的公开提取接口，选择信号覆盖提取到解码的完整生命周期。读取中或失败时不能提交。创建、导入的响应未确认时刷新目录，先核对新增条目再提交，避免重复创建。
+
+ZIP 与素材上传也等待 FileDropzone 的文件提取结束后再提交；单文件替换仅接受最新选择，多文件素材保留各次选择的累加结果。
+
+从 Dataset 新建用例使用 `/datasets/$datasetId/data/new`，页面始终有明确的数据集归属，只调用一次 `POST /api/data?datasetId=...`，创建与关联由 API 原子提交；页面不持有“已创建、未关联”的补偿状态。创建响应未确认时刷新目录并阻止重复提交，再返回 Dataset 核对。
+
+创建项目仅在“创建并运行”时提交；此前取消只返回项目管理。Run 预览与其操作、选择范围绑定，选择改变后旧响应不能恢复可提交的预览。创建与 Run 提交都捕获完整请求；结果未确认时保持该请求和幂等键，允许原样重试，不能编辑后误启动另一组目标。仅执行的 Run 进行中仍可填写或修改评估计划；首次带评估的 Run 后沿用 API 返回的只读计划。
+
+项目页面共用 `useProject` 的可见页轮询和 Run 结束刷新。使用 API 的既有 Run 序号发现两次轮询间完成的短 Run；结果首次在 Project 读取完成后获取。运行期间四层 Metrics 与评估同步状态轮询，结束后取消尚未完成的旧读取，再统一刷新最终 Metrics、评估记录和只读观察数据；各页不另存一份“运行中”状态。每个 Subject/Evaluator 的会话入口绑定该 Agent 自己的观察地址。
 
 ## 目录
 
@@ -36,3 +48,13 @@ pnpm --filter @eval-platform/eval-web dev
 - `VITE_LANGFUSE_PROJECT_URL`：Langfuse eval 项目地址，用于跳转到会话与分数。
 
 `pnpm --filter @eval-platform/eval-web check` 检查页面与 Worker 的类型，`test` 运行组件、工具函数与 Worker 测试。
+
+四层 Metrics 共用执行 Agent、评估 Agent 的 Token 表，展示总量、缓存读取、缓存写入、输入、输出、推理及逐模型明细。每个值保留服务端完整性状态，未获得的值不按零展示；总量直接使用 Metrics 结果，不重复加上缓存或推理 Token。采样内每个 Agent 复用同一展示。
+
+资源与轨迹按 Agent 分开，四层与采样 Agent 详情复用一套投影：轮数、模型请求、工具调用的成功/失败/取消/进行中/未知次数，按工具类型的调用/返回长度与耗时，非工具轮数及明确关联的 Token，以及资源诊断。长度以规范 JSON 的 UTF-8 字节计，不转换为 Token；时长展示累计、均值、范围与有效/缺失数量，不当成并行批次的墙钟时间。
+
+只读 Trajectory 按轮次、模型请求、工具调用、审批、交互、子 Agent、上下文分类，并保留其他原始事件。工具类型筛选只作用于已加载事件；轮数等统计始终来自 Metrics。Query 缓存保存一个已加载区间，历史分页与运行中刷新原子合并；新尾页跨过多页时补齐到旧区间，已加载历史不会被滚动窗口替换。Run 结束时再刷新观察数据。
+
+Workspace 只保存选中的路径，节点取当前目录树。文件获取与文本解码属于同一个 Query，切换文件或已知版本时旧读取不能回填新预览；读取失败可重试。每次选中验证当前文件，运行中沿用统一轮询周期读取，结束由 Project 统一刷新，不以可选的 mtime 或 size 推断内容未改变。HTML 视图在同一路径更新时保留用户的源码/预览选择。下载链接按 Blob 生命周期创建和释放。
+
+聚合数值显示均值、总体方差、中位数和范围，均使用 Metrics 返回值。资源分布在“均值、方差、中位数与范围”展开，消耗/轮数/工具次数的单位是单 Agent；工具长度/操作耗时按单次调用，Schema 数值按字段观察值。每项保留自己的有效 N、缺失和完整性；小的非零方差使用有效数字或科学计数法，不显示为零。方差单位为原单位的平方。

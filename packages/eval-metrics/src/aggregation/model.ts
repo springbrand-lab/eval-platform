@@ -25,6 +25,8 @@ export interface NumericSummary {
   readonly min: number | null;
   readonly max: number | null;
   readonly mean: number | null;
+  /** Population variance over available values only (divide by `count`), in squared units. */
+  readonly variance: number | null;
   readonly median: number | null;
 }
 
@@ -133,6 +135,43 @@ export interface ResourceStatistics {
   readonly diagnostics: readonly ResourceDiagnostic[];
 }
 
+export type NumericDistributions<T> = { readonly [K in keyof T]: CoveredNumericSummary };
+
+export interface OperationDistributions {
+  readonly count: CoveredNumericSummary;
+  readonly completed: CoveredNumericSummary;
+  readonly failed: CoveredNumericSummary;
+  readonly cancelled: CoveredNumericSummary;
+  readonly inProgress: CoveredNumericSummary;
+  readonly unknown: CoveredNumericSummary;
+}
+
+/** Single-Agent observations, never observations made from child-scope aggregates. */
+export interface ResourceDistribution {
+  readonly unit: "agent";
+  readonly records: number;
+  readonly tokens: NumericDistributions<TokenStatistics>;
+  readonly costs: NumericDistributions<CostStatistics>;
+  readonly modelRequests: OperationDistributions;
+  readonly trajectory: {
+    readonly turns: OperationDistributions;
+    readonly tools: OperationDistributions;
+    readonly nonToolTurns: CoveredNumericSummary;
+    readonly nonToolTurnTokens: NumericDistributions<NonToolTurnTokens>;
+    readonly byTool: readonly { readonly toolName: string | null; readonly operations: OperationDistributions }[];
+  };
+  readonly byModel: readonly {
+    readonly provider: string | null;
+    readonly model: string | null;
+    readonly tokens: NumericDistributions<TokenStatistics>;
+    readonly providerUsd: CoveredNumericSummary;
+  }[];
+}
+
+export interface AggregatedResourceStatistics extends ResourceStatistics {
+  readonly distribution: ResourceDistribution;
+}
+
 export interface AttemptMetric {
   readonly attemptId: string;
   readonly attemptNumber: number;
@@ -236,7 +275,7 @@ export interface MetricSummary {
   readonly counts: MetricCounts;
   readonly execution: StageStatistics;
   readonly evaluation: StageStatistics;
-  readonly executionAgent: ResourceStatistics;
-  readonly evaluationAgents: ResourceStatistics;
+  readonly executionAgent: AggregatedResourceStatistics;
+  readonly evaluationAgents: AggregatedResourceStatistics;
   readonly evaluationOutputs: EvaluationOutputSummary;
 }

@@ -4,8 +4,7 @@ import { RefreshCw, Square } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { getProjectOverview, metricKeys } from "@/api-sdk/metrics-api";
-import { getProject, projectKeys } from "@/api-sdk/projects-api";
-import { listRunEvaluations, runKeys, stopRun, syncRunScores } from "@/api-sdk/runs-api";
+import { listRunEvaluations, runKeys, syncRunScores } from "@/api-sdk/runs-api";
 import type { EvaluationRecord } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
 import { Badge, StatusBadge } from "@/components/ui/badge";
@@ -13,12 +12,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
 import { CopyId, ProgressBar } from "@/components/ui/data-display";
-import { ConfirmDialog } from "@/components/ui/dialog";
 import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
 import { formatDateTime, OPERATION_LABELS } from "@/lib/format";
 import { SummaryCards } from "@/features/metrics/summary";
 import { isFinished, runPhaseLabel } from "./run-status";
 import { POLL_MS, useRun } from "./use-run-polling";
+import { useProject } from "@/features/projects/use-project";
+import { StopRunDialog, type StopRunTarget } from "./stop-run-dialog";
 
 export function ScoreSyncBadge({ record }: { record: EvaluationRecord }) {
   if (!record.scoreSync) return <span className="text-text-muted">暂无同步记录</span>;
@@ -30,28 +30,22 @@ export function ScoreSyncBadge({ record }: { record: EvaluationRecord }) {
 export function RunDetailPage({ projectId, runId }: { projectId: string; runId: string }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const view = useQuery({ queryKey: projectKeys.detail(projectId), queryFn: ({ signal }) => getProject(projectId, signal) });
+  const view = useProject(projectId);
   const run = useRun(projectId, runId);
   const active = !!run.data && !isFinished(run.data.run.status);
   const overview = useQuery({
     queryKey: metricKeys.project(projectId, [runId]),
     queryFn: ({ signal }) => getProjectOverview(projectId, [runId], signal),
+    enabled: !!view.data, staleTime: 0,
     refetchInterval: active ? POLL_MS : false,
   });
   const evaluations = useQuery({
     queryKey: runKeys.evaluations(projectId, runId),
     queryFn: ({ signal }) => listRunEvaluations(projectId, runId, signal),
+    enabled: !!view.data, staleTime: 0,
     refetchInterval: active ? POLL_MS : false,
   });
-  const [stopping, setStopping] = useState(false);
-  const stop = useMutation({
-    mutationFn: () => stopRun(projectId, runId),
-    onSuccess: async () => {
-      toast.success("已请求停止");
-      setStopping(false);
-      await queryClient.invalidateQueries({ queryKey: ["runs"] });
-    },
-  });
+  const [stopTarget, setStopTarget] = useState<StopRunTarget | null>(null);
   const sync = useMutation({
     mutationFn: () => syncRunScores(projectId, runId),
     onSuccess: async (summary) => {
@@ -73,11 +67,12 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
         actions={(
           <>
             {unsynced > 0 && <Button icon={<RefreshCw />} loading={sync.isPending} onClick={() => sync.mutate()}>同步可用分数</Button>}
-            {active && !snapshot?.stopRequested && <Button variant="outline-danger" icon={<Square />} onClick={() => setStopping(true)}>停止</Button>}
+            {active && !snapshot?.stopRequested && <Button variant="outline-danger" icon={<Square />} onClick={() => setStopTarget({ projectId, runId })}>停止</Button>}
           </>
         )}
       />
-      {run.isPending ? <LoadingBlock /> : run.error ? <ErrorBlock error={run.error} /> : snapshot && (
+      {view.error && <ErrorBlock error={view.error} onRetry={() => void view.refetch()} />}
+      {run.isPending ? <LoadingBlock /> : run.error ? <ErrorBlock error={run.error} onRetry={() => void run.refetch()} /> : snapshot && (
         <div className="flex flex-col gap-5">
           <Card>
             <CardBody className="grid gap-x-8 gap-y-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -134,8 +129,7 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
           </p>
         </div>
       )}
-      <ConfirmDialog open={stopping} onClose={() => setStopping(false)} onConfirm={() => stop.mutate()} loading={stop.isPending} danger
-        title="停止 Run" description="中断正在运行的 Agent，不再开始新的采样和评估。已完成的结果保留。" confirmLabel="停止" />
+      <StopRunDialog target={stopTarget} onClose={() => setStopTarget(null)} />
     </Page>
   );
 }

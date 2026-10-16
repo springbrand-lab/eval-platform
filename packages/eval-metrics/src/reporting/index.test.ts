@@ -63,6 +63,21 @@ const scope = { projectId: PROJECT.projectId };
 const scoreOf = (summary: MetricSummary) => summary.evaluationOutputs.fields.find((field) => field.jsonPointer === "/score")!;
 
 describe("four-level reporting", () => {
+  it("recomputes per-Agent mean, variance, median and range at all four levels", async () => {
+    const metrics = metricsOf();
+    const project = await metrics.getProjectOverview(scope);
+    const datasetView = await metrics.getDatasetOverview({ ...scope, datasetId: D1 });
+    const sample = await metrics.getSampleOverview({ ...scope, projectSampleId: "ps-1" });
+    const detail = await metrics.getSamplingDetail({ ...scope, samplingId: "s1a" });
+    for (const summary of [project.summary, datasetView.summary]) {
+      const stats = summary.executionAgent.distribution.tokens.total;
+      expect(stats).toMatchObject({ count: 3, missing: 0, min: 100, max: 400, median: 200, mean: 700 / 3 });
+      expect(stats.variance).toBeCloseTo(140000 / 9);
+    }
+    expect(sample.summary.executionAgent.distribution.tokens.total).toMatchObject({ count: 2, mean: 150, variance: 2500, median: 150, min: 100, max: 200 });
+    expect(detail.summary.executionAgent.distribution.tokens.total).toMatchObject({ count: 1, mean: 100, variance: 0, median: 100, min: 100, max: 100 });
+  });
+
   it("builds the Project from the fixed plan and deduplicates shared ProjectSamples", async () => {
     const result = await metricsOf().getProjectOverview(scope);
     expect(result.project).toEqual(PROJECT);

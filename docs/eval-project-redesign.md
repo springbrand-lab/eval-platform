@@ -293,7 +293,7 @@ EvaluationRecord 只保存 Evaluator 原始输出（`structuredOutput` 的文件
 - Schema 允许 null 时 null 由独立的 nullCount 计数，不进入分布与数值统计，不算 false 或任何枚举值，也不同于缺失；
 - 评估失败、缺字段、校验失败不按 0 或 false 参与。
 
-Schema 编译为唯一的字段展示计划，保留声明来源、条件和根引用上下文。观察只来自实际命中的统计声明；展示定义的并集不能给观察补资格。每个字段路径输出 Schema 的 title（缺省为字段路径）、description、kinds、observationCount、contributingEvaluationCount、missingEvaluationCount（附缺失原因）、数值字段的 total/min/max/mean/median、boolean/enum 分布条目（count、evaluations、share = count / observationCount）、声明允许 null 时的 nullCount 与 coverage。无观察为 unavailable，有观察但部分评估未贡献为 partial，全部评估贡献时才 complete。数组字段一条记录可产生多个观测，因此同时展示观测数和贡献记录数。
+Schema 编译为唯一的字段展示计划，保留声明来源、条件和根引用上下文。观察只来自实际命中的统计声明；展示定义的并集不能给观察补资格。每个字段路径输出 Schema 的 title（缺省为字段路径）、description、kinds、observationCount、contributingEvaluationCount、missingEvaluationCount（附缺失原因）、数值字段的 total/min/max/mean/variance/median、boolean/enum 分布条目（count、evaluations、share = count / observationCount）、声明允许 null 时的 nullCount 与 coverage。无观察为 unavailable，有观察但部分评估未贡献为 partial，全部评估贡献时才 complete。数组字段一条记录可产生多个观测，因此同时展示观测数和贡献记录数。
 
 ### 5.6 公共模型
 
@@ -363,5 +363,10 @@ Metrics：
 13. 来源 Data、Material、Session、Schema 软删除后，已有 Project 仍可重跑和评估。
 14. 仅执行创建的 Project 不填评估计划也能运行；之后补填、修改评估计划，启动评估后评估计划变为只读；未填写时启动评估被拒绝。
 15. Cancel 创建不产生任何 Project、副本或 Run。
+16. Run 预览请求尚未返回时改变操作或范围，旧响应不再允许提交；提交结果未确认时，只能以相同请求体和幂等键重试，不能通过修改目标产生重复 Run。
 
-场景 11 的只读页面与服务端写入拒绝，以及场景 9、10 所依赖的 Evaluator 原始结构化输出，待 Eval SP 与 Eval Web 完成（见 [SP 接口需求](sp-eval-api-requirements.md)）。
+## 本次交付待办
+
+- [x] 聚合数值指标展示均值、总体方差、中位数、最小值、最大值。消耗、轮数、工具次数按单次 Agent，工具长度和调用耗时按单次调用，Schema 数值按字段观察值统计。五项都只统计有值记录，均值和总体方差的分母 N 为有值数量；缺失不进分母也不补零，真实零参与。无值时统计为 null，单个有值记录的方差为 0；偶数个有效值的中位数取中间两个的平均。四层从范围内原始观察重算，不用下层均值再次求均值；保留有效数量和完整性信息，Web 只展示结果。
+
+上述页面、原始输出与本地公开接口读取已实现；跨部署和真实浏览器验收仍需完成。发布依赖见 [SP 包发布与升级](sp-package-publishing-todo.md)，SP 服务端契约见 [SP 接口需求](sp-eval-api-requirements.md)。

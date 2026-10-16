@@ -1,6 +1,7 @@
 export { createDatasetService, type DatasetService } from "./dataset/index.js";
 export {
   dataInputSchema,
+  dataCreateOptionsSchema,
   dataSchema,
   datasetInputSchema,
   datasetSchema,
@@ -10,6 +11,7 @@ export {
   platformIdSchema,
   type Data,
   type DataInput,
+  type DataCreateOptions,
   type Dataset,
   type DatasetInput,
   type DatasetSnapshot,

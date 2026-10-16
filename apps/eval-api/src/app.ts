@@ -8,6 +8,7 @@ import creditRouter from "./routes/credits/credits.index.js";
 import dataRouter from "./routes/data/data.index.js";
 import datasetRouter from "./routes/datasets/datasets.index.js";
 import healthRouter from "./routes/health/health.index.js";
+import inputLimitsRouter from "./routes/input-limits/input-limits.index.js";
 import materialBundleRouter from "./routes/material-bundles/material-bundles.index.js";
 import metricsRouter from "./routes/metrics/metrics.index.js";
 import outputSchemaRouter from "./routes/output-schemas/output-schemas.index.js";
@@ -23,6 +24,7 @@ export function createRoutes(logger: pino.Logger) {
   app.use("/api/*", serviceAccountScope);
   app.route("/", healthRouter);
   app.route("/api/me", sessionRouter);
+  app.route("/api/input-limits", inputLimitsRouter);
   app.route("/api/agent-configs", agentConfigRouter);
   app.route("/api/agents", agentRouter);
   app.route("/api/credits", creditRouter);

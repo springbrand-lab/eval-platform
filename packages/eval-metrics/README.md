@@ -16,6 +16,7 @@ src/
 │   ├── model.ts              # 资源、轨迹、Agent 视图、输出字段、阶段与层级汇总模型
 │   ├── agents.ts             # Subject/Evaluator 分视角、Attempt 与 Agent 时长
 │   ├── resources.ts          # 资源聚合编排与 coverage
+│   ├── resource-distributions.ts # 单 Agent 资源分布，复用资源事实解释与数值统计
 │   ├── resource-facts.ts     # 诊断、数值校验与按来源身份去重
 │   ├── resource-usage.ts     # Token/Provider USD 与 Subagent 覆盖
 │   ├── resource-billing.ts   # 模型与 Action 结算
@@ -46,6 +47,10 @@ Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sam
 每层 `MetricSummary` 包含：固定绑定数（datasets/data/projectSamples）、当前 samplings/evaluations、执行与评估阶段（状态分布、成功率、Attempt/重启、Agent 时长与 Attempt 时长）、`executionAgent` 与 `evaluationAgents` 分开的资源统计，以及 `evaluationOutputs`。`getSamplingDetail` 额外返回 Subject 与每个 Evaluator 的 `AgentMetricView`，以及每条评估的 `EvaluationOutputView`（原始文本、解析后的 JSON、校验结果、字段观察、产物、证据与轨迹引用）。
 
 ## 资源与轨迹
+
+所有数值观察共用 `NumericSummary`，返回有效 `count`、`missing`、total、mean、总体 variance、min、max、median。均值与方差仅以有值的 N 为分母；缺失不补零，真实零参与。N=0 时各统计为 null，N=1 时方差为 0。方差单位是原数值单位的平方。
+
+每层的 `executionAgent` / `evaluationAgents` 是 `AggregatedResourceStatistics`，在全范围原始事件去重后的累计资源外，还含 `distribution`：从各 Subject / Evaluator 的原始 Attempts 经同一资源解释器形成单 Agent 观察，再统计 Token（含缓存）、积分/成本、轮数、模型/工具次数及结果、非工具轮 Token、各工具和模型的分布。分组归属与数值完整性分别判断：完整事实证明未调用某类型时才产生真实零，其他类型的数值缺失不影响这个零；存在可能归入该类型的未知模型或工具名时，不能证明缺席，记为缺失，已知部分也不能标为 complete。分组与补零都由原始资源解释器处理，展示层不从累计数值猜测归属。工具长度和调用耗时仍按单次调用统计，Agent 时长按单 Agent，Schema 数值按字段观察值。绝不平均 Dataset/Sample 的下层汇总。
 
 原始 `AgentResourceSnapshot` 是费用和 Token 的唯一来源：模型账单按 `accountId + eventId`、Action 按 `executionId`、遥测按 `sessionId + eventId` 去重；不重算价格，不把 reasoning 再加进 total；失败、取消、重启 Attempt 的消耗照常计入。已提交但没有收集记录的 Attempt 记为 `uncollected` 并使结果不完整；从未提交的 Attempt 不制造缺失。缺失值为 null 并带 coverage（complete/partial/unavailable）与 diagnostics，只有完整空流才证明 0。
 
@@ -84,7 +89,7 @@ reader 每条记录只解析、校验和执行计划一次，保留全部观察�
 
 - `kinds`：该形态的种类。
 - `observationCount`：被汇总的值总数（含 null），数组字段一条评估可贡献多个；`contributingEvaluationCount` 为至少有一个值的评估数；`missingEvaluationCount` 按 not-succeeded/invalid-output/unavailable-output/absent 诊断。null 是被观察到的值，不是缺失。
-- `numeric`：有数值种类时为数字值的 count/total/min/max/mean/median，否则为 null；null、布尔和字符串从不进入数值统计。
+- `numeric`：有数值种类时为数字值的 count/total/min/max/mean/variance/median，否则为 null；null、布尔和字符串从不进入数值统计。
 - `distribution`：该形态的 boolean 与 enum 取值，按形态顺序全部列出（未出现时 count 为 0）；没有 boolean/enum 种类的字段为空数组（数字枚举仍有取值分布）。条目给出 `count`（出现次数）、`evaluations`（包含该值的评估数）与 `share = count / observationCount`（分母含 null 和不在分布中的值，如混合字段的数字；无观察时为 null）。
 - `nullCount`：null 出现次数，独立于 `distribution`；当且仅当形态允许 null 时存在（尚未出现 null 时为 0），否则省略。null 从不算作 false、任何枚举值或缺失。
 - 展示：`distribution` 各条目加一个由 `nullCount` 得出的固定 null 条目，占比为 `nullCount / observationCount`；只有每个非 null 值都在分布中时（纯 boolean、enum 字段），它与各条目 share 之和才为 1。boolean 字段排除 null 的通过率不是字段，由 true 的 count / (observationCount − nullCount) 得出。缺失评估（`missingEvaluationCount`）不进入 `observationCount`，与 null 不同。
@@ -96,6 +101,6 @@ Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`�
 
 查询范围外的 Project/Run/Dataset/ProjectSample/Sampling 抛 `MetricsEntityNotFoundError`（entity 为 `project | run | dataset | project-sample | sampling`），非法查询抛 `MetricsQueryError`，来源事实不一致（重复身份、越界 Sampling、缺失绑定 ProjectSample、绑定与计划不符、Schema 与评估计划不符等）抛 `MetricsSourceError`。
 
-不实现实验对比、归因、缓存、指标持久化或 API/Web/CLI；本包只有包根入口。
+不实现实验对比、归因、查询缓存、指标持久化或 API/Web/CLI；本包只有包根入口。
 
 `createEvaluationScoreReader()` 为可选 Langfuse 集成提供只读派生接口：复用同一个 Schema presentation plan、严格 JSON 解析和安全数值校验，只从成功且校验通过的原始输出读取顶层 numeric score 与可选字符串 reason。每个 Schema 独立编译，复用 `$id` 不冲突；不保存另一份解析结果到 Runtime。

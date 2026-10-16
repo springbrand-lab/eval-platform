@@ -5,8 +5,9 @@ import { StatusBadge } from "@/components/ui/badge";
 import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
 import { CopyId } from "@/components/ui/data-display";
-import { formatDateTime, formatDuration, formatNumber, formatUsd } from "@/lib/format";
+import { formatDateTime, formatDuration } from "@/lib/format";
 import { langfuseSessionUrl } from "@/lib/langfuse";
+import { ResourceMetrics } from "@/features/metrics/resource-metrics";
 
 export function LangfuseLink({ chatId, label = "Langfuse 会话" }: { chatId: string | null | undefined; label?: string }) {
   const url = langfuseSessionUrl(chatId);
@@ -50,15 +51,8 @@ export function AgentPanel({ title, agent, observe }: {
             { label: "耗时", value: formatDuration(agent.agentDurationMs) },
             { label: "Chat", value: agent.chatId ? <CopyId value={agent.chatId} /> : "—" },
           ]} />
-          <DescriptionList items={[
-            { label: "Token", value: `${formatNumber(resources.tokens.total.value)}（输入 ${formatNumber(resources.tokens.input.value)} · 输出 ${formatNumber(resources.tokens.output.value)}）` },
-            { label: "积分", value: formatNumber(resources.costs.chargedUnits.value) },
-            { label: "模型成本", value: formatUsd(resources.costs.providerUsd.value) },
-            { label: "模型调用", value: `${formatNumber(resources.modelRequests.count.value)} 次` },
-            { label: "工具调用", value: `${formatNumber(resources.trajectory.tools.count.value)} 次` },
-            { label: "资源统计", value: <StatusBadge status={resources.coverage} /> },
-          ]} />
         </div>
+        <ResourceMetrics statistics={resources} />
         {agent.attempts.items.length > 0 && (
           <div>
             <p className="mb-2 text-xs font-semibold text-text-muted">尝试（{agent.attempts.count}，重启 {agent.attempts.restarts} 次）</p>

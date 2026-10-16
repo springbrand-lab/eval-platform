@@ -1,5 +1,6 @@
-import type { RunSnapshot } from "@eval-platform/eval-contracts";
 import type {
+  CurrentRun,
+  ProjectRunState,
   RuntimeRecoveryStore,
   RuntimeRunAdmission,
   RuntimeRunAdmissionCommand,
@@ -16,7 +17,7 @@ import {
   RuntimeRunIdentityConflictError,
   RuntimeRunStoppedError,
 } from "@eval-platform/eval-runtime";
-import { and, eq, gt, inArray, max } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, max } from "drizzle-orm";
 import { addToGroup, selectByIds, sqlBatches } from "./batch.js";
 import type { RunQueue } from "../run-worker-queue.js";
 import { constraintViolation, READ_SNAPSHOT, type EvalDb } from "./client.js";
@@ -55,8 +56,6 @@ type RuntimeStoreScope =
   | { readonly kind: "user"; readonly ownerUserId: string; readonly release: EvalSpRelease };
 
 type AdmissionWriter = Parameters<Parameters<EvalDb["transaction"]>[0]>[0];
-
-export type CurrentRun = Pick<RunSnapshot, "runId" | "stopRequested">;
 
 function sameIds(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((id, index) => id === right[index]);
@@ -311,11 +310,14 @@ async function admitRun(
   return { run: structuredClone(run), created: true };
 }
 
-/** The Project's unfinished Run, if any. */
-export async function readCurrentRun(reader: RecordReader, ownerUserId: string, projectId: string): Promise<CurrentRun | null> {
-  const [active] = await reader.select({ runId: runs.runId, stopRequested: runs.stopRequested })
-    .from(runs).where(and(eq(runs.ownerUserId, ownerUserId), eq(runs.projectId, projectId), runActive(reader))).limit(1);
-  return active ? { runId: active.runId, ...(active.stopRequested ? { stopRequested: true as const } : {}) } : null;
+/** Admission serializes Runs, so only the latest one can still be active. */
+export async function readProjectRunState(reader: RecordReader, ownerUserId: string, projectId: string): Promise<ProjectRunState> {
+  const [latest] = await reader.select({ runId: runs.runId, sequence: runs.sequence, stopRequested: runs.stopRequested, active: runActive(reader) })
+    .from(runs).where(and(eq(runs.ownerUserId, ownerUserId), eq(runs.projectId, projectId))).orderBy(desc(runs.sequence)).limit(1);
+  return {
+    runSequence: latest?.sequence ?? 0,
+    currentRun: latest?.active ? { runId: latest.runId, ...(latest.stopRequested ? { stopRequested: true as const } : {}) } : null,
+  };
 }
 
 function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope, runQueue: RunQueue): RuntimeStore {
@@ -464,8 +466,8 @@ export function createPostgresRuntimeStore(
 export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string, runQueue: RunQueue) {
   const owner = requireOwnerUserId(ownerUserId);
   return {
-    getCurrentRun(projectId: string): Promise<CurrentRun | null> {
-      return readCurrentRun(db, owner, projectId);
+    async getCurrentRun(projectId: string): Promise<CurrentRun | null> {
+      return (await readProjectRunState(db, owner, projectId)).currentRun;
     },
     async stopRun(projectId: string, runId: string): Promise<{ runId: string; stopRequested: true } | null> {
       return db.transaction(async (transaction) => {

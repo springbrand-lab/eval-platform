@@ -20,6 +20,9 @@ export const remove: AppRouteHandler<typeof routes.remove> = async (c) => {
   return c.body(null, 204);
 };
 
+export const evaluationOutputSchema: AppRouteHandler<typeof routes.evaluationOutputSchema> = async (c) =>
+  ok(c, await c.var.services.projects.getEvaluationOutputSchema(c.req.valid("param").projectId));
+
 export const replaceEvaluationPlan: AppRouteHandler<typeof routes.replaceEvaluationPlan> = async (c) =>
   ok(c, await c.var.services.projects.replaceEvaluationPlan(c.req.valid("param").projectId, c.req.valid("json")));
 

@@ -7,7 +7,7 @@ export const list: AppRouteHandler<typeof routes.list> = async (c) =>
   ok(c, await c.var.services.datasets.listData(c.req.valid("query").datasetId));
 
 export const create: AppRouteHandler<typeof routes.create> = async (c) =>
-  ok(c, await c.var.services.datasets.createData(c.req.valid("json")), 201);
+  ok(c, await c.var.services.datasets.createData(c.req.valid("json"), c.req.valid("query")), 201);
 
 export const get: AppRouteHandler<typeof routes.get> = async (c) => {
   const data = await c.var.services.datasets.getData(c.req.valid("param").dataId);

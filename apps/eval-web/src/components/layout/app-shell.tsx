@@ -1,6 +1,6 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import {
-  Bot, Coins, Database, FileJson2, FlaskConical, FolderArchive, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
+  Bot, Coins, Database, FlaskConical, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
 } from "lucide-react";
 import { useState, type ComponentType } from "react";
 import { isEmbedded } from "@/auth/session";
@@ -11,13 +11,11 @@ import { readThemePreference, saveThemePreference, type ThemePreference } from "
 interface NavItem { to: string; label: string; icon: ComponentType<{ className?: string }> }
 
 export const NAV_GROUPS: readonly { label: string; items: readonly NavItem[] }[] = [
-  { label: "评测", items: [{ to: "/projects", label: "Project", icon: FlaskConical }] },
+  { label: "评测", items: [{ to: "/projects", label: "项目管理", icon: FlaskConical }] },
   {
     label: "数据",
     items: [
-      { to: "/datasets", label: "测试集", icon: Database },
-      { to: "/resources", label: "初始资源", icon: FolderArchive },
-      { to: "/output-schemas", label: "评分格式", icon: FileJson2 },
+      { to: "/datasets", label: "数据集", icon: Database },
     ],
   },
   { label: "配置", items: [{ to: "/agents", label: "Agent", icon: Bot }] },

@@ -5,7 +5,7 @@ describe("@eval-platform/eval-dataset", () => {
   it("exports only the Dataset service, its model, document parsing and errors", () => {
     expect(Object.keys(entry).toSorted()).toEqual([
       "assertPromptData", "assertPromptDatasetMetadata", "createDatasetService", "DataInUseError",
-      "DatasetEntityNotFoundError", "DatasetIdentityConflictError", "DatasetInputError", "dataInputSchema",
+      "DatasetEntityNotFoundError", "DatasetIdentityConflictError", "DatasetInputError", "dataCreateOptionsSchema", "dataInputSchema",
       "dataSchema", "datasetInputSchema", "datasetSchema", "datasetSnapshotSchema", "initialMaterialsRefsSchema", "initialSessionRefSchema",
       "parseDatasetDocument", "parseStrictJson", "platformIdSchema", "promptDatasetUploadSchema",
     ].toSorted());

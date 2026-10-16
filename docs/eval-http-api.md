@@ -1,5 +1,9 @@
 # Eval HTTP control plane
 
+## Input limits
+
+Authenticated `GET /api/input-limits` returns `EvalInputLimits`: positive integer fields `materialFileBytes`, `materialTotalBytes`, `materialMaxFiles`, `sessionContentChars`, `zipArchiveBytes`, `outputSchemaBytes`, `datasetDocumentBytes`, `promptDatasetFileBytes`, `runTargetIds`, `samplingCountMax`. Values come from the API's actual validation constants. Web enables the corresponding submit actions only after loading these bounds; it has no default numeric copy. The API continues enforcing every bound.
+
 `apps/eval-api` exposes the Dataset, initial-resource catalog, Agent Config, Project, Run, observation and Metrics services through one Hono application served by `@hono/node-server` (`start:api`, entry `src/server.ts`). It owns request authentication and composition, not evaluation semantics or SP storage. Process configuration is listed in the [eval-api README](../apps/eval-api/README.md); the Project, Runtime and Metrics design behind these routes is recorded in [Project、Runtime 与 Metrics 设计](eval-project-redesign.md). This document is the single source for routes, the response envelope, status codes and error codes.
 
 ## Application structure
@@ -108,6 +112,7 @@ A Project's execution plan, Dataset/Data snapshot and Sampling counts are fixed 
 | `GET /api/projects/{projectId}` | `ProjectView` below |
 | `DELETE /api/projects/{projectId}` | `204` |
 | `PUT /api/projects/{projectId}/evaluation-plan` | Evaluation plan body below / `ProjectView` |
+| `GET /api/projects/{projectId}/evaluation-output-schema` | `EvaluationOutputSchemaDocument {reference:{outputSchemaId,digest}, content: JSON Schema}` or `null` without an evaluation plan; reads the Project reference even after catalog soft deletion |
 
 Creation body:
 
@@ -130,12 +135,12 @@ Creation reads the selected owned, non-deleted Datasets and their current member
 
 Creation is idempotent per owner and `idempotencyKey`; the replay, race and compensation rules are defined once in [Project 创建](eval-project-redesign.md#31-创建). On the wire: creation and a matching replay return `201 {project, run}` (a replay clones no Agent Config), where `run` is the creation's own first Run or `null` when the Project already has other Runs; a different body under the key is `409 PROJECT_IDEMPOTENCY_CONFLICT`; a key whose Project was soft-deleted is `404 PROJECT_NOT_FOUND`; a first Run that keeps meeting evaluation-plan changes ends in `409 PROJECT_PLAN_CHANGED` with the Project kept for a same-key replay.
 
-`ProjectView` is the fixed plan plus current state: `{project, datasets: [{datasetId, name, description?, kind, projectSampleIds}], execution, executionPlanDigest, evaluation: {plan, digest, lockedAt | null} | null, projectSamples: [{projectSampleId, projectId, dataId, datasetIds, samplingCount, data}], currentRun: {runId, stopRequested?} | null}`. `execution.subjectAgentConfig` and `evaluation.plan.evaluatorAgentConfig` are the Agent Config bodies as frozen; `harness.agentConfig` names the frozen copy. `evaluation.plan.outputSchema` is `{outputSchemaId, digest}`; `evaluation.lockedAt` is set by the first pipeline or evaluation Run.
+`ProjectView` is the fixed plan plus current state: `{project, datasets: [{datasetId, name, description?, kind, projectSampleIds}], execution, executionPlanDigest, evaluation: {plan, digest, lockedAt | null} | null, projectSamples: [{projectSampleId, projectId, dataId, datasetIds, samplingCount, data}], runSequence, currentRun: {runId, stopRequested?} | null}`. `runSequence` is the latest admitted Run's existing sequence, or 0 before any Run; it is read with `currentRun` in the same snapshot and lets clients detect a Run that both started and finished between polls. It is not another persisted counter. `execution.subjectAgentConfig` and `evaluation.plan.evaluatorAgentConfig` are the Agent Config bodies as frozen; `harness.agentConfig` names the frozen copy. `evaluation.plan.outputSchema` is `{outputSchemaId, digest}`; `evaluation.lockedAt` is set by the first pipeline or evaluation Run.
 
 | Route | Domain errors |
 | --- | --- |
 | Create | `404 PROJECT_NOT_FOUND` (key of a deleted creation, whatever the body); `409 PROJECT_IDEMPOTENCY_CONFLICT`; `400 RUNTIME_INPUT_INVALID` (pipeline without evaluation plan, Data not a current member, override for unselected Data, no Data, plan values such as concurrency, retry policy and timeout); `413 RUN_TARGETS_TOO_LARGE` (more than `RUN_TARGET_IDS` Data); `404 DATASET_NOT_FOUND`, `OUTPUT_SCHEMA_NOT_FOUND`; `409 AGENT_CONFIG_FROZEN` (a frozen copy selected as source); `409 RUNTIME_RECORD_CONFLICT` (identical requests kept racing the same key; retry with the same key); relayed SP errors; every first-Run admission error of [Run submission](#runs) |
-| Detail | `404 PROJECT_NOT_FOUND` |
+| Detail / Project Schema | `404 PROJECT_NOT_FOUND` |
 | Delete | `404 PROJECT_NOT_FOUND`; `409 PROJECT_BUSY` while a Run is active or its stop is not finalized |
 | Evaluation plan | `404 PROJECT_NOT_FOUND`, `OUTPUT_SCHEMA_NOT_FOUND`; `409 PROJECT_EVALUATION_PLAN_LOCKED`, `AGENT_CONFIG_FROZEN`; `400 RUNTIME_INPUT_INVALID`; relayed SP errors |
 
@@ -223,7 +228,7 @@ Datasets and Data are the user's editable source catalog; Projects copy what the
 | `GET /api/datasets/{datasetId}/export?format=json\|yaml` | Document text with `application/json` or `application/yaml` | `404 DATASET_NOT_FOUND` |
 | `POST /api/datasets/prompt-import` | `{name, description, format:"json"\|"jsonl", content}` / `201 {dataset, data}`; see [Dataset upload](eval-dataset-upload.md) | `400 DATASET_INPUT_INVALID` |
 | `GET /api/data?datasetId=` | Non-deleted `Data[]`, optionally one Dataset's members | `404 DATASET_NOT_FOUND` |
-| `POST /api/data` | Data input / `201 Data` | `400 DATASET_INPUT_INVALID`; `404 BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`); `409 DATASET_IDENTITY_CONFLICT` |
+| `POST /api/data?datasetId=...` | Data input / `201 Data`; optional Dataset binding is atomic with creation | `400 DATASET_INPUT_INVALID`; `404 DATASET_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`); `409 DATASET_IDENTITY_CONFLICT` |
 | `GET /api/data/{dataId}` | `Data` | `404 DATA_NOT_FOUND` |
 | `PUT /api/data/{dataId}` | Data input / `Data` | `400 DATASET_INPUT_INVALID`; `404 DATA_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`) |
 | `DELETE /api/data/{dataId}` | `204`; soft delete, idempotent | `409 DATA_IN_USE` while an active Dataset contains it |

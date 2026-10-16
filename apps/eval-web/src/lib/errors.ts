@@ -1,5 +1,11 @@
 import { ApiError } from "@springbrand/http/client";
 
+/** A write may have committed when no usable success or business rejection arrived. */
+export function isWriteOutcomeUnknown(error: unknown): boolean {
+  return error instanceof ApiError && (error.kind === "network" || error.kind === "timeout"
+    || error.kind === "response" || error.status >= 500);
+}
+
 /** Chinese text for every Eval API error code; unknown codes fall back to the server's errMsg. */
 export const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   REQUEST_INVALID_INPUT: "请求内容无效",

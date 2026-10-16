@@ -1,12 +1,14 @@
-import type { EvaluationOutputSummary, MetricSummary, OutputFieldSummary, ResourceStatistics } from "@/api-sdk/types";
+import type { EvaluationOutputSummary, MetricSummary, OutputFieldSummary } from "@/api-sdk/types";
 import { MetricCard } from "@/components/ui/data-display";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/badge";
-import { formatCompact, formatNumber, formatPercent } from "@/lib/format";
+import { formatCompact, formatDuration, formatNumber, formatPercent, formatStatistic } from "@/lib/format";
+import { AgentMetricPair } from "./metric-value";
+import { NumericMetrics, ResourceMetrics } from "./resource-metrics";
 
 function fieldValue(field: OutputFieldSummary): string {
   const values: string[] = [];
-  if (field.numeric) values.push(`均值 ${formatNumber(field.numeric.mean, 2)}`);
+  if (field.numeric) values.push(`均值 ${formatStatistic(field.numeric.mean)} · 方差 ${formatStatistic(field.numeric.variance)} · 中位数 ${formatStatistic(field.numeric.median)} · 最小 ${formatStatistic(field.numeric.min)} · 最大 ${formatStatistic(field.numeric.max)}`);
   values.push(...field.distribution.map((item) => `${JSON.stringify(item.value)}: ${item.count} (${formatPercent(item.share)})`));
   if (field.nullCount !== undefined) values.push(`null: ${field.nullCount}`);
   return values.join(" · ") || "暂无有效观察";
@@ -29,7 +31,7 @@ export function OutputFields({ outputs }: { outputs: EvaluationOutputSummary }) 
         <p className="mt-1 text-xs text-text-muted">{field.description}</p>
         <p className="mt-1 break-all font-mono text-xs text-text-muted">{field.jsonPointer || "$"} · {field.kinds.join(" / ")}</p>
         <p className="mt-3 text-sm">{fieldValue(field)}</p>
-        {field.numeric && <p className="mt-1 text-xs text-text-muted">最小 {formatNumber(field.numeric.min, 2)} · 最大 {formatNumber(field.numeric.max, 2)}</p>}
+        {field.numeric && <p className="mt-1 text-xs text-text-muted">有效数值 N = {field.numeric.count}</p>}
         <p className="mt-2 text-xs text-text-muted">{field.contributingEvaluationCount} 份评估 · {field.observationCount} 个观察值 · 缺失 {field.missingEvaluationCount} 份</p>
         {field.diagnostics.length > 0 && <p className="mt-1 text-xs text-text-muted">{field.diagnostics.map((item) => `${MISSING[item.reason]} ${item.evaluations}`).join(" · ")}</p>}
       </section>)}
@@ -38,16 +40,6 @@ export function OutputFields({ outputs }: { outputs: EvaluationOutputSummary }) 
 }
 
 const MISSING = { "not-succeeded": "评估未成功", "invalid-output": "结果无效", "unavailable-output": "结果未获得", absent: "字段缺失" };
-
-export function chargedUnits(...stats: readonly ResourceStatistics[]): number | null {
-  const values = stats.map((item) => item.costs.chargedUnits.value).filter((value): value is number => value !== null);
-  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : null;
-}
-
-export function totalTokens(...stats: readonly ResourceStatistics[]): number | null {
-  const values = stats.map((item) => item.tokens.total.value).filter((value): value is number => value !== null);
-  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : null;
-}
 
 export function SummaryCards({ summary }: { summary: MetricSummary }) {
   const execution = summary.execution;
@@ -60,10 +52,23 @@ export function SummaryCards({ summary }: { summary: MetricSummary }) {
         hint={`成功 ${execution.statuses.succeeded} · 失败 ${execution.statuses.failed} · 进行中 ${running}`} />
       <MetricCard label="评估成功率" value={formatPercent(evaluation.successRate)} tone={evaluation.statuses.failed > 0 ? "warning" : undefined}
         hint={`成功 ${evaluation.statuses.succeeded} · 失败 ${evaluation.statuses.failed}`} />
-      <MetricCard label="积分消耗" value={formatNumber(chargedUnits(summary.executionAgent, summary.evaluationAgents))}
-        hint={`执行 ${formatNumber(summary.executionAgent.costs.chargedUnits.value)} · 评估 ${formatNumber(summary.evaluationAgents.costs.chargedUnits.value)}`} />
-      <MetricCard label="Token" value={formatCompact(totalTokens(summary.executionAgent, summary.evaluationAgents))}
-        hint={`执行 ${formatCompact(summary.executionAgent.tokens.total.value)} · 评估 ${formatCompact(summary.evaluationAgents.tokens.total.value)}`} />
+      <MetricCard label="积分消耗" value={<AgentMetricPair execution={summary.executionAgent.costs.chargedUnits} evaluation={summary.evaluationAgents.costs.chargedUnits} />} />
+      <MetricCard label="Token" value={<AgentMetricPair execution={summary.executionAgent.tokens.total} evaluation={summary.evaluationAgents.tokens.total} format={formatCompact} />} />
+    </div>
+    <div className="grid gap-4">
+      {([
+        ["执行 Agent", summary.executionAgent, execution],
+        ["评估 Agent", summary.evaluationAgents, evaluation],
+      ] as const).map(([title, statistics, stage]) => <Card key={title}>
+        <CardHeader title={`${title} 资源与轨迹`} />
+        <CardBody className="flex flex-col gap-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div><h3 className="mb-2 text-sm font-semibold">Agent 耗时</h3><NumericMetrics summary={stage.agentDurationMs} format={formatDuration} varianceUnit="毫秒²" /></div>
+            <div><h3 className="mb-2 text-sm font-semibold">单次尝试耗时</h3><NumericMetrics summary={stage.attemptDurationMs} format={formatDuration} varianceUnit="毫秒²" /></div>
+          </div>
+          <ResourceMetrics statistics={statistics} distribution={statistics.distribution} />
+        </CardBody>
+      </Card>)}
     </div>
     <OutputFields outputs={summary.evaluationOutputs} />
   </div>;

@@ -1,10 +1,17 @@
 import { ApiError } from "@springbrand/http/client";
 import { describe, expect, it } from "vitest";
-import { describeError, fieldErrors } from "./errors";
+import { describeError, fieldErrors, isWriteOutcomeUnknown } from "./errors";
 import { formatBytes, formatDuration, formatNumber, formatPercent } from "./format";
 import { langfuseScoreId, langfuseSessionUrl } from "./langfuse";
 
 describe("errors", () => {
+  it("distinguishes uncertain writes from pre-send validation and business rejection", () => {
+    expect(isWriteOutcomeUnknown(new ApiError({ status: 0, kind: "network", code: "NETWORK_ERROR", message: "lost" }))).toBe(true);
+    expect(isWriteOutcomeUnknown(new ApiError({ status: 200, kind: "response", code: "RESPONSE_INVALID", message: "bad response" }))).toBe(true);
+    expect(isWriteOutcomeUnknown(new ApiError({ status: 0, kind: "input", code: "REQUEST_INVALID_INPUT", message: "bad input" }))).toBe(false);
+    expect(isWriteOutcomeUnknown(new ApiError({ status: 400, code: "BUNDLE_FILE_INVALID", message: "invalid zip" }))).toBe(false);
+  });
+
   it("maps known codes to Chinese, appends field errors and falls back to the server text", () => {
     expect(describeError(new ApiError({ status: 409, code: "PROJECT_BUSY", message: "busy" }))).toBe("Project 还有未结束的 Run");
     expect(describeError(new ApiError({

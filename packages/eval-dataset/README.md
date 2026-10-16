@@ -51,7 +51,7 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 `createDatasetService(store)` 的公共方法：
 
 - `createDataset(input)`、`updateDataset(datasetId, input)`、`getDataset(datasetId)`、`listDatasets()`、`deleteDataset(datasetId)`。
-- `createData(input)`、`updateData(dataId, input)`、`getData(dataId)`、`listData(datasetId?)`、`deleteData(dataId)`。
+- `createData(input, options?)`、`updateData(dataId, input)`、`getData(dataId)`、`listData(datasetId?)`、`deleteData(dataId)`。可选 `options.datasetId` 让创建与加入目标 Dataset 在同一 Store 事务完成；目标必须自有且未软删除，Prompt Dataset 仍校验四个必选字段。任一步失败不留下孤立 Data。省略目标则独立创建 Data。
 - `attachData(datasetId, dataIds)`、`detachData(datasetId, dataIds)`。
 - `importDataset(source, format)`、`exportDataset(datasetId, format)`，format 必须明确为 `json` 或 `yaml`。
 - `importPromptDataset({name,description,format,content})`：Dataset 元数据独立于文件，JSON 文件是 Data 数组，JSONL 每行一条 Data；每条都要求 `name`、`description`、`userPrompt` 和 `evalPrompt`，一次原子导入。Store 记录 Prompt Dataset 的内部种类，后续修改和关联 Data 时继续校验这些必填字段。详见 [Dataset upload](../../docs/eval-dataset-upload.md)。

@@ -1,5 +1,4 @@
 import {
-  flexRender,
   getCoreRowModel,
   getFilteredRowModel,
   getSortedRowModel,
@@ -10,10 +9,10 @@ import {
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown, ArrowUp, ArrowUpDown, Search } from "lucide-react";
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { Button, Checkbox, Input, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@springbrand/site-block";
 import { cn } from "@/lib/cn";
 import { EmptyState } from "./feedback";
-import { Checkbox } from "./form";
 
 export interface Column<T> {
   key: string;
@@ -51,6 +50,7 @@ export function DataTable<T>({
 }: DataTableProps<T>) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [query, setQuery] = useState("");
+  const columnsByKey = new Map(columns.map((column) => [column.key, column]));
   const rowSelection = useMemo<RowSelectionState>(
     () => Object.fromEntries([...(selected ?? [])].map((key) => [key, true])), [selected],
   );
@@ -58,8 +58,6 @@ export function DataTable<T>({
   const definitions = useMemo<ColumnDef<T>[]>(() => {
     const defs: ColumnDef<T>[] = columns.map((column) => ({
       id: column.key,
-      header: () => column.header,
-      cell: ({ row }) => column.cell(row.original),
       enableSorting: !!column.sortValue,
       sortDescFirst: false,
       ...(column.sortValue ? { accessorFn: (row: T) => column.sortValue!(row) ?? "", sortUndefined: "last" as const } : {}),
@@ -68,12 +66,7 @@ export function DataTable<T>({
     if (selectable) {
       defs.unshift({
         id: "__select",
-        header: ({ table }) => (
-          <Checkbox aria-label="全选"
-            checked={table.getIsAllRowsSelected() ? true : table.getIsSomeRowsSelected() ? "indeterminate" : false}
-            onCheckedChange={(value) => table.toggleAllRowsSelected(value)} />
-        ),
-        cell: ({ row }) => <Checkbox aria-label="选择" checked={row.getIsSelected()} onCheckedChange={(value) => row.toggleSelected(value)} />,
+        enableSorting: false,
         meta: { className: "w-10" },
       });
     }
@@ -100,7 +93,11 @@ export function DataTable<T>({
   });
 
   const visible = table.getRowModel().rows;
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLElement>(null);
+  // Dune owns the single table viewport; virtualization and sticky headers use that same public slot.
+  const connectViewport = useCallback((table: HTMLTableElement | null) => {
+    scroller.current = table?.closest<HTMLElement>('[data-slot="table-container"]') ?? null;
+  }, []);
   const virtual = visible.length > VIRTUAL_FROM;
   const virtualizer = useVirtualizer({
     count: visible.length,
@@ -122,7 +119,7 @@ export function DataTable<T>({
           {searchText && (
             <div className="relative w-64">
               <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-text-faint" />
-              <input
+              <Input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder={searchPlaceholder}
@@ -137,33 +134,34 @@ export function DataTable<T>({
       {visible.length === 0 ? (
         empty ?? <EmptyState title={query ? "没有匹配的结果" : "暂无数据"} />
       ) : (
-        <div ref={scroller} className={cn("overflow-x-auto", virtual && "max-h-[70vh] overflow-y-auto")}>
-          <table className="w-full border-collapse text-[13px]">
-            <thead className={cn(virtual && "sticky top-0 z-10 bg-surface")}>
+        <div className={virtual ? "[&>[data-slot=table-container]]:max-h-[70vh] [&>[data-slot=table-container]]:overflow-y-auto" : undefined}>
+          <Table ref={connectViewport} className="w-full border-collapse text-[13px]">
+            <TableHeader className={cn(virtual && "sticky top-0 z-10 bg-surface")}>
               {table.getHeaderGroups().map((group) => (
-                <tr key={group.id} className="border-b border-border text-left text-xs text-text-muted">
+                <TableRow key={group.id} className="border-b border-border text-left text-xs text-text-muted">
                   {group.headers.map((header) => {
                     const meta = header.column.columnDef.meta as { className?: string; align?: string } | undefined;
                     const sorted = header.column.getIsSorted();
                     return (
-                      <th key={header.id} className={cn("h-9 whitespace-nowrap px-3 font-semibold", meta?.align === "right" && "text-right", meta?.className)}>
-                        {header.column.getCanSort() ? (
-                          <button type="button" onClick={header.column.getToggleSortingHandler()}
+                      <TableHead key={header.id} className={cn("h-9 whitespace-nowrap px-3 font-semibold", meta?.align === "right" && "text-right", meta?.className)}>
+                        {header.column.id === "__select" ? <Checkbox aria-label="全选" checked={table.getIsAllRowsSelected()}
+                          indeterminate={!table.getIsAllRowsSelected() && table.getIsSomeRowsSelected()} onCheckedChange={(value) => table.toggleAllRowsSelected(value)} /> : header.column.getCanSort() ? (
+                          <Button type="button" variant="ghost" size="sm" onClick={header.column.getToggleSortingHandler()}
                             className={cn("inline-flex items-center gap-1 hover:text-text-strong", meta?.align === "right" && "flex-row-reverse")}>
-                            {flexRender(header.column.columnDef.header, header.getContext())}
+                            {columnsByKey.get(header.column.id)!.header}
                             {sorted === "asc" ? <ArrowUp className="size-3" /> : sorted === "desc" ? <ArrowDown className="size-3" /> : <ArrowUpDown className="size-3 opacity-40" />}
-                          </button>
-                        ) : flexRender(header.column.columnDef.header, header.getContext())}
-                      </th>
+                          </Button>
+                        ) : columnsByKey.get(header.column.id)!.header}
+                      </TableHead>
                     );
                   })}
-                </tr>
+                </TableRow>
               ))}
-            </thead>
-            <tbody>
-              {padTop > 0 && <tr style={{ height: padTop }}><td colSpan={columnCount} /></tr>}
+            </TableHeader>
+            <TableBody>
+              {padTop > 0 && <TableRow style={{ height: padTop }}><TableCell colSpan={columnCount} /></TableRow>}
               {shownRows.map((row) => (
-                <tr
+                <TableRow
                   key={row.id}
                   data-state={row.getIsSelected() ? "selected" : undefined}
                   onClick={onRowClick ? () => onRowClick(row.original) : undefined}
@@ -175,17 +173,18 @@ export function DataTable<T>({
                   {row.getVisibleCells().map((cell) => {
                     const meta = cell.column.columnDef.meta as { className?: string; align?: string } | undefined;
                     return (
-                      <td key={cell.id} onClick={cell.column.id === "__select" ? (event) => event.stopPropagation() : undefined}
+                      <TableCell key={cell.id} onClick={cell.column.id === "__select" ? (event) => event.stopPropagation() : undefined}
                         className={cn("h-11 px-3 py-2 align-middle", meta?.align === "right" && "text-right tabular", meta?.className)}>
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </td>
+                        {cell.column.id === "__select" ? <Checkbox aria-label="选择" checked={row.getIsSelected()} onCheckedChange={(value) => row.toggleSelected(value)} />
+                          : columnsByKey.get(cell.column.id)!.cell(row.original)}
+                      </TableCell>
                     );
                   })}
-                </tr>
+                </TableRow>
               ))}
-              {padBottom > 0 && <tr style={{ height: padBottom }}><td colSpan={columnCount} /></tr>}
-            </tbody>
-          </table>
+              {padBottom > 0 && <TableRow style={{ height: padBottom }}><TableCell colSpan={columnCount} /></TableRow>}
+            </TableBody>
+          </Table>
         </div>
       )}
     </div>

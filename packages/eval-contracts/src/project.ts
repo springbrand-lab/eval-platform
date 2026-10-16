@@ -1,4 +1,4 @@
-import type { DatasetKind, HarnessConfig, JsonValue, Project, RetryPolicy } from "./model.js";
+import type { DatasetKind, EvaluationOutputSchema, HarnessConfig, JsonValue, Project, RetryPolicy } from "./model.js";
 
 /**
  * Display-only copy of an Agent Config taken when it was frozen for a Project. Runs always use the
@@ -24,6 +24,12 @@ export interface EvaluationOutputSchemaRef {
   readonly outputSchemaId: string;
   /** sha256 of the canonical Schema JSON. */
   readonly digest: string;
+}
+
+/** A Project-bound Schema's identity and content from one digest-checked read, including deleted catalog entries. */
+export interface EvaluationOutputSchemaDocument {
+  readonly reference: EvaluationOutputSchemaRef;
+  readonly content: EvaluationOutputSchema;
 }
 
 /** Optional at creation; replaceable as a whole until the first evaluating Run locks it. */

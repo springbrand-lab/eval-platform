@@ -1,8 +1,10 @@
 import {
   EVAL_INITIALIZATION_MAX_BYTES,
+  EVAL_INITIAL_FILE_MAX_BYTES,
   EVAL_MATERIAL_MAX_FILES,
   EVAL_SESSION_CONTENT_MAX_CHARS,
 } from "@springbrand/eval-harness";
+import type { EvalInputLimits } from "@eval-platform/eval-contracts";
 
 /**
  * Single source for Eval API content limits. Request body limits are derived from these values
@@ -29,6 +31,20 @@ export const IDENTIFIER_CHARS = 512;
 export const RUN_TARGET_IDS = 10_000;
 /** Most Samplings one ProjectSample creates per execution. */
 export const SAMPLING_COUNT_MAX = 100;
+
+/** The browser reads the same bounds that the API enforces. */
+export const INPUT_LIMITS = Object.freeze({
+  materialFileBytes: EVAL_INITIAL_FILE_MAX_BYTES,
+  materialTotalBytes: EVAL_INITIALIZATION_MAX_BYTES,
+  materialMaxFiles: EVAL_MATERIAL_MAX_FILES,
+  sessionContentChars: EVAL_SESSION_CONTENT_MAX_CHARS,
+  zipArchiveBytes: ZIP_ARCHIVE_BYTES,
+  outputSchemaBytes: OUTPUT_SCHEMA_BYTES,
+  datasetDocumentBytes: DATASET_DOCUMENT_BYTES,
+  promptDatasetFileBytes: PROMPT_DATASET_FILE_BYTES,
+  runTargetIds: RUN_TARGET_IDS,
+  samplingCountMax: SAMPLING_COUNT_MAX,
+}) satisfies EvalInputLimits;
 
 /** One JSON string escape (`\uXXXX`) is the most bytes a single text unit can occupy in a body. */
 const JSON_ESCAPED_UNIT_BYTES = 6;

@@ -6,6 +6,7 @@ const USAGE_KINDS = new Set(["assistant_model", "compaction", "subagent", "chat_
 const TOKEN_BUCKETS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
 const USAGE_METRICS = [...TOKEN_BUCKETS, "reasoningTokens", "totalTokens", "providerUsd"] as const;
 type UsageMetric = (typeof USAGE_METRICS)[number];
+export type ModelGroupKey = Pick<ModelStatistics, "provider" | "model">;
 
 interface UsageStatistics {
   readonly tokens: TokenStatistics;
@@ -16,7 +17,7 @@ interface UsageStatistics {
 }
 
 /** Token and provider-cost totals without double counting usage that a subagent summary already covers. */
-export function aggregateUsage(stream: FactStream, diagnostics: ResourceDiagnostics): UsageStatistics {
+export function aggregateUsage(stream: FactStream, diagnostics: ResourceDiagnostics, requestedGroups: readonly ModelGroupKey[] = []): UsageStatistics {
   const known = selectKnownUsage(stream.entries, diagnostics);
   const summaries = readSubagentSummaries(known.entries, diagnostics);
   const selection = new UsageSelection(
@@ -26,13 +27,12 @@ export function aggregateUsage(stream: FactStream, diagnostics: ResourceDiagnost
     diagnostics,
   );
   const totalUsage = new Set(selection.entries("totalTokens"));
-  const byModel = modelGroups(new Set(USAGE_METRICS.flatMap((metric) => selection.entries(metric))))
+  const byModel = modelGroups(new Set(USAGE_METRICS.flatMap((metric) => selection.entries(metric))), requestedGroups)
     .map((group): ModelStatistics => ({
-      provider: group.provider,
-      model: group.model,
-      usageRecords: group.entries.filter((entry) => totalUsage.has(entry)).length,
-      tokens: selection.tokens(new Set(group.entries)),
-      providerUsd: selection.total("providerUsd", new Set(group.entries)),
+      ...group,
+      usageRecords: [...totalUsage].filter((entry) => sameModel(modelKey(entry), group)).length,
+      tokens: selection.tokens(group),
+      providerUsd: selection.total("providerUsd", group),
     }))
     .sort((left, right) => identity(left.provider, left.model).localeCompare(identity(right.provider, right.model)));
   return {
@@ -135,12 +135,14 @@ class UsageSelection {
     return selected;
   }
 
-  total(metric: UsageMetric, group?: ReadonlySet<FactEntry>): MetricNumber {
-    const entries = this.entries(metric).filter((entry) => group === undefined || group.has(entry));
-    return this.diagnostics.sum(entries, this.complete, "usageEvents", metric, metric !== "providerUsd", (entry) => this.#value(entry, metric));
+  total(metric: UsageMetric, group?: ModelGroupKey): MetricNumber {
+    const selected = this.entries(metric);
+    const entries = group === undefined ? selected : selected.filter((entry) => sameModel(modelKey(entry), group));
+    const attributable = group === undefined || selected.every((entry) => !couldBelongToGroup(modelKey(entry), group));
+    return this.diagnostics.sum(entries, this.complete && attributable, "usageEvents", metric, metric !== "providerUsd", (entry) => this.#value(entry, metric));
   }
 
-  tokens(group?: ReadonlySet<FactEntry>): TokenStatistics {
+  tokens(group?: ModelGroupKey): TokenStatistics {
     return {
       input: this.total("inputTokens", group),
       output: this.total("outputTokens", group),
@@ -196,22 +198,26 @@ function readUsageMetric(entry: FactEntry, metric: UsageMetric, diagnostics: Res
   return null;
 }
 
-interface ModelGroup {
-  readonly provider: string | null;
-  readonly model: string | null;
-  readonly entries: FactEntry[];
+function modelKey(entry: FactEntry): ModelGroupKey {
+  const metadata = record(entry.fact.providerMetadata);
+  return { provider: text(metadata?.provider) ?? null, model: text(metadata?.model) ?? null };
 }
 
-function modelGroups(entries: ReadonlySet<FactEntry>): ModelGroup[] {
-  const groups = new Map<string, ModelGroup>();
-  for (const entry of entries) {
-    const metadata = record(entry.fact.providerMetadata);
-    const provider = text(metadata?.provider) ?? null;
-    const model = text(metadata?.model) ?? null;
-    const key = identity(provider, model);
-    const group = groups.get(key) ?? { provider, model, entries: [] };
-    group.entries.push(entry);
-    groups.set(key, group);
+function sameModel(left: ModelGroupKey, right: ModelGroupKey): boolean {
+  return left.provider === right.provider && left.model === right.model;
+}
+
+/** Unknown metadata can hide usage of a named model; a different known attribute excludes it. */
+function couldBelongToGroup(actual: ModelGroupKey, group: ModelGroupKey): boolean {
+  if (group.provider === null || group.model === null || sameModel(actual, group)) return false;
+  return (actual.provider === null || actual.provider === group.provider)
+    && (actual.model === null || actual.model === group.model);
+}
+
+function modelGroups(entries: ReadonlySet<FactEntry>, requested: readonly ModelGroupKey[]): ModelGroupKey[] {
+  const groups = new Map<string, ModelGroupKey>();
+  for (const group of [...entries].map(modelKey).concat(requested)) {
+    groups.set(identity(group.provider, group.model), group);
   }
   return [...groups.values()];
 }

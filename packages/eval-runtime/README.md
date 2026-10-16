@@ -13,6 +13,7 @@
   - `submit({ idempotencyKey, projectId, operation, selector, targets })` 以 `targets` 为准校验（不重新展开），构造新 Sampling（每个目标 ProjectSample 按 `samplingCount` 新建，每个目标 Sampling 一对一新建）、EvaluationRecord（pipeline 每个新 Sampling 一条，evaluation 每个目标 Sampling 一条）和 Run，并调用一次 `RuntimeStore.admitRun()`。请求指纹为 `digestJson({ projectId, operation, selector, targets, planDigests })`，`planDigests` 含执行计划摘要，pipeline/evaluation 另含评估计划摘要；同 key 先按已存 Run 的摘要比对，事实相同即重放原 Run，不再读取计划。
 - `createEvalRunResumer({ plans, harness, store, evidence, evidenceLimits?, onError, ... })`：Worker 入口，`evidence` 是证据包存储 `EvidenceStore`，`evidenceLimits` 缺省为 `DEFAULT_EVIDENCE_LIMITS`；提供 `resume(runId, stopSignal?)`、`interrupt(runId)` 和 `stop(runId)`。每次先读取 Run，再读取 Project 计划并核对 `run.planDigests`；摘要不一致直接拒绝，绝不用另一份计划运行。执行使用执行计划的 Harness、`executionConcurrency` 和 `retryPolicy`，评估使用评估计划的对应字段；ProjectSample 按不同 ID 批量读取并校验身份。
 - 结果读取实现 `EvalRunQueries`（`getRun`、`getSampling`、`getEvaluation`、`listEvaluations`），由宿主基于自身存储提供；`toRunSnapshot` 投影 `operation`、`selector`、`targets` 与派生的 `phase/status`。
+- `ProjectView` 是 API 与 Web 共用的 Project 读取投影：固定计划、全部 `ProjectSample` 和 `ProjectRunState`。后者只包含既有 Run 序号和 `CurrentRun | null`，`CurrentRun` 从公开 `RunSnapshot` 选取身份与停止意图；这些是查询契约，不增加持久化状态。
 
 `RuntimeStore.admitRun()` 的准入事务合同只由 [`runtime/store.ts`](src/runtime/store.ts) 定义，调度与持久化见[架构方案](../../docs/architecture.md#run-准入与独立评估)。
 

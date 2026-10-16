@@ -45,6 +45,7 @@ export type {
 export type {
   AgentConfigSnapshot,
   EvaluationOutputSchemaRef,
+  EvaluationOutputSchemaDocument,
   EvaluationPlan,
   ExecutionPlan,
   ProjectDatasetSnapshot,
@@ -89,3 +90,5 @@ export {
 export { IDENTIFIER_RULE, identifierSchema, isIdentifier } from "./identifier.js";
 export { canonicalJsonBytes, createId, equalJson, sha256Hex } from "./canonical.js";
 export { jsonObjectSchema, jsonValueSchema } from "./json.js";
+export { evalInputLimitsSchema } from "./input-limits.js";
+export type { EvalInputLimits } from "./input-limits.js";

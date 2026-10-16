@@ -64,6 +64,12 @@ AWS 资源由 `infra/aws/cloudformation.yaml`（栈 `eval-platform-api`）创建
 
 ## HTTP 控制面
 
+`GET /api/input-limits` 从实际校验常量返回上传与选择上限，Web 不保存数值副本。
+
+Project 视图的 `runSequence` 和 `currentRun` 从同一最新 Run 行及其当前工作投影读取；序号复用准入已有的 `runs.sequence`，没有另一份版本存储。Web 因而能发现两次轮询间已经结束的短 Run。
+
+`GET /api/projects/{projectId}/evaluation-output-schema` 在同一只读快照中检查 Project 归属和可见性，复用 Worker 的计划引用及摘要校验，返回 Schema 引用与正文；没有评估计划时为 null。Schema 目录软删除不影响此读取，目录接口仍禁止新选择已删除项。
+
 路由、信封、状态码、错误码和请求体规则只在 [Eval HTTP 控制面](../../docs/eval-http-api.md) 描述；Dataset 上传、初始资源与输出格式见 [Dataset upload](../../docs/eval-dataset-upload.md)。内容上限的唯一来源是 `src/limits.ts`（`RUN_TARGET_IDS` 同时限制一个 Project 绑定的 Data 数和一次 Run 的选择/目标 ID 数，超出的展开结果返回 413），各路由的请求体上限由其推导。
 
 Eval API 不做交互式登录，固定以一个 Eval SP 服务账号运行。服务账号与它的长期会话由 sp-platform 的 `pnpm --filter sp-platform-api eval:bootstrap-service-account` 在 `sp-platform-eval` 库中创建，可重复执行，每次轮换会话。进程启动时用 `EVAL_SP_SERVICE_SESSION_TOKEN` 调用一次 Eval SP 的 `/api/auth/me`，结果必须是 `EVAL_SP_SERVICE_USER_ID`，否则拒绝启动；之后每个 `/api/*` 请求都归属这个账号，请求不需要携带 `Authorization`，客户端也不能指定用户。Agent Config 的增删改查用服务会话调用 Eval SP 的 `/api/user-agent-configs`，写请求带上 `EVAL_WEB_ORIGIN` 以满足 SP 的来源校验。Eval 不保存配置正文。服务账号的积分不自动发放，由 `/api/credits/grants` 用 `EVAL_SP_ADMIN_TOKEN` 调用 Eval SP 的管理员加积分接口手动添加（见 HTTP 契约的 Credits 一节）。API 是内部服务，只能部署在受信网络内。

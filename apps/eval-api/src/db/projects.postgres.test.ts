@@ -197,6 +197,32 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     expect(stub.configs.get(copyId)?.setting).toEqual({ model: "Subject" });
   });
 
+  it("keeps Project Schema reads and Run sequence authoritative after source deletion and short Runs", async () => {
+    const { first, subject, evaluator, schema } = await catalog();
+    const { projects: service, outputSchemas, worker, runtime, plans } = services();
+    const { project, run } = await service.create({
+      name: "Schema read", datasets: [{ datasetId: first.datasetId }], samplingCount: 1,
+      execution: { userAgentId: subject, framework: "sp", executionConcurrency: 1 },
+      evaluation: { userAgentId: evaluator, evaluationConcurrency: 1, outputSchemaId: schema.outputSchemaId },
+      idempotencyKey: "schema-read", run: { operation: "execution" },
+    });
+    expect((await service.get(project.projectId))!.runSequence).toBe(1);
+    const document = await service.getEvaluationOutputSchema(project.projectId);
+    expect(document).toEqual({ reference: (await service.get(project.projectId))!.evaluation!.plan.outputSchema, content: JSON.parse(scoreSchema) });
+    await outputSchemas.delete(schema.outputSchemaId);
+    expect(await outputSchemas.get(schema.outputSchemaId)).toBeNull();
+    expect(await service.getEvaluationOutputSchema(project.projectId)).toEqual(document);
+    await expect(services(OTHER).projects.getEvaluationOutputSchema(project.projectId)).rejects.toBeInstanceOf(RuntimeEntityNotFoundError);
+    await settle(worker, run!.samplingIds, "succeeded");
+    expect(await service.get(project.projectId)).toMatchObject({ runSequence: 1, currentRun: null });
+    const next = await buildCommand(plans, runtime, { projectId: project.projectId, operation: "execution", idempotencyKey: "second" });
+    await runtime.admitRun(next);
+    await settle(worker, next.run.samplingIds, "succeeded");
+    expect(await service.get(project.projectId)).toMatchObject({ runSequence: 2, currentRun: null });
+    await service.delete(project.projectId);
+    await expect(service.getEvaluationOutputSchema(project.projectId)).rejects.toBeInstanceOf(RuntimeEntityNotFoundError);
+  });
+
   it("rejects invalid selections before any SP copy is made", async () => {
     const { d1, d3, first, second, subject, schema } = await catalog();
     const { projects: service, datasets, outputSchemas } = services();

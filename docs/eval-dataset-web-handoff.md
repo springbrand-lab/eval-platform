@@ -1,6 +1,14 @@
 # Dataset 层与 Web 接入说明
 
-本文给后续实现 Dataset 页、资源目录和评估输出格式选择的 Web 开发使用。接口事实以 [Dataset 上传契约](eval-dataset-upload.md)、[Eval HTTP 接口](eval-http-api.md)和当前代码为准。当前仓库的 `eval-web` 仍是骨架；本文描述的是已经实现的后端能力和 Web 需要接上的操作。
+本文是 Dataset Web 交互的接入约束。接口事实以 [Dataset 上传契约](eval-dataset-upload.md)、[Eval HTTP 接口](eval-http-api.md)和当前代码为准。
+
+## Web 导航与操作
+
+“数据集”入口下只有四个子卡片：初始素材、初始上下文、Prompt 数据集、评分 Schema。素材与上下文分别进入自己的 Bundle 列表和详情，不提供混合 Bundle 或旧路由。评分 Schema 是独立文件，名称和描述在平台填写，没有 Bundle。
+
+两类 Bundle 支持创建时附 ZIP、向已有 Bundle 导入 ZIP、逐条上传，以及分别编辑包与条目的名称和描述。ZIP 出错显示条目路径和错误，不创建半包。样本编辑单独展示 name、description、启动 Prompt、评估 Prompt；任意额外 JSON 字段保持原样。执行素材和评估素材各为跨 Bundle 的有序多选，执行上下文为单选。选择器只列活动资源，不默默清除现有引用。软删除保持已创建 Project 的固定快照和文件读取能力。
+
+四层 Metrics 统一消费服务端返回的 `evaluationOutputs` 展示定义、观察和资源统计。Web 不重新解释 Schema、不把任意数值字段当评分、不从下层均值反推上层统计；所有字段的 title、description、分布、null、缺失和覆盖状态都来自同一事实链。Sampling 的 Context、Workspace、Trajectory 观察均为只读。
 
 ## 背景与目的
 
@@ -23,7 +31,7 @@ ID 由后端生成，前端保存 ID 供请求使用，列表和选择器优先�
 ## 后端能力
 
 - `eval-dataset` 已支持独立的 Prompt JSON/JSONL 上传解析、Dataset/Data 关联和通用 JSON/YAML 导入导出。Prompt Dataset 在导入后继续约束自身描述及成员 Data 的名称、描述和两个 Prompt；资源引用中的 UUID 在模型入口统一成小写。
-- 标准 Eval API 已提供 Dataset/Data、素材 Bundle/Material、上下文 Bundle/Session（含 ZIP 导入）和输出格式的路由；Project 在评估计划中选择输出格式。资源由已认证用户隔离；通用 Data 创建、修改和导入也会校验引用的资源属于该用户且仍可选。
+- 标准 Eval API 已提供 Dataset/Data、素材 Bundle/Material、上下文 Bundle/Session（含 ZIP 导入）和输出格式的路由；Project 在评估计划中选择输出格式。目录按固定 Eval 服务账号隔离，takt 用户负责访问控制和操作审计；Data 创建、修改和导入会校验引用的资源属于该服务账号且仍可选。
 - 相关数据库表、关联和软删除字段都在 `apps/eval-api/migrations-postgres/0000_initial.sql` 初始基线内。删除规则见下文“编辑、关联与删除规则”。
 - API 上传的文件由 Eval Bundle 目录保存，Run Worker 按 Project 快照中 Data 副本的 Material/Session 引用取用；评估输出格式按 Project 评估计划保存的 ID 解析。执行和评估仍通过 SP 公开接口完成，Web 不需要实现文件目录或 SP 内部存储协议。
 
@@ -49,7 +57,6 @@ Dataset 页提供 Dataset 名称、描述输入框和一个 `.json` 或 `.jsonl`
 ```http
 POST /api/datasets/prompt-import
 Content-Type: application/json
-Authorization: Bearer <Eval SP session token>
 ```
 
 ```json
@@ -122,7 +129,7 @@ Web 用 `GET /api/evaluation-output-schemas` 展示可选格式。输出格式�
 
 - 创建 Project 时可放在 `POST /api/projects` 的 `evaluation` 字段中；首个 Run 选择执行并评估（`run.operation: "pipeline"`）时必填。
 - 之后用 `PUT /api/projects/{projectId}/evaluation-plan` 整体替换评估计划，返回更新后的 Project 详情；没有“清空”操作。
-- Project 详情的 `evaluation.outputSchema` 是 `{outputSchemaId, digest}`；Web 用格式列表按 ID 找到名称和描述。
+- Project 详情的 `evaluation.plan.outputSchema` 是 `{outputSchemaId, digest}`。已有 Project 的只读查看通过 `GET /api/projects/{projectId}/evaluation-output-schema` 取得同一次摘要校验的引用与正文，目录软删除后仍可查看；新选择仍只列活动 Schema。
 - 没有评估计划的 Project 启动执行并评估或仅评估返回 `409 PROJECT_EVALUATION_PLAN_REQUIRED`；首个带评估的 Run 准入后评估计划锁定，再替换返回 `409 PROJECT_EVALUATION_PLAN_LOCKED`，详情页应改为只读展示。
 
 完整请求体、Project 详情结构和错误码见 [Eval HTTP 控制面](eval-http-api.md#projects)；评估计划的设计见 [Project、Runtime 与 Metrics 设计](eval-project-redesign.md)。
@@ -130,7 +137,7 @@ Web 用 `GET /api/evaluation-output-schemas` 展示可选格式。输出格式�
 ## 编辑、关联与删除规则
 
 - 两类 Bundle、Material、Session 和输出格式的 `name`、`description` 可通过各自详情路由的 `PATCH` 修改，提交其中一个或两个字段即可，值必须非空白。详情路由分别是 `/api/material-bundles/{bundleId}`、`/api/material-bundles/{bundleId}/materials/{materialId}`、`/api/session-bundles/{bundleId}`、`/api/session-bundles/{bundleId}/sessions/{sessionId}`、`/api/evaluation-output-schemas/{outputSchemaId}`；它们也支持 `GET` 和 `DELETE`。上传后的文件或 Schema 正文不能修改；要换内容，创建新资源后重新绑定。
-- Dataset 用 `PUT /api/datasets/{datasetId}` 全量替换可编辑字段。Prompt Dataset 的 `name`、`description` 始终必填。Data 用 `PUT /api/data/{dataId}` 全量替换；Web 必须从当前 Data 合并未改字段再提交，否则省略的 Prompt、业务字段或资源引用会被移除。Prompt Dataset 成员的名称、描述和两个 Prompt 不能被改成空值。只改资源 ID 时优先用上面的专用 `PATCH`。
+- Dataset 用 `PUT /api/datasets/{datasetId}` 全量替换可编辑字段。Prompt Dataset 的 `name`、`description` 始终必填。Data 用 `PUT /api/data/{dataId}` 全量替换；Web 从当前 Data 合并未改业务字段和资源引用，与四个可编辑字段一同保存。Prompt Dataset 成员的名称、描述和两个 Prompt 不能被改成空值。专用 `initial-resources` PATCH 供独立资源绑定调用使用，当前 Web 编辑器统一保存完整 Data。
 - Data 可被同一用户的多个 Dataset 复用。`POST /api/datasets/{datasetId}/data` 用 `{dataIds:[...]}` 关联已有 Data；同一路径的 `DELETE` 解除关联。修改共享 Data 会影响所有引用它的 Dataset。
 - 删除都是软删除，列表和详情不再返回已删除的资源，上传文件字节仍留在目录。只要任一**活动 Data** 仍引用某个 Material（在执行素材或评估素材任一列表中）或 Session，删除它或它所在的 Bundle 就返回 `409`；即使该 Data 当前不属于任何 Dataset，也算绑定。Web 应先清空或改绑相关 Data，再重试删除。删除素材 Bundle 会把其 Material 一起标记删除，删除上下文 Bundle 会把其 Session 一起标记删除。
 - 输出格式的删除总是允许：已选用它的评估计划继续按 ID 读取 Schema，只是它不能再被新选择。
@@ -138,14 +145,14 @@ Web 用 `GET /api/evaluation-output-schemas` 展示可选格式。输出格式�
 
 ## 接口与页面实现提示
 
-所有 `/api/*` 请求都带 Eval SP 会话的 `Authorization: Bearer`，浏览器请求的 `Origin` 必须是部署配置的 Eval Web 来源，否则返回 `403`。JSON 请求体必须使用 `Content-Type: application/json`；创建 Bundle 和导入 ZIP 使用 `multipart/form-data`（由浏览器 `FormData` 生成，不要手动设置边界）。当前 `eval-web` 还没有页面实现。信封、状态码和完整错误码目录以 [Eval HTTP 控制面](eval-http-api.md) 为准，要点如下：
+所有 `/api/*` 请求通过 Web Worker 的受信 gateway，以固定 Eval SP 服务账号运行；浏览器不持有该服务账号凭证，鉴权以 [Eval HTTP 控制面](eval-http-api.md) 为准。JSON 请求体必须使用 `Content-Type: application/json`；创建 Bundle 和导入 ZIP 使用 `multipart/form-data`（由浏览器 `FormData` 生成，不要手动设置边界）。Web 已提供四个数据入口，上传和选择的上限从 `GET /api/input-limits` 读取。信封、状态码和完整错误码目录以 HTTP 契约为准，要点如下：
 
 - 成功：`{ "success": true, "msg": <数据>, "errMsg": "", "code": "" }`；创建返回 `201`，删除和 Dataset 关联变更返回空体 `204`。
 - 失败：`{ "code", "errMsg", "requestId", "errors"?, "details"? }`，响应头 `X-Request-ID` 与 `requestId` 相同，便于反馈问题。按 `code` 区分原因，不解析 `errMsg` 文本；可用 `@eval-platform/eval-contracts/http-errors` 的 `decodeError` 解码。
 - `422 REQUEST_VALIDATION_FAILED`：字段不合法，`errors[].path` 指向出错字段，可直接标注到表单。
 - `400`：JSON 格式错误或重复字段（`REQUEST_INVALID_JSON`）、multipart 请求体无法解析（`REQUEST_INVALID_INPUT`），或通过格式校验后被业务规则拒绝（如 `DATASET_INPUT_INVALID`、`CATALOG_INPUT_INVALID`、`BUNDLE_FILE_INVALID`）。
-- `401`：会话无效，需重新登录；`404`：资源不存在或不属于当前用户；`409`：仍有绑定（`BUNDLE_RESOURCE_IN_USE`、`DATA_IN_USE`）或评估计划已锁定（`PROJECT_EVALUATION_PLAN_LOCKED`）等冲突；`413`：超过大小限制；`415`：`Content-Type` 与路由要求不符。ZIP 导入失败时按上文逐条展示 `errors[]`。
-- `503`：Eval SP、数据库或 Bundle 目录暂不可用，可稍后原样重试。
+- `401`：Worker 确认 takt 登录失效，需重新登录；`404`：资源不存在或不属于服务账号；`409`：仍有绑定（`BUNDLE_RESOURCE_IN_USE`、`DATA_IN_USE`）或评估计划已锁定（`PROJECT_EVALUATION_PLAN_LOCKED`）等冲突；`413`：超过大小限制；`415`：`Content-Type` 与路由要求不符。ZIP 导入失败时按上文逐条展示 `errors[]`。
+- `503`：Eval SP、数据库或 Bundle 目录暂不可用。GET 可重读；Bundle 创建和 ZIP 导入没有幂等键，提交结果未确认时先刷新检查目录，不能自动重发。Project/Run 创建则保留原请求体及幂等键重试。
 
 删除收到 `409` 时保留当前列表状态，不要在 UI 中先把条目移除。
 

@@ -1,14 +1,14 @@
 import type {
   AgentRole,
   EvaluationPlan,
+  EvaluationOutputSchemaDocument,
   ExecutionPlan,
   Project,
   ProjectDatasetSnapshot,
-  ProjectPlan,
   RunHandle,
 } from "@eval-platform/eval-contracts";
 import { DatasetEntityNotFoundError, dataSchema, type Data } from "@eval-platform/eval-dataset";
-import { RuntimeEntityNotFoundError, RuntimeInputError, RuntimeProjectBusyError, type ProjectSample } from "@eval-platform/eval-runtime";
+import { RuntimeEntityNotFoundError, RuntimeInputError, RuntimeProjectBusyError, type ProjectSample, type ProjectView } from "@eval-platform/eval-runtime";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { addToGroup, sqlBatches } from "./batch.js";
 import type { FrozenCopy } from "../agent-configs.js";
@@ -20,11 +20,12 @@ import {
   projectExists,
   projectFromRow,
   readAllProjectSamples,
+  readEvaluationOutputSchemaDocument,
   readProjectPlan,
   visibleProject,
 } from "./project-plans.js";
 import { projectHasRun, readRunRecords, runActive } from "./run-records.js";
-import { readCurrentRun, type CurrentRun } from "./runtime.js";
+import { readProjectRunState } from "./runtime.js";
 import {
   data,
   datasetData,
@@ -77,12 +78,6 @@ async function requireEvaluationPlanUnlocked(reader: Pick<EvalDb, "select">, pro
   const [plan] = await reader.select({ lockedAt: projectEvaluationPlans.lockedAt })
     .from(projectEvaluationPlans).where(eq(projectEvaluationPlans.projectId, projectId));
   if (plan?.lockedAt) throw new ProjectEvaluationPlanLockedError(projectId);
-}
-
-/** The fixed plan, every bound ProjectSample and the current Run. */
-export interface ProjectView extends ProjectPlan {
-  readonly projectSamples: readonly ProjectSample[];
-  readonly currentRun: CurrentRun | null;
 }
 
 /** Locks the visible Project row; false when it is gone or soft-deleted. */
@@ -273,13 +268,20 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
       return projectExists(db, projectId, owner);
     },
 
+    getEvaluationOutputSchema(projectId: string): Promise<EvaluationOutputSchemaDocument | null> {
+      return db.transaction(async (transaction) => {
+        if (!await projectExists(transaction, projectId, owner)) throw new RuntimeEntityNotFoundError("project", projectId);
+        return readEvaluationOutputSchemaDocument(transaction, projectId, owner);
+      }, READ_SNAPSHOT);
+    },
+
     get(projectId: string): Promise<ProjectView | null> {
       return db.transaction(async (transaction) => {
         const plan = await readProjectPlan(transaction, projectId, owner);
         if (!plan) return null;
         const samples = await readAllProjectSamples(transaction, plan);
-        const currentRun = await readCurrentRun(transaction, owner, projectId);
-        return { ...plan, projectSamples: samples, currentRun };
+        const runState = await readProjectRunState(transaction, owner, projectId);
+        return { ...plan, projectSamples: samples, ...runState };
       }, READ_SNAPSHOT);
     },
 

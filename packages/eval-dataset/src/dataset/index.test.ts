@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import { createDatasetService } from "./index.js";
-import type { Data, DataInput, Dataset, DatasetSnapshot } from "./model.js";
+import type { Data, DataCreateOptions, DataInput, Dataset, DatasetSnapshot } from "./model.js";
 import { parseDatasetDocument, serializeDatasetDocument } from "./serialization.js";
 import type { DatasetStore } from "./store.js";
 import { DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError, DatasetInputError } from "./store.js";
@@ -41,9 +41,11 @@ class TestDatasetStore implements DatasetStore {
     this.memberships.delete(datasetId);
   }
 
-  async createData(data: Data): Promise<void> {
+  async createData(data: Data, options?: DataCreateOptions): Promise<void> {
+    if (options?.datasetId !== undefined) this.requireDataset(options.datasetId);
     if (this.data.has(data.dataId)) throw new DatasetIdentityConflictError("data", data.dataId);
     this.data.set(data.dataId, persisted(data));
+    if (options?.datasetId !== undefined) this.memberships.get(options.datasetId)!.add(data.dataId);
   }
 
   async updateData(data: Data): Promise<void> {
@@ -128,6 +130,19 @@ const initialMaterials = [
 ];
 
 describe("Dataset service", () => {
+  it("creates Data with its optional Dataset membership through one atomic store operation", async () => {
+    const store = new TestDatasetStore();
+    const service = createDatasetService(store);
+    const dataset = await service.createDataset({ name: "tasks" });
+    const data = await service.createData({ userPrompt: "task" }, { datasetId: dataset.datasetId.toUpperCase() });
+    expect(await service.listData(dataset.datasetId)).toEqual([data]);
+    await expect(service.createData({ userPrompt: "other" }, { datasetId: crypto.randomUUID() }))
+      .rejects.toBeInstanceOf(DatasetEntityNotFoundError);
+    await expect(service.createData({ userPrompt: "other" }, { datasetId: "invalid" }))
+      .rejects.toBeInstanceOf(DatasetInputError);
+    expect(await service.listData()).toEqual([data]);
+  });
+
   it("generates only Dataset/Data entity IDs and preserves both external resource identities", async () => {
     const store = new TestDatasetStore();
     const service = createDatasetService(store);

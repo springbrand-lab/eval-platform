@@ -17,8 +17,8 @@ export function ProjectsPage() {
   return (
     <Page>
       <PageHeader
-        title="Project"
-        actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => void navigate({ to: "/projects/new" })}>新建 Project</Button>}
+        title="项目管理"
+        actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => void navigate({ to: "/projects/new" })}>新建项目</Button>}
       />
       <Card>
         {projects.isPending ? <LoadingBlock /> : projects.error ? <div className="p-4"><ErrorBlock error={projects.error} onRetry={() => void projects.refetch()} /></div> : (
@@ -27,8 +27,8 @@ export function ProjectsPage() {
             rowKey={(row) => row.projectId}
             searchText={(row) => `${row.name} ${row.description ?? ""}`}
             onRowClick={(row) => void navigate({ to: "/projects/$projectId", params: { projectId: row.projectId } })}
-            empty={<EmptyState title="还没有 Project"
-              action={<Button variant="primary" onClick={() => void navigate({ to: "/projects/new" })}>新建 Project</Button>} />}
+            empty={<EmptyState title="还没有项目"
+              action={<Button variant="primary" onClick={() => void navigate({ to: "/projects/new" })}>新建项目</Button>} />}
             columns={[
               { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span>, sortValue: (row) => row.name },
               { key: "description", header: "说明", cell: (row) => <span className="line-clamp-1 text-text-muted">{row.description || "—"}</span> },

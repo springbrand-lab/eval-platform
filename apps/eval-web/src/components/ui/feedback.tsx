@@ -2,6 +2,7 @@ import { AlertTriangle, Inbox, Loader2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { describeError } from "@/lib/errors";
+import { ApiError } from "@springbrand/http/client";
 
 export function Skeleton({ className }: { className?: string }) {
   return <div className={cn("animate-pulse rounded-md bg-surface-muted", className)} aria-hidden />;
@@ -39,8 +40,11 @@ export function ErrorBlock({ error, onRetry }: { error: unknown; onRetry?: () =>
     <div className="flex items-start gap-3 rounded-[var(--radius-card)] border border-danger/30 bg-danger-soft p-4 text-[13px]">
       <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" />
       <div className="flex-1">
-        <p className="font-semibold text-danger">加载失败</p>
+        <p className="font-semibold text-danger">请求失败</p>
         <p className="mt-1 text-text">{describeError(error)}</p>
+        {error instanceof ApiError && error.errors && error.errors.length > 0 && <ul className="mt-2 space-y-1">
+          {error.errors.map((item, index) => <li key={index}><code>{item.path || "内容"}</code>：{item.errMsg}</li>)}
+        </ul>}
       </div>
       {onRetry && <button type="button" onClick={onRetry} className=" link font-semibold">重试</button>}
     </div>

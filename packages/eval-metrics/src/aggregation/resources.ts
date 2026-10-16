@@ -3,7 +3,7 @@ import type { ResourceStatistics } from "./model.js";
 import { aggregateBilling } from "./resource-billing.js";
 import { ResourceDiagnostics, readStream, type OwnedSnapshot } from "./resource-facts.js";
 import { aggregateTelemetry } from "./resource-telemetry.js";
-import { aggregateUsage } from "./resource-usage.js";
+import { aggregateUsage, type ModelGroupKey } from "./resource-usage.js";
 import { coverage } from "./statistics.js";
 
 export interface ResourceInput {
@@ -33,7 +33,13 @@ function readCollections(inputs: readonly ResourceInput[]): {
   return { collections, snapshots };
 }
 
-export function aggregateResources(inputs: readonly ResourceInput[]): ResourceStatistics {
+/** Requested domains let the interpreter prove unused groups without inferring absence from numeric totals. */
+export interface ResourceGroups {
+  readonly models: readonly ModelGroupKey[];
+  readonly tools: readonly (string | null)[];
+}
+
+export function aggregateResources(inputs: readonly ResourceInput[], groups: ResourceGroups = { models: [], tools: [] }): ResourceStatistics {
   const { collections, snapshots } = readCollections(inputs);
   const diagnostics = new ResourceDiagnostics();
   const collectionsComplete = snapshots.length > 0 && collections.pending === 0 && collections.failed === 0
@@ -41,9 +47,9 @@ export function aggregateResources(inputs: readonly ResourceInput[]): ResourceSt
   const usageEvents = readStream(snapshots, "usageEvents", collectionsComplete, diagnostics);
   const telemetryEvents = readStream(snapshots, "telemetryEvents", collectionsComplete, diagnostics);
   const billingSettlements = readStream(snapshots, "billingSettlements", collectionsComplete, diagnostics);
-  const usage = aggregateUsage(usageEvents, diagnostics);
+  const usage = aggregateUsage(usageEvents, diagnostics, groups.models);
   const billing = aggregateBilling(billingSettlements, diagnostics);
-  const { modelRequests, trajectory } = aggregateTelemetry(telemetryEvents, diagnostics);
+  const { modelRequests, trajectory } = aggregateTelemetry(telemetryEvents, diagnostics, groups.tools);
   const issues = diagnostics.list();
   const streamsComplete = usageEvents.complete && telemetryEvents.complete && billingSettlements.complete;
   return {
