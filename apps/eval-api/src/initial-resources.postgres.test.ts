@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDatasetService } from "@eval-platform/eval-dataset";
@@ -16,6 +16,8 @@ import { bundleMaterials } from "./db/schema.js";
 import { createInitialResourceApi } from "./initial-resources.js";
 import { createOwnerServices } from "./owner-services.js";
 import { openBundleDirectory, type BundleDirectory } from "./sp/bundle-directory.js";
+import { BundleFileError } from "./sp/bundle-errors.js";
+import type { InitialResourceFile } from "@eval-platform/eval-contracts";
 import type { EvalSpClient } from "./sp/client.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "./test-support.js";
 
@@ -467,6 +469,161 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
     expect(deleted.status).toBe(404);
     expect(await code(deleted)).toBe("BUNDLE_RESOURCE_NOT_FOUND");
     expect(await storedFiles(bundleRoot)).toEqual(filesBeforeMissing);
+  });
+
+  it("reads exact resource files without exposing another catalog, resource or owner", async () => {
+    const bundles = await openBundleDirectory(bundleRoot);
+    const send = httpClient(database.db, bundles);
+    const { materialBundles, sessionBundles } = createBundleCatalogs(database.db, owner, bundles);
+    const { bundle } = await materialBundles.create({ name: "Preview", description: "File inventory" });
+    const html = "<h1>页面</h1><script>alert(1)</script>";
+    const binary = Buffer.from([0, 255, 10, 128]);
+    const multipart = "--AbC\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\na\r\n--AbC--\r\n";
+    const files = [
+      { path: "/pages/index.html", mediaType: "text/html", contentBase64: Buffer.from(html).toString("base64") },
+      { path: "/资料/图 #1?.bin", mediaType: "application/octet-stream", contentBase64: binary.toString("base64") },
+      { path: "/empty.txt", mediaType: "text/plain", contentBase64: "" },
+      { path: "/unicode-mime.txt", mediaType: "text/plain; charset=日本語", contentBase64: "YQ==" },
+      { path: "/newline-mime.txt", mediaType: "text/plain\r\nx-header: injected", contentBase64: "YQ==" },
+      { path: "/control-mime.txt", mediaType: "text/\u0001plain", contentBase64: "YQ==" },
+      { path: "/del-mime.txt", mediaType: "text/\u007fplain", contentBase64: "YQ==" },
+      { path: "/form.bin", mediaType: "multipart/form-data; boundary=AbC", contentBase64: Buffer.from(multipart).toString("base64") },
+      { path: "/tab-form.bin", mediaType: "multipart/form-data;\tboundary=AbC", contentBase64: Buffer.from(multipart).toString("base64") },
+    ];
+    const resource = await materialBundles.createResource(bundle.bundleId, { name: "Page", description: "Read only", files });
+    const base = `/api/material-bundles/${bundle.bundleId}/materials/${resource.materialId}`;
+    const inventory = await send(`${base}/files`, "GET");
+    expect(inventory.status).toBe(200);
+    expect(await msg<InitialResourceFile[]>(inventory)).toEqual(files.map(({ path, mediaType, contentBase64 }) => ({
+      path, mediaType, byteSize: Buffer.from(contentBase64, "base64").byteLength,
+    })));
+    const fileUrl = (path: string) => `${base}/file?${new URLSearchParams({ path })}`;
+    const page = await send(fileUrl(files[0]!.path), "GET");
+    expect(page.status).toBe(200);
+    expect(page.headers.get("Content-Type")).toBe("text/html");
+    expect(page.headers.get("Content-Length")).toBe(String(Buffer.byteLength(html)));
+    expect(page.headers.get("Content-Disposition")).toBe("attachment");
+    expect(page.headers.get("Content-Security-Policy")).toBe("default-src 'none'; sandbox");
+    expect(page.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(page.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(await page.text()).toBe(html);
+    const attachment = await send(fileUrl(files[1]!.path), "GET");
+    expect(Buffer.from(await attachment.arrayBuffer())).toEqual(binary);
+    const empty = await send(fileUrl("/empty.txt"), "GET");
+    expect(empty.status).toBe(200);
+    expect(empty.headers.get("Content-Length")).toBe("0");
+    expect(await empty.text()).toBe("");
+    for (const path of ["/unicode-mime.txt", "/newline-mime.txt", "/control-mime.txt", "/del-mime.txt"]) {
+      const response = await send(fileUrl(path), "GET");
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("application/octet-stream");
+      expect(response.headers.has("x-header")).toBe(false);
+      expect(await response.text()).toBe("a");
+    }
+    for (const path of ["/form.bin", "/tab-form.bin"]) {
+      const formResponse = await send(fileUrl(path), "GET");
+      expect(formResponse.headers.get("Content-Type")).toBe(files.find((file) => file.path === path)!.mediaType);
+      expect((await formResponse.formData()).get("x")).toBe("a");
+    }
+
+    // Labels are editable; path identities and content come only from the immutable manifest.
+    await materialBundles.updateResource(bundle.bundleId, resource.materialId, { name: "Renamed" });
+    expect(await (await send(fileUrl(files[0]!.path), "GET")).text()).toBe(html);
+    expect((await send(fileUrl(files[0]!.path).replace(bundle.bundleId, bundle.bundleId.toUpperCase()), "GET")).status).toBe(200);
+    for (const path of ["/../empty.txt", "/pages/../empty.txt", "/pages/%2e%2e/empty.txt", "empty.txt", "/missing.txt", "/資料/图 #1?.bin"]) {
+      const missing = await send(fileUrl(path), "GET");
+      expect(missing.status).toBe(404);
+      expect(await code(missing)).toBe("BUNDLE_FILE_NOT_FOUND");
+    }
+    expect((await send(`${base}/file`, "GET")).status).toBe(422);
+    for (const endpoint of [`${base}/files`, fileUrl(files[0]!.path)]) {
+      const other = await send(endpoint, "GET", undefined, "other");
+      expect(other.status).toBe(404);
+      expect(await code(other)).toBe("BUNDLE_RESOURCE_NOT_FOUND");
+    }
+    const { bundle: second } = await materialBundles.create({ name: "Other", description: "Different resource" });
+    const sibling = await materialBundles.createResource(second.bundleId, { name: "Sibling", description: "Other", files });
+    expect((await send(base.replace(resource.materialId, sibling.materialId) + "/files", "GET")).status).toBe(404);
+    expect((await send(base.replace("material-bundles", "session-bundles").replace("materials", "sessions") + "/files", "GET")).status).toBe(404);
+
+    const { bundle: contexts } = await sessionBundles.create({ name: "Contexts", description: "Formats" });
+    for (const format of ["json", "jsonl"] as const) {
+      const content = format === "json" ? sessionFile("preview") + "\n" : sessionEntry("preview") + "\n\n";
+      const session = await sessionBundles.createResource(contexts.bundleId, { name: "Editable label", description: "Context", format, content });
+      const contextBase = `/api/session-bundles/${contexts.bundleId}/sessions/${session.sessionId}`;
+      expect(await msg(await send(`${contextBase}/files`, "GET"))).toEqual([{
+        path: `/context.${format}`, mediaType: format === "json" ? "application/json" : "application/x-ndjson", byteSize: Buffer.byteLength(content),
+      }]);
+      const read = await send(`${contextBase}/file?path=${encodeURIComponent(`/context.${format}`)}`, "GET");
+      expect(read.status).toBe(200);
+      expect(await read.text()).toBe(content);
+    }
+  });
+
+  it("hides deleted resources from file reads while keeping their bytes for existing Projects", async () => {
+    const bundles = await openBundleDirectory(bundleRoot);
+    const send = httpClient(database.db, bundles);
+    const { materialBundles, sessionBundles } = createBundleCatalogs(database.db, owner, bundles);
+    const files = [{ path: "/keep.txt", mediaType: "text/plain", contentBase64: "a2VlcA==" }];
+    const { bundle } = await materialBundles.create({ name: "Deleted preview", description: "Kept bytes" });
+    const resource = await materialBundles.createResource(bundle.bundleId, { name: "File", description: "Kept", files });
+    const base = `/api/material-bundles/${bundle.bundleId}/materials/${resource.materialId}`;
+    await materialBundles.deleteResource(bundle.bundleId, resource.materialId);
+    for (const suffix of ["/files", "/file?path=%2Fkeep.txt"]) {
+      const missing = await send(base + suffix, "GET");
+      expect(missing.status).toBe(404);
+      expect(await code(missing)).toBe("BUNDLE_RESOURCE_NOT_FOUND");
+    }
+    expect(await bundles.resolveInitialMaterials(owner, resource)).toEqual(files);
+
+    const { bundle: contexts } = await sessionBundles.create({ name: "Deleted context", description: "Kept bytes" });
+    const content = { format: "json" as const, content: sessionFile("kept") };
+    const session = await sessionBundles.createResource(contexts.bundleId, { name: "Context", description: "Kept", ...content });
+    await sessionBundles.delete(contexts.bundleId);
+    const contextBase = `/api/session-bundles/${contexts.bundleId}/sessions/${session.sessionId}`;
+    for (const suffix of ["/files", "/file?path=%2Fcontext.json"]) expect((await send(contextBase + suffix, "GET")).status).toBe(404);
+    expect(await bundles.resolveInitialSession(owner, session)).toEqual(content);
+  });
+
+  it("preserves Bundle read failures instead of disguising them as missing resources", async () => {
+    const bundles = await openBundleDirectory(bundleRoot);
+    const { materialBundles } = createBundleCatalogs(database.db, owner, bundles);
+    const { bundle } = await materialBundles.create({ name: "Unavailable preview", description: "Read errors" });
+    const material = await materialBundles.createResource(bundle.bundleId, {
+      name: "Present", description: "Catalog record", files: [{ path: "/file.txt", mediaType: "text/plain", contentBase64: "YQ==" }],
+    });
+    const base = `/api/material-bundles/${bundle.bundleId}/materials/${material.materialId}`;
+    const suffixes = ["/files", "/file?path=%2Ffile.txt"];
+    const send = httpClient(database.db, bundles);
+    const manifest = join(bundleRoot, owner, bundle.bundleId, "materials", `${material.materialId}.json`);
+    for (const content of [
+      "{broken JSON", JSON.stringify({ wrong: [] }),
+      JSON.stringify({ files: [{ path: "/file.txt", mediaType: "text/plain", contentBase64: "not base64" }] }),
+      JSON.stringify({ files: Array.from({ length: EVAL_MATERIAL_MAX_FILES + 1 }, (_, index) => ({
+        path: `/${index}.txt`, mediaType: "text/plain", contentBase64: "YQ==",
+      })) }),
+    ]) {
+      await writeFile(manifest, content);
+      for (const suffix of suffixes) {
+        const response = await send(base + suffix, "GET");
+        expect(response.status).toBe(500);
+        const body = await response.json();
+        expect(body).toMatchObject({ code: "BUNDLE_FILE_CORRUPT", requestId: expect.any(String) });
+        expect(body).not.toHaveProperty("errors");
+        expect(JSON.stringify(body)).not.toContain("base64");
+        expect(JSON.stringify(body)).not.toContain(bundleRoot);
+      }
+    }
+    await rm(manifest);
+    for (const suffix of suffixes) expect(await code(await send(base + suffix, "GET"))).toBe("BUNDLE_FILE_NOT_FOUND");
+    const unavailable = httpClient(database.db, { ...bundles, async resolveInitialMaterials() {
+      throw new BundleFileError("unavailable", "Read failed", { cause: new Error("private filesystem details") });
+    } });
+    for (const suffix of suffixes) {
+      const response = await unavailable(base + suffix, "GET");
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ code: "BUNDLE_FILE_UNAVAILABLE", requestId: expect.any(String) });
+    }
   });
 
   it("removes every file a batch wrote when the batch cannot commit", async () => {

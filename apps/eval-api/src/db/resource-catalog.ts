@@ -2,9 +2,10 @@ import type { Data, InitialMaterialsRef, InitialSessionRef } from "@eval-platfor
 import { and, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { SelectedFieldsFlat } from "drizzle-orm/pg-core";
 import type { SelectResultFields } from "drizzle-orm/query-builders/select.types";
-import { createId } from "@eval-platform/eval-contracts";
+import { createId, type InitialResourceFile } from "@eval-platform/eval-contracts";
 import { requireInitializationBudget, type MaterialFile, type SessionContent } from "../sp/bundle-content.js";
 import type { BundleDirectory } from "../sp/bundle-directory.js";
+import { BundleFileError } from "../sp/bundle-errors.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import { parseCatalogMetadataPatch, platformId, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";
@@ -44,8 +45,20 @@ export interface BundleCatalog<R, I> {
   listResources(bundleId: string): Promise<readonly R[]>;
   createResource(bundleId: string, input: I): Promise<R>;
   getResource(bundleId: string, resourceId: string): Promise<R>;
+  /** Inventory of the active resource's immutable stored files, without their content. */
+  listFiles(bundleId: string, resourceId: string): Promise<readonly InitialResourceFile[]>;
+  /** Read an exact inventory path, never a filesystem-relative path. */
+  getFile(bundleId: string, resourceId: string, path: string): Promise<InitialResourceFileContent>;
   updateResource(bundleId: string, resourceId: string, input: CatalogMetadataPatch): Promise<R>;
   deleteResource(bundleId: string, resourceId: string): Promise<void>;
+}
+
+export interface InitialResourceFileContent extends InitialResourceFile {
+  readonly bytes: Uint8Array;
+}
+
+interface StoredResourceFile extends InitialResourceFile {
+  readonly readBytes: () => Uint8Array;
 }
 
 type CatalogWriter = Pick<EvalDb, "select" | "insert">;
@@ -76,6 +89,8 @@ interface BundleKind<F extends SelectedFieldsFlat, I> {
     readonly fields: F;
     readonly prepare: (directory: BundleDirectory, owner: string, bundleId: string, input: I) =>
       PreparedResource<SelectResultFields<F>>;
+    readonly readFiles: (directory: BundleDirectory, owner: string, bundleId: string, resourceId: string) =>
+      Promise<readonly StoredResourceFile[]>;
   };
 }
 
@@ -102,6 +117,11 @@ const materialBundle = {
         remove: () => directory.removeInitialMaterials(owner, reference),
       };
     },
+    readFiles: async (directory: BundleDirectory, owner: string, bundleId: string, materialId: string) =>
+      (await directory.resolveInitialMaterials(owner, { bundleId, materialId })).map(({ path, mediaType, contentBase64 }) => {
+        return { path, mediaType, byteSize: Buffer.byteLength(contentBase64, "base64"),
+          readBytes: () => Buffer.from(contentBase64, "base64") };
+      }),
   },
 } as const satisfies BundleKind<SelectedFieldsFlat, MaterialInput>;
 
@@ -126,6 +146,11 @@ const sessionBundle = {
         },
         remove: () => directory.removeInitialSession(owner, reference),
       };
+    },
+    readFiles: async (directory: BundleDirectory, owner: string, bundleId: string, sessionId: string) => {
+      const { format, content } = await directory.resolveInitialSession(owner, { bundleId, sessionId });
+      return [{ path: `/context.${format}`, mediaType: format === "json" ? "application/json" : "application/x-ndjson",
+        byteSize: Buffer.byteLength(content, "utf8"), readBytes: () => Buffer.from(content, "utf8") }];
     },
   },
 } as const satisfies BundleKind<SelectedFieldsFlat, SessionInput>;
@@ -179,6 +204,18 @@ function createBundleCatalog<F extends SelectedFieldsFlat, I>(
     const [row] = await transaction.select().from(table).where(activeBundle(bundleId)).for("update");
     if (!row) throw new BundleResourceNotFoundError(bundle.kind, bundleId);
     return bundleRecord(row);
+  }
+  async function requireResource(bundleId: string, resourceId: string): Promise<ResourceRecord> {
+    const id = platformId(bundleId, "bundleId");
+    const childId = platformId(resourceId, resource.idField);
+    await requireBundle(id);
+    const [row] = await db.select(resource.fields).from(resource.table).where(resourceRow(id, childId));
+    if (!row) throw new BundleResourceNotFoundError(resource.kind, childId);
+    return row;
+  }
+  async function readFiles(bundleId: string, resourceId: string): Promise<readonly StoredResourceFile[]> {
+    await requireResource(bundleId, resourceId);
+    return resource.readFiles(directory, owner, bundleId, resourceId);
   }
   /**
    * The single resource write path: store every resource's bytes, then commit the Bundle claim and all
@@ -261,13 +298,15 @@ function createBundleCatalog<F extends SelectedFieldsFlat, I>(
     async createResource(bundleId: string, input: I): Promise<ResourceRecord> {
       return (await importInto(bundleId, [input])).imported[0]!;
     },
-    async getResource(bundleId: string, resourceId: string): Promise<ResourceRecord> {
-      const id = platformId(bundleId, "bundleId");
-      const childId = platformId(resourceId, resource.idField);
-      await requireBundle(id);
-      const [row] = await db.select(resource.fields).from(resource.table).where(resourceRow(id, childId));
-      if (!row) throw new BundleResourceNotFoundError(resource.kind, childId);
-      return row;
+    getResource: requireResource,
+    async listFiles(bundleId: string, resourceId: string): Promise<readonly InitialResourceFile[]> {
+      return (await readFiles(bundleId, resourceId)).map(({ path, mediaType, byteSize }) => ({ path, mediaType, byteSize }));
+    },
+    async getFile(bundleId: string, resourceId: string, path: string): Promise<InitialResourceFileContent> {
+      const file = (await readFiles(bundleId, resourceId)).find((entry) => entry.path === path);
+      if (!file) throw new BundleFileError("not-found", "The file is not in this initial resource");
+      const { readBytes, ...metadata } = file;
+      return { ...metadata, bytes: readBytes() };
     },
     async updateResource(bundleId: string, resourceId: string, input: CatalogMetadataPatch): Promise<ResourceRecord> {
       const id = platformId(bundleId, "bundleId");

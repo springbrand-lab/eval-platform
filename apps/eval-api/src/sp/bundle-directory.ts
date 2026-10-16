@@ -46,11 +46,11 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
       throw unavailable(error);
     }
     if (!insideRoot(location.ownerDirectory, resolved)) {
-      throw new BundleFileError("invalid", "Initial Bundle resource escapes its owner directory");
+      throw new BundleFileError("corrupt", "Stored Bundle resource escapes its owner directory");
     }
     let bytes: Uint8Array;
     try {
-      if (!(await stat(resolved)).isFile()) throw new BundleFileError("invalid", "Initial Bundle resource is not a file");
+      if (!(await stat(resolved)).isFile()) throw new BundleFileError("corrupt", "Stored Bundle resource is not a file");
       bytes = await readFile(resolved);
     } catch (error) {
       if (error instanceof BundleFileError) throw error;
@@ -59,7 +59,7 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
     try {
       return parseStrictJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     } catch (cause) {
-      throw new BundleFileError("invalid", "Initial Bundle resource is not valid JSON", { cause });
+      throw new BundleFileError("corrupt", "Stored Bundle resource is not valid JSON", { cause });
     }
   }
 
@@ -115,16 +115,28 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
       const manifest = await readResource(materialsLocation(ownerUserId, reference));
       if (manifest === undefined) throw new BundleFileError("not-found", "Initial material is missing from its Bundle");
       if (!isRecord(manifest) || Object.keys(manifest).length !== 1 || !("files" in manifest)) {
-        throw new BundleFileError("invalid", "Initial material manifest must contain only files");
+        throw new BundleFileError("corrupt", "Stored material manifest must contain only files");
       }
-      return validateMaterialFiles(manifest.files).files;
+      return validateStoredContent(() => validateMaterialFiles(manifest.files).files);
     },
     async resolveInitialSession(ownerUserId, reference) {
       const context = await readResource(sessionLocation(ownerUserId, reference));
       if (context === undefined) throw new BundleFileError("not-found", "Initial context is missing from its Bundle");
-      return validateSessionContent(context);
+      return validateStoredContent(() => validateSessionContent(context));
     },
   };
+}
+
+/** The upload rule is shared, but an immutable stored value failing it is a server fault. */
+function validateStoredContent<T>(validate: () => T): T {
+  try {
+    return validate();
+  } catch (cause) {
+    if (cause instanceof BundleFileError && (cause.reason === "invalid" || cause.reason === "too-large")) {
+      throw new BundleFileError("corrupt", "Stored Bundle content is invalid. Contact the administrator", { cause });
+    }
+    throw cause;
+  }
 }
 
 async function ensureDirectory(path: string): Promise<void> {

@@ -2,6 +2,8 @@
 
 `EvalInputLimits` 与 `evalInputLimitsSchema` 定义控制面公开的输入上限形状，不定义 SP 或应用的数值。API 从实际校验常量投影，Web 通过 `GET /api/input-limits` 获取，不维护第二套数值。
 
+`InitialResourceFile` 与 `initialResourceFileSchema` 定义初始素材、初始上下文共用的只读文件目录投影：资源内绝对路径、媒体类型、字节数。不包含内容副本、预览状态或 SP Workspace 身份。内容仍从 API 的 Bundle 目录按精确路径读取。
+
 评估平台跨包共享的稳定契约层，公共契约从包根入口导入。`./http-errors` 是 Eval API 唯一的错误码目录（`defineErrorCatalog`），`./http` 是基于它的 Hono 响应器（`createHonoHttp`）；只有这两个 HTTP 边界子路径依赖 `@springbrand/http` 与 `hono`，包根不加载它们。HTTP 契约见 [Eval HTTP 控制面](../../docs/eval-http-api.md)。
 
 负责 Project 与其固定计划（`src/project.ts`：`ProjectPlan`、`ExecutionPlan`、`EvaluationPlan`、`ProjectDatasetSnapshot`、`AgentConfigSnapshot`、`EvaluationOutputSchemaRef`）、Sampling、EvaluationRecord、Run 选择与目标、HarnessConfig、ExecutionOutput、EvaluationAgentOutput（评估产物、原始结构化输出、证据和完整轨迹）、AgentObservationRef、ArtifactRef、TrajectoryRef 和 EvidenceRef 等运行与评估类型边界。Subject 证据包契约位于 `src/evidence.ts`：`EvidenceBundleRef`（`Sampling.evidence`）、`EvidenceManifest`、`EvidenceArtifact`、`EvidenceOmission`、`TrajectoryEvent`（`sp-trajectory/v1` 原始轨迹）、`EvidenceLimits` 与 `DEFAULT_EVIDENCE_LIMITS`，以及 `EVIDENCE_ROOT`、`EVIDENCE_MANIFEST_PATH`、`EVIDENCE_ARTIFACTS_ROOT`、`EVIDENCE_TRAJECTORY_ROOT`、`EVALUATION_RESULT_PATH` 等路径常量；`EvidenceRef` 仍是评委输出中的证据引用，两者不同。证据和解释属于评估 Agent 输出，没有独立的归因契约。SP Chat 是持久 Session：`Sampling.subjectChatId` 和 `EvaluationRecord.chatId` 标识各自的 Chat，每个 Attempt 的 `submissionId` 标识该 Chat 内的一次提交。`AgentResourceCollection` 在投递前按 `chatId + idempotencyKey` 登记，采集成功后保留真实 `submissionId`，只表达 `pending | collected | failed` 的采集状态。Dataset/Data 由 `eval-dataset` 拥有，ProjectSample（Project 创建时的完整 Data 副本）由 `eval-runtime` 的运行时模型拥有；`Sampling.projectSampleId` 指向它。

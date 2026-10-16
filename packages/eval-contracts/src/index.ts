@@ -92,3 +92,5 @@ export { canonicalJsonBytes, createId, equalJson, sha256Hex } from "./canonical.
 export { jsonObjectSchema, jsonValueSchema } from "./json.js";
 export { evalInputLimitsSchema } from "./input-limits.js";
 export type { EvalInputLimits } from "./input-limits.js";
+export { initialResourceFileSchema } from "./initial-resource-files.js";
+export type { InitialResourceFile } from "./initial-resource-files.js";

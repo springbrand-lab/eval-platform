@@ -58,7 +58,7 @@ Owns stable runtime/evaluation types shared across packages: Project and its fix
 
 An owner-scoped output-format catalog holds standalone named draft 2020-12 JSON Schema files with immutable bodies; the evaluation plan stores the selected ID and its content digest. Every pipeline/evaluation Run requires an evaluation plan. Runtime resolves the Schema by ID, even after its catalog entry is soft-deleted, and every Evaluation Agent receives it at the fixed path `/evaluation-output.schema.json` in its confined Workspace before submission (see [Eval SP Harness](eval-sp-harness-protocol.md)).
 
-It is the only place for cross-package evaluation contracts. `AgentResourceSnapshot` carries unchanged SP usage events, telemetry events and billing settlements with collection scope and source-completeness metadata. It does not implement orchestration, persistence, normalization, aggregation or pricing.
+It is the only place for cross-package evaluation contracts. `InitialResourceFile` describes an initial resource's read-only file inventory (`path`, `mediaType`, `byteSize`) shared by API and Web; bytes remain in the API's existing Bundle directory. `AgentResourceSnapshot` carries unchanged SP usage events, telemetry events and billing settlements with collection scope and source-completeness metadata. It does not implement orchestration, persistence, normalization, aggregation or pricing.
 
 ### `eval-dataset`
 

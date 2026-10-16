@@ -60,6 +60,7 @@ const errorDefinitions = {
   BUNDLE_FILE_NOT_FOUND: { status: 404, message: "Bundle file not found" },
   BUNDLE_FILE_TOO_LARGE: { status: 413, message: "Bundle file is too large" },
   BUNDLE_FILE_INVALID: { status: 400, message: "Bundle file is invalid" },
+  BUNDLE_FILE_CORRUPT: { status: 500, message: "Stored Bundle content is invalid. Contact the administrator" },
   BUNDLE_FILE_UNAVAILABLE: { status: 503, message: "Bundle file could not be read. Try again shortly" },
   OUTPUT_SCHEMA_NOT_FOUND: { status: 404, message: "Output format not found" },
   SCORE_SYNC_UNCONFIGURED: { status: 503, message: "Langfuse score sync is not configured" },

@@ -59,6 +59,7 @@ const bundleFileCodes = {
   "not-found": "BUNDLE_FILE_NOT_FOUND",
   "too-large": "BUNDLE_FILE_TOO_LARGE",
   invalid: "BUNDLE_FILE_INVALID",
+  corrupt: "BUNDLE_FILE_CORRUPT",
   unavailable: "BUNDLE_FILE_UNAVAILABLE",
 } as const satisfies Record<BundleFileErrorReason, HttpErrorCode>;
 
@@ -163,7 +164,7 @@ export function apiError(error: Error): HttpError {
   if (error instanceof DatasetEntityNotFoundError) return new HttpError(datasetEntityCodes[error.entity], error.message, { cause: error });
   if (error instanceof MetricsEntityNotFoundError) return new HttpError(metricsEntityCodes[error.entity], error.message, { cause: error });
   if (error instanceof BundleFileError) {
-    return new HttpError(bundleFileCodes[error.reason], error.message, {
+    return new HttpError(bundleFileCodes[error.reason], error.reason === "corrupt" ? undefined : error.message, {
       cause: error, ...(error.details === undefined ? {} : { errors: [...error.details] }),
     });
   }

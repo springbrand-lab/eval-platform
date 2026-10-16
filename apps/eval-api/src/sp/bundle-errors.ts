@@ -1,4 +1,4 @@
-export type BundleFileErrorReason = "not-found" | "too-large" | "invalid" | "unavailable";
+export type BundleFileErrorReason = "not-found" | "too-large" | "invalid" | "corrupt" | "unavailable";
 export type BundleFileErrorDetail = { readonly path: string; readonly errMsg: string };
 
 /** A Bundle directory read or upload failed; `unavailable` is the only retryable reason. */

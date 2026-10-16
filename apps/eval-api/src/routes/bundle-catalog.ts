@@ -1,5 +1,6 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { ok } from "@eval-platform/eval-contracts/http";
+import { initialResourceFileSchema } from "@eval-platform/eval-contracts";
 import { platformIdSchema } from "@eval-platform/eval-dataset";
 import { responseSchema } from "@springbrand/http/catalog";
 import { jsonContent } from "stoker/openapi/helpers";
@@ -8,6 +9,7 @@ import type { BundleCatalog, BundleImport, BundleRecord, CatalogLabels, Material
 import { createRouter } from "../lib/create-app.js";
 import { jsonBody, multipartBody } from "../lib/request-body.js";
 import type { OwnerServices } from "../lib/types.js";
+import { fileResponse } from "../lib/file-response.js";
 import { METADATA_BODY_BYTES, ZIP_BODY_BYTES } from "../limits.js";
 import {
   bodyErrorResponses,
@@ -54,6 +56,10 @@ export function bundleRouter<R extends ResourceRecord, C, Z extends { readonly s
   const zipMiddleware = [multipartBody(ZIP_BODY_BYTES)];
   const resourcesPath = `/{bundleId}/${segment}` as const;
   const resourcePath = `${resourcesPath}/{${idParam}}` as const;
+  const fileErrorResponses = {
+    ...errorResponses,
+    ...notFoundResponse,
+  } as const;
 
   const resourceRef = (params: Readonly<Record<string, string | undefined>>) => [params.bundleId!, params[idParam]!] as const;
   const readZip = async (zip: File | undefined) => zip ? kind.readZip(new Uint8Array(await zip.arrayBuffer())) : [];
@@ -200,6 +206,33 @@ export function bundleRouter<R extends ResourceRecord, C, Z extends { readonly s
   }), async (c) => {
     const record: ResourceRecord = await kind.catalog(c.var.services).getResource(...resourceRef(c.req.valid("param")));
     return ok(c, record);
+  });
+
+  router.openapi(createRoute({
+    method: "get",
+    path: `${resourcePath}/files`,
+    tags: [tag],
+    summary: `List the ${resource}'s immutable files`,
+    request: { params: resourceParams },
+    responses: {
+      200: jsonContent(responseSchema(z.array(initialResourceFileSchema).readonly()), "Resource files"),
+      ...fileErrorResponses,
+    },
+  }), async (c) => ok(c, await kind.catalog(c.var.services).listFiles(...resourceRef(c.req.valid("param")))));
+
+  router.openapi(createRoute({
+    method: "get",
+    path: `${resourcePath}/file`,
+    tags: [tag],
+    summary: `Read one ${resource} file as a sandboxed attachment`,
+    request: { params: resourceParams, query: z.object({ path: z.string().min(1) }) },
+    responses: {
+      200: { description: "Original file bytes", content: { "application/octet-stream": { schema: z.string() } } },
+      ...fileErrorResponses,
+    },
+  }), async (c) => {
+    const file = await kind.catalog(c.var.services).getFile(...resourceRef(c.req.valid("param")), c.req.valid("query").path);
+    return fileResponse({ body: new Uint8Array(file.bytes), contentType: file.mediaType, contentLength: String(file.byteSize) }) as never;
   });
 
   router.openapi(createRoute({

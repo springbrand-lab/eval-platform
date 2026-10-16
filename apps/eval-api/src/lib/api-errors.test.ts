@@ -71,6 +71,7 @@ describe("apiError", () => {
     [new BundleFileError("not-found", "m"), 404, "BUNDLE_FILE_NOT_FOUND"],
     [new BundleFileError("too-large", "m"), 413, "BUNDLE_FILE_TOO_LARGE"],
     [new BundleFileError("invalid", "m"), 400, "BUNDLE_FILE_INVALID"],
+    [new BundleFileError("corrupt", "private stored content"), 500, "BUNDLE_FILE_CORRUPT"],
     [new BundleFileError("unavailable", "m"), 503, "BUNDLE_FILE_UNAVAILABLE"],
     [new EvalSpApiError(401, null), 503, "EVAL_SP_UNAVAILABLE"],
     [new EvalSpApiError(403, null), 403, "EVAL_SP_FORBIDDEN"],

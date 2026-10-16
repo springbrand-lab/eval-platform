@@ -12,6 +12,8 @@ Data 表单与 Schema 上传复用 `eval-dataset` 公开的严格 JSON 解析和
 
 ZIP 与素材上传也等待 FileDropzone 的文件提取结束后再提交；单文件替换仅接受最新选择，多文件素材保留各次选择的累加结果。
 
+初始素材、初始上下文的文件读取共用 `bundles-api.ts` 的 `getResource`、`listFiles`、`getFile`；目录投影从 `eval-contracts` 的 `InitialResourceFile` 引入。Query key 包含资源种类、包、资源和文件路径，内容请求接受取消信号，路径作为 query 参数原样传递。格式预览的发布依赖与接入待办见 [SP 共享包发布与升级](../../docs/sp-package-publishing-todo.md)。
+
 从 Dataset 新建用例使用 `/datasets/$datasetId/data/new`，页面始终有明确的数据集归属，只调用一次 `POST /api/data?datasetId=...`，创建与关联由 API 原子提交；页面不持有“已创建、未关联”的补偿状态。创建响应未确认时刷新目录并阻止重复提交，再返回 Dataset 核对。
 
 创建项目仅在“创建并运行”时提交；此前取消只返回项目管理。Run 预览与其操作、选择范围绑定，选择改变后旧响应不能恢复可提交的预览。创建与 Run 提交都捕获完整请求；结果未确认时保持该请求和幂等键，允许原样重试，不能编辑后误启动另一组目标。仅执行的 Run 进行中仍可填写或修改评估计划；首次带评估的 Run 后沿用 API 返回的只读计划。

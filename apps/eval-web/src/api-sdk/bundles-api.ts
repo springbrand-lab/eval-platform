@@ -1,4 +1,5 @@
 import { api, enc } from "./client";
+import type { InitialResourceFile } from "@eval-platform/eval-contracts";
 import type { BundleRecord, MaterialFile, MaterialRecord, SessionRecord } from "./types";
 
 export type ResourceKind = "material" | "session";
@@ -10,11 +11,15 @@ function catalog<R, Input>(kind: ResourceKind, segment: "materials" | "sessions"
   const path = kind === "material" ? "/api/material-bundles" : "/api/session-bundles";
   const base = (bundleId: string) => `${path}/${enc(bundleId)}`;
   const resources = (bundleId: string) => `${base(bundleId)}/${segment}`;
+  const resource = (bundleId: string, resourceId: string) => `${resources(bundleId)}/${enc(resourceId)}`;
   const keys = {
     all: ["bundles", kind] as const,
     list: () => ["bundles", kind, "list"] as const,
     detail: (id: string) => ["bundles", kind, id] as const,
     resources: (id: string) => ["bundles", kind, id, segment] as const,
+    resource: (id: string, resourceId: string) => ["bundles", kind, id, segment, resourceId] as const,
+    files: (id: string, resourceId: string) => ["bundles", kind, id, segment, resourceId, "files"] as const,
+    file: (id: string, resourceId: string, filePath: string) => ["bundles", kind, id, segment, resourceId, "file", filePath] as const,
   };
   return {
     keys,
@@ -33,9 +38,13 @@ function catalog<R, Input>(kind: ResourceKind, segment: "materials" | "sessions"
     update: (id: string, input: Partial<Metadata>) => api.patch<BundleRecord>(base(id), input),
     delete: (id: string) => api.delete(base(id)),
     listResources: (id: string, signal?: AbortSignal) => api.get<R[]>(resources(id), { signal }),
+    getResource: (id: string, resourceId: string, signal?: AbortSignal) => api.get<R>(resource(id, resourceId), { signal }),
+    listFiles: (id: string, resourceId: string, signal?: AbortSignal) => api.get<InitialResourceFile[]>(`${resource(id, resourceId)}/files`, { signal }),
+    getFile: (id: string, resourceId: string, filePath: string, signal?: AbortSignal) =>
+      api.blob(`${resource(id, resourceId)}/file`, { params: { path: filePath }, signal, timeoutMs: 120_000 }),
     createResource: (id: string, input: Input) => api.post<R>(resources(id), input, { timeoutMs: 180_000 }),
-    updateResource: (id: string, resourceId: string, input: Partial<Metadata>) => api.patch<R>(`${resources(id)}/${enc(resourceId)}`, input),
-    deleteResource: (id: string, resourceId: string) => api.delete(`${resources(id)}/${enc(resourceId)}`),
+    updateResource: (id: string, resourceId: string, input: Partial<Metadata>) => api.patch<R>(resource(id, resourceId), input),
+    deleteResource: (id: string, resourceId: string) => api.delete(resource(id, resourceId)),
   };
 }
 

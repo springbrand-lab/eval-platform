@@ -79,8 +79,8 @@ describe("Eval Bundle directory", () => {
     await put(directory, `materials/${materialId}.json`, '{"files":[{"path":1}]}');
     await put(directory, `sessions/${sessionId}.json`, '{"format":"jsonl","content":false}');
     const source = await openBundleDirectory(directory);
-    await expect(source.resolveInitialMaterials(owner, { bundleId, materialId })).rejects.toMatchObject(failure("invalid"));
-    await expect(source.resolveInitialSession(owner, { bundleId, sessionId })).rejects.toMatchObject(failure("invalid"));
+    await expect(source.resolveInitialMaterials(owner, { bundleId, materialId })).rejects.toMatchObject(failure("corrupt"));
+    await expect(source.resolveInitialSession(owner, { bundleId, sessionId })).rejects.toMatchObject(failure("corrupt"));
     await expect(source.uploadInitialSession(owner, { bundleId, sessionId: resourceId(1) },
       { format: "jsonl", content: "not-json" })).rejects.toMatchObject(failure("invalid"));
 
@@ -90,7 +90,7 @@ describe("Eval Bundle directory", () => {
     const manifest = join(directory, owner, bundleId, "materials", `${materialId}.json`);
     await rm(manifest);
     await symlink(outsideFile, manifest);
-    await expect(source.resolveInitialMaterials(owner, { bundleId, materialId })).rejects.toMatchObject(failure("invalid"));
+    await expect(source.resolveInitialMaterials(owner, { bundleId, materialId })).rejects.toMatchObject(failure("corrupt"));
   });
 
   it("does not follow a Bundle link into another user's directory", async () => {
@@ -102,8 +102,8 @@ describe("Eval Bundle directory", () => {
     await mkdir(join(directory, owner));
     await symlink(join(directory, otherOwner, bundleId), join(directory, owner, bundleId), "dir");
 
-    await expect(source.resolveInitialMaterials(owner, { bundleId, materialId })).rejects.toMatchObject(failure("invalid"));
-    await expect(source.resolveInitialSession(owner, { bundleId, sessionId })).rejects.toMatchObject(failure("invalid"));
+    await expect(source.resolveInitialMaterials(owner, { bundleId, materialId })).rejects.toMatchObject(failure("corrupt"));
+    await expect(source.resolveInitialSession(owner, { bundleId, sessionId })).rejects.toMatchObject(failure("corrupt"));
     await expect(source.uploadInitialMaterials(owner, { bundleId, materialId: resourceId(1) }, files))
       .rejects.toMatchObject(failure("invalid"));
     await expect(source.uploadInitialSession(owner, { bundleId, sessionId: resourceId(1) }, context))
@@ -130,7 +130,7 @@ describe("Eval Bundle directory", () => {
         .rejects.toMatchObject(failure(reason));
       await put(directory, `materials/${resourceId(index)}.json`, JSON.stringify({ files: value }));
       await expect(source.resolveInitialMaterials(owner, { bundleId, materialId: resourceId(index) }))
-        .rejects.toMatchObject(failure(reason));
+        .rejects.toMatchObject({ ...failure("corrupt"), cause: failure(reason) });
     }
   });
 
@@ -142,7 +142,7 @@ describe("Eval Bundle directory", () => {
       .rejects.toMatchObject({ ...failure("invalid"), details: [{ path: "content:1" }] });
     await put(directory, `sessions/${sessionId}.json`, JSON.stringify(duplicate));
     await expect(source.resolveInitialSession(owner, { bundleId, sessionId }))
-      .rejects.toMatchObject({ ...failure("invalid"), details: [{ path: "content:1" }] });
+      .rejects.toMatchObject({ ...failure("corrupt"), cause: { ...failure("invalid"), details: [{ path: "content:1" }] } });
   });
 
   it("requires an absolute directory at startup", async () => {
