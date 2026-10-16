@@ -12,6 +12,7 @@ const client = createHttpClient({
   responseMode: "envelope",
   decodeError,
   timeoutMs: 60_000,
+  maxResponseBytes: Number.MAX_SAFE_INTEGER,
   getToken: currentToken,
   onUnauthorized: () => markUnauthorized(),
 });

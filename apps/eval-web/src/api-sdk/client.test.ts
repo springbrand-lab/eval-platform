@@ -12,6 +12,21 @@ describe("browser SDK and Web gateway errors", () => {
   beforeEach(() => { vi.resetModules(); clearVerificationCacheForTest(); });
   afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); clearVerificationCacheForTest(); });
 
+  it("loads sampling details larger than the SDK's default response limit without truncation", async () => {
+    const content = "x".repeat(10 * 1024 * 1024 + 1);
+    const upstream: typeof fetch = async (input) => String(input).startsWith(env.TAKT_ORIGIN)
+      ? Response.json({ user: { userId: "operator-1", access: { menuIds: ["eval"] } } })
+      : Response.json({ success: true, msg: { sampling: { samplingId: "sampling-a", execution: { status: "failed", lastError: content } } } });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(new Request(input, init), env, upstream)));
+    const auth = await import("@/auth/session");
+    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    const { getSamplingDetail } = await import("./metrics-api");
+    const detail = await getSamplingDetail("project-a", "sampling-a");
+    expect(detail.sampling.samplingId).toBe("sampling-a");
+    expect(detail.sampling.execution.lastError).toBe(content);
+    expect(auth.getAuthState().status).toBe("ready");
+  });
+
   it.each([
     ["denied", "EVAL_ACCESS_DENIED", 403, "forbidden"],
     ["expired", "AUTH_UNAUTHENTICATED", 401, "unauthorized"],
