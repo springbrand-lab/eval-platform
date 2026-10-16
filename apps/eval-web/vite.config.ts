@@ -18,6 +18,10 @@ export default defineConfig(({ mode }) => {
       alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
       dedupe: ["react", "react-dom", "@tanstack/react-query", "@springbrand/http", "@springbrand/site-block"],
     },
+    optimizeDeps: {
+      // This ESM package needs Vite's asset transforms for URL imports, CSS and Workers.
+      exclude: ["@springbrand/file-renderers"],
+    },
     server: {
       proxy: {
         "/api": {

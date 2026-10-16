@@ -18,7 +18,7 @@ ZIP 与素材上传也等待 FileDropzone 的文件提取结束后再提交；�
 
 素材、上下文名称进入 `/resources/$kind/$bundleId/$resourceId` 的只读目录页。资源与运行 Workspace 共用目录导航和 `@springbrand/file-renderers` 的格式选择、解析、预览、源码及下载；Web 仅负责鉴权文件读取、请求取消与 Blob URL 生命周期。文件夹和 ZIP 导入后的路径使用同一目录投影。HTML/CSS/图片等相对引用由公共 `rendererResourcePath` 统一解析，只读取当前资源根目录内的文件；Web 不另行解码链接。
 
-`file-renderers`、`agent-config-editor` 使用 npm 精确版本，Tailwind 扫描它们发布后的 `dist/**/*.js`；格式自身的 CSS Module 由包内 JS 导入。Vite 对 React、React DOM、TanStack Query、HTTP 和 site-block 去重，避免产生第二份 Context 或错误类。依赖接入与独立安装验证见 [SP 共享包接入与升级](../../docs/sp-package-publishing-todo.md)。
+`file-renderers`、`agent-config-editor` 使用 npm 精确版本，Tailwind 扫描它们发布后的 `dist/**/*.js`；格式自身的 CSS Module 由包内 JS 导入。`file-renderers` 是包含资源 URL、CSS 和 Worker 的 ESM 包，开发时不参与依赖预打包，由 Vite 标准资源流水线处理。Vite 对 React、React DOM、TanStack Query、HTTP 和 site-block 去重，避免产生第二份 Context 或错误类。依赖接入与独立安装验证见 [SP 共享包接入与升级](../../docs/sp-package-publishing-todo.md)。
 
 从 Dataset 新建用例使用 `/datasets/$datasetId/data/new`，页面始终有明确的数据集归属，只调用一次 `POST /api/data?datasetId=...`，创建与关联由 API 原子提交；页面不持有“已创建、未关联”的补偿状态。创建响应未确认时刷新目录并阻止重复提交，再返回 Dataset 核对。
 
