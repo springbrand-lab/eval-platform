@@ -21,6 +21,7 @@ export interface DatasetService {
   listDatasets(): Promise<readonly Dataset[]>;
   deleteDataset(datasetId: string): Promise<void>;
   createData(input: DataInput, options?: DataCreateOptions): Promise<Data>;
+  addData(datasetId: string, inputs: readonly DataInput[]): Promise<readonly Data[]>;
   updateData(dataId: string, input: DataInput): Promise<Data>;
   getData(dataId: string): Promise<Data | null>;
   listData(datasetId?: string): Promise<readonly Data[]>;
@@ -83,6 +84,13 @@ export function createDatasetService(store: DatasetStore): DatasetService {
       const data = dataSchema.parse({ ...fields, dataId: crypto.randomUUID() });
       await store.createData(data, target);
       return dataSchema.parse(data);
+    },
+    async addData(datasetId, inputs) {
+      const id = platformId(datasetId);
+      const fields = parseInput(() => dataInputSchema.array().min(1).parse(inputs));
+      const entries = fields.map((input) => dataSchema.parse({ ...input, dataId: crypto.randomUUID() }));
+      await store.createDataBatch(id, entries);
+      return entries;
     },
     async updateData(dataId, input) {
       const data = parseInput(() => dataSchema.parse({

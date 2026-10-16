@@ -8,6 +8,7 @@ export interface DatasetStore {
   deleteDataset(datasetId: string): Promise<void>;
   /** Creates Data and its optional Dataset membership atomically, or writes neither. */
   createData(data: Data, options?: DataCreateOptions): Promise<void>;
+  createDataBatch(datasetId: string, data: readonly Data[]): Promise<void>;
   updateData(data: Data): Promise<void>;
   getData(dataId: string): Promise<Data | null>;
   listData(datasetId?: string): Promise<readonly Data[]>;

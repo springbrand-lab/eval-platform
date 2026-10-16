@@ -24,13 +24,13 @@ import { useInputLimits } from "@/features/input-limits";
 import { parseStrictJson } from "@eval-platform/eval-dataset";
 import { buildSchemaContent, initialSchemaFields, SchemaBuilder } from "./schema-builder";
 
-export const SCORE_CONVENTION = "评估结果按这份 JSON Schema 展示和统计，支持数值、布尔、枚举和 null。";
+export const SCORE_CONVENTION = "定义评估结果包含哪些字段，例如分数、结论和理由。具体评判标准在用例的「评估要求」中填写。";
 
-function CreateDialog({ onClose }: { onClose: () => void }) {
+export function OutputSchemaCreateDialog({ onClose, onCreated }: { onClose: () => void; onCreated?: (record: OutputSchemaRecord) => void }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [metadata, setMetadata] = useState({ name: "", description: "" });
-  const [mode, setMode] = useState("import");
+  const [mode, setMode] = useState("manual");
   const [fields, setFields] = useState(initialSchemaFields);
   const [fileName, setFileName] = useState("");
   const draft = useTextImport();
@@ -52,10 +52,11 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
     meta: { silent: true },
     onError: async (error) => { if (isWriteOutcomeUnknown(error)) await queryClient.invalidateQueries({ queryKey: outputSchemaKeys.all }); },
     onSuccess: async (record) => {
-      toast.success("已新建评分格式");
+      toast.success("已新建评估结果格式");
       await queryClient.invalidateQueries({ queryKey: outputSchemaKeys.all });
       onClose();
-      void navigate({ to: "/output-schemas/$outputSchemaId", params: { outputSchemaId: record.outputSchemaId } });
+      if (onCreated) onCreated(record);
+      else void navigate({ to: "/output-schemas/$outputSchemaId", params: { outputSchemaId: record.outputSchemaId } });
     },
   });
   const errors = fieldErrors(create.error);
@@ -64,14 +65,14 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
     && (mode === "manual" ? !built.error : !draft.reading && !draft.error);
   return <Dialog open onOpenChange={(next) => { if (!next && !create.isPending) onClose(); }}>
     <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col sm:max-w-3xl" showCloseButton={!create.isPending}>
-      <DialogHeader><DialogTitle>新建评分格式</DialogTitle><DialogDescription>导入已有格式，或直接配置评分字段，用于展示和统计评估结果。</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>新建评估结果格式</DialogTitle><DialogDescription>导入已有格式，或直接配置结果字段，用于展示和统计评估结果。</DialogDescription></DialogHeader>
       <Tabs value={mode} className="flex min-h-0 flex-col gap-4" onValueChange={(value) => {
         if (blocked) return;
         setMode(value); if (draft.reading) setFileName("");
         draft.setContent(draft.content); create.reset();
       }}>
       <TabsList className="h-auto w-full flex-wrap">
-        <TabsTrigger value="import" disabled={blocked}>导入评分格式</TabsTrigger>
+        <TabsTrigger value="import" disabled={blocked}>导入评估结果格式</TabsTrigger>
         <TabsTrigger value="manual" disabled={blocked}>手动创建</TabsTrigger>
       </TabsList>
       <TabsContent value={mode} className="flex min-h-0 flex-col">
@@ -102,7 +103,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
         </fieldset>
         </div>
         <DialogFooter className="shrink-0"><FormButton type="button" variant="outline" disabled={create.isPending} onClick={onClose}>取消</FormButton>
-          <FormButton type="submit" loading={create.isPending} disabled={!valid}>创建评分格式</FormButton></DialogFooter>
+          <FormButton type="submit" loading={create.isPending} disabled={!valid}>创建评估结果格式</FormButton></DialogFooter>
       </form>
       </TabsContent>
       </Tabs>
@@ -117,9 +118,10 @@ export function OutputSchemasPage() {
   return (
     <Page>
       <PageHeader
-        title="评分格式"
-        crumbs={[{ label: "数据集", to: "/datasets" }]}
-        actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setUploading(true)}>新建评分格式</Button>}
+        title="评估结果格式"
+        description={SCORE_CONVENTION}
+
+        actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setUploading(true)}>新建评估结果格式</Button>}
       />
       <Card>
         {schemas.isPending ? <LoadingBlock /> : schemas.error ? <div className="p-4"><ErrorBlock error={schemas.error} /></div> : (
@@ -128,8 +130,8 @@ export function OutputSchemasPage() {
             rowKey={(row) => row.outputSchemaId}
             searchText={(row) => `${row.name} ${row.description}`}
             onRowClick={(row) => void navigate({ to: "/output-schemas/$outputSchemaId", params: { outputSchemaId: row.outputSchemaId } })}
-            empty={<EmptyState title="还没有评分格式" description={SCORE_CONVENTION}
-              action={<Button variant="primary" onClick={() => setUploading(true)}>新建评分格式</Button>} />}
+            empty={<EmptyState title="还没有评估结果格式" description={SCORE_CONVENTION}
+              action={<Button variant="primary" onClick={() => setUploading(true)}>新建评估结果格式</Button>} />}
             columns={[
               { key: "name", header: "名称", cell: (row) => <span className="font-semibold">{row.name}</span>, sortValue: (row) => row.name },
               { key: "description", header: "说明", cell: (row) => <span className="text-text-muted">{row.description}</span> },
@@ -138,7 +140,7 @@ export function OutputSchemasPage() {
           />
         )}
       </Card>
-      {uploading && <CreateDialog onClose={() => setUploading(false)} />}
+      {uploading && <OutputSchemaCreateDialog onClose={() => setUploading(false)} />}
     </Page>
   );
 }

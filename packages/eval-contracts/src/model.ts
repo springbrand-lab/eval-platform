@@ -37,6 +37,8 @@ export interface SamplingStageState {
   readonly lastError?: string;
   /** Subject Submission ended, but artifacts and complete trajectory still need finalization. */
   readonly evidencePending?: boolean;
+  /** Explicit collection-only recovery of an already completed Agent; never submit/restart it. */
+  readonly collectionPending?: true;
 }
 
 export const AGENT_STATUSES = ["queued", "running", "completed", "failed", "interrupted", "cancelled"] as const;
@@ -233,19 +235,25 @@ export interface EvidenceRef {
   readonly contentHash?: string;
 }
 
-/** The Evaluator's raw result file, unchanged; Metrics validates it against the Project Schema. */
+/** Where an Evaluator's result came from, in the order Runtime prefers them. */
+export const EVALUATION_RESULT_SOURCES = ["submission", "result-file", "final-reply"] as const;
+export type EvaluationResultSource = (typeof EVALUATION_RESULT_SOURCES)[number];
+
+/** The Evaluator's raw result, unchanged; Metrics validates it against the Project Schema. */
 export interface EvaluationStructuredOutput {
-  /** Path of the result file in the Evaluator's own Space. */
+  /** Result file path in the Evaluator's own Space, or the channel the result arrived through. */
   readonly path: string;
-  /** Original UTF-8 file text, not a parsed copy. */
+  /** Original UTF-8 text, not a parsed copy. */
   readonly content: string;
   readonly contentHash?: string;
+  /** Absent on records written before results were submitted directly; those came from the result file. */
+  readonly source?: EvaluationResultSource;
 }
 
 export interface EvaluationAgentOutput {
   readonly status: "succeeded" | "failed";
   readonly artifacts: readonly ArtifactRef[];
-  /** Absent when SP found no result file; Metrics reports it as unavailable, never as zero. */
+  /** Absent when no result was found; Metrics reports it as unavailable, never as zero. */
   readonly structuredOutput?: EvaluationStructuredOutput;
   readonly evidenceRefs?: readonly EvidenceRef[];
   readonly trajectory: TrajectoryRef;

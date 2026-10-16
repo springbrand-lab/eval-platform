@@ -72,8 +72,8 @@ describe("Agent resource and trajectory categories", () => {
     try {
       const text = view.container.textContent!;
       expect(text).toContain("下一级实验结果");
-      expect(text.indexOf("下一级实验结果")).toBeLessThan(text.indexOf("Schema 评估输出"));
-      expect(text.indexOf("Schema 评估输出")).toBeLessThan(text.indexOf("执行 Agent 资源与轨迹"));
+      expect(text.indexOf("下一级实验结果")).toBeLessThan(text.indexOf("评估指标统计"));
+      expect(text.indexOf("评估指标统计")).toBeLessThan(text.indexOf("执行 Agent 资源与轨迹"));
       const resources = [...view.container.querySelectorAll("details")].find((item) => item.querySelector("summary")?.textContent?.includes("资源与轨迹统计"));
       expect(resources).toBeDefined();
       expect(resources?.open).toBe(false);

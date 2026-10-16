@@ -4,6 +4,7 @@ import type {
   EvaluationAgentOutput,
   EvaluationStructuredOutput,
   ExecutionOutput,
+  JsonValue,
   MaterializedDataBinding,
 } from "@eval-platform/eval-contracts";
 import type { AgentHandle, AgentSubmission, EnsureAgentInput } from "@eval-platform/eval-runtime/harness";
@@ -181,6 +182,25 @@ export function evidenceTrajectoryPage(value: unknown) {
     nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
   }) satisfies z.ZodType<EvalEvidenceTrajectoryPage>, value, "evidence trajectory page");
 }
+
+/** Assistant text of a finished turn in SP's trajectory, or undefined for any other event. */
+export function finalReplyText(event: Readonly<Record<string, JsonValue>>): string | undefined {
+  const parsed = finishedTurnSchema.safeParse(event);
+  if (!parsed.success || parsed.data.payload.output.role !== "assistant") return undefined;
+  const text = parsed.data.payload.output.content
+    .flatMap((block) => block.type === "text" && typeof block.text === "string" ? [block.text] : []).join("\n");
+  return text.trim() === "" ? undefined : text;
+}
+
+const finishedTurnSchema = z.object({
+  type: z.literal("turn.finished"),
+  payload: z.object({
+    output: z.object({
+      role: z.string(),
+      content: z.array(z.looseObject({ type: z.string(), text: z.unknown().optional() })),
+    }),
+  }),
+});
 
 export function evidenceFileReceipt(value: unknown): EvalEvidenceFileReceipt {
   return response(z.object({

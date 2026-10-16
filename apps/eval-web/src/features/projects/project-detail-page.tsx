@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, ClipboardCheck, Play, Square, Trash2 } from "lucide-react";
+import { ArrowRight, Play, Square, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { getProjectOverview, metricKeys } from "@/api-sdk/metrics-api";
@@ -10,14 +10,14 @@ import { Page, PageHeader } from "@/components/layout/page";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, DescriptionList, SectionLabel } from "@/components/ui/card";
-import { DataTable } from "@/components/ui/data-table";
-import { CopyId, ProgressBar } from "@/components/ui/data-display";
+import { ProjectStatistics } from "./project-statistics";
+import { ProjectResults } from "./project-results";
+import { CopyId, ProgressBar, Tabs } from "@/components/ui/data-display";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { EmptyState, ErrorBlock, LoadingBlock, Spinner } from "@/components/ui/feedback";
 import { ActionMenu } from "@/components/ui/menu";
 import { Tooltip } from "@/components/ui/tooltip";
-import { formatDateTime, formatDuration, formatNumber, formatPercent, OPERATION_LABELS } from "@/lib/format";
-import { OutputPreview, SummaryCards } from "@/features/metrics/summary";
+import { formatDateTime, formatDuration, OPERATION_LABELS } from "@/lib/format";
 import { runPhaseLabel } from "@/features/runs/run-status";
 import { POLL_MS, useRun } from "@/features/runs/use-run-polling";
 import { useProject } from "./use-project";
@@ -101,7 +101,7 @@ function PlanCard({ view }: { view: ProjectView }) {
             <DescriptionList items={[
               { label: "评估 Agent", value: evaluation.plan.evaluatorAgentConfig.name },
               { label: "评估并发", value: evaluation.plan.evaluationConcurrency },
-              { label: "评分 Schema", value: <Link to="/projects/$projectId/output-schema" params={{ projectId }} className="link">查看</Link> },
+              { label: "评估结果格式", value: <Link to="/projects/$projectId/output-schema" params={{ projectId }} className="link">查看</Link> },
             ]} />
           ) : <p className="text-[13px] text-text-muted">还没有评估计划，只能执行，不能评估。</p>}
         </div>
@@ -134,6 +134,7 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
     enabled: !!view.data, staleTime: 0,
     refetchInterval: view.data?.currentRun ? 10_000 : false,
   });
+  const [tab, setTab] = useState<"results" | "runs" | "settings">("results");
   const [deleting, setDeleting] = useState(false);
   const [stopTarget, setStopTarget] = useState<StopRunTarget | null>(null);
   const remove = useMutation({
@@ -148,18 +149,17 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
   const busy = !!view.data?.currentRun;
   return (
     <Page>
-      <PageHeader
+      <PageHeader compact
         title={project?.name ?? "Project"}
         description={project?.description}
         crumbs={[{ label: "项目管理", to: "/projects" }]}
         meta={project && <Badge>{project.sourceBranch}</Badge>}
         actions={(
           <>
-            <Button icon={<ClipboardCheck />} onClick={() => void navigate({ to: "/projects/$projectId/evaluation-plan", params: { projectId } })}>评估计划</Button>
-            <Tooltip content={busy ? "当前 Run 结束后才能发起" : null}>
+            <Tooltip content={busy ? "当前运行结束后才能再次发起" : null}>
               <span>
-                <Button variant="primary" icon={<Play />} disabled={busy}
-                  onClick={() => void navigate({ to: "/projects/$projectId/runs/new", params: { projectId } })}>发起 Run</Button>
+                <Button size="sm" variant="primary" icon={<Play />} disabled={busy}
+                  onClick={() => void navigate({ to: "/projects/$projectId/runs/new", params: { projectId } })}>运行 / 重新评估</Button>
               </span>
             </Tooltip>
             <ActionMenu items={[{ label: "删除 Project", icon: <Trash2 />, danger: true, disabled: busy, onSelect: () => setDeleting(true) }]} />
@@ -167,39 +167,20 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
         )}
       />
       {view.isPending ? <LoadingBlock /> : view.error ? <ErrorBlock error={view.error} onRetry={() => void view.refetch()} /> : (
-        <div className="flex flex-col gap-5">
+        <div className="flex flex-col gap-3">
           <CurrentRunBanner projectId={projectId} current={view.data!.currentRun} onStop={setStopTarget} />
-          {overview.data ? <SummaryCards summary={overview.data.summary}>
-          <Card>
-            <CardHeader title="测试集结果" description="项目 → 测试集 → 用例 → 采样。点击测试集查看用例表现；成功率表示运行完成情况，质量由评估输出衡量。" />
-            <DataTable
-              rows={overview.data?.datasets ?? []}
-              rowKey={(row) => row.dataset.datasetId}
-              searchText={(row) => row.dataset.name}
-              searchPlaceholder="搜索测试集"
-              onRowClick={(row) => void navigate({ to: "/projects/$projectId/datasets/$datasetId", params: { projectId, datasetId: row.dataset.datasetId } })}
-              columns={[
-                { key: "name", header: "测试集", cell: (row) => <span className="font-semibold text-text-strong">{row.dataset.name}</span> },
-                { key: "samples", header: "用例", align: "right", cell: (row) => formatNumber(row.summary.counts.projectSamples) },
-                { key: "samplings", header: "采样", align: "right", cell: (row) => formatNumber(row.summary.counts.samplings) },
-                { key: "execution", header: "执行成功率", align: "right", cell: (row) => formatPercent(row.summary.execution.successRate), sortValue: (row) => row.summary.execution.successRate },
-                { key: "evaluation", header: "评估成功率", align: "right", cell: (row) => formatPercent(row.summary.evaluation.successRate), sortValue: (row) => row.summary.evaluation.successRate },
-                { key: "failed", header: "失败（执行 / 评估）", align: "right", cell: (row) => <span className={row.summary.execution.statuses.failed + row.summary.evaluation.statuses.failed > 0 ? "font-medium text-danger" : "text-text-muted"}>{row.summary.execution.statuses.failed} / {row.summary.evaluation.statuses.failed}</span>,
-                  sortValue: (row) => row.summary.execution.statuses.failed + row.summary.evaluation.statuses.failed },
-                { key: "output", header: "评估输出", cell: (row) => <OutputPreview outputs={row.summary.evaluationOutputs} /> },
-              ]}
-            />
-          </Card>
-          </SummaryCards> : overview.error ? <ErrorBlock error={overview.error} onRetry={() => void overview.refetch()} /> : <LoadingBlock rows={2} />}
-          <div className="grid gap-5 xl:grid-cols-[1fr_420px]">
-            {view.data && <PlanCard view={view.data} />}
-            <Card>
-              <CardHeader title="运行记录" description="每次 Run 的操作范围与运行状态。" />
-              {!overview.data ? overview.error ? <ErrorBlock error={overview.error} onRetry={() => void overview.refetch()} /> : <LoadingBlock rows={2} /> : overview.data.runIds.length === 0
-                ? <EmptyState title="还没有 Run" />
-                : <div>{overview.data!.runIds.map((runId) => <RunRow key={runId} projectId={projectId} runId={runId} />)}</div>}
-            </Card>
-          </div>
+          <Tabs variant="line" value={tab} onChange={setTab} tabs={[{ value: "results", label: "结果" }, { value: "runs", label: "运行记录" }, { value: "settings", label: "项目设置" }]} />
+          {tab === "results" && (overview.data ? <>
+            <ProjectResults key={projectId} projectId={projectId} view={view.data!} overview={overview.data} />
+            <ProjectStatistics summary={overview.data.summary} />
+          </> : overview.error ? <ErrorBlock error={overview.error} onRetry={() => void overview.refetch()} /> : <LoadingBlock rows={2} />)}
+          {tab === "settings" && view.data && <><PlanCard view={view.data} /><Card><CardHeader title="测试范围" description="项目使用创建时的数据副本，之后修改数据集不会改变已有项目。" /><CardBody><ul>{view.data.datasets.map((dataset) => <li key={dataset.datasetId}><Link className="link" to="/projects/$projectId/datasets/$datasetId" params={{ projectId, datasetId: dataset.datasetId }}>{dataset.name}</Link></li>)}</ul></CardBody></Card></>}
+          {tab === "runs" && <Card>
+            <CardHeader title="运行记录" description="列出与当前结果关联的运行。进入记录查看该次操作的范围和状态；已被替换的历史结果不在此汇总。" />
+            {!overview.data ? overview.error ? <ErrorBlock error={overview.error} onRetry={() => void overview.refetch()} /> : <LoadingBlock rows={2} /> : overview.data.runIds.length === 0
+              ? <EmptyState title="还没有运行记录" />
+              : <div>{overview.data.runIds.map((runId) => <RunRow key={runId} projectId={projectId} runId={runId} />)}</div>}
+          </Card>}
           {project && <p className="text-xs text-text-faint">创建于 {formatDateTime(project.createdAt)} · <CopyId value={project.projectId} /></p>}
         </div>
       )}

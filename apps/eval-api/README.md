@@ -41,7 +41,7 @@
 
 被测执行成功后，Worker 经 SP 导出接口取得被测产物清单、逐个文件和完整轨迹（完整原始事件按顺序分片），由 `src/evidence/` 按内容 hash 固化为证据包：`evidence/blobs/<sha256>` 与 `evidence/<evidenceId 的 hex>/manifest.json`，Sampling 只记录 `evidence` 引用。评估时评委是普通 Agent，有自己的 Chat 和 Space；Worker 把证据包导入评委 Space 的 `/evidence/`（`manifest.json`、`artifacts/<原路径>`、`trajectory/events-000001.jsonl` 等有序分片），评委看不到被测 Workspace。
 
-评委把结果写进自己 Space 的 `/output/result.json`，SP 以 `structuredOutput` 原样返回。Metrics 统一按 Project 锁定 Schema 解析和展示所有支持的字段。配置 Langfuse 时，同一 Metrics reader 从合法输出派生顶层 numeric `score` 和可选字符串 `reason`，发布到被测 Chat 的 session，名称 `judge-score`、ID `eval-score:<evaluationId>`。原始输出不增加派生 score/reason 字段；没有 numeric score 不影响评估。同步失败只记在 `scoreSync`，补同步重新从原始输出与锁定 Schema 派生。
+评估 Agent 通过 Eval API 自带的 MCP Server（`POST /mcp/evaluation-results`，工具 `submit_evaluation`，需配置 `EVAL_RESULT_MCP_TOKEN`）直接提交结果，提交时按锁定 Schema 校验并存入 `eval_evaluation_submissions`；没有提交时依次回退到 SP 返回的 `/output/result.json` 和最终回复中的 JSON。只有合法结果才使评估成功，详见[评估结果提交](../../docs/eval-evaluation-result-submission.md)。Metrics 统一按 Project 锁定 Schema 解析和展示所有支持的字段。配置 Langfuse 时，同一 Metrics reader 从合法输出派生顶层 numeric `score` 和可选字符串 `reason`，发布到被测 Chat 的 session，名称 `judge-score`、ID `eval-score:<evaluationId>`。原始输出不增加派生 score/reason 字段；没有 numeric score 不影响评估。同步失败只记在 `scoreSync`，补同步重新从原始输出与锁定 Schema 派生。
 
 Worker 可多实例部署、滚动升级；收到信号后停止取任务，等待进行中的 Run 结束再关闭 pg-boss 和连接池。调度、恢复、停止语义和剩余风险见[架构方案](../../docs/architecture.md#run-调度与停止)。
 
@@ -105,8 +105,16 @@ Eval API 不做交互式登录，固定以一个 Eval SP 服务账号运行。�
 
 ## SP Harness 与 Bundle 目录
 
-`src/sp/harness.ts` 用服务凭证确保 Inbox Chat、初始化、提交/重启、按键校准、收集完整产物/轨迹、原始资源和 Evaluator 原样的 `structuredOutput` 结果文件；`sp/submission-observer.ts` 以 WebSocket 终态推送为主，Ping/Pong 检测静默失活，断线后读取一次权威状态并有限重连，健康连接期间不轮询。SP HTTP 请求默认最多等待 60 秒，停止调用最多 10 秒。当前只支持 `sp` 框架，`codex`、`cc` 明确拒绝。服务契约、Bundle 文件布局与校验规则见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。SP 服务路由已在独立 SP 分支实现，真实跨部署联调仍需完成。
+`src/sp/harness.ts` 用服务凭证确保 Inbox Chat、初始化、提交/重启、按键校准、收集完整产物/轨迹、原始资源、Evaluator 原样的 `structuredOutput` 结果文件，以及按轨迹读取 Evaluator 最后一条回复（`readFinalReply`）；`sp/submission-observer.ts` 以 WebSocket 终态推送为主，Ping/Pong 检测静默失活，断线后读取一次权威状态并有限重连，健康连接期间不轮询。SP HTTP 请求默认最多等待 60 秒，停止调用最多 10 秒。当前只支持 `sp` 框架，`codex`、`cc` 明确拒绝。服务契约、Bundle 文件布局与校验规则见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。SP 服务路由已在独立 SP 分支实现，真实跨部署联调仍需完成。
 
 `src/sp/bundle-directory.ts` 的 `openBundleDirectory` 是 API 上传与 Worker 读取共用的唯一 Bundle 目录实现；文件错误以 `BundleFileError` 表达，只有 `unavailable` 可重试。`src/sp/bundle-content.ts` 是 Material 与 Session 内容的唯一校验规则，上传、ZIP 导入和读取共用；`src/bundle-zip/` 用 SP 的 `inspectStrictZip` 读取 ZIP，再按 Bundle 类型分组成资源。
 
 资源目录通过现有 `BundleCatalog` 的 `listFiles` / `getFile` 提供只读文件清单和内容，先检查当前用户的活动 Bundle 与资源，再读取同一份 Bundle 文件。素材保留资源内路径；上下文以单个 `/context.json` 或 `/context.jsonl` 文件公开原文。HTTP 文件响应与运行观察文件共用附件、sandbox CSP 和禁止缓存的响应边界。目录软删除不开放浏览，Worker 对既有 Project 引用的读取不变。已存内容损坏为 `corrupt`，HTTP 映射为安全的 `500 BUNDLE_FILE_CORRUPT` 并保留内部 cause；上传校验仍为 `invalid` / `too-large`。
+
+
+数据集维护：DatasetService.addData(datasetId, inputs) 校验全部输入并生成身份，DatasetStore.createDataBatch 在一个事务中创建全部 Data 及其关联，失败不保留部分用例。HTTP `POST /api/datasets/{datasetId}/data/import` 接受 `{format: "json" | "jsonl", content: string}`，采用用例列表的严格解析、资源引用限制及 prompt 文件/请求大小上限；返回 201 Data[]。原有完整文档导入的身份冲突和重放语义不变。Web 导航调整不改变 Subject/Evaluator、资源引用和项目冻结副本契约。
+
+
+手动重新收集结果：POST /api/projects/{projectId}/samplings/{samplingId}/collect 与 /evaluations/{evaluationId}/collect 返回 202 {runId, queued}。仅接受归属匹配、最后 Attempt 为 completed 且有 Chat/Submission 的失败阶段；已成功为幂等无操作，重复待收集请求不重复入队，项目忙或 Run 已停止时拒绝。API 在 Project 行锁内设置 retrying + collectionPending，并原子提交原 Run 队列任务。Worker 只读取已有输出，不创建或重启 Agent/Attempt；执行侧必须归档产物和完整轨迹，评估侧保存原始结果并沿用校验和同步。失败清除待收集标记并保留错误，支持再次补收。补收执行不自动启动之前已取消的评估。当前运行查询允许旧 Run 因补收重新活跃，runSequence 仍是最大创建序号。
+
+Run 评估列表省略可选 output 正文和 attempt.resources 原始快照；详情接口仍提供完整记录。避免列表重复传输完整遥测导致响应超过客户端限制。

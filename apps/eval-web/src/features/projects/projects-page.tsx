@@ -18,7 +18,7 @@ export function ProjectsPage() {
     <Page>
       <PageHeader
         title="项目管理"
-        description="查看实验结果，逐层定位到测试集、用例和单次采样。"
+        description="打开项目查看用例表现、比较重复采样，并直接检查评估理由与产物。"
         actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => void navigate({ to: "/projects/new" })}>新建项目</Button>}
       />
       <Card>

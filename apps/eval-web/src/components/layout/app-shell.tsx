@@ -1,6 +1,6 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import {
-  Bot, Coins, Database, FlaskConical, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
+  Bot, Coins, Database, FolderArchive, FileJson2, MessagesSquare, FlaskConical, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
 } from "lucide-react";
 import { useState, type ComponentType } from "react";
 import { isEmbedded } from "@/auth/session";
@@ -15,10 +15,15 @@ export const NAV_GROUPS: readonly { label: string; items: readonly NavItem[] }[]
     label: "工作空间",
     items: [
       { to: "/projects", label: "项目管理", icon: FlaskConical },
-      { to: "/datasets", label: "数据集", icon: Database, paths: ["/resources", "/output-schemas"] },
-      { to: "/agents", label: "Agent 创建", icon: Bot },
+      { to: "/datasets", label: "数据集", icon: Database, paths: ["/data"] },
+      { to: "/agents", label: "Agent 管理", icon: Bot },
     ],
   },
+  { label: "资源", items: [
+    { to: "/resources/material", label: "输入素材", icon: FolderArchive },
+    { to: "/resources/session", label: "初始对话", icon: MessagesSquare },
+    { to: "/output-schemas", label: "评估结果格式", icon: FileJson2 },
+  ] },
   { label: "账户", items: [{ to: "/credits", label: "积分", icon: Coins }] },
 ];
 

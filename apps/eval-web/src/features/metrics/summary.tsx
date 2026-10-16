@@ -27,17 +27,17 @@ export function OutputPreview({ outputs }: { outputs: EvaluationOutputSummary })
   ))}</div>;
 }
 
-export function OutputFields({ outputs }: { outputs: EvaluationOutputSummary }) {
+export function OutputFields({ outputs, compact = false }: { outputs: EvaluationOutputSummary; compact?: boolean }) {
   return <Card>
-    <CardHeader title="Schema 评估输出" description={`有效 ${outputs.validation.valid} · 无效 ${outputs.validation.invalid} · 未获得 ${outputs.validation.unavailable}`} />
-    <CardBody className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-4">
+    <CardHeader className={compact ? "px-3 py-2" : undefined} title="评估指标统计" description={`有效 ${outputs.validation.valid} · 无效 ${outputs.validation.invalid} · 未获得 ${outputs.validation.unavailable}`} />
+    <CardBody className={compact ? "grid grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-2 p-3" : "grid grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-4"}>
       {outputs.fields.length === 0 && <p className="text-sm text-text-muted">暂无可统计字段。原始结果可在采样详情查看。</p>}
-      {outputs.fields.map((field) => <section key={field.jsonPointer} className="min-w-0 rounded-lg border border-border p-4">
+      {outputs.fields.map((field) => <section key={field.jsonPointer} className={compact ? "min-w-0 rounded-md border border-border p-3" : "min-w-0 rounded-lg border border-border p-4"}>
         <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">{field.title}</h3>{field.coverage !== "complete" && <StatusBadge status={field.coverage} />}</div>
         <p className="mt-1 text-xs text-text-muted">{field.description}</p>
         {field.numeric ? <>
           <p className="mt-4 flex flex-wrap items-baseline gap-2 text-2xl font-semibold tabular text-text-strong">{formatStatistic(field.numeric.mean)}<span className="text-xs font-normal text-text-muted">均值 · N = {field.numeric.count}</span></p>
-          <details className="mt-3 text-xs text-text-muted">
+          <details open={compact || undefined} className="mt-3 text-xs text-text-muted">
             <summary className="cursor-pointer">分布与字段信息</summary>
             <p className="mt-2 leading-6">{fieldValue(field)}</p>
             <p className="mt-1 break-all font-mono">{field.jsonPointer || "$"} · {field.kinds.join(" / ")}</p>

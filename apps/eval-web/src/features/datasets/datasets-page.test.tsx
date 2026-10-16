@@ -24,13 +24,12 @@ function button(text: string) {
 
 async function openCreate() {
   await click(button("新建数据集"));
-  await click([...document.querySelectorAll('[role="tab"]')].find((item) => item.textContent === "手动创建"));
-  const description = [...document.querySelectorAll("label")].find((item) => item.textContent === "说明")!;
+  const description = [...document.querySelectorAll("label")].find((item) => item.textContent === "说明（可选）")!;
   await type(document.getElementById(description.htmlFor)!, "Dataset description");
 }
 
 function nameInput() {
-  const label = [...document.querySelectorAll("label")].find((item) => item.textContent === "名称")!;
+  const label = [...document.querySelectorAll("label")].find((item) => item.textContent?.replace("*", "") === "名称")!;
   return document.getElementById(label.htmlFor) as HTMLInputElement;
 }
 
@@ -41,6 +40,7 @@ beforeEach(() => {
   state.fetch.mockReset();
   state.fetch.mockImplementation(async (input, init) => {
     const request = new Request(input, init);
+    if (new URL(request.url).pathname.endsWith("/data")) return response([]);
     state.requests.push(request.method);
     expect(new URL(request.url).pathname).toBe("/api/datasets");
     if (request.method === "GET") return response([...state.records]);
@@ -71,8 +71,6 @@ it("rereads the Dataset catalog and blocks a duplicate after a lost creation ack
     expect(view.client.getQueryData(datasetKeys.list())).toEqual(state.records);
     expect(nameInput().matches(":disabled")).toBe(true);
     expect(button("创建数据集").disabled).toBe(true);
-    await click([...document.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "导入数据集"));
-    expect(document.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("手动创建");
     await click(button("创建数据集"));
     expect(state.records).toHaveLength(1);
     expect(state.requests).toEqual(["GET", "POST", "GET"]);

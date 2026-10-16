@@ -41,7 +41,7 @@ export function checkMaterialFiles(files: readonly { path: string; size: number 
   return null;
 }
 
-function MaterialUpload({ bundleId, open, onClose }: { bundleId: string; open: boolean; onClose: () => void }) {
+export function MaterialUpload({ bundleId, open, onClose, onCreated }: { bundleId: string; open: boolean; onClose: () => void; onCreated?: (id: string) => void }) {
   const queryClient = useQueryClient();
   const limits = useInputLimits();
   const [files, setFiles] = useState<PickedFile[]>([]);
@@ -56,7 +56,8 @@ function MaterialUpload({ bundleId, open, onClose }: { bundleId: string; open: b
     }),
     meta: { silent: true },
     onError: async (error) => { if (isWriteOutcomeUnknown(error)) await queryClient.invalidateQueries({ queryKey: materialBundles.keys.all }); },
-    onSuccess: async () => {
+    onSuccess: async (record) => {
+      onCreated?.(record.materialId);
       toast.success("素材已上传");
       await queryClient.invalidateQueries({ queryKey: materialBundles.keys.resources(bundleId) });
       setFiles([]);
@@ -88,7 +89,7 @@ function MaterialUpload({ bundleId, open, onClose }: { bundleId: string; open: b
   );
 }
 
-function SessionUpload({ bundleId, open, onClose }: { bundleId: string; open: boolean; onClose: () => void }) {
+export function SessionUpload({ bundleId, open, onClose, onCreated }: { bundleId: string; open: boolean; onClose: () => void; onCreated?: (id: string) => void }) {
   const id = useId();
   const queryClient = useQueryClient();
   const limits = useInputLimits();
@@ -100,14 +101,15 @@ function SessionUpload({ bundleId, open, onClose }: { bundleId: string; open: bo
     mutationFn: (metadata: { name: string; description: string }) => sessionBundles.createResource(bundleId, { ...metadata, format, content }),
     meta: { silent: true },
     onError: async (error) => { if (isWriteOutcomeUnknown(error)) await queryClient.invalidateQueries({ queryKey: sessionBundles.keys.all }); },
-    onSuccess: async () => {
-      toast.success("初始上下文已上传");
+    onSuccess: async (record) => {
+      onCreated?.(record.sessionId);
+      toast.success("初始对话已上传");
       await queryClient.invalidateQueries({ queryKey: sessionBundles.keys.resources(bundleId) });
       onClose();
     },
   });
   return (
-    <MetadataDialog open={open} onClose={onClose} title="新建上下文" submitLabel="创建" loading={create.isPending}
+    <MetadataDialog open={open} onClose={onClose} title="新建初始对话" submitLabel="创建" loading={create.isPending}
       extraValid={!!limits.data && content.trim().length > 0 && !draft.reading && !draft.error && !tooLong && !isWriteOutcomeUnknown(create.error)} onSubmit={(value) => create.mutate(value)}>
       <CatalogWriteFeedback error={create.error} />
       {limits.error && <ErrorBlock error={limits.error} onRetry={() => void limits.refetch()} />}
@@ -141,7 +143,7 @@ export function BundleDetailPage({ kind, bundleId }: { kind: ResourceKind; bundl
   const queryClient = useQueryClient();
   const limits = useInputLimits();
   const catalog = resourceCatalog(kind);
-  const label = kind === "material" ? "素材" : "上下文";
+  const label = kind === "material" ? "素材" : "对话";
   const bundle = useQuery({ queryKey: catalog.keys.detail(bundleId), queryFn: ({ signal }) => catalog.get(bundleId, signal) });
   const items = useQuery({ queryKey: catalog.keys.resources(bundleId), queryFn: async ({ signal }): Promise<ResourceRecord[]> => catalog.listResources(bundleId, signal) });
   const [editing, setEditing] = useState<{ record?: ResourceRecord } | null>(null);
@@ -180,7 +182,7 @@ export function BundleDetailPage({ kind, bundleId }: { kind: ResourceKind; bundl
   if (!bundle.data) return <Page>{bundle.error ? <ErrorBlock error={bundle.error} onRetry={() => void bundle.refetch()} /> : <LoadingBlock />}</Page>;
   return <Page>
     <PageHeader title={bundle.data.name} description={bundle.data.description}
-      crumbs={[{ label: "数据集", to: "/datasets" }, { label: `初始${label}`, to: "/resources/$kind", params: { kind } }]}
+      crumbs={[{ label: kind === "material" ? "输入素材" : "初始对话", to: "/resources/$kind", params: { kind } }]}
       actions={<><Button icon={<Pencil />} onClick={() => { update.reset(); setEditing({}); }}>编辑名称与说明</Button>
         <ActionMenu items={[{ label: "删除包", icon: <Trash2 />, danger: true, onSelect: () => { remove.reset(); setPending({}); } }]} /></>} />
     {bundle.error && <ErrorBlock error={bundle.error} onRetry={() => void bundle.refetch()} />}
@@ -221,6 +223,6 @@ export function BundleDetailPage({ kind, bundleId }: { kind: ResourceKind; bundl
     </Dialog>
     <ConfirmDialog open={!!pending} onClose={() => { if (!remove.isPending) setPending(null); }} onConfirm={() => remove.mutate()}
       loading={remove.isPending} danger confirmLabel="删除" title={`删除${pending?.record ? label : "包"}`}
-      description={<>{pending?.record ? "删除后不再用于新选择。" : `将删除这个包及其中的${label}。`}已有项目的引用仍可读取。仍有样本绑定时，请先解除绑定。{remove.error && <ErrorBlock error={remove.error} />}</>} />
+      description={<>{pending?.record ? "删除后不再用于新选择。" : `将删除这个包及其中的${label}。`}已有项目的引用仍可读取。仍有用例绑定时，请先解除绑定。{remove.error && <ErrorBlock error={remove.error} />}</>} />
   </Page>;
 }

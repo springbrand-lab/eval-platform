@@ -46,7 +46,7 @@ async function mount(kind: ResourceKind) {
 }
 
 it.each(["material", "session"] as const)("%s name opens the detail route; only context metadata is editable", async (kind) => {
-  const record = { bundleId: "bundle", name: kind === "material" ? "参考素材" : "初始上下文", description: "说明",
+  const record = { bundleId: "bundle", name: kind === "material" ? "参考素材" : "初始对话", description: "说明",
     ...(kind === "material" ? { materialId: "resource", byteSize: 4 } : { sessionId: "resource", format: "json" }) };
   const path = kind === "material" ? "/docs/readme.txt" : "/context.json";
   const content = kind === "material" ? "素材内部内容" : '{"entries":[]}';

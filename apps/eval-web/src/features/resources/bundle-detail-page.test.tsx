@@ -24,7 +24,7 @@ it.each(["material", "session"] as const)("%s offers creation inside a Bundle an
     await vi.waitFor(() => expect(view.container.querySelector("tbody tr")).not.toBeNull());
     const edits = [...view.container.querySelectorAll("tbody button")].filter((button) => button.textContent === "编辑名称与说明");
     expect(edits).toHaveLength(kind === "session" ? 1 : 0);
-    const label = kind === "material" ? "素材" : "上下文";
+    const label = kind === "material" ? "素材" : "对话";
     await click([...view.container.querySelectorAll("button")].find((button) => button.textContent === `新建${label}`));
     expect(document.querySelector('input[type="file"]')).not.toBeNull();
     if (kind === "session") expect(document.querySelector("textarea")).not.toBeNull();

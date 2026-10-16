@@ -3,6 +3,8 @@ import * as handlers from "./runs.handlers.js";
 import * as routes from "./runs.routes.js";
 
 const router = createRouter();
+router.openapi(routes.collectExecution, handlers.collectExecution);
+router.openapi(routes.collectEvaluation, handlers.collectEvaluation);
 router.openapi(routes.previewRun, handlers.previewRun);
 router.openapi(routes.submitRun, handlers.submitRun);
 router.openapi(routes.getRun, handlers.getRun);

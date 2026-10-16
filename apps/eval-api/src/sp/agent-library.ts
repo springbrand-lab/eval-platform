@@ -21,6 +21,8 @@ export const AGENT_LIBRARY_ROUTES = [
   { method: "delete", path: "/user-references/{id}", upstream: "/api/user-references/{id}", body: "none" },
   { method: "post", path: "/inbox/attachments", upstream: "/api/inbox/attachments", body: "multipart" },
   { method: "delete", path: "/inbox/attachments", upstream: "/api/inbox/attachments", body: "none" },
+  // Read-only: the shared editor has no MCP section, so Eval Web shows selected user MCP Servers itself.
+  { method: "get", path: "/mcp-servers/{id}", upstream: "/api/mcp-servers/{id}", body: "none" },
   { method: "get", path: "/user-agent-configs/{id}/deletion-check", upstream: "/api/user-agent-configs/{id}/deletion-check", body: "none" },
 ] as const;
 

@@ -38,6 +38,7 @@ import {
   RuntimeRunIdentityConflictError,
   RuntimeRunStoppedError,
 } from "./errors.js";
+import { RESULT_INVALID_PREFIX, RESULT_NOT_SUBMITTED, type EvaluationResultPort } from "./results.js";
 import type { RetryController, RetryOperation } from "./retry.js";
 import {
   createEvalRunAdmission,
@@ -498,6 +499,7 @@ function makeHarness(): Harness {
       structuredOutput: { path: "/output/result.json", content: '{"score":0.9}' },
       trajectory: { trajectoryId: "trajectory-2", source: "evaluator" as const, path: "/eval/evaluation.jsonl" },
     })),
+    readFinalReply: vi.fn(async (): Promise<string | undefined> => undefined),
     collectAgentResources: vi.fn(async ({ handle, idempotencyKey, submissionId }) => {
       const resolvedSubmissionId = submissionId ?? submissionIdFor(handle, idempotencyKey);
       if (!resolvedSubmissionId) throw new Error("Cannot collect resources for an unknown submission");
@@ -5093,5 +5095,145 @@ describe("Run recovery from persisted facts", () => {
     expect(harness.collectEvaluation).toHaveBeenCalledOnce();
     expect((await store.getEvaluation(evaluation.evaluationId))!.attempts[0]!.evaluationAttemptId)
       .toBe("existing-evaluation-attempt");
+  });
+});
+
+it("recollects completed Subject and Evaluator results without dispatching or importing anything", async () => {
+  const harness = makeHarness();
+  const store = makeStore();
+  const runtime = createAutoResumingRuntime({ harness, store, sleep: async () => undefined });
+  const run = await runtime.submit(projectRequest("pipeline", "recollect-existing"));
+  await waitForTerminal(runtime, run.runId);
+  const original = (await store.getSampling(run.samplingIds[0]!))!;
+  const originalEvaluation = (await store.listEvaluations(original.samplingId))[0]!;
+  for (const method of ["ensureAgent", "submitAgent", "restartAgent", "materializeInitialData", "importEvidence", "exportEvidence", "collectExecution", "collectEvaluation"] as const) vi.mocked(harness[method]).mockClear();
+  const { evidence: _evidence, ...withoutEvidence } = original;
+  await store.updateSampling({ ...withoutEvidence, execution: { status: "retrying", collectionPending: true } }, original);
+  await runtime.resume(run.runId);
+  const recovered = (await store.getSampling(original.samplingId))!;
+  expect(recovered.execution).toEqual({ status: "succeeded" });
+  expect(recovered.evidence).toBeDefined();
+  expect(recovered.executionAttempts).toEqual(original.executionAttempts);
+  expect(harness.collectExecution).toHaveBeenCalledTimes(1);
+  expect(harness.exportEvidence).toHaveBeenCalledTimes(1);
+  const { output: _output, ...withoutOutput } = originalEvaluation;
+  await store.updateEvaluation({ ...withoutOutput, status: { status: "retrying", collectionPending: true } }, originalEvaluation);
+  await runtime.resume(run.runId);
+  const evaluation = (await store.getEvaluation(originalEvaluation.evaluationId))!;
+  expect(evaluation.status).toEqual({ status: "succeeded" });
+  expect(evaluation.output).toEqual(originalEvaluation.output);
+  expect(evaluation.attempts).toEqual(originalEvaluation.attempts);
+  expect(harness.collectEvaluation).toHaveBeenCalledTimes(1);
+  for (const method of ["ensureAgent", "submitAgent", "restartAgent", "materializeInitialData", "importEvidence"] as const) expect(harness[method]).not.toHaveBeenCalled();
+});
+
+it("ends a failed manual recollection without leaving it pending or re-running the Agent", async () => {
+  const harness = makeHarness();
+  const store = makeStore();
+  const runtime = createAutoResumingRuntime({ harness, store, sleep: async () => undefined, onError: vi.fn() });
+  const run = await runtime.submit(projectRequest("pipeline", "recollect-failure"));
+  await waitForTerminal(runtime, run.runId);
+  const sampling = (await store.getSampling(run.samplingIds[0]!))!;
+  const evaluation = (await store.listEvaluations(sampling.samplingId))[0]!;
+  vi.mocked(harness.submitAgent).mockClear();
+  vi.mocked(harness.collectExecution).mockRejectedValueOnce(new Error("collection unavailable"));
+  await store.updateSampling({ ...sampling, execution: { status: "retrying", collectionPending: true } }, sampling);
+  await runtime.resume(run.runId);
+  expect((await store.getSampling(sampling.samplingId))!.execution).toMatchObject({ status: "failed", lastError: expect.stringContaining("collection unavailable") });
+  expect((await store.getSampling(sampling.samplingId))!.execution.collectionPending).toBeUndefined();
+  const failed = (await store.getSampling(sampling.samplingId))!;
+  await store.updateSampling({ ...sampling }, failed);
+  vi.mocked(harness.collectEvaluation).mockRejectedValueOnce(new Error("result unavailable"));
+  await store.updateEvaluation({ ...evaluation, status: { status: "retrying", collectionPending: true } }, evaluation);
+  await runtime.resume(run.runId);
+  const recovered = (await store.getEvaluation(evaluation.evaluationId))!;
+  expect(recovered.status).toMatchObject({ status: "failed", lastError: expect.stringContaining("result unavailable") });
+  expect(recovered.status.collectionPending).toBeUndefined();
+  expect(recovered.attempts).toEqual(evaluation.attempts);
+  expect(harness.submitAgent).not.toHaveBeenCalled();
+});
+
+it("does not revive a completed pipeline when evaluations move to a later Run", async () => {
+  const runtime = createAutoResumingRuntime({ harness: makeHarness(), store: makeStore() });
+  runtime.plans.samples = [makeSample("sample-1", { samplingCount: 2 })];
+  const first = await runtime.submit(projectRequest("pipeline", "original-pipeline"));
+  await waitForTerminal(runtime, first.runId);
+  const second = await runtime.submit(evaluationRequest([first.samplingIds[0]!]));
+  await waitForTerminal(runtime, second.runId);
+  expect(await runtime.getRun(first.runId)).toMatchObject({ status: "succeeded" });
+  const third = await runtime.submit(evaluationRequest([first.samplingIds[1]!]));
+  await waitForTerminal(runtime, third.runId);
+  expect(["succeeded", "failed", "cancelled"]).toContain((await runtime.getRun(first.runId)).status);
+});
+
+describe("evaluation result checking", () => {
+  const validScore = (_schema: unknown, content: string) => {
+    const parsed = JSON.parse(content) as { score?: unknown };
+    return typeof parsed.score === "number" ? { valid: true, errors: [] } : { valid: false, errors: ["/score must be number"] };
+  };
+
+  async function evaluateOnce(harness: Harness, results: EvaluationResultPort) {
+    const store = makeStore();
+    const runtime = createAutoResumingRuntime({ plans: makePlans([makeSample("sample-1")]), harness, store, results });
+    const run = await runtime.submit(projectRequest("pipeline", `results-${Math.random()}`));
+    await waitForTerminal(runtime, run.runId);
+    const record = (await store.getRun(run.runId))!;
+    const [evaluation] = await store.getEvaluations(record.evaluationIds);
+    return evaluation!;
+  }
+
+  const noResult = {
+    status: "succeeded" as const, artifacts: [],
+    trajectory: { trajectoryId: "trajectory-2", source: "evaluator" as const, path: "/eval/evaluation.jsonl" },
+  };
+
+  it("prefers the submitted result and tells the Evaluator to submit it", async () => {
+    const harness = makeHarness();
+    const evaluation = await evaluateOnce(harness, {
+      submission: {
+        token: (id) => `token-for-${id}`,
+        read: async () => ({ path: "mcp:submit_evaluation", content: '{"score":3}' }),
+      },
+      check: validScore,
+    });
+    expect(evaluation.status).toEqual({ status: "succeeded" });
+    expect(evaluation.output?.structuredOutput).toEqual({ path: "mcp:submit_evaluation", content: '{"score":3}', source: "submission" });
+    const prompt = vi.mocked(harness.submitAgent).mock.calls.find(([call]) => call.handle.role === "evaluator")![0].prompt;
+    expect(prompt).toContain(`submit_evaluation tool with evaluationId "${evaluation.evaluationId}", submitToken "token-for-${evaluation.evaluationId}"`);
+    expect(prompt).not.toContain("/output/result.json");
+    expect(harness.readFinalReply).not.toHaveBeenCalled();
+  });
+
+  it("keeps the result file and marks its source", async () => {
+    const evaluation = await evaluateOnce(makeHarness(), { check: validScore });
+    expect(evaluation.status).toEqual({ status: "succeeded" });
+    expect(evaluation.output?.structuredOutput?.source).toBe("result-file");
+  });
+
+  it("recovers a valid result from the final reply", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
+    vi.mocked(harness.readFinalReply).mockResolvedValue("I could not write the file.\n```json\n{\"score\": 8}\n```\nRetry later.");
+    const evaluation = await evaluateOnce(harness, { submission: { token: () => "t", read: async () => undefined }, check: validScore });
+    expect(evaluation.status).toEqual({ status: "succeeded" });
+    expect(evaluation.output?.structuredOutput).toEqual({ path: "final-reply", content: '{"score": 8}', source: "final-reply" });
+  });
+
+  it("fails as not submitted without running the Evaluator again", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
+    const evaluation = await evaluateOnce(harness, { check: validScore });
+    expect(evaluation.status).toEqual({ status: "failed", lastError: RESULT_NOT_SUBMITTED });
+    expect(vi.mocked(harness.submitAgent).mock.calls.filter(([call]) => call.handle.role === "evaluator")).toHaveLength(1);
+    expect(vi.mocked(harness.restartAgent).mock.calls.filter(([call]) => call.handle.role === "evaluator")).toHaveLength(0);
+  });
+
+  it("fails an invalid result and keeps it as evidence", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.collectEvaluation).mockResolvedValue({ ...noResult, structuredOutput: { path: "/output/result.json", content: '{"score":"high"}' } });
+    const evaluation = await evaluateOnce(harness, { check: validScore });
+    expect(evaluation.status.status).toBe("failed");
+    expect(evaluation.status.lastError).toBe(`${RESULT_INVALID_PREFIX} (result-file): /score must be number`);
+    expect(evaluation.output?.structuredOutput?.content).toBe('{"score":"high"}');
   });
 });

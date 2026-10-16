@@ -1,3 +1,4 @@
+import { OutputFormatPicker } from "@/features/output-schemas/output-format-picker";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useId, useState } from "react";
@@ -45,7 +46,7 @@ function PlanForm({ view }: { view: ProjectView }) {
     <Card>
       <CardHeader title={current ? "替换评估计划" : "填写评估计划"} />
       <CardBody className="flex flex-col gap-4">
-        <fieldset disabled={save.isPending} className="grid gap-4 md:grid-cols-3">
+        <fieldset disabled={save.isPending} className="grid gap-4 md:grid-cols-2">
           <Field><FieldLabel htmlFor={`${formId}-agent`}>评估 Agent</FieldLabel>
             <NativeSelect id={`${formId}-agent`} required value={agentId} onChange={(event) => setAgentId(event.target.value)}>
               <option value="" disabled>请选择</option>
@@ -56,12 +57,8 @@ function PlanForm({ view }: { view: ProjectView }) {
           <Field><FieldLabel htmlFor={`${formId}-concurrency`}>评估并发</FieldLabel>
             <Input id={`${formId}-concurrency`} required type="number" min={1} value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))} />
           </Field>
-          <Field><FieldLabel htmlFor={`${formId}-schema`}>评分 Schema</FieldLabel>
-            <NativeSelect id={`${formId}-schema`} required value={schemaId} onChange={(event) => setSchemaId(event.target.value)}>
-              <option value="" disabled>请选择</option>
-              {schemaId && !schemas.data?.some((schema) => schema.outputSchemaId === schemaId) && <option value={schemaId} disabled>{schemaId}</option>}
-              {(schemas.data ?? []).map((schema) => <option key={schema.outputSchemaId} value={schema.outputSchemaId}>{schema.name}</option>)}
-            </NativeSelect>
+          <Field className="md:col-span-2"><FieldLabel htmlFor={`${formId}-schema`}>评估结果格式</FieldLabel>
+            <OutputFormatPicker id={`${formId}-schema`} value={schemaId} disabled={save.isPending} onChange={setSchemaId} />
           </Field>
         </fieldset>
         {agents.error && <ErrorBlock error={agents.error} onRetry={() => void agents.refetch()} />}
@@ -91,7 +88,7 @@ export function EvaluationPlanPage({ projectId }: { projectId: string }) {
                 <DescriptionList items={[
                   { label: "评估 Agent", value: evaluation.plan.evaluatorAgentConfig.name },
                   { label: "评估并发", value: evaluation.plan.evaluationConcurrency },
-                  { label: "评分 Schema", value: <Link className="link" to="/projects/$projectId/output-schema" params={{ projectId }}>查看</Link> },
+                  { label: "评估结果格式", value: <Link className="link" to="/projects/$projectId/output-schema" params={{ projectId }}>查看</Link> },
                 ]} />
               </CardBody>
             </Card>

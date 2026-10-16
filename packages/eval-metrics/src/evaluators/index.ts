@@ -37,6 +37,55 @@ export interface EvaluationOutputReader {
 
 const NOTHING: OutputFacts = { observations: [], fields: new Map() };
 
+interface ContentCheck {
+  readonly document: JsonValue | null;
+  readonly validation: EvaluationValidation;
+  readonly validated?: ReturnType<CompiledOutputPlan["validate"]>;
+}
+
+/** Strict JSON parse, safe-number check and Schema validation of one raw result text. */
+function checkContent(compiled: CompiledOutputPlan | undefined, compileError: string | undefined, content: string): ContentCheck {
+  let document: JsonValue;
+  try {
+    document = parseStrictJson(content) as JsonValue;
+  } catch (error) {
+    return { document: null, validation: validation("invalid", "invalid-json", [documentError("json", (error as SyntaxError).message)]) };
+  }
+  const unsafe = unsafeNumber(document, []);
+  if (unsafe !== undefined) {
+    return { document: null, validation: validation("invalid", "unsafe-number", [
+      documentError("number", "Number is not finite or exceeds the safe-integer range", unsafe),
+    ]) };
+  }
+  if (!compiled) {
+    return { document, validation: compileError === undefined
+      ? validation("unavailable", "no-schema")
+      : validation("unavailable", "invalid-schema", [documentError("schema", compileError)]) };
+  }
+  const validated = compiled.validate(document);
+  if (!validated.valid) {
+    return { document, validation: validation("invalid", "schema-mismatch", (compiled.errors ?? []).map(schemaError)) };
+  }
+  return { document, validation: validation("valid", "valid"), validated };
+}
+
+/** Validates raw result text exactly as the detail view does; one compiled Schema per Schema object. */
+export function createEvaluationResultValidator(): (schema: EvaluationOutputSchema, content: string) => EvaluationValidation {
+  const plans = new WeakMap<EvaluationOutputSchema, { compiled?: CompiledOutputPlan; compileError?: string }>();
+  return (schema, content) => {
+    let plan = plans.get(schema);
+    if (!plan) {
+      try {
+        plan = { compiled: new CompiledOutputPlan(schema) };
+      } catch (error) {
+        plan = { compileError: (error as Error).message };
+      }
+      plans.set(schema, plan);
+    }
+    return checkContent(plan.compiled, plan.compileError, content).validation;
+  };
+}
+
 export interface EvaluationOutputRead {
   readonly view: EvaluationOutputView;
   readonly facts: OutputFacts;
@@ -75,28 +124,9 @@ export function createEvaluationOutputReader(
     };
     if (!output) return view(null, validation("unavailable", "no-output"));
     if (!structured) return view(null, validation("unavailable", "no-structured-output"));
-    let document: JsonValue;
-    try {
-      document = parseStrictJson(structured.content) as JsonValue;
-    } catch (error) {
-      return view(null, validation("invalid", "invalid-json", [documentError("json", (error as SyntaxError).message)]));
-    }
-    const unsafe = unsafeNumber(document, []);
-    if (unsafe !== undefined) {
-      return view(null, validation("invalid", "unsafe-number", [
-        documentError("number", "Number is not finite or exceeds the safe-integer range", unsafe),
-      ]));
-    }
-    if (!compiled) {
-      return view(document, compileError === undefined
-        ? validation("unavailable", "no-schema")
-        : validation("unavailable", "invalid-schema", [documentError("schema", compileError)]));
-    }
-    const validated = compiled.validate(document);
-    if (!validated.valid) {
-      return view(document, validation("invalid", "schema-mismatch", (compiled.errors ?? []).map(schemaError)));
-    }
-    return view(document, validation("valid", "valid"), isSucceededEvaluation(record) ? compiled.observe(document, validated) : NOTHING);
+    const checked = checkContent(compiled, compileError, structured.content);
+    if (checked.validation.status !== "valid" || !compiled || !checked.validated) return view(checked.document, checked.validation);
+    return view(checked.document, checked.validation, isSucceededEvaluation(record) ? compiled.observe(checked.document!, checked.validated) : NOTHING);
   };
   const cachedRead = (record: EvaluationRecord): EvaluationOutputRead => {
     let cached = reads.get(record.evaluationId);

@@ -10,7 +10,7 @@ import { resourceFileTree } from "./resource-file-tree";
 
 export function ResourceDetailPage({ kind, bundleId, resourceId }: { kind: ResourceKind; bundleId: string; resourceId: string }) {
   const catalog = resourceCatalog(kind);
-  const label = kind === "material" ? "素材" : "上下文";
+  const label = kind === "material" ? "素材" : "对话";
   const bundle = useQuery({ queryKey: catalog.keys.detail(bundleId), queryFn: ({ signal }) => catalog.get(bundleId, signal) });
   const resource = useQuery({ queryKey: catalog.keys.resource(bundleId, resourceId), queryFn: async ({ signal }) => await catalog.getResource(bundleId, resourceId, signal) });
   const files = useQuery({ queryKey: catalog.keys.files(bundleId, resourceId), queryFn: ({ signal }) => catalog.listFiles(bundleId, resourceId, signal) });
@@ -21,7 +21,7 @@ export function ResourceDetailPage({ kind, bundleId, resourceId }: { kind: Resou
   const failed = [bundle, resource, files].find((query) => query.error);
   return <Page>
     <PageHeader title={resource.data?.name ?? `初始${label}`} description={resource.data?.description}
-      crumbs={[{ label: "数据集", to: "/datasets" }, { label: `初始${label}`, to: "/resources/$kind", params: { kind } },
+      crumbs={[{ label: kind === "material" ? "输入素材" : "初始对话", to: "/resources/$kind", params: { kind } },
         { label: bundle.data?.name ?? `${label}包`, to: "/resources/$kind/$bundleId", params: { kind, bundleId } }]} />
     {failed ? <ErrorBlock error={failed.error} onRetry={() => void failed.refetch()} />
       : !bundle.data || !resource.data || !files.data ? <LoadingBlock />

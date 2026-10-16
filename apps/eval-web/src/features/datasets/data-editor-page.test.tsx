@@ -16,9 +16,10 @@ const create = vi.hoisted(() => vi.fn(async (input: unknown, _options: unknown) 
 const attach = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
 vi.mock("@/api-sdk/data-api", async (original) => ({ ...await original<object>(), getData: get, updateData: update, createData: create }));
-vi.mock("@/api-sdk/datasets-api", async (original) => ({ ...await original<object>(), attachData: attach }));
+vi.mock("@/api-sdk/datasets-api", async (original) => ({ ...await original<object>(), attachData: attach, listDatasets: async () => [], getDataset: async () => ({ datasetId: "dataset", name: "Dataset" }) }));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => navigate,
+  useBlocker: () => ({ status: "idle" }),
   Link: ({ children, to, params = {} }: { children: React.ReactNode; to: string; params?: Record<string, string> }) =>
     <a href={to.replace(/\$(\w+)/gu, (_, key: string) => params[key] ?? "")}>{children}</a>,
 }));
@@ -34,7 +35,7 @@ function control(container: HTMLElement, label: string) {
 }
 
 async function fillNewData(container: HTMLElement) {
-  for (const [label, value] of [["名称", "Case"], ["说明", "Task"], ["执行 Prompt", "Execute"], ["评估 Prompt", "Judge"]]) {
+  for (const [label, value] of [["名称", "Case"], ["说明", "Task"], ["执行任务", "Execute"], ["评估要求", "Judge"]]) {
     await type(control(container, label!), value!);
   }
 }
@@ -92,11 +93,11 @@ describe("uploaded sample editor", () => {
         if (!element) throw new Error(`Missing label ${label}`);
         return view.container.ownerDocument.getElementById(element.htmlFor) as HTMLInputElement | HTMLTextAreaElement;
       };
-      for (const [label, value] of [["名称", "新名称"], ["说明", "新描述"], ["执行 Prompt", "新启动\n原文"], ["评估 Prompt", "新评估\n原文"]]) {
+      for (const [label, value] of [["名称", "新名称"], ["说明", "新描述"], ["执行任务", "新启动\n原文"], ["评估要求", "新评估\n原文"]]) {
         expect(control(label!).required).toBe(true);
         await type(control(label!), value!);
       }
-      await click([...view.container.querySelectorAll("button")].find((button) => button.textContent === "保存修改"));
+      await click([...view.container.querySelectorAll("button")].find((button) => button.textContent === "保存并返回"));
       await vi.waitFor(() => expect(update).toHaveBeenCalledExactlyOnceWith(fixture.dataId, {
         name: "新名称", description: "新描述", userPrompt: "新启动\n原文", evalPrompt: "新评估\n原文", custom: fixture.custom,
       }));

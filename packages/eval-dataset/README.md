@@ -108,3 +108,6 @@ Dataset、文档外壳和资源引用使用严格 schema；Data 允许任意其�
 - 领域失败使用 `DatasetEntityNotFoundError`、`DatasetIdentityConflictError`、`DataInUseError`，用户输入失败使用 `DatasetInputError`；不引入 HTTP 错误或掩盖未知 I/O 错误。
 
 本包不依赖 SP 包，也不复制 SP 的数据库实现。它使用原生 UUID/JSON、Zod/YAML 和 `jsonc-parser` 的严格遍历能力检查重复 JSON 字段，并在自己的 Zod schema 中沿用 SP 已采用的 UUID 校验与小写规范化模式；真实数据库客户端、事务执行和 Workspace 素材能力由其所属边界提供。
+
+
+数据集维护：DatasetService.addData(datasetId, inputs) 校验全部输入并生成身份，DatasetStore.createDataBatch 在一个事务中创建全部 Data 及其关联，失败不保留部分用例。HTTP `POST /api/datasets/{datasetId}/data/import` 接受 `{format: "json" | "jsonl", content: string}`，采用用例列表的严格解析、资源引用限制及 prompt 文件/请求大小上限；返回 201 Data[]。原有完整文档导入的身份冲突和重放语义不变。Web 导航调整不改变 Subject/Evaluator、资源引用和项目冻结副本契约。

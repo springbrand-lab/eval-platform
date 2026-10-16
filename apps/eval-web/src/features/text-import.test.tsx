@@ -22,7 +22,7 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 const cases = [
-  { feature: "session", open: "新建上下文", submit: "创建", contentLabel: "内容", mock: api.session },
+  { feature: "session", open: "新建对话", submit: "创建", contentLabel: "内容", mock: api.session },
 ] as const;
 
 function deferredFile(name: string, type = "application/json") {

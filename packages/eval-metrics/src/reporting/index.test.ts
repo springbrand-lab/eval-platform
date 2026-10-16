@@ -81,6 +81,8 @@ describe("four-level reporting", () => {
   it("builds the Project from the fixed plan and deduplicates shared ProjectSamples", async () => {
     const result = await metricsOf().getProjectOverview(scope);
     expect(result.project).toEqual(PROJECT);
+    expect(result.projectSamples.map((row) => [row.projectSampleId, row.samplingIds.length])).toEqual([["ps-1", 2], ["ps-2", 1], ["ps-3", 0]]);
+    expect(new Set(result.projectSamples.map((row) => row.projectSampleId)).size).toBe(3);
     expect(result.runIds).toEqual(["pipeline-run", "reevaluation-run"]);
     expect(result.summary.counts).toEqual({ datasets: 2, data: 3, projectSamples: 3, samplings: 3, evaluations: 3 });
     expect(result.datasets.map((row) => [row.dataset.datasetId, row.dataset.name, row.summary.counts])).toEqual([
@@ -127,6 +129,7 @@ describe("four-level reporting", () => {
     const metrics = metricsOf();
     const filtered = await metrics.getProjectOverview({ ...scope, runIds: ["reevaluation-run"] });
     expect(filtered.runIds).toEqual(["reevaluation-run"]);
+    expect(filtered.projectSamples.flatMap((row) => row.samplingIds)).toHaveLength(1);
     expect(filtered.summary.counts).toEqual({ datasets: 2, data: 3, projectSamples: 3, samplings: 1, evaluations: 1 });
     expect(filtered.datasets.map((row) => row.dataset.datasetId)).toEqual([D1, D2]);
     expect(scoreOf(filtered.summary).numeric?.total).toBe(50);

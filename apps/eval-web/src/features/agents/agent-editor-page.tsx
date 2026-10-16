@@ -20,6 +20,7 @@ import { Page, PageHeader } from "@/components/layout/page";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { ErrorBlock, LoadingBlock } from "@/components/ui/feedback";
+import { AgentMcpServers } from "./agent-mcp-servers";
 
 const FROZEN_PREFIX = "eval-frozen-";
 type SaveRequest = { kind: "create"; input: CreateUserAgentConfigInput }
@@ -70,8 +71,8 @@ function AgentForm({ initial, template, userId, onSaved }: {
     onError: (failure) => {
       setError(failure instanceof AgentCreationError ? describeAgentCreationError(failure)
         : failure instanceof ApiError && failure.status === 409
-          ? "This Agent changed elsewhere. Your edits are still here. Reload the page to load its latest settings."
-          : failure instanceof Error ? failure.message : "Could not save this Agent. Your edits are still here.");
+          ? "此 Agent 已在其他位置更新。你的修改仍然保留，请重新加载页面获取最新配置。"
+          : failure instanceof Error ? failure.message : "保存失败。你的修改仍然保留，请重试。");
     },
     onSettled: () => {
       submitting.current = false;
@@ -109,7 +110,7 @@ function AgentForm({ initial, template, userId, onSaved }: {
         : { kind: "create", input: createInputFromDraft(draft, slug) };
     } catch (failure) {
       const issue = failure instanceof ZodError ? failure.issues[0] : undefined;
-      setError(issue ? `${issue.path.join(".") || "Agent settings"}: ${issue.message}` : "Check the Agent settings before saving.");
+      setError(issue ? `${issue.path.join(".") || "Agent 配置"}: ${issue.message}` : "请检查配置后再保存。");
       return;
     }
     submitting.current = true;
@@ -117,6 +118,7 @@ function AgentForm({ initial, template, userId, onSaved }: {
     save.mutate(request);
   }
   const common = {
+    supplementaryContent: <AgentMcpServers selections={draft.setting.mcpServers} />,
     userId, draft, models: models.data ?? [], modelsLoading: models.isPending, modelsError: models.isError,
     readOnly, saving: save.isPending, error, onSave: submit,
     onDraftChange: (update: (current: AgentDraft) => AgentDraft) => {
@@ -126,7 +128,7 @@ function AgentForm({ initial, template, userId, onSaved }: {
     },
     onBack: () => { if (!save.isPending) { allowNavigation.current = true; void navigate({ to: "/agents" }); } },
   };
-  return <>
+  return <div className="agent-editor-layout">
     <AgentEditorProvider client={agentEditorClient} connectorReturnTo={base ? `/agents/${encodeURIComponent(base.id)}` : "/agents/new"}>
       {base ? <AgentEditor mode="edit" {...common} agent={base} dirty={dirty}
         checkingDelete={deletionCheck.isPending} deleteBlocker={deleteBlocker}
@@ -140,7 +142,7 @@ function AgentForm({ initial, template, userId, onSaved }: {
       onConfirm={() => { if (!save.isPending && blocker.status === "blocked") { allowNavigation.current = true; blocker.proceed(); } }}
       loading={save.isPending} title={save.isPending ? "正在保存 Agent" : "放弃未保存的修改？"}
       description={save.isPending ? "请等待保存完成。" : "离开后，本次未提交的修改会丢弃。"} confirmLabel="放弃修改" />
-  </>;
+  </div>;
 }
 
 export function AgentEditorPage({ id }: { id?: string }) {
@@ -151,9 +153,9 @@ export function AgentEditorPage({ id }: { id?: string }) {
   const source = id ? config : template;
   const failed = me.error ? me : source.error ? source : null;
   const ready = !!me.data && (id ? !!config.data : !!template.data);
-  return <Page narrow>
-    <PageHeader title={id ? config.data?.name ?? "Agent" : "新建 Agent"} crumbs={[{ label: "Agent", to: "/agents" }]}
-      description="先定义行为与模型，再按任务选择能力和参考资料。保存后可在项目的执行或评估计划中使用。" />
+  return <Page>
+    <PageHeader compact title={id ? config.data?.name ?? "Agent" : "新建 Agent"} crumbs={[{ label: "Agent 管理", to: "/agents" }]}
+      description="配置行为、模型与可用能力。修改后保存，供项目执行或评估使用。" />
     {failed && <ErrorBlock error={failed.error} onRetry={() => void failed.refetch()} />}
     {ready ? <AgentForm key={id ?? "new"} initial={config.data} template={template.data} userId={me.data!.id}
       onSaved={(saved) => { if (!id) void navigate({ to: "/agents/$id", params: { id: saved.id } }); }} /> : !failed && <LoadingBlock />}

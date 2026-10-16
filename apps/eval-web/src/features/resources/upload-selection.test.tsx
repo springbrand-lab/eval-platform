@@ -42,7 +42,7 @@ async function pendingDrop(file: File) {
 }
 
 it.each([
-  { mode: "create", open: "新建初始素材包", submit: "创建" },
+  { mode: "create", open: "新建输入素材包", submit: "创建" },
   { mode: "zip", open: "导入 ZIP", submit: "导入" },
   { mode: "material", open: "新建素材", submit: "创建" },
 ])("$mode waits for browser extraction, keeping replacement and additive selections consistent", async (config) => {

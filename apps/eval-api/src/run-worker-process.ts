@@ -5,6 +5,8 @@ import { Pool } from "pg";
 import type { Logger } from "pino";
 import type { WorkerConfig } from "./config/worker.js";
 import { createEvalDb } from "./db/client.js";
+import { createPostgresEvaluationSubmissions } from "./db/evaluation-submissions.js";
+import { createEvaluationResultPort } from "./evaluation-results/submission.js";
 import { createPostgresWorkerProjectPlanReader } from "./db/project-plans.js";
 import { createLangfuseScorePublisher } from "./langfuse/scores.js";
 import { createPostgresWorkerRuntimeStore } from "./db/runtime.js";
@@ -43,6 +45,10 @@ export async function startSpEvalRunWorkerProcess(config: WorkerConfig, logger: 
         read: createEvaluationScoreReader(),
         publish: createLangfuseScorePublisher({ config: config.langfuse }),
       } }),
+      results: createEvaluationResultPort({
+        store: createPostgresEvaluationSubmissions(db),
+        ...(config.EVAL_RESULT_MCP_TOKEN === undefined ? {} : { token: config.EVAL_RESULT_MCP_TOKEN }),
+      }),
       onError: (error) => logger.error({ error: errorDiagnostics(error) }, "run_runtime_error"),
     });
     const worker = await startEvalRunWorker({

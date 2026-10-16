@@ -31,3 +31,6 @@ export const listSamplingEvaluations = (samplingId: string, signal?: AbortSignal
   api.get<EvaluationRecord[]>(`/api/samplings/${enc(samplingId)}/evaluations`, { signal });
 export const getEvaluation = (evaluationId: string, signal?: AbortSignal) =>
   api.get<EvaluationRecord>(`/api/evaluations/${enc(evaluationId)}`, { signal });
+
+export const recollectResult = (projectId: string, kind: "samplings" | "evaluations", id: string) =>
+  api.post<{ runId: string; queued: boolean }>(`/api/projects/${enc(projectId)}/${kind}/${enc(id)}/collect`);

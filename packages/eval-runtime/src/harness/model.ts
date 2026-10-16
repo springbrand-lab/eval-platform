@@ -181,6 +181,8 @@ export interface Harness {
   restartAgent(input: SubmitAgentInput): Promise<AgentSubmission>;
   collectExecution(input: CollectAgentInput): Promise<ExecutionOutput>;
   collectEvaluation(input: CollectAgentInput): Promise<EvaluationAgentOutput>;
+  /** Text of the Agent's last finished reply, or undefined when it has none; read-only. */
+  readFinalReply(input: CollectAgentInput): Promise<string | undefined>;
   collectAgentResources(input: CollectAgentResourcesInput): Promise<AgentResourceSnapshot>;
   /** Export a finished Agent's artifacts and complete trajectory; read-only. */
   exportEvidence(input: ExportEvidenceInput): Promise<ExportedEvidence>;

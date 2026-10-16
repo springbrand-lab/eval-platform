@@ -45,6 +45,7 @@ function setup() {
       replaceEvaluationPlan: vi.fn(async () => view),
     },
     datasets: {
+      addData: vi.fn(async (_datasetId: string, inputs: readonly DataInput[]) => inputs.map((input) => ({ ...input, dataId: agentId }))),
       createData: vi.fn(async (input: DataInput, _options: { datasetId?: string }) => ({ ...input, dataId: agentId })),
       createDataset: vi.fn(async ({ name }: { name: string }) => ({ datasetId, name })),
       importDataset: vi.fn(async () => ({ dataset: { datasetId, name: "Cases" }, data: [] })),
@@ -56,6 +57,8 @@ function setup() {
     },
     results: { getRun: vi.fn(async () => ({ runId: "run-1" })) },
     projectRuns: {
+      readRun: vi.fn(),
+      recollect: vi.fn(async () => ({ runId: "run-1", queued: true })),
       getCurrentRun: vi.fn(async () => null),
       stopRun: vi.fn(async (_projectId: string, runId: string) => runId === "run-1" ? { runId, stopRequested: true as const } : null),
     },
@@ -498,4 +501,38 @@ describe("Eval API HTTP layer", () => {
     expect(values.status).toBe(201);
     expect(app.services.projects.create).toHaveBeenCalledTimes(2);
   });
+});
+
+
+it("validates a complete case list before dispatching an atomic append", async () => {
+  const app = setup();
+  const row = { name: "Case", description: "Details", userPrompt: "Execute", evalPrompt: "Evaluate" };
+  const response = await app.request(`/api/datasets/${datasetId}/data/import`, jsonRequest("POST", { format: "json", content: JSON.stringify([row]) }));
+  expect(response.status).toBe(201);
+  expect(app.services.datasets.addData).toHaveBeenCalledExactlyOnceWith(datasetId, [row]);
+  app.services.datasets.addData.mockClear();
+  const rejected = await app.request(`/api/datasets/${datasetId}/data/import`, jsonRequest("POST", { format: "jsonl", content: JSON.stringify(row) + "\n" + JSON.stringify({ ...row, evalPrompt: " " }) }));
+  expect(rejected.status).toBe(400);
+  expect(app.services.datasets.addData).not.toHaveBeenCalled();
+});
+
+it("routes collection requests to the scoped queue command without Run admission", async () => {
+  const app = setup();
+  expect((await app.request("/api/projects/project-1/samplings/sample-1/collect", jsonRequest("POST", {}))).status).toBe(202);
+  expect(app.services.projectRuns.recollect).toHaveBeenCalledWith("project-1", "execution", "sample-1");
+  expect((await app.request("/api/projects/project-1/evaluations/eval-1/collect", jsonRequest("POST", {}))).status).toBe(202);
+  expect(app.services.projectRuns.recollect).toHaveBeenCalledWith("project-1", "evaluation", "eval-1");
+  expect(app.services.admission.submit).not.toHaveBeenCalled();
+});
+
+ it("returns lightweight Run evaluation records without raw resource or output payloads", async () => {
+  const app = setup();
+  const evaluation = { evaluationId: "e-1", samplingId: "s-1", status: { status: "succeeded" }, chatId: "chat-1", attempts: [{ status: "completed", submissionId: "submission-1", resources: { snapshot: { telemetryEvents: ["x".repeat(11 * 1024 * 1024)] } } }], output: { structuredOutput: { content: "large output" } } };
+  app.services.projectRuns.readRun.mockResolvedValue({ run: { runId: "run-1" }, evaluations: [evaluation] });
+  const response = await app.request("/api/projects/project-1/runs/run-1/evaluations", authorized());
+  expect(response.status).toBe(200);
+  const text = await response.text();
+  expect(text.length).toBeLessThan(2000);
+  expect(JSON.parse(text).msg.evaluations).toEqual([{ evaluationId: "e-1", samplingId: "s-1", status: { status: "succeeded" }, chatId: "chat-1", attempts: [{ status: "completed", submissionId: "submission-1" }] }]);
+  expect(evaluation.attempts[0]!.resources).toBeDefined();
 });

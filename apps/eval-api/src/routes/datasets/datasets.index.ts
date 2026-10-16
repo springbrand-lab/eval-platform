@@ -11,6 +11,7 @@ router.openapi(routes.get, handlers.get);
 router.openapi(routes.replace, handlers.replace);
 router.openapi(routes.remove, handlers.remove);
 router.openapi(routes.listData, handlers.listData);
+router.openapi(routes.importData, handlers.importData);
 router.openapi(routes.attachData, handlers.attachData);
 router.openapi(routes.detachData, handlers.detachData);
 router.openapi(routes.exportDocument, handlers.exportDocument);

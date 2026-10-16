@@ -32,14 +32,14 @@ export function buildSelector(selection: RunTargetSelector): RunTargetSelector |
     (["datasetIds", "projectSampleIds", "samplingIds"] as const).filter((key) => selection[key]?.length)
       .map((key) => [key, [...new Set(selection[key])].sort()]),
   );
-  return Object.keys(selector).length > 0 ? selector : "请至少选择一个测试集、用例或采样";
+  return Object.keys(selector).length > 0 ? selector : "请至少选择一个数据集、用例或采样";
 }
 
-export function NewRunPage({ projectId, initial = {} }: { projectId: string; initial?: { datasetId?: string; projectSampleId?: string; samplingId?: string } }) {
+export function NewRunPage({ projectId, initial = {} }: { projectId: string; initial?: { datasetId?: string; projectSampleId?: string; samplingId?: string; operation?: RunOperation } }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const view = useProject(projectId);
-  const [operation, setOperation] = useState<RunOperation>("execution");
+  const [operation, setOperation] = useState<RunOperation>(initial.operation ?? "execution");
   const [selection, setSelection] = useState<RunTargetSelector>(() => initial.samplingId ? { samplingIds: [initial.samplingId] }
     : initial.projectSampleId ? { projectSampleIds: [initial.projectSampleId] } : initial.datasetId ? { datasetIds: [initial.datasetId] } : { all: true });
   const selector = buildSelector(selection);
@@ -94,7 +94,7 @@ export function NewRunPage({ projectId, initial = {} }: { projectId: string; ini
             </CardBody>
           </Card>
           <Card>
-            <CardHeader title="运行范围" description="按项目、测试集、用例或单个采样选择；支持跨测试集组合。" />
+            <CardHeader title="运行范围" description="按项目、数据集、用例或单个采样选择；支持跨数据集组合。" />
             <CardBody><RunScopePicker project={view.data} value={selection} disabled={frozen} initialSamplingId={initial.samplingId}
               onChange={(next) => { if (!frozen) setSelection(next); }} /></CardBody>
           </Card>

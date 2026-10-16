@@ -125,6 +125,19 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
         if (target) await transaction.insert(datasetData).values({ ownerUserId, datasetId: target.datasetId, dataId: entry.dataId });
       });
     },
+    async createDataBatch(datasetId, records) {
+      const entries = records.map((record) => dataSchema.parse(record));
+      await db.transaction(async (transaction) => {
+        const target = await lockDataset(transaction, ownerUserId, datasetId);
+        for (const entry of entries) {
+          if (target.kind === "prompt") assertPromptData(entry);
+          await assertDataReferencesSelectable(transaction, ownerUserId, entry);
+        }
+        if (!entries.length) return;
+        await transaction.insert(data).values(entries.map((entry) => ({ dataId: entry.dataId, ownerUserId, content: dataContent(entry) })));
+        await transaction.insert(datasetData).values(entries.map((entry) => ({ ownerUserId, datasetId, dataId: entry.dataId })));
+      });
+    },
     async updateData(record) {
       const entry = dataSchema.parse(record);
       await db.transaction(async (transaction) => {

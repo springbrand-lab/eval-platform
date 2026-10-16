@@ -93,6 +93,7 @@ interface ScopedView {
 /** Shared ProjectSamples appear in every Dataset row; the Project summary counts each Sampling once. */
 export interface ProjectOverview extends ScopedView {
   readonly datasets: readonly DatasetMetricRow[];
+  readonly projectSamples: readonly (ProjectSampleMetricRow & { readonly samplingIds: readonly string[] })[];
 }
 
 export interface DatasetOverview extends ScopedView {

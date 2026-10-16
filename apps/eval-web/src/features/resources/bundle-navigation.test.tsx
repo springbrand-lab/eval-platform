@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
+import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { resetAuthForTest } from "@/auth/session";
 import { routeTree } from "@/routeTree.gen";
@@ -41,13 +41,15 @@ it.each([
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 10_000 } } });
   const showPicker = async () => {
-    const picker = await render(<QueryClientProvider client={queryClient}>
-      <ResourcePicker kind={kind} label="初始资源" value={{ bundleId, id: resourceId }} onChange={vi.fn()} />
-    </QueryClientProvider>);
+    // The picker links a selected resource to its page, so it needs a router.
+    const root = createRootRoute({ component: () => <ResourcePicker kind={kind} label="初始资源" value={{ bundleId, id: resourceId }} onChange={vi.fn()} /> });
+    const pickerRouter = createRouter({ routeTree: root, history: createMemoryHistory({ initialEntries: ["/"] }) });
+    const picker = await render(<QueryClientProvider client={queryClient}><RouterProvider router={pickerRouter} /></QueryClientProvider>);
     try {
       await vi.waitFor(() => {
-        const option = picker.container.querySelector(`select[aria-label="初始资源"] option[value="${resourceId}"]`);
-        expect(option?.textContent).toBe(`${resourceName} · 资源说明`);
+        const option = picker.container.querySelector(`select[aria-label="初始资源"] option[value="${bundleId}/${resourceId}"]`);
+        expect(option?.textContent).toBe(resourceName);
+        expect(picker.container.textContent).toContain("资源说明");
       });
     } finally { await picker.unmount(); }
   };

@@ -17,7 +17,7 @@ import { useInputLimits } from "@/features/input-limits";
 import { isWriteOutcomeUnknown } from "@/lib/errors";
 import { CatalogWriteFeedback } from "@/features/catalog-write-feedback";
 
-export const RESOURCE_LABELS = { material: "初始素材", session: "初始上下文" } as const;
+export const RESOURCE_LABELS = { material: "输入素材", session: "初始对话" } as const;
 
 export function ResourcesPage({ kind }: { kind: ResourceKind }) {
   const navigate = useNavigate();
@@ -43,7 +43,7 @@ export function ResourcesPage({ kind }: { kind: ResourceKind }) {
   });
   const close = () => { if (!create.isPending) { setCreating(false); setZip(null); create.reset(); } };
   return <Page>
-    <PageHeader title={label} crumbs={[{ label: "数据集", to: "/datasets" }]}
+    <PageHeader title={label}
       description={kind === "material" ? "创建素材包后上传文件或文件夹，也可以在创建时一次导入 ZIP。素材可复用于多个用例。" : "上传执行前的会话上下文。创建时可通过 ZIP 批量导入 JSON / JSONL 文件。"}
       actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setCreating(true)}>新建{label}包</Button>} />
     <Card>

@@ -29,8 +29,8 @@ describe("Data editor", () => {
   it.each([
     [{ name: " " }, "名称"],
     [{ description: " " }, "说明"],
-    [{ userPrompt: " " }, "userPrompt"],
-    [{ evalPrompt: " " }, "evalPrompt"],
+    [{ userPrompt: " " }, "执行任务"],
+    [{ evalPrompt: " " }, "评估要求"],
     [{ extra: "{" }, "JSON 格式错误"],
     [{ extra: "[]" }, "JSON 对象"],
     [{ extra: '{"custom":1,"custom":2}' }, "JSON 格式错误"],

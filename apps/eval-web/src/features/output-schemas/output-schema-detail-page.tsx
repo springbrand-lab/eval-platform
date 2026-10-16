@@ -8,7 +8,7 @@ import { deleteOutputSchema, getOutputSchema, outputSchemaKeys, updateOutputSche
 import { Page, PageHeader } from "@/components/layout/page";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
-import { JsonViewer } from "@/components/ui/data-display";
+import { OutputFormatPreview } from "./output-format-picker";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
 import { Field, Input } from "@/components/ui/form";
@@ -41,9 +41,9 @@ export function OutputSchemaDetailPage({ outputSchemaId }: { outputSchemaId: str
   return (
     <Page>
       <PageHeader
-        title={data?.name ?? "评分格式"}
-        crumbs={[{ label: "评分格式", to: "/output-schemas" }]}
-        actions={<ActionMenu items={[{ label: "删除评分格式", icon: <Trash2 />, danger: true, onSelect: () => setDeleting(true) }]} />}
+        title={data?.name ?? "评估结果格式"}
+        crumbs={[{ label: "评估结果格式", to: "/output-schemas" }]}
+        actions={<ActionMenu items={[{ label: "删除评估结果格式", icon: <Trash2 />, danger: true, onSelect: () => setDeleting(true) }]} />}
       />
       {record.isPending ? <LoadingBlock /> : record.error ? <ErrorBlock error={record.error} /> : form && (
         <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
@@ -56,10 +56,10 @@ export function OutputSchemaDetailPage({ outputSchemaId }: { outputSchemaId: str
             </CardBody>
           </Card>
           <Card>
-            <CardHeader title="Schema" />
+            <CardHeader title="结果字段" />
             <CardBody className="flex flex-col gap-3">
               <Notice>{SCORE_CONVENTION}</Notice>
-              <JsonViewer value={data!.schema} />
+              <OutputFormatPreview schema={data!.schema} />
             </CardBody>
           </Card>
         </div>
@@ -70,7 +70,7 @@ export function OutputSchemaDetailPage({ outputSchemaId }: { outputSchemaId: str
         onConfirm={() => remove.mutate()}
         loading={remove.isPending}
         danger
-        title="删除评分格式"
+        title="删除评估结果格式"
         description="删除后不再用于新选择，已有项目仍按原引用读取。"
         confirmLabel="删除"
       />

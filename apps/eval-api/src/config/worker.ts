@@ -1,4 +1,4 @@
-import type { z } from "zod";
+import { z } from "zod";
 import {
   absolutePathSchema,
   databaseEnvSchema,
@@ -24,6 +24,8 @@ const workerEnvSchema = databaseEnvSchema.extend({
   EVAL_SP_SERVICE_TOKEN: requiredStringSchema,
   EVAL_BUNDLE_DIR: absolutePathSchema,
   EVAL_RUN_WORKER_CONCURRENCY: positiveIntSchema.default(8),
+  /** Same value as the API's; when set, Evaluators are told to submit through the MCP tool. */
+  EVAL_RESULT_MCP_TOKEN: z.string().min(32).optional(),
   ...evidenceR2EnvShape,
   ...langfuseEnvShape,
 }).superRefine((value, context) => {

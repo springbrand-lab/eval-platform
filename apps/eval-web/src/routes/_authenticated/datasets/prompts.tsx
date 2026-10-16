@@ -1,3 +1,2 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { DatasetsPage } from "@/features/datasets/datasets-page";
-export const Route = createFileRoute("/_authenticated/datasets/prompts")({ component: DatasetsPage });
+import { createFileRoute, redirect } from "@tanstack/react-router";
+export const Route = createFileRoute("/_authenticated/datasets/prompts")({ beforeLoad: () => { throw redirect({ to: "/datasets" }); } });

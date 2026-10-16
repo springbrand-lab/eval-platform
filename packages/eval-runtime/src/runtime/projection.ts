@@ -20,7 +20,7 @@ function aggregateRunProgress(
   const phase = currentRunPhase(records, phases);
   const evaluationBySamplingId = new Map(evaluations.map((evaluation) => [evaluation.samplingId, evaluation]));
   const phaseRecords = phase === "evaluation"
-    ? records.filter((state) => state.execution.status === "succeeded")
+    ? records.filter((state) => state.execution.status === "succeeded" && evaluationBySamplingId.has(state.samplingId))
     : records;
   const statuses = phaseRecords.map((state) => (
     phase === "execution"

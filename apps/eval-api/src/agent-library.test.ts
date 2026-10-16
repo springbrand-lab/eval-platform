@@ -47,6 +47,16 @@ describe("shared Agent editor HTTP gateway", () => {
     expect(app.calls[0]!.headers.has("Origin")).toBe(false);
   });
 
+  it("reads one selected MCP Server read-only", async () => {
+    const id = "d75b2a66-08b3-4c7c-acf2-79d17110d663";
+    const app = setup(envelope({ id, name: "Eval 结果提交", source: "user", status: "active", authType: "bearer" }));
+    const result = await app.request(`/api/agent-library/mcp-servers/${id}`);
+    expect(result.status).toBe(200);
+    expect(app.calls[0]!.url).toBe(`https://eval-sp.test/api/mcp-servers/${id}`);
+    expect(app.calls[0]!.method).toBe("GET");
+    expect((await app.request(`/api/agent-library/mcp-servers/${id}`, { method: "PATCH" })).status).toBe(404);
+  });
+
   it("forwards exact Skill archive bytes and the write Origin", async () => {
     const app = setup();
     const bytes = new Uint8Array([80, 75, 0, 1, 255]);

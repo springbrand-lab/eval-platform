@@ -22,6 +22,7 @@ export {
   assertPromptData,
   assertPromptDatasetMetadata,
   parseDatasetDocument,
+  parsePromptDatasetUpload,
   parseStrictJson,
   promptDatasetUploadSchema,
   type DatasetFormat,

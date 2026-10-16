@@ -204,3 +204,16 @@ export const getEvaluation = createRoute({
     ...notFoundResponse,
   },
 });
+
+export const collectExecution = createRoute({
+  method: "post", path: "/projects/{projectId}/samplings/{samplingId}/collect", tags: ["Run"],
+  summary: "Recollect output and freeze evidence from an already completed Subject without executing it",
+  request: { params: projectParams.extend({ samplingId: entityIdSchema }) },
+  responses: { 202: jsonContent(responseSchema(z.object({ runId: z.string(), queued: z.boolean() })), "Collection requested"), ...errorResponses, ...notFoundResponse, ...conflictResponse },
+});
+export const collectEvaluation = createRoute({
+  method: "post", path: "/projects/{projectId}/evaluations/{evaluationId}/collect", tags: ["Run"],
+  summary: "Recollect an already completed Evaluator's output without evaluating again",
+  request: { params: projectParams.extend({ evaluationId: entityIdSchema }) },
+  responses: { 202: jsonContent(responseSchema(z.object({ runId: z.string(), queued: z.boolean() })), "Collection requested"), ...errorResponses, ...notFoundResponse, ...conflictResponse },
+});

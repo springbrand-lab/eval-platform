@@ -21,7 +21,7 @@ const setting: AgentDraft["setting"] = {
   memoryDefaults: { enabled: false, memoryTokens: 3_000, preferencesTokens: 750 }, sandbox: { enabled: true },
   skillIds: [], mcpServers: [{ serverId: "platform-mcp" }], actionIds: [], connectorIds: [], extensionIds: [], referenceFileIds: [],
 };
-const template: UserAgentConfigTemplate = { name: "New Agent", description: null, setting };
+const template: UserAgentConfigTemplate = { name: "新建 Agent", description: null, setting };
 const initial: AgentConfig = {
   id: "agent-a", user_id: "user-a", slug: "agent-a", name: "Original name", description: null,
   revision: 3, setting_schema_version: 4, setting, is_default: false, created_at: 1, updated_at: 1,
@@ -58,6 +58,10 @@ describe("SP Agent editor in Eval", () => {
       if (path === "/api/agent-library/user-agent-configs/agent-a/deletion-check") return {
         allowed: true, activeChatIds: [], enabledScheduleIds: [], unfinishedRunIds: [],
       };
+      if (path === "/api/agent-library/mcp-servers/platform-mcp") return {
+        id: "platform-mcp", name: "Eval 结果提交", description: "submit_evaluation", status: "active", source: "user",
+        url: "https://evalapi.example/mcp/evaluation-results", authType: "bearer",
+      };
       throw new Error(`Unexpected GET ${path}`);
     });
     transport.request.mockImplementation(async (path: string) => {
@@ -82,26 +86,56 @@ describe("SP Agent editor in Eval", () => {
     window.scrollTo = vi.fn();
   });
 
+  it("shows selected MCP Servers read-only and keeps them on save", async () => {
+    const view = await mount("/agents/agent-a");
+    try {
+      await settle(() => expect(view.container.textContent).toContain("MCP Server (1)"));
+      await settle(() => expect(view.container.textContent).toContain("Eval 结果提交"));
+      expect(view.container.textContent).toContain("https://evalapi.example/mcp/evaluation-results");
+      const mcp = view.container.querySelector('fieldset [aria-label="MCP Server"]');
+      expect(mcp).not.toBeNull();
+      expect(mcp!.compareDocumentPosition(button("保存修改")) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+      expect(view.container.textContent).not.toContain("工具服务");
+      await type(name(), "Renamed");
+      await click(button("保存修改"));
+      await settle(() => expect(transport.patch).toHaveBeenCalledTimes(1));
+      expect(transport.patch.mock.calls[0]![1]).toMatchObject({ setting: { mcpServers: [{ serverId: "platform-mcp" }] } });
+    } finally {
+      await view.close();
+    }
+  });
+
   it("creates with the SP template, prompt dialog, resource selector and validated settings", async () => {
     const view = await mount();
     try {
       await settle(() => expect(name()).not.toBeNull());
       expect(view.container.textContent).not.toContain("Slug");
+      expect(view.container.querySelector('[aria-label="基本信息"] #agent-name')).not.toBeNull();
+      expect(view.container.querySelector('[data-agent-prompt] textarea')).not.toBeNull();
+      expect(view.container.querySelector('[data-agent-runtime] #agent-model')).not.toBeNull();
+      expect(view.container.textContent).not.toContain("行为与指令");
+      expect(view.container.querySelector('[data-agent-runtime] [aria-expanded]')).toBeNull();
+      expect(view.container.textContent).not.toContain("暂未添加");
+      expect(view.container.querySelectorAll('[data-agent-empty]')).toHaveLength(6);
+      expect(view.container.querySelector('[data-agent-empty] [aria-expanded]')).toBeNull();
+      expect(view.container.querySelector('[aria-label="添加任务技能"]')).not.toBeNull();
+      for (const label of ["Behavior", "Thinking", "Connectors", "Save changes", "None selected."]) expect(view.container.textContent).not.toContain(label);
+      const thinking = view.container.querySelector<HTMLSelectElement>('#agent-thinking')!;
+      expect([...thinking.options].map((option) => option.textContent)).toEqual(['不额外思考', '极简', '较浅', '适中', '深入', '最深入']);
+      expect([...thinking.options].map((option) => option.value)).toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
       expect(view.container.textContent).not.toContain("setting JSON");
-      for (const section of ["Behavior", "Model", "Thinking", "Connectors", "Component Connectors", "Extensions", "Actions", "Skills", "References"]) {
+      for (const section of ["模型", "思考深度", "外部应用连接", "内置连接工具", "扩展能力", "可执行操作", "任务技能", "参考资料"]) {
         expect(view.container.textContent).toContain(section);
       }
       await type(name(), "  Research Agent  ");
       await type(document.querySelector("#agent-description"), "Research description");
-      await click(button("Template instructionsClick to view and edit the full prompt"));
-      await type(document.querySelector('[aria-label="Full system prompt"]'), "Updated instructions");
-      await click(button("Done", document.querySelector('[role="dialog"]')!));
+      await type(document.querySelector('[aria-label="完整工作指令"]'), "Updated instructions");
       await select(document.querySelector("#agent-thinking"), "high");
-      await click(document.querySelector('[aria-label="Add Skills"]'));
-      await settle(() => expect(document.querySelector('[aria-label="Select Research Skill"]')).not.toBeNull());
-      await click(document.querySelector('[aria-label="Select Research Skill"]'));
-      await click(button("Save changes", document.querySelector('[role="dialog"]')!));
-      await click(button("Create Agent"));
+      await click(document.querySelector('[aria-label="添加任务技能"]'));
+      await settle(() => expect(document.querySelector('[aria-label="选择Research Skill"]')).not.toBeNull());
+      await click(document.querySelector('[aria-label="选择Research Skill"]'));
+      await click(button("保存修改", document.querySelector('[role="dialog"]')!));
+      await click(button("创建 Agent"));
       await settle(() => expect(transport.post).toHaveBeenCalledTimes(1));
       expect(transport.post.mock.calls[0]).toEqual(["/api/agent-configs", {
         slug: expect.stringMatching(/^agent-[\da-f-]{36}$/u), name: "Research Agent", description: "Research description",
@@ -117,7 +151,7 @@ describe("SP Agent editor in Eval", () => {
     try {
       await settle(() => expect(name()).not.toBeNull());
       await type(name(), "Discard me");
-      await click(button("Cancel"));
+      await click(button("取消"));
       await settle(() => expect(view.router.state.location.pathname).toBe("/agents"));
       expect(transport.post).not.toHaveBeenCalled();
       expect(transport.patch).not.toHaveBeenCalled();
@@ -148,7 +182,7 @@ describe("SP Agent editor in Eval", () => {
     try {
       await settle(() => expect(name()).not.toBeNull());
       await type(name(), "Keep my draft");
-      await click(button("Create Agent"));
+      await click(button("创建 Agent"));
       await settle(() => expect(transport.post).toHaveBeenCalledTimes(1));
       const request = transport.post.mock.calls[0]![1];
       transport.get.mockImplementationOnce(async () => { throw new Error("Template temporarily unavailable"); });
@@ -158,7 +192,7 @@ describe("SP Agent editor in Eval", () => {
       await click(button("重试"));
       await settle(() => expect(view.container.textContent).not.toContain("Template temporarily unavailable"));
       expect(name()?.value).toBe("Keep my draft");
-      await click(button("Create Agent"));
+      await click(button("创建 Agent"));
       await settle(() => expect(transport.post).toHaveBeenCalledTimes(2));
       expect(transport.post.mock.calls[1]![1]).toEqual(request);
     } finally { await view.close(); }
@@ -176,7 +210,7 @@ describe("SP Agent editor in Eval", () => {
       await click(button("重试"));
       await settle(() => expect(view.container.textContent).not.toContain("Config temporarily unavailable"));
       expect(name()?.value).toBe("Unsaved name");
-      await click(button("Save changes"));
+      await click(button("保存修改"));
       await settle(() => expect(transport.patch).toHaveBeenCalledExactlyOnceWith("/api/agent-configs/agent-a", {
         revision: 3, name: "Unsaved name", description: null, setting,
       }));
@@ -189,8 +223,8 @@ describe("SP Agent editor in Eval", () => {
     try {
       await settle(() => expect(name()?.value).toBe("Original name"));
       await type(name(), "My version");
-      await click(button("Save changes"));
-      await settle(() => expect(view.container.textContent).toContain("Your edits are still here"));
+      await click(button("保存修改"));
+      await settle(() => expect(view.container.textContent).toContain("你的修改仍然保留"));
       expect(name()?.value).toBe("My version");
       expect(transport.patch).toHaveBeenCalledTimes(1);
     } finally { await view.close(); }
@@ -202,12 +236,11 @@ describe("SP Agent editor in Eval", () => {
     try {
       await settle(() => expect(name()?.value).toBe("Original name"));
       expect(name()?.disabled).toBe(true);
-      expect(view.container.textContent).not.toContain("Save changes");
-      expect(view.container.textContent).not.toContain("Delete Agent");
-      expect(view.container.textContent).not.toContain("Manage");
-      await click(button("Template instructionsClick to view and edit the full prompt"));
-      expect(document.querySelector<HTMLTextAreaElement>('[aria-label="Full system prompt"]')?.readOnly).toBe(true);
-      expect(document.querySelector('[role="dialog"]')?.textContent).not.toContain("Done");
+      expect(view.container.textContent).not.toContain("保存修改");
+      expect(view.container.textContent).not.toContain("删除 Agent");
+      expect([...view.container.querySelectorAll("button")].some((item) => item.textContent?.trim() === "管理")).toBe(false);
+      expect(document.querySelector<HTMLTextAreaElement>('[aria-label="完整工作指令"]')?.readOnly).toBe(true);
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
       expect(transport.post).not.toHaveBeenCalled();
       expect(transport.patch).not.toHaveBeenCalled();
     } finally { await view.close(); }
@@ -221,10 +254,10 @@ describe("SP Agent editor in Eval", () => {
     const view = await mount("/agents/agent-a");
     try {
       await settle(() => expect(name()?.value).toBe("Original name"));
-      await click(button("Delete Agent"));
+      await click(button("删除 Agent"));
       await settle(() => expect(document.querySelector('[role="alertdialog"]')).not.toBeNull());
       await click(button("删除", document.querySelector('[role="alertdialog"]')!));
-      await settle(() => expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain("Finish this Agent's active Chat work"));
+      await settle(() => expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain("请先结束此 Agent 正在进行的会话"));
       expect(view.router.state.location.pathname).toBe("/agents/agent-a");
       expect(transport.delete).toHaveBeenCalledExactlyOnceWith("/api/agent-configs/agent-a");
     } finally { await view.close(); }

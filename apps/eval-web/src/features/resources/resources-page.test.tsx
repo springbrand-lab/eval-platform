@@ -22,7 +22,7 @@ it("refreshes an uncertain create and requires catalog inspection before another
   const view = await render(<TooltipProvider><QueryClientProvider client={client}><ResourcesPage kind="material" /></QueryClientProvider></TooltipProvider>);
   try {
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
-    await click([...view.container.querySelectorAll("button")].find((item) => item.textContent === "新建初始素材包"));
+    await click([...view.container.querySelectorAll("button")].find((item) => item.textContent === "新建输入素材包"));
     const control = (label: string) => document.getElementById([...document.querySelectorAll("label")].find((item) => item.textContent === label)!.htmlFor)!;
     await type(control("名称"), "已提交的包"); await type(control("说明"), "描述");
     await click([...document.querySelectorAll("button")].find((item) => item.textContent === "创建"));
