@@ -17,7 +17,7 @@ import {
   normalizeEvaluationPlan,
   normalizeExecutionPlan,
 } from "@eval-platform/eval-runtime";
-import { createId } from "@springbrand/utils";
+import { createId } from "@eval-platform/eval-contracts";
 import type { AgentConfigService, FrozenCopy } from "../agent-configs.js";
 import {
   OutputSchemaNotFoundError,

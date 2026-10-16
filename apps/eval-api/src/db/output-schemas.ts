@@ -1,6 +1,6 @@
 import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import { and, eq, isNull } from "drizzle-orm";
-import { createId } from "@springbrand/utils";
+import { createId } from "@eval-platform/eval-contracts";
 import { parseEvaluationOutputSchema } from "../project-output-schema.js";
 import type { EvalDb } from "./client.js";
 import { parseCatalogMetadataPatch, platformId, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";

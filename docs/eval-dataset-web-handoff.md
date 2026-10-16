@@ -67,7 +67,7 @@ Authorization: Bearer <Eval SP session token>
 
 ### 2. 建素材 Bundle 和上下文 Bundle
 
-用户可在导入 Dataset 前后管理资源。资源按当前登录用户共享，不属于某个 Dataset。Web 提供两个独立入口：素材 Bundle 只管理 Material，上下文 Bundle 只管理 Session；两者的列表、详情和上传互不混用。
+用户可在导入 Dataset 前后管理资源。资源按 Eval 服务账号共享，不属于某个 Dataset。Web 提供两个独立入口：素材 Bundle 只管理 Material，上下文 Bundle 只管理 Session；两者的列表、详情和上传互不混用。
 
 | 操作 | 素材 Bundle | 上下文 Bundle |
 | --- | --- | --- |

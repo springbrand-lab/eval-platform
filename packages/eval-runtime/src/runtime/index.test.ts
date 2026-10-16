@@ -10,15 +10,17 @@ import type {
   RunRequest,
   RunTargetSelector,
 } from "@eval-platform/eval-contracts";
-import { isPendingSamplingStatus } from "@eval-platform/eval-contracts";
+import { DEFAULT_EVIDENCE_LIMITS, isPendingSamplingStatus } from "@eval-platform/eval-contracts";
 import { digestExecutionPlan, digestJson } from "../plan/index.js";
 import type {
   AgentHandle,
   AgentSubmission,
   CollectAgentResourcesInput,
+  EvidenceStore,
   Harness,
 } from "../harness/index.js";
-import { AgentHandleNotFoundError } from "../harness/index.js";
+import { AgentHandleNotFoundError, createEvidenceStore } from "../harness/index.js";
+import { createMemoryEvidenceBlobs, exportedEvidence } from "../harness/evidence-test-support.js";
 import type { ProjectPlanReader, ProjectSample } from "./model.js";
 import type {
   RuntimeRunAdmission,
@@ -26,7 +28,7 @@ import type {
   SamplingState,
   RuntimeStore,
 } from "./store.js";
-import { equalJson } from "@springbrand/utils";
+import { equalJson } from "@eval-platform/eval-contracts";
 import {
   RuntimeAdmissionConflictError,
   RuntimeEntityNotFoundError,
@@ -67,7 +69,16 @@ const EVALUATOR = { ownerUserId: "user-1", userAgentId: "evaluator-agent" };
 const SOURCE_COMMIT = "a".repeat(40);
 const OUTPUT_SCHEMA = { type: "object", properties: { score: { type: "number" } } } as const;
 
-type WithDefaultReporter<T extends { readonly onError: unknown }> = Omit<T, "onError"> & { readonly onError?: T["onError"] };
+type WithDefaultReporter<T extends { readonly onError: unknown; readonly evidence: unknown }> =
+  Omit<T, "onError" | "evidence"> & { readonly onError?: T["onError"]; readonly evidence?: T["evidence"] };
+
+/** Every Runtime in this file shares one in-memory evidence store, so seeded bundles open anywhere. */
+const TEST_EVIDENCE_BLOBS = createMemoryEvidenceBlobs();
+const TEST_EVIDENCE: EvidenceStore = createEvidenceStore(TEST_EVIDENCE_BLOBS, () => "2026-10-15T00:00:00.000Z");
+const SEEDED_EVIDENCE = await TEST_EVIDENCE.save({
+  evidence: exportedEvidence({ samplingId: "seeded-sampling" }),
+  limits: DEFAULT_EVIDENCE_LIMITS,
+});
 
 type RuntimeDependencies = WithDefaultReporter<Omit<EvalRunResumerDependencies, "plans" | "store">> & {
   readonly sourceCommit?: string;
@@ -118,7 +129,11 @@ function createRuntime(dependencies: RuntimeDependencies) {
 }
 
 function createEvalRunResumer(dependencies: WithDefaultReporter<EvalRunResumerDependencies>) {
-  return createResumerWithReporter({ ...dependencies, onError: dependencies.onError ?? console.error });
+  return createResumerWithReporter({
+    ...dependencies,
+    evidence: dependencies.evidence ?? TEST_EVIDENCE,
+    onError: dependencies.onError ?? console.error,
+  });
 }
 
 /** Admission bound to a test Store and its Project plans. */
@@ -406,10 +421,13 @@ function makeStore(options: StoreOptions = {}): TestStore {
   };
 }
 
+/** A seeded succeeded execution with its output is evaluable, so it gets a stored bundle unless it set one. */
 async function seedSampling(store: RuntimeStore, record: SamplingState): Promise<void> {
   const expected = await store.getSampling(record.samplingId);
   if (!expected) throw new Error("Unknown Sampling fixture");
-  await store.updateSampling(record, expected);
+  const evaluable = record.execution.status === "succeeded" && record.artifacts !== undefined
+    && record.trajectory !== undefined && !("evidence" in record);
+  await store.updateSampling(evaluable ? { ...record, evidence: SEEDED_EVIDENCE } : record, expected);
 }
 
 async function seedEvaluation(store: RuntimeStore, record: EvaluationRecord): Promise<void> {
@@ -443,13 +461,13 @@ function makeHarness(): Harness {
     return makeSubmission("completed", submissionId);
   };
   return {
-    ensureAgent: vi.fn(async ({ role, framework, samplingId, chatId, evaluationWorkspace, agentConfig }): Promise<AgentHandle> => ({
+    ensureAgent: vi.fn(async ({ role, framework, samplingId, chatId, evaluationId, agentConfig }): Promise<AgentHandle> => ({
       ownerUserId: agentConfig.ownerUserId,
       role,
       framework,
       samplingId,
       chatId,
-      ...(evaluationWorkspace === undefined ? {} : { evaluationWorkspace }),
+      ...(evaluationId === undefined ? {} : { evaluationId }),
     })),
     materializeInitialData: vi.fn(async () => ({
       manifestHash: "manifest-1",
@@ -477,7 +495,7 @@ function makeHarness(): Harness {
     collectEvaluation: vi.fn(async () => ({
       status: "succeeded" as const,
       artifacts: [{ artifactId: "evaluation-artifact-1", kind: "evaluation", path: "/eval/result" }],
-      score: 0.9,
+      structuredOutput: { path: "/output/result.json", content: '{"score":0.9}' },
       trajectory: { trajectoryId: "trajectory-2", source: "evaluator" as const, path: "/eval/evaluation.jsonl" },
     })),
     collectAgentResources: vi.fn(async ({ handle, idempotencyKey, submissionId }) => {
@@ -497,7 +515,8 @@ function makeHarness(): Harness {
         billingSettlements: [],
       };
     }),
-    materializeSubjectTrajectory: vi.fn(async () => undefined),
+    exportEvidence: vi.fn(async ({ handle }) => exportedEvidence({ samplingId: handle.samplingId, chatId: handle.chatId })),
+    importEvidence: vi.fn(async () => undefined),
   };
 }
 
@@ -982,12 +1001,17 @@ describe("eval runtime orchestration", () => {
     expect(evaluator.handle.chatId).not.toBe(subject.handle.chatId);
     expect(vi.mocked(harness.submitAgent).mock.calls.find(([call]) => call.handle.role === "subject")?.[0].prompt)
       .toBe(sample.data.userPrompt);
-    expect(vi.mocked(harness.submitAgent).mock.calls.find(([call]) => call.handle.role === "evaluator")?.[0].prompt)
-      .toBe(sample.data.evalPrompt);
+    const evaluatorPrompt = vi.mocked(harness.submitAgent).mock.calls
+      .find(([call]) => call.handle.role === "evaluator")?.[0].prompt;
+    expect(evaluatorPrompt?.startsWith(`${sample.data.evalPrompt}\n\n`)).toBe(true);
+    expect(evaluatorPrompt).toContain("/evidence/manifest.json");
+    expect(evaluatorPrompt).toContain("/output/result.json");
     const evaluationSubmitIndex = vi.mocked(harness.submitAgent).mock.calls.findIndex(
       ([input]) => input.handle.role === "evaluator",
     );
-    expect(vi.mocked(harness.materializeSubjectTrajectory).mock.invocationCallOrder[0]!)
+    expect(vi.mocked(harness.exportEvidence).mock.invocationCallOrder[0]!)
+      .toBeLessThan(vi.mocked(harness.importEvidence).mock.invocationCallOrder[0]!);
+    expect(vi.mocked(harness.importEvidence).mock.invocationCallOrder[0]!)
       .toBeLessThan(vi.mocked(harness.submitAgent).mock.invocationCallOrder[evaluationSubmitIndex]!);
   });
 
@@ -1218,14 +1242,16 @@ describe("eval runtime orchestration", () => {
         role: "evaluator",
         framework: "sp",
         agentConfig: EVALUATOR,
-        evaluationWorkspace: {
-          subject: { userId: SUBJECT.ownerUserId, chatId: expect.any(String) },
-          evaluationId: expect.any(String),
-        },
+        evaluationId: expect.any(String),
       }));
-      expect(harness.materializeSubjectTrajectory).toHaveBeenCalledWith(expect.objectContaining({
-        subjectWorkspace: { userId: SUBJECT.ownerUserId, chatId: expect.any(String) },
-        trajectory: { trajectoryId: "trajectory-1", source: "subject", path: "/eval/trajectory.jsonl" },
+      expect(harness.ensureAgent).toHaveBeenNthCalledWith(2, expect.not.objectContaining({
+        evaluationWorkspace: expect.anything(),
+      }));
+      const sampling = await store.getSampling(run.samplingIds[0]!);
+      expect(harness.importEvidence).toHaveBeenCalledWith(expect.objectContaining({
+        handle: expect.objectContaining({ role: "evaluator", evaluationId: expect.any(String) }),
+        root: "/evidence",
+        evidence: expect.objectContaining({ ref: sampling?.evidence }),
       }));
       await expect(store.getRun(run.runId)).resolves.toMatchObject({
         operation: "pipeline",
@@ -1277,7 +1303,7 @@ describe("eval runtime orchestration", () => {
     expect(harness.submitAgent).not.toHaveBeenCalled();
   });
 
-  it("rejects an evaluator Chat that did not bind the Subject Workspace", async () => {
+  it("rejects an evaluator Chat that did not bind its Evaluation ID", async () => {
     const harness = makeHarness();
     vi.mocked(harness.ensureAgent).mockImplementation(async (input) => ({
       role: input.role,
@@ -1292,9 +1318,9 @@ describe("eval runtime orchestration", () => {
       sleep: async () => undefined,
     });
 
-    const run = await runtime.submit(projectRequest("pipeline", "missing-evaluator-workspace-binding"));
+    const run = await runtime.submit(projectRequest("pipeline", "missing-evaluator-evaluation-id"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
-    expect(harness.materializeSubjectTrajectory).not.toHaveBeenCalled();
+    expect(harness.importEvidence).not.toHaveBeenCalled();
     expect(vi.mocked(harness.submitAgent).mock.calls.filter(
       ([input]) => input.handle.role === "evaluator",
     )).toHaveLength(0);
@@ -1427,8 +1453,9 @@ describe("eval runtime orchestration", () => {
       handle: expect.objectContaining({ role: "evaluator" }),
       runtime: EVALUATION_RUNTIME,
     }));
-    expect(harness.materializeSubjectTrajectory).toHaveBeenCalledWith(expect.objectContaining({
-      subjectWorkspace: { userId: SUBJECT.ownerUserId, chatId: expect.any(String) },
+    expect(harness.importEvidence).toHaveBeenCalledWith(expect.objectContaining({
+      handle: expect.objectContaining({ role: "evaluator" }),
+      runtime: EVALUATION_RUNTIME,
     }));
     expect(harness.submitAgent).toHaveBeenCalledWith(expect.objectContaining({
       handle: expect.objectContaining({ role: "evaluator" }),
@@ -1848,10 +1875,11 @@ describe("eval runtime orchestration", () => {
     const harness = makeHarness();
     const plans = makePlans();
     const getSamples = vi.spyOn(plans, "getProjectSamples");
+    const store = makeStore();
     const runtime = createAutoResumingRuntime({
       plans,
       harness,
-      store: makeStore(),
+      store,
       sleep: async () => undefined,
     });
     const execution = await runtime.submit(projectRequest("execution", "test-request"));
@@ -1869,27 +1897,20 @@ describe("eval runtime orchestration", () => {
     expect(harness.collectEvaluation).toHaveBeenCalledTimes(1);
     expect(getSamples).toHaveBeenCalledWith(PROJECT_ID, ["sample-1"]);
     expect(harness.materializeInitialData).toHaveBeenCalledTimes(2);
-    expect(harness.materializeSubjectTrajectory).toHaveBeenCalledWith(expect.objectContaining({
-      subjectWorkspace: { userId: SUBJECT.ownerUserId, chatId: expect.any(String) },
-      trajectory: {
-        trajectoryId: "trajectory-1",
-        source: "subject",
-        path: "/eval/trajectory.jsonl",
-      },
-    }));
     const sampling = await runtime.getSampling(execution.samplingIds[0]!);
+    const stored = (await store.getSampling(execution.samplingIds[0]!))!;
     expect(sampling.subjectChatId).toEqual(expect.any(String));
     expect(evaluationRecord.chatId).toEqual(expect.any(String));
     expect(evaluationRecord.chatId).not.toBe(sampling.subjectChatId);
-    const trajectoryInput = vi.mocked(harness.materializeSubjectTrajectory).mock.calls[0]?.[0];
-    expect(trajectoryInput?.subjectWorkspace.chatId).toBe(sampling.subjectChatId);
-    expect(trajectoryInput?.idempotencyKey).toBe(`subject-trajectory:${sampling.subjectChatId}`);
+    const evidence = stored.evidence!;
+    expect(evidence.evidenceId).toMatch(/^sha256:[0-9a-f]{64}$/u);
+    const importInput = vi.mocked(harness.importEvidence).mock.calls[0]?.[0];
+    expect(importInput?.idempotencyKey).toBe(`evidence:${evidence.evidenceId}:${evaluationRecord.evaluationId}`);
+    expect(importInput?.handle.chatId).toBe(evaluationRecord.chatId);
+    expect(importInput?.evidence.manifest.artifacts).toEqual([expect.objectContaining({ path: "/index.html" })]);
     expect(harness.ensureAgent).toHaveBeenCalledWith(expect.objectContaining({
       chatId: evaluationRecord.chatId,
-      evaluationWorkspace: {
-        subject: trajectoryInput?.subjectWorkspace,
-        evaluationId: evaluationRecord.evaluationId,
-      },
+      evaluationId: evaluationRecord.evaluationId,
     }));
     expect(sampling).toMatchObject({
       execution: { status: "succeeded" },
@@ -1919,19 +1940,20 @@ describe("eval runtime orchestration", () => {
     expect(evaluations.map(({ evaluationId }) => evaluationId)).toEqual([secondSnapshot.evaluationIds[0]]);
     await expect(store.getEvaluation(firstSnapshot.evaluationIds[0]!)).resolves.toBeNull();
     expect((await store.getRun(firstEvaluation.runId))?.evaluationIds).toEqual([]);
-    const trajectoryInputs = vi.mocked(harness.materializeSubjectTrajectory).mock.calls.map(([input]) => input);
-    expect(trajectoryInputs).toHaveLength(2);
-    expect(trajectoryInputs[1]).toEqual(trajectoryInputs[0]);
-    const evaluatorBindings = vi.mocked(harness.ensureAgent).mock.calls
-      .map(([input]) => input)
-      .filter((input) => input.role === "evaluator")
-      .map((input) => input.evaluationWorkspace);
-    expect(evaluatorBindings.map((binding) => binding?.evaluationId)).toEqual([
+    // Both Evaluations read the same frozen bundle; the Subject is exported only once.
+    expect(harness.exportEvidence).toHaveBeenCalledTimes(1);
+    const imports = vi.mocked(harness.importEvidence).mock.calls.map(([input]) => input);
+    expect(imports).toHaveLength(2);
+    expect(imports[1]?.evidence.ref).toEqual(imports[0]?.evidence.ref);
+    expect(imports.map(({ handle }) => handle.evaluationId)).toEqual([
       firstSnapshot.evaluationIds[0],
       secondSnapshot.evaluationIds[0],
     ]);
-    expect(evaluatorBindings[0]?.subject).toEqual(trajectoryInputs[0]?.subjectWorkspace);
-    expect(evaluatorBindings[1]?.subject).toEqual(trajectoryInputs[0]?.subjectWorkspace);
+    const evaluatorIds = vi.mocked(harness.ensureAgent).mock.calls
+      .map(([input]) => input)
+      .filter((input) => input.role === "evaluator")
+      .map((input) => input.evaluationId);
+    expect(evaluatorIds).toEqual([firstSnapshot.evaluationIds[0], secondSnapshot.evaluationIds[0]]);
     await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.not.toHaveProperty(
       "evaluation",
     );
@@ -2172,7 +2194,7 @@ describe("eval runtime orchestration", () => {
     });
     expect(inputs[0]!.data).not.toHaveProperty("initialSession");
     expect(harness.ensureAgent).toHaveBeenCalledTimes(2);
-    expect(harness.materializeSubjectTrajectory).toHaveBeenCalledTimes(1);
+    expect(harness.importEvidence).toHaveBeenCalledTimes(1);
     expect(harness.restartAgent).not.toHaveBeenCalled();
     expect(harness.inspectAgentOperation).not.toHaveBeenCalled();
     const record = await runtime.getEvaluation(snapshot.evaluationIds[0]!);
@@ -2180,17 +2202,17 @@ describe("eval runtime orchestration", () => {
     expect(record.chatId).toBe(inputs[0]!.handle.chatId);
   });
 
-  it("retries Subject trajectory materialization with the same key before evaluator submission", async () => {
+  it("retries evidence import with the same key before evaluator submission", async () => {
     const harness = makeHarness();
     const committedKeys = new Set<string>();
     let copyRetryStarted!: () => void;
     const started = new Promise<void>((resolve) => { copyRetryStarted = resolve; });
     let finishCopy!: () => void;
     const pending = new Promise<void>((resolve) => { finishCopy = resolve; });
-    vi.mocked(harness.materializeSubjectTrajectory).mockImplementation(async ({ idempotencyKey }) => {
+    vi.mocked(harness.importEvidence).mockImplementation(async ({ idempotencyKey }) => {
       if (!committedKeys.has(idempotencyKey)) {
         committedKeys.add(idempotencyKey);
-        throw new Error("trajectory materialization response lost after commit");
+        throw new Error("evidence import response lost after commit");
       }
       copyRetryStarted();
       await pending;
@@ -2214,13 +2236,12 @@ describe("eval runtime orchestration", () => {
     expect(snapshot.status).toBe("succeeded");
 
     expect(committedKeys.size).toBe(1);
-    const [first, second] = vi.mocked(harness.materializeSubjectTrajectory).mock.calls;
-    expect(second![0]).toEqual(first![0]);
-    expect(first![0].idempotencyKey).toBe(`subject-trajectory:${first![0].subjectWorkspace.chatId}`);
-    expect(first![0]).toMatchObject({
-      subjectWorkspace: { userId: SUBJECT.ownerUserId, chatId: expect.any(String) },
-      trajectory: { trajectoryId: "trajectory-1", source: "subject", path: "/eval/trajectory.jsonl" },
-    });
+    const [first, second] = vi.mocked(harness.importEvidence).mock.calls;
+    expect(second![0].idempotencyKey).toBe(first![0].idempotencyKey);
+    expect(second![0].evidence.ref).toEqual(first![0].evidence.ref);
+    expect(first![0].idempotencyKey)
+      .toBe(`evidence:${first![0].evidence.ref.evidenceId}:${snapshot.evaluationIds[0]}`);
+    expect(first![0]).toMatchObject({ root: "/evidence", handle: { role: "evaluator" } });
     const inputs = vi.mocked(harness.materializeInitialData).mock.calls
       .map(([input]) => input)
       .filter((input) => input.handle.role === "evaluator");
@@ -2239,7 +2260,7 @@ describe("eval runtime orchestration", () => {
     "does not submit or restart the evaluator after evidence initialization fails (retryable: %s)",
     async (retryable) => {
       const harness = makeHarness();
-      vi.mocked(harness.materializeSubjectTrajectory).mockRejectedValue(Object.assign(
+      vi.mocked(harness.importEvidence).mockRejectedValue(Object.assign(
         new Error("evidence initialization failed"),
         { retryable },
       ));
@@ -2261,7 +2282,7 @@ describe("eval runtime orchestration", () => {
       const snapshot = await waitForTerminal(runtime, evaluation.runId);
       expect(snapshot.status).toBe("failed");
 
-      expect(harness.materializeSubjectTrajectory).toHaveBeenCalledTimes(retryable ? 2 : 1);
+      expect(harness.importEvidence).toHaveBeenCalledTimes(retryable ? 2 : 1);
       expect(decide.mock.calls.map(([input]) => input)).toEqual(retryable ? [
         { operation: "initialization", failureKind: "network", attemptNumber: 1 },
         { operation: "initialization", failureKind: "network", attemptNumber: 2 },
@@ -2280,6 +2301,64 @@ describe("eval runtime orchestration", () => {
       });
     },
   );
+
+  it("freezes a succeeded Subject's evidence and points its trajectory into the bundle", async () => {
+    const harness = makeHarness();
+    const store = makeStore();
+    const runtime = createAutoResumingRuntime({ harness, store, sleep: async () => undefined });
+    const run = await runtime.submit(projectRequest("execution", "evidence-freeze"));
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
+
+    const sampling = (await store.getSampling(run.samplingIds[0]!))!;
+    const evidence = sampling.evidence!;
+    expect(harness.exportEvidence).toHaveBeenCalledWith(expect.objectContaining({
+      handle: expect.objectContaining({ role: "subject", chatId: sampling.subjectChatId }),
+      limits: DEFAULT_EVIDENCE_LIMITS,
+    }));
+    const { manifest } = await TEST_EVIDENCE.open(evidence);
+    expect(manifest.source).toMatchObject({ samplingId: sampling.samplingId, agentRef: { chatId: sampling.subjectChatId } });
+    expect(sampling.trajectory).toEqual({
+      trajectoryId: evidence.evidenceId,
+      source: "subject",
+      path: `evidence:${evidence.evidenceId}/trajectory/`,
+      contentHash: `sha256:${evidence.manifestSha256}`,
+    });
+  });
+
+  it("fails the execution, keeping its output, when evidence export never succeeds", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.exportEvidence).mockRejectedValue(Object.assign(new Error("export unavailable"), { retryable: false }));
+    const store = makeStore();
+    const runtime = createAutoResumingRuntime({ harness, store, sleep: async () => undefined });
+    const run = await runtime.submit(projectRequest("pipeline", "evidence-export-fails"));
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
+
+    const sampling = (await store.getSampling(run.samplingIds[0]!))!;
+    expect(sampling.execution).toMatchObject({ status: "failed", lastError: expect.stringContaining("export unavailable") });
+    expect(sampling.artifacts).toEqual([{ artifactId: "artifact-1", kind: "project", path: "/eval/output" }]);
+    expect(sampling).not.toHaveProperty("evidence");
+    expect(harness.submitAgent).toHaveBeenCalledTimes(1);
+    expect(harness.importEvidence).not.toHaveBeenCalled();
+  });
+
+  it("fails an Evaluation whose Sampling has no evidence bundle without starting an Evaluator", async () => {
+    const harness = makeHarness();
+    const store = makeStore();
+    const runtime = createAutoResumingRuntime({ harness, store, sleep: async () => undefined });
+    const execution = await runtime.submit(projectRequest("execution", "no-evidence-execution"));
+    await waitForTerminal(runtime, execution.runId);
+    const stored = (await store.getSampling(execution.samplingIds[0]!))!;
+    const { evidence: _evidence, ...withoutEvidence } = stored;
+    await store.updateSampling(withoutEvidence, stored);
+
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
+    const snapshot = await waitForTerminal(runtime, evaluation.runId);
+    expect(snapshot.status).toBe("failed");
+    await expect(runtime.getEvaluation(snapshot.evaluationIds[0]!)).resolves.toMatchObject({
+      status: { status: "failed", lastError: "sampling has no evidence bundle" },
+    });
+    expect(vi.mocked(harness.ensureAgent).mock.calls.filter(([input]) => input.role === "evaluator")).toHaveLength(0);
+  });
 
   it("keeps execution success when evaluation fails", async () => {
     const harness = makeHarness();
@@ -2317,6 +2396,79 @@ describe("eval runtime orchestration", () => {
       execution: { status: "succeeded" },
     });
     await expect(runtime.getSampling(execution.samplingIds[0]!)).resolves.not.toHaveProperty("sample");
+  });
+
+  it("records the Evaluator score and syncs it to the Subject session", async () => {
+    const harness = makeHarness();
+    const publish = vi.fn(async () => undefined);
+    const runtime = createAutoResumingRuntime({
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+      scores: { read: () => ({ score: 0.9 }), publish },
+    });
+    const execution = await runtime.submit(projectRequest("execution", "test-request"));
+    await waitForTerminal(runtime, execution.runId);
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
+    const snapshot = await waitForTerminal(runtime, evaluation.runId);
+
+    const sampling = await runtime.getSampling(execution.samplingIds[0]!);
+    const record = await runtime.getEvaluation(snapshot.evaluationIds[0]!);
+    expect(record).toMatchObject({
+      status: { status: "succeeded" },
+      output: { structuredOutput: { content: '{"score":0.9}' } },
+      scoreSync: { status: "synced" },
+    });
+    expect(publish).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      evaluationId: record!.evaluationId,
+      subjectChatId: sampling!.subjectChatId,
+      evaluatorChatId: record!.chatId,
+      score: 0.9,
+    }));
+  });
+
+  it("keeps a succeeded Evaluation when its score cannot be synced", async () => {
+    const onError = vi.fn();
+    const runtime = createAutoResumingRuntime({
+      harness: makeHarness(),
+      store: makeStore(),
+      sleep: async () => undefined,
+      onError,
+      scores: { read: () => ({ score: 0.9 }), publish: async () => { throw new Error("Langfuse unavailable"); } },
+    });
+    const execution = await runtime.submit(projectRequest("execution", "test-request"));
+    await waitForTerminal(runtime, execution.runId);
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
+    const snapshot = await waitForTerminal(runtime, evaluation.runId);
+
+    await expect(runtime.getEvaluation(snapshot.evaluationIds[0]!)).resolves.toMatchObject({
+      status: { status: "succeeded" },
+      output: { structuredOutput: { content: '{"score":0.9}' } },
+      scoreSync: { status: "failed", lastError: "Langfuse unavailable" },
+    });
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining("score was not synced"),
+    }));
+  });
+
+  it("keeps an Evaluation whose result breaks the output schema but syncs no score", async () => {
+    const publish = vi.fn(async () => undefined);
+    const runtime = createAutoResumingRuntime({
+      harness: makeHarness(),
+      store: makeStore(),
+      sleep: async () => undefined,
+      scores: { read: () => undefined, publish },
+    });
+    const execution = await runtime.submit(projectRequest("execution", "test-request"));
+    await waitForTerminal(runtime, execution.runId);
+    const evaluation = await runtime.submit(evaluationRequest(execution.samplingIds));
+    const snapshot = await waitForTerminal(runtime, evaluation.runId);
+
+    const record = await runtime.getEvaluation(snapshot.evaluationIds[0]!);
+    expect(record).toMatchObject({ status: { status: "succeeded" }, output: { structuredOutput: { content: '{"score":0.9}' } } });
+    expect(record?.output).not.toHaveProperty("score");
+    expect(record).not.toHaveProperty("scoreSync");
+    expect(publish).not.toHaveBeenCalled();
   });
 
   it("retries evaluation output collection without restarting the evaluator", async () => {
@@ -2582,7 +2734,7 @@ describe("eval runtime orchestration", () => {
       return {
         status: "succeeded",
         artifacts: [{ artifactId: "evaluation-artifact-1", kind: "evaluation", path: "/eval/result" }],
-        score: 0.9,
+        structuredOutput: { path: "/output/result.json", content: '{"score":0.9}' },
         trajectory: {
           trajectoryId: "trajectory-2",
           source: "evaluator",
@@ -3011,6 +3163,7 @@ describe("Project Run stop", () => {
       execution: { status: "succeeded" },
       artifacts: [{ artifactId: "subject-file", kind: "file", path: "/subject.txt" }],
       trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
+      evidence: SEEDED_EVIDENCE,
     }, queued);
     const handle = await admission.submit(evaluationRequest([samplingId], "stop-evaluator-latch"));
     let stopped = false;
@@ -3165,6 +3318,7 @@ describe("Project Run stop", () => {
       ...queued, subjectChatId: "subject-chat-1", execution: { status: "succeeded" },
       artifacts: [{ artifactId: "subject-file", kind: "file", path: "/subject.txt" }],
       trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
+      evidence: SEEDED_EVIDENCE,
     };
     await store.updateSampling(succeeded, queued);
     const handle = await admission.submit(evaluationRequest([samplingId], "stop-evaluation"));

@@ -26,6 +26,20 @@ function patch(bytes: Buffer, from: string, to: string): Buffer {
   return patched;
 }
 
+/** Advertise oversized entries with tiny bodies: limit rejection must precede inflation. */
+function declareEntryBytes(archive: Buffer, size: number): Buffer {
+  const bytes = Buffer.from(archive);
+  const end = bytes.length - 22; // ZipWriter above writes no archive comment.
+  expect(bytes.readUInt32LE(end)).toBe(0x06054b50);
+  let at = bytes.readUInt32LE(end + 16);
+  for (let left = bytes.readUInt16LE(end + 10); left > 0; left--) {
+    expect(bytes.readUInt32LE(at)).toBe(0x02014b50);
+    bytes.writeUInt32LE(size, at + 24);
+    at += 46 + bytes.readUInt16LE(at + 28) + bytes.readUInt16LE(at + 30) + bytes.readUInt16LE(at + 32);
+  }
+  return bytes;
+}
+
 const invalid = (...details: readonly { path: string; errMsg?: unknown }[]) => ({
   name: "BundleFileError",
   reason: "invalid",
@@ -140,13 +154,24 @@ describe("Material ZIP", () => {
       .rejects.toMatchObject(invalid({ path: "d", errMsg: "A Material directory must contain at least one file" }));
   });
 
-  it("rejects archives past their size limits before inflating them", async () => {
+  it("rejects an archive past its upload byte limit", async () => {
     await expect(readMaterialZip(new Uint8Array(ZIP_ARCHIVE_BYTES + 1))).rejects.toMatchObject(tooLarge());
-    await expect(readMaterialZip(await zip(["big.bin", new Uint8Array(EVAL_INITIAL_FILE_MAX_BYTES + 1)])))
+  });
+
+  it("rejects an oversized declared file before inflating it", async () => {
+    await expect(readMaterialZip(declareEntryBytes(await zip(["big.bin", "x"]), EVAL_INITIAL_FILE_MAX_BYTES + 1)))
       .rejects.toMatchObject(tooLarge("big.bin"));
-    await expect(readMaterialZip(await zip(...Array.from({ length: ZIP_ENTRIES + 1 }, (_, index): ZipEntry => [`${index}.txt`]))))
-      .rejects.toMatchObject(tooLarge());
-    const bomb = await zip(...Array.from({ length: 21 }, (_, index): ZipEntry => [`${index}.bin`, new Uint8Array(ZIP_EXPANDED_BYTES / 20)]));
+  });
+
+  it("counts directories toward the archive entry limit", async () => {
+    const archive = await zip(...Array.from({ length: ZIP_ENTRIES + 1 }, (_, index): ZipEntry => [`${index}/`]));
+    await expect(readMaterialZip(archive)).rejects.toMatchObject({
+      ...tooLarge(), details: [{ path: "zip", errMsg: `ZIP contains more than ${ZIP_ENTRIES} entries` }],
+    });
+  });
+
+  it("rejects an oversized declared archive before inflating any entry", async () => {
+    const bomb = declareEntryBytes(await zip(...Array.from({ length: 21 }, (_, index): ZipEntry => [`${index}.bin`, "x"])), ZIP_EXPANDED_BYTES / 20);
     expect(bomb.byteLength).toBeLessThan(1_000_000);
     await expect(readMaterialZip(bomb)).rejects.toMatchObject(tooLarge());
   });

@@ -1,6 +1,6 @@
 import { createDatasetService } from "@eval-platform/eval-dataset";
-import { createMetrics } from "@eval-platform/eval-metrics";
-import { createEvalRunAdmission } from "@eval-platform/eval-runtime";
+import { createMetrics, createEvaluationScoreReader } from "@eval-platform/eval-metrics";
+import { createEvalRunAdmission, syncRunScores, type EvaluationScore } from "@eval-platform/eval-runtime";
 import { createActiveOwnerAdmission } from "./active-owner-admission.js";
 import { createAgentConfigService } from "./agent-configs.js";
 import type { EvalDb } from "./db/client.js";
@@ -28,10 +28,12 @@ export interface OwnerServicesDependencies {
   readonly bundles: BundleDirectory;
   readonly release: EvalSpRelease;
   readonly runQueue: RunQueue;
+  /** Delivers one score to Langfuse; absent when Langfuse is not configured. */
+  readonly publishScore?: (score: EvaluationScore) => Promise<void>;
 }
 
 /** The single composition of owner-scoped services; Run admission is shared while an owner has active requests. */
-export function createOwnerServices({ db, sp, bundles, release, runQueue }: OwnerServicesDependencies): ApiRuntime["ownerServices"] {
+export function createOwnerServices({ db, sp, bundles, release, runQueue, publishScore }: OwnerServicesDependencies): ApiRuntime["ownerServices"] {
   const admissions = createActiveOwnerAdmission((ownerUserId) => createEvalRunAdmission({
     sourceCommit: release.sourceCommit,
     plans: createPostgresProjectPlanReader(db, ownerUserId),
@@ -43,6 +45,23 @@ export function createOwnerServices({ db, sp, bundles, release, runQueue }: Owne
     const projectStore = createPostgresProjectStore(db, ownerUserId);
     const outputSchemas = createOutputSchemaCatalog(db, ownerUserId);
     const agentConfigs = createAgentConfigService({ ownerUserId, sessionToken, sp, projects: projectStore });
+    const readRun = createPostgresProjectRunReader(db, ownerUserId);
+    const scores = publishScore === undefined ? undefined : {
+      async syncRun(projectId: string, runId: string) {
+        if (!await readRun(projectId, runId)) return null;
+        const plans = createPostgresProjectPlanReader(db, ownerUserId);
+        const schema = await plans.getEvaluationOutputSchema(projectId);
+        if (!schema) return null;
+        return syncRunScores({
+          store: createPostgresRuntimeStore(db, ownerUserId, release, runQueue),
+          runId,
+          publish: publishScore,
+          read: createEvaluationScoreReader(),
+          schema,
+          now: () => new Date().toISOString(),
+        });
+      },
+    };
     const services = {
       datasets: createDatasetService(createPostgresDatasetStore(db, ownerUserId)),
       projects: createProjectService({
@@ -53,13 +72,14 @@ export function createOwnerServices({ db, sp, bundles, release, runQueue }: Owne
       results: createPostgresRuntimeQueries(db, ownerUserId),
       projectRuns: {
         ...createPostgresProjectRunControl(db, ownerUserId, runQueue),
-        readRun: createPostgresProjectRunReader(db, ownerUserId),
+        readRun,
       },
       observations: createPostgresObservationReader(db, ownerUserId),
       metrics: createMetrics({ source: createPostgresMetricsSource(db, ownerUserId) }),
       ...createBundleCatalogs(db, ownerUserId, bundles),
       outputSchemas,
       initialResources: createInitialResourceApi(db, ownerUserId),
+      ...(scores === undefined ? {} : { scores }),
     };
     return { services, release: releaseAdmission };
   };

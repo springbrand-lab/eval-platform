@@ -1,0 +1,96 @@
+import { Link } from "@tanstack/react-router";
+import { Eye, ExternalLink } from "lucide-react";
+import type { AgentMetricView } from "@/api-sdk/types";
+import { StatusBadge } from "@/components/ui/badge";
+import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/card";
+import { DataTable } from "@/components/ui/data-table";
+import { CopyId } from "@/components/ui/data-display";
+import { formatDateTime, formatDuration, formatNumber, formatUsd } from "@/lib/format";
+import { langfuseSessionUrl } from "@/lib/langfuse";
+
+export function LangfuseLink({ chatId, label = "Langfuse 会话" }: { chatId: string | null | undefined; label?: string }) {
+  const url = langfuseSessionUrl(chatId);
+  if (!url) return null;
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[13px] link font-semibold">
+      {label}<ExternalLink className="size-3.5" />
+    </a>
+  );
+}
+
+/** One Agent (the Subject or an Evaluator): status, Attempts, resources and evidence. */
+export function AgentPanel({ title, agent, observe }: {
+  title: string;
+  agent: AgentMetricView;
+  observe?: { to: string; params: Record<string, string> };
+}) {
+  const resources = agent.resources;
+  return (
+    <Card>
+      <CardHeader
+        title={title}
+        actions={(
+          <>
+            <LangfuseLink chatId={agent.chatId} />
+            {observe && agent.chatId && (
+              <Link to={observe.to} params={observe.params as never} className="inline-flex items-center gap-1 text-[13px] link font-semibold">
+                <Eye className="size-3.5" />查看会话
+              </Link>
+            )}
+          </>
+        )}
+      />
+      <CardBody className="flex flex-col gap-5">
+        <div className="grid gap-6 lg:grid-cols-2">
+          <DescriptionList items={[
+            { label: "状态", value: <StatusBadge status={agent.stage.status} /> },
+            ...(agent.stage.lastError ? [{ label: "错误", value: <span className="text-danger">{agent.stage.lastError}</span> }] : []),
+            { label: "开始", value: formatDateTime(agent.firstStartedAt) },
+            { label: "结束", value: formatDateTime(agent.lastCompletedAt) },
+            { label: "耗时", value: formatDuration(agent.agentDurationMs) },
+            { label: "Chat", value: agent.chatId ? <CopyId value={agent.chatId} /> : "—" },
+          ]} />
+          <DescriptionList items={[
+            { label: "Token", value: `${formatNumber(resources.tokens.total.value)}（输入 ${formatNumber(resources.tokens.input.value)} · 输出 ${formatNumber(resources.tokens.output.value)}）` },
+            { label: "积分", value: formatNumber(resources.costs.chargedUnits.value) },
+            { label: "模型成本", value: formatUsd(resources.costs.providerUsd.value) },
+            { label: "模型调用", value: `${formatNumber(resources.modelRequests.count.value)} 次` },
+            { label: "工具调用", value: `${formatNumber(resources.trajectory.tools.count.value)} 次` },
+            { label: "资源统计", value: <StatusBadge status={resources.coverage} /> },
+          ]} />
+        </div>
+        {agent.attempts.items.length > 0 && (
+          <div>
+            <p className="mb-2 text-xs font-semibold text-text-muted">尝试（{agent.attempts.count}，重启 {agent.attempts.restarts} 次）</p>
+            <div className="rounded-[var(--radius-control)] border border-border">
+              <DataTable
+                rows={agent.attempts.items}
+                rowKey={(row) => String(row.attemptNumber)}
+                columns={[
+                  { key: "n", header: "#", cell: (row) => row.attemptNumber },
+                  { key: "status", header: "状态", cell: (row) => <StatusBadge status={row.status} /> },
+                  { key: "start", header: "开始", cell: (row) => formatDateTime(row.startedAt) },
+                  { key: "duration", header: "耗时", cell: (row) => formatDuration(row.durationMs) },
+                  { key: "error", header: "错误", cell: (row) => <span className="line-clamp-2 text-danger">{row.error ?? ""}</span> },
+                ]}
+              />
+            </div>
+          </div>
+        )}
+        {agent.artifacts.length > 0 && (
+          <div>
+            <p className="mb-2 text-xs font-semibold text-text-muted">产物（{agent.artifacts.length}）</p>
+            <ul className="flex flex-col gap-1 font-mono text-[13px]">
+              {agent.artifacts.map((artifact) => (
+                <li key={artifact.artifactId} className="flex items-center gap-2">
+                  <span className="truncate">{artifact.path}</span>
+                  <span className="text-xs text-text-muted">{artifact.kind}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}

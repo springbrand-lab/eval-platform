@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "eval-web",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@eval-platform/eval-web", "dev"],
+      "port": 5176
+    }
+  ]
+}

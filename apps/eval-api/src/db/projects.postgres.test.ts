@@ -31,7 +31,7 @@ import { createPostgresMetricsSource } from "./metrics.js";
 import { createPostgresObservationReader } from "./observation.js";
 import { createOutputSchemaCatalog } from "./output-schemas.js";
 import { createPostgresProjectPlanReader } from "./project-plans.js";
-import { EvalSpApiError } from "../sp/client.js";
+import { EvalSpApiError } from "../sp/http.js";
 import { createPostgresProjectStore } from "./project-store.js";
 import { createPostgresProjectRunReader } from "./run-view.js";
 import { createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore } from "./runtime.js";
@@ -847,7 +847,10 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
   it("creates a Project and runs it through the HTTP control plane with the Runtime admission", async () => {
     const { first, second, subject, evaluator, schema } = await catalog();
     const ownerServices = createOwnerServices({ db: database.db, sp: stub.sp, bundles: {} as BundleDirectory, release, runQueue });
-    const send = requestApp({ webOrigin: WEB_ORIGIN, sp: stub.sp, ownerServices });
+    const send = requestApp({
+      webOrigin: WEB_ORIGIN, sp: stub.sp, ownerServices, spAdminToken: "admin-token", observation: {} as never,
+      serviceAccount: { user: { id: OWNER, role: "user" }, email: "owner@test", sessionToken: OWNER },
+    });
     const created = await send("/api/projects", jsonRequest("POST", {
       name: "HTTP", datasets: [{ datasetId: first.datasetId }, { datasetId: second.datasetId }], samplingCount: 1,
       execution: { userAgentId: subject, framework: "sp", executionConcurrency: 1 },

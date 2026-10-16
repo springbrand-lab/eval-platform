@@ -1,6 +1,6 @@
 import type { ProjectDatasetSnapshot } from "@eval-platform/eval-contracts";
 import type { ProjectSample } from "@eval-platform/eval-runtime";
-import { createId } from "@springbrand/utils";
+import { createId } from "@eval-platform/eval-contracts";
 import type { SelectedDataset } from "../db/project-store.js";
 
 /**

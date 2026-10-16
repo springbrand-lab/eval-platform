@@ -1,4 +1,4 @@
-import { AGENT_STATUSES, EVIDENCE_KINDS } from "@eval-platform/eval-contracts";
+import { AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectSchema } from "@eval-platform/eval-contracts";
 import type {
   AgentResourceSnapshot,
   EvaluationAgentOutput,
@@ -10,16 +10,18 @@ import type { AgentHandle, AgentSubmission, EnsureAgentInput } from "@eval-platf
 import {
   evalEnsureChatSchema,
   evalInitializationResultSchema,
+  evalEvidenceArtifactsSchema,
   evalInitializationSchema,
   evalSubmitSchema,
-  evalTrajectoryMaterializationSchema,
   stableEvalFacts,
   type EvalEnsureChat,
+  type EvalEvidenceArtifact,
+  type EvalEvidenceFileReceipt,
+  type EvalEvidenceTrajectoryPage,
   type EvalInitialization,
   type EvalInitializationResult,
   type EvalSubmissionReceipt,
   type EvalSubmit,
-  type EvalTrajectoryMaterialization,
 } from "@springbrand/eval-harness";
 import { z } from "zod";
 import { SpHarnessError } from "./harness-error.js";
@@ -47,7 +49,7 @@ export function ensureChatRequest(input: EnsureAgentInput): EvalEnsureChat {
     samplingId: input.samplingId,
     projectId: input.projectId,
     agentConfig: { ownerUserId: input.agentConfig.ownerUserId, userAgentId: input.agentConfig.userAgentId },
-    ...(input.evaluationWorkspace === undefined ? {} : { evaluationWorkspace: input.evaluationWorkspace }),
+    ...(input.evaluationId === undefined ? {} : { evaluationId: input.evaluationId }),
     ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
   }, "Chat");
 }
@@ -60,10 +62,6 @@ export function submitRequest(input: EvalSubmit): EvalSubmit {
   return request<EvalSubmit>(evalSubmitSchema, input, "Submission");
 }
 
-export function trajectoryRequest(input: EvalTrajectoryMaterialization): EvalTrajectoryMaterialization {
-  return request<EvalTrajectoryMaterialization>(evalTrajectoryMaterializationSchema, input, "trajectory");
-}
-
 /** SP echoes the immutable creation facts; any difference means the Chat belongs to someone else. */
 export function agentHandle(value: unknown, chat: EvalEnsureChat): AgentHandle {
   const handle: AgentHandle = {
@@ -72,7 +70,7 @@ export function agentHandle(value: unknown, chat: EvalEnsureChat): AgentHandle {
     ownerUserId: chat.agentConfig.ownerUserId,
     chatId: chat.chatId,
     samplingId: chat.samplingId,
-    ...(chat.evaluationWorkspace === undefined ? {} : { evaluationWorkspace: chat.evaluationWorkspace }),
+    ...(chat.evaluationId === undefined ? {} : { evaluationId: chat.evaluationId }),
   };
   if (stableEvalFacts(value) !== stableEvalFacts(handle)) {
     throw new SpHarnessError("Eval SP returned an Agent handle with different creation facts", false);
@@ -171,4 +169,23 @@ const resourceSnapshotSchema = z.object({
 
 export function resourceSnapshot(value: unknown): AgentResourceSnapshot {
   return response(resourceSnapshotSchema, value, "resource snapshot");
+}
+
+export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact[] {
+  return response(evalEvidenceArtifactsSchema, value, "evidence artifact list").artifacts;
+}
+
+export function evidenceTrajectoryPage(value: unknown) {
+  return response(z.object({
+    events: z.array(z.object({ ingestSeq: z.number().int().positive().safe(), event: jsonObjectSchema })),
+    nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
+  }) satisfies z.ZodType<EvalEvidenceTrajectoryPage>, value, "evidence trajectory page");
+}
+
+export function evidenceFileReceipt(value: unknown): EvalEvidenceFileReceipt {
+  return response(z.object({
+    path: id,
+    size: z.number().int().nonnegative(),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  }), value, "evidence file receipt");
 }

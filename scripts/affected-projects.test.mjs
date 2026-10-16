@@ -71,3 +71,13 @@ test("ignores documentation-only changes", () => {
     any: false,
   });
 });
+
+test("deploys the API when its deployment files change", () => {
+  assert.deepEqual(affectedProjects(["infra/aws/deploy/compose.yaml"]), {
+    api: true,
+    cli: false,
+    web: false,
+    packages: false,
+    any: true,
+  });
+});

@@ -32,3 +32,40 @@ export const observeEvaluation: AppRouteHandler<typeof routes.observeEvaluation>
   const { projectId, evaluationId } = c.req.valid("param");
   return ok(c, await c.var.services.observations.evaluator(projectId, evaluationId));
 };
+
+async function observedChat(c: Parameters<AppRouteHandler<typeof routes.observeChat>>[0] | Parameters<AppRouteHandler<typeof routes.observeFile>>[0],
+  projectId: string, kind: "samplings" | "evaluations", id: string) {
+  const observations = c.var.services.observations;
+  const ref = kind === "samplings" ? await observations.subject(projectId, id) : await observations.evaluator(projectId, id);
+  if (!ref.chatId) throw new HttpError("EVAL_SP_NOT_FOUND", "The Agent has not started yet");
+  return { ownerUserId: ref.ownerUserId, chatId: ref.chatId };
+}
+
+export const observeChat: AppRouteHandler<typeof routes.observeChat> = async (c) => {
+  const { projectId, kind, id, part } = c.req.valid("param");
+  const chat = await observedChat(c, projectId, kind, id);
+  const observation = c.env.observation;
+  if (part === "messages") return ok(c, await observation.messages(chat));
+  if (part === "tree") return ok(c, await observation.tree(chat));
+  const { limit, beforeSeq } = c.req.valid("query");
+  return ok(c, await observation.trajectory(chat, {
+    ...(limit === undefined ? {} : { limit }),
+    ...(beforeSeq === undefined ? {} : { beforeSeq }),
+  }));
+};
+
+/** Bytes go out as an attachment under a sandbox CSP, so a Workspace file never runs in Eval's origin. */
+export const observeFile: AppRouteHandler<typeof routes.observeFile> = async (c) => {
+  const { projectId, kind, id } = c.req.valid("param");
+  const chat = await observedChat(c, projectId, kind, id);
+  const file = await c.env.observation.file(chat, c.req.valid("query").path);
+  const headers = new Headers({
+    "Content-Type": file.contentType,
+    "Content-Disposition": "attachment",
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "private, no-store",
+  });
+  if (file.contentLength !== null) headers.set("Content-Length", file.contentLength);
+  return new Response(file.body, { status: 200, headers }) as never;
+};

@@ -42,7 +42,7 @@ describe("Eval Bundle directory", () => {
     await expect(source.resolveInitialSession(owner, { bundleId, sessionId }))
       .resolves.toEqual({ format: "jsonl", content: `${userEntry("m1")}\n` });
     await expect(source.resolveInitialMaterials(otherOwner, { bundleId, materialId })).rejects.toMatchObject(failure("not-found"));
-    await expect(source.resolveInitialSession(owner, { bundleId, sessionId: resourceId(1) })).resolves.toBeUndefined();
+    await expect(source.resolveInitialSession(owner, { bundleId, sessionId: resourceId(1) })).rejects.toMatchObject(failure("not-found"));
     await source.removeInitialMaterials(owner, { bundleId, materialId });
     await source.removeInitialMaterials(owner, { bundleId, materialId });
     await expect(source.resolveInitialMaterials(owner, { bundleId, materialId })).rejects.toMatchObject(failure("not-found"));
@@ -111,7 +111,7 @@ describe("Eval Bundle directory", () => {
     await expect(source.resolveInitialMaterials(otherOwner, { bundleId, materialId })).resolves.toEqual(files);
     await expect(source.resolveInitialMaterials(otherOwner, { bundleId, materialId: resourceId(1) }))
       .rejects.toMatchObject(failure("not-found"));
-    await expect(source.resolveInitialSession(otherOwner, { bundleId, sessionId: resourceId(1) })).resolves.toBeUndefined();
+    await expect(source.resolveInitialSession(otherOwner, { bundleId, sessionId: resourceId(1) })).rejects.toMatchObject(failure("not-found"));
   });
 
   it("applies the SP material file contract when uploading and when reading an existing manifest", async () => {

@@ -162,7 +162,7 @@ export function evaluation(evaluationId = "evaluation-1", patch: Partial<Evaluat
     output: {
       status: "succeeded",
       structuredOutput: {
-        path: `/evaluations/${evaluationId}/result.json`,
+        path: "/output/result.json",
         content: typeof result === "string" ? result : JSON.stringify(result),
       },
       artifacts: [{ artifactId: `report:${evaluationId}`, kind: "report", path: "/evaluation.json" }],

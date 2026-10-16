@@ -1,5 +1,5 @@
 import type { AgentConfigRef, AgentConfigSnapshot, AgentRole, JsonValue } from "@eval-platform/eval-contracts";
-import { createId } from "@springbrand/utils";
+import { createId } from "@eval-platform/eval-contracts";
 import { AgentConfigFrozenError } from "./db/errors.js";
 import type { PostgresProjectStore } from "./db/project-store.js";
 import type { EvalSpAgentConfig, EvalSpClient } from "./sp/client.js";

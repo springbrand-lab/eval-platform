@@ -11,10 +11,10 @@ export function requestApp(runtime: ApiRuntime) {
 }
 
 /** Request options for an authenticated JSON call. */
-export function jsonRequest(method: string, body: unknown, token = "session"): RequestInit {
+export function jsonRequest(method: string, body: unknown, token = "session", headers: Record<string, string> = {}): RequestInit {
   return {
     method,
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...headers },
     body: typeof body === "string" ? body : JSON.stringify(body),
   };
 }

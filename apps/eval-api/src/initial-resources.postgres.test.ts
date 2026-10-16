@@ -1,16 +1,15 @@
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { createDatasetService } from "@eval-platform/eval-dataset";
 import { EVAL_INITIAL_FILE_MAX_BYTES, EVAL_INITIALIZATION_MAX_BYTES, EVAL_MATERIAL_MAX_FILES } from "@springbrand/eval-harness";
 import { TextReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
-import { migrate } from "drizzle-orm/node-postgres/migrator";
-import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createEvalDb } from "./db/client.js";
+import type { EvalDb } from "./db/client.js";
 import { createPostgresDatasetStore } from "./db/dataset.js";
 import { createPostgresProjectPlanReader } from "./db/project-plans.js";
 import { seedProject } from "./db/test-fixtures.js";
+import { createTestDatabase } from "./db/test-database.js";
 import { BundleResourceInUseError, BundleResourceNotFoundError } from "./db/errors.js";
 import { createBundleCatalogs } from "./db/resource-catalog.js";
 import { bundleMaterials } from "./db/schema.js";
@@ -26,14 +25,20 @@ const otherOwner = "22222222-2222-4222-8222-222222222222";
 
 const release = { sourceBranch: "release-2.0.0", sourceCommit: "a".repeat(40) };
 const sp = {
-  async verifySession(token: string) { return { id: token === "other" ? otherOwner : owner, role: "user" as const }; },
   async getAgentConfig(_token: string, id: string) { return { id, user_id: owner, name: id }; },
 } as EvalSpClient;
 
-/** The full HTTP stack over PostgreSQL; the Bearer token selects the verified owner. */
-function httpClient(db: ReturnType<typeof createEvalDb>, bundles: BundleDirectory) {
-  const send = requestApp({ webOrigin: WEB_ORIGIN, sp, ownerServices: createOwnerServices({ db, sp, bundles, release, runQueue: { async enqueue() {} } }) });
-  return async (path: string, method: string, body?: unknown, token = "owner") => send(path,
+/** One full HTTP stack per service account over PostgreSQL; `token` picks the account. */
+function httpClient(db: EvalDb, bundles: BundleDirectory) {
+  const ownerServices = createOwnerServices({ db, sp, bundles, release, runQueue: { async enqueue() {} } });
+  const send = (token: string) => requestApp({
+    webOrigin: WEB_ORIGIN, sp, ownerServices,
+    spAdminToken: "admin-token",
+    observation: {} as never,
+    serviceAccount: { user: { id: token === "other" ? otherOwner : owner, role: "user" }, email: `${token}@test`, sessionToken: token },
+  });
+  const apps = { owner: send("owner"), other: send("other") };
+  return async (path: string, method: string, body?: unknown, token: "owner" | "other" = "owner") => apps[token](path,
     body === undefined ? authorized(token, { method })
       : body instanceof FormData ? authorized(token, { method, body }) : jsonRequest(method, body, token));
 }
@@ -70,38 +75,24 @@ async function code(response: Response): Promise<string> {
 }
 
 describe.skipIf(!connection)("Dataset resource catalog", () => {
-  let pool: Pool;
-  let databaseName: string;
+  let database: Awaited<ReturnType<typeof createTestDatabase>>;
   let bundleRoot: string;
 
   beforeAll(async () => {
-    databaseName = `eval_resources_${crypto.randomUUID().replaceAll("-", "")}`;
-    const adminUrl = new URL(connection!);
-    adminUrl.pathname = "/postgres";
-    const admin = new Pool({ connectionString: adminUrl.toString() });
-    try { await admin.query(`CREATE DATABASE "${databaseName}"`); }
-    finally { await admin.end(); }
-    const target = new URL(connection!);
-    target.pathname = `/${databaseName}`;
-    pool = new Pool({ connectionString: target.toString() });
-    await migrate(createEvalDb(pool), { migrationsFolder: resolve("migrations-postgres") });
+    database = await createTestDatabase(connection!);
     bundleRoot = await mkdtemp(join(tmpdir(), "eval-resources-"));
   }, 30_000);
 
   afterAll(async () => {
-    if (pool) await pool.end();
-    if (bundleRoot) await rm(bundleRoot, { recursive: true, force: true });
-    if (databaseName) {
-      const adminUrl = new URL(connection!);
-      adminUrl.pathname = "/postgres";
-      const admin = new Pool({ connectionString: adminUrl.toString() });
-      try { await admin.query(`DROP DATABASE "${databaseName}"`); }
-      finally { await admin.end(); }
+    try {
+      if (bundleRoot) await rm(bundleRoot, { recursive: true, force: true });
+    } finally {
+      if (database) await database.destroy();
     }
-  });
+  }, 30_000);
 
   it("creates, edits, lists and soft-deletes individual resources while existing Data keeps its refs", async () => {
-    const db = createEvalDb(pool);
+    const db = database.db;
     const dataset = createDatasetService(createPostgresDatasetStore(db, owner));
     const original = await dataset.createData({ userPrompt: "Build page", metadata: { priority: 3 } });
     const bundles = await openBundleDirectory(bundleRoot);
@@ -243,7 +234,7 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
   });
 
   it("keeps UUID resource bindings effective when the client uses uppercase IDs", async () => {
-    const db = createEvalDb(pool);
+    const db = database.db;
     const directory = await openBundleDirectory(bundleRoot);
     const { materialBundles, sessionBundles } = createBundleCatalogs(db, owner, directory);
     const dataset = createDatasetService(createPostgresDatasetStore(db, owner));
@@ -311,7 +302,7 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
   });
 
   it("rejects binding one field's Materials whose catalog sizes together exceed one SP initialization", async () => {
-    const db = createEvalDb(pool);
+    const db = database.db;
     const bundles = await openBundleDirectory(bundleRoot);
     const send = httpClient(db, bundles);
     const { materialBundles } = createBundleCatalogs(db, owner, bundles);
@@ -354,7 +345,7 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
   });
 
   it("blocks deleting a Material listed at any position of either material list", async () => {
-    const db = createEvalDb(pool);
+    const db = database.db;
     const { materialBundles } = createBundleCatalogs(db, owner, await openBundleDirectory(bundleRoot));
     const dataset = createDatasetService(createPostgresDatasetStore(db, owner));
     const api = createInitialResourceApi(db, owner);
@@ -390,7 +381,7 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
   });
 
   it("creates Bundles with their ZIP resources and imports more, all or nothing", async () => {
-    const db = createEvalDb(pool);
+    const db = database.db;
     const bundles = await openBundleDirectory(bundleRoot);
     const send = httpClient(db, bundles);
     const jsonl = `${sessionEntry("m1")}\n${sessionEntry("m2")}\n`;
@@ -479,16 +470,16 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
   });
 
   it("removes every file a batch wrote when the batch cannot commit", async () => {
-    const db = createEvalDb(pool);
+    const db = database.db;
     const directory = await openBundleDirectory(bundleRoot);
     const { sessionBundles } = createBundleCatalogs(db, owner, directory);
     const input = (name: string) => ({ name, description: "Batch", format: "json" as const, content: sessionFile("m1") });
     const rejected = { cause: expect.objectContaining({ message: "rejected by test" }) };
     const listed = await sessionBundles.list();
     const filesBefore = await storedFiles(bundleRoot);
-    await pool.query(`CREATE FUNCTION eval_test_reject() RETURNS trigger LANGUAGE plpgsql AS $$
+    await database.db.$client.query(`CREATE FUNCTION eval_test_reject() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN IF NEW.name = 'reject.json' THEN RAISE EXCEPTION 'rejected by test'; END IF; RETURN NEW; END $$`);
-    await pool.query("CREATE TRIGGER eval_test_reject BEFORE INSERT ON eval_bundle_sessions FOR EACH ROW EXECUTE FUNCTION eval_test_reject()");
+    await database.db.$client.query("CREATE TRIGGER eval_test_reject BEFORE INSERT ON eval_bundle_sessions FOR EACH ROW EXECUTE FUNCTION eval_test_reject()");
     try {
       await expect(sessionBundles.create({ name: "Rejected", description: "Batch" }, [input("ok.json"), input("reject.json")]))
         .rejects.toMatchObject(rejected);
@@ -508,13 +499,13 @@ describe.skipIf(!connection)("Dataset resource catalog", () => {
       expect(failure).toBeInstanceOf(AggregateError);
       expect((failure as AggregateError).errors).toEqual([expect.objectContaining(rejected), new Error("disk unavailable")]);
     } finally {
-      await pool.query("DROP TRIGGER eval_test_reject ON eval_bundle_sessions");
-      await pool.query("DROP FUNCTION eval_test_reject()");
+      await database.db.$client.query("DROP TRIGGER eval_test_reject ON eval_bundle_sessions");
+      await database.db.$client.query("DROP FUNCTION eval_test_reject()");
     }
   });
 
   it("uploads standalone output formats that evaluation plans keep reading after a soft delete", async () => {
-    const db = createEvalDb(pool);
+    const db = database.db;
     const send = httpClient(db, await openBundleDirectory(bundleRoot));
     const schema = { type: "object", required: ["score"], properties: { score: { type: "number" } } };
     const upload = await send("/api/evaluation-output-schemas", "POST", {

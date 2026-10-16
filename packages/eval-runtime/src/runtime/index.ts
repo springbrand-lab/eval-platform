@@ -45,6 +45,13 @@ export {
   type RuntimePersistenceOutcome,
 } from "./errors.js";
 export type { RetryController, RetryDecision, RetryOperation } from "./retry.js";
+export {
+  publishEvaluationScore,
+  syncRunScores,
+  type EvaluationScore,
+  type EvaluationScorePort,
+  type ScoreSyncSummary,
+} from "./scores.js";
 
 export function createEvalRunAdmission(dependencies: EvalRunAdmissionDependencies): EvalRunAdmission {
   const admission = new RunAdmission(dependencies);

@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentConfigFrozenError, ProjectEvaluationPlanLockedError } from "./db/errors.js";
 import type { ApiRuntime, OwnerServices } from "./lib/types.js";
 import { METADATA_BODY_BYTES, RUN_TARGET_IDS, SAMPLING_COUNT_MAX, ZIP_BODY_BYTES } from "./limits.js";
-import { EvalSpApiError, EvalSpTransportError, type EvalSpClient } from "./sp/client.js";
+import type { EvalSpClient } from "./sp/client.js";
+import { EvalSpApiError } from "./sp/http.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "./test-support.js";
 
 const owner = "11111111-1111-4111-8111-111111111111";
@@ -76,12 +77,28 @@ function setup() {
     },
   };
   const sp = {
-    verifySession: vi.fn(async (token: string) => token === "session" ? { id: owner, role: "user" as const } : null),
+    getCreditBalance: vi.fn(async () => ({ availableUnits: 500, topupRemainingUnits: 0, otherRemainingUnits: 500 })),
+    grantCredits: vi.fn(async (_token: string, input: { email: string; units: number; adjustmentId: string }) =>
+      ({ userId: owner, email: input.email, adjustmentId: input.adjustmentId, units: input.units, replayed: false })),
+    listCreditGrants: vi.fn(async () => []),
+  };
+  const observation = {
+    messages: vi.fn(async () => [{ id: "m1", role: "user", parts: [{ type: "text", text: "Build a page" }] }]),
+    tree: vi.fn(async () => [{ name: "index.html", path: "/index.html", type: "file" }]),
+    trajectory: vi.fn(async () => ({ events: [], beforeSeq: null, hasOlder: false })),
+    file: vi.fn(async () => ({ body: new Blob(["<h1>Hi</h1>"]).stream(), contentType: "text/html", contentLength: "11" })),
   };
   const release = vi.fn();
   const ownerServices = vi.fn(() => ({ services: services as unknown as OwnerServices, release }));
-  const runtime: ApiRuntime = { webOrigin: WEB_ORIGIN, sp: sp as unknown as EvalSpClient, ownerServices };
-  return { request: requestApp(runtime), services, sp, ownerServices, release };
+  const runtime: ApiRuntime = {
+    webOrigin: WEB_ORIGIN,
+    sp: sp as unknown as EvalSpClient,
+    serviceAccount: { user: { id: owner, role: "user" }, email: "eval-service@test", sessionToken: "service-session" },
+    spAdminToken: "admin-token",
+    ownerServices,
+    observation,
+  };
+  return { request: requestApp(runtime), services, sp, ownerServices, release, observation, runtime };
 }
 
 describe("Eval API HTTP layer", () => {
@@ -92,17 +109,15 @@ describe("Eval API HTTP layer", () => {
     expect(await response.json()).toEqual({ success: true, msg: { status: "ok" }, errMsg: "", code: "" });
   });
 
-  it("requires a verified Eval SP session before composing owner services", async () => {
+  it("runs every request as the fixed service account without request credentials", async () => {
     const app = setup();
-    const missing = await app.request("/api/projects");
-    const invalid = await app.request("/api/projects", authorized("expired"));
-    expect([missing.status, invalid.status]).toEqual([401, 401]);
-    expect(await invalid.json()).toMatchObject({ code: "AUTH_UNAUTHENTICATED", requestId: invalid.headers.get("x-request-id") });
-    expect(app.ownerServices).not.toHaveBeenCalled();
-    app.sp.verifySession.mockRejectedValueOnce(new EvalSpTransportError(new Error("connect refused")));
-    const unavailable = await app.request("/api/projects", authorized());
-    expect(unavailable.status).toBe(503);
-    expect(await unavailable.json()).toMatchObject({ code: "EVAL_SP_UNAVAILABLE" });
+    const anonymous = await app.request("/api/projects");
+    const otherToken = await app.request("/api/projects", authorized("someone-else"));
+    expect([anonymous.status, otherToken.status]).toEqual([200, 200]);
+    expect(app.ownerServices).toHaveBeenNthCalledWith(1, { id: owner, role: "user" }, "service-session");
+    expect(app.ownerServices).toHaveBeenNthCalledWith(2, { id: owner, role: "user" }, "service-session");
+    const me = await app.request("/api/me");
+    expect(await me.json()).toMatchObject({ msg: { id: owner } });
   });
 
   it("admits only the Eval Web browser origin and keeps CORS headers on failures", async () => {
@@ -126,7 +141,7 @@ describe("Eval API HTTP layer", () => {
     const created = await app.request("/api/projects", jsonRequest("POST", createBody));
     expect(created.status).toBe(201);
     expect(await created.json()).toMatchObject({ success: true, msg: { project: { name: "Tasks" }, run: { runId: "run-1" } } });
-    expect(app.ownerServices).toHaveBeenCalledWith({ id: owner, role: "user" }, "session");
+    expect(app.ownerServices).toHaveBeenCalledWith({ id: owner, role: "user" }, "service-session");
     app.services.results.getRun.mockRejectedValueOnce(new Error("database password is secret"));
     const failed = await app.request("/api/runs/run-1", authorized());
     expect(failed.status).toBe(500);
@@ -340,6 +355,58 @@ describe("Eval API HTTP layer", () => {
       [{ projectId: "project-1" }],
     ]);
     expect(app.services.metrics.getSampleOverview).toHaveBeenCalledWith({ projectId: "project-1", runIds: ["run-1"], projectSampleId: "sample-1" });
+  });
+
+  it("accepts only requests carrying the eval-web token once one is configured, and records the actor", async () => {
+    const app = setup();
+    const runtime = { ...app.runtime, webApiToken: "w".repeat(40) };
+    const request = requestApp(runtime);
+    expect((await request("/api/projects")).status).toBe(401);
+    expect((await request("/api/projects", { headers: { "X-Eval-Web-Token": "x".repeat(40) } })).status).toBe(401);
+    expect((await request("/api/projects", { headers: { "X-Eval-Web-Token": "w".repeat(40) } })).status).toBe(200);
+    const granted = await request("/api/credits/grants", jsonRequest("POST", { units: 5, idempotencyKey: "k-actor", note: "batch" }, undefined, {
+      "X-Eval-Web-Token": "w".repeat(40),
+      "X-Eval-Actor": encodeURIComponent(JSON.stringify({ id: "ou_1", name: "张三" })),
+    }));
+    expect(granted.status).toBe(200);
+    expect(app.sp.grantCredits).toHaveBeenLastCalledWith("admin-token", expect.objectContaining({ note: "[张三] batch" }));
+    expect((await app.request("/healthz")).status).toBe(200);
+  });
+
+  it("proxies read-only Chat observation and serves Workspace files as sandboxed attachments", async () => {
+    const app = setup();
+    const messages = await app.request("/api/projects/project-1/samplings/s-1/observation/messages");
+    expect(await messages.json()).toMatchObject({ success: true, msg: [{ id: "m1" }] });
+    expect(app.observation.messages).toHaveBeenCalledWith({ ownerUserId: owner, chatId: "chat-1" });
+    const page = await app.request("/api/projects/project-1/samplings/s-1/observation/trajectory?limit=50&beforeSeq=9");
+    expect(page.status).toBe(200);
+    expect(app.observation.trajectory).toHaveBeenCalledWith({ ownerUserId: owner, chatId: "chat-1" }, { limit: 50, beforeSeq: 9 });
+    const file = await app.request("/api/projects/project-1/samplings/s-1/observation/file?path=%2Findex.html");
+    expect(file.status).toBe(200);
+    expect(file.headers.get("content-disposition")).toBe("attachment");
+    expect(file.headers.get("content-security-policy")).toContain("sandbox");
+    expect(await file.text()).toBe("<h1>Hi</h1>");
+    const notStarted = await app.request("/api/projects/project-1/evaluations/e-1/observation/tree");
+    expect(notStarted.status).toBe(404);
+    expect((await app.request("/api/projects/project-1/samplings/s-1/observation/history")).status).toBe(422);
+  });
+
+  it("reads the balance and grants credits only to the service account", async () => {
+    const app = setup();
+    const balance = await app.request("/api/credits");
+    expect(await balance.json()).toMatchObject({ msg: { availableUnits: 500 } });
+    expect(app.sp.getCreditBalance).toHaveBeenCalledWith("service-session");
+    const granted = await app.request("/api/credits/grants", jsonRequest("POST", { units: 1000, idempotencyKey: "topup-1", note: "first batch" }));
+    expect(granted.status).toBe(200);
+    expect(app.sp.grantCredits).toHaveBeenCalledWith("admin-token", {
+      email: "eval-service@test", units: 1000, adjustmentId: "eval-platform:topup-1", note: "first batch",
+    });
+    const foreign = await app.request("/api/credits/grants", jsonRequest("POST", { units: 1, idempotencyKey: "k", email: "other@test" }));
+    const negative = await app.request("/api/credits/grants", jsonRequest("POST", { units: -5, idempotencyKey: "k" }));
+    expect([foreign.status, negative.status]).toEqual([422, 422]);
+    expect(app.sp.grantCredits).toHaveBeenCalledTimes(1);
+    await app.request("/api/credits/grants?limit=5");
+    expect(app.sp.listCreditGrants).toHaveBeenCalledWith("admin-token", { email: "eval-service@test", limit: 5 });
   });
 
   it("proxies Agent Configs, rejects frozen copy writes and relays SP validation text", async () => {

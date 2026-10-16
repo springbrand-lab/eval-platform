@@ -1,12 +1,15 @@
 import { createEvalRunResumer } from "@eval-platform/eval-runtime";
+import { createEvaluationScoreReader } from "@eval-platform/eval-metrics";
 import { errorDiagnostics } from "@springbrand/http/server";
 import { Pool } from "pg";
 import type { Logger } from "pino";
 import type { WorkerConfig } from "./config/worker.js";
 import { createEvalDb } from "./db/client.js";
 import { createPostgresWorkerProjectPlanReader } from "./db/project-plans.js";
+import { createLangfuseScorePublisher } from "./langfuse/scores.js";
 import { createPostgresWorkerRuntimeStore } from "./db/runtime.js";
 import { createRunQueue, openRunBoss } from "./run-worker-queue.js";
+import { openEvidenceStore } from "./evidence/store.js";
 import { openBundleDirectory } from "./sp/bundle-directory.js";
 import { createSpHarness } from "./sp/harness.js";
 import { startEvalRunWorker } from "./worker.js";
@@ -19,6 +22,7 @@ export interface SpEvalRunWorkerProcess {
 /** Runs admitted, persisted Runs from their Project plans. Admission belongs to the API process. */
 export async function startSpEvalRunWorkerProcess(config: WorkerConfig, logger: Logger): Promise<SpEvalRunWorkerProcess> {
   const bundles = await openBundleDirectory(config.EVAL_BUNDLE_DIR);
+  const evidence = await openEvidenceStore(config);
   const boss = await openRunBoss(config.DATABASE_URL, logger, { useListenNotify: true });
   const pool = new Pool({ connectionString: config.DATABASE_URL });
   try {
@@ -34,6 +38,11 @@ export async function startSpEvalRunWorkerProcess(config: WorkerConfig, logger: 
         resolveInitialSession: bundles.resolveInitialSession,
       }),
       store,
+      evidence,
+      ...(config.langfuse === undefined ? {} : { scores: {
+        read: createEvaluationScoreReader(),
+        publish: createLangfuseScorePublisher({ config: config.langfuse }),
+      } }),
       onError: (error) => logger.error({ error: errorDiagnostics(error) }, "run_runtime_error"),
     });
     const worker = await startEvalRunWorker({

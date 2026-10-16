@@ -1,0 +1,112 @@
+/*
+ * Design tokens, modelled on Langfuse: neutral zinc greys, a near-black (light) / near-white (dark) primary,
+ * a neutral accent (no hue) for selection and links, and paired soft-fill/strong-text status colours.
+ * The only hues in the app are the status colours and the brand mark.
+ * Dark mode is fully neutral (no blue cast) and keeps body text at ~70% so headings carry the contrast.
+ * Components use only these names.
+ */
+:root {
+  --bg: hsl(0 0% 100%);
+  --sidebar: hsl(0 0% 98.5%);
+  --surface: hsl(0 0% 100%);
+  --surface-muted: hsl(240 4.8% 95.9%);
+  --surface-hover: hsl(240 4.8% 96.9%);
+  --surface-code: hsl(240 5% 96.5%);
+  --border: hsl(240 5.9% 90%);
+  --border-strong: hsl(240 4.9% 83.9%);
+  --input: hsl(240 5.9% 88%);
+  --text-strong: hsl(240 5.9% 10%);
+  --text: hsl(240 3.7% 15.9%);
+  --text-secondary: hsl(240 5.2% 33.9%);
+  --text-muted: hsl(240 3.8% 46.1%);
+  --text-faint: hsl(240 5% 64.9%);
+  --primary: hsl(240 5.9% 10%);
+  --primary-hover: hsl(240 5.2% 26%);
+  --primary-fg: hsl(0 0% 98%);
+  --accent: hsl(240 5.9% 10%);
+  --accent-soft: hsl(240 4.8% 95.9%);
+  --link: hsl(240 5.9% 10%);
+  --ring: hsl(240 5% 64.9%);
+  --success: oklch(43.2% 0.095 166.913);
+  --success-soft: oklch(95% 0.052 163.051 / 0.7);
+  --warning: oklch(47.6% 0.114 61.907);
+  --warning-soft: oklch(97.3% 0.071 103.193 / 0.7);
+  --danger: oklch(57.7% 0.245 27.325);
+  --danger-soft: oklch(93.6% 0.032 17.717 / 0.7);
+  --info: hsl(227.1 75.7% 41.1%);
+  --info-soft: hsl(214 94.6% 92.7% / 0.7);
+  --shadow: 0 1px 2px hsl(240 6% 10% / 0.04), 0 4px 16px hsl(240 6% 10% / 0.06);
+  --overlay: hsl(240 6% 10% / 0.4);
+  color-scheme: light;
+}
+
+html.dark {
+  --bg: hsl(0 0% 6%);
+  --sidebar: hsl(0 0% 4%);
+  --surface: hsl(0 0% 7.5%);
+  --surface-muted: hsl(0 0% 11.6%);
+  --surface-hover: hsl(0 0% 10%);
+  --surface-code: hsl(0 0% 4%);
+  --border: hsl(0 0% 16%);
+  --border-strong: hsl(0 0% 24%);
+  --input: hsl(0 0% 20%);
+  --text-strong: hsl(0 0% 91%);
+  --text: hsl(0 0% 76%);
+  --text-secondary: hsl(0 0% 64%);
+  --text-muted: hsl(0 0% 54%);
+  --text-faint: hsl(0 0% 40%);
+  --primary: hsl(0 0% 90%);
+  --primary-hover: hsl(0 0% 78%);
+  --primary-fg: hsl(0 0% 6%);
+  --accent: hsl(0 0% 91%);
+  --accent-soft: hsl(0 0% 13%);
+  --link: hsl(0 0% 91%);
+  --ring: hsl(0 0% 40%);
+  --success: oklch(76.5% 0.177 163.223);
+  --success-soft: oklch(37.8% 0.077 168.94 / 0.45);
+  --warning: oklch(79.5% 0.184 86.047);
+  --warning-soft: oklch(55.4% 0.135 66.442 / 0.25);
+  --danger: oklch(72% 0.17 27.325);
+  --danger-soft: oklch(39.6% 0.141 25.723 / 0.45);
+  --info: hsl(209 88% 66%);
+  --info-soft: hsl(209 45% 15%);
+  --shadow: 0 1px 2px hsl(0 0% 0% / 0.4), 0 8px 24px hsl(0 0% 0% / 0.45);
+  --overlay: hsl(0 0% 0% / 0.6);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-sidebar: var(--sidebar);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-surface-hover: var(--surface-hover);
+  --color-surface-code: var(--surface-code);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-input: var(--input);
+  --color-text-strong: var(--text-strong);
+  --color-text: var(--text);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-text-faint: var(--text-faint);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-fg: var(--primary-fg);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-link: var(--link);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --radius-card: 8px;
+  --radius-control: 6px;
+}

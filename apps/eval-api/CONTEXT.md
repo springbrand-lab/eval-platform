@@ -21,9 +21,9 @@ by Eval SP; only the Worker Store and plan reader cross users. Metrics and Run
 views read in sets under one repeatable-read, read-only transaction and reuse
 the Runtime's status projection.
 
-The Hono HTTP control plane (`start:api`) verifies every Bearer session with
-Eval SP, assembles owner-scoped services once per owner and routes Dataset,
-Project, Run, Metrics, observation, Agent Config and initial-resource
+The Hono HTTP control plane (`start:api`) runs as one fixed Eval SP service
+account verified once at startup, assembles owner-scoped services once per owner and routes Dataset,
+Project, Run, Metrics, observation, Agent Config, credit and initial-resource
 operations. Run admission and stop
 requests commit their facts and enqueue a pg-boss Run job in one transaction;
 the HTTP process never executes an Agent or holds the SP service credential.
@@ -33,5 +33,8 @@ The Run Worker (`start:worker`) consumes those jobs with the real Eval SP
 Harness and calls the Runtime's `resume()`; it never stores a second Run
 status. Several Worker instances may run at once. A shared `EVAL_BUNDLE_DIR`
 stores each user's uploaded material and optional Session content for both
-processes. Scheduling and stop semantics are recorded in
+processes. The Worker alone owns the evidence store (`src/evidence/`): an
+Eval-only R2 bucket, or `evidence/` under that directory, holding each
+succeeded Subject's content-addressed evidence bundle that Evaluators import
+into their own Space. Scheduling and stop semantics are recorded in
 `docs/architecture.md`; process configuration is in `README.md`.

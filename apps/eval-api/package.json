@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit",
+    "build": "esbuild src/server.ts src/run-worker-main.ts src/migrate.ts --bundle --platform=node --format=esm --target=node24 --main-fields=module,main --outdir=dist --metafile=dist/build-meta.json --entry-names=[name] --external:pg --external:bufferutil --external:utf-8-validate --external:supports-color --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
     "check": "tsc --noEmit",
     "test": "vitest run",
     "start:api": "tsx src/server.ts",
@@ -20,9 +20,8 @@
     "@eval-platform/eval-runtime": "workspace:*",
     "@hono/node-server": "1.19.17",
     "@hono/zod-openapi": "1.5.1",
-    "@springbrand/eval-harness": "link:../../../sp-platform/packages/eval-harness",
+    "@springbrand/eval-harness": "0.1.0-alpha.0",
     "@springbrand/http": "0.1.0-alpha.4",
-    "@springbrand/utils": "link:../../../sp-platform/packages/utils",
     "ajv": "^8.20.0",
     "drizzle-orm": "^0.45.2",
     "hono": "4.12.33",
@@ -32,7 +31,6 @@
     "pg-boss": "12.28.0",
     "pino": "10.3.1",
     "stoker": "2.0.1",
-    "tsx": "^4.23.15",
     "ws": "^8.22.0",
     "zod": "4.6.5"
   },
@@ -43,7 +41,10 @@
     "@types/ws": "^8.18.2",
     "@zip.js/zip.js": "2.8.41",
     "drizzle-kit": "^0.31.10",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "yaml": "^2.9.1"
   }
 }

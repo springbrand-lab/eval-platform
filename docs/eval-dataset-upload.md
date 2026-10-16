@@ -43,7 +43,7 @@ Invalid archives, entries and content are `400 BUNDLE_FILE_INVALID` and exceeded
 
 ## Catalog rules
 
-Every route requires the Eval SP Bearer session. The API obtains the owner from that session, not the body. Catalog queries and writes use the owner in SQL, and Bundle file writes use the same owner directory. Missing Bundles or resources return `404`.
+Every route runs as the fixed Eval SP service account. The API takes the owner from that account, never from the body. Catalog queries and writes use the owner in SQL, and Bundle file writes use the same owner directory. Missing Bundles or resources return `404`.
 
 An output format is one standalone, immutable draft 2020-12 JSON Schema file. It has a server-generated UUID, required `name` and `description`, and no Bundle. The catalog validates and stores the parsed Schema. A Project's evaluation plan selects one output format by ID and fixes its content digest; the plan can be replaced only until the first pipeline/evaluation Run locks it (see [Eval HTTP control plane](eval-http-api.md)). Runtime reads the Schema by that ID before initializing each Evaluator, and Metrics validates evaluation outputs against it. A missing, deleted or another owner's output format cannot be selected.
 

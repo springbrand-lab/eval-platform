@@ -6,7 +6,7 @@ import type {
   RunTargets,
   Sampling,
 } from "@eval-platform/eval-contracts";
-import { equalJson } from "@springbrand/utils";
+import { equalJson } from "@eval-platform/eval-contracts";
 import { describeAgentError } from "./agent-lifecycle.js";
 import type { RetryController, RetryDecision } from "./retry.js";
 import {

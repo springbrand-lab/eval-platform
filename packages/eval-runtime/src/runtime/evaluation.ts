@@ -1,3 +1,12 @@
+import {
+  EVALUATION_RESULT_PATH,
+  EVIDENCE_ARTIFACTS_ROOT,
+  EVIDENCE_MANIFEST_PATH,
+  EVIDENCE_ROOT,
+  EVIDENCE_TRAJECTORY_ROOT,
+  EVIDENCE_SUBJECT_INPUTS_ROOT,
+  EVALUATION_OUTPUT_SCHEMA_PATH,
+} from "@eval-platform/eval-contracts";
 import type {
   EvaluationAgentOutput,
   EvaluationAttempt,
@@ -16,15 +25,24 @@ import {
   AgentOperationError,
   applyAttemptPatch,
   describeAgentError,
+  reportError,
   runAgentLifecycle,
   type StageDependencies,
 } from "./agent-lifecycle.js";
+import { publishEvaluationScore } from "./scores.js";
 
 export interface EvaluateSamplingInput {
   readonly context: RuntimeEvaluationContext;
   readonly harnessConfig: HarnessConfig;
   readonly retryPolicy: RetryPolicy;
   readonly evaluationOutputSchema: EvaluationOutputSchema;
+}
+
+/** Eval Platform, not the Evaluator's framework, says where evidence is and where the result goes. */
+export function evaluatorPrompt(evalPrompt: string): string {
+  return `${evalPrompt}
+
+The evidence to evaluate is in ${EVIDENCE_ROOT}/ of your own Workspace. ${EVIDENCE_MANIFEST_PATH} lists the original Subject inputs, produced artifacts, ordered trajectory parts with sizes and SHA-256 hashes, and any omitted artifacts and why. The original inputs are under ${EVIDENCE_SUBJECT_INPUTS_ROOT}/<bundleId>/<materialId>/ and the produced artifacts are under ${EVIDENCE_ARTIFACTS_ROOT}/ at their original paths. Treat artifacts as the primary evidence and trajectory as supporting evidence. Read every numbered JSONL part under ${EVIDENCE_TRAJECTORY_ROOT}/ in order to see the complete raw Subject trajectory; the manifest declares its source format and completeness. Finish by writing one JSON value to ${EVALUATION_RESULT_PATH}, following the JSON Schema at ${EVALUATION_OUTPUT_SCHEMA_PATH}.`;
 }
 
 export function requireEvaluationPrompt(sample: ProjectSample): string {
@@ -56,26 +74,22 @@ export async function evaluateSampling(
     });
     currentEvaluation = next;
   };
-  const { artifacts, trajectory } = sampling;
-  if (
-    sampling.execution.status !== "succeeded"
-    || artifacts === undefined
-    || trajectory === undefined
-  ) {
+  if (sampling.execution.status !== "succeeded" || sampling.artifacts === undefined || sampling.trajectory === undefined) {
     await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no successful execution output"));
     return { ...input.context, evaluation: currentEvaluation };
   }
+  const evidenceRef = sampling.evidence;
+  if (evidenceRef === undefined) {
+    await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no evidence bundle"));
+    return { ...input.context, evaluation: currentEvaluation };
+  }
 
+  // The score is synced to the Subject Chat's session; the Evaluator never touches that Chat.
   const subjectChatId = sampling.subjectChatId;
   if (!subjectChatId) {
     await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject Chat"));
     return { ...input.context, evaluation: currentEvaluation };
   }
-  // SP creates the Subject Chat under the selected user-agent Config owner.
-  const subjectWorkspace = {
-    userId: sampling.subjectAgent.ownerUserId,
-    chatId: subjectChatId,
-  };
 
   try {
     const evalPrompt = requireEvaluationPrompt(sample);
@@ -108,12 +122,9 @@ export async function evaluateSampling(
       projectId: sampling.projectId,
       samplingId: sampling.samplingId,
       chatId,
-      evaluationWorkspace: {
-        subject: subjectWorkspace,
-        evaluationId: currentEvaluation.evaluationId,
-      },
+      evaluationId: currentEvaluation.evaluationId,
       harnessConfig: evaluatorHarness,
-      prompt: evalPrompt,
+      prompt: evaluatorPrompt(evalPrompt),
       retryController,
       attempts: currentEvaluation.attempts,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({
@@ -154,11 +165,12 @@ export async function evaluateSampling(
           evaluationOutputSchema: input.evaluationOutputSchema,
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
-        await dependencies.harness.materializeSubjectTrajectory({
-          idempotencyKey: `subject-trajectory:${subjectWorkspace.chatId}`,
-          samplingId: sampling.samplingId,
-          subjectWorkspace,
-          trajectory,
+        await dependencies.harness.importEvidence({
+          handle,
+          idempotencyKey: `evidence:${evidenceRef.evidenceId}:${currentEvaluation.evaluationId}`,
+          evidence: await dependencies.evidence.open(evidenceRef),
+          root: EVIDENCE_ROOT,
+          ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
       },
       collectOutput: (handle) => dependencies.harness.collectEvaluation({
@@ -173,12 +185,35 @@ export async function evaluateSampling(
       ),
     });
 
+    // The raw result file stays the record of truth (Metrics validates it); only a valid score is synced.
     await persistEvaluation({
       ...currentEvaluation,
       evaluator: agentConfig,
       status: { status: "succeeded" },
       output: result.output,
     });
+    const publish = dependencies.scores?.publish?.bind(dependencies.scores);
+    let scored: ReturnType<NonNullable<typeof dependencies.scores>["read"]>;
+    try {
+      scored = publish ? dependencies.scores!.read(input.evaluationOutputSchema, currentEvaluation) : undefined;
+    } catch (cause) {
+      reportError(dependencies.onError, new Error(`Evaluation ${currentEvaluation.evaluationId} score could not be read`, { cause }));
+    }
+    if (publish && scored) {
+      const scoreSync = await publishEvaluationScore(publish, {
+        evaluationId: currentEvaluation.evaluationId,
+        samplingId: sampling.samplingId,
+        projectId: sampling.projectId,
+        projectSampleId: sampling.projectSampleId,
+        subjectChatId,
+        evaluatorChatId: chatId,
+        ...scored,
+      }, dependencies.now);
+      if (scoreSync.lastError !== undefined) {
+        reportError(dependencies.onError, new Error(`Evaluation ${currentEvaluation.evaluationId} score was not synced: ${scoreSync.lastError}`));
+      }
+      await persistEvaluation({ ...currentEvaluation, scoreSync });
+    }
     return { ...input.context, evaluation: currentEvaluation };
   } catch (error) {
     const details = describeAgentError(error);

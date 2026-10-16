@@ -8,7 +8,7 @@ type ResourceLocation = { readonly path: string; readonly ownerDirectory: string
 
 export interface BundleDirectory {
   resolveInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef): Promise<readonly MaterialFile[]>;
-  resolveInitialSession(ownerUserId: string, reference: InitialSessionRef): Promise<SessionContent | undefined>;
+  resolveInitialSession(ownerUserId: string, reference: InitialSessionRef): Promise<SessionContent>;
   /** Validate and store one Material's files; resolves to their total decoded bytes. */
   uploadInitialMaterials(ownerUserId: string, reference: InitialMaterialsRef,
     files: readonly MaterialFile[]): Promise<number>;
@@ -121,7 +121,8 @@ export async function openBundleDirectory(directory: string): Promise<BundleDire
     },
     async resolveInitialSession(ownerUserId, reference) {
       const context = await readResource(sessionLocation(ownerUserId, reference));
-      return context === undefined ? undefined : validateSessionContent(context);
+      if (context === undefined) throw new BundleFileError("not-found", "Initial context is missing from its Bundle");
+      return validateSessionContent(context);
     },
   };
 }

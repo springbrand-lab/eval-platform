@@ -4,11 +4,13 @@
 
 ## Application structure
 
-The layout follows SP's `apps/api`: `lib/create-app.ts` installs request IDs, pino request logging (`hono-pino`), the trusted-Origin check, CORS, `notFound` and `onError` for every route; `lib/api-errors.ts` holds the single `apiError` translation; `middlewares/` holds session authentication, Origin trust and logging; each domain lives in `routes/<domain>/<domain>.routes.ts | .handlers.ts | .index.ts` with `@hono/zod-openapi` route definitions. Owner-scoped services are assembled once per request in `owner-services.ts`; concurrent requests of one owner share its Run admission instance through `active-owner-admission.ts`, and the entry is released when the owner has no active request.
+The layout follows SP's `apps/api`: `lib/create-app.ts` installs request IDs, pino request logging (`hono-pino`), the trusted-Origin check, CORS, `notFound` and `onError` for every route; `lib/api-errors.ts` holds the single `apiError` translation; `middlewares/` holds the service-account scope, Origin trust and logging; each domain lives in `routes/<domain>/<domain>.routes.ts | .handlers.ts | .index.ts` with `@hono/zod-openapi` route definitions. Owner-scoped services are assembled once per request in `owner-services.ts`; concurrent requests of one owner share its Run admission instance through `active-owner-admission.ts`, and the entry is released when the owner has no active request.
 
 ## Authentication and Origin
 
-Every `/api/*` request requires `Authorization: Bearer <Eval SP session token>`. One session middleware calls the configured Eval SP `/api/auth/me` for every request and scopes all services to the returned user ID; the client cannot select an owner, and another owner's records are reported as missing (`404`). A missing or rejected session is `401 AUTH_UNAUTHENTICATED`; an unreachable Eval SP is `503 EVAL_SP_UNAVAILABLE`, never a `401`. `GET /healthz` is unauthenticated and only reports that the process is serving.
+The Eval API runs as one fixed Eval SP service account; there is no interactive login. `EVAL_SP_SERVICE_USER_ID` names that account and `EVAL_SP_SERVICE_SESSION_TOKEN` is its long-lived service session, issued by SP's `bootstrap-eval-service-account` script. At startup the process verifies the token once through Eval SP `/api/auth/me` and refuses to start unless it resolves to the configured user. One middleware then scopes every `/api/*` request to that account; requests carry no `Authorization` header and the client cannot select an owner. Agent Config calls to Eval SP use the service session. `GET /healthz` only reports that the process is serving. The API is an internal service and must only be reachable from trusted networks.
+
+Deployed behind eval-web, every `/api/*` request must carry `X-Eval-Web-Token` equal to `EVAL_WEB_API_TOKEN`, otherwise it is `401 AUTH_UNAUTHENTICATED`. The eval-web Worker adds it after verifying the takt login, together with `X-Eval-Actor` (URI-encoded JSON `{id, name}` of the takt user). The actor is used only for audit, such as the credit-grant note prefix, and never selects an owner. Without `EVAL_WEB_API_TOKEN` (local development only) the header is not required.
 
 A request carrying an `Origin` other than `EVAL_WEB_ORIGIN` is rejected with `403 REQUEST_UNTRUSTED_ORIGIN` on every route; requests without `Origin` (non-browser clients) pass. CORS allows only that Origin, the `Authorization` and `Content-Type` headers, and exposes `X-Request-ID`. The same Origin is sent as the trusted Origin on Eval SP Agent Config writes.
 
@@ -63,7 +65,15 @@ Content limits live only in `apps/eval-api/src/limits.ts`, except the Material a
 
 ## Routes
 
-All `/api/*` routes require the Bearer session and may additionally return `401`, `403`, `422`, `500` and `503` as described above. Routes with a JSON or multipart body may also return `400`, `413` and `415`. The tables list each route's success payload and its domain error codes.
+All `/api/*` routes run as the service account and may additionally return `403`, `422`, `500` and `503` as described above. Routes with a JSON or multipart body may also return `400`, `413` and `415`. The tables list each route's success payload and its domain error codes.
+
+### Credits
+
+| Route | Body / result |
+| --- | --- |
+| `GET /api/credits` | Service account balance; see [Credits](#credits) |
+| `GET, POST /api/credits/grants` | Manual credit grants; see [Credits](#credits) |
+
 
 ### Session and health
 
@@ -139,6 +149,7 @@ Each Run is chosen per request: `operation` is `execution`, `pipeline` or `evalu
 | `POST /api/projects/{projectId}/runs` | `{idempotencyKey, operation, selector, targets:{projectSampleIds, samplingIds}}` (each list unique, at most `RUN_TARGET_IDS` IDs in total) / `202 RunHandle {runId, samplingIds}` |
 | `GET /api/projects/{projectId}/runs/current` | `{run: {runId, stopRequested?} \| null}` |
 | `POST /api/projects/{projectId}/runs/{runId}/stop` | No body / `202 {runId, stopRequested:true}` |
+| `POST /api/projects/{projectId}/runs/{runId}/score-sync` | No body / `{synced, failed, skipped}`; see [Run admission and stop](#run-admission-and-stop) |
 | `GET /api/projects/{projectId}/runs/{runId}` | `{run: RunSnapshot}` |
 | `GET /api/projects/{projectId}/runs/{runId}/evaluations` | `{evaluations: EvaluationRecord[]}` in the Run's admission order |
 
@@ -153,6 +164,7 @@ Expansion and replacement follow [Run admission](architecture.md#run-准入与�
 | Current | `404 PROJECT_NOT_FOUND` |
 | Stop | `404 RUN_NOT_FOUND` (also for another owner's or a deleted Project); `409 PROJECT_NO_ACTIVE_RUN` |
 | Run, Run evaluations | `404 RUN_NOT_FOUND` |
+| Score re-sync | `404 RUN_NOT_FOUND`; `503 SCORE_SYNC_UNCONFIGURED` |
 
 ### Result reads
 
@@ -171,8 +183,12 @@ Replaced Samplings and Evaluations no longer exist and read as `404`. Sampling a
 | --- | --- | --- |
 | `GET /api/projects/{projectId}/samplings/{samplingId}/observation` | `AgentObservationRef` for the Subject | `404 PROJECT_NOT_FOUND`, `SAMPLING_NOT_FOUND` |
 | `GET /api/projects/{projectId}/evaluations/{evaluationId}/observation` | `AgentObservationRef` for the Evaluator | `404 PROJECT_NOT_FOUND`, `EVALUATION_NOT_FOUND` |
+| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/messages` | The Chat's UI messages, as Eval SP returns them | As above; `404 EVAL_SP_NOT_FOUND` before the Agent starts; relayed SP errors |
+| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/tree` | The Chat Workspace tree (`WorkspaceTreeNode[]`) | As above |
+| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/trajectory?limit=&beforeSeq=` | One trajectory page `{events:[{ingestSeq, event}], beforeSeq, hasOlder}`, newest first; `limit` 1–200 | As above |
+| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/file?path=` | Raw file bytes as an attachment under `Content-Security-Policy: default-src 'none'; sandbox`; at most 10 MB | As above; `413 CATALOG_PAYLOAD_TOO_LARGE` |
 
-`AgentObservationRef` is `{role, projectId, samplingId, evaluationId?, ownerUserId, chatId?, state}`. The API checks the owner, a non-deleted Project and that the Sampling or Evaluation is current in that Project. The Subject entry uses `Sampling.subjectChatId` and the Subject Agent Config owner; the Evaluator entry uses `EvaluationRecord.chatId` and the Evaluator owner. `state` is `available` when a Chat ID and at least one attempt exist, otherwise `not-started`. The entry is available in every Run state. No writable Chat URL is returned; the read-only Chat, Context, Workspace and Trajectory pages are served by Eval SP.
+The observation data routes read the service account's Chat from Eval SP server-side with the service session and `EVAL_SP_TRUSTED_ORIGIN`; they are GET-only and cannot drive an Agent. `AgentObservationRef` is `{role, projectId, samplingId, evaluationId?, ownerUserId, chatId?, state}`. The API checks the owner, a non-deleted Project and that the Sampling or Evaluation is current in that Project. The Subject entry uses `Sampling.subjectChatId` and the Subject Agent Config owner; the Evaluator entry uses `EvaluationRecord.chatId` and the Evaluator owner. `state` is `available` when a Chat ID and at least one attempt exist, otherwise `not-started`. The entry is available in every Run state. No writable Chat URL is returned; the read-only Chat, Context, Workspace and Trajectory pages are served by Eval SP.
 
 ### Metrics
 
@@ -234,6 +250,16 @@ A Material Bundle contains only Materials and a Session Bundle only Sessions; ou
 
 Material Bundle, Session Bundle, Material and Session names and descriptions are required nonblank text (`422 REQUEST_VALIDATION_FAILED`). An output format may be soft-deleted while an evaluation plan uses it; the plan keeps reading the Schema by ID, but the format can no longer be selected.
 
+## Credits
+
+Eval SP charges every Agent turn and paid Action against the service account's credits; Eval never bypasses that billing. Credits are added explicitly from the Eval back office, never by an automatic allowance:
+
+- `GET /api/credits` returns the service account's `creditAccount` from Eval SP `/api/account/snapshot` (`availableUnits`, `topupRemainingUnits`, `otherRemainingUnits`).
+- `POST /api/credits/grants` with `{units, idempotencyKey, note?}` grants `units` (positive integer) to the service account through Eval SP's admin credit grant, recorded as a non-expiring `system_adjustment`. The SP adjustment ID is `eval-platform:<idempotencyKey>`, so retrying one key grants once and reusing it with different facts is `409`. `idempotencyKey` is 1–200 characters without control characters; `note` is at most 500 characters. Credits can only be added.
+- `GET /api/credits/grants?limit=` lists the service account's manual grants, newest first (`limit` 1–100, default 20).
+
+The target account is always the service account; the client cannot name another user. Grants use `EVAL_SP_ADMIN_TOKEN`, the Eval SP deployment's own `RESOURCE_ADMIN_TOKEN`, which must not be shared with dev or production.
+
 ## Run admission and stop
 
 Run admission uses a token-free, owner-scoped `ProjectPlanReader` and `RuntimeStore` with `createEvalRunAdmission`. The HTTP process holds no Harness credential and never runs Agents: admission and stop requests commit their Run facts and enqueue the Run job in the same PostgreSQL transaction (see [Run scheduling](architecture.md#run-调度与停止)).
@@ -241,6 +267,8 @@ Run admission uses a token-free, owner-scoped `ProjectPlanReader` and `RuntimeSt
 Admission responses follow the rules in [Run admission](architecture.md#run-准入与独立评估): the request fingerprint covers `projectId`, `operation`, `selector`, `targets` and the plan digests. A matching replay of the Project's latest Run returns the original Run, even while it is active; a reused key with different facts, or the key of a Run that a later admission superseded, is `409 RUN_IDEMPOTENCY_CONFLICT`; a new key while the Project has an unfinished Run is `409 PROJECT_BUSY`. Inside the transaction the Store rechecks the plan digests (`PROJECT_PLAN_CHANGED`), the evaluation plan (`PROJECT_EVALUATION_PLAN_REQUIRED`) and that the submitted targets still match the current Samplings (`RUN_TARGETS_STALE`); on any of these the caller previews again with a new key.
 
 `POST .../runs/{runId}/stop` targets only the named Run of that Project and returns `202 {runId, stopRequested:true}`, including for a repeat; an unknown Run, another owner's Run or a Run of a deleted Project is `404 RUN_NOT_FOUND`; a finished Run without a stop request is `409 PROJECT_NO_ACTIVE_RUN`. The response only records the request; stop semantics are described in [Run scheduling and stop](architecture.md#run-调度与停止).
+
+`POST .../runs/{runId}/score-sync` re-sends to Langfuse every succeeded, scored Evaluation of the Run whose `scoreSync` is not `synced`, and records each outcome. An unknown Run is `404 RUN_NOT_FOUND`; without Langfuse settings it is `503 SCORE_SYNC_UNCONFIGURED`.
 
 ## Error codes
 
@@ -256,7 +284,7 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `REQUEST_UNTRUSTED_ORIGIN` | 403 | `Origin` other than `EVAL_WEB_ORIGIN` |
 | `REQUEST_NOT_FOUND` | 404 | Unknown route or method |
 | `REQUEST_RATE_LIMITED` | 429 | Eval SP rate-limited a relayed request |
-| `AUTH_UNAUTHENTICATED` | 401 | Missing or rejected Eval SP session |
+| `AUTH_UNAUTHENTICATED` | 401 | Missing or wrong `X-Eval-Web-Token` when one is configured |
 | `INTERNAL_ERROR` | 500 | Unexpected failure |
 | `DATABASE_UNAVAILABLE` | 503 | PostgreSQL unreachable; retry the same request |
 | `RESPONSE_INVALID` | 502 | Client only: the response is not a valid envelope |
@@ -304,4 +332,5 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `BUNDLE_FILE_UNAVAILABLE` | 503 | Bundle directory unreadable; retry |
 | `OUTPUT_SCHEMA_NOT_FOUND` | 404 | Unknown or deleted output format |
 | `METRICS_QUERY_INVALID` | 400 | Invalid Metrics query |
+| `SCORE_SYNC_UNCONFIGURED` | 503 | Score re-sync without Langfuse settings |
 | `NETWORK_ERROR`, `REQUEST_TIMEOUT`, `RESPONSE_TOO_LARGE`, `RUNTIME_UNSUPPORTED`, `REQUEST_REDIRECT_BLOCKED`, `HTTP_ERROR` | 0 | Client only |

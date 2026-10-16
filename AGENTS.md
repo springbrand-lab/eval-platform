@@ -20,5 +20,4 @@
 
 ## Verification
 
-- Local installs require a sibling `../sp-platform` checkout with `pnpm install` done (linked SP packages; see `docs/sp-package-publishing-todo.md`).
 - `pnpm check`, then `DATABASE_URL=postgres://<user>:<pass>@<host>:<port>/<db> pnpm -r --no-bail test`; without `DATABASE_URL` the PostgreSQL integration tests are skipped.

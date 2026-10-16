@@ -1,4 +1,4 @@
-import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
+import { jsonObjectSchema, type EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import { parseStrictJson } from "@eval-platform/eval-dataset";
 import Ajv2020 from "ajv/dist/2020.js";
 import { CatalogInputError, CatalogPayloadTooLargeError } from "./db/errors.js";
@@ -21,17 +21,11 @@ export function parseEvaluationOutputSchema(content: string): EvaluationOutputSc
   if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
     throw new CatalogInputError("Evaluation output JSON Schema must be an object", "content");
   }
-  if (!hasOnlySafeNumbers(schema)) {
+  if (!jsonObjectSchema.safeParse(schema).success) {
     throw new CatalogInputError("Evaluation output JSON Schema must contain only finite, safe JSON numbers", "content");
   }
   if (!schemaValidator.validateSchema(schema)) {
     throw new CatalogInputError(`Evaluation output JSON Schema is invalid: ${schemaValidator.errorsText()}`, "content");
   }
   return schema as EvaluationOutputSchema;
-}
-
-function hasOnlySafeNumbers(value: unknown): boolean {
-  if (typeof value === "number") return Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value));
-  if (value === null || typeof value !== "object") return true;
-  return Object.values(value).every(hasOnlySafeNumbers);
 }

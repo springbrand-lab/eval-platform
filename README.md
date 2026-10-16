@@ -90,7 +90,7 @@ eval-contracts → eval-dataset → eval-runtime → eval-metrics
 
 工程约定与 `sp-platform` 对齐：每个 workspace 都有独立的 package metadata、TypeScript 配置、README 和 Vitest 入口；共享包提供 `src/index.ts` 公共入口，应用只提供进程入口，并额外拥有自己的 `CONTEXT.md`。`eval-api` 使用注入的 `pg` 连接池、Drizzle 和独立迁移；不复制 SP 私有数据库客户端或 Agent 内核。Eval 发布流程从固定 SP 源码部署独立的 SP 运行环境，Eval 代码不导入其私有源文件。可使用 `DATABASE_URL` 运行数据库集成测试。
 
-本地安装与联调要求 sp-platform 检出在本仓库的同级目录 `../sp-platform` 并已执行 `pnpm install`：`@springbrand/eval-harness`、`@springbrand/utils` 当前以 `link:` 依赖其工作区包，发布计划见 [SP 共享包发布待办](docs/sp-package-publishing-todo.md)。
+`@springbrand/eval-harness` 与 `@springbrand/http` 都以精确版本从 npm 安装，不需要检出 sp-platform。
 
 接入真实环境前，还需要部署独立的 Eval SP 与 Eval API/Worker，配置各服务地址、数据库和 Bundle 目录（进程与环境变量见 [eval-api README](apps/eval-api/README.md)），并验证登录、Agent 初始化、执行、评估、证据和指标的完整链路。Project 分支绑定与 Run commit 来源记录已在类型和数据库中实现。
 

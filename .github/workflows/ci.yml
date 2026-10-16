@@ -1,5 +1,7 @@
-name: Test
+name: CI
 
+# One pipeline: detect affected projects, test them, then deploy what changed.
+# Deploys run only on main, and only after every test job that ran has passed.
 on:
   workflow_dispatch:
   push:
@@ -10,9 +12,10 @@ on:
 permissions:
   contents: read
 
+# A newer push cancels stale test runs on PRs, but never interrupts a deploy on main.
 concurrency:
-  group: test-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
@@ -169,3 +172,132 @@ jobs:
 
       - name: Test Eval Web
         run: pnpm --filter @eval-platform/eval-web test
+
+  deploy-api:
+    name: Deploy Eval API and Run Worker
+    needs: [changes, packages, api]
+    if: >-
+      !cancelled()
+      && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      && needs.changes.outputs.api == 'true'
+      && needs.api.result == 'success'
+      && (needs.packages.result == 'success' || needs.packages.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: deploy-api
+      cancel-in-progress: false
+    # No environment: the AWS role trusts this repository's main-branch OIDC subject.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate deployment configuration
+        env:
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ECR_REPOSITORY: ${{ vars.AWS_ECR_REPOSITORY }}
+          INSTANCE_ID: ${{ vars.AWS_EC2_INSTANCE_ID }}
+        run: |
+          : "${AWS_ROLE_ARN:?AWS_ROLE_ARN is required}"
+          : "${AWS_REGION:?AWS_REGION is required}"
+          : "${ECR_REPOSITORY:?AWS_ECR_REPOSITORY is required}"
+          : "${INSTANCE_ID:?AWS_EC2_INSTANCE_ID is required}"
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Check for an existing immutable image
+        id: image
+        env:
+          ECR_REPOSITORY: ${{ vars.AWS_ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids "imageTag=$IMAGE_TAG" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.image.outputs.exists != 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push image
+        if: steps.image.outputs.exists != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/eval-api/Dockerfile
+          target: production
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ vars.AWS_ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: type=gha,scope=eval-api
+          cache-to: type=gha,scope=eval-api,mode=max
+
+      - name: Migrate and deploy through Systems Manager
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.AWS_ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+          INSTANCE_ID: ${{ vars.AWS_EC2_INSTANCE_ID }}
+          APP_SECRET_ID: eval-platform/api/production
+          DB_SECRET_ID: eval-platform/database/production
+        run: bash infra/aws/deploy/dispatch.sh
+
+      - name: Smoke test
+        env:
+          API_ORIGIN: https://evalapi.springbrand.ai
+        run: |
+          curl --fail --show-error --silent --retry 12 --retry-delay 5 --retry-all-errors "$API_ORIGIN/healthz"
+          # Without the eval-web token every /api route is rejected.
+          test "$(curl --show-error --silent --output /dev/null --write-out '%{http_code}' "$API_ORIGIN/api/me")" = 401
+
+  deploy-web:
+    name: Deploy Eval Web to Cloudflare
+    needs: [changes, packages, web]
+    if: >-
+      !cancelled()
+      && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      && needs.changes.outputs.web == 'true'
+      && needs.web.result == 'success'
+      && (needs.packages.result == 'success' || needs.packages.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: deploy-web
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: https://evalrapp.springbrand.ai
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Prepare workspace
+        uses: ./.github/actions/prepare-workspace
+        with:
+          package-filter: "@eval-platform/eval-web"
+          cache-scope: deploy-web
+
+      - name: Build Eval Web
+        run: pnpm --filter @eval-platform/eval-web build
+
+      - name: Deploy Worker
+        working-directory: apps/eval-web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm exec wrangler deploy

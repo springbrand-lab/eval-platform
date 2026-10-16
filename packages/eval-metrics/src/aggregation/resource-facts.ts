@@ -1,5 +1,5 @@
 import type { AgentResourceScope, AgentResourceSnapshot, JsonValue } from "@eval-platform/eval-contracts";
-import { equalJson } from "@springbrand/utils";
+import { equalJson } from "@eval-platform/eval-contracts";
 import { record, text, type JsonRecord } from "../json.js";
 import type { MetricNumber, ResourceDiagnostic } from "./model.js";
 import { coverage } from "./statistics.js";

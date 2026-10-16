@@ -10,7 +10,7 @@ import type {
   RunPhases,
 } from "@eval-platform/eval-contracts";
 import { AGENT_FRAMEWORKS, jsonObjectSchema } from "@eval-platform/eval-contracts";
-import { canonicalJsonBytes, sha256Hex } from "@springbrand/utils";
+import { canonicalJsonBytes, sha256Hex } from "@eval-platform/eval-contracts";
 import { RuntimeInputError } from "../runtime/errors.js";
 import { requireIdentifier, requireObject } from "../runtime/input.js";
 import type { ProjectSample } from "../runtime/model.js";

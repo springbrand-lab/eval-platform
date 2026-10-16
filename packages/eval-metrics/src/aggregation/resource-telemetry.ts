@@ -1,5 +1,5 @@
 import type { JsonValue } from "@eval-platform/eval-contracts";
-import { canonicalJsonBytes } from "@springbrand/utils";
+import { canonicalJsonBytes } from "@eval-platform/eval-contracts";
 import { record, text } from "../json.js";
 import type {
   CoveredNumericSummary,

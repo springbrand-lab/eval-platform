@@ -1,0 +1,79 @@
+/* Order matters (message-panel cloud-os host requirements): every @import comes first, the package CSS
+   among them; after @source or @layer, Tailwind stops inlining it and the kumo @theme block is dropped. */
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "streamdown/styles.css";
+@import "@springbrand/message-panel/cloud-os.css";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/geist-mono";
+@import "./theme.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* cloud-os ships TypeScript source: an explicit glob is required. streamdown renders markdown with Tailwind classes. */
+@source "../../node_modules/@springbrand/message-panel/cloud-os/**/*.{ts,tsx}";
+@source "../../node_modules/streamdown/dist/*.js";
+@source "../../node_modules/@streamdown/code/dist/*.js";
+@source "../../node_modules/@streamdown/math/dist/*.js";
+@source "../../node_modules/@streamdown/mermaid/dist/*.js";
+@source "../../node_modules/@streamdown/cjk/dist/*.js";
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* Neutral links: the underline, not a hue, marks them. */
+  .link {
+    color: var(--text-strong);
+    text-decoration: underline;
+    text-decoration-color: var(--border-strong);
+    text-underline-offset: 3px;
+    transition: text-decoration-color 120ms;
+  }
+  .link:hover {
+    text-decoration-color: currentColor;
+  }
+}
+
+/* The embedded SP chat view (cloud-os) ships a warm-grey light palette and a purple-tinted (hue 285) dark
+   one. Inside Eval its neutral surfaces, lines and text follow Eval's own greys; brand and status colours stay. */
+.eval-chat .cloud-os-root[data-mode] {
+  --color-kumo-base: var(--surface);
+  --color-kumo-elevated: var(--surface-muted);
+  --color-kumo-tint: var(--surface-muted);
+  --color-kumo-overlay: var(--surface);
+  --color-kumo-recessed: var(--surface-code);
+  --color-kumo-control: var(--surface);
+  --color-kumo-fill: var(--surface-muted);
+  --color-kumo-fill-hover: var(--border);
+  --color-kumo-interact: var(--border-strong);
+  --color-kumo-line: var(--border);
+  --color-kumo-ring: var(--ring);
+  --color-kumo-bubble-user: var(--surface-muted);
+  --color-kumo-tip-stroke: var(--border);
+  --text-color-kumo-default: var(--text);
+  --text-color-kumo-default-hover: var(--text-strong);
+  --text-color-kumo-strong: var(--text-strong);
+  --text-color-kumo-subtle: var(--text-muted);
+  --text-color-kumo-inactive: var(--text-faint);
+}

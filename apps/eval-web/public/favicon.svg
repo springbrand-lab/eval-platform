@@ -1,0 +1,17 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M2.6 10.1V5.0A2.4 2.4 0 0 1 5.0 2.6H10.1" stroke="#FF9938" stroke-width="2.6"/>
+<path d="M29.4 21.9V27.0A2.4 2.4 0 0 1 27.0 29.4H21.9" stroke="#FF9938" stroke-width="2.6"/>
+<g filter="url(#eval-mark-blur)"><rect x="18.20" y="14.35" width="7.00" height="3.3" rx="0.5" transform="rotate(0 16 16)" fill="url(#eval-mark-gradient)"/>
+<rect x="18.20" y="14.35" width="7.00" height="3.3" rx="0.5" transform="rotate(45 16 16)" fill="url(#eval-mark-gradient)"/>
+<rect x="18.20" y="14.35" width="7.00" height="3.3" rx="0.5" transform="rotate(90 16 16)" fill="url(#eval-mark-gradient)"/>
+<rect x="18.20" y="14.35" width="7.00" height="3.3" rx="0.5" transform="rotate(135 16 16)" fill="url(#eval-mark-gradient)"/>
+<rect x="18.20" y="14.35" width="7.00" height="3.3" rx="0.5" transform="rotate(180 16 16)" fill="url(#eval-mark-gradient)"/>
+<rect x="18.20" y="14.35" width="7.00" height="3.3" rx="0.5" transform="rotate(225 16 16)" fill="url(#eval-mark-gradient)"/>
+<rect x="18.20" y="14.35" width="7.00" height="3.3" rx="0.5" transform="rotate(270 16 16)" fill="url(#eval-mark-gradient)"/>
+<rect x="18.20" y="14.35" width="7.00" height="3.3" rx="0.5" transform="rotate(315 16 16)" fill="url(#eval-mark-gradient)"/>
+</g>
+<defs>
+<linearGradient id="eval-mark-gradient" x1="22" y1="6" x2="12" y2="26" gradientUnits="userSpaceOnUse"><stop stop-color="#FFD078"/><stop offset="1" stop-color="#FF9938"/></linearGradient>
+<filter id="eval-mark-blur" x="0" y="0" width="32" height="32" filterUnits="userSpaceOnUse"><feGaussianBlur stdDeviation="0.7"/></filter>
+</defs>
+</svg>

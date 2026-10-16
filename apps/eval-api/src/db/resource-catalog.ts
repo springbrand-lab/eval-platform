@@ -2,7 +2,7 @@ import type { Data, InitialMaterialsRef, InitialSessionRef } from "@eval-platfor
 import { and, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { SelectedFieldsFlat } from "drizzle-orm/pg-core";
 import type { SelectResultFields } from "drizzle-orm/query-builders/select.types";
-import { createId } from "@springbrand/utils";
+import { createId } from "@eval-platform/eval-contracts";
 import { requireInitializationBudget, type MaterialFile, type SessionContent } from "../sp/bundle-content.js";
 import type { BundleDirectory } from "../sp/bundle-directory.js";
 import type { EvalDb } from "./client.js";

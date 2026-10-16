@@ -113,7 +113,8 @@ Dataset ──> Data ──(创建 Project 时复制)──> ProjectSample
 - `ProjectSample` 是 Project 内固定的一条测试输入，结构见[包边界](package-boundaries.md#eval-runtime)；
 - `Sampling` 是一次独立运行，引用自己的 `projectSampleId`，拥有自己的 Subject Chat / Workspace；
 - `Run` 是一次提交的工作范围，只包含本次实际处理的 Sampling/EvaluationRecord；Project 当前结果集合不等于最近 Run 的成员；
-- 评估使用独立 Evaluation Chat / Session，但 Workspace 绑定 Subject Chat 的同一个物理 SpaceDO；每次评估产生独立 `EvaluationRecord`，材料和结果写入自己的 `/evaluations/<evaluationId>/` 目录。
+- Subject 执行成功后导出一份不可变、按内容寻址的证据包（产物 + `sp-trajectory/v1` 原始轨迹 轨迹），`Sampling.evidence` 保存其引用；
+- 评估使用普通 Agent：独立 Evaluation Chat / Session 和自己的 Space，不绑定 Subject；每次评估产生独立 `EvaluationRecord`，证据导入自己 Space 的 `/evidence/`，结果写到 `/output/result.json`。
 
 ## SP Harness 对齐
 
@@ -122,7 +123,7 @@ Harness 只依赖以下正式边界：
 SP Chat 是持久 Session：Sampling/EvaluationRecord 保存各自 Chat ID；每次 Prompt 提交在该 Chat 中创建一个 Submission，真实 Submission ID 由对应 Attempt 保存。自动重试沿用 Chat，而新提交拥有自己的 Submission 身份。
 
 1. Agent Config 引用：`ownerUserId`、`userAgentId`；
-2. Eval SP 的普通 Inbox/Chat 创建：Subject 和 Evaluator 都进入 **Eval SP 自己的** Inbox，不进入 dev/production 的 Inbox；Eval 预分配 Chat ID 并要求同 ID 幂等。Evaluator 创建时携带 Subject 的 `{userId, chatId}` Workspace 引用和 `evaluationId`；
+2. Eval SP 的普通 Inbox/Chat 创建：Subject 和 Evaluator 都进入 **Eval SP 自己的** Inbox，不进入 dev/production 的 Inbox；Eval 预分配 Chat ID 并要求同 ID 幂等。Evaluator 创建时只携带 `evaluationId`；
 3. 消息投递：`dispatchMessage(message, "enqueue" | "steer")`；
 4. Submission 终态推送：Harness 接收可靠的完成/失败/取消通知；`SubmissionReceipt` 和按幂等键的操作查询只用于提交后的初始确认、断线恢复和重试前校准；
 5. Trajectory：`TrajectoryPage`，按 `beforeSeq` 分页读取完整轨迹，单页不超过 `200`；
@@ -131,15 +132,18 @@ SP Chat 是持久 Session：Sampling/EvaluationRecord 保存各自 Chat ID；每
 评估输入准备流程是：
 
 ```text
-Subject Chat ──完整 Trajectory──→ SP 物化接口
-     │                              │
-     └── Workspace 产物 ────────────┴──→ Subject SpaceDO
-                                         ↑        ↑
-                                 Subject Chat  Evaluator Chat
-                                               （仅写评估目录）
+Subject Space ──exportEvidence（产物 + 轨迹）──→ 证据包（R2 或本地 evidence/）
+                                                   │ 按 sha256 去重、manifest 固化
+                                                   ↓ importEvidence
+                                        Evaluator 自己的 Space
+                                          /evidence/manifest.json
+                                          /evidence/subject-inputs/…
+                                          /evidence/artifacts/…
+                                          /evidence/trajectory/events-000001.jsonl, …
+                                          /output/result.json ← 评估结果
 ```
 
-SP 根据执行 Chat 的 `{userId, chatId}` 定位同一 SpaceDO，按 Subject Chat 幂等物化完整轨迹；Subject 产物留在原处，不复制。Evaluator 有独立的 Chat、Submission 和轨迹，写权限限定在本次评估目录。Eval 不绕过 SP 的公开 Workspace/Trajectory 边界操作 DO。
+Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产物清单、逐个文件和 SP 完整原始 `trajectory_events` 的有序分片，按 `DEFAULT_EVIDENCE_LIMITS`（单文件 25 MB、总量 500 MB、20,000 个文件、排除 `node_modules` 等目录）写入证据包，未纳入的文件记入 `omitted`。导出与执行阶段共用重试策略，始终失败时 Sampling 为 `failed` 且不可评估；失败的执行不导出证据包。评估准备时 `Harness.importEvidence` 以 `evidence:<evidenceId>:<evaluationId>` 为幂等键把证据包写入 Evaluator 自己的 Space，manifest 最后写入；同一 Sampling 的多次评估复用同一证据包。Eval 不绕过 SP 的公开边界操作 DO。
 
 ## 生命周期语义
 
@@ -154,8 +158,8 @@ SP 根据执行 Chat 的 `{userId, chatId}` 定位同一 SpaceDO，按 Subject C
 - 推送丢失、连接断开或运行时恢复时，有限次调用 `getSubmission()` 做校准；
 - 网络、LLM、网站等临时故障先查询原 Submission，再决定是否重启同一个 Chat / Workspace；
 - 手动取消、鉴权失败、配置错误不自动重启；
-- 每次执行和评估都完整收集对应 Agent 的产物与轨迹；SP 把完整 Subject 轨迹物化到原 SpaceDO，评估直接读取留在原处的 Subject 产物；结果评估以产物为主，轨迹作为补充证据；
-- Evaluator 输出中的 `structuredOutput` 是 Evaluator 写入评估目录的原始结果文件文本，Runtime 原样保存；`eval-metrics` 读取时按评估计划锁定的 Schema 校验并抽取输出字段。
+- 每次执行和评估都完整收集对应 Agent 的产物与轨迹；Subject 证据导出为不可变证据包后导入 Evaluator 自己的 Space，评估不读取 Subject Workspace；没有证据包的 Sampling不能评估；结果评估以产物为主，轨迹作为补充证据；
+- Evaluator 输出中的 `structuredOutput` 是 Evaluator 写入自己 Space `/output/result.json` 的原始结果文件文本，Runtime 原样保存；`eval-metrics` 读取时按评估计划锁定的 Schema 校验并抽取可统计字段。
 
 ## Metrics 与只读观察
 
@@ -166,7 +170,6 @@ SP 根据执行 Chat 的 `{userId, chatId}` 定位同一 SpaceDO，按 Subject C
 ## 接入真实环境前的剩余事项
 
 1. 给 SP API、Agent、Space 配置 Eval 独立发布目标和持久资源；Eval 的全部 SP 地址指向这套部署，登录与 Agent Config 由 Eval SP 提供；
-2. 发布 `@springbrand/eval-harness` 与 `@springbrand/utils`，把当前的 `link:` 本地依赖改为版本依赖，见[发布待办](sp-package-publishing-todo.md)；
-3. 在真实部署中联调 Evaluator 绑定 Subject SpaceDO、评估目录写入约束、轨迹物化、提交恢复、长连接终态、无人值守处理和原始资源读取；SP 仍需在输出中返回 Evaluator 的原始结构化结果文件，并在服务端执行只读观察的访问控制，详见[接口需求](sp-eval-api-requirements.md)；
-4. 把 `eval-api` 的 API、Run Worker、PostgreSQL 迁移和共享 Bundle 目录部署到目标环境；
-5. SP 的公开 Agent 创建边界需支持 `framework` 选择和绑定，并实际提供 Codex/CC 云端运行；评估侧只传递选择，不重建这些启动器。
+2. 在真实部署中联调证据导出与导入、Evaluator 结果文件收集、提交恢复、长连接终态、无人值守处理和原始资源读取；SP 仍需在服务端执行只读观察的访问控制，详见[接口需求](sp-eval-api-requirements.md)；
+3. 把 `eval-api` 的 API、Run Worker、PostgreSQL 迁移和共享 Bundle 目录部署到目标环境；
+4. SP 的公开 Agent 创建边界需支持 `framework` 选择和绑定，并实际提供 Codex/CC 云端运行；评估侧只传递选择，不重建这些启动器。

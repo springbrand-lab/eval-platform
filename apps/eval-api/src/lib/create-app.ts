@@ -28,7 +28,7 @@ export function createApp(logger: pino.Logger) {
   app.use(trustedOrigin);
   app.use(cors({
     origin: allowedCorsOrigin,
-    allowHeaders: ["Authorization", "Content-Type"],
+    allowHeaders: ["Authorization", "Content-Type", "X-Eval-Web-Token", "X-Eval-Actor"],
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     exposeHeaders: ["X-Request-ID"],
     maxAge: 86400,

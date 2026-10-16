@@ -33,7 +33,7 @@ import {
 } from "../db/errors.js";
 import { RunTargetsTooLargeError } from "../limits.js";
 import { BundleFileError, type BundleFileErrorReason } from "../sp/bundle-errors.js";
-import { EvalSpApiError, EvalSpTransportError } from "../sp/client.js";
+import { EvalSpApiError, EvalSpTransportError } from "../sp/http.js";
 
 const runtimeEntityCodes = {
   project: "PROJECT_NOT_FOUND",
@@ -120,7 +120,7 @@ function fieldError(code: "RUNTIME_INPUT_INVALID" | "CATALOG_INPUT_INVALID", err
 
 function evalSpError(error: EvalSpApiError): HttpError {
   const upstream = { cause: error, upstreamStatus: error.status };
-  if (error.status === 401) return new HttpError("AUTH_UNAUTHENTICATED", "Eval SP session is invalid", upstream);
+  if (error.status === 401) return new HttpError("EVAL_SP_UNAVAILABLE", undefined, upstream);
   if (error.status === 403) return new HttpError("EVAL_SP_FORBIDDEN", undefined, upstream);
   if (error.status === 404) return new HttpError("EVAL_SP_NOT_FOUND", undefined, upstream);
   if (error.status === 429) return new HttpError("REQUEST_RATE_LIMITED", undefined, upstream);

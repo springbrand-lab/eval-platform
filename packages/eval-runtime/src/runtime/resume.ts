@@ -5,8 +5,8 @@ import type {
   ExecutionPlan,
   RetryPolicy,
 } from "@eval-platform/eval-contracts";
-import { isPendingSamplingStatus } from "@eval-platform/eval-contracts";
-import { createId } from "@springbrand/utils";
+import { DEFAULT_EVIDENCE_LIMITS, isPendingSamplingStatus } from "@eval-platform/eval-contracts";
+import { createId } from "@eval-platform/eval-contracts";
 import type { Harness } from "../harness/model.js";
 import { errorMessage, reportError, type StageDependencies } from "./agent-lifecycle.js";
 import { RuntimeEntityNotFoundError, RuntimeRunStoppedError } from "./errors.js";
@@ -39,11 +39,14 @@ export class RunResumer implements EvalRunResumer {
     this.#stage = {
       harness: dependencies.harness,
       store: dependencies.store,
+      evidence: dependencies.evidence,
+      evidenceLimits: dependencies.evidenceLimits ?? DEFAULT_EVIDENCE_LIMITS,
       idFactory: dependencies.idFactory ?? createId,
       now: dependencies.now ?? (() => new Date().toISOString()),
       sleep: dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
       onError: this.#onError,
       createRetryController: this.#createRetryController,
+      ...(dependencies.scores === undefined ? {} : { scores: dependencies.scores }),
     };
     this.#stop = {
       store: this.#store,
@@ -218,7 +221,7 @@ export class RunResumer implements EvalRunResumer {
     return {
       ensureAgent: (input) => gate(() => harness.ensureAgent(input)),
       materializeInitialData: (input) => gate(() => harness.materializeInitialData(input)),
-      materializeSubjectTrajectory: (input) => gate(() => harness.materializeSubjectTrajectory(input)),
+      importEvidence: (input) => gate(() => harness.importEvidence(input)),
       submitAgent: (input) => gate(() => harness.submitAgent(input)),
       restartAgent: (input) => gate(() => harness.restartAgent(input)),
       waitForSubmission: (input) => observe(harness.waitForSubmission(input)),
@@ -227,6 +230,7 @@ export class RunResumer implements EvalRunResumer {
       collectExecution: (input) => observe(harness.collectExecution(input)),
       collectEvaluation: (input) => observe(harness.collectEvaluation(input)),
       collectAgentResources: (input) => observe(harness.collectAgentResources(input)),
+      exportEvidence: (input) => observe(harness.exportEvidence(input)),
     };
   }
 

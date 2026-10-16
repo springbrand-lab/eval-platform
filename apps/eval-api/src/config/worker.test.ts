@@ -17,6 +17,36 @@ describe("Run worker configuration", () => {
     });
   });
 
+  it("groups the Langfuse score settings only when all are set", () => {
+    const langfuse = {
+      LANGFUSE_BASE_URL: "https://us.cloud.langfuse.com/",
+      LANGFUSE_PUBLIC_KEY: "pk-lf",
+      LANGFUSE_SECRET_KEY: "sk-lf",
+      LANGFUSE_ENVIRONMENT: "dev",
+    };
+    expect(loadWorkerConfig({ ...required, ...langfuse }).langfuse).toEqual({
+      baseUrl: "https://us.cloud.langfuse.com", publicKey: "pk-lf", secretKey: "sk-lf", environment: "dev",
+    });
+    expect(loadWorkerConfig({ ...required, LANGFUSE_ENVIRONMENT: "dev" })).not.toHaveProperty("langfuse");
+    expect(() => loadWorkerConfig({ ...required, LANGFUSE_PUBLIC_KEY: "pk-lf" })).toThrow("must be set together");
+  });
+
+  it("selects the R2 evidence bucket only when all its settings are set", () => {
+    const r2 = {
+      EVAL_EVIDENCE_R2_ENDPOINT: "https://account.r2.cloudflarestorage.com/",
+      EVAL_EVIDENCE_R2_BUCKET: "eval-evidence",
+      EVAL_EVIDENCE_R2_ACCESS_KEY_ID: "key-id",
+      EVAL_EVIDENCE_R2_SECRET_ACCESS_KEY: "secret",
+    };
+    const config = loadWorkerConfig({ ...required, ...r2 });
+    expect(config.evidenceR2).toEqual({
+      endpoint: "https://account.r2.cloudflarestorage.com", bucket: "eval-evidence", accessKeyId: "key-id", secretAccessKey: "secret",
+    });
+    expect(config).not.toHaveProperty("EVAL_EVIDENCE_R2_SECRET_ACCESS_KEY");
+    expect(loadWorkerConfig(required)).not.toHaveProperty("evidenceR2");
+    expect(() => loadWorkerConfig({ ...required, EVAL_EVIDENCE_R2_BUCKET: "eval-evidence" })).toThrow("must be set together");
+  });
+
   it("parses an explicit Run concurrency", () => {
     expect(loadWorkerConfig({ ...required, EVAL_RUN_WORKER_CONCURRENCY: "3" }).EVAL_RUN_WORKER_CONCURRENCY).toBe(3);
   });
