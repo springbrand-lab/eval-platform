@@ -41,7 +41,7 @@ export function ObservationPage({ projectId, target }: { projectId: string; targ
     refetchInterval: refresh,
   });
   const samplingId = ref.data?.samplingId;
-  const title = target.role === "subject" ? "被测 Agent 会话" : "评委会话";
+  const title = target.role === "subject" ? "执行 Agent 会话" : "评估 Agent 会话";
   const tabs = (
     <Tabs<Tab> value={tab} onChange={setTab} tabs={[
       { value: "messages", label: "Context" },

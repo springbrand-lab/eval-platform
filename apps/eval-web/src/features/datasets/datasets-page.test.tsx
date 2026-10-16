@@ -5,6 +5,7 @@ import { click, render, type } from "@/test/render";
 import { datasetKeys } from "@/api-sdk/datasets-api";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DatasetsPage } from "./datasets-page";
+import { inputLimits } from "@/test/input-limits";
 
 const state = vi.hoisted(() => {
   const fetch = vi.fn<typeof globalThis.fetch>();
@@ -12,12 +13,20 @@ const state = vi.hoisted(() => {
   return { fetch, records: [] as Dataset[], requests: [] as string[], outcome: "lost" as "lost" | "reject" | "success", navigate: vi.fn() };
 });
 vi.mock("@/auth/session", () => ({ currentToken: () => null, markForbidden: vi.fn(), markUnauthorized: vi.fn() }));
+vi.mock("@/api-sdk/input-limits-api", async (original) => ({ ...await original<object>(), getInputLimits: async () => inputLimits }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate, Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));
 
 function button(text: string) {
   const element = [...document.querySelectorAll("button")].find((item) => item.textContent === text);
   if (!element) throw new Error(`Missing button ${text}`);
   return element;
+}
+
+async function openCreate() {
+  await click(button("新建数据集"));
+  await click([...document.querySelectorAll('[role="tab"]')].find((item) => item.textContent === "手动创建"));
+  const description = [...document.querySelectorAll("label")].find((item) => item.textContent === "说明")!;
+  await type(document.getElementById(description.htmlFor)!, "Dataset description");
 }
 
 function nameInput() {
@@ -47,7 +56,8 @@ async function page() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const view = await render(<QueryClientProvider client={client}><TooltipProvider><DatasetsPage /></TooltipProvider></QueryClientProvider>);
   await vi.waitFor(() => expect(state.requests).toEqual(["GET"]));
-  await click(button("新建测试集"));
+  expect([...view.container.querySelectorAll("button")].filter((item) => item.textContent === "新建数据集")).toHaveLength(1);
+  await openCreate();
   return { ...view, client, close: async () => { await view.unmount(); client.clear(); } };
 }
 
@@ -55,18 +65,20 @@ it("rereads the Dataset catalog and blocks a duplicate after a lost creation ack
   const view = await page();
   try {
     await type(nameInput(), "Committed Dataset");
-    await click(button("创建"));
+    await click(button("创建数据集"));
     await vi.waitFor(() => expect(document.body.textContent).toContain("提交结果尚未确认"));
     expect(state.requests).toEqual(["GET", "POST", "GET"]);
     expect(view.client.getQueryData(datasetKeys.list())).toEqual(state.records);
     expect(nameInput().matches(":disabled")).toBe(true);
-    expect(button("创建").disabled).toBe(true);
-    await click(button("创建"));
+    expect(button("创建数据集").disabled).toBe(true);
+    await click([...document.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "导入数据集"));
+    expect(document.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("手动创建");
+    await click(button("创建数据集"));
     expect(state.records).toHaveLength(1);
     expect(state.requests).toEqual(["GET", "POST", "GET"]);
     await click(button("取消"));
     expect(view.container.textContent).toContain("Committed Dataset");
-    await click(button("新建测试集"));
+    await openCreate();
     expect(nameInput().value).toBe("");
     expect(document.body.textContent).not.toContain("提交结果尚未确认");
   } finally { await view.close(); }
@@ -77,14 +89,14 @@ it("keeps a rejected creation editable and submits the corrected Dataset once", 
   const view = await page();
   try {
     await type(nameInput(), "Rejected Dataset");
-    await click(button("创建"));
-    await vi.waitFor(() => expect(button("创建").disabled).toBe(false));
+    await click(button("创建数据集"));
+    await vi.waitFor(() => expect(button("创建数据集").disabled).toBe(false));
     expect(state.records).toEqual([]);
     expect(nameInput().matches(":disabled")).toBe(false);
     state.outcome = "success";
     await type(nameInput(), "Corrected Dataset");
-    await click(button("创建"));
+    await click(button("创建数据集"));
     await vi.waitFor(() => expect(state.navigate).toHaveBeenCalledWith({ to: "/datasets/$datasetId", params: { datasetId: "20000000-0000-4000-8000-000000000001" } }));
-    expect(state.records).toEqual([{ datasetId: "20000000-0000-4000-8000-000000000001", name: "Corrected Dataset" }]);
+    expect(state.records).toEqual([{ datasetId: "20000000-0000-4000-8000-000000000001", name: "Corrected Dataset", description: "Dataset description" }]);
   } finally { await view.close(); }
 });

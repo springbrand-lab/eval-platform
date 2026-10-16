@@ -4,12 +4,13 @@ import { act } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RunOperation, RunPreview, RunTargetSelector } from "@/api-sdk/types";
-import { click, render } from "@/test/render";
+import { click, render, type } from "@/test/render";
 import { NewRunPage } from "./new-run-page";
 
-const mocks = vi.hoisted(() => ({ project: vi.fn(), preview: vi.fn(), submit: vi.fn(), navigate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ project: vi.fn(), preview: vi.fn(), submit: vi.fn(), navigate: vi.fn(), sample: vi.fn() }));
 vi.mock("@/api-sdk/projects-api", async (original) => ({ ...await original<object>(), getProject: mocks.project }));
 vi.mock("@/api-sdk/runs-api", async (original) => ({ ...await original<object>(), previewRun: mocks.preview, submitRun: mocks.submit }));
+vi.mock("@/api-sdk/metrics-api", async (original) => ({ ...await original<object>(), getSampleOverview: mocks.sample }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => mocks.navigate, Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));
 
 function preview(operation: RunOperation, selector: RunTargetSelector = { all: true }): RunPreview {
@@ -21,11 +22,29 @@ const button = (container: HTMLElement, text: string) => [...container.querySele
 const flush = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
 
 beforeEach(() => {
-  mocks.project.mockReset(); mocks.preview.mockReset(); mocks.submit.mockReset(); mocks.navigate.mockReset();
+  mocks.project.mockReset(); mocks.preview.mockReset(); mocks.submit.mockReset(); mocks.navigate.mockReset(); mocks.sample.mockReset();
   mocks.project.mockResolvedValue({ project: { projectId: "project", name: "项目" }, currentRun: null, evaluation: {}, datasets: [], projectSamples: [] });
   mocks.preview.mockImplementation(async (_id: string, input: { operation: RunOperation; selector: RunTargetSelector }) => preview(input.operation, input.selector));
   mocks.submit.mockResolvedValue({ runId: "run" });
 });
+
+function selectionProject() {
+  return { project: { projectId: "project", name: "项目" }, currentRun: null, evaluation: {},
+    datasets: [
+      { datasetId: "d1", name: "基础布局", projectSampleIds: ["a"] },
+      { datasetId: "d2", name: "交互布局", projectSampleIds: ["a", "b"] },
+    ],
+    projectSamples: ["a", "b"].map((id) => ({ projectSampleId: id, datasetIds: id === "a" ? ["d1", "d2"] : ["d2"],
+      samplingCount: 2, data: { dataId: id, name: `用例 ${id}`, userPrompt: `任务 ${id}` } })),
+  };
+}
+
+const picker = (container: HTMLElement) => container.querySelector<HTMLButtonElement>('button[aria-haspopup="dialog"]')!;
+const popup = () => document.querySelector<HTMLElement>('[data-slot="popover-content"]')!;
+function choice(label: string) {
+  const item = [...document.querySelectorAll("label")].find((item) => item.querySelector("[title]")?.getAttribute("title") === label)!;
+  return document.getElementById(item.htmlFor) as HTMLButtonElement;
+}
 
 async function page() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -82,5 +101,81 @@ it("clears a stale target preview and requires a new preview", async () => {
     expect(view.container.textContent).toContain("目标已变化");
     await click(button(view.container, "预览")); await flush();
     expect(button(view.container, "提交 Run").disabled).toBe(false);
+  } finally { await view.close(); }
+});
+
+it("keeps hidden Dataset selections while searching and invalidates the preview when cleared", async () => {
+  mocks.project.mockResolvedValue(selectionProject());
+  const view = await page();
+  try {
+    await click(picker(view.container));
+    await click(choice("项目"));
+    await click(choice("基础布局"));
+    await type(popup().querySelector('[aria-label="搜索测试集或用例"]'), "交互");
+    await click(choice("交互布局"));
+    expect(view.container.textContent).toContain("2 个测试集");
+    await click(picker(view.container));
+    await click(button(view.container, "预览")); await flush();
+    expect(mocks.preview.mock.calls.at(-1)?.[1]).toEqual({ operation: "execution", selector: { datasetIds: ["d1", "d2"] } });
+    expect(button(view.container, "提交 Run").disabled).toBe(false);
+    await click(picker(view.container));
+    await type(popup().querySelector('[aria-label="搜索测试集或用例"]'), "无匹配");
+    expect(popup().textContent).toContain("没有匹配的测试集或用例");
+    expect(view.container.textContent).toContain("2 个测试集");
+    await click(button(popup(), "清空选择"));
+    await click(picker(view.container));
+    expect(button(view.container, "提交 Run").disabled).toBe(true);
+    expect(button(view.container, "预览").disabled).toBe(true);
+  } finally { await view.close(); }
+});
+
+it("combines Sampling choices across cases and prunes descendants when a Dataset is selected", async () => {
+  mocks.project.mockResolvedValue(selectionProject());
+  mocks.sample.mockImplementation(async (_project: string, id: string) => ({ samplings: [1, 2].map((index) => ({
+    samplingId: `${id}-${index}`, execution: { status: "succeeded" },
+  })) }));
+  const view = await page();
+  try {
+    await click(picker(view.container));
+    await click(choice("项目"));
+    await click(popup().querySelector('[aria-label="展开 基础布局"]'));
+    await click(popup().querySelector('[aria-label="展开 用例 a"]')); await flush();
+    await click(choice("采样 1 · a-1"));
+    expect(choice("基础布局").getAttribute("aria-checked")).toBe("mixed");
+    await click(popup().querySelector('[aria-label="展开 交互布局"]'));
+    await click(popup().querySelector('[aria-label="展开 用例 b"]')); await flush();
+    await click(choice("采样 1 · b-1"));
+    expect(view.container.textContent).toContain("2 个采样");
+    await click(picker(view.container));
+    await click(button(view.container, "预览")); await flush();
+    expect(mocks.preview.mock.calls.at(-1)?.[1].selector).toEqual({ samplingIds: ["a-1", "b-1"] });
+    await click(picker(view.container));
+    await click(choice("基础布局"));
+    await click(picker(view.container));
+    await click(button(view.container, "预览")); await flush();
+    expect(mocks.preview.mock.calls.at(-1)?.[1].selector).toEqual({ datasetIds: ["d1"], samplingIds: ["b-1"] });
+  } finally { await view.close(); }
+});
+
+it("freezes selection rows and clear actions while replaying an uncertain Dataset submission", async () => {
+  mocks.project.mockResolvedValue(selectionProject());
+  mocks.submit.mockRejectedValueOnce(new ApiError({ kind: "network", code: "NETWORK_ERROR", status: 0, message: "ack lost" }));
+  const view = await page();
+  try {
+    await click(picker(view.container));
+    await click(choice("项目"));
+    await click(choice("基础布局"));
+    await click(button(view.container, "预览")); await flush();
+    await click(button(view.container, "提交 Run")); await flush();
+    const command = mocks.submit.mock.calls[0]?.[1];
+    expect(picker(view.container).disabled).toBe(true);
+    if (popup()) {
+      await click(choice("交互布局"));
+      expect(choice("交互布局").disabled).toBe(true);
+      expect(button(popup(), "清空选择").disabled).toBe(true);
+    }
+    expect(view.container.textContent).toContain("1 个测试集");
+    await click(button(view.container, "重试提交")); await flush();
+    expect(mocks.submit.mock.calls[1]?.[1]).toEqual(command);
   } finally { await view.close(); }
 });

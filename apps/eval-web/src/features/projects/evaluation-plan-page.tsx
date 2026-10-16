@@ -46,7 +46,7 @@ function PlanForm({ view }: { view: ProjectView }) {
       <CardHeader title={current ? "替换评估计划" : "填写评估计划"} />
       <CardBody className="flex flex-col gap-4">
         <fieldset disabled={save.isPending} className="grid gap-4 md:grid-cols-3">
-          <Field><FieldLabel htmlFor={`${formId}-agent`}>评委 Agent</FieldLabel>
+          <Field><FieldLabel htmlFor={`${formId}-agent`}>评估 Agent</FieldLabel>
             <NativeSelect id={`${formId}-agent`} required value={agentId} onChange={(event) => setAgentId(event.target.value)}>
               <option value="" disabled>请选择</option>
               {agentId && !agents.data?.some((option) => option.agentConfig.userAgentId === agentId) && <option value={agentId} disabled>{current?.evaluatorAgentConfig.name ?? agentId}</option>}
@@ -89,7 +89,7 @@ export function EvaluationPlanPage({ projectId }: { projectId: string }) {
               <CardHeader title="当前评估计划" />
               <CardBody>
                 <DescriptionList items={[
-                  { label: "评委 Agent", value: evaluation.plan.evaluatorAgentConfig.name },
+                  { label: "评估 Agent", value: evaluation.plan.evaluatorAgentConfig.name },
                   { label: "评估并发", value: evaluation.plan.evaluationConcurrency },
                   { label: "评分 Schema", value: <Link className="link" to="/projects/$projectId/output-schema" params={{ projectId }}>查看</Link> },
                 ]} />

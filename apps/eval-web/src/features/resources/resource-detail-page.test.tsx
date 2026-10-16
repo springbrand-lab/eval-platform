@@ -45,7 +45,7 @@ async function mount(kind: ResourceKind) {
   return { router, ...view, cleanup: async () => { await view.unmount(); client.clear(); } };
 }
 
-it.each(["material", "session"] as const)("%s name navigates to the real detail route; edit remains independent", async (kind) => {
+it.each(["material", "session"] as const)("%s name opens the detail route; only context metadata is editable", async (kind) => {
   const record = { bundleId: "bundle", name: kind === "material" ? "参考素材" : "初始上下文", description: "说明",
     ...(kind === "material" ? { materialId: "resource", byteSize: 4 } : { sessionId: "resource", format: "json" }) };
   const path = kind === "material" ? "/docs/readme.txt" : "/context.json";
@@ -56,11 +56,14 @@ it.each(["material", "session"] as const)("%s name navigates to the real detail 
   const view = await mount(kind);
   try {
     await vi.waitFor(() => expect(document.querySelector(`a[href="/resources/${kind}/bundle/resource"]`)).not.toBeNull());
-    await click(button("编辑"));
-    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-    expect(view.router.state.location.pathname).toBe(`/resources/${kind}/bundle`);
-    expect(requests.listFiles).not.toHaveBeenCalled();
-    await click(button("取消"));
+    const edit = [...document.querySelectorAll("tbody button")].find((item) => item.textContent === "编辑名称与说明");
+    if (kind === "session") {
+      await click(edit);
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+      expect(view.router.state.location.pathname).toBe(`/resources/${kind}/bundle`);
+      expect(requests.listFiles).not.toHaveBeenCalled();
+      await click(button("取消"));
+    } else expect(edit).toBeUndefined();
     await click(document.querySelector(`a[href="/resources/${kind}/bundle/resource"]`));
     await vi.waitFor(() => expect(view.router.state.location.pathname).toBe(`/resources/${kind}/bundle/resource`));
     await vi.waitFor(() => expect(document.querySelector('nav[aria-label$="目录"]')).not.toBeNull());

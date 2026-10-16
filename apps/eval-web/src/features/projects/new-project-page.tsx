@@ -10,8 +10,8 @@ import { createProject, projectKeys } from "@/api-sdk/projects-api";
 import type { Data, ProjectCreateInput } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
 import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/card";
-import { DataTable } from "@/components/ui/data-table";
-import { Stepper, Tabs } from "@/components/ui/data-display";
+import { Stepper } from "@/components/ui/data-display";
+import { HierarchyBranch } from "@/components/ui/hierarchy-picker";
 import { EmptyState, ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
 import { Checkbox, RadioCards } from "@/components/ui/form";
 import { dataTitle } from "@/features/datasets/dataset-detail-page";
@@ -20,7 +20,7 @@ import { newIdempotencyKey } from "@/lib/files";
 import type { EvalInputLimits } from "@eval-platform/eval-contracts";
 import { useInputLimits } from "@/features/input-limits";
 
-const STEPS = ["用例", "采样次数", "被测 Agent", "评估与运行"];
+const STEPS = ["用例", "采样次数", "执行 Agent", "评估与运行"];
 
 interface DatasetChoice {
   /** null: every current member. */
@@ -63,13 +63,13 @@ export function buildProjectInput(draft: ProjectDraft, idempotencyKey: string, m
   if (!positive(draft.samplingCount, limits.samplingCountMax)) return `默认采样次数需要是 1–${limits.samplingCountMax} 的整数`;
   const overrides = Object.entries(draft.samplingCounts).filter(([dataId, count]) => selectedData.has(dataId) && count !== draft.samplingCount);
   if (overrides.some(([, count]) => !positive(count, limits.samplingCountMax))) return `采样次数需要是 1–${limits.samplingCountMax} 的整数`;
-  if (!draft.subjectAgentId) return "请选择被测 Agent";
+  if (!draft.subjectAgentId) return "请选择执行 Agent";
   if (!positive(draft.executionConcurrency)) return "执行并发需要是正整数";
   const timeout = draft.executionTimeoutMinutes.trim() ? Number(draft.executionTimeoutMinutes) : undefined;
   const timeoutMs = timeout === undefined ? undefined : Math.round(timeout * 60_000);
   if (timeoutMs !== undefined && !positive(timeoutMs)) return "超时时间需要换算为有效的正整数毫秒";
   if (draft.withEvaluation) {
-    if (!draft.evaluatorAgentId) return "请选择评委 Agent";
+    if (!draft.evaluatorAgentId) return "请选择评估 Agent";
     if (!positive(draft.evaluationConcurrency)) return "评估并发需要是正整数";
     if (!draft.outputSchemaId) return "请选择评分格式";
   } else if (draft.firstRun === "pipeline") {
@@ -105,11 +105,29 @@ export function NewProjectPage() {
   return <ProjectForm limits={limits.data} />;
 }
 
+function DatasetCases({ datasetId, choice, disabled, onChange }: {
+  datasetId: string; choice?: DatasetChoice; disabled: boolean;
+  onChange: (ids: Set<string>) => void;
+}) {
+  const members = useQuery({ queryKey: datasetKeys.members(datasetId), queryFn: ({ signal }) => listDatasetData(datasetId, signal) });
+  if (members.isPending) return <LoadingBlock rows={2} />;
+  if (members.error) return <ErrorBlock error={members.error} onRetry={() => void members.refetch()} />;
+  return members.data.length === 0 ? <p className="px-4 py-3 text-xs text-text-muted">这个测试集还没有用例。</p> : members.data.map((item) => (
+    <HierarchyBranch key={item.dataId} label={dataTitle(item)} detail="用例" collapsible={false} checked={!!choice && (!choice.dataIds || choice.dataIds.has(item.dataId))}
+      disabled={disabled} onCheckedChange={(checked) => {
+        const next = new Set(choice ? choice.dataIds ?? members.data.map((data) => data.dataId) : []);
+        if (checked) next.add(item.dataId); else next.delete(item.dataId);
+        onChange(next);
+      }} />
+  ));
+}
+
 function ProjectForm({ limits }: { limits: EvalInputLimits }) {
   const formId = useId();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [step, setStep] = useState(0);
+  const [datasetSearch, setDatasetSearch] = useState("");
   // Unknown outcomes replay the captured request with this same key.
   const [idempotencyKey] = useState(() => newIdempotencyKey("project"));
   const [draft, setDraft] = useState<ProjectDraft>({
@@ -156,14 +174,17 @@ function ProjectForm({ limits }: { limits: EvalInputLimits }) {
   const frozen = create.isPending || uncertain;
 
   const toggleDataset = (datasetId: string, on: boolean) => {
+    if (frozen) return;
     const next = new Map(draft.datasets);
     if (on) next.set(datasetId, { dataIds: null });
     else next.delete(datasetId);
     update({ datasets: next });
   };
   const setChoice = (datasetId: string, dataIds: Set<string> | null) => {
+    if (frozen) return;
     const next = new Map(draft.datasets);
-    next.set(datasetId, { dataIds });
+    if (dataIds?.size === 0) next.delete(datasetId);
+    else next.set(datasetId, { dataIds });
     update({ datasets: next });
   };
 
@@ -179,8 +200,8 @@ function ProjectForm({ limits }: { limits: EvalInputLimits }) {
   const schemaOptions = (schemas.data ?? []).map((schema) => ({ value: schema.outputSchemaId, label: schema.name }));
 
   return (
-    <Page>
-      <PageHeader title="新建项目" crumbs={[{ label: "项目管理", to: "/projects" }]} />
+    <Page narrow>
+      <PageHeader title="新建项目" description="选择测试数据，定义采样与 Agent，确认后开始第一次运行。" crumbs={[{ label: "项目管理", to: "/projects" }]} />
       <fieldset disabled={frozen} className="min-w-0">
       <div className="mb-5"><Stepper steps={STEPS} current={step} onSelect={setStep} /></div>
 
@@ -193,42 +214,35 @@ function ProjectForm({ limits }: { limits: EvalInputLimits }) {
             </CardBody>
           </Card>
           <Card>
-            <CardHeader title="测试集" actions={<span className="text-xs text-text-muted tabular">已选 {selectedData.length} 条用例</span>} />
+            <CardHeader title="测试数据范围" description="按测试集分组展示用例，可整组选中，也可逐条勾选。" actions={<span className="text-xs text-text-muted tabular">已选 {selectedData.length} 条用例</span>} />
             {datasets.isPending ? <LoadingBlock rows={3} /> : (datasets.data ?? []).length === 0 ? (
               <EmptyState title="还没有测试集" action={<Link to="/datasets" className="link text-[13px] font-semibold">去导入</Link>} />
             ) : (
-              <div className="divide-y divide-border">
-                {(datasets.data ?? []).map((dataset) => {
+              <CardBody className="flex flex-col gap-3">
+                <div aria-label="测试集与用例" className="min-w-0">
+                  <div className="flex items-center gap-2 border-b border-border p-3">
+                    <Input aria-label="搜索测试集" placeholder="搜索测试集" value={datasetSearch} disabled={frozen} onChange={(event) => setDatasetSearch(event.target.value)} />
+                    <Button type="button" variant="ghost" size="sm" disabled={frozen || draft.datasets.size === 0} onClick={() => !frozen && update({ datasets: new Map() })}>清空选择</Button>
+                  </div>
+                  <div className="flex flex-col gap-3 pt-3">
+                {(datasets.data ?? []).filter((dataset) => `${dataset.name} ${dataset.description ?? ""}`.toLowerCase().includes(datasetSearch.trim().toLowerCase())).map((dataset) => {
                   const choice = draft.datasets.get(dataset.datasetId);
                   const list = members.get(dataset.datasetId) ?? [];
                   return (
-                    <div key={dataset.datasetId} className="px-4 py-3">
-                      <div className="flex items-center justify-between gap-4">
-                        <Checkbox label={dataset.name} checked={!!choice} onCheckedChange={(checked) => toggleDataset(dataset.datasetId, checked)} />
-                        {choice && (
-                          <Tabs<"all" | "some"> value={choice.dataIds ? "some" : "all"} tabs={[
-                            { value: "all", label: "全部", count: list.length },
-                            { value: "some", label: "部分", ...(choice.dataIds ? { count: choice.dataIds.size } : {}) },
-                          ]} onChange={(value) => setChoice(dataset.datasetId, value === "all" ? null : new Set(list.map((item) => item.dataId)))} />
-                        )}
-                      </div>
-                      {choice?.dataIds && (
-                        <div className="mt-3 overflow-hidden rounded-[var(--radius-control)] border border-border">
-                          <DataTable<Data>
-                            rows={list}
-                            rowKey={(row) => row.dataId}
-                            selectable
-                            selected={choice.dataIds}
-                            onSelectedChange={(next) => setChoice(dataset.datasetId, next)}
-                            searchText={(row) => `${dataTitle(row)} ${row.userPrompt}`}
-                            columns={[{ key: "title", header: "用例", cell: (row) => <span className="line-clamp-1">{dataTitle(row)}</span> }]}
-                          />
-                        </div>
-                      )}
+                    <div key={dataset.datasetId} className="overflow-hidden rounded-lg border border-border">
+                    <HierarchyBranch label={dataset.name} defaultOpen detail={choice ? `测试集 · 已选 ${choice.dataIds?.size ?? list.length} 条用例` : "测试集"}
+                      checked={!choice ? false : !choice.dataIds || (list.length > 0 && list.every((item) => choice.dataIds?.has(item.dataId))) ? true : "indeterminate"}
+                      disabled={frozen} onCheckedChange={(checked) => toggleDataset(dataset.datasetId, checked)}>
+                      <DatasetCases datasetId={dataset.datasetId} choice={choice} disabled={frozen} onChange={(ids) => setChoice(dataset.datasetId, ids)} />
+                    </HierarchyBranch>
                     </div>
                   );
                 })}
-              </div>
+                  {(datasets.data ?? []).every((dataset) => !`${dataset.name} ${dataset.description ?? ""}`.toLowerCase().includes(datasetSearch.trim().toLowerCase())) && <p className="p-4 text-sm text-text-muted">没有匹配的测试集。</p>}
+                  </div>
+                </div>
+                <p className="text-xs leading-5 text-text-muted">勾选测试集包含其全部用例，也可逐条调整。共享用例创建时去重，下一步配置采样次数。</p>
+              </CardBody>
             )}
           </Card>
           {datasets.error && <ErrorBlock error={datasets.error} onRetry={() => void datasets.refetch()} />}
@@ -242,22 +256,23 @@ function ProjectForm({ limits }: { limits: EvalInputLimits }) {
             <Field className="max-w-xs"><FieldLabel htmlFor={`${formId}-count`}>每条用例采样次数</FieldLabel>
               <Input id={`${formId}-count`} required type="number" min={1} max={limits.samplingCountMax} value={draft.samplingCount}
                 onChange={(event) => update({ samplingCount: Number(event.target.value) })} />
-              <FieldDescription>{`1–${limits.samplingCountMax}，下表可逐条覆盖`}</FieldDescription>
+              <FieldDescription>{`1–${limits.samplingCountMax}，展开下方用例可单独调整；共享用例的次数同步。`}</FieldDescription>
             </Field>
             <div className="overflow-hidden rounded-[var(--radius-control)] border border-border">
-              <DataTable<Data>
-                rows={selectedData}
-                rowKey={(row) => row.dataId}
-                searchText={(row) => dataTitle(row)}
-                columns={[
-                  { key: "title", header: "用例", cell: (row) => <span className="line-clamp-1">{dataTitle(row)}</span> },
-                  { key: "count", header: "次数", align: "right", cell: (row) => (
-                    <Input aria-label={`${dataTitle(row)}的采样次数`} type="number" min={1} max={limits.samplingCountMax} className="ml-auto h-8 w-24 text-right"
-                      value={draft.samplingCounts[row.dataId] ?? draft.samplingCount}
-                      onChange={(event) => update({ samplingCounts: { ...draft.samplingCounts, [row.dataId]: Number(event.target.value) } })} />
-                  ) },
-                ]}
-              />
+              <div className="border-b border-border bg-surface-muted/60 px-4 py-3 text-xs text-text-muted">测试集 → 用例 · 同一用例只创建一次，次数跨测试集同步</div>
+              <div className="p-2">
+                {(datasets.data ?? []).filter((dataset) => draft.datasets.has(dataset.datasetId)).map((dataset) => {
+                  const choice = draft.datasets.get(dataset.datasetId)!;
+                  const list = (members.get(dataset.datasetId) ?? []).filter((item) => !choice.dataIds || choice.dataIds.has(item.dataId));
+                  return <HierarchyBranch key={dataset.datasetId} label={dataset.name} detail={`测试集 · ${list.length} 条用例`} defaultOpen>
+                    {list.map((item) => <HierarchyBranch key={item.dataId} label={dataTitle(item)} detail="用例" actions={
+                        <Input aria-label={`${dataTitle(item)}的采样次数`} type="number" min={1} max={limits.samplingCountMax} className="h-9 w-24 text-right"
+                          value={draft.samplingCounts[item.dataId] ?? draft.samplingCount}
+                          onChange={(event) => update({ samplingCounts: { ...draft.samplingCounts, [item.dataId]: Number(event.target.value) } })} />
+                    } />)}
+                  </HierarchyBranch>;
+                })}
+              </div>
             </div>
             <p className="text-xs text-text-muted tabular">首次执行共 {totalSamplings} 次采样</p>
           </CardBody>
@@ -267,7 +282,7 @@ function ProjectForm({ limits }: { limits: EvalInputLimits }) {
       {step === 2 && (
         <Card>
           <CardBody className="grid gap-4 md:grid-cols-3">
-            <Field><FieldLabel htmlFor={`${formId}-subject`}>被测 Agent</FieldLabel>
+            <Field><FieldLabel htmlFor={`${formId}-subject`}>执行 Agent</FieldLabel>
               <NativeSelect id={`${formId}-subject`} required value={draft.subjectAgentId} onChange={(event) => update({ subjectAgentId: event.target.value })}>
                 <option value="" disabled>请选择</option>{agentOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </NativeSelect>
@@ -294,7 +309,7 @@ function ProjectForm({ limits }: { limits: EvalInputLimits }) {
             {draft.withEvaluation ? (
               <CardBody className="flex flex-col gap-4">
                 <div className="grid gap-4 md:grid-cols-3">
-                  <Field><FieldLabel htmlFor={`${formId}-evaluator`}>评委 Agent</FieldLabel>
+                  <Field><FieldLabel htmlFor={`${formId}-evaluator`}>评估 Agent</FieldLabel>
                     <NativeSelect id={`${formId}-evaluator`} required value={draft.evaluatorAgentId} onChange={(event) => update({ evaluatorAgentId: event.target.value })}>
                       <option value="" disabled>请选择</option>{evaluatorOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                     </NativeSelect>
@@ -318,7 +333,7 @@ function ProjectForm({ limits }: { limits: EvalInputLimits }) {
             <CardHeader title="首个 Run" />
             <CardBody>
               <RadioCards<"pipeline" | "execution"> className="md:grid-cols-2" value={draft.firstRun} onValueChange={(value) => update({ firstRun: value })} options={[
-                { value: "pipeline", title: "执行 + 评估", description: "采样成功后由评委打分", disabled: !draft.withEvaluation },
+                { value: "pipeline", title: "执行 + 评估", description: "采样成功后由评估 Agent 打分", disabled: !draft.withEvaluation },
                 { value: "execution", title: "只执行", description: "之后再单独评估" },
               ]} />
             </CardBody>
@@ -328,8 +343,8 @@ function ProjectForm({ limits }: { limits: EvalInputLimits }) {
               <DescriptionList items={[
                 { label: "名称", value: draft.name || "—" },
                 { label: "用例", value: `${selectedData.length} 条 · 首次 ${totalSamplings} 次采样` },
-                { label: "被测 Agent", value: agentOptions.find((item) => item.value === draft.subjectAgentId)?.label ?? "—" },
-                { label: "评委 Agent", value: draft.withEvaluation ? evaluatorOptions.find((item) => item.value === draft.evaluatorAgentId)?.label ?? "—" : "不评估" },
+                { label: "执行 Agent", value: agentOptions.find((item) => item.value === draft.subjectAgentId)?.label ?? "—" },
+                { label: "评估 Agent", value: draft.withEvaluation ? evaluatorOptions.find((item) => item.value === draft.evaluatorAgentId)?.label ?? "—" : "不评估" },
               ]} />
             </CardBody>
           </Card>
@@ -340,7 +355,7 @@ function ProjectForm({ limits }: { limits: EvalInputLimits }) {
       </fieldset>
       {uncertain && <Notice tone="warning">提交结果尚未确认。重试会使用同一份创建请求，也可以返回项目管理查看。</Notice>}
 
-      <div className="sticky bottom-0 -mx-6 mt-5 flex items-center justify-between gap-3 border-t border-border bg-bg/90 px-6 py-3 backdrop-blur">
+      <div className="sticky bottom-0 -mx-4 mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-bg/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6">
         <div className="flex gap-2">
           <Button disabled={create.isPending} onClick={() => void navigate({ to: "/projects" })}>{uncertain ? "返回项目管理" : "取消"}</Button>
           <Button disabled={step === 0 || frozen} onClick={() => setStep(step - 1)}>上一步</Button>

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { act } from "react";
 import { click, render, type } from "@/test/render";
 import { StatusBadge } from "./badge";
 import { DataTable } from "./data-table";
@@ -42,5 +43,34 @@ describe("DataTable", () => {
     const view = await render(<DataTable rows={many} columns={columns} rowKey={(row) => row.id} />);
     expect(view.container.querySelectorAll("tbody tr").length).toBeLessThan(100);
     await view.unmount();
+  });
+
+  it("distinguishes an unmatched search from an empty catalog and can clear it", async () => {
+    const view = await render(<DataTable rows={rows} columns={columns} rowKey={(row) => row.id}
+      searchText={(row) => row.name} empty={<p>创建第一条记录</p>} />);
+    try {
+      await type(view.container.querySelector("input"), "missing");
+      expect(view.container.textContent).toContain("没有匹配的结果");
+      expect(view.container.textContent).not.toContain("创建第一条记录");
+      expect(view.container.textContent).toContain("0 / 3");
+      await click([...view.container.querySelectorAll("button")].find((button) => button.textContent === "清空搜索"));
+      expect(view.container.querySelectorAll("tbody tr")).toHaveLength(3);
+    } finally { await view.unmount(); }
+  });
+
+  it("opens a row from the keyboard without hijacking controls inside it", async () => {
+    const open = vi.fn();
+    const view = await render(<DataTable rows={rows} columns={[
+      ...columns, { key: "action", header: "操作", cell: () => <button type="button">复制</button> },
+    ]} rowKey={(row) => row.id} onRowClick={open} />);
+    try {
+      const row = view.container.querySelector("tbody tr")!;
+      expect(row.getAttribute("tabindex")).toBe("0");
+      await act(async () => { row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+      expect(open).toHaveBeenCalledWith(rows[0]);
+      open.mockClear();
+      await act(async () => { row.querySelector("button")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+      expect(open).not.toHaveBeenCalled();
+    } finally { await view.unmount(); }
   });
 });

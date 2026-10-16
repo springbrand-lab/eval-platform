@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { render } from "@/test/render";
+import { click, render } from "@/test/render";
 import { agentMetric, metricSummary, resourceStatistics } from "@/test/metrics";
 import { AgentPanel } from "@/features/results/agent-panel";
 import { ResourceMetrics } from "./resource-metrics";
@@ -32,9 +32,13 @@ describe("Agent resource and trajectory categories", () => {
       expect([...turns.querySelectorAll("td")].slice(0, 6).map((item) => item.textContent)).toEqual(["4", "2", "1", "0", "0", "1"]);
       const tool = view.container.querySelector('table[aria-label="工具类型统计"] tbody tr')!;
       expect(tool.textContent).toContain("write_file");
-      expect(tool.textContent).toContain("累计 480 B · 均值 160 B");
-      expect(tool.textContent).toContain("最小 100 B · 最大 200 B");
-      expect(tool.textContent).toContain("有效 0 · 缺失 3");
+      await click([...view.container.querySelectorAll("button")].find((button) => button.textContent?.startsWith("工具长度与耗时")));
+      const lengths = view.container.querySelector('table[aria-label="工具长度与耗时分布"]')!;
+      const rows = [...lengths.querySelectorAll("tbody tr")];
+      expect([...rows[0]!.querySelectorAll("td")].map((cell) => cell.textContent)).toEqual(["480 B", "160 B", "180 B", "100 B — 200 B", "3", "0"]);
+      expect([...rows[1]!.querySelectorAll("td")].map((cell) => cell.textContent)).toEqual(["未获得", "未获得", "未获得", "未获得 — 未获得", "0", "3"]);
+      await click(lengths.closest("section")!.querySelector("button"));
+      expect(rows[0]!.textContent).toContain("1,866.67字节²");
       const details = [...view.container.querySelectorAll("dt")];
       const value = (label: string) => details.find((item) => item.textContent === label)?.nextElementSibling?.textContent;
       expect(value("非工具轮数")).toBe("1");
@@ -59,6 +63,22 @@ describe("Agent resource and trajectory categories", () => {
       expect(tables[0]?.textContent).toContain("write_file");
       expect(tables[1]?.textContent).toContain("暂无工具类型数据");
       expect(tables[2]?.textContent).toContain("write_file");
+    } finally { await view.unmount(); }
+  });
+
+  it("puts drill-down results before output details and collapsed resource statistics", async () => {
+    const summary = metricSummary(fixture(), resourceStatistics());
+    const view = await render(<SummaryCards summary={summary}><h2>下一级实验结果</h2></SummaryCards>);
+    try {
+      const text = view.container.textContent!;
+      expect(text).toContain("下一级实验结果");
+      expect(text.indexOf("下一级实验结果")).toBeLessThan(text.indexOf("Schema 评估输出"));
+      expect(text.indexOf("Schema 评估输出")).toBeLessThan(text.indexOf("执行 Agent 资源与轨迹"));
+      const resources = [...view.container.querySelectorAll("details")].find((item) => item.querySelector("summary")?.textContent?.includes("资源与轨迹统计"));
+      expect(resources).toBeDefined();
+      expect(resources?.open).toBe(false);
+      expect(resources?.textContent).toContain("write_file");
+      expect(resources?.textContent).toContain("评估 Agent 资源与轨迹");
     } finally { await view.unmount(); }
   });
 });

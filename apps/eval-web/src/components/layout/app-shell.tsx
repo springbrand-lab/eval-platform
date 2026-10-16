@@ -8,17 +8,17 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { readThemePreference, saveThemePreference, type ThemePreference } from "@/lib/theme";
 
-interface NavItem { to: string; label: string; icon: ComponentType<{ className?: string }> }
+interface NavItem { to: string; label: string; icon: ComponentType<{ className?: string }>; paths?: readonly string[] }
 
 export const NAV_GROUPS: readonly { label: string; items: readonly NavItem[] }[] = [
-  { label: "评测", items: [{ to: "/projects", label: "项目管理", icon: FlaskConical }] },
   {
-    label: "数据",
+    label: "工作空间",
     items: [
-      { to: "/datasets", label: "数据集", icon: Database },
+      { to: "/projects", label: "项目管理", icon: FlaskConical },
+      { to: "/datasets", label: "数据集", icon: Database, paths: ["/resources", "/output-schemas"] },
+      { to: "/agents", label: "Agent 创建", icon: Bot },
     ],
   },
-  { label: "配置", items: [{ to: "/agents", label: "Agent", icon: Bot }] },
   { label: "账户", items: [{ to: "/credits", label: "积分", icon: Coins }] },
 ];
 
@@ -40,10 +40,10 @@ export function AppShell() {
 
   return (
     <div className="flex h-full bg-bg">
-      <aside className={cn("flex shrink-0 flex-col border-r border-border bg-sidebar transition-[width] duration-150", collapsed ? "w-14" : "w-56")}>
+      <aside className={cn("flex shrink-0 flex-col border-r border-border bg-sidebar transition-[width] duration-150", collapsed ? "w-14" : "w-14 md:w-56")}>
         <div className={cn("flex h-14 items-center gap-2 px-3", collapsed && "justify-center px-0")}>
           {!collapsed && (
-            <span className="flex min-w-0 items-center gap-2 pl-1 text-sm font-semibold text-text-strong">
+            <span className="hidden min-w-0 items-center gap-2.5 pl-1 text-base font-semibold tracking-tight text-text-strong md:flex">
               <img src="/favicon.svg" alt="" className="size-5" />
               {embedded ? "Eval" : "Eval 评测"}
             </span>
@@ -52,7 +52,7 @@ export function AppShell() {
             type="button"
             onClick={() => setCollapsed(!collapsed)}
             aria-label={collapsed ? "展开导航" : "收起导航"}
-            className={cn("rounded-md p-1.5 text-text-muted hover:bg-surface-muted hover:text-text-strong", !collapsed && "ml-auto")}
+            className={cn("rounded-md p-1.5 text-text-muted hover:bg-surface-muted hover:text-text-strong", !collapsed && "md:ml-auto")}
           >
             {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
           </button>
@@ -60,22 +60,25 @@ export function AppShell() {
         <nav aria-label="主导航" className="flex-1 overflow-y-auto px-2 pb-3">
           {NAV_GROUPS.map((group) => (
             <div key={group.label} className="mt-3 first:mt-1">
-              {!collapsed && <p className="mb-1 px-2 text-[11px] font-semibold text-text-faint">{group.label}</p>}
+              {!collapsed && <p className="mb-2 hidden px-2 text-xs font-medium text-text-faint md:block">{group.label}</p>}
               {group.items.map((item) => {
-                const active = pathname === item.to || pathname.startsWith(`${item.to}/`);
+                const active = [item.to, ...item.paths ?? []].some((path) => pathname === path || pathname.startsWith(`${path}/`));
                 const Icon = item.icon;
                 return (
-                  <Tooltip key={item.to} content={collapsed ? item.label : null} side="right">
+                  <Tooltip key={item.to} content={item.label} side="right">
                   <Link
                     to={item.to}
+                    aria-label={item.label}
+                    aria-current={active ? "page" : undefined}
                     className={cn(
-                      "mb-px flex h-8 items-center gap-2.5 rounded-md px-2 text-[13px] transition-colors",
-                      active ? "bg-surface-muted font-semibold text-text-strong" : "text-text-secondary hover:bg-surface-muted/70 hover:text-text-strong",
+                      "mb-1 flex h-10 items-center gap-2.5 rounded-lg px-2 text-sm transition-colors",
+                      active ? "bg-surface-muted font-semibold text-text-strong ring-1 ring-border" : "text-text-secondary hover:bg-surface-muted/70 hover:text-text-strong",
                       collapsed && "justify-center px-0",
+                      !collapsed && "justify-center md:justify-start",
                     )}
                   >
                     <Icon className={cn("size-4 shrink-0", active ? "text-text-strong" : "text-text-muted")} />
-                    {!collapsed && item.label}
+                    {!collapsed && <span className="hidden md:inline">{item.label}</span>}
                   </Link>
                   </Tooltip>
                 );
@@ -94,7 +97,7 @@ export function AppShell() {
               {theme === "dark" ? <Moon className="size-4" /> : <Sun className="size-4" />}
             </button>
           ) : (
-            <div role="radiogroup" aria-label="主题" className="flex rounded-md bg-surface-muted p-0.5">
+            <div role="radiogroup" aria-label="主题" className="grid grid-cols-1 rounded-md bg-surface-muted p-0.5 md:grid-cols-3">
               {THEMES.map((item) => {
                 const Icon = item.icon;
                 return (
@@ -106,7 +109,7 @@ export function AppShell() {
                     aria-checked={theme === item.value}
                     onClick={() => choose(item.value)}
                     className={cn(
-                      "flex h-7 flex-1 items-center justify-center rounded-[5px] transition-colors",
+                      "flex h-8 items-center justify-center rounded-[5px] transition-colors",
                       theme === item.value ? "bg-surface text-text-strong shadow-sm" : "text-text-muted hover:text-text-strong",
                     )}
                   >

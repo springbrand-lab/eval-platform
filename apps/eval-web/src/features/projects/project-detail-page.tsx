@@ -83,7 +83,7 @@ function PlanCard({ view }: { view: ProjectView }) {
         <div>
           <SectionLabel>执行</SectionLabel>
           <DescriptionList items={[
-            { label: "被测 Agent", value: execution.subjectAgentConfig.name },
+            { label: "执行 Agent", value: execution.subjectAgentConfig.name },
             { label: "执行并发", value: execution.executionConcurrency },
             { label: "重试", value: `最多 ${execution.retryPolicy.maxRestarts} 次` },
             { label: "单次超时", value: execution.harness.runtime?.timeoutMs ? formatDuration(execution.harness.runtime.timeoutMs) : "默认" },
@@ -99,7 +99,7 @@ function PlanCard({ view }: { view: ProjectView }) {
           </SectionLabel>
           {evaluation ? (
             <DescriptionList items={[
-              { label: "评委 Agent", value: evaluation.plan.evaluatorAgentConfig.name },
+              { label: "评估 Agent", value: evaluation.plan.evaluatorAgentConfig.name },
               { label: "评估并发", value: evaluation.plan.evaluationConcurrency },
               { label: "评分 Schema", value: <Link to="/projects/$projectId/output-schema" params={{ projectId }} className="link">查看</Link> },
             ]} />
@@ -151,7 +151,7 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
       <PageHeader
         title={project?.name ?? "Project"}
         description={project?.description}
-        crumbs={[{ label: "Project", to: "/projects" }]}
+        crumbs={[{ label: "项目管理", to: "/projects" }]}
         meta={project && <Badge>{project.sourceBranch}</Badge>}
         actions={(
           <>
@@ -169,28 +169,33 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
       {view.isPending ? <LoadingBlock /> : view.error ? <ErrorBlock error={view.error} onRetry={() => void view.refetch()} /> : (
         <div className="flex flex-col gap-5">
           <CurrentRunBanner projectId={projectId} current={view.data!.currentRun} onStop={setStopTarget} />
-          {overview.data ? <SummaryCards summary={overview.data.summary} /> : overview.error ? <ErrorBlock error={overview.error} /> : <LoadingBlock rows={2} />}
+          {overview.data ? <SummaryCards summary={overview.data.summary}>
           <Card>
-            <CardHeader title="测试集" />
+            <CardHeader title="测试集结果" description="项目 → 测试集 → 用例 → 采样。点击测试集查看用例表现；成功率表示运行完成情况，质量由评估输出衡量。" />
             <DataTable
               rows={overview.data?.datasets ?? []}
               rowKey={(row) => row.dataset.datasetId}
+              searchText={(row) => row.dataset.name}
+              searchPlaceholder="搜索测试集"
               onRowClick={(row) => void navigate({ to: "/projects/$projectId/datasets/$datasetId", params: { projectId, datasetId: row.dataset.datasetId } })}
               columns={[
                 { key: "name", header: "测试集", cell: (row) => <span className="font-semibold text-text-strong">{row.dataset.name}</span> },
                 { key: "samples", header: "用例", align: "right", cell: (row) => formatNumber(row.summary.counts.projectSamples) },
                 { key: "samplings", header: "采样", align: "right", cell: (row) => formatNumber(row.summary.counts.samplings) },
-                { key: "execution", header: "执行成功率", align: "right", cell: (row) => formatPercent(row.summary.execution.successRate) },
-                { key: "evaluation", header: "评估成功率", align: "right", cell: (row) => formatPercent(row.summary.evaluation.successRate) },
+                { key: "execution", header: "执行成功率", align: "right", cell: (row) => formatPercent(row.summary.execution.successRate), sortValue: (row) => row.summary.execution.successRate },
+                { key: "evaluation", header: "评估成功率", align: "right", cell: (row) => formatPercent(row.summary.evaluation.successRate), sortValue: (row) => row.summary.evaluation.successRate },
+                { key: "failed", header: "失败（执行 / 评估）", align: "right", cell: (row) => <span className={row.summary.execution.statuses.failed + row.summary.evaluation.statuses.failed > 0 ? "font-medium text-danger" : "text-text-muted"}>{row.summary.execution.statuses.failed} / {row.summary.evaluation.statuses.failed}</span>,
+                  sortValue: (row) => row.summary.execution.statuses.failed + row.summary.evaluation.statuses.failed },
                 { key: "output", header: "评估输出", cell: (row) => <OutputPreview outputs={row.summary.evaluationOutputs} /> },
               ]}
             />
           </Card>
+          </SummaryCards> : overview.error ? <ErrorBlock error={overview.error} onRetry={() => void overview.refetch()} /> : <LoadingBlock rows={2} />}
           <div className="grid gap-5 xl:grid-cols-[1fr_420px]">
             {view.data && <PlanCard view={view.data} />}
             <Card>
-              <CardHeader title="Run" />
-              {(overview.data?.runIds ?? []).length === 0
+              <CardHeader title="运行记录" description="每次 Run 的操作范围与运行状态。" />
+              {!overview.data ? overview.error ? <ErrorBlock error={overview.error} onRetry={() => void overview.refetch()} /> : <LoadingBlock rows={2} /> : overview.data.runIds.length === 0
                 ? <EmptyState title="还没有 Run" />
                 : <div>{overview.data!.runIds.map((runId) => <RunRow key={runId} projectId={projectId} runId={runId} />)}</div>}
             </Card>

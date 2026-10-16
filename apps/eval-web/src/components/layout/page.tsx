@@ -19,11 +19,11 @@ export function PageHeader({ title, description, crumbs, actions, meta, flush }:
     if (typeof title === "string") document.title = `${title} · Eval`;
   }, [title]);
   return (
-    <header className={cn("sticky top-0 z-20 -mx-6 border-b border-border bg-bg/90 px-6 py-3 backdrop-blur supports-[backdrop-filter]:bg-bg/75", !flush && "mb-5")}>
+    <header className={cn("sticky top-0 z-20 -mx-4 border-b border-border bg-bg/95 px-4 py-5 backdrop-blur sm:-mx-6 sm:px-6", !flush && "mb-6")}>
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <div className="min-w-0">
           {crumbs && crumbs.length > 0 && (
-            <nav aria-label="面包屑" className="mb-0.5 flex flex-wrap items-center gap-1 text-xs text-text-muted">
+            <nav aria-label="面包屑" className="mb-2 flex flex-wrap items-center gap-1 text-xs text-text-muted">
               {crumbs.map((crumb, index) => (
                 <span key={index} className="inline-flex items-center gap-1">
                   {crumb.to
@@ -34,11 +34,11 @@ export function PageHeader({ title, description, crumbs, actions, meta, flush }:
               ))}
             </nav>
           )}
-          <div className="flex min-w-0 items-center gap-2.5">
-            <h1 className="truncate text-lg font-semibold tracking-tight text-text-strong">{title}</h1>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-2">
+            <h1 title={typeof title === "string" ? title : undefined} className="max-w-full truncate text-xl font-semibold tracking-tight text-text-strong sm:text-2xl">{title}</h1>
             {meta}
           </div>
-          {description && <p className="mt-0.5 max-w-3xl text-[13px] text-text-muted">{description}</p>}
+          {description && <p className="mt-2 max-w-3xl text-sm leading-relaxed text-text-muted">{description}</p>}
         </div>
         {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
@@ -46,6 +46,6 @@ export function PageHeader({ title, description, crumbs, actions, meta, flush }:
   );
 }
 
-export function Page({ children }: { children: ReactNode }) {
-  return <div className="mx-auto w-full max-w-[1600px] px-6 pb-10">{children}</div>;
+export function Page({ children, narrow = false }: { children: ReactNode; narrow?: boolean }) {
+  return <div className={cn("mx-auto w-full px-4 pb-10 sm:px-6", narrow ? "max-w-[1120px]" : "max-w-[1600px]")}>{children}</div>;
 }

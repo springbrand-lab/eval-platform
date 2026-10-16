@@ -44,7 +44,7 @@ async function pendingDrop(file: File) {
 it.each([
   { mode: "create", open: "新建初始素材包", submit: "创建" },
   { mode: "zip", open: "导入 ZIP", submit: "导入" },
-  { mode: "material", open: "上传素材", submit: "上传" },
+  { mode: "material", open: "新建素材", submit: "创建" },
 ])("$mode waits for browser extraction, keeping replacement and additive selections consistent", async (config) => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const view = await render(<TooltipProvider><QueryClientProvider client={client}>
@@ -53,7 +53,7 @@ it.each([
   try {
     await vi.waitFor(() => expect(button(config.open)).toBeDefined());
     await click(button(config.open));
-    if (config.mode !== "zip") { await type(control("名称"), "平台名称"); await type(control("描述"), "平台描述"); }
+    if (config.mode !== "zip") { await type(control("名称"), "平台名称"); await type(control("说明"), "平台描述"); }
     const old = new File(["old"], config.mode === "material" ? "old.txt" : "old.zip", { type: config.mode === "material" ? "text/plain" : "application/zip" });
     await choose(old);
     expect(button(config.submit).disabled).toBe(false);
@@ -72,7 +72,7 @@ it.each([
       const late = await pendingDrop(new File(["late"], "late.zip", { type: "application/zip" }));
       await click(button("取消"));
       await click(button(config.open));
-      await type(control("名称"), "新草稿"); await type(control("描述"), "新描述");
+      await type(control("名称"), "新草稿"); await type(control("说明"), "新描述");
       const newest = await pendingDrop(new File(["newest"], "newest.zip", { type: "application/zip" }));
       await late();
       expect(document.querySelector('[role="dialog"]')!.textContent).not.toContain("late.zip");
