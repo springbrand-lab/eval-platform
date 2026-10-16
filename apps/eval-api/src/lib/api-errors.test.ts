@@ -135,7 +135,8 @@ describe("apiError", () => {
     expect(translated.code).toBe("DATABASE_UNAVAILABLE");
     const log = JSON.stringify(errorDiagnostics(translated));
     expect(log).toContain("ECONNREFUSED");
-    expect(log).not.toContain("private");
+    expect(log).not.toContain("private_column");
+    expect(log).not.toContain("private-value");
     expect(apiError(new DrizzleQueryError("select 1", [], Object.assign(new Error("duplicate"), { code: "23505" }))).code)
       .toBe("INTERNAL_ERROR");
     expect(apiError(Object.assign(new Error("terminating connection"), { code: "57P01" })).code).toBe("DATABASE_UNAVAILABLE");

@@ -16,8 +16,8 @@
 /* cloud-os ships TypeScript source: an explicit glob is required. streamdown renders markdown with Tailwind classes. */
 @source "../../node_modules/@springbrand/message-panel/cloud-os/**/*.{ts,tsx}";
 @source "../../node_modules/@springbrand/site-block/dist/**/*.js";
-@source "../../node_modules/@springbrand/file-renderers/src/**/*.{ts,tsx}";
-@source "../../node_modules/@springbrand/agent-config-editor/src/**/*.{ts,tsx}";
+@source "../../node_modules/@springbrand/file-renderers/dist/**/*.js";
+@source "../../node_modules/@springbrand/agent-config-editor/dist/**/*.js";
 @source "../../node_modules/streamdown/dist/*.js";
 @source "../../node_modules/@streamdown/code/dist/*.js";
 @source "../../node_modules/@streamdown/math/dist/*.js";

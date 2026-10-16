@@ -1,36 +1,24 @@
-# SP 共享包发布与升级
+# SP 共享包接入与升级
 
-当前控制面与 Worker 按精确版本从 npm 安装 `@springbrand/eval-harness`。npm 的 `0.1.0-alpha.0` 尚不具备本次合并后的契约；本地验证暂用 sibling SP 的公开包入口。不能把旧版包的安装成功当成本次发布验证。
+Eval 使用下面四个 npm 包的精确版本，版本与完整性由消费方 `package.json` 和 `pnpm-lock.yaml` 固定。安装不依赖 sibling SP 仓库、私有 Workspace 包或本地 vendor 路径。
 
-## 新版公开内容
+| 包 | 版本 | 消费方与公开入口 |
+| --- | --- | --- |
+| `@springbrand/eval-harness` | `0.1.0-alpha.2` | Eval API：初始化、证据路径、上限，以及 `inspectStrictZip`、`StrictZipError` 和 ZIP 类型 |
+| `@springbrand/file-renderers` | `0.1.0-alpha.1` | Eval Web：文件解析、预览、`resource-path` 与格式 CSS Module |
+| `@springbrand/contracts` | `0.1.0-alpha.0` | Eval HTTP 目录：SP 编辑器领域错误、删除阻挡详情 Schema |
+| `@springbrand/agent-config-editor` | `0.1.0-alpha.0` | Eval Web：根入口、`client`、`draft` 与 `connector-authorization` |
 
-- 当前的多素材初始化、规范上下文、独立 Evaluator 证据导入及完整原始轨迹契约。
-- Material 数量、单文件/初始化总量、上下文字符数等真实校验上限及相关公开 helper；Eval API 直接引用，Web 经 `GET /api/input-limits` 获取。
-- 原始 Subject 输入、Artifact、Trajectory 证据路径及 Schema 固定路径 helper。
-- 由 eval-harness 公开的 ZIP 工具：`inspectStrictZip`、`StrictZipError`、`StrictZipEntry`、`StrictZipEntryLimit`、`StrictZipErrorCode`。Eval API 不直接依赖 SP 的 utils 实现。
-- 发布 `@springbrand/file-renderers` 的公开文件预览入口：`contracts`、`format`、`preview-content`、`preview-host`、`preview-surface`、`preview-error-boundary`、`resource-path`。Eval Web 负责目录、鉴权读取和取消请求，资源链接解析、文件格式解析与只读渲染由共享包负责。`reference` 统一使用原始 URL 引用，由 `rendererResourcePath` 转为精确文件路径；HTML 与 Markdown 不保留两套路径语义。
-- `file-renderers` 的 `@silurus/ooxml` 当前引用仓库内 `vendor/*.tgz`；发布包必须包含可安装的依赖，不能让消费者依赖 SP 本地文件。`workspace:*` 依赖也必须在发布时解析到真实公开版本。
-- 发布 `@springbrand/agent-config-editor` 的根入口、`client`、`draft` 与 `connector-authorization`：SP Web 与 Eval Web 已共用同一套 Agent 表单、资源库、公共客户端和创建重放流程。其 `agent-contracts`、`contracts`、`utils`、`file-renderers` 依赖须同时解析成真实公开版本；SP 应用只保留宿主导航、传输与保存流程。
-- Eval HTTP 目录复用 `@springbrand/contracts/errors` 与 `agent-config-deletion` 的公开 Agent 编辑器错误定义和详情 Schema。此 contracts 包也需发布，替换 `eval-contracts` 中的本地 link；不能通过复制错误码/Schema 或丢弃 domain code 绕过发包。
+SP 内部 `utils`、`resource`、`agent-contracts` 的实现与声明由发布产物携带，不作为 Eval 的额外依赖。ZIP 的唯一公开入口是 eval-harness；Eval 不导入 SP utils。`file-renderers` 的安装依赖不引用 SP 仓库中的 `vendor/*.tgz`。
 
-## 升级与交付
+Web 的 Tailwind 扫描 `file-renderers/dist/**/*.js` 与 `agent-config-editor/dist/**/*.js`，不扫描 SP 源码。格式 CSS Module 由文件预览模块导入。React、React DOM、TanStack Query、HTTP 与 site-block 在 Vite 中去重，保持宿主 Context 和错误类一致。
 
-1. SP 发布与部署契约一致的新 npm 版本。
-2. Eval API 升级精确版本，并将 ZIP 工具导入切换到 eval-harness；删除对 sibling utils 的本地验证依赖，不添加旧契约兼容分支。
-3. 更新锁文件，检查发布包的类型与运行时 exports，使用干净环境进行 frozen install。
-4. 运行全仓 check、带 PostgreSQL 的测试、API/Web 构建，以及与 sibling SP 的公开接口联调。
-5. 复审通过的 main 合并和后续 Web/统计改动可先提交并推送当前分支；新版包、干净安装和跨项目联调完成前，不标记发布验证通过。
+## 升级与验证
 
-生产环境不保留本地 link 或 API 运行时的兼容回退。版本必须以实际 npm 发布结果为准。
+1. 检查四个精确版本的 npm 产物：导出及其目标文件存在，JS 和声明均不导入 SP 私有包，依赖不包含 `workspace:`、`link:` 或仓库外的 `file:` 路径。
+2. 更新消费方精确版本与锁文件。新发的这四个自有包在 `minimumReleaseAgeExclude` 中明确放行；不扩大到其他依赖。
+3. 在 SP 仓库外的新目录执行 `pnpm install --frozen-lockfile`，不能复制或链接现有 `node_modules`。独立安装后运行 `pnpm check`、带 PostgreSQL 的全仓测试和 API/Web 构建，确认类型、运行时、预览资源及样式都来自发布产物。
+4. 检查 Web 构建 CSS 包含共享 Agent 表单的工具类及文件预览的 CSS Module；不通过浏览器更改用户已验收的页面。
+5. CI 沿用 `.github/actions/prepare-workspace` 的 frozen install。推送开发分支验证依赖与构建；部署仍只通过现有 main 流程，不随依赖升级单独启动 Agent 或改写项目。
 
-## 资源目录预览接入
-
-已完成素材、上下文共用的只读文件清单与精确路径内容接口，以及 Web SDK。使用已有 Bundle 内容，不复制文件、目录索引或预览状态。
-
-按用户要求先本地连接 sibling 的 `file-renderers` 公开包，完成下面的页面和本地联调，并在 SP 尚未发包时先推送当前开发分支。分支暂保留本地 link 以记录真实联调依赖；它不能用于远端干净安装或发布。SP 正式发包后必须替换为精确 npm 版本并更新锁文件，再验证 CI。SP 本地公共包中的路径契约修正也须纳入该次发包：
-
-1. 素材、上下文名称使用链接进入 `/resources/$kind/$bundleId/$resourceId`；目录页的编辑、删除仍是独立操作。
-2. 左侧由文件清单生成目录树，右侧展示选中文件；上下文按现有规范文件展示 JSON/JSONL。目录来自导入后的资源路径，不声称重建原 ZIP。
-3. 通过公开 `parseFile`、`FileRendererPreview` 等入口进行只读预览；同一资源内的 HTML/CSS/图片等相对引用由共享包解析路径，宿主通过同一已鉴权内容接口读取。链接不能越过资源根目录；不读取 SP 私有实现或存储。
-4. 文件请求、解析、相对资源读取、Blob URL 共用当前选择的取消生命周期；切换资源、文件或卸载时清理，旧响应不能回填。保留源码切换与原文件下载，预览失败可重试。
-5. 使用真实发布版本和锁文件验证干净安装，完成素材与上下文的目录点击、图片/文本/HTML 相对资源、JSON/JSONL、失败重试及切换取消的测试和浏览器验收，再标记页面交付。
+素材与上下文共用只读文件清单和精确路径内容接口。目录来自导入后的 `InitialResourceFile` 路径；资源与运行 Workspace 使用同一公共文件解析、相对引用解析和预览实现。文件请求、解析、关联资源及 Blob URL 属于当前选择的取消生命周期。

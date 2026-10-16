@@ -15,7 +15,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@springbrand/contracts": "link:../../../sp-platform/packages/contracts",
+    "@springbrand/contracts": "0.1.0-alpha.0",
     "@springbrand/http": "0.1.0-alpha.4",
     "hono": "4.12.33",
     "zod": "^4.4.3"

@@ -1,6 +1,5 @@
 import { extname } from "node:path";
-import { EVAL_INITIAL_FILE_MAX_BYTES } from "@springbrand/eval-harness";
-import { inspectStrictZip, StrictZipError, type StrictZipEntry, type StrictZipEntryLimit, type StrictZipErrorCode } from "@springbrand/utils";
+import { EVAL_INITIAL_FILE_MAX_BYTES, inspectStrictZip, StrictZipError, type StrictZipEntry, type StrictZipEntryLimit, type StrictZipErrorCode } from "@springbrand/eval-harness";
 import { lookup } from "mime-types";
 import { isCatalogLabel } from "../db/catalog-metadata.js";
 import {
