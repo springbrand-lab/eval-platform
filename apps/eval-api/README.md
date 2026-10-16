@@ -60,7 +60,7 @@ Worker 可多实例部署、滚动升级；收到信号后停止取任务，等�
 - `api` 加入 Eval SP 的 compose 网络 `eval_default`（别名 `eval-platform-api`），由该网络的 cloudflared 隧道 `sp-platform-api-eval` 对外提供 `https://evalapi.springbrand.ai`；不开放任何主机端口。
 - 运行配置在 Secrets Manager：`eval-platform/api/production`（上文环境变量，`DATABASE_URL`、`EVAL_BUNDLE_DIR`、`EVAL_API_HOST`/`PORT` 除外）与 `eval-platform/database/production`（数据库凭证）。部署时生成 `DATABASE_URL`，API 与 Worker 只拿到各自需要的变量。Eval SP 重新发布后需更新其中的 `EVAL_SP_SOURCE_COMMIT` 并重新部署。
 
-AWS 资源由 `infra/aws/cloudformation.yaml`（栈 `eval-platform-api`）创建。推送到 `main` 且改动涉及 eval-api、共享包或部署文件时，`.github/workflows/ci.yml` 在 eval-api（及共享包）测试通过后经 GitHub OIDC 构建并推送 ECR 镜像，再通过 SSM 在实例上执行 `infra/aws/deploy/deploy.sh`：拉取镜像、运行迁移、替换两个服务并检查 `/healthz`。
+AWS 资源由 `infra/aws/cloudformation.yaml`（栈 `eval-platform-api`）创建。推送到 `main` 且改动涉及 eval-api、共享包或部署文件时，`.github/workflows/ci.yml` 在 eval-api（及共享包）测试通过后经 GitHub OIDC 构建并推送 ECR 镜像，再通过 SSM 在实例上执行 `infra/aws/deploy/deploy.sh`：拉取镜像、运行迁移、替换两个服务，检查 `/healthz` 并以 Web 凭证读取初始素材、初始上下文、Prompt 数据集和评分 Schema 四个目录。部署不重建数据库，也不自动上传演示数据；可重复使用的模拟输入见 [联调数据](../../fixtures/eval-demo/README.md)。
 
 ## HTTP 控制面
 
