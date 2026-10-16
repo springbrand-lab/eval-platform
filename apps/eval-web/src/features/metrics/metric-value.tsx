@@ -1,13 +1,9 @@
 import type { MetricNumber } from "@/api-sdk/types";
-import { StatusBadge } from "@/components/ui/badge";
 import { formatNumber } from "@/lib/format";
 
-/** A measured value always travels with its source coverage, including a known zero. */
+/** Coverage is shown at the resource boundary; missing measurements still differ from zero. */
 export function MetricValue({ metric, format = formatNumber }: { metric: MetricNumber; format?: (value: number) => string }) {
-  return <span className="inline-flex flex-wrap items-center gap-1.5">
-    <span className="tabular-nums">{metric.value === null ? "未获得" : format(metric.value)}</span>
-    <StatusBadge status={metric.coverage} />
-  </span>;
+  return <span className="tabular-nums">{metric.value === null ? "未获得" : format(metric.value)}</span>;
 }
 
 export function AgentMetricPair({ execution, evaluation, format }: {

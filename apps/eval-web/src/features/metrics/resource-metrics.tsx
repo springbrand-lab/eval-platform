@@ -27,7 +27,7 @@ function TrajectoryMetrics({ trajectory, modelRequests }: Pick<ResourceStatistic
     { label: "模型请求", value: modelRequests },
   ];
   return <section aria-label="轨迹统计" className="flex flex-col gap-3">
-    <div className="flex items-center gap-2"><h3 className="text-sm font-semibold">轨迹统计</h3><StatusBadge status={trajectory.coverage} /></div>
+    <h3 className="text-sm font-semibold">轨迹统计</h3>
     <Table aria-label="轨迹操作">
       <TableCaption>轮数按 Turn 计数，工具按调用操作计数；累计耗时是各次操作耗时之和。</TableCaption>
       <TableHeader><TableRow>
@@ -55,8 +55,8 @@ function TrajectoryMetrics({ trajectory, modelRequests }: Pick<ResourceStatistic
         <TableHead scope="row">{tool.toolName ?? "未识别工具"}</TableHead><TableCell><MetricValue metric={tool.count} /></TableCell>
         <TableCell>{tool.completed}</TableCell><TableCell>{tool.failed}</TableCell><TableCell>{tool.cancelled}</TableCell>
         <TableCell>{tool.inProgress}</TableCell><TableCell>{tool.unknown}</TableCell>
-        <TableCell><NumericMetrics summary={tool.inputLength} format={formatBytes} varianceUnit="字节²" /><StatusBadge status={tool.inputLength.coverage} /></TableCell>
-        <TableCell><NumericMetrics summary={tool.outputLength} format={formatBytes} varianceUnit="字节²" /><StatusBadge status={tool.outputLength.coverage} /></TableCell>
+        <TableCell><NumericMetrics summary={tool.inputLength} format={formatBytes} varianceUnit="字节²" /></TableCell>
+        <TableCell><NumericMetrics summary={tool.outputLength} format={formatBytes} varianceUnit="字节²" /></TableCell>
         <TableCell><NumericMetrics summary={tool.durationMs} format={formatDuration} varianceUnit="毫秒²" /></TableCell>
       </TableRow>)}</TableBody>
     </Table>

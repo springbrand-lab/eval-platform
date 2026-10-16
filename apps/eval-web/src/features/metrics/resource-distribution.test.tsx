@@ -16,8 +16,9 @@ it("shows five statistics with each metric's effective N, preserving small nonze
     await click([...view.container.querySelectorAll("button")].find((item) => item.textContent === "均值、方差、中位数与范围"));
     const table = view.container.querySelector('table[aria-label="Agent Token 与缓存分布"]')!;
     const cells = (label: string) => [...[...table.querySelectorAll("tbody tr")].find((row) => row.querySelector("th")?.textContent === label)!.querySelectorAll("td")].map((cell) => cell.textContent);
-    expect(cells("缓存读取 Token")).toEqual(["Token", "0.0015", "2.5E-7", "0.0015", "0.001", "0.002", "2", "2", "部分"]);
-    expect(cells("推理 Token")).toEqual(["Token", "未获得", "未获得", "未获得", "未获得", "未获得", "0", "4", "无结果"]);
+    expect(cells("缓存读取 Token")).toEqual(["Token", "0.0015", "2.5E-7", "0.0015", "0.001", "0.002", "2", "2"]);
+    expect(cells("推理 Token")).toEqual(["Token", "未获得", "未获得", "未获得", "未获得", "未获得", "0", "4"]);
+    expect(table.textContent).not.toMatch(/完整性|完整|部分|无结果/u);
     expect(table.textContent).toContain("总体方差和中位数只统计有效 N");
   } finally { await view.unmount(); }
 });

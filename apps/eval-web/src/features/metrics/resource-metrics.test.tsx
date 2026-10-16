@@ -29,7 +29,7 @@ describe("Agent resource and trajectory categories", () => {
       const operations = view.container.querySelector('table[aria-label="轨迹操作"]')!;
       expect([...operations.querySelectorAll("tbody th")].map((item) => item.textContent)).toEqual(["轨迹轮数", "工具调用", "模型请求"]);
       const turns = operations.querySelector("tbody tr")!;
-      expect([...turns.querySelectorAll("td")].slice(0, 6).map((item) => item.textContent)).toEqual(["4部分", "2", "1", "0", "0", "1"]);
+      expect([...turns.querySelectorAll("td")].slice(0, 6).map((item) => item.textContent)).toEqual(["4", "2", "1", "0", "0", "1"]);
       const tool = view.container.querySelector('table[aria-label="工具类型统计"] tbody tr')!;
       expect(tool.textContent).toContain("write_file");
       expect(tool.textContent).toContain("累计 480 B · 均值 160 B");
@@ -37,9 +37,11 @@ describe("Agent resource and trajectory categories", () => {
       expect(tool.textContent).toContain("有效 0 · 缺失 3");
       const details = [...view.container.querySelectorAll("dt")];
       const value = (label: string) => details.find((item) => item.textContent === label)?.nextElementSibling?.textContent;
-      expect(value("非工具轮数")).toBe("1部分");
-      expect(value("非工具轮输入 Token")).toBe("80部分");
-      expect(value("非工具轮总 Token")).toBe("未获得无结果");
+      expect(value("非工具轮数")).toBe("1");
+      expect(value("非工具轮输入 Token")).toBe("80");
+      expect(value("非工具轮总 Token")).toBe("未获得");
+      expect(value("资源完整性")).toBe("完整");
+      expect([...view.container.querySelectorAll("span")].filter((item) => item.textContent === "完整")).toHaveLength(1);
       expect(view.container.textContent).toContain("未关联到轮次的工具 1 次、模型请求 2 次");
     } finally { await view.unmount(); }
   });

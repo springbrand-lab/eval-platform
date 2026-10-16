@@ -27,7 +27,7 @@ export function OutputFields({ outputs }: { outputs: EvaluationOutputSummary }) 
     <CardBody className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
       {outputs.fields.length === 0 && <p className="text-sm text-text-muted">暂无可统计字段。原始结果可在采样详情查看。</p>}
       {outputs.fields.map((field) => <section key={field.jsonPointer} className="rounded-lg border border-border p-3">
-        <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">{field.title}</h3><StatusBadge status={field.coverage} /></div>
+        <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">{field.title}</h3>{field.coverage !== "complete" && <StatusBadge status={field.coverage} />}</div>
         <p className="mt-1 text-xs text-text-muted">{field.description}</p>
         <p className="mt-1 break-all font-mono text-xs text-text-muted">{field.jsonPointer || "$"} · {field.kinds.join(" / ")}</p>
         <p className="mt-3 text-sm">{fieldValue(field)}</p>

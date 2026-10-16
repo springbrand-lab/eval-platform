@@ -43,6 +43,8 @@ Prompt JSON/JSONL 文件每条提供 name、description、userPrompt、evalPromp
 
 Subject 和每个 Evaluator 分开显示资源、费用、Token、缓存读取/写入、Agent/Attempt 时长、轨迹轮数、工具和模型调用的结果分类、各工具输入/返回长度，以及非工具轮和明确关联的 Token。工具长度是规范 JSON 的 UTF-8 字节数；缓存和 reasoning 不重复加到 total。未知、缺失、真实零及 coverage 保持区别。
 
+每个 Agent 展示模型名称和一组 Token 指标，不做“全部模型”与逐模型的重复表格或分布。资源完整性统一在“资源完整性”一处表达，单个数值、工具长度和分布不重复显示状态标签；Schema 字段完整时同样不加“完整”标签，异常状态及缺失说明继续展示。
+
 均值、总体方差、中位数、最小值、最大值由 Metrics 统一返回。资源和调用次数按单 Agent（合并重启），工具长度和调用耗时按单次调用，Schema 数值按有效字段观察。分母 N 是有值数量，缺失不补零；N=0 为 null，N=1 方差为 0。方差显示平方单位，小的非零值使用有效数字或科学计数法。
 
 JSON Schema 经后端编译为展示计划，返回字段标题、说明、数值统计、boolean/enum 分布、null、缺失及完整性。Web 消费这些结果，不另外遍历 Schema 产生评分规则。原始评估输出可直接查看；Langfuse 的 score/reason 只是可选派生投递，不替代 Schema 展示。
