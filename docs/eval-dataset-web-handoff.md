@@ -6,7 +6,7 @@
 
 “数据集”入口下只有四个子卡片：初始素材、初始上下文、Prompt 数据集、评分 Schema。素材与上下文分别进入自己的 Bundle 列表和详情，不提供混合 Bundle 或旧路由。评分 Schema 是独立文件，名称和描述在平台填写，没有 Bundle。
 
-两类 Bundle 支持创建时附 ZIP、向已有 Bundle 导入 ZIP、逐条上传，以及分别编辑包与条目的名称和描述。ZIP 出错显示条目路径和错误，不创建半包。样本编辑单独展示 name、description、启动 Prompt、评估 Prompt；任意额外 JSON 字段保持原样。执行素材和评估素材各为跨 Bundle 的有序多选，执行上下文为单选。选择器只列活动资源，不默默清除现有引用。软删除保持已创建 Project 的固定快照和文件读取能力。
+两类 Bundle 支持创建时附 ZIP、向已有 Bundle 导入 ZIP、逐条上传，以及分别编辑包与条目的名称和描述。ZIP 出错显示条目路径和错误，不创建半包。样本编辑单独展示 name、description、执行 Prompt、评估 Prompt；任意额外 JSON 字段保持原样。执行素材和评估素材各为跨 Bundle 的有序多选，执行上下文为单选。选择器只列活动资源，不默默清除现有引用。软删除保持已创建 Project 的固定快照和文件读取能力。
 
 四层 Metrics 统一消费服务端返回的 `evaluationOutputs` 展示定义、观察和资源统计。Web 不重新解释 Schema、不把任意数值字段当评分、不从下层均值反推上层统计；所有字段的 title、description、分布、null、缺失和覆盖状态都来自同一事实链。Sampling 的 Context、Workspace、Trajectory 观察均为只读。
 

@@ -125,7 +125,7 @@ export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
             columns={[
               { key: "title", header: "名称", className: "min-w-40", cell: (row) => <span className="line-clamp-2 font-semibold text-text-strong">{dataTitle(row)}</span>, sortValue: dataTitle },
               { key: "description", header: "说明", cell: (row) => <span className="line-clamp-2 max-w-sm text-text-muted">{typeof row.description === "string" ? row.description : "未填写"}</span> },
-              { key: "prompt", header: "启动 Prompt", cell: (row) => <span className="line-clamp-2 max-w-md text-text-muted">{row.userPrompt}</span> },
+              { key: "prompt", header: "执行 Prompt", cell: (row) => <span className="line-clamp-2 max-w-md text-text-muted">{row.userPrompt}</span> },
               { key: "evalPrompt", header: "评估 Prompt", cell: (row) => <span className="line-clamp-2 max-w-md text-text-muted">{row.evalPrompt ?? "未填写"}</span> },
               { key: "resources", header: "", cell: (row) => <DataResourceBadges data={row} /> },
               { key: "id", header: "ID", cell: (row) => <CopyId value={row.dataId} /> },

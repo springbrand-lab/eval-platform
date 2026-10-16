@@ -6,6 +6,8 @@ Eval 的内部管理界面：准备测试集与初始资源、上传评分格式
 
 与 sp-platform `apps/web` 对齐：React 19、Vite、TanStack Router（文件路由，生成 `src/routeTree.gen.ts`）、TanStack Query、Tailwind CSS v4、`@springbrand/http`（解析 Eval API 的 `{success, msg, errMsg, code}` 信封）、lucide-react、sonner。只读会话复用 SP 聊天页同一套渲染：`@springbrand/message-panel/cloud-os` 的 `CloudOsRoot` 与 `CloudOsChatMessages`（不传任何回调，审批禁用）。样式按该包的宿主要求接入：`src/styles/index.css` 中所有 `@import`（含 `tw-animate-css`、`streamdown/styles.css`、`cloud-os.css`）放在最前，并用显式 glob 把 `cloud-os` 源码与 streamdown 产物加入 `@source`。领域类型从 `@eval-platform/*` 包以 `import type` 引入。
 
+统一 HTTP 客户端的 `maxResponseBytes` 使用 SDK 接受的最大值 `Number.MAX_SAFE_INTEGER`，支持读取超过 SDK 默认 10 MiB 上限的完整采样详情及其他 API 响应。
+
 Agent 新建与编辑直接复用 SP 同一份 `@springbrand/agent-config-editor`：行为、完整系统提示词、模型/思考强度、能力选择和排序、Skill/Reference 管理与预览。宿主只负责默认模板、当前用户、保存、revision 冲突、冻结副本只读及导航；不再提供 Slug 或配置 JSON 输入框。创建会话持有固定 Slug，失败重试通过 SP 创建重放校准；后台读取失败保留草稿。公共资源客户端经 `/api/agent-library` 访问当前 Eval SP，配置写入仍走 `/api/agent-configs`。错误由 Eval 目录解码，保留经过校验的 SP 编辑器领域码和删除阻挡详情。详见 [编辑器对齐](../../docs/agent-config-editor-alignment.md)。
 
 Data 表单与 Schema 上传复用 `eval-dataset` 公开的严格 JSON 解析和输入校验；这些运行时入口随 Web 打包。上传与 Project 选择上限只从 API 的 `GET /api/input-limits` 读取，没有浏览器数值副本。

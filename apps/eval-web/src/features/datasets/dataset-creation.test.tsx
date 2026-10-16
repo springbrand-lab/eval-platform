@@ -37,7 +37,7 @@ async function manual() {
 
 async function fillCase(name: string) {
   const editor = document.querySelector('[aria-label="用例编辑"]')!;
-  for (const [label, value] of [["名称", name], ["说明", `${name} description`], ["启动 Prompt", `${name} execute`], ["评估 Prompt", `${name} evaluate`], ["JSON", '{"custom":{"retained":true}}']]) {
+  for (const [label, value] of [["名称", name], ["说明", `${name} description`], ["执行 Prompt", `${name} execute`], ["评估 Prompt", `${name} evaluate`], ["JSON", '{"custom":{"retained":true}}']]) {
     await type(control(label!, editor), value!);
   }
 }
