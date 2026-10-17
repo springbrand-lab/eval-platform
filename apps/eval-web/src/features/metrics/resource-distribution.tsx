@@ -50,7 +50,8 @@ function TrajectoryDistribution({ distribution }: { distribution: ResourceDistri
 
 function ToolDistribution({ tools, lengthTools }: { tools: ResourceDistribution["trajectory"]["byTool"]; lengthTools: ResourceStatistics["trajectory"]["byTool"] }) {
   const [toolIndex, setToolIndex] = useState("0");
-  const tool = tools[Number(toolIndex)] ?? tools[0]!;
+  const selectedIndex = Math.min(Math.max(Number(toolIndex) || 0, 0), tools.length - 1);
+  const tool = tools[selectedIndex]!;
   const name = tool.toolName ?? "未识别工具";
   const lengthTool = lengthTools.find((item) => item.toolName === tool.toolName);
   const rows: StatisticsRow[] = [
@@ -65,7 +66,7 @@ function ToolDistribution({ tools, lengthTools }: { tools: ResourceDistribution[
     <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div><h4 className="text-sm font-semibold text-text-strong">工具明细</h4><p className="mt-1 text-xs leading-5 text-text-muted">选择具体工具，查看它在全部 Agent 中的调用结果和单次调用表现。</p></div>
       <div className="flex min-w-0 sm:shrink-0">
-        <NativeSelect aria-label="选择工具" className="max-w-full sm:min-w-48" value={toolIndex} onChange={(event) => setToolIndex(event.target.value)}>
+        <NativeSelect aria-label="选择工具" className="max-w-full sm:min-w-48" value={String(selectedIndex)} onChange={(event) => setToolIndex(event.target.value)}>
           {tools.map((item, index) => <NativeSelectOption key={`${item.toolName ?? "unknown"}-${index}`} value={String(index)}>{item.toolName ?? "未识别工具"}</NativeSelectOption>)}
         </NativeSelect>
       </div>

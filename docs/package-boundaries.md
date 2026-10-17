@@ -130,7 +130,7 @@ The recognized billing facts are SP's model settlement receipt with its authorit
 
 Ambiguous subagent summaries and cyclic parent relationships are diagnosed and cannot suppress trustworthy child details. Contradictory terminal outcomes or tool names remain unknown instead of picking a winner. Binding counts (Datasets, Data, ProjectSamples) describe the Project snapshot, including Data without runs.
 
-The file layout lives in [packages/eval-metrics/README.md](../packages/eval-metrics/README.md). The root entry exports `createMetrics`, the error classes (`MetricsEntityNotFoundError` for an unknown Project, Run, Dataset, ProjectSample or Sampling, `MetricsQueryError`, `MetricsSourceError`) and the model types. Experiment comparison, metric persistence/caches and application UIs are not introduced.
+The file layout lives in [packages/eval-metrics/README.md](../packages/eval-metrics/README.md). The root entry exports `createMetrics`, the error classes (`MetricsEntityNotFoundError` for an unknown Project, Run, Dataset, ProjectSample or Sampling, `MetricsQueryError`, `MetricsSourceError`), the model types and the bounded telemetry projection helpers used by the API persistence adapter. Experiment comparison, metric persistence/caches and application UIs are not introduced.
 
 ### `apps/eval-api`
 

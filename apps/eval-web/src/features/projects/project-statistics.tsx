@@ -1,9 +1,9 @@
-import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@springbrand/site-block";
 import type { MetricSummary, ResourceStatistics, StageStatistics } from "@/api-sdk/types";
 import { ResourceMetrics } from "@/features/metrics/resource-metrics";
 import { MetricValue } from "@/features/metrics/metric-value";
 import { ModelName } from "@/features/metrics/token-metrics";
-import { formatDuration, formatMetricBytes, formatPercent, formatStatistic } from "@/lib/format";
+import { ToolStatisticsTable } from "@/features/metrics/tool-statistics-table";
+import { formatDuration, formatPercent, formatStatistic } from "@/lib/format";
 
 function StageStat({ label, value, tone = "neutral" }: { label: string; value: number; tone?: "neutral" | "success" | "danger" | "warning" }) {
   const toneClass = {
@@ -35,25 +35,9 @@ function AgentOverview({ title, statistics, stage }: { title: string; statistics
       <OverviewMetric label="平均 Agent 耗时">{duration(stage.agentDurationMs?.mean)}</OverviewMetric>
       <OverviewMetric label="模型请求"><MetricValue metric={statistics.modelRequests.count} /></OverviewMetric>
     </div>
-    <section aria-label={`${title}工具调用概况`} className="overflow-hidden rounded-lg border border-border bg-surface">
-      <div className="border-b border-border px-3 py-2.5"><h5 className="text-sm font-semibold text-text-strong">工具调用概况</h5><p className="mt-1 text-xs text-text-muted">每个工具一行；长度是单次调用的平均值。</p></div>
-      <div className="overflow-x-auto">
-        <Table aria-label="工具调用概况" className="min-w-[760px] text-[13px]">
-          <TableCaption className="m-0 border-t border-border px-3 py-2 text-left text-xs">未获得的长度或耗时不按零计数。</TableCaption>
-          <TableHeader className="bg-surface-muted/60"><TableRow>
-            {['工具', '调用次数', '成功', '失败', '平均耗时', '平均调用长度', '平均返回长度'].map((label, index) => <TableHead key={label} className={index === 0 ? 'px-3 text-xs' : 'text-right text-xs'}>{label}</TableHead>)}
-          </TableRow></TableHeader>
-          <TableBody>{statistics.trajectory.byTool.length === 0 ? <TableRow><TableCell colSpan={7} className="px-3 py-5 text-center text-text-muted">暂无工具调用</TableCell></TableRow> : statistics.trajectory.byTool.map((tool) => <TableRow key={tool.toolName ?? 'unknown'}>
-            <TableHead scope="row" className="px-3 font-medium text-text-strong">{tool.toolName ?? '未识别工具'}</TableHead>
-            <TableCell className="text-right font-semibold tabular-nums"><MetricValue metric={tool.count} /></TableCell>
-            <TableCell className="text-right tabular-nums">{tool.completed}</TableCell>
-            <TableCell className={`text-right tabular-nums ${tool.failed > 0 ? 'font-medium text-danger' : 'text-text-muted'}`}>{tool.failed}</TableCell>
-            <TableCell className="text-right tabular-nums">{duration(tool.durationMs?.mean)}</TableCell>
-            <TableCell className="text-right tabular-nums">{formatMetricBytes(tool.inputLength?.mean)}</TableCell>
-            <TableCell className="pr-3 text-right tabular-nums">{formatMetricBytes(tool.outputLength?.mean)}</TableCell>
-          </TableRow>)}</TableBody>
-        </Table>
-      </div>
+    <section aria-label={`${title}工具调用概况`} className="space-y-2">
+      <div><h5 className="text-sm font-semibold text-text-strong">工具调用概况</h5><p className="mt-1 text-xs text-text-muted">每个工具一行；长度是单次调用的平均值。</p></div>
+      <ToolStatisticsTable tools={statistics.trajectory.byTool} variant="overview" />
     </section>
   </section>;
 }

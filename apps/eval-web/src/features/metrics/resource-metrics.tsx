@@ -13,6 +13,7 @@ import { TokenMetrics } from "./token-metrics";
 import { COST_FIELDS } from "./metric-labels";
 import { ResourceDistributionPanel } from "./resource-distribution";
 import { StatisticsTable } from "./statistics-table";
+import { ToolStatisticsTable } from "./tool-statistics-table";
 
 function MetricDisclosure({ title, description, children, expanded = false }: { title: string; description: string; children: ReactNode; expanded?: boolean }) {
   if (expanded) return <section className="min-w-0 space-y-2 border-t border-border pt-3"><h3 className="text-xs font-semibold">{title}</h3><p className="text-xs text-text-muted">{description}</p>{children}</section>;
@@ -71,7 +72,7 @@ function TrajectoryMetrics({ trajectory, modelRequests, showToolMeasurements, co
     <div><h3 className="text-sm font-semibold text-text-strong">操作次数</h3><p className="mt-1 text-xs text-text-muted">先看处理轮和子操作发生了多少次，再按工具查看具体结果。</p></div>
     <OperationsTable label="操作次数" caption="处理轮、模型请求和工具调用分别计数；思考和内容是处理轮的命中标记，状态列只适用于可追踪的操作。" rows={operations} />
     <div className="space-y-3"><div><h4 className="text-sm font-semibold text-text-strong">按工具查看</h4><p className="mt-1 text-xs text-text-muted">每种工具一行，查看调用次数和结果状态。</p></div>
-      <OperationsTable label="工具调用明细" caption="每种工具的累计调用结果；未知不计为成功或失败。" rows={trajectory.byTool.map((tool) => ({ label: tool.toolName ?? "未识别工具", value: tool }))} emptyLabel="暂无工具调用" />
+      <ToolStatisticsTable tools={trajectory.byTool} variant="operations" />
     </div>
     {showToolMeasurements && trajectory.byTool.length > 0 && <ToolMeasurementDetails trajectory={trajectory} compact={compact} />}
     {(trajectory.unlinkedOperations.tools > 0 || trajectory.unlinkedOperations.generations > 0) && <p className="text-xs text-muted-foreground">

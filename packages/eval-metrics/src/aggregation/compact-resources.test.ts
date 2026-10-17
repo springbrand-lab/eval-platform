@@ -38,7 +38,7 @@ describe("body-free telemetry metrics", () => {
     expect(aggregateResources(projected).duplicateRecords.telemetryEvents).toBe(2);
   });
 
-  it.each([undefined, null, "", "[REDACTED]", "[CONTENT OMITTED]", { b: 2, a: ["é", "\n"] }])(
+  it.each([undefined, null, "", "[REDACTED]", "[CONTENT OMITTED]", { redacted: true }, { b: 2, a: ["é", "\n"] }])(
     "preserves tool lengths and fallback for %j", async (body) => {
       const inputs = [resourceInput({ finalized: false, telemetryEvents: [
         telemetry("s", "tool.started", "t", { toolName: "t", ...(body === undefined ? {} : { input: body }) }),
@@ -57,8 +57,9 @@ describe("body-free telemetry metrics", () => {
     const collection = projected!.collection;
     if (!collection || collection.status !== "collected") throw new Error("expected compacted collection");
     expect(hasCurrentTelemetryProjection(collection)).toBe(true);
+    await expect(compactResourceCollection(collection)).resolves.toEqual(collection);
     const event = collection.snapshot.telemetryEvents[1]!;
-    expect(event.metricProjection).toMatchObject({ version: TELEMETRY_PROJECTION_VERSION, hasThinking: false, hasContent: false, markersKnown: false });
+    expect(event.metricProjection).toMatchObject({ version: TELEMETRY_PROJECTION_VERSION, hasThinking: false, hasContent: false, thinkingKnown: false, contentKnown: false });
     const expected = { value: null, coverage: "unavailable" };
     expect(aggregateResources([projected!]).trajectory.thinkingTurns).toEqual(expected);
     expect(aggregateResources([projected!]).trajectory.contentTurns).toEqual(expected);
@@ -68,7 +69,8 @@ describe("body-free telemetry metrics", () => {
       const projection = { ...(item.metricProjection as Record<string, JsonValue>) };
       delete projection.hasThinking;
       delete projection.hasContent;
-      delete projection.markersKnown;
+      delete projection.thinkingKnown;
+      delete projection.contentKnown;
       projection.version = 1;
       return { ...item, metricProjection: projection };
     });

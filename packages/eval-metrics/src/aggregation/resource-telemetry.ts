@@ -1,4 +1,4 @@
-import { TELEMETRY_PROJECTION_VERSION, telemetryBodyLength, telemetryContentFlags } from "./compact-resources.js";
+import { TELEMETRY_PROJECTION_VERSION, telemetryBodyLength, telemetryContentFlags, telemetryOutputLength } from "./compact-resources.js";
 import { record, text } from "../json.js";
 import type {
   CoveredNumericSummary,
@@ -38,13 +38,30 @@ interface ObservedOperation {
   readonly parentKey: string | null;
   readonly hasThinking: boolean;
   readonly hasContent: boolean;
-  /** False when the output body or compact marker projection cannot prove marker absence. */
-  readonly markerKnown: boolean;
+  /** False when the thinking marker cannot be proven absent or present. */
+  readonly thinkingKnown: boolean;
+  /** False when the content marker cannot be proven absent or present. */
+  readonly contentKnown: boolean;
   readonly first: FactEntry;
   readonly start: FactEntry | undefined;
   readonly terminal: FactEntry | undefined;
   /** False when the events contradict each other. */
   readonly consistent: boolean;
+}
+
+interface MarkerState {
+  readonly hit: boolean;
+  readonly known: boolean;
+}
+
+function markerState(hit: boolean, known: boolean): MarkerState {
+  return { hit, known: hit || known };
+}
+
+/** A positive marker remains known even if another source for the same operation is incomplete. */
+function mergeMarkerState(left: MarkerState, right: MarkerState): MarkerState {
+  const hit = left.hit || right.hit;
+  return { hit, known: hit || (left.known && right.known) };
 }
 
 /** Operations are identified within their session; parentOperationId uses the same scope. */
@@ -168,23 +185,38 @@ function inspectOperation(operation: OperationEvents, diagnostics: ResourceDiagn
   }
   const contentFlags = events.reduce((flags, entry) => {
     const projection = entry.metricProjection;
-    const projected = projection?.version === TELEMETRY_PROJECTION_VERSION && typeof projection.markersKnown === "boolean";
+    const projected = projection?.version === TELEMETRY_PROJECTION_VERSION
+      && typeof projection.hasThinking === "boolean"
+      && typeof projection.hasContent === "boolean"
+      && typeof projection.thinkingKnown === "boolean"
+      && typeof projection.contentKnown === "boolean";
     const detected = projected ? {
-      thinking: projection?.hasThinking === true,
-      content: projection?.hasContent === true,
-      known: projection?.markersKnown === true,
+      thinking: projection.hasThinking === true,
+      content: projection.hasContent === true,
+      thinkingKnown: projection.thinkingKnown === true,
+      contentKnown: projection.contentKnown === true,
+    } : projection?.version === 2 ? {
+      thinking: projection.hasThinking === true,
+      content: projection.hasContent === true,
+      thinkingKnown: projection.hasThinking === true || projection.markersKnown === true,
+      contentKnown: projection.hasContent === true || projection.markersKnown === true,
     } : projection ? {
       thinking: false,
       content: false,
-      known: false,
+      thinkingKnown: false,
+      contentKnown: false,
     } : telemetryContentFlags(entry.fact);
     return {
-      thinking: flags.thinking || detected.thinking,
-      content: flags.content || detected.content,
-      known: flags.known && detected.known,
+      thinking: mergeMarkerState(flags.thinking, markerState(detected.thinking, detected.thinkingKnown)),
+      content: mergeMarkerState(flags.content, markerState(detected.content, detected.contentKnown)),
     };
-  }, { thinking: false, content: false, known: true });
-  const markerKnown = operation.kind === "tool" || contentFlags.known;
+  }, {
+    thinking: { hit: false, known: true },
+    content: { hit: false, known: true },
+  });
+  const finished = terminals.length > 0;
+  const thinking = operation.kind === "tool" || finished ? contentFlags.thinking : markerState(contentFlags.thinking.hit, false);
+  const content = operation.kind === "tool" || finished ? contentFlags.content : markerState(contentFlags.content.hit, false);
   return {
     kind: operation.kind,
     key: operation.key,
@@ -192,9 +224,10 @@ function inspectOperation(operation: OperationEvents, diagnostics: ResourceDiagn
     duration: outcomes.size > 1 ? null : duration,
     toolName: toolNames.size === 1 ? [...toolNames][0] ?? null : null,
     parentKey: parents.size === 1 ? operationKey(operation.sessionId, [...parents][0]!) : null,
-    hasThinking: contentFlags.thinking,
-    hasContent: contentFlags.content,
-    markerKnown,
+    hasThinking: thinking.hit,
+    hasContent: content.hit,
+    thinkingKnown: thinking.known,
+    contentKnown: content.known,
     first,
     start,
     terminal,
@@ -234,18 +267,18 @@ function operationStatistics(observed: readonly ObservedOperation[], complete: b
   };
 }
 
-/** Marked Turn counts stay partial or unavailable while a generation cannot be assigned to a Turn. */
+/** A known empty category remains a real zero even when another telemetry stream is incomplete. */
 function markedTurnStatistics(
   turns: readonly ObservedOperation[],
   marked: ReadonlySet<string>,
   complete: boolean,
-  generationLinksComplete: boolean,
-  markerKnowledgeComplete: boolean,
+  categoryKnown: boolean,
 ): OperationStatistics {
-  const statistics = operationStatistics(turns.filter((turn) => marked.has(turn.key)), complete && generationLinksComplete && markerKnowledgeComplete);
-  if (!generationLinksComplete || !markerKnowledgeComplete) return statistics;
-  if (statistics.count.value !== null || turns.length === 0) return statistics;
-  return { ...statistics, count: { value: 0, coverage: "partial" } };
+  const statistics = operationStatistics(turns.filter((turn) => marked.has(turn.key)), complete && categoryKnown);
+  if (categoryKnown && !complete && marked.size === 0 && turns.length > 0) {
+    return { ...statistics, count: { value: 0, coverage: "partial" } };
+  }
+  return statistics;
 }
 
 function bodyLength(entry: FactEntry | undefined, kind: "input" | "output"): number | null {
@@ -255,7 +288,7 @@ function bodyLength(entry: FactEntry | undefined, kind: "input" | "output"): num
   }
   const payload = record(entry?.fact.payload);
   return kind === "input" ? telemetryBodyLength(payload?.input)
-    : telemetryBodyLength(payload?.output) ?? telemetryBodyLength(payload?.response);
+    : telemetryOutputLength(payload);
 }
 
 function lengthSummary(values: readonly (number | null)[], complete: boolean): CoveredNumericSummary {
@@ -308,26 +341,30 @@ function trajectoryTurnMetrics(
   const turns = observed.filter((operation) => operation.kind === "turn");
   const tools = linkToTurns(observed, "tool");
   const generations = linkToTurns(observed, "generation");
-  const turnFlags = new Map(turns.map((turn) => [turn.key, { thinking: turn.hasThinking, content: turn.hasContent, known: turn.markerKnown }]));
+  const turnFlags = new Map(turns.map((turn) => [turn.key, {
+    thinking: markerState(turn.hasThinking, turn.thinkingKnown),
+    content: markerState(turn.hasContent, turn.contentKnown),
+  }]));
   for (const [generation, turn] of generations.linked) {
     const flags = turnFlags.get(turn);
     if (!flags) continue;
-    flags.thinking ||= generation.hasThinking;
-    flags.content ||= generation.hasContent;
-    flags.known &&= generation.markerKnown;
+    flags.thinking = mergeMarkerState(flags.thinking, markerState(generation.hasThinking, generation.thinkingKnown));
+    flags.content = mergeMarkerState(flags.content, markerState(generation.hasContent, generation.contentKnown));
   }
-  const thinking = new Set([...turnFlags].filter(([, flags]) => flags.thinking).map(([key]) => key));
-  const content = new Set([...turnFlags].filter(([, flags]) => flags.content).map(([key]) => key));
+  const thinking = new Set([...turnFlags].filter(([, flags]) => flags.thinking.hit).map(([key]) => key));
+  const content = new Set([...turnFlags].filter(([, flags]) => flags.content.hit).map(([key]) => key));
   const generationLinksComplete = generations.unlinked === 0;
-  const generationMarkersComplete = generationLinksComplete && [...generations.linked.keys()].every((generation) => generation.markerKnown);
-  const markerKnowledgeComplete = turns.every((turn) => turnFlags.get(turn.key)?.known === true) && generationMarkersComplete;
-  const thinkingTurnOperations = markedTurnStatistics(turns, thinking, complete, generationLinksComplete, markerKnowledgeComplete);
-  const contentTurnOperations = markedTurnStatistics(turns, content, complete, generationLinksComplete, markerKnowledgeComplete);
+  const thinkingKnown = generationLinksComplete
+    && [...turnFlags.values()].every((flags) => flags.thinking.known);
+  const contentKnown = generationLinksComplete
+    && [...turnFlags.values()].every((flags) => flags.content.known);
+  const thinkingTurnOperations = markedTurnStatistics(turns, thinking, complete, thinkingKnown);
+  const contentTurnOperations = markedTurnStatistics(turns, content, complete, contentKnown);
   const thinkingCount = thinkingTurnOperations.count;
   const contentCount = contentTurnOperations.count;
   const turnTokens = (marked: ReadonlySet<string>, markedCount: MetricNumber): ThinkingTurnTokens => {
     const markedGenerations = [...generations.linked].filter(([, turn]) => marked.has(turn)).map(([operation]) => operation);
-    const tokensComplete = markedCount.coverage === "complete" && generationMarkersComplete;
+    const tokensComplete = markedCount.coverage === "complete" && generationLinksComplete;
     const tokens = (field: "inputTokens" | "outputTokens" | "totalTokens"): MetricNumber => markedCount.value === null
       ? { value: null, coverage: "unavailable" }
       : diagnostics.sum(markedGenerations.map((operation) => operation.terminal ?? operation.first), tokensComplete, "telemetryEvents", field, true, (entry) => (

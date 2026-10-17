@@ -110,7 +110,7 @@ export function readStream(
     for (const rawFact of snapshot[stream]) {
       const fact = stream === "telemetryEvents" ? record(rawFact.event) ?? rawFact : rawFact;
       const projection = stream === "telemetryEvents" ? record(rawFact.metricProjection) : undefined;
-      const metricProjection = (projection?.version === 1 || projection?.version === TELEMETRY_PROJECTION_VERSION)
+      const metricProjection = (projection?.version === 1 || projection?.version === 2 || projection?.version === TELEMETRY_PROJECTION_VERSION)
         && typeof projection.fingerprint === "string" ? projection : undefined;
       const entry: FactEntry = { fact, ownerUserId, scope: snapshot.scope, ...(metricProjection ? { metricProjection } : {}) };
       const key = sourceIdentity(stream, ownerUserId, fact);
@@ -125,6 +125,18 @@ export function readStream(
         continue;
       }
       duplicates += 1;
+      if (existing && existing.metricProjection && metricProjection
+        && existing.metricProjection.fingerprint === metricProjection.fingerprint) {
+        const existingVersion = typeof existing.metricProjection.version === "number" ? existing.metricProjection.version : 0;
+        const version = typeof metricProjection.version === "number" ? metricProjection.version : 0;
+        if (version > existingVersion) byIdentity.set(key, entry);
+        else if (version === existingVersion && !equalJson(existing.metricProjection, metricProjection)) {
+          complete = false;
+          diagnostics.report("conflicting-identity", stream, entry, "The same source identity has contradictory metric projections");
+          byIdentity.set(key, null);
+        }
+        continue;
+      }
       if (existing && !(existing.metricProjection && metricProjection
         ? existing.metricProjection.fingerprint === metricProjection.fingerprint : equalJson(existing.fact, fact))) {
         complete = false;

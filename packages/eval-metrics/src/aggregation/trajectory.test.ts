@@ -58,8 +58,8 @@ describe("trajectory metrics", () => {
     const result = aggregateResources([resourceInput({ telemetryEvents: [
       ...turn("thinking-turn", "completed", 0, 1_000, { thinking: "hidden" }),
       ...turn("content-turn", "completed", 0, 1_000, { content: "answer" }),
-      ...generation("thinking-generation", "thinking-turn", { inputTokens: 10, outputTokens: 4, totalTokens: 14 }),
-      ...generation("content-generation", "content-turn", { inputTokens: 20, outputTokens: 8, totalTokens: 28 }),
+      ...generation("thinking-generation", "thinking-turn", { output: { thinking: "hidden" }, inputTokens: 10, outputTokens: 4, totalTokens: 14 }),
+      ...generation("content-generation", "content-turn", { output: { content: "answer" }, inputTokens: 20, outputTokens: 8, totalTokens: 28 }),
     ] })]);
     expect(result.trajectory.thinkingTurns).toEqual({ value: 1, coverage: "complete" });
     expect(result.trajectory.contentTurns).toEqual({ value: 1, coverage: "complete" });
@@ -79,16 +79,16 @@ describe("trajectory metrics", () => {
     expect(result.trajectory.turns).toMatchObject({
       count: { value: 5 }, completed: 1, failed: 1, cancelled: 1, inProgress: 1, unknown: 1,
     });
-    expect(result.trajectory.thinkingTurns).toEqual({ value: 0, coverage: "complete" });
-    expect(result.trajectory.thinkingTurnOperations).toMatchObject({ count: { value: 0, coverage: "complete" }, completed: 0, failed: 0 });
-    expect(result.trajectory.contentTurns).toEqual({ value: 3, coverage: "complete" });
-    expect(result.trajectory.contentTurnOperations).toMatchObject({ count: { value: 3, coverage: "complete" }, completed: 1, failed: 1, inProgress: 0, unknown: 1 });
+    expect(result.trajectory.thinkingTurns).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.thinkingTurnOperations).toMatchObject({ count: { value: null, coverage: "unavailable" }, completed: 0, failed: 0 });
+    expect(result.trajectory.contentTurns).toEqual({ value: 3, coverage: "partial" });
+    expect(result.trajectory.contentTurnOperations).toMatchObject({ count: { value: 3, coverage: "partial" }, completed: 1, failed: 1, inProgress: 0, unknown: 1 });
   });
 
   it("treats missing or sanitizer-omitted bodies as missing, never zero, and never adds output and response", () => {
     const result = aggregateResources([resourceInput({ telemetryEvents: [
       ...turn("turn-a", "completed"),
-      ...tool("t1", "turn-a", "browser", { input: "[CONTENT OMITTED]" }, { outcome: "completed", output: "[REDACTED]" }),
+      ...tool("t1", "turn-a", "browser", { input: "[CONTENT OMITTED]" }, { outcome: "completed", output: "[REDACTED]", response: { shouldNotBeUsed: true } }),
       ...tool("t2", "turn-a", "browser", {}, { outcome: "completed", output: "abc", response: "ignored response" }),
       ...tool("t3", "turn-a", "browser", { input: null }, null),
     ] })]);
