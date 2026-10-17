@@ -12,10 +12,11 @@ import { ModelName } from "./token-metrics";
 
 function fieldValue(field: OutputFieldSummary, compact = false): string {
   const values: string[] = [];
+  const distribution = field.distribution ?? [];
   if (field.numeric) values.push(compact
     ? `均值 ${formatStatistic(field.numeric.mean)} · N=${field.numeric.count}`
     : `均值 ${formatStatistic(field.numeric.mean)} · 标准差 ${formatStatistic(standardDeviation(field.numeric.variance))} · 中位数 ${formatStatistic(field.numeric.median)} · 最小 ${formatStatistic(field.numeric.min)} · 最大 ${formatStatistic(field.numeric.max)}`);
-  values.push(...field.distribution.map((item) => `${JSON.stringify(item.value)}: ${item.count} (${formatPercent(item.share)})`));
+  values.push(...distribution.map((item) => `${JSON.stringify(item.value)}: ${item.count} (${formatPercent(item.share)})`));
   if (field.nullCount !== undefined) values.push(`null: ${field.nullCount}`);
   return values.join(" · ") || "暂无有效观察";
 }
