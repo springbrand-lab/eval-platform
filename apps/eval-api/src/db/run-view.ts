@@ -1,9 +1,10 @@
 import type { EvaluationRecord, RunSnapshot } from "@eval-platform/eval-contracts";
 import { toRunSnapshot } from "@eval-platform/eval-runtime";
+import { readMetricEvaluations } from "./metric-facts.js";
 import { READ_SNAPSHOT, type EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import { projectExists } from "./project-plans.js";
-import { readEvaluations, readRunRecords, readSamplings, requireMembers, type RecordReader } from "./run-records.js";
+import { readRunRecords, readSamplingProgress, requireMembers, type RecordReader } from "./run-records.js";
 
 export interface ProjectRunView {
   readonly run: RunSnapshot;
@@ -21,8 +22,8 @@ export type RunViewScope =
 export async function readRunView(reader: RecordReader, runId: string, scope: RunViewScope): Promise<ProjectRunView | null> {
   const [record] = await readRunRecords(reader, [runId], scope);
   if (!record || !await projectExists(reader, record.projectId, scope.ownerUserId)) return null;
-  const samplingRows = await readSamplings(reader, record.samplingIds, scope.ownerUserId);
-  const evaluationRows = await readEvaluations(reader, record.evaluationIds, scope.ownerUserId);
+  const samplingRows = await readSamplingProgress(reader, record.samplingIds, scope.ownerUserId);
+  const evaluationRows = await readMetricEvaluations(reader, record.evaluationIds, scope.ownerUserId);
   const missing = (kind: string) => (id: string) => new Error(`Run ${runId} is missing ${kind} ${id}`);
   const members = requireMembers(samplingRows, record.samplingIds, missing("Sampling"));
   const evaluationRecords = requireMembers(evaluationRows, record.evaluationIds, missing("Evaluation"));

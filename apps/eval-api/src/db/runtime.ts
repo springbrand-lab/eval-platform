@@ -18,6 +18,7 @@ import {
   RuntimeRunStoppedError,
 } from "@eval-platform/eval-runtime";
 import { and, desc, eq, gt, inArray, max, sql } from "drizzle-orm";
+import { samplingMetricFacts, evaluationMetricFacts } from "./metric-facts.js";
 import { addToGroup, selectByIds, sqlBatches } from "./batch.js";
 import type { RunQueue } from "../run-worker-queue.js";
 import { constraintViolation, READ_SNAPSHOT, type EvalDb } from "./client.js";
@@ -269,19 +270,23 @@ async function insertRun(transaction: AdmissionWriter, owner: string, command: R
   if (!inserted) throw new RuntimeRunIdentityConflictError(`Run identity already exists: ${run.runId}`);
 
   for (const batch of sqlBatches(newSamplings)) {
-    await transaction.insert(samplings).values(batch.map((record) => ({
+    const rows = [];
+    for (const record of batch) rows.push({
       samplingId: record.samplingId, ownerUserId: owner, projectId: record.projectId,
-      projectSampleId: record.projectSampleId, facts: samplingFacts(record),
-    })));
+      projectSampleId: record.projectSampleId, facts: samplingFacts(record), metricFacts: await samplingMetricFacts(samplingFacts(record)),
+    });
+    await transaction.insert(samplings).values(rows);
   }
   const memberships = run.samplingIds.map((samplingId, position) => ({
     ownerUserId: owner, runId: run.runId, samplingId, position,
   }));
   for (const batch of sqlBatches(memberships)) await transaction.insert(runSamplings).values(batch);
   for (const batch of sqlBatches(newEvaluations)) {
-    await transaction.insert(evaluations).values(batch.map((evaluation) => ({
-      evaluationId: evaluation.evaluationId, ownerUserId: owner, samplingId: evaluation.samplingId, facts: evaluationFacts(evaluation),
-    })));
+    const rows = [];
+    for (const evaluation of batch) rows.push({
+      evaluationId: evaluation.evaluationId, ownerUserId: owner, samplingId: evaluation.samplingId, facts: evaluationFacts(evaluation), metricFacts: await evaluationMetricFacts(evaluationFacts(evaluation)),
+    });
+    await transaction.insert(evaluations).values(rows);
   }
   const evaluationMemberships = newEvaluations.map((evaluation, position) => ({
     ownerUserId: owner, runId: run.runId, evaluationId: evaluation.evaluationId, samplingId: evaluation.samplingId, position,
@@ -383,7 +388,7 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope, runQueue: RunQ
         || record.projectId !== expected.projectId || record.projectSampleId !== expected.projectSampleId) {
         throw new RuntimeRecordConflictError("Sampling identity changed before update");
       }
-      const updated = await db.update(samplings).set({ facts: samplingFacts(record) })
+      const updated = await db.update(samplings).set({ facts: samplingFacts(record), metricFacts: await samplingMetricFacts(samplingFacts(record)) })
         .where(and(eq(samplings.samplingId, record.samplingId), eq(samplings.projectId, record.projectId),
           eq(samplings.projectSampleId, record.projectSampleId),
           owner === undefined ? undefined : eq(samplings.ownerUserId, owner),
@@ -403,7 +408,7 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope, runQueue: RunQ
       if (record.evaluationId !== expected.evaluationId || record.samplingId !== expected.samplingId) {
         throw new RuntimeRecordConflictError("Evaluation identity changed before update");
       }
-      const updated = await db.update(evaluations).set({ facts: evaluationFacts(record) })
+      const updated = await db.update(evaluations).set({ facts: evaluationFacts(record), metricFacts: await evaluationMetricFacts(evaluationFacts(record)) })
         .where(and(eq(evaluations.evaluationId, record.evaluationId), eq(evaluations.samplingId, record.samplingId),
           owner === undefined ? undefined : eq(evaluations.ownerUserId, owner),
           eq(evaluations.facts, evaluationFacts(expected))))
@@ -505,9 +510,9 @@ export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string,
           || !(evaluation ? evaluation.chatId : sampling.subjectChatId)
           || (evaluation && (sampling.execution.status !== "succeeded" || !sampling.evidence))) throw new ResultCollectionConflictError();
         const pending = { status: "retrying" as const, collectionPending: true as const };
-        if (evaluation) await transaction.update(evaluations).set({ facts: evaluationFacts({ ...evaluation, status: pending }) })
+        if (evaluation) await transaction.update(evaluations).set({ facts: evaluationFacts({ ...evaluation, status: pending }), metricFacts: await evaluationMetricFacts(evaluationFacts({ ...evaluation, status: pending })) })
           .where(and(eq(evaluations.ownerUserId, owner), eq(evaluations.evaluationId, id)));
-        else await transaction.update(samplings).set({ facts: samplingFacts({ ...sampling, execution: pending }) })
+        else await transaction.update(samplings).set({ facts: samplingFacts({ ...sampling, execution: pending }), metricFacts: await samplingMetricFacts(samplingFacts({ ...sampling, execution: pending })) })
           .where(and(eq(samplings.ownerUserId, owner), eq(samplings.samplingId, id)));
         await runQueue.enqueue(transaction, run.runId, "collection");
         return { runId: run.runId, queued: true };

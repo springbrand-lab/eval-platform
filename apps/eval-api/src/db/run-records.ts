@@ -55,11 +55,11 @@ export async function projectHasRun(reader: RecordReader, projectId: string): Pr
   return run !== undefined;
 }
 
-export function samplingFromRow(row: typeof samplings.$inferSelect): Sampling {
+export function samplingFromRow(row: Pick<typeof samplings.$inferSelect, "facts" | "samplingId" | "projectId" | "projectSampleId">): Sampling {
   return { ...row.facts, samplingId: row.samplingId, projectId: row.projectId, projectSampleId: row.projectSampleId };
 }
 
-export function evaluationFromRow(row: typeof evaluations.$inferSelect): EvaluationRecord {
+export function evaluationFromRow(row: Pick<typeof evaluations.$inferSelect, "facts" | "evaluationId" | "samplingId">): EvaluationRecord {
   return { ...row.facts, evaluationId: row.evaluationId, samplingId: row.samplingId };
 }
 
@@ -166,4 +166,17 @@ export async function readRunRecords(
     ...(row.stopRequested ? { stopRequested: true as const } : {}),
     ...(row.stopFinalized ? { stopFinalized: true as const } : {}),
   }));
+}
+
+/** Run progress depends on stages only, never raw resource snapshots or evaluation outputs. */
+export async function readSamplingProgress(reader: RecordReader, ids: readonly string[], owner: string) {
+  return selectByIds(ids, (batch) => reader.select({ samplingId: samplings.samplingId,
+    execution: sql<Sampling["execution"]>`${samplings.facts}->'execution'`,
+  }).from(samplings).where(and(inArray(samplings.samplingId, batch), eq(samplings.ownerUserId, owner))), (row) => row.samplingId);
+}
+
+export async function readEvaluationProgress(reader: RecordReader, ids: readonly string[], owner: string) {
+  return selectByIds(ids, (batch) => reader.select({ evaluationId: evaluations.evaluationId, samplingId: evaluations.samplingId,
+    status: sql<EvaluationRecord["status"]>`${evaluations.facts}->'status'`,
+  }).from(evaluations).where(and(inArray(evaluations.evaluationId, batch), eq(evaluations.ownerUserId, owner))), (row) => row.evaluationId);
 }

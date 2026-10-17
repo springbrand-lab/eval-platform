@@ -252,6 +252,7 @@ export const samplings = pgTable("eval_samplings", {
   projectId: text("project_id").notNull(),
   projectSampleId: text("project_sample_id").notNull(),
   facts: jsonb("facts").$type<Omit<Sampling, "samplingId" | "projectId" | "projectSampleId">>().notNull(),
+  metricFacts: jsonb("metric_facts").$type<Omit<Sampling, "samplingId" | "projectId" | "projectSampleId">>(),
 }, (table) => [
   unique("eval_samplings_owner_id_uq").on(table.ownerUserId, table.samplingId),
   foreignKey({ name: "eval_samplings_project_sample_fk", columns: [table.ownerUserId, table.projectId, table.projectSampleId], foreignColumns: [projectSamples.ownerUserId, projectSamples.projectId, projectSamples.projectSampleId] }),
@@ -263,6 +264,7 @@ export const evaluations = pgTable("eval_evaluations", {
   ownerUserId: text("owner_user_id").notNull(),
   samplingId: text("sampling_id").notNull(),
   facts: jsonb("facts").$type<Omit<EvaluationRecord, "evaluationId" | "samplingId">>().notNull(),
+  metricFacts: jsonb("metric_facts").$type<Omit<EvaluationRecord, "evaluationId" | "samplingId">>(),
 }, (table) => [
   unique("eval_evaluations_owner_identity_uq").on(table.ownerUserId, table.evaluationId, table.samplingId),
   foreignKey({ name: "eval_evaluations_sampling_fk", columns: [table.ownerUserId, table.samplingId], foreignColumns: [samplings.ownerUserId, samplings.samplingId] }).onDelete("restrict"),

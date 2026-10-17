@@ -107,3 +107,7 @@ Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`�
 
 
 项目结果工作台：ProjectOverview 额外返回去重的 projectSamples 行及每行当前 samplingIds，沿用同一事实快照和 Metrics 聚合口径，不由前端合计子层统计。默认是当前有效采样及评估结果，非历史运行总和；指定运行的范围仍由 runIds 控制。Web 将数据集作为筛选，按用例聚合、展开采样，单次采样直接打开结果抽屉；运行记录与配置分开展示。采样详情和抽屉共用结果组件，评估内容与产物优先、技术统计按需展开，文件预览复用已有只读 Workspace API 和公共渲染器，不读取 SP 私有存储。
+
+## Compact resource facts
+
+`compactResourceCollection` derives telemetry metric facts without event bodies. It keeps canonical SHA-256 fingerprints for source conflicts and canonical input/output lengths (including omitted-body and output/response fallback semantics). The existing interpreter consumes these facts with the same operation merging, completeness, distributions and exact medians as raw snapshots. The API owns persistence; this package performs no storage or background work. Original facts and evidence are never replaced by the projection.

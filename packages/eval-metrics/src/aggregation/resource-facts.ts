@@ -8,6 +8,7 @@ export type Stream = ResourceDiagnostic["stream"];
 
 export interface FactEntry {
   readonly fact: JsonRecord;
+  readonly metricProjection?: JsonRecord;
   readonly ownerUserId: string;
   readonly scope: AgentResourceScope;
 }
@@ -107,7 +108,9 @@ export function readStream(
     if (!snapshot.finalized || snapshot.coverage[stream] !== "complete") complete = false;
     for (const rawFact of snapshot[stream]) {
       const fact = stream === "telemetryEvents" ? record(rawFact.event) ?? rawFact : rawFact;
-      const entry = { fact, ownerUserId, scope: snapshot.scope };
+      const projection = stream === "telemetryEvents" ? record(rawFact.metricProjection) : undefined;
+      const metricProjection = projection?.version === 1 && typeof projection.fingerprint === "string" ? projection : undefined;
+      const entry: FactEntry = { fact, ownerUserId, scope: snapshot.scope, ...(metricProjection ? { metricProjection } : {}) };
       const key = sourceIdentity(stream, ownerUserId, fact);
       if (key === undefined) {
         complete = false;
@@ -120,7 +123,8 @@ export function readStream(
         continue;
       }
       duplicates += 1;
-      if (existing && !equalJson(existing.fact, fact)) {
+      if (existing && !(existing.metricProjection && metricProjection
+        ? existing.metricProjection.fingerprint === metricProjection.fingerprint : equalJson(existing.fact, fact))) {
         complete = false;
         diagnostics.report("conflicting-identity", stream, entry, "The same source identity has contradictory facts");
         byIdentity.set(key, null);

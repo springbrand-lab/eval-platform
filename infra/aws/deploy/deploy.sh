@@ -106,6 +106,8 @@ compose=(docker compose -p eval-platform -f "$DEPLOY_DIR/compose.yaml" -f "$TEMP
 "${compose[@]}" pull --quiet
 "${compose[@]}" run --rm --no-deps api node dist/migrate.js
 "${compose[@]}" up -d --pull never --remove-orphans --wait
+# Finish projections invalidated by the old Worker while the first backfill was running.
+"${compose[@]}" exec -T api node dist/migrate.js
 "${compose[@]}" exec -T api node --input-type=module <<'JS'
 for (const path of ["/healthz", "/api/material-bundles", "/api/session-bundles", "/api/datasets", "/api/evaluation-output-schemas"]) {
   const response = await fetch(`http://127.0.0.1:8788${path}`, {

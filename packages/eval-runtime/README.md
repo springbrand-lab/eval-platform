@@ -120,3 +120,5 @@ Sampling 的三个边界固定如下：
 手动重新收集结果：POST /api/projects/{projectId}/samplings/{samplingId}/collect 与 /evaluations/{evaluationId}/collect 返回 202 {runId, queued}。仅接受归属匹配、最后 Attempt 为 completed 且有 Chat/Submission 的失败阶段；已成功为幂等无操作，重复待收集请求不重复入队，项目忙或 Run 已停止时拒绝。API 在 Project 行锁内设置 retrying + collectionPending，并原子提交原 Run 队列任务。Worker 只读取已有输出，不创建或重启 Agent/Attempt；执行侧必须归档产物和完整轨迹，评估侧保存原始结果并沿用校验和同步。失败清除待收集标记并保留错误，支持再次补收。补收执行不自动启动之前已取消的评估。当前运行查询允许旧 Run 因补收重新活跃，runSequence 仍是最大创建序号。
 
 Run 状态按当前归属的评估记录投影。重新评估移走旧记录后，旧 Run 不把缺失的评估当成 queued；没有剩余阶段记录时沿用空 Run 的终态 failed，不再被视为活动任务。
+
+`toRunSnapshot` only requires Sampling execution states and Evaluation sampling IDs/statuses; applications must not load resource snapshots solely to compute Run progress.

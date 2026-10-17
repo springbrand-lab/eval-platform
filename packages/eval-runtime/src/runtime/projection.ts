@@ -3,7 +3,7 @@ import { isPendingSamplingStatus } from "@eval-platform/eval-contracts";
 import type { SamplingSnapshot } from "./model.js";
 import type { RuntimeRunRecord, SamplingState } from "./store.js";
 
-export function currentRunPhase(records: readonly SamplingState[], phases: RunPhases): RunPhase {
+export function currentRunPhase(records: readonly Pick<SamplingState, "samplingId" | "execution">[], phases: RunPhases): RunPhase {
   const firstPhase = phases[0];
   if (firstPhase === "execution" && phases.length === 2) {
     if (records.some((state) => isPendingSamplingStatus(state.execution.status))) return "execution";
@@ -13,8 +13,8 @@ export function currentRunPhase(records: readonly SamplingState[], phases: RunPh
 }
 
 function aggregateRunProgress(
-  records: readonly SamplingState[],
-  evaluations: readonly EvaluationRecord[],
+  records: readonly Pick<SamplingState, "samplingId" | "execution">[],
+  evaluations: readonly Pick<EvaluationRecord, "samplingId" | "status">[],
   phases: RunPhases,
 ): Pick<RunSnapshot, "phase" | "status"> {
   const phase = currentRunPhase(records, phases);
@@ -52,8 +52,8 @@ function aggregateRunProgress(
 
 export function toRunSnapshot(
   run: RuntimeRunRecord,
-  records: readonly SamplingState[],
-  evaluations: readonly EvaluationRecord[],
+  records: readonly Pick<SamplingState, "samplingId" | "execution">[],
+  evaluations: readonly Pick<EvaluationRecord, "samplingId" | "status">[],
 ): RunSnapshot {
   const progress = aggregateRunProgress(records, evaluations, run.phases);
   const stopFinalizing = run.stopRequested === true && run.stopFinalized !== true

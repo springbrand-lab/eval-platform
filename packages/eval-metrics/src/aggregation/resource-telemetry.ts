@@ -1,5 +1,4 @@
-import type { JsonValue } from "@eval-platform/eval-contracts";
-import { canonicalJsonBytes } from "@eval-platform/eval-contracts";
+import { telemetryBodyLength } from "./compact-resources.js";
 import { record, text } from "../json.js";
 import type {
   CoveredNumericSummary,
@@ -20,8 +19,6 @@ const OPERATION_TYPES = new Set([
   "turn.admitted", "turn.started", "turn.steered", "turn.recovering", "turn.cancelled", "turn.finished",
   "tool.started", "tool.finished",
 ]);
-/** Whole-body placeholders SP's telemetry sanitizer writes instead of content. */
-const OMITTED_BODIES = new Set(["[CONTENT OMITTED]", "[REDACTED]"]);
 
 interface OperationEvents {
   readonly kind: OperationKind;
@@ -210,10 +207,14 @@ function operationStatistics(observed: readonly ObservedOperation[], complete: b
   };
 }
 
-/** Bytes of a present body; absent and sanitizer-omitted bodies are missing, never zero. */
-function bodyLength(value: JsonValue | undefined): number | null {
-  if (value === undefined || (typeof value === "string" && OMITTED_BODIES.has(value))) return null;
-  return canonicalJsonBytes(value).byteLength;
+function bodyLength(entry: FactEntry | undefined, kind: "input" | "output"): number | null {
+  if (entry?.metricProjection) {
+    const value = entry.metricProjection[`${kind}Length`];
+    return typeof value === "number" ? value : null;
+  }
+  const payload = record(entry?.fact.payload);
+  return kind === "input" ? telemetryBodyLength(payload?.input)
+    : telemetryBodyLength(payload?.output) ?? telemetryBodyLength(payload?.response);
 }
 
 function lengthSummary(values: readonly (number | null)[], complete: boolean): CoveredNumericSummary {
@@ -222,15 +223,11 @@ function lengthSummary(values: readonly (number | null)[], complete: boolean): C
 }
 
 function toolMetric(toolName: string | null, operations: readonly ObservedOperation[], complete: boolean): ToolMetric {
-  const payload = (entry: FactEntry | undefined) => record(entry?.fact.payload);
   return {
     toolName,
     ...operationStatistics(operations, complete),
-    inputLength: lengthSummary(operations.map((operation) => bodyLength(payload(operation.start)?.input)), complete),
-    outputLength: lengthSummary(operations.map((operation) => {
-      const finished = payload(operation.terminal);
-      return bodyLength(finished?.output) ?? bodyLength(finished?.response);
-    }), complete),
+    inputLength: lengthSummary(operations.map((operation) => bodyLength(operation.start, "input")), complete),
+    outputLength: lengthSummary(operations.map((operation) => bodyLength(operation.terminal, "output")), complete),
   };
 }
 

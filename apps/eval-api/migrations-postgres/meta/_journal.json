@@ -15,6 +15,13 @@
       "when": 1792165388750,
       "tag": "0001_evaluation_submissions",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792215512673,
+      "tag": "0002_metric_facts",
+      "breakpoints": true
     }
   ]
 }
