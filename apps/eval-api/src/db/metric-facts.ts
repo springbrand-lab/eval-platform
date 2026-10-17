@@ -1,6 +1,6 @@
 import type { AgentResourceCollection, EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
-import { compactResourceCollection } from "@eval-platform/eval-metrics";
-import { and, eq, gt, inArray, isNull } from "drizzle-orm";
+import { compactResourceCollection, hasCurrentTelemetryProjection } from "@eval-platform/eval-metrics";
+import { and, eq, gt, inArray } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
 import { evaluations, samplings } from "./schema.js";
 import { selectByIds } from "./batch.js";
@@ -16,6 +16,10 @@ async function compactAttempts<T extends { readonly resources?: AgentResourceCol
   return result;
 }
 
+function hasCurrentMetricFacts<T extends { readonly resources?: AgentResourceCollection }>(attempts: readonly T[]): boolean {
+  return attempts.every((attempt) => attempt.resources === undefined || hasCurrentTelemetryProjection(attempt.resources));
+}
+
 export async function samplingMetricFacts(facts: SamplingFacts): Promise<SamplingFacts> {
   return { ...facts, executionAttempts: await compactAttempts(facts.executionAttempts) };
 }
@@ -28,7 +32,7 @@ export async function evaluationMetricFacts(facts: EvaluationFacts): Promise<Eva
 export async function readMetricSampling(reader: RecordReader, row: Pick<typeof samplings.$inferSelect,
   "samplingId" | "projectId" | "projectSampleId" | "ownerUserId" | "metricFacts">): Promise<Sampling> {
   let facts = row.metricFacts;
-  if (facts === null) {
+  if (facts === null || !hasCurrentMetricFacts(facts.executionAttempts)) {
     const [raw] = await reader.select({ facts: samplings.facts }).from(samplings)
       .where(and(eq(samplings.samplingId, row.samplingId), eq(samplings.ownerUserId, row.ownerUserId)));
     if (!raw) throw new Error(`Missing Sampling ${row.samplingId}`);
@@ -40,7 +44,7 @@ export async function readMetricSampling(reader: RecordReader, row: Pick<typeof 
 export async function readMetricEvaluation(reader: RecordReader, row: Pick<typeof evaluations.$inferSelect,
   "evaluationId" | "samplingId" | "ownerUserId" | "metricFacts">): Promise<EvaluationRecord> {
   let facts = row.metricFacts;
-  if (facts === null) {
+  if (facts === null || !hasCurrentMetricFacts(facts.attempts)) {
     const [raw] = await reader.select({ facts: evaluations.facts }).from(evaluations)
       .where(and(eq(evaluations.evaluationId, row.evaluationId), eq(evaluations.ownerUserId, row.ownerUserId)));
     if (!raw) throw new Error(`Missing Evaluation ${row.evaluationId}`);
@@ -56,18 +60,26 @@ export async function backfillMetricFacts(db: EvalDb): Promise<void> {
     for (;;) {
       const next = await db.transaction(async (tx) => {
         if (kind === "sampling") {
-          const [row] = await tx.select({ id: samplings.samplingId, facts: samplings.facts }).from(samplings)
-            .where(and(isNull(samplings.metricFacts), after === undefined ? undefined : gt(samplings.samplingId, after)))
+          const [row] = await tx.select({ id: samplings.samplingId, metricFacts: samplings.metricFacts }).from(samplings)
+            .where(after === undefined ? undefined : gt(samplings.samplingId, after))
             .orderBy(samplings.samplingId).limit(1).for("update");
           if (!row) return undefined;
-          await tx.update(samplings).set({ metricFacts: await samplingMetricFacts(row.facts) }).where(eq(samplings.samplingId, row.id));
+          if (!row.metricFacts || !hasCurrentMetricFacts(row.metricFacts.executionAttempts)) {
+            const [raw] = await tx.select({ facts: samplings.facts }).from(samplings).where(eq(samplings.samplingId, row.id));
+            if (!raw) throw new Error(`Missing Sampling ${row.id}`);
+            await tx.update(samplings).set({ metricFacts: await samplingMetricFacts(raw.facts) }).where(eq(samplings.samplingId, row.id));
+          }
           return row.id;
         }
-        const [row] = await tx.select({ id: evaluations.evaluationId, facts: evaluations.facts }).from(evaluations)
-          .where(and(isNull(evaluations.metricFacts), after === undefined ? undefined : gt(evaluations.evaluationId, after)))
+        const [row] = await tx.select({ id: evaluations.evaluationId, metricFacts: evaluations.metricFacts }).from(evaluations)
+          .where(after === undefined ? undefined : gt(evaluations.evaluationId, after))
           .orderBy(evaluations.evaluationId).limit(1).for("update");
         if (!row) return undefined;
-        await tx.update(evaluations).set({ metricFacts: await evaluationMetricFacts(row.facts) }).where(eq(evaluations.evaluationId, row.id));
+        if (!row.metricFacts || !hasCurrentMetricFacts(row.metricFacts.attempts)) {
+          const [raw] = await tx.select({ facts: evaluations.facts }).from(evaluations).where(eq(evaluations.evaluationId, row.id));
+          if (!raw) throw new Error(`Missing Evaluation ${row.id}`);
+          await tx.update(evaluations).set({ metricFacts: await evaluationMetricFacts(raw.facts) }).where(eq(evaluations.evaluationId, row.id));
+        }
         return row.id;
       });
       if (next === undefined) break;

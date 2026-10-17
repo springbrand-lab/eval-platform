@@ -3,6 +3,18 @@ import { record, text } from "../json.js";
 
 export const TELEMETRY_PROJECTION_VERSION = 2;
 
+export function hasCurrentTelemetryProjection(collection: AgentResourceCollection): boolean {
+  if (collection.status !== "collected") return true;
+  return collection.snapshot.telemetryEvents.every((raw) => {
+    const projection = record(raw.metricProjection);
+    return projection?.version === TELEMETRY_PROJECTION_VERSION
+      && typeof projection.fingerprint === "string"
+      && typeof projection.hasThinking === "boolean"
+      && typeof projection.hasContent === "boolean"
+      && typeof projection.markersKnown === "boolean";
+  });
+}
+
 /** Bytes of present canonical JSON; sanitized whole-body placeholders remain missing. */
 export function telemetryBodyLength(value: JsonValue | undefined): number | null {
   if (value === undefined || value === "[CONTENT OMITTED]" || value === "[REDACTED]") return null;

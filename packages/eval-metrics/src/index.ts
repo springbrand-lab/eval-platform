@@ -5,4 +5,4 @@ export type * from "./evaluators/model.js";
 export type * from "./aggregation/model.js";
 export type * from "./reporting/model.js";
 
-export { compactResourceCollection } from "./aggregation/compact-resources.js";
+export { compactResourceCollection, hasCurrentTelemetryProjection } from "./aggregation/compact-resources.js";
