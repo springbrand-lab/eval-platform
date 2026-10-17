@@ -1,7 +1,7 @@
 import { ApiError } from "@springbrand/http/client";
 import { describe, expect, it } from "vitest";
 import { describeError, fieldErrors, isWriteOutcomeUnknown } from "./errors";
-import { formatBytes, formatDuration, formatNumber, formatPercent } from "./format";
+import { formatBytes, formatDuration, formatMetricBytes, formatNumber, formatPercent, standardDeviation } from "./format";
 import { langfuseScoreId, langfuseSessionUrl } from "./langfuse";
 
 describe("errors", () => {
@@ -41,6 +41,10 @@ describe("format", () => {
     expect(formatDuration(850)).toBe("850 毫秒");
     expect(formatDuration(75_000)).toBe("1 分 15 秒");
     expect(formatBytes(2048)).toBe("2.0 KB");
+    expect(formatMetricBytes(43.2049)).toBe("43.2049 B");
+    expect(formatMetricBytes(null)).toBe("未获得");
+    expect(standardDeviation(25)).toBe(5);
+    expect(standardDeviation(null)).toBeNull();
   });
 });
 

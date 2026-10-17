@@ -3,7 +3,7 @@ import type { MetricSummary, ResourceStatistics, StageStatistics } from "@/api-s
 import { ResourceMetrics } from "@/features/metrics/resource-metrics";
 import { MetricValue } from "@/features/metrics/metric-value";
 import { ModelName } from "@/features/metrics/token-metrics";
-import { formatBytes, formatDuration, formatPercent, formatStatistic } from "@/lib/format";
+import { formatDuration, formatMetricBytes, formatPercent, formatStatistic } from "@/lib/format";
 
 function StageStat({ label, value, tone = "neutral" }: { label: string; value: number; tone?: "neutral" | "success" | "danger" | "warning" }) {
   const toneClass = {
@@ -25,7 +25,6 @@ function OverviewMetric({ label, title, children }: { label: string; title?: str
 }
 
 function AgentOverview({ title, statistics, stage }: { title: string; statistics: ResourceStatistics; stage: StageStatistics }) {
-  const bytes = (value: number | null | undefined) => value === null || value === undefined ? "未获得" : value < 1024 ? `${formatStatistic(value)} B` : formatBytes(value);
   const duration = (value: number | null | undefined) => value === null || value === undefined ? "未获得" : formatDuration(value);
   return <section aria-label={`${title}总览`} className="space-y-4 rounded-lg border border-border bg-surface-muted/20 p-3">
     <div><h4 className="text-sm font-semibold text-text-strong">总览</h4><p className="mt-1 text-xs text-text-muted">模型 <ModelName statistics={statistics} /> · 先看资源消耗和工具使用，再进入下方分项明细。</p></div>
@@ -50,8 +49,8 @@ function AgentOverview({ title, statistics, stage }: { title: string; statistics
             <TableCell className="text-right tabular-nums">{tool.completed}</TableCell>
             <TableCell className={`text-right tabular-nums ${tool.failed > 0 ? 'font-medium text-danger' : 'text-text-muted'}`}>{tool.failed}</TableCell>
             <TableCell className="text-right tabular-nums">{duration(tool.durationMs?.mean)}</TableCell>
-            <TableCell className="text-right tabular-nums">{bytes(tool.inputLength?.mean)}</TableCell>
-            <TableCell className="pr-3 text-right tabular-nums">{bytes(tool.outputLength?.mean)}</TableCell>
+            <TableCell className="text-right tabular-nums">{formatMetricBytes(tool.inputLength?.mean)}</TableCell>
+            <TableCell className="pr-3 text-right tabular-nums">{formatMetricBytes(tool.outputLength?.mean)}</TableCell>
           </TableRow>)}</TableBody>
         </Table>
       </div>

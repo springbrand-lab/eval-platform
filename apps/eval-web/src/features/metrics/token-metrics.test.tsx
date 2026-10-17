@@ -15,7 +15,7 @@ describe("Token and cache display", () => {
       tokens: { ...tokens, cacheRead: { value: 41, coverage: "partial" } },
     }] })} />);
     try {
-      expect([...view.container.querySelectorAll("dd")].map((cell) => cell.textContent)).toEqual(["200", "0", "未获得", "100", "20", "5", "25.0%"]);
+      expect([...view.container.querySelectorAll("dd")].map((cell) => cell.textContent)).toEqual(["200", "0", "未获得", "100", "20", "5", "25.0%", "0", "0", "0", "0", "0", "0"]);
       expect(view.container.textContent).toContain("模型 model");
       expect(view.container.textContent).not.toMatch(/全部模型|完整|部分|无结果/u);
       expect(view.container.querySelector("table")).toBeNull();

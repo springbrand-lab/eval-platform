@@ -1,6 +1,6 @@
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@springbrand/site-block";
 import type { NumericSummary } from "@/api-sdk/types";
-import { formatNumber, formatStatistic } from "@/lib/format";
+import { formatNumber, formatStatistic, standardDeviation } from "@/lib/format";
 
 export interface StatisticsRow {
   label: string;
@@ -47,7 +47,7 @@ export function StatisticsTable({ label, description, rows, total = false, showH
             <TableCell className="text-right tabular-nums text-text-secondary">
               <span aria-label={`最小 ${show(summary.min)}，最大 ${show(summary.max)}`}>{show(summary.min)} — {show(summary.max)}</span>
             </TableCell>
-            <TableCell className="text-right tabular-nums">{show(summary.variance === null ? null : Math.sqrt(Math.max(0, summary.variance)))}</TableCell>
+            <TableCell className="text-right tabular-nums">{show(standardDeviation(summary.variance) ?? null)}</TableCell>
             <TableCell className="text-right tabular-nums">{formatNumber(summary.count)}</TableCell>
             <TableCell className={`pr-4 text-right tabular-nums ${summary.missing > 0 ? "text-warning" : "text-text-muted"}`}>{formatNumber(summary.missing)}</TableCell>
           </TableRow>;

@@ -39,6 +39,7 @@ describe("Agent resource and trajectory categories", () => {
       expect([...thinking.querySelectorAll("td")].map((item) => item.textContent)).toEqual(["2", "1", "1", "0", "0", "0"]);
       const tool = view.container.querySelector('table[aria-label="工具调用明细"] tbody tr')!;
       expect(tool.textContent).toContain("write_file");
+      expect(view.container.querySelector('table[aria-label="工具长度与耗时分布"]')).not.toBeNull();
       expect(view.container.querySelector('[aria-label="费用"]')).toBeNull();
       expect(view.container.querySelector('[aria-label="Token 与缓存"]')).toBeNull();
       expect(view.container.textContent).toContain("资源完整性");
@@ -93,6 +94,9 @@ describe("Agent resource and trajectory categories", () => {
       expect(resources?.open).toBe(false);
       expect(resources?.textContent).toContain("write_file");
       expect(resources?.textContent).toContain("评估 Agent 资源与轨迹");
+      expect(resources?.textContent).toContain("模型 未获得");
+      expect(resources?.textContent).toContain("缓存命中率");
+      expect(resources?.textContent).toContain("41.2%");
     } finally { await view.unmount(); }
   });
 });

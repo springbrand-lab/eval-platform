@@ -1,7 +1,7 @@
 import { NativeSelect, NativeSelectOption } from "@springbrand/site-block";
 import { useState } from "react";
 import type { OperationDistributions, ResourceDistribution, ResourceStatistics } from "@/api-sdk/types";
-import { formatBytes, formatDuration, formatStatistic } from "@/lib/format";
+import { formatDuration, formatMetricBytes } from "@/lib/format";
 import { COST_FIELDS, OPERATION_FIELDS, TOKEN_FIELDS } from "./metric-labels";
 import { StatisticsTable, type StatisticsRow } from "./statistics-table";
 
@@ -53,12 +53,11 @@ function ToolDistribution({ tools, lengthTools }: { tools: ResourceDistribution[
   const tool = tools[Number(toolIndex)] ?? tools[0]!;
   const name = tool.toolName ?? "未识别工具";
   const lengthTool = lengthTools.find((item) => item.toolName === tool.toolName);
-  const bytes = (value: number) => value < 1024 ? `${formatStatistic(value)} B` : formatBytes(value);
   const rows: StatisticsRow[] = [
     ...operationRows(tool.operations),
     ...(lengthTool ? [
-      { label: "请求大小", unit: "字节", summary: lengthTool.inputLength, format: bytes },
-      { label: "返回大小", unit: "字节", summary: lengthTool.outputLength, format: bytes },
+      { label: "请求大小", unit: "字节", summary: lengthTool.inputLength, format: formatMetricBytes },
+      { label: "返回大小", unit: "字节", summary: lengthTool.outputLength, format: formatMetricBytes },
       { label: "调用耗时", unit: "毫秒", summary: lengthTool.durationMs, format: formatDuration },
     ] : []),
   ];

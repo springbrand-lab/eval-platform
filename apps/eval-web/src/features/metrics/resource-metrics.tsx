@@ -7,7 +7,7 @@ import { useState, type ReactNode } from "react";
 import type { OperationStatistics, ResourceDistribution, ResourceStatistics, StageStatistics } from "@/api-sdk/types";
 import { StatusBadge } from "@/components/ui/badge";
 import { DescriptionList } from "@/components/ui/card";
-import { formatDuration, formatStatistic, formatUsd } from "@/lib/format";
+import { formatDuration, formatMetricBytes, formatStatistic, formatUsd } from "@/lib/format";
 import { MetricValue } from "./metric-value";
 import { TokenMetrics } from "./token-metrics";
 import { COST_FIELDS } from "./metric-labels";
@@ -49,7 +49,17 @@ function OperationsTable({ label, caption, rows, emptyLabel = "暂无可用数�
   </div>;
 }
 
-function TrajectoryMetrics({ trajectory, modelRequests }: Pick<ResourceStatistics, "trajectory" | "modelRequests">) {
+function ToolMeasurementDetails({ trajectory, compact }: Pick<ResourceStatistics, "trajectory"> & { compact: boolean }) {
+  return <MetricDisclosure title="工具长度与耗时" description="按单次工具调用统计。调用和返回长度使用 UTF-8 字节，不换算为 Token。" expanded={compact}>
+    <StatisticsTable label="工具长度与耗时分布" total description="未获得或脱敏正文不按零计数。" rows={trajectory.byTool.flatMap((tool) => [
+      { label: `${tool.toolName ?? "未识别工具"} · 调用长度`, unit: "字节", summary: tool.inputLength, format: formatMetricBytes },
+      { label: `${tool.toolName ?? "未识别工具"} · 返回长度`, unit: "字节", summary: tool.outputLength, format: formatMetricBytes },
+      { label: `${tool.toolName ?? "未识别工具"} · 耗时`, unit: "毫秒", summary: tool.durationMs, format: formatDuration },
+    ])} />
+  </MetricDisclosure>;
+}
+
+function TrajectoryMetrics({ trajectory, modelRequests, showToolMeasurements, compact }: Pick<ResourceStatistics, "trajectory" | "modelRequests"> & { showToolMeasurements: boolean; compact: boolean }) {
   const operations = [
     { label: "处理轮（Turn）", value: trajectory.turns },
     { label: "思考命中轮", value: trajectory.thinkingTurnOperations },
@@ -63,6 +73,7 @@ function TrajectoryMetrics({ trajectory, modelRequests }: Pick<ResourceStatistic
     <div className="space-y-3"><div><h4 className="text-sm font-semibold text-text-strong">按工具查看</h4><p className="mt-1 text-xs text-text-muted">每种工具一行，查看调用次数和结果状态。</p></div>
       <OperationsTable label="工具调用明细" caption="每种工具的累计调用结果；未知不计为成功或失败。" rows={trajectory.byTool.map((tool) => ({ label: tool.toolName ?? "未识别工具", value: tool }))} emptyLabel="暂无工具调用" />
     </div>
+    {showToolMeasurements && trajectory.byTool.length > 0 && <ToolMeasurementDetails trajectory={trajectory} compact={compact} />}
     {(trajectory.unlinkedOperations.tools > 0 || trajectory.unlinkedOperations.generations > 0) && <p className="text-xs text-muted-foreground">
       未关联到处理轮的工具 {trajectory.unlinkedOperations.tools} 次、模型请求 {trajectory.unlinkedOperations.generations} 次，思考轮和内容轮统计可能不完整。
     </p>}
@@ -144,7 +155,7 @@ export function ResourceMetrics({ statistics, distribution, durations, showCover
   const content = panel === "costs" ? <div className="flex min-w-0 flex-col gap-5"><CostMetrics statistics={statistics} compact={compact} />{distribution && <ResourceDistributionPanel distribution={distribution} statistics={statistics} section="costs" />}</div>
     : panel === "tokens" ? <div className="flex min-w-0 flex-col gap-5"><TokenMetrics statistics={statistics} />{distribution && <ResourceDistributionPanel distribution={distribution} statistics={statistics} section="tokens" />}</div>
       : panel === "operations" ? <div className="flex min-w-0 flex-col gap-5">
-        <TrajectoryMetrics trajectory={statistics.trajectory} modelRequests={statistics.modelRequests} />
+        <TrajectoryMetrics trajectory={statistics.trajectory} modelRequests={statistics.modelRequests} showToolMeasurements={!distribution} compact={compact} />
         {distribution && <ResourceDistributionPanel distribution={distribution} statistics={statistics} section="operations" />}
       </div>
         : <DurationMetrics statistics={statistics} durations={durations} />;

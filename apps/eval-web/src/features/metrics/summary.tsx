@@ -5,15 +5,16 @@ import { Bot, ChevronDown, Scale } from "lucide-react";
 import { MetricCard } from "@/components/ui/data-display";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/badge";
-import { formatCompact, formatDuration, formatNumber, formatPercent, formatStatistic } from "@/lib/format";
+import { formatCompact, formatDuration, formatNumber, formatPercent, formatStatistic, standardDeviation } from "@/lib/format";
 import { AgentMetricPair, MetricValue } from "./metric-value";
 import { ResourceMetrics } from "./resource-metrics";
+import { ModelName } from "./token-metrics";
 
 function fieldValue(field: OutputFieldSummary, compact = false): string {
   const values: string[] = [];
   if (field.numeric) values.push(compact
     ? `均值 ${formatStatistic(field.numeric.mean)} · N=${field.numeric.count}`
-    : `均值 ${formatStatistic(field.numeric.mean)} · 方差 ${formatStatistic(field.numeric.variance)} · 中位数 ${formatStatistic(field.numeric.median)} · 最小 ${formatStatistic(field.numeric.min)} · 最大 ${formatStatistic(field.numeric.max)}`);
+    : `均值 ${formatStatistic(field.numeric.mean)} · 标准差 ${formatStatistic(standardDeviation(field.numeric.variance))} · 中位数 ${formatStatistic(field.numeric.median)} · 最小 ${formatStatistic(field.numeric.min)} · 最大 ${formatStatistic(field.numeric.max)}`);
   values.push(...field.distribution.map((item) => `${JSON.stringify(item.value)}: ${item.count} (${formatPercent(item.share)})`));
   if (field.nullCount !== undefined) values.push(`null: ${field.nullCount}`);
   return values.join(" · ") || "暂无有效观察";
@@ -88,12 +89,14 @@ export function SummaryCards({ summary, children }: { summary: MetricSummary; ch
               <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-surface-muted"><Icon className="size-4 text-text-secondary" /></span>
               <span><span className="block font-semibold text-text-strong">{title} 资源与轨迹</span>
                 <span className="mt-1 block text-xs font-normal text-text-muted">{stage.records} 个 Agent · 已结束 {stage.terminalRecords}</span>
+                <span className="mt-1 block max-w-56 break-words text-xs font-normal text-text-muted">模型 <ModelName statistics={statistics} /></span>
                 <span className="mt-2 flex flex-wrap items-center gap-2 text-xs font-normal text-text-muted">资源完整性 <StatusBadge status={statistics.coverage} /></span></span>
             </span>
-            <span className="grid grid-cols-3 gap-4">
+            <span className="grid grid-cols-2 gap-4 md:grid-cols-4">
               <span><span className="block text-xs font-normal text-text-muted">Token</span><span className="mt-1 block font-semibold tabular-nums"><MetricValue metric={statistics.tokens.total} format={formatCompact} /></span></span>
               <span><span className="block text-xs font-normal text-text-muted">实际积分</span><span className="mt-1 block font-semibold tabular-nums"><MetricValue metric={statistics.costs.chargedUnits} format={formatStatistic} /></span></span>
-          <span><span className="block text-xs font-normal text-text-muted">平均 Agent 耗时</span><span className="mt-1 block font-semibold tabular-nums">{stage.agentDurationMs?.mean === null || stage.agentDurationMs?.mean === undefined ? "未获得" : formatDuration(stage.agentDurationMs.mean)}</span></span>
+              <span><span className="block text-xs font-normal text-text-muted">缓存命中率</span><span className="mt-1 block font-semibold tabular-nums"><MetricValue metric={statistics.cacheHitRate} format={formatPercent} /></span></span>
+              <span><span className="block text-xs font-normal text-text-muted">平均 Agent 耗时</span><span className="mt-1 block font-semibold tabular-nums">{stage.agentDurationMs?.mean === null || stage.agentDurationMs?.mean === undefined ? "未获得" : formatDuration(stage.agentDurationMs.mean)}</span></span>
             </span>
           </span>
         </AccordionTrigger>

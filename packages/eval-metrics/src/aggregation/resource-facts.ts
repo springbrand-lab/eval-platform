@@ -1,6 +1,7 @@
 import type { AgentResourceScope, AgentResourceSnapshot, JsonValue } from "@eval-platform/eval-contracts";
 import { equalJson } from "@eval-platform/eval-contracts";
 import { record, text, type JsonRecord } from "../json.js";
+import { TELEMETRY_PROJECTION_VERSION } from "./compact-resources.js";
 import type { MetricNumber, ResourceDiagnostic } from "./model.js";
 import { coverage } from "./statistics.js";
 
@@ -109,7 +110,8 @@ export function readStream(
     for (const rawFact of snapshot[stream]) {
       const fact = stream === "telemetryEvents" ? record(rawFact.event) ?? rawFact : rawFact;
       const projection = stream === "telemetryEvents" ? record(rawFact.metricProjection) : undefined;
-      const metricProjection = projection?.version === 1 && typeof projection.fingerprint === "string" ? projection : undefined;
+      const metricProjection = (projection?.version === 1 || projection?.version === TELEMETRY_PROJECTION_VERSION)
+        && typeof projection.fingerprint === "string" ? projection : undefined;
       const entry: FactEntry = { fact, ownerUserId, scope: snapshot.scope, ...(metricProjection ? { metricProjection } : {}) };
       const key = sourceIdentity(stream, ownerUserId, fact);
       if (key === undefined) {
