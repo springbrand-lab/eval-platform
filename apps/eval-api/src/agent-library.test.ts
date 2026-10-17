@@ -57,6 +57,15 @@ describe("shared Agent editor HTTP gateway", () => {
     expect((await app.request(`/api/agent-library/mcp-servers/${id}`, { method: "PATCH" })).status).toBe(404);
   });
 
+  it("lists user MCP Servers for the Eval Agent purpose selector", async () => {
+    const app = setup(envelope({ data: [{ id: "result-mcp", source: "user", name: "Eval 结果提交", description: "submit_evaluation", status: "active", url: "https://evalapi.example/mcp/evaluation-results", authType: "bearer", revision: 1, updatedAt: "2026-10-17T00:00:00.000Z" }], total: 1, page: 1, pageSize: 100 }));
+    const result = await app.request("/api/agent-library/mcp-servers?source=user&page=1&pageSize=100");
+    expect(result.status).toBe(200);
+    expect(app.calls[0]!.url).toBe("https://eval-sp.test/api/mcp-servers?source=user&page=1&pageSize=100");
+    expect(app.calls[0]!.method).toBe("GET");
+    expect((await result.json())).toMatchObject({ success: true, msg: { total: 1 } });
+  });
+
   it("forwards exact Skill archive bytes and the write Origin", async () => {
     const app = setup();
     const bytes = new Uint8Array([80, 75, 0, 1, 255]);

@@ -13,6 +13,7 @@ import {
   agentKeys, createAgentConfig, deleteAgentConfig, getAgentConfig, updateAgentConfig,
 } from "@/api-sdk/agent-configs-api";
 import { agentEditorClient, agentLibraryKeys, getAgentTemplate } from "@/api-sdk/agent-editor-api";
+import { getEvaluationResultsMcp, mcpServerKeys } from "@/api-sdk/mcp-servers-api";
 import { ApiError, api } from "@/api-sdk/client";
 import { getMe, meKey } from "@/api-sdk/session-api";
 import type { AgentConfig } from "@/api-sdk/types";
@@ -20,6 +21,7 @@ import { Page, PageHeader } from "@/components/layout/page";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { ErrorBlock, LoadingBlock } from "@/components/ui/feedback";
+import { AgentPurposeSelector, type AgentPurpose } from "./agent-purpose";
 import { AgentMcpServers } from "./agent-mcp-servers";
 
 const FROZEN_PREFIX = "eval-frozen-";
@@ -35,15 +37,55 @@ function AgentForm({ initial, template, userId, onSaved }: {
   const [baseline, setBaseline] = useState<AgentDraft>(() => initial ? draftFromAgent(initial)
     : { name: "", description: "", setting: template!.setting });
   const [draft, setDraft] = useState(baseline);
+  const [purpose, setPurpose] = useState<AgentPurpose>("execution");
+  const [purposeReady, setPurposeReady] = useState(false);
   const [slug] = useState(() => `agent-${crypto.randomUUID()}`);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteBlocker, setDeleteBlocker] = useState<AgentDeletionFeedback | null>(null);
   const submitting = useRef(false);
   const allowNavigation = useRef(false);
+  const purposeUserChanged = useRef(false);
   const readOnly = !!base?.slug.startsWith(FROZEN_PREFIX);
   const dirty = !agentDraftEqual(draft, baseline);
   const models = useQuery({ queryKey: agentLibraryKeys.models, queryFn: ({ signal }) => agentEditorClient.models.listModelCatalog(signal) });
+  const evaluationMcp = useQuery({
+    queryKey: mcpServerKeys.evaluationResults,
+    queryFn: ({ signal }) => getEvaluationResultsMcp(signal),
+    retry: false,
+  });
+  const evaluationMcpId = evaluationMcp.data?.kind === "available" ? evaluationMcp.data.server.id : undefined;
+
+  useEffect(() => {
+    if (evaluationMcp.isPending || (!initial && !template)) return;
+    const source = initial ?? template;
+    if (!purposeReady) setPurposeReady(true);
+    if (!purposeUserChanged.current && evaluationMcpId) {
+      setPurpose(source?.setting.mcpServers.some((selection) => selection.serverId === evaluationMcpId) ? "evaluation" : "execution");
+    }
+  }, [evaluationMcp.isPending, evaluationMcpId, initial, purposeReady, template]);
+
+  useEffect(() => {
+    if (!purposeReady || !evaluationMcpId) return;
+    const selected = draft.setting.mcpServers.some((selection) => selection.serverId === evaluationMcpId);
+    if ((purpose === "evaluation" && selected) || (purpose === "execution" && (!selected || !purposeUserChanged.current))) return;
+    allowNavigation.current = false;
+    setError(null);
+    setDraft((current) => {
+      if (purpose === "evaluation" && !selected) {
+        return { ...current, setting: { ...current.setting, mcpServers: [...current.setting.mcpServers, { serverId: evaluationMcpId }] } };
+      }
+      if (purpose === "execution" && selected) {
+        return { ...current, setting: { ...current.setting, mcpServers: current.setting.mcpServers.filter((selection) => selection.serverId !== evaluationMcpId) } };
+      }
+      return current;
+    });
+  }, [draft.setting.mcpServers, evaluationMcpId, purpose, purposeReady]);
+
+  function changePurpose(next: AgentPurpose) {
+    purposeUserChanged.current = true;
+    setPurpose(next);
+  }
 
   useEffect(() => {
     if (!initial || dirty || base?.revision === initial.revision) return;
@@ -104,6 +146,24 @@ function AgentForm({ initial, template, userId, onSaved }: {
   });
   function submit() {
     if (readOnly || submitting.current) return;
+    if (purpose === "evaluation") {
+      if (!purposeReady || evaluationMcp.isPending) {
+        setError("正在读取评估结果 MCP，请稍后再保存。");
+        return;
+      }
+      if (evaluationMcp.error) {
+        setError(`无法读取评估结果 MCP：${evaluationMcp.error instanceof Error ? evaluationMcp.error.message : "请求失败"}`);
+        return;
+      }
+      if (evaluationMcp.data?.kind !== "available" || !evaluationMcpId) {
+        setError(evaluationMcp.data?.kind === "unavailable" ? evaluationMcp.data.reason : "评估结果 MCP 不可用，请先完成配置。");
+        return;
+      }
+      if (!draft.setting.mcpServers.some((selection) => selection.serverId === evaluationMcpId)) {
+        setError("评估结果 MCP 尚未加入配置，请稍后再保存。");
+        return;
+      }
+    }
     let request: SaveRequest;
     try {
       request = base ? { kind: "update", id: base.id, input: updateInputFromDraft(draft, base.revision) }
@@ -118,7 +178,17 @@ function AgentForm({ initial, template, userId, onSaved }: {
     save.mutate(request);
   }
   const common = {
-    supplementaryContent: <AgentMcpServers selections={draft.setting.mcpServers} />,
+    supplementaryContent: <>
+      <AgentPurposeSelector
+        purpose={purpose}
+        resolution={evaluationMcp.data}
+        loading={evaluationMcp.isPending || !purposeReady}
+        error={evaluationMcp.error}
+        readOnly={readOnly || !purposeReady}
+        onChange={changePurpose}
+      />
+      <AgentMcpServers selections={draft.setting.mcpServers} />
+    </>,
     userId, draft, models: models.data ?? [], modelsLoading: models.isPending, modelsError: models.isError,
     readOnly, saving: save.isPending, error, onSave: submit,
     onDraftChange: (update: (current: AgentDraft) => AgentDraft) => {

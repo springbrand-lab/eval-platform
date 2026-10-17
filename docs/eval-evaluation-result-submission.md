@@ -32,7 +32,7 @@
 
 - Eval API 与 Run Worker 配置同一个 `EVAL_RESULT_MCP_TOKEN`（至少 32 个字符）。生产部署从应用 Secret 读取该值并传给两个容器（`infra/aws/deploy/deploy.sh`），MCP 地址为 `https://evalapi.springbrand.ai/mcp/evaluation-results`。
 - Eval SP 必须能通过公网 HTTPS 访问该 MCP 地址（SP 只接受 `https:`，并只连接公网地址）。本地联调需要一个 HTTPS 隧道指向本地 Eval API。
-- 在 Eval SP 的服务账号下创建用户 MCP Server（URL 为 `https://<公网地址>/mcp/evaluation-results`，鉴权为 Bearer），再在评估 Agent 的 Agent Config 的 `mcpServers` 中选中它。只影响选中它的 Agent Config；SP 连不上该 MCP 时只把它标为不可用；未提交合法结果时评估不会记为成功。
+- 在 Eval SP 的服务账号下创建用户 MCP Server（URL 为 `https://<公网地址>/mcp/evaluation-results`，鉴权为 Bearer）。Eval Agent Config 创建页的“Agent 用途”选择“评估”时，会按这个固定 URL 路径查找该服务并自动把它的 `serverId` 加入 `mcpServers`；选择“执行”时会移除这个自动绑定项。页面不会依赖数据库里的随机 MCP ID，找不到唯一且启用的结果 MCP 时会阻止评估配置保存并提示原因。只影响选中它的 Agent Config；SP 连不上该 MCP 时只把它标为不可用；未提交合法结果时评估不会记为成功。
 - 评估 Chat 中的工具审批由 SP 无人值守逻辑自动允许，不会卡在审批。
 
 ## MCP completion authority

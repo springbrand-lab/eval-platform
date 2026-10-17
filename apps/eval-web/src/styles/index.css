@@ -96,6 +96,7 @@
 }
 .agent-editor-layout > main > form > fieldset > * { margin-block: 0; min-width: 0; }
 .agent-editor-layout > main > form > fieldset > header,
+.agent-editor-layout > main > form > fieldset > .agent-purpose-section,
 .agent-editor-layout > main > form > fieldset > .agent-mcp-section { grid-column: 1 / -1; }
 .agent-editor-layout > main > form > fieldset > header h1 { display: none; }
 .agent-editor-layout > main > form > fieldset > header p { font-size: 12px; }

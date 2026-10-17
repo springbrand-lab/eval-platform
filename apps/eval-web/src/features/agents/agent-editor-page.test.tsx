@@ -21,7 +21,7 @@ const setting: AgentDraft["setting"] = {
   memoryDefaults: { enabled: false, memoryTokens: 3_000, preferencesTokens: 750 }, sandbox: { enabled: true },
   skillIds: [], mcpServers: [{ serverId: "platform-mcp" }], actionIds: [], connectorIds: [], extensionIds: [], referenceFileIds: [],
 };
-const template: UserAgentConfigTemplate = { name: "新建 Agent", description: null, setting };
+const template: UserAgentConfigTemplate = { name: "新建 Agent", description: null, setting: { ...setting, mcpServers: [] } };
 const initial: AgentConfig = {
   id: "agent-a", user_id: "user-a", slug: "agent-a", name: "Original name", description: null,
   revision: 3, setting_schema_version: 4, setting, is_default: false, created_at: 1, updated_at: 1,
@@ -57,6 +57,12 @@ describe("SP Agent editor in Eval", () => {
       if (path === "/api/agent-configs/agent-a") return structuredClone(stored);
       if (path === "/api/agent-library/user-agent-configs/agent-a/deletion-check") return {
         allowed: true, activeChatIds: [], enabledScheduleIds: [], unfinishedRunIds: [],
+      };
+      if (path === "/api/agent-library/mcp-servers?source=user&page=1&pageSize=100") return {
+        data: [{
+          id: "platform-mcp", name: "Eval 结果提交", description: "submit_evaluation", status: "active", source: "user",
+          url: "https://evalapi.example/mcp/evaluation-results", authType: "bearer",
+        }], total: 1, page: 1, pageSize: 100,
       };
       if (path === "/api/agent-library/mcp-servers/platform-mcp") return {
         id: "platform-mcp", name: "Eval 结果提交", description: "submit_evaluation", status: "active", source: "user",
@@ -139,10 +145,36 @@ describe("SP Agent editor in Eval", () => {
       await settle(() => expect(transport.post).toHaveBeenCalledTimes(1));
       expect(transport.post.mock.calls[0]).toEqual(["/api/agent-configs", {
         slug: expect.stringMatching(/^agent-[\da-f-]{36}$/u), name: "Research Agent", description: "Research description",
-        setting: { ...setting, systemPrompt: "Updated instructions", thinking: "high", skillIds: ["skill-a"] },
+        setting: { ...template.setting, systemPrompt: "Updated instructions", thinking: "high", skillIds: ["skill-a"] },
       }]);
       await settle(() => expect(view.router.state.location.pathname).toBe("/agents/agent-a"));
       expect(transport.request.mock.calls.some(([path]) => path.startsWith("/api/agent-library/skills?") && path.includes("view=selectable"))).toBe(true);
+    } finally { await view.close(); }
+  });
+
+  it("adds the result MCP when a new Agent is marked for evaluation", async () => {
+    const view = await mount();
+    try {
+      await settle(() => expect(name()).not.toBeNull());
+      await click(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]'));
+      await settle(() => expect(view.container.textContent).toContain("已自动连接：Eval 结果提交"));
+      await type(name(), "Evaluator");
+      await click(button("创建 Agent"));
+      await settle(() => expect(transport.post).toHaveBeenCalledTimes(1));
+      expect(transport.post.mock.calls[0]![1]).toMatchObject({ setting: { mcpServers: [{ serverId: "platform-mcp" }] } });
+    } finally { await view.close(); }
+  });
+
+  it("removes the result MCP when an existing evaluation Agent is changed to execution", async () => {
+    const view = await mount("/agents/agent-a");
+    try {
+      await settle(() => expect(view.container.querySelector("[data-agent-purpose]")).not.toBeNull());
+      await settle(() => expect(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]')?.checked).toBe(true));
+      await click(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="execution"]'));
+      await settle(() => expect(view.container.textContent).not.toContain("MCP Server (1)"));
+      await click(button("保存修改"));
+      await settle(() => expect(transport.patch).toHaveBeenCalledTimes(1));
+      expect(transport.patch.mock.calls[0]![1]).toMatchObject({ setting: { mcpServers: [] } });
     } finally { await view.close(); }
   });
 
