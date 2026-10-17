@@ -2707,6 +2707,75 @@ describe("eval runtime orchestration", () => {
     expect(harness.collectEvaluation).toHaveBeenCalledTimes(1);
   });
 
+  it("starts each evaluation while another Sampling is still executing", async () => {
+    const harness = makeHarness();
+    let markExecutionBStarted!: () => void;
+    const executionBStarted = new Promise<void>((resolve) => {
+      markExecutionBStarted = resolve;
+    });
+    let releaseExecutionB!: () => void;
+    const executionBGate = new Promise<void>((resolve) => {
+      releaseExecutionB = resolve;
+    });
+    let secondSamplingId!: string;
+    vi.mocked(harness.collectExecution).mockImplementation(async ({ handle }) => {
+      if (handle.samplingId === secondSamplingId) {
+        markExecutionBStarted();
+        await executionBGate;
+      }
+      return {
+        samplingId: handle.samplingId,
+        status: "succeeded",
+        artifacts: [{ artifactId: `artifact-${handle.samplingId}`, kind: "project", path: "/output" }],
+        trajectory: { trajectoryId: `trajectory-${handle.samplingId}`, source: "subject", path: "/trajectory" },
+      };
+    });
+    let markEvaluationAStarted!: () => void;
+    const evaluationAStarted = new Promise<void>((resolve) => {
+      markEvaluationAStarted = resolve;
+    });
+    let releaseEvaluationA!: () => void;
+    const evaluationAGate = new Promise<void>((resolve) => {
+      releaseEvaluationA = resolve;
+    });
+    let firstSamplingId!: string;
+    vi.mocked(harness.collectEvaluation).mockImplementation(async ({ handle }) => {
+      if (handle.samplingId === firstSamplingId) {
+        markEvaluationAStarted();
+        await evaluationAGate;
+      }
+      return {
+        status: "succeeded",
+        artifacts: [{ artifactId: `evaluation-artifact-${handle.samplingId}`, kind: "evaluation", path: "/eval/result" }],
+        structuredOutput: { path: "/output/result.json", content: '{"score":0.9}' },
+        trajectory: { trajectoryId: `evaluation-trajectory-${handle.samplingId}`, source: "evaluator", path: "/eval/evaluation.jsonl" },
+      };
+    });
+
+    const runtime = createAutoResumingRuntime({
+      plans: makePlans([makeSample("sample-1"), makeSample("sample-2")]),
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+    });
+    runtime.plans.execution = executionPlan({ executionConcurrency: 2 });
+    runtime.plans.evaluation = evaluationPlan({ evaluationConcurrency: 1 });
+    const run = await runtime.submit(projectRequest("pipeline", "per-sampling-pipeline", ["sample-1", "sample-2"]));
+    firstSamplingId = run.samplingIds[0]!;
+    secondSamplingId = run.samplingIds[1]!;
+
+    await executionBStarted;
+    await evaluationAStarted;
+    expect(harness.collectEvaluation).toHaveBeenCalledTimes(1);
+    expect((await runtime.getSampling(run.samplingIds[1]!)).execution.status).toBe("running");
+
+    releaseExecutionB();
+    releaseEvaluationA();
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
+    expect(harness.collectExecution).toHaveBeenCalledTimes(2);
+    expect(harness.collectEvaluation).toHaveBeenCalledTimes(2);
+  });
+
   it("evaluates successful pipeline samplings when another execution fails", async () => {
     const harness = makeHarness();
     let subjectSubmissionCount = 0;

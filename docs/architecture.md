@@ -148,7 +148,7 @@ Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产�
 ## 生命周期语义
 
 - `EvalRunAdmission.submit()` 只原子提交对应 Run 和关联记录，随后返回；
-- Run Worker 按 pg-boss 任务调用 `resume(runId)`，调度与停止见上文；`pipeline` 只顺序编排执行和评估，不是第三种阶段；执行失败或取消的 Sampling 不提交 Evaluator，其 EvaluationRecord 取消，成功的 Sampling 照常评估；
+- Run Worker 按 pg-boss 任务调用 `resume(runId)`，调度与停止见上文；`pipeline` 只编排执行和评估，不是第三种阶段。执行和评估使用彼此独立的并发队列：某条 Sampling 的执行及证据保存成功后立即提交对应评估，其他 Sampling 可以继续执行；执行失败或取消的 Sampling 不提交 Evaluator，其 EvaluationRecord 取消，成功的 Sampling 照常评估；
 - evaluation Run 不改动 Subject 的 Attempt、资源、产物、轨迹和状态；
 - 恢复读取 Project 计划并核对计划摘要，按 Attempt 幂等键继续，Agent 已完成时只补收集与保存；
 - ProjectSample 的 `samplingCount` 决定整条重跑时新建的 Sampling 数；
