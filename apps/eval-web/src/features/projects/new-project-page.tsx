@@ -2,6 +2,7 @@ import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/rea
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useId, useState } from "react";
 import { Button, Field, FieldDescription, FieldLabel, Input, NativeSelect } from "@springbrand/site-block";
+import { Plus } from "lucide-react";
 import { toast } from "sonner";
 import { agentKeys, listAgentOptions } from "@/api-sdk/agent-configs-api";
 import { datasetKeys, listDatasetData, listDatasets } from "@/api-sdk/datasets-api";
@@ -127,6 +128,7 @@ function ProjectForm({ limits, datasetId }: { limits: EvalInputLimits; datasetId
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [step, setStep] = useState(0);
+  const [datasetPickerOpen, setDatasetPickerOpen] = useState(!!datasetId);
   const [datasetSearch, setDatasetSearch] = useState("");
   // Unknown outcomes replay the captured request with this same key.
   const [idempotencyKey] = useState(() => newIdempotencyKey("project"));
@@ -178,6 +180,7 @@ function ProjectForm({ limits, datasetId }: { limits: EvalInputLimits; datasetId
     if (on) next.set(datasetId, { dataIds: null });
     else next.delete(datasetId);
     update({ datasets: next });
+    if (next.size === 0) setDatasetPickerOpen(false);
   };
   const setChoice = (datasetId: string, dataIds: Set<string> | null) => {
     if (frozen) return;
@@ -185,6 +188,7 @@ function ProjectForm({ limits, datasetId }: { limits: EvalInputLimits; datasetId
     if (dataIds?.size === 0) next.delete(datasetId);
     else next.set(datasetId, { dataIds });
     update({ datasets: next });
+    if (next.size === 0) setDatasetPickerOpen(false);
   };
 
   const stepValid = [
@@ -215,12 +219,22 @@ function ProjectForm({ limits, datasetId }: { limits: EvalInputLimits; datasetId
             <CardHeader title="测试数据范围" description="按数据集选择用例。创建项目时保存当前数据副本，之后修改数据集不会更新已有项目。" actions={<span className="text-xs text-text-muted tabular">已选 {selectedData.length} 条用例</span>} />
             {datasets.isPending ? <LoadingBlock rows={3} /> : (datasets.data ?? []).length === 0 ? (
               <EmptyState title="还没有数据集" action={<Link to="/datasets" className="link text-[13px] font-semibold">去导入</Link>} />
+            ) : !datasetPickerOpen && draft.datasets.size === 0 ? (
+              <EmptyState
+                title="还没有添加数据集"
+                description="先添加数据集，再选择其中的用例。"
+                action={<Button type="button" onClick={() => setDatasetPickerOpen(true)}><Plus className="size-4" />添加数据集</Button>}
+              />
             ) : (
               <CardBody className="flex flex-col gap-3">
                 <div aria-label="数据集与用例" className="min-w-0">
                   <div className="flex items-center gap-2 border-b border-border p-3">
                     <Input aria-label="搜索数据集" placeholder="搜索数据集" value={datasetSearch} disabled={frozen} onChange={(event) => setDatasetSearch(event.target.value)} />
-                    <Button type="button" variant="ghost" size="sm" disabled={frozen || draft.datasets.size === 0} onClick={() => !frozen && update({ datasets: new Map() })}>清空选择</Button>
+                    <Button type="button" variant="ghost" size="sm" disabled={frozen || draft.datasets.size === 0} onClick={() => {
+                      if (frozen) return;
+                      update({ datasets: new Map() });
+                      setDatasetPickerOpen(false);
+                    }}>清空选择</Button>
                   </div>
                   <div className="flex flex-col gap-3 pt-3">
                 {(datasets.data ?? []).filter((dataset) => `${dataset.name} ${dataset.description ?? ""}`.toLowerCase().includes(datasetSearch.trim().toLowerCase())).map((dataset) => {

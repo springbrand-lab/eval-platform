@@ -38,7 +38,9 @@ async function page() {
 
 async function prepare(container: HTMLElement) {
   await type(control(container, "名称"), "测试项目");
-  expect(button(container, "选择数据集与用例")).toBeUndefined();
+  expect(button(container, "添加数据集")).toBeDefined();
+  expect([...container.querySelectorAll("label")].some((item) => item.textContent === "样本")).toBe(false);
+  await click(button(container, "添加数据集")); await flush();
   expect(control(container, "样本")).toBeDefined();
   await click(control(container, "数据集")); await flush();
   await click(button(container, "下一步"));
@@ -64,6 +66,7 @@ it("keeps the per-sample count input mounted and focused while entering multiple
   const view = await page();
   try {
     await type(control(view.container, "名称"), "测试项目");
+    await click(button(view.container, "添加数据集")); await flush();
     await click(control(view.container, "数据集")); await flush();
     await click(button(view.container, "下一步"));
     const input = view.container.querySelector<HTMLInputElement>('[aria-label="样本的采样次数"]')!;
@@ -98,8 +101,9 @@ it("shows groups inline, retains selection through collapse and search, and keep
   mocks.members.push({ ...mocks.members[0]!, dataId: "second", name: "第二用例" });
   const view = await page();
   try {
-    expect(button(view.container, "选择数据集与用例")).toBeUndefined();
+    expect(button(view.container, "添加数据集")).toBeDefined();
     await type(control(view.container, "名称"), "测试项目");
+    await click(button(view.container, "添加数据集")); await flush();
     await click(control(view.container, "样本"));
     await flush();
     expect(control(view.container, "数据集").getAttribute("aria-checked")).toBe("mixed");
