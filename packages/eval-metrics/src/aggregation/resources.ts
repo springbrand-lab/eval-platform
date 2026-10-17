@@ -3,7 +3,7 @@ import type { ResourceStatistics } from "./model.js";
 import { aggregateBilling } from "./resource-billing.js";
 import { ResourceDiagnostics, readStream, type OwnedSnapshot } from "./resource-facts.js";
 import { aggregateTelemetry } from "./resource-telemetry.js";
-import { aggregateUsage, type ModelGroupKey } from "./resource-usage.js";
+import { aggregateUsage, cacheHitRate, type ModelGroupKey } from "./resource-usage.js";
 import { coverage } from "./statistics.js";
 
 export interface ResourceInput {
@@ -62,6 +62,7 @@ export function aggregateResources(inputs: readonly ResourceInput[], groups: Res
     },
     overlappingUsageRecords: usage.overlappingUsageRecords,
     tokens: usage.tokens,
+    cacheHitRate: cacheHitRate(usage.tokens),
     costs: { providerUsd: usage.providerUsd, ...billing },
     modelRequests,
     trajectory: { ...trajectory, diagnostics: issues.filter((issue) => issue.stream === "telemetryEvents") },

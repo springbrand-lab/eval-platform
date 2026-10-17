@@ -103,11 +103,20 @@ describe("trajectory metrics", () => {
       ...turn("turn-a", "completed"), ...tool("t1", undefined, "browser", {}, { outcome: "completed" }),
       ...generation("g1", undefined, { inputTokens: 1, outputTokens: 1, totalTokens: 2 }),
     ] })]);
-    expect(result.trajectory.thinkingTurns).toEqual({ value: 0, coverage: "complete" });
-    expect(result.trajectory.contentTurns).toEqual({ value: 1, coverage: "complete" });
+    expect(result.trajectory.thinkingTurns).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.contentTurns).toEqual({ value: 1, coverage: "partial" });
     expect(result.trajectory.thinkingTurnTokens.total).toEqual({ value: null, coverage: "unavailable" });
     expect(result.trajectory.contentTurnTokens.total).toEqual({ value: null, coverage: "unavailable" });
     expect(result.trajectory.unlinkedOperations).toEqual({ tools: 1, generations: 1 });
+  });
+
+  it("does not claim a marked-turn count is complete when an unlinked generation may carry the marker", () => {
+    const result = aggregateResources([resourceInput({ telemetryEvents: [
+      ...turn("turn-a", "completed", 0, 1_000, {}),
+      ...generation("unlinked-thinking", undefined, { output: { thinking: "hidden" }, totalTokens: 2 }),
+    ] })]);
+    expect(result.trajectory.thinkingTurns).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.contentTurns).toEqual({ value: null, coverage: "unavailable" });
   });
 
   it("marks content tokens partial when only some generations are linked", () => {
@@ -117,8 +126,8 @@ describe("trajectory metrics", () => {
       ...generation("g1", "turn-b", { inputTokens: 4, outputTokens: 2, totalTokens: 6 }), ...generation("g2", undefined, { totalTokens: 99 }),
       ...generation("g3", "turn-b", null),
     ] })]);
-    expect(result.trajectory.thinkingTurns).toEqual({ value: 0, coverage: "complete" });
-    expect(result.trajectory.contentTurns).toEqual({ value: 2, coverage: "complete" });
+    expect(result.trajectory.thinkingTurns).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.contentTurns).toEqual({ value: 2, coverage: "partial" });
     expect(result.trajectory.thinkingTurnTokens.total).toEqual({ value: null, coverage: "unavailable" });
     expect(result.trajectory.contentTurnTokens.total).toEqual({ value: 6, coverage: "partial" });
   });

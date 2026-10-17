@@ -141,6 +141,8 @@ export interface ResourceStatistics {
   };
   readonly overlappingUsageRecords: number;
   readonly tokens: TokenStatistics;
+  /** Cache reads divided by input plus cache reads, with the source coverage preserved. */
+  readonly cacheHitRate: MetricNumber;
   readonly costs: CostStatistics;
   readonly modelRequests: OperationStatistics;
   readonly trajectory: TrajectorySummary;

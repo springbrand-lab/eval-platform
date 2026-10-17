@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { click, render } from "@/test/render";
+import { render } from "@/test/render";
 import { aggregatedResourceStatistics, agentMetric, metricSummary, resourceStatistics } from "@/test/metrics";
 import { AgentPanel } from "@/features/results/agent-panel";
 import { ResourceMetrics } from "./resource-metrics";
@@ -28,33 +28,6 @@ function fixture() {
 }
 
 describe("Agent resource and trajectory categories", () => {
-  it("keeps legacy trajectory payloads renderable when marked-turn status fields are absent", async () => {
-    const legacy = resourceStatistics();
-    delete (legacy.trajectory as unknown as Record<string, unknown>).thinkingTurnOperations;
-    delete (legacy.trajectory as unknown as Record<string, unknown>).contentTurnOperations;
-    const distribution = aggregatedResourceStatistics(resourceStatistics()).distribution;
-    delete (distribution.trajectory as unknown as Record<string, unknown>).thinkingTurnOperations;
-    delete (distribution.trajectory as unknown as Record<string, unknown>).contentTurnOperations;
-    const view = await render(<ResourceMetrics statistics={legacy} distribution={distribution} />);
-    try {
-      const table = view.container.querySelector('table[aria-label="操作次数"]')!;
-      expect(table.textContent).toContain("思考命中轮");
-      expect(table.textContent).toContain("未获得");
-      expect(view.container.querySelector('table[aria-label="操作次数的 Agent 间差异"]')?.textContent).toContain("思考命中轮");
-    } finally { await view.unmount(); }
-  });
-
-  it("keeps the Token panel renderable when legacy distributions omit marked-turn Token buckets", async () => {
-    const distribution = aggregatedResourceStatistics(resourceStatistics()).distribution;
-    delete (distribution.trajectory as unknown as Record<string, unknown>).thinkingTurnTokens;
-    delete (distribution.trajectory as unknown as Record<string, unknown>).contentTurnTokens;
-    const view = await render(<ResourceMetrics statistics={resourceStatistics()} distribution={distribution} />);
-    try {
-      await click([...view.container.querySelectorAll('[role="tab"]')].find((item) => item.textContent?.startsWith("Token")));
-      expect(view.container.querySelector('table[aria-label="思考与内容 Token 的 Agent 间差异"]')?.textContent).toContain("未获得");
-    } finally { await view.unmount(); }
-  });
-
   it("shows operation outcomes, turn labels and per-tool details in the operation panel", async () => {
     const view = await render(<ResourceMetrics statistics={fixture()} />);
     try {
@@ -81,7 +54,7 @@ describe("Agent resource and trajectory categories", () => {
     try {
       const status = view.container.querySelector('table[aria-label="工具 write_file 明细"]')!;
       const text = view.container.textContent!;
-      expect(text.indexOf("操作次数的 Agent 间差异")).toBeLessThan(text.indexOf("按工具查看"));
+      expect(text.indexOf("操作次数")).toBeLessThan(text.indexOf("按工具查看"));
       expect(status.querySelectorAll("tbody tr")).toHaveLength(9);
       expect(status.textContent).toContain("成功");
       const row = (label: string) => [...status.querySelectorAll("tbody tr")].find((item) => item.querySelector("th > span")?.textContent === label)!;

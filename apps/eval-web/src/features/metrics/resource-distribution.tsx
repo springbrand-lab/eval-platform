@@ -1,6 +1,6 @@
 import { NativeSelect, NativeSelectOption } from "@springbrand/site-block";
 import { useState } from "react";
-import type { NumericSummary, OperationDistributions, ResourceDistribution, ResourceStatistics } from "@/api-sdk/types";
+import type { OperationDistributions, ResourceDistribution, ResourceStatistics } from "@/api-sdk/types";
 import { formatBytes, formatDuration, formatStatistic } from "@/lib/format";
 import { COST_FIELDS, OPERATION_FIELDS, TOKEN_FIELDS } from "./metric-labels";
 import { StatisticsTable, type StatisticsRow } from "./statistics-table";
@@ -10,12 +10,10 @@ function operationRows(statistics: OperationDistributions): StatisticsRow[] {
 }
 
 function trajectoryRows(distribution: ResourceDistribution): StatisticsRow[] {
-  const thinkingCount = distribution.trajectory.thinkingTurnOperations?.count ?? distribution.trajectory.thinkingTurns;
-  const contentCount = distribution.trajectory.contentTurnOperations?.count ?? distribution.trajectory.contentTurns;
   return [
     { label: "处理轮（Turn）", unit: "次", summary: distribution.trajectory.turns.count },
-    { label: "思考命中轮", unit: "次", summary: thinkingCount },
-    { label: "内容命中轮", unit: "次", summary: contentCount },
+    { label: "思考命中轮", unit: "次", summary: distribution.trajectory.thinkingTurnOperations.count },
+    { label: "内容命中轮", unit: "次", summary: distribution.trajectory.contentTurnOperations.count },
     { label: "模型请求", unit: "次", summary: distribution.modelRequests.count },
     { label: "工具调用", unit: "次", summary: distribution.trajectory.tools.count },
   ];
@@ -26,11 +24,10 @@ function tokenRows(distribution: ResourceDistribution): StatisticsRow[] {
 }
 
 function turnTokenRows(distribution: ResourceDistribution): StatisticsRow[] {
-  const unavailable: NumericSummary = { count: 0, missing: 0, total: null, min: null, max: null, mean: null, variance: null, median: null };
   const rows: StatisticsRow[] = [];
   for (const [prefix, tokens] of [["思考轮", distribution.trajectory.thinkingTurnTokens], ["内容轮", distribution.trajectory.contentTurnTokens]] as const) {
     for (const [key, label] of [["input", "输入 Token"], ["output", "输出 Token"], ["total", "总 Token"]] as const) {
-      rows.push({ label: `${prefix} · ${label}`, unit: "Token", summary: tokens?.[key] ?? unavailable });
+      rows.push({ label: `${prefix} · ${label}`, unit: "Token", summary: tokens[key] });
     }
   }
   return rows;
@@ -81,13 +78,13 @@ function ToolDistribution({ tools, lengthTools }: { tools: ResourceDistribution[
 export type ResourceDistributionSection = "costs" | "tokens" | "operations";
 
 /** Agent-level observations are shown inside the selected metric, without a separate scope switch. */
-export function ResourceDistributionPanel({ distribution, statistics, section, showTrajectory = true, showTools = true }: { distribution: ResourceDistribution; statistics: ResourceStatistics; section: ResourceDistributionSection; showTrajectory?: boolean; showTools?: boolean }) {
+export function ResourceDistributionPanel({ distribution, statistics, section }: { distribution: ResourceDistribution; statistics: ResourceStatistics; section: ResourceDistributionSection }) {
   return <section aria-label={`${section === "costs" ? "费用" : section === "tokens" ? "Token" : "操作次数"}的 Agent 间差异`} className="flex min-w-0 flex-col gap-5">
     {section === "costs" && <CostDistribution distribution={distribution} />}
     {section === "tokens" && <TokenDistribution distribution={distribution} />}
     {section === "operations" && <>
-      {showTrajectory && <TrajectoryDistribution distribution={distribution} />}
-      {showTools && distribution.trajectory.byTool.length > 0 && <ToolDistribution tools={distribution.trajectory.byTool} lengthTools={statistics.trajectory.byTool} />}
+      <TrajectoryDistribution distribution={distribution} />
+      {distribution.trajectory.byTool.length > 0 && <ToolDistribution tools={distribution.trajectory.byTool} lengthTools={statistics.trajectory.byTool} />}
     </>}
   </section>;
 }

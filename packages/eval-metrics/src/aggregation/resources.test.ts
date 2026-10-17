@@ -9,6 +9,7 @@ describe("resource statistics", () => {
   it("proves zero only from complete finalized empty sources", () => {
     const complete = aggregateResources([resourceInput()]);
     expect(complete.tokens.total).toEqual({ value: 0, coverage: "complete" });
+    expect(complete.cacheHitRate).toEqual({ value: null, coverage: "complete" });
     expect(complete.costs.chargedUnits).toEqual({ value: 0, coverage: "complete" });
     expect(complete.trajectory.tools.count).toEqual({ value: 0, coverage: "complete" });
     expect(complete.collections).toEqual({ collected: 1, pending: 0, failed: 0, uncollected: 0, unsubmitted: 0, finalized: 1 });
@@ -32,6 +33,7 @@ describe("resource statistics", () => {
       { ownerUserId: "owner-1", collection: { status: "pending", scope: SCOPE } },
     ]);
     expect(result.tokens.total).toEqual({ value: 35, coverage: "partial" });
+    expect(result.cacheHitRate).toEqual({ value: 3 / 13, coverage: "partial" });
     expect(result.costs.providerUsd).toEqual({ value: 0.5, coverage: "partial" });
     expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
   });
@@ -60,6 +62,7 @@ describe("resource statistics", () => {
     expect(result.tokens.reasoning).toEqual({ value: 4, coverage: "complete" });
     expect(result.tokens.cacheRead).toEqual({ value: 3, coverage: "partial" });
     expect(result.tokens.total).toEqual({ value: 35, coverage: "partial" });
+    expect(result.cacheHitRate).toEqual({ value: 3 / 18, coverage: "partial" });
   });
 
   it("uses an explicit trusted total without deriving missing buckets", () => {

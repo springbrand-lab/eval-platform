@@ -9,10 +9,6 @@ export interface StatisticsRow {
   format?: (value: number) => string;
 }
 
-const unavailableSummary: NumericSummary = {
-  count: 0, missing: 1, total: null, min: null, max: null, mean: null, variance: null, median: null,
-};
-
 export function StatisticsTable({ label, description, rows, total = false, showHeader = true }: {
   label: string; description: string; rows: readonly StatisticsRow[]; total?: boolean; showHeader?: boolean;
 }) {
@@ -39,22 +35,21 @@ export function StatisticsTable({ label, description, rows, total = false, showH
           <TableHead scope="col" className="pr-4 text-right text-xs">缺失</TableHead>
         </TableRow></TableHeader>
         <TableBody>{rows.map(({ label: name, unit, summary, format = formatStatistic }, index) => {
-          const safeSummary = summary ?? unavailableSummary;
-          const show = (value: number | null | undefined) => value === null || value === undefined ? "未获得" : format(value);
+          const show = (value: number | null) => value === null ? "未获得" : format(value);
           return <TableRow key={`${name}-${index}`}>
             <TableHead scope="row" className="max-w-64 whitespace-normal px-4 py-3">
               <span className="block break-words font-medium text-text-strong">{name}</span>
               <span className="mt-0.5 block text-xs font-normal text-text-muted">{unit}</span>
             </TableHead>
-            {total && <TableCell className="text-right tabular-nums text-text-secondary">{show(safeSummary.total)}</TableCell>}
-            <TableCell className="text-right font-semibold tabular-nums text-text-strong">{show(safeSummary.mean)}</TableCell>
-            <TableCell className="text-right tabular-nums">{show(safeSummary.median)}</TableCell>
+            {total && <TableCell className="text-right tabular-nums text-text-secondary">{show(summary.total)}</TableCell>}
+            <TableCell className="text-right font-semibold tabular-nums text-text-strong">{show(summary.mean)}</TableCell>
+            <TableCell className="text-right tabular-nums">{show(summary.median)}</TableCell>
             <TableCell className="text-right tabular-nums text-text-secondary">
-              <span aria-label={`最小 ${show(safeSummary.min)}，最大 ${show(safeSummary.max)}`}>{show(safeSummary.min)} — {show(safeSummary.max)}</span>
+              <span aria-label={`最小 ${show(summary.min)}，最大 ${show(summary.max)}`}>{show(summary.min)} — {show(summary.max)}</span>
             </TableCell>
-            <TableCell className="text-right tabular-nums">{show(safeSummary.variance === null ? null : Math.sqrt(Math.max(0, safeSummary.variance)))}</TableCell>
-            <TableCell className="text-right tabular-nums">{formatNumber(safeSummary.count)}</TableCell>
-            <TableCell className={`pr-4 text-right tabular-nums ${safeSummary.missing > 0 ? "text-warning" : "text-text-muted"}`}>{formatNumber(safeSummary.missing)}</TableCell>
+            <TableCell className="text-right tabular-nums">{show(summary.variance === null ? null : Math.sqrt(Math.max(0, summary.variance)))}</TableCell>
+            <TableCell className="text-right tabular-nums">{formatNumber(summary.count)}</TableCell>
+            <TableCell className={`pr-4 text-right tabular-nums ${summary.missing > 0 ? "text-warning" : "text-text-muted"}`}>{formatNumber(summary.missing)}</TableCell>
           </TableRow>;
         })}</TableBody>
       </Table>

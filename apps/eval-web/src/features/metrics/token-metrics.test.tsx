@@ -10,13 +10,13 @@ describe("Token and cache display", () => {
       cacheRead: { value: 0, coverage: "complete" as const },
       cacheWrite: { value: null, coverage: "unavailable" as const },
     };
-    const view = await render(<TokenMetrics statistics={resourceStatistics({ tokens, byModel: [{
+    const view = await render(<TokenMetrics statistics={resourceStatistics({ tokens, cacheHitRate: { value: 0.25, coverage: "partial" }, byModel: [{
       provider: "provider", model: "model", usageRecords: 1, providerUsd: { value: null, coverage: "unavailable" },
       tokens: { ...tokens, cacheRead: { value: 41, coverage: "partial" } },
     }] })} />);
     try {
-      expect([...view.container.querySelectorAll("dd")].map((cell) => cell.textContent)).toEqual(["200", "0", "未获得", "100", "20", "5", "0%"]);
-      expect(view.container.textContent).not.toContain("模型 model");
+      expect([...view.container.querySelectorAll("dd")].map((cell) => cell.textContent)).toEqual(["200", "0", "未获得", "100", "20", "5", "25.0%"]);
+      expect(view.container.textContent).toContain("模型 model");
       expect(view.container.textContent).not.toMatch(/全部模型|完整|部分|无结果/u);
       expect(view.container.querySelector("table")).toBeNull();
     } finally { await view.unmount(); }
@@ -24,7 +24,7 @@ describe("Token and cache display", () => {
 
   it("keeps execution and evaluation caches separate in the shared four-level summary", async () => {
     const execution = resourceStatistics();
-    const evaluation = resourceStatistics({ tokens: { ...execution.tokens, cacheRead: { value: 13, coverage: "partial" } } });
+    const evaluation = resourceStatistics({ tokens: { ...execution.tokens, cacheRead: { value: 13, coverage: "partial" } }, cacheHitRate: { value: 13 / 113, coverage: "partial" } });
     const view = await render(<>
       <TokenMetrics statistics={execution} />
       <TokenMetrics statistics={evaluation} />

@@ -2,6 +2,7 @@ import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, Tabl
 import type { MetricSummary, ResourceStatistics, StageStatistics } from "@/api-sdk/types";
 import { ResourceMetrics } from "@/features/metrics/resource-metrics";
 import { MetricValue } from "@/features/metrics/metric-value";
+import { ModelName } from "@/features/metrics/token-metrics";
 import { formatBytes, formatDuration, formatPercent, formatStatistic } from "@/lib/format";
 
 function StageStat({ label, value, tone = "neutral" }: { label: string; value: number; tone?: "neutral" | "success" | "danger" | "warning" }) {
@@ -26,17 +27,12 @@ function OverviewMetric({ label, title, children }: { label: string; title?: str
 function AgentOverview({ title, statistics, stage }: { title: string; statistics: ResourceStatistics; stage: StageStatistics }) {
   const bytes = (value: number | null | undefined) => value === null || value === undefined ? "未获得" : value < 1024 ? `${formatStatistic(value)} B` : formatBytes(value);
   const duration = (value: number | null | undefined) => value === null || value === undefined ? "未获得" : formatDuration(value);
-  const inputTokens = statistics.tokens.input.value;
-  const cacheReadTokens = statistics.tokens.cacheRead.value;
-  const cacheHitRate = inputTokens === null || cacheReadTokens === null || inputTokens + cacheReadTokens === 0
-    ? null
-    : cacheReadTokens / (inputTokens + cacheReadTokens);
   return <section aria-label={`${title}总览`} className="space-y-4 rounded-lg border border-border bg-surface-muted/20 p-3">
-    <div><h4 className="text-sm font-semibold text-text-strong">总览</h4><p className="mt-1 text-xs text-text-muted">先看资源消耗和工具使用，再进入下方分项明细。</p></div>
+    <div><h4 className="text-sm font-semibold text-text-strong">总览</h4><p className="mt-1 text-xs text-text-muted">模型 <ModelName statistics={statistics} /> · 先看资源消耗和工具使用，再进入下方分项明细。</p></div>
     <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
       <OverviewMetric label="实际积分"><MetricValue metric={statistics.costs.chargedUnits} format={formatStatistic} /></OverviewMetric>
       <OverviewMetric label="总 Token"><MetricValue metric={statistics.tokens.total} /></OverviewMetric>
-      <OverviewMetric label="缓存命中率" title="缓存读取 ÷（输入 Token + 缓存读取 Token）">{cacheHitRate === null ? "未获得" : formatPercent(cacheHitRate)}</OverviewMetric>
+      <OverviewMetric label="缓存命中率" title="缓存读取 ÷（输入 Token + 缓存读取 Token）"><MetricValue metric={statistics.cacheHitRate} format={formatPercent} /></OverviewMetric>
       <OverviewMetric label="平均 Agent 耗时">{duration(stage.agentDurationMs?.mean)}</OverviewMetric>
       <OverviewMetric label="模型请求"><MetricValue metric={statistics.modelRequests.count} /></OverviewMetric>
     </div>
@@ -87,7 +83,7 @@ export function ProjectStatistics({ summary }: { summary: MetricSummary }) {
           </div>
           <div className="min-w-0 space-y-4 p-3">
             <AgentOverview title={title} statistics={statistics} stage={stage} />
-            <ResourceMetrics report statistics={statistics} distribution={statistics.distribution} durations={stage} />
+            <ResourceMetrics compact statistics={statistics} distribution={statistics.distribution} durations={stage} />
           </div>
         </section>)}
       </div>

@@ -4,7 +4,7 @@ import {
 } from "@springbrand/site-block";
 import { Check, ChevronDown, Clock3, Coins, ListChecks, Sigma } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import type { MetricNumber, OperationStatistics, ResourceDistribution, ResourceStatistics, StageStatistics } from "@/api-sdk/types";
+import type { OperationStatistics, ResourceDistribution, ResourceStatistics, StageStatistics } from "@/api-sdk/types";
 import { StatusBadge } from "@/components/ui/badge";
 import { DescriptionList } from "@/components/ui/card";
 import { formatDuration, formatStatistic, formatUsd } from "@/lib/format";
@@ -27,7 +27,7 @@ function MetricDisclosure({ title, description, children, expanded = false }: { 
   </Collapsible>;
 }
 
-type OperationRow = { label: string; value?: OperationStatistics; count?: MetricNumber };
+type OperationRow = { label: string; value: OperationStatistics };
 
 function OperationsTable({ label, caption, rows, emptyLabel = "暂无可用数据" }: { label: string; caption: string; rows: readonly OperationRow[]; emptyLabel?: string }) {
   return <div className="overflow-hidden rounded-lg border border-border">
@@ -36,14 +36,14 @@ function OperationsTable({ label, caption, rows, emptyLabel = "暂无可用数�
       <TableHeader className="bg-surface-muted/60"><TableRow>
         {["指标", "次数", "成功", "失败", "取消", "进行中", "未知"].map((name, index) => <TableHead key={name} scope="col" className={index === 0 ? "px-4 text-xs" : "text-right text-xs"}>{name}</TableHead>)}
       </TableRow></TableHeader>
-      <TableBody>{rows.length === 0 ? <TableRow><TableCell colSpan={7} className="px-4 py-6 text-center text-text-muted">{emptyLabel}</TableCell></TableRow> : rows.map(({ label: name, value, count }, index) => <TableRow key={`${name}-${index}`}>
+      <TableBody>{rows.length === 0 ? <TableRow><TableCell colSpan={7} className="px-4 py-6 text-center text-text-muted">{emptyLabel}</TableCell></TableRow> : rows.map(({ label: name, value }, index) => <TableRow key={`${name}-${index}`}>
         <TableHead scope="row" className="max-w-64 whitespace-normal break-words px-4 py-3 font-medium text-text-strong">{name}</TableHead>
-        <TableCell className="text-right font-semibold tabular-nums"><MetricValue metric={value?.count ?? count ?? { value: null, coverage: "unavailable" }} /></TableCell>
-        <TableCell className="text-right tabular-nums">{value?.completed ?? "未获得"}</TableCell>
-        <TableCell className={`text-right tabular-nums ${value && value.failed > 0 ? "font-medium text-danger" : "text-text-muted"}`}>{value?.failed ?? "未获得"}</TableCell>
-        <TableCell className="text-right tabular-nums text-text-muted">{value?.cancelled ?? "未获得"}</TableCell>
-        <TableCell className="text-right tabular-nums">{value?.inProgress ?? "未获得"}</TableCell>
-        <TableCell className="text-right tabular-nums text-text-muted">{value?.unknown ?? "未获得"}</TableCell>
+        <TableCell className="text-right font-semibold tabular-nums"><MetricValue metric={value.count} /></TableCell>
+        <TableCell className="text-right tabular-nums">{value.completed}</TableCell>
+        <TableCell className={`text-right tabular-nums ${value.failed > 0 ? "font-medium text-danger" : "text-text-muted"}`}>{value.failed}</TableCell>
+        <TableCell className="text-right tabular-nums text-text-muted">{value.cancelled}</TableCell>
+        <TableCell className="text-right tabular-nums">{value.inProgress}</TableCell>
+        <TableCell className="text-right tabular-nums text-text-muted">{value.unknown}</TableCell>
       </TableRow>)}</TableBody>
     </Table>
   </div>;
@@ -52,8 +52,8 @@ function OperationsTable({ label, caption, rows, emptyLabel = "暂无可用数�
 function TrajectoryMetrics({ trajectory, modelRequests }: Pick<ResourceStatistics, "trajectory" | "modelRequests">) {
   const operations = [
     { label: "处理轮（Turn）", value: trajectory.turns },
-    { label: "思考命中轮", value: trajectory.thinkingTurnOperations, count: trajectory.thinkingTurns },
-    { label: "内容命中轮", value: trajectory.contentTurnOperations, count: trajectory.contentTurns },
+    { label: "思考命中轮", value: trajectory.thinkingTurnOperations },
+    { label: "内容命中轮", value: trajectory.contentTurnOperations },
     { label: "模型请求", value: modelRequests },
     { label: "工具调用", value: trajectory.tools },
   ];
@@ -69,7 +69,7 @@ function TrajectoryMetrics({ trajectory, modelRequests }: Pick<ResourceStatistic
   </section>;
 }
 
-function CostMetrics({ statistics, report }: { statistics: ResourceStatistics; report: boolean }) {
+function CostMetrics({ statistics, compact }: { statistics: ResourceStatistics; compact: boolean }) {
   return <section aria-label="费用" className="min-w-0 rounded-xl border border-border bg-surface p-4 shadow-sm">
     <div className="flex flex-wrap items-start justify-between gap-2">
       <div><h3 className="text-sm font-semibold text-text-strong">费用</h3><p className="mt-1 text-xs text-text-muted">实际扣除与模型成本分别展示。</p></div>
@@ -79,7 +79,7 @@ function CostMetrics({ statistics, report }: { statistics: ResourceStatistics; r
       <div className="rounded-lg bg-surface-muted/70 px-3 py-3"><dt className="text-xs text-text-muted">实际积分</dt><dd className="mt-1.5 text-xl font-semibold tabular-nums text-text-strong"><MetricValue metric={statistics.costs.chargedUnits} format={formatStatistic} /></dd></div>
       <div className="rounded-lg bg-surface-muted/70 px-3 py-3"><dt className="text-xs text-text-muted">模型成本 · USD</dt><dd className="mt-1.5 text-xl font-semibold tabular-nums text-text-strong"><MetricValue metric={statistics.costs.providerUsd} format={formatUsd} /></dd></div>
     </dl>
-    <MetricDisclosure expanded={report} title="费用明细" description="模型、Action、计价与实际扣除分别记录，不将这些字段重复相加。">
+    <MetricDisclosure expanded={compact} title="费用明细" description="模型、Action、计价与实际扣除分别记录，不将这些字段重复相加。">
       <DescriptionList className="rounded-lg border border-border p-3" items={COST_FIELDS.filter(([key]) => key !== "chargedUnits" && key !== "providerUsd").map(([key, label]) => ({
         label, value: <MetricValue metric={statistics.costs[key]} format={formatStatistic} />,
       }))} />
@@ -133,23 +133,22 @@ function PanelSelector({ value, onChange }: { value: MetricPanel; onChange: (val
 }
 
 /** Resource details are organized by the thing being measured; Agent scope stays fixed at the current entry. */
-export function ResourceMetrics({ statistics, distribution, durations, showCoverage = true, report = false }: {
+export function ResourceMetrics({ statistics, distribution, durations, showCoverage = true, compact = false }: {
   statistics: ResourceStatistics; distribution?: ResourceDistribution;
   durations?: Pick<StageStatistics, "agentDurationMs" | "attemptDurationMs">;
   showCoverage?: boolean;
-  report?: boolean;
+  compact?: boolean;
 }) {
   const [panel, setPanel] = useState<MetricPanel>("operations");
   const activePanel = PANEL_OPTIONS.find((item) => item.value === panel)!;
-  const content = panel === "costs" ? <div className="flex min-w-0 flex-col gap-5"><CostMetrics statistics={statistics} report={report} />{distribution && <ResourceDistributionPanel distribution={distribution} statistics={statistics} section="costs" />}</div>
+  const content = panel === "costs" ? <div className="flex min-w-0 flex-col gap-5"><CostMetrics statistics={statistics} compact={compact} />{distribution && <ResourceDistributionPanel distribution={distribution} statistics={statistics} section="costs" />}</div>
     : panel === "tokens" ? <div className="flex min-w-0 flex-col gap-5"><TokenMetrics statistics={statistics} />{distribution && <ResourceDistributionPanel distribution={distribution} statistics={statistics} section="tokens" />}</div>
       : panel === "operations" ? <div className="flex min-w-0 flex-col gap-5">
-        {distribution && <ResourceDistributionPanel distribution={distribution} statistics={statistics} section="operations" showTools={false} />}
         <TrajectoryMetrics trajectory={statistics.trajectory} modelRequests={statistics.modelRequests} />
-        {distribution && <ResourceDistributionPanel distribution={distribution} statistics={statistics} section="operations" showTrajectory={false} />}
+        {distribution && <ResourceDistributionPanel distribution={distribution} statistics={statistics} section="operations" />}
       </div>
         : <DurationMetrics statistics={statistics} durations={durations} />;
-  return <div className={report ? "flex min-w-0 flex-col gap-3 [&_td]:px-2 [&_td]:py-1.5 [&_th]:px-2 [&_th]:py-1.5 [&_th]:h-8 [&_dd]:text-sm [&_dd]:mt-1 [&_dl]:gap-2 [&_dl]:p-2 [&_dl]:grid-cols-2 [&_table]:text-xs [&_td]:whitespace-nowrap" : "flex min-w-0 flex-col gap-5"}>
+  return <div className={compact ? "flex min-w-0 flex-col gap-3 [&_td]:px-2 [&_td]:py-1.5 [&_th]:px-2 [&_th]:py-1.5 [&_th]:h-8 [&_dd]:text-sm [&_dd]:mt-1 [&_dl]:gap-2 [&_dl]:p-2 [&_dl]:grid-cols-2 [&_table]:text-xs [&_td]:whitespace-nowrap" : "flex min-w-0 flex-col gap-5"}>
     <section aria-label="分项详细数据" className="min-w-0 space-y-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div><h3 className="text-sm font-semibold text-text-strong">分项详细数据</h3><p className="mt-1 text-xs text-text-muted">按费用、Token、操作次数和耗时查看当前入口下全部 Agent 的明细。</p></div>
@@ -158,7 +157,7 @@ export function ResourceMetrics({ statistics, distribution, durations, showCover
       <PanelSelector value={panel} onChange={setPanel} />
       <div role="tabpanel" aria-label={`${activePanel.label}明细`} className="min-w-0 pt-2">{content}</div>
     </section>
-    {statistics.diagnostics.length > 0 && <MetricDisclosure expanded={report} title={`统计诊断（${statistics.diagnostics.length}）`} description="查看缺失来源、重复记录和其他统计诊断。">
+    {statistics.diagnostics.length > 0 && <MetricDisclosure expanded={compact} title={`统计诊断（${statistics.diagnostics.length}）`} description="查看缺失来源、重复记录和其他统计诊断。">
       <ul className="list-inside list-disc text-xs leading-6 text-text-muted">{statistics.diagnostics.map((item, index) => <li key={index}>{item.stream} · {item.eventId ?? item.kind} · {item.message}</li>)}</ul>
     </MetricDisclosure>}
   </div>;

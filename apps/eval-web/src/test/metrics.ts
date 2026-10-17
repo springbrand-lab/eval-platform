@@ -11,6 +11,7 @@ export function resourceStatistics(patch: Partial<ResourceStatistics> = {}): Res
     duplicateRecords: { usageEvents: 0, telemetryEvents: 0, billingSettlements: 0 },
     overlappingUsageRecords: 0,
     tokens: { input: complete(100), output: complete(20), cacheRead: complete(70), cacheWrite: complete(10), reasoning: complete(5), total: complete(200) },
+    cacheHitRate: complete(70 / 170),
     costs: { providerUsd: complete(0), modelDebitedUnits: complete(0), actionChargedUnits: complete(0), chargedUnits: complete(0), ratedUnits: complete(0), shortfallUnits: complete(0), platformOwnedUnits: complete(0) },
     modelRequests: operation,
     trajectory: { coverage: "complete", turns: operation, tools: operation, byTool: [], thinkingTurns: complete(0), thinkingTurnOperations: operation, contentTurns: complete(0), contentTurnOperations: operation, thinkingTurnTokens: { input: complete(0), output: complete(0), total: complete(0) }, contentTurnTokens: { input: complete(0), output: complete(0), total: complete(0) }, unlinkedOperations: { tools: 0, generations: 0 }, diagnostics: [] },

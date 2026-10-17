@@ -221,12 +221,16 @@ function operationStatistics(observed: readonly ObservedOperation[], complete: b
   };
 }
 
-/** A complete list of Turns can prove that an incomplete collection contains zero marked Turns so far. */
-function markedTurnStatistics(turns: readonly ObservedOperation[], marked: ReadonlySet<string>, complete: boolean): OperationStatistics {
-  const statistics = operationStatistics(turns.filter((turn) => marked.has(turn.key)), complete);
-  return statistics.count.value === null && turns.length > 0
-    ? { ...statistics, count: { value: 0, coverage: "partial" } }
-    : statistics;
+/** Marked Turn counts stay partial or unavailable while a generation cannot be assigned to a Turn. */
+function markedTurnStatistics(
+  turns: readonly ObservedOperation[],
+  marked: ReadonlySet<string>,
+  complete: boolean,
+  generationLinksComplete: boolean,
+): OperationStatistics {
+  const statistics = operationStatistics(turns.filter((turn) => marked.has(turn.key)), complete && generationLinksComplete);
+  if (!generationLinksComplete || statistics.count.value !== null || turns.length === 0) return statistics;
+  return { ...statistics, count: { value: 0, coverage: "partial" } };
 }
 
 function bodyLength(entry: FactEntry | undefined, kind: "input" | "output"): number | null {
@@ -298,8 +302,9 @@ function trajectoryTurnMetrics(
   }
   const thinking = new Set([...turnFlags].filter(([, flags]) => flags.thinking).map(([key]) => key));
   const content = new Set([...turnFlags].filter(([, flags]) => flags.content).map(([key]) => key));
-  const thinkingTurnOperations = markedTurnStatistics(turns, thinking, complete);
-  const contentTurnOperations = markedTurnStatistics(turns, content, complete);
+  const generationLinksComplete = generations.unlinked === 0;
+  const thinkingTurnOperations = markedTurnStatistics(turns, thinking, complete, generationLinksComplete);
+  const contentTurnOperations = markedTurnStatistics(turns, content, complete, generationLinksComplete);
   const thinkingCount = thinkingTurnOperations.count;
   const contentCount = contentTurnOperations.count;
   const turnTokens = (marked: ReadonlySet<string>, markedCount: MetricNumber): ThinkingTurnTokens => {
