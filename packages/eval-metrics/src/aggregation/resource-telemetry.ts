@@ -1,7 +1,8 @@
-import { telemetryBodyLength } from "./compact-resources.js";
+import { telemetryBodyLength, telemetryContentFlags } from "./compact-resources.js";
 import { record, text } from "../json.js";
 import type {
   CoveredNumericSummary,
+  ThinkingTurnTokens,
   MetricNumber,
   OperationStatistics,
   ResourceStatistics,
@@ -35,6 +36,8 @@ interface ObservedOperation {
   readonly toolName: string | null;
   /** Session-scoped key of the parent operation; null when absent or contradictory. */
   readonly parentKey: string | null;
+  readonly hasThinking: boolean;
+  readonly hasContent: boolean;
   readonly first: FactEntry;
   readonly start: FactEntry | undefined;
   readonly terminal: FactEntry | undefined;
@@ -71,7 +74,7 @@ export function aggregateTelemetry(
       byTool: [...toolGroups.entries()]
         .map(([toolName, operations]) => toolMetric(toolName, operations, complete && (toolName === null || toolNamesKnown)))
         .sort((left, right) => (left.toolName ?? "").localeCompare(right.toolName ?? "")),
-      ...nonToolTurns(observed, complete, diagnostics),
+      ...trajectoryTurnMetrics(observed, complete, diagnostics),
     },
   };
 }
@@ -161,6 +164,15 @@ function inspectOperation(operation: OperationEvents, diagnostics: ResourceDiagn
     consistent = false;
     diagnostics.report("conflicting-identity", "telemetryEvents", first, "An operation has contradictory parent operations");
   }
+  const contentFlags = events.reduce((flags, entry) => {
+    const projectedThinking = entry.metricProjection?.hasThinking === true;
+    const projectedContent = entry.metricProjection?.hasContent === true;
+    const detected = telemetryContentFlags(entry.fact);
+    return {
+      thinking: flags.thinking || projectedThinking || detected.thinking,
+      content: flags.content || projectedContent || detected.content,
+    };
+  }, { thinking: false, content: false });
   return {
     kind: operation.kind,
     key: operation.key,
@@ -168,6 +180,8 @@ function inspectOperation(operation: OperationEvents, diagnostics: ResourceDiagn
     duration: outcomes.size > 1 ? null : duration,
     toolName: toolNames.size === 1 ? [...toolNames][0] ?? null : null,
     parentKey: parents.size === 1 ? operationKey(operation.sessionId, [...parents][0]!) : null,
+    hasThinking: contentFlags.thinking,
+    hasContent: contentFlags.content,
     first,
     start,
     terminal,
@@ -205,6 +219,14 @@ function operationStatistics(observed: readonly ObservedOperation[], complete: b
     unknown: count("unknown"),
     durationMs: summarizeNumbers(observed.map((item) => item.duration)),
   };
+}
+
+/** A complete list of Turns can prove that an incomplete collection contains zero marked Turns so far. */
+function markedTurnStatistics(turns: readonly ObservedOperation[], marked: ReadonlySet<string>, complete: boolean): OperationStatistics {
+  const statistics = operationStatistics(turns.filter((turn) => marked.has(turn.key)), complete);
+  return statistics.count.value === null && turns.length > 0
+    ? { ...statistics, count: { value: 0, coverage: "partial" } }
+    : statistics;
 }
 
 function bodyLength(entry: FactEntry | undefined, kind: "input" | "output"): number | null {
@@ -259,33 +281,46 @@ function linkToTurns(observed: readonly ObservedOperation[], kind: "tool" | "gen
   return { linked, unlinked };
 }
 
-function nonToolTurns(
+function trajectoryTurnMetrics(
   observed: readonly ObservedOperation[],
   complete: boolean,
   diagnostics: ResourceDiagnostics,
-): Pick<TrajectorySummary, "nonToolTurns" | "nonToolTurnTokens" | "unlinkedOperations"> {
+): Pick<TrajectorySummary, "thinkingTurns" | "thinkingTurnOperations" | "contentTurns" | "contentTurnOperations" | "thinkingTurnTokens" | "contentTurnTokens" | "unlinkedOperations"> {
   const turns = observed.filter((operation) => operation.kind === "turn");
   const tools = linkToTurns(observed, "tool");
   const generations = linkToTurns(observed, "generation");
-  const toolTurns = new Set(tools.linked.values());
-  const nonTool = new Set(turns.filter((turn) => !toolTurns.has(turn.key)).map((turn) => turn.key));
-  const count: MetricNumber = turns.length === 0
-    ? { value: complete ? 0 : null, coverage: coverage(complete, false) }
-    : tools.unlinked > 0 && tools.linked.size === 0
+  const turnFlags = new Map(turns.map((turn) => [turn.key, { thinking: turn.hasThinking, content: turn.hasContent }]));
+  for (const [generation, turn] of generations.linked) {
+    const flags = turnFlags.get(turn);
+    if (!flags) continue;
+    flags.thinking ||= generation.hasThinking;
+    flags.content ||= generation.hasContent;
+  }
+  const thinking = new Set([...turnFlags].filter(([, flags]) => flags.thinking).map(([key]) => key));
+  const content = new Set([...turnFlags].filter(([, flags]) => flags.content).map(([key]) => key));
+  const thinkingTurnOperations = markedTurnStatistics(turns, thinking, complete);
+  const contentTurnOperations = markedTurnStatistics(turns, content, complete);
+  const thinkingCount = thinkingTurnOperations.count;
+  const contentCount = contentTurnOperations.count;
+  const turnTokens = (marked: ReadonlySet<string>, markedCount: MetricNumber): ThinkingTurnTokens => {
+    const markedGenerations = [...generations.linked].filter(([, turn]) => marked.has(turn)).map(([operation]) => operation);
+    const tokensComplete = markedCount.coverage === "complete" && generations.unlinked === 0;
+    const tokens = (field: "inputTokens" | "outputTokens" | "totalTokens"): MetricNumber => markedCount.value === null
       ? { value: null, coverage: "unavailable" }
-      : { value: nonTool.size, coverage: coverage(complete && tools.unlinked === 0, true) };
-  const nonToolGenerations = [...generations.linked].filter(([, turn]) => nonTool.has(turn)).map(([operation]) => operation);
-  const tokensComplete = count.coverage === "complete" && generations.unlinked === 0;
-  const tokens = (field: "inputTokens" | "outputTokens" | "totalTokens"): MetricNumber => count.value === null
-    ? { value: null, coverage: "unavailable" }
-    : diagnostics.sum(nonToolGenerations.map((operation) => operation.terminal ?? operation.first), tokensComplete, "telemetryEvents", field, true, (entry) => (
-      entry.fact.type === "generation.finished"
-        ? diagnostics.number(entry, "telemetryEvents", record(entry.fact.payload)?.[field], field, true)
-        : null
-    ));
+      : diagnostics.sum(markedGenerations.map((operation) => operation.terminal ?? operation.first), tokensComplete, "telemetryEvents", field, true, (entry) => (
+        entry.fact.type === "generation.finished"
+          ? diagnostics.number(entry, "telemetryEvents", record(entry.fact.payload)?.[field], field, true)
+          : null
+      ));
+    return { input: tokens("inputTokens"), output: tokens("outputTokens"), total: tokens("totalTokens") };
+  };
   return {
-    nonToolTurns: count,
-    nonToolTurnTokens: { input: tokens("inputTokens"), output: tokens("outputTokens"), total: tokens("totalTokens") },
+    thinkingTurns: thinkingCount,
+    thinkingTurnOperations,
+    contentTurns: contentCount,
+    contentTurnOperations,
+    thinkingTurnTokens: turnTokens(thinking, thinkingCount),
+    contentTurnTokens: turnTokens(content, contentCount),
     unlinkedOperations: { tools: tools.unlinked, generations: generations.unlinked },
   };
 }

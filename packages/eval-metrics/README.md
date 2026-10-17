@@ -20,7 +20,7 @@ src/
 │   ├── resource-facts.ts     # 诊断、数值校验与按来源身份去重
 │   ├── resource-usage.ts     # Token/Provider USD 与 Subagent 覆盖
 │   ├── resource-billing.ts   # 模型与 Action 结算
-│   ├── resource-telemetry.ts # 模型请求、Turn、工具、长度与非工具轮
+│   ├── resource-telemetry.ts # 模型请求、Turn、工具、长度、思考轮与内容轮
 │   ├── output-fields.ts      # JSON Schema 输出字段汇总
 │   ├── statistics.ts         # NumericSummary 与唯一的 coverage 规则
 │   └── index.ts              # 单层汇总
@@ -50,7 +50,7 @@ Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sam
 
 所有数值观察共用 `NumericSummary`，返回有效 `count`、`missing`、total、mean、总体 variance、min、max、median。均值与方差仅以有值的 N 为分母；缺失不补零，真实零参与。N=0 时各统计为 null，N=1 时方差为 0。方差单位是原数值单位的平方。
 
-每层的 `executionAgent` / `evaluationAgents` 是 `AggregatedResourceStatistics`，在全范围原始事件去重后的累计资源外，还含 `distribution`：从各 Subject / Evaluator 的原始 Attempts 经同一资源解释器形成单 Agent 观察，再统计 Token（含缓存）、积分/成本、轮数、模型/工具次数及结果、非工具轮 Token、各工具和模型的分布。分组归属与数值完整性分别判断：完整事实证明未调用某类型时才产生真实零，其他类型的数值缺失不影响这个零；存在可能归入该类型的未知模型或工具名时，不能证明缺席，记为缺失，已知部分也不能标为 complete。分组与补零都由原始资源解释器处理，展示层不从累计数值猜测归属。工具长度和调用耗时仍按单次调用统计，Agent 时长按单 Agent，Schema 数值按字段观察值。绝不平均 Dataset/Sample 的下层汇总。
+每层的 `executionAgent` / `evaluationAgents` 是 `AggregatedResourceStatistics`，在全范围原始事件去重后的累计资源外，还含 `distribution`：从各 Subject / Evaluator 的原始 Attempts 经同一资源解释器形成单 Agent 观察，再统计 Token（含缓存）、积分/成本、轮数、模型/工具次数及结果、思考轮、内容轮与两类对应的 Token、各工具和模型的分布。思考轮和内容轮的数量与成功、失败、取消、进行中、未知状态都按命中标记对应的唯一 Turn 统计；它们可以重叠，不能相加推算处理轮。分组归属与数值完整性分别判断：完整事实证明未调用某类型时才产生真实零，其他类型的数值缺失不影响这个零；存在可能归入该类型的未知模型或工具名时，不能证明缺席，记为缺失，已知部分也不能标为 complete。分组与补零都由原始资源解释器处理，展示层不从累计数值猜测归属。工具长度和调用耗时仍按单次调用统计，Agent 时长按单 Agent，Schema 数值按字段观察值。绝不平均 Dataset/Sample 的下层汇总。
 
 原始 `AgentResourceSnapshot` 是费用和 Token 的唯一来源：模型账单按 `accountId + eventId`、Action 按 `executionId`、遥测按 `sessionId + eventId` 去重；不重算价格，不把 reasoning 再加进 total；失败、取消、重启 Attempt 的消耗照常计入。已提交但没有收集记录的 Attempt 记为 `uncollected` 并使结果不完整；从未提交的 Attempt 不制造缺失。缺失值为 null 并带 coverage（complete/partial/unavailable）与 diagnostics，只有完整空流才证明 0。
 
@@ -58,7 +58,8 @@ Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sam
 
 - Turn 数及 completed/failed/cancelled/inProgress/unknown；
 - 按 `toolName` 的调用数、结果、耗时，输入长度（`tool.started` 的 `payload.input`）与返回长度（`tool.finished` 的 `payload.output`，缺失时用 `response`，不相加），均为规范 JSON 的 UTF-8 字节数；缺失或被 SP 脱敏（`[CONTENT OMITTED]`/`[REDACTED]`）记为 missing；
-- 非工具轮：经 `parentOperationId`（嵌套工具沿父工具上溯）没有任何工具归属的 Turn；非工具轮 Token 只汇总明确归属到这些 Turn 的 `generation.finished` 的 input/output/total。缺少关联时为 partial/unavailable，不用减法推算。
+- 思考轮：Turn 或其关联 generation 的输出中出现 `thinking`、`signature` 或 `*Signature` 标记；内容轮：输出中出现 `content` 标记。一个 Turn 可以同时属于思考轮和内容轮，工具调用也单独计入工具操作，因此这些分类的数量不要求相加等于 Turn 总数。思考轮 Token 和内容轮 Token 分别汇总明确归属到对应分类的 `generation.finished` 的 input/output/total；同一 generation 同时命中两类时两边都会保留，缺少关联时为 partial/unavailable，不用减法推算。
+
 
 ## JSON Schema 输出字段
 

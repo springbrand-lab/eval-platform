@@ -12,6 +12,7 @@ import { StatusBadge } from "@/components/ui/badge";
 import { ErrorBlock, LoadingBlock, EmptyState } from "@/components/ui/feedback";
 import { formatDuration, formatStatistic } from "@/lib/format";
 import { dataTitle } from "@/features/datasets/dataset-detail-page";
+import { OutputFields } from "@/features/metrics/summary";
 const SamplingResult = lazy(() => import("@/features/results/sampling-detail-page").then((module) => ({ default: module.SamplingResult })));
 import { POLL_MS } from "@/features/runs/use-run-polling";
 
@@ -87,6 +88,7 @@ export function ProjectResults({ projectId, view, overview }: { projectId: strin
       {summary.evaluationOutputs.validation.invalid > 0 && <button className="text-warning hover:underline" onClick={() => focusResults("attention")}>格式无效 {summary.evaluationOutputs.validation.invalid}</button>}
       {summary.evaluationOutputs.validation.unavailable > 0 && <button className="text-warning hover:underline" onClick={() => focusResults("missing")}>结果未获得 {summary.evaluationOutputs.validation.unavailable}</button>}
     </div>
+    <OutputFields outputs={summary.evaluationOutputs} compact />
     <Card><CardHeader className="px-3 py-3" title="用例结果" description="整体与用例使用同一列指标对照；评分仅统计有效结果。积分和累计耗时包含执行与评估，展开用例可定位到单次采样。" />
       <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
         <Input className="h-8 max-w-52 text-xs" aria-label="搜索用例" placeholder="搜索用例名称" value={query} onChange={(e) => setQuery(e.target.value)} />

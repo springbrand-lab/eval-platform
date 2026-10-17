@@ -1,23 +1,93 @@
-import type { OperationDistributions, ResourceDistribution } from "@/api-sdk/types";
+import { NativeSelect, NativeSelectOption } from "@springbrand/site-block";
+import { useState } from "react";
+import type { NumericSummary, OperationDistributions, ResourceDistribution, ResourceStatistics } from "@/api-sdk/types";
+import { formatBytes, formatDuration, formatStatistic } from "@/lib/format";
 import { COST_FIELDS, OPERATION_FIELDS, TOKEN_FIELDS } from "./metric-labels";
 import { StatisticsTable, type StatisticsRow } from "./statistics-table";
 
-function operationRows(prefix: string, statistics: OperationDistributions): StatisticsRow[] {
-  return OPERATION_FIELDS.map(([key, label]) => ({ label: `${prefix} · ${label}`, unit: "次", summary: statistics[key] }));
+function operationRows(statistics: OperationDistributions): StatisticsRow[] {
+  return OPERATION_FIELDS.map(([key, label]) => ({ label, unit: "次", summary: statistics[key] }));
 }
 
-/** Resource statistics use single-Agent observations, not child-scope totals or the visible trajectory page. */
-export function ResourceDistributionPanel({ distribution }: { distribution: ResourceDistribution }) {
-  return <div className="flex min-w-0 flex-col gap-7">
-        <p className="rounded-lg bg-surface-muted px-4 py-3 text-[13px] leading-6 text-text-secondary">统计对象：{distribution.records} 个 Agent（每个 Agent 合并其重试）。以下比较单个 Agent 的消耗与调用次数，不是项目总量，也不是已加载的轨迹事件数量。</p>
-        <StatisticsTable label="Agent Token 与缓存分布" description="每个 Agent 的 Token 消耗；缓存与推理不重复计入总量。" rows={TOKEN_FIELDS.map(([key, label]) => ({ label, unit: "Token", summary: distribution.tokens[key] }))} />
-        <StatisticsTable label="Agent 积分与成本分布" description="每个 Agent 的费用。USD 与积分分别展示，不进行换算或合并。" rows={COST_FIELDS.map(([key, label]) => ({ label, unit: key === "providerUsd" ? "USD" : "积分", summary: distribution.costs[key] }))} />
-        <StatisticsTable label="Agent 轨迹次数分布" description="每个 Agent 的操作次数和非工具轮 Token；不按下层汇总值再次求平均。" rows={[
-          ...operationRows("轮次", distribution.trajectory.turns), ...operationRows("工具调用", distribution.trajectory.tools), ...operationRows("模型请求", distribution.modelRequests),
-          { label: "非工具轮数", unit: "次", summary: distribution.trajectory.nonToolTurns },
-          ...(["input", "output", "total"] as const).map((key, index) => ({ label: ["非工具轮输入 Token", "非工具轮输出 Token", "非工具轮总 Token"][index]!, unit: "Token", summary: distribution.trajectory.nonToolTurnTokens[key] })),
-        ]} />
-        {distribution.trajectory.byTool.map((tool) => <StatisticsTable key={JSON.stringify(tool.toolName)} label={`工具 ${tool.toolName ?? "未识别工具"} 的 Agent 分布`}
-          description="每个 Agent 对该工具的调用次数，区别于单次调用的长度和耗时。" rows={operationRows(tool.toolName ?? "未识别工具", tool.operations)} />)}
+function trajectoryRows(distribution: ResourceDistribution): StatisticsRow[] {
+  const thinkingCount = distribution.trajectory.thinkingTurnOperations?.count ?? distribution.trajectory.thinkingTurns;
+  const contentCount = distribution.trajectory.contentTurnOperations?.count ?? distribution.trajectory.contentTurns;
+  return [
+    { label: "处理轮（Turn）", unit: "次", summary: distribution.trajectory.turns.count },
+    { label: "思考命中轮", unit: "次", summary: thinkingCount },
+    { label: "内容命中轮", unit: "次", summary: contentCount },
+    { label: "模型请求", unit: "次", summary: distribution.modelRequests.count },
+    { label: "工具调用", unit: "次", summary: distribution.trajectory.tools.count },
+  ];
+}
+
+function tokenRows(distribution: ResourceDistribution): StatisticsRow[] {
+  return TOKEN_FIELDS.map(([key, label]) => ({ label, unit: "Token", summary: distribution.tokens[key] }));
+}
+
+function turnTokenRows(distribution: ResourceDistribution): StatisticsRow[] {
+  const unavailable: NumericSummary = { count: 0, missing: 0, total: null, min: null, max: null, mean: null, variance: null, median: null };
+  const rows: StatisticsRow[] = [];
+  for (const [prefix, tokens] of [["思考轮", distribution.trajectory.thinkingTurnTokens], ["内容轮", distribution.trajectory.contentTurnTokens]] as const) {
+    for (const [key, label] of [["input", "输入 Token"], ["output", "输出 Token"], ["total", "总 Token"]] as const) {
+      rows.push({ label: `${prefix} · ${label}`, unit: "Token", summary: tokens?.[key] ?? unavailable });
+    }
+  }
+  return rows;
+}
+
+function TokenDistribution({ distribution }: { distribution: ResourceDistribution }) {
+  return <div className="flex min-w-0 flex-col gap-5">
+    <StatisticsTable label="Token 的 Agent 间差异" description="当前入口包含全部 Agent；每个 Agent 合并重试后，再比较 Token 用量的均值、范围和波动。" rows={tokenRows(distribution)} />
+    <StatisticsTable label="思考与内容 Token 的 Agent 间差异" description="思考轮和内容轮可以命中同一轮，分类 Token 也可能重叠，不能相加推算总 Token。" rows={turnTokenRows(distribution)} />
   </div>;
+}
+
+function CostDistribution({ distribution }: { distribution: ResourceDistribution }) {
+  return <StatisticsTable label="费用的 Agent 间差异" description="当前入口包含全部 Agent；积分与 USD 使用各自单位展示，不进行换算或合并。" rows={COST_FIELDS.map(([key, label]) => ({ label, unit: key === "providerUsd" ? "USD" : "积分", summary: distribution.costs[key] }))} />;
+}
+
+function TrajectoryDistribution({ distribution }: { distribution: ResourceDistribution }) {
+  return <StatisticsTable label="操作次数的 Agent 间差异" description="思考命中轮、内容命中轮和工具调用可以属于同一处理轮，因此这些次数不要求相加等于处理轮。" rows={trajectoryRows(distribution)} />;
+}
+
+function ToolDistribution({ tools, lengthTools }: { tools: ResourceDistribution["trajectory"]["byTool"]; lengthTools: ResourceStatistics["trajectory"]["byTool"] }) {
+  const [toolIndex, setToolIndex] = useState("0");
+  const tool = tools[Number(toolIndex)] ?? tools[0]!;
+  const name = tool.toolName ?? "未识别工具";
+  const lengthTool = lengthTools.find((item) => item.toolName === tool.toolName);
+  const bytes = (value: number) => value < 1024 ? `${formatStatistic(value)} B` : formatBytes(value);
+  const rows: StatisticsRow[] = [
+    ...operationRows(tool.operations),
+    ...(lengthTool ? [
+      { label: "请求大小", unit: "字节", summary: lengthTool.inputLength, format: bytes },
+      { label: "返回大小", unit: "字节", summary: lengthTool.outputLength, format: bytes },
+      { label: "调用耗时", unit: "毫秒", summary: lengthTool.durationMs, format: formatDuration },
+    ] : []),
+  ];
+  return <section aria-label="工具明细" className="min-w-0 space-y-3">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <div><h4 className="text-sm font-semibold text-text-strong">工具明细</h4><p className="mt-1 text-xs leading-5 text-text-muted">选择具体工具，查看它在全部 Agent 中的调用结果和单次调用表现。</p></div>
+      <div className="flex min-w-0 sm:shrink-0">
+        <NativeSelect aria-label="选择工具" className="max-w-full sm:min-w-48" value={toolIndex} onChange={(event) => setToolIndex(event.target.value)}>
+          {tools.map((item, index) => <NativeSelectOption key={`${item.toolName ?? "unknown"}-${index}`} value={String(index)}>{item.toolName ?? "未识别工具"}</NativeSelectOption>)}
+        </NativeSelect>
+      </div>
+    </div>
+    <StatisticsTable label={`工具 ${name} 明细`} description="次数按工具调用统计；大小按单次请求或返回统计；缺失不补零。" rows={rows} showHeader={false} />
+  </section>;
+}
+
+export type ResourceDistributionSection = "costs" | "tokens" | "operations";
+
+/** Agent-level observations are shown inside the selected metric, without a separate scope switch. */
+export function ResourceDistributionPanel({ distribution, statistics, section, showTrajectory = true, showTools = true }: { distribution: ResourceDistribution; statistics: ResourceStatistics; section: ResourceDistributionSection; showTrajectory?: boolean; showTools?: boolean }) {
+  return <section aria-label={`${section === "costs" ? "费用" : section === "tokens" ? "Token" : "操作次数"}的 Agent 间差异`} className="flex min-w-0 flex-col gap-5">
+    {section === "costs" && <CostDistribution distribution={distribution} />}
+    {section === "tokens" && <TokenDistribution distribution={distribution} />}
+    {section === "operations" && <>
+      {showTrajectory && <TrajectoryDistribution distribution={distribution} />}
+      {showTools && distribution.trajectory.byTool.length > 0 && <ToolDistribution tools={distribution.trajectory.byTool} lengthTools={statistics.trajectory.byTool} />}
+    </>}
+  </section>;
 }

@@ -69,12 +69,12 @@ export function SummaryCards({ summary, children }: { summary: MetricSummary; ch
       <MetricCard label="积分消耗" value={<AgentMetricPair execution={summary.executionAgent.costs.chargedUnits} evaluation={summary.evaluationAgents.costs.chargedUnits} />} />
       <MetricCard label="Token" value={<AgentMetricPair execution={summary.executionAgent.tokens.total} evaluation={summary.evaluationAgents.tokens.total} format={formatCompact} />} />
     </div>
-    {children}
     <OutputFields outputs={summary.evaluationOutputs} />
+    {children}
     <details className="group rounded-[var(--radius-card)] border border-border bg-surface">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-[var(--radius-card)] px-5 py-4 hover:bg-surface-hover [&::-webkit-details-marker]:hidden">
         <span><span className="block text-sm font-semibold text-text-strong">资源与轨迹统计</span>
-          <span className="mt-1 block text-[13px] text-text-muted">先看消耗摘要，再分别展开执行与评估 Agent。累计概览和分布统计分开展示。</span></span>
+          <span className="mt-1 block text-[13px] text-text-muted">先看消耗摘要，再分别展开执行与评估 Agent，按费用、Token、操作次数和耗时查看明细。</span></span>
         <ChevronDown className="size-4 shrink-0 text-text-muted transition-transform group-open:rotate-180" />
       </summary>
     <Accordion multiple className="border-t border-border">
@@ -93,7 +93,7 @@ export function SummaryCards({ summary, children }: { summary: MetricSummary; ch
             <span className="grid grid-cols-3 gap-4">
               <span><span className="block text-xs font-normal text-text-muted">Token</span><span className="mt-1 block font-semibold tabular-nums"><MetricValue metric={statistics.tokens.total} format={formatCompact} /></span></span>
               <span><span className="block text-xs font-normal text-text-muted">实际积分</span><span className="mt-1 block font-semibold tabular-nums"><MetricValue metric={statistics.costs.chargedUnits} format={formatStatistic} /></span></span>
-              <span><span className="block text-xs font-normal text-text-muted">平均 Agent 耗时</span><span className="mt-1 block font-semibold tabular-nums">{stage.agentDurationMs.mean === null ? "未获得" : formatDuration(stage.agentDurationMs.mean)}</span></span>
+          <span><span className="block text-xs font-normal text-text-muted">平均 Agent 耗时</span><span className="mt-1 block font-semibold tabular-nums">{stage.agentDurationMs?.mean === null || stage.agentDurationMs?.mean === undefined ? "未获得" : formatDuration(stage.agentDurationMs.mean)}</span></span>
             </span>
           </span>
         </AccordionTrigger>

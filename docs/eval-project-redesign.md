@@ -271,8 +271,9 @@ Sampling 明细把 Subject 和每个当前 Evaluator 分开为 `AgentMetricView`
 | 工具调用长度 | `tool.started` 的 `payload.input` 规范 JSON 的 UTF-8 字节数。 |
 | 工具返回长度 | `tool.finished` 的 `payload.output`，缺失时用 `response`，两者不相加；UTF-8 字节数。 |
 | 长度分布 | 每种工具给 count、missing、total、min、max、mean、median 和 coverage；正文缺失或被脱敏记为 missing，不补零。 |
-| 非工具轮 | 经 `parentOperationId` 没有任何工具归属的 Turn。 |
-| 非工具轮 Token | 只汇总明确归属到非工具轮的 generation Token；不用总 Token 减工具 Token 推算。 |
+| 思考轮 | Turn 或其关联 generation 的输出含 `thinking`、`signature` 或 `*Signature` 标记。 |
+| 内容轮 | Turn 或其关联 generation 的输出含 `content` 标记；同一 Turn 可以同时是思考轮和内容轮。 |
+| 思考轮 / 内容轮 Token | 分别汇总明确归属到对应分类的 generation Token；同一 generation 同时命中两类时两边保留，不用总 Token 减工具 Token 推算。 |
 
 缺少 Turn→generation 关联字段时，相关指标为 partial/unavailable。工具长度是字节数，不是 Token。
 
@@ -341,7 +342,7 @@ Metrics：
 - 来源改动后固定层级不变；未运行 ProjectSample 仍出现；共享 Data 在 Dataset 视图重复、Project 汇总不重复；
 - 未选中结果保留在默认指标；`runIds` 只过滤本批；
 - Subject 与 Evaluator 资源分开；credit、Token、cache、Provider USD、Action 结算去重；
-- 轨迹跨 Attempt 合并、事件去重、轮数、工具结果与长度、非工具轮与 generation Token；
+- 轨迹跨 Attempt 合并、事件去重、轮数、工具结果与长度、思考轮、内容轮与 generation Token；思考轮和内容轮可以重叠；
 - complete/partial/unavailable coverage 与 diagnostics；
 - Schema 嵌套数值、数组数值、组合分支、`$ref`、缺失字段与非法数字；
 - 四层聚合从底层原始值重算。
