@@ -23,7 +23,7 @@ export interface EvaluationResultPort {
   readonly submission?: {
     /** Per-Evaluation credential the Evaluator passes to the tool. */
     token(evaluationId: string): string;
-    /** The latest valid result submitted through the tool, if any. */
+    /** The accepted valid result submitted through the tool, if any. */
     read(evaluationId: string): Promise<EvaluationStructuredOutput | undefined>;
   };
   check(schema: EvaluationOutputSchema, content: string): EvaluationResultCheck;
@@ -42,7 +42,7 @@ export function resultInstruction(input: {
   if (input.submission === undefined) {
     return `Finish by writing one JSON value to ${input.resultPath}, following the JSON Schema at ${input.schemaPath}. ${finalReply}`;
   }
-  return `Finish by calling the ${EVALUATION_SUBMIT_TOOL} tool with evaluationId "${input.submission.evaluationId}", submitToken "${input.submission.token}" and result set to one JSON value following the JSON Schema at ${input.schemaPath}. Do not write a result file. If the tool rejects the result, correct it and call the tool again; do not re-evaluate. If the tool is unavailable, say so. ${finalReply}`;
+  return `Finish by calling the ${EVALUATION_SUBMIT_TOOL} tool with evaluationId "${input.submission.evaluationId}", submitToken "${input.submission.token}" and result set to one JSON value following the JSON Schema at ${input.schemaPath}. Do not write a result file. If the tool rejects the result, correct it and call the tool again; do not re-evaluate. If the tool is unavailable, say so. After the tool accepts the result, end with a short summary.`;
 }
 
 /** The last fenced JSON block that parses, else the whole reply when it is JSON; the raw text is kept for Metrics. */
@@ -60,7 +60,7 @@ export function extractFinalReplyResult(reply: string): string | undefined {
   return undefined;
 }
 
-/** Prefers a submitted result, then SP's result file, then the final reply; never invents one. */
+/** MCP is authoritative when configured; otherwise read the result file or final reply. */
 export async function resolveEvaluationResult(input: {
   readonly port: EvaluationResultPort;
   readonly evaluationId: string;
@@ -69,6 +69,10 @@ export async function resolveEvaluationResult(input: {
 }): Promise<EvaluationAgentOutput> {
   const submitted = await input.port.submission?.read(input.evaluationId);
   if (submitted) return { ...input.output, structuredOutput: { ...submitted, source: "submission" } };
+  if (input.port.submission) {
+    const { structuredOutput: _file, ...output } = input.output;
+    return output;
+  }
   const file = input.output.structuredOutput;
   if (file) return { ...input.output, structuredOutput: { ...file, source: file.source ?? "result-file" } };
   const reply = await input.readFinalReply();

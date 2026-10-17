@@ -1,4 +1,4 @@
-import { EVALUATION_OUTPUT_SCHEMA_PATH, EVALUATION_SUBMIT_TOOL, isPendingSamplingStatus } from "@eval-platform/eval-contracts";
+import { EVALUATION_OUTPUT_SCHEMA_PATH, EVALUATION_SUBMIT_TOOL } from "@eval-platform/eval-contracts";
 import type { Context } from "hono";
 import { createRouter } from "../lib/create-app.js";
 import type { AppBindings } from "../lib/types.js";
@@ -47,7 +47,6 @@ async function submit(c: Context<AppBindings>, args: unknown) {
   if (!verifyEvaluationSubmitToken(results.token, evaluationId, submitToken)) return toolText("evaluationId and submitToken do not match. Use the exact values from your instructions.", true);
   const target = await results.submissions.target(evaluationId);
   if (!target) return toolText(`Evaluation ${evaluationId} does not exist.`, true);
-  if (!isPendingSamplingStatus(target.status)) return toolText(`Evaluation ${evaluationId} has already finished (${target.status}); the result was not accepted.`, true);
   if (!target.schema) return toolText(`Evaluation ${evaluationId} has no output Schema; the result was not accepted.`, true);
   // Models sometimes pass the object as JSON text; anything else is checked as given.
   let value = result;
@@ -64,7 +63,9 @@ async function submit(c: Context<AppBindings>, args: unknown) {
   if (!verdict.valid) {
     return toolText(`The result does not match ${EVALUATION_OUTPUT_SCHEMA_PATH} and was not accepted. Correct these and call ${EVALUATION_SUBMIT_TOOL} again:\n${verdict.errors.map((error) => `- ${error}`).join("\n")}`, true);
   }
-  await results.submissions.save({ evaluationId, ownerUserId: target.ownerUserId, content, submittedAt: new Date() });
+  const receipt = await results.submissions.save({ evaluationId, ownerUserId: target.ownerUserId, content, submittedAt: new Date() });
+  if (receipt === "closed") return toolText(`Evaluation ${evaluationId} is stopped, cancelled, replaced or unavailable; the result was not accepted.`, true);
+  if (receipt === "conflict") return toolText(`Evaluation ${evaluationId} already has an accepted result; a different result cannot replace it.`, true);
   c.var.logger?.info({ event: "evaluation_result_submitted", evaluationId }, "Evaluation result submitted");
   return toolText("Evaluation result accepted. You are done; end with a short summary.");
 }

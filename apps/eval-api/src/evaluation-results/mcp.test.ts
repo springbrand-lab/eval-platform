@@ -11,7 +11,7 @@ const schema = { type: "object", required: ["score"], properties: { score: { typ
 function setup(target: Awaited<ReturnType<NonNullable<ApiRuntime["evaluationResults"]>["submissions"]["target"]>> = {
   ownerUserId: "owner-1", status: "running", schema,
 }, configured = true) {
-  const submissions = { target: vi.fn(async () => target), save: vi.fn(async () => undefined) };
+  const submissions = { target: vi.fn(async () => target), save: vi.fn(async () => "accepted" as "accepted" | "replayed" | "closed" | "conflict") };
   const runtime = {
     webOrigin: WEB_ORIGIN,
     ...(configured ? { evaluationResults: { token: TOKEN, submissions } } : {}),
@@ -74,11 +74,24 @@ describe("evaluation result MCP Server", () => {
     expect(app.submissions.save).not.toHaveBeenCalled();
   });
 
-  it("refuses results for finished or unknown Evaluations", async () => {
-    for (const app of [setup({ ownerUserId: "owner-1", status: "succeeded", schema }), setup(null)]) {
-      const body = await (await app.call(valid)).json() as { result: { isError: boolean } };
-      expect(body.result.isError).toBe(true);
-      expect(app.submissions.save).not.toHaveBeenCalled();
-    }
+  it("accepts a late valid result after an observation failure", async () => {
+    const app = setup({ ownerUserId: "owner-1", status: "failed", schema });
+    expect(await (await app.call(valid)).json()).toMatchObject({ result: { content: [{ text: expect.stringContaining("accepted") }] } });
+    expect(app.submissions.save).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["closed", "conflict"] as const)("reports atomic %s without claiming acceptance", async (receipt) => {
+    const app = setup();
+    app.submissions.save.mockResolvedValue(receipt);
+    expect(await (await app.call(valid)).json()).toMatchObject({ result: { isError: true } });
+  });
+
+  it("acknowledges an identical accepted replay and rejects an unknown Evaluation", async () => {
+    const app = setup({ ownerUserId: "owner-1", status: "succeeded", schema });
+    app.submissions.save.mockResolvedValue("replayed");
+    expect(await (await app.call(valid)).json()).toMatchObject({ result: { content: [{ text: expect.stringContaining("accepted") }] } });
+    const missing = setup(null);
+    expect(await (await missing.call(valid)).json()).toMatchObject({ result: { isError: true } });
+    expect(missing.submissions.save).not.toHaveBeenCalled();
   });
 });

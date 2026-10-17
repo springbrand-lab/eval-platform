@@ -272,8 +272,8 @@ export const evaluations = pgTable("eval_evaluations", {
 ]);
 
 /**
- * The latest valid result an Evaluator handed over through the submission tool; one row per
- * Evaluation, overwritten by a later valid submission. Never part of `eval_evaluations.facts`, so the
+ * The accepted result an Evaluator handed over through the submission tool; one immutable row per
+ * Evaluation. Identical retries replay its receipt. Never part of `eval_evaluations.facts`, so the
  * Worker's compare-and-set writes do not race the API's tool calls.
  */
 export const evaluationSubmissions = pgTable("eval_evaluation_submissions", {

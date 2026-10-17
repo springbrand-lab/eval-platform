@@ -1,5 +1,6 @@
 import {
   EVALUATION_RESULT_PATH,
+  equalJson,
   EVIDENCE_ARTIFACTS_ROOT,
   EVIDENCE_MANIFEST_PATH,
   EVIDENCE_ROOT,
@@ -20,9 +21,10 @@ import { dataInputSchema } from "@eval-platform/eval-dataset";
 
 import type { ProjectSample, RuntimeEvaluationContext } from "./model.js";
 import { persistRuntimeRecord, readStageFailure } from "./store.js";
-import { RuntimeAdmissionConflictError } from "./errors.js";
+import { RuntimeAdmissionConflictError, RuntimeRecordPersistenceError } from "./errors.js";
 import {
   AgentOperationError,
+  SubmissionStatusError,
   applyAttemptPatch,
   collectOutputWithRetry,
   describeAgentError,
@@ -72,16 +74,34 @@ export async function evaluateSampling(
   const { sampling, evaluation, sample } = input.context;
   let currentEvaluation = evaluation;
   const retryController = dependencies.createRetryController(input.retryPolicy);
+  const acceptedResult = (record: EvaluationRecord): boolean =>
+    record.status.status === "succeeded" && record.output?.structuredOutput?.source === "submission";
+  const keepAccepted = (next: EvaluationRecord, accepted: EvaluationRecord): EvaluationRecord => {
+    if (!acceptedResult(accepted) || !accepted.output?.structuredOutput) return next;
+    const { error: _error, ...output } = next.output ?? accepted.output;
+    return { ...next, status: accepted.status, output: {
+      ...output, status: "succeeded", structuredOutput: accepted.output.structuredOutput,
+    } };
+  };
+  const observationFacts = ({ status: _status, output: _output, ...facts }: EvaluationRecord) => facts;
+  const write = (next: EvaluationRecord, expected: EvaluationRecord) => persistRuntimeRecord({
+    record: next, expected,
+    write: (record, previous) => dependencies.store.updateEvaluation(record, previous),
+    read: () => dependencies.store.getEvaluation(next.evaluationId), retryController, sleep: dependencies.sleep,
+  });
   const persistEvaluation = async (next: EvaluationRecord): Promise<void> => {
-    await persistRuntimeRecord({
-      record: next,
-      expected: currentEvaluation,
-      write: (record, expected) => dependencies.store.updateEvaluation(record, expected),
-      read: () => dependencies.store.getEvaluation(next.evaluationId),
-      retryController,
-      sleep: dependencies.sleep,
-    });
-    currentEvaluation = next;
+    let update = keepAccepted(next, currentEvaluation);
+    try {
+      await write(update, currentEvaluation);
+    } catch (error) {
+      if (!(error instanceof RuntimeRecordPersistenceError) || error.outcome !== "conflict") throw error;
+      const stored = await dependencies.store.getEvaluation(next.evaluationId);
+      // Rebase only the API's completion fields; never overwrite concurrent Attempt or stop changes.
+      if (!stored || !acceptedResult(stored) || !equalJson(observationFacts(stored), observationFacts(currentEvaluation))) throw error;
+      update = keepAccepted(next, stored);
+      await write(update, stored);
+    }
+    currentEvaluation = update;
   };
   if (sampling.execution.status !== "succeeded" || sampling.artifacts === undefined || sampling.trajectory === undefined) {
     await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no successful execution output"));
@@ -98,6 +118,32 @@ export async function evaluateSampling(
   if (!subjectChatId) {
     await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject Chat"));
     return { ...input.context, evaluation: currentEvaluation };
+  }
+
+  async function syncScore(): Promise<void> {
+    if (currentEvaluation.scoreSync?.status === "synced" || !currentEvaluation.chatId || !subjectChatId) return;
+    const publish = dependencies.scores?.publish?.bind(dependencies.scores);
+    let scored: ReturnType<NonNullable<typeof dependencies.scores>["read"]>;
+    try {
+      scored = publish ? dependencies.scores!.read(input.evaluationOutputSchema, currentEvaluation) : undefined;
+    } catch (cause) {
+      reportError(dependencies.onError, new Error(`Evaluation ${currentEvaluation.evaluationId} score could not be read`, { cause }));
+    }
+    if (publish && scored) {
+      const scoreSync = await publishEvaluationScore(publish, {
+        evaluationId: currentEvaluation.evaluationId,
+        samplingId: sampling.samplingId,
+        projectId: sampling.projectId,
+        projectSampleId: sampling.projectSampleId,
+        subjectChatId,
+        evaluatorChatId: currentEvaluation.chatId!,
+        ...scored,
+      }, dependencies.now);
+      if (scoreSync.lastError !== undefined) {
+        reportError(dependencies.onError, new Error(`Evaluation ${currentEvaluation.evaluationId} score was not synced: ${scoreSync.lastError}`));
+      }
+      await persistEvaluation({ ...currentEvaluation, scoreSync });
+    }
   }
 
   try {
@@ -140,6 +186,7 @@ export async function evaluateSampling(
     const submissionToken = dependencies.results?.submission?.token(currentEvaluation.evaluationId);
     const result = currentEvaluation.status.collectionPending ? await recollect() : await runAgentLifecycle<EvaluationAttempt, EvaluationAgentOutput>(dependencies, {
       stage: "evaluation",
+      deferFailureStatus: dependencies.results?.submission !== undefined,
       role: "evaluator",
       projectId: sampling.projectId,
       samplingId: sampling.samplingId,
@@ -148,7 +195,10 @@ export async function evaluateSampling(
       harnessConfig: evaluatorHarness,
       prompt: evaluatorPrompt(evalPrompt, submissionToken === undefined ? undefined
         : { evaluationId: currentEvaluation.evaluationId, token: submissionToken }),
-      retryController,
+      retryController: {
+        decide: (request) => request.operation === "restart" && acceptedResult(currentEvaluation)
+          ? Promise.resolve({ shouldRetry: false }) : retryController.decide(request),
+      },
       attempts: currentEvaluation.attempts,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({
         evaluationAttemptId: attemptId,
@@ -238,30 +288,16 @@ export async function evaluateSampling(
       status: { status: "succeeded" },
       output,
     });
-    const publish = dependencies.scores?.publish?.bind(dependencies.scores);
-    let scored: ReturnType<NonNullable<typeof dependencies.scores>["read"]>;
-    try {
-      scored = publish ? dependencies.scores!.read(input.evaluationOutputSchema, currentEvaluation) : undefined;
-    } catch (cause) {
-      reportError(dependencies.onError, new Error(`Evaluation ${currentEvaluation.evaluationId} score could not be read`, { cause }));
-    }
-    if (publish && scored) {
-      const scoreSync = await publishEvaluationScore(publish, {
-        evaluationId: currentEvaluation.evaluationId,
-        samplingId: sampling.samplingId,
-        projectId: sampling.projectId,
-        projectSampleId: sampling.projectSampleId,
-        subjectChatId,
-        evaluatorChatId: chatId,
-        ...scored,
-      }, dependencies.now);
-      if (scoreSync.lastError !== undefined) {
-        reportError(dependencies.onError, new Error(`Evaluation ${currentEvaluation.evaluationId} score was not synced: ${scoreSync.lastError}`));
-      }
-      await persistEvaluation({ ...currentEvaluation, scoreSync });
-    }
+    await syncScore();
     return { ...input.context, evaluation: currentEvaluation };
   } catch (error) {
+    // MCP may have committed while this worker was observing SP or writing stale Attempt facts.
+    const accepted = await dependencies.store.getEvaluation(currentEvaluation.evaluationId);
+    if (accepted?.status.status === "succeeded" && accepted.output?.structuredOutput?.source === "submission") {
+      currentEvaluation = accepted;
+      await syncScore();
+      return { ...input.context, evaluation: currentEvaluation };
+    }
     const details = describeAgentError(error);
     const { stored, failureBase } = await readStageFailure(error, {
       read: () => dependencies.store.getEvaluation(currentEvaluation.evaluationId),
@@ -274,7 +310,7 @@ export async function evaluateSampling(
     await persistEvaluation({
       ...failureBase,
       evaluator: agentConfig,
-      status: { status: "failed", lastError: details.message },
+      status: { status: dependencies.results?.submission && error instanceof SubmissionStatusError ? "retrying" : "failed", lastError: details.message },
     });
     return { ...input.context, evaluation: currentEvaluation };
   }

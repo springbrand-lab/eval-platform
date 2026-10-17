@@ -151,7 +151,7 @@ class OutputCollectionError extends AgentOperationError {
   }
 }
 
-class SubmissionStatusError extends AgentOperationError {
+export class SubmissionStatusError extends AgentOperationError {
   constructor(
     stage: AgentLifecycleStage,
     details: AgentErrorDetails,

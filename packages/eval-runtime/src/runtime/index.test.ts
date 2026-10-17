@@ -5214,9 +5214,57 @@ describe("evaluation result checking", () => {
     const harness = makeHarness();
     vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
     vi.mocked(harness.readFinalReply).mockResolvedValue("I could not write the file.\n```json\n{\"score\": 8}\n```\nRetry later.");
-    const evaluation = await evaluateOnce(harness, { submission: { token: () => "t", read: async () => undefined }, check: validScore });
+    const evaluation = await evaluateOnce(harness, { check: validScore });
     expect(evaluation.status).toEqual({ status: "succeeded" });
     expect(evaluation.output?.structuredOutput).toEqual({ path: "final-reply", content: '{"score": 8}', source: "final-reply" });
+  });
+
+  it("does not substitute a file or final reply for a missing MCP acceptance", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.readFinalReply).mockResolvedValue('{"score": 8}');
+    const evaluation = await evaluateOnce(harness, { submission: { token: () => "t", read: async () => undefined }, check: validScore });
+    expect(evaluation.status).toEqual({ status: "failed", lastError: RESULT_NOT_SUBMITTED });
+    expect(evaluation.output?.structuredOutput).toBeUndefined();
+    expect(harness.readFinalReply).not.toHaveBeenCalled();
+  });
+
+  it.each(["disconnect", "completed"] as const)("keeps MCP recovery and acceptance authoritative when observation is %s", async (observation) => {
+    const store = makeStore();
+    const harness = makeHarness();
+    vi.mocked(harness.submitAgent).mockImplementation(async (input) => input.handle.role === "evaluator"
+      ? makeSubmission("running", "evaluation-submission") : makeSubmission("completed"));
+    vi.mocked(harness.waitForSubmission).mockRejectedValue(Object.assign(new Error("Submission WebSocket closed before terminal status"), { retryable: true }));
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission("running", "evaluation-submission"));
+    const publish = vi.fn(async () => undefined);
+    const runtime = createRuntime({ store, harness, scores: { read: () => ({ score: 8 }), publish }, plans: makePlans([makeSample("sample-1")]),
+      results: { submission: { token: () => "t", read: async (id) => (await store.getEvaluation(id))?.output?.structuredOutput }, check: validScore },
+    });
+    const run = await runtime.submit(projectRequest("pipeline", "mcp-disconnected"));
+    await runtime.resume(run.runId);
+    const [before] = await store.listEvaluations(run.samplingIds[0]!);
+    expect(before!.status.status).toBe("retrying");
+    expect(before!.attempts[0]!.status).toBe("running");
+    expect(before!.attempts[0]!.completedAt).toBeUndefined();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+    const accepted = { ...before!, status: { status: "succeeded" as const }, output: {
+      ...noResult, structuredOutput: { path: "mcp:submit_evaluation", content: '{"score":8}', source: "submission" as const },
+    } };
+    vi.mocked(harness.waitForSubmission).mockImplementation(async () => {
+      const current = (await store.getEvaluation(before!.evaluationId))!;
+      await store.updateEvaluation({ ...accepted, attempts: current.attempts }, current);
+      if (observation === "completed") return makeSubmission("completed", "evaluation-submission");
+      throw Object.assign(new Error("socket closed after MCP acceptance"), { retryable: true });
+    });
+    await runtime.resume(run.runId);
+    expect((await store.getEvaluation(before!.evaluationId))!.status).toEqual({ status: "succeeded" });
+    expect((await store.getEvaluation(before!.evaluationId))!.output?.structuredOutput?.content).toBe('{"score":8}');
+    expect(publish).toHaveBeenCalledTimes(1);
+    if (observation === "completed") {
+      const latest = (await store.getEvaluation(before!.evaluationId))!;
+      expect(latest.attempts[0]!.status).toBe("completed");
+      expect(latest.attempts[0]!.resources?.status).toBe("collected");
+    }
+    expect(harness.restartAgent).not.toHaveBeenCalled();
   });
 
   it("fails as not submitted without running the Evaluator again", async () => {

@@ -122,3 +122,5 @@ Sampling 的三个边界固定如下：
 Run 状态按当前归属的评估记录投影。重新评估移走旧记录后，旧 Run 不把缺失的评估当成 queued；没有剩余阶段记录时沿用空 Run 的终态 failed，不再被视为活动任务。
 
 `toRunSnapshot` only requires Sampling execution states and Evaluation sampling IDs/statuses; applications must not load resource snapshots solely to compute Run progress.
+
+MCP-enabled Evaluations complete on validated result acceptance, atomically with the result and metric facts. Status-socket loss is recoverable observation failure, not an Evaluation terminal fact. Late submissions cannot bypass Project deletion, Run stop/cancellation or replacement. Runtime preserves accepted results when subsequent observation or collection fails. See [evaluation result submission](../../docs/eval-evaluation-result-submission.md).

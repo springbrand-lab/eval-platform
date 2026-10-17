@@ -22,7 +22,7 @@ import { ProjectRunStopConflictError } from "./errors.js";
 import { createPostgresProjectPlanReader, createPostgresWorkerProjectPlanReader } from "./project-plans.js";
 import { createPostgresProjectRunReader } from "./run-view.js";
 import { createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, readProjectRunState } from "./runtime.js";
-import { data as dataTable, datasets as datasetsTable, evaluations, projectEvaluationPlans, runs, samplings } from "./schema.js";
+import { data as dataTable, datasets as datasetsTable, evaluations, projectEvaluationPlans, projects, runs, samplings } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
 import { createPostgresEvaluationSubmissions } from "./evaluation-submissions.js";
 import { buildCommand, makeData, release, seedProject, settle } from "./test-fixtures.js";
@@ -113,7 +113,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     expect(await control.getCurrentRun(seeded.projectId)).toBeNull();
   });
 
-  it("keeps the latest submitted Evaluator result and resolves its locked Schema", async () => {
+  it("atomically accepts the first MCP result and idempotently replays it", async () => {
     const seeded = await project({ datasets: [{ data: [makeData()] }], evaluation: true });
     const { admission, command } = await seeded.admit({ operation: "pipeline" });
     expect(admission.created).toBe(true);
@@ -124,12 +124,50 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     expect(await submissions.target(evaluationId)).toEqual({
       ownerUserId: OWNER, status: "queued", schema: { type: "object", properties: { score: { type: "number" } } },
     });
-    await submissions.save({ evaluationId, ownerUserId: OWNER, content: '{"score":1}', submittedAt: new Date() });
-    await submissions.save({ evaluationId, ownerUserId: OWNER, content: '{"score":2}', submittedAt: new Date() });
+    const { worker } = stores();
+    const sampling = (await worker.getSampling(command.run.samplingIds[0]!))!;
+    await worker.updateSampling({ ...sampling, execution: { status: "succeeded" } }, sampling);
+    const original = (await worker.getEvaluation(evaluationId))!;
+    const observing = { ...original, chatId: "evaluating-chat", status: { status: "failed" as const, lastError: "status observation disconnected" } };
+    await worker.updateEvaluation(observing, original);
+    const input = { evaluationId, ownerUserId: OWNER, content: '{"score":1}', submittedAt: new Date() };
+    expect((await Promise.all([submissions.save(input), submissions.save(input)])).sort()).toEqual(["accepted", "replayed"]);
+    expect(await submissions.save({ ...input, content: '{ "score": 1 }' })).toBe("replayed");
+    expect(await submissions.save({ ...input, content: '{"score":2}' })).toBe("conflict");
     expect(await submissions.read(evaluationId)).toEqual({
-      path: "mcp:submit_evaluation", content: '{"score":2}',
-      contentHash: "sha256:" + createHash("sha256").update('{"score":2}').digest("hex"),
+      path: "mcp:submit_evaluation", content: '{"score":1}',
+      contentHash: "sha256:" + createHash("sha256").update('{"score":1}').digest("hex"),
     });
+    const accepted = (await worker.getEvaluation(evaluationId))!;
+    expect(accepted).toMatchObject({ status: { status: "succeeded" }, output: {
+      status: "succeeded", structuredOutput: { source: "submission", content: '{"score":1}' },
+      trajectory: { source: "evaluator", path: "/api/chats/evaluating-chat/trajectory" },
+    } });
+    expect(accepted.status.lastError).toBeUndefined();
+    expect(accepted.attempts).toEqual(observing.attempts);
+    const [projection] = await database.db.select({ facts: evaluations.metricFacts }).from(evaluations).where(eq(evaluations.evaluationId, evaluationId));
+    expect(projection!.facts?.status).toEqual({ status: "succeeded" });
+    await expect(worker.updateEvaluation({ ...observing, status: { status: "failed" } }, observing)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
+    expect(await worker.isRunActive(command.run.runId)).toBe(false);
+  });
+
+  it.each(["stopped", "cancelled", "replaced", "wrong-owner", "deleted"] as const)("rejects MCP acceptance for %s work", async (reason) => {
+    const seeded = await project({ datasets: [{ data: [makeData()] }], evaluation: true });
+    const { command } = await seeded.admit({ operation: "pipeline" });
+    const { worker } = stores();
+    const sampling = (await worker.getSampling(command.run.samplingIds[0]!))!;
+    await worker.updateSampling({ ...sampling, execution: { status: "succeeded" } }, sampling);
+    const evaluationId = command.run.evaluationIds[0]!;
+    const original = (await worker.getEvaluation(evaluationId))!;
+    await worker.updateEvaluation({ ...original, chatId: "chat", status: { status: reason === "cancelled" ? "cancelled" : "failed" } }, original);
+    if (reason === "stopped") await database.db.update(runs).set({ stopRequested: true }).where(eq(runs.runId, command.run.runId));
+    if (reason === "replaced") await seeded.admit({ operation: "evaluation" });
+    if (reason === "deleted") await database.db.update(projects).set({ deletedAt: new Date() }).where(eq(projects.projectId, seeded.projectId));
+    const submissions = createPostgresEvaluationSubmissions(database.db);
+    expect(await submissions.save({ evaluationId, ownerUserId: reason === "wrong-owner" ? "other" : OWNER,
+      content: '{"score":1}', submittedAt: new Date() })).toBe("closed");
+    expect(await submissions.read(evaluationId)).toBeUndefined();
+    expect((await worker.getEvaluation(evaluationId))?.status.status).not.toBe("succeeded");
   });
 
   it("queues only the selected completed evaluation and leaves its sampling untouched", async () => {
