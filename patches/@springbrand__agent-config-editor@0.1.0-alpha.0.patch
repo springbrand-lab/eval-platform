@@ -139,10 +139,18 @@ index 865fb4e6113c1219f95a007788f5bfbbef64ce15..a13c183e7edeb21fc6a4324223582e55
      models: readonly ModelPresetAccess[];
      modelsLoading: boolean;
 diff --git a/dist/agent-config-editor/src/agent-editor.js b/dist/agent-config-editor/src/agent-editor.js
-index cc5833eea8c215bb02ce95f479cd378809fb6d65..ab6e77a184eebe8ff369302421de0367d6f2a41d 100644
+index cc5833eea8c215bb02ce95f479cd378809fb6d65..2ed7caadeb2aaf0512929d26f4039df6eed4f0ca 100644
 --- a/dist/agent-config-editor/src/agent-editor.js
 +++ b/dist/agent-config-editor/src/agent-editor.js
-@@ -27,8 +27,6 @@ export function AgentEditor(props) {
+@@ -2,7 +2,6 @@ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-run
+ import { useEffect, useState } from 'react';
+ import { useQueries, useQuery } from '@tanstack/react-query';
+ import { Alert, AlertDescription, Badge, Button, Collapsible, CollapsibleContent, CollapsibleTrigger, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Field, FieldLabel, Input, NativeSelect, NativeSelectOption, Textarea, } from '@springbrand/site-block';
+-import { THINKING_LEVELS, modelSelectionFromPresetId } from '../../agent-contracts/src/model.js';
+ import { AGENT_CONFIG_SELECTION_LIMIT } from '../../agent-contracts/src/agent.js';
+ import { ATTACHMENT_MAX_COUNT } from '../../utils/src/index.js';
+ import { selectedConnectorToolkitIds } from '../../agent-contracts/src/mcp.js';
+@@ -27,8 +26,6 @@ export function AgentEditor(props) {
      const readOnlySelections = readOnly || (mode === 'edit' && props.agent.is_default);
      const deleteBlocker = mode === 'edit' ? props.deleteBlocker : null;
      const deleteCheckError = mode === 'edit' ? props.deleteCheckError : null;
@@ -151,13 +159,41 @@ index cc5833eea8c215bb02ce95f479cd378809fb6d65..ab6e77a184eebe8ff369302421de0367
      const [skillAddOpen, setSkillAddOpen] = useState(false);
      const [skillManageOpen, setSkillManageOpen] = useState(false);
      const [referenceAddOpen, setReferenceAddOpen] = useState(false);
-@@ -74,9 +72,13 @@ export function AgentEditor(props) {
+@@ -37,9 +34,16 @@ export function AgentEditor(props) {
+     const [actionAddOpen, setActionAddOpen] = useState(false);
+     const [preview, setPreview] = useState(null);
+     const updateSetting = (update) => onDraftChange((current) => ({ ...current, setting: update(current.setting) }));
+-    const selectedModel = draft.setting.presetId
++    const defaultModel = models.find((model) => model.default);
++    const selectedModel = models.find(({ id }) => id === draft.setting.presetId)?.id
+         ?? models.find(({ providerModel }) => providerModel === draft.setting.model)?.id
++        ?? defaultModel?.id
+         ?? '';
++    const preset = models.find((model) => model.id === selectedModel);
++    const thinkingLevels = preset?.thinkingLevels ?? [];
++    const thinking = preset && thinkingLevels.includes(draft.setting.thinking)
++        ? draft.setting.thinking
++        : preset?.thinking ?? '';
+     const connectorIds = selectedConnectorToolkitIds(draft.setting.mcpServers);
+     const componentSelectionCount = draft.setting.connectorIds.length + draft.setting.extensionIds.length;
+     const maxConnectorCount = AGENT_CONFIG_SELECTION_LIMIT - draft.setting.skillIds.length
+@@ -74,52 +78,55 @@ export function AgentEditor(props) {
          }));
      }
      return _jsxs("main", { className: 'flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto bg-background', children: [_jsxs("form", { className: 'flex min-h-full flex-col', onSubmit: (event) => { event.preventDefault(); if (!readOnly && !saving)
 -                    onSave(); }, children: [_jsxs("fieldset", { disabled: saving, className: 'mx-auto w-full min-w-0 max-w-3xl flex-1 space-y-4 border-0 px-4 pt-5 pb-12 md:px-8 md:pt-8', children: [_jsxs("header", { className: 'mb-5 space-y-2', children: [_jsxs(Button, { type: 'button', variant: 'ghost', size: 'sm', className: '-ml-2 md:hidden', onClick: onBack, children: [_jsx(ChevronLeft, { "aria-hidden": 'true' }), " Agents"] }), _jsxs("div", { className: 'flex flex-wrap items-center gap-2', children: [_jsx("h1", { className: 'text-2xl font-semibold tracking-tight', children: mode === 'create' ? 'New Agent' : 'Settings' }), mode === 'edit' && props.agent.is_default ? _jsx(Badge, { variant: 'secondary', children: "Default" }) : null] }), _jsx("p", { className: 'text-sm text-muted-foreground', children: mode === 'create'
 -                                            ? 'Choose how this Agent should work.'
 -                                            : 'Changes to references affect new Chats. Existing Chats keep their files.' })] }), _jsxs(AgentResourceSection, { title: 'Behavior', children: [_jsxs("div", { className: 'grid gap-4 sm:grid-cols-2', children: [_jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-name', children: "Name" }), _jsx(Input, { id: 'agent-name', disabled: readOnlySelections, required: true, maxLength: 200, value: draft.name, onChange: (event) => onDraftChange((current) => ({ ...current, name: event.target.value })) })] }), _jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-description', children: "Description" }), _jsx(Input, { id: 'agent-description', disabled: readOnlySelections, maxLength: 2000, value: draft.description, onChange: (event) => onDraftChange((current) => ({ ...current, description: event.target.value })) })] })] }), _jsxs("div", { className: 'space-y-2', children: [_jsx("span", { className: 'text-sm font-medium', children: "System prompt" }), _jsxs("button", { type: 'button', className: 'block min-h-24 w-full rounded-lg border border-border bg-muted/20 p-3 text-left text-sm hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring', onClick: () => { setPromptText(draft.setting.systemPrompt ?? ''); setPromptOpen(true); }, children: [_jsx("span", { className: 'line-clamp-3 whitespace-pre-wrap break-words text-muted-foreground', children: draft.setting.systemPrompt || 'Add instructions for the Agent...' }), _jsx("span", { className: 'mt-2 block text-xs text-muted-foreground', children: "Click to view and edit the full prompt" })] })] })] }), _jsxs(AgentResourceSection, { title: 'Model', children: [_jsxs("div", { className: 'grid gap-4 sm:grid-cols-2', children: [_jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-model', children: "Model" }), _jsxs(NativeSelect, { id: 'agent-model', value: selectedModel, disabled: readOnly || modelsLoading || modelsError, onChange: (event) => {
+-                                                            const presetId = event.target.value;
+-                                                            updateSetting((setting) => {
+-                                                                if (!presetId)
+-                                                                    return { ...setting, presetId: null, model: null };
+-                                                                const selection = modelSelectionFromPresetId(presetId);
+-                                                                return { ...setting, presetId: selection.presetId, model: selection.model, thinking: selection.thinking };
+-                                                            });
+-                                                        }, children: [_jsx(NativeSelectOption, { value: '', children: "Platform default" }), models.map((model) => _jsxs(NativeSelectOption, { value: model.id, disabled: !model.available, children: [model.name, model.available ? '' : ` (requires ${model.requiredPlan})`] }, model.id))] })] }), _jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-thinking', children: "Thinking" }), _jsx(NativeSelect, { id: 'agent-thinking', value: draft.setting.thinking, disabled: readOnly, onChange: (event) => updateSetting((setting) => ({ ...setting,
+-                                                            thinking: event.target.value,
+-                                                        })), children: THINKING_LEVELS.map((level) => _jsx(NativeSelectOption, { value: level, children: level }, level)) })] })] }), modelsError ? _jsx("p", { role: 'alert', className: 'text-sm text-destructive', children: "Could not load models." }) : null] }), _jsx(AgentResourceSection, { title: 'Connectors', count: connectorIds.length, onAdd: readOnlySelections ? undefined : () => setConnectorAddOpen(true), children: connectorIds.length === 0 ? _jsx("p", { className: 'text-sm text-muted-foreground', children: "None selected." }) :
 +                    onSave(); }, children: [_jsxs("fieldset", { disabled: saving, className: 'mx-auto w-full min-w-0 max-w-3xl flex-1 space-y-4 border-0 px-4 pt-5 pb-12 md:px-8 md:pt-8', children: [_jsxs("header", { className: 'mb-5 space-y-2', children: [_jsxs(Button, { type: 'button', variant: 'ghost', size: 'sm', className: '-ml-2 md:hidden', onClick: onBack, children: [_jsx(ChevronLeft, { "aria-hidden": 'true' }), " Agent 管理"] }), _jsxs("div", { className: 'flex flex-wrap items-center gap-2', children: [_jsx("h1", { className: 'text-2xl font-semibold tracking-tight', children: mode === 'create' ? "新建 Agent" : "配置" }), mode === 'edit' && props.agent.is_default ? _jsx(Badge, { variant: 'secondary', children: "默认" }) : null] }), _jsx("p", { className: 'text-sm text-muted-foreground', children: mode === 'create'
 +                                            ? "设置 Agent 的工作方式。"
 +                                            : "参考资料的修改对新会话生效，已有会话仍保留原文件。" })] }), _jsx("section", { "aria-label": "基本信息", "data-agent-identity": true, children: _jsxs("div", { className: 'grid gap-4 sm:grid-cols-2', children: [_jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-name', children: "名称" }), _jsx(Input, { id: 'agent-name', disabled: readOnlySelections, required: true, maxLength: 200, value: draft.name, onChange: (event) => onDraftChange((current) => ({ ...current, name: event.target.value })) })] }), _jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-description', children: "用途说明" }), _jsx(Input, { id: 'agent-description', disabled: readOnlySelections, maxLength: 2000, value: draft.description, onChange: (event) => onDraftChange((current) => ({ ...current, description: event.target.value })) })] })] }) }), _jsxs("section", { "data-agent-prompt": true, className: "space-y-2", children: [
@@ -165,18 +201,15 @@ index cc5833eea8c215bb02ce95f479cd378809fb6d65..ab6e77a184eebe8ff369302421de0367
 +  _jsx(Textarea, { id: "agent-system-prompt", "aria-label": "完整工作指令", rows: 12, maxLength: 50000, readOnly: readOnly, value: draft.setting.systemPrompt ?? "", className: "min-h-64 w-full resize-y text-sm leading-6", placeholder: "说明 Agent 的职责、工作步骤和注意事项", onChange: (event) => updateSetting((setting) => ({ ...setting, systemPrompt: event.target.value || null })) }),
 +  _jsx("p", { className: "text-xs text-muted-foreground", children: readOnly ? "这是项目使用的固定配置，只能查看。" : "直接编辑，点击保存修改后生效。" }),
 +] }), _jsxs("section", { "data-agent-runtime": true, className: "space-y-3", children: [_jsx("h2", { className: "text-sm font-semibold", children: "运行设置" }), _jsxs("div", { className: 'grid gap-4 sm:grid-cols-2', children: [_jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-model', children: "模型" }), _jsxs(NativeSelect, { id: 'agent-model', value: selectedModel, disabled: readOnly || modelsLoading || modelsError, onChange: (event) => {
-                                                             const presetId = event.target.value;
-                                                             updateSetting((setting) => {
-                                                                 if (!presetId)
-@@ -84,42 +86,42 @@ export function AgentEditor(props) {
-                                                                 const selection = modelSelectionFromPresetId(presetId);
-                                                                 return { ...setting, presetId: selection.presetId, model: selection.model, thinking: selection.thinking };
-                                                             });
--                                                        }, children: [_jsx(NativeSelectOption, { value: '', children: "Platform default" }), models.map((model) => _jsxs(NativeSelectOption, { value: model.id, disabled: !model.available, children: [model.name, model.available ? '' : ` (requires ${model.requiredPlan})`] }, model.id))] })] }), _jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-thinking', children: "Thinking" }), _jsx(NativeSelect, { id: 'agent-thinking', value: draft.setting.thinking, disabled: readOnly, onChange: (event) => updateSetting((setting) => ({ ...setting,
-+                                                        }, children: [_jsx(NativeSelectOption, { value: '', children: "使用平台默认模型" }), models.map((model) => _jsxs(NativeSelectOption, { value: model.id, disabled: !model.available, children: [model.name, model.available ? '' : `（需要 ${model.requiredPlan} 方案）`] }, model.id))] })] }), _jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-thinking', children: "思考深度" }), _jsx(NativeSelect, { id: 'agent-thinking', value: draft.setting.thinking, disabled: readOnly, onChange: (event) => updateSetting((setting) => ({ ...setting,
-                                                             thinking: event.target.value,
--                                                        })), children: THINKING_LEVELS.map((level) => _jsx(NativeSelectOption, { value: level, children: level }, level)) })] })] }), modelsError ? _jsx("p", { role: 'alert', className: 'text-sm text-destructive', children: "Could not load models." }) : null] }), _jsx(AgentResourceSection, { title: 'Connectors', count: connectorIds.length, onAdd: readOnlySelections ? undefined : () => setConnectorAddOpen(true), children: connectorIds.length === 0 ? _jsx("p", { className: 'text-sm text-muted-foreground', children: "None selected." }) :
-+                                                        })), children: THINKING_LEVELS.map((level) => _jsx(NativeSelectOption, { value: level, children: ({ none: "不额外思考", minimal: "极简", low: "较浅", medium: "适中", high: "深入", xhigh: "最深入" })[level] ?? level }, level)) })] })] }), modelsError ? _jsx("p", { role: 'alert', className: 'text-sm text-destructive', children: "模型列表加载失败，请稍后重试。" }) : null] }), _jsxs("header", { "data-agent-capabilities": true, children: [_jsx("h2", { className: "text-sm font-semibold", children: "可选能力与资料" }), _jsx("p", { className: "text-xs text-muted-foreground", children: "按任务需要添加；未添加的能力无需配置。MCP Server 独立列出。" })] }), _jsx(AgentResourceSection, { title: "外部应用连接", count: connectorIds.length, onAdd: readOnlySelections ? undefined : () => setConnectorAddOpen(true), children: connectorIds.length === 0 ? _jsx("p", { className: 'text-sm text-muted-foreground', children: "暂未添加" }) :
++                                                            const model = models.find((item) => item.id === event.target.value);
++                                                            if (!model)
++                                                                return;
++                                                            updateSetting((setting) => ({ ...setting, presetId: model.id, model: model.providerModel, thinking: model.thinking, executionLevel: model.executionLevel }));
++                                                        }, children: models.map((model) => _jsxs(NativeSelectOption, { value: model.id, disabled: !model.available, children: [model.name, model.available ? '' : `（需要 ${model.requiredPlan} 方案）`] }, model.id)) })] }), _jsxs(Field, { children: [_jsx(FieldLabel, { htmlFor: 'agent-thinking', children: "思考深度" }), _jsxs(NativeSelect, { id: 'agent-thinking', value: thinking, disabled: readOnly || modelsLoading || modelsError || !preset, onChange: (event) => {
++                                                            const level = event.target.value;
++                                                            if (thinkingLevels.includes(level))
++                                                                updateSetting((setting) => ({ ...setting, thinking: level }));
++                                                        }, children: thinkingLevels.map((level) => _jsx(NativeSelectOption, { value: level, children: ({ none: "不额外思考", minimal: "极简", low: "较浅", medium: "适中", high: "深入", xhigh: "最深入", max: "极高" })[level] ?? level }, level)) })] })] }), modelsError ? _jsx("p", { role: 'alert', className: 'text-sm text-destructive', children: "模型列表加载失败，请稍后重试。" }) : null] }), _jsxs("header", { "data-agent-capabilities": true, children: [_jsx("h2", { className: "text-sm font-semibold", children: "可选能力与资料" }), _jsx("p", { className: "text-xs text-muted-foreground", children: "按任务需要添加；未添加的能力无需配置。MCP Server 独立列出。" })] }), _jsx(AgentResourceSection, { title: "外部应用连接", count: connectorIds.length, onAdd: readOnlySelections ? undefined : () => setConnectorAddOpen(true), children: connectorIds.length === 0 ? _jsx("p", { className: 'text-sm text-muted-foreground', children: "暂未添加" }) :
                                      _jsx("ul", { className: 'space-y-2', children: connectorIds.map((id) => {
                                              const connector = connectorAuthorization.groups.find((item) => item.toolkitId === id);
                                              const connected = connector?.status === 'connected' || connector?.connections.some((account) => account.status === 'active');

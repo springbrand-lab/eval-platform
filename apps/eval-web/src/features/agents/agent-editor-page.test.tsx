@@ -21,6 +21,23 @@ const setting: AgentDraft["setting"] = {
   memoryDefaults: { enabled: false, memoryTokens: 3_000, preferencesTokens: 750 }, sandbox: { enabled: true },
   skillIds: [], mcpServers: [{ serverId: "platform-mcp" }], actionIds: [], connectorIds: [], extensionIds: [], referenceFileIds: [],
 };
+const modelCatalog = [
+  {
+    id: "deepseek-flash-balanced", name: "DeepSeek V4.1 Flash", providerModel: "deepseek/deepseek-v4.1-flash",
+    thinking: "high", executionLevel: "high", default: true, requiredPlan: "free", available: true,
+    thinkingLevels: ["none", "low", "high", "max"],
+  },
+  {
+    id: "gemini-flash-fast", name: "Claude Sonnet 5.5", providerModel: "anthropic/claude-sonnet-5.5",
+    thinking: "medium", executionLevel: "high", requiredPlan: "free", available: true,
+    thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
+  {
+    id: "claude-opus-max", name: "Claude Opus 5.5", providerModel: "anthropic/claude-opus-5.5",
+    thinking: "high", executionLevel: "high", requiredPlan: "pro", available: true,
+    thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
+];
 const template: UserAgentConfigTemplate = { name: "新建 Agent", description: null, setting: { ...setting, mcpServers: [] } };
 const initial: AgentConfig = {
   id: "agent-a", user_id: "user-a", slug: "agent-a", name: "Original name", description: null,
@@ -72,7 +89,7 @@ describe("SP Agent editor in Eval", () => {
     });
     transport.request.mockImplementation(async (path: string) => {
       const url = new URL(path, "http://eval.test");
-      if (url.pathname === "/api/agent-library/models") return [];
+      if (url.pathname === "/api/agent-library/models") return modelCatalog;
       if (url.pathname === "/api/agent-library/connectors") return { items: [], nextCursor: null };
       if (url.pathname === "/api/agent-library/components") return { data: [], page: 1, pageSize: 50, total: 0 };
       if (url.pathname === "/api/agent-library/skills") return {
@@ -127,8 +144,11 @@ describe("SP Agent editor in Eval", () => {
       expect(view.container.querySelector('[aria-label="添加任务技能"]')).not.toBeNull();
       for (const label of ["Behavior", "Thinking", "Connectors", "Save changes", "None selected."]) expect(view.container.textContent).not.toContain(label);
       const thinking = view.container.querySelector<HTMLSelectElement>('#agent-thinking')!;
-      expect([...thinking.options].map((option) => option.textContent)).toEqual(['不额外思考', '极简', '较浅', '适中', '深入', '最深入']);
-      expect([...thinking.options].map((option) => option.value)).toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+      expect([...thinking.options].map((option) => option.textContent)).toEqual(['不额外思考', '较浅', '深入', '极高']);
+      expect([...thinking.options].map((option) => option.value)).toEqual(['none', 'low', 'high', 'max']);
+      expect(view.container.querySelector('#agent-model option[value=""]')).toBeNull();
+      expect(view.container.textContent).toContain("DeepSeek V4.1 Flash");
+      expect(view.container.textContent).toContain("Claude Sonnet 5.5");
       expect(view.container.textContent).not.toContain("setting JSON");
       for (const section of ["模型", "思考深度", "外部应用连接", "内置连接工具", "扩展能力", "可执行操作", "任务技能", "参考资料"]) {
         expect(view.container.textContent).toContain(section);
@@ -136,7 +156,10 @@ describe("SP Agent editor in Eval", () => {
       await type(name(), "  Research Agent  ");
       await type(document.querySelector("#agent-description"), "Research description");
       await type(document.querySelector('[aria-label="完整工作指令"]'), "Updated instructions");
-      await select(document.querySelector("#agent-thinking"), "high");
+      await select(document.querySelector("#agent-model"), "gemini-flash-fast");
+      const sonnetThinking = document.querySelector<HTMLSelectElement>("#agent-thinking")!;
+      expect([...sonnetThinking.options].map((option) => option.value)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+      await select(sonnetThinking, "xhigh");
       await click(document.querySelector('[aria-label="添加任务技能"]'));
       await settle(() => expect(document.querySelector('[aria-label="选择Research Skill"]')).not.toBeNull());
       await click(document.querySelector('[aria-label="选择Research Skill"]'));
@@ -145,7 +168,15 @@ describe("SP Agent editor in Eval", () => {
       await settle(() => expect(transport.post).toHaveBeenCalledTimes(1));
       expect(transport.post.mock.calls[0]).toEqual(["/api/agent-configs", {
         slug: expect.stringMatching(/^agent-[\da-f-]{36}$/u), name: "Research Agent", description: "Research description",
-        setting: { ...template.setting, systemPrompt: "Updated instructions", thinking: "high", skillIds: ["skill-a"] },
+        setting: {
+          ...template.setting,
+          presetId: "gemini-flash-fast",
+          model: "anthropic/claude-sonnet-5.5",
+          thinking: "xhigh",
+          executionLevel: "high",
+          systemPrompt: "Updated instructions",
+          skillIds: ["skill-a"],
+        },
       }]);
       await settle(() => expect(view.router.state.location.pathname).toBe("/agents/agent-a"));
       expect(transport.request.mock.calls.some(([path]) => path.startsWith("/api/agent-library/skills?") && path.includes("view=selectable"))).toBe(true);
