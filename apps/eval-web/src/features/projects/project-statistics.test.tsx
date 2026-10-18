@@ -8,9 +8,12 @@ it("keeps both Agent summaries and exposes one clear detail category at a time",
   const screen = await render(<ProjectStatistics summary={summary} />);
   try {
     expect(screen.container.querySelectorAll('[role="tablist"]').length).toBeGreaterThan(0);
-    expect(screen.container.querySelector('details:not([open])')).toBeNull();
+      expect(screen.container.querySelectorAll('details:not([open])')).toHaveLength(2);
     for (const role of ['执行 Agent', '评估 Agent']) {
       const region = screen.container.querySelector(`[aria-label="${role}完整资源统计"]`)!;
+        expect((region as HTMLDetailsElement).open).toBe(false);
+        await click(region.querySelector('summary')!);
+        expect((region as HTMLDetailsElement).open).toBe(true);
       expect(region.textContent).toContain('实际积分');
       expect(region.textContent).toContain('总 Token');
       expect(region.textContent).toContain('缓存命中率');

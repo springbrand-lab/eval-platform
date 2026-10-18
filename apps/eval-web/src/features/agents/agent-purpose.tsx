@@ -37,7 +37,7 @@ export function AgentPurposeSelector({
             className="mt-0.5 size-4 accent-primary"
           />
           <span>
-            <span className="block text-sm font-medium text-text-strong">执行</span>
+            <span className="block text-sm font-medium text-text-strong">执行 Agent</span>
             <span className="mt-1 block text-xs text-text-muted">用于执行项目任务，不自动提交评估结果。</span>
           </span>
         </label>
@@ -52,7 +52,7 @@ export function AgentPurposeSelector({
             className="mt-0.5 size-4 accent-primary"
           />
           <span>
-            <span className="block text-sm font-medium text-text-strong">评估</span>
+            <span className="block text-sm font-medium text-text-strong">评估 Agent</span>
             <span className="mt-1 block text-xs text-text-muted">自动带上评估结果提交 MCP，供 Evaluator 调用 submit_evaluation。</span>
           </span>
         </label>
