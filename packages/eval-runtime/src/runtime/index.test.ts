@@ -3946,6 +3946,85 @@ describe("raw resource persistence", () => {
     expect(harness.collectEvaluation).toHaveBeenCalledTimes(1);
   });
 
+  it("retries an unfinalized evaluator resource snapshot after a terminal submission", async () => {
+    const harness = makeHarness();
+    let evaluatorReads = 0;
+    vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
+      const snapshot = makeResources(input);
+      if (input.handle.role === "evaluator" && evaluatorReads++ === 0) {
+        return { ...snapshot, finalized: false };
+      }
+      return snapshot;
+    });
+    const runtime = createAutoResumingRuntime({
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+      createRetryController: createProductionRetryController,
+    });
+    const run = await runtime.submit(projectRequest("pipeline", "retry-unfinalized-evaluator-resources"));
+
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
+
+    const evaluation = await runtime.getEvaluation((await runtime.getRun(run.runId)).evaluationIds[0]!);
+    expect(evaluation?.attempts[0]?.resources).toMatchObject({
+      status: "collected",
+      snapshot: { finalized: true },
+    });
+    expect(harness.collectAgentResources).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the last unfinalized evaluator snapshot when finalization retries exhaust", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => ({
+      ...makeResources(input),
+      ...(input.handle.role === "evaluator" ? { finalized: false } : {}),
+    }));
+    const runtime = createAutoResumingRuntime({
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+      createRetryController: createProductionRetryController,
+    });
+    const run = await runtime.submit(projectRequest("pipeline", "preserve-unfinalized-evaluator-resources"));
+
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
+
+    const evaluation = await runtime.getEvaluation((await runtime.getRun(run.runId)).evaluationIds[0]!);
+    expect(evaluation?.attempts[0]?.resources).toMatchObject({
+      status: "collected",
+      snapshot: { finalized: false },
+    });
+    expect(harness.collectAgentResources).toHaveBeenCalledTimes(9);
+  });
+
+  it("keeps a validated unfinalized snapshot when a later resource response is invalid", async () => {
+    const harness = makeHarness();
+    const reported = vi.fn();
+    let reads = 0;
+    vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
+      const snapshot = makeResources(input);
+      if (reads++ === 0) return { ...snapshot, finalized: false };
+      return { ...snapshot, scope: { ...snapshot.scope, submissionId: "different-submission" } };
+    });
+    const runtime = createAutoResumingRuntime({
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+      onError: reported,
+      createRetryController: createProductionRetryController,
+    });
+    const run = await runtime.submit(projectRequest("execution", "preserve-unfinalized-before-invalid-resource"));
+
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
+
+    const resources = (await runtime.getSampling(run.samplingIds[0]!)).executionAttempts[0]!.resources;
+    expect(resources).toMatchObject({ status: "collected", snapshot: { finalized: false } });
+    expect(reported).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining("does not match the requested operation scope"),
+    }));
+  });
+
   it("preserves the original Agent failure when its resource read also fails", async () => {
     const harness = makeHarness();
     vi.mocked(harness.submitAgent).mockResolvedValue({
@@ -4056,6 +4135,37 @@ describe("raw resource persistence", () => {
     expect(sampling.execution.lastError).toContain(operation === "submission" ? "submission response lost" : "status source unavailable");
     expect(harness.collectExecution).not.toHaveBeenCalled();
     expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("retries unfinalized resources while the Submission status is still uncertain", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.submitAgent).mockRejectedValue(new Error("submission response lost"));
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue(null);
+    let reads = 0;
+    vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => ({
+      ...makeResources(input),
+      finalized: reads++ > 0,
+    }));
+    const decide: RetryController["decide"] = async ({ operation, failureKind }) => (
+      operation === "resources"
+        ? { shouldRetry: true, reason: failureKind, backoffMs: 0 }
+        : { shouldRetry: false, reason: failureKind }
+    );
+    const runtime = createAutoResumingRuntime({
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+      createRetryController: () => ({ decide }),
+    });
+    const run = await runtime.submit(projectRequest("execution", "uncertain-unfinalized-resource-retry"));
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
+
+    const sampling = await runtime.getSampling(run.samplingIds[0]!);
+    expect(sampling.executionAttempts[0]!.resources).toMatchObject({
+      status: "collected",
+      snapshot: { finalized: true },
+    });
+    expect(harness.collectAgentResources).toHaveBeenCalledTimes(2);
   });
 
   it("replaces a re-evaluated record while keeping execution raw records unchanged", async () => {
@@ -5420,7 +5530,7 @@ describe("evaluation result checking", () => {
     expect(evaluation.status).toEqual({ status: "succeeded" });
     expect(evaluation.output?.structuredOutput).toEqual({ path: "mcp:submit_evaluation", content: '{"score":3}', source: "submission" });
     const prompt = vi.mocked(harness.submitAgent).mock.calls.find(([call]) => call.handle.role === "evaluator")![0].prompt;
-    expect(prompt).toContain(`submit_evaluation tool with evaluationId "${evaluation.evaluationId}", submitToken "token-for-${evaluation.evaluationId}"`);
+    expect(prompt).toContain(`submit_evaluation MCP tool directly with evaluationId "${evaluation.evaluationId}", submitToken "token-for-${evaluation.evaluationId}"`);
     expect(prompt).not.toContain("/output/result.json");
     expect(harness.readFinalReply).not.toHaveBeenCalled();
   });

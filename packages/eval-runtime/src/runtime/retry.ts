@@ -84,7 +84,7 @@ export async function retryIdempotentOperation<TResult>(loop: IdempotentRetryLoo
       if (loop.shouldAbort?.(error)) throw error;
       const reconciled = await loop.reconcile?.();
       if (reconciled !== undefined) return reconciled;
-      const details = loop.describeError?.(error) ?? defaultRetryErrorDetails(error);
+      const details = loop.describeError?.(error) ?? describeRetryError(error);
       const decision = details.retryable
         ? await retryController.decide({ operation: loop.operation, failureKind: details.failureKind, attemptNumber })
         : undefined;
@@ -95,7 +95,7 @@ export async function retryIdempotentOperation<TResult>(loop: IdempotentRetryLoo
   }
 }
 
-function defaultRetryErrorDetails(error: unknown): RetryErrorDetails {
+export function describeRetryError(error: unknown): RetryErrorDetails {
   if (error instanceof Error) {
     const candidate = error as Error & { readonly retryable?: unknown; readonly failureKind?: unknown };
     return {

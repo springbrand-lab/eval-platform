@@ -11,7 +11,10 @@ const schema = { type: "object", required: ["score"], properties: { score: { typ
 function setup(target: Awaited<ReturnType<NonNullable<ApiRuntime["evaluationResults"]>["submissions"]["target"]>> = {
   ownerUserId: "owner-1", status: "running", schema,
 }, configured = true) {
-  const submissions = { target: vi.fn(async () => target), save: vi.fn(async () => "accepted" as "accepted" | "replayed" | "closed" | "conflict") };
+  const submissions = {
+    target: vi.fn(async () => target),
+    save: vi.fn(async (..._args: readonly unknown[]) => "accepted" as "accepted" | "replayed" | "closed" | "conflict"),
+  };
   const runtime = {
     webOrigin: WEB_ORIGIN,
     ...(configured ? { evaluationResults: { token: TOKEN, submissions } } : {}),
@@ -66,6 +69,7 @@ describe("evaluation result MCP Server", () => {
     expect(body.result.isError).toBeUndefined();
     expect(body.result.content[0]!.text).toContain("accepted");
     expect(app.submissions.save).toHaveBeenCalledTimes(2);
+    expect(app.submissions.save.mock.calls[1]![0]).toBe(app.submissions.save.mock.calls[0]![0]);
   });
 
   it("accepts a result passed as JSON text", async () => {
