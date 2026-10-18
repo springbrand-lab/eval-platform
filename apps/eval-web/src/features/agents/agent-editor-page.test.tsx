@@ -198,6 +198,19 @@ describe("SP Agent editor in Eval", () => {
     } finally { await view.close(); }
   });
 
+  it("keeps the purpose selector available while the result MCP is loading", async () => {
+    const get = transport.get.getMockImplementation()!;
+    transport.get.mockImplementation(async (path: string) => {
+      if (path === "/api/agent-library/mcp-servers?source=user&page=1&pageSize=100") return new Promise(() => {});
+      return get(path);
+    });
+    const view = await mount();
+    try {
+      await settle(() => expect(name()).not.toBeNull());
+      expect(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]')?.disabled).toBe(false);
+    } finally { await view.close(); }
+  });
+
   it("removes the result MCP when an existing evaluation Agent is changed to execution", async () => {
     const view = await mount("/agents/agent-a");
     try {

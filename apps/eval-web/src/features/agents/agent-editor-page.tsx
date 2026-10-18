@@ -184,7 +184,7 @@ function AgentForm({ initial, template, userId, onSaved }: {
         resolution={evaluationMcp.data}
         loading={evaluationMcp.isPending || !purposeReady}
         error={evaluationMcp.error}
-        readOnly={readOnly || !purposeReady}
+        readOnly={readOnly}
         onChange={changePurpose}
       />
       <AgentMcpServers selections={draft.setting.mcpServers} />
