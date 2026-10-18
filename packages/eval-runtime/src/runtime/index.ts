@@ -47,7 +47,15 @@ export {
   type RuntimeEntity,
   type RuntimePersistenceOutcome,
 } from "./errors.js";
-export type { RetryController, RetryDecision, RetryOperation } from "./retry.js";
+export {
+  createRetryController,
+  retryIdempotentOperation,
+  type IdempotentRetryLoop,
+  type RetryController,
+  type RetryDecision,
+  type RetryErrorDetails,
+  type RetryOperation,
+} from "./retry.js";
 export {
   publishEvaluationScore,
   syncRunScores,

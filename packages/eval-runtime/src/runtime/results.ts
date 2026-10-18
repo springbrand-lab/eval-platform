@@ -42,7 +42,7 @@ export function resultInstruction(input: {
   if (input.submission === undefined) {
     return `Finish by writing one JSON value to ${input.resultPath}, following the JSON Schema at ${input.schemaPath}. ${finalReply}`;
   }
-  return `Finish by calling the ${EVALUATION_SUBMIT_TOOL} tool with evaluationId "${input.submission.evaluationId}", submitToken "${input.submission.token}" and result set to one JSON value following the JSON Schema at ${input.schemaPath}. Do not write a result file. If the tool rejects the result, correct it and call the tool again; do not re-evaluate. If the tool is unavailable, say so. After the tool accepts the result, end with a short summary.`;
+  return `Finish by calling the ${EVALUATION_SUBMIT_TOOL} MCP tool directly with evaluationId "${input.submission.evaluationId}", submitToken "${input.submission.token}" and result set to one JSON value following the JSON Schema at ${input.schemaPath}. Do not invoke it through codemode or the execution tool, and do not write a result file. If the tool rejects the result, correct it and call the MCP tool again; do not re-evaluate. If the tool is unavailable, say so. After the tool accepts the result, end with a short summary.`;
 }
 
 /** The last fenced JSON block that parses, else the whole reply when it is JSON; the raw text is kept for Metrics. */

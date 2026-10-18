@@ -1,8 +1,34 @@
 import { describe, expect, it } from "vitest";
 import { RuntimeInputError } from "./errors.js";
-import { createRetryController, DEFAULT_RETRY_POLICY } from "./retry.js";
+import { createRetryController, DEFAULT_RETRY_POLICY, retryIdempotentOperation } from "./retry.js";
 
 describe("retry controller", () => {
+  it("retries a shared idempotent operation with the fixed transient budget", async () => {
+    let calls = 0;
+    const delays: number[] = [];
+    const result = await retryIdempotentOperation({
+      operation: "persistence",
+      run: async () => {
+        calls += 1;
+        if (calls <= 7) throw new Error("temporary database failure");
+        return "saved";
+      },
+      sleep: async (milliseconds) => { delays.push(milliseconds); },
+    });
+
+    expect(result).toBe("saved");
+    expect(calls).toBe(8);
+    expect(delays).toEqual([250, 500, 1_000, 2_000, 4_000, 8_000, 10_000]);
+  });
+
+  it("does not retry an operation that marks its failure as permanent", async () => {
+    const run = async () => { throw Object.assign(new Error("invalid facts"), { retryable: false }); };
+
+    await expect(retryIdempotentOperation({
+      operation: "persistence", run, sleep: async () => undefined,
+    })).rejects.toThrow("invalid facts");
+  });
+
   it("uses seven transient retries with a bounded backoff near thirty seconds", async () => {
     const controller = createRetryController();
     const decisions = await Promise.all(Array.from({ length: 8 }, (_, index) => controller.decide({
