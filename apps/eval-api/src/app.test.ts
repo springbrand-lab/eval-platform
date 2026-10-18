@@ -559,11 +559,11 @@ it("routes collection requests to the scoped queue command without Run admission
  it("returns lightweight Run evaluation records without raw resource or output payloads", async () => {
   const app = setup();
   const evaluation = { evaluationId: "e-1", samplingId: "s-1", status: { status: "succeeded" }, chatId: "chat-1", attempts: [{ status: "completed", submissionId: "submission-1", resources: { snapshot: { telemetryEvents: ["x".repeat(11 * 1024 * 1024)] } } }], output: { structuredOutput: { content: "large output" } } };
-  app.services.projectRuns.readRun.mockResolvedValue({ run: { runId: "run-1" }, evaluations: [evaluation] });
+  app.services.projectRuns.readRun.mockResolvedValue({ run: { runId: "run-1" }, samplings: [{ samplingId: "s-1", execution: { status: "succeeded" } }], evaluations: [evaluation] });
   const response = await app.request("/api/projects/project-1/runs/run-1/evaluations", authorized());
   expect(response.status).toBe(200);
   const text = await response.text();
   expect(text.length).toBeLessThan(2000);
-  expect(JSON.parse(text).msg.evaluations).toEqual([{ evaluationId: "e-1", samplingId: "s-1", status: { status: "succeeded" }, chatId: "chat-1", attempts: [{ status: "completed", submissionId: "submission-1" }] }]);
+  expect(JSON.parse(text).msg.evaluations).toEqual([{ evaluationId: "e-1", samplingId: "s-1", status: { status: "succeeded" }, execution: { status: "succeeded" }, chatId: "chat-1", attempts: [{ status: "completed", submissionId: "submission-1" }] }]);
   expect(evaluation.attempts[0]!.resources).toBeDefined();
 });

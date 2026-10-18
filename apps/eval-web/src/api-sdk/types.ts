@@ -58,6 +58,8 @@ export type {
   StageStatistics,
 } from "@eval-platform/eval-metrics";
 
+export type RunEvaluation = EvaluationRecord & Pick<Sampling, "execution">;
+
 export interface Me {
   readonly id: string;
   readonly role: "user" | "admin" | "super_admin";

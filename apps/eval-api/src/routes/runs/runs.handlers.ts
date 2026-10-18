@@ -55,11 +55,13 @@ export const getProjectRun: AppRouteHandler<typeof routes.getProjectRun> = async
 
 export const listProjectRunEvaluations: AppRouteHandler<typeof routes.listProjectRunEvaluations> = async (c) => {
   const { projectId, runId } = c.req.valid("param");
-  const { evaluations } = await requireProjectRun(c.var.services, projectId, runId);
-  return ok(c, { evaluations: evaluations.map(({ output: _output, attempts, ...record }) => ({
-    ...record,
-    attempts: attempts.map(({ resources: _resources, ...attempt }) => attempt),
-  })) });
+  const { evaluations, samplings } = await requireProjectRun(c.var.services, projectId, runId);
+  const executionBySamplingId = new Map(samplings.map((sampling) => [sampling.samplingId, sampling.execution]));
+  return ok(c, { evaluations: evaluations.map(({ output: _output, attempts, ...record }) => {
+    const execution = executionBySamplingId.get(record.samplingId);
+    if (!execution) throw new Error(`Run ${runId} is missing Sampling ${record.samplingId}`);
+    return { ...record, execution, attempts: attempts.map(({ resources: _resources, ...attempt }) => attempt) };
+  }) });
 };
 
 export const getSampling: AppRouteHandler<typeof routes.getSampling> = async (c) =>

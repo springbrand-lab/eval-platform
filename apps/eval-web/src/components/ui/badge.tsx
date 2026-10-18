@@ -44,8 +44,8 @@ const STATUS: Record<string, { label: string; tone: Tone }> = {
 };
 
 /** Status is shown as text and colour together, never colour alone. */
-export function StatusBadge({ status, className }: { status: string | null | undefined; className?: string }) {
+export function StatusBadge({ status, className, label }: { status: string | null | undefined; className?: string; label?: string }) {
   if (!status) return <Badge className={className}>—</Badge>;
   const entry = STATUS[status] ?? { label: status, tone: "neutral" as const };
-  return <Badge tone={entry.tone} dot className={className}>{entry.label}</Badge>;
+  return <Badge tone={entry.tone} dot className={className}>{label ?? entry.label}</Badge>;
 }

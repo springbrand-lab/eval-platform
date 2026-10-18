@@ -37,7 +37,7 @@ describe("retry controller", () => {
       attemptNumber: index + 1,
     })));
 
-    expect(DEFAULT_RETRY_POLICY).toEqual({ maxRestarts: 2, initialBackoffMs: 250, maxBackoffMs: 10_000 });
+    expect(DEFAULT_RETRY_POLICY).toEqual({ maxRestarts: 4, initialBackoffMs: 250, maxBackoffMs: 10_000 });
     expect(decisions.slice(0, 7)).toEqual([
       { shouldRetry: true, reason: "network", backoffMs: 250 },
       { shouldRetry: true, reason: "network", backoffMs: 500 },

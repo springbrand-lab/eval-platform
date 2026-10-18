@@ -59,7 +59,7 @@ export function ProjectStatistics({ summary }: { summary: MetricSummary }) {
                 <StageStat label="成功" value={stage.statuses.succeeded} tone="success" />
                 <StageStat label="失败" value={stage.statuses.failed} tone={stage.statuses.failed > 0 ? "danger" : "neutral"} />
                 <StageStat label="取消" value={stage.statuses.cancelled} />
-                <StageStat label="未结束" value={stage.records - stage.terminalRecords} tone={stage.records - stage.terminalRecords > 0 ? "warning" : "neutral"} />
+                <StageStat label={title === "执行 Agent" ? "执行中" : "评估中"} value={stage.records - stage.terminalRecords} tone={stage.records - stage.terminalRecords > 0 ? "warning" : "neutral"} />
                 <StageStat label="尝试" value={stage.attempts} />
                 <StageStat label="重启" value={stage.restarts} />
               </span>

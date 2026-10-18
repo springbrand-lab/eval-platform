@@ -120,14 +120,15 @@ const MISSING = { "not-succeeded": "评估未成功", "invalid-output": "结果�
 export function SummaryCards({ summary, children }: { summary: MetricSummary; children?: ReactNode }) {
   const execution = summary.execution;
   const evaluation = summary.evaluation;
-  const running = execution.records - execution.terminalRecords;
+  const executionInProgress = execution.records - execution.terminalRecords;
+  const evaluationInProgress = evaluation.records - evaluation.terminalRecords;
   return <div className="flex flex-col gap-6">
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
       <MetricCard label="采样" value={formatNumber(summary.counts.samplings)} hint={`${summary.counts.projectSamples} 条样本 · ${summary.counts.evaluations} 个评估`} />
       <MetricCard label="执行成功率" value={formatPercent(execution.successRate)} tone={execution.statuses.failed > 0 ? "warning" : undefined}
-        hint={`成功 ${execution.statuses.succeeded} · 失败 ${execution.statuses.failed} · 未结束 ${running}`} />
+        hint={`成功 ${execution.statuses.succeeded} · 失败 ${execution.statuses.failed} · 执行中 ${executionInProgress}`} />
       <MetricCard label="评估成功率" value={formatPercent(evaluation.successRate)} tone={evaluation.statuses.failed > 0 ? "warning" : undefined}
-        hint={`成功 ${evaluation.statuses.succeeded} · 失败 ${evaluation.statuses.failed}`} />
+        hint={`成功 ${evaluation.statuses.succeeded} · 失败 ${evaluation.statuses.failed} · 评估中 ${evaluationInProgress}`} />
       <MetricCard label="积分消耗" value={<AgentMetricPair execution={summary.executionAgent.costs.chargedUnits} evaluation={summary.evaluationAgents.costs.chargedUnits} />} />
       <MetricCard label="Token" value={<AgentMetricPair execution={summary.executionAgent.tokens.total} evaluation={summary.evaluationAgents.tokens.total} format={formatCompact} />} />
     </div>

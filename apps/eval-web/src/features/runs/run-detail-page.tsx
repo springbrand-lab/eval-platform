@@ -5,7 +5,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { getProjectOverview, metricKeys } from "@/api-sdk/metrics-api";
 import { listRunEvaluations, runKeys, syncRunScores } from "@/api-sdk/runs-api";
-import type { EvaluationRecord } from "@/api-sdk/types";
+import type { EvaluationRecord, RunEvaluation } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,7 @@ import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
 import { formatDateTime, OPERATION_LABELS } from "@/lib/format";
 import { OutputFields } from "@/features/metrics/summary";
 import { ResourceMetrics, stageStatusFor } from "@/features/metrics/resource-metrics";
-import { isFinished, runPhaseLabel } from "./run-status";
+import { isFinished, runPhaseLabel, stageProgressLabel } from "./run-status";
 import { POLL_MS, useRun } from "./use-run-polling";
 import { useProject } from "@/features/projects/use-project";
 import { StopRunDialog, type StopRunTarget } from "./stop-run-dialog";
@@ -26,6 +26,15 @@ export function ScoreSyncBadge({ record }: { record: EvaluationRecord }) {
   return record.scoreSync.status === "synced"
     ? <Badge tone="success">已同步</Badge>
     : <span title={record.scoreSync.lastError}><Badge tone="danger">同步失败</Badge></span>;
+}
+
+function RunEvaluationStatus({ executionStatus, evaluationStatus }: { executionStatus: string; evaluationStatus: string }) {
+  const executionLabel = stageProgressLabel("execution", executionStatus);
+  const evaluationLabel = stageProgressLabel("evaluation", evaluationStatus);
+  const label = executionLabel ?? evaluationLabel;
+  const activeStatus = executionLabel === undefined ? evaluationStatus : executionStatus;
+  const status = label === undefined && evaluationStatus === "queued" && executionStatus !== "succeeded" ? executionStatus : activeStatus;
+  return <StatusBadge status={status} label={label ?? undefined} />;
 }
 
 export function RunDetailPage({ projectId, runId }: { projectId: string; runId: string }) {
@@ -58,6 +67,7 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
   const snapshot = run.data?.run;
   const records = evaluations.data?.evaluations ?? [];
   const unsynced = records.filter((record) => record.status.status === "succeeded" && record.scoreSync?.status !== "synced").length;
+  const inProgress = (stage: { records: number; terminalRecords: number }) => stage.records - stage.terminalRecords;
 
   return (
     <Page>
@@ -79,20 +89,20 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
             <span>{OPERATION_LABELS[snapshot.operation]}</span>
             <span>采样 <strong className="font-medium text-text-strong">{snapshot.samplingIds.length}</strong></span>
             <span>评估 <strong className="font-medium text-text-strong">{snapshot.evaluationIds.length}</strong></span>
-            {overview.data && <><span>执行成功 {overview.data.summary.execution.statuses.succeeded}</span><span>评估成功 {overview.data.summary.evaluation.statuses.succeeded}</span><span>有效结果 {overview.data.summary.evaluationOutputs.validation.valid}</span></>}
+            {overview.data && <><span>执行成功 {overview.data.summary.execution.statuses.succeeded}</span><span>执行中 {inProgress(overview.data.summary.execution)}</span><span>评估成功 {overview.data.summary.evaluation.statuses.succeeded}</span><span>评估中 {inProgress(overview.data.summary.evaluation)}</span><span>有效结果 {overview.data.summary.evaluationOutputs.validation.valid}</span></>}
           </div>
           {snapshot.stopRequested && !isFinished(snapshot.status) && <Notice tone="warning">正在停止：正在中断已运行的 Agent，并收集已产生的结果。</Notice>}
           <Card>
             <div className="flex items-center justify-between border-b border-border px-3 py-2"><h2 className="text-xs font-semibold">评估列表</h2><span className="text-[11px] text-text-muted">点击记录查看采样结果</span></div>
             {evaluations.isPending ? <LoadingBlock /> : evaluations.error ? <div className="p-3"><ErrorBlock error={evaluations.error} /></div> : (
-              <DataTable<EvaluationRecord>
+              <DataTable<RunEvaluation>
                 rows={records}
                 rowKey={(row) => row.evaluationId}
                 onRowClick={(row) => void navigate({ to: "/projects/$projectId/samplings/$samplingId", params: { projectId, samplingId: row.samplingId } })}
                 empty={<p className="px-3 py-4 text-xs text-text-muted">这个 Run 没有评估。</p>}
                 columns={[
                   { key: "sampling", header: "采样", cell: (row) => <CopyId value={row.samplingId} /> },
-                  { key: "status", header: "状态", cell: (row) => <StatusBadge status={row.status.status} />, sortValue: (row) => row.status.status },
+                  { key: "status", header: "状态", cell: (row) => <RunEvaluationStatus executionStatus={row.execution.status} evaluationStatus={row.status.status} />, sortValue: (row) => row.status.status },
                   { key: "result", header: "异常信息", cell: (row) => <span className="line-clamp-2 max-w-xl text-text-muted">{row.status.lastError ?? "—"}</span> },
                   { key: "sync", header: "Langfuse", cell: (row) => <ScoreSyncBadge record={row} /> },
                   { key: "attempts", header: "尝试", align: "right", cell: (row) => row.attempts.length },

@@ -184,7 +184,7 @@ Each Run is chosen per request: `operation` is `execution`, `pipeline` or `evalu
 | `POST /api/projects/{projectId}/runs/{runId}/stop` | No body / `202 {runId, stopRequested:true}` |
 | `POST /api/projects/{projectId}/runs/{runId}/score-sync` | No body / `{synced, failed, skipped}`; see [Run admission and stop](#run-admission-and-stop) |
 | `GET /api/projects/{projectId}/runs/{runId}` | `{run: RunSnapshot}` |
-| `GET /api/projects/{projectId}/runs/{runId}/evaluations` | `{evaluations: EvaluationRecord[]}` in the Run's admission order; list records omit optional `output` and attempt `resources` payloads (available from the Evaluation detail endpoint) |
+| `GET /api/projects/{projectId}/runs/{runId}/evaluations` | `{evaluations: (EvaluationRecord & { execution: SamplingStageState })[]}` in the Run's admission order; each row includes the linked Sampling execution status, while optional `output` and attempt `resources` payloads are omitted (available from the Evaluation detail endpoint) |
 
 Expansion and replacement follow [Run admission](architecture.md#run-准入与独立评估). On the wire, evaluation `targets.projectSampleIds` is always empty and `targets.samplingIds` lists the Samplings to evaluate.
 

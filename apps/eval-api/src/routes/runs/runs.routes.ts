@@ -1,5 +1,5 @@
 import { createRoute, z } from "@hono/zod-openapi";
-import { RUN_OPERATIONS, type EvaluationRecord, type RunHandle, type RunSnapshot } from "@eval-platform/eval-contracts";
+import { RUN_OPERATIONS, type EvaluationRecord, type RunHandle, type RunSnapshot, type Sampling } from "@eval-platform/eval-contracts";
 import { httpErrorSchema } from "@eval-platform/eval-contracts/http-errors";
 import { platformIdSchema } from "@eval-platform/eval-dataset";
 import type { RunPreview, SamplingSnapshot } from "@eval-platform/eval-runtime";
@@ -21,6 +21,8 @@ import {
 const runHandleSchema = z.custom<RunHandle>();
 const runSnapshotSchema = z.custom<RunSnapshot>();
 const evaluationSchema = z.custom<EvaluationRecord>();
+export type RunEvaluationView = EvaluationRecord & Pick<Sampling, "execution">;
+const runEvaluationSchema = z.custom<RunEvaluationView>();
 const samplingSchema = z.custom<SamplingSnapshot>();
 const currentRunSchema = z.object({ runId: z.string(), stopRequested: z.literal(true).exactOptional() });
 const projectParams = z.object({ projectId: entityIdSchema });
@@ -160,7 +162,7 @@ export const listProjectRunEvaluations = createRoute({
   summary: "List the Run's Evaluation records in admission order",
   request: { params: projectRunParams },
   responses: {
-    200: jsonContent(responseSchema(z.object({ evaluations: z.array(evaluationSchema).readonly() })), "Evaluations"),
+    200: jsonContent(responseSchema(z.object({ evaluations: z.array(runEvaluationSchema).readonly() })), "Evaluations"),
     ...errorResponses,
     ...notFoundResponse,
   },

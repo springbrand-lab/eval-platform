@@ -6,7 +6,7 @@ import { requireObject } from "./input.js";
 const TRANSIENT_RETRY_COUNT = 7;
 
 export const DEFAULT_RETRY_POLICY = {
-  maxRestarts: 2,
+  maxRestarts: 4,
   initialBackoffMs: 250,
   maxBackoffMs: 10_000,
 } as const satisfies RetryPolicy;
