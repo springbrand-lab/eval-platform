@@ -2,6 +2,7 @@ import {
   Button, Collapsible, CollapsibleContent, CollapsibleTrigger,
   Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow,
 } from "@springbrand/site-block";
+import { SAMPLING_STATUSES, type SamplingStatus } from "@eval-platform/eval-contracts";
 import { Check, ChevronDown, Clock3, Coins, ListChecks, Sigma } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import type { OperationStatistics, ResourceDistribution, ResourceStatistics, StageStatistics } from "@/api-sdk/types";
@@ -14,6 +15,12 @@ import { COST_FIELDS } from "./metric-labels";
 import { ResourceDistributionPanel } from "./resource-distribution";
 import { StatisticsTable } from "./statistics-table";
 import { ToolStatisticsTable } from "./tool-statistics-table";
+
+/** A stage badge is unambiguous only when every record in the scope has the same status. */
+export function stageStatusFor(stage: StageStatistics): SamplingStatus | undefined {
+  const statuses = SAMPLING_STATUSES.filter((status) => stage.statuses[status] > 0);
+  return statuses.length === 1 ? statuses[0] : undefined;
+}
 
 function MetricDisclosure({ title, description, children, expanded = false }: { title: string; description: string; children: ReactNode; expanded?: boolean }) {
   if (expanded) return <section className="min-w-0 space-y-2 border-t border-border pt-3"><h3 className="text-xs font-semibold">{title}</h3><p className="text-xs text-text-muted">{description}</p>{children}</section>;
@@ -35,7 +42,7 @@ function OperationsTable({ label, caption, rows, emptyLabel = "暂无可用数�
     <Table aria-label={label} className="text-[13px]">
       <TableCaption className="m-0 border-t border-border px-4 py-2 text-left text-xs">{caption}</TableCaption>
       <TableHeader className="bg-surface-muted/60"><TableRow>
-        {["指标", "次数", "成功", "失败", "取消", "进行中", "未知"].map((name, index) => <TableHead key={name} scope="col" className={index === 0 ? "px-4 text-xs" : "text-right text-xs"}>{name}</TableHead>)}
+        {["指标", "次数", "成功", "失败", "取消", "未闭合", "未知"].map((name, index) => <TableHead key={name} scope="col" className={index === 0 ? "px-4 text-xs" : "text-right text-xs"}>{name}</TableHead>)}
       </TableRow></TableHeader>
       <TableBody>{rows.length === 0 ? <TableRow><TableCell colSpan={7} className="px-4 py-6 text-center text-text-muted">{emptyLabel}</TableCell></TableRow> : rows.map(({ label: name, value }, index) => <TableRow key={`${name}-${index}`}>
         <TableHead scope="row" className="max-w-64 whitespace-normal break-words px-4 py-3 font-medium text-text-strong">{name}</TableHead>
@@ -60,7 +67,7 @@ function ToolMeasurementDetails({ trajectory, compact }: Pick<ResourceStatistics
   </MetricDisclosure>;
 }
 
-function TrajectoryMetrics({ trajectory, modelRequests, showToolMeasurements, compact }: Pick<ResourceStatistics, "trajectory" | "modelRequests"> & { showToolMeasurements: boolean; compact: boolean }) {
+function TrajectoryMetrics({ trajectory, modelRequests, stageStatus, showToolMeasurements, compact }: Pick<ResourceStatistics, "trajectory" | "modelRequests"> & { stageStatus?: SamplingStatus; showToolMeasurements: boolean; compact: boolean }) {
   const operations = [
     { label: "处理轮（Turn）", value: trajectory.turns },
     { label: "思考命中轮", value: trajectory.thinkingTurnOperations },
@@ -69,7 +76,7 @@ function TrajectoryMetrics({ trajectory, modelRequests, showToolMeasurements, co
     { label: "工具调用", value: trajectory.tools },
   ];
   return <section aria-label="操作次数" className="flex min-w-0 flex-col gap-4">
-    <div><h3 className="text-sm font-semibold text-text-strong">操作次数</h3><p className="mt-1 text-xs text-text-muted">先看处理轮和子操作发生了多少次，再按工具查看具体结果。</p></div>
+    <div><div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-semibold text-text-strong">操作次数</h3>{stageStatus && <><span className="text-xs text-text-muted">阶段状态</span><StatusBadge status={stageStatus} /></>}</div><p className="mt-1 text-xs text-text-muted">下表是底层遥测操作统计；执行/评估 Agent 的阶段状态单独展示，未闭合操作不代表 Agent 仍在运行。</p></div>
     <OperationsTable label="操作次数" caption="处理轮、模型请求和工具调用分别计数；思考和内容是处理轮的命中标记，状态列只适用于可追踪的操作。" rows={operations} />
     <div className="space-y-3"><div><h4 className="text-sm font-semibold text-text-strong">按工具查看</h4><p className="mt-1 text-xs text-text-muted">每种工具一行，查看调用次数和结果状态。</p></div>
       <ToolStatisticsTable tools={trajectory.byTool} variant="operations" />
@@ -145,9 +152,10 @@ function PanelSelector({ value, onChange }: { value: MetricPanel; onChange: (val
 }
 
 /** Resource details are organized by the thing being measured; Agent scope stays fixed at the current entry. */
-export function ResourceMetrics({ statistics, distribution, durations, showCoverage = true, compact = false }: {
+export function ResourceMetrics({ statistics, distribution, durations, stageStatus, showCoverage = true, compact = false }: {
   statistics: ResourceStatistics; distribution?: ResourceDistribution;
   durations?: Pick<StageStatistics, "agentDurationMs" | "attemptDurationMs">;
+  stageStatus?: SamplingStatus;
   showCoverage?: boolean;
   compact?: boolean;
 }) {
@@ -156,7 +164,7 @@ export function ResourceMetrics({ statistics, distribution, durations, showCover
   const content = panel === "costs" ? <div className="flex min-w-0 flex-col gap-5"><CostMetrics statistics={statistics} compact={compact} />{distribution && <ResourceDistributionPanel distribution={distribution} statistics={statistics} section="costs" />}</div>
     : panel === "tokens" ? <div className="flex min-w-0 flex-col gap-5"><TokenMetrics statistics={statistics} />{distribution && <ResourceDistributionPanel distribution={distribution} statistics={statistics} section="tokens" />}</div>
       : panel === "operations" ? <div className="flex min-w-0 flex-col gap-5">
-        <TrajectoryMetrics trajectory={statistics.trajectory} modelRequests={statistics.modelRequests} showToolMeasurements={!distribution} compact={compact} />
+        <TrajectoryMetrics trajectory={statistics.trajectory} modelRequests={statistics.modelRequests} stageStatus={stageStatus} showToolMeasurements={!distribution} compact={compact} />
         {distribution && <ResourceDistributionPanel distribution={distribution} statistics={statistics} section="operations" />}
       </div>
         : <DurationMetrics statistics={statistics} durations={durations} />;

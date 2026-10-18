@@ -1,5 +1,5 @@
 import type { MetricSummary, ResourceStatistics, StageStatistics } from "@/api-sdk/types";
-import { ResourceMetrics } from "@/features/metrics/resource-metrics";
+import { ResourceMetrics, stageStatusFor } from "@/features/metrics/resource-metrics";
 import { MetricValue } from "@/features/metrics/metric-value";
 import { ModelName } from "@/features/metrics/token-metrics";
 import { ToolStatisticsTable } from "@/features/metrics/tool-statistics-table";
@@ -66,7 +66,7 @@ export function ProjectStatistics({ summary }: { summary: MetricSummary }) {
           </div>
           <div className="min-w-0 space-y-4 p-3">
             <AgentOverview title={title} statistics={statistics} stage={stage} />
-            <ResourceMetrics compact statistics={statistics} distribution={statistics.distribution} durations={stage} />
+            <ResourceMetrics compact statistics={statistics} distribution={statistics.distribution} durations={stage} stageStatus={stageStatusFor(stage)} />
           </div>
         </section>)}
       </div>

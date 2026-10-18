@@ -27,6 +27,19 @@ describe("resource statistics", () => {
     expect(result.trajectory.turns.count).toEqual({ value: null, coverage: "unavailable" });
   });
 
+  it("classifies an unclosed operation from a terminal Attempt as unknown", () => {
+    const result = aggregateResources([{
+      ...resourceInput({ telemetryEvents: [
+        telemetry("turn-start", "turn.started", "turn-1"),
+        telemetry("turn-end", "turn.finished", "turn-1", { outcome: "completed" }, 2_000),
+        telemetry("generation-start", "generation.started", "generation-1", {}, 1_000, "session-1", "turn-1"),
+      ] }),
+      canEmitTelemetry: false,
+    }]);
+    expect(result.modelRequests).toMatchObject({ count: { value: 1 }, inProgress: 0, unknown: 1 });
+    expect(result.trajectory.turns).toMatchObject({ count: { value: 1 }, completed: 1, inProgress: 0, unknown: 0 });
+  });
+
   it("marks observed values partial when another attempt's resources are missing", () => {
     const result = aggregateResources([
       resourceInput({ usageEvents: [usage("usage-1")] }),

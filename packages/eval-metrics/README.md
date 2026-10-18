@@ -56,7 +56,7 @@ Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sam
 
 轨迹指标来自每个 Attempt 已保存的 SP Telemetry 事件，跨 Attempt/分页合并后按 `sessionId + operationId` 归并操作：
 
-- Turn 数及 completed/failed/cancelled/inProgress/unknown；
+- Turn 数及 completed/failed/cancelled/inProgress/unknown；`inProgress` 只表示该操作所属的 Attempt 仍处于活跃状态。Attempt 已进入终态但遥测缺少对应终端事件时，操作归为 `unknown`；这类遥测缺口不改变执行或评估阶段本身的终态。
 - 按 `toolName` 的调用数、结果、耗时，输入长度（`tool.started` 的 `payload.input`）与返回长度（`tool.finished` 的 `payload.output`，缺失时用 `response`，不相加），均为规范 JSON 的 UTF-8 字节数；缺失或被 SP 脱敏（`[CONTENT OMITTED]`/`[REDACTED]`）记为 missing；
 - 思考轮：Turn 或其关联 generation 的输出中出现 `thinking`、`signature` 或 `*Signature` 标记；内容轮：输出中出现 `content` 标记。一个 Turn 可以同时属于思考轮和内容轮，工具调用也单独计入工具操作，因此这些分类的数量不要求相加等于 Turn 总数。思考轮 Token 和内容轮 Token 分别汇总明确归属到对应分类的 `generation.finished` 的 input/output/total；同一 generation 同时命中两类时两边都会保留，缺少关联时为 partial/unavailable，不用减法推算。
 

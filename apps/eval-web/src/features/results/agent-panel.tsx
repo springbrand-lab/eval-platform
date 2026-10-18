@@ -69,7 +69,7 @@ export function AgentPanel({ title, agent, observe }: {
         <details className="rounded-lg border border-border">
           <summary className="cursor-pointer px-4 py-3 text-sm font-medium">资源与尝试明细</summary>
           <div className="flex flex-col gap-5 border-t border-border p-4">
-        <ResourceMetrics statistics={resources} />
+        <ResourceMetrics statistics={resources} stageStatus={agent.stage.status} />
         {agent.attempts.items.length > 0 && (
           <div>
             <p className="mb-2 text-xs font-semibold text-text-muted">尝试（{agent.attempts.count}，重启 {agent.attempts.restarts} 次）</p>

@@ -169,7 +169,7 @@ function inspectOperation(operation: OperationEvents, diagnostics: ResourceDiagn
   }
   const outcome = outcomes.size === 1 ? [...outcomes][0] : undefined;
   const status: OperationStatus = !terminal
-    ? "inProgress"
+    ? events.some((entry) => entry.canEmitTelemetry) ? "inProgress" : "unknown"
     : outcome === "completed" || outcome === "failed" || outcome === "cancelled" ? outcome : "unknown";
   const duration = operationDuration(start, terminal, diagnostics);
   const distinct = (read: (entry: FactEntry) => string | undefined) => new Set(events.map(read).filter((value) => value !== undefined));

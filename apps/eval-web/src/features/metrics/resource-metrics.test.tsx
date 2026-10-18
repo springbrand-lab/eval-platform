@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { EvaluationOutputSummary } from "@/api-sdk/types";
 import { render } from "@/test/render";
 import { aggregatedResourceStatistics, agentMetric, metricSummary, resourceStatistics } from "@/test/metrics";
 import { AgentPanel } from "@/features/results/agent-panel";
-import { ResourceMetrics } from "./resource-metrics";
-import { SummaryCards } from "./summary";
+import { ResourceMetrics, stageStatusFor } from "./resource-metrics";
+import { OutputFields, SummaryCards } from "./summary";
 
 function fixture() {
   const base = resourceStatistics();
@@ -28,6 +29,18 @@ function fixture() {
 }
 
 describe("Agent resource and trajectory categories", () => {
+  it("keeps the Agent stage status separate from telemetry operation outcomes", async () => {
+    const summary = metricSummary(resourceStatistics(), resourceStatistics()).execution;
+    expect(stageStatusFor(summary)).toBe("succeeded");
+    expect(stageStatusFor({ ...summary, records: 2, statuses: { ...summary.statuses, running: 1 } })).toBeUndefined();
+    const view = await render(<ResourceMetrics statistics={fixture()} stageStatus="succeeded" />);
+    try {
+      expect(view.container.textContent).toContain("阶段状态");
+      expect(view.container.textContent).toContain("成功");
+      expect(view.container.textContent).toContain("未闭合");
+    } finally { await view.unmount(); }
+  });
+
   it("shows operation outcomes, turn labels and per-tool details in the operation panel", async () => {
     const view = await render(<ResourceMetrics statistics={fixture()} />);
     try {
@@ -65,6 +78,40 @@ describe("Agent resource and trajectory categories", () => {
     } finally { await view.unmount(); }
   });
 
+  it("puts product-facing evaluation conclusions before technical details", async () => {
+    const outputs: EvaluationOutputSummary = {
+      ...metricSummary(resourceStatistics(), resourceStatistics()).evaluationOutputs,
+      evaluations: 16,
+      validation: { valid: 16, invalid: 0, unavailable: 0 },
+      fields: [
+        {
+          jsonPointer: "/quality", title: "页面质量", description: "依据交付物的完整度与可用性评分", kinds: ["number"],
+          observationCount: 16, contributingEvaluationCount: 16, missingEvaluationCount: 0,
+          numeric: { count: 16, missing: 0, total: 1328, min: 70.55, max: 95.45, mean: 83, variance: 58.5565, median: 83 },
+          distribution: [], coverage: "complete", diagnostics: [],
+        },
+        {
+          jsonPointer: "/passed", title: "任务完成", description: "产物是否满足任务的主要要求", kinds: ["boolean"],
+          observationCount: 16, contributingEvaluationCount: 16, missingEvaluationCount: 0, numeric: null,
+          distribution: [{ value: true, count: 15, share: 15 / 16, evaluations: 15 }, { value: false, count: 1, share: 1 / 16, evaluations: 1 }],
+          coverage: "complete", nullCount: 0, diagnostics: [],
+        },
+      ],
+    };
+    const view = await render(<OutputFields outputs={outputs} />);
+    try {
+      const text = view.container.textContent!;
+      expect(text).toContain("评估指标概览");
+      expect(text).toContain("有效结果");
+      expect(text).toContain("93.8%");
+      expect(text).toContain("页面质量");
+      expect(text).toContain("任务完成");
+      expect(text).toContain("83");
+      expect(text).toContain("是");
+      expect([...view.container.querySelectorAll("details")].every((details) => !details.open)).toBe(true);
+    } finally { await view.unmount(); }
+  });
+
   it("uses the same categories for each Agent and the four-level summary, with separate roles", async () => {
     const execution = fixture();
     const evaluation = resourceStatistics();
@@ -87,7 +134,7 @@ describe("Agent resource and trajectory categories", () => {
     try {
       const text = view.container.textContent!;
       expect(text).toContain("下一级实验结果");
-      expect(text.indexOf("评估指标统计")).toBeLessThan(text.indexOf("下一级实验结果"));
+      expect(text.indexOf("评估指标概览")).toBeLessThan(text.indexOf("下一级实验结果"));
       expect(text.indexOf("下一级实验结果")).toBeLessThan(text.indexOf("执行 Agent 资源与轨迹"));
       const resources = [...view.container.querySelectorAll("details")].find((item) => item.querySelector("summary")?.textContent?.includes("资源与轨迹统计"));
       expect(resources).toBeDefined();

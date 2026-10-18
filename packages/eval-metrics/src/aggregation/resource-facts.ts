@@ -11,6 +11,8 @@ export interface FactEntry {
   readonly fact: JsonRecord;
   readonly metricProjection?: JsonRecord;
   readonly ownerUserId: string;
+  /** True when the Attempt that supplied this fact can still emit telemetry. */
+  readonly canEmitTelemetry: boolean;
   readonly scope: AgentResourceScope;
 }
 
@@ -23,6 +25,7 @@ export interface FactStream {
 
 export interface OwnedSnapshot {
   readonly ownerUserId: string;
+  readonly canEmitTelemetry: boolean;
   readonly snapshot: AgentResourceSnapshot;
 }
 
@@ -105,14 +108,17 @@ export function readStream(
   let complete = collectionsComplete;
   let duplicates = 0;
   const byIdentity = new Map<string, FactEntry | null>();
-  for (const { ownerUserId, snapshot } of snapshots) {
+  for (const { ownerUserId, canEmitTelemetry, snapshot } of snapshots) {
     if (!snapshot.finalized || snapshot.coverage[stream] !== "complete") complete = false;
     for (const rawFact of snapshot[stream]) {
       const fact = stream === "telemetryEvents" ? record(rawFact.event) ?? rawFact : rawFact;
       const projection = stream === "telemetryEvents" ? record(rawFact.metricProjection) : undefined;
       const metricProjection = (projection?.version === 1 || projection?.version === 2 || projection?.version === TELEMETRY_PROJECTION_VERSION)
         && typeof projection.fingerprint === "string" ? projection : undefined;
-      const entry: FactEntry = { fact, ownerUserId, scope: snapshot.scope, ...(metricProjection ? { metricProjection } : {}) };
+      const entry: FactEntry = {
+        fact, ownerUserId, canEmitTelemetry, scope: snapshot.scope,
+        ...(metricProjection ? { metricProjection } : {}),
+      };
       const key = sourceIdentity(stream, ownerUserId, fact);
       if (key === undefined) {
         complete = false;

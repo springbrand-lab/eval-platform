@@ -15,7 +15,7 @@ import { CopyId } from "@/components/ui/data-display";
 import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
 import { formatDateTime, OPERATION_LABELS } from "@/lib/format";
 import { OutputFields } from "@/features/metrics/summary";
-import { ResourceMetrics } from "@/features/metrics/resource-metrics";
+import { ResourceMetrics, stageStatusFor } from "@/features/metrics/resource-metrics";
 import { isFinished, runPhaseLabel } from "./run-status";
 import { POLL_MS, useRun } from "./use-run-polling";
 import { useProject } from "@/features/projects/use-project";
@@ -103,7 +103,7 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
           {overview.error && <ErrorBlock error={overview.error} onRetry={() => void overview.refetch()} />}
           {overview.data && <>
             <details className="rounded-lg border border-border bg-surface">
-              <summary className="cursor-pointer px-3 py-2.5 text-xs font-medium">评估指标统计<span className="ml-3 font-normal text-text-muted">有效 {overview.data.summary.evaluationOutputs.validation.valid} · 无效 {overview.data.summary.evaluationOutputs.validation.invalid} · 未获得 {overview.data.summary.evaluationOutputs.validation.unavailable}</span></summary>
+              <summary className="cursor-pointer px-3 py-2.5 text-xs font-medium">评估指标概览<span className="ml-3 font-normal text-text-muted">有效 {overview.data.summary.evaluationOutputs.validation.valid} · 无效 {overview.data.summary.evaluationOutputs.validation.invalid} · 未获得 {overview.data.summary.evaluationOutputs.validation.unavailable}</span></summary>
               <div className="border-t border-border p-3"><OutputFields outputs={overview.data.summary.evaluationOutputs} /></div>
             </details>
             {([
@@ -111,7 +111,7 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
               ["评估 Agent", overview.data.summary.evaluationAgents, overview.data.summary.evaluation],
             ] as const).map(([title, statistics, stage]) => <details key={title} className="rounded-lg border border-border bg-surface">
               <summary className="cursor-pointer px-3 py-2.5 text-xs font-medium">{title} · 资源统计<span className="ml-3 font-normal text-text-muted">已结束 {stage.terminalRecords} / {stage.records}</span></summary>
-              <div className="border-t border-border p-3"><ResourceMetrics statistics={statistics} distribution={statistics.distribution} durations={stage} /></div>
+              <div className="border-t border-border p-3"><ResourceMetrics statistics={statistics} distribution={statistics.distribution} durations={stage} stageStatus={stageStatusFor(stage)} /></div>
             </details>)}
           </>}
           <details className="rounded-lg border border-border bg-surface">
