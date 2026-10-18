@@ -10,6 +10,8 @@ Eval 的内部管理界面：准备测试集与初始资源、上传评估结果
 
 Agent 新建与编辑直接复用 SP 同一份 `@springbrand/agent-config-editor`：行为、完整系统提示词、模型/思考强度、能力选择和排序、Skill/Reference 管理与预览。宿主只负责默认模板、当前用户、保存、revision 冲突、冻结副本只读及导航；不再提供 Slug 或配置 JSON 输入框。创建会话持有固定 Slug，失败重试通过 SP 创建重放校准；后台读取失败保留草稿。公共资源客户端经 `/api/agent-library` 访问当前 Eval SP，配置写入仍走 `/api/agent-configs`。错误由 Eval 目录解码，保留经过校验的 SP 编辑器领域码和删除阻挡详情。详见 [编辑器对齐](../../docs/agent-config-editor-alignment.md)。
 
+Agent 创建时必须选择“执行 Agent”或“评估 Agent”，用途写入 Eval 并在创建后固定；管理页可按用途筛选。新建 Project 的执行 Agent 和评估计划的评估 Agent 分别只请求对应用途，API 也会再次校验用途，不能依赖浏览器筛选绕过。
+
 Data 表单与 Schema 上传复用 `eval-dataset` 公开的严格 JSON 解析和输入校验；这些运行时入口随 Web 打包。上传与 Project 选择上限只从 API 的 `GET /api/input-limits` 读取，没有浏览器数值副本。
 
 文本导入共用 `useTextImport` 草稿：从文件选择/拖入事件开始清空旧内容，仅接受最新选择的提取与读取；手动编辑接管草稿，关闭窗口销毁草稿。FileDropzone 复用 `react-dropzone` 的校验与 `file-selector` 的公开提取接口，选择信号覆盖提取到解码的完整生命周期。读取中或失败时不能提交。创建、导入的响应未确认时刷新目录，先核对新增条目再提交，避免重复创建。

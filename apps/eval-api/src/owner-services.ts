@@ -5,6 +5,7 @@ import { createActiveOwnerAdmission } from "./active-owner-admission.js";
 import { createAgentConfigService } from "./agent-configs.js";
 import type { EvalDb } from "./db/client.js";
 import { createPostgresDatasetStore } from "./db/dataset.js";
+import { createPostgresAgentPurposeStore } from "./db/agent-purposes.js";
 import { createPostgresMetricsSource } from "./db/metrics.js";
 import { createPostgresObservationReader } from "./db/observation.js";
 import { createOutputSchemaCatalog } from "./db/output-schemas.js";
@@ -44,7 +45,9 @@ export function createOwnerServices({ db, sp, bundles, release, runQueue, publis
     const { admission, release: releaseAdmission } = admissions.acquire(ownerUserId);
     const projectStore = createPostgresProjectStore(db, ownerUserId);
     const outputSchemas = createOutputSchemaCatalog(db, ownerUserId);
-    const agentConfigs = createAgentConfigService({ ownerUserId, sessionToken, sp, projects: projectStore });
+    const agentConfigs = createAgentConfigService({
+      ownerUserId, sessionToken, sp, projects: projectStore, purposes: createPostgresAgentPurposeStore(db, ownerUserId),
+    });
     const readRun = createPostgresProjectRunReader(db, ownerUserId);
     const scores = publishScore === undefined ? undefined : {
       async syncRun(projectId: string, runId: string) {

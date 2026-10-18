@@ -1,3 +1,5 @@
+import type { AgentPurpose } from "@eval-platform/eval-contracts";
+
 /** A user-supplied catalog field (name, description, content, reference) is invalid. */
 export class CatalogInputError extends Error {
   constructor(message: string, readonly field?: string) {
@@ -43,6 +45,22 @@ export class AgentConfigFrozenError extends Error {
   constructor(readonly userAgentId: string) {
     super(`Agent Config ${userAgentId} is a frozen Project copy`);
     this.name = "AgentConfigFrozenError";
+  }
+}
+
+/** An editable Agent Config keeps its execution/evaluation purpose for its entire lifetime. */
+export class AgentConfigPurposeLockedError extends Error {
+  constructor(readonly userAgentId: string) {
+    super(`Agent Config ${userAgentId} purpose cannot be changed after creation`);
+    this.name = "AgentConfigPurposeLockedError";
+  }
+}
+
+/** A Project or evaluation plan selected an Agent whose immutable purpose is different. */
+export class AgentConfigPurposeMismatchError extends Error {
+  constructor(readonly userAgentId: string, readonly expected: AgentPurpose, readonly actual: AgentPurpose) {
+    super(`Agent Config ${userAgentId} is an ${actual} Agent, but ${expected} is required`);
+    this.name = "AgentConfigPurposeMismatchError";
   }
 }
 

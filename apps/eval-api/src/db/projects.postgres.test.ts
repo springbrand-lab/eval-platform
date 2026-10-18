@@ -21,6 +21,7 @@ import type { BundleDirectory } from "../sp/bundle-directory.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "../test-support.js";
 import type { PgBoss } from "pg-boss";
 import { createPostgresDatasetStore } from "./dataset.js";
+import { createPostgresAgentPurposeStore } from "./agent-purposes.js";
 import {
   AgentConfigFrozenError,
   OutputSchemaNotFoundError,
@@ -106,7 +107,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     const db = database.db;
     const store = createPostgresProjectStore(db, owner);
     const outputSchemas = createOutputSchemaCatalog(db, owner);
-    const agentConfigs = createAgentConfigService({ ownerUserId: owner, sessionToken: owner, sp: stub.sp, projects: store });
+    const agentConfigs = createAgentConfigService({ ownerUserId: owner, sessionToken: owner, sp: stub.sp, projects: store, purposes: createPostgresAgentPurposeStore(db, owner) });
     return {
       store, outputSchemas, agentConfigs,
       projects: createProjectService({ ownerUserId: owner, sourceBranch: release.sourceBranch, store, outputSchemas, agentConfigs, admission }),
@@ -134,7 +135,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     return {
       d1, d2, d3, first, second, schema,
       subject: stub.seed(owner, "Subject"),
-      evaluator: stub.seed(owner, "Evaluator"),
+      evaluator: stub.seed(owner, "Evaluator", { model: "Evaluator", mcpServers: [{ serverId: "eval-results" }] }),
     };
   }
 
@@ -716,7 +717,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
 
     const subjectCopy = firstView.execution.harness.agentConfig.userAgentId;
     expect((await agentConfigs.list()).map((config) => config.id).sort()).toEqual([subject, evaluator].sort());
-    expect((await agentConfigs.listAgents("evaluator")).map((agent) => agent.agentConfig.userAgentId).sort()).toEqual([subject, evaluator].sort());
+    expect((await agentConfigs.listAgents("evaluator", "evaluation")).map((agent) => agent.agentConfig.userAgentId).sort()).toEqual([evaluator]);
     await expect(agentConfigs.update(subjectCopy, { name: "edit" })).rejects.toBeInstanceOf(AgentConfigFrozenError);
     await expect(agentConfigs.remove(secondCopy)).rejects.toBeInstanceOf(AgentConfigFrozenError);
     await expect(agentConfigs.remove(firstCopy)).rejects.toBeInstanceOf(AgentConfigFrozenError);
@@ -744,7 +745,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     const service = createProjectService({
       ownerUserId: OWNER, sourceBranch: release.sourceBranch, store: racing,
       outputSchemas: createOutputSchemaCatalog(database.db, OWNER),
-      agentConfigs: createAgentConfigService({ ownerUserId: OWNER, sessionToken: OWNER, sp: stub.sp, projects: store }),
+      agentConfigs: createAgentConfigService({ ownerUserId: OWNER, sessionToken: OWNER, sp: stub.sp, projects: store, purposes: createPostgresAgentPurposeStore(database.db, OWNER) }),
       admission: planAdmission(OWNER),
     });
     await database.db.update(projectEvaluationPlans).set({ lockedAt: new Date() }).where(eq(projectEvaluationPlans.projectId, seeded.projectId));

@@ -2,6 +2,7 @@
 import type {
   AgentConfigRef,
   AgentObservationRef,
+  AgentPurpose,
   AgentRole,
   EvaluationOutputSchema,
   EvaluationRecord,
@@ -19,6 +20,7 @@ import type { ProjectSample, RunPreview } from "@eval-platform/eval-runtime";
 
 export type {
   AgentObservationRef,
+  AgentPurpose,
   AgentRole,
   Data,
   Dataset,
@@ -66,7 +68,9 @@ export type { UserAgentConfig as AgentConfig } from "@springbrand/agent-config-e
 export interface AgentOption {
   readonly agentConfig: AgentConfigRef;
   readonly name: string;
+  /** Existing Subject/Evaluator role choice; purpose is the immutable Eval classification. */
   readonly role: AgentRole;
+  readonly purpose: AgentPurpose | null;
 }
 
 export interface AgentPolicyInput {

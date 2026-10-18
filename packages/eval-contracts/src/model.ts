@@ -21,6 +21,8 @@ export type JsonValue =
 export type EvaluationOutputSchema = Readonly<Record<string, JsonValue>>;
 
 export type AgentRole = "subject" | "evaluator";
+/** The immutable purpose of an editable Agent Config. */
+export type AgentPurpose = "execution" | "evaluation";
 
 export const SAMPLING_STATUSES = ["queued", "starting", "running", "retrying", "succeeded", "failed", "cancelled"] as const;
 export type SamplingStatus = (typeof SAMPLING_STATUSES)[number];

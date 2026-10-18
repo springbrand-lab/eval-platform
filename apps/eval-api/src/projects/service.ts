@@ -171,11 +171,11 @@ export function createProjectService(input: {
     };
     const copies: string[] = [];
     try {
-      const subject = await agentConfigs.freeze(body.execution.userAgentId);
+      const subject = await agentConfigs.freeze(body.execution.userAgentId, "execution");
       copies.push(subject.userAgentId);
       let evaluation: { readonly copy: FrozenCopy; readonly plan: EvaluationPlan } | null = null;
       if (evaluationInput) {
-        const copy = await agentConfigs.freeze(evaluationInput.body.userAgentId);
+        const copy = await agentConfigs.freeze(evaluationInput.body.userAgentId, "evaluation");
         copies.push(copy.userAgentId);
         evaluation = { copy, plan: evaluationPlan(evaluationInput.body, copy, evaluationInput.outputSchema) };
       }
@@ -254,7 +254,7 @@ export function createProjectService(input: {
     async replaceEvaluationPlan(projectId: string, body: EvaluationPlanBody): Promise<ProjectView> {
       await store.requireEvaluationPlanEditable(projectId);
       const outputSchema = await schemaRef(body.outputSchemaId);
-      const evaluator = await agentConfigs.freeze(body.userAgentId);
+      const evaluator = await agentConfigs.freeze(body.userAgentId, "evaluation");
       let retired: string[];
       try {
         const plan = evaluationPlan(body, evaluator, outputSchema);

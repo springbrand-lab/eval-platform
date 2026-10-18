@@ -15,7 +15,7 @@ vi.mock("@/api-sdk/datasets-api", async (original) => ({ ...await original<objec
   listDatasetData: async () => mocks.members,
 }));
 vi.mock("@/api-sdk/agent-configs-api", async (original) => ({ ...await original<object>(),
-  listAgentOptions: async (role: string) => [{ name: role, agentConfig: { userAgentId: role } }],
+  listAgentOptions: async (role: string) => [{ name: role, agentConfig: { userAgentId: role }, role: role === "subject" ? "subject" : "evaluator", purpose: role === "subject" ? "execution" : "evaluation" }],
 }));
 vi.mock("@/api-sdk/output-schemas-api", async (original) => ({ ...await original<object>(), listOutputSchemas: async () => [{ outputSchemaId: "schema", name: "评分" }] }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => mocks.navigate, Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));

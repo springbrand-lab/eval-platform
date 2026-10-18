@@ -172,8 +172,8 @@ function ProjectForm({ limits, datasetId }: { limits: EvalInputLimits; datasetId
     })),
   });
   const members = new Map(selectedIds.map((id, index) => [id, memberQueries[index]?.data ?? []] as const));
-  const agents = useQuery({ queryKey: agentKeys.options("subject"), queryFn: ({ signal }) => listAgentOptions("subject", signal) });
-  const evaluators = useQuery({ queryKey: agentKeys.options("evaluator"), queryFn: ({ signal }) => listAgentOptions("evaluator", signal) });
+  const agents = useQuery({ queryKey: agentKeys.options("subject", "execution"), queryFn: ({ signal }) => listAgentOptions("subject", "execution", signal) });
+  const evaluators = useQuery({ queryKey: agentKeys.options("evaluator", "evaluation"), queryFn: ({ signal }) => listAgentOptions("evaluator", "evaluation", signal) });
 
   const selectedById = new Map<string, Data>();
   for (const [datasetId, choice] of draft.datasets) {
@@ -371,8 +371,10 @@ function ProjectForm({ limits, datasetId }: { limits: EvalInputLimits; datasetId
               <NativeSelect id={`${formId}-subject`} required value={draft.subjectAgentId} onChange={(event) => update({ subjectAgentId: event.target.value })}>
                 <option value="" disabled>请选择</option>{agentOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </NativeSelect>
+              <FieldDescription>仅展示用途为“执行”的 Agent。</FieldDescription>
             </Field>
-            {agents.error && <ErrorBlock error={agents.error} onRetry={() => void agents.refetch()} />}
+            {agents.error && <div className="md:col-span-3"><ErrorBlock error={agents.error} onRetry={() => void agents.refetch()} /></div>}
+            {agents.isSuccess && agentOptions.length === 0 && <div className="md:col-span-3"><Notice tone="warning">还没有可用的执行 Agent。<Link className="link font-semibold" to="/agents/new">去创建 Agent</Link></Notice></div>}
             <Field><FieldLabel htmlFor={`${formId}-execution-concurrency`}>执行并发</FieldLabel>
               <Input id={`${formId}-execution-concurrency`} required type="number" min={1} value={draft.executionConcurrency} onChange={(event) => update({ executionConcurrency: Number(event.target.value) })} />
             </Field>
@@ -398,6 +400,7 @@ function ProjectForm({ limits, datasetId }: { limits: EvalInputLimits; datasetId
                     <NativeSelect id={`${formId}-evaluator`} required value={draft.evaluatorAgentId} onChange={(event) => update({ evaluatorAgentId: event.target.value })}>
                       <option value="" disabled>请选择</option>{evaluatorOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                     </NativeSelect>
+                    <FieldDescription>仅展示用途为“评估”的 Agent。</FieldDescription>
                   </Field>
                   <Field><FieldLabel htmlFor={`${formId}-evaluation-concurrency`}>评估并发</FieldLabel>
                     <Input id={`${formId}-evaluation-concurrency`} required type="number" min={1} value={draft.evaluationConcurrency} onChange={(event) => update({ evaluationConcurrency: Number(event.target.value) })} />
@@ -406,7 +409,8 @@ function ProjectForm({ limits, datasetId }: { limits: EvalInputLimits; datasetId
                     <OutputFormatPicker id={`${formId}-schema`} value={draft.outputSchemaId} disabled={frozen} onChange={(outputSchemaId) => update({ outputSchemaId })} />
                   </Field>
                 </div>
-                {evaluators.error && <ErrorBlock error={evaluators.error} onRetry={() => void evaluators.refetch()} />}
+                {evaluators.error && <div className="md:col-span-2"><ErrorBlock error={evaluators.error} onRetry={() => void evaluators.refetch()} /></div>}
+                {evaluators.isSuccess && evaluatorOptions.length === 0 && <div className="md:col-span-2"><Notice tone="warning">还没有可用的评估 Agent。<Link className="link font-semibold" to="/agents/new">去创建 Agent，并在用途中选择“评估”</Link></Notice></div>}
                 {missingEvalPrompt > 0 && <Notice tone="warning">{missingEvalPrompt} 条用例没有评估要求，评估时会被拒绝。</Notice>}
               </CardBody>
             ) : <CardBody className="text-[13px] text-text-muted">可在项目中填写评估配置。</CardBody>}

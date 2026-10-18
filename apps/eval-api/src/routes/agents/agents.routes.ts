@@ -8,10 +8,13 @@ export const list = createRoute({
   method: "get",
   path: "/",
   tags: ["Agent"],
-  summary: "List Agent choices for Subject and Evaluator roles",
-  request: { query: z.strictObject({ role: z.enum(["subject", "evaluator"]).exactOptional() }) },
+  summary: "List Agent choices filtered by execution or evaluation purpose",
+  request: { query: z.strictObject({
+    role: z.enum(["subject", "evaluator"]).exactOptional(),
+    purpose: z.enum(["execution", "evaluation"]).exactOptional(),
+  }) },
   responses: {
-    200: jsonContent(responseSchema(z.array(z.custom<AgentOption>()).readonly()), "Agent choices"),
+    200: jsonContent(responseSchema(z.array(z.custom<AgentOption>()).readonly()), "Agent choices with immutable purpose metadata"),
     ...errorResponses,
   },
 });

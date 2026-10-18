@@ -1,5 +1,6 @@
 import type {
   AgentConfigSnapshot,
+  AgentPurpose,
   AgentRole,
   DatasetKind,
   EvaluationOutputSchema,
@@ -65,6 +66,20 @@ export const evaluationOutputSchemas = pgTable("eval_evaluation_output_schemas",
   index("eval_evaluation_output_schemas_owner_idx").on(table.ownerUserId),
   check("eval_evaluation_output_schemas_name_ck", sql`length(trim(${table.name})) > 0`),
   check("eval_evaluation_output_schemas_description_ck", sql`length(trim(${table.description})) > 0`),
+]);
+
+/** The immutable Eval-side purpose assigned when an editable SP Agent Config is created. */
+export const agentConfigPurposes = pgTable("eval_agent_config_purposes", {
+  ownerUserId: text("owner_user_id").notNull(),
+  userAgentId: text("user_agent_id").notNull(),
+  purpose: text("purpose").$type<AgentPurpose>().notNull(),
+  evaluationMcpServerId: text("evaluation_mcp_server_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ name: "eval_agent_config_purposes_pk", columns: [table.ownerUserId, table.userAgentId] }),
+  index("eval_agent_config_purposes_owner_idx").on(table.ownerUserId),
+  check("eval_agent_config_purposes_purpose_ck", sql`${table.purpose} IN ('execution', 'evaluation')`),
+  check("eval_agent_config_purposes_evaluation_mcp_ck", sql`${table.purpose} = 'execution' OR ${table.evaluationMcpServerId} IS NOT NULL`),
 ]);
 
 /** Material Bundles and Session Bundles are independent owner-scoped catalogs with identical metadata. */

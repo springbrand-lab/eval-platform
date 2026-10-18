@@ -9,7 +9,7 @@ import { EvaluationPlanPage } from "./evaluation-plan-page";
 
 const mocks = vi.hoisted(() => ({ project: vi.fn(), save: vi.fn(), navigate: vi.fn() }));
 vi.mock("@/api-sdk/projects-api", async (original) => ({ ...await original<object>(), getProject: mocks.project, replaceEvaluationPlan: mocks.save }));
-vi.mock("@/api-sdk/agent-configs-api", async (original) => ({ ...await original<object>(), listAgentOptions: async () => [{ name: "评估 Agent", agentConfig: { userAgentId: "evaluator" } }] }));
+vi.mock("@/api-sdk/agent-configs-api", async (original) => ({ ...await original<object>(), listAgentOptions: async () => [{ name: "评估 Agent", agentConfig: { userAgentId: "evaluator" }, role: "evaluator", purpose: "evaluation" }] }));
 vi.mock("@/api-sdk/output-schemas-api", async (original) => ({ ...await original<object>(), listOutputSchemas: async () => [{ outputSchemaId: "schema", name: "评分" }] }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => mocks.navigate, Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));
 

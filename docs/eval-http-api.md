@@ -88,16 +88,18 @@ All `/api/*` routes run as the service account and may additionally return `403`
 
 ### Agent Configs
 
-Agent Configs are created, read, edited and deleted in Eval; the independent Eval SP only hosts them. Requests are relayed with the fixed service account's session to Eval SP `/api/user-agent-configs`; bodies are SP's public Agent Config JSON, forwarded unchanged (any JSON object). Project creation and evaluation-plan saving clone the selected Agent Configs into frozen copies; which copies count as frozen and the reserved `eval-frozen-` slug prefix are defined in [Agent Config 冻结副本](eval-project-redesign.md#23-agent-config-冻结副本). On the wire: frozen copies are omitted from both lists, `PATCH`/`DELETE` of one and selecting one as a creation or evaluation-plan source are `409 AGENT_CONFIG_FROZEN`, and a `POST`/`PATCH` body with a reserved `slug` is `422 REQUEST_VALIDATION_FAILED`.
+Agent Configs are created, read, edited and deleted in Eval; the independent Eval SP only hosts them. Requests are relayed with the fixed service account's session to Eval SP `/api/user-agent-configs`; bodies use SP's public Agent Config JSON, with the Eval-only create `purpose` removed before forwarding. Project creation and evaluation-plan saving clone the selected Agent Configs into frozen copies; which copies count as frozen and the reserved `eval-frozen-` slug prefix are defined in [Agent Config 冻结副本](eval-project-redesign.md#23-agent-config-冻结副本). On the wire: frozen copies are omitted from both lists, `PATCH`/`DELETE` of one and selecting one as a creation or evaluation-plan source are `409 AGENT_CONFIG_FROZEN`, and a `POST`/`PATCH` body with a reserved `slug` is `422 REQUEST_VALIDATION_FAILED`.
 
 | Route | Body / result | Domain errors |
 | --- | --- | --- |
 | `GET /api/agent-configs` | SP Agent Config list without frozen copies | Relayed SP errors |
-| `POST /api/agent-configs` | SP create body / `201` SP Agent Config | `422 REQUEST_VALIDATION_FAILED` (reserved slug); relayed SP errors |
+| `POST /api/agent-configs` | SP create body plus required Eval `purpose: execution | evaluation` / `201` SP Agent Config | `422 REQUEST_VALIDATION_FAILED` (reserved slug or missing purpose); `422 AGENT_CONFIG_PURPOSE_MISMATCH`; relayed SP errors |
 | `GET /api/agent-configs/{id}` | SP Agent Config; a frozen copy is readable | Relayed SP errors |
-| `PATCH /api/agent-configs/{id}` | SP update body / SP Agent Config | `409 AGENT_CONFIG_FROZEN`; `422 REQUEST_VALIDATION_FAILED` (reserved slug); relayed SP errors |
+| `PATCH /api/agent-configs/{id}` | SP update body / SP Agent Config | `409 AGENT_CONFIG_FROZEN` or `AGENT_CONFIG_PURPOSE_LOCKED`; `422 REQUEST_VALIDATION_FAILED` (reserved slug); relayed SP errors |
 | `DELETE /api/agent-configs/{id}` | `204` | `409 AGENT_CONFIG_FROZEN`; relayed SP errors |
-| `GET /api/agents?role=subject\|evaluator` | `[{agentConfig:{ownerUserId,userAgentId}, name, role}]`, one entry per role unless `role` is given; frozen copies excluded | Relayed SP errors |
+| `GET /api/agents?role=subject\|evaluator&purpose=execution\|evaluation` | `[{agentConfig:{ownerUserId,userAgentId}, name, role, purpose}]`; the existing Subject/Evaluator role multiplicity remains, while `purpose` filters the immutable Eval classification. Frozen copies are excluded | Relayed SP errors |
+
+The create request supplies the immutable `purpose`. Evaluation creation is accepted only when the config selects a user server at the public `/mcp/evaluation-results` path; execution creation rejects that binding. Existing pre-purpose configs are classified once from the same MCP binding and then persisted. `purpose` is create-only and is never forwarded to SP; updates must preserve the stored purpose and, for an Evaluation Agent, its recorded result MCP binding.
 
 Public Agent editor domain errors retain the codes, statuses and messages selected from SP's public catalog in `eval-contracts/src/sp-editor-errors.ts`; no second definition of those SP errors exists in Eval. The three deletion blocker codes (`AGENT_CONFIG_ACTIVE_CHAT`, `AGENT_CONFIG_ACTIVE_SCHEDULE_RUN`, `AGENT_CONFIG_ENABLED_SCHEDULE`) may carry SP's validated `AgentConfigDeletionCheck` details. Invalid or unregistered details are discarded. This applies when a deletion blocker appears after a successful deletion preflight as well as to resource-library errors.
 

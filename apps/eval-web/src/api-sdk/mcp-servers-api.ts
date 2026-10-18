@@ -1,3 +1,4 @@
+import { isEvaluationResultsMcpUrl } from "@eval-platform/eval-contracts";
 import { api } from "./client";
 
 /** Metadata SP returns for one MCP Server; connection secrets are never included. */
@@ -26,16 +27,9 @@ export const mcpServerKeys = {
   evaluationResults: ["agent-library", "evaluation-results-mcp"] as const,
 };
 
-const EVALUATION_RESULTS_MCP_PATH = "/mcp/evaluation-results";
-
 function isEvaluationResultsMcp(server: McpServerSummary): boolean {
   if (server.source !== "user" || !server.url) return false;
-  try {
-    const path = new URL(server.url).pathname.replace(/\/+$/u, "") || "/";
-    return path === EVALUATION_RESULTS_MCP_PATH;
-  } catch {
-    return false;
-  }
+  return isEvaluationResultsMcpUrl(server.url);
 }
 
 /** Finds the service-account MCP registered for Eval's result submission endpoint. */

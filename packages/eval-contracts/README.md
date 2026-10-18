@@ -4,6 +4,10 @@
 
 `InitialResourceFile` 与 `initialResourceFileSchema` 定义初始素材、初始上下文共用的只读文件目录投影：资源内绝对路径、媒体类型、字节数。不包含内容副本、预览状态或 SP Workspace 身份。内容仍从 API 的 Bundle 目录按精确路径读取。
 
+`EVALUATION_RESULTS_MCP_PATH` 与 `isEvaluationResultsMcpUrl` 是 Agent 用途分类和 Agent 编辑器共用的公开评估结果提交 MCP 路径判定；分类不依赖 MCP 的展示名称或描述。
+
+`AgentPurpose` 是 Eval Agent Config 在创建时固定的 `execution | evaluation` 用途；它与 Runtime 的 `AgentRole` 分开，Subject/Evaluator 运行契约不因此改变。
+
 评估平台跨包共享的稳定契约层，公共契约从包根入口导入。`./http-errors` 是 Eval API 唯一的错误码目录（`defineErrorCatalog`），`./http` 是基于它的 Hono 响应器（`createHonoHttp`）；只有这两个 HTTP 边界子路径依赖 `@springbrand/http` 与 `hono`，包根不加载它们。HTTP 契约见 [Eval HTTP 控制面](../../docs/eval-http-api.md)。
 
 Agent 编辑器使用的 SP 领域错误由 `sp-editor-errors.ts` 从 SP 公开错误目录选取，状态码、默认文案和删除阻挡详情 Schema 均复用上游定义。仅 HTTP 子路径加载这些契约；服务账号认证失败仍由 API 翻译为依赖不可用，不要求浏览器重新登录。
