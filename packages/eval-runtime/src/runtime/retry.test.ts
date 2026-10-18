@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RuntimeInputError } from "./errors.js";
 import { createRetryController, DEFAULT_RETRY_POLICY, retryIdempotentOperation } from "./retry.js";
 
@@ -27,6 +27,19 @@ describe("retry controller", () => {
     await expect(retryIdempotentOperation({
       operation: "persistence", run, sleep: async () => undefined,
     })).rejects.toThrow("invalid facts");
+  });
+
+  it("does not reconcile a permanent failure", async () => {
+    const reconcile = vi.fn(async () => "unexpected");
+
+    await expect(retryIdempotentOperation({
+      operation: "submission",
+      run: async () => { throw Object.assign(new Error("request rejected"), { retryable: false }); },
+      reconcile,
+      sleep: async () => undefined,
+    })).rejects.toThrow("request rejected");
+
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it("uses ten transient retries with bounded backoff", async () => {

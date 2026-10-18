@@ -526,7 +526,10 @@ async function submitWithReconciliation<TAttempt extends AgentAttemptRecord, TOu
   };
   return retryAgentOperation({
     ...samplingRetry(dependencies, options),
-    operation,
+    // A restart is a new Agent Attempt, but the RPC carrying that Attempt is
+    // still one idempotent submission operation. Keep its transport retries
+    // independent from the plan's Agent restart allowance.
+    operation: "submission",
     run: () => operation === "restart"
       ? dependencies.harness.restartAgent(input)
       : dependencies.harness.submitAgent(input),

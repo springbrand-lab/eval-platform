@@ -82,12 +82,18 @@ export async function retryIdempotentOperation<TResult>(loop: IdempotentRetryLoo
       return await loop.run();
     } catch (error) {
       if (loop.shouldAbort?.(error)) throw error;
+      const details = loop.describeError?.(error) ?? describeRetryError(error);
+      // Reconciliation is only meaningful for an uncertain transient failure.
+      // A permanent rejection must be returned as-is; probing the operation key
+      // can both add an unnecessary request and mask an identity/validation error.
+      if (!details.retryable) throw loop.fail?.(error, details) ?? error;
       const reconciled = await loop.reconcile?.();
       if (reconciled !== undefined) return reconciled;
-      const details = loop.describeError?.(error) ?? describeRetryError(error);
-      const decision = details.retryable
-        ? await retryController.decide({ operation: loop.operation, failureKind: details.failureKind, attemptNumber })
-        : undefined;
+      const decision = await retryController.decide({
+        operation: loop.operation,
+        failureKind: details.failureKind,
+        attemptNumber,
+      });
       if (!decision?.shouldRetry) throw loop.fail?.(error, details) ?? error;
       await loop.onRetry?.(details.message);
       await sleep(decision.backoffMs ?? 0);

@@ -196,8 +196,23 @@ export async function evaluateSampling(
       prompt: evaluatorPrompt(evalPrompt, submissionToken === undefined ? undefined
         : { evaluationId: currentEvaluation.evaluationId, token: submissionToken }),
       retryController: {
-        decide: (request) => request.operation === "restart" && acceptedResult(currentEvaluation)
-          ? Promise.resolve({ shouldRetry: false }) : retryController.decide(request),
+        async decide(request) {
+          if (request.operation === "restart") {
+            // The MCP transaction may accept a result while the Agent's terminal
+            // receipt is still being observed. Re-read the authoritative record
+            // before creating another Attempt; the local snapshot can be stale.
+            try {
+              const latest = await dependencies.store.getEvaluation(currentEvaluation.evaluationId);
+              if (latest && acceptedResult(latest)) {
+                currentEvaluation = latest;
+                return { shouldRetry: false };
+              }
+            } catch {
+              // Keep the normal retry decision when the reconciliation read is unavailable.
+            }
+          }
+          return retryController.decide(request);
+        },
       },
       attempts: currentEvaluation.attempts,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({

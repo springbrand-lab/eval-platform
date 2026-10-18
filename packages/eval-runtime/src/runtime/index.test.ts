@@ -2686,6 +2686,7 @@ describe("eval runtime orchestration", () => {
       harness,
       store: makeStore(),
       sleep: async () => undefined,
+      createRetryController: createProductionRetryController,
     });
 
     runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
@@ -2704,6 +2705,33 @@ describe("eval runtime orchestration", () => {
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
     expect(sampling.executionAttempts.map((attempt) => attempt.submissionId))
       .toEqual(["submission-1", "submission-2"]);
+  });
+
+  it("does not let the Agent restart budget cut off transient restart RPC retries", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.submitAgent).mockResolvedValueOnce({
+      submissionId: "submission-1",
+      status: "failed",
+      retryable: true,
+      error: "temporary upstream failure",
+    });
+    vi.mocked(harness.restartAgent)
+      .mockRejectedValueOnce(Object.assign(new Error("restart transport 1"), { retryable: true }))
+      .mockRejectedValueOnce(Object.assign(new Error("restart transport 2"), { retryable: true }))
+      .mockResolvedValueOnce(makeSubmission("completed", "submission-2"));
+    const runtime = createAutoResumingRuntime({
+      harness,
+      store: makeStore(),
+      sleep: async () => undefined,
+      createRetryController: createProductionRetryController,
+    });
+
+    runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
+    const run = await runtime.submit(projectRequest("execution", "restart-rpc-transient-retries"));
+
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
+    expect(harness.restartAgent).toHaveBeenCalledTimes(3);
+    expect((await runtime.getSampling(run.samplingIds[0]!)).executionAttempts).toHaveLength(2);
   });
 
   it("creates a new restart key only after the previous key is confirmed failed", async () => {
@@ -2727,6 +2755,7 @@ describe("eval runtime orchestration", () => {
       harness,
       store: makeStore(),
       sleep: async () => undefined,
+      createRetryController: createProductionRetryController,
     });
 
     runtime.plans.execution = executionPlan({ retryPolicy: RETRY_TWO });
@@ -5595,6 +5624,46 @@ describe("evaluation result checking", () => {
       expect(latest.attempts[0]!.status).toBe("completed");
       expect(latest.attempts[0]!.resources?.status).toBe("collected");
     }
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("does not restart after MCP acceptance races with a failed terminal receipt", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const acceptedOutput = {
+      ...noResult,
+      structuredOutput: { path: "mcp:submit_evaluation", content: '{"score":8}', source: "submission" as const },
+    };
+    let accepted = false;
+    const updateEvaluation = store.updateEvaluation.bind(store);
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
+      await updateEvaluation(record, expected);
+      if (!accepted && record.attempts.some((attempt) => attempt.status === "failed")
+        && record.attempts.at(-1)?.resources?.status === "collected") {
+        accepted = true;
+        await updateEvaluation({ ...record, status: { status: "succeeded" }, output: acceptedOutput }, record);
+      }
+    });
+    vi.mocked(harness.submitAgent).mockImplementation(async ({ handle }) => (
+      handle.role === "evaluator" ? makeSubmission("running", "evaluation-submission") : makeSubmission("completed")
+    ));
+    vi.mocked(harness.waitForSubmission).mockImplementation(async ({ handle }) => (
+      handle.role === "evaluator"
+        ? { submissionId: "evaluation-submission", status: "failed", retryable: true, error: "late Agent failure" }
+        : makeSubmission("completed")
+    ));
+    const runtime = createRuntime({ store, harness, plans: makePlans([makeSample("sample-1")], {
+      evaluation: evaluationPlan({ retryPolicy: RETRY_ONE }),
+    }),
+      createRetryController: createProductionRetryController,
+      results: { submission: { token: () => "t", read: async (id) => (await store.getEvaluation(id))?.output?.structuredOutput }, check: validScore },
+    });
+    const run = await runtime.submit(projectRequest("pipeline", "mcp-accepted-before-restart"));
+
+    await runtime.resume(run.runId);
+
+    const evaluation = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
+    expect(evaluation.status.status).toBe("succeeded");
     expect(harness.restartAgent).not.toHaveBeenCalled();
   });
 
