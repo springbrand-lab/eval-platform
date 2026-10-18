@@ -1,5 +1,5 @@
 import type { RetryPolicy } from "@eval-platform/eval-contracts";
-import type { AgentFailureKind } from "../harness/model.js";
+import { AGENT_FAILURE_KINDS, type AgentFailureKind } from "../harness/model.js";
 import { RuntimeInputError } from "./errors.js";
 import { requireObject } from "./input.js";
 
@@ -25,6 +25,24 @@ export interface RetryController {
     readonly failureKind: AgentFailureKind;
     readonly attemptNumber: number;
   }): Promise<RetryDecision>;
+}
+
+export interface RetryErrorDetails {
+  readonly message: string;
+  readonly retryable: boolean;
+  readonly failureKind: AgentFailureKind;
+}
+
+export interface IdempotentRetryLoop<TResult> {
+  readonly operation: RetryOperation;
+  readonly run: () => Promise<TResult>;
+  readonly retryController?: RetryController;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly reconcile?: () => Promise<TResult | undefined>;
+  readonly onRetry?: (message: string) => Promise<void>;
+  readonly describeError?: (error: unknown) => RetryErrorDetails;
+  readonly shouldAbort?: (error: unknown) => boolean;
+  readonly fail?: (error: unknown, details: RetryErrorDetails) => unknown;
 }
 
 export function requireRetryPolicy(policy: unknown): asserts policy is RetryPolicy {
@@ -53,4 +71,42 @@ export function createRetryController(policy: RetryPolicy = DEFAULT_RETRY_POLICY
       return { shouldRetry: true, reason: input.failureKind, backoffMs };
     },
   };
+}
+
+/** Repeats one idempotent operation with Runtime's fixed transient retry budget and backoff. */
+export async function retryIdempotentOperation<TResult>(loop: IdempotentRetryLoop<TResult>): Promise<TResult> {
+  const retryController = loop.retryController ?? createRetryController();
+  const sleep = loop.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  for (let attemptNumber = 1; ; attemptNumber += 1) {
+    try {
+      return await loop.run();
+    } catch (error) {
+      if (loop.shouldAbort?.(error)) throw error;
+      const reconciled = await loop.reconcile?.();
+      if (reconciled !== undefined) return reconciled;
+      const details = loop.describeError?.(error) ?? defaultRetryErrorDetails(error);
+      const decision = details.retryable
+        ? await retryController.decide({ operation: loop.operation, failureKind: details.failureKind, attemptNumber })
+        : undefined;
+      if (!decision?.shouldRetry) throw loop.fail?.(error, details) ?? error;
+      await loop.onRetry?.(details.message);
+      await sleep(decision.backoffMs ?? 0);
+    }
+  }
+}
+
+function defaultRetryErrorDetails(error: unknown): RetryErrorDetails {
+  if (error instanceof Error) {
+    const candidate = error as Error & { readonly retryable?: unknown; readonly failureKind?: unknown };
+    return {
+      message: error.message,
+      retryable: candidate.retryable !== false,
+      failureKind: isAgentFailureKind(candidate.failureKind) ? candidate.failureKind : "network",
+    };
+  }
+  return { message: String(error), retryable: true, failureKind: "network" };
+}
+
+function isAgentFailureKind(value: unknown): value is AgentFailureKind {
+  return typeof value === "string" && AGENT_FAILURE_KINDS.includes(value as AgentFailureKind);
 }

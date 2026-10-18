@@ -36,8 +36,10 @@ describe("evaluation result MCP Server", () => {
     expect(init.headers.get("mcp-session-id")).toBeNull();
     expect(await init.json()).toMatchObject({ jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} } } });
     expect((await app.rpc({ jsonrpc: "2.0", method: "notifications/initialized" })).status).toBe(202);
-    const list = await (await app.rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" })).json() as { result: { tools: Array<{ name: string; inputSchema: { required: string[] } }> } };
+    const list = await (await app.rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" })).json() as { result: { tools: Array<{ name: string; description: string; inputSchema: { required: string[] } }> } };
     expect(list.result.tools.map((tool) => tool.name)).toEqual(["submit_evaluation"]);
+    expect(list.result.tools[0]!.description).toContain("Call this MCP tool directly");
+    expect(list.result.tools[0]!.description).toContain("do not invoke it through codemode or the execution tool");
     expect(list.result.tools[0]!.inputSchema.required).toEqual(["evaluationId", "submitToken", "result"]);
     expect(await (await app.rpc({ jsonrpc: "2.0", id: 3, method: "nope" })).json()).toMatchObject({ error: { code: -32601 } });
     expect((await app.request(EVALUATION_RESULTS_MCP_PATH, { method: "GET", headers: { Authorization: `Bearer ${TOKEN}` } })).status).toBe(405);
@@ -54,6 +56,16 @@ describe("evaluation result MCP Server", () => {
     expect(body.result.isError).toBeUndefined();
     expect(body.result.content[0]!.text).toContain("accepted");
     expect(app.submissions.save).toHaveBeenCalledWith(expect.objectContaining({ evaluationId: EVALUATION_ID, ownerUserId: "owner-1", content: '{"score":8}' }));
+  });
+
+  it("retries a transient submission failure", async () => {
+    const app = setup();
+    app.submissions.save.mockRejectedValueOnce(new Error("temporary database failure"));
+    const body = await (await app.call(valid)).json() as { result: { isError?: boolean; content: Array<{ text: string }> } };
+
+    expect(body.result.isError).toBeUndefined();
+    expect(body.result.content[0]!.text).toContain("accepted");
+    expect(app.submissions.save).toHaveBeenCalledTimes(2);
   });
 
   it("accepts a result passed as JSON text", async () => {

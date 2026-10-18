@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { extractFinalReplyResult } from "./results.js";
+import { extractFinalReplyResult, resultInstruction } from "./results.js";
+
+describe("resultInstruction", () => {
+  it("requires direct MCP submission instead of codemode", () => {
+    const instruction = resultInstruction({
+      schemaPath: "/evaluation-output.schema.json",
+      resultPath: "/output/result.json",
+      submission: { evaluationId: "evaluation-1", token: "submit-token" },
+    });
+    expect(instruction).toContain("submit_evaluation MCP tool directly");
+    expect(instruction).toContain("Do not invoke it through codemode or the execution tool");
+  });
+});
 
 describe("extractFinalReplyResult", () => {
   it("takes the last fenced JSON block that parses", () => {

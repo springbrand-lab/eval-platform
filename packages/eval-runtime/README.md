@@ -49,7 +49,7 @@ src/
 
 包入口为根 `.` 与 `./harness`。计划摘要、Schema 摘要和请求指纹统一由 `plan/` 的 `digestJson`（基于 `@eval-platform/eval-contracts` 的 `canonicalJsonBytes`/`sha256Hex`）计算；指纹或摘要算法变化后本地开发库需清库重建。
 
-计划、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。Run 不保存配置正文，只保存 `operation`、`phases`、`selector`、`targets`、`samplingIds`、`evaluationIds`、`planDigests`、request identity 和停止标记。调度与停止流程见[架构方案](../../docs/architecture.md#run-调度与停止)。
+计划、Harness 和 Runtime 是本包内的子模块，不是额外 workspace package。运行时只负责启动 Agent、完整收集产物和轨迹、分别控制执行/评估阶段的最大 DO 启动数量与重试，并把结果交给评估结果层；它不实现指标算法。根入口导出的 `retryIdempotentOperation` 供应用适配器复用同一套固定幂等重试预算和退避，不另设次数或配置。Run 不保存配置正文，只保存 `operation`、`phases`、`selector`、`targets`、`samplingIds`、`evaluationIds`、`planDigests`、request identity 和停止标记。调度与停止流程见[架构方案](../../docs/architecture.md#run-调度与停止)。
 
 恢复跳过已完成的阶段，并按 Attempt 原 `submissionId`、操作类型和幂等键向 SP 校准。已完成 Agent 的资源或产物保存失败只补收尾，不重新提交或重启。已保存的失败 Attempt 若 SP 校准暂不可用，仍保持待恢复，不能代替重启决策进入证据收尾。只有确认失败且重试决策拒绝后，Subject 证据保存完才写为 `failed`。`RuntimeRecoveryStore` 只提供 `isRunActive`、`isRunStopRequested`、`requestRunStop`、`markRunStopFinalized`，Run 当前状态仍只从子记录推导。Pipeline 使用独立的执行和评估并发队列：每条 Sampling 的执行及证据保存成功后立即提交对应评估，其他 Sampling 可以继续执行；执行失败的 Sampling 不提交 Evaluator，其 EvaluationRecord 取消。仅评估 Run 不改动 Subject 的 Attempt、资源、产物、轨迹和状态。
 

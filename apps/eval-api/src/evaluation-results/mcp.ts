@@ -1,4 +1,5 @@
 import { EVALUATION_OUTPUT_SCHEMA_PATH, EVALUATION_SUBMIT_TOOL } from "@eval-platform/eval-contracts";
+import { retryIdempotentOperation } from "@eval-platform/eval-runtime";
 import type { Context } from "hono";
 import { createRouter } from "../lib/create-app.js";
 import type { AppBindings } from "../lib/types.js";
@@ -17,7 +18,7 @@ const SERVER_INFO = { name: "eval-platform-evaluation-results", version: "1.0.0"
 const SUBMIT_TOOL = {
   name: EVALUATION_SUBMIT_TOOL,
   title: "Submit evaluation result",
-  description: `Hand your final evaluation result to Eval Platform. Call it once when you have finished evaluating, with the evaluationId and submitToken from your instructions and the result as one JSON object following ${EVALUATION_OUTPUT_SCHEMA_PATH}. If the result is rejected, the response lists what to correct; fix it and call again without re-evaluating.`,
+  description: `Submit your final evaluation result directly to Eval Platform through this MCP tool. Call this MCP tool directly once you have finished evaluating; do not invoke it through codemode or the execution tool. Use the evaluationId and submitToken from your instructions and pass the result as one JSON object following ${EVALUATION_OUTPUT_SCHEMA_PATH}. If the result is rejected, the response lists what to correct; fix it and call this MCP tool again without re-evaluating.`,
   inputSchema: {
     type: "object",
     properties: {
@@ -63,7 +64,11 @@ async function submit(c: Context<AppBindings>, args: unknown) {
   if (!verdict.valid) {
     return toolText(`The result does not match ${EVALUATION_OUTPUT_SCHEMA_PATH} and was not accepted. Correct these and call ${EVALUATION_SUBMIT_TOOL} again:\n${verdict.errors.map((error) => `- ${error}`).join("\n")}`, true);
   }
-  const receipt = await results.submissions.save({ evaluationId, ownerUserId: target.ownerUserId, content, submittedAt: new Date() });
+  const submission = { evaluationId, ownerUserId: target.ownerUserId, content, submittedAt: new Date() };
+  const receipt = await retryIdempotentOperation({
+    operation: "persistence",
+    run: () => results.submissions.save(submission),
+  });
   if (receipt === "closed") return toolText(`Evaluation ${evaluationId} is stopped, cancelled, replaced or unavailable; the result was not accepted.`, true);
   if (receipt === "conflict") return toolText(`Evaluation ${evaluationId} already has an accepted result; a different result cannot replace it.`, true);
   c.var.logger?.info({ event: "evaluation_result_submitted", evaluationId }, "Evaluation result submitted");
