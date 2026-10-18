@@ -185,23 +185,18 @@ export class RunResumer implements EvalRunResumer {
       if (scheduledEvaluationIds.has(evaluation.evaluationId)
         || !isPendingSamplingStatus(evaluation.status.status)) return;
       scheduledEvaluationIds.add(evaluation.evaluationId);
-      evaluationQueue.enqueue(async () => {
-        if (stopSignal?.aborted) return;
-        try {
-          await evaluateSampling(evaluationDependencies, {
-            context: {
-              sampling,
-              evaluation,
-              sample: sampleBySamplingId.get(sampling.samplingId)!,
-            },
-            harnessConfig: evaluationConfig.evaluationHarness,
-            retryPolicy: evaluationConfig.retryPolicy,
-            evaluationOutputSchema: await getEvaluationOutputSchema(),
-          });
-        } catch (error) {
-          if (!(error instanceof RuntimeRunStoppedError)) evaluationErrors.push(error);
-        }
-      });
+      evaluationQueue.enqueue(() => this.#runQueuedStageTask(stopSignal, evaluationErrors, async () => {
+        await evaluateSampling(evaluationDependencies, {
+          context: {
+            sampling,
+            evaluation,
+            sample: sampleBySamplingId.get(sampling.samplingId)!,
+          },
+          harnessConfig: evaluationConfig.evaluationHarness,
+          retryPolicy: evaluationConfig.retryPolicy,
+          evaluationOutputSchema: await getEvaluationOutputSchema(),
+        });
+      }));
     };
 
     // Recover already successful executions immediately. Evaluations paired with
@@ -217,28 +212,23 @@ export class RunResumer implements EvalRunResumer {
     }
 
     for (const state of samplings.filter(({ execution }) => isPendingSamplingStatus(execution.status))) {
-      executionQueue.enqueue(async () => {
-        if (stopSignal?.aborted) return;
-        try {
-          await executeSampling(executionDependencies, {
-            context: { state, sample: sampleBySamplingId.get(state.samplingId)! },
-            harnessConfig: executionConfig.harness,
-            retryPolicy: executionConfig.retryPolicy,
-          });
-          const latest = await this.#store.getSampling(state.samplingId);
-          if (!latest) throw new RuntimeEntityNotFoundError("sampling", state.samplingId);
-          samplingById.set(latest.samplingId, latest);
-          const evaluation = evaluationBySamplingId.get(latest.samplingId);
-          if (!evaluation || !isPendingSamplingStatus(evaluation.status.status)) return;
-          if (latest.execution.status === "succeeded") {
-            scheduleEvaluation(latest, evaluation);
-          } else if (!isPendingSamplingStatus(latest.execution.status)) {
-            cancelEvaluation(evaluation);
-          }
-        } catch (error) {
-          if (!(error instanceof RuntimeRunStoppedError)) executionErrors.push(error);
+      executionQueue.enqueue(() => this.#runQueuedStageTask(stopSignal, executionErrors, async () => {
+        await executeSampling(executionDependencies, {
+          context: { state, sample: sampleBySamplingId.get(state.samplingId)! },
+          harnessConfig: executionConfig.harness,
+          retryPolicy: executionConfig.retryPolicy,
+        });
+        const latest = await this.#store.getSampling(state.samplingId);
+        if (!latest) throw new RuntimeEntityNotFoundError("sampling", state.samplingId);
+        samplingById.set(latest.samplingId, latest);
+        const evaluation = evaluationBySamplingId.get(latest.samplingId);
+        if (!evaluation || !isPendingSamplingStatus(evaluation.status.status)) return;
+        if (latest.execution.status === "succeeded") {
+          scheduleEvaluation(latest, evaluation);
+        } else if (!isPendingSamplingStatus(latest.execution.status)) {
+          cancelEvaluation(evaluation);
         }
-      });
+      }));
     }
 
     try {
@@ -266,6 +256,19 @@ export class RunResumer implements EvalRunResumer {
     }
     if (evaluationErrors.length > 0) {
       throw new AggregateError(evaluationErrors, "Evaluation phase could not persist its progress");
+    }
+  }
+
+  async #runQueuedStageTask(
+    stopSignal: AbortSignal | undefined,
+    errors: unknown[],
+    task: () => Promise<void>,
+  ): Promise<void> {
+    if (stopSignal?.aborted) return;
+    try {
+      await task();
+    } catch (error) {
+      if (!(error instanceof RuntimeRunStoppedError)) errors.push(error);
     }
   }
 
