@@ -3,7 +3,7 @@ import { AGENT_FAILURE_KINDS, type AgentFailureKind } from "../harness/model.js"
 import { RuntimeInputError } from "./errors.js";
 import { requireObject } from "./input.js";
 
-const TRANSIENT_RETRY_COUNT = 7;
+const TRANSIENT_RETRY_COUNT = 10;
 
 export const DEFAULT_RETRY_POLICY = {
   maxRestarts: 4,

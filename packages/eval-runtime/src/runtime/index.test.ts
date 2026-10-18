@@ -1735,7 +1735,7 @@ describe("eval runtime orchestration", () => {
     const pending = await runtime.getSampling(run.samplingIds[0]!);
     expect(pending.execution).toEqual(expect.objectContaining({ status: "retrying", evidencePending: true }));
     expect(pending.artifacts).toEqual([{ artifactId: "artifact-1", kind: "project", path: "/eval/output" }]);
-    expect(harness.exportEvidence).toHaveBeenCalledTimes(8);
+    expect(harness.exportEvidence).toHaveBeenCalledTimes(11);
 
     vi.mocked(harness.exportEvidence).mockImplementation(async ({ handle }) => (
       exportedEvidence({ samplingId: handle.samplingId, chatId: handle.chatId })
@@ -3995,7 +3995,7 @@ describe("raw resource persistence", () => {
       status: "collected",
       snapshot: { finalized: false },
     });
-    expect(harness.collectAgentResources).toHaveBeenCalledTimes(9);
+    expect(harness.collectAgentResources).toHaveBeenCalledTimes(12);
   });
 
   it("keeps a validated unfinalized snapshot when a later resource response is invalid", async () => {

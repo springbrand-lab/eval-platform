@@ -46,7 +46,7 @@ Project 由两部分组成，设计记录见 [Project、Runtime 与 Metrics 设�
 - **执行计划**在创建事务中确定，之后没有任何修改入口：元数据、source branch、绑定的 Dataset 快照（名称、描述、kind、创建时成员顺序）、ProjectSample、Subject Harness（框架、冻结副本引用、超时）、`executionConcurrency`、`retryPolicy` 和 Subject Agent Config 正文快照（仅展示）。`executionPlanDigest` 覆盖执行计划、Dataset 绑定和全部 ProjectSample。
 - **评估计划**可在创建时填写，也可之后补填；未锁定时只有一份当前值，可通过 `PUT /api/projects/:id/evaluation-plan` 整体替换（重新保存会生成新 Evaluator 副本并删除旧副本）。内容是 Evaluator Harness、`evaluationConcurrency`、`retryPolicy`、评估输出 JSON Schema 的 ID 与内容摘要和 Evaluator 正文快照。读取时是一个 `ProjectEvaluation`（`plan`、`digest`、`lockedAt`），未填写时整体为 null。首个 pipeline/evaluation Run 在准入事务内写入 `lockedAt`，之后 Run 停止或失败也不解锁，替换返回冲突。
 
-`retryPolicy` 的 Project 请求只配置 `maxRestarts`，控制确认失败后的 Agent 重启；计划仍保存 `initialBackoffMs` 和 `maxBackoffMs`，但由 Runtime 写入固定的 250ms 和 10s。创建、初始化、提交校准、状态读取、产物/证据、资源读取、持久化和停止调用等幂等瞬态操作由 Runtime 固定重试 7 次，不提供单独配置。
+`retryPolicy` 的 Project 请求只配置 `maxRestarts`，控制确认失败后的 Agent 重启；计划仍保存 `initialBackoffMs` 和 `maxBackoffMs`，但由 Runtime 写入固定的 250ms 和 10s。创建、初始化、提交校准、状态读取、产物/证据、资源读取、持久化和停止调用等幂等瞬态操作由 Runtime 固定重试 10 次，不提供单独配置。
 
 ProjectSample 是 Project 自己的固定输入：来源 Data 的完整副本、所属 Dataset ID 列表（按绑定顺序）和 `samplingCount`。同一 Data 被多个所选 Dataset 绑定时只生成一个 ProjectSample。Material/Session/Schema 只保存引用：正文不可变，软删除只让它们退出目录，已有 Project 仍按 ID 读取。来源 Dataset/Data 之后被修改、解除关联或软删除，以及原 Agent Config 被修改，都不影响已有 Project。
 
@@ -145,7 +145,7 @@ Subject Space ──exportEvidence（产物 + 轨迹）──→ 证据包（R2 
                                           /output/result.json ← 评估结果
 ```
 
-Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产物清单、逐个文件和 SP 完整原始 `trajectory_events` 的有序分片，按 `DEFAULT_EVIDENCE_LIMITS`（单文件 25 MB、总量 500 MB、20,000 个文件、排除 `node_modules` 等目录）写入证据包，未纳入的文件记入 `omitted`。导出与执行阶段共用 Runtime 固定的 7 次幂等重试；瞬态失败耗尽时保留已有产物和轨迹，Sampling 置为 `retrying + evidencePending`，由后续 Worker 只补收证据，不重复提交或重启 Agent；不可重试的最终化错误才置为 `failed`。评估准备时 `Harness.importEvidence` 以 `evidence:<evidenceId>:<evaluationId>` 为幂等键把证据包写入 Evaluator 自己的 Space，manifest 最后写入；同一 Sampling 的多次评估复用同一证据包。Eval 不绕过 SP 的公开边界操作 DO。
+Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产物清单、逐个文件和 SP 完整原始 `trajectory_events` 的有序分片，按 `DEFAULT_EVIDENCE_LIMITS`（单文件 25 MB、总量 500 MB、20,000 个文件、排除 `node_modules` 等目录）写入证据包，未纳入的文件记入 `omitted`。导出与执行阶段共用 Runtime 固定的 10 次幂等重试；瞬态失败耗尽时保留已有产物和轨迹，Sampling 置为 `retrying + evidencePending`，由后续 Worker 只补收证据，不重复提交或重启 Agent；不可重试的最终化错误才置为 `failed`。评估准备时 `Harness.importEvidence` 以 `evidence:<evidenceId>:<evaluationId>` 为幂等键把证据包写入 Evaluator 自己的 Space，manifest 最后写入；同一 Sampling 的多次评估复用同一证据包。Eval 不绕过 SP 的公开边界操作 DO。
 
 ## 生命周期语义
 

@@ -10,15 +10,15 @@ describe("retry controller", () => {
       operation: "persistence",
       run: async () => {
         calls += 1;
-        if (calls <= 7) throw new Error("temporary database failure");
+        if (calls <= 10) throw new Error("temporary database failure");
         return "saved";
       },
       sleep: async (milliseconds) => { delays.push(milliseconds); },
     });
 
     expect(result).toBe("saved");
-    expect(calls).toBe(8);
-    expect(delays).toEqual([250, 500, 1_000, 2_000, 4_000, 8_000, 10_000]);
+    expect(calls).toBe(11);
+    expect(delays).toEqual([250, 500, 1_000, 2_000, 4_000, 8_000, 10_000, 10_000, 10_000, 10_000]);
   });
 
   it("does not retry an operation that marks its failure as permanent", async () => {
@@ -29,16 +29,16 @@ describe("retry controller", () => {
     })).rejects.toThrow("invalid facts");
   });
 
-  it("uses seven transient retries with a bounded backoff near thirty seconds", async () => {
+  it("uses ten transient retries with bounded backoff", async () => {
     const controller = createRetryController();
-    const decisions = await Promise.all(Array.from({ length: 8 }, (_, index) => controller.decide({
+    const decisions = await Promise.all(Array.from({ length: 11 }, (_, index) => controller.decide({
       operation: "collection",
       failureKind: "network",
       attemptNumber: index + 1,
     })));
 
     expect(DEFAULT_RETRY_POLICY).toEqual({ maxRestarts: 4, initialBackoffMs: 250, maxBackoffMs: 10_000 });
-    expect(decisions.slice(0, 7)).toEqual([
+    expect(decisions.slice(0, 10)).toEqual([
       { shouldRetry: true, reason: "network", backoffMs: 250 },
       { shouldRetry: true, reason: "network", backoffMs: 500 },
       { shouldRetry: true, reason: "network", backoffMs: 1_000 },
@@ -46,9 +46,12 @@ describe("retry controller", () => {
       { shouldRetry: true, reason: "network", backoffMs: 4_000 },
       { shouldRetry: true, reason: "network", backoffMs: 8_000 },
       { shouldRetry: true, reason: "network", backoffMs: 10_000 },
+      { shouldRetry: true, reason: "network", backoffMs: 10_000 },
+      { shouldRetry: true, reason: "network", backoffMs: 10_000 },
+      { shouldRetry: true, reason: "network", backoffMs: 10_000 },
     ]);
-    expect(decisions[7]).toEqual({ shouldRetry: false, reason: "network" });
-    expect(decisions.slice(0, 7).reduce((total, decision) => total + (decision.backoffMs ?? 0), 0)).toBe(25_750);
+    expect(decisions[10]).toEqual({ shouldRetry: false, reason: "network" });
+    expect(decisions.slice(0, 10).reduce((total, decision) => total + (decision.backoffMs ?? 0), 0)).toBe(55_750);
   });
 
   it("caps restarts and applies exponential backoff", async () => {
