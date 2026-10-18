@@ -77,16 +77,16 @@ export function OutputPreview({ outputs }: { outputs: EvaluationOutputSummary })
 
 function OutputFieldCard({ field, compact }: { field: OutputFieldSummary; compact: boolean }) {
   return <section className={`flex h-full min-w-0 flex-col rounded-xl border border-border ${compact ? "p-3" : "p-4"} ${field.coverage === "complete" ? "bg-surface" : "bg-surface-muted/40"}`}>
-    <div className="flex items-start justify-between gap-3">
+    <div className="flex min-h-[4.5rem] items-start justify-between gap-3">
       <div className="min-w-0 flex-1">
         <h4 className="truncate text-sm font-semibold text-text-strong" title={field.title}>{field.title}</h4>
-        <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-text-muted">{field.description || "\u00a0"}</p>
+        <p className="mt-1 min-h-10 line-clamp-2 text-xs leading-5 text-text-muted">{field.description || "\u00a0"}</p>
       </div>
       {field.coverage !== "complete" && <StatusBadge status={field.coverage} />}
     </div>
-    <div className="mt-2 flex items-center"><FieldHeadline field={field} /></div>
-    <details className="group mt-3 border-t border-border pt-3 text-xs text-text-muted">
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 font-medium hover:text-text-strong [&::-webkit-details-marker]:hidden"><span>查看统计详情</span><ChevronDown className="size-3.5 transition-transform group-open:rotate-180" /></summary>
+    <div className="mt-2 flex min-h-10 items-center"><FieldHeadline field={field} /></div>
+    <details className="group mt-auto w-full border-t border-border pt-3 text-xs text-text-muted">
+      <summary className="flex min-h-7 cursor-pointer list-none items-center justify-between gap-2 font-medium hover:text-text-strong [&::-webkit-details-marker]:hidden"><span>查看统计详情</span><ChevronDown className="size-3.5 transition-transform group-open:rotate-180" /></summary>
       <div className="mt-3 grid gap-2 rounded-lg bg-surface-muted/60 p-3">
         <div className="grid gap-1 border-b border-border/70 pb-2 sm:grid-cols-[max-content_minmax(0,1fr)] sm:items-start sm:gap-x-4"><span className="text-text-faint">统计摘要</span><span className="min-w-0 break-words leading-5 text-text-secondary sm:text-right">{fieldValue(field)}</span></div>
         <div className="grid gap-1 border-b border-border/70 pb-2 sm:grid-cols-[max-content_minmax(0,1fr)] sm:items-start sm:gap-x-4"><span className="text-text-faint">字段路径</span><code className="min-w-0 break-all font-mono text-[11px] text-text-secondary sm:text-right">{field.jsonPointer || "$"}</code></div>

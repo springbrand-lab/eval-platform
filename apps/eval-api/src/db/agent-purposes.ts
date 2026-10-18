@@ -10,14 +10,17 @@ export interface AgentPurposeRecord {
   readonly evaluationMcpServerId: string | null;
 }
 
+export interface AgentPurposeInput {
+  readonly userAgentId: string;
+  readonly purpose: AgentPurpose;
+  readonly evaluationMcpServerId: string | null;
+}
+
 export interface AgentPurposeStore {
   list(userAgentIds: readonly string[]): Promise<readonly AgentPurposeRecord[]>;
   get(userAgentId: string): Promise<AgentPurposeRecord | null>;
-  createIfAbsent(input: {
-    readonly userAgentId: string;
-    readonly purpose: AgentPurpose;
-    readonly evaluationMcpServerId: string | null;
-  }): Promise<AgentPurposeRecord>;
+  ensure(input: AgentPurposeInput): Promise<AgentPurposeRecord>;
+  upsert(input: AgentPurposeInput): Promise<AgentPurposeRecord>;
   remove(userAgentId: string): Promise<void>;
 }
 
@@ -29,7 +32,7 @@ function record(row: typeof agentConfigPurposes.$inferSelect): AgentPurposeRecor
   };
 }
 
-/** Owner-scoped persistence for the immutable purpose metadata of editable SP Agent Configs. */
+/** Owner-scoped persistence for the current purpose metadata of editable SP Agent Configs. */
 export function createPostgresAgentPurposeStore(db: EvalDb, ownerUserId: string): AgentPurposeStore {
   const owner = requireOwnerUserId(ownerUserId);
   return {
@@ -46,8 +49,17 @@ export function createPostgresAgentPurposeStore(db: EvalDb, ownerUserId: string)
       ));
       return row ? record(row) : null;
     },
-    async createIfAbsent(input) {
+    async ensure(input) {
       await db.insert(agentConfigPurposes).values({ ownerUserId: owner, ...input }).onConflictDoNothing();
+      const current = await this.get(input.userAgentId);
+      if (!current) throw new Error(`Agent purpose ${input.userAgentId} was not persisted`);
+      return current;
+    },
+    async upsert(input) {
+      await db.insert(agentConfigPurposes).values({ ownerUserId: owner, ...input }).onConflictDoUpdate({
+        target: [agentConfigPurposes.ownerUserId, agentConfigPurposes.userAgentId],
+        set: { purpose: input.purpose, evaluationMcpServerId: input.evaluationMcpServerId },
+      });
       const current = await this.get(input.userAgentId);
       if (!current) throw new Error(`Agent purpose ${input.userAgentId} was not persisted`);
       return current;

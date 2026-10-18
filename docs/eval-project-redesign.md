@@ -80,7 +80,7 @@ Project 的一次一致读取是 `ProjectPlan`（`packages/eval-contracts/src/pr
 
 Agent Config 在 Eval 中通过 `/api/agent-configs` 增删改查，Eval SP 只是承载层。由于 SP 原地更新配置，Project 不直接引用用户的可编辑 Agent Config：
 
-每个可编辑 Agent Config 在 `eval_agent_config_purposes` 中有一个不可变用途（`execution` 或 `evaluation`），这是 Agent 管理、Project 角色筛选、创建、更新和冻结共同使用的唯一事实源。已有配置缺少记录时，首次读取通过 SP 的公开 MCP 目录完成一次性 reconciliation；目录不可用、评估结果 MCP 歧义或配置选择的 MCP 不可用时返回 `AGENT_CONFIG_PURPOSE_UNAVAILABLE`（503），不返回用途未知的选项，也不把配置临时归入任一用途。记录创建后不再从可变 MCP 设置或目录可用性重分类；更新/冻结只要求评估配置仍保留记录的 result MCP 选择，若配置正文已丢失该选择则拒绝变更。
+每个可编辑 Agent Config 在 `eval_agent_config_purposes` 中有一个当前用途（`execution` 或 `evaluation`），这是 Agent 管理、Project 角色筛选、创建、更新和冻结共同使用的唯一事实源。已有配置缺少记录时，首次读取通过 SP 的公开 MCP 目录完成一次性 reconciliation；目录不可用、评估结果 MCP 歧义或配置选择的 MCP 不可用时返回 `AGENT_CONFIG_PURPOSE_UNAVAILABLE`（503），不返回用途未知的选项，也不把配置临时归入任一用途。编辑用途时服务端同步配置：评估 Agent 自动保留唯一可用的结果 MCP，执行 Agent 移除该绑定；用途变化不会影响已有 Project 的冻结副本。
 
 - 创建 Project（Subject，以及填写时的 Evaluator）或保存评估计划（Evaluator）时，Eval API 读取所选 Agent Config，通过 SP 公开创建接口生成内容相同的副本（slug `eval-frozen-<uuid>`，名称追加 ` (frozen)`），计划引用副本的 `userAgentId`；
 - 计划同时保存 `AgentConfigSnapshot` 正文快照，只用于展示；运行始终通过副本引用调用 SP，不从正文重建配置；

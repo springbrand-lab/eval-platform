@@ -48,15 +48,7 @@ export class AgentConfigFrozenError extends Error {
   }
 }
 
-/** An editable Agent Config keeps its execution/evaluation purpose for its entire lifetime. */
-export class AgentConfigPurposeLockedError extends Error {
-  constructor(readonly userAgentId: string) {
-    super(`Agent Config ${userAgentId} purpose cannot be changed after creation`);
-    this.name = "AgentConfigPurposeLockedError";
-  }
-}
-
-/** A Project or evaluation plan selected an Agent whose immutable purpose is different. */
+/** A Project or evaluation plan selected an Agent whose current purpose is different. */
 export class AgentConfigPurposeMismatchError extends Error {
   constructor(readonly userAgentId: string, readonly expected: AgentPurpose, readonly actual: AgentPurpose) {
     super(`Agent Config ${userAgentId} is an ${actual} Agent, but ${expected} is required`);
@@ -64,7 +56,7 @@ export class AgentConfigPurposeMismatchError extends Error {
   }
 }
 
-/** The immutable purpose cannot be reconciled from Eval's persisted record and the SP catalog. */
+/** The purpose cannot be reconciled from Eval's persisted record and the SP catalog. */
 export class AgentConfigPurposeUnavailableError extends Error {
   constructor(readonly userAgentId?: string) {
     super(userAgentId

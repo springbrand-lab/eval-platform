@@ -13,7 +13,7 @@ It consumes only the Eval API and package public contracts. It never drives an A
 to SP Durable Objects, and never reconstructs trajectory facts from UI state. Its Worker is the only
 place the takt token is checked; the Eval API sees the verified user only as an audit actor.
 
-Agent management receives an immutable `execution` or `evaluation` purpose on every selectable
+Agent management receives a current `execution` or `evaluation` purpose on every selectable
 Agent option. The API reconciles missing purpose records before returning options; an unavailable
 or ambiguous MCP catalog is a blocking 503, so the page never renders an unknown-purpose row or
 lets a Project selector continue with an incomplete list. The Web uses the same filtered options

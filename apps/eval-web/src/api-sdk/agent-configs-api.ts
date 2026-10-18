@@ -15,7 +15,8 @@ export const listAgentConfigs = (signal?: AbortSignal) => api.get<AgentConfig[]>
 export const getAgentConfig = (id: string, signal?: AbortSignal) => api.get<AgentConfig>(`/api/agent-configs/${enc(id)}`, { signal });
 export const createAgentConfig = (input: AgentConfigInput, purpose: AgentPurpose) =>
   api.post<AgentConfig>("/api/agent-configs", { ...input, purpose });
-export const updateAgentConfig = (id: string, input: UpdateUserAgentConfigInput) =>
+export type AgentConfigUpdateInput = UpdateUserAgentConfigInput & { readonly purpose?: AgentPurpose };
+export const updateAgentConfig = (id: string, input: AgentConfigUpdateInput) =>
   api.patch<AgentConfig>(`/api/agent-configs/${enc(id)}`, input);
 export const deleteAgentConfig = (id: string) => api.delete(`/api/agent-configs/${enc(id)}`);
 export const listAgentOptions = (role?: AgentRole, purpose?: AgentPurpose, signal?: AbortSignal) =>

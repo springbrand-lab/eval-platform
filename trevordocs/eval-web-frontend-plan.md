@@ -67,7 +67,7 @@ Sampling 内的 Subject 和所有 Evaluator 都有各自的 Context、Workspace�
 
 结果页面按“当前范围的关键指标 → Schema 评估输出 → 下一级结果明细 → 按需展开的资源与轨迹统计”组织。Project、Dataset、Sample 的明细依次进入 Dataset、Sample、Sampling；共享 Data 可属于多个 Dataset，Sample 页面展示全部所属测试集入口，不虚构唯一父级。Sampling 优先展示执行 Agent 产物与评估 Agent 结果，资源和尝试明细可展开；折叠只影响展示，不改变采集、轮询或 Metrics 口径。执行/评估成功率不是质量分数，零、未知、缺失和字段有效 N 继续区分。
 
-数据准备入口分别说明提示词、素材、上下文和评分 Schema 的用途与上传格式。Agent 目录使用当前 Eval SP 的模型目录展示真实模型名称、思考强度和系统提示词摘要，以及公开配置中的能力数量；编辑继续由公共 AgentEditor 负责。用途来自 Eval API 的不可变用途记录；用途 reconciliation 失败时列表阻断并允许重试，不显示未知用途。列表支持搜索结果计数、清空搜索及键盘打开行；无匹配与空目录是不同状态。应用在自己的主题边界统一本地和 Dune 语义色，列表采用宽布局，编辑页限宽，窄屏保留可访问的导航。
+数据准备入口分别说明提示词、素材、上下文和评分 Schema 的用途与上传格式。Agent 目录使用当前 Eval SP 的模型目录展示真实模型名称、思考强度和系统提示词摘要，以及公开配置中的能力数量；编辑继续由公共 AgentEditor 负责。用途来自 Eval API 的当前用途记录，编辑时可以切换，切换评估用途会自动同步结果 MCP；用途 reconciliation 失败时列表阻断并允许重试，不显示未知用途。列表支持搜索结果计数、清空搜索及键盘打开行；无匹配与空目录是不同状态。应用在自己的主题边界统一本地和 Dune 语义色，列表采用宽布局，编辑页限宽，窄屏保留可访问的导航。
 
 React 19、Vite、TanStack Router 和 Query 管理页面与数据。普通控件优先使用安装版本的 Dune 公开部件，表格在应用内组合 TanStack Table/Virtual；cell 是普通渲染回调，不因输入而改变组件身份。虚拟列表与固定表头使用 Dune 同一个公开滚动容器。领域组合留在对应 features 中。
 

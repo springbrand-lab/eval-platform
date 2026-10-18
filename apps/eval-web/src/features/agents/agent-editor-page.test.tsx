@@ -213,16 +213,21 @@ describe("SP Agent editor in Eval", () => {
     } finally { await view.close(); }
   });
 
-  it("locks an existing Agent's purpose after creation", async () => {
+  it("allows an existing Agent to switch purpose and removes the result MCP when returning to execution", async () => {
     const view = await mount("/agents/agent-a");
     try {
       await settle(() => expect(view.container.querySelector("[data-agent-purpose]")).not.toBeNull());
       await settle(() => expect(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]')?.checked).toBe(true));
       const executionPurpose = view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="execution"]')!;
-      expect(executionPurpose.disabled).toBe(true);
       await click(executionPurpose);
-      expect(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]')?.checked).toBe(true);
-      expect(view.container.textContent).toContain("用途在创建后固定");
+      await settle(() => expect(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="execution"]')?.checked).toBe(true));
+      await act(async () => { await view.query.invalidateQueries({ queryKey: agentKeys.options() }); });
+      await settle(() => expect(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="execution"]')?.checked).toBe(true));
+      await click(button("保存修改"));
+      await settle(() => expect(transport.patch).toHaveBeenCalledTimes(1));
+      expect(transport.patch.mock.calls[0]![1]).toMatchObject({
+        purpose: "execution", setting: { mcpServers: [] },
+      });
     } finally { await view.close(); }
   });
 
@@ -292,7 +297,7 @@ describe("SP Agent editor in Eval", () => {
       expect(name()?.value).toBe("Unsaved name");
       await click(button("保存修改"));
       await settle(() => expect(transport.patch).toHaveBeenCalledExactlyOnceWith("/api/agent-configs/agent-a", {
-        revision: 3, name: "Unsaved name", description: null, setting,
+        revision: 3, name: "Unsaved name", description: null, setting, purpose: "evaluation",
       }));
     } finally { await view.close(); }
   });

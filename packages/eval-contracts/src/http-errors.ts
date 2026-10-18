@@ -28,7 +28,6 @@ const errorDefinitions = {
   EVAL_SP_UNAVAILABLE: { status: 503, message: "Eval SP is unavailable. Try again shortly" },
 
   AGENT_CONFIG_FROZEN: { status: 409, message: "Agent Config is a frozen Project copy and cannot be changed" },
-  AGENT_CONFIG_PURPOSE_LOCKED: { status: 409, message: "Agent Config purpose cannot be changed after creation" },
   AGENT_CONFIG_PURPOSE_MISMATCH: { status: 422, message: "Agent Config purpose does not match the requested project role" },
   AGENT_CONFIG_PURPOSE_UNAVAILABLE: { status: 503, message: "Agent Config purpose is temporarily unavailable" },
 

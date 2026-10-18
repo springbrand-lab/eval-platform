@@ -6,7 +6,7 @@
 
 `EVALUATION_RESULTS_MCP_PATH`、`isEvaluationResultsMcpUrl` 与 `resolveEvaluationResultsMcp` 是 Agent 用途分类和 Agent 编辑器共用的公开评估结果提交 MCP 判定；只有唯一启用且使用 Bearer 鉴权的用户 MCP 可用，分类不依赖 MCP 的展示名称或描述。
 
-`AgentPurpose` 是 Eval Agent Config 在创建时固定的 `execution | evaluation` 用途；它与 Runtime 的 `AgentRole` 分开，Subject/Evaluator 运行契约不因此改变。
+`AgentPurpose` 是 Eval Agent Config 当前的 `execution | evaluation` 用途，可在编辑时切换；它与 Runtime 的 `AgentRole` 分开，Subject/Evaluator 运行契约不因此改变。切换为评估用途时由 Eval 自动绑定评估结果 MCP，切回执行用途时移除该绑定。
 
 评估平台跨包共享的稳定契约层，公共契约从包根入口导入。`./http-errors` 是 Eval API 唯一的错误码目录（`defineErrorCatalog`），`./http` 是基于它的 Hono 响应器（`createHonoHttp`）；只有这两个 HTTP 边界子路径依赖 `@springbrand/http` 与 `hono`，包根不加载它们。HTTP 契约见 [Eval HTTP 控制面](../../docs/eval-http-api.md)。
 
