@@ -1,4 +1,4 @@
-import type { RunSnapshot } from "@/api-sdk/types";
+import type { RunSnapshot, StageStatistics } from "@/api-sdk/types";
 
 const FINISHED = new Set(["succeeded", "failed", "cancelled"]);
 const IN_PROGRESS = new Set(["starting", "running", "retrying"]);
@@ -16,4 +16,9 @@ export function runPhaseLabel(run: Pick<RunSnapshot, "phase" | "status" | "stopR
 export function stageProgressLabel(stage: "execution" | "evaluation", status: string): string | undefined {
   if (!IN_PROGRESS.has(status)) return undefined;
   return stage === "execution" ? "执行中" : "评估中";
+}
+
+/** Counts stage records that are actively starting, running or retrying; queued records are waiting. */
+export function stageInProgressCount(stage: Pick<StageStatistics, "statuses">): number {
+  return stage.statuses.starting + stage.statuses.running + stage.statuses.retrying;
 }

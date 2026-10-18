@@ -18,7 +18,7 @@ import { EmptyState, ErrorBlock, LoadingBlock, Spinner } from "@/components/ui/f
 import { ActionMenu } from "@/components/ui/menu";
 import { Tooltip } from "@/components/ui/tooltip";
 import { formatDateTime, formatDuration, OPERATION_LABELS } from "@/lib/format";
-import { runPhaseLabel } from "@/features/runs/run-status";
+import { runPhaseLabel, stageInProgressCount } from "@/features/runs/run-status";
 import { POLL_MS, useRun } from "@/features/runs/use-run-polling";
 import { useProject } from "./use-project";
 import { StopRunDialog, type StopRunTarget } from "@/features/runs/stop-run-dialog";
@@ -52,7 +52,7 @@ function CurrentRunBanner({ projectId, current, onStop }: { projectId: string; c
               segments={[
                 { label: "执行成功", value: execution.succeeded, tone: "success" },
                 { label: "评估成功", value: evaluation.succeeded, tone: "success" },
-                { label: "进行中", value: execution.running + execution.starting + execution.retrying + evaluation.running + evaluation.starting + evaluation.retrying, tone: "warning" },
+                { label: "进行中", value: stageInProgressCount({ statuses: execution }) + stageInProgressCount({ statuses: evaluation }), tone: "warning" },
                 { label: "排队", value: execution.queued + evaluation.queued, tone: "neutral" },
                 { label: "失败", value: execution.failed + evaluation.failed, tone: "danger" },
               ]}

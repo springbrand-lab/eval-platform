@@ -9,6 +9,7 @@ import { formatCompact, formatDuration, formatNumber, formatPercent, formatStati
 import { AgentMetricPair, MetricValue } from "./metric-value";
 import { ResourceMetrics, stageStatusFor } from "./resource-metrics";
 import { ModelName } from "./token-metrics";
+import { stageInProgressCount } from "@/features/runs/run-status";
 
 function fieldValue(field: OutputFieldSummary, compact = false): string {
   const values: string[] = [];
@@ -120,8 +121,8 @@ const MISSING = { "not-succeeded": "评估未成功", "invalid-output": "结果�
 export function SummaryCards({ summary, children }: { summary: MetricSummary; children?: ReactNode }) {
   const execution = summary.execution;
   const evaluation = summary.evaluation;
-  const executionInProgress = execution.records - execution.terminalRecords;
-  const evaluationInProgress = evaluation.records - evaluation.terminalRecords;
+  const executionInProgress = stageInProgressCount(execution);
+  const evaluationInProgress = stageInProgressCount(evaluation);
   return <div className="flex flex-col gap-6">
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
       <MetricCard label="采样" value={formatNumber(summary.counts.samplings)} hint={`${summary.counts.projectSamples} 条样本 · ${summary.counts.evaluations} 个评估`} />

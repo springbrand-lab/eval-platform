@@ -16,7 +16,7 @@ import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
 import { formatDateTime, OPERATION_LABELS } from "@/lib/format";
 import { OutputFields } from "@/features/metrics/summary";
 import { ResourceMetrics, stageStatusFor } from "@/features/metrics/resource-metrics";
-import { isFinished, runPhaseLabel, stageProgressLabel } from "./run-status";
+import { isFinished, runPhaseLabel, stageInProgressCount, stageProgressLabel } from "./run-status";
 import { POLL_MS, useRun } from "./use-run-polling";
 import { useProject } from "@/features/projects/use-project";
 import { StopRunDialog, type StopRunTarget } from "./stop-run-dialog";
@@ -67,7 +67,6 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
   const snapshot = run.data?.run;
   const records = evaluations.data?.evaluations ?? [];
   const unsynced = records.filter((record) => record.status.status === "succeeded" && record.scoreSync?.status !== "synced").length;
-  const inProgress = (stage: { records: number; terminalRecords: number }) => stage.records - stage.terminalRecords;
 
   return (
     <Page>
@@ -89,7 +88,7 @@ export function RunDetailPage({ projectId, runId }: { projectId: string; runId: 
             <span>{OPERATION_LABELS[snapshot.operation]}</span>
             <span>采样 <strong className="font-medium text-text-strong">{snapshot.samplingIds.length}</strong></span>
             <span>评估 <strong className="font-medium text-text-strong">{snapshot.evaluationIds.length}</strong></span>
-            {overview.data && <><span>执行成功 {overview.data.summary.execution.statuses.succeeded}</span><span>执行中 {inProgress(overview.data.summary.execution)}</span><span>评估成功 {overview.data.summary.evaluation.statuses.succeeded}</span><span>评估中 {inProgress(overview.data.summary.evaluation)}</span><span>有效结果 {overview.data.summary.evaluationOutputs.validation.valid}</span></>}
+            {overview.data && <><span>执行成功 {overview.data.summary.execution.statuses.succeeded}</span><span>执行中 {stageInProgressCount(overview.data.summary.execution)}</span><span>评估成功 {overview.data.summary.evaluation.statuses.succeeded}</span><span>评估中 {stageInProgressCount(overview.data.summary.evaluation)}</span><span>有效结果 {overview.data.summary.evaluationOutputs.validation.valid}</span></>}
           </div>
           {snapshot.stopRequested && !isFinished(snapshot.status) && <Notice tone="warning">正在停止：正在中断已运行的 Agent，并收集已产生的结果。</Notice>}
           <Card>

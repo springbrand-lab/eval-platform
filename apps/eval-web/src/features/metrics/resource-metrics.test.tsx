@@ -149,6 +149,32 @@ describe("Agent resource and trajectory categories", () => {
     } finally { await view.unmount(); }
   });
 
+  it("counts only active stage statuses as in progress", async () => {
+    const base = metricSummary(resourceStatistics(), resourceStatistics());
+    const summary = {
+      ...base,
+      execution: {
+        ...base.execution,
+        records: 13,
+        terminalRecords: 0,
+        statuses: { queued: 8, starting: 2, running: 3, retrying: 0, succeeded: 0, failed: 0, cancelled: 0 },
+      },
+      evaluation: {
+        ...base.evaluation,
+        records: 13,
+        terminalRecords: 0,
+        statuses: { queued: 8, starting: 2, running: 3, retrying: 0, succeeded: 0, failed: 0, cancelled: 0 },
+      },
+    };
+    const view = await render(<SummaryCards summary={summary} />);
+    try {
+      expect(view.container.textContent).toContain("执行中 5");
+      expect(view.container.textContent).not.toContain("执行中 13");
+      expect(view.container.textContent).toContain("评估中 5");
+      expect(view.container.textContent).not.toContain("评估中 13");
+    } finally { await view.unmount(); }
+  });
+
   it("puts output details before drill-down results and collapsed resource statistics", async () => {
     const summary = metricSummary(fixture(), resourceStatistics());
     const view = await render(<SummaryCards summary={summary}><h2>下一级实验结果</h2></SummaryCards>);
