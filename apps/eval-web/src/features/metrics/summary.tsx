@@ -59,8 +59,6 @@ function ValidationOverview({ outputs }: { outputs: EvaluationOutputSummary }) {
     { label: "结果未获得", count: outputs.validation.unavailable, detail: "等待或缺少结果", tone: "neutral", icon: CircleHelp },
   ] as const;
   return <div aria-label="评估结果概览" className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-border bg-surface-muted/30 px-3 py-2.5">
-    <span className="text-xs font-semibold text-text-secondary">结果获取情况</span>
-    <span className="hidden h-4 w-px bg-border sm:block" aria-hidden="true" />
     {items.map(({ label, count, detail, tone, icon: Icon }) => <span key={label} className="inline-flex items-center gap-1.5 text-xs text-text-muted">
       <Icon className={`size-3.5 ${tone === "success" ? "text-success" : tone === "warning" ? "text-warning" : "text-text-muted"}`} aria-hidden="true" />
       <span>{label}</span>
@@ -83,9 +81,9 @@ export function OutputFields({ outputs, compact = false }: { outputs: Evaluation
     <CardHeader className={compact ? "px-3 py-3" : undefined} title="评估指标概览" description="先看关键结论，再查看指标分布与统计口径。" />
     <CardBody className={compact ? "p-3" : "p-5"}>
       <ValidationOverview outputs={outputs} />
-      {outputs.fields.length === 0 ? <p className="mt-5 text-sm text-text-muted">暂无可统计字段。原始结果可在采样详情查看。</p> : <section className="mt-6" aria-label="关键指标">
+      {outputs.fields.length === 0 ? <p className="mt-5 text-sm text-text-muted">暂无可统计字段。原始结果可在采样详情查看。</p> : <section className="mt-6" aria-label="评估结果">
         <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-          <h3 className="text-sm font-semibold text-text-strong">关键指标</h3>
+          <h3 className="text-sm font-semibold text-text-strong">评估结果</h3>
           <span className="text-xs text-text-muted">共 {outputs.fields.length} 项 · 以有效评估结果计算</span>
         </div>
         <div className={compact ? "grid grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-2" : "grid grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-4"}>
