@@ -2,7 +2,7 @@ import { TELEMETRY_PROJECTION_VERSION, telemetryBodyLength, telemetryContentFlag
 import { record, text } from "../json.js";
 import type {
   CoveredNumericSummary,
-  ThinkingTurnTokens,
+  ThinkingStepTokens,
   MetricNumber,
   OperationStatistics,
   ResourceStatistics,
@@ -93,7 +93,7 @@ export function aggregateTelemetry(
       byTool: [...toolGroups.entries()]
         .map(([toolName, operations]) => toolMetric(toolName, operations, complete && (toolName === null || toolNamesKnown)))
         .sort((left, right) => (left.toolName ?? "").localeCompare(right.toolName ?? "")),
-      ...trajectoryTurnMetrics(observed, complete, diagnostics),
+      ...trajectoryStepMetrics(observed, complete, diagnostics),
     },
   };
 }
@@ -268,14 +268,14 @@ function operationStatistics(observed: readonly ObservedOperation[], complete: b
 }
 
 /** A known empty category remains a real zero even when another telemetry stream is incomplete. */
-function markedTurnStatistics(
-  turns: readonly ObservedOperation[],
+function markedStepStatistics(
+  steps: readonly ObservedOperation[],
   marked: ReadonlySet<string>,
   complete: boolean,
   categoryKnown: boolean,
 ): OperationStatistics {
-  const statistics = operationStatistics(turns.filter((turn) => marked.has(turn.key)), complete && categoryKnown);
-  if (categoryKnown && !complete && marked.size === 0 && turns.length > 0) {
+  const statistics = operationStatistics(steps.filter((step) => marked.has(step.key)), complete && categoryKnown);
+  if (categoryKnown && !complete && marked.size === 0 && steps.length > 0) {
     return { ...statistics, count: { value: 0, coverage: "partial" } };
   }
   return statistics;
@@ -333,41 +333,55 @@ function linkToTurns(observed: readonly ObservedOperation[], kind: "tool" | "gen
   return { linked, unlinked };
 }
 
-function trajectoryTurnMetrics(
+function trajectoryStepMetrics(
   observed: readonly ObservedOperation[],
   complete: boolean,
   diagnostics: ResourceDiagnostics,
-): Pick<TrajectorySummary, "thinkingTurns" | "thinkingTurnOperations" | "contentTurns" | "contentTurnOperations" | "thinkingTurnTokens" | "contentTurnTokens" | "unlinkedOperations"> {
+): Pick<TrajectorySummary, "thinkingSteps" | "thinkingStepOperations" | "contentSteps" | "contentStepOperations" | "thinkingStepTokens" | "contentStepTokens" | "unlinkedOperations"> {
   const turns = observed.filter((operation) => operation.kind === "turn");
+  const steps = observed.filter((operation) => operation.kind === "generation");
   const tools = linkToTurns(observed, "tool");
   const generations = linkToTurns(observed, "generation");
   const turnFlags = new Map(turns.map((turn) => [turn.key, {
     thinking: markerState(turn.hasThinking, turn.thinkingKnown),
     content: markerState(turn.hasContent, turn.contentKnown),
   }]));
+  const stepFlags = new Map(steps.map((step) => [step.key, {
+    thinking: markerState(step.hasThinking, step.thinkingKnown),
+    content: markerState(step.hasContent, step.contentKnown),
+  }]));
   for (const [generation, turn] of generations.linked) {
     const flags = turnFlags.get(turn);
-    if (!flags) continue;
-    flags.thinking = mergeMarkerState(flags.thinking, markerState(generation.hasThinking, generation.thinkingKnown));
-    flags.content = mergeMarkerState(flags.content, markerState(generation.hasContent, generation.contentKnown));
+    const step = stepFlags.get(generation.key);
+    if (!step) continue;
+    if (flags) {
+      step.thinking = mergeMarkerState(step.thinking, flags.thinking);
+      step.content = mergeMarkerState(step.content, flags.content);
+    }
   }
-  const thinking = new Set([...turnFlags].filter(([, flags]) => flags.thinking.hit).map(([key]) => key));
-  const content = new Set([...turnFlags].filter(([, flags]) => flags.content.hit).map(([key]) => key));
+  const thinking = new Set([...stepFlags].filter(([, flags]) => flags.thinking.hit).map(([key]) => key));
+  const content = new Set([...stepFlags].filter(([, flags]) => flags.content.hit).map(([key]) => key));
+  // A completed Turn without any generation event cannot prove that there were no
+  // model steps. Keep the category unavailable in that case instead of reporting
+  // a misleading complete zero. An actually empty trajectory is a proven zero.
+  const stepsPresent = steps.length > 0;
+  const thinkingKnown = stepsPresent
+    ? [...stepFlags.values()].every((flags) => flags.thinking.known)
+    : turns.length === 0;
+  const contentKnown = stepsPresent
+    ? [...stepFlags.values()].every((flags) => flags.content.known)
+    : turns.length === 0;
   const generationLinksComplete = generations.unlinked === 0;
-  const thinkingKnown = generationLinksComplete
-    && [...turnFlags.values()].every((flags) => flags.thinking.known);
-  const contentKnown = generationLinksComplete
-    && [...turnFlags.values()].every((flags) => flags.content.known);
-  const thinkingTurnOperations = markedTurnStatistics(turns, thinking, complete, thinkingKnown);
-  const contentTurnOperations = markedTurnStatistics(turns, content, complete, contentKnown);
-  const thinkingCount = thinkingTurnOperations.count;
-  const contentCount = contentTurnOperations.count;
-  const turnTokens = (marked: ReadonlySet<string>, markedCount: MetricNumber): ThinkingTurnTokens => {
-    const markedGenerations = [...generations.linked].filter(([, turn]) => marked.has(turn)).map(([operation]) => operation);
-    const tokensComplete = markedCount.coverage === "complete" && generationLinksComplete;
+  const thinkingStepOperations = markedStepStatistics(steps, thinking, complete && generationLinksComplete, thinkingKnown);
+  const contentStepOperations = markedStepStatistics(steps, content, complete && generationLinksComplete, contentKnown);
+  const thinkingCount = thinkingStepOperations.count;
+  const contentCount = contentStepOperations.count;
+  const stepTokens = (marked: ReadonlySet<string>, markedCount: MetricNumber): ThinkingStepTokens => {
+    const markedSteps = steps.filter((step) => marked.has(step.key));
+    const tokensComplete = markedCount.coverage === "complete";
     const tokens = (field: "inputTokens" | "outputTokens" | "totalTokens"): MetricNumber => markedCount.value === null
       ? { value: null, coverage: "unavailable" }
-      : diagnostics.sum(markedGenerations.map((operation) => operation.terminal ?? operation.first), tokensComplete, "telemetryEvents", field, true, (entry) => (
+      : diagnostics.sum(markedSteps.map((operation) => operation.terminal ?? operation.first), tokensComplete, "telemetryEvents", field, true, (entry) => (
         entry.fact.type === "generation.finished"
           ? diagnostics.number(entry, "telemetryEvents", record(entry.fact.payload)?.[field], field, true)
           : null
@@ -375,12 +389,12 @@ function trajectoryTurnMetrics(
     return { input: tokens("inputTokens"), output: tokens("outputTokens"), total: tokens("totalTokens") };
   };
   return {
-    thinkingTurns: thinkingCount,
-    thinkingTurnOperations,
-    contentTurns: contentCount,
-    contentTurnOperations,
-    thinkingTurnTokens: turnTokens(thinking, thinkingCount),
-    contentTurnTokens: turnTokens(content, contentCount),
+    thinkingSteps: thinkingCount,
+    thinkingStepOperations,
+    contentSteps: contentCount,
+    contentStepOperations,
+    thinkingStepTokens: stepTokens(thinking, thinkingCount),
+    contentStepTokens: stepTokens(content, contentCount),
     unlinkedOperations: { tools: tools.unlinked, generations: generations.unlinked },
   };
 }

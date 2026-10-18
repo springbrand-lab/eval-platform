@@ -12,12 +12,12 @@ function fixture() {
     ...base.trajectory, coverage: "partial",
     turns: { ...base.trajectory.turns, count: { value: 4, coverage: "partial" }, completed: 2, failed: 1, unknown: 1 },
     tools: { ...base.trajectory.tools, count: { value: 3, coverage: "partial" }, completed: 2, failed: 1 },
-    thinkingTurns: { value: 2, coverage: "partial" },
-    thinkingTurnOperations: { ...base.trajectory.thinkingTurnOperations, count: { value: 2, coverage: "partial" }, completed: 1, failed: 1 },
-    contentTurns: { value: 1, coverage: "partial" },
-    contentTurnOperations: { ...base.trajectory.contentTurnOperations, count: { value: 1, coverage: "partial" }, completed: 1 },
-    thinkingTurnTokens: { input: { value: 160, coverage: "partial" }, output: { value: 40, coverage: "partial" }, total: { value: 200, coverage: "partial" } },
-    contentTurnTokens: { input: { value: 80, coverage: "partial" }, output: { value: null, coverage: "unavailable" }, total: { value: null, coverage: "unavailable" } },
+    thinkingSteps: { value: 2, coverage: "partial" },
+    thinkingStepOperations: { ...base.trajectory.thinkingStepOperations, count: { value: 2, coverage: "partial" }, completed: 1, failed: 1 },
+    contentSteps: { value: 1, coverage: "partial" },
+    contentStepOperations: { ...base.trajectory.contentStepOperations, count: { value: 1, coverage: "partial" }, completed: 1 },
+    thinkingStepTokens: { input: { value: 160, coverage: "partial" }, output: { value: 40, coverage: "partial" }, total: { value: 200, coverage: "partial" } },
+    contentStepTokens: { input: { value: 80, coverage: "partial" }, output: { value: null, coverage: "unavailable" }, total: { value: null, coverage: "unavailable" } },
     byTool: [{
       ...base.trajectory.tools, toolName: "write_file", count: { value: 3, coverage: "partial" }, completed: 2, failed: 1,
       durationMs: { count: 3, missing: 0, total: 600, min: 100, max: 300, mean: 200, variance: 6666.666666666667, median: 200 },
@@ -45,10 +45,10 @@ describe("Agent resource and trajectory categories", () => {
     const view = await render(<ResourceMetrics statistics={fixture()} />);
     try {
       const operations = view.container.querySelector('table[aria-label="操作次数"]')!;
-      expect([...operations.querySelectorAll("tbody th")].map((item) => item.textContent)).toEqual(["处理轮（Turn）", "思考命中轮", "内容命中轮", "模型请求", "工具调用"]);
+      expect([...operations.querySelectorAll("tbody th")].map((item) => item.textContent)).toEqual(["处理轮（Turn）", "思考步骤", "内容步骤", "模型请求", "工具调用"]);
       const turns = operations.querySelector("tbody tr")!;
       expect([...turns.querySelectorAll("td")].slice(0, 6).map((item) => item.textContent)).toEqual(["4", "2", "1", "0", "0", "1"]);
-      const thinking = [...operations.querySelectorAll("tbody tr")].find((row) => row.querySelector("th")?.textContent === "思考命中轮")!;
+      const thinking = [...operations.querySelectorAll("tbody tr")].find((row) => row.querySelector("th")?.textContent === "思考步骤")!;
       expect([...thinking.querySelectorAll("td")].map((item) => item.textContent)).toEqual(["2", "1", "1", "0", "0", "0"]);
       const tool = view.container.querySelector('table[aria-label="工具调用明细"] tbody tr')!;
       expect(tool.textContent).toContain("write_file");

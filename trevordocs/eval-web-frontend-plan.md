@@ -47,7 +47,7 @@ Prompt JSON/JSONL 文件每条提供 name、description、userPrompt、evalPromp
 
 层级为 Project → Dataset → Sample → Sampling，每层都从该范围的原始事实计算，Web 不平均下层汇总。
 
-Subject 和每个 Evaluator 分开显示资源、费用、Token、缓存读取/写入、缓存命中率、Agent/Attempt 时长、轨迹轮数、工具和模型调用的结果分类、各工具输入/返回长度，以及思考轮、内容轮和分别明确关联的思考轮/内容轮 Token。思考轮和内容轮可以重叠，Token 也按各自命中的 generation 统计。工具长度是规范 JSON 的 UTF-8 字节数；缓存和 reasoning 不重复加到 total。未知、缺失、真实零及 coverage 保持区别。
+Subject 和每个 Evaluator 分开显示资源、费用、Token、缓存读取/写入、缓存命中率、Agent/Attempt 时长、轨迹 Turn 数、工具和模型调用的结果分类、各工具输入/返回长度，以及按 generation Step 命中的思考步骤、内容步骤和分别关联的 Token。一个 Turn 可以包含多个 Step，一个 Step 可以同时命中思考与内容，Token 也按各自命中的 generation 统计。工具长度是规范 JSON 的 UTF-8 字节数；缓存和 reasoning 不重复加到 total。未知、缺失、真实零及 coverage 保持区别。
 
 每个 Agent 展示模型名称和一组 Token 指标，不做“全部模型”与逐模型的重复表格或分布。资源完整性统一在“资源完整性”一处表达，单个数值、工具长度和分布不重复显示状态标签；Schema 字段完整时同样不加“完整”标签，异常状态及缺失说明继续展示。
 
@@ -67,7 +67,7 @@ Sampling 内的 Subject 和所有 Evaluator 都有各自的 Context、Workspace�
 
 结果页面按“当前范围的关键指标 → Schema 评估输出 → 下一级结果明细 → 按需展开的资源与轨迹统计”组织。Project、Dataset、Sample 的明细依次进入 Dataset、Sample、Sampling；共享 Data 可属于多个 Dataset，Sample 页面展示全部所属测试集入口，不虚构唯一父级。Sampling 优先展示执行 Agent 产物与评估 Agent 结果，资源和尝试明细可展开；折叠只影响展示，不改变采集、轮询或 Metrics 口径。执行/评估成功率不是质量分数，零、未知、缺失和字段有效 N 继续区分。
 
-数据准备入口分别说明提示词、素材、上下文和评分 Schema 的用途与上传格式。Agent 目录使用当前 Eval SP 的模型目录展示真实模型名称、思考强度和系统提示词摘要，以及公开配置中的能力数量；编辑继续由公共 AgentEditor 负责。列表支持搜索结果计数、清空搜索及键盘打开行；无匹配与空目录是不同状态。应用在自己的主题边界统一本地和 Dune 语义色，列表采用宽布局，编辑页限宽，窄屏保留可访问的导航。
+数据准备入口分别说明提示词、素材、上下文和评分 Schema 的用途与上传格式。Agent 目录使用当前 Eval SP 的模型目录展示真实模型名称、思考强度和系统提示词摘要，以及公开配置中的能力数量；编辑继续由公共 AgentEditor 负责。用途来自 Eval API 的不可变用途记录；用途 reconciliation 失败时列表阻断并允许重试，不显示未知用途。列表支持搜索结果计数、清空搜索及键盘打开行；无匹配与空目录是不同状态。应用在自己的主题边界统一本地和 Dune 语义色，列表采用宽布局，编辑页限宽，窄屏保留可访问的导航。
 
 React 19、Vite、TanStack Router 和 Query 管理页面与数据。普通控件优先使用安装版本的 Dune 公开部件，表格在应用内组合 TanStack Table/Virtual；cell 是普通渲染回调，不因输入而改变组件身份。虚拟列表与固定表头使用 Dune 同一个公开滚动容器。领域组合留在对应 features 中。
 

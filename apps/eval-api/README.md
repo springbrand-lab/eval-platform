@@ -78,7 +78,7 @@ Eval API 不做交互式登录，固定以一个 Eval SP 服务账号运行。�
 
 共享 Agent 编辑器的默认模板、模型和资源库经 `/api/agent-library` 的显式方法/路径表转发；资源库正文由 SP 公共接口校验，Eval 统一执行请求体限长、JSON 唯一字段、Origin 与固定服务账号规则。配置写入不在此转发表内，仍经过已有冻结副本服务。传输层从 Eval HTTP 目录解码公开编辑器错误，保留验证后的删除阻挡详情；SP 服务会话失效始终是依赖不可用，不能触发浏览器重新登录。接口列表与字节限制见 HTTP 契约。
 
-Agent 用途由 Eval 在创建时写入 `eval_agent_config_purposes`，只接受 `execution` 或 `evaluation`，创建后不可变；已有配置首次读取时按公开评估结果 MCP 绑定初始化一次。项目冻结执行副本和评估副本时分别校验用途，避免只靠 Web 选择器筛选。
+Agent 用途由 Eval 在创建时写入 `eval_agent_config_purposes`，只接受 `execution` 或 `evaluation`，创建后不可变；已有配置首次读取时按公开评估结果 MCP 绑定初始化一次。公开 MCP 目录不可用、canonical 评估结果 MCP 歧义或配置选择的 MCP 不可用时，用途读取返回 `AGENT_CONFIG_PURPOSE_UNAVAILABLE`（503），不返回 unknown 选项。项目冻结执行副本和评估副本时分别校验用途，避免只靠 Web 选择器筛选。
 
 `owner-services.ts` 按服务账号组装一次用户范围内的服务；同一用户的并发请求经 `active-owner-admission.ts` 共享 Run 准入实例（`createEvalRunAdmission` + 用户范围的 `createPostgresProjectPlanReader` 与 `RuntimeStore`），请求结束后释放；准入不持有登录 token。
 

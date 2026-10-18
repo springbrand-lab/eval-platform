@@ -165,7 +165,7 @@ describe("four-level reporting", () => {
     const detail = await metricsOf(withTrajectory).getSamplingDetail({ ...scope, samplingId: "s1a" });
     expect(detail.projectSample).toEqual(PS1);
     expect(detail.subject).toMatchObject({ role: "subject", chatId: "subject:s1a", resources: { tokens: { total: { value: 100 } } } });
-    expect(detail.subject.resources.trajectory).toMatchObject({ turns: { count: { value: 1 } }, tools: { count: { value: 1 } }, contentTurns: { value: null, coverage: "unavailable" } });
+    expect(detail.subject.resources.trajectory).toMatchObject({ turns: { count: { value: 1 } }, tools: { count: { value: 1 } }, contentSteps: { value: null, coverage: "unavailable" } });
     expect(detail.evaluations.map((item) => [item.agent.role, item.agent.chatId, item.agent.resources.tokens.total.value])).toEqual([
       ["evaluator", "judge:e1a2", 7], ["evaluator", "judge:e1a3", 3],
     ]);

@@ -30,6 +30,7 @@ const errorDefinitions = {
   AGENT_CONFIG_FROZEN: { status: 409, message: "Agent Config is a frozen Project copy and cannot be changed" },
   AGENT_CONFIG_PURPOSE_LOCKED: { status: 409, message: "Agent Config purpose cannot be changed after creation" },
   AGENT_CONFIG_PURPOSE_MISMATCH: { status: 422, message: "Agent Config purpose does not match the requested project role" },
+  AGENT_CONFIG_PURPOSE_UNAVAILABLE: { status: 503, message: "Agent Config purpose is temporarily unavailable" },
 
   PROJECT_NOT_FOUND: { status: 404, message: "Project not found" },
   RESULT_COLLECTION_CONFLICT: { status: 409, message: "This result cannot be recollected in its current state" },

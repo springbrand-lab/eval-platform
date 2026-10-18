@@ -10,7 +10,7 @@ Eval 的内部管理界面：准备测试集与初始资源、上传评估结果
 
 Agent 新建与编辑直接复用 SP 同一份 `@springbrand/agent-config-editor`：行为、完整系统提示词、模型/思考强度、能力选择和排序、Skill/Reference 管理与预览。模型名称、可用性和每个模型支持的思考档位始终来自当前 Eval SP 的公开模型目录，Agent 管理列表也复用同一目录映射展示，不维护本地模型枚举。宿主只负责默认模板、当前用户、保存、revision 冲突、冻结副本只读及导航；不再提供 Slug 或配置 JSON 输入框。创建会话持有固定 Slug，失败重试通过 SP 创建重放校准；后台读取失败保留草稿。公共资源客户端经 `/api/agent-library` 访问当前 Eval SP，配置写入仍走 `/api/agent-configs`。错误由 Eval 目录解码，保留经过校验的 SP 编辑器领域码和删除阻挡详情。详见 [编辑器对齐](../../docs/agent-config-editor-alignment.md)。
 
-Agent 创建时必须选择“执行 Agent”或“评估 Agent”，用途写入 Eval 并在创建后固定；管理页可按用途筛选。新建 Project 的执行 Agent 和评估计划的评估 Agent 分别只请求对应用途，API 也会再次校验用途，不能依赖浏览器筛选绕过。
+Agent 创建时必须选择“执行 Agent”或“评估 Agent”，用途写入 Eval 并在创建后固定；管理页可按用途筛选。用途信息读取失败或 MCP 目录无法完成 reconciliation 时，管理页阻断列表并提示重试，不显示用途未知的配置。新建 Project 的执行 Agent 和评估计划的评估 Agent 分别只请求对应用途，API 也会再次校验用途，不能依赖浏览器筛选绕过。
 
 Data 表单与 Schema 上传复用 `eval-dataset` 公开的严格 JSON 解析和输入校验；这些运行时入口随 Web 打包。上传与 Project 选择上限只从 API 的 `GET /api/input-limits` 读取，没有浏览器数值副本。
 
@@ -75,7 +75,7 @@ pnpm --filter @eval-platform/eval-web dev
 
 四层 Metrics 和采样内每个 Agent 共用 Token 展示：模型名称、总量、缓存读取、缓存写入、输入、输出、推理和缓存命中率，不使用“全部模型”和模型明细的重复表格。资源完整性集中在“资源完整性”一处展示，数值和分布不重复放状态标签；未获得的值仍不按零展示。总量和缓存命中率直接使用 Metrics 结果，不重复加上缓存或推理 Token。
 
-资源与轨迹按 Agent 分开，四层与采样 Agent 详情复用一套投影。执行/评估阶段状态直接使用各自的 Sampling/Evaluation 状态；轮数、模型请求、工具调用的成功/失败/取消/未闭合/未知是底层遥测操作统计，不作为 Agent 阶段状态。按工具类型展示调用/返回长度与耗时，输出含 `thinking`/`signature` 标记的思考轮、含 `content` 标记的内容轮及分别明确关联的思考轮/内容轮 Token，以及资源诊断。思考轮和内容轮可以重叠，数量不要求加总为 Turn 总数；Token 也按各自命中的 generation 统计，可能重叠。长度以规范 JSON 的 UTF-8 字节计，不转换为 Token；时长展示累计、均值、范围与有效/缺失数量，不当成并行批次的墙钟时间。
+资源与轨迹按 Agent 分开，四层与采样 Agent 详情复用一套投影。执行/评估阶段状态直接使用各自的 Sampling/Evaluation 状态；Turn、模型请求、工具调用以及思考步骤/内容步骤的成功/失败/取消/未闭合/未知是底层遥测操作统计，不作为 Agent 阶段状态。按工具类型展示调用/返回长度与耗时；每个 `generation` operation 是一个模型 Step，Step 自身或所属 Turn 的输出含 `thinking`/`signature` 标记时计入思考步骤，含 `content` 标记时计入内容步骤，并分别汇总命中 Step 的 Token。一个 Turn 可以包含多个 Step，一个 Step 可以同时命中两类，数量不要求加总为 Turn 总数；Token 也可能重叠。长度以规范 JSON 的 UTF-8 字节计，不转换为 Token；时长展示累计、均值、范围与有效/缺失数量，不当成并行批次的墙钟时间。
 
 只读 Trajectory 按轮次、模型请求、工具调用、审批、交互、子 Agent、上下文分类，并保留其他原始事件。工具类型筛选只作用于已加载事件；轮数等统计始终来自 Metrics。Query 缓存保存一个已加载区间，历史分页与运行中刷新原子合并；新尾页跨过多页时补齐到旧区间，已加载历史不会被滚动窗口替换。Run 结束时再刷新观察数据。
 

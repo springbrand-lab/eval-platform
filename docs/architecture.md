@@ -8,7 +8,7 @@
 
 Eval 的一次发布流程从固定的 SP Git 分支解析出 commit，独立发布一套 Eval SP：SP API 及其数据库、Agent Worker、Space Worker、专用 DO 命名空间和 R2。Eval SP Agent 的 `API_ORIGIN` 指向 Eval SP API；Eval 的登录、Agent Config、Chat、Submission、Workspace、轨迹、计费和 Action 接入也全部指向 Eval SP，不依赖 dev/production SP 服务。Eval API、Run Worker、Web 随同一发布流程上线。完整数据归属与发布约束见 [Eval 独立 SP 部署方案](eval-sp-deployment.md)。
 
-Agent Config 存在 Eval SP 自己的 `user-agent` 库，但只在 Eval 内通过 `/api/agent-configs` 增删改查；Eval SP 只是承载层，Eval 不另建配置库，也不在线读取 dev/production 的配置。Project 引用的是创建 Project 或保存评估计划时在 Eval SP 生成的冻结副本，副本不出现在 Agent Config 列表中，也不能被编辑或删除。Git 分支绑定 Project；固定分支阶段只能选择已部署的分支。Run 记录实际 SP commit 作为代码来源，Sampling 不存分支；更新 SP 代码不重建 Eval SP 数据库或 Eval PostgreSQL。
+Agent Config 存在 Eval SP 自己的 `user-agent` 库，但只在 Eval 内通过 `/api/agent-configs` 增删改查；Eval SP 只是承载层，Eval 不另建配置库，也不在线读取 dev/production 的配置。`eval_agent_config_purposes` 是用途（`execution`/`evaluation`）的唯一事实源；缺失记录只在首次选项读取时通过 SP 公共 MCP 目录一次性 reconciliation，目录不可用、canonical 评估结果 MCP 歧义或已选 MCP 不可用时返回 `AGENT_CONFIG_PURPOSE_UNAVAILABLE`（503），不产生 unknown 选项。Project 的用途筛选、创建、更新与冻结都复用该记录。Project 引用的是创建 Project 或保存评估计划时在 Eval SP 生成的冻结副本，副本不出现在 Agent Config 列表中，也不能被编辑或删除。Git 分支绑定 Project；固定分支阶段只能选择已部署的分支。Run 记录实际 SP commit 作为代码来源，Sampling 不存分支；更新 SP 代码不重建 Eval SP 数据库或 Eval PostgreSQL。
 
 ## 第一阶段包边界
 
@@ -163,7 +163,7 @@ Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产�
 
 ## Metrics 与只读观察
 
-`eval-metrics` 从应用注入的一致事实快照（Project 计划、ProjectSample、当前 Sampling/EvaluationRecord、Run）聚合，层级固定为 Project → Dataset → ProjectSample → Sampling，来自 Project 快照而不是实时目录；未运行的 ProjectSample 照常出现，共享 ProjectSample 在 Project 汇总中按 Sampling/Evaluation 身份去重。Subject 与每个 Evaluator 分别给出 `AgentMetricView`（资源、Attempt、时长、轨迹）。轨迹指标来自 Attempt 已保存的 SP telemetry 事件：Turn 数、按工具的调用数/结果/输入与返回字节长度、输出含 `thinking`/`signature` 标记的思考轮、含 `content` 标记的内容轮，以及分别明确归属到思考轮和内容轮的 generation Token；思考轮和内容轮的状态按命中标记对应的唯一 Turn 统计，分类可以重叠，同一 generation 的 Token 也可以在两类中出现。评估结果按 Schema 声明的 number/integer、boolean、enum（含枚举数组元素）字段逐层汇总：数值字段给出数值统计，boolean/enum 给出按声明顺序的非 null 分布条目；Schema 允许 null 时另给独立的 `nullCount`，不进入分布与数值统计、不算 false 或任何枚举值，也不同于缺失。规则见 [eval-metrics README](../packages/eval-metrics/README.md)。没有评估计划时为 unavailable。
+`eval-metrics` 从应用注入的一致事实快照（Project 计划、ProjectSample、当前 Sampling/EvaluationRecord、Run）聚合，层级固定为 Project → Dataset → ProjectSample → Sampling，来自 Project 快照而不是实时目录；未运行的 ProjectSample 照常出现，共享 ProjectSample 在 Project 汇总中按 Sampling/Evaluation 身份去重。Subject 与每个 Evaluator 分别给出 `AgentMetricView`（资源、Attempt、时长、轨迹）。轨迹指标来自 Attempt 已保存的 SP telemetry 事件：Turn 数、按工具的调用数/结果/输入与返回字节长度、按 `generation` operation 统计的模型 Step，以及命中 `thinking`/`signature` 或 `content` 标记的思考步骤/内容步骤和各自 Token；一个 Turn 可以包含多个 Step，一个 Step 可以同时命中两类，分类按各自命中的 Step 统计并允许重叠。评估结果按 Schema 声明的 number/integer、boolean、enum（含枚举数组元素）字段逐层汇总：数值字段给出数值统计，boolean/enum 给出按声明顺序的非 null 分布条目；Schema 允许 null 时另给独立的 `nullCount`，不进入分布与数值统计、不算 false 或任何枚举值，也不同于缺失。规则见 [eval-metrics README](../packages/eval-metrics/README.md)。没有评估计划时为 unavailable。
 
 每个 Sampling 和 EvaluationRecord 在任何 Run 状态下都有只读观察入口：Eval API 校验 owner、Project 与当前 Sampling/Evaluation 身份后返回 `AgentObservationRef`（角色、Chat 所属用户、Chat ID、`not-started | available`），不向浏览器暴露可写 Chat URL。Context、Workspace 和 Trajectory 的读接口由 Eval SP 提供，交互式观察的只读权限由 SP 服务端执行。
 

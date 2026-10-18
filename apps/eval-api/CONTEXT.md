@@ -29,6 +29,15 @@ requests commit their facts and enqueue a pg-boss Run job in one transaction;
 the HTTP process never executes an Agent or holds the SP service credential.
 See `docs/eval-http-api.md` for the route contract.
 
+Agent purpose is an Eval-owned immutable record (`execution` or `evaluation`) keyed by
+the editable SP Agent Config ID. Agent-choice reads use that record as their only source
+of truth. A missing record is reconciled once from SP's public MCP catalog; if the catalog
+cannot be read, the result MCP is ambiguous, or a selected MCP is unavailable, the API
+returns `AGENT_CONFIG_PURPOSE_UNAVAILABLE` (503) and does not emit an unknown-purpose
+option or continue with a partial list. Once recorded, later reads do not reclassify the
+Agent from mutable MCP settings. Create, update, freeze and Project role checks all use the
+same purpose service.
+
 The Run Worker (`start:worker`) consumes those jobs with the real Eval SP
 Harness and calls the Runtime's `resume()`; it never stores a second Run
 status. Several Worker instances may run at once. A shared `EVAL_BUNDLE_DIR`

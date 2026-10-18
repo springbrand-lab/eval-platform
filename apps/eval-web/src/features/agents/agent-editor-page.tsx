@@ -15,6 +15,7 @@ import {
 import { agentEditorClient, agentLibraryKeys, getAgentTemplate } from "@/api-sdk/agent-editor-api";
 import { getEvaluationResultsMcp, mcpServerKeys } from "@/api-sdk/mcp-servers-api";
 import { ApiError, api } from "@/api-sdk/client";
+import { describeError } from "@/lib/errors";
 import { getMe, meKey } from "@/api-sdk/session-api";
 import type { AgentConfig } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
@@ -65,16 +66,24 @@ function AgentForm({ initial, template, userId, onSaved }: {
 
   useEffect(() => {
     if (evaluationMcp.isPending || (!initial && !template) || (initial && purposeOptions.isPending)) return;
+    if (initial && purposeOptions.error) {
+      setError("Agent 用途暂时不可用，请重试后再保存。");
+      return;
+    }
     const source = initial ?? template;
+    const selectedPurpose = initial
+      ? purposeOptions.data?.find((option) => option.agentConfig.userAgentId === initial.id)?.purpose
+      : undefined;
+    if (initial && !selectedPurpose) {
+      setError("Agent 用途暂时不可用，请重试后再保存。");
+      return;
+    }
     if (!purposeReady) setPurposeReady(true);
     if (!purposeUserChanged.current) {
-      const selectedPurpose = initial
-        ? purposeOptions.data?.find((option) => option.agentConfig.userAgentId === initial.id)?.purpose
-        : undefined;
       if (selectedPurpose) setPurpose(selectedPurpose);
       else if (evaluationMcpId) setPurpose(source?.setting.mcpServers.some((selection) => selection.serverId === evaluationMcpId) ? "evaluation" : "execution");
     }
-  }, [evaluationMcp.isPending, evaluationMcpId, initial, purposeOptions.data, purposeOptions.isPending, purposeReady, template]);
+  }, [evaluationMcp.isPending, evaluationMcpId, initial, purposeOptions.data, purposeOptions.error, purposeOptions.isPending, purposeReady, template]);
 
   useEffect(() => {
     if (!purposeReady || !evaluationMcpId || purposeLocked) return;
@@ -123,12 +132,12 @@ function AgentForm({ initial, template, userId, onSaved }: {
     },
     onError: (failure) => {
       setError(failure instanceof AgentCreationError ? describeAgentCreationError(failure)
-        : failure instanceof ApiError && failure.code === "AGENT_CONFIG_PURPOSE_LOCKED"
-          ? "Agent 用途在创建后固定，不能切换为另一类。"
-        : failure instanceof ApiError && failure.code === "AGENT_CONFIG_PURPOSE_MISMATCH"
-          ? "所选用途与评估结果 MCP 不一致，请检查配置后重试。"
+        : failure instanceof ApiError && (failure.code === "AGENT_CONFIG_PURPOSE_LOCKED" || failure.code === "AGENT_CONFIG_PURPOSE_MISMATCH")
+          ? describeError(failure)
         : failure instanceof ApiError && failure.status === 409
           ? "此 Agent 已在其他位置更新。你的修改仍然保留，请重新加载页面获取最新配置。"
+        : failure instanceof ApiError
+          ? describeError(failure)
           : failure instanceof Error ? failure.message : "保存失败。你的修改仍然保留，请重试。");
     },
     onSettled: () => {
@@ -165,7 +174,7 @@ function AgentForm({ initial, template, userId, onSaved }: {
       setError("正在识别 Agent 用途，请稍后再保存。");
       return;
     }
-    if (purpose === "evaluation") {
+    if (purpose === "evaluation" && !purposeLocked) {
       if (!purposeReady || evaluationMcp.isPending) {
         setError("正在读取评估结果 MCP，请稍后再保存。");
         return;

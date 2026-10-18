@@ -70,7 +70,7 @@ export interface AgentOption {
   readonly name: string;
   /** Existing Subject/Evaluator role choice; purpose is the immutable Eval classification. */
   readonly role: AgentRole;
-  readonly purpose: AgentPurpose | null;
+  readonly purpose: AgentPurpose;
 }
 
 export interface AgentPolicyInput {

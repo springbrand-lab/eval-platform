@@ -64,6 +64,16 @@ export class AgentConfigPurposeMismatchError extends Error {
   }
 }
 
+/** The immutable purpose cannot be reconciled from Eval's persisted record and the SP catalog. */
+export class AgentConfigPurposeUnavailableError extends Error {
+  constructor(readonly userAgentId?: string) {
+    super(userAgentId
+      ? `Agent Config ${userAgentId} purpose cannot be resolved from the Eval SP catalog`
+      : "Agent Config purpose cannot be resolved from the Eval SP catalog");
+    this.name = "AgentConfigPurposeUnavailableError";
+  }
+}
+
 export type BundleResourceKind = "Material Bundle" | "Session Bundle" | "Material" | "Session";
 
 export class BundleResourceNotFoundError extends Error {

@@ -97,6 +97,18 @@ describe("Eval SP public API client", () => {
     expect(requests[0]!.url).toBe("https://eval-sp.example.test/api/mcp-servers?source=user&page=1&pageSize=100");
   });
 
+  it("reads the requested MCP source when reconciling selected Agent servers", async () => {
+    const { fetch, requests } = recordingFetch(ok({ data: [{
+      id: "platform-mcp", source: "platform", status: "active", url: "https://eval.example/mcp/platform", authType: "none",
+    }], total: 1, page: 1, pageSize: 100 }));
+    const client = createEvalSpClient({ ...origins, fetch });
+
+    await expect(client.listMcpServers("token", "platform")).resolves.toEqual([{
+      id: "platform-mcp", source: "platform", status: "active", url: "https://eval.example/mcp/platform", authType: "none",
+    }]);
+    expect(requests[0]!.url).toBe("https://eval-sp.example.test/api/mcp-servers?source=platform&page=1&pageSize=100");
+  });
+
   it("reads every MCP page before classifying the result server", async () => {
     const first = { id: "first", source: "user", status: "active", url: "https://eval.example/other", authType: "none" };
     const result = { id: "result-mcp", source: "user", status: "active", url: "https://eval.example/mcp/evaluation-results", authType: "bearer" };

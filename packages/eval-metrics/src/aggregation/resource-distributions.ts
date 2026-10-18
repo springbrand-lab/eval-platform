@@ -35,12 +35,12 @@ function resourceDistribution(totals: ResourceStatistics, agents: readonly Resou
     trajectory: {
       turns: operations(agents.map((item) => item.trajectory.turns)),
       tools: operations(agents.map((item) => item.trajectory.tools)),
-      thinkingTurns: distribution(agents.map((item) => item.trajectory.thinkingTurns)),
-      thinkingTurnOperations: operations(agents.map((item) => item.trajectory.thinkingTurnOperations)),
-      contentTurns: distribution(agents.map((item) => item.trajectory.contentTurns)),
-      contentTurnOperations: operations(agents.map((item) => item.trajectory.contentTurnOperations)),
-      thinkingTurnTokens: fields(totals.trajectory.thinkingTurnTokens, agents.map((item) => item.trajectory.thinkingTurnTokens)),
-      contentTurnTokens: fields(totals.trajectory.contentTurnTokens, agents.map((item) => item.trajectory.contentTurnTokens)),
+      thinkingSteps: distribution(agents.map((item) => item.trajectory.thinkingSteps)),
+      thinkingStepOperations: operations(agents.map((item) => item.trajectory.thinkingStepOperations)),
+      contentSteps: distribution(agents.map((item) => item.trajectory.contentSteps)),
+      contentStepOperations: operations(agents.map((item) => item.trajectory.contentStepOperations)),
+      thinkingStepTokens: fields(totals.trajectory.thinkingStepTokens, agents.map((item) => item.trajectory.thinkingStepTokens)),
+      contentStepTokens: fields(totals.trajectory.contentStepTokens, agents.map((item) => item.trajectory.contentStepTokens)),
       byTool: totals.trajectory.byTool.map(({ toolName }) => ({
         toolName,
         operations: operations(agents.map((item) => item.trajectory.byTool.find((tool) => tool.toolName === toolName)!)),

@@ -40,38 +40,50 @@ describe("trajectory metrics", () => {
       outputLength: { count: 1, total: 4, coverage: "complete" },
     });
     expect(trajectory.byTool[1]).toMatchObject({ failed: 1, inputLength: { total: 4 }, outputLength: { total: 11 } });
-    expect(trajectory.thinkingTurns).toEqual({ value: 2, coverage: "complete" });
-    expect(trajectory.thinkingTurnOperations).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 2, failed: 0 });
-    expect(trajectory.contentTurns).toEqual({ value: 2, coverage: "complete" });
-    expect(trajectory.contentTurnOperations).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 2, failed: 0 });
-    expect(trajectory.contentTurnTokens).toEqual({
+    expect(trajectory.thinkingSteps).toEqual({ value: 2, coverage: "complete" });
+    expect(trajectory.thinkingStepOperations).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 2, failed: 0 });
+    expect(trajectory.contentSteps).toEqual({ value: 2, coverage: "complete" });
+    expect(trajectory.contentStepOperations).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 2, failed: 0 });
+    expect(trajectory.contentStepTokens).toEqual({
       input: { value: 110, coverage: "complete" }, output: { value: 55, coverage: "complete" }, total: { value: 165, coverage: "complete" },
     });
-    expect(trajectory.thinkingTurnTokens).toEqual({
+    expect(trajectory.thinkingStepTokens).toEqual({
       input: { value: 110, coverage: "complete" }, output: { value: 55, coverage: "complete" }, total: { value: 165, coverage: "complete" },
     });
     expect(trajectory.unlinkedOperations).toEqual({ tools: 0, generations: 0 });
     expect(result.modelRequests.count.value).toBe(2);
   });
 
-  it("attributes generation tokens to thinking and content Turns independently", () => {
+  it("attributes generation-step tokens to thinking and content steps independently", () => {
     const result = aggregateResources([resourceInput({ telemetryEvents: [
       ...turn("thinking-turn", "completed", 0, 1_000, { thinking: "hidden" }),
       ...turn("content-turn", "completed", 0, 1_000, { content: "answer" }),
       ...generation("thinking-generation", "thinking-turn", { output: { thinking: "hidden" }, inputTokens: 10, outputTokens: 4, totalTokens: 14 }),
       ...generation("content-generation", "content-turn", { output: { content: "answer" }, inputTokens: 20, outputTokens: 8, totalTokens: 28 }),
     ] })]);
-    expect(result.trajectory.thinkingTurns).toEqual({ value: 1, coverage: "complete" });
-    expect(result.trajectory.contentTurns).toEqual({ value: 1, coverage: "complete" });
-    expect(result.trajectory.thinkingTurnTokens).toEqual({
+    expect(result.trajectory.thinkingSteps).toEqual({ value: 1, coverage: "complete" });
+    expect(result.trajectory.contentSteps).toEqual({ value: 1, coverage: "complete" });
+    expect(result.trajectory.thinkingStepTokens).toEqual({
       input: { value: 10, coverage: "complete" }, output: { value: 4, coverage: "complete" }, total: { value: 14, coverage: "complete" },
     });
-    expect(result.trajectory.contentTurnTokens).toEqual({
+    expect(result.trajectory.contentStepTokens).toEqual({
       input: { value: 20, coverage: "complete" }, output: { value: 8, coverage: "complete" }, total: { value: 28, coverage: "complete" },
     });
   });
 
-  it("keeps Turn outcomes distinct", () => {
+  it("counts each marked generation step separately within one Turn", () => {
+    const result = aggregateResources([resourceInput({ telemetryEvents: [
+      ...turn("turn", "completed", 0, 1_000, {}),
+      ...generation("thinking-1", "turn", { output: { thinking: "one" }, inputTokens: 1, outputTokens: 1, totalTokens: 2 }),
+      ...generation("thinking-2", "turn", { output: { thinking: "two" }, inputTokens: 2, outputTokens: 2, totalTokens: 4 }),
+    ] })]);
+    expect(result.trajectory.turns.count).toEqual({ value: 1, coverage: "complete" });
+    expect(result.trajectory.thinkingSteps).toEqual({ value: 2, coverage: "complete" });
+    expect(result.trajectory.thinkingStepOperations.count).toEqual({ value: 2, coverage: "complete" });
+    expect(result.trajectory.thinkingStepTokens.total).toEqual({ value: 6, coverage: "complete" });
+  });
+
+  it("keeps Turn outcomes distinct while step markers use generation operations", () => {
     const result = aggregateResources([resourceInput({ telemetryEvents: [
       ...turn("completed", "completed"), ...turn("failed", "failed"), telemetry("cancel", "turn.cancelled", "cancelled"),
       ...turn("running"), ...turn("unknown", "mystery"),
@@ -79,10 +91,10 @@ describe("trajectory metrics", () => {
     expect(result.trajectory.turns).toMatchObject({
       count: { value: 5 }, completed: 1, failed: 1, cancelled: 1, inProgress: 1, unknown: 1,
     });
-    expect(result.trajectory.thinkingTurns).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.thinkingTurnOperations).toMatchObject({ count: { value: null, coverage: "unavailable" }, completed: 0, failed: 0 });
-    expect(result.trajectory.contentTurns).toEqual({ value: 3, coverage: "partial" });
-    expect(result.trajectory.contentTurnOperations).toMatchObject({ count: { value: 3, coverage: "partial" }, completed: 1, failed: 1, inProgress: 0, unknown: 1 });
+    expect(result.trajectory.thinkingSteps).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.thinkingStepOperations).toMatchObject({ count: { value: null, coverage: "unavailable" }, completed: 0, failed: 0 });
+    expect(result.trajectory.contentSteps).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.contentStepOperations).toMatchObject({ count: { value: null, coverage: "unavailable" }, completed: 0, failed: 0, inProgress: 0, unknown: 0 });
   });
 
   it("treats missing or sanitizer-omitted bodies as missing, never zero, and never adds output and response", () => {
@@ -98,25 +110,25 @@ describe("trajectory metrics", () => {
     expect(browser!.outputLength).toMatchObject({ count: 1, missing: 2, total: 5, coverage: "partial" });
   });
 
-  it("classifies turns from output markers while keeping unlinked operation diagnostics", () => {
+  it("classifies generation steps from output markers while keeping unlinked operation diagnostics", () => {
     const result = aggregateResources([resourceInput({ telemetryEvents: [
       ...turn("turn-a", "completed"), ...tool("t1", undefined, "browser", {}, { outcome: "completed" }),
       ...generation("g1", undefined, { inputTokens: 1, outputTokens: 1, totalTokens: 2 }),
     ] })]);
-    expect(result.trajectory.thinkingTurns).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.contentTurns).toEqual({ value: 1, coverage: "partial" });
-    expect(result.trajectory.thinkingTurnTokens.total).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.contentTurnTokens.total).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.thinkingSteps).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.contentSteps).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.thinkingStepTokens.total).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.contentStepTokens.total).toEqual({ value: null, coverage: "unavailable" });
     expect(result.trajectory.unlinkedOperations).toEqual({ tools: 1, generations: 1 });
   });
 
-  it("does not claim a marked-turn count is complete when an unlinked generation may carry the marker", () => {
+  it("counts an unlinked generation as a step when its own marker is present", () => {
     const result = aggregateResources([resourceInput({ telemetryEvents: [
       ...turn("turn-a", "completed", 0, 1_000, {}),
       ...generation("unlinked-thinking", undefined, { output: { thinking: "hidden" }, totalTokens: 2 }),
     ] })]);
-    expect(result.trajectory.thinkingTurns).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.contentTurns).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.thinkingSteps).toEqual({ value: 1, coverage: "partial" });
+    expect(result.trajectory.contentSteps).toEqual({ value: 0, coverage: "partial" });
   });
 
   it("marks content tokens partial when only some generations are linked", () => {
@@ -126,10 +138,10 @@ describe("trajectory metrics", () => {
       ...generation("g1", "turn-b", { inputTokens: 4, outputTokens: 2, totalTokens: 6 }), ...generation("g2", undefined, { totalTokens: 99 }),
       ...generation("g3", "turn-b", null),
     ] })]);
-    expect(result.trajectory.thinkingTurns).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.contentTurns).toEqual({ value: 2, coverage: "partial" });
-    expect(result.trajectory.thinkingTurnTokens.total).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.contentTurnTokens.total).toEqual({ value: 6, coverage: "partial" });
+    expect(result.trajectory.thinkingSteps).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.contentSteps).toEqual({ value: 2, coverage: "partial" });
+    expect(result.trajectory.thinkingStepTokens.total).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.contentStepTokens.total).toEqual({ value: 6, coverage: "partial" });
   });
 
   it("does not claim complete trajectory metrics from an unfinalized or failed collection", () => {
@@ -137,7 +149,7 @@ describe("trajectory metrics", () => {
     const result = aggregateResources([resourceInput({ finalized: false, telemetryEvents: events })]);
     expect(result.coverage).toBe("partial");
     expect(result.trajectory.coverage).toBe("partial");
-    expect(result.trajectory.contentTurns).toEqual({ value: 1, coverage: "partial" });
+    expect(result.trajectory.contentSteps).toEqual({ value: null, coverage: "unavailable" });
     const missing = aggregateResources([{ ownerUserId: "owner-1", collection: undefined, submitted: true }]);
     expect(missing).toMatchObject({ coverage: "unavailable", collections: { uncollected: 1 } });
     expect(missing.trajectory.turns.count).toEqual({ value: null, coverage: "unavailable" });
@@ -155,8 +167,8 @@ describe("trajectory metrics", () => {
       telemetry("t:end", "tool.finished", "t", { toolName: "browser", outcome: "completed" }, 2, "session-1", "turn-b"),
     ] })]);
     expect(result.trajectory.unlinkedOperations.tools).toBe(1);
-    expect(result.trajectory.thinkingTurns).toEqual({ value: 0, coverage: "partial" });
-    expect(result.trajectory.contentTurns).toEqual({ value: 2, coverage: "partial" });
+    expect(result.trajectory.thinkingSteps).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.contentSteps).toEqual({ value: null, coverage: "unavailable" });
     expect(result.trajectory.diagnostics).toContainEqual(expect.objectContaining({ kind: "conflicting-identity", message: expect.stringContaining("parent") }));
   });
 });

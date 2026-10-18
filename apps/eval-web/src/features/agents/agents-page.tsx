@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
 import { CopyId } from "@/components/ui/data-display";
-import { EmptyState, ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
+import { EmptyState, ErrorBlock, LoadingBlock } from "@/components/ui/feedback";
 
 type AgentFilter = "all" | AgentPurpose;
 
@@ -21,12 +21,12 @@ const FILTERS: readonly { value: AgentFilter; label: string }[] = [
   { value: "evaluation", label: "评估 Agent" },
 ];
 
-function purposeLabel(purpose: AgentPurpose | null | undefined): string {
-  return purpose === "evaluation" ? "评估 Agent" : purpose === "execution" ? "执行 Agent" : "用途未识别";
+function purposeLabel(purpose: AgentPurpose): string {
+  return purpose === "evaluation" ? "评估 Agent" : "执行 Agent";
 }
 
-function purposeTone(purpose: AgentPurpose | null | undefined): "accent" | "info" | "neutral" {
-  return purpose === "evaluation" ? "accent" : purpose === "execution" ? "info" : "neutral";
+function purposeTone(purpose: AgentPurpose): "accent" | "info" {
+  return purpose === "evaluation" ? "accent" : "info";
 }
 
 const THINKING_LABELS: Readonly<Record<string, string>> = {
@@ -40,7 +40,8 @@ function thinkingLabel(level: string | null | undefined): string {
 function modelLabel(config: AgentConfig, models: readonly { id: string; name: string; providerModel: string }[]): string {
   const selected = models.find((model) => model.id === config.setting.presetId)
     ?? models.find((model) => model.providerModel === config.setting.model);
-  return selected?.name ?? config.setting.presetId ?? config.setting.model ?? "跟随默认配置";
+  if (selected) return selected.name;
+  return config.setting.presetId || config.setting.model ? "模型信息不可用" : "跟随模型默认";
 }
 
 export function AgentsPage() {
@@ -50,8 +51,9 @@ export function AgentsPage() {
   const purposes = useQuery({ queryKey: agentKeys.options(), queryFn: ({ signal }) => listAgentOptions(undefined, undefined, signal) });
   const models = useQuery({ queryKey: agentLibraryKeys.models, queryFn: ({ signal }) => agentEditorClient.models.listModelCatalog(signal) });
   const purposeByConfigId = useMemo(() => new Map(
-    (purposes.data ?? []).flatMap((option) => option.purpose ? [[option.agentConfig.userAgentId, option.purpose] as const] : []),
+    (purposes.data ?? []).map((option) => [option.agentConfig.userAgentId, option.purpose] as const),
   ), [purposes.data]);
+  const purposesIncomplete = configs.data?.some((config) => !purposeByConfigId.has(config.id)) ?? false;
   const rows = useMemo(() => (configs.data ?? []).filter((config) => filter === "all" || purposeByConfigId.get(config.id) === filter), [configs.data, filter, purposeByConfigId]);
   const counts = useMemo(() => ({
     all: configs.data?.length ?? 0,
@@ -66,13 +68,16 @@ export function AgentsPage() {
         actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => void navigate({ to: "/agents/new" })}>新建 Agent</Button>}
       />
       <Card>
-        {configs.isPending ? <LoadingBlock /> : configs.error ? <div className="p-4"><ErrorBlock error={configs.error} onRetry={() => void configs.refetch()} /></div> : (
+        {configs.error ? <div className="p-4"><ErrorBlock error={configs.error} onRetry={() => void configs.refetch()} /></div>
+          : purposes.error ? <div className="p-4"><ErrorBlock error={purposes.error} onRetry={() => void purposes.refetch()} /></div>
+          : models.error ? <div className="p-4"><ErrorBlock error={models.error} onRetry={() => void models.refetch()} /></div>
+          : configs.isPending || purposes.isPending || models.isPending ? <LoadingBlock />
+          : purposesIncomplete ? <div className="p-4"><ErrorBlock error={new Error("用途信息不完整，请重试后再查看 Agent 列表。")} onRetry={() => { void configs.refetch(); void purposes.refetch(); }} /></div> : (
           <>
-            {purposes.error && <div className="p-4 pb-0"><Notice tone="warning">用途信息暂时不可用，列表仍可查看；恢复后可按用途筛选。<button type="button" className="ml-2 font-semibold underline" onClick={() => void purposes.refetch()}>重试</button></Notice></div>}
             <DataTable<AgentConfig>
               rows={rows}
               rowKey={(row) => row.id}
-              searchText={(row) => `${row.name} ${purposeLabel(purposeByConfigId.get(row.id))} ${row.description ?? ""} ${modelLabel(row, models.data ?? [])} ${row.setting.presetId ?? ""} ${row.setting.model ?? ""} ${thinkingLabel(row.setting.thinking)}`}
+              searchText={(row) => `${row.name} ${purposeLabel(purposeByConfigId.get(row.id)!)} ${row.description ?? ""} ${modelLabel(row, models.data ?? [])} ${row.setting.presetId ?? ""} ${row.setting.model ?? ""} ${thinkingLabel(row.setting.thinking)}`}
               searchPlaceholder="搜索名称、说明或模型"
               onRowClick={(row) => void navigate({ to: "/agents/$id", params: { id: row.id } })}
               toolbar={<div role="tablist" aria-label="按 Agent 用途筛选" className="inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-lg border border-border bg-surface-muted/70 p-0.5">
@@ -91,7 +96,7 @@ export function AgentsPage() {
               columns={[
                 { key: "name", header: "Agent", cell: (row) => <div className="min-w-40 py-1"><span className="font-semibold text-text-strong">{row.name}</span>
                   <p className="mt-1 line-clamp-2 max-w-xs text-xs text-text-muted">{row.description || "暂无说明"}</p></div>, sortValue: (row) => row.name },
-                { key: "purpose", header: "用途", cell: (row) => <Badge tone={purposeTone(purposeByConfigId.get(row.id))} dot>{purposeLabel(purposeByConfigId.get(row.id))}</Badge>, sortValue: (row) => purposeLabel(purposeByConfigId.get(row.id)) },
+                { key: "purpose", header: "用途", cell: (row) => <Badge tone={purposeTone(purposeByConfigId.get(row.id)!)} dot>{purposeLabel(purposeByConfigId.get(row.id)!)}</Badge>, sortValue: (row) => purposeLabel(purposeByConfigId.get(row.id)!) },
                 { key: "model", header: "模型配置", cell: (row) => <div className="max-w-64 break-words text-[13px]">
                   {modelLabel(row, models.data ?? [])}
                   <p className="mt-1 text-xs text-text-muted">思考强度 · {thinkingLabel(row.setting.thinking)}</p>

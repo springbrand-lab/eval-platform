@@ -80,6 +80,8 @@ Project 的一次一致读取是 `ProjectPlan`（`packages/eval-contracts/src/pr
 
 Agent Config 在 Eval 中通过 `/api/agent-configs` 增删改查，Eval SP 只是承载层。由于 SP 原地更新配置，Project 不直接引用用户的可编辑 Agent Config：
 
+每个可编辑 Agent Config 在 `eval_agent_config_purposes` 中有一个不可变用途（`execution` 或 `evaluation`），这是 Agent 管理、Project 角色筛选、创建、更新和冻结共同使用的唯一事实源。已有配置缺少记录时，首次读取通过 SP 的公开 MCP 目录完成一次性 reconciliation；目录不可用、评估结果 MCP 歧义或配置选择的 MCP 不可用时返回 `AGENT_CONFIG_PURPOSE_UNAVAILABLE`（503），不返回用途未知的选项，也不把配置临时归入任一用途。记录创建后不再从可变 MCP 设置或目录可用性重分类；更新/冻结只要求评估配置仍保留记录的 result MCP 选择，若配置正文已丢失该选择则拒绝变更。
+
 - 创建 Project（Subject，以及填写时的 Evaluator）或保存评估计划（Evaluator）时，Eval API 读取所选 Agent Config，通过 SP 公开创建接口生成内容相同的副本（slug `eval-frozen-<uuid>`，名称追加 ` (frozen)`），计划引用副本的 `userAgentId`；
 - 计划同时保存 `AgentConfigSnapshot` 正文快照，只用于展示；运行始终通过副本引用调用 SP，不从正文重建配置；
 - `eval_project_agent_configs` 记录副本、角色、所属 Project 和正文快照；被替换的 Evaluator 副本标记 `retired_at`，行保留；
@@ -271,11 +273,11 @@ Sampling 明细把 Subject 和每个当前 Evaluator 分开为 `AgentMetricView`
 | 工具调用长度 | `tool.started` 的 `payload.input` 规范 JSON 的 UTF-8 字节数。 |
 | 工具返回长度 | `tool.finished` 的 `payload.output`，缺失时用 `response`，两者不相加；UTF-8 字节数。 |
 | 长度分布 | 每种工具给 count、missing、total、min、max、mean、median 和 coverage；正文缺失或被脱敏记为 missing，不补零。 |
-| 思考轮 | Turn 或其关联 generation 的输出含 `thinking`、`signature` 或 `*Signature` 标记。 |
-| 内容轮 | Turn 或其关联 generation 的输出含 `content` 标记；同一 Turn 可以同时是思考轮和内容轮。 |
-| 思考轮 / 内容轮 Token | 分别汇总明确归属到对应分类的 generation Token；同一 generation 同时命中两类时两边保留，不用总 Token 减工具 Token 推算。 |
+| 思考步骤 | 每个 `generation` operation 是一个模型 Step；该 Step 自身或所属 Turn 的输出含 `thinking`、`signature` 或 `*Signature` 标记。一个 Turn 可以包含多个 Step。 |
+| 内容步骤 | 每个模型 Step 自身或所属 Turn 的输出含 `content` 标记；同一 Step 可以同时是思考步骤和内容步骤。 |
+| 思考步骤 / 内容步骤 Token | 分别汇总命中对应分类的 `generation.finished` Token；同一 Step 同时命中两类时两边保留，不用总 Token 减工具 Token 推算。 |
 
-缺少 Turn→generation 关联字段时，相关指标为 partial/unavailable。工具长度是字节数，不是 Token。
+没有父 Turn 但 generation Step 自身带有 marker 时，相关分类仍按该 Step 统计并保留未关联诊断，但 coverage 为 partial；既没有父 Turn 也没有自身 marker 时，相关分类为 partial/unavailable。工具长度是字节数，不是 Token。
 
 ### 5.5 JSON Schema 评估结果
 
@@ -342,7 +344,7 @@ Metrics：
 - 来源改动后固定层级不变；未运行 ProjectSample 仍出现；共享 Data 在 Dataset 视图重复、Project 汇总不重复；
 - 未选中结果保留在默认指标；`runIds` 只过滤本批；
 - Subject 与 Evaluator 资源分开；credit、Token、cache、Provider USD、Action 结算去重；
-- 轨迹跨 Attempt 合并、事件去重、轮数、工具结果与长度、思考轮、内容轮与 generation Token；思考轮和内容轮可以重叠；
+- 轨迹跨 Attempt 合并、事件去重、Turn 数、工具结果与长度、思考步骤、内容步骤与 generation Token；思考步骤和内容步骤可以重叠，一个 Turn 内的多个 generation Step 分别统计；
 - complete/partial/unavailable coverage 与 diagnostics；
 - Schema 嵌套数值、数组数值、组合分支、`$ref`、缺失字段与非法数字；
 - 四层聚合从底层原始值重算。

@@ -30,7 +30,7 @@ function service(configs: readonly EvalSpAgentConfig[], mcpServers: readonly {
 }[]) {
   const sp = {
     listAgentConfigs: vi.fn(async () => configs),
-    listMcpServers: vi.fn(async () => mcpServers),
+    listMcpServers: vi.fn(async (_token: string, source: "platform" | "user" = "user") => mcpServers.filter((server) => server.source === source)),
     getAgentConfig: vi.fn(async (_token: string, id: string) => configs.find((item) => item.id === id)!),
     createAgentConfig: vi.fn(async (_token: string, input: unknown) => {
       const body = input as Record<string, unknown>;
@@ -51,6 +51,7 @@ function service(configs: readonly EvalSpAgentConfig[], mcpServers: readonly {
 }
 
 const resultMcp = { id: "result-mcp", source: "user", status: "active", url: "https://eval.example/mcp/evaluation-results", authType: "bearer" };
+const otherMcp = { id: "other-mcp", source: "user", status: "active", url: "https://example.test/mcp/other", authType: "bearer" };
 
 describe("Agent purpose filtering", () => {
   it("persists the selected purpose without sending Eval metadata to SP", async () => {
@@ -72,12 +73,18 @@ describe("Agent purpose filtering", () => {
     expect(agents.sp.createAgentConfig).not.toHaveBeenCalled();
   });
 
-  it("does not classify a disabled or ambiguous result MCP as an Evaluation Agent", async () => {
-    const disabled = service([config("legacy", { mcpServers: [{ serverId: resultMcp.id }] })], [{ ...resultMcp, status: "disabled" }]);
-    await expect(disabled.listAgents("evaluator", "evaluation")).resolves.toEqual([]);
-    await expect(disabled.listAgents()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ purpose: null })]));
-    const duplicate = service([config("legacy", { mcpServers: [{ serverId: resultMcp.id }] })], [resultMcp, { ...resultMcp, id: "result-mcp-2" }]);
-    await expect(duplicate.listAgents("evaluator", "evaluation")).resolves.toEqual([]);
+  it("fails purpose reads when the selected result MCP is disabled or ambiguous", async () => {
+    const disabled = service([config("stored", { mcpServers: [{ serverId: resultMcp.id }] })], [{ ...resultMcp, status: "disabled" }]);
+    await expect(disabled.listAgents("evaluator", "evaluation")).rejects.toMatchObject({ name: "AgentConfigPurposeUnavailableError", userAgentId: "stored" });
+    await expect(disabled.listAgents()).rejects.toMatchObject({ name: "AgentConfigPurposeUnavailableError" });
+    const duplicate = service([config("stored", { mcpServers: [{ serverId: resultMcp.id }] })], [resultMcp, { ...resultMcp, id: "result-mcp-2" }]);
+    await expect(duplicate.listAgents("evaluator", "evaluation")).rejects.toMatchObject({ name: "AgentConfigPurposeUnavailableError" });
+  });
+
+  it("does not expose an unknown purpose when the MCP catalog is unavailable", async () => {
+    const offline = service([config("orphan", { mcpServers: [] })], []);
+    offline.sp.listMcpServers.mockRejectedValueOnce(new Error("offline"));
+    await expect(offline.listAgents()).rejects.toMatchObject({ name: "AgentConfigPurposeUnavailableError" });
   });
 
   it("classifies and filters configs from their selected evaluation result MCP", async () => {
@@ -85,7 +92,7 @@ describe("Agent purpose filtering", () => {
       config("executor", { mcpServers: [{ serverId: "other-mcp" }] }),
       config("evaluator", { mcpServers: [{ serverId: resultMcp.id }] }),
       config("plain", { model: "default" }),
-    ], [resultMcp]);
+    ], [resultMcp, otherMcp]);
 
     await expect(agents.listAgents("subject", "execution")).resolves.toEqual([
       { agentConfig: { ownerUserId: owner, userAgentId: "executor" }, name: "executor", role: "subject", purpose: "execution" },
@@ -113,7 +120,7 @@ describe("Agent purpose filtering", () => {
     });
   });
 
-  it("keeps a legacy purpose after the external MCP catalog changes", async () => {
+  it("keeps the persisted purpose after the external MCP catalog changes", async () => {
     const servers = [resultMcp];
     const agents = service([config("evaluator", { mcpServers: [{ serverId: resultMcp.id }] })], servers);
     await expect(agents.listAgents("evaluator", "evaluation")).resolves.toHaveLength(1);
@@ -123,6 +130,14 @@ describe("Agent purpose filtering", () => {
     await expect(agents.listAgents("evaluator", "evaluation")).resolves.toHaveLength(1);
     await expect(agents.update("evaluator", { name: "renamed" })).resolves.toMatchObject({ name: "renamed" });
     await expect(agents.update("evaluator", { setting: { mcpServers: [] } })).rejects.toMatchObject({ name: "AgentConfigPurposeLockedError" });
+  });
+
+  it("rejects updates when an Evaluation Agent has lost its recorded result binding", async () => {
+    const agents = service([config("evaluator", { mcpServers: [] })], [resultMcp]);
+    await agents.purposeStore.createIfAbsent({ userAgentId: "evaluator", purpose: "evaluation", evaluationMcpServerId: resultMcp.id });
+    await expect(agents.update("evaluator", { name: "renamed" })).rejects.toMatchObject({
+      name: "AgentConfigPurposeLockedError", userAgentId: "evaluator",
+    });
   });
 
   it("rejects selecting an Agent for the wrong Project role", async () => {

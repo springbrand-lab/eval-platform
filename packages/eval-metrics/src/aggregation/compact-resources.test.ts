@@ -61,8 +61,8 @@ describe("body-free telemetry metrics", () => {
     const event = collection.snapshot.telemetryEvents[1]!;
     expect(event.metricProjection).toMatchObject({ version: TELEMETRY_PROJECTION_VERSION, hasThinking: false, hasContent: false, thinkingKnown: false, contentKnown: false });
     const expected = { value: null, coverage: "unavailable" };
-    expect(aggregateResources([projected!]).trajectory.thinkingTurns).toEqual(expected);
-    expect(aggregateResources([projected!]).trajectory.contentTurns).toEqual(expected);
+    expect(aggregateResources([projected!]).trajectory.thinkingSteps).toEqual(expected);
+    expect(aggregateResources([projected!]).trajectory.contentSteps).toEqual(expected);
 
     const legacyEvents = collection.snapshot.telemetryEvents.map((item) => {
       if (!item.metricProjection) return item;
@@ -85,7 +85,7 @@ describe("body-free telemetry metrics", () => {
       },
     };
     expect(hasCurrentTelemetryProjection(legacy.collection)).toBe(false);
-    expect(aggregateResources([legacy]).trajectory.thinkingTurns).toEqual(expected);
-    expect(aggregateResources([legacy]).trajectory.contentTurns).toEqual(expected);
+    expect(aggregateResources([legacy]).trajectory.thinkingSteps).toEqual(expected);
+    expect(aggregateResources([legacy]).trajectory.contentSteps).toEqual(expected);
   });
 });

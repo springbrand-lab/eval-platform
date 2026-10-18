@@ -61,7 +61,7 @@ export interface EvalSpMcpServer {
 export interface EvalSpClient {
   verifySession(token: string): Promise<EvalSpUser | null>;
   listAgentConfigs(token: string): Promise<readonly EvalSpAgentConfig[]>;
-  listMcpServers(token: string): Promise<readonly EvalSpMcpServer[]>;
+  listMcpServers(token: string, source?: "platform" | "user"): Promise<readonly EvalSpMcpServer[]>;
   getAgentConfig(token: string, id: string): Promise<EvalSpAgentConfig>;
   createAgentConfig(token: string, input: unknown): Promise<EvalSpAgentConfig>;
   updateAgentConfig(token: string, id: string, input: unknown): Promise<EvalSpAgentConfig>;
@@ -145,14 +145,14 @@ export function createEvalSpClient(input: {
     async listAgentConfigs(token) {
       return read(z.array(agentConfigSchema), await request(token, "/api/user-agent-configs"));
     },
-    async listMcpServers(token) {
+    async listMcpServers(token, source = "user") {
       const pageSize = 100;
       const first = read(mcpServerCollectionSchema,
-        await request(token, `/api/mcp-servers?source=user&page=1&pageSize=${pageSize}`));
+        await request(token, `/api/mcp-servers?source=${source}&page=1&pageSize=${pageSize}`));
       const pages = [first];
       for (let page = 2; page <= Math.ceil(first.total / pageSize); page += 1) {
         pages.push(read(mcpServerCollectionSchema,
-          await request(token, `/api/mcp-servers?source=user&page=${page}&pageSize=${pageSize}`)));
+          await request(token, `/api/mcp-servers?source=${source}&page=${page}&pageSize=${pageSize}`)));
       }
       return pages.flatMap((page) => page.data);
     },

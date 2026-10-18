@@ -1,20 +1,18 @@
 import type { AgentConfigRef, AgentConfigSnapshot, AgentPurpose, AgentRole, JsonValue } from "@eval-platform/eval-contracts";
-import { createId } from "@eval-platform/eval-contracts";
+import { createId, resolveEvaluationResultsMcp } from "@eval-platform/eval-contracts";
 import {
   evaluationResultsMcpCandidates,
-  evaluationMcpServerId,
-  evaluationResultsMcpServers,
-  purposeOfAgent,
   selectedMcpServerIds,
 } from "./agent-purpose.js";
 import {
   AgentConfigFrozenError,
   AgentConfigPurposeLockedError,
   AgentConfigPurposeMismatchError,
+  AgentConfigPurposeUnavailableError,
 } from "./db/errors.js";
 import type { AgentPurposeRecord, AgentPurposeStore } from "./db/agent-purposes.js";
 import type { PostgresProjectStore } from "./db/project-store.js";
-import type { EvalSpAgentConfig, EvalSpClient } from "./sp/client.js";
+import type { EvalSpAgentConfig, EvalSpClient, EvalSpMcpServer } from "./sp/client.js";
 
 /** SP's `createUserAgentConfigInputSchema` bounds the name to 200 characters. */
 const AGENT_CONFIG_NAME_CHARS = 200;
@@ -34,8 +32,8 @@ export interface AgentOption {
   readonly name: string;
   /** Existing Subject/Evaluator role contract; one option is still emitted for each requested role. */
   readonly role: AgentRole;
-  /** Eval-side immutable purpose; null means a legacy config could not be classified during this read. */
-  readonly purpose: AgentPurpose | null;
+  /** Eval-side immutable purpose. Every selectable config has one persisted record. */
+  readonly purpose: AgentPurpose;
 }
 
 export interface FrozenCopy {
@@ -79,7 +77,9 @@ function updateBody(body: unknown): { readonly config: unknown; readonly purpose
 
 /**
  * SP hosts editable Agent Config bodies; Eval owns the immutable purpose metadata and Project-role checks.
- * Legacy configs are classified once when first read, then never reclassified from mutable MCP metadata.
+ * A missing purpose record is reconciled once from the public SP MCP catalog. Every
+ * successful read then returns the persisted record; an uncertain reconciliation is
+ * an unavailable service result rather than an unknown Agent purpose.
  */
 export function createAgentConfigService(input: {
   readonly ownerUserId: string;
@@ -108,44 +108,70 @@ export function createAgentConfigService(input: {
     return configs.filter((config) => !isFrozen(config, recorded));
   }
 
-  async function classify(configs: readonly EvalSpAgentConfig[], required: boolean): Promise<Map<string, AgentPurposeRecord | null>> {
-    const result = new Map<string, AgentPurposeRecord | null>((await purposes.list(configs.map((config) => config.id))).map((item) => [item.userAgentId, item]));
+  interface PurposeCatalog {
+    readonly evaluationServerId: string | null;
+    readonly availableServerIds: ReadonlySet<string>;
+    readonly resultCandidateIds: ReadonlySet<string>;
+  }
+
+  async function purposeCatalog(): Promise<PurposeCatalog> {
+    let servers: readonly EvalSpMcpServer[];
+    try {
+      const [userServers, platformServers] = await Promise.all([
+        sp.listMcpServers(token, "user"),
+        sp.listMcpServers(token, "platform"),
+      ]);
+      servers = [...userServers, ...platformServers];
+    } catch {
+      throw new AgentConfigPurposeUnavailableError();
+    }
+    const resolution = resolveEvaluationResultsMcp(servers);
+    if (resolution.kind === "multiple") throw new AgentConfigPurposeUnavailableError();
+    return {
+      evaluationServerId: resolution.kind === "available" ? resolution.server.id : null,
+      availableServerIds: new Set(servers.filter((server) => server.status === "active").map((server) => server.id)),
+      resultCandidateIds: new Set(evaluationResultsMcpCandidates(servers).map((server) => server.id)),
+    };
+  }
+
+  function purposeFromConfig(config: Readonly<Record<string, unknown>>, catalog: PurposeCatalog): AgentPurpose {
+    const selected = selectedMcpServerIds(config);
+    if (selected.some((id) => !catalog.availableServerIds.has(id))) {
+      throw new AgentConfigPurposeUnavailableError(typeof config.id === "string" ? config.id : undefined);
+    }
+    if (selected.some((id) => catalog.resultCandidateIds.has(id) && id !== catalog.evaluationServerId)) {
+      throw new AgentConfigPurposeUnavailableError(typeof config.id === "string" ? config.id : undefined);
+    }
+    return catalog.evaluationServerId !== null && selected.includes(catalog.evaluationServerId) ? "evaluation" : "execution";
+  }
+
+  async function classify(configs: readonly EvalSpAgentConfig[]): Promise<Map<string, AgentPurposeRecord>> {
+    const result = new Map<string, AgentPurposeRecord>((await purposes.list(configs.map((config) => config.id))).map((item) => [item.userAgentId, item]));
     const missing = configs.filter((config) => !result.has(config.id));
     if (missing.length === 0) return result;
-    let servers;
-    try {
-      servers = await sp.listMcpServers(token);
-    } catch (error) {
-      if (required) throw error;
-      for (const config of missing) result.set(config.id, null);
-      return result;
-    }
-    const evaluationServerIds = new Set(evaluationResultsMcpServers(servers).map((server) => server.id));
-    const evaluationCandidateIds = new Set(evaluationResultsMcpCandidates(servers).map((server) => server.id));
+    const catalog = await purposeCatalog();
     for (const config of missing) {
-      const selectsUnavailableResultMcp = selectedMcpServerIds(config).some((id) => evaluationCandidateIds.has(id) && !evaluationServerIds.has(id));
-      if (selectsUnavailableResultMcp) {
-        if (required) throw new Error("The evaluation result MCP is unavailable or ambiguous");
-        result.set(config.id, null);
-        continue;
-      }
-      const purpose = purposeOfAgent(config, evaluationServerIds);
+      const purpose = purposeFromConfig(config, catalog);
       result.set(config.id, await purposes.createIfAbsent({
         userAgentId: config.id,
         purpose,
-        evaluationMcpServerId: evaluationMcpServerId(config, evaluationServerIds),
+        evaluationMcpServerId: catalog.evaluationServerId !== null && purpose === "evaluation" ? catalog.evaluationServerId : null,
       }));
     }
     return result;
   }
 
-  async function classifyOne(config: EvalSpAgentConfig, required = true): Promise<AgentPurposeRecord | null> {
-    return (await classify([config], required)).get(config.id) ?? null;
+  async function classifyOne(config: EvalSpAgentConfig): Promise<AgentPurposeRecord> {
+    const record = (await classify([config])).get(config.id);
+    if (!record) throw new AgentConfigPurposeUnavailableError(config.id);
+    return record;
   }
 
-  async function evaluationServerIds(): Promise<ReadonlySet<string>> {
-    const servers = await sp.listMcpServers(token);
-    return new Set(evaluationResultsMcpServers(servers).map((server) => server.id));
+  function assertStoredBinding(config: EvalSpAgentConfig, stored: AgentPurposeRecord): void {
+    if (stored.purpose === "evaluation"
+      && (!stored.evaluationMcpServerId || !selectedMcpServerIds(config).includes(stored.evaluationMcpServerId))) {
+      throw new AgentConfigPurposeLockedError(config.id);
+    }
   }
 
   return {
@@ -153,9 +179,11 @@ export function createAgentConfigService(input: {
     get: (id: string) => sp.getAgentConfig(token, id),
     async create(body: unknown) {
       const { config, purpose } = createBody(body);
-      const ids = await evaluationServerIds();
-      const selectedEvaluationMcpServerId = evaluationMcpServerId({ setting: config.setting }, ids);
-      const actual: AgentPurpose = selectedEvaluationMcpServerId === null ? "execution" : "evaluation";
+      const catalog = await purposeCatalog();
+      const actual = purposeFromConfig({ id: "new", setting: config.setting }, catalog);
+      const selectedEvaluationMcpServerId = catalog.evaluationServerId !== null
+        && selectedMcpServerIds({ setting: config.setting }).includes(catalog.evaluationServerId)
+        ? catalog.evaluationServerId : null;
       if (actual !== purpose) throw new AgentConfigPurposeMismatchError("new", purpose, actual);
       const created = await sp.createAgentConfig(token, config);
       try {
@@ -173,7 +201,7 @@ export function createAgentConfigService(input: {
     async update(id: string, body: unknown) {
       const current = await requireEditable(id);
       const stored = await classifyOne(current);
-      if (!stored) throw new Error(`Agent purpose ${id} is unavailable`);
+      assertStoredBinding(current, stored);
       const forwarded = updateBody(body);
       if (forwarded.hasPurpose && forwarded.purpose !== stored.purpose) throw new AgentConfigPurposeLockedError(id);
       const next = forwarded.config && typeof forwarded.config === "object" && !Array.isArray(forwarded.config)
@@ -185,8 +213,9 @@ export function createAgentConfigService(input: {
             throw new AgentConfigPurposeLockedError(id);
           }
         } else {
-          const evaluationIds = await evaluationServerIds();
-          if (nextMcpServerIds.some((serverId) => evaluationIds.has(serverId))) {
+          const catalog = await purposeCatalog();
+          const actual = purposeFromConfig(next as EvalSpAgentConfig, catalog);
+          if (actual !== "execution") {
             throw new AgentConfigPurposeLockedError(id);
           }
         }
@@ -200,10 +229,11 @@ export function createAgentConfigService(input: {
     },
     async listAgents(role?: AgentRole, purpose?: AgentPurpose): Promise<AgentOption[]> {
       const configs = await list();
-      const records = await classify(configs, false);
+      const records = await classify(configs);
       const roles = role === undefined ? AGENT_ROLES : [role];
       return configs.flatMap((config) => roles.flatMap((selectedRole) => {
-        const selectedPurpose = records.get(config.id)?.purpose ?? null;
+        const selectedPurpose = records.get(config.id)?.purpose;
+        if (!selectedPurpose) throw new AgentConfigPurposeUnavailableError(config.id);
         return purpose === undefined || selectedPurpose === purpose ? [{
           agentConfig: { ownerUserId, userAgentId: config.id }, name: config.name, role: selectedRole, purpose: selectedPurpose,
         }] : [];
@@ -213,7 +243,7 @@ export function createAgentConfigService(input: {
     async freeze(sourceUserAgentId: string, expectedPurpose: AgentPurpose): Promise<FrozenCopy> {
       const source = await requireEditable(sourceUserAgentId);
       const stored = await classifyOne(source);
-      if (!stored) throw new Error(`Agent purpose ${sourceUserAgentId} is unavailable`);
+      assertStoredBinding(source, stored);
       if (stored.purpose !== expectedPurpose) throw new AgentConfigPurposeMismatchError(sourceUserAgentId, expectedPurpose, stored.purpose);
       const copy = await sp.createAgentConfig(token, frozenCopyInput(source));
       return {
