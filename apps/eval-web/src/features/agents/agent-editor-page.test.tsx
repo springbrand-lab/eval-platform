@@ -187,7 +187,9 @@ describe("SP Agent editor in Eval", () => {
     const view = await mount();
     try {
       await settle(() => expect(name()).not.toBeNull());
-      await click(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]'));
+      const evaluationPurpose = view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]');
+      await settle(() => expect(evaluationPurpose?.disabled).toBe(false));
+      await click(evaluationPurpose);
       await settle(() => expect(view.container.textContent).toContain("已自动连接：Eval 结果提交"));
       await type(name(), "Evaluator");
       await click(button("创建 Agent"));
