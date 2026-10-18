@@ -1,17 +1,7 @@
 import { useQueries } from "@tanstack/react-query";
 import { api } from "@/api-sdk/client";
+import type { McpServerSummary } from "@/api-sdk/mcp-servers-api";
 import { Badge } from "@/components/ui/badge";
-
-/** Metadata SP returns for one MCP Server; connection secrets are never included. */
-interface McpServerSummary {
-  readonly id: string;
-  readonly name: string;
-  readonly description?: string | null;
-  readonly status: string;
-  readonly source: "platform" | "user";
-  readonly url?: string | null;
-  readonly authType?: string | null;
-}
 
 type McpSelection = { readonly serverId: string; readonly kind?: string };
 

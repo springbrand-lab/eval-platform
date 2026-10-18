@@ -73,20 +73,33 @@ export interface ToolMetric extends OperationStatistics {
   readonly outputLength: CoveredNumericSummary;
 }
 
-/** Tokens of generations explicitly linked to a Turn without tool operations; never derived by subtraction. */
-export interface NonToolTurnTokens {
+/** Tokens of generations explicitly linked to a marked Turn; never derived by subtraction. */
+export interface TurnTokens {
   readonly input: MetricNumber;
   readonly output: MetricNumber;
   readonly total: MetricNumber;
 }
+
+export type ThinkingTurnTokens = TurnTokens;
+export type ContentTurnTokens = TurnTokens;
 
 export interface TrajectorySummary {
   readonly coverage: AgentResourceCompleteness;
   readonly turns: OperationStatistics;
   readonly tools: OperationStatistics;
   readonly byTool: readonly ToolMetric[];
-  readonly nonToolTurns: MetricNumber;
-  readonly nonToolTurnTokens: NonToolTurnTokens;
+  /** Turns whose output or linked generation contains thinking/signature markers. */
+  readonly thinkingTurns: MetricNumber;
+  /** Status and duration of the unique Turns counted by `thinkingTurns`. */
+  readonly thinkingTurnOperations: OperationStatistics;
+  /** Turns whose output or linked generation contains a content marker. */
+  readonly contentTurns: MetricNumber;
+  /** Status and duration of the unique Turns counted by `contentTurns`. */
+  readonly contentTurnOperations: OperationStatistics;
+  /** Tokens of generations explicitly linked to a thinking Turn; may overlap contentTurnTokens. */
+  readonly thinkingTurnTokens: ThinkingTurnTokens;
+  /** Tokens of generations explicitly linked to a content Turn; may overlap thinkingTurnTokens. */
+  readonly contentTurnTokens: ContentTurnTokens;
   /** Operations whose Turn cannot be resolved through parentOperationId. */
   readonly unlinkedOperations: { readonly tools: number; readonly generations: number };
   readonly diagnostics: readonly ResourceDiagnostic[];
@@ -128,6 +141,8 @@ export interface ResourceStatistics {
   };
   readonly overlappingUsageRecords: number;
   readonly tokens: TokenStatistics;
+  /** Cache reads divided by input plus cache reads, with the source coverage preserved. */
+  readonly cacheHitRate: MetricNumber;
   readonly costs: CostStatistics;
   readonly modelRequests: OperationStatistics;
   readonly trajectory: TrajectorySummary;
@@ -156,8 +171,12 @@ export interface ResourceDistribution {
   readonly trajectory: {
     readonly turns: OperationDistributions;
     readonly tools: OperationDistributions;
-    readonly nonToolTurns: CoveredNumericSummary;
-    readonly nonToolTurnTokens: NumericDistributions<NonToolTurnTokens>;
+    readonly thinkingTurns: CoveredNumericSummary;
+    readonly thinkingTurnOperations: OperationDistributions;
+    readonly contentTurns: CoveredNumericSummary;
+    readonly contentTurnOperations: OperationDistributions;
+    readonly thinkingTurnTokens: NumericDistributions<ThinkingTurnTokens>;
+    readonly contentTurnTokens: NumericDistributions<ContentTurnTokens>;
     readonly byTool: readonly { readonly toolName: string | null; readonly operations: OperationDistributions }[];
   };
   readonly byModel: readonly {

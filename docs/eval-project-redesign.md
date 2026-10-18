@@ -271,8 +271,9 @@ Sampling 明细把 Subject 和每个当前 Evaluator 分开为 `AgentMetricView`
 | 工具调用长度 | `tool.started` 的 `payload.input` 规范 JSON 的 UTF-8 字节数。 |
 | 工具返回长度 | `tool.finished` 的 `payload.output`，缺失时用 `response`，两者不相加；UTF-8 字节数。 |
 | 长度分布 | 每种工具给 count、missing、total、min、max、mean、median 和 coverage；正文缺失或被脱敏记为 missing，不补零。 |
-| 非工具轮 | 经 `parentOperationId` 没有任何工具归属的 Turn。 |
-| 非工具轮 Token | 只汇总明确归属到非工具轮的 generation Token；不用总 Token 减工具 Token 推算。 |
+| 思考轮 | Turn 或其关联 generation 的输出含 `thinking`、`signature` 或 `*Signature` 标记。 |
+| 内容轮 | Turn 或其关联 generation 的输出含 `content` 标记；同一 Turn 可以同时是思考轮和内容轮。 |
+| 思考轮 / 内容轮 Token | 分别汇总明确归属到对应分类的 generation Token；同一 generation 同时命中两类时两边保留，不用总 Token 减工具 Token 推算。 |
 
 缺少 Turn→generation 关联字段时，相关指标为 partial/unavailable。工具长度是字节数，不是 Token。
 
@@ -341,7 +342,7 @@ Metrics：
 - 来源改动后固定层级不变；未运行 ProjectSample 仍出现；共享 Data 在 Dataset 视图重复、Project 汇总不重复；
 - 未选中结果保留在默认指标；`runIds` 只过滤本批；
 - Subject 与 Evaluator 资源分开；credit、Token、cache、Provider USD、Action 结算去重；
-- 轨迹跨 Attempt 合并、事件去重、轮数、工具结果与长度、非工具轮与 generation Token；
+- 轨迹跨 Attempt 合并、事件去重、轮数、工具结果与长度、思考轮、内容轮与 generation Token；思考轮和内容轮可以重叠；
 - complete/partial/unavailable coverage 与 diagnostics；
 - Schema 嵌套数值、数组数值、组合分支、`$ref`、缺失字段与非法数字；
 - 四层聚合从底层原始值重算。
@@ -367,6 +368,6 @@ Metrics：
 
 ## 本次交付待办
 
-- [x] 聚合数值指标展示均值、总体方差、中位数、最小值、最大值。消耗、轮数、工具次数按单次 Agent，工具长度和调用耗时按单次调用，Schema 数值按字段观察值统计。五项都只统计有值记录，均值和总体方差的分母 N 为有值数量；缺失不进分母也不补零，真实零参与。无值时统计为 null，单个有值记录的方差为 0；偶数个有效值的中位数取中间两个的平均。四层从范围内原始观察重算，不用下层均值再次求均值；保留有效数量和完整性信息，Web 只展示结果。
+- [x] 聚合数值指标展示均值、标准差、中位数、最小值、最大值。Metrics 保留总体方差，Web 将其开平方后按与指标相同的基础单位展示标准差。消耗、轮数、工具次数按单次 Agent，工具长度和调用耗时按单次调用，Schema 数值按字段观察值统计。五项都只统计有值记录，均值和总体方差的分母 N 为有值数量；缺失不进分母也不补零，真实零参与。无值时统计为 null，单个有值记录的方差为 0；偶数个有效值的中位数取中间两个的平均。四层从范围内原始观察重算，不用下层均值再次求均值；保留有效数量和完整性信息，Web 只展示结果。
 
 上述页面、原始输出与本地公开接口读取已实现；跨部署和真实浏览器验收仍需完成。发布依赖见 [SP 包发布与升级](sp-package-publishing-todo.md)，SP 服务端契约见 [SP 接口需求](sp-eval-api-requirements.md)。

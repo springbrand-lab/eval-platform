@@ -3,7 +3,7 @@ import type { ResourceStatistics } from "./model.js";
 import { aggregateBilling } from "./resource-billing.js";
 import { ResourceDiagnostics, readStream, type OwnedSnapshot } from "./resource-facts.js";
 import { aggregateTelemetry } from "./resource-telemetry.js";
-import { aggregateUsage, type ModelGroupKey } from "./resource-usage.js";
+import { aggregateUsage, cacheHitRate, type ModelGroupKey } from "./resource-usage.js";
 import { coverage } from "./statistics.js";
 
 export interface ResourceInput {
@@ -11,6 +11,8 @@ export interface ResourceInput {
   readonly collection: AgentResourceCollection | undefined;
   /** The Attempt reached SP, so a missing collection is a gap rather than nothing to collect. */
   readonly submitted?: boolean;
+  /** Whether this Attempt can still emit telemetry. Raw aggregation callers default to true. */
+  readonly canEmitTelemetry?: boolean;
 }
 
 function readCollections(inputs: readonly ResourceInput[]): {
@@ -19,13 +21,14 @@ function readCollections(inputs: readonly ResourceInput[]): {
 } {
   const collections = { collected: 0, pending: 0, failed: 0, uncollected: 0, unsubmitted: 0, finalized: 0 };
   const snapshots: OwnedSnapshot[] = [];
-  for (const { ownerUserId, collection, submitted } of inputs) {
+  for (const input of inputs) {
+    const { ownerUserId, collection, submitted } = input;
     if (!collection) {
       collections[submitted ? "uncollected" : "unsubmitted"] += 1;
     } else if (collection.status === "collected") {
       collections.collected += 1;
       if (collection.snapshot.finalized) collections.finalized += 1;
-      snapshots.push({ ownerUserId, snapshot: collection.snapshot });
+      snapshots.push({ ownerUserId, canEmitTelemetry: input.canEmitTelemetry ?? true, snapshot: collection.snapshot });
     } else {
       collections[collection.status] += 1;
     }
@@ -62,6 +65,7 @@ export function aggregateResources(inputs: readonly ResourceInput[], groups: Res
     },
     overlappingUsageRecords: usage.overlappingUsageRecords,
     tokens: usage.tokens,
+    cacheHitRate: cacheHitRate(usage.tokens),
     costs: { providerUsd: usage.providerUsd, ...billing },
     modelRequests,
     trajectory: { ...trajectory, diagnostics: issues.filter((issue) => issue.stream === "telemetryEvents") },

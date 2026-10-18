@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { compactResourceCollection } from "./compact-resources.js";
+import type { JsonValue } from "@eval-platform/eval-contracts";
+import { compactResourceCollection, hasCurrentTelemetryProjection, TELEMETRY_PROJECTION_VERSION } from "./compact-resources.js";
 import { aggregateResources, type ResourceInput } from "./resources.js";
 import { resourceInput, telemetry } from "../test-support.js";
 
@@ -37,7 +38,7 @@ describe("body-free telemetry metrics", () => {
     expect(aggregateResources(projected).duplicateRecords.telemetryEvents).toBe(2);
   });
 
-  it.each([undefined, null, "", "[REDACTED]", "[CONTENT OMITTED]", { b: 2, a: ["é", "\n"] }])(
+  it.each([undefined, null, "", "[REDACTED]", "[CONTENT OMITTED]", { redacted: true }, { b: 2, a: ["é", "\n"] }])(
     "preserves tool lengths and fallback for %j", async (body) => {
       const inputs = [resourceInput({ finalized: false, telemetryEvents: [
         telemetry("s", "tool.started", "t", { toolName: "t", ...(body === undefined ? {} : { input: body }) }),
@@ -46,4 +47,45 @@ describe("body-free telemetry metrics", () => {
       expect(aggregateResources(await compact(inputs))).toEqual(aggregateResources(inputs));
     },
   );
+
+  it("does not turn sanitized bodies or old compact projections into complete marker zeros", async () => {
+    const inputs = [resourceInput({ telemetryEvents: [
+      telemetry("turn-start", "turn.started", "turn"),
+      telemetry("turn-end", "turn.finished", "turn", { outcome: "completed", output: "[REDACTED]" }),
+    ] })];
+    const [projected] = await compact(inputs);
+    const collection = projected!.collection;
+    if (!collection || collection.status !== "collected") throw new Error("expected compacted collection");
+    expect(hasCurrentTelemetryProjection(collection)).toBe(true);
+    await expect(compactResourceCollection(collection)).resolves.toEqual(collection);
+    const event = collection.snapshot.telemetryEvents[1]!;
+    expect(event.metricProjection).toMatchObject({ version: TELEMETRY_PROJECTION_VERSION, hasThinking: false, hasContent: false, thinkingKnown: false, contentKnown: false });
+    const expected = { value: null, coverage: "unavailable" };
+    expect(aggregateResources([projected!]).trajectory.thinkingTurns).toEqual(expected);
+    expect(aggregateResources([projected!]).trajectory.contentTurns).toEqual(expected);
+
+    const legacyEvents = collection.snapshot.telemetryEvents.map((item) => {
+      if (!item.metricProjection) return item;
+      const projection = { ...(item.metricProjection as Record<string, JsonValue>) };
+      delete projection.hasThinking;
+      delete projection.hasContent;
+      delete projection.thinkingKnown;
+      delete projection.contentKnown;
+      projection.version = 1;
+      return { ...item, metricProjection: projection };
+    });
+    const legacy = {
+      ownerUserId: projected!.ownerUserId,
+      collection: {
+        ...collection,
+        snapshot: {
+          ...collection.snapshot,
+          telemetryEvents: legacyEvents,
+        },
+      },
+    };
+    expect(hasCurrentTelemetryProjection(legacy.collection)).toBe(false);
+    expect(aggregateResources([legacy]).trajectory.thinkingTurns).toEqual(expected);
+    expect(aggregateResources([legacy]).trajectory.contentTurns).toEqual(expected);
+  });
 });

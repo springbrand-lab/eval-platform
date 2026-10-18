@@ -9,6 +9,7 @@ describe("resource statistics", () => {
   it("proves zero only from complete finalized empty sources", () => {
     const complete = aggregateResources([resourceInput()]);
     expect(complete.tokens.total).toEqual({ value: 0, coverage: "complete" });
+    expect(complete.cacheHitRate).toEqual({ value: null, coverage: "complete" });
     expect(complete.costs.chargedUnits).toEqual({ value: 0, coverage: "complete" });
     expect(complete.trajectory.tools.count).toEqual({ value: 0, coverage: "complete" });
     expect(complete.collections).toEqual({ collected: 1, pending: 0, failed: 0, uncollected: 0, unsubmitted: 0, finalized: 1 });
@@ -26,12 +27,26 @@ describe("resource statistics", () => {
     expect(result.trajectory.turns.count).toEqual({ value: null, coverage: "unavailable" });
   });
 
+  it("classifies an unclosed operation from a terminal Attempt as unknown", () => {
+    const result = aggregateResources([{
+      ...resourceInput({ telemetryEvents: [
+        telemetry("turn-start", "turn.started", "turn-1"),
+        telemetry("turn-end", "turn.finished", "turn-1", { outcome: "completed" }, 2_000),
+        telemetry("generation-start", "generation.started", "generation-1", {}, 1_000, "session-1", "turn-1"),
+      ] }),
+      canEmitTelemetry: false,
+    }]);
+    expect(result.modelRequests).toMatchObject({ count: { value: 1 }, inProgress: 0, unknown: 1 });
+    expect(result.trajectory.turns).toMatchObject({ count: { value: 1 }, completed: 1, inProgress: 0, unknown: 0 });
+  });
+
   it("marks observed values partial when another attempt's resources are missing", () => {
     const result = aggregateResources([
       resourceInput({ usageEvents: [usage("usage-1")] }),
       { ownerUserId: "owner-1", collection: { status: "pending", scope: SCOPE } },
     ]);
     expect(result.tokens.total).toEqual({ value: 35, coverage: "partial" });
+    expect(result.cacheHitRate).toEqual({ value: 3 / 13, coverage: "partial" });
     expect(result.costs.providerUsd).toEqual({ value: 0.5, coverage: "partial" });
     expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
   });
@@ -60,6 +75,7 @@ describe("resource statistics", () => {
     expect(result.tokens.reasoning).toEqual({ value: 4, coverage: "complete" });
     expect(result.tokens.cacheRead).toEqual({ value: 3, coverage: "partial" });
     expect(result.tokens.total).toEqual({ value: 35, coverage: "partial" });
+    expect(result.cacheHitRate).toEqual({ value: 3 / 18, coverage: "partial" });
   });
 
   it("uses an explicit trusted total without deriving missing buckets", () => {

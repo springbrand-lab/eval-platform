@@ -16,6 +16,16 @@ interface UsageStatistics {
   readonly overlappingUsageRecords: number;
 }
 
+/** Derives cache hit rate from the canonical token buckets while retaining their weakest coverage. */
+export function cacheHitRate(tokens: TokenStatistics): MetricNumber {
+  const coverage = tokens.input.coverage === "unavailable" || tokens.cacheRead.coverage === "unavailable"
+    ? "unavailable"
+    : tokens.input.coverage === "partial" || tokens.cacheRead.coverage === "partial" ? "partial" : "complete";
+  if (tokens.input.value === null || tokens.cacheRead.value === null) return { value: null, coverage };
+  const denominator = tokens.input.value + tokens.cacheRead.value;
+  return denominator === 0 ? { value: null, coverage } : { value: tokens.cacheRead.value / denominator, coverage };
+}
+
 /** Token and provider-cost totals without double counting usage that a subagent summary already covers. */
 export function aggregateUsage(stream: FactStream, diagnostics: ResourceDiagnostics, requestedGroups: readonly ModelGroupKey[] = []): UsageStatistics {
   const known = selectKnownUsage(stream.entries, diagnostics);

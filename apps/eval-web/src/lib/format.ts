@@ -59,6 +59,15 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+export function formatMetricBytes(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "未获得";
+  return value < 1024 ? `${formatStatistic(value)} B` : formatBytes(value);
+}
+
+export function standardDeviation(variance: number | null | undefined): number | null | undefined {
+  return variance === null || variance === undefined ? variance : Math.sqrt(Math.max(0, variance));
+}
+
 export const OPERATION_LABELS: Readonly<Record<string, string>> = {
   execution: "只执行",
   pipeline: "执行 + 评估",

@@ -148,7 +148,7 @@ Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产�
 ## 生命周期语义
 
 - `EvalRunAdmission.submit()` 只原子提交对应 Run 和关联记录，随后返回；
-- Run Worker 按 pg-boss 任务调用 `resume(runId)`，调度与停止见上文；`pipeline` 只顺序编排执行和评估，不是第三种阶段；执行失败或取消的 Sampling 不提交 Evaluator，其 EvaluationRecord 取消，成功的 Sampling 照常评估；
+- Run Worker 按 pg-boss 任务调用 `resume(runId)`，调度与停止见上文；`pipeline` 只编排执行和评估，不是第三种阶段。执行和评估使用彼此独立的并发队列：某条 Sampling 的执行及证据保存成功后立即提交对应评估，其他 Sampling 可以继续执行；执行失败或取消的 Sampling 不提交 Evaluator，其 EvaluationRecord 取消，成功的 Sampling 照常评估；
 - evaluation Run 不改动 Subject 的 Attempt、资源、产物、轨迹和状态；
 - 恢复读取 Project 计划并核对计划摘要，按 Attempt 幂等键继续，Agent 已完成时只补收集与保存；
 - ProjectSample 的 `samplingCount` 决定整条重跑时新建的 Sampling 数；
@@ -163,7 +163,7 @@ Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产�
 
 ## Metrics 与只读观察
 
-`eval-metrics` 从应用注入的一致事实快照（Project 计划、ProjectSample、当前 Sampling/EvaluationRecord、Run）聚合，层级固定为 Project → Dataset → ProjectSample → Sampling，来自 Project 快照而不是实时目录；未运行的 ProjectSample 照常出现，共享 ProjectSample 在 Project 汇总中按 Sampling/Evaluation 身份去重。Subject 与每个 Evaluator 分别给出 `AgentMetricView`（资源、Attempt、时长、轨迹）。轨迹指标来自 Attempt 已保存的 SP telemetry 事件：Turn 数、按工具的调用数/结果/输入与返回字节长度、非工具轮及经 `parentOperationId` 明确归属的 generation Token。评估结果按 Schema 声明的 number/integer、boolean、enum（含枚举数组元素）字段逐层汇总：数值字段给出数值统计，boolean/enum 给出按声明顺序的非 null 分布条目；Schema 允许 null 时另给独立的 `nullCount`，不进入分布与数值统计、不算 false 或任何枚举值，也不同于缺失。规则见 [eval-metrics README](../packages/eval-metrics/README.md)。没有评估计划时为 unavailable。
+`eval-metrics` 从应用注入的一致事实快照（Project 计划、ProjectSample、当前 Sampling/EvaluationRecord、Run）聚合，层级固定为 Project → Dataset → ProjectSample → Sampling，来自 Project 快照而不是实时目录；未运行的 ProjectSample 照常出现，共享 ProjectSample 在 Project 汇总中按 Sampling/Evaluation 身份去重。Subject 与每个 Evaluator 分别给出 `AgentMetricView`（资源、Attempt、时长、轨迹）。轨迹指标来自 Attempt 已保存的 SP telemetry 事件：Turn 数、按工具的调用数/结果/输入与返回字节长度、输出含 `thinking`/`signature` 标记的思考轮、含 `content` 标记的内容轮，以及分别明确归属到思考轮和内容轮的 generation Token；思考轮和内容轮的状态按命中标记对应的唯一 Turn 统计，分类可以重叠，同一 generation 的 Token 也可以在两类中出现。评估结果按 Schema 声明的 number/integer、boolean、enum（含枚举数组元素）字段逐层汇总：数值字段给出数值统计，boolean/enum 给出按声明顺序的非 null 分布条目；Schema 允许 null 时另给独立的 `nullCount`，不进入分布与数值统计、不算 false 或任何枚举值，也不同于缺失。规则见 [eval-metrics README](../packages/eval-metrics/README.md)。没有评估计划时为 unavailable。
 
 每个 Sampling 和 EvaluationRecord 在任何 Run 状态下都有只读观察入口：Eval API 校验 owner、Project 与当前 Sampling/Evaluation 身份后返回 `AgentObservationRef`（角色、Chat 所属用户、Chat ID、`not-started | available`），不向浏览器暴露可写 Chat URL。Context、Workspace 和 Trajectory 的读接口由 Eval SP 提供，交互式观察的只读权限由 SP 服务端执行。
 

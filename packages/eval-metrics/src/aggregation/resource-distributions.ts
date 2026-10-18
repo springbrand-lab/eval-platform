@@ -35,8 +35,12 @@ function resourceDistribution(totals: ResourceStatistics, agents: readonly Resou
     trajectory: {
       turns: operations(agents.map((item) => item.trajectory.turns)),
       tools: operations(agents.map((item) => item.trajectory.tools)),
-      nonToolTurns: distribution(agents.map((item) => item.trajectory.nonToolTurns)),
-      nonToolTurnTokens: fields(totals.trajectory.nonToolTurnTokens, agents.map((item) => item.trajectory.nonToolTurnTokens)),
+      thinkingTurns: distribution(agents.map((item) => item.trajectory.thinkingTurns)),
+      thinkingTurnOperations: operations(agents.map((item) => item.trajectory.thinkingTurnOperations)),
+      contentTurns: distribution(agents.map((item) => item.trajectory.contentTurns)),
+      contentTurnOperations: operations(agents.map((item) => item.trajectory.contentTurnOperations)),
+      thinkingTurnTokens: fields(totals.trajectory.thinkingTurnTokens, agents.map((item) => item.trajectory.thinkingTurnTokens)),
+      contentTurnTokens: fields(totals.trajectory.contentTurnTokens, agents.map((item) => item.trajectory.contentTurnTokens)),
       byTool: totals.trajectory.byTool.map(({ toolName }) => ({
         toolName,
         operations: operations(agents.map((item) => item.trajectory.byTool.find((tool) => tool.toolName === toolName)!)),

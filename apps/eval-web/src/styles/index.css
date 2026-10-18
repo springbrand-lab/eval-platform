@@ -96,6 +96,7 @@
 }
 .agent-editor-layout > main > form > fieldset > * { margin-block: 0; min-width: 0; }
 .agent-editor-layout > main > form > fieldset > header,
+.agent-editor-layout > main > form > fieldset > .agent-purpose-section,
 .agent-editor-layout > main > form > fieldset > .agent-mcp-section { grid-column: 1 / -1; }
 .agent-editor-layout > main > form > fieldset > header h1 { display: none; }
 .agent-editor-layout > main > form > fieldset > header p { font-size: 12px; }
@@ -132,4 +133,42 @@
   min-height: 12rem;
   max-height: 65dvh;
   overflow-y: auto;
+}
+
+/* Keep the capability directory quiet when every resource is empty. */
+.agent-editor-layout > main > form > fieldset > [data-agent-capabilities] {
+  gap: 3px;
+  padding-bottom: 1px;
+}
+.agent-editor-layout > main > form > fieldset > [data-agent-capabilities] h2 {
+  letter-spacing: -0.01em;
+}
+.agent-editor-layout > main > form > fieldset > [data-agent-capabilities] p {
+  line-height: 1.45;
+}
+.agent-editor-layout > main > form > fieldset > [data-agent-empty] {
+  min-height: 44px;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  transition: background-color 120ms ease;
+}
+.agent-editor-layout > main > form > fieldset > [data-agent-empty]:hover,
+.agent-editor-layout > main > form > fieldset > [data-agent-empty]:focus-within {
+  background: var(--surface-hover);
+}
+.agent-editor-layout > main > form > fieldset > [data-agent-empty] > div {
+  min-height: 44px;
+  padding: 0 8px;
+}
+.agent-editor-layout > main > form > fieldset > [data-agent-empty] h3 {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+.agent-editor-layout > main > form > fieldset > [data-agent-empty] button {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.agent-editor-layout > main > form > fieldset > [data-agent-empty] button:hover {
+  color: var(--text-strong);
 }

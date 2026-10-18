@@ -22,7 +22,12 @@ export function attemptDuration(attempt: Attempt): number | null {
 
 /** Raw resource inputs of one Agent's Attempts; a submitted Attempt without collection is a gap. */
 export function attemptResources(ownerUserId: string, attempts: readonly Attempt[]): readonly ResourceInput[] {
-  return attempts.map((attempt) => ({ ownerUserId, collection: attempt.resources, submitted: attempt.submissionId !== undefined }));
+  return attempts.map((attempt) => ({
+    ownerUserId,
+    collection: attempt.resources,
+    submitted: attempt.submissionId !== undefined,
+    canEmitTelemetry: !isTerminalAgentStatus(attempt.status),
+  }));
 }
 
 /** First valid start to last terminal completion; null while the latest Attempt is not terminal. */

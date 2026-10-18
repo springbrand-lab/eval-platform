@@ -21,7 +21,24 @@ const setting: AgentDraft["setting"] = {
   memoryDefaults: { enabled: false, memoryTokens: 3_000, preferencesTokens: 750 }, sandbox: { enabled: true },
   skillIds: [], mcpServers: [{ serverId: "platform-mcp" }], actionIds: [], connectorIds: [], extensionIds: [], referenceFileIds: [],
 };
-const template: UserAgentConfigTemplate = { name: "新建 Agent", description: null, setting };
+const modelCatalog = [
+  {
+    id: "deepseek-flash-balanced", name: "DeepSeek V4.1 Flash", providerModel: "deepseek/deepseek-v4.1-flash",
+    thinking: "high", executionLevel: "high", default: true, requiredPlan: "free", available: true,
+    thinkingLevels: ["none", "low", "high", "max"],
+  },
+  {
+    id: "gemini-flash-fast", name: "Claude Sonnet 5.5", providerModel: "anthropic/claude-sonnet-5.5",
+    thinking: "medium", executionLevel: "high", requiredPlan: "free", available: true,
+    thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
+  {
+    id: "claude-opus-max", name: "Claude Opus 5.5", providerModel: "anthropic/claude-opus-5.5",
+    thinking: "high", executionLevel: "high", requiredPlan: "pro", available: true,
+    thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
+];
+const template: UserAgentConfigTemplate = { name: "新建 Agent", description: null, setting: { ...setting, mcpServers: [] } };
 const initial: AgentConfig = {
   id: "agent-a", user_id: "user-a", slug: "agent-a", name: "Original name", description: null,
   revision: 3, setting_schema_version: 4, setting, is_default: false, created_at: 1, updated_at: 1,
@@ -58,6 +75,12 @@ describe("SP Agent editor in Eval", () => {
       if (path === "/api/agent-library/user-agent-configs/agent-a/deletion-check") return {
         allowed: true, activeChatIds: [], enabledScheduleIds: [], unfinishedRunIds: [],
       };
+      if (path === "/api/agent-library/mcp-servers?source=user&page=1&pageSize=100") return {
+        data: [{
+          id: "platform-mcp", name: "Eval 结果提交", description: "submit_evaluation", status: "active", source: "user",
+          url: "https://evalapi.example/mcp/evaluation-results", authType: "bearer",
+        }], total: 1, page: 1, pageSize: 100,
+      };
       if (path === "/api/agent-library/mcp-servers/platform-mcp") return {
         id: "platform-mcp", name: "Eval 结果提交", description: "submit_evaluation", status: "active", source: "user",
         url: "https://evalapi.example/mcp/evaluation-results", authType: "bearer",
@@ -66,7 +89,7 @@ describe("SP Agent editor in Eval", () => {
     });
     transport.request.mockImplementation(async (path: string) => {
       const url = new URL(path, "http://eval.test");
-      if (url.pathname === "/api/agent-library/models") return [];
+      if (url.pathname === "/api/agent-library/models") return modelCatalog;
       if (url.pathname === "/api/agent-library/connectors") return { items: [], nextCursor: null };
       if (url.pathname === "/api/agent-library/components") return { data: [], page: 1, pageSize: 50, total: 0 };
       if (url.pathname === "/api/agent-library/skills") return {
@@ -121,8 +144,11 @@ describe("SP Agent editor in Eval", () => {
       expect(view.container.querySelector('[aria-label="添加任务技能"]')).not.toBeNull();
       for (const label of ["Behavior", "Thinking", "Connectors", "Save changes", "None selected."]) expect(view.container.textContent).not.toContain(label);
       const thinking = view.container.querySelector<HTMLSelectElement>('#agent-thinking')!;
-      expect([...thinking.options].map((option) => option.textContent)).toEqual(['不额外思考', '极简', '较浅', '适中', '深入', '最深入']);
-      expect([...thinking.options].map((option) => option.value)).toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+      expect([...thinking.options].map((option) => option.textContent)).toEqual(['不额外思考', '较浅', '深入', '极高']);
+      expect([...thinking.options].map((option) => option.value)).toEqual(['none', 'low', 'high', 'max']);
+      expect(view.container.querySelector('#agent-model option[value=""]')).toBeNull();
+      expect(view.container.textContent).toContain("DeepSeek V4.1 Flash");
+      expect(view.container.textContent).toContain("Claude Sonnet 5.5");
       expect(view.container.textContent).not.toContain("setting JSON");
       for (const section of ["模型", "思考深度", "外部应用连接", "内置连接工具", "扩展能力", "可执行操作", "任务技能", "参考资料"]) {
         expect(view.container.textContent).toContain(section);
@@ -130,7 +156,10 @@ describe("SP Agent editor in Eval", () => {
       await type(name(), "  Research Agent  ");
       await type(document.querySelector("#agent-description"), "Research description");
       await type(document.querySelector('[aria-label="完整工作指令"]'), "Updated instructions");
-      await select(document.querySelector("#agent-thinking"), "high");
+      await select(document.querySelector("#agent-model"), "gemini-flash-fast");
+      const sonnetThinking = document.querySelector<HTMLSelectElement>("#agent-thinking")!;
+      expect([...sonnetThinking.options].map((option) => option.value)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+      await select(sonnetThinking, "xhigh");
       await click(document.querySelector('[aria-label="添加任务技能"]'));
       await settle(() => expect(document.querySelector('[aria-label="选择Research Skill"]')).not.toBeNull());
       await click(document.querySelector('[aria-label="选择Research Skill"]'));
@@ -139,10 +168,46 @@ describe("SP Agent editor in Eval", () => {
       await settle(() => expect(transport.post).toHaveBeenCalledTimes(1));
       expect(transport.post.mock.calls[0]).toEqual(["/api/agent-configs", {
         slug: expect.stringMatching(/^agent-[\da-f-]{36}$/u), name: "Research Agent", description: "Research description",
-        setting: { ...setting, systemPrompt: "Updated instructions", thinking: "high", skillIds: ["skill-a"] },
+        setting: {
+          ...template.setting,
+          presetId: "gemini-flash-fast",
+          model: "anthropic/claude-sonnet-5.5",
+          thinking: "xhigh",
+          executionLevel: "high",
+          systemPrompt: "Updated instructions",
+          skillIds: ["skill-a"],
+        },
       }]);
       await settle(() => expect(view.router.state.location.pathname).toBe("/agents/agent-a"));
       expect(transport.request.mock.calls.some(([path]) => path.startsWith("/api/agent-library/skills?") && path.includes("view=selectable"))).toBe(true);
+    } finally { await view.close(); }
+  });
+
+  it("adds the result MCP when a new Agent is marked for evaluation", async () => {
+    const view = await mount();
+    try {
+      await settle(() => expect(name()).not.toBeNull());
+      const evaluationPurpose = view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]');
+      await settle(() => expect(evaluationPurpose?.disabled).toBe(false));
+      await click(evaluationPurpose);
+      await settle(() => expect(view.container.textContent).toContain("已自动连接：Eval 结果提交"));
+      await type(name(), "Evaluator");
+      await click(button("创建 Agent"));
+      await settle(() => expect(transport.post).toHaveBeenCalledTimes(1));
+      expect(transport.post.mock.calls[0]![1]).toMatchObject({ setting: { mcpServers: [{ serverId: "platform-mcp" }] } });
+    } finally { await view.close(); }
+  });
+
+  it("removes the result MCP when an existing evaluation Agent is changed to execution", async () => {
+    const view = await mount("/agents/agent-a");
+    try {
+      await settle(() => expect(view.container.querySelector("[data-agent-purpose]")).not.toBeNull());
+      await settle(() => expect(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]')?.checked).toBe(true));
+      await click(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="execution"]'));
+      await settle(() => expect(view.container.textContent).not.toContain("MCP Server (1)"));
+      await click(button("保存修改"));
+      await settle(() => expect(transport.patch).toHaveBeenCalledTimes(1));
+      expect(transport.patch.mock.calls[0]![1]).toMatchObject({ setting: { mcpServers: [] } });
     } finally { await view.close(); }
   });
 

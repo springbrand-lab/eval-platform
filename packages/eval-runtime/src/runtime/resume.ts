@@ -15,7 +15,7 @@ import { executeSampling } from "./execution.js";
 import type { EvalRunResumer, EvalRunResumerDependencies } from "./model.js";
 import { RunRecords } from "./records.js";
 import { createRetryController, type RetryController } from "./retry.js";
-import { createAgentScheduler } from "./scheduler.js";
+import { createAgentScheduler, createAgentTaskQueue } from "./scheduler.js";
 import { finishStoppedRun, interruptRun, type StopContext } from "./stop.js";
 import { persistRuntimeRecord, type RuntimeRunRecord, type RuntimeStore, type SamplingState } from "./store.js";
 
@@ -68,6 +68,10 @@ export class RunResumer implements EvalRunResumer {
     const plans = await this.#records.plan(run);
 
     let samplings = await this.#records.samplings(run.samplingIds);
+    if (plans.operation === "pipeline") {
+      await this.#runPipeline(run, plans.execution, plans.evaluation, samplings, stopSignal);
+      return;
+    }
     if (plans.operation !== "evaluation") {
       const unfinished = samplings.filter(({ execution }) => isPendingSamplingStatus(execution.status));
       if (unfinished.length > 0) {
@@ -86,12 +90,8 @@ export class RunResumer implements EvalRunResumer {
       const sampling = samplingById.get(evaluation.samplingId);
       return sampling?.execution.status === "succeeded" ? [{ sampling, evaluation }] : [];
     });
-    const toCancel = plans.operation === "pipeline"
-      ? pending.filter((evaluation) => samplingById.get(evaluation.samplingId)?.execution.status !== "succeeded")
-      : [];
     const settlements = await Promise.allSettled([
       this.#evaluate(run, config, toEvaluate, stopSignal),
-      ...toCancel.map((evaluation) => this.#cancelEvaluation(evaluation, config)),
     ]);
     const errors = settlements.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
     if (errors.length > 0) throw new AggregateError(errors, "Evaluation phase could not persist its progress");
@@ -141,6 +141,135 @@ export class RunResumer implements EvalRunResumer {
       }),
       "Execution phase could not persist its progress",
     );
+  }
+
+  /**
+   * Run execution and evaluation as two independent bounded queues. Evaluation
+   * work is admitted as soon as its Sampling has persisted successful execution
+   * and evidence, while other Subject Samplings keep using execution capacity.
+   */
+  async #runPipeline(
+    run: RuntimeRunRecord,
+    executionConfig: ExecutionPlan,
+    evaluationConfig: EvaluationPlan,
+    samplings: readonly SamplingState[],
+    stopSignal: AbortSignal | undefined,
+  ): Promise<void> {
+    const evaluations = await this.#records.evaluations(run.evaluationIds);
+    const samplingById = new Map(samplings.map((sampling) => [sampling.samplingId, sampling]));
+    const evaluationBySamplingId = new Map(evaluations.map((evaluation) => [evaluation.samplingId, evaluation]));
+    const sampleFor = await this.#records.samples(samplings, run.projectId);
+    const sampleBySamplingId = new Map(samplings.map((sampling) => [sampling.samplingId, sampleFor(sampling)]));
+    const executionQueue = createAgentTaskQueue({ maxConcurrentDos: executionConfig.executionConcurrency });
+    const evaluationQueue = createAgentTaskQueue({ maxConcurrentDos: evaluationConfig.evaluationConcurrency });
+    const executionErrors: unknown[] = [];
+    const evaluationErrors: unknown[] = [];
+    const cancellationTasks: Promise<void>[] = [];
+    const cancelledEvaluationIds = new Set<string>();
+    const scheduledEvaluationIds = new Set<string>();
+    let evaluationOutputSchema: Promise<EvaluationOutputSchema> | undefined;
+
+    const getEvaluationOutputSchema = (): Promise<EvaluationOutputSchema> => {
+      evaluationOutputSchema ??= this.#outputSchema(run.projectId);
+      return evaluationOutputSchema;
+    };
+    const cancelEvaluation = (evaluation: EvaluationRecord): void => {
+      if (cancelledEvaluationIds.has(evaluation.evaluationId)) return;
+      cancelledEvaluationIds.add(evaluation.evaluationId);
+      cancellationTasks.push(this.#cancelEvaluation(evaluation, evaluationConfig));
+    };
+    const guardedHarness = this.#guardedHarness(run.runId, stopSignal);
+    const executionDependencies = this.#stageDependencies(guardedHarness, () => !stopSignal?.aborted);
+    const evaluationDependencies = this.#stageDependencies(guardedHarness, () => !stopSignal?.aborted);
+    const scheduleEvaluation = (sampling: SamplingState, evaluation: EvaluationRecord): void => {
+      if (scheduledEvaluationIds.has(evaluation.evaluationId)
+        || !isPendingSamplingStatus(evaluation.status.status)) return;
+      scheduledEvaluationIds.add(evaluation.evaluationId);
+      evaluationQueue.enqueue(() => this.#runQueuedStageTask(stopSignal, evaluationErrors, async () => {
+        await evaluateSampling(evaluationDependencies, {
+          context: {
+            sampling,
+            evaluation,
+            sample: sampleBySamplingId.get(sampling.samplingId)!,
+          },
+          harnessConfig: evaluationConfig.evaluationHarness,
+          retryPolicy: evaluationConfig.retryPolicy,
+          evaluationOutputSchema: await getEvaluationOutputSchema(),
+        });
+      }));
+    };
+
+    // Recover already successful executions immediately. Evaluations paired with
+    // a still-running execution remain pending until that execution settles.
+    for (const evaluation of evaluations) {
+      if (!isPendingSamplingStatus(evaluation.status.status)) continue;
+      const sampling = samplingById.get(evaluation.samplingId);
+      if (sampling?.execution.status === "succeeded") {
+        scheduleEvaluation(sampling, evaluation);
+      } else if (!sampling || !isPendingSamplingStatus(sampling.execution.status)) {
+        cancelEvaluation(evaluation);
+      }
+    }
+
+    for (const state of samplings.filter(({ execution }) => isPendingSamplingStatus(execution.status))) {
+      executionQueue.enqueue(() => this.#runQueuedStageTask(stopSignal, executionErrors, async () => {
+        await executeSampling(executionDependencies, {
+          context: { state, sample: sampleBySamplingId.get(state.samplingId)! },
+          harnessConfig: executionConfig.harness,
+          retryPolicy: executionConfig.retryPolicy,
+        });
+        const latest = await this.#store.getSampling(state.samplingId);
+        if (!latest) throw new RuntimeEntityNotFoundError("sampling", state.samplingId);
+        samplingById.set(latest.samplingId, latest);
+        const evaluation = evaluationBySamplingId.get(latest.samplingId);
+        if (!evaluation || !isPendingSamplingStatus(evaluation.status.status)) return;
+        if (latest.execution.status === "succeeded") {
+          scheduleEvaluation(latest, evaluation);
+        } else if (!isPendingSamplingStatus(latest.execution.status)) {
+          cancelEvaluation(evaluation);
+        }
+      }));
+    }
+
+    try {
+      await executionQueue.close();
+    } catch (error) {
+      executionErrors.push(error);
+    }
+    try {
+      await evaluationQueue.close();
+    } catch (error) {
+      evaluationErrors.push(error);
+    }
+    // Cancellation deliberately runs outside the evaluation queue: it is a
+    // record-only cleanup and must never consume an Evaluator concurrency slot.
+    await Promise.allSettled(cancellationTasks);
+
+    if (executionErrors.length > 0 && evaluationErrors.length > 0) {
+      throw new AggregateError(
+        [...executionErrors, ...evaluationErrors],
+        "Pipeline could not persist its progress",
+      );
+    }
+    if (executionErrors.length > 0) {
+      throw new AggregateError(executionErrors, "Execution phase could not persist its progress");
+    }
+    if (evaluationErrors.length > 0) {
+      throw new AggregateError(evaluationErrors, "Evaluation phase could not persist its progress");
+    }
+  }
+
+  async #runQueuedStageTask(
+    stopSignal: AbortSignal | undefined,
+    errors: unknown[],
+    task: () => Promise<void>,
+  ): Promise<void> {
+    if (stopSignal?.aborted) return;
+    try {
+      await task();
+    } catch (error) {
+      if (!(error instanceof RuntimeRunStoppedError)) errors.push(error);
+    }
   }
 
   async #evaluate(

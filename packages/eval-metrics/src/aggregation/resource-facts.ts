@@ -1,6 +1,7 @@
 import type { AgentResourceScope, AgentResourceSnapshot, JsonValue } from "@eval-platform/eval-contracts";
 import { equalJson } from "@eval-platform/eval-contracts";
 import { record, text, type JsonRecord } from "../json.js";
+import { TELEMETRY_PROJECTION_VERSION } from "./compact-resources.js";
 import type { MetricNumber, ResourceDiagnostic } from "./model.js";
 import { coverage } from "./statistics.js";
 
@@ -10,6 +11,8 @@ export interface FactEntry {
   readonly fact: JsonRecord;
   readonly metricProjection?: JsonRecord;
   readonly ownerUserId: string;
+  /** True when the Attempt that supplied this fact can still emit telemetry. */
+  readonly canEmitTelemetry: boolean;
   readonly scope: AgentResourceScope;
 }
 
@@ -22,6 +25,7 @@ export interface FactStream {
 
 export interface OwnedSnapshot {
   readonly ownerUserId: string;
+  readonly canEmitTelemetry: boolean;
   readonly snapshot: AgentResourceSnapshot;
 }
 
@@ -104,13 +108,17 @@ export function readStream(
   let complete = collectionsComplete;
   let duplicates = 0;
   const byIdentity = new Map<string, FactEntry | null>();
-  for (const { ownerUserId, snapshot } of snapshots) {
+  for (const { ownerUserId, canEmitTelemetry, snapshot } of snapshots) {
     if (!snapshot.finalized || snapshot.coverage[stream] !== "complete") complete = false;
     for (const rawFact of snapshot[stream]) {
       const fact = stream === "telemetryEvents" ? record(rawFact.event) ?? rawFact : rawFact;
       const projection = stream === "telemetryEvents" ? record(rawFact.metricProjection) : undefined;
-      const metricProjection = projection?.version === 1 && typeof projection.fingerprint === "string" ? projection : undefined;
-      const entry: FactEntry = { fact, ownerUserId, scope: snapshot.scope, ...(metricProjection ? { metricProjection } : {}) };
+      const metricProjection = (projection?.version === 1 || projection?.version === 2 || projection?.version === TELEMETRY_PROJECTION_VERSION)
+        && typeof projection.fingerprint === "string" ? projection : undefined;
+      const entry: FactEntry = {
+        fact, ownerUserId, canEmitTelemetry, scope: snapshot.scope,
+        ...(metricProjection ? { metricProjection } : {}),
+      };
       const key = sourceIdentity(stream, ownerUserId, fact);
       if (key === undefined) {
         complete = false;
@@ -123,6 +131,18 @@ export function readStream(
         continue;
       }
       duplicates += 1;
+      if (existing && existing.metricProjection && metricProjection
+        && existing.metricProjection.fingerprint === metricProjection.fingerprint) {
+        const existingVersion = typeof existing.metricProjection.version === "number" ? existing.metricProjection.version : 0;
+        const version = typeof metricProjection.version === "number" ? metricProjection.version : 0;
+        if (version > existingVersion) byIdentity.set(key, entry);
+        else if (version === existingVersion && !equalJson(existing.metricProjection, metricProjection)) {
+          complete = false;
+          diagnostics.report("conflicting-identity", stream, entry, "The same source identity has contradictory metric projections");
+          byIdentity.set(key, null);
+        }
+        continue;
+      }
       if (existing && !(existing.metricProjection && metricProjection
         ? existing.metricProjection.fingerprint === metricProjection.fingerprint : equalJson(existing.fact, fact))) {
         complete = false;
