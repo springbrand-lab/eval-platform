@@ -58,12 +58,15 @@ function ValidationOverview({ outputs }: { outputs: EvaluationOutputSummary }) {
     { label: "结果无效", count: outputs.validation.invalid, detail: "不计入指标", tone: "warning", icon: AlertCircle },
     { label: "结果未获得", count: outputs.validation.unavailable, detail: "等待或缺少结果", tone: "neutral", icon: CircleHelp },
   ] as const;
-  return <div className="grid grid-cols-1 gap-2 sm:grid-cols-3" aria-label="评估结果概览">
-    {items.map(({ label, count, detail, tone, icon: Icon }) => <div key={label} className={`rounded-lg border p-3 ${tone === "success" ? "border-success/20 bg-success-soft" : tone === "warning" ? "border-warning/25 bg-warning-soft" : "border-border bg-surface-muted"}`}>
-      <div className={`flex items-center gap-1.5 text-xs font-semibold ${tone === "success" ? "text-success" : tone === "warning" ? "text-warning" : "text-text-muted"}`}><Icon className="size-3.5" />{label}</div>
-      <div className="mt-1.5 text-2xl font-semibold leading-none tabular-nums text-text-strong">{count}</div>
-      <p className="mt-1.5 text-xs text-text-muted">{detail}</p>
-    </div>)}
+  return <div aria-label="评估结果概览" className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-border bg-surface-muted/30 px-3 py-2.5">
+    <span className="text-xs font-semibold text-text-secondary">结果获取情况</span>
+    <span className="hidden h-4 w-px bg-border sm:block" aria-hidden="true" />
+    {items.map(({ label, count, detail, tone, icon: Icon }) => <span key={label} className="inline-flex items-center gap-1.5 text-xs text-text-muted">
+      <Icon className={`size-3.5 ${tone === "success" ? "text-success" : tone === "warning" ? "text-warning" : "text-text-muted"}`} aria-hidden="true" />
+      <span>{label}</span>
+      <strong className="font-semibold tabular-nums text-text-strong">{count}</strong>
+      <span className="text-[11px] text-text-faint">{detail}</span>
+    </span>)}
   </div>;
 }
 
