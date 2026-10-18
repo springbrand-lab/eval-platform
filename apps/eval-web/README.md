@@ -8,7 +8,7 @@ Eval 的内部管理界面：准备测试集与初始资源、上传评估结果
 
 统一 HTTP 客户端的 `maxResponseBytes` 使用 SDK 接受的最大值 `Number.MAX_SAFE_INTEGER`，支持读取超过 SDK 默认 10 MiB 上限的完整采样详情及其他 API 响应。
 
-Agent 新建与编辑直接复用 SP 同一份 `@springbrand/agent-config-editor`：行为、完整系统提示词、模型/思考强度、能力选择和排序、Skill/Reference 管理与预览。宿主只负责默认模板、当前用户、保存、revision 冲突、冻结副本只读及导航；不再提供 Slug 或配置 JSON 输入框。创建会话持有固定 Slug，失败重试通过 SP 创建重放校准；后台读取失败保留草稿。公共资源客户端经 `/api/agent-library` 访问当前 Eval SP，配置写入仍走 `/api/agent-configs`。错误由 Eval 目录解码，保留经过校验的 SP 编辑器领域码和删除阻挡详情。详见 [编辑器对齐](../../docs/agent-config-editor-alignment.md)。
+Agent 新建与编辑直接复用 SP 同一份 `@springbrand/agent-config-editor`：行为、完整系统提示词、模型/思考强度、能力选择和排序、Skill/Reference 管理与预览。模型名称、可用性和每个模型支持的思考档位始终来自当前 Eval SP 的公开模型目录，Agent 管理列表也复用同一目录映射展示，不维护本地模型枚举。宿主只负责默认模板、当前用户、保存、revision 冲突、冻结副本只读及导航；不再提供 Slug 或配置 JSON 输入框。创建会话持有固定 Slug，失败重试通过 SP 创建重放校准；后台读取失败保留草稿。公共资源客户端经 `/api/agent-library` 访问当前 Eval SP，配置写入仍走 `/api/agent-configs`。错误由 Eval 目录解码，保留经过校验的 SP 编辑器领域码和删除阻挡详情。详见 [编辑器对齐](../../docs/agent-config-editor-alignment.md)。
 
 Agent 创建时必须选择“执行 Agent”或“评估 Agent”，用途写入 Eval 并在创建后固定；管理页可按用途筛选。新建 Project 的执行 Agent 和评估计划的评估 Agent 分别只请求对应用途，API 也会再次校验用途，不能依赖浏览器筛选绕过。
 
@@ -105,6 +105,6 @@ Agent 编辑页保留共享编辑器的所有表单与保存行为，以 `.agent
 
 共享 Agent 编辑器当前没有语言参数；本项目通过 pnpm patchedDependencies 固定中文文案补丁（patches/@springbrand__agent-config-editor@0.1.0-alpha.0.patch）。覆盖编辑页、选择器、技能/资料管理、操作反馈与无障碍标签。Thinking 只翻译显示名称，原始枚举与模型、能力标识、用户内容保持不变；升级包版本时需迁移补丁并运行编辑器测试。外部服务返回的用户资源名称和原始错误内容不做字符串替换。
 
-MCP 保留标准名称 `MCP Server`。共享编辑器补丁提供可选 `supplementaryContent` 插槽，用来在同一个 fieldset、保存栏之前展示既有 MCP 配置元数据；不新增 MCP 协议、连接或配置写入逻辑。只读清单与其他配置共用宽度与分隔线，避免保存栏把 MCP 信息隔在表单之外。
+MCP 保留标准名称 `MCP Server`。共享编辑器补丁提供可选 `supplementaryContent` 插槽，用来在同一个 fieldset、保存栏之前展示既有 MCP 配置元数据；用户自选 MCP 不在该入口编辑。评估结果 MCP 是 Eval 管理的用途绑定例外：选择“评估 Agent”时按固定 URL 自动加入，选择“执行 Agent”时移除，保存前由 API 再次校验唯一启用且 Bearer 鉴权的服务。只读清单与其他配置共用宽度与分隔线，避免保存栏把 MCP 信息隔在表单之外。
 
 能力为空时保留名称和添加/管理入口，不渲染空内容或折叠箭头；选择后仍走共享编辑器原有条目列表。独立 MCP 配置不计入外部应用连接数量。中等窗口能力入口双列、宽屏三列，避免重复空状态撑长页面。

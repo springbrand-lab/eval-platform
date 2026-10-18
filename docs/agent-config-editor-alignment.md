@@ -6,7 +6,7 @@ Eval 与 SP 共用 `@springbrand/agent-config-editor`，不复制 SP 应用源�
 
 公共编辑器只接受宿主注入的 HTTP 客户端和导航，不持有凭据、SP 应用路由、数据库或运行时。SP Web 与 Eval Web 都消费同一公共实现。模型和资源目录从当前 Eval SP 的公开接口读取，不使用生产 SP 数据或本地枚举副本。
 
-Eval API 在现有 Web 网关和固定服务账号作用域内提供 `/api/agent-library`：仅开放默认模板、模型目录、Skills、Actions、Components、Connectors、References 和 Reference 附件所需的明确路径与方法。正文由 SP 校验，Eval 保留请求体限长、错误翻译、取消信号和 Origin 校验；不提供任意 URL 转发，不将服务账号会话交给浏览器。公共编辑器只展示 Connector Toolkit，其他 MCP 选择原样保留在配置中；Eval Web 在编辑页下方以只读方式列出这些用户 MCP Server（例如[评估结果提交](eval-evaluation-result-submission.md)的 MCP），为此 `/api/agent-library` 额外开放 `GET /mcp-servers` 和 `GET /mcp-servers/{id}`，响应不含连接凭据。Agent Config 写入仍走既有 `/api/agent-configs` 冻结保护。
+Eval API 在现有 Web 网关和固定服务账号作用域内提供 `/api/agent-library`：仅开放默认模板、模型目录、Skills、Actions、Components、Connectors、References 和 Reference 附件所需的明确路径与方法。正文由 SP 校验，Eval 保留请求体限长、错误翻译、取消信号和 Origin 校验；不提供任意 URL 转发，不将服务账号会话交给浏览器。公共编辑器只展示 Connector Toolkit；用户选择的其他 MCP 原样保留在配置中，Eval Web 在编辑页下方以只读方式列出这些用户 MCP Server。评估结果提交 MCP 是 Eval 管理的用途绑定例外：用途选择器按固定 URL 路径自动加入或移除它，用户不能把它当作普通 MCP 编辑；为此 `/api/agent-library` 额外开放 `GET /mcp-servers` 和 `GET /mcp-servers/{id}`，响应不含连接凭据。Agent Config 写入仍走既有 `/api/agent-configs` 冻结保护。
 
 公共 Agent 编辑器的领域错误和删除阻挡详情从 SP 唯一错误目录选取，服务端与浏览器均用同一 Eval HTTP 目录解码。删除预检查与实际删除之间新增的活跃工作仍能显示真实阻挡原因；未经 Schema 校验的详情不公开。SP 服务会话失效是依赖不可用，不能清除浏览器登录。
 

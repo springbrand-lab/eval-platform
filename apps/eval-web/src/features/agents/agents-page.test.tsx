@@ -8,12 +8,16 @@ import { click, render } from "@/test/render";
 import { AgentsPage } from "./agents-page";
 
 const mocks = vi.hoisted(() => ({
-  configs: vi.fn(), options: vi.fn(),
+  configs: vi.fn(), options: vi.fn(), models: vi.fn(),
 }));
 vi.mock("@/api-sdk/agent-configs-api", () => ({
   agentKeys: { list: () => ["agents", "configs", "list"], options: (role?: string) => ["agents", "options", role ?? "all"] },
   listAgentConfigs: mocks.configs,
   listAgentOptions: mocks.options,
+}));
+vi.mock("@/api-sdk/agent-editor-api", () => ({
+  agentLibraryKeys: { models: ["agent-library", "models"] },
+  agentEditorClient: { models: { listModelCatalog: mocks.models } },
 }));
 
 function config(id: string): AgentConfig {
@@ -44,6 +48,7 @@ async function mount() {
 describe("Agent management purpose filter", () => {
   it("shows purpose badges and filters the table without changing the source list", async () => {
     mocks.configs.mockResolvedValue([config("executor"), config("evaluator")]);
+    mocks.models.mockResolvedValue([{ id: "model", name: "DeepSeek V4.1 Flash", providerModel: "model", thinking: "high", thinkingLevels: ["high"] }]);
     mocks.options.mockResolvedValue([
       { agentConfig: { ownerUserId: "owner", userAgentId: "executor" }, name: "执行配置", role: "subject", purpose: "execution" },
       { agentConfig: { ownerUserId: "owner", userAgentId: "evaluator" }, name: "评估配置", role: "evaluator", purpose: "evaluation" },
@@ -52,6 +57,8 @@ describe("Agent management purpose filter", () => {
     try {
       expect(view.container.textContent).toContain("执行 Agent");
       expect(view.container.textContent).toContain("评估 Agent");
+      expect(view.container.textContent).toContain("DeepSeek V4.1 Flash");
+      expect(view.container.textContent).toContain("适中");
       expect(view.container.querySelectorAll("tbody tr")).toHaveLength(2);
 
       const evaluatorFilter = [...view.container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]

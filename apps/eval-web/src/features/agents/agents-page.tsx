@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { Bot, CheckCircle2, ClipboardCheck, Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 import { agentKeys, listAgentConfigs, listAgentOptions } from "@/api-sdk/agent-configs-api";
+import { agentEditorClient, agentLibraryKeys } from "@/api-sdk/agent-editor-api";
 import type { AgentConfig, AgentPurpose } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
 import { Button } from "@/components/ui/button";
@@ -28,11 +29,26 @@ function purposeTone(purpose: AgentPurpose | null | undefined): "accent" | "info
   return purpose === "evaluation" ? "accent" : purpose === "execution" ? "info" : "neutral";
 }
 
+const THINKING_LABELS: Readonly<Record<string, string>> = {
+  none: "不额外思考", minimal: "极简", low: "较浅", medium: "适中", high: "深入", xhigh: "最深入", max: "极高",
+};
+
+function thinkingLabel(level: string | null | undefined): string {
+  return level ? THINKING_LABELS[level] ?? level : "跟随模型默认";
+}
+
+function modelLabel(config: AgentConfig, models: readonly { id: string; name: string; providerModel: string }[]): string {
+  const selected = models.find((model) => model.id === config.setting.presetId)
+    ?? models.find((model) => model.providerModel === config.setting.model);
+  return selected?.name ?? config.setting.presetId ?? config.setting.model ?? "跟随默认配置";
+}
+
 export function AgentsPage() {
   const navigate = useNavigate();
   const [filter, setFilter] = useState<AgentFilter>("all");
   const configs = useQuery({ queryKey: agentKeys.list(), queryFn: ({ signal }) => listAgentConfigs(signal) });
   const purposes = useQuery({ queryKey: agentKeys.options(), queryFn: ({ signal }) => listAgentOptions(undefined, undefined, signal) });
+  const models = useQuery({ queryKey: agentLibraryKeys.models, queryFn: ({ signal }) => agentEditorClient.models.listModelCatalog(signal) });
   const purposeByConfigId = useMemo(() => new Map(
     (purposes.data ?? []).flatMap((option) => option.purpose ? [[option.agentConfig.userAgentId, option.purpose] as const] : []),
   ), [purposes.data]);
@@ -56,7 +72,7 @@ export function AgentsPage() {
             <DataTable<AgentConfig>
               rows={rows}
               rowKey={(row) => row.id}
-              searchText={(row) => `${row.name} ${purposeLabel(purposeByConfigId.get(row.id))} ${row.description ?? ""} ${row.setting.presetId ?? ""} ${row.setting.model ?? ""}`}
+              searchText={(row) => `${row.name} ${purposeLabel(purposeByConfigId.get(row.id))} ${row.description ?? ""} ${modelLabel(row, models.data ?? [])} ${row.setting.presetId ?? ""} ${row.setting.model ?? ""} ${thinkingLabel(row.setting.thinking)}`}
               searchPlaceholder="搜索名称、说明或模型"
               onRowClick={(row) => void navigate({ to: "/agents/$id", params: { id: row.id } })}
               toolbar={<div role="tablist" aria-label="按 Agent 用途筛选" className="inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-lg border border-border bg-surface-muted/70 p-0.5">
@@ -77,8 +93,8 @@ export function AgentsPage() {
                   <p className="mt-1 line-clamp-2 max-w-xs text-xs text-text-muted">{row.description || "暂无说明"}</p></div>, sortValue: (row) => row.name },
                 { key: "purpose", header: "用途", cell: (row) => <Badge tone={purposeTone(purposeByConfigId.get(row.id))} dot>{purposeLabel(purposeByConfigId.get(row.id))}</Badge>, sortValue: (row) => purposeLabel(purposeByConfigId.get(row.id)) },
                 { key: "model", header: "模型配置", cell: (row) => <div className="max-w-64 break-words text-[13px]">
-                  {row.setting.presetId || row.setting.model || "跟随默认配置"}
-                  <p className="mt-1 text-xs text-text-muted">思考强度 · {row.setting.thinking}</p>
+                  {modelLabel(row, models.data ?? [])}
+                  <p className="mt-1 text-xs text-text-muted">思考强度 · {thinkingLabel(row.setting.thinking)}</p>
                 </div> },
                 { key: "prompt", header: "系统提示词", cell: (row) => <span className="line-clamp-2 max-w-xs text-[13px] text-text-secondary">{row.setting.systemPrompt || "未设置"}</span> },
                 { key: "capabilities", header: "能力与资料", cell: (row) => {
