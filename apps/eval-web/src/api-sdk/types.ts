@@ -68,7 +68,7 @@ export type { UserAgentConfig as AgentConfig } from "@springbrand/agent-config-e
 export interface AgentOption {
   readonly agentConfig: AgentConfigRef;
   readonly name: string;
-  /** Existing Subject/Evaluator role choice; purpose is the immutable Eval classification. */
+  /** Existing Subject/Evaluator role choice; purpose is the current Eval classification. */
   readonly role: AgentRole;
   readonly purpose: AgentPurpose;
 }

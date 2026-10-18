@@ -324,13 +324,12 @@ function ProjectForm({ limits, datasetId }: { limits: EvalInputLimits; datasetId
           <CardBody className="flex flex-col gap-4">
             <Field className="max-w-lg"><FieldLabel htmlFor={`${formId}-count`}>默认采样次数</FieldLabel>
               <Input id={`${formId}-count`} required type="number" min={1} max={limits.samplingCountMax} value={draft.samplingCount}
-                onChange={(event) => update({ samplingCount: Number(event.target.value) })} />
-              <FieldDescription>{`1–${limits.samplingCountMax}。下方可以单独覆盖某条用例，共享用例的次数会保持同步。`}</FieldDescription>
+                onChange={(event) => update({ samplingCount: Number(event.target.value), samplingCounts: {} })} />
+              <FieldDescription>{`1–${limits.samplingCountMax}。下方可以单独设置某条用例；修改默认值会同步覆盖已单独设置的次数。`}</FieldDescription>
             </Field>
             <div className="overflow-hidden rounded-[var(--radius-control)] border border-border">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-surface-muted/60 px-4 py-3 text-xs text-text-muted">
                 <span>数据集 → 用例 · 同一用例只创建一次，次数跨数据集同步</span>
-                {Object.keys(draft.samplingCounts).some((dataId) => selectedData.some((item) => item.dataId === dataId)) && <Button type="button" variant="ghost" size="sm" onClick={() => update({ samplingCounts: {} })}>全部恢复默认</Button>}
               </div>
               <div className="p-2">
                 {(datasets.data ?? []).filter((dataset) => draft.datasets.has(dataset.datasetId)).map((dataset) => {
@@ -348,11 +347,6 @@ function ProjectForm({ limits, datasetId }: { limits: EvalInputLimits; datasetId
                               else samplingCounts[item.dataId] = count;
                               update({ samplingCounts });
                             }} />
-                          {draft.samplingCounts[item.dataId] !== undefined && <Button type="button" variant="ghost" size="sm" onClick={() => {
-                            const samplingCounts = { ...draft.samplingCounts };
-                            delete samplingCounts[item.dataId];
-                            update({ samplingCounts });
-                          }}>恢复默认</Button>}
                         </div>
                     } />)}
                   </HierarchyBranch>;

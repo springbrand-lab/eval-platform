@@ -25,8 +25,8 @@ function purposeLabel(purpose: AgentPurpose): string {
   return purpose === "evaluation" ? "评估 Agent" : "执行 Agent";
 }
 
-function purposeTone(purpose: AgentPurpose): "accent" | "info" {
-  return purpose === "evaluation" ? "accent" : "info";
+function purposeTone(purpose: AgentPurpose): "success" | "info" {
+  return purpose === "evaluation" ? "success" : "info";
 }
 
 const THINKING_LABELS: Readonly<Record<string, string>> = {
@@ -85,7 +85,7 @@ export function AgentsPage() {
                   const selected = filter === item.value;
                   return <button key={item.value} type="button" role="tab" aria-selected={selected} onClick={() => setFilter(item.value)}
                     className={`inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 ${selected ? "bg-surface text-text-strong shadow-sm" : "text-text-muted hover:text-text-strong"}`}>
-                    {item.value === "execution" ? <CheckCircle2 className="size-3.5 text-info" aria-hidden /> : item.value === "evaluation" ? <ClipboardCheck className="size-3.5 text-accent" aria-hidden /> : null}
+                    {item.value === "execution" ? <CheckCircle2 className="size-3.5 text-info" aria-hidden /> : item.value === "evaluation" ? <ClipboardCheck className="size-3.5 text-success" aria-hidden /> : null}
                     {item.label}<span className="rounded-full bg-surface-muted px-1.5 py-0.5 text-[10px] tabular-nums text-text-muted">{counts[item.value]}</span>
                   </button>;
                 })}

@@ -14,7 +14,7 @@ export const list = createRoute({
     purpose: z.enum(["execution", "evaluation"]).exactOptional(),
   }) },
   responses: {
-    200: jsonContent(responseSchema(z.array(z.custom<AgentOption>()).readonly()), "Agent choices with immutable purpose metadata"),
+    200: jsonContent(responseSchema(z.array(z.custom<AgentOption>()).readonly()), "Agent choices with current purpose metadata"),
     ...errorResponses,
   },
 });

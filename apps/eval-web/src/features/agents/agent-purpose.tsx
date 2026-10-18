@@ -9,7 +9,6 @@ export function AgentPurposeSelector({
   loading,
   error,
   readOnly,
-  locked,
   onChange,
 }: {
   purpose: AgentPurpose;
@@ -17,14 +16,13 @@ export function AgentPurposeSelector({
   loading: boolean;
   error: unknown;
   readOnly: boolean;
-  locked?: boolean;
   onChange: (purpose: AgentPurpose) => void;
 }) {
   const unavailable = resolution?.kind === "unavailable" ? resolution.reason : null;
   return (
     <section aria-label="Agent 用途" data-agent-purpose className="agent-purpose-section w-full border-t border-border pt-4">
       <h2 className="text-sm font-semibold">Agent 用途</h2>
-      <p className="mt-1 text-xs text-text-muted">{locked ? "用途在创建后固定，不能改为另一类 Agent。" : "创建时选择用途，保存后不能改为另一类 Agent。"}</p>
+      <p className="mt-1 text-xs text-text-muted">可在执行 Agent 与评估 Agent 之间切换；切换为评估 Agent 时会自动连接评估结果 MCP。</p>
       <div role="radiogroup" aria-label="Agent 用途" className="mt-3 grid gap-3 sm:grid-cols-2">
         <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border p-3 has-[:checked]:border-primary has-[:checked]:bg-primary/5">
           <input
@@ -32,7 +30,7 @@ export function AgentPurposeSelector({
             name="agent-purpose"
             value="execution"
             checked={purpose === "execution"}
-            disabled={readOnly || locked}
+            disabled={readOnly}
             onChange={() => onChange("execution")}
             className="mt-0.5 size-4 accent-primary"
           />
@@ -47,7 +45,7 @@ export function AgentPurposeSelector({
             name="agent-purpose"
             value="evaluation"
             checked={purpose === "evaluation"}
-            disabled={readOnly || locked}
+            disabled={readOnly}
             onChange={() => onChange("evaluation")}
             className="mt-0.5 size-4 accent-primary"
           />

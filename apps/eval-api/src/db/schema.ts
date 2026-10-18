@@ -68,7 +68,7 @@ export const evaluationOutputSchemas = pgTable("eval_evaluation_output_schemas",
   check("eval_evaluation_output_schemas_description_ck", sql`length(trim(${table.description})) > 0`),
 ]);
 
-/** The immutable Eval-side purpose assigned when an editable SP Agent Config is created. */
+/** The Eval-side purpose currently assigned to an editable SP Agent Config. */
 export const agentConfigPurposes = pgTable("eval_agent_config_purposes", {
   ownerUserId: text("owner_user_id").notNull(),
   userAgentId: text("user_agent_id").notNull(),

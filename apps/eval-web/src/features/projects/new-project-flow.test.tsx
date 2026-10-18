@@ -85,6 +85,24 @@ it("keeps the per-sample count input mounted and focused while entering multiple
   } finally { await view.close(); }
 });
 
+it("overwrites individual sample counts when the default changes", async () => {
+  const view = await page();
+  try {
+    await type(control(view.container, "名称"), "测试项目");
+    await click(button(view.container, "添加数据集")); await flush();
+    await click(control(view.container, "数据集"));
+    await click(button(view.container, "添加数据集")); await flush();
+    await click(control(view.container, "数据集")); await flush();
+    await click(button(view.container, "下一步"));
+    const sample = view.container.querySelector<HTMLInputElement>('[aria-label="样本的采样次数"]')!;
+    await type(sample, "5");
+    expect(sample.value).toBe("5");
+    await type(control(view.container, "默认采样次数"), "3");
+    expect(sample.value).toBe("3");
+    expect(view.container.textContent).not.toContain("恢复默认");
+  } finally { await view.close(); }
+});
+
 it("replays an execution-only creation unchanged after an unknown outcome", async () => {
   mocks.create.mockRejectedValueOnce(new ApiError({ kind: "network", code: "NETWORK_ERROR", status: 0, message: "ack lost" }));
   const view = await page();

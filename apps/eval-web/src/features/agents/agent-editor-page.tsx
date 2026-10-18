@@ -8,9 +8,10 @@ import {
   createInputFromDraft, deletionBlockerFeedback, deletionErrorFeedback, describeAgentCreationError,
   draftFromAgent, updateInputFromDraft, type AgentDeletionFeedback, type AgentDraft,
 } from "@springbrand/agent-config-editor";
-import type { AgentConfigDeletionCheck, CreateUserAgentConfigInput, UpdateUserAgentConfigInput, UserAgentConfigTemplate } from "@springbrand/agent-config-editor/client";
+import type { AgentConfigDeletionCheck, CreateUserAgentConfigInput, UserAgentConfigTemplate } from "@springbrand/agent-config-editor/client";
 import {
   agentKeys, createAgentConfig, deleteAgentConfig, getAgentConfig, listAgentOptions, updateAgentConfig,
+  type AgentConfigUpdateInput,
 } from "@/api-sdk/agent-configs-api";
 import { agentEditorClient, agentLibraryKeys, getAgentTemplate } from "@/api-sdk/agent-editor-api";
 import { getEvaluationResultsMcp, mcpServerKeys } from "@/api-sdk/mcp-servers-api";
@@ -27,7 +28,7 @@ import { AgentMcpServers } from "./agent-mcp-servers";
 
 const FROZEN_PREFIX = "eval-frozen-";
 type SaveRequest = { kind: "create"; input: CreateUserAgentConfigInput; purpose: AgentPurpose }
-  | { kind: "update"; id: string; input: UpdateUserAgentConfigInput };
+  | { kind: "update"; id: string; input: AgentConfigUpdateInput };
 
 function AgentForm({ initial, template, userId, onSaved }: {
   initial?: AgentConfig; template?: UserAgentConfigTemplate; userId: string; onSaved: (config: AgentConfig) => void;
@@ -46,9 +47,9 @@ function AgentForm({ initial, template, userId, onSaved }: {
   const [deleteBlocker, setDeleteBlocker] = useState<AgentDeletionFeedback | null>(null);
   const submitting = useRef(false);
   const allowNavigation = useRef(false);
-  const purposeUserChanged = useRef(false);
+  // Purpose is loaded from the server once; after the user changes it, background query refreshes must not overwrite the draft.
+  const purposeSelectionTouched = useRef(false);
   const readOnly = !!base?.slug.startsWith(FROZEN_PREFIX);
-  const purposeLocked = !!base;
   const dirty = !agentDraftEqual(draft, baseline);
   const models = useQuery({ queryKey: agentLibraryKeys.models, queryFn: ({ signal }) => agentEditorClient.models.listModelCatalog(signal) });
   const evaluationMcp = useQuery({
@@ -79,16 +80,16 @@ function AgentForm({ initial, template, userId, onSaved }: {
       return;
     }
     if (!purposeReady) setPurposeReady(true);
-    if (!purposeUserChanged.current) {
+    if (!purposeSelectionTouched.current) {
       if (selectedPurpose) setPurpose(selectedPurpose);
       else if (evaluationMcpId) setPurpose(source?.setting.mcpServers.some((selection) => selection.serverId === evaluationMcpId) ? "evaluation" : "execution");
     }
   }, [evaluationMcp.isPending, evaluationMcpId, initial, purposeOptions.data, purposeOptions.error, purposeOptions.isPending, purposeReady, template]);
 
   useEffect(() => {
-    if (!purposeReady || !evaluationMcpId || purposeLocked) return;
+    if (!purposeReady || !evaluationMcpId) return;
     const selected = draft.setting.mcpServers.some((selection) => selection.serverId === evaluationMcpId);
-    if ((purpose === "evaluation" && selected) || (purpose === "execution" && (!selected || !purposeUserChanged.current))) return;
+    if ((purpose === "evaluation" && selected) || (purpose === "execution" && !selected)) return;
     allowNavigation.current = false;
     setError(null);
     setDraft((current) => {
@@ -100,10 +101,10 @@ function AgentForm({ initial, template, userId, onSaved }: {
       }
       return current;
     });
-  }, [draft.setting.mcpServers, evaluationMcpId, purpose, purposeLocked, purposeReady]);
+  }, [draft.setting.mcpServers, evaluationMcpId, purpose, purposeReady]);
 
   function changePurpose(next: AgentPurpose) {
-    purposeUserChanged.current = true;
+    purposeSelectionTouched.current = true;
     setPurpose(next);
   }
 
@@ -132,7 +133,7 @@ function AgentForm({ initial, template, userId, onSaved }: {
     },
     onError: (failure) => {
       setError(failure instanceof AgentCreationError ? describeAgentCreationError(failure)
-        : failure instanceof ApiError && (failure.code === "AGENT_CONFIG_PURPOSE_LOCKED" || failure.code === "AGENT_CONFIG_PURPOSE_MISMATCH")
+        : failure instanceof ApiError && failure.code === "AGENT_CONFIG_PURPOSE_MISMATCH"
           ? describeError(failure)
         : failure instanceof ApiError && failure.status === 409
           ? "此 Agent 已在其他位置更新。你的修改仍然保留，请重新加载页面获取最新配置。"
@@ -170,11 +171,11 @@ function AgentForm({ initial, template, userId, onSaved }: {
   });
   function submit() {
     if (readOnly || submitting.current) return;
-    if (purposeLocked && !purposeReady) {
+    if (!purposeReady) {
       setError("正在识别 Agent 用途，请稍后再保存。");
       return;
     }
-    if (purpose === "evaluation" && !purposeLocked) {
+    if (purpose === "evaluation") {
       if (!purposeReady || evaluationMcp.isPending) {
         setError("正在读取评估结果 MCP，请稍后再保存。");
         return;
@@ -194,7 +195,7 @@ function AgentForm({ initial, template, userId, onSaved }: {
     }
     let request: SaveRequest;
     try {
-      request = base ? { kind: "update", id: base.id, input: updateInputFromDraft(draft, base.revision) }
+      request = base ? { kind: "update", id: base.id, input: { ...updateInputFromDraft(draft, base.revision), purpose } }
         : { kind: "create", input: createInputFromDraft(draft, slug), purpose };
     } catch (failure) {
       const issue = failure instanceof ZodError ? failure.issues[0] : undefined;
@@ -213,7 +214,6 @@ function AgentForm({ initial, template, userId, onSaved }: {
         loading={evaluationMcp.isPending || !purposeReady}
         error={evaluationMcp.error}
         readOnly={readOnly}
-        locked={purposeLocked}
         onChange={changePurpose}
       />
       <AgentMcpServers selections={draft.setting.mcpServers} />

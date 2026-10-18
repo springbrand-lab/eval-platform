@@ -60,6 +60,8 @@ describe("Agent management purpose filter", () => {
       expect(view.container.textContent).toContain("DeepSeek V4.1 Flash");
       expect(view.container.textContent).toContain("适中");
       expect(view.container.querySelectorAll("tbody tr")).toHaveLength(2);
+      const evaluatorRow = [...view.container.querySelectorAll("tbody tr")].find((row) => row.textContent?.includes("评估配置"));
+      expect(evaluatorRow?.querySelector(".bg-success-soft")).not.toBeNull();
 
       const evaluatorFilter = [...view.container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
         .find((button) => button.textContent?.includes("评估 Agent"));

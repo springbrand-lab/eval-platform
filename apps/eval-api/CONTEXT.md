@@ -29,7 +29,7 @@ requests commit their facts and enqueue a pg-boss Run job in one transaction;
 the HTTP process never executes an Agent or holds the SP service credential.
 See `docs/eval-http-api.md` for the route contract.
 
-Agent purpose is an Eval-owned immutable record (`execution` or `evaluation`) keyed by
+Agent purpose is an Eval-owned current record (`execution` or `evaluation`) keyed by
 the editable SP Agent Config ID. Agent-choice reads use that record as their only source
 of truth. A missing record is reconciled once from SP's public MCP catalog; if the catalog
 cannot be read, the result MCP is ambiguous, or a selected MCP is unavailable, the API

@@ -28,7 +28,6 @@ export const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   EVAL_SP_REQUEST_FAILED: "Eval SP 请求失败",
   EVAL_SP_UNAVAILABLE: "Eval SP 暂时不可用，请稍后重试",
   AGENT_CONFIG_FROZEN: "这是 Project 的冻结副本，不能修改或删除",
-  AGENT_CONFIG_PURPOSE_LOCKED: "Agent 用途在创建后固定，不能切换为另一类",
   AGENT_CONFIG_PURPOSE_MISMATCH: "Agent 用途与当前配置不匹配，请检查评估结果 MCP",
   AGENT_CONFIG_PURPOSE_UNAVAILABLE: "Agent 用途信息暂时不可用，请确认 Eval SP 的 MCP 目录可用后重试",
   PROJECT_NOT_FOUND: "Project 不存在或已删除",

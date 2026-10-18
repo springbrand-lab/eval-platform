@@ -16,11 +16,15 @@ import {
 } from "../schemas.js";
 
 const agentConfigSchema = z.custom<EvalSpAgentConfig>();
-/** SP owns the Agent Config input contract; Eval reserves the frozen-copy slug prefix and create-only purpose field. */
+/** SP owns the Agent Config input contract; Eval reserves the frozen-copy slug prefix and purpose field. */
 const agentConfigInputSchema = z.record(z.string(), z.unknown())
   .refine((body) => !isReservedSlug(body.slug), { path: ["slug"], message: `must not start with ${FROZEN_SLUG_PREFIX}` });
 const agentConfigCreateInputSchema = agentConfigInputSchema.refine(
   (body) => body.purpose === "execution" || body.purpose === "evaluation",
+  { path: ["purpose"], message: "purpose must be execution or evaluation" },
+);
+const agentConfigUpdateInputSchema = agentConfigInputSchema.refine(
+  (body) => !Object.hasOwn(body, "purpose") || body.purpose === "execution" || body.purpose === "evaluation",
   { path: ["purpose"], message: "purpose must be execution or evaluation" },
 );
 const params = z.object({ id: platformIdSchema });
@@ -69,7 +73,7 @@ export const update = createRoute({
   tags: ["Agent Config"],
   summary: "Update an Eval SP Agent Config; frozen Project copies are rejected",
   middleware: [jsonBody(JSON_BODY_BYTES)],
-  request: { params, body: jsonBodyContent(agentConfigInputSchema) },
+  request: { params, body: jsonBodyContent(agentConfigUpdateInputSchema) },
   responses: {
     200: jsonContent(responseSchema(agentConfigSchema), "Updated Agent Config"),
     ...bodyErrorResponses,

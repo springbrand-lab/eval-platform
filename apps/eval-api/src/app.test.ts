@@ -1,7 +1,7 @@
 import { RuntimeAdmissionConflictError, RuntimeEntityNotFoundError, RuntimeInputError, RuntimeProjectBusyError } from "@eval-platform/eval-runtime";
 import { DatasetEntityNotFoundError, type DataInput } from "@eval-platform/eval-dataset";
 import { describe, expect, it, vi } from "vitest";
-import { AgentConfigFrozenError, ProjectEvaluationPlanLockedError } from "./db/errors.js";
+import { AgentConfigFrozenError, AgentConfigPurposeUnavailableError, ProjectEvaluationPlanLockedError } from "./db/errors.js";
 import type { ApiRuntime, OwnerServices } from "./lib/types.js";
 import { INPUT_LIMITS, METADATA_BODY_BYTES, RUN_TARGET_IDS, SAMPLING_COUNT_MAX, ZIP_BODY_BYTES } from "./limits.js";
 import type { EvalSpClient } from "./sp/client.js";
@@ -82,7 +82,7 @@ function setup() {
     agentConfigs: {
       list: vi.fn(async () => [{ id: "agent-1", user_id: owner, name: "Agent" }]),
       create: vi.fn(async () => { throw new EvalSpApiError(422, { code: "AGENT_CONFIG_INVALID", errMsg: "Name is required" }); }),
-      update: vi.fn(async (id: string) => { throw new AgentConfigFrozenError(id); }),
+      update: vi.fn(async (id: string, _body: unknown): Promise<unknown> => { throw new AgentConfigFrozenError(id); }),
       listAgents: vi.fn(async () => []),
     },
   };
@@ -487,6 +487,24 @@ describe("Eval API HTTP layer", () => {
     const frozen = await app.request(`/api/agent-configs/${agentId}`, jsonRequest("PATCH", { name: "x", revision: 1 }));
     expect(frozen.status).toBe(409);
     expect(await frozen.json()).toMatchObject({ code: "AGENT_CONFIG_FROZEN" });
+    app.services.agentConfigs.update.mockResolvedValueOnce({ id: agentId, user_id: owner, name: "Evaluator" });
+    const switched = await app.request(`/api/agent-configs/${agentId}`, jsonRequest("PATCH", {
+      purpose: "evaluation", revision: 1, name: "Evaluator",
+    }));
+    expect(switched.status).toBe(200);
+    expect(await switched.json()).toMatchObject({ success: true, msg: { name: "Evaluator" } });
+    expect(app.services.agentConfigs.update).toHaveBeenLastCalledWith(agentId, {
+      purpose: "evaluation", revision: 1, name: "Evaluator",
+    });
+    app.services.agentConfigs.update.mockRejectedValueOnce(new AgentConfigPurposeUnavailableError(agentId));
+    const unavailable = await app.request(`/api/agent-configs/${agentId}`, jsonRequest("PATCH", { purpose: "evaluation" }));
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toMatchObject({ code: "AGENT_CONFIG_PURPOSE_UNAVAILABLE" });
+    const callsBeforeInvalidPurpose = app.services.agentConfigs.update.mock.calls.length;
+    const invalidPurpose = await app.request(`/api/agent-configs/${agentId}`, jsonRequest("PATCH", { purpose: "other" }));
+    expect(invalidPurpose.status).toBe(422);
+    expect(await invalidPurpose.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED", errors: [expect.objectContaining({ path: "purpose" })] });
+    expect(app.services.agentConfigs.update).toHaveBeenCalledTimes(callsBeforeInvalidPurpose);
     for (const [method, path] of [["POST", "/api/agent-configs"], ["PATCH", `/api/agent-configs/${agentId}`]] as const) {
       const reserved = await app.request(path, jsonRequest(method, { slug: " Eval-Frozen-mine ", name: "Mine", ...(method === "POST" ? { purpose: "execution" } : {}) }));
       expect(reserved.status).toBe(422);
