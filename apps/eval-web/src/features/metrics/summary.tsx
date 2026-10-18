@@ -90,7 +90,7 @@ function OutputFieldCard({ field, compact }: { field: OutputFieldSummary; compac
       {field.nullCount !== undefined && field.nullCount > 0 && <span>空值 {field.nullCount}</span>}
       {field.missingEvaluationCount === 0 && (field.nullCount === undefined || field.nullCount === 0) && <span>覆盖全部有效评估</span>}
     </div>
-    <details className="group mt-auto border-t border-border pt-3 text-xs text-text-muted">
+    <details className="group mt-3 border-t border-border pt-3 text-xs text-text-muted">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-2 font-medium hover:text-text-strong [&::-webkit-details-marker]:hidden"><span>查看统计详情</span><ChevronDown className="size-3.5 transition-transform group-open:rotate-180" /></summary>
       <div className="mt-3 grid gap-2 rounded-lg bg-surface-muted/60 p-3">
         <div className="grid gap-1 border-b border-border/70 pb-2 sm:grid-cols-[max-content_minmax(0,1fr)] sm:items-start sm:gap-x-4"><span className="text-text-faint">统计摘要</span><span className="min-w-0 break-words leading-5 text-text-secondary sm:text-right">{fieldValue(field)}</span></div>
