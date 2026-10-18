@@ -13,9 +13,7 @@ const samplingCountSchema = z.number().int().positive().max(SAMPLING_COUNT_MAX);
 
 const retryPolicySchema = z.strictObject({
   maxRestarts: z.number(),
-  initialBackoffMs: z.number(),
-  maxBackoffMs: z.number(),
-}) satisfies z.ZodType<RetryPolicy>;
+}) satisfies z.ZodType<Pick<RetryPolicy, "maxRestarts">>;
 
 /** Shape only; concurrency, retry and timeout rules belong to Runtime's plan normalization. */
 const agentPolicy = {

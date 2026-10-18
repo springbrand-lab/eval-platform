@@ -75,7 +75,7 @@ export interface AgentOption {
 
 export interface AgentPolicyInput {
   readonly userAgentId: string;
-  readonly retryPolicy?: RetryPolicy;
+  readonly retryPolicy?: Pick<RetryPolicy, "maxRestarts">;
   readonly timeoutMs?: number;
 }
 

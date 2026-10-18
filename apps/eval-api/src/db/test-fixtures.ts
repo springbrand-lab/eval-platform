@@ -20,7 +20,7 @@ import { createPostgresProjectStore } from "./project-store.js";
 import { projectEvaluationPlans } from "./schema.js";
 
 export const release = { sourceBranch: "release-2.0.0", sourceCommit: "a".repeat(40) };
-const retryPolicy = { maxRestarts: 1, initialBackoffMs: 0, maxBackoffMs: 0 };
+const retryPolicy = { maxRestarts: 1, initialBackoffMs: 250, maxBackoffMs: 10_000 };
 
 /** An in-memory Eval SP whose Bearer token is the user ID; records every Agent Config call. */
 export function createStubSp() {

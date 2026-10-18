@@ -14,7 +14,9 @@ import { AgentHandleNotFoundError } from "../harness/index.js";
 import type { AgentHandle, AgentSubmission, Harness } from "../harness/model.js";
 import {
   agentOperationKey,
+  collectOutputWithRetry,
   errorMessage,
+  retryAgentOperation,
   type AgentAttemptRecord,
   type AgentLifecycleStage,
   type StageDependencies,
@@ -57,7 +59,7 @@ interface StoppedStage<TRecord extends StageRecord, TAttempt extends AgentAttemp
   /** Let the stage persist an observed terminal Submission without restarting; returns the saved record. */
   resumeObserved(record: TRecord): Promise<TRecord>;
   /** Save evidence of an interrupted Agent; null leaves the record recoverable. */
-  collectEvidence(record: TRecord, operationFound: boolean, persist: Persist<TRecord>): Promise<TRecord | null>;
+  collectEvidence(record: TRecord, operationFound: boolean, persist: Persist<TRecord>, retryController: RetryController): Promise<TRecord | null>;
   cancelled(record: TRecord, attempts: readonly TAttempt[]): TRecord;
 }
 
@@ -87,11 +89,11 @@ function evaluatorHandle(evaluation: EvaluationRecord, harness: HarnessConfig): 
 /** Interrupt every SP Submission of a stop-requested Run that may still be active. */
 export async function interruptRun(context: StopContext, run: RuntimeRunRecord, plans: RunStagePlans): Promise<void> {
   const samplings = await context.records.samplings(run.samplingIds);
-  const handles: AgentHandle[] = [];
+  const handles: { readonly handle: AgentHandle; readonly retryPolicy: RetryPolicy }[] = [];
   if (plans.operation !== "evaluation") {
     for (const sampling of samplings) {
       const handle = subjectHandle(sampling, plans.execution.harness);
-      if (handle && isPendingSamplingStatus(sampling.execution.status)) handles.push(handle);
+      if (handle && isPendingSamplingStatus(sampling.execution.status)) handles.push({ handle, retryPolicy: plans.execution.retryPolicy });
     }
   }
   if (plans.operation !== "execution") {
@@ -100,11 +102,16 @@ export async function interruptRun(context: StopContext, run: RuntimeRunRecord, 
       const sampling = samplingById.get(evaluation.samplingId);
       if (!sampling) throw new Error(`Run ${run.runId} is missing Sampling ${evaluation.samplingId}`);
       const handle = evaluatorHandle(evaluation, plans.evaluation.evaluationHarness);
-      if (handle && isPendingSamplingStatus(evaluation.status.status)) handles.push(handle);
+      if (handle && isPendingSamplingStatus(evaluation.status.status)) handles.push({ handle, retryPolicy: plans.evaluation.retryPolicy });
     }
   }
   await settleAll(
-    handles.map((handle) => () => context.harness.stopAgent({ handle })),
+    handles.map(({ handle, retryPolicy }) => () => retryAgentOperation({
+      operation: "stop",
+      retryController: context.createRetryController(retryPolicy),
+      sleep: context.sleep,
+      run: () => context.harness.stopAgent({ handle }),
+    })),
     `Could not interrupt Run ${run.runId}`,
   );
 }
@@ -143,6 +150,27 @@ async function settleAll(tasks: readonly (() => Promise<void>)[], message: strin
   if (errors.length > 0) throw new AggregateError(errors, message);
 }
 
+async function collectStoppedOutput<TOutput, TRecord>(input: {
+  readonly stage: AgentLifecycleStage;
+  readonly collect: () => Promise<TOutput>;
+  readonly retryController: RetryController;
+  readonly sleep: (milliseconds: number) => Promise<void>;
+  readonly onSuccess: (output: TOutput) => Promise<TRecord>;
+  readonly onFailure: (error: unknown) => Promise<TRecord | null>;
+}): Promise<TRecord | null> {
+  try {
+    const output = await collectOutputWithRetry({
+      stage: input.stage,
+      collect: input.collect,
+      retryController: input.retryController,
+      sleep: input.sleep,
+    });
+    return await input.onSuccess(output);
+  } catch (error) {
+    return input.onFailure(error);
+  }
+}
+
 function stoppedExecution(
   context: StopContext,
   projectId: string,
@@ -167,23 +195,28 @@ function stoppedExecution(
       });
       return requireRecord(await context.store.getSampling(record.samplingId), "sampling", record.samplingId);
     },
-    async collectEvidence(record, _operationFound, persist) {
+    async collectEvidence(record, _operationFound, persist, retryController) {
       if (record.execution.evidencePending) return null;
       const handle = subjectHandle(record, config.harness);
       if (!handle || !wasInterrupted(record.executionAttempts) || (record.artifacts && record.trajectory)) return record;
-      let output;
-      try {
-        output = await context.harness.collectExecution({ handle });
-      } catch (error) {
-        await persist({
-          ...record,
-          execution: { status: "retrying", evidencePending: true, lastError: errorMessage(error) },
-        }, record);
-        return null;
-      }
-      const next = { ...record, artifacts: output.artifacts, trajectory: output.trajectory };
-      await persist(next, record);
-      return next;
+      return collectStoppedOutput({
+        stage: "execution",
+        collect: () => context.harness.collectExecution({ handle }),
+        retryController,
+        sleep: context.sleep,
+        onSuccess: async (output) => {
+          const next = { ...record, artifacts: output.artifacts, trajectory: output.trajectory };
+          await persist(next, record);
+          return next;
+        },
+        onFailure: async (error) => {
+          await persist({
+            ...record,
+            execution: { status: "retrying", evidencePending: true, lastError: errorMessage(error) },
+          }, record);
+          return null;
+        },
+      });
     },
     cancelled: (record, executionAttempts) => ({
       ...record,
@@ -220,19 +253,24 @@ function stoppedEvaluation(
       });
       return requireRecord(await context.store.getEvaluation(record.evaluationId), "evaluation", record.evaluationId);
     },
-    async collectEvidence(record, operationFound, persist) {
+    async collectEvidence(record, operationFound, persist, retryController) {
       const handle = evaluatorHandle(record, config.evaluationHarness);
       if (!handle || !operationFound || !wasInterrupted(record.attempts) || record.output) return record;
-      let output;
-      try {
-        output = await context.harness.collectEvaluation({ handle });
-      } catch (error) {
-        await persist({ ...record, status: { status: "retrying", lastError: errorMessage(error) } }, record);
-        return null;
-      }
-      const next = { ...record, output };
-      await persist(next, record);
-      return next;
+      return collectStoppedOutput({
+        stage: "evaluation",
+        collect: () => context.harness.collectEvaluation({ handle }),
+        retryController,
+        sleep: context.sleep,
+        onSuccess: async (output) => {
+          const next = { ...record, output };
+          await persist(next, record);
+          return next;
+        },
+        onFailure: async (error) => {
+          await persist({ ...record, status: { status: "retrying", lastError: errorMessage(error) } }, record);
+          return null;
+        },
+      });
     },
     cancelled: (record, attempts) => ({ ...record, attempts, status: { status: "cancelled", lastError: "Run stopped" } }),
   };
@@ -265,7 +303,7 @@ async function finishStoppedStage<TRecord extends StageRecord, TAttempt extends 
   if (attempt && handle) {
     const receipt = await inspectStoppedOperation(
       context.harness, handle, agentOperationKey(stage.stage, current.samplingId, attempt.attemptNumber),
-      attempt.submissionId,
+      attempt.submissionId, retryController, context.sleep,
     );
     operationFound = receipt !== null;
     if (!receipt && attempt.submissionId) {
@@ -277,7 +315,7 @@ async function finishStoppedStage<TRecord extends StageRecord, TAttempt extends 
     if (receipt && isPendingSamplingStatus(stage.status(current))) current = await stage.resumeObserved(current);
   }
 
-  const finalized = await stage.collectEvidence(current, operationFound, persist);
+  const finalized = await stage.collectEvidence(current, operationFound, persist, retryController);
   if (!finalized) return;
   current = finalized;
   const status = stage.status(current);
@@ -291,14 +329,26 @@ async function finishStoppedStage<TRecord extends StageRecord, TAttempt extends 
 }
 
 async function inspectStoppedOperation(
-  harness: Harness, handle: AgentHandle, idempotencyKey: string, submissionId: string | undefined,
+  harness: Harness,
+  handle: AgentHandle,
+  idempotencyKey: string,
+  submissionId: string | undefined,
+  retryController: RetryController,
+  sleep: (milliseconds: number) => Promise<void>,
 ): Promise<AgentSubmission | null> {
-  try {
-    return await harness.inspectAgentOperation({ handle, idempotencyKey });
-  } catch (error) {
-    if (error instanceof AgentHandleNotFoundError && !submissionId) return null;
-    throw error;
-  }
+  return retryAgentOperation({
+    operation: "status",
+    retryController,
+    sleep,
+    run: async () => {
+      try {
+        return await harness.inspectAgentOperation({ handle, idempotencyKey });
+      } catch (error) {
+        if (error instanceof AgentHandleNotFoundError && !submissionId) return null;
+        throw error;
+      }
+    },
+  });
 }
 
 function requireRecord<T>(record: T | null, entity: "sampling" | "evaluation", id: string): T {

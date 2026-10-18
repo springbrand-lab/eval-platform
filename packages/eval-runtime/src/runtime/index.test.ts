@@ -9,6 +9,7 @@ import type {
   RunOperation,
   RunRequest,
   RunTargetSelector,
+  RetryPolicy,
 } from "@eval-platform/eval-contracts";
 import { DEFAULT_EVIDENCE_LIMITS, isPendingSamplingStatus } from "@eval-platform/eval-contracts";
 import { digestExecutionPlan, digestJson } from "../plan/index.js";
@@ -22,6 +23,7 @@ import type {
 import { AgentHandleNotFoundError, createEvidenceStore } from "../harness/index.js";
 import { createMemoryEvidenceBlobs, exportedEvidence } from "../harness/evidence-test-support.js";
 import type { ProjectPlanReader, ProjectSample } from "./model.js";
+import { createRetryController as createProductionRetryController, DEFAULT_RETRY_POLICY } from "./retry.js";
 import type {
   RuntimeRunAdmission,
   RuntimeRunRecord,
@@ -132,9 +134,20 @@ function createRuntime(dependencies: RuntimeDependencies) {
 function createEvalRunResumer(dependencies: WithDefaultReporter<EvalRunResumerDependencies>) {
   return createResumerWithReporter({
     ...dependencies,
+    createRetryController: dependencies.createRetryController ?? noTransientRetryController,
     evidence: dependencies.evidence ?? TEST_EVIDENCE,
     onError: dependencies.onError ?? console.error,
   });
+}
+
+/** Existing orchestration tests opt into transient retries only where they cover that production policy. */
+function noTransientRetryController(policy?: RetryPolicy): RetryController {
+  const delegate = createProductionRetryController(policy);
+  return {
+    decide: (input) => input.operation === "restart"
+      ? delegate.decide(input)
+      : Promise.resolve({ shouldRetry: false, reason: input.failureKind }),
+  };
 }
 
 /** Admission bound to a test Store and its Project plans. */
@@ -1691,6 +1704,77 @@ describe("eval runtime orchestration", () => {
     expect(harness.submitAgent).toHaveBeenCalledTimes(1);
     expect(harness.restartAgent).not.toHaveBeenCalled();
     expect(harness.collectExecution).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers a transient output collection failure with the production retry controller", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.collectExecution)
+      .mockRejectedValueOnce(Object.assign(new Error("service temporarily unavailable"), { retryable: true }));
+    const store = makeStore({ plans: makePlans(undefined, { execution: executionPlan({ retryPolicy: DEFAULT_RETRY_POLICY }) }) });
+    const runtime = createRuntime({ harness, store, sleep: async () => undefined, createRetryController: createProductionRetryController });
+    const run = await runtime.submit(projectRequest("execution", "default-collection-retry"));
+
+    await runtime.resume(run.runId);
+
+    expect((await runtime.getSampling(run.samplingIds[0]!)).execution).toEqual({ status: "succeeded" });
+    expect(harness.collectExecution).toHaveBeenCalledTimes(2);
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("keeps a completed Subject pending when evidence export is temporarily unavailable", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.exportEvidence).mockRejectedValue(
+      Object.assign(new Error("service temporarily unavailable"), { retryable: true }),
+    );
+    const store = makeStore({ plans: makePlans(undefined, { execution: executionPlan({ retryPolicy: DEFAULT_RETRY_POLICY }) }) });
+    const runtime = createRuntime({ harness, store, sleep: async () => undefined, createRetryController: createProductionRetryController });
+    const run = await runtime.submit(projectRequest("execution", "pending-evidence-export"));
+
+    await runtime.resume(run.runId);
+
+    const pending = await runtime.getSampling(run.samplingIds[0]!);
+    expect(pending.execution).toEqual(expect.objectContaining({ status: "retrying", evidencePending: true }));
+    expect(pending.artifacts).toEqual([{ artifactId: "artifact-1", kind: "project", path: "/eval/output" }]);
+    expect(harness.exportEvidence).toHaveBeenCalledTimes(8);
+
+    vi.mocked(harness.exportEvidence).mockImplementation(async ({ handle }) => (
+      exportedEvidence({ samplingId: handle.samplingId, chatId: handle.chatId })
+    ));
+
+    await runtime.resume(run.runId);
+
+    expect((await runtime.getSampling(run.samplingIds[0]!)).execution).toEqual({ status: "succeeded" });
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("retries transient resource reads for execution and evaluation without rerunning either Agent", async () => {
+    const harness = makeHarness();
+    const transientFailures = new Set<string>();
+    vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
+      if (!transientFailures.has(input.handle.role)) {
+        transientFailures.add(input.handle.role);
+        throw Object.assign(new Error("service temporarily unavailable"), { retryable: true });
+      }
+      return makeResources(input);
+    });
+    const runtime = createAutoResumingRuntime({
+      harness,
+      store: makeStore({ plans: makePlans(undefined, {
+        execution: executionPlan({ retryPolicy: DEFAULT_RETRY_POLICY }),
+        evaluation: evaluationPlan({ retryPolicy: DEFAULT_RETRY_POLICY }),
+      }) }),
+      sleep: async () => undefined,
+      createRetryController: createProductionRetryController,
+    });
+    const run = await runtime.submit(projectRequest("pipeline", "default-resource-retry"));
+
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
+    expect(harness.collectAgentResources).toHaveBeenCalledTimes(4);
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+    expect((await runtime.getSampling(run.samplingIds[0]!)).executionAttempts[0]!.resources?.status).toBe("collected");
+    const evaluationId = (await runtime.getRun(run.runId)).evaluationIds[0]!;
+    const evaluation = await runtime.getEvaluation(evaluationId);
+    expect(evaluation.attempts[0]!.resources?.status).toBe("collected");
   });
 
   it("does not restart a completed Agent when output collection retries are exhausted", async () => {
@@ -3380,6 +3464,42 @@ describe("Project Run stop", () => {
     expect(harness.restartAgent).not.toHaveBeenCalled();
   });
 
+  it("retries stop and terminal status calls before finalizing a stopped Subject", async () => {
+    const { store, harness, admission } = stoppedRun();
+    const handle = await admission.submit(projectRequest("execution", "stop-idempotent-retry"));
+    const samplingId = handle.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    const active: SamplingState = {
+      ...queued, subjectChatId: "subject-chat-1", execution: { status: "running" },
+      executionAttempts: [{
+        executionAttemptId: "attempt-1", samplingId, attemptNumber: 1,
+        status: "running", resources: { status: "pending", scope: {
+          chatId: "subject-chat-1", idempotencyKey: `execution:${samplingId}`,
+        } },
+      }],
+    };
+    await store.updateSampling(active, queued);
+    vi.mocked(harness.stopAgent)
+      .mockRejectedValueOnce(Object.assign(new Error("stop temporarily unavailable"), { retryable: true }))
+      .mockResolvedValue();
+    vi.mocked(harness.inspectAgentOperation)
+      .mockRejectedValueOnce(Object.assign(new Error("status temporarily unavailable"), { retryable: true }))
+      .mockResolvedValue({
+        submissionId: "submission-1", status: "interrupted",
+        retryable: false, error: "Evaluation Run stopped",
+      });
+    const resumer = createTestResumer(store, harness, {
+      sleep: async () => undefined,
+      createRetryController: createProductionRetryController,
+    });
+
+    await resumer.stop(handle.runId);
+
+    expect(harness.stopAgent).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(harness.inspectAgentOperation).mock.calls.length).toBeGreaterThan(1);
+    expect((await store.getSampling(samplingId))?.execution.status).toBe("cancelled");
+  });
+
   it("interrupts a live Evaluator and keeps its result and resource snapshot", async () => {
     const { store, harness, admission, resumer } = stoppedRun();
     const execution = await admission.submit(projectRequest("execution", "stop-evaluation-seed"));
@@ -3517,6 +3637,38 @@ describe("Project Run stop", () => {
     expect(completed.execution.status).toBe("cancelled");
     expect(completed.artifacts).toHaveLength(1);
     expect(completed.trajectory?.source).toBe("subject");
+  });
+
+  it("retries stopped evidence collection before cancelling the stage", async () => {
+    const { store, harness, admission } = stoppedRun();
+    const handle = await admission.submit(projectRequest("execution", "stop-evidence-transient-retry"));
+    const samplingId = handle.samplingIds[0]!;
+    const queued = (await store.getSampling(samplingId))!;
+    const interrupted: SamplingState = {
+      ...queued,
+      subjectChatId: "evidence-chat",
+      execution: { status: "failed", lastError: "Submission interrupted" },
+      executionAttempts: [{
+        executionAttemptId: "terminal-attempt", samplingId, attemptNumber: 1,
+        submissionId: "terminal-submission", status: "interrupted", completedAt: "2026-10-14T00:00:00.000Z",
+      }],
+    };
+    await store.updateSampling(interrupted, queued);
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
+      submissionId: "terminal-submission", status: "interrupted",
+    });
+    vi.mocked(harness.collectExecution).mockRejectedValueOnce(
+      Object.assign(new Error("evidence temporarily unavailable"), { retryable: true }),
+    );
+    const resumer = createTestResumer(store, harness, {
+      sleep: async () => undefined,
+      createRetryController: createProductionRetryController,
+    });
+
+    await resumer.stop(handle.runId);
+
+    expect(harness.collectExecution).toHaveBeenCalledTimes(2);
+    expect((await store.getSampling(samplingId))?.execution.status).toBe("cancelled");
   });
 
   it("confirms saved evidence after the store loses its write response", async () => {
