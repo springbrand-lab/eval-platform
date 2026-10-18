@@ -15,7 +15,7 @@ vi.mock("@/api-sdk/datasets-api", async (original) => ({ ...await original<objec
   listDatasetData: async () => mocks.members,
 }));
 vi.mock("@/api-sdk/agent-configs-api", async (original) => ({ ...await original<object>(),
-  listAgentOptions: async (role: string) => [{ name: role, agentConfig: { userAgentId: role } }],
+  listAgentOptions: async (role: string) => [{ name: role, agentConfig: { userAgentId: role }, role: role === "subject" ? "subject" : "evaluator", purpose: role === "subject" ? "execution" : "evaluation" }],
 }));
 vi.mock("@/api-sdk/output-schemas-api", async (original) => ({ ...await original<object>(), listOutputSchemas: async () => [{ outputSchemaId: "schema", name: "评分" }] }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => mocks.navigate, Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));
@@ -41,10 +41,13 @@ async function prepare(container: HTMLElement) {
   expect(button(container, "添加数据集")).toBeDefined();
   expect([...container.querySelectorAll("label")].some((item) => item.textContent === "样本")).toBe(false);
   await click(button(container, "添加数据集")); await flush();
+  expect([...container.querySelectorAll("label")].some((item) => item.textContent === "样本")).toBe(false);
+  await click(control(container, "数据集"));
+  await click(button(container, "添加数据集")); await flush();
   expect(control(container, "样本")).toBeDefined();
   await click(control(container, "数据集")); await flush();
   await click(button(container, "下一步"));
-  await type(control(container, "每条用例采样次数"), "3");
+  await type(control(container, "默认采样次数"), "3");
   await click(button(container, "下一步"));
   await select(control(container, "执行 Agent"), "subject");
   await click(button(container, "下一步"));
@@ -66,6 +69,8 @@ it("keeps the per-sample count input mounted and focused while entering multiple
   const view = await page();
   try {
     await type(control(view.container, "名称"), "测试项目");
+    await click(button(view.container, "添加数据集")); await flush();
+    await click(control(view.container, "数据集"));
     await click(button(view.container, "添加数据集")); await flush();
     await click(control(view.container, "数据集")); await flush();
     await click(button(view.container, "下一步"));
@@ -104,6 +109,12 @@ it("shows groups inline, retains selection through collapse and search, and keep
     expect(button(view.container, "添加数据集")).toBeDefined();
     await type(control(view.container, "名称"), "测试项目");
     await click(button(view.container, "添加数据集")); await flush();
+    const search = view.container.querySelector<HTMLInputElement>('[aria-label="搜索数据集"]')!;
+    await type(search, "没有匹配");
+    expect(view.container.textContent).toContain("没有匹配的数据集");
+    await type(search, ""); await flush();
+    await click(control(view.container, "数据集"));
+    await click(button(view.container, "添加数据集")); await flush();
     await click(control(view.container, "样本"));
     await flush();
     expect(control(view.container, "数据集").getAttribute("aria-checked")).toBe("mixed");
@@ -112,10 +123,6 @@ it("shows groups inline, retains selection through collapse and search, and keep
     await click(view.container.querySelector('[aria-label="展开 数据集"]'));
     await flush();
     expect(control(view.container, "样本").getAttribute("aria-checked")).toBe("true");
-    const search = view.container.querySelector<HTMLInputElement>('[aria-label="搜索数据集"]')!;
-    await type(search, "没有匹配");
-    expect(view.container.textContent).toContain("已选 1 条用例");
-    await type(search, ""); await flush();
     await click(control(view.container, "第二用例")); await flush();
     expect(control(view.container, "数据集").getAttribute("aria-checked")).toBe("true");
     await click(button(view.container, "下一步"));

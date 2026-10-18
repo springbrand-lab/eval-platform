@@ -12,8 +12,8 @@ function operationRows(statistics: OperationDistributions): StatisticsRow[] {
 function trajectoryRows(distribution: ResourceDistribution): StatisticsRow[] {
   return [
     { label: "处理轮（Turn）", unit: "次", summary: distribution.trajectory.turns.count },
-    { label: "思考命中轮", unit: "次", summary: distribution.trajectory.thinkingTurnOperations.count },
-    { label: "内容命中轮", unit: "次", summary: distribution.trajectory.contentTurnOperations.count },
+    { label: "思考步骤", unit: "次", summary: distribution.trajectory.thinkingStepOperations.count },
+    { label: "内容步骤", unit: "次", summary: distribution.trajectory.contentStepOperations.count },
     { label: "模型请求", unit: "次", summary: distribution.modelRequests.count },
     { label: "工具调用", unit: "次", summary: distribution.trajectory.tools.count },
   ];
@@ -23,9 +23,9 @@ function tokenRows(distribution: ResourceDistribution): StatisticsRow[] {
   return TOKEN_FIELDS.map(([key, label]) => ({ label, unit: "Token", summary: distribution.tokens[key] }));
 }
 
-function turnTokenRows(distribution: ResourceDistribution): StatisticsRow[] {
+function stepTokenRows(distribution: ResourceDistribution): StatisticsRow[] {
   const rows: StatisticsRow[] = [];
-  for (const [prefix, tokens] of [["思考轮", distribution.trajectory.thinkingTurnTokens], ["内容轮", distribution.trajectory.contentTurnTokens]] as const) {
+  for (const [prefix, tokens] of [["思考步骤", distribution.trajectory.thinkingStepTokens], ["内容步骤", distribution.trajectory.contentStepTokens]] as const) {
     for (const [key, label] of [["input", "输入 Token"], ["output", "输出 Token"], ["total", "总 Token"]] as const) {
       rows.push({ label: `${prefix} · ${label}`, unit: "Token", summary: tokens[key] });
     }
@@ -36,7 +36,7 @@ function turnTokenRows(distribution: ResourceDistribution): StatisticsRow[] {
 function TokenDistribution({ distribution }: { distribution: ResourceDistribution }) {
   return <div className="flex min-w-0 flex-col gap-5">
     <StatisticsTable label="Token 的 Agent 间差异" description="当前入口包含全部 Agent；每个 Agent 合并重试后，再比较 Token 用量的均值、范围和波动。" rows={tokenRows(distribution)} />
-    <StatisticsTable label="思考与内容 Token 的 Agent 间差异" description="思考轮和内容轮可以命中同一轮，分类 Token 也可能重叠，不能相加推算总 Token。" rows={turnTokenRows(distribution)} />
+    <StatisticsTable label="思考与内容 Token 的 Agent 间差异" description="思考步骤和内容步骤可以命中同一模型步骤，分类 Token 也可能重叠，不能相加推算总 Token。" rows={stepTokenRows(distribution)} />
   </div>;
 }
 
@@ -45,7 +45,7 @@ function CostDistribution({ distribution }: { distribution: ResourceDistribution
 }
 
 function TrajectoryDistribution({ distribution }: { distribution: ResourceDistribution }) {
-  return <StatisticsTable label="操作次数的 Agent 间差异" description="思考命中轮、内容命中轮和工具调用可以属于同一处理轮，因此这些次数不要求相加等于处理轮。" rows={trajectoryRows(distribution)} />;
+  return <StatisticsTable label="操作次数的 Agent 间差异" description="思考步骤、内容步骤和工具调用按各自操作尺度统计，因此这些次数不要求相加等于处理轮。" rows={trajectoryRows(distribution)} />;
 }
 
 function ToolDistribution({ tools, lengthTools }: { tools: ResourceDistribution["trajectory"]["byTool"]; lengthTools: ResourceStatistics["trajectory"]["byTool"] }) {

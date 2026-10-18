@@ -11,7 +11,7 @@ import type { EvaluationPlanInput, ProjectView } from "@/api-sdk/types";
 import { ApiError } from "@/api-sdk/client";
 import { Page, PageHeader } from "@/components/layout/page";
 import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/card";
-import { ErrorBlock, LoadingBlock } from "@/components/ui/feedback";
+import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
 import { useProject } from "./use-project";
 
 function PlanForm({ view }: { view: ProjectView }) {
@@ -19,7 +19,7 @@ function PlanForm({ view }: { view: ProjectView }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const projectId = view.project.projectId;
-  const agents = useQuery({ queryKey: agentKeys.options("evaluator"), queryFn: ({ signal }) => listAgentOptions("evaluator", signal) });
+  const agents = useQuery({ queryKey: agentKeys.options("evaluator", "evaluation"), queryFn: ({ signal }) => listAgentOptions("evaluator", "evaluation", signal) });
   const schemas = useQuery({ queryKey: outputSchemaKeys.list(), queryFn: ({ signal }) => listOutputSchemas(signal) });
   const current = view.evaluation?.plan;
   const [agentId, setAgentId] = useState(current?.evaluatorAgentConfig.sourceUserAgentId ?? "");
@@ -62,6 +62,7 @@ function PlanForm({ view }: { view: ProjectView }) {
           </Field>
         </fieldset>
         {agents.error && <ErrorBlock error={agents.error} onRetry={() => void agents.refetch()} />}
+        {agents.isSuccess && agents.data.length === 0 && <Notice tone="warning">还没有可用的评估 Agent。<Link className="link font-semibold" to="/agents/new">去创建 Agent，并在用途中选择“评估”</Link></Notice>}
         {schemas.error && <ErrorBlock error={schemas.error} onRetry={() => void schemas.refetch()} />}
         {save.error && <ErrorBlock error={save.error} />}
         <div className="flex justify-end">

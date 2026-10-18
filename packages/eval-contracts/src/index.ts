@@ -2,6 +2,7 @@ export type {
   AgentConfigRef,
   AgentFramework,
   AgentObservationRef,
+  AgentPurpose,
   AgentResourceCollection,
   AgentResourceCompleteness,
   AgentResourceCoverage,
@@ -98,4 +99,6 @@ export { jsonObjectSchema, jsonValueSchema } from "./json.js";
 export { evalInputLimitsSchema } from "./input-limits.js";
 export type { EvalInputLimits } from "./input-limits.js";
 export { initialResourceFileSchema } from "./initial-resource-files.js";
+export { EVALUATION_RESULTS_MCP_PATH, isEvaluationResultsMcpUrl, resolveEvaluationResultsMcp } from "./evaluation-results-mcp.js";
+export type { EvaluationResultsMcpResolution, EvaluationResultsMcpServer } from "./evaluation-results-mcp.js";
 export type { InitialResourceFile } from "./initial-resource-files.js";

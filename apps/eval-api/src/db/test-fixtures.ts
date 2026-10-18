@@ -25,6 +25,10 @@ const retryPolicy = { maxRestarts: 1, initialBackoffMs: 0, maxBackoffMs: 0 };
 /** An in-memory Eval SP whose Bearer token is the user ID; records every Agent Config call. */
 export function createStubSp() {
   const configs = new Map<string, EvalSpAgentConfig>();
+  const mcpServers = [{
+    id: "eval-results", source: "user", status: "active",
+    url: "https://eval.example/mcp/evaluation-results", authType: "bearer",
+  }] as const;
   const calls = { created: [] as Array<Record<string, unknown>>, deleted: [] as string[] };
   function owned(token: string, id: string): EvalSpAgentConfig {
     const config = configs.get(id);
@@ -34,6 +38,7 @@ export function createStubSp() {
   const sp = {
     verifySession: vi.fn(async (token: string) => ({ id: token, role: "user" as const })),
     listAgentConfigs: vi.fn(async (token: string) => [...configs.values()].filter((config) => config.user_id === token)),
+    listMcpServers: vi.fn(async () => mcpServers),
     getAgentConfig: vi.fn(async (token: string, id: string) => structuredClone(owned(token, id))),
     createAgentConfig: vi.fn(async (token: string, input: unknown) => {
       const body = input as Record<string, unknown>;

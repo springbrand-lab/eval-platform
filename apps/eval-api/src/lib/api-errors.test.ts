@@ -15,6 +15,9 @@ import { DrizzleQueryError } from "drizzle-orm/errors";
 import { describe, expect, it } from "vitest";
 import {
   AgentConfigFrozenError,
+  AgentConfigPurposeMismatchError,
+  AgentConfigPurposeLockedError,
+  AgentConfigPurposeUnavailableError,
   BundleResourceInUseError,
   BundleResourceNotFoundError,
   CatalogInputError,
@@ -54,6 +57,9 @@ describe("apiError", () => {
     [new ProjectEvaluationPlanLockedError("p"), 409, "PROJECT_EVALUATION_PLAN_LOCKED"],
     [new ProjectIdempotencyConflictError(), 409, "PROJECT_IDEMPOTENCY_CONFLICT"],
     [new AgentConfigFrozenError(id), 409, "AGENT_CONFIG_FROZEN"],
+    [new AgentConfigPurposeLockedError(id), 409, "AGENT_CONFIG_PURPOSE_LOCKED"],
+    [new AgentConfigPurposeMismatchError(id, "evaluation", "execution"), 422, "AGENT_CONFIG_PURPOSE_MISMATCH"],
+    [new AgentConfigPurposeUnavailableError(id), 503, "AGENT_CONFIG_PURPOSE_UNAVAILABLE"],
     [new DatasetEntityNotFoundError("dataset", id), 404, "DATASET_NOT_FOUND"],
     [new DatasetEntityNotFoundError("data", id), 404, "DATA_NOT_FOUND"],
     [new DatasetInputError("m"), 400, "DATASET_INPUT_INVALID"],

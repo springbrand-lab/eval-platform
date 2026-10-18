@@ -23,6 +23,9 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import {
   AgentConfigFrozenError,
+  AgentConfigPurposeMismatchError,
+  AgentConfigPurposeLockedError,
+  AgentConfigPurposeUnavailableError,
   BundleResourceInUseError,
   BundleResourceNotFoundError,
   CatalogInputError,
@@ -89,6 +92,9 @@ const publicMessageCodes = new Map<ErrorClass, HttpErrorCode>([
   [ProjectEvaluationPlanLockedError, "PROJECT_EVALUATION_PLAN_LOCKED"],
   [ProjectIdempotencyConflictError, "PROJECT_IDEMPOTENCY_CONFLICT"],
   [AgentConfigFrozenError, "AGENT_CONFIG_FROZEN"],
+  [AgentConfigPurposeLockedError, "AGENT_CONFIG_PURPOSE_LOCKED"],
+  [AgentConfigPurposeMismatchError, "AGENT_CONFIG_PURPOSE_MISMATCH"],
+  [AgentConfigPurposeUnavailableError, "AGENT_CONFIG_PURPOSE_UNAVAILABLE"],
   [DatasetIdentityConflictError, "DATASET_IDENTITY_CONFLICT"],
   [DataInUseError, "DATA_IN_USE"],
   [CatalogPayloadTooLargeError, "CATALOG_PAYLOAD_TOO_LARGE"],

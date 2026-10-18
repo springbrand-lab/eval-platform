@@ -51,24 +51,26 @@ export function ProjectStatistics({ summary }: { summary: MetricSummary }) {
         {([
           ["执行 Agent", summary.executionAgent, summary.execution],
           ["评估 Agent", summary.evaluationAgents, summary.evaluation],
-        ] as const).map(([title, statistics, stage]) => <section aria-label={`${title}完整资源统计`} key={title} className="min-w-0 rounded-lg border border-border bg-surface">
-          <div className="border-b border-border px-3 py-3">
-            <h3 className="text-sm font-semibold">{title}</h3>
-            <div className="mt-2 flex flex-wrap gap-1.5" aria-label={`${title}状态摘要`}>
-              <StageStat label="总数" value={stage.records} />
-              <StageStat label="成功" value={stage.statuses.succeeded} tone="success" />
-              <StageStat label="失败" value={stage.statuses.failed} tone={stage.statuses.failed > 0 ? "danger" : "neutral"} />
-              <StageStat label="取消" value={stage.statuses.cancelled} />
-              <StageStat label="未结束" value={stage.records - stage.terminalRecords} tone={stage.records - stage.terminalRecords > 0 ? "warning" : "neutral"} />
-              <StageStat label="尝试" value={stage.attempts} />
-              <StageStat label="重启" value={stage.restarts} />
-            </div>
-          </div>
+        ] as const).map(([title, statistics, stage]) => <details aria-label={`${title}完整资源统计`} key={title} className="group min-w-0 rounded-lg border border-border bg-surface">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 border-b border-border px-3 py-3 hover:bg-surface-hover [&::-webkit-details-marker]:hidden">
+            <span className="min-w-0"><span className="block text-sm font-semibold">{title}</span>
+              <span className="mt-1 flex flex-wrap gap-1.5" aria-label={`${title}状态摘要`}>
+                <StageStat label="总数" value={stage.records} />
+                <StageStat label="成功" value={stage.statuses.succeeded} tone="success" />
+                <StageStat label="失败" value={stage.statuses.failed} tone={stage.statuses.failed > 0 ? "danger" : "neutral"} />
+                <StageStat label="取消" value={stage.statuses.cancelled} />
+                <StageStat label="未结束" value={stage.records - stage.terminalRecords} tone={stage.records - stage.terminalRecords > 0 ? "warning" : "neutral"} />
+                <StageStat label="尝试" value={stage.attempts} />
+                <StageStat label="重启" value={stage.restarts} />
+              </span>
+            </span>
+            <span aria-hidden="true" className="text-text-muted transition-transform group-open:rotate-180">⌄</span>
+          </summary>
           <div className="min-w-0 space-y-4 p-3">
             <AgentOverview title={title} statistics={statistics} stage={stage} />
             <ResourceMetrics compact statistics={statistics} distribution={statistics.distribution} durations={stage} stageStatus={stageStatusFor(stage)} />
           </div>
-        </section>)}
+        </details>)}
       </div>
     </section>
   </section>;

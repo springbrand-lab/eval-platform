@@ -475,14 +475,20 @@ describe("Eval API HTTP layer", () => {
     const app = setup();
     const listed = await app.request("/api/agent-configs", authorized());
     expect(await listed.json()).toMatchObject({ msg: [{ id: "agent-1" }] });
-    const rejected = await app.request("/api/agent-configs", jsonRequest("POST", { name: "" }));
+    const choices = await app.request("/api/agents?role=subject&purpose=execution");
+    expect(choices.status).toBe(200);
+    expect(app.services.agentConfigs.listAgents).toHaveBeenCalledWith("subject", "execution");
+    const missingPurpose = await app.request("/api/agent-configs", jsonRequest("POST", { name: "New Agent" }));
+    expect(missingPurpose.status).toBe(422);
+    expect(await missingPurpose.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED", errors: [expect.objectContaining({ path: "purpose" })] });
+    const rejected = await app.request("/api/agent-configs", jsonRequest("POST", { name: "", purpose: "execution" }));
     expect(rejected.status).toBe(422);
     expect(await rejected.json()).toMatchObject({ code: "AGENT_CONFIG_INVALID", errMsg: "Name is required" });
     const frozen = await app.request(`/api/agent-configs/${agentId}`, jsonRequest("PATCH", { name: "x", revision: 1 }));
     expect(frozen.status).toBe(409);
     expect(await frozen.json()).toMatchObject({ code: "AGENT_CONFIG_FROZEN" });
     for (const [method, path] of [["POST", "/api/agent-configs"], ["PATCH", `/api/agent-configs/${agentId}`]] as const) {
-      const reserved = await app.request(path, jsonRequest(method, { slug: " Eval-Frozen-mine ", name: "Mine" }));
+      const reserved = await app.request(path, jsonRequest(method, { slug: " Eval-Frozen-mine ", name: "Mine", ...(method === "POST" ? { purpose: "execution" } : {}) }));
       expect(reserved.status).toBe(422);
       expect(await reserved.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED", errors: [expect.objectContaining({ path: "slug" })] });
     }

@@ -73,34 +73,34 @@ export interface ToolMetric extends OperationStatistics {
   readonly outputLength: CoveredNumericSummary;
 }
 
-/** Tokens of generations explicitly linked to a marked Turn; never derived by subtraction. */
-export interface TurnTokens {
+/** Tokens of model steps explicitly marked as thinking or content; never derived by subtraction. */
+export interface StepTokens {
   readonly input: MetricNumber;
   readonly output: MetricNumber;
   readonly total: MetricNumber;
 }
 
-export type ThinkingTurnTokens = TurnTokens;
-export type ContentTurnTokens = TurnTokens;
+export type ThinkingStepTokens = StepTokens;
+export type ContentStepTokens = StepTokens;
 
 export interface TrajectorySummary {
   readonly coverage: AgentResourceCompleteness;
   readonly turns: OperationStatistics;
   readonly tools: OperationStatistics;
   readonly byTool: readonly ToolMetric[];
-  /** Turns whose output or linked generation contains thinking/signature markers. */
-  readonly thinkingTurns: MetricNumber;
-  /** Status and duration of the unique Turns counted by `thinkingTurns`. */
-  readonly thinkingTurnOperations: OperationStatistics;
-  /** Turns whose output or linked generation contains a content marker. */
-  readonly contentTurns: MetricNumber;
-  /** Status and duration of the unique Turns counted by `contentTurns`. */
-  readonly contentTurnOperations: OperationStatistics;
-  /** Tokens of generations explicitly linked to a thinking Turn; may overlap contentTurnTokens. */
-  readonly thinkingTurnTokens: ThinkingTurnTokens;
-  /** Tokens of generations explicitly linked to a content Turn; may overlap thinkingTurnTokens. */
-  readonly contentTurnTokens: ContentTurnTokens;
-  /** Operations whose Turn cannot be resolved through parentOperationId. */
+  /** Model steps whose output or owning Turn contains thinking/signature markers. */
+  readonly thinkingSteps: MetricNumber;
+  /** Status and duration of the marked model steps counted by `thinkingSteps`. */
+  readonly thinkingStepOperations: OperationStatistics;
+  /** Model steps whose output or owning Turn contains a content marker. */
+  readonly contentSteps: MetricNumber;
+  /** Status and duration of the marked model steps counted by `contentSteps`. */
+  readonly contentStepOperations: OperationStatistics;
+  /** Tokens of thinking-marked model steps; may overlap contentStepTokens. */
+  readonly thinkingStepTokens: ThinkingStepTokens;
+  /** Tokens of content-marked model steps; may overlap thinkingStepTokens. */
+  readonly contentStepTokens: ContentStepTokens;
+  /** Tool/model operations whose parent Turn cannot be resolved through parentOperationId. */
   readonly unlinkedOperations: { readonly tools: number; readonly generations: number };
   readonly diagnostics: readonly ResourceDiagnostic[];
 }
@@ -171,12 +171,12 @@ export interface ResourceDistribution {
   readonly trajectory: {
     readonly turns: OperationDistributions;
     readonly tools: OperationDistributions;
-    readonly thinkingTurns: CoveredNumericSummary;
-    readonly thinkingTurnOperations: OperationDistributions;
-    readonly contentTurns: CoveredNumericSummary;
-    readonly contentTurnOperations: OperationDistributions;
-    readonly thinkingTurnTokens: NumericDistributions<ThinkingTurnTokens>;
-    readonly contentTurnTokens: NumericDistributions<ContentTurnTokens>;
+    readonly thinkingSteps: CoveredNumericSummary;
+    readonly thinkingStepOperations: OperationDistributions;
+    readonly contentSteps: CoveredNumericSummary;
+    readonly contentStepOperations: OperationDistributions;
+    readonly thinkingStepTokens: NumericDistributions<ThinkingStepTokens>;
+    readonly contentStepTokens: NumericDistributions<ContentStepTokens>;
     readonly byTool: readonly { readonly toolName: string | null; readonly operations: OperationDistributions }[];
   };
   readonly byModel: readonly {

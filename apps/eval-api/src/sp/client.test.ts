@@ -84,6 +84,46 @@ describe("Eval SP public API client", () => {
     expect(await requests[3]!.json()).toEqual({ revision: 1, name: "Judge" });
   });
 
+  it("reads public MCP metadata without exposing connection credentials", async () => {
+    const { fetch, requests } = recordingFetch(ok({ data: [{
+      id: "result-mcp", source: "user", status: "active", url: "https://eval.example/mcp/evaluation-results", authType: "bearer",
+      token: "must not escape",
+    }], total: 1, page: 1, pageSize: 100 }));
+    const client = createEvalSpClient({ ...origins, fetch });
+
+    await expect(client.listMcpServers("token")).resolves.toEqual([{
+      id: "result-mcp", source: "user", status: "active", url: "https://eval.example/mcp/evaluation-results", authType: "bearer",
+    }]);
+    expect(requests[0]!.url).toBe("https://eval-sp.example.test/api/mcp-servers?source=user&page=1&pageSize=100");
+  });
+
+  it("reads the requested MCP source when reconciling selected Agent servers", async () => {
+    const { fetch, requests } = recordingFetch(ok({ data: [{
+      id: "platform-mcp", source: "platform", status: "active", url: "https://eval.example/mcp/platform", authType: "none",
+    }], total: 1, page: 1, pageSize: 100 }));
+    const client = createEvalSpClient({ ...origins, fetch });
+
+    await expect(client.listMcpServers("token", "platform")).resolves.toEqual([{
+      id: "platform-mcp", source: "platform", status: "active", url: "https://eval.example/mcp/platform", authType: "none",
+    }]);
+    expect(requests[0]!.url).toBe("https://eval-sp.example.test/api/mcp-servers?source=platform&page=1&pageSize=100");
+  });
+
+  it("reads every MCP page before classifying the result server", async () => {
+    const first = { id: "first", source: "user", status: "active", url: "https://eval.example/other", authType: "none" };
+    const result = { id: "result-mcp", source: "user", status: "active", url: "https://eval.example/mcp/evaluation-results", authType: "bearer" };
+    const { fetch, requests } = recordingFetch(
+      ok({ data: [first], total: 101, page: 1, pageSize: 100 }),
+      ok({ data: [result], total: 101, page: 2, pageSize: 100 }),
+    );
+    const client = createEvalSpClient({ ...origins, fetch });
+
+    await expect(client.listMcpServers("token")).resolves.toEqual([first, result]);
+    expect(requests.map((request) => new URL(request.url).search)).toEqual([
+      "?source=user&page=1&pageSize=100", "?source=user&page=2&pageSize=100",
+    ]);
+  });
+
   it("rejects an invalid SP origin before sending anything", () => {
     expect(() => createEvalSpClient({ ...origins, origin: "https://eval-sp.example.test/other" })).toThrow();
     expect(() => createEvalSpClient({ ...origins, writeOrigin: "https://eval-web.example.test/other" })).toThrow();

@@ -72,6 +72,7 @@ describe("SP Agent editor in Eval", () => {
       if (path === "/api/me") return { id: "user-a", role: "user" };
       if (path === "/api/agent-library/default-template") return structuredClone(template);
       if (path === "/api/agent-configs/agent-a") return structuredClone(stored);
+      if (path === "/api/agents") return [{ name: "Original name", agentConfig: { userAgentId: "agent-a" }, role: "evaluator", purpose: "evaluation" }];
       if (path === "/api/agent-library/user-agent-configs/agent-a/deletion-check") return {
         allowed: true, activeChatIds: [], enabledScheduleIds: [], unfinishedRunIds: [],
       };
@@ -144,6 +145,7 @@ describe("SP Agent editor in Eval", () => {
       expect(view.container.querySelector('[aria-label="添加任务技能"]')).not.toBeNull();
       for (const label of ["Behavior", "Thinking", "Connectors", "Save changes", "None selected."]) expect(view.container.textContent).not.toContain(label);
       const thinking = view.container.querySelector<HTMLSelectElement>('#agent-thinking')!;
+      await settle(() => expect(thinking.options.length).toBeGreaterThan(0));
       expect([...thinking.options].map((option) => option.textContent)).toEqual(['不额外思考', '较浅', '深入', '极高']);
       expect([...thinking.options].map((option) => option.value)).toEqual(['none', 'low', 'high', 'max']);
       expect(view.container.querySelector('#agent-model option[value=""]')).toBeNull();
@@ -167,7 +169,7 @@ describe("SP Agent editor in Eval", () => {
       await click(button("创建 Agent"));
       await settle(() => expect(transport.post).toHaveBeenCalledTimes(1));
       expect(transport.post.mock.calls[0]).toEqual(["/api/agent-configs", {
-        slug: expect.stringMatching(/^agent-[\da-f-]{36}$/u), name: "Research Agent", description: "Research description",
+        slug: expect.stringMatching(/^agent-[\da-f-]{36}$/u), name: "Research Agent", description: "Research description", purpose: "execution",
         setting: {
           ...template.setting,
           presetId: "gemini-flash-fast",
@@ -198,16 +200,29 @@ describe("SP Agent editor in Eval", () => {
     } finally { await view.close(); }
   });
 
-  it("removes the result MCP when an existing evaluation Agent is changed to execution", async () => {
+  it("keeps the purpose selector available while the result MCP is loading", async () => {
+    const get = transport.get.getMockImplementation()!;
+    transport.get.mockImplementation(async (path: string) => {
+      if (path === "/api/agent-library/mcp-servers?source=user&page=1&pageSize=100") return new Promise(() => {});
+      return get(path);
+    });
+    const view = await mount();
+    try {
+      await settle(() => expect(name()).not.toBeNull());
+      expect(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]')?.disabled).toBe(false);
+    } finally { await view.close(); }
+  });
+
+  it("locks an existing Agent's purpose after creation", async () => {
     const view = await mount("/agents/agent-a");
     try {
       await settle(() => expect(view.container.querySelector("[data-agent-purpose]")).not.toBeNull());
       await settle(() => expect(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]')?.checked).toBe(true));
-      await click(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="execution"]'));
-      await settle(() => expect(view.container.textContent).not.toContain("MCP Server (1)"));
-      await click(button("保存修改"));
-      await settle(() => expect(transport.patch).toHaveBeenCalledTimes(1));
-      expect(transport.patch.mock.calls[0]![1]).toMatchObject({ setting: { mcpServers: [] } });
+      const executionPurpose = view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="execution"]')!;
+      expect(executionPurpose.disabled).toBe(true);
+      await click(executionPurpose);
+      expect(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]')?.checked).toBe(true);
+      expect(view.container.textContent).toContain("用途在创建后固定");
     } finally { await view.close(); }
   });
 

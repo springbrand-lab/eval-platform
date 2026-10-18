@@ -49,9 +49,19 @@ export interface EvalSpAgentConfig {
   readonly [field: string]: unknown;
 }
 
+/** Public MCP metadata returned by SP. Connection credentials are never exposed. */
+export interface EvalSpMcpServer {
+  readonly id: string;
+  readonly source: string;
+  readonly status: string;
+  readonly url: string | null;
+  readonly authType: string | null;
+}
+
 export interface EvalSpClient {
   verifySession(token: string): Promise<EvalSpUser | null>;
   listAgentConfigs(token: string): Promise<readonly EvalSpAgentConfig[]>;
+  listMcpServers(token: string, source?: "platform" | "user"): Promise<readonly EvalSpMcpServer[]>;
   getAgentConfig(token: string, id: string): Promise<EvalSpAgentConfig>;
   createAgentConfig(token: string, input: unknown): Promise<EvalSpAgentConfig>;
   updateAgentConfig(token: string, id: string, input: unknown): Promise<EvalSpAgentConfig>;
@@ -79,6 +89,13 @@ const creditGrantRecordSchema = z.object({
   units: z.number().int(), note: z.string().nullable(), createdAt: z.string(),
 });
 const agentConfigSchema = z.looseObject({ id: z.string().min(1), user_id: z.string().min(1), name: z.string() });
+const mcpServerSchema = z.object({
+  id: z.string().min(1), source: z.string().min(1), status: z.string().min(1),
+  url: z.string().nullable().default(null), authType: z.string().nullable().default(null),
+}).passthrough().transform(({ id, source, status, url, authType }) => ({ id, source, status, url, authType }));
+const mcpServerCollectionSchema = z.object({
+  data: z.array(mcpServerSchema), total: z.number().int().nonnegative(), page: z.number().int().positive(), pageSize: z.number().int().positive(),
+}).passthrough();
 
 function read<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
@@ -127,6 +144,17 @@ export function createEvalSpClient(input: {
     },
     async listAgentConfigs(token) {
       return read(z.array(agentConfigSchema), await request(token, "/api/user-agent-configs"));
+    },
+    async listMcpServers(token, source = "user") {
+      const pageSize = 100;
+      const first = read(mcpServerCollectionSchema,
+        await request(token, `/api/mcp-servers?source=${source}&page=1&pageSize=${pageSize}`));
+      const pages = [first];
+      for (let page = 2; page <= Math.ceil(first.total / pageSize); page += 1) {
+        pages.push(read(mcpServerCollectionSchema,
+          await request(token, `/api/mcp-servers?source=${source}&page=${page}&pageSize=${pageSize}`)));
+      }
+      return pages.flatMap((page) => page.data);
     },
     async getAgentConfig(token, id) {
       return read(agentConfigSchema, await request(token, configPath(id)));

@@ -70,20 +70,20 @@ function ToolMeasurementDetails({ trajectory, compact }: Pick<ResourceStatistics
 function TrajectoryMetrics({ trajectory, modelRequests, stageStatus, showToolMeasurements, compact }: Pick<ResourceStatistics, "trajectory" | "modelRequests"> & { stageStatus?: SamplingStatus; showToolMeasurements: boolean; compact: boolean }) {
   const operations = [
     { label: "处理轮（Turn）", value: trajectory.turns },
-    { label: "思考命中轮", value: trajectory.thinkingTurnOperations },
-    { label: "内容命中轮", value: trajectory.contentTurnOperations },
+    { label: "思考步骤", value: trajectory.thinkingStepOperations },
+    { label: "内容步骤", value: trajectory.contentStepOperations },
     { label: "模型请求", value: modelRequests },
     { label: "工具调用", value: trajectory.tools },
   ];
   return <section aria-label="操作次数" className="flex min-w-0 flex-col gap-4">
     <div><div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-semibold text-text-strong">操作次数</h3>{stageStatus && <><span className="text-xs text-text-muted">阶段状态</span><StatusBadge status={stageStatus} /></>}</div><p className="mt-1 text-xs text-text-muted">下表是底层遥测操作统计；执行/评估 Agent 的阶段状态单独展示，未闭合操作不代表 Agent 仍在运行。</p></div>
-    <OperationsTable label="操作次数" caption="处理轮、模型请求和工具调用分别计数；思考和内容是处理轮的命中标记，状态列只适用于可追踪的操作。" rows={operations} />
+    <OperationsTable label="操作次数" caption="处理轮、模型请求、思考步骤和工具调用分别计数；思考步骤和内容步骤可命中同一模型步骤，状态列只适用于可追踪的操作。" rows={operations} />
     <div className="space-y-3"><div><h4 className="text-sm font-semibold text-text-strong">按工具查看</h4><p className="mt-1 text-xs text-text-muted">每种工具一行，查看调用次数和结果状态。</p></div>
       <ToolStatisticsTable tools={trajectory.byTool} variant="operations" />
     </div>
     {showToolMeasurements && trajectory.byTool.length > 0 && <ToolMeasurementDetails trajectory={trajectory} compact={compact} />}
     {(trajectory.unlinkedOperations.tools > 0 || trajectory.unlinkedOperations.generations > 0) && <p className="text-xs text-muted-foreground">
-      未关联到处理轮的工具 {trajectory.unlinkedOperations.tools} 次、模型请求 {trajectory.unlinkedOperations.generations} 次，思考轮和内容轮统计可能不完整。
+      未关联到处理轮的工具 {trajectory.unlinkedOperations.tools} 次、模型请求 {trajectory.unlinkedOperations.generations} 次，步骤标记统计可能不完整。
     </p>}
   </section>;
 }

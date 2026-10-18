@@ -71,9 +71,30 @@ function ValidationOverview({ outputs }: { outputs: EvaluationOutputSummary }) {
 /** Compact projection of every field supplied by the same server-side presentation plan. */
 export function OutputPreview({ outputs }: { outputs: EvaluationOutputSummary }) {
   return <div className="flex min-w-40 max-w-sm flex-col gap-1.5 whitespace-normal py-1 text-xs">{outputs.fields.length === 0 ? "暂无可统计字段" : outputs.fields.map((field) => (
-    <span key={field.jsonPointer}><strong className="font-medium text-text-strong">{field.title}</strong>：{fieldValue(field, true)}
-      {field.missingEvaluationCount > 0 && <span className="ml-1 text-warning">缺失 {field.missingEvaluationCount}</span>}</span>
+    <span key={field.jsonPointer}><strong className="font-medium text-text-strong">{field.title}</strong>：{fieldValue(field, true)}</span>
   ))}</div>;
+}
+
+function OutputFieldCard({ field, compact }: { field: OutputFieldSummary; compact: boolean }) {
+  return <section className={`flex h-full min-w-0 flex-col rounded-xl border border-border ${compact ? "p-3" : "p-4"} ${field.coverage === "complete" ? "bg-surface" : "bg-surface-muted/40"}`}>
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0 flex-1">
+        <h4 className="truncate text-sm font-semibold text-text-strong" title={field.title}>{field.title}</h4>
+        <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-text-muted">{field.description || "\u00a0"}</p>
+      </div>
+      {field.coverage !== "complete" && <StatusBadge status={field.coverage} />}
+    </div>
+    <div className="mt-2 flex items-center"><FieldHeadline field={field} /></div>
+    <details className="group mt-3 border-t border-border pt-3 text-xs text-text-muted">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 font-medium hover:text-text-strong [&::-webkit-details-marker]:hidden"><span>查看统计详情</span><ChevronDown className="size-3.5 transition-transform group-open:rotate-180" /></summary>
+      <div className="mt-3 grid gap-2 rounded-lg bg-surface-muted/60 p-3">
+        <div className="grid gap-1 border-b border-border/70 pb-2 sm:grid-cols-[max-content_minmax(0,1fr)] sm:items-start sm:gap-x-4"><span className="text-text-faint">统计摘要</span><span className="min-w-0 break-words leading-5 text-text-secondary sm:text-right">{fieldValue(field)}</span></div>
+        <div className="grid gap-1 border-b border-border/70 pb-2 sm:grid-cols-[max-content_minmax(0,1fr)] sm:items-start sm:gap-x-4"><span className="text-text-faint">字段路径</span><code className="min-w-0 break-all font-mono text-[11px] text-text-secondary sm:text-right">{field.jsonPointer || "$"}</code></div>
+        <div className="grid gap-1 sm:grid-cols-[max-content_minmax(0,1fr)] sm:items-start sm:gap-x-4"><span className="text-text-faint">数据类型</span><span className="text-text-secondary sm:text-right">{field.kinds.join(" / ")}</span></div>
+        {field.diagnostics.length > 0 && <div className="grid gap-1 border-t border-border/70 pt-2 sm:grid-cols-[max-content_minmax(0,1fr)] sm:items-start sm:gap-x-4"><span className="text-text-faint">数据说明</span><span className="break-words text-warning sm:text-right">{field.diagnostics.map((item) => `${MISSING[item.reason]} ${item.evaluations}`).join(" · ")}</span></div>}
+      </div>
+    </details>
+  </section>;
 }
 
 export function OutputFields({ outputs, compact = false }: { outputs: EvaluationOutputSummary; compact?: boolean }) {
@@ -87,22 +108,7 @@ export function OutputFields({ outputs, compact = false }: { outputs: Evaluation
           <span className="text-xs text-text-muted">共 {outputs.fields.length} 项 · 以有效评估结果计算</span>
         </div>
         <div className={compact ? "grid grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-2" : "grid grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-4"}>
-          {outputs.fields.map((field) => <section key={field.jsonPointer} className={`min-w-0 rounded-lg border border-border p-4 ${field.coverage === "complete" ? "bg-surface" : "bg-surface-muted/40"}`}>
-            <div className="flex items-start justify-between gap-2"><div className="min-w-0"><h4 className="truncate text-sm font-semibold text-text-strong" title={field.title}>{field.title}</h4><p className="mt-1 line-clamp-2 text-xs leading-relaxed text-text-muted">{field.description}</p></div>{field.coverage !== "complete" && <StatusBadge status={field.coverage} />}</div>
-            <div className="mt-5"><FieldHeadline field={field} /></div>
-            <p className="mt-2 text-xs text-text-muted">{field.numeric?.count ? `有效样本 N = ${field.numeric.count} · 范围 ${formatStatistic(field.numeric.min)}–${formatStatistic(field.numeric.max)}` : `${field.contributingEvaluationCount} 份评估 · ${field.observationCount} 个观察值`}</p>
-            <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted">
-              {field.missingEvaluationCount > 0 && <span className="text-warning">缺失 {field.missingEvaluationCount} 份</span>}
-              {field.nullCount !== undefined && field.nullCount > 0 && <span>空值 {field.nullCount}</span>}
-              {field.missingEvaluationCount === 0 && (field.nullCount === undefined || field.nullCount === 0) && <span>覆盖全部有效评估</span>}
-            </div>
-            <details className="group mt-4 border-t border-border pt-3 text-xs text-text-muted">
-              <summary className="flex cursor-pointer list-none items-center justify-between gap-2 font-medium hover:text-text-strong [&::-webkit-details-marker]:hidden"><span>查看统计详情</span><ChevronDown className="size-3.5 transition-transform group-open:rotate-180" /></summary>
-              <p className="mt-2 leading-6">{fieldValue(field)}</p>
-              <p className="mt-1 break-all font-mono">{field.jsonPointer || "$"} · {field.kinds.join(" / ")}</p>
-              {field.diagnostics.length > 0 && <p className="mt-1 text-warning">{field.diagnostics.map((item) => `${MISSING[item.reason]} ${item.evaluations}`).join(" · ")}</p>}
-            </details>
-          </section>)}
+          {outputs.fields.map((field) => <OutputFieldCard key={field.jsonPointer} field={field} compact={compact} />)}
         </div>
       </section>}
     </CardBody>

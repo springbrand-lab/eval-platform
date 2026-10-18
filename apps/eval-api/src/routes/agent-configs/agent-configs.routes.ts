@@ -16,9 +16,13 @@ import {
 } from "../schemas.js";
 
 const agentConfigSchema = z.custom<EvalSpAgentConfig>();
-/** SP owns the Agent Config input contract and receives the body unchanged; Eval only reserves the frozen-copy slug prefix. */
+/** SP owns the Agent Config input contract; Eval reserves the frozen-copy slug prefix and create-only purpose field. */
 const agentConfigInputSchema = z.record(z.string(), z.unknown())
   .refine((body) => !isReservedSlug(body.slug), { path: ["slug"], message: `must not start with ${FROZEN_SLUG_PREFIX}` });
+const agentConfigCreateInputSchema = agentConfigInputSchema.refine(
+  (body) => body.purpose === "execution" || body.purpose === "evaluation",
+  { path: ["purpose"], message: "purpose must be execution or evaluation" },
+);
 const params = z.object({ id: platformIdSchema });
 
 export const list = createRoute({
@@ -38,7 +42,7 @@ export const create = createRoute({
   tags: ["Agent Config"],
   summary: "Create an Eval SP Agent Config",
   middleware: [jsonBody(JSON_BODY_BYTES)],
-  request: { body: jsonBodyContent(agentConfigInputSchema) },
+  request: { body: jsonBodyContent(agentConfigCreateInputSchema) },
   responses: {
     201: jsonContent(responseSchema(agentConfigSchema), "Created Agent Config"),
     ...bodyErrorResponses,

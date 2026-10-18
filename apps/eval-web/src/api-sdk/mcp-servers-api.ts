@@ -1,3 +1,4 @@
+import { resolveEvaluationResultsMcp } from "@eval-platform/eval-contracts";
 import { api } from "./client";
 
 /** Metadata SP returns for one MCP Server; connection secrets are never included. */
@@ -26,29 +27,24 @@ export const mcpServerKeys = {
   evaluationResults: ["agent-library", "evaluation-results-mcp"] as const,
 };
 
-const EVALUATION_RESULTS_MCP_PATH = "/mcp/evaluation-results";
-
-function isEvaluationResultsMcp(server: McpServerSummary): boolean {
-  if (server.source !== "user" || !server.url) return false;
-  try {
-    const path = new URL(server.url).pathname.replace(/\/+$/u, "") || "/";
-    return path === EVALUATION_RESULTS_MCP_PATH;
-  } catch {
-    return false;
-  }
-}
-
 /** Finds the service-account MCP registered for Eval's result submission endpoint. */
 export async function getEvaluationResultsMcp(signal?: AbortSignal): Promise<EvaluationResultsMcpResolution> {
-  const collection = await api.get<McpServerCollection>(
-    "/api/agent-library/mcp-servers?source=user&page=1&pageSize=100",
+  const pageSize = 100;
+  const first = await api.get<McpServerCollection>(
+    `/api/agent-library/mcp-servers?source=user&page=1&pageSize=${pageSize}`,
     signal ? { signal } : undefined,
   );
-  const matches = collection.data.filter(isEvaluationResultsMcp);
-  const active = matches.filter((server) => server.status === "active" && server.authType === "bearer");
-  if (active.length === 1) return { kind: "available", server: active[0]! };
-  if (active.length > 1) return { kind: "unavailable", reason: "找到了多个评估结果 MCP，无法确定要绑定哪一个。" };
-  if (matches.some((server) => server.status !== "active")) return { kind: "unavailable", reason: "评估结果 MCP 已配置，但当前未启用。" };
-  if (matches.length > 0) return { kind: "unavailable", reason: "评估结果 MCP 已配置，但需要 Bearer 鉴权。" };
+  const pages = [first];
+  for (let page = 2; page <= Math.ceil(first.total / pageSize); page += 1) {
+    pages.push(await api.get<McpServerCollection>(
+      `/api/agent-library/mcp-servers?source=user&page=${page}&pageSize=${pageSize}`,
+      signal ? { signal } : undefined,
+    ));
+  }
+  const resolution = resolveEvaluationResultsMcp(pages.flatMap((page) => page.data));
+  if (resolution.kind === "available") return { kind: "available", server: resolution.server };
+  if (resolution.kind === "multiple") return { kind: "unavailable", reason: "找到了多个评估结果 MCP，无法确定要绑定哪一个。" };
+  if (resolution.kind === "disabled") return { kind: "unavailable", reason: "评估结果 MCP 已配置，但当前未启用。" };
+  if (resolution.kind === "invalid-auth") return { kind: "unavailable", reason: "评估结果 MCP 已配置，但需要 Bearer 鉴权。" };
   return { kind: "unavailable", reason: "尚未配置评估结果 MCP，请先在 Eval SP 服务账号中创建 /mcp/evaluation-results。" };
 }
