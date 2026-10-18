@@ -77,19 +77,14 @@ export function OutputPreview({ outputs }: { outputs: EvaluationOutputSummary })
 
 function OutputFieldCard({ field, compact }: { field: OutputFieldSummary; compact: boolean }) {
   return <section className={`flex h-full min-w-0 flex-col rounded-xl border border-border ${compact ? "p-3" : "p-4"} ${field.coverage === "complete" ? "bg-surface" : "bg-surface-muted/40"}`}>
-    <div className="flex min-h-[4.25rem] items-start justify-between gap-3">
+    <div className="flex min-h-[3.75rem] items-start justify-between gap-3">
       <div className="min-w-0 flex-1">
         <h4 className="truncate text-sm font-semibold text-text-strong" title={field.title}>{field.title}</h4>
-        <p className="mt-1 min-h-[2.25rem] line-clamp-2 text-xs leading-relaxed text-text-muted">{field.description || "\u00a0"}</p>
+        <p className="mt-1 min-h-[2rem] line-clamp-2 text-xs leading-relaxed text-text-muted">{field.description || "\u00a0"}</p>
       </div>
       {field.coverage !== "complete" && <StatusBadge status={field.coverage} />}
     </div>
-    <div className="mt-3 flex min-h-12 items-center"><FieldHeadline field={field} /></div>
-    <p className="mt-2 min-h-5 text-xs text-text-muted">{field.numeric?.count ? `有效样本 N = ${field.numeric.count} · 范围 ${formatStatistic(field.numeric.min)}–${formatStatistic(field.numeric.max)}` : `${field.contributingEvaluationCount} 份评估 · ${field.observationCount} 个观察值`}</p>
-    <div className="mt-3 flex min-h-5 flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted">
-      {field.nullCount !== undefined && field.nullCount > 0 && <span>空值 {field.nullCount}</span>}
-      {field.missingEvaluationCount === 0 && (field.nullCount === undefined || field.nullCount === 0) && <span>覆盖全部有效评估</span>}
-    </div>
+    <div className="mt-2 flex items-center"><FieldHeadline field={field} /></div>
     <details className="group mt-3 border-t border-border pt-3 text-xs text-text-muted">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-2 font-medium hover:text-text-strong [&::-webkit-details-marker]:hidden"><span>查看统计详情</span><ChevronDown className="size-3.5 transition-transform group-open:rotate-180" /></summary>
       <div className="mt-3 grid gap-2 rounded-lg bg-surface-muted/60 p-3">

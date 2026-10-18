@@ -97,6 +97,21 @@ describe("Eval SP public API client", () => {
     expect(requests[0]!.url).toBe("https://eval-sp.example.test/api/mcp-servers?source=user&page=1&pageSize=100");
   });
 
+  it("reads every MCP page before classifying the result server", async () => {
+    const first = { id: "first", source: "user", status: "active", url: "https://eval.example/other", authType: "none" };
+    const result = { id: "result-mcp", source: "user", status: "active", url: "https://eval.example/mcp/evaluation-results", authType: "bearer" };
+    const { fetch, requests } = recordingFetch(
+      ok({ data: [first], total: 101, page: 1, pageSize: 100 }),
+      ok({ data: [result], total: 101, page: 2, pageSize: 100 }),
+    );
+    const client = createEvalSpClient({ ...origins, fetch });
+
+    await expect(client.listMcpServers("token")).resolves.toEqual([first, result]);
+    expect(requests.map((request) => new URL(request.url).search)).toEqual([
+      "?source=user&page=1&pageSize=100", "?source=user&page=2&pageSize=100",
+    ]);
+  });
+
   it("rejects an invalid SP origin before sending anything", () => {
     expect(() => createEvalSpClient({ ...origins, origin: "https://eval-sp.example.test/other" })).toThrow();
     expect(() => createEvalSpClient({ ...origins, writeOrigin: "https://eval-web.example.test/other" })).toThrow();

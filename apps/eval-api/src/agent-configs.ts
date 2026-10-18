@@ -1,6 +1,7 @@
 import type { AgentConfigRef, AgentConfigSnapshot, AgentPurpose, AgentRole, JsonValue } from "@eval-platform/eval-contracts";
 import { createId } from "@eval-platform/eval-contracts";
 import {
+  evaluationResultsMcpCandidates,
   evaluationMcpServerId,
   evaluationResultsMcpServers,
   purposeOfAgent,
@@ -120,7 +121,14 @@ export function createAgentConfigService(input: {
       return result;
     }
     const evaluationServerIds = new Set(evaluationResultsMcpServers(servers).map((server) => server.id));
+    const evaluationCandidateIds = new Set(evaluationResultsMcpCandidates(servers).map((server) => server.id));
     for (const config of missing) {
+      const selectsUnavailableResultMcp = selectedMcpServerIds(config).some((id) => evaluationCandidateIds.has(id) && !evaluationServerIds.has(id));
+      if (selectsUnavailableResultMcp) {
+        if (required) throw new Error("The evaluation result MCP is unavailable or ambiguous");
+        result.set(config.id, null);
+        continue;
+      }
       const purpose = purposeOfAgent(config, evaluationServerIds);
       result.set(config.id, await purposes.createIfAbsent({
         userAgentId: config.id,
@@ -171,7 +179,6 @@ export function createAgentConfigService(input: {
       const next = forwarded.config && typeof forwarded.config === "object" && !Array.isArray(forwarded.config)
         ? { ...current, ...(forwarded.config as Record<string, unknown>) } : current;
       if (forwarded.config && typeof forwarded.config === "object" && !Array.isArray(forwarded.config) && "setting" in forwarded.config) {
-        const currentMcpServerIds = new Set(selectedMcpServerIds(current));
         const nextMcpServerIds = selectedMcpServerIds(next as EvalSpAgentConfig);
         if (stored.purpose === "evaluation") {
           if (!stored.evaluationMcpServerId || !nextMcpServerIds.includes(stored.evaluationMcpServerId)) {
@@ -179,7 +186,7 @@ export function createAgentConfigService(input: {
           }
         } else {
           const evaluationIds = await evaluationServerIds();
-          if (nextMcpServerIds.some((serverId) => evaluationIds.has(serverId) && !currentMcpServerIds.has(serverId))) {
+          if (nextMcpServerIds.some((serverId) => evaluationIds.has(serverId))) {
             throw new AgentConfigPurposeLockedError(id);
           }
         }

@@ -108,6 +108,8 @@ describe("Agent resource and trajectory categories", () => {
       expect(text).toContain("任务完成");
       expect(text).toContain("83");
       expect(text).toContain("是");
+      expect(text).not.toContain("有效样本 N");
+      expect(text).not.toContain("覆盖全部有效评估");
       expect([...view.container.querySelectorAll("details")].every((details) => !details.open)).toBe(true);
     } finally { await view.unmount(); }
   });

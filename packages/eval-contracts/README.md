@@ -4,7 +4,7 @@
 
 `InitialResourceFile` 与 `initialResourceFileSchema` 定义初始素材、初始上下文共用的只读文件目录投影：资源内绝对路径、媒体类型、字节数。不包含内容副本、预览状态或 SP Workspace 身份。内容仍从 API 的 Bundle 目录按精确路径读取。
 
-`EVALUATION_RESULTS_MCP_PATH` 与 `isEvaluationResultsMcpUrl` 是 Agent 用途分类和 Agent 编辑器共用的公开评估结果提交 MCP 路径判定；分类不依赖 MCP 的展示名称或描述。
+`EVALUATION_RESULTS_MCP_PATH`、`isEvaluationResultsMcpUrl` 与 `resolveEvaluationResultsMcp` 是 Agent 用途分类和 Agent 编辑器共用的公开评估结果提交 MCP 判定；只有唯一启用且使用 Bearer 鉴权的用户 MCP 可用，分类不依赖 MCP 的展示名称或描述。
 
 `AgentPurpose` 是 Eval Agent Config 在创建时固定的 `execution | evaluation` 用途；它与 Runtime 的 `AgentRole` 分开，Subject/Evaluator 运行契约不因此改变。
 

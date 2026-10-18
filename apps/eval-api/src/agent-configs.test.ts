@@ -72,6 +72,14 @@ describe("Agent purpose filtering", () => {
     expect(agents.sp.createAgentConfig).not.toHaveBeenCalled();
   });
 
+  it("does not classify a disabled or ambiguous result MCP as an Evaluation Agent", async () => {
+    const disabled = service([config("legacy", { mcpServers: [{ serverId: resultMcp.id }] })], [{ ...resultMcp, status: "disabled" }]);
+    await expect(disabled.listAgents("evaluator", "evaluation")).resolves.toEqual([]);
+    await expect(disabled.listAgents()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ purpose: null })]));
+    const duplicate = service([config("legacy", { mcpServers: [{ serverId: resultMcp.id }] })], [resultMcp, { ...resultMcp, id: "result-mcp-2" }]);
+    await expect(duplicate.listAgents("evaluator", "evaluation")).resolves.toEqual([]);
+  });
+
   it("classifies and filters configs from their selected evaluation result MCP", async () => {
     const agents = service([
       config("executor", { mcpServers: [{ serverId: "other-mcp" }] }),

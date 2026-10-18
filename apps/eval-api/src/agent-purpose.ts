@@ -1,9 +1,15 @@
-import { isEvaluationResultsMcpUrl } from "@eval-platform/eval-contracts";
+import { isEvaluationResultsMcpUrl, resolveEvaluationResultsMcp } from "@eval-platform/eval-contracts";
 import type { AgentPurpose } from "@eval-platform/eval-contracts";
 import type { EvalSpAgentConfig, EvalSpMcpServer } from "./sp/client.js";
 
-/** Returns the SP MCP records that represent Eval's result-submission capability. */
+/** Returns the one enabled, Bearer-authenticated result MCP when the catalog has exactly one. */
 export function evaluationResultsMcpServers(servers: readonly EvalSpMcpServer[]): readonly EvalSpMcpServer[] {
+  const resolution = resolveEvaluationResultsMcp(servers);
+  return resolution.kind === "available" ? [resolution.server] : [];
+}
+
+/** Returns all user MCPs at the canonical result path, including unavailable records. */
+export function evaluationResultsMcpCandidates(servers: readonly EvalSpMcpServer[]): readonly EvalSpMcpServer[] {
   return servers.filter((server) => server.source === "user" && !!server.url && isEvaluationResultsMcpUrl(server.url));
 }
 
