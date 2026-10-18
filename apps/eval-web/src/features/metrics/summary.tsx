@@ -77,10 +77,10 @@ export function OutputPreview({ outputs }: { outputs: EvaluationOutputSummary })
 
 function OutputFieldCard({ field, compact }: { field: OutputFieldSummary; compact: boolean }) {
   return <section className={`flex h-full min-w-0 flex-col rounded-xl border border-border ${compact ? "p-3" : "p-4"} ${field.coverage === "complete" ? "bg-surface" : "bg-surface-muted/40"}`}>
-    <div className="flex min-h-[3.75rem] items-start justify-between gap-3">
+    <div className="flex items-start justify-between gap-3">
       <div className="min-w-0 flex-1">
         <h4 className="truncate text-sm font-semibold text-text-strong" title={field.title}>{field.title}</h4>
-        <p className="mt-1 min-h-[2rem] line-clamp-2 text-xs leading-relaxed text-text-muted">{field.description || "\u00a0"}</p>
+        <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-text-muted">{field.description || "\u00a0"}</p>
       </div>
       {field.coverage !== "complete" && <StatusBadge status={field.coverage} />}
     </div>
