@@ -112,6 +112,25 @@ describe("Agent resource and trajectory categories", () => {
     } finally { await view.unmount(); }
   });
 
+  it("keeps field-level missing counts out of evaluation result cards", async () => {
+    const outputs: EvaluationOutputSummary = {
+      ...metricSummary(resourceStatistics(), resourceStatistics()).evaluationOutputs,
+      evaluations: 4,
+      validation: { valid: 4, invalid: 0, unavailable: 0 },
+      fields: [{
+        jsonPointer: "/quality", title: "页面质量", description: "", kinds: ["number"],
+        observationCount: 3, contributingEvaluationCount: 3, missingEvaluationCount: 4,
+        numeric: { count: 3, missing: 0, total: 240, min: 70, max: 90, mean: 80, variance: 100, median: 80 },
+        distribution: [], coverage: "partial", diagnostics: [],
+      }],
+    };
+    const view = await render(<OutputFields outputs={outputs} />);
+    try {
+      expect(view.container.textContent).not.toContain("缺失 4");
+      expect(view.container.textContent).not.toContain("缺4");
+    } finally { await view.unmount(); }
+  });
+
   it("uses the same categories for each Agent and the four-level summary, with separate roles", async () => {
     const execution = fixture();
     const evaluation = resourceStatistics();

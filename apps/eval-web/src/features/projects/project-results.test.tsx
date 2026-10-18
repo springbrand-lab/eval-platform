@@ -3,7 +3,7 @@ import { expect, it, vi } from "vitest";
 import type { ProjectOverview, ProjectView, OutputFieldSummary } from "@/api-sdk/types";
 import { click, render, select } from "@/test/render";
 import { metricSummary, resourceStatistics } from "@/test/metrics";
-import { ProjectResults, needsAttention, ResultCost } from "./project-results";
+import { MetricCell, ProjectResults, needsAttention, ResultCost } from "./project-results";
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));
 vi.mock("@/features/results/sampling-detail-page", () => ({ SamplingResult: ({ samplingId }: { samplingId: string }) => <div>result:{samplingId}</div> }));
 const load = vi.hoisted(() => vi.fn());
@@ -88,4 +88,14 @@ it("does not turn missing cost or duration into zero", async () => {
   const incomplete = { ...summary, evaluationAgents: { ...summary.evaluationAgents, costs: { ...summary.evaluationAgents.costs, chargedUnits: { value: null, coverage: 'unavailable' as const } } } };
   const screen = await render(<ResultCost summary={incomplete} />);
   try { expect(screen.container.textContent).toBe('积分未获得耗时未获得'); } finally { await screen.unmount(); }
+});
+
+it("does not repeat field-level missing counts in result cells", async () => {
+  const field: OutputFieldSummary = {
+    jsonPointer: "/score", title: "分数", description: "", kinds: ["number"], observationCount: 2,
+    contributingEvaluationCount: 2, missingEvaluationCount: 4, coverage: "partial", diagnostics: [], distribution: [],
+    numeric: { count: 2, missing: 0, total: 16, mean: 8, min: 7, max: 9, variance: 1, median: 8 },
+  };
+  const screen = await render(<MetricCell field={field} />);
+  try { expect(screen.container.textContent).not.toContain("缺4"); } finally { await screen.unmount(); }
 });

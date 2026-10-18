@@ -31,7 +31,6 @@ export function MetricCell({ field }: { field?: OutputFieldSummary }) {
     : distribution.filter((item) => item.count > 0).map((item) => `${item.value === true ? "是" : item.value === false ? "否" : String(item.value)}${field.observationCount > 1 ? ` ×${item.count}` : ""}`).join("、") || (field.nullCount ? "空值" : "—");
   return <div className="min-w-0 break-words tabular-nums"><span className="font-medium text-text-strong">{value}</span>
     {field.numeric && field.numeric.count > 1 && <span className="block break-words text-[11px] text-text-muted" title={`均值 ${value}；范围 ${formatStatistic(field.numeric.min)} 至 ${formatStatistic(field.numeric.max)}；${field.numeric.count} 个有效值`}>{formatStatistic(field.numeric.min)}–{formatStatistic(field.numeric.max)} · n={field.numeric.count}</span>}
-    {field.missingEvaluationCount > 0 && <span className="ml-1 text-[11px] text-warning" title={`${field.missingEvaluationCount} 份评估未贡献此字段的有效值`}>缺{field.missingEvaluationCount}</span>}
   </div>;
 }
 const cellClass = "h-12 min-w-0 whitespace-normal break-words px-3 py-2 align-middle text-xs";
