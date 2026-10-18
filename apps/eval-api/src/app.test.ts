@@ -520,9 +520,16 @@ describe("Eval API HTTP layer", () => {
     expect(pipeline.status).toBe(400);
     expect(await pipeline.json()).toMatchObject({ code: "RUNTIME_INPUT_INVALID", errors: [{ path: "evaluation" }] });
     const values = await app.request("/api/projects", jsonRequest("POST", {
-      ...createBody, execution: { ...createBody.execution, executionConcurrency: 1.5, timeoutMs: 0, retryPolicy: { maxRestarts: -1, initialBackoffMs: 5, maxBackoffMs: 1 } },
+      ...createBody, execution: { ...createBody.execution, executionConcurrency: 1.5, timeoutMs: 0, retryPolicy: { maxRestarts: -1 } },
     }));
     expect(values.status).toBe(201);
+    expect(app.services.projects.create).toHaveBeenCalledTimes(2);
+
+    const nonConfigurable = await app.request("/api/projects", jsonRequest("POST", {
+      ...createBody, execution: { ...createBody.execution, retryPolicy: { maxRestarts: 1, maxBackoffMs: 10_000 } },
+    }));
+    expect(nonConfigurable.status).toBe(422);
+    expect(await nonConfigurable.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED" });
     expect(app.services.projects.create).toHaveBeenCalledTimes(2);
   });
 });

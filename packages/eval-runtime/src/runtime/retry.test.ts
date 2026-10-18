@@ -1,10 +1,32 @@
 import { describe, expect, it } from "vitest";
 import { RuntimeInputError } from "./errors.js";
-import { createRetryController } from "./retry.js";
+import { createRetryController, DEFAULT_RETRY_POLICY } from "./retry.js";
 
 describe("retry controller", () => {
+  it("uses seven transient retries with a bounded backoff near thirty seconds", async () => {
+    const controller = createRetryController();
+    const decisions = await Promise.all(Array.from({ length: 8 }, (_, index) => controller.decide({
+      operation: "collection",
+      failureKind: "network",
+      attemptNumber: index + 1,
+    })));
+
+    expect(DEFAULT_RETRY_POLICY).toEqual({ maxRestarts: 2, initialBackoffMs: 250, maxBackoffMs: 10_000 });
+    expect(decisions.slice(0, 7)).toEqual([
+      { shouldRetry: true, reason: "network", backoffMs: 250 },
+      { shouldRetry: true, reason: "network", backoffMs: 500 },
+      { shouldRetry: true, reason: "network", backoffMs: 1_000 },
+      { shouldRetry: true, reason: "network", backoffMs: 2_000 },
+      { shouldRetry: true, reason: "network", backoffMs: 4_000 },
+      { shouldRetry: true, reason: "network", backoffMs: 8_000 },
+      { shouldRetry: true, reason: "network", backoffMs: 10_000 },
+    ]);
+    expect(decisions[7]).toEqual({ shouldRetry: false, reason: "network" });
+    expect(decisions.slice(0, 7).reduce((total, decision) => total + (decision.backoffMs ?? 0), 0)).toBe(25_750);
+  });
+
   it("caps restarts and applies exponential backoff", async () => {
-    const controller = createRetryController({ maxRestarts: 2, initialBackoffMs: 10, maxBackoffMs: 15 });
+    const controller = createRetryController({ maxRestarts: 2, initialBackoffMs: 0, maxBackoffMs: 0 });
 
     await expect(controller.decide({
       operation: "restart",
@@ -13,7 +35,7 @@ describe("retry controller", () => {
     })).resolves.toEqual({
       shouldRetry: true,
       reason: "network",
-      backoffMs: 10,
+      backoffMs: 250,
     });
     await expect(controller.decide({
       operation: "restart",
@@ -22,7 +44,7 @@ describe("retry controller", () => {
     })).resolves.toEqual({
       shouldRetry: true,
       reason: "network",
-      backoffMs: 15,
+      backoffMs: 500,
     });
     await expect(controller.decide({
       operation: "restart",
@@ -34,13 +56,13 @@ describe("retry controller", () => {
     });
   });
 
-  it.each(["creation", "initialization", "submission", "status", "collection", "resources", "persistence"] as const)(
-    "does not prescribe %s retries or spend the restart allowance on them",
+  it.each(["creation", "initialization", "submission", "status", "collection", "resources", "persistence", "stop"] as const)(
+    "retries idempotent %s operations without spending the restart allowance",
     async (operation) => {
       const controller = createRetryController({
         maxRestarts: 2,
-        initialBackoffMs: 10,
-        maxBackoffMs: 15,
+        initialBackoffMs: 0,
+        maxBackoffMs: 0,
       });
       const failureKind = operation === "status" ? "submission-timeout" : "network";
 
@@ -49,8 +71,9 @@ describe("retry controller", () => {
         failureKind,
         attemptNumber: 1,
       })).resolves.toEqual({
-        shouldRetry: false,
+        shouldRetry: true,
         reason: failureKind,
+        backoffMs: 250,
       });
       await expect(controller.decide({
         operation: "restart",
@@ -59,15 +82,13 @@ describe("retry controller", () => {
       })).resolves.toEqual({
         shouldRetry: true,
         reason: "network",
-        backoffMs: 10,
+        backoffMs: 250,
       });
     },
   );
 
   it.each([
     [{ maxRestarts: -1, initialBackoffMs: 0, maxBackoffMs: 0 }, "retryPolicy.maxRestarts"],
-    [{ maxRestarts: 1, initialBackoffMs: -1, maxBackoffMs: 0 }, "retryPolicy.initialBackoffMs"],
-    [{ maxRestarts: 1, initialBackoffMs: 10, maxBackoffMs: 5 }, "retryPolicy.maxBackoffMs"],
   ])("rejects invalid policy %j on %s with the shared config validation", (policy, field) => {
     expect(() => createRetryController(policy)).toThrow(RuntimeInputError);
     expect(() => createRetryController(policy)).toThrow(expect.objectContaining({ field }));

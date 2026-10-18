@@ -3,13 +3,15 @@ import type { AgentFailureKind } from "../harness/model.js";
 import { RuntimeInputError } from "./errors.js";
 import { requireObject } from "./input.js";
 
+const TRANSIENT_RETRY_COUNT = 7;
+
 export const DEFAULT_RETRY_POLICY = {
   maxRestarts: 2,
   initialBackoffMs: 250,
-  maxBackoffMs: 5_000,
+  maxBackoffMs: 10_000,
 } as const satisfies RetryPolicy;
 
-export type RetryOperation = "creation" | "initialization" | "submission" | "status" | "collection" | "resources" | "persistence" | "restart";
+export type RetryOperation = "creation" | "initialization" | "submission" | "status" | "collection" | "resources" | "persistence" | "stop" | "restart";
 
 export interface RetryDecision {
   readonly shouldRetry: boolean;
@@ -27,15 +29,9 @@ export interface RetryController {
 
 export function requireRetryPolicy(policy: unknown): asserts policy is RetryPolicy {
   requireObject(policy, "retryPolicy");
-  const { maxRestarts, initialBackoffMs, maxBackoffMs } = policy as Partial<Record<keyof RetryPolicy, unknown>>;
+  const { maxRestarts } = policy as Partial<Record<keyof RetryPolicy, unknown>>;
   if (typeof maxRestarts !== "number" || !Number.isInteger(maxRestarts) || maxRestarts < 0) {
     throw new RuntimeInputError("retryPolicy.maxRestarts must be a non-negative integer", "retryPolicy.maxRestarts");
-  }
-  if (typeof initialBackoffMs !== "number" || !Number.isFinite(initialBackoffMs) || initialBackoffMs < 0) {
-    throw new RuntimeInputError("retryPolicy.initialBackoffMs must be non-negative", "retryPolicy.initialBackoffMs");
-  }
-  if (typeof maxBackoffMs !== "number" || !Number.isFinite(maxBackoffMs) || maxBackoffMs < initialBackoffMs) {
-    throw new RuntimeInputError("retryPolicy.maxBackoffMs must be at least initialBackoffMs", "retryPolicy.maxBackoffMs");
   }
 }
 
@@ -44,15 +40,15 @@ export function createRetryController(policy: RetryPolicy = DEFAULT_RETRY_POLICY
 
   return {
     async decide(input) {
-      if (input.operation !== "restart") {
-        return { shouldRetry: false, reason: input.failureKind };
-      }
+      const maxRetries = input.operation === "restart"
+        ? policy.maxRestarts
+        : TRANSIENT_RETRY_COUNT;
 
-      const shouldRetry = input.attemptNumber <= policy.maxRestarts;
+      const shouldRetry = input.attemptNumber <= maxRetries;
       if (!shouldRetry) return { shouldRetry: false, reason: input.failureKind };
       const backoffMs = Math.min(
-        policy.maxBackoffMs,
-        policy.initialBackoffMs * 2 ** Math.max(0, input.attemptNumber - 1),
+        DEFAULT_RETRY_POLICY.maxBackoffMs,
+        DEFAULT_RETRY_POLICY.initialBackoffMs * 2 ** Math.max(0, input.attemptNumber - 1),
       );
       return { shouldRetry: true, reason: input.failureKind, backoffMs };
     },

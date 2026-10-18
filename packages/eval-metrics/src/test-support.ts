@@ -44,7 +44,7 @@ export function dataset(datasetId: string, projectSampleIds: readonly string[]):
 }
 
 export function plan(datasets: readonly ProjectDatasetSnapshot[], evaluation = true): ProjectPlan {
-  const retryPolicy = { maxRestarts: 1, initialBackoffMs: 10, maxBackoffMs: 100 };
+  const retryPolicy = { maxRestarts: 1, initialBackoffMs: 250, maxBackoffMs: 10_000 };
   const snapshot = (sourceUserAgentId: string) => ({ sourceUserAgentId, name: sourceUserAgentId, body: {} });
   return {
     project: PROJECT, datasets,

@@ -58,8 +58,11 @@ describe("project plan", () => {
     expect(normalized.harness).not.toBe(execution.harness);
     expect(normalized.harness.agentConfig).not.toBe(execution.harness.agentConfig);
     expect(normalizeEvaluationPlan(evaluation).retryPolicy).toEqual(DEFAULT_RETRY_POLICY);
-    const retryPolicy = { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 };
-    expect(normalizeExecutionPlan({ ...execution, retryPolicy }).retryPolicy).toEqual(retryPolicy);
+    const retryPolicy = { maxRestarts: 0 };
+    expect(normalizeExecutionPlan({ ...execution, retryPolicy }).retryPolicy).toEqual({
+      ...DEFAULT_RETRY_POLICY,
+      maxRestarts: retryPolicy.maxRestarts,
+    });
   });
 
   it.each(["sp", "codex", "cc"] as const)("preserves the %s Subject framework", (framework) => {
@@ -92,7 +95,7 @@ describe("project plan", () => {
 
   it.each([
     [{ ...execution, executionConcurrency: 0 }, "execution.executionConcurrency"],
-    [{ ...execution, retryPolicy: { maxRestarts: -1, initialBackoffMs: 0, maxBackoffMs: 0 } }, "retryPolicy.maxRestarts"],
+    [{ ...execution, retryPolicy: { maxRestarts: -1 } }, "retryPolicy.maxRestarts"],
     [{ ...execution, harness: { ...execution.harness, runtime: [] } }, "execution.harness.runtime"],
     [{ ...execution, harness: { ...execution.harness, runtime: { timeoutMs: 0 } } }, "execution.harness.runtime.timeoutMs"],
     [{ ...execution, subjectAgentConfig: { ...execution.subjectAgentConfig, body: [] } }, "execution.subjectAgentConfig.body"],
@@ -115,7 +118,11 @@ describe("project plan", () => {
   it("digests the execution plan independently of object key order and ProjectSample order", async () => {
     const plan = normalizeExecutionPlan(execution);
     const reordered = {
-      retryPolicy: { maxBackoffMs: plan.retryPolicy.maxBackoffMs, initialBackoffMs: plan.retryPolicy.initialBackoffMs, maxRestarts: plan.retryPolicy.maxRestarts },
+      retryPolicy: {
+        maxBackoffMs: plan.retryPolicy.maxBackoffMs,
+        initialBackoffMs: plan.retryPolicy.initialBackoffMs,
+        maxRestarts: plan.retryPolicy.maxRestarts,
+      },
       executionConcurrency: plan.executionConcurrency,
       subjectAgentConfig: { body: { tools: ["x"], model: "a" }, name: "Subject", sourceUserAgentId: "subject-agent" },
       harness: { runtime: { timeoutMs: 1_234 }, agentConfig: { userAgentId: SUBJECT.userAgentId, ownerUserId: SUBJECT.ownerUserId }, framework: "sp", kind: "sp" },

@@ -140,9 +140,10 @@ class OutputCollectionError extends AgentOperationError {
     details: AgentErrorDetails,
     cause: unknown,
     retryable = details.retryable,
+    label = `${stage} output collection failed`,
   ) {
     super(
-      `${stage} output collection failed: ${details.message}`,
+      `${label}: ${details.message}`,
       retryable,
       details.failureKind,
       cause,
@@ -203,7 +204,7 @@ export function withExecutionStatus(
   };
 }
 
-interface AgentErrorDetails {
+export interface AgentErrorDetails {
   readonly message: string;
   readonly retryable: boolean;
   readonly failureKind: AgentFailureKind;
@@ -439,7 +440,7 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
   }
 }
 
-interface RetryLoop<TResult> {
+export interface RetryLoop<TResult> {
   readonly operation: RetryOperation;
   readonly retryController: RetryController;
   readonly sleep: (milliseconds: number) => Promise<void>;
@@ -453,7 +454,7 @@ interface RetryLoop<TResult> {
 }
 
 /** Repeats one idempotent Agent operation while its failures are retryable and the controller allows it. */
-async function retryAgentOperation<TResult>(loop: RetryLoop<TResult>): Promise<TResult> {
+export async function retryAgentOperation<TResult>(loop: RetryLoop<TResult>): Promise<TResult> {
   for (let attemptNumber = 1; ; attemptNumber += 1) {
     try {
       return await loop.run();
@@ -587,6 +588,7 @@ export function collectOutputWithRetry<TOutput>(input: {
   readonly retryController: RetryController;
   readonly sleep: (milliseconds: number) => Promise<void>;
   readonly onRetry?: (message: string) => Promise<void>;
+  readonly failureLabel?: string;
 }): Promise<TOutput> {
   return retryAgentOperation({
     operation: "collection",
@@ -594,7 +596,9 @@ export function collectOutputWithRetry<TOutput>(input: {
     sleep: input.sleep,
     run: input.collect,
     ...(input.onRetry === undefined ? {} : { onRetry: input.onRetry }),
-    fail: (error, details) => new OutputCollectionError(input.stage, details, error),
+    fail: (error, details) => new OutputCollectionError(
+      input.stage, details, error, details.retryable, input.failureLabel,
+    ),
   });
 }
 

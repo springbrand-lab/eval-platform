@@ -16,9 +16,10 @@ import { requireIdentifier, requireObject } from "../runtime/input.js";
 import type { ProjectSample } from "../runtime/model.js";
 import { DEFAULT_RETRY_POLICY, requireRetryPolicy } from "../runtime/retry.js";
 
-/** Caller input; `retryPolicy` defaults to DEFAULT_RETRY_POLICY. */
-export type ExecutionPlanInput = Omit<ExecutionPlan, "retryPolicy"> & { readonly retryPolicy?: RetryPolicy };
-export type EvaluationPlanInput = Omit<EvaluationPlan, "retryPolicy"> & { readonly retryPolicy?: RetryPolicy };
+/** Caller input; Runtime supplies the fixed backoff fields. */
+type RetryPolicyInput = Pick<RetryPolicy, "maxRestarts">;
+export type ExecutionPlanInput = Omit<ExecutionPlan, "retryPolicy"> & { readonly retryPolicy?: RetryPolicyInput };
+export type EvaluationPlanInput = Omit<EvaluationPlan, "retryPolicy"> & { readonly retryPolicy?: RetryPolicyInput };
 
 /** Every ProjectSample of the plan once, in Dataset binding order then member order. */
 export function planProjectSampleIds(plan: ProjectPlan): readonly string[] {
@@ -42,7 +43,10 @@ export function normalizeExecutionPlan(input: ExecutionPlanInput): ExecutionPlan
     harness: normalizeHarness(input.harness, "execution.harness"),
     subjectAgentConfig: normalizeAgentConfigSnapshot(input.subjectAgentConfig, "execution.subjectAgentConfig"),
     executionConcurrency: input.executionConcurrency,
-    retryPolicy: { ...(input.retryPolicy ?? DEFAULT_RETRY_POLICY) },
+    retryPolicy: {
+      ...DEFAULT_RETRY_POLICY,
+      ...(input.retryPolicy === undefined ? {} : { maxRestarts: input.retryPolicy.maxRestarts }),
+    },
   };
 }
 
@@ -62,7 +66,10 @@ export function normalizeEvaluationPlan(input: EvaluationPlanInput): EvaluationP
     evaluationHarness: { ...harness, framework: "sp" },
     evaluatorAgentConfig: normalizeAgentConfigSnapshot(input.evaluatorAgentConfig, "evaluation.evaluatorAgentConfig"),
     evaluationConcurrency: input.evaluationConcurrency,
-    retryPolicy: { ...(input.retryPolicy ?? DEFAULT_RETRY_POLICY) },
+    retryPolicy: {
+      ...DEFAULT_RETRY_POLICY,
+      ...(input.retryPolicy === undefined ? {} : { maxRestarts: input.retryPolicy.maxRestarts }),
+    },
     outputSchema: { outputSchemaId: input.outputSchema.outputSchemaId, digest: input.outputSchema.digest },
   };
 }

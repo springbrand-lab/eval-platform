@@ -63,12 +63,13 @@ export async function executeSampling(
   /**
    * A succeeded execution is evaluable only once its artifacts and complete trajectory are frozen
    * in an evidence bundle; the bundle's trajectory then replaces the framework-local reference.
-   * Export shares the execution retry policy; if it never succeeds, the Sampling fails.
+   * Export shares the execution transient retry policy.
    */
   const freezeEvidence = (chatId: string, output: ExecutionOutput): Promise<ExecutionOutput> => collectOutputWithRetry({
     stage: "execution",
     retryController,
     sleep: dependencies.sleep,
+    failureLabel: "execution evidence finalization failed",
     collect: async () => {
       const exported = await dependencies.harness.exportEvidence({
         handle: subjectHandle(chatId),
@@ -107,6 +108,38 @@ export async function executeSampling(
     current = sampling;
   };
 
+  const persistPendingEvidence = async (output: ExecutionOutput, message: string): Promise<void> => {
+    await persist({
+      ...current,
+      execution: { status: "retrying", lastError: message, evidencePending: true },
+      ...executionEvidence(output),
+    });
+  };
+
+  const persistEvidenceFinalizationFailure = async (output: ExecutionOutput, error: unknown): Promise<void> => {
+    const details = describeAgentError(error);
+    if (details.retryable) {
+      await persistPendingEvidence(output, details.message);
+      return;
+    }
+    await persist({
+      ...withExecutionStatus(current, "failed", details.message),
+      ...executionEvidence(output),
+    });
+  };
+
+  const freezeEvidenceOrPersistFailure = async (
+    chatId: string,
+    output: ExecutionOutput,
+  ): Promise<ExecutionOutput | undefined> => {
+    try {
+      return await freezeEvidence(chatId, output);
+    } catch (error) {
+      await persistEvidenceFinalizationFailure(output, error);
+      return undefined;
+    }
+  };
+
   try {
     if (current.execution.evidencePending || current.execution.collectionPending) {
       const attempt = current.executionAttempts.at(-1);
@@ -124,15 +157,9 @@ export async function executeSampling(
       }
       const succeeded = attempt.status === "completed" && output.status === "succeeded";
       if (succeeded) {
-        try {
-          output = await freezeEvidence(current.subjectChatId, output);
-        } catch (exportError) {
-          await persist({
-            ...withExecutionStatus(current, "failed", describeAgentError(exportError).message),
-            ...executionEvidence(output),
-          });
-          return { state: current, sample };
-        }
+        const frozen = await freezeEvidenceOrPersistFailure(current.subjectChatId, output);
+        if (frozen === undefined) return { state: current, sample };
+        output = frozen;
       }
       await persist({
         ...withExecutionStatus(current, succeeded ? "succeeded" : "failed",
@@ -218,7 +245,8 @@ export async function executeSampling(
       deferFailureStatus: true,
     });
 
-    const frozen = await freezeEvidence(chatId, result.output);
+    const frozen = await freezeEvidenceOrPersistFailure(chatId, result.output);
+    if (frozen === undefined) return { state: current, sample };
     await persist({
       ...withExecutionStatus(current, "succeeded"),
       ...executionEvidence(frozen),
