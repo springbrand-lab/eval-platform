@@ -26,23 +26,44 @@ export async function readTextBody(request: Request, maxBytes: number): Promise<
   return decodeUtf8(await readBytesLimited(request, maxBytes));
 }
 
-/**
- * The only JSON body reader: a bounded, UTF-8, duplicate-field-free JSON object. The accepted
- * text is handed on unchanged to the route's schema validator.
- */
+/** Hands a bounded, UTF-8, duplicate-field-free JSON object on unchanged to the route's schema validator. */
+function forwardJsonObject(request: Request, bytes: Uint8Array): Request {
+  const text = decodeUtf8(bytes);
+  let value: unknown;
+  try {
+    value = parseStrictJson(text);
+  } catch (cause) {
+    if (!(cause instanceof SyntaxError)) throw cause;
+    throw new HttpError("REQUEST_INVALID_JSON", undefined, { cause });
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new HttpError("REQUEST_INVALID_JSON");
+  return new Request(request, { body: text });
+}
+
+/** The only JSON body reader. */
 export function jsonBody(maxBytes: number): MiddlewareHandler<AppBindings> {
   return async (c, next) => {
     requireMediaType(c.req.raw, JSON_MEDIA_TYPE, "application/json");
-    const text = await readTextBody(c.req.raw, maxBytes);
-    let value: unknown;
-    try {
-      value = parseStrictJson(text);
-    } catch (cause) {
-      if (!(cause instanceof SyntaxError)) throw cause;
-      throw new HttpError("REQUEST_INVALID_JSON", undefined, { cause });
+    c.req.raw = forwardJsonObject(c.req.raw, await readBytesLimited(c.req.raw, maxBytes));
+    await next();
+  };
+}
+
+/**
+ * {@link jsonBody} for an optional body. Zero bytes are no body whatever the Content-Type claims,
+ * so the route validator reads `{}`.
+ */
+export function optionalJsonBody(maxBytes: number): MiddlewareHandler<AppBindings> {
+  return async (c, next) => {
+    const bytes = await readBytesLimited(c.req.raw, maxBytes);
+    if (bytes.byteLength === 0) {
+      const headers = new Headers(c.req.raw.headers);
+      headers.delete("content-type");
+      c.req.raw = new Request(c.req.raw, { body: new Uint8Array(), headers });
+    } else {
+      requireMediaType(c.req.raw, JSON_MEDIA_TYPE, "application/json");
+      c.req.raw = forwardJsonObject(c.req.raw, bytes);
     }
-    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new HttpError("REQUEST_INVALID_JSON");
-    c.req.raw = new Request(c.req.raw, { body: text });
     await next();
   };
 }

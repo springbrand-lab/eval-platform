@@ -7,7 +7,7 @@ import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/badge";
 import { formatCompact, formatDuration, formatNumber, formatPercent, formatStatistic, standardDeviation } from "@/lib/format";
 import { AgentMetricPair, MetricValue } from "./metric-value";
-import { ResourceMetrics, stageStatusFor } from "./resource-metrics";
+import { ResourceCollectionNotes, ResourceMetrics, stageStatusFor } from "./resource-metrics";
 import { ModelName } from "./token-metrics";
 import { stageInProgressCount } from "@/features/runs/run-status";
 
@@ -153,7 +153,8 @@ export function SummaryCards({ summary, children }: { summary: MetricSummary; ch
               <span><span className="block font-semibold text-text-strong">{title} 资源与轨迹</span>
                 <span className="mt-1 block text-xs font-normal text-text-muted">{stage.records} 个 Agent · 已结束 {stage.terminalRecords}</span>
                 <span className="mt-1 block max-w-56 break-words text-xs font-normal text-text-muted">模型 <ModelName statistics={statistics} /></span>
-                <span className="mt-2 flex flex-wrap items-center gap-2 text-xs font-normal text-text-muted">资源完整性 <StatusBadge status={statistics.coverage} /></span></span>
+                <span className="mt-2 flex flex-wrap items-center gap-2 text-xs font-normal text-text-muted">资源完整性 <StatusBadge status={statistics.coverage} /></span>
+                <ResourceCollectionNotes className="mt-2" collections={statistics.collections} /></span>
             </span>
             <span className="grid grid-cols-2 gap-4 md:grid-cols-4">
               <span><span className="block text-xs font-normal text-text-muted">Token</span><span className="mt-1 block font-semibold tabular-nums"><MetricValue metric={statistics.tokens.total} format={formatCompact} /></span></span>

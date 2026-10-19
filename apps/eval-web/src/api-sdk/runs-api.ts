@@ -1,3 +1,4 @@
+import type { RecollectTarget } from "@eval-platform/eval-contracts";
 import { api, enc } from "./client";
 import type {
   EvaluationRecord, RunEvaluation, RunHandle, RunOperation, RunPreview, RunSnapshot, RunTargetSelector, RunTargets,
@@ -32,5 +33,5 @@ export const listSamplingEvaluations = (samplingId: string, signal?: AbortSignal
 export const getEvaluation = (evaluationId: string, signal?: AbortSignal) =>
   api.get<EvaluationRecord>(`/api/evaluations/${enc(evaluationId)}`, { signal });
 
-export const recollectResult = (projectId: string, kind: "samplings" | "evaluations", id: string) =>
-  api.post<{ runId: string; queued: boolean }>(`/api/projects/${enc(projectId)}/${kind}/${enc(id)}/collect`);
+export const recollectResult = (projectId: string, kind: "samplings" | "evaluations", id: string, target: RecollectTarget) =>
+  api.post<{ runId: string; queued: boolean }>(`/api/projects/${enc(projectId)}/${kind}/${enc(id)}/collect`, { target });

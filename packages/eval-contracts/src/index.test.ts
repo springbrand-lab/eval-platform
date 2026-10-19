@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   AGENT_STATUSES,
+  DEFAULT_EVIDENCE_LIMITS,
+  EVIDENCE_EXPORT_MAX_PASSES,
+  OBSERVATION_MAX_PASSES,
   PENDING_SAMPLING_STATUSES,
+  RECOLLECT_TARGETS,
+  RESOURCE_WAIT_MS,
   SAMPLING_STATUSES,
   TERMINAL_AGENT_STATUSES,
   isIdentifier,
   isPendingSamplingStatus,
+  isStageRecoveryPending,
   isTerminalAgentStatus,
   jsonObjectSchema,
   jsonValueSchema,
@@ -14,6 +20,25 @@ import {
 describe("@eval-platform/eval-contracts", () => {
   it("classifies every Sampling status against the single pending set", () => {
     expect(SAMPLING_STATUSES.filter(isPendingSamplingStatus)).toEqual(PENDING_SAMPLING_STATUSES);
+  });
+
+  it("owes work for a pending status or a finished stage still waiting for its resources", () => {
+    const resourcesPending = { deadline: "2026-10-20T00:10:00.000Z" };
+    for (const status of SAMPLING_STATUSES) {
+      const pending = isPendingSamplingStatus(status);
+      expect(isStageRecoveryPending({ status })).toBe(pending);
+      expect(isStageRecoveryPending({ status, resourcesPending })).toBe(true);
+      expect(isStageRecoveryPending({ status, observationPending: { passes: 1 } })).toBe(pending);
+      expect(isStageRecoveryPending({ status, evidencePending: true, collectionPending: true })).toBe(pending);
+    }
+  });
+
+  it("bounds pass-counted recoveries by the same number of passes and resources by ten minutes", () => {
+    expect(OBSERVATION_MAX_PASSES).toBe(5);
+    expect(EVIDENCE_EXPORT_MAX_PASSES).toBe(OBSERVATION_MAX_PASSES);
+    expect(RESOURCE_WAIT_MS).toBe(600_000);
+    expect(RECOLLECT_TARGETS).toEqual(["output", "resources"]);
+    expect(DEFAULT_EVIDENCE_LIMITS.maxFileBytes).toBe(95_000_000);
   });
 
   it("classifies every Agent status against the single terminal set", () => {

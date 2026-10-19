@@ -2,11 +2,13 @@ import type {
   AgentConfigRef,
   AgentFramework,
   AgentRole,
+  AgentResourceReadinessReport,
   AgentResourceSnapshot,
   AgentStatus,
   EvaluationAgentOutput,
   EvaluationOutputSchema,
   EvidenceBundleRef,
+  EvidenceExportProgress,
   EvidenceLimits,
   EvidenceManifest,
   EvidenceOmission,
@@ -111,6 +113,8 @@ export interface ExportedArtifact {
 
 export interface ExportEvidenceInput {
   readonly handle: AgentHandle;
+  /** The terminal Subject Submission whose evidence is exported. */
+  readonly submissionId: string;
   readonly limits: EvidenceLimits;
   readonly initialMaterials?: readonly InitialMaterialsRef[];
   readonly runtime?: HarnessRuntimeOptions;
@@ -122,6 +126,13 @@ export interface ExportedSubjectInput extends ExportedArtifact {
   read(): Promise<ReadableStream<Uint8Array>>;
 }
 
+/** One raw source trajectory event and its strictly increasing, positive source cursor. */
+export interface ExportedTrajectoryEvent {
+  readonly seq: number;
+  /** Written unchanged as one JSONL line. */
+  readonly record: JsonValue;
+}
+
 /** What one framework exports from a finished Agent; the evidence store freezes it. */
 export interface ExportedEvidence {
   readonly source: EvidenceSource;
@@ -130,8 +141,11 @@ export interface ExportedEvidence {
   readonly subjectInputs: readonly ExportedSubjectInput[];
   readonly omitted: readonly EvidenceOmission[];
   readonly readFile: EvidenceFileReader;
-  /** Complete raw events in order; the adapter pages through its source without projection. */
-  readonly trajectory: AsyncIterable<JsonValue>;
+  /**
+   * Complete raw events after `afterSeq` (0 for all), in order; the adapter pages through its
+   * source without projection. Each call starts a new read.
+   */
+  readTrajectory(afterSeq: number): AsyncIterable<ExportedTrajectoryEvent>;
   readonly trajectoryFormat: string;
   readonly trajectoryComplete: boolean;
   readonly trajectoryIncompleteReason?: string;
@@ -155,15 +169,25 @@ export interface ImportEvidenceInput {
   readonly runtime?: HarnessRuntimeOptions;
 }
 
-export interface SaveEvidenceInput {
+export interface ResumeEvidenceInput {
   readonly evidence: ExportedEvidence;
   readonly limits: EvidenceLimits;
+  /** Progress persisted by an earlier pass of the same export; absent to start one. */
+  readonly progress?: EvidenceExportProgress;
+  /**
+   * Persists progress after each completed step (listing, file, trajectory part); the export
+   * waits for it, and a rejection ends the export with that error. Calls never overlap.
+   */
+  readonly onProgress?: (progress: EvidenceExportProgress) => Promise<void>;
 }
 
 /** Content-addressed bundle storage; implemented by the application (R2 or a local directory). */
 export interface EvidenceStore {
-  /** Writes blobs by hash, then the manifest; an identical manifest that already exists is reused. */
-  save(input: SaveEvidenceInput): Promise<EvidenceBundleRef>;
+  /**
+   * Stores the listed files and trajectory parts still missing from `progress` by hash, then the
+   * manifest; the same progress always finalizes the same manifest, which is written once.
+   */
+  resume(input: ResumeEvidenceInput): Promise<EvidenceBundleRef>;
   open(ref: EvidenceBundleRef): Promise<EvidenceBundleReader>;
 }
 
@@ -181,8 +205,10 @@ export interface Harness {
   restartAgent(input: SubmitAgentInput): Promise<AgentSubmission>;
   collectExecution(input: CollectAgentInput): Promise<ExecutionOutput>;
   collectEvaluation(input: CollectAgentInput): Promise<EvaluationAgentOutput>;
-  /** Text of the Agent's last finished reply, or undefined when it has none; read-only. */
-  readFinalReply(input: CollectAgentInput): Promise<string | undefined>;
+  /** Text of the Agent's last finished reply in that Submission, or undefined when it has none; read-only. */
+  readFinalReply(input: CollectAgentInput & { readonly submissionId: string }): Promise<string | undefined>;
+  /** Whether the snapshot is finalized, without downloading its events. */
+  inspectAgentResources(input: CollectAgentResourcesInput): Promise<AgentResourceReadinessReport>;
   collectAgentResources(input: CollectAgentResourcesInput): Promise<AgentResourceSnapshot>;
   /** Export a finished Agent's artifacts and complete trajectory; read-only. */
   exportEvidence(input: ExportEvidenceInput): Promise<ExportedEvidence>;

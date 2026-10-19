@@ -1,8 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 import { RuntimeInputError } from "./errors.js";
-import { createRetryController, DEFAULT_RETRY_POLICY, retryIdempotentOperation } from "./retry.js";
+import { createRetryController, DEFAULT_RETRY_POLICY, loggedRetryController, retryIdempotentOperation } from "./retry.js";
 
 describe("retry controller", () => {
+  it("reports each retry and the exhausted budget of the shared retry loop", async () => {
+    const log = vi.fn();
+    const retryController = loggedRetryController(createRetryController({ ...DEFAULT_RETRY_POLICY, maxRestarts: 0 }), log);
+    await expect(retryIdempotentOperation({
+      operation: "status", retryController, sleep: async () => undefined,
+      run: async () => { throw Object.assign(new Error("socket closed"), { failureKind: "submission-timeout" }); },
+    })).rejects.toThrow("socket closed");
+
+    expect(log).toHaveBeenCalledTimes(11);
+    expect(log).toHaveBeenNthCalledWith(1, {
+      name: "operation_retry", operation: "status", attemptNumber: 1, failureKind: "submission-timeout", error: "socket closed", backoffMs: 250,
+    });
+    expect(log).toHaveBeenLastCalledWith({
+      name: "retry_exhausted", operation: "status", attemptNumber: 11, failureKind: "submission-timeout", error: "socket closed",
+    });
+  });
+
   it("retries a shared idempotent operation with the fixed transient budget", async () => {
     let calls = 0;
     const delays: number[] = [];

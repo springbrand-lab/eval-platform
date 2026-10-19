@@ -5,16 +5,34 @@ import {
 import { SAMPLING_STATUSES, type SamplingStatus } from "@eval-platform/eval-contracts";
 import { Check, ChevronDown, Clock3, Coins, ListChecks, Sigma } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import type { OperationStatistics, ResourceDistribution, ResourceStatistics, StageStatistics } from "@/api-sdk/types";
-import { StatusBadge } from "@/components/ui/badge";
+import type { OperationStatistics, ResourceCollections, ResourceDistribution, ResourceStatistics, StageStatistics } from "@/api-sdk/types";
+import { Badge, StatusBadge, type Tone } from "@/components/ui/badge";
 import { DescriptionList } from "@/components/ui/card";
+import { cn } from "@/lib/cn";
 import { formatDuration, formatMetricBytes, formatStatistic, formatUsd } from "@/lib/format";
 import { MetricValue } from "./metric-value";
+import { RESOURCES_PENDING_LABEL, unfinalizedResourceCount } from "./resource-collection";
 import { TokenMetrics } from "./token-metrics";
 import { COST_FIELDS } from "./metric-labels";
 import { ResourceDistributionPanel } from "./resource-distribution";
 import { StatisticsTable } from "./statistics-table";
 import { ToolStatisticsTable } from "./tool-statistics-table";
+
+/** Phrasing content only, so it can sit inside an accordion trigger. */
+export function ResourceCollectionNotes({ collections, resourcesPending = false, className }: {
+  collections: ResourceCollections; resourcesPending?: boolean; className?: string;
+}) {
+  const unfinalized = unfinalizedResourceCount(collections);
+  const notes: { key: string; tone: Tone; text: string }[] = [];
+  if (resourcesPending || collections.pending > 0) notes.push({ key: "pending", tone: "info", text: collections.pending > 1 ? `${RESOURCES_PENDING_LABEL} ${collections.pending} 个` : RESOURCES_PENDING_LABEL });
+  if (collections.failed > 0) notes.push({ key: "failed", tone: "danger", text: `资源采集失败 ${collections.failed} 个` });
+  if (collections.uncollected > 0) notes.push({ key: "uncollected", tone: "warning", text: `${collections.uncollected} 个资源尚未采集` });
+  if (unfinalized > 0) notes.push({ key: "unfinalized", tone: "warning", text: `${unfinalized} 个资源快照未定稿，数值可能不完整` });
+  if (notes.length === 0) return null;
+  return <span data-testid="resource-collection-notes" aria-label="资源采集状态" className={cn("flex flex-wrap items-center gap-1.5", className)}>
+    {notes.map((note) => <Badge key={note.key} tone={note.tone} dot>{note.text}</Badge>)}
+  </span>;
+}
 
 /** A stage badge is unambiguous only when every record in the scope has the same status. */
 export function stageStatusFor(stage: StageStatistics): SamplingStatus | undefined {
@@ -152,10 +170,11 @@ function PanelSelector({ value, onChange }: { value: MetricPanel; onChange: (val
 }
 
 /** Resource details are organized by the thing being measured; Agent scope stays fixed at the current entry. */
-export function ResourceMetrics({ statistics, distribution, durations, stageStatus, showCoverage = true, compact = false }: {
+export function ResourceMetrics({ statistics, distribution, durations, stageStatus, resourcesPending = false, showCoverage = true, compact = false }: {
   statistics: ResourceStatistics; distribution?: ResourceDistribution;
   durations?: Pick<StageStatistics, "agentDurationMs" | "attemptDurationMs">;
   stageStatus?: SamplingStatus;
+  resourcesPending?: boolean;
   showCoverage?: boolean;
   compact?: boolean;
 }) {
@@ -172,7 +191,10 @@ export function ResourceMetrics({ statistics, distribution, durations, stageStat
     <section aria-label="分项详细数据" className="min-w-0 space-y-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div><h3 className="text-sm font-semibold text-text-strong">分项详细数据</h3><p className="mt-1 text-xs text-text-muted">按费用、Token、操作次数和耗时查看当前入口下全部 Agent 的明细。</p></div>
-        {showCoverage && <dl className="flex shrink-0 items-center gap-2 text-xs"><dt className="text-text-muted">资源完整性</dt><dd><StatusBadge status={statistics.coverage} /></dd></dl>}
+        {showCoverage && <div className="flex shrink-0 flex-col items-end gap-1.5">
+          <dl className="flex items-center gap-2 text-xs"><dt className="text-text-muted">资源完整性</dt><dd><StatusBadge status={statistics.coverage} /></dd></dl>
+          <ResourceCollectionNotes className="justify-end" collections={statistics.collections} resourcesPending={resourcesPending} />
+        </div>}
       </div>
       <PanelSelector value={panel} onChange={setPanel} />
       <div role="tabpanel" aria-label={`${activePanel.label}明细`} className="min-w-0 pt-2">{content}</div>

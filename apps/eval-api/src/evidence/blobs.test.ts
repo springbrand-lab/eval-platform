@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_EVIDENCE_LIMITS } from "@eval-platform/eval-contracts";
-import { createEvidenceStore } from "@eval-platform/eval-runtime/harness";
+import { DEFAULT_EVIDENCE_LIMITS, type EvidenceExportProgress } from "@eval-platform/eval-contracts";
+import { createEvidenceStore, type ExportedEvidence } from "@eval-platform/eval-runtime/harness";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openLocalEvidenceBlobs } from "./local-blobs.js";
 import { createR2EvidenceBlobs, signV4 } from "./r2-blobs.js";
@@ -43,7 +43,7 @@ describe("local evidence blobs", () => {
     const root = await mkdtemp(join(tmpdir(), "eval-evidence-"));
     directories.push(root);
     const store = createEvidenceStore(await openLocalEvidenceBlobs(root), () => "2026-10-15T00:00:00.000Z");
-    const ref = await store.save({
+    const ref = await store.resume({
       limits: DEFAULT_EVIDENCE_LIMITS,
       evidence: {
         source: { framework: "sp", samplingId: "s-1", agentRef: { chatId: "c-1" } },
@@ -51,9 +51,9 @@ describe("local evidence blobs", () => {
         subjectInputs: [],
         omitted: [{ path: "/node_modules/a.js", reason: "excluded" }],
         readFile: async () => stream("hi"),
-        trajectory: (async function* () {
-          yield { seq: 1, at: "2026-10-15T00:00:00.000Z", type: "other" as const, content: {}, raw: null };
-        })(),
+        async* readTrajectory(afterSeq) {
+          if (afterSeq < 1) yield { seq: 1, record: { ingestSeq: 1, event: { type: "other", content: {}, raw: null } } };
+        },
         trajectoryComplete: true,
         trajectoryFormat: "sp-trajectory/v1",
       },
@@ -119,6 +119,58 @@ describe("R2 evidence blobs", () => {
     await blobs.putManifest(id, new TextEncoder().encode("second"));
     expect(new TextDecoder().decode(await blobs.readManifest(id))).toBe("first");
     await expect(blobs.readManifest("d".repeat(64))).resolves.toBeUndefined();
+  });
+
+  it("resumes an export on R2 without re-reading stored files and keeps one manifest after a lost response", async () => {
+    const objects = new Map<string, Uint8Array>();
+    let loseManifestResponse = true;
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const key = new URL(request.url).pathname;
+      if (request.method === "PUT") {
+        if (objects.has(key)) return new Response(null, { status: 412 });
+        objects.set(key, new Uint8Array(await request.arrayBuffer()));
+        if (key.endsWith("/manifest.json") && loseManifestResponse) {
+          loseManifestResponse = false;
+          throw new TypeError("fetch failed");
+        }
+        return new Response(null, { status: 200 });
+      }
+      const body = objects.get(key);
+      if (!body) return new Response(null, { status: 404 });
+      return new Response(request.method === "HEAD" ? null : new Uint8Array(body));
+    });
+    let tick = 0;
+    const store = createEvidenceStore(createR2EvidenceBlobs({
+      endpoint: "https://account.r2.cloudflarestorage.com", bucket: "eval-evidence", accessKeyId: "key-id", secretAccessKey: "secret",
+    }, fetch), () => new Date(Date.UTC(2026, 9, 15, 0, 0, tick++)).toISOString());
+    const reads: string[] = [];
+    const evidence: ExportedEvidence = {
+      source: { framework: "sp", samplingId: "s-r2", agentRef: { chatId: "c-1" } },
+      artifacts: [{ path: "/a.txt", size: 1, mediaType: "text/plain" }, { path: "/b.txt", size: 1, mediaType: "text/plain" }],
+      subjectInputs: [],
+      omitted: [],
+      async readFile(path) {
+        reads.push(path);
+        return stream(path === "/a.txt" ? "a" : "b");
+      },
+      async* readTrajectory(afterSeq) {
+        if (afterSeq < 1) yield { seq: 1, record: { ingestSeq: 1, event: { type: "raw" } } };
+      },
+      trajectoryComplete: true,
+      trajectoryFormat: "sp-trajectory/v1",
+    };
+    let progress: EvidenceExportProgress | undefined;
+    const onProgress = async (next: EvidenceExportProgress) => { progress = next; };
+
+    await expect(store.resume({ evidence, limits: DEFAULT_EVIDENCE_LIMITS, onProgress })).rejects.toThrow(/fetch failed/u);
+    expect(progress?.trajectory.done).toBe(true);
+    reads.length = 0;
+    const ref = await store.resume({ evidence, limits: DEFAULT_EVIDENCE_LIMITS, progress: progress!, onProgress });
+    expect(reads).toEqual([]);
+    expect([...objects.keys()].filter((key) => key.endsWith("/manifest.json")))
+      .toEqual([`/eval-evidence/evidence/${ref.evidenceId.slice("sha256:".length)}/manifest.json`]);
+    expect((await store.open(ref)).manifest.artifacts.map((artifact) => artifact.sha256)).toEqual([sha("a"), sha("b")]);
   });
 
   it("reports a transient R2 failure as retryable", async () => {

@@ -22,31 +22,83 @@ export function samplingSucceeded(): SQL {
   return eq(samplingStatus, "succeeded");
 }
 
-function pendingMemberships(reader: RecordReader) {
+const samplingStage = sql`${samplings.facts}->'execution'`;
+const evaluationStage = sql`${evaluations.facts}->'status'`;
+
+/**
+ * With a pending status, the SQL form of `isStageRecoveryPending`: a finished stage still waiting
+ * for its resource snapshot. `observationPending` only exists on a pending status.
+ */
+function resourcesPending(stage: SQL): SQL {
+  return sql`jsonb_typeof(${stage}->'resourcesPending') = 'object'`;
+}
+
+/** Epoch milliseconds of the earliest due readiness check; one never scheduled is due at once, as in `isStageDue`. */
+function earliestResourceCheck(stage: SQL): SQL {
+  return sql`min(coalesce(extract(epoch from (${stage}->'resourcesPending'->>'nextAttemptAt')::timestamptz)::float8 * 1000, '-infinity'::float8))`;
+}
+
+/** Correlated member subqueries of the outer `runs` row, selecting `value(stage)` when given. */
+function memberships(reader: RecordReader, sampling: SQL | undefined, evaluation: SQL | undefined, value?: (stage: SQL) => SQL) {
   return [
-    reader.select({ samplingId: runSamplings.samplingId }).from(runSamplings)
+    reader.select({ value: value?.(samplingStage) ?? sql`1` }).from(runSamplings)
       .innerJoin(samplings, eq(runSamplings.samplingId, samplings.samplingId))
-      .where(and(eq(runSamplings.runId, runs.runId), inArray(samplingStatus, PENDING_SAMPLING_STATUSES))),
-    reader.select({ evaluationId: runEvaluations.evaluationId }).from(runEvaluations)
+      .where(and(eq(runSamplings.runId, runs.runId), sampling)),
+    reader.select({ value: value?.(evaluationStage) ?? sql`1` }).from(runEvaluations)
       .innerJoin(evaluations, eq(runEvaluations.evaluationId, evaluations.evaluationId))
-      .where(and(eq(runEvaluations.runId, runs.runId), inArray(evaluationStatus, PENDING_SAMPLING_STATUSES))),
+      .where(and(eq(runEvaluations.runId, runs.runId), evaluation)),
   ] as const;
+}
+
+/** Members whose status is pending; the only test for a Run's finished stages and stop finalization. */
+function pendingMemberships(reader: RecordReader) {
+  return memberships(reader, inArray(samplingStatus, PENDING_SAMPLING_STATUSES), inArray(evaluationStatus, PENDING_SAMPLING_STATUSES));
+}
+
+/**
+ * Members of a non-stopped Run still waiting for a resource snapshot. A Sampling's execution stage belongs to
+ * the execution/pipeline Run that created it, never to an evaluation Run that reuses it. A stop
+ * request ignores these flags, so they can never hold a stopped Run open.
+ */
+function recoveringMemberships(reader: RecordReader, value?: (stage: SQL) => SQL) {
+  const running = eq(runs.stopRequested, false);
+  return memberships(reader,
+    and(running, inArray(runs.operation, ["execution", "pipeline"]), resourcesPending(samplingStage)),
+    and(running, resourcesPending(evaluationStage)), value);
 }
 
 /** True for a Run whose Sampling or Evaluation work is pending; correlated with the outer `runs` row. */
 function runUnfinished(reader: RecordReader): SQL | undefined {
   const [samplingWork, evaluationWork] = pendingMemberships(reader);
-  return or(exists(samplingWork), exists(evaluationWork));
+  const [samplingRecovery, evaluationRecovery] = recoveringMemberships(reader);
+  return or(exists(samplingWork), exists(evaluationWork), exists(samplingRecovery), exists(evaluationRecovery));
 }
 
+/** No member status is pending; recovery flags do not delay stop finalization. */
 export function runFinished(reader: RecordReader): SQL | undefined {
   const [samplingWork, evaluationWork] = pendingMemberships(reader);
   return and(notExists(samplingWork), notExists(evaluationWork));
 }
 
-/** An active Run still has pending work or an unfinalized stop request. */
+/** The SQL form of the Runtime's `isRunStopPending`: a stop request not yet finalized. */
+export function runStopPending(): SQL<boolean> {
+  return sql<boolean>`${and(eq(runs.stopRequested, true), eq(runs.stopFinalized, false))}`;
+}
+
+/** An active Run still has pending work, owed recovery while not stopped, or an unfinalized stop request. */
 export function runActive(reader: RecordReader): SQL<boolean> {
-  return sql<boolean>`${or(runUnfinished(reader), and(eq(runs.stopRequested, true), eq(runs.stopFinalized, false)))}`;
+  return sql<boolean>`${or(runUnfinished(reader), runStopPending())}`;
+}
+
+/**
+ * Epoch milliseconds of the earliest due resource readiness check of a Run that waits for nothing
+ * else: no pending member and no stop request. Null for any other Run.
+ */
+export async function nextResourceCheckAt(reader: RecordReader, runId: string): Promise<number | null> {
+  const [sampling, evaluation] = recoveringMemberships(reader, earliestResourceCheck);
+  const [row] = await reader.select({ at: sql<number | string | null>`least((${sampling}), (${evaluation}))` }).from(runs)
+    .where(and(eq(runs.runId, runId), runFinished(reader)));
+  return row?.at == null ? null : Number(row.at);
 }
 
 /** The single definition of "this Project has a Run", shared by creation replay, admission and compensation. */

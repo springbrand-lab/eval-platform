@@ -1,0 +1,151 @@
+import { RESOURCE_CHECK_INTERVAL_MS, type AgentResourceScope, type HarnessConfig, type SamplingStageState } from "@eval-platform/eval-contracts";
+
+import type { AgentHandle } from "../harness/model.js";
+import {
+  ConfirmedSubmissionFailure,
+  agentOperationKey,
+  applyAttemptPatch,
+  errorMessage,
+  inspectUncertainOperation,
+  isSuccessfulSubmission,
+  isTerminal,
+  reportError,
+  type AgentAttemptRecord,
+  type AgentLifecycleDependencies,
+  type AgentLifecycleStage,
+} from "./agent-lifecycle.js";
+import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
+import { attemptOwesResources } from "./recovery.js";
+import { awaitResourceFinalization, downloadResources, resourceScopeMatches, storedResourceScope } from "./resources.js";
+import type { RetryController } from "./retry.js";
+
+export interface FinishedStageRefresh<TAttempt extends AgentAttemptRecord> {
+  readonly stage: AgentLifecycleStage;
+  readonly samplingId: string;
+  /** Built from the persisted Chat, absent without one; the Agent is never ensured, initialized or submitted. */
+  readonly handle: AgentHandle | undefined;
+  readonly harnessConfig: HarnessConfig;
+  readonly retryController: RetryController;
+  readonly attempts: readonly TAttempt[];
+  readonly state: SamplingStageState;
+  readonly agentEnded: (attempt: TAttempt) => boolean;
+  /** Writes exactly these Attempts and stage state; status, output and evidence stay unchanged. */
+  readonly persist: (attempts: readonly TAttempt[], state: SamplingStageState) => Promise<void>;
+}
+
+/**
+ * One due pass of a finished stage waiting for its resources: a readiness check per owed Attempt,
+ * then the single download once SP finalized the snapshot. Past the deadline, or when finalizing a
+ * stopped Run (without a readiness check), the current snapshot is downloaded once and kept as it
+ * is, the wait ends and the shortfall is reported once.
+ */
+export async function refreshFinishedStage<TAttempt extends AgentAttemptRecord>(
+  dependencies: AgentLifecycleDependencies,
+  refresh: FinishedStageRefresh<TAttempt>,
+): Promise<void> {
+  const { stage, samplingId, handle } = refresh;
+  const { resourcesPending: pending, ...finished } = refresh.state;
+  if (pending === undefined) return;
+  if (handle === undefined) {
+    reportError(dependencies.onError, new Error(`${stage} resources for sampling ${samplingId} were not read: no Chat`));
+    await refresh.persist(refresh.attempts, finished);
+    return;
+  }
+  const now = dependencies.now();
+  const stopping = dependencies.finalizingStop === true;
+  try {
+    const expired = stopping || Date.parse(now) >= Date.parse(pending.deadline);
+    const errors: string[] = [];
+    const attempts: TAttempt[] = [];
+    for (const original of refresh.attempts) {
+      if (!attemptOwesResources(original, refresh.agentEnded)) {
+        attempts.push(original);
+        continue;
+      }
+      const { attempt, error } = await refreshAttempt(dependencies, refresh, handle, original, expired);
+      attempts.push(attempt);
+      if (error !== undefined) errors.push(`Attempt ${attempt.attemptNumber}: ${error}`);
+    }
+    const lastError = errors.join("; ");
+    if (errors.length > 0 && expired) {
+      reportError(dependencies.onError, new Error(
+        `${stage} resources for sampling ${samplingId}, Chat ${handle.chatId} were not finalized ${stopping ? "when the Run stopped" : `by ${pending.deadline}`}; kept the current snapshot: ${lastError}`,
+      ));
+    }
+    const nextAttemptAt = new Date(Math.min(Date.parse(now) + RESOURCE_CHECK_INTERVAL_MS, Date.parse(pending.deadline))).toISOString();
+    await refresh.persist(attempts, errors.length === 0 || expired
+      ? finished
+      : { ...finished, resourcesPending: { deadline: pending.deadline, nextAttemptAt, lastError } });
+  } catch (error) {
+    if (error instanceof RuntimeRecordPersistenceError || (!stopping && error instanceof RuntimeRunStoppedError)) throw error;
+    const message = errorMessage(error);
+    reportError(dependencies.onError, new Error(
+      `${stage} resource refresh failed for sampling ${samplingId}: ${message}`, { cause: error },
+    ));
+    // A stopped Run never keeps the wait: record the failure on each owed Attempt and end it.
+    if (stopping) {
+      await refresh.persist(refresh.attempts.map((attempt) => withResourceFailure(attempt, refresh.agentEnded, now, message)), finished);
+      return;
+    }
+    // Otherwise keep the wait but back off one interval, so the stage is not due again immediately.
+    const nextAttemptAt = new Date(Math.min(Date.parse(now) + RESOURCE_CHECK_INTERVAL_MS, Date.parse(pending.deadline))).toISOString();
+    await refresh.persist(refresh.attempts, { ...finished, resourcesPending: { deadline: pending.deadline, nextAttemptAt, lastError: message } });
+  }
+}
+
+function withResourceFailure<TAttempt extends AgentAttemptRecord>(
+  attempt: TAttempt, agentEnded: (attempt: TAttempt) => boolean, collectedAt: string, error: string,
+): TAttempt {
+  const scope = storedResourceScope(attempt.resources);
+  if (!attemptOwesResources(attempt, agentEnded) || attempt.resources?.status === "collected" || scope === undefined) return attempt;
+  return applyAttemptPatch(attempt, { resources: { status: "failed", scope, collectedAt, error } });
+}
+
+async function refreshAttempt<TAttempt extends AgentAttemptRecord>(
+  dependencies: AgentLifecycleDependencies,
+  refresh: FinishedStageRefresh<TAttempt>,
+  handle: AgentHandle,
+  original: TAttempt,
+  expired: boolean,
+): Promise<{ readonly attempt: TAttempt; readonly error?: string }> {
+  const { stage, samplingId } = refresh;
+  let attempt = original;
+  const idempotencyKey = agentOperationKey(stage, samplingId, attempt.attemptNumber);
+  if (attempt.completedAt === undefined && attempt.submissionId !== undefined) {
+    // An accepted Evaluation whose receipt was never observed: record its terminal once SP confirms it.
+    const inspection = await inspectUncertainOperation(dependencies, { stage, samplingId, harnessConfig: refresh.harnessConfig }, handle, idempotencyKey);
+    const observed = inspection.submission;
+    if (observed && isTerminal(observed) && observed.submissionId === attempt.submissionId) {
+      attempt = applyAttemptPatch(attempt, {
+        status: observed.status,
+        completedAt: dependencies.now(),
+        ...(isSuccessfulSubmission(observed) ? {} : { error: new ConfirmedSubmissionFailure(stage, observed).message }),
+      });
+    }
+  }
+  const scope: AgentResourceScope = {
+    chatId: handle.chatId,
+    idempotencyKey,
+    ...(attempt.submissionId === undefined ? {} : { submissionId: attempt.submissionId }),
+  };
+  const stored = storedResourceScope(attempt.resources);
+  if (stored && !resourceScopeMatches(stored, scope)) {
+    return { attempt, error: "resource scope does not match the submitted operation" };
+  }
+  const source = {
+    harness: dependencies.harness, handle, scope, retryController: refresh.retryController,
+    sleep: dependencies.sleep, now: dependencies.now, log: dependencies.log,
+    ...(refresh.harnessConfig.runtime === undefined ? {} : { runtime: refresh.harnessConfig.runtime }),
+  };
+  const owed = dependencies.finalizingStop ? undefined : await awaitResourceFinalization(source, [0]);
+  if (owed !== undefined && !expired) return { attempt, error: owed };
+  const resources = await downloadResources(source);
+  if (resources.status === "failed") {
+    return { attempt: attempt.resources?.status === "collected" ? attempt : applyAttemptPatch(attempt, { resources }), error: resources.error };
+  }
+  attempt = applyAttemptPatch(attempt, {
+    resources,
+    ...(attempt.submissionId === undefined ? { submissionId: resources.snapshot.scope.submissionId } : {}),
+  });
+  return resources.snapshot.finalized ? { attempt } : { attempt, error: owed ?? "resource snapshot is not finalized" };
+}

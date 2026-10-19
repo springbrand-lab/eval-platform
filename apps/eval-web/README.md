@@ -30,7 +30,7 @@ ZIP 与素材上传也等待 FileDropzone 的文件提取结束后再提交；�
 
 资源选择器与 Bundle 详情共用资源列表缓存，缓存保存 API 返回的完整记录；选择器通过 Query 的 `select` 生成选项，不把 `{id, name}` 展示投影写回共享缓存。访问页面的先后顺序不影响资源 ID、描述或格式。
 
-素材、上下文名称进入 `/resources/$kind/$bundleId/$resourceId` 的只读目录页。资源与运行 Workspace 共用目录导航和 `@springbrand/file-renderers` 的格式选择、解析、预览、源码及下载；Web 仅负责鉴权文件读取、请求取消与 Blob URL 生命周期。文件夹和 ZIP 导入后的路径使用同一目录投影。HTML/CSS/图片等相对引用由公共 `rendererResourcePath` 统一解析，只读取当前资源根目录内的文件；Web 不另行解码链接。
+素材、上下文名称进入 `/resources/$kind/$bundleId/$resourceId` 的只读目录页。资源与运行 Workspace 共用目录导航和 `@springbrand/file-renderers` 的格式选择、解析、预览、源码及下载；Web 仅负责鉴权文件读取、请求取消与 Blob URL 生命周期。文件夹和 ZIP 导入后的路径使用同一目录投影。HTML/CSS/图片等相对引用由公共 `rendererResourcePath` 统一解析，只读取当前资源根目录内的文件；HTML 预览还只读取页面所在目录及其子目录（网站根），上级目录的引用不读取；Web 不另行解码链接，并遵守渲染器传入的剩余字节预算（`maxBytes`）。
 
 `file-renderers`、`agent-config-editor` 使用 npm 精确版本，Tailwind 扫描它们发布后的 `dist/**/*.js`；格式自身的 CSS Module 由包内 JS 导入。`file-renderers` 是包含资源 URL、CSS 和 Worker 的 ESM 包，开发时不参与依赖预打包，由 Vite 标准资源流水线处理；其包含 CommonJS 的依赖链仍显式参与预打包，按 [Vite 的嵌套依赖配置](https://vite.dev/config/dep-optimization-options.html#optimizedeps-exclude)转换，不能把原始 CommonJS 交给浏览器。Vite 对 React、React DOM、TanStack Query、HTTP 和 site-block 去重，避免产生第二份 Context 或错误类。依赖接入与独立安装验证见 [SP 共享包接入与升级](../../docs/sp-package-publishing-todo.md)。
 
@@ -94,6 +94,8 @@ Workspace 只保存选中的路径，节点取当前目录树。Query 只缓存�
 
 
 手动重新收集结果：POST /api/projects/{projectId}/samplings/{samplingId}/collect 与 /evaluations/{evaluationId}/collect 返回 202 {runId, queued}。仅接受归属匹配、最后 Attempt 为 completed 且有 Chat/Submission 的失败阶段；已成功为幂等无操作，重复待收集请求不重复入队，项目忙或 Run 已停止时拒绝。API 在 Project 行锁内设置 retrying + collectionPending，并原子提交原 Run 队列任务。Worker 只读取已有输出，不创建或重启 Agent/Attempt；执行侧必须归档产物和完整轨迹，评估侧保存原始结果并沿用校验和同步。失败清除待收集标记并保留错误，支持再次补收。补收执行不自动启动之前已取消的评估。当前运行查询允许旧 Run 因补收重新活跃，runSequence 仍是最大创建序号。
+
+阶段进度按完整阶段状态显示，而不只看 status：`evidencePending` 显示“执行 Agent 已完成 · 整理证据中”（评估侧为“评估 Agent 已完成 · 整理证据中”），`collectionPending` 显示“补收结果中”，`observationPending` 显示“确认 Agent 状态中”，`resourcesPending` 在任意状态下显示“补采资源中”；其余进行中阶段仍为“执行中/评估中”，计数口径不变。资源完整性旁按 `collections` 明确提示“资源采集失败 N 个”“N 个资源尚未采集”“N 个资源快照未定稿，数值可能不完整”和补采中的数量，数值本身仍只在确实无数据时显示“未获得”。最后 Attempt 已完成且该 Agent 资源存在失败、未采集或未定稿快照时，结果卡提供“重新采集资源”，以 `{ "target": "resources" }` 调用同一 collect 接口，只补采资源，不重新运行 Agent；“重新收集结果”同样显式发送 `{ "target": "output" }`。采样详情页在 Sampling 带有 `evidenceExport` 时显示证据导出进度：当前轮次（上限 5 轮）、已存产物与执行输入数量、轨迹分段是否读完、未纳入证据的文件数和最近错误；导出失败时提示进度已保留，重新收集执行结果会从断点继续。
 
 采样详情采用紧凑的结果工作区：桌面将评分/理由与文件预览并列，小屏堆叠；标量评分横排，长说明在可聚焦区域内滚动且保留全文。证据选择与执行产物共用右侧单一预览，查询仍按 Agent 身份隔离。采样只保留结果、执行过程、评估过程、资源统计一层导航；进入过程直接显示对应会话，原始轨迹在独立抽屉查看。重新执行与重新评估分别进入预选对应操作的运行确认页，不直接启动任务。独立页与抽屉共用同一结果组件，结果补收和运行契约不变。
 

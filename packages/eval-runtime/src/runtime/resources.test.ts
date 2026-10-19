@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { AgentResourceSnapshot } from "@eval-platform/eval-contracts";
-import { AgentResourceValidationError, validateResourceSnapshot } from "./resources.js";
+import { AgentResourceValidationError, validateResourceReadiness, validateResourceSnapshot } from "./resources.js";
 
 const SCOPE = { chatId: "chat-1", submissionId: "submission-1", idempotencyKey: "execution:sampling-1" };
+const READY = {
+  receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 0, pendingRuntimeEvents: 0,
+  actionCharges: { complete: true, unsettledExecutions: 0, missingExecutionIds: 0 },
+};
 
 function snapshot(): AgentResourceSnapshot {
   return {
@@ -13,6 +17,7 @@ function snapshot(): AgentResourceSnapshot {
     usageEvents: [],
     telemetryEvents: [],
     billingSettlements: [],
+    readiness: READY,
   };
 }
 
@@ -63,6 +68,32 @@ describe("raw resource snapshot validation", () => {
       telemetryEvents: [{ type: "generation.started", status: "provider-native-running" }],
     };
     expect(validateResourceSnapshot(input, SCOPE)).toEqual(input);
+  });
+
+  it("keeps SP's readiness diagnostics and requires them on a freshly read snapshot", () => {
+    const readiness = {
+      receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 3, pendingRuntimeEvents: 0,
+      actionCharges: { complete: false, unsettledExecutions: 1, missingExecutionIds: 0 },
+    };
+    const input = { ...snapshot(), finalized: false, readiness };
+    expect(validateResourceSnapshot(input, SCOPE)).toEqual(input);
+    const { readiness: _readiness, ...withoutReadiness } = snapshot();
+    expect(() => validateResourceSnapshot(withoutReadiness, SCOPE)).toThrow(AgentResourceValidationError);
+  });
+
+  it.each([
+    { readiness: null },
+    { readiness: { receiptTerminal: true } },
+    { readiness: {
+      receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: -1, pendingRuntimeEvents: 0,
+      actionCharges: { complete: true, unsettledExecutions: 0, missingExecutionIds: 0 },
+    } },
+    { readiness: {
+      receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 0, pendingRuntimeEvents: 0,
+      actionCharges: { complete: true, unsettledExecutions: 0, missingExecutionIds: 0 }, extra: 1,
+    } },
+  ])("rejects malformed readiness %j", (patch) => {
+    expect(() => validateResourceSnapshot({ ...snapshot(), ...patch }, SCOPE)).toThrow(AgentResourceValidationError);
   });
 
   it.each(["chatId", "submissionId", "idempotencyKey"] as const)("rejects a different %s", (field) => {
@@ -130,5 +161,20 @@ describe("raw resource snapshot validation", () => {
       expect(error).toBeInstanceOf(AgentResourceValidationError);
       expect(error).toHaveProperty("retryable", false);
     }
+  });
+});
+
+describe("resource readiness validation", () => {
+  const readiness = {
+    receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 1, pendingRuntimeEvents: 0,
+    actionCharges: { complete: false, unsettledExecutions: 1, missingExecutionIds: 0 },
+  };
+
+  it("accepts a report for the requested operation and rejects one for another Submission or with events", () => {
+    const report = { scope: SCOPE, observedAt: "2026-10-08T00:00:00.000Z", finalized: false, readiness };
+    expect(validateResourceReadiness(report, { chatId: SCOPE.chatId, idempotencyKey: SCOPE.idempotencyKey })).toEqual(report);
+    expect(() => validateResourceReadiness({ ...report, scope: { ...SCOPE, submissionId: "other" } }, SCOPE))
+      .toThrow("Resource readiness does not match the requested operation scope");
+    expect(() => validateResourceReadiness({ ...report, usageEvents: [] }, SCOPE)).toThrow(AgentResourceValidationError);
   });
 });

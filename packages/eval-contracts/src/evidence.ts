@@ -1,4 +1,4 @@
-import type { AgentFramework } from "./model.js";
+import type { AgentFramework, RecoveryPasses } from "./model.js";
 
 /**
  * An evidence bundle freezes what a Subject produced: its artifacts and its complete trajectory,
@@ -85,6 +85,46 @@ export interface EvidenceManifest {
   readonly omitted: readonly EvidenceOmission[];
 }
 
+export interface EvidenceExportArtifact {
+  readonly path: string;
+  readonly size: number;
+  readonly mediaType: string;
+  readonly sha256?: string;
+}
+
+export interface EvidenceExportSubjectInput extends EvidenceExportArtifact {
+  readonly bundleId: string;
+  readonly materialId: string;
+}
+
+/**
+ * Resumable progress of one bundle export. The listing and `exportedAt` are frozen by the first
+ * pass, so a resumed export stores only what is missing and finalizes the same manifest.
+ */
+export interface EvidenceExportProgress {
+  readonly exportedAt: string;
+  readonly artifacts: readonly EvidenceExportArtifact[];
+  readonly subjectInputs: readonly EvidenceExportSubjectInput[];
+  readonly omitted: readonly EvidenceOmission[];
+  readonly trajectory: {
+    /** Source cursor after the last event of the last stored part; 0 before any part. */
+    readonly afterSeq: number;
+    readonly parts: readonly EvidenceTrajectoryPart[];
+    readonly done?: true;
+  };
+}
+
+/** Kept on the Sampling while its Subject evidence export is unfinished, and on its failure. */
+export interface EvidenceExportState extends RecoveryPasses {
+  /** The Subject Submission the progress belongs to; progress of another Submission is never reused. */
+  readonly submissionId: string;
+  /** Absent until a pass listed the evidence. */
+  readonly progress?: EvidenceExportProgress;
+}
+
+/** Runtime passes that may end without a stored bundle before the execution fails. */
+export const EVIDENCE_EXPORT_MAX_PASSES = 5;
+
 export interface EvidenceLimits {
   readonly maxFileBytes: number;
   readonly maxTotalBytes: number;
@@ -93,9 +133,9 @@ export interface EvidenceLimits {
   readonly excludedSegments: readonly string[];
 }
 
-/** SP moves one file per Durable Object RPC, which caps a single file at 25 MB. */
+/** SP streams each file in one HTTP request body, which Cloudflare caps at 100 MB. */
 export const DEFAULT_EVIDENCE_LIMITS: EvidenceLimits = {
-  maxFileBytes: 25_000_000,
+  maxFileBytes: 95_000_000,
   maxTotalBytes: 500_000_000,
   maxFiles: 20_000,
   excludedSegments: ["node_modules", ".git", ".cache", ".next", ".turbo", "__pycache__"],

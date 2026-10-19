@@ -20,7 +20,7 @@
     "@eval-platform/eval-runtime": "workspace:*",
     "@hono/node-server": "1.19.17",
     "@hono/zod-openapi": "1.5.1",
-    "@springbrand/eval-harness": "0.1.0-alpha.3",
+    "@springbrand/eval-harness": "0.1.0-alpha.4",
     "@springbrand/http": "0.1.0-alpha.4",
     "ajv": "^8.20.0",
     "drizzle-orm": "^0.45.2",

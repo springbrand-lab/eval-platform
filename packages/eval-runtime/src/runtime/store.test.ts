@@ -119,7 +119,7 @@ describe("Runtime record persistence", () => {
     expect(input.write.mock.calls[1]![0]).toBe(input.write.mock.calls[0]![0]);
     expect(committed).toEqual(original);
     expect(input.retryController.decide).toHaveBeenCalledExactlyOnceWith({
-      operation: "persistence", failureKind: "network", attemptNumber: 1,
+      operation: "persistence", failureKind: "network", attemptNumber: 1, error: expect.any(String),
     });
     expect(input.sleep).toHaveBeenCalledExactlyOnceWith(43);
   });
@@ -169,8 +169,8 @@ describe("Runtime record persistence", () => {
     });
     expect(input.write).toHaveBeenCalledTimes(2);
     expect(input.retryController.decide.mock.calls.map(([decision]) => decision)).toEqual([
-      { operation: "persistence", failureKind: "network", attemptNumber: 1 },
-      { operation: "persistence", failureKind: "network", attemptNumber: 2 },
+      { operation: "persistence", failureKind: "network", attemptNumber: 1, error: "write unavailable" },
+      { operation: "persistence", failureKind: "network", attemptNumber: 2, error: "write unavailable" },
     ]);
     expect(input.sleep).toHaveBeenCalledExactlyOnceWith(7);
   });
@@ -196,7 +196,7 @@ describe("Runtime record persistence", () => {
       name: "RuntimeRecordPersistenceError", message: error.message, outcome: "unknown", cause: error,
     });
     expect(input.retryController.decide).toHaveBeenCalledExactlyOnceWith({
-      operation: "persistence", failureKind: "network", attemptNumber: 1,
+      operation: "persistence", failureKind: "network", attemptNumber: 1, error: expect.any(String),
     });
   });
 });

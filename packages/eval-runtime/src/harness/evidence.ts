@@ -1,10 +1,10 @@
 import type {
   EvidenceArtifact,
+  EvidenceBundleRef,
+  EvidenceExportProgress,
   EvidenceLimits,
   EvidenceManifest,
   EvidenceOmission,
-  EvidenceTrajectoryPart,
-  JsonValue,
 } from "@eval-platform/eval-contracts";
 import {
   EVIDENCE_OMISSION_REASONS,
@@ -15,11 +15,20 @@ import {
 } from "@eval-platform/eval-contracts";
 import { z } from "zod";
 
-import type { EvidenceBundleReader, EvidenceStore, ExportedArtifact } from "./model.js";
+import type {
+  EvidenceBundleReader,
+  EvidenceStore,
+  ExportedArtifact,
+  ExportedEvidence,
+  ExportedTrajectoryEvent,
+} from "./model.js";
 
 /** Raw content-addressed storage; `createEvidenceStore` owns the bundle format on top of it. */
 export interface EvidenceBlobStore {
-  /** Stores the bytes under their SHA-256 without buffering them whole; repeats are no-ops. */
+  /**
+   * Stores the bytes under their SHA-256, reading at most `maxBytes`; repeats are no-ops. An
+   * implementation may buffer one blob (the R2 store must, to sign its payload hash).
+   */
   putBlob(content: ReadableStream<Uint8Array>, maxBytes: number): Promise<{ readonly sha256: string; readonly size: number }>;
   readBlob(sha256: string): Promise<ReadableStream<Uint8Array> | undefined>;
   /** Writes once; an existing manifest under the same ID keeps its bytes. */
@@ -66,56 +75,131 @@ export function applyEvidenceLimits(
   return { artifacts: kept, omitted };
 }
 
+/**
+ * Freezes the listing and export moment of a new export. Limits are checked once here, on the
+ * listed sizes; every stored file must then have exactly its listed size.
+ */
+function planEvidenceExport(evidence: ExportedEvidence, limits: EvidenceLimits, exportedAt: string): EvidenceExportProgress {
+  if (evidence.artifacts.length > limits.maxFiles) {
+    throw new EvidenceIntegrityError("Exported evidence has more files than its limits allow");
+  }
+  if (evidence.artifacts.reduce((total, artifact) => total + artifact.size, 0) > limits.maxTotalBytes) {
+    throw new EvidenceIntegrityError("Exported evidence is larger than its limits allow");
+  }
+  return {
+    exportedAt,
+    artifacts: evidence.artifacts.map(({ path, size, mediaType }) => ({ path, size, mediaType })),
+    subjectInputs: evidence.subjectInputs.map(({ bundleId, materialId, path, size, mediaType }) => ({
+      bundleId, materialId, path, size, mediaType,
+    })),
+    omitted: evidence.omitted.map(({ path, reason }) => ({ path, reason })),
+    trajectory: { afterSeq: 0, parts: [] },
+  };
+}
+
+/** The manifest a complete progress finalizes; the same progress always yields the same bytes. */
+async function finalizeEvidenceManifest(evidence: ExportedEvidence, progress: EvidenceExportProgress): Promise<{
+  readonly evidenceHex: string;
+  readonly bytes: Uint8Array;
+  readonly ref: EvidenceBundleRef;
+}> {
+  const stored = <T extends { readonly sha256?: string; readonly path: string }>(file: T): T & { readonly sha256: string } => {
+    if (file.sha256 === undefined) throw new EvidenceIntegrityError(`Evidence file ${file.path} is not stored yet`);
+    return file as T & { readonly sha256: string };
+  };
+  if (!progress.trajectory.done) throw new EvidenceIntegrityError("Evidence trajectory is not stored yet");
+  const parts = progress.trajectory.parts;
+  const body = {
+    schemaVersion: EVIDENCE_SCHEMA_VERSION,
+    source: { ...evidence.source, exportedAt: progress.exportedAt },
+    artifacts: progress.artifacts.map((file): EvidenceArtifact => {
+      const { path, size, mediaType, sha256 } = stored(file);
+      return { path, size, mediaType, sha256 };
+    }),
+    subjectInputs: progress.subjectInputs.map((file) => {
+      const { bundleId, materialId, path, mediaType, sha256, size } = stored(file);
+      return { bundleId, materialId, path, mediaType, sha256, size };
+    }),
+    trajectory: {
+      format: evidence.trajectoryFormat,
+      parts: [...parts],
+      events: parts.reduce((count, part) => count + part.events, 0),
+      complete: evidence.trajectoryComplete,
+      ...(evidence.trajectoryIncompleteReason === undefined
+        ? {} : { incompleteReason: evidence.trajectoryIncompleteReason }),
+    },
+    omitted: [...progress.omitted],
+  } satisfies Omit<EvidenceManifest, "evidenceId">;
+  const evidenceHex = await sha256Hex(canonicalJsonBytes(body));
+  const manifest: EvidenceManifest = { ...body, evidenceId: `sha256:${evidenceHex}` };
+  const bytes = canonicalJsonBytes(manifest);
+  return {
+    evidenceHex,
+    bytes,
+    ref: { evidenceId: manifest.evidenceId, manifestSha256: await sha256Hex(bytes), exportedAt: progress.exportedAt },
+  };
+}
+
 export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string = () => new Date().toISOString()): EvidenceStore {
   return {
-    async save({ evidence, limits }) {
-      if (evidence.artifacts.length > limits.maxFiles) {
-        throw new EvidenceIntegrityError("Exported evidence has more files than its limits allow");
+    async resume({ evidence, limits, progress: saved, onProgress }) {
+      const persist = serialProgress(onProgress);
+      let progress = saved ?? planEvidenceExport(evidence, limits, now());
+      if (saved === undefined) await persist(progress);
+
+      // Files: only those without a stored hash are read. Every started read settles before failing.
+      const artifacts = [...progress.artifacts];
+      const subjectInputs = [...progress.subjectInputs];
+      const update = () => {
+        progress = { ...progress, artifacts: [...artifacts], subjectInputs: [...subjectInputs] };
+        return persist(progress);
+      };
+      const readers = new Map(evidence.subjectInputs.map((file) => [subjectInputKey(file), file]));
+      const pending = [
+        ...artifacts.flatMap((file, index) => file.sha256 === undefined ? [async () => {
+          const { sha256, size } = await blobs.putBlob(await evidence.readFile(file.path), limits.maxFileBytes);
+          if (size !== file.size) throw new EvidenceIntegrityError(`Evidence file ${file.path} size changed during export`);
+          artifacts[index] = { ...file, sha256 };
+          await update();
+        }] : []),
+        ...subjectInputs.flatMap((file, index) => file.sha256 === undefined ? [async () => {
+          const reader = readers.get(subjectInputKey(file));
+          if (!reader) throw new EvidenceIntegrityError(`Subject input ${file.path} is no longer exported`);
+          const { sha256, size } = await blobs.putBlob(await reader.read(), limits.maxFileBytes);
+          if (size !== file.size) throw new EvidenceIntegrityError(`Subject input ${file.path} size changed during export`);
+          subjectInputs[index] = { ...file, sha256 };
+          await update();
+        }] : []),
+      ];
+      await runSettled(pending, UPLOAD_CONCURRENCY);
+
+      if (!progress.trajectory.done) {
+        const parts = [...progress.trajectory.parts];
+        let afterSeq = progress.trajectory.afterSeq;
+        const save = async (part: TrajectoryPartBuffer, done: boolean) => {
+          if (part.chunks.length > 0) {
+            const storedPart = await blobs.putBlob(new ReadableStream({
+              start(controller) {
+                for (const bytes of part.chunks) controller.enqueue(bytes);
+                controller.close();
+              },
+            }), limits.maxFileBytes);
+            parts.push({ ...storedPart, events: part.chunks.length });
+            afterSeq = part.lastSeq;
+          }
+          progress = { ...progress, trajectory: { afterSeq, parts: [...parts], ...(done ? { done: true as const } : {}) } };
+          await persist(progress);
+        };
+        for await (const part of trajectoryParts(evidence.readTrajectory(afterSeq), afterSeq, limits.maxFileBytes)) {
+          await save(part, false);
+        }
+        await save({ chunks: [], size: 0, lastSeq: afterSeq }, true);
       }
-      const exportedAt = now();
-      const stored = await mapLimited(evidence.artifacts, UPLOAD_CONCURRENCY, async (artifact): Promise<EvidenceArtifact> => {
-        const { sha256, size } = await blobs.putBlob(await evidence.readFile(artifact.path), limits.maxFileBytes);
-        if (size !== artifact.size) throw new EvidenceIntegrityError(`Evidence file ${artifact.path} size changed during export`);
-        return { path: artifact.path, size, mediaType: artifact.mediaType, sha256 };
-      });
-      if (stored.reduce((total, artifact) => total + artifact.size, 0) > limits.maxTotalBytes) {
-        throw new EvidenceIntegrityError("Exported evidence is larger than its limits allow");
-      }
-      const subjectInputs = await mapLimited(evidence.subjectInputs, UPLOAD_CONCURRENCY, async (file) => {
-        const { sha256, size } = await blobs.putBlob(await file.read(), limits.maxFileBytes);
-        if (size !== file.size) throw new EvidenceIntegrityError(`Subject input ${file.path} size changed during export`);
-        return { bundleId: file.bundleId, materialId: file.materialId, path: file.path, mediaType: file.mediaType, sha256, size };
-      });
-      const parts: EvidenceTrajectoryPart[] = [];
-      for await (const part of trajectoryParts(evidence.trajectory, limits.maxFileBytes)) {
-        const storedPart = await blobs.putBlob(new ReadableStream({
-          start(controller) {
-            for (const bytes of part.chunks) controller.enqueue(bytes);
-            controller.close();
-          },
-        }), limits.maxFileBytes);
-        parts.push({ ...storedPart, events: part.events });
-      }
-      const body = {
-        schemaVersion: EVIDENCE_SCHEMA_VERSION,
-        source: { ...evidence.source, exportedAt },
-        artifacts: stored,
-        subjectInputs,
-        trajectory: {
-          format: evidence.trajectoryFormat,
-          parts,
-          events: parts.reduce((count, part) => count + part.events, 0),
-          complete: evidence.trajectoryComplete,
-          ...(evidence.trajectoryIncompleteReason === undefined
-            ? {} : { incompleteReason: evidence.trajectoryIncompleteReason }),
-        },
-        omitted: [...evidence.omitted],
-      } satisfies Omit<EvidenceManifest, "evidenceId">;
-      const evidenceHex = await sha256Hex(canonicalJsonBytes(body));
-      const manifest: EvidenceManifest = { ...body, evidenceId: `sha256:${evidenceHex}` };
-      const bytes = canonicalJsonBytes(manifest);
-      await blobs.putManifest(evidenceHex, bytes);
-      return { evidenceId: manifest.evidenceId, manifestSha256: await sha256Hex(bytes), exportedAt };
+
+      const manifest = await finalizeEvidenceManifest(evidence, progress);
+      // Write-once: replaying a lost response writes the identical manifest under the same ID.
+      await blobs.putManifest(manifest.evidenceHex, manifest.bytes);
+      return manifest.ref;
     },
 
     async open(ref): Promise<EvidenceBundleReader> {
@@ -184,36 +268,90 @@ function compare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-/** Parts retain complete lines and order, with at most one file's bytes buffered. */
-async function* trajectoryParts(events: AsyncIterable<JsonValue>, maxBytes: number): AsyncGenerator<{
+function subjectInputKey(file: { readonly bundleId: string; readonly materialId: string; readonly path: string }): string {
+  return JSON.stringify([file.bundleId, file.materialId, file.path]);
+}
+
+interface TrajectoryPartBuffer {
   readonly chunks: readonly Uint8Array[];
-  readonly events: number;
-}> {
+  readonly size: number;
+  /** Source cursor of the part's last event. */
+  readonly lastSeq: number;
+}
+
+/**
+ * Parts retain complete lines and order, with at most one file's bytes buffered. A part ends only
+ * at an event boundary, so the same events after a part boundary always split the same way. An
+ * event larger than one file can be neither split nor imported, so the export fails on it.
+ */
+async function* trajectoryParts(
+  events: AsyncIterable<ExportedTrajectoryEvent>,
+  afterSeq: number,
+  maxBytes: number,
+): AsyncGenerator<TrajectoryPartBuffer> {
   const encoder = new TextEncoder();
   let chunks: Uint8Array[] = [];
   let size = 0;
-  for await (const event of events) {
-    const bytes = encoder.encode(`${JSON.stringify(event)}\n`);
-    if (bytes.byteLength > maxBytes) throw new EvidenceIntegrityError("One trajectory event exceeds the evidence file byte limit");
-    if (size + bytes.byteLength > maxBytes) {
-      yield { chunks, events: chunks.length };
+  let lastSeq = afterSeq;
+  for await (const { seq, record } of events) {
+    if (!Number.isSafeInteger(seq) || seq <= lastSeq) {
+      throw new EvidenceIntegrityError("Exported trajectory events are out of order");
+    }
+    const bytes = encoder.encode(`${JSON.stringify(record)}\n`);
+    if (bytes.byteLength > maxBytes) {
+      throw new EvidenceIntegrityError(`Trajectory event ${seq} is ${bytes.byteLength} bytes, above the ${maxBytes}-byte evidence file limit`);
+    }
+    if (chunks.length > 0 && size + bytes.byteLength > maxBytes) {
+      yield { chunks, size, lastSeq };
       chunks = [];
       size = 0;
     }
     chunks.push(bytes);
     size += bytes.byteLength;
+    lastSeq = seq;
   }
-  if (chunks.length > 0) yield { chunks, events: chunks.length };
+  if (chunks.length > 0) yield { chunks, size, lastSeq };
 }
 
-async function mapLimited<T, R>(items: readonly T[], limit: number, map: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
+/**
+ * Hands progress to `onProgress` one call at a time. A caller waits until a write including its
+ * progress has finished; progress queued behind a running write is coalesced into the next one.
+ */
+function serialProgress(
+  onProgress: ((progress: EvidenceExportProgress) => Promise<void>) | undefined,
+): (progress: EvidenceExportProgress) => Promise<void> {
+  if (onProgress === undefined) return async () => undefined;
+  let queued: EvidenceExportProgress | undefined;
+  let chain: Promise<void> = Promise.resolve();
+  return (progress) => {
+    const scheduled = queued !== undefined;
+    queued = progress;
+    if (!scheduled) {
+      chain = chain.then(async () => {
+        const next = queued!;
+        queued = undefined;
+        await onProgress(next);
+      });
+    }
+    return chain;
+  };
+}
+
+/** Runs tasks with bounded concurrency; after a failure no new task starts, and every started one settles. */
+async function runSettled(tasks: readonly (() => Promise<void>)[], limit: number): Promise<void> {
   let next = 0;
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await map(items[index]!);
+  let failed = false;
+  let failure: unknown;
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+    while (!failed && next < tasks.length) {
+      const task = tasks[next++]!;
+      try {
+        await task();
+      } catch (error) {
+        if (!failed) failure = error;
+        failed = true;
+      }
     }
   }));
-  return results;
+  if (failed) throw failure;
 }

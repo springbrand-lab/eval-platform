@@ -1,4 +1,4 @@
-import type { EvidenceBundleRef } from "./evidence.js";
+import type { EvidenceBundleRef, EvidenceExportState } from "./evidence.js";
 import type { AgentResourceCollection } from "./resources.js";
 
 export type {
@@ -6,6 +6,8 @@ export type {
   AgentResourceCompleteness,
   AgentResourceCoverage,
   AgentResourceFact,
+  AgentResourceReadiness,
+  AgentResourceReadinessReport,
   AgentResourceScope,
   SubmittedAgentResourceScope,
   AgentResourceSnapshot,
@@ -41,6 +43,51 @@ export interface SamplingStageState {
   readonly evidencePending?: boolean;
   /** Explicit collection-only recovery of an already completed Agent; never submit/restart it. */
   readonly collectionPending?: true;
+  /** The Agent ended before SP finalized its resource snapshot; Runtime waits for it until `deadline`. */
+  readonly resourcesPending?: ResourcesPending;
+  /** The Agent's terminal status could not be confirmed; Runtime re-observes the same Submission without a new Attempt. */
+  readonly observationPending?: RecoveryPasses;
+}
+
+/** A recovery bounded by Runtime passes: how many failed and why the last one did. */
+export interface RecoveryPasses {
+  readonly passes: number;
+  readonly lastError?: string;
+}
+
+/** A recovery bounded by time: the next readiness check is due at `nextAttemptAt`, never after `deadline`. */
+export interface ResourcesPending {
+  readonly deadline: string;
+  readonly nextAttemptAt?: string;
+  readonly lastError?: string;
+}
+
+/** Passes that may fail to confirm one Submission's terminal status before its stage fails. */
+export const OBSERVATION_MAX_PASSES = 5;
+
+/** How long after the Agent ended Runtime waits for a finalized resource snapshot before storing the current one. */
+export const RESOURCE_WAIT_MS = 10 * 60_000;
+
+/** How long a resource wait defers between readiness checks. */
+export const RESOURCE_CHECK_INTERVAL_MS = 60_000;
+
+/** A resource wait that starts at `now`, its first readiness check one interval later. */
+export function startResourceWait(now: string): ResourcesPending {
+  const start = Date.parse(now);
+  return {
+    deadline: new Date(start + RESOURCE_WAIT_MS).toISOString(),
+    nextAttemptAt: new Date(start + RESOURCE_CHECK_INTERVAL_MS).toISOString(),
+  };
+}
+
+/**
+ * The single definition of a stage Runtime still owes work: a pending status, or a finished stage
+ * waiting for its resource snapshot. `observationPending` only exists on a pending status, so it
+ * never keeps a finished stage open. Persistence queries apply it to a Run's members, scoped by
+ * Run kind and stop request.
+ */
+export function isStageRecoveryPending(state: SamplingStageState): boolean {
+  return isPendingSamplingStatus(state.status) || state.resourcesPending !== undefined;
 }
 
 export const AGENT_STATUSES = ["queued", "running", "completed", "failed", "interrupted", "cancelled"] as const;
@@ -156,11 +203,17 @@ export interface Sampling {
   readonly trajectory?: TrajectoryRef;
   /** The frozen artifacts and trajectory every Evaluation of this Sampling reads; absent when not evaluable. */
   readonly evidence?: EvidenceBundleRef;
+  /** Progress of an unfinished or failed evidence export; removed once `evidence` is stored. */
+  readonly evidenceExport?: EvidenceExportState;
 }
 
 /** Chosen per Run; never persisted on the Project. */
 export const RUN_OPERATIONS = ["execution", "pipeline", "evaluation"] as const;
 export type RunOperation = (typeof RUN_OPERATIONS)[number];
+
+/** What a manual recollection of a finished stage reads again. */
+export const RECOLLECT_TARGETS = ["output", "resources"] as const;
+export type RecollectTarget = (typeof RECOLLECT_TARGETS)[number];
 
 /**
  * What the user picked. Expansion happens inside the Project snapshot, never the live catalog:

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
+import { isStageRecoveryPending, RESOURCE_WAIT_MS, type EvaluationRecord, type Sampling, type SamplingStageState } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError, DatasetInputError } from "@eval-platform/eval-dataset";
 import {
   RuntimeEntityNotFoundError,
@@ -15,12 +15,13 @@ import { count, eq, sql } from "drizzle-orm";
 import { PgBoss, type JobWithMetadata } from "pg-boss";
 import pino from "pino";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createRunQueue, openRunBoss, RUN_QUEUE, RUN_QUEUE_OPTIONS, type RunJob, type RunQueue } from "../run-worker-queue.js";
+import { createRunQueue, openRunBoss, RUN_QUEUE, RUN_QUEUE_OPTIONS, type RunJob, type RunQueue, type RunWorkerQueue } from "../run-worker-queue.js";
 import { startEvalRunWorker } from "../worker.js";
 import { createPostgresDatasetStore } from "./dataset.js";
 import { ProjectRunStopConflictError } from "./errors.js";
 import { createPostgresProjectPlanReader, createPostgresWorkerProjectPlanReader } from "./project-plans.js";
 import { createPostgresProjectRunReader } from "./run-view.js";
+import { nextResourceCheckAt } from "./run-records.js";
 import { createPostgresProjectRunControl, createPostgresRuntimeStore, createPostgresWorkerRuntimeStore, readProjectRunState } from "./runtime.js";
 import { data as dataTable, datasets as datasetsTable, evaluations, projectEvaluationPlans, projects, runs, samplings } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
@@ -34,7 +35,7 @@ const OWNER = "user-A";
 describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persistence", () => {
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
   let jobs: PgBoss;
-  let runQueue: RunQueue;
+  let runQueue: RunWorkerQueue;
 
   beforeAll(async () => {
     database = await createTestDatabase(connection!);
@@ -95,7 +96,12 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     const first = await seeded.admit({ operation: "execution", projectSampleIds: [seeded.samples[0]!.projectSampleId] });
     const id = first.command.run.samplingIds[0]!;
     const original = (await store.getSampling(id))!;
-    const completed = { ...original, subjectChatId: "chat", execution: { status: "failed" as const, lastError: "output unavailable" }, executionAttempts: [{ executionAttemptId: "attempt", samplingId: id, attemptNumber: 1, status: "completed" as const, submissionId: "submission", startedAt: "2026-10-16T00:00:00Z", completedAt: "2026-10-16T00:00:01Z" }] };
+    // An exhausted evidence export keeps its progress, so the recollection resumes instead of restarting it.
+    const evidenceExport = { submissionId: "submission", passes: 5, lastError: "evidence export failed: R2 unavailable", progress: {
+      exportedAt: "2026-10-16T00:00:02.000Z", artifacts: [{ path: "/a.txt", size: 1, mediaType: "text/plain", sha256: "a".repeat(64) }],
+      subjectInputs: [], omitted: [], trajectory: { afterSeq: 200, parts: [{ sha256: "b".repeat(64), size: 10, events: 200 }] },
+    } };
+    const completed = { ...original, subjectChatId: "chat", execution: { status: "failed" as const, lastError: "output unavailable" }, evidenceExport, executionAttempts: [{ executionAttemptId: "attempt", samplingId: id, attemptNumber: 1, status: "completed" as const, submissionId: "submission", startedAt: "2026-10-16T00:00:00Z", completedAt: "2026-10-16T00:00:01Z" }] };
     await worker.updateSampling(completed, original);
     const second = await seeded.admit({ operation: "execution", projectSampleIds: [seeded.samples[1]!.projectSampleId] });
     await expect(control.recollect(seeded.projectId, "execution", id)).rejects.toBeInstanceOf(RuntimeProjectBusyError);
@@ -107,6 +113,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     const pending = (await store.getSampling(id))!;
     expect(pending.execution).toEqual({ status: "retrying", collectionPending: true });
     expect(pending.executionAttempts).toEqual(completed.executionAttempts);
+    expect(pending.evidenceExport).toEqual(evidenceExport);
     expect(await jobs.findJobs(RUN_QUEUE, { key: `collection:${first.command.run.runId}` })).toHaveLength(1);
     await worker.updateSampling({ ...pending, execution: { status: "succeeded" } }, pending);
     expect(await control.recollect(seeded.projectId, "execution", id)).toEqual({ runId: first.command.run.runId, queued: false });
@@ -189,15 +196,239 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     await expect(control.recollect(foreignProject.projectId, "evaluation", evaluation.evaluationId)).rejects.toBeInstanceOf(RuntimeEntityNotFoundError);
   });
 
-  it("rejects collection of an unfinished Agent or a stopped Run", async () => {
+  it("rejects collection of an unfinished Agent or a pending stop, and recollects output after a finalized stop", async () => {
     const seeded = await project(); const { store, worker, control } = stores();
     const first = await seeded.admit({ operation: "execution" }); const id = first.command.run.samplingIds[0]!;
+    const runId = first.command.run.runId;
     await settle(worker, [id], "failed");
     await expect(control.recollect(seeded.projectId, "execution", id)).rejects.toMatchObject({ name: "ResultCollectionConflictError" });
     const row = (await store.getSampling(id))!;
     await worker.updateSampling({ ...row, subjectChatId: "chat", executionAttempts: [{ executionAttemptId: "attempt", samplingId: id, attemptNumber: 1, status: "completed", submissionId: "submission", startedAt: "2026-10-16T00:00:00Z", completedAt: "2026-10-16T00:00:01Z" }] }, row);
-    await database.db.update(runs).set({ stopRequested: true, stopFinalized: true }).where(eq(runs.runId, first.command.run.runId));
+    await database.db.update(runs).set({ stopRequested: true }).where(eq(runs.runId, runId));
     await expect(control.recollect(seeded.projectId, "execution", id)).rejects.toMatchObject({ name: "ResultCollectionConflictError" });
+    expect(await worker.markRunStopFinalized(runId)).toBe(true);
+    await expect(control.recollect(seeded.projectId, "execution", id, "resources")).rejects.toMatchObject({ name: "ResultCollectionConflictError" });
+
+    expect(await control.recollect(seeded.projectId, "execution", id)).toEqual({ runId, queued: true });
+    expect(await worker.isRunActive(runId)).toBe(true);
+    expect(await worker.isRunStopPending(runId)).toBe(false);
+    expect(await control.getCurrentRun(seeded.projectId)).toEqual({ runId });
+    // Stopping the recollection reopens the stop, so the Worker finalizes it again.
+    expect(await control.stopRun(seeded.projectId, runId)).toEqual({ runId, stopRequested: true });
+    expect(await worker.isRunStopPending(runId)).toBe(true);
+    expect(await control.getCurrentRun(seeded.projectId)).toEqual({ runId, stopRequested: true });
+  });
+
+  const completedAttempt = (samplingId: string, resources?: NonNullable<Sampling["executionAttempts"][number]["resources"]>) => ({
+    executionAttemptId: "attempt", samplingId, attemptNumber: 1, status: "completed" as const, submissionId: "submission",
+    startedAt: "2026-10-16T00:00:00Z", completedAt: "2026-10-16T00:00:01Z", ...(resources === undefined ? {} : { resources }),
+  });
+  const snapshot = (finalized: boolean) => ({
+    status: "collected" as const,
+    snapshot: {
+      scope: { chatId: "chat", idempotencyKey: "execution", submissionId: "submission" }, observedAt: "2026-10-16T00:00:02Z", finalized,
+      coverage: { usageEvents: "complete" as const, telemetryEvents: "partial" as const, billingSettlements: "complete" as const },
+      usageEvents: [], telemetryEvents: [], billingSettlements: [],
+    },
+  });
+
+  it("keeps a non-stopped Run active exactly while a member stage owes recovery work", async () => {
+    const seeded = await project({ datasets: [{ data: [makeData()] }], evaluation: true });
+    const { worker, control } = stores();
+    const pipeline = await seeded.admit({ operation: "pipeline" });
+    const samplingId = pipeline.command.run.samplingIds[0]!;
+    await settle(worker, [samplingId], "succeeded");
+    expect(await worker.isRunActive(pipeline.command.run.runId)).toBe(false);
+    const finished = (await worker.getSampling(samplingId))!;
+    const deadline = "2026-10-16T00:10:00.000Z";
+    const stages: readonly SamplingStageState[] = [
+      { status: "succeeded" },
+      { status: "failed", lastError: "x" },
+      { status: "succeeded", resourcesPending: { deadline, lastError: "not finalized" } },
+      { status: "failed", resourcesPending: { deadline } },
+      { status: "running", observationPending: { passes: 2 } },
+      { status: "retrying", collectionPending: true },
+    ];
+    let previous = finished;
+    for (const execution of stages) {
+      const next = { ...finished, execution };
+      await worker.updateSampling(next, previous);
+      previous = next;
+      expect(await worker.isRunActive(pipeline.command.run.runId), JSON.stringify(execution)).toBe(isStageRecoveryPending(execution));
+    }
+    const refreshing = { ...finished, execution: { status: "succeeded" as const, resourcesPending: { deadline } } };
+    await worker.updateSampling(refreshing, previous);
+    expect(await control.getCurrentRun(seeded.projectId)).toEqual({ runId: pipeline.command.run.runId });
+    await worker.updateSampling(finished, refreshing);
+    expect(await worker.isRunActive(pipeline.command.run.runId)).toBe(false);
+
+    const evaluation = (await worker.getEvaluation(pipeline.command.run.evaluationIds[0]!))!;
+    const evaluationRefreshing = { ...evaluation, status: { status: "failed" as const, resourcesPending: { deadline } } };
+    await worker.updateEvaluation(evaluationRefreshing, evaluation);
+    expect(await worker.isRunActive(pipeline.command.run.runId)).toBe(true);
+    await worker.updateEvaluation(evaluation, evaluationRefreshing);
+
+    // An evaluation-only Run that reuses the Sampling does not inherit the execution stage's refresh.
+    const evaluating = await seeded.admit({ operation: "evaluation" });
+    for (const id of evaluating.command.run.evaluationIds) {
+      const record = (await worker.getEvaluation(id))!;
+      await worker.updateEvaluation({ ...record, status: { status: "succeeded" } }, record);
+    }
+    expect(await worker.isRunActive(evaluating.command.run.runId)).toBe(false);
+    await worker.updateSampling(refreshing, finished);
+    expect(await worker.isRunActive(pipeline.command.run.runId)).toBe(true);
+    expect(await worker.isRunActive(evaluating.command.run.runId)).toBe(false);
+
+    // A stop is never held open by a refresh: the flags are ignored once stop is requested.
+    await worker.requestRunStop(pipeline.command.run.runId);
+    expect(await worker.markRunStopFinalized(pipeline.command.run.runId)).toBe(true);
+    expect(await worker.isRunActive(pipeline.command.run.runId)).toBe(false);
+    expect(await control.getCurrentRun(seeded.projectId)).toBeNull();
+  });
+
+  it("queues a resource-only recollection of a finished stage without changing its status", async () => {
+    const seeded = await project({ datasets: [{ data: [makeData()] }] });
+    const { store, worker, control } = stores();
+    const first = await seeded.admit({ operation: "execution" });
+    const runId = first.command.run.runId;
+    const id = first.command.run.samplingIds[0]!;
+    await expect(control.recollect(seeded.projectId, "execution", id, "resources")).rejects.toMatchObject({ name: "ResultCollectionConflictError" });
+    await settle(worker, [id], "succeeded");
+    const settled = (await store.getSampling(id))!;
+    await expect(control.recollect(seeded.projectId, "execution", id, "resources")).rejects.toMatchObject({ name: "ResultCollectionConflictError" });
+    const unfinalized = { ...settled, subjectChatId: "chat", executionAttempts: [completedAttempt(id, snapshot(false))] };
+    await worker.updateSampling(unfinalized, settled);
+    const requests = await Promise.all([
+      control.recollect(seeded.projectId, "execution", id, "resources"),
+      control.recollect(seeded.projectId, "execution", id, "resources"),
+    ]);
+    expect(requests).toEqual([{ runId, queued: true }, { runId, queued: true }]);
+    const pending = (await store.getSampling(id))!;
+    expect(pending.execution).toEqual({ status: "succeeded", resourcesPending: { deadline: expect.any(String), nextAttemptAt: expect.any(String) } });
+    expect(Date.parse(pending.execution.resourcesPending!.nextAttemptAt!)).toBeLessThanOrEqual(Date.now());
+    expect(pending.executionAttempts).toEqual(unfinalized.executionAttempts);
+    expect(await jobs.findJobs(RUN_QUEUE, { key: `collection:${runId}` })).toHaveLength(1);
+    expect(await worker.isRunActive(runId)).toBe(true);
+    // Output recollection stays a no-op for a succeeded stage.
+    expect(await control.recollect(seeded.projectId, "execution", id)).toEqual({ runId, queued: false });
+
+    const finalized = { ...pending, execution: { status: "succeeded" as const }, executionAttempts: [completedAttempt(id, snapshot(true))] };
+    await worker.updateSampling(finalized, pending);
+    expect(await control.recollect(seeded.projectId, "execution", id, "resources")).toEqual({ runId, queued: false });
+    expect((await store.getSampling(id))!.execution).toEqual({ status: "succeeded" });
+
+    const failed = { ...finalized, execution: { status: "failed" as const, lastError: "resources failed" },
+      executionAttempts: [completedAttempt(id, { status: "failed", scope: { chatId: "chat", idempotencyKey: "execution" }, collectedAt: "2026-10-16T00:00:02Z", error: "x" })] };
+    await worker.updateSampling(failed, finalized);
+    expect(await control.recollect(seeded.projectId, "execution", id, "resources")).toEqual({ runId, queued: true });
+    expect((await store.getSampling(id))!.execution).toEqual({ status: "failed", lastError: "resources failed", resourcesPending: { deadline: expect.any(String), nextAttemptAt: expect.any(String) } });
+
+    await database.db.update(runs).set({ stopRequested: true, stopFinalized: true }).where(eq(runs.runId, runId));
+    await expect(control.recollect(seeded.projectId, "execution", id, "resources")).rejects.toMatchObject({ name: "ResultCollectionConflictError" });
+  });
+
+  it("queues a resource-only recollection of a finished Evaluation", async () => {
+    const seeded = await project({ datasets: [{ data: [makeData()] }], evaluation: true });
+    const { store, worker, control } = stores();
+    const first = await seeded.admit({ operation: "pipeline" });
+    await settle(worker, first.command.run.samplingIds, "succeeded");
+    const evaluation = (await store.getEvaluation(first.command.run.evaluationIds[0]!))!;
+    const completed = { ...evaluation, chatId: "evaluator-chat", attempts: [{ evaluationAttemptId: "eval-attempt", evaluationId: evaluation.evaluationId,
+      attemptNumber: 1, status: "completed" as const, submissionId: "eval-submission", startedAt: "2026-10-16T00:00:00Z", completedAt: "2026-10-16T00:00:01Z",
+      resources: snapshot(false) }] };
+    await worker.updateEvaluation(completed, evaluation);
+    expect(await control.recollect(seeded.projectId, "evaluation", evaluation.evaluationId, "resources"))
+      .toEqual({ runId: first.command.run.runId, queued: true });
+    expect((await store.getEvaluation(evaluation.evaluationId))!.status).toEqual({ status: "succeeded", resourcesPending: { deadline: expect.any(String), nextAttemptAt: expect.any(String) } });
+  });
+
+  it("queues a resource recollection exactly when an ended Attempt still owes resources, as Runtime refreshes it", async () => {
+    const seeded = await project({ datasets: [{ data: [makeData()] }] });
+    const { store, worker, control } = stores();
+    const { command } = await seeded.admit({ operation: "execution" });
+    const runId = command.run.runId;
+    const id = command.run.samplingIds[0]!;
+    await settle(worker, [id], "failed");
+    const settled = (await store.getSampling(id))!;
+    const failedAgent = { ...settled, subjectChatId: "chat", executionAttempts: [{
+      ...completedAttempt(id, snapshot(false)), status: "failed" as const, error: "Agent failed",
+    }] };
+    await worker.updateSampling(failedAgent, settled);
+    const before = Date.now();
+    expect(await control.recollect(seeded.projectId, "execution", id, "resources")).toEqual({ runId, queued: true });
+    const deadline = Date.parse((await store.getSampling(id))!.execution.resourcesPending!.deadline);
+    expect(deadline - before).toBeGreaterThanOrEqual(RESOURCE_WAIT_MS);
+    expect(deadline - Date.now()).toBeLessThanOrEqual(RESOURCE_WAIT_MS);
+
+    const pending = (await store.getSampling(id))!;
+    const earlierOwes = { ...pending, execution: { status: "failed" as const }, executionAttempts: [
+      { ...completedAttempt(id, snapshot(false)), status: "failed" as const },
+      { ...completedAttempt(id, snapshot(true)), executionAttemptId: "attempt-2", attemptNumber: 2 },
+    ] };
+    await worker.updateSampling(earlierOwes, pending);
+    expect(await control.recollect(seeded.projectId, "execution", id, "resources")).toEqual({ runId, queued: true });
+
+    const owesNothing = (await store.getSampling(id))!;
+    const settledAll = { ...owesNothing, execution: { status: "failed" as const }, executionAttempts: [
+      { ...completedAttempt(id, snapshot(true)), status: "failed" as const },
+      { executionAttemptId: "attempt-2", samplingId: id, attemptNumber: 2, status: "running" as const, submissionId: "submission-2",
+        startedAt: "2026-10-16T00:00:02Z", resources: snapshot(false) },
+    ] };
+    await worker.updateSampling(settledAll, owesNothing);
+    expect(await control.recollect(seeded.projectId, "execution", id, "resources")).toEqual({ runId, queued: false });
+  });
+
+  it("schedules the next pass of a Run waiting only for resources at its earliest due check", async () => {
+    const seeded = await project({ datasets: [{ data: [makeData()] }], evaluation: true });
+    const { worker } = stores();
+    const { command } = await seeded.admit({ operation: "pipeline" });
+    const runId = command.run.runId;
+    const samplingId = command.run.samplingIds[0]!;
+    const deadline = new Date(Date.now() + RESOURCE_WAIT_MS).toISOString();
+    const soon = new Date(Date.now() + 30_000).toISOString();
+    const later = new Date(Date.now() + 60_000).toISOString();
+    expect(await nextResourceCheckAt(database.db, runId)).toBeNull();
+    await settle(worker, [samplingId], "succeeded");
+    const sampling = (await worker.getSampling(samplingId))!;
+    const waiting = { ...sampling, execution: { status: "succeeded" as const, resourcesPending: { deadline, nextAttemptAt: later } } };
+    await worker.updateSampling(waiting, sampling);
+    expect(await nextResourceCheckAt(database.db, runId)).toBe(Date.parse(later));
+    const evaluation = (await worker.getEvaluation(command.run.evaluationIds[0]!))!;
+    const evaluationWaiting = { ...evaluation, status: { status: "failed" as const, resourcesPending: { deadline, nextAttemptAt: soon } } };
+    await worker.updateEvaluation(evaluationWaiting, evaluation);
+    expect(await nextResourceCheckAt(database.db, runId)).toBe(Date.parse(soon));
+
+    // An admitted job is the active one while its handler runs; the deferral completes it and wakes the Run later.
+    const [job] = await jobs.fetch<RunJob>(RUN_QUEUE);
+    expect(job?.data.runId).toBe(runId);
+    expect(await worker.deferResourceCheck(runId, job!.id)).toBe(soon);
+    expect(await runJobStates(runId)).toEqual(["completed"]);
+    const [wake] = await jobs.findJobs<RunJob>(RUN_QUEUE, { key: `resources:${runId}` });
+    expect(wake).toMatchObject({ state: "created", data: { runId }, retryCount: 0, policy: RUN_QUEUE_OPTIONS.policy, retryLimit: RUN_QUEUE_OPTIONS.retryLimit });
+    expect(wake!.startAfter.toISOString()).toBe(soon);
+
+    // A later deferral moves the queued wake-up instead of keeping a stale one, and frees the Run's own key.
+    await database.db.transaction((transaction) => runQueue.enqueue(transaction, runId));
+    const [next] = await jobs.fetch<RunJob>(RUN_QUEUE, { includeMetadata: true });
+    expect(next?.singletonKey).toBe(runId);
+    await worker.updateEvaluation({ ...evaluationWaiting, status: { status: "failed" } }, evaluationWaiting);
+    expect(await worker.deferResourceCheck(runId, next!.id)).toBe(later);
+    const wakes = await jobs.findJobs<RunJob>(RUN_QUEUE, { key: `resources:${runId}` });
+    expect(wakes.map((item) => [item.state, item.startAfter.toISOString()])).toEqual([["created", later]]);
+    await database.db.transaction((transaction) => runQueue.enqueue(transaction, runId));
+    expect(await runJobStates(runId)).toEqual(expect.arrayContaining(["created"]));
+
+    // Overdue, never scheduled, pending or stopped work is not an idle wait: the job retries with backoff instead.
+    const current = (await worker.getSampling(samplingId))!;
+    const overdue = { ...current, execution: { status: "succeeded" as const, resourcesPending: { deadline } } };
+    await worker.updateSampling(overdue, current);
+    expect(await nextResourceCheckAt(database.db, runId)).toBe(-Infinity);
+    expect(await worker.deferResourceCheck(runId, crypto.randomUUID())).toBeNull();
+    await worker.updateSampling({ ...overdue, execution: { status: "retrying" } }, overdue);
+    expect(await nextResourceCheckAt(database.db, runId)).toBeNull();
+    await worker.updateSampling(waiting, { ...overdue, execution: { status: "retrying" } });
+    await worker.requestRunStop(runId);
+    expect(await nextResourceCheckAt(database.db, runId)).toBeNull();
   });
 
   describe("Dataset catalog", () => {
@@ -569,7 +800,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
       expect(await foreign.stopRun(projectId, command.run.runId)).toBeNull();
       expect(await control.stopRun(projectId, command.run.runId)).toEqual({ runId: command.run.runId, stopRequested: true });
       expect(await control.stopRun(projectId, command.run.runId)).toEqual({ runId: command.run.runId, stopRequested: true });
-      expect(await worker.isRunStopRequested(command.run.runId)).toBe(true);
+      expect(await worker.isRunStopPending(command.run.runId)).toBe(true);
       expect(await worker.markRunStopFinalized(command.run.runId)).toBe(false);
       await settle(worker, command.run.samplingIds, "cancelled");
       expect(await control.getCurrentRun(projectId)).toEqual({ runId: command.run.runId, stopRequested: true });
@@ -609,8 +840,9 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
       const { projectId } = await project();
       const { plans, store } = stores();
       const command = await buildCommand(plans, store, { projectId, operation: "execution" });
-      const rollback: RunQueue = {
-        async enqueue(transaction, runId) {
+      const rollback = {
+        ...runQueue,
+        async enqueue(transaction: Parameters<RunQueue["enqueue"]>[0], runId: string) {
           await runQueue.enqueue(transaction, runId);
           throw new Error("commit aborted");
         },
@@ -767,7 +999,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
         await control.stopRun(projectId, command.run.runId);
         await vi.waitFor(async () => expect(await runJobStates(command.run.runId)).toEqual(["completed"]), { timeout: 10_000 });
         expect(resumer.interrupt).toHaveBeenCalledWith(command.run.runId);
-        expect(resumer.stop).toHaveBeenCalledExactlyOnceWith(command.run.runId);
+        expect(resumer.stop).toHaveBeenCalledExactlyOnceWith(command.run.runId, expect.any(Object));
         expect((await store.getRun(command.run.runId))?.stopFinalized).toBe(true);
       } finally {
         await worker.close();

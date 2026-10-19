@@ -7,6 +7,7 @@ import {
   EVIDENCE_TRAJECTORY_ROOT,
   EVIDENCE_SUBJECT_INPUTS_ROOT,
   EVALUATION_OUTPUT_SCHEMA_PATH,
+  isPendingSamplingStatus,
 } from "@eval-platform/eval-contracts";
 import type {
   EvaluationAgentOutput,
@@ -30,8 +31,11 @@ import {
   describeAgentError,
   reportError,
   runAgentLifecycle,
+  withContext,
   type StageDependencies,
 } from "./agent-lifecycle.js";
+import { evaluationAgentEnded, isAcceptedEvaluation, unconfirmedObservation, withRecoveryBookkeeping } from "./recovery.js";
+import { refreshFinishedStage } from "./resource-refresh.js";
 import { publishEvaluationScore } from "./scores.js";
 import { evaluationResultFailure, resolveEvaluationResult, resultInstruction } from "./results.js";
 
@@ -65,58 +69,85 @@ export function requireEvaluationPrompt(sample: ProjectSample): string {
 }
 
 export async function evaluateSampling(
-  dependencies: StageDependencies,
+  stageDependencies: StageDependencies,
   input: EvaluateSamplingInput,
 ): Promise<RuntimeEvaluationContext> {
+  const { samplingId, evaluationId } = input.context.evaluation;
+  const dependencies = withContext(stageDependencies, { stage: "evaluation", samplingId, evaluationId });
   const evaluatorHarness = input.harnessConfig;
   const agentConfig = evaluatorHarness.agentConfig;
   const harnessRuntime = evaluatorHarness.runtime;
   const { sampling, evaluation, sample } = input.context;
   let currentEvaluation = evaluation;
-  const retryController = dependencies.createRetryController(input.retryPolicy);
-  const acceptedResult = (record: EvaluationRecord): boolean =>
-    record.status.status === "succeeded" && record.output?.structuredOutput?.source === "submission";
+  const retryController = dependencies.createRetryController(input.retryPolicy, dependencies.log);
   const keepAccepted = (next: EvaluationRecord, accepted: EvaluationRecord): EvaluationRecord => {
-    if (!acceptedResult(accepted) || !accepted.output?.structuredOutput) return next;
+    if (!isAcceptedEvaluation(accepted) || !accepted.output?.structuredOutput) return next;
     const { error: _error, ...output } = next.output ?? accepted.output;
-    return { ...next, status: accepted.status, output: {
+    // The accepted status stays; only the writer's resource bookkeeping is taken. Observation is moot.
+    const { resourcesPending: _resources, observationPending: _observation, ...status } = accepted.status;
+    const resourcesPending = next.status.resourcesPending;
+    return { ...next, status: { ...status, ...(resourcesPending === undefined ? {} : { resourcesPending }) }, output: {
       ...output, status: "succeeded", structuredOutput: accepted.output.structuredOutput,
     } };
   };
+  const withBookkeeping = (record: EvaluationRecord, previous: EvaluationRecord): EvaluationRecord => ({
+    ...record, status: withRecoveryBookkeeping(record.status, previous.status, record.attempts, evaluationAgentEnded(record), dependencies),
+  });
   const observationFacts = ({ status: _status, output: _output, ...facts }: EvaluationRecord) => facts;
   const write = (next: EvaluationRecord, expected: EvaluationRecord) => persistRuntimeRecord({
     record: next, expected,
     write: (record, previous) => dependencies.store.updateEvaluation(record, previous),
     read: () => dependencies.store.getEvaluation(next.evaluationId), retryController, sleep: dependencies.sleep,
   });
-  const persistEvaluation = async (next: EvaluationRecord): Promise<void> => {
-    let update = keepAccepted(next, currentEvaluation);
+  /** Writes the record prepared against its base, rebasing only onto an accepted result committed meanwhile. */
+  const writePrepared = async (prepare: (base: EvaluationRecord) => EvaluationRecord): Promise<void> => {
+    let update = prepare(currentEvaluation);
     try {
       await write(update, currentEvaluation);
     } catch (error) {
       if (!(error instanceof RuntimeRecordPersistenceError) || error.outcome !== "conflict") throw error;
-      const stored = await dependencies.store.getEvaluation(next.evaluationId);
+      const stored = await dependencies.store.getEvaluation(currentEvaluation.evaluationId);
       // Rebase only the API's completion fields; never overwrite concurrent Attempt or stop changes.
-      if (!stored || !acceptedResult(stored) || !equalJson(observationFacts(stored), observationFacts(currentEvaluation))) throw error;
-      update = keepAccepted(next, stored);
+      if (!stored || !isAcceptedEvaluation(stored) || !equalJson(observationFacts(stored), observationFacts(currentEvaluation))) throw error;
+      update = prepare(stored);
       await write(update, stored);
     }
     currentEvaluation = update;
   };
+  const persistRecord = (next: EvaluationRecord): Promise<void> => writePrepared((base) => keepAccepted(next, base));
+  /** Writes this record with recovery flags derived from the Attempts it commits. */
+  const persist = (next: EvaluationRecord): Promise<void> => writePrepared((base) => withBookkeeping(keepAccepted(next, base), base));
+  if (currentEvaluation.status.resourcesPending && !isPendingSamplingStatus(currentEvaluation.status.status)) {
+    await refreshFinishedStage(dependencies, {
+      stage: "evaluation",
+      samplingId: sampling.samplingId,
+      handle: currentEvaluation.chatId === undefined ? undefined : {
+        ownerUserId: agentConfig.ownerUserId, chatId: currentEvaluation.chatId, samplingId: sampling.samplingId,
+        evaluationId: currentEvaluation.evaluationId, role: "evaluator", framework: evaluatorHarness.framework,
+      },
+      harnessConfig: evaluatorHarness,
+      retryController,
+      attempts: currentEvaluation.attempts,
+      state: currentEvaluation.status,
+      agentEnded: evaluationAgentEnded(currentEvaluation),
+      persist: (attempts, status) => persistRecord({ ...currentEvaluation, attempts, status }),
+    });
+    return { ...input.context, evaluation: currentEvaluation };
+  }
   if (sampling.execution.status !== "succeeded" || sampling.artifacts === undefined || sampling.trajectory === undefined) {
-    await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no successful execution output"));
+    await persist(withEvaluationStatus(currentEvaluation, "failed", "sampling has no successful execution output"));
     return { ...input.context, evaluation: currentEvaluation };
   }
   const evidenceRef = sampling.evidence;
   if (evidenceRef === undefined) {
-    await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no evidence bundle"));
+    await persist(withEvaluationStatus(currentEvaluation, "failed", "sampling has no evidence bundle"));
     return { ...input.context, evaluation: currentEvaluation };
   }
 
   // The score is synced to the Subject Chat's session; the Evaluator never touches that Chat.
   const subjectChatId = sampling.subjectChatId;
   if (!subjectChatId) {
-    await persistEvaluation(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject Chat"));
+    await persist(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject Chat"));
     return { ...input.context, evaluation: currentEvaluation };
   }
 
@@ -142,7 +173,7 @@ export async function evaluateSampling(
       if (scoreSync.lastError !== undefined) {
         reportError(dependencies.onError, new Error(`Evaluation ${currentEvaluation.evaluationId} score was not synced: ${scoreSync.lastError}`));
       }
-      await persistEvaluation({ ...currentEvaluation, scoreSync });
+      await persist({ ...currentEvaluation, scoreSync });
     }
   }
 
@@ -168,7 +199,7 @@ export async function evaluateSampling(
     }
     const chatId = currentEvaluation.chatId ?? dependencies.idFactory();
     if (currentEvaluation.chatId === undefined) {
-      await persistEvaluation({
+      await persist({
         ...currentEvaluation,
         evaluator: agentConfig,
         chatId,
@@ -203,7 +234,7 @@ export async function evaluateSampling(
             // before creating another Attempt; the local snapshot can be stale.
             try {
               const latest = await dependencies.store.getEvaluation(currentEvaluation.evaluationId);
-              if (latest && acceptedResult(latest)) {
+              if (latest && isAcceptedEvaluation(latest)) {
                 currentEvaluation = latest;
                 return { shouldRetry: false };
               }
@@ -215,6 +246,7 @@ export async function evaluateSampling(
         },
       },
       attempts: currentEvaluation.attempts,
+      attemptId: (attempt) => attempt.evaluationAttemptId,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({
         evaluationAttemptId: attemptId,
         evaluationId: currentEvaluation.evaluationId,
@@ -223,7 +255,7 @@ export async function evaluateSampling(
         startedAt,
       }),
       appendAttempt: async (attempt) => {
-        await persistEvaluation({
+        await persist({
           ...currentEvaluation,
           attempts: [...currentEvaluation.attempts, attempt],
         });
@@ -234,7 +266,7 @@ export async function evaluateSampling(
         ));
         if (!existing) throw new Error(`Unknown evaluation attempt ${attempt.evaluationAttemptId}`);
         const updated = applyAttemptPatch(existing, patch);
-        await persistEvaluation({
+        await persist({
           ...currentEvaluation,
           attempts: currentEvaluation.attempts.map((item) => (
             item.evaluationAttemptId === updated.evaluationAttemptId ? updated : item
@@ -243,7 +275,7 @@ export async function evaluateSampling(
         return updated;
       },
       setSamplingStatus: async (status, lastError) => {
-        await persistEvaluation(withEvaluationStatus(currentEvaluation, status, lastError));
+        await persist(withEvaluationStatus(currentEvaluation, status, lastError));
       },
       prepare: async (handle) => {
         await dependencies.harness.materializeInitialData({
@@ -276,19 +308,21 @@ export async function evaluateSampling(
     // Only a valid result the platform holds makes the Evaluation succeed; a missing or invalid one is
     // kept as evidence and never re-runs the Evaluator, so it is not scored twice.
     const results = dependencies.results;
+    const submissionId = currentEvaluation.attempts.at(-1)?.submissionId;
     const output = results === undefined ? result.output : await collectOutputWithRetry({
       stage: "evaluation", retryController, sleep: dependencies.sleep,
       collect: () => resolveEvaluationResult({
         port: results, evaluationId: currentEvaluation.evaluationId, output: result.output,
-        readFinalReply: () => dependencies.harness.readFinalReply({
+        readFinalReply: async () => submissionId === undefined ? undefined : dependencies.harness.readFinalReply({
           handle: evaluatorHandle,
+          submissionId,
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         }),
       }),
     });
     const resultFailure = results === undefined ? undefined : evaluationResultFailure(results, input.evaluationOutputSchema, output);
     if (resultFailure !== undefined) {
-      await persistEvaluation({
+      await persist({
         ...currentEvaluation,
         evaluator: agentConfig,
         status: { status: "failed", lastError: resultFailure },
@@ -297,7 +331,7 @@ export async function evaluateSampling(
       return { ...input.context, evaluation: currentEvaluation };
     }
     // The raw result stays the record of truth (Metrics validates it); only a valid score is synced.
-    await persistEvaluation({
+    await persist({
       ...currentEvaluation,
       evaluator: agentConfig,
       status: { status: "succeeded" },
@@ -308,8 +342,11 @@ export async function evaluateSampling(
   } catch (error) {
     // MCP may have committed while this worker was observing SP or writing stale Attempt facts.
     const accepted = await dependencies.store.getEvaluation(currentEvaluation.evaluationId);
-    if (accepted?.status.status === "succeeded" && accepted.output?.structuredOutput?.source === "submission") {
+    if (accepted && isAcceptedEvaluation(accepted)) {
       currentEvaluation = accepted;
+      // Observation loss after acceptance is not a failure; the unread resources become a refresh.
+      const settled = withBookkeeping(accepted, accepted);
+      if (!equalJson(settled, accepted)) await persistRecord(settled);
       await syncScore();
       return { ...input.context, evaluation: currentEvaluation };
     }
@@ -322,7 +359,12 @@ export async function evaluateSampling(
     });
     currentEvaluation = stored;
     if (currentEvaluation.status.status === "succeeded") return { ...input.context, evaluation: currentEvaluation };
-    await persistEvaluation({
+    const lastAttempt = failureBase.attempts.at(-1);
+    if (error instanceof SubmissionStatusError && lastAttempt && lastAttempt.completedAt === undefined) {
+      await persist({ ...failureBase, evaluator: agentConfig, status: unconfirmedObservation("evaluation", failureBase.status, details.message) });
+      return { ...input.context, evaluation: currentEvaluation };
+    }
+    await persist({
       ...failureBase,
       evaluator: agentConfig,
       status: { status: dependencies.results?.submission && error instanceof SubmissionStatusError ? "retrying" : "failed", lastError: details.message },

@@ -8,7 +8,8 @@ export const RUN_QUEUE = "eval-runs";
 /**
  * One queued-or-active job per Run (`singletonKey` = Run ID): a stop request sent while the
  * Run already has a job is absorbed by it. Heartbeats detect a crashed Worker; expiry is the
- * pg-boss maximum so a long Run is not cut short. Retries back off while a Run stays active.
+ * pg-boss maximum so a long Run is not cut short. Retries back off while a Run stays active with
+ * pending work; a Run waiting only for resource checks is deferred instead (`RunWorkerQueue.defer`).
  */
 export const RUN_QUEUE_OPTIONS = {
   policy: "exclusive",
@@ -28,6 +29,14 @@ export interface RunJob {
 export interface RunQueue {
   /** Writes the Run job through the caller's transaction, so it commits or rolls back with the Run facts. */
   enqueue(transaction: DrizzleTransactionLike, runId: string, reason?: "collection"): Promise<void>;
+}
+
+export interface RunWorkerQueue extends RunQueue {
+  /**
+   * Completes the active job and schedules the Run's next pass at `startAfter` under its own key, both
+   * in the caller's transaction, so an idle wait spends no retry and absorbs no stop or recollection.
+   */
+  defer(transaction: DrizzleTransactionLike, runId: string, jobId: string, startAfter: Date): Promise<void>;
 }
 
 export interface RunQueueProducer extends RunQueue {
@@ -53,13 +62,20 @@ export async function openRunBoss(
   }
 }
 
-export function createRunQueue(boss: Pick<PgBoss, "send">): RunQueue {
+export function createRunQueue(boss: Pick<PgBoss, "send" | "complete" | "upsert">): RunWorkerQueue {
   return {
     async enqueue(transaction, runId, reason) {
       const job: RunJob = { runId };
       // A completed stage can be recovered while its previous job is still settling.
       // Give recovery its own deduplicated wake-up so that old job cannot absorb and lose it.
       await boss.send(RUN_QUEUE, job, { singletonKey: reason === "collection" ? `collection:${runId}` : runId, db: fromDrizzle(transaction, sql) });
+    },
+    async defer(transaction, runId, jobId, startAfter) {
+      const db = fromDrizzle(transaction, sql);
+      const job: RunJob = { runId };
+      await boss.complete(RUN_QUEUE, jobId, null, { db });
+      // Moves an already deferred wake-up to the latest earliest due time instead of keeping a stale one.
+      await boss.upsert(RUN_QUEUE, job, { singletonKey: `resources:${runId}`, startAfter, db });
     },
   };
 }

@@ -16,7 +16,7 @@ import { createAgentConfigService } from "../agent-configs.js";
 import { createOwnerServices } from "../owner-services.js";
 import { apiError } from "../lib/api-errors.js";
 import { createProjectService } from "../projects/service.js";
-import { createRunQueue, openRunBoss, RUN_QUEUE, type RunQueue } from "../run-worker-queue.js";
+import { createRunQueue, openRunBoss, RUN_QUEUE, type RunWorkerQueue } from "../run-worker-queue.js";
 import type { BundleDirectory } from "../sp/bundle-directory.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "../test-support.js";
 import type { PgBoss } from "pg-boss";
@@ -59,7 +59,7 @@ const scoreSchema = JSON.stringify({ type: "object", properties: { score: { type
 describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Metrics and observation", () => {
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
   let jobs: PgBoss;
-  let runQueue: RunQueue;
+  let runQueue: RunWorkerQueue;
   let stub: ReturnType<typeof createStubSp>;
 
   beforeAll(async () => {

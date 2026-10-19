@@ -1,5 +1,7 @@
 import { AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectSchema } from "@eval-platform/eval-contracts";
 import type {
+  AgentResourceReadiness,
+  AgentResourceReadinessReport,
   AgentResourceSnapshot,
   EvaluationAgentOutput,
   EvaluationStructuredOutput,
@@ -152,10 +154,21 @@ export function evaluationOutput(value: unknown): EvaluationAgentOutput {
 }
 
 const completenessSchema = z.enum(["complete", "partial", "unavailable"]);
+const count = z.number().int().nonnegative().safe();
 const factsSchema = z.array(z.record(z.string(), z.json()));
 
+const scopeSchema = z.object({ chatId: id, idempotencyKey: id, submissionId: id });
+
+const readinessSchema = z.object({
+  receiptTerminal: z.boolean(),
+  stateUnreadable: z.boolean(),
+  pendingTelemetryEvents: count,
+  pendingRuntimeEvents: count,
+  actionCharges: z.object({ complete: z.boolean(), unsettledExecutions: count, missingExecutionIds: count }),
+}) satisfies z.ZodType<AgentResourceReadiness>;
+
 const resourceSnapshotSchema = z.object({
-  scope: z.object({ chatId: id, idempotencyKey: id, submissionId: id }),
+  scope: scopeSchema,
   observedAt: id,
   finalized: z.boolean(),
   coverage: z.object({
@@ -166,10 +179,20 @@ const resourceSnapshotSchema = z.object({
   usageEvents: factsSchema,
   telemetryEvents: factsSchema,
   billingSettlements: factsSchema,
+  readiness: readinessSchema,
 }) satisfies z.ZodType<AgentResourceSnapshot>;
 
 export function resourceSnapshot(value: unknown): AgentResourceSnapshot {
   return response(resourceSnapshotSchema, value, "resource snapshot");
+}
+
+export function resourceReadiness(value: unknown): AgentResourceReadinessReport {
+  return response(z.object({
+    scope: scopeSchema,
+    observedAt: id,
+    finalized: z.boolean(),
+    readiness: readinessSchema,
+  }) satisfies z.ZodType<AgentResourceReadinessReport>, value, "resource readiness");
 }
 
 export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact[] {

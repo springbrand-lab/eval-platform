@@ -547,13 +547,52 @@ it("validates a complete case list before dispatching an atomic append", async (
   expect(app.services.datasets.addData).not.toHaveBeenCalled();
 });
 
+const collect = (app: ReturnType<typeof setup>, init: RequestInit) => app.request("/api/projects/project-1/samplings/sample-1/collect", init);
+
 it("routes collection requests to the scoped queue command without Run admission", async () => {
   const app = setup();
-  expect((await app.request("/api/projects/project-1/samplings/sample-1/collect", jsonRequest("POST", {}))).status).toBe(202);
-  expect(app.services.projectRuns.recollect).toHaveBeenCalledWith("project-1", "execution", "sample-1");
-  expect((await app.request("/api/projects/project-1/evaluations/eval-1/collect", jsonRequest("POST", {}))).status).toBe(202);
-  expect(app.services.projectRuns.recollect).toHaveBeenCalledWith("project-1", "evaluation", "eval-1");
+  expect((await collect(app, jsonRequest("POST", {}))).status).toBe(202);
+  expect(app.services.projectRuns.recollect).toHaveBeenCalledWith("project-1", "execution", "sample-1", undefined);
+  expect((await app.request("/api/projects/project-1/evaluations/eval-1/collect", jsonRequest("POST", { target: "resources" }))).status).toBe(202);
+  expect(app.services.projectRuns.recollect).toHaveBeenCalledWith("project-1", "evaluation", "eval-1", "resources");
   expect(app.services.admission.submit).not.toHaveBeenCalled();
+});
+
+it("accepts a collection request without body bytes, whatever its Content-Type", async () => {
+  const app = setup();
+  expect((await collect(app, authorized("session", { method: "POST" }))).status).toBe(202);
+  expect((await collect(app, jsonRequest("POST", ""))).status).toBe(202);
+  expect(app.services.projectRuns.recollect).toHaveBeenCalledTimes(2);
+  expect(app.services.projectRuns.recollect).toHaveBeenLastCalledWith("project-1", "execution", "sample-1", undefined);
+});
+
+it("returns the queued collection for a resource target", async () => {
+  const app = setup();
+  const resources = await collect(app, jsonRequest("POST", { target: "resources" }));
+  expect(resources.status).toBe(202);
+  expect(await resources.json()).toMatchObject({ msg: { runId: "run-1", queued: true } });
+  expect(app.services.projectRuns.recollect).toHaveBeenLastCalledWith("project-1", "execution", "sample-1", "resources");
+});
+
+it("rejects an unknown collection target or field with 422", async () => {
+  const app = setup();
+  for (const body of [{ target: "trajectory" }, { target: "resources", extra: true }]) {
+    expect((await collect(app, jsonRequest("POST", body))).status).toBe(422);
+  }
+  expect(app.services.projectRuns.recollect).not.toHaveBeenCalled();
+});
+
+it("rejects a non-object collection body with 400", async () => {
+  const app = setup();
+  expect((await collect(app, jsonRequest("POST", []))).status).toBe(400);
+  expect(app.services.projectRuns.recollect).not.toHaveBeenCalled();
+});
+
+it("rejects a non-JSON collection body with 415", async () => {
+  const app = setup();
+  const init = authorized("session", { method: "POST", body: "{\"target\":\"resources\"}", headers: { "Content-Type": "text/plain" } });
+  expect((await collect(app, init)).status).toBe(415);
+  expect(app.services.projectRuns.recollect).not.toHaveBeenCalled();
 });
 
  it("returns lightweight Run evaluation records without raw resource or output payloads", async () => {

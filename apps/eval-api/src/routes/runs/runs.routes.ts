@@ -1,12 +1,12 @@
 import { createRoute, z } from "@hono/zod-openapi";
-import { RUN_OPERATIONS, type EvaluationRecord, type RunHandle, type RunSnapshot, type Sampling } from "@eval-platform/eval-contracts";
+import { RECOLLECT_TARGETS, RUN_OPERATIONS, type EvaluationRecord, type RunHandle, type RunSnapshot, type Sampling } from "@eval-platform/eval-contracts";
 import { httpErrorSchema } from "@eval-platform/eval-contracts/http-errors";
 import { platformIdSchema } from "@eval-platform/eval-dataset";
 import type { RunPreview, SamplingSnapshot } from "@eval-platform/eval-runtime";
 import { responseSchema } from "@springbrand/http/catalog";
 import { jsonContent } from "stoker/openapi/helpers";
-import { jsonBody } from "../../lib/request-body.js";
-import { RUN_BODY_BYTES, RUN_PREVIEW_BODY_BYTES, RUN_TARGET_IDS } from "../../limits.js";
+import { jsonBody, optionalJsonBody } from "../../lib/request-body.js";
+import { METADATA_BODY_BYTES, RUN_BODY_BYTES, RUN_PREVIEW_BODY_BYTES, RUN_TARGET_IDS } from "../../limits.js";
 import {
   bodyErrorResponses,
   conflictResponse,
@@ -207,15 +207,26 @@ export const getEvaluation = createRoute({
   },
 });
 
+/** Optional body: `output` (the default) recollects a failed stage's output; `resources` refreshes a finished stage's resource snapshot. */
+const collectBody = {
+  required: false,
+  content: { "application/json": { schema: z.strictObject({ target: z.enum(RECOLLECT_TARGETS).exactOptional() }) } },
+} as const;
+const collectResponses = {
+  202: jsonContent(responseSchema(z.object({ runId: z.string(), queued: z.boolean() })), "Collection requested"),
+  ...bodyErrorResponses, ...notFoundResponse, ...conflictResponse,
+} as const;
 export const collectExecution = createRoute({
   method: "post", path: "/projects/{projectId}/samplings/{samplingId}/collect", tags: ["Run"],
-  summary: "Recollect output and freeze evidence from an already completed Subject without executing it",
-  request: { params: projectParams.extend({ samplingId: entityIdSchema }) },
-  responses: { 202: jsonContent(responseSchema(z.object({ runId: z.string(), queued: z.boolean() })), "Collection requested"), ...errorResponses, ...notFoundResponse, ...conflictResponse },
+  summary: "Recollect output and evidence, or only the resource snapshot, from an already completed Subject without executing it",
+  middleware: [optionalJsonBody(METADATA_BODY_BYTES)],
+  request: { params: projectParams.extend({ samplingId: entityIdSchema }), body: collectBody },
+  responses: collectResponses,
 });
 export const collectEvaluation = createRoute({
   method: "post", path: "/projects/{projectId}/evaluations/{evaluationId}/collect", tags: ["Run"],
-  summary: "Recollect an already completed Evaluator's output without evaluating again",
-  request: { params: projectParams.extend({ evaluationId: entityIdSchema }) },
-  responses: { 202: jsonContent(responseSchema(z.object({ runId: z.string(), queued: z.boolean() })), "Collection requested"), ...errorResponses, ...notFoundResponse, ...conflictResponse },
+  summary: "Recollect an already completed Evaluator's output, or only its resource snapshot, without evaluating again",
+  middleware: [optionalJsonBody(METADATA_BODY_BYTES)],
+  request: { params: projectParams.extend({ evaluationId: entityIdSchema }), body: collectBody },
+  responses: collectResponses,
 });

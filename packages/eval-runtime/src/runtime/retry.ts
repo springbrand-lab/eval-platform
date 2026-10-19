@@ -2,6 +2,7 @@ import type { RetryPolicy } from "@eval-platform/eval-contracts";
 import { AGENT_FAILURE_KINDS, type AgentFailureKind } from "../harness/model.js";
 import { RuntimeInputError } from "./errors.js";
 import { requireObject } from "./input.js";
+import type { RuntimeLog } from "./log.js";
 
 const TRANSIENT_RETRY_COUNT = 10;
 
@@ -24,7 +25,24 @@ export interface RetryController {
     readonly operation: RetryOperation;
     readonly failureKind: AgentFailureKind;
     readonly attemptNumber: number;
+    /** Message of the failure being decided, for diagnostics only. */
+    readonly error?: string;
   }): Promise<RetryDecision>;
+}
+
+/** Reports every decision: `operation_retry` before a backoff, `retry_exhausted` when the budget is spent. */
+export function loggedRetryController(controller: RetryController, log: RuntimeLog): RetryController {
+  return {
+    async decide(input) {
+      const decision = await controller.decide(input);
+      const { operation, attemptNumber, failureKind, error } = input;
+      const fields = { operation, attemptNumber, failureKind, ...(error === undefined ? {} : { error }) };
+      log(decision.shouldRetry
+        ? { name: "operation_retry", ...fields, backoffMs: decision.backoffMs ?? 0 }
+        : { name: "retry_exhausted", ...fields });
+      return decision;
+    },
+  };
 }
 
 export interface RetryErrorDetails {
@@ -93,6 +111,7 @@ export async function retryIdempotentOperation<TResult>(loop: IdempotentRetryLoo
         operation: loop.operation,
         failureKind: details.failureKind,
         attemptNumber,
+        error: details.message,
       });
       if (!decision?.shouldRetry) throw loop.fail?.(error, details) ?? error;
       await loop.onRetry?.(details.message);
