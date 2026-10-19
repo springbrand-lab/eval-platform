@@ -1,18 +1,19 @@
 import { z } from "zod";
 import {
   identifierSchema,
-  jsonObjectSchema,
-  type AgentResourceCollection,
+  jsonObjectInPlaceSchema,
+  summarizeResourceSnapshot,
   type AgentResourceFact,
   type AgentResourceReadinessReport,
   type AgentResourceScope,
   type AgentResourceSnapshot,
+  type AgentResourceState,
 } from "@eval-platform/eval-contracts";
 
 import type { AgentHandle, Harness, HarnessRuntimeOptions } from "../harness/model.js";
-import { RuntimeRunStoppedError } from "./errors.js";
+import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 import type { RuntimeLog } from "./log.js";
-import { describeRetryError, retryIdempotentOperation, type RetryController } from "./retry.js";
+import { describeRetryError, retryIdempotentOperation, type RetryController, type RetryErrorDetails } from "./retry.js";
 
 const completeness = z.enum(["complete", "partial", "unavailable"]);
 const scopeSchema = z.strictObject({
@@ -37,6 +38,14 @@ const reportSchema = z.strictObject({
   finalized: z.boolean(),
   readiness: readinessSchema,
 });
+/** Raw records are validated in place; a snapshot can be hundreds of megabytes. */
+function factsSchema() {
+  return z.custom<readonly AgentResourceFact[]>(
+    (value) => Array.isArray(value) && value.every((fact) => jsonObjectInPlaceSchema.safeParse(fact).success),
+    "Expected an array of plain JSON objects",
+  );
+}
+
 const snapshotSchema = z.strictObject({
   scope: scopeSchema,
   observedAt: z.iso.datetime({ offset: true }),
@@ -46,9 +55,9 @@ const snapshotSchema = z.strictObject({
     telemetryEvents: completeness,
     billingSettlements: completeness,
   }),
-  usageEvents: z.array(jsonObjectSchema),
-  telemetryEvents: z.array(jsonObjectSchema),
-  billingSettlements: z.array(jsonObjectSchema),
+  usageEvents: factsSchema(),
+  telemetryEvents: factsSchema(),
+  billingSettlements: factsSchema(),
   readiness: readinessSchema,
 });
 
@@ -74,8 +83,8 @@ export function resourceScopeMatches(stored: AgentResourceScope, requested: Agen
     && (stored.submissionId === undefined || requested.submissionId === undefined || stored.submissionId === requested.submissionId);
 }
 
-export function storedResourceScope(collection: AgentResourceCollection | undefined): AgentResourceScope | undefined {
-  return collection?.status === "collected" ? collection.snapshot.scope : collection?.scope;
+export function storedResourceScope(resources: AgentResourceState | undefined): AgentResourceScope | undefined {
+  return resources?.status === "collected" ? resources.summary.scope : resources?.scope;
 }
 
 function parseScoped<T extends { readonly scope: AgentResourceScope }>(
@@ -92,8 +101,10 @@ function parseScoped<T extends { readonly scope: AgentResourceScope }>(
   return parsed.data;
 }
 
+/** Returns the validated value itself, never a copy. */
 export function validateResourceSnapshot(value: unknown, scope: AgentResourceScope): AgentResourceSnapshot {
-  return parseScoped(snapshotSchema, value, scope, "Resource snapshot");
+  parseScoped(snapshotSchema, value, scope, "Resource snapshot");
+  return value as AgentResourceSnapshot;
 }
 
 export function validateResourceReadiness(value: unknown, scope: AgentResourceScope): AgentResourceReadinessReport {
@@ -178,26 +189,70 @@ export async function awaitResourceFinalization(
   return done({ reason });
 }
 
-/** The single full download: the snapshot as SP reports it, finalized or not, or why it failed. */
-export async function downloadResources(
-  source: ResourceSource,
-): Promise<Exclude<AgentResourceCollection, { readonly status: "pending" }>> {
+let downloadQueue: Promise<unknown> = Promise.resolve();
+
+/** Runs one snapshot download and its persistence at a time in this process; a snapshot can be hundreds of megabytes. */
+function exclusively<T>(task: () => Promise<T>): Promise<T> {
+  const run = downloadQueue.then(task);
+  downloadQueue = run.catch(() => undefined);
+  return run;
+}
+
+export interface ResourceDownload {
+  readonly source: ResourceSource;
+  /** The Attempt's stored resources; a collected snapshot is kept when no newer one is stored. */
+  readonly current: AgentResourceState;
+  /** Stores the raw snapshot unchanged, before the stage record refers to it. */
+  readonly saveSnapshot: (snapshot: AgentResourceSnapshot) => Promise<void>;
+  /** Saves the Attempt's resources on its stage record. */
+  readonly save: (resources: AgentResourceState) => Promise<void>;
+}
+
+/**
+ * The single full download of an Attempt's snapshot as SP reports it, finalized or not. Each download
+ * is counted on the Attempt before it starts, so one a crash interrupted counts against the same
+ * `resources` retry budget. Once the budget is spent the Attempt is given up: `failed`, or its
+ * already collected snapshot kept, and Runtime no longer owes it.
+ */
+export async function collectResources(download: ResourceDownload): Promise<AgentResourceState> {
+  const { source } = download;
   const started = Date.now();
   const fields = () => ({ name: "resources_collected", ...scopeFields(source.scope), durationMs: Date.now() - started });
-  try {
-    const snapshot = await readResources(source, async () => (
-      validateResourceSnapshot(await source.harness.collectAgentResources(resourceInput(source)), source.scope)
-    ));
-    source.log({
-      ...fields(), finalized: snapshot.finalized, coverage: snapshot.coverage,
-      usageEvents: snapshot.usageEvents.length, telemetryEvents: snapshot.telemetryEvents.length,
-      billingSettlements: snapshot.billingSettlements.length, creditsTotal: creditsTotal(snapshot.billingSettlements),
-    });
-    return { status: "collected", snapshot };
-  } catch (error) {
-    if (error instanceof RuntimeRunStoppedError) throw error;
-    const message = describeRetryError(error).message;
-    source.log({ ...fields(), error: message });
-    return { status: "failed", scope: source.scope, collectedAt: source.now(), error: message };
+  let state = download.current;
+  let failure: RetryErrorDetails = { message: "resource download was interrupted", failureKind: "network", retryable: true };
+  for (;;) {
+    const downloads = state.downloads ?? 0;
+    if (downloads > 0) {
+      const decision = failure.retryable
+        ? await source.retryController.decide({ operation: "resources", failureKind: failure.failureKind, attemptNumber: downloads, error: failure.message })
+        : { shouldRetry: false };
+      if (!decision.shouldRetry) {
+        const given: AgentResourceState = state.status === "collected"
+          ? { ...state, exhausted: true }
+          : { status: "failed", scope: source.scope, collectedAt: source.now(), error: failure.message, downloads, exhausted: true };
+        await download.save(given);
+        source.log({ ...fields(), downloads, error: failure.message });
+        return given;
+      }
+      await source.sleep(decision.backoffMs ?? 0);
+    }
+    try {
+      return await exclusively(async () => {
+        state = { ...state, downloads: downloads + 1 };
+        await download.save(state);
+        const snapshot = validateResourceSnapshot(await source.harness.collectAgentResources(resourceInput(source)), source.scope);
+        await download.saveSnapshot(snapshot);
+        const collected: AgentResourceState = { status: "collected", summary: summarizeResourceSnapshot(snapshot) };
+        await download.save(collected);
+        source.log({
+          ...fields(), finalized: snapshot.finalized, coverage: snapshot.coverage,
+          ...collected.summary.counts, creditsTotal: creditsTotal(snapshot.billingSettlements),
+        });
+        return collected;
+      });
+    } catch (error) {
+      if (error instanceof RuntimeRunStoppedError || error instanceof RuntimeRecordPersistenceError) throw error;
+      failure = describeRetryError(error);
+    }
   }
 }

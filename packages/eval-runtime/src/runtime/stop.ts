@@ -32,7 +32,7 @@ import { evaluationAgentEnded, executionAgentEnded, RECOVERY_FLAGS } from "./rec
 import { refreshFinishedStage } from "./resource-refresh.js";
 import type { RetryController } from "./retry.js";
 import { createAgentScheduler } from "./scheduler.js";
-import { persistRuntimeRecord, type RuntimeRunRecord, type RuntimeStore, type SamplingState } from "./store.js";
+import { persistRuntimeRecord, type EvaluationState, type RuntimeRunRecord, type RuntimeStore, type SamplingState } from "./store.js";
 
 const STOP_IO_CONCURRENCY = 16;
 
@@ -47,8 +47,9 @@ export interface StopContext {
   readonly outputSchema: (projectId: string) => Promise<EvaluationOutputSchema>;
 }
 
-type StageRecord = SamplingState | EvaluationRecord;
-type Persist<TRecord> = (record: TRecord, expected: TRecord) => Promise<void>;
+type StageRecord = SamplingState | EvaluationState;
+/** Writes `record` over `expected` and returns it as stored. */
+type Persist<TRecord> = (record: TRecord, expected: TRecord) => Promise<TRecord>;
 
 /** The stage-specific facts of one stopped execution or evaluation record. */
 interface StoppedStage<TRecord extends StageRecord, TAttempt extends AgentAttemptRecord> {
@@ -61,7 +62,7 @@ interface StoppedStage<TRecord extends StageRecord, TAttempt extends AgentAttemp
   attempts(record: TRecord): readonly TAttempt[];
   agentEnded(record: TRecord): (attempt: TAttempt) => boolean;
   handle(record: TRecord): AgentHandle | undefined;
-  write: Persist<TRecord>;
+  write(record: TRecord, expected: TRecord): Promise<void>;
   read(record: TRecord): Promise<TRecord | null>;
   /** Let the stage persist an observed terminal Submission without restarting; returns the saved record. */
   resumeObserved(record: TRecord): Promise<TRecord>;
@@ -143,7 +144,7 @@ export async function finishStoppedRun(
 ): Promise<void> {
   const samplings = await context.records.samplings(run.samplingIds);
   const stages: StoppedStage<SamplingState, ExecutionAttempt>[] = [];
-  const evaluationStages: StoppedStage<EvaluationRecord, EvaluationAttempt>[] = [];
+  const evaluationStages: StoppedStage<EvaluationState, EvaluationAttempt>[] = [];
   if (plans.operation !== "evaluation") {
     stages.push(...samplings.map((sampling) => stoppedExecution(context, run.projectId, plans.execution, sampling)));
   }
@@ -243,11 +244,7 @@ function stoppedExecution(
         collect: () => context.harness.collectExecution({ handle }),
         retryController,
         sleep: context.sleep,
-        save: async (output) => {
-          const next = { ...record, artifacts: output.artifacts, trajectory: output.trajectory };
-          await persist(next, record);
-          return next;
-        },
+        save: (output) => persist({ ...record, artifacts: output.artifacts, trajectory: output.trajectory }, record),
       });
     },
     withState: (record, execution, executionAttempts) => ({ ...record, executionAttempts, execution }),
@@ -259,8 +256,8 @@ function stoppedEvaluation(
   projectId: string,
   config: EvaluationPlan,
   sampling: SamplingState,
-  initial: EvaluationRecord,
-): StoppedStage<EvaluationRecord, EvaluationAttempt> {
+  initial: EvaluationState,
+): StoppedStage<EvaluationState, EvaluationAttempt> {
   return {
     initial,
     stage: "evaluation",
@@ -293,11 +290,7 @@ function stoppedEvaluation(
         collect: () => context.harness.collectEvaluation({ handle }),
         retryController,
         sleep: context.sleep,
-        save: async (output) => {
-          const next = { ...record, output };
-          await persist(next, record);
-          return next;
-        },
+        save: (output) => persist({ ...record, output }, record),
       });
     },
     withState: (record, status, attempts) => ({ ...record, attempts, status }),
@@ -308,7 +301,7 @@ function stoppedEvaluation(
  * Ends one stage of a pending stop. An Agent observed to have completed keeps its outcome, or fails
  * with the pending work named so a manual recollection can resume it; any other pending stage is
  * cancelled. Saved Attempts, resources, output and export progress are never discarded; resources
- * still owed are downloaded once as they are, since a stopped Run never refreshes them.
+ * still owed are recorded failed without reading SP.
  */
 async function finishStoppedStage<TRecord extends StageRecord, TAttempt extends AgentAttemptRecord>(
   context: StopContext,
@@ -339,10 +332,9 @@ async function finishStoppedStage<TRecord extends StageRecord, TAttempt extends 
       attempts: stage.attempts(record),
       state: stage.state(record),
       agentEnded: stage.agentEnded(record),
+      saveResourceSnapshot: () => Promise.reject(new Error("A stopping Run never reads resources")),
       persist: async (attempts, state) => {
-        const next = stage.withState(record, state, attempts);
-        await persist(next, record);
-        settled = next;
+        settled = await persist(stage.withState(settled, state, attempts), settled);
       },
     });
     return settled;

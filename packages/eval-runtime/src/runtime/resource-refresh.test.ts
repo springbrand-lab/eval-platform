@@ -24,6 +24,7 @@ function refreshWith(deadline: string) {
     attempts,
     state: { status: "succeeded", resourcesPending: { deadline, nextAttemptAt: NOW } },
     agentEnded: () => { throw new Error("unexpected refresh failure"); },
+    saveResourceSnapshot: vi.fn(),
     persist,
   });
   return { run, persist, onError, attempts };
@@ -45,6 +46,15 @@ describe("refreshFinishedStage", () => {
         lastError: "unexpected refresh failure",
       },
     });
+  });
+
+  it("ends the wait when a pass fails past the deadline", async () => {
+    const { run, persist, onError, attempts } = refreshWith(NOW);
+
+    await run();
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(persist).toHaveBeenCalledExactlyOnceWith(attempts, { status: "succeeded" });
   });
 
   it("caps the backoff at the deadline", async () => {

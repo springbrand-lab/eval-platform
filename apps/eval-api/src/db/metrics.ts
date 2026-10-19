@@ -1,10 +1,10 @@
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { MetricsEntityNotFoundError, MetricsSourceError } from "@eval-platform/eval-metrics";
-import type { MetricsFacts, MetricsQuery, MetricsSource } from "@eval-platform/eval-metrics";
+import type { MetricsEvaluation, MetricsFacts, MetricsQuery, MetricsSampling, MetricsSource } from "@eval-platform/eval-metrics";
 import { planProjectSampleIds, toRunSnapshot, type ProjectSample } from "@eval-platform/eval-runtime";
 import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { READ_SNAPSHOT, type EvalDb } from "./client.js";
-import { metricSamplingColumns, metricEvaluationColumns, readMetricSampling, readMetricEvaluation } from "./metric-facts.js";
+import { readMetricEvaluation, readMetricSampling } from "./attempt-resources.js";
 import { requireOwnerUserId } from "./owner.js";
 import {
   readAllProjectSamples,
@@ -16,9 +16,9 @@ import {
   readRunRecords,
   readSamplingProgress,
   readEvaluationProgress,
-  readSamplings,
-  readEvaluations,
+  evaluationFromRow,
   requireMembers,
+  samplingFromRow,
 } from "./run-records.js";
 import { evaluations, projectSampleDatasets, runEvaluations, runSamplings, samplings } from "./schema.js";
 
@@ -75,8 +75,8 @@ export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): Me
           runIds === undefined ? undefined : inArray(samplings.samplingId, transaction
             .select({ id: runSamplings.samplingId }).from(runSamplings).where(inArray(runSamplings.runId, [...runIds]))),
         );
-        const samplingRows = await transaction.select(metricSamplingColumns).from(samplings).where(scope).orderBy(samplings.samplingId);
-        const evaluationRows = await transaction.select(metricEvaluationColumns).from(evaluations)
+        const samplingRows = await transaction.select().from(samplings).where(scope).orderBy(samplings.samplingId);
+        const evaluationRows = await transaction.select({ evaluation: evaluations }).from(evaluations)
           .innerJoin(samplings, and(eq(samplings.ownerUserId, evaluations.ownerUserId), eq(samplings.samplingId, evaluations.samplingId)))
           .where(and(scope, runIds === undefined ? undefined : inArray(evaluations.evaluationId, transaction
             .select({ id: runEvaluations.evaluationId }).from(runEvaluations).where(inArray(runEvaluations.runId, [...runIds])))))
@@ -88,18 +88,11 @@ export function createPostgresMetricsSource(db: EvalDb, ownerUserId: string): Me
 
         const runRecords = await readRunRecords(transaction, runRows.map((row) => row.runId),
           { kind: "project", ownerUserId: owner, projectId });
-        const metricSamplings: Sampling[] = [];
-        const metricEvaluations: EvaluationRecord[] = [];
-        if (query.samplingId === undefined) {
-          for (const row of samplingRows) metricSamplings.push(await readMetricSampling(transaction, row));
-          for (const row of evaluationRows) metricEvaluations.push(await readMetricEvaluation(transaction, row));
-        } else {
-          // Detail preserves the raw contract, restricted to exactly one Sampling and its Evaluations.
-          metricSamplings.push(...(await readSamplings(transaction, samplingRows.map((row) => row.samplingId), owner))
-            .filter((record) => record !== null));
-          metricEvaluations.push(...(await readEvaluations(transaction, evaluationRows.map((row) => row.evaluationId), owner))
-            .filter((record) => record !== null));
-        }
+        // Snapshots are read one record at a time, as the Metrics projection stored beside each raw snapshot.
+        const metricSamplings: MetricsSampling[] = [];
+        const metricEvaluations: MetricsEvaluation[] = [];
+        for (const row of samplingRows) metricSamplings.push(await readMetricSampling(transaction, owner, samplingFromRow(row)));
+        for (const { evaluation } of evaluationRows) metricEvaluations.push(await readMetricEvaluation(transaction, owner, evaluationFromRow(evaluation)));
         const samplingById = byId<Pick<Sampling, "samplingId" | "execution">>(metricSamplings, (record) => record.samplingId);
         const evaluationById = byId<Pick<EvaluationRecord, "evaluationId" | "samplingId" | "status">>(metricEvaluations, (record) => record.evaluationId);
         // Dataset/sample scopes may omit other Run members. Reuse loaded members, read only the remainder.

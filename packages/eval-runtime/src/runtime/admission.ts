@@ -8,6 +8,7 @@ import type {
   RunRequest,
   RunTargetSelector,
   RunTargets,
+  Sampling,
 } from "@eval-platform/eval-contracts";
 import { createId, equalJson, RUN_OPERATIONS } from "@eval-platform/eval-contracts";
 import { digestJson, phasesOf, planProjectSampleIds } from "../plan/index.js";
@@ -261,7 +262,7 @@ export class RunAdmission implements EvalRunAdmission {
     return samplings;
   }
 
-  #createSampling(projectId: string, projectSampleId: string, subjectAgent: AgentConfigRef): SamplingState {
+  #createSampling(projectId: string, projectSampleId: string, subjectAgent: AgentConfigRef): Sampling {
     return {
       samplingId: this.#idFactory(),
       projectId,

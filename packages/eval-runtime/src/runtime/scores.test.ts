@@ -22,6 +22,7 @@ describe("Run score re-sync", () => {
   const scored = (evaluationId: string, scoreSync?: { status: "synced" | "failed"; at: string }) => ({
     evaluationId,
     samplingId: `sampling-${evaluationId}`,
+    revision: 1,
     evaluator: { ownerUserId: "owner", userAgentId: "judge" },
     chatId: `judge-${evaluationId}`,
     status: { status: "succeeded" as const },

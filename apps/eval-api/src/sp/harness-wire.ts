@@ -1,4 +1,4 @@
-import { AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectSchema } from "@eval-platform/eval-contracts";
+import { AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectInPlaceSchema } from "@eval-platform/eval-contracts";
 import type {
   AgentResourceReadiness,
   AgentResourceReadinessReport,
@@ -155,7 +155,8 @@ export function evaluationOutput(value: unknown): EvaluationAgentOutput {
 
 const completenessSchema = z.enum(["complete", "partial", "unavailable"]);
 const count = z.number().int().nonnegative().safe();
-const factsSchema = z.array(z.record(z.string(), z.json()));
+/** Raw records are validated in place, never copied; a snapshot can be hundreds of megabytes. */
+const factsSchema = z.array(jsonObjectInPlaceSchema);
 
 const scopeSchema = z.object({ chatId: id, idempotencyKey: id, submissionId: id });
 
@@ -201,7 +202,7 @@ export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact
 
 export function evidenceTrajectoryPage(value: unknown) {
   return response(z.object({
-    events: z.array(z.object({ ingestSeq: z.number().int().positive().safe(), event: jsonObjectSchema })),
+    events: z.array(z.object({ ingestSeq: z.number().int().positive().safe(), event: jsonObjectInPlaceSchema })),
     nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
   }) satisfies z.ZodType<EvalEvidenceTrajectoryPage>, value, "evidence trajectory page");
 }

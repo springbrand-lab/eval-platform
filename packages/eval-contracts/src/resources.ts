@@ -53,18 +53,57 @@ export interface AgentResourceReadinessReport {
   readonly readiness: AgentResourceReadiness;
 }
 
-export type AgentResourceCollection =
-  | {
-    readonly status: "pending";
-    readonly scope: AgentResourceScope;
-  }
-  | {
-    readonly status: "collected";
-    readonly snapshot: AgentResourceSnapshot;
-  }
-  | {
-    readonly status: "failed";
-    readonly scope: AgentResourceScope;
-    readonly collectedAt: string;
-    readonly error: string;
+export interface AgentResourceCounts {
+  readonly usageEvents: number;
+  readonly telemetryEvents: number;
+  readonly billingSettlements: number;
+}
+
+/** What a stage record keeps of a stored snapshot; its events live only in the resource store. */
+export type AgentResourceSnapshotSummary = Omit<AgentResourceSnapshot, "usageEvents" | "telemetryEvents" | "billingSettlements"> & {
+  readonly counts: AgentResourceCounts;
+};
+
+export function summarizeResourceSnapshot(snapshot: AgentResourceSnapshot): AgentResourceSnapshotSummary {
+  const { usageEvents, telemetryEvents, billingSettlements, ...summary } = snapshot;
+  return {
+    ...summary,
+    counts: { usageEvents: usageEvents.length, telemetryEvents: telemetryEvents.length, billingSettlements: billingSettlements.length },
   };
+}
+
+interface AgentResourceDownloads {
+  /** Downloads started since the last stored snapshot, saved before each one so a crash also counts. */
+  readonly downloads?: number;
+}
+
+interface AgentResourcesGivenUp {
+  /** The download retry budget is spent; Runtime no longer owes this Attempt's resources. */
+  readonly exhausted?: true;
+}
+
+type PendingAgentResources = AgentResourceDownloads & {
+  readonly status: "pending";
+  readonly scope: AgentResourceScope;
+};
+
+type FailedAgentResources = AgentResourceDownloads & AgentResourcesGivenUp & {
+  readonly status: "failed";
+  readonly scope: AgentResourceScope;
+  readonly collectedAt: string;
+  readonly error: string;
+};
+
+type CollectedAgentResourceState = AgentResourceDownloads & AgentResourcesGivenUp & {
+  readonly status: "collected";
+  readonly summary: AgentResourceSnapshotSummary;
+};
+
+/** An Attempt's resources as its stage record stores them. */
+export type AgentResourceState = PendingAgentResources | FailedAgentResources | CollectedAgentResourceState;
+
+/** A resource state with its stored snapshot loaded; read one record at a time. */
+export type AgentResourceCollection =
+  | PendingAgentResources
+  | FailedAgentResources
+  | CollectedAgentResourceState & { readonly snapshot: AgentResourceSnapshot };

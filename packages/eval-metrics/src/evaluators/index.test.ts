@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { EvaluationOutputSchema, EvaluationRecord, JsonValue } from "@eval-platform/eval-contracts";
+import type { EvaluationOutputSchema, JsonValue } from "@eval-platform/eval-contracts";
+import type { MetricsEvaluation } from "../aggregation/model.js";
 import { evaluation, OUTPUT_SCHEMA, SCHEMA_REF } from "../test-support.js";
 import { createEvaluationOutputReader } from "./index.js";
 
-const read = (result: JsonValue | string, schema: EvaluationOutputSchema | null = OUTPUT_SCHEMA, patch: Partial<EvaluationRecord> = {}) =>
+const read = (result: JsonValue | string, schema: EvaluationOutputSchema | null = OUTPUT_SCHEMA, patch: Partial<MetricsEvaluation> = {}) =>
   createEvaluationOutputReader(schema && SCHEMA_REF, schema).read(evaluation("evaluation-1", patch, result)).view;
 const observed = (view: ReturnType<typeof read>) => view.observations.map(({ jsonPointer, instancePointer, kinds, value }) => (
   [jsonPointer, instancePointer, kinds.join("+"), value]

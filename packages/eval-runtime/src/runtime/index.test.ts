@@ -12,6 +12,7 @@ import type {
   RetryPolicy,
 } from "@eval-platform/eval-contracts";
 import {
+  summarizeResourceSnapshot,
   DEFAULT_EVIDENCE_LIMITS,
   EVIDENCE_EXPORT_MAX_PASSES,
   OBSERVATION_MAX_PASSES,
@@ -32,6 +33,8 @@ import { createMemoryEvidenceBlobs, exportedEvidence, testClock } from "../harne
 import type { ProjectPlanReader, ProjectSample } from "./model.js";
 import { createRetryController as createProductionRetryController, DEFAULT_RETRY_POLICY } from "./retry.js";
 import type {
+  EvaluationState,
+  ResourceSnapshotTarget,
   RuntimeRunAdmission,
   RuntimeRunRecord,
   SamplingState,
@@ -98,6 +101,10 @@ type RuntimeDependencies = WithDefaultReporter<Omit<EvalRunResumerDependencies, 
   readonly plans?: TestPlans;
 };
 
+function withoutRevision({ revision: _revision, ...record }: EvaluationState): EvaluationRecord {
+  return structuredClone(record);
+}
+
 function createRunQueries(store: RuntimeStore, records: RunRecords): EvalRunQueries {
   return {
     async getRun(runId) {
@@ -113,10 +120,10 @@ function createRunQueries(store: RuntimeStore, records: RunRecords): EvalRunQuer
     async getEvaluation(evaluationId) {
       const evaluation = await store.getEvaluation(evaluationId);
       if (!evaluation) throw new RuntimeEntityNotFoundError("evaluation", evaluationId);
-      return structuredClone(evaluation);
+      return withoutRevision(evaluation);
     },
     async listEvaluations(samplingId) {
-      return structuredClone(await store.listEvaluations(samplingId));
+      return (await store.listEvaluations(samplingId)).map(withoutRevision);
     },
   };
 }
@@ -313,6 +320,7 @@ function makeSample(projectSampleId: string, overrides: Partial<ProjectSample> =
 interface TestStore extends RuntimeStore {
   plans(): TestPlans;
   usePlans(plans: TestPlans): void;
+  resourceSnapshot(target: ResourceSnapshotTarget): AgentResourceSnapshot | undefined;
 }
 
 interface StoreOptions {
@@ -323,7 +331,8 @@ interface StoreOptions {
 function makeStore(options: StoreOptions = {}): TestStore {
   const runs = new Map<string, RuntimeRunRecord>();
   const samplings = new Map<string, SamplingState>();
-  const evaluations = new Map<string, EvaluationRecord>();
+  const evaluations = new Map<string, EvaluationState>();
+  const resourceSnapshots = new Map<string, AgentResourceSnapshot>();
   let plans = options.plans ?? makePlans();
   const owesWork = <T>(ids: readonly string[], records: Map<string, T>, stage: (record: T) => SamplingState["execution"]) => (
     ids.some((id) => { const record = records.get(id); return record !== undefined && isStageRecoveryPending(stage(record)); })
@@ -408,16 +417,16 @@ function makeStore(options: StoreOptions = {}): TestStore {
         });
       }
       runs.set(run.runId, run);
-      for (const record of created) samplings.set(record.samplingId, record);
-      for (const evaluation of added) evaluations.set(evaluation.evaluationId, evaluation);
+      for (const record of created) samplings.set(record.samplingId, { ...record, revision: 0 });
+      for (const evaluation of added) evaluations.set(evaluation.evaluationId, { ...evaluation, revision: 0 });
       if (evaluates) plans.lock();
       return { run, created: true } satisfies RuntimeRunAdmission;
     },
     async updateEvaluation(record, expected) {
-      if (!equalJson(evaluations.get(record.evaluationId), expected)) {
+      if (evaluations.get(record.evaluationId)?.revision !== expected.revision) {
         throw new RuntimeRecordConflictError("Evaluation changed before update");
       }
-      evaluations.set(record.evaluationId, record);
+      evaluations.set(record.evaluationId, { ...record, revision: expected.revision + 1 });
     },
     async getEvaluation(evaluationId) {
       return evaluations.get(evaluationId) ?? null;
@@ -429,10 +438,10 @@ function makeStore(options: StoreOptions = {}): TestStore {
       return [...evaluations.values()].filter((evaluation) => evaluation.samplingId === samplingId);
     },
     async updateSampling(state, expected) {
-      if (!equalJson(samplings.get(state.samplingId), expected)) {
+      if (samplings.get(state.samplingId)?.revision !== expected.revision) {
         throw new RuntimeRecordConflictError("Sampling changed before update");
       }
-      samplings.set(state.samplingId, state);
+      samplings.set(state.samplingId, { ...state, revision: expected.revision + 1 });
     },
     async getSampling(samplingId) {
       return samplings.get(samplingId) ?? null;
@@ -440,7 +449,15 @@ function makeStore(options: StoreOptions = {}): TestStore {
     async getSamplings(samplingIds) {
       return samplingIds.map((samplingId) => samplings.get(samplingId) ?? null);
     },
+    resourceSnapshot: (target) => resourceSnapshots.get(snapshotKey(target)),
+    async saveResourceSnapshot(target, snapshot) {
+      resourceSnapshots.set(snapshotKey(target), snapshot);
+    },
   };
+}
+
+function snapshotKey({ samplingId, evaluationId, attemptId }: ResourceSnapshotTarget): string {
+  return `${samplingId}/${evaluationId ?? ""}/${attemptId}`;
 }
 
 /** A seeded succeeded execution with its output is evaluable, so it gets a stored bundle unless it set one. */
@@ -458,7 +475,7 @@ async function saved(store: RuntimeStore, samplingId: string): Promise<SamplingS
   return sampling;
 }
 
-async function savedEvaluation(store: RuntimeStore, evaluationId: string): Promise<EvaluationRecord> {
+async function savedEvaluation(store: RuntimeStore, evaluationId: string): Promise<EvaluationState> {
   const evaluation = await store.getEvaluation(evaluationId);
   if (!evaluation) throw new Error(`Evaluation ${evaluationId} is not stored`);
   return evaluation;
@@ -467,7 +484,7 @@ async function savedEvaluation(store: RuntimeStore, evaluationId: string): Promi
 async function seedEvaluation(store: RuntimeStore, record: EvaluationRecord): Promise<void> {
   const expected = await store.getEvaluation(record.evaluationId);
   if (!expected) throw new Error("Unknown Evaluation fixture");
-  await store.updateEvaluation(record, expected);
+  await store.updateEvaluation({ ...record, revision: expected.revision }, expected);
 }
 
 function makeSubmission(status: AgentSubmission["status"] = "completed", submissionId = "submission-1"): AgentSubmission {
@@ -3665,7 +3682,7 @@ describe("Project Run stop", () => {
     const run = (await store.getRun(handle.runId))!;
     const evaluationId = run.evaluationIds[0]!;
     const initial = await savedEvaluation(store, evaluationId);
-    const active: EvaluationRecord = {
+    const active: EvaluationState = {
       ...initial, chatId: "evaluation-chat-1", status: { status: "running" },
       attempts: [{
         evaluationAttemptId: "evaluation-attempt-1", evaluationId,
@@ -3798,11 +3815,11 @@ describe("Project Run stop", () => {
     };
     const collectedResources = (chatId: string, idempotencyKey: string, submissionId: string) => ({
       status: "collected" as const,
-      snapshot: {
+      summary: summarizeResourceSnapshot({
         scope: { chatId, idempotencyKey, submissionId }, observedAt: ENDED_AT, finalized: true,
-        coverage: { usageEvents: "complete" as const, telemetryEvents: "complete" as const, billingSettlements: "complete" as const },
+        coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
         usageEvents: [], telemetryEvents: [], billingSettlements: [],
-      },
+      }),
     });
 
     async function endedSubject(key: string, execution: SamplingState["execution"], operation: "execution" | "pipeline" = "execution") {
@@ -3822,7 +3839,7 @@ describe("Project Run stop", () => {
         }],
       };
       await fixture.store.updateSampling(ended, queued);
-      return { ...fixture, handle, samplingId, ended };
+      return { ...fixture, handle, samplingId, ended: await saved(fixture.store, samplingId) };
     }
 
     function expectNoAgentWork(harness: Harness): void {
@@ -3847,7 +3864,7 @@ describe("Project Run stop", () => {
       await resumer(store, harness).stop(handle.runId, reporter);
 
       const stopped = await saved(store, samplingId);
-      expect(stopped).toEqual({ ...ended, execution: { status: "failed", lastError } });
+      expect(stopped).toEqual({ ...ended, revision: expect.any(Number), execution: { status: "failed", lastError } });
       expectNoAgentWork(harness);
       expect(harness.collectExecution).not.toHaveBeenCalled();
       expect(reporter.finalizing).toHaveBeenCalledExactlyOnceWith({
@@ -3865,7 +3882,7 @@ describe("Project Run stop", () => {
       await resumer(store, harness).stop(handle.runId);
 
       expect(await saved(store, samplingId)).toEqual({
-        ...uncollected, execution: { status: "failed", lastError: "Run stopped before evidence export finished; last: execution output collection failed: SP output unavailable" },
+        ...uncollected, revision: expect.any(Number), execution: { status: "failed", lastError: "Run stopped before evidence export finished; last: execution output collection failed: SP output unavailable" },
       });
       expect(harness.collectExecution).toHaveBeenCalledOnce();
       expectNoAgentWork(harness);
@@ -3896,7 +3913,7 @@ describe("Project Run stop", () => {
 
       await resumer(store, harness).stop(handle.runId);
 
-      expect(await saved(store, samplingId)).toEqual({ ...ended, execution: { status: "succeeded" } });
+      expect(await saved(store, samplingId)).toEqual({ ...ended, revision: expect.any(Number), execution: { status: "succeeded" } });
       expectNoAgentWork(harness);
       expect(harness.collectAgentResources).not.toHaveBeenCalled();
     });
@@ -3933,13 +3950,13 @@ describe("Project Run stop", () => {
       const [attempt] = ended.executionAttempts;
       const resources = collectedResources("subject-chat", `execution:${samplingId}`, "subject-submission");
       const unfinalized: SamplingState = {
-        ...ended, executionAttempts: [{ ...attempt!, resources: { ...resources, snapshot: { ...resources.snapshot, finalized: false } } }],
+        ...ended, executionAttempts: [{ ...attempt!, resources: { ...resources, summary: { ...resources.summary, finalized: false } } }],
       };
       await store.updateSampling(unfinalized, ended);
 
       await resumer(store, harness).stop(handle.runId);
 
-      expect(await saved(store, samplingId)).toEqual({ ...unfinalized, execution: { status: "succeeded" } });
+      expect(await saved(store, samplingId)).toEqual({ ...unfinalized, revision: expect.any(Number), execution: { status: "succeeded" } });
       expect(harness.collectAgentResources).not.toHaveBeenCalled();
       expect(harness.inspectAgentResources).not.toHaveBeenCalled();
     });
@@ -3958,7 +3975,7 @@ describe("Project Run stop", () => {
       const handle = await admission.submit(evaluationRequest([samplingId], "stop-ended-evaluator"));
       const evaluationId = (await store.getRun(handle.runId))!.evaluationIds[0]!;
       const initial = await savedEvaluation(store, evaluationId);
-      const pending: EvaluationRecord = {
+      const pending: EvaluationState = {
         ...initial, chatId: "evaluator-chat", status: { status: "retrying", lastError: "output unavailable" },
         attempts: [{
           evaluationAttemptId: "evaluator-attempt", evaluationId, attemptNumber: 1, status: "completed",
@@ -3973,7 +3990,7 @@ describe("Project Run stop", () => {
       await resumer(store, harness).stop(handle.runId, reporter);
 
       expect(await savedEvaluation(store, evaluationId)).toEqual({
-        ...pending, status: { status: "failed", lastError: "Run stopped before output collection finished; last: evaluation output collection failed: SP output unavailable" },
+        ...pending, revision: expect.any(Number), status: { status: "failed", lastError: "Run stopped before output collection finished; last: evaluation output collection failed: SP output unavailable" },
       });
       expect(harness.collectEvaluation).toHaveBeenCalledOnce();
       expect(harness.readFinalReply).not.toHaveBeenCalled();
@@ -4072,7 +4089,7 @@ describe("Project Run stop", () => {
       const { store, harness, handle, samplingId, ended } = await endedSubject("stop-finalized-unfinalized", { status: "retrying", collectionPending: true });
       const [attempt] = ended.executionAttempts;
       const resources = collectedResources("subject-chat", `execution:${samplingId}`, "subject-submission");
-      const unfinalized = { ...ended, executionAttempts: [{ ...attempt!, resources: { ...resources, snapshot: { ...resources.snapshot, finalized: false } } }] };
+      const unfinalized = { ...ended, executionAttempts: [{ ...attempt!, resources: { ...resources, summary: { ...resources.summary, finalized: false } } }] };
       await store.updateSampling(unfinalized, ended);
       const getRun = store.getRun.bind(store);
       store.getRun = async (runId) => {
@@ -4110,7 +4127,7 @@ describe("Project Run stop", () => {
 
       const refreshed = await saved(store, samplingId);
       expect(refreshed.execution).toEqual({ status: "succeeded" });
-      expect(refreshed.executionAttempts[0]!.resources).toMatchObject({ status: "collected", snapshot: { scope } });
+      expect(refreshed.executionAttempts[0]!.resources).toMatchObject({ status: "collected", summary: { scope } });
       expect(harness.collectAgentResources).toHaveBeenCalledOnce();
     });
 
@@ -4213,7 +4230,7 @@ describe("raw resource persistence", () => {
     const collectExecution = harness.collectExecution;
     vi.mocked(harness.collectExecution).mockImplementation(async (input) => {
       const sampling = await store.getSampling(input.handle.samplingId);
-      expect(sampling!.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot: captured[0] });
+      expect(sampling!.executionAttempts[0]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(captured[0]!) });
       return {
         samplingId: input.handle.samplingId,
         status: "succeeded",
@@ -4229,8 +4246,8 @@ describe("raw resource persistence", () => {
     expect(captured).toHaveLength(2);
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
     const evaluation = await runtime.getEvaluation(completed.evaluationIds[0]!);
-    expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot: captured[0] });
-    expect(evaluation.attempts[0]!.resources).toEqual({ status: "collected", snapshot: captured[1] });
+    expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(captured[0]!) });
+    expect(evaluation.attempts[0]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(captured[1]!) });
     expect(captured[0]!.scope.chatId).toBe(sampling.subjectChatId);
     expect(captured[1]!.scope.chatId).toBe(evaluation.chatId);
     expect(captured[1]!.scope.chatId).not.toBe(captured[0]!.scope.chatId);
@@ -4250,7 +4267,7 @@ describe("raw resource persistence", () => {
     const run = await runtime.submit(projectRequest("pipeline", "cold-raw-query"));
     const completed = await waitForTerminal(runtime, run.runId);
     const originalSampling = await store.getSampling(run.samplingIds[0]!);
-    const originalEvaluation = await store.getEvaluation(completed.evaluationIds[0]!);
+    const originalEvaluation = withoutRevision((await store.getEvaluation(completed.evaluationIds[0]!))!);
     const coldHarness = makeHarness();
     const cold = createAutoResumingRuntime({ harness: coldHarness, store });
 
@@ -4263,12 +4280,12 @@ describe("raw resource persistence", () => {
     const collections = [sampling.executionAttempts[0]!.resources, evaluation.attempts[0]!.resources, evaluations[0]!.attempts[0]!.resources];
     for (const resources of collections) {
       if (resources?.status !== "collected") throw new Error("missing raw resources");
-      Reflect.set(resources.snapshot.usageEvents[0]!, "changedByConsumer", true);
+      Reflect.set(resources.summary.counts, "changedByConsumer", true);
     }
     expect(await cold.getSampling(run.samplingIds[0]!)).toEqual(await runtime.getSampling(run.samplingIds[0]!));
     expect(await cold.getEvaluation(completed.evaluationIds[0]!)).toEqual(originalEvaluation);
     expect(await cold.listEvaluations(run.samplingIds[0]!)).toEqual([originalEvaluation]);
-    expect(originalSampling!.executionAttempts[0]!.resources).not.toHaveProperty("snapshot.usageEvents.0.changedByConsumer");
+    expect(originalSampling!.executionAttempts[0]!.resources).not.toHaveProperty("summary.counts.changedByConsumer");
     expect(coldHarness.ensureAgent).not.toHaveBeenCalled();
     expect(coldHarness.collectAgentResources).not.toHaveBeenCalled();
   });
@@ -4291,7 +4308,7 @@ describe("raw resource persistence", () => {
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
     expect(sampling.execution.lastError).toBe(`subject ${status}`);
-    expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot: captured[0] });
+    expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(captured[0]!) });
     expect(harness.collectExecution).toHaveBeenCalledOnce();
     expect(sampling.artifacts).toEqual([{ artifactId: "artifact-1", kind: "project", path: "/eval/output" }]);
     expect(sampling.trajectory).toEqual({ trajectoryId: "trajectory-1", source: "subject", path: "/eval/trajectory.jsonl" });
@@ -4319,9 +4336,9 @@ describe("raw resource persistence", () => {
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
     const evaluation = await runtime.getEvaluation(completed.evaluationIds[0]!);
     expect(sampling.execution.status).toBe("succeeded");
-    expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot: captured[0] });
+    expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(captured[0]!) });
     expect(evaluation.status).toEqual({ status: "failed", lastError: `evaluator ${status}` });
-    expect(evaluation.attempts[0]!.resources).toEqual({ status: "collected", snapshot: captured[1] });
+    expect(evaluation.attempts[0]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(captured[1]!) });
     expect(harness.collectEvaluation).not.toHaveBeenCalled();
     expect(harness.restartAgent).not.toHaveBeenCalled();
   });
@@ -4362,8 +4379,8 @@ describe("raw resource persistence", () => {
 
     expect(completed.status).toBe("succeeded");
     expect(attempts).toHaveLength(2);
-    expect(attempts[0]!.resources).toEqual({ status: "collected", snapshot: stageResources[0] });
-    expect(attempts[1]!.resources).toEqual({ status: "collected", snapshot: stageResources[1] });
+    expect(attempts[0]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(stageResources[0]!) });
+    expect(attempts[1]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(stageResources[1]!) });
     expect(stageResources[1]!.scope.submissionId).toBe(stageResources[0]!.scope.submissionId);
     expect(stageResources[1]!.scope.idempotencyKey).toBe(`${role === "subject" ? "execution" : "evaluation"}:${run.samplingIds[0]}:restart:2`);
     expect(harness.restartAgent).toHaveBeenCalledTimes(1);
@@ -4437,7 +4454,7 @@ describe("raw resource persistence", () => {
 
     const evaluation = await runtime.getEvaluation((await runtime.getRun(run.runId)).evaluationIds[0]!);
     expect(evaluation.status).toEqual({ status: "succeeded" });
-    expect(evaluation.attempts[0]?.resources).toMatchObject({ status: "collected", snapshot: { finalized: true } });
+    expect(evaluation.attempts[0]?.resources).toMatchObject({ status: "collected", summary: { finalized: true } });
     expect(evaluatorChecks).toBe(2);
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(2);
   });
@@ -4587,7 +4604,7 @@ describe("raw resource persistence", () => {
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "failed" });
 
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
-    expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot: captured });
+    expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(captured) });
     expect(sampling.executionAttempts[0]!.submissionId).toBe(captured.scope.submissionId);
     expect(sampling.execution.lastError).toContain(operation === "submission" ? "submission response lost" : "status source unavailable");
     expect(harness.collectExecution).not.toHaveBeenCalled();
@@ -4629,8 +4646,8 @@ describe("raw resource persistence", () => {
     await expect(store.getEvaluation(firstBefore.evaluationId)).resolves.toBeNull();
     expect(await runtime.listEvaluations(execution.samplingIds[0]!)).toEqual([secondEvaluation]);
     expect(secondEvaluation.chatId).not.toBe(firstBefore.chatId);
-    expect(firstBefore.attempts[0]!.resources).toMatchObject({ snapshot: { scope: { chatId: firstBefore.chatId, submissionId: firstBefore.attempts[0]!.submissionId } } });
-    expect(secondEvaluation.attempts[0]!.resources).toMatchObject({ snapshot: { scope: { chatId: secondEvaluation.chatId, submissionId: secondEvaluation.attempts[0]!.submissionId } } });
+    expect(firstBefore.attempts[0]!.resources).toMatchObject({ summary: { scope: { chatId: firstBefore.chatId, submissionId: firstBefore.attempts[0]!.submissionId } } });
+    expect(secondEvaluation.attempts[0]!.resources).toMatchObject({ summary: { scope: { chatId: secondEvaluation.chatId, submissionId: secondEvaluation.attempts[0]!.submissionId } } });
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(3);
   });
 
@@ -4663,7 +4680,9 @@ describe("raw resource persistence", () => {
     expect(completed.status).toBe("succeeded");
     expect(evaluation.attempts).toHaveLength(1);
     expect(evaluation.attempts[0]!.resources?.status).toBe("collected");
-    expect(evaluation.attempts[0]!.resources).toHaveProperty("snapshot.usageEvents.0.sourceExtension");
+    expect(store.resourceSnapshot({
+      samplingId: evaluation.samplingId, evaluationId: evaluation.evaluationId, attemptId: evaluation.attempts[0]!.evaluationAttemptId,
+    })).toHaveProperty("usageEvents.0.sourceExtension");
     expect(harness.restartAgent).not.toHaveBeenCalled();
     expect(harness.submitAgent).toHaveBeenCalledTimes(2);
   });
@@ -4715,7 +4734,7 @@ describe("raw resource persistence", () => {
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
     expect(sampling.executionAttempts[0]!.status).toBe("completed");
     expect(sampling.executionAttempts[0]).not.toHaveProperty("error");
-    expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot: captured });
+    expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(captured) });
     expect(sampling.execution.lastError).toContain("artifact read unavailable");
     expect(sampling.execution.status).toBe("retrying");
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(1);
@@ -4733,7 +4752,8 @@ describe("raw resource persistence", () => {
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => ({
       ...makeResources(input), usageEvents: [repeatedUsage], billingSettlements: [repeatedSettlement],
     }));
-    const runtime = createAutoResumingRuntime({ harness, store: makeStore(), sleep: async () => undefined });
+    const store = makeStore();
+    const runtime = createAutoResumingRuntime({ harness, store, sleep: async () => undefined });
     runtime.plans.execution = executionPlan({ retryPolicy: RETRY_ONE });
     const run = await runtime.submit(projectRequest("execution", "raw-source-repeats"));
     await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
@@ -4741,9 +4761,9 @@ describe("raw resource persistence", () => {
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
     expect(sampling.executionAttempts).toHaveLength(2);
     for (const attempt of sampling.executionAttempts) {
-      expect(attempt.resources).toMatchObject({
-        status: "collected", snapshot: { usageEvents: [repeatedUsage], billingSettlements: [repeatedSettlement] },
-      });
+      expect(attempt.resources).toMatchObject({ status: "collected", summary: { counts: { usageEvents: 1, billingSettlements: 1 } } });
+      expect(store.resourceSnapshot({ samplingId: sampling.samplingId, attemptId: attempt.executionAttemptId }))
+        .toMatchObject({ usageEvents: [repeatedUsage], billingSettlements: [repeatedSettlement] });
     }
   });
 
@@ -4789,7 +4809,7 @@ describe("raw resource persistence", () => {
     expect(attempts).toHaveLength(1);
     expect(attempts[0]!.status).toBe("completed");
     expect(attempts[0]).not.toHaveProperty("error");
-    expect(attempts[0]!.resources).toEqual({ status: "collected", snapshot: captured });
+    expect(attempts[0]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(captured) });
     expect(role === "subject" ? harness.collectExecution : harness.collectEvaluation).toHaveBeenCalledTimes(1);
     expect(harness.restartAgent).not.toHaveBeenCalled();
   });
@@ -5249,7 +5269,7 @@ describe("SP Chat and Submission identities", () => {
     expect(sampling.subjectChatId).not.toBe("turn-1");
     expect(sampling.subjectChatId).not.toBe("turn-2");
     expect(sampling.executionAttempts.map((attempt) => (
-      attempt.resources?.status === "collected" ? attempt.resources.snapshot.scope : undefined
+      attempt.resources?.status === "collected" ? attempt.resources.summary.scope : undefined
     ))).toEqual([
       { chatId: sampling.subjectChatId, submissionId: "turn-1", idempotencyKey: `execution:${sampling.samplingId}` },
       { chatId: sampling.subjectChatId, submissionId: "turn-2", idempotencyKey: `execution:${sampling.samplingId}:restart:2` },
@@ -5298,7 +5318,7 @@ describe("Run recovery from persisted facts", () => {
         executionAttemptId: "failed-before-crash", samplingId, attemptNumber: 1,
         submissionId: "submission-1", status: "failed", error: "agent task failed",
         completedAt: "2026-10-14T00:00:00.000Z",
-        resources: { status: "collected", snapshot: makeResources({ handle, idempotencyKey }) },
+        resources: { status: "collected", summary: summarizeResourceSnapshot(makeResources({ handle, idempotencyKey })) },
       }],
     }, original);
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue({
@@ -5435,7 +5455,7 @@ describe("Run recovery from persisted facts", () => {
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(role === "subject" ? 1 : 2);
   });
 
-  it("keeps a partial resource snapshot and owes the resources when its recovery download fails", async () => {
+  it("keeps a partial resource snapshot and gives it up when its recovery download spends the retry budget", async () => {
     const store = makeStore();
     const harness = makeHarness();
     const reported = vi.fn();
@@ -5461,21 +5481,24 @@ describe("Run recovery from persisted facts", () => {
       executionAttempts: [{
         executionAttemptId: "attempt-before-recovery", samplingId, attemptNumber: 1,
         submissionId, status: "running", startedAt: "2026-10-09T00:00:00.000Z",
-        resources: { status: "collected", snapshot },
+        resources: { status: "collected", summary: summarizeResourceSnapshot(snapshot) },
       }],
     });
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("refresh unavailable"));
     await runtime.resume(run.runId);
     const persisted = await saved(store, samplingId);
-    expect(persisted.execution).toEqual({ status: "succeeded", resourcesPending: { deadline: expect.any(String), nextAttemptAt: expect.any(String) } });
-    expect(persisted.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot });
+    expect(persisted.execution).toEqual({ status: "succeeded" });
+    expect(persisted.executionAttempts[0]!.resources).toEqual({
+      status: "collected", summary: summarizeResourceSnapshot(snapshot), downloads: 1, exhausted: true,
+    });
+    await expect(runtime.getRun(run.runId)).resolves.toMatchObject({ status: "succeeded" });
     expect(reported).not.toHaveBeenCalled();
     expect(harness.submitAgent).not.toHaveBeenCalled();
     expect(harness.collectAgentResources).toHaveBeenCalledOnce();
   });
 
-  it("keeps an evaluator resource snapshot and owes the resources when its recovery download fails", async () => {
+  it("keeps an evaluator resource snapshot and gives it up when its recovery download spends the retry budget", async () => {
     const store = makeStore();
     const harness = makeHarness();
     const reported = vi.fn();
@@ -5508,15 +5531,17 @@ describe("Run recovery from persisted facts", () => {
         evaluationAttemptId: "judge-before-recovery", evaluationId: evaluation.evaluationId,
         attemptNumber: 1, submissionId, status: "running",
         startedAt: "2026-10-09T00:00:00.000Z",
-        resources: { status: "collected", snapshot },
+        resources: { status: "collected", summary: summarizeResourceSnapshot(snapshot) },
       }],
     });
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("evaluator refresh unavailable"));
     await runtime.resume(run.runId);
     const persisted = await savedEvaluation(store, evaluation.evaluationId);
-    expect(persisted.status).toEqual({ status: "succeeded", resourcesPending: { deadline: expect.any(String), nextAttemptAt: expect.any(String) } });
-    expect(persisted.attempts[0]!.resources).toEqual({ status: "collected", snapshot });
+    expect(persisted.status).toEqual({ status: "succeeded" });
+    expect(persisted.attempts[0]!.resources).toEqual({
+      status: "collected", summary: summarizeResourceSnapshot(snapshot), downloads: 1, exhausted: true,
+    });
     expect(reported).not.toHaveBeenCalled();
     expect(harness.submitAgent).not.toHaveBeenCalled();
     expect(harness.collectAgentResources).toHaveBeenCalledOnce();
@@ -5544,7 +5569,7 @@ describe("Run recovery from persisted facts", () => {
       executionAttempts: [{
         executionAttemptId: "finalized-before-recovery", samplingId, attemptNumber: 1,
         submissionId, status: "running", startedAt: "2026-10-09T00:00:00.000Z",
-        resources: { status: "collected", snapshot },
+        resources: { status: "collected", summary: summarizeResourceSnapshot(snapshot) },
       }],
     });
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
@@ -5552,7 +5577,7 @@ describe("Run recovery from persisted facts", () => {
     await runtime.resume(run.runId);
     const persisted = await saved(store, samplingId);
     expect(persisted.execution.status).toBe("succeeded");
-    expect(persisted.executionAttempts[0]!.resources).toEqual({ status: "collected", snapshot });
+    expect(persisted.executionAttempts[0]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(snapshot) });
     expect(harness.collectAgentResources).not.toHaveBeenCalled();
     expect(reported).not.toHaveBeenCalled();
   });
@@ -5650,7 +5675,7 @@ describe("Run recovery from persisted facts", () => {
       executionAttempts: [{
         executionAttemptId: "uncertain-attempt", samplingId, attemptNumber: 1,
         submissionId, status: "running", startedAt: "2026-10-09T00:00:00.000Z",
-        resources: { status: "collected", snapshot: { ...makeResources({ handle, idempotencyKey }), finalized: false } },
+        resources: { status: "collected", summary: summarizeResourceSnapshot({ ...makeResources({ handle, idempotencyKey }), finalized: false }) },
       }],
     });
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission());
@@ -5663,7 +5688,8 @@ describe("Run recovery from persisted facts", () => {
     expect(harness.submitAgent).not.toHaveBeenCalled();
     expect(harness.collectAgentResources).toHaveBeenCalledOnce();
     const resources = (await saved(store, samplingId)).executionAttempts[0]!.resources;
-    expect(resources).toMatchObject({ status: "collected", snapshot: { usageEvents: [{ eventId: "terminal-usage" }] } });
+    expect(resources).toMatchObject({ status: "collected", summary: { counts: { usageEvents: 1 } } });
+    expect(store.resourceSnapshot({ samplingId, attemptId: "uncertain-attempt" })).toMatchObject({ usageEvents: [{ eventId: "terminal-usage" }] });
   });
 
   it("repairs a completed Agent's resource save from another Runtime without rerunning the Agent", async () => {
@@ -5714,7 +5740,7 @@ describe("Run recovery from persisted facts", () => {
       executionAttempts: [{
         executionAttemptId: "failed-attempt", samplingId, attemptNumber: 1, submissionId,
         status: "failed", error: "upstream failed", completedAt: "2026-10-09T00:00:00.000Z",
-        resources: { status: "collected", snapshot: makeResources({ handle, idempotencyKey }) },
+        resources: { status: "collected", summary: summarizeResourceSnapshot(makeResources({ handle, idempotencyKey })) },
       }],
     });
     vi.mocked(harness.inspectAgentOperation).mockResolvedValueOnce(null).mockResolvedValueOnce({
@@ -5756,7 +5782,7 @@ describe("Run recovery from persisted facts", () => {
       executionAttempts: [{
         executionAttemptId: "failed-before-recovery", samplingId, attemptNumber: 1, submissionId,
         status: "failed", error: "upstream failed", completedAt: "2026-10-09T00:00:00.000Z",
-        resources: { status: "collected", snapshot: makeResources({ handle, idempotencyKey }) },
+        resources: { status: "collected", summary: summarizeResourceSnapshot(makeResources({ handle, idempotencyKey })) },
       }],
     });
     vi.mocked(harness.inspectAgentOperation)
@@ -5798,7 +5824,7 @@ describe("Run recovery from persisted facts", () => {
       executionAttempts: [{
         executionAttemptId: "unconfirmed-attempt", samplingId, attemptNumber: 1, submissionId,
         status: "failed", error: "upstream failed", completedAt: "2026-10-09T00:00:00.000Z",
-        resources: { status: "collected", snapshot: makeResources({ handle, idempotencyKey: `execution:${samplingId}` }) },
+        resources: { status: "collected", summary: summarizeResourceSnapshot(makeResources({ handle, idempotencyKey: `execution:${samplingId}` })) },
       }],
     });
     vi.mocked(harness.inspectAgentOperation).mockResolvedValue(null);
@@ -6132,7 +6158,7 @@ describe("resource readiness waiting and Submission observation", () => {
     expect(vi.mocked(harness.collectAgentResources).mock.invocationCallOrder[0]!)
       .toBeGreaterThan(vi.mocked(harness.inspectAgentResources).mock.invocationCallOrder[2]!);
     expect(sampling.execution).toEqual({ status: "succeeded" });
-    expect(sampling.executionAttempts[0]!.resources).toMatchObject({ status: "collected", snapshot: { finalized: true } });
+    expect(sampling.executionAttempts[0]!.resources).toMatchObject({ status: "collected", summary: { finalized: true } });
   });
 
   it("never downloads an unfinalized snapshot: it waits across passes on readiness alone and downloads once when finalized", async () => {
@@ -6172,7 +6198,7 @@ describe("resource readiness waiting and Submission observation", () => {
     await runtime.resume(run.runId);
     const refreshed = await saved(store, samplingId);
     expect(refreshed.execution).toEqual({ status: "succeeded" });
-    expect(refreshed.executionAttempts[0]!.resources).toMatchObject({ status: "collected", snapshot: { finalized: true } });
+    expect(refreshed.executionAttempts[0]!.resources).toMatchObject({ status: "collected", summary: { finalized: true } });
     expect(refreshed.evidence).toEqual(first.evidence);
     expect(harness.collectAgentResources).toHaveBeenCalledOnce();
     expect(harness.collectAgentResources).toHaveBeenCalledWith(expect.objectContaining({
@@ -6210,7 +6236,7 @@ describe("resource readiness waiting and Submission observation", () => {
     await runtime.resume(run.runId);
     const final = await saved(store, samplingId);
     expect(final.execution).toEqual({ status: "succeeded" });
-    expect(final.executionAttempts[0]!.resources).toMatchObject({ status: "collected", snapshot: { finalized: false, readiness: PENDING_READINESS } });
+    expect(final.executionAttempts[0]!.resources).toMatchObject({ status: "collected", summary: { finalized: false, readiness: PENDING_READINESS } });
     expect(harness.collectAgentResources).toHaveBeenCalledOnce();
     expect(reported).toHaveBeenCalledOnce();
     const [error] = reported.mock.calls[0]! as [Error];
@@ -6291,7 +6317,7 @@ describe("resource readiness waiting and Submission observation", () => {
     const refreshed = await savedEvaluation(store, evaluationId);
     expect(refreshed.status).toEqual({ status: "succeeded" });
     expect(refreshed.output).toEqual(first.output);
-    expect(refreshed.attempts[0]!.resources).toMatchObject({ status: "collected", snapshot: { finalized: true } });
+    expect(refreshed.attempts[0]!.resources).toMatchObject({ status: "collected", summary: { finalized: true } });
     expect(vi.mocked(harness.collectAgentResources).mock.calls.filter(([call]) => call.handle.role === "evaluator")).toHaveLength(1);
     expect(vi.mocked(harness.submitAgent).mock.calls.filter(([call]) => call.handle.role === "evaluator")).toHaveLength(1);
     expect(vi.mocked(harness.ensureAgent).mock.calls.filter(([call]) => call.role === "evaluator")).toHaveLength(1);
@@ -6325,34 +6351,69 @@ describe("resource readiness waiting and Submission observation", () => {
 
     const persisted = await saved(store, samplingId);
     expect(persisted.execution).toEqual({ status: "succeeded" });
-    expect(persisted.executionAttempts[0]!.resources).toMatchObject({ status: "collected", snapshot: { finalized: true } });
+    expect(persisted.executionAttempts[0]!.resources).toMatchObject({ status: "collected", summary: { finalized: true } });
     expect(harness.collectAgentResources).toHaveBeenCalledOnce();
     expect(harness.submitAgent).not.toHaveBeenCalled();
   });
 
-  it("downloads again on a later pass when the single download failed", async () => {
+  it("retries a failed download within the resources retry budget and stores the snapshot outside the stage record", async () => {
     const store = makeStore();
     const harness = makeHarness();
-    const clock = testClock(START);
     vi.mocked(harness.collectAgentResources)
       .mockRejectedValueOnce(new Error("resource source unavailable"))
       .mockImplementation(async (input) => makeResources(input));
-    const runtime = createRuntime({ harness, store, sleep: async () => undefined, now: clock.now });
+    const runtime = createRuntime({ harness, store, sleep: async () => undefined, createRetryController: createProductionRetryController });
     const run = await runtime.submit(projectRequest("execution", "refresh-failed-resources"));
     await runtime.resume(run.runId);
-    const first = await saved(store, run.samplingIds[0]!);
-    expect(first.execution).toEqual({ status: "succeeded", resourcesPending: { deadline: DEADLINE, nextAttemptAt: FIRST_CHECK } });
-    expect(first.executionAttempts[0]!.resources?.status).toBe("failed");
-    await runtime.resume(run.runId);
-    expect(harness.collectAgentResources).toHaveBeenCalledOnce();
-
-    clock.advance(RESOURCE_CHECK_INTERVAL_MS);
-    await runtime.resume(run.runId);
     const persisted = await saved(store, run.samplingIds[0]!);
+    const attempt = persisted.executionAttempts[0]!;
     expect(persisted.execution).toEqual({ status: "succeeded" });
-    expect(persisted.executionAttempts[0]!.resources).toMatchObject({ status: "collected", snapshot: { finalized: true } });
+    expect(attempt.resources).toMatchObject({ status: "collected", summary: { finalized: true, counts: { usageEvents: 1 } } });
+    expect(attempt.resources).not.toHaveProperty("downloads");
+    expect(store.resourceSnapshot({ samplingId: persisted.samplingId, attemptId: attempt.executionAttemptId }))
+      .toEqual(await vi.mocked(harness.collectAgentResources).mock.results[1]!.value);
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(2);
     expect(harness.submitAgent).toHaveBeenCalledOnce();
+  });
+
+  describe("a download a crashed Worker started", () => {
+    async function crashedDownload(key: string, downloads: number) {
+      const store = makeStore();
+      const harness = makeHarness();
+      vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => makeResources(input));
+      const runtime = createRuntime({ harness, store, sleep: async () => undefined, now: () => START, createRetryController: createProductionRetryController });
+      const run = await runtime.submit(projectRequest("execution", key));
+      const samplingId = run.samplingIds[0]!;
+      await seedSampling(store, {
+        ...(await saved(store, samplingId)),
+        subjectChatId: "subject-chat",
+        execution: { status: "succeeded", resourcesPending: { deadline: DEADLINE, nextAttemptAt: START } },
+        artifacts: [{ artifactId: "subject-file", kind: "file", path: "/subject.txt" }],
+        trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
+        executionAttempts: [{
+          executionAttemptId: "crashed-download", samplingId, attemptNumber: 1, status: "completed",
+          submissionId: "submission-1", startedAt: START, completedAt: START,
+          resources: { status: "pending", scope: { chatId: "subject-chat", idempotencyKey: `execution:${samplingId}`, submissionId: "submission-1" }, downloads },
+        }],
+      });
+      await runtime.resume(run.runId);
+      return { harness, runtime, run, persisted: await saved(store, samplingId) };
+    }
+
+    it("counts against the same retry budget before the next download", async () => {
+      const { harness, persisted } = await crashedDownload("crashed-download-retried", 3);
+      expect(harness.collectAgentResources).toHaveBeenCalledOnce();
+      expect(persisted.execution).toEqual({ status: "succeeded" });
+      expect(persisted.executionAttempts[0]!.resources).toMatchObject({ status: "collected", summary: { finalized: true } });
+    });
+
+    it("gives the resources up without downloading once crashes spent the budget, so the Run finishes", async () => {
+      const { harness, runtime, run, persisted } = await crashedDownload("crashed-download-exhausted", 11);
+      expect(harness.collectAgentResources).not.toHaveBeenCalled();
+      expect(persisted.execution).toEqual({ status: "succeeded" });
+      expect(persisted.executionAttempts[0]!.resources).toMatchObject({ status: "failed", downloads: 11, exhausted: true });
+      await expect(runtime.getRun(run.runId)).resolves.toMatchObject({ status: "succeeded" });
+    });
   });
 
   it("persists an unconfirmed terminal status and re-observes the same Submission on the next pass", async () => {
@@ -6467,7 +6528,7 @@ describe("resource readiness waiting and Submission observation", () => {
     expect(refreshed.output?.structuredOutput).toEqual(acceptedOutput.structuredOutput);
     expect(refreshed.attempts).toHaveLength(1);
     expect(refreshed.attempts[0]).toMatchObject({ status: "completed", completedAt: expect.any(String) });
-    expect(refreshed.attempts[0]!.resources).toMatchObject({ status: "collected", snapshot: { finalized: true } });
+    expect(refreshed.attempts[0]!.resources).toMatchObject({ status: "collected", summary: { finalized: true } });
     expect(vi.mocked(harness.submitAgent).mock.calls.filter(([call]) => call.handle.role === "evaluator")).toHaveLength(1);
     expect(harness.restartAgent).not.toHaveBeenCalled();
   });

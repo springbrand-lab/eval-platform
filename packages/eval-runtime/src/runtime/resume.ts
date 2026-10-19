@@ -1,7 +1,6 @@
 import type {
   EvaluationOutputSchema,
   EvaluationPlan,
-  EvaluationRecord,
   ExecutionPlan,
   RetryPolicy,
   SamplingStageState,
@@ -20,7 +19,14 @@ import { RunRecords, type RunStagePlans } from "./records.js";
 import { createRetryController, loggedRetryController, type RetryController } from "./retry.js";
 import { createAgentScheduler, createAgentTaskQueue } from "./scheduler.js";
 import { finishStoppedRun, interruptRun, type StopContext } from "./stop.js";
-import { isRunStopPending, persistRuntimeRecord, type RuntimeRunRecord, type RuntimeStore, type SamplingState } from "./store.js";
+import {
+  isRunStopPending,
+  persistRuntimeRecord,
+  type EvaluationState,
+  type RuntimeRunRecord,
+  type RuntimeStore,
+  type SamplingState,
+} from "./store.js";
 
 export class RunResumer implements EvalRunResumer {
   readonly #store: RuntimeStore;
@@ -214,7 +220,7 @@ export class RunResumer implements EvalRunResumer {
       evaluationOutputSchema ??= this.#outputSchema(run.projectId);
       return evaluationOutputSchema;
     };
-    const cancelEvaluation = (evaluation: EvaluationRecord): void => {
+    const cancelEvaluation = (evaluation: EvaluationState): void => {
       if (cancelledEvaluationIds.has(evaluation.evaluationId)) return;
       cancelledEvaluationIds.add(evaluation.evaluationId);
       cancellationTasks.push(this.#cancelEvaluation(run.runId, evaluation, evaluationConfig));
@@ -222,7 +228,7 @@ export class RunResumer implements EvalRunResumer {
     const guardedHarness = this.#guardedHarness(run.runId, stopSignal);
     const executionDependencies = this.#stageDependencies(run, guardedHarness, () => !stopSignal?.aborted);
     const evaluationDependencies = this.#stageDependencies(run, guardedHarness, () => !stopSignal?.aborted);
-    const scheduleEvaluation = (sampling: SamplingState, evaluation: EvaluationRecord): void => {
+    const scheduleEvaluation = (sampling: SamplingState, evaluation: EvaluationState): void => {
       if (scheduledEvaluationIds.has(evaluation.evaluationId) || !owesWork(evaluation.status)) return;
       scheduledEvaluationIds.add(evaluation.evaluationId);
       evaluationQueue.enqueue(() => this.#runQueuedStageTask(stopSignal, evaluationErrors, async () => {
@@ -318,7 +324,7 @@ export class RunResumer implements EvalRunResumer {
   async #evaluate(
     run: RuntimeRunRecord,
     config: EvaluationPlan,
-    targets: readonly { readonly sampling: SamplingState; readonly evaluation: EvaluationRecord }[],
+    targets: readonly { readonly sampling: SamplingState; readonly evaluation: EvaluationState }[],
     stopSignal: AbortSignal | undefined,
   ): Promise<void> {
     if (targets.length === 0) return;
@@ -413,11 +419,11 @@ export class RunResumer implements EvalRunResumer {
   }
 
   /** Pipeline evaluations of failed executions are cancelled independently of the evaluation scheduler. */
-  async #cancelEvaluation(runId: string, evaluation: EvaluationRecord, config: EvaluationPlan): Promise<void> {
+  async #cancelEvaluation(runId: string, evaluation: EvaluationState, config: EvaluationPlan): Promise<void> {
     const { samplingId, evaluationId } = evaluation;
     const context = { runId, stage: "evaluation", samplingId, evaluationId } as const;
     const retryController = this.#stage.createRetryController(config.retryPolicy, withContext(this.#stage, context).log);
-    const persist = (record: EvaluationRecord, expected: EvaluationRecord): Promise<void> => persistRuntimeRecord({
+    const persist = (record: EvaluationState, expected: EvaluationState): Promise<EvaluationState> => persistRuntimeRecord({
       record,
       expected,
       write: (next, previous) => this.#store.updateEvaluation(next, previous),

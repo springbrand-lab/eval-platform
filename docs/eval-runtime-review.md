@@ -1045,4 +1045,5 @@ Agent 已经做完，产物也拿到了。保存证据包时只要一个文件�
 
 - （已解决）eval-api 已升级到 `@springbrand/eval-harness@0.1.0-alpha.4`，其 `EVAL_EVIDENCE_FILE_MAX_BYTES` 为 95,000,000，`spEvidenceLimits(DEFAULT_EVIDENCE_LIMITS)` 的单文件上限现为 95 MB 并已生效。
 - Eval 只等待 SP 的 telemetry/runtime outbox 投递，不触发投递；按需排空需要 `@springbrand/agent-runtime` 提供带保护的 flush API。
-- 资源快照存于 `facts` JSONB，单值上限约 255 MB；超过时需另行设计原始 telemetry 的存储位置。
+- 资源快照已移出 `facts`：每个 Attempt 一行存于 `eval_attempt_resources.snapshot`（JSONB 单值上限约 255 MB 仍适用于单个快照），阶段事实只保存状态与摘要；见下方 Worker 内存修复。
+- Worker 内存修复（2026-10-20）：Worker 每轮调度、停止轮询与汇总此前读取全部 Sampling/Evaluation 的完整 `facts`（含每个 Attempt 的原始快照，单个 Run 约 168 MB），每次小写入又重写并字符串化新旧 `facts`，512 MB 堆反复 OOM；崩溃在下载中途时下载从不计数，于是无限重下。现在：快照原文单独存表，Metrics 投影同一语句写入，阶段写入按 `revision` 条件写；每次下载前先持久化下载计数，崩溃计入同一 `resources` 重试预算，预算用尽即放弃（`exhausted`，阶段状态不变，Run 可结束）；进程内同一时间只下载一个快照；快照原地校验，不再 `structuredClone`。迁移 `0004_attempt_resources` 不回填数据。

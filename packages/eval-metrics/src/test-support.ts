@@ -1,15 +1,16 @@
-import type {
-  AgentResourceCollection,
-  AgentResourceFact,
-  AgentResourceSnapshot,
-  EvaluationOutputSchema,
-  EvaluationRecord,
-  JsonValue,
-  ProjectDatasetSnapshot,
-  ProjectPlan,
-  RunSnapshot,
+import {
+  summarizeResourceSnapshot,
+  type AgentResourceCollection,
+  type AgentResourceFact,
+  type AgentResourceSnapshot,
+  type EvaluationOutputSchema,
+  type JsonValue,
+  type ProjectDatasetSnapshot,
+  type ProjectPlan,
+  type RunSnapshot,
 } from "@eval-platform/eval-contracts";
-import type { ProjectSample, SamplingSnapshot } from "@eval-platform/eval-runtime";
+import type { ProjectSample } from "@eval-platform/eval-runtime";
+import type { MetricsEvaluation, MetricsSampling } from "./aggregation/model.js";
 import type { ResourceInput } from "./aggregation/resources.js";
 import type { MetricsFacts } from "./reporting/model.js";
 
@@ -82,15 +83,13 @@ export function facts(patch: Partial<MetricsFacts> & Pick<MetricsFacts, "plan" |
 }
 
 export function collection(patch: Partial<AgentResourceSnapshot> = {}): AgentResourceCollection {
-  return {
-    status: "collected",
-    snapshot: {
-      scope: { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "execution:sampling-1" },
-      observedAt: "2026-10-08T00:00:01.000Z", finalized: true,
-      coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
-      usageEvents: [], telemetryEvents: [], billingSettlements: [], ...patch,
-    },
+  const snapshot: AgentResourceSnapshot = {
+    scope: { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "execution:sampling-1" },
+    observedAt: "2026-10-08T00:00:01.000Z", finalized: true,
+    coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
+    usageEvents: [], telemetryEvents: [], billingSettlements: [], ...patch,
   };
+  return { status: "collected", summary: summarizeResourceSnapshot(snapshot), snapshot };
 }
 
 export function resourceInput(patch: Partial<AgentResourceSnapshot> = {}, ownerUserId = "owner-1"): ResourceInput {
@@ -127,7 +126,7 @@ export function settlement(eventId: string, patch: AgentResourceFact = {}): Agen
   };
 }
 
-export function sampling(samplingId = "sampling-1", patch: Partial<SamplingSnapshot> = {}): SamplingSnapshot {
+export function sampling(samplingId = "sampling-1", patch: Partial<MetricsSampling> = {}): MetricsSampling {
   return {
     samplingId, projectId: PROJECT.projectId, projectSampleId: "ps-1", subjectAgent: SUBJECT,
     subjectChatId: `subject:${samplingId}`, execution: { status: "succeeded" },
@@ -146,7 +145,7 @@ export function sampling(samplingId = "sampling-1", patch: Partial<SamplingSnaps
 }
 
 /** A succeeded EvaluationRecord whose structured output is `result` written as JSON text (or raw text). */
-export function evaluation(evaluationId = "evaluation-1", patch: Partial<EvaluationRecord> = {}, result: JsonValue | string = { score: 80 }): EvaluationRecord {
+export function evaluation(evaluationId = "evaluation-1", patch: Partial<MetricsEvaluation> = {}, result: JsonValue | string = { score: 80 }): MetricsEvaluation {
   return {
     evaluationId, samplingId: "sampling-1", evaluator: EVALUATOR, chatId: `judge:${evaluationId}`,
     status: { status: "succeeded" },

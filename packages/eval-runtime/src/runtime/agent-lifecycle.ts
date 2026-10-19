@@ -1,7 +1,8 @@
 import type {
   AgentRole,
-  AgentResourceCollection,
   AgentResourceScope,
+  AgentResourceSnapshot,
+  AgentResourceState,
   AgentStatus,
   EvidenceLimits,
   HarnessConfig,
@@ -31,7 +32,7 @@ import {
   RESOURCE_READINESS_DELAYS_MS,
   STOPPED_RESOURCES_ERROR,
   awaitResourceFinalization,
-  downloadResources,
+  collectResources,
   resourceScopeMatches,
   storedResourceScope,
 } from "./resources.js";
@@ -60,7 +61,7 @@ export interface AgentAttemptRecord {
   readonly startedAt?: string;
   readonly completedAt?: string;
   readonly error?: string;
-  readonly resources?: AgentResourceCollection;
+  readonly resources?: AgentResourceState;
 }
 
 export interface AttemptPatch {
@@ -68,7 +69,7 @@ export interface AttemptPatch {
   readonly status?: AgentStatus;
   readonly completedAt?: string;
   readonly error?: string;
-  readonly resources?: AgentResourceCollection;
+  readonly resources?: AgentResourceState;
 }
 
 export interface AgentLifecycleDependencies {
@@ -135,6 +136,8 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   }) => TAttempt;
   readonly appendAttempt: (attempt: TAttempt) => Promise<void>;
   readonly updateAttempt: (attempt: TAttempt, patch: AttemptPatch) => Promise<TAttempt>;
+  /** Stores the Attempt's raw resource snapshot outside its stage record. */
+  readonly saveResourceSnapshot: (attempt: TAttempt, snapshot: AgentResourceSnapshot) => Promise<void>;
   readonly setSamplingStatus: (status: SamplingStatus, lastError?: string) => Promise<void>;
   readonly prepare: (handle: AgentHandle) => Promise<void>;
   readonly collectOutput: (handle: AgentHandle) => Promise<TOutput>;
@@ -220,11 +223,11 @@ export function applyAttemptPatch<TAttempt extends AgentAttemptRecord>(
   } as TAttempt;
 }
 
-export function withExecutionStatus(
-  sampling: Sampling,
+export function withExecutionStatus<T extends Sampling>(
+  sampling: T,
   status: SamplingStatus,
   lastError?: string,
-): Sampling {
+): T {
   return {
     ...sampling,
     execution: lastError === undefined ? { status } : { status, lastError },
@@ -367,15 +370,15 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
         }
       } finally {
         const terminalSaved = terminalPatch === undefined || attempt.completedAt !== undefined;
-        const needsResources = !dispatchBlocked && (attempt.resources?.status === "pending"
-          || (attempt.resources?.status === "failed" && attempt.completedAt !== undefined)
-          || (attempt.resources?.status === "collected" && terminal !== undefined
-            && !attempt.resources.snapshot.finalized));
+        const resources = attempt.resources;
+        const needsResources = !dispatchBlocked && resources !== undefined && (resources.status === "pending"
+          || (resources.exhausted !== true && ((resources.status === "failed" && attempt.completedAt !== undefined)
+            || (resources.status === "collected" && terminal !== undefined && !resources.summary.finalized))));
         if (terminalSaved && needsResources && (dependencies.finalizingStop || dependencies.runStopped)) {
           // A stopping or stopped Run never reads SP: an ended Attempt's owed resources fail as they are.
-          if (attempt.completedAt !== undefined && attempt.resources?.status !== "collected") {
+          if (attempt.completedAt !== undefined && resources.status !== "collected") {
             attempt = await options.updateAttempt(attempt, { resources: {
-              status: "failed", scope: storedResourceScope(attempt.resources) ?? resourceScope,
+              status: "failed", scope: storedResourceScope(resources) ?? resourceScope,
               collectedAt: dependencies.now(), error: STOPPED_RESOURCES_ERROR,
             } });
           }
@@ -388,13 +391,18 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
           const owed = await awaitResourceFinalization(
             source, attempt.completedAt === undefined ? [0] : RESOURCE_READINESS_DELAYS_MS,
           );
-          const resources = owed === undefined ? await downloadResources(source) : undefined;
-          if (resources && !(attempt.resources?.status === "collected" && resources.status === "failed")) {
-            attempt = await options.updateAttempt(attempt, {
-              ...(resources.status === "collected" && !attempt.submissionId
-                ? { submissionId: resources.snapshot.scope.submissionId }
-                : {}),
-              resources,
+          if (owed === undefined) {
+            const downloading = attempt;
+            await collectResources({
+              source,
+              current: resources,
+              saveSnapshot: (snapshot) => options.saveResourceSnapshot(downloading, snapshot),
+              save: async (next) => {
+                attempt = await options.updateAttempt(attempt!, {
+                  ...(next.status === "collected" && !attempt!.submissionId ? { submissionId: next.summary.scope.submissionId } : {}),
+                  resources: next,
+                });
+              },
             });
           }
         }

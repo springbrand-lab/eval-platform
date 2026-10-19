@@ -16,7 +16,7 @@ import type {
 import type { EvidenceStore, Harness } from "../harness/model.js";
 import type { RuntimeContext, RuntimeLog } from "./log.js";
 import type { RetryController } from "./retry.js";
-import type { SamplingState, RuntimeStore } from "./store.js";
+import type { EvaluationState, SamplingState, RuntimeStore } from "./store.js";
 import type { EvaluationScorePort } from "./scores.js";
 import type { EvaluationResultPort } from "./results.js";
 
@@ -69,7 +69,7 @@ export interface RuntimeSamplingContext {
 
 export interface RuntimeEvaluationContext {
   readonly sampling: SamplingState;
-  readonly evaluation: EvaluationRecord;
+  readonly evaluation: EvaluationState;
   readonly sample: ProjectSample;
 }
 

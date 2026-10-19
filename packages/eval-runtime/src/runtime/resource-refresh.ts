@@ -1,4 +1,10 @@
-import { RESOURCE_CHECK_INTERVAL_MS, type AgentResourceScope, type HarnessConfig, type SamplingStageState } from "@eval-platform/eval-contracts";
+import {
+  RESOURCE_CHECK_INTERVAL_MS,
+  type AgentResourceScope,
+  type AgentResourceSnapshot,
+  type HarnessConfig,
+  type SamplingStageState,
+} from "@eval-platform/eval-contracts";
 
 import type { AgentHandle } from "../harness/model.js";
 import {
@@ -19,7 +25,7 @@ import { attemptOwesResources } from "./recovery.js";
 import {
   STOPPED_RESOURCES_ERROR,
   awaitResourceFinalization,
-  downloadResources,
+  collectResources,
   resourceScopeMatches,
   storedResourceScope,
 } from "./resources.js";
@@ -35,6 +41,8 @@ export interface FinishedStageRefresh<TAttempt extends AgentAttemptRecord> {
   readonly attempts: readonly TAttempt[];
   readonly state: SamplingStageState;
   readonly agentEnded: (attempt: TAttempt) => boolean;
+  /** Stores an Attempt's raw resource snapshot outside its stage record. */
+  readonly saveResourceSnapshot: (attempt: TAttempt, snapshot: AgentResourceSnapshot) => Promise<void>;
   /** Writes exactly these Attempts and stage state; status, output and evidence stay unchanged. */
   readonly persist: (attempts: readonly TAttempt[], state: SamplingStageState) => Promise<void>;
 }
@@ -42,9 +50,10 @@ export interface FinishedStageRefresh<TAttempt extends AgentAttemptRecord> {
 /**
  * One due pass of a finished stage waiting for its resources: a readiness check per owed Attempt,
  * then the single download once SP finalized the snapshot. Past the deadline the current snapshot
- * is downloaded once and kept as it is, the wait ends and the shortfall is reported once. Finalizing
- * a stop never reads SP: each owed Attempt without a collected snapshot is recorded failed with
- * {@link STOPPED_RESOURCES_ERROR} and the wait ends.
+ * is downloaded once and kept as it is, the wait ends and the shortfall is reported once; a pass
+ * that fails past the deadline also ends it. An Attempt whose download budget is spent is no longer
+ * owed. Finalizing a stop never reads SP: each owed Attempt without a collected snapshot is recorded
+ * failed with {@link STOPPED_RESOURCES_ERROR} and the wait ends.
  */
 export async function refreshFinishedStage<TAttempt extends AgentAttemptRecord>(
   dependencies: AgentLifecycleDependencies,
@@ -63,17 +72,19 @@ export async function refreshFinishedStage<TAttempt extends AgentAttemptRecord>(
     await refresh.persist(refresh.attempts, finished);
     return;
   }
+  const expired = Date.parse(now) >= Date.parse(pending.deadline);
+  // Saved after every counted download, so a later failure never discards the count.
+  const attempts = [...refresh.attempts];
   try {
-    const expired = Date.parse(now) >= Date.parse(pending.deadline);
     const errors: string[] = [];
-    const attempts: TAttempt[] = [];
-    for (const original of refresh.attempts) {
-      if (!attemptOwesResources(original, refresh.agentEnded)) {
-        attempts.push(original);
-        continue;
-      }
-      const { attempt, error } = await refreshAttempt(dependencies, refresh, handle, original, expired);
-      attempts.push(attempt);
+    for (const [index, original] of refresh.attempts.entries()) {
+      if (!attemptOwesResources(original, refresh.agentEnded)) continue;
+      const save = async (attempt: TAttempt) => {
+        attempts[index] = attempt;
+        await refresh.persist(attempts, refresh.state);
+      };
+      const { attempt, error } = await refreshAttempt(dependencies, refresh, handle, original, expired, save);
+      attempts[index] = attempt;
       if (error !== undefined) errors.push(`Attempt ${attempt.attemptNumber}: ${error}`);
     }
     const lastError = errors.join("; ");
@@ -92,9 +103,13 @@ export async function refreshFinishedStage<TAttempt extends AgentAttemptRecord>(
     reportError(dependencies.onError, new Error(
       `${stage} resource refresh failed for sampling ${samplingId}: ${message}`, { cause: error },
     ));
+    if (expired) {
+      await refresh.persist(attempts, finished);
+      return;
+    }
     // Keep the wait but back off one interval, so the stage is not due again immediately.
     const nextAttemptAt = new Date(Math.min(Date.parse(now) + RESOURCE_CHECK_INTERVAL_MS, Date.parse(pending.deadline))).toISOString();
-    await refresh.persist(refresh.attempts, { ...finished, resourcesPending: { deadline: pending.deadline, nextAttemptAt, lastError: message } });
+    await refresh.persist(attempts, { ...finished, resourcesPending: { deadline: pending.deadline, nextAttemptAt, lastError: message } });
   }
 }
 
@@ -112,6 +127,7 @@ async function refreshAttempt<TAttempt extends AgentAttemptRecord>(
   handle: AgentHandle,
   original: TAttempt,
   expired: boolean,
+  save: (attempt: TAttempt) => Promise<void>,
 ): Promise<{ readonly attempt: TAttempt; readonly error?: string }> {
   const { stage, samplingId } = refresh;
   let attempt = original;
@@ -144,13 +160,26 @@ async function refreshAttempt<TAttempt extends AgentAttemptRecord>(
   };
   const owed = await awaitResourceFinalization(source, [0]);
   if (owed !== undefined && !expired) return { attempt, error: owed };
-  const resources = await downloadResources(source);
-  if (resources.status === "failed") {
-    return { attempt: attempt.resources?.status === "collected" ? attempt : applyAttemptPatch(attempt, { resources }), error: resources.error };
-  }
-  attempt = applyAttemptPatch(attempt, {
-    resources,
-    ...(attempt.submissionId === undefined ? { submissionId: resources.snapshot.scope.submissionId } : {}),
+  const resources = await collectResources({
+    source,
+    current: attempt.resources!,
+    saveSnapshot: (snapshot) => refresh.saveResourceSnapshot(original, snapshot),
+    save: async (next) => {
+      attempt = applyAttemptPatch(attempt, {
+        resources: next,
+        ...(next.status === "collected" && attempt.submissionId === undefined ? { submissionId: next.summary.scope.submissionId } : {}),
+      });
+      await save(attempt);
+    },
   });
-  return resources.snapshot.finalized ? { attempt } : { attempt, error: owed ?? "resource snapshot is not finalized" };
+  if (resources.status !== "pending" && resources.exhausted) {
+    const error = resources.status === "failed" ? resources.error : "resource snapshot is not finalized";
+    reportError(dependencies.onError, new Error(
+      `${stage} resources for sampling ${samplingId}, Chat ${handle.chatId}, Attempt ${attempt.attemptNumber} were given up after ${resources.downloads} downloads: ${error}`,
+    ));
+    return { attempt };
+  }
+  return resources.status === "collected" && resources.summary.finalized
+    ? { attempt }
+    : { attempt, error: owed ?? "resource snapshot is not finalized" };
 }

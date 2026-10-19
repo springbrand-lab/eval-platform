@@ -32,6 +32,9 @@ export type {
   RuntimeRunRequestIdentity,
   RuntimeRunRecord,
   RuntimeRecoveryStore,
+  EvaluationState,
+  ResourceSnapshotTarget,
+  Revisioned,
   SamplingState,
   RuntimeStore,
 } from "./store.js";
@@ -74,7 +77,7 @@ export {
   type EvaluationResultPort,
 } from "./results.js";
 export { safeLog, type RuntimeContext, type RuntimeLog } from "./log.js";
-export { evaluationAgentEnded, executionAgentEnded, stageOwesResources } from "./recovery.js";
+export { evaluationAgentEnded, executionAgentEnded, stageOwesResources, withFreshResourceBudget } from "./recovery.js";
 
 export function createEvalRunAdmission(dependencies: EvalRunAdmissionDependencies): EvalRunAdmission {
   const admission = new RunAdmission(dependencies);

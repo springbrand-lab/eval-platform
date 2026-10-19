@@ -1,5 +1,6 @@
 import type {
   AgentConfigSnapshot,
+  AgentResourceSnapshot,
   AgentPurpose,
   AgentRole,
   DatasetKind,
@@ -267,7 +268,8 @@ export const samplings = pgTable("eval_samplings", {
   projectId: text("project_id").notNull(),
   projectSampleId: text("project_sample_id").notNull(),
   facts: jsonb("facts").$type<Omit<Sampling, "samplingId" | "projectId" | "projectSampleId">>().notNull(),
-  metricFacts: jsonb("metric_facts").$type<Omit<Sampling, "samplingId" | "projectId" | "projectSampleId">>(),
+  /** Bumped by every committed write of `facts`; the Runtime's compare-and-set token. */
+  revision: integer("revision").notNull().default(0),
 }, (table) => [
   unique("eval_samplings_owner_id_uq").on(table.ownerUserId, table.samplingId),
   foreignKey({ name: "eval_samplings_project_sample_fk", columns: [table.ownerUserId, table.projectId, table.projectSampleId], foreignColumns: [projectSamples.ownerUserId, projectSamples.projectId, projectSamples.projectSampleId] }),
@@ -279,11 +281,34 @@ export const evaluations = pgTable("eval_evaluations", {
   ownerUserId: text("owner_user_id").notNull(),
   samplingId: text("sampling_id").notNull(),
   facts: jsonb("facts").$type<Omit<EvaluationRecord, "evaluationId" | "samplingId">>().notNull(),
-  metricFacts: jsonb("metric_facts").$type<Omit<EvaluationRecord, "evaluationId" | "samplingId">>(),
+  /** Bumped by every committed write of `facts`; the Runtime's compare-and-set token. */
+  revision: integer("revision").notNull().default(0),
 }, (table) => [
   unique("eval_evaluations_owner_identity_uq").on(table.ownerUserId, table.evaluationId, table.samplingId),
   foreignKey({ name: "eval_evaluations_sampling_fk", columns: [table.ownerUserId, table.samplingId], foreignColumns: [samplings.ownerUserId, samplings.samplingId] }).onDelete("restrict"),
   index("eval_evaluations_sampling_idx").on(table.samplingId),
+]);
+
+/**
+ * One Attempt's raw resource snapshot, stored unchanged outside its stage record (whose facts keep only
+ * its summary), with the Metrics projection derived from it in the same write. `record_id` is the
+ * Sampling of an execution Attempt or the Evaluation of an evaluation Attempt; rows go with their record.
+ */
+export const attemptResources = pgTable("eval_attempt_resources", {
+  stage: text("stage").$type<"execution" | "evaluation">().notNull(),
+  recordId: text("record_id").notNull(),
+  attemptId: text("attempt_id").notNull(),
+  ownerUserId: text("owner_user_id").notNull(),
+  samplingId: text("sampling_id").notNull(),
+  evaluationId: text("evaluation_id"),
+  snapshot: jsonb("snapshot").$type<AgentResourceSnapshot>().notNull(),
+  metricSnapshot: jsonb("metric_snapshot").$type<AgentResourceSnapshot>().notNull(),
+}, (table) => [
+  primaryKey({ name: "eval_attempt_resources_pk", columns: [table.stage, table.recordId, table.attemptId] }),
+  foreignKey({ name: "eval_attempt_resources_sampling_fk", columns: [table.ownerUserId, table.samplingId], foreignColumns: [samplings.ownerUserId, samplings.samplingId] }).onDelete("cascade"),
+  foreignKey({ name: "eval_attempt_resources_evaluation_fk", columns: [table.ownerUserId, table.evaluationId, table.samplingId], foreignColumns: [evaluations.ownerUserId, evaluations.evaluationId, evaluations.samplingId] }).onDelete("cascade"),
+  check("eval_attempt_resources_record_ck", sql`(${table.stage} = 'execution' AND ${table.evaluationId} IS NULL AND ${table.recordId} = ${table.samplingId}) OR (${table.stage} = 'evaluation' AND ${table.recordId} = ${table.evaluationId})`),
+  index("eval_attempt_resources_sampling_idx").on(table.samplingId),
 ]);
 
 /**

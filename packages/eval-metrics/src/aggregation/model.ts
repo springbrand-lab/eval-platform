@@ -1,6 +1,11 @@
 import type {
   AgentConfigRef,
+  AgentResourceCollection,
   AgentResourceCompleteness,
+  AgentResourceState,
+  EvaluationAttempt,
+  EvaluationRecord,
+  ExecutionAttempt,
   AgentResourceScope,
   AgentRole,
   AgentStatus,
@@ -10,7 +15,23 @@ import type {
   SamplingStatus,
   TrajectoryRef,
 } from "@eval-platform/eval-contracts";
+import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
 import type { EvaluationValidationStatus, OutputFieldDefinition, OutputScalar } from "../evaluators/model.js";
+
+/** An Attempt whose collected resources carry their stored snapshot. */
+export type WithResourceSnapshot<T extends { readonly resources?: AgentResourceState }> = Omit<T, "resources"> & {
+  readonly resources?: AgentResourceCollection;
+};
+
+/** A Sampling whose collected Attempt resources carry their stored snapshots. */
+export type MetricsSampling = Omit<SamplingSnapshot, "executionAttempts"> & {
+  readonly executionAttempts: readonly WithResourceSnapshot<ExecutionAttempt>[];
+};
+
+/** An EvaluationRecord whose collected Attempt resources carry their stored snapshots. */
+export type MetricsEvaluation = Omit<EvaluationRecord, "attempts"> & {
+  readonly attempts: readonly WithResourceSnapshot<EvaluationAttempt>[];
+};
 
 export interface MetricNumber {
   readonly value: number | null;

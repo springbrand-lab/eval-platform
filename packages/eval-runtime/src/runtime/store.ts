@@ -1,4 +1,5 @@
 import type {
+  AgentResourceSnapshot,
   EvaluationRecord,
   RunOperation,
   RunPhases,
@@ -59,9 +60,9 @@ export interface RuntimeRunAdmissionCommand {
    * `run.targets.samplingIds`, as read before the transaction; empty for evaluation.
    */
   readonly replacedSamplingIds: readonly string[];
-  /** New Samplings (execution/pipeline only). */
-  readonly samplings: readonly SamplingState[];
-  /** New EvaluationRecords (pipeline/evaluation only). */
+  /** New Samplings (execution/pipeline only), stored at revision 0. */
+  readonly samplings: readonly Sampling[];
+  /** New EvaluationRecords (pipeline/evaluation only), stored at revision 0. */
   readonly evaluations: readonly EvaluationRecord[];
 }
 
@@ -71,7 +72,17 @@ export interface RuntimeRunAdmission {
   readonly created: boolean;
 }
 
-export type SamplingState = Sampling;
+/** A stored record with the revision its compare-and-set update must match. */
+export type Revisioned<T> = T & { readonly revision: number };
+export type SamplingState = Revisioned<Sampling>;
+export type EvaluationState = Revisioned<EvaluationRecord>;
+
+/** The Attempt whose raw resource snapshot is stored; `evaluationId` is present for, and only for, an Evaluator. */
+export interface ResourceSnapshotTarget {
+  readonly samplingId: string;
+  readonly evaluationId?: string;
+  readonly attemptId: string;
+}
 
 export interface RuntimeStore {
   getRun(runId: string): Promise<RuntimeRunRecord | null>;
@@ -102,17 +113,22 @@ export interface RuntimeStore {
    * enforce identity.
    */
   admitRun(command: RuntimeRunAdmissionCommand): Promise<RuntimeRunAdmission>;
-  /** Atomically update only while the supplied previous facts still match. */
-  updateEvaluation(record: EvaluationRecord, expected: EvaluationRecord): Promise<void>;
-  getEvaluation(evaluationId: string): Promise<EvaluationRecord | null>;
+  /** Atomically update only while `expected.revision` is still stored; the record is saved at the next revision. */
+  updateEvaluation(record: EvaluationState, expected: EvaluationState): Promise<void>;
+  getEvaluation(evaluationId: string): Promise<EvaluationState | null>;
   /** Return one Evaluation or null per input ID, in the same order. */
-  getEvaluations(evaluationIds: readonly string[]): Promise<readonly (EvaluationRecord | null)[]>;
-  listEvaluations(samplingId: string): Promise<readonly EvaluationRecord[]>;
-  /** Atomically update only while the supplied previous facts still match. */
+  getEvaluations(evaluationIds: readonly string[]): Promise<readonly (EvaluationState | null)[]>;
+  listEvaluations(samplingId: string): Promise<readonly EvaluationState[]>;
+  /** Atomically update only while `expected.revision` is still stored; the record is saved at the next revision. */
   updateSampling(state: SamplingState, expected: SamplingState): Promise<void>;
   getSampling(samplingId: string): Promise<SamplingState | null>;
   /** Return one Sampling or null per input ID, in the same order. */
   getSamplings(samplingIds: readonly string[]): Promise<readonly (SamplingState | null)[]>;
+  /**
+   * Stores one Attempt's raw snapshot unchanged, replacing an earlier one. Called before the stage
+   * record marks it collected; stage records keep only its summary.
+   */
+  saveResourceSnapshot(target: ResourceSnapshotTarget, snapshot: AgentResourceSnapshot): Promise<void>;
 }
 
 /**
@@ -133,20 +149,21 @@ export interface RuntimeRecoveryStore {
   markRunStopFinalized(runId: string): Promise<boolean>;
 }
 
-export async function persistRuntimeRecord<TRecord extends SamplingState | EvaluationRecord>(input: {
+/** Writes `record` over `expected` and returns it as stored, at the next revision. */
+export async function persistRuntimeRecord<TRecord extends SamplingState | EvaluationState>(input: {
   readonly record: TRecord;
   readonly expected: TRecord;
   readonly write: (record: TRecord, expected: TRecord) => Promise<void>;
   readonly read: () => Promise<TRecord | null>;
   readonly retryController: RetryController;
   readonly sleep: (milliseconds: number) => Promise<void>;
-}): Promise<void> {
-  const record = structuredClone(input.record);
-  const expected = structuredClone(input.expected);
+}): Promise<TRecord> {
+  const { expected } = input;
+  const record: TRecord = { ...input.record, revision: expected.revision + 1 };
   for (let attemptNumber = 1; ; attemptNumber += 1) {
     try {
       await input.write(record, expected);
-      return;
+      return record;
     } catch (error) {
       let stored: TRecord | null = null;
       let readFailed = false;
@@ -155,13 +172,13 @@ export async function persistRuntimeRecord<TRecord extends SamplingState | Evalu
       } catch {
         readFailed = true;
       }
-      if (equalJson(stored, record)) return;
+      if (equalJson(stored, record)) return record;
 
       const outcome: RuntimePersistenceOutcome = error instanceof RuntimeRecordConflictError
         ? "conflict"
         : readFailed || stored === null
           ? "unknown"
-          : !equalJson(stored, expected)
+          : stored.revision !== expected.revision
             ? "conflict"
             : "not-committed";
       const details = describeAgentError(error);
@@ -216,7 +233,7 @@ export interface StageFailureRecords<TRecord> {
  * Run stops, committed or conflicting persistence, and a record changed by another writer.
  */
 export async function readStageFailure<
-  TRecord extends SamplingState | EvaluationRecord,
+  TRecord extends SamplingState | EvaluationState,
   TAttempt extends { readonly completedAt?: string },
 >(error: unknown, record: {
   readonly read: () => Promise<TRecord | null>;
@@ -231,7 +248,7 @@ export async function readStageFailure<
   if (!stored) throw error;
   if (!(error instanceof RuntimeRecordPersistenceError)) return { stored, failureBase: stored };
   const attempted = error.attemptedRecord as TRecord;
-  if (!equalJson(stored, error.expectedRecord)) {
+  if (stored.revision !== (error.expectedRecord as TRecord).revision) {
     if (equalJson(stored, attempted)) return { stored, failureBase: stored };
     throw error;
   }

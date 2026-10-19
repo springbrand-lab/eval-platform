@@ -78,6 +78,8 @@ export function toRunSnapshot(
   };
 }
 
-export function toSamplingSnapshot(state: SamplingState): SamplingSnapshot {
-  return structuredClone(state);
+/** Detached public facts, without the Store revision. */
+export function toSamplingSnapshot(state: SamplingSnapshot & { readonly revision?: number }): SamplingSnapshot {
+  const { revision: _revision, ...snapshot } = state;
+  return structuredClone(snapshot);
 }

@@ -843,8 +843,8 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     const s = services();
     const pipeline = await buildCommand(s.plans, s.runtime, { projectId: seeded.projectId, operation: "pipeline" });
     await s.runtime.admitRun(pipeline);
-    const sampling = pipeline.samplings[0]!;
-    const evaluation = pipeline.evaluations[0]!;
+    const sampling = { ...pipeline.samplings[0]!, revision: 0 };
+    const evaluation = { ...pipeline.evaluations[0]!, revision: 0 };
     expect(await s.observations.subject(seeded.projectId, sampling.samplingId)).toEqual({
       role: "subject", projectId: seeded.projectId, samplingId: sampling.samplingId, ownerUserId: OWNER, state: "not-started",
     });

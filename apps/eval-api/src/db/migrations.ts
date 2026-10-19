@@ -3,7 +3,6 @@ import { readMigrationFiles, type MigrationMeta } from "drizzle-orm/migrator";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { PgTable } from "drizzle-orm/pg-core";
 import type { EvalDb } from "./client.js";
-import { backfillMetricFacts } from "./metric-facts.js";
 import * as schema from "./schema.js";
 
 function historyMismatch(): Error {
@@ -32,7 +31,6 @@ export async function migrateDatabase(db: EvalDb, config: { readonly migrationsF
   await assertRecordedMigrations(db, expected);
   await migrate(db, config);
   if (await assertRecordedMigrations(db, expected) !== expected.length) throw historyMismatch();
-  await backfillMetricFacts(db);
   // Use the application's only table/column definition, without reading any business rows.
   for (const value of Object.values(schema)) {
     if (is(value, PgTable)) await db.select().from(value).limit(0);

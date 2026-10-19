@@ -17,7 +17,7 @@ import {
 import { dataInputSchema } from "@eval-platform/eval-dataset";
 import type { AgentHandle } from "../harness/model.js";
 
-import { persistRuntimeRecord, readStageFailure } from "./store.js";
+import { persistRuntimeRecord, readStageFailure, type SamplingState } from "./store.js";
 import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 import type { RuntimeSamplingContext } from "./model.js";
 import {
@@ -127,8 +127,8 @@ export async function executeSampling(
     reportError(dependencies.onError, reported);
   };
 
-  const persistRecord = async (sampling: Sampling): Promise<void> => {
-    await persistRuntimeRecord({
+  const persistRecord = async (sampling: SamplingState): Promise<void> => {
+    current = await persistRuntimeRecord({
       record: sampling,
       expected: current,
       write: (record, expected) => dependencies.store.updateSampling(record, expected),
@@ -136,10 +136,9 @@ export async function executeSampling(
       retryController,
       sleep: dependencies.sleep,
     });
-    current = sampling;
   };
   /** Writes this record with recovery flags derived from the Attempts it commits. */
-  const persist = (sampling: Sampling): Promise<void> => persistRecord({
+  const persist = (sampling: SamplingState): Promise<void> => persistRecord({
     ...sampling,
     execution: withRecoveryBookkeeping(
       sampling.execution, current.execution, sampling.executionAttempts, executionAgentEnded, dependencies,
@@ -213,6 +212,8 @@ export async function executeSampling(
       attempts: current.executionAttempts,
       state: current.execution,
       agentEnded: executionAgentEnded,
+      saveResourceSnapshot: (attempt, snapshot) => dependencies.store.saveResourceSnapshot(
+        { samplingId: current.samplingId, attemptId: attempt.executionAttemptId }, snapshot),
       persist: (executionAttempts, execution) => persistRecord({ ...current, executionAttempts, execution }),
     });
     return { state: current, sample };
@@ -297,6 +298,8 @@ export async function executeSampling(
         });
         return updated;
       },
+      saveResourceSnapshot: (attempt, snapshot) => dependencies.store.saveResourceSnapshot(
+        { samplingId: current.samplingId, attemptId: attempt.executionAttemptId }, snapshot),
       setSamplingStatus: async (status, lastError) => {
         await persist(withExecutionStatus(current, status, lastError));
       },
@@ -401,7 +404,7 @@ function exportSummary(progress: EvidenceExportProgress | undefined): Record<str
 }
 
 /** Once the bundle is stored, its reference replaces the export progress. */
-function withoutEvidenceExport(sampling: Sampling): Sampling {
+function withoutEvidenceExport(sampling: SamplingState): SamplingState {
   const { evidenceExport: _progress, ...rest } = sampling;
   return rest;
 }

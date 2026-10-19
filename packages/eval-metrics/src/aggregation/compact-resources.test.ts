@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { JsonValue } from "@eval-platform/eval-contracts";
-import { compactResourceCollection, hasCurrentTelemetryProjection, TELEMETRY_PROJECTION_VERSION } from "./compact-resources.js";
+import { compactResourceSnapshot, TELEMETRY_PROJECTION_VERSION } from "./compact-resources.js";
 import { aggregateResources, type ResourceInput } from "./resources.js";
 import { resourceInput, telemetry } from "../test-support.js";
 
 async function compact(inputs: readonly ResourceInput[]): Promise<ResourceInput[]> {
   const result: ResourceInput[] = [];
-  for (const input of inputs) result.push({ ...input, collection: input.collection ? await compactResourceCollection(input.collection) : undefined });
+  for (const input of inputs) {
+    const collection = input.collection;
+    result.push({ ...input, collection: collection?.status === "collected"
+      ? { ...collection, snapshot: await compactResourceSnapshot(collection.snapshot) } : collection });
+  }
   return result;
 }
 
@@ -56,8 +60,6 @@ describe("body-free telemetry metrics", () => {
     const [projected] = await compact(inputs);
     const collection = projected!.collection;
     if (!collection || collection.status !== "collected") throw new Error("expected compacted collection");
-    expect(hasCurrentTelemetryProjection(collection)).toBe(true);
-    await expect(compactResourceCollection(collection)).resolves.toEqual(collection);
     const event = collection.snapshot.telemetryEvents[1]!;
     expect(event.metricProjection).toMatchObject({ version: TELEMETRY_PROJECTION_VERSION, hasThinking: false, hasContent: false, thinkingKnown: false, contentKnown: false });
     const expected = { value: null, coverage: "unavailable" };
@@ -84,7 +86,6 @@ describe("body-free telemetry metrics", () => {
         },
       },
     };
-    expect(hasCurrentTelemetryProjection(legacy.collection)).toBe(false);
     expect(aggregateResources([legacy]).trajectory.thinkingSteps).toEqual(expected);
     expect(aggregateResources([legacy]).trajectory.contentSteps).toEqual(expected);
   });

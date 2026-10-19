@@ -38,7 +38,7 @@ A ProjectSample without materials needs no material file. Material and Session f
 
 A snapshot is downloaded once, after SP reports it final, instead of re-reading 100+ MB until it is:
 
-1. Every Harness call, the readiness route and the snapshot included, uses Runtime's fixed inner budget of ten retries for transient failures.
+1. Every Harness call, the readiness route and the snapshot included, uses Runtime's fixed inner budget of ten retries for transient failures. Snapshot downloads count against it on the Attempt before each one, so a crashed download counts too; once it is spent Runtime gives the snapshot up instead of downloading again. A process downloads one snapshot at a time.
 2. When the Agent ends, Runtime polls the readiness route in the same pass after 5, 10, 20 and 40 s. As soon as `finalized` is true it downloads the full snapshot once.
 3. If it is still not final, the stage keeps `resourcesPending` with a `deadline` ten minutes after the Agent ended; later Worker passes check readiness every 60 s until the deadline. A Run waiting for nothing else is woken by a delayed job at its earliest `nextAttemptAt`, so idle waits spend no retry. At the deadline Runtime downloads the current snapshot once and stores it as it is (`finalized: false`, with SP's `readiness`).
 4. A manual `resources` recollection starts the same wait with a new ten-minute deadline.

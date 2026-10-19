@@ -1,9 +1,8 @@
-import type { EvaluationAttempt, EvaluationRecord, ExecutionAttempt, SamplingStatus } from "@eval-platform/eval-contracts";
+import type { EvaluationAttempt, ExecutionAttempt, SamplingStatus } from "@eval-platform/eval-contracts";
 import { SAMPLING_STATUSES } from "@eval-platform/eval-contracts";
-import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
 import type { EvaluationOutputReader } from "../evaluators/index.js";
 import { agentSpan, attemptDuration, attemptResources } from "./agents.js";
-import type { MetricCounts, MetricSummary, StageStatistics } from "./model.js";
+import type { MetricCounts, MetricSummary, MetricsEvaluation, MetricsSampling, StageStatistics, WithResourceSnapshot } from "./model.js";
 import { summarizeOutputFields } from "./output-fields.js";
 import { aggregateAgentResources } from "./resource-distributions.js";
 import { summarizeNumbers } from "./statistics.js";
@@ -11,14 +10,14 @@ import { summarizeNumbers } from "./statistics.js";
 export interface MetricInput {
   /** Fixed bindings of the level being summarized. */
   readonly bindings: Pick<MetricCounts, "datasets" | "data" | "projectSamples">;
-  readonly samplings: readonly SamplingSnapshot[];
-  readonly evaluations: readonly EvaluationRecord[];
+  readonly samplings: readonly MetricsSampling[];
+  readonly evaluations: readonly MetricsEvaluation[];
   readonly outputs: EvaluationOutputReader;
 }
 
 interface StageRecord {
   readonly status: SamplingStatus;
-  readonly attempts: readonly (ExecutionAttempt | EvaluationAttempt)[];
+  readonly attempts: readonly (WithResourceSnapshot<ExecutionAttempt> | WithResourceSnapshot<EvaluationAttempt>)[];
 }
 
 function stageStatistics(records: readonly StageRecord[]): StageStatistics {

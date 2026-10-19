@@ -1,6 +1,7 @@
-import { IDENTIFIER_RULE, isIdentifier, type EvaluationRecord, type ProjectDatasetSnapshot } from "@eval-platform/eval-contracts";
-import type { ProjectSample, SamplingSnapshot } from "@eval-platform/eval-runtime";
-import { evaluatorAgent, subjectAgent } from "../aggregation/agents.js";
+import { IDENTIFIER_RULE, isIdentifier, type ProjectDatasetSnapshot } from "@eval-platform/eval-contracts";
+import type { ProjectSample } from "@eval-platform/eval-runtime";
+import { evaluatorAgent, subjectAgent, withoutSnapshots } from "../aggregation/agents.js";
+import type { MetricsEvaluation, MetricsSampling } from "../aggregation/model.js";
 import { aggregateMetrics, type MetricInput } from "../aggregation/index.js";
 import { createEvaluationOutputReader } from "../evaluators/index.js";
 import type { DatasetMetricRow, Metrics, MetricsFacts, MetricsQuery, MetricsSource } from "./model.js";
@@ -149,17 +150,17 @@ function prepareFacts(facts: MetricsFacts, query: MetricsQuery) {
   const bySample = groupBy(samplings, (sampling) => sampling.projectSampleId);
   const bySampling = groupBy(evaluations, (evaluation) => evaluation.samplingId);
   const outputs = createEvaluationOutputReader(plan.evaluation?.plan.outputSchema ?? null, facts.evaluationOutputSchema);
-  const samplingsOf = (samples: readonly ProjectSample[]): readonly SamplingSnapshot[] => samples
+  const samplingsOf = (samples: readonly ProjectSample[]): readonly MetricsSampling[] => samples
     .flatMap((sample) => [...bySample.get(sample.projectSampleId) ?? []].sort((left, right) => left.samplingId.localeCompare(right.samplingId)));
-  const evaluationsOf = (records: readonly SamplingSnapshot[]): readonly EvaluationRecord[] => records
+  const evaluationsOf = (records: readonly MetricsSampling[]): readonly MetricsEvaluation[] => records
     .flatMap((sampling) => [...bySampling.get(sampling.samplingId) ?? []].sort((left, right) => left.evaluationId.localeCompare(right.evaluationId)));
-  const summarize = (bindings: MetricInput["bindings"], records: readonly SamplingSnapshot[]) => aggregateMetrics({
+  const summarize = (bindings: MetricInput["bindings"], records: readonly MetricsSampling[]) => aggregateMetrics({
     bindings, samplings: records, evaluations: evaluationsOf(records), outputs,
   });
   const summarizeSamples = (samples: readonly ProjectSample[], datasets: number) => summarize({
     datasets, data: new Set(samples.map((sample) => sample.dataId)).size, projectSamples: samples.length,
   }, samplingsOf(samples));
-  const runIdsOf = (records: readonly SamplingSnapshot[]): readonly string[] => {
+  const runIdsOf = (records: readonly MetricsSampling[]): readonly string[] => {
     if (selectedRuns) return selectedRuns.map((run) => run.runId).sort();
     const ids = new Set(records.map((sampling) => sampling.samplingId));
     return facts.runs.filter((run) => run.samplingIds.some((id) => ids.has(id))).map((run) => run.runId).sort();
@@ -225,11 +226,11 @@ export function createMetrics(dependencies: { readonly source: MetricsSource }):
       if (!sampling) throw new MetricsEntityNotFoundError("sampling", query.samplingId!);
       const projectSample = view.sampleById.get(sampling.projectSampleId)!;
       return {
-        project: view.project, runIds: view.runIdsOf([sampling]), projectSample, sampling,
+        project: view.project, runIds: view.runIdsOf([sampling]), projectSample, sampling: withoutSnapshots(sampling),
         summary: view.summarize(sampleBindings(projectSample), [sampling]),
         subject: subjectAgent(sampling),
         evaluations: view.evaluationsOf([sampling]).map((record) => ({
-          record, agent: evaluatorAgent(record), output: view.outputs.read(record).view,
+          record: withoutSnapshots(record), agent: evaluatorAgent(record), output: view.outputs.read(record).view,
         })),
       };
     },
