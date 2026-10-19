@@ -38,8 +38,6 @@ import { refreshFinishedStage } from "./resource-refresh.js";
 import { publishEvaluationScore } from "./scores.js";
 import { RESULT_NOT_SUBMITTED, evaluationResultFailure, resolveEvaluationResult, resultInstruction } from "./results.js";
 
-const DYNAMIC_WORKER_CONCURRENCY_ERROR = "Dynamic worker concurrency limit exceeded";
-
 export interface EvaluateSamplingInput {
   readonly context: RuntimeEvaluationContext;
   readonly harnessConfig: HarnessConfig;
@@ -318,14 +316,9 @@ export async function evaluateSampling(
         handle,
         ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
       })),
-      recoverOutput: async (_handle, output, attempt) => {
+      recoverOutput: async (_handle, output) => {
         if (!results || output.structuredOutput || dependencies.finalizingStop || dependencies.runStopped) return undefined;
-        const reply = await collectOutputWithRetry({
-          stage: "evaluation", retryController, sleep: dependencies.sleep,
-          collect: () => readFinalReply(attempt.submissionId),
-        });
-        return reply?.includes(DYNAMIC_WORKER_CONCURRENCY_ERROR)
-          ? new AgentOperationError(DYNAMIC_WORKER_CONCURRENCY_ERROR, true, "network") : undefined;
+        return new AgentOperationError(RESULT_NOT_SUBMITTED, true, "llm");
       },
       isSuccessfulOutput: (output) => output.status === "succeeded",
       outputFailure: (output) => new AgentOperationError(
@@ -345,9 +338,7 @@ export async function evaluateSampling(
       await persist({
         ...currentEvaluation,
         evaluator: agentConfig,
-        status: { status: "failed", lastError: resultFailure === RESULT_NOT_SUBMITTED
-          && currentEvaluation.attempts.at(-1)?.error === DYNAMIC_WORKER_CONCURRENCY_ERROR
-          ? `${resultFailure}: ${DYNAMIC_WORKER_CONCURRENCY_ERROR}` : resultFailure },
+        status: { status: "failed", lastError: resultFailure },
         output,
       });
       return { ...input.context, evaluation: currentEvaluation };

@@ -6009,7 +6009,7 @@ describe("evaluation result checking", () => {
     const store = makeStore();
     const runtime = createAutoResumingRuntime({
       plans: makePlans([makeSample("sample-1")], { evaluation: evaluationPlan({ retryPolicy }) }),
-      harness, store, results,
+      harness, store, results, sleep: async () => undefined,
     });
     const run = await runtime.submit(projectRequest("pipeline", `results-${Math.random()}`));
     await waitForTerminal(runtime, run.runId);
@@ -6023,14 +6023,11 @@ describe("evaluation result checking", () => {
     trajectory: { trajectoryId: "trajectory-2", source: "evaluator" as const, path: "/eval/evaluation.jsonl" },
   };
 
-  it("retries an unsubmitted evaluation once after a dynamic worker concurrency limit", async () => {
+  it("retries a completed evaluation without a submitted score", async () => {
     const store = makeStore();
     const harness = makeHarness();
     const sleep = vi.fn(async (_milliseconds: number) => undefined);
     vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
-    vi.mocked(harness.readFinalReply).mockResolvedValue(
-      "I could not submit the evaluation: Dynamic worker concurrency limit exceeded.",
-    );
     const runtime = createRuntime({
       store, harness, sleep, createRetryController: createProductionRetryController,
       plans: makePlans([makeSample("sample-1")], { evaluation: evaluationPlan({ retryPolicy: RETRY_ONE }) }),
@@ -6043,7 +6040,7 @@ describe("evaluation result checking", () => {
         check: validScore,
       },
     });
-    const run = await runtime.submit(projectRequest("pipeline", "dynamic-worker-recovery"));
+    const run = await runtime.submit(projectRequest("pipeline", "missing-evaluation-result-recovery"));
 
     await runtime.resume(run.runId);
 
@@ -6059,16 +6056,16 @@ describe("evaluation result checking", () => {
     expect(harness.collectExecution).toHaveBeenCalledTimes(1);
     expect(harness.exportEvidence).toHaveBeenCalledTimes(1);
     expect(harness.importEvidence).toHaveBeenCalledTimes(1);
+    expect(harness.readFinalReply).not.toHaveBeenCalled();
   });
 
-  it.each([0, DEFAULT_RETRY_POLICY.maxRestarts])("bounds concurrency-limit recovery by maxRestarts=%i", async (maxRestarts) => {
+  it.each([0, DEFAULT_RETRY_POLICY.maxRestarts])("bounds missing-score recovery by maxRestarts=%i", async (maxRestarts) => {
     const store = makeStore();
     const harness = makeHarness();
     const sleep = vi.fn(async (_milliseconds: number) => undefined);
     const log = vi.fn();
-    const error = "Dynamic worker concurrency limit exceeded";
+    const error = RESULT_NOT_SUBMITTED;
     vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
-    vi.mocked(harness.readFinalReply).mockResolvedValue(`Evaluation stalled: ${error}.`);
     const runtime = createRuntime({
       store, harness, sleep, log, createRetryController: createProductionRetryController,
       plans: makePlans([makeSample("sample-1")], {
@@ -6076,12 +6073,12 @@ describe("evaluation result checking", () => {
       }),
       results: { submission: { token: () => "t", read: async () => undefined }, check: validScore },
     });
-    const run = await runtime.submit(projectRequest("pipeline", `concurrency-limit-budget-${maxRestarts}`));
+    const run = await runtime.submit(projectRequest("pipeline", `missing-score-budget-${maxRestarts}`));
 
     await runtime.resume(run.runId);
 
     const evaluation = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
-    expect(evaluation.status).toEqual({ status: "failed", lastError: `${RESULT_NOT_SUBMITTED}: ${error}` });
+    expect(evaluation.status).toEqual({ status: "failed", lastError: error });
     expect(evaluation.attempts).toHaveLength(maxRestarts + 1);
     for (const attempt of evaluation.attempts) {
       expect(attempt).toMatchObject({ status: "completed", error, resources: { status: "collected" } });
@@ -6097,7 +6094,7 @@ describe("evaluation result checking", () => {
     }));
   });
 
-  it("shares the restart budget between failed Submissions and completed concurrency-limited evaluations", async () => {
+  it("shares the restart budget between failed Submissions and completed evaluations without scores", async () => {
     const store = makeStore();
     const harness = makeHarness();
     const submit = vi.mocked(harness.submitAgent).getMockImplementation()!;
@@ -6109,7 +6106,6 @@ describe("evaluation result checking", () => {
       observedAt: "2026-10-08T00:00:00.000Z", finalized: true, readiness: FINALIZED_READINESS,
     }));
     vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
-    vi.mocked(harness.readFinalReply).mockResolvedValue("Dynamic worker concurrency limit exceeded");
     const runtime = createRuntime({
       store, harness, sleep: async () => undefined,
       plans: makePlans([makeSample("sample-1")], { evaluation: evaluationPlan({ retryPolicy: RETRY_TWO }) }),
@@ -6130,7 +6126,6 @@ describe("evaluation result checking", () => {
     store.usePlans(makePlans([makeSample("sample-1")], { evaluation: evaluationPlan({ retryPolicy: RETRY_ONE }) }));
     const harness = makeHarness();
     vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
-    vi.mocked(harness.readFinalReply).mockResolvedValue("Dynamic worker concurrency limit exceeded");
     const results: EvaluationResultPort = {
       submission: {
         token: () => "t",
@@ -6142,7 +6137,7 @@ describe("evaluation result checking", () => {
     let release!: () => void;
     const waiting = new Promise<void>((resolve) => { release = resolve; });
     const sleep = vi.fn(() => waiting);
-    const run = await createTestAdmission(store).submit(projectRequest("pipeline", "resume-concurrency-recovery"));
+    const run = await createTestAdmission(store).submit(projectRequest("pipeline", "resume-missing-score-recovery"));
     const stop = new AbortController();
     const resumer = createTestResumer(store, harness, { results, sleep, createRetryController: createProductionRetryController });
     const task = resumer.resume(run.runId, stop.signal);
@@ -6154,7 +6149,7 @@ describe("evaluation result checking", () => {
       const pending = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
       expect(pending.status.status).toBe("retrying");
       expect(pending.attempts).toHaveLength(1);
-      expect(pending.attempts[0]).toMatchObject({ status: "completed", error: "Dynamic worker concurrency limit exceeded" });
+      expect(pending.attempts[0]).toMatchObject({ status: "completed", error: RESULT_NOT_SUBMITTED });
       expect(harness.restartAgent).not.toHaveBeenCalled();
 
       release();
@@ -6175,16 +6170,15 @@ describe("evaluation result checking", () => {
     }
   });
 
-  it("does not restart when MCP accepts the result while concurrency recovery is being recorded", async () => {
+  it("does not restart when MCP accepts the result while missing-score recovery is being recorded", async () => {
     const store = makeStore();
     const harness = makeHarness();
     vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
-    vi.mocked(harness.readFinalReply).mockResolvedValue("Dynamic worker concurrency limit exceeded");
     const write = store.updateEvaluation.bind(store);
     let accepted = false;
     vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected, resources) => {
       await write(record, expected, resources);
-      if (!accepted && record.attempts.at(-1)?.error === "Dynamic worker concurrency limit exceeded") {
+      if (!accepted && record.attempts.at(-1)?.error === RESULT_NOT_SUBMITTED) {
         accepted = true;
         const current = (await store.getEvaluation(record.evaluationId))!;
         await write({ ...current, status: { status: "succeeded" }, output: {
@@ -6200,7 +6194,7 @@ describe("evaluation result checking", () => {
         check: validScore,
       },
     });
-    const run = await runtime.submit(projectRequest("pipeline", "accepted-before-concurrency-restart"));
+    const run = await runtime.submit(projectRequest("pipeline", "accepted-before-missing-score-restart"));
 
     await runtime.resume(run.runId);
 
@@ -6211,12 +6205,13 @@ describe("evaluation result checking", () => {
     expect(harness.restartAgent).not.toHaveBeenCalled();
   });
 
-  it("never dispatches concurrency recovery during a manual output recollection", async () => {
+  it("never dispatches missing-score recovery during a manual output recollection", async () => {
     const store = makeStore();
     const harness = makeHarness();
+    const log = vi.fn();
     vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
     const runtime = createRuntime({
-      store, harness, sleep: async () => undefined,
+      store, harness, log, sleep: async () => undefined,
       plans: makePlans([makeSample("sample-1")], { evaluation: evaluationPlan({ retryPolicy: RETRY_ONE }) }),
       results: { submission: { token: () => "t", read: async () => undefined }, check: validScore },
     });
@@ -6224,16 +6219,18 @@ describe("evaluation result checking", () => {
     await runtime.resume(run.runId);
     const evaluation = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
     expect(evaluation.status.status).toBe("failed");
-    vi.mocked(harness.readFinalReply).mockClear().mockResolvedValue("Dynamic worker concurrency limit exceeded");
+    vi.mocked(harness.restartAgent).mockClear();
+    log.mockClear();
     await seedEvaluation(store, { ...evaluation, status: { status: "retrying", collectionPending: true } });
 
     await runtime.resume(run.runId);
 
     const recollected = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
     expect(recollected.status).toEqual({ status: "failed", lastError: RESULT_NOT_SUBMITTED });
-    expect(recollected.attempts).toHaveLength(1);
+    expect(recollected.attempts).toHaveLength(2);
     expect(harness.restartAgent).not.toHaveBeenCalled();
     expect(harness.readFinalReply).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalledWith(expect.objectContaining({ operation: "restart" }));
   });
 
   it("prefers the submitted result and tells the Evaluator to submit it", async () => {
@@ -6277,10 +6274,8 @@ describe("evaluation result checking", () => {
     }, DEFAULT_RETRY_POLICY);
     expect(evaluation.status).toEqual({ status: "failed", lastError: RESULT_NOT_SUBMITTED });
     expect(evaluation.output?.structuredOutput).toBeUndefined();
-    expect(harness.readFinalReply).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      submissionId: evaluation.attempts.at(-1)!.submissionId,
-    }));
-    expect(harness.restartAgent).not.toHaveBeenCalled();
+    expect(harness.readFinalReply).not.toHaveBeenCalled();
+    expect(harness.restartAgent).toHaveBeenCalledTimes(DEFAULT_RETRY_POLICY.maxRestarts);
   });
 
   it.each(["disconnect", "completed"] as const)("keeps MCP recovery and acceptance authoritative when observation is %s", async (observation) => {
@@ -6362,18 +6357,19 @@ describe("evaluation result checking", () => {
     expect(harness.restartAgent).not.toHaveBeenCalled();
   });
 
-  it("fails as not submitted without running the Evaluator again", async () => {
+  it("fails as not submitted only after exhausting the Evaluator restart budget", async () => {
     const harness = makeHarness();
     vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
     const evaluation = await evaluateOnce(harness, { check: validScore }, DEFAULT_RETRY_POLICY);
     expect(evaluation.status).toEqual({ status: "failed", lastError: RESULT_NOT_SUBMITTED });
     expect(vi.mocked(harness.submitAgent).mock.calls.filter(([call]) => call.handle.role === "evaluator")).toHaveLength(1);
-    expect(vi.mocked(harness.restartAgent).mock.calls.filter(([call]) => call.handle.role === "evaluator")).toHaveLength(0);
+    expect(vi.mocked(harness.restartAgent).mock.calls.filter(([call]) => call.handle.role === "evaluator"))
+      .toHaveLength(DEFAULT_RETRY_POLICY.maxRestarts);
+    expect(evaluation.attempts).toHaveLength(DEFAULT_RETRY_POLICY.maxRestarts + 1);
   });
 
   it("fails an invalid result and keeps it as evidence", async () => {
     const harness = makeHarness();
-    vi.mocked(harness.readFinalReply).mockResolvedValue("Dynamic worker concurrency limit exceeded");
     vi.mocked(harness.collectEvaluation).mockResolvedValue({ ...noResult, structuredOutput: { path: "/output/result.json", content: '{"score":"high"}' } });
     const evaluation = await evaluateOnce(harness, { check: validScore }, DEFAULT_RETRY_POLICY);
     expect(evaluation.status.status).toBe("failed");
