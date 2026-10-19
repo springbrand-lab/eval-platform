@@ -4,20 +4,23 @@ import type {
   EvaluationRecord,
   ExecutionPlan,
   RetryPolicy,
+  SamplingStageState,
 } from "@eval-platform/eval-contracts";
 import { DEFAULT_EVIDENCE_LIMITS, isPendingSamplingStatus } from "@eval-platform/eval-contracts";
 import { createId } from "@eval-platform/eval-contracts";
 import type { Harness } from "../harness/model.js";
-import { errorMessage, reportError, type StageDependencies } from "./agent-lifecycle.js";
+import { errorMessage, reportError, withContext, type StageDependencies } from "./agent-lifecycle.js";
+import { isStageDue, summarizeStages } from "./recovery.js";
 import { RuntimeEntityNotFoundError, RuntimeRunStoppedError } from "./errors.js";
 import { evaluateSampling } from "./evaluation.js";
 import { executeSampling } from "./execution.js";
-import type { EvalRunResumer, EvalRunResumerDependencies } from "./model.js";
-import { RunRecords } from "./records.js";
-import { createRetryController, type RetryController } from "./retry.js";
+import type { EvalRunResumer, EvalRunResumerDependencies, RunStopReporter } from "./model.js";
+import { safeLog, type RuntimeContext, type RuntimeLog } from "./log.js";
+import { RunRecords, type RunStagePlans } from "./records.js";
+import { createRetryController, loggedRetryController, type RetryController } from "./retry.js";
 import { createAgentScheduler, createAgentTaskQueue } from "./scheduler.js";
 import { finishStoppedRun, interruptRun, type StopContext } from "./stop.js";
-import { persistRuntimeRecord, type RuntimeRunRecord, type RuntimeStore, type SamplingState } from "./store.js";
+import { isRunStopPending, persistRuntimeRecord, type RuntimeRunRecord, type RuntimeStore, type SamplingState } from "./store.js";
 
 export class RunResumer implements EvalRunResumer {
   readonly #store: RuntimeStore;
@@ -25,9 +28,9 @@ export class RunResumer implements EvalRunResumer {
   readonly #harness: Harness;
   readonly #plans: EvalRunResumerDependencies["plans"];
   readonly #createRetryController: (policy?: RetryPolicy) => RetryController;
-  readonly #onError: (error: Error) => void;
+  readonly #onError: (error: Error, context?: RuntimeContext) => void;
+  readonly #log: RuntimeLog;
   readonly #stage: StageDependencies;
-  readonly #stop: StopContext;
 
   constructor(dependencies: EvalRunResumerDependencies) {
     this.#store = dependencies.store;
@@ -36,6 +39,7 @@ export class RunResumer implements EvalRunResumer {
     this.#plans = dependencies.plans;
     this.#createRetryController = dependencies.createRetryController ?? createRetryController;
     this.#onError = dependencies.onError;
+    this.#log = safeLog(dependencies.log);
     this.#stage = {
       harness: dependencies.harness,
       store: dependencies.store,
@@ -45,18 +49,21 @@ export class RunResumer implements EvalRunResumer {
       now: dependencies.now ?? (() => new Date().toISOString()),
       sleep: dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
       onError: this.#onError,
-      createRetryController: this.#createRetryController,
+      log: this.#log,
+      createRetryController: (policy, log) => loggedRetryController(this.#createRetryController(policy), log),
       ...(dependencies.scores === undefined ? {} : { scores: dependencies.scores }),
       ...(dependencies.results === undefined ? {} : { results: dependencies.results }),
     };
-    this.#stop = {
+  }
+
+  #stopContext(runId: string): StopContext {
+    return {
       store: this.#store,
       records: this.#records,
       harness: this.#harness,
       now: this.#stage.now,
       sleep: this.#stage.sleep,
-      createRetryController: this.#createRetryController,
-      stageDependencies: this.#stageDependencies(this.#harness, () => false),
+      stageDependencies: { ...this.#stageDependencies({ runId }, this.#harness, () => false), finalizingStop: true },
       outputSchema: (projectId) => this.#outputSchema(projectId),
     };
   }
@@ -64,16 +71,47 @@ export class RunResumer implements EvalRunResumer {
   async resume(runId: string, stopSignal?: AbortSignal): Promise<void> {
     if (stopSignal?.aborted) return;
     const run = await this.#requireRun(runId);
-    if (run.stopRequested || stopSignal?.aborted) return;
+    if (isRunStopPending(run) || stopSignal?.aborted) return;
     const plans = await this.#records.plan(run);
+    const started = Date.now();
+    try {
+      await this.#resumePass(run, plans, stopSignal);
+    } finally {
+      await this.#logPassSummary(run, plans.operation, started);
+    }
+  }
 
+  /** `run_pass_summary`: stage statuses and recovery flags after one resume pass. */
+  async #logPassSummary(run: RuntimeRunRecord, operation: RunStagePlans["operation"], started: number): Promise<void> {
+    try {
+      const executions = operation === "evaluation"
+        ? [] : (await this.#records.samplings(run.samplingIds)).map(({ execution }) => execution);
+      const evaluations = operation === "execution"
+        ? [] : (await this.#records.evaluations(run.evaluationIds)).map(({ status }) => status);
+      const execution = summarizeStages(executions);
+      const evaluation = summarizeStages(evaluations);
+      const all = summarizeStages([...executions, ...evaluations]);
+      this.#log({
+        name: "run_pass_summary", runId: run.runId, operation,
+        execution: execution.statuses, evaluation: evaluation.statuses, ...all.flags,
+        ...(all.nextDueAt === undefined ? {} : { nextDueAt: all.nextDueAt }),
+        durationMs: Date.now() - started,
+      });
+    } catch (error) {
+      reportError((reported) => this.#onError(reported, { runId: run.runId }), new Error(`Run ${run.runId} pass summary failed: ${errorMessage(error)}`, { cause: error }));
+    }
+  }
+
+  async #resumePass(run: RuntimeRunRecord, plans: RunStagePlans, stopSignal: AbortSignal | undefined): Promise<void> {
     let samplings = await this.#records.samplings(run.samplingIds);
+    const now = this.#stage.now();
+    const owesWork = (state: SamplingStageState) => isStageDue(state, now);
     if (plans.operation === "pipeline") {
-      await this.#runPipeline(run, plans.execution, plans.evaluation, samplings, stopSignal);
+      await this.#runPipeline(run, plans.execution, plans.evaluation, samplings, stopSignal, owesWork);
       return;
     }
     if (plans.operation !== "evaluation") {
-      const unfinished = samplings.filter(({ execution }) => isPendingSamplingStatus(execution.status));
+      const unfinished = samplings.filter(({ execution }) => owesWork(execution));
       if (unfinished.length > 0) {
         await this.#execute(run, plans.execution, unfinished, stopSignal);
         samplings = await this.#records.samplings(run.samplingIds);
@@ -85,10 +123,11 @@ export class RunResumer implements EvalRunResumer {
     const config = plans.evaluation;
     const samplingById = new Map(samplings.map((sampling) => [sampling.samplingId, sampling]));
     const pending = (await this.#records.evaluations(run.evaluationIds))
-      .filter((evaluation) => isPendingSamplingStatus(evaluation.status.status));
+      .filter((evaluation) => owesWork(evaluation.status));
     const toEvaluate = pending.flatMap((evaluation) => {
       const sampling = samplingById.get(evaluation.samplingId);
-      return sampling?.execution.status === "succeeded" ? [{ sampling, evaluation }] : [];
+      return sampling && (sampling.execution.status === "succeeded" || !isPendingSamplingStatus(evaluation.status.status))
+        ? [{ sampling, evaluation }] : [];
     });
     const settlements = await Promise.allSettled([
       this.#evaluate(run, config, toEvaluate, stopSignal),
@@ -99,15 +138,16 @@ export class RunResumer implements EvalRunResumer {
 
   async interrupt(runId: string): Promise<void> {
     const run = await this.#requireRun(runId);
-    if (run.stopRequested) await interruptRun(this.#stop, run, await this.#records.plan(run));
+    if (isRunStopPending(run)) await interruptRun(this.#stopContext(runId), run, await this.#records.plan(run));
   }
 
-  async stop(runId: string): Promise<void> {
+  async stop(runId: string, reporter?: RunStopReporter): Promise<void> {
     const run = await this.#requireRun(runId);
-    if (!run.stopRequested) return;
+    if (!isRunStopPending(run)) return;
     const plans = await this.#records.plan(run);
-    await interruptRun(this.#stop, run, plans);
-    await finishStoppedRun(this.#stop, run, plans);
+    const context = this.#stopContext(runId);
+    await interruptRun(context, run, plans);
+    await finishStoppedRun(context, run, plans, reporter);
   }
 
   async #requireRun(runId: string): Promise<RuntimeRunRecord> {
@@ -130,7 +170,7 @@ export class RunResumer implements EvalRunResumer {
   ): Promise<void> {
     const sampleFor = await this.#records.samples(samplings, run.projectId);
     await this.#runStage(
-      run.runId,
+      run,
       stopSignal,
       config.executionConcurrency,
       samplings.map((state) => ({ state, sample: sampleFor(state) })),
@@ -154,6 +194,7 @@ export class RunResumer implements EvalRunResumer {
     evaluationConfig: EvaluationPlan,
     samplings: readonly SamplingState[],
     stopSignal: AbortSignal | undefined,
+    owesWork: (state: SamplingStageState) => boolean,
   ): Promise<void> {
     const evaluations = await this.#records.evaluations(run.evaluationIds);
     const samplingById = new Map(samplings.map((sampling) => [sampling.samplingId, sampling]));
@@ -176,14 +217,13 @@ export class RunResumer implements EvalRunResumer {
     const cancelEvaluation = (evaluation: EvaluationRecord): void => {
       if (cancelledEvaluationIds.has(evaluation.evaluationId)) return;
       cancelledEvaluationIds.add(evaluation.evaluationId);
-      cancellationTasks.push(this.#cancelEvaluation(evaluation, evaluationConfig));
+      cancellationTasks.push(this.#cancelEvaluation(run.runId, evaluation, evaluationConfig));
     };
     const guardedHarness = this.#guardedHarness(run.runId, stopSignal);
-    const executionDependencies = this.#stageDependencies(guardedHarness, () => !stopSignal?.aborted);
-    const evaluationDependencies = this.#stageDependencies(guardedHarness, () => !stopSignal?.aborted);
+    const executionDependencies = this.#stageDependencies(run, guardedHarness, () => !stopSignal?.aborted);
+    const evaluationDependencies = this.#stageDependencies(run, guardedHarness, () => !stopSignal?.aborted);
     const scheduleEvaluation = (sampling: SamplingState, evaluation: EvaluationRecord): void => {
-      if (scheduledEvaluationIds.has(evaluation.evaluationId)
-        || !isPendingSamplingStatus(evaluation.status.status)) return;
+      if (scheduledEvaluationIds.has(evaluation.evaluationId) || !owesWork(evaluation.status)) return;
       scheduledEvaluationIds.add(evaluation.evaluationId);
       evaluationQueue.enqueue(() => this.#runQueuedStageTask(stopSignal, evaluationErrors, async () => {
         await evaluateSampling(evaluationDependencies, {
@@ -202,8 +242,11 @@ export class RunResumer implements EvalRunResumer {
     // Recover already successful executions immediately. Evaluations paired with
     // a still-running execution remain pending until that execution settles.
     for (const evaluation of evaluations) {
-      if (!isPendingSamplingStatus(evaluation.status.status)) continue;
       const sampling = samplingById.get(evaluation.samplingId);
+      if (!isPendingSamplingStatus(evaluation.status.status)) {
+        if (sampling && owesWork(evaluation.status)) scheduleEvaluation(sampling, evaluation);
+        continue;
+      }
       if (sampling?.execution.status === "succeeded") {
         scheduleEvaluation(sampling, evaluation);
       } else if (!sampling || !isPendingSamplingStatus(sampling.execution.status)) {
@@ -211,7 +254,7 @@ export class RunResumer implements EvalRunResumer {
       }
     }
 
-    for (const state of samplings.filter(({ execution }) => isPendingSamplingStatus(execution.status))) {
+    for (const state of samplings.filter(({ execution }) => owesWork(execution))) {
       executionQueue.enqueue(() => this.#runQueuedStageTask(stopSignal, executionErrors, async () => {
         await executeSampling(executionDependencies, {
           context: { state, sample: sampleBySamplingId.get(state.samplingId)! },
@@ -282,7 +325,7 @@ export class RunResumer implements EvalRunResumer {
     const sampleFor = await this.#records.samples(targets.map(({ sampling }) => sampling), run.projectId);
     const evaluationOutputSchema = await this.#outputSchema(run.projectId);
     await this.#runStage(
-      run.runId,
+      run,
       stopSignal,
       config.evaluationConcurrency,
       targets.map(({ sampling, evaluation }) => ({ sampling, evaluation, sample: sampleFor(sampling) })),
@@ -297,19 +340,19 @@ export class RunResumer implements EvalRunResumer {
   }
 
   async #runStage<TContext>(
-    runId: string,
+    run: RuntimeRunRecord,
     stopSignal: AbortSignal | undefined,
     concurrency: number,
     contexts: readonly TContext[],
-    run: (dependencies: StageDependencies, context: TContext) => Promise<unknown>,
+    runContext: (dependencies: StageDependencies, context: TContext) => Promise<unknown>,
     failure: string,
   ): Promise<void> {
-    const dependencies = this.#stageDependencies(this.#guardedHarness(runId, stopSignal), () => !stopSignal?.aborted);
+    const dependencies = this.#stageDependencies(run, this.#guardedHarness(run.runId, stopSignal), () => !stopSignal?.aborted);
     const errors: unknown[] = [];
     await createAgentScheduler({ maxConcurrentDos: concurrency }).run(contexts.map((context) => async () => {
       if (stopSignal?.aborted) return;
       try {
-        await run(dependencies, context);
+        await runContext(dependencies, context);
       } catch (error) {
         if (!(error instanceof RuntimeRunStoppedError)) errors.push(error);
       }
@@ -317,12 +360,15 @@ export class RunResumer implements EvalRunResumer {
     if (errors.length > 0) throw new AggregateError(errors, failure);
   }
 
-  #stageDependencies(harness: Harness, restartAllowed: () => boolean): StageDependencies {
+  #stageDependencies(
+    { runId, stopFinalized }: Pick<RuntimeRunRecord, "runId" | "stopFinalized">, harness: Harness, restartAllowed: () => boolean,
+  ): StageDependencies {
     return {
-      ...this.#stage,
+      ...withContext(this.#stage, { runId }),
+      ...(stopFinalized === undefined ? {} : { runStopped: stopFinalized }),
       harness,
-      createRetryController: (policy) => {
-        const delegate = this.#createRetryController(policy);
+      createRetryController: (policy, log) => {
+        const delegate = this.#stage.createRetryController(policy, log);
         return {
           decide: (input) => input.operation === "restart" && !restartAllowed()
             ? Promise.resolve({ shouldRetry: false }) : delegate.decide(input),
@@ -360,14 +406,17 @@ export class RunResumer implements EvalRunResumer {
       collectExecution: (input) => observe(harness.collectExecution(input)),
       collectEvaluation: (input) => observe(harness.collectEvaluation(input)),
       readFinalReply: (input) => observe(harness.readFinalReply(input)),
+      inspectAgentResources: (input) => observe(harness.inspectAgentResources(input)),
       collectAgentResources: (input) => observe(harness.collectAgentResources(input)),
       exportEvidence: (input) => observe(harness.exportEvidence(input)),
     };
   }
 
   /** Pipeline evaluations of failed executions are cancelled independently of the evaluation scheduler. */
-  async #cancelEvaluation(evaluation: EvaluationRecord, config: EvaluationPlan): Promise<void> {
-    const retryController = this.#createRetryController(config.retryPolicy);
+  async #cancelEvaluation(runId: string, evaluation: EvaluationRecord, config: EvaluationPlan): Promise<void> {
+    const { samplingId, evaluationId } = evaluation;
+    const context = { runId, stage: "evaluation", samplingId, evaluationId } as const;
+    const retryController = this.#stage.createRetryController(config.retryPolicy, withContext(this.#stage, context).log);
     const persist = (record: EvaluationRecord, expected: EvaluationRecord): Promise<void> => persistRuntimeRecord({
       record,
       expected,
@@ -399,7 +448,7 @@ export class RunResumer implements EvalRunResumer {
           [error, finalizationError],
           `Could not finalize evaluation ${evaluation.evaluationId} for sampling ${evaluation.samplingId}`,
         );
-        reportError(this.#onError, reported);
+        reportError((error) => this.#onError(error, context), reported);
       }
     }
   }

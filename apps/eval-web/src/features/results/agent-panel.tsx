@@ -8,6 +8,7 @@ import { CopyId } from "@/components/ui/data-display";
 import { formatDateTime, formatDuration } from "@/lib/format";
 import { langfuseSessionUrl } from "@/lib/langfuse";
 import { ResourceMetrics } from "@/features/metrics/resource-metrics";
+import { StageHint } from "@/features/runs/stage-hint";
 
 export function LangfuseLink({ chatId, label = "Langfuse 会话" }: { chatId: string | null | undefined; label?: string }) {
   const url = langfuseSessionUrl(chatId);
@@ -44,7 +45,7 @@ export function AgentPanel({ title, agent, observe }: {
       <CardBody className="flex flex-col gap-5">
         <div className="grid gap-6 lg:grid-cols-2">
           <DescriptionList items={[
-            { label: "状态", value: <StatusBadge status={agent.stage.status} /> },
+            { label: "状态", value: <span className="inline-flex flex-wrap items-center gap-1.5"><StatusBadge status={agent.stage.status} /><StageHint stage={agent.role === "subject" ? "execution" : "evaluation"} state={agent.stage} /></span> },
             ...(agent.stage.lastError ? [{ label: "错误", value: <span className="text-danger">{agent.stage.lastError}</span> }] : []),
             { label: "开始", value: formatDateTime(agent.firstStartedAt) },
             { label: "结束", value: formatDateTime(agent.lastCompletedAt) },
@@ -69,7 +70,7 @@ export function AgentPanel({ title, agent, observe }: {
         <details className="rounded-lg border border-border">
           <summary className="cursor-pointer px-4 py-3 text-sm font-medium">资源与尝试明细</summary>
           <div className="flex flex-col gap-5 border-t border-border p-4">
-        <ResourceMetrics statistics={resources} stageStatus={agent.stage.status} />
+        <ResourceMetrics statistics={resources} stageStatus={agent.stage.status} resourcesPending={!!agent.stage.resourcesPending} />
         {agent.attempts.items.length > 0 && (
           <div>
             <p className="mb-2 text-xs font-semibold text-text-muted">尝试（{agent.attempts.count}，重启 {agent.attempts.restarts} 次）</p>

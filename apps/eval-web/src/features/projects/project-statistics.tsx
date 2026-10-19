@@ -4,6 +4,7 @@ import { MetricValue } from "@/features/metrics/metric-value";
 import { ModelName } from "@/features/metrics/token-metrics";
 import { ToolStatisticsTable } from "@/features/metrics/tool-statistics-table";
 import { formatDuration, formatPercent, formatStatistic } from "@/lib/format";
+import { stageInProgressCount } from "@/features/runs/run-status";
 
 function StageStat({ label, value, tone = "neutral" }: { label: string; value: number; tone?: "neutral" | "success" | "danger" | "warning" }) {
   const toneClass = {
@@ -59,7 +60,7 @@ export function ProjectStatistics({ summary }: { summary: MetricSummary }) {
                 <StageStat label="成功" value={stage.statuses.succeeded} tone="success" />
                 <StageStat label="失败" value={stage.statuses.failed} tone={stage.statuses.failed > 0 ? "danger" : "neutral"} />
                 <StageStat label="取消" value={stage.statuses.cancelled} />
-                <StageStat label="未结束" value={stage.records - stage.terminalRecords} tone={stage.records - stage.terminalRecords > 0 ? "warning" : "neutral"} />
+                <StageStat label={title === "执行 Agent" ? "执行中" : "评估中"} value={stageInProgressCount(stage)} tone={stageInProgressCount(stage) > 0 ? "warning" : "neutral"} />
                 <StageStat label="尝试" value={stage.attempts} />
                 <StageStat label="重启" value={stage.restarts} />
               </span>

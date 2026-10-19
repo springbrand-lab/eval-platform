@@ -2,11 +2,12 @@ import type { RetryPolicy } from "@eval-platform/eval-contracts";
 import { AGENT_FAILURE_KINDS, type AgentFailureKind } from "../harness/model.js";
 import { RuntimeInputError } from "./errors.js";
 import { requireObject } from "./input.js";
+import type { RuntimeLog } from "./log.js";
 
-const TRANSIENT_RETRY_COUNT = 7;
+const TRANSIENT_RETRY_COUNT = 10;
 
 export const DEFAULT_RETRY_POLICY = {
-  maxRestarts: 2,
+  maxRestarts: 4,
   initialBackoffMs: 250,
   maxBackoffMs: 10_000,
 } as const satisfies RetryPolicy;
@@ -24,7 +25,24 @@ export interface RetryController {
     readonly operation: RetryOperation;
     readonly failureKind: AgentFailureKind;
     readonly attemptNumber: number;
+    /** Message of the failure being decided, for diagnostics only. */
+    readonly error?: string;
   }): Promise<RetryDecision>;
+}
+
+/** Reports every decision: `operation_retry` before a backoff, `retry_exhausted` when the budget is spent. */
+export function loggedRetryController(controller: RetryController, log: RuntimeLog): RetryController {
+  return {
+    async decide(input) {
+      const decision = await controller.decide(input);
+      const { operation, attemptNumber, failureKind, error } = input;
+      const fields = { operation, attemptNumber, failureKind, ...(error === undefined ? {} : { error }) };
+      log(decision.shouldRetry
+        ? { name: "operation_retry", ...fields, backoffMs: decision.backoffMs ?? 0 }
+        : { name: "retry_exhausted", ...fields });
+      return decision;
+    },
+  };
 }
 
 export interface RetryErrorDetails {
@@ -82,12 +100,19 @@ export async function retryIdempotentOperation<TResult>(loop: IdempotentRetryLoo
       return await loop.run();
     } catch (error) {
       if (loop.shouldAbort?.(error)) throw error;
+      const details = loop.describeError?.(error) ?? describeRetryError(error);
+      // Reconciliation is only meaningful for an uncertain transient failure.
+      // A permanent rejection must be returned as-is; probing the operation key
+      // can both add an unnecessary request and mask an identity/validation error.
+      if (!details.retryable) throw loop.fail?.(error, details) ?? error;
       const reconciled = await loop.reconcile?.();
       if (reconciled !== undefined) return reconciled;
-      const details = loop.describeError?.(error) ?? describeRetryError(error);
-      const decision = details.retryable
-        ? await retryController.decide({ operation: loop.operation, failureKind: details.failureKind, attemptNumber })
-        : undefined;
+      const decision = await retryController.decide({
+        operation: loop.operation,
+        failureKind: details.failureKind,
+        attemptNumber,
+        error: details.message,
+      });
       if (!decision?.shouldRetry) throw loop.fail?.(error, details) ?? error;
       await loop.onRetry?.(details.message);
       await sleep(decision.backoffMs ?? 0);

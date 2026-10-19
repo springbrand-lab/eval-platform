@@ -919,3 +919,130 @@ A 执行成功，B 执行失败。Runtime 本来应该继续评估 A，并把 B 
 - 首次资源采集失败仍记录 failed。已有 collected 快照的补采失败只报告带 Stage、Sampling、Submission 身份的错误，保留原始快照和它真实的 coverage/finalized；finalized 快照不再补采。
 - 新增 Subject/Evaluator 在终态和资源保存的写前失败、提交后响应丢失且读回失败回归，以及两种角色的补采失败、finalized 快照跳过补采测试。Runtime 全套 223 项测试和 workspace 类型检查通过；使用临时 PostgreSQL 18.3 容器执行 eval-api 全套 19 项测试，全部通过。没有修改 SP 实现。
 - 代码已修复，仍待独立复审。本轮未提交 Git。
+
+### R-22：证据最终化失败时每轮从头下载，且 Run 重试预算重新计数（已实现，待复审）
+
+**发现日期**：2026-10-19。线上 Project `稳定性测试mcp工具`（Project `7ee18b4b-abc8-4a82-929b-9d4f4769ee1e`）的 Pipeline Run `75223d13-247f-4150-91d2-8da6e3be7114` 复现。
+
+**线上现象**
+
+- 26 个执行中 21 个成功、5 个 `retrying`；其中 4 个的 Subject Attempt 已是 `completed`，都有产物和轨迹，但 `evidence` 为空，错误为 `execution evidence finalization failed: 服务暂时无法完成请求，请稍后重试`。
+- 这 4 个不是 Agent 重跑，Attempt 都是第 1 次，执行重启数为 0；对应的 5 个评估保持 `queued`。
+- 数据库只保存最后状态，不保存证据导出已经重试了多少次，也不保存每个文件的完成进度。
+
+**大白话**
+
+Agent 已经做完，产物也拿到了。保存证据包时只要一个文件、轨迹页或 manifest 出错，下一轮就重新列产物、重新下载全部文件、重新读完整轨迹。前面成功的文件不会写坏，但不会被流程级进度复用，带宽和时间都会重复消耗。
+
+**相关位置**
+
+- `packages/eval-runtime/src/runtime/execution.ts:63-89`：`exportEvidence()` 和 `EvidenceStore.save()` 被同一个幂等收集重试包住；一次失败后整段重新开始。
+- `packages/eval-runtime/src/runtime/execution.ts:111-123`：瞬态失败耗尽后写入 `retrying + evidencePending`，不记录已经完成的文件或导出游标。
+- `packages/eval-runtime/src/harness/evidence.ts:69-120`：先逐文件写 Blob，最后才写 manifest；中途失败没有可恢复的 bundle 进度记录。
+- `apps/eval-api/src/evidence/r2-blobs.ts:91-103`：R2 Blob 会先读完整文件并计算 hash，再检查目标是否已存在，重试仍会重新从 SP 下载文件。
+- `apps/eval-api/src/run-worker-queue.ts:13-22`：Run 的 pg-boss 重试跨轮重新调用 Runtime；每轮 Runtime 又创建新的固定幂等重试预算。
+
+**影响**
+
+- 一个坏文件或一次轨迹请求失败会阻塞整个证据包，不能利用已经成功的部分继续。
+- 同一批产物和轨迹被反复读取；部分 Blob 可能留下但没有 manifest，形成无引用存储。
+- 每个 Worker 轮次都重新开始 10 次瞬态重试，外层 Run 长期保持 active，页面还会把 `evidencePending` 显示成执行中。
+- 不会因此重复提交或重启已完成的 Agent；风险主要是重复下载、Run 长时间不结束和错误信号误导。
+
+**处理要求**
+
+- 证据导出/保存需要可恢复：保存稳定的导出事实或进度，重试时复用已成功的文件和轨迹分片，不从产物列表开始重新下载全部内容。
+- 重试预算不能在每次 Worker Run 轮次无条件清零；耗尽后的状态要有明确的终态或人工补收入口，不能无限保持 `retrying`。
+- 展示层将“Agent 已完成、证据整理中”与“执行 Agent 仍在运行”分开统计和提示。
+- 增加失败发生在单个文件、轨迹分页和 manifest 写入之后的回归，验证不会重复提交 Agent，且已保存的 Blob/manifest 可安全复用。
+
+**用户结论**：2026-10-19 已确认。用户表示：“这是一个问题，记录下”。
+
+**处理状态**：已实现（2026-10-19），待独立复审；SP 侧配套修复见 R-24，未修改线上数据，未提交 Git。
+
+**实现摘要**
+
+- 契约：`Sampling.evidenceExport`（`EvidenceExportState`：`submissionId`、`passes`、`lastError`、`progress`）。`progress` 冻结首轮的产物/Subject 输入清单、`omitted` 与 `exportedAt`，每个文件存入后记录 `sha256`，轨迹记录 `afterSeq`、已存分片和 `done`。`EVIDENCE_EXPORT_MAX_PASSES = 5`。
+- EvidenceStore：`resume({evidence, limits, progress?, onProgress})` 拆成清单冻结、按 hash 存缺失文件、从游标续存轨迹分片、确定性 manifest 四步；`resume()` 是唯一入口，无进度时即新的一次导出。每完成一个文件或分片，经 `onProgress` 串行（合并排队）写入，已启动的读取全部结束后才报告失败。轨迹仍只在事件边界切分，从分片边界续读，结果与一次不中断的导出逐字节相同；单个超过文件上限的事件不会被截断或丢弃：导出在写入任何分片前以不可重试的明确错误失败。manifest 使用已持久化的 `exportedAt`，写入响应丢失后重放得到同一 `evidenceId`，`putManifest` 仍是写一次。
+- Runtime：进度写入走 `persistRuntimeRecord` 条件写（R-20/R-21），写入失败或 Run 停止原样上抛，不被当作导出失败。只复用同一 `submissionId` 的进度。每轮失败 `passes + 1`；瞬态失败未满 5 轮保持 `retrying + evidencePending`，满 5 轮或不可重试时执行置为 `failed`（`evidence export failed after 5 passes: …` / `evidence export failed: …`），保留产物、输出与进度；评估保持排队，从不重新提交或重启 Subject。人工补收（`collectionPending`）在同一进度上重新给 5 轮预算；数据库 `recollect` 保留 `evidenceExport`。成功后 `evidenceExport` 被 `evidence` 引用替换。
+- SP Harness：`exportEvidence` 接收 `submissionId`，作为必填查询参数随清单、文件和轨迹页请求发送，SP 按它锁定就绪判断与身份；`readTrajectory(afterSeq)` 从给定游标分页。导入前先检查所有文件大小，超过 `EVAL_EVIDENCE_FILE_MAX_BYTES` 的文件（例如单事件超大分片）在任何写入前以不可重试的明确错误失败。
+- 回归：`packages/eval-runtime/src/harness/evidence.test.ts`、`src/runtime/index.test.ts`（resumable Subject evidence export）、`apps/eval-api/src/sp/harness.test.ts`、`src/sp/evidence.test.ts`、`src/evidence/blobs.test.ts`（R2 manifest 响应丢失）、`src/db/persistence.postgres.test.ts`（recollect 保留进度）。
+- 展示层已由 `apps/eval-web/src/features/runs/run-status.ts` 将 `evidencePending` 显示为“整理证据中”；采样详情页由 `apps/eval-web/src/features/runs/evidence-export-progress.tsx` 展示 `evidenceExport` 的轮次、已存产物/执行输入、轨迹分段与最近错误；运行列表仍只显示“整理证据中”。WS 观察等其他预算按 R-23 处理。
+
+### R-23：Submission WebSocket 断链与证据导出就绪状态没有形成一个可恢复的收尾流程（已实现，待复审）
+
+**发现日期**：2026-10-19。目标是一次 Pipeline Run 中 Subject 执行和 Evaluator 评估都能完成；Subject 已经产生结果时，连接断开或证据服务暂时未就绪不能再次执行 Agent，也不能让 Run 无限停留在 `retrying`。
+
+**先确认 WebSocket 契约是否对得上**
+
+- Eval 的服务契约要求连接时先发送持久化状态快照，随后发送 `{"type":"submission.status","submission":AgentSubmission}`；见 `docs/eval-sp-harness-protocol.md:14`。
+- 当前独立 Eval SP 分支的实现确实把连接时快照和后续通知都编码成这个事件：`/Users/apple/code/sp-platform-eval-agent-model/apps/agent/src/chat/severn-agent.ts:681-697`、`:700-714`；SP 的集成测试也断言了 `type`、真实 `submissionId` 和 `normalizedStatus`：`.../apps/agent/src/eval/http.worker.test.ts:720-733`、`:788-807`。
+- Eval 端 `apps/eval-api/src/sp/submission-observer.ts:120-129` 只接受字符串 JSON 且只解析 `type === "submission.status"`，这和当前 SP 分支一致；所以现有证据不能把本次 WS 问题归因于“快照格式不一致”。仍需在 Eval 端补一个“连接后立即收到 completed 快照”的单测，避免未来 SP 只发裸 `AgentSubmission` 或改事件名时被静默忽略。
+
+**当前已经有的兜底**
+
+- `createSpHarness().waitForSubmission()` 先按稳定操作键读一次状态；已是终态就不建 WS，见 `apps/eval-api/src/sp/harness.ts:256-273`。
+- 每次连接只观察同一个真实 `submissionId`；连接异常、关闭或 Ping/Pong 超时后做一次按键校准，再以有限次数（3 个连接）重连，见 `apps/eval-api/src/sp/submission-observer.ts:29-57`、`:60-134`。健康连接不轮询。
+- Runtime 只有收到明确终态才更新 Attempt；状态不确定时不会直接重启 Agent，见 `packages/eval-runtime/src/runtime/agent-lifecycle.ts:319-367`、`:624-711`。提交重试也复用同一个操作键，见 `:514-537`。
+
+**WS 的实际缺口**
+
+1. `observeTerminalSubmission()` 在一次断线后的校准返回 `null` 且没有 HTTP 错误时，会在 `apps/eval-api/src/sp/submission-observer.ts:50-52` 立即抛错，不再重连。已拿到真实 Submission ID 后，`null` 只能说明“这次校准没有读到”，不能证明 Submission 已失败或不存在；应把它当作未知状态，继续使用同一 `submissionId` 重连，或持久化为 `observationPending` 交给下一轮恢复。
+2. 连接次数、校准次数和等待期限只存在当前 Worker 内存。`retryIdempotentOperation()` 每次进入 `resume()` 都从 1 开始，见 `packages/eval-runtime/src/runtime/retry.ts:76-101`；外层 pg-boss 虽有 100 次重试，见 `apps/eval-api/src/run-worker-queue.ts:13-22`，但每轮又创建新的 Runtime 重试预算。连接一直不稳时，Run 会长时间处于活动态，直到 Worker 最后一轮请求停止，见 `apps/eval-api/src/worker.ts:76-96`。
+3. `inspectUncertainOperation()` 会吞掉所有校准异常并返回 `undefined`，见 `packages/eval-runtime/src/runtime/agent-lifecycle.ts:624-635`。这保护了“不因校准失败而重启”，但没有把 HTTP 状态、是否返回 `null`、连接次数和下一次恢复时间写入记录或日志，线上只能看到笼统的 `Submission WebSocket closed before terminal status`。
+4. 证据导出没有绑定 Attempt 的 `submissionId`：`Harness.exportEvidence` 的输入只有 Chat 和 Sampling 相关信息，见 `packages/eval-runtime/src/harness/model.ts:112-117`；SP 的 `#finishedEvalChat()` 读取的是 Chat 的 latest Submission，见 `/Users/apple/code/sp-platform-eval-agent-model/apps/agent/src/chat/severn-agent.ts:498-513`。正常流程不会在证据待收尾时再提交，但收尾、停止或人工补收并发时应显式锁定原 Submission，避免“最后一次 Submission”漂移。
+
+**证据导出的实际失败点**
+
+- SP 契约明确说三个导出接口在 Submission 尚未终态或 telemetry 尚未投递完时返回 `409`，见 `docs/eval-sp-harness-protocol.md:19`。独立 SP 分支的 `#finishedEvalChat()` 在非终态时抛 `EvalChatConflict`，在 telemetry 仍待投递时抛 `Complete Chat trajectory is not available yet`，见 `/Users/apple/code/sp-platform-eval-agent-model/apps/agent/src/chat/severn-agent.ts:498-513`；路由层将冲突映射为 409，通用错误则可能变成 5xx，见 `.../apps/agent/src/eval/http.ts:114-135`、`:166-188`。因此“模型已完成但证据接口暂时不可读”是正常的可恢复就绪状态，不应当作永久证据错误。
+- Eval Harness 的瞬态 HTTP 分类只认 `408`、`429` 和 `>=500`，见 `apps/eval-api/src/sp/harness.ts:81-91`；证据导出中的 `409` 会变成不可重试的 `SpHarnessError`，导致 `freezeEvidence()` 直接进入失败收尾。应给证据路由返回机器可判定的 `EVIDENCE_NOT_READY`（带 `Retry-After`），只把该证据专用 409 标成可重试，不能把 Chat 身份冲突等普通 409 一并重试。
+- `execution.ts:68-89` 将 `exportEvidence()`、所有文件下载、轨迹分页和 `EvidenceStore.save()` 包在一个收集重试里；`packages/eval-runtime/src/harness/evidence.ts:69-120` 逐个写 Blob/轨迹分片，manifest 最后才写，中间没有持久化游标。R2 虽按 hash 检查已存在 Blob，`apps/eval-api/src/evidence/r2-blobs.ts:85-103` 仍需先从 SP 重新读完整文件并计算 hash，再发 HEAD；所以已有 Blob 能避免二次写入，却不能避免二次下载。轨迹迭代器也每次从 `afterSeq=0` 重新分页，见 `apps/eval-api/src/sp/harness.ts:160-177`。
+- 证据待收尾只保存 `retrying + evidencePending` 和最后错误，见 `packages/eval-runtime/src/runtime/execution.ts:111-139`；没有文件、轨迹游标、manifest 候选或跨 Worker 重试计数。下一轮 `executeSampling()` 又从 `collectExecution()` 和 `exportEvidence()` 的开头开始，见 `:143-169`；这正是线上“Agent 已完成、证据一直下载失败、5 个评估排队”的根因链。
+
+**修复方案（按这个顺序实现）**
+
+1. **先修 SP/Eval 语义，不扩大普通 409 的重试范围。** 导出接口带上锁定的 `submissionId`（或返回一次性的 immutable export snapshot ID），SP 只为这个 Submission 判断终态和 telemetry readiness；新增机器错误码 `EVIDENCE_NOT_READY` 与 `Retry-After`，终态未确认、telemetry 未投递都返回该可重试状态，文件超限、路径/身份冲突仍不可重试。SP 必须先持久化终态再发 WS 快照，重连仍发送同一 Submission 的最新快照；当前独立 SP 分支已做到快照事件，但要把“导出 readiness”从通用异常变成明确契约。
+2. **Eval 端把“未知状态”和“已失败”分开。** WS 断开后按原操作键校准；返回终态就收尾，返回 running 就用同一真实 Submission ID 重连，返回 `null` 或临时 HTTP 错误就持久化 `observationPending` 并延迟恢复，绝不创建新 Attempt、绝不换幂等键、绝不因未知状态进入 `restart`。将当前内存中的 observer 次数、最近状态、下次观察时间和全局 deadline 写入 Attempt/RuntimeStore；Worker 重启后继续同一预算。只有明确的 `failed/interrupted/cancelled` 才进入 Agent 重启策略。
+3. **把证据保存拆成可恢复的小步骤。** 为每个 `samplingId + attemptId + submissionId` 建立一个稳定的 Evidence Export Job（可落在 Sampling facts 的受控字段或独立 RuntimeStore 表），至少保存：导出身份、冻结后的 artifact 清单摘要、每个 artifact/Subject input 的 hash/size/完成状态、轨迹最后 `afterSeq`、已写入的 trajectory parts、omitted、manifest 候选、重试次数/下一次时间/最后错误。扩展 `EvidenceStore` 为“按 hash 写入并返回已存在、按 part/cursor 提交进度、最后 finalize manifest”的幂等操作；重试只下载缺少的文件或下一页轨迹，manifest 写入响应丢失时按内容 hash 重放，不重复提交 Agent。
+4. **把重试预算持久化并设置明确出口。** Agent 的 `maxRestarts`、WS 状态观察、证据 readiness、文件/轨迹读取、R2/DB 持久化分别计数；同一收尾操作跨 Worker 累计，不在 `resume()` 里清零。预算耗尽时写明确的 `evidence_failed`/`observation_failed` 收尾事实并保留已保存内容，或转入已有的人工补收入口（`packages/eval-runtime/README.md:120`），不能无限保持 `retrying`。成功条件必须是 manifest 已保存且 `Sampling.evidence` 与执行成功状态一次条件写入；然后才解锁对应 Evaluation。
+5. **补齐可观测性。** 每次 `ws_open/ws_close/ws_inspect/evidence_list/file/page/blob/manifest` 记录结构化字段：`runId,samplingId,stage,attemptId,submissionId,idempotencyKey,operation,phase,retryNumber,httpStatus,path,afterSeq`；错误只记录状态和摘要，不记录产物内容或凭证。`onError` 仍保留，但不能只报一条最终错误。
+
+**必须通过的验收场景**
+
+- WS：连接后收到 `submission.status` 的已完成快照直接继续；首个连接断开且按键返回 running 时重连同一 URL；按键暂时 503 或返回 `null` 时不新建 Attempt，下一轮能继续观察；状态明确 failed 时才按 `maxRestarts` 重启；相同幂等键的提交响应丢失不会产生第二个 Submission。
+- 证据 readiness：Submission completed 但 SP 仍返回 `EVIDENCE_NOT_READY/409` 时等待并重试；普通 Chat 冲突/413/非法轨迹游标不重试；readiness 后逐文件下载失败只重试缺失文件。
+- 断点：第 2 个 artifact 失败后恢复只读第 2 个；轨迹第 2 页失败后恢复从已保存 cursor 继续；manifest 写入响应丢失后重复 finalize 得到同一 `evidenceId`，不会重复下载或产生错误 manifest。
+- 全链路：模拟一次 WS 断线、telemetry 延迟、一个文件短暂 503 和一次 R2 响应丢失，单个 Run 最终得到 `execution.succeeded -> evaluation.succeeded`，每个 Subject/Evaluator 只产生一个正常 Attempt（除非明确 Submission failed 且策略允许重启），Run 不因未知状态进入失败或无限活动。
+
+**处理状态**：已实现（2026-10-19），待独立复审；未修改线上数据，未提交 Git。
+
+**实现摘要**
+
+- 观察：`submission-observer.ts` 断线后优先用 SP 新增的 `GET .../submissions/{submissionId}` 校准（旧 SP 返回 404 时回退按键读取）；`null` 或瞬时错误继续重连同一 URL，耗尽后抛出可重试的 “status unconfirmed” 错误并带上最后一次读取结果。
+- Runtime：`SamplingStageState.observationPending` 跨 Worker 轮次持久化观察次数，下一轮观察同一 Submission，不新建 Attempt、不换幂等键；`OBSERVATION_MAX_ATTEMPTS = 5` 轮后以明确信息置为 `failed`。MCP 已接受结果的评估断链后保持 `succeeded`，并标记 `resourcesPending` 补采资源。`inspectUncertainOperation` 不再吞错，状态错误附带 `inspect: null|<status>|error`。
+- 就绪：SP 对未完成或 telemetry 未投递的证据请求返回 `409 EVIDENCE_NOT_READY` 与 `Retry-After`；Eval 只对 GET 上的该错误码重试。
+- 可观测：harness 输出 `ws_open/ws_close/ws_inspect/ws_reconnect/submission_terminal/resources_read/evidence_*` 结构化日志，经 Run Worker 写入 pino。
+
+### R-24：SP 以 Durable Object RPC 整值返回大数据，导致资源快照/证据轨迹失败与 isolate 内存重置（已实现，待复审）
+
+**发现日期**：2026-10-19，来自 Cloudflare Workers Logs（`severn-agent-eval`，近 8 天）与 CloudWatch。
+
+**线上证据**
+
+- `resources/by-key`：评估 Agent 240 次读取中 100 次 500，执行 Agent 277 次中 58 次 500；异常几乎全部为 `Serialized RPC arguments or return values are limited to 32MiB`（35–79 MB）。早期读取能成功但 `finalized=false`，数据补齐后每次都超限；Eval 保存不完整快照或 `failed` 后不再补读，表现为“积分未获得”、工具数偏少。
+- `evidence/trajectory?afterSeq=0&limit=200`：40 次 500，同为 RPC 超限，证据包永远导不完，执行一直“执行中”。
+- SevernAgent `/eval/submissions/{id}/events`：470 次 exception、70 次 canceled；原因是 `Durable Object connection closed because the object was reset` 与 `Network connection lost`。同一脚本版本下出现 `Durable Object's isolate exceeded its memory limit and was reset`，时间与上述大数据读取和证据导入重合，同一 isolate 内其他 Chat 的观察连接被一并断开，即 R-23 中 “Submission WebSocket closed before terminal status” 的直接原因。
+
+**修复（SP `fix/eval-harness-large-transport`，基于 `eval` @ d6e443ac）**
+
+- 资源快照、证据轨迹、证据文件不再作为 RPC 返回值，改为流式 `fetch`：Agent Worker → Inbox（`forwardEvalChatRequest`，经 `withOwnedChat` 校验归属）→ Chat，不是 Worker 直连 Chat。直连路由刻意推迟：它要在 Worker 中复制 Inbox 的归属与停止校验；若 Cloudflare 日志显示 Inbox 成为热点再评估。资源快照逐行写出本 Submission 的原始 telemetry body（含工具输入输出，不压缩、不丢字段），按 SQL 分批读取，不再把整段轨迹读入内存。
+- 证据文件 GET/PUT 流式读写，PUT 边写边算 SHA-256，不匹配时删除；`EVAL_EVIDENCE_FILE_MAX_BYTES` 提升至 95,000,000（受 Cloudflare 免费区 100 MB 请求体上限约束）。
+- 资源快照必带 `readiness`，并新增只返回 `{scope, observedAt, finalized, readiness}` 的 `resources/by-key/{key}/readiness` 路由；`collectEvalActionCharges` 将 `failed/outcome_unknown` 视为已结算（`chargedCredits: 0`，与网关释放预留一致），工具结束但无 `executionId` 不再在 Submission 终态后永久阻塞。
+- SP 证据读取（artifacts、files、trajectory）必须带 `submissionId`；按 ID 读取 Submission 的路由已上线，Eval 不再在 404 时回退按键读取。
+- Eval 侧：Agent 结束后先轮询 readiness 路由（同轮 5/10/20/40 s，之后以 `resourcesPending.deadline` 跨轮每 60 s，最长到 Agent 结束后 10 分钟），定稿或到期后只完整下载一次快照，不再反复重读 100+ MB；每次调用仍有 Runtime 固定的 10 次内层重试。JSON 响应上限提升到 V8 字符串上限（约 512 MiB），资源与证据传输超时 5 分钟，readiness 使用 60 s 控制超时；Web 区分“整理证据中/补采资源中/确认 Agent 状态中/资源采集失败”，并提供“重新采集资源”。
+
+**遗留**
+
+- （已解决）eval-api 已升级到 `@springbrand/eval-harness@0.1.0-alpha.4`，其 `EVAL_EVIDENCE_FILE_MAX_BYTES` 为 95,000,000，`spEvidenceLimits(DEFAULT_EVIDENCE_LIMITS)` 的单文件上限现为 95 MB 并已生效。
+- Eval 只等待 SP 的 telemetry/runtime outbox 投递，不触发投递；按需排空需要 `@springbrand/agent-runtime` 提供带保护的 flush API。
+- 资源快照存于 `facts` JSONB，单值上限约 255 MB；超过时需另行设计原始 telemetry 的存储位置。

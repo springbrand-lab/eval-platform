@@ -25,6 +25,8 @@ import { SummaryCards } from "@/features/metrics/summary";
 import { AgentPanel, LangfuseLink } from "./agent-panel";
 import { useProject } from "@/features/projects/use-project";
 import { POLL_MS } from "@/features/runs/use-run-polling";
+import { StageHint } from "@/features/runs/stage-hint";
+import { EvidenceExportProgress } from "@/features/runs/evidence-export-progress";
 
 const VALIDATION_REASON: Record<string, string> = {
   "invalid-json": "结果文件不是有效的 JSON",
@@ -54,14 +56,14 @@ function JudgeResult({ projectId, detail, subjectChatId, busy, fields, onEvidenc
   const descriptions = prose.filter(([key]) => !evidence.some(([evidenceKey]) => key === evidenceKey));
   return <Card>
     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2">
-      <h3 className="text-xs font-semibold">评估 Agent 结果</h3><StatusBadge status={detail.agent.stage.status} />
+      <span className="flex flex-wrap items-center gap-2"><h3 className="text-xs font-semibold">评估 Agent 结果</h3><StatusBadge status={detail.agent.stage.status} /><StageHint stage="evaluation" state={record.status} /></span>
       <p className="w-full text-[11px] text-text-muted">{record.evaluationId.slice(0, 8)} · {formatDateTime(detail.agent.lastCompletedAt)}</p>
     </div>
     <CardBody className="@container flex min-w-0 flex-col gap-3 p-3">
       {record.status.status === "cancelled" && record.attempts.length === 0 && record.status.lastError === "execution did not succeed"
         ? <p className="text-xs text-text-muted">此前因执行失败而取消，尚未评估。执行结果恢复后，可点击顶部“重新评估”。</p>
         : detail.agent.stage.lastError && <p role="alert" className="break-words text-xs text-danger">{detail.agent.stage.lastError}</p>}
-      <RecollectResultButton projectId={projectId} samplingId={record.samplingId} evaluationId={record.evaluationId} stage={record.status} busy={busy}
+      <RecollectResultButton projectId={projectId} samplingId={record.samplingId} evaluationId={record.evaluationId} stage={record.status} busy={busy} resources={detail.agent.resources.collections}
         eligible={!!record.chatId && record.attempts.at(-1)?.status === "completed"} />
       {validation.status !== "valid" && <p className="rounded-md bg-surface-muted p-2 text-xs text-warning">{VALIDATION_REASON[validation.reason] ?? validation.reason}，暂不计入有效评估。</p>}
       {scores.length > 0 && <dl aria-label="评估数值" className="grid grid-cols-2 @min-[360px]:grid-cols-4 gap-px overflow-hidden rounded-md border border-border bg-border">{scores.map(([key, value]) => <div key={key} className="min-w-0 bg-surface px-2.5 py-2"><dt className="truncate text-[11px] text-text-muted" title={label(key)}>{label(key)}</dt><dd className="mt-1 text-base font-semibold tabular-nums">{value === true ? "是" : value === false ? "否" : value === null ? "空值" : String(value)}</dd></div>)}</dl>}
@@ -128,12 +130,13 @@ export function SamplingResult({ projectId, samplingId, standalone = false }: { 
     <Button asChild size="sm" variant="ghost" disabled={running}><Link to="/projects/$projectId/runs/new" disabled={running} params={{ projectId }} search={{ samplingId, operation: "execution" }}>重新执行</Link></Button>
     <Button asChild size="sm" variant="outline" disabled={running || data.subject.stage.status !== "succeeded" || !view.data?.evaluation}><Link to="/projects/$projectId/runs/new" disabled={running || data.subject.stage.status !== "succeeded" || !view.data?.evaluation} params={{ projectId }} search={{ samplingId, operation: "evaluation" }}>重新评估</Link></Button>
   </div>;
-  const identity = <span className="flex flex-wrap items-center gap-2"><span className="font-mono text-[11px] text-text-muted">采样 {samplingId.slice(0, 8)}</span><span className="text-xs text-text-muted">执行</span><StatusBadge status={data.subject.stage.status} /></span>;
+  const identity = <span className="flex flex-wrap items-center gap-2"><span className="font-mono text-[11px] text-text-muted">采样 {samplingId.slice(0, 8)}</span><span className="text-xs text-text-muted">执行</span><StatusBadge status={data.subject.stage.status} /><StageHint stage="execution" state={data.subject.stage} /></span>;
   return <div className="flex min-w-0 flex-col gap-3">
     {standalone ? <PageHeader compact title={dataTitle(data.projectSample.data)} meta={identity} actions={actions} crumbs={[{ label: "项目管理", to: "/projects" }, { label: view.data?.project.name ?? "返回项目", to: "/projects/$projectId", params: { projectId } }]} />
       : <div className="flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap items-center gap-2"><h2 className="text-sm font-semibold">{dataTitle(data.projectSample.data)}</h2>{identity}</div>{actions}</div>}
     {data.subject.stage.lastError && <p role="alert" className="break-words rounded-md border border-danger/20 px-3 py-2 text-xs text-danger">执行阶段异常：{data.subject.stage.lastError}</p>}
-    <RecollectResultButton projectId={projectId} samplingId={samplingId} stage={data.subject.stage} busy={running}
+    <EvidenceExportProgress state={data.sampling.evidenceExport} executionStatus={data.subject.stage.status} />
+    <RecollectResultButton projectId={projectId} samplingId={samplingId} stage={data.subject.stage} busy={running} resources={data.subject.resources.collections}
       eligible={!!data.subject.chatId && data.subject.attempts.items.at(-1)?.status === "completed"} />
     <Tabs variant="line" value={tab} onChange={setTab} tabs={[{ value: "result", label: "结果" }, { value: "execution", label: "执行过程" }, { value: "evaluation", label: "评估过程" }, { value: "resources", label: "资源统计" }]} />
     {tab === "result" ? <>

@@ -18,6 +18,7 @@ it("keeps both Agent summaries and exposes one clear detail category at a time",
       expect(region.textContent).toContain('总 Token');
       expect(region.textContent).toContain('缓存命中率');
       expect(region.textContent).toContain('41.2%');
+      expect(region.textContent).toContain(role === '执行 Agent' ? '执行中' : '评估中');
       expect(region.querySelector(`[aria-label="${role}总览"]`)).not.toBeNull();
       expect(region.querySelector('table[aria-label="工具调用概况"]')).not.toBeNull();
       expect(region.querySelector('table[aria-label="操作次数"]')).not.toBeNull();

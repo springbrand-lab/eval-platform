@@ -14,6 +14,7 @@ import type {
   Sampling,
 } from "@eval-platform/eval-contracts";
 import type { EvidenceStore, Harness } from "../harness/model.js";
+import type { RuntimeContext, RuntimeLog } from "./log.js";
 import type { RetryController } from "./retry.js";
 import type { SamplingState, RuntimeStore } from "./store.js";
 import type { EvaluationScorePort } from "./scores.js";
@@ -133,14 +134,38 @@ export interface EvalRunResumerDependencies {
   readonly scores?: EvaluationScorePort;
   /** Result submission and Schema checking; only a valid result makes an Evaluation succeed. */
   readonly results?: EvaluationResultPort;
-  /** Receives failures that must not interrupt the Run; it should not throw. */
-  readonly onError: (error: Error) => void;
+  /** Receives failures that must not interrupt the Run, with the members they belong to; it should not throw. */
+  readonly onError: (error: Error, context?: RuntimeContext) => void;
+  /** Structured diagnostics such as `run_pass_summary`, `stage_attempt` and `resources_collected`; see the README. */
+  readonly log?: RuntimeLog;
+}
+
+/** Why a stop forced a stage terminal: nothing was dispatched, the Agent was stopped, or its results were still pending. */
+export type StageStopReason = "not-started" | "agent-stopped" | "status-unconfirmed" | "evidence-export" | "output-collection";
+
+export interface StoppedStageReport {
+  readonly stage: "execution" | "evaluation";
+  readonly samplingId: string;
+  readonly evaluationId?: string;
+  readonly status: "failed" | "cancelled";
+  readonly reason: StageStopReason;
+}
+
+/** Identities and counts of one stop finalization, never payloads; it should not throw. */
+export interface RunStopReporter {
+  /** Run members by `<stage>.<status>[.<pending flag>]` before finalization. */
+  finalizing(states: Readonly<Record<string, number>>): void;
+  stageStopped(report: StoppedStageReport): void;
 }
 
 export interface EvalRunResumer {
+  /** Runs a Run's due work; a Run whose stop is pending is left to `stop`. */
   resume(runId: string, stopSignal?: AbortSignal): Promise<void>;
   /** Interrupt active SP Submissions without finalizing still-running local tasks. */
   interrupt(runId: string): Promise<void>;
-  /** Finalize a persisted stop request after local resume tasks have quiesced. */
-  stop(runId: string): Promise<void>;
+  /**
+   * Finalize a pending stop after local resume tasks have quiesced: every pending stage ends without
+   * re-running an Agent, exporting evidence or waiting for resource readiness; owed resources are downloaded once as they are.
+   */
+  stop(runId: string, reporter?: RunStopReporter): Promise<void>;
 }

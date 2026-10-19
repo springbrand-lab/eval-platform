@@ -55,11 +55,13 @@ export const getProjectRun: AppRouteHandler<typeof routes.getProjectRun> = async
 
 export const listProjectRunEvaluations: AppRouteHandler<typeof routes.listProjectRunEvaluations> = async (c) => {
   const { projectId, runId } = c.req.valid("param");
-  const { evaluations } = await requireProjectRun(c.var.services, projectId, runId);
-  return ok(c, { evaluations: evaluations.map(({ output: _output, attempts, ...record }) => ({
-    ...record,
-    attempts: attempts.map(({ resources: _resources, ...attempt }) => attempt),
-  })) });
+  const { evaluations, samplings } = await requireProjectRun(c.var.services, projectId, runId);
+  const executionBySamplingId = new Map(samplings.map((sampling) => [sampling.samplingId, sampling.execution]));
+  return ok(c, { evaluations: evaluations.map(({ output: _output, attempts, ...record }) => {
+    const execution = executionBySamplingId.get(record.samplingId);
+    if (!execution) throw new Error(`Run ${runId} is missing Sampling ${record.samplingId}`);
+    return { ...record, execution, attempts: attempts.map(({ resources: _resources, ...attempt }) => attempt) };
+  }) });
 };
 
 export const getSampling: AppRouteHandler<typeof routes.getSampling> = async (c) =>
@@ -76,9 +78,9 @@ export const getEvaluation: AppRouteHandler<typeof routes.getEvaluation> = async
 
 export const collectExecution: AppRouteHandler<typeof routes.collectExecution> = async (c) => {
   const { projectId, samplingId } = c.req.valid("param");
-  return ok(c, await c.var.services.projectRuns.recollect(projectId, "execution", samplingId), 202);
+  return ok(c, await c.var.services.projectRuns.recollect(projectId, "execution", samplingId, c.req.valid("json").target), 202);
 };
 export const collectEvaluation: AppRouteHandler<typeof routes.collectEvaluation> = async (c) => {
   const { projectId, evaluationId } = c.req.valid("param");
-  return ok(c, await c.var.services.projectRuns.recollect(projectId, "evaluation", evaluationId), 202);
+  return ok(c, await c.var.services.projectRuns.recollect(projectId, "evaluation", evaluationId, c.req.valid("json").target), 202);
 };

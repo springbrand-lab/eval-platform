@@ -32,8 +32,8 @@ importers:
         specifier: 1.5.1
         version: 1.5.1(hono@4.12.33)(zod@4.6.5)
       '@springbrand/eval-harness':
-        specifier: 0.1.0-alpha.3
-        version: 0.1.0-alpha.3
+        specifier: 0.1.0-alpha.4
+        version: 0.1.0-alpha.4
       '@springbrand/http':
         specifier: 0.1.0-alpha.4
         version: 0.1.0-alpha.4(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
@@ -145,8 +145,8 @@ importers:
         specifier: 0.1.0-alpha.0
         version: 0.1.0-alpha.0(patch_hash=1b945dbc09351777f8779c2b7bbcc59f98cba985fc48ba40f97a8281e02ceac7)(@date-fns/tz@1.5.0)(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(date-fns@4.4.0)(hono@4.12.33)(react-dom@19.3.0(react@19.3.0))(react-icons@5.6.0(react@19.3.0))(react@19.3.0)(recharts@2.15.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0))
       '@springbrand/file-renderers':
-        specifier: 0.1.0-alpha.1
-        version: 0.1.0-alpha.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+        specifier: 0.1.0-alpha.2
+        version: 0.1.0-alpha.2(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@springbrand/http':
         specifier: 0.1.0-alpha.4
         version: 0.1.0-alpha.4(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
@@ -2521,11 +2521,19 @@ packages:
   '@springbrand/contracts@0.1.0-alpha.0':
     resolution: {integrity: sha512-xbXVBmLAyaH0I11ofFvfR0b7Yx03YxyXirF1RR6G/Tc0CKiMwehSb5fV3H2GPZSo+W6cMNj7YW/vuA75mvUJzQ==}
 
-  '@springbrand/eval-harness@0.1.0-alpha.3':
-    resolution: {integrity: sha512-wldX7kxbxBzWsqoII/eyaU834aIzzCsxs04Nirn/LglT+9tNmbkyhA2VTXP/sdrTm5sT8PrkXRJ1wcXgPyplcw==}
+  '@springbrand/eval-harness@0.1.0-alpha.4':
+    resolution: {integrity: sha512-p1M3DVe2KWgpsVKrpaiMSzhow+IctRAHyxMp9LGYeHIZ7uzYprspTRFC/in5/v+vCV407JR//a7WMVdu3Qfcyw==}
 
   '@springbrand/file-renderers@0.1.0-alpha.1':
     resolution: {integrity: sha512-TZLMxjTeEvRvzY8Ee3ZDmzKjSol2huHZYdIuclKxIBQirxkIQToPuPUGQU082ZdBdwCBDolWCMl3JBRFCdiJ/A==}
+    peerDependencies:
+      react: ^19.0.0
+      react-dom: ^19.0.0
+    bundledDependencies:
+      - '@silurus/ooxml'
+
+  '@springbrand/file-renderers@0.1.0-alpha.2':
+    resolution: {integrity: sha512-wZ1GWbGYWrrsW/xJoXvdiP7at67GwndIA9l8Sj7IepLgS6xamQB+ptTn22zjhMcO4HDKZgaeVmnYku+hFp5aLg==}
     peerDependencies:
       react: ^19.0.0
       react-dom: ^19.0.0
@@ -7721,7 +7729,7 @@ snapshots:
       - react-dom
       - supports-color
 
-  '@springbrand/eval-harness@0.1.0-alpha.3':
+  '@springbrand/eval-harness@0.1.0-alpha.4':
     dependencies:
       '@zip.js/zip.js': 2.8.41
       ipaddr.js: 2.5.0
@@ -7729,6 +7737,34 @@ snapshots:
       zod: 4.6.5
 
   '@springbrand/file-renderers@0.1.0-alpha.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)':
+    dependencies:
+      '@excalidraw/excalidraw': 0.18.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+      '@google/model-viewer': 4.3.1(three@0.183.0)
+      '@streamdown/code': 1.1.1(react@19.3.0)
+      '@zip.js/zip.js': 2.8.41
+      css-tree: 3.2.1
+      es-module-lexer: 2.3.2
+      fflate: 0.8.3
+      ipaddr.js: 2.5.0
+      jsonc-parser: 3.3.1
+      mermaid: 11.17.2
+      parse5: 7.3.0
+      react: 19.3.0
+      react-data-grid: 7.0.0-beta.61(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+      react-dom: 19.3.0(react@19.3.0)
+      saxes: 6.0.0
+      smol-toml: 1.8.0
+      srcset: 5.0.3
+      streamdown: 2.7.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+      three: 0.183.0
+      yaml: 2.9.0
+    transitivePeerDependencies:
+      - '@types/react'
+      - '@types/react-dom'
+      - immer
+      - supports-color
+
+  '@springbrand/file-renderers@0.1.0-alpha.2(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)':
     dependencies:
       '@excalidraw/excalidraw': 0.18.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@google/model-viewer': 4.3.1(three@0.183.0)

@@ -7,9 +7,9 @@ import {
   type AgentHandle,
   type EvidenceBundleReader,
 } from "@eval-platform/eval-runtime";
-import { EVAL_INITIAL_FILE_MAX_BYTES, EVAL_OUTPUT_SCHEMA_PATH as SCHEMA_PATH } from "@springbrand/eval-harness";
+import { EVAL_EVIDENCE_FILE_MAX_BYTES, EVAL_INITIAL_FILE_MAX_BYTES, EVAL_OUTPUT_SCHEMA_PATH as SCHEMA_PATH } from "@springbrand/eval-harness";
 import WebSocket, { WebSocketServer } from "ws";
-import { createSpHarness, SpHarnessError } from "./harness.js";
+import { createSpHarness, SpHarnessError, spEvidenceLimits } from "./harness.js";
 
 const OWNER = "11111111-1111-4111-8111-111111111111";
 const OTHER_OWNER = "22222222-2222-4222-8222-222222222222";
@@ -40,15 +40,27 @@ const executionOutput = {
   artifacts: [{ artifactId: "artifact-1", kind: "project", path: "/project" }],
   trajectory: { trajectoryId: "trajectory-1", source: "subject", path: "/trajectory.jsonl" },
 };
+const readiness = {
+  receiptTerminal: true,
+  stateUnreadable: false,
+  pendingTelemetryEvents: 0,
+  pendingRuntimeEvents: 2,
+  actionCharges: { complete: false, unsettledExecutions: 1, missingExecutionIds: 0 },
+};
+const scope = { chatId: SUBJECT_CHAT, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" };
 const resources = {
-  scope: { chatId: SUBJECT_CHAT, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" },
+  scope,
   observedAt: "2026-10-14T00:00:00.000Z",
   finalized: true,
   coverage: { usageEvents: "complete", telemetryEvents: "partial", billingSettlements: "complete" },
   usageEvents: [{ eventId: "usage-1", unknownField: null }],
   telemetryEvents: [{ eventId: "event-1" }],
   billingSettlements: [{ eventId: "billing-1", chargedCredits: 7 }],
+  readiness,
 };
+const RESOURCES_PATH = `${CHAT_PATH}/resources/by-key/execution%3Asampling-1`;
+const BY_ID_PATH = `${CHAT_PATH}/submissions/submission-1`;
+const BY_KEY_PATH = `${CHAT_PATH}/submissions/by-key/execution%3Asampling-1`;
 type Ref = { readonly bundleId: string; readonly materialId: string };
 const subjectMaterials: readonly Ref[] = [
   { bundleId: "bundle-1", materialId: "material-1" },
@@ -117,7 +129,7 @@ class FakeSocket extends EventTarget {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    this.dispatchEvent(new Event("close"));
+    this.dispatchEvent(Object.assign(new Event("close"), { code: 1006, reason: "" }));
   }
 
   sendStatus(submission: unknown): void {
@@ -546,7 +558,7 @@ describe("Eval SP Harness", () => {
         return Response.json({ artifacts: [
           { path: "/index.html", size: 11, mediaType: "text/html" },
           { path: "/node_modules/x/index.js", size: 1, mediaType: "text/javascript" },
-          { path: "/video.mp4", size: 30_000_000, mediaType: "video/mp4" },
+          { path: "/video.mp4", size: EVAL_EVIDENCE_FILE_MAX_BYTES + 1, mediaType: "video/mp4" },
         ] });
       }
       if (url.pathname.endsWith("/evidence/trajectory")) {
@@ -557,8 +569,9 @@ describe("Eval SP Harness", () => {
       if (url.pathname.endsWith("/evidence/files")) return new Response("<h1>Hi</h1>", { headers: { "Content-Type": "text/html" } });
       throw new Error(`Unexpected ${request.method} ${url}`);
     });
-    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
-    const exported = await harness.exportEvidence({ handle: subject, limits: DEFAULT_EVIDENCE_LIMITS });
+    const logged: Record<string, unknown>[] = [];
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, log: (event) => logged.push(event) });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits: DEFAULT_EVIDENCE_LIMITS });
 
     expect(exported.source).toEqual({ framework: "sp", samplingId: "sampling-1", agentRef: { ownerUserId: OWNER, chatId: SUBJECT_CHAT } });
     expect(exported.artifacts).toEqual([{ path: "/index.html", size: 11, mediaType: "text/html" }]);
@@ -568,15 +581,31 @@ describe("Eval SP Harness", () => {
     ]);
     expect(exported.trajectoryComplete).toBe(true);
     await expect(new Response(await exported.readFile("/index.html")).text()).resolves.toBe("<h1>Hi</h1>");
-    const events: JsonValue[] = [];
-    for await (const item of exported.trajectory) events.push(item);
+    const events: { seq: number; record: JsonValue }[] = [];
+    for await (const item of exported.readTrajectory(0)) events.push(item);
     expect(events).toEqual([
-      event(1, "turn.admitted", { prompt: "Build" }),
-      event(2, "tool.started", { toolName: "write", input: { path: "/index.html" } }),
-      event(3, "context.compacted", { removedMessages: 3 }),
+      { seq: 1, record: event(1, "turn.admitted", { prompt: "Build" }) },
+      { seq: 2, record: event(2, "tool.started", { toolName: "write", input: { path: "/index.html" } }) },
+      { seq: 3, record: event(3, "context.compacted", { removedMessages: 3 }) },
     ]);
+    // Successful file reads and intermediate pages are summarized by Runtime; only the final page is logged.
+    expect(logged).toEqual([expect.objectContaining({ name: "evidence_trajectory_page", status: 200, from: 0, pages: 2, events: 3, afterSeq: 2 })]);
+    expect(JSON.stringify(logged)).not.toContain("Build");
     const fileRequest = requests.find((request) => new URL(request.url).pathname.endsWith("/evidence/files"))!;
     expect(new URL(fileRequest.url).searchParams.get("path")).toBe("/index.html");
+    // Every export read names its Submission.
+    const exportReads = requests.filter((request) => new URL(request.url).pathname.includes("/evidence/"));
+    expect(exportReads.map((request) => new URL(request.url).searchParams.get("submissionId")))
+      .toEqual(exportReads.map(() => "submission-1"));
+
+    // A resumed read starts at the persisted cursor and yields exactly the remaining events.
+    requests.length = 0;
+    const resumed: { seq: number; record: JsonValue }[] = [];
+    for await (const item of exported.readTrajectory(2)) resumed.push(item);
+    expect(resumed).toEqual(events.slice(2));
+    expect(requests.map((request) => new URL(request.url).searchParams.get("afterSeq"))).toEqual(["2"]);
+    await expect((async () => { for await (const _ of exported.readTrajectory(-1)) { /* never reached */ } })())
+      .rejects.toMatchObject({ name: "SpHarnessError", retryable: false });
     expect(requests.every((request) => request.headers.get("X-Eval-Service-Token") === "secret")).toBe(true);
     expect(requests.every((request) => new URL(request.url).pathname.startsWith(CHAT_PATH))).toBe(true);
   });
@@ -635,5 +664,310 @@ describe("Eval SP Harness", () => {
       await expect(harness.importEvidence({ handle: evaluator, idempotencyKey: "k", evidence, root: "/evidence" }))
         .rejects.toMatchObject({ name: "SpHarnessError", retryable, status });
     }
+  });
+});
+
+describe("Eval SP Harness large transfers and readiness", () => {
+  const notReady = () => Response.json({ code: "EVIDENCE_NOT_READY", errMsg: "Telemetry is still being delivered" },
+    { status: 409, headers: { "Retry-After": "3" } });
+
+  it("passes SP's resource readiness through and reports the read without payload contents", async () => {
+    const events: Record<string, unknown>[] = [];
+    const { fetch } = queuedFetch(Response.json(resources));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "service-secret", fetch,
+      log: (event) => events.push(event) });
+    expect(await harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
+      .toEqual(resources);
+    expect(events).toEqual([expect.objectContaining({
+      name: "resources_read", status: 200, finalized: true, submissionId: "submission-1", readiness, telemetryEvents: 1,
+    })]);
+    expect(JSON.stringify(events)).not.toContain("service-secret");
+    expect(JSON.stringify(events)).not.toContain("event-1");
+  });
+
+  it.each([
+    ["an invalid", { ...resources, readiness: { ...readiness, pendingTelemetryEvents: -1 } }],
+    ["a missing", (({ readiness: _readiness, ...rest }) => rest)(resources)],
+  ])("rejects %s readiness summary instead of persisting the snapshot", async (_case, body) => {
+    const { fetch } = queuedFetch(Response.json(body));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
+      .rejects.toMatchObject({ retryable: false, message: "Eval SP returned an invalid resource snapshot" });
+  });
+
+  it("inspects resource readiness on its own route with the control timeout, without events", async () => {
+    const report = { scope, observedAt: "2026-10-14T00:00:00.000Z", finalized: false, readiness };
+    const events: Record<string, unknown>[] = [];
+    const { fetch, requests } = queuedFetch(Response.json({ ...report, telemetryEvents: [{ eventId: "event-1" }] }), Response.json(report));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, log: (event) => events.push(event) });
+    const input = { handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" };
+    expect(await harness.inspectAgentResources(input)).toEqual(report);
+    expect(await harness.inspectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1" })).toEqual(report);
+    expect(requests.map((request) => `${new URL(request.url).pathname}${new URL(request.url).search}`)).toEqual([
+      `${RESOURCES_PATH}/readiness?submissionId=submission-1`, `${RESOURCES_PATH}/readiness`,
+    ]);
+    expect(events[0]).toMatchObject({ name: "resources_readiness", status: 200, finalized: false, readiness });
+  });
+
+  it("logs SP's request ID with a failed JSON read for cross-system correlation", async () => {
+    const events: Record<string, unknown>[] = [];
+    const { fetch } = queuedFetch(Response.json({ code: "INTERNAL_ERROR", errMsg: "unavailable" },
+      { status: 503, headers: { "X-Request-ID": "sp-request-2" } }));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, log: (event) => events.push(event) });
+    await expect(harness.inspectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1" }))
+      .rejects.toMatchObject({ retryable: true, status: 503, requestId: "sp-request-2" });
+    expect(events).toEqual([expect.objectContaining({ name: "resources_readiness", status: 503, retryable: true, requestId: "sp-request-2" })]);
+  });
+
+  it.each([
+    { ...resources, readiness: { ...readiness, actionCharges: { complete: true } } },
+    { scope, observedAt: "2026-10-14T00:00:00.000Z", finalized: false },
+    { scope: { ...scope, submissionId: "" }, observedAt: "x", finalized: true, readiness },
+  ])("rejects a readiness report outside SP's contract", async (body) => {
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: queuedFetch(Response.json(body)).fetch });
+    await expect(harness.inspectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
+      .rejects.toMatchObject({ retryable: false, message: "Eval SP returned an invalid resource readiness" });
+  });
+
+  it("fails an oversized resource snapshot explicitly and permanently", async () => {
+    const { fetch } = queuedFetch(Response.json({ ...resources, telemetryEvents: [{ payload: "x".repeat(2_048) }] }));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, maxResponseBytes: 1_024 });
+    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
+      .rejects.toMatchObject({
+        name: "SpHarnessError", retryable: false,
+        message: "Eval SP resource snapshot exceeded the 1024-byte response limit",
+      });
+  });
+
+  it("retries a resource snapshot whose stream was cut off mid-body", async () => {
+    const full = new TextEncoder().encode(JSON.stringify(resources));
+    const cut = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(full.slice(0, full.length / 2));
+        controller.error(new TypeError("terminated"));
+      },
+    });
+    const { fetch } = queuedFetch(new Response(cut, { headers: { "Content-Type": "application/json" } }));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
+      .rejects.toMatchObject({ name: "SpHarnessError", retryable: true });
+  });
+
+  it("uses the large-transfer timeout for resources and evidence, and the short timeout elsewhere", async () => {
+    const hang = vi.fn((input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+      signal?.addEventListener("abort", () => reject(signal.reason));
+    }));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: hang,
+      requestTimeoutMs: 5, transferTimeoutMs: 60 });
+    const started = Date.now();
+    await expect(harness.inspectAgentOperation({ handle: subject, idempotencyKey: "execution:sampling-1" }))
+      .rejects.toMatchObject({ retryable: true });
+    expect(Date.now() - started).toBeLessThan(55);
+    const readinessStarted = Date.now();
+    await expect(harness.inspectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
+      .rejects.toMatchObject({ retryable: true });
+    expect(Date.now() - readinessStarted).toBeLessThan(55);
+    const resourceStarted = Date.now();
+    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
+      .rejects.toMatchObject({ retryable: true });
+    expect(Date.now() - resourceStarted).toBeGreaterThanOrEqual(55);
+  });
+
+  it("retries an evidence read only while SP reports EVIDENCE_NOT_READY", async () => {
+    const { fetch } = queuedFetch(
+      notReady(),
+      notReady(),
+      Response.json({ code: "REQUEST_CONFLICT", errMsg: "Submission is still running" }, { status: 409 }),
+      new Response(null, { status: 409 }),
+    );
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    await expect(harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits: DEFAULT_EVIDENCE_LIMITS })).rejects.toMatchObject({
+      name: "SpHarnessError", retryable: true, status: 409, retryAfterMs: 3_000,
+    });
+    const exported = (await createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
+      fetch: queuedFetch(Response.json({ artifacts: [] })).fetch }).exportEvidence({ handle: subject, submissionId: "submission-1", limits: DEFAULT_EVIDENCE_LIMITS }));
+    expect(exported.artifacts).toEqual([]);
+    const fileHarness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
+      fetch: queuedFetch(Response.json({ artifacts: [] }), notReady(),
+        Response.json({ code: "REQUEST_CONFLICT", errMsg: "conflict" }, { status: 409 })).fetch });
+    const files = await fileHarness.exportEvidence({ handle: subject, submissionId: "submission-1", limits: DEFAULT_EVIDENCE_LIMITS });
+    await expect(files.readFile("/index.html")).rejects.toMatchObject({ retryable: true, status: 409, retryAfterMs: 3_000 });
+    await expect(files.readFile("/index.html")).rejects.toMatchObject({ retryable: false, status: 409 });
+    const reply = { handle: evaluator, submissionId: "evaluation-submission" };
+    await expect(harness.readFinalReply(reply)).rejects.toMatchObject({ retryable: true, status: 409 });
+    await expect(harness.readFinalReply(reply)).rejects.toMatchObject({ retryable: false, status: 409 });
+    await expect(harness.readFinalReply(reply)).rejects.toMatchObject({ retryable: false, status: 409 });
+  });
+
+  it("never retries a rejected evidence write, even one labelled EVIDENCE_NOT_READY", async () => {
+    const evidence = {
+      ref: { evidenceId: `sha256:${"a".repeat(64)}`, manifestSha256: "", exportedAt: "x" },
+      manifestBytes: new TextEncoder().encode("manifest"),
+      manifest: { artifacts: [], subjectInputs: [], trajectory: { parts: [] } },
+      readBlob: async () => new Response("").body!,
+    } as unknown as EvidenceBundleReader;
+    Object.assign(evidence.ref, { manifestSha256: createHash("sha256").update(evidence.manifestBytes).digest("hex") });
+    const events: Record<string, unknown>[] = [];
+    const rejected = Response.json({ code: "EVIDENCE_NOT_READY", errMsg: "not ready" },
+      { status: 409, headers: { "X-Request-ID": "sp-request-1", "cf-ray": "ray-1" } });
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: queuedFetch(rejected).fetch,
+      log: (event) => events.push(event) });
+    await expect(harness.importEvidence({ handle: evaluator, idempotencyKey: "k", evidence, root: "/evidence" }))
+      .rejects.toMatchObject({ retryable: false, status: 409, requestId: "sp-request-1", cfRay: "ray-1" });
+    expect(events).toEqual([
+      expect.objectContaining({ name: "evidence_file", direction: "write", status: 409, requestId: "sp-request-1", cfRay: "ray-1" }),
+      expect.objectContaining({
+        name: "evidence_import", evaluationId: "evaluation-1", filesStored: 0, filesTotal: 1, bytes: 8, outcome: "failed",
+        status: 409, requestId: "sp-request-1", cfRay: "ray-1", durationMs: expect.any(Number),
+      }),
+    ]);
+  });
+
+  it("streams evidence blobs to SP instead of buffering them, and rejects bytes that differ from the manifest", async () => {
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    const manifestBytes = new TextEncoder().encode("{}");
+    const evidenceWith = (stored: string) => ({
+      ref: { evidenceId: `sha256:${"a".repeat(64)}`, manifestSha256: sha("{}"), exportedAt: "x" },
+      manifestBytes,
+      manifest: {
+        artifacts: [{ path: "/a.txt", size: 5, mediaType: "text/plain", sha256: sha("hello") }],
+        subjectInputs: [],
+        trajectory: { parts: [] },
+      },
+      readBlob: async () => new Response(stored).body!,
+    }) as unknown as EvidenceBundleReader;
+    const bodies: unknown[] = [];
+    const duplex: unknown[] = [];
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(init?.body);
+      duplex.push((init as { duplex?: unknown } | undefined)?.duplex);
+      const bytes = new Uint8Array(await new Request(input, init).arrayBuffer());
+      return Response.json({ path: `/evidence${new URL(String(input)).searchParams.get("path")}`, size: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex") });
+    });
+    const events: Record<string, unknown>[] = [];
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, log: (event) => events.push(event) });
+    await harness.importEvidence({ handle: evaluator, idempotencyKey: "k", evidence: evidenceWith("hello"), root: "/evidence" });
+    expect(events).toEqual([{
+      name: "evidence_import", role: "evaluator", chatId: evaluator.chatId, samplingId: evaluator.samplingId, evaluationId: evaluator.evaluationId,
+      evidenceId: `sha256:${"a".repeat(64)}`, filesStored: 2, filesTotal: 2, bytes: 7, durationMs: expect.any(Number), outcome: "stored",
+    }]);
+    expect(bodies[0]).toBeInstanceOf(ReadableStream);
+    expect(duplex[0]).toBe("half");
+    fetch.mockClear();
+    await expect(harness.importEvidence({ handle: evaluator, idempotencyKey: "k", evidence: evidenceWith("HELLO"), root: "/evidence" }))
+      .rejects.toMatchObject({ name: "SpHarnessError", retryable: false, message: "Evidence bytes do not match the import contract for /artifacts/a.txt" });
+    const oversized = evidenceWith("hello");
+    Object.assign(oversized.manifest.artifacts[0]!, { size: 1 + EVAL_EVIDENCE_FILE_MAX_BYTES });
+    fetch.mockClear();
+    await expect(harness.importEvidence({ handle: evaluator, idempotencyKey: "k", evidence: oversized, root: "/evidence" }))
+      .rejects.toMatchObject({ retryable: false });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("bounds every evidence file, trajectory parts included, by SP's file limit", () => {
+    expect(spEvidenceLimits(DEFAULT_EVIDENCE_LIMITS)).toEqual({ ...DEFAULT_EVIDENCE_LIMITS, maxFileBytes: EVAL_EVIDENCE_FILE_MAX_BYTES });
+    const smaller = { ...DEFAULT_EVIDENCE_LIMITS, maxFileBytes: 1_000 };
+    expect(spEvidenceLimits(smaller)).toEqual(smaller);
+  });
+
+  it("refuses, before writing anything, a bundle with a file larger than SP can import", async () => {
+    // Only a bundle stored under limits larger than SP's can hold such a part.
+    const evidence = {
+      ref: { evidenceId: `sha256:${"a".repeat(64)}`, manifestSha256: "b".repeat(64), exportedAt: "x" },
+      manifestBytes: new TextEncoder().encode("{}"),
+      manifest: {
+        artifacts: [{ path: "/a.txt", size: 5, mediaType: "text/plain", sha256: "c".repeat(64) }],
+        subjectInputs: [],
+        trajectory: { parts: [{ sha256: "d".repeat(64), size: 1, events: 1 }, { sha256: "e".repeat(64), size: EVAL_EVIDENCE_FILE_MAX_BYTES + 1, events: 1 }] },
+      },
+      readBlob: async () => new Response("").body!,
+    } as unknown as EvidenceBundleReader;
+    const fetch = vi.fn(async () => new Response(null, { status: 500 }));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    await expect(harness.importEvidence({ handle: evaluator, idempotencyKey: "k", evidence, root: "/evidence" })).rejects.toMatchObject({
+      name: "SpHarnessError",
+      retryable: false,
+      message: `Evidence file /trajectory/events-000002.jsonl is ${EVAL_EVIDENCE_FILE_MAX_BYTES + 1} bytes, above SP's ${EVAL_EVIDENCE_FILE_MAX_BYTES}-byte evidence file limit; the bundle cannot be imported`,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("Eval SP Submission observation after a dropped socket", () => {
+  function sockets() {
+    const opened: FakeSocket[] = [];
+    const openWebSocket = vi.fn((_url: string, _headers: Readonly<Record<string, string>>) => {
+      const socket = new FakeSocket();
+      opened.push(socket);
+      return socket as unknown as WebSocket;
+    });
+    return { opened, openWebSocket };
+  }
+
+  it("reads the known Submission by ID and reconnects the same URL while it is still running", async () => {
+    const { opened, openWebSocket } = sockets();
+    const events: Record<string, unknown>[] = [];
+    const { fetch, requests } = queuedFetch(Response.json(receipt("running")), Response.json(receipt("running")));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, openWebSocket,
+      log: (event) => events.push(event) });
+    const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
+    await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
+    opened[0]!.close();
+    await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledTimes(2));
+    opened[1]!.sendStatus(receipt("completed"));
+    await expect(waiting).resolves.toMatchObject({ status: "completed" });
+    expect(openWebSocket.mock.calls[1]![0]).toBe(openWebSocket.mock.calls[0]![0]);
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([BY_KEY_PATH, BY_ID_PATH]);
+    expect(events.map((event) => event.name)).toEqual(["ws_open", "ws_close", "ws_inspect", "ws_reconnect", "ws_open", "submission_terminal"]);
+    expect(events[2]).toMatchObject({ outcome: "running", submissionId: "submission-1" });
+    expect(JSON.stringify(events)).not.toContain("secret");
+  });
+
+  it("ends observation when SP no longer has the known Submission, without an operation-key fallback", async () => {
+    const { opened, openWebSocket } = sockets();
+    const { fetch, requests } = queuedFetch(
+      Response.json(receipt("running")),
+      Response.json({ code: "REQUEST_NOT_FOUND", errMsg: "Submission not found" }, { status: 404 }),
+    );
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, openWebSocket });
+    const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
+    await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
+    opened[0]!.close();
+    await expect(waiting).rejects.toBeInstanceOf(AgentHandleNotFoundError);
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([BY_KEY_PATH, BY_ID_PATH]);
+    expect(openWebSocket).toHaveBeenCalledOnce();
+  });
+
+  it("ends with a retryable 'status unconfirmed' error naming the last status read", async () => {
+    const openWebSocket = vi.fn(() => {
+      const socket = new FakeSocket();
+      queueMicrotask(() => socket.close());
+      return socket as unknown as WebSocket;
+    });
+    const { fetch } = spFetch(() => Response.json(receipt("running")));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, openWebSocket });
+    const failure = await harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ name: "SpHarnessError", retryable: true });
+    expect((failure as Error).message).toBe("Submission submission-1 status unconfirmed after 3 connections: "
+      + "Submission WebSocket closed before terminal status (code 1006); last status read: running");
+    expect(openWebSocket).toHaveBeenCalledTimes(3);
+
+    const failing = spFetch((request) => new URL(request.url).pathname === BY_KEY_PATH
+      ? Response.json(receipt("running")) : new Response(null, { status: 503 }));
+    const unavailable = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: failing.fetch, openWebSocket });
+    await expect(unavailable.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" }))
+      .rejects.toMatchObject({ retryable: true, message: expect.stringMatching(/status unconfirmed .* last status read: HTTP 503$/u) });
+  });
+
+  it("does not wait for a terminal fact when the known Submission is replaced", async () => {
+    const { opened, openWebSocket } = sockets();
+    const { fetch } = queuedFetch(Response.json(receipt("running")), Response.json(receipt("running", "submission-2")));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, openWebSocket });
+    const waiting = harness.waitForSubmission({ handle: subject, idempotencyKey: "execution:sampling-1" });
+    await vi.waitFor(() => expect(openWebSocket).toHaveBeenCalledOnce());
+    opened[0]!.close();
+    await expect(waiting).rejects.toMatchObject({ retryable: false });
   });
 });

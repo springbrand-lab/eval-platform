@@ -149,6 +149,32 @@ describe("Agent resource and trajectory categories", () => {
     } finally { await view.unmount(); }
   });
 
+  it("counts only active stage statuses as in progress", async () => {
+    const base = metricSummary(resourceStatistics(), resourceStatistics());
+    const summary = {
+      ...base,
+      execution: {
+        ...base.execution,
+        records: 13,
+        terminalRecords: 0,
+        statuses: { queued: 8, starting: 2, running: 3, retrying: 0, succeeded: 0, failed: 0, cancelled: 0 },
+      },
+      evaluation: {
+        ...base.evaluation,
+        records: 13,
+        terminalRecords: 0,
+        statuses: { queued: 8, starting: 2, running: 3, retrying: 0, succeeded: 0, failed: 0, cancelled: 0 },
+      },
+    };
+    const view = await render(<SummaryCards summary={summary} />);
+    try {
+      expect(view.container.textContent).toContain("执行中 5");
+      expect(view.container.textContent).not.toContain("执行中 13");
+      expect(view.container.textContent).toContain("评估中 5");
+      expect(view.container.textContent).not.toContain("评估中 13");
+    } finally { await view.unmount(); }
+  });
+
   it("puts output details before drill-down results and collapsed resource statistics", async () => {
     const summary = metricSummary(fixture(), resourceStatistics());
     const view = await render(<SummaryCards summary={summary}><h2>下一级实验结果</h2></SummaryCards>);
@@ -165,6 +191,37 @@ describe("Agent resource and trajectory categories", () => {
       expect(resources?.textContent).toContain("模型 未获得");
       expect(resources?.textContent).toContain("缓存命中率");
       expect(resources?.textContent).toContain("41.2%");
+    } finally { await view.unmount(); }
+  });
+
+  it("explains failed, unfinalized and pending resource collection instead of only 未获得", async () => {
+    const statistics = resourceStatistics({ coverage: "partial", collections: { collected: 3, pending: 0, failed: 2, uncollected: 0, unsubmitted: 0, finalized: 1 } });
+    const view = await render(<ResourceMetrics statistics={statistics} resourcesPending />);
+    try {
+      const notes = view.container.querySelector('[data-testid="resource-collection-notes"]')!;
+      expect([...notes.children].map((item) => item.textContent)).toEqual(["补采资源中", "资源采集失败 2 个", "2 个资源快照未定稿，数值可能不完整"]);
+    } finally { await view.unmount(); }
+  });
+
+  it("shows no collection notes for complete resources and keeps them in the summary header", async () => {
+    const complete = await render(<ResourceMetrics statistics={resourceStatistics()} />);
+    try { expect(complete.container.querySelector('[data-testid="resource-collection-notes"]')).toBeNull(); }
+    finally { await complete.unmount(); }
+    const partial = resourceStatistics({ collections: { collected: 1, pending: 2, failed: 0, uncollected: 1, unsubmitted: 0, finalized: 0 } });
+    const view = await render(<SummaryCards summary={metricSummary(partial, resourceStatistics())} />);
+    try {
+      const notes = view.container.querySelectorAll('[data-testid="resource-collection-notes"]');
+      expect(notes[0]?.closest("button")).not.toBeNull();
+      expect([...notes[0]!.children].map((item) => item.textContent)).toEqual(["补采资源中 2 个", "1 个资源尚未采集", "1 个资源快照未定稿，数值可能不完整"]);
+    } finally { await view.unmount(); }
+  });
+
+  it("shows the Agent stage hint and resource retry in the Agent panel", async () => {
+    const agent = { ...agentMetric(resourceStatistics()), stage: { status: "succeeded", resourcesPending: { deadline: "2026-01-01T00:10:00.000Z" } } } as Parameters<typeof AgentPanel>[0]["agent"];
+    const view = await render(<AgentPanel title="执行 Agent" agent={agent} />);
+    try {
+      expect(view.container.querySelector('[data-testid="stage-hint"]')?.textContent).toBe("补采资源中");
+      expect(view.container.querySelector('[data-testid="resource-collection-notes"]')?.textContent).toContain("补采资源中");
     } finally { await view.unmount(); }
   });
 });

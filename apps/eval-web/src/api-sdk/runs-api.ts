@@ -1,6 +1,7 @@
+import type { RecollectTarget } from "@eval-platform/eval-contracts";
 import { api, enc } from "./client";
 import type {
-  EvaluationRecord, RunHandle, RunOperation, RunPreview, RunSnapshot, RunTargetSelector, RunTargets,
+  EvaluationRecord, RunEvaluation, RunHandle, RunOperation, RunPreview, RunSnapshot, RunTargetSelector, RunTargets,
   Sampling, ScoreSyncSummary,
 } from "./types";
 
@@ -20,7 +21,7 @@ export const submitRun = (projectId: string, input: {
 export const getProjectRun = (projectId: string, runId: string, signal?: AbortSignal) =>
   api.get<{ run: RunSnapshot }>(`${base(projectId)}/${enc(runId)}`, { signal });
 export const listRunEvaluations = (projectId: string, runId: string, signal?: AbortSignal) =>
-  api.get<{ evaluations: EvaluationRecord[] }>(`${base(projectId)}/${enc(runId)}/evaluations`, { signal });
+  api.get<{ evaluations: RunEvaluation[] }>(`${base(projectId)}/${enc(runId)}/evaluations`, { signal });
 export const stopRun = (projectId: string, runId: string) =>
   api.post<{ runId: string; stopRequested: true }>(`${base(projectId)}/${enc(runId)}/stop`);
 export const syncRunScores = (projectId: string, runId: string) =>
@@ -32,5 +33,5 @@ export const listSamplingEvaluations = (samplingId: string, signal?: AbortSignal
 export const getEvaluation = (evaluationId: string, signal?: AbortSignal) =>
   api.get<EvaluationRecord>(`/api/evaluations/${enc(evaluationId)}`, { signal });
 
-export const recollectResult = (projectId: string, kind: "samplings" | "evaluations", id: string) =>
-  api.post<{ runId: string; queued: boolean }>(`/api/projects/${enc(projectId)}/${kind}/${enc(id)}/collect`);
+export const recollectResult = (projectId: string, kind: "samplings" | "evaluations", id: string, target: RecollectTarget) =>
+  api.post<{ runId: string; queued: boolean }>(`/api/projects/${enc(projectId)}/${kind}/${enc(id)}/collect`, { target });

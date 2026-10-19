@@ -4,7 +4,8 @@ import type { Fetch } from "../sp/http.js";
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const EMPTY_SHA256 = createHash("sha256").update("").digest("hex");
-const REQUEST_TIMEOUT_MS = 120_000;
+/** One request moves a whole blob (up to SP's per-file evidence limit) in either direction. */
+const REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 export interface R2EvidenceConfig {
   /** The account's S3 endpoint origin, such as `https://<account>.r2.cloudflarestorage.com`. */

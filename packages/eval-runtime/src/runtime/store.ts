@@ -115,11 +115,20 @@ export interface RuntimeStore {
   getSamplings(samplingIds: readonly string[]): Promise<readonly (SamplingState | null)[]>;
 }
 
+/**
+ * A stop request not yet finalized. Once finalized, a stopped Run only becomes active again through
+ * a manual output recollection, which dispatches no Agent work.
+ */
+export function isRunStopPending(run: Pick<RuntimeRunRecord, "stopRequested" | "stopFinalized">): boolean {
+  return run.stopRequested === true && run.stopFinalized !== true;
+}
+
 export interface RuntimeRecoveryStore {
   /** True while a stage is unfinished or a stop request is not yet finalized. */
   isRunActive(runId: string): Promise<boolean>;
-  isRunStopRequested(runId: string): Promise<boolean>;
-  /** Persist a system stop for an active Run whose scheduling budget is exhausted. */
+  /** The persisted form of `isRunStopPending`. */
+  isRunStopPending(runId: string): Promise<boolean>;
+  /** Persist a system stop for an active Run whose scheduling budget is exhausted, reopening a finalized one. */
   requestRunStop(runId: string): Promise<void>;
   markRunStopFinalized(runId: string): Promise<boolean>;
 }
@@ -165,6 +174,7 @@ export async function persistRuntimeRecord<TRecord extends SamplingState | Evalu
           operation: "persistence",
           failureKind: details.failureKind,
           attemptNumber,
+          error: details.message,
         });
       } catch (decisionError) {
         throw new RuntimeRecordPersistenceError(

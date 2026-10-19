@@ -215,7 +215,7 @@ Runtime 只用 Project 计划中冻结副本的 `AgentConfigRef` 调用 Eval SP�
 
 ### 4.5 恢复、重试与证据
 
-Worker `resume(runId)` 先读取 Run，再读取 Project 计划并核对 Run 保存的计划摘要（不一致直接拒绝），然后读取目标记录；已完成阶段跳过，未完成阶段继续。Chat 初始化、Submission 校准、资源收集和重启使用稳定操作身份；响应丢失先按原 key 校准，不创建第二个 Chat 或第二次 Submission。重启增加 Attempt，不增加 Sampling。`retryPolicy.maxRestarts` 只控制 Agent 重启；创建、初始化、提交校准、状态读取、产物/证据、资源读取、持久化和停止调用由 Runtime 固定重试 7 次，使用 250ms 初始退避和 10 秒上限。
+Worker `resume(runId)` 先读取 Run，再读取 Project 计划并核对 Run 保存的计划摘要（不一致直接拒绝），然后读取目标记录；已完成阶段跳过，未完成阶段继续。Chat 初始化、Submission 校准、资源收集和重启使用稳定操作身份；响应丢失先按原 key 校准，不创建第二个 Chat 或第二次 Submission。重启增加 Attempt，不增加 Sampling。`retryPolicy.maxRestarts` 只控制 Agent 重启；创建、初始化、提交校准、状态读取、产物/证据、资源读取、持久化和停止调用由 Runtime 固定重试 10 次，使用 250ms 初始退避和 10 秒上限。
 
 每个 Subject 和 Evaluator 都保存产物和完整轨迹引用；Subject 失败也收集可用证据。证据收集未完成时记录 `evidencePending`，恢复只补收集，不重复提交。调度与停止见[架构方案](architecture.md#run-调度与停止)。
 

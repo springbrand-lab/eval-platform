@@ -29,13 +29,14 @@ async function mount(readFile: ReadPreviewFile, path = "/pages/index.html") {
   return { ...view, cleanup: async () => { await view.unmount(); client.clear(); } };
 }
 
-it("renders HTML with nested CSS, images and scripts through the bound reader", async () => {
+it("renders HTML with nested CSS, images and scripts of its Website through the bound reader", async () => {
+  // The page's directory roots its Website: `../outside.css` is above it and never read.
   const files = new Map([
-    ["/pages/index.html", textBlob('<link rel="stylesheet" href="../css/main.css"><img src="../img/logo.svg"><script src="../js/app.js"></script>')],
-    ["/css/main.css", textBlob('body{background:url(../img/background.png)}', "text/css")],
-    ["/img/logo.svg", textBlob('<svg xmlns="http://www.w3.org/2000/svg"/>', "image/svg+xml")],
-    ["/img/background.png", textBlob("IMAGE", "image/png")],
-    ["/js/app.js", textBlob('document.body.dataset.loaded="true";', "application/javascript")],
+    ["/pages/index.html", textBlob('<link rel="stylesheet" href="css/main.css"><link rel="stylesheet" href="../outside.css"><img src="img/logo.svg"><script src="js/app.js"></script>')],
+    ["/pages/css/main.css", textBlob('body{background:url(../img/background.png)}', "text/css")],
+    ["/pages/img/logo.svg", textBlob('<svg xmlns="http://www.w3.org/2000/svg"/>', "image/svg+xml")],
+    ["/pages/img/background.png", textBlob("IMAGE", "image/png")],
+    ["/pages/js/app.js", textBlob('document.body.dataset.loaded="true";', "application/javascript")],
   ]);
   const read = vi.fn<ReadPreviewFile>(async (path) => {
     const value = files.get(path);
@@ -44,7 +45,7 @@ it("renders HTML with nested CSS, images and scripts through the bound reader", 
   });
   const view = await mount(read);
   try {
-    await vi.waitFor(() => expect(document.querySelector("iframe")?.getAttribute("srcdoc")).toContain("data:text/javascript;charset=utf-8;base64,"));
+    await vi.waitFor(() => expect(document.querySelector("iframe")?.getAttribute("srcdoc")).toContain(`;base64,${btoa('document.body.dataset.loaded="true";')}`));
     expect(read.mock.calls.map(([path]) => path).sort()).toEqual([...files.keys()].sort());
     expect(document.querySelector("iframe")?.getAttribute("sandbox")).toBe("allow-scripts");
     expect(document.querySelector("a[download]")?.getAttribute("download")).toBe("index.html");

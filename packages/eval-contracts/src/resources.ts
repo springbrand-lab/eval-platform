@@ -29,6 +29,28 @@ export interface AgentResourceSnapshot {
   readonly usageEvents: readonly AgentResourceFact[];
   readonly telemetryEvents: readonly AgentResourceFact[];
   readonly billingSettlements: readonly AgentResourceFact[];
+  /** SP's own explanation of why `finalized` is false; diagnostic only, never a second completeness signal. */
+  readonly readiness?: AgentResourceReadiness;
+}
+
+export interface AgentResourceReadiness {
+  readonly receiptTerminal: boolean;
+  readonly stateUnreadable: boolean;
+  readonly pendingTelemetryEvents: number;
+  readonly pendingRuntimeEvents: number;
+  readonly actionCharges: {
+    readonly complete: boolean;
+    readonly unsettledExecutions: number;
+    readonly missingExecutionIds: number;
+  };
+}
+
+/** Whether SP has finalized a snapshot, without its events; Runtime waits on this before downloading. */
+export interface AgentResourceReadinessReport {
+  readonly scope: SubmittedAgentResourceScope;
+  readonly observedAt: string;
+  readonly finalized: boolean;
+  readonly readiness: AgentResourceReadiness;
 }
 
 export type AgentResourceCollection =

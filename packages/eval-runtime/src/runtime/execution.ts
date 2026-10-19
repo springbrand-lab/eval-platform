@@ -1,29 +1,42 @@
 import type {
+  EvidenceExportProgress,
+  EvidenceExportState,
   ExecutionAttempt,
   ExecutionOutput,
   HarnessConfig,
+  RecoveryPasses,
   RetryPolicy,
   Sampling,
   TrajectoryRef,
 } from "@eval-platform/eval-contracts";
-import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
+import {
+  EVIDENCE_EXPORT_MAX_PASSES,
+  isPendingSamplingStatus,
+  isTerminalAgentStatus,
+} from "@eval-platform/eval-contracts";
 import { dataInputSchema } from "@eval-platform/eval-dataset";
 import type { AgentHandle } from "../harness/model.js";
 
 import { persistRuntimeRecord, readStageFailure } from "./store.js";
-import { RuntimeRecordPersistenceError } from "./errors.js";
+import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 import type { RuntimeSamplingContext } from "./model.js";
 import {
   AgentOperationError,
   ConfirmedSubmissionFailure,
+  SubmissionStatusError,
   applyAttemptPatch,
   collectOutputWithRetry,
   describeAgentError,
   reportError,
   runAgentLifecycle,
+  withContext,
   withExecutionStatus,
   type StageDependencies,
 } from "./agent-lifecycle.js";
+import { executionAgentEnded, failedPass, unconfirmedObservation, withRecoveryBookkeeping } from "./recovery.js";
+import { refreshFinishedStage } from "./resource-refresh.js";
+
+const EVIDENCE_EXPORT_FAILED = "evidence export failed";
 
 export interface ExecuteSamplingInput {
   readonly context: RuntimeSamplingContext;
@@ -32,14 +45,15 @@ export interface ExecuteSamplingInput {
 }
 
 export async function executeSampling(
-  dependencies: StageDependencies,
+  stageDependencies: StageDependencies,
   input: ExecuteSamplingInput,
 ): Promise<RuntimeSamplingContext> {
+  const dependencies = withContext(stageDependencies, { stage: "execution", samplingId: input.context.state.samplingId });
   const subjectHarness = input.harnessConfig;
   const harnessRuntime = subjectHarness.runtime;
   const { sample } = input.context;
   let current = input.context.state;
-  const retryController = dependencies.createRetryController(input.retryPolicy);
+  const retryController = dependencies.createRetryController(input.retryPolicy, dependencies.log);
   let observedOutput: ExecutionOutput | undefined;
 
   const subjectHandle = (chatId: string): AgentHandle => ({
@@ -60,33 +74,50 @@ export async function executeSampling(
     }),
   });
 
+  /** Saved export progress of exactly this Submission; progress of any other Submission is never reused. */
+  const exportStateOf = (submissionId: string): EvidenceExportState | undefined => (
+    current.evidenceExport?.submissionId === submissionId ? current.evidenceExport : undefined
+  );
+
   /**
    * A succeeded execution is evaluable only once its artifacts and complete trajectory are frozen
    * in an evidence bundle; the bundle's trajectory then replaces the framework-local reference.
-   * Export shares the execution transient retry policy.
+   * Each stored file and trajectory part is saved as progress first, so a retry reads only what is missing.
    */
-  const freezeEvidence = (chatId: string, output: ExecutionOutput): Promise<ExecutionOutput> => collectOutputWithRetry({
-    stage: "execution",
-    retryController,
-    sleep: dependencies.sleep,
-    failureLabel: "execution evidence finalization failed",
-    collect: async () => {
-      const exported = await dependencies.harness.exportEvidence({
-        handle: subjectHandle(chatId),
-        limits: dependencies.evidenceLimits,
-        ...(input.context.sample.data.initialMaterials === undefined ? {} : { initialMaterials: input.context.sample.data.initialMaterials }),
-        ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
-      });
-      const evidence = await dependencies.evidence.save({ evidence: exported, limits: dependencies.evidenceLimits });
-      const trajectory: TrajectoryRef = {
-        trajectoryId: evidence.evidenceId,
-        source: "subject",
-        path: `evidence:${evidence.evidenceId}/trajectory/`,
-        contentHash: `sha256:${evidence.manifestSha256}`,
-      };
-      return { ...output, trajectory, evidence };
-    },
-  });
+  const freezeEvidence = (chatId: string, output: ExecutionOutput, submissionId: string, passes: number): Promise<ExecutionOutput> => (
+    collectOutputWithRetry({
+      stage: "execution",
+      retryController,
+      sleep: dependencies.sleep,
+      failureLabel: EVIDENCE_EXPORT_FAILED,
+      collect: async () => {
+        const exported = await dependencies.harness.exportEvidence({
+          handle: subjectHandle(chatId),
+          submissionId,
+          limits: dependencies.evidenceLimits,
+          ...(sample.data.initialMaterials === undefined ? {} : { initialMaterials: sample.data.initialMaterials }),
+          ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
+        });
+        const progress = exportStateOf(submissionId)?.progress;
+        const evidence = await dependencies.evidence.resume({
+          evidence: exported,
+          limits: dependencies.evidenceLimits,
+          ...(progress === undefined ? {} : { progress }),
+          onProgress: (next) => {
+            const { lastError } = exportStateOf(submissionId) ?? {};
+            return persist({ ...current, evidenceExport: { submissionId, passes, ...(lastError === undefined ? {} : { lastError }), progress: next } });
+          },
+        });
+        const trajectory: TrajectoryRef = {
+          trajectoryId: evidence.evidenceId,
+          source: "subject",
+          path: `evidence:${evidence.evidenceId}/trajectory/`,
+          contentHash: `sha256:${evidence.manifestSha256}`,
+        };
+        return { ...output, trajectory, evidence };
+      },
+    })
+  );
 
   const reportEvidenceError = (error: unknown): void => {
     const reported = new Error(
@@ -96,7 +127,7 @@ export async function executeSampling(
     reportError(dependencies.onError, reported);
   };
 
-  const persist = async (sampling: Sampling): Promise<void> => {
+  const persistRecord = async (sampling: Sampling): Promise<void> => {
     await persistRuntimeRecord({
       record: sampling,
       expected: current,
@@ -107,38 +138,85 @@ export async function executeSampling(
     });
     current = sampling;
   };
+  /** Writes this record with recovery flags derived from the Attempts it commits. */
+  const persist = (sampling: Sampling): Promise<void> => persistRecord({
+    ...sampling,
+    execution: withRecoveryBookkeeping(
+      sampling.execution, current.execution, sampling.executionAttempts, executionAgentEnded, dependencies,
+    ),
+  });
 
-  const persistPendingEvidence = async (output: ExecutionOutput, message: string): Promise<void> => {
-    await persist({
-      ...current,
-      execution: { status: "retrying", lastError: message, evidencePending: true },
-      ...executionEvidence(output),
-    });
-  };
-
-  const persistEvidenceFinalizationFailure = async (output: ExecutionOutput, error: unknown): Promise<void> => {
+  /**
+   * Ends one pass without a bundle, keeping the output and export progress. A transient failure
+   * keeps the execution pending until `EVIDENCE_EXPORT_MAX_PASSES` passes failed; the Subject
+   * Agent is never resubmitted or restarted for an export failure.
+   */
+  const persistEvidenceExportFailure = async (output: ExecutionOutput, error: unknown, submissionId: string,
+    previous: RecoveryPasses | undefined): Promise<void> => {
     const details = describeAgentError(error);
-    if (details.retryable) {
-      await persistPendingEvidence(output, details.message);
+    const { next, exhausted } = failedPass(previous, details.message, EVIDENCE_EXPORT_MAX_PASSES);
+    const { progress } = exportStateOf(submissionId) ?? {};
+    const evidenceExport: EvidenceExportState = { submissionId, ...next, ...(progress === undefined ? {} : { progress }) };
+    if (details.retryable && !exhausted) {
+      await persist({
+        ...current,
+        execution: { status: "retrying", lastError: details.message, evidencePending: true },
+        ...executionEvidence(output),
+        evidenceExport,
+      });
       return;
     }
+    const cause = error instanceof AgentOperationError && error.cause !== undefined ? describeAgentError(error.cause).message : details.message;
     await persist({
-      ...withExecutionStatus(current, "failed", details.message),
+      ...withExecutionStatus(current, "failed", details.retryable
+        ? `${EVIDENCE_EXPORT_FAILED} after ${next.passes} passes: ${cause}` : details.message),
       ...executionEvidence(output),
+      evidenceExport,
     });
   };
 
   const freezeEvidenceOrPersistFailure = async (
     chatId: string,
     output: ExecutionOutput,
+    submissionId: string | undefined,
   ): Promise<ExecutionOutput | undefined> => {
+    if (submissionId === undefined) {
+      throw new AgentOperationError("Subject evidence has no terminal Submission", false, "network");
+    }
+    // A manual recollection starts a fresh pass budget on the same progress.
+    const previous = current.execution.collectionPending ? undefined : exportStateOf(submissionId);
+    const started = Date.now();
+    const logExport = (outcome: "stored" | "failed", error?: unknown) => dependencies.log({
+      name: "evidence_export", submissionId, passes: (previous?.passes ?? 0) + 1, outcome,
+      ...exportSummary(exportStateOf(submissionId)?.progress), durationMs: Date.now() - started,
+      ...(error === undefined ? {} : { error: describeAgentError(error).message }),
+    });
     try {
-      return await freezeEvidence(chatId, output);
+      const frozen = await freezeEvidence(chatId, output, submissionId, previous?.passes ?? 0);
+      logExport("stored");
+      return frozen;
     } catch (error) {
-      await persistEvidenceFinalizationFailure(output, error);
+      if (error instanceof RuntimeRecordPersistenceError || error instanceof RuntimeRunStoppedError) throw error;
+      logExport("failed", error);
+      await persistEvidenceExportFailure(output, error, submissionId, previous);
       return undefined;
     }
   };
+
+  if (current.execution.resourcesPending && !isPendingSamplingStatus(current.execution.status)) {
+    await refreshFinishedStage(dependencies, {
+      stage: "execution",
+      samplingId: current.samplingId,
+      handle: current.subjectChatId === undefined ? undefined : subjectHandle(current.subjectChatId),
+      harnessConfig: subjectHarness,
+      retryController,
+      attempts: current.executionAttempts,
+      state: current.execution,
+      agentEnded: executionAgentEnded,
+      persist: (executionAttempts, execution) => persistRecord({ ...current, executionAttempts, execution }),
+    });
+    return { state: current, sample };
+  }
 
   try {
     if (current.execution.evidencePending || current.execution.collectionPending) {
@@ -157,12 +235,12 @@ export async function executeSampling(
       }
       const succeeded = attempt.status === "completed" && output.status === "succeeded";
       if (succeeded) {
-        const frozen = await freezeEvidenceOrPersistFailure(current.subjectChatId, output);
+        const frozen = await freezeEvidenceOrPersistFailure(current.subjectChatId, output, attempt.submissionId);
         if (frozen === undefined) return { state: current, sample };
         output = frozen;
       }
       await persist({
-        ...withExecutionStatus(current, succeeded ? "succeeded" : "failed",
+        ...withExecutionStatus(withoutEvidenceExport(current), succeeded ? "succeeded" : "failed",
           succeeded ? undefined : attempt.error ?? output.error ?? current.execution.lastError ?? "execution failed"),
         ...executionEvidence(output),
       });
@@ -191,6 +269,7 @@ export async function executeSampling(
       prompt: initialData.userPrompt,
       retryController,
       attempts: current.executionAttempts,
+      attemptId: (attempt) => attempt.executionAttemptId,
       createAttempt: ({ attemptId, attemptNumber, startedAt }) => ({
         executionAttemptId: attemptId,
         samplingId: current.samplingId,
@@ -245,10 +324,14 @@ export async function executeSampling(
       deferFailureStatus: true,
     });
 
-    const frozen = await freezeEvidenceOrPersistFailure(chatId, result.output);
+    if (dependencies.finalizingStop) {
+      await persist({ ...current, execution: { status: "retrying", evidencePending: true }, ...executionEvidence(result.output) });
+      return { state: current, sample };
+    }
+    const frozen = await freezeEvidenceOrPersistFailure(chatId, result.output, current.executionAttempts.at(-1)?.submissionId);
     if (frozen === undefined) return { state: current, sample };
     await persist({
-      ...withExecutionStatus(current, "succeeded"),
+      ...withExecutionStatus(withoutEvidenceExport(current), "succeeded"),
       ...executionEvidence(frozen),
     });
     return { state: current, sample };
@@ -263,6 +346,10 @@ export async function executeSampling(
     current = stored;
     if (current.execution.status === "succeeded") return { state: current, sample };
     const lastAttempt = failureBase.executionAttempts.at(-1);
+    if (error instanceof SubmissionStatusError && lastAttempt && lastAttempt.completedAt === undefined) {
+      await persist({ ...failureBase, execution: unconfirmedObservation("execution", failureBase.execution, details.message) });
+      return { state: current, sample };
+    }
     const terminalChatId = failureBase.subjectChatId && lastAttempt?.submissionId && lastAttempt.completedAt
       && isTerminalAgentStatus(lastAttempt.status) ? failureBase.subjectChatId : undefined;
     if (error instanceof RuntimeRecordPersistenceError && terminalChatId) throw error;
@@ -292,6 +379,31 @@ export async function executeSampling(
     });
     return { state: current, sample };
   }
+}
+
+/** Counts and sizes of one export's saved progress; never paths or bytes. */
+function exportSummary(progress: EvidenceExportProgress | undefined): Record<string, unknown> {
+  if (progress === undefined) return {};
+  const files = [...progress.artifacts, ...progress.subjectInputs];
+  const stored = files.filter((file) => file.sha256 !== undefined);
+  const { parts } = progress.trajectory;
+  const omitted: Record<string, number> = {};
+  for (const { reason } of progress.omitted) omitted[reason] = (omitted[reason] ?? 0) + 1;
+  return {
+    filesStored: stored.length,
+    filesTotal: files.length,
+    bytes: [...stored, ...parts].reduce((sum, { size }) => sum + size, 0),
+    trajectoryParts: parts.length,
+    trajectoryEvents: parts.reduce((sum, { events }) => sum + events, 0),
+    trajectoryDone: progress.trajectory.done === true,
+    omitted,
+  };
+}
+
+/** Once the bundle is stored, its reference replaces the export progress. */
+function withoutEvidenceExport(sampling: Sampling): Sampling {
+  const { evidenceExport: _progress, ...rest } = sampling;
+  return rest;
 }
 
 function executionEvidence(output: ExecutionOutput): Pick<Sampling, "artifacts" | "trajectory" | "evidence"> {

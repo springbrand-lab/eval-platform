@@ -184,7 +184,9 @@ Each Run is chosen per request: `operation` is `execution`, `pipeline` or `evalu
 | `POST /api/projects/{projectId}/runs/{runId}/stop` | No body / `202 {runId, stopRequested:true}` |
 | `POST /api/projects/{projectId}/runs/{runId}/score-sync` | No body / `{synced, failed, skipped}`; see [Run admission and stop](#run-admission-and-stop) |
 | `GET /api/projects/{projectId}/runs/{runId}` | `{run: RunSnapshot}` |
-| `GET /api/projects/{projectId}/runs/{runId}/evaluations` | `{evaluations: EvaluationRecord[]}` in the Run's admission order; list records omit optional `output` and attempt `resources` payloads (available from the Evaluation detail endpoint) |
+| `GET /api/projects/{projectId}/runs/{runId}/evaluations` | `{evaluations: (EvaluationRecord & { execution: SamplingStageState })[]}` in the Run's admission order; each row includes the linked Sampling execution status, while optional `output` and attempt `resources` payloads are omitted (available from the Evaluation detail endpoint) |
+| `POST /api/projects/{projectId}/samplings/{samplingId}/collect` | Optional `{target?: RecollectTarget}` (`"output" \| "resources"`; no body, a zero-byte body or `{}` mean `"output"`) / `202 {runId, queued}`; see [Manual recollection](#manual-recollection) |
+| `POST /api/projects/{projectId}/evaluations/{evaluationId}/collect` | Same body and result for one Evaluation |
 
 Expansion and replacement follow [Run admission](architecture.md#run-准入与独立评估). On the wire, evaluation `targets.projectSampleIds` is always empty and `targets.samplingIds` lists the Samplings to evaluate.
 
@@ -198,6 +200,7 @@ Expansion and replacement follow [Run admission](architecture.md#run-准入与�
 | Stop | `404 RUN_NOT_FOUND` (also for another owner's or a deleted Project); `409 PROJECT_NO_ACTIVE_RUN` |
 | Run, Run evaluations | `404 RUN_NOT_FOUND` |
 | Score re-sync | `404 RUN_NOT_FOUND`; `503 SCORE_SYNC_UNCONFIGURED` |
+| Collect | `404 PROJECT_NOT_FOUND`, `SAMPLING_NOT_FOUND`, `EVALUATION_NOT_FOUND`; `409 PROJECT_BUSY` (another Run is active), `RESULT_COLLECTION_CONFLICT` (stage or Attempt not eligible, Run stopped); `400 REQUEST_INVALID_JSON`, `415 REQUEST_UNSUPPORTED_MEDIA_TYPE`, `422 REQUEST_VALIDATION_FAILED` (unknown `target` or extra field) |
 
 ### Result reads
 
@@ -337,6 +340,7 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `PROJECT_BUSY` | 409 | New Run key or deletion while a Run is unfinished |
 | `PROJECT_IDEMPOTENCY_CONFLICT` | 409 | Creation key reused with a different body |
 | `PROJECT_NO_ACTIVE_RUN` | 409 | Stop of a finished Run without a stop request |
+| `RESULT_COLLECTION_CONFLICT` | 409 | Manual recollection of a stage, Attempt or Run that is not eligible |
 | `PROJECT_SOURCE_BRANCH_CONFLICT` | 409 | Project belongs to another Eval SP source branch |
 | `PROJECT_EVALUATION_PLAN_REQUIRED` | 409 | pipeline/evaluation on a Project without an evaluation plan |
 | `PROJECT_EVALUATION_PLAN_LOCKED` | 409 | Evaluation plan replacement after the first evaluating Run |
@@ -380,4 +384,11 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 项目结果工作台：ProjectOverview 额外返回去重的 projectSamples 行及每行当前 samplingIds，沿用同一事实快照和 Metrics 聚合口径，不由前端合计子层统计。默认是当前有效采样及评估结果，非历史运行总和；指定运行的范围仍由 runIds 控制。Web 将数据集作为筛选，按用例聚合、展开采样，单次采样直接打开结果抽屉；运行记录与配置分开展示。采样详情和抽屉共用结果组件，评估内容与产物优先、技术统计按需展开，文件预览复用已有只读 Workspace API 和公共渲染器，不读取 SP 私有存储。
 
 
-手动重新收集结果：POST /api/projects/{projectId}/samplings/{samplingId}/collect 与 /evaluations/{evaluationId}/collect 返回 202 {runId, queued}。仅接受归属匹配、最后 Attempt 为 completed 且有 Chat/Submission 的失败阶段；已成功为幂等无操作，重复待收集请求不重复入队，项目忙或 Run 已停止时拒绝。API 在 Project 行锁内设置 retrying + collectionPending，并原子提交原 Run 队列任务。Worker 只读取已有输出，不创建或重启 Agent/Attempt；执行侧必须归档产物和完整轨迹，评估侧保存原始结果并沿用校验和同步。失败清除待收集标记并保留错误，支持再次补收。补收执行不自动启动之前已取消的评估。当前运行查询允许旧 Run 因补收重新活跃，runSequence 仍是最大创建序号。
+## Manual recollection
+
+手动重新收集结果：POST /api/projects/{projectId}/samplings/{samplingId}/collect 与 /evaluations/{evaluationId}/collect 返回 202 {runId, queued}。请求体可选：`{"target": RecollectTarget}`，取值来自 `@eval-platform/eval-contracts` 的 `RECOLLECT_TARGETS`（`"output" | "resources"`）；无请求体、零字节请求体（不论 Content-Type）或 `{}` 均为 `"output"`。有字节时必须是 `application/json` 的 JSON 对象，且只允许 `target` 一个字段（否则 415/400/422）。两种目标都不创建、提交或重启 Agent/Attempt，都在 Project 行锁内更新阶段事实并原子提交原 Run 的 `collection` 队列任务（同一 Run 去重）。Run 停止尚未收尾时一律拒绝，停止已收尾时只接受 `output`。
+
+- `target: "output"`：仅接受归属匹配、最后 Attempt 为 completed 且有 Chat/Submission 的失败阶段；已成功为幂等无操作，重复待收集请求不重复入队，项目忙或 Run 停止尚未收尾时拒绝；停止已收尾的 Run 可补收输出（不重开停止），但不能补采资源。API 设置 retrying + collectionPending。Worker 只读取已有输出；执行侧必须归档产物和完整轨迹，评估侧保存原始结果并沿用校验和同步。失败清除待收集标记并保留错误，支持再次补收。补收执行不自动启动之前已取消的评估。
+- `target: "resources"`：只重新读取仍欠资源的已结束 Attempt 的原始资源快照，判断与 Runtime 刷新共用 `stageOwesResources`（任一已结束 Attempt——含失败的 Agent 和更早的 Attempt——的快照失败或 `finalized: false`）。接受状态为 succeeded 或 failed 且有 Chat 的阶段；API 只在阶段上写入 `resourcesPending: {deadline}`（`startResourceWait`：当前时间加 `RESOURCE_WAIT_MS`，10 分钟），不改变 `status`、`lastError` 或 Attempt。没有 Attempt 欠资源时为幂等无操作（`queued: false`）；阶段已带 `resourcesPending` 时只再次唤醒同一 Run（`queued: true`）。其他 Run 活跃时为 `409 PROJECT_BUSY`（所属 Run 仍活跃时可以加入），阶段未结束、没有 Chat 或 Run 已停止为 `409 RESULT_COLLECTION_CONFLICT`。Runtime 按 [Waiting for resources](eval-sp-harness-protocol.md#waiting-for-resources) 等待 SP 定稿，定稿或到期后只完整下载一次，然后清除该标记。
+
+Run 活跃度与 `isStageRecoveryPending()` 一致：除待处理状态外（`observationPending` 只出现在待处理状态上），未请求停止的 Run 中只要有成员带 `resourcesPending`（执行侧只计入创建该 Sampling 的 execution/pipeline Run，评估侧计入其 Evaluation 所在 Run），Run 就保持活跃，Worker 继续恢复它。停止请求后该标记被忽略，停止最终化只看状态，所以标记不会让 Run 永远活跃。当前运行查询允许旧 Run 因补收重新活跃，runSequence 仍是最大创建序号。

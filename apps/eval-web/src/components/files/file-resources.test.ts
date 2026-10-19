@@ -33,3 +33,12 @@ it.each(["图 #1?.png", "100%.png", "literal%20.png"])("reads the exact %s inven
   expect(result.unavailableResources).toBe(0);
   expect(result.document).toContain("data:image/png;base64,AQ==");
 });
+
+it("blocks a linked file above the preview's remaining byte budget without copying it", async () => {
+  const arrayBuffer = vi.fn(async () => new ArrayBuffer(4));
+  const read = vi.fn<ReadPreviewFile>(async () => ({ type: "image/png", size: 4, arrayBuffer }) as unknown as Blob);
+  const signal = new AbortController().signal;
+  await expect(fileResources(read, signal).resolve({ basePath: "/", reference: "a.png", purpose: "image" }, { signal, maxBytes: 3 }))
+    .resolves.toMatchObject({ status: "blocked" });
+  expect(arrayBuffer).not.toHaveBeenCalled();
+});

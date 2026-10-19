@@ -1,4 +1,4 @@
-import type { EvalRunResumer, RuntimeRecoveryStore } from "@eval-platform/eval-runtime";
+import type { EvalRunResumer, RunStopReporter, RuntimeRecoveryStore } from "@eval-platform/eval-runtime";
 import { errorDiagnostics } from "@springbrand/http/server";
 import type { JobWithMetadata, PgBoss } from "pg-boss";
 import type { Logger } from "pino";
@@ -7,9 +7,17 @@ import { RUN_QUEUE, type RunJob } from "./run-worker-queue.js";
 /** How often an active Run re-reads its persisted stop request, and repeats SP interrupts after one. */
 export const STOP_POLL_MS = 1_000;
 
+export interface RunRecoveryStore extends RuntimeRecoveryStore {
+  /**
+   * For a Run waiting only for resource readiness checks whose earliest one is still ahead, completes
+   * this job and schedules the next pass then; returns that time, or null for any other Run.
+   */
+  deferResourceCheck(runId: string, jobId: string): Promise<string | null>;
+}
+
 export interface RunJobHandlerOptions {
   readonly runtime: EvalRunResumer;
-  readonly store: RuntimeRecoveryStore;
+  readonly store: RunRecoveryStore;
   readonly logger: Logger;
 }
 
@@ -23,7 +31,7 @@ export interface EvalRunWorker {
   close(): Promise<void>;
 }
 
-/** Thrown while a Run stays active after a pass, so pg-boss retries its job with backoff. */
+/** Thrown while a Run keeps pending work after a pass, so pg-boss retries its job with backoff. */
 export class RunStillActiveError extends Error {
   constructor(readonly runId: string) {
     super(`Run ${runId} is still active`);
@@ -32,11 +40,13 @@ export class RunStillActiveError extends Error {
 }
 
 export interface RunJobAttempt {
-  /** The job has no retries left; an active Run is stopped and cleaned up instead of retried. */
-  readonly final: boolean;
+  readonly jobId: string;
+  readonly retryCount: number;
+  /** At `retryCount >= retryLimit` the job is final: an active Run with pending work is stopped and cleaned up instead of retried. */
+  readonly retryLimit: number;
 }
 
-/** Processes one Run job: resume, interrupt on a persisted stop, then finalize that stop. */
+/** Processes one Run job: resume, interrupt on a pending stop, then finalize that stop in the same pass. */
 export function createRunJobHandler(
   { runtime, store, logger }: RunJobHandlerOptions,
 ): (runId: string, attempt: RunJobAttempt) => Promise<void> {
@@ -45,7 +55,7 @@ export function createRunJobHandler(
       await pause(STOP_POLL_MS, settled);
       if (settled.aborted) return;
       try {
-        if (await store.isRunStopRequested(runId)) stop.abort();
+        if (await store.isRunStopPending(runId)) stop.abort();
       } catch (error) {
         logger.error({ runId, error: errorDiagnostics(error) }, "run_stop_check_failed");
       }
@@ -73,24 +83,40 @@ export function createRunJobHandler(
     }
   }
 
-  return async (runId, attempt) => {
+  function stopReporter(runId: string): RunStopReporter {
+    return {
+      finalizing: (states) => logger.info({ runId, states }, "run_stop_finalizing"),
+      stageStopped: (stage) => logger.info({ runId, ...stage }, "run_stage_stopped"),
+    };
+  }
+
+  return async (runId, { jobId, retryCount, retryLimit }) => {
     if (!await store.isRunActive(runId)) return;
-    if (!await store.isRunStopRequested(runId)) {
+    const final = retryCount >= retryLimit;
+    const stopPending = await store.isRunStopPending(runId);
+    logger.info({ runId, jobId, retryCount, retryLimit, final, stopPending }, "run_job_start");
+    if (!stopPending) {
       try {
         await resumeUntilStopped(runId);
       } catch (error) {
         // The last attempt still cleans up: a failing pass must not leave the Project busy.
-        if (!attempt.final) throw error;
+        if (!final) throw error;
         logger.error({ runId, error: errorDiagnostics(error) }, "run_final_pass_failed");
       }
+      const startAfter = await store.deferResourceCheck(runId, jobId);
+      if (startAfter !== null) {
+        logger.info({ runId, startAfter }, "run_resource_check_scheduled");
+        return;
+      }
     }
-    if (attempt.final && await store.isRunActive(runId) && !await store.isRunStopRequested(runId)) {
+    if (final && await store.isRunActive(runId) && !await store.isRunStopPending(runId)) {
       logger.warn({ runId }, "run_retry_budget_exhausted");
       await store.requestRunStop(runId);
     }
-    if (await store.isRunStopRequested(runId)) {
-      await runtime.stop(runId);
-      await store.markRunStopFinalized(runId);
+    if (await store.isRunStopPending(runId)) {
+      await runtime.stop(runId, stopReporter(runId));
+      const finalized = await store.markRunStopFinalized(runId);
+      logger[finalized ? "info" : "warn"]({ runId, finalized }, "run_stop_finalized");
     }
     if (await store.isRunActive(runId)) throw new RunStillActiveError(runId);
   };
@@ -101,9 +127,9 @@ export async function startEvalRunWorker(options: EvalRunWorkerOptions): Promise
   const handle = createRunJobHandler(options);
   const work = { batchSize: 1, localConcurrency: options.concurrency, includeMetadata: true } as const;
   await boss.work(RUN_QUEUE, work, async (jobs: JobWithMetadata<RunJob>[]) => {
-    for (const { data: { runId }, retryCount, retryLimit } of jobs) {
+    for (const { id, data: { runId }, retryCount, retryLimit } of jobs) {
       try {
-        await handle(runId, { final: retryCount >= retryLimit });
+        await handle(runId, { jobId: id, retryCount, retryLimit });
       } catch (error) {
         if (error instanceof RunStillActiveError) logger.info({ runId }, "run_job_deferred");
         else logger.error({ runId, error: errorDiagnostics(error) }, "run_job_failed");

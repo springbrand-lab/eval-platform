@@ -17,6 +17,7 @@ import type {
 } from "@eval-platform/eval-contracts";
 import type { Data, Dataset } from "@eval-platform/eval-dataset";
 import type { ProjectSample, RunPreview } from "@eval-platform/eval-runtime";
+import type { ResourceStatistics } from "@eval-platform/eval-metrics";
 
 export type {
   AgentObservationRef,
@@ -57,6 +58,10 @@ export type {
   OutputFieldSummary,
   StageStatistics,
 } from "@eval-platform/eval-metrics";
+
+export type RunEvaluation = EvaluationRecord & Pick<Sampling, "execution">;
+
+export type ResourceCollections = ResourceStatistics["collections"];
 
 export interface Me {
   readonly id: string;
