@@ -121,7 +121,8 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   /** Required for, and only for, an Evaluator. */
   readonly evaluationId?: string;
   readonly harnessConfig: HarnessConfig;
-  readonly prompt: string;
+  /** Resolved once per submission operation, including when resuming a persisted Attempt. */
+  readonly prompt: string | (() => string);
   readonly retryController: RetryController;
   readonly attempts: readonly TAttempt[];
   readonly attemptId: (attempt: TAttempt) => string;
@@ -573,7 +574,7 @@ async function submitWithReconciliation<TAttempt extends AgentAttemptRecord, TOu
   const input = {
     handle,
     idempotencyKey,
-    prompt: options.prompt,
+    prompt: typeof options.prompt === "function" ? options.prompt() : options.prompt,
     ...runtimeOption(options.harnessConfig.runtime),
   };
   return retryAgentOperation({

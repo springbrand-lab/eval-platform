@@ -6051,6 +6051,7 @@ describe("evaluation result checking", () => {
     expect(harness.restartAgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       handle: expect.objectContaining({ role: "evaluator", chatId: evaluation.chatId }),
       idempotencyKey: `evaluation:${evaluation.samplingId}:restart:2`,
+      prompt: "Please complete the evaluation, then use the MCP tool to submit the evaluation result.",
     }));
     expect(sleep).toHaveBeenCalledWith(250);
     expect(harness.collectExecution).toHaveBeenCalledTimes(1);
@@ -6087,6 +6088,9 @@ describe("evaluation result checking", () => {
       })).toBeDefined();
     }
     expect(harness.restartAgent).toHaveBeenCalledTimes(maxRestarts);
+    for (const [input] of vi.mocked(harness.restartAgent).mock.calls) {
+      expect(input.prompt).toBe("Please complete the evaluation, then use the MCP tool to submit the evaluation result.");
+    }
     expect(harness.collectExecution).toHaveBeenCalledTimes(1);
     expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([250, 500, 1_000, 2_000].slice(0, maxRestarts));
     expect(log).toHaveBeenCalledWith(expect.objectContaining({
@@ -6119,6 +6123,10 @@ describe("evaluation result checking", () => {
     expect(evaluation.status.status).toBe("failed");
     expect(evaluation.attempts.map(({ status }) => status)).toEqual(["failed", "completed", "completed"]);
     expect(harness.restartAgent).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(harness.restartAgent).mock.calls.map(([input]) => input.prompt)).toEqual([
+      expect.stringContaining("Evaluate sample-1"),
+      "Please complete the evaluation, then use the MCP tool to submit the evaluation result.",
+    ]);
   });
 
   it("resumes an interrupted recovery backoff with the same persisted restart budget", async () => {
@@ -6160,7 +6168,9 @@ describe("evaluation result checking", () => {
       const recovered = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
       expect(recovered.status.status).toBe("succeeded");
       expect(recovered.attempts).toHaveLength(2);
-      expect(harness.restartAgent).toHaveBeenCalledOnce();
+      expect(harness.restartAgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        prompt: "Please complete the evaluation, then use the MCP tool to submit the evaluation result.",
+      }));
       expect(harness.importEvidence).toHaveBeenCalledOnce();
       expect(harness.collectExecution).toHaveBeenCalledOnce();
     } finally {
@@ -6168,6 +6178,38 @@ describe("evaluation result checking", () => {
       release();
       await task;
     }
+  });
+
+  it("keeps the resubmission reminder after a reminder Submission fails", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
+    vi.mocked(harness.restartAgent).mockResolvedValueOnce({
+      ...makeSubmission("failed", "failed-reminder"), retryable: true, error: "temporary Agent failure",
+    });
+    const runtime = createRuntime({
+      store, harness, sleep: async () => undefined,
+      plans: makePlans([makeSample("sample-1")], { evaluation: evaluationPlan({ retryPolicy: RETRY_TWO }) }),
+      results: {
+        submission: {
+          token: () => "t",
+          read: async () => vi.mocked(harness.restartAgent).mock.calls.length < 2
+            ? undefined : { path: "mcp:submit_evaluation", content: '{"score":8}', source: "submission" },
+        },
+        check: validScore,
+      },
+    });
+    const run = await runtime.submit(projectRequest("pipeline", "failed-resubmission-reminder"));
+
+    await runtime.resume(run.runId);
+
+    const evaluation = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
+    expect(evaluation.status.status).toBe("succeeded");
+    expect(evaluation.attempts.map(({ status }) => status)).toEqual(["completed", "failed", "completed"]);
+    expect(vi.mocked(harness.restartAgent).mock.calls.map(([input]) => input.prompt)).toEqual([
+      "Please complete the evaluation, then use the MCP tool to submit the evaluation result.",
+      "Please complete the evaluation, then use the MCP tool to submit the evaluation result.",
+    ]);
   });
 
   it("does not restart when MCP accepts the result while missing-score recovery is being recorded", async () => {
@@ -6366,6 +6408,10 @@ describe("evaluation result checking", () => {
     expect(vi.mocked(harness.restartAgent).mock.calls.filter(([call]) => call.handle.role === "evaluator"))
       .toHaveLength(DEFAULT_RETRY_POLICY.maxRestarts);
     expect(evaluation.attempts).toHaveLength(DEFAULT_RETRY_POLICY.maxRestarts + 1);
+    for (const [input] of vi.mocked(harness.restartAgent).mock.calls) {
+      expect(input.prompt).toContain("Evaluate sample-1");
+      expect(input.prompt).toContain("/output/result.json");
+    }
   });
 
   it("fails an invalid result and keeps it as evidence", async () => {

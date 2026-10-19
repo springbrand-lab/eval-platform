@@ -243,8 +243,12 @@ export async function evaluateSampling(
       chatId,
       evaluationId: currentEvaluation.evaluationId,
       harnessConfig: evaluatorHarness,
-      prompt: evaluatorPrompt(evalPrompt, submissionToken === undefined ? undefined
-        : { evaluationId: currentEvaluation.evaluationId, token: submissionToken }),
+      prompt: () => submissionToken !== undefined && currentEvaluation.attempts.some((attempt) => (
+        attempt.status === "completed" && attempt.error === RESULT_NOT_SUBMITTED
+      ))
+        ? "Please complete the evaluation, then use the MCP tool to submit the evaluation result."
+        : evaluatorPrompt(evalPrompt, submissionToken === undefined ? undefined
+          : { evaluationId: currentEvaluation.evaluationId, token: submissionToken }),
       retryController: {
         async decide(request) {
           if (request.operation === "restart") {
