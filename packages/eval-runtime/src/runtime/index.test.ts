@@ -6051,7 +6051,7 @@ describe("evaluation result checking", () => {
     expect(harness.restartAgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       handle: expect.objectContaining({ role: "evaluator", chatId: evaluation.chatId }),
       idempotencyKey: `evaluation:${evaluation.samplingId}:restart:2`,
-      prompt: "Please call the MCP tool to resubmit the evaluation result.",
+      prompt: "Please complete the evaluation, then use the MCP tool to submit the evaluation result.",
     }));
     expect(sleep).toHaveBeenCalledWith(250);
     expect(harness.collectExecution).toHaveBeenCalledTimes(1);
@@ -6089,7 +6089,7 @@ describe("evaluation result checking", () => {
     }
     expect(harness.restartAgent).toHaveBeenCalledTimes(maxRestarts);
     for (const [input] of vi.mocked(harness.restartAgent).mock.calls) {
-      expect(input.prompt).toBe("Please call the MCP tool to resubmit the evaluation result.");
+      expect(input.prompt).toBe("Please complete the evaluation, then use the MCP tool to submit the evaluation result.");
     }
     expect(harness.collectExecution).toHaveBeenCalledTimes(1);
     expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([250, 500, 1_000, 2_000].slice(0, maxRestarts));
@@ -6125,7 +6125,7 @@ describe("evaluation result checking", () => {
     expect(harness.restartAgent).toHaveBeenCalledTimes(2);
     expect(vi.mocked(harness.restartAgent).mock.calls.map(([input]) => input.prompt)).toEqual([
       expect.stringContaining("Evaluate sample-1"),
-      "Please call the MCP tool to resubmit the evaluation result.",
+      "Please complete the evaluation, then use the MCP tool to submit the evaluation result.",
     ]);
   });
 
@@ -6169,7 +6169,7 @@ describe("evaluation result checking", () => {
       expect(recovered.status.status).toBe("succeeded");
       expect(recovered.attempts).toHaveLength(2);
       expect(harness.restartAgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-        prompt: "Please call the MCP tool to resubmit the evaluation result.",
+        prompt: "Please complete the evaluation, then use the MCP tool to submit the evaluation result.",
       }));
       expect(harness.importEvidence).toHaveBeenCalledOnce();
       expect(harness.collectExecution).toHaveBeenCalledOnce();
@@ -6207,8 +6207,8 @@ describe("evaluation result checking", () => {
     expect(evaluation.status.status).toBe("succeeded");
     expect(evaluation.attempts.map(({ status }) => status)).toEqual(["completed", "failed", "completed"]);
     expect(vi.mocked(harness.restartAgent).mock.calls.map(([input]) => input.prompt)).toEqual([
-      "Please call the MCP tool to resubmit the evaluation result.",
-      "Please call the MCP tool to resubmit the evaluation result.",
+      "Please complete the evaluation, then use the MCP tool to submit the evaluation result.",
+      "Please complete the evaluation, then use the MCP tool to submit the evaluation result.",
     ]);
   });
 
