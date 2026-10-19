@@ -1,7 +1,7 @@
 import type { EvaluationRecord, RunPhase, RunPhases, RunSnapshot, SamplingStatus } from "@eval-platform/eval-contracts";
 import { isPendingSamplingStatus } from "@eval-platform/eval-contracts";
 import type { SamplingSnapshot } from "./model.js";
-import type { RuntimeRunRecord, SamplingState } from "./store.js";
+import { withoutRevision, type RuntimeRunRecord, type SamplingState } from "./store.js";
 
 export function currentRunPhase(records: readonly Pick<SamplingState, "samplingId" | "execution">[], phases: RunPhases): RunPhase {
   const firstPhase = phases[0];
@@ -80,6 +80,5 @@ export function toRunSnapshot(
 
 /** Detached public facts, without the Store revision. */
 export function toSamplingSnapshot(state: SamplingSnapshot & { readonly revision?: number }): SamplingSnapshot {
-  const { revision: _revision, ...snapshot } = state;
-  return structuredClone(snapshot);
+  return structuredClone(withoutRevision(state));
 }

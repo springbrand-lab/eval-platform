@@ -4,6 +4,7 @@ import type { Metrics } from "@eval-platform/eval-metrics";
 import type { EvalRunAdmission, EvalRunQueries } from "@eval-platform/eval-runtime";
 import type { Env as PinoEnv } from "hono-pino";
 import type { AgentConfigService } from "../agent-configs.js";
+import type { createPostgresResourceSnapshotReader } from "../db/attempt-resources.js";
 import type { createPostgresObservationReader } from "../db/observation.js";
 import type { createOutputSchemaCatalog } from "../db/output-schemas.js";
 import type { EvaluationSubmissionStore } from "../db/evaluation-submissions.js";
@@ -27,6 +28,7 @@ export interface OwnerServices {
     readRun(projectId: string, runId: string): Promise<ProjectRunView | null>;
   };
   readonly observations: ReturnType<typeof createPostgresObservationReader>;
+  readonly resourceSnapshots: ReturnType<typeof createPostgresResourceSnapshotReader>;
   readonly metrics: Metrics;
   readonly materialBundles: BundleCatalogs["materialBundles"];
   readonly sessionBundles: BundleCatalogs["sessionBundles"];

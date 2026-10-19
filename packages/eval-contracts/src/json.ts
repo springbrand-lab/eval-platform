@@ -88,3 +88,9 @@ export const jsonObjectInPlaceSchema: z.ZodType<JsonObject> = z.custom<JsonObjec
   (value) => isJsonObject(value) && readJsonValue(value, false) !== undefined,
   `Expected a JSON object. ${JSON_VALUE_MESSAGE}`,
 );
+
+/** An array of plain JSON objects, validated in place and returned as the original array; for raw resource facts. */
+export const jsonObjectArrayInPlaceSchema: z.ZodType<readonly JsonObject[]> = z.custom<readonly JsonObject[]>(
+  (value) => Array.isArray(value) && value.every(isJsonObject) && readJsonValue(value, false) !== undefined,
+  `Expected an array of JSON objects. ${JSON_VALUE_MESSAGE}`,
+);

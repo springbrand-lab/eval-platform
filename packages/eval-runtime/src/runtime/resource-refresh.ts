@@ -26,6 +26,7 @@ import {
   STOPPED_RESOURCES_ERROR,
   awaitResourceFinalization,
   collectResources,
+  failedResources,
   resourceScopeMatches,
   storedResourceScope,
 } from "./resources.js";
@@ -41,10 +42,16 @@ export interface FinishedStageRefresh<TAttempt extends AgentAttemptRecord> {
   readonly attempts: readonly TAttempt[];
   readonly state: SamplingStageState;
   readonly agentEnded: (attempt: TAttempt) => boolean;
-  /** Stores an Attempt's raw resource snapshot outside its stage record. */
-  readonly saveResourceSnapshot: (attempt: TAttempt, snapshot: AgentResourceSnapshot) => Promise<void>;
-  /** Writes exactly these Attempts and stage state; status, output and evidence stay unchanged. */
-  readonly persist: (attempts: readonly TAttempt[], state: SamplingStageState) => Promise<void>;
+  /**
+   * Writes exactly these Attempts and stage state; status, output and evidence stay unchanged. A
+   * downloaded raw snapshot of `collected.attempt` is stored in the same write.
+   */
+  readonly persist: (attempts: readonly TAttempt[], state: SamplingStageState, collected?: CollectedResources<TAttempt>) => Promise<void>;
+}
+
+export interface CollectedResources<TAttempt> {
+  readonly attempt: TAttempt;
+  readonly snapshot: AgentResourceSnapshot;
 }
 
 /**
@@ -79,9 +86,9 @@ export async function refreshFinishedStage<TAttempt extends AgentAttemptRecord>(
     const errors: string[] = [];
     for (const [index, original] of refresh.attempts.entries()) {
       if (!attemptOwesResources(original, refresh.agentEnded)) continue;
-      const save = async (attempt: TAttempt) => {
+      const save = async (attempt: TAttempt, snapshot?: AgentResourceSnapshot) => {
         attempts[index] = attempt;
-        await refresh.persist(attempts, refresh.state);
+        await refresh.persist(attempts, refresh.state, snapshot && { attempt: original, snapshot });
       };
       const { attempt, error } = await refreshAttempt(dependencies, refresh, handle, original, expired, save);
       attempts[index] = attempt;
@@ -116,9 +123,9 @@ export async function refreshFinishedStage<TAttempt extends AgentAttemptRecord>(
 function withResourceFailure<TAttempt extends AgentAttemptRecord>(
   attempt: TAttempt, agentEnded: (attempt: TAttempt) => boolean, collectedAt: string, error: string,
 ): TAttempt {
-  const scope = storedResourceScope(attempt.resources);
-  if (!attemptOwesResources(attempt, agentEnded) || attempt.resources?.status === "collected" || scope === undefined) return attempt;
-  return applyAttemptPatch(attempt, { resources: { status: "failed", scope, collectedAt, error } });
+  const resources = attempt.resources;
+  if (!attemptOwesResources(attempt, agentEnded) || resources === undefined || resources.status === "collected") return attempt;
+  return applyAttemptPatch(attempt, { resources: failedResources(resources, resources.scope, collectedAt, error) });
 }
 
 async function refreshAttempt<TAttempt extends AgentAttemptRecord>(
@@ -127,7 +134,7 @@ async function refreshAttempt<TAttempt extends AgentAttemptRecord>(
   handle: AgentHandle,
   original: TAttempt,
   expired: boolean,
-  save: (attempt: TAttempt) => Promise<void>,
+  save: (attempt: TAttempt, snapshot?: AgentResourceSnapshot) => Promise<void>,
 ): Promise<{ readonly attempt: TAttempt; readonly error?: string }> {
   const { stage, samplingId } = refresh;
   let attempt = original;
@@ -163,13 +170,13 @@ async function refreshAttempt<TAttempt extends AgentAttemptRecord>(
   const resources = await collectResources({
     source,
     current: attempt.resources!,
-    saveSnapshot: (snapshot) => refresh.saveResourceSnapshot(original, snapshot),
-    save: async (next) => {
+    exclusively: dependencies.resourceDownloads,
+    save: async (next, snapshot) => {
       attempt = applyAttemptPatch(attempt, {
         resources: next,
         ...(next.status === "collected" && attempt.submissionId === undefined ? { submissionId: next.summary.scope.submissionId } : {}),
       });
-      await save(attempt);
+      await save(attempt, snapshot);
     },
   });
   if (resources.status !== "pending" && resources.exhausted) {

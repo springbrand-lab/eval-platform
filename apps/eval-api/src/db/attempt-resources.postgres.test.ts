@@ -4,6 +4,8 @@ import { createMetrics, type MetricsFacts } from "@eval-platform/eval-metrics";
 import { and, eq } from "drizzle-orm";
 import { Pool, types } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { withoutRevision } from "@eval-platform/eval-runtime";
+import { createPostgresResourceSnapshotReader } from "./attempt-resources.js";
 import { createEvalDb } from "./client.js";
 import { createPostgresMetricsSource } from "./metrics.js";
 import { createPostgresProjectPlanReader } from "./project-plans.js";
@@ -44,37 +46,60 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     for (const { samplingId } of command.samplings) {
       const snapshot = rawSnapshot(samplingId, body);
       raw.set(samplingId, snapshot);
-      await store.saveResourceSnapshot({ samplingId, attemptId: samplingId }, snapshot);
       const original = (await store.getSampling(samplingId))!;
       expect(original.revision).toBe(0);
       const record = { ...original, execution: { status: "succeeded" as const }, executionAttempts: [{
         executionAttemptId: samplingId, samplingId, attemptNumber: 1, status: "completed" as const,
         resources: { status: "collected" as const, summary: summarizeResourceSnapshot(snapshot) },
       }] };
-      await store.updateSampling(record, original);
+      await store.updateSampling(record, original, { attemptId: samplingId, snapshot });
       await expect(store.getSampling(samplingId)).resolves.toEqual({ ...record, revision: 1 });
-      await expect(store.updateSampling(record, original)).rejects.toThrow(/changed before update/);
-      const { revision: _revision, ...facts } = record;
-      storedSamplings.push(facts);
+      await expect(store.updateSampling(record, original, { attemptId: samplingId, snapshot: rawSnapshot(samplingId, "stale") }))
+        .rejects.toThrow(/changed before update/);
+      storedSamplings.push(withoutRevision(record));
     }
-    for (const { evaluationId, samplingId } of command.evaluations) {
+    for (const { evaluationId } of command.evaluations) {
       const snapshot = rawSnapshot(evaluationId, body);
       raw.set(evaluationId, snapshot);
-      await store.saveResourceSnapshot({ samplingId, evaluationId, attemptId: evaluationId }, rawSnapshot(evaluationId, "replaced"));
-      await store.saveResourceSnapshot({ samplingId, evaluationId, attemptId: evaluationId }, snapshot);
       const original = (await store.getEvaluation(evaluationId))!;
-      const record = { ...original, status: { status: "succeeded" as const }, attempts: [{
+      const attempt = (resources: AgentResourceSnapshot) => ({
         evaluationAttemptId: evaluationId, evaluationId, attemptNumber: 1, status: "completed" as const,
-        resources: { status: "collected" as const, summary: summarizeResourceSnapshot(snapshot) },
-      }] };
-      await store.updateEvaluation(record, original);
-      const { revision: _revision, ...facts } = record;
-      storedEvaluations.push(facts);
+        resources: { status: "collected" as const, summary: summarizeResourceSnapshot(resources) },
+      });
+      const replaced = rawSnapshot(evaluationId, "replaced");
+      await store.updateEvaluation({ ...original, attempts: [attempt(replaced)] }, original, { attemptId: evaluationId, snapshot: replaced });
+      const first = (await store.getEvaluation(evaluationId))!;
+      const record = { ...first, status: { status: "succeeded" as const }, attempts: [attempt(snapshot)] };
+      await store.updateEvaluation(record, first, { attemptId: evaluationId, snapshot });
+      storedEvaluations.push(withoutRevision(record));
     }
     const rows = await database.db.select().from(attemptResources).where(eq(attemptResources.ownerUserId, owner));
     expect(rows).toHaveLength(4);
     for (const row of rows) expect(row.snapshot).toEqual(raw.get(row.recordId));
-    await expect(store.saveResourceSnapshot({ samplingId: "missing", attemptId: "a" }, rawSnapshot("missing", ""))).rejects.toThrow(/sampling/);
+
+    const [samplingId] = command.run.samplingIds;
+    const [evaluationId] = command.run.evaluationIds;
+    const reader = createPostgresResourceSnapshotReader(database.db, owner);
+    const read = async (stage: "execution" | "evaluation", recordId: string, attemptId = recordId, projectId = seeded.projectId) => {
+      const stream = await reader.open(projectId, stage, recordId, attemptId);
+      return stream && new Response(stream).text();
+    };
+    for (const [stage, id] of [["execution", samplingId!], ["evaluation", evaluationId!]] as const) {
+      const text = await read(stage, id);
+      expect(Buffer.byteLength(text!)).toBeGreaterThan(1 << 20);
+      expect(JSON.parse(text!)).toEqual(raw.get(id));
+    }
+    expect(await read("evaluation", samplingId!)).toBeNull();
+    expect(await read("execution", samplingId!, "other")).toBeNull();
+    expect(await read("execution", samplingId!, samplingId, "other-project")).toBeNull();
+    expect(await createPostgresResourceSnapshotReader(database.db, "someone-else").open(seeded.projectId, "execution", samplingId!, samplingId!)).toBeNull();
+    const cancelled = await reader.open(seeded.projectId, "execution", samplingId!, samplingId!);
+    await cancelled!.getReader().cancel();
+    expect(database.db.$client.idleCount).toBe(database.db.$client.totalCount);
+
+    const orphan = { stage: "evaluation" as const, recordId: samplingId!, attemptId: "orphan", ownerUserId: owner, samplingId: samplingId!,
+      evaluationId: null, snapshot: raw.get(samplingId!)!, metricSnapshot: raw.get(samplingId!)! };
+    await expect(database.db.insert(attemptResources).values(orphan)).rejects.toMatchObject({ cause: { constraint: "eval_attempt_resources_record_ck" } });
 
     const sizes: number[] = [];
     const parser = types.getTypeParser(3802, "text");
@@ -124,12 +149,11 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const body = "x".repeat(6_000_000);
     for (const { samplingId } of command.samplings) {
       const snapshot = rawSnapshot(samplingId, body);
-      await store.saveResourceSnapshot({ samplingId, attemptId: samplingId }, snapshot);
       const original = (await store.getSampling(samplingId))!;
       await store.updateSampling({ ...original, execution: { status: "succeeded" }, executionAttempts: [{
         executionAttemptId: samplingId, samplingId, attemptNumber: 1, status: "completed",
         resources: { status: "collected", summary: summarizeResourceSnapshot(snapshot) },
-      }] }, original);
+      }] }, original, { attemptId: samplingId, snapshot });
     }
     const script = `
       import { Pool } from 'pg';

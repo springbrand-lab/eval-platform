@@ -34,12 +34,12 @@ import type { ProjectPlanReader, ProjectSample } from "./model.js";
 import { createRetryController as createProductionRetryController, DEFAULT_RETRY_POLICY } from "./retry.js";
 import type {
   EvaluationState,
-  ResourceSnapshotTarget,
   RuntimeRunAdmission,
   RuntimeRunRecord,
   SamplingState,
   RuntimeStore,
 } from "./store.js";
+import { withoutRevision } from "./store.js";
 import { equalJson } from "@eval-platform/eval-contracts";
 import {
   RuntimeAdmissionConflictError,
@@ -101,9 +101,6 @@ type RuntimeDependencies = WithDefaultReporter<Omit<EvalRunResumerDependencies, 
   readonly plans?: TestPlans;
 };
 
-function withoutRevision({ revision: _revision, ...record }: EvaluationState): EvaluationRecord {
-  return structuredClone(record);
-}
 
 function createRunQueries(store: RuntimeStore, records: RunRecords): EvalRunQueries {
   return {
@@ -120,10 +117,10 @@ function createRunQueries(store: RuntimeStore, records: RunRecords): EvalRunQuer
     async getEvaluation(evaluationId) {
       const evaluation = await store.getEvaluation(evaluationId);
       if (!evaluation) throw new RuntimeEntityNotFoundError("evaluation", evaluationId);
-      return withoutRevision(evaluation);
+      return structuredClone(withoutRevision(evaluation));
     },
     async listEvaluations(samplingId) {
-      return (await store.listEvaluations(samplingId)).map(withoutRevision);
+      return (await store.listEvaluations(samplingId)).map((record) => structuredClone(withoutRevision(record)));
     },
   };
 }
@@ -320,7 +317,13 @@ function makeSample(projectSampleId: string, overrides: Partial<ProjectSample> =
 interface TestStore extends RuntimeStore {
   plans(): TestPlans;
   usePlans(plans: TestPlans): void;
-  resourceSnapshot(target: ResourceSnapshotTarget): AgentResourceSnapshot | undefined;
+  resourceSnapshot(target: SnapshotTarget): AgentResourceSnapshot | undefined;
+}
+
+interface SnapshotTarget {
+  readonly samplingId: string;
+  readonly evaluationId?: string;
+  readonly attemptId: string;
 }
 
 interface StoreOptions {
@@ -422,11 +425,15 @@ function makeStore(options: StoreOptions = {}): TestStore {
       if (evaluates) plans.lock();
       return { run, created: true } satisfies RuntimeRunAdmission;
     },
-    async updateEvaluation(record, expected) {
+    async updateEvaluation(record, expected, resources) {
       if (evaluations.get(record.evaluationId)?.revision !== expected.revision) {
         throw new RuntimeRecordConflictError("Evaluation changed before update");
       }
       evaluations.set(record.evaluationId, { ...record, revision: expected.revision + 1 });
+      if (resources) {
+        const { samplingId, evaluationId } = record;
+        resourceSnapshots.set(snapshotKey({ samplingId, evaluationId, attemptId: resources.attemptId }), resources.snapshot);
+      }
     },
     async getEvaluation(evaluationId) {
       return evaluations.get(evaluationId) ?? null;
@@ -437,11 +444,12 @@ function makeStore(options: StoreOptions = {}): TestStore {
     async listEvaluations(samplingId) {
       return [...evaluations.values()].filter((evaluation) => evaluation.samplingId === samplingId);
     },
-    async updateSampling(state, expected) {
+    async updateSampling(state, expected, resources) {
       if (samplings.get(state.samplingId)?.revision !== expected.revision) {
         throw new RuntimeRecordConflictError("Sampling changed before update");
       }
       samplings.set(state.samplingId, { ...state, revision: expected.revision + 1 });
+      if (resources) resourceSnapshots.set(snapshotKey({ samplingId: state.samplingId, attemptId: resources.attemptId }), resources.snapshot);
     },
     async getSampling(samplingId) {
       return samplings.get(samplingId) ?? null;
@@ -450,13 +458,10 @@ function makeStore(options: StoreOptions = {}): TestStore {
       return samplingIds.map((samplingId) => samplings.get(samplingId) ?? null);
     },
     resourceSnapshot: (target) => resourceSnapshots.get(snapshotKey(target)),
-    async saveResourceSnapshot(target, snapshot) {
-      resourceSnapshots.set(snapshotKey(target), snapshot);
-    },
   };
 }
 
-function snapshotKey({ samplingId, evaluationId, attemptId }: ResourceSnapshotTarget): string {
+function snapshotKey({ samplingId, evaluationId, attemptId }: SnapshotTarget): string {
   return `${samplingId}/${evaluationId ?? ""}/${attemptId}`;
 }
 
@@ -4267,7 +4272,7 @@ describe("raw resource persistence", () => {
     const run = await runtime.submit(projectRequest("pipeline", "cold-raw-query"));
     const completed = await waitForTerminal(runtime, run.runId);
     const originalSampling = await store.getSampling(run.samplingIds[0]!);
-    const originalEvaluation = withoutRevision((await store.getEvaluation(completed.evaluationIds[0]!))!);
+    const originalEvaluation = structuredClone(withoutRevision((await store.getEvaluation(completed.evaluationIds[0]!))!));
     const coldHarness = makeHarness();
     const cold = createAutoResumingRuntime({ harness: coldHarness, store });
 
@@ -4657,12 +4662,12 @@ describe("raw resource persistence", () => {
     const store = makeStore();
     const update = store.updateEvaluation.bind(store);
     let remainingFailures = 2;
-    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected) => {
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected, resources) => {
       if ((record.status.status === "succeeded" || record.status.status === "failed") && remainingFailures > 0) {
         remainingFailures -= 1;
         throw new Error("terminal persistence failed");
       }
-      await update(record, expected);
+      await update(record, expected, resources);
     });
     const onError = vi.fn();
     const runtime = createAutoResumingRuntime({ harness, store, onError });
@@ -4716,6 +4721,24 @@ describe("raw resource persistence", () => {
     await runtime.resume(run.runId);
     expect((await runtime.getRun(run.runId)).status).toBe("succeeded");
     expect(harness.submitAgent).toHaveBeenCalledOnce();
+  });
+
+  it("commits each raw snapshot in the same record write that marks it collected", async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => makeResources(input));
+    const store = makeStore();
+    const update = vi.spyOn(store, "updateSampling");
+    const runtime = createAutoResumingRuntime({ harness, store });
+    const run = await runtime.submit(projectRequest("execution", "snapshot-with-summary"));
+    await expect.poll(async () => (await runtime.getRun(run.runId)).status).toBe("succeeded");
+
+    const writes = update.mock.calls.filter(([, , resources]) => resources !== undefined);
+    expect(writes).toHaveLength(1);
+    const [state, , resources] = writes[0]!;
+    const attempt = state.executionAttempts.find((item) => item.executionAttemptId === resources!.attemptId)!;
+    expect(attempt.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(resources!.snapshot) });
+    expect(update.mock.calls.findIndex(([record]) => record.executionAttempts.some((item) => item.resources?.status === "collected")))
+      .toBe(update.mock.calls.indexOf(writes[0]!));
   });
 
   it("retains raw data when completed Agent output collection fails", async () => {

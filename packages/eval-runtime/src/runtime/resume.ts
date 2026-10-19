@@ -16,6 +16,7 @@ import { executeSampling } from "./execution.js";
 import type { EvalRunResumer, EvalRunResumerDependencies, RunStopReporter } from "./model.js";
 import { safeLog, type RuntimeContext, type RuntimeLog } from "./log.js";
 import { RunRecords, type RunStagePlans } from "./records.js";
+import { createExclusiveRunner } from "./resources.js";
 import { createRetryController, loggedRetryController, type RetryController } from "./retry.js";
 import { createAgentScheduler, createAgentTaskQueue } from "./scheduler.js";
 import { finishStoppedRun, interruptRun, type StopContext } from "./stop.js";
@@ -57,6 +58,7 @@ export class RunResumer implements EvalRunResumer {
       onError: this.#onError,
       log: this.#log,
       createRetryController: (policy, log) => loggedRetryController(this.#createRetryController(policy), log),
+      resourceDownloads: createExclusiveRunner(),
       ...(dependencies.scores === undefined ? {} : { scores: dependencies.scores }),
       ...(dependencies.results === undefined ? {} : { results: dependencies.results }),
     };

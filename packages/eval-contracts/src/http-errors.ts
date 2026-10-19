@@ -54,6 +54,7 @@ const errorDefinitions = {
   SAMPLING_NOT_FOUND: { status: 404, message: "Sampling not found" },
   SAMPLING_UNAVAILABLE: { status: 409, message: "Selected Sampling is unavailable for evaluation" },
   EVALUATION_NOT_FOUND: { status: 404, message: "Evaluation not found" },
+  RESOURCE_SNAPSHOT_NOT_FOUND: { status: 404, message: "Resource snapshot not found" },
 
   DATASET_NOT_FOUND: { status: 404, message: "Dataset not found" },
   DATASET_INPUT_INVALID: { status: 400, message: "Dataset input is invalid" },

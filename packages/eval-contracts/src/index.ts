@@ -114,7 +114,7 @@ export {
 } from "./evidence.js";
 export { IDENTIFIER_RULE, identifierSchema, isIdentifier } from "./identifier.js";
 export { canonicalJsonBytes, createId, equalJson, sha256Hex } from "./canonical.js";
-export { jsonObjectInPlaceSchema, jsonObjectSchema, jsonValueSchema } from "./json.js";
+export { jsonObjectArrayInPlaceSchema, jsonObjectInPlaceSchema, jsonObjectSchema, jsonValueSchema } from "./json.js";
 export { summarizeResourceSnapshot } from "./resources.js";
 export { evalInputLimitsSchema } from "./input-limits.js";
 export type { EvalInputLimits } from "./input-limits.js";

@@ -4,6 +4,7 @@ import type { RetryController } from "./retry.js";
 import {
   AgentResourceValidationError,
   collectResources,
+  createExclusiveRunner,
   validateResourceReadiness,
   validateResourceSnapshot,
   type ResourceSource,
@@ -186,7 +187,7 @@ describe("resource readiness validation", () => {
 describe("crash-safe resource download", () => {
   const STORED = { status: "pending", scope: SCOPE } as const;
 
-  function setup(collect: () => Promise<unknown>, current: AgentResourceState = STORED, budget = 2) {
+  function setup(collect: () => Promise<unknown>, current: AgentResourceState = STORED, budget = 2, exclusively = createExclusiveRunner()) {
     const events: string[] = [];
     const saved: AgentResourceState[] = [];
     const harness = {
@@ -208,19 +209,22 @@ describe("crash-safe resource download", () => {
         log: (event: Record<string, unknown>) => { events.push(`log:${String(event.name)}`); },
       },
       current,
-      saveSnapshot: vi.fn(async (_snapshot: AgentResourceSnapshot) => { events.push("snapshot"); }),
-      save: vi.fn(async (resources: AgentResourceState) => { saved.push(resources); events.push(`save:${resources.status}`); }),
+      exclusively,
+      save: vi.fn(async (resources: AgentResourceState, stored?: AgentResourceSnapshot) => {
+        saved.push(resources);
+        events.push(`save:${resources.status}${stored ? "+snapshot" : ""}`);
+      }),
     };
     return { download, harness, decide, events, saved };
   }
 
-  it("counts each download on the Attempt before it starts and logs only after the snapshot and its summary are stored", async () => {
+  it("counts each download on the Attempt before it starts and logs only after the snapshot is stored with its summary", async () => {
     const { download, events, saved } = setup(async () => snapshot());
     const result = await collectResources(download);
     expect(result).toEqual({ status: "collected", summary: summarizeResourceSnapshot(snapshot()) });
-    expect(events).toEqual(["save:pending", "download", "snapshot", "save:collected", "log:resources_collected"]);
+    expect(events).toEqual(["save:pending", "download", "save:collected+snapshot", "log:resources_collected"]);
     expect(saved[0]).toEqual({ ...STORED, downloads: 1 });
-    expect(download.saveSnapshot.mock.calls[0]![0]).toEqual(snapshot());
+    expect(download.save.mock.calls[1]).toEqual([result, snapshot()]);
   });
 
   it("counts a download a crashed process started against the same retry budget", async () => {
@@ -246,7 +250,17 @@ describe("crash-safe resource download", () => {
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(3);
     expect(result).toEqual({ ...collected, downloads: 3, exhausted: true });
     expect(saved.map((item) => item.downloads)).toEqual([1, 2, 3, 3]);
-    expect(download.saveSnapshot).not.toHaveBeenCalled();
+    expect(download.save.mock.calls.every(([, stored]) => stored === undefined)).toBe(true);
+  });
+
+  it("records each retried failure on a failed Attempt with its count, and gives up with the last one", async () => {
+    const failed: AgentResourceState = { status: "failed", scope: SCOPE, collectedAt: "2026-10-08T00:00:00.000Z", error: "old" };
+    let calls = 0;
+    const { download } = setup(async () => { calls += 1; throw new Error(`SP unavailable ${calls}`); }, failed);
+    await expect(collectResources(download)).resolves.toEqual({ ...failed, error: "SP unavailable 3", collectedAt: "2026-10-08T00:01:00.000Z", downloads: 3, exhausted: true });
+    expect(download.save.mock.calls.map(([resources]) => resources.status === "failed" && [resources.downloads, resources.error])).toEqual([
+      [1, "old"], [2, "SP unavailable 1"], [3, "SP unavailable 2"], [3, "SP unavailable 3"],
+    ]);
   });
 
   it("gives up at once on an unretryable failure", async () => {
@@ -267,9 +281,24 @@ describe("crash-safe resource download", () => {
       active -= 1;
       return snapshot();
     };
-    const first = setup(slow);
-    const second = setup(slow);
+    const exclusively = createExclusiveRunner();
+    const first = setup(slow, STORED, 2, exclusively);
+    const second = setup(slow, STORED, 2, exclusively);
     await Promise.all([collectResources(first.download), collectResources(second.download)]);
     expect(peak).toBe(1);
+  });
+
+  it("holds the download lock only for the download and the snapshot save, never while counting", async () => {
+    const exclusively = createExclusiveRunner();
+    let release!: () => void;
+    const counting = new Promise<void>((resolve) => { release = resolve; });
+    const blocked = setup(async () => snapshot(), STORED, 2, exclusively);
+    blocked.download.save.mockImplementationOnce(() => counting);
+    const other = setup(async () => snapshot(), STORED, 2, exclusively);
+    const pending = collectResources(blocked.download);
+    await expect(collectResources(other.download)).resolves.toMatchObject({ status: "collected" });
+    expect(blocked.harness.collectAgentResources).not.toHaveBeenCalled();
+    release();
+    await expect(pending).resolves.toMatchObject({ status: "collected" });
   });
 });

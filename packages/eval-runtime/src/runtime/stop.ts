@@ -332,8 +332,8 @@ async function finishStoppedStage<TRecord extends StageRecord, TAttempt extends 
       attempts: stage.attempts(record),
       state: stage.state(record),
       agentEnded: stage.agentEnded(record),
-      saveResourceSnapshot: () => Promise.reject(new Error("A stopping Run never reads resources")),
-      persist: async (attempts, state) => {
+      persist: async (attempts, state, collected) => {
+        if (collected) throw new Error("A stopping Run never reads resources");
         settled = await persist(stage.withState(settled, state, attempts), settled);
       },
     });

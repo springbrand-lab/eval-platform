@@ -200,7 +200,7 @@
       "checkConstraints": {
         "eval_attempt_resources_record_ck": {
           "name": "eval_attempt_resources_record_ck",
-          "value": "(\"eval_attempt_resources\".\"stage\" = 'execution' AND \"eval_attempt_resources\".\"evaluation_id\" IS NULL AND \"eval_attempt_resources\".\"record_id\" = \"eval_attempt_resources\".\"sampling_id\") OR (\"eval_attempt_resources\".\"stage\" = 'evaluation' AND \"eval_attempt_resources\".\"record_id\" = \"eval_attempt_resources\".\"evaluation_id\")"
+          "value": "(\"eval_attempt_resources\".\"stage\" = 'execution' AND \"eval_attempt_resources\".\"evaluation_id\" IS NULL AND \"eval_attempt_resources\".\"record_id\" = \"eval_attempt_resources\".\"sampling_id\") OR (\"eval_attempt_resources\".\"stage\" = 'evaluation' AND \"eval_attempt_resources\".\"evaluation_id\" IS NOT NULL AND \"eval_attempt_resources\".\"record_id\" = \"eval_attempt_resources\".\"evaluation_id\")"
         }
       },
       "isRLSEnabled": false

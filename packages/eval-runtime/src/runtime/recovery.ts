@@ -1,4 +1,4 @@
-import type { AgentResourceState, EvaluationRecord, RecoveryPasses, SamplingStageState } from "@eval-platform/eval-contracts";
+import type { EvaluationRecord, RecoveryPasses, SamplingStageState } from "@eval-platform/eval-contracts";
 import {
   OBSERVATION_MAX_PASSES,
   isPendingSamplingStatus,
@@ -59,8 +59,8 @@ export function attemptOwesResources<T extends AgentAttemptRecord>(attempt: T, a
 export function withFreshResourceBudget<T extends AgentAttemptRecord>(attempts: readonly T[]): T[] {
   return attempts.map((attempt) => {
     if (attempt.resources === undefined) return attempt;
-    const { downloads: _downloads, exhausted: _exhausted, ...resources } = attempt.resources as AgentResourceState & { readonly exhausted?: true };
-    return { ...attempt, resources: resources as AgentResourceState };
+    const { downloads: _downloads, exhausted: _exhausted, ...resources } = attempt.resources;
+    return { ...attempt, resources };
   });
 }
 

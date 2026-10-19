@@ -32,12 +32,13 @@ export type {
   RuntimeRunRequestIdentity,
   RuntimeRunRecord,
   RuntimeRecoveryStore,
+  AttemptResourceSnapshot,
   EvaluationState,
-  ResourceSnapshotTarget,
   Revisioned,
   SamplingState,
   RuntimeStore,
 } from "./store.js";
+export { withoutRevision } from "./store.js";
 export { requireSourceCommit } from "./admission.js";
 export { toRunSnapshot, toSamplingSnapshot } from "./projection.js";
 export {

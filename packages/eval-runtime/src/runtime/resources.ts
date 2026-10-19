@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   identifierSchema,
-  jsonObjectInPlaceSchema,
+  jsonObjectArrayInPlaceSchema,
   summarizeResourceSnapshot,
   type AgentResourceFact,
   type AgentResourceReadinessReport,
@@ -38,14 +38,6 @@ const reportSchema = z.strictObject({
   finalized: z.boolean(),
   readiness: readinessSchema,
 });
-/** Raw records are validated in place; a snapshot can be hundreds of megabytes. */
-function factsSchema() {
-  return z.custom<readonly AgentResourceFact[]>(
-    (value) => Array.isArray(value) && value.every((fact) => jsonObjectInPlaceSchema.safeParse(fact).success),
-    "Expected an array of plain JSON objects",
-  );
-}
-
 const snapshotSchema = z.strictObject({
   scope: scopeSchema,
   observedAt: z.iso.datetime({ offset: true }),
@@ -55,9 +47,9 @@ const snapshotSchema = z.strictObject({
     telemetryEvents: completeness,
     billingSettlements: completeness,
   }),
-  usageEvents: factsSchema(),
-  telemetryEvents: factsSchema(),
-  billingSettlements: factsSchema(),
+  usageEvents: jsonObjectArrayInPlaceSchema,
+  telemetryEvents: jsonObjectArrayInPlaceSchema,
+  billingSettlements: jsonObjectArrayInPlaceSchema,
   readiness: readinessSchema,
 });
 
@@ -189,61 +181,75 @@ export async function awaitResourceFinalization(
   return done({ reason });
 }
 
-let downloadQueue: Promise<unknown> = Promise.resolve();
+/** Runs tasks one at a time, in call order. */
+export type ExclusiveRunner = <T>(task: () => Promise<T>) => Promise<T>;
 
-/** Runs one snapshot download and its persistence at a time in this process; a snapshot can be hundreds of megabytes. */
-function exclusively<T>(task: () => Promise<T>): Promise<T> {
-  const run = downloadQueue.then(task);
-  downloadQueue = run.catch(() => undefined);
-  return run;
+export function createExclusiveRunner(): ExclusiveRunner {
+  let queue: Promise<unknown> = Promise.resolve();
+  return (task) => {
+    const run = queue.then(task);
+    queue = run.catch(() => undefined);
+    return run;
+  };
+}
+
+/** Records resources as failed with `error`, keeping their download count. */
+export function failedResources(
+  resources: AgentResourceState, scope: AgentResourceScope, collectedAt: string, error: string,
+): Extract<AgentResourceState, { readonly status: "failed" }> {
+  const { downloads } = resources;
+  return { status: "failed", scope, collectedAt, error, ...(downloads === undefined ? {} : { downloads }) };
 }
 
 export interface ResourceDownload {
   readonly source: ResourceSource;
   /** The Attempt's stored resources; a collected snapshot is kept when no newer one is stored. */
   readonly current: AgentResourceState;
-  /** Stores the raw snapshot unchanged, before the stage record refers to it. */
-  readonly saveSnapshot: (snapshot: AgentResourceSnapshot) => Promise<void>;
-  /** Saves the Attempt's resources on its stage record. */
-  readonly save: (resources: AgentResourceState) => Promise<void>;
+  /** One snapshot download and its save at a time in this process; a snapshot can be hundreds of megabytes. */
+  readonly exclusively: ExclusiveRunner;
+  /** Saves the Attempt's resources on its stage record, with the raw snapshot they summarize in the same write. */
+  readonly save: (resources: AgentResourceState, snapshot?: AgentResourceSnapshot) => Promise<void>;
 }
+
+const INTERRUPTED: RetryErrorDetails = { message: "resource download was interrupted", failureKind: "network", retryable: true };
 
 /**
  * The single full download of an Attempt's snapshot as SP reports it, finalized or not. Each download
  * is counted on the Attempt before it starts, so one a crash interrupted counts against the same
- * `resources` retry budget. Once the budget is spent the Attempt is given up: `failed`, or its
- * already collected snapshot kept, and Runtime no longer owes it.
+ * `resources` retry budget; a failed Attempt records each retried failure with its count. Once the
+ * budget is spent the Attempt is given up: `failed`, or its already collected snapshot kept, and
+ * Runtime no longer owes it.
  */
 export async function collectResources(download: ResourceDownload): Promise<AgentResourceState> {
   const { source } = download;
   const started = Date.now();
   const fields = () => ({ name: "resources_collected", ...scopeFields(source.scope), durationMs: Date.now() - started });
   let state = download.current;
-  let failure: RetryErrorDetails = { message: "resource download was interrupted", failureKind: "network", retryable: true };
+  let failure: RetryErrorDetails | undefined;
   for (;;) {
     const downloads = state.downloads ?? 0;
+    const last = failure ?? INTERRUPTED;
     if (downloads > 0) {
-      const decision = failure.retryable
-        ? await source.retryController.decide({ operation: "resources", failureKind: failure.failureKind, attemptNumber: downloads, error: failure.message })
+      const decision = last.retryable
+        ? await source.retryController.decide({ operation: "resources", failureKind: last.failureKind, attemptNumber: downloads, error: last.message })
         : { shouldRetry: false };
       if (!decision.shouldRetry) {
         const given: AgentResourceState = state.status === "collected"
           ? { ...state, exhausted: true }
-          : { status: "failed", scope: source.scope, collectedAt: source.now(), error: failure.message, downloads, exhausted: true };
+          : { ...failedResources(state, source.scope, source.now(), last.message), exhausted: true };
         await download.save(given);
-        source.log({ ...fields(), downloads, error: failure.message });
+        source.log({ ...fields(), downloads, error: last.message });
         return given;
       }
       await source.sleep(decision.backoffMs ?? 0);
     }
+    state = { ...state, downloads: downloads + 1, ...(state.status === "failed" && failure ? { error: failure.message } : {}) };
+    await download.save(state);
     try {
-      return await exclusively(async () => {
-        state = { ...state, downloads: downloads + 1 };
-        await download.save(state);
+      return await download.exclusively(async () => {
         const snapshot = validateResourceSnapshot(await source.harness.collectAgentResources(resourceInput(source)), source.scope);
-        await download.saveSnapshot(snapshot);
         const collected: AgentResourceState = { status: "collected", summary: summarizeResourceSnapshot(snapshot) };
-        await download.save(collected);
+        await download.save(collected, snapshot);
         source.log({
           ...fields(), finalized: snapshot.finalized, coverage: snapshot.coverage,
           ...collected.summary.counts, creditsTotal: creditsTotal(snapshot.billingSettlements),

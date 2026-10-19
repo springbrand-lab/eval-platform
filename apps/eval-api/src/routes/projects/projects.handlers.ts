@@ -65,3 +65,10 @@ export const observeFile: AppRouteHandler<typeof routes.observeFile> = async (c)
   const file = await c.env.observation.file(chat, c.req.valid("query").path);
   return fileResponse(file) as never;
 };
+
+export const resourceSnapshot: AppRouteHandler<typeof routes.resourceSnapshot> = async (c) => {
+  const { projectId, kind, id, attemptId } = c.req.valid("param");
+  const body = await c.var.services.resourceSnapshots.open(projectId, kind === "samplings" ? "execution" : "evaluation", id, attemptId);
+  if (!body) throw new HttpError("RESOURCE_SNAPSHOT_NOT_FOUND");
+  return fileResponse({ body, contentType: "application/json", contentLength: null }) as never;
+};

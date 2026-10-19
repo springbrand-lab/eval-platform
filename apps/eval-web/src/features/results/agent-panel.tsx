@@ -1,10 +1,15 @@
 import { Link } from "@tanstack/react-router";
 import { Eye, ExternalLink } from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
+import { getResourceSnapshot } from "@/api-sdk/observations-api";
 import type { AgentMetricView } from "@/api-sdk/types";
 import { StatusBadge } from "@/components/ui/badge";
 import { Card, CardBody, CardHeader, DescriptionList } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
 import { CopyId } from "@/components/ui/data-display";
+import { describeError } from "@/lib/errors";
+import { downloadFile } from "@/lib/files";
 import { formatDateTime, formatDuration } from "@/lib/format";
 import { langfuseSessionUrl } from "@/lib/langfuse";
 import { ResourceMetrics } from "@/features/metrics/resource-metrics";
@@ -20,8 +25,28 @@ export function LangfuseLink({ chatId, label = "Langfuse 会话" }: { chatId: st
   );
 }
 
+/** Downloads one Attempt's stored raw resource snapshot unchanged. */
+function ResourceSnapshotDownload({ projectId, agent, attemptId }: { projectId: string; agent: AgentMetricView; attemptId: string }) {
+  const [busy, setBusy] = useState(false);
+  const download = async () => {
+    setBusy(true);
+    try {
+      const snapshot = agent.evaluationId === null
+        ? await getResourceSnapshot(projectId, "samplings", agent.samplingId, attemptId)
+        : await getResourceSnapshot(projectId, "evaluations", agent.evaluationId, attemptId);
+      downloadFile(`resource-snapshot-${attemptId}.json`, snapshot, "application/json");
+    } catch (error) {
+      toast.error(describeError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <button data-testid="resource-snapshot" className="link text-xs" disabled={busy} onClick={() => void download()}>{busy ? "下载中…" : "原始资源快照"}</button>;
+}
+
 /** One Agent (the Subject or an Evaluator): status, Attempts, resources and evidence. */
-export function AgentPanel({ title, agent, observe }: {
+export function AgentPanel({ projectId, title, agent, observe }: {
+  projectId: string;
   title: string;
   agent: AgentMetricView;
   observe?: { to: string; params: Record<string, string> };
@@ -84,6 +109,7 @@ export function AgentPanel({ title, agent, observe }: {
                   { key: "start", header: "开始", cell: (row) => formatDateTime(row.startedAt) },
                   { key: "duration", header: "耗时", cell: (row) => formatDuration(row.durationMs) },
                   { key: "error", header: "错误", cell: (row) => <span className="line-clamp-2 text-danger">{row.error ?? ""}</span> },
+                  { key: "resources", header: "资源", cell: (row) => row.resourceCollection === "collected" ? <ResourceSnapshotDownload projectId={projectId} agent={agent} attemptId={row.attemptId} /> : null },
                 ]}
               />
             </div>

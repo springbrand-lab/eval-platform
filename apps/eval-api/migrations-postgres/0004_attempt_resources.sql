@@ -11,7 +11,7 @@ CREATE TABLE "eval_attempt_resources" (
 	"snapshot" jsonb NOT NULL,
 	"metric_snapshot" jsonb NOT NULL,
 	CONSTRAINT "eval_attempt_resources_pk" PRIMARY KEY("stage","record_id","attempt_id"),
-	CONSTRAINT "eval_attempt_resources_record_ck" CHECK (("eval_attempt_resources"."stage" = 'execution' AND "eval_attempt_resources"."evaluation_id" IS NULL AND "eval_attempt_resources"."record_id" = "eval_attempt_resources"."sampling_id") OR ("eval_attempt_resources"."stage" = 'evaluation' AND "eval_attempt_resources"."record_id" = "eval_attempt_resources"."evaluation_id"))
+	CONSTRAINT "eval_attempt_resources_record_ck" CHECK (("eval_attempt_resources"."stage" = 'execution' AND "eval_attempt_resources"."evaluation_id" IS NULL AND "eval_attempt_resources"."record_id" = "eval_attempt_resources"."sampling_id") OR ("eval_attempt_resources"."stage" = 'evaluation' AND "eval_attempt_resources"."evaluation_id" IS NOT NULL AND "eval_attempt_resources"."record_id" = "eval_attempt_resources"."evaluation_id"))
 );
 --> statement-breakpoint
 ALTER TABLE "eval_evaluations" ADD COLUMN "revision" integer DEFAULT 0 NOT NULL;--> statement-breakpoint

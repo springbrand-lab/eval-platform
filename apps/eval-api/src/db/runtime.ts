@@ -22,7 +22,7 @@ import {
   withFreshResourceBudget,
 } from "@eval-platform/eval-runtime";
 import { and, desc, eq, gt, inArray, max, sql } from "drizzle-orm";
-import { saveAttemptResources } from "./attempt-resources.js";
+import { updateWithResources } from "./attempt-resources.js";
 import { addToGroup, selectByIds, sqlBatches } from "./batch.js";
 import type { RunQueue, RunWorkerQueue } from "../run-worker-queue.js";
 import type { RunRecoveryStore } from "../worker.js";
@@ -388,20 +388,21 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope, runQueue: RunQ
         throw new RuntimeInputError(`Run facts violate ${violation.constraint}`);
       }
     },
-    async updateSampling(record, expected) {
+    async updateSampling(record, expected, resources) {
       if (record.samplingId !== expected.samplingId
         || record.projectId !== expected.projectId || record.projectSampleId !== expected.projectSampleId) {
         throw new RuntimeRecordConflictError("Sampling identity changed before update");
       }
-      const updated = await db.update(samplings).set({ facts: samplingFacts(record), revision: expected.revision + 1 })
-        .where(and(eq(samplings.samplingId, record.samplingId), eq(samplings.projectId, record.projectId),
-          eq(samplings.projectSampleId, record.projectSampleId),
-          owner === undefined ? undefined : eq(samplings.ownerUserId, owner),
-          eq(samplings.revision, expected.revision)))
-        .returning({ samplingId: samplings.samplingId });
-      if (updated.length === 0) {
-        throw new RuntimeRecordConflictError(`Sampling changed before update: ${record.samplingId}`);
-      }
+      await updateWithResources(db, resources, async (writer) => {
+        const [updated] = await writer.update(samplings).set({ facts: samplingFacts(record), revision: expected.revision + 1 })
+          .where(and(eq(samplings.samplingId, record.samplingId), eq(samplings.projectId, record.projectId),
+            eq(samplings.projectSampleId, record.projectSampleId),
+            owner === undefined ? undefined : eq(samplings.ownerUserId, owner),
+            eq(samplings.revision, expected.revision)))
+          .returning({ ownerUserId: samplings.ownerUserId });
+        if (!updated) throw new RuntimeRecordConflictError(`Sampling changed before update: ${record.samplingId}`);
+        return { ownerUserId: updated.ownerUserId, samplingId: record.samplingId };
+      });
     },
     async getSampling(samplingId) {
       const [row] = await readSamplingRows(db, [samplingId], owner);
@@ -410,21 +411,19 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope, runQueue: RunQ
     async getSamplings(samplingIds) {
       return (await readSamplingRows(db, samplingIds, owner)).map((row) => row && samplingStateFromRow(row));
     },
-    saveResourceSnapshot(target, snapshot) {
-      return saveAttemptResources(db, target, snapshot, owner);
-    },
-    async updateEvaluation(record, expected) {
+    async updateEvaluation(record, expected, resources) {
       if (record.evaluationId !== expected.evaluationId || record.samplingId !== expected.samplingId) {
         throw new RuntimeRecordConflictError("Evaluation identity changed before update");
       }
-      const updated = await db.update(evaluations).set({ facts: evaluationFacts(record), revision: expected.revision + 1 })
-        .where(and(eq(evaluations.evaluationId, record.evaluationId), eq(evaluations.samplingId, record.samplingId),
-          owner === undefined ? undefined : eq(evaluations.ownerUserId, owner),
-          eq(evaluations.revision, expected.revision)))
-        .returning({ evaluationId: evaluations.evaluationId });
-      if (updated.length === 0) {
-        throw new RuntimeRecordConflictError(`Evaluation changed before update: ${record.evaluationId}`);
-      }
+      await updateWithResources(db, resources, async (writer) => {
+        const [updated] = await writer.update(evaluations).set({ facts: evaluationFacts(record), revision: expected.revision + 1 })
+          .where(and(eq(evaluations.evaluationId, record.evaluationId), eq(evaluations.samplingId, record.samplingId),
+            owner === undefined ? undefined : eq(evaluations.ownerUserId, owner),
+            eq(evaluations.revision, expected.revision)))
+          .returning({ ownerUserId: evaluations.ownerUserId });
+        if (!updated) throw new RuntimeRecordConflictError(`Evaluation changed before update: ${record.evaluationId}`);
+        return { ownerUserId: updated.ownerUserId, samplingId: record.samplingId, evaluationId: record.evaluationId };
+      });
     },
     async getEvaluation(evaluationId) {
       const [row] = await readEvaluationRows(db, [evaluationId], owner);

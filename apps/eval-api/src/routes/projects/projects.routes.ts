@@ -163,3 +163,16 @@ export const observeFile = createRoute({
     ...notFoundResponse,
   },
 });
+
+export const resourceSnapshot = createRoute({
+  method: "get",
+  path: "/{projectId}/{kind}/{id}/attempts/{attemptId}/resource-snapshot",
+  tags: ["Project"],
+  summary: "Download one Subject or Evaluator Attempt's stored raw resource snapshot, streamed unparsed",
+  request: { params: observedParams.extend({ attemptId: entityIdSchema }) },
+  responses: {
+    200: { description: "Raw resource snapshot JSON", content: { "application/json": { schema: z.unknown() } } },
+    ...errorResponses,
+    ...notFoundResponse,
+  },
+});

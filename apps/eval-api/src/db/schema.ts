@@ -307,7 +307,7 @@ export const attemptResources = pgTable("eval_attempt_resources", {
   primaryKey({ name: "eval_attempt_resources_pk", columns: [table.stage, table.recordId, table.attemptId] }),
   foreignKey({ name: "eval_attempt_resources_sampling_fk", columns: [table.ownerUserId, table.samplingId], foreignColumns: [samplings.ownerUserId, samplings.samplingId] }).onDelete("cascade"),
   foreignKey({ name: "eval_attempt_resources_evaluation_fk", columns: [table.ownerUserId, table.evaluationId, table.samplingId], foreignColumns: [evaluations.ownerUserId, evaluations.evaluationId, evaluations.samplingId] }).onDelete("cascade"),
-  check("eval_attempt_resources_record_ck", sql`(${table.stage} = 'execution' AND ${table.evaluationId} IS NULL AND ${table.recordId} = ${table.samplingId}) OR (${table.stage} = 'evaluation' AND ${table.recordId} = ${table.evaluationId})`),
+  check("eval_attempt_resources_record_ck", sql`(${table.stage} = 'execution' AND ${table.evaluationId} IS NULL AND ${table.recordId} = ${table.samplingId}) OR (${table.stage} = 'evaluation' AND ${table.evaluationId} IS NOT NULL AND ${table.recordId} = ${table.evaluationId})`),
   index("eval_attempt_resources_sampling_idx").on(table.samplingId),
 ]);
 

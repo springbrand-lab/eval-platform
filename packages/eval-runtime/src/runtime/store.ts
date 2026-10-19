@@ -77,11 +77,18 @@ export type Revisioned<T> = T & { readonly revision: number };
 export type SamplingState = Revisioned<Sampling>;
 export type EvaluationState = Revisioned<EvaluationRecord>;
 
-/** The Attempt whose raw resource snapshot is stored; `evaluationId` is present for, and only for, an Evaluator. */
-export interface ResourceSnapshotTarget {
-  readonly samplingId: string;
-  readonly evaluationId?: string;
+/** The record's facts without the Store revision. */
+export function withoutRevision<T extends { readonly revision?: number }>({ revision: _revision, ...record }: T): Omit<T, "revision"> {
+  return record;
+}
+
+/**
+ * One Attempt's raw resource snapshot, stored unchanged, replacing an earlier one, in the same
+ * transaction as the record update that marks it collected; stage records keep only its summary.
+ */
+export interface AttemptResourceSnapshot {
   readonly attemptId: string;
+  readonly snapshot: AgentResourceSnapshot;
 }
 
 export interface RuntimeStore {
@@ -113,22 +120,20 @@ export interface RuntimeStore {
    * enforce identity.
    */
   admitRun(command: RuntimeRunAdmissionCommand): Promise<RuntimeRunAdmission>;
-  /** Atomically update only while `expected.revision` is still stored; the record is saved at the next revision. */
-  updateEvaluation(record: EvaluationState, expected: EvaluationState): Promise<void>;
+  /**
+   * Atomically update only while `expected.revision` is still stored; the record is saved at the next
+   * revision together with `resources`, or neither is.
+   */
+  updateEvaluation(record: EvaluationState, expected: EvaluationState, resources?: AttemptResourceSnapshot): Promise<void>;
   getEvaluation(evaluationId: string): Promise<EvaluationState | null>;
   /** Return one Evaluation or null per input ID, in the same order. */
   getEvaluations(evaluationIds: readonly string[]): Promise<readonly (EvaluationState | null)[]>;
   listEvaluations(samplingId: string): Promise<readonly EvaluationState[]>;
-  /** Atomically update only while `expected.revision` is still stored; the record is saved at the next revision. */
-  updateSampling(state: SamplingState, expected: SamplingState): Promise<void>;
+  /** As `updateEvaluation`. */
+  updateSampling(state: SamplingState, expected: SamplingState, resources?: AttemptResourceSnapshot): Promise<void>;
   getSampling(samplingId: string): Promise<SamplingState | null>;
   /** Return one Sampling or null per input ID, in the same order. */
   getSamplings(samplingIds: readonly string[]): Promise<readonly (SamplingState | null)[]>;
-  /**
-   * Stores one Attempt's raw snapshot unchanged, replacing an earlier one. Called before the stage
-   * record marks it collected; stage records keep only its summary.
-   */
-  saveResourceSnapshot(target: ResourceSnapshotTarget, snapshot: AgentResourceSnapshot): Promise<void>;
 }
 
 /**

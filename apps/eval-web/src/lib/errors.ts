@@ -53,6 +53,7 @@ export const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   SAMPLING_NOT_FOUND: "采样不存在",
   SAMPLING_UNAVAILABLE: "所选采样没有成功执行，不能评估",
   EVALUATION_NOT_FOUND: "评估记录不存在",
+  RESOURCE_SNAPSHOT_NOT_FOUND: "原始资源快照不存在",
   DATASET_NOT_FOUND: "数据集不存在",
   DATASET_INPUT_INVALID: "数据集或用例内容无效",
   DATASET_IDENTITY_CONFLICT: "同一 ID 已存在不同内容",

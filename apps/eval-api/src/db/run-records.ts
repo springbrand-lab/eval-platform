@@ -1,6 +1,6 @@
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { PENDING_SAMPLING_STATUSES } from "@eval-platform/eval-contracts";
-import type { EvaluationState, RuntimeRunRecord, SamplingState } from "@eval-platform/eval-runtime";
+import { withoutRevision, type EvaluationState, type RuntimeRunRecord, type SamplingState } from "@eval-platform/eval-runtime";
 import { and, eq, exists, inArray, notExists, or, sql, type SQL } from "drizzle-orm";
 import { selectByIds } from "./batch.js";
 import type { EvalDb } from "./client.js";
@@ -126,12 +126,12 @@ export function evaluationStateFromRow(row: typeof evaluations.$inferSelect): Ev
 
 /** The stored facts of a record; identity columns and the revision live outside them. */
 export function samplingFacts(record: Sampling & { readonly revision?: number }): typeof samplings.$inferInsert.facts {
-  const { samplingId: _samplingId, projectId: _projectId, projectSampleId: _projectSampleId, revision: _revision, ...facts } = record;
+  const { samplingId: _samplingId, projectId: _projectId, projectSampleId: _projectSampleId, ...facts } = withoutRevision(record);
   return facts;
 }
 
 export function evaluationFacts(record: EvaluationRecord & { readonly revision?: number }): typeof evaluations.$inferInsert.facts {
-  const { evaluationId: _evaluationId, samplingId: _samplingId, revision: _revision, ...facts } = record;
+  const { evaluationId: _evaluationId, samplingId: _samplingId, ...facts } = withoutRevision(record);
   return facts;
 }
 

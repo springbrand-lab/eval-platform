@@ -33,8 +33,10 @@ import {
   STOPPED_RESOURCES_ERROR,
   awaitResourceFinalization,
   collectResources,
+  failedResources,
   resourceScopeMatches,
   storedResourceScope,
+  type ExclusiveRunner,
 } from "./resources.js";
 import type { RuntimeStore } from "./store.js";
 import type { RuntimeContext, RuntimeLog } from "./log.js";
@@ -84,6 +86,8 @@ export interface AgentLifecycleDependencies {
   readonly finalizingStop?: true;
   /** Recollecting after a finalized stop: output collection never reads resources or starts a resource wait; only a manual resource recollection refreshes them. */
   readonly runStopped?: true;
+  /** Shared by every stage of the process, so one snapshot download and save runs at a time. */
+  readonly resourceDownloads: ExclusiveRunner;
 }
 
 /** Report a failure that must not interrupt the Run; a reporter that throws is the last resort for stderr. */
@@ -135,9 +139,8 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
     readonly startedAt: string;
   }) => TAttempt;
   readonly appendAttempt: (attempt: TAttempt) => Promise<void>;
-  readonly updateAttempt: (attempt: TAttempt, patch: AttemptPatch) => Promise<TAttempt>;
-  /** Stores the Attempt's raw resource snapshot outside its stage record. */
-  readonly saveResourceSnapshot: (attempt: TAttempt, snapshot: AgentResourceSnapshot) => Promise<void>;
+  /** Saves the patch; a raw resource snapshot is stored in the same write, outside the stage record. */
+  readonly updateAttempt: (attempt: TAttempt, patch: AttemptPatch, snapshot?: AgentResourceSnapshot) => Promise<TAttempt>;
   readonly setSamplingStatus: (status: SamplingStatus, lastError?: string) => Promise<void>;
   readonly prepare: (handle: AgentHandle) => Promise<void>;
   readonly collectOutput: (handle: AgentHandle) => Promise<TOutput>;
@@ -377,10 +380,9 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
         if (terminalSaved && needsResources && (dependencies.finalizingStop || dependencies.runStopped)) {
           // A stopping or stopped Run never reads SP: an ended Attempt's owed resources fail as they are.
           if (attempt.completedAt !== undefined && resources.status !== "collected") {
-            attempt = await options.updateAttempt(attempt, { resources: {
-              status: "failed", scope: storedResourceScope(resources) ?? resourceScope,
-              collectedAt: dependencies.now(), error: STOPPED_RESOURCES_ERROR,
-            } });
+            attempt = await options.updateAttempt(attempt, { resources: failedResources(
+              resources, storedResourceScope(resources) ?? resourceScope, dependencies.now(), STOPPED_RESOURCES_ERROR,
+            ) });
           }
         } else if (terminalSaved && needsResources) {
           const source = {
@@ -392,16 +394,15 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
             source, attempt.completedAt === undefined ? [0] : RESOURCE_READINESS_DELAYS_MS,
           );
           if (owed === undefined) {
-            const downloading = attempt;
             await collectResources({
               source,
               current: resources,
-              saveSnapshot: (snapshot) => options.saveResourceSnapshot(downloading, snapshot),
-              save: async (next) => {
+              exclusively: dependencies.resourceDownloads,
+              save: async (next, snapshot) => {
                 attempt = await options.updateAttempt(attempt!, {
                   ...(next.status === "collected" && !attempt!.submissionId ? { submissionId: next.summary.scope.submissionId } : {}),
                   resources: next,
-                });
+                }, snapshot);
               },
             });
           }

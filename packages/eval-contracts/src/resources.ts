@@ -83,6 +83,7 @@ interface AgentResourcesGivenUp {
 }
 
 type PendingAgentResources = AgentResourceDownloads & {
+  readonly exhausted?: never;
   readonly status: "pending";
   readonly scope: AgentResourceScope;
 };

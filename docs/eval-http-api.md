@@ -211,6 +211,10 @@ Expansion and replacement follow [Run admission](architecture.md#run-准入与�
 | `GET /api/samplings/{samplingId}/evaluations` | Current `EvaluationRecord[]` of the Sampling, by `evaluationId` | `404 SAMPLING_NOT_FOUND` |
 | `GET /api/evaluations/{evaluationId}` | `EvaluationRecord` `{evaluationId, samplingId, evaluator, chatId?, status, attempts, output?}`; `output.structuredOutput` is the Evaluator's raw result file `{path, content, contentHash?}`; attempt `resources` as for Sampling | `404 EVALUATION_NOT_FOUND` |
 
+| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/attempts/{attemptId}/resource-snapshot` | One Subject (`samplings`) or Evaluator (`evaluations`) Attempt's stored raw `AgentResourceSnapshot`: the stored JSON streamed as `application/json` attachment bytes (sandbox CSP, `nosniff`, `private, no-store`), without `Content-Length` | `404 RESOURCE_SNAPSHOT_NOT_FOUND` (no such current record or Attempt in the owner's non-deleted Project, or no stored snapshot: resources pending or failed) |
+
+The raw-snapshot route checks the owner, a non-deleted Project and that the record is current in it, as the observation routes do. The API never parses or loads the snapshot: one read-only transaction declares a PostgreSQL cursor over the stored `jsonb` as UTF-8 text and streams it in 1 MiB chunks, so its events (full prompts and tool bodies) reach the client unchanged without passing through the API's heap; aborting the download closes the cursor. Stage records and every other read keep only the summary.
+
 Replaced Samplings and Evaluations no longer exist and read as `404`. Sampling and Evaluation responses retain artifact and complete trajectory references; their bytes remain behind Eval SP's public read-only Workspace and Trajectory APIs, and this control plane does not read SP Durable Object storage.
 
 ### Read-only observation
@@ -359,6 +363,7 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `SAMPLING_NOT_FOUND` | 404 | Unknown, replaced or another Project's Sampling |
 | `SAMPLING_UNAVAILABLE` | 409 | Evaluation of a Sampling without a successful execution |
 | `EVALUATION_NOT_FOUND` | 404 | Unknown or replaced Evaluation |
+| `RESOURCE_SNAPSHOT_NOT_FOUND` | 404 | No stored raw resource snapshot for that current Attempt |
 | `DATASET_NOT_FOUND` | 404 | Unknown or deleted Dataset, or a Dataset the Project does not bind |
 | `DATASET_INPUT_INVALID` | 400 | Dataset or Data input rejected |
 | `DATASET_IDENTITY_CONFLICT` | 409 | Dataset or Data identity reused with different content |

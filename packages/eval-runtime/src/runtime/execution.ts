@@ -17,7 +17,7 @@ import {
 import { dataInputSchema } from "@eval-platform/eval-dataset";
 import type { AgentHandle } from "../harness/model.js";
 
-import { persistRuntimeRecord, readStageFailure, type SamplingState } from "./store.js";
+import { persistRuntimeRecord, readStageFailure, type AttemptResourceSnapshot, type SamplingState } from "./store.js";
 import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 import type { RuntimeSamplingContext } from "./model.js";
 import {
@@ -127,23 +127,23 @@ export async function executeSampling(
     reportError(dependencies.onError, reported);
   };
 
-  const persistRecord = async (sampling: SamplingState): Promise<void> => {
+  const persistRecord = async (sampling: SamplingState, resources?: AttemptResourceSnapshot): Promise<void> => {
     current = await persistRuntimeRecord({
       record: sampling,
       expected: current,
-      write: (record, expected) => dependencies.store.updateSampling(record, expected),
+      write: (record, expected) => dependencies.store.updateSampling(record, expected, resources),
       read: () => dependencies.store.getSampling(sampling.samplingId),
       retryController,
       sleep: dependencies.sleep,
     });
   };
   /** Writes this record with recovery flags derived from the Attempts it commits. */
-  const persist = (sampling: SamplingState): Promise<void> => persistRecord({
+  const persist = (sampling: SamplingState, resources?: AttemptResourceSnapshot): Promise<void> => persistRecord({
     ...sampling,
     execution: withRecoveryBookkeeping(
       sampling.execution, current.execution, sampling.executionAttempts, executionAgentEnded, dependencies,
     ),
-  });
+  }, resources);
 
   /**
    * Ends one pass without a bundle, keeping the output and export progress. A transient failure
@@ -212,9 +212,8 @@ export async function executeSampling(
       attempts: current.executionAttempts,
       state: current.execution,
       agentEnded: executionAgentEnded,
-      saveResourceSnapshot: (attempt, snapshot) => dependencies.store.saveResourceSnapshot(
-        { samplingId: current.samplingId, attemptId: attempt.executionAttemptId }, snapshot),
-      persist: (executionAttempts, execution) => persistRecord({ ...current, executionAttempts, execution }),
+      persist: (executionAttempts, execution, collected) => persistRecord({ ...current, executionAttempts, execution },
+        collected && { attemptId: collected.attempt.executionAttemptId, snapshot: collected.snapshot }),
     });
     return { state: current, sample };
   }
@@ -284,7 +283,7 @@ export async function executeSampling(
           executionAttempts: [...current.executionAttempts, attempt],
         });
       },
-      updateAttempt: async (attempt, patch) => {
+      updateAttempt: async (attempt, patch, snapshot) => {
         const existing = current.executionAttempts.find((item) => (
           item.executionAttemptId === attempt.executionAttemptId
         ));
@@ -295,11 +294,9 @@ export async function executeSampling(
           executionAttempts: current.executionAttempts.map((item) => (
             item.executionAttemptId === updated.executionAttemptId ? updated : item
           )),
-        });
+        }, snapshot && { attemptId: updated.executionAttemptId, snapshot });
         return updated;
       },
-      saveResourceSnapshot: (attempt, snapshot) => dependencies.store.saveResourceSnapshot(
-        { samplingId: current.samplingId, attemptId: attempt.executionAttemptId }, snapshot),
       setSamplingStatus: async (status, lastError) => {
         await persist(withExecutionStatus(current, status, lastError));
       },

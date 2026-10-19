@@ -13,6 +13,7 @@ import {
   isPendingSamplingStatus,
   isStageRecoveryPending,
   isTerminalAgentStatus,
+  jsonObjectArrayInPlaceSchema,
   jsonObjectInPlaceSchema,
   jsonObjectSchema,
   jsonValueSchema,
@@ -98,6 +99,14 @@ describe("@eval-platform/eval-contracts", () => {
     cyclic.self = cyclic;
     for (const invalid of [cyclic, { value: Number.NaN }, { value: new Date() }, { get computed() { return 1; } }]) {
       expect(jsonObjectInPlaceSchema.safeParse(invalid).success).toBe(false);
+    }
+  });
+
+  it("validates a large array of raw objects in place, returning the original array", () => {
+    const input = [{ eventId: "a" }, { eventId: "b", nested: [null] }];
+    expect(jsonObjectArrayInPlaceSchema.parse(input)).toBe(input);
+    for (const invalid of [{}, [null], [[]], [{ value: Number.NaN }], Object.assign([{}], { extra: true }), new Array(1)]) {
+      expect(jsonObjectArrayInPlaceSchema.safeParse(invalid).success).toBe(false);
     }
   });
 
