@@ -19,7 +19,7 @@ export const deleteDataset = (datasetId: string) => api.delete(`/api/datasets/${
 export const listDatasetData = (datasetId: string, signal?: AbortSignal) =>
   api.get<Data[]>(`/api/datasets/${enc(datasetId)}/data`, { signal });
 export const attachData = (datasetId: string, dataIds: readonly string[]) =>
-  api.post<void>(`/api/datasets/${enc(datasetId)}/data`, { dataIds });
+  api.post<void>(`/api/datasets/${enc(datasetId)}/data`, { dataIds }, { responseMode: "json" });
 export const detachData = (datasetId: string, dataIds: readonly string[]) =>
   api.delete(`/api/datasets/${enc(datasetId)}/data`, { body: { dataIds } });
 export const importDataset = (format: DatasetFormat, content: string) =>
