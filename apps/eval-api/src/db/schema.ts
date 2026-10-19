@@ -22,6 +22,7 @@ import {
   foreignKey,
   index,
   integer,
+  json,
   jsonb,
   pgTable,
   primaryKey,
@@ -301,8 +302,8 @@ export const attemptResources = pgTable("eval_attempt_resources", {
   ownerUserId: text("owner_user_id").notNull(),
   samplingId: text("sampling_id").notNull(),
   evaluationId: text("evaluation_id"),
-  snapshot: jsonb("snapshot").$type<AgentResourceSnapshot>().notNull(),
-  metricSnapshot: jsonb("metric_snapshot").$type<AgentResourceSnapshot>().notNull(),
+  snapshot: json("snapshot").$type<AgentResourceSnapshot>().notNull(),
+  metricSnapshot: json("metric_snapshot").$type<AgentResourceSnapshot>().notNull(),
 }, (table) => [
   primaryKey({ name: "eval_attempt_resources_pk", columns: [table.stage, table.recordId, table.attemptId] }),
   foreignKey({ name: "eval_attempt_resources_sampling_fk", columns: [table.ownerUserId, table.samplingId], foreignColumns: [samplings.ownerUserId, samplings.samplingId] }).onDelete("cascade"),

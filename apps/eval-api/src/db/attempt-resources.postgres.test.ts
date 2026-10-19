@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { summarizeResourceSnapshot, type AgentResourceSnapshot, type EvaluationRecord, type Sampling } from "@eval-platform/eval-contracts";
-import { createMetrics, type MetricsFacts } from "@eval-platform/eval-metrics";
+import { compactResourceSnapshot, createMetrics, type MetricsFacts } from "@eval-platform/eval-metrics";
 import { and, eq } from "drizzle-orm";
 import { Pool, types } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -18,13 +18,13 @@ import { buildCommand, makeData, release, seedProject } from "./test-fixtures.js
 const connection = process.env.DATABASE_URL;
 const owner = "attempt-resources-test";
 
-function rawSnapshot(id: string, body: string): AgentResourceSnapshot {
+function rawSnapshot(id: string, body: string, toolName = "tool"): AgentResourceSnapshot {
   return {
     scope: { chatId: id, idempotencyKey: id, submissionId: id }, observedAt: "2026-10-17T00:00:00Z", finalized: true,
     coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
     usageEvents: [], billingSettlements: [], telemetryEvents: [
-      { eventId: "start", type: "tool.started", operationId: "tool", occurredAt: 1, resource: { sessionId: id }, payload: { toolName: "tool", input: body } },
-      { eventId: "end", type: "tool.finished", operationId: "tool", occurredAt: 5, resource: { sessionId: id }, payload: { toolName: "tool", outcome: "completed", output: body } },
+      { eventId: "start", type: "tool.started", operationId: "tool", occurredAt: 1, resource: { sessionId: id }, payload: { toolName, input: body } },
+      { eventId: "end", type: "tool.finished", operationId: "tool", occurredAt: 5, resource: { sessionId: id }, payload: { toolName, outcome: "completed", output: body } },
     ],
   };
 }
@@ -102,11 +102,13 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     await expect(database.db.insert(attemptResources).values(orphan)).rejects.toMatchObject({ cause: { constraint: "eval_attempt_resources_record_ck" } });
 
     const sizes: number[] = [];
-    const parser = types.getTypeParser(3802, "text");
     const pool = new Pool({ connectionString: database.connectionString, types: {
-      getTypeParser: (oid: number, format?: "text" | "binary") => oid === 3802 && format !== "binary"
-        ? (value: string) => { sizes.push(Buffer.byteLength(value)); return parser(value); }
-        : types.getTypeParser(oid, format),
+      getTypeParser: (oid: number, format?: "text" | "binary") => {
+        const parser = types.getTypeParser(oid, format);
+        return (oid === 114 || oid === 3802) && format !== "binary"
+          ? (value: string) => { sizes.push(Buffer.byteLength(value)); return parser(value); }
+          : parser;
+      },
     } });
     try {
       const measured = createEvalDb(pool);
@@ -140,6 +142,57 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     expect(await database.db.select({ id: attemptResources.recordId }).from(attemptResources)
       .where(and(eq(attemptResources.ownerUserId, owner)))).toEqual([]);
   }, 30_000);
+
+  describe.each(["execution", "evaluation"] as const)("%s snapshot string round trips", (stage) => {
+    it.each([
+      ["an unpaired high surrogate", "\ud83e"],
+      ["an unpaired low surrogate", "\udd16"],
+      ["an escaped NUL", "\u0000"],
+      ["normal Unicode", "\u4e2d\u6587 \u00e9 \ud83e\udd16"],
+    ])("preserves %s in raw snapshots, Metrics projections and downloads", async (_name, value) => {
+      const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }], evaluation: stage === "evaluation" });
+      const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
+      const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, {
+        projectId: seeded.projectId, operation: stage === "execution" ? "execution" : "pipeline",
+      });
+      await store.admitRun(command);
+      const recordId = (stage === "execution" ? command.run.samplingIds[0] : command.run.evaluationIds[0])!;
+      const snapshot = rawSnapshot(recordId, value, value);
+      const resources = { status: "collected" as const, summary: summarizeResourceSnapshot(snapshot) };
+      if (stage === "execution") {
+        const original = (await store.getSampling(recordId))!;
+        await store.updateSampling({ ...original, execution: { status: "succeeded" }, executionAttempts: [{
+          executionAttemptId: recordId, samplingId: recordId, attemptNumber: 1, status: "completed", resources,
+        }] }, original, { attemptId: recordId, snapshot });
+        expect((await store.getSampling(recordId))!.executionAttempts[0]!.resources).toEqual(resources);
+      } else {
+        const original = (await store.getEvaluation(recordId))!;
+        await store.updateEvaluation({ ...original, status: { status: "succeeded" }, attempts: [{
+          evaluationAttemptId: recordId, evaluationId: recordId, attemptNumber: 1, status: "completed", resources,
+        }] }, original, { attemptId: recordId, snapshot });
+        expect((await store.getEvaluation(recordId))!.attempts[0]!.resources).toEqual(resources);
+      }
+
+      const [row] = await database.db.select().from(attemptResources)
+        .where(and(eq(attemptResources.stage, stage), eq(attemptResources.recordId, recordId)));
+      expect(row?.snapshot).toEqual(snapshot);
+      const projection = await compactResourceSnapshot(snapshot);
+      expect(row?.metricSnapshot).toEqual(projection);
+      expect(row?.metricSnapshot.telemetryEvents).toMatchObject([
+        { event: { payload: { toolName: value } } },
+        { event: { payload: { toolName: value } } },
+      ]);
+      const facts = await createPostgresMetricsSource(database.db, owner).read({ projectId: seeded.projectId });
+      const attempt = stage === "execution" ? facts.samplings[0]!.executionAttempts[0] : facts.evaluations[0]!.attempts[0];
+      expect(attempt?.resources).toEqual({ ...resources, snapshot: projection });
+
+      const stream = await createPostgresResourceSnapshotReader(database.db, owner).open(seeded.projectId, stage, recordId, recordId);
+      expect(stream).not.toBeNull();
+      const text = await new Response(stream!).text();
+      expect(JSON.parse(text)).toEqual(snapshot);
+      expect(text).toContain(JSON.stringify(value));
+    });
+  });
 
   it("serves a 312 MB raw project in a process with a 128 MB heap", async () => {
     const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }], samplingCount: 26 });

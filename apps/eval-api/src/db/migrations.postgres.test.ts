@@ -1,11 +1,18 @@
 import { appendFile, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { summarizeResourceSnapshot, type AgentResourceSnapshot } from "@eval-platform/eval-contracts";
+import { compactResourceSnapshot } from "@eval-platform/eval-metrics";
 import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createPostgresResourceSnapshotReader } from "./attempt-resources.js";
+import { createPostgresMetricsSource } from "./metrics.js";
 import { migrateDatabase } from "./migrations.js";
-import { datasets } from "./schema.js";
+import { createPostgresProjectPlanReader } from "./project-plans.js";
+import { createPostgresRuntimeStore } from "./runtime.js";
+import { attemptResources, datasets } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
+import { buildCommand, makeData, release, seedProject } from "./test-fixtures.js";
 
 const connection = process.env.DATABASE_URL;
 const migrationsFolder = path.resolve("migrations-postgres");
@@ -78,4 +85,113 @@ describe.skipIf(!connection)("deployment database migrations", () => {
       .toBe("migration_probe");
     await expect(migrateDatabase(database.db, { migrationsFolder: nextFolder })).resolves.toBeUndefined();
   });
+});
+
+describe.skipIf(!connection)("resource snapshot JSON migration", () => {
+  let database: Awaited<ReturnType<typeof createTestDatabase>>;
+  let directory: string;
+
+  beforeAll(async () => {
+    directory = await mkdtemp(path.join(tmpdir(), "eval-resource-json-upgrade-"));
+    await cp(migrationsFolder, directory, { recursive: true });
+    const journalPath = path.join(directory, "meta/_journal.json");
+    const journal = JSON.parse(await readFile(journalPath, "utf8"));
+    journal.entries = journal.entries.filter((entry: { idx: number }) => entry.idx <= 4);
+    await writeFile(journalPath, JSON.stringify(journal));
+    database = await createTestDatabase(connection!, directory);
+  }, 30_000);
+
+  afterAll(async () => {
+    if (database) await database.destroy();
+    if (directory) await rm(directory, { recursive: true, force: true });
+  }, 30_000);
+
+  it("upgrades historical jsonb resources without losing data or migration history", async () => {
+    const { db } = database;
+    const columnTypes = async () => (await db.execute(sql`
+      SELECT column_name, data_type FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'eval_attempt_resources'
+        AND column_name IN ('snapshot', 'metric_snapshot') ORDER BY column_name
+    `)).rows;
+    expect(await columnTypes()).toEqual([
+      { column_name: "metric_snapshot", data_type: "jsonb" },
+      { column_name: "snapshot", data_type: "jsonb" },
+    ]);
+
+    const owner = "resource-json-upgrade-test";
+    const seeded = await seedProject(db, owner, { datasets: [{ data: [makeData()] }], evaluation: true });
+    const store = createPostgresRuntimeStore(db, owner, release, { enqueue: async () => {} });
+    const command = await buildCommand(createPostgresProjectPlanReader(db, owner), store, { projectId: seeded.projectId, operation: "pipeline" });
+    await store.admitRun(command);
+    const records = [["execution", command.run.samplingIds[0]!], ["evaluation", command.run.evaluationIds[0]!]] as const;
+    const saveSnapshot = async (stage: "execution" | "evaluation", recordId: string, attemptId: string, body: string) => {
+      const snapshot: AgentResourceSnapshot = {
+        scope: { chatId: recordId, idempotencyKey: attemptId, submissionId: attemptId },
+        observedAt: "2026-10-17T00:00:00Z", finalized: true,
+        coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
+        usageEvents: [], billingSettlements: [], telemetryEvents: [
+          { eventId: "start", type: "tool.started", operationId: attemptId, occurredAt: 1, resource: { sessionId: recordId }, payload: { toolName: body, input: body } },
+          { eventId: "end", type: "tool.finished", operationId: attemptId, occurredAt: 5, resource: { sessionId: recordId }, payload: { toolName: body, outcome: "completed", output: body } },
+        ],
+      };
+      const resources = { status: "collected" as const, summary: summarizeResourceSnapshot(snapshot) };
+      if (stage === "execution") {
+        const original = (await store.getSampling(recordId))!;
+        await store.updateSampling({ ...original, execution: { status: "succeeded" }, executionAttempts: [...original.executionAttempts, {
+          executionAttemptId: attemptId, samplingId: recordId, attemptNumber: original.executionAttempts.length + 1, status: "completed", resources,
+        }] }, original, { attemptId, snapshot });
+      } else {
+        const original = (await store.getEvaluation(recordId))!;
+        await store.updateEvaluation({ ...original, status: { status: "succeeded" }, attempts: [...original.attempts, {
+          evaluationAttemptId: attemptId, evaluationId: recordId, attemptNumber: original.attempts.length + 1, status: "completed", resources,
+        }] }, original, { attemptId, snapshot });
+      }
+      return snapshot;
+    };
+    for (const [stage, recordId] of records) {
+      await saveSnapshot(stage, recordId, recordId, "before upgrade \u4e2d\u6587 \ud83e\udd16");
+    }
+    const snapshots = () => db.select().from(attemptResources).orderBy(attemptResources.stage, attemptResources.recordId, attemptResources.attemptId);
+    const history = async () => (await db.execute(sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`)).rows;
+    const before = await snapshots();
+    expect(before).toHaveLength(2);
+    const source = createPostgresMetricsSource(db, owner);
+    const factsBefore = await source.read({ projectId: seeded.projectId });
+    const prefix = await history();
+    expect(prefix).toHaveLength(5);
+
+    await migrateDatabase(db, { migrationsFolder });
+
+    expect(await columnTypes()).toEqual([
+      { column_name: "metric_snapshot", data_type: "json" },
+      { column_name: "snapshot", data_type: "json" },
+    ]);
+    expect(await snapshots()).toEqual(before);
+    expect(await source.read({ projectId: seeded.projectId })).toEqual(factsBefore);
+    const upgradedHistory = await history();
+    expect(upgradedHistory.slice(0, prefix.length)).toEqual(prefix);
+    expect(upgradedHistory).toHaveLength(prefix.length + 1);
+
+    const reader = createPostgresResourceSnapshotReader(db, owner);
+    const download = async (stage: "execution" | "evaluation", recordId: string, attemptId: string) => {
+      const stream = await reader.open(seeded.projectId, stage, recordId, attemptId);
+      expect(stream).not.toBeNull();
+      return JSON.parse(await new Response(stream!).text());
+    };
+    for (const row of before) expect(await download(row.stage, row.recordId, row.attemptId)).toEqual(row.snapshot);
+    for (const [stage, recordId] of records) {
+      const attemptId = `${recordId}:after-upgrade`;
+      const snapshot = await saveSnapshot(stage, recordId, attemptId, "Unicode \u4e2d\u6587 \ud83e\udd16; high \ud83e; low \udd16; NUL \u0000");
+      const row = (await snapshots()).find((item) => item.attemptId === attemptId);
+      expect(row?.snapshot).toEqual(snapshot);
+      expect(row?.metricSnapshot).toEqual(await compactResourceSnapshot(snapshot));
+      expect(await download(stage, recordId, attemptId)).toEqual(snapshot);
+    }
+
+    const beforeRerun = await snapshots();
+    expect(beforeRerun.filter((row) => row.attemptId === row.recordId)).toEqual(before);
+    await expect(migrateDatabase(db, { migrationsFolder })).resolves.toBeUndefined();
+    expect(await snapshots()).toEqual(beforeRerun);
+    expect(await history()).toEqual(upgradedHistory);
+  }, 30_000);
 });
