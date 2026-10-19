@@ -3,8 +3,8 @@ import { Pool } from "pg";
 import { createEvalDb, type EvalDb } from "./client.js";
 import { migrateDatabase } from "./migrations.js";
 
-/** A temporary database migrated with the baseline; tests drop it afterwards. */
-export async function createTestDatabase(url: string): Promise<{
+/** A temporary database migrated with the requested history; tests drop it afterwards. */
+export async function createTestDatabase(url: string, migrationsFolder = path.resolve("migrations-postgres")): Promise<{
   readonly db: EvalDb;
   readonly connectionString: string;
   destroy(): Promise<void>;
@@ -26,7 +26,7 @@ export async function createTestDatabase(url: string): Promise<{
   const pool = new Pool({ connectionString: target.toString() });
   const db = createEvalDb(pool);
   try {
-    await migrateDatabase(db, { migrationsFolder: path.resolve("migrations-postgres") });
+    await migrateDatabase(db, { migrationsFolder });
   } catch (error) {
     await pool.end();
     await admin(`DROP DATABASE "${databaseName}"`);
