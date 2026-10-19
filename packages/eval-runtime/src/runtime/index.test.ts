@@ -6005,9 +6005,12 @@ describe("evaluation result checking", () => {
     return typeof parsed.score === "number" ? { valid: true, errors: [] } : { valid: false, errors: ["/score must be number"] };
   };
 
-  async function evaluateOnce(harness: Harness, results: EvaluationResultPort) {
+  async function evaluateOnce(harness: Harness, results: EvaluationResultPort, retryPolicy: RetryPolicy = NO_RETRY) {
     const store = makeStore();
-    const runtime = createAutoResumingRuntime({ plans: makePlans([makeSample("sample-1")]), harness, store, results });
+    const runtime = createAutoResumingRuntime({
+      plans: makePlans([makeSample("sample-1")], { evaluation: evaluationPlan({ retryPolicy }) }),
+      harness, store, results, sleep: async () => undefined,
+    });
     const run = await runtime.submit(projectRequest("pipeline", `results-${Math.random()}`));
     await waitForTerminal(runtime, run.runId);
     const record = (await store.getRun(run.runId))!;
@@ -6019,6 +6022,216 @@ describe("evaluation result checking", () => {
     status: "succeeded" as const, artifacts: [],
     trajectory: { trajectoryId: "trajectory-2", source: "evaluator" as const, path: "/eval/evaluation.jsonl" },
   };
+
+  it("retries a completed evaluation without a submitted score", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
+    const runtime = createRuntime({
+      store, harness, sleep, createRetryController: createProductionRetryController,
+      plans: makePlans([makeSample("sample-1")], { evaluation: evaluationPlan({ retryPolicy: RETRY_ONE }) }),
+      results: {
+        submission: {
+          token: () => "t",
+          read: async () => vi.mocked(harness.restartAgent).mock.calls.length === 0
+            ? undefined : { path: "mcp:submit_evaluation", content: '{"score":8}', source: "submission" },
+        },
+        check: validScore,
+      },
+    });
+    const run = await runtime.submit(projectRequest("pipeline", "missing-evaluation-result-recovery"));
+
+    await runtime.resume(run.runId);
+
+    const evaluation = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
+    expect(evaluation.status.status).toBe("succeeded");
+    expect(evaluation.output?.structuredOutput?.source).toBe("submission");
+    expect(evaluation.attempts.map((attempt) => attempt.status)).toEqual(["completed", "completed"]);
+    expect(harness.restartAgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      handle: expect.objectContaining({ role: "evaluator", chatId: evaluation.chatId }),
+      idempotencyKey: `evaluation:${evaluation.samplingId}:restart:2`,
+    }));
+    expect(sleep).toHaveBeenCalledWith(250);
+    expect(harness.collectExecution).toHaveBeenCalledTimes(1);
+    expect(harness.exportEvidence).toHaveBeenCalledTimes(1);
+    expect(harness.importEvidence).toHaveBeenCalledTimes(1);
+    expect(harness.readFinalReply).not.toHaveBeenCalled();
+  });
+
+  it.each([0, DEFAULT_RETRY_POLICY.maxRestarts])("bounds missing-score recovery by maxRestarts=%i", async (maxRestarts) => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    const log = vi.fn();
+    const error = RESULT_NOT_SUBMITTED;
+    vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
+    const runtime = createRuntime({
+      store, harness, sleep, log, createRetryController: createProductionRetryController,
+      plans: makePlans([makeSample("sample-1")], {
+        evaluation: evaluationPlan({ retryPolicy: { ...DEFAULT_RETRY_POLICY, maxRestarts } }),
+      }),
+      results: { submission: { token: () => "t", read: async () => undefined }, check: validScore },
+    });
+    const run = await runtime.submit(projectRequest("pipeline", `missing-score-budget-${maxRestarts}`));
+
+    await runtime.resume(run.runId);
+
+    const evaluation = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
+    expect(evaluation.status).toEqual({ status: "failed", lastError: error });
+    expect(evaluation.attempts).toHaveLength(maxRestarts + 1);
+    for (const attempt of evaluation.attempts) {
+      expect(attempt).toMatchObject({ status: "completed", error, resources: { status: "collected" } });
+      expect(store.resourceSnapshot({
+        samplingId: evaluation.samplingId, evaluationId: evaluation.evaluationId, attemptId: attempt.evaluationAttemptId,
+      })).toBeDefined();
+    }
+    expect(harness.restartAgent).toHaveBeenCalledTimes(maxRestarts);
+    expect(harness.collectExecution).toHaveBeenCalledTimes(1);
+    expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([250, 500, 1_000, 2_000].slice(0, maxRestarts));
+    expect(log).toHaveBeenCalledWith(expect.objectContaining({
+      name: "retry_exhausted", operation: "restart", attemptNumber: maxRestarts + 1, error,
+    }));
+  });
+
+  it("shares the restart budget between failed Submissions and completed evaluations without scores", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const submit = vi.mocked(harness.submitAgent).getMockImplementation()!;
+    vi.mocked(harness.submitAgent).mockImplementation(async (input) => input.handle.role === "evaluator"
+      ? { ...makeSubmission("failed", "failed-evaluation"), retryable: true, error: "temporary Agent failure" }
+      : submit(input));
+    vi.mocked(harness.inspectAgentResources).mockImplementation(async (input) => ({
+      scope: { chatId: input.handle.chatId, idempotencyKey: input.idempotencyKey, submissionId: input.submissionId! },
+      observedAt: "2026-10-08T00:00:00.000Z", finalized: true, readiness: FINALIZED_READINESS,
+    }));
+    vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
+    const runtime = createRuntime({
+      store, harness, sleep: async () => undefined,
+      plans: makePlans([makeSample("sample-1")], { evaluation: evaluationPlan({ retryPolicy: RETRY_TWO }) }),
+      results: { submission: { token: () => "t", read: async () => undefined }, check: validScore },
+    });
+    const run = await runtime.submit(projectRequest("pipeline", "shared-evaluation-restarts"));
+
+    await runtime.resume(run.runId);
+
+    const evaluation = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
+    expect(evaluation.status.status).toBe("failed");
+    expect(evaluation.attempts.map(({ status }) => status)).toEqual(["failed", "completed", "completed"]);
+    expect(harness.restartAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it("resumes an interrupted recovery backoff with the same persisted restart budget", async () => {
+    const store = makeStore();
+    store.usePlans(makePlans([makeSample("sample-1")], { evaluation: evaluationPlan({ retryPolicy: RETRY_ONE }) }));
+    const harness = makeHarness();
+    vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
+    const results: EvaluationResultPort = {
+      submission: {
+        token: () => "t",
+        read: async () => vi.mocked(harness.restartAgent).mock.calls.length === 0
+          ? undefined : { path: "mcp:submit_evaluation", content: '{"score":8}', source: "submission" },
+      },
+      check: validScore,
+    };
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const sleep = vi.fn(() => waiting);
+    const run = await createTestAdmission(store).submit(projectRequest("pipeline", "resume-missing-score-recovery"));
+    const stop = new AbortController();
+    const resumer = createTestResumer(store, harness, { results, sleep, createRetryController: createProductionRetryController });
+    const task = resumer.resume(run.runId, stop.signal);
+    try {
+      await vi.waitFor(() => expect(sleep).toHaveBeenCalledOnce());
+      stop.abort();
+      await task;
+
+      const pending = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
+      expect(pending.status.status).toBe("retrying");
+      expect(pending.attempts).toHaveLength(1);
+      expect(pending.attempts[0]).toMatchObject({ status: "completed", error: RESULT_NOT_SUBMITTED });
+      expect(harness.restartAgent).not.toHaveBeenCalled();
+
+      release();
+      await createTestResumer(store, harness, {
+        results, sleep: async () => undefined, createRetryController: createProductionRetryController,
+      }).resume(run.runId);
+
+      const recovered = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
+      expect(recovered.status.status).toBe("succeeded");
+      expect(recovered.attempts).toHaveLength(2);
+      expect(harness.restartAgent).toHaveBeenCalledOnce();
+      expect(harness.importEvidence).toHaveBeenCalledOnce();
+      expect(harness.collectExecution).toHaveBeenCalledOnce();
+    } finally {
+      stop.abort();
+      release();
+      await task;
+    }
+  });
+
+  it("does not restart when MCP accepts the result while missing-score recovery is being recorded", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
+    const write = store.updateEvaluation.bind(store);
+    let accepted = false;
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (record, expected, resources) => {
+      await write(record, expected, resources);
+      if (!accepted && record.attempts.at(-1)?.error === RESULT_NOT_SUBMITTED) {
+        accepted = true;
+        const current = (await store.getEvaluation(record.evaluationId))!;
+        await write({ ...current, status: { status: "succeeded" }, output: {
+          ...noResult, structuredOutput: { path: "mcp:submit_evaluation", content: '{"score":8}', source: "submission" },
+        } }, current);
+      }
+    });
+    const runtime = createRuntime({
+      store, harness, sleep: async () => undefined,
+      plans: makePlans([makeSample("sample-1")], { evaluation: evaluationPlan({ retryPolicy: RETRY_ONE }) }),
+      results: {
+        submission: { token: () => "t", read: async (id) => (await store.getEvaluation(id))?.output?.structuredOutput },
+        check: validScore,
+      },
+    });
+    const run = await runtime.submit(projectRequest("pipeline", "accepted-before-missing-score-restart"));
+
+    await runtime.resume(run.runId);
+
+    const evaluation = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
+    expect(evaluation.status.status).toBe("succeeded");
+    expect(evaluation.output?.structuredOutput?.content).toBe('{"score":8}');
+    expect(evaluation.attempts).toHaveLength(1);
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("never dispatches missing-score recovery during a manual output recollection", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const log = vi.fn();
+    vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
+    const runtime = createRuntime({
+      store, harness, log, sleep: async () => undefined,
+      plans: makePlans([makeSample("sample-1")], { evaluation: evaluationPlan({ retryPolicy: RETRY_ONE }) }),
+      results: { submission: { token: () => "t", read: async () => undefined }, check: validScore },
+    });
+    const run = await runtime.submit(projectRequest("pipeline", "recollect-not-restart"));
+    await runtime.resume(run.runId);
+    const evaluation = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
+    expect(evaluation.status.status).toBe("failed");
+    vi.mocked(harness.restartAgent).mockClear();
+    log.mockClear();
+    await seedEvaluation(store, { ...evaluation, status: { status: "retrying", collectionPending: true } });
+
+    await runtime.resume(run.runId);
+
+    const recollected = (await store.listEvaluations(run.samplingIds[0]!))[0]!;
+    expect(recollected.status).toEqual({ status: "failed", lastError: RESULT_NOT_SUBMITTED });
+    expect(recollected.attempts).toHaveLength(2);
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+    expect(harness.readFinalReply).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalledWith(expect.objectContaining({ operation: "restart" }));
+  });
 
   it("prefers the submitted result and tells the Evaluator to submit it", async () => {
     const harness = makeHarness();
@@ -6056,10 +6269,13 @@ describe("evaluation result checking", () => {
   it("does not substitute a file or final reply for a missing MCP acceptance", async () => {
     const harness = makeHarness();
     vi.mocked(harness.readFinalReply).mockResolvedValue('{"score": 8}');
-    const evaluation = await evaluateOnce(harness, { submission: { token: () => "t", read: async () => undefined }, check: validScore });
+    const evaluation = await evaluateOnce(harness, {
+      submission: { token: () => "t", read: async () => undefined }, check: validScore,
+    }, DEFAULT_RETRY_POLICY);
     expect(evaluation.status).toEqual({ status: "failed", lastError: RESULT_NOT_SUBMITTED });
     expect(evaluation.output?.structuredOutput).toBeUndefined();
     expect(harness.readFinalReply).not.toHaveBeenCalled();
+    expect(harness.restartAgent).toHaveBeenCalledTimes(DEFAULT_RETRY_POLICY.maxRestarts);
   });
 
   it.each(["disconnect", "completed"] as const)("keeps MCP recovery and acceptance authoritative when observation is %s", async (observation) => {
@@ -6141,22 +6357,26 @@ describe("evaluation result checking", () => {
     expect(harness.restartAgent).not.toHaveBeenCalled();
   });
 
-  it("fails as not submitted without running the Evaluator again", async () => {
+  it("fails as not submitted only after exhausting the Evaluator restart budget", async () => {
     const harness = makeHarness();
     vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
-    const evaluation = await evaluateOnce(harness, { check: validScore });
+    const evaluation = await evaluateOnce(harness, { check: validScore }, DEFAULT_RETRY_POLICY);
     expect(evaluation.status).toEqual({ status: "failed", lastError: RESULT_NOT_SUBMITTED });
     expect(vi.mocked(harness.submitAgent).mock.calls.filter(([call]) => call.handle.role === "evaluator")).toHaveLength(1);
-    expect(vi.mocked(harness.restartAgent).mock.calls.filter(([call]) => call.handle.role === "evaluator")).toHaveLength(0);
+    expect(vi.mocked(harness.restartAgent).mock.calls.filter(([call]) => call.handle.role === "evaluator"))
+      .toHaveLength(DEFAULT_RETRY_POLICY.maxRestarts);
+    expect(evaluation.attempts).toHaveLength(DEFAULT_RETRY_POLICY.maxRestarts + 1);
   });
 
   it("fails an invalid result and keeps it as evidence", async () => {
     const harness = makeHarness();
     vi.mocked(harness.collectEvaluation).mockResolvedValue({ ...noResult, structuredOutput: { path: "/output/result.json", content: '{"score":"high"}' } });
-    const evaluation = await evaluateOnce(harness, { check: validScore });
+    const evaluation = await evaluateOnce(harness, { check: validScore }, DEFAULT_RETRY_POLICY);
     expect(evaluation.status.status).toBe("failed");
     expect(evaluation.status.lastError).toBe(`${RESULT_INVALID_PREFIX} (result-file): /score must be number`);
     expect(evaluation.output?.structuredOutput?.content).toBe('{"score":"high"}');
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+    expect(harness.readFinalReply).not.toHaveBeenCalled();
   });
 });
 

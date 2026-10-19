@@ -36,7 +36,7 @@ import { reportError } from "./log.js";
 import { evaluationAgentEnded, isAcceptedEvaluation, unconfirmedObservation, withRecoveryBookkeeping } from "./recovery.js";
 import { refreshFinishedStage } from "./resource-refresh.js";
 import { publishEvaluationScore } from "./scores.js";
-import { evaluationResultFailure, resolveEvaluationResult, resultInstruction } from "./results.js";
+import { RESULT_NOT_SUBMITTED, evaluationResultFailure, resolveEvaluationResult, resultInstruction } from "./results.js";
 
 export interface EvaluateSamplingInput {
   readonly context: RuntimeEvaluationContext;
@@ -209,9 +209,26 @@ export async function evaluateSampling(
     }
 
     const evaluatorHandle = { ownerUserId: agentConfig.ownerUserId, chatId, samplingId: sampling.samplingId, evaluationId: currentEvaluation.evaluationId, role: "evaluator" as const, framework: evaluatorHarness.framework };
+    const results = dependencies.results;
+    let finalReply: { submissionId: string; text: string | undefined } | undefined;
+    const readFinalReply = async (submissionId: string | undefined): Promise<string | undefined> => {
+      if (submissionId === undefined) return undefined;
+      if (finalReply?.submissionId === submissionId) return finalReply.text;
+      const text = await dependencies.harness.readFinalReply({
+        handle: evaluatorHandle, submissionId,
+        ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
+      });
+      finalReply = { submissionId, text };
+      return text;
+    };
+    const resolveOutput = (output: EvaluationAgentOutput): Promise<EvaluationAgentOutput> => results === undefined
+      ? Promise.resolve(output) : resolveEvaluationResult({
+        port: results, evaluationId: currentEvaluation.evaluationId, output,
+        readFinalReply: () => readFinalReply(currentEvaluation.attempts.at(-1)?.submissionId),
+      });
     const recollect = async () => {
       const output = await collectOutputWithRetry({ stage: "evaluation", retryController, sleep: dependencies.sleep,
-        collect: () => dependencies.harness.collectEvaluation({ handle: evaluatorHandle }),
+        collect: async () => resolveOutput(await dependencies.harness.collectEvaluation({ handle: evaluatorHandle })),
       });
       if (output.status !== "succeeded") throw new AgentOperationError(`evaluation output collection failed: ${output.error ?? "output unavailable"}`, false, "network");
       return { output };
@@ -295,10 +312,14 @@ export async function evaluateSampling(
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
       },
-      collectOutput: (handle) => dependencies.harness.collectEvaluation({
+      collectOutput: async (handle) => resolveOutput(await dependencies.harness.collectEvaluation({
         handle,
         ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
-      }),
+      })),
+      recoverOutput: async (_handle, output) => {
+        if (!results || output.structuredOutput || dependencies.finalizingStop || dependencies.runStopped) return undefined;
+        return new AgentOperationError(RESULT_NOT_SUBMITTED, true, "llm");
+      },
       isSuccessfulOutput: (output) => output.status === "succeeded",
       outputFailure: (output) => new AgentOperationError(
         output.error ?? "evaluation output failed",
@@ -307,20 +328,10 @@ export async function evaluateSampling(
       ),
     });
 
-    // Only a valid result the platform holds makes the Evaluation succeed; a missing or invalid one is
-    // kept as evidence and never re-runs the Evaluator, so it is not scored twice.
-    const results = dependencies.results;
-    const submissionId = currentEvaluation.attempts.at(-1)?.submissionId;
+    // Recheck acceptance after the lifecycle: missing or invalid results never count as success.
     const output = results === undefined ? result.output : await collectOutputWithRetry({
       stage: "evaluation", retryController, sleep: dependencies.sleep,
-      collect: () => resolveEvaluationResult({
-        port: results, evaluationId: currentEvaluation.evaluationId, output: result.output,
-        readFinalReply: async () => submissionId === undefined ? undefined : dependencies.harness.readFinalReply({
-          handle: evaluatorHandle,
-          submissionId,
-          ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
-        }),
-      }),
+      collect: () => resolveOutput(result.output),
     });
     const resultFailure = results === undefined ? undefined : evaluationResultFailure(results, input.evaluationOutputSchema, output);
     if (resultFailure !== undefined) {

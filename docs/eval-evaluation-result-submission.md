@@ -28,6 +28,12 @@
 
 仅未配置 MCP 的旧 Agent 保留 `result-file` 和 `final-reply` 的收集方式，依然经过同一 Schema 校验。原始产物、轨迹和 Attempt 记录保留。
 
+## 未提交评分的重试
+
+评估 Agent 的 Submission 已完成、平台尚无提交评分时，直接进入 Runtime 现有的 `restart` 决策，不检查错误文本或最终回复。在同一评估 Chat 使用新的幂等键提交下一次 Attempt，和失败 Submission 共用评估计划的 `maxRestarts`、退避及持久化 Attempt 次数；默认最多 4 次重启，加上首次共 5 次，不另加预算。不会重跑执行 Agent，也不重新初始化或导入证据。原 Attempt 的完成状态、资源及 `evaluation result not submitted` 原因保留，Worker 恢复不重置次数；耗尽后仍未提交则明确失败。
+
+最终回复不作为 MCP 评分。合法结果已接受、结果格式无效、人工补收或 Run 已停止时不启动恢复；恢复决策前再读当前记录确认结果未被 MCP 接受。
+
 ## 配置
 
 - Eval API 与 Run Worker 配置同一个 `EVAL_RESULT_MCP_TOKEN`（至少 32 个字符）。生产部署从应用 Secret 读取该值并传给两个容器（`infra/aws/deploy/deploy.sh`），MCP 地址为 `https://evalapi.springbrand.ai/mcp/evaluation-results`。

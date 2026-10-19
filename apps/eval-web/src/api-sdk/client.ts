@@ -30,7 +30,8 @@ export const api = {
   post: <T>(path: string, body?: unknown, options?: HttpRequestOptions) => watch(client.post<T>(path, body, options)),
   put: <T>(path: string, body?: unknown, options?: HttpRequestOptions) => watch(client.put<T>(path, body, options)),
   patch: <T>(path: string, body?: unknown, options?: HttpRequestOptions) => watch(client.patch<T>(path, body, options)),
-  delete: <T = void>(path: string, options?: HttpRequestOptions) => watch(client.delete<T>(path, options)),
+  delete: <T = void>(path: string, options?: HttpRequestOptions) =>
+    watch(client.delete<T>(path, { ...options, responseMode: "json" })),
   /** Text endpoints such as Dataset export, outside the JSON envelope. */
   text: (path: string, options?: HttpRequestOptions) =>
     watch(client.get<string>(path, { ...options, responseMode: "text" })),

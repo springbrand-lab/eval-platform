@@ -138,6 +138,8 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   readonly collectOutput: (handle: AgentHandle) => Promise<TOutput>;
   readonly isSuccessfulOutput: (output: TOutput) => boolean;
   readonly outputFailure: (output: TOutput) => AgentOperationError;
+  /** A narrowly identified missing result may need a new Attempt, not another read of the old output. */
+  readonly recoverOutput?: (handle: AgentHandle, output: TOutput, attempt: TAttempt) => Promise<AgentOperationError | undefined>;
   /** The caller atomically persists the final stage state with required evidence. */
   readonly deferFailureStatus?: boolean;
 }
@@ -416,12 +418,25 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
         const failure = options.outputFailure(output);
         throw new OutputCollectionError(options.stage, describeAgentError(failure), failure, false);
       }
+      const recovery = await options.recoverOutput?.(outputHandle, output, attempt);
+      if (recovery?.retryable) {
+        attempt = await options.updateAttempt(attempt, { error: recovery.message });
+        const decision = await retryController.decide({
+          operation: "restart", failureKind: recovery.failureKind, attemptNumber, error: recovery.message,
+        });
+        if (decision.shouldRetry) {
+          await options.setSamplingStatus("retrying", recovery.message);
+          await dependencies.sleep(decision.backoffMs ?? 0);
+          attempt = undefined;
+          continue;
+        }
+      }
 
       return { handle, output };
     } catch (error) {
       if (error instanceof RuntimeRecordPersistenceError || error instanceof RuntimeRunStoppedError) throw error;
       const details = describeAgentError(error);
-      if (terminalPatch === undefined && attempt.resources === undefined) {
+      if (terminalPatch === undefined && attempt !== undefined && attempt.resources === undefined) {
         logAttempt(await options.updateAttempt(attempt, {
           status: "failed",
           completedAt: dependencies.now(),

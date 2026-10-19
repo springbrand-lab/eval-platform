@@ -12,6 +12,78 @@ describe("browser SDK and Web gateway errors", () => {
   beforeEach(() => { vi.resetModules(); clearVerificationCacheForTest(); });
   afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); clearVerificationCacheForTest(); });
 
+  it("accepts an empty successful deletion without reporting a response error", async () => {
+    let deleted = false;
+    const upstream: typeof fetch = async (input, init) => {
+      if (String(input).startsWith(env.TAKT_ORIGIN)) {
+        return Response.json({ user: { userId: "operator-1", access: { menuIds: ["eval"] } } });
+      }
+      expect(String(input)).toBe(`${env.EVAL_API_ORIGIN}/api/projects/project-a`);
+      expect(init?.method).toBe("DELETE");
+      deleted = true;
+      return new Response(null, { status: 204 });
+    };
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(new Request(input, init), env, upstream));
+    vi.stubGlobal("fetch", fetcher);
+    const auth = await import("@/auth/session");
+    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    const { deleteProject } = await import("./projects-api");
+
+    await expect(deleteProject("project-a")).resolves.toBeUndefined();
+    expect(deleted).toBe(true);
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(auth.getAuthState().status).toBe("ready");
+  });
+
+  it.each(["POST", "DELETE"] as const)("accepts an empty successful dataset membership %s", async (method) => {
+    let changes = 0;
+    const upstream: typeof fetch = async (input, init) => {
+      if (String(input).startsWith(env.TAKT_ORIGIN)) {
+        return Response.json({ user: { userId: "operator-1", access: { menuIds: ["eval"] } } });
+      }
+      expect(String(input)).toBe(`${env.EVAL_API_ORIGIN}/api/datasets/dataset-a/data`);
+      expect(init?.method).toBe(method);
+      expect(await new Response(init?.body).json()).toEqual({ dataIds: ["data-a"] });
+      changes += 1;
+      return new Response(null, { status: 204 });
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(new Request(input, init), env, upstream)));
+    const auth = await import("@/auth/session");
+    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    const { attachData, detachData } = await import("./datasets-api");
+
+    await expect((method === "POST" ? attachData : detachData)("dataset-a", ["data-a"])).resolves.toBeUndefined();
+    expect(changes).toBe(1);
+    expect(auth.getAuthState().status).toBe("ready");
+  });
+
+  it("keeps a connection failure after a committed deletion unknown and never repeats it", async () => {
+    let deletions = 0;
+    const upstream: typeof fetch = async (input) => {
+      if (String(input).startsWith(env.TAKT_ORIGIN)) {
+        return Response.json({ user: { userId: "operator-1", access: { menuIds: ["eval"] } } });
+      }
+      deletions += 1;
+      return new Response(null, { status: 204 });
+    };
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      await handle(new Request(input, init), env, upstream);
+      throw new TypeError("Connection closed after deletion");
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const auth = await import("@/auth/session");
+    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    const { deleteProject } = await import("./projects-api");
+    const { isWriteOutcomeUnknown } = await import("@/lib/errors");
+
+    const error: unknown = await deleteProject("project-a").then(() => null, (failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "NETWORK_ERROR", kind: "network", status: 0 });
+    expect(isWriteOutcomeUnknown(error)).toBe(true);
+    expect(deletions).toBe(1);
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(auth.getAuthState().status).toBe("ready");
+  });
+
   it("loads sampling details larger than the SDK's default response limit without truncation", async () => {
     const content = "x".repeat(10 * 1024 * 1024 + 1);
     const upstream: typeof fetch = async (input) => String(input).startsWith(env.TAKT_ORIGIN)
