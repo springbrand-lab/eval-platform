@@ -31,15 +31,15 @@ import {
 import {
   RESOURCE_READINESS_DELAYS_MS,
   STOPPED_RESOURCES_ERROR,
-  awaitResourceFinalization,
   collectResources,
   failedResources,
   resourceScopeMatches,
   storedResourceScope,
   type ExclusiveRunner,
+  type ResourceSource,
 } from "./resources.js";
 import type { RuntimeStore } from "./store.js";
-import type { RuntimeContext, RuntimeLog } from "./log.js";
+import { reportError, type RuntimeContext, type RuntimeLog } from "./log.js";
 import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 import type { EvaluationScorePort } from "./scores.js";
 import type { EvaluationResultPort } from "./results.js";
@@ -88,15 +88,7 @@ export interface AgentLifecycleDependencies {
   readonly runStopped?: true;
   /** Shared by every stage of the process, so one snapshot download and save runs at a time. */
   readonly resourceDownloads: ExclusiveRunner;
-}
-
-/** Report a failure that must not interrupt the Run; a reporter that throws is the last resort for stderr. */
-export function reportError(onError: (error: Error) => void, error: Error): void {
-  try {
-    onError(error);
-  } catch (reportingError) {
-    console.error(error, reportingError);
-  }
+  readonly resourceStop?: ResourceSource["stop"];
 }
 
 /** Tags every log event and reported error with the Run members it belongs to. */
@@ -387,25 +379,23 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
         } else if (terminalSaved && needsResources) {
           const source = {
             harness: dependencies.harness, handle, scope: resourceScope, retryController,
-            sleep: dependencies.sleep, now: dependencies.now, log: dependencies.log, ...runtimeOption(options.harnessConfig.runtime),
+            sleep: dependencies.sleep, now: dependencies.now, log: dependencies.log, onError: dependencies.onError,
+            ...runtimeOption(options.harnessConfig.runtime),
+            ...(dependencies.resourceStop === undefined ? {} : { stop: dependencies.resourceStop }),
           };
-          // An unfinalized snapshot is never downloaded here; the stage owes it as `resourcesPending`.
-          const owed = await awaitResourceFinalization(
-            source, attempt.completedAt === undefined ? [0] : RESOURCE_READINESS_DELAYS_MS,
-          );
-          if (owed === undefined) {
-            await collectResources({
-              source,
-              current: resources,
-              exclusively: dependencies.resourceDownloads,
-              save: async (next, snapshot) => {
-                attempt = await options.updateAttempt(attempt!, {
-                  ...(next.status === "collected" && !attempt!.submissionId ? { submissionId: next.summary.scope.submissionId } : {}),
-                  resources: next,
-                }, snapshot);
-              },
-            });
-          }
+          await collectResources({
+            source,
+            current: resources,
+            exclusively: dependencies.resourceDownloads,
+            readinessDelays: attempt.completedAt === undefined ? [0] : RESOURCE_READINESS_DELAYS_MS,
+            allowUnfinalized: false,
+            save: async (next, snapshot) => {
+              attempt = await options.updateAttempt(attempt!, {
+                ...(next.status === "collected" && !attempt!.submissionId ? { submissionId: next.summary.scope.submissionId } : {}),
+                resources: next,
+              }, snapshot);
+            },
+          });
         }
       }
       if (!terminal) throw new Error(`${options.stage} submission has no confirmed status`);

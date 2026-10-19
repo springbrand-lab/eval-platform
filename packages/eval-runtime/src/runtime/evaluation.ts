@@ -28,11 +28,11 @@ import {
   applyAttemptPatch,
   collectOutputWithRetry,
   describeAgentError,
-  reportError,
   runAgentLifecycle,
   withContext,
   type StageDependencies,
 } from "./agent-lifecycle.js";
+import { reportError } from "./log.js";
 import { evaluationAgentEnded, isAcceptedEvaluation, unconfirmedObservation, withRecoveryBookkeeping } from "./recovery.js";
 import { refreshFinishedStage } from "./resource-refresh.js";
 import { publishEvaluationScore } from "./scores.js";

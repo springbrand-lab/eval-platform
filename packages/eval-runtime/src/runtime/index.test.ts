@@ -57,6 +57,7 @@ import {
   createEvalRunResumer as createResumerWithReporter,
   toRunSnapshot,
   toSamplingSnapshot,
+  withFreshResourceBudget,
   type EvalRunQueries,
   type EvalRunResumerDependencies,
   type RunStopReporter,
@@ -4426,9 +4427,10 @@ describe("raw resource persistence", () => {
 
   it("does not turn successful execution/evaluation into failure when resource reads are exhausted", async () => {
     const harness = makeHarness();
+    const onError = vi.fn();
     vi.mocked(harness.collectAgentResources).mockRejectedValue(new Error("resource source unavailable"));
     const runtime = createAutoResumingRuntime({
-      harness, store: makeStore(), sleep: async () => undefined,
+      harness, store: makeStore(), onError, sleep: async () => undefined,
       createRetryController: makeRetryControllerFactory({ resources: 1 }),
     });
     const run = await runtime.submit(projectRequest("pipeline", "missing-resources-pipeline"));
@@ -4446,6 +4448,10 @@ describe("raw resource persistence", () => {
     expect(harness.restartAgent).not.toHaveBeenCalled();
     expect(harness.collectExecution).toHaveBeenCalledTimes(1);
     expect(harness.collectEvaluation).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(onError.mock.calls.map(([, context]) => context.stage)).toEqual(["execution", "evaluation"]);
+    await runtime.resume(run.runId);
+    expect(onError).toHaveBeenCalledTimes(2);
   });
 
   it("waits on evaluator readiness after a terminal submission and downloads its snapshot once", async () => {
@@ -5516,7 +5522,9 @@ describe("Run recovery from persisted facts", () => {
       status: "collected", summary: summarizeResourceSnapshot(snapshot), downloads: 1, exhausted: true,
     });
     await expect(runtime.getRun(run.runId)).resolves.toMatchObject({ status: "succeeded" });
-    expect(reported).not.toHaveBeenCalled();
+    expect(reported).toHaveBeenCalledOnce();
+    await runtime.resume(run.runId);
+    expect(reported).toHaveBeenCalledOnce();
     expect(harness.submitAgent).not.toHaveBeenCalled();
     expect(harness.collectAgentResources).toHaveBeenCalledOnce();
   });
@@ -5565,7 +5573,9 @@ describe("Run recovery from persisted facts", () => {
     expect(persisted.attempts[0]!.resources).toEqual({
       status: "collected", summary: summarizeResourceSnapshot(snapshot), downloads: 1, exhausted: true,
     });
-    expect(reported).not.toHaveBeenCalled();
+    expect(reported).toHaveBeenCalledOnce();
+    await runtime.resume(run.runId);
+    expect(reported).toHaveBeenCalledOnce();
     expect(harness.submitAgent).not.toHaveBeenCalled();
     expect(harness.collectAgentResources).toHaveBeenCalledOnce();
   });
@@ -6150,6 +6160,196 @@ describe("evaluation result checking", () => {
   });
 });
 
+describe("resource downloads during Run cancellation", () => {
+  const NOW = "2026-10-20T00:00:00.000Z";
+
+  async function setup(sizes: readonly number[]) {
+    const samples = Array.from({ length: sizes.reduce((sum, size) => sum + size, 0) }, (_, index) => makeSample(`sample-${index}`));
+    const store = makeStore({ plans: makePlans(samples, { execution: executionPlan({ executionConcurrency: 3 }) }) });
+    const harness = makeHarness();
+    const admission = createTestAdmission(store);
+    const runs: RuntimeRunRecord[] = [];
+    let offset = 0;
+    for (const [index, size] of sizes.entries()) {
+      const ids = samples.slice(offset, offset + size).map(({ projectSampleId }) => projectSampleId);
+      const admitted = await admission.submit(projectRequest("execution", `resource-stop-${index}`, ids));
+      const run = (await store.getRun(admitted.runId))!;
+      runs.push(run);
+      for (const samplingId of run.samplingIds) {
+        await seedSampling(store, {
+          ...(await saved(store, samplingId)), subjectChatId: `chat-${samplingId}`, execution: { status: "succeeded" },
+          executionAttempts: [{
+            executionAttemptId: `attempt-${samplingId}`, samplingId, attemptNumber: 1, status: "completed",
+            submissionId: `submission-${samplingId}`, completedAt: NOW,
+            resources: { status: "pending", scope: {
+              chatId: `chat-${samplingId}`, idempotencyKey: `execution:${samplingId}`, submissionId: `submission-${samplingId}`,
+            } },
+          }],
+        });
+      }
+      offset += size;
+    }
+    for (const run of runs) {
+      for (const samplingId of run.samplingIds) {
+        await seedSampling(store, { ...(await saved(store, samplingId)), execution: {
+          status: "succeeded", resourcesPending: { deadline: new Date(Date.parse(NOW) + RESOURCE_WAIT_MS).toISOString(), nextAttemptAt: NOW },
+        } });
+      }
+    }
+    let active = 0;
+    let peak = 0;
+    let automatic = false;
+    const downloads: { readonly input: CollectAgentResourcesInput; readonly finish: () => void }[] = [];
+    vi.mocked(harness.collectAgentResources).mockImplementation((input) => new Promise((resolve, reject) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        active -= 1;
+        if (input.signal?.aborted) reject(input.signal.reason);
+        else resolve(makeResources(input));
+      };
+      downloads.push({ input, finish });
+      if (automatic) finish();
+    }));
+    return {
+      store, harness, runs, downloads,
+      resumer: createTestResumer(store, harness, { now: () => NOW, sleep: async () => undefined }),
+      active: () => active, peak: () => peak,
+      finishAll() { automatic = true; downloads.forEach(({ finish }) => finish()); },
+    };
+  }
+
+  it("cancels one Run's three refreshes without starting queued physical downloads or releasing the active one early", async () => {
+    const fixture = await setup([3]);
+    const stop = new AbortController();
+    let settled = false;
+    const task = fixture.resumer.resume(fixture.runs[0]!.runId, stop.signal).then(() => { settled = true; });
+    try {
+      await vi.waitFor(() => expect(fixture.harness.inspectAgentResources).toHaveBeenCalledTimes(3));
+      await vi.waitFor(() => expect(fixture.downloads).toHaveLength(1));
+      stop.abort();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fixture.downloads).toHaveLength(1);
+      expect(fixture.downloads[0]!.input.signal?.aborted).toBe(true);
+      expect(settled).toBe(false);
+      expect(fixture.active()).toBe(1);
+      fixture.downloads[0]!.finish();
+      await task;
+      expect(fixture.active()).toBe(0);
+      expect(fixture.peak()).toBe(1);
+      expect(fixture.downloads).toHaveLength(1);
+    } finally {
+      fixture.finishAll();
+      await task;
+    }
+  });
+
+  it("keeps another Run behind the physical cancellation and cleanup of an active download", async () => {
+    const fixture = await setup([1, 1]);
+    const stop = new AbortController();
+    const first = fixture.resumer.resume(fixture.runs[0]!.runId, stop.signal);
+    await vi.waitFor(() => expect(fixture.downloads).toHaveLength(1));
+    const second = fixture.resumer.resume(fixture.runs[1]!.runId);
+    try {
+      await vi.waitFor(() => expect(fixture.harness.inspectAgentResources).toHaveBeenCalledTimes(2));
+      stop.abort();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fixture.downloads).toHaveLength(1);
+      expect(fixture.active()).toBe(1);
+      fixture.downloads[0]!.finish();
+      await first;
+      await vi.waitFor(() => expect(fixture.downloads).toHaveLength(2));
+      expect(fixture.peak()).toBe(1);
+      fixture.downloads[1]!.finish();
+      await second;
+      expect(fixture.active()).toBe(0);
+    } finally {
+      fixture.finishAll();
+      await Promise.all([first, second]);
+    }
+  });
+
+  it("cancels a queued Run promptly without counting or starting its download", async () => {
+    const fixture = await setup([1, 1]);
+    const first = fixture.resumer.resume(fixture.runs[0]!.runId);
+    await vi.waitFor(() => expect(fixture.downloads).toHaveLength(1));
+    const stop = new AbortController();
+    let settled = false;
+    const second = fixture.resumer.resume(fixture.runs[1]!.runId, stop.signal).then(() => { settled = true; });
+    try {
+      await vi.waitFor(() => expect(fixture.harness.inspectAgentResources).toHaveBeenCalledTimes(2));
+      stop.abort();
+      await vi.waitFor(() => expect(settled).toBe(true));
+      expect(fixture.active()).toBe(1);
+      const queued = await saved(fixture.store, fixture.runs[1]!.samplingIds[0]!);
+      expect(queued.executionAttempts[0]!.resources).not.toHaveProperty("downloads");
+      fixture.downloads[0]!.finish();
+      await first;
+      expect(fixture.downloads).toHaveLength(1);
+      expect(fixture.peak()).toBe(1);
+    } finally {
+      fixture.finishAll();
+      await Promise.all([first, second]);
+    }
+  });
+
+  it.each(["readiness", "download-backoff", "count-persistence"] as const)("stops during %s sleep without retrying or blocking finalization", async (during) => {
+    const fixture = await setup([1]);
+    const samplingId = fixture.runs[0]!.samplingIds[0]!;
+    if (during === "readiness") {
+      const current = await saved(fixture.store, samplingId);
+      await seedSampling(fixture.store, { ...current, execution: { ...current.execution, status: "retrying" } });
+      mockReadiness(fixture.harness, () => false);
+    }
+    if (during === "download-backoff") {
+      vi.mocked(fixture.harness.collectAgentResources).mockRejectedValue(new Error("SP unavailable"));
+    }
+    if (during === "count-persistence") {
+      const write = fixture.store.updateSampling.bind(fixture.store);
+      vi.spyOn(fixture.store, "updateSampling").mockImplementation(async (record, expected, resources) => {
+        if (record.executionAttempts[0]?.resources?.status === "pending" && record.executionAttempts[0].resources.downloads) {
+          throw new Error("database temporarily unavailable");
+        }
+        await write(record, expected, resources);
+      });
+    }
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const sleep = vi.fn(() => waiting);
+    const onError = vi.fn();
+    const resumer = createTestResumer(fixture.store, fixture.harness, {
+      now: () => NOW, sleep, onError, createRetryController: createProductionRetryController,
+    });
+    const stop = new AbortController();
+    let settled = false;
+    const task = resumer.resume(fixture.runs[0]!.runId, stop.signal).then(() => { settled = true; });
+    try {
+      await vi.waitFor(() => expect(sleep).toHaveBeenCalledOnce());
+      stop.abort();
+      await vi.waitFor(() => expect(settled).toBe(true));
+      expect(fixture.harness.collectAgentResources).toHaveBeenCalledTimes(during === "download-backoff" ? 1 : 0);
+      expect(onError).not.toHaveBeenCalled();
+      const readRun = fixture.store.getRun.bind(fixture.store);
+      vi.spyOn(fixture.store, "getRun").mockImplementation(async (runId) => {
+        const run = await readRun(runId);
+        return run && { ...run, stopRequested: true };
+      });
+      await resumer.stop(fixture.runs[0]!.runId);
+      const stopped = await saved(fixture.store, samplingId);
+      expect(stopped.execution).not.toHaveProperty("resourcesPending");
+      expect(stopped.executionAttempts[0]!.resources?.status).toBe("failed");
+      expect(onError).not.toHaveBeenCalled();
+    } finally {
+      release();
+      fixture.finishAll();
+      await task;
+    }
+  });
+});
+
 describe("resource readiness waiting and Submission observation", () => {
   const START = "2026-10-20T00:00:00.000Z";
   const DEADLINE = new Date(Date.parse(START) + RESOURCE_WAIT_MS).toISOString();
@@ -6347,6 +6547,160 @@ describe("resource readiness waiting and Submission observation", () => {
     expect(harness.collectEvaluation).toHaveBeenCalledOnce();
   });
 
+  it.each(["pending", "finalized"] as const)("keeps the accepted Evaluator's %s resource wait recoverable when confirmed terminal writes fail", async (resources) => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const clock = testClock(START);
+    const run = await createTestAdmission(store).submit(projectRequest("pipeline", `receipt-before-resources-${resources}`));
+    const record = (await store.getRun(run.runId))!;
+    const samplingId = record.samplingIds[0]!;
+    const evaluationId = record.evaluationIds[0]!;
+    await seedSampling(store, {
+      ...(await saved(store, samplingId)), subjectChatId: "subject-chat", execution: { status: "succeeded" },
+      artifacts: [], trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
+    });
+    const initial = await savedEvaluation(store, evaluationId);
+    const input: CollectAgentResourcesInput = {
+      handle: { ownerUserId: EVALUATOR.ownerUserId, role: "evaluator", framework: "sp", chatId: "evaluation-chat", samplingId, evaluationId },
+      idempotencyKey: `evaluation:${samplingId}`, submissionId: "evaluation-submission",
+    };
+    const snapshot = makeResources(input);
+    const attempt: EvaluationState["attempts"][number] = {
+      evaluationAttemptId: "accepted-attempt", evaluationId, attemptNumber: 1,
+      submissionId: input.submissionId!, status: "running", startedAt: START,
+      resources: resources === "finalized"
+        ? { status: "collected", summary: summarizeResourceSnapshot(snapshot) }
+        : { status: "pending", scope: snapshot.scope },
+    };
+    await store.updateEvaluation({
+      ...initial, chatId: input.handle.chatId, attempts: [attempt],
+      status: { status: "succeeded", resourcesPending: { deadline: DEADLINE, nextAttemptAt: FIRST_CHECK } },
+      output: {
+        status: "succeeded", artifacts: [],
+        trajectory: { trajectoryId: "evaluation-trace", source: "evaluator", path: "/evaluation.jsonl" },
+        structuredOutput: { path: "mcp:submit_evaluation", content: '{"score":8}', source: "submission" },
+      },
+    }, initial, resources === "finalized" ? { attemptId: attempt.evaluationAttemptId, snapshot } : undefined);
+    const accepted = await savedEvaluation(store, evaluationId);
+    vi.mocked(harness.inspectAgentOperation).mockResolvedValue(makeSubmission("completed", input.submissionId!));
+    vi.mocked(harness.collectAgentResources).mockResolvedValue(snapshot);
+    const write = store.updateEvaluation.bind(store);
+    let unavailable = true;
+    const rejectedCompletions: string[] = [];
+    vi.spyOn(store, "updateEvaluation").mockImplementation(async (next, expected, collected) => {
+      const completedAt = next.attempts[0]?.completedAt;
+      if (unavailable && completedAt !== undefined) {
+        rejectedCompletions.push(completedAt);
+        clock.advance(1_000);
+        throw new Error("confirmed terminal persistence unavailable");
+      }
+      await write(next, expected, collected);
+    });
+    const options = {
+      now: clock.now, sleep: async () => undefined, onError: vi.fn(),
+      createRetryController: createProductionRetryController,
+    };
+    clock.advance(RESOURCE_CHECK_INTERVAL_MS);
+    await expect(createTestResumer(store, harness, options).resume(run.runId)).rejects.toBeInstanceOf(AggregateError);
+    const waiting = await savedEvaluation(store, evaluationId);
+    expect(rejectedCompletions).toHaveLength(11);
+    expect(new Set(rejectedCompletions)).toEqual(new Set([FIRST_CHECK]));
+    expect(isStageRecoveryPending(waiting.status)).toBe(true);
+    expect(waiting.status).toEqual(accepted.status);
+    expect(waiting.output).toEqual(accepted.output);
+    expect(waiting.attempts).toEqual(accepted.attempts);
+    expect(harness.inspectAgentOperation).toHaveBeenCalledOnce();
+    expect(harness.inspectAgentResources).not.toHaveBeenCalled();
+    expect(harness.collectAgentResources).not.toHaveBeenCalled();
+
+    unavailable = false;
+    const restarted = createTestResumer(store, harness, options);
+    await restarted.resume(run.runId);
+    const recovered = await savedEvaluation(store, evaluationId);
+    expect(recovered.status).toEqual({ status: "succeeded" });
+    expect(isStageRecoveryPending(recovered.status)).toBe(false);
+    expect(recovered.output).toEqual(accepted.output);
+    expect(recovered.attempts[0]).toMatchObject({ status: "completed", startedAt: START, completedAt: clock.now() });
+    expect(Date.parse(recovered.attempts[0]!.completedAt!) - Date.parse(recovered.attempts[0]!.startedAt!)).toBeGreaterThan(0);
+    expect(recovered.attempts[0]!.resources).toMatchObject({ status: "collected", summary: { finalized: true } });
+    expect(store.resourceSnapshot({ samplingId, evaluationId, attemptId: attempt.evaluationAttemptId })).toBe(snapshot);
+    expect(harness.inspectAgentOperation).toHaveBeenCalledTimes(2);
+    expect(harness.inspectAgentResources).toHaveBeenCalledTimes(resources === "pending" ? 1 : 0);
+    expect(harness.collectAgentResources).toHaveBeenCalledTimes(resources === "pending" ? 1 : 0);
+    await restarted.resume(run.runId);
+    expect(harness.inspectAgentOperation).toHaveBeenCalledTimes(2);
+    expect(harness.inspectAgentResources).toHaveBeenCalledTimes(resources === "pending" ? 1 : 0);
+    expect(harness.collectAgentResources).toHaveBeenCalledTimes(resources === "pending" ? 1 : 0);
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("keeps an exhausted accepted Evaluation's raw snapshot until an explicit manual budget reset", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const onError = vi.fn();
+    mockReadiness(harness, (input) => input.handle.role !== "evaluator");
+    const runtime = createRuntime({
+      harness, store, onError, now: () => START, sleep: async () => undefined,
+      createRetryController: createProductionRetryController,
+      results: { submission: { token: () => "t", read: async () => ({ path: "mcp:submit_evaluation", content: '{"score":3}' }) }, check: validScore },
+    });
+    const run = await runtime.submit(projectRequest("pipeline", "exhausted-accepted-snapshot"));
+    await runtime.resume(run.runId);
+    const evaluationId = (await runtime.getRun(run.runId)).evaluationIds[0]!;
+    const accepted = await savedEvaluation(store, evaluationId);
+    const original = accepted.attempts[0]!;
+    const { completedAt: _completed, ...unobserved } = original;
+    const input = {
+      handle: {
+        ownerUserId: EVALUATOR.ownerUserId, role: "evaluator" as const, framework: "sp" as const,
+        samplingId: accepted.samplingId, chatId: accepted.chatId!, evaluationId,
+      },
+      idempotencyKey: `evaluation:${accepted.samplingId}`, submissionId: original.submissionId!,
+    };
+    const raw = unfinalized(input);
+    await store.updateEvaluation({
+      ...accepted,
+      status: { status: "succeeded", resourcesPending: { deadline: DEADLINE, nextAttemptAt: START } },
+      attempts: [{ ...unobserved, status: "running", resources: { status: "collected", summary: summarizeResourceSnapshot(raw), downloads: 11 } }],
+    }, accepted, { attemptId: original.evaluationAttemptId, snapshot: raw });
+    vi.mocked(harness.inspectAgentResources).mockClear();
+    vi.mocked(harness.inspectAgentOperation).mockClear();
+    vi.mocked(harness.collectAgentResources).mockClear();
+
+    await runtime.resume(run.runId);
+    const exhausted = await savedEvaluation(store, evaluationId);
+    expect(exhausted.status).toEqual({ status: "succeeded" });
+    expect(exhausted.output).toEqual(accepted.output);
+    expect(exhausted.attempts[0]!.resources).toMatchObject({
+      status: "collected", downloads: 11, exhausted: true, summary: summarizeResourceSnapshot(raw),
+    });
+    expect(store.resourceSnapshot({ samplingId: accepted.samplingId, evaluationId, attemptId: original.evaluationAttemptId })).toBe(raw);
+    expect(harness.inspectAgentResources).not.toHaveBeenCalled();
+    expect(harness.inspectAgentOperation).not.toHaveBeenCalled();
+    expect(harness.collectAgentResources).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledOnce();
+    await runtime.resume(run.runId);
+    expect(onError).toHaveBeenCalledOnce();
+
+    await store.updateEvaluation({
+      ...exhausted,
+      status: { status: "succeeded", resourcesPending: { deadline: DEADLINE, nextAttemptAt: START } },
+      attempts: withFreshResourceBudget(exhausted.attempts),
+    }, exhausted);
+    mockReadiness(harness, () => true);
+    await runtime.resume(run.runId);
+    const recollected = await savedEvaluation(store, evaluationId);
+    expect(recollected.status).toEqual({ status: "succeeded" });
+    expect(recollected.output).toEqual(accepted.output);
+    expect(recollected.attempts[0]!.resources).toMatchObject({ status: "collected", summary: { finalized: true } });
+    expect(recollected.attempts[0]!.resources).not.toHaveProperty("downloads");
+    expect(recollected.attempts[0]!.resources).not.toHaveProperty("exhausted");
+    expect(harness.collectAgentResources).toHaveBeenCalledOnce();
+    expect(harness.submitAgent).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
   it("re-collects failed resources of a terminal Attempt instead of keeping the failure", async () => {
     const store = makeStore();
     const harness = makeHarness();
@@ -6400,17 +6754,20 @@ describe("resource readiness waiting and Submission observation", () => {
   });
 
   describe("a download a crashed Worker started", () => {
-    async function crashedDownload(key: string, downloads: number) {
+    async function crashedDownload(key: string, downloads: number, readiness?: "pending" | "error", lifecycle = false) {
       const store = makeStore();
       const harness = makeHarness();
+      const onError = vi.fn();
+      if (readiness === "pending") mockReadiness(harness, () => false);
+      if (readiness === "error") vi.mocked(harness.inspectAgentResources).mockRejectedValue(new Error("SP unavailable"));
       vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => makeResources(input));
-      const runtime = createRuntime({ harness, store, sleep: async () => undefined, now: () => START, createRetryController: createProductionRetryController });
+      const runtime = createRuntime({ harness, store, onError, sleep: async () => undefined, now: () => START, createRetryController: createProductionRetryController });
       const run = await runtime.submit(projectRequest("execution", key));
       const samplingId = run.samplingIds[0]!;
       await seedSampling(store, {
         ...(await saved(store, samplingId)),
         subjectChatId: "subject-chat",
-        execution: { status: "succeeded", resourcesPending: { deadline: DEADLINE, nextAttemptAt: START } },
+        execution: lifecycle ? { status: "retrying" } : { status: "succeeded", resourcesPending: { deadline: DEADLINE, nextAttemptAt: START } },
         artifacts: [{ artifactId: "subject-file", kind: "file", path: "/subject.txt" }],
         trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
         executionAttempts: [{
@@ -6420,7 +6777,7 @@ describe("resource readiness waiting and Submission observation", () => {
         }],
       });
       await runtime.resume(run.runId);
-      return { harness, runtime, run, persisted: await saved(store, samplingId) };
+      return { harness, runtime, run, onError, persisted: await saved(store, samplingId) };
     }
 
     it("counts against the same retry budget before the next download", async () => {
@@ -6431,11 +6788,30 @@ describe("resource readiness waiting and Submission observation", () => {
     });
 
     it("gives the resources up without downloading once crashes spent the budget, so the Run finishes", async () => {
-      const { harness, runtime, run, persisted } = await crashedDownload("crashed-download-exhausted", 11);
+      const { harness, runtime, run, onError, persisted } = await crashedDownload("crashed-download-exhausted", 11);
+      expect(harness.inspectAgentResources).not.toHaveBeenCalled();
       expect(harness.collectAgentResources).not.toHaveBeenCalled();
       expect(persisted.execution).toEqual({ status: "succeeded" });
       expect(persisted.executionAttempts[0]!.resources).toMatchObject({ status: "failed", downloads: 11, exhausted: true });
       await expect(runtime.getRun(run.runId)).resolves.toMatchObject({ status: "succeeded" });
+      expect(onError).toHaveBeenCalledOnce();
+      await runtime.resume(run.runId);
+      expect(onError).toHaveBeenCalledOnce();
+    });
+
+    it.each(["pending", "error"] as const)("finishes exhausted resources without reading %s readiness in either entry", async (readiness) => {
+      for (const lifecycle of [false, true]) {
+        const { harness, runtime, run, onError, persisted } = await crashedDownload(`exhausted-${readiness}-${lifecycle}`, 11, readiness, lifecycle);
+        expect(harness.inspectAgentResources).not.toHaveBeenCalled();
+        expect(harness.collectAgentResources).not.toHaveBeenCalled();
+        expect(persisted.execution).toEqual({ status: "succeeded" });
+        expect(persisted.executionAttempts[0]).toMatchObject({
+          status: "completed", completedAt: START, resources: { status: "failed", downloads: 11, exhausted: true },
+        });
+        expect(onError).toHaveBeenCalledOnce();
+        await runtime.resume(run.runId);
+        expect(onError).toHaveBeenCalledOnce();
+      }
     });
   });
 

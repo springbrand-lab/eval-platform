@@ -38,7 +38,7 @@ export function createStubSp() {
   const sp = {
     verifySession: vi.fn(async (token: string) => ({ id: token, role: "user" as const })),
     listAgentConfigs: vi.fn(async (token: string) => [...configs.values()].filter((config) => config.user_id === token)),
-    listMcpServers: vi.fn(async () => mcpServers),
+    listMcpServers: vi.fn(async (_token: string, source: "platform" | "user" = "user") => mcpServers.filter((server) => server.source === source)),
     getAgentConfig: vi.fn(async (token: string, id: string) => structuredClone(owned(token, id))),
     createAgentConfig: vi.fn(async (token: string, input: unknown) => {
       const body = input as Record<string, unknown>;

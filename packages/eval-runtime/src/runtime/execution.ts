@@ -27,12 +27,12 @@ import {
   applyAttemptPatch,
   collectOutputWithRetry,
   describeAgentError,
-  reportError,
   runAgentLifecycle,
   withContext,
   withExecutionStatus,
   type StageDependencies,
 } from "./agent-lifecycle.js";
+import { reportError } from "./log.js";
 import { executionAgentEnded, failedPass, unconfirmedObservation, withRecoveryBookkeeping } from "./recovery.js";
 import { refreshFinishedStage } from "./resource-refresh.js";
 

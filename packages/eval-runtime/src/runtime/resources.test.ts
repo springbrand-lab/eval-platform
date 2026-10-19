@@ -191,7 +191,7 @@ describe("crash-safe resource download", () => {
     const events: string[] = [];
     const saved: AgentResourceState[] = [];
     const harness = {
-      inspectAgentResources: vi.fn(),
+      inspectAgentResources: vi.fn(async () => ({ scope: SCOPE, observedAt: snapshot().observedAt, finalized: true, readiness: READY })),
       collectAgentResources: vi.fn(async () => {
         events.push("download");
         return collect();
@@ -207,9 +207,12 @@ describe("crash-safe resource download", () => {
         sleep: async () => undefined,
         now: () => "2026-10-08T00:01:00.000Z",
         log: (event: Record<string, unknown>) => { events.push(`log:${String(event.name)}`); },
+        onError: vi.fn(),
       },
       current,
       exclusively,
+      readinessDelays: [0],
+      allowUnfinalized: false,
       save: vi.fn(async (resources: AgentResourceState, stored?: AgentResourceSnapshot) => {
         saved.push(resources);
         events.push(`save:${resources.status}${stored ? "+snapshot" : ""}`);
@@ -221,15 +224,15 @@ describe("crash-safe resource download", () => {
   it("counts each download on the Attempt before it starts and logs only after the snapshot is stored with its summary", async () => {
     const { download, events, saved } = setup(async () => snapshot());
     const result = await collectResources(download);
-    expect(result).toEqual({ status: "collected", summary: summarizeResourceSnapshot(snapshot()) });
-    expect(events).toEqual(["save:pending", "download", "save:collected+snapshot", "log:resources_collected"]);
+    expect(result).toEqual({});
+    expect(events).toEqual(["log:resource_wait", "save:pending", "download", "save:collected+snapshot", "log:resources_collected"]);
     expect(saved[0]).toEqual({ ...STORED, downloads: 1 });
-    expect(download.save.mock.calls[1]).toEqual([result, snapshot()]);
+    expect(download.save.mock.calls[1]).toEqual([{ status: "collected", summary: summarizeResourceSnapshot(snapshot()) }, snapshot()]);
   });
 
   it("counts a download a crashed process started against the same retry budget", async () => {
     const { download, decide, harness, saved } = setup(async () => snapshot(), { ...STORED, downloads: 2 });
-    await expect(collectResources(download)).resolves.toMatchObject({ status: "collected" });
+    await expect(collectResources(download)).resolves.toEqual({});
     expect(decide).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ operation: "resources", attemptNumber: 2 }));
     expect(saved[0]).toEqual({ ...STORED, downloads: 3 });
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(1);
@@ -237,18 +240,19 @@ describe("crash-safe resource download", () => {
 
   it("gives up without downloading once crashed downloads spent the budget", async () => {
     const { download, harness, saved } = setup(async () => snapshot(), { ...STORED, downloads: 3 });
-    const result = await collectResources(download);
+    await collectResources(download);
+    expect(harness.inspectAgentResources).not.toHaveBeenCalled();
     expect(harness.collectAgentResources).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ status: "failed", scope: SCOPE, downloads: 3, exhausted: true, collectedAt: "2026-10-08T00:01:00.000Z" });
-    expect(saved).toEqual([result]);
+    expect(saved).toEqual([expect.objectContaining({ status: "failed", scope: SCOPE, downloads: 3, exhausted: true, collectedAt: "2026-10-08T00:01:00.000Z" })]);
+    expect(download.source.onError).toHaveBeenCalledOnce();
   });
 
   it("retries failed downloads within the budget, then keeps an already collected snapshot as given up", async () => {
     const collected: AgentResourceState = { status: "collected", summary: summarizeResourceSnapshot({ ...snapshot(), finalized: false }) };
     const { download, harness, saved } = setup(async () => { throw new Error("SP unavailable"); }, collected);
-    const result = await collectResources(download);
+    await collectResources(download);
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(3);
-    expect(result).toEqual({ ...collected, downloads: 3, exhausted: true });
+    expect(saved.at(-1)).toEqual({ ...collected, downloads: 3, exhausted: true });
     expect(saved.map((item) => item.downloads)).toEqual([1, 2, 3, 3]);
     expect(download.save.mock.calls.every(([, stored]) => stored === undefined)).toBe(true);
   });
@@ -256,16 +260,18 @@ describe("crash-safe resource download", () => {
   it("records each retried failure on a failed Attempt with its count, and gives up with the last one", async () => {
     const failed: AgentResourceState = { status: "failed", scope: SCOPE, collectedAt: "2026-10-08T00:00:00.000Z", error: "old" };
     let calls = 0;
-    const { download } = setup(async () => { calls += 1; throw new Error(`SP unavailable ${calls}`); }, failed);
-    await expect(collectResources(download)).resolves.toEqual({ ...failed, error: "SP unavailable 3", collectedAt: "2026-10-08T00:01:00.000Z", downloads: 3, exhausted: true });
+    const { download, saved } = setup(async () => { calls += 1; throw new Error(`SP unavailable ${calls}`); }, failed);
+    await collectResources(download);
+    expect(saved.at(-1)).toEqual({ ...failed, error: "SP unavailable 3", collectedAt: "2026-10-08T00:01:00.000Z", downloads: 3, exhausted: true });
     expect(download.save.mock.calls.map(([resources]) => resources.status === "failed" && [resources.downloads, resources.error])).toEqual([
       [1, "old"], [2, "SP unavailable 1"], [3, "SP unavailable 2"], [3, "SP unavailable 3"],
     ]);
   });
 
   it("gives up at once on an unretryable failure", async () => {
-    const { download, harness } = setup(async () => ({ ...snapshot(), scope: { ...SCOPE, chatId: "other" } }));
-    await expect(collectResources(download)).resolves.toMatchObject({
+    const { download, harness, saved } = setup(async () => ({ ...snapshot(), scope: { ...SCOPE, chatId: "other" } }));
+    await collectResources(download);
+    expect(saved.at(-1)).toMatchObject({
       status: "failed", downloads: 1, exhausted: true, error: expect.stringContaining("does not match"),
     });
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(1);
@@ -288,7 +294,7 @@ describe("crash-safe resource download", () => {
     expect(peak).toBe(1);
   });
 
-  it("holds the download lock only for the download and the snapshot save, never while counting", async () => {
+  it("does not count queued downloads and holds the slot through the count save", async () => {
     const exclusively = createExclusiveRunner();
     let release!: () => void;
     const counting = new Promise<void>((resolve) => { release = resolve; });
@@ -296,9 +302,14 @@ describe("crash-safe resource download", () => {
     blocked.download.save.mockImplementationOnce(() => counting);
     const other = setup(async () => snapshot(), STORED, 2, exclusively);
     const pending = collectResources(blocked.download);
-    await expect(collectResources(other.download)).resolves.toMatchObject({ status: "collected" });
+    await vi.waitFor(() => expect(blocked.download.save).toHaveBeenCalledOnce());
+    const queued = collectResources(other.download);
+    await vi.waitFor(() => expect(other.harness.inspectAgentResources).toHaveBeenCalledOnce());
+    expect(other.download.save).not.toHaveBeenCalled();
+    expect(other.harness.collectAgentResources).not.toHaveBeenCalled();
     expect(blocked.harness.collectAgentResources).not.toHaveBeenCalled();
     release();
-    await expect(pending).resolves.toMatchObject({ status: "collected" });
+    await Promise.all([pending, queued]);
+    expect(other.saved[0]).toEqual({ ...STORED, downloads: 1 });
   });
 });

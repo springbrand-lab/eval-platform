@@ -90,6 +90,8 @@ export interface CollectAgentResourcesInput {
   /** Omitted only while reconciling a dispatch whose SP receipt is unknown. */
   readonly submissionId?: string;
   readonly runtime?: HarnessRuntimeOptions;
+  /** Cancels the request and body read; the Promise settles only after both have ended. */
+  readonly signal?: AbortSignal;
 }
 
 export interface MaterializeInitialDataInput {

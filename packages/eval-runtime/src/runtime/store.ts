@@ -170,6 +170,7 @@ export async function persistRuntimeRecord<TRecord extends SamplingState | Evalu
       await input.write(record, expected);
       return record;
     } catch (error) {
+      if (error instanceof RuntimeRunStoppedError) throw error;
       let stored: TRecord | null = null;
       let readFailed = false;
       try {
@@ -199,6 +200,7 @@ export async function persistRuntimeRecord<TRecord extends SamplingState | Evalu
           error: details.message,
         });
       } catch (decisionError) {
+        if (decisionError instanceof RuntimeRunStoppedError) throw decisionError;
         throw new RuntimeRecordPersistenceError(
           "Persistence retry decision failed: " + describeAgentError(decisionError).message,
           outcome,
@@ -213,6 +215,7 @@ export async function persistRuntimeRecord<TRecord extends SamplingState | Evalu
       try {
         await input.sleep(decision.backoffMs ?? 0);
       } catch (sleepError) {
+        if (sleepError instanceof RuntimeRunStoppedError) throw sleepError;
         throw new RuntimeRecordPersistenceError(
           "Persistence retry delay failed: " + describeAgentError(sleepError).message,
           outcome,

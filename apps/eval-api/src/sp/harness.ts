@@ -28,6 +28,7 @@ import {
   type EvalInitialization,
 } from "@springbrand/eval-harness";
 import { ApiError, parseHttpError } from "@springbrand/http/client";
+import { isRequestCancelled } from "@springbrand/http/errors";
 import { errorDiagnostics, readBytesLimited } from "@springbrand/http/server";
 import WebSocket from "ws";
 import { httpOriginSchema } from "../config/env.js";
@@ -120,6 +121,7 @@ function evidenceNotReady(status: number, code: string | undefined, context: Pic
 
 /** Harness operations are idempotent, so every transient SP failure may be retried. */
 function harnessError(error: unknown, context: FailureContext): unknown {
+  if (isRequestCancelled(error)) return error;
   if (!(error instanceof ApiError)) return error;
   if (error.code === "RESPONSE_TOO_LARGE") {
     // Repeating the read returns the same body; only a larger ceiling or a smaller response can succeed.
@@ -196,15 +198,17 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     readonly timeoutMs?: number;
     readonly label?: string;
     readonly evidenceRead?: boolean;
+    readonly signal?: AbortSignal;
   }
 
   async function call(method: "GET" | "POST" | "PUT", path: string, request: CallOptions = {}): Promise<unknown> {
-    const { body, timeoutMs } = request;
+    const { body, timeoutMs, signal } = request;
     try {
       return (await http.request<unknown>(path, {
         method,
         ...(body === undefined ? {} : { body }),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        ...(signal === undefined ? {} : { signal }),
       })).data;
     } catch (error) {
       throw harnessError(error, {
@@ -350,8 +354,10 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     let value: T;
     try {
       value = parse(await call("GET", `${operationPath("resources", input.handle, input.idempotencyKey)}${leaf}${query}`,
-        { timeoutMs, label: `resource ${leaf === "" ? "snapshot" : "readiness"}` }));
+        { timeoutMs, label: `resource ${leaf === "" ? "snapshot" : "readiness"}`,
+          ...(input.signal === undefined ? {} : { signal: input.signal }) }));
     } catch (error) {
+      if (isRequestCancelled(error)) throw error;
       log({ name, ...fields(), ...failureFields(error) });
       throw error;
     }

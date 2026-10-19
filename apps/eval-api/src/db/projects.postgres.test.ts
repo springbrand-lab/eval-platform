@@ -146,6 +146,37 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     )[0]!.n));
   }
 
+  it("reconciles and persists Agent purposes from source-scoped MCP catalogs before enforcing frozen-copy roles", async () => {
+    const { subject, evaluator } = await catalog();
+    const { agentConfigs } = services();
+    await expect(agentConfigs.listAgents("subject", "execution")).resolves.toEqual([{
+      agentConfig: { ownerUserId: OWNER, userAgentId: subject }, name: "Subject", role: "subject", purpose: "execution",
+    }]);
+    await expect(agentConfigs.listAgents("evaluator", "evaluation")).resolves.toEqual([{
+      agentConfig: { ownerUserId: OWNER, userAgentId: evaluator }, name: "Evaluator", role: "evaluator", purpose: "evaluation",
+    }]);
+    expect(stub.sp.listMcpServers.mock.calls).toEqual([[OWNER, "user"], [OWNER, "platform"]]);
+    const purposes = createPostgresAgentPurposeStore(database.db, OWNER);
+    await expect(purposes.get(subject)).resolves.toEqual({
+      userAgentId: subject, purpose: "execution", evaluationMcpServerId: null,
+    });
+    await expect(purposes.get(evaluator)).resolves.toEqual({
+      userAgentId: evaluator, purpose: "evaluation", evaluationMcpServerId: "eval-results",
+    });
+
+    stub.sp.listMcpServers.mockRejectedValue(new Error("catalog offline"));
+    const reloaded = services().agentConfigs;
+    await expect(reloaded.listAgents()).resolves.toHaveLength(4);
+    expect(stub.sp.listMcpServers).toHaveBeenCalledTimes(2);
+    await expect(reloaded.freeze(subject, "evaluation")).rejects.toMatchObject({
+      name: "AgentConfigPurposeMismatchError", expected: "evaluation", actual: "execution",
+    });
+    await expect(reloaded.freeze(evaluator, "execution")).rejects.toMatchObject({
+      name: "AgentConfigPurposeMismatchError", expected: "execution", actual: "evaluation",
+    });
+    expect(stub.sp.createAgentConfig).not.toHaveBeenCalled();
+  });
+
   it("snapshots Datasets, shared Data and frozen Agent Configs, unaffected by later catalog edits and soft deletes", async () => {
     const { d1, d2, d3, first, second, subject } = await catalog();
     const { projects: service, datasets } = services();

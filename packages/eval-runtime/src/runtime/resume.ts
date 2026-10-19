@@ -8,13 +8,13 @@ import type {
 import { DEFAULT_EVIDENCE_LIMITS, isPendingSamplingStatus } from "@eval-platform/eval-contracts";
 import { createId } from "@eval-platform/eval-contracts";
 import type { Harness } from "../harness/model.js";
-import { errorMessage, reportError, withContext, type StageDependencies } from "./agent-lifecycle.js";
+import { errorMessage, withContext, type StageDependencies } from "./agent-lifecycle.js";
 import { isStageDue, summarizeStages } from "./recovery.js";
 import { RuntimeEntityNotFoundError, RuntimeRunStoppedError } from "./errors.js";
 import { evaluateSampling } from "./evaluation.js";
 import { executeSampling } from "./execution.js";
 import type { EvalRunResumer, EvalRunResumerDependencies, RunStopReporter } from "./model.js";
-import { safeLog, type RuntimeContext, type RuntimeLog } from "./log.js";
+import { reportError, safeLog, type RuntimeContext, type RuntimeLog } from "./log.js";
 import { RunRecords, type RunStagePlans } from "./records.js";
 import { createExclusiveRunner } from "./resources.js";
 import { createRetryController, loggedRetryController, type RetryController } from "./retry.js";
@@ -28,6 +28,21 @@ import {
   type RuntimeStore,
   type SamplingState,
 } from "./store.js";
+
+function observeRun<T>(runId: string, signal: AbortSignal | undefined, read: () => Promise<T>): Promise<T> {
+  if (signal?.aborted) return Promise.reject(new RuntimeRunStoppedError(runId));
+  const pending = read();
+  if (!signal) return pending;
+  return new Promise<T>((resolve, reject) => {
+    const onStop = () => reject(new RuntimeRunStoppedError(runId));
+    signal.addEventListener("abort", onStop, { once: true });
+    pending.then(
+      (value) => { signal.removeEventListener("abort", onStop); resolve(value); },
+      (error: unknown) => { signal.removeEventListener("abort", onStop); reject(error); },
+    );
+    if (signal.aborted) onStop();
+  });
+}
 
 export class RunResumer implements EvalRunResumer {
   readonly #store: RuntimeStore;
@@ -228,8 +243,8 @@ export class RunResumer implements EvalRunResumer {
       cancellationTasks.push(this.#cancelEvaluation(run.runId, evaluation, evaluationConfig));
     };
     const guardedHarness = this.#guardedHarness(run.runId, stopSignal);
-    const executionDependencies = this.#stageDependencies(run, guardedHarness, () => !stopSignal?.aborted);
-    const evaluationDependencies = this.#stageDependencies(run, guardedHarness, () => !stopSignal?.aborted);
+    const executionDependencies = this.#stageDependencies(run, guardedHarness, () => !stopSignal?.aborted, stopSignal);
+    const evaluationDependencies = this.#stageDependencies(run, guardedHarness, () => !stopSignal?.aborted, stopSignal);
     const scheduleEvaluation = (sampling: SamplingState, evaluation: EvaluationState): void => {
       if (scheduledEvaluationIds.has(evaluation.evaluationId) || !owesWork(evaluation.status)) return;
       scheduledEvaluationIds.add(evaluation.evaluationId);
@@ -355,7 +370,7 @@ export class RunResumer implements EvalRunResumer {
     runContext: (dependencies: StageDependencies, context: TContext) => Promise<unknown>,
     failure: string,
   ): Promise<void> {
-    const dependencies = this.#stageDependencies(run, this.#guardedHarness(run.runId, stopSignal), () => !stopSignal?.aborted);
+    const dependencies = this.#stageDependencies(run, this.#guardedHarness(run.runId, stopSignal), () => !stopSignal?.aborted, stopSignal);
     const errors: unknown[] = [];
     await createAgentScheduler({ maxConcurrentDos: concurrency }).run(contexts.map((context) => async () => {
       if (stopSignal?.aborted) return;
@@ -370,10 +385,15 @@ export class RunResumer implements EvalRunResumer {
 
   #stageDependencies(
     { runId, stopFinalized }: Pick<RuntimeRunRecord, "runId" | "stopFinalized">, harness: Harness, restartAllowed: () => boolean,
+    stopSignal?: AbortSignal,
   ): StageDependencies {
     return {
       ...withContext(this.#stage, { runId }),
       ...(stopFinalized === undefined ? {} : { runStopped: stopFinalized }),
+      ...(stopSignal === undefined ? {} : {
+        resourceStop: { runId, signal: stopSignal },
+        sleep: (milliseconds: number) => observeRun(runId, stopSignal, () => this.#stage.sleep(milliseconds)),
+      }),
       harness,
       createRetryController: (policy, log) => {
         const delegate = this.#stage.createRetryController(policy, log);
@@ -385,38 +405,27 @@ export class RunResumer implements EvalRunResumer {
     };
   }
 
-  /** Serialize SP mutations with a persisted stop and abandon observations once the Run stops. */
+  /** Resource reads cancel their transport and must settle before releasing the download slot. */
   #guardedHarness(runId: string, stopSignal: AbortSignal | undefined): Harness {
     const harness = this.#harness;
-    const observe = <T>(pending: Promise<T>): Promise<T> => {
-      if (!stopSignal) return pending;
-      return new Promise<T>((resolve, reject) => {
-        const onStop = () => reject(new RuntimeRunStoppedError(runId));
-        stopSignal.addEventListener("abort", onStop, { once: true });
-        pending.then(
-          (value) => { stopSignal.removeEventListener("abort", onStop); resolve(value); },
-          (error: unknown) => { stopSignal.removeEventListener("abort", onStop); reject(error); },
-        );
-        if (stopSignal.aborted) onStop();
-      });
-    };
+    const observe = <T>(read: () => Promise<T>) => observeRun(runId, stopSignal, read);
     const gate = <T>(dispatch: () => Promise<T>): Promise<T> =>
-      observe(this.#store.withRunDispatchGate(runId, dispatch));
+      observe(() => this.#store.withRunDispatchGate(runId, dispatch));
     return {
       ensureAgent: (input) => gate(() => harness.ensureAgent(input)),
       materializeInitialData: (input) => gate(() => harness.materializeInitialData(input)),
       importEvidence: (input) => gate(() => harness.importEvidence(input)),
       submitAgent: (input) => gate(() => harness.submitAgent(input)),
       restartAgent: (input) => gate(() => harness.restartAgent(input)),
-      waitForSubmission: (input) => observe(harness.waitForSubmission(input)),
-      inspectAgentOperation: (input) => observe(harness.inspectAgentOperation(input)),
-      stopAgent: (input) => observe(harness.stopAgent(input)),
-      collectExecution: (input) => observe(harness.collectExecution(input)),
-      collectEvaluation: (input) => observe(harness.collectEvaluation(input)),
-      readFinalReply: (input) => observe(harness.readFinalReply(input)),
-      inspectAgentResources: (input) => observe(harness.inspectAgentResources(input)),
-      collectAgentResources: (input) => observe(harness.collectAgentResources(input)),
-      exportEvidence: (input) => observe(harness.exportEvidence(input)),
+      waitForSubmission: (input) => observe(() => harness.waitForSubmission(input)),
+      inspectAgentOperation: (input) => observe(() => harness.inspectAgentOperation(input)),
+      stopAgent: (input) => observe(() => harness.stopAgent(input)),
+      collectExecution: (input) => observe(() => harness.collectExecution(input)),
+      collectEvaluation: (input) => observe(() => harness.collectEvaluation(input)),
+      readFinalReply: (input) => observe(() => harness.readFinalReply(input)),
+      inspectAgentResources: (input) => harness.inspectAgentResources(input),
+      collectAgentResources: (input) => harness.collectAgentResources(input),
+      exportEvidence: (input) => observe(() => harness.exportEvidence(input)),
     };
   }
 

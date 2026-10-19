@@ -15,16 +15,15 @@ import {
   inspectUncertainOperation,
   isSuccessfulSubmission,
   isTerminal,
-  reportError,
   type AgentAttemptRecord,
   type AgentLifecycleDependencies,
   type AgentLifecycleStage,
 } from "./agent-lifecycle.js";
 import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
-import { attemptOwesResources } from "./recovery.js";
+import { reportError } from "./log.js";
+import { attemptOwesResources, stageOwesResources } from "./recovery.js";
 import {
   STOPPED_RESOURCES_ERROR,
-  awaitResourceFinalization,
   collectResources,
   failedResources,
   resourceScopeMatches,
@@ -85,10 +84,11 @@ export async function refreshFinishedStage<TAttempt extends AgentAttemptRecord>(
   try {
     const errors: string[] = [];
     for (const [index, original] of refresh.attempts.entries()) {
-      if (!attemptOwesResources(original, refresh.agentEnded)) continue;
+      if (!refresh.agentEnded(original) || original.resources === undefined || original.resources.exhausted) continue;
       const save = async (attempt: TAttempt, snapshot?: AgentResourceSnapshot) => {
         attempts[index] = attempt;
-        await refresh.persist(attempts, refresh.state, snapshot && { attempt: original, snapshot });
+        await refresh.persist(attempts, stageOwesResources(attempts, refresh.agentEnded) ? refresh.state : finished,
+          snapshot && { attempt: original, snapshot });
       };
       const { attempt, error } = await refreshAttempt(dependencies, refresh, handle, original, expired, save);
       attempts[index] = attempt;
@@ -139,18 +139,6 @@ async function refreshAttempt<TAttempt extends AgentAttemptRecord>(
   const { stage, samplingId } = refresh;
   let attempt = original;
   const idempotencyKey = agentOperationKey(stage, samplingId, attempt.attemptNumber);
-  if (attempt.completedAt === undefined && attempt.submissionId !== undefined) {
-    // An accepted Evaluation whose receipt was never observed: record its terminal once SP confirms it.
-    const inspection = await inspectUncertainOperation(dependencies, { stage, samplingId, harnessConfig: refresh.harnessConfig }, handle, idempotencyKey);
-    const observed = inspection.submission;
-    if (observed && isTerminal(observed) && observed.submissionId === attempt.submissionId) {
-      attempt = applyAttemptPatch(attempt, {
-        status: observed.status,
-        completedAt: dependencies.now(),
-        ...(isSuccessfulSubmission(observed) ? {} : { error: new ConfirmedSubmissionFailure(stage, observed).message }),
-      });
-    }
-  }
   const scope: AgentResourceScope = {
     chatId: handle.chatId,
     idempotencyKey,
@@ -162,15 +150,29 @@ async function refreshAttempt<TAttempt extends AgentAttemptRecord>(
   }
   const source = {
     harness: dependencies.harness, handle, scope, retryController: refresh.retryController,
-    sleep: dependencies.sleep, now: dependencies.now, log: dependencies.log,
+    sleep: dependencies.sleep, now: dependencies.now, log: dependencies.log, onError: dependencies.onError,
     ...(refresh.harnessConfig.runtime === undefined ? {} : { runtime: refresh.harnessConfig.runtime }),
+    ...(dependencies.resourceStop === undefined ? {} : { stop: dependencies.resourceStop }),
   };
-  const owed = await awaitResourceFinalization(source, [0]);
-  if (owed !== undefined && !expired) return { attempt, error: owed };
-  const resources = await collectResources({
+  const { pending } = await collectResources({
     source,
     current: attempt.resources!,
     exclusively: dependencies.resourceDownloads,
+    readinessDelays: [0],
+    allowUnfinalized: expired,
+    prepare: async () => {
+      if (attempt.completedAt !== undefined || attempt.submissionId === undefined) return;
+      const inspection = await inspectUncertainOperation(dependencies, { stage, samplingId, harnessConfig: refresh.harnessConfig }, handle, idempotencyKey);
+      const observed = inspection.submission;
+      if (observed && isTerminal(observed) && observed.submissionId === attempt.submissionId) {
+        attempt = applyAttemptPatch(attempt, {
+          status: observed.status,
+          completedAt: dependencies.now(),
+          ...(isSuccessfulSubmission(observed) ? {} : { error: new ConfirmedSubmissionFailure(stage, observed).message }),
+        });
+        await save(attempt);
+      }
+    },
     save: async (next, snapshot) => {
       attempt = applyAttemptPatch(attempt, {
         resources: next,
@@ -179,14 +181,5 @@ async function refreshAttempt<TAttempt extends AgentAttemptRecord>(
       await save(attempt, snapshot);
     },
   });
-  if (resources.status !== "pending" && resources.exhausted) {
-    const error = resources.status === "failed" ? resources.error : "resource snapshot is not finalized";
-    reportError(dependencies.onError, new Error(
-      `${stage} resources for sampling ${samplingId}, Chat ${handle.chatId}, Attempt ${attempt.attemptNumber} were given up after ${resources.downloads} downloads: ${error}`,
-    ));
-    return { attempt };
-  }
-  return resources.status === "collected" && resources.summary.finalized
-    ? { attempt }
-    : { attempt, error: owed ?? "resource snapshot is not finalized" };
+  return pending === undefined ? { attempt } : { attempt, error: pending };
 }

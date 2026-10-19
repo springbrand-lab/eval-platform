@@ -12,7 +12,7 @@ import {
 
 import type { AgentHandle, Harness, HarnessRuntimeOptions } from "../harness/model.js";
 import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
-import type { RuntimeLog } from "./log.js";
+import { reportError, type RuntimeLog } from "./log.js";
 import { describeRetryError, retryIdempotentOperation, type RetryController, type RetryErrorDetails } from "./retry.js";
 
 const completeness = z.enum(["complete", "partial", "unavailable"]);
@@ -113,6 +113,12 @@ export interface ResourceSource {
   readonly sleep: (milliseconds: number) => Promise<void>;
   readonly now: () => string;
   readonly log: RuntimeLog;
+  readonly onError: (error: Error) => void;
+  readonly stop?: { readonly runId: string; readonly signal: AbortSignal };
+}
+
+function checkResourceStop(source: ResourceSource): void {
+  if (source.stop?.signal.aborted) throw new RuntimeRunStoppedError(source.stop.runId);
 }
 
 function scopeFields({ chatId, idempotencyKey, submissionId }: AgentResourceScope) {
@@ -134,17 +140,25 @@ function readResources<T>(source: ResourceSource, read: () => Promise<T>): Promi
     operation: "resources",
     retryController: source.retryController,
     sleep: source.sleep,
-    run: read,
+    run: async () => {
+      checkResourceStop(source);
+      try {
+        return await read();
+      } finally {
+        checkResourceStop(source);
+      }
+    },
     shouldAbort: (error) => error instanceof RuntimeRunStoppedError,
   });
 }
 
-function resourceInput({ handle, scope, runtime }: ResourceSource) {
+function resourceInput({ handle, scope, runtime, stop }: ResourceSource) {
   return {
     handle,
     idempotencyKey: scope.idempotencyKey,
     ...(scope.submissionId === undefined ? {} : { submissionId: scope.submissionId }),
     ...(runtime === undefined ? {} : { runtime }),
+    ...(stop === undefined ? {} : { signal: stop.signal }),
   };
 }
 
@@ -152,7 +166,7 @@ function resourceInput({ handle, scope, runtime }: ResourceSource) {
  * Checks readiness after each delay, never downloading events. Undefined once SP finalized the
  * snapshot; otherwise why it is still owed. A read failure ends the wait.
  */
-export async function awaitResourceFinalization(
+async function awaitResourceFinalization(
   source: ResourceSource,
   delays: readonly number[],
 ): Promise<string | undefined> {
@@ -165,6 +179,7 @@ export async function awaitResourceFinalization(
   };
   let reason = "resource snapshot was not checked";
   for (const delay of delays) {
+    checkResourceStop(source);
     if (delay > 0) await source.sleep(delay);
     checks += 1;
     try {
@@ -181,15 +196,31 @@ export async function awaitResourceFinalization(
   return done({ reason });
 }
 
-/** Runs tasks one at a time, in call order. */
-export type ExclusiveRunner = <T>(task: () => Promise<T>) => Promise<T>;
+/** Cancels queued tasks, but waits for running tasks to settle before releasing their slot. */
+export type ExclusiveRunner = <T>(task: () => Promise<T>, signal?: AbortSignal) => Promise<T>;
 
 export function createExclusiveRunner(): ExclusiveRunner {
   let queue: Promise<unknown> = Promise.resolve();
-  return (task) => {
-    const run = queue.then(task);
+  return (task, signal) => {
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    let started = false;
+    const run = queue.then(() => {
+      started = true;
+      signal?.throwIfAborted();
+      return task();
+    });
     queue = run.catch(() => undefined);
-    return run;
+    if (!signal) return run;
+    return new Promise((resolve, reject) => {
+      const onAbort = () => { if (!started) reject(signal.reason); };
+      const clear = () => signal.removeEventListener("abort", onAbort);
+      signal.addEventListener("abort", onAbort, { once: true });
+      run.then(
+        (value) => { clear(); resolve(value); },
+        (error: unknown) => { clear(); reject(error); },
+      );
+      if (signal.aborted) onAbort();
+    });
   };
 }
 
@@ -207,6 +238,10 @@ export interface ResourceDownload {
   readonly current: AgentResourceState;
   /** One snapshot download and its save at a time in this process; a snapshot can be hundreds of megabytes. */
   readonly exclusively: ExclusiveRunner;
+  readonly readinessDelays: readonly number[];
+  readonly allowUnfinalized: boolean;
+  /** Persists confirmed Agent terminal facts after budget admission, before resource reads. */
+  readonly prepare?: () => Promise<void>;
   /** Saves the Attempt's resources on its stage record, with the raw snapshot they summarize in the same write. */
   readonly save: (resources: AgentResourceState, snapshot?: AgentResourceSnapshot) => Promise<void>;
 }
@@ -214,40 +249,57 @@ export interface ResourceDownload {
 const INTERRUPTED: RetryErrorDetails = { message: "resource download was interrupted", failureKind: "network", retryable: true };
 
 /**
- * The single full download of an Attempt's snapshot as SP reports it, finalized or not. Each download
- * is counted on the Attempt before it starts, so one a crash interrupted counts against the same
- * `resources` retry budget; a failed Attempt records each retried failure with its count. Once the
- * budget is spent the Attempt is given up: `failed`, or its already collected snapshot kept, and
- * Runtime no longer owes it.
+ * The resource flow for both entry paths: budget before terminal preparation and readiness, then one
+ * download and atomic save at a time. A crash-safe count is committed only after acquiring the slot.
+ * Giving up preserves any stored snapshot and reports once, after saving `exhausted`.
  */
-export async function collectResources(download: ResourceDownload): Promise<AgentResourceState> {
+export async function collectResources(download: ResourceDownload): Promise<{ readonly pending?: string }> {
   const { source } = download;
   const started = Date.now();
   const fields = () => ({ name: "resources_collected", ...scopeFields(source.scope), durationMs: Date.now() - started });
   let state = download.current;
+  if (state.exhausted) return {};
   let failure: RetryErrorDetails | undefined;
+  let checkedReadiness = false;
+  let owed: string | undefined;
   for (;;) {
+    checkResourceStop(source);
     const downloads = state.downloads ?? 0;
     const last = failure ?? INTERRUPTED;
-    if (downloads > 0) {
-      const decision = last.retryable
+    const decision = downloads > 0
+      ? last.retryable
         ? await source.retryController.decide({ operation: "resources", failureKind: last.failureKind, attemptNumber: downloads, error: last.message })
-        : { shouldRetry: false };
-      if (!decision.shouldRetry) {
-        const given: AgentResourceState = state.status === "collected"
-          ? { ...state, exhausted: true }
-          : { ...failedResources(state, source.scope, source.now(), last.message), exhausted: true };
-        await download.save(given);
-        source.log({ ...fields(), downloads, error: last.message });
-        return given;
-      }
-      await source.sleep(decision.backoffMs ?? 0);
+        : { shouldRetry: false }
+      : { shouldRetry: true };
+    checkResourceStop(source);
+    if (!decision.shouldRetry) {
+      const given: AgentResourceState = state.status === "collected"
+        ? { ...state, exhausted: true }
+        : { ...failedResources(state, source.scope, source.now(), last.message), exhausted: true };
+      await download.save(given);
+      source.log({ ...fields(), downloads, error: last.message });
+      reportError(source.onError, new Error(
+        `Resources for Chat ${source.scope.chatId}, operation ${source.scope.idempotencyKey} were given up after ${downloads} downloads: ${last.message}`,
+      ));
+      return {};
     }
-    state = { ...state, downloads: downloads + 1, ...(state.status === "failed" && failure ? { error: failure.message } : {}) };
-    await download.save(state);
+    if (!checkedReadiness) {
+      await download.prepare?.();
+      checkResourceStop(source);
+      if (state.status === "collected" && state.summary.finalized) return {};
+      owed = await awaitResourceFinalization(source, download.readinessDelays);
+      if (owed !== undefined && !download.allowUnfinalized) return { pending: owed };
+      checkedReadiness = true;
+    }
+    if (downloads > 0) await source.sleep(decision.backoffMs ?? 0);
     try {
-      return await download.exclusively(async () => {
+      const collected = await download.exclusively(async () => {
+        checkResourceStop(source);
+        state = { ...state, downloads: downloads + 1, ...(state.status === "failed" && failure ? { error: failure.message } : {}) };
+        await download.save(state);
+        checkResourceStop(source);
         const snapshot = validateResourceSnapshot(await source.harness.collectAgentResources(resourceInput(source)), source.scope);
+        checkResourceStop(source);
         const collected: AgentResourceState = { status: "collected", summary: summarizeResourceSnapshot(snapshot) };
         await download.save(collected, snapshot);
         source.log({
@@ -255,9 +307,11 @@ export async function collectResources(download: ResourceDownload): Promise<Agen
           ...collected.summary.counts, creditsTotal: creditsTotal(snapshot.billingSettlements),
         });
         return collected;
-      });
+      }, source.stop?.signal);
+      return collected.summary.finalized ? {} : { pending: owed ?? "resource snapshot is not finalized" };
     } catch (error) {
       if (error instanceof RuntimeRunStoppedError || error instanceof RuntimeRecordPersistenceError) throw error;
+      checkResourceStop(source);
       failure = describeRetryError(error);
     }
   }
