@@ -1,4 +1,5 @@
-import { api, enc } from "./client";
+import { isWriteOutcomeUnknown } from "@/lib/errors";
+import { api, ApiError, enc } from "./client";
 import type { AgentObservationRef, EvaluationPlanInput, Project, ProjectCreateInput, ProjectView, RunHandle } from "./types";
 import type { EvaluationOutputSchemaDocument } from "@eval-platform/eval-contracts";
 
@@ -14,7 +15,22 @@ export const getProject = (projectId: string, signal?: AbortSignal) =>
   api.get<ProjectView>(`/api/projects/${enc(projectId)}`, { signal });
 export const createProject = (input: ProjectCreateInput) =>
   api.post<{ project: Project; run: RunHandle | null }>("/api/projects", input);
-export const deleteProject = (projectId: string) => api.delete(`/api/projects/${enc(projectId)}`);
+export async function deleteProject(projectId: string): Promise<void> {
+  try {
+    await api.delete(`/api/projects/${enc(projectId)}`);
+  } catch (error) {
+    if (isWriteOutcomeUnknown(error)) {
+      // The write may have committed before its response was lost; never replay it.
+      try {
+        await getProject(projectId);
+      } catch (confirmationError) {
+        if (confirmationError instanceof ApiError && confirmationError.status === 404
+          && confirmationError.code === "PROJECT_NOT_FOUND") return;
+      }
+    }
+    throw error;
+  }
+}
 export const replaceEvaluationPlan = (projectId: string, plan: EvaluationPlanInput) =>
   api.put<ProjectView>(`/api/projects/${enc(projectId)}/evaluation-plan`, plan);
 export const getProjectOutputSchema = (projectId: string, signal?: AbortSignal) =>

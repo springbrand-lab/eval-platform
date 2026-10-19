@@ -10,6 +10,8 @@ Eval 的内部管理界面：准备测试集与初始资源、上传评估结果
 
 删除及数据集成员变更的成功响应为 `204 No Content`，使用现有 HTTP SDK 的 `json` 模式接收空结果，不按成功信封解析。错误仍由同一 Eval 错误目录解码，连接中断不能当作删除成功，也不自动重发写请求。
 
+项目删除结果不确定时，通过同一 HTTP SDK 只读查询一次该 Project；仅 HTTP 404 且领域码为 `PROJECT_NOT_FOUND` 时确认已删除，沿用正常成功提示和返回项目列表，不再把已经确认的删除弹成网络失败。项目仍存在、确认请求失败、权限拒绝或其他 404 时保留原删除错误，不伪造成功，也不重复 DELETE。正常 `204` 不增加查询。
+
 Agent 新建与编辑直接复用 SP 同一份 `@springbrand/agent-config-editor`：行为、完整系统提示词、模型/思考强度、能力选择和排序、Skill/Reference 管理与预览。模型名称、可用性和每个模型支持的思考档位始终来自当前 Eval SP 的公开模型目录，Agent 管理列表也复用同一目录映射展示，不维护本地模型枚举。宿主只负责默认模板、当前用户、保存、revision 冲突、冻结副本只读及导航；不再提供 Slug 或配置 JSON 输入框。创建会话持有固定 Slug，失败重试通过 SP 创建重放校准；后台读取失败保留草稿。公共资源客户端经 `/api/agent-library` 访问当前 Eval SP，配置写入仍走 `/api/agent-configs`。错误由 Eval 目录解码，保留经过校验的 SP 编辑器领域码和删除阻挡详情。详见 [编辑器对齐](../../docs/agent-config-editor-alignment.md)。
 
 Agent 创建时选择“执行 Agent”或“评估 Agent”，用途由 Eval 统一记录，管理页可按用途筛选，也可在编辑时切换。切换为评估 Agent 时自动绑定评估结果 MCP，切回执行 Agent 时自动移除该绑定。用途信息读取失败或 MCP 目录无法完成 reconciliation 时，管理页阻断列表并提示重试，不显示用途未知的配置。新建 Project 的执行 Agent 和评估计划的评估 Agent 分别只请求对应用途，API 也会再次校验用途，不能依赖浏览器筛选绕过。

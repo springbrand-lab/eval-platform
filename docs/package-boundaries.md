@@ -160,6 +160,8 @@ Web reads upload and selection bounds from authenticated `GET /api/input-limits`
 
 Future internal UI entry point. It will create Projects (Datasets, Data subsets, Sampling counts, Subject Agent and execution policy, optional evaluation plan), fill or replace the evaluation plan until it locks, preview and submit Runs over Project/Dataset/ProjectSample/Sampling selections, stop and delete, and render the four-level metrics and read-only Chat/Workspace/Trajectory views. There is no execution-plan editor.
 
+Project deletion owns read-only outcome reconciliation in its Web domain client. A confirmed `204` needs no extra request. If a DELETE has an uncertain outcome, one uncached `getProject` read may confirm absence only through HTTP 404 with `PROJECT_NOT_FOUND`; that confirmed state completes the deletion and its normal success feedback/navigation. A present Project, unavailable verification, permission rejection or unrelated 404 preserves the original write error. Never infer success from connection loss or replay the DELETE.
+
 ### `apps/eval-cli`
 
 Future CLI entry point. It will use the same API semantics as Web; it is not the source of truth for Cloudflare Agent trajectories.
