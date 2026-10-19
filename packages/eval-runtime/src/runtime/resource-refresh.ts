@@ -16,7 +16,13 @@ import {
 } from "./agent-lifecycle.js";
 import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 import { attemptOwesResources } from "./recovery.js";
-import { awaitResourceFinalization, downloadResources, resourceScopeMatches, storedResourceScope } from "./resources.js";
+import {
+  STOPPED_RESOURCES_ERROR,
+  awaitResourceFinalization,
+  downloadResources,
+  resourceScopeMatches,
+  storedResourceScope,
+} from "./resources.js";
 import type { RetryController } from "./retry.js";
 
 export interface FinishedStageRefresh<TAttempt extends AgentAttemptRecord> {
@@ -35,9 +41,10 @@ export interface FinishedStageRefresh<TAttempt extends AgentAttemptRecord> {
 
 /**
  * One due pass of a finished stage waiting for its resources: a readiness check per owed Attempt,
- * then the single download once SP finalized the snapshot. Past the deadline, or when finalizing a
- * stopped Run (without a readiness check), the current snapshot is downloaded once and kept as it
- * is, the wait ends and the shortfall is reported once.
+ * then the single download once SP finalized the snapshot. Past the deadline the current snapshot
+ * is downloaded once and kept as it is, the wait ends and the shortfall is reported once. Finalizing
+ * a stop never reads SP: each owed Attempt without a collected snapshot is recorded failed with
+ * {@link STOPPED_RESOURCES_ERROR} and the wait ends.
  */
 export async function refreshFinishedStage<TAttempt extends AgentAttemptRecord>(
   dependencies: AgentLifecycleDependencies,
@@ -46,15 +53,18 @@ export async function refreshFinishedStage<TAttempt extends AgentAttemptRecord>(
   const { stage, samplingId, handle } = refresh;
   const { resourcesPending: pending, ...finished } = refresh.state;
   if (pending === undefined) return;
+  const now = dependencies.now();
+  if (dependencies.finalizingStop) {
+    await refresh.persist(refresh.attempts.map((attempt) => withResourceFailure(attempt, refresh.agentEnded, now, STOPPED_RESOURCES_ERROR)), finished);
+    return;
+  }
   if (handle === undefined) {
     reportError(dependencies.onError, new Error(`${stage} resources for sampling ${samplingId} were not read: no Chat`));
     await refresh.persist(refresh.attempts, finished);
     return;
   }
-  const now = dependencies.now();
-  const stopping = dependencies.finalizingStop === true;
   try {
-    const expired = stopping || Date.parse(now) >= Date.parse(pending.deadline);
+    const expired = Date.parse(now) >= Date.parse(pending.deadline);
     const errors: string[] = [];
     const attempts: TAttempt[] = [];
     for (const original of refresh.attempts) {
@@ -69,7 +79,7 @@ export async function refreshFinishedStage<TAttempt extends AgentAttemptRecord>(
     const lastError = errors.join("; ");
     if (errors.length > 0 && expired) {
       reportError(dependencies.onError, new Error(
-        `${stage} resources for sampling ${samplingId}, Chat ${handle.chatId} were not finalized ${stopping ? "when the Run stopped" : `by ${pending.deadline}`}; kept the current snapshot: ${lastError}`,
+        `${stage} resources for sampling ${samplingId}, Chat ${handle.chatId} were not finalized by ${pending.deadline}; kept the current snapshot: ${lastError}`,
       ));
     }
     const nextAttemptAt = new Date(Math.min(Date.parse(now) + RESOURCE_CHECK_INTERVAL_MS, Date.parse(pending.deadline))).toISOString();
@@ -77,17 +87,12 @@ export async function refreshFinishedStage<TAttempt extends AgentAttemptRecord>(
       ? finished
       : { ...finished, resourcesPending: { deadline: pending.deadline, nextAttemptAt, lastError } });
   } catch (error) {
-    if (error instanceof RuntimeRecordPersistenceError || (!stopping && error instanceof RuntimeRunStoppedError)) throw error;
+    if (error instanceof RuntimeRecordPersistenceError || error instanceof RuntimeRunStoppedError) throw error;
     const message = errorMessage(error);
     reportError(dependencies.onError, new Error(
       `${stage} resource refresh failed for sampling ${samplingId}: ${message}`, { cause: error },
     ));
-    // A stopped Run never keeps the wait: record the failure on each owed Attempt and end it.
-    if (stopping) {
-      await refresh.persist(refresh.attempts.map((attempt) => withResourceFailure(attempt, refresh.agentEnded, now, message)), finished);
-      return;
-    }
-    // Otherwise keep the wait but back off one interval, so the stage is not due again immediately.
+    // Keep the wait but back off one interval, so the stage is not due again immediately.
     const nextAttemptAt = new Date(Math.min(Date.parse(now) + RESOURCE_CHECK_INTERVAL_MS, Date.parse(pending.deadline))).toISOString();
     await refresh.persist(refresh.attempts, { ...finished, resourcesPending: { deadline: pending.deadline, nextAttemptAt, lastError: message } });
   }
@@ -137,7 +142,7 @@ async function refreshAttempt<TAttempt extends AgentAttemptRecord>(
     sleep: dependencies.sleep, now: dependencies.now, log: dependencies.log,
     ...(refresh.harnessConfig.runtime === undefined ? {} : { runtime: refresh.harnessConfig.runtime }),
   };
-  const owed = dependencies.finalizingStop ? undefined : await awaitResourceFinalization(source, [0]);
+  const owed = await awaitResourceFinalization(source, [0]);
   if (owed !== undefined && !expired) return { attempt, error: owed };
   const resources = await downloadResources(source);
   if (resources.status === "failed") {

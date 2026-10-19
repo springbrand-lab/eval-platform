@@ -8,12 +8,12 @@ import type { RetryController } from "./retry.js";
 
 const NOW = "2026-10-20T00:01:00.000Z";
 
-function refreshWith(deadline: string, finalizingStop?: true) {
+function refreshWith(deadline: string) {
   const onError = vi.fn();
   const persist = vi.fn(async (_attempts: readonly AgentAttemptRecord[], _state: SamplingStageState) => undefined);
   const attempts = [{ attemptNumber: 1 }] as unknown as readonly AgentAttemptRecord[];
   const dependencies = {
-    now: () => NOW, onError, log: () => undefined, ...(finalizingStop ? { finalizingStop } : {}),
+    now: () => NOW, onError, log: () => undefined,
   } as unknown as AgentLifecycleDependencies;
   const run = () => refreshFinishedStage(dependencies, {
     stage: "execution",

@@ -56,12 +56,13 @@ function pendingMemberships(reader: RecordReader) {
 }
 
 /**
- * Members of a non-stopped Run still waiting for a resource snapshot. A Sampling's execution stage belongs to
- * the execution/pipeline Run that created it, never to an evaluation Run that reuses it. A stop
- * request ignores these flags, so they can never hold a stopped Run open.
+ * Members still waiting for a resource snapshot of a Run without a pending stop. A Sampling's execution
+ * stage belongs to the execution/pipeline Run that created it, never to an evaluation Run that reuses it.
+ * A pending stop ignores these flags, so they never hold it open; finalizing it clears them, so after a
+ * finalized stop they only come from a manual resource recollection.
  */
 function recoveringMemberships(reader: RecordReader, value?: (stage: SQL) => SQL) {
-  const running = eq(runs.stopRequested, false);
+  const running = or(eq(runs.stopRequested, false), eq(runs.stopFinalized, true));
   return memberships(reader,
     and(running, inArray(runs.operation, ["execution", "pipeline"]), resourcesPending(samplingStage)),
     and(running, resourcesPending(evaluationStage)), value);

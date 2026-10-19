@@ -504,17 +504,17 @@ export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string,
         const sampling = samplingFromRow(samplingRow);
         const evaluation = evaluationRow ? evaluationFromRow(evaluationRow) : null;
         const [run] = evaluation
-          ? await transaction.select({ runId: runs.runId, stopped: runs.stopRequested, stopPending: runStopPending() }).from(runs)
+          ? await transaction.select({ runId: runs.runId, stopPending: runStopPending() }).from(runs)
             .innerJoin(runEvaluations, eq(runEvaluations.runId, runs.runId))
             .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId), eq(runEvaluations.evaluationId, id))).limit(1)
-          : await transaction.select({ runId: runs.runId, stopped: runs.stopRequested, stopPending: runStopPending() }).from(runs)
+          : await transaction.select({ runId: runs.runId, stopPending: runStopPending() }).from(runs)
             .innerJoin(runSamplings, eq(runSamplings.runId, runs.runId))
             .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId), eq(runSamplings.samplingId, id), inArray(runs.operation, ["execution", "pipeline"]))).orderBy(desc(runs.sequence)).limit(1);
         if (!run) throw new ResultCollectionConflictError();
         const stage = evaluation?.status ?? sampling.execution;
         if (target === "output" && stage.status === "succeeded") return { runId: run.runId, queued: false };
-        // A finalized stop only reopens for output: resource refreshes never run for a stopped Run.
-        if (run.stopPending || (run.stopped && target === "resources")) throw new ResultCollectionConflictError();
+        // A finalized stop reopens for output or for the resources it recorded as failed, without reopening the stop.
+        if (run.stopPending) throw new ResultCollectionConflictError();
         const [active] = await transaction.select({ runId: runs.runId }).from(runs)
           .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId), runActive(transaction))).limit(1);
         const owned = active?.runId === run.runId;

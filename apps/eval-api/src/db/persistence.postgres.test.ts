@@ -207,7 +207,8 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     await database.db.update(runs).set({ stopRequested: true }).where(eq(runs.runId, runId));
     await expect(control.recollect(seeded.projectId, "execution", id)).rejects.toMatchObject({ name: "ResultCollectionConflictError" });
     expect(await worker.markRunStopFinalized(runId)).toBe(true);
-    await expect(control.recollect(seeded.projectId, "execution", id, "resources")).rejects.toMatchObject({ name: "ResultCollectionConflictError" });
+    // No ended Attempt owes resources, so a resource recollection is a no-op.
+    expect(await control.recollect(seeded.projectId, "execution", id, "resources")).toEqual({ runId, queued: false });
 
     expect(await control.recollect(seeded.projectId, "execution", id)).toEqual({ runId, queued: true });
     expect(await worker.isRunActive(runId)).toBe(true);
@@ -279,9 +280,12 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     expect(await worker.isRunActive(pipeline.command.run.runId)).toBe(true);
     expect(await worker.isRunActive(evaluating.command.run.runId)).toBe(false);
 
-    // A stop is never held open by a refresh: the flags are ignored once stop is requested.
+    // A pending stop is never held open by a refresh: its flags are ignored until the stop is finalized.
     await worker.requestRunStop(pipeline.command.run.runId);
     expect(await worker.markRunStopFinalized(pipeline.command.run.runId)).toBe(true);
+    // Finalizing clears every flag; one set afterwards is a manual resource recollection that reactivates the Run.
+    expect(await worker.isRunActive(pipeline.command.run.runId)).toBe(true);
+    await worker.updateSampling(finished, refreshing);
     expect(await worker.isRunActive(pipeline.command.run.runId)).toBe(false);
     expect(await control.getCurrentRun(seeded.projectId)).toBeNull();
   });
@@ -323,7 +327,15 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     expect(await control.recollect(seeded.projectId, "execution", id, "resources")).toEqual({ runId, queued: true });
     expect((await store.getSampling(id))!.execution).toEqual({ status: "failed", lastError: "resources failed", resourcesPending: { deadline: expect.any(String), nextAttemptAt: expect.any(String) } });
 
+    // A finalized stop records owed resources as failed; recollecting them reactivates the Run without reopening the stop.
     await database.db.update(runs).set({ stopRequested: true, stopFinalized: true }).where(eq(runs.runId, runId));
+    const stopped = (await store.getSampling(id))!;
+    await worker.updateSampling({ ...stopped, execution: { status: "failed", lastError: "resources failed" } }, stopped);
+    expect(await worker.isRunActive(runId)).toBe(false);
+    expect(await control.recollect(seeded.projectId, "execution", id, "resources")).toEqual({ runId, queued: true });
+    expect(await worker.isRunActive(runId)).toBe(true);
+    expect(await worker.isRunStopPending(runId)).toBe(false);
+    await database.db.update(runs).set({ stopFinalized: false }).where(eq(runs.runId, runId));
     await expect(control.recollect(seeded.projectId, "execution", id, "resources")).rejects.toMatchObject({ name: "ResultCollectionConflictError" });
   });
 

@@ -52,6 +52,9 @@ const snapshotSchema = z.strictObject({
   readiness: readinessSchema,
 });
 
+/** Recorded on each Attempt still owing resources when a stopping or stopped Run would otherwise read them. */
+export const STOPPED_RESOURCES_ERROR = "Run stopped before resources were collected";
+
 /** Readiness checks right after the Agent ends; together about 75 seconds. */
 export const RESOURCE_READINESS_DELAYS_MS = [0, 5_000, 10_000, 20_000, 40_000] as const;
 

@@ -165,7 +165,7 @@ export interface EvalRunResumer {
   interrupt(runId: string): Promise<void>;
   /**
    * Finalize a pending stop after local resume tasks have quiesced: every pending stage ends without
-   * re-running an Agent, exporting evidence or waiting for resource readiness; owed resources are downloaded once as they are.
+   * re-running an Agent, exporting evidence or reading resources; owed resources are recorded as failed.
    */
   stop(runId: string, reporter?: RunStopReporter): Promise<void>;
 }

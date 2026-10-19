@@ -29,6 +29,7 @@ import {
 } from "./retry.js";
 import {
   RESOURCE_READINESS_DELAYS_MS,
+  STOPPED_RESOURCES_ERROR,
   awaitResourceFinalization,
   downloadResources,
   resourceScopeMatches,
@@ -78,9 +79,9 @@ export interface AgentLifecycleDependencies {
   readonly onError: (error: Error, context?: RuntimeContext) => void;
   /** Already safe: it never throws. */
   readonly log: RuntimeLog;
-  /** Finalizing a stopped Run: check resource readiness once and leave Subject evidence export pending. */
+  /** Finalizing a stopped Run: never read resources and leave Subject evidence export pending. */
   readonly finalizingStop?: true;
-  /** Recollecting after a finalized stop: the snapshot the stop kept is final, so no resource wait starts. */
+  /** Recollecting after a finalized stop: output collection never reads resources or starts a resource wait; only a manual resource recollection refreshes them. */
   readonly runStopped?: true;
 }
 
@@ -370,14 +371,22 @@ export async function runAgentLifecycle<TAttempt extends AgentAttemptRecord, TOu
           || (attempt.resources?.status === "failed" && attempt.completedAt !== undefined)
           || (attempt.resources?.status === "collected" && terminal !== undefined
             && !attempt.resources.snapshot.finalized));
-        if (terminalSaved && needsResources) {
+        if (terminalSaved && needsResources && (dependencies.finalizingStop || dependencies.runStopped)) {
+          // A stopping or stopped Run never reads SP: an ended Attempt's owed resources fail as they are.
+          if (attempt.completedAt !== undefined && attempt.resources?.status !== "collected") {
+            attempt = await options.updateAttempt(attempt, { resources: {
+              status: "failed", scope: storedResourceScope(attempt.resources) ?? resourceScope,
+              collectedAt: dependencies.now(), error: STOPPED_RESOURCES_ERROR,
+            } });
+          }
+        } else if (terminalSaved && needsResources) {
           const source = {
             harness: dependencies.harness, handle, scope: resourceScope, retryController,
             sleep: dependencies.sleep, now: dependencies.now, log: dependencies.log, ...runtimeOption(options.harnessConfig.runtime),
           };
           // An unfinalized snapshot is never downloaded here; the stage owes it as `resourcesPending`.
           const owed = await awaitResourceFinalization(
-            source, attempt.completedAt === undefined || dependencies.finalizingStop ? [0] : RESOURCE_READINESS_DELAYS_MS,
+            source, attempt.completedAt === undefined ? [0] : RESOURCE_READINESS_DELAYS_MS,
           );
           const resources = owed === undefined ? await downloadResources(source) : undefined;
           if (resources && !(attempt.resources?.status === "collected" && resources.status === "failed")) {
