@@ -32,6 +32,8 @@
 
 评估 Agent 的 Submission 已完成、平台尚无提交评分时，直接进入 Runtime 现有的 `restart` 决策，不检查错误文本或最终回复。在同一评估 Chat 使用新的幂等键提交下一次 Attempt，和失败 Submission 共用评估计划的 `maxRestarts`、退避及持久化 Attempt 次数；默认最多 4 次重启，加上首次共 5 次，不另加预算。不会重跑执行 Agent，也不重新初始化或导入证据。原 Attempt 的完成状态、资源及 `evaluation result not submitted` 原因保留，Worker 恢复不重置次数；耗尽后仍未提交则明确失败。
 
+MCP 评分补交时只发送 `Please call the MCP tool to resubmit the evaluation result.`，不再发送原评估消息。原 Chat 已有评估上下文、Schema 和提交凭证。补交模式从已保存的 completed Attempt 和未提交原因推导，Worker 恢复或后续补交消息失败后仍使用同一句提示；首次评估、补交前的普通失败重启及非 MCP 旧流程不改变提示词。
+
 最终回复不作为 MCP 评分。合法结果已接受、结果格式无效、人工补收或 Run 已停止时不启动恢复；恢复决策前再读当前记录确认结果未被 MCP 接受。
 
 ## 配置
