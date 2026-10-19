@@ -13,8 +13,12 @@ import {
   isPendingSamplingStatus,
   isStageRecoveryPending,
   isTerminalAgentStatus,
+  jsonObjectArrayInPlaceSchema,
+  jsonObjectInPlaceSchema,
   jsonObjectSchema,
   jsonValueSchema,
+  summarizeResourceSnapshot,
+  type AgentResourceSnapshot,
 } from "./index.js";
 
 describe("@eval-platform/eval-contracts", () => {
@@ -84,5 +88,41 @@ describe("@eval-platform/eval-contracts", () => {
 
   it.each([null, [], "text"])("requires a top-level JSON object: %j", (value) => {
     expect(jsonObjectSchema.safeParse(value).success).toBe(false);
+    expect(jsonObjectInPlaceSchema.safeParse(value).success).toBe(false);
+  });
+
+  it("validates a large raw object in place by the same rules, without copying it", () => {
+    const shared = { tokens: [1, null] };
+    const input = { first: shared, second: shared, nested: [[{ ok: true }]] };
+    expect(jsonObjectInPlaceSchema.parse(input)).toBe(input);
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    for (const invalid of [cyclic, { value: Number.NaN }, { value: new Date() }, { get computed() { return 1; } }]) {
+      expect(jsonObjectInPlaceSchema.safeParse(invalid).success).toBe(false);
+    }
+  });
+
+  it("validates a large array of raw objects in place, returning the original array", () => {
+    const input = [{ eventId: "a" }, { eventId: "b", nested: [null] }];
+    expect(jsonObjectArrayInPlaceSchema.parse(input)).toBe(input);
+    for (const invalid of [{}, [null], [[]], [{ value: Number.NaN }], Object.assign([{}], { extra: true }), new Array(1)]) {
+      expect(jsonObjectArrayInPlaceSchema.safeParse(invalid).success).toBe(false);
+    }
+  });
+
+  it("summarizes a resource snapshot without its events", () => {
+    const snapshot: AgentResourceSnapshot = {
+      scope: { chatId: "chat", idempotencyKey: "key", submissionId: "submission" },
+      observedAt: "2026-10-20T00:00:00.000Z",
+      finalized: true,
+      coverage: { usageEvents: "complete", telemetryEvents: "partial", billingSettlements: "complete" },
+      usageEvents: [{ eventId: "u" }],
+      telemetryEvents: [{ eventId: "t1" }, { eventId: "t2" }],
+      billingSettlements: [],
+    };
+    expect(summarizeResourceSnapshot(snapshot)).toEqual({
+      scope: snapshot.scope, observedAt: snapshot.observedAt, finalized: true, coverage: snapshot.coverage,
+      counts: { usageEvents: 1, telemetryEvents: 2, billingSettlements: 0 },
+    });
   });
 });

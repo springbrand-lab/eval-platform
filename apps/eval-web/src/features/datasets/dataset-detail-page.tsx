@@ -18,7 +18,7 @@ import { ConfirmDialog, Dialog } from "@/components/ui/dialog";
 import { EmptyState, ErrorBlock, LoadingBlock } from "@/components/ui/feedback";
 import { Badge } from "@/components/ui/badge";
 import { Field, Input, Textarea } from "@/components/ui/form";
-import { downloadText } from "@/lib/files";
+import { downloadFile } from "@/lib/files";
 
 export function dataTitle(data: Data): string {
   const name = (data as { name?: unknown }).name;
@@ -79,7 +79,7 @@ export function DatasetDetailPage({ datasetId }: { datasetId: string }) {
   });
   const exportAs = async (format: "json" | "yaml") => {
     const text = await exportDataset(datasetId, format);
-    downloadText(`${dataset.data?.name ?? "dataset"}.${format === "yaml" ? "yaml" : "json"}`, text,
+    downloadFile(`${dataset.data?.name ?? "dataset"}.${format === "yaml" ? "yaml" : "json"}`, text,
       format === "yaml" ? "application/yaml" : "application/json");
   };
 

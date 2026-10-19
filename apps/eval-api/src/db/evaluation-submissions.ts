@@ -65,12 +65,11 @@ export function createPostgresEvaluationSubmissions(db: EvalDb) {
             path: `/api/chats/${encodeURIComponent(evaluation.chatId)}/trajectory` },
           structuredOutput,
         };
-        // No full resource JSON is transferred to Node merely to publish a small score.
         const patch = JSON.stringify({ status: { status: "succeeded" }, output });
         if (!existing) await tx.insert(evaluationSubmissions).values({ ...input, contentHash });
         await tx.update(evaluations).set({
           facts: sql`${evaluations.facts} || ${patch}::jsonb`,
-          metricFacts: sql`${evaluations.metricFacts} || ${patch}::jsonb`,
+          revision: sql`${evaluations.revision} + 1`,
         }).where(eq(evaluations.evaluationId, input.evaluationId));
         return existing ? "replayed" : "accepted";
       });

@@ -17,3 +17,12 @@ export function safeLog(log: RuntimeLog | undefined): RuntimeLog {
     } catch { /* Diagnostics are best effort. */ }
   };
 }
+
+/** Reporting must not change the Run outcome. */
+export function reportError(onError: (error: Error) => void, error: Error): void {
+  try {
+    onError(error);
+  } catch (reportingError) {
+    console.error(error, reportingError);
+  }
+}

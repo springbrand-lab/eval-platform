@@ -1,4 +1,4 @@
-import { canonicalJsonBytes, sha256Hex, type AgentResourceCollection, type AgentResourceFact, type JsonValue } from "@eval-platform/eval-contracts";
+import { canonicalJsonBytes, sha256Hex, type AgentResourceFact, type AgentResourceSnapshot, type JsonValue } from "@eval-platform/eval-contracts";
 import { record, text } from "../json.js";
 
 export const TELEMETRY_PROJECTION_VERSION = 3;
@@ -8,21 +8,6 @@ const HIDDEN_TELEMETRY_TEXT = new Set([
   "[REDACTED]",
   "[Action business data withheld from telemetry]",
 ]);
-
-export function hasCurrentTelemetryProjection(collection: AgentResourceCollection): boolean {
-  if (collection.status !== "collected") return true;
-  return collection.snapshot.telemetryEvents.every((raw) => {
-    const projection = record(raw.metricProjection);
-    return projection?.version === TELEMETRY_PROJECTION_VERSION
-      && typeof projection.fingerprint === "string"
-      && typeof projection.hasThinking === "boolean"
-      && typeof projection.hasContent === "boolean"
-      && typeof projection.thinkingKnown === "boolean"
-      && typeof projection.contentKnown === "boolean"
-      && nullableLength(projection.inputLength)
-      && nullableLength(projection.outputLength);
-  });
-}
 
 /** Bytes of present canonical JSON; sanitized whole-body placeholders remain missing. */
 export function telemetryBodyLength(value: JsonValue | undefined): number | null {
@@ -59,10 +44,6 @@ function containsHiddenTelemetry(value: JsonValue | undefined): boolean {
   return object !== undefined && (object.redacted === true || Object.values(object).some(containsHiddenTelemetry));
 }
 
-function nullableLength(value: JsonValue | undefined): boolean {
-  return value === null || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
-}
-
 /** Reads the assistant output markers used to classify a Turn without retaining its body. */
 export function telemetryContentFlags(event: Readonly<Record<string, JsonValue>>): TelemetryContentFlags {
   const type = text(event.type);
@@ -84,12 +65,11 @@ export function telemetryContentFlags(event: Readonly<Record<string, JsonValue>>
   };
 }
 
-/** Internal Metrics projection, never a replacement for the original SP resource snapshot. */
-export async function compactResourceCollection(collection: AgentResourceCollection): Promise<AgentResourceCollection> {
-  if (collection.status !== "collected" || hasCurrentTelemetryProjection(collection)) return collection;
+/** Internal Metrics projection of a raw snapshot, stored beside it and never a replacement for it. */
+export async function compactResourceSnapshot(snapshot: AgentResourceSnapshot): Promise<AgentResourceSnapshot> {
   const telemetryEvents: AgentResourceFact[] = [];
   // Sequential hashing bounds temporary canonical JSON buffers to one event, not the full snapshot.
-  for (const raw of collection.snapshot.telemetryEvents) {
+  for (const raw of snapshot.telemetryEvents) {
     const event = record(raw.event) ?? raw;
     const payload = record(event.payload);
     const contentFlags = telemetryContentFlags(event);
@@ -113,5 +93,5 @@ export async function compactResourceCollection(collection: AgentResourceCollect
       },
     });
   }
-  return { ...collection, snapshot: { ...collection.snapshot, telemetryEvents } };
+  return { ...snapshot, telemetryEvents };
 }

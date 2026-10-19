@@ -14,7 +14,7 @@ import { CatalogWriteFeedback } from "@/features/catalog-write-feedback";
 import { useInputLimits } from "@/features/input-limits";
 import { detectTextImportFormat, textImportAccept, useTextImport } from "@/features/use-text-import";
 import { isWriteOutcomeUnknown } from "@/lib/errors";
-import { downloadText } from "@/lib/files";
+import { downloadFile } from "@/lib/files";
 
 export function DatasetCreateDialog({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
@@ -92,7 +92,7 @@ export function DatasetImportDialog({ datasetId, onClose }: { datasetId?: string
     footer={<><Button disabled={upload.isPending} onClick={onClose}>取消</Button><Button variant="primary" loading={upload.isPending} disabled={blocked || !valid} onClick={() => upload.mutate()}>确认导入</Button></>}>
     <fieldset disabled={blocked} className="flex min-w-0 flex-col gap-4">
       <p className="text-sm text-text-muted">用例列表包含名称、说明、执行任务和评估要求。导入列表不接受资源引用，导入后可为用例添加素材和初始对话。{!datasetId && "也可导入完整数据集 JSON / YAML，保留原有身份和资源引用。"}</p>
-      <Button onClick={() => downloadText("cases.json", JSON.stringify(template, null, 2), "application/json")}>下载用例模板</Button>
+      <Button onClick={() => downloadFile("cases.json", JSON.stringify(template, null, 2), "application/json")}>下载用例模板</Button>
       {!datasetId && <><Field label="名称" required>{(id) => <Input id={id} value={name} onChange={(e) => { edited.current.name = true; setName(e.target.value); }} />}</Field>
         <Field label="说明" required={list}>{(id) => <Input id={id} value={description} onChange={(e) => { edited.current.description = true; setDescription(e.target.value); }} />}</Field></>}
       <FileDropzone disabled={blocked} multiple={false} accept={textImportAccept(formats)} maxBytes={limits.data ? Math.max(limits.data.promptDatasetFileBytes, limits.data.datasetDocumentBytes) : undefined}

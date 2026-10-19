@@ -8,6 +8,7 @@ import {
   type EvidenceBundleReader,
 } from "@eval-platform/eval-runtime";
 import { EVAL_EVIDENCE_FILE_MAX_BYTES, EVAL_INITIAL_FILE_MAX_BYTES, EVAL_OUTPUT_SCHEMA_PATH as SCHEMA_PATH } from "@springbrand/eval-harness";
+import { isRequestCancelled } from "@springbrand/http/errors";
 import WebSocket, { WebSocketServer } from "ws";
 import { createSpHarness, SpHarnessError, spEvidenceLimits } from "./harness.js";
 
@@ -670,6 +671,56 @@ describe("Eval SP Harness", () => {
 describe("Eval SP Harness large transfers and readiness", () => {
   const notReady = () => Response.json({ code: "EVIDENCE_NOT_READY", errMsg: "Telemetry is still being delivered" },
     { status: 409, headers: { "Retry-After": "3" } });
+
+  it.each(["collectAgentResources", "inspectAgentResources"] as const)("physically cancels the streamed body of %s and preserves cancellation", async (method) => {
+    const stop = new AbortController();
+    let active = 0;
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let started!: () => void;
+    const reading = new Promise<void>((resolve) => { started = resolve; });
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+      active += 1;
+      const body = new ReadableStream<Uint8Array>({
+        start(stream) {
+          controller = stream;
+          stream.enqueue(new TextEncoder().encode('{"scope":'));
+          signal?.addEventListener("abort", () => {
+            active -= 1;
+            stream.error(signal.reason);
+          }, { once: true });
+        },
+        pull() { started(); },
+      });
+      return new Response(body, { headers: { "Content-Type": "application/json" } });
+    });
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    const result = harness[method]({
+      handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1", signal: stop.signal,
+    }).catch((error: unknown) => error);
+    try {
+      await reading;
+      stop.abort();
+      await vi.waitFor(() => expect(active).toBe(0));
+      const error = await result;
+      expect(isRequestCancelled(error)).toBe(true);
+      expect(error).not.toBeInstanceOf(SpHarnessError);
+      expect(fetch).toHaveBeenCalledOnce();
+    } finally {
+      controller.error(new Error("test cleanup"));
+      await result;
+    }
+  });
+
+  it.each(["collectAgentResources", "inspectAgentResources"] as const)("does not start %s with an already aborted signal", async (method) => {
+    const fetch = vi.fn(async () => Response.json(resources));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    const error = await harness[method]({
+      handle: subject, idempotencyKey: "execution:sampling-1", signal: AbortSignal.abort(),
+    }).catch((cause: unknown) => cause);
+    expect(isRequestCancelled(error)).toBe(true);
+    expect(fetch).not.toHaveBeenCalled();
+  });
 
   it("passes SP's resource readiness through and reports the read without payload contents", async () => {
     const events: Record<string, unknown>[] = [];

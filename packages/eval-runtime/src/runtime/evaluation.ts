@@ -12,7 +12,6 @@ import {
 import type {
   EvaluationAgentOutput,
   EvaluationAttempt,
-  EvaluationRecord,
   EvaluationOutputSchema,
   HarnessConfig,
   RetryPolicy,
@@ -21,7 +20,7 @@ import type {
 import { dataInputSchema } from "@eval-platform/eval-dataset";
 
 import type { ProjectSample, RuntimeEvaluationContext } from "./model.js";
-import { persistRuntimeRecord, readStageFailure } from "./store.js";
+import { persistRuntimeRecord, readStageFailure, withoutRevision, type AttemptResourceSnapshot, type EvaluationState } from "./store.js";
 import { RuntimeAdmissionConflictError, RuntimeRecordPersistenceError } from "./errors.js";
 import {
   AgentOperationError,
@@ -29,11 +28,11 @@ import {
   applyAttemptPatch,
   collectOutputWithRetry,
   describeAgentError,
-  reportError,
   runAgentLifecycle,
   withContext,
   type StageDependencies,
 } from "./agent-lifecycle.js";
+import { reportError } from "./log.js";
 import { evaluationAgentEnded, isAcceptedEvaluation, unconfirmedObservation, withRecoveryBookkeeping } from "./recovery.js";
 import { refreshFinishedStage } from "./resource-refresh.js";
 import { publishEvaluationScore } from "./scores.js";
@@ -80,7 +79,7 @@ export async function evaluateSampling(
   const { sampling, evaluation, sample } = input.context;
   let currentEvaluation = evaluation;
   const retryController = dependencies.createRetryController(input.retryPolicy, dependencies.log);
-  const keepAccepted = (next: EvaluationRecord, accepted: EvaluationRecord): EvaluationRecord => {
+  const keepAccepted = (next: EvaluationState, accepted: EvaluationState): EvaluationState => {
     if (!isAcceptedEvaluation(accepted) || !accepted.output?.structuredOutput) return next;
     const { error: _error, ...output } = next.output ?? accepted.output;
     // The accepted status stays; only the writer's resource bookkeeping is taken. Observation is moot.
@@ -90,33 +89,35 @@ export async function evaluateSampling(
       ...output, status: "succeeded", structuredOutput: accepted.output.structuredOutput,
     } };
   };
-  const withBookkeeping = (record: EvaluationRecord, previous: EvaluationRecord): EvaluationRecord => ({
+  const withBookkeeping = (record: EvaluationState, previous: EvaluationState): EvaluationState => ({
     ...record, status: withRecoveryBookkeeping(record.status, previous.status, record.attempts, evaluationAgentEnded(record), dependencies),
   });
-  const observationFacts = ({ status: _status, output: _output, ...facts }: EvaluationRecord) => facts;
-  const write = (next: EvaluationRecord, expected: EvaluationRecord) => persistRuntimeRecord({
+  const observationFacts = (record: EvaluationState) => {
+    const { status: _status, output: _output, ...facts } = withoutRevision(record);
+    return facts;
+  };
+  const write = (next: EvaluationState, expected: EvaluationState, resources?: AttemptResourceSnapshot): Promise<EvaluationState> => persistRuntimeRecord({
     record: next, expected,
-    write: (record, previous) => dependencies.store.updateEvaluation(record, previous),
+    write: (record, previous) => dependencies.store.updateEvaluation(record, previous, resources),
     read: () => dependencies.store.getEvaluation(next.evaluationId), retryController, sleep: dependencies.sleep,
   });
   /** Writes the record prepared against its base, rebasing only onto an accepted result committed meanwhile. */
-  const writePrepared = async (prepare: (base: EvaluationRecord) => EvaluationRecord): Promise<void> => {
-    let update = prepare(currentEvaluation);
+  const writePrepared = async (prepare: (base: EvaluationState) => EvaluationState, resources?: AttemptResourceSnapshot): Promise<void> => {
     try {
-      await write(update, currentEvaluation);
+      currentEvaluation = await write(prepare(currentEvaluation), currentEvaluation, resources);
     } catch (error) {
       if (!(error instanceof RuntimeRecordPersistenceError) || error.outcome !== "conflict") throw error;
       const stored = await dependencies.store.getEvaluation(currentEvaluation.evaluationId);
       // Rebase only the API's completion fields; never overwrite concurrent Attempt or stop changes.
       if (!stored || !isAcceptedEvaluation(stored) || !equalJson(observationFacts(stored), observationFacts(currentEvaluation))) throw error;
-      update = prepare(stored);
-      await write(update, stored);
+      currentEvaluation = await write(prepare(stored), stored, resources);
     }
-    currentEvaluation = update;
   };
-  const persistRecord = (next: EvaluationRecord): Promise<void> => writePrepared((base) => keepAccepted(next, base));
+  const persistRecord = (next: EvaluationState, resources?: AttemptResourceSnapshot): Promise<void> => (
+    writePrepared((base) => keepAccepted(next, base), resources));
   /** Writes this record with recovery flags derived from the Attempts it commits. */
-  const persist = (next: EvaluationRecord): Promise<void> => writePrepared((base) => withBookkeeping(keepAccepted(next, base), base));
+  const persist = (next: EvaluationState, resources?: AttemptResourceSnapshot): Promise<void> => (
+    writePrepared((base) => withBookkeeping(keepAccepted(next, base), base), resources));
   if (currentEvaluation.status.resourcesPending && !isPendingSamplingStatus(currentEvaluation.status.status)) {
     await refreshFinishedStage(dependencies, {
       stage: "evaluation",
@@ -130,7 +131,8 @@ export async function evaluateSampling(
       attempts: currentEvaluation.attempts,
       state: currentEvaluation.status,
       agentEnded: evaluationAgentEnded(currentEvaluation),
-      persist: (attempts, status) => persistRecord({ ...currentEvaluation, attempts, status }),
+      persist: (attempts, status, collected) => persistRecord({ ...currentEvaluation, attempts, status },
+        collected && { attemptId: collected.attempt.evaluationAttemptId, snapshot: collected.snapshot }),
     });
     return { ...input.context, evaluation: currentEvaluation };
   }
@@ -260,7 +262,7 @@ export async function evaluateSampling(
           attempts: [...currentEvaluation.attempts, attempt],
         });
       },
-      updateAttempt: async (attempt, patch) => {
+      updateAttempt: async (attempt, patch, snapshot) => {
         const existing = currentEvaluation.attempts.find((item) => (
           item.evaluationAttemptId === attempt.evaluationAttemptId
         ));
@@ -271,7 +273,7 @@ export async function evaluateSampling(
           attempts: currentEvaluation.attempts.map((item) => (
             item.evaluationAttemptId === updated.evaluationAttemptId ? updated : item
           )),
-        });
+        }, snapshot && { attemptId: updated.evaluationAttemptId, snapshot });
         return updated;
       },
       setSamplingStatus: async (status, lastError) => {
@@ -374,10 +376,10 @@ export async function evaluateSampling(
 }
 
 function withEvaluationStatus(
-  evaluation: EvaluationRecord,
+  evaluation: EvaluationState,
   status: SamplingStatus,
   lastError?: string,
-): EvaluationRecord {
+): EvaluationState {
   return {
     ...evaluation,
     status: lastError === undefined ? { status } : { status, lastError },

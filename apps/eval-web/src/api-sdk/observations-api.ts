@@ -47,3 +47,7 @@ export const getTrajectoryPage = (projectId: string, kind: ObservedKind, id: str
   api.get<TrajectoryPage>(`${base(projectId, kind, id)}/trajectory`, { params: { limit: 100, ...(beforeSeq ? { beforeSeq } : {}) }, signal });
 export const getWorkspaceFile = (projectId: string, kind: ObservedKind, id: string, path: string, signal?: AbortSignal) =>
   api.blob(`${base(projectId, kind, id)}/file`, { params: { path }, signal, timeoutMs: 120_000 });
+
+/** One Attempt's stored raw resource snapshot, as the JSON bytes the API streams. */
+export const getResourceSnapshot = (projectId: string, kind: ObservedKind, id: string, attemptId: string) =>
+  api.blob(`/api/projects/${enc(projectId)}/${kind}/${enc(id)}/attempts/${enc(attemptId)}/resource-snapshot`, { timeoutMs: 600_000 });

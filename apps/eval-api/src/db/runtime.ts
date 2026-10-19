@@ -19,9 +19,10 @@ import {
   RuntimeRunIdentityConflictError,
   RuntimeRunStoppedError,
   stageOwesResources,
+  withFreshResourceBudget,
 } from "@eval-platform/eval-runtime";
 import { and, desc, eq, gt, inArray, max, sql } from "drizzle-orm";
-import { samplingMetricFacts, evaluationMetricFacts } from "./metric-facts.js";
+import { updateWithResources } from "./attempt-resources.js";
 import { addToGroup, selectByIds, sqlBatches } from "./batch.js";
 import type { RunQueue, RunWorkerQueue } from "../run-worker-queue.js";
 import type { RunRecoveryStore } from "../worker.js";
@@ -33,17 +34,19 @@ import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
 import {
   evaluationFacts,
   evaluationFromRow,
-  listSamplingEvaluations,
+  evaluationStateFromRow,
+  listSamplingEvaluationRows,
   nextResourceCheckAt,
   projectHasRun,
-  readEvaluations,
+  readEvaluationRows,
   readRunRecords,
-  readSamplings,
+  readSamplingRows,
   runActive,
   runStopPending,
   runFinished,
   samplingFacts,
   samplingFromRow,
+  samplingStateFromRow,
   samplingSucceeded,
   type RecordReader,
   type RunRecordScope,
@@ -276,23 +279,19 @@ async function insertRun(transaction: AdmissionWriter, owner: string, command: R
   if (!inserted) throw new RuntimeRunIdentityConflictError(`Run identity already exists: ${run.runId}`);
 
   for (const batch of sqlBatches(newSamplings)) {
-    const rows = [];
-    for (const record of batch) rows.push({
+    await transaction.insert(samplings).values(batch.map((record) => ({
       samplingId: record.samplingId, ownerUserId: owner, projectId: record.projectId,
-      projectSampleId: record.projectSampleId, facts: samplingFacts(record), metricFacts: await samplingMetricFacts(samplingFacts(record)),
-    });
-    await transaction.insert(samplings).values(rows);
+      projectSampleId: record.projectSampleId, facts: samplingFacts(record),
+    })));
   }
   const memberships = run.samplingIds.map((samplingId, position) => ({
     ownerUserId: owner, runId: run.runId, samplingId, position,
   }));
   for (const batch of sqlBatches(memberships)) await transaction.insert(runSamplings).values(batch);
   for (const batch of sqlBatches(newEvaluations)) {
-    const rows = [];
-    for (const evaluation of batch) rows.push({
-      evaluationId: evaluation.evaluationId, ownerUserId: owner, samplingId: evaluation.samplingId, facts: evaluationFacts(evaluation), metricFacts: await evaluationMetricFacts(evaluationFacts(evaluation)),
-    });
-    await transaction.insert(evaluations).values(rows);
+    await transaction.insert(evaluations).values(batch.map((evaluation) => ({
+      evaluationId: evaluation.evaluationId, ownerUserId: owner, samplingId: evaluation.samplingId, facts: evaluationFacts(evaluation),
+    })));
   }
   const evaluationMemberships = newEvaluations.map((evaluation, position) => ({
     ownerUserId: owner, runId: run.runId, evaluationId: evaluation.evaluationId, samplingId: evaluation.samplingId, position,
@@ -374,7 +373,7 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope, runQueue: RunQ
           inArray(samplings.projectSampleId, batch), owner === undefined ? undefined : eq(samplings.ownerUserId, owner)))
           .orderBy(samplings.samplingId);
         for (const row of rows) {
-          addToGroup(byProjectSample, row.projectSampleId, samplingFromRow(row));
+          addToGroup(byProjectSample, row.projectSampleId, samplingStateFromRow(row));
         }
       }
       return [...new Set(projectSampleIds)].flatMap((id) => byProjectSample.get(id) ?? []);
@@ -389,48 +388,52 @@ function createRuntimeStore(db: EvalDb, scope: RuntimeStoreScope, runQueue: RunQ
         throw new RuntimeInputError(`Run facts violate ${violation.constraint}`);
       }
     },
-    async updateSampling(record, expected) {
+    async updateSampling(record, expected, resources) {
       if (record.samplingId !== expected.samplingId
         || record.projectId !== expected.projectId || record.projectSampleId !== expected.projectSampleId) {
         throw new RuntimeRecordConflictError("Sampling identity changed before update");
       }
-      const updated = await db.update(samplings).set({ facts: samplingFacts(record), metricFacts: await samplingMetricFacts(samplingFacts(record)) })
-        .where(and(eq(samplings.samplingId, record.samplingId), eq(samplings.projectId, record.projectId),
-          eq(samplings.projectSampleId, record.projectSampleId),
-          owner === undefined ? undefined : eq(samplings.ownerUserId, owner),
-          eq(samplings.facts, samplingFacts(expected))))
-        .returning({ samplingId: samplings.samplingId });
-      if (updated.length === 0) {
-        throw new RuntimeRecordConflictError(`Sampling changed before update: ${record.samplingId}`);
-      }
+      await updateWithResources(db, resources, async (writer) => {
+        const [updated] = await writer.update(samplings).set({ facts: samplingFacts(record), revision: expected.revision + 1 })
+          .where(and(eq(samplings.samplingId, record.samplingId), eq(samplings.projectId, record.projectId),
+            eq(samplings.projectSampleId, record.projectSampleId),
+            owner === undefined ? undefined : eq(samplings.ownerUserId, owner),
+            eq(samplings.revision, expected.revision)))
+          .returning({ ownerUserId: samplings.ownerUserId });
+        if (!updated) throw new RuntimeRecordConflictError(`Sampling changed before update: ${record.samplingId}`);
+        return { ownerUserId: updated.ownerUserId, samplingId: record.samplingId };
+      });
     },
     async getSampling(samplingId) {
-      return (await readSamplings(db, [samplingId], owner))[0] ?? null;
+      const [row] = await readSamplingRows(db, [samplingId], owner);
+      return row ? samplingStateFromRow(row) : null;
     },
-    getSamplings(samplingIds) {
-      return readSamplings(db, samplingIds, owner);
+    async getSamplings(samplingIds) {
+      return (await readSamplingRows(db, samplingIds, owner)).map((row) => row && samplingStateFromRow(row));
     },
-    async updateEvaluation(record, expected) {
+    async updateEvaluation(record, expected, resources) {
       if (record.evaluationId !== expected.evaluationId || record.samplingId !== expected.samplingId) {
         throw new RuntimeRecordConflictError("Evaluation identity changed before update");
       }
-      const updated = await db.update(evaluations).set({ facts: evaluationFacts(record), metricFacts: await evaluationMetricFacts(evaluationFacts(record)) })
-        .where(and(eq(evaluations.evaluationId, record.evaluationId), eq(evaluations.samplingId, record.samplingId),
-          owner === undefined ? undefined : eq(evaluations.ownerUserId, owner),
-          eq(evaluations.facts, evaluationFacts(expected))))
-        .returning({ evaluationId: evaluations.evaluationId });
-      if (updated.length === 0) {
-        throw new RuntimeRecordConflictError(`Evaluation changed before update: ${record.evaluationId}`);
-      }
+      await updateWithResources(db, resources, async (writer) => {
+        const [updated] = await writer.update(evaluations).set({ facts: evaluationFacts(record), revision: expected.revision + 1 })
+          .where(and(eq(evaluations.evaluationId, record.evaluationId), eq(evaluations.samplingId, record.samplingId),
+            owner === undefined ? undefined : eq(evaluations.ownerUserId, owner),
+            eq(evaluations.revision, expected.revision)))
+          .returning({ ownerUserId: evaluations.ownerUserId });
+        if (!updated) throw new RuntimeRecordConflictError(`Evaluation changed before update: ${record.evaluationId}`);
+        return { ownerUserId: updated.ownerUserId, samplingId: record.samplingId, evaluationId: record.evaluationId };
+      });
     },
     async getEvaluation(evaluationId) {
-      return (await readEvaluations(db, [evaluationId], owner))[0] ?? null;
+      const [row] = await readEvaluationRows(db, [evaluationId], owner);
+      return row ? evaluationStateFromRow(row) : null;
     },
-    getEvaluations(evaluationIds) {
-      return readEvaluations(db, evaluationIds, owner);
+    async getEvaluations(evaluationIds) {
+      return (await readEvaluationRows(db, evaluationIds, owner)).map((row) => row && evaluationStateFromRow(row));
     },
-    listEvaluations(samplingId) {
-      return listSamplingEvaluations(db, samplingId, owner);
+    async listEvaluations(samplingId) {
+      return (await listSamplingEvaluationRows(db, samplingId, owner)).map(evaluationStateFromRow);
     },
   };
 }
@@ -504,17 +507,17 @@ export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string,
         const sampling = samplingFromRow(samplingRow);
         const evaluation = evaluationRow ? evaluationFromRow(evaluationRow) : null;
         const [run] = evaluation
-          ? await transaction.select({ runId: runs.runId, stopped: runs.stopRequested, stopPending: runStopPending() }).from(runs)
+          ? await transaction.select({ runId: runs.runId, stopPending: runStopPending() }).from(runs)
             .innerJoin(runEvaluations, eq(runEvaluations.runId, runs.runId))
             .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId), eq(runEvaluations.evaluationId, id))).limit(1)
-          : await transaction.select({ runId: runs.runId, stopped: runs.stopRequested, stopPending: runStopPending() }).from(runs)
+          : await transaction.select({ runId: runs.runId, stopPending: runStopPending() }).from(runs)
             .innerJoin(runSamplings, eq(runSamplings.runId, runs.runId))
             .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId), eq(runSamplings.samplingId, id), inArray(runs.operation, ["execution", "pipeline"]))).orderBy(desc(runs.sequence)).limit(1);
         if (!run) throw new ResultCollectionConflictError();
         const stage = evaluation?.status ?? sampling.execution;
         if (target === "output" && stage.status === "succeeded") return { runId: run.runId, queued: false };
-        // A finalized stop only reopens for output: resource refreshes never run for a stopped Run.
-        if (run.stopPending || (run.stopped && target === "resources")) throw new ResultCollectionConflictError();
+        // A finalized stop reopens for output or for the resources it recorded as failed, without reopening the stop.
+        if (run.stopPending) throw new ResultCollectionConflictError();
         const [active] = await transaction.select({ runId: runs.runId }).from(runs)
           .where(and(eq(runs.ownerUserId, owner), eq(runs.projectId, projectId), runActive(transaction))).limit(1);
         const owned = active?.runId === run.runId;
@@ -522,14 +525,18 @@ export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string,
           await runQueue.enqueue(transaction, run.runId, "collection");
           return { runId: run.runId, queued: true };
         };
+        /** A manual resource recollection also gives every Attempt a fresh download budget. */
         const requeue = async (next: SamplingStageState) => {
+          const fresh = target === "resources";
           if (evaluation) {
-            const facts = evaluationFacts({ ...evaluation, status: next });
-            await transaction.update(evaluations).set({ facts, metricFacts: await evaluationMetricFacts(facts) })
+            const attempts = fresh ? withFreshResourceBudget(evaluation.attempts) : evaluation.attempts;
+            const facts = evaluationFacts({ ...evaluation, status: next, attempts });
+            await transaction.update(evaluations).set({ facts, revision: sql`${evaluations.revision} + 1` })
               .where(and(eq(evaluations.ownerUserId, owner), eq(evaluations.evaluationId, id)));
           } else {
-            const facts = samplingFacts({ ...sampling, execution: next });
-            await transaction.update(samplings).set({ facts, metricFacts: await samplingMetricFacts(facts) })
+            const executionAttempts = fresh ? withFreshResourceBudget(sampling.executionAttempts) : sampling.executionAttempts;
+            const facts = samplingFacts({ ...sampling, execution: next, executionAttempts });
+            await transaction.update(samplings).set({ facts, revision: sql`${samplings.revision} + 1` })
               .where(and(eq(samplings.ownerUserId, owner), eq(samplings.samplingId, id)));
           }
           return queue();
@@ -541,8 +548,8 @@ export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string,
         if (target === "resources") {
           if (!chatId || (stage.status !== "succeeded" && stage.status !== "failed")) throw new ResultCollectionConflictError();
           const owed = evaluation
-            ? stageOwesResources(evaluation.attempts, evaluationAgentEnded(evaluation))
-            : stageOwesResources(sampling.executionAttempts, executionAgentEnded);
+            ? stageOwesResources(withFreshResourceBudget(evaluation.attempts), evaluationAgentEnded(evaluation))
+            : stageOwesResources(withFreshResourceBudget(sampling.executionAttempts), executionAgentEnded);
           if (!owed) return { runId: run.runId, queued: false };
           const now = new Date().toISOString();
           return requeue({ ...stage, resourcesPending: { ...startResourceWait(now), nextAttemptAt: now } });

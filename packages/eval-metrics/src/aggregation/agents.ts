@@ -1,14 +1,12 @@
 import {
   isTerminalAgentStatus,
   type EvaluationAttempt,
-  type EvaluationRecord,
   type ExecutionAttempt,
 } from "@eval-platform/eval-contracts";
-import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
-import type { AgentMetricView, AttemptMetric } from "./model.js";
+import type { AgentMetricView, AttemptMetric, MetricsEvaluation, MetricsSampling, WithResourceSnapshot } from "./model.js";
 import { aggregateResources, type ResourceInput } from "./resources.js";
 
-type Attempt = ExecutionAttempt | EvaluationAttempt;
+type Attempt = WithResourceSnapshot<ExecutionAttempt> | WithResourceSnapshot<EvaluationAttempt>;
 
 function time(value: string | undefined): number {
   return value === undefined ? NaN : Date.parse(value);
@@ -70,7 +68,7 @@ function agentView<Item extends Attempt>(
   };
 }
 
-export function subjectAgent(sampling: SamplingSnapshot): AgentMetricView {
+export function subjectAgent(sampling: MetricsSampling): AgentMetricView {
   return agentView({
     role: "subject", agentConfigRef: sampling.subjectAgent, chatId: sampling.subjectChatId ?? null,
     samplingId: sampling.samplingId, evaluationId: null, stage: sampling.execution,
@@ -78,10 +76,22 @@ export function subjectAgent(sampling: SamplingSnapshot): AgentMetricView {
   }, sampling.executionAttempts, (attempt) => attempt.executionAttemptId);
 }
 
-export function evaluatorAgent(record: EvaluationRecord): AgentMetricView {
+export function evaluatorAgent(record: MetricsEvaluation): AgentMetricView {
   return agentView({
     role: "evaluator", agentConfigRef: record.evaluator, chatId: record.chatId ?? null,
     samplingId: record.samplingId, evaluationId: record.evaluationId, stage: record.status,
     artifacts: record.output?.artifacts ?? [], trajectory: record.output?.trajectory ?? null,
   }, record.attempts, (attempt) => attempt.evaluationAttemptId);
+}
+
+/** The stage record as stored, without the snapshots loaded for Metrics. */
+export function withoutSnapshots<T extends MetricsSampling | MetricsEvaluation>(record: T): T {
+  const strip = <A extends Attempt>(attempt: A): A => {
+    if (attempt.resources?.status !== "collected") return attempt;
+    const { snapshot: _snapshot, ...resources } = attempt.resources;
+    return { ...attempt, resources };
+  };
+  return "executionAttempts" in record
+    ? { ...record, executionAttempts: record.executionAttempts.map(strip) }
+    : { ...record, attempts: record.attempts.map(strip) };
 }

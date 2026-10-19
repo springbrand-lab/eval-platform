@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import type { EvaluationRecord } from "@eval-platform/eval-contracts";
 import type { RetryController } from "./retry.js";
 import { RuntimeRecordConflictError } from "./errors.js";
-import { persistRuntimeRecord } from "./store.js";
+import { persistRuntimeRecord, type EvaluationState } from "./store.js";
 
-function makeRecord(): EvaluationRecord {
+function makeRecord(revision = 3): EvaluationState {
   return {
+    revision,
     evaluationId: "evaluation-1",
     samplingId: "sampling-1",
     evaluator: { ownerUserId: "user-1", userAgentId: "agent-1" },
@@ -20,14 +20,12 @@ function makeRecord(): EvaluationRecord {
       completedAt: "2026-10-08T00:00:00.000Z",
       resources: {
         status: "collected",
-        snapshot: {
+        summary: {
           scope: { chatId: "chat-1", submissionId: "submission-1", idempotencyKey: "evaluation:sampling-1" },
           observedAt: "2026-10-08T00:00:01.000Z",
           finalized: false,
           coverage: { usageEvents: "partial", telemetryEvents: "complete", billingSettlements: "unavailable" },
-          usageEvents: [{ eventId: "event-1", source: { extra: null, rawTokens: 123 } }, { eventId: "event-1" }],
-          telemetryEvents: [],
-          billingSettlements: [],
+          counts: { usageEvents: 2, telemetryEvents: 0, billingSettlements: 0 },
         },
       },
     }],
@@ -40,23 +38,29 @@ function reverseObjectKeys(value: unknown): unknown {
   return Object.fromEntries(Object.entries(value).reverse().map(([key, entry]) => [key, reverseObjectKeys(entry)]));
 }
 
+/** The record as committed over `makeRecord()`. */
+function written(record = makeRecord()): EvaluationState {
+  return { ...record, revision: 4 };
+}
+
 function persistenceInput(record = makeRecord()) {
   return {
     record,
-    expected: structuredClone(record),
-    write: vi.fn<(record: EvaluationRecord, expected: EvaluationRecord) => Promise<void>>(async () => undefined),
-    read: vi.fn<() => Promise<EvaluationRecord | null>>(async () => null),
+    expected: makeRecord(),
+    write: vi.fn<(record: EvaluationState, expected: EvaluationState) => Promise<void>>(async () => undefined),
+    read: vi.fn<() => Promise<EvaluationState | null>>(async () => null),
     retryController: { decide: vi.fn<RetryController["decide"]>(async () => ({ shouldRetry: false })) },
     sleep: vi.fn(async (_milliseconds: number) => undefined),
   };
 }
 
 describe("Runtime record persistence", () => {
-  it("does not reconcile or retry an acknowledged write", async () => {
+  it("writes the record at the next revision without copying its facts, and does not reconcile an acknowledged write", async () => {
     const input = persistenceInput();
-    await persistRuntimeRecord(input);
-    expect(input.write).toHaveBeenCalledExactlyOnceWith(input.record, input.expected);
-    expect(input.write.mock.calls[0]![0]).not.toBe(input.record);
+    await expect(persistRuntimeRecord(input)).resolves.toEqual(written());
+    expect(input.write).toHaveBeenCalledExactlyOnceWith(written(), input.expected);
+    expect(input.write.mock.calls[0]![0].attempts).toBe(input.record.attempts);
+    expect(input.write.mock.calls[0]![1]).toBe(input.expected);
     expect(input.read).not.toHaveBeenCalled();
     expect(input.retryController.decide).not.toHaveBeenCalled();
   });
@@ -69,17 +73,15 @@ describe("Runtime record persistence", () => {
     input.retryController.decide.mockResolvedValue({ shouldRetry: true });
     await persistRuntimeRecord({ ...input, expected });
     expect(input.write).toHaveBeenCalledTimes(2);
-    expect(input.write.mock.calls[0]![0]).toEqual(input.record);
-    expect(input.write.mock.calls[0]![1]).toEqual(expected);
+    expect(input.write.mock.calls[0]![0]).toEqual(written());
+    expect(input.write.mock.calls[0]![1]).toBe(expected);
     expect(input.write.mock.calls[1]).toEqual(input.write.mock.calls[0]);
-    expect(input.write.mock.calls[0]![0]).not.toBe(input.record);
-    expect(input.write.mock.calls[0]![1]).not.toBe(expected);
   });
 
   it("stops stale conditional writes after a Store conflict", async () => {
     const input = persistenceInput();
     input.write.mockRejectedValue(new RuntimeRecordConflictError("newer facts exist"));
-    input.read.mockResolvedValue({ ...makeRecord(), status: { status: "failed" } });
+    input.read.mockResolvedValue({ ...makeRecord(4), status: { status: "failed" } });
     await expect(persistRuntimeRecord(input)).rejects.toMatchObject({
       name: "RuntimeRecordPersistenceError", outcome: "conflict",
     });
@@ -90,8 +92,8 @@ describe("Runtime record persistence", () => {
   it("confirms committed facts regardless of JSON object key order", async () => {
     const input = persistenceInput();
     input.write.mockRejectedValue(new Error("response lost"));
-    input.read.mockResolvedValue(reverseObjectKeys(makeRecord()) as EvaluationRecord);
-    await expect(persistRuntimeRecord(input)).resolves.toBeUndefined();
+    input.read.mockResolvedValue(reverseObjectKeys(written()) as EvaluationState);
+    await expect(persistRuntimeRecord(input)).resolves.toEqual(written());
     expect(input.write).toHaveBeenCalledTimes(1);
     expect(input.read).toHaveBeenCalledTimes(1);
     expect(input.retryController.decide).not.toHaveBeenCalled();
@@ -99,19 +101,15 @@ describe("Runtime record persistence", () => {
   });
 
   it.each(["before", "after"] as const)("retries fixed facts when reconciliation fails %s commit", async (failure) => {
-    const status: { status: "running" | "failed" } = { status: "running" };
-    const input = persistenceInput({ ...makeRecord(), status });
-    const original = structuredClone(input.record);
-    let committed: EvaluationRecord | null = null;
-    input.write.mockImplementation(async (record) => { committed = structuredClone(record); });
+    const input = persistenceInput();
+    const original = written();
+    let committed: EvaluationState | null = null;
+    input.write.mockImplementation(async (record) => { committed = record; });
     input.write.mockImplementationOnce(async (record) => {
-      if (failure === "after") committed = structuredClone(record);
+      if (failure === "after") committed = record;
       throw new Error(`${failure} commit failure`);
     });
-    input.read.mockImplementation(async () => {
-      status.status = "failed";
-      throw new Error("read unavailable");
-    });
+    input.read.mockRejectedValue(new Error("read unavailable"));
     input.retryController.decide.mockResolvedValue({ shouldRetry: true, backoffMs: 43 });
     await persistRuntimeRecord(input);
     expect(input.write).toHaveBeenCalledTimes(2);
@@ -124,30 +122,12 @@ describe("Runtime record persistence", () => {
     expect(input.sleep).toHaveBeenCalledExactlyOnceWith(43);
   });
 
-  it.each(["status", "attempt", "ordering", "duplicates", "null"] as const)("does not confirm an older or changed %s fact", async (change) => {
+  it.each(["status", "attempt"] as const)("does not confirm a record another writer changed: %s", async (change) => {
     const input = persistenceInput();
-    let stale = makeRecord();
-    if (change === "status") {
-      stale = { ...stale, status: { status: "queued" } };
-    } else if (change === "attempt") {
-      stale = { ...stale, attempts: [{ ...stale.attempts[0]!, status: "running" }] };
-    } else {
-      const resources = stale.attempts[0]!.resources;
-      if (resources?.status !== "collected") throw new Error("Missing resource snapshot");
-      const usageEvents = resources.snapshot.usageEvents;
-      const changedEvents = change === "ordering"
-        ? usageEvents.toReversed()
-        : change === "duplicates"
-          ? usageEvents.slice(0, 1)
-          : [{ ...usageEvents[0], source: { rawTokens: 123 } }, usageEvents[1]!];
-      stale = {
-        ...stale,
-        attempts: [{
-          ...stale.attempts[0]!,
-          resources: { status: "collected", snapshot: { ...resources.snapshot, usageEvents: changedEvents } },
-        }],
-      };
-    }
+    const base = makeRecord(4);
+    const stale = change === "status"
+      ? { ...base, status: { status: "queued" as const } }
+      : { ...base, attempts: [{ ...base.attempts[0]!, status: "running" as const }] };
     const error = new Error("write failed");
     input.write.mockRejectedValue(error);
     input.read.mockResolvedValue(stale);

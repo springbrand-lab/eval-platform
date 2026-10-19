@@ -17,7 +17,7 @@ import {
 import { dataInputSchema } from "@eval-platform/eval-dataset";
 import type { AgentHandle } from "../harness/model.js";
 
-import { persistRuntimeRecord, readStageFailure } from "./store.js";
+import { persistRuntimeRecord, readStageFailure, type AttemptResourceSnapshot, type SamplingState } from "./store.js";
 import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 import type { RuntimeSamplingContext } from "./model.js";
 import {
@@ -27,12 +27,12 @@ import {
   applyAttemptPatch,
   collectOutputWithRetry,
   describeAgentError,
-  reportError,
   runAgentLifecycle,
   withContext,
   withExecutionStatus,
   type StageDependencies,
 } from "./agent-lifecycle.js";
+import { reportError } from "./log.js";
 import { executionAgentEnded, failedPass, unconfirmedObservation, withRecoveryBookkeeping } from "./recovery.js";
 import { refreshFinishedStage } from "./resource-refresh.js";
 
@@ -127,24 +127,23 @@ export async function executeSampling(
     reportError(dependencies.onError, reported);
   };
 
-  const persistRecord = async (sampling: Sampling): Promise<void> => {
-    await persistRuntimeRecord({
+  const persistRecord = async (sampling: SamplingState, resources?: AttemptResourceSnapshot): Promise<void> => {
+    current = await persistRuntimeRecord({
       record: sampling,
       expected: current,
-      write: (record, expected) => dependencies.store.updateSampling(record, expected),
+      write: (record, expected) => dependencies.store.updateSampling(record, expected, resources),
       read: () => dependencies.store.getSampling(sampling.samplingId),
       retryController,
       sleep: dependencies.sleep,
     });
-    current = sampling;
   };
   /** Writes this record with recovery flags derived from the Attempts it commits. */
-  const persist = (sampling: Sampling): Promise<void> => persistRecord({
+  const persist = (sampling: SamplingState, resources?: AttemptResourceSnapshot): Promise<void> => persistRecord({
     ...sampling,
     execution: withRecoveryBookkeeping(
       sampling.execution, current.execution, sampling.executionAttempts, executionAgentEnded, dependencies,
     ),
-  });
+  }, resources);
 
   /**
    * Ends one pass without a bundle, keeping the output and export progress. A transient failure
@@ -213,7 +212,8 @@ export async function executeSampling(
       attempts: current.executionAttempts,
       state: current.execution,
       agentEnded: executionAgentEnded,
-      persist: (executionAttempts, execution) => persistRecord({ ...current, executionAttempts, execution }),
+      persist: (executionAttempts, execution, collected) => persistRecord({ ...current, executionAttempts, execution },
+        collected && { attemptId: collected.attempt.executionAttemptId, snapshot: collected.snapshot }),
     });
     return { state: current, sample };
   }
@@ -283,7 +283,7 @@ export async function executeSampling(
           executionAttempts: [...current.executionAttempts, attempt],
         });
       },
-      updateAttempt: async (attempt, patch) => {
+      updateAttempt: async (attempt, patch, snapshot) => {
         const existing = current.executionAttempts.find((item) => (
           item.executionAttemptId === attempt.executionAttemptId
         ));
@@ -294,7 +294,7 @@ export async function executeSampling(
           executionAttempts: current.executionAttempts.map((item) => (
             item.executionAttemptId === updated.executionAttemptId ? updated : item
           )),
-        });
+        }, snapshot && { attemptId: updated.executionAttemptId, snapshot });
         return updated;
       },
       setSamplingStatus: async (status, lastError) => {
@@ -401,7 +401,7 @@ function exportSummary(progress: EvidenceExportProgress | undefined): Record<str
 }
 
 /** Once the bundle is stored, its reference replaces the export progress. */
-function withoutEvidenceExport(sampling: Sampling): Sampling {
+function withoutEvidenceExport(sampling: SamplingState): SamplingState {
   const { evidenceExport: _progress, ...rest } = sampling;
   return rest;
 }

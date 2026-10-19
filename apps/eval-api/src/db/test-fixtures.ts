@@ -1,6 +1,6 @@
-import type { EvaluationRecord, ProjectDatasetSnapshot, RunOperation, RunTargetSelector } from "@eval-platform/eval-contracts";
+import type { EvaluationRecord, ProjectDatasetSnapshot, RunOperation, RunTargetSelector, Sampling } from "@eval-platform/eval-contracts";
 import type { Data } from "@eval-platform/eval-dataset";
-import type { ProjectPlanReader, ProjectSample, RuntimeRunAdmissionCommand, RuntimeStore, SamplingState } from "@eval-platform/eval-runtime";
+import type { ProjectPlanReader, ProjectSample, RuntimeRunAdmissionCommand, RuntimeStore } from "@eval-platform/eval-runtime";
 import {
   digestJson,
   digestExecutionPlan,
@@ -38,7 +38,7 @@ export function createStubSp() {
   const sp = {
     verifySession: vi.fn(async (token: string) => ({ id: token, role: "user" as const })),
     listAgentConfigs: vi.fn(async (token: string) => [...configs.values()].filter((config) => config.user_id === token)),
-    listMcpServers: vi.fn(async () => mcpServers),
+    listMcpServers: vi.fn(async (_token: string, source: "platform" | "user" = "user") => mcpServers.filter((server) => server.source === source)),
     getAgentConfig: vi.fn(async (token: string, id: string) => structuredClone(owned(token, id))),
     createAgentConfig: vi.fn(async (token: string, input: unknown) => {
       const body = input as Record<string, unknown>;
@@ -154,7 +154,7 @@ export async function buildCommand(plans: ProjectPlanReader, store: RuntimeStore
       .filter((sampling) => sampling.execution.status === "succeeded").map((sampling) => sampling.samplingId);
   }
   const targets = { projectSampleIds, samplingIds };
-  let samplings: SamplingState[] = [];
+  let samplings: Sampling[] = [];
   let replacedSamplingIds: string[] = [];
   let runSamplingIds = samplingIds;
   if (input.operation !== "evaluation") {
@@ -163,7 +163,7 @@ export async function buildCommand(plans: ProjectPlanReader, store: RuntimeStore
     replacedSamplingIds = [...current, ...targetSamplings].map((sampling) => sampling.samplingId);
     const samples = (await plans.getProjectSamples(input.projectId, projectSampleIds)).filter((sample) => sample !== null);
     const agent = plan.execution.harness.agentConfig;
-    const fresh = (projectSampleId: string): SamplingState => ({
+    const fresh = (projectSampleId: string): Sampling => ({
       samplingId: crypto.randomUUID(), projectId: input.projectId, projectSampleId,
       execution: { status: "queued" }, subjectAgent: agent, executionAttempts: [],
     });

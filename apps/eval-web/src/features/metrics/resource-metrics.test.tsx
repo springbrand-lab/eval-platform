@@ -138,7 +138,7 @@ describe("Agent resource and trajectory categories", () => {
     const evaluation = resourceStatistics();
     const view = await render(<>
       <SummaryCards summary={metricSummary(execution, evaluation)} />
-      <AgentPanel title="执行 Agent" agent={agentMetric(execution)} />
+      <AgentPanel projectId="project" title="执行 Agent" agent={agentMetric(execution)} />
     </>);
     try {
       const tables = [...view.container.querySelectorAll('table[aria-label="工具调用明细"]')];
@@ -218,7 +218,7 @@ describe("Agent resource and trajectory categories", () => {
 
   it("shows the Agent stage hint and resource retry in the Agent panel", async () => {
     const agent = { ...agentMetric(resourceStatistics()), stage: { status: "succeeded", resourcesPending: { deadline: "2026-01-01T00:10:00.000Z" } } } as Parameters<typeof AgentPanel>[0]["agent"];
-    const view = await render(<AgentPanel title="执行 Agent" agent={agent} />);
+    const view = await render(<AgentPanel projectId="project" title="执行 Agent" agent={agent} />);
     try {
       expect(view.container.querySelector('[data-testid="stage-hint"]')?.textContent).toBe("补采资源中");
       expect(view.container.querySelector('[data-testid="resource-collection-notes"]')?.textContent).toContain("补采资源中");

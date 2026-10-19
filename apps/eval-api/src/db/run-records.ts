@@ -1,6 +1,6 @@
 import type { EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
 import { PENDING_SAMPLING_STATUSES } from "@eval-platform/eval-contracts";
-import type { RuntimeRunRecord } from "@eval-platform/eval-runtime";
+import { withoutRevision, type EvaluationState, type RuntimeRunRecord, type SamplingState } from "@eval-platform/eval-runtime";
 import { and, eq, exists, inArray, notExists, or, sql, type SQL } from "drizzle-orm";
 import { selectByIds } from "./batch.js";
 import type { EvalDb } from "./client.js";
@@ -56,12 +56,13 @@ function pendingMemberships(reader: RecordReader) {
 }
 
 /**
- * Members of a non-stopped Run still waiting for a resource snapshot. A Sampling's execution stage belongs to
- * the execution/pipeline Run that created it, never to an evaluation Run that reuses it. A stop
- * request ignores these flags, so they can never hold a stopped Run open.
+ * Members still waiting for a resource snapshot of a Run without a pending stop. A Sampling's execution
+ * stage belongs to the execution/pipeline Run that created it, never to an evaluation Run that reuses it.
+ * A pending stop ignores these flags, so they never hold it open; finalizing it clears them, so after a
+ * finalized stop they only come from a manual resource recollection.
  */
 function recoveringMemberships(reader: RecordReader, value?: (stage: SQL) => SQL) {
-  const running = eq(runs.stopRequested, false);
+  const running = or(eq(runs.stopRequested, false), eq(runs.stopFinalized, true));
   return memberships(reader,
     and(running, inArray(runs.operation, ["execution", "pipeline"]), resourcesPending(samplingStage)),
     and(running, resourcesPending(evaluationStage)), value);
@@ -115,46 +116,64 @@ export function evaluationFromRow(row: Pick<typeof evaluations.$inferSelect, "fa
   return { ...row.facts, evaluationId: row.evaluationId, samplingId: row.samplingId };
 }
 
-export function samplingFacts(record: Sampling): typeof samplings.$inferInsert.facts {
-  const { samplingId: _samplingId, projectId: _projectId, projectSampleId: _projectSampleId, ...facts } = record;
+export function samplingStateFromRow(row: typeof samplings.$inferSelect): SamplingState {
+  return { ...samplingFromRow(row), revision: row.revision };
+}
+
+export function evaluationStateFromRow(row: typeof evaluations.$inferSelect): EvaluationState {
+  return { ...evaluationFromRow(row), revision: row.revision };
+}
+
+/** The stored facts of a record; identity columns and the revision live outside them. */
+export function samplingFacts(record: Sampling & { readonly revision?: number }): typeof samplings.$inferInsert.facts {
+  const { samplingId: _samplingId, projectId: _projectId, projectSampleId: _projectSampleId, ...facts } = withoutRevision(record);
   return facts;
 }
 
-export function evaluationFacts(record: EvaluationRecord): typeof evaluations.$inferInsert.facts {
-  const { evaluationId: _evaluationId, samplingId: _samplingId, ...facts } = record;
+export function evaluationFacts(record: EvaluationRecord & { readonly revision?: number }): typeof evaluations.$inferInsert.facts {
+  const { evaluationId: _evaluationId, samplingId: _samplingId, ...facts } = withoutRevision(record);
   return facts;
 }
 
-/** One Sampling or null per requested ID, in request order. Omit the owner only for the Worker. */
-export async function readSamplings(
-  reader: RecordReader, samplingIds: readonly string[], ownerUserId?: string,
-): Promise<(Sampling | null)[]> {
-  const rows = await selectByIds(samplingIds, (batch) => reader.select().from(samplings).where(and(
+/** One Sampling row or null per requested ID, in request order. Omit the owner only for the Worker. */
+export function readSamplingRows(reader: RecordReader, samplingIds: readonly string[], ownerUserId?: string) {
+  return selectByIds(samplingIds, (batch) => reader.select().from(samplings).where(and(
     inArray(samplings.samplingId, batch),
     ownerUserId === undefined ? undefined : eq(samplings.ownerUserId, ownerUserId),
   )), (row) => row.samplingId);
-  return rows.map((row) => row && samplingFromRow(row));
 }
 
-/** One EvaluationRecord or null per requested ID, in request order. Omit the owner only for the Worker. */
-export async function readEvaluations(
-  reader: RecordReader, evaluationIds: readonly string[], ownerUserId?: string,
-): Promise<(EvaluationRecord | null)[]> {
-  const rows = await selectByIds(evaluationIds, (batch) => reader.select().from(evaluations).where(and(
+export async function readSamplings(
+  reader: RecordReader, samplingIds: readonly string[], ownerUserId?: string,
+): Promise<(Sampling | null)[]> {
+  return (await readSamplingRows(reader, samplingIds, ownerUserId)).map((row) => row && samplingFromRow(row));
+}
+
+/** One Evaluation row or null per requested ID, in request order. Omit the owner only for the Worker. */
+export function readEvaluationRows(reader: RecordReader, evaluationIds: readonly string[], ownerUserId?: string) {
+  return selectByIds(evaluationIds, (batch) => reader.select().from(evaluations).where(and(
     inArray(evaluations.evaluationId, batch),
     ownerUserId === undefined ? undefined : eq(evaluations.ownerUserId, ownerUserId),
   )), (row) => row.evaluationId);
-  return rows.map((row) => row && evaluationFromRow(row));
+}
+
+export async function readEvaluations(
+  reader: RecordReader, evaluationIds: readonly string[], ownerUserId?: string,
+): Promise<(EvaluationRecord | null)[]> {
+  return (await readEvaluationRows(reader, evaluationIds, ownerUserId)).map((row) => row && evaluationFromRow(row));
+}
+
+export function listSamplingEvaluationRows(reader: RecordReader, samplingId: string, ownerUserId?: string) {
+  return reader.select().from(evaluations)
+    .where(and(eq(evaluations.samplingId, samplingId),
+      ownerUserId === undefined ? undefined : eq(evaluations.ownerUserId, ownerUserId)))
+    .orderBy(evaluations.evaluationId);
 }
 
 export async function listSamplingEvaluations(
   reader: RecordReader, samplingId: string, ownerUserId?: string,
 ): Promise<EvaluationRecord[]> {
-  const rows = await reader.select().from(evaluations)
-    .where(and(eq(evaluations.samplingId, samplingId),
-      ownerUserId === undefined ? undefined : eq(evaluations.ownerUserId, ownerUserId)))
-    .orderBy(evaluations.evaluationId);
-  return rows.map(evaluationFromRow);
+  return (await listSamplingEvaluationRows(reader, samplingId, ownerUserId)).map(evaluationFromRow);
 }
 
 /** Run memberships are protected by foreign keys; a gap means the stored state is corrupt. */

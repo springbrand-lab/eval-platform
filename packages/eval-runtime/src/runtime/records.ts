@@ -1,7 +1,7 @@
-import type { EvaluationPlan, EvaluationRecord, ExecutionPlan } from "@eval-platform/eval-contracts";
+import type { EvaluationPlan, ExecutionPlan } from "@eval-platform/eval-contracts";
 import { RuntimeEntityNotFoundError } from "./errors.js";
 import type { ProjectPlanReader, ProjectSample } from "./model.js";
-import type { RuntimeRunRecord, RuntimeStore, SamplingState } from "./store.js";
+import type { EvaluationState, RuntimeRunRecord, RuntimeStore, SamplingState } from "./store.js";
 
 /** The Project plan stages a Run was admitted against, verified by digest. */
 export type RunStagePlans =
@@ -45,7 +45,7 @@ export class RunRecords {
     });
   }
 
-  async evaluations(evaluationIds: readonly string[]): Promise<readonly EvaluationRecord[]> {
+  async evaluations(evaluationIds: readonly string[]): Promise<readonly EvaluationState[]> {
     const records = await this.#store.getEvaluations(evaluationIds);
     if (records.length !== evaluationIds.length) throw new Error("Store returned an incomplete Evaluation batch");
     return evaluationIds.map((evaluationId, index) => {

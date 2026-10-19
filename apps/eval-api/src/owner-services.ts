@@ -3,6 +3,7 @@ import { createMetrics, createEvaluationScoreReader } from "@eval-platform/eval-
 import { createEvalRunAdmission, syncRunScores, type EvaluationScore } from "@eval-platform/eval-runtime";
 import { createActiveOwnerAdmission } from "./active-owner-admission.js";
 import { createAgentConfigService } from "./agent-configs.js";
+import { createPostgresResourceSnapshotReader } from "./db/attempt-resources.js";
 import type { EvalDb } from "./db/client.js";
 import { createPostgresDatasetStore } from "./db/dataset.js";
 import { createPostgresAgentPurposeStore } from "./db/agent-purposes.js";
@@ -78,6 +79,7 @@ export function createOwnerServices({ db, sp, bundles, release, runQueue, publis
         readRun,
       },
       observations: createPostgresObservationReader(db, ownerUserId),
+      resourceSnapshots: createPostgresResourceSnapshotReader(db, ownerUserId),
       metrics: createMetrics({ source: createPostgresMetricsSource(db, ownerUserId) }),
       ...createBundleCatalogs(db, ownerUserId, bundles),
       outputSchemas,

@@ -8,7 +8,7 @@ import type {
   SamplingStageState,
 } from "@eval-platform/eval-contracts";
 import type { ProjectSample, SamplingSnapshot } from "@eval-platform/eval-runtime";
-import type { AgentMetricView, MetricSummary } from "../aggregation/model.js";
+import type { AgentMetricView, MetricSummary, MetricsEvaluation, MetricsSampling } from "../aggregation/model.js";
 import type { EvaluationOutputView } from "../evaluators/model.js";
 
 export interface MetricsScope {
@@ -49,9 +49,9 @@ export interface MetricsFacts {
    */
   readonly projectSamples: readonly ProjectSample[];
   /** Current Samplings of `projectSamples`, restricted to `runIds` when given. */
-  readonly samplings: readonly SamplingSnapshot[];
+  readonly samplings: readonly MetricsSampling[];
   /** Current EvaluationRecords of `samplings`, restricted to `runIds` when given. */
-  readonly evaluations: readonly EvaluationRecord[];
+  readonly evaluations: readonly MetricsEvaluation[];
   /** Selected Runs, or every Run that still has a current member in scope. */
   readonly runs: readonly RunSnapshot[];
 }

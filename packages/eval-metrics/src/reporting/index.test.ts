@@ -1,11 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import type { EvaluationOutputSchema, EvaluationRecord } from "@eval-platform/eval-contracts";
-import type { SamplingSnapshot } from "@eval-platform/eval-runtime";
+import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import {
   collection, dataset, evaluation, facts, OUTPUT_SCHEMA, plan, PROJECT, projectSample, run, sampling, telemetry, usage,
 } from "../test-support.js";
 import { createMetrics, MetricsEntityNotFoundError, MetricsQueryError, MetricsSourceError } from "./index.js";
-import type { MetricSummary } from "../aggregation/model.js";
+import type { MetricSummary, MetricsEvaluation, MetricsSampling } from "../aggregation/model.js";
 import type { MetricsFacts, MetricsQuery, MetricsSource } from "./model.js";
 
 const D1 = "dataset-1";
@@ -19,12 +18,12 @@ function tokens(total: number, eventId: string) {
   return collection({ usageEvents: [usage(eventId, { metrics: { totalTokens: total } })] });
 }
 
-function subjectRun(samplingId: string, projectSampleId: string, total: number): SamplingSnapshot {
+function subjectRun(samplingId: string, projectSampleId: string, total: number): MetricsSampling {
   const base = sampling(samplingId, { projectSampleId });
   return { ...base, executionAttempts: [{ ...base.executionAttempts[0]!, resources: tokens(total, `usage:${samplingId}`) }] };
 }
 
-function judge(evaluationId: string, samplingId: string, score: number, total = 1): EvaluationRecord {
+function judge(evaluationId: string, samplingId: string, score: number, total = 1): MetricsEvaluation {
   const base = evaluation(evaluationId, { samplingId }, { score, scores: [{ value: score / 10 }] });
   return { ...base, attempts: [{ ...base.attempts[0]!, resources: tokens(total, `usage:${evaluationId}`) }] };
 }
@@ -164,6 +163,9 @@ describe("four-level reporting", () => {
     }) }] }, ...SAMPLINGS.slice(1)], evaluations: [...CURRENT.evaluations, judge("e1a3", "s1a", 70, 3)] });
     const detail = await metricsOf(withTrajectory).getSamplingDetail({ ...scope, samplingId: "s1a" });
     expect(detail.projectSample).toEqual(PS1);
+    expect(detail.sampling.executionAttempts[0]!.resources).toMatchObject({ status: "collected", summary: { counts: { usageEvents: 1, telemetryEvents: 3 } } });
+    expect(detail.sampling.executionAttempts[0]!.resources).not.toHaveProperty("snapshot");
+    expect(detail.evaluations[0]!.record.attempts[0]!.resources).not.toHaveProperty("snapshot");
     expect(detail.subject).toMatchObject({ role: "subject", chatId: "subject:s1a", resources: { tokens: { total: { value: 100 } } } });
     expect(detail.subject.resources.trajectory).toMatchObject({ turns: { count: { value: 1 } }, tools: { count: { value: 1 } }, contentSteps: { value: null, coverage: "unavailable" } });
     expect(detail.evaluations.map((item) => [item.agent.role, item.agent.chatId, item.agent.resources.tokens.total.value])).toEqual([

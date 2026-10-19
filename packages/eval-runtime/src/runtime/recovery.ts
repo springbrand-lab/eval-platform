@@ -44,10 +44,24 @@ export function evaluationAgentEnded(record: EvaluationRecord): (attempt: AgentA
   return (attempt) => executionAgentEnded(attempt) || (isAcceptedEvaluation(record) && attempt.submissionId !== undefined);
 }
 
-/** The single definition of an ended, dispatched Attempt whose resource snapshot is failed or not yet finalized. */
+/**
+ * The single definition of an ended, dispatched Attempt whose resource snapshot is failed or not yet
+ * finalized, unless its download retry budget is spent.
+ */
 export function attemptOwesResources<T extends AgentAttemptRecord>(attempt: T, agentEnded: (attempt: T) => boolean): boolean {
   const resources = attempt.resources;
-  return agentEnded(attempt) && resources !== undefined && !(resources.status === "collected" && resources.snapshot.finalized);
+  if (!agentEnded(attempt) || resources === undefined) return false;
+  if (resources.status === "pending") return true;
+  return resources.exhausted !== true && !(resources.status === "collected" && resources.summary.finalized);
+}
+
+/** A manual resource recollection gives every Attempt a fresh download budget. */
+export function withFreshResourceBudget<T extends AgentAttemptRecord>(attempts: readonly T[]): T[] {
+  return attempts.map((attempt) => {
+    if (attempt.resources === undefined) return attempt;
+    const { downloads: _downloads, exhausted: _exhausted, ...resources } = attempt.resources;
+    return { ...attempt, resources };
+  });
 }
 
 export function stageOwesResources<T extends AgentAttemptRecord>(attempts: readonly T[], agentEnded: (attempt: T) => boolean): boolean {

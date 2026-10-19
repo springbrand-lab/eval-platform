@@ -1,4 +1,4 @@
-import { AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectSchema } from "@eval-platform/eval-contracts";
+import { AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectArrayInPlaceSchema, jsonObjectInPlaceSchema } from "@eval-platform/eval-contracts";
 import type {
   AgentResourceReadiness,
   AgentResourceReadinessReport,
@@ -155,7 +155,6 @@ export function evaluationOutput(value: unknown): EvaluationAgentOutput {
 
 const completenessSchema = z.enum(["complete", "partial", "unavailable"]);
 const count = z.number().int().nonnegative().safe();
-const factsSchema = z.array(z.record(z.string(), z.json()));
 
 const scopeSchema = z.object({ chatId: id, idempotencyKey: id, submissionId: id });
 
@@ -176,9 +175,9 @@ const resourceSnapshotSchema = z.object({
     telemetryEvents: completenessSchema,
     billingSettlements: completenessSchema,
   }),
-  usageEvents: factsSchema,
-  telemetryEvents: factsSchema,
-  billingSettlements: factsSchema,
+  usageEvents: jsonObjectArrayInPlaceSchema,
+  telemetryEvents: jsonObjectArrayInPlaceSchema,
+  billingSettlements: jsonObjectArrayInPlaceSchema,
   readiness: readinessSchema,
 }) satisfies z.ZodType<AgentResourceSnapshot>;
 
@@ -201,7 +200,7 @@ export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact
 
 export function evidenceTrajectoryPage(value: unknown) {
   return response(z.object({
-    events: z.array(z.object({ ingestSeq: z.number().int().positive().safe(), event: jsonObjectSchema })),
+    events: z.array(z.object({ ingestSeq: z.number().int().positive().safe(), event: jsonObjectInPlaceSchema })),
     nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
   }) satisfies z.ZodType<EvalEvidenceTrajectoryPage>, value, "evidence trajectory page");
 }

@@ -1,9 +1,10 @@
 import type { EvidenceBundleRef, EvidenceExportState } from "./evidence.js";
-import type { AgentResourceCollection } from "./resources.js";
+import type { AgentResourceState } from "./resources.js";
 
 export type {
   AgentResourceCollection,
   AgentResourceCompleteness,
+  AgentResourceCounts,
   AgentResourceCoverage,
   AgentResourceFact,
   AgentResourceReadiness,
@@ -11,6 +12,8 @@ export type {
   AgentResourceScope,
   SubmittedAgentResourceScope,
   AgentResourceSnapshot,
+  AgentResourceSnapshotSummary,
+  AgentResourceState,
 } from "./resources.js";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -173,7 +176,7 @@ export interface ExecutionAttempt {
   readonly startedAt?: string;
   readonly completedAt?: string;
   readonly error?: string;
-  readonly resources?: AgentResourceCollection;
+  readonly resources?: AgentResourceState;
 }
 
 export interface EvaluationAttempt {
@@ -185,7 +188,7 @@ export interface EvaluationAttempt {
   readonly startedAt?: string;
   readonly completedAt?: string;
   readonly error?: string;
-  readonly resources?: AgentResourceCollection;
+  readonly resources?: AgentResourceState;
 }
 
 export interface Sampling {

@@ -14,5 +14,6 @@ router.openapi(routes.observeEvaluation, handlers.observeEvaluation);
 // The file route is registered first so `file` is never read as a JSON part.
 router.openapi(routes.observeFile, handlers.observeFile);
 router.openapi(routes.observeChat, handlers.observeChat);
+router.openapi(routes.resourceSnapshot, handlers.resourceSnapshot);
 
 export default router;

@@ -70,6 +70,10 @@ function setup() {
         role: "evaluator", projectId, samplingId: "s-1", evaluationId, ownerUserId: owner, state: "not-started",
       })),
     },
+    resourceSnapshots: {
+      open: vi.fn(async (_projectId: string, _stage: string, _recordId: string, attemptId: string) =>
+        attemptId === "a-1" ? new Blob(['{"usageEvents":[]}']).stream() : null),
+    },
     metrics: {
       getProjectOverview: vi.fn(async () => ({ projectId: "project-1" })),
       getSampleOverview: vi.fn(async () => ({ projectSampleId: "sample-1" })),
@@ -451,6 +455,21 @@ describe("Eval API HTTP layer", () => {
     const notStarted = await app.request("/api/projects/project-1/evaluations/e-1/observation/tree");
     expect(notStarted.status).toBe(404);
     expect((await app.request("/api/projects/project-1/samplings/s-1/observation/history")).status).toBe(422);
+  });
+
+  it("streams one Attempt's stored raw resource snapshot as a JSON attachment", async () => {
+    const app = setup();
+    const response = await app.request("/api/projects/project-1/evaluations/e-1/attempts/a-1/resource-snapshot", authorized());
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("content-disposition")).toBe("attachment");
+    expect(await response.text()).toBe('{"usageEvents":[]}');
+    expect(app.services.resourceSnapshots.open).toHaveBeenCalledWith("project-1", "evaluation", "e-1", "a-1");
+    await app.request("/api/projects/project-1/samplings/s-1/attempts/a-1/resource-snapshot", authorized());
+    expect(app.services.resourceSnapshots.open).toHaveBeenLastCalledWith("project-1", "execution", "s-1", "a-1");
+    const missing = await app.request("/api/projects/project-1/samplings/s-1/attempts/a-2/resource-snapshot", authorized());
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ code: "RESOURCE_SNAPSHOT_NOT_FOUND" });
   });
 
   it("reads the balance and grants credits only to the service account", async () => {
