@@ -2,6 +2,12 @@ import { MutationCache, QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearVerificationCacheForTest, handle, type Env } from "../../worker/index";
 
+// HTTP fixtures exercise real retry counts; deletion-retry.test.ts verifies actual timing.
+vi.mock("@eval-platform/eval-contracts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@eval-platform/eval-contracts")>()),
+  idempotentRetryBackoffMs: () => 0,
+}));
+
 const env: Env = {
   ASSETS: { fetch: async () => new Response("assets") },
   TAKT_ORIGIN: "https://takt.test", TAKT_EVAL_MENU_ID: "eval",
@@ -116,7 +122,7 @@ describe("browser SDK and Web gateway errors", () => {
     await expect(deleteProject("project-a")).rejects.toMatchObject({
       code: "NETWORK_ERROR", status: 0, context: { method: "DELETE" },
     });
-    expect(methods).toEqual(["DELETE", "GET"]);
+    expect(methods).toEqual(["DELETE", ...Array(status === 200 ? 10 : 1).fill("GET")]);
   });
 
   it("preserves a rejected deletion without making a confirmation request", async () => {

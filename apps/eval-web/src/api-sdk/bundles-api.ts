@@ -1,4 +1,5 @@
 import { api, enc } from "./client";
+import { deleteWithConfirmation, isConfirmedAbsent } from "./delete-confirmation";
 import type { InitialResourceFile } from "@eval-platform/eval-contracts";
 import type { BundleRecord, MaterialFile, MaterialRecord, SessionRecord } from "./types";
 
@@ -36,7 +37,10 @@ function catalog<R, Input>(kind: ResourceKind, segment: "materials" | "sessions"
       return api.post<BundleImport>(`${base(id)}/import`, body, { timeoutMs: 180_000 });
     },
     update: (id: string, input: Partial<Metadata>) => api.patch<BundleRecord>(base(id), input),
-    delete: (id: string) => api.delete(base(id)),
+    delete: (id: string) => deleteWithConfirmation(
+      () => api.delete(base(id)),
+      () => isConfirmedAbsent(() => api.get(base(id)), "BUNDLE_RESOURCE_NOT_FOUND"),
+    ),
     listResources: (id: string, signal?: AbortSignal) => api.get<R[]>(resources(id), { signal }),
     getResource: (id: string, resourceId: string, signal?: AbortSignal) => api.get<R>(resource(id, resourceId), { signal }),
     listFiles: (id: string, resourceId: string, signal?: AbortSignal) => api.get<InitialResourceFile[]>(`${resource(id, resourceId)}/files`, { signal }),
@@ -44,7 +48,10 @@ function catalog<R, Input>(kind: ResourceKind, segment: "materials" | "sessions"
       api.blob(`${resource(id, resourceId)}/file`, { params: { path: filePath }, signal, timeoutMs: 120_000 }),
     createResource: (id: string, input: Input) => api.post<R>(resources(id), input, { timeoutMs: 180_000 }),
     updateResource: (id: string, resourceId: string, input: Partial<Metadata>) => api.patch<R>(resource(id, resourceId), input),
-    deleteResource: (id: string, resourceId: string) => api.delete(resource(id, resourceId)),
+    deleteResource: (id: string, resourceId: string) => deleteWithConfirmation(
+      () => api.delete(resource(id, resourceId)),
+      () => isConfirmedAbsent(() => api.get(resource(id, resourceId)), "BUNDLE_RESOURCE_NOT_FOUND"),
+    ),
   };
 }
 

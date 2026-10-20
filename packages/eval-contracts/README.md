@@ -1,5 +1,7 @@
 # @eval-platform/eval-contracts
 
+`IDEMPOTENT_RETRY_POLICY` 与 `idempotentRetryBackoffMs()` 是跨 Runtime/Web 共用的纯重试契约：恢复预算 10 次，退避从 250ms 指数增长、上限 10s；本包不执行循环或计时器。Runtime 保持首次操作加 10 次幂等重试，Web 在一次未确认的 DELETE 后把这份恢复预算用于最多 10 次只读确认（首次立即查询）。Agent 的 `maxRestarts` 独立，不由该预算改变。
+
 `EvalInputLimits` 与 `evalInputLimitsSchema` 定义控制面公开的输入上限形状，不定义 SP 或应用的数值。API 从实际校验常量投影，Web 通过 `GET /api/input-limits` 获取，不维护第二套数值。
 
 `InitialResourceFile` 与 `initialResourceFileSchema` 定义初始素材、初始上下文共用的只读文件目录投影：资源内绝对路径、媒体类型、字节数。不包含内容副本、预览状态或 SP Workspace 身份。内容仍从 API 的 Bundle 目录按精确路径读取。

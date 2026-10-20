@@ -1,15 +1,13 @@
-import type { RetryPolicy } from "@eval-platform/eval-contracts";
+import { IDEMPOTENT_RETRY_POLICY, idempotentRetryBackoffMs, type RetryPolicy } from "@eval-platform/eval-contracts";
 import { AGENT_FAILURE_KINDS, type AgentFailureKind } from "../harness/model.js";
 import { RuntimeInputError } from "./errors.js";
 import { requireObject } from "./input.js";
 import type { RuntimeLog } from "./log.js";
 
-const TRANSIENT_RETRY_COUNT = 10;
-
 export const DEFAULT_RETRY_POLICY = {
   maxRestarts: 4,
-  initialBackoffMs: 250,
-  maxBackoffMs: 10_000,
+  initialBackoffMs: IDEMPOTENT_RETRY_POLICY.initialBackoffMs,
+  maxBackoffMs: IDEMPOTENT_RETRY_POLICY.maxBackoffMs,
 } as const satisfies RetryPolicy;
 
 export type RetryOperation = "creation" | "initialization" | "submission" | "status" | "collection" | "resources" | "persistence" | "stop" | "restart";
@@ -78,14 +76,11 @@ export function createRetryController(policy: RetryPolicy = DEFAULT_RETRY_POLICY
     async decide(input) {
       const maxRetries = input.operation === "restart"
         ? policy.maxRestarts
-        : TRANSIENT_RETRY_COUNT;
+        : IDEMPOTENT_RETRY_POLICY.maxRetries;
 
       const shouldRetry = input.attemptNumber <= maxRetries;
       if (!shouldRetry) return { shouldRetry: false, reason: input.failureKind };
-      const backoffMs = Math.min(
-        DEFAULT_RETRY_POLICY.maxBackoffMs,
-        DEFAULT_RETRY_POLICY.initialBackoffMs * 2 ** Math.max(0, input.attemptNumber - 1),
-      );
+      const backoffMs = idempotentRetryBackoffMs(input.attemptNumber);
       return { shouldRetry: true, reason: input.failureKind, backoffMs };
     },
   };

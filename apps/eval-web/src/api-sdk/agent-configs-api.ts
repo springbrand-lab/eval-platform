@@ -1,4 +1,5 @@
 import { api, enc } from "./client";
+import { deleteWithConfirmation, isConfirmedAbsent } from "./delete-confirmation";
 import type { AgentConfig, AgentOption, AgentPurpose, AgentRole } from "./types";
 import type { CreateUserAgentConfigInput, UpdateUserAgentConfigInput } from "@springbrand/agent-config-editor/client";
 
@@ -18,6 +19,9 @@ export const createAgentConfig = (input: AgentConfigInput, purpose: AgentPurpose
 export type AgentConfigUpdateInput = UpdateUserAgentConfigInput & { readonly purpose?: AgentPurpose };
 export const updateAgentConfig = (id: string, input: AgentConfigUpdateInput) =>
   api.patch<AgentConfig>(`/api/agent-configs/${enc(id)}`, input);
-export const deleteAgentConfig = (id: string) => api.delete(`/api/agent-configs/${enc(id)}`);
+export const deleteAgentConfig = (id: string) => deleteWithConfirmation(
+  () => api.delete(`/api/agent-configs/${enc(id)}`),
+  () => isConfirmedAbsent(() => getAgentConfig(id), "EVAL_SP_NOT_FOUND"),
+);
 export const listAgentOptions = (role?: AgentRole, purpose?: AgentPurpose, signal?: AbortSignal) =>
   api.get<AgentOption[]>("/api/agents", { params: { ...(role ? { role } : {}), ...(purpose ? { purpose } : {}) }, signal });

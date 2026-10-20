@@ -1,4 +1,5 @@
 import { api, enc } from "./client";
+import { deleteWithConfirmation, isConfirmedAbsent } from "./delete-confirmation";
 import type { Data, Dataset, DatasetSnapshot } from "./types";
 
 export const datasetKeys = {
@@ -15,13 +16,24 @@ export const getDataset = (datasetId: string, signal?: AbortSignal) => api.get<D
 export const createDataset = (input: { name: string; description?: string }) => api.post<Dataset>("/api/datasets", input);
 export const updateDataset = (datasetId: string, input: { name: string; description?: string }) =>
   api.put<Dataset>(`/api/datasets/${enc(datasetId)}`, input);
-export const deleteDataset = (datasetId: string) => api.delete(`/api/datasets/${enc(datasetId)}`);
+export const deleteDataset = (datasetId: string) => deleteWithConfirmation(
+  () => api.delete(`/api/datasets/${enc(datasetId)}`),
+  () => isConfirmedAbsent(() => getDataset(datasetId), "DATASET_NOT_FOUND"),
+);
 export const listDatasetData = (datasetId: string, signal?: AbortSignal) =>
   api.get<Data[]>(`/api/datasets/${enc(datasetId)}/data`, { signal });
 export const attachData = (datasetId: string, dataIds: readonly string[]) =>
   api.post<void>(`/api/datasets/${enc(datasetId)}/data`, { dataIds }, { responseMode: "json" });
-export const detachData = (datasetId: string, dataIds: readonly string[]) =>
-  api.delete(`/api/datasets/${enc(datasetId)}/data`, { body: { dataIds } });
+export const detachData = (datasetId: string, dataIds: readonly string[]) => {
+  const requested = [...dataIds];
+  return deleteWithConfirmation(
+    () => api.delete(`/api/datasets/${enc(datasetId)}/data`, { body: { dataIds: requested } }),
+    async () => {
+      const remaining = await listDatasetData(datasetId);
+      return requested.length > 0 && requested.every((id) => !remaining.some((data) => data.dataId === id));
+    },
+  );
+};
 export const importDataset = (format: DatasetFormat, content: string) =>
   api.post<DatasetSnapshot>("/api/datasets/import", content, {
     params: { format },

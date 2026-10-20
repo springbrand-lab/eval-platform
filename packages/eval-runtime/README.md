@@ -2,6 +2,8 @@
 
 评估运行时的控制面和执行编排。它只依赖 SP 的公开 Harness 边界，不复制 SP Runtime，也不直接读取 Durable Object 存储。
 
+固定幂等重试的次数与退避只从 contracts 的 `IDEMPOTENT_RETRY_POLICY` / `idempotentRetryBackoffMs()` 取得，与 Web 删除确认共享同一份配置和计算。Runtime 仍为首次操作加 10 次重试，默认 `maxRestarts: 4` 的 Agent 重启预算不变。
+
 目标部署中的 SP 是 Eval 独立发布的 API/数据库、Agent Worker 和 Space Worker；登录、Agent Config 及 Agent 生命周期全部由这套 SP 提供。Harness 使用该部署的普通 Inbox/Chat 生命周期，具体 HTTP/WebSocket 客户端由 `apps/eval-api` 组合。部署分支绑定 Project；Runtime 从当前发布信息取得 commit 并写入新 Run，恢复时只读 Run 已保存的 commit。见[部署方案](../../docs/eval-sp-deployment.md)与[Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
 
 ## 对外边界

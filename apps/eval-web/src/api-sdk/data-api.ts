@@ -1,4 +1,5 @@
 import { api, enc } from "./client";
+import { deleteWithConfirmation, isConfirmedAbsent } from "./delete-confirmation";
 import type { Data } from "./types";
 import type { DataCreateOptions, DataInput } from "@eval-platform/eval-dataset";
 
@@ -15,4 +16,7 @@ export const listData = (datasetId?: string, signal?: AbortSignal) =>
 export const getData = (dataId: string, signal?: AbortSignal) => api.get<Data>(`/api/data/${enc(dataId)}`, { signal });
 export const createData = (input: DataInput, options: DataCreateOptions = {}) => api.post<Data>("/api/data", input, { params: options });
 export const updateData = (dataId: string, input: DataInput) => api.put<Data>(`/api/data/${enc(dataId)}`, input);
-export const deleteData = (dataId: string) => api.delete(`/api/data/${enc(dataId)}`);
+export const deleteData = (dataId: string) => deleteWithConfirmation(
+  () => api.delete(`/api/data/${enc(dataId)}`),
+  () => isConfirmedAbsent(() => getData(dataId), "DATA_NOT_FOUND"),
+);
