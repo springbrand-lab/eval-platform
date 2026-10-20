@@ -1,4 +1,5 @@
 import { api, enc } from "./client";
+import { deleteWithConfirmation, isConfirmedAbsent } from "./delete-confirmation";
 import type { OutputSchemaRecord } from "./types";
 
 export const outputSchemaKeys = {
@@ -16,4 +17,7 @@ export const createOutputSchema = (input: { name: string; description: string; c
   api.post<OutputSchemaRecord>(base, input);
 export const updateOutputSchema = (outputSchemaId: string, input: { name?: string; description?: string }) =>
   api.patch<OutputSchemaRecord>(`${base}/${enc(outputSchemaId)}`, input);
-export const deleteOutputSchema = (outputSchemaId: string) => api.delete(`${base}/${enc(outputSchemaId)}`);
+export const deleteOutputSchema = (outputSchemaId: string) => deleteWithConfirmation(
+  () => api.delete(`${base}/${enc(outputSchemaId)}`),
+  () => isConfirmedAbsent(() => getOutputSchema(outputSchemaId), "OUTPUT_SCHEMA_NOT_FOUND"),
+);

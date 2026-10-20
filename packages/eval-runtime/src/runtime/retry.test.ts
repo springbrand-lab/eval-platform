@@ -1,8 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
+import { IDEMPOTENT_RETRY_POLICY, idempotentRetryBackoffMs } from "@eval-platform/eval-contracts";
 import { RuntimeInputError } from "./errors.js";
 import { createRetryController, DEFAULT_RETRY_POLICY, loggedRetryController, retryIdempotentOperation } from "./retry.js";
 
 describe("retry controller", () => {
+  it("uses the same recovery budget and backoff as Web confirmation without changing restart limits", async () => {
+    const controller = createRetryController({ ...DEFAULT_RETRY_POLICY, maxRestarts: 0 });
+    for (let attemptNumber = 1; attemptNumber <= IDEMPOTENT_RETRY_POLICY.maxRetries; attemptNumber += 1) {
+      await expect(controller.decide({ operation: "status", failureKind: "network", attemptNumber })).resolves.toEqual({
+        shouldRetry: true, reason: "network", backoffMs: idempotentRetryBackoffMs(attemptNumber),
+      });
+    }
+    await expect(controller.decide({
+      operation: "status", failureKind: "network", attemptNumber: IDEMPOTENT_RETRY_POLICY.maxRetries + 1,
+    })).resolves.toEqual({ shouldRetry: false, reason: "network" });
+    await expect(controller.decide({
+      operation: "restart", failureKind: "network", attemptNumber: 1,
+    })).resolves.toEqual({ shouldRetry: false, reason: "network" });
+  });
+
   it("reports each retry and the exhausted budget of the shared retry loop", async () => {
     const log = vi.fn();
     const retryController = loggedRetryController(createRetryController({ ...DEFAULT_RETRY_POLICY, maxRestarts: 0 }), log);
