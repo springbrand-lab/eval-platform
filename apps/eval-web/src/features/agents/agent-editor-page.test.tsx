@@ -200,6 +200,63 @@ describe("SP Agent editor in Eval", () => {
     } finally { await view.close(); }
   });
 
+  it("waits for refreshed purpose options after creation without retaining an unavailable error", async () => {
+    const get = transport.get.getMockImplementation()!;
+    let resolveOptions!: (value: unknown) => void;
+    const options = new Promise((resolve) => { resolveOptions = resolve; });
+    transport.get.mockImplementation(async (path: string) => path === "/api/agents" ? options : get(path));
+    const view = await mount();
+    try {
+      await settle(() => expect(name()).not.toBeNull());
+      view.query.setQueryData(agentKeys.options(), []);
+      await type(name(), "Created Agent");
+      await click(button("创建 Agent"));
+      await settle(() => expect(view.router.state.location.pathname).toBe("/agents/agent-a"));
+      await settle(() => expect(name()?.value).toBe("Created Agent"));
+
+      expect(view.container.textContent).not.toContain("Agent 用途暂时不可用");
+      await act(async () => {
+        resolveOptions([{
+          name: "Created Agent", role: "executor", purpose: "execution", agentConfig: { userAgentId: "agent-a" },
+        }]);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      });
+      await settle(() => expect(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="execution"]')?.checked).toBe(true));
+      expect(view.container.textContent).not.toContain("Agent 用途暂时不可用");
+      await type(name(), "Edited after creation");
+      await click(button("保存修改"));
+      await settle(() => expect(transport.patch).toHaveBeenCalledTimes(1));
+      expect(transport.patch.mock.calls[0]![1]).toMatchObject({ name: "Edited after creation", purpose: "execution" });
+      expect(transport.post).toHaveBeenCalledTimes(1);
+    } finally { await view.close(); }
+  });
+
+  it.each(["unavailable", "missing"] as const)("keeps a genuine %s purpose error until its query recovers without losing the draft", async (failure) => {
+    const get = transport.get.getMockImplementation()!;
+    transport.get.mockImplementation(async (path: string) => {
+      if (path !== "/api/agents") return get(path);
+      if (failure === "missing") return [];
+      throw new ApiError({ kind: "http", status: 503, code: "AGENT_CONFIG_PURPOSE_UNAVAILABLE", message: "Catalog unavailable" });
+    });
+    const view = await mount("/agents/agent-a");
+    try {
+      await settle(() => expect(view.container.textContent).toContain("Agent 用途暂时不可用"));
+      await type(name(), "Keep this draft");
+      expect(view.container.textContent).toContain("Agent 用途暂时不可用");
+
+      transport.get.mockImplementation(get);
+      await act(async () => {
+        await view.query.invalidateQueries({ queryKey: agentKeys.options() });
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      });
+      await settle(() => expect(view.container.querySelector<HTMLInputElement>('input[name="agent-purpose"][value="evaluation"]')?.checked).toBe(true));
+      expect(view.container.textContent).not.toContain("Agent 用途暂时不可用");
+      expect(name()?.value).toBe("Keep this draft");
+      expect(transport.post).not.toHaveBeenCalled();
+      expect(transport.patch).not.toHaveBeenCalled();
+    } finally { await view.close(); }
+  });
+
   it("keeps the purpose selector available while the result MCP is loading", async () => {
     const get = transport.get.getMockImplementation()!;
     transport.get.mockImplementation(async (path: string) => {
@@ -310,6 +367,8 @@ describe("SP Agent editor in Eval", () => {
       await type(name(), "My version");
       await click(button("保存修改"));
       await settle(() => expect(view.container.textContent).toContain("你的修改仍然保留"));
+      await act(async () => { await view.query.invalidateQueries({ queryKey: agentKeys.options() }); });
+      expect(view.container.textContent).toContain("你的修改仍然保留");
       expect(name()?.value).toBe("My version");
       expect(transport.patch).toHaveBeenCalledTimes(1);
     } finally { await view.close(); }

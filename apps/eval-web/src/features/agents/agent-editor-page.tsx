@@ -64,27 +64,24 @@ function AgentForm({ initial, template, userId, onSaved }: {
     retry: false,
   });
   const evaluationMcpId = evaluationMcp.data?.kind === "available" ? evaluationMcp.data.server.id : undefined;
+  const selectedPurpose = initial
+    ? purposeOptions.data?.find((option) => option.agentConfig.userAgentId === initial.id)?.purpose
+    : undefined;
+  // Cached options may predate this Agent; wait for their refresh before reporting a missing purpose.
+  const purposeLoading = !!initial && (purposeOptions.isPending || purposeOptions.isFetching);
+  const purposeError = initial && !purposeLoading && (purposeOptions.error || !selectedPurpose)
+    ? "Agent 用途暂时不可用，请重试后再保存。"
+    : null;
 
   useEffect(() => {
-    if (evaluationMcp.isPending || (!initial && !template) || (initial && purposeOptions.isPending)) return;
-    if (initial && purposeOptions.error) {
-      setError("Agent 用途暂时不可用，请重试后再保存。");
-      return;
-    }
+    if (evaluationMcp.isPending || (!initial && !template) || purposeLoading || purposeError) return;
     const source = initial ?? template;
-    const selectedPurpose = initial
-      ? purposeOptions.data?.find((option) => option.agentConfig.userAgentId === initial.id)?.purpose
-      : undefined;
-    if (initial && !selectedPurpose) {
-      setError("Agent 用途暂时不可用，请重试后再保存。");
-      return;
-    }
     if (!purposeReady) setPurposeReady(true);
     if (!purposeSelectionTouched.current) {
       if (selectedPurpose) setPurpose(selectedPurpose);
       else if (evaluationMcpId) setPurpose(source?.setting.mcpServers.some((selection) => selection.serverId === evaluationMcpId) ? "evaluation" : "execution");
     }
-  }, [evaluationMcp.isPending, evaluationMcpId, initial, purposeOptions.data, purposeOptions.error, purposeOptions.isPending, purposeReady, template]);
+  }, [evaluationMcp.isPending, evaluationMcpId, initial, purposeError, purposeLoading, purposeReady, selectedPurpose, template]);
 
   useEffect(() => {
     if (!purposeReady || !evaluationMcpId) return;
@@ -219,7 +216,7 @@ function AgentForm({ initial, template, userId, onSaved }: {
       <AgentMcpServers selections={draft.setting.mcpServers} />
     </>,
     userId, draft, models: models.data ?? [], modelsLoading: models.isPending, modelsError: models.isError,
-    readOnly, saving: save.isPending, error, onSave: submit,
+    readOnly, saving: save.isPending, error: error ?? purposeError, onSave: submit,
     onDraftChange: (update: (current: AgentDraft) => AgentDraft) => {
       allowNavigation.current = false;
       setDraft(update);
