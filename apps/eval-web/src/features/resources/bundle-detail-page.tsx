@@ -223,6 +223,6 @@ export function BundleDetailPage({ kind, bundleId }: { kind: ResourceKind; bundl
     </Dialog>
     <ConfirmDialog open={!!pending} onClose={() => { if (!remove.isPending) setPending(null); }} onConfirm={() => remove.mutate()}
       loading={remove.isPending} danger confirmLabel="删除" title={`删除${pending?.record ? label : "包"}`}
-      description={<>{pending?.record ? "删除后不再用于新选择。" : `将删除这个包及其中的${label}。`}已有项目的引用仍可读取。仍有用例绑定时，请先解除绑定。{remove.error && <ErrorBlock error={remove.error} />}</>} />
+      description={<>{pending?.record ? "删除后不再用于新选择。" : `将删除这个包及其中的${label}。`}已绑定的用例和已有项目仍可读取，后续不能新选。{remove.error && <ErrorBlock error={remove.error} />}</>} />
   </Page>;
 }

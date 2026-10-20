@@ -69,12 +69,12 @@ Project 的一次一致读取是 `ProjectPlan`（`packages/eval-contracts/src/pr
 | 评估输出 JSON Schema | 正文不可变，只能修改元数据；软删除不影响按 ID 读取 | 保存 ID 和内容摘要 |
 | Agent Config | 在 Eval 内增删改查，SP 侧原地更新，没有版本历史 | 冻结副本，见 2.3 |
 
-软删除的来源对象仍可被已有 Project 引用和执行，只是不再出现在目录中，也不能被新的 Data 或 Project 选择。因此目录删除从不被 Project 阻挡：
+软删除的来源对象仍可被已有 Project 引用和执行，只是不再出现在目录中，也不能被新的 Data 绑定或作为新资源选择。已有 Data 的同字段素材、Session 引用可继续保留，并可用于创建 Project。因此目录删除从不被 Project 阻挡：
 
 - 输出格式的软删除总是允许；
 - Dataset 软删除从不被 Project 阻挡；
 - Data 软删除只在它仍属于某个未删除 Dataset 时被拒绝，与 Project 无关；
-- Material/Session/Bundle 软删除只在仍被活动 Data 引用时被拒绝（见 [Dataset upload](eval-dataset-upload.md)）。
+- Material/Session/Bundle 软删除总是允许，不清除已有 Data 绑定，也不删除文件；新增绑定仍要求资源未删除（见 [Dataset upload](eval-dataset-upload.md)）。
 
 ### 2.3 Agent Config 冻结副本
 

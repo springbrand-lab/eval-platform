@@ -31,11 +31,11 @@ export function createInitialResourceApi(db: EvalDb, ownerUserId: string): Initi
   return {
     async bindData(dataId, patch) {
       return db.transaction(async (transaction) => {
-        await assertDataReferencesSelectable(transaction, owner, patch);
         const [row] = await transaction.select({ content: data.content }).from(data)
           .where(and(eq(data.ownerUserId, owner), eq(data.dataId, dataId),
             isNull(data.deletedAt))).for("update");
         if (!row) throw new DatasetEntityNotFoundError("data", dataId);
+        await assertDataReferencesSelectable(transaction, owner, patch, dataSchema.parse({ ...row.content, dataId }));
         const next: Record<string, unknown> = { ...row.content };
         for (const [field, value] of Object.entries(patch)) {
           if (value) next[field] = value;

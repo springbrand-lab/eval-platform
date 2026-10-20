@@ -28,7 +28,7 @@ ZIP 与素材上传也等待 FileDropzone 的文件提取结束后再提交；�
 
 输入素材、初始对话的文件读取共用 `bundles-api.ts` 的 `getResource`、`listFiles`、`getFile`；目录投影从 `eval-contracts` 的 `InitialResourceFile` 引入。Query key 包含资源种类、包、资源和文件路径，内容请求接受取消信号，路径作为 query 参数原样传递。格式预览的发布依赖与验证流程见 [SP 共享包接入与升级](../../docs/sp-package-publishing-todo.md)。
 
-资源选择器与 Bundle 详情共用资源列表缓存，缓存保存 API 返回的完整记录；选择器通过 Query 的 `select` 生成选项，不把 `{id, name}` 展示投影写回共享缓存。访问页面的先后顺序不影响资源 ID、描述或格式。
+资源选择器与 Bundle 详情共用资源列表缓存，缓存保存 API 返回的完整记录；选择器通过 Query 的 `select` 生成选项，不把 `{id, name}` 展示投影写回共享缓存。访问页面的先后顺序不影响资源 ID、描述或格式。Bundle、素材和初始对话允许带引用软删除，确认提示保留现有用例和项目引用；资源选择器保留已从目录移除的当前绑定，不请求它的目录文件，也不允许新增选择。
 
 素材、上下文名称进入 `/resources/$kind/$bundleId/$resourceId` 的只读目录页。资源与运行 Workspace 共用目录导航和 `@springbrand/file-renderers` 的格式选择、解析、预览、源码及下载；Web 仅负责鉴权文件读取、请求取消与 Blob URL 生命周期。文件夹和 ZIP 导入后的路径使用同一目录投影。HTML/CSS/图片等相对引用由公共 `rendererResourcePath` 统一解析，只读取当前资源根目录内的文件；HTML 预览还只读取页面所在目录及其子目录（网站根），上级目录的引用不读取；Web 不另行解码链接，并遵守渲染器传入的剩余字节预算（`maxBytes`）。
 

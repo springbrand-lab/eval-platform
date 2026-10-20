@@ -13,7 +13,6 @@ import { fileResponse } from "../lib/file-response.js";
 import { METADATA_BODY_BYTES, ZIP_BODY_BYTES } from "../limits.js";
 import {
   bodyErrorResponses,
-  conflictResponse,
   deletedResponse,
   errorResponses,
   fileSchema,
@@ -130,13 +129,12 @@ export function bundleRouter<R extends ResourceRecord, C, Z extends { readonly s
     method: "delete",
     path: "/{bundleId}",
     tags: [tag],
-    summary: `Soft-delete a ${tag} that no Data references`,
+    summary: `Soft-delete a ${tag}; existing Data and Projects keep their references`,
     request: { params: bundleParams },
     responses: {
       ...deletedResponse,
       ...errorResponses,
       ...notFoundResponse,
-      ...conflictResponse,
     },
   }), async (c) => {
     await kind.catalog(c.var.services).delete(c.req.valid("param").bundleId);
@@ -257,13 +255,12 @@ export function bundleRouter<R extends ResourceRecord, C, Z extends { readonly s
     method: "delete",
     path: resourcePath,
     tags: [tag],
-    summary: `Soft-delete a ${resource} that no Data references`,
+    summary: `Soft-delete a ${resource}; existing Data and Projects keep their references`,
     request: { params: resourceParams },
     responses: {
       ...deletedResponse,
       ...errorResponses,
       ...notFoundResponse,
-      ...conflictResponse,
     },
   }), async (c) => {
     await kind.catalog(c.var.services).deleteResource(...resourceRef(c.req.valid("param")));

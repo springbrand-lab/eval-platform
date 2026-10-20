@@ -269,25 +269,25 @@ Data and reference validation rules are those of `@eval-platform/eval-dataset` a
 
 ### Initial-resource catalog and output formats
 
-A Material Bundle contains only Materials and a Session Bundle only Sessions; output formats are standalone draft 2020-12 JSON Schema files. Upload and ZIP import rules are in [Dataset upload](eval-dataset-upload.md). Metadata PATCH bodies are `{name?, description?}` with at least one nonblank field; uploaded content is immutable. All deletes are soft and hide the entry from lists and reads; file bytes are kept.
+A Material Bundle contains only Materials and a Session Bundle only Sessions; output formats are standalone draft 2020-12 JSON Schema files. Upload and ZIP import rules are in [Dataset upload](eval-dataset-upload.md). Metadata PATCH bodies are `{name?, description?}` with at least one nonblank field; uploaded content is immutable. All deletes are soft and hide the entry from catalog lists and reads; file bytes are kept. Data and Project references never block these catalog deletes, and existing references are not cleared.
 
 | Route | Body / result | Domain errors |
 | --- | --- | --- |
 | `GET, POST /api/material-bundles` | GET `MaterialBundle[]` (`{bundleId, name, description}`); POST multipart `name`, `description`, optional `zip` / `201 {bundle, imported:[{source, material}]}` | `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
-| `GET, PATCH, DELETE /api/material-bundles/{bundleId}` | `MaterialBundle`; DELETE `204` and also deletes its Materials | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` while active Data reference its Materials |
+| `GET, PATCH, DELETE /api/material-bundles/{bundleId}` | `MaterialBundle`; DELETE `204` and also soft-deletes its Materials | `404 BUNDLE_RESOURCE_NOT_FOUND` |
 | `POST /api/material-bundles/{bundleId}/import` | Multipart `zip` / `201 {bundle, imported:[{source, material}]}` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
 | `GET, POST /api/material-bundles/{bundleId}/materials` | POST `{name, description, files:[{path, mediaType, contentBase64}]}` / `201 {bundleId, materialId, name, description, byteSize}` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `400 BUNDLE_FILE_INVALID`; `413 BUNDLE_FILE_TOO_LARGE`; `503 BUNDLE_FILE_UNAVAILABLE` |
-| `GET, PATCH, DELETE /api/material-bundles/{bundleId}/materials/{materialId}` | Material; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` |
+| `GET, PATCH, DELETE /api/material-bundles/{bundleId}/materials/{materialId}` | Material; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND` |
 | `GET /api/material-bundles/{bundleId}/materials/{materialId}/files` | `InitialResourceFile[]` (`{path, mediaType, byteSize}`), preserving the resource's stored absolute paths | `404 BUNDLE_RESOURCE_NOT_FOUND`, `BUNDLE_FILE_NOT_FOUND`; Bundle file read errors |
 | `GET /api/material-bundles/{bundleId}/materials/{materialId}/file?path=` | Exact stored file bytes, outside the JSON envelope; attachment under sandbox CSP | As for the file list; `404 BUNDLE_FILE_NOT_FOUND` for an unlisted path |
 | `GET, POST /api/session-bundles`, `GET, PATCH, DELETE /api/session-bundles/{bundleId}`, `POST /api/session-bundles/{bundleId}/import` | As for Material Bundles, with `SessionBundle` and `imported:[{source, session}]` | As for Material Bundles |
 | `GET, POST /api/session-bundles/{bundleId}/sessions` | POST `{name, description, format:"json"\|"jsonl", content}` / `201 {bundleId, sessionId, name, description, format}` | As for Materials |
-| `GET, PATCH, DELETE /api/session-bundles/{bundleId}/sessions/{sessionId}` | Session; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND`; `409 BUNDLE_RESOURCE_IN_USE` |
+| `GET, PATCH, DELETE /api/session-bundles/{bundleId}/sessions/{sessionId}` | Session; DELETE `204` | `404 BUNDLE_RESOURCE_NOT_FOUND` |
 | `GET /api/session-bundles/{bundleId}/sessions/{sessionId}/files`, `GET .../file?path=` | Same read-only file contract; one `/context.json` or `/context.jsonl` file containing the original uploaded context text | As for Material file reads |
 | `GET, POST /api/evaluation-output-schemas` | POST `{name, description, content}` (Schema file text) / `201 {outputSchemaId, name, description, schema}` | `400 CATALOG_INPUT_INVALID`; `413 CATALOG_PAYLOAD_TOO_LARGE` |
 | `GET, PATCH, DELETE /api/evaluation-output-schemas/{outputSchemaId}` | Output format; DELETE `204` | `404 OUTPUT_SCHEMA_NOT_FOUND` (also for repeated DELETE) |
 
-Material Bundle, Session Bundle, Material and Session names and descriptions are required nonblank text (`422 REQUEST_VALIDATION_FAILED`). An output format may be soft-deleted while an evaluation plan uses it; the plan keeps reading the Schema by ID, but the format can no longer be selected.
+Material Bundle, Session Bundle, Material and Session names and descriptions are required nonblank text (`422 REQUEST_VALIDATION_FAILED`). Material and Session references already bound in the same Data field may be retained, reordered or removed after soft deletion; Data edits, identical Data import replay and Project creation from that Data keep working. Newly binding a resource, including moving it to another field or restoring it after removal, requires an active resource and Bundle. All bound Materials, including retained ones, count toward that field's initialization budget. An output format may be soft-deleted while an evaluation plan uses it; the plan keeps reading the Schema by ID, but the format can no longer be selected.
 
 Catalog file reads first require an active Bundle and resource belonging to the service account, then use the existing Bundle directory and content validation. They never read SP storage or join a query path to the filesystem. `path` must exactly match a listed file; no decoding, normalization or traversal is performed by the reader. Directory structure is derived from these paths, not stored again. Material ZIP import strips the top-level resource directory as documented in Dataset upload; context ZIP import creates one resource per JSON/JSONL file. The original archive is not retained. Editing catalog labels never changes file identities or bytes. Soft-deleted catalog entries are no longer browsable, while existing Project references keep their separate Worker read semantics. Invalid stored content is `500 BUNDLE_FILE_CORRUPT`, distinct from upload validation failures; only unavailable I/O is retryable. All content responses use attachment disposition, a sandbox CSP, `nosniff` and `private, no-store` cache control. Media types that cannot be represented in an HTTP header are served as `application/octet-stream`; the inventory retains the uploaded media type.
 
@@ -367,7 +367,6 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `CATALOG_INPUT_INVALID` | 400 | Catalog reference or output-format Schema content invalid, or a name or description rejected after request validation |
 | `CATALOG_PAYLOAD_TOO_LARGE` | 413 | Output-format content over its limit |
 | `BUNDLE_RESOURCE_NOT_FOUND` | 404 | Unknown or deleted Material Bundle, Session Bundle, Material or Session, including a reference whose `bundleId` names the other Bundle type |
-| `BUNDLE_RESOURCE_IN_USE` | 409 | Resource or Bundle deletion while active Data reference it or its resources |
 | `BUNDLE_FILE_NOT_FOUND` | 404 | Bundle file missing |
 | `BUNDLE_FILE_TOO_LARGE` | 413 | Material file, Material, one Data field's bound Materials or ZIP archive over a limit; `errors` name the ZIP entries or the Data field |
 | `BUNDLE_FILE_INVALID` | 400 | Material or Session content, ZIP archive or ZIP entry invalid; `errors` name the ZIP entries |

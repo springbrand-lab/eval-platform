@@ -64,7 +64,6 @@ const errorDefinitions = {
   CATALOG_INPUT_INVALID: { status: 400, message: "Catalog input is invalid" },
   CATALOG_PAYLOAD_TOO_LARGE: { status: 413, message: "Catalog content is too large" },
   BUNDLE_RESOURCE_NOT_FOUND: { status: 404, message: "Bundle resource not found" },
-  BUNDLE_RESOURCE_IN_USE: { status: 409, message: "Bundle resource is still bound to Data" },
   BUNDLE_FILE_NOT_FOUND: { status: 404, message: "Bundle file not found" },
   BUNDLE_FILE_TOO_LARGE: { status: 413, message: "Bundle file is too large" },
   BUNDLE_FILE_INVALID: { status: 400, message: "Bundle file is invalid" },
