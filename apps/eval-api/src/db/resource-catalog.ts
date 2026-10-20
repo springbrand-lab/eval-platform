@@ -1,5 +1,6 @@
+import { isDeepStrictEqual } from "node:util";
 import type { Data, InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
-import { and, eq, isNull, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { SelectedFieldsFlat } from "drizzle-orm/pg-core";
 import type { SelectResultFields } from "drizzle-orm/query-builders/select.types";
 import { createId, type InitialResourceFile } from "@eval-platform/eval-contracts";
@@ -9,8 +10,8 @@ import { BundleFileError } from "../sp/bundle-errors.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import { parseCatalogMetadataPatch, platformId, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";
-import { BundleResourceInUseError, BundleResourceNotFoundError } from "./errors.js";
-import { bundleMaterials, bundleSessions, data, materialBundles, sessionBundles } from "./schema.js";
+import { BundleResourceNotFoundError } from "./errors.js";
+import { bundleMaterials, bundleSessions, materialBundles, sessionBundles } from "./schema.js";
 
 export interface BundleRecord {
   readonly bundleId: string;
@@ -62,6 +63,7 @@ interface StoredResourceFile extends InitialResourceFile {
 }
 
 type CatalogWriter = Pick<EvalDb, "select" | "insert">;
+type DataReferences = { readonly [K in "initialMaterials" | "evalInitialMaterials" | "initialSession"]?: Data[K] | null };
 
 /** A Data field holding references to one Bundle kind's resources: a list, or a single reference. */
 interface DataReferenceField {
@@ -159,26 +161,24 @@ export type MaterialRecord = SelectResultFields<typeof materialBundle.resource.f
 export type SessionRecord = SelectResultFields<typeof sessionBundle.resource.fields>;
 
 /** Data content containing a reference with these IDs, as the field itself or as one element of its list. */
-function referenceCondition({ field, list }: DataReferenceField, reference: Readonly<Record<string, string>>) {
-  return sql`${data.content} @> ${JSON.stringify({ [field]: list ? [reference] : reference })}::jsonb`;
-}
-
-async function activeDataBinding(
-  reader: Pick<EvalDb, "select">, owner: string, condition: SQL | undefined,
-): Promise<boolean> {
-  const [bound] = await reader.select({ dataId: data.dataId }).from(data).where(and(
-    eq(data.ownerUserId, owner), isNull(data.deletedAt), condition,
-  )).limit(1);
-  return bound !== undefined;
+function hasReference(
+  { field, list }: DataReferenceField, record: DataReferences | undefined, reference: InitialMaterialsRef | InitialSessionRef,
+): boolean {
+  const current = record?.[field];
+  return list && Array.isArray(current)
+    ? current.some((item) => isDeepStrictEqual(item, reference))
+    : isDeepStrictEqual(current, reference);
 }
 
 function bundleRecord(row: BundleRecord): BundleRecord {
   return { bundleId: row.bundleId, name: row.name, description: row.description };
 }
 
-function activeResource(bundle: BundleKind<SelectedFieldsFlat, never>, owner: string, bundleId: string, resourceId?: string) {
+function resourceCondition(
+  bundle: BundleKind<SelectedFieldsFlat, never>, owner: string, bundleId: string, resourceId?: string, includeDeleted = false,
+) {
   const { table, id } = bundle.resource;
-  return and(eq(table.ownerUserId, owner), eq(table.bundleId, bundleId), isNull(table.deletedAt),
+  return and(eq(table.ownerUserId, owner), eq(table.bundleId, bundleId), includeDeleted ? undefined : isNull(table.deletedAt),
     resourceId === undefined ? undefined : eq(id, resourceId));
 }
 
@@ -191,9 +191,7 @@ function createBundleCatalog<F extends SelectedFieldsFlat, I>(
   const activeBundle = (bundleId: string) => and(
     eq(table.ownerUserId, owner), eq(table.bundleId, bundleId), isNull(table.deletedAt),
   );
-  const resourceRow = (bundleId: string, resourceId?: string) => activeResource(bundle, owner, bundleId, resourceId);
-  const dataBinding = (bundleId: string, resourceId?: string) => or(...bundle.dataFields.map((field) =>
-    referenceCondition(field, { bundleId, ...(resourceId === undefined ? {} : { [resource.idField]: resourceId }) })));
+  const resourceRow = (bundleId: string, resourceId?: string) => resourceCondition(bundle, owner, bundleId, resourceId);
   async function requireBundle(bundleId: string): Promise<BundleRecord> {
     const id = platformId(bundleId, "bundleId");
     const [row] = await db.select().from(table).where(activeBundle(id));
@@ -279,9 +277,6 @@ function createBundleCatalog<F extends SelectedFieldsFlat, I>(
       const id = platformId(bundleId, "bundleId");
       await db.transaction(async (transaction) => {
         await lockBundle(transaction, id);
-        if (await activeDataBinding(transaction, owner, dataBinding(id))) {
-          throw new BundleResourceInUseError(bundle.kind, id);
-        }
         const deletedAt = new Date();
         await transaction.update(resource.table).set({ deletedAt }).where(resourceRow(id));
         await transaction.update(table).set({ deletedAt }).where(activeBundle(id));
@@ -328,9 +323,6 @@ function createBundleCatalog<F extends SelectedFieldsFlat, I>(
         const [selected] = await transaction.select({ id: resource.id }).from(resource.table)
           .where(resourceRow(id, childId)).for("update");
         if (!selected) throw new BundleResourceNotFoundError(resource.kind, childId);
-        if (await activeDataBinding(transaction, owner, dataBinding(id, childId))) {
-          throw new BundleResourceInUseError(resource.kind, childId);
-        }
         await transaction.update(resource.table).set({ deletedAt: new Date() }).where(resourceRow(id, childId));
       });
     },
@@ -348,10 +340,10 @@ export function createBundleCatalogs(db: EvalDb, ownerUserId: string, directory:
 
 export type BundleCatalogs = ReturnType<typeof createBundleCatalogs>;
 
-/** Lock an active, newly referenceable resource and return its public record. */
+/** Lock an owner-scoped resource, allowing soft deletes only for a retained Data reference, and return its public record. */
 async function selectableResource<F extends SelectedFieldsFlat>(
   bundle: BundleKind<F, never>, reader: Pick<EvalDb, "select">, ownerUserId: string,
-  bundleId: string, resourceId: string,
+  bundleId: string, resourceId: string, retained = false,
 ): Promise<SelectResultFields<F>> {
   const owner = requireOwnerUserId(ownerUserId);
   const { table, resource } = bundle;
@@ -360,7 +352,8 @@ async function selectableResource<F extends SelectedFieldsFlat>(
   const [row] = await reader.select(fields).from(resource.table)
     .innerJoin(table, and(eq(table.bundleId, resource.table.bundleId),
       eq(table.ownerUserId, resource.table.ownerUserId)))
-    .where(and(activeResource(bundle, owner, platformId(bundleId, "bundleId"), id), isNull(table.deletedAt)))
+    .where(and(resourceCondition(bundle, owner, platformId(bundleId, "bundleId"), id, retained),
+      retained ? undefined : isNull(table.deletedAt)))
     .for("share");
   if (!row) throw new BundleResourceNotFoundError(resource.kind, id);
   // Drizzle leaves rows of a generic selection unresolved; `resource.fields` fixes their shape.
@@ -370,29 +363,31 @@ async function selectableResource<F extends SelectedFieldsFlat>(
 /** Validate one Data field's Material references; together they must fit one SP initialization. */
 async function assertMaterialsSelectable(
   reader: Pick<EvalDb, "select">, ownerUserId: string,
-  field: "initialMaterials" | "evalInitialMaterials", references: readonly InitialMaterialsRef[],
+  field: (typeof materialBundle.dataFields)[number], references: readonly InitialMaterialsRef[], previous: DataReferences | undefined,
 ): Promise<void> {
   let byteSize = 0;
-  for (const { bundleId, materialId } of references) {
-    byteSize += (await selectableResource(materialBundle, reader, ownerUserId, bundleId, materialId)).byteSize;
+  for (const reference of references) {
+    byteSize += (await selectableResource(materialBundle, reader, ownerUserId, reference.bundleId, reference.materialId,
+      hasReference(field, previous, reference))).byteSize;
   }
-  requireInitializationBudget(byteSize, field);
+  requireInitializationBudget(byteSize, field.field);
 }
 
 async function assertSessionSelectable(
-  reader: Pick<EvalDb, "select">, ownerUserId: string, reference: InitialSessionRef,
+  reader: Pick<EvalDb, "select">, ownerUserId: string, reference: InitialSessionRef, previous: DataReferences | undefined,
 ): Promise<void> {
-  await selectableResource(sessionBundle, reader, ownerUserId, reference.bundleId, reference.sessionId);
+  await selectableResource(sessionBundle, reader, ownerUserId, reference.bundleId, reference.sessionId,
+    hasReference(sessionBundle.dataFields[0], previous, reference));
 }
 
 /** Validate every resource reference before a Data row is created or replaced. */
 export async function assertDataReferencesSelectable(
   reader: Pick<EvalDb, "select">, ownerUserId: string,
-  record: { readonly [K in "initialMaterials" | "evalInitialMaterials" | "initialSession"]?: Data[K] | null },
+  record: DataReferences, previous?: DataReferences,
 ): Promise<void> {
-  for (const field of ["initialMaterials", "evalInitialMaterials"] as const) {
-    const references = record[field];
-    if (references) await assertMaterialsSelectable(reader, ownerUserId, field, references);
+  for (const field of materialBundle.dataFields) {
+    const references = record[field.field];
+    if (references) await assertMaterialsSelectable(reader, ownerUserId, field, references, previous);
   }
-  if (record.initialSession) await assertSessionSelectable(reader, ownerUserId, record.initialSession);
+  if (record.initialSession) await assertSessionSelectable(reader, ownerUserId, record.initialSession, previous);
 }

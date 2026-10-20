@@ -61,7 +61,8 @@ export function ResourcePicker({ kind, value, onChange, disabled, label, exclude
       <Button type="button" variant="outline" disabled={disabled} onClick={() => setCreating(true)}>{kind === "material" ? "上传新素材" : "导入初始对话"}</Button>
     </div>
     {selected && <p className="text-xs text-text-muted">{selected.description} <Link className="link" to="/resources/$kind/$bundleId/$resourceId" params={{ kind, bundleId: selected.bundleId, resourceId: selected.id }} target="_blank" rel="noreferrer">查看文件与内容（新标签页）</Link></p>}
-    {value?.id && <ResourceFiles kind={kind} value={value} />}
+    {selected && <ResourceFiles kind={kind} value={selected} />}
+    {value?.id && !selected && !loading && !error && <p className="text-xs text-text-muted">该资源已从资源库移除，现有绑定仍可使用。</p>}
     {error && <ErrorBlock error={error} onRetry={() => { void bundles.refetch(); lists.forEach((query) => { void query.refetch(); }); }} />}
     {!loading && !error && !rows.length && <p className="text-xs text-text-muted">还没有可选资源，可直接在这里创建。</p>}
     {creating && <InlineResourceCreate kind={kind} bundles={bundles.data ?? []} onClose={() => setCreating(false)} onCreated={onChange} />}

@@ -75,13 +75,6 @@ export class BundleResourceNotFoundError extends Error {
   }
 }
 
-export class BundleResourceInUseError extends Error {
-  constructor(readonly kind: BundleResourceKind, readonly id: string) {
-    super(`${kind} is still bound to Data: ${id}`);
-    this.name = "BundleResourceInUseError";
-  }
-}
-
 export class OutputSchemaNotFoundError extends Error {
   constructor(readonly outputSchemaId: string) {
     super(`Unknown output format ${outputSchemaId}`);

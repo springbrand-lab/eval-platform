@@ -141,11 +141,11 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
     async updateData(record) {
       const entry = dataSchema.parse(record);
       await db.transaction(async (transaction) => {
-        await assertDataReferencesSelectable(transaction, ownerUserId, entry);
-        const [current] = await transaction.select({ dataId: data.dataId }).from(data)
+        const [current] = await transaction.select({ dataId: data.dataId, content: data.content }).from(data)
           .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, entry.dataId),
             isNull(data.deletedAt))).for("update");
         if (!current) throw new DatasetEntityNotFoundError("data", entry.dataId);
+        await assertDataReferencesSelectable(transaction, ownerUserId, entry, dataFromRow(current));
         const [promptMember] = await transaction.select({ datasetId: datasets.datasetId })
           .from(datasetData).innerJoin(datasets, and(
             eq(datasetData.ownerUserId, datasets.ownerUserId),
@@ -257,7 +257,6 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
           .sort((left, right) => left.dataId.localeCompare(right.dataId));
         for (const entry of incomingData) {
           if (kind === "prompt") assertPromptData(entry);
-          await assertDataReferencesSelectable(transaction, ownerUserId, entry);
         }
         const seenIds = new Set<string>();
         for (const entry of incomingData) {
@@ -267,6 +266,8 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
         for (const entry of incomingData) {
           const [lockedData] = await transaction.select().from(data)
             .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, entry.dataId))).for("update");
+          await assertDataReferencesSelectable(transaction, ownerUserId, entry,
+            lockedData?.deletedAt === null ? dataFromRow(lockedData) : undefined);
           let existingData = lockedData;
           if (!existingData) {
             const [inserted] = await transaction.insert(data).values({

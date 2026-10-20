@@ -62,7 +62,6 @@ export const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   CATALOG_INPUT_INVALID: "名称、说明或 Schema 内容无效",
   CATALOG_PAYLOAD_TOO_LARGE: "内容超过大小上限",
   BUNDLE_RESOURCE_NOT_FOUND: "初始资源不存在",
-  BUNDLE_RESOURCE_IN_USE: "初始资源仍被用例引用，不能删除",
   BUNDLE_FILE_NOT_FOUND: "文件不存在",
   BUNDLE_FILE_CONFLICT: "同一文件已存在不同内容",
   BUNDLE_FILE_TOO_LARGE: "文件超过大小上限",

@@ -139,7 +139,7 @@ Web 用 `GET /api/evaluation-output-schemas` 展示可选格式。输出格式�
 - 两类 Bundle、Material、Session 和输出格式的 `name`、`description` 可通过各自详情路由的 `PATCH` 修改，提交其中一个或两个字段即可，值必须非空白。详情路由分别是 `/api/material-bundles/{bundleId}`、`/api/material-bundles/{bundleId}/materials/{materialId}`、`/api/session-bundles/{bundleId}`、`/api/session-bundles/{bundleId}/sessions/{sessionId}`、`/api/evaluation-output-schemas/{outputSchemaId}`；它们也支持 `GET` 和 `DELETE`。上传后的文件或 Schema 正文不能修改；要换内容，创建新资源后重新绑定。
 - Dataset 用 `PUT /api/datasets/{datasetId}` 全量替换可编辑字段。Prompt Dataset 的 `name`、`description` 始终必填。Data 用 `PUT /api/data/{dataId}` 全量替换；Web 从当前 Data 合并未改业务字段和资源引用，与四个可编辑字段一同保存。Prompt Dataset 成员的名称、描述和两个 Prompt 不能被改成空值。专用 `initial-resources` PATCH 供独立资源绑定调用使用，当前 Web 编辑器统一保存完整 Data。
 - Data 可被同一用户的多个 Dataset 复用。`POST /api/datasets/{datasetId}/data` 用 `{dataIds:[...]}` 关联已有 Data；同一路径的 `DELETE` 解除关联。修改共享 Data 会影响所有引用它的 Dataset。
-- 删除都是软删除，列表和详情不再返回已删除的资源，上传文件字节仍留在目录。只要任一**活动 Data** 仍引用某个 Material（在执行素材或评估素材任一列表中）或 Session，删除它或它所在的 Bundle 就返回 `409`；即使该 Data 当前不属于任何 Dataset，也算绑定。Web 应先清空或改绑相关 Data，再重试删除。删除素材 Bundle 会把其 Material 一起标记删除，删除上下文 Bundle 会把其 Session 一起标记删除。
+- 删除都是软删除，列表和详情不再返回已删除的资源，上传文件字节仍留在目录。Material、Session 及两类 Bundle 即使有 Data 绑定也允许删除，不要求先解绑；删除 Bundle 会把其中的活动资源一起标记删除。已有 Data 的同字段引用可继续保留、重排或移除，编辑和创建 Project 不受影响；新增绑定、跨字段移用或移除后重新绑定仍要求资源未删除。Web 保留目录外的当前绑定并说明它仍可使用，不请求已删除资源的目录文件。
 - 输出格式的删除总是允许：已选用它的评估计划继续按 ID 读取 Schema，只是它不能再被新选择。
 - Data 仍属于任一未删除 Dataset 时不能删除（`409 DATA_IN_USE`），先解除 Dataset 关联。Dataset 删除不受限制，也不会顺带删除可复用 Data。Project 保存的是 Dataset/Data 快照，目录中的修改和删除都不影响已有 Project，也从不因 Project 被阻止。
 
@@ -151,7 +151,7 @@ Web 用 `GET /api/evaluation-output-schemas` 展示可选格式。输出格式�
 - 失败：`{ "code", "errMsg", "requestId", "errors"?, "details"? }`，响应头 `X-Request-ID` 与 `requestId` 相同，便于反馈问题。按 `code` 区分原因，不解析 `errMsg` 文本；可用 `@eval-platform/eval-contracts/http-errors` 的 `decodeError` 解码。
 - `422 REQUEST_VALIDATION_FAILED`：字段不合法，`errors[].path` 指向出错字段，可直接标注到表单。
 - `400`：JSON 格式错误或重复字段（`REQUEST_INVALID_JSON`）、multipart 请求体无法解析（`REQUEST_INVALID_INPUT`），或通过格式校验后被业务规则拒绝（如 `DATASET_INPUT_INVALID`、`CATALOG_INPUT_INVALID`、`BUNDLE_FILE_INVALID`）。
-- `401`：Worker 确认 takt 登录失效，需重新登录；`404`：资源不存在或不属于服务账号；`409`：仍有绑定（`BUNDLE_RESOURCE_IN_USE`、`DATA_IN_USE`）或评估计划已锁定（`PROJECT_EVALUATION_PLAN_LOCKED`）等冲突；`413`：超过大小限制；`415`：`Content-Type` 与路由要求不符。ZIP 导入失败时按上文逐条展示 `errors[]`。
+- `401`：Worker 确认 takt 登录失效，需重新登录；`404`：资源不存在或不属于服务账号；`409`：用例仍属于活动数据集（`DATA_IN_USE`）或评估计划已锁定（`PROJECT_EVALUATION_PLAN_LOCKED`）等冲突；`413`：超过大小限制；`415`：`Content-Type` 与路由要求不符。ZIP 导入失败时按上文逐条展示 `errors[]`。
 - `503`：Eval SP、数据库或 Bundle 目录暂不可用。GET 可重读；Bundle 创建和 ZIP 导入没有幂等键，提交结果未确认时先刷新检查目录，不能自动重发。Project/Run 创建则保留原请求体及幂等键重试。
 
 删除收到 `409` 时保留当前列表状态，不要在 UI 中先把条目移除。
