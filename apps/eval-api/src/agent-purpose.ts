@@ -11,7 +11,7 @@ export function selectedMcpServerIds(config: Readonly<Record<string, unknown>>):
   const mcpServers = (setting as { readonly mcpServers?: unknown }).mcpServers;
   if (!Array.isArray(mcpServers)) return [];
   return mcpServers.flatMap((selection) => {
-    if (!selection || typeof selection !== "object") return [];
+    if (!selection || typeof selection !== "object" || "kind" in selection) return [];
     const id = (selection as { readonly serverId?: unknown }).serverId;
     return typeof id === "string" && id.length > 0 ? [id] : [];
   });

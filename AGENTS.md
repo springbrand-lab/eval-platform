@@ -18,6 +18,7 @@
 - Keep package metadata, `tsconfig.json`, `README.md` and focused tests together; shared packages expose `src/index.ts`, applications expose only their process entry points.
 - Do not commit generated output, local secrets or Durable Object state.
 - Web role labels are “执行 Agent” and “评估 Agent”; do not use 被测 Agent, 测试 Agent, 实验 Agent or 评委. Keep the public Subject/Evaluator contracts unchanged.
+- SP Agent selections with `kind: "connector_toolkit"` are Connector Toolkits, not managed MCP Servers. Purpose reconciliation checks only selections without `kind` against the MCP catalog and preserves Toolkit selections.
 
 ## Verification
 

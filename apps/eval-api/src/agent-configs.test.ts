@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createAgentConfigService } from "./agent-configs.js";
 import type { AgentPurposeRecord, AgentPurposeStore } from "./db/agent-purposes.js";
+import { AgentConfigFrozenError } from "./db/errors.js";
 import type { EvalSpAgentConfig, EvalSpClient } from "./sp/client.js";
+import { EvalSpApiError, EvalSpTransportError } from "./sp/http.js";
 
 const owner = "owner";
 
@@ -32,7 +34,7 @@ function purposes(): AgentPurposeStore {
 
 function service(configs: readonly EvalSpAgentConfig[], mcpServers: readonly {
   id: string; source: string; status: string; url: string | null; authType: string | null;
-}[]) {
+}[], frozenIds: readonly string[] = []) {
   const sp = {
     listAgentConfigs: vi.fn(async () => configs),
     listMcpServers: vi.fn(async (_token: string, source: "platform" | "user" = "user") => mcpServers.filter((server) => server.source === source)),
@@ -50,13 +52,100 @@ function service(configs: readonly EvalSpAgentConfig[], mcpServers: readonly {
     ownerUserId: owner,
     sessionToken: "session",
     sp: client,
-    projects: { frozenAgentConfigIds: vi.fn(async () => new Set<string>()) },
+    projects: { frozenAgentConfigIds: vi.fn(async (ids: readonly string[]) => new Set(ids.filter((id) => frozenIds.includes(id)))) },
     purposes: purposeStore,
   }), { sp, purposeStore });
 }
 
 const resultMcp = { id: "result-mcp", source: "user", status: "active", url: "https://eval.example/mcp/evaluation-results", authType: "bearer" };
 const otherMcp = { id: "other-mcp", source: "user", status: "active", url: "https://example.test/mcp/other", authType: "bearer" };
+const toolkit = { serverId: "google-calendar", kind: "connector_toolkit" };
+
+describe("Agent Config new selections", () => {
+  it("refuses an archived source after deletion even when GET retains its body", async () => {
+    const source = config("archived", { mcpServers: [] });
+    const agents = service([source], []);
+    agents.sp.deleteAgentConfig.mockImplementationOnce(async () => {
+      agents.sp.listAgentConfigs.mockResolvedValue([]);
+    });
+
+    await agents.remove(source.id);
+    expect(agents.sp.deleteAgentConfig).toHaveBeenCalledWith("session", source.id);
+    await expect(agents.list()).resolves.toEqual([]);
+    await expect(agents.listAgents()).resolves.toEqual([]);
+    await expect(agents.get(source.id)).resolves.toEqual(source);
+
+    const frozen = agents.freeze(source.id, "execution");
+    await expect(frozen).rejects.toBeInstanceOf(EvalSpApiError);
+    await expect(frozen).rejects.toMatchObject({ status: 404 });
+    expect(agents.sp.createAgentConfig).not.toHaveBeenCalled();
+    expect(agents.sp.listMcpServers).not.toHaveBeenCalled();
+    await expect(agents.purposeStore.get(source.id)).resolves.toBeNull();
+  });
+
+  it("freezes an active owned source using the full GET body", async () => {
+    const source = config("active", { model: "default", mcpServers: [] });
+    const agents = service([source], []);
+    agents.sp.listAgentConfigs.mockResolvedValue([{ id: source.id, user_id: owner, name: source.name }]);
+
+    await expect(agents.freeze(source.id, "execution")).resolves.toEqual({
+      userAgentId: "created",
+      snapshot: { sourceUserAgentId: source.id, name: source.name, body: source },
+    });
+    expect(agents.sp.listAgentConfigs).toHaveBeenCalledWith("session");
+    expect(agents.sp.createAgentConfig).toHaveBeenCalledExactlyOnceWith("session", {
+      slug: expect.stringMatching(/^eval-frozen-/), name: "active (frozen)", description: null, setting: source.setting,
+    });
+  });
+
+  it("keeps recorded and reserved-slug copies out of lists and new selections but readable by ID", async () => {
+    const active = config("active", { mcpServers: [] });
+    const recorded = config("recorded-copy", { mcpServers: [] });
+    const orphan = { ...config("orphan", { mcpServers: [] }), slug: " Eval-Frozen-orphan " };
+    const agents = service([active, recorded, orphan], [], [recorded.id]);
+
+    await expect(agents.list()).resolves.toEqual([active]);
+    await expect(agents.listAgents("subject", "execution")).resolves.toEqual([
+      { agentConfig: { ownerUserId: owner, userAgentId: active.id }, name: active.name, role: "subject", purpose: "execution" },
+    ]);
+    for (const copy of [recorded, orphan]) {
+      await expect(agents.freeze(copy.id, "execution")).rejects.toBeInstanceOf(AgentConfigFrozenError);
+      await expect(agents.get(copy.id)).resolves.toEqual(copy);
+    }
+    expect(agents.sp.createAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it("does not select a source listed under another owner", async () => {
+    const source = config("foreign", { mcpServers: [] });
+    const agents = service([source], []);
+    agents.sp.listAgentConfigs.mockResolvedValue([{ ...source, user_id: "another-owner" }]);
+
+    await expect(agents.freeze(source.id, "execution")).rejects.toMatchObject({ name: "EvalSpApiError", status: 404 });
+    expect(agents.sp.createAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    new EvalSpApiError(503, null),
+    new EvalSpTransportError(new Error("offline")),
+  ])("preserves an active-list dependency failure without creating a copy (%s)", async (error) => {
+    const agents = service([config("active", { mcpServers: [] })], []);
+    agents.sp.listAgentConfigs.mockRejectedValueOnce(error);
+
+    await expect(agents.freeze("active", "execution")).rejects.toBe(error);
+    expect(agents.sp.createAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it("does not require active-list membership for retained GETs or updates delegated to SP", async () => {
+    const source = config("retained", { mcpServers: [] });
+    const agents = service([source], []);
+    agents.sp.listAgentConfigs.mockResolvedValue([]);
+
+    await expect(agents.get(source.id)).resolves.toEqual(source);
+    await expect(agents.update(source.id, { name: "renamed" })).resolves.toMatchObject({ id: source.id, name: "renamed" });
+    expect(agents.sp.updateAgentConfig).toHaveBeenCalledWith("session", source.id, { name: "renamed" });
+    expect(agents.sp.listAgentConfigs).not.toHaveBeenCalled();
+  });
+});
 
 describe("Agent purpose filtering", () => {
   it("persists the selected purpose without sending Eval metadata to SP", async () => {
@@ -76,6 +165,60 @@ describe("Agent purpose filtering", () => {
     expect(agents.sp.createAgentConfig).toHaveBeenCalledWith("session", {
       name: "Executor", setting: { mcpServers: [] },
     });
+  });
+
+  it("preserves Connector Toolkits when creating an Execution Agent", async () => {
+    const agents = service([], []);
+    const setting = { mcpServers: [toolkit] };
+    await expect(agents.create({ name: "Executor", purpose: "execution", setting })).resolves.toMatchObject({ id: "created" });
+    expect(agents.sp.createAgentConfig).toHaveBeenCalledWith("session", { name: "Executor", setting });
+  });
+
+  it("preserves Connector Toolkits and managed MCPs when creating an Evaluation Agent", async () => {
+    const agents = service([], [resultMcp, otherMcp]);
+    await expect(agents.create({
+      name: "Evaluator", purpose: "evaluation", setting: { mcpServers: [toolkit, { serverId: otherMcp.id }] },
+    })).resolves.toMatchObject({ id: "created" });
+    expect(agents.sp.createAgentConfig).toHaveBeenCalledWith("session", {
+      name: "Evaluator", setting: { mcpServers: [toolkit, { serverId: otherMcp.id }, { serverId: resultMcp.id }] },
+    });
+    await expect(agents.purposeStore.get("created")).resolves.toMatchObject({
+      purpose: "evaluation", evaluationMcpServerId: resultMcp.id,
+    });
+  });
+
+  it("reconciles purpose independently of Connector Toolkit selections", async () => {
+    const agents = service([
+      config("executor", { mcpServers: [toolkit] }),
+      config("evaluator", { mcpServers: [toolkit, { serverId: resultMcp.id }] }),
+    ], [resultMcp]);
+    await expect(agents.listAgents("subject", "execution")).resolves.toMatchObject([{ name: "executor", purpose: "execution" }]);
+    await expect(agents.listAgents("evaluator", "evaluation")).resolves.toMatchObject([{ name: "evaluator", purpose: "evaluation" }]);
+  });
+
+  it("updates an Agent with Connector Toolkits and no purpose record", async () => {
+    const agents = service([config("executor", { mcpServers: [toolkit] })], []);
+    await expect(agents.update("executor", { name: "renamed" })).resolves.toMatchObject({ name: "renamed" });
+    expect(agents.sp.updateAgentConfig).toHaveBeenCalledWith("session", "executor", { name: "renamed" });
+    await expect(agents.purposeStore.get("executor")).resolves.toMatchObject({ purpose: "execution" });
+  });
+
+  it("freezes an Agent containing Connector Toolkits without changing its selections", async () => {
+    const setting = { mcpServers: [toolkit] };
+    const agents = service([config("executor", setting)], []);
+    await expect(agents.freeze("executor", "execution")).resolves.toMatchObject({
+      snapshot: { sourceUserAgentId: "executor", body: { setting } },
+    });
+    expect(agents.sp.createAgentConfig).toHaveBeenCalledWith("session", expect.objectContaining({ setting }));
+  });
+
+  it.each(["missing", "disabled"] as const)("still rejects a %s managed MCP alongside Connector Toolkits", async (availability) => {
+    const agents = service([], availability === "disabled" ? [{ ...otherMcp, status: "disabled" }] : []);
+    await expect(agents.create({
+      name: "Executor", purpose: "execution", setting: { mcpServers: [toolkit, { serverId: otherMcp.id }] },
+    })).rejects.toMatchObject({ name: "AgentConfigPurposeUnavailableError", userAgentId: "new" });
+    expect(agents.sp.createAgentConfig).not.toHaveBeenCalled();
+    await expect(agents.purposeStore.get("created")).resolves.toBeNull();
   });
 
   it("fails purpose reads when the selected result MCP is disabled or ambiguous", async () => {

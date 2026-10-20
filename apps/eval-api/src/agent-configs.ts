@@ -12,6 +12,7 @@ import {
 import type { AgentPurposeRecord, AgentPurposeStore } from "./db/agent-purposes.js";
 import type { PostgresProjectStore } from "./db/project-store.js";
 import type { EvalSpAgentConfig, EvalSpClient, EvalSpMcpServer } from "./sp/client.js";
+import { EvalSpApiError } from "./sp/http.js";
 
 /** SP's `createUserAgentConfigInputSchema` bounds the name to 200 characters. */
 const AGENT_CONFIG_NAME_CHARS = 200;
@@ -312,6 +313,11 @@ export function createAgentConfigService(input: {
     /** Clones a selectable Agent Config into a new SP Agent Config whose body never changes again. */
     async freeze(sourceUserAgentId: string, expectedPurpose: AgentPurpose): Promise<FrozenCopy> {
       const source = await requireEditable(sourceUserAgentId);
+      // SP retains archived configs for old Chats; only the active list proves new selectability.
+      const active = await sp.listAgentConfigs(token);
+      if (!active.some((config) => config.id === sourceUserAgentId && config.user_id === ownerUserId)) {
+        throw new EvalSpApiError(404, null);
+      }
       const stored = await classifyOne(source);
       if (stored.purpose !== expectedPurpose) throw new AgentConfigPurposeMismatchError(sourceUserAgentId, expectedPurpose, stored.purpose);
       const copy = await sp.createAgentConfig(token, frozenCopyInput(source));
