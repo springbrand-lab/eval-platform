@@ -1,5 +1,5 @@
 import { api, enc } from "./client";
-import { deleteWithConfirmation, isConfirmedAbsent } from "./delete-confirmation";
+import { deleteWithConfirmation } from "./delete-confirmation";
 import type { AgentConfig, AgentOption, AgentPurpose, AgentRole } from "./types";
 import type { CreateUserAgentConfigInput, UpdateUserAgentConfigInput } from "@springbrand/agent-config-editor/client";
 
@@ -21,7 +21,8 @@ export const updateAgentConfig = (id: string, input: AgentConfigUpdateInput) =>
   api.patch<AgentConfig>(`/api/agent-configs/${enc(id)}`, input);
 export const deleteAgentConfig = (id: string) => deleteWithConfirmation(
   () => api.delete(`/api/agent-configs/${enc(id)}`),
-  () => isConfirmedAbsent(() => getAgentConfig(id), "EVAL_SP_NOT_FOUND"),
+  // Soft-deleted configs remain readable by ID for old Chats.
+  async () => !(await listAgentConfigs()).some((config) => config.id === id),
 );
 export const listAgentOptions = (role?: AgentRole, purpose?: AgentPurpose, signal?: AbortSignal) =>
   api.get<AgentOption[]>("/api/agents", { params: { ...(role ? { role } : {}), ...(purpose ? { purpose } : {}) }, signal });

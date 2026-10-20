@@ -21,7 +21,7 @@ const resources = [
     remove: async () => (await import("./datasets-api")).deleteDataset("item") },
   { name: "Data", path: "/api/data/item", code: "DATA_NOT_FOUND",
     remove: async () => (await import("./data-api")).deleteData("item") },
-  { name: "Agent Config", path: "/api/agent-configs/item", code: "EVAL_SP_NOT_FOUND",
+  { name: "Agent Config", path: "/api/agent-configs/item", readPath: "/api/agent-configs", code: "EVAL_SP_NOT_FOUND",
     remove: async () => (await import("./agent-configs-api")).deleteAgentConfig("item") },
   { name: "Output Schema", path: "/api/evaluation-output-schemas/item", code: "OUTPUT_SCHEMA_NOT_FOUND",
     remove: async () => (await import("./output-schemas-api")).deleteOutputSchema("item") },
@@ -57,18 +57,83 @@ describe("deletion outcome confirmation", () => {
 
   it.each(resources)("$name confirms absence after a lost response without repeating DELETE", async (resource) => {
     const methods: string[] = [];
+    const readPath = "readPath" in resource ? resource.readPath : resource.path;
     const upstream: typeof fetch = async (input, init) => {
       if (String(input).startsWith(env.TAKT_ORIGIN)) {
         return Response.json({ user: { userId: "operator", access: { menuIds: ["eval"] } } });
       }
-      expect(String(input)).toBe(`${env.EVAL_API_ORIGIN}${resource.path}`);
+      expect(String(input)).toBe(`${env.EVAL_API_ORIGIN}${init?.method === "DELETE" ? resource.path : readPath}`);
       methods.push(init!.method!);
       return init?.method === "DELETE" ? new Response(null, { status: 204 })
-        : Response.json({ code: resource.code, errMsg: "Resource not found" }, { status: 404 });
+        : "readPath" in resource ? Response.json({ success: true, msg: [] })
+          : Response.json({ code: resource.code, errMsg: "Resource not found" }, { status: 404 });
     };
     await installApi(upstream);
 
     await expect(resource.remove()).resolves.toBeUndefined();
+    expect(methods).toEqual(["DELETE", "GET"]);
+  });
+
+  it("confirms a retained Agent Config from the active list after its deletion response is lost", async () => {
+    const retained = { id: "item", user_id: "owner", name: "Deleted Agent", slug: "item" };
+    const other = { ...retained, id: "other", name: "Other Agent", slug: "other" };
+    const requests: string[] = [];
+    let deleted = false;
+    await installApi(authenticatedApi((url, init) => {
+      const path = new URL(url).pathname;
+      requests.push(`${init.method} ${path}`);
+      if (init.method === "DELETE") {
+        expect(path).toBe("/api/agent-configs/item");
+        deleted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (path === "/api/agent-configs") {
+        return Response.json({ success: true, msg: deleted ? [other] : [retained, other] });
+      }
+      expect(path).toBe("/api/agent-configs/item");
+      return Response.json({ success: true, msg: retained });
+    }));
+    const { deleteAgentConfig, getAgentConfig } = await import("./agent-configs-api");
+
+    await expect(deleteAgentConfig("item")).resolves.toBeUndefined();
+    await expect(getAgentConfig("item")).resolves.toEqual(retained);
+    expect(requests).toEqual([
+      "DELETE /api/agent-configs/item",
+      "GET /api/agent-configs",
+      "GET /api/agent-configs/item",
+    ]);
+  });
+
+  it("confirms an Agent Config once it disappears from a temporarily unavailable active list", async () => {
+    const methods: string[] = [];
+    let reads = 0;
+    await installApi(authenticatedApi((url, init) => {
+      methods.push(init.method!);
+      if (init.method === "DELETE") return new Response(null, { status: 204 });
+      expect(url).toBe(`${env.EVAL_API_ORIGIN}/api/agent-configs`);
+      reads += 1;
+      if (reads === 1) return Response.json({ code: "EVAL_API_UNAVAILABLE", errMsg: "Unavailable" }, { status: 503 });
+      return Response.json({ success: true, msg: reads === 2 ? [{ id: "item" }] : [] });
+    }));
+    const { deleteAgentConfig } = await import("./agent-configs-api");
+
+    await expect(deleteAgentConfig("item")).resolves.toBeUndefined();
+    expect(methods).toEqual(["DELETE", "GET", "GET", "GET"]);
+  });
+
+  it.each([null, {}, { data: [] }])("does not confirm an Agent Config from a malformed active list (%j)", async (body) => {
+    const methods: string[] = [];
+    await installApi(authenticatedApi((url, init) => {
+      methods.push(init.method!);
+      if (init.method === "DELETE") return new Response(null, { status: 204 });
+      expect(url).toBe(`${env.EVAL_API_ORIGIN}/api/agent-configs`);
+      return Response.json({ success: true, msg: body });
+    }));
+    const { deleteAgentConfig } = await import("./agent-configs-api");
+
+    await expect(deleteAgentConfig("item")).rejects.toMatchObject({
+      code: "NETWORK_ERROR", context: { method: "DELETE" },
+    });
     expect(methods).toEqual(["DELETE", "GET"]);
   });
 
@@ -103,10 +168,12 @@ describe("deletion outcome confirmation", () => {
   ])("verification is $state", ({ status, body }) => {
     it.each(resources)("$name keeps the original write error without replaying DELETE", async (resource) => {
       const methods: string[] = [];
+      const readPath = "readPath" in resource ? resource.readPath : resource.path;
       await installApi(authenticatedApi((url, init) => {
-        expect(url).toBe(`${env.EVAL_API_ORIGIN}${resource.path}`);
+        expect(url).toBe(`${env.EVAL_API_ORIGIN}${init.method === "DELETE" ? resource.path : readPath}`);
         methods.push(init.method!);
-        return init.method === "DELETE" ? new Response(null, { status: 204 }) : Response.json(body, { status });
+        const readBody = status === 200 && "readPath" in resource ? { success: true, msg: [{ id: "item" }] } : body;
+        return init.method === "DELETE" ? new Response(null, { status: 204 }) : Response.json(readBody, { status });
       }));
 
       await expect(resource.remove()).rejects.toMatchObject({

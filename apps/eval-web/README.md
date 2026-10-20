@@ -10,7 +10,7 @@ Eval 的内部管理界面：准备测试集与初始资源、上传评估结果
 
 Eval 目录删除及数据集成员变更的成功响应为 `204 No Content`，使用现有 HTTP SDK 的 `json` 模式接收空结果，不按成功信封解析；共享编辑器的 Skill/参考资料删除保留其原有成功结果，不改公共协议。错误仍由同一 Eval 错误目录解码，连接中断不能当作删除成功，也不自动重发写请求。
 
-所有用户可操作的删除共用 `delete-confirmation.ts`：响应不确定时，通过同一 HTTP SDK 最多只读确认 10 次，首次立即查询，后续复用 contracts 的 `IDEMPOTENT_RETRY_POLICY` / `idempotentRetryBackoffMs()`，从 250ms 指数退避、上限 10s，不另写配置或退避算法；确认已删立即沿用正常成功提示。Project、Dataset、Data、Agent Config、评估结果格式、素材/对话包及其中资源，仅接受各自明确的 HTTP 404 领域码；数据集成员移除须确认全部指定 Data ID 都已不在成员列表；Skill 使用 selected 查询确认 deleted 状态，参考资料通过其详情确认不存在。仍存在或瞬态读取失败可继续确认；权限、认证、取消、无关 404 等不可重试读取错误立即结束。未确认或预算耗尽均保留原删除错误，绝不重复 DELETE。正常成功不增加查询。共享编辑器的临时上传附件回收不属于用户删除入口，且没有已开放的读取契约，仍由共享模块自行清理，不伪造确认结果。
+所有用户可操作的删除共用 `delete-confirmation.ts`：响应不确定时，通过同一 HTTP SDK 最多只读确认 10 次，首次立即查询，后续复用 contracts 的 `IDEMPOTENT_RETRY_POLICY` / `idempotentRetryBackoffMs()`，从 250ms 指数退避、上限 10s，不另写配置或退避算法；确认已删立即沿用正常成功提示。Project、Dataset、Data、评估结果格式、素材/对话包及其中资源，仅接受各自明确的 HTTP 404 领域码；Agent Config 通过活动配置列表确认目标 ID 已移除，其详情在软删除后仍保留给旧 Chat 读取，不能用详情是否 404 判断删除结果；数据集成员移除须确认全部指定 Data ID 都已不在成员列表；Skill 使用 selected 查询确认 deleted 状态，参考资料通过其详情确认不存在。仍存在或瞬态读取失败可继续确认；权限、认证、取消、无关 404 等不可重试读取错误立即结束。未确认或预算耗尽均保留原删除错误，绝不重复 DELETE。正常成功不增加查询。共享编辑器的临时上传附件回收不属于用户删除入口，且没有已开放的读取契约，仍由共享模块自行清理，不伪造确认结果。
 
 Agent 新建与编辑直接复用 SP 同一份 `@springbrand/agent-config-editor`：行为、完整系统提示词、模型/思考强度、能力选择和排序、Skill/Reference 管理与预览。模型名称、可用性和每个模型支持的思考档位始终来自当前 Eval SP 的公开模型目录，Agent 管理列表也复用同一目录映射展示，不维护本地模型枚举。宿主只负责默认模板、当前用户、保存、revision 冲突、冻结副本只读及导航；不再提供 Slug 或配置 JSON 输入框。创建会话持有固定 Slug，失败重试通过 SP 创建重放校准；后台读取失败保留草稿。公共资源客户端经 `/api/agent-library` 访问当前 Eval SP，配置写入仍走 `/api/agent-configs`。错误由 Eval 目录解码，保留经过校验的 SP 编辑器领域码和删除阻挡详情。详见 [编辑器对齐](../../docs/agent-config-editor-alignment.md)。
 
