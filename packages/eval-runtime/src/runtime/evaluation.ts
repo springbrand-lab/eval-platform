@@ -118,7 +118,9 @@ export async function evaluateSampling(
   /** Writes this record with recovery flags derived from the Attempts it commits. */
   const persist = (next: EvaluationState, resources?: AttemptResourceSnapshot): Promise<void> => (
     writePrepared((base) => withBookkeeping(keepAccepted(next, base), base), resources));
+  const subjectChatId = sampling.subjectChatId;
   if (currentEvaluation.status.resourcesPending && !isPendingSamplingStatus(currentEvaluation.status.status)) {
+    if (currentEvaluation.status.status === "succeeded") await syncScore();
     await refreshFinishedStage(dependencies, {
       stage: "evaluation",
       samplingId: sampling.samplingId,
@@ -147,7 +149,6 @@ export async function evaluateSampling(
   }
 
   // The score is synced to the Subject Chat's session; the Evaluator never touches that Chat.
-  const subjectChatId = sampling.subjectChatId;
   if (!subjectChatId) {
     await persist(withEvaluationStatus(currentEvaluation, "failed", "sampling has no subject Chat"));
     return { ...input.context, evaluation: currentEvaluation };
@@ -175,7 +176,8 @@ export async function evaluateSampling(
       if (scoreSync.lastError !== undefined) {
         reportError(dependencies.onError, new Error(`Evaluation ${currentEvaluation.evaluationId} score was not synced: ${scoreSync.lastError}`));
       }
-      await persist({ ...currentEvaluation, scoreSync });
+      // Score delivery must not clear pending terminal receipt or resource recovery.
+      await persistRecord({ ...currentEvaluation, scoreSync });
     }
   }
 

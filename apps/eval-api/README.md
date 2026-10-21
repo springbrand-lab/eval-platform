@@ -18,12 +18,16 @@ User search requires a trimmed, nonblank `q` (at most 200 characters); missing
 or blank input returns 422 locally without calling the source. Agent search
 may remain blank after an authorized user is selected.
 
-`EVAL_DEV_SP_API_ORIGIN` and `EVAL_DEV_SP_EXPORT_TOKEN` are optional **as a pair**.
-No pair means `{enabled:false,maxAgents:50}` and ordinary API behavior remains
+`EVAL_DEV_SP_API_ORIGIN` optionally enables the source and requires the existing
+Takt `SP_PLATFORM_RESOURCE_ADMIN_TOKEN` for that Dev SP deployment (its
+`RESOURCE_ADMIN_TOKEN`). No new credential is generated. The shared token retains
+its management authority; this client uses only the scoped read-only export routes.
+Without the source origin, imports stay disabled even if the shared token exists.
+Disabled imports mean `{enabled:false,maxAgents:50}` and ordinary API behavior remains
 available. Owner-scoped persisted `GET /tasks/:taskId` remains available even
-after the source pair is removed or target imports are disabled; it reads only
+after the source origin is removed or target imports are disabled; it reads only
 Eval task state, never creates a source client/session or enqueues work. Source
-browsing and preview/apply remain unavailable without the authorized source pair.
+browsing and preview/apply remain unavailable without the source origin and existing Takt credential.
 Source and target origins must differ. The source client exposes only
 the approved GET `/api/agent-config-export/users`, `/users/:id/agents`, and
 `/users/:id/snapshot?agentIds=`; it never creates shares, sessions or other dev
@@ -76,17 +80,60 @@ Source export settings must already use SP's canonical public wire defaults
 (`presetId: null`, `referenceFileIds: []` when absent in storage). Eval preserves
 the complete setting, does not copy SP's normalizer or guess missing defaults,
 and blocks an incompatible Agent before any target resource writes.
+Every prepared setting, including Agents with no direct Action/Connector/Extension
+selections, must pass the fixed target's read-only
+`POST /api/agent-config-imports/validate` using the existing service Session and
+trusted Origin. The request is
+`{setting, dependencies, plannedResources:{skills:[{id,name}], references:[{id,size}]}}`;
+`dependencies` defaults to `[]` and `plannedResources` to empty lists.
+Its standard success envelope must contain
+`{version:1,setting}` with a JSON object exactly equal to the already canonical,
+purpose-reconciled setting. Eval does not duplicate SP's setting schema or accept
+dropped fields, truncation or rewritten defaults. In particular, current Dev
+`authoring`, `preferredSupplierIds` and `referenceNotes` remain intact in the
+source snapshot, frozen plan and create-only Agent POST.
+
+SP owns all admission rules through the same implementation as ordinary writes
+and atomic imports: model-plan access, managed MCP, Connector Toolkits,
+Actions/Components/Suppliers, Skills/References and exact definition proof checks.
+Eval makes no Action detail, Component/Toolkit/model catalog or separate
+definition-metadata request for admission. Its managed MCP catalog reads remain
+only for Eval purpose reconciliation; Toolkit selections are never treated as
+managed MCP Servers.
+
+Planned facts are strict, bounded to 256 unique selected IDs per list and derived
+only from the already-durable source snapshot, before preparing the Agent.
+Only selected source `kind:"user"` Skills supply `{id,name}`; platform Skills
+must already exist on Target. References supply UUID `id` and nonnegative integer
+`size`. Unselected resources, URLs, owner fields and source credentials are not
+sent. These facts let SP validate future selected Skill name clashes and Reference
+totals without accepting arbitrary missing, foreign or soft-deleted IDs. Existing
+resources always use SP's actual facts. No second persisted fact set is added.
+Preflight uses a read-only snapshot, creates no resource, upload, receipt or
+reservation, and never grants a later write.
+
+Only documented HTTP 422 codes `REQUEST_VALIDATION_FAILED`,
+`AGENT_CONFIG_IMPORT_INVALID` or `AGENT_CONFIG_INVALID`, exact HTTP 403
+`MODEL_ACCESS_DENIED`, and the known import-conflict 409 codes prove a rejection.
+They block that Agent with a safe conflict while retaining structured upstream
+diagnostics as the cause, rather than deferring validation to an uncertain POST.
+Unknown status/code pairs, missing/incompatible preflight and
+auth/service outages fail closed as dependency unavailability, with no fallback
+or resource writes. Apply repeats this check with frozen snapshot facts before
+any dependency write. The formal Agent import service and receipt recovery repeat
+preflight with empty planned lists, requiring actual imported resources.
+Cancellation retains its existing dependency-failure wrapper and original SDK
+cause, never an Agent conflict.
+Definition fingerprint and purpose/MCP checks remain mandatory.
 Selected Actions, Connectors and Extensions require source definition evidence
 `{kind,id,fingerprint}` (SHA-256 lowercase hex) from snapshot `dependencies`.
 Only the selected-root union is accepted; duplicates, wrong kind/ID and missing
 proofs are never replaced with target-only versions. Per-Agent proofs are frozen
-in the prepared plan and both source/target digests and import keys. Preview and
-apply compare them with read-only target
-`POST /api/agent-config-imports/dependencies {resources:[{kind,id}]}` (at most
-500 proofs in the source union and per call), returning
-`{items:[{kind,id,fingerprint}]}` in the usual envelope.
-Apply uses no source calls and checks current target evidence before dependency
-writes, then sends the unchanged frozen `dependencies` in the Agent import POST.
+in the prepared plan and both source/target digests and import keys (at most
+500 proofs in the source union and per preflight). Preview and apply send those
+expected proofs in the authoritative preflight so SP compares current definitions.
+Apply uses no source calls and checks current admission before dependency writes,
+then sends the unchanged frozen `dependencies` in the Agent import POST.
 SP rechecks exact coverage/current definitions inside insert/replay and receipt
 verification. No Action/Component publishing, adoption or credentials are part
 of this seam; Connector Toolkits remain distinct from managed MCP selections.
@@ -99,10 +146,10 @@ Migrations are review artifacts only; generating them never applies them.
 `src/agent-import-worker-main.ts` independently. It reads process environment
 only (no `.env` discovery). Supply `DATABASE_URL`, `EVAL_BUNDLE_DIR`,
 `EVAL_SP_API_ORIGIN`, `EVAL_SP_SERVICE_USER_ID`,
-`EVAL_SP_SERVICE_SESSION_TOKEN`, `EVAL_WEB_ORIGIN`, and the optional paired
-`EVAL_DEV_SP_API_ORIGIN` / `EVAL_DEV_SP_EXPORT_TOKEN`. An absent source pair
+`EVAL_SP_SERVICE_SESSION_TOKEN`, `EVAL_WEB_ORIGIN` and, when enabling a Dev source,
+`EVAL_DEV_SP_API_ORIGIN` with the existing `SP_PLATFORM_RESOURCE_ADMIN_TOKEN`. An absent source origin
 starts disabled without SP/queue connections. The Run Worker never receives
-the dev export token. Busy owner leases are durably deferred in the same
+the shared source token. Busy owner leases are durably deferred in the same
 transaction as completing their queue delivery, not acknowledged/lost or
 charged against the ten failure retries.
 Preview and apply use separate stable queue singleton keys
@@ -208,6 +255,17 @@ Initialization failures still close the pool and drop the temporary database.
 
 Worker 可多实例部署、滚动升级；收到信号后停止取任务，等待进行中的 Run 结束再关闭 pg-boss 和连接池。调度、恢复、停止语义和剩余风险见[架构方案](../../docs/architecture.md#run-调度与停止)。
 
+Run job settlement belongs to the application-owned
+`RunRecoveryStore.settleRunJob(runId, jobId)` Interface. Under the same Project
+row lock used by admission, stop, recollection and MCP acceptance, it rereads
+durable work and atomically completes an idle job, completes and defers a
+resource-only wait, or leaves an active job owned by the Worker for retry.
+The handler uses this Interface on every successful exit, including an initially
+idle Run; pg-boss's later auto-ack is only an idempotent acknowledgement.
+A new request therefore either becomes visible before settlement or enqueues
+after completion. Correctness must not depend on a different singleton key for
+each recovery path. The lock covers database work only, never SP requests.
+
 ## 本地开发
 
 `start:api` 和 `start:worker` 自动加载本包目录下的 `.env.eval`（不提交），已有 shell 环境变量优先；文件不存在时只读取 shell 环境变量。根目录 `pnpm dev` 同时启动这两个进程与 Web。使用 Web 默认代理时，在 `.env.eval` 中设置 `EVAL_API_PORT=18788`，并确保 Web 的 `EVAL_API_ORIGIN` 指向该端口。
@@ -295,3 +353,5 @@ Each Attempt's raw resource snapshot is stored unchanged in `eval_attempt_resour
 The `snapshot` and `metric_snapshot` columns use PostgreSQL `json` to preserve contract-permitted JavaScript strings losslessly, including unpaired surrogates and escaped U+0000; stage facts remain `jsonb`. Migration `0005_resource_snapshot_json` converts both columns in place in one `ALTER TABLE`, preserving existing data and the applied migration-history prefix. Migrations `0000` through `0004` are unchanged and migration-history validation remains enabled. The conversion takes a table lock and may rewrite the table, so plan an appropriate migration window. No online migration execution is included in this change.
 
 MCP-enabled Evaluations complete on validated result acceptance, atomically with the result and its revision. Status-socket loss is recoverable observation failure, not an Evaluation terminal fact. Late submissions cannot bypass Project deletion, Run stop/cancellation or replacement. Runtime preserves accepted results when subsequent observation or collection fails. See [evaluation result submission](../../docs/eval-evaluation-result-submission.md).
+
+The acceptance transaction also preserves an existing resource wait or starts `resourcesPending` for submitted Attempts still owing resources, using Runtime's public resource predicate. A Worker crash after MCP acceptance must not leave a succeeded Evaluation invisible to durable resource recovery. The submission store requires the existing `RunQueue`: when a previously inactive Evaluation acquires owed resource recovery, it enqueues a `collection:<runId>` wake-up in that same Project-locked transaction, so even a completed or settling original job cannot lose recovery. It checks `isStageRecoveryPending()` on the locked Evaluation's old status, regardless of another member keeping the Run active, since that member can finish before acceptance commits. Already-pending Evaluations keep their current durable wake-up, and identical replay neither adds a job nor resets the first wait deadline.

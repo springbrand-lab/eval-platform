@@ -3,8 +3,9 @@ import { AgentConfigPurposeUnavailableError } from "../db/errors.js";
 import type { Fetch } from "../sp/http.js";
 import { createImportDownloads, safeImportPath, type ImportStaging } from "./bytes.js";
 import { ImportConflictError, ImportDependencyError } from "./errors.js";
-import { digest, IMPORT_LIMITS, resourceKey, summarize, type ImportPlan, type ImportTask, type PlannedResource } from "./model.js";
-import { agentSourceDigest, dependencies, dependencyKeys, planDigest, requireCanonicalSourceSetting, requireReusable, resourceDigests } from "./semantics.js";
+import { digest, IMPORT_LIMITS, resourceKey, summarize, type ImportPlan, type ImportTask } from "./model.js";
+import { agentSourceDigest, dependencyKeys, planDigest, requireCanonicalSourceSetting, requireReusable, resourceDigests } from "./semantics.js";
+import { dependencies, plannedResourcesForAgent } from "./selection-facts.js";
 import { sourceDefinitionEvidence, type DefinitionEvidence } from "./definition-evidence.js";
 import type { AgentImportSource } from "./source.js";
 import type { AgentImportStore } from "./store.js";
@@ -81,10 +82,11 @@ export function createImportPlanner(input: {
         continue;
       }
       try {
+        const plannedResources = plannedResourcesForAgent(snapshot, agent);
         const key = resourceKey("agent", item.id);
         let prepared = resources.get(key)?.prepared;
-        if (prepared) await target.validateSelections(prepared.config.setting, prepared.dependencies);
-        else prepared = await agents.prepareImport(agent, task.request.purpose, proofs);
+        if (prepared) await target.validateSelections(prepared.config.setting, prepared.dependencies, plannedResources);
+        else prepared = await agents.prepareImport(agent, task.request.purpose, proofs, plannedResources);
         resources.set(key, { kind: "agent", id: item.id, name: agent.name, source: agent, files: [],
           sourceDigest: "", targetDigest: "", importKey: "", prepared });
         for (const id of selected.skills) {
@@ -113,18 +115,11 @@ export function createImportPlanner(input: {
     plan.resources = [...resources.values()].filter((resource) => needed.has(resourceKey(resource.kind, resource.id)));
     let totalBytes = 0;
     let fileCount = 0;
-    const names = new Map<string, PlannedResource>();
     for (const resource of plan.resources) {
       if (resource.kind === "agent") continue;
       const files = "files" in resource.source ? resource.source.files : [{ path: "reference", size: "size" in resource.source ? resource.source.size : 0, url: "url" in resource.source ? resource.source.url : "" }];
       fileCount += files.length;
       totalBytes += files.reduce((sum, file) => sum + file.size, 0);
-      if (resource.kind === "skill" && !resource.platform) {
-        const name = resource.name.toLowerCase();
-        const other = names.get(name);
-        if (other && other.id !== resource.id) other.error = resource.error = "Different private Skills share one runtime name";
-        names.set(name, resource);
-      }
     }
     if (fileCount > IMPORT_LIMITS.files || totalBytes > IMPORT_LIMITS.totalBytes) throw new ImportConflictError("Selected dependency union exceeds import limits");
     view.progress = { stage: "files", completed: 0, total: fileCount, bytesRead: 0, totalBytes };
@@ -157,7 +152,6 @@ export function createImportPlanner(input: {
         } else {
           if (resource.platform) throw new ImportConflictError("Platform Skill is missing on target; it cannot be uploaded as a private Skill");
           if (await store.sources.get(resource.kind, resource.id)) throw new ImportConflictError("Previously registered target dependency is unavailable; it cannot be revived");
-          if (resource.kind === "skill" && await target.conflictingSkillName(resource.id, resource.name)) throw new ImportConflictError("A different private Skill already uses this runtime name");
         }
         const intent = await store.intent(resource.kind, resource.id);
         if (intent && (intent.sourceDigest !== resource.sourceDigest || intent.targetDigest !== resource.targetDigest

@@ -42,7 +42,8 @@ export async function startSpEvalRunWorkerProcess(config: WorkerConfig, logger: 
   try {
     const log = eventLogger(logger);
     const db = createEvalDb(pool);
-    const store = createPostgresWorkerRuntimeStore(db, createRunQueue(boss));
+    const runQueue = createRunQueue(boss);
+    const store = createPostgresWorkerRuntimeStore(db, runQueue);
     const runtime = createEvalRunResumer({
       // Only trusted, persisted Run facts reach this cross-user plan reader.
       plans: createPostgresWorkerProjectPlanReader(db),
@@ -62,7 +63,7 @@ export async function startSpEvalRunWorkerProcess(config: WorkerConfig, logger: 
         publish: createLangfuseScorePublisher({ config: config.langfuse }),
       } }),
       results: createEvaluationResultPort({
-        store: createPostgresEvaluationSubmissions(db),
+        store: createPostgresEvaluationSubmissions(db, runQueue),
         ...(config.EVAL_RESULT_MCP_TOKEN === undefined ? {} : { token: config.EVAL_RESULT_MCP_TOKEN }),
       }),
       log,

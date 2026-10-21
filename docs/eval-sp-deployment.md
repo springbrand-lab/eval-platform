@@ -26,13 +26,13 @@ Eval Web/CLI ──> Eval API ──> Eval SP 的公开 API
 
 ## 数据归属
 
-Agent 从 dev 导入是可选控制面能力，不改变运行部署选择。dev 只提供专用服务凭据保护的只读导出接口；不要为导入执行 dev 数据回填、资源写入、创建会话或分享记录。新增资源来源/任务迁移属于 Eval 业务库，create-only 导入回执迁移属于目标 Eval SP；两者都不能指向 dev 或其他共享库。本轮实现不执行部署或迁移。
+Agent 从 dev 导入是可选控制面能力，不改变运行部署选择。dev 的只读导出接口复用现有 Takt 服务管理令牌；不要为导入执行 dev 数据回填、资源写入、创建会话或分享记录。新增资源来源/任务迁移属于 Eval 业务库，create-only 导入回执迁移属于目标 Eval SP；两者都不能指向 dev 或其他共享库。本轮实现不执行部署或迁移。
 
-在 AWS 应用 Secret 中成对配置 `EVAL_DEV_SP_API_ORIGIN` 和 `EVAL_DEV_SP_EXPORT_TOKEN` 才启用导入。来源 SP 的专用 `AGENT_CONFIG_EXPORT_TOKEN` 由运维显式配置，不复用 Eval SP 管理 token、用户 Session 或 MCP API Key；同时在来源 SP 明文配置 `AGENT_CONFIG_EXPORT_USER_IDS`，只授权明确的 UUID 用户列表，或显式 `*` 授权全范围，空范围保持禁用。不要将真实密钥填进模板或浏览器配置。
+不新增密钥：来源 SP 复用该 Dev 环境已有的 `RESOURCE_ADMIN_TOKEN`，也就是 Takt 的 `SP_PLATFORM_RESOURCE_ADMIN_TOKEN`。在 `eval-platform/api/production` 现有 AWS 应用 Secret 中提供 `EVAL_DEV_SP_API_ORIGIN=https://devrapi.springbrand.ai` 和 `SP_PLATFORM_RESOURCE_ADMIN_TOKEN` 的这个已有值；不要生成另一枚导出 token，不使用 Takt 个人登录 token、production 令牌或 Eval 目标的 `EVAL_SP_ADMIN_TOKEN`。只有配置来源地址才启用导入，共享令牌单独存在不启用导入。同时在来源 SP 明文配置 `AGENT_CONFIG_EXPORT_USER_IDS`，只授权明确的 UUID 用户列表，或显式 `*` 授权全范围，空范围保持禁用。不要将真实密钥填进模板或浏览器配置。
 
-来源 SP 的 AWS 部署仅在应用 Secret 中该可选 token 非空时注入 API 容器，不注入 Cloudflared；缺省不变成部署必填项。启用前先发布包含 canonical export 和依赖证据契约的来源/目标 SP 代码，再开放允许列表。目标的只读依赖证据查询、插入和回执重放须使用同一版指纹规则；旧来源缺少规范化字段或所选平台定义证据时会阻断，不退回仅比较 ID。
+来源 SP 的 AWS 部署沿用现有必需的 `RESOURCE_ADMIN_TOKEN` 注入 API，不注入 Cloudflared、Agent Worker 或 Web。该共享令牌本身保留原管理权限，只有导出接口是受范围限制的只读入口；管理员轮换时须同步更新 Takt 和 Eval 调用方。启用前先发布包含 canonical export 和依赖证据契约的来源/目标 SP 代码，再开放允许列表。目标的只读依赖证据查询、插入和回执重放须使用同一版指纹规则；旧来源缺少规范化字段或所选平台定义证据时会阻断，不退回仅比较 ID。
 
-目标 Eval SP 的 `AGENT_CONFIG_IMPORT_USER_IDS` 只填写 Eval 服务账号 UUID，默认空且不接受 `*`。导入端须先读取目标公开能力 `GET /api/agent-config-imports/config` 并确认 `{version:1,enabled:true}`，然后才能上传目标附件或调用三类导入。该允许列表不写入 dev 配置；来源只读凭据不能成为目标写入凭据。普通 Agent 创建不应依赖该导入开关。
+目标 Eval SP 的 `AGENT_CONFIG_IMPORT_USER_IDS` 只填写 Eval 服务账号 UUID，默认空且不接受 `*`。导入端须先读取目标公开能力 `GET /api/agent-config-imports/config` 并确认 `{version:1,enabled:true}`，然后才能上传目标附件或调用三类导入。该允许列表不写入 dev 配置；来源管理令牌不能用于目标导入鉴权，目标写入仍使用固定 Eval 服务账号的会话。普通 Agent 创建不应依赖该导入开关。
 
 目标 Skill 的内容地址必须为独立 `https://creation-file-eval.springbrand.ai`，绑定 `sp-platform-content-eval-enam`；Reference 使用 `https://evalworkspace.springbrand.ai`。不能因为 Eval 暂无 Creation 页面就让目标 Skill 回读 `creation-file-dev.springbrand.ai`。仓库已修正 Eval 的内容 origin，但域名/bucket 绑定与部署后的实际读取尚未核验，必须由运维在启用导入前完成。导入端按 source/target 分开的精确 CDN 允许列表校验，不能从导出 payload 自动授权新域名。
 

@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  '@springbrand/agent-config-editor@0.1.0-alpha.0': 1b945dbc09351777f8779c2b7bbcc59f98cba985fc48ba40f97a8281e02ceac7
+  '@springbrand/agent-config-editor@0.1.0-alpha.1': c8099b63843f9afa20ec505549f7ba7aa52814acb0c196bef2e6d872a35670c8
 
 importers:
 
@@ -142,8 +142,8 @@ importers:
         specifier: ^5.3.0
         version: 5.3.0
       '@springbrand/agent-config-editor':
-        specifier: 0.1.0-alpha.0
-        version: 0.1.0-alpha.0(patch_hash=1b945dbc09351777f8779c2b7bbcc59f98cba985fc48ba40f97a8281e02ceac7)(@date-fns/tz@1.5.0)(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(date-fns@4.4.0)(hono@4.12.33)(react-dom@19.3.0(react@19.3.0))(react-icons@5.6.0(react@19.3.0))(react@19.3.0)(recharts@2.15.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0))
+        specifier: 0.1.0-alpha.1
+        version: 0.1.0-alpha.1(patch_hash=c8099b63843f9afa20ec505549f7ba7aa52814acb0c196bef2e6d872a35670c8)(@date-fns/tz@1.5.0)(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(date-fns@4.4.0)(hono@4.12.33)(react-dom@19.3.0(react@19.3.0))(react-icons@5.6.0(react@19.3.0))(react@19.3.0)(recharts@2.15.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0))
       '@springbrand/file-renderers':
         specifier: 0.1.0-alpha.2
         version: 0.1.0-alpha.2(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -2511,8 +2511,8 @@ packages:
   '@speed-highlight/core@1.2.24':
     resolution: {integrity: sha512-qeW2e1l78afw8VhRPfPQ1Gjj+KU5XFQ/OFV5ti6eTa9bruO7mJyZtA4vw0ofqmA3tKCkROE9xLk3VZoeRc98nw==}
 
-  '@springbrand/agent-config-editor@0.1.0-alpha.0':
-    resolution: {integrity: sha512-cn8JYMCHSaHteTr7T9mYj4GebynqCrHU7B3yi0bobSdU2ceVe4oJHQLikIVZQ0v1VVhb7Bw6qOAJDMNZ9jINuw==}
+  '@springbrand/agent-config-editor@0.1.0-alpha.1':
+    resolution: {integrity: sha512-MJ54/+XVhoHtRGPoYe/hND8fP9E/plhRmTOK25oeX2CsK7YuEvWwF3NKJ7nuyMc9XDlPYOzQ6+8eJOtcgXQ9UQ==}
     peerDependencies:
       '@tanstack/react-query': ^5.0.0
       react: ^19.0.0
@@ -7682,7 +7682,7 @@ snapshots:
 
   '@speed-highlight/core@1.2.24': {}
 
-  '@springbrand/agent-config-editor@0.1.0-alpha.0(patch_hash=1b945dbc09351777f8779c2b7bbcc59f98cba985fc48ba40f97a8281e02ceac7)(@date-fns/tz@1.5.0)(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(date-fns@4.4.0)(hono@4.12.33)(react-dom@19.3.0(react@19.3.0))(react-icons@5.6.0(react@19.3.0))(react@19.3.0)(recharts@2.15.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0))':
+  '@springbrand/agent-config-editor@0.1.0-alpha.1(patch_hash=c8099b63843f9afa20ec505549f7ba7aa52814acb0c196bef2e6d872a35670c8)(@date-fns/tz@1.5.0)(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(date-fns@4.4.0)(hono@4.12.33)(react-dom@19.3.0(react@19.3.0))(react-icons@5.6.0(react@19.3.0))(react@19.3.0)(recharts@2.15.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0))':
     dependencies:
       '@springbrand/contracts': 0.1.0-alpha.0(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@springbrand/file-renderers': 0.1.0-alpha.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)

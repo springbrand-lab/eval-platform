@@ -1,13 +1,14 @@
 import { z } from "zod";
-import { equalJson } from "@eval-platform/eval-contracts";
+import { equalJson, jsonObjectSchema } from "@eval-platform/eval-contracts";
 import { importOriginSchema } from "../config/agent-imports.js";
 import { createImportDownloads } from "./bytes.js";
 import { httpOriginSchema } from "../config/env.js";
 import { createSpHttpClient, EvalSpApiError, throwSpClientError, type Fetch } from "../sp/http.js";
 import type { EvalSpAgentConfig, EvalSpClient } from "../sp/client.js";
-import { exportFileSchema, receiptSchema, type ImportReceipt, type ImportResult, type PreparedAgent, type ResourceKind } from "./model.js";
+import { exportFileSchema, receiptSchema, type ImportReceipt, type ImportResult, type PlannedImportResources, type PreparedAgent, type ResourceKind } from "./model.js";
 import { ImportConflictError, ImportDependencyError, ImportOutcomeUnknownError, ImportTargetDisabledError, importConflict } from "./errors.js";
-import { DEFINITION_PROBE_LIMIT, definitionEvidenceSchema, requireDefinitionEvidence, type DefinitionEvidence } from "./definition-evidence.js";
+import { requireDefinitionEvidence, type DefinitionEvidence } from "./definition-evidence.js";
+import { requirePlannedResources } from "./selection-facts.js";
 
 const record = z.record(z.string(), z.unknown());
 const resultSchema = z.object({ receipt: receiptSchema, replayed: z.boolean(), resource: record });
@@ -37,14 +38,13 @@ export interface AgentImportTarget {
   listAgents(): Promise<readonly EvalSpAgentConfig[]>;
   agent(id: string): Promise<EvalSpAgentConfig | null>;
   skill(id: string): Promise<TargetSkill | null>;
-  conflictingSkillName(id: string, name: string): Promise<boolean>;
   reference(id: string): Promise<TargetReference | null>;
   receipt(kind: ResourceKind, importKey: string): Promise<ImportResult | null>;
   importAgent(prepared: PreparedAgent, importKey: string): Promise<ImportResult>;
   importSkill(id: string, zip: Uint8Array, importKey: string): Promise<ImportResult>;
   uploadReference(id: string, name: string, mediaType: string, bytes: Uint8Array): Promise<TargetAttachment>;
   importReference(id: string, attachment: TargetAttachment, importKey: string): Promise<ImportResult>;
-  validateSelections(setting: Record<string, unknown>, dependencies?: readonly DefinitionEvidence[]): Promise<void>;
+  validateSelections(setting: Record<string, unknown>, dependencies?: readonly DefinitionEvidence[], plannedResources?: PlannedImportResources): Promise<void>;
 }
 export function checkReceipt(result: ImportResult, kind: ResourceKind, id: string, importKey: string, known?: ImportReceipt | null): void {
   const receipt = receiptSchema.parse(result.receipt);
@@ -146,19 +146,6 @@ export function createAgentImportTarget(input: {
       if (files.id !== id || files.name !== summary.name) throw new ImportConflictError("Target Skill identity changed");
       return { ...summary, ...files };
     },
-    async conflictingSkillName(id, name) {
-      const query = new URLSearchParams({ view: "library", q: name, pageSize: "100" });
-      let expected: number | undefined;
-      for (let page = 1; page <= 100; page++) {
-        query.set("page", String(page));
-        const result = await dependency(() => request(`/api/skills?${query}`, skillsPage));
-        if (result.page !== page || expected !== undefined && result.total !== expected) throw new ImportDependencyError("Target Skill catalog changed during checking");
-        expected = result.total;
-        if (result.data.some((item) => item.id !== id && item.origin === "upload" && !item.deleted && item.name.toLowerCase() === name.toLowerCase())) return true;
-        if (page * result.pageSize >= result.total) return false;
-      }
-      throw new ImportDependencyError("Target Skill catalog exceeds bounded search");
-    },
     reference: (id) => nullable(() => request(`/api/user-references/${encodeURIComponent(id)}`, referenceSchema)),
     receipt: (kind, key) => nullable(() => request(`/api/agent-config-imports/receipts/${encodeURIComponent(key)}?kind=${kind}`, resultSchema)),
     async importAgent(prepared, importKey) {
@@ -193,75 +180,28 @@ export function createAgentImportTarget(input: {
         "/api/user-references/imports", resultSchema, { referenceId: id, attachment, importKey },
       ));
     },
-    async validateSelections(setting, dependencies = []) {
+    async validateSelections(setting, dependencies = [], plannedResources = { skills: [], references: [] }) {
       const frozen = requireDefinitionEvidence(setting, dependencies);
-      if (frozen.length > 0) {
-        await target.requireEnabled();
-        const { items } = await dependency(() => request("/api/agent-config-imports/dependencies", z.strictObject({
-          items: z.array(definitionEvidenceSchema).max(DEFINITION_PROBE_LIMIT),
-        }), { resources: frozen.map(({ kind, id }) => ({ kind, id })) }));
-        const current = requireDefinitionEvidence(setting, items);
-        if (!equalJson(current, frozen)) throw new ImportConflictError("Target capability definitions differ from the frozen source proofs");
-      }
-      // Target creation also validates the public setting schema and selection permissions atomically.
-      // Preview catches unavailable catalogs early, without silently dropping unsupported capabilities.
-      const selections = [
-        ["connectorIds", "/api/components?kind=connector"],
-        ["extensionIds", "/api/components?kind=extension"],
-      ] as const;
-      const actions = setting.actionIds ?? [];
-      if (!Array.isArray(actions) || actions.some((id) => typeof id !== "string")) throw new ImportConflictError("Unsupported actionIds");
-      for (const id of actions) {
-        const action = await nullable(() => request(`/api/actions/${encodeURIComponent(id)}`, record));
-        if (!action || action.id !== id || action.selectable !== true) throw new ImportConflictError("Target Action is unavailable");
-      }
-      for (const [field, route] of selections) {
-        const ids = setting[field];
-        if (ids === undefined) continue;
-        if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) throw new ImportConflictError(`Unsupported ${field}`);
-        if (ids.length === 0) continue;
-        const available = new Set<string>();
-        let expected: number | undefined;
-        for (let page = 1; page <= 100; page++) {
-          const result = await dependency(() => request(`${route}&page=${page}&pageSize=100`, z.object({
-            data: z.array(record), total: z.number().int().nonnegative(), page: z.number().int().positive(), pageSize: z.number().int().positive(),
-          })));
-          if (result.page !== page || expected !== undefined && result.total !== expected) throw new ImportDependencyError("Target Component catalog changed during checking");
-          expected = result.total;
-          for (const item of result.data) if (typeof item.id === "string" && item.selectable === true) available.add(item.id);
-          if (page * result.pageSize >= result.total) break;
-          if (page === 100) throw new ImportDependencyError("Target Component catalog exceeds bounded search");
+      const planned = requirePlannedResources(setting, plannedResources);
+      await target.requireEnabled();
+      try {
+        const validated = await request("/api/agent-config-imports/validate", z.strictObject({
+          version: z.literal(1), setting: jsonObjectSchema,
+        }), { setting, dependencies: frozen, plannedResources: planned });
+        if (!equalJson(validated.setting, setting)) {
+          throw new ImportConflictError("Target Agent validation changed the frozen setting; update the target and preview again");
         }
-        if (ids.some((id) => !available.has(id))) throw new ImportConflictError(`Target ${field} are unavailable or cannot be verified`);
-      }
-      const toolkits = (Array.isArray(setting.mcpServers) ? setting.mcpServers : [])
-        .map((selection) => record.safeParse(selection))
-        .filter((selection) => selection.success && selection.data.kind === "connector_toolkit")
-        .map((selection) => selection.success ? selection.data.serverId : undefined);
-      if (toolkits.length > 0) {
-        const available = new Set<string>();
-        const cursors = new Set<string>();
-        let cursor: string | null = null;
-        for (let page = 0; page < 100; page++) {
-          // The public Connector page is cursor-based. It is not a Component or managed MCP collection.
-          const result = await dependency(() => request(`/api/connectors${cursor === null ? "" : `?${new URLSearchParams({ cursor })}`}`, z.object({
-            items: z.array(z.object({ toolkitId: z.string(), status: z.string() })),
-            nextCursor: z.string().min(1).max(4096).nullable(),
-          })));
-          for (const item of result.items) if (item.status !== "configuration_required") available.add(item.toolkitId);
-          cursor = result.nextCursor;
-          if (cursor === null) break;
-          if (cursors.has(cursor) || page === 99) throw new ImportDependencyError("Target Toolkit catalog cannot be fully checked");
-          cursors.add(cursor);
+      } catch (error) {
+        const code = error instanceof EvalSpApiError ? record.safeParse(error.payload).data?.code : undefined;
+        // Only documented status/code pairs prove an admission rejection, never an auth or proxy failure.
+        if (error instanceof EvalSpApiError && (
+          error.status === 422 && typeof code === "string"
+            && ["REQUEST_VALIDATION_FAILED", "AGENT_CONFIG_IMPORT_INVALID", "AGENT_CONFIG_INVALID"].includes(code)
+          || error.status === 403 && code === "MODEL_ACCESS_DENIED"
+        )) {
+          throw new ImportConflictError("Target rejected the complete Agent setting or its selected dependencies; preview again after checking target availability", error);
         }
-        if (toolkits.some((id) => typeof id !== "string" || !available.has(id))) throw new ImportConflictError("Target Connector Toolkit is unavailable");
-      }
-      if (typeof setting.model === "string" || typeof setting.presetId === "string") {
-        const models = await dependency(() => request("/api/model-catalog", z.array(record)));
-        if (typeof setting.model === "string" && !models.some((item) => item.providerModel === setting.model && item.available === true)
-          || typeof setting.presetId === "string" && !models.some((item) => item.id === setting.presetId && item.available === true)) {
-          throw new ImportConflictError("Target model/preset is unavailable or cannot be verified");
-        }
+        dependencyError(error);
       }
     },
   };

@@ -15,7 +15,7 @@ async function fixture() {
   return { ...f, snapshot };
 }
 const resourcePosts = (f: Awaited<ReturnType<typeof fixture>>) => f.requests.filter((request) => request.method === "POST"
-  && new URL(request.url).pathname !== "/api/agent-config-imports/dependencies");
+  && new URL(request.url).pathname !== "/api/agent-config-imports/validate");
 
 describe("SP-owned canonical source setting consumed before prepared-plan freezing", () => {
   it("preserves the full current export wire with null preset/empty references through hashes and target receipt checks", async () => {

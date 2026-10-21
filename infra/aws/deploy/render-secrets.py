@@ -20,11 +20,10 @@ def render(app, database):
     if database.get("dbname") != "eval-platform":
         raise SystemExit("Database secret must target eval-platform")
 
-    source = ["EVAL_DEV_SP_API_ORIGIN", "EVAL_DEV_SP_EXPORT_TOKEN"]
-    configured = [bool(app.get(name)) for name in source]
-    if any(configured) and not all(configured):
-        raise SystemExit("EVAL_DEV_SP_API_ORIGIN and EVAL_DEV_SP_EXPORT_TOKEN must be set together")
-    enabled = all(configured)
+    enabled = bool(app.get("EVAL_DEV_SP_API_ORIGIN"))
+    if enabled and not app.get("SP_PLATFORM_RESOURCE_ADMIN_TOKEN"):
+        raise SystemExit("EVAL_DEV_SP_API_ORIGIN requires Takt's existing SP_PLATFORM_RESOURCE_ADMIN_TOKEN")
+    source = ["EVAL_DEV_SP_API_ORIGIN", "SP_PLATFORM_RESOURCE_ADMIN_TOKEN"] if enabled else []
     if enabled:
         def origin(value):
             try:

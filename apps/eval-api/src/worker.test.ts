@@ -3,13 +3,14 @@ import type { JobWithMetadata, PgBoss } from "pg-boss";
 import pino from "pino";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RUN_QUEUE, type RunJob } from "./run-worker-queue.js";
-import { createRunJobHandler, RunStillActiveError, startEvalRunWorker, STOP_POLL_MS, type RunRecoveryStore } from "./worker.js";
+import { createRunJobHandler, RunStillActiveError, startEvalRunWorker, STOP_POLL_MS, type RunJobSettlement, type RunRecoveryStore } from "./worker.js";
 
 const retry = { jobId: "job-1", retryCount: 0, retryLimit: 2 };
 const finalRetry = { jobId: "job-1", retryCount: 2, retryLimit: 2 };
 
-function fixture(input: { active?: boolean[]; stopRequested?: () => boolean } = {}) {
+function fixture(input: { active?: boolean[]; settlements?: RunJobSettlement[]; stopRequested?: () => boolean } = {}) {
   const active = [...(input.active ?? [true, false])];
+  const settlements = [...(input.settlements ?? [])];
   const runtime = {
     resume: vi.fn<EvalRunResumer["resume"]>(async () => undefined),
     interrupt: vi.fn<EvalRunResumer["interrupt"]>(async () => undefined),
@@ -20,7 +21,7 @@ function fixture(input: { active?: boolean[]; stopRequested?: () => boolean } = 
     isRunStopPending: vi.fn<RunRecoveryStore["isRunStopPending"]>(async () => input.stopRequested?.() ?? false),
     requestRunStop: vi.fn<RunRecoveryStore["requestRunStop"]>(async () => undefined),
     markRunStopFinalized: vi.fn<RunRecoveryStore["markRunStopFinalized"]>(async () => true),
-    deferResourceCheck: vi.fn<RunRecoveryStore["deferResourceCheck"]>(async () => null),
+    settleRunJob: vi.fn<RunRecoveryStore["settleRunJob"]>(async () => settlements.shift() ?? { kind: "completed" }),
   };
   const logger = pino({ level: "silent" });
   return { runtime, store, logger, handle: createRunJobHandler({ runtime, store, logger }) };
@@ -40,8 +41,9 @@ describe("Run job handler", () => {
   });
 
   it("completes a job whose Run is no longer active without resuming it", async () => {
-    const { runtime, handle } = fixture({ active: [false] });
+    const { runtime, store, handle } = fixture({ active: [false] });
     await handle("run-1", retry);
+    expect(store.settleRunJob).toHaveBeenCalledExactlyOnceWith("run-1", "job-1");
     expect(runtime.resume).not.toHaveBeenCalled();
     expect(runtime.stop).not.toHaveBeenCalled();
   });
@@ -55,21 +57,21 @@ describe("Run job handler", () => {
   });
 
   it("fails the job for a backoff retry while the Run stays active", async () => {
-    const { handle } = fixture({ active: [true, true] });
+    const { handle } = fixture({ active: [true, true], settlements: [{ kind: "active" }, { kind: "active" }] });
     await expect(handle("run-1", retry)).rejects.toBeInstanceOf(RunStillActiveError);
   });
 
   it("defers a Run waiting only for a resource check instead of spending a retry", async () => {
     const { runtime, store, handle } = fixture({ active: [true, true] });
-    store.deferResourceCheck.mockResolvedValue("2026-10-16T00:01:00.000Z");
+    store.settleRunJob.mockResolvedValue({ kind: "deferred", startAfter: "2026-10-16T00:01:00.000Z" });
     await handle("run-1", retry);
-    expect(store.deferResourceCheck).toHaveBeenCalledExactlyOnceWith("run-1", "job-1");
+    expect(store.settleRunJob).toHaveBeenCalledExactlyOnceWith("run-1", "job-1");
     expect(runtime.stop).not.toHaveBeenCalled();
   });
 
   it("defers a resource wait on the final retry instead of stopping the Run", async () => {
     const { runtime, store, handle } = fixture({ active: [true, true] });
-    store.deferResourceCheck.mockResolvedValue("2026-10-16T00:01:00.000Z");
+    store.settleRunJob.mockResolvedValue({ kind: "deferred", startAfter: "2026-10-16T00:01:00.000Z" });
     await handle("run-1", finalRetry);
     expect(store.requestRunStop).not.toHaveBeenCalled();
     expect(runtime.stop).not.toHaveBeenCalled();
@@ -78,12 +80,12 @@ describe("Run job handler", () => {
   it("does not defer a Run whose stop is requested", async () => {
     const { store, handle } = fixture({ active: [true, false], stopRequested: () => true });
     await handle("run-1", retry);
-    expect(store.deferResourceCheck).not.toHaveBeenCalled();
+    expect(store.settleRunJob).toHaveBeenCalledExactlyOnceWith("run-1", "job-1");
   });
 
   it("interrupts an active Run on a persisted stop request, then finalizes the stop", async () => {
     let stopRequested = false;
-    const { runtime, store, handle } = fixture({ active: [true, false], stopRequested: () => stopRequested });
+    const { runtime, store, handle } = fixture({ active: [true, false], settlements: [{ kind: "active" }], stopRequested: () => stopRequested });
     let finish!: () => void;
     runtime.resume.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
     const handling = handle("run-1", retry);
@@ -124,7 +126,7 @@ describe("Run job handler", () => {
       reporter?.stageStopped({ stage: "execution", samplingId: "sampling-1", status: "failed", reason: "evidence-export" });
     });
     await handle("run-1", retry);
-    expect(store.deferResourceCheck).not.toHaveBeenCalled();
+    expect(store.settleRunJob).toHaveBeenCalledExactlyOnceWith("run-1", "job-1");
     expect(info).toHaveBeenCalledWith({ runId: "run-1", states: { "execution.retrying.evidencePending": 5, "evaluation.queued": 5 } }, "run_stop_finalizing");
     expect(info).toHaveBeenCalledWith({ runId: "run-1", stage: "execution", samplingId: "sampling-1", status: "failed", reason: "evidence-export" }, "run_stage_stopped");
     expect(info).toHaveBeenCalledWith({ runId: "run-1", finalized: true }, "run_stop_finalized");
@@ -138,14 +140,14 @@ describe("Run job handler", () => {
   });
 
   it("retries a stop whose cleanup could not be finalized yet", async () => {
-    const { store, handle } = fixture({ active: [true, true], stopRequested: () => true });
+    const { store, handle } = fixture({ active: [true, true], settlements: [{ kind: "active" }], stopRequested: () => true });
     store.markRunStopFinalized.mockResolvedValue(false);
     await expect(handle("run-1", retry)).rejects.toBeInstanceOf(RunStillActiveError);
   });
 
   it("stops and cleans up a Run that is still active on the final retry", async () => {
     let stopRequested = false;
-    const { runtime, store, handle } = fixture({ active: [true, true, false], stopRequested: () => stopRequested });
+    const { runtime, store, handle } = fixture({ active: [true, true, false], settlements: [{ kind: "active" }], stopRequested: () => stopRequested });
     store.requestRunStop.mockImplementation(async () => { stopRequested = true; });
     await handle("run-1", finalRetry);
     expect(runtime.resume).toHaveBeenCalledOnce();
@@ -156,7 +158,7 @@ describe("Run job handler", () => {
 
   it("still stops and cleans up when the final pass throws", async () => {
     let stopRequested = false;
-    const { runtime, store, handle } = fixture({ active: [true, true, false], stopRequested: () => stopRequested });
+    const { runtime, store, handle } = fixture({ active: [true, true, false], settlements: [{ kind: "active" }], stopRequested: () => stopRequested });
     runtime.resume.mockRejectedValue(new Error("Eval SP unavailable"));
     store.requestRunStop.mockImplementation(async () => { stopRequested = true; });
     await handle("run-1", finalRetry);
@@ -181,7 +183,7 @@ describe("Run job handler", () => {
 
   it("keeps watching for a stop after a transient stop-check failure", async () => {
     let checks = 0;
-    const { runtime, store, logger, handle } = fixture({ active: [true, false] });
+    const { runtime, store, logger, handle } = fixture({ active: [true, false], settlements: [{ kind: "active" }] });
     const logged = vi.spyOn(logger, "error");
     store.isRunStopPending.mockImplementation(async () => {
       checks += 1;
@@ -231,14 +233,14 @@ describe("Run worker", () => {
 
     await source.deliver("run-1");
     expect(runtime.resume).toHaveBeenCalledExactlyOnceWith("run-1", expect.any(AbortSignal));
-    expect(store.deferResourceCheck).toHaveBeenCalledExactlyOnceWith("run-1", "job-run-1");
+    expect(store.settleRunJob).toHaveBeenCalledExactlyOnceWith("run-1", "job-run-1");
     await worker.close();
     expect(source.offWork).toHaveBeenCalledExactlyOnceWith(RUN_QUEUE, { wait: true });
   });
 
   it("reports a deferred Run without an error log and rethrows so pg-boss retries it", async () => {
     const source = fakeBoss();
-    const { runtime, store, logger } = fixture({ active: [true, true] });
+    const { runtime, store, logger } = fixture({ active: [true, true], settlements: [{ kind: "active" }, { kind: "active" }] });
     const info = vi.spyOn(logger, "info");
     const error = vi.spyOn(logger, "error");
     await startEvalRunWorker({ boss: source.boss, runtime, store, logger, concurrency: 1 });
@@ -250,7 +252,7 @@ describe("Run worker", () => {
   it("marks the job's last retry as final", async () => {
     const source = fakeBoss();
     let stopRequested = false;
-    const { runtime, store, logger } = fixture({ active: [true, true, false], stopRequested: () => stopRequested });
+    const { runtime, store, logger } = fixture({ active: [true, true, false], settlements: [{ kind: "active" }], stopRequested: () => stopRequested });
     store.requestRunStop.mockImplementation(async () => { stopRequested = true; });
     await startEvalRunWorker({ boss: source.boss, runtime, store, logger, concurrency: 1 });
     await source.deliver("run-1", 2);

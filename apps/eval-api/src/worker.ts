@@ -7,12 +7,14 @@ import { RUN_QUEUE, type RunJob } from "./run-worker-queue.js";
 /** How often an active Run re-reads its persisted stop request, and repeats SP interrupts after one. */
 export const STOP_POLL_MS = 1_000;
 
+export type RunJobSettlement =
+  | { readonly kind: "completed" }
+  | { readonly kind: "deferred"; readonly startAfter: string }
+  | { readonly kind: "active" };
+
 export interface RunRecoveryStore extends RuntimeRecoveryStore {
-  /**
-   * For a Run waiting only for resource readiness checks whose earliest one is still ahead, completes
-   * this job and schedules the next pass then; returns that time, or null for any other Run.
-   */
-  deferResourceCheck(runId: string, jobId: string): Promise<string | null>;
+  /** Rereads work and completes or defers this job atomically with the Project's wake-up writers. */
+  settleRunJob(runId: string, jobId: string): Promise<RunJobSettlement>;
 }
 
 export interface RunJobHandlerOptions {
@@ -90,8 +92,16 @@ export function createRunJobHandler(
     };
   }
 
+  async function settle(runId: string, jobId: string): Promise<boolean> {
+    const result = await store.settleRunJob(runId, jobId);
+    if (result.kind === "deferred") {
+      logger.info({ runId, startAfter: result.startAfter }, "run_resource_check_scheduled");
+    }
+    return result.kind !== "active";
+  }
+
   return async (runId, { jobId, retryCount, retryLimit }) => {
-    if (!await store.isRunActive(runId)) return;
+    if (!await store.isRunActive(runId) && await settle(runId, jobId)) return;
     const final = retryCount >= retryLimit;
     const stopPending = await store.isRunStopPending(runId);
     logger.info({ runId, jobId, retryCount, retryLimit, final, stopPending }, "run_job_start");
@@ -103,11 +113,7 @@ export function createRunJobHandler(
         if (!final) throw error;
         logger.error({ runId, error: errorDiagnostics(error) }, "run_final_pass_failed");
       }
-      const startAfter = await store.deferResourceCheck(runId, jobId);
-      if (startAfter !== null) {
-        logger.info({ runId, startAfter }, "run_resource_check_scheduled");
-        return;
-      }
+      if (await settle(runId, jobId)) return;
     }
     if (final && await store.isRunActive(runId) && !await store.isRunStopPending(runId)) {
       logger.warn({ runId }, "run_retry_budget_exhausted");
@@ -118,7 +124,7 @@ export function createRunJobHandler(
       const finalized = await store.markRunStopFinalized(runId);
       logger[finalized ? "info" : "warn"]({ runId, finalized }, "run_stop_finalized");
     }
-    if (await store.isRunActive(runId)) throw new RunStillActiveError(runId);
+    if (!await settle(runId, jobId)) throw new RunStillActiveError(runId);
   };
 }
 

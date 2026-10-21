@@ -633,7 +633,7 @@ dev 用户     [搜索 / 选择已授权用户]
 - 两仓 `pnpm check` 通过。Eval 全量测试 1,745 通过、107 跳过；未提供 `DATABASE_URL`，不把跳过用例算作数据库验收。
 - SP `agent-contracts` 107 通过；API 653 通过、536 跳过，另有 5 个既有充值 mock 失败（缺少 `c.get`），不是导出/导入失败。
 - 扩大到 SP 全仓后，另发现 Creation 1 个、Web 22 个失败；已在 `git archive HEAD` 的临时隔离副本中使用同一套已安装依赖复现，未修改这些业务及测试。全仓因此仍非全绿。
-- SP AWS 部署预检 8/8、Eval 部署凭据隔离 7/7 通过。`AGENT_CONFIG_EXPORT_TOKEN` 只注入 SP API；Eval 的来源凭据只供 API/import Worker，Run Worker 不获得来源凭据。
+- 历史验收（专用导出密钥方案，现已由复用 Takt 令牌的方案替代）：SP AWS 部署预检 8/8、Eval 部署凭据隔离 7/7 通过。原 `AGENT_CONFIG_EXPORT_TOKEN` 只注入 SP API；Eval 的来源凭据只供 API/import Worker，Run Worker 不获得来源凭据。当前配置以 `eval-sp-deployment.md` 为准，不新增导出密钥。
 - 离线串联 SP 实际公共导出 Schema、Eval source adapter、Eval target adapter、SP 实际导入 Schema 通过：缺省字段进入冻结配置前已规范化，所选能力证据随请求原样保留；使用内存假传输，无真实 HTTP 或数据库操作。
 - 两仓 tracked/new-file 空白检查通过。未执行真实数据库迁移、并发/断点恢复验收、域名/R2 绑定验证、部署、包发布或真实导入；临时基线副本已清理，既有工作区未回退。
 

@@ -19,13 +19,13 @@ import { createEvalSpClient } from "./sp/client.js";
 
 /** Independently startable import consumer. No Run resumer, Agent Worker token or dev writes. */
 export async function startAgentImportWorkerProcess(config: AgentImportWorkerConfig, logger: Logger) {
-  if (config.EVAL_DEV_SP_API_ORIGIN === undefined || config.EVAL_DEV_SP_EXPORT_TOKEN === undefined) {
+  if (config.EVAL_DEV_SP_API_ORIGIN === undefined || config.SP_PLATFORM_RESOURCE_ADMIN_TOKEN === undefined) {
     return { enabled: false, close: async () => {} };
   }
   const sp = createEvalSpClient({ origin: config.EVAL_SP_API_ORIGIN, writeOrigin: config.EVAL_WEB_ORIGIN });
   const user = await sp.verifySession(config.EVAL_SP_SERVICE_SESSION_TOKEN);
   if (user?.id !== config.EVAL_SP_SERVICE_USER_ID) throw new Error("Import target session does not belong to the fixed Eval service account");
-  const source = createAgentImportSource({ origin: config.EVAL_DEV_SP_API_ORIGIN, targetOrigin: config.EVAL_SP_API_ORIGIN, token: config.EVAL_DEV_SP_EXPORT_TOKEN });
+  const source = createAgentImportSource({ origin: config.EVAL_DEV_SP_API_ORIGIN, targetOrigin: config.EVAL_SP_API_ORIGIN, token: config.SP_PLATFORM_RESOURCE_ADMIN_TOKEN });
   const target = createAgentImportTarget({ origin: config.EVAL_SP_API_ORIGIN, sourceOrigin: source.origin,
     writeOrigin: config.EVAL_WEB_ORIGIN, sessionToken: config.EVAL_SP_SERVICE_SESSION_TOKEN, ownerUserId: user.id, sp });
   const staging = await openImportStaging(config.EVAL_BUNDLE_DIR);

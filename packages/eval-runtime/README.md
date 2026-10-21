@@ -135,3 +135,5 @@ Run 状态按当前归属的评估记录投影。重新评估移走旧记录后�
 `toRunSnapshot` only requires Sampling execution states and Evaluation sampling IDs/statuses; applications must not load resource snapshots solely to compute Run progress.
 
 MCP-enabled Evaluations complete on validated result acceptance, atomically with the result and its revision. Status-socket loss is recoverable observation failure, not an Evaluation terminal fact; after acceptance it leaves the Evaluation `succeeded` with `resourcesPending` instead of `retrying`. Late submissions cannot bypass Project deletion, Run stop/cancellation or replacement. Runtime preserves accepted results when subsequent observation or collection fails. See [evaluation result submission](../../docs/eval-evaluation-result-submission.md).
+
+Recovery of a succeeded Evaluation awaiting resources delivers any scored result not yet synced before resource collection. It reuses the persisted output, locked Schema and idempotent score publisher without rerunning the Agent. Score-only writes preserve pending receipt/resource recovery; delivery failure records `scoreSync: failed` without blocking resource recovery or changing the accepted result.

@@ -1,6 +1,8 @@
 import type { EvaluationAgentOutput, EvaluationOutputSchema, EvaluationStructuredOutput, SamplingStatus } from "@eval-platform/eval-contracts";
-import { canonicalJsonBytes, equalJson, EVALUATION_SUBMISSION_PATH, sha256Hex } from "@eval-platform/eval-contracts";
+import { canonicalJsonBytes, equalJson, EVALUATION_SUBMISSION_PATH, isStageRecoveryPending, sha256Hex, startResourceWait } from "@eval-platform/eval-contracts";
+import { evaluationAgentEnded, stageOwesResources } from "@eval-platform/eval-runtime";
 import { and, eq, isNull, sql } from "drizzle-orm";
+import type { RunQueue } from "../run-worker-queue.js";
 import type { EvalDb } from "./client.js";
 import { readEvaluationOutputSchema } from "./project-plans.js";
 import { evaluationSubmissions, evaluations, projects, runEvaluations, runs, samplings } from "./schema.js";
@@ -15,7 +17,7 @@ export type EvaluationSubmissionStore = ReturnType<typeof createPostgresEvaluati
 export type EvaluationSubmissionReceipt = "accepted" | "replayed" | "closed" | "conflict";
 
 /** Validated MCP results are authoritative; Agent completion and resource collection are separate facts. */
-export function createPostgresEvaluationSubmissions(db: EvalDb) {
+export function createPostgresEvaluationSubmissions(db: EvalDb, runQueue: RunQueue) {
   return {
     async read(evaluationId: string): Promise<EvaluationStructuredOutput | undefined> {
       const [row] = await db.select().from(evaluationSubmissions).where(eq(evaluationSubmissions.evaluationId, evaluationId));
@@ -41,20 +43,19 @@ export function createPostgresEvaluationSubmissions(db: EvalDb) {
         const [project] = await tx.select({ id: projects.projectId }).from(projects)
           .where(and(eq(projects.projectId, scope.projectId), eq(projects.ownerUserId, input.ownerUserId), isNull(projects.deletedAt))).for("update");
         if (!project) return "closed";
-        const [run] = await tx.select({ stopped: runs.stopRequested }).from(runEvaluations)
+        const [stored] = await tx.select({
+          facts: evaluations.facts, samplingId: evaluations.samplingId,
+        }).from(evaluations).where(and(eq(evaluations.evaluationId, input.evaluationId), eq(evaluations.ownerUserId, input.ownerUserId))).for("update");
+        const evaluation = stored && { ...stored.facts, evaluationId: input.evaluationId, samplingId: stored.samplingId };
+        if (!evaluation?.chatId || evaluation.status.status === "cancelled") return "closed";
+        const [run] = await tx.select({ runId: runs.runId, stopped: runs.stopRequested }).from(runEvaluations)
           .innerJoin(runs, eq(runs.runId, runEvaluations.runId))
           .where(and(eq(runEvaluations.evaluationId, input.evaluationId), eq(runs.projectId, project.id)));
         if (!run || run.stopped) return "closed";
-        const [evaluation] = await tx.select({
-          status: sql<SamplingStatus>`${evaluations.facts}->'status'->>'status'`,
-          chatId: sql<string | null>`${evaluations.facts}->>'chatId'`,
-          output: sql<EvaluationAgentOutput | null>`${evaluations.facts}->'output'`,
-        }).from(evaluations).where(and(eq(evaluations.evaluationId, input.evaluationId), eq(evaluations.ownerUserId, input.ownerUserId))).for("update");
-        if (!evaluation?.chatId || evaluation.status === "cancelled") return "closed";
         const [existing] = await tx.select({ contentHash: evaluationSubmissions.contentHash, content: evaluationSubmissions.content }).from(evaluationSubmissions)
           .where(eq(evaluationSubmissions.evaluationId, input.evaluationId));
         if (existing && !equalJson(JSON.parse(existing.content), JSON.parse(input.content))) return "conflict";
-        if (evaluation.status === "succeeded") return existing ? "replayed" : "closed";
+        if (evaluation.status.status === "succeeded") return existing ? "replayed" : "closed";
         const structuredOutput: EvaluationStructuredOutput = { path: EVALUATION_SUBMISSION_PATH, content: existing?.content ?? input.content, contentHash: existing?.contentHash ?? contentHash, source: "submission" };
         const { error: _previousError, ...previousOutput } = evaluation.output ?? {};
         const output: EvaluationAgentOutput = {
@@ -65,12 +66,18 @@ export function createPostgresEvaluationSubmissions(db: EvalDb) {
             path: `/api/chats/${encodeURIComponent(evaluation.chatId)}/trajectory` },
           structuredOutput,
         };
-        const patch = JSON.stringify({ status: { status: "succeeded" }, output });
+        const accepted = { ...evaluation, status: { status: "succeeded" as const }, output };
+        const resourcesPending = evaluation.status.resourcesPending
+          ?? (stageOwesResources(accepted.attempts, evaluationAgentEnded(accepted))
+            ? startResourceWait(input.submittedAt.toISOString()) : undefined);
+        const patch = JSON.stringify({ status: { ...accepted.status, ...(resourcesPending === undefined ? {} : { resourcesPending }) }, output });
         if (!existing) await tx.insert(evaluationSubmissions).values({ ...input, contentHash });
         await tx.update(evaluations).set({
           facts: sql`${evaluations.facts} || ${patch}::jsonb`,
           revision: sql`${evaluations.revision} + 1`,
         }).where(eq(evaluations.evaluationId, input.evaluationId));
+        // Another member can finish before commit; only this locked target's old pending facts guarantee recovery.
+        if (resourcesPending !== undefined && !isStageRecoveryPending(evaluation.status)) await runQueue.enqueue(tx, run.runId, "collection");
         return existing ? "replayed" : "accepted";
       });
     },

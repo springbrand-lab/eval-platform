@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isStageRecoveryPending, RESOURCE_WAIT_MS, type Sampling, type SamplingStageState } from "@eval-platform/eval-contracts";
+import { isStageRecoveryPending, RESOURCE_WAIT_MS, startResourceWait, type Sampling, type SamplingStageState } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError, DatasetInputError } from "@eval-platform/eval-dataset";
 import {
   RuntimeEntityNotFoundError,
@@ -16,7 +16,7 @@ import { PgBoss, type JobWithMetadata } from "pg-boss";
 import pino from "pino";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRunQueue, openRunBoss, RUN_QUEUE, RUN_QUEUE_OPTIONS, type RunJob, type RunQueue, type RunWorkerQueue } from "../run-worker-queue.js";
-import { startEvalRunWorker } from "../worker.js";
+import { createRunJobHandler, RunStillActiveError, startEvalRunWorker } from "../worker.js";
 import { createPostgresDatasetStore } from "./dataset.js";
 import { ProjectRunStopConflictError } from "./errors.js";
 import { createPostgresProjectPlanReader, createPostgresWorkerProjectPlanReader } from "./project-plans.js";
@@ -90,6 +90,26 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     return (await runJobs(runId)).map((job) => job.state);
   }
 
+  async function observationFailedEvaluation() {
+    const seeded = await project({ datasets: [{ data: [makeData()] }], evaluation: true });
+    const { command } = await seeded.admit({ operation: "pipeline" });
+    const { worker } = stores();
+    const sampling = (await worker.getSampling(command.run.samplingIds[0]!))!;
+    await worker.updateSampling({ ...sampling, execution: { status: "succeeded" } }, sampling);
+    const evaluationId = command.run.evaluationIds[0]!;
+    const original = (await worker.getEvaluation(evaluationId))!;
+    await worker.updateEvaluation({
+      ...original, chatId: "evaluating-chat",
+      status: { status: "failed", lastError: "status observation disconnected" },
+      attempts: [{
+        evaluationAttemptId: "evaluating-attempt", evaluationId, attemptNumber: 1,
+        status: "running", startedAt: "2026-10-21T07:44:59.634Z", submissionId: "evaluating-submission",
+        resources: { status: "pending", scope: { chatId: "evaluating-chat", idempotencyKey: `evaluation:${sampling.samplingId}` } },
+      }],
+    }, original);
+    return { worker, runId: command.run.runId, evaluationId };
+  }
+
   it("queues collection atomically, deduplicates requests and discovers an older recovered Run", async () => {
     const seeded = await project({ datasets: [{ data: [makeData(), makeData()] }] });
     const { store, worker, control } = stores();
@@ -125,7 +145,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     const { admission, command } = await seeded.admit({ operation: "pipeline" });
     expect(admission.created).toBe(true);
     const evaluationId = command.run.evaluationIds[0]!;
-    const submissions = createPostgresEvaluationSubmissions(database.db);
+    const submissions = createPostgresEvaluationSubmissions(database.db, runQueue);
     expect(await submissions.read(evaluationId)).toBeUndefined();
     expect(await submissions.target("missing")).toBeNull();
     expect(await submissions.target(evaluationId)).toEqual({
@@ -156,6 +176,235 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     expect(accepted.revision).toBe(original.revision + 2);
     await expect(worker.updateEvaluation({ ...observing, status: { status: "failed" } }, observing)).rejects.toBeInstanceOf(RuntimeRecordConflictError);
     expect(await worker.isRunActive(command.run.runId)).toBe(false);
+    expect(await jobs.findJobs(RUN_QUEUE, { key: `collection:${command.run.runId}` })).toHaveLength(0);
+  });
+
+  it.each(["new", "existing"] as const)("keeps MCP-accepted resources recoverable after a Worker crash (%s wait)", async (wait) => {
+    const seeded = await project({ datasets: [{ data: [makeData()] }], evaluation: true });
+    const { command } = await seeded.admit({ operation: "pipeline" });
+    const { worker } = stores();
+    const sampling = (await worker.getSampling(command.run.samplingIds[0]!))!;
+    await worker.updateSampling({ ...sampling, execution: { status: "succeeded" } }, sampling);
+    const evaluationId = command.run.evaluationIds[0]!;
+    const original = (await worker.getEvaluation(evaluationId))!;
+    const submittedAt = new Date("2026-10-21T07:50:59.975Z");
+    const resourcesPending = startResourceWait(wait === "existing" ? "2026-10-21T07:49:59.975Z" : submittedAt.toISOString());
+    const observing = {
+      ...original, chatId: "evaluating-chat",
+      status: { status: "running" as const, ...(wait === "existing" ? { resourcesPending } : {}) },
+      attempts: [{
+        evaluationAttemptId: "evaluating-attempt", evaluationId, attemptNumber: 1,
+        status: "running" as const, startedAt: "2026-10-21T07:44:59.634Z", submissionId: "evaluating-submission",
+        resources: { status: "pending" as const, scope: { chatId: "evaluating-chat", idempotencyKey: `evaluation:${sampling.samplingId}` } },
+      }],
+    };
+    await worker.updateEvaluation(observing, original);
+    expect(await worker.isRunActive(command.run.runId)).toBe(true);
+
+    const submissions = createPostgresEvaluationSubmissions(database.db, runQueue);
+    const input = { evaluationId, ownerUserId: OWNER, content: '{"score":1}', submittedAt };
+    expect(await submissions.save(input)).toBe("accepted");
+
+    const accepted = (await worker.getEvaluation(evaluationId))!;
+    expect(accepted.status).toEqual({ status: "succeeded", resourcesPending });
+    expect(accepted.attempts).toEqual(observing.attempts);
+    expect(await worker.isRunActive(command.run.runId)).toBe(true);
+    expect(await jobs.findJobs(RUN_QUEUE, { key: `collection:${command.run.runId}` })).toHaveLength(0);
+    expect(await submissions.save({ ...input, submittedAt: new Date(submittedAt.getTime() + 60_000) })).toBe("replayed");
+    expect(await worker.getEvaluation(evaluationId)).toEqual(accepted);
+    expect(await jobs.findJobs(RUN_QUEUE, { key: `collection:${command.run.runId}` })).toHaveLength(0);
+  });
+
+  it.each([
+    { previousJob: "completed", otherMemberPending: false },
+    { previousJob: "settling", otherMemberPending: false },
+    { previousJob: "settling", otherMemberPending: true },
+  ] as const)("durably schedules late MCP resource recovery ($previousJob previous job; other member pending: $otherMemberPending)", async ({ previousJob, otherMemberPending }) => {
+    const seeded = await project({ datasets: [{ data: otherMemberPending ? [makeData(), makeData()] : [makeData()] }], evaluation: true });
+    const { command } = await seeded.admit({ operation: "pipeline" });
+    const runId = command.run.runId;
+    const { worker } = stores();
+    const sampling = (await worker.getSampling(command.run.samplingIds[0]!))!;
+    await worker.updateSampling({ ...sampling, execution: { status: "succeeded" } }, sampling);
+    const evaluationId = command.run.evaluationIds[0]!;
+    const original = (await worker.getEvaluation(evaluationId))!;
+    const observing = {
+      ...original, chatId: "evaluating-chat",
+      status: { status: "failed" as const, lastError: "status observation disconnected" },
+      attempts: [{
+        evaluationAttemptId: "evaluating-attempt", evaluationId, attemptNumber: 1,
+        status: "running" as const, startedAt: "2026-10-21T07:44:59.634Z", submissionId: "evaluating-submission",
+        resources: { status: "pending" as const, scope: { chatId: "evaluating-chat", idempotencyKey: `evaluation:${sampling.samplingId}` } },
+      }],
+    };
+    await worker.updateEvaluation(observing, original);
+    expect(isStageRecoveryPending(observing.status)).toBe(false);
+    expect(await worker.isRunActive(runId)).toBe(otherMemberPending);
+    const [oldJob] = await jobs.fetch<RunJob>(RUN_QUEUE);
+    expect(oldJob?.data).toEqual({ runId });
+    if (previousJob === "completed") await jobs.complete(RUN_QUEUE, oldJob!.id);
+    expect(await runJobStates(runId)).toEqual([previousJob === "completed" ? "completed" : "active"]);
+
+    const acceptanceQueue: RunQueue = {
+      async enqueue(...args) {
+        await runQueue.enqueue(...args);
+        if (otherMemberPending) {
+          // Acceptance is still uncommitted while the Worker finishes the other member and its old job.
+          await settle(worker, [command.run.samplingIds[1]!], "succeeded");
+          expect((await worker.getEvaluation(evaluationId))!.status).toEqual(observing.status);
+          expect(await worker.isRunActive(runId)).toBe(false);
+          await jobs.complete(RUN_QUEUE, oldJob!.id);
+        }
+      },
+    };
+    const submissions = createPostgresEvaluationSubmissions(database.db, acceptanceQueue);
+    const submittedAt = new Date("2026-10-21T07:50:59.975Z");
+    const input = { evaluationId, ownerUserId: OWNER, content: '{"score":1}', submittedAt };
+    const beforeAcceptance = (await worker.getEvaluation(evaluationId))!;
+    const rollback: RunQueue = {
+      async enqueue(...args) {
+        await runQueue.enqueue(...args);
+        throw new Error("commit aborted");
+      },
+    };
+    await expect(createPostgresEvaluationSubmissions(database.db, rollback).save(input)).rejects.toThrow("commit aborted");
+    expect(await submissions.read(evaluationId)).toBeUndefined();
+    expect(await worker.getEvaluation(evaluationId)).toEqual(beforeAcceptance);
+    expect(await worker.isRunActive(runId)).toBe(otherMemberPending);
+    expect(await jobs.findJobs(RUN_QUEUE, { key: `collection:${runId}` })).toHaveLength(0);
+    expect(await submissions.save(input)).toBe("accepted");
+
+    const accepted = (await worker.getEvaluation(evaluationId))!;
+    expect(accepted.status).toEqual({ status: "succeeded", resourcesPending: startResourceWait(submittedAt.toISOString()) });
+    expect(accepted.attempts).toEqual(observing.attempts);
+    expect(accepted.output).toMatchObject({ status: "succeeded", structuredOutput: { source: "submission", content: input.content } });
+    expect(accepted.revision).toBe(beforeAcceptance.revision + 1);
+    expect(await worker.isRunActive(runId)).toBe(true);
+    expect(await runJobStates(runId)).toEqual([previousJob === "completed" || otherMemberPending ? "completed" : "active"]);
+    const wakeups = await jobs.findJobs<RunJob>(RUN_QUEUE, { key: `collection:${runId}` });
+    expect(wakeups).toHaveLength(1);
+    expect(wakeups[0]).toMatchObject({ state: "created", data: { runId } });
+    expect(await submissions.save({ ...input, submittedAt: new Date(submittedAt.getTime() + 60_000) })).toBe("replayed");
+    expect(await worker.getEvaluation(evaluationId)).toEqual(accepted);
+    expect((await jobs.findJobs(RUN_QUEUE, { key: `collection:${runId}` })).map((job) => job.id)).toEqual(wakeups.map((job) => job.id));
+  });
+
+  it.each(["ordinary", "collection", "resources"] as const)("hands late accepted work to recovery while an old %s job is settling", async (origin) => {
+    const { worker, runId, evaluationId } = await observationFailedEvaluation();
+    let [oldJob] = await jobs.fetch<RunJob>(RUN_QUEUE);
+    if (origin === "collection") {
+      await jobs.complete(RUN_QUEUE, oldJob!.id);
+      await database.db.transaction((tx) => runQueue.enqueue(tx, runId, "collection"));
+      [oldJob] = await jobs.fetch<RunJob>(RUN_QUEUE);
+    } else if (origin === "resources") {
+      await database.db.transaction((tx) => runQueue.defer(tx, runId, oldJob!.id, new Date(Date.now() - 60_000)));
+      [oldJob] = await jobs.fetch<RunJob>(RUN_QUEUE);
+    }
+    const submissions = createPostgresEvaluationSubmissions(database.db, runQueue);
+    let accepted = false;
+    const handler = createRunJobHandler({
+      runtime: { resume: vi.fn(async () => undefined), interrupt: vi.fn(), stop: vi.fn() } as unknown as EvalRunResumer,
+      store: {
+        ...worker,
+        async isRunActive(id) {
+          const active = await worker.isRunActive(id);
+          if (!active && !accepted) {
+            accepted = true;
+            await expect(submissions.save({
+              evaluationId, ownerUserId: OWNER, content: '{"score":1}', submittedAt: new Date(),
+            })).resolves.toBe("accepted");
+          }
+          return active;
+        },
+      },
+      logger: silent,
+    });
+    try {
+      await handler(runId, { jobId: oldJob!.id, retryCount: 0, retryLimit: 100 });
+      await jobs.complete(RUN_QUEUE, oldJob!.id);
+    } catch (error) {
+      if (!(error instanceof RunStillActiveError)) throw error;
+      await jobs.fail(RUN_QUEUE, oldJob!.id, { message: error.message });
+    }
+    expect(accepted).toBe(true);
+    expect(await worker.isRunActive(runId)).toBe(true);
+    const pending = (await jobs.findJobs<RunJob>(RUN_QUEUE)).filter((job) =>
+      job.data.runId === runId && ["created", "retry", "active"].includes(job.state));
+    expect(pending.length, "accepted resources need a durable job after the old handler settles").toBeGreaterThan(0);
+    await makeJobDue(pending[0]!.id);
+    const [recovery] = await jobs.fetch<RunJob>(RUN_QUEUE);
+    expect(recovery?.data).toEqual({ runId });
+  });
+
+  it("rolls back an idle acknowledgement and preserves a later wake-up after completion", async () => {
+    const { worker, runId, evaluationId } = await observationFailedEvaluation();
+    const [oldJob] = await jobs.fetch<RunJob>(RUN_QUEUE);
+    const aborted = createPostgresWorkerRuntimeStore(database.db, {
+      ...runQueue,
+      async complete(...args) {
+        await runQueue.complete(...args);
+        throw new Error("settlement aborted");
+      },
+    });
+    await expect(aborted.settleRunJob(runId, oldJob!.id)).rejects.toThrow("settlement aborted");
+    expect(await runJobStates(runId)).toEqual(["active"]);
+    expect(await worker.settleRunJob(runId, oldJob!.id)).toEqual({ kind: "completed" });
+    expect(await runJobStates(runId)).toEqual(["completed"]);
+
+    const submissions = createPostgresEvaluationSubmissions(database.db, runQueue);
+    expect(await submissions.save({
+      evaluationId, ownerUserId: OWNER, content: '{"score":1}', submittedAt: new Date(),
+    })).toBe("accepted");
+    // pg-boss's duplicate auto-ack of the old ID must not consume the new job.
+    await jobs.complete(RUN_QUEUE, oldJob!.id);
+    const [recovery] = await jobs.fetch<RunJob>(RUN_QUEUE);
+    expect(recovery?.data).toEqual({ runId });
+    expect(await worker.isRunActive(runId)).toBe(true);
+  });
+
+  it("serializes acceptance arriving during an idle settlement with its acknowledgement", async () => {
+    const { runId, evaluationId } = await observationFailedEvaluation();
+    const [oldJob] = await jobs.fetch<RunJob>(RUN_QUEUE);
+    await jobs.complete(RUN_QUEUE, oldJob!.id);
+    await database.db.transaction((tx) => runQueue.enqueue(tx, runId, "collection"));
+    const [collecting] = await jobs.fetch<RunJob>(RUN_QUEUE);
+    let reached!: () => void;
+    const completing = new Promise<void>((resolve) => { reached = resolve; });
+    let release!: () => void;
+    const allowed = new Promise<void>((resolve) => { release = resolve; });
+    const worker = createPostgresWorkerRuntimeStore(database.db, {
+      ...runQueue,
+      async complete(...args) {
+        reached();
+        await allowed;
+        await runQueue.complete(...args);
+      },
+    });
+    const settlement = worker.settleRunJob(runId, collecting!.id);
+    await completing;
+    const accepting = createPostgresEvaluationSubmissions(database.db, runQueue).save({
+      evaluationId, ownerUserId: OWNER, content: '{"score":1}', submittedAt: new Date(),
+    });
+    try {
+      // Wait for the real acceptance transaction to reach the shared Project lock.
+      await vi.waitFor(async () => {
+        const { rows } = await database.db.execute<{ waiting: number }>(sql`
+          SELECT count(*)::int AS waiting FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND lower(query) LIKE '%for update%' AND pid <> pg_backend_pid()
+        `);
+        expect(rows[0]!.waiting).toBeGreaterThan(0);
+      }, { timeout: 2_000 });
+    } finally {
+      release();
+      await Promise.all([settlement, accepting]);
+    }
+    expect(await settlement).toEqual({ kind: "completed" });
+    expect(await accepting).toBe("accepted");
+    await jobs.complete(RUN_QUEUE, collecting!.id);
+    const [recovery] = await jobs.fetch<RunJob>(RUN_QUEUE);
+    expect(recovery?.data).toEqual({ runId });
+    expect(await worker.isRunActive(runId)).toBe(true);
   });
 
   it.each(["stopped", "cancelled", "replaced", "wrong-owner", "deleted"] as const)("rejects MCP acceptance for %s work", async (reason) => {
@@ -170,7 +419,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     if (reason === "stopped") await database.db.update(runs).set({ stopRequested: true }).where(eq(runs.runId, command.run.runId));
     if (reason === "replaced") await seeded.admit({ operation: "evaluation" });
     if (reason === "deleted") await database.db.update(projects).set({ deletedAt: new Date() }).where(eq(projects.projectId, seeded.projectId));
-    const submissions = createPostgresEvaluationSubmissions(database.db);
+    const submissions = createPostgresEvaluationSubmissions(database.db, runQueue);
     expect(await submissions.save({ evaluationId, ownerUserId: reason === "wrong-owner" ? "other" : OWNER,
       content: '{"score":1}', submittedAt: new Date() })).toBe("closed");
     expect(await submissions.read(evaluationId)).toBeUndefined();
@@ -419,7 +668,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     // An admitted job is the active one while its handler runs; the deferral completes it and wakes the Run later.
     const [job] = await jobs.fetch<RunJob>(RUN_QUEUE);
     expect(job?.data.runId).toBe(runId);
-    expect(await worker.deferResourceCheck(runId, job!.id)).toBe(soon);
+    expect(await worker.settleRunJob(runId, job!.id)).toEqual({ kind: "deferred", startAfter: soon });
     expect(await runJobStates(runId)).toEqual(["completed"]);
     const [wake] = await jobs.findJobs<RunJob>(RUN_QUEUE, { key: `resources:${runId}` });
     expect(wake).toMatchObject({ state: "created", data: { runId }, retryCount: 0, policy: RUN_QUEUE_OPTIONS.policy, retryLimit: RUN_QUEUE_OPTIONS.retryLimit });
@@ -430,7 +679,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     const [next] = await jobs.fetch<RunJob>(RUN_QUEUE, { includeMetadata: true });
     expect(next?.singletonKey).toBe(runId);
     await worker.updateEvaluation({ ...evaluationWaiting, status: { status: "failed" } }, (await worker.getEvaluation(evaluation.evaluationId))!);
-    expect(await worker.deferResourceCheck(runId, next!.id)).toBe(later);
+    expect(await worker.settleRunJob(runId, next!.id)).toEqual({ kind: "deferred", startAfter: later });
     const wakes = await jobs.findJobs<RunJob>(RUN_QUEUE, { key: `resources:${runId}` });
     expect(wakes.map((item) => [item.state, item.startAfter.toISOString()])).toEqual([["created", later]]);
     await database.db.transaction((transaction) => runQueue.enqueue(transaction, runId));
@@ -441,7 +690,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     const overdue = { ...current, execution: { status: "succeeded" as const, resourcesPending: { deadline } } };
     await worker.updateSampling(overdue, current);
     expect(await nextResourceCheckAt(database.db, runId)).toBe(-Infinity);
-    expect(await worker.deferResourceCheck(runId, crypto.randomUUID())).toBeNull();
+    expect(await worker.settleRunJob(runId, crypto.randomUUID())).toEqual({ kind: "active" });
     await worker.updateSampling({ ...overdue, execution: { status: "retrying" } }, (await worker.getSampling(samplingId))!);
     expect(await nextResourceCheckAt(database.db, runId)).toBeNull();
     await worker.updateSampling(waiting, (await worker.getSampling(samplingId))!);
