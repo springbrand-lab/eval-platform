@@ -4,6 +4,7 @@ import path from "node:path";
 import { summarizeResourceSnapshot, type AgentResourceSnapshot } from "@eval-platform/eval-contracts";
 import { compactResourceSnapshot } from "@eval-platform/eval-metrics";
 import { sql } from "drizzle-orm";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createPostgresResourceSnapshotReader } from "./attempt-resources.js";
 import { createPostgresMetricsSource } from "./metrics.js";
@@ -98,7 +99,8 @@ describe.skipIf(!connection)("resource snapshot JSON migration", () => {
     const journal = JSON.parse(await readFile(journalPath, "utf8"));
     journal.entries = journal.entries.filter((entry: { idx: number }) => entry.idx <= 4);
     await writeFile(journalPath, JSON.stringify(journal));
-    database = await createTestDatabase(connection!, directory);
+    // Only fixture setup stops at the historical prefix; the upgrade uses the production guard.
+    database = await createTestDatabase(connection!, (db) => migrate(db, { migrationsFolder: directory }));
   }, 30_000);
 
   afterAll(async () => {
@@ -117,6 +119,13 @@ describe.skipIf(!connection)("resource snapshot JSON migration", () => {
       { column_name: "metric_snapshot", data_type: "jsonb" },
       { column_name: "snapshot", data_type: "jsonb" },
     ]);
+    expect((await db.execute(sql`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name IN (
+        'eval_resource_sources', 'eval_agent_import_tasks', 'eval_agent_import_intents',
+        'eval_agent_import_task_intents', 'eval_agent_import_leases'
+      )
+    `)).rows).toEqual([]);
 
     const owner = "resource-json-upgrade-test";
     const seeded = await seedProject(db, owner, { datasets: [{ data: [makeData()] }], evaluation: true });

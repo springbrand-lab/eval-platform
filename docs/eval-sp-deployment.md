@@ -20,6 +20,10 @@ Eval Web/CLI ──> Eval API ──> Eval SP 的公开 API
 
 两个数据库的职责不同：Eval SP 数据库属于 SP 账户和 Agent 运行面；Eval PostgreSQL 属于评估业务。Eval 不直接访问 SP 数据库、DO SQLite 或 SP 的 R2，只使用 SP 公开的 Chat、Submission、Trajectory、Workspace 等接口。
 
+当前 Eval API/Web 的 CI 按改动发布：同一次发布涉及 API 时，新 Web 必须等待本次 AWS API 发布及冒烟检查成功；API 测试、迁移或发布失败不能让新 Web 先上线。只改 Web、API 未改动时，允许 API 发布 job 跳过，不阻断独立 Web 发布。此门禁不替代上游 Eval SP 的独立部署与验收。
+
+导入弹窗的配置请求是 `GET /api/agent-config-sync/config`。来源未配置时应返回 `200 {enabled:false,...}`；`404` 不是正常的关闭状态，应核对实际 AWS API 版本及 Cloudflare 的 `EVAL_API_ORIGIN`，不能通过吞掉 404、临时写库或关闭迁移校验绕过。
+
 ## 数据归属
 
 Agent 从 dev 导入是可选控制面能力，不改变运行部署选择。dev 只提供专用服务凭据保护的只读导出接口；不要为导入执行 dev 数据回填、资源写入、创建会话或分享记录。新增资源来源/任务迁移属于 Eval 业务库，create-only 导入回执迁移属于目标 Eval SP；两者都不能指向 dev 或其他共享库。本轮实现不执行部署或迁移。
