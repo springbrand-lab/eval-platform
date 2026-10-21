@@ -1,5 +1,11 @@
 import type { AgentConfigRef, AgentConfigSnapshot, AgentPurpose, AgentRole, JsonValue } from "@eval-platform/eval-contracts";
-import { createId, resolveEvaluationResultsMcp } from "@eval-platform/eval-contracts";
+import { createId, equalJson, resolveEvaluationResultsMcp } from "@eval-platform/eval-contracts";
+import { ImportConflictError, ImportDependencyError } from "./agent-imports/errors.js";
+import type { ImportResult, PreparedAgent, SourceAgent } from "./agent-imports/model.js";
+import { requireDefinitionEvidence, type DefinitionEvidence } from "./agent-imports/definition-evidence.js";
+import { requireCanonicalSourceSetting } from "./agent-imports/semantics.js";
+import { checkAgentResult, checkReceipt, type AgentImportTarget } from "./agent-imports/target.js";
+import type { ResourceSourceStore } from "./db/agent-import-sources.js";
 import {
   evaluationResultsMcpCandidates,
   selectedMcpServerIds,
@@ -103,6 +109,8 @@ export function createAgentConfigService(input: {
   readonly sp: EvalSpClient;
   readonly projects: Pick<PostgresProjectStore, "frozenAgentConfigIds">;
   readonly purposes: AgentPurposeStore;
+  readonly sources?: ResourceSourceStore;
+  readonly imports?: AgentImportTarget;
 }) {
   const { ownerUserId, sessionToken: token, sp, projects, purposes } = input;
 
@@ -110,7 +118,12 @@ export function createAgentConfigService(input: {
     return recorded.has(config.id) || isReservedSlug(config.slug);
   }
 
+  async function requireNotPendingImport(id: string): Promise<void> {
+    if ((await input.sources?.pendingAgentIds([id]))?.has(id)) throw new AgentConfigPurposeUnavailableError(id);
+  }
+
   async function requireEditable(id: string): Promise<EvalSpAgentConfig> {
+    await requireNotPendingImport(id);
     const recorded = await projects.frozenAgentConfigIds([id]);
     if (recorded.has(id)) throw new AgentConfigFrozenError(id);
     const config = await sp.getAgentConfig(token, id);
@@ -121,7 +134,8 @@ export function createAgentConfigService(input: {
   async function list(): Promise<EvalSpAgentConfig[]> {
     const configs = await sp.listAgentConfigs(token);
     const recorded = await projects.frozenAgentConfigIds(configs.map((config) => config.id));
-    return configs.filter((config) => !isFrozen(config, recorded));
+    const pending = await input.sources?.pendingAgentIds(configs.map((config) => config.id)) ?? new Set<string>();
+    return configs.filter((config) => !isFrozen(config, recorded) && !pending.has(config.id));
   }
 
   interface PurposeCatalog {
@@ -199,6 +213,7 @@ export function createAgentConfigService(input: {
       }
       const mcpServers = [
         ...selections.filter((selection) => {
+          if (bodyRecord(selection) && "kind" in bodyRecord(selection)!) return true;
           const id = bodyRecord(selection)?.serverId;
           return typeof id !== "string" || !managedEvaluationMcpIds.has(id);
         }),
@@ -207,6 +222,7 @@ export function createAgentConfigService(input: {
       return { config: withMcpSelections(config, setting, mcpServers), evaluationMcpServerId };
     }
     const mcpServers = selections.filter((selection) => {
+      if (bodyRecord(selection) && "kind" in bodyRecord(selection)!) return true;
       const id = bodyRecord(selection)?.serverId;
       return typeof id !== "string" || !managedEvaluationMcpIds.has(id);
     });
@@ -218,31 +234,92 @@ export function createAgentConfigService(input: {
     evaluationMcpServerId: string,
   ): { readonly config: Record<string, unknown>; readonly evaluationMcpServerId: null } {
     const { setting, selections } = readMcpSelections(config);
-    const mcpServers = selections.filter((selection) => bodyRecord(selection)?.serverId !== evaluationMcpServerId);
+    const mcpServers = selections.filter((selection) => {
+      const record = bodyRecord(selection);
+      return record && "kind" in record || record?.serverId !== evaluationMcpServerId;
+    });
     return { config: withMcpSelections(config, setting, mcpServers), evaluationMcpServerId: null };
   }
 
   return {
     list,
-    get: (id: string) => sp.getAgentConfig(token, id),
+    async get(id: string) {
+      await requireNotPendingImport(id);
+      return sp.getAgentConfig(token, id);
+    },
     async create(body: unknown) {
       const { config, purpose } = createBody(body);
       const catalog = await purposeCatalog();
       const normalized = normalizePurposeConfig(config, purpose, catalog);
       const actual = purposeFromConfig({ ...normalized.config, id: "new" }, catalog);
       if (actual !== purpose) throw new AgentConfigPurposeMismatchError("new", purpose, actual);
-      const created = await sp.createAgentConfig(token, normalized.config);
+      // Ordinary create retains SP's body, status, slug replay and compensation semantics.
+      // Only the ordinary POST's affirmative insertion header can establish new native provenance.
+      const outcome = input.sources && sp.createAgentConfigOutcome
+        ? await sp.createAgentConfigOutcome(token, normalized.config) : null;
+      const created = outcome?.config ?? await sp.createAgentConfig(token, normalized.config);
       try {
         await purposes.upsert({
           userAgentId: created.id,
           purpose,
           evaluationMcpServerId: normalized.evaluationMcpServerId,
         });
+        if (outcome?.created === true && created.user_id === ownerUserId) await input.sources!.recordNative(created.id);
       } catch (error) {
         await Promise.allSettled([sp.deleteAgentConfig(token, created.id)]);
         throw error;
       }
       return created;
+    },
+    /** Freeze target normalization in preview, using the same purpose/MCP and frozen-copy rules. */
+    async prepareImport(source: SourceAgent, purpose: AgentPurpose, dependencies: readonly DefinitionEvidence[] = []): Promise<PreparedAgent> {
+      if (!input.imports) throw new ImportDependencyError("Agent imports are disabled");
+      if (isReservedSlug(source.slug) || source.slug === "default"
+        || (await projects.frozenAgentConfigIds([source.id])).has(source.id)) throw new AgentConfigFrozenError(source.id);
+      requireCanonicalSourceSetting(source.setting);
+      const config = { id: source.id, slug: `import-${source.id}`, name: source.name,
+        description: source.description, setting: source.setting };
+      const proofs = requireDefinitionEvidence(source.setting, dependencies);
+      const catalog = await purposeCatalog();
+      const normalized = normalizePurposeConfig(config, purpose, catalog);
+      const actual = purposeFromConfig(normalized.config, catalog);
+      if (actual !== purpose) throw new AgentConfigPurposeMismatchError(source.id, purpose, actual);
+      await input.imports.validateSelections(normalized.config.setting as Record<string, unknown>, proofs);
+      return { purpose, evaluationMcpServerId: normalized.evaluationMcpServerId, dependencies: proofs,
+        config: { ...config, setting: normalized.config.setting as Record<string, unknown> } };
+    },
+    /** Create-only receipt flow. Local failures retain the remote result; never use normal create's DELETE compensation. */
+    async import(prepared: PreparedAgent, importKey: string, onReceipt: (result: ImportResult) => Promise<void>, recovered?: ImportResult): Promise<ImportResult> {
+      if (!input.imports) throw new ImportDependencyError("Agent imports are disabled");
+      const id = prepared.config.id;
+      if (isReservedSlug(prepared.config.slug) || prepared.config.slug === "default"
+        || (await projects.frozenAgentConfigIds([id])).has(id)) throw new AgentConfigFrozenError(id);
+      const source = await input.sources?.get("agent", id);
+      if (source?.origin === "eval_native") throw new ImportConflictError("An Eval-native Agent already occupies this ID");
+      requireCanonicalSourceSetting(prepared.config.setting);
+      await input.imports.validateSelections(prepared.config.setting, prepared.dependencies);
+      if (!recovered) {
+        const catalog = await purposeCatalog();
+        const normalized = normalizePurposeConfig(prepared.config, prepared.purpose, catalog);
+        if (!equalJson(normalized.config, prepared.config) || normalized.evaluationMcpServerId !== prepared.evaluationMcpServerId) {
+          throw new ImportConflictError("Target purpose prerequisites changed; preview again");
+        }
+        const actual = purposeFromConfig(prepared.config, catalog);
+        if (actual !== prepared.purpose) throw new AgentConfigPurposeMismatchError(id, prepared.purpose, actual);
+      }
+      const result = recovered ?? await input.imports.importAgent(prepared, importKey);
+      checkReceipt(result, "agent", id, importKey);
+      // A cached/replayed receipt proves historical insertion, never the current body or current existence.
+      const current = await input.imports.agent(id);
+      if (!current) throw new ImportConflictError("The imported Agent no longer exists; import cannot recreate it");
+      checkAgentResult({ ...result, resource: current }, prepared, ownerUserId);
+      // SP GET retains archived bodies and its public DTO has no tombstone. Use the existing active-list fact too.
+      if (!(await input.imports.listAgents()).some((agent) => agent.id === id && agent.user_id === ownerUserId)) {
+        throw new ImportConflictError("The imported Agent is no longer active; import cannot revive it");
+      }
+      await onReceipt(result); // durable creation proof precedes purpose/source finalization
+      await purposes.upsert({ userAgentId: id, purpose: prepared.purpose, evaluationMcpServerId: prepared.evaluationMcpServerId });
+      return result;
     },
     async update(id: string, body: unknown) {
       const current = await requireEditable(id);
@@ -312,6 +389,7 @@ export function createAgentConfigService(input: {
     },
     /** Clones a selectable Agent Config into a new SP Agent Config whose body never changes again. */
     async freeze(sourceUserAgentId: string, expectedPurpose: AgentPurpose): Promise<FrozenCopy> {
+      // requireEditable shares the pending-import fence with get/update/remove, before any target I/O.
       const source = await requireEditable(sourceUserAgentId);
       // SP retains archived configs for old Chats; only the active list proves new selectability.
       const active = await sp.listAgentConfigs(token);

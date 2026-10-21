@@ -1,5 +1,5 @@
-# One image runs the Eval API (dist/server.js), the Run Worker (dist/run-worker-main.js) and
-# migrations (dist/migrate.js). Build from the repository root:
+# One image runs the API, Run Worker, optional import Worker and migrations.
+# Build from the repository root:
 #   docker build -f apps/eval-api/Dockerfile .
 FROM node:24-bookworm-slim AS build-tools
 RUN npm install --global pnpm@11.6.0 && npm cache clean --force

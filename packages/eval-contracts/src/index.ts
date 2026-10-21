@@ -123,3 +123,22 @@ export { EVALUATION_RESULTS_MCP_PATH, isEvaluationResultsMcpUrl, resolveEvaluati
 export type { EvaluationResultsMcpResolution, EvaluationResultsMcpServer } from "./evaluation-results-mcp.js";
 export type { InitialResourceFile } from "./initial-resource-files.js";
 export { IDEMPOTENT_RETRY_POLICY, idempotentRetryBackoffMs } from "./retry.js";
+export {
+  AGENT_IMPORT_MAX_AGENTS,
+  agentImportApplySchema,
+  agentImportCandidatePageSchema,
+  agentImportCandidateSchema,
+  agentImportConfigSchema,
+  agentImportPreviewSchema,
+  agentImportSourceUserSchema,
+  agentImportTaskViewSchema,
+} from "./agent-imports.js";
+export type {
+  AgentImportApply,
+  AgentImportCandidate,
+  AgentImportCandidatePage,
+  AgentImportConfig,
+  AgentImportPreview,
+  AgentImportSourceUser,
+  AgentImportTaskView,
+} from "./agent-imports.js";

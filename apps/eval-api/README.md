@@ -4,6 +4,156 @@
 
 ## 进程与环境变量
 
+### Agent create-only imports (public Interface boundary)
+
+`/api/agent-config-sync` adds optional `GET /config`, `GET /users?q=alice&limit=20`,
+`GET /users/:sourceUserId/agents?q=&cursor=&limit=&onlyMissing=true`,
+`POST /previews {sourceUserId,agentIds,purpose,idempotencyKey}`,
+`GET /tasks/:taskId`, and `POST /tasks/:taskId/apply {idempotencyKey}`.
+Both writes return 202 `{taskId}`; the independent `eval-agent-imports` pg-boss
+consumer performs preparation/import, not an HTTP request or the Run Worker.
+DTOs live in `eval-contracts/src/agent-imports.ts`. Target owner is always the
+verified Eval service account; source user only scopes the authorized export.
+User search requires a trimmed, nonblank `q` (at most 200 characters); missing
+or blank input returns 422 locally without calling the source. Agent search
+may remain blank after an authorized user is selected.
+
+`EVAL_DEV_SP_API_ORIGIN` and `EVAL_DEV_SP_EXPORT_TOKEN` are optional **as a pair**.
+No pair means `{enabled:false,maxAgents:50}` and ordinary API behavior remains
+available. Owner-scoped persisted `GET /tasks/:taskId` remains available even
+after the source pair is removed or target imports are disabled; it reads only
+Eval task state, never creates a source client/session or enqueues work. Source
+browsing and preview/apply remain unavailable without the authorized source pair.
+Source and target origins must differ. The source client exposes only
+the approved GET `/api/agent-config-export/users`, `/users/:id/agents`, and
+`/users/:id/snapshot?agentIds=`; it never creates shares, sessions or other dev
+records. Target imports use the service session and `EVAL_WEB_ORIGIN`:
+`POST /api/skills/imports?skillId=&importKey=` (complete ZIP),
+`POST /api/user-references/imports` (a freshly uploaded target attachment), and
+`POST /api/user-agent-configs/imports`. Recovery reads
+`GET /api/agent-config-imports/receipts/:importKey?kind=`.
+Reference bytes first use ordinary `POST /api/inbox/attachments` with the retained
+Reference ID as `clientAttachmentId`; SP rejects immutable attachment identity or
+content mismatches with `409 REQUEST_CONFLICT`. The target adapter treats only
+HTTP 409 with a known public conflict code (`AGENT_CONFIG_IMPORT_CONFLICT` or
+`REQUEST_CONFLICT`) as an authoritative conflict on dependency/upload and receipt
+reads, preserving the structured upstream cause rather than reporting an unknown
+outcome or retrying the dependency. On these reads/uploads, unknown 409 codes,
+malformed responses, network and target authentication failures remain dependency
+unavailability; missing receipts remain 404/null. Upstream failures never
+invalidate the browser session.
+IDs are preserved; platform Skill IDs are strings, not necessarily UUIDs.
+Platform Skills are verified against the target catalog, never uploaded as user
+Skills. Same-name private Skill collisions block only their dependent Agents.
+
+The API owns unified internal resource sources, durable tasks, per-resource
+write-ahead intents/receipts and owner leases. Existing unknown rows are never
+claimed from a matching ID/hash or an unfinished intent. Source metadata never
+appears in ordinary Agent DTOs. A valid target receipt is required before an
+import can register provenance or hide an unfinished imported Agent. Imported
+objects are retained after purpose/source finalization failures; recovery never
+deletes, renames, aliases or allocates replacement IDs.
+Confirmed imports awaiting metadata finalization share one ordinary
+get/edit/delete/freeze access fence; unknown intents and proven native rows are
+not hidden. A receipt proves historical insertion, not current existence:
+every Agent result, including cached receipts and POST replays, is freshly read
+and checked against the frozen body and the target's active list before local
+purpose/source finalization. SP's retained GET body alone cannot prove it is active.
+
+Preview freezes the selected dependency union and its actual byte hashes under
+`EVAL_BUNDLE_DIR/imports` with bounded files/bytes, private permissions and TTL.
+Apply consumes that immutable plan, only ready candidates, dependencies first.
+Invalid paths/URLs on one resource block only its dependent Agents; aggregate
+selected-union file/byte limits still reject the whole preview.
+Source export settings must already use SP's canonical public wire defaults
+(`presetId: null`, `referenceFileIds: []` when absent in storage). Eval preserves
+the complete setting, does not copy SP's normalizer or guess missing defaults,
+and blocks an incompatible Agent before any target resource writes.
+Selected Actions, Connectors and Extensions require source definition evidence
+`{kind,id,fingerprint}` (SHA-256 lowercase hex) from snapshot `dependencies`.
+Only the selected-root union is accepted; duplicates, wrong kind/ID and missing
+proofs are never replaced with target-only versions. Per-Agent proofs are frozen
+in the prepared plan and both source/target digests and import keys. Preview and
+apply compare them with read-only target
+`POST /api/agent-config-imports/dependencies {resources:[{kind,id}]}` (at most
+500 proofs in the source union and per call), returning
+`{items:[{kind,id,fingerprint}]}` in the usual envelope.
+Apply uses no source calls and checks current target evidence before dependency
+writes, then sends the unchanged frozen `dependencies` in the Agent import POST.
+SP rechecks exact coverage/current definitions inside insert/replay and receipt
+verification. No Action/Component publishing, adoption or credentials are part
+of this seam; Connector Toolkits remain distinct from managed MCP selections.
+All downloads reject redirects, unsafe paths and non-allowlisted URLs; CDN reads
+carry no SP token. The target insert-only operations remain the final defense
+against concurrent edits, tombstones, ownership and uniqueness conflicts.
+Migrations are review artifacts only; generating them never applies them.
+
+`pnpm --filter @eval-platform/eval-api start:import-worker` runs
+`src/agent-import-worker-main.ts` independently. It reads process environment
+only (no `.env` discovery). Supply `DATABASE_URL`, `EVAL_BUNDLE_DIR`,
+`EVAL_SP_API_ORIGIN`, `EVAL_SP_SERVICE_USER_ID`,
+`EVAL_SP_SERVICE_SESSION_TOKEN`, `EVAL_WEB_ORIGIN`, and the optional paired
+`EVAL_DEV_SP_API_ORIGIN` / `EVAL_DEV_SP_EXPORT_TOKEN`. An absent source pair
+starts disabled without SP/queue connections. The Run Worker never receives
+the dev export token. Busy owner leases are durably deferred in the same
+transaction as completing their queue delivery, not acknowledged/lost or
+charged against the ten failure retries.
+Preview and apply use separate stable queue singleton keys
+`preview:<taskId>` / `apply:<taskId>` so an active preview cannot absorb apply.
+A rejected required enqueue rolls back the caller's transaction; lease deferral
+still completes the old delivery and upserts a delayed wake-up transactionally.
+
+Staging limits are 50 Agents, 1,000 files, 20 MiB per file, 200 MiB per selected
+union, 2 GiB for the staging root, with a 24-hour preview TTL. Apply never
+refreshes source data. After TTL, existing valid receipts can still finalize
+local purpose/source records, but no new remote import is started.
+Download origins are separated by purpose in `src/agent-imports/bytes.ts`:
+source permits `creation-file-dev.springbrand.ai` and
+`devworkspace.springbrand.ai`; target permits only
+`creation-file-eval.springbrand.ai` and `evalworkspace.springbrand.ai`.
+Both permit the global platform CDN `cdn.springbrand.ai` and their exact fixed
+API/static-proxy origin (HTTPS or loopback tests), never the other deployment's
+private CDNs. All `/api/` byte URLs, including legacy share ZIP routes, remain
+rejected. The logical Skill archive path keeps SP's 240-character bound; encoded
+CDN paths have a separate bounded owner/version-prefix budget with segment,
+traversal and encoded-separator validation. Neither browser input nor an export
+can expand these allowlists. The independent Eval Skill CDN binding/configuration
+is an operator step; this repository change does not deploy or verify its DNS.
+
+Ordinary Agent creation retains `POST /api/user-agent-configs`, the original
+body/200 response, SP-assigned identity, slug replay and existing failure
+compensation. Its optional `X-Agent-Config-Created: true|false` response header
+is an internal transport fact: only `true` registers `eval_native`; `false` or a
+missing header never adopts an unknown row or changes a proven import binding.
+It never calls import capability/import endpoints and works when source is
+absent or target imports are disabled. The independent import method never
+compensates by deleting an imported object.
+
+Import preview/apply and worker stages probe the fixed target's public
+`GET /api/agent-config-imports/config` (`{version:1,enabled}`), and each remote
+write rechecks capability, including before `/api/inbox/attachments`. Probes
+are not cached as write authority; SP independently enforces its explicit target
+service-account allowlist. The existing Eval `/config` returns `enabled:false`
+when target capability is disabled; upstream 401 stays dependency unavailability,
+not browser authentication. A disabled apply keeps its durable plan/key resumable.
+
+`migrations-postgres/0006_agent_imports.sql` and its Drizzle metadata add only
+Eval-side source/task/intent/lease structures. No old sources are backfilled.
+Agent import PostgreSQL tests opt in only with `EVAL_IMPORT_TEST_DATABASE_URL`;
+they never read `.env` or fall back to `DATABASE_URL`. Other PostgreSQL suites
+use `DATABASE_URL`. Local unit checks remain supported with both variables unset;
+the corresponding database suites explicitly skip.
+
+After merge, the existing `api` job in `.github/workflows/ci.yml` will run ordinary
+and Agent import PostgreSQL tests on its disposable `postgres:17-alpine` service,
+using test-only credentials. It defines one `DATABASE_URL`, rejects a missing
+value before testing, and explicitly derives
+`EVAL_IMPORT_TEST_DATABASE_URL="$DATABASE_URL"` for the test invocation.
+`createTestDatabase` creates, migrates and drops its own random `eval_test_<UUID>`
+databases on that service. The same job also runs `pnpm test:deployment`;
+`deploy-api` still requires the API job to succeed. Live R2 access remains an
+explicit operator opt-in and is not verified by this workflow.
+
 本文是环境变量的唯一完整列表。两个进程对接同一 Eval SP 发布，挂载同一个 `EVAL_BUNDLE_DIR`，配置无效时启动失败。日志统一使用 pino（API 请求日志用 `hono-pino`），错误经 `errorDiagnostics` 脱敏后记录。Run Worker 把 Runtime 与 Harness 诊断事件写入同一 pino 日志（见 [eval-runtime README](../../packages/eval-runtime/README.md) 第 31 条与 [SP Harness 协议](../../docs/eval-sp-harness-protocol.md#diagnostics)），`run_runtime_error` 带 `runId`/`stage`/`samplingId`/`evaluationId`；每个 Run 任务开始时记录 `run_job_start`（`runId`、`jobId`、`retryCount`、`retryLimit`、`final`、`stopPending`）。
 
 `pnpm --filter @eval-platform/eval-api start:api`（`src/server.ts`，配置见 `src/config/api.ts`）启动 HTTP 控制面：

@@ -16,6 +16,20 @@ Agent 新建与编辑直接复用 SP 同一份 `@springbrand/agent-config-editor
 
 Agent 创建时选择“执行 Agent”或“评估 Agent”，用途由 Eval 统一记录，管理页可按用途筛选，也可在编辑时切换。切换为评估 Agent 时自动绑定评估结果 MCP，切回执行 Agent 时自动移除该绑定。用途信息读取失败或 MCP 目录无法完成 reconciliation 时，管理页阻断列表并提示重试，不显示用途未知的配置。新建 Project 的执行 Agent 和评估计划的评估 Agent 分别只请求对应用途，API 也会再次校验用途，不能依赖浏览器筛选绕过。
 
+### 从 dev 导入 Agent
+
+Agent 管理页的「从 dev 导入」是独立的仅新增流程，不改变普通列表、用途筛选、编辑或原生 Agent。来源凭据只在服务端，浏览器只调用 Eval 的 `/api/agent-config-sync`：读取 `config`、搜索已授权 `users`，再按所选用户搜索和游标分页读取 `users/{sourceUserId}/agents`（每页 20，`onlyMissing=true`）。未选用户不读取 Agent；跨页选择保留并明确展示，切换用户清空未提交选择与预览。
+
+用户搜索先 trim，非空才发请求；空白或清空输入仅提示输入名称或邮箱，不读取全部用户、不显示依赖故障。用户选定后的 Agent 搜索允许为空，仍受来源用户和分页约束。
+
+`POST /previews` 只提交 `{sourceUserId, agentIds, purpose, idempotencyKey}`，返回 `202 {taskId}`；之后只读 `GET /tasks/{taskId}`，展示检查结果、逐 Agent 依赖数量、冲突及错误。用途显式选择“执行 Agent”或“评估 Agent”，不由来源或列表筛选推断。依赖由服务端按所选根 Agent 求并集，浏览器不读取或转发完整 SP 配置、资源字节或凭据，也不把逐 Agent 数量相加冒充去重依赖总数。
+
+用户复核后以固定幂等键 `POST /tasks/{taskId}/apply`，仅导入通过检查的根 Agent 与必要依赖，保持原 ID，不覆盖、删除或复活已有对象。关闭弹窗不取消后台任务；同一 Agent 页面重新打开恢复原任务的只读轮询。未知写入响应不自动重发；同页手动重试始终使用原任务、原请求与原幂等键，不能更换用户继续应用旧预览。失败、部分失败和 `outcome_unknown` 分开提示，未知结果须核验，不能当成“全部已同步”。
+
+跨刷新/路由重进只保存一个任务定位指针：按当前 Web origin 与经 `/api/me` 核实的 Eval 目标用户隔离的 localStorage key，值仅 `{taskId}`。重新打开弹窗时先确认当前目标身份，再通过原 SDK 的 `GET /tasks/{taskId}` 读取服务器权威范围、用途、根 IDs、进度和结果；不从缓存或存储重建事实，不自动 POST/确认，也不保存正文、token、幂等键或任务状态。恢复后的任务始终只读；未提交的检查如需继续须显式“重新选择”后重新检查，确认响应不明的任务应先核验。终态指针保留以便查看结果；用户显式重新选择，或切换尚未提交的来源用户/用途/选择时清除原预览指针。已提交任务不能改变范围。存储损坏、不可用及任务 404/403 安全失效，不影响普通页面；其他读取故障保留指针，只读重试。存储不可用时只能保留当前页任务，提示用户保留任务 ID。
+
+查询与工作流状态只在 UI；`api-sdk/agent-imports-api.ts` 是现有 HTTP 客户端的薄层，类型来自 `@eval-platform/eval-contracts` 根导出。任务结束后刷新 `agentKeys.all`，并使用当前 `@springbrand/agent-config-editor/client` 的公开 `skillQueryKeys.all(targetUserId)` 和 `userReferenceQueryKeys.collections(targetUserId)` 刷新编辑器缓存。来源未配置或读取失败只影响导入弹窗，不阻断普通 Agent 管理。普通页面不展示来源列、标签、筛选或编辑项；弹窗中的 dev 用户仅用于限定本次导入范围。
+
 Data 表单与 Schema 上传复用 `eval-dataset` 公开的严格 JSON 解析和输入校验；这些运行时入口随 Web 打包。上传与 Project 选择上限只从 API 的 `GET /api/input-limits` 读取，没有浏览器数值副本。
 
 文本导入共用 `useTextImport` 草稿：从文件选择/拖入事件开始清空旧内容，仅接受最新选择的提取与读取；手动编辑接管草稿，关闭窗口销毁草稿。FileDropzone 复用 `react-dropzone` 的校验与 `file-selector` 的公开提取接口，选择信号覆盖提取到解码的完整生命周期。读取中或失败时不能提交。创建、导入的响应未确认时刷新目录，先核对新增条目再提交，避免重复创建。

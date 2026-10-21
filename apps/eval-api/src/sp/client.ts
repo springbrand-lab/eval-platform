@@ -49,6 +49,12 @@ export interface EvalSpAgentConfig {
   readonly [field: string]: unknown;
 }
 
+/** Transport fact only; never part of an ordinary Agent DTO. Missing/unknown header is not proof of insertion. */
+export interface EvalSpAgentConfigCreation {
+  readonly config: EvalSpAgentConfig;
+  readonly created: boolean | null;
+}
+
 /** Public MCP metadata returned by SP. Connection credentials are never exposed. */
 export interface EvalSpMcpServer {
   readonly id: string;
@@ -64,6 +70,7 @@ export interface EvalSpClient {
   listMcpServers(token: string, source?: "platform" | "user"): Promise<readonly EvalSpMcpServer[]>;
   getAgentConfig(token: string, id: string): Promise<EvalSpAgentConfig>;
   createAgentConfig(token: string, input: unknown): Promise<EvalSpAgentConfig>;
+  createAgentConfigOutcome?(token: string, input: unknown): Promise<EvalSpAgentConfigCreation>;
   updateAgentConfig(token: string, id: string, input: unknown): Promise<EvalSpAgentConfig>;
   deleteAgentConfig(token: string, id: string): Promise<unknown>;
   requestAgentLibrary(token: string, input: AgentLibraryRequest): Promise<unknown>;
@@ -117,7 +124,10 @@ export function createEvalSpClient(input: {
   const writeOrigin = httpOriginSchema.parse(input.writeOrigin);
 
   async function request(token: string, path: string, method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" = "GET",
-    body?: unknown, options: { signal?: AbortSignal; contentType?: string } = {}): Promise<unknown> {
+    body?: unknown, options: {
+      signal?: AbortSignal; contentType?: string;
+      responseHeaders?: (headers: Readonly<Record<string, string>>) => void;
+    } = {}): Promise<unknown> {
     if (typeof token !== "string" || token.length === 0) throw new TypeError("Session token is required");
     try {
       const result = await http.request<unknown>(path, {
@@ -127,10 +137,22 @@ export function createEvalSpClient(input: {
         ...(options.signal === undefined ? {} : { signal: options.signal }),
         ...(body === undefined ? {} : { body }),
       });
+      options.responseHeaders?.(result.headers);
       return result.data;
     } catch (error) {
       throwSpClientError(error);
     }
+  }
+
+  async function createAgentConfigOutcome(token: string, body: unknown): Promise<EvalSpAgentConfigCreation> {
+    let created: boolean | null = null;
+    const data = await request(token, "/api/user-agent-configs", "POST", body, {
+      responseHeaders(headers) {
+        const value = headers["x-agent-config-created"];
+        created = value === "true" ? true : value === "false" ? false : null;
+      },
+    });
+    return { config: read(agentConfigSchema, data), created };
   }
 
   return {
@@ -160,8 +182,9 @@ export function createEvalSpClient(input: {
       return read(agentConfigSchema, await request(token, configPath(id)));
     },
     async createAgentConfig(token, body) {
-      return read(agentConfigSchema, await request(token, "/api/user-agent-configs", "POST", body));
+      return (await createAgentConfigOutcome(token, body)).config;
     },
+    createAgentConfigOutcome,
     async updateAgentConfig(token, id, body) {
       return read(agentConfigSchema, await request(token, configPath(id), "PATCH", body));
     },

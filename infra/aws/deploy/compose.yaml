@@ -54,6 +54,20 @@ services:
         awslogs-group: /springbrand/eval-platform/production
         awslogs-stream: run-worker
 
+  import-worker:
+    <<: *eval-runtime
+    profiles: ["agent-imports"]
+    command: ["node", "dist/agent-import-worker-main.js"]
+    stop_grace_period: 5m
+    environment:
+      EVAL_BUNDLE_DIR: /data/bundles
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:?AWS_REGION is required}
+        awslogs-group: /springbrand/eval-platform/production
+        awslogs-stream: import-worker
+
 volumes:
   bundles: {}
 

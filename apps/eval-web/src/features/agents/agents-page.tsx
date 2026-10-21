@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { Bot, CheckCircle2, ClipboardCheck, Plus } from "lucide-react";
+import { Bot, CheckCircle2, ClipboardCheck, Download, Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 import { agentKeys, listAgentConfigs, listAgentOptions } from "@/api-sdk/agent-configs-api";
 import { agentEditorClient, agentLibraryKeys } from "@/api-sdk/agent-editor-api";
@@ -12,6 +12,7 @@ import { Card } from "@/components/ui/card";
 import { DataTable } from "@/components/ui/data-table";
 import { CopyId } from "@/components/ui/data-display";
 import { EmptyState, ErrorBlock, LoadingBlock } from "@/components/ui/feedback";
+import { AgentImportDialog } from "./agent-import-dialog";
 
 type AgentFilter = "all" | AgentPurpose;
 
@@ -47,6 +48,7 @@ function modelLabel(config: AgentConfig, models: readonly { id: string; name: st
 export function AgentsPage() {
   const navigate = useNavigate();
   const [filter, setFilter] = useState<AgentFilter>("all");
+  const [importing, setImporting] = useState(false);
   const configs = useQuery({ queryKey: agentKeys.list(), queryFn: ({ signal }) => listAgentConfigs(signal) });
   const purposes = useQuery({ queryKey: agentKeys.options(), queryFn: ({ signal }) => listAgentOptions(undefined, undefined, signal) });
   const models = useQuery({ queryKey: agentLibraryKeys.models, queryFn: ({ signal }) => agentEditorClient.models.listModelCatalog(signal) });
@@ -65,7 +67,10 @@ export function AgentsPage() {
       <PageHeader
         title="Agent 管理"
         description="按用途管理执行与评估 Agent。创建项目时只会看到与用途匹配的配置。"
-        actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => void navigate({ to: "/agents/new" })}>新建 Agent</Button>}
+        actions={<>
+          <Button icon={<Download className="size-4" />} onClick={() => setImporting(true)}>从 dev 导入</Button>
+          <Button variant="primary" icon={<Plus className="size-4" />} onClick={() => void navigate({ to: "/agents/new" })}>新建 Agent</Button>
+        </>}
       />
       <Card>
         {configs.error ? <div className="p-4"><ErrorBlock error={configs.error} onRetry={() => void configs.refetch()} /></div>
@@ -119,6 +124,7 @@ export function AgentsPage() {
           </>
         )}
       </Card>
+      <AgentImportDialog open={importing} onClose={() => setImporting(false)} />
     </Page>
   );
 }

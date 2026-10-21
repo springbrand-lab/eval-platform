@@ -1,5 +1,13 @@
 # @eval-platform/eval-contracts
 
+`src/agent-imports.ts` 拥有 dev → Eval 仅新增导入的公共 DTO 与严格 preview/apply 请求 Schema：
+`AgentImportConfig`、`AgentImportSourceUser`、`AgentImportCandidate`、`AgentImportCandidatePage`、
+`AgentImportTaskView`。来源用户仅限定已授权导出范围，目标仍是固定 Eval 服务账号。
+任务可表达部分失败与结果待校准；来源/回执/凭据只属于 API 内部事实，不加入普通 Agent DTO。
+本包不执行下载、导入、队列或数据库操作。HTTP 使用 `/api/agent-config-sync` 的
+`config`、`users`、`users/:sourceUserId/agents`、`previews`、`tasks/:taskId`、
+`tasks/:taskId/apply`；preview/apply 均返回 202 `{taskId}`。
+
 `IDEMPOTENT_RETRY_POLICY` 与 `idempotentRetryBackoffMs()` 是跨 Runtime/Web 共用的纯重试契约：恢复预算 10 次，退避从 250ms 指数增长、上限 10s；本包不执行循环或计时器。Runtime 保持首次操作加 10 次幂等重试，Web 在一次未确认的 DELETE 后把这份恢复预算用于最多 10 次只读确认（首次立即查询）。Agent 的 `maxRestarts` 独立，不由该预算改变。
 
 `EvalInputLimits` 与 `evalInputLimitsSchema` 定义控制面公开的输入上限形状，不定义 SP 或应用的数值。API 从实际校验常量投影，Web 通过 `GET /api/input-limits` 获取，不维护第二套数值。

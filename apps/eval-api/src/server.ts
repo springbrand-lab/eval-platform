@@ -2,6 +2,9 @@ import { serve } from "@hono/node-server";
 import { Pool } from "pg";
 import pino from "pino";
 import { createRoutes } from "./app.js";
+import { createAgentImportQueue, openAgentImportBoss } from "./agent-import-queue.js";
+import { createAgentImportSource } from "./agent-imports/source.js";
+import { createAgentImportTarget } from "./agent-imports/target.js";
 import { loadApiConfig } from "./config/api.js";
 import { createEvalDb } from "./db/client.js";
 import { createPostgresEvaluationSubmissions } from "./db/evaluation-submissions.js";
@@ -26,6 +29,12 @@ if (serviceUser?.id !== config.EVAL_SP_SERVICE_USER_ID || !serviceUser.email) {
   throw new Error("EVAL_SP_SERVICE_SESSION_TOKEN does not belong to EVAL_SP_SERVICE_USER_ID");
 }
 const db = createEvalDb(pool);
+const importBoss = config.EVAL_DEV_SP_API_ORIGIN === undefined ? undefined : await openAgentImportBoss(config.DATABASE_URL, logger);
+const agentImportTarget = createAgentImportTarget({
+  origin: config.EVAL_SP_API_ORIGIN, writeOrigin: config.EVAL_WEB_ORIGIN, ownerUserId: serviceUser.id,
+  sessionToken: config.EVAL_SP_SERVICE_SESSION_TOKEN, sp,
+  ...(config.EVAL_DEV_SP_API_ORIGIN === undefined ? {} : { sourceOrigin: config.EVAL_DEV_SP_API_ORIGIN }),
+});
 const runtime: ApiRuntime = {
   webOrigin: config.EVAL_WEB_ORIGIN,
   ...(config.EVAL_WEB_API_TOKEN === undefined ? {} : { webApiToken: config.EVAL_WEB_API_TOKEN }),
@@ -39,7 +48,12 @@ const runtime: ApiRuntime = {
   serviceAccount: { user: serviceUser, email: serviceUser.email, sessionToken: config.EVAL_SP_SERVICE_SESSION_TOKEN },
   spAdminToken: config.EVAL_SP_ADMIN_TOKEN,
   ownerServices: createOwnerServices({
-    db, sp, bundles, release: config.release, runQueue,
+    db, sp, bundles, release: config.release, runQueue, agentImportTarget,
+    ...(importBoss === undefined ? {} : { agentImports: {
+      source: createAgentImportSource({ origin: config.EVAL_DEV_SP_API_ORIGIN!, targetOrigin: config.EVAL_SP_API_ORIGIN,
+        token: config.EVAL_DEV_SP_EXPORT_TOKEN! }),
+      queue: createAgentImportQueue(importBoss),
+    } }),
     ...(config.langfuse === undefined ? {} : { publishScore: createLangfuseScorePublisher({ config: config.langfuse }) }),
   }),
   ...(config.EVAL_RESULT_MCP_TOKEN === undefined ? {} : { evaluationResults: {
@@ -60,7 +74,7 @@ logger.info({ event: "api_started", host: config.EVAL_API_HOST, port: config.EVA
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     server.close(() => {
-      runQueue.close().then(() => pool.end()).then(
+      Promise.all([runQueue.close(), importBoss?.stop()]).then(() => pool.end()).then(
         () => process.exit(0),
         (error: unknown) => {
           logger.error({ event: "api_shutdown_failed", error: errorDiagnostics(error) }, "Eval API shutdown failed");

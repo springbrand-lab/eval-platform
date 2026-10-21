@@ -170,7 +170,8 @@ describe.skipIf(!connection)("resource snapshot JSON migration", () => {
     expect(await source.read({ projectId: seeded.projectId })).toEqual(factsBefore);
     const upgradedHistory = await history();
     expect(upgradedHistory.slice(0, prefix.length)).toEqual(prefix);
-    expect(upgradedHistory).toHaveLength(prefix.length + 1);
+    const expectedHistory = JSON.parse(await readFile(path.join(migrationsFolder, "meta/_journal.json"), "utf8"));
+    expect(upgradedHistory).toHaveLength(expectedHistory.entries.length);
 
     const reader = createPostgresResourceSnapshotReader(db, owner);
     const download = async (stage: "execution" | "evaluation", recordId: string, attemptId: string) => {
