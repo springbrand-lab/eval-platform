@@ -42,10 +42,28 @@ describe("deployment-scoped import byte policy", () => {
     expect(() => downloads("target").validateUrl("https://creation-file-eval.springbrand.ai.evil.test/file")).toThrow();
   });
 
+  it.each(["source", "target"] as const)("hashes a literal percent filename at its URI-encoded %s URL without rewriting it", async (purpose) => {
+    const origin = purpose === "source" ? SOURCE_IMPORT_CDN_ORIGINS[0] : TARGET_IMPORT_CDN_ORIGINS[0];
+    const url = `${origin}/users/owner/skills/percent-assets/versions/v1/percent-assets/assets/100%25.txt`;
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => new Response("abc"));
+    const file = { path: "assets/100%.txt", size: 3, url };
+    await expect(downloads(purpose, fetch).hash(file)).resolves.toEqual({
+      ...file, sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    });
+    expect(fetch.mock.calls.map(([address]) => address)).toEqual([url]);
+    for (const [, init] of fetch.mock.calls) {
+      expect(init?.redirect).toBe("error");
+      expect(init?.credentials).toBe("omit");
+      expect(new Headers(init?.headers).has("Authorization")).toBe(false);
+    }
+  });
+
   it.each([
-    "/files/../SKILL.md", "/files/%2e%2e/SKILL.md", "/files/%252e%252e/SKILL.md",
+    "/files/../SKILL.md", "/files/%2e/SKILL.md", "/files/%2e%2e/SKILL.md", "/files/%252e%252e/SKILL.md",
     "/files/a%2fb", "/files/a%2Fb", "/files/a%252fb", "/files/%5csecret", "/files/%00file",
-    "/files/C:/file", "/files//name", "/%61pi/user-agent-configs/id/share.zip",
+    "/files/%255csecret", "/files/%2500file", "/files/%0afile", "/files/%250afile", "/files/%7ffile", "/files/%257ffile",
+    "/files/C:/file", "/files/%43%3a/file", "/files//name", "/files/100%.txt", "/a/%2e%2e/b", "/a/%00",
+    "/%61pi/user-agent-configs/id/share.zip",
   ])("rejects traversal and encoded separator path %s before fetching", async (pathname) => {
     const fetch = vi.fn<typeof globalThis.fetch>();
     await expect(downloads("target", fetch).hash({

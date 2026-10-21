@@ -228,12 +228,68 @@ describe("selected public capability definition evidence", () => {
     f.setStatus(status);
     await expect(f.worker.run(task.id)).rejects.toBeInstanceOf(ImportDependencyError);
     expect(resourceWrites(f)).toEqual([]);
-    expect(task.view.status).toBe("outcome_unknown");
+    expect(task.view.status).toBe("importing");
+    expect(task.view.progress.stage).toBe("receipts");
     expect(task.plan).toEqual(plan);
     f.setStatus(200);
     await f.worker.run(task.id);
     expect(task.view.status).toBe("completed");
     expect(task.plan).toEqual(plan);
+  });
+
+  it("finishes a committed Agent POST with an unknown 409 through its receipt, without another resource write", async () => {
+    const f = await fixture();
+    const fetch = f.fetch.getMockImplementation()!;
+    let intercepted = false;
+    f.fetch.mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      const response = await fetch(request);
+      if (!intercepted && request.method === "POST" && new URL(request.url).pathname === "/api/user-agent-configs/imports") {
+        intercepted = true;
+        return Response.json({ code: "UNKNOWN_PROXY_CONFLICT", errMsg: "Unverified response" }, { status: 409 });
+      }
+      return response;
+    });
+    const task = await f.preview();
+    await f.store.apply(task.id, "apply");
+    await f.worker.run(task.id);
+    expect(intercepted).toBe(true);
+    expect(task.view.status).toBe("completed");
+    expect(task.view.agents.map((agent) => agent.status)).toEqual(["created", "created"]);
+    const writes = resourceWrites(f).filter((request) => new URL(request.url).pathname === "/api/user-agent-configs/imports");
+    expect(await Promise.all(writes.map(async (request) => (await request.clone().json() as { id: string }).id)))
+      .toEqual([agentId, otherAgentId]);
+  });
+
+  it("keeps an unverifiable Agent POST active and resumes the same plan without rewriting completed dependencies", async () => {
+    const f = await fixture();
+    const fetch = f.fetch.getMockImplementation()!;
+    let unavailable = true;
+    f.fetch.mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      if (unavailable && request.method === "POST" && new URL(request.url).pathname === "/api/user-agent-configs/imports"
+        && (await request.clone().json() as { id: string }).id === agentId) {
+        f.requests.push(request.clone());
+        return Response.json({ code: "UNKNOWN_PROXY_CONFLICT", errMsg: "Unverified response" }, { status: 409 });
+      }
+      return fetch(request);
+    });
+    const task = await f.preview();
+    const plan = structuredClone(task.plan);
+    await f.store.apply(task.id, "apply");
+    await expect(f.worker.run(task.id)).rejects.toMatchObject({ code: "EVAL_SP_UNAVAILABLE" });
+    expect(task.view.status).toBe("importing");
+    expect(task.view.progress.stage).toBe("receipts");
+    expect(task.view.agents.map((agent) => agent.status)).toEqual(["outcome_unknown", "created"]);
+    const dependencyWrites = () => resourceWrites(f).filter((request) =>
+      new URL(request.url).pathname !== "/api/user-agent-configs/imports");
+    const completedDependencyWrites = dependencyWrites().length;
+    unavailable = false;
+    await f.worker.run(task.id);
+    expect(task.view.status).toBe("completed");
+    expect(task.view.agents.map((agent) => agent.status)).toEqual(["created", "created"]);
+    expect(task.plan).toEqual(plan);
+    expect(dependencyWrites()).toHaveLength(completedDependencyWrites);
   });
 
   it("guards the metadata POST with target import capability, without confusing it with a resource mutation", async () => {

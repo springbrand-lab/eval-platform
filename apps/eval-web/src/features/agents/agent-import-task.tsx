@@ -21,6 +21,7 @@ const STAGE_LABELS: Readonly<Record<string, string>> = {
   checking: "检查依赖", preparing: "准备文件", preparing_files: "准备文件",
   skills: "导入 Skill", references: "导入参考资料", agents: "导入 Agent",
   finalizing: "记录用途与回执", queued: "等待处理", importing: "导入资源", completed: "处理结束",
+  receipts: "核验回执与本地收尾", finished: "处理结束",
 };
 
 export function AgentImportTask({ task, userName, expired, restored = false }: {
@@ -28,12 +29,14 @@ export function AgentImportTask({ task, userName, expired, restored = false }: {
 }) {
   const ready = task.agents.filter((agent) => agent.status === "ready").length;
   const unknown = task.agents.filter((agent) => agent.status === "outcome_unknown").length;
+  const recovering = task.status === "importing" && (task.progress.stage === "receipts" || unknown > 0);
   const issues = task.summary.failed > 0 || task.summary.conflicts > 0 || unknown > 0;
   const value = task.progress.total > 0 ? Math.min(100, task.progress.completed / task.progress.total * 100) : null;
   return <section aria-label="导入检查与结果" className="space-y-3 border-t border-border pt-4">
     <div>
       <h3 className="text-sm font-semibold" role="status">{task.status === "ready" && restored ? "已恢复检查结果（只读）"
-        : task.status === "completed" && issues ? "任务已结束，仍有项目需处理" : STATUS_LABELS[task.status]}</h3>
+        : task.status === "completed" && issues ? "任务已结束，仍有项目需处理"
+          : recovering ? "后台核验回执与本地收尾中" : STATUS_LABELS[task.status]}</h3>
       <p className="mt-1 text-[13px] text-text-muted">本次 dev 用户：{userName} · 用途：{task.purpose === "execution" ? "执行 Agent" : "评估 Agent"}</p>
       <p className="mt-1 break-all font-mono text-xs text-text-muted">任务 ID：{task.id}</p>
     </div>
@@ -55,8 +58,11 @@ export function AgentImportTask({ task, userName, expired, restored = false }: {
     </Notice>}
     {task.status === "completed_with_errors" && <Notice tone="warning">部分导入未成功，已新增的 Agent 和资源会保留。请逐项查看失败与冲突，不会自动重试或删除。</Notice>}
     {task.status === "failed" && <Notice tone="danger">任务失败，导入未完成；已经创建的资源会保留。请查看错误并核验结果，不能将失败视为同步成功。</Notice>}
-    {(task.status === "outcome_unknown" || unknown > 0) && <Notice tone="warning">
-      部分写入可能已经生效，但尚无足够回执确认。不会自动重试、覆盖或删除；请保留任务 ID，联系管理员核验，不要重新发起相同导入。
+    {recovering && <Notice tone="info">
+      后台仍在自动恢复：沿用原任务、原 ID 和原幂等键核验回执并完成 Eval 记录。页面只读查询，无需重新确认；不会覆盖或删除已有资源。
+    </Notice>}
+    {task.status === "outcome_unknown" && <Notice tone="warning">
+      部分写入可能已经生效，但回执核验或本地收尾尚未完成。后台自动恢复已停止，不会自动继续、覆盖或删除；可刷新任务状态查看核验结果。请保留任务 ID，联系管理员核验，不要重新发起相同导入。
     </Notice>}
     {task.error && <p role="alert" className="whitespace-pre-wrap break-words text-[13px] text-danger">{task.error}</p>}
     <Table aria-label="逐 Agent 导入结果">

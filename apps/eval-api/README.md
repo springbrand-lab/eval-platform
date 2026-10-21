@@ -37,11 +37,12 @@ Reference ID as `clientAttachmentId`; SP rejects immutable attachment identity o
 content mismatches with `409 REQUEST_CONFLICT`. The target adapter treats only
 HTTP 409 with a known public conflict code (`AGENT_CONFIG_IMPORT_CONFLICT` or
 `REQUEST_CONFLICT`) as an authoritative conflict on dependency/upload and receipt
-reads, preserving the structured upstream cause rather than reporting an unknown
-outcome or retrying the dependency. On these reads/uploads, unknown 409 codes,
-malformed responses, network and target authentication failures remain dependency
-unavailability; missing receipts remain 404/null. Upstream failures never
-invalidate the browser session.
+reads and create-only POSTs, preserving the structured upstream cause. Unknown
+409 codes, malformed responses, network and target authentication failures are
+never classified from HTTP status alone. Reads/uploads retain dependency failures;
+an uncertain import POST first checks the same key's durable receipt and remains
+unresolved if that receipt cannot prove success. Missing receipts remain 404/null.
+Upstream failures never invalidate the browser session.
 IDs are preserved; platform Skill IDs are strings, not necessarily UUIDs.
 Platform Skills are verified against the target catalog, never uploaded as user
 Skills. Same-name private Skill collisions block only their dependent Agents.
@@ -63,8 +64,14 @@ purpose/source finalization. SP's retained GET body alone cannot prove it is act
 Preview freezes the selected dependency union and its actual byte hashes under
 `EVAL_BUNDLE_DIR/imports` with bounded files/bytes, private permissions and TTL.
 Apply consumes that immutable plan, only ready candidates, dependencies first.
+Automatic recovery keeps the task `importing`; receipt reconciliation uses stage
+`receipts` even when individual Agents have unknown results. Exhausting the queue
+recovery budget leaves the task `outcome_unknown` for manual reconciliation, never
+fabricated failure or success. The Web only polls this persisted lifecycle.
 Invalid paths/URLs on one resource block only its dependent Agents; aggregate
 selected-union file/byte limits still reject the whole preview.
+Manifest/archive paths are literal filenames, including `%`; only download URLs
+are URI-decoded. Neither path validation nor ZIP creation rewrites filenames.
 Source export settings must already use SP's canonical public wire defaults
 (`presetId: null`, `referenceFileIds: []` when absent in storage). Eval preserves
 the complete setting, does not copy SP's normalizer or guess missing defaults,

@@ -22,7 +22,10 @@ export class ImportLeaseLostError extends Error {
   constructor() { super("Import task lease was lost"); }
 }
 export function importConflict(error: unknown): boolean {
-  return error instanceof ImportConflictError || error instanceof EvalSpApiError && error.status === 409;
+  if (error instanceof ImportConflictError) return true;
+  if (!(error instanceof EvalSpApiError) || error.status !== 409
+    || error.payload === null || typeof error.payload !== "object" || !("code" in error.payload)) return false;
+  return error.payload.code === "AGENT_CONFIG_IMPORT_CONFLICT" || error.payload.code === "REQUEST_CONFLICT";
 }
 /** Never relay upstream authentication/404 as a browser login or task-not-found failure. */
 export function dependencyFailure(cause: unknown): never {

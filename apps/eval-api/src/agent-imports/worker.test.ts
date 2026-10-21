@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { ImportLeaseLostError, ImportOutcomeUnknownError, ImportTargetDisabledError } from "./errors.js";
+import { ImportDependencyError, ImportLeaseLostError, ImportOutcomeUnknownError, ImportTargetDisabledError } from "./errors.js";
 import { IMPORT_LIMITS, resourceKey } from "./model.js";
 import { agentId, otherAgentId, owner, referenceId, sourceUser, snapshotFixture, workerFixture } from "./worker.test-support.js";
 
@@ -61,17 +61,81 @@ describe("durable import worker through approved public HTTP seams", () => {
     expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
   });
 
-  it("performs no target write while disabled after enqueue, and resumes the same apply after capability is enabled", async () => {
+  it.each([false, true])("retains the same apply without target writes while disabled before execution (final: %s)", async (final) => {
     const f = await fixture();
     const task = await f.preview();
+    const plan = structuredClone(task.plan);
     await f.store.apply(task.id, "apply");
     f.setTargetEnabled(false);
-    await expect(f.worker.run(task.id, { final: true })).rejects.toBeInstanceOf(ImportTargetDisabledError);
-    expect(task.view.status).toBe("outcome_unknown");
+    const savedBefore = f.savedViews.length;
+    await expect(f.worker.run(task.id, { final })).rejects.toBeInstanceOf(ImportTargetDisabledError);
+    expect(task.view.status).toBe(final ? "outcome_unknown" : "importing");
+    expect(task.view.progress.stage).toBe("receipts");
+    expect(task.plan).toEqual(plan);
+    expect(task.applyKey).toBe("apply");
+    expect(f.savedViews.slice(savedBefore).map((view) => view.status)).toEqual([final ? "outcome_unknown" : "importing"]);
     expect(f.requests.every((request) => request.method === "GET")).toBe(true);
     f.setTargetEnabled(true);
     await f.worker.run(task.id);
     expect(task.view.status).toBe("completed");
+  });
+
+  it.each([false, true])("preserves earlier writes and their receipts while disabled before reconciliation (final: %s)", async (final) => {
+    const f = await fixture();
+    const task = await f.preview();
+    const plan = structuredClone(task.plan);
+    await f.store.apply(task.id, "apply");
+    f.failNextPurpose();
+    await expect(f.worker.run(task.id)).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
+    const intent = structuredClone(f.intents.get(resourceKey("agent", agentId))!);
+    const writes = f.requests.filter((request) => request.method === "POST").length;
+    f.setTargetEnabled(false);
+    await expect(f.worker.run(task.id, { final })).rejects.toBeInstanceOf(ImportTargetDisabledError);
+    expect(task.view.status).toBe(final ? "outcome_unknown" : "importing");
+    expect(task.view.progress.stage).toBe("receipts");
+    expect(task.plan).toEqual(plan);
+    expect(task.applyKey).toBe("apply");
+    expect(f.intents.get(resourceKey("agent", agentId))).toEqual(intent);
+    expect(f.targetAgents.has(agentId)).toBe(true);
+    expect(f.requests.filter((request) => request.method === "POST")).toHaveLength(writes);
+    f.setTargetEnabled(true);
+    await f.worker.run(task.id);
+    expect(task.view.status).toBe("completed");
+    expect(f.requests.filter((request) => request.method === "POST")).toHaveLength(writes);
+    expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it("keeps a transient preview checking, then fails it only when the delivery budget is exhausted", async () => {
+    const f = await fixture();
+    const task = await f.store.create({ sourceUserId: sourceUser,
+      agentIds: [agentId], purpose: "execution", idempotencyKey: "preview" }, f.source.connectionId);
+    const fetch = f.fetch.getMockImplementation()!;
+    f.fetch.mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      if (new URL(request.url).origin === "https://dev.test") {
+        return Response.json({ code: "SERVICE_UNAVAILABLE", errMsg: "unavailable" }, { status: 503 });
+      }
+      return fetch(request);
+    });
+    await expect(f.worker.run(task.id)).rejects.toBeInstanceOf(ImportDependencyError);
+    expect(task.view.status).toBe("checking");
+    expect(task.view.agents[0]?.status).toBe("pending");
+    await expect(f.worker.run(task.id, { final: true })).rejects.toBeInstanceOf(ImportDependencyError);
+    expect(task.view.status).toBe("failed");
+    expect(task.view.agents[0]?.status).toBe("failed");
+    expect(task.applyKey).toBeNull();
+    expect(f.requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  it("fails a deterministic global apply conflict without treating it as recoverable receipt work", async () => {
+    const f = await fixture();
+    const task = await f.preview();
+    await f.store.apply(task.id, "apply");
+    task.connectionId = "different-source";
+    await expect(f.worker.run(task.id)).resolves.toBeUndefined();
+    expect(task.view.status).toBe("failed");
+    expect(task.view.agents.map((agent) => agent.status)).toEqual(["failed", "failed"]);
+    expect(f.requests.every((request) => request.method === "GET")).toBe(true);
   });
   it("prepares only the selected union, imports all Skill bytes and target attachments, dependencies before same-ID Agents", async () => {
     const f = await fixture();
@@ -112,7 +176,7 @@ describe("durable import worker through approved public HTTP seams", () => {
 
   it.each(["path", "url", "reference-name"] as const)("isolates invalid source %s to its dependency closure and still applies an independent root", async (invalid) => {
     const snapshot = snapshotFixture();
-    if (invalid === "path") snapshot.skills[0]!.files[1]!.path = "assets/100%.txt";
+    if (invalid === "path") snapshot.skills[0]!.files[1]!.path = "assets/../brief.txt";
     else if (invalid === "url") snapshot.skills[0]!.files[1]!.url = "https://dev.test/api/private";
     else snapshot.references[0]!.name = "../brief.txt";
     const original = structuredClone(snapshot);
@@ -199,13 +263,18 @@ describe("durable import worker through approved public HTTP seams", () => {
     expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(2);
   });
 
-  it.each(["purpose", "source"] as const)("keeps a confirmed Agent after %s persistence failure and recovers by receipt, never DELETE/new ID", async (failure) => {
+  it.each(["purpose", "source"] as const)("keeps receipt recovery active after %s persistence failure and completes on the next delivery, never DELETE/new ID", async (failure) => {
     const f = await fixture();
     const task = await f.preview();
     failure === "purpose" ? f.failNextPurpose() : f.failNextSource();
     await f.store.apply(task.id, "apply");
+    const savedBefore = f.savedViews.length;
     await expect(f.worker.run(task.id)).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
-    expect(task.view.status).toBe("outcome_unknown");
+    expect(task.view.status).toBe("importing");
+    expect(task.view.progress.stage).toBe("receipts");
+    expect(task.view.error).toContain("background recovery will continue");
+    expect(task.view.agents.map((agent) => agent.status)).toEqual(["outcome_unknown", "created"]);
+    expect(f.savedViews.slice(savedBefore).every((view) => view.status === "importing")).toBe(true);
     expect(f.targetAgents.has(agentId)).toBe(true);
     expect(f.intents.get(resourceKey("agent", agentId))?.receipt?.resourceId).toBe(agentId);
     expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
@@ -215,6 +284,105 @@ describe("durable import worker through approved public HTTP seams", () => {
     expect(f.sources.get(resourceKey("agent", agentId))?.origin).toBe("dev_import");
     expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(2);
     expect(f.requests.filter((request) => new URL(request.url).origin === "https://dev.test")).toHaveLength(sourceReads);
+    expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it("publishes terminal outcome_unknown only after the final unsuccessful local reconciliation, preserving the receipt and plan", async () => {
+    const f = await fixture();
+    const task = await f.preview([agentId]);
+    const plan = structuredClone(task.plan);
+    await f.store.apply(task.id, "apply");
+    f.failNextPurpose();
+    await expect(f.worker.run(task.id)).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
+    expect(task.view.status).toBe("importing");
+    const intent = structuredClone(f.intents.get(resourceKey("agent", agentId))!);
+    const writes = f.requests.filter((request) => request.method === "POST").length;
+    f.failNextPurpose();
+    await expect(f.worker.run(task.id, { final: true })).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
+    expect(task.view.status).toBe("outcome_unknown");
+    expect(task.view.progress.stage).toBe("receipts");
+    expect(task.view.error).toContain("Automatic import recovery is exhausted");
+    expect(task.view.agents[0]?.status).toBe("outcome_unknown");
+    expect(task.plan).toEqual(plan);
+    expect(task.applyKey).toBe("apply");
+    expect(f.intents.get(resourceKey("agent", agentId))).toEqual(intent);
+    expect(f.targetAgents.has(agentId)).toBe(true);
+    expect(f.sources.has(resourceKey("agent", agentId))).toBe(false);
+    expect(f.savedViews.filter((view) => view.status === "outcome_unknown")).toHaveLength(1);
+    expect(f.savedViews.at(-1)?.status).toBe("outcome_unknown");
+    expect(f.requests.filter((request) => request.method === "POST")).toHaveLength(writes);
+    expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("does not mislabel committed writes when task completion persistence fails (final: %s)", async (final) => {
+    const f = await fixture();
+    const task = await f.preview([otherAgentId]);
+    const plan = structuredClone(task.plan);
+    await f.store.apply(task.id, "apply");
+    f.failNextCompletion();
+    const savedBefore = f.savedViews.length;
+    await expect(f.worker.run(task.id, { final })).rejects.toThrow("task DB offline");
+    expect(task.view.status).toBe(final ? "outcome_unknown" : "importing");
+    expect(task.view.progress.stage).toBe("receipts");
+    expect(task.view.agents[0]?.status).toBe("created");
+    expect(task.plan).toEqual(plan);
+    expect(task.applyKey).toBe("apply");
+    expect(f.intents.get(resourceKey("agent", otherAgentId))).toMatchObject({
+      status: "completed", receipt: { resourceId: otherAgentId },
+    });
+    expect([...f.targetAgents.keys()]).toEqual([otherAgentId]);
+    expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(1);
+    expect(f.savedViews.slice(savedBefore).some((view) => ["failed", "completed"].includes(view.status))).toBe(false);
+    if (!final) {
+      expect(f.savedViews.slice(savedBefore).some((view) => view.status === "outcome_unknown")).toBe(false);
+      await f.worker.run(task.id);
+      expect(task.view.status).toBe("completed");
+      expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(1);
+    }
+    expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("keeps a lost Agent write active, preserving its identity if receipt retries exhaust (final: %s)", async (final) => {
+    const f = await fixture();
+    const task = await f.preview([otherAgentId]);
+    await f.store.apply(task.id, "apply");
+    const key = task.plan!.resources.find((resource) => resource.kind === "agent")!.importKey;
+    let unavailable = true;
+    const fetch = f.fetch.getMockImplementation()!;
+    f.fetch.mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (unavailable && f.targetAgents.has(otherAgentId) && path === `/api/agent-config-imports/receipts/${key}`) {
+        return Response.json({ code: "SERVICE_UNAVAILABLE", errMsg: "unavailable" }, { status: 503 });
+      }
+      const response = await fetch(request);
+      if (unavailable && request.method === "POST" && path === "/api/user-agent-configs/imports") {
+        throw new TypeError("response lost after insert");
+      }
+      return response;
+    });
+    const savedBefore = f.savedViews.length;
+    await expect(f.worker.run(task.id)).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
+    expect(task.view.status).toBe("importing");
+    expect(task.view.progress.stage).toBe("receipts");
+    expect(task.view.agents[0]?.status).toBe("outcome_unknown");
+    expect(f.savedViews.slice(savedBefore).every((view) => view.status === "importing")).toBe(true);
+    expect(f.intents.get(resourceKey("agent", otherAgentId))).toMatchObject({ status: "outcome_unknown", importKey: key });
+    expect(f.targetAgents.has(otherAgentId)).toBe(true);
+    expect(f.sources.has(resourceKey("agent", otherAgentId))).toBe(false);
+    if (final) {
+      await expect(f.worker.run(task.id, { final: true })).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
+      expect(task.view.status).toBe("outcome_unknown");
+      expect(task.view.progress.stage).toBe("receipts");
+      expect(f.intents.get(resourceKey("agent", otherAgentId))).toMatchObject({ status: "outcome_unknown", importKey: key });
+      expect(f.sources.has(resourceKey("agent", otherAgentId))).toBe(false);
+      expect(f.savedViews.filter((view) => view.status === "outcome_unknown")).toHaveLength(1);
+    }
+    unavailable = false;
+    await f.worker.run(task.id, { final: true });
+    expect(task.view.status).toBe("completed");
+    expect(f.sources.get(resourceKey("agent", otherAgentId))?.receipt?.importKey).toBe(key);
+    expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(1);
     expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
   });
 

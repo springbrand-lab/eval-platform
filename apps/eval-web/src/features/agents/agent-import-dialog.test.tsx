@@ -439,7 +439,7 @@ describe("dev Agent import user workflow", () => {
     expect(transport.post).not.toHaveBeenCalled();
   });
 
-  it("polls checking/progress, survives close/reopen read-only, then invalidates Agent and public target-user resource caches", async () => {
+  it("polls active receipt recovery across close/reopen and adopts completion, refreshing Agent and public target-user resource caches", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     previewStatus = "checking";
     const view = await mount(); await open(); await chooseUser(); await chooseAgent(1); await preview();
@@ -465,6 +465,22 @@ describe("dev Agent import user workflow", () => {
     expect(modal().textContent).toContain("导入 Agent");
     expect(modal().textContent).toContain("当前只读查询原任务");
     expect(transport.post).toHaveBeenCalledTimes(2);
+    task!.progress.stage = "receipts";
+    task!.agents[0] = { ...task!.agents[0]!, status: "outcome_unknown" };
+    task!.summary.failed = 1;
+    await poll();
+    await settle(() => expect(modal().textContent).toContain("后台核验回执与本地收尾中"));
+    expect(modal().textContent).toContain("后台仍在自动恢复");
+    expect(modal().textContent).not.toContain("不会自动重试");
+    expect(modal().textContent).not.toContain("联系管理员核验");
+    expect([...modal().querySelectorAll("button")].some((item) => /重新选择|确认导入|重试确认/u.test(item.textContent ?? ""))).toBe(false);
+    await click(button("收起", modal()));
+    const recoveryReads = taskCalls().length;
+    await poll();
+    expect(taskCalls().length).toBeGreaterThan(recoveryReads);
+    await open();
+    expect(modal().textContent).toContain("后台核验回执与本地收尾中");
+    expect(transport.post).toHaveBeenCalledTimes(2);
     const resources = [
       skillQueryKeys.collection(TARGET, "library", ""),
       skillQueryKeys.selected(TARGET, [uuid(5)]),
@@ -473,10 +489,16 @@ describe("dev Agent import user workflow", () => {
     const otherUser = skillQueryKeys.collection(USER_A, "library", "");
     for (const key of [...resources, otherUser]) view.query.setQueryData(key, "cached before import");
     const invalidate = vi.spyOn(view.query, "invalidateQueries");
-    task!.status = "completed";
     task!.agents[0] = { ...task!.agents[0]!, status: "created" };
     task!.summary.created = 1;
-    task!.progress = { ...task!.progress, stage: "completed", completed: 3 };
+    task!.summary.failed = 0;
+    await poll();
+    await settle(() => expect(modal().textContent).toContain("已新增 1"));
+    expect(modal().textContent).toContain("后台核验回执与本地收尾中");
+    expect(modal().textContent).not.toContain("导入完成");
+    expect(invalidate).not.toHaveBeenCalled();
+    task!.status = "completed";
+    task!.progress = { ...task!.progress, stage: "finished", completed: 3 };
     await poll();
     await settle(() => expect(modal().textContent).toContain("导入完成"));
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.all });
@@ -498,10 +520,11 @@ describe("dev Agent import user workflow", () => {
     const view = await mount(); await open(); await chooseUser(); await chooseAgent(1); await chooseAgent(2); await preview();
     await confirm(2);
     task!.status = status;
-    task!.summary = { created: 1, skipped: 0, failed: status === "outcome_unknown" ? 0 : 1, conflicts: 0 };
+    task!.summary = { created: 1, skipped: 0, failed: 1, conflicts: 0 };
     task!.agents[0] = { ...task!.agents[0]!, status: "created" };
     task!.agents[1] = { ...task!.agents[1]!, status: status === "outcome_unknown" ? "outcome_unknown" : "failed", message: "回执或依赖校验失败" };
     task!.error = status === "outcome_unknown" ? "公开回执缺失，待核验" : "依赖导入失败，成功部分保留";
+    task!.progress.stage = status === "outcome_unknown" ? "receipts" : "finished";
     const invalidate = vi.spyOn(view.query, "invalidateQueries");
     await poll();
     await settle(() => expect(modal().textContent).toContain(task!.error));
@@ -512,8 +535,14 @@ describe("dev Agent import user workflow", () => {
     expect(transport.post).toHaveBeenCalledTimes(2);
     if (status === "outcome_unknown") {
       expect(modal().textContent).toContain("部分写入可能已经生效");
+      expect(modal().textContent).toContain("后台自动恢复已停止");
+      expect(modal().textContent).not.toContain("后台仍在自动恢复");
       expect(modal().textContent).toContain("联系管理员核验");
-      expect([...modal().querySelectorAll("button")].some((item) => item.textContent === "重新选择")).toBe(false);
+      expect([...modal().querySelectorAll("button")].some((item) => /重新选择|确认导入|重试确认/u.test(item.textContent ?? ""))).toBe(false);
+      const reads = taskCalls().length;
+      await poll(); await poll();
+      expect(taskCalls()).toHaveLength(reads);
+      expect(transport.post).toHaveBeenCalledTimes(2);
     } else {
       expect(modal().textContent).toContain(status === "failed" ? "任务失败，导入未完成" : "部分导入未成功");
       expect(modal().textContent).toContain("资源会保留");
@@ -529,7 +558,8 @@ describe("dev Agent import user workflow", () => {
     await leave(first);
     task = {
       ...task!, sourceUserId: USER_B, purpose: "evaluation", status: "importing",
-      agents: [{ id: uuid(41), name: "服务器权威 Agent", status: "pending", skillCount: 4, referenceCount: 3 }],
+      agents: [{ id: uuid(41), name: "服务器权威 Agent", status: "outcome_unknown", skillCount: 4, referenceCount: 3 }],
+      progress: { ...task!.progress, stage: "receipts" }, summary: { created: 0, skipped: 0, failed: 1, conflicts: 0 },
     };
     transport.post.mockClear(); transport.get.mockClear();
     const second = await reopenPersisted();
@@ -537,16 +567,25 @@ describe("dev Agent import user workflow", () => {
     expect(modal().textContent).toContain("用途：评估 Agent");
     expect(modal().textContent).toContain("服务器权威 Agent");
     expect(modal().textContent).toContain(uuid(41));
+    expect(modal().textContent).toContain("后台仍在自动恢复");
+    expect(modal().textContent).not.toContain("后台自动恢复已停止");
     expect(modal().querySelector('input[name="agent-import-user"]')).toBeNull();
     expect(candidateCalls()).toHaveLength(0);
     expect(transport.get.mock.calls.some(([path]) => path === `${base}/users`)).toBe(false);
     expect(taskCalls()).toHaveLength(1);
-    task!.progress = { stage: "agents", completed: 2, total: 3, bytesRead: 600, totalBytes: 1024 };
+    task!.progress = { stage: "receipts", completed: 2, total: 3, bytesRead: 600, totalBytes: 1024 };
     await poll();
     await settle(() => expect(modal().textContent).toContain("已读取 600 B"));
     expect(transport.post).not.toHaveBeenCalled();
     expect(JSON.parse(window.localStorage.getItem(key)!)).toEqual({ taskId: task!.id });
     expect(second.container.textContent).not.toMatch(/eval_native|dev_import|INTERNAL_CONNECTION|服务器权威 Agent/u);
+    task!.status = "completed";
+    task!.agents[0] = { ...task!.agents[0]!, status: "created" };
+    task!.summary = { created: 1, skipped: 0, failed: 0, conflicts: 0 };
+    task!.progress.stage = "finished";
+    await poll();
+    await settle(() => expect(modal().textContent).toContain("导入完成"));
+    expect(transport.post).not.toHaveBeenCalled();
   });
 
   it("does not use a previous target user's pointer or cached identity while verifying the current user", async () => {
@@ -768,12 +807,16 @@ describe("dev Agent import user workflow", () => {
     expect(JSON.parse(window.localStorage.getItem(agentImportPointerKey(TARGET))!)).toEqual({ taskId: task!.id });
   });
 
-  it.each(["completed", "completed_with_errors", "failed", "outcome_unknown"] as const)("restores terminal %s results without replay or polling", async (status) => {
+  it.each([
+    ["completed", "created"], ["completed_with_errors", "failed"], ["failed", "failed"],
+    ["outcome_unknown", "outcome_unknown"], ["outcome_unknown", "created"],
+  ] as const)("restores terminal %s with %s Agent rows without automatic replay or polling", async (status, agentStatus) => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const stored = persistedTask(status);
-    stored.agents[0] = { ...stored.agents[0]!, status: status === "completed" ? "created" : status === "outcome_unknown" ? "outcome_unknown" : "failed" };
-    stored.summary.created = status === "completed" ? 1 : 0;
-    stored.summary.failed = ["failed", "completed_with_errors"].includes(status) ? 1 : 0;
+    stored.agents[0] = { ...stored.agents[0]!, status: agentStatus };
+    stored.summary.created = agentStatus === "created" ? 1 : 0;
+    stored.summary.failed = agentStatus === "created" ? 0 : 1;
+    stored.progress.stage = status === "outcome_unknown" ? "receipts" : "finished";
     await reopenPersisted();
     expect(modal().textContent).toContain(stored.id);
     expect(modal().textContent).toContain("只读查看范围与结果");
@@ -784,8 +827,22 @@ describe("dev Agent import user workflow", () => {
     expect(taskCalls()).toHaveLength(reads);
     expect(transport.post).not.toHaveBeenCalled();
     if (status === "outcome_unknown") {
+      expect(modal().textContent).toContain("后台自动恢复已停止");
+      expect(modal().textContent).not.toContain("后台仍在自动恢复");
       expect(modal().textContent).toContain("联系管理员核验");
-      expect([...modal().querySelectorAll("button")].some((item) => item.textContent === "重新选择")).toBe(false);
+      expect([...modal().querySelectorAll("button")].some((item) => /重新选择|确认导入|重试确认/u.test(item.textContent ?? ""))).toBe(false);
+      expect(modal().querySelector('input[name="agent-import-user"]')).toBeNull();
+      stored.status = "completed";
+      stored.agents[0] = { ...stored.agents[0]!, status: "created" };
+      stored.summary = { created: 1, skipped: 0, failed: 0, conflicts: 0 };
+      stored.progress.stage = "finished";
+      await poll();
+      expect(taskCalls()).toHaveLength(reads);
+      expect(modal().textContent).toContain("导入结果待核验");
+      await click(button("刷新任务状态", modal()));
+      await settle(() => expect(modal().textContent).toContain("导入完成"));
+      expect(taskCalls()).toHaveLength(reads + 1);
+      expect(transport.post).not.toHaveBeenCalled();
     } else {
       await click(button("重新选择", modal()));
       expect(window.localStorage.getItem(agentImportPointerKey(TARGET))).toBeNull();

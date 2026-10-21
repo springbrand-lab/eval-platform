@@ -1,7 +1,7 @@
 import type { AgentConfigService } from "../agent-configs.js";
 import type { Fetch } from "../sp/http.js";
 import type { ImportStaging } from "./bytes.js";
-import { ImportConflictError, ImportDependencyError, ImportLeaseLostError, ImportOutcomeUnknownError, ImportTargetDisabledError, importConflict } from "./errors.js";
+import { ImportConflictError, ImportDependencyError, ImportLeaseLostError, ImportOutcomeUnknownError, importConflict } from "./errors.js";
 import { resourceKey, summarize, type ImportResult, type ImportTask, type PlannedResource } from "./model.js";
 import { createImportPlanner } from "./planner.js";
 import { dependencyKeys, planDigest, requireCanonicalSourceSetting, requireReusable } from "./semantics.js";
@@ -156,12 +156,11 @@ export function createAgentImportWorker(input: {
       view.progress.completed++;
       await store.save(task, { view: summarize(view) });
     }
-    const unknown = view.agents.some((item) => item.status === "outcome_unknown");
-    view.status = unknown ? "outcome_unknown" : view.agents.some((item) => ["conflict", "failed"].includes(item.status))
+    if (view.agents.some((item) => item.status === "outcome_unknown")) throw new ImportOutcomeUnknownError();
+    view.status = view.agents.some((item) => ["conflict", "failed"].includes(item.status))
       ? "completed_with_errors" : "completed";
-    view.progress.stage = unknown ? "receipts" : "finished";
+    view.progress.stage = "finished";
     await store.save(task, { view: summarize(view) });
-    if (unknown) throw new ImportOutcomeUnknownError(); // durable retry, not a detached promise
   }
   return {
     async run(taskId: string, options: { final?: boolean } = {}): Promise<void> {
@@ -174,17 +173,22 @@ export function createAgentImportWorker(input: {
         else await apply(task);
       } catch (error) {
         if (error instanceof ImportLeaseLostError) throw error;
-        if (task.view.status === "outcome_unknown") throw error;
-        // Disabling a target may pause local finalization after earlier writes. Retain its resumable apply key/plan.
-        const terminal = (importConflict(error) || options.final === true) && !(task.applyKey && error instanceof ImportTargetDisabledError);
+        const conflict = importConflict(error);
+        const uncertain = !!task.applyKey && !conflict;
+        const terminal = conflict || options.final === true;
         const view = { ...task.view,
-          status: terminal ? "failed" as const : task.applyKey ? "outcome_unknown" as const : "checking" as const,
-          error: error instanceof ImportConflictError ? error.message : "Agent import dependency or local persistence is unavailable; retry the same task",
+          status: uncertain ? terminal ? "outcome_unknown" as const : "importing" as const
+            : terminal ? "failed" as const : "checking" as const,
+          progress: uncertain ? { ...task.view.progress, stage: "receipts" } : task.view.progress,
+          error: error instanceof ImportConflictError ? error.message : uncertain
+            ? terminal ? "Automatic import recovery is exhausted; the same task requires manual receipt or local finalization reconciliation"
+              : "Import receipt or local finalization reconciliation is pending; background recovery will continue with the same task"
+            : "Agent import dependency or local persistence is unavailable; retry the same task",
         };
-        if (terminal) view.agents = view.agents.map((item) => ["pending", "ready"].includes(item.status)
+        if (view.status === "failed") view.agents = view.agents.map((item) => ["pending", "ready"].includes(item.status)
           ? { ...item, status: "failed" as const, message: view.error } : item);
         await store.save(task, { view: summarize(view) });
-        if (!terminal || error instanceof ImportDependencyError) throw error;
+        if (!terminal || uncertain || error instanceof ImportDependencyError) throw error;
       } finally { await store.release(task); }
     },
   };

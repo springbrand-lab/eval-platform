@@ -16,6 +16,39 @@ async function staging() {
 }
 
 describe("frozen import bytes", () => {
+  it("preserves literal percent filenames and complete bytes through downloads, staging and Skill ZIP packing", async () => {
+    const { store } = await staging();
+    const base = "https://creation-file-dev.springbrand.ai/users/source-owner/skills/percent-assets/versions/v1/percent-assets";
+    const sourceFiles = [
+      { path: "SKILL.md", url: `${base}/SKILL.md`,
+        bytes: new TextEncoder().encode("---\nname: percent-assets\ndescription: Keep original assets\n---\nUse the assets.\n") },
+      { path: "assets/100%.txt", url: `${base}/assets/100%25.txt`, bytes: new Uint8Array([0, 13, 10, 37, 128, 255, 0]) },
+      { path: "assets/100%25.txt", url: `${base}/assets/100%2525.txt`, bytes: new TextEncoder().encode("literal %25\r\n") },
+      { path: "assets/rate%20data.txt", url: `${base}/assets/rate%2520data.txt`, bytes: new TextEncoder().encode("not a space\n") },
+    ];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url) => {
+      const file = sourceFiles.find((file) => file.url === url);
+      if (!file) throw new Error(`Unexpected download: ${url}`);
+      return new Response(file.bytes);
+    });
+    const downloads = createImportDownloads({ origin: "https://dev.test", purpose: "source", fetch });
+    const expires = new Date(Date.now() + 60_000).toISOString();
+    const files = [];
+    for (const file of sourceFiles) {
+      files.push(await downloads.freeze(store, task, { path: file.path, size: file.bytes.byteLength, url: file.url }, expires));
+    }
+    const reader = new ZipReader(new Uint8ArrayReader(await store.zip(task, files, expires)));
+    try {
+      const entries = await reader.getEntries();
+      expect(entries.map((entry) => entry.filename)).toEqual(["SKILL.md", "assets/100%.txt", "assets/100%25.txt", "assets/rate%20data.txt"]);
+      for (const [index, entry] of entries.entries()) {
+        expect(entry.directory).toBe(false);
+        if (!entry.directory) expect(await entry.getData(new Uint8ArrayWriter())).toEqual(sourceFiles[index]!.bytes);
+      }
+    } finally { await reader.close(); }
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual(sourceFiles.map((file) => file.url));
+  });
+
   it("streams every Skill file, freezes hashes and packs all paths, with no token on CDN requests", async () => {
     const { store } = await staging();
     const fetch = vi.fn<typeof globalThis.fetch>(async () => new Response("abc"));
@@ -43,7 +76,8 @@ describe("frozen import bytes", () => {
     await expect(store.read(task, files[0]!, "2000-01-01T00:00:00.000Z")).rejects.toThrow(/expired/i);
   });
 
-  it.each(["../a", "/a", "a/../b", "a//b", "a\\b", "a/\u0000", "a/%2e%2e/b", "a/%00"])("rejects unsafe paths %s", (name) => {
+  it.each(["", ".", "..", "./a", "../a", "/a", "//a", "a/../b", "a/./b", "a//b", "a/", "a\\b",
+    "a/\u0000", "a/\u001f", "a/\u007f", "C:/a", "c:a"])("rejects unsafe literal paths %s", (name) => {
     expect(() => safeImportPath(name)).toThrow();
   });
 

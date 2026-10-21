@@ -33,6 +33,7 @@ export const agentImportPreviewSchema = z.strictObject({
 export const agentImportApplySchema = z.strictObject({ idempotencyKey });
 export const agentImportTaskViewSchema = z.strictObject({
   id,
+  // Automatic reconciliation remains importing; task-level outcome_unknown requires manual recovery.
   status: z.enum([
     "checking", "ready", "queued", "importing", "completed", "completed_with_errors", "failed", "outcome_unknown",
   ]),

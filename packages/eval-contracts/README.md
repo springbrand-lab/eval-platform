@@ -4,6 +4,9 @@
 `AgentImportConfig`、`AgentImportSourceUser`、`AgentImportCandidate`、`AgentImportCandidatePage`、
 `AgentImportTaskView`。来源用户仅限定已授权导出范围，目标仍是固定 Eval 服务账号。
 任务可表达部分失败与结果待校准；来源/回执/凭据只属于 API 内部事实，不加入普通 Agent DTO。
+任务级 `importing` 包含后台自动回执校准（`progress.stage: receipts`），期间逐 Agent 可为
+`outcome_unknown`；任务级 `outcome_unknown` 仅表示自动恢复预算耗尽、需要人工核验的终态。
+Web 轮询前者、停止自动轮询后者，不根据逐 Agent 的未知结果提前结束整个任务。
 本包不执行下载、导入、队列或数据库操作。HTTP 使用 `/api/agent-config-sync` 的
 `config`、`users`、`users/:sourceUserId/agents`、`previews`、`tasks/:taskId`、
 `tasks/:taskId/apply`；preview/apply 均返回 202 `{taskId}`。

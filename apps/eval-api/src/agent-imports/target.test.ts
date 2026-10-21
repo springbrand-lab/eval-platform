@@ -14,8 +14,8 @@ const receipt = { id: "33333333-3333-4333-8333-333333333333", resourceKind: "age
 const result: ImportResult = { receipt, replayed: false, resource: { ...prepared.config, user_id: owner } };
 const ok = (msg: unknown) => Response.json({ success: true, msg, code: "", errMsg: "" });
 const missing = () => Response.json({ code: "IMPORT_RECEIPT_NOT_FOUND", errMsg: "missing" }, { status: 404 });
-function setup(fetch: typeof globalThis.fetch) {
-  return createAgentImportTarget({ origin: "https://eval.test", sourceOrigin: "https://dev.test", writeOrigin: "https://web.test",
+function setup(fetch: typeof globalThis.fetch, sourceOrigin = "https://dev.test") {
+  return createAgentImportTarget({ origin: "https://eval.test", sourceOrigin, writeOrigin: "https://web.test",
     ownerUserId: owner, sessionToken: "target-session", sp: {} as EvalSpClient,
     // Receipt/write tests use the real versioned capability wire; dedicated tests exercise negative probes.
     fetch: (input, init) => new URL(input instanceof Request ? input.url : String(input)).pathname === "/api/agent-config-imports/config"
@@ -54,12 +54,129 @@ describe("fixed create-only target HTTP seam", () => {
     expect(fetch.mock.calls.every(([input, init]) => (input instanceof Request ? input.method : init?.method) === "GET")).toBe(true);
   });
 
+  it("reconciles an unknown POST 409 through the same key's matching receipt", async () => {
+    let submitted = false;
+    const calls: Request[] = [];
+    const target = setup(async (input, init) => {
+      const request = new Request(input, init); calls.push(request);
+      if (request.method === "POST") {
+        submitted = true;
+        return Response.json({ code: "ID_CONFLICT", errMsg: "nonstandard response" }, { status: 409 });
+      }
+      return submitted ? ok({ ...result, replayed: true }) : missing();
+    });
+    await expect(target.importAgent(prepared, "key")).resolves.toEqual({ ...result, replayed: true });
+    expect(calls.map((request) => [request.method, request.url])).toEqual([
+      ["GET", "https://eval.test/api/agent-config-imports/receipts/key?kind=agent"],
+      ["POST", "https://eval.test/api/user-agent-configs/imports"],
+      ["GET", "https://eval.test/api/agent-config-imports/receipts/key?kind=agent"],
+    ]);
+  });
+
+  it.each([
+    { response: "unknown-code", body: '{"code":"ID_CONFLICT","errMsg":"private POST details"}', code: "ID_CONFLICT", recovery: "missing" },
+    { response: "unknown-code", body: '{"code":"ID_CONFLICT","errMsg":"private POST details"}', code: "ID_CONFLICT", recovery: "unavailable" },
+    { response: "malformed", body: '{"code":"REQUEST_CONFLICT"', code: "HTTP_ERROR", recovery: "missing" },
+    { response: "malformed", body: '{"code":"REQUEST_CONFLICT"', code: "HTTP_ERROR", recovery: "unavailable" },
+  ])("keeps a Skill POST $response 409 outcome unknown with a $recovery receipt", async ({ body, code, recovery }) => {
+    let submitted = false;
+    const calls: Request[] = [];
+    const target = setup(async (input, init) => {
+      const request = new Request(input, init); calls.push(request);
+      if (request.method === "POST") {
+        submitted = true;
+        return new Response(body, { status: 409, headers: { "Content-Type": "application/json", "X-Request-Id": "post-request" } });
+      }
+      if (submitted && recovery === "unavailable") throw new TypeError("receipt offline");
+      return missing();
+    });
+    const error = await target.importSkill("platform-string", new Uint8Array([1, 2, 3]), "skill-key").catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(ImportOutcomeUnknownError);
+    expect((error as Error).cause).toBeInstanceOf(EvalSpApiError);
+    expect((error as Error).cause).toMatchObject({ status: 409, payload: { code, requestId: "post-request" } });
+    expect((error as Error).message).not.toContain("private POST details");
+    expect(calls.map((request) => [request.method, request.url])).toEqual([
+      ["GET", "https://eval.test/api/agent-config-imports/receipts/skill-key?kind=skill"],
+      ["POST", "https://eval.test/api/skills/imports?skillId=platform-string&importKey=skill-key"],
+      ["GET", "https://eval.test/api/agent-config-imports/receipts/skill-key?kind=skill"],
+    ]);
+  });
+
+  it("recovers a malformed Reference POST 409 through its matching receipt without another upload", async () => {
+    const attachment = { attachmentCdnUrl: `https://evalworkspace.springbrand.ai/uploads/v1/${owner}/${id}`,
+      clientAttachmentId: id, name: "brief.txt", mediaType: "text/plain", size: 3 };
+    const referenceResult: ImportResult = { receipt: { ...receipt, resourceKind: "reference", importKey: "ref-key" }, replayed: true,
+      resource: { id, name: attachment.name, mediaType: attachment.mediaType, size: attachment.size,
+        status: "active", attachmentCdnUrl: attachment.attachmentCdnUrl } };
+    let submitted = false;
+    const calls: Request[] = [];
+    const target = setup(async (input, init) => {
+      const request = new Request(input, init); calls.push(request);
+      if (new URL(request.url).pathname === "/api/inbox/attachments") return ok(attachment);
+      if (request.method === "POST") {
+        submitted = true;
+        return new Response('{"code":"AGENT_CONFIG_IMPORT_CONFLICT"', { status: 409 });
+      }
+      return submitted ? ok(referenceResult) : missing();
+    });
+    const uploaded = await target.uploadReference(id, attachment.name, attachment.mediaType, new Uint8Array([1, 2, 3]));
+    await expect(target.importReference(id, uploaded, "ref-key")).resolves.toEqual(referenceResult);
+    expect(calls.map((request) => [request.method, request.url])).toEqual([
+      ["POST", "https://eval.test/api/inbox/attachments"],
+      ["GET", "https://eval.test/api/agent-config-imports/receipts/ref-key?kind=reference"],
+      ["POST", "https://eval.test/api/user-references/imports"],
+      ["GET", "https://eval.test/api/agent-config-imports/receipts/ref-key?kind=reference"],
+    ]);
+    expect(await calls[2]!.json()).toEqual({ referenceId: id, attachment, importKey: "ref-key" });
+  });
+
   it("never treats ID/content equality without a receipt as a successful uncertain write", async () => {
     const target = setup(async (input, init) => {
       if (new Request(input, init).method === "POST") throw new TypeError("lost response");
       return missing();
     });
     await expect(target.importAgent(prepared, "key")).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
+  });
+
+  it("keeps a nonstandard POST success unresolved without a matching receipt", async () => {
+    const calls: Request[] = [];
+    const target = setup(async (input, init) => {
+      const request = new Request(input, init); calls.push(request);
+      return request.method === "GET" ? missing() : ok({ code: "REQUEST_CONFLICT" });
+    });
+    const error = await target.importAgent(prepared, "key").catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(ImportOutcomeUnknownError);
+    expect((error as Error).cause).toBeInstanceOf(Error);
+    expect(calls.map((request) => [request.method, request.url])).toEqual([
+      ["GET", "https://eval.test/api/agent-config-imports/receipts/key?kind=agent"],
+      ["POST", "https://eval.test/api/user-agent-configs/imports"],
+      ["GET", "https://eval.test/api/agent-config-imports/receipts/key?kind=agent"],
+    ]);
+  });
+
+  it.each([
+    { status: 400, code: "REQUEST_CONFLICT" },
+    { status: 401, code: "REQUEST_CONFLICT" },
+    { status: 403, code: "AGENT_CONFIG_IMPORT_CONFLICT" },
+    { status: 422, code: "AGENT_CONFIG_IMPORT_CONFLICT" },
+    { status: 503, code: "REQUEST_CONFLICT" },
+  ])("does not infer a POST conflict from HTTP $status carrying $code", async ({ status, code }) => {
+    const calls: Request[] = [];
+    const target = setup(async (input, init) => {
+      const request = new Request(input, init); calls.push(request);
+      return request.method === "GET" ? missing() : Response.json({
+        code, errMsg: "private POST details", requestId: "post-request",
+      }, { status });
+    });
+    const error = await target.importAgent(prepared, "key").catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(ImportOutcomeUnknownError);
+    expect((error as Error).cause).toBeInstanceOf(EvalSpApiError);
+    expect((error as Error).cause).toMatchObject({ status, payload: { code, requestId: "post-request" } });
+    expect(calls.map((request) => [request.method, request.url])).toEqual([
+      ["GET", "https://eval.test/api/agent-config-imports/receipts/key?kind=agent"],
+      ["POST", "https://eval.test/api/user-agent-configs/imports"],
+      ["GET", "https://eval.test/api/agent-config-imports/receipts/key?kind=agent"],
+    ]);
   });
 
   it.each([
@@ -86,6 +203,14 @@ describe("fixed create-only target HTTP seam", () => {
     await expect(target.receipt("agent", "key")).rejects.toBeInstanceOf(ImportDependencyError);
     await expect(target.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3])))
       .rejects.toBeInstanceOf(ImportDependencyError);
+  });
+
+  it("rejects a source-origin Reference attachment despite noncanonical source origin spelling", async () => {
+    const attachment = { attachmentCdnUrl: `https://cdn.springbrand.ai/uploads/v1/${owner}/${id}`,
+      clientAttachmentId: id, name: "brief.txt", mediaType: "text/plain", size: 3 };
+    const target = setup(async () => ok(attachment), "HTTPS://CDN.SPRINGBRAND.AI/");
+    await expect(target.uploadReference(id, attachment.name, attachment.mediaType, new Uint8Array([1, 2, 3])))
+      .rejects.toBeInstanceOf(ImportConflictError);
   });
 
   it.each(["AGENT_CONFIG_IMPORT_CONFLICT", "REQUEST_CONFLICT"])("preserves immutable Reference upload conflicts and their safe upstream cause (%s)", async (code) => {
@@ -150,7 +275,7 @@ describe("fixed create-only target HTTP seam", () => {
       .rejects.toBeInstanceOf(ImportDependencyError);
   });
 
-  it.each(["ID_CONFLICT", "AGENT_CONFIG_IMPORT_CONFLICT", "REQUEST_CONFLICT"])("rejects create-only import 409 %s without a replacement ID, DELETE, PATCH, or fallback upload", async (code) => {
+  it.each(["AGENT_CONFIG_IMPORT_CONFLICT", "REQUEST_CONFLICT"])("rejects create-only import 409 %s without a replacement ID, DELETE, PATCH, or fallback upload", async (code) => {
     const calls: Request[] = [];
     const target = setup(async (input, init) => {
       const request = new Request(input, init); calls.push(request);

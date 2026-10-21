@@ -6,7 +6,7 @@ import { httpOriginSchema } from "../config/env.js";
 import { createSpHttpClient, EvalSpApiError, throwSpClientError, type Fetch } from "../sp/http.js";
 import type { EvalSpAgentConfig, EvalSpClient } from "../sp/client.js";
 import { exportFileSchema, receiptSchema, type ImportReceipt, type ImportResult, type PreparedAgent, type ResourceKind } from "./model.js";
-import { ImportConflictError, ImportDependencyError, ImportOutcomeUnknownError, ImportTargetDisabledError } from "./errors.js";
+import { ImportConflictError, ImportDependencyError, ImportOutcomeUnknownError, ImportTargetDisabledError, importConflict } from "./errors.js";
 import { DEFINITION_PROBE_LIMIT, definitionEvidenceSchema, requireDefinitionEvidence, type DefinitionEvidence } from "./definition-evidence.js";
 
 const record = z.record(z.string(), z.unknown());
@@ -69,7 +69,8 @@ export function createAgentImportTarget(input: {
   sp: EvalSpClient; fetch?: Fetch;
 }): AgentImportTarget {
   const origin = httpOriginSchema.parse(input.origin);
-  if (input.sourceOrigin && origin === importOriginSchema.parse(input.sourceOrigin)) throw new TypeError("source and target origins must differ");
+  const sourceOrigin = input.sourceOrigin === undefined ? undefined : importOriginSchema.parse(input.sourceOrigin);
+  if (origin === sourceOrigin) throw new TypeError("source and target origins must differ");
   const writeOrigin = httpOriginSchema.parse(input.writeOrigin);
   const ownerUserId = z.uuid().parse(input.ownerUserId).toLowerCase();
   if (!input.sessionToken.trim()) throw new TypeError("Target session token is required");
@@ -78,7 +79,7 @@ export function createAgentImportTarget(input: {
     const url = new URL(attachment.attachmentCdnUrl);
     createImportDownloads({ origin, purpose: "target" }).validateUrl(url.href);
     if (attachment.clientAttachmentId !== id || url.search || url.pathname !== `/uploads/v1/${ownerUserId}/${id}`
-      || input.sourceOrigin === url.origin) throw new ImportConflictError("Reference attachment is not a target-owned upload");
+      || sourceOrigin === url.origin) throw new ImportConflictError("Reference attachment is not a target-owned upload");
   }
   async function request<T>(path: string, schema: z.ZodType<T>, body?: unknown, contentType?: string): Promise<T> {
     try {
@@ -93,11 +94,8 @@ export function createAgentImportTarget(input: {
   }
   function dependencyError(error: unknown): never {
     if (error instanceof ImportConflictError) throw error;
-    if (error instanceof EvalSpApiError && error.status === 409) {
-      const code = record.safeParse(error.payload).data?.code;
-      if (code === "AGENT_CONFIG_IMPORT_CONFLICT" || code === "REQUEST_CONFLICT") {
-        throw new ImportConflictError("Target import conflicts with the current resource or dependency definitions", error);
-      }
+    if (importConflict(error)) {
+      throw new ImportConflictError("Target import conflicts with the current resource or dependency definitions", error);
     }
     throw new ImportDependencyError(undefined, error);
   }
@@ -120,14 +118,11 @@ export function createAgentImportTarget(input: {
       checkReceipt(result, kind, id, importKey);
       return result;
     } catch (error) {
-      if (error instanceof ImportConflictError) throw error;
-      if (error instanceof EvalSpApiError && [400, 409, 422].includes(error.status)) {
-        throw new ImportConflictError("Target rejected the create-only import; existing resources were not changed", error);
-      }
+      if (importConflict(error)) dependencyError(error);
       // The POST may have committed. Only its durable receipt can turn an uncertain write into success.
       let result: ImportResult | null = null;
       try { result = await target.receipt(kind, importKey); } catch (cause) {
-        if (cause instanceof ImportConflictError) throw cause;
+        if (importConflict(cause)) throw cause;
         // An unavailable receipt lookup remains uncertain; queue recovery will retry it.
       }
       if (result) { checkReceipt(result, kind, id, importKey); return result; }

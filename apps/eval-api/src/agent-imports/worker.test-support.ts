@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { ZipReader, Uint8ArrayReader, Uint8ArrayWriter } from "@zip.js/zip.js";
-import { equalJson, type AgentImportPreview } from "@eval-platform/eval-contracts";
+import { equalJson, type AgentImportPreview, type AgentImportTaskView } from "@eval-platform/eval-contracts";
 import { vi } from "vitest";
 import { createAgentConfigService } from "../agent-configs.js";
 import type { AgentPurposeStore } from "../db/agent-purposes.js";
@@ -53,12 +53,14 @@ export async function workerFixture(snapshot = snapshotFixture()) {
   const targetReferences = new Map<string, TargetReference>();
   const receipts = new Map<string, ImportResult>();
   const events: string[] = [];
+  const savedViews: AgentImportTaskView[] = [];
   const requests: Request[] = [];
   const zipFiles: string[][] = [];
   let task: ImportTask | undefined;
   let lostSkillResponse = false;
   let failPurpose = false;
   let failSourceOnce = false;
+  let failCompletion = false;
   let targetEnabled = true;
   const store: AgentImportStore = {
     sources: {
@@ -102,7 +104,13 @@ export async function workerFixture(snapshot = snapshotFixture()) {
       task.leaseToken = token; task.attempts++; return task;
     },
     heartbeat: async () => {},
-    async save(current, update) { Object.assign(current, update, { revision: current.revision + 1 }); },
+    async save(current, update) {
+      if (failCompletion && update.view && ["completed", "completed_with_errors"].includes(update.view.status)) {
+        failCompletion = false; throw new Error("task DB offline");
+      }
+      Object.assign(current, update, { revision: current.revision + 1 });
+      if (update.view) savedViews.push(structuredClone(update.view));
+    },
     async release(current) { current.leaseToken = null; },
     intent: async (kind, id) => intents.get(resourceKey(kind, id)) ?? null,
     async markIntent(_task, resource, status, receipt) {
@@ -220,9 +228,10 @@ export async function workerFixture(snapshot = snapshotFixture()) {
     projects: { frozenAgentConfigIds: async () => new Set<string>() }, purposes, sources: store.sources, imports: target });
   const staging = await openImportStaging(directory);
   const worker = createAgentImportWorker({ source, target, store, agents, staging, fetch });
-  return { store, worker, source, target, agents, purposes, sources, intents, targetAgents, targetSkills, targetReferences, requests, events, zipFiles, sp, fetch,
+  return { store, worker, source, target, agents, purposes, sources, intents, targetAgents, targetSkills, targetReferences, requests, events, savedViews, zipFiles, sp, fetch,
     loseSkillResponse: () => { lostSkillResponse = true; }, failNextPurpose: () => { failPurpose = true; },
     failNextSource: () => { failSourceOnce = true; },
+    failNextCompletion: () => { failCompletion = true; },
     setTargetEnabled: (enabled: boolean) => { targetEnabled = enabled; },
     archiveAgent: (id: string) => { archivedAgents.add(id); },
     resetTask: () => { task = undefined; },

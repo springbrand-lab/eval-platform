@@ -20,15 +20,10 @@ export const TARGET_IMPORT_CDN_ORIGINS = [
 const DOWNLOAD_PATH_LIMITS = { encoded: 4096, decoded: 1024, segment: 255, url: 8192 } as const;
 const hashPattern = /^[0-9a-f]{64}$/u;
 export function safeImportPath(value: string): string {
-  let decoded: string;
-  try { decoded = decodeURIComponent(value); } catch { throw new ImportConflictError("Invalid file path"); }
+  // Manifest and ZIP paths are literal, not URI-encoded.
   if (!value || value.length > 240 || /^[\/\\]/u.test(value) || /[\\\u0000-\u001f\u007f]/u.test(value)
-    || /[\\\u0000-\u001f\u007f]/u.test(decoded)
-    || /%(?:2f|5c)/iu.test(value) || /%(?:2e|2f|5c|00)/iu.test(decoded)
     || /^[a-z]:/iu.test(value)
-    || decoded.split("/").some((part) => !part || part === "." || part === "..")
-    || value.split("/").some((part) => !part || part === "." || part === "..")
-    || path.posix.normalize(value) !== value || decoded.includes("\\")) {
+    || value.split("/").some((part) => !part || part === "." || part === "..")) {
     throw new ImportConflictError("Unsafe import file path");
   }
   return value;

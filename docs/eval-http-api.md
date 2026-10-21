@@ -120,6 +120,8 @@ Agent imports are an optional control-plane capability. The browser chooses an a
 
 `AgentImportTaskView` and the source-user/candidate projections belong to `eval-contracts`, not the SP configuration body. A preview binds the source user, selected IDs, purpose, immutable dependency manifest and content evidence. Changing the selected source user requires a new preview. A page without missing candidates is not proof that every source page is synchronized.
 
+Task-level `importing` includes automatic receipt recovery (`progress.stage: receipts`), even while individual Agents report `outcome_unknown`. The Web continues read-only polling until recovery completes or the Worker exhausts its queue budget. Only then is an unresolved task published as terminal `outcome_unknown`, with manual refresh/reconciliation available and no browser mutation replay.
+
 Imports preserve Agent, Skill and Reference IDs, create only missing target resources, and never update, delete, revive, rename or alias existing objects. A same-name private Skill belonging to a different source user can still conflict under the shared target owner; source-user selection does not create target tenancy. Platform Skills are verified as platform objects, not uploaded as user Skills.
 
 SP exports canonical saved settings before Eval freezes a preview: legal omitted `presetId` and `referenceFileIds` become `null` and `[]` without source writes or model-plan fallback. Eval rejects incompatible noncanonical exports before writes rather than changing the frozen expectation after a POST.
