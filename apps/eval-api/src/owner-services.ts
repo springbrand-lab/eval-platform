@@ -3,6 +3,12 @@ import { createMetrics, createEvaluationScoreReader } from "@eval-platform/eval-
 import { createEvalRunAdmission, syncRunScores, type EvaluationScore } from "@eval-platform/eval-runtime";
 import { createActiveOwnerAdmission } from "./active-owner-admission.js";
 import { createAgentConfigService } from "./agent-configs.js";
+import { createAgentImportService, createAgentImportTaskReader } from "./agent-imports/service.js";
+import type { AgentImportSource } from "./agent-imports/source.js";
+import type { AgentImportTarget } from "./agent-imports/target.js";
+import type { AgentImportQueue } from "./agent-import-queue.js";
+import { createPostgresAgentImportStore, createPostgresAgentImportTaskReader } from "./db/agent-imports.js";
+import { createPostgresResourceSourceStore } from "./db/agent-import-sources.js";
 import { createPostgresResourceSnapshotReader } from "./db/attempt-resources.js";
 import type { EvalDb } from "./db/client.js";
 import { createPostgresDatasetStore } from "./db/dataset.js";
@@ -30,12 +36,14 @@ export interface OwnerServicesDependencies {
   readonly bundles: BundleDirectory;
   readonly release: EvalSpRelease;
   readonly runQueue: RunQueue;
+  readonly agentImportTarget?: AgentImportTarget;
+  readonly agentImports?: { readonly source: AgentImportSource; readonly queue: AgentImportQueue };
   /** Delivers one score to Langfuse; absent when Langfuse is not configured. */
   readonly publishScore?: (score: EvaluationScore) => Promise<void>;
 }
 
 /** The single composition of owner-scoped services; Run admission is shared while an owner has active requests. */
-export function createOwnerServices({ db, sp, bundles, release, runQueue, publishScore }: OwnerServicesDependencies): ApiRuntime["ownerServices"] {
+export function createOwnerServices({ db, sp, bundles, release, runQueue, publishScore, agentImportTarget, agentImports }: OwnerServicesDependencies): ApiRuntime["ownerServices"] {
   const admissions = createActiveOwnerAdmission((ownerUserId) => createEvalRunAdmission({
     sourceCommit: release.sourceCommit,
     plans: createPostgresProjectPlanReader(db, ownerUserId),
@@ -48,6 +56,8 @@ export function createOwnerServices({ db, sp, bundles, release, runQueue, publis
     const outputSchemas = createOutputSchemaCatalog(db, ownerUserId);
     const agentConfigs = createAgentConfigService({
       ownerUserId, sessionToken, sp, projects: projectStore, purposes: createPostgresAgentPurposeStore(db, ownerUserId),
+      sources: createPostgresResourceSourceStore(db, ownerUserId),
+      ...(agentImportTarget === undefined ? {} : { imports: agentImportTarget }),
     });
     const readRun = createPostgresProjectRunReader(db, ownerUserId);
     const scores = publishScore === undefined ? undefined : {
@@ -72,6 +82,11 @@ export function createOwnerServices({ db, sp, bundles, release, runQueue, publis
         ownerUserId, sourceBranch: release.sourceBranch, store: projectStore, outputSchemas, agentConfigs, admission,
       }),
       agentConfigs,
+      agentImportTasks: createAgentImportTaskReader(createPostgresAgentImportTaskReader(db, ownerUserId)),
+      ...(agentImports === undefined || agentImportTarget === undefined ? {} : { agentImports: createAgentImportService({
+        source: agentImports.source, target: agentImportTarget,
+        store: createPostgresAgentImportStore(db, ownerUserId, agentImports.queue),
+      }) }),
       admission,
       results: createPostgresRuntimeQueries(db, ownerUserId),
       projectRuns: {

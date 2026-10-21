@@ -105,6 +105,37 @@ Public Agent editor domain errors retain the codes, statuses and messages select
 
 Other relayed SP errors: SP `401` → `503 EVAL_SP_UNAVAILABLE` (the service session failed, not the browser login); `403` → `EVAL_SP_FORBIDDEN`; `404` → `EVAL_SP_NOT_FOUND`; `409` → `EVAL_SP_CONFLICT`; `400`/`422` → `422 EVAL_SP_REQUEST_INVALID`; `429` → `REQUEST_RATE_LIMITED`; other statuses → `502 EVAL_SP_REQUEST_FAILED`. For `400`, `409` and `422`, SP's `errMsg` and field `errors` are relayed. An unreachable SP is `503 EVAL_SP_UNAVAILABLE`.
 
+### Add-only dev imports
+
+Agent imports are an optional control-plane capability. The browser chooses an authorized dev source user and missing Agent IDs; it never sends source credentials, a source origin, a target owner, or resource bodies. The fixed Eval service account remains the target owner. These routes use the same Web gateway, actor audit, Origin policy and standard envelope as Agent Config CRUD.
+
+| Route | Body / result |
+| --- | --- |
+| `GET /api/agent-config-sync/config` | `{enabled, maxAgents}`; an unconfigured source disables imports, not ordinary API startup |
+| `GET /api/agent-config-sync/users?q=...&limit=...` | Trimmed nonblank `q` (1–200 characters); `{users:[{id,name,email}]}` from the authorized read-only source; blank input is a local 422 |
+| `GET /api/agent-config-sync/users/{sourceUserId}/agents` | `q`, `cursor`, `limit`, `onlyMissing`; `{items, nextCursor}` with target-existence classification |
+| `POST /api/agent-config-sync/previews` | `{sourceUserId, agentIds, purpose, idempotencyKey}`; `202 {taskId}` |
+| `GET /api/agent-config-sync/tasks/{taskId}` | Owner-scoped persisted `AgentImportTaskView`; remains readable when the optional source or target import capability is disabled |
+| `POST /api/agent-config-sync/tasks/{taskId}/apply` | `{idempotencyKey}`; `202 {taskId}` applies the ready subset of the fixed preview |
+
+`AgentImportTaskView` and the source-user/candidate projections belong to `eval-contracts`, not the SP configuration body. A preview binds the source user, selected IDs, purpose, immutable dependency manifest and content evidence. Changing the selected source user requires a new preview. A page without missing candidates is not proof that every source page is synchronized.
+
+Task-level `importing` includes automatic receipt recovery (`progress.stage: receipts`), even while individual Agents report `outcome_unknown`. The Web continues read-only polling until recovery completes or the Worker exhausts its queue budget. Only then is an unresolved task published as terminal `outcome_unknown`, with manual refresh/reconciliation available and no browser mutation replay.
+
+Imports preserve Agent, Skill and Reference IDs, create only missing target resources, and never update, delete, revive, rename or alias existing objects. A same-name private Skill belonging to a different source user can still conflict under the shared target owner; source-user selection does not create target tenancy. Platform Skills are verified as platform objects, not uploaded as user Skills.
+
+SP exports canonical saved settings before Eval freezes a preview: legal omitted `presetId` and `referenceFileIds` become `null` and `[]` without source writes or model-plan fallback. Eval rejects incompatible noncanonical exports before writes rather than changing the frozen expectation after a POST.
+
+Selected Actions, Connector Components and Extensions carry public `{kind,id,fingerprint}` definition evidence. Eval compares it through the target's read-only `POST /api/agent-config-imports/dependencies` metadata query and freezes the same evidence into the Agent import body and digests. SP verifies it again inside the create-only transaction and on receipt replay; no definition is published or adopted. This proves the platform-declared definition/version, not independently changing remote MCP behavior behind an unchanged URL/revision.
+
+A known target import-receipt 409 is a conflict, not an unknown write or transient dependency failure. File/path conflicts block only dependent Agent roots; global union-size limits still reject the whole preview. History reads require only the current owner and the Eval database, never a live source connection, queue or target write permission.
+
+Only the dedicated import consumer reads source files and writes target import operations. Run Worker and browser receive no dev credentials. Source requests use SP's explicit read-only export contract; neither database copying nor share/ZIP creation is a source adapter. Byte transfers are bounded, path-validated and credential-free at the content origin.
+
+The Eval database owns internal provenance for all three resource kinds, import tasks, per-resource intents and receipts. Provenance is not included in ordinary Agent Config DTOs, columns, badges or filters. The target SP owns atomic create-only insertion and its durable operation receipts. A failed response or local metadata write is reconciled using the original operation identity; imported resources are never automatically deleted as compensation. Ordinary manual Agent creation retains its existing behavior.
+
+Manual creation still calls SP's ordinary create operation, independently of the import capability. Only an explicit `X-Agent-Config-Created: true` response proves a new native Agent for internal provenance; a slug replay (`false`) or an older SP without the header leaves unregistered provenance unchanged. This creation fact is not added to the ordinary Agent DTO.
+
 ### Agent editor library
 
 `/api/agent-library` supplies the shared SP/Eval Agent editor. All routes use the existing Web gateway, Origin policy and fixed service account. Each successful operation returns the standard envelope with the public SP result as `msg` (HTTP 200). Filters and pagination query parameters are forwarded unchanged. SP owns resource eligibility, upload validation and domain schemas.

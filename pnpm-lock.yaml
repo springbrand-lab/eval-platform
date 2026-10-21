@@ -37,6 +37,9 @@ importers:
       '@springbrand/http':
         specifier: 0.1.0-alpha.4
         version: 0.1.0-alpha.4(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
+      '@zip.js/zip.js':
+        specifier: 2.8.41
+        version: 2.8.41
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
@@ -83,9 +86,6 @@ importers:
       '@types/ws':
         specifier: ^8.18.2
         version: 8.18.2
-      '@zip.js/zip.js':
-        specifier: 2.8.41
-        version: 2.8.41
       drizzle-kit:
         specifier: ^0.31.10
         version: 0.31.11

@@ -48,4 +48,18 @@ describe("API configuration", () => {
   ])("rejects invalid configuration %o", (override) => {
     expect(() => loadApiConfig({ ...environment, ...override })).toThrow();
   });
+
+  it("keeps imports optional and validates the source pair and separate origins", () => {
+    expect(loadApiConfig(environment)).not.toHaveProperty("EVAL_DEV_SP_API_ORIGIN");
+    const source = { EVAL_DEV_SP_API_ORIGIN: "https://dev-sp.test/", EVAL_DEV_SP_EXPORT_TOKEN: "read-only-export" };
+    expect(loadApiConfig({ ...environment, ...source })).toMatchObject({
+      EVAL_DEV_SP_API_ORIGIN: "https://dev-sp.test", EVAL_DEV_SP_EXPORT_TOKEN: "read-only-export",
+    });
+    for (const override of [
+      { EVAL_DEV_SP_API_ORIGIN: source.EVAL_DEV_SP_API_ORIGIN },
+      { EVAL_DEV_SP_EXPORT_TOKEN: source.EVAL_DEV_SP_EXPORT_TOKEN },
+      { ...source, EVAL_DEV_SP_API_ORIGIN: environment.EVAL_SP_API_ORIGIN },
+      { ...source, EVAL_DEV_SP_API_ORIGIN: "http://dev-sp.test" },
+    ]) expect(() => loadApiConfig({ ...environment, ...override })).toThrow();
+  });
 });

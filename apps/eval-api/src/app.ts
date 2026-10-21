@@ -3,6 +3,7 @@ import { createApp } from "./lib/create-app.js";
 import { serviceAccountScope } from "./middlewares/service-account.js";
 import { webGateway } from "./middlewares/web-gateway.js";
 import agentConfigRouter from "./routes/agent-configs/agent-configs.index.js";
+import agentImportRouter from "./routes/agent-imports/agent-imports.index.js";
 import agentRouter from "./routes/agents/agents.index.js";
 import agentLibraryRouter from "./routes/agent-library/agent-library.index.js";
 import creditRouter from "./routes/credits/credits.index.js";
@@ -30,6 +31,7 @@ export function createRoutes(logger: pino.Logger) {
   app.route("/api/me", sessionRouter);
   app.route("/api/input-limits", inputLimitsRouter);
   app.route("/api/agent-configs", agentConfigRouter);
+  app.route("/api/agent-config-sync", agentImportRouter);
   app.route("/api/agent-library", agentLibraryRouter);
   app.route("/api/agents", agentRouter);
   app.route("/api/credits", creditRouter);

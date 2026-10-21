@@ -97,6 +97,20 @@ describe("Eval SP public API client", () => {
     expect(requests[0]!.url).toBe("https://eval-sp.example.test/api/mcp-servers?source=user&page=1&pageSize=100");
   });
 
+  it.each([
+    ["true", true], ["false", false], [null, null], ["unknown", null],
+  ] as const)("keeps ordinary create insertion header %s as an internal fact, not a resource field", async (header, created) => {
+    const config = { id: "agent", user_id: "owner", name: "Native", setting: {}, revision: 1 };
+    const response = ok(config);
+    if (header !== null) response.headers.set("X-Agent-Config-Created", header);
+    const { fetch, requests } = recordingFetch(response);
+    const client = createEvalSpClient({ ...origins, fetch });
+    await expect(client.createAgentConfigOutcome!("token", { slug: "ordinary", name: "Native", setting: {} }))
+      .resolves.toEqual({ config, created });
+    expect(requests.map((request) => [request.method, new URL(request.url).pathname])).toEqual([["POST", "/api/user-agent-configs"]]);
+    expect(await requests[0]!.json()).toEqual({ slug: "ordinary", name: "Native", setting: {} });
+  });
+
   it("reads the requested MCP source when reconciling selected Agent servers", async () => {
     const { fetch, requests } = recordingFetch(ok({ data: [{
       id: "platform-mcp", source: "platform", status: "active", url: "https://eval.example/mcp/platform", authType: "none",

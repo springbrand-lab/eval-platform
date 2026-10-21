@@ -4,6 +4,7 @@ import type { Metrics } from "@eval-platform/eval-metrics";
 import type { EvalRunAdmission, EvalRunQueries } from "@eval-platform/eval-runtime";
 import type { Env as PinoEnv } from "hono-pino";
 import type { AgentConfigService } from "../agent-configs.js";
+import type { AgentImportService, AgentImportTaskReader } from "../agent-imports/service.js";
 import type { createPostgresResourceSnapshotReader } from "../db/attempt-resources.js";
 import type { createPostgresObservationReader } from "../db/observation.js";
 import type { createOutputSchemaCatalog } from "../db/output-schemas.js";
@@ -22,6 +23,10 @@ export interface OwnerServices {
   readonly datasets: DatasetService;
   readonly projects: ProjectService;
   readonly agentConfigs: AgentConfigService;
+  /** Always available: persisted owner-scoped progress, independent of optional import mutations. */
+  readonly agentImportTasks: AgentImportTaskReader;
+  /** Absent when the optional authorized dev export connection is not configured. */
+  readonly agentImports?: AgentImportService;
   readonly admission: EvalRunAdmission;
   readonly results: EvalRunQueries;
   readonly projectRuns: ReturnType<typeof createPostgresProjectRunControl> & {

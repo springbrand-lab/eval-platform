@@ -3,6 +3,8 @@ import type {
   AgentResourceSnapshot,
   AgentPurpose,
   AgentRole,
+  AgentImportPreview,
+  AgentImportTaskView,
   DatasetKind,
   EvaluationOutputSchema,
   EvaluationPlan,
@@ -15,6 +17,7 @@ import type {
   Sampling,
 } from "@eval-platform/eval-contracts";
 import type { Data } from "@eval-platform/eval-dataset";
+import type { ImportPlan, ImportReceipt, PlannedResource, ResourceKind, ResourceSource, SourceSnapshot } from "../agent-imports/model.js";
 import { sql } from "drizzle-orm";
 import {
   boolean,
@@ -82,6 +85,108 @@ export const agentConfigPurposes = pgTable("eval_agent_config_purposes", {
   index("eval_agent_config_purposes_owner_idx").on(table.ownerUserId),
   check("eval_agent_config_purposes_purpose_ck", sql`${table.purpose} IN ('execution', 'evaluation')`),
   check("eval_agent_config_purposes_evaluation_mcp_ck", sql`${table.purpose} = 'execution' OR ${table.evaluationMcpServerId} IS NOT NULL`),
+]);
+
+/** Internal provenance is not part of an SP Agent Config or any ordinary Agent DTO. */
+export const resourceSources = pgTable("eval_resource_sources", {
+  ownerUserId: text("owner_user_id").notNull(),
+  kind: text("resource_kind").$type<ResourceKind>().notNull(),
+  id: text("resource_id").notNull(), // Skill IDs intentionally are not UUID-only.
+  origin: text("origin").$type<ResourceSource["origin"]>().notNull(),
+  connectionId: text("source_connection_id"),
+  sourceUserId: text("source_user_id"),
+  sourceDigest: text("source_digest"),
+  targetDigest: text("applied_target_digest"),
+  receipt: json("receipt").$type<ImportReceipt>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.ownerUserId, table.kind, table.id] }),
+  check("eval_resource_sources_kind_ck", sql`${table.kind} IN ('agent', 'skill', 'reference')`),
+  check("eval_resource_sources_origin_ck", sql`${table.origin} IN ('eval_native', 'dev_import', 'platform_catalog')`),
+  check("eval_resource_sources_identity_ck", sql`length(${table.ownerUserId}) > 0 AND length(${table.id}) BETWEEN 1 AND 255`),
+  check("eval_resource_sources_proof_ck", sql`${table.origin} = 'eval_native' OR (
+    ${table.connectionId} IS NOT NULL AND ${table.sourceUserId} IS NOT NULL
+    AND ${table.sourceDigest} IS NOT NULL AND ${table.targetDigest} IS NOT NULL
+    AND (${table.origin} = 'platform_catalog' OR ${table.receipt} IS NOT NULL))`),
+]);
+
+export const agentImportTasks = pgTable("eval_agent_import_tasks", {
+  id: uuid("task_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
+  actorId: text("actor_id"),
+  connectionId: text("source_connection_id").notNull(),
+  sourceUserId: text("source_user_id").notNull(),
+  requestKey: text("request_key").notNull(),
+  fingerprint: text("request_fingerprint").notNull(),
+  request: json("request").$type<AgentImportPreview>().notNull(),
+  status: text("status").$type<AgentImportTaskView["status"]>().notNull(),
+  view: json("view").$type<AgentImportTaskView>().notNull(),
+  snapshot: json("snapshot").$type<SourceSnapshot>(),
+  plan: json("plan").$type<ImportPlan>(),
+  applyKey: text("apply_key"),
+  applyFingerprint: text("apply_fingerprint"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  leaseToken: uuid("lease_token"),
+  leaseUntil: timestamp("lease_until", { withTimezone: true }),
+  revision: integer("revision").notNull().default(0),
+  attempts: integer("attempts").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  unique("eval_agent_import_tasks_owner_id_uq").on(table.ownerUserId, table.id),
+  unique("eval_agent_import_tasks_request_uq").on(table.ownerUserId, table.requestKey),
+  index("eval_agent_import_tasks_owner_idx").on(table.ownerUserId),
+  check("eval_agent_import_tasks_identity_ck", sql`length(${table.ownerUserId}) > 0 AND length(${table.requestKey}) > 0 AND length(${table.fingerprint}) > 0`),
+  check("eval_agent_import_tasks_status_ck", sql`${table.status} IN (
+    'checking', 'ready', 'queued', 'importing', 'completed', 'completed_with_errors', 'failed', 'outcome_unknown')`),
+  check("eval_agent_import_tasks_apply_ck", sql`(${table.applyKey} IS NULL) = (${table.applyFingerprint} IS NULL)`),
+  check("eval_agent_import_tasks_lease_ck", sql`(${table.leaseToken} IS NULL) = (${table.leaseUntil} IS NULL)`),
+]);
+
+/** One immutable intent per target identity. A new task cannot replace an uncertain older intent. */
+export const agentImportIntents = pgTable("eval_agent_import_intents", {
+  ownerUserId: text("owner_user_id").notNull(),
+  kind: text("resource_kind").$type<ResourceKind>().notNull(),
+  id: text("resource_id").notNull(),
+  connectionId: text("source_connection_id").notNull(),
+  sourceUserId: text("source_user_id").notNull(),
+  sourceDigest: text("source_digest").notNull(),
+  targetDigest: text("applied_target_digest").notNull(),
+  importKey: text("import_key").notNull(),
+  fingerprint: text("intent_fingerprint").notNull(),
+  resource: json("resource").$type<PlannedResource>().notNull(),
+  status: text("status").$type<"planned" | "submitting" | "confirmed" | "completed" | "conflict" | "outcome_unknown">().notNull(),
+  receipt: json("receipt").$type<ImportReceipt>(),
+  attachment: json("attachment").$type<{ attachmentCdnUrl: string; clientAttachmentId: string; name: string; mediaType: string; size: number }>(),
+  error: text("error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.ownerUserId, table.kind, table.id] }),
+  unique("eval_agent_import_intents_key_uq").on(table.ownerUserId, table.importKey),
+  check("eval_agent_import_intents_kind_ck", sql`${table.kind} IN ('agent', 'skill', 'reference')`),
+  check("eval_agent_import_intents_status_ck", sql`${table.status} IN ('planned', 'submitting', 'confirmed', 'completed', 'conflict', 'outcome_unknown')`),
+  check("eval_agent_import_intents_receipt_ck", sql`${table.status} NOT IN ('confirmed', 'completed') OR ${table.receipt} IS NOT NULL`),
+]);
+
+export const agentImportTaskIntents = pgTable("eval_agent_import_task_intents", {
+  ownerUserId: text("owner_user_id").notNull(),
+  taskId: uuid("task_id").notNull(),
+  kind: text("resource_kind").$type<ResourceKind>().notNull(),
+  id: text("resource_id").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.taskId, table.kind, table.id] }),
+  foreignKey({ columns: [table.ownerUserId, table.taskId], foreignColumns: [agentImportTasks.ownerUserId, agentImportTasks.id] }),
+  foreignKey({ columns: [table.ownerUserId, table.kind, table.id],
+    foreignColumns: [agentImportIntents.ownerUserId, agentImportIntents.kind, agentImportIntents.id] }),
+]);
+
+/** Persistent coordination, not a process lock or pg-boss singleton-key assumption. */
+export const agentImportLeases = pgTable("eval_agent_import_leases", {
+  ownerUserId: text("owner_user_id").primaryKey(),
+  taskId: uuid("task_id").notNull(),
+  token: uuid("token").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  foreignKey({ columns: [table.ownerUserId, table.taskId], foreignColumns: [agentImportTasks.ownerUserId, agentImportTasks.id] }),
 ]);
 
 /** Material Bundles and Session Bundles are independent owner-scoped catalogs with identical metadata. */

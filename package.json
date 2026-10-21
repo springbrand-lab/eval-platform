@@ -14,6 +14,7 @@
     "test": "pnpm -r --if-present test",
     "typegen": "pnpm -r --if-present typegen",
     "check:packages": "pnpm -r --if-present --filter './packages/**' check",
-    "test:packages": "pnpm -r --if-present --filter './packages/**' test"
+    "test:packages": "pnpm -r --if-present --filter './packages/**' test",
+    "test:deployment": "node --test infra/aws/deploy/*.test.mjs"
   }
 }

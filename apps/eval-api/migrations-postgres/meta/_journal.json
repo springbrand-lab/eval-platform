@@ -43,6 +43,13 @@
       "when": 1792440426582,
       "tag": "0005_resource_snapshot_json",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792517619186,
+      "tag": "0006_agent_imports",
+      "breakpoints": true
     }
   ]
 }

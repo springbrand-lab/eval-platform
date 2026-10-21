@@ -34,68 +34,15 @@ curl -fsSLo "$TEMP_DIR/rds-global-bundle.pem" \
 grep -q -- "-----BEGIN CERTIFICATE-----" "$TEMP_DIR/rds-global-bundle.pem"
 install -m 0644 "$TEMP_DIR/rds-global-bundle.pem" "$DEPLOY_DIR/rds-global-bundle.pem"
 
-APP_SECRET_PATH="$TEMP_DIR/app-secret.json" \
-DB_SECRET_PATH="$TEMP_DIR/database-secret.json" \
-python3 > "$TEMP_DIR/secrets.compose.json" <<'PY'
-import json
-import os
-from pathlib import Path
-from urllib.parse import quote
+python3 "$DEPLOY_DIR/render-secrets.py" \
+  "$TEMP_DIR/app-secret.json" "$TEMP_DIR/database-secret.json" > "$TEMP_DIR/secrets.compose.json"
 
-app = json.loads(Path(os.environ["APP_SECRET_PATH"]).read_text())
-database = json.loads(Path(os.environ["DB_SECRET_PATH"]).read_text())
-
-langfuse = ["LANGFUSE_BASE_URL", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_ENVIRONMENT"]
-# Optional; the API serves the Evaluator result MCP Server and the Worker derives submit tokens from it.
-result_mcp = ["EVAL_RESULT_MCP_TOKEN"]
-evidence_r2 = [
-    "EVAL_EVIDENCE_R2_ENDPOINT",
-    "EVAL_EVIDENCE_R2_BUCKET",
-    "EVAL_EVIDENCE_R2_ACCESS_KEY_ID",
-    "EVAL_EVIDENCE_R2_SECRET_ACCESS_KEY",
-]
-api_required = [
-    "EVAL_SP_API_ORIGIN",
-    "EVAL_SP_SERVICE_USER_ID",
-    "EVAL_SP_SERVICE_SESSION_TOKEN",
-    "EVAL_SP_ADMIN_TOKEN",
-    "EVAL_WEB_ORIGIN",
-    "EVAL_WEB_API_TOKEN",
-    "EVAL_SP_SOURCE_BRANCH",
-    "EVAL_SP_SOURCE_COMMIT",
-    "EVAL_SP_AGENT_ORIGIN",
-    "EVAL_SP_TRUSTED_ORIGIN",
-]
-worker_required = ["EVAL_SP_AGENT_ORIGIN", "EVAL_SP_SERVICE_TOKEN"]
-missing = sorted({name for name in api_required + worker_required if not app.get(name)})
-if missing:
-    raise SystemExit("AWS app secret is missing: " + ", ".join(missing))
-
-if database.get("dbname") != "eval-platform":
-    raise SystemExit("Database secret must target eval-platform")
-database_url = (
-    "postgres://"
-    + quote(database["username"], safe="")
-    + ":"
-    + quote(database["password"], safe="")
-    + "@"
-    + database["host"]
-    + f":{database.get('port', 5432)}/"
-    + quote(database["dbname"], safe="")
-    + "?sslmode=verify-full&sslrootcert="
-    + quote("/etc/ssl/certs/aws-rds-global-bundle.pem", safe="")
-)
-
-def pick(names):
-    return {name: app[name] for name in names if app.get(name)}
-
-print(json.dumps({
-    "services": {
-        "api": {"environment": {"DATABASE_URL": database_url, **pick(api_required + langfuse + result_mcp)}},
-        "run-worker": {"environment": {"DATABASE_URL": database_url, **pick(worker_required + evidence_r2 + langfuse + result_mcp)}},
-    }
-}))
-PY
+if python3 -c 'import json,sys; sys.exit(not json.load(open(sys.argv[1]))["x-agent-imports-enabled"])' \
+  "$TEMP_DIR/secrets.compose.json"; then
+  export COMPOSE_PROFILES=agent-imports
+else
+  unset COMPOSE_PROFILES
+fi
 
 IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 export IMAGE_URI AWS_REGION
@@ -105,6 +52,9 @@ aws ecr get-login-password --region "$AWS_REGION" \
 compose=(docker compose -p eval-platform -f "$DEPLOY_DIR/compose.yaml" -f "$TEMP_DIR/secrets.compose.json")
 "${compose[@]}" pull --quiet
 "${compose[@]}" run --rm --no-deps api node dist/migrate.js
+if [[ -z "${COMPOSE_PROFILES:-}" ]]; then
+  "${compose[@]}" --profile agent-imports stop import-worker
+fi
 "${compose[@]}" up -d --pull never --remove-orphans --wait
 # Finish projections invalidated by the old Worker while the first backfill was running.
 "${compose[@]}" exec -T api node dist/migrate.js
@@ -121,6 +71,9 @@ JS
 # The Run Worker has no HTTP surface; it exits when its configuration or database connection fails.
 sleep 10
 test "$("${compose[@]}" ps --status running --quiet run-worker | wc -l)" -eq 1
+if [[ "${COMPOSE_PROFILES:-}" == agent-imports ]]; then
+  test "$("${compose[@]}" ps --status running --quiet import-worker | wc -l)" -eq 1
+fi
 
 docker image prune --all --force --filter "until=72h" > /dev/null
 
