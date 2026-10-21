@@ -9,17 +9,17 @@ export const importOriginSchema = httpOriginSchema.refine((value) => {
 
 export const agentImportEnvShape = {
   EVAL_DEV_SP_API_ORIGIN: importOriginSchema.optional(),
-  EVAL_DEV_SP_EXPORT_TOKEN: requiredStringSchema.optional(),
+  SP_PLATFORM_RESOURCE_ADMIN_TOKEN: requiredStringSchema.optional(),
 };
 
 export function refineAgentImportEnv(value: {
   readonly EVAL_SP_API_ORIGIN: string;
   readonly EVAL_DEV_SP_API_ORIGIN?: string | undefined;
-  readonly EVAL_DEV_SP_EXPORT_TOKEN?: string | undefined;
+  readonly SP_PLATFORM_RESOURCE_ADMIN_TOKEN?: string | undefined;
 }, context: z.RefinementCtx): void {
-  if ((value.EVAL_DEV_SP_API_ORIGIN === undefined) !== (value.EVAL_DEV_SP_EXPORT_TOKEN === undefined)) {
+  if (value.EVAL_DEV_SP_API_ORIGIN !== undefined && value.SP_PLATFORM_RESOURCE_ADMIN_TOKEN === undefined) {
     context.addIssue({ code: "custom", path: ["EVAL_DEV_SP_API_ORIGIN"],
-      message: "EVAL_DEV_SP_API_ORIGIN and EVAL_DEV_SP_EXPORT_TOKEN must be set together" });
+      message: "EVAL_DEV_SP_API_ORIGIN requires Takt's existing SP_PLATFORM_RESOURCE_ADMIN_TOKEN" });
   }
   if (value.EVAL_DEV_SP_API_ORIGIN === value.EVAL_SP_API_ORIGIN) {
     context.addIssue({ code: "custom", path: ["EVAL_DEV_SP_API_ORIGIN"],
@@ -36,7 +36,7 @@ const workerSchema = databaseEnvSchema.extend({
   ...agentImportEnvShape,
 }).superRefine(refineAgentImportEnv);
 
-/** Separate process: no Run Worker token, admin token, Langfuse credentials or SP Agent access. */
+/** Source management credential only: no target admin, Run Worker, Langfuse or Agent credentials. */
 export function loadAgentImportWorkerConfig(environment: Record<string, string | undefined>) {
   return loadEnv(workerSchema, environment);
 }

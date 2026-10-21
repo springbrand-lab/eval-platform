@@ -21,6 +21,11 @@ const setting: AgentDraft["setting"] = {
   memoryDefaults: { enabled: false, memoryTokens: 3_000, preferencesTokens: 750 }, sandbox: { enabled: true },
   skillIds: [], mcpServers: [{ serverId: "platform-mcp" }], actionIds: [], connectorIds: [], extensionIds: [], referenceFileIds: [],
 };
+const importedFields = {
+  authoring: { goal: " \tResearch\r\n", inputs: " Text + URL \n", exampleInput: " https://example.test/input ", instructionsMode: "manual" },
+  preferredSupplierIds: ["supplier.z", "supplier.a"],
+  referenceNotes: " \tKeep imported background verbatim\r\n\n ",
+};
 const modelCatalog = [
   {
     id: "deepseek-flash-balanced", name: "DeepSeek V4.1 Flash", providerModel: "deepseek/deepseek-v4.1-flash",
@@ -127,6 +132,25 @@ describe("SP Agent editor in Eval", () => {
     } finally {
       await view.close();
     }
+  });
+
+  it.each([
+    { authoring: importedFields.authoring },
+    { preferredSupplierIds: importedFields.preferredSupplierIds },
+    { referenceNotes: importedFields.referenceNotes },
+    importedFields,
+  ])("preserves imported Dev fields on a name-only save (%#)", async (fields) => {
+    Object.assign(stored.setting, structuredClone(fields));
+    const view = await mount("/agents/agent-a");
+    try {
+      await settle(() => expect(name()).not.toBeNull());
+      await type(name(), "Renamed imported Agent");
+      await click(button("保存修改"));
+      await settle(() => expect(transport.patch).toHaveBeenCalledTimes(1));
+      expect(transport.patch.mock.calls[0]![1]).toMatchObject({
+        name: "Renamed imported Agent", setting: fields,
+      });
+    } finally { await view.close(); }
   });
 
   it("creates with the SP template, prompt dialog, resource selector and validated settings", async () => {

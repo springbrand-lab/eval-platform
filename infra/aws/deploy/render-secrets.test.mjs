@@ -27,7 +27,7 @@ const database = {
 };
 const source = {
   EVAL_DEV_SP_API_ORIGIN: "https://dev-api.example.test",
-  EVAL_DEV_SP_EXPORT_TOKEN: "source-export",
+  SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "source-export",
 };
 
 function render(overrides = {}, db = database) {
@@ -59,34 +59,29 @@ test("dev credentials reach API and import consumer, never Run Worker", () => {
   const api = overlay.services.api.environment;
   const importer = overlay.services["import-worker"].environment;
   const runner = overlay.services["run-worker"].environment;
-  assert.equal(api.EVAL_DEV_SP_EXPORT_TOKEN, "source-export");
-  assert.equal(importer.EVAL_DEV_SP_EXPORT_TOKEN, "source-export");
+  assert.equal(api.SP_PLATFORM_RESOURCE_ADMIN_TOKEN, "source-export");
+  assert.equal(importer.SP_PLATFORM_RESOURCE_ADMIN_TOKEN, "source-export");
   assert.equal(importer.EVAL_SP_SERVICE_SESSION_TOKEN, "target-session");
   assert.equal(runner.EVAL_SP_SERVICE_TOKEN, "target-harness");
   assert.equal(runner.EVAL_DEV_SP_API_ORIGIN, undefined);
-  assert.equal(runner.EVAL_DEV_SP_EXPORT_TOKEN, undefined);
+  assert.equal(runner.SP_PLATFORM_RESOURCE_ADMIN_TOKEN, undefined);
   assert.equal(importer.EVAL_SP_SERVICE_TOKEN, undefined);
   assert.equal(importer.EVAL_SP_ADMIN_TOKEN, undefined);
   assert.equal(importer.EVAL_WEB_API_TOKEN, undefined);
 });
 
-test("a half-configured dev connection fails before emitting secrets", () => {
-  for (const partial of [
-    { EVAL_DEV_SP_API_ORIGIN: source.EVAL_DEV_SP_API_ORIGIN },
-    { EVAL_DEV_SP_EXPORT_TOKEN: source.EVAL_DEV_SP_EXPORT_TOKEN },
-  ]) {
-    const result = render(partial);
-    assert.notEqual(result.status, 0);
-    assert.equal(result.stdout, "");
-    assert.match(result.stderr, /EVAL_DEV_SP_API_ORIGIN.*EVAL_DEV_SP_EXPORT_TOKEN/u);
-    assert.doesNotMatch(result.stderr, /source-export|target-session/u);
-  }
+test("a source origin requires the existing Takt credential before emitting secrets", () => {
+  const result = render({ EVAL_DEV_SP_API_ORIGIN: source.EVAL_DEV_SP_API_ORIGIN });
+  assert.notEqual(result.status, 0);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /EVAL_DEV_SP_API_ORIGIN.*SP_PLATFORM_RESOURCE_ADMIN_TOKEN/u);
+  assert.doesNotMatch(result.stderr, /source-export|target-session/u);
 });
 
 test("source cannot resolve to the same HTTP origin as target", () => {
   const result = render({
     EVAL_DEV_SP_API_ORIGIN: "https://EVAL-API.example.test:443/",
-    EVAL_DEV_SP_EXPORT_TOKEN: "source-export",
+    SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "source-export",
   });
   assert.notEqual(result.status, 0);
   assert.equal(result.stdout, "");
@@ -98,6 +93,17 @@ test("only Eval's dedicated database is accepted", () => {
   assert.notEqual(result.status, 0);
   assert.equal(result.stdout, "");
   assert.match(result.stderr, /Database secret must target eval-platform/u);
+});
+
+test("an existing Takt token alone neither enables imports nor reaches any process", () => {
+  const result = render({ SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "existing-takt-sp-token" });
+  assert.equal(result.status, 0, result.stderr);
+  const overlay = JSON.parse(result.stdout);
+  assert.equal(overlay["x-agent-imports-enabled"], false);
+  assert.equal(overlay.services["import-worker"], undefined);
+  for (const service of Object.values(overlay.services)) {
+    assert.equal(service.environment.SP_PLATFORM_RESOURCE_ADMIN_TOKEN, undefined);
+  }
 });
 
 test("database credentials are escaped and the connection verifies TLS", () => {

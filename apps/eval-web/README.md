@@ -123,7 +123,7 @@ Run 详情与采样页共用 compact PageHeader；首屏用一行运行摘要和
 
 Agent 编辑页保留共享编辑器的所有表单与保存行为，以 `.agent-editor-layout` 限定宿主样式：取消嵌套页面的窄列、重复标题和分组卡片边框，名称和用途独立置顶，工作指令直接编辑并占主栏，运行设置占右侧辅栏，能力选择以三列排列，保存栏保持可见。样式依赖当前固定版本的 form/fieldset 结构及 data-agent-* 区域标识；升级共享编辑器时需复核布局。MCP 只读清单与表单使用相同宽度。
 
-共享 Agent 编辑器当前没有语言参数；本项目通过 pnpm patchedDependencies 固定中文文案补丁（patches/@springbrand__agent-config-editor@0.1.0-alpha.0.patch）。覆盖编辑页、选择器、技能/资料管理、操作反馈与无障碍标签。Thinking 只翻译显示名称，原始枚举与模型、能力标识、用户内容保持不变；升级包版本时需迁移补丁并运行编辑器测试。外部服务返回的用户资源名称和原始错误内容不做字符串替换。
+共享 Agent 编辑器当前没有语言参数；本项目通过 pnpm patchedDependencies 固定中文文案补丁（patches/@springbrand__agent-config-editor@0.1.0-alpha.1.patch）。覆盖编辑页、选择器、技能/资料管理、操作反馈与无障碍标签。Thinking 只翻译显示名称，原始枚举与模型、能力标识、用户内容保持不变；升级包版本时需迁移补丁并运行编辑器测试。外部服务返回的用户资源名称和原始错误内容不做字符串替换。
 
 MCP 保留标准名称 `MCP Server`。共享编辑器补丁提供可选 `supplementaryContent` 插槽，用来在同一个 fieldset、保存栏之前展示既有 MCP 配置元数据；用户自选 MCP 不在该入口编辑。评估结果 MCP 是 Eval 管理的用途绑定例外：选择“评估 Agent”时按固定 URL 自动加入，选择“执行 Agent”时移除，保存前由 API 再次校验唯一启用且 Bearer 鉴权的服务。只读清单与其他配置共用宽度与分隔线，避免保存栏把 MCP 信息隔在表单之外。
 

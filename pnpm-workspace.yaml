@@ -16,4 +16,4 @@ minimumReleaseAgeExclude:
   - "@springbrand/agent-config-editor"
 
 patchedDependencies:
-  '@springbrand/agent-config-editor@0.1.0-alpha.0': patches/@springbrand__agent-config-editor@0.1.0-alpha.0.patch
+  '@springbrand/agent-config-editor@0.1.0-alpha.1': patches/@springbrand__agent-config-editor@0.1.0-alpha.1.patch

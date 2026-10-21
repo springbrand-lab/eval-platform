@@ -16,6 +16,16 @@ const environment = {
 };
 
 describe("API configuration", () => {
+  it("uses Takt's existing SP credential for the optional Dev source", () => {
+    expect(loadApiConfig({
+      ...environment, EVAL_DEV_SP_API_ORIGIN: "https://dev-sp.test",
+      SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "existing-takt-sp-token",
+    })).toMatchObject({
+      EVAL_DEV_SP_API_ORIGIN: "https://dev-sp.test",
+      SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "existing-takt-sp-token",
+    });
+  });
+
   it("normalizes origins, applies listen defaults and validates the SP release once", () => {
     expect(loadApiConfig(environment)).toEqual({
       DATABASE_URL: environment.DATABASE_URL,
@@ -49,17 +59,19 @@ describe("API configuration", () => {
     expect(() => loadApiConfig({ ...environment, ...override })).toThrow();
   });
 
-  it("keeps imports optional and validates the source pair and separate origins", () => {
+  it("keeps imports optional and requires the source credential and separate origins", () => {
     expect(loadApiConfig(environment)).not.toHaveProperty("EVAL_DEV_SP_API_ORIGIN");
-    const source = { EVAL_DEV_SP_API_ORIGIN: "https://dev-sp.test/", EVAL_DEV_SP_EXPORT_TOKEN: "read-only-export" };
+    const source = { EVAL_DEV_SP_API_ORIGIN: "https://dev-sp.test/", SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "takt-source-admin" };
     expect(loadApiConfig({ ...environment, ...source })).toMatchObject({
-      EVAL_DEV_SP_API_ORIGIN: "https://dev-sp.test", EVAL_DEV_SP_EXPORT_TOKEN: "read-only-export",
+      EVAL_DEV_SP_API_ORIGIN: "https://dev-sp.test", SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "takt-source-admin",
     });
     for (const override of [
       { EVAL_DEV_SP_API_ORIGIN: source.EVAL_DEV_SP_API_ORIGIN },
-      { EVAL_DEV_SP_EXPORT_TOKEN: source.EVAL_DEV_SP_EXPORT_TOKEN },
       { ...source, EVAL_DEV_SP_API_ORIGIN: environment.EVAL_SP_API_ORIGIN },
       { ...source, EVAL_DEV_SP_API_ORIGIN: "http://dev-sp.test" },
     ]) expect(() => loadApiConfig({ ...environment, ...override })).toThrow();
+    expect(loadApiConfig({
+      ...environment, SP_PLATFORM_RESOURCE_ADMIN_TOKEN: source.SP_PLATFORM_RESOURCE_ADMIN_TOKEN,
+    })).not.toHaveProperty("EVAL_DEV_SP_API_ORIGIN");
   });
 });
