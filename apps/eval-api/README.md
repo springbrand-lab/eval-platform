@@ -161,6 +161,12 @@ databases on that service. The same job also runs `pnpm test:deployment`;
 `deploy-api` still requires the API job to succeed. Live R2 access remains an
 explicit operator opt-in and is not verified by this workflow.
 
+`createTestDatabase` defaults to the production migration entry, including history
+validation and current-schema probes. Historical upgrade fixtures supply an
+initialization callback using Drizzle's migrator with the unchanged migration
+prefix, then exercise the production entry with the complete migration folder.
+Initialization failures still close the pool and drop the temporary database.
+
 本文是环境变量的唯一完整列表。两个进程对接同一 Eval SP 发布，挂载同一个 `EVAL_BUNDLE_DIR`，配置无效时启动失败。日志统一使用 pino（API 请求日志用 `hono-pino`），错误经 `errorDiagnostics` 脱敏后记录。Run Worker 把 Runtime 与 Harness 诊断事件写入同一 pino 日志（见 [eval-runtime README](../../packages/eval-runtime/README.md) 第 31 条与 [SP Harness 协议](../../docs/eval-sp-harness-protocol.md#diagnostics)），`run_runtime_error` 带 `runId`/`stage`/`samplingId`/`evaluationId`；每个 Run 任务开始时记录 `run_job_start`（`runId`、`jobId`、`retryCount`、`retryLimit`、`final`、`stopPending`）。
 
 `pnpm --filter @eval-platform/eval-api start:api`（`src/server.ts`，配置见 `src/config/api.ts`）启动 HTTP 控制面：

@@ -73,7 +73,7 @@ ZIP 与素材上传也等待 FileDropzone 的文件提取结束后再提交；�
 
 与 takt 共用登录：takt 的 `/dashboard/eval` 用 iframe 打开本应用，iframe 发出 `eval:ready`，takt 只向本应用的来源回传 `{type: "takt:token", token}`。Worker 用这个 token 调用 takt 的 `/api/auth/me`，用户须有 `eval` 菜单（或是管理员）才放行；之后去掉 token，附上 `X-Eval-Web-Token` 与操作人 `X-Eval-Actor` 转发给 Eval API。页面响应带 `Content-Security-Policy: frame-ancestors`，只允许 takt 嵌入。
 
-Worker 配置见 `wrangler.jsonc`：`TAKT_ORIGIN`、`TAKT_EVAL_MENU_ID`、`EVAL_API_ORIGIN`、`EVAL_WEB_ORIGIN`、`FRAME_ANCESTORS`，密钥 `EVAL_WEB_API_TOKEN`（与 Eval API 相同）。构建期变量写在 `.env.production`：`VITE_TAKT_ORIGIN`、`VITE_LANGFUSE_PROJECT_URL`。`pnpm --filter @eval-platform/eval-web deploy` 构建并部署；推送到 `main` 时由 `.github/workflows/ci.yml` 在 eval-web 测试通过后自动部署。
+Worker 配置见 `wrangler.jsonc`：`TAKT_ORIGIN`、`TAKT_EVAL_MENU_ID`、`EVAL_API_ORIGIN`、`EVAL_WEB_ORIGIN`、`FRAME_ANCESTORS`，密钥 `EVAL_WEB_API_TOKEN`（与 Eval API 相同）。构建期变量写在 `.env.production`：`VITE_TAKT_ORIGIN`、`VITE_LANGFUSE_PROJECT_URL`。`pnpm --filter @eval-platform/eval-web deploy` 构建并部署；推送到 `main` 时由 `.github/workflows/ci.yml` 在 eval-web 和受影响共享包测试通过后自动部署。同次发布涉及 API 时，Web 还须等待 AWS API 发布及冒烟检查成功；只改 Web 时允许 API 发布 job 跳过。
 
 ## 本地开发
 

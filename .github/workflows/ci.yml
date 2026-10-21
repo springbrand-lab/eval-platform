@@ -1,7 +1,8 @@
 name: CI
 
 # One pipeline: detect affected projects, test them, then deploy what changed.
-# Deploys run only on main, and only after every test job that ran has passed.
+# Deploys run only on main after their affected tests pass.
+# Web waits for a changed API to deploy successfully.
 on:
   workflow_dispatch:
   push:
@@ -288,13 +289,14 @@ jobs:
 
   deploy-web:
     name: Deploy Eval Web to Cloudflare
-    needs: [changes, packages, web]
+    needs: [changes, packages, web, deploy-api]
     if: >-
       !cancelled()
       && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
       && needs.changes.outputs.web == 'true'
       && needs.web.result == 'success'
       && (needs.packages.result == 'success' || needs.packages.result == 'skipped')
+      && (needs.changes.outputs.api != 'true' || needs.deploy-api.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
