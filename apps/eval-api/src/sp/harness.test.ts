@@ -234,6 +234,42 @@ describe("Eval SP Harness", () => {
     expect(new URL(requests[5]!.url).searchParams.get("submissionId")).toBe("submission-1");
   });
 
+  it.each([subject, evaluator])("preserves $role Prompt text and business fields across initialization and submission", async (handle) => {
+    const prompt = "\t\r\nBuild a project\nPreserve formatting.\u00a0\u3000";
+    const data = { userPrompt: prompt, sampleId: { source: "dataset", index: 0 }, metadata: { enabled: false } };
+    const outputSchema = handle.role === "evaluator" ? { type: "object" } : undefined;
+    const materialized = binding([], "", outputSchema ? { evaluationOutputSchemaPath: SCHEMA_PATH } : {});
+    const { fetch, requests } = queuedFetch(Response.json(materialized), Response.json(receipt("completed")));
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    const chatPath = `/internal/v1/eval-harness/users/${OWNER}/chats/${handle.chatId}`;
+
+    await expect(harness.materializeInitialData({
+      handle, idempotencyKey: "initial-data:prompt", data,
+      ...(outputSchema ? { evaluationOutputSchema: outputSchema } : {}),
+    })).resolves.toEqual(materialized);
+    await expect(harness.submitAgent({
+      handle, idempotencyKey: "submission:prompt", prompt,
+    })).resolves.toMatchObject({ submissionId: "submission-1", status: "completed" });
+
+    expect(requests).toHaveLength(2);
+    expect(new URL(requests[0]!.url).pathname).toBe(`${chatPath}/initialization`);
+    expect(await requests[0]!.json()).toMatchObject({ idempotencyKey: "initial-data:prompt", data });
+    expect(new URL(requests[1]!.url).pathname).toBe(`${chatPath}/submissions`);
+    expect(await requests[1]!.json()).toEqual({ idempotencyKey: "submission:prompt", prompt, unattended: true });
+  });
+
+  it.each(["", " \t\r\n\u00a0\u3000"])("rejects blank Prompt %j in initialization and submission before contacting SP", async (prompt) => {
+    const fetch = vi.fn();
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    await expect(harness.materializeInitialData({
+      handle: subject, idempotencyKey: "initial-data:prompt", data: { userPrompt: prompt },
+    })).rejects.toMatchObject({ name: "SpHarnessError", retryable: false });
+    await expect(harness.submitAgent({
+      handle: subject, idempotencyKey: "submission:prompt", prompt,
+    })).rejects.toMatchObject({ name: "SpHarnessError", retryable: false });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("ensures an evaluator Chat with only its Evaluation ID and reads the result from its own Space", async () => {
     const { fetch, requests } = spFetch((request) => new URL(request.url).pathname.endsWith("/output")
       ? Response.json({
