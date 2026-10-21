@@ -32,6 +32,8 @@ export interface RunQueue {
 }
 
 export interface RunWorkerQueue extends RunQueue {
+  /** Acknowledges the job through the caller's atomic Run settlement transaction. */
+  complete(transaction: DrizzleTransactionLike, jobId: string): Promise<void>;
   /**
    * Completes the active job and schedules the Run's next pass at `startAfter` under its own key, both
    * in the caller's transaction, so an idle wait spends no retry and absorbs no stop or recollection.
@@ -63,17 +65,20 @@ export async function openRunBoss(
 }
 
 export function createRunQueue(boss: Pick<PgBoss, "send" | "complete" | "upsert">): RunWorkerQueue {
+  const complete: RunWorkerQueue["complete"] = async (transaction, jobId) => {
+    await boss.complete(RUN_QUEUE, jobId, null, { db: fromDrizzle(transaction, sql) });
+  };
   return {
     async enqueue(transaction, runId, reason) {
       const job: RunJob = { runId };
-      // A completed stage can be recovered while its previous job is still settling.
-      // Give recovery its own deduplicated wake-up so that old job cannot absorb and lose it.
+      // Recovery can wake immediately instead of waiting on the ordinary job's retry backoff.
       await boss.send(RUN_QUEUE, job, { singletonKey: reason === "collection" ? `collection:${runId}` : runId, db: fromDrizzle(transaction, sql) });
     },
+    complete,
     async defer(transaction, runId, jobId, startAfter) {
       const db = fromDrizzle(transaction, sql);
       const job: RunJob = { runId };
-      await boss.complete(RUN_QUEUE, jobId, null, { db });
+      await complete(transaction, jobId);
       // Moves an already deferred wake-up to the latest earliest due time instead of keeping a stale one.
       await boss.upsert(RUN_QUEUE, job, { singletonKey: `resources:${runId}`, startAfter, db });
     },

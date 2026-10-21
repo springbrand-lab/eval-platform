@@ -51,14 +51,14 @@ const runtime: ApiRuntime = {
     db, sp, bundles, release: config.release, runQueue, agentImportTarget,
     ...(importBoss === undefined ? {} : { agentImports: {
       source: createAgentImportSource({ origin: config.EVAL_DEV_SP_API_ORIGIN!, targetOrigin: config.EVAL_SP_API_ORIGIN,
-        token: config.EVAL_DEV_SP_EXPORT_TOKEN! }),
+        token: config.SP_PLATFORM_RESOURCE_ADMIN_TOKEN! }),
       queue: createAgentImportQueue(importBoss),
     } }),
     ...(config.langfuse === undefined ? {} : { publishScore: createLangfuseScorePublisher({ config: config.langfuse }) }),
   }),
   ...(config.EVAL_RESULT_MCP_TOKEN === undefined ? {} : { evaluationResults: {
     token: config.EVAL_RESULT_MCP_TOKEN,
-    submissions: createPostgresEvaluationSubmissions(db),
+    submissions: createPostgresEvaluationSubmissions(db, runQueue),
   } }),
 };
 const app = createRoutes(logger);

@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => {
   const worker = { close: vi.fn(async () => { order.push("worker.close"); }) };
   const db = {};
   const store = {};
+  const submissions = {};
   const plans = {};
   const runQueue = {};
   const harness = {};
@@ -18,7 +19,7 @@ const mocks = vi.hoisted(() => {
   const evidence = {};
   const evidenceLimits = {};
   return {
-    order, pool, boss, worker, db, store, plans, runQueue, harness, runtime, bundles, evidence, evidenceLimits,
+    order, pool, boss, worker, db, store, submissions, plans, runQueue, harness, runtime, bundles, evidence, evidenceLimits,
     spEvidenceLimits: vi.fn((_limits: unknown) => evidenceLimits),
     openEvidenceStore: vi.fn(async (_config: unknown) => evidence),
     Pool: vi.fn(function Pool() { return pool; }),
@@ -27,6 +28,7 @@ const mocks = vi.hoisted(() => {
     createRunQueue: vi.fn(() => runQueue),
     createEvalDb: vi.fn(() => db),
     createPostgresWorkerRuntimeStore: vi.fn(() => store),
+    createPostgresEvaluationSubmissions: vi.fn(() => submissions),
     createPostgresWorkerProjectPlanReader: vi.fn(() => plans),
     createSpHarness: vi.fn(() => harness),
     createEvalRunResumer: vi.fn((_dependencies: unknown) => runtime),
@@ -40,6 +42,7 @@ vi.mock("./evidence/store.js", () => ({ openEvidenceStore: mocks.openEvidenceSto
 vi.mock("./run-worker-queue.js", () => ({ openRunBoss: mocks.openRunBoss, createRunQueue: mocks.createRunQueue }));
 vi.mock("./db/client.js", () => ({ createEvalDb: mocks.createEvalDb }));
 vi.mock("./db/runtime.js", () => ({ createPostgresWorkerRuntimeStore: mocks.createPostgresWorkerRuntimeStore }));
+vi.mock("./db/evaluation-submissions.js", () => ({ createPostgresEvaluationSubmissions: mocks.createPostgresEvaluationSubmissions }));
 vi.mock("./db/project-plans.js", () => ({ createPostgresWorkerProjectPlanReader: mocks.createPostgresWorkerProjectPlanReader }));
 vi.mock("./sp/harness.js", () => ({ createSpHarness: mocks.createSpHarness, spEvidenceLimits: mocks.spEvidenceLimits }));
 vi.mock("@eval-platform/eval-runtime", () => ({ createEvalRunResumer: mocks.createEvalRunResumer }));
@@ -70,6 +73,7 @@ describe("Eval SP Run worker process", () => {
     expect(mocks.Pool).toHaveBeenCalledExactlyOnceWith({ connectionString: config.DATABASE_URL });
     expect(mocks.createRunQueue).toHaveBeenCalledExactlyOnceWith(mocks.boss);
     expect(mocks.createPostgresWorkerRuntimeStore).toHaveBeenCalledExactlyOnceWith(mocks.db, mocks.runQueue);
+    expect(mocks.createPostgresEvaluationSubmissions).toHaveBeenCalledExactlyOnceWith(mocks.db, mocks.runQueue);
     expect(mocks.createSpHarness).toHaveBeenCalledExactlyOnceWith({
       origin: "https://agent.eval-sp.test",
       serviceToken: "secret",

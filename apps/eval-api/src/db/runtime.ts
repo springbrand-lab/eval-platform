@@ -462,13 +462,24 @@ export function createPostgresWorkerRuntimeStore(
         .returning({ runId: runs.runId });
       return updated !== undefined;
     },
-    deferResourceCheck(runId, jobId) {
+    settleRunJob(runId, jobId) {
       return db.transaction(async (transaction) => {
+        // Wake-up writers hold this same lock until both their facts and queue write commit.
+        await transaction.select({ projectId: projects.projectId }).from(projects)
+          .innerJoin(runs, eq(runs.projectId, projects.projectId))
+          .where(eq(runs.runId, runId)).for("update", { of: projects });
+        // Read after acquiring the lock, including wake-ups committed while this transaction waited.
+        const [active] = await transaction.select({ runId: runs.runId }).from(runs)
+          .where(and(eq(runs.runId, runId), runActive(transaction)));
+        if (!active) {
+          await runQueue.complete(transaction, jobId);
+          return { kind: "completed" as const };
+        }
         const at = await nextResourceCheckAt(transaction, runId);
-        if (at === null || at <= Date.now()) return null;
+        if (at === null || at <= Date.now()) return { kind: "active" as const };
         const startAfter = new Date(at);
         await runQueue.defer(transaction, runId, jobId, startAfter);
-        return startAfter.toISOString();
+        return { kind: "deferred" as const, startAfter: startAfter.toISOString() };
       });
     },
   };

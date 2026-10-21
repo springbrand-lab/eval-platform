@@ -6813,6 +6813,67 @@ describe("resource readiness waiting and Submission observation", () => {
     expect(harness.collectEvaluation).toHaveBeenCalledOnce();
   });
 
+  it.each(["synced", "failed"] as const)("syncs an accepted score before recovering resources after a Worker restart (%s)", async (delivery) => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const clock = testClock(START);
+    const run = await createTestAdmission(store).submit(projectRequest("pipeline", "accepted-score-after-worker-restart"));
+    const record = (await store.getRun(run.runId))!;
+    const samplingId = record.samplingIds[0]!;
+    const evaluationId = record.evaluationIds[0]!;
+    await seedSampling(store, {
+      ...(await saved(store, samplingId)), subjectChatId: "subject-chat", execution: { status: "succeeded" },
+      artifacts: [], trajectory: { trajectoryId: "subject-trace", source: "subject", path: "/subject.jsonl" },
+    });
+    const initial = await savedEvaluation(store, evaluationId);
+    const input: CollectAgentResourcesInput = {
+      handle: { ownerUserId: EVALUATOR.ownerUserId, role: "evaluator", framework: "sp", chatId: "evaluation-chat", samplingId, evaluationId },
+      idempotencyKey: `evaluation:${samplingId}`, submissionId: "evaluation-submission",
+    };
+    const snapshot = makeResources(input);
+    await store.updateEvaluation({
+      ...initial, chatId: input.handle.chatId,
+      attempts: [{
+        evaluationAttemptId: "accepted-attempt", evaluationId, attemptNumber: 1,
+        submissionId: input.submissionId!, status: "completed", startedAt: START, completedAt: START,
+        resources: { status: "pending", scope: snapshot.scope, downloads: 1 },
+      }],
+      status: { status: "succeeded", resourcesPending: { deadline: DEADLINE, nextAttemptAt: FIRST_CHECK } },
+      output: {
+        status: "succeeded", artifacts: [],
+        trajectory: { trajectoryId: "evaluation-trace", source: "evaluator", path: "/evaluation.jsonl" },
+        structuredOutput: { path: "mcp:submit_evaluation", content: '{"score":8}', source: "submission" },
+      },
+    }, initial);
+    const publish = vi.fn(async () => {
+      if (delivery === "failed") throw new Error("Langfuse unavailable");
+    });
+    const onError = vi.fn();
+    clock.advance(RESOURCE_CHECK_INTERVAL_MS);
+
+    await createTestResumer(store, harness, {
+      now: clock.now, sleep: async () => undefined, scores: { read: () => ({ score: 8 }), publish },
+      createRetryController: createProductionRetryController, onError,
+    }).resume(run.runId);
+
+    expect(publish).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      evaluationId, samplingId, subjectChatId: "subject-chat", evaluatorChatId: "evaluation-chat", score: 8,
+    }));
+    expect(publish.mock.invocationCallOrder[0]!)
+      .toBeLessThan(vi.mocked(harness.collectAgentResources).mock.invocationCallOrder[0]!);
+    const recovered = await savedEvaluation(store, evaluationId);
+    expect(recovered.status).toEqual({ status: "succeeded" });
+    expect(recovered.scoreSync).toMatchObject({ status: delivery });
+    expect(recovered.attempts[0]!.resources?.status).toBe("collected");
+    if (delivery === "failed") {
+      expect(onError).toHaveBeenCalledWith(expect.objectContaining({
+        message: expect.stringContaining("score was not synced: Langfuse unavailable"),
+      }), expect.objectContaining({ evaluationId }));
+    }
+    expect(harness.submitAgent).not.toHaveBeenCalled();
+    expect(harness.restartAgent).not.toHaveBeenCalled();
+  });
+
   it.each(["pending", "finalized"] as const)("keeps the accepted Evaluator's %s resource wait recoverable when confirmed terminal writes fail", async (resources) => {
     const store = makeStore();
     const harness = makeHarness();
@@ -6862,9 +6923,11 @@ describe("resource readiness waiting and Submission observation", () => {
       }
       await write(next, expected, collected);
     });
+    const publish = vi.fn(async () => undefined);
     const options = {
       now: clock.now, sleep: async () => undefined, onError: vi.fn(),
       createRetryController: createProductionRetryController,
+      scores: { read: () => ({ score: 8 }), publish },
     };
     clock.advance(RESOURCE_CHECK_INTERVAL_MS);
     await expect(createTestResumer(store, harness, options).resume(run.runId)).rejects.toBeInstanceOf(AggregateError);
@@ -6875,6 +6938,8 @@ describe("resource readiness waiting and Submission observation", () => {
     expect(waiting.status).toEqual(accepted.status);
     expect(waiting.output).toEqual(accepted.output);
     expect(waiting.attempts).toEqual(accepted.attempts);
+    expect(waiting.scoreSync).toMatchObject({ status: "synced" });
+    expect(publish).toHaveBeenCalledOnce();
     expect(harness.inspectAgentOperation).toHaveBeenCalledOnce();
     expect(harness.inspectAgentResources).not.toHaveBeenCalled();
     expect(harness.collectAgentResources).not.toHaveBeenCalled();
@@ -6893,6 +6958,7 @@ describe("resource readiness waiting and Submission observation", () => {
     expect(harness.inspectAgentOperation).toHaveBeenCalledTimes(2);
     expect(harness.inspectAgentResources).toHaveBeenCalledTimes(resources === "pending" ? 1 : 0);
     expect(harness.collectAgentResources).toHaveBeenCalledTimes(resources === "pending" ? 1 : 0);
+    expect(publish).toHaveBeenCalledOnce();
     await restarted.resume(run.runId);
     expect(harness.inspectAgentOperation).toHaveBeenCalledTimes(2);
     expect(harness.inspectAgentResources).toHaveBeenCalledTimes(resources === "pending" ? 1 : 0);

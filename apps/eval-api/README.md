@@ -251,6 +251,17 @@ Initialization failures still close the pool and drop the temporary database.
 
 Worker 可多实例部署、滚动升级；收到信号后停止取任务，等待进行中的 Run 结束再关闭 pg-boss 和连接池。调度、恢复、停止语义和剩余风险见[架构方案](../../docs/architecture.md#run-调度与停止)。
 
+Run job settlement belongs to the application-owned
+`RunRecoveryStore.settleRunJob(runId, jobId)` Interface. Under the same Project
+row lock used by admission, stop, recollection and MCP acceptance, it rereads
+durable work and atomically completes an idle job, completes and defers a
+resource-only wait, or leaves an active job owned by the Worker for retry.
+The handler uses this Interface on every successful exit, including an initially
+idle Run; pg-boss's later auto-ack is only an idempotent acknowledgement.
+A new request therefore either becomes visible before settlement or enqueues
+after completion. Correctness must not depend on a different singleton key for
+each recovery path. The lock covers database work only, never SP requests.
+
 ## 本地开发
 
 `start:api` 和 `start:worker` 自动加载本包目录下的 `.env.eval`（不提交），已有 shell 环境变量优先；文件不存在时只读取 shell 环境变量。根目录 `pnpm dev` 同时启动这两个进程与 Web。使用 Web 默认代理时，在 `.env.eval` 中设置 `EVAL_API_PORT=18788`，并确保 Web 的 `EVAL_API_ORIGIN` 指向该端口。
