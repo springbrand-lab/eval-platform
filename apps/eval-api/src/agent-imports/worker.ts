@@ -5,6 +5,7 @@ import { ImportConflictError, ImportDependencyError, ImportLeaseLostError, Impor
 import { resourceKey, summarize, type ImportResult, type ImportTask, type PlannedResource } from "./model.js";
 import { createImportPlanner } from "./planner.js";
 import { dependencyKeys, planDigest, requireCanonicalSourceSetting, requireReusable } from "./semantics.js";
+import { plannedResourcesForAgent } from "./selection-facts.js";
 import type { AgentImportSource } from "./source.js";
 import type { AgentImportStore } from "./store.js";
 import { checkReceipt, type AgentImportTarget } from "./target.js";
@@ -59,14 +60,16 @@ export function createAgentImportWorker(input: {
           intent?.receipt ?? undefined, message);
       }
     }
-    // Check every root's frozen definition evidence before ANY Skill, Reference, attachment or Agent write.
+    // Check each complete root and its frozen facts before ANY Skill, Reference, attachment or Agent write.
     // A conflicting root cannot cause its otherwise-unused dependencies to be published on the target.
     for (const resource of resources.filter((item) => item.kind === "agent")) {
       await store.heartbeat(task);
       try {
         if (!resource.prepared) throw new ImportConflictError("Agent has no frozen target configuration");
         requireCanonicalSourceSetting(resource.prepared.config.setting);
-        await target.validateSelections(resource.prepared.config.setting, resource.prepared.dependencies);
+        const source = plan.snapshot.agents.find((agent) => agent.id === resource.id);
+        if (!source) throw new ImportConflictError("Agent is missing from the frozen source snapshot");
+        await target.validateSelections(resource.prepared.config.setting, resource.prepared.dependencies, plannedResourcesForAgent(plan.snapshot, source));
       } catch (error) {
         if (!(error instanceof ImportConflictError)) throw error; // dependency outage pauses the plan before remote writes
         await failure(resource, error);
@@ -96,7 +99,6 @@ export function createAgentImportWorker(input: {
             if (Date.parse(task.expiresAt) <= Date.now()) throw new ImportConflictError("Preview expired before this resource was imported");
             await store.markIntent(task, resource, "submitting");
             if (resource.kind === "skill") {
-              if (await target.conflictingSkillName(resource.id, resource.name)) throw new ImportConflictError("Private Skill runtime name is already occupied");
               result = await target.importSkill(resource.id, await staging.zip(task.id, resource.files, task.expiresAt), resource.importKey);
             } else {
               const source = resource.source;

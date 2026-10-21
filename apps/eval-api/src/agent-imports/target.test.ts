@@ -4,6 +4,7 @@ import { EvalSpApiError } from "../sp/http.js";
 import { ImportConflictError, ImportDependencyError, ImportOutcomeUnknownError } from "./errors.js";
 import { createAgentImportTarget } from "./target.js";
 import type { ImportResult, PreparedAgent } from "./model.js";
+import { canonicalSourceSettingFixture } from "./public-wire.test-support.js";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const owner = "22222222-2222-4222-8222-222222222222";
@@ -290,18 +291,57 @@ describe("fixed create-only target HTTP seam", () => {
     expect(new URL(calls[1]!.url).searchParams.get("skillId")).toBe("platform-string");
   });
 
-  it("checks target model provider IDs/presets and paginated Component capabilities without dropping them", async () => {
+  it("delegates eligibility and exact definition comparison to one target preflight with selected planned facts", async () => {
     const proof = { kind: "connector" as const, id: "connector", fingerprint: "a".repeat(64) };
+    const setting = { ...canonicalSourceSettingFixture(), model: "provider/model", presetId: "preset",
+      connectorIds: ["connector"], skillIds: ["private-skill", "platform-string"], referenceFileIds: [id],
+      mcpServers: [{ serverId: "toolkit", kind: "connector_toolkit" }] };
+    const plannedResources = { skills: [{ id: "private-skill", name: "Runtime name" }], references: [{ id, size: 3 }] };
+    const calls: Request[] = [];
     const target = setup(async (input) => {
-      const url = new URL(new Request(input).url);
-      if (url.pathname === "/api/agent-config-imports/dependencies") return ok({ items: [proof] });
-      if (url.pathname === "/api/model-catalog") return ok([{ id: "preset", providerModel: "provider/model", available: true }]);
-      const page = Number(url.searchParams.get("page") ?? "1");
-      return ok({ data: page === 1 ? [{ id: "unrelated", status: "active", selectable: true }] : [{ id: "connector", status: "active", selectable: true }],
-        total: 2, page, pageSize: 1 });
+      const request = new Request(input); calls.push(request.clone());
+      if (new URL(request.url).pathname === "/api/agent-config-imports/validate") {
+        const body = await request.json();
+        if (body.setting.model === "denied") return Response.json({
+          code: "AGENT_CONFIG_INVALID", errMsg: "Target selection is unavailable", requestId: "preflight-denied",
+        }, { status: 422 });
+        return ok({ version: 1, setting });
+      }
+      throw new Error("Eligibility must not be inferred from target catalogs");
     });
-    await expect(target.validateSelections({ model: "provider/model", presetId: "preset", connectorIds: ["connector"] }, [proof])).resolves.toBeUndefined();
-    await expect(target.validateSelections({ model: "missing" })).rejects.toBeInstanceOf(ImportConflictError);
-    await expect(target.validateSelections({ presetId: "missing" })).rejects.toBeInstanceOf(ImportConflictError);
+    await expect(target.validateSelections(setting, [proof], plannedResources)).resolves.toBeUndefined();
+    expect(await calls[0]!.clone().json()).toEqual({ setting, dependencies: [proof], plannedResources });
+    await expect(target.validateSelections({ ...setting, model: "denied" }, [proof], plannedResources))
+      .rejects.toMatchObject({ code: "EVAL_SP_CONFLICT", cause: { status: 422, payload: { requestId: "preflight-denied" } } });
+    expect(calls.map((request) => [request.method, new URL(request.url).pathname])).toEqual([
+      ["POST", "/api/agent-config-imports/validate"], ["POST", "/api/agent-config-imports/validate"],
+    ]);
+  });
+
+  it.each([
+    { skills: [{ id: "private-skill", name: "one" }, { id: "private-skill", name: "two" }], references: [] },
+    { skills: [{ id: "unselected", name: "unselected" }], references: [] },
+    { skills: [{ id: "private-skill", name: "" }], references: [] },
+    { skills: [{ id: "private-skill", name: "n".repeat(121) }], references: [] },
+    { skills: [{ id: "private-skill", name: "one", kind: "platform" }], references: [] },
+    { skills: Array.from({ length: 257 }, (_, index) => ({ id: `skill-${index}`, name: `skill-${index}` })), references: [] },
+    { skills: [], references: [{ id, size: 3 }, { id, size: 3 }] },
+    { skills: [], references: [{ id: owner, size: 3 }] },
+    { skills: [], references: [{ id, size: -1 }] },
+    { skills: [], references: [{ id, size: 1.5 }] },
+    { skills: [], references: [{ id: "not-a-uuid", size: 3 }] },
+    { skills: [], references: [{ id, size: 3, url: "https://dev.test/private" }] },
+    { skills: [], references: Array.from({ length: 257 }, () => ({ id, size: 0 })) },
+  ])("refuses invalid planned identity/metadata (%#) before any target request", async (plannedResources) => {
+    const setting = { ...canonicalSourceSettingFixture(), skillIds: ["private-skill"], referenceFileIds: [id] };
+    const calls: Request[] = [];
+    const target = setup(async (input) => {
+      calls.push(new Request(input));
+      return ok({ version: 1, setting });
+    });
+    const original = structuredClone(plannedResources);
+    await expect(target.validateSelections(setting, [], plannedResources)).rejects.toBeInstanceOf(ImportConflictError);
+    expect(calls).toEqual([]);
+    expect(plannedResources).toEqual(original);
   });
 });

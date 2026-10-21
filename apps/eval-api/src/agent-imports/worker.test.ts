@@ -10,6 +10,10 @@ async function fixture(snapshot = snapshotFixture()) {
 }
 const posts = (f: Awaited<ReturnType<typeof workerFixture>>, pathname: string) =>
   f.requests.filter((request) => request.method === "POST" && new URL(request.url).pathname === pathname);
+const resourceWrites = (f: Awaited<ReturnType<typeof workerFixture>>) => f.requests.filter((request) =>
+  request.method !== "GET"
+  && !(request.method === "POST"
+    && new URL(request.url).pathname === "/api/agent-config-imports/validate"));
 
 describe("durable import worker through approved public HTTP seams", () => {
   it("classifies a real receipt HTTP conflict as terminal for that root, not outcome_unknown", async () => {
@@ -74,7 +78,7 @@ describe("durable import worker through approved public HTTP seams", () => {
     expect(task.plan).toEqual(plan);
     expect(task.applyKey).toBe("apply");
     expect(f.savedViews.slice(savedBefore).map((view) => view.status)).toEqual([final ? "outcome_unknown" : "importing"]);
-    expect(f.requests.every((request) => request.method === "GET")).toBe(true);
+    expect(resourceWrites(f)).toEqual([]);
     f.setTargetEnabled(true);
     await f.worker.run(task.id);
     expect(task.view.status).toBe("completed");
@@ -88,7 +92,7 @@ describe("durable import worker through approved public HTTP seams", () => {
     f.failNextPurpose();
     await expect(f.worker.run(task.id)).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
     const intent = structuredClone(f.intents.get(resourceKey("agent", agentId))!);
-    const writes = f.requests.filter((request) => request.method === "POST").length;
+    const writes = resourceWrites(f).length;
     f.setTargetEnabled(false);
     await expect(f.worker.run(task.id, { final })).rejects.toBeInstanceOf(ImportTargetDisabledError);
     expect(task.view.status).toBe(final ? "outcome_unknown" : "importing");
@@ -97,11 +101,11 @@ describe("durable import worker through approved public HTTP seams", () => {
     expect(task.applyKey).toBe("apply");
     expect(f.intents.get(resourceKey("agent", agentId))).toEqual(intent);
     expect(f.targetAgents.has(agentId)).toBe(true);
-    expect(f.requests.filter((request) => request.method === "POST")).toHaveLength(writes);
+    expect(resourceWrites(f)).toHaveLength(writes);
     f.setTargetEnabled(true);
     await f.worker.run(task.id);
     expect(task.view.status).toBe("completed");
-    expect(f.requests.filter((request) => request.method === "POST")).toHaveLength(writes);
+    expect(resourceWrites(f)).toHaveLength(writes);
     expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
   });
 
@@ -135,13 +139,13 @@ describe("durable import worker through approved public HTTP seams", () => {
     await expect(f.worker.run(task.id)).resolves.toBeUndefined();
     expect(task.view.status).toBe("failed");
     expect(task.view.agents.map((agent) => agent.status)).toEqual(["failed", "failed"]);
-    expect(f.requests.every((request) => request.method === "GET")).toBe(true);
+    expect(resourceWrites(f)).toEqual([]);
   });
   it("prepares only the selected union, imports all Skill bytes and target attachments, dependencies before same-ID Agents", async () => {
     const f = await fixture();
     const task = await f.preview();
     expect(task.view.agents.map((item) => item.status)).toEqual(["ready", "ready"]);
-    expect(f.requests.every((request) => request.method === "GET")).toBe(true);
+    expect(resourceWrites(f)).toEqual([]);
     expect(f.requests.some((request) => request.url.endsWith("/unused"))).toBe(false);
     await f.store.apply(task.id, "apply");
     expect(f.events.at(-1)).toBe("enqueue:apply");
@@ -161,10 +165,23 @@ describe("durable import worker through approved public HTTP seams", () => {
     expect(f.requests.filter((request) => new URL(request.url).origin === "https://dev.test").every((request) => request.method === "GET")).toBe(true);
   });
 
-  it("blocks a same-name different-ID private Skill only in its dependency closure, without alias/rename/replace", async () => {
+  it("honors a target preflight same-name different-ID Skill conflict only in its dependency closure, without alias/rename/replace", async () => {
     const f = await fixture();
     f.targetSkills.set("native-skill", { id: "native-skill", name: "private-skill", origin: "upload", available: true, deleted: false,
       files: [{ path: "SKILL.md", size: 3, url: "https://eval.test/target-files/native" }] });
+    const transport = f.fetch.getMockImplementation()!;
+    f.fetch.mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      if (new URL(request.url).pathname === "/api/agent-config-imports/validate") {
+        const body = await request.clone().json();
+        if (body.setting.skillIds.includes("private-skill")) {
+          f.requests.push(request.clone());
+          expect(body.plannedResources.skills).toEqual([{ id: "private-skill", name: "private-skill" }]);
+          return Response.json({ code: "AGENT_CONFIG_IMPORT_CONFLICT", errMsg: "Target Skill runtime name conflicts" }, { status: 409 });
+        }
+      }
+      return transport(request);
+    });
     const task = await f.preview();
     expect(task.view.agents.map((item) => item.status)).toEqual(["conflict", "ready"]);
     await f.store.apply(task.id, "apply"); await f.worker.run(task.id);
@@ -209,7 +226,7 @@ describe("durable import worker through approved public HTTP seams", () => {
     expect(task.view.status).toBe("failed");
     expect(task.view.error).toBe("Selected dependency union exceeds import limits");
     expect(task.view.agents.map((agent) => agent.status)).toEqual(["failed", "failed"]);
-    expect(f.requests.every((request) => request.method === "GET")).toBe(true);
+    expect(resourceWrites(f)).toEqual([]);
   });
 
   it("does not claim/hide a native or unknown pre-existing Agent from a same-ID unknown intent", async () => {
@@ -296,7 +313,7 @@ describe("durable import worker through approved public HTTP seams", () => {
     await expect(f.worker.run(task.id)).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
     expect(task.view.status).toBe("importing");
     const intent = structuredClone(f.intents.get(resourceKey("agent", agentId))!);
-    const writes = f.requests.filter((request) => request.method === "POST").length;
+    const writes = resourceWrites(f).length;
     f.failNextPurpose();
     await expect(f.worker.run(task.id, { final: true })).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
     expect(task.view.status).toBe("outcome_unknown");
@@ -310,7 +327,7 @@ describe("durable import worker through approved public HTTP seams", () => {
     expect(f.sources.has(resourceKey("agent", agentId))).toBe(false);
     expect(f.savedViews.filter((view) => view.status === "outcome_unknown")).toHaveLength(1);
     expect(f.savedViews.at(-1)?.status).toBe("outcome_unknown");
-    expect(f.requests.filter((request) => request.method === "POST")).toHaveLength(writes);
+    expect(resourceWrites(f)).toHaveLength(writes);
     expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
   });
 
@@ -397,7 +414,7 @@ describe("durable import worker through approved public HTTP seams", () => {
       expect(intent).toMatchObject({ status: "confirmed", receipt: { resourceId: agentId } });
       expect(f.purposes.upsert).toHaveBeenCalledTimes(1);
       const historicalReceipt = structuredClone(intent.receipt);
-      const postCount = f.requests.filter((request) => request.method === "POST").length;
+      const postCount = resourceWrites(f).length;
       if (change === "deleted") f.targetAgents.delete(agentId);
       else if (change === "archived") f.archiveAgent(agentId); // public GET retains its body, active list excludes it
       else f.targetAgents.set(agentId, { ...f.targetAgents.get(agentId)!, name: "Changed externally", setting: { mcpServers: [], skillIds: [] } });
@@ -411,7 +428,7 @@ describe("durable import worker through approved public HTTP seams", () => {
       expect(intent.receipt).toEqual(historicalReceipt);
       expect(f.requests.slice(before).some((request) => request.method === "GET"
         && new URL(request.url).pathname === `/api/user-agent-configs/${agentId}`)).toBe(true);
-      expect(f.requests.filter((request) => request.method === "POST")).toHaveLength(postCount);
+      expect(resourceWrites(f)).toHaveLength(postCount);
       expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
     });
   }
@@ -432,11 +449,11 @@ describe("durable import worker through approved public HTTP seams", () => {
     f.failNextPurpose();
     await f.store.apply(task.id, "apply");
     await expect(f.worker.run(task.id)).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
-    const before = f.requests.filter((request) => request.method === "POST").length;
+    const before = resourceWrites(f).length;
     task.expiresAt = "2000-01-01T00:00:00.000Z";
     await f.worker.run(task.id);
     expect(task.view.status).toBe("completed");
-    expect(f.requests.filter((request) => request.method === "POST")).toHaveLength(before);
+    expect(resourceWrites(f)).toHaveLength(before);
   });
 
   it("does not refetch a changed source after preview or overwrite a native Agent created before apply", async () => {

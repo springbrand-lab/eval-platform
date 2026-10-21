@@ -45,6 +45,12 @@ export type SourceReference = z.infer<typeof sourceReferenceSchema>;
 export type SourceSnapshot = z.infer<typeof sourceSnapshotSchema>;
 export type ExportFile = z.infer<typeof exportFileSchema>;
 export interface FrozenFile extends ExportFile { sha256: string }
+/** Read-only target preflight facts; derived from the frozen snapshot, never a second persisted resource state. */
+export const plannedImportResourcesSchema = z.strictObject({
+  skills: z.array(sourceSkillSchema.pick({ id: true, name: true }).readonly()).max(256).readonly(),
+  references: z.array(sourceReferenceSchema.pick({ id: true, size: true }).readonly()).max(256).readonly(),
+}).readonly();
+export type PlannedImportResources = z.infer<typeof plannedImportResourcesSchema>;
 export interface PreparedAgent {
   config: { id: string; slug: string; name: string; description: string | null; setting: Record<string, unknown> };
   purpose: "execution" | "evaluation";

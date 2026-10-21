@@ -120,13 +120,54 @@ Agent imports are an optional control-plane capability. The browser chooses an a
 
 `AgentImportTaskView` and the source-user/candidate projections belong to `eval-contracts`, not the SP configuration body. A preview binds the source user, selected IDs, purpose, immutable dependency manifest and content evidence. Changing the selected source user requires a new preview. A page without missing candidates is not proof that every source page is synchronized.
 
+Preview validates the complete prepared setting through target SP
+`POST /api/agent-config-imports/validate`, even when no platform definitions are
+selected. Its request is
+`{setting, dependencies, plannedResources:{skills:[{id,name}], references:[{id,size}]}}`;
+omitted `dependencies` defaults to `[]` and omitted `plannedResources` to empty
+lists. Its standard success envelope contains `{version:1, setting}`.
+The target owns strict canonical validation, model-plan access, MCP/Toolkit,
+Action/Component/Supplier eligibility, Skill/Reference selection rules and exact
+definition comparison, using the same owning implementation as ordinary writes
+and create-only imports. Eval does not reconstruct admission from Action details,
+Component/Toolkit/model catalogs or a separate target definition query.
+
+Planned facts come only from the frozen source snapshot, not browser input or
+another persisted fact set. Each strict list contains at most 256 unique selected
+IDs. Only source `kind:"user"` Skills supply names; selected platform Skills must
+exist on Target. Reference facts supply UUID IDs and nonnegative integer sizes.
+This permits only explicit planned missing dependencies, including selected Skill
+name and Reference total checks; it cannot bypass foreign, soft-deleted or
+otherwise unavailable existing resources. Existing resources use actual target
+facts, not the planned metadata. The read-only snapshot creates no resource,
+upload, receipt or reservation, takes no row locks and authorizes no later write.
+Apply repeats preflight with the frozen facts before any dependency write.
+The formal Agent import and receipt recovery use empty planned lists to require
+the actual imported dependencies; SP revalidates atomically at commit.
+
+Eval requires the returned setting to exactly equal the prepared setting. It
+does not remove unknown fields, copy the SP setting schema locally, or bypass a
+missing/incompatible validation operation. Current Dev `authoring`,
+`preferredSupplierIds` and `referenceNotes` must survive preview, import and
+readback. Only documented 422 `REQUEST_VALIDATION_FAILED`,
+`AGENT_CONFIG_IMPORT_INVALID` or `AGENT_CONFIG_INVALID`, exact 403
+`MODEL_ACCESS_DENIED`, and known import-conflict 409 codes prove a deterministic
+rejection. They block that Agent with a safe conflict and retain upstream
+diagnostics as the cause. Unknown status/code pairs, auth, rate limits, outages,
+cancellation and unavailable/incompatible preflight remain dependency failures
+without clearing the browser Session or falling back to catalog admission.
+Eval's managed MCP reads remain only for purpose reconciliation and keep
+Connector Toolkits distinct. Target SP must
+support the configuration and its runtime semantics before this Eval backend
+is released and the Dev source is enabled. No Web presentation change is needed.
+
 Task-level `importing` includes automatic receipt recovery (`progress.stage: receipts`), even while individual Agents report `outcome_unknown`. The Web continues read-only polling until recovery completes or the Worker exhausts its queue budget. Only then is an unresolved task published as terminal `outcome_unknown`, with manual refresh/reconciliation available and no browser mutation replay.
 
 Imports preserve Agent, Skill and Reference IDs, create only missing target resources, and never update, delete, revive, rename or alias existing objects. A same-name private Skill belonging to a different source user can still conflict under the shared target owner; source-user selection does not create target tenancy. Platform Skills are verified as platform objects, not uploaded as user Skills.
 
 SP exports canonical saved settings before Eval freezes a preview: legal omitted `presetId` and `referenceFileIds` become `null` and `[]` without source writes or model-plan fallback. Eval rejects incompatible noncanonical exports before writes rather than changing the frozen expectation after a POST.
 
-Selected Actions, Connector Components and Extensions carry public `{kind,id,fingerprint}` definition evidence. Eval compares it through the target's read-only `POST /api/agent-config-imports/dependencies` metadata query and freezes the same evidence into the Agent import body and digests. SP verifies it again inside the create-only transaction and on receipt replay; no definition is published or adopted. This proves the platform-declared definition/version, not independently changing remote MCP behavior behind an unchanged URL/revision.
+Selected Actions, Connector Components and Extensions carry public `{kind,id,fingerprint}` definition evidence. Eval validates exact source coverage/identity locally, freezes the same evidence into the prepared Agent, import body and digests, and sends those expected proofs in the authoritative preflight for SP comparison (at most 500 per call). SP verifies them again inside the create-only transaction and on receipt replay; no definition is published or adopted. This proves the platform-declared definition/version, not independently changing remote MCP behavior behind an unchanged URL/revision.
 
 A known target import-receipt 409 is a conflict, not an unknown write or transient dependency failure. File/path conflicts block only dependent Agent roots; global union-size limits still reject the whole preview. History reads require only the current owner and the Eval database, never a live source connection, queue or target write permission.
 

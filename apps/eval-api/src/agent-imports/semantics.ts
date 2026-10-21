@@ -1,10 +1,11 @@
 import { equalJson } from "@eval-platform/eval-contracts";
 import { ImportConflictError } from "./errors.js";
-import { digest, skillId, uuid, type FrozenFile, type ImportPlan, type ImportTask, type PlannedResource, type SourceAgent } from "./model.js";
+import { digest, type FrozenFile, type ImportPlan, type ImportTask, type PlannedResource, type SourceAgent } from "./model.js";
 import type { AgentImportTarget } from "./target.js";
 import { checkReceipt } from "./target.js";
 import type { ResourceSourceStore } from "../db/agent-import-sources.js";
 import type { DefinitionEvidence } from "./definition-evidence.js";
+import { dependencies } from "./selection-facts.js";
 
 export function agentSourceDigest(source: SourceAgent, dependencies: readonly DefinitionEvidence[]): string {
   return digest({ version: 1, source, dependencies });
@@ -18,16 +19,6 @@ export function requireCanonicalSourceSetting(setting: Readonly<Record<string, u
   }
 }
 
-export function dependencies(agent: SourceAgent): { skills: string[]; references: string[] } {
-  function ids(field: string, kind: "skill" | "reference") {
-    const values = agent.setting[field] ?? [];
-    if (!Array.isArray(values) || values.length > 256) throw new ImportConflictError(`Unsupported ${field}`);
-    const ids = values.map((value) => (kind === "skill" ? skillId : uuid).parse(value));
-    if (new Set(ids).size !== ids.length) throw new ImportConflictError(`Duplicate ${field}`);
-    return ids;
-  }
-  return { skills: ids("skillIds", "skill"), references: ids("referenceFileIds", "reference") };
-}
 export function dependencyKeys(agent: SourceAgent): string[] {
   const { skills, references } = dependencies(agent);
   return [...skills.map((id) => `skill:${id}`), ...references.map((id) => `reference:${id}`)];

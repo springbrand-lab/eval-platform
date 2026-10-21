@@ -159,6 +159,10 @@ export async function workerFixture(snapshot = snapshotFixture()) {
       return ok({ ...snapshot, agents: snapshot.agents.filter((agent) => ids.includes(agent.id)) });
     }
     if (url.pathname === "/api/agent-config-imports/config") return ok({ version: 1, enabled: targetEnabled });
+    if (url.pathname === "/api/agent-config-imports/validate") {
+      const { setting } = await request.json();
+      return ok({ version: 1, setting }); // Public preflight wire; SP owns the setting schema.
+    }
     if (request.method === "GET" && url.pathname.startsWith("/api/user-agent-configs/")) {
       const id = decodeURIComponent(url.pathname.split("/").at(-1)!);
       return targetAgents.has(id) ? ok(targetAgents.get(id)) : missing();

@@ -1,7 +1,7 @@
 import type { AgentConfigRef, AgentConfigSnapshot, AgentPurpose, AgentRole, JsonValue } from "@eval-platform/eval-contracts";
 import { createId, equalJson, resolveEvaluationResultsMcp } from "@eval-platform/eval-contracts";
 import { ImportConflictError, ImportDependencyError } from "./agent-imports/errors.js";
-import type { ImportResult, PreparedAgent, SourceAgent } from "./agent-imports/model.js";
+import type { ImportResult, PlannedImportResources, PreparedAgent, SourceAgent } from "./agent-imports/model.js";
 import { requireDefinitionEvidence, type DefinitionEvidence } from "./agent-imports/definition-evidence.js";
 import { requireCanonicalSourceSetting } from "./agent-imports/semantics.js";
 import { checkAgentResult, checkReceipt, type AgentImportTarget } from "./agent-imports/target.js";
@@ -272,7 +272,10 @@ export function createAgentConfigService(input: {
       return created;
     },
     /** Freeze target normalization in preview, using the same purpose/MCP and frozen-copy rules. */
-    async prepareImport(source: SourceAgent, purpose: AgentPurpose, dependencies: readonly DefinitionEvidence[] = []): Promise<PreparedAgent> {
+    async prepareImport(
+      source: SourceAgent, purpose: AgentPurpose, dependencies: readonly DefinitionEvidence[] = [],
+      plannedResources: PlannedImportResources = { skills: [], references: [] },
+    ): Promise<PreparedAgent> {
       if (!input.imports) throw new ImportDependencyError("Agent imports are disabled");
       if (isReservedSlug(source.slug) || source.slug === "default"
         || (await projects.frozenAgentConfigIds([source.id])).has(source.id)) throw new AgentConfigFrozenError(source.id);
@@ -284,7 +287,7 @@ export function createAgentConfigService(input: {
       const normalized = normalizePurposeConfig(config, purpose, catalog);
       const actual = purposeFromConfig(normalized.config, catalog);
       if (actual !== purpose) throw new AgentConfigPurposeMismatchError(source.id, purpose, actual);
-      await input.imports.validateSelections(normalized.config.setting as Record<string, unknown>, proofs);
+      await input.imports.validateSelections(normalized.config.setting as Record<string, unknown>, proofs, plannedResources);
       return { purpose, evaluationMcpServerId: normalized.evaluationMcpServerId, dependencies: proofs,
         config: { ...config, setting: normalized.config.setting as Record<string, unknown> } };
     },
@@ -297,6 +300,7 @@ export function createAgentConfigService(input: {
       const source = await input.sources?.get("agent", id);
       if (source?.origin === "eval_native") throw new ImportConflictError("An Eval-native Agent already occupies this ID");
       requireCanonicalSourceSetting(prepared.config.setting);
+      // Dependencies must exist now, including during receipt recovery; no future-resource facts are supplied.
       await input.imports.validateSelections(prepared.config.setting, prepared.dependencies);
       if (!recovered) {
         const catalog = await purposeCatalog();
