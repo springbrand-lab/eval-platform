@@ -21,8 +21,11 @@ export function createAgentImportService(input: { source: AgentImportSource; tar
   const { source, target, store } = input;
   return {
     config: async () => ({ enabled: (await target.config()).enabled, maxAgents: AGENT_IMPORT_MAX_AGENTS }),
-    users: (query: { q?: string | undefined; limit?: number | undefined }) =>
-      source.users({ ...(query.q === undefined ? {} : { q: query.q }), ...(query.limit === undefined ? {} : { limit: query.limit }) }),
+    users: (query: { q?: string | undefined; cursor?: string | undefined; limit?: number | undefined }) =>
+      source.users({
+        ...(query.q === undefined ? {} : { q: query.q }), ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+        ...(query.limit === undefined ? {} : { limit: query.limit }),
+      }),
     async candidates(sourceUserId: string, query: { q?: string | undefined; cursor?: string | undefined; limit?: number | undefined; onlyMissing?: boolean | undefined }): Promise<AgentImportCandidatePage> {
       const { onlyMissing, ...scope } = query;
       const [page, existing] = await Promise.all([source.agents(sourceUserId, {

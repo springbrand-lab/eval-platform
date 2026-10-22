@@ -14,14 +14,18 @@ describe("approved read-only export seam", () => {
       const request = new Request(input, init);
       calls.push(request);
       const path = new URL(request.url).pathname;
-      if (path.endsWith("/users")) return envelope({ users: [{ id: user, name: "User", email: "u@example.test" }] });
+      if (path.endsWith("/users")) return envelope({
+        users: [{ id: user, name: "User", email: "u@example.test" }], nextCursor: null,
+      });
       if (path.endsWith("/agents")) return envelope({ items: [], nextCursor: "next-page" });
       return envelope({ version: 1, sourceUserId: user, agents: [{
         id: agent, name: "Agent", description: null, slug: "agent", revision: 1, setting: canonicalSourceSettingFixture(),
       }], skills: [], references: [] });
     });
     const source = createAgentImportSource({ origin: "https://dev.test", targetOrigin: "https://eval.test", token: "export-only", fetch });
-    await expect(source.users({ q: "user", limit: 20 })).resolves.toHaveLength(1);
+    await expect(source.users({ q: "user", limit: 20 })).resolves.toEqual({
+      users: [{ id: user, name: "User", email: "u@example.test" }], nextCursor: null,
+    });
     await expect(source.agents(user, { cursor: "old", q: "a", limit: 10 })).resolves.toMatchObject({ nextCursor: "next-page" });
     await source.snapshot(user, [agent]);
     expect(calls.map((r) => new URL(r.url).pathname)).toEqual([
@@ -36,10 +40,65 @@ describe("approved read-only export seam", () => {
     }
   });
 
+  it("browses complete source-user pages without a query and forwards 4096-character opaque cursors for later users", async () => {
+    const cursor = "opaque+source/cursor==".padEnd(4096, "x");
+    const calls: Request[] = [];
+    const source = createAgentImportSource({ origin: "https://dev.test", targetOrigin: "https://eval.test", token: "export",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        calls.push(request);
+        return envelope(new URL(request.url).searchParams.get("cursor") === cursor
+          ? { users: [{ id: agent, name: "Later User", email: "later@example.test" }], nextCursor: null }
+          : { users: [{ id: user, name: "User", email: "u@example.test" }], nextCursor: cursor });
+      } });
+    await expect(source.users({})).resolves.toEqual({
+      users: [{ id: user, name: "User", email: "u@example.test" }], nextCursor: cursor,
+    });
+    await expect(source.users({ cursor, limit: 1 })).resolves.toEqual({
+      users: [{ id: agent, name: "Later User", email: "later@example.test" }], nextCursor: null,
+    });
+    expect(new URL(calls[0]!.url).searchParams.get("limit")).toBe("20");
+    expect(new URL(calls[1]!.url).searchParams.get("cursor")).toBe(cursor);
+    expect(new URL(calls[1]!.url).searchParams.get("limit")).toBe("1");
+    expect(calls.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  it.each([
+    { limit: 0 }, { limit: 21 }, { limit: 1.5 }, { cursor: "" }, { cursor: "x".repeat(4097) }, { q: "x".repeat(201) },
+  ])("rejects invalid source-user query bounds before making an export request %#", async (query) => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => envelope({ users: [], nextCursor: null }));
+    const source = createAgentImportSource({ origin: "https://dev.test", targetOrigin: "https://eval.test", token: "export", fetch });
+    await expect(source.users(query)).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{}, ""], [{ q: "" }, ""], [{ q: "  \t " }, ""], [{ q: "  User  " }, "User"],
+  ] as const)("keeps optional source-user search compatible with no-typing browsing %#", async (query, expected) => {
+    const calls: Request[] = [];
+    const source = createAgentImportSource({ origin: "https://dev.test", targetOrigin: "https://eval.test", token: "export",
+      fetch: async (input, init) => {
+        calls.push(new Request(input, init));
+        return envelope({ users: [], nextCursor: null });
+      } });
+    await source.users(query);
+    expect(new URL(calls[0]!.url).searchParams.get("q")).toBe(expected);
+  });
+
   it.each([401, 403, 404, 503])("translates export HTTP %i to a dependency failure, not login invalidation", async (status) => {
     const source = createAgentImportSource({ origin: "https://dev.test", targetOrigin: "https://eval.test", token: "export",
       fetch: async () => Response.json({ success: false, code: "NOT_FOUND", errMsg: "upstream" }, { status }) });
     await expect(source.agents(user, {})).rejects.toBeInstanceOf(ImportDependencyError);
+    await expect(source.users({})).rejects.toMatchObject({ code: "EVAL_SP_UNAVAILABLE", status: 503, cause: { status } });
+  });
+
+  it.each([
+    { users: [] }, { users: [], nextCursor: 1 }, { users: Array(21).fill({ id: user, name: "User", email: "u@example.test" }), nextCursor: null },
+    { users: [], nextCursor: null, token: "not-public" }, { users: { users: [], nextCursor: null }, nextCursor: null },
+  ])("rejects malformed source-user pages as dependency failures rather than truncating or dropping cursors %#", async (page) => {
+    const source = createAgentImportSource({ origin: "https://dev.test", targetOrigin: "https://eval.test", token: "export",
+      fetch: async () => envelope(page) });
+    await expect(source.users({})).rejects.toBeInstanceOf(ImportDependencyError);
   });
 
   it("rejects wrong source owner or a substituted selected set", async () => {

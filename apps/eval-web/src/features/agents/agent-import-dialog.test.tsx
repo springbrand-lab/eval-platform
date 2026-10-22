@@ -39,6 +39,7 @@ function candidate(n: number, exists = false): AgentImportCandidate {
 }
 let enabled: boolean, maxAgents: number, previewStatus: AgentImportTaskView["status"], sequence: number, targetUserId: string;
 let task: AgentImportTaskView | null;
+let userRead: ((params: Record<string, unknown>) => unknown) | null;
 let candidateRead: ((userId: string, params: Record<string, unknown>) => unknown) | null;
 const mounted: { unmount: () => Promise<void>; query: QueryClient }[] = [];
 function createTask(input: AgentImportPreview): AgentImportTaskView {
@@ -69,6 +70,7 @@ async function settle(check: () => void) {
   throw failure;
 }
 function candidateCalls() { return transport.get.mock.calls.filter(([path]) => /^\/api\/agent-config-sync\/users\/[^/]+\/agents$/u.test(path)); }
+function userCalls() { return transport.get.mock.calls.filter(([path]) => path === `${base}/users`); }
 function taskCalls() { return transport.get.mock.calls.filter(([path]) => path.startsWith(`${base}/tasks/`)); }
 async function mount(query = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })) {
   const root = createRootRoute({ component: Outlet });
@@ -82,12 +84,6 @@ async function mount(query = new QueryClient({ defaultOptions: { queries: { retr
 }
 async function open() {
   await click(button("从 dev 导入"));
-  if (enabled) {
-    await settle(() => expect(modal().querySelector('[aria-label="搜索已授权 dev 用户"]')
-      || modal().textContent?.includes("Dev Alice")).toBeTruthy());
-    const search = modal().querySelector<HTMLInputElement>('[aria-label="搜索已授权 dev 用户"]');
-    if (search && !search.value.trim()) await type(search, "dev");
-  }
   await settle(() => expect(modal().textContent).toContain(enabled ? "Dev Alice" : "当前环境尚未启用"));
 }
 async function chooseUser(id = USER_A) {
@@ -134,7 +130,7 @@ describe("dev Agent import user workflow", () => {
   beforeEach(() => {
     for (const mock of Object.values(transport)) mock.mockReset();
     window.localStorage.clear();
-    enabled = true; maxAgents = 50; previewStatus = "ready"; sequence = 0; task = null; candidateRead = null;
+    enabled = true; maxAgents = 50; previewStatus = "ready"; sequence = 0; task = null; userRead = null; candidateRead = null;
     targetUserId = TARGET;
     window.scrollTo = vi.fn();
     transport.get.mockImplementation(async (path: string, options?: { params?: Record<string, unknown> }) => {
@@ -142,11 +138,7 @@ describe("dev Agent import user workflow", () => {
       if (path === "/api/agents") return [{ agentConfig: { ownerUserId: TARGET, userAgentId: native.id }, name: native.name, role: "subject", purpose: "execution" }];
       if (path === "/api/me") return { id: targetUserId, role: "user" };
       if (path === `${base}/config`) return { enabled, maxAgents };
-      if (path === `${base}/users`) {
-        const q = String(options?.params?.q ?? "").trim();
-        if (!q) throw new Error("Source user search requires a nonblank query");
-        return { users: q === "dev" ? users : [users[1]] };
-      }
+      if (path === `${base}/users`) return userRead ? userRead(options?.params ?? {}) : { users, nextCursor: null };
       if (path.startsWith(`${base}/tasks/`)) {
         if (!task || path !== `${base}/tasks/${task.id}`) throw new Error("Task not found");
         return structuredClone(task);
@@ -184,42 +176,178 @@ describe("dev Agent import user workflow", () => {
     vi.restoreAllMocks();
   });
 
-  it("waits for a nonblank source-user search, trims it and never loads Agents before selection", async () => {
+  it("automatically lists dev usernames without a search input and never loads Agents before selection", async () => {
     await mount();
+    expect(userCalls()).toHaveLength(0);
     await click(button("从 dev 导入"));
-    await settle(() => expect(modal().querySelector('[aria-label="搜索已授权 dev 用户"]')).not.toBeNull());
-    const search = modal().querySelector<HTMLInputElement>('[aria-label="搜索已授权 dev 用户"]')!;
-    const searches = () => transport.get.mock.calls.filter(([path]) => path === `${base}/users`);
-    expect(searches()).toHaveLength(0);
-    await type(search, "   ");
-    expect(searches()).toHaveLength(0);
-    await type(search, "  dev  ");
     await settle(() => expect(modal().textContent).toContain("Dev Alice"));
-    expect(searches().at(-1)?.[1].params).toEqual({ q: "dev", limit: 20 });
+    expect(modal().querySelector('input[type="search"]')).toBeNull();
+    expect(userCalls()).toHaveLength(1);
+    expect(userCalls()[0]![1]).toEqual({ params: { limit: 20 }, signal: expect.any(AbortSignal) });
+    expect([...modal().querySelectorAll('[role="radiogroup"][aria-label="选择 dev 用户"] label')]
+      .map((label) => label.textContent)).toEqual(["Dev Alice", "Dev Bob"]);
+    expect(modal().textContent).not.toMatch(/alice@example|bob@example|00000000|已授权用户|请先输入|最多显示 20/u);
     expect(candidateCalls()).toHaveLength(0);
-    const reads = searches().length;
-    await type(search, "");
-    await settle(() => expect(modal().textContent).toContain("请先输入 dev 用户的名称或邮箱进行搜索"));
-    expect(searches()).toHaveLength(reads);
-    expect(modal().querySelector('[aria-label="选择 dev 用户"]')).toBeNull();
+    await chooseUser(USER_B);
+    expect(modal().textContent).toContain("已选用户：Dev Bob");
+    expect(modal().textContent).not.toMatch(/alice@example|bob@example|00000000-0000-4000-8000-00000000010[12]/u);
+    expect(candidateCalls()).toHaveLength(1);
   });
 
-  it("does not fetch Agents until an authorized user is chosen, and searches the server", async () => {
+  it("does not fetch Agents until a user is chosen, and keeps Agent search on the server", async () => {
     const view = await mount();
     expect(candidateCalls()).toHaveLength(0);
     expect(transport.get.mock.calls.some(([path]) => path.startsWith(base))).toBe(false);
     await open();
     expect(candidateCalls()).toHaveLength(0);
-    expect(modal().textContent).toContain("请先选择已授权的 dev 用户");
-    await type(modal().querySelector('[aria-label="搜索已授权 dev 用户"]'), "Bob + mail");
-    await settle(() => expect(transport.get).toHaveBeenCalledWith(`${base}/users`, expect.objectContaining({ params: { q: "Bob + mail", limit: 20 } })));
-    expect(candidateCalls()).toHaveLength(0);
+    expect(modal().textContent).toContain("请先选择 dev 用户");
     await chooseUser(USER_B);
     expect(candidateCalls().at(-1)).toEqual([`${base}/users/${USER_B}/agents`, expect.objectContaining({ params: { q: "", limit: 20 } })]);
     await type(modal().querySelector('[aria-label="搜索 dev Agent"]'), "搜索内容");
     await settle(() => expect(modal().textContent).toContain("Agent 80"));
     expect(candidateCalls().at(-1)![1].params).toEqual({ q: "搜索内容", limit: 20 });
     expect(view.container.querySelector("tbody")?.textContent).toContain("Eval 原生配置");
+  });
+
+  it("appends user pages beyond 20 while retaining the selected user and preview until a user switch", async () => {
+    const laterUser = { id: uuid(121), name: "Dev User 21", email: "user21@example.test" };
+    const firstPage = [...users, ...Array.from({ length: 18 }, (_, index) => ({
+      id: uuid(103 + index), name: `Dev User ${index + 3}`, email: `user${index + 3}@example.test`,
+    }))];
+    userRead = (params) => params.cursor === "user-page-2"
+      ? { users: [laterUser], nextCursor: null } : { users: firstPage, nextCursor: "user-page-2" };
+    candidateRead = (id) => ({ items: [candidate(id === laterUser.id ? 61 : 1)], nextCursor: null });
+    await mount(); await open(); await chooseUser(); await chooseAgent(1); await preview();
+    const originalTaskId = task!.id;
+    expect(modal().querySelectorAll('input[name="agent-import-user"]')).toHaveLength(20);
+    expect(modal().textContent).not.toContain("Dev User 21");
+    const readsBeforeMore = userCalls().length;
+    expect(userCalls().every(([, options]) => options.params.cursor === undefined)).toBe(true);
+    await click(button("加载更多用户", modal()));
+    await settle(() => expect(modal().textContent).toContain("Dev User 21"));
+    expect(modal().querySelectorAll('input[name="agent-import-user"]')).toHaveLength(21);
+    expect(userCalls()).toHaveLength(readsBeforeMore + 1);
+    expect(userCalls().at(-1)![1].params).toEqual({ limit: 20, cursor: "user-page-2" });
+    expect(modal().querySelector(`input[name="agent-import-user"][value="${USER_A}"]`)).toHaveProperty("checked", true);
+    expect(modal().textContent).toContain("已选用户：Dev Alice");
+    expect(modal().textContent).toContain("已选 1 / 50");
+    expect(modal().querySelector(`[role="checkbox"][aria-label="选择 Agent Agent 1（${uuid(1)}）"]`)?.getAttribute("aria-checked")).toBe("true");
+    expect(modal().querySelector('[aria-label="逐 Agent 导入结果"]')).not.toBeNull();
+    expect(modal().textContent).toContain(originalTaskId);
+    expect([...modal().querySelectorAll("button")].some((item) => item.textContent === "加载更多用户")).toBe(false);
+    await chooseUser(laterUser.id);
+    expect(modal().textContent).toContain("已选用户：Dev User 21");
+    expect(modal().textContent).toContain("已选 0 / 50");
+    expect(modal().querySelector('[aria-label="逐 Agent 导入结果"]')).toBeNull();
+    expect(window.localStorage.getItem(agentImportPointerKey(TARGET))).toBeNull();
+    await chooseAgent(61); await preview();
+    expect(transport.post.mock.calls[1]![1]).toMatchObject({ sourceUserId: laterUser.id, agentIds: [uuid(61)] });
+    expect(modal().textContent).not.toContain(laterUser.email);
+  });
+
+  it("keeps loaded usernames, the selected user, Agents and preview when a later user page fails, and retries that page", async () => {
+    const laterUser = { id: uuid(121), name: "Dev User 21", email: "user21@example.test" };
+    let failMore!: (error: Error) => void;
+    let failing = true;
+    userRead = (params) => {
+      if (params.cursor !== "user-page-2") return { users, nextCursor: "user-page-2" };
+      if (failing) return new Promise((_resolve, reject) => { failMore = reject; });
+      return { users: [laterUser], nextCursor: null };
+    };
+    await mount(); await open(); await chooseUser(); await chooseAgent(1); await preview();
+    const originalTaskId = task!.id;
+    await settle(() => expect(button("加载更多用户", modal()).disabled).toBe(false));
+    const readsBeforeMore = userCalls().length;
+    await click(button("加载更多用户", modal()));
+    await settle(() => expect(userCalls()).toHaveLength(readsBeforeMore + 1));
+    expect(button("加载更多用户", modal()).disabled).toBe(true);
+    expect(modal().querySelector(`input[name="agent-import-user"][value="${USER_A}"]`)).toHaveProperty("checked", true);
+    expect(modal().textContent).toContain("Dev Bob");
+    await act(async () => failMore(new Error("更多用户暂时不可用")));
+    await settle(() => expect(modal().textContent).toContain("更多用户暂时不可用"));
+    expect(modal().querySelectorAll('input[name="agent-import-user"]')).toHaveLength(2);
+    expect(modal().querySelector(`input[name="agent-import-user"][value="${USER_A}"]`)).toHaveProperty("checked", true);
+    expect(modal().textContent).toContain("Dev Bob");
+    expect(modal().textContent).toContain("已选用户：Dev Alice");
+    expect(modal().textContent).toContain("已选 1 / 50");
+    expect(modal().textContent).toContain(originalTaskId);
+    expect(modal().querySelector('[aria-label="逐 Agent 导入结果"]')).not.toBeNull();
+    expect(modal().textContent).not.toContain("暂无 dev 用户");
+    failing = false;
+    await click(button("重试", modal()));
+    await settle(() => expect(modal().textContent).toContain("Dev User 21"));
+    expect(modal().textContent).not.toContain("更多用户暂时不可用");
+    expect(modal().querySelectorAll('input[name="agent-import-user"]')).toHaveLength(3);
+    expect(modal().querySelector(`input[name="agent-import-user"][value="${USER_A}"]`)).toHaveProperty("checked", true);
+    expect(modal().querySelector(`[role="checkbox"][aria-label="选择 Agent Agent 1（${uuid(1)}）"]`)?.getAttribute("aria-checked")).toBe("true");
+    expect(modal().textContent).toContain(originalTaskId);
+    expect(userCalls().slice(readsBeforeMore).map(([, options]) => options.params)).toEqual([
+      { limit: 20, cursor: "user-page-2" }, { limit: 20, cursor: "user-page-2" },
+    ]);
+    expect(transport.post).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { name: "", email: "private@example.test" },
+    { name: " \t ", email: "private@example.test" },
+    { name: "", email: "" },
+  ])("uses an unnamed-user label instead of email or UUID in the picker, preview and confirmation: %j", async (user) => {
+    userRead = () => ({ users: [{ id: USER_A, ...user }], nextCursor: null });
+    await mount(); await click(button("从 dev 导入"));
+    await settle(() => expect(modal().textContent).toContain("未命名用户"));
+    expect(modal().querySelector('[role="radiogroup"][aria-label="选择 dev 用户"] label')?.textContent).toBe("未命名用户");
+    expect(modal().textContent).not.toMatch(/private@example|00000000/u);
+    await chooseUser(); await chooseAgent(1);
+    expect(modal().textContent).toContain("已选用户：未命名用户");
+    await preview();
+    expect(modal().textContent).toContain("本次 dev 用户：未命名用户");
+    expect(modal().textContent).not.toContain(USER_A);
+    expect(modal().textContent).not.toContain("private@example.test");
+    await click(button("确认导入 1 个 Agent", modal()));
+    const confirmation = document.querySelector('[role="alertdialog"]')!;
+    expect(confirmation.textContent).toContain("本次 dev 用户：未命名用户");
+    expect(confirmation.textContent).not.toContain(USER_A);
+    expect(confirmation.textContent).not.toContain("private@example.test");
+  });
+
+  it("shows initial user loading and an empty directory without requiring input or reading Agents", async () => {
+    let finish!: (page: unknown) => void;
+    userRead = () => new Promise((resolve) => { finish = resolve; });
+    const view = await mount(); await click(button("从 dev 导入"));
+    await settle(() => expect(userCalls()).toHaveLength(1));
+    expect(modal().querySelector('[role="status"][aria-label="加载中"]')).not.toBeNull();
+    expect(modal().querySelector('input[type="search"]')).toBeNull();
+    expect(modal().textContent).not.toContain("暂无 dev 用户");
+    expect(candidateCalls()).toHaveLength(0);
+    await act(async () => finish({ users: [], nextCursor: null }));
+    await settle(() => expect(modal().textContent).toContain("暂无 dev 用户"));
+    expect(modal().querySelector('[role="status"][aria-label="加载中"]')).toBeNull();
+    expect(modal().querySelectorAll('input[name="agent-import-user"]')).toHaveLength(0);
+    expect([...modal().querySelectorAll("button")].some((item) => item.textContent === "加载更多用户")).toBe(false);
+    expect(button("检查所选依赖", modal()).disabled).toBe(true);
+    expect(candidateCalls()).toHaveLength(0);
+    expect(transport.post).not.toHaveBeenCalled();
+    expect(view.container.querySelector("tbody")?.textContent).toContain("Eval 原生配置");
+  });
+
+  it("reports an initial user-directory failure and retries the first page without input or premature Agent reads", async () => {
+    userRead = () => { throw new Error("用户目录暂时不可用"); };
+    await mount(); await click(button("从 dev 导入"));
+    await settle(() => expect(modal().textContent).toContain("用户目录暂时不可用"));
+    expect(modal().querySelector('input[type="search"]')).toBeNull();
+    expect(modal().querySelector('[aria-label="选择 dev 用户"]')).toBeNull();
+    expect(modal().textContent).not.toContain("暂无 dev 用户");
+    expect(button("检查所选依赖", modal()).disabled).toBe(true);
+    expect(candidateCalls()).toHaveLength(0);
+    userRead = () => ({ users, nextCursor: null });
+    await click(button("重试", modal()));
+    await settle(() => expect(modal().textContent).toContain("Dev Bob"));
+    expect(modal().textContent).not.toContain("用户目录暂时不可用");
+    expect(userCalls().map(([, options]) => options.params)).toEqual([{ limit: 20 }, { limit: 20 }]);
+    expect(candidateCalls()).toHaveLength(0);
+    expect(transport.post).not.toHaveBeenCalled();
+    await chooseUser(USER_B);
+    expect(modal().textContent).toContain("已选用户：Dev Bob");
   });
 
   it.each([true, false])("revalidates a fresh cached Eval identity when opening the dialog (source enabled: %s)", async (sourceEnabled) => {
@@ -231,12 +359,12 @@ describe("dev Agent import user workflow", () => {
     expect(transport.get.mock.calls.some(([path]) => path === "/api/me")).toBe(false);
     await click(button("从 dev 导入"));
     await settle(() => expect(modal().textContent).toContain(enabled
-      ? "请先输入 dev 用户的名称或邮箱进行搜索" : "当前环境尚未启用 dev 导入"));
+      ? "Dev Alice" : "当前环境尚未启用 dev 导入"));
     expect(modal().textContent).not.toContain("正在确认 Eval 账号并只读恢复任务定位信息");
     expect(transport.get.mock.calls.filter(([path]) => path === "/api/me")).toHaveLength(1);
     expect(taskCalls()).toHaveLength(0);
     expect(candidateCalls()).toHaveLength(0);
-    expect(transport.get.mock.calls.some(([path]) => path === `${base}/users`)).toBe(false);
+    expect(userCalls()).toHaveLength(enabled ? 1 : 0);
     expect(transport.post).not.toHaveBeenCalled();
   });
 
@@ -395,6 +523,7 @@ describe("dev Agent import user workflow", () => {
   });
 
   it("prevents duplicate preview and apply sends while their acknowledgments are pending", async () => {
+    userRead = () => ({ users, nextCursor: "user-page-2" });
     await mount(); await open(); await chooseUser(); await chooseAgent(1);
     let finishPreview!: (value: { taskId: string }) => void;
     transport.post.mockImplementationOnce((_path: string, input: AgentImportPreview) => {
@@ -406,6 +535,16 @@ describe("dev Agent import user workflow", () => {
     await settle(() => expect(transport.post).toHaveBeenCalledTimes(1));
     expect(check.disabled).toBe(true);
     expect(modal().querySelector("fieldset")).toHaveProperty("disabled", true);
+    const readsDuringPreview = userCalls().length;
+    const selectedUser = modal().querySelector<HTMLInputElement>(`input[name="agent-import-user"][value="${USER_A}"]`)!;
+    const otherUser = modal().querySelector<HTMLInputElement>(`input[name="agent-import-user"][value="${USER_B}"]`)!;
+    expect(otherUser.matches(":disabled")).toBe(true);
+    expect(button("加载更多用户", modal()).disabled).toBe(true);
+    await click(otherUser); await click(button("加载更多用户", modal()));
+    expect(selectedUser.checked).toBe(true);
+    expect(otherUser.checked).toBe(false);
+    expect(userCalls()).toHaveLength(readsDuringPreview);
+    expect(candidateCalls().at(-1)![0]).toBe(`${base}/users/${USER_A}/agents`);
     expect(modal().querySelector('[aria-label="逐 Agent 导入结果"]')).toBeNull();
     await act(async () => finishPreview({ taskId: task!.id }));
     await settle(() => expect(modal().querySelector('[aria-label="逐 Agent 导入结果"]')).not.toBeNull());
@@ -638,7 +777,8 @@ describe("dev Agent import user workflow", () => {
     };
     transport.post.mockClear(); transport.get.mockClear();
     const second = await reopenPersisted();
-    expect(modal().textContent).toContain(USER_B);
+    expect(modal().textContent).toContain("本次 dev 用户：未命名用户");
+    expect(modal().textContent).not.toContain(USER_B);
     expect(modal().textContent).toContain("用途：评估 Agent");
     expect(modal().textContent).toContain("服务器权威 Agent");
     expect(modal().textContent).toContain(uuid(41));
@@ -678,12 +818,13 @@ describe("dev Agent import user workflow", () => {
     await click(button("从 dev 导入"));
     await settle(() => expect(transport.get.mock.calls.filter(([path]) => path === "/api/me")).toHaveLength(1));
     expect(modal().textContent).toContain("正在确认 Eval 账号并只读恢复任务定位信息");
-    expect(modal().querySelector('[aria-label="搜索已授权 dev 用户"]')).toBeNull();
+    expect(modal().querySelector('[aria-label="选择 dev 用户"]')).toBeNull();
+    expect(userCalls()).toHaveLength(0);
     expect(taskCalls()).toHaveLength(0);
     expect(modal().querySelector('[aria-label="逐 Agent 导入结果"]')).toBeNull();
     await act(async () => verify({ id: targetUserId, role: "user" }));
-    await settle(() => expect(modal().textContent).toContain("请先输入 dev 用户的名称或邮箱进行搜索"));
-    expect(transport.get.mock.calls.some(([path]) => path === `${base}/users`)).toBe(false);
+    await settle(() => expect(modal().textContent).toContain("Dev Alice"));
+    expect(userCalls()).toHaveLength(1);
     expect(taskCalls()).toHaveLength(0);
     expect(window.localStorage.getItem(agentImportPointerKey(TARGET))).toBe(oldPointer);
     expect(window.localStorage.getItem(agentImportPointerKey(targetUserId))).toBeNull();
@@ -740,8 +881,8 @@ describe("dev Agent import user workflow", () => {
     });
     await mount(); await click(button("从 dev 导入"));
     await settle(() => expect(modal().textContent).toContain("已清理定位指针"));
-    await settle(() => expect(modal().textContent).toContain("请先输入 dev 用户的名称或邮箱进行搜索"));
-    expect(transport.get.mock.calls.some(([path]) => path === `${base}/users`)).toBe(false);
+    await settle(() => expect(modal().textContent).toContain("Dev Alice"));
+    expect(userCalls()).toHaveLength(1);
     expect(window.localStorage.getItem(agentImportPointerKey(TARGET))).toBeNull();
     expect(taskCalls()).toHaveLength(1);
     expect(modal().querySelector('[aria-label="逐 Agent 导入结果"]')).toBeNull();
@@ -837,7 +978,8 @@ describe("dev Agent import user workflow", () => {
     expect(transport.post).not.toHaveBeenCalled();
     await act(async () => finish(stored));
     await settle(() => expect(modal().textContent).toContain("已从服务端恢复原任务"));
-    expect(modal().textContent).toContain(USER_A);
+    expect(modal().textContent).toContain("本次 dev 用户：未命名用户");
+    expect(modal().textContent).not.toContain(USER_A);
     expect(modal().textContent).toContain(uuid(1));
     expect(modal().textContent).toContain("后台导入中");
     expect(modal().textContent).not.toContain("不可信的旧缓存名称");
@@ -860,8 +1002,8 @@ describe("dev Agent import user workflow", () => {
     await settle(() => expect(taskCalls()).toHaveLength(1));
     targetUserId = uuid(901);
     await act(async () => { await view.query.invalidateQueries({ queryKey: meKey }); });
-    await settle(() => expect(modal().textContent).toContain("请先输入 dev 用户的名称或邮箱进行搜索"));
-    expect(transport.get.mock.calls.some(([path]) => path === `${base}/users`)).toBe(false);
+    await settle(() => expect(modal().textContent).toContain("Dev Alice"));
+    expect(userCalls()).toHaveLength(1);
     expect(signal.aborted).toBe(true);
     await act(async () => finish(stored));
     expect(modal().querySelector('[aria-label="逐 Agent 导入结果"]')).toBeNull();
@@ -879,11 +1021,10 @@ describe("dev Agent import user workflow", () => {
     expect(transport.post).not.toHaveBeenCalled();
     expect(window.localStorage.getItem(agentImportPointerKey(TARGET))).toContain(stored.id);
     await click(button("重新选择", modal()));
-    await settle(() => expect(modal().textContent).toContain("请先输入 dev 用户的名称或邮箱进行搜索"));
+    await settle(() => expect(modal().textContent).toContain("Dev Alice"));
     expect(window.localStorage.getItem(agentImportPointerKey(TARGET))).toBeNull();
     expect(modal().querySelector('[aria-label="逐 Agent 导入结果"]')).toBeNull();
-    await type(modal().querySelector('[aria-label="搜索已授权 dev 用户"]'), "dev");
-    await settle(() => expect(modal().textContent).toContain("Dev Bob"));
+    expect(modal().textContent).toContain("Dev Bob");
     await chooseUser(USER_B); await chooseAgent(41); await preview();
     expect(transport.post).toHaveBeenCalledTimes(1);
     expect(transport.post.mock.calls[0]![1]).toMatchObject({ sourceUserId: USER_B, agentIds: [uuid(41)] });

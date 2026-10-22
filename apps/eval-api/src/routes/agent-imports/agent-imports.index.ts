@@ -1,7 +1,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import {
   AGENT_IMPORT_MAX_AGENTS, agentImportApplySchema, agentImportCandidatePageSchema, agentImportConfigSchema,
-  agentImportPreviewSchema, agentImportSourceUserSchema, agentImportTaskViewSchema,
+  agentImportPreviewSchema, agentImportSourceUserPageSchema, agentImportTaskViewSchema,
 } from "@eval-platform/eval-contracts";
 import { ok } from "@eval-platform/eval-contracts/http";
 import { responseSchema } from "@springbrand/http/catalog";
@@ -26,9 +26,11 @@ router.openapi(createRoute({
 }), async (c) => ok(c, await c.var.services.agentImports?.config() ?? { enabled: false, maxAgents: AGENT_IMPORT_MAX_AGENTS }));
 router.openapi(createRoute({
   method: "get", path: "/users", tags,
-  request: { query: z.strictObject({ ...search, q: z.string().trim().min(1).max(200) }) },
-  responses: { 200: jsonContent(responseSchema(z.strictObject({ users: z.array(agentImportSourceUserSchema) })), "Authorized source users"), ...errorResponses },
-}), async (c) => ok(c, { users: await requireAgentImports(c.var.services.agentImports).users(c.req.valid("query")) }));
+  request: { query: z.strictObject({
+    ...search, q: z.string().trim().max(200).default(""), cursor: z.string().min(1).max(4096).optional(),
+  }) },
+  responses: { 200: jsonContent(responseSchema(agentImportSourceUserPageSchema), "Authorized source user page"), ...errorResponses },
+}), async (c) => ok(c, await requireAgentImports(c.var.services.agentImports).users(c.req.valid("query"))));
 router.openapi(createRoute({
   method: "get", path: "/users/{sourceUserId}/agents", tags,
   request: {

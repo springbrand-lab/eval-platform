@@ -130,6 +130,7 @@ export {
   agentImportCandidateSchema,
   agentImportConfigSchema,
   agentImportPreviewSchema,
+  agentImportSourceUserPageSchema,
   agentImportSourceUserSchema,
   agentImportTaskViewSchema,
 } from "./agent-imports.js";
@@ -140,5 +141,6 @@ export type {
   AgentImportConfig,
   AgentImportPreview,
   AgentImportSourceUser,
+  AgentImportSourceUserPage,
   AgentImportTaskView,
 } from "./agent-imports.js";

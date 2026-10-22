@@ -1,6 +1,6 @@
 import type { AgentImportCandidate, AgentImportSourceUser, AgentPurpose } from "@eval-platform/eval-contracts";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@springbrand/site-block";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { listAgentImportCandidates, listAgentImportUsers } from "@/api-sdk/agent-imports-api";
 import { Button } from "@/components/ui/button";
@@ -20,34 +20,37 @@ interface PickerProps {
 }
 
 export function AgentImportPicker(props: PickerProps) {
-  const [q, setQ] = useState("");
-  const search = q.trim();
-  const users = useQuery({
-    queryKey: agentImportKeys.users(search),
-    queryFn: ({ signal }) => listAgentImportUsers(search, AGENT_IMPORT_PAGE_SIZE, signal),
-    enabled: search.length > 0 && !props.disabled,
+  const users = useInfiniteQuery({
+    queryKey: agentImportKeys.users,
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ signal, pageParam }) => listAgentImportUsers({
+      limit: AGENT_IMPORT_PAGE_SIZE, ...(pageParam !== undefined ? { cursor: pageParam } : {}),
+    }, signal),
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    enabled: !props.disabled,
     retry: false,
   });
+  const listedUsers = users.data?.pages.flatMap((page) => page.users) ?? [];
   return <div className="space-y-4">
     <fieldset disabled={props.disabled} className="space-y-2">
       <legend className="mb-2 text-sm font-semibold">1. 选择 dev 用户</legend>
-      <Input type="search" aria-label="搜索已授权 dev 用户" placeholder="搜索已授权用户的名称或邮箱" maxLength={200}
-        value={q} onChange={(event) => setQ(event.target.value)} />
-      {!search ? <p className="text-[13px] text-text-muted">请先输入 dev 用户的名称或邮箱进行搜索。</p>
-        : users.error ? <ErrorBlock error={users.error} onRetry={() => void users.refetch()} />
-        : users.isPending ? <LoadingBlock rows={2} />
-        : <div role="radiogroup" aria-label="选择 dev 用户" className="max-h-36 space-y-1 overflow-y-auto">
-          {users.data.users.map((user) => <label key={user.id}
+      {users.error && <ErrorBlock error={users.error} onRetry={() => {
+        if (!props.disabled && !users.isFetching) void (users.isFetchNextPageError ? users.fetchNextPage() : users.refetch());
+      }} />}
+      {users.isPending ? <LoadingBlock rows={2} />
+        : users.data && <div role="radiogroup" aria-label="选择 dev 用户" className="max-h-36 space-y-1 overflow-y-auto">
+          {listedUsers.map((user) => <label key={user.id}
             className="flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 text-[13px] has-[:checked]:border-primary has-[:checked]:bg-primary/5">
             <input type="radio" name="agent-import-user" value={user.id} checked={props.sourceUser?.id === user.id}
               className="size-4 accent-primary" onChange={() => props.onUserChange(user)} />
-            <span className="min-w-0 break-words">{user.name || user.email || user.id}
-              {user.name && user.email && <span className="ml-2 text-text-muted">{user.email}</span>}</span>
+            <span className="min-w-0 break-words">{user.name.trim() || "未命名用户"}</span>
           </label>)}
-          {users.data.users.length === 0 && <p className="text-[13px] text-text-muted">未找到已授权用户，请调整搜索；不会读取未授权用户。</p>}
+          {listedUsers.length === 0 && <p className="text-[13px] text-text-muted">暂无 dev 用户。</p>}
         </div>}
-      <p className="text-xs text-text-muted">最多显示 20 位已授权用户，可搜索缩小范围。切换用户将清空尚未提交的选择与检查结果。</p>
-      {props.sourceUser && <p className="text-[13px]">已选用户：{props.sourceUser.name || props.sourceUser.email || props.sourceUser.id}</p>}
+      {users.hasNextPage && <Button size="sm" disabled={props.disabled || users.isFetching} loading={users.isFetchingNextPage}
+        onClick={() => void users.fetchNextPage()}>加载更多用户</Button>}
+      <p className="text-xs text-text-muted">切换用户将清空尚未提交的选择与检查结果。</p>
+      {props.sourceUser && <p className="text-[13px]">已选用户：{props.sourceUser.name.trim() || "未命名用户"}</p>}
     </fieldset>
     <fieldset disabled={props.disabled} className="flex flex-wrap items-center gap-4 border-t border-border pt-3">
       <legend className="text-sm font-semibold">导入后的用途</legend>
@@ -60,7 +63,7 @@ export function AgentImportPicker(props: PickerProps) {
     </fieldset>
     {props.sourceUser
       ? <AgentImportCandidates key={props.sourceUser.id} {...props} sourceUser={props.sourceUser} />
-      : <Notice tone="neutral">请先选择已授权的 dev 用户，再搜索和选择该用户的 Agent。</Notice>}
+      : <Notice tone="neutral">请先选择 dev 用户，再搜索和选择该用户的 Agent。</Notice>}
   </div>;
 }
 
