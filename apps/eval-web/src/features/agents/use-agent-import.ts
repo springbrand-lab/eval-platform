@@ -37,6 +37,7 @@ export function useAgentImport(open: boolean) {
   const invalidated = useRef(new Set<string>());
   const me = useQuery({
     queryKey: meKey, queryFn: ({ signal }) => getMe(signal), enabled: open || !!session || !!recovery, retry: false,
+    staleTime: 0,
   });
   // Never look up a pointer using a previous mount's cached identity.
   const targetUserId = me.isFetchedAfterMount && !me.isFetching && !me.error ? me.data?.id : undefined;
@@ -48,6 +49,7 @@ export function useAgentImport(open: boolean) {
     queryFn: async ({ signal }) => parseAgentImportTask(await getAgentImportTask(locator!.id, signal), locator!.id),
     enabled: !!locator,
     retry: false,
+    staleTime: 0,
     // Keep reading after close; the server owns execution and no effect replays a POST.
     refetchInterval: (query) => query.state.data && isAgentImportTerminal(query.state.data.status) ? false : AGENT_IMPORT_POLL_MS,
   });
