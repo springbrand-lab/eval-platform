@@ -18,16 +18,17 @@ User search requires a trimmed, nonblank `q` (at most 200 characters); missing
 or blank input returns 422 locally without calling the source. Agent search
 may remain blank after an authorized user is selected.
 
-`EVAL_DEV_SP_API_ORIGIN` optionally enables the source and requires the existing
+The Dev source is fixed to `https://devrapi.springbrand.ai`; the
+`EVAL_DEV_SP_API_ORIGIN` environment variable is not read. Supplying the existing
 Takt `SP_PLATFORM_RESOURCE_ADMIN_TOKEN` for that Dev SP deployment (its
-`RESOURCE_ADMIN_TOKEN`). No new credential is generated. The shared token retains
+`RESOURCE_ADMIN_TOKEN`) enables imports. No new credential is generated. The shared token retains
 its management authority; this client uses only the scoped read-only export routes.
-Without the source origin, imports stay disabled even if the shared token exists.
+Without the shared token, imports stay disabled.
 Disabled imports mean `{enabled:false,maxAgents:50}` and ordinary API behavior remains
 available. Owner-scoped persisted `GET /tasks/:taskId` remains available even
-after the source origin is removed or target imports are disabled; it reads only
+after the source token is removed or target imports are disabled; it reads only
 Eval task state, never creates a source client/session or enqueues work. Source
-browsing and preview/apply remain unavailable without the source origin and existing Takt credential.
+browsing and preview/apply remain unavailable without the existing Takt credential.
 Source and target origins must differ. The source client exposes only
 the approved GET `/api/agent-config-export/users`, `/users/:id/agents`, and
 `/users/:id/snapshot?agentIds=`; it never creates shares, sessions or other dev
@@ -146,8 +147,8 @@ Migrations are review artifacts only; generating them never applies them.
 `src/agent-import-worker-main.ts` independently. It reads process environment
 only (no `.env` discovery). Supply `DATABASE_URL`, `EVAL_BUNDLE_DIR`,
 `EVAL_SP_API_ORIGIN`, `EVAL_SP_SERVICE_USER_ID`,
-`EVAL_SP_SERVICE_SESSION_TOKEN`, `EVAL_WEB_ORIGIN` and, when enabling a Dev source,
-`EVAL_DEV_SP_API_ORIGIN` with the existing `SP_PLATFORM_RESOURCE_ADMIN_TOKEN`. An absent source origin
+`EVAL_SP_SERVICE_SESSION_TOKEN`, `EVAL_WEB_ORIGIN` and, when enabling the fixed Dev source,
+the existing `SP_PLATFORM_RESOURCE_ADMIN_TOKEN`. An absent source token
 starts disabled without SP/queue connections. The Run Worker never receives
 the shared source token. Busy owner leases are durably deferred in the same
 transaction as completing their queue delivery, not acknowledged/lost or

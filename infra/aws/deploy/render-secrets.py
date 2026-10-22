@@ -6,6 +6,9 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 
+DEV_SP_API_ORIGIN = "https://devrapi.springbrand.ai"
+
+
 def render(app, database):
     api_required = [
         "EVAL_SP_API_ORIGIN", "EVAL_SP_SERVICE_USER_ID", "EVAL_SP_SERVICE_SESSION_TOKEN",
@@ -20,10 +23,8 @@ def render(app, database):
     if database.get("dbname") != "eval-platform":
         raise SystemExit("Database secret must target eval-platform")
 
-    enabled = bool(app.get("EVAL_DEV_SP_API_ORIGIN"))
-    if enabled and not app.get("SP_PLATFORM_RESOURCE_ADMIN_TOKEN"):
-        raise SystemExit("EVAL_DEV_SP_API_ORIGIN requires Takt's existing SP_PLATFORM_RESOURCE_ADMIN_TOKEN")
-    source = ["EVAL_DEV_SP_API_ORIGIN", "SP_PLATFORM_RESOURCE_ADMIN_TOKEN"] if enabled else []
+    enabled = bool(app.get("SP_PLATFORM_RESOURCE_ADMIN_TOKEN"))
+    source = ["SP_PLATFORM_RESOURCE_ADMIN_TOKEN"] if enabled else []
     if enabled:
         def origin(value):
             try:
@@ -38,7 +39,7 @@ def render(app, database):
             except (TypeError, ValueError):
                 raise SystemExit("SP import origins must be HTTP origins without credentials or paths")
 
-        if origin(app[source[0]]) == origin(app["EVAL_SP_API_ORIGIN"]):
+        if origin(DEV_SP_API_ORIGIN) == origin(app["EVAL_SP_API_ORIGIN"]):
             raise SystemExit("Source and target SP origins must be different")
 
     database_url = (
