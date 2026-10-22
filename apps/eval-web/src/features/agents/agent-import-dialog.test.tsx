@@ -222,6 +222,24 @@ describe("dev Agent import user workflow", () => {
     expect(view.container.querySelector("tbody")?.textContent).toContain("Eval 原生配置");
   });
 
+  it.each([true, false])("revalidates a fresh cached Eval identity when opening the dialog (source enabled: %s)", async (sourceEnabled) => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.UTC(2026, 9, 22));
+    enabled = sourceEnabled;
+    const query = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 10_000 } } });
+    query.setQueryData(meKey, { id: TARGET, role: "user" });
+    await mount(query);
+    expect(transport.get.mock.calls.some(([path]) => path === "/api/me")).toBe(false);
+    await click(button("从 dev 导入"));
+    await settle(() => expect(modal().textContent).toContain(enabled
+      ? "请先输入 dev 用户的名称或邮箱进行搜索" : "当前环境尚未启用 dev 导入"));
+    expect(modal().textContent).not.toContain("正在确认 Eval 账号并只读恢复任务定位信息");
+    expect(transport.get.mock.calls.filter(([path]) => path === "/api/me")).toHaveLength(1);
+    expect(taskCalls()).toHaveLength(0);
+    expect(candidateCalls()).toHaveLength(0);
+    expect(transport.get.mock.calls.some(([path]) => path === `${base}/users`)).toBe(false);
+    expect(transport.post).not.toHaveBeenCalled();
+  });
+
   it("keeps a disabled source isolated from the ordinary native list, filters and creation", async () => {
     enabled = false;
     const view = await mount();
@@ -589,10 +607,11 @@ describe("dev Agent import user workflow", () => {
   });
 
   it("does not use a previous target user's pointer or cached identity while verifying the current user", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.UTC(2026, 9, 22));
     persistedTask();
     const oldPointer = window.localStorage.getItem(agentImportPointerKey(TARGET));
     targetUserId = uuid(901);
-    const query = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const query = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 10_000 } } });
     query.setQueryData(meKey, { id: TARGET, role: "user" });
     const original = transport.get.getMockImplementation()!;
     let verify!: (value: unknown) => void;
@@ -600,6 +619,9 @@ describe("dev Agent import user workflow", () => {
       ? new Promise((resolve) => { verify = resolve; }) : original(path, options));
     await mount(query);
     await click(button("从 dev 导入"));
+    await settle(() => expect(transport.get.mock.calls.filter(([path]) => path === "/api/me")).toHaveLength(1));
+    expect(modal().textContent).toContain("正在确认 Eval 账号并只读恢复任务定位信息");
+    expect(modal().querySelector('[aria-label="搜索已授权 dev 用户"]')).toBeNull();
     expect(taskCalls()).toHaveLength(0);
     expect(modal().querySelector('[aria-label="逐 Agent 导入结果"]')).toBeNull();
     await act(async () => verify({ id: targetUserId, role: "user" }));
@@ -737,9 +759,10 @@ describe("dev Agent import user workflow", () => {
     expect(transport.post).not.toHaveBeenCalled();
   });
 
-  it("does not treat cached task scope as authoritative before a fresh recovery GET completes", async () => {
+  it("does not treat fresh cached terminal task scope as authoritative before a recovery GET completes", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.UTC(2026, 9, 22));
     const stored = structuredClone(persistedTask());
-    const query = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const query = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 10_000 } } });
     query.setQueryData(agentImportKeys.task(TARGET, stored.id), {
       ...stored, sourceUserId: USER_B, status: "completed",
       agents: [{ ...stored.agents[0], id: uuid(41), name: "不可信的旧缓存名称" }],
@@ -750,12 +773,16 @@ describe("dev Agent import user workflow", () => {
       ? new Promise((resolve) => { finish = resolve; }) : original(path, options));
     await mount(query); await click(button("从 dev 导入"));
     await settle(() => expect(taskCalls()).toHaveLength(1));
+    expect(modal().textContent).toContain("正在确认 Eval 账号并只读恢复任务定位信息");
+    expect(modal().textContent).not.toContain("已从服务端恢复原任务");
     expect(modal().querySelector('[aria-label="逐 Agent 导入结果"]')).toBeNull();
     expect(modal().textContent).not.toContain("不可信的旧缓存名称");
+    expect(transport.post).not.toHaveBeenCalled();
     await act(async () => finish(stored));
     await settle(() => expect(modal().textContent).toContain("已从服务端恢复原任务"));
     expect(modal().textContent).toContain(USER_A);
     expect(modal().textContent).toContain(uuid(1));
+    expect(modal().textContent).toContain("后台导入中");
     expect(modal().textContent).not.toContain("不可信的旧缓存名称");
     expect(transport.post).not.toHaveBeenCalled();
   });
