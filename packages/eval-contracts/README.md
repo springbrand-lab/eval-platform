@@ -1,8 +1,16 @@
 # @eval-platform/eval-contracts
 
 `src/agent-imports.ts` 拥有 dev → Eval 按 ID 覆盖导入的公共 DTO 与严格 preview/apply 请求 Schema：
-`AgentImportConfig`、`AgentImportSourceUser`、`AgentImportCandidate`、`AgentImportCandidatePage`、
+`AgentImportConfig`、`AgentImportSourceUser`、`AgentImportSourceUserPage`、
+`AgentImportCandidate`、`AgentImportCandidatePage`、
 `AgentImportTaskView`。来源用户仅限定已授权导出范围，目标仍是固定 Eval 服务账号。
+`AgentImportSourceUserPage` 为严格的 `{users:[{id,name,email}],nextCursor:string|null}`，
+每页最多 20 个用户；Schema 与类型均从包根入口导出。
+`GET /api/agent-config-sync/users` 无需姓名或邮箱输入：省略或空白 `q` 浏览导出范围内
+全部符合条件的 dev 账号，可选搜索 `q` 去除首尾空白后最多 200 字符。
+`limit` 为 1–20、默认 20；可选的非空 `cursor` 最多 4,096 字符，作为来源拥有的 opaque
+游标原样传递。SP 按名称/ID 稳定分页，Eval 不截断目录或另配用户白名单。
+Web 仅展示用户名，仍以 ID 选择；email 字段为兼容性保留，不要求用户输入。
 任务可表达部分失败与结果待校准；来源/回执/凭据只属于 API 内部事实，不加入普通 Agent DTO。
 已有 ID 的自有活动 Agent、用户 Skill 和 Reference 原地覆盖元数据与内容，缺失 ID 新建；不跨目标账号覆盖或复活受保护资源。
 逐 Agent 的可选 `overwrite` 预览提示和 `overwritten` 完成状态区分覆盖与新建；

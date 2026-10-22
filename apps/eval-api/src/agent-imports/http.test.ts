@@ -4,7 +4,7 @@ import { jsonRequest, requestApp, WEB_ORIGIN } from "../test-support.js";
 import { ImportDependencyError } from "./errors.js";
 import { initialView, type ImportTask } from "./model.js";
 import { createAgentImportService, createAgentImportTaskReader } from "./service.js";
-import type { AgentImportSource } from "./source.js";
+import { createAgentImportSource, type AgentImportSource } from "./source.js";
 import type { AgentImportStore } from "./store.js";
 import type { AgentImportTarget } from "./target.js";
 import { createAgentImportTarget } from "./target.js";
@@ -16,10 +16,12 @@ const userB = "33333333-3333-4333-8333-333333333333";
 const agent = "44444444-4444-4444-8444-444444444444";
 const taskId = "55555555-5555-4555-8555-555555555555";
 const body = { sourceUserId: userA, agentIds: [agent], purpose: "execution" as const, idempotencyKey: "preview" };
-function fixture(enabled = true) {
+function fixture(enabled = true, webApiToken?: string) {
   const source = {
     origin: "https://dev.test", connectionId: "fixed-export-connection",
-    users: vi.fn(async () => [{ id: userA, name: "A", email: "a@example.test" }]),
+    users: vi.fn<AgentImportSource["users"]>(async () => ({
+      users: [{ id: userA, name: "A", email: "a@example.test" }], nextCursor: "next-user-page",
+    })),
     agents: vi.fn(async (sourceUserId: string) => ({
       items: [{ id: agent, name: sourceUserId === userA ? "A Agent" : "B Agent", description: null, revision: 2, skillCount: 1, referenceCount: 0 }],
       nextCursor: "next-source-page",
@@ -44,7 +46,7 @@ function fixture(enabled = true) {
   const service = createAgentImportService({ source: source as unknown as AgentImportSource, target: target as unknown as AgentImportTarget, store: store as unknown as AgentImportStore });
   const nativeList = vi.fn(async () => [{ id: agent, name: "Native", user_id: owner }]);
   const runtime = {
-    webOrigin: WEB_ORIGIN,
+    webOrigin: WEB_ORIGIN, ...(webApiToken === undefined ? {} : { webApiToken }),
     serviceAccount: { user: { id: owner, role: "user" }, email: "service@example.test", sessionToken: "service-session" },
     ownerServices: () => ({ services: {
       agentConfigs: { list: nativeList }, agentImportTasks: createAgentImportTaskReader(store as unknown as AgentImportStore),
@@ -63,18 +65,30 @@ describe("Agent import public HTTP control plane", () => {
     const list = await f.request("/api/agent-configs");
     expect(list.status).toBe(200);
     expect(await list.json()).toMatchObject({ msg: [{ id: agent, name: "Native" }] });
-    const unavailable = await f.request("/api/agent-config-sync/users?q=Alice");
+    const unavailable = await f.request("/api/agent-config-sync/users");
     expect(unavailable.status).toBe(503);
     expect(await unavailable.json()).toMatchObject({ code: "EVAL_SP_UNAVAILABLE" });
     expect(f.source.users).not.toHaveBeenCalled();
   });
 
-  it.each(["", "?q=", "?q=%20%20"])("rejects a blank user search locally without calling the source (%s)", async (query) => {
+  it.each(["", "?q=", "?q=%20%20"])("browses the first source-user page without typing a name or email (%s)", async (query) => {
     const f = fixture();
     const response = await f.request(`/api/agent-config-sync/users${query}`);
-    expect(response.status).toBe(422);
-    expect(await response.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      success: true, msg: { users: [{ id: userA, name: "A", email: "a@example.test" }], nextCursor: "next-user-page" },
+    });
+  });
+
+  it("keeps no-query browsing behind the ordinary Web gateway authentication", async () => {
+    const f = fixture(true, "test-web-gateway-token");
+    const denied = await f.request("/api/agent-config-sync/users");
+    expect(denied.status).toBe(401);
+    expect(await denied.json()).toMatchObject({ code: "AUTH_UNAUTHENTICATED" });
     expect(f.source.users).not.toHaveBeenCalled();
+    const allowed = await f.request("/api/agent-config-sync/users", { headers: { "X-Eval-Web-Token": "test-web-gateway-token" } });
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toMatchObject({ msg: { users: [{ id: userA }], nextCursor: "next-user-page" } });
   });
 
   it("trims a valid user search before passing it to the authorized source", async () => {
@@ -83,6 +97,48 @@ describe("Agent import public HTTP control plane", () => {
     expect(response.status).toBe(200);
     expect(f.source.users).toHaveBeenCalledExactlyOnceWith({ q: "Alice", limit: 20 });
   });
+
+  it("returns later source users when following a 4096-character opaque cursor without a search query", async () => {
+    const f = fixture();
+    const cursor = "opaque+source/cursor==".padEnd(4096, "x");
+    f.source.users.mockImplementation(async (query) => query.cursor === cursor
+      ? { users: [{ id: userB, name: "B", email: "b@example.test" }], nextCursor: null }
+      : { users: [{ id: userA, name: "A", email: "a@example.test" }], nextCursor: cursor });
+    const response = await f.request(`/api/agent-config-sync/users?cursor=${encodeURIComponent(cursor)}&limit=1`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      success: true, msg: { users: [{ id: userB, name: "B", email: "b@example.test" }], nextCursor: null },
+    });
+    expect(f.source.users).toHaveBeenCalledExactlyOnceWith({ q: "", cursor, limit: 1 });
+  });
+
+  it.each([
+    "limit=0", "limit=21", "limit=1.5", "limit=not-a-number", "limit=", "cursor=", `cursor=${"x".repeat(4097)}`, `q=${"x".repeat(201)}`,
+  ])("rejects invalid source-user query bounds locally %#", async (query) => {
+    const f = fixture();
+    const response = await f.request(`/api/agent-config-sync/users?${query}`);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED" });
+    expect(f.source.users).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403, 404, 503, "network", "malformed"] as const)(
+    "keeps source-user directory failure %s a dependency failure, not session expiry or an empty page", async (failure) => {
+      const f = fixture();
+      const source = createAgentImportSource({ origin: "https://dev.test", targetOrigin: "https://eval.test", token: "export",
+        fetch: async () => {
+          if (failure === "network") throw new TypeError("Source connection failed");
+          if (failure === "malformed") return Response.json({ success: true, msg: { users: [] }, code: "", errMsg: "" });
+          return Response.json({ success: false, code: "AUTH_UNAUTHENTICATED", errMsg: "upstream" }, { status: failure });
+        } });
+      f.source.users.mockImplementation(source.users);
+      const response = await f.request("/api/agent-config-sync/users");
+      expect(response.status).toBe(503);
+      const result = await response.json();
+      expect(result).toMatchObject({ code: "EVAL_SP_UNAVAILABLE" });
+      expect(result).not.toHaveProperty("msg");
+    },
+  );
 
   it("preserves the source cursor on filtered empty pages and scopes changed source users independently", async () => {
     const f = fixture();

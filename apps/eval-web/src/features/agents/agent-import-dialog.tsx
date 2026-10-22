@@ -12,7 +12,7 @@ export function AgentImportDialog({ open, onClose }: { open: boolean; onClose: (
   const [confirming, setConfirming] = useState<"apply" | "retry" | null>(null);
   useEffect(() => setConfirming(null), [flow.session?.id]);
   const showWriteError = flow.writeError && (flow.writeError.phase === "preview" || !flow.task.data || flow.task.data.status === "ready");
-  const userName = flow.sourceUser?.name || flow.sourceUser?.email || flow.sourceUser?.id || flow.session?.request.sourceUserId || "";
+  const userName = flow.sourceUser?.name.trim() || "未命名用户";
   const canCheck = !flow.restoring && !!flow.config.data?.enabled && !flow.config.error && !!flow.me.data && !flow.me.error && !!flow.sourceUser
     && flow.selected.size > 0 && flow.selected.size <= flow.config.data.maxAgents;
 

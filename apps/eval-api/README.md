@@ -15,7 +15,7 @@ Each new preview has distinct operation keys; an uncertain retry uses its
 original keys and receipts rather than overwriting again. An unfinished
 operation blocks a new operation on the same resource.
 
-`/api/agent-config-sync` adds optional `GET /config`, `GET /users?q=alice&limit=20`,
+`/api/agent-config-sync` adds optional `GET /config`, `GET /users?limit=20`,
 `GET /users/:sourceUserId/agents?q=&cursor=&limit=`,
 `POST /previews {sourceUserId,agentIds,purpose,idempotencyKey}`,
 `GET /tasks/:taskId`, and `POST /tasks/:taskId/apply {idempotencyKey}`.
@@ -25,9 +25,16 @@ DTOs live in `eval-contracts/src/agent-imports.ts`. Target owner is always the
 verified Eval service account; source user only scopes the authorized export.
 `onlyMissing` remains an optional catalog filter; Web omits it so existing IDs
 remain selectable for overwrite.
-User search requires a trimmed, nonblank `q` (at most 200 characters); missing
-or blank input returns 422 locally without calling the source. Agent search
-may remain blank after an authorized user is selected.
+User browsing needs no name or email input: missing or blank `q` browses all
+eligible dev accounts in the existing authorized export scope. Optional `q` is
+trimmed and bounded to 200 characters for search compatibility. The response is
+`{users:[{id,name,email}],nextCursor:string|null}` (`AgentImportSourceUserPage`),
+with at most 20 users; `limit` is 1–20 (default 20). An optional nonempty cursor
+is bounded to 4,096 characters and forwarded unchanged. SP owns stable name/ID
+keyset pagination; Eval preserves each page and its cursor rather than capping
+the directory or requiring a manual user allowlist. Web displays usernames only;
+IDs still identify selections and email remains in the compatible wire contract.
+Agent search may remain blank after an authorized user is selected.
 
 The Dev source is fixed to `https://devrapi.springbrand.ai`; the
 `EVAL_DEV_SP_API_ORIGIN` environment variable is not read. Supplying the existing
@@ -71,6 +78,11 @@ never classified from HTTP status alone. Reads/uploads retain dependency failure
 an uncertain import POST first checks the same key's durable receipt and remains
 unresolved if that receipt cannot prove success. Missing receipts remain 404/null.
 Upstream failures never invalidate the browser session.
+Deploy the Dev SP paginated user-export contract before releasing this Eval API
+and its no-typing Web consumer. An incompatible or unavailable source response
+fails as dependency unavailability, never as an empty directory or browser
+session expiration. This browsing change requires no database migration or new
+credential/configuration.
 IDs are preserved; platform Skill IDs are strings, not necessarily UUIDs.
 Platform Skills are verified against the target catalog, never uploaded as user
 Skills. Same-name private Skill collisions block only their dependent Agents.

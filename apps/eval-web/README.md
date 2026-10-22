@@ -18,9 +18,9 @@ Agent 创建时选择“执行 Agent”或“评估 Agent”，用途由 Eval �
 
 ### 从 dev 导入 Agent
 
-Agent 管理页的「从 dev 导入」是独立的显式按 ID 覆盖流程，不改变普通列表、用途筛选、编辑或新建入口；选中的已有自有 Agent 也会被覆盖。来源凭据只在服务端，浏览器只调用 Eval 的 `/api/agent-config-sync`：读取 `config`、搜索来源 `users`，再按所选用户搜索和游标分页读取 `users/{sourceUserId}/agents`（每页 20，不设置 `onlyMissing`，已有 ID 仍可选择）。未选用户不读取 Agent；跨页选择保留并明确展示，切换用户清空未提交选择与预览。
+Agent 管理页的「从 dev 导入」是独立的显式按 ID 覆盖流程，不改变普通列表、用途筛选、编辑或新建入口；选中的已有自有 Agent 也会被覆盖。来源凭据只在服务端，浏览器只调用 Eval 的 `/api/agent-config-sync`：读取 `config`、分页读取来源 `users`，再按所选用户搜索和游标分页读取 `users/{sourceUserId}/agents`（每页 20，不设置 `onlyMissing`，已有 ID 仍可选择）。未选用户不读取 Agent；跨页选择保留并明确展示，切换用户清空未提交选择与预览。
 
-用户搜索先 trim，非空才发请求；空白或清空输入仅提示输入名称或邮箱，不读取全部用户、不显示依赖故障。用户选定后的 Agent 搜索允许为空，仍受来源用户和分页约束。
+导入启用且当前 Eval 身份确认完成后，打开弹窗自动读取第一页用户，无需输入名称或邮箱。`GET /users` 仅发送 `{limit: 20, cursor?: string}`，不发送 `q`，返回共享 `AgentImportSourceUserPage` 的 `{users: [{id, name, email}], nextCursor: string | null}`。用户列表与已选提示只显示用户名，空白名称显示「未命名用户」，不以邮箱或 UUID 替代。通过「加载更多用户」按游标追加后续页，不把前 20 位当作完整目录，也不自动读取全部页；后续页失败保留已有用户、当前用户与 Agent 选择，支持原页重试。首次加载、空目录与读取失败分别展示，不影响普通 Agent 列表。用户选定后的 Agent 搜索允许为空，仍受来源用户和分页约束。
 
 `POST /previews` 只提交 `{sourceUserId, agentIds, purpose, idempotencyKey}`，返回 `202 {taskId}`；之后只读 `GET /tasks/{taskId}`，展示检查结果、逐 Agent 依赖数量、可选的 `overwrite` 提示、冲突及错误，完成后区分 `created` 与 `overwritten`。`summary.overwritten` 可选以兼容旧任务；`skipped` 仅兼容历史结果，不因已有 ID 跳过新导入。用途显式选择“执行 Agent”或“评估 Agent”，不由来源或列表筛选推断。依赖由服务端按所选根 Agent 求并集，浏览器不读取或转发完整 SP 配置、资源字节或凭据，也不把逐 Agent 数量相加冒充去重依赖总数。
 

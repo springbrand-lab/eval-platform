@@ -15,6 +15,9 @@ export const agentImportConfigSchema = z.strictObject({
 export const agentImportSourceUserSchema = z.strictObject({
   id, name: z.string(), email: z.string(),
 });
+export const agentImportSourceUserPageSchema = z.strictObject({
+  users: z.array(agentImportSourceUserSchema).max(20), nextCursor: z.string().nullable(),
+});
 export const agentImportCandidateSchema = z.strictObject({
   id, name: z.string(), description: z.string(), revision: count,
   skillCount: count, referenceCount: count, exists: z.boolean(),
@@ -55,6 +58,7 @@ export const agentImportTaskViewSchema = z.strictObject({
 
 export type AgentImportConfig = z.infer<typeof agentImportConfigSchema>;
 export type AgentImportSourceUser = z.infer<typeof agentImportSourceUserSchema>;
+export type AgentImportSourceUserPage = z.infer<typeof agentImportSourceUserPageSchema>;
 export type AgentImportCandidate = z.infer<typeof agentImportCandidateSchema>;
 export type AgentImportCandidatePage = z.infer<typeof agentImportCandidatePageSchema>;
 export type AgentImportPreview = z.infer<typeof agentImportPreviewSchema>;

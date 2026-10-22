@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { agentImportSourceUserSchema, type AgentImportSourceUser } from "@eval-platform/eval-contracts";
+import { agentImportSourceUserPageSchema, type AgentImportSourceUserPage } from "@eval-platform/eval-contracts";
 import { createSpHttpClient, throwSpClientError, type Fetch } from "../sp/http.js";
 import { importOriginSchema } from "../config/agent-imports.js";
 import { connectionId, sourceSnapshotSchema, uuid, type SourceSnapshot } from "./model.js";
@@ -9,6 +9,11 @@ import { requireDefinitionScope } from "./definition-evidence.js";
 const querySchema = z.strictObject({
   q: z.string().max(200).optional(), limit: z.number().int().min(1).max(50).optional(),
   cursor: z.string().max(2000).optional(),
+});
+const usersQuerySchema = querySchema.extend({
+  q: z.string().trim().max(200).default(""),
+  limit: z.number().int().min(1).max(20).default(20),
+  cursor: z.string().min(1).max(4096).optional(),
 });
 const candidatesSchema = z.object({
   items: z.array(z.object({
@@ -21,7 +26,7 @@ export type SourceCandidatePage = z.infer<typeof candidatesSchema>;
 export interface AgentImportSource {
   readonly origin: string;
   readonly connectionId: string;
-  users(query: { q?: string; limit?: number }): Promise<AgentImportSourceUser[]>;
+  users(query: { q?: string; cursor?: string; limit?: number }): Promise<AgentImportSourceUserPage>;
   agents(sourceUserId: string, query: { q?: string; cursor?: string; limit?: number }): Promise<SourceCandidatePage>;
   snapshot(sourceUserId: string, agentIds: readonly string[]): Promise<SourceSnapshot>;
 }
@@ -43,18 +48,17 @@ export function createAgentImportSource(input: { origin: string; targetOrigin: s
       try { throwSpClientError(error); } catch (cause) { dependencyFailure(cause); }
     }
   }
-  function query(input: z.input<typeof querySchema>): string {
-    const parsed = querySchema.parse(input);
-    return new URLSearchParams(Object.entries(parsed).map(([key, value]) => [key, String(value)])).toString();
+  function query(input: z.output<typeof querySchema>): string {
+    return new URLSearchParams(Object.entries(input).map(([key, value]) => [key, String(value)])).toString();
   }
   return {
     origin, connectionId: connectionId(origin),
     async users(input) {
-      return (await get(`/api/agent-config-export/users?${query({ ...input, limit: Math.min(input.limit ?? 20, 20) })}`,
-        z.object({ users: z.array(agentImportSourceUserSchema).max(20) }))).users;
+      return get(`/api/agent-config-export/users?${query(usersQuerySchema.parse(input))}`,
+        agentImportSourceUserPageSchema);
     },
     agents(id, input) {
-      return get(`/api/agent-config-export/users/${uuid.parse(id)}/agents?${query({ ...input, limit: input.limit ?? 20 })}`, candidatesSchema);
+      return get(`/api/agent-config-export/users/${uuid.parse(id)}/agents?${query(querySchema.parse({ ...input, limit: input.limit ?? 20 }))}`, candidatesSchema);
     },
     async snapshot(id, agentIds) {
       const user = uuid.parse(id);

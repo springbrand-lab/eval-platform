@@ -3,7 +3,7 @@ import type {
   AgentImportCandidatePage,
   AgentImportConfig,
   AgentImportPreview,
-  AgentImportSourceUser,
+  AgentImportSourceUserPage,
   AgentImportTaskView,
 } from "@eval-platform/eval-contracts";
 import { api, enc } from "./client";
@@ -12,8 +12,8 @@ const base = "/api/agent-config-sync";
 
 export const getAgentImportConfig = (signal?: AbortSignal) =>
   api.get<AgentImportConfig>(`${base}/config`, { signal });
-export const listAgentImportUsers = (q: string, limit: number, signal?: AbortSignal) =>
-  api.get<{ users: AgentImportSourceUser[] }>(`${base}/users`, { params: { q, limit }, signal });
+export const listAgentImportUsers = (input: { limit: number; cursor?: string }, signal?: AbortSignal) =>
+  api.get<AgentImportSourceUserPage>(`${base}/users`, { params: input, signal });
 export const listAgentImportCandidates = (
   sourceUserId: string, input: { q: string; cursor?: string; limit: number }, signal?: AbortSignal,
 ) => api.get<AgentImportCandidatePage>(`${base}/users/${enc(sourceUserId)}/agents`, {

@@ -6,7 +6,7 @@ export const AGENT_IMPORT_POLL_MS = 2_000;
 /** UI-owned keys; the transport SDK has no query/cache or workflow state. */
 export const agentImportKeys = {
   config: ["agent-imports", "config"] as const,
-  users: (q: string) => ["agent-imports", "users", q] as const,
+  users: ["agent-imports", "users"] as const,
   candidatesAll: ["agent-imports", "candidates"] as const,
   candidates: (userId: string, q: string, cursor: string | null) => ["agent-imports", "candidates", userId, q, cursor] as const,
   task: (targetUserId: string, id: string) => ["agent-imports", "task", targetUserId, id] as const,

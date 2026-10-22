@@ -23,7 +23,7 @@ describe("Agent import SDK public HTTP seam", () => {
     vi.resetModules();
   });
 
-  it("reads config, bounded user search, existing same-ID candidates, cursors and tasks through the existing client", async () => {
+  it("reads config, paginated users without a search query, existing same-ID candidates and tasks through the existing client", async () => {
     const requests: Request[] = [];
     const candidatePage: AgentImportCandidatePage = {
       items: [{ id: agentId, name: "Source Agent", description: "", revision: 3, skillCount: 2, referenceCount: 1, exists: true }],
@@ -37,7 +37,10 @@ describe("Agent import SDK public HTTP seam", () => {
       expect(request.headers.get("Authorization")).toBe("Bearer fixture-eval-token");
       expect(url.origin).toBe(window.location.origin);
       if (url.pathname.endsWith("/config")) return ok({ enabled: true, maxAgents: 50 });
-      if (url.pathname.endsWith("/users")) return ok({ users: [{ id: userId, name: "授权用户", email: "user@example.test" }] });
+      if (url.pathname.endsWith("/users")) return ok({
+        users: [{ id: userId, name: "Dev User", email: "user@example.test" }],
+        nextCursor: url.searchParams.has("cursor") ? null : "users/page?2 + 中文",
+      });
       if (url.pathname.endsWith("/agents")) return ok(candidatePage);
       return ok(task);
     });
@@ -46,20 +49,26 @@ describe("Agent import SDK public HTTP seam", () => {
     const { getAgentImportConfig, listAgentImportUsers, listAgentImportCandidates, getAgentImportTask } = await import("./agent-imports-api");
     const controller = new AbortController();
     await expect(getAgentImportConfig(controller.signal)).resolves.toEqual({ enabled: true, maxAgents: 50 });
-    await expect(listAgentImportUsers("中文 + mail", 20, controller.signal)).resolves.toMatchObject({ users: [{ id: userId }] });
+    await expect(listAgentImportUsers({ limit: 20 }, controller.signal)).resolves.toEqual({
+      users: [{ id: userId, name: "Dev User", email: "user@example.test" }], nextCursor: "users/page?2 + 中文",
+    });
+    await expect(listAgentImportUsers({ limit: 20, cursor: "users/page?2 + 中文" }, controller.signal)).resolves.toEqual({
+      users: [{ id: userId, name: "Dev User", email: "user@example.test" }], nextCursor: null,
+    });
     await expect(listAgentImportCandidates(userId, { q: "Agent + 名称", limit: 20 }, controller.signal))
       .resolves.toEqual(candidatePage);
     await expect(listAgentImportCandidates(userId, { q: "Agent + 名称", cursor: "next/page?2", limit: 20 }, controller.signal))
       .resolves.toEqual(candidatePage);
     await expect(getAgentImportTask(taskId, controller.signal)).resolves.toEqual(task);
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
-      "/api/agent-config-sync/config", "/api/agent-config-sync/users",
+      "/api/agent-config-sync/config", "/api/agent-config-sync/users", "/api/agent-config-sync/users",
       `/api/agent-config-sync/users/${userId}/agents`, `/api/agent-config-sync/users/${userId}/agents`,
       `/api/agent-config-sync/tasks/${taskId}`,
     ]);
-    expect(Object.fromEntries(new URL(requests[1]!.url).searchParams)).toEqual({ q: "中文 + mail", limit: "20" });
-    expect(Object.fromEntries(new URL(requests[2]!.url).searchParams)).toEqual({ q: "Agent + 名称", limit: "20" });
-    expect(Object.fromEntries(new URL(requests[3]!.url).searchParams)).toEqual({
+    expect(Object.fromEntries(new URL(requests[1]!.url).searchParams)).toEqual({ limit: "20" });
+    expect(Object.fromEntries(new URL(requests[2]!.url).searchParams)).toEqual({ limit: "20", cursor: "users/page?2 + 中文" });
+    expect(Object.fromEntries(new URL(requests[3]!.url).searchParams)).toEqual({ q: "Agent + 名称", limit: "20" });
+    expect(Object.fromEntries(new URL(requests[4]!.url).searchParams)).toEqual({
       q: "Agent + 名称", limit: "20", cursor: "next/page?2",
     });
     expect(requests.every((request) => !request.signal.aborted)).toBe(true);
@@ -105,7 +114,7 @@ describe("Agent import SDK public HTTP seam", () => {
     await expect(getAgentImportTask(taskId)).resolves.toEqual(view);
   });
 
-  it("forwards cancellation to an in-flight read without performing another request", async () => {
+  it.each(["users", "agents"] as const)("forwards cancellation to an in-flight %s read without performing another request", async (resource) => {
     let request!: Request;
     const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       request = new Request(input, init);
@@ -114,9 +123,11 @@ describe("Agent import SDK public HTTP seam", () => {
       });
     });
     vi.stubGlobal("fetch", fetcher);
-    const { listAgentImportCandidates } = await import("./agent-imports-api");
+    const { listAgentImportUsers, listAgentImportCandidates } = await import("./agent-imports-api");
     const controller = new AbortController();
-    const pending = listAgentImportCandidates(userId, { q: "", limit: 20 }, controller.signal);
+    const pending = resource === "users"
+      ? listAgentImportUsers({ limit: 20, cursor: "users/page?2" }, controller.signal)
+      : listAgentImportCandidates(userId, { q: "", limit: 20 }, controller.signal);
     const rejection = expect(pending).rejects.toMatchObject({ name: "AbortError" });
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
     controller.abort();

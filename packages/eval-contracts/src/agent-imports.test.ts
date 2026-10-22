@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  agentImportApplySchema, agentImportPreviewSchema, agentImportTaskViewSchema,
-  type AgentImportCandidatePage, type AgentImportConfig, type AgentImportSourceUser,
+  agentImportApplySchema, agentImportPreviewSchema, agentImportSourceUserPageSchema, agentImportTaskViewSchema,
+  type AgentImportCandidatePage, type AgentImportConfig, type AgentImportSourceUser, type AgentImportSourceUserPage,
 } from "./index.js";
 
 const id = "c16bcc47-a03b-4b22-a276-bb6177c229b1";
@@ -14,6 +14,19 @@ describe("Agent import public contract", () => {
       id, name: "Agent", description: "", revision: 1, skillCount: 1, referenceCount: 0, exists: false,
     }], nextCursor: null };
     expect({ config, user, page }).toMatchObject({ config: { enabled: false }, page: { nextCursor: null } });
+  });
+
+  it("exports an exact bounded source-user page with an explicit continuation cursor", () => {
+    const user = { id, name: "Source", email: "source@example.test" };
+    const page: AgentImportSourceUserPage = { users: [user], nextCursor: "opaque-source-cursor" };
+    expect(agentImportSourceUserPageSchema.parse(page)).toEqual(page);
+    expect(agentImportSourceUserPageSchema.parse({ users: [], nextCursor: null })).toEqual({ users: [], nextCursor: null });
+    expect(agentImportSourceUserPageSchema.parse({ users: [], nextCursor: "more" })).toEqual({ users: [], nextCursor: "more" });
+    expect(agentImportSourceUserPageSchema.parse({ users: Array(20).fill(user), nextCursor: "more" }).users).toHaveLength(20);
+    for (const invalid of [
+      [user], { users: [user] }, { users: [], nextCursor: 1 }, { users: Array(21).fill(user), nextCursor: null },
+      { users: page, nextCursor: null }, { ...page, token: "secret" }, { ...page, users: [{ ...user, ownerUserId: id }] },
+    ]) expect(agentImportSourceUserPageSchema.safeParse(invalid).success).toBe(false);
   });
 
   it("binds one source user, ordered unique UUIDs, purpose and an idempotency key", () => {
