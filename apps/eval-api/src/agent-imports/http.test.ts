@@ -58,12 +58,12 @@ function fixture(enabled = true, webApiToken?: string) {
 }
 
 describe("Agent import public HTTP control plane", () => {
-  it("accepts the official source account through the existing owner-scoped Agent route", async () => {
+  it.each(["springbrand-official", "oidc|MixedCase:42"])("accepts source account %s through the existing owner-scoped Agent route", async (sourceUserId) => {
     const f = fixture();
-    const response = await f.request("/api/agent-config-sync/users/springbrand-official/agents?limit=20");
+    const response = await f.request(`/api/agent-config-sync/users/${encodeURIComponent(sourceUserId)}/agents?limit=20`);
     expect(response.status).toBe(200);
-    expect(f.source.agents).toHaveBeenCalledExactlyOnceWith("springbrand-official", { limit: 20 });
-    const official = { ...body, sourceUserId: "springbrand-official" };
+    expect(f.source.agents).toHaveBeenCalledExactlyOnceWith(sourceUserId, { limit: 20 });
+    const official = { ...body, sourceUserId };
     const preview = await f.request("/api/agent-config-sync/previews", jsonRequest("POST", official));
     expect(preview.status).toBe(202);
     expect(f.store.create).toHaveBeenCalledExactlyOnceWith(official, "fixed-export-connection", undefined);

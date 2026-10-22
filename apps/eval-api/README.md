@@ -34,6 +34,9 @@ is bounded to 4,096 characters and forwarded unchanged. SP owns stable name/ID
 keyset pagination; Eval preserves each page and its cursor rather than capping
 the directory or requiring a manual user allowlist. Web displays usernames only;
 IDs still identify selections and email remains in the compatible wire contract.
+The real official account is listed first. Source Auth IDs are opaque strings
+and may be non-UUID legacy IDs; the adapter encodes each ID as one path segment.
+Agent/resource IDs and the target-owner authorization rules are unchanged.
 Agent search may remain blank after an authorized user is selected.
 
 The Dev source is fixed to `https://devrapi.springbrand.ai`; the

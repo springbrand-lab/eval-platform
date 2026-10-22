@@ -58,13 +58,13 @@ export function createAgentImportSource(input: { origin: string; targetOrigin: s
         agentImportSourceUserPageSchema);
     },
     agents(id, input) {
-      return get(`/api/agent-config-export/users/${agentImportSourceUserIdSchema.parse(id)}/agents?${query(querySchema.parse({ ...input, limit: input.limit ?? 20 }))}`, candidatesSchema);
+      return get(`/api/agent-config-export/users/${encodeURIComponent(agentImportSourceUserIdSchema.parse(id))}/agents?${query(querySchema.parse({ ...input, limit: input.limit ?? 20 }))}`, candidatesSchema);
     },
     async snapshot(id, agentIds) {
       const user = agentImportSourceUserIdSchema.parse(id);
       const ids = z.array(uuid).min(1).max(50).parse(agentIds);
       if (new Set(ids).size !== ids.length) throw new TypeError("Duplicate selected Agent IDs");
-      const snapshot = await get(`/api/agent-config-export/users/${user}/snapshot?${new URLSearchParams({ agentIds: ids.join(",") })}`, sourceSnapshotSchema);
+      const snapshot = await get(`/api/agent-config-export/users/${encodeURIComponent(user)}/snapshot?${new URLSearchParams({ agentIds: ids.join(",") })}`, sourceSnapshotSchema);
       if (snapshot.sourceUserId !== user || snapshot.agents.length !== ids.length ||
         new Set(snapshot.agents.map((agent) => agent.id)).size !== ids.length ||
         snapshot.agents.some((agent) => !ids.includes(agent.id))) dependencyFailure(new Error("Export scope mismatch"));

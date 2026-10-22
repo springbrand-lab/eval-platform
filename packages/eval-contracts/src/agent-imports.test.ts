@@ -48,7 +48,7 @@ describe("Agent import public contract", () => {
     expect(agentImportPreviewSchema.safeParse(request).success).toBe(true);
     expect(agentImportPreviewSchema.safeParse({ ...request, sourceUserId: undefined }).success).toBe(false);
     expect(agentImportPreviewSchema.safeParse({ ...request, agentIds: [sourceUserId] }).success).toBe(false);
-    for (const invalid of ["default", "other-system-account", "https://attacker.example"]) {
+    for (const invalid of ["", " ", ".", "..", "a/b", "a\\b", "a?b", "a#b", "a\nb", "https://attacker.example", "x".repeat(201)]) {
       expect(agentImportPreviewSchema.safeParse({ ...request, sourceUserId: invalid }).success).toBe(false);
     }
   });
@@ -64,5 +64,14 @@ describe("Agent import public contract", () => {
     expect(agentImportTaskViewSchema.parse({ ...view, sourceUserId: "springbrand-official" }).sourceUserId).toBe("springbrand-official");
     expect(agentImportTaskViewSchema.safeParse({ ...view, sourceUserId: null }).success).toBe(false);
     expect(agentImportTaskViewSchema.safeParse({ ...view, origin: "dev_import" }).success).toBe(false);
+  });
+
+  it.each(["oidc|MixedCase:42", id.toUpperCase()])("preserves opaque source identity %s without relaxing Agent IDs or choosing another target", (sourceUserId) => {
+    const user = { id: sourceUserId, name: "Legacy user", email: "" };
+    expect(agentImportSourceUserPageSchema.parse({ users: [user], nextCursor: null }).users).toEqual([user]);
+    const request = { sourceUserId, agentIds: [id], purpose: "execution", idempotencyKey: "legacy-preview" };
+    expect(agentImportPreviewSchema.parse(request)).toEqual(request);
+    expect(agentImportPreviewSchema.safeParse({ ...request, agentIds: ["oidc|MixedCase:42"] }).success).toBe(false);
+    expect(agentImportPreviewSchema.safeParse({ ...request, targetOwner: sourceUserId }).success).toBe(false);
   });
 });

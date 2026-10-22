@@ -8,15 +8,14 @@ const agent = "22222222-2222-4222-8222-222222222222";
 const envelope = (msg: unknown) => Response.json({ success: true, msg, code: "", errMsg: "" });
 
 describe("approved read-only export seam", () => {
-  it("reads the official user, its Agent list and its original owner-bound snapshot", async () => {
-    const official = "springbrand-official";
+  it.each(["springbrand-official", "oidc|MixedCase:42"])("reads and safely encodes source account %s without changing its identity", async (official) => {
     const calls: string[] = [];
     const source = createAgentImportSource({ origin: "https://dev.test", targetOrigin: "https://eval.test", token: "export",
       fetch: async (input) => {
         const path = new URL(new Request(input).url).pathname;
         calls.push(path);
         if (path.endsWith("/users")) return envelope({
-          users: [{ id: official, name: "SpringBrand", email: "official@example.test", official: true }], nextCursor: null,
+          users: [{ id: official, name: "Source", email: "source@example.test", official: official === "springbrand-official" }], nextCursor: null,
         });
         if (path.endsWith("/agents")) return envelope({ items: [], nextCursor: null });
         return envelope({ version: 1, sourceUserId: official, agents: [{
@@ -24,13 +23,13 @@ describe("approved read-only export seam", () => {
           setting: canonicalSourceSettingFixture(),
         }], skills: [], references: [] });
       } });
-    expect((await source.users({})).users[0]).toMatchObject({ id: official, official: true });
+    expect((await source.users({})).users[0]).toMatchObject({ id: official, official: official === "springbrand-official" });
     await expect(source.agents(official, {})).resolves.toEqual({ items: [], nextCursor: null });
     await expect(source.snapshot(official, [agent])).resolves.toMatchObject({ sourceUserId: official });
     expect(calls).toEqual([
       "/api/agent-config-export/users",
-      `/api/agent-config-export/users/${official}/agents`,
-      `/api/agent-config-export/users/${official}/snapshot`,
+      `/api/agent-config-export/users/${encodeURIComponent(official)}/agents`,
+      `/api/agent-config-export/users/${encodeURIComponent(official)}/snapshot`,
     ]);
   });
 
