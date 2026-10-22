@@ -1,5 +1,7 @@
 # Eval 与 dev AgentConfig 同步调研
 
+> **历史记录，非现行规范**：下文保留当时的仅新增约束与方案演进；现行行为以 [按 ID 覆盖导入契约](eval-http-api.md#overwrite-dev-imports) 和 [部署说明](eval-sp-deployment.md#数据归属) 为准。已有自有活动资源显式原地覆盖，不再仅导入缺失 ID；本轮覆盖能力未进行实际生产导入或部署。下文的“当前需求”仅指当时状态。
+
 首次调研：2026-10-20；约束更新：2026-10-21。本文是调研结论与待确认的设计建议，不代表接口已经实现或部署。
 
 > **当前需求以第 12 节为准**：用户最新前提是 **dev、Eval 均未上线**；只做 **dev → Eval 导入缺失 Agent 及必要 Skill / Reference**。导入三类对象必须真正保留源 ID（Agent、Reference 为 UUID；Skill 保留现有 SkillId，不把平台字符串 ID 重编码为 UUID），不另造目标 ID 或改写依赖数组冒充统一。Eval 原生 Agent 必须隔离；不统一 owner、账号或凭据，不覆盖、不删除、不反向同步。

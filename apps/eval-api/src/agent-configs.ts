@@ -291,14 +291,12 @@ export function createAgentConfigService(input: {
       return { purpose, evaluationMcpServerId: normalized.evaluationMcpServerId, dependencies: proofs,
         config: { ...config, setting: normalized.config.setting as Record<string, unknown> } };
     },
-    /** Create-only receipt flow. Local failures retain the remote result; never use normal create's DELETE compensation. */
+    /** Overwrite receipt flow. Local failures retain the remote result; never use normal create's DELETE compensation. */
     async import(prepared: PreparedAgent, importKey: string, onReceipt: (result: ImportResult) => Promise<void>, recovered?: ImportResult): Promise<ImportResult> {
       if (!input.imports) throw new ImportDependencyError("Agent imports are disabled");
       const id = prepared.config.id;
       if (isReservedSlug(prepared.config.slug) || prepared.config.slug === "default"
         || (await projects.frozenAgentConfigIds([id])).has(id)) throw new AgentConfigFrozenError(id);
-      const source = await input.sources?.get("agent", id);
-      if (source?.origin === "eval_native") throw new ImportConflictError("An Eval-native Agent already occupies this ID");
       requireCanonicalSourceSetting(prepared.config.setting);
       // Dependencies must exist now, including during receipt recovery; no future-resource facts are supplied.
       await input.imports.validateSelections(prepared.config.setting, prepared.dependencies);

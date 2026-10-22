@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import type { EvalSpClient } from "../sp/client.js";
 import { EvalSpApiError } from "../sp/http.js";
 import { ImportConflictError, ImportDependencyError, ImportOutcomeUnknownError } from "./errors.js";
-import { createAgentImportTarget } from "./target.js";
+import { createAgentImportTarget, type TargetAttachment } from "./target.js";
 import type { ImportResult, PreparedAgent } from "./model.js";
 import { canonicalSourceSettingFixture } from "./public-wire.test-support.js";
 
@@ -15,13 +16,20 @@ const receipt = { id: "33333333-3333-4333-8333-333333333333", resourceKind: "age
 const result: ImportResult = { receipt, replayed: false, resource: { ...prepared.config, user_id: owner } };
 const ok = (msg: unknown) => Response.json({ success: true, msg, code: "", errMsg: "" });
 const missing = () => Response.json({ code: "IMPORT_RECEIPT_NOT_FOUND", errMsg: "missing" }, { status: 404 });
-function setup(fetch: typeof globalThis.fetch, sourceOrigin = "https://dev.test") {
+function setup(fetch: typeof globalThis.fetch, sourceOrigin = "https://dev.test", ownerUserId = owner) {
   return createAgentImportTarget({ origin: "https://eval.test", sourceOrigin, writeOrigin: "https://web.test",
-    ownerUserId: owner, sessionToken: "target-session", sp: {} as EvalSpClient,
+    ownerUserId, sessionToken: "target-session", sp: {} as EvalSpClient,
     // Receipt/write tests use the real versioned capability wire; dedicated tests exercise negative probes.
     fetch: (input, init) => new URL(input instanceof Request ? input.url : String(input)).pathname === "/api/agent-config-imports/config"
       ? Promise.resolve(ok({ version: 1, enabled: true })) : fetch(input, init),
   });
+}
+async function admittedAttachment(request: Request, ownerUserId = owner): Promise<TargetAttachment> {
+  const form = await request.formData();
+  const file = form.get("file") as File;
+  const clientAttachmentId = form.get("clientAttachmentId") as string;
+  return { attachmentCdnUrl: `https://evalworkspace.springbrand.ai/uploads/v1/${ownerUserId}/${clientAttachmentId}`,
+    clientAttachmentId, name: form.get("name") as string, mediaType: file.type, size: file.size };
 }
 
 describe("fixed create-only target HTTP seam", () => {
@@ -104,7 +112,7 @@ describe("fixed create-only target HTTP seam", () => {
   });
 
   it("recovers a malformed Reference POST 409 through its matching receipt without another upload", async () => {
-    const attachment = { attachmentCdnUrl: `https://evalworkspace.springbrand.ai/uploads/v1/${owner}/${id}`,
+    let attachment = { attachmentCdnUrl: `https://evalworkspace.springbrand.ai/uploads/v1/${owner}/${id}`,
       clientAttachmentId: id, name: "brief.txt", mediaType: "text/plain", size: 3 };
     const referenceResult: ImportResult = { receipt: { ...receipt, resourceKind: "reference", importKey: "ref-key" }, replayed: true,
       resource: { id, name: attachment.name, mediaType: attachment.mediaType, size: attachment.size,
@@ -113,14 +121,18 @@ describe("fixed create-only target HTTP seam", () => {
     const calls: Request[] = [];
     const target = setup(async (input, init) => {
       const request = new Request(input, init); calls.push(request);
-      if (new URL(request.url).pathname === "/api/inbox/attachments") return ok(attachment);
+      if (new URL(request.url).pathname === "/api/inbox/attachments") {
+        attachment = await admittedAttachment(request.clone());
+        referenceResult.resource.attachmentCdnUrl = attachment.attachmentCdnUrl;
+        return ok(attachment);
+      }
       if (request.method === "POST") {
         submitted = true;
         return new Response('{"code":"AGENT_CONFIG_IMPORT_CONFLICT"', { status: 409 });
       }
       return submitted ? ok(referenceResult) : missing();
     });
-    const uploaded = await target.uploadReference(id, attachment.name, attachment.mediaType, new Uint8Array([1, 2, 3]));
+    const uploaded = await target.uploadReference(id, attachment.name, attachment.mediaType, new Uint8Array([1, 2, 3]), "ref-key");
     await expect(target.importReference(id, uploaded, "ref-key")).resolves.toEqual(referenceResult);
     expect(calls.map((request) => [request.method, request.url])).toEqual([
       ["POST", "https://eval.test/api/inbox/attachments"],
@@ -130,6 +142,55 @@ describe("fixed create-only target HTTP seam", () => {
     ]);
     expect(await calls[2]!.json()).toEqual({ referenceId: id, attachment, importKey: "ref-key" });
   });
+
+  it("keeps a valid temporary UUID stable across operation retries but distinct by key, Reference and owner, even for identical content", async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const fetch: typeof globalThis.fetch = async (input, init) => ok(await admittedAttachment(new Request(input, init)));
+    const first = await setup(fetch).uploadReference(id, "brief.txt", "text/plain", bytes, "operation-one");
+    const retry = await setup(fetch).uploadReference(id, "brief.txt", "text/plain", bytes, "operation-one");
+    const next = await setup(fetch).uploadReference(id, "brief.txt", "text/plain", bytes, "operation-two");
+    const otherReference = await setup(fetch).uploadReference(owner, "brief.txt", "text/plain", bytes, "operation-one");
+    const otherOwner = "44444444-4444-4444-8444-444444444444";
+    const otherTarget = setup(async (input, init) => ok(await admittedAttachment(new Request(input, init), otherOwner)),
+      "https://dev.test", otherOwner);
+    const other = await otherTarget.uploadReference(id, "brief.txt", "text/plain", bytes, "operation-one");
+    expect(retry).toEqual(first);
+    const ids = [first, next, otherReference, other].map((attachment) => attachment.clientAttachmentId);
+    expect(new Set(ids).size).toBe(4);
+    expect(ids).not.toContain(id);
+    for (const value of ids) expect(z.uuid({ version: "v8" }).safeParse(value).success).toBe(true);
+  });
+
+  it("does not accept another operation's staging attachment as this Reference import", async () => {
+    const calls: Request[] = [];
+    const target = setup(async (input, init) => {
+      const request = new Request(input, init); calls.push(request.clone());
+      return ok(await admittedAttachment(request));
+    });
+    const attachment = await target.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3]), "operation-one");
+    expect(() => target.importReference(id, attachment, "operation-two")).toThrow(ImportConflictError);
+    expect(() => target.importReference(owner, attachment, "operation-one")).toThrow(ImportConflictError);
+    expect(calls.map((request) => new URL(request.url).pathname)).toEqual(["/api/inbox/attachments"]);
+  });
+
+  it.each(["foreign-owner", "other-upload", "different-client-id", "query", "fragment", "name", "media-type", "size"] as const)(
+    "keeps the target-owned staging identity and frozen metadata checks (%s)", async (change) => {
+      const target = setup(async (input, init) => {
+        const attachment = await admittedAttachment(new Request(input, init));
+        if (change === "foreign-owner") attachment.attachmentCdnUrl = attachment.attachmentCdnUrl.replace(owner, id);
+        else if (change === "other-upload") attachment.attachmentCdnUrl = `https://evalworkspace.springbrand.ai/uploads/v1/${owner}/${id}`;
+        else if (change === "different-client-id") attachment.clientAttachmentId = id;
+        else if (change === "query") attachment.attachmentCdnUrl += "?copied=true";
+        else if (change === "fragment") attachment.attachmentCdnUrl += "#copied";
+        else if (change === "name") attachment.name = "other.txt";
+        else if (change === "media-type") attachment.mediaType = "text/markdown";
+        else attachment.size++;
+        return ok(attachment);
+      });
+      await expect(target.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3]), "ref-key"))
+        .rejects.toBeInstanceOf(ImportConflictError);
+    },
+  );
 
   it("never treats ID/content equality without a receipt as a successful uncertain write", async () => {
     const target = setup(async (input, init) => {
@@ -202,15 +263,17 @@ describe("fixed create-only target HTTP seam", () => {
       status, headers: { "Content-Type": "application/json" },
     }));
     await expect(target.receipt("agent", "key")).rejects.toBeInstanceOf(ImportDependencyError);
-    await expect(target.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3])))
+    await expect(target.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3]), "ref-key"))
       .rejects.toBeInstanceOf(ImportDependencyError);
   });
 
   it("rejects a source-origin Reference attachment despite noncanonical source origin spelling", async () => {
-    const attachment = { attachmentCdnUrl: `https://cdn.springbrand.ai/uploads/v1/${owner}/${id}`,
-      clientAttachmentId: id, name: "brief.txt", mediaType: "text/plain", size: 3 };
-    const target = setup(async () => ok(attachment), "HTTPS://CDN.SPRINGBRAND.AI/");
-    await expect(target.uploadReference(id, attachment.name, attachment.mediaType, new Uint8Array([1, 2, 3])))
+    const target = setup(async (input, init) => {
+      const attachment = await admittedAttachment(new Request(input, init));
+      attachment.attachmentCdnUrl = attachment.attachmentCdnUrl.replace("https://evalworkspace.springbrand.ai", "https://cdn.springbrand.ai");
+      return ok(attachment);
+    }, "HTTPS://CDN.SPRINGBRAND.AI/");
+    await expect(target.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3]), "ref-key"))
       .rejects.toBeInstanceOf(ImportConflictError);
   });
 
@@ -222,7 +285,7 @@ describe("fixed create-only target HTTP seam", () => {
         code, errMsg: "private upstream details", requestId: "upload-request",
       }, { status: 409 });
     });
-    const error = await target.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3]))
+    const error = await target.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3]), "ref-key")
       .catch((error: unknown) => error);
     expect(error).toBeInstanceOf(ImportConflictError);
     expect(error).toMatchObject({ status: 409, code: "EVAL_SP_CONFLICT", cause: expect.any(EvalSpApiError) });
@@ -233,7 +296,9 @@ describe("fixed create-only target HTTP seam", () => {
     expect(calls.map((request) => [request.method, request.url])).toEqual([
       ["POST", "https://eval.test/api/inbox/attachments"],
     ]);
-    expect((await calls[0]!.formData()).get("clientAttachmentId")).toBe(id);
+    const clientAttachmentId = (await calls[0]!.formData()).get("clientAttachmentId");
+    expect(z.uuid({ version: "v8" }).safeParse(clientAttachmentId).success).toBe(true);
+    expect(clientAttachmentId).not.toBe(id);
   });
 
   it.each(["AGENT_CONFIG_IMPORT_CONFLICT", "REQUEST_CONFLICT"])("preserves authoritative receipt %s and its safe upstream cause", async (code) => {
@@ -272,7 +337,7 @@ describe("fixed create-only target HTTP seam", () => {
     const offline = setup(async () => { throw new TypeError("offline"); });
     await expect(offline.receipt("agent", "key"))
       .rejects.toBeInstanceOf(ImportDependencyError);
-    await expect(offline.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3])))
+    await expect(offline.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3]), "ref-key"))
       .rejects.toBeInstanceOf(ImportDependencyError);
   });
 

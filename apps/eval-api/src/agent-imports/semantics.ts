@@ -1,9 +1,7 @@
 import { equalJson } from "@eval-platform/eval-contracts";
 import { ImportConflictError } from "./errors.js";
 import { digest, type FrozenFile, type ImportPlan, type ImportTask, type PlannedResource, type SourceAgent } from "./model.js";
-import type { AgentImportTarget } from "./target.js";
-import { checkReceipt } from "./target.js";
-import type { ResourceSourceStore } from "../db/agent-import-sources.js";
+import type { AgentImportStore } from "./store.js";
 import type { DefinitionEvidence } from "./definition-evidence.js";
 import { dependencies } from "./selection-facts.js";
 
@@ -43,8 +41,8 @@ export function resourceDigests(resource: PlannedResource, task: ImportTask): vo
     resource.sourceDigest = agentSourceDigest(resource.source as SourceAgent, resource.prepared!.dependencies);
     resource.targetDigest = digest({ version: 1, prepared: resource.prepared });
   }
-  resource.importKey = `eval-import-v1-${digest({
-    version: 1, owner: task.ownerUserId, connection: task.connectionId, sourceUserId: task.request.sourceUserId,
+  resource.importKey = `eval-import-v2-${digest({
+    version: 2, task: task.id, owner: task.ownerUserId, connection: task.connectionId, sourceUserId: task.request.sourceUserId,
     kind: resource.kind, id: resource.id, source: resource.sourceDigest, target: resource.targetDigest,
   })}`;
 }
@@ -53,16 +51,11 @@ export function planDigest(plan: ImportPlan, task: ImportTask): string {
     eligibleAgentIds: plan.eligibleAgentIds, owner: task.ownerUserId, connection: task.connectionId,
     user: task.request.sourceUserId, purpose: task.request.purpose });
 }
-/** Equality is necessary, never sufficient: provenance and its still-valid SP receipt are both required. */
-export async function requireReusable(resource: PlannedResource, task: ImportTask, sources: ResourceSourceStore, target: AgentImportTarget): Promise<void> {
-  const source = await sources.get(resource.kind, resource.id);
-  if (!source || source.origin !== "dev_import" || source.connectionId !== task.connectionId
-    || source.sourceUserId !== task.request.sourceUserId || source.sourceDigest !== resource.sourceDigest
-    || source.targetDigest !== resource.targetDigest || !source.receipt) {
-    throw new ImportConflictError("Existing resource has no matching proven import, or its source content changed");
+/** Only known resource outcomes can admit a new overwrite; transactional admission also checks owning tasks. */
+export async function requireReplaceableIntent(resource: PlannedResource, store: Pick<AgentImportStore, "intent">): Promise<void> {
+  const current = await store.intent(resource.kind, resource.id);
+  if (current && current.importKey !== resource.importKey && (!["completed", "planned", "conflict", "confirmed"].includes(current.status)
+    || current.status === "confirmed" && !current.receipt)) {
+    throw new ImportConflictError("An unfinished import must be reconciled before this resource can be overwritten");
   }
-  const result = await target.receipt(resource.kind, source.receipt.importKey);
-  if (!result) throw new ImportConflictError("Existing resource import receipt is unavailable");
-  checkReceipt(result, resource.kind, resource.id, source.receipt.importKey, source.receipt);
-  resource.importKey = source.receipt.importKey;
 }

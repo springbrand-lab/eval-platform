@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, ne, or } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import { agentImportIntents, resourceSources } from "./schema.js";
@@ -8,7 +8,7 @@ import { ImportConflictError } from "../agent-imports/errors.js";
 export interface ResourceSourceStore {
   get(kind: ResourceKind, id: string): Promise<ResourceSource | null>;
   recordNative(id: string): Promise<void>;
-  /** Only confirmed receipts, never unknown intents, can suppress an unfinished new Agent. */
+  /** Only confirmed receipts, never unknown intents, can suppress an unfinished Agent import. */
   pendingAgentIds(ids: readonly string[]): Promise<ReadonlySet<string>>;
 }
 export function createPostgresResourceSourceStore(db: EvalDb, ownerUserId: string): ResourceSourceStore {
@@ -28,12 +28,9 @@ export function createPostgresResourceSourceStore(db: EvalDb, ownerUserId: strin
     async pendingAgentIds(ids) {
       if (ids.length === 0) return new Set();
       const rows = await db.select({ id: agentImportIntents.id, key: agentImportIntents.importKey, receipt: agentImportIntents.receipt })
-        .from(agentImportIntents).leftJoin(resourceSources, and(
-          eq(resourceSources.ownerUserId, agentImportIntents.ownerUserId), eq(resourceSources.kind, "agent"),
-          eq(resourceSources.id, agentImportIntents.id),
-        )).where(and(
+        .from(agentImportIntents).where(and(
           eq(agentImportIntents.ownerUserId, owner), eq(agentImportIntents.kind, "agent"), inArray(agentImportIntents.id, [...ids]),
-          eq(agentImportIntents.status, "confirmed"), or(isNull(resourceSources.origin), ne(resourceSources.origin, "eval_native")),
+          eq(agentImportIntents.status, "confirmed"),
         ));
       return new Set(rows.flatMap((row) => {
         const parsed = receiptSchema.safeParse(row.receipt);

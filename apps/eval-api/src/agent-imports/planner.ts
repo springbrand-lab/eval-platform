@@ -4,13 +4,12 @@ import type { Fetch } from "../sp/http.js";
 import { createImportDownloads, safeImportPath, type ImportStaging } from "./bytes.js";
 import { ImportConflictError, ImportDependencyError } from "./errors.js";
 import { digest, IMPORT_LIMITS, resourceKey, summarize, type ImportPlan, type ImportTask } from "./model.js";
-import { agentSourceDigest, dependencyKeys, planDigest, requireCanonicalSourceSetting, requireReusable, resourceDigests } from "./semantics.js";
+import { dependencyKeys, planDigest, requireCanonicalSourceSetting, requireReplaceableIntent, resourceDigests } from "./semantics.js";
 import { dependencies, plannedResourcesForAgent } from "./selection-facts.js";
 import { sourceDefinitionEvidence, type DefinitionEvidence } from "./definition-evidence.js";
 import type { AgentImportSource } from "./source.js";
 import type { AgentImportStore } from "./store.js";
 import type { AgentImportTarget } from "./target.js";
-import { checkReceipt } from "./target.js";
 import { createImportVerification } from "./verification.js";
 
 export function createImportPlanner(input: {
@@ -33,10 +32,12 @@ export function createImportPlanner(input: {
     const bySkill = new Map(snapshot.skills.map((item) => [item.id, item]));
     const byReference = new Map(snapshot.references.map((item) => [item.id, item]));
     if (bySkill.size !== snapshot.skills.length || byReference.size !== snapshot.references.length) throw new ImportConflictError("Duplicate source resource identities");
-    const plan: ImportPlan = task.plan ?? { version: 1, snapshot, resources: [], eligibleAgentIds: [], digest: "" };
+    const plan: ImportPlan = task.plan ?? { version: 2, snapshot, resources: [], eligibleAgentIds: [], digest: "" };
+    if (plan.version !== 2) throw new ImportConflictError("Import behavior changed; create a new overwrite preview");
     if (digest(plan.snapshot) !== digest(snapshot)) throw new ImportConflictError("Frozen export snapshot changed");
     const resources = new Map(plan.resources.map((item) => [resourceKey(item.kind, item.id), item]));
     const view = structuredClone(task.view);
+    const activeIds = new Set((await target.listAgents()).filter((agent) => agent.user_id === task.ownerUserId).map((agent) => agent.id));
     delete view.error;
     function block(id: string, message: string) {
       const item = view.agents.find((item) => item.id === id)!;
@@ -64,23 +65,12 @@ export function createImportPlanner(input: {
       }
       const existing = await target.agent(item.id);
       const binding = await store.sources.get("agent", item.id);
-      if (existing || binding) {
-        if (existing && binding?.origin === "dev_import" && binding.connectionId === task.connectionId
-          && binding.sourceUserId === task.request.sourceUserId && binding.receipt && existing.user_id === task.ownerUserId) {
-          try {
-            const result = await target.receipt("agent", binding.receipt.importKey);
-            if (!result) { block(item.id, "Existing Agent has no valid target receipt"); continue; }
-            checkReceipt(result, "agent", item.id, binding.receipt.importKey, binding.receipt);
-            item.status = "skipped";
-            item.message = binding.sourceDigest === agentSourceDigest(agent, proofs)
-              ? "Agent already exists; it will not be changed" : "Source changed; the existing Agent will not be updated";
-          } catch (error) {
-            if (!(error instanceof ImportConflictError)) throw error;
-            block(item.id, error.message);
-          }
-        } else block(item.id, "Target ID is occupied, unavailable or has no matching proven import");
+      if (existing && (existing.user_id !== task.ownerUserId || !activeIds.has(item.id) || existing.slug === "default" || existing.is_default === true)
+        || !existing && binding) {
+        block(item.id, "Target Agent is foreign, protected or unavailable");
         continue;
       }
+      item.overwrite = !!existing;
       try {
         const plannedResources = plannedResourcesForAgent(snapshot, agent);
         const key = resourceKey("agent", item.id);
@@ -88,7 +78,7 @@ export function createImportPlanner(input: {
         if (prepared) await target.validateSelections(prepared.config.setting, prepared.dependencies, plannedResources);
         else prepared = await agents.prepareImport(agent, task.request.purpose, proofs, plannedResources);
         resources.set(key, { kind: "agent", id: item.id, name: agent.name, source: agent, files: [],
-          sourceDigest: "", targetDigest: "", importKey: "", prepared });
+          sourceDigest: "", targetDigest: "", importKey: "", prepared, overwrite: !!existing });
         for (const id of selected.skills) {
           const skill = bySkill.get(id);
           if (!skill) throw new ImportConflictError("Export is missing a selected Skill");
@@ -147,16 +137,17 @@ export function createImportPlanner(input: {
           await store.save(task, { plan, view: summarize(view) });
         }
         resourceDigests(resource, task);
-        if (await verify(resource, task)) {
-          if (!resource.platform) await requireReusable(resource, task, store.sources, target);
+        if (resource.platform) {
+          if (!await verify(resource, task)) throw new ImportConflictError("Platform Skill is missing on target; it cannot be uploaded as a private Skill");
         } else {
-          if (resource.platform) throw new ImportConflictError("Platform Skill is missing on target; it cannot be uploaded as a private Skill");
-          if (await store.sources.get(resource.kind, resource.id)) throw new ImportConflictError("Previously registered target dependency is unavailable; it cannot be revived");
-        }
-        const intent = await store.intent(resource.kind, resource.id);
-        if (intent && (intent.sourceDigest !== resource.sourceDigest || intent.targetDigest !== resource.targetDigest
-          || intent.connectionId !== task.connectionId || intent.sourceUserId !== task.request.sourceUserId)) {
-          throw new ImportConflictError("A different durable import intent already owns this dependency ID");
+          const current = resource.kind === "skill" ? await target.skill(resource.id) : await target.reference(resource.id);
+          if (!current && await store.sources.get(resource.kind, resource.id)) {
+            throw new ImportConflictError("Previously registered target dependency is unavailable; it cannot be revived");
+          }
+          if (current && ("origin" in current ? current.origin !== "upload" || current.deleted || !current.available : current.status !== "active")) {
+            throw new ImportConflictError("Target dependency is protected or unavailable");
+          }
+          await requireReplaceableIntent(resource, store);
         }
       } catch (error) {
         if (!(error instanceof ImportConflictError)) throw error;
@@ -173,10 +164,9 @@ export function createImportPlanner(input: {
       }
       const resource = resources.get(resourceKey("agent", item.id))!;
       resourceDigests(resource, task);
-      const intent = await store.intent("agent", item.id);
-      if (intent && (intent.sourceDigest !== resource.sourceDigest || intent.targetDigest !== resource.targetDigest
-        || intent.connectionId !== task.connectionId || intent.sourceUserId !== task.request.sourceUserId)) {
-        block(item.id, "A different durable import intent already owns this Agent ID"); continue;
+      try { await requireReplaceableIntent(resource, store); } catch (error) {
+        if (!(error instanceof ImportConflictError)) throw error;
+        block(item.id, error.message); continue;
       }
       item.status = "ready";
     }

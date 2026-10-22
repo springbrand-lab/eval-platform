@@ -14,8 +14,8 @@ const STATUS_LABELS: Record<AgentImportTaskView["status"], string> = {
   outcome_unknown: "导入结果待核验",
 };
 const AGENT_LABELS: Record<AgentImportTaskView["agents"][number]["status"], string> = {
-  pending: "待处理", ready: "可新增", created: "已新增", skipped: "已跳过",
-  conflict: "冲突，未覆盖", failed: "失败", outcome_unknown: "结果待核验",
+  pending: "待处理", ready: "可导入", created: "已新增", overwritten: "已覆盖", skipped: "已跳过",
+  conflict: "冲突，需处理", failed: "失败", outcome_unknown: "结果待核验",
 };
 const STAGE_LABELS: Readonly<Record<string, string>> = {
   checking: "检查依赖", preparing: "准备文件", preparing_files: "准备文件",
@@ -42,8 +42,8 @@ export function AgentImportTask({ task, userName, expired, restored = false }: {
     </div>
     <div className="flex flex-wrap gap-x-5 gap-y-1 text-[13px]" aria-label="导入数量">
       <span>所选 Agent {task.agents.length}</span>
-      <span>可新增 {ready}</span><span>已新增 {task.summary.created}</span>
-      <span>已跳过 {task.summary.skipped}</span><span>冲突 {task.summary.conflicts}</span>
+      <span>可导入 {ready}</span><span>已新增 {task.summary.created}</span><span>已覆盖 {task.summary.overwritten ?? 0}</span>
+      {task.summary.skipped > 0 && <span>已跳过 {task.summary.skipped}</span>}<span>冲突 {task.summary.conflicts}</span>
       <span>失败 {task.summary.failed}</span><span>结果待核验 {unknown}</span>
     </div>
     <Progress value={value} aria-label="导入任务进度">
@@ -52,14 +52,14 @@ export function AgentImportTask({ task, userName, expired, restored = false }: {
     </Progress>
     <p className="text-xs text-text-muted">已读取 {formatBytes(task.progress.bytesRead)} / {formatBytes(task.progress.totalBytes)}</p>
     {task.status === "ready" && <Notice tone={issues ? "warning" : "info"}>
-      仅导入通过检查的 {ready} 个 Agent 及其必要依赖并集，保留原 ID。已有、冲突和失败项不覆盖。
+      仅导入通过检查的 {ready} 个 Agent 及其必要依赖并集，保留原 ID；同 ID 的已有内容会被覆盖，冲突和失败项不导入。
       {task.expiresAt && <p className="mt-1">检查有效期至 {formatDateTime(task.expiresAt)}。</p>}
       {expired && <p className="mt-1 font-semibold">检查已过期，请重新选择并检查，不能继续确认。</p>}
     </Notice>}
-    {task.status === "completed_with_errors" && <Notice tone="warning">部分导入未成功，已新增的 Agent 和资源会保留。请逐项查看失败与冲突，不会自动重试或删除。</Notice>}
-    {task.status === "failed" && <Notice tone="danger">任务失败，导入未完成；已经创建的资源会保留。请查看错误并核验结果，不能将失败视为同步成功。</Notice>}
+    {task.status === "completed_with_errors" && <Notice tone="warning">部分导入未成功，已新增或覆盖的资源会保留。请逐项查看失败与冲突，不会自动重试或删除。</Notice>}
+    {task.status === "failed" && <Notice tone="danger">任务失败，导入未完成；已经新增或覆盖的资源会保留。请查看错误并核验结果，不能将失败视为同步成功。</Notice>}
     {recovering && <Notice tone="info">
-      后台仍在自动恢复：沿用原任务、原 ID 和原幂等键核验回执并完成 Eval 记录。页面只读查询，无需重新确认；不会覆盖或删除已有资源。
+      后台仍在自动恢复：沿用原任务、原 ID 和原幂等键核验回执并完成 Eval 记录。页面只读查询，无需重新确认；不会重复应用已确认的覆盖，也不删除资源。
     </Notice>}
     {task.status === "outcome_unknown" && <Notice tone="warning">
       部分写入可能已经生效，但回执核验或本地收尾尚未完成。后台自动恢复已停止，不会自动继续、覆盖或删除；可刷新任务状态查看核验结果。请保留任务 ID，联系管理员核验，不要重新发起相同导入。
@@ -73,6 +73,7 @@ export function AgentImportTask({ task, userName, expired, restored = false }: {
         <TableCell className="text-xs">Skill {agent.skillCount}<br />参考资料 {agent.referenceCount}</TableCell>
         <TableCell className="max-w-sm whitespace-normal text-[13px]">
           <span className={["failed", "conflict"].includes(agent.status) ? "text-danger" : agent.status === "outcome_unknown" ? "text-warning" : ""}>{AGENT_LABELS[agent.status]}</span>
+          {agent.status === "ready" && agent.overwrite && <p className="text-xs text-warning">同 ID 将覆盖</p>}
           {agent.message && <p className="mt-1 whitespace-pre-wrap break-words text-xs text-text-muted">{agent.message}</p>}
         </TableCell>
       </TableRow>)}</TableBody>

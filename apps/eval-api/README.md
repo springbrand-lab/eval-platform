@@ -4,16 +4,27 @@
 
 ## 进程与环境变量
 
-### Agent create-only imports (public Interface boundary)
+### Agent overwrite imports (public Interface boundary)
+
+Explicit imports create missing IDs and overwrite the target owner's existing
+Agent, user Skill and Reference metadata/content in place from the frozen dev
+snapshot. Existing IDs are selectable, not skipped or cloned; IDs and original
+`createdAt` are preserved, and Agent/Skill revisions advance. Platform Skills,
+frozen/default/deleted/disabled resources and other owners remain protected.
+Each new preview has distinct operation keys; an uncertain retry uses its
+original keys and receipts rather than overwriting again. An unfinished
+operation blocks a new operation on the same resource.
 
 `/api/agent-config-sync` adds optional `GET /config`, `GET /users?q=alice&limit=20`,
-`GET /users/:sourceUserId/agents?q=&cursor=&limit=&onlyMissing=true`,
+`GET /users/:sourceUserId/agents?q=&cursor=&limit=`,
 `POST /previews {sourceUserId,agentIds,purpose,idempotencyKey}`,
 `GET /tasks/:taskId`, and `POST /tasks/:taskId/apply {idempotencyKey}`.
 Both writes return 202 `{taskId}`; the independent `eval-agent-imports` pg-boss
 consumer performs preparation/import, not an HTTP request or the Run Worker.
 DTOs live in `eval-contracts/src/agent-imports.ts`. Target owner is always the
 verified Eval service account; source user only scopes the authorized export.
+`onlyMissing` remains an optional catalog filter; Web omits it so existing IDs
+remain selectable for overwrite.
 User search requires a trimmed, nonblank `q` (at most 200 characters); missing
 or blank input returns 422 locally without calling the source. Agent search
 may remain blank after an authorized user is selected.
@@ -22,8 +33,15 @@ The Dev source is fixed to `https://devrapi.springbrand.ai`; the
 `EVAL_DEV_SP_API_ORIGIN` environment variable is not read. Supplying the existing
 Takt `SP_PLATFORM_RESOURCE_ADMIN_TOKEN` for that Dev SP deployment (its
 `RESOURCE_ADMIN_TOKEN`) enables imports. No new credential is generated. The shared token retains
-its management authority; this client uses only the scoped read-only export routes.
+its management authority; this client uses only the read-only export routes.
 Without the shared token, imports stay disabled.
+SP derives transfer policy from its trusted deployment `API_ORIGIN`: dev
+(`https://devrapi.springbrand.ai`) exports across all source accounts; Eval
+(`https://evalrapi.springbrand.ai`) imports for every authenticated target user;
+other origins disable both. There is no import/export-specific user-ID allowlist
+or manual account verification. Eval still uses its ordinary fixed service
+session, and target auth, trusted Origin and ownership checks remain mandatory.
+
 Disabled imports mean `{enabled:false,maxAgents:50}` and ordinary API behavior remains
 available. Owner-scoped persisted `GET /tasks/:taskId` remains available even
 after the source token is removed or target imports are disabled; it reads only
@@ -37,12 +55,17 @@ records. Target imports use the service session and `EVAL_WEB_ORIGIN`:
 `POST /api/user-references/imports` (a freshly uploaded target attachment), and
 `POST /api/user-agent-configs/imports`. Recovery reads
 `GET /api/agent-config-imports/receipts/:importKey?kind=`.
-Reference bytes first use ordinary `POST /api/inbox/attachments` with the retained
-Reference ID as `clientAttachmentId`; SP rejects immutable attachment identity or
-content mismatches with `409 REQUEST_CONFLICT`. The target adapter treats only
-HTTP 409 with a known public conflict code (`AGENT_CONFIG_IMPORT_CONFLICT` or
+Reference bytes first use ordinary `POST /api/inbox/attachments` with a temporary
+UUID derived from the target owner, Reference ID and import key. Retries reuse
+that upload identity; a new operation gets a distinct upload so changed bytes or
+metadata cannot collide with an earlier immutable upload. The final `referenceId`
+always remains the original resource ID. Previously persisted same-ID attachments
+remain valid for recovery without another upload. SP rejects immutable upload
+identity or content mismatches with `409 REQUEST_CONFLICT`.
+The target adapter treats only HTTP 409 with a known public conflict code
+(`AGENT_CONFIG_IMPORT_CONFLICT` or
 `REQUEST_CONFLICT`) as an authoritative conflict on dependency/upload and receipt
-reads and create-only POSTs, preserving the structured upstream cause. Unknown
+reads and import POSTs, preserving the structured upstream cause. Unknown
 409 codes, malformed responses, network and target authentication failures are
 never classified from HTTP status alone. Reads/uploads retain dependency failures;
 an uncertain import POST first checks the same key's durable receipt and remains
@@ -53,15 +76,18 @@ Platform Skills are verified against the target catalog, never uploaded as user
 Skills. Same-name private Skill collisions block only their dependent Agents.
 
 The API owns unified internal resource sources, durable tasks, per-resource
-write-ahead intents/receipts and owner leases. Existing unknown rows are never
-claimed from a matching ID/hash or an unfinished intent. Source metadata never
-appears in ordinary Agent DTOs. A valid target receipt is required before an
+write-ahead intents/receipts and owner leases. Native or unknown provenance is
+never adopted from a matching ID/hash or an unfinished intent. An explicit
+overwrite may replace native provenance only after its matching target receipt,
+current-resource verification and purpose/source finalization. Source metadata
+never appears in ordinary Agent DTOs. A valid target receipt is required before an
 import can register provenance or hide an unfinished imported Agent. Imported
 objects are retained after purpose/source finalization failures; recovery never
-deletes, renames, aliases or allocates replacement IDs.
+deletes, forks, aliases or allocates replacement IDs.
 Confirmed imports awaiting metadata finalization share one ordinary
-get/edit/delete/freeze access fence; unknown intents and proven native rows are
-not hidden. A receipt proves historical insertion, not current existence:
+get/edit/delete/freeze access fence, including explicitly overwritten native
+Agents; unknown intents alone do not hide a row.
+A receipt proves a historical import commit, not current existence:
 every Agent result, including cached receipts and POST replays, is freshly read
 and checked against the frozen body and the target's active list before local
 purpose/source finalization. SP's retained GET body alone cannot prove it is active.
@@ -69,6 +95,10 @@ purpose/source finalization. SP's retained GET body alone cannot prove it is act
 Preview freezes the selected dependency union and its actual byte hashes under
 `EVAL_BUNDLE_DIR/imports` with bounded files/bytes, private permissions and TTL.
 Apply consumes that immutable plan, only ready candidates, dependencies first.
+New stored plans use version 2 for overwrite consent. Old unsubmitted create-only
+version-1 previews require a new check; already-applied version-1 plans may only
+finalize matching proven receipts, never start fresh overwrite writes or uploads.
+This internal plan version does not change SP's version-1 capability/preflight wire.
 Automatic recovery keeps the task `importing`; receipt reconciliation uses stage
 `receipts` even when individual Agents have unknown results. Exhausting the queue
 recovery budget leaves the task `outcome_unknown` for manual reconciliation, never
@@ -92,7 +122,7 @@ Its standard success envelope must contain
 purpose-reconciled setting. Eval does not duplicate SP's setting schema or accept
 dropped fields, truncation or rewritten defaults. In particular, current Dev
 `authoring`, `preferredSupplierIds` and `referenceNotes` remain intact in the
-source snapshot, frozen plan and create-only Agent POST.
+source snapshot, frozen plan and overwrite-capable Agent POST.
 
 SP owns all admission rules through the same implementation as ordinary writes
 and atomic imports: model-plan access, managed MCP, Connector Toolkits,
@@ -108,8 +138,11 @@ Only selected source `kind:"user"` Skills supply `{id,name}`; platform Skills
 must already exist on Target. References supply UUID `id` and nonnegative integer
 `size`. Unselected resources, URLs, owner fields and source credentials are not
 sent. These facts let SP validate future selected Skill name clashes and Reference
-totals without accepting arbitrary missing, foreign or soft-deleted IDs. Existing
-resources always use SP's actual facts. No second persisted fact set is added.
+totals for both absent IDs and active owned replacements. Incoming planned
+Skill names and Reference sizes are used for replacements too; current target
+ownership/lifecycle checks still reject protected, foreign, deleted or disabled
+resources. Unplanned resources use actual target facts. No second persisted fact
+set is added.
 Preflight uses a read-only snapshot, creates no resource, upload, receipt or
 reservation, and never grants a later write.
 
@@ -135,11 +168,11 @@ in the prepared plan and both source/target digests and import keys (at most
 expected proofs in the authoritative preflight so SP compares current definitions.
 Apply uses no source calls and checks current admission before dependency writes,
 then sends the unchanged frozen `dependencies` in the Agent import POST.
-SP rechecks exact coverage/current definitions inside insert/replay and receipt
+SP rechecks exact coverage/current definitions inside resource-write/replay and receipt
 verification. No Action/Component publishing, adoption or credentials are part
 of this seam; Connector Toolkits remain distinct from managed MCP selections.
 All downloads reject redirects, unsafe paths and non-allowlisted URLs; CDN reads
-carry no SP token. The target insert-only operations remain the final defense
+carry no SP token. The target's guarded insert/update operations remain the final defense
 against concurrent edits, tombstones, ownership and uniqueness conflicts.
 Migrations are review artifacts only; generating them never applies them.
 
@@ -187,13 +220,19 @@ compensates by deleting an imported object.
 Import preview/apply and worker stages probe the fixed target's public
 `GET /api/agent-config-imports/config` (`{version:1,enabled}`), and each remote
 write rechecks capability, including before `/api/inbox/attachments`. Probes
-are not cached as write authority; SP independently enforces its explicit target
-service-account allowlist. The existing Eval `/config` returns `enabled:false`
+are not cached as write authority; SP independently enforces deployment capability,
+ordinary authentication, trusted Origin and target ownership. The existing Eval
+`/config` returns `enabled:false`
 when target capability is disabled; upstream 401 stays dependency unavailability,
 not browser authentication. A disabled apply keeps its durable plan/key resumable.
 
 `migrations-postgres/0006_agent_imports.sql` and its Drizzle metadata add only
 Eval-side source/task/intent/lease structures. No old sources are backfilled.
+Target SP needs `0040_agent_config_import_receipts.sql` and
+`0041_agent_config_import_overwrite.sql` through its normal deployment pipeline,
+not manual remote database actions. Immutable operation receipts may refer to
+the same single mutable resource; they are not historical resource copies.
+No production import or deployment of this overwrite change has occurred.
 Agent import PostgreSQL tests opt in only with `EVAL_IMPORT_TEST_DATABASE_URL`;
 they never read `.env` or fall back to `DATABASE_URL`. Other PostgreSQL suites
 use `DATABASE_URL`. Local unit checks remain supported with both variables unset;

@@ -7,11 +7,11 @@ Eval 使用下面四个 npm 包的精确版本，版本与完整性由消费方 
 | `@springbrand/eval-harness` | `0.1.0-alpha.3` | Eval API：初始化、证据路径、上限，以及 `inspectStrictZip`、`StrictZipError` 和 ZIP 类型 |
 | `@springbrand/file-renderers` | `0.1.0-alpha.1` | Eval Web：文件解析、预览、`resource-path` 与格式 CSS Module |
 | `@springbrand/contracts` | `0.1.0-alpha.0` | Eval HTTP 目录：SP 编辑器领域错误、删除阻挡详情 Schema |
-| `@springbrand/agent-config-editor` | `0.1.0-alpha.1` | Eval Web：根入口、`client`、`draft` 与 `connector-authorization` |
+| `@springbrand/agent-config-editor` | `0.1.0-alpha.3` | Eval Web：根入口、`client`、`draft` 与 `connector-authorization` |
 
 SP 内部 `utils`、`resource`、`agent-contracts` 及 Runtime 公开 canonical 校验器的实现与声明由发布产物携带，不作为 Eval 的额外依赖。ZIP 的唯一公开入口是 eval-harness；Eval 不导入 SP utils。`file-renderers` 的安装依赖不引用 SP 仓库中的 `vendor/*.tgz`。
 
-编辑器 `0.1.0-alpha.1` 保留 Dev 配置的 `authoring`、`preferredSupplierIds` 和 `referenceNotes`，支持导入后仅修改名称再保存。升级迁移原有中文、布局与删除反馈补丁，不修改页面展示；模型选择修复已由上游提供，补丁不再重复实现。
+编辑器 `0.1.0-alpha.3` 保留 Dev 配置的 `authoring`、`preferredSupplierIds` 和 `referenceNotes`，支持导入后仅修改名称再保存，并通过 `/client` 公开 Reference 详情查询键。导入结束时同时失效资料列表与详情缓存，使同 ID 覆盖后的名称和内容地址及时刷新。升级迁移原有中文、布局与删除反馈补丁，不修改页面展示；模型选择修复已由上游提供，补丁不再重复实现。
 
 Web 的 Tailwind 扫描 `file-renderers/dist/**/*.js` 与 `agent-config-editor/dist/**/*.js`，不扫描 SP 源码。格式 CSS Module 由文件预览模块导入。React、React DOM、TanStack Query、HTTP 与 site-block 在 Vite 中去重，保持宿主 Context 和错误类一致。
 

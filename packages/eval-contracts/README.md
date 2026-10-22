@@ -1,9 +1,12 @@
 # @eval-platform/eval-contracts
 
-`src/agent-imports.ts` 拥有 dev → Eval 仅新增导入的公共 DTO 与严格 preview/apply 请求 Schema：
+`src/agent-imports.ts` 拥有 dev → Eval 按 ID 覆盖导入的公共 DTO 与严格 preview/apply 请求 Schema：
 `AgentImportConfig`、`AgentImportSourceUser`、`AgentImportCandidate`、`AgentImportCandidatePage`、
 `AgentImportTaskView`。来源用户仅限定已授权导出范围，目标仍是固定 Eval 服务账号。
 任务可表达部分失败与结果待校准；来源/回执/凭据只属于 API 内部事实，不加入普通 Agent DTO。
+已有 ID 的自有活动 Agent、用户 Skill 和 Reference 原地覆盖元数据与内容，缺失 ID 新建；不跨目标账号覆盖或复活受保护资源。
+逐 Agent 的可选 `overwrite` 预览提示和 `overwritten` 完成状态区分覆盖与新建；
+`summary.overwritten` 可选以兼容历史任务，新任务始终提供覆盖数量。历史 `skipped` 状态只用于读取旧任务。
 任务级 `importing` 包含后台自动回执校准（`progress.stage: receipts`），期间逐 Agent 可为
 `outcome_unknown`；任务级 `outcome_unknown` 仅表示自动恢复预算耗尽、需要人工核验的终态。
 Web 轮询前者、停止自动轮询后者，不根据逐 Agent 的未知结果提前结束整个任务。

@@ -18,7 +18,7 @@ export function AgentImportDialog({ open, onClose }: { open: boolean; onClose: (
 
   return <>
     <Dialog open={open} onClose={onClose} title="从 dev 导入" size="lg"
-      description="只读取已授权的 dev 数据，保留同 ID，仅新增 Agent 与必要依赖；不覆盖或删除 Eval 已有对象。"
+      description="从 dev 导入 Agent 与必要依赖，保留原 ID；Eval 中同 ID 的已有内容会被覆盖，不删除资源。"
       footer={<>
         <Button onClick={onClose}>{flow.readOnly ? "收起" : "关闭"}</Button>
         {flow.session && flow.canReset && <Button onClick={flow.restart}>重新选择</Button>}
@@ -72,7 +72,7 @@ export function AgentImportDialog({ open, onClose }: { open: boolean; onClose: (
     <ConfirmDialog open={open && confirming !== null} onClose={() => { if (!flow.posting) setConfirming(null); }}
       title={confirming === "retry" ? "使用原请求重试确认" : "确认后台导入"}
       description={<>
-        本次 dev 用户：{userName}。将以{flow.purpose === "execution" ? "执行 Agent" : "评估 Agent"}用途新增 {flow.readyCount} 个 Agent 和必要依赖，保留原 ID，已有与冲突项不覆盖、不删除。关闭窗口不会取消后台任务。
+        本次 dev 用户：{userName}。将以{flow.purpose === "execution" ? "执行 Agent" : "评估 Agent"}用途导入 {flow.readyCount} 个 Agent 和必要依赖，保留原 ID。同 ID 的 Agent、Skill、参考资料会被覆盖，冲突项不导入，不删除资源。关闭窗口不会取消后台任务。
         {confirming === "retry" && <span className="mt-2 block">上次响应未确认。本次仅重试同一任务的原确认请求与原幂等键，不创建新任务。</span>}
       </>}
       confirmLabel={confirming === "retry" ? "重试原确认请求" : "开始后台导入"}
