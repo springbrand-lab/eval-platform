@@ -4,6 +4,7 @@ import { ConfirmDialog, Dialog } from "@/components/ui/dialog";
 import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
 import { AgentImportPicker } from "./agent-import-picker";
 import { AgentImportTask } from "./agent-import-task";
+import { agentImportUserName } from "./agent-import-state";
 import { useAgentImport } from "./use-agent-import";
 
 /** Always mounted by AgentsPage so closing the overlay cannot cancel or replace its captured task. */
@@ -12,7 +13,7 @@ export function AgentImportDialog({ open, onClose }: { open: boolean; onClose: (
   const [confirming, setConfirming] = useState<"apply" | "retry" | null>(null);
   useEffect(() => setConfirming(null), [flow.session?.id]);
   const showWriteError = flow.writeError && (flow.writeError.phase === "preview" || !flow.task.data || flow.task.data.status === "ready");
-  const userName = flow.sourceUser?.name.trim() || "未命名用户";
+  const userName = agentImportUserName(flow.sourceUser);
   const canCheck = !flow.restoring && !!flow.config.data?.enabled && !flow.config.error && !!flow.me.data && !flow.me.error && !!flow.sourceUser
     && flow.selected.size > 0 && flow.selected.size <= flow.config.data.maxAgents;
 

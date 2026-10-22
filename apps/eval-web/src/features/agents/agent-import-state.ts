@@ -1,7 +1,11 @@
-import { agentImportTaskViewSchema, type AgentImportApply, type AgentImportPreview, type AgentImportTaskView } from "@eval-platform/eval-contracts";
+import { agentImportTaskViewSchema, type AgentImportApply, type AgentImportPreview, type AgentImportSourceUser, type AgentImportTaskView } from "@eval-platform/eval-contracts";
 
 export const AGENT_IMPORT_PAGE_SIZE = 20;
 export const AGENT_IMPORT_POLL_MS = 2_000;
+
+export function agentImportUserName(user: AgentImportSourceUser | null): string {
+  return user?.official ? "官方" : user?.name.trim() || "未命名用户";
+}
 
 /** UI-owned keys; the transport SDK has no query/cache or workflow state. */
 export const agentImportKeys = {

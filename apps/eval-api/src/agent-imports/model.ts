@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalJsonBytes, type AgentImportPreview, type AgentImportTaskView } from "@eval-platform/eval-contracts";
+import { agentImportSourceUserIdSchema, canonicalJsonBytes, type AgentImportPreview, type AgentImportTaskView } from "@eval-platform/eval-contracts";
 import { z } from "zod";
 import { jsonObjectSchema } from "@eval-platform/eval-contracts";
 import { DEFINITION_PROBE_LIMIT, definitionEvidenceSchema, type DefinitionEvidence } from "./definition-evidence.js";
@@ -27,7 +27,7 @@ export const sourceReferenceSchema = z.strictObject({
   size, status: z.enum(["active", "disabled"]), url: z.url(),
 });
 export const sourceSnapshotSchema = z.strictObject({
-  version: z.literal(1), sourceUserId: uuid,
+  version: z.literal(1), sourceUserId: agentImportSourceUserIdSchema,
   agents: z.array(sourceAgentSchema).max(IMPORT_LIMITS.agents),
   skills: z.array(sourceSkillSchema).max(IMPORT_LIMITS.files),
   references: z.array(sourceReferenceSchema).max(IMPORT_LIMITS.files),

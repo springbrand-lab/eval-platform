@@ -8,6 +8,32 @@ const agent = "22222222-2222-4222-8222-222222222222";
 const envelope = (msg: unknown) => Response.json({ success: true, msg, code: "", errMsg: "" });
 
 describe("approved read-only export seam", () => {
+  it("reads the official user, its Agent list and its original owner-bound snapshot", async () => {
+    const official = "springbrand-official";
+    const calls: string[] = [];
+    const source = createAgentImportSource({ origin: "https://dev.test", targetOrigin: "https://eval.test", token: "export",
+      fetch: async (input) => {
+        const path = new URL(new Request(input).url).pathname;
+        calls.push(path);
+        if (path.endsWith("/users")) return envelope({
+          users: [{ id: official, name: "SpringBrand", email: "official@example.test", official: true }], nextCursor: null,
+        });
+        if (path.endsWith("/agents")) return envelope({ items: [], nextCursor: null });
+        return envelope({ version: 1, sourceUserId: official, agents: [{
+          id: agent, name: "Official Agent", description: null, slug: "official-agent", revision: 1,
+          setting: canonicalSourceSettingFixture(),
+        }], skills: [], references: [] });
+      } });
+    expect((await source.users({})).users[0]).toMatchObject({ id: official, official: true });
+    await expect(source.agents(official, {})).resolves.toEqual({ items: [], nextCursor: null });
+    await expect(source.snapshot(official, [agent])).resolves.toMatchObject({ sourceUserId: official });
+    expect(calls).toEqual([
+      "/api/agent-config-export/users",
+      `/api/agent-config-export/users/${official}/agents`,
+      `/api/agent-config-export/users/${official}/snapshot`,
+    ]);
+  });
+
   it("exposes only three scoped GETs and never shares a target session or write Origin", async () => {
     const calls: Request[] = [];
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {

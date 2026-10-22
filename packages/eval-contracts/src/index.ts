@@ -132,6 +132,7 @@ export {
   agentImportPreviewSchema,
   agentImportSourceUserPageSchema,
   agentImportSourceUserSchema,
+  agentImportSourceUserIdSchema,
   agentImportTaskViewSchema,
 } from "./agent-imports.js";
 export type {

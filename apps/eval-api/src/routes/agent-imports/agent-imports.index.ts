@@ -1,7 +1,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import {
   AGENT_IMPORT_MAX_AGENTS, agentImportApplySchema, agentImportCandidatePageSchema, agentImportConfigSchema,
-  agentImportPreviewSchema, agentImportSourceUserPageSchema, agentImportTaskViewSchema,
+  agentImportPreviewSchema, agentImportSourceUserIdSchema, agentImportSourceUserPageSchema, agentImportTaskViewSchema,
 } from "@eval-platform/eval-contracts";
 import { ok } from "@eval-platform/eval-contracts/http";
 import { responseSchema } from "@springbrand/http/catalog";
@@ -34,7 +34,7 @@ router.openapi(createRoute({
 router.openapi(createRoute({
   method: "get", path: "/users/{sourceUserId}/agents", tags,
   request: {
-    params: z.strictObject({ sourceUserId: z.uuid().transform((id) => id.toLowerCase()) }),
+    params: z.strictObject({ sourceUserId: agentImportSourceUserIdSchema }),
     query: z.strictObject({ ...search, limit: z.coerce.number().int().min(1).max(50).default(20),
       cursor: z.string().max(2000).optional(), onlyMissing: z.enum(["true", "false"]).transform((value) => value === "true").optional() }),
   },

@@ -39,6 +39,20 @@ describe("Agent import public contract", () => {
     expect(agentImportApplySchema.safeParse({ idempotencyKey: "apply-1", sourceUserId: id }).success).toBe(false);
   });
 
+  it("accepts the official source account while retaining one required owner and UUID Agent IDs", () => {
+    const sourceUserId = "springbrand-official";
+    expect(agentImportSourceUserPageSchema.safeParse({
+      users: [{ id: sourceUserId, name: "SpringBrand", email: "official@example.test", official: true }], nextCursor: null,
+    }).success).toBe(true);
+    const request = { sourceUserId, agentIds: [id], purpose: "execution", idempotencyKey: "official-preview" };
+    expect(agentImportPreviewSchema.safeParse(request).success).toBe(true);
+    expect(agentImportPreviewSchema.safeParse({ ...request, sourceUserId: undefined }).success).toBe(false);
+    expect(agentImportPreviewSchema.safeParse({ ...request, agentIds: [sourceUserId] }).success).toBe(false);
+    for (const invalid of ["default", "other-system-account", "https://attacker.example"]) {
+      expect(agentImportPreviewSchema.safeParse({ ...request, sourceUserId: invalid }).success).toBe(false);
+    }
+  });
+
   it("describes durable progress, partial failures and unknown outcomes", () => {
     const view = {
       id, status: "outcome_unknown", sourceUserId: id, purpose: "evaluation",
@@ -47,6 +61,8 @@ describe("Agent import public contract", () => {
       summary: { created: 0, skipped: 0, failed: 1, conflicts: 0 }, expiresAt: "2026-10-22T00:00:00.000Z",
     };
     expect(agentImportTaskViewSchema.parse(view)).toEqual(view);
+    expect(agentImportTaskViewSchema.parse({ ...view, sourceUserId: "springbrand-official" }).sourceUserId).toBe("springbrand-official");
+    expect(agentImportTaskViewSchema.safeParse({ ...view, sourceUserId: null }).success).toBe(false);
     expect(agentImportTaskViewSchema.safeParse({ ...view, origin: "dev_import" }).success).toBe(false);
   });
 });

@@ -1,5 +1,10 @@
 # @eval-platform/eval-contracts
 
+The existing source-user picker also accepts the dev export protocol's official
+account ID, `springbrand-official`, with an optional `official` label flag.
+Only source-user identities have this exception; Agent, task and target IDs
+remain UUIDs. Preview still requires exactly one source user.
+
 `src/agent-imports.ts` 拥有 dev → Eval 按 ID 覆盖导入的公共 DTO 与严格 preview/apply 请求 Schema：
 `AgentImportConfig`、`AgentImportSourceUser`、`AgentImportSourceUserPage`、
 `AgentImportCandidate`、`AgentImportCandidatePage`、

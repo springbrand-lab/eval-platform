@@ -218,6 +218,23 @@ describe("dev Agent import user workflow", () => {
     expect(view.container.querySelector("tbody")?.textContent).toContain("Eval 原生配置");
   });
 
+  it("adds an official option to the same dropdown and preserves its source ID through preview and confirmation", async () => {
+    const official = { id: "springbrand-official", name: "SpringBrand", email: "official@example.test", official: true };
+    userRead = () => ({ users: [...users, official], nextCursor: null });
+    candidateRead = () => ({ items: [candidate(1)], nextCursor: null });
+    await mount(); await open();
+    expect(userOptions().map((option) => option.textContent)).toEqual(["Dev Alice", "Dev Bob", "官方"]);
+    expect(modal().querySelector('input[type="search"]')).toBeNull();
+    await chooseUser(official.id); await chooseAgent(1); await preview();
+    expect(transport.post.mock.calls[0]![1]).toMatchObject({ sourceUserId: official.id, agentIds: [uuid(1)] });
+    expect(modal().textContent).toContain("本次 dev 用户：官方");
+    await click(button("确认导入 1 个 Agent", modal()));
+    const confirmation = document.querySelector('[role="alertdialog"]')!;
+    expect(confirmation.textContent).toContain("本次 dev 用户：官方");
+    expect(confirmation.textContent).not.toContain(official.email);
+    expect(transport.post.mock.calls.filter(([path]) => path.endsWith("/apply"))).toHaveLength(0);
+  });
+
   it("appends user pages beyond 20 while retaining the selected user and preview until a user switch", async () => {
     const laterUser = { id: uuid(121), name: "Dev User 21", email: "user21@example.test" };
     const firstPage = [...users, ...Array.from({ length: 18 }, (_, index) => ({

@@ -3,6 +3,7 @@ import { z } from "zod";
 /** Control-plane contract only. No source credentials, internal provenance or target-owner input. */
 export const AGENT_IMPORT_MAX_AGENTS = 50;
 const id = z.uuid().transform((value) => value.toLowerCase());
+export const agentImportSourceUserIdSchema = z.union([id, z.literal("springbrand-official")]);
 const count = z.number().int().nonnegative();
 const purpose = z.enum(["execution", "evaluation"]);
 const idempotencyKey = z.string().min(1).max(200).refine(
@@ -13,7 +14,7 @@ export const agentImportConfigSchema = z.strictObject({
   enabled: z.boolean(), maxAgents: z.number().int().positive(),
 });
 export const agentImportSourceUserSchema = z.strictObject({
-  id, name: z.string(), email: z.string(),
+  id: agentImportSourceUserIdSchema, name: z.string(), email: z.string(), official: z.boolean().optional(),
 });
 export const agentImportSourceUserPageSchema = z.strictObject({
   users: z.array(agentImportSourceUserSchema).max(20), nextCursor: z.string().nullable(),
@@ -26,7 +27,7 @@ export const agentImportCandidatePageSchema = z.strictObject({
   items: z.array(agentImportCandidateSchema), nextCursor: z.string().nullable(),
 });
 export const agentImportPreviewSchema = z.strictObject({
-  sourceUserId: id,
+  sourceUserId: agentImportSourceUserIdSchema,
   agentIds: z.array(id).min(1).max(AGENT_IMPORT_MAX_AGENTS).refine(
     (ids) => new Set(ids).size === ids.length, "Duplicate Agent IDs are not allowed",
   ),
@@ -40,7 +41,7 @@ export const agentImportTaskViewSchema = z.strictObject({
   status: z.enum([
     "checking", "ready", "queued", "importing", "completed", "completed_with_errors", "failed", "outcome_unknown",
   ]),
-  sourceUserId: id,
+  sourceUserId: agentImportSourceUserIdSchema,
   purpose,
   agents: z.array(z.strictObject({
     id, name: z.string(),
