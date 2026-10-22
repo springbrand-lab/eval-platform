@@ -3,7 +3,8 @@ import { z } from "zod";
 /** Control-plane contract only. No source credentials, internal provenance or target-owner input. */
 export const AGENT_IMPORT_MAX_AGENTS = 50;
 const id = z.uuid().transform((value) => value.toLowerCase());
-export const agentImportSourceUserIdSchema = z.union([id, z.literal("springbrand-official")]);
+export const agentImportSourceUserIdSchema = z.string().min(1).max(200).regex(/^[^\s/\\?#\u0000-\u001f\u007f]+$/u)
+  .refine((value) => value !== "." && value !== "..", "Invalid source account");
 const count = z.number().int().nonnegative();
 const purpose = z.enum(["execution", "evaluation"]);
 const idempotencyKey = z.string().min(1).max(200).refine(

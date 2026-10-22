@@ -1,9 +1,12 @@
 # @eval-platform/eval-contracts
 
-The existing source-user picker also accepts the dev export protocol's official
-account ID, `springbrand-official`, with an optional `official` label flag.
-Only source-user identities have this exception; Agent, task and target IDs
-remain UUIDs. Preview still requires exactly one source user.
+Source-user IDs are opaque Auth identifiers, including legacy non-UUID IDs and
+the official account `springbrand-official` with its optional `official` flag.
+They are bounded to 200 characters and cannot contain whitespace, controls,
+path/query delimiters or dot segments. Source paths encode the ID as one segment.
+Source-account case is preserved, even for UUID-shaped IDs.
+Agent, task and target IDs remain UUIDs. Preview still requires one source user;
+this validation does not replace source lifecycle, scope or target ownership checks.
 
 `src/agent-imports.ts` 拥有 dev → Eval 按 ID 覆盖导入的公共 DTO 与严格 preview/apply 请求 Schema：
 `AgentImportConfig`、`AgentImportSourceUser`、`AgentImportSourceUserPage`、

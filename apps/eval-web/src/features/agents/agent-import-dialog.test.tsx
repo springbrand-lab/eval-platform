@@ -220,10 +220,10 @@ describe("dev Agent import user workflow", () => {
 
   it("adds an official option to the same dropdown and preserves its source ID through preview and confirmation", async () => {
     const official = { id: "springbrand-official", name: "SpringBrand", email: "official@example.test", official: true };
-    userRead = () => ({ users: [...users, official], nextCursor: null });
+    userRead = () => ({ users: [official, ...users], nextCursor: null });
     candidateRead = () => ({ items: [candidate(1)], nextCursor: null });
     await mount(); await open();
-    expect(userOptions().map((option) => option.textContent)).toEqual(["Dev Alice", "Dev Bob", "官方"]);
+    expect(userOptions().map((option) => option.textContent)).toEqual(["官方", "Dev Alice", "Dev Bob"]);
     expect(modal().querySelector('input[type="search"]')).toBeNull();
     await chooseUser(official.id); await chooseAgent(1); await preview();
     expect(transport.post.mock.calls[0]![1]).toMatchObject({ sourceUserId: official.id, agentIds: [uuid(1)] });
