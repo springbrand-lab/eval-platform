@@ -18,13 +18,17 @@ Agent 创建时选择“执行 Agent”或“评估 Agent”，用途由 Eval �
 
 ### 从 dev 导入 Agent
 
-Agent 管理页的「从 dev 导入」是独立的仅新增流程，不改变普通列表、用途筛选、编辑或原生 Agent。来源凭据只在服务端，浏览器只调用 Eval 的 `/api/agent-config-sync`：读取 `config`、搜索已授权 `users`，再按所选用户搜索和游标分页读取 `users/{sourceUserId}/agents`（每页 20，`onlyMissing=true`）。未选用户不读取 Agent；跨页选择保留并明确展示，切换用户清空未提交选择与预览。
+Agent 管理页的「从 dev 导入」是独立的显式按 ID 覆盖流程，不改变普通列表、用途筛选、编辑或新建入口；选中的已有自有 Agent 也会被覆盖。来源凭据只在服务端，浏览器只调用 Eval 的 `/api/agent-config-sync`：读取 `config`、搜索来源 `users`，再按所选用户搜索和游标分页读取 `users/{sourceUserId}/agents`（每页 20，不设置 `onlyMissing`，已有 ID 仍可选择）。未选用户不读取 Agent；跨页选择保留并明确展示，切换用户清空未提交选择与预览。
 
 用户搜索先 trim，非空才发请求；空白或清空输入仅提示输入名称或邮箱，不读取全部用户、不显示依赖故障。用户选定后的 Agent 搜索允许为空，仍受来源用户和分页约束。
 
-`POST /previews` 只提交 `{sourceUserId, agentIds, purpose, idempotencyKey}`，返回 `202 {taskId}`；之后只读 `GET /tasks/{taskId}`，展示检查结果、逐 Agent 依赖数量、冲突及错误。用途显式选择“执行 Agent”或“评估 Agent”，不由来源或列表筛选推断。依赖由服务端按所选根 Agent 求并集，浏览器不读取或转发完整 SP 配置、资源字节或凭据，也不把逐 Agent 数量相加冒充去重依赖总数。
+`POST /previews` 只提交 `{sourceUserId, agentIds, purpose, idempotencyKey}`，返回 `202 {taskId}`；之后只读 `GET /tasks/{taskId}`，展示检查结果、逐 Agent 依赖数量、可选的 `overwrite` 提示、冲突及错误，完成后区分 `created` 与 `overwritten`。`summary.overwritten` 可选以兼容旧任务；`skipped` 仅兼容历史结果，不因已有 ID 跳过新导入。用途显式选择“执行 Agent”或“评估 Agent”，不由来源或列表筛选推断。依赖由服务端按所选根 Agent 求并集，浏览器不读取或转发完整 SP 配置、资源字节或凭据，也不把逐 Agent 数量相加冒充去重依赖总数。
 
-用户复核后以固定幂等键 `POST /tasks/{taskId}/apply`，仅导入通过检查的根 Agent 与必要依赖，保持原 ID，不覆盖、删除或复活已有对象。关闭弹窗不取消后台任务；同一 Agent 页面重新打开恢复原任务的只读轮询。浏览器不自动重发未知写入响应；同页手动重试始终使用原任务、原请求与原幂等键，不能更换用户继续应用旧预览。后台仍在自动校准时，任务保持 `importing`，页面持续轮询并刷新最终结果；仅自动恢复预算耗尽才以任务级 `outcome_unknown` 停止自动轮询，保留手动刷新和人工核验出口。失败、部分失败和未知结果分开提示，不能当成“全部已同步”。
+用户复核后以固定幂等键 `POST /tasks/{taskId}/apply`，仅导入通过检查的根 Agent 与必要依赖：缺失 ID 插入，已有自有活动 Agent、用户 Skill 和 Reference 直接更新原记录的元数据与内容，不克隆、不分叉、不生成替代 ID。ID 与原 `createdAt` 保留，Agent/Skill revision 递增；跨 owner、平台、冻结/默认、已删除或停用资源仍受保护，平台 Skill 只核验和引用，不删除或复活对象。
+
+每次显式新导入重新检查并使用新任务/操作键；同一操作重放不重复写入。旧版仅新增、尚未提交的预览必须重新检查；已提交旧任务只能校准并收尾已有回执，不能沿用旧确认发起覆盖。
+
+关闭弹窗不取消后台任务；同一 Agent 页面重新打开恢复原任务的只读轮询。浏览器不自动重发未知写入响应；同页手动重试始终使用原任务、原请求与原幂等键，不能更换用户继续应用旧预览。后台仍在自动校准时，任务保持 `importing`，页面持续轮询并刷新最终结果；仅自动恢复预算耗尽才以任务级 `outcome_unknown` 停止自动轮询，保留手动刷新和人工核验出口。失败、部分失败和未知结果分开提示，不能当成“全部已同步”。
 
 跨刷新/路由重进只保存一个任务定位指针：按当前 Web origin 与经 `/api/me` 核实的 Eval 目标用户隔离的 localStorage key，值仅 `{taskId}`。重新打开弹窗时先确认当前目标身份，再通过原 SDK 的 `GET /tasks/{taskId}` 读取服务器权威范围、用途、根 IDs、进度和结果；不从缓存或存储重建事实，不自动 POST/确认，也不保存正文、token、幂等键或任务状态。恢复后的任务始终只读；未提交的检查如需继续须显式“重新选择”后重新检查，确认响应不明的任务应先核验。终态指针保留以便查看结果；用户显式重新选择，或切换尚未提交的来源用户/用途/选择时清除原预览指针。已提交任务不能改变范围。存储损坏、不可用及任务 404/403 安全失效，不影响普通页面；其他读取故障保留指针，只读重试。存储不可用时只能保留当前页任务，提示用户保留任务 ID。
 
@@ -123,7 +127,7 @@ Run 详情与采样页共用 compact PageHeader；首屏用一行运行摘要和
 
 Agent 编辑页保留共享编辑器的所有表单与保存行为，以 `.agent-editor-layout` 限定宿主样式：取消嵌套页面的窄列、重复标题和分组卡片边框，名称和用途独立置顶，工作指令直接编辑并占主栏，运行设置占右侧辅栏，能力选择以三列排列，保存栏保持可见。样式依赖当前固定版本的 form/fieldset 结构及 data-agent-* 区域标识；升级共享编辑器时需复核布局。MCP 只读清单与表单使用相同宽度。
 
-共享 Agent 编辑器当前没有语言参数；本项目通过 pnpm patchedDependencies 固定中文文案补丁（patches/@springbrand__agent-config-editor@0.1.0-alpha.1.patch）。覆盖编辑页、选择器、技能/资料管理、操作反馈与无障碍标签。Thinking 只翻译显示名称，原始枚举与模型、能力标识、用户内容保持不变；升级包版本时需迁移补丁并运行编辑器测试。外部服务返回的用户资源名称和原始错误内容不做字符串替换。
+共享 Agent 编辑器当前没有语言参数；本项目通过 pnpm patchedDependencies 固定中文文案补丁（patches/@springbrand__agent-config-editor@0.1.0-alpha.3.patch）。覆盖编辑页、选择器、技能/资料管理、操作反馈与无障碍标签。Thinking 只翻译显示名称，原始枚举与模型、能力标识、用户内容保持不变；升级包版本时需迁移补丁并运行编辑器测试。外部服务返回的用户资源名称和原始错误内容不做字符串替换。
 
 MCP 保留标准名称 `MCP Server`。共享编辑器补丁提供可选 `supplementaryContent` 插槽，用来在同一个 fieldset、保存栏之前展示既有 MCP 配置元数据；用户自选 MCP 不在该入口编辑。评估结果 MCP 是 Eval 管理的用途绑定例外：选择“评估 Agent”时按固定 URL 自动加入，选择“执行 Agent”时移除，保存前由 API 再次校验唯一启用且 Bearer 鉴权的服务。只读清单与其他配置共用宽度与分隔线，避免保存栏把 MCP 信息隔在表单之外。
 

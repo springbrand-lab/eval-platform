@@ -52,7 +52,7 @@ describe("fixed target import capability guard", () => {
     await f.target.requireEnabled();
     f.setEnabled(false);
     await expect(f.target.importSkill("stable-skill", new Uint8Array([1]), "skill-key")).rejects.toBeInstanceOf(ImportTargetDisabledError);
-    await expect(f.target.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3]))).rejects.toBeInstanceOf(ImportTargetDisabledError);
+    await expect(f.target.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3]), "ref-key")).rejects.toBeInstanceOf(ImportTargetDisabledError);
     await expect(f.target.importReference(id, attachment, "ref-key")).rejects.toBeInstanceOf(ImportTargetDisabledError);
     await expect(f.target.importAgent(prepared, "agent-key")).rejects.toBeInstanceOf(ImportTargetDisabledError);
     expect(f.requests.every((request) => request.method === "GET")).toBe(true);
@@ -63,14 +63,14 @@ describe("fixed target import capability guard", () => {
     const f = fixture();
     await f.target.importSkill("stable-skill", new Uint8Array([1]), "skill-key");
     f.setEnabled(false);
-    await expect(f.target.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3]))).rejects.toBeInstanceOf(ImportTargetDisabledError);
+    await expect(f.target.uploadReference(id, "brief.txt", "text/plain", new Uint8Array([1, 2, 3]), "ref-key")).rejects.toBeInstanceOf(ImportTargetDisabledError);
     expect(f.requests.filter((request) => request.method === "POST").map((request) => new URL(request.url).pathname)).toEqual(["/api/skills/imports"]);
   });
 
   it.each([401, 403, 503])("translates capability HTTP %i to a dependency failure without any POST", async (status) => {
     const f = fixture();
     f.setStatus(status);
-    await expect(f.target.uploadReference(id, attachment.name, attachment.mediaType, new Uint8Array([1, 2, 3])))
+    await expect(f.target.uploadReference(id, attachment.name, attachment.mediaType, new Uint8Array([1, 2, 3]), "ref-key"))
       .rejects.toMatchObject({ status: 503, code: "EVAL_SP_UNAVAILABLE" });
     expect(f.requests.every((request) => request.method === "GET")).toBe(true);
   });
@@ -78,7 +78,7 @@ describe("fixed target import capability guard", () => {
   it("fails closed on an unsupported capability version", async () => {
     const f = fixture();
     f.setVersion(2);
-    await expect(f.target.uploadReference(id, attachment.name, attachment.mediaType, new Uint8Array([1, 2, 3]))).rejects.toBeInstanceOf(ImportDependencyError);
+    await expect(f.target.uploadReference(id, attachment.name, attachment.mediaType, new Uint8Array([1, 2, 3]), "ref-key")).rejects.toBeInstanceOf(ImportDependencyError);
     expect(f.requests.every((request) => request.method === "GET")).toBe(true);
   });
 });

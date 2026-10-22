@@ -17,7 +17,7 @@ export const listAgentImportUsers = (q: string, limit: number, signal?: AbortSig
 export const listAgentImportCandidates = (
   sourceUserId: string, input: { q: string; cursor?: string; limit: number }, signal?: AbortSignal,
 ) => api.get<AgentImportCandidatePage>(`${base}/users/${enc(sourceUserId)}/agents`, {
-  params: { ...input, onlyMissing: true }, signal,
+  params: input, signal,
 });
 export const previewAgentImport = (input: AgentImportPreview) =>
   api.post<{ taskId: string }>(`${base}/previews`, input);

@@ -123,6 +123,7 @@ export function useAgentImport(open: boolean) {
       client.invalidateQueries({ queryKey: agentKeys.all }),
       client.invalidateQueries({ queryKey: skillQueryKeys.all(activeSession.targetUserId) }),
       client.invalidateQueries({ queryKey: userReferenceQueryKeys.collections(activeSession.targetUserId) }),
+      client.invalidateQueries({ queryKey: userReferenceQueryKeys.details() }),
       client.invalidateQueries({ queryKey: agentImportKeys.candidatesAll }),
     ]);
   }, [activeSession, client, matches, task.data]);

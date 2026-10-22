@@ -14,9 +14,10 @@ import { ImportConflictError, ImportLeaseLostError } from "./errors.js";
 import { digest, initialView, resourceKey, type ImportIntent, type ImportReceipt, type ImportResult, type ImportTask, type ResourceSource, type SourceSnapshot } from "./model.js";
 import { createAgentImportSource } from "./source.js";
 import type { AgentImportStore } from "./store.js";
-import { createAgentImportTarget, type TargetReference, type TargetSkill } from "./target.js";
+import { createAgentImportTarget, type TargetAttachment, type TargetReference, type TargetSkill } from "./target.js";
 import { createAgentImportWorker } from "./worker.js";
 import { canonicalSourceSettingFixture } from "./public-wire.test-support.js";
+import { dependencyKeys } from "./semantics.js";
 
 export const owner = "11111111-1111-4111-8111-111111111111";
 export const sourceUser = "22222222-2222-4222-8222-222222222222";
@@ -47,16 +48,21 @@ export async function workerFixture(snapshot = snapshotFixture()) {
   const directory = await mkdtemp(path.join(tmpdir(), "eval-import-worker-"));
   const sources = new Map<string, ResourceSource>();
   const intents = new Map<string, ImportIntent>();
+  const tasks = new Map<string, ImportTask>();
+  const memberships = new Map<string, Set<string>>();
   const targetAgents = new Map<string, EvalSpAgentConfig>();
   const archivedAgents = new Set<string>();
   const targetSkills = new Map<string, TargetSkill>();
   const targetReferences = new Map<string, TargetReference>();
+  const targetUploads = new Map<string, { attachment: TargetAttachment; bytes: Uint8Array }>();
+  const fileBytes = new Map<string, Uint8Array>();
   const receipts = new Map<string, ImportResult>();
   const events: string[] = [];
   const savedViews: AgentImportTaskView[] = [];
   const requests: Request[] = [];
   const zipFiles: string[][] = [];
   let task: ImportTask | undefined;
+  let previewSequence = 0;
   let lostSkillResponse = false;
   let failPurpose = false;
   let failSourceOnce = false;
@@ -81,27 +87,47 @@ export async function workerFixture(snapshot = snapshotFixture()) {
       const expiresAt = new Date(Date.now() + 60_000).toISOString();
       task = { id, ownerUserId: owner, actorId: actorId ?? null, connectionId, request, fingerprint: digest(request),
         view: initialView(id, request, expiresAt), snapshot: null, plan: null, expiresAt, applyKey: null, leaseToken: null, revision: 0, attempts: 0 };
+      tasks.set(id, task);
       events.push("enqueue:preview");
       return task;
     },
-    get: async (id) => task?.id === id ? task : null,
+    get: async (id) => tasks.get(id) ?? null,
     async apply(id, key) {
-      if (task?.id !== id || !task.plan) throw new Error("Not ready");
-      task.applyKey = key; task.view.status = "queued";
-      for (const resource of task.plan.resources.filter((resource) => !resource.platform)) {
-        const current = intents.get(resourceKey(resource.kind, resource.id));
-        if (current) continue;
-        intents.set(resourceKey(resource.kind, resource.id), { ...resource, ownerUserId: owner,
-          connectionId: task.connectionId, sourceUserId: task.request.sourceUserId, status: "planned", receipt: null, attachment: null });
+      const active = tasks.get(id);
+      if (!active?.plan) throw new Error("Not ready");
+      const plan = active.plan;
+      const needed = new Set(plan.eligibleAgentIds.flatMap((id) => [
+        resourceKey("agent", id), ...dependencyKeys(plan.snapshot.agents.find((agent) => agent.id === id)!),
+      ]));
+      const resources = plan.resources.filter((resource) => !resource.platform && needed.has(resourceKey(resource.kind, resource.id)));
+      for (const resource of resources) {
+        const identity = resourceKey(resource.kind, resource.id);
+        const current = intents.get(identity);
+        if (current && current.importKey !== resource.importKey
+          && (!["planned", "completed", "conflict", "confirmed"].includes(current.status)
+            || current.status === "confirmed" && !current.receipt
+            || [...memberships.get(identity) ?? []].some((id) => !["completed", "completed_with_errors", "failed"].includes(tasks.get(id)!.view.status)))) {
+          throw new ImportConflictError("Previous import is unfinished");
+        }
+      }
+      active.applyKey = key; active.view.status = "queued";
+      for (const resource of resources) {
+        const identity = resourceKey(resource.kind, resource.id);
+        const members = memberships.get(identity) ?? new Set<string>();
+        members.add(id); memberships.set(identity, members);
+        if (intents.get(identity)?.importKey === resource.importKey) continue;
+        intents.set(identity, { ...resource, ownerUserId: owner,
+          connectionId: active.connectionId, sourceUserId: active.request.sourceUserId, status: "planned", receipt: null, attachment: null });
         events.push(`intent:${resource.kind}:${resource.id}`);
       }
       events.push("enqueue:apply");
-      return task;
+      return active;
     },
     async claim(id, token) {
-      if (task?.id !== id || ["completed", "completed_with_errors", "ready", "failed"].includes(task.view.status)) return null;
-      if (task.leaseToken) throw new ImportLeaseLostError();
-      task.leaseToken = token; task.attempts++; return task;
+      const active = tasks.get(id);
+      if (!active || ["completed", "completed_with_errors", "ready", "failed"].includes(active.view.status)) return null;
+      if (active.leaseToken) throw new ImportLeaseLostError();
+      active.leaseToken = token; active.attempts++; return active;
     },
     heartbeat: async () => {},
     async save(current, update) {
@@ -151,7 +177,7 @@ export async function workerFixture(snapshot = snapshotFixture()) {
     if (url.pathname.startsWith("/files/") || url.pathname.startsWith("/target-files/") || url.pathname.startsWith("/uploads/v1/")) {
       if (request.headers.has("Authorization")) throw new Error("CDN credential leak");
       if (url.pathname.endsWith("unused")) throw new Error("Unselected dependency downloaded");
-      return new Response("abc");
+      return new Response(fileBytes.has(url.href) ? new Uint8Array(fileBytes.get(url.href)!) : "abc");
     }
     if (url.origin === "https://dev.test") {
       if (request.method !== "GET") throw new Error("Dev write");
@@ -198,14 +224,30 @@ export async function workerFixture(snapshot = snapshotFixture()) {
     if (url.pathname === "/api/inbox/attachments") {
       const form = await request.formData();
       const file = form.get("file") as File;
-      if (await file.text() !== "abc") throw new Error("Attachment bytes changed");
-      return ok({ attachmentCdnUrl: `https://eval.test/uploads/v1/${owner}/${referenceId}`, clientAttachmentId: referenceId,
-        name: file.name, mediaType: file.type, size: file.size });
+      const clientAttachmentId = form.get("clientAttachmentId") as string;
+      const attachment: TargetAttachment = {
+        attachmentCdnUrl: `https://eval.test/uploads/v1/${owner}/${clientAttachmentId}`, clientAttachmentId,
+        name: form.get("name") as string, mediaType: file.type, size: file.size,
+      };
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const existing = targetUploads.get(clientAttachmentId);
+      if (existing && (!equalJson(existing.attachment, attachment) || !Buffer.from(existing.bytes).equals(bytes))) {
+        return Response.json({ code: "REQUEST_CONFLICT", errMsg: "Attachment identity already exists" }, { status: 409 });
+      }
+      if (!existing) {
+        targetUploads.set(clientAttachmentId, { attachment, bytes });
+        fileBytes.set(attachment.attachmentCdnUrl, bytes);
+      }
+      return ok(attachment);
     }
     if (url.pathname === "/api/user-references/imports") {
       const body = await request.json();
       if (!body.attachment.attachmentCdnUrl.startsWith("https://eval.test/")) throw new Error("Source Reference URL was copied");
-      const value: TargetReference = { id: body.referenceId, ...body.attachment, status: "active" };
+      const uploaded = targetUploads.get(body.attachment.clientAttachmentId);
+      if (!uploaded || !equalJson(uploaded.attachment, body.attachment)) throw new Error("Reference upload was not verified");
+      const value: TargetReference = { id: body.referenceId, ...body.attachment, status: "active",
+        attachmentCdnUrl: `https://eval.test/target-files/references/${encodeURIComponent(body.importKey)}` };
+      fileBytes.set(value.attachmentCdnUrl, new Uint8Array(uploaded.bytes));
       targetReferences.set(value.id, value);
       return ok(result("reference", value.id, body.importKey, value));
     }
@@ -232,15 +274,16 @@ export async function workerFixture(snapshot = snapshotFixture()) {
     projects: { frozenAgentConfigIds: async () => new Set<string>() }, purposes, sources: store.sources, imports: target });
   const staging = await openImportStaging(directory);
   const worker = createAgentImportWorker({ source, target, store, agents, staging, fetch });
-  return { store, worker, source, target, agents, purposes, sources, intents, targetAgents, targetSkills, targetReferences, requests, events, savedViews, zipFiles, sp, fetch,
+  return { store, worker, source, target, agents, purposes, sources, intents, targetAgents, targetSkills, targetReferences, targetUploads, requests, events, savedViews, zipFiles, sp, fetch,
     loseSkillResponse: () => { lostSkillResponse = true; }, failNextPurpose: () => { failPurpose = true; },
     failNextSource: () => { failSourceOnce = true; },
     failNextCompletion: () => { failCompletion = true; },
     setTargetEnabled: (enabled: boolean) => { targetEnabled = enabled; },
+    setSourceFileBytes: (url: string, bytes: Uint8Array) => { fileBytes.set(url, new Uint8Array(bytes)); },
     archiveAgent: (id: string) => { archivedAgents.add(id); },
-    resetTask: () => { task = undefined; },
+    resetTask: () => { task = undefined; previewSequence++; },
     async preview(ids = [agentId, otherAgentId]) {
-      const request: AgentImportPreview = { sourceUserId: sourceUser, agentIds: ids, purpose: "execution", idempotencyKey: `preview-${ids.join(",")}` };
+      const request: AgentImportPreview = { sourceUserId: sourceUser, agentIds: ids, purpose: "execution", idempotencyKey: `preview-${previewSequence}-${ids.join(",")}` };
       const current = await store.create(request, source.connectionId);
       await worker.run(current.id); return current;
     },

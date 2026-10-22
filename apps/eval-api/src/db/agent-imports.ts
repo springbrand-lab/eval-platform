@@ -60,9 +60,22 @@ export function createPostgresAgentImportStore(db: EvalDb, ownerUserId: string, 
       resource, status: "planned" as const,
     };
     await transaction.insert(agentImportIntents).values(values).onConflictDoNothing();
-    const [current] = await transaction.select().from(agentImportIntents).where(identity(owner, resource.kind, resource.id));
-    if (!current || current.fingerprint !== values.fingerprint || current.importKey !== values.importKey) {
-      throw new ImportConflictError("A different or uncertain import already owns this target resource intent");
+    const [current] = await transaction.select().from(agentImportIntents).where(identity(owner, resource.kind, resource.id)).for("update");
+    if (!current) throw new ImportConflictError("Import intent is unavailable");
+    if (current.fingerprint !== values.fingerprint || current.importKey !== values.importKey) {
+      const members = await transaction.select({ status: agentImportTasks.status }).from(agentImportTaskIntents)
+        .innerJoin(agentImportTasks, and(eq(agentImportTasks.ownerUserId, agentImportTaskIntents.ownerUserId),
+          eq(agentImportTasks.id, agentImportTaskIntents.taskId)))
+        .where(and(eq(agentImportTaskIntents.ownerUserId, owner),
+          eq(agentImportTaskIntents.kind, resource.kind), eq(agentImportTaskIntents.id, resource.id)));
+      if (!["planned", "completed", "conflict", "confirmed"].includes(current.status)
+        || current.status === "confirmed" && !current.receipt || members.length === 0
+        || members.some(({ status }) => !["completed", "completed_with_errors", "failed"].includes(status))) {
+        throw new ImportConflictError("A different or uncertain import already owns this target resource intent");
+      }
+      await transaction.update(agentImportIntents).set({
+        ...values, receipt: null, attachment: null, error: null,
+      }).where(identity(owner, resource.kind, resource.id));
     }
     await transaction.insert(agentImportTaskIntents).values({ ownerUserId: owner, taskId: task.id, kind: resource.kind, id: resource.id }).onConflictDoNothing();
   }
@@ -93,6 +106,7 @@ export function createPostgresAgentImportStore(db: EvalDb, ownerUserId: string, 
         const [row] = await transaction.select().from(agentImportTasks).where(scoped(id)).for("update");
         if (!row) throw new HttpError("REQUEST_NOT_FOUND", "Import task not found");
         if (!row.plan) throw new ImportConflictError("Import preview is not ready");
+        if (row.plan.version !== 2 && row.applyKey === null) throw new ImportConflictError("Import behavior changed; create a new overwrite preview");
         const fingerprint = digest({ taskId: id, owner, connection: row.connectionId, user: row.sourceUserId,
           purpose: row.request.purpose, planDigest: row.plan.digest });
         if (row.applyKey !== null && (row.applyKey !== key || row.applyFingerprint !== fingerprint)) {
@@ -110,7 +124,9 @@ export function createPostgresAgentImportStore(db: EvalDb, ownerUserId: string, 
           return [`agent:${agentId}`, ...(Array.isArray(source.setting.skillIds) ? source.setting.skillIds.map((id) => `skill:${id}`) : []),
             ...(Array.isArray(source.setting.referenceFileIds) ? source.setting.referenceFileIds.map((id) => `reference:${id}`) : [])];
         }));
-        for (const resource of row.plan.resources) if (needed.has(`${resource.kind}:${resource.id}`)) await createIntent(transaction, task, resource);
+        for (const resource of [...row.plan.resources].sort((a, b) => `${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`, "en"))) {
+          if (needed.has(`${resource.kind}:${resource.id}`)) await createIntent(transaction, task, resource);
+        }
         const view = { ...row.view, status: "queued" as const, progress: { ...row.view.progress, stage: "queued" } };
         const [updated] = await transaction.update(agentImportTasks).set({
           status: "queued", view, applyKey: key, applyFingerprint: fingerprint, revision: row.revision + 1,
@@ -198,14 +214,18 @@ export function createPostgresAgentImportStore(db: EvalDb, ownerUserId: string, 
           origin: resource.platform ? "platform_catalog" as const : "dev_import" as const,
           connectionId: task.connectionId, sourceUserId: task.request.sourceUserId,
           sourceDigest: resource.sourceDigest, targetDigest: resource.targetDigest, receipt };
-        await transaction.insert(resourceSources).values(values).onConflictDoNothing();
+        await transaction.insert(resourceSources).values(values).onConflictDoUpdate({
+          target: [resourceSources.ownerUserId, resourceSources.kind, resourceSources.id],
+          set: { origin: values.origin, connectionId: values.connectionId, sourceUserId: values.sourceUserId,
+            sourceDigest: values.sourceDigest, targetDigest: values.targetDigest, receipt },
+        });
         const [current] = await transaction.select().from(resourceSources).where(and(
           eq(resourceSources.ownerUserId, owner), eq(resourceSources.kind, resource.kind), eq(resourceSources.id, resource.id),
         ));
         if (!current || current.origin !== values.origin || current.connectionId !== values.connectionId
           || !resource.platform && current.sourceUserId !== values.sourceUserId || current.sourceDigest !== values.sourceDigest
           || current.targetDigest !== values.targetDigest || !equalJson(current.receipt, receipt)) {
-          throw new ImportConflictError("Existing target provenance cannot be replaced or claimed");
+          throw new ImportConflictError("Target provenance does not match the confirmed import");
         }
         if (!resource.platform) {
           const [intent] = await transaction.select().from(agentImportIntents).where(identity(owner, resource.kind, resource.id)).for("update");

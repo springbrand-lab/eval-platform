@@ -1,3 +1,4 @@
+import type { AgentImportPreview } from "@eval-platform/eval-contracts";
 import { sql, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PgBoss, type JobWithMetadata } from "pg-boss";
@@ -29,8 +30,10 @@ describe.skipIf(!connection)("Agent import PostgreSQL transactions, ownership an
   afterAll(async () => { if (database) await database.destroy(); }, 30_000);
   const store = (id = owner) => createPostgresAgentImportStore(database.db, id, queue);
   const request = () => ({ sourceUserId: sourceUser, agentIds: [crypto.randomUUID()], purpose: "execution" as const, idempotencyKey: crypto.randomUUID() });
-  async function ready(currentStore = store(), beforeReady?: () => Promise<void>): Promise<{ task: ImportTask; resource: PlannedResource }> {
-    const current = await currentStore.create(request(), "fixed-connection");
+  async function ready(currentStore = store(), beforeReady?: () => Promise<void>, id?: string, version: ImportPlan["version"] = 2): Promise<{ task: ImportTask; resource: PlannedResource }> {
+    const body: AgentImportPreview = request();
+    if (id) body.agentIds = [id];
+    const current = await currentStore.create(body, "fixed-connection");
     const claimed = (await currentStore.claim(current.id, crypto.randomUUID()))!;
     await beforeReady?.();
     const source = { id: current.request.agentIds[0]!, name: "A", description: null, slug: "source", revision: 1, setting: {} };
@@ -40,7 +43,7 @@ describe.skipIf(!connection)("Agent import PostgreSQL transactions, ownership an
         config: { id: source.id, name: "A", description: null, slug: `import-${source.id}`, setting: {} },
       } };
     resourceDigests(resource, claimed);
-    const plan: ImportPlan = { version: 1, snapshot: { version: 1, sourceUserId: sourceUser, agents: [source], skills: [], references: [], dependencies: [] },
+    const plan: ImportPlan = { version, snapshot: { version: 1, sourceUserId: sourceUser, agents: [source], skills: [], references: [], dependencies: [] },
       resources: [resource], eligibleAgentIds: [source.id], digest: "" };
     plan.digest = planDigest(plan, claimed);
     await currentStore.save(claimed, { plan, snapshot: plan.snapshot, view: { ...claimed.view, status: "ready",
@@ -63,6 +66,15 @@ describe.skipIf(!connection)("Agent import PostgreSQL transactions, ownership an
     await expect(store().create(rejected, "connection")).rejects.toThrow("queue insert failure");
     failEnqueue = false;
     expect(await database.db.select().from(agentImportTasks).where(eq(agentImportTasks.requestKey, rejected.idempotencyKey))).toHaveLength(0);
+  });
+
+  it("requires a fresh overwrite preview instead of applying unsubmitted create-only consent", async () => {
+    const currentStore = store();
+    const { task, resource } = await ready(currentStore, undefined, undefined, 1);
+    await expect(currentStore.apply(task.id, "legacy")).rejects.toBeInstanceOf(ImportConflictError);
+    expect((await currentStore.get(task.id))?.applyKey).toBeNull();
+    expect(await currentStore.intent("agent", resource.id)).toBeNull();
+    expect((await database.db.execute(sql`SELECT * FROM import_job_probe WHERE task_id = ${task.id}`)).rows).toHaveLength(1);
   });
 
   it("binds all data to the fixed target owner, not the chosen source user or audit actor", async () => {
@@ -139,7 +151,7 @@ describe.skipIf(!connection)("Agent import PostgreSQL transactions, ownership an
     await store().release(current);
   });
 
-  it("requires actual matching receipts to register source or hide a new unfinished Agent; native rows are never adopted", async () => {
+  it("requires matching receipts before replacing native provenance and hides unfinished overwrite finalization", async () => {
     const { task, resource } = await ready();
     await store().apply(task.id, "apply");
     const claimed = (await store().claim(task.id, crypto.randomUUID()))!;
@@ -152,11 +164,50 @@ describe.skipIf(!connection)("Agent import PostgreSQL transactions, ownership an
     await store().markIntent(claimed, resource, "confirmed", receipt);
     expect(await store().sources.pendingAgentIds([resource.id])).toEqual(new Set([resource.id]));
     await store().sources.recordNative(resource.id);
+    expect(await store().sources.pendingAgentIds([resource.id])).toEqual(new Set([resource.id]));
+    await store().complete(claimed, resource, receipt);
     expect(await store().sources.pendingAgentIds([resource.id])).toEqual(new Set());
-    await expect(store().complete(claimed, resource, receipt)).rejects.toBeInstanceOf(ImportConflictError);
-    expect(await store().sources.get("agent", resource.id)).toMatchObject({ origin: "eval_native" });
-    expect((await database.db.select().from(resourceSources).where(eq(resourceSources.id, resource.id)))[0]?.sourceUserId).toBeNull();
+    expect(await store().sources.get("agent", resource.id)).toMatchObject({ origin: "dev_import", receipt });
+    expect((await database.db.select().from(resourceSources).where(eq(resourceSources.id, resource.id)))[0]?.sourceUserId).toBe(sourceUser);
     expect((await database.db.select().from(agentImportIntents).where(eq(agentImportIntents.id, resource.id)))[0]?.receipt).toEqual(receipt);
     await store().release(claimed);
+  });
+
+  it("rotates an intent only after prior tasks finish and atomically replaces its latest provenance", async () => {
+    const currentStore = store();
+    const first = await ready(currentStore);
+    await currentStore.apply(first.task.id, "first");
+    const claimed = (await currentStore.claim(first.task.id, crypto.randomUUID()))!;
+    const receipt = { id: crypto.randomUUID(), resourceKind: "agent" as const, resourceId: first.resource.id,
+      importKey: first.resource.importKey, fingerprint: digest(first.resource.prepared), createdAt: new Date().toISOString() };
+    await currentStore.markIntent(claimed, first.resource, "confirmed", receipt);
+    await currentStore.complete(claimed, first.resource, receipt);
+    await currentStore.release(claimed);
+    const second = await ready(currentStore, undefined, first.resource.id);
+    expect(second.resource.importKey).not.toBe(first.resource.importKey);
+    await expect(currentStore.apply(second.task.id, "second")).rejects.toBeInstanceOf(ImportConflictError);
+    expect((await currentStore.get(second.task.id))?.applyKey).toBeNull();
+    expect((await currentStore.intent("agent", first.resource.id))?.receipt).toEqual(receipt);
+    const finishing = (await currentStore.claim(first.task.id, crypto.randomUUID()))!;
+    await currentStore.save(finishing, { view: { ...finishing.view, status: "completed" } });
+    await currentStore.release(finishing);
+    await currentStore.apply(second.task.id, "second");
+    expect(await currentStore.intent("agent", first.resource.id)).toMatchObject({
+      status: "planned", importKey: second.resource.importKey, receipt: null, attachment: null,
+    });
+    const next = (await currentStore.claim(second.task.id, crypto.randomUUID()))!;
+    const nextReceipt = { ...receipt, id: crypto.randomUUID(), importKey: second.resource.importKey };
+    await currentStore.markIntent(next, second.resource, "confirmed", nextReceipt);
+    await currentStore.complete(next, second.resource, nextReceipt);
+    expect((await currentStore.sources.get("agent", first.resource.id))?.receipt).toEqual(nextReceipt);
+    await currentStore.save(next, { view: { ...next.view, status: "completed" } });
+    await currentStore.release(next);
+    const third = await ready(currentStore, undefined, first.resource.id);
+    const fourth = await ready(currentStore, undefined, first.resource.id);
+    const competing = await Promise.allSettled([
+      currentStore.apply(third.task.id, "third"), currentStore.apply(fourth.task.id, "fourth"),
+    ]);
+    expect(competing.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(competing.filter((result) => result.status === "rejected")).toHaveLength(1);
   });
 });

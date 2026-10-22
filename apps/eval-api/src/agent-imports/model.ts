@@ -67,11 +67,12 @@ export interface PlannedResource {
   files: FrozenFile[];
   source: SourceSkill | SourceReference | SourceAgent;
   prepared?: PreparedAgent;
+  overwrite?: boolean;
   platform?: boolean;
   error?: string;
 }
 export interface ImportPlan {
-  version: 1;
+  version: 1 | 2;
   snapshot: SourceSnapshot;
   resources: PlannedResource[];
   eligibleAgentIds: string[];
@@ -125,12 +126,13 @@ export function initialView(id: string, request: AgentImportPreview, expiresAt: 
     id, status: "checking", sourceUserId: request.sourceUserId, purpose: request.purpose, expiresAt,
     agents: request.agentIds.map((id) => ({ id, name: id, status: "pending", skillCount: 0, referenceCount: 0 })),
     progress: { stage: "checking", completed: 0, total: request.agentIds.length, bytesRead: 0, totalBytes: 0 },
-    summary: { created: 0, skipped: 0, failed: 0, conflicts: 0 },
+    summary: { created: 0, overwritten: 0, skipped: 0, failed: 0, conflicts: 0 },
   };
 }
 export function summarize(view: AgentImportTaskView): AgentImportTaskView {
   return { ...view, summary: {
     created: view.agents.filter((item) => item.status === "created").length,
+    overwritten: view.agents.filter((item) => item.status === "overwritten").length,
     skipped: view.agents.filter((item) => item.status === "skipped").length,
     failed: view.agents.filter((item) => item.status === "failed" || item.status === "outcome_unknown").length,
     conflicts: view.agents.filter((item) => item.status === "conflict").length,

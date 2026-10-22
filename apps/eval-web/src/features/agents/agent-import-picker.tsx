@@ -60,7 +60,7 @@ export function AgentImportPicker(props: PickerProps) {
     </fieldset>
     {props.sourceUser
       ? <AgentImportCandidates key={props.sourceUser.id} {...props} sourceUser={props.sourceUser} />
-      : <Notice tone="neutral">请先选择已授权的 dev 用户，再搜索和选择该用户的缺失 Agent。</Notice>}
+      : <Notice tone="neutral">请先选择已授权的 dev 用户，再搜索和选择该用户的 Agent。</Notice>}
   </div>;
 }
 
@@ -76,29 +76,29 @@ function AgentImportCandidates({
     }, signal),
     retry: false,
   });
-  const missing = (page.data?.items ?? []).filter((agent) => !agent.exists);
-  const onPage = missing.filter((agent) => selected.has(agent.id)).length;
-  const all = missing.length > 0 && onPage === missing.length;
-  const bulkOverLimit = selected.size + missing.length - onPage > maxAgents;
+  const candidates = page.data?.items ?? [];
+  const onPage = candidates.filter((agent) => selected.has(agent.id)).length;
+  const all = candidates.length > 0 && onPage === candidates.length;
+  const bulkOverLimit = selected.size + candidates.length - onPage > maxAgents;
   function toggle(agent: AgentImportCandidate, checked: boolean) {
-    if (disabled || agent.exists || checked && !selected.has(agent.id) && selected.size >= maxAgents) return;
+    if (disabled || checked && !selected.has(agent.id) && selected.size >= maxAgents) return;
     const next = new Map(selected);
     if (checked) next.set(agent.id, agent);
     else next.delete(agent.id);
     onSelectionChange(next);
   }
-  return <section aria-label="选择缺失 Agent" className="space-y-3 border-t border-border pt-3">
+  return <section aria-label="选择导入 Agent" className="space-y-3 border-t border-border pt-3">
     <h3 className="text-sm font-semibold">2. 选择 Agent</h3>
     <Input type="search" aria-label="搜索 dev Agent" placeholder="搜索此用户的 Agent 名称或说明" disabled={disabled}
       value={search.q} onChange={(event) => setSearch({ q: event.target.value, cursors: [null] })} />
-    <p className="text-xs text-text-muted">每页 20 个，仅查询 Eval 缺失的 Agent；只检查和导入所选 Agent 的必要依赖并集。</p>
+    <p className="text-xs text-text-muted">每页 20 个，已有 ID 也可选择并覆盖；只检查和导入所选 Agent 的必要依赖并集。</p>
     <div className="flex flex-wrap items-center justify-between gap-2 text-[13px]">
-      <Checkbox label="全选本页缺失 Agent" checked={all ? true : onPage > 0 ? "indeterminate" : false}
-        disabled={disabled || page.isFetching || missing.length === 0 || !all && bulkOverLimit}
+      <Checkbox label="全选本页 Agent" checked={all ? true : onPage > 0 ? "indeterminate" : false}
+        disabled={disabled || page.isFetching || candidates.length === 0 || !all && bulkOverLimit}
         onCheckedChange={(checked) => {
           if (disabled || checked && bulkOverLimit) return;
           const next = new Map(selected);
-          for (const agent of missing) { if (checked) next.set(agent.id, agent); else next.delete(agent.id); }
+          for (const agent of candidates) { if (checked) next.set(agent.id, agent); else next.delete(agent.id); }
           onSelectionChange(next);
         }} />
       <span aria-live="polite">已选 {selected.size} / {maxAgents} 个（跨页保留，本页已选 {onPage} 个）</span>
@@ -106,7 +106,7 @@ function AgentImportCandidates({
     {selected.size >= maxAgents && <p className="text-xs text-warning">已达到本次导入上限，请取消部分选择后再添加。</p>}
     {page.error ? <ErrorBlock error={page.error} onRetry={() => void page.refetch()} />
       : page.isPending ? <LoadingBlock rows={3} />
-      : page.data.items.length === 0 ? <Notice tone="neutral">本页没有符合条件的缺失 Agent。可调整搜索或查看其他页；不代表整个用户已同步。</Notice>
+      : page.data.items.length === 0 ? <Notice tone="neutral">本页没有符合条件的 Agent。可调整搜索或查看其他页。</Notice>
       : <Table aria-label="dev 用户的候选 Agent">
         <TableHeader><TableRow>
           <TableHead className="w-10"><span className="sr-only">选择</span></TableHead>
@@ -114,7 +114,7 @@ function AgentImportCandidates({
         </TableRow></TableHeader>
         <TableBody>{page.data.items.map((agent) => <TableRow key={agent.id}>
           <TableCell><Checkbox aria-label={`选择 Agent ${agent.name}（${agent.id}）`} checked={selected.has(agent.id)}
-            disabled={disabled || agent.exists || !selected.has(agent.id) && selected.size >= maxAgents}
+            disabled={disabled || !selected.has(agent.id) && selected.size >= maxAgents}
             onCheckedChange={(checked) => toggle(agent, checked)} /></TableCell>
           <TableCell className="min-w-40 whitespace-normal">
             <span className="font-semibold">{agent.name}</span>
@@ -122,7 +122,7 @@ function AgentImportCandidates({
             <p className="mt-1 break-all font-mono text-xs text-text-muted">{agent.id} · revision {agent.revision}</p>
           </TableCell>
           <TableCell className="text-xs">Skill {agent.skillCount}<br />参考资料 {agent.referenceCount}</TableCell>
-          <TableCell className="text-xs">{agent.exists ? "已存在，不导入" : "缺失，可选择"}</TableCell>
+          <TableCell className="text-xs">{agent.exists ? "已存在，导入将覆盖" : "缺失，导入将新增"}</TableCell>
         </TableRow>)}</TableBody>
       </Table>}
     <nav aria-label="候选 Agent 分页" className="flex items-center justify-end gap-3">

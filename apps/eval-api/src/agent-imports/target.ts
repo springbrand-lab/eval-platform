@@ -5,7 +5,7 @@ import { createImportDownloads } from "./bytes.js";
 import { httpOriginSchema } from "../config/env.js";
 import { createSpHttpClient, EvalSpApiError, throwSpClientError, type Fetch } from "../sp/http.js";
 import type { EvalSpAgentConfig, EvalSpClient } from "../sp/client.js";
-import { exportFileSchema, receiptSchema, type ImportReceipt, type ImportResult, type PlannedImportResources, type PreparedAgent, type ResourceKind } from "./model.js";
+import { digest, exportFileSchema, receiptSchema, type ImportReceipt, type ImportResult, type PlannedImportResources, type PreparedAgent, type ResourceKind } from "./model.js";
 import { ImportConflictError, ImportDependencyError, ImportOutcomeUnknownError, ImportTargetDisabledError, importConflict } from "./errors.js";
 import { requireDefinitionEvidence, type DefinitionEvidence } from "./definition-evidence.js";
 import { requirePlannedResources } from "./selection-facts.js";
@@ -42,7 +42,7 @@ export interface AgentImportTarget {
   receipt(kind: ResourceKind, importKey: string): Promise<ImportResult | null>;
   importAgent(prepared: PreparedAgent, importKey: string): Promise<ImportResult>;
   importSkill(id: string, zip: Uint8Array, importKey: string): Promise<ImportResult>;
-  uploadReference(id: string, name: string, mediaType: string, bytes: Uint8Array): Promise<TargetAttachment>;
+  uploadReference(id: string, name: string, mediaType: string, bytes: Uint8Array, importKey: string): Promise<TargetAttachment>;
   importReference(id: string, attachment: TargetAttachment, importKey: string): Promise<ImportResult>;
   validateSelections(setting: Record<string, unknown>, dependencies?: readonly DefinitionEvidence[], plannedResources?: PlannedImportResources): Promise<void>;
 }
@@ -75,6 +75,13 @@ export function createAgentImportTarget(input: {
   const ownerUserId = z.uuid().parse(input.ownerUserId).toLowerCase();
   if (!input.sessionToken.trim()) throw new TypeError("Target session token is required");
   const http = createSpHttpClient({ origin, responseMode: "envelope", timeoutMs: 60_000, maxResponseBytes: 16 * 1024 * 1024, fetch: input.fetch });
+  function referenceUploadId(id: string, importKey: string): string {
+    const bytes = Buffer.from(digest(["eval-reference-upload/v1", ownerUserId, id, importKey]), "hex").subarray(0, 16);
+    bytes[6] = (bytes[6]! & 0x0f) | 0x80;
+    bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+    const hex = bytes.toString("hex");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
   function validateAttachment(attachment: TargetAttachment, id: string): void {
     const url = new URL(attachment.attachmentCdnUrl);
     createImportDownloads({ origin, purpose: "target" }).validateUrl(url.href);
@@ -160,22 +167,23 @@ export function createAgentImportTarget(input: {
       `/api/skills/imports?${new URLSearchParams({ skillId: id, importKey })}`, resultSchema,
       zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength), "application/zip",
     )),
-    async uploadReference(id, name, mediaType, bytes) {
+    async uploadReference(id, name, mediaType, bytes, importKey) {
       // Ordinary attachment upload has no import guard on SP; probe immediately before this POST too.
       await target.requireEnabled();
+      const clientAttachmentId = referenceUploadId(id, importKey);
       const form = new FormData();
       form.append("file", new Blob([new Uint8Array(bytes)], { type: mediaType }), name);
       form.append("name", name);
-      form.append("clientAttachmentId", id);
+      form.append("clientAttachmentId", clientAttachmentId);
       const attachment = await dependency(() => request("/api/inbox/attachments", attachmentSchema, form));
-      validateAttachment(attachment, id);
-      if (attachment.clientAttachmentId !== id || attachment.name !== name || attachment.mediaType !== mediaType || attachment.size !== bytes.byteLength) {
+      validateAttachment(attachment, clientAttachmentId);
+      if (attachment.name !== name || attachment.mediaType !== mediaType || attachment.size !== bytes.byteLength) {
         throw new ImportConflictError("Target attachment does not match the frozen Reference");
       }
       return attachment;
     },
     importReference: (id, attachment, importKey) => {
-      validateAttachment(attachment, id);
+      validateAttachment(attachment, attachment.clientAttachmentId === id ? id : referenceUploadId(id, importKey));
       return commit("reference", id, importKey, () => request(
         "/api/user-references/imports", resultSchema, { referenceId: id, attachment, importKey },
       ));

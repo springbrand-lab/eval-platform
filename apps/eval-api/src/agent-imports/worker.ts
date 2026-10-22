@@ -4,7 +4,7 @@ import type { ImportStaging } from "./bytes.js";
 import { ImportConflictError, ImportDependencyError, ImportLeaseLostError, ImportOutcomeUnknownError, importConflict } from "./errors.js";
 import { resourceKey, summarize, type ImportResult, type ImportTask, type PlannedResource } from "./model.js";
 import { createImportPlanner } from "./planner.js";
-import { dependencyKeys, planDigest, requireCanonicalSourceSetting, requireReusable } from "./semantics.js";
+import { dependencyKeys, planDigest, requireCanonicalSourceSetting } from "./semantics.js";
 import { plannedResourcesForAgent } from "./selection-facts.js";
 import type { AgentImportSource } from "./source.js";
 import type { AgentImportStore } from "./store.js";
@@ -52,7 +52,7 @@ export function createAgentImportWorker(input: {
       if (error instanceof ImportLeaseLostError) throw error;
       const unknown = !importConflict(error);
       const message = unknown ? "Import outcome requires target receipt or local finalization reconciliation"
-        : error instanceof ImportConflictError ? error.message : "Target rejected this create-only resource";
+        : error instanceof ImportConflictError ? error.message : "Target rejected this resource import";
       results.set(resourceKey(resource.kind, resource.id), { unknown, message });
       if (!resource.platform) {
         const intent = await store.intent(resource.kind, resource.id);
@@ -88,14 +88,10 @@ export function createAgentImportWorker(input: {
           await store.complete(task, resource, null);
         } else {
           let result = await receipt(resource);
-          const exists = await verify(resource, task);
-          if (exists && !result) {
-            await requireReusable(resource, task, store.sources, target);
-            result = await receipt(resource);
-            if (!result) throw new ImportConflictError("Existing dependency has no valid import receipt");
-          }
-          if (!exists && await store.sources.get(resource.kind, resource.id)) throw new ImportConflictError("A registered dependency was removed; import cannot revive it");
           if (!result) {
+            if (plan.version !== 2) throw new ImportOutcomeUnknownError();
+            const current = resource.kind === "skill" ? await target.skill(resource.id) : await target.reference(resource.id);
+            if (!current && await store.sources.get(resource.kind, resource.id)) throw new ImportConflictError("A registered dependency was removed; import cannot revive it");
             if (Date.parse(task.expiresAt) <= Date.now()) throw new ImportConflictError("Preview expired before this resource was imported");
             await store.markIntent(task, resource, "submitting");
             if (resource.kind === "skill") {
@@ -107,14 +103,14 @@ export function createAgentImportWorker(input: {
               let attachment = intent?.attachment;
               if (!attachment) {
                 attachment = await target.uploadReference(resource.id, source.name, source.mediaType,
-                  await staging.read(task.id, resource.files[0]!, task.expiresAt));
+                  await staging.read(task.id, resource.files[0]!, task.expiresAt), resource.importKey);
                 await store.saveAttachment(task, resource, attachment); // freezes the exact target attachment before POST
               }
               result = await target.importReference(resource.id, attachment, resource.importKey);
             }
           }
           await confirmed(resource, result);
-          if (!exists && !await verify(resource, task)) throw new ImportOutcomeUnknownError();
+          if (!await verify(resource, task)) throw new ImportConflictError("Imported dependency is no longer available");
           await store.complete(task, resource, result.receipt);
         }
         results.set(resourceKey(resource.kind, resource.id), null);
@@ -137,16 +133,18 @@ export function createAgentImportWorker(input: {
           if (!resource.prepared) throw new ImportConflictError("Agent has no frozen target configuration");
           const recovered = await receipt(resource);
           if (!recovered) {
-            if (Date.parse(task.expiresAt) <= Date.now()) throw new ImportConflictError("Preview expired before Agent creation");
+            if (plan.version !== 2) throw new ImportOutcomeUnknownError();
+            if (Date.parse(task.expiresAt) <= Date.now()) throw new ImportConflictError("Preview expired before Agent import");
             const existing = await target.agent(resource.id);
-            if (existing || await store.sources.get("agent", resource.id)) throw new ImportConflictError("Target Agent ID is already occupied; it will not be changed");
+            if (!existing && await store.sources.get("agent", resource.id)) throw new ImportConflictError("A registered Agent was removed; import cannot revive it");
+            item.overwrite = !!existing;
             await store.markIntent(task, resource, "submitting");
           }
           // AgentConfigService verifies the current target even when this is a historical receipt result.
           const result = await agents.import(resource.prepared, resource.importKey,
             (result) => confirmed(resource, result), recovered ?? undefined);
           await store.complete(task, resource, result.receipt);
-          item.status = "created";
+          item.status = (item.overwrite ?? resource.overwrite) ? "overwritten" : "created";
           delete item.message;
         } catch (error) {
           await failure(resource, error);

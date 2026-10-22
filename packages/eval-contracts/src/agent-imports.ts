@@ -41,13 +41,14 @@ export const agentImportTaskViewSchema = z.strictObject({
   purpose,
   agents: z.array(z.strictObject({
     id, name: z.string(),
-    status: z.enum(["pending", "ready", "created", "skipped", "conflict", "failed", "outcome_unknown"]),
+    status: z.enum(["pending", "ready", "created", "overwritten", "skipped", "conflict", "failed", "outcome_unknown"]),
+    overwrite: z.boolean().optional(),
     message: z.string().optional(), skillCount: count, referenceCount: count,
   })),
   progress: z.strictObject({
     stage: z.string(), completed: count, total: count, bytesRead: count, totalBytes: count,
   }),
-  summary: z.strictObject({ created: count, skipped: count, failed: count, conflicts: count }),
+  summary: z.strictObject({ created: count, overwritten: count.optional(), skipped: count, failed: count, conflicts: count }),
   error: z.string().optional(),
   expiresAt: z.iso.datetime().optional(),
 });

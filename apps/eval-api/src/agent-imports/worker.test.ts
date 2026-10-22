@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { ImportDependencyError, ImportLeaseLostError, ImportOutcomeUnknownError, ImportTargetDisabledError } from "./errors.js";
+import { ImportConflictError, ImportDependencyError, ImportLeaseLostError, ImportOutcomeUnknownError, ImportTargetDisabledError } from "./errors.js";
 import { IMPORT_LIMITS, resourceKey } from "./model.js";
+import { planDigest } from "./semantics.js";
 import { agentId, otherAgentId, owner, referenceId, sourceUser, snapshotFixture, workerFixture } from "./worker.test-support.js";
 
 const fixtures: Awaited<ReturnType<typeof workerFixture>>[] = [];
@@ -16,6 +17,256 @@ const resourceWrites = (f: Awaited<ReturnType<typeof workerFixture>>) => f.reque
     && new URL(request.url).pathname === "/api/agent-config-imports/validate"));
 
 describe("durable import worker through approved public HTTP seams", () => {
+  it("does not turn an already-confirmed legacy create-only plan into new overwrite writes", async () => {
+    const f = await fixture();
+    const task = await f.preview();
+    await f.store.apply(task.id, "legacy-apply");
+    task.plan = { ...task.plan!, version: 1 };
+    task.plan.digest = planDigest(task.plan, task);
+    await expect(f.worker.run(task.id, { final: true })).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
+    expect(task.view.status).toBe("outcome_unknown");
+    expect(resourceWrites(f)).toEqual([]);
+    expect(f.targetAgents.size).toBe(0);
+  });
+
+  it("finalizes a legacy task's proven receipt without rewriting its existing resource", async () => {
+    const f = await fixture();
+    const task = await f.preview([agentId]);
+    await f.store.apply(task.id, "apply");
+    f.failNextPurpose();
+    await expect(f.worker.run(task.id)).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
+    const writes = resourceWrites(f).length;
+    task.plan = { ...task.plan!, version: 1 };
+    task.plan.digest = planDigest(task.plan, task);
+    await f.worker.run(task.id);
+    expect(task.view.status).toBe("completed");
+    expect(resourceWrites(f)).toHaveLength(writes);
+    expect(f.sources.get(resourceKey("agent", agentId))?.origin).toBe("dev_import");
+  });
+
+  it("overwrites an existing native Agent and its owned dependencies instead of skipping their IDs", async () => {
+    const f = await fixture();
+    f.targetAgents.set(agentId, { id: agentId, user_id: owner, slug: "existing", name: "Old Agent",
+      setting: { ...snapshotFixture().agents[0]!.setting, systemPrompt: "Old prompt" } });
+    await f.store.sources.recordNative(agentId);
+    f.targetSkills.set("private-skill", { id: "private-skill", name: "Old Skill", origin: "upload", available: true, deleted: false,
+      files: [{ path: "old.md", size: 3, url: "https://eval.test/target-files/old.md" }] });
+    f.targetReferences.set(referenceId, { id: referenceId, name: "old.txt", mediaType: "text/plain", size: 99,
+      status: "active", attachmentCdnUrl: "https://eval.test/target-files/old.txt" });
+    const task = await f.preview([agentId]);
+    expect(task.view.agents[0]).toMatchObject({ status: "ready", overwrite: true });
+    await f.store.apply(task.id, "overwrite");
+    await f.worker.run(task.id);
+    expect(task.view.status).toBe("completed");
+    expect(task.view.agents[0]?.status).toBe("overwritten");
+    expect(task.view.summary).toMatchObject({ created: 0, overwritten: 1, skipped: 0 });
+    expect(f.targetAgents.get(agentId)).toMatchObject({ id: agentId, name: "Source" });
+    expect(f.targetSkills.get("private-skill")).toMatchObject({ id: "private-skill", name: "private-skill" });
+    expect(f.targetReferences.get(referenceId)).toMatchObject({ id: referenceId, name: "brief.txt", size: 3 });
+    expect(f.sources.get(resourceKey("agent", agentId))?.origin).toBe("dev_import");
+    for (const path of ["/api/user-agent-configs/imports", "/api/skills/imports", "/api/user-references/imports"]) {
+      expect(posts(f, path)).toHaveLength(1);
+    }
+  });
+
+  it("uses fresh operation keys for a second import and restores same-ID resources from dev", async () => {
+    const snapshot = snapshotFixture();
+    const f = await fixture(snapshot);
+    const first = await f.preview([agentId]);
+    await f.store.apply(first.id, "first"); await f.worker.run(first.id);
+    const oldKeys = first.plan!.resources.filter((resource) => !resource.platform).map((resource) => resource.importKey);
+    f.targetAgents.set(agentId, { ...f.targetAgents.get(agentId)!, name: "Local edit" });
+    snapshot.agents[0]!.name = "Updated dev Agent";
+    snapshot.agents[0]!.setting = { ...snapshot.agents[0]!.setting, systemPrompt: "Updated dev prompt" };
+    snapshot.references[0]!.name = "updated-brief.txt";
+    f.resetTask();
+    const next = await f.preview([agentId]);
+    expect(next.view.agents[0]).toMatchObject({ status: "ready", overwrite: true });
+    expect(next.plan!.resources.filter((resource) => !resource.platform).every((resource) => !oldKeys.includes(resource.importKey))).toBe(true);
+    await f.store.apply(next.id, "second"); await f.worker.run(next.id);
+    expect(next.view.status).toBe("completed");
+    expect(next.view.summary).toMatchObject({ created: 0, overwritten: 1, skipped: 0 });
+    expect(f.targetAgents.get(agentId)).toMatchObject({ name: "Updated dev Agent", setting: { systemPrompt: "Updated dev prompt" } });
+    expect(f.targetReferences.get(referenceId)?.name).toBe("updated-brief.txt");
+    for (const path of ["/api/user-agent-configs/imports", "/api/skills/imports", "/api/user-references/imports"]) {
+      expect(posts(f, path)).toHaveLength(2);
+    }
+  });
+
+  it.each(["bytes", "metadata", "bytes and metadata"] as const)("reimports changed Reference %s through retained immutable uploads without changing its final ID", async (change) => {
+    const snapshot = snapshotFixture();
+    const f = await fixture(snapshot);
+    const first = await f.preview([agentId]);
+    await f.store.apply(first.id, "first"); await f.worker.run(first.id);
+    expect(first.view.status).toBe("completed");
+    const previous = f.targetReferences.get(referenceId)!;
+    const bytes = new TextEncoder().encode(change === "metadata" ? "abc" : "updated dev reference");
+    const source = snapshot.references[0]!;
+    if (change !== "bytes") {
+      source.name = "updated-brief.md";
+      source.mediaType = "text/markdown";
+    }
+    source.size = bytes.byteLength;
+    f.setSourceFileBytes(source.url, bytes);
+    f.resetTask();
+    const next = await f.preview([agentId]);
+    expect(next.view.agents[0]).toMatchObject({ status: "ready", overwrite: true });
+    await f.store.apply(next.id, "second"); await f.worker.run(next.id);
+    expect(next.view.status).toBe("completed");
+    expect(next.view.summary).toMatchObject({ created: 0, overwritten: 1, skipped: 0 });
+    expect([...f.targetReferences.keys()]).toEqual([referenceId]);
+    const current = f.targetReferences.get(referenceId)!;
+    expect(current).toMatchObject({ id: referenceId, name: source.name, mediaType: source.mediaType, size: bytes.byteLength });
+    expect(await (await f.fetch(current.attachmentCdnUrl)).text()).toBe(new TextDecoder().decode(bytes));
+    expect(await (await f.fetch(previous.attachmentCdnUrl)).text()).toBe("abc");
+    const uploads = await Promise.all(posts(f, "/api/inbox/attachments").map((request) => request.clone().formData()));
+    expect(uploads).toHaveLength(2);
+    expect(uploads[0]!.get("clientAttachmentId")).not.toBe(uploads[1]!.get("clientAttachmentId"));
+    expect(f.targetUploads.size).toBe(2); // Promotion retains the first immutable temporary upload.
+    const imports = await Promise.all(posts(f, "/api/user-references/imports").map((request) => request.clone().json()));
+    expect(imports.map((body) => body.referenceId)).toEqual([referenceId, referenceId]);
+    expect(imports[0].importKey).not.toBe(imports[1].importKey);
+    expect(f.requests.some((request) => request.method === "DELETE")).toBe(false);
+    expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it("reuses one immutable temporary upload UUID after losing its response before attachment persistence", async () => {
+    const f = await fixture();
+    const task = await f.preview([agentId]);
+    const sourceReads = f.requests.filter((request) => new URL(request.url).origin === "https://dev.test").length;
+    f.setSourceFileBytes(snapshotFixture().references[0]!.url, new TextEncoder().encode("changed after preview"));
+    await f.store.apply(task.id, "apply");
+    let loseResponse = true;
+    const fetch = f.fetch.getMockImplementation()!;
+    f.fetch.mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      const response = await fetch(request);
+      if (loseResponse && request.method === "POST" && new URL(request.url).pathname === "/api/inbox/attachments") {
+        loseResponse = false;
+        throw new TypeError("upload response lost after storage");
+      }
+      return response;
+    });
+    await expect(f.worker.run(task.id)).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
+    expect(task.view.status).toBe("importing");
+    expect(f.intents.get(resourceKey("reference", referenceId))?.attachment).toBeNull();
+    expect(f.targetUploads.size).toBe(1);
+    await f.worker.run(task.id);
+    expect(task.view.status).toBe("completed");
+    const uploads = await Promise.all(posts(f, "/api/inbox/attachments").map((request) => request.clone().formData()));
+    expect(uploads).toHaveLength(2);
+    expect(uploads[0]!.get("clientAttachmentId")).toBe(uploads[1]!.get("clientAttachmentId"));
+    expect(uploads[0]!.get("clientAttachmentId")).not.toBe(referenceId);
+    expect(f.targetUploads.size).toBe(1);
+    expect(new TextDecoder().decode([...f.targetUploads.values()][0]!.bytes)).toBe("abc");
+    expect([...f.targetReferences.keys()]).toEqual([referenceId]);
+    expect(posts(f, "/api/user-references/imports")).toHaveLength(1);
+    expect(f.requests.filter((request) => new URL(request.url).origin === "https://dev.test")).toHaveLength(sourceReads);
+    expect(f.requests.some((request) => request.method === "DELETE")).toBe(false);
+  });
+
+  it.each(["before-commit", "after-commit"] as const)("reuses the persisted Reference attachment and reconciles receipts after a lost import %s", async (failure) => {
+    const f = await fixture();
+    const task = await f.preview([agentId]);
+    const plan = structuredClone(task.plan);
+    const sourceReads = f.requests.filter((request) => new URL(request.url).origin === "https://dev.test").length;
+    await f.store.apply(task.id, "apply");
+    let recover = false;
+    const fetch = f.fetch.getMockImplementation()!;
+    f.fetch.mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (!recover && path.includes("/receipts/") && f.targetReferences.has(referenceId)) {
+        return Response.json({ code: "SERVICE_UNAVAILABLE", errMsg: "receipt unavailable" }, { status: 503 });
+      }
+      if (!recover && request.method === "POST" && path === "/api/user-references/imports") {
+        if (failure === "after-commit") await fetch(request);
+        else f.requests.push(request.clone());
+        throw new TypeError("Reference import response lost");
+      }
+      return fetch(request);
+    });
+    await expect(f.worker.run(task.id)).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
+    expect(task.view.status).toBe("importing");
+    const attachment = structuredClone(f.intents.get(resourceKey("reference", referenceId))!.attachment);
+    expect(attachment).not.toBeNull();
+    expect(attachment!.clientAttachmentId).not.toBe(referenceId);
+    expect(posts(f, "/api/inbox/attachments")).toHaveLength(1);
+    recover = true;
+    await f.worker.run(task.id);
+    expect(task.view.status).toBe("completed");
+    expect(task.plan).toEqual(plan);
+    expect(f.intents.get(resourceKey("reference", referenceId))?.attachment).toEqual(attachment);
+    expect(posts(f, "/api/inbox/attachments")).toHaveLength(1);
+    const imports = await Promise.all(posts(f, "/api/user-references/imports").map((request) => request.clone().json()));
+    expect(imports).toHaveLength(failure === "before-commit" ? 2 : 1);
+    for (const body of imports) expect(body).toMatchObject({ referenceId, attachment });
+    expect([...f.targetReferences.keys()]).toEqual([referenceId]);
+    expect(f.sources.get(resourceKey("reference", referenceId))?.receipt?.resourceId).toBe(referenceId);
+    expect(f.requests.filter((request) => new URL(request.url).origin === "https://dev.test")).toHaveLength(sourceReads);
+    expect(f.requests.some((request) => request.method === "DELETE")).toBe(false);
+  });
+
+  it("recovers an already-persisted legacy same-ID Reference attachment without replacing or uploading it again", async () => {
+    const f = await fixture();
+    const task = await f.preview([agentId]);
+    await f.store.apply(task.id, "apply");
+    const reference = task.plan!.resources.find((resource) => resource.kind === "reference")!;
+    const form = new FormData();
+    form.append("file", new Blob(["abc"], { type: "text/plain" }), "brief.txt");
+    form.append("name", "brief.txt");
+    form.append("clientAttachmentId", referenceId);
+    const response = await f.fetch("https://eval.test/api/inbox/attachments", { method: "POST", body: form,
+      headers: { Authorization: "Bearer target-session", Origin: "https://web.test" } });
+    expect(response.status).toBe(200);
+    const attachment = (await response.json()).msg;
+    await f.store.saveAttachment(task, reference, attachment);
+    await f.worker.run(task.id);
+    expect(task.view.status).toBe("completed");
+    expect(posts(f, "/api/inbox/attachments")).toHaveLength(1);
+    const imports = posts(f, "/api/user-references/imports");
+    expect(imports).toHaveLength(1);
+    expect(await imports[0]!.clone().json()).toEqual({ referenceId, attachment, importKey: reference.importKey });
+    expect([...f.targetReferences.keys()]).toEqual([referenceId]);
+    expect(f.targetUploads.size).toBe(1);
+    expect(f.requests.some((request) => request.method === "DELETE")).toBe(false);
+  });
+
+  it("rejects applying a new overwrite while a previous import still needs receipt finalization", async () => {
+    const f = await fixture();
+    const first = await f.preview([agentId]);
+    await f.store.apply(first.id, "first");
+    f.failNextPurpose();
+    await expect(f.worker.run(first.id)).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
+    const writes = resourceWrites(f).length;
+    f.resetTask();
+    const next = await f.preview([agentId]);
+    expect(next.view.agents[0]?.status).toBe("ready");
+    await expect(f.store.apply(next.id, "blocked")).rejects.toBeInstanceOf(ImportConflictError);
+    expect(resourceWrites(f)).toHaveLength(writes);
+    await f.worker.run(first.id);
+    expect(first.view.status).toBe("completed");
+    expect(resourceWrites(f)).toHaveLength(writes);
+  });
+
+  it("allows a fresh overwrite after a known content conflict ended the previous task", async () => {
+    const f = await fixture();
+    const first = await f.preview([agentId]);
+    await f.store.apply(first.id, "first");
+    f.failNextPurpose();
+    await expect(f.worker.run(first.id)).rejects.toBeInstanceOf(ImportOutcomeUnknownError);
+    f.targetAgents.set(agentId, { ...f.targetAgents.get(agentId)!, name: "Later local edit" });
+    await f.worker.run(first.id);
+    expect(first.view.status).toBe("completed_with_errors");
+    f.resetTask();
+    const next = await f.preview([agentId]);
+    expect(next.view.agents[0]?.status).toBe("ready");
+    await f.store.apply(next.id, "next"); await f.worker.run(next.id);
+    expect(next.view.status).toBe("completed");
+    expect(next.view.agents[0]?.status).toBe("overwritten");
+    expect(f.targetAgents.get(agentId)?.name).toBe("Source");
+  });
+
   it("classifies a real receipt HTTP conflict as terminal for that root, not outcome_unknown", async () => {
     const f = await fixture();
     const task = await f.preview();
@@ -41,7 +292,7 @@ describe("durable import worker through approved public HTTP seams", () => {
     expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
   });
 
-  it("keeps an existing imported Agent's receipt conflict local to that preview root", async () => {
+  it("does not let an old receipt conflict block an explicitly requested new overwrite", async () => {
     const f = await fixture();
     const first = await f.preview([agentId]);
     await f.store.apply(first.id, "apply"); await f.worker.run(first.id);
@@ -57,11 +308,12 @@ describe("durable import worker through approved public HTTP seams", () => {
     f.resetTask();
     const next = await f.preview();
     expect(next.view.status).toBe("ready");
-    expect(next.view.agents.map((agent) => agent.status)).toEqual(["conflict", "ready"]);
+    expect(next.view.agents.map((agent) => agent.status)).toEqual(["ready", "ready"]);
     const before = posts(f, "/api/user-agent-configs/imports").length;
     await f.store.apply(next.id, "next-apply"); await f.worker.run(next.id);
-    expect(next.view.status).toBe("completed_with_errors");
-    expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(before + 1);
+    expect(next.view.status).toBe("completed");
+    expect(next.view.agents.map((agent) => agent.status)).toEqual(["overwritten", "created"]);
+    expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(before + 2);
     expect(f.sp.deleteAgentConfig).not.toHaveBeenCalled();
   });
 
@@ -151,7 +403,7 @@ describe("durable import worker through approved public HTTP seams", () => {
     expect(f.events.at(-1)).toBe("enqueue:apply");
     await f.worker.run(task.id);
     expect(task.view.status).toBe("completed");
-    expect(task.view.summary).toEqual({ created: 2, skipped: 0, failed: 0, conflicts: 0 });
+    expect(task.view.summary).toEqual({ created: 2, overwritten: 0, skipped: 0, failed: 0, conflicts: 0 });
     expect(f.zipFiles).toEqual([["SKILL.md", "scripts/run.py"]]);
     expect([...f.targetAgents.keys()].sort()).toEqual([agentId, otherAgentId].sort());
     expect(f.targetAgents.get(agentId)?.setting).toMatchObject({ skillIds: ["private-skill", "builtin-demo"], referenceFileIds: [referenceId] });
@@ -232,6 +484,11 @@ describe("durable import worker through approved public HTTP seams", () => {
   it("does not claim/hide a native or unknown pre-existing Agent from a same-ID unknown intent", async () => {
     const f = await fixture();
     f.targetAgents.set(agentId, { id: agentId, user_id: owner, name: "Native", slug: "native", setting: {} });
+    const initial = await f.preview();
+    const pending = initial.plan!.resources.find((resource) => resource.kind === "agent" && resource.id === agentId)!;
+    f.intents.set(resourceKey("agent", agentId), { ...pending, ownerUserId: owner, connectionId: initial.connectionId,
+      sourceUserId: sourceUser, status: "outcome_unknown", receipt: null, attachment: null });
+    f.resetTask();
     const task = await f.preview();
     expect(task.view.agents[0]?.status).toBe("conflict");
     await f.store.apply(task.id, "apply"); await f.worker.run(task.id);
@@ -242,30 +499,37 @@ describe("durable import worker through approved public HTTP seams", () => {
     expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(1);
   });
 
-  it("does not adopt a same-ID/same-content dependency without receipt provenance", async () => {
+  it("overwrites a matching pre-existing dependency and registers only its new verified receipt", async () => {
     const f = await fixture();
     f.targetSkills.set("private-skill", { id: "private-skill", name: "private-skill", origin: "upload", available: true, deleted: false,
       files: [{ path: "SKILL.md", size: 3, url: "https://eval.test/target-files/md" },
         { path: "scripts/run.py", size: 3, url: "https://eval.test/target-files/script" }] });
     const task = await f.preview();
-    expect(task.view.agents[0]?.status).toBe("conflict");
+    expect(task.view.agents[0]?.status).toBe("ready");
     expect(f.sources.has(resourceKey("skill", "private-skill"))).toBe(false);
     expect(posts(f, "/api/skills/imports")).toHaveLength(0);
+    await f.store.apply(task.id, "apply"); await f.worker.run(task.id);
+    expect(posts(f, "/api/skills/imports")).toHaveLength(1);
+    expect(f.sources.get(resourceKey("skill", "private-skill"))?.receipt).toBeTruthy();
   });
 
-  it("rejects a target private Skill still pointing at the dev CDN without downloading it or importing its Agent", async () => {
+  it("replaces a private Skill's stale dev CDN pointers without downloading the old target content", async () => {
     const f = await fixture();
     f.targetSkills.set("private-skill", { id: "private-skill", name: "private-skill", origin: "upload", available: true, deleted: false,
       files: [{ path: "SKILL.md", size: 3, url: "https://creation-file-dev.springbrand.ai/skills/private/SKILL.md" },
         { path: "scripts/run.py", size: 3, url: "https://creation-file-dev.springbrand.ai/skills/private/scripts/run.py" }] });
     const task = await f.preview();
-    expect(task.view.agents[0]).toMatchObject({ status: "conflict", message: "Untrusted import download address" });
+    expect(task.view.agents[0]?.status).toBe("ready");
     expect(task.view.agents[1]?.status).toBe("ready");
     expect(f.requests.some((request) => new URL(request.url).origin === "https://creation-file-dev.springbrand.ai")).toBe(false);
     expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(0);
+    await f.store.apply(task.id, "apply"); await f.worker.run(task.id);
+    expect(task.view.status).toBe("completed");
+    expect(f.requests.some((request) => new URL(request.url).origin === "https://creation-file-dev.springbrand.ai")).toBe(false);
+    expect(f.targetSkills.get("private-skill")?.files.every((file) => new URL(file.url).origin === "https://eval.test")).toBe(true);
   });
 
-  it("reuses a legitimate receipt only after verifying the current complete target contents", async () => {
+  it("overwrites shared dependencies once per new task rather than reusing an earlier import operation", async () => {
     const snapshot = snapshotFixture();
     const f = await fixture(snapshot);
     const first = await f.preview([agentId]);
@@ -273,11 +537,11 @@ describe("durable import worker through approved public HTTP seams", () => {
     snapshot.agents[1]!.setting = { ...snapshot.agents[1]!.setting, skillIds: ["private-skill"] };
     f.resetTask();
     const second = await f.preview();
-    expect(second.view.agents.map((item) => item.status)).toEqual(["skipped", "ready"]);
+    expect(second.view.agents.map((item) => item.status)).toEqual(["ready", "ready"]);
     await f.store.apply(second.id, "another-apply"); await f.worker.run(second.id);
     expect(second.view.status).toBe("completed");
-    expect(posts(f, "/api/skills/imports")).toHaveLength(1);
-    expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(2);
+    expect(posts(f, "/api/skills/imports")).toHaveLength(2);
+    expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(3);
   });
 
   it.each(["purpose", "source"] as const)("keeps receipt recovery active after %s persistence failure and completes on the next delivery, never DELETE/new ID", async (failure) => {
@@ -456,18 +720,19 @@ describe("durable import worker through approved public HTTP seams", () => {
     expect(resourceWrites(f)).toHaveLength(before);
   });
 
-  it("does not refetch a changed source after preview or overwrite a native Agent created before apply", async () => {
+  it("uses the frozen source when overwriting an owned Agent created between preview and apply", async () => {
     const snapshot = snapshotFixture();
     const f = await fixture(snapshot);
     const task = await f.preview();
     snapshot.agents[0]!.name = "Changed upstream";
     f.targetAgents.set(agentId, { id: agentId, user_id: owner, name: "Racing native", setting: {} });
     await f.store.apply(task.id, "apply"); await f.worker.run(task.id);
-    expect(task.view.status).toBe("completed_with_errors");
-    expect(f.targetAgents.get(agentId)?.name).toBe("Racing native");
-    expect(f.sources.has(resourceKey("agent", agentId))).toBe(false);
-    expect(await f.agents.list()).toContainEqual(expect.objectContaining({ name: "Racing native" }));
-    expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(1);
+    expect(task.view.status).toBe("completed");
+    expect(f.targetAgents.get(agentId)?.name).toBe("Source");
+    expect(f.sources.get(resourceKey("agent", agentId))?.origin).toBe("dev_import");
+    expect(await f.agents.list()).toContainEqual(expect.objectContaining({ name: "Source" }));
+    expect(task.view.agents[0]?.status).toBe("overwritten");
+    expect(posts(f, "/api/user-agent-configs/imports")).toHaveLength(2);
   });
 
   it("does not acknowledge a duplicate delivery as successful while another lease is active", async () => {

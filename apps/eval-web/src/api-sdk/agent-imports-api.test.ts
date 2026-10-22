@@ -1,4 +1,4 @@
-import type { AgentImportPreview, AgentImportTaskView } from "@eval-platform/eval-contracts";
+import type { AgentImportCandidatePage, AgentImportPreview, AgentImportTaskView } from "@eval-platform/eval-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const userId = "00000000-0000-4000-8000-000000000001";
@@ -23,8 +23,12 @@ describe("Agent import SDK public HTTP seam", () => {
     vi.resetModules();
   });
 
-  it("reads config, bounded user search, real candidate cursors and tasks through the existing client", async () => {
+  it("reads config, bounded user search, existing same-ID candidates, cursors and tasks through the existing client", async () => {
     const requests: Request[] = [];
+    const candidatePage: AgentImportCandidatePage = {
+      items: [{ id: agentId, name: "Source Agent", description: "", revision: 3, skillCount: 2, referenceCount: 1, exists: true }],
+      nextCursor: "next/page?2",
+    };
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = new Request(input, init);
       requests.push(request);
@@ -34,7 +38,7 @@ describe("Agent import SDK public HTTP seam", () => {
       expect(url.origin).toBe(window.location.origin);
       if (url.pathname.endsWith("/config")) return ok({ enabled: true, maxAgents: 50 });
       if (url.pathname.endsWith("/users")) return ok({ users: [{ id: userId, name: "授权用户", email: "user@example.test" }] });
-      if (url.pathname.endsWith("/agents")) return ok({ items: [], nextCursor: "next/page?2" });
+      if (url.pathname.endsWith("/agents")) return ok(candidatePage);
       return ok(task);
     });
     vi.stubGlobal("fetch", fetcher);
@@ -44,8 +48,9 @@ describe("Agent import SDK public HTTP seam", () => {
     await expect(getAgentImportConfig(controller.signal)).resolves.toEqual({ enabled: true, maxAgents: 50 });
     await expect(listAgentImportUsers("中文 + mail", 20, controller.signal)).resolves.toMatchObject({ users: [{ id: userId }] });
     await expect(listAgentImportCandidates(userId, { q: "Agent + 名称", limit: 20 }, controller.signal))
-      .resolves.toEqual({ items: [], nextCursor: "next/page?2" });
-    await listAgentImportCandidates(userId, { q: "Agent + 名称", cursor: "next/page?2", limit: 20 }, controller.signal);
+      .resolves.toEqual(candidatePage);
+    await expect(listAgentImportCandidates(userId, { q: "Agent + 名称", cursor: "next/page?2", limit: 20 }, controller.signal))
+      .resolves.toEqual(candidatePage);
     await expect(getAgentImportTask(taskId, controller.signal)).resolves.toEqual(task);
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
       "/api/agent-config-sync/config", "/api/agent-config-sync/users",
@@ -53,9 +58,9 @@ describe("Agent import SDK public HTTP seam", () => {
       `/api/agent-config-sync/tasks/${taskId}`,
     ]);
     expect(Object.fromEntries(new URL(requests[1]!.url).searchParams)).toEqual({ q: "中文 + mail", limit: "20" });
-    expect(Object.fromEntries(new URL(requests[2]!.url).searchParams)).toEqual({ q: "Agent + 名称", limit: "20", onlyMissing: "true" });
+    expect(Object.fromEntries(new URL(requests[2]!.url).searchParams)).toEqual({ q: "Agent + 名称", limit: "20" });
     expect(Object.fromEntries(new URL(requests[3]!.url).searchParams)).toEqual({
-      q: "Agent + 名称", limit: "20", cursor: "next/page?2", onlyMissing: "true",
+      q: "Agent + 名称", limit: "20", cursor: "next/page?2",
     });
     expect(requests.every((request) => !request.signal.aborted)).toBe(true);
   });

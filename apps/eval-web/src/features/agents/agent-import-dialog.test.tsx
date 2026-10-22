@@ -1,6 +1,6 @@
 import type { AgentImportCandidate, AgentImportPreview, AgentImportTaskView } from "@eval-platform/eval-contracts";
-import { skillQueryKeys, userReferenceQueryKeys } from "@springbrand/agent-config-editor/client";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createAgentEditorClient, skillQueryKeys, userReferenceQueryKeys } from "@springbrand/agent-config-editor/client";
+import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, Outlet, RouterProvider } from "@tanstack/react-router";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -44,7 +44,7 @@ const mounted: { unmount: () => Promise<void>; query: QueryClient }[] = [];
 function createTask(input: AgentImportPreview): AgentImportTaskView {
   return {
     id: uuid(1000 + ++sequence), sourceUserId: input.sourceUserId, purpose: input.purpose, status: previewStatus,
-    agents: input.agentIds.map((id) => ({ id, name: `Agent ${Number(id.slice(-12))}`, status: "ready", skillCount: 2, referenceCount: 1 })),
+    agents: input.agentIds.map((id) => ({ id, name: `Agent ${Number(id.slice(-12))}`, status: "ready", overwrite: id === uuid(20), skillCount: 2, referenceCount: 1 })),
     progress: { stage: "checking", completed: input.agentIds.length, total: input.agentIds.length, bytesRead: 40, totalBytes: 100 },
     summary: { created: 0, skipped: 0, failed: 0, conflicts: 0 }, expiresAt: "2099-01-01T00:00:00.000Z",
   };
@@ -215,10 +215,10 @@ describe("dev Agent import user workflow", () => {
     await settle(() => expect(transport.get).toHaveBeenCalledWith(`${base}/users`, expect.objectContaining({ params: { q: "Bob + mail", limit: 20 } })));
     expect(candidateCalls()).toHaveLength(0);
     await chooseUser(USER_B);
-    expect(candidateCalls().at(-1)).toEqual([`${base}/users/${USER_B}/agents`, expect.objectContaining({ params: { q: "", limit: 20, onlyMissing: true } })]);
+    expect(candidateCalls().at(-1)).toEqual([`${base}/users/${USER_B}/agents`, expect.objectContaining({ params: { q: "", limit: 20 } })]);
     await type(modal().querySelector('[aria-label="搜索 dev Agent"]'), "搜索内容");
     await settle(() => expect(modal().textContent).toContain("Agent 80"));
-    expect(candidateCalls().at(-1)![1].params).toEqual({ q: "搜索内容", limit: 20, onlyMissing: true });
+    expect(candidateCalls().at(-1)![1].params).toEqual({ q: "搜索内容", limit: 20 });
     expect(view.container.querySelector("tbody")?.textContent).toContain("Eval 原生配置");
   });
 
@@ -260,7 +260,7 @@ describe("dev Agent import user workflow", () => {
     expect(transport.post).not.toHaveBeenCalled();
   });
 
-  it("selects only the current page's missing rows, preserves an explicit cross-page set and submits only those IDs", async () => {
+  it("selects new and existing IDs on the current page and preserves the explicit cross-page set", async () => {
     const view = await mount();
     const evaluationTab = [...view.container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent?.startsWith("评估 Agent"));
     await click(evaluationTab);
@@ -268,17 +268,17 @@ describe("dev Agent import user workflow", () => {
     expect(modal().querySelector<HTMLInputElement>('input[name="agent-import-purpose"][value="execution"]')?.checked).toBe(true);
     await chooseUser();
     expect(modal().querySelectorAll('[aria-label="dev 用户的候选 Agent"] tbody tr')).toHaveLength(20);
-    expect(modal().querySelector(`[role="checkbox"][aria-label="选择 Agent Agent 20（${uuid(20)}）"]`)).toHaveProperty("disabled", true);
+    expect(modal().querySelector(`[role="checkbox"][aria-label="选择 Agent Agent 20（${uuid(20)}）"]`)).toHaveProperty("disabled", false);
     await click(modal().querySelector('[role="checkbox"]'));
-    expect(modal().textContent).toContain("已选 19 / 50 个（跨页保留，本页已选 19 个）");
+    expect(modal().textContent).toContain("已选 20 / 50 个（跨页保留，本页已选 20 个）");
     await click(button("下一页", modal()));
     await settle(() => expect(modal().textContent).toContain("第 2 页"));
     await settle(() => expect(modal().querySelectorAll('[aria-label="dev 用户的候选 Agent"] tbody tr')).toHaveLength(2));
     expect(modal().querySelector('[aria-label="dev 用户的候选 Agent"]')?.textContent).not.toContain("Agent 1");
-    expect(candidateCalls().at(-1)![1].params).toEqual({ q: "", cursor: "page-2", limit: 20, onlyMissing: true });
+    expect(candidateCalls().at(-1)![1].params).toEqual({ q: "", cursor: "page-2", limit: 20 });
     expect(modal().textContent).toContain("跨页保留，本页已选 0 个");
     await chooseAgent(21);
-    expect(modal().textContent).toContain("已选 20 / 50 个（跨页保留，本页已选 1 个）");
+    expect(modal().textContent).toContain("已选 21 / 50 个（跨页保留，本页已选 1 个）");
     await click(button("上一页", modal()));
     await settle(() => expect(modal().querySelectorAll('[aria-label="dev 用户的候选 Agent"] tbody tr')).toHaveLength(20));
     expect(modal().querySelector('[role="checkbox"]')?.getAttribute("aria-checked")).toBe("true");
@@ -288,14 +288,31 @@ describe("dev Agent import user workflow", () => {
     const input = transport.post.mock.calls[0]![1] as AgentImportPreview;
     expect(input).toEqual({
       sourceUserId: USER_A, purpose: "evaluation", idempotencyKey: expect.any(String),
-      agentIds: [...Array.from({ length: 19 }, (_, index) => uuid(index + 1)), uuid(21)].sort(),
+      agentIds: [...Array.from({ length: 20 }, (_, index) => uuid(index + 1)), uuid(21)].sort(),
     });
-    expect(input.agentIds).not.toContain(uuid(20));
+    expect(input.agentIds).toContain(uuid(20));
     expect(input.agentIds).not.toContain(uuid(22));
     expect(input.agentIds).not.toContain(native.id);
-    expect(modal().textContent).toContain("所选 Agent 20");
+    expect(modal().textContent).toContain("所选 Agent 21");
     expect(modal().textContent).toContain("每行依赖数量可能重叠，不合计为去重资源数");
     expect(transport.post).toHaveBeenCalledTimes(1);
+  });
+
+  it("warns before overwriting a selected existing ID and displays its overwrite result", async () => {
+    await mount(); await open(); await chooseUser();
+    expect(modal().textContent).toContain("已存在，导入将覆盖");
+    await chooseAgent(20); await preview();
+    await click(button("确认导入 1 个 Agent", modal()));
+    const confirmation = document.querySelector('[role="alertdialog"]')!;
+    expect(confirmation.textContent).toContain("同 ID 的 Agent、Skill、参考资料会被覆盖");
+    expect(transport.post.mock.calls.filter(([path]) => path.endsWith("/apply"))).toHaveLength(0);
+    await click(button("开始后台导入", confirmation));
+    await settle(() => expect(document.querySelector('[role="alertdialog"]')).toBeNull());
+    task = { ...task!, status: "completed", agents: task!.agents.map((agent) => ({ ...agent, status: "overwritten" })),
+      summary: { created: 0, overwritten: 1, skipped: 0, failed: 0, conflicts: 0 } };
+    await click(button("刷新任务状态", modal()));
+    await settle(() => expect(modal().textContent).toContain("已覆盖 1"));
+    expect(modal().querySelector('[aria-label="逐 Agent 导入结果"]')?.textContent).toContain("已覆盖");
   });
 
   it("clears selection and preview on a user switch and ignores the old task's late read", async () => {
@@ -408,12 +425,12 @@ describe("dev Agent import user workflow", () => {
 
   it("reviews counts/conflicts and applies only a ready task without sending resource payloads", async () => {
     await mount(); await open(); await chooseUser(); await chooseAgent(1); await chooseAgent(2); await preview();
-    task!.agents[1] = { ...task!.agents[1]!, status: "conflict", message: "同 ID 的依赖内容不一致，不覆盖" };
+    task!.agents[1] = { ...task!.agents[1]!, status: "conflict", message: "同 ID 的依赖属于其他账号，不能覆盖" };
     task!.summary.conflicts = 1;
     await click(button("刷新任务状态", modal()));
-    await settle(() => expect(modal().textContent).toContain("同 ID 的依赖内容不一致，不覆盖"));
+    await settle(() => expect(modal().textContent).toContain("同 ID 的依赖属于其他账号，不能覆盖"));
     expect(modal().textContent).toContain("所选 Agent 2");
-    expect(modal().textContent).toContain("可新增 1");
+    expect(modal().textContent).toContain("可导入 1");
     expect(modal().textContent).toContain("冲突 1");
     expect(transport.post).toHaveBeenCalledTimes(1);
     await confirm(1);
@@ -531,6 +548,46 @@ describe("dev Agent import user workflow", () => {
     expect(transport.post).toHaveBeenCalledTimes(2);
     expect(view.container.querySelector("tbody")?.textContent).toContain("Eval 原生配置");
     expect(view.container.textContent).not.toMatch(/eval_native|dev_import|INTERNAL_CONNECTION|alice@example/u);
+  });
+
+  it("refreshes a same-ID Reference when reopening editor details within the fresh cache window", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    vi.spyOn(Date, "now").mockReturnValue(Date.UTC(2026, 9, 22));
+    const query = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 10_000 } } });
+    let reference = {
+      id: uuid(50), name: "Before.txt", mediaType: "text/plain", size: 4, status: "active",
+      attachmentCdnUrl: "https://files.example.test/before.txt",
+      createdAt: "2026-10-20T00:00:00.000Z", updatedAt: "2026-10-20T00:00:00.000Z",
+    };
+    const editor = createAgentEditorClient(async <T,>(path: string) => {
+      expect(path).toBe(`/api/user-references/${reference.id}`);
+      return structuredClone(reference) as T;
+    });
+    const detail = {
+      queryKey: userReferenceQueryKeys.detail(reference.id),
+      queryFn: ({ signal }: { signal: AbortSignal }) => editor.references.getReference(reference.id, signal),
+    };
+    await query.fetchQuery(detail);
+    await mount(query); await open(); await chooseUser(); await chooseAgent(20); await preview(); await confirm(1);
+    reference = {
+      ...reference, name: "After.txt", attachmentCdnUrl: "https://files.example.test/after.txt",
+      updatedAt: "2026-10-22T00:00:00.000Z",
+    };
+    task!.status = "completed";
+    task!.agents[0] = { ...task!.agents[0]!, status: "overwritten" };
+    task!.summary.overwritten = 1;
+    task!.progress = { ...task!.progress, stage: "finished", completed: 3 };
+    await poll();
+    await settle(() => expect(modal().textContent).toContain("已覆盖 1"));
+    const observer = new QueryObserver(query, detail);
+    const unsubscribe = observer.subscribe(() => undefined);
+    try {
+      await settle(() => expect(observer.getCurrentResult().data).toMatchObject({
+        id: uuid(50), name: "After.txt", attachmentCdnUrl: "https://files.example.test/after.txt",
+      }));
+    } finally {
+      unsubscribe();
+    }
   });
 
   it.each(["completed_with_errors", "failed", "outcome_unknown"] as const)("reports %s precisely instead of claiming everything is synced", async (status) => {
