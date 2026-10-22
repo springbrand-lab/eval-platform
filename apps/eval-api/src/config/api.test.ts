@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { loadAgentImportWorkerConfig } from "./agent-imports.js";
 import { loadApiConfig } from "./api.js";
 
 const environment = {
@@ -15,13 +16,17 @@ const environment = {
   EVAL_SP_TRUSTED_ORIGIN: "https://sp-web.test",
 };
 
+const importConfigurations = [
+  { name: "API", load: loadApiConfig },
+  { name: "import worker", load: loadAgentImportWorkerConfig },
+];
+
 describe("API configuration", () => {
-  it("uses Takt's existing SP credential for the optional Dev source", () => {
-    expect(loadApiConfig({
-      ...environment, EVAL_DEV_SP_API_ORIGIN: "https://dev-sp.test",
-      SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "existing-takt-sp-token",
+  it.each(importConfigurations)("uses the fixed Dev source with only Takt's credential for $name", ({ load }) => {
+    expect(load({
+      ...environment, SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "existing-takt-sp-token",
     })).toMatchObject({
-      EVAL_DEV_SP_API_ORIGIN: "https://dev-sp.test",
+      EVAL_DEV_SP_API_ORIGIN: "https://devrapi.springbrand.ai",
       SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "existing-takt-sp-token",
     });
   });
@@ -59,19 +64,19 @@ describe("API configuration", () => {
     expect(() => loadApiConfig({ ...environment, ...override })).toThrow();
   });
 
-  it("keeps imports optional and requires the source credential and separate origins", () => {
-    expect(loadApiConfig(environment)).not.toHaveProperty("EVAL_DEV_SP_API_ORIGIN");
-    const source = { EVAL_DEV_SP_API_ORIGIN: "https://dev-sp.test/", SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "takt-source-admin" };
-    expect(loadApiConfig({ ...environment, ...source })).toMatchObject({
-      EVAL_DEV_SP_API_ORIGIN: "https://dev-sp.test", SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "takt-source-admin",
+  it.each(importConfigurations)("keeps imports optional without allowing source overrides or matching targets for $name", ({ load }) => {
+    expect(load(environment)).not.toHaveProperty("EVAL_DEV_SP_API_ORIGIN");
+    const legacyOrigin = { EVAL_DEV_SP_API_ORIGIN: "https://other-dev.test" };
+    expect(load({ ...environment, ...legacyOrigin })).not.toHaveProperty("EVAL_DEV_SP_API_ORIGIN");
+    expect(load({
+      ...environment, ...legacyOrigin, SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "takt-source-admin",
+    })).toMatchObject({
+      EVAL_DEV_SP_API_ORIGIN: "https://devrapi.springbrand.ai", SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "takt-source-admin",
     });
-    for (const override of [
-      { EVAL_DEV_SP_API_ORIGIN: source.EVAL_DEV_SP_API_ORIGIN },
-      { ...source, EVAL_DEV_SP_API_ORIGIN: environment.EVAL_SP_API_ORIGIN },
-      { ...source, EVAL_DEV_SP_API_ORIGIN: "http://dev-sp.test" },
-    ]) expect(() => loadApiConfig({ ...environment, ...override })).toThrow();
-    expect(loadApiConfig({
-      ...environment, SP_PLATFORM_RESOURCE_ADMIN_TOKEN: source.SP_PLATFORM_RESOURCE_ADMIN_TOKEN,
-    })).not.toHaveProperty("EVAL_DEV_SP_API_ORIGIN");
+    expect(() => load({ ...environment, SP_PLATFORM_RESOURCE_ADMIN_TOKEN: " " })).toThrow();
+    expect(() => load({
+      ...environment, EVAL_SP_API_ORIGIN: "https://DEVRAPI.springbrand.ai:443/",
+      SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "takt-source-admin",
+    })).toThrow(/source and target SP origins must be different/u);
   });
 });

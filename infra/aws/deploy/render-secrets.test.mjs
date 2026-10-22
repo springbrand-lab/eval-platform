@@ -26,7 +26,6 @@ const database = {
   host: "database.example.test",
 };
 const source = {
-  EVAL_DEV_SP_API_ORIGIN: "https://dev-api.example.test",
   SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "source-export",
 };
 
@@ -61,6 +60,8 @@ test("dev credentials reach API and import consumer, never Run Worker", () => {
   const runner = overlay.services["run-worker"].environment;
   assert.equal(api.SP_PLATFORM_RESOURCE_ADMIN_TOKEN, "source-export");
   assert.equal(importer.SP_PLATFORM_RESOURCE_ADMIN_TOKEN, "source-export");
+  assert.equal(api.EVAL_DEV_SP_API_ORIGIN, undefined);
+  assert.equal(importer.EVAL_DEV_SP_API_ORIGIN, undefined);
   assert.equal(importer.EVAL_SP_SERVICE_SESSION_TOKEN, "target-session");
   assert.equal(runner.EVAL_SP_SERVICE_TOKEN, "target-harness");
   assert.equal(runner.EVAL_DEV_SP_API_ORIGIN, undefined);
@@ -70,18 +71,23 @@ test("dev credentials reach API and import consumer, never Run Worker", () => {
   assert.equal(importer.EVAL_WEB_API_TOKEN, undefined);
 });
 
-test("a source origin requires the existing Takt credential before emitting secrets", () => {
-  const result = render({ EVAL_DEV_SP_API_ORIGIN: source.EVAL_DEV_SP_API_ORIGIN });
-  assert.notEqual(result.status, 0);
-  assert.equal(result.stdout, "");
-  assert.match(result.stderr, /EVAL_DEV_SP_API_ORIGIN.*SP_PLATFORM_RESOURCE_ADMIN_TOKEN/u);
-  assert.doesNotMatch(result.stderr, /source-export|target-session/u);
+test("a legacy source origin alone neither enables imports nor reaches any process", () => {
+  const result = render({ EVAL_DEV_SP_API_ORIGIN: "https://other-dev.example.test" });
+  assert.equal(result.status, 0, result.stderr);
+  const overlay = JSON.parse(result.stdout);
+  assert.equal(overlay["x-agent-imports-enabled"], false);
+  assert.equal(overlay.services["import-worker"], undefined);
+  for (const service of Object.values(overlay.services)) {
+    assert.equal(service.environment.EVAL_DEV_SP_API_ORIGIN, undefined);
+    assert.equal(service.environment.SP_PLATFORM_RESOURCE_ADMIN_TOKEN, undefined);
+  }
 });
 
 test("source cannot resolve to the same HTTP origin as target", () => {
   const result = render({
-    EVAL_DEV_SP_API_ORIGIN: "https://EVAL-API.example.test:443/",
-    SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "source-export",
+    ...source,
+    EVAL_SP_API_ORIGIN: "https://DEVRAPI.springbrand.ai:443/",
+    EVAL_DEV_SP_API_ORIGIN: "https://other-dev.example.test",
   });
   assert.notEqual(result.status, 0);
   assert.equal(result.stdout, "");
@@ -95,14 +101,14 @@ test("only Eval's dedicated database is accepted", () => {
   assert.match(result.stderr, /Database secret must target eval-platform/u);
 });
 
-test("an existing Takt token alone neither enables imports nor reaches any process", () => {
-  const result = render({ SP_PLATFORM_RESOURCE_ADMIN_TOKEN: "existing-takt-sp-token" });
+test("a legacy source origin cannot override the fixed source when imports are enabled", () => {
+  const result = render({ ...source, EVAL_DEV_SP_API_ORIGIN: "https://other-dev.example.test" });
   assert.equal(result.status, 0, result.stderr);
   const overlay = JSON.parse(result.stdout);
-  assert.equal(overlay["x-agent-imports-enabled"], false);
-  assert.equal(overlay.services["import-worker"], undefined);
+  assert.equal(overlay["x-agent-imports-enabled"], true);
+  assert.equal(overlay.services["import-worker"].environment.SP_PLATFORM_RESOURCE_ADMIN_TOKEN, "source-export");
   for (const service of Object.values(overlay.services)) {
-    assert.equal(service.environment.SP_PLATFORM_RESOURCE_ADMIN_TOKEN, undefined);
+    assert.equal(service.environment.EVAL_DEV_SP_API_ORIGIN, undefined);
   }
 });
 

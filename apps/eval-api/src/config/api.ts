@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { requireEvalSpRelease, type EvalSpRelease } from "../db/release.js";
-import { agentImportEnvShape, refineAgentImportEnv } from "./agent-imports.js";
+import { agentImportEnvShape, refineAgentImportEnv, withFixedAgentImportSource } from "./agent-imports.js";
 import {
   absolutePathSchema,
   databaseEnvSchema,
@@ -40,7 +40,7 @@ const apiEnvSchema = databaseEnvSchema.extend({
   /** Lets the API re-sync a Run's scores; the Run Worker syncs them as Evaluations finish. */
   ...langfuseEnvShape,
   ...agentImportEnvShape,
-}).superRefine(refineLangfuseEnv).superRefine(refineAgentImportEnv);
+}).superRefine(refineLangfuseEnv).superRefine(refineAgentImportEnv).transform(withFixedAgentImportSource);
 
 export type ApiConfig = Omit<ReturnType<typeof takeLangfuseConfig<z.output<typeof apiEnvSchema>>>,
   "EVAL_SP_SOURCE_BRANCH" | "EVAL_SP_SOURCE_COMMIT"> & {
