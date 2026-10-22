@@ -6,7 +6,7 @@ import { listAgentImportCandidates, listAgentImportUsers } from "@/api-sdk/agent
 import { Button } from "@/components/ui/button";
 import { Checkbox, Input } from "@/components/ui/form";
 import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
-import { AGENT_IMPORT_PAGE_SIZE, agentImportKeys } from "./agent-import-state";
+import { AGENT_IMPORT_PAGE_SIZE, agentImportKeys, agentImportUserName } from "./agent-import-state";
 
 interface PickerProps {
   sourceUser: AgentImportSourceUser | null;
@@ -46,13 +46,13 @@ export function AgentImportPicker(props: PickerProps) {
           }}>
           <NativeSelectOption value="" disabled>{listedUsers.length === 0 ? "暂无 dev 用户" : "请选择 dev 用户"}</NativeSelectOption>
           {listedUsers.map((user) => <NativeSelectOption key={user.id} value={user.id}>
-            {user.name.trim() || "未命名用户"}
+            {agentImportUserName(user)}
           </NativeSelectOption>)}
         </NativeSelect>}
       {users.hasNextPage && <Button size="sm" disabled={props.disabled || users.isFetching} loading={users.isFetchingNextPage}
         onClick={() => void users.fetchNextPage()}>加载更多用户</Button>}
       <p className="text-xs text-text-muted">切换用户将清空尚未提交的选择与检查结果。</p>
-      {props.sourceUser && <p className="text-[13px]">已选用户：{props.sourceUser.name.trim() || "未命名用户"}</p>}
+      {props.sourceUser && <p className="text-[13px]">已选用户：{agentImportUserName(props.sourceUser)}</p>}
     </fieldset>
     <fieldset disabled={props.disabled} className="flex flex-wrap items-center gap-4 border-t border-border pt-3">
       <legend className="text-sm font-semibold">导入后的用途</legend>

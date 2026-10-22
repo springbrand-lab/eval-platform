@@ -58,6 +58,17 @@ function fixture(enabled = true, webApiToken?: string) {
 }
 
 describe("Agent import public HTTP control plane", () => {
+  it("accepts the official source account through the existing owner-scoped Agent route", async () => {
+    const f = fixture();
+    const response = await f.request("/api/agent-config-sync/users/springbrand-official/agents?limit=20");
+    expect(response.status).toBe(200);
+    expect(f.source.agents).toHaveBeenCalledExactlyOnceWith("springbrand-official", { limit: 20 });
+    const official = { ...body, sourceUserId: "springbrand-official" };
+    const preview = await f.request("/api/agent-config-sync/previews", jsonRequest("POST", official));
+    expect(preview.status).toBe(202);
+    expect(f.store.create).toHaveBeenCalledExactlyOnceWith(official, "fixed-export-connection", undefined);
+  });
+
   it("keeps ordinary Agent reads and startup semantics available while imports are disabled", async () => {
     const f = fixture(false);
     const config = await f.request("/api/agent-config-sync/config");

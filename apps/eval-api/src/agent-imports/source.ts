@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { agentImportSourceUserPageSchema, type AgentImportSourceUserPage } from "@eval-platform/eval-contracts";
+import { agentImportSourceUserIdSchema, agentImportSourceUserPageSchema, type AgentImportSourceUserPage } from "@eval-platform/eval-contracts";
 import { createSpHttpClient, throwSpClientError, type Fetch } from "../sp/http.js";
 import { importOriginSchema } from "../config/agent-imports.js";
 import { connectionId, sourceSnapshotSchema, uuid, type SourceSnapshot } from "./model.js";
@@ -58,10 +58,10 @@ export function createAgentImportSource(input: { origin: string; targetOrigin: s
         agentImportSourceUserPageSchema);
     },
     agents(id, input) {
-      return get(`/api/agent-config-export/users/${uuid.parse(id)}/agents?${query(querySchema.parse({ ...input, limit: input.limit ?? 20 }))}`, candidatesSchema);
+      return get(`/api/agent-config-export/users/${agentImportSourceUserIdSchema.parse(id)}/agents?${query(querySchema.parse({ ...input, limit: input.limit ?? 20 }))}`, candidatesSchema);
     },
     async snapshot(id, agentIds) {
-      const user = uuid.parse(id);
+      const user = agentImportSourceUserIdSchema.parse(id);
       const ids = z.array(uuid).min(1).max(50).parse(agentIds);
       if (new Set(ids).size !== ids.length) throw new TypeError("Duplicate selected Agent IDs");
       const snapshot = await get(`/api/agent-config-export/users/${user}/snapshot?${new URLSearchParams({ agentIds: ids.join(",") })}`, sourceSnapshotSchema);
