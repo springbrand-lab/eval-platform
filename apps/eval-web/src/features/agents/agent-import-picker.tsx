@@ -1,5 +1,5 @@
 import type { AgentImportCandidate, AgentImportSourceUser, AgentPurpose } from "@eval-platform/eval-contracts";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@springbrand/site-block";
+import { NativeSelect, NativeSelectOption, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@springbrand/site-block";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { listAgentImportCandidates, listAgentImportUsers } from "@/api-sdk/agent-imports-api";
@@ -38,15 +38,17 @@ export function AgentImportPicker(props: PickerProps) {
         if (!props.disabled && !users.isFetching) void (users.isFetchNextPageError ? users.fetchNextPage() : users.refetch());
       }} />}
       {users.isPending ? <LoadingBlock rows={2} />
-        : users.data && <div role="radiogroup" aria-label="选择 dev 用户" className="max-h-36 space-y-1 overflow-y-auto">
-          {listedUsers.map((user) => <label key={user.id}
-            className="flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 text-[13px] has-[:checked]:border-primary has-[:checked]:bg-primary/5">
-            <input type="radio" name="agent-import-user" value={user.id} checked={props.sourceUser?.id === user.id}
-              className="size-4 accent-primary" onChange={() => props.onUserChange(user)} />
-            <span className="min-w-0 break-words">{user.name.trim() || "未命名用户"}</span>
-          </label>)}
-          {listedUsers.length === 0 && <p className="text-[13px] text-text-muted">暂无 dev 用户。</p>}
-        </div>}
+        : users.data && <NativeSelect aria-label="选择 dev 用户" name="agent-import-user" className="w-full"
+          value={props.sourceUser?.id ?? ""} disabled={props.disabled || listedUsers.length === 0}
+          onChange={(event) => {
+            const user = listedUsers.find((item) => item.id === event.target.value);
+            if (user && !props.disabled) props.onUserChange(user);
+          }}>
+          <NativeSelectOption value="" disabled>{listedUsers.length === 0 ? "暂无 dev 用户" : "请选择 dev 用户"}</NativeSelectOption>
+          {listedUsers.map((user) => <NativeSelectOption key={user.id} value={user.id}>
+            {user.name.trim() || "未命名用户"}
+          </NativeSelectOption>)}
+        </NativeSelect>}
       {users.hasNextPage && <Button size="sm" disabled={props.disabled || users.isFetching} loading={users.isFetchingNextPage}
         onClick={() => void users.fetchNextPage()}>加载更多用户</Button>}
       <p className="text-xs text-text-muted">切换用户将清空尚未提交的选择与检查结果。</p>
