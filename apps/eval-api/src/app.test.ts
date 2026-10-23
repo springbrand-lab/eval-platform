@@ -74,6 +74,12 @@ function setup() {
       open: vi.fn(async (_projectId: string, _stage: string, _recordId: string, attemptId: string) =>
         attemptId === "a-1" ? new Blob(['{"usageEvents":[]}']).stream() : null),
     },
+    projectResultsExport: {
+      open: vi.fn(async (projectId: string, _signal: AbortSignal) => {
+        if (projectId !== "project-1") throw new RuntimeEntityNotFoundError("project", projectId);
+        return new Blob(["ZIP bytes"]).stream();
+      }),
+    },
     metrics: {
       getProjectOverview: vi.fn(async () => ({ projectId: "project-1" })),
       getSampleOverview: vi.fn(async () => ({ projectSampleId: "sample-1" })),
@@ -470,6 +476,49 @@ describe("Eval API HTTP layer", () => {
     const missing = await app.request("/api/projects/project-1/samplings/s-1/attempts/a-2/resource-snapshot", authorized());
     expect(missing.status).toBe(404);
     expect(await missing.json()).toMatchObject({ code: "RESOURCE_SNAPSHOT_NOT_FOUND" });
+  });
+
+  it("serves a gateway-authenticated evaluation-results ZIP attachment with no Run, Metrics or SP side effects", async () => {
+    const app = setup();
+    const request = requestApp({ ...app.runtime, webApiToken: "w".repeat(40) });
+    const path = "/api/projects/project-1/evaluation-results.zip";
+    expect((await request(path)).status).toBe(401);
+    expect(app.services.projectResultsExport.open).not.toHaveBeenCalled();
+    const response = await request(`${path}?runId=ignored&status=failed`, { headers: { "X-Eval-Web-Token": "w".repeat(40) } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/zip");
+    expect(response.headers.get("content-disposition")).toBe('attachment; filename="project-project-1-evaluation-results.zip"');
+    expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.has("content-length")).toBe(false);
+    expect(await response.text()).toBe("ZIP bytes");
+    expect(app.services.projectResultsExport.open).toHaveBeenCalledExactlyOnceWith("project-1", expect.any(AbortSignal));
+    expect(app.services.projects.get).not.toHaveBeenCalled();
+    expect(app.services.admission.preview).not.toHaveBeenCalled();
+    expect(app.services.admission.submit).not.toHaveBeenCalled();
+    expect(app.services.projectRuns.recollect).not.toHaveBeenCalled();
+    expect(app.services.projectRuns.stopRun).not.toHaveBeenCalled();
+    expect(app.services.metrics.getProjectOverview).not.toHaveBeenCalled();
+    expect(app.sp.getCreditBalance).not.toHaveBeenCalled();
+    expect(app.observation.file).not.toHaveBeenCalled();
+  });
+
+  it("returns Project-not-found JSON before a ZIP body and safely encodes the download filename", async () => {
+    const app = setup();
+    for (const id of ["missing", "foreign", "soft-deleted"]) {
+      const missing = await app.request(`/api/projects/${id}/evaluation-results.zip`, authorized());
+      expect(missing.status).toBe(404);
+      expect(missing.headers.get("content-type")).toContain("application/json");
+      expect(missing.headers.has("content-disposition")).toBe(false);
+      expect(await missing.json()).toMatchObject({ code: "PROJECT_NOT_FOUND" });
+    }
+    const projectId = '项目\\..%"?';
+    app.services.projectResultsExport.open.mockResolvedValueOnce(new Blob(["ZIP bytes"]).stream());
+    const response = await app.request(`/api/projects/${encodeURIComponent(projectId)}/evaluation-results.zip`, authorized());
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-disposition")).toBe(`attachment; filename="project-${encodeURIComponent(projectId)}-evaluation-results.zip"`);
+    expect(await response.text()).toBe("ZIP bytes");
   });
 
   it("reads the balance and grants credits only to the service account", async () => {

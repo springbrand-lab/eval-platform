@@ -24,6 +24,14 @@ export const remove: AppRouteHandler<typeof routes.remove> = async (c) => {
 export const evaluationOutputSchema: AppRouteHandler<typeof routes.evaluationOutputSchema> = async (c) =>
   ok(c, await c.var.services.projects.getEvaluationOutputSchema(c.req.valid("param").projectId));
 
+export const evaluationResults: AppRouteHandler<typeof routes.evaluationResults> = async (c) => {
+  const { projectId } = c.req.valid("param");
+  const body = await c.var.services.projectResultsExport.open(projectId, c.req.raw.signal);
+  const response = fileResponse({ body, contentType: "application/zip", contentLength: null });
+  response.headers.set("Content-Disposition", `attachment; filename="project-${encodeURIComponent(projectId)}-evaluation-results.zip"`);
+  return response as never;
+};
+
 export const replaceEvaluationPlan: AppRouteHandler<typeof routes.replaceEvaluationPlan> = async (c) =>
   ok(c, await c.var.services.projects.replaceEvaluationPlan(c.req.valid("param").projectId, c.req.valid("json")));
 

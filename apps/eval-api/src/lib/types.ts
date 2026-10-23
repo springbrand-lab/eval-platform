@@ -14,6 +14,7 @@ import type { ProjectRunView } from "../db/run-view.js";
 import type { createPostgresProjectRunControl } from "../db/runtime.js";
 import type { InitialResourceApi } from "../initial-resources.js";
 import type { ProjectService } from "../projects/service.js";
+import type { ProjectResultsExport } from "../projects/evaluation-results.js";
 import type { EvalSpClient, EvalSpUser } from "../sp/client.js";
 import type { ScoreSyncSummary } from "@eval-platform/eval-runtime";
 import type { SpObservationClient } from "../sp/observation.js";
@@ -22,6 +23,7 @@ import type { SpObservationClient } from "../sp/observation.js";
 export interface OwnerServices {
   readonly datasets: DatasetService;
   readonly projects: ProjectService;
+  readonly projectResultsExport: ProjectResultsExport;
   readonly agentConfigs: AgentConfigService;
   /** Always available: persisted owner-scoped progress, independent of optional import mutations. */
   readonly agentImportTasks: AgentImportTaskReader;

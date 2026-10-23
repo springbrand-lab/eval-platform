@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, DescriptionList, SectionLabel } from "@/components/ui/card";
 import { ProjectStatistics } from "./project-statistics";
 import { ProjectResults } from "./project-results";
+import { ProjectResultsDownloadButton } from "./project-results-download-button";
 import { CopyId, ProgressBar, Tabs } from "@/components/ui/data-display";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { EmptyState, ErrorBlock, LoadingBlock, Spinner } from "@/components/ui/feedback";
@@ -156,6 +157,7 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
         meta={project && <Badge>{project.sourceBranch}</Badge>}
         actions={(
           <>
+            <ProjectResultsDownloadButton projectId={projectId} disabled={!view.isSuccess || !project} />
             <Tooltip content={busy ? "当前运行结束后才能再次发起" : null}>
               <span>
                 <Button size="sm" variant="primary" icon={<Play />} disabled={busy}
