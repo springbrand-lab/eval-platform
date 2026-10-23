@@ -13,6 +13,8 @@ export const projectKeys = {
 export const listProjects = (signal?: AbortSignal) => api.get<Project[]>("/api/projects", { signal });
 export const getProject = (projectId: string, signal?: AbortSignal) =>
   api.get<ProjectView>(`/api/projects/${enc(projectId)}`, { signal });
+export const downloadProjectEvaluationResults = (projectId: string, signal?: AbortSignal) =>
+  api.blob(`/api/projects/${enc(projectId)}/evaluation-results.zip`, { signal, timeoutMs: 600_000 });
 export const createProject = (input: ProjectCreateInput) =>
   api.post<{ project: Project; run: RunHandle | null }>("/api/projects", input);
 export const deleteProject = (projectId: string) => deleteWithConfirmation(

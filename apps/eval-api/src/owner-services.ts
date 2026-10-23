@@ -17,6 +17,7 @@ import { createPostgresMetricsSource } from "./db/metrics.js";
 import { createPostgresObservationReader } from "./db/observation.js";
 import { createOutputSchemaCatalog } from "./db/output-schemas.js";
 import { createPostgresProjectPlanReader } from "./db/project-plans.js";
+import { createPostgresProjectResultsSource } from "./db/project-results.js";
 import { createPostgresProjectStore } from "./db/project-store.js";
 import type { EvalSpRelease } from "./db/release.js";
 import { createBundleCatalogs } from "./db/resource-catalog.js";
@@ -26,6 +27,7 @@ import { createPostgresRuntimeQueries } from "./db/runtime-queries.js";
 import { createInitialResourceApi } from "./initial-resources.js";
 import type { ApiRuntime } from "./lib/types.js";
 import { createProjectService } from "./projects/service.js";
+import { createProjectResultsExport } from "./projects/evaluation-results.js";
 import type { BundleDirectory } from "./sp/bundle-directory.js";
 import type { RunQueue } from "./run-worker-queue.js";
 import type { EvalSpClient } from "./sp/client.js";
@@ -81,6 +83,7 @@ export function createOwnerServices({ db, sp, bundles, release, runQueue, publis
       projects: createProjectService({
         ownerUserId, sourceBranch: release.sourceBranch, store: projectStore, outputSchemas, agentConfigs, admission,
       }),
+      projectResultsExport: createProjectResultsExport(createPostgresProjectResultsSource(db, ownerUserId)),
       agentConfigs,
       agentImportTasks: createAgentImportTaskReader(createPostgresAgentImportTaskReader(db, ownerUserId)),
       ...(agentImports === undefined || agentImportTarget === undefined ? {} : { agentImports: createAgentImportService({

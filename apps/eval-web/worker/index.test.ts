@@ -51,6 +51,56 @@ describe("eval-web Worker", () => {
     expect(fetcher.mock.calls.filter(([input]) => String(input).startsWith("https://takt.test"))).toHaveLength(1);
   });
 
+  it("passes a project result ZIP through without buffering or changing attachment protections", async () => {
+    const first = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    const last = new Uint8Array([0x50, 0x4b, 0x05, 0x06]);
+    let finish!: () => void;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(first);
+        finish = () => { controller.enqueue(last); controller.close(); };
+      },
+    });
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => String(input).startsWith("https://takt.test")
+      ? Response.json({ user: allowed })
+      : new Response(body, { headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": 'attachment; filename="project-1-evaluation-results.zip"',
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "X-Content-Type-Options": "nosniff",
+      } }));
+    const response = await handle(new Request("https://eval-web.test/api/projects/project-1/evaluation-results.zip", {
+      headers: { Authorization: "Bearer zip-download" },
+    }), env, fetcher);
+
+    expect(response.status).toBe(200);
+    expect(String(fetcher.mock.calls[1]![0])).toBe("https://eval-api.test/api/projects/project-1/evaluation-results.zip");
+    expect(response.headers.get("content-type")).toBe("application/zip");
+    expect(response.headers.get("content-disposition")).toBe('attachment; filename="project-1-evaluation-results.zip"');
+    expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    const reader = response.body!.getReader();
+    expect((await reader.read()).value).toEqual(first);
+    finish();
+    expect((await reader.read()).value).toEqual(last);
+    expect((await reader.read()).done).toBe(true);
+  });
+
+  it("propagates download cancellation to the upstream result stream", async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({ cancel });
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => String(input).startsWith("https://takt.test")
+      ? Response.json({ user: allowed })
+      : new Response(body, { headers: { "Content-Type": "application/zip" } }));
+    const response = await handle(new Request("https://eval-web.test/api/projects/project-1/evaluation-results.zip", {
+      headers: { Authorization: "Bearer cancelled-download" },
+    }), env, fetcher);
+
+    await response.body!.cancel("download cancelled");
+    expect(cancel).toHaveBeenCalledExactlyOnceWith("download cancelled");
+  });
+
   it("lets takt admins in and serves pages that only takt may frame", async () => {
     expect((await handle(api("admin"), env, takt({ ...allowed, access: { isAdmin: true, menuIds: [] } }))).status).toBe(200);
     const page = await handle(new Request("https://eval-web.test/projects"), env, takt(allowed));

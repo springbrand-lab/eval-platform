@@ -2,6 +2,12 @@
 
 内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。设计见 [Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
 
+## 项目评估结果下载
+
+`GET /api/projects/{projectId}/evaluation-results.zip` 在同一只读快照中导出项目当前留存的全部采样与评估记录，不受页面筛选或 Run 选择影响；未知、其他所有者或软删除项目返回 `404 PROJECT_NOT_FOUND`。ZIP 按 `project/dataset/sample/sampling` 的固定身份分层，共享用例按项目冻结的数据集归属分别保存。原始评估结果以独立 JSON 文件原样保存，包含无效结果；缺失或未完成结果只保存状态元数据。目录、元数据文件名与响应保护见 [HTTP 下载契约](../../docs/eval-http-api.md#projects)。
+
+下载只读取 Eval 已存事实，不运行 Agent、不补收结果、不读取 SP，不导出 Agent 配置正文、结果提交凭据、原始资源快照或 Workspace/证据文件内容。数据库读取及 ZIP 输出须有界流式处理，不一次性加载全部结果正文或整个压缩包。
+
 ## 进程与环境变量
 
 ### Agent overwrite imports (public Interface boundary)

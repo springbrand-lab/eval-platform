@@ -8,6 +8,8 @@ Eval 的内部管理界面：准备测试集与初始资源、上传评估结果
 
 统一 HTTP 客户端的 `maxResponseBytes` 使用 SDK 接受的最大值 `Number.MAX_SAFE_INTEGER`，支持读取超过 SDK 默认 10 MiB 上限的完整采样详情及其他 API 响应。
 
+项目页在“运行 / 重新评估”左侧提供“下载评估结果”：通过现有认证 HTTP 客户端读取 `GET /api/projects/{projectId}/evaluation-results.zip` 并下载 ZIP，不在浏览器遍历用例或构建压缩包。导出包含项目当前留存的全部采样与评估记录，按 `project/dataset/sample/sampling` 分层，不受当前筛选影响；运行期间允许下载后端一致性快照。下载中禁用重复点击并显示进度状态，失败保留页面并提示可重试；项目未加载时不可下载。原始结果与缺失状态的文件契约见 [HTTP 下载契约](../../docs/eval-http-api.md#projects)。
+
 Eval 目录删除及数据集成员变更的成功响应为 `204 No Content`，使用现有 HTTP SDK 的 `json` 模式接收空结果，不按成功信封解析；共享编辑器的 Skill/参考资料删除保留其原有成功结果，不改公共协议。错误仍由同一 Eval 错误目录解码，连接中断不能当作删除成功，也不自动重发写请求。
 
 所有用户可操作的删除共用 `delete-confirmation.ts`：响应不确定时，通过同一 HTTP SDK 最多只读确认 10 次，首次立即查询，后续复用 contracts 的 `IDEMPOTENT_RETRY_POLICY` / `idempotentRetryBackoffMs()`，从 250ms 指数退避、上限 10s，不另写配置或退避算法；确认已删立即沿用正常成功提示。Project、Dataset、Data、评估结果格式、素材/对话包及其中资源，仅接受各自明确的 HTTP 404 领域码；Agent Config 通过活动配置列表确认目标 ID 已移除，其详情在软删除后仍保留给旧 Chat 读取，不能用详情是否 404 判断删除结果；数据集成员移除须确认全部指定 Data ID 都已不在成员列表；Skill 使用 selected 查询确认 deleted 状态，参考资料通过其详情确认不存在。仍存在或瞬态读取失败可继续确认；权限、认证、取消、无关 404 等不可重试读取错误立即结束。未确认或预算耗尽均保留原删除错误，绝不重复 DELETE。正常成功不增加查询。共享编辑器的临时上传附件回收不属于用户删除入口，且没有已开放的读取契约，仍由共享模块自行清理，不伪造确认结果。

@@ -72,6 +72,19 @@ export const evaluationOutputSchema = createRoute({
   },
 });
 
+export const evaluationResults = createRoute({
+  method: "get",
+  path: "/{projectId}/evaluation-results.zip",
+  tags: ["Project"],
+  summary: "Download a read-only snapshot of every retained Sampling and Evaluation result in the Project",
+  request: { params },
+  responses: {
+    200: { description: "Evaluation-results ZIP attachment", content: { "application/zip": { schema: z.string() } } },
+    ...errorResponses,
+    ...notFoundResponse,
+  },
+});
+
 export const remove = createRoute({
   method: "delete",
   path: "/{projectId}",
