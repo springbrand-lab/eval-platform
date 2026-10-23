@@ -1,4 +1,6 @@
-import { TELEMETRY_PROJECTION_VERSION, telemetryBodyLength, telemetryContentFlags, telemetryOutputLength } from "./compact-resources.js";
+import type { JsonValue } from "@eval-platform/eval-contracts";
+import { telemetryBodyLength, telemetryContentFlags, telemetryOutputLength } from "./telemetry-content.js";
+import { inspectNativeTelemetry } from "./native-telemetry.js";
 import { record, text } from "../json.js";
 import type {
   CoveredNumericSummary,
@@ -12,7 +14,7 @@ import type {
 import { identity, type FactEntry, type FactStream, type ResourceDiagnostics } from "./resource-facts.js";
 import { coverage, summarizeNumbers } from "./statistics.js";
 
-type OperationKind = "generation" | "turn" | "tool";
+type OperationKind = "generation" | "poll" | "compaction" | "turn" | "tool";
 type OperationStatus = "completed" | "failed" | "cancelled" | "inProgress" | "unknown";
 
 const OPERATION_TYPES = new Set([
@@ -28,7 +30,7 @@ interface OperationEvents {
   readonly events: FactEntry[];
 }
 
-interface ObservedOperation {
+export interface ObservedOperation {
   readonly kind: OperationKind;
   readonly key: string;
   readonly status: OperationStatus;
@@ -47,6 +49,13 @@ interface ObservedOperation {
   readonly terminal: FactEntry | undefined;
   /** False when the events contradict each other. */
   readonly consistent: boolean;
+  readonly nativeDetails?: {
+    readonly inputLength: number | null;
+    readonly outputLength: number | null;
+    readonly attempt?: number;
+    readonly taskId?: number;
+    readonly tokens: Readonly<Record<string, JsonValue | undefined>>;
+  };
 }
 
 interface MarkerState {
@@ -74,21 +83,40 @@ export function aggregateTelemetry(
   stream: FactStream,
   diagnostics: ResourceDiagnostics,
   requestedTools: readonly (string | null)[] = [],
-): Pick<ResourceStatistics, "modelRequests"> & { readonly trajectory: Omit<TrajectorySummary, "diagnostics"> } {
-  const grouped = groupOperations(stream.entries, diagnostics);
-  const observed = grouped.operations.map((operation) => inspectOperation(operation, diagnostics));
-  const complete = stream.complete && grouped.complete && observed.every((operation) => operation.consistent);
+): Pick<ResourceStatistics, "modelRequests"> & { readonly trajectory: Omit<TrajectorySummary, "diagnostics">; readonly nativeUsage: FactStream } {
+  const historical = stream.entries.filter((entry) => !entry.native);
+  const grouped = groupOperations(historical, diagnostics);
+  const native = inspectNativeTelemetry(stream.entries, diagnostics);
+  const observed = [...grouped.operations.map((operation) => inspectOperation(operation, diagnostics)), ...native.operations];
+  const complete = stream.complete && grouped.complete && native.complete && observed.every((operation) => operation.consistent);
   const ofKind = (kind: OperationKind) => observed.filter((operation) => operation.kind === kind);
   const tools = ofKind("tool");
+  const nativeGenerations = native.operations.filter((operation) => operation.kind === "generation" || operation.kind === "poll");
   const toolNamesKnown = tools.every((operation) => operation.toolName !== null);
   const toolGroups = new Map<string | null, ObservedOperation[]>();
   for (const operation of tools) toolGroups.set(operation.toolName, [...toolGroups.get(operation.toolName) ?? [], operation]);
   for (const toolName of requestedTools) if (!toolGroups.has(toolName)) toolGroups.set(toolName, []);
   return {
-    modelRequests: operationStatistics(ofKind("generation"), complete),
+    nativeUsage: { ...native.usage, complete: stream.complete && native.usage.complete },
+    modelRequests: operationStatistics([...ofKind("generation"), ...ofKind("poll")], complete),
     trajectory: {
       coverage: coverage(complete, observed.length > 0),
       turns: operationStatistics(ofKind("turn"), complete),
+      compactions: operationStatistics(ofKind("compaction"), complete && historical.length === 0),
+      deferredPolls: operationStatistics(ofKind("poll"), complete && historical.length === 0),
+      modelInvocations: operationStatistics(observed.filter((operation) =>
+        operation.kind === "generation" || operation.kind === "compaction"), complete),
+      generationTasks: {
+        value: historical.length === 0 && (complete || nativeGenerations.length > 0)
+          ? new Set(nativeGenerations
+            .map((operation) => identity(operation.first.native!.resource.agentId, operation.first.native!.resource.sessionId,
+              operation.first.native!.submissionId, String(operation.nativeDetails?.taskId)))).size : null,
+        coverage: coverage(complete && historical.length === 0, nativeGenerations.length > 0),
+      },
+      requestRetries: {
+        generation: retryCount(ofKind("generation"), complete && historical.length === 0),
+        compaction: retryCount(ofKind("compaction"), complete && historical.length === 0),
+      },
       tools: operationStatistics(tools, complete),
       byTool: [...toolGroups.entries()]
         .map(([toolName, operations]) => toolMetric(toolName, operations, complete && (toolName === null || toolNamesKnown)))
@@ -185,7 +213,7 @@ function inspectOperation(operation: OperationEvents, diagnostics: ResourceDiagn
   }
   const contentFlags = events.reduce((flags, entry) => {
     const projection = entry.metricProjection;
-    const projected = projection?.version === TELEMETRY_PROJECTION_VERSION
+    const projected = projection?.version === 3
       && typeof projection.hasThinking === "boolean"
       && typeof projection.hasContent === "boolean"
       && typeof projection.thinkingKnown === "boolean"
@@ -300,8 +328,8 @@ function toolMetric(toolName: string | null, operations: readonly ObservedOperat
   return {
     toolName,
     ...operationStatistics(operations, complete),
-    inputLength: lengthSummary(operations.map((operation) => bodyLength(operation.start, "input")), complete),
-    outputLength: lengthSummary(operations.map((operation) => bodyLength(operation.terminal, "output")), complete),
+    inputLength: lengthSummary(operations.map((operation) => operation.nativeDetails ? operation.nativeDetails.inputLength : bodyLength(operation.start, "input")), complete),
+    outputLength: lengthSummary(operations.map((operation) => operation.nativeDetails ? operation.nativeDetails.outputLength : bodyLength(operation.terminal, "output")), complete),
   };
 }
 
@@ -367,10 +395,10 @@ function trajectoryStepMetrics(
   const stepsPresent = steps.length > 0;
   const thinkingKnown = stepsPresent
     ? [...stepFlags.values()].every((flags) => flags.thinking.known)
-    : turns.length === 0;
+    : turns.length === 0 || complete && turns.every((turn) => turn.first.native !== undefined);
   const contentKnown = stepsPresent
     ? [...stepFlags.values()].every((flags) => flags.content.known)
-    : turns.length === 0;
+    : turns.length === 0 || complete && turns.every((turn) => turn.first.native !== undefined);
   const generationLinksComplete = generations.unlinked === 0;
   const thinkingStepOperations = markedStepStatistics(steps, thinking, complete && generationLinksComplete, thinkingKnown);
   const contentStepOperations = markedStepStatistics(steps, content, complete && generationLinksComplete, contentKnown);
@@ -381,11 +409,13 @@ function trajectoryStepMetrics(
     const tokensComplete = markedCount.coverage === "complete";
     const tokens = (field: "inputTokens" | "outputTokens" | "totalTokens"): MetricNumber => markedCount.value === null
       ? { value: null, coverage: "unavailable" }
-      : diagnostics.sum(markedSteps.map((operation) => operation.terminal ?? operation.first), tokensComplete, "telemetryEvents", field, true, (entry) => (
-        entry.fact.type === "generation.finished"
-          ? diagnostics.number(entry, "telemetryEvents", record(entry.fact.payload)?.[field], field, true)
-          : null
-      ));
+      : diagnostics.sum(markedSteps.map((operation) => operation.terminal ?? operation.first), tokensComplete, "telemetryEvents", field, true, (entry) => {
+        const operation = markedSteps.find((step) => (step.terminal ?? step.first) === entry)!;
+        return operation.nativeDetails
+          ? diagnostics.number(entry, "telemetryEvents", operation.nativeDetails.tokens[field], field, true)
+          : entry.fact.type === "generation.finished"
+            ? diagnostics.number(entry, "telemetryEvents", record(entry.fact.payload)?.[field], field, true) : null;
+      });
     return { input: tokens("inputTokens"), output: tokens("outputTokens"), total: tokens("totalTokens") };
   };
   return {
@@ -397,4 +427,10 @@ function trajectoryStepMetrics(
     contentStepTokens: stepTokens(content, contentCount),
     unlinkedOperations: { tools: tools.unlinked, generations: generations.unlinked },
   };
+}
+
+function retryCount(operations: readonly ObservedOperation[], complete: boolean): MetricNumber {
+  const native = operations.filter((operation) => operation.nativeDetails?.attempt !== undefined);
+  const value = native.filter((operation) => operation.nativeDetails!.attempt! > 1).length;
+  return { value: complete || native.length > 0 ? value : null, coverage: coverage(complete, native.length > 0) };
 }

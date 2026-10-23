@@ -4,6 +4,7 @@ import { evaluatorAgent, subjectAgent, withoutSnapshots } from "../aggregation/a
 import type { MetricsEvaluation, MetricsSampling } from "../aggregation/model.js";
 import { aggregateMetrics, type MetricInput } from "../aggregation/index.js";
 import { createEvaluationOutputReader } from "../evaluators/index.js";
+import { compactResourceSnapshot } from "../aggregation/compact-resources.js";
 import type { DatasetMetricRow, Metrics, MetricsFacts, MetricsQuery, MetricsSource } from "./model.js";
 
 export class MetricsQueryError extends Error {
@@ -174,7 +175,20 @@ function prepareFacts(facts: MetricsFacts, query: MetricsQuery) {
 }
 
 export function createMetrics(dependencies: { readonly source: MetricsSource }): Metrics {
-  const load = async (query: MetricsQuery) => prepareFacts(structuredClone(await dependencies.source.read(structuredClone(query))), query);
+  const load = async (query: MetricsQuery) => {
+    const facts = structuredClone(await dependencies.source.read(structuredClone(query)));
+    const prepare = async <T extends { readonly resources?: import("@eval-platform/eval-contracts").AgentResourceCollection }>(attempt: T): Promise<T> => {
+      if (attempt.resources?.status !== "collected") return attempt;
+      return { ...attempt, resources: { ...attempt.resources, snapshot: await compactResourceSnapshot(attempt.resources.snapshot) } };
+    };
+    const samplings = await Promise.all(facts.samplings.map(async (sampling) => ({
+      ...sampling, executionAttempts: await Promise.all(sampling.executionAttempts.map(prepare)),
+    })));
+    const evaluations = await Promise.all(facts.evaluations.map(async (evaluation) => ({
+      ...evaluation, attempts: await Promise.all(evaluation.attempts.map(prepare)),
+    })));
+    return prepareFacts({ ...facts, samplings, evaluations }, query);
+  };
   const sampleBindings = (sample: ProjectSample) => ({ datasets: sample.datasetIds.length, data: 1, projectSamples: 1 });
   return {
     async getProjectOverview(input) {

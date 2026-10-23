@@ -1,7 +1,8 @@
 import type { AgentResourceScope, AgentResourceSnapshot, JsonValue } from "@eval-platform/eval-contracts";
 import { equalJson } from "@eval-platform/eval-contracts";
+import { HISTORICAL_SP_TRAJECTORY_FORMAT, PI_TRAJECTORY_FORMAT, TrajectoryFormatError, storedTrajectoryFormat } from "@eval-platform/eval-runtime/harness";
 import { record, text, type JsonRecord } from "../json.js";
-import { TELEMETRY_PROJECTION_VERSION } from "./compact-resources.js";
+import { TELEMETRY_PROJECTION_VERSION, nativeMetricSchema, nativeSnapshotProjectionSchema, telemetryFingerprint, type NativeMetricRecord } from "./native-facts.js";
 import type { MetricNumber, ResourceDiagnostic } from "./model.js";
 import { coverage } from "./statistics.js";
 
@@ -10,6 +11,8 @@ export type Stream = ResourceDiagnostic["stream"];
 export interface FactEntry {
   readonly fact: JsonRecord;
   readonly metricProjection?: JsonRecord;
+  readonly native?: NativeMetricRecord;
+  readonly fingerprint?: string;
   readonly ownerUserId: string;
   /** True when the Attempt that supplied this fact can still emit telemetry. */
   readonly canEmitTelemetry: boolean;
@@ -39,7 +42,7 @@ export class ResourceDiagnostics {
   readonly #keys = new Set<string>();
 
   report(kind: ResourceDiagnostic["kind"], stream: Stream, entry: FactEntry, message: string): void {
-    const eventId = text(entry.fact.eventId);
+    const eventId = entry.native?.sourceIdentity ?? text(entry.fact.eventId);
     const diagnostic = { kind, stream, scope: { ...entry.scope }, message, ...(eventId === undefined ? {} : { eventId }) };
     const key = JSON.stringify(diagnostic);
     if (this.#keys.has(key)) return;
@@ -90,7 +93,7 @@ function sourceIdentity(stream: Stream, ownerUserId: string, fact: JsonRecord): 
   if (stream === "usageEvents") return eventId ? identity(ownerUserId, eventId) : undefined;
   if (stream === "telemetryEvents") {
     const sessionId = text(record(fact.resource)?.sessionId);
-    return eventId && sessionId ? identity(sessionId, eventId) : undefined;
+    return eventId && sessionId ? identity(HISTORICAL_SP_TRAJECTORY_FORMAT, sessionId, eventId) : undefined;
   }
   const executionId = text(fact.executionId);
   if (executionId) return identity("action", executionId);
@@ -109,17 +112,50 @@ export function readStream(
   let duplicates = 0;
   const byIdentity = new Map<string, FactEntry | null>();
   for (const { ownerUserId, canEmitTelemetry, snapshot } of snapshots) {
+    const format = storedTrajectoryFormat(snapshot.trajectoryFormat);
+    if (stream === "usageEvents" && format === PI_TRAJECTORY_FORMAT) continue;
     if (!snapshot.finalized || snapshot.coverage[stream] !== "complete") complete = false;
+    if (format === PI_TRAJECTORY_FORMAT) {
+      const metadata = nativeSnapshotProjectionSchema.parse((snapshot as unknown as Record<string, unknown>).metricProjection);
+      if (!metadata.complete) complete = false;
+      if (stream === "telemetryEvents") {
+        for (const message of metadata.diagnostics) diagnostics.report("unsupported-record", stream,
+          { fact: {}, ownerUserId, canEmitTelemetry, scope: snapshot.scope }, message);
+      }
+    }
     for (const rawFact of snapshot[stream]) {
-      const fact = stream === "telemetryEvents" ? record(rawFact.event) ?? rawFact : rawFact;
+      let fact = stream === "telemetryEvents" ? record(rawFact.event) ?? rawFact : rawFact;
       const projection = stream === "telemetryEvents" ? record(rawFact.metricProjection) : undefined;
-      const metricProjection = (projection?.version === 1 || projection?.version === 2 || projection?.version === TELEMETRY_PROJECTION_VERSION)
-        && typeof projection.fingerprint === "string" ? projection : undefined;
+      let native: NativeMetricRecord | undefined;
+      let fingerprint: string | undefined;
+      let metricProjection: JsonRecord | undefined;
+      if (stream === "telemetryEvents") {
+        if (format === PI_TRAJECTORY_FORMAT) {
+          if (!projection || projection.version !== TELEMETRY_PROJECTION_VERSION || projection.sourceFormat !== PI_TRAJECTORY_FORMAT) {
+            throw new Error(`Unsupported native telemetry projection version: ${String(projection?.version)}`);
+          }
+          native = nativeMetricSchema.parse(projection.native);
+          fingerprint = text(projection.fingerprint);
+          if (!fingerprint) throw new Error("Native telemetry projection has no source fingerprint");
+          fact = { sourceIdentity: native.sourceIdentity };
+        } else {
+          if (fact.format !== undefined && fact.format !== HISTORICAL_SP_TRAJECTORY_FORMAT) throw new TrajectoryFormatError(fact.format);
+          if (projection) {
+            if (![1, 2, 3].includes(Number(projection.version)) || typeof projection.fingerprint !== "string") {
+              throw new Error(`Unsupported historical telemetry projection version: ${String(projection.version)}`);
+            }
+            metricProjection = projection;
+          }
+          fingerprint = metricProjection ? text(metricProjection.fingerprint) : telemetryFingerprint(fact);
+        }
+      }
       const entry: FactEntry = {
         fact, ownerUserId, canEmitTelemetry, scope: snapshot.scope,
         ...(metricProjection ? { metricProjection } : {}),
+        ...(native ? { native } : {}),
+        ...(fingerprint ? { fingerprint } : {}),
       };
-      const key = sourceIdentity(stream, ownerUserId, fact);
+      const key = native?.sourceIdentity ?? sourceIdentity(stream, ownerUserId, fact);
       if (key === undefined) {
         complete = false;
         diagnostics.report("missing-identity", stream, entry, `Cannot identify ${stream} record`);
@@ -131,20 +167,24 @@ export function readStream(
         continue;
       }
       duplicates += 1;
-      if (existing && existing.metricProjection && metricProjection
-        && existing.metricProjection.fingerprint === metricProjection.fingerprint) {
-        const existingVersion = typeof existing.metricProjection.version === "number" ? existing.metricProjection.version : 0;
-        const version = typeof metricProjection.version === "number" ? metricProjection.version : 0;
-        if (version > existingVersion) byIdentity.set(key, entry);
-        else if (version === existingVersion && !equalJson(existing.metricProjection, metricProjection)) {
+      if (existing && existing.fingerprint && fingerprint && existing.fingerprint === fingerprint) {
+        const existingVersion = typeof existing.metricProjection?.version === "number" ? existing.metricProjection.version : 0;
+        const version = typeof metricProjection?.version === "number" ? metricProjection.version : 0;
+        if (existing.metricProjection && metricProjection && version === existingVersion && !equalJson(existing.metricProjection, metricProjection)) {
           complete = false;
           diagnostics.report("conflicting-identity", stream, entry, "The same source identity has contradictory metric projections");
           byIdentity.set(key, null);
+        } else {
+          const selected = version > existingVersion ? entry : existing;
+          byIdentity.set(key, {
+            ...selected, canEmitTelemetry: existing.canEmitTelemetry === true || entry.canEmitTelemetry === true,
+            ...(selected.native ? { native: { ...selected.native, selected: existing.native?.selected === true || native?.selected === true } } : {}),
+          });
         }
         continue;
       }
-      if (existing && !(existing.metricProjection && metricProjection
-        ? existing.metricProjection.fingerprint === metricProjection.fingerprint : equalJson(existing.fact, fact))) {
+      if (existing && !(existing.fingerprint && fingerprint
+        ? existing.fingerprint === fingerprint : equalJson(existing.fact, fact))) {
         complete = false;
         diagnostics.report("conflicting-identity", stream, entry, "The same source identity has contradictory facts");
         byIdentity.set(key, null);

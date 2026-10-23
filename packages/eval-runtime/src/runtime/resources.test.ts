@@ -13,6 +13,10 @@ import {
 const SCOPE = { chatId: "chat-1", submissionId: "submission-1", idempotencyKey: "execution:sampling-1" };
 const READY = {
   receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 0, pendingRuntimeEvents: 0,
+  trajectory: { resource: { agentId: "root", sessionId: SCOPE.chatId }, submissionId: SCOPE.submissionId,
+    status: "delivered" as const, requiredClosed: true, pendingRecords: 0, children: [] },
+  runtimeBusiness: { actor: { resource: { agentId: "root", sessionId: SCOPE.chatId }, path: [] },
+    submissionId: SCOPE.submissionId, status: "delivered" as const, pendingRuntimeEvents: 0, quarantinedRuntimeEvents: 0, children: [] },
   actionCharges: { complete: true, unsettledExecutions: 0, missingExecutionIds: 0 },
 };
 
@@ -21,6 +25,7 @@ function snapshot(): AgentResourceSnapshot {
     scope: SCOPE,
     observedAt: "2026-10-08T00:00:00.000Z",
     finalized: true,
+    trajectoryFormat: "pi-trajectory/v1",
     coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
     usageEvents: [],
     telemetryEvents: [],
@@ -28,6 +33,12 @@ function snapshot(): AgentResourceSnapshot {
     readiness: READY,
   };
 }
+
+const nativeEntry = (id: number, data: object = {}) => ({
+  format: "pi-trajectory/v1", resource: { agentId: "root", sessionId: SCOPE.chatId }, submissionId: SCOPE.submissionId,
+  projection: { kind: "safe", policyId: "fixture", policyVersion: 1 },
+  record: { type: "entry", value: { id, conversationId: 1, kind: "future.source.entry", data } },
+});
 
 describe("raw resource snapshot validation", () => {
   it("accepts a pre-dispatch Chat/key scope while requiring the snapshot's real Submission ID", () => {
@@ -47,8 +58,8 @@ describe("raw resource snapshot validation", () => {
       parentRunId: "parent-1",
       unknownSourceField: [true, null, { custom: "native" }],
     };
-    const started = { eventId: "start-1", operationId: "tool-1", type: "tool.started", occurredAt: 20 };
-    const finished = { eventId: "finish-1", operationId: "tool-1", type: "tool.finished", occurredAt: 30 };
+    const started = nativeEntry(2, { sourceFact: "started", occurredAt: 20 });
+    const finished = nativeEntry(3, { sourceFact: "finished", occurredAt: 30 });
     const input = {
       ...snapshot(),
       usageEvents: [usage, usage],
@@ -65,18 +76,34 @@ describe("raw resource snapshot validation", () => {
     expect(output).not.toHaveProperty("toolCount");
   });
 
-  it("preserves incomplete/unfinalized source declarations without interpreting their records", () => {
+  it("preserves incomplete/unfinalized declarations and native extension fields", () => {
     const input = {
       ...snapshot(),
       finalized: false,
       coverage: { usageEvents: "partial", telemetryEvents: "complete", billingSettlements: "unavailable" },
-      telemetryEvents: [{ type: "generation.started", status: "provider-native-running" }],
+      telemetryEvents: [nativeEntry(2, { status: "provider-native-running" })],
     };
     expect(validateResourceSnapshot(input, SCOPE)).toEqual(input);
   });
 
+  it("preserves a public partial snapshot whose runtime could not bind a root resource", () => {
+    const input: AgentResourceSnapshot = { ...snapshot(), finalized: false,
+      coverage: { usageEvents: "partial", telemetryEvents: "partial", billingSettlements: "partial" },
+      readiness: { ...READY, stateUnreadable: true, pendingTelemetryEvents: null, pendingRuntimeEvents: null,
+        trajectory: { ...READY.trajectory, resource: null, status: "unreadable", requiredClosed: false, pendingRecords: null },
+        runtimeBusiness: { ...READY.runtimeBusiness, actor: { resource: null, path: [] },
+          status: "unreadable", pendingRuntimeEvents: null, quarantinedRuntimeEvents: null },
+        actionCharges: { complete: false, unsettledExecutions: 0, missingExecutionIds: 0 } },
+    };
+    const bytes = JSON.stringify(input);
+    expect(validateResourceSnapshot(input, SCOPE)).toBe(input);
+    expect(JSON.stringify(input)).toBe(bytes);
+    expect(() => validateResourceSnapshot({ ...input, finalized: true }, SCOPE)).toThrow(AgentResourceValidationError);
+  });
+
   it("keeps SP's readiness diagnostics and requires them on a freshly read snapshot", () => {
     const readiness = {
+      ...READY,
       receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 3, pendingRuntimeEvents: 0,
       actionCharges: { complete: false, unsettledExecutions: 1, missingExecutionIds: 0 },
     };
@@ -171,6 +198,7 @@ describe("raw resource snapshot validation", () => {
 
 describe("resource readiness validation", () => {
   const readiness = {
+    ...READY,
     receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 1, pendingRuntimeEvents: 0,
     actionCharges: { complete: false, unsettledExecutions: 1, missingExecutionIds: 0 },
   };
@@ -181,6 +209,39 @@ describe("resource readiness validation", () => {
     expect(() => validateResourceReadiness({ ...report, scope: { ...SCOPE, submissionId: "other" } }, SCOPE))
       .toThrow("Resource readiness does not match the requested operation scope");
     expect(() => validateResourceReadiness({ ...report, usageEvents: [] }, SCOPE)).toThrow(AgentResourceValidationError);
+  });
+
+  it("preserves unknown delivery and nullable counts rather than making them finalized or empty", () => {
+    const unknown = {
+      ...READY, pendingTelemetryEvents: null, pendingRuntimeEvents: null,
+      trajectory: { ...READY.trajectory, status: "unreadable", pendingRecords: null,
+        children: [{ ...READY.trajectory, resource: null, submissionId: null, status: "missing", pendingRecords: null }] },
+      runtimeBusiness: { ...READY.runtimeBusiness, status: "unreadable", pendingRuntimeEvents: null, quarantinedRuntimeEvents: null },
+    };
+    const report = { scope: SCOPE, observedAt: snapshot().observedAt, finalized: false, readiness: unknown };
+    expect(validateResourceReadiness(report, SCOPE)).toBe(report);
+    expect(validateResourceSnapshot({ ...snapshot(), ...report }, SCOPE)).toEqual({ ...snapshot(), ...report });
+    expect(() => validateResourceReadiness({ ...report, finalized: true }, SCOPE)).toThrow(AgentResourceValidationError);
+  });
+
+  it("does not accept absent native or business delivery, a wrong native root, or an unsafe record", () => {
+    const { trajectory: _trajectory, ...withoutTrajectory } = READY;
+    const { runtimeBusiness: _business, ...withoutBusiness } = READY;
+    for (const readiness of [
+      withoutTrajectory, withoutBusiness, { ...READY, trajectory: { ...READY.trajectory, submissionId: "old-submission" } },
+      { ...READY, runtimeBusiness: { ...READY.runtimeBusiness, actor: { resource: { agentId: "other", sessionId: SCOPE.chatId }, path: [] } } },
+    ]) expect(() => validateResourceSnapshot({ ...snapshot(), readiness }, SCOPE)).toThrow(AgentResourceValidationError);
+    const { projection: _projection, ...unsafe } = nativeEntry(2);
+    for (const event of [unsafe, { ...nativeEntry(2), ingestSeq: 1 }]) {
+      expect(() => validateResourceSnapshot({ ...snapshot(), telemetryEvents: [event] }, SCOPE)).toThrow(AgentResourceValidationError);
+    }
+  });
+
+  it("rejects cyclic readiness before recursive wire validation can overflow", () => {
+    const trajectory: Record<string, unknown> = { ...READY.trajectory };
+    trajectory.children = [trajectory];
+    expect(() => validateResourceSnapshot({ ...snapshot(), readiness: { ...READY, trajectory } }, SCOPE))
+      .toThrow(AgentResourceValidationError);
   });
 });
 

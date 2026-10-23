@@ -10,7 +10,7 @@ import { Badge, StatusBadge, type Tone } from "@/components/ui/badge";
 import { DescriptionList } from "@/components/ui/card";
 import { cn } from "@/lib/cn";
 import { formatDuration, formatMetricBytes, formatStatistic, formatUsd } from "@/lib/format";
-import { MetricValue } from "./metric-value";
+import { MetricValue, OperationValue } from "./metric-value";
 import { RESOURCES_PENDING_LABEL, unfinalizedResourceCount } from "./resource-collection";
 import { TokenMetrics } from "./token-metrics";
 import { COST_FIELDS } from "./metric-labels";
@@ -65,11 +65,11 @@ function OperationsTable({ label, caption, rows, emptyLabel = "暂无可用数�
       <TableBody>{rows.length === 0 ? <TableRow><TableCell colSpan={7} className="px-4 py-6 text-center text-text-muted">{emptyLabel}</TableCell></TableRow> : rows.map(({ label: name, value }, index) => <TableRow key={`${name}-${index}`}>
         <TableHead scope="row" className="max-w-64 whitespace-normal break-words px-4 py-3 font-medium text-text-strong">{name}</TableHead>
         <TableCell className="text-right font-semibold tabular-nums"><MetricValue metric={value.count} /></TableCell>
-        <TableCell className="text-right tabular-nums">{value.completed}</TableCell>
-        <TableCell className={`text-right tabular-nums ${value.failed > 0 ? "font-medium text-danger" : "text-text-muted"}`}>{value.failed}</TableCell>
-        <TableCell className="text-right tabular-nums text-text-muted">{value.cancelled}</TableCell>
-        <TableCell className="text-right tabular-nums">{value.inProgress}</TableCell>
-        <TableCell className="text-right tabular-nums text-text-muted">{value.unknown}</TableCell>
+        <TableCell className="text-right tabular-nums"><OperationValue value={value.completed} count={value.count} /></TableCell>
+        <TableCell className={`text-right tabular-nums ${value.failed > 0 ? "font-medium text-danger" : "text-text-muted"}`}><OperationValue value={value.failed} count={value.count} /></TableCell>
+        <TableCell className="text-right tabular-nums text-text-muted"><OperationValue value={value.cancelled} count={value.count} /></TableCell>
+        <TableCell className="text-right tabular-nums"><OperationValue value={value.inProgress} count={value.count} /></TableCell>
+        <TableCell className="text-right tabular-nums text-text-muted"><OperationValue value={value.unknown} count={value.count} /></TableCell>
       </TableRow>)}</TableBody>
     </Table>
   </div>;
@@ -91,11 +91,14 @@ function TrajectoryMetrics({ trajectory, modelRequests, stageStatus, showToolMea
     { label: "思考步骤", value: trajectory.thinkingStepOperations },
     { label: "内容步骤", value: trajectory.contentStepOperations },
     { label: "模型请求", value: modelRequests },
+    { label: "延迟轮询", value: trajectory.deferredPolls },
+    { label: "压缩请求", value: trajectory.compactions },
     { label: "工具调用", value: trajectory.tools },
   ];
   return <section aria-label="操作次数" className="flex min-w-0 flex-col gap-4">
     <div><div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-semibold text-text-strong">操作次数</h3>{stageStatus && <><span className="text-xs text-text-muted">阶段状态</span><StatusBadge status={stageStatus} /></>}</div><p className="mt-1 text-xs text-text-muted">下表是底层遥测操作统计；执行/评估 Agent 的阶段状态单独展示，未闭合操作不代表 Agent 仍在运行。</p></div>
     <OperationsTable label="操作次数" caption="处理轮、模型请求、思考步骤和工具调用分别计数；思考步骤和内容步骤可命中同一模型步骤，状态列只适用于可追踪的操作。" rows={operations} />
+    <p className="text-xs text-text-muted">原生生成任务 <MetricValue metric={trajectory.generationTasks} /> 个，实际模型调用 <MetricValue metric={trajectory.modelInvocations.count} /> 次。模型重试 <MetricValue metric={trajectory.requestRetries.generation} /> 次，压缩重试 <MetricValue metric={trajectory.requestRetries.compaction} /> 次。轮询不增加模型步骤，hook 和准备记录不作为模型请求。</p>
     <div className="space-y-3"><div><h4 className="text-sm font-semibold text-text-strong">按工具查看</h4><p className="mt-1 text-xs text-text-muted">每种工具一行，查看调用次数和结果状态。</p></div>
       <ToolStatisticsTable tools={trajectory.byTool} variant="operations" />
     </div>
@@ -128,6 +131,7 @@ function DurationMetrics({ statistics, durations }: { statistics: ResourceStatis
   const operations = [
     { label: "处理轮（Turn）", unit: "毫秒", summary: statistics.trajectory.turns.durationMs, format: formatDuration },
     { label: "模型请求", unit: "毫秒", summary: statistics.modelRequests.durationMs, format: formatDuration },
+    { label: "压缩请求", unit: "毫秒", summary: statistics.trajectory.compactions.durationMs, format: formatDuration },
     { label: "工具调用", unit: "毫秒", summary: statistics.trajectory.tools.durationMs, format: formatDuration },
   ];
   return <section aria-label="耗时明细" className="min-w-0 space-y-4">

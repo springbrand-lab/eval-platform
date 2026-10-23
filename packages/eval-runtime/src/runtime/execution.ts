@@ -70,6 +70,9 @@ export async function executeSampling(
     sleep: dependencies.sleep,
     collect: () => dependencies.harness.collectExecution({
       handle: subjectHandle(chatId),
+      ...(current.executionAttempts.at(-1)?.submissionId === undefined ? {} : {
+        submissionId: current.executionAttempts.at(-1)!.submissionId!,
+      }),
       ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
     }),
   });
@@ -311,6 +314,9 @@ export async function executeSampling(
       collectOutput: async (handle) => {
         observedOutput = await dependencies.harness.collectExecution({
           handle,
+          ...(current.executionAttempts.at(-1)?.submissionId === undefined ? {} : {
+            submissionId: current.executionAttempts.at(-1)!.submissionId!,
+          }),
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
         });
         return observedOutput;

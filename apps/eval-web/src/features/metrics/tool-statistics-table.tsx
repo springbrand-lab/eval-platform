@@ -1,7 +1,7 @@
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@springbrand/site-block";
 import type { ResourceStatistics } from "@/api-sdk/types";
 import { formatDuration, formatMetricBytes } from "@/lib/format";
-import { MetricValue } from "./metric-value";
+import { MetricValue, OperationValue } from "./metric-value";
 
 type ToolMetric = ResourceStatistics["trajectory"]["byTool"][number];
 type TableVariant = "operations" | "overview";
@@ -36,19 +36,19 @@ export function ToolStatisticsTable({
         <TableBody>{tools.length === 0 ? <TableRow><TableCell colSpan={7} className="px-3 py-5 text-center text-text-muted">{emptyLabel}</TableCell></TableRow> : tools.map((tool, index) => overview ? <TableRow key={`${tool.toolName ?? "unknown"}-${index}`}>
           <TableHead scope="row" className="px-3 font-medium text-text-strong">{toolName(tool)}</TableHead>
           <TableCell className="text-right font-semibold tabular-nums"><MetricValue metric={tool.count} /></TableCell>
-          <TableCell className="text-right tabular-nums">{tool.completed}</TableCell>
-          <TableCell className={`text-right tabular-nums ${tool.failed > 0 ? "font-medium text-danger" : "text-text-muted"}`}>{tool.failed}</TableCell>
+          <TableCell className="text-right tabular-nums"><OperationValue value={tool.completed} count={tool.count} /></TableCell>
+          <TableCell className={`text-right tabular-nums ${tool.failed > 0 ? "font-medium text-danger" : "text-text-muted"}`}><OperationValue value={tool.failed} count={tool.count} /></TableCell>
           <TableCell className="text-right tabular-nums">{formatDuration(tool.durationMs.mean)}</TableCell>
           <TableCell className="text-right tabular-nums">{formatMetricBytes(tool.inputLength.mean)}</TableCell>
           <TableCell className="pr-3 text-right tabular-nums">{formatMetricBytes(tool.outputLength.mean)}</TableCell>
         </TableRow> : <TableRow key={`${tool.toolName ?? "unknown"}-${index}`}>
           <TableHead scope="row" className="max-w-64 whitespace-normal break-words px-3 py-3 font-medium text-text-strong">{toolName(tool)}</TableHead>
           <TableCell className="text-right font-semibold tabular-nums"><MetricValue metric={tool.count} /></TableCell>
-          <TableCell className="text-right tabular-nums">{tool.completed}</TableCell>
-          <TableCell className={`text-right tabular-nums ${tool.failed > 0 ? "font-medium text-danger" : "text-text-muted"}`}>{tool.failed}</TableCell>
-          <TableCell className="text-right tabular-nums text-text-muted">{tool.cancelled}</TableCell>
-          <TableCell className="text-right tabular-nums">{tool.inProgress}</TableCell>
-          <TableCell className="pr-3 text-right tabular-nums text-text-muted">{tool.unknown}</TableCell>
+          <TableCell className="text-right tabular-nums"><OperationValue value={tool.completed} count={tool.count} /></TableCell>
+          <TableCell className={`text-right tabular-nums ${tool.failed > 0 ? "font-medium text-danger" : "text-text-muted"}`}><OperationValue value={tool.failed} count={tool.count} /></TableCell>
+          <TableCell className="text-right tabular-nums text-text-muted"><OperationValue value={tool.cancelled} count={tool.count} /></TableCell>
+          <TableCell className="text-right tabular-nums"><OperationValue value={tool.inProgress} count={tool.count} /></TableCell>
+          <TableCell className="pr-3 text-right tabular-nums text-text-muted"><OperationValue value={tool.unknown} count={tool.count} /></TableCell>
         </TableRow>)}</TableBody>
       </Table>
     </div>

@@ -1,4 +1,5 @@
 import type { AgentFramework, RecoveryPasses } from "./model.js";
+import type { AgentTrajectoryScope } from "./resources.js";
 
 /**
  * An evidence bundle freezes what a Subject produced: its artifacts and its complete trajectory,
@@ -76,6 +77,9 @@ export interface EvidenceManifest {
   readonly trajectory: {
     /** The source Harness declares the raw event format; Runtime does not interpret it. */
     readonly format: string;
+    /** Required for new native evidence; historical manifests are never rewritten. */
+    readonly scope?: AgentTrajectoryScope;
+    readonly cursor?: { readonly throughSeq: number };
     readonly parts: readonly EvidenceTrajectoryPart[];
     readonly events: number;
     /** False when the framework could not export its full trajectory; `incompleteReason` says why. */
@@ -107,6 +111,8 @@ export interface EvidenceExportProgress {
   readonly subjectInputs: readonly EvidenceExportSubjectInput[];
   readonly omitted: readonly EvidenceOmission[];
   readonly trajectory: {
+    readonly scope?: AgentTrajectoryScope;
+    readonly cursor?: { readonly throughSeq: number };
     /** Source cursor after the last event of the last stored part; 0 before any part. */
     readonly afterSeq: number;
     readonly parts: readonly EvidenceTrajectoryPart[];

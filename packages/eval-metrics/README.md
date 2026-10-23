@@ -48,17 +48,64 @@ Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sam
 
 ## 资源与轨迹
 
+新资源快照以公开 `trajectoryFormat: "pi-trajectory/v1"` 标记原生
+`telemetryEvents`。原生记录校验、bookkeeping 和来源身份复用
+`eval-runtime/harness` 及其上游 `@springbrand/eval-harness` 公共入口；指标解释只在本包。
+请求按实际 dispatched 的 `request` 计数，generation 与 compaction 分列；`fetchDeferred`
+单独记为 deferred poll，不增加 thinking/content Step 或 invocation。`generationTasks`
+按唯一原生 task 计数，retry 使用 request attempt；`request_start` 与 hook 不冒充模型调用。
+Host Turn 按 actor/Chat/Submission 归并，
+工具按原生 toolCall/toolResult 关联，耗时仅用原生明确的时间事实。Token 从原生响应读取，
+完整依赖通过同一个 `openTrajectory` reader 读取，但执行选择只信任 SP 明确的根与 required
+descendant membership 与原生不可变归属，不以模型 context 窗口裁剪实际工作；
+同执行被压缩/丢弃的请求、工具与离支 conversation 仍保留。源封口和交付证明完整性，
+未封口 prefix 只提供已观察值和 incomplete coverage。不从 origin、缺少 parent 或相同
+session 猜根。历史 execution 依赖也不是本次 work。子 Agent 明细和父工具 usage 按每项已覆盖值去重。
+Action/SuperLink 与模型积分仍只读正式 `billingSettlements`，不从轨迹估算或重复扣费。
+模型定义、参数与 extension/hook 安全变更仍保留在原始证据中。指标不要求重放模型输入；
+compaction 依据真实调用、usage 与原生 summary 统计，不依赖输入 recipe 或 prompt renderer。
+`cutoff: null` 的辅助 hook/custom task 调用也是独立的真实 invocation，
+按实际 outcome/usage 统计，不要求 canonical context 或完整输入快照。
+是否能成为根 final reply 与是否属于实际执行工作互不替代；缺失 usage 仍是未知，不变成零。
+
+新紧凑投影使用版本 6 和 source format，保留来源摘要、排除接收游标的原始事实指纹、
+scope fingerprint、选中记录标记、完整性诊断和指标所需字段，
+不伪装成完整原生记录或旧事件。原生只支持当前 v6；v4/v5 是未发布、未部署的中间草稿，
+不是历史用户记录。不支持的原生投影版本显式失败，不读取备用 RAW、不重新解释或迁移。
+`compactResourceSnapshot(snapshot)` 从原生源派生 v6，或校验已有 v6 的 scope、
+fingerprint 和 membership；读取不写回缓存或原文。历史无 format 的已存资源及历史 v1–v3
+投影仅按 `sp-trajectory/v1` 只读解释，不升级或重写旧证据。
+未知格式与投影版本显式报错。
+缺少响应、关联、耗时、required child 或 usage 时保留 partial/unavailable，不用零掩盖。
+异常 `request_end.response` 的原生 usage 可作为真实来源；interrupted 不变成免费请求。
+原生快照必须保留完整 public readiness，不能用历史 optional 形状接受新数据。
+缺少 seal/依赖时，空结算也不能证明零费用；有正式结算的已知数值仍保留部分覆盖。
+缓存另校验 source identity、fingerprint 和 selected record 的 execution scope，
+不能靠改 format、scope 或旧 version 绕过解释。
+旧 native v5 的 selected 曾错误等同 context 窗口，现拒绝复用，不就地升级；
+需从保留的原始快照重新派生。合法非 finalized 的 root-unavailable 快照返回
+unknown diagnostics，不从 Chat/外层 scope 猜 actor。identity-less required child
+仍令递归 public delivery gate 不完整，只汇报已知成员的 partial 值。
+
+`native-pi.test.ts` 使用公开 Pi 1.1 MemoryStorage/Harness、faux Models、真实 Tool
+和 compaction，再经公开 trajectory projector 消费；expected 来自实际 Models usage
+和 Tool 执行数。相关测试 devDependencies 与 lockfile 已使用现有离线缓存同步；
+隔离工作区的 frozen、lockfile-only 校验通过，未安装依赖或改动 node_modules。
+这不等于已发布 SDK/Harness 的验收，精确版本发布门禁仍保持不变。
+原生 `approval_decision` 作为完整证据保留，不增加模型调用、工具执行、Token
+或积分；无需为审批增加另一份指标事实或改写历史证据。
+
 所有数值观察共用 `NumericSummary`，返回有效 `count`、`missing`、total、mean、总体 variance、min、max、median。均值与方差仅以有值的 N 为分母；缺失不补零，真实零参与。N=0 时各统计为 null，N=1 时方差为 0。方差单位是原数值单位的平方。
 
 每层的 `executionAgent` / `evaluationAgents` 是 `AggregatedResourceStatistics`，在全范围原始事件去重后的累计资源上提供缓存命中率，并含 `distribution`：从各 Subject / Evaluator 的原始 Attempts 经同一资源解释器形成单 Agent 观察，再统计 Token（含缓存）、积分/成本、轮数、模型/工具次数及结果、思考步骤、内容步骤与两类对应的 Token、各工具和模型的分布。缓存命中率由 `cacheRead / (input + cacheRead)` 在 Metrics 内计算，并保留输入与缓存读取两者中较弱的 coverage；分母为零时为 null。思考步骤和内容步骤都以唯一 `generation` operation 作为一个模型 Step；一个 Turn 可以包含多个 Step，一个 Step 也可以同时命中两类，因此两类数量、状态和耗时可以重叠，不能相加推算处理轮。分组归属与数值完整性分别判断：完整事实证明未调用某类型时才产生真实零，其他类型的数值缺失不影响这个零；存在可能归入该类型的未知模型或工具名时，不能证明缺席，记为缺失，已知部分也不能标为 complete。分组与补零都由原始资源解释器处理，展示层不从累计数值猜测归属。工具长度和调用耗时仍按单次调用统计，Agent 时长按单 Agent，Schema 数值按字段观察值。绝不平均 Dataset/Sample 的下层汇总。
 
-原始 `AgentResourceSnapshot` 是费用和 Token 的唯一来源：模型账单按 `accountId + eventId`、Action 按 `executionId`、遥测按 `sessionId + eventId` 去重；不重算价格，不把 reasoning 再加进 total；失败、取消、重启 Attempt 的消耗照常计入。已提交但没有收集记录的 Attempt 记为 `uncollected` 并使结果不完整；从未提交的 Attempt 不制造缺失。缺失值为 null 并带 coverage（complete/partial/unavailable）与 diagnostics，只有完整空流才证明 0。
+原始 `AgentResourceSnapshot` 是费用和 Token 的唯一来源：模型账单按 `accountId + eventId`、Action 按 `executionId` 去重；原生写入按公共 `trajectoryRecordIdentity`（actor、Chat、write type、native ID）去重，不以接收顺序 `ingestSeq` 充当来源身份；仅历史 v1 遥测使用其归档 `eventId`。不重算价格，不把 reasoning 再加进 total；失败、取消、重启 Attempt 的消耗照常计入。已提交但没有收集记录的 Attempt 记为 `uncollected` 并使结果不完整；从未提交的 Attempt 不制造缺失。缺失值为 null 并带 coverage（complete/partial/unavailable）与 diagnostics，只有完整空流才证明 0。
 
-轨迹指标来自每个 Attempt 已保存的 SP Telemetry 事件，跨 Attempt/分页合并后按 `sessionId + operationId` 归并操作：
+轨迹指标来自每个 Attempt 已保存的原生记录：Host Turn 按 actor/Chat/Submission，模型请求按 actor/Chat/Submission/requestId，工具按会话内原生调用与结果关联。歧义关联保留诊断而不靠到达顺序猜配对。只有历史 v1 只读解释使用 `sessionId + operationId` 归并操作：
 
 - Turn 数及 completed/failed/cancelled/inProgress/unknown；`inProgress` 只表示该操作所属的 Attempt 仍处于活跃状态。Attempt 已进入终态但遥测缺少对应终端事件时，操作归为 `unknown`；这类遥测缺口不改变执行或评估阶段本身的终态。
-- 按 `toolName` 的调用数、结果、耗时，输入长度（`tool.started` 的 `payload.input`）与返回长度（`tool.finished` 的 `payload.output`，缺失时用 `response`，不相加），均为规范 JSON 的 UTF-8 字节数；缺失或被 SP 脱敏（`[CONTENT OMITTED]`/`[REDACTED]`）记为 missing；
-- 思考步骤：每个 `generation` operation 是一个模型 Step；该 Step 自身或所属 Turn 的输出中出现 `thinking`、`signature` 或 `*Signature` 标记即命中。内容步骤：同一模型 Step 自身或所属 Turn 的输出中出现 `content` 标记即命中。一个 Turn 可以包含多个 Step，一个 Step 可以同时属于两类；工具调用仍按独立的 `tool` operation 统计。思考步骤 Token 和内容步骤 Token 分别汇总命中 Step 的 `generation.finished` input/output/total；同一 Step 同时命中两类时两边都会保留。没有父 Turn 但 Step 自身带有 marker 时仍按 Step 统计并保留未关联诊断，但 coverage 为 partial；既没有父 Turn 也没有自身 marker 时，相关分类为 partial/unavailable，不用减法推算。
+- 按 `toolName` 的调用数、结果、原生 `toolResult.durationMs`；输入长度为 `toolCall.arguments`，返回长度为工具返回的 `{content, details?}`，均使用规范 JSON 的 UTF-8 字节数，不计身份、状态与时钟字段。嵌套工具保留自身明确的参数字节数、状态与耗时；缺少返回或原生耗时不使用外层时长、hook 时长或模型到结果的间隔猜补。仅历史 v1 使用归档 `tool.started.payload.input` 与 `tool.finished.payload.output`（缺失时用 `response`，不相加）。缺失或脱敏正文记为 missing；
+- 思考步骤：每个已 dispatch 的 generation request 是一个模型 Step，关联原生 assistant 输出的 `thinking`、`signature` 或 `*Signature` 标记；内容步骤独立按 `content` 标记判定。一个 Turn 可以包含多个 Step，一个 Step 可以同时属于两类；工具调用独立统计。两类 Token 分别使用命中响应的原生 usage，同一 Step 同时命中时两边保留。仅历史 v1 使用其 Step/Turn 输出标记与 `generation.finished` Token。未关联 Turn 保留诊断，分类 coverage 为 partial/unavailable，不用减法推算；compaction 与 request retry 单独列出，hook 不计为 request。
 
 
 ## JSON Schema 输出字段

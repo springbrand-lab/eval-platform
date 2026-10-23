@@ -18,6 +18,7 @@
   "dependencies": {
     "@eval-platform/eval-contracts": "workspace:*",
     "@eval-platform/eval-dataset": "workspace:*",
+    "@springbrand/eval-harness": "0.1.0-alpha.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {

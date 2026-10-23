@@ -328,6 +328,31 @@ Agent 用途由 Eval 写入 `eval_agent_config_purposes`，只接受 `execution`
 
 ## SP Harness 与 Bundle 目录
 
+新运行的证据分页与资源快照只接收 `@springbrand/eval-harness` 根入口公开的
+`pi-trajectory/v1`。原始 native fields、分页游标、大小限制和断点续传保持不变；
+Harness 不生成旧 custom events。最终回复的选择复用 `eval-runtime/harness`，
+以准确的根 actor、Chat、Submission 和 completed Host terminal 限定原生 assistant。
+已归档 `sp-trajectory/v1` 证据只读打开/导入，不重新导出、不重写字节。
+Metrics 紧凑投影由 `eval-metrics` 单独版本化，API 不实现指标或 Pi context 算法。
+原生请求审计保留模型定义、有效参数、安全变更、结果与响应；canonical Pi 会话上下文不等于
+模型输入的完整快照，也不依赖 compaction 输入 recipe/renderer。普通 Chat 呈现不在本次范围内。
+generation 的 request/preparation 必须显式记录 cutoff；null 表示未绑定 canonical context，
+不能变成 latest。辅助 hook/custom task 调用保留独立 invocation 与实测 usage，不成为根回复，
+也不使合法的原生 primary 回复失效。实际执行工作统计不受这项回复筛选影响。
+Metrics 只支持当前原生 v6，未发布的 v4/v5 草稿与其他不支持的原生版本显式失败。
+API 只读取现有 Metrics 投影，没有备用 RAW 查询、迁移或缓存/归档写回。
+真正历史 `sp-trajectory/v1` 的 metric v1–v3 保持字节不变、只读可用。
+公开依赖链与本地诊断的区别见 [原生轨迹验收](../../docs/native-trajectory-acceptance.md)。
+当前已安装 Harness 版本尚不包含这组公共导出；正式依赖 pin/lock 验证须等上游发布，
+临时公共 source 验证不代表已发布包验证。
+
+资源 readiness 保留公开的 `trajectory`、`runtimeBusiness` 和 nullable pending counts。
+Runtime 与 API 共用 Harness 的公共类型约束校验，不从事件另算 readiness。新输出引用必须带
+native format、scope 与 fixed cursor，并与已知的本次 Submission 对齐。证据导出先固定公开
+scope/cursor，分页与续传不扩大边界。观察接口与 Web 共用 safe native history page 读取，
+缺 format 或 safe marker 在 API 边界即失败，不把不安全记录转发给 Web。上游失败保留 cause、
+错误码和 request ID；不是所有 409 都代表 Chat identity 输入冲突。
+
 readiness 与快照请求接收 Runtime 的本地 `AbortSignal`，使用现有 HTTP SDK 取消请求和正文读取；取消保留其分类，不包装成网络故障。Runtime 统一资源预算、等待和放弃通知，下载名额直到真实请求与原子保存结束才释放，详见 [运行时合同](../../packages/eval-runtime/README.md)。
 
 `src/sp/harness.ts` 用服务凭证确保 Inbox Chat、初始化、提交/重启、按键校准、收集完整产物/轨迹、原始资源、Evaluator 原样的 `structuredOutput` 结果文件，以及按轨迹读取 Evaluator 最后一条回复（`readFinalReply`）；`sp/submission-observer.ts` 以 WebSocket 终态推送为主，Ping/Pong 检测静默失活，断线后按已知 Submission ID 读取一次权威状态（404 表示 Submission 或 Chat 已不存在，不回退按键读取）并对同一 Submission URL 有限重连；瞬态错误只表示状态未知，预算用尽时抛出可重试的 “status unconfirmed” 错误，健康连接期间不轮询。资源先经无事件的 readiness 路由等待 SP 定稿，再只完整下载一次快照；证据读取总是携带 `submissionId`。SP HTTP 请求（含 readiness）默认最多等待 60 秒，停止调用最多 10 秒；资源快照与证据传输（流式，可达数百 MB）单独最多等待 5 分钟，JSON 响应上限为 V8 最大字符串长度（约 512 MiB），超限明确报不可重试错误。证据 GET 的 `409 EVIDENCE_NOT_READY` 可重试，其他 409 不重试；证据导入流式 PUT 并边传边校验大小与 SHA-256；单个证据文件上限取 `DEFAULT_EVIDENCE_LIMITS` 与 `@springbrand/eval-harness@0.1.0-alpha.5` 的 `EVAL_EVIDENCE_FILE_MAX_BYTES` 中较小者，现为 95 MB。Harness 的 `log` 事件由 Worker 写入 pino，不含正文或凭证。当前只支持 `sp` 框架，`codex`、`cc` 明确拒绝。服务契约、Bundle 文件布局与校验规则见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。SP 服务路由已在独立 SP 分支实现，真实跨部署联调仍需完成。

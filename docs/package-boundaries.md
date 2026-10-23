@@ -50,6 +50,44 @@ The arrows describe allowed consumption direction. The contract package must not
 
 ### Evidence export and import
 
+New SP reads use only `pi-trajectory/v1`, through the root public exports of
+`@springbrand/eval-harness`. `eval-runtime/harness` owns format validation, native
+record presentation and Submission-scoped final-reply selection shared by the
+API and Web. Canonical Pi conversation context-at and request audit facts use
+the public `openTrajectory` reader, never a second reconstruction in Eval.
+Request inspection retains model definitions/options, safe audit steps, outcome
+and response. It does not replay model inputs, expose full input before/after
+snapshots, or require a compaction renderer/recipe. Source identity includes
+the actor, Chat, native write type and native ID. The page cursor is receiving
+store order, not a native ID.
+Generation request/preparation cutoffs are required and explicitly nullable:
+null means `canonicalContext: null`, never latest context. Compaction remains
+anchored. Auxiliary hook/custom task Models invocations retain real ownership
+and measured outcome/usage without a conversation binding. They cannot become
+or invalidate the root native primary reply, but remain counted execution work.
+
+The shared Harness native execution reader requires SP's explicit root and
+required descendant resource/Submission identities. All context dependencies
+remain available to Pi, including historically executed records with immutable
+birth attribution. Explicit execution membership selects all observed work,
+including compacted/discarded entries and owned off-branch conversations; source
+closure/delivery proves completeness. Pi's seal context separately selects the
+model-visible branch for replies, never the accounting work set. API and Web share
+safe live/history page validation; missing format is never historical fallback.
+Expanded canonical context, request and typed hook values delegate to the SDK
+reader; other safe change records remain unchanged audit evidence.
+New output collection also correlates a known Submission before accepting the
+output reference; it does not silently accept a previous Chat attempt.
+
+`sp-trajectory/v1` remains a read-only format for already stored evidence and
+resource snapshots, including explicit historical compact-projection versions.
+Opening/importing those bundles does not rewrite their manifests, hashes or
+JSONL bytes. New Harness reads, exports and observation pages have no historical
+fallback. Unknown formats fail explicitly. Metrics owns native metric
+projections and interpretation; it does not turn native records into the retired
+custom-event protocol. Billing settlements remain the only source of charged
+credits.
+
 The existing Harness/EvidenceStore seam owns one immutable evidence bundle per successful Subject execution. The Harness exports produced artifacts, original Subject Material files resolved from the Project's fixed references, and the complete raw source trajectory in order. EvidenceStore stores both file groups by content hash and splits trajectory JSONL at event boundaries within the file byte limit; it never normalizes or discards source event fields. The manifest records Subject input identities, artifacts, ordered trajectory parts with sizes/hashes/event counts, completeness and explicit artifact omissions. Runtime passes only the frozen Subject Material references to export, never live Dataset contents. An Evaluator receives its own initialization first, then all evidence files, and the manifest last; the SP adapter uses the public package's evidence path helpers and checks path, size and hash receipts. An event larger than the file limit is never dropped or truncated: the export fails with an explicit non-retryable error before any part is stored, and the SP import likewise refuses a bundle with a file above SP's per-file limit before writing anything.
 
 Export is resumable without a second job store. `EvidenceStore.resume()` freezes the listing and `exportedAt` on the first pass, stores each missing artifact/Subject input by content hash and continues trajectory parts from a persisted source cursor (`ExportedEvidence.readTrajectory(afterSeq)`), then writes the deterministic manifest once; without saved progress it starts a new export. Runtime persists that progress after every stored file or part as `Sampling.evidenceExport` through the conditional Sampling update, bound to the Subject Submission ID that `Harness.exportEvidence` also receives; progress of another Submission is never reused. A later pass reads only what is missing, so the same evidence ID results. After `EVIDENCE_EXPORT_MAX_PASSES` failed passes, or a non-retryable failure, the execution fails with `evidence export failed…`, keeping its output and progress; a manual recollection resumes that progress with a fresh pass budget. Export failures never resubmit or restart the Subject Agent, and Evaluations stay queued until the bundle is stored. No legacy single-file trajectory or alternate Workspace initialization branch is retained.
@@ -108,7 +146,7 @@ Evaluation requires `sampling.evidence`; otherwise it fails with "sampling has n
 
 Each submitted execution/evaluation attempt owns a persisted `AgentResourceState`; the raw snapshot itself is stored apart from it (see [Attempt resource snapshots](#attempt-resource-snapshots)). Before dispatch, Runtime persists the pending operation scope as `chatId + idempotencyKey`; SP assigns the actual Submission ID on acceptance, which Runtime saves on the Attempt immediately after the receipt or recovery lookup. A collected resource snapshot must include `chatId + submissionId + idempotencyKey`; the Harness may resolve the operation by Chat and key if the receipt is uncertain. Runtime calls the required public `Harness.collectAgentResources()` after terminal observation or uncertain submission/status failure, before collecting outputs, deciding a restart or publishing the stage's terminal state. Creation/initialization failures that never dispatch have no resource collection. Failed, interrupted and cancelled submissions are collected too. Every restart keeps the previous attempt's facts; a separately requested evaluation keeps its own facts in its new EvaluationRecord. Store updates atomically persist the snapshot, attempt and its resource state with the owning Sampling/EvaluationRecord. No resource ledger, database client or DO storage access is added to Runtime.
 
-SP supplies an operation-scoped, consistent snapshot containing only that operation's new work and descendants, excluding imported Session history and shared Subject evidence. `usageEvents`, `telemetryEvents` and `billingSettlements` contain the original JSON records: all fields, missing fields, null values, source identities, parent/child relationships, ordering and duplicates are retained. Runtime validates only the requested scope, collection envelope and lossless JSON serializability; it does not extract model requests/tools/Turns, normalize statuses/Token fields, merge events, deduplicate, calculate totals/durations, convert currencies or reprice billing. Source `coverage` and `finalized` metadata are preserved rather than used to derive a second resource-completeness result. Runtime stores no processed resource metrics.
+SP supplies an operation-scoped, consistent snapshot of new work and descendants, together with immutable native dependencies. Dependencies can include historical execution records; origin alone is not execution membership. Shared Subject evidence is not new work. `trajectoryFormat` is required on new downloads and must be `PI_TRAJECTORY_FORMAT`. `usageEvents`, `telemetryEvents` and `billingSettlements` retain original JSON values, ordering, duplicates and future native value fields. Runtime validates requested scope, lossless JSON, safe public records and public readiness, preserving `trajectory`, `runtimeBusiness` and nullable pending counts. Unresolved delivery cannot masquerade as finalized. It does not normalize model/Token facts, deduplicate, calculate metrics or reprice billing. Source `coverage/finalized` are not overwritten with a second completeness fact. Unmarked saved historical snapshots are a read-only Metrics input, never a new-download fallback.
 
 Resource reads use the Runtime's fixed ten-retry budget and backoff; for downloads the count is saved on the Attempt before each one, so it survives a crashed process. Retry re-reads the same scope and never creates/restarts an Agent or resubmits work. `AgentResourceState.status` is only `pending | collected | failed`: collected means the original snapshot was saved, not that the source is complete. When the download budget is spent, a collected snapshot is kept and otherwise the Attempt is `failed`, both marked `exhausted` and no longer owed; the refresh reports it through `onError`, never resource payloads. SP's `readiness` diagnostic is required on every newly read snapshot and stored unchanged; stored historical snapshots may lack it. When an ended Agent (terminal Attempt, or an Evaluator whose MCP result was accepted) still owes a failed or unfinalized snapshot (`stageOwesResources`, the one definition shared with the API's resource recollection), its stage state carries `resourcesPending`, derived from and committed with the Attempt write. A finished stage with that flag gets read-only refresh passes on resume (same Chat, key and Submission; no ensure/submit/restart; stage status, output, evidence and accepted results unchanged), spaced by `nextAttemptAt` (60 s, never after `deadline`); at the deadline the current snapshot is kept, the flag cleared and the shortfall reported once. The flag never enters `PENDING_SAMPLING_STATUSES`; `isStageRecoveryPending()` lets a recovery store keep a Run without a pending stop scheduled. Finalizing a stop never reads resources: each ended Attempt still owing them without a collected snapshot is saved as `failed` (`Run stopped before resources were collected`), a collected snapshot is kept, and the flag is cleared; a later manual resource recollection refreshes them as usual. An unconfirmable terminal status persists `observationPending` across Worker passes; the next pass re-observes the same Attempt and Submission, only an explicit failed/interrupted/cancelled terminal consumes `maxRestarts`, and after `OBSERVATION_MAX_ATTEMPTS` passes the stage fails with an explicit message. Status errors carry the inspection outcome (`inspect: null` / `inspect error: …`). Resource collection does not change the Agent/output result or replace its original error. `getSampling()` and EvaluationRecord queries expose these durable facts even from a new Runtime instance; Metrics consumes the application's `MetricsSource` facts rather than SP or private Store tables. Artifacts and complete trajectories still use references; resource snapshots store source resource events, not an additional Workspace or Session copy. Subject artifacts and the complete trajectory are required: after a terminal Submission, execution stays nonterminal until both references and the final execution status are saved together. `execution.evidencePending` marks evidence finalization for recovery without submitting or restarting the Agent; the original Agent failure is preserved.
 
@@ -204,6 +242,17 @@ Run evaluation lists omit optional output bodies and attempt resource snapshots 
 ### Bounded Metrics reads
 
 `eval-metrics` owns the deterministic compact telemetry projection (`compactResourceSnapshot`): source-event SHA-256, event/operation identity, status/time/Token fields, canonical input/output byte lengths and versioned thinking/content marker flags. It preserves per-event observations for exact medians, cross-Attempt deduplication and conflicts; it is not an average of lower-level summaries.
+
+Native version 6 additionally freezes execution selection, scope fingerprint and
+interpretation diagnostics. Native tasks, invocations, deferred polls, retries
+and compaction are distinct. Cached native projections from another scope or
+any unsupported version fail explicitly; only current native v6 is supported.
+Native v4/v5 were unreleased drafts, not historical user records. There is no
+retained-RAW callback, extra database fallback query, reinterpretation or
+migration. Deriving v6 from current native source and validating current v6
+scope/fingerprint/membership remain Metrics-owned. Reads do not rewrite raw
+snapshots, archived evidence or stored projections. Actual historical
+`sp-trajectory/v1` metric versions 1–3 remain read-only and byte-preserving.
 
 ### Attempt resource snapshots
 

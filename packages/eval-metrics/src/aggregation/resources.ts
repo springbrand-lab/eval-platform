@@ -50,9 +50,13 @@ export function aggregateResources(inputs: readonly ResourceInput[], groups: Res
   const usageEvents = readStream(snapshots, "usageEvents", collectionsComplete, diagnostics);
   const telemetryEvents = readStream(snapshots, "telemetryEvents", collectionsComplete, diagnostics);
   const billingSettlements = readStream(snapshots, "billingSettlements", collectionsComplete, diagnostics);
-  const usage = aggregateUsage(usageEvents, diagnostics, groups.models);
   const billing = aggregateBilling(billingSettlements, diagnostics);
-  const { modelRequests, trajectory } = aggregateTelemetry(telemetryEvents, diagnostics, groups.tools);
+  const { modelRequests, trajectory, nativeUsage } = aggregateTelemetry(telemetryEvents, diagnostics, groups.tools);
+  const usage = aggregateUsage({
+    entries: [...usageEvents.entries, ...nativeUsage.entries],
+    complete: usageEvents.complete && nativeUsage.complete,
+    duplicates: usageEvents.duplicates,
+  }, diagnostics, groups.models);
   const issues = diagnostics.list();
   const streamsComplete = usageEvents.complete && telemetryEvents.complete && billingSettlements.complete;
   return {

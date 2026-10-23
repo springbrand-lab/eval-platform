@@ -2,6 +2,14 @@
 
 This is the service contract consumed by `apps/eval-api`. The independently deployed SP Agent Worker exposes the user-scoped routes below. Eval must not call SP Durable Object storage or private source modules. SP's `@springbrand/eval-harness` package is the single definition of the route paths, the service header, request schemas, Submission receipts, canonical Session validation and Material path and file-count rules; `apps/eval-api/src/sp/` imports them and validates every request against SP's schema before sending it.
 
+The native fields below describe the current public SP/UA source seam and EP
+consumer implementation. Installed `eval-harness@0.1.0-alpha.5` does not yet
+export them. Source-alias local tests are not released-package or deployed SP
+acceptance; see [native consumer verification](native-trajectory-acceptance.md).
+New trajectory reads require `pi-trajectory/v1` and SDK safe projection policy
+identity. Historical `sp-trajectory/v1` manifests/JSONL are read/imported without
+rewriting bytes or hashes, never used as a new-GET fallback.
+
 The Eval Run Worker calls the independently deployed Eval SP origin with `X-Eval-Service-Token`. SP authenticates the service and checks the requested user, Agent Config, Chat, and Workspace ownership. HTTP responses below are bare JSON. A `409` on Chat ensure means immutable creation facts conflict; an unknown operation lookup returns JSON `null` with `200`, while an unknown Chat is an error. Retries use the original Chat ID and operation key. Both Eval SP clients (this service client and the API's session/Agent Config client) use `@springbrand/http/client`: redirects are rejected, response size is bounded, and network errors, timeouts, `408`, `429` and `≥500` are retryable. In addition, a Harness `GET` answered `409` with code `EVIDENCE_NOT_READY` is retryable (see [Readiness](#readiness-and-large-transfers)); every other `409`, and any `409` on a `PUT`, is not.
 
 | Operation | Target route | Request / response |
@@ -14,11 +22,11 @@ The Eval Run Worker calls the independently deployed Eval SP origin with `X-Eval
 | Stop Eval Chat | `POST /internal/v1/eval-harness/users/{userId}/chats/{chatId}/submissions/stop` | `{ok:boolean}`; SP durably blocks future initialization and Submissions in this Eval-bound Chat, waits for submissions already being accepted, then interrupts every unfinished Submission before returning. A missing Chat is `404`; repeated stop after terminal work returns `{ok:false}`. |
 | Observe terminal | `WS /internal/v1/eval-harness/users/{userId}/chats/{chatId}/submissions/{submissionId}/events` | Authenticate the upgrade with `X-Eval-Service-Token`. On connect SP sends a persisted status snapshot, then `{"type":"submission.status","submission":AgentSubmission}` updates for this Submission. The endpoint answers protocol Ping with Pong. Eval detects a silent connection with Ping/Pong, performs one HTTP status read after each disconnection (by Submission ID, see above), and reopens the same Submission URL up to three connections. A transient read error does not end observation: the status is unknown, not failed. A terminal read ends observation; a different Submission ID is a non-retryable error. When the budget or the Submission deadline is spent, Eval raises a retryable error `Submission {id} status unconfirmed after N connections: {socket failure}; last status read: {status \| HTTP n \| error}`, so Runtime re-observes the same Submission instead of treating the Agent as failed. Healthy progress uses the socket, not polling. |
 | Collect output | `GET /internal/v1/eval-harness/users/{userId}/chats/{chatId}/output?role=...&samplingId=...&evaluationId=...` | `ExecutionOutput` or `EvaluationAgentOutput`. SP returns the complete artifact list and complete trajectory reference, including failed runs. An `EvaluationAgentOutput` carries the Evaluator's result file `/output/result.json` from its own Space as `structuredOutput: {path, content, contentHash?}` with the original UTF-8 text, or omits it when no file exists (SP-side support still required, see [SP requirements](sp-eval-api-requirements.md)). Results submitted through Eval's own MCP tool take precedence; see [Evaluation result submission](eval-evaluation-result-submission.md). |
-| Collect raw resources | `GET /internal/v1/eval-harness/users/{userId}/chats/{chatId}/resources/by-key/{key}?submissionId=...` | `AgentResourceSnapshot` with source events, `coverage` and `finalized` unchanged, plus the required `readiness: {receiptTerminal, stateUnreadable, pendingTelemetryEvents, pendingRuntimeEvents, actionCharges: {complete, unsettledExecutions, missingExecutionIds}}` explaining `finalized` (all counts non-negative integers). Eval rejects a snapshot without valid `readiness` and stores it unchanged with the snapshot; only snapshots persisted before this contract lack it. The response carries the complete raw telemetry, can exceed 100 MB, and is streamed by SP. SP resolves a missing Submission ID by Chat and key; it never substitutes Chat ID. |
+| Collect raw resources | `GET /internal/v1/eval-harness/users/{userId}/chats/{chatId}/resources/by-key/{key}?submissionId=...` | `AgentResourceSnapshot` with required `trajectoryFormat: "pi-trajectory/v1"`, safe native `telemetryEvents`, source usage/settlements, `coverage/finalized` and full public `readiness`. Readiness preserves `trajectory` and `runtimeBusiness` delivery trees with exact resource/Submission attribution; pending/quarantined counts may be null (unknown), not zero. Contradictory finalized facts fail explicitly. The raw snapshot remains unchanged. The response can exceed 100 MB and is streamed by SP. SP resolves a missing Submission ID by Chat/key, never by substituting Chat ID. |
 | Inspect resource readiness | `GET /internal/v1/eval-harness/users/{userId}/chats/{chatId}/resources/by-key/{key}/readiness?submissionId=...` | `AgentResourceReadinessReport` `{scope:{chatId,idempotencyKey,submissionId}, observedAt, finalized, readiness}` without any events: the same `finalized` and `readiness` the snapshot route would return now. Same scope and optional `submissionId` as the snapshot route; a small body under the 60 s control timeout. See [Waiting for resources](#waiting-for-resources). |
 | List evidence artifacts | `GET /internal/v1/eval-harness/users/{userId}/chats/{chatId}/evidence/artifacts?submissionId=...` | `{artifacts:[{path,size,mediaType}]}`: files the Agent produced in its own Space, excluding `/reference`, `/initial-materials`, `/userspace`, `/evidence` and uploads. |
 | Read evidence file | `GET /internal/v1/eval-harness/users/{userId}/chats/{chatId}/evidence/files?path=...&submissionId=...` | Raw, streamed bytes of one listed file; `413` when it exceeds the package's `EVAL_EVIDENCE_FILE_MAX_BYTES` (`95_000_000` in `@springbrand/eval-harness@0.1.0-alpha.5`, which Eval pins; the limit is in effect). Eval omits larger artifacts as `too-large` before reading them. |
-| Read evidence trajectory | `GET /internal/v1/eval-harness/users/{userId}/chats/{chatId}/evidence/trajectory?afterSeq=...&limit=...&submissionId=...` | `{events:[{ingestSeq,event}], nextAfterSeq}`, oldest first from `trajectory_events`, `limit` ≤ 200, `nextAfterSeq` is `null` on the last page. Eval writes each `{ingestSeq,event}` entry unchanged as one `sp-trajectory/v1` JSONL line, and a resumed export starts at the `ingestSeq` of the last stored part. All three evidence reads require `submissionId`: the Subject Attempt's for an export, and the Evaluator Attempt's for `readFinalReply`; Eval always sends it. All three export routes return `409 EVIDENCE_NOT_READY` with `Retry-After` until the last Submission is terminal and its telemetry is delivered; Eval treats that code as retryable on every Harness `GET`, including Collect output. The same route serves an Evaluator Chat, from which `readFinalReply` takes the assistant text of the last `turn.finished` event. |
+| Read evidence trajectory | `GET /internal/v1/eval-harness/users/{userId}/chats/{chatId}/evidence/trajectory?afterSeq=...&limit=...&submissionId=...` | Public `EvalEvidenceTrajectoryPage`: native `format`, explicit root `scope`, fixed `cursor:{throughSeq}`, safe `{ingestSeq,event}` rows and `nextAfterSeq`; limit ≤ 200. Export/resume pins scope and cursor across every oldest-first page, preserving each raw row as native JSONL. The last cursor is null only at the fixed boundary. Every evidence read names its exact Submission. Public SP delivery gating returns `409 EVIDENCE_NOT_READY` until scoped native/business delivery is ready. Final reply uses the shared SDK reader at the requested root's completed Host terminal and its visible final generation response, not the last raw event or a child/old/fork/compaction/tool-use/failed response. |
 | Import evidence file | `PUT /internal/v1/eval-harness/users/{userId}/chats/{chatId}/evidence/files?path=/relative` | Raw body with `Content-Type` and `X-Eval-Content-Sha256: <hex>` / `{path:"/evidence/...",size,sha256}`. Evaluator Chats only. Eval streams each stored blob (chunked, half-duplex) rather than buffering it, verifying size and SHA-256 against the manifest while it streams; a mismatch aborts the upload as a non-retryable error. An identical repeat is a no-op; different content is `409`, a path escaping `/evidence` is `422`, and a write after stop is `409`; none of these is retried. Eval writes the manifest last. The Run Worker gives Runtime `spEvidenceLimits(DEFAULT_EVIDENCE_LIMITS)`, so artifacts and trajectory parts are exported within `EVAL_EVIDENCE_FILE_MAX_BYTES`. Before any write Eval still checks every manifest file against it; a larger file (only possible in a bundle stored under larger limits) fails the import explicitly and permanently. |
 
 The Run Worker process consumes pg-boss Run jobs, reads the persisted Run, its Project plan and ProjectSample snapshots, and composes Runtime with this Harness; on shutdown it stops fetching jobs and waits for active Runs. It uses this service contract; browser session tokens are never stored for background execution. This release's concrete Harness rejects `codex` and `cc` ("SP Harness cannot run {framework} Agents") rather than falling back to SP. Initialization does not send `runtime`; SP receives it when ensuring a Chat or submitting a prompt, while Eval uses it to bound terminal observation. Submission observation over WebSocket lives in `sp/submission-observer.ts`.
@@ -47,6 +55,41 @@ A snapshot is downloaded once, after SP reports it final, instead of re-reading 
 For an accepted Evaluator whose terminal receipt is still unconfirmed, budget admission precedes receipt inspection. Any confirmed terminal state and completion time are persisted before resource reads or clearing the wait; failed writes leave recovery scheduled. An already finalized snapshot is not downloaded again. Exhausted budgets skip receipt inspection entirely.
 
 Eval does not trigger delivery of SP's telemetry/runtime outboxes; it only waits for it. Draining them on demand needs a guarded flush API in `@springbrand/agent-runtime` (follow-up).
+
+The API and Web share native live/history page validation and cannot relay an
+unsafe record or infer an absent format. Native metrics selection uses SP's
+explicit required execution membership and immutable birth ownership, not Pi's
+model context window. Compacted/discarded same-execution work remains counted;
+source closure/delivery determines completeness. Pi's visible seal branch is
+separately used for final replies, with request metadata read from the full source.
+All immutable historical dependencies remain available to `openTrajectory`. A public
+Chat history page is not a new execution scope. Output collection correlates
+known Submission IDs before accepting a native trajectory reference.
+Resource reads likewise compare Chat, operation key and known Submission at the
+public Harness boundary. Native finalized readiness requires business delivery
+for every required execution, independently of native delivery. A missing source
+or an unresolved delivery fact cannot establish a known zero charge.
+
+The public SDK reader's `context()` is canonical Pi conversation context-at,
+not the exact input of a Models invocation. `request()` retains the native
+record, metadata, canonical context, safe audit steps, end and response; it has
+no replayed `messages` result. EP does not call a full-input `input()` reader
+or inspect whole before/after input snapshots. Extension/hook evidence, model
+definitions and effective non-secret parameters remain visible. Typed hook
+values may be resolved through `hook()`; other safe changes stay raw audit
+records. Native compaction inspection/statistics require actual invocation,
+metadata, measured usage and native summary, not a compaction input recipe or
+prompt renderer. Raw export bytes and fixed scope/cursor resume are unchanged.
+Generation requests/preparations require `cutoff: EntryId | null`. Null is an
+explicitly unbound invocation, not a missing anchor or a request for latest
+conversation. `request().context` and EP's preparation `canonicalContext` are
+null in that case; `context()` itself is unchanged and compaction stays anchored.
+Actual Registry TaskRuntime/HookApi identity binds Models, not cancellation
+signals. Auxiliary hook/custom task calls retain independent IDs, outcomes and
+measured usage without conversation snapshots. Root reply selection requires a
+context-bound native primary assistant visible at the completed root terminal;
+an unbound preparation/inline response neither replaces nor invalidates it.
+Accounting still includes every actual owned invocation independently.
 
 ## Diagnostics
 

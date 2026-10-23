@@ -1,18 +1,22 @@
 import { constants as bufferConstants } from "node:buffer";
 import { createHash } from "node:crypto";
-import type { AgentFramework, AgentResourceReadiness, EvidenceLimits, JsonValue } from "@eval-platform/eval-contracts";
-import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
+import type { AgentFramework, AgentResourceReadiness, AgentResourceScope, EvidenceLimits } from "@eval-platform/eval-contracts";
+import { equalJson, isTerminalAgentStatus, jsonObjectInPlaceSchema } from "@eval-platform/eval-contracts";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import { safeLog, type RuntimeLog } from "@eval-platform/eval-runtime";
 import {
   AgentHandleNotFoundError,
   AgentIdentityConflictError,
   applyEvidenceLimits,
+  PI_TRAJECTORY_FORMAT,
+  readNativeFinalReply,
+  storedTrajectoryFormat,
   type AgentHandle,
   type AgentSubmission,
   type CollectAgentResourcesInput,
   type Harness,
   type SubmitAgentInput,
+  type TrajectoryRecord,
 } from "@eval-platform/eval-runtime/harness";
 import {
   EVAL_EVIDENCE_FILE_MAX_BYTES,
@@ -26,6 +30,7 @@ import {
   evalSubjectInputEvidencePath,
   evalTrajectoryEvidencePath,
   type EvalInitialization,
+  type EvalEvidenceTrajectoryPage,
 } from "@springbrand/eval-harness";
 import { ApiError, parseHttpError } from "@springbrand/http/client";
 import { isRequestCancelled } from "@springbrand/http/errors";
@@ -43,7 +48,6 @@ import {
   evidenceFileReceipt,
   evidenceTrajectoryPage,
   executionOutput,
-  finalReplyText,
   initializationRequest,
   resourceReadiness,
   resourceSnapshot,
@@ -132,6 +136,7 @@ function harnessError(error: unknown, context: FailureContext): unknown {
     || (error.kind === "http" && (transientStatus(error.status) || evidenceNotReady(error.status, error.code, context)));
   return new SpHarnessError(error.kind === "http" ? error.message : `Eval SP request failed: ${error.code}`,
     transient, {
+      code: error.code,
       ...(error.kind === "http" ? { status: error.status } : {}),
       ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
       ...(error.requestId === undefined ? {} : { requestId: error.requestId }),
@@ -251,6 +256,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       throw new SpHarnessError(`Eval SP evidence request returned ${response.status} (${parsed.code})`,
         notReady || transientStatus(response.status), {
           status: response.status,
+          code: parsed.code,
           ...(parsed.retryAfterMs === undefined ? {} : { retryAfterMs: parsed.retryAfterMs }),
           ...(requestId === undefined ? {} : { requestId }),
           ...(cfRay === undefined ? {} : { cfRay }),
@@ -282,25 +288,41 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
   const operationPath = (kind: "submissions" | "resources", handle: AgentHandle, key: string): string =>
     `${handlePath(handle)}/${kind}/by-key/${encodeURIComponent(key)}`;
 
-  /** Every trajectory event of the whole Chat after `from` (0 for all), oldest first; the Submission only scopes the read. */
-  async function* trajectoryEvents(handle: AgentHandle, submissionId: string, from = 0): AsyncGenerator<{
+  async function trajectoryPage(
+    handle: AgentHandle, submissionId: string, afterSeq = 0, boundary?: EvalEvidenceTrajectoryPage,
+  ): Promise<EvalEvidenceTrajectoryPage> {
+    const query = new URLSearchParams({
+      afterSeq: String(afterSeq), limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX), submissionId,
+      ...(boundary ? { throughSeq: String(boundary.cursor.throughSeq) } : {}),
+    });
+    const page = evidenceTrajectoryPage(await call("GET", `${handlePath(handle)}/evidence/trajectory?${query}`,
+      { timeoutMs: transferTimeoutMs, label: "evidence trajectory page", evidenceRead: true }));
+    if (page.scope.submissionId !== submissionId || page.scope.resource.sessionId !== handle.chatId ||
+      boundary && (!equalJson(page.scope, boundary.scope) || !equalJson(page.cursor, boundary.cursor))) {
+      throw new SpHarnessError("Eval SP changed the evidence root execution or fixed cursor", false);
+    }
+    let last = afterSeq;
+    for (const item of page.events) {
+      if (item.ingestSeq <= last) throw new SpHarnessError("Eval SP trajectory events are out of order", false);
+      last = item.ingestSeq;
+    }
+    return page;
+  }
+
+  /** Includes historical dependencies unchanged, pinned to SP's explicit execution and immutable cutoff. */
+  async function* trajectoryEvents(handle: AgentHandle, submissionId: string, boundary: EvalEvidenceTrajectoryPage, from = 0): AsyncGenerator<{
     ingestSeq: number;
-    event: Record<string, JsonValue>;
+    event: TrajectoryRecord;
   }> {
     if (!Number.isSafeInteger(from) || from < 0) throw new SpHarnessError(`Invalid trajectory cursor ${from}`, false);
-    const path = `${handlePath(handle)}/evidence/trajectory`;
     let afterSeq: number | null = from;
     let pages = 0;
     let events = 0;
     while (afterSeq !== null) {
-      const query = new URLSearchParams({
-        afterSeq: String(afterSeq), limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX), submissionId,
-      });
       const fields = { ...handleContext(handle), afterSeq, submissionId };
       let page: ReturnType<typeof evidenceTrajectoryPage>;
       try {
-        page = evidenceTrajectoryPage(await call("GET", `${path}?${query}`,
-          { timeoutMs: transferTimeoutMs, label: "evidence trajectory page", evidenceRead: true }));
+        page = afterSeq === 0 ? boundary : await trajectoryPage(handle, submissionId, afterSeq, boundary);
       } catch (error) {
         log({ name: "evidence_trajectory_page", ...fields, ...failureFields(error) });
         throw error;
@@ -311,12 +333,12 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       let last: number = afterSeq;
       for (const event of page.events) {
         if (event.ingestSeq <= last) throw new SpHarnessError("Eval SP trajectory events are out of order", false);
-        yield event;
         last = event.ingestSeq;
       }
       if (page.nextAfterSeq !== null && (page.events.length === 0 || page.nextAfterSeq !== last)) {
         throw new SpHarnessError("Eval SP returned an invalid trajectory cursor", false);
       }
+      yield* page.events;
       afterSeq = page.nextAfterSeq;
     }
   }
@@ -342,7 +364,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     }
   }
 
-  async function readResources<T extends { readonly finalized: boolean; readonly readiness?: AgentResourceReadiness }>(
+  async function readResources<T extends { readonly finalized: boolean; readonly readiness?: AgentResourceReadiness; readonly scope: AgentResourceScope }>(
     input: CollectAgentResourcesInput, name: string, leaf: string, parse: (value: unknown) => T, timeoutMs: number,
     summary: (value: T) => Record<string, unknown> = () => ({}),
   ): Promise<T> {
@@ -356,6 +378,10 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       value = parse(await call("GET", `${operationPath("resources", input.handle, input.idempotencyKey)}${leaf}${query}`,
         { timeoutMs, label: `resource ${leaf === "" ? "snapshot" : "readiness"}`,
           ...(input.signal === undefined ? {} : { signal: input.signal }) }));
+      if (value.scope.chatId !== input.handle.chatId || value.scope.idempotencyKey !== input.idempotencyKey ||
+        input.submissionId !== undefined && value.scope.submissionId !== input.submissionId) {
+        throw new SpHarnessError("Eval SP returned resources for another operation scope", false);
+      }
     } catch (error) {
       if (isRequestCancelled(error)) throw error;
       log({ name, ...fields(), ...failureFields(error) });
@@ -383,7 +409,9 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       try {
         value = await call("PUT", chatPath(chat.agentConfig.ownerUserId, chat.chatId), { body: chat });
       } catch (error) {
-        if (error instanceof SpHarnessError && error.status === 409) throw new AgentIdentityConflictError(input.chatId);
+        if (error instanceof SpHarnessError && error.status === 409 && error.code === "REQUEST_CONFLICT") {
+          throw new AgentIdentityConflictError(input.chatId, { cause: error });
+        }
         throw error;
       }
       return agentHandle(value, chat);
@@ -451,13 +479,18 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         context: { ...handleContext(input.handle), idempotencyKey: input.idempotencyKey },
       });
     },
-    async collectExecution({ handle }) {
+    async collectExecution({ handle, submissionId }) {
       requireSp(handle.framework);
       if (handle.role !== "subject") throw new SpHarnessError("Expected Subject Chat", false);
       const query = new URLSearchParams({ role: handle.role, samplingId: handle.samplingId });
-      return executionOutput(await call("GET", `${handlePath(handle)}/output?${query}`, { evidenceRead: true }), handle.samplingId);
+      const output = executionOutput(await call("GET", `${handlePath(handle)}/output?${query}`, { evidenceRead: true }), handle.samplingId);
+      if (output.trajectory.scope?.resource.sessionId !== handle.chatId ||
+        submissionId !== undefined && output.trajectory.scope?.submissionId !== submissionId) {
+        throw new SpHarnessError("Eval SP returned execution output for another native execution", false);
+      }
+      return output;
     },
-    async collectEvaluation({ handle }) {
+    async collectEvaluation({ handle, submissionId }) {
       requireSp(handle.framework);
       if (handle.role !== "evaluator" || handle.evaluationId === undefined) {
         throw new SpHarnessError("Expected Evaluator Chat", false);
@@ -467,13 +500,19 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         samplingId: handle.samplingId,
         evaluationId: handle.evaluationId,
       });
-      return evaluationOutput(await call("GET", `${handlePath(handle)}/output?${query}`, { evidenceRead: true }));
+      const output = evaluationOutput(await call("GET", `${handlePath(handle)}/output?${query}`, { evidenceRead: true }));
+      if (output.trajectory.scope?.resource.sessionId !== handle.chatId ||
+        submissionId !== undefined && output.trajectory.scope?.submissionId !== submissionId) {
+        throw new SpHarnessError("Eval SP returned evaluation output for another native execution", false);
+      }
+      return output;
     },
     async readFinalReply({ handle, submissionId }) {
       requireSp(handle.framework);
-      let reply: string | undefined;
-      for await (const { event } of trajectoryEvents(handle, submissionId)) reply = finalReplyText(event) ?? reply;
-      return reply;
+      const boundary = await trajectoryPage(handle, submissionId);
+      const records: TrajectoryRecord[] = [];
+      for await (const { event } of trajectoryEvents(handle, submissionId, boundary)) records.push(event);
+      return readNativeFinalReply(records, boundary.scope);
     },
     collectAgentResources: (input) => readResources(input, "resources_read", "", resourceSnapshot, transferTimeoutMs,
       (snapshot) => ({ coverage: snapshot.coverage, usageEvents: snapshot.usageEvents.length,
@@ -497,6 +536,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       const listed = evidenceArtifacts(await call("GET", `${path}/artifacts?${new URLSearchParams(bound)}`,
         { timeoutMs: transferTimeoutMs, label: "evidence artifact list", evidenceRead: true }));
       const { artifacts, omitted } = applyEvidenceLimits(listed, spEvidenceLimits(limits));
+      const boundary = await trajectoryPage(handle, submissionId);
       return {
         source: { framework: "sp", samplingId: handle.samplingId, agentRef: { ownerUserId: handle.ownerUserId, chatId: handle.chatId } },
         artifacts,
@@ -516,10 +556,13 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         },
         async* readTrajectory(afterSeq) {
           // The page entry is the raw record: its source cursor and the unchanged event.
-          for await (const entry of trajectoryEvents(handle, submissionId, afterSeq)) yield { seq: entry.ingestSeq, record: entry };
+          for await (const entry of trajectoryEvents(handle, submissionId, boundary, afterSeq)) {
+            yield { seq: entry.ingestSeq, record: jsonObjectInPlaceSchema.parse(entry) };
+          }
         },
-        trajectoryFormat: "sp-trajectory/v1",
-        // SP reads `trajectory_events` only after the Submission ended and every event was delivered.
+        trajectoryFormat: PI_TRAJECTORY_FORMAT,
+        trajectoryScope: boundary.scope,
+        trajectoryCursor: boundary.cursor,
         trajectoryComplete: true,
       };
     },
@@ -527,6 +570,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       requireSp(handle.framework);
       if (handle.role !== "evaluator") throw new SpHarnessError("Only an Evaluator imports evidence", false);
       const { manifest } = evidence;
+      storedTrajectoryFormat(manifest.trajectory.format);
       /** Streams one stored blob to SP; SP checks the SHA-256 header and both sides compare the receipt. */
       const put = async (relative: string, mediaType: string, sha256: string, size: number,
         read: () => Promise<ReadableStream<Uint8Array> | Uint8Array>) => {

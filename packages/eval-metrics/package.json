@@ -15,9 +15,14 @@
     "@eval-platform/eval-contracts": "workspace:*",
     "@eval-platform/eval-dataset": "workspace:*",
     "@eval-platform/eval-runtime": "workspace:*",
-    "ajv": "^8.20.0"
+    "ajv": "^8.20.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-durable": "1.1.0",
+    "@springbrand/eval-harness": "0.1.0-alpha.5",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }

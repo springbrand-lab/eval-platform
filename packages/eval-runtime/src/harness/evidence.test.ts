@@ -1,6 +1,7 @@
 import {
-  DEFAULT_EVIDENCE_LIMITS, sha256Hex, type EvidenceExportProgress, type EvidenceLimits,
+  DEFAULT_EVIDENCE_LIMITS, jsonObjectInPlaceSchema, sha256Hex, type EvidenceExportProgress, type EvidenceLimits,
 } from "@eval-platform/eval-contracts";
+import { evalEvidenceTrajectoryPageSchema, parseTrajectoryRecord, PI_TRAJECTORY_FORMAT } from "@springbrand/eval-harness";
 import { describe, expect, it } from "vitest";
 
 import { applyEvidenceLimits, createEvidenceStore, EvidenceIntegrityError } from "./evidence.js";
@@ -37,6 +38,44 @@ describe("evidence limits", () => {
 });
 
 describe("evidence store", () => {
+  it.each([
+    { decision: "allow_once", status: "approved" },
+    { decision: "deny", status: "rejected", reason: "User declined" },
+  ])("archives a public native $decision approval page byte-for-byte", async (decision) => {
+    const scope = { resource: { agentId: "root", sessionId: "chat" }, submissionId: "submission" };
+    const event = parseTrajectoryRecord({
+      format: PI_TRAJECTORY_FORMAT, ...scope, projection: { kind: "safe", policyId: "fixture", policyVersion: 1 },
+      record: { type: "entry", value: {
+        id: 2, conversationId: 1, kind: "springbrand.trajectory", data: {
+          type: "approval_decision", submissionId: scope.submissionId, requestId: "host-request",
+          executionId: "approval-execution", toolCallId: "call", toolName: "action_send",
+          decidedAt: 20, recordedAt: 20, ...decision,
+        },
+      } },
+    });
+    const page = evalEvidenceTrajectoryPageSchema.parse({
+      format: PI_TRAJECTORY_FORMAT, scope, cursor: { throughSeq: 1 },
+      events: [{ ingestSeq: 1, event }], nextAfterSeq: null,
+    });
+    const source = `${JSON.stringify(page.events[0])}\n`;
+    const evidence = {
+      ...exportedEvidence({ samplingId: "native-approval", files: {},
+        events: page.events.map((record) => jsonObjectInPlaceSchema.parse(record)) }),
+      trajectoryFormat: page.format, trajectoryScope: page.scope, trajectoryCursor: page.cursor,
+    };
+    const store = createEvidenceStore(createMemoryEvidenceBlobs(), () => NOW);
+    const bundle = await store.open(await store.resume({ evidence, limits: DEFAULT_EVIDENCE_LIMITS }));
+    expect(bundle.manifest.trajectory).toMatchObject({
+      format: PI_TRAJECTORY_FORMAT, scope, cursor: page.cursor, events: 1, complete: true,
+    });
+    const part = bundle.manifest.trajectory.parts[0];
+    if (!part) throw new Error("Missing native approval evidence part");
+    const archived = await text(await bundle.readBlob(part.sha256));
+    expect(archived).toBe(source);
+    expect(part.sha256).toBe(await sha256Hex(source));
+    expect(JSON.parse(archived).event).toEqual(event);
+  });
+
   it("stores content once per hash and opens the same manifest by reference", async () => {
     const blobs = createMemoryEvidenceBlobs();
     const store = createEvidenceStore(blobs, () => NOW);

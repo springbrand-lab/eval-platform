@@ -1,5 +1,5 @@
 import type { EvidenceBundleRef, EvidenceExportState } from "./evidence.js";
-import type { AgentResourceState } from "./resources.js";
+import type { AgentResourceState, AgentTrajectoryScope } from "./resources.js";
 
 export type {
   AgentResourceCollection,
@@ -14,6 +14,9 @@ export type {
   AgentResourceSnapshot,
   AgentResourceSnapshotSummary,
   AgentResourceState,
+  AgentTrajectoryScope,
+  AgentTrajectoryDeliveryState,
+  AgentRuntimeBusinessDeliveryState,
 } from "./resources.js";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -159,6 +162,9 @@ export interface TrajectoryRef {
   readonly source: "subject" | "evaluator";
   readonly path: string;
   readonly contentHash?: string;
+  readonly format?: string;
+  readonly scope?: AgentTrajectoryScope;
+  readonly cursor?: { readonly throughSeq: number };
 }
 
 export interface RetryPolicy {

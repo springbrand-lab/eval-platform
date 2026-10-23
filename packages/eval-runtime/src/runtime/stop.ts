@@ -241,7 +241,11 @@ function stoppedExecution(
       return collectStoppedOutput({
         record,
         stage: "execution",
-        collect: () => context.harness.collectExecution({ handle }),
+        collect: () => context.harness.collectExecution({
+          handle, ...(record.executionAttempts.at(-1)?.submissionId === undefined ? {} : {
+            submissionId: record.executionAttempts.at(-1)!.submissionId!,
+          }),
+        }),
         retryController,
         sleep: context.sleep,
         save: (output) => persist({ ...record, artifacts: output.artifacts, trajectory: output.trajectory }, record),
@@ -287,7 +291,11 @@ function stoppedEvaluation(
       return collectStoppedOutput({
         record,
         stage: "evaluation",
-        collect: () => context.harness.collectEvaluation({ handle }),
+        collect: () => context.harness.collectEvaluation({
+          handle, ...(record.attempts.at(-1)?.submissionId === undefined ? {} : {
+            submissionId: record.attempts.at(-1)!.submissionId!,
+          }),
+        }),
         retryController,
         sleep: context.sleep,
         save: (output) => persist({ ...record, output }, record),

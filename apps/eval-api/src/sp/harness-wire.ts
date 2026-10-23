@@ -1,21 +1,27 @@
-import { AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectArrayInPlaceSchema, jsonObjectInPlaceSchema } from "@eval-platform/eval-contracts";
+import { AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectArrayInPlaceSchema } from "@eval-platform/eval-contracts";
 import type {
-  AgentResourceReadiness,
   AgentResourceReadinessReport,
   AgentResourceSnapshot,
   EvaluationAgentOutput,
   EvaluationStructuredOutput,
   ExecutionOutput,
-  JsonValue,
   MaterializedDataBinding,
 } from "@eval-platform/eval-contracts";
-import type { AgentHandle, AgentSubmission, EnsureAgentInput } from "@eval-platform/eval-runtime/harness";
+import {
+  PI_TRAJECTORY_FORMAT, nativeResourceReadinessSchema, validateNativeResourceScope,
+  type AgentHandle, type AgentSubmission, type EnsureAgentInput,
+} from "@eval-platform/eval-runtime/harness";
 import {
   evalEnsureChatSchema,
   evalInitializationResultSchema,
   evalEvidenceArtifactsSchema,
+  evalEvidenceTrajectoryPageSchema,
   evalInitializationSchema,
   evalSubmitSchema,
+  evalTrajectoryScopeSchema,
+  evalTrajectoryCursorSchema,
+  evalSafeTrajectoryRecordSchema,
+  EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX,
   stableEvalFacts,
   type EvalEnsureChat,
   type EvalEvidenceArtifact,
@@ -116,7 +122,10 @@ const artifactsSchema = z.array(z.looseObject({
 }));
 
 function trajectorySchema<Source extends "subject" | "evaluator">(source: Source) {
-  return z.looseObject({ trajectoryId: id, source: z.literal(source), path: id, contentHash: id.exactOptional() });
+  return z.looseObject({
+    trajectoryId: id, source: z.literal(source), path: id, contentHash: id.exactOptional(),
+    format: z.literal(PI_TRAJECTORY_FORMAT), scope: evalTrajectoryScopeSchema, cursor: evalTrajectoryCursorSchema,
+  });
 }
 
 const outputStatusSchema = z.enum(["succeeded", "failed"]);
@@ -154,22 +163,13 @@ export function evaluationOutput(value: unknown): EvaluationAgentOutput {
 }
 
 const completenessSchema = z.enum(["complete", "partial", "unavailable"]);
-const count = z.number().int().nonnegative().safe();
-
 const scopeSchema = z.object({ chatId: id, idempotencyKey: id, submissionId: id });
-
-const readinessSchema = z.object({
-  receiptTerminal: z.boolean(),
-  stateUnreadable: z.boolean(),
-  pendingTelemetryEvents: count,
-  pendingRuntimeEvents: count,
-  actionCharges: z.object({ complete: z.boolean(), unsettledExecutions: count, missingExecutionIds: count }),
-}) satisfies z.ZodType<AgentResourceReadiness>;
 
 const resourceSnapshotSchema = z.object({
   scope: scopeSchema,
   observedAt: id,
   finalized: z.boolean(),
+  trajectoryFormat: z.literal(PI_TRAJECTORY_FORMAT),
   coverage: z.object({
     usageEvents: completenessSchema,
     telemetryEvents: completenessSchema,
@@ -178,20 +178,33 @@ const resourceSnapshotSchema = z.object({
   usageEvents: jsonObjectArrayInPlaceSchema,
   telemetryEvents: jsonObjectArrayInPlaceSchema,
   billingSettlements: jsonObjectArrayInPlaceSchema,
-  readiness: readinessSchema,
+  readiness: nativeResourceReadinessSchema,
 }) satisfies z.ZodType<AgentResourceSnapshot>;
 
 export function resourceSnapshot(value: unknown): AgentResourceSnapshot {
-  return response(resourceSnapshotSchema, value, "resource snapshot");
+  const snapshot = response(resourceSnapshotSchema, value, "resource snapshot");
+  try {
+    validateNativeResourceScope(snapshot, true);
+    for (const event of snapshot.telemetryEvents) evalSafeTrajectoryRecordSchema.parse(event);
+  } catch (cause) {
+    throw new SpHarnessError("Eval SP returned an invalid native resource trajectory", false, { cause });
+  }
+  return value as AgentResourceSnapshot;
 }
 
 export function resourceReadiness(value: unknown): AgentResourceReadinessReport {
-  return response(z.object({
+  const report = response(z.strictObject({
     scope: scopeSchema,
     observedAt: id,
     finalized: z.boolean(),
-    readiness: readinessSchema,
+    readiness: nativeResourceReadinessSchema,
   }) satisfies z.ZodType<AgentResourceReadinessReport>, value, "resource readiness");
+  try {
+    validateNativeResourceScope(report, false);
+  } catch (cause) {
+    throw new SpHarnessError("Eval SP returned inconsistent native resource readiness", false, { cause });
+  }
+  return value as AgentResourceReadinessReport;
 }
 
 export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact[] {
@@ -199,30 +212,13 @@ export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact
 }
 
 export function evidenceTrajectoryPage(value: unknown) {
-  return response(z.object({
-    events: z.array(z.object({ ingestSeq: z.number().int().positive().safe(), event: jsonObjectInPlaceSchema })),
-    nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
-  }) satisfies z.ZodType<EvalEvidenceTrajectoryPage>, value, "evidence trajectory page");
+  response(evalEvidenceTrajectoryPageSchema, value, "evidence trajectory page");
+  const page = value as EvalEvidenceTrajectoryPage;
+  if (page.events.length > EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX) {
+    throw new SpHarnessError("Eval SP returned an oversized evidence trajectory page", false);
+  }
+  return page;
 }
-
-/** Assistant text of a finished turn in SP's trajectory, or undefined for any other event. */
-export function finalReplyText(event: Readonly<Record<string, JsonValue>>): string | undefined {
-  const parsed = finishedTurnSchema.safeParse(event);
-  if (!parsed.success || parsed.data.payload.output.role !== "assistant") return undefined;
-  const text = parsed.data.payload.output.content
-    .flatMap((block) => block.type === "text" && typeof block.text === "string" ? [block.text] : []).join("\n");
-  return text.trim() === "" ? undefined : text;
-}
-
-const finishedTurnSchema = z.object({
-  type: z.literal("turn.finished"),
-  payload: z.object({
-    output: z.object({
-      role: z.string(),
-      content: z.array(z.looseObject({ type: z.string(), text: z.unknown().optional() })),
-    }),
-  }),
-});
 
 export function evidenceFileReceipt(value: unknown): EvalEvidenceFileReceipt {
   return response(z.object({

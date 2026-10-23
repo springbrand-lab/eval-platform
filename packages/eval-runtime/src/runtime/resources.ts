@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   identifierSchema,
   jsonObjectArrayInPlaceSchema,
+  jsonObjectInPlaceSchema,
   summarizeResourceSnapshot,
   type AgentResourceFact,
   type AgentResourceReadinessReport,
@@ -11,6 +12,9 @@ import {
 } from "@eval-platform/eval-contracts";
 
 import type { AgentHandle, Harness, HarnessRuntimeOptions } from "../harness/model.js";
+import { PI_TRAJECTORY_FORMAT } from "../harness/trajectory.js";
+import { nativeResourceReadinessSchema, validateNativeResourceScope } from "../harness/resource-wire.js";
+import { evalSafeTrajectoryRecordSchema } from "@springbrand/eval-harness";
 import { RuntimeRecordPersistenceError, RuntimeRunStoppedError } from "./errors.js";
 import { reportError, type RuntimeLog } from "./log.js";
 import { describeRetryError, retryIdempotentOperation, type RetryController, type RetryErrorDetails } from "./retry.js";
@@ -21,27 +25,17 @@ const scopeSchema = z.strictObject({
   idempotencyKey: identifierSchema,
   submissionId: identifierSchema,
 });
-const readinessSchema = z.strictObject({
-  receiptTerminal: z.boolean(),
-  stateUnreadable: z.boolean(),
-  pendingTelemetryEvents: z.number().int().nonnegative(),
-  pendingRuntimeEvents: z.number().int().nonnegative(),
-  actionCharges: z.strictObject({
-    complete: z.boolean(),
-    unsettledExecutions: z.number().int().nonnegative(),
-    missingExecutionIds: z.number().int().nonnegative(),
-  }),
-});
 const reportSchema = z.strictObject({
   scope: scopeSchema,
   observedAt: z.iso.datetime({ offset: true }),
   finalized: z.boolean(),
-  readiness: readinessSchema,
+  readiness: nativeResourceReadinessSchema,
 });
 const snapshotSchema = z.strictObject({
   scope: scopeSchema,
   observedAt: z.iso.datetime({ offset: true }),
   finalized: z.boolean(),
+  trajectoryFormat: z.literal(PI_TRAJECTORY_FORMAT),
   coverage: z.strictObject({
     usageEvents: completeness,
     telemetryEvents: completeness,
@@ -50,7 +44,7 @@ const snapshotSchema = z.strictObject({
   usageEvents: jsonObjectArrayInPlaceSchema,
   telemetryEvents: jsonObjectArrayInPlaceSchema,
   billingSettlements: jsonObjectArrayInPlaceSchema,
-  readiness: readinessSchema,
+  readiness: nativeResourceReadinessSchema,
 });
 
 /** Recorded on each Attempt still owing resources when a stopping or stopped Run would otherwise read them. */
@@ -62,8 +56,8 @@ export const RESOURCE_READINESS_DELAYS_MS = [0, 5_000, 10_000, 20_000, 40_000] a
 export class AgentResourceValidationError extends Error {
   readonly retryable = false;
 
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "AgentResourceValidationError";
   }
 }
@@ -85,6 +79,9 @@ function parseScoped<T extends { readonly scope: AgentResourceScope }>(
   scope: AgentResourceScope,
   label: string,
 ): T {
+  if (!jsonObjectInPlaceSchema.safeParse(value).success) {
+    throw new AgentResourceValidationError(`${label} must contain only lossless JSON data`);
+  }
   const parsed = schema.safeParse(value);
   if (!parsed.success) throw new AgentResourceValidationError(`${label} is invalid: ${parsed.error.message}`);
   if (!resourceScopeMatches(parsed.data.scope, scope)) {
@@ -95,12 +92,24 @@ function parseScoped<T extends { readonly scope: AgentResourceScope }>(
 
 /** Returns the validated value itself, never a copy. */
 export function validateResourceSnapshot(value: unknown, scope: AgentResourceScope): AgentResourceSnapshot {
-  parseScoped(snapshotSchema, value, scope, "Resource snapshot");
+  const snapshot = parseScoped(snapshotSchema, value, scope, "Resource snapshot");
+  try {
+    validateNativeResourceScope(snapshot, true);
+    for (const record of snapshot.telemetryEvents) evalSafeTrajectoryRecordSchema.parse(record);
+  } catch (cause) {
+    throw new AgentResourceValidationError("Resource snapshot has an invalid native trajectory", { cause });
+  }
   return value as AgentResourceSnapshot;
 }
 
 export function validateResourceReadiness(value: unknown, scope: AgentResourceScope): AgentResourceReadinessReport {
-  return parseScoped(reportSchema, value, scope, "Resource readiness");
+  const report = parseScoped(reportSchema, value, scope, "Resource readiness");
+  try {
+    validateNativeResourceScope(report, false);
+  } catch (cause) {
+    throw new AgentResourceValidationError("Resource readiness has inconsistent native scope or delivery", { cause });
+  }
+  return value as AgentResourceReadinessReport;
 }
 
 /** One Attempt's resources under the exact scope it was submitted with. */

@@ -24,9 +24,24 @@ describe("Eval SP observation client", () => {
   });
 
   it("unwraps the SP API trajectory envelope and passes paging", async () => {
-    const fetch = vi.fn(async () => Response.json({ success: true, msg: { events: [], beforeSeq: null, hasOlder: false } }));
-    expect(await client(fetch).trajectory(chat, { limit: 50, beforeSeq: 3 })).toEqual({ events: [], beforeSeq: null, hasOlder: false });
+    const page = { format: "pi-trajectory/v1", events: [], beforeSeq: null, hasOlder: false };
+    const fetch = vi.fn(async () => Response.json({ success: true, msg: page }));
+    expect(await client(fetch).trajectory(chat, { limit: 50, beforeSeq: 3 })).toEqual(page);
     expect((fetch.mock.calls[0] as unknown as [Request])[0].url).toBe(`https://api.test/api/chats/${chat.chatId}/trajectory?limit=50&beforeSeq=3`);
+  });
+
+  it.each([
+    { events: [], beforeSeq: null, hasOlder: false },
+    { format: "sp-trajectory/v1", events: [], beforeSeq: null, hasOlder: false },
+    { format: "pi-trajectory/v1", events: [{ ingestSeq: 1, event: {
+      format: "pi-trajectory/v1", resource: { agentId: "root", sessionId: chat.chatId }, submissionId: "s",
+      record: { type: "conversation", value: { id: 1 } },
+    } }], beforeSeq: null, hasOlder: false },
+  ])("rejects incompatible or unsafe native pages before relaying them to Web", async (page) => {
+    const fetch = vi.fn(async () => Response.json({ success: true, msg: page }));
+    await expect(client(fetch).trajectory(chat, {})).rejects.toMatchObject({
+      name: "EvalSpTransportError", cause: expect.any(Error),
+    });
   });
 
   it("maps SP failures and refuses oversized files", async () => {

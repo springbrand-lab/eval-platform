@@ -4,6 +4,7 @@ import type { AgentFailureKind } from "@eval-platform/eval-runtime/harness";
 export class SpHarnessError extends Error {
   readonly failureKind: AgentFailureKind;
   readonly status: number | undefined;
+  readonly code: string | undefined;
   /** SP's `Retry-After` hint, when it sent one; Runtime's own backoff still governs the next attempt. */
   readonly retryAfterMs: number | undefined;
   /** SP's `X-Request-ID` and Cloudflare's `cf-ray` of the failed response, for cross-system correlation. */
@@ -16,6 +17,7 @@ export class SpHarnessError extends Error {
     details: {
       readonly failureKind?: AgentFailureKind;
       readonly status?: number;
+      readonly code?: string;
       readonly retryAfterMs?: number;
       readonly requestId?: string;
       readonly cfRay?: string;
@@ -26,6 +28,7 @@ export class SpHarnessError extends Error {
     this.name = "SpHarnessError";
     this.failureKind = details.failureKind ?? "network";
     this.status = details.status;
+    this.code = details.code;
     this.retryAfterMs = details.retryAfterMs;
     this.requestId = details.requestId;
     this.cfRay = details.cfRay;

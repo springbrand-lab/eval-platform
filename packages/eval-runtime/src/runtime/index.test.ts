@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
   AgentFramework,
+  AgentResourceFact,
   AgentResourceSnapshot,
   EvaluationPlan,
   EvaluationRecord,
@@ -512,6 +513,18 @@ const PENDING_READINESS = {
   actionCharges: { complete: false, unsettledExecutions: 1, missingExecutionIds: 0 },
 };
 
+function scopedReadiness(chatId: string, submissionId: string, base = FINALIZED_READINESS) {
+  const resource = { agentId: "root", sessionId: chatId };
+  return {
+    ...base,
+    trajectory: { resource, submissionId, status: base.pendingTelemetryEvents === 0 ? "delivered" as const : "pending" as const,
+      requiredClosed: true, pendingRecords: base.pendingTelemetryEvents, children: [] },
+    runtimeBusiness: { actor: { resource, path: [] }, submissionId,
+      status: base.pendingRuntimeEvents === 0 ? "delivered" as const : "pending" as const,
+      pendingRuntimeEvents: base.pendingRuntimeEvents, quarantinedRuntimeEvents: 0, children: [] },
+  };
+}
+
 /** SP readiness for the requested scope; `finalized` decides each check. */
 function mockReadiness(harness: Harness, finalized: (input: CollectAgentResourcesInput) => boolean): void {
   vi.mocked(harness.inspectAgentResources).mockImplementation(async (input) => {
@@ -520,7 +533,7 @@ function mockReadiness(harness: Harness, finalized: (input: CollectAgentResource
       scope: { chatId: input.handle.chatId, idempotencyKey: input.idempotencyKey, submissionId: input.submissionId ?? "submission-1" },
       observedAt: "2026-10-08T00:00:00.000Z",
       finalized: ready,
-      readiness: ready ? FINALIZED_READINESS : PENDING_READINESS,
+      readiness: scopedReadiness(input.handle.chatId, input.submissionId ?? "submission-1", ready ? FINALIZED_READINESS : PENDING_READINESS),
     };
   });
 }
@@ -586,7 +599,7 @@ function makeHarness(): Harness {
         scope: { chatId: handle.chatId, submissionId: resolvedSubmissionId, idempotencyKey },
         observedAt: "2026-10-08T00:00:00.000Z",
         finalized: true,
-        readiness: FINALIZED_READINESS,
+        readiness: scopedReadiness(handle.chatId, resolvedSubmissionId),
       };
     }),
     collectAgentResources: vi.fn(async ({ handle, idempotencyKey, submissionId }) => {
@@ -596,6 +609,7 @@ function makeHarness(): Harness {
         scope: { chatId: handle.chatId, submissionId: resolvedSubmissionId, idempotencyKey },
         observedAt: "2026-10-08T00:00:00.000Z",
         finalized: true,
+        trajectoryFormat: "pi-trajectory/v1",
         coverage: {
           usageEvents: "complete" as const,
           telemetryEvents: "complete" as const,
@@ -604,7 +618,7 @@ function makeHarness(): Harness {
         usageEvents: [],
         telemetryEvents: [],
         billingSettlements: [],
-        readiness: FINALIZED_READINESS,
+        readiness: scopedReadiness(handle.chatId, resolvedSubmissionId),
       };
     }),
     exportEvidence: vi.fn(async ({ handle }) => exportedEvidence({ samplingId: handle.samplingId, chatId: handle.chatId })),
@@ -626,27 +640,31 @@ function makeResources(input: CollectAgentResourcesInput): AgentResourceSnapshot
     providerCostUsd: { input: 0.1, output: 0.02, cacheRead: 0.01, cacheWrite: 0, total: 0.13 },
     sourceExtension: { retained: [true, null, "original"] },
   };
-  const event = (type: string, operationId: string, occurredAt: number, payload: Record<string, string | number>) => ({
-    eventId: `${submissionId}:${idempotencyKey}:${type}`,
-    operationId,
-    type,
-    occurredAt,
-    resource: { sessionId: handle.chatId },
-    payload,
+  const record = (type: string, value: AgentResourceFact): AgentResourceFact => ({
+    format: "pi-trajectory/v1", resource: { agentId: "root", sessionId: handle.chatId }, submissionId,
+    projection: { kind: "safe", policyId: "fixture", policyVersion: 1 }, record: { type, value },
   });
+  const entry = (id: number, kind: string, fields: AgentResourceFact) => record("entry", { id, conversationId: 1, kind, ...fields });
   return {
     scope: { chatId: handle.chatId, submissionId, idempotencyKey },
     observedAt: "2026-10-08T00:00:00.000Z",
     finalized: true,
-    readiness: FINALIZED_READINESS,
+    trajectoryFormat: "pi-trajectory/v1",
+    readiness: scopedReadiness(handle.chatId, submissionId),
     coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
     usageEvents: [usage],
     telemetryEvents: [
-      event("turn.started", `${idempotencyKey}:turn`, 100, {}),
-      event("generation.finished", `${idempotencyKey}:model`, 200, { model: `${handle.role}-model`, totalTokens: 110 }),
-      event("tool.started", `${idempotencyKey}:tool`, 200, { toolName: "bash" }),
-      event("tool.finished", `${idempotencyKey}:tool`, 250, { toolName: "bash", durationMs: 50 }),
-      event("turn.finished", `${idempotencyKey}:turn`, 300, { outcome: "completed", durationMs: 200 }),
+      record("conversation", { id: 1 }),
+      entry(2, "pi.user", { model: [{ role: "user", content: "Original task", timestamp: 100 }] }),
+      entry(3, "springbrand.trajectory", { data: { type: "host_turn", phase: "admitted", requestId: "host", submissionId, recordedAt: 100 } }),
+      entry(4, "springbrand.trajectory", { data: { type: "request", requestId: "request", taskId: 10, cutoff: 2, attempt: 1,
+        purpose: "generation", method: "streamSimple", inputs: [], dispatched: true, startedAt: 150,
+        model: { provider: "openrouter", modelId: `${handle.role}-model`, api: "openai-completions" } } }),
+      entry(5, "pi.assistant", { byTaskId: 10, model: [{ role: "assistant", provider: "openrouter", model: `${handle.role}-model`,
+        api: "openai-completions", content: [{ type: "text", text: "Original reply" }], stopReason: "stop", timestamp: 150,
+        usage: { input: 100, output: 10, cacheRead: 30, cacheWrite: 0, totalTokens: 140, cost: usage.providerCostUsd } }] }),
+      entry(6, "springbrand.trajectory", { data: { type: "request_end", requestId: "request", taskId: 10, endedAt: 200, result: { type: "entry", entryId: 5 } } }),
+      entry(7, "springbrand.trajectory", { data: { type: "host_turn", phase: "terminal", status: "completed", submissionId, childRegistrationClosed: true, recordedAt: 300 } }),
     ],
     billingSettlements: [{
       eventId,
@@ -1837,7 +1855,7 @@ describe("eval runtime orchestration", () => {
       submissionId: expect.any(String), checks: 1, finalized: true, durationMs: expect.any(Number),
     });
     expect(events).toContainEqual(expect.objectContaining({
-      ...evaluator, name: "resources_collected", finalized: true, usageEvents: 1, telemetryEvents: 5, billingSettlements: 2, creditsTotal: 20,
+      ...evaluator, name: "resources_collected", finalized: true, usageEvents: 1, telemetryEvents: 7, billingSettlements: 2, creditsTotal: 20,
     }));
     expect(events).toContainEqual(expect.objectContaining({
       ...member, name: "evidence_export", passes: 1, outcome: "stored", filesStored: 1, filesTotal: 1,
@@ -4022,7 +4040,7 @@ describe("Project Run stop", () => {
       }, queued);
       vi.mocked(harness.inspectAgentOperation).mockResolvedValue({ submissionId: "subject-submission", status: "completed" });
       vi.mocked(harness.inspectAgentResources).mockResolvedValue({
-        scope, observedAt: ENDED_AT, finalized: false, readiness: FINALIZED_READINESS,
+        scope, observedAt: ENDED_AT, finalized: false, readiness: scopedReadiness(scope.chatId, scope.submissionId),
       });
       const sleep = vi.fn(async () => undefined);
       const reporter = stopReporter();
@@ -4214,6 +4232,22 @@ describe("Project Run stop", () => {
 });
 
 describe("raw resource persistence", () => {
+  it.each([undefined, "sp-trajectory/v1", "future-trajectory/v2"])("never saves a new resource download under format %j", async (trajectoryFormat) => {
+    const harness = makeHarness();
+    const decide = vi.fn(async () => ({ shouldRetry: true, backoffMs: 0 }));
+    vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
+      const { trajectoryFormat: _format, ...snapshot } = makeResources(input);
+      return { ...snapshot, ...(trajectoryFormat === undefined ? {} : { trajectoryFormat }) };
+    });
+    const runtime = createAutoResumingRuntime({ harness, store: makeStore(), createRetryController: () => ({ decide }) });
+    const run = await runtime.submit(projectRequest("execution", `unsupported-resource-${trajectoryFormat}`));
+    await expect(waitForTerminal(runtime, run.runId)).resolves.toMatchObject({ status: "succeeded" });
+    const resources = (await runtime.getSampling(run.samplingIds[0]!)).executionAttempts[0]!.resources;
+    expect(resources).toMatchObject({ status: "failed", error: expect.stringContaining("Resource snapshot is invalid") });
+    expect(harness.collectAgentResources).toHaveBeenCalledTimes(1);
+    expect(decide).not.toHaveBeenCalled();
+  });
+
   it("persists scopes before dispatch and saves unchanged subject/evaluator records before output collection", async () => {
     const store = makeStore();
     const harness = makeHarness();
@@ -4250,6 +4284,7 @@ describe("raw resource persistence", () => {
 
     expect(completed.status).toBe("succeeded");
     expect(captured).toHaveLength(2);
+    expect(captured.every((snapshot) => snapshot.trajectoryFormat === "pi-trajectory/v1")).toBe(true);
     const sampling = await runtime.getSampling(run.samplingIds[0]!);
     const evaluation = await runtime.getEvaluation(completed.evaluationIds[0]!);
     expect(sampling.executionAttempts[0]!.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(captured[0]!) });
@@ -4489,7 +4524,7 @@ describe("raw resource persistence", () => {
     const decide = vi.fn(async () => ({ shouldRetry: true, backoffMs: 0 }));
     vi.mocked(harness.inspectAgentResources).mockImplementation(async (input) => ({
       scope: { chatId: input.handle.chatId, idempotencyKey: input.idempotencyKey, submissionId: "different-submission" },
-      observedAt: "2026-10-08T00:00:00.000Z", finalized: true, readiness: FINALIZED_READINESS,
+      observedAt: "2026-10-08T00:00:00.000Z", finalized: true, readiness: scopedReadiness(input.handle.chatId, "different-submission"),
     }));
     const runtime = createAutoResumingRuntime({ harness, store: makeStore(), sleep: async () => undefined, createRetryController: () => ({ decide }) });
     const run = await runtime.submit(projectRequest("execution", "readiness-wrong-scope"));
@@ -6107,7 +6142,7 @@ describe("evaluation result checking", () => {
       : submit(input));
     vi.mocked(harness.inspectAgentResources).mockImplementation(async (input) => ({
       scope: { chatId: input.handle.chatId, idempotencyKey: input.idempotencyKey, submissionId: input.submissionId! },
-      observedAt: "2026-10-08T00:00:00.000Z", finalized: true, readiness: FINALIZED_READINESS,
+      observedAt: "2026-10-08T00:00:00.000Z", finalized: true, readiness: scopedReadiness(input.handle.chatId, input.submissionId!),
     }));
     vi.mocked(harness.collectEvaluation).mockResolvedValue(noResult);
     const runtime = createRuntime({
@@ -6622,7 +6657,7 @@ describe("resource readiness waiting and Submission observation", () => {
   const FIRST_CHECK = new Date(Date.parse(START) + RESOURCE_CHECK_INTERVAL_MS).toISOString();
   const socketClosed = () => Object.assign(new Error("Submission WebSocket closed before terminal status"), { retryable: true });
   const unfinalized = (input: CollectAgentResourcesInput): AgentResourceSnapshot => ({
-    ...makeResources(input), finalized: false, readiness: PENDING_READINESS,
+    ...makeResources(input), finalized: false, readiness: scopedReadiness(input.handle.chatId, input.submissionId ?? "submission-1", PENDING_READINESS),
     coverage: { usageEvents: "partial", telemetryEvents: "partial", billingSettlements: "partial" },
   });
   const validScore = (_schema: unknown, content: string) => (

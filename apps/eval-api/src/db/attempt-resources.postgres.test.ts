@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { summarizeResourceSnapshot, type AgentResourceSnapshot, type EvaluationRecord, type Sampling } from "@eval-platform/eval-contracts";
+import { summarizeResourceSnapshot, type AgentResourceFact, type AgentResourceSnapshot, type EvaluationRecord, type Sampling } from "@eval-platform/eval-contracts";
 import { compactResourceSnapshot, createMetrics, type MetricsFacts } from "@eval-platform/eval-metrics";
 import { and, eq } from "drizzle-orm";
 import { Pool, types } from "pg";
@@ -19,15 +19,58 @@ const connection = process.env.DATABASE_URL;
 const owner = "attempt-resources-test";
 
 function rawSnapshot(id: string, body: string, toolName = "tool"): AgentResourceSnapshot {
+  const record = (type: string, value: AgentResourceFact): AgentResourceFact => ({
+    format: "pi-trajectory/v1", resource: { agentId: "root", sessionId: id }, submissionId: id,
+    projection: { kind: "safe", policyId: "fixture", policyVersion: 1 }, record: { type, value },
+  });
+  const entry = (entryId: number, kind: string, fields: AgentResourceFact) =>
+    record("entry", { id: entryId, conversationId: 1, kind, ...fields });
   return {
     scope: { chatId: id, idempotencyKey: id, submissionId: id }, observedAt: "2026-10-17T00:00:00Z", finalized: true,
+    trajectoryFormat: "pi-trajectory/v1",
+    readiness: {
+      receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 0, pendingRuntimeEvents: 0,
+      actionCharges: { complete: true, unsettledExecutions: 0, missingExecutionIds: 0 },
+      trajectory: { resource: { agentId: "root", sessionId: id }, submissionId: id, status: "delivered",
+        requiredClosed: true, pendingRecords: 0, children: [] },
+      runtimeBusiness: { actor: { resource: { agentId: "root", sessionId: id }, path: [] }, submissionId: id,
+        status: "delivered", pendingRuntimeEvents: 0, quarantinedRuntimeEvents: 0, children: [] },
+    },
     coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
     usageEvents: [], billingSettlements: [], telemetryEvents: [
-      { eventId: "start", type: "tool.started", operationId: "tool", occurredAt: 1, resource: { sessionId: id }, payload: { toolName, input: body } },
-      { eventId: "end", type: "tool.finished", operationId: "tool", occurredAt: 5, resource: { sessionId: id }, payload: { toolName, outcome: "completed", output: body } },
+      record("conversation", { id: 1 }),
+      entry(2, "springbrand.trajectory", { data: { type: "host_turn", phase: "admitted", submissionId: id, requestId: "host", recordedAt: 0 } }),
+      entry(3, "springbrand.trajectory", { data: { type: "request", requestId: "model", taskId: 10, cutoff: 2, attempt: 1,
+        purpose: "generation", method: "streamSimple", inputs: [], dispatched: true, startedAt: 1,
+        model: { provider: "openrouter", modelId: "model", api: "openai-completions" } } }),
+      entry(4, "pi.assistant", { byTaskId: 10, model: [{
+        role: "assistant", provider: "openrouter", model: "model", api: "openai-completions", stopReason: "toolUse", timestamp: 1,
+        content: [{ type: "toolCall", id: "call", name: toolName, arguments: { body } }],
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      }] }),
+      entry(5, "springbrand.trajectory", { data: { type: "request_end", requestId: "model", taskId: 10, endedAt: 2, result: { type: "entry", entryId: 4 } } }),
+      entry(6, "pi.toolResult", { byTaskId: 11, model: [{
+        role: "toolResult", toolCallId: "call", toolName, content: [{ type: "text", text: body }], isError: false, timestamp: 3, durationMs: 4,
+      }] }),
+      entry(7, "springbrand.trajectory", { data: { type: "host_turn", phase: "terminal", status: "completed", submissionId: id,
+        childRegistrationClosed: true, recordedAt: 10 } }),
     ],
   };
 }
+
+it.each(["\ud83e", "\udd16", "\u0000", "中文 é 🤖"])("keeps native persisted projections body-free and lossless for %j without PostgreSQL", async (toolName) => {
+  const body = "source-only-body".repeat(10_000);
+  const snapshot = rawSnapshot("native-snapshot", body, toolName);
+  const original = JSON.stringify(snapshot);
+  const projection = await compactResourceSnapshot(snapshot);
+  const serialized = JSON.stringify(projection);
+  expect(projection.trajectoryFormat).toBe("pi-trajectory/v1");
+  expect(serialized.length).toBeLessThan(15_000);
+  expect(serialized).toContain(JSON.stringify(toolName));
+  expect(serialized).not.toContain(body);
+  expect(JSON.stringify(snapshot)).toBe(original);
+});
 
 describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage facts", () => {
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -178,10 +221,8 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       expect(row?.snapshot).toEqual(snapshot);
       const projection = await compactResourceSnapshot(snapshot);
       expect(row?.metricSnapshot).toEqual(projection);
-      expect(row?.metricSnapshot.telemetryEvents).toMatchObject([
-        { event: { payload: { toolName: value } } },
-        { event: { payload: { toolName: value } } },
-      ]);
+      expect(row?.metricSnapshot.trajectoryFormat).toBe("pi-trajectory/v1");
+      expect(JSON.stringify(row?.metricSnapshot)).toContain(JSON.stringify(value));
       const facts = await createPostgresMetricsSource(database.db, owner).read({ projectId: seeded.projectId });
       const attempt = stage === "execution" ? facts.samplings[0]!.executionAttempts[0] : facts.evaluations[0]!.attempts[0];
       expect(attempt?.resources).toEqual({ ...resources, snapshot: projection });

@@ -1,3 +1,4 @@
+import { readNativeTrajectoryPage, type NativeTrajectoryPage, type TrajectoryRecord } from "@eval-platform/eval-runtime/harness";
 import { api, enc } from "./client";
 import type { AgentObservationRef } from "./types";
 
@@ -13,22 +14,9 @@ export interface WorkspaceTreeNode {
   readonly children?: readonly WorkspaceTreeNode[];
 }
 
-export interface TrajectoryEvent {
-  readonly eventId: string;
-  readonly occurredAt: number;
-  readonly type: string;
-  readonly operationId?: string;
-  readonly parentOperationId?: string;
-  readonly submissionId?: string;
-  readonly payload?: Readonly<Record<string, unknown>>;
-  readonly [field: string]: unknown;
-}
+export type TrajectoryEvent = TrajectoryRecord;
 
-export interface TrajectoryPage {
-  readonly events: readonly { readonly ingestSeq: number; readonly event: TrajectoryEvent }[];
-  readonly beforeSeq: number | null;
-  readonly hasOlder: boolean;
-}
+export type TrajectoryPage = NativeTrajectoryPage;
 
 export const observationKeys = {
   ref: (projectId: string, kind: ObservedKind, id: string) => ["observation", projectId, kind, id, "ref"] as const,
@@ -43,8 +31,12 @@ export const getMessages = (projectId: string, kind: ObservedKind, id: string, s
   api.get<unknown[]>(`${base(projectId, kind, id)}/messages`, { signal });
 export const getWorkspaceTree = (projectId: string, kind: ObservedKind, id: string, signal?: AbortSignal) =>
   api.get<WorkspaceTreeNode[]>(`${base(projectId, kind, id)}/tree`, { signal });
-export const getTrajectoryPage = (projectId: string, kind: ObservedKind, id: string, beforeSeq?: number, signal?: AbortSignal) =>
-  api.get<TrajectoryPage>(`${base(projectId, kind, id)}/trajectory`, { params: { limit: 100, ...(beforeSeq ? { beforeSeq } : {}) }, signal });
+export const getTrajectoryPage = async (projectId: string, kind: ObservedKind, id: string, beforeSeq?: number, signal?: AbortSignal): Promise<TrajectoryPage> => {
+  return readNativeTrajectoryPage(
+    await api.get<unknown>(`${base(projectId, kind, id)}/trajectory`, { params: { limit: 100, ...(beforeSeq ? { beforeSeq } : {}) }, signal }),
+    { limit: 100, ...(beforeSeq === undefined ? {} : { beforeSeq }) },
+  );
+};
 export const getWorkspaceFile = (projectId: string, kind: ObservedKind, id: string, path: string, signal?: AbortSignal) =>
   api.blob(`${base(projectId, kind, id)}/file`, { params: { path }, signal, timeoutMs: 120_000 });
 

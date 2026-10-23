@@ -230,7 +230,12 @@ export async function evaluateSampling(
       });
     const recollect = async () => {
       const output = await collectOutputWithRetry({ stage: "evaluation", retryController, sleep: dependencies.sleep,
-        collect: async () => resolveOutput(await dependencies.harness.collectEvaluation({ handle: evaluatorHandle })),
+        collect: async () => resolveOutput(await dependencies.harness.collectEvaluation({
+          handle: evaluatorHandle,
+          ...(currentEvaluation.attempts.at(-1)?.submissionId === undefined ? {} : {
+            submissionId: currentEvaluation.attempts.at(-1)!.submissionId!,
+          }),
+        })),
       });
       if (output.status !== "succeeded") throw new AgentOperationError(`evaluation output collection failed: ${output.error ?? "output unavailable"}`, false, "network");
       return { output };
@@ -320,6 +325,9 @@ export async function evaluateSampling(
       },
       collectOutput: async (handle) => resolveOutput(await dependencies.harness.collectEvaluation({
         handle,
+        ...(currentEvaluation.attempts.at(-1)?.submissionId === undefined ? {} : {
+          submissionId: currentEvaluation.attempts.at(-1)!.submissionId!,
+        }),
         ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
       })),
       recoverOutput: async (_handle, output) => {

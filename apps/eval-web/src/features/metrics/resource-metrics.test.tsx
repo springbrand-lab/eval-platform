@@ -29,6 +29,32 @@ function fixture() {
 }
 
 describe("Agent resource and trajectory categories", () => {
+  it("does not show native unknown coverage as known zero in operation or billing cells", async () => {
+    const base = resourceStatistics();
+    const unknown = { ...base.modelRequests, count: { value: null, coverage: "unavailable" as const } };
+    const statistics = resourceStatistics({
+      coverage: "unavailable", modelRequests: unknown,
+      costs: { ...base.costs, chargedUnits: { value: 0, coverage: "unavailable" } },
+      trajectory: { ...base.trajectory, coverage: "unavailable", turns: unknown, tools: unknown,
+        modelInvocations: unknown, deferredPolls: unknown, compactions: unknown,
+        generationTasks: { value: 0, coverage: "unavailable" },
+        requestRetries: { generation: { value: 0, coverage: "partial" }, compaction: { value: 0, coverage: "unavailable" } },
+        thinkingStepOperations: unknown, contentStepOperations: unknown,
+        byTool: [{ ...unknown, toolName: "unobserved", inputLength: { ...base.modelRequests.durationMs, coverage: "unavailable" },
+          outputLength: { ...base.modelRequests.durationMs, coverage: "unavailable" } }],
+      },
+    });
+    const view = await render(<ResourceMetrics statistics={statistics} />);
+    try {
+      const requests = [...view.container.querySelectorAll('table[aria-label="操作次数"] tbody tr')]
+        .find((row) => row.querySelector("th")?.textContent === "模型请求")!;
+      expect([...requests.querySelectorAll("td")].map((cell) => cell.textContent)).toEqual(Array(6).fill("未获得"));
+      const tools = view.container.querySelector('table[aria-label="工具调用明细"] tbody tr')!;
+      expect([...tools.querySelectorAll("td")].map((cell) => cell.textContent)).toEqual(Array(6).fill("未获得"));
+      expect(view.container.textContent).toContain("原生生成任务 未获得 个");
+      expect(view.container.textContent).toContain("模型重试 未获得 次");
+    } finally { await view.unmount(); }
+  });
   it("keeps the Agent stage status separate from telemetry operation outcomes", async () => {
     const summary = metricSummary(resourceStatistics(), resourceStatistics()).execution;
     expect(stageStatusFor(summary)).toBe("succeeded");
@@ -45,11 +71,12 @@ describe("Agent resource and trajectory categories", () => {
     const view = await render(<ResourceMetrics statistics={fixture()} />);
     try {
       const operations = view.container.querySelector('table[aria-label="操作次数"]')!;
-      expect([...operations.querySelectorAll("tbody th")].map((item) => item.textContent)).toEqual(["处理轮（Turn）", "思考步骤", "内容步骤", "模型请求", "工具调用"]);
+      expect([...operations.querySelectorAll("tbody th")].map((item) => item.textContent)).toEqual(["处理轮（Turn）", "思考步骤", "内容步骤", "模型请求", "延迟轮询", "压缩请求", "工具调用"]);
+      expect(view.container.textContent).toContain("模型重试 0 次，压缩重试 0 次");
       const turns = operations.querySelector("tbody tr")!;
-      expect([...turns.querySelectorAll("td")].slice(0, 6).map((item) => item.textContent)).toEqual(["4", "2", "1", "0", "0", "1"]);
+      expect([...turns.querySelectorAll("td")].slice(0, 6).map((item) => item.textContent)).toEqual(["4", "2", "1", "未获得", "未获得", "1"]);
       const thinking = [...operations.querySelectorAll("tbody tr")].find((row) => row.querySelector("th")?.textContent === "思考步骤")!;
-      expect([...thinking.querySelectorAll("td")].map((item) => item.textContent)).toEqual(["2", "1", "1", "0", "0", "0"]);
+      expect([...thinking.querySelectorAll("td")].map((item) => item.textContent)).toEqual(["2", "1", "1", "未获得", "未获得", "未获得"]);
       const tool = view.container.querySelector('table[aria-label="工具调用明细"] tbody tr')!;
       expect(tool.textContent).toContain("write_file");
       expect(view.container.querySelector('table[aria-label="工具长度与耗时分布"]')).not.toBeNull();

@@ -11,9 +11,12 @@ import {
   EVIDENCE_SCHEMA_VERSION,
   AGENT_FRAMEWORKS,
   canonicalJsonBytes,
+  equalJson,
   sha256Hex,
 } from "@eval-platform/eval-contracts";
 import { z } from "zod";
+import { evalTrajectoryScopeSchema, evalTrajectoryCursorSchema } from "@springbrand/eval-harness";
+import { PI_TRAJECTORY_FORMAT, storedTrajectoryFormat } from "./trajectory.js";
 
 import type {
   EvidenceBundleReader,
@@ -93,7 +96,10 @@ function planEvidenceExport(evidence: ExportedEvidence, limits: EvidenceLimits, 
       bundleId, materialId, path, size, mediaType,
     })),
     omitted: evidence.omitted.map(({ path, reason }) => ({ path, reason })),
-    trajectory: { afterSeq: 0, parts: [] },
+    trajectory: { afterSeq: 0, parts: [],
+      ...(evidence.trajectoryScope ? { scope: evidence.trajectoryScope } : {}),
+      ...(evidence.trajectoryCursor ? { cursor: evidence.trajectoryCursor } : {}),
+    },
   };
 }
 
@@ -122,6 +128,8 @@ async function finalizeEvidenceManifest(evidence: ExportedEvidence, progress: Ev
     }),
     trajectory: {
       format: evidence.trajectoryFormat,
+      ...(progress.trajectory.scope ? { scope: progress.trajectory.scope } : {}),
+      ...(progress.trajectory.cursor ? { cursor: progress.trajectory.cursor } : {}),
       parts: [...parts],
       events: parts.reduce((count, part) => count + part.events, 0),
       complete: evidence.trajectoryComplete,
@@ -143,6 +151,14 @@ async function finalizeEvidenceManifest(evidence: ExportedEvidence, progress: Ev
 export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string = () => new Date().toISOString()): EvidenceStore {
   return {
     async resume({ evidence, limits, progress: saved, onProgress }) {
+      if (evidence.trajectoryFormat === PI_TRAJECTORY_FORMAT) {
+        evalTrajectoryScopeSchema.parse(evidence.trajectoryScope);
+        evalTrajectoryCursorSchema.parse(evidence.trajectoryCursor);
+        if (saved && (!equalJson(saved.trajectory.scope, evidence.trajectoryScope) ||
+          !equalJson(saved.trajectory.cursor, evidence.trajectoryCursor))) {
+          throw new EvidenceIntegrityError("Native evidence scope or fixed cursor changed during resume");
+        }
+      }
       const persist = serialProgress(onProgress);
       let progress = saved ?? planEvidenceExport(evidence, limits, now());
       if (saved === undefined) await persist(progress);
@@ -187,7 +203,7 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
             parts.push({ ...storedPart, events: part.chunks.length });
             afterSeq = part.lastSeq;
           }
-          progress = { ...progress, trajectory: { afterSeq, parts: [...parts], ...(done ? { done: true as const } : {}) } };
+          progress = { ...progress, trajectory: { ...progress.trajectory, afterSeq, parts: [...parts], ...(done ? { done: true as const } : {}) } };
           await persist(progress);
         };
         for await (const part of trajectoryParts(evidence.readTrajectory(afterSeq), afterSeq, limits.maxFileBytes)) {
@@ -215,6 +231,10 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
         throw new EvidenceIntegrityError(`Evidence bundle ${ref.evidenceId} manifest is invalid`);
       }
       const manifest = parsed.data as EvidenceManifest;
+      storedTrajectoryFormat(manifest.trajectory.format);
+      if (manifest.trajectory.format === PI_TRAJECTORY_FORMAT) {
+        if (!manifest.trajectory.scope || !manifest.trajectory.cursor) throw new EvidenceIntegrityError("Native evidence has no explicit scope or fixed cursor");
+      }
       return {
         ref,
         manifest,
@@ -256,6 +276,8 @@ const manifestSchema = z.object({
   })),
   trajectory: z.object({
     format: z.string().min(1),
+    scope: evalTrajectoryScopeSchema.optional(),
+    cursor: evalTrajectoryCursorSchema.optional(),
     parts: z.array(z.object({ sha256, size: z.number().int().positive(), events: z.number().int().positive() })),
     events: z.number().int().nonnegative(),
     complete: z.boolean(),

@@ -107,6 +107,12 @@ export type ContentStepTokens = StepTokens;
 export interface TrajectorySummary {
   readonly coverage: AgentResourceCompleteness;
   readonly turns: OperationStatistics;
+  readonly compactions: OperationStatistics;
+  readonly deferredPolls: OperationStatistics;
+  readonly modelInvocations: OperationStatistics;
+  /** Distinct native task identities, never inferred from retry/poll counts. Unavailable for v1 archives. */
+  readonly generationTasks: MetricNumber;
+  readonly requestRetries: { readonly generation: MetricNumber; readonly compaction: MetricNumber };
   readonly tools: OperationStatistics;
   readonly byTool: readonly ToolMetric[];
   /** Model steps whose output or owning Turn contains thinking/signature markers. */

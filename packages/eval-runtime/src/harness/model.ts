@@ -2,6 +2,7 @@ import type {
   AgentConfigRef,
   AgentFramework,
   AgentRole,
+  AgentTrajectoryScope,
   AgentResourceReadinessReport,
   AgentResourceSnapshot,
   AgentStatus,
@@ -81,6 +82,8 @@ export interface WaitForSubmissionInput {
 
 export interface CollectAgentInput {
   readonly handle: AgentHandle;
+  /** When known, the output must belong to this Submission, never another Chat attempt. */
+  readonly submissionId?: string;
   readonly runtime?: HarnessRuntimeOptions;
 }
 
@@ -149,6 +152,8 @@ export interface ExportedEvidence {
    */
   readTrajectory(afterSeq: number): AsyncIterable<ExportedTrajectoryEvent>;
   readonly trajectoryFormat: string;
+  readonly trajectoryScope?: AgentTrajectoryScope;
+  readonly trajectoryCursor?: { readonly throughSeq: number };
   readonly trajectoryComplete: boolean;
   readonly trajectoryIncompleteReason?: string;
 }

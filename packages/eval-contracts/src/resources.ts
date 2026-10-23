@@ -26,6 +26,7 @@ export interface AgentResourceSnapshot {
   readonly observedAt: string;
   readonly finalized: boolean;
   readonly coverage: AgentResourceCoverage;
+  readonly trajectoryFormat?: string;
   readonly usageEvents: readonly AgentResourceFact[];
   readonly telemetryEvents: readonly AgentResourceFact[];
   readonly billingSettlements: readonly AgentResourceFact[];
@@ -36,13 +37,45 @@ export interface AgentResourceSnapshot {
 export interface AgentResourceReadiness {
   readonly receiptTerminal: boolean;
   readonly stateUnreadable: boolean;
-  readonly pendingTelemetryEvents: number;
-  readonly pendingRuntimeEvents: number;
+  readonly pendingTelemetryEvents: number | null;
+  readonly pendingRuntimeEvents: number | null;
+  /** The unmodified public SP delivery state. Absent only on immutable historical records. */
+  readonly trajectory?: AgentTrajectoryDeliveryState;
+  readonly runtimeBusiness?: AgentRuntimeBusinessDeliveryState;
   readonly actionCharges: {
     readonly complete: boolean;
     readonly unsettledExecutions: number;
     readonly missingExecutionIds: number;
   };
+}
+
+export interface AgentTrajectoryScope {
+  readonly resource: { readonly agentId: string; readonly sessionId: string };
+  readonly submissionId: string;
+}
+
+/** Stored public wire data, not a locally inferred execution tree. */
+export interface AgentTrajectoryDeliveryState {
+  readonly resource: AgentTrajectoryScope["resource"] | null;
+  readonly submissionId: string | null;
+  readonly status: "delivered" | "pending" | "failed" | "quarantined" | "missing" | "unreadable";
+  readonly requiredClosed: boolean;
+  readonly pendingRecords: number | null;
+  readonly children: readonly AgentTrajectoryDeliveryState[];
+  readonly error?: string;
+}
+
+export interface AgentRuntimeBusinessDeliveryState {
+  readonly actor: {
+    readonly resource: AgentTrajectoryScope["resource"] | null;
+    readonly path: readonly { readonly className: string; readonly name: string }[];
+  };
+  readonly submissionId: string | null;
+  readonly status: AgentTrajectoryDeliveryState["status"];
+  readonly pendingRuntimeEvents: number | null;
+  readonly quarantinedRuntimeEvents: number | null;
+  readonly children: readonly AgentRuntimeBusinessDeliveryState[];
+  readonly error?: string;
 }
 
 /** Whether SP has finalized a snapshot, without its events; Runtime waits on this before downloading. */

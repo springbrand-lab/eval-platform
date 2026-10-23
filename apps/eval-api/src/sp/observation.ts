@@ -1,6 +1,7 @@
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
+import { readNativeTrajectoryPage } from "@eval-platform/eval-runtime/harness";
 import { ApiError, type HttpClient, type HttpRequestOptions } from "@springbrand/http/client";
-import { createSpHttpClient, throwSpClientError, type Fetch } from "./http.js";
+import { createSpHttpClient, EvalSpTransportError, throwSpClientError, type Fetch } from "./http.js";
 
 /** One Eval SP Chat of the service account. */
 export interface ChatRef {
@@ -71,7 +72,12 @@ export function createSpObservationClient(input: {
       return { body: data.stream(), contentType: data.type || "application/octet-stream", contentLength: String(data.size) };
     },
     async trajectory(chat, query) {
-      return (await get(api, `/api/chats/${encodeURIComponent(chat.chatId)}/trajectory`, { params: { ...query } })).data;
+      const value = (await get(api, `/api/chats/${encodeURIComponent(chat.chatId)}/trajectory`, { params: { ...query } })).data;
+      try {
+        return readNativeTrajectoryPage(value, query);
+      } catch (cause) {
+        throw new EvalSpTransportError(cause);
+      }
     },
   };
 }

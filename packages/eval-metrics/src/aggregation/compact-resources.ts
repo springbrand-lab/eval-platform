@@ -1,97 +1,89 @@
-import { canonicalJsonBytes, sha256Hex, type AgentResourceFact, type AgentResourceSnapshot, type JsonValue } from "@eval-platform/eval-contracts";
-import { record, text } from "../json.js";
+import { jsonObjectInPlaceSchema, type AgentResourceFact, type AgentResourceSnapshot } from "@eval-platform/eval-contracts";
+import {
+  PI_TRAJECTORY_FORMAT, nativeExecutionKey, nativeExecutionMembers, openNativeExecution, parseSafeTrajectoryRecord,
+  storedTrajectoryFormat, trajectoryRecordIdentity, isEvalTrajectoryDelivered,
+  nativeResourceReadinessSchema, validateNativeResourceScope,
+} from "@eval-platform/eval-runtime/harness";
+import { record } from "../json.js";
+import { TELEMETRY_PROJECTION_VERSION, nativeMetricSchema, nativeSnapshotProjectionSchema, projectNativeRecord, telemetryFingerprint } from "./native-facts.js";
 
-export const TELEMETRY_PROJECTION_VERSION = 3;
+export { TELEMETRY_PROJECTION_VERSION } from "./native-facts.js";
+export { telemetryBodyLength, telemetryOutputLength, telemetryContentFlags } from "./telemetry-content.js";
 
-const HIDDEN_TELEMETRY_TEXT = new Set([
-  "[CONTENT OMITTED]",
-  "[REDACTED]",
-  "[Action business data withheld from telemetry]",
-]);
-
-/** Bytes of present canonical JSON; sanitized whole-body placeholders remain missing. */
-export function telemetryBodyLength(value: JsonValue | undefined): number | null {
-  if (value === undefined || containsHiddenTelemetry(value)) return null;
-  return canonicalJsonBytes(value).byteLength;
-}
-
-/** Uses `response` only when the public event omitted `output`; redaction stays missing. */
-export function telemetryOutputLength(payload: JsonValue | undefined): number | null {
-  const object = record(payload);
-  if (!object) return null;
-  return Object.hasOwn(object, "output") ? telemetryBodyLength(object.output) : telemetryBodyLength(object.response);
-}
-
-export interface TelemetryContentFlags {
-  readonly thinking: boolean;
-  readonly content: boolean;
-  /** Marker absence is proven independently for each category. */
-  readonly thinkingKnown: boolean;
-  readonly contentKnown: boolean;
-}
-
-function hasKey(value: JsonValue | undefined, predicate: (key: string) => boolean): boolean {
-  if (Array.isArray(value)) return value.some((item) => hasKey(item, predicate));
-  const object = record(value);
-  if (!object) return false;
-  return Object.entries(object).some(([key, item]) => predicate(key) || hasKey(item, predicate));
-}
-
-function containsHiddenTelemetry(value: JsonValue | undefined): boolean {
-  if (typeof value === "string" && HIDDEN_TELEMETRY_TEXT.has(value)) return true;
-  if (Array.isArray(value)) return value.some(containsHiddenTelemetry);
-  const object = record(value);
-  return object !== undefined && (object.redacted === true || Object.values(object).some(containsHiddenTelemetry));
-}
-
-/** Reads the assistant output markers used to classify a Turn without retaining its body. */
-export function telemetryContentFlags(event: Readonly<Record<string, JsonValue>>): TelemetryContentFlags {
-  const type = text(event.type);
-  if (type !== "turn.finished" && type !== "generation.finished") return { thinking: false, content: false, thinkingKnown: true, contentKnown: true };
-  const payload = record(event.payload);
-  if (!payload) return { thinking: false, content: false, thinkingKnown: false, contentKnown: false };
-  const output = Object.hasOwn(payload, "output") ? payload.output : payload.response;
-  const directThinking = Object.keys(payload).some((key) => key === "thinking" || key === "signature" || key.toLowerCase().endsWith("signature"));
-  const directContent = Object.hasOwn(payload, "content");
-  const outputMarkers = output ?? (directThinking || directContent ? payload : undefined);
-  const bodyKnown = output !== undefined && !containsHiddenTelemetry(output);
-  const thinking = directThinking || hasKey(outputMarkers, (key) => key === "thinking" || key === "signature" || key.toLowerCase().endsWith("signature"));
-  const content = directContent || hasKey(outputMarkers, (key) => key === "content");
-  return {
-    thinking,
-    content,
-    thinkingKnown: thinking || directThinking || bodyKnown,
-    contentKnown: content || directContent || bodyKnown,
-  };
-}
-
-/** Internal Metrics projection of a raw snapshot, stored beside it and never a replacement for it. */
+/** Derive current native metrics from source, or validate the current cache; never migrate or write back. */
 export async function compactResourceSnapshot(snapshot: AgentResourceSnapshot): Promise<AgentResourceSnapshot> {
-  const telemetryEvents: AgentResourceFact[] = [];
-  // Sequential hashing bounds temporary canonical JSON buffers to one event, not the full snapshot.
-  for (const raw of snapshot.telemetryEvents) {
-    const event = record(raw.event) ?? raw;
-    const payload = record(event.payload);
-    const contentFlags = telemetryContentFlags(event);
-    const pick = (value: AgentResourceFact | undefined, fields: readonly string[]): AgentResourceFact =>
-      Object.fromEntries(fields.flatMap((key) => value?.[key] === undefined ? [] : [[key, value[key]!]]));
-    telemetryEvents.push({
-      event: {
-        ...pick(event, ["eventId", "type", "operationId", "parentOperationId", "occurredAt"]),
-        resource: pick(record(event.resource), ["sessionId"]),
-        payload: pick(payload, ["outcome", "durationMs", "toolName", "inputTokens", "outputTokens", "totalTokens"]),
-      },
-      metricProjection: {
-        version: TELEMETRY_PROJECTION_VERSION,
-        fingerprint: await sha256Hex(canonicalJsonBytes(event)),
-        hasThinking: contentFlags.thinking,
-        hasContent: contentFlags.content,
-        thinkingKnown: contentFlags.thinkingKnown,
-        contentKnown: contentFlags.contentKnown,
-        inputLength: event.type === "tool.started" ? telemetryBodyLength(payload?.input) : null,
-        outputLength: event.type === "tool.finished" ? telemetryOutputLength(payload) : null,
-      },
-    });
+  const stored = record((snapshot as AgentResourceSnapshot & { readonly metricProjection?: AgentResourceFact }).metricProjection);
+  if (snapshot.trajectoryFormat !== PI_TRAJECTORY_FORMAT && (
+    stored?.sourceFormat === PI_TRAJECTORY_FORMAT ||
+    snapshot.telemetryEvents.some((raw) => (record(raw.event) ?? raw).format === PI_TRAJECTORY_FORMAT)
+  )) throw new Error("Native resources require an explicit pi-trajectory/v1 format");
+  if (storedTrajectoryFormat(snapshot.trajectoryFormat) !== PI_TRAJECTORY_FORMAT) return snapshot;
+  if (stored && stored.version !== TELEMETRY_PROJECTION_VERSION) {
+    throw new Error(`Unsupported native telemetry projection version: ${String(stored.version)}`);
   }
-  return { ...snapshot, telemetryEvents };
+  const readiness = nativeResourceReadinessSchema.parse(snapshot.readiness);
+  validateNativeResourceScope({ ...snapshot, readiness }, true);
+  const delivery = readiness.trajectory;
+  const members = delivery.resource !== null && delivery.submissionId !== null ? nativeExecutionMembers(delivery) : [];
+  const scopeFingerprint = telemetryFingerprint(jsonObjectInPlaceSchema.parse({ scope: snapshot.scope, trajectory: delivery }));
+  if (stored) {
+    const metadata = nativeSnapshotProjectionSchema.parse(stored);
+    if (metadata.scopeFingerprint !== scopeFingerprint) throw new Error("Native metric cache belongs to another execution scope");
+    const memberKeys = new Set(members.map(nativeExecutionKey));
+    for (const raw of snapshot.telemetryEvents) {
+      if (raw.format !== undefined) throw new Error("A native metric cache cannot contain raw native records");
+      const projection = record(raw.metricProjection);
+      if (projection?.version !== TELEMETRY_PROJECTION_VERSION || projection.sourceFormat !== PI_TRAJECTORY_FORMAT) {
+        throw new Error(`Unsupported native telemetry projection version: ${String(projection?.version)}`);
+      }
+      if (typeof projection.fingerprint !== "string" || !/^[0-9a-f]{64}$/u.test(projection.fingerprint)) {
+        throw new Error("Native metric cache has no valid source fingerprint");
+      }
+      const native = nativeMetricSchema.parse(projection.native);
+      if (native.sourceIdentity !== JSON.stringify([native.resource.agentId, native.resource.sessionId, native.recordType, native.id])) {
+        throw new Error("Native metric cache has inconsistent source identity");
+      }
+      if (native.selected && (native.submissionId === null ||
+        !memberKeys.has(nativeExecutionKey({ resource: native.resource, submissionId: native.submissionId })))) {
+        throw new Error("Native metric cache selects records outside its execution scope");
+      }
+    }
+    return snapshot;
+  }
+  const source = snapshot.telemetryEvents.map((raw) => {
+    if (raw.metricProjection !== undefined) {
+      throw new Error("Unsupported native telemetry projection version or missing snapshot metadata");
+    }
+    return parseSafeTrajectoryRecord(record(raw.event) ?? raw);
+  });
+  let selected: ReadonlySet<string> = new Set();
+  let complete = isEvalTrajectoryDelivered(delivery);
+  let diagnostics: readonly string[] = complete ? [] : ["Native trajectory delivery or required membership is incomplete"];
+  if (members.length === 0) diagnostics = [...diagnostics, "Native trajectory root execution identity is unavailable"];
+  try {
+    if (members.length > 0) {
+      const view = await openNativeExecution(source, members);
+      try {
+        selected = view.selected;
+        complete &&= view.complete;
+        diagnostics = [...diagnostics, ...view.diagnostics];
+      } finally {
+        await view.close();
+      }
+    }
+  } catch (error) {
+    complete = false;
+    diagnostics = [...diagnostics, error instanceof Error ? error.message : String(error)];
+  }
+  const telemetryEvents: AgentResourceFact[] = [];
+  for (const event of source) {
+    telemetryEvents.push(jsonObjectInPlaceSchema.parse({ metricProjection: {
+      version: TELEMETRY_PROJECTION_VERSION, sourceFormat: PI_TRAJECTORY_FORMAT,
+      fingerprint: telemetryFingerprint(jsonObjectInPlaceSchema.parse(event)),
+      native: projectNativeRecord(event, selected.has(trajectoryRecordIdentity(event))),
+    } }));
+  }
+  return { ...snapshot, telemetryEvents, metricProjection: {
+    version: TELEMETRY_PROJECTION_VERSION, sourceFormat: PI_TRAJECTORY_FORMAT, scopeFingerprint, complete, diagnostics,
+  } } as AgentResourceSnapshot;
 }

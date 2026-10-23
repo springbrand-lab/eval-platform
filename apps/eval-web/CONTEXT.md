@@ -13,6 +13,27 @@ It consumes only the Eval API and package public contracts. It never drives an A
 to SP Durable Objects, and never reconstructs trajectory facts from UI state. Its Worker is the only
 place the takt token is checked; the Eval API sees the verified user only as an audit actor.
 
+Live trajectory pages contain only `pi-trajectory/v1` native records. Classification,
+summary and model/tool filters use the shared `eval-runtime/harness` reader seam;
+raw expansion retains the complete source record. Receiving-store cursors and
+actor-scoped identities govern paging and overlap, not actor-local native IDs.
+The loaded interval survives refreshes and failed history reads. Unknown formats
+are explicit errors. Historical evidence decoding does not enable a legacy live
+observation mode.
+
+API and Web use the same Harness safe page parser. On-demand canonical Pi
+conversation context, request parameters/outcome/response and typed hook values
+call the official SDK reader against the loaded native records. Safe changes
+are audit records, not replayed messages or full before/after model-input
+snapshots. Compaction does not require an input recipe. Missing earlier
+dependencies are an explicit inspection gap, never a second transcript.
+Raw Chat history is not an execution metrics/final-reply
+source by UI selection. Native tasks, invocations and deferred polls are shown
+as distinct resource observations in the existing operations panel.
+Unknown/unavailable metrics, including operation outcome cells and cached zero
+values without complete coverage, render as “未获得”, not a known zero.
+Cross-page policy changes for one actor are rejected before cache replacement.
+
 Agent management receives a current `execution` or `evaluation` purpose on every selectable
 Agent option. The API reconciles missing purpose records before returning options; an unavailable
 or ambiguous MCP catalog is a blocking 503, so the page never renders an unknown-purpose row or

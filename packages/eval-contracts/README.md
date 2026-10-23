@@ -17,6 +17,11 @@ Web 轮询前者、停止自动轮询后者，不根据逐 Agent 的未知结果
 
 `InitialResourceFile` 与 `initialResourceFileSchema` 定义初始素材、初始上下文共用的只读文件目录投影：资源内绝对路径、媒体类型、字节数。不包含内容副本、预览状态或 SP Workspace 身份。内容仍从 API 的 Bundle 目录按精确路径读取。
 
+`AgentResourceSnapshot.trajectoryFormat` 保存 SP 的公开轨迹格式标记；新 SP 快照是
+`pi-trajectory/v1`，历史已存快照可能没有该字段。此包只承载标记和原始 JSON，
+不解码 Pi、推断 Host 状态或实现指标。原生合同与历史只读 decoder 归
+`eval-runtime/harness`，指标和版本化紧凑投影归 `eval-metrics`。
+
 `EVALUATION_RESULTS_MCP_PATH`、`isEvaluationResultsMcpUrl` 与 `resolveEvaluationResultsMcp` 是 Agent 用途分类和 Agent 编辑器共用的公开评估结果提交 MCP 判定；只有唯一启用且使用 Bearer 鉴权的用户 MCP 可用，分类不依赖 MCP 的展示名称或描述。
 
 `AgentPurpose` 是 Eval Agent Config 当前的 `execution | evaluation` 用途，可在编辑时切换；它与 Runtime 的 `AgentRole` 分开，Subject/Evaluator 运行契约不因此改变。切换为评估用途时由 Eval 自动绑定评估结果 MCP，切回执行用途时移除该绑定。
