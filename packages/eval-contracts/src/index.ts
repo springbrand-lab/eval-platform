@@ -94,10 +94,13 @@ export type {
   EvidenceOmissionReason,
   EvidenceSource,
   EvidenceSubjectInput,
+  EvidenceTrajectoryCursor,
   EvidenceTrajectoryPart,
+  EvidenceTrajectoryPin,
 } from "./evidence.js";
 export {
   DEFAULT_EVIDENCE_LIMITS,
+  evidenceTrajectoryPinOf,
   EVALUATION_FINAL_REPLY_PATH,
   EVALUATION_RESULT_PATH,
   EVALUATION_SUBMISSION_PATH,

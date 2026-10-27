@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { EvidenceExportProgress } from "@eval-platform/eval-contracts";
 import { createEvidenceStore, type AgentHandle } from "@eval-platform/eval-runtime/harness";
 import { evalEvidencePath } from "@springbrand/eval-harness";
 import { describe, expect, it } from "vitest";
@@ -50,6 +51,9 @@ describe("SP evidence export, persistence and import", () => {
       const evidence = await store.open(await store.resume({ evidence: exported, limits }));
       expect(cursors).toEqual(["0", "4"]);
       expect(evidence.manifest.trajectory.events).toBe(8);
+      // SP without a cursor: the export is unbounded and keeps the default format.
+      expect(evidence.manifest.trajectory.format).toBe("sp-trajectory/v1");
+      expect(exported).not.toHaveProperty("trajectoryCursor");
       expect(evidence.manifest.trajectory.parts.length).toBeGreaterThan(1);
       await harness.importEvidence({ handle: evaluator, idempotencyKey: "evidence", evidence, root: "/evidence" });
       expect(imported.at(-1)?.path).toBe("/manifest.json");
@@ -60,6 +64,64 @@ describe("SP evidence export, persistence and import", () => {
         const file = imported.find((item) => item.path === `/subject-inputs/${ref.bundleId}/${ref.materialId}/same.txt`);
         expect(new TextDecoder().decode(file!.bytes)).toBe(`original ${ref.materialId}`);
       }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stores exactly the pinned range across an interrupted export and refuses a changed pin", async () => {
+    const root = await mkdtemp(join(tmpdir(), "eval-evidence-pinned-"));
+    try {
+      // Events 7 and 8 arrive after SP pinned the export at 6; they never enter the bundle.
+      const events = Array.from({ length: 8 }, (_, index) => ({ ingestSeq: index + 1,
+        event: { type: "unknown.public.event", payload: { content: "x".repeat(70), index } } }));
+      const queries: Record<string, string>[] = [];
+      let failSecondPage = true;
+      const harness = createSpHarness({
+        origin: "https://sp.test", serviceToken: "service",
+        fetch: async (input, init) => {
+          const url = new URL(new Request(input, init).url);
+          if (url.pathname.endsWith("/artifacts")) return Response.json({ artifacts: [] });
+          queries.push(Object.fromEntries(url.searchParams));
+          const afterSeq = Number(url.searchParams.get("afterSeq"));
+          const throughSeq = Number(url.searchParams.get("throughSeq") ?? 6);
+          if (afterSeq > 0 && failSecondPage) {
+            failSecondPage = false;
+            return Response.json({ code: "EVIDENCE_NOT_READY", errMsg: "not ready" }, { status: 409 });
+          }
+          const page = events.filter((entry) => entry.ingestSeq > afterSeq && entry.ingestSeq <= throughSeq).slice(0, 5);
+          const last = page.at(-1)?.ingestSeq;
+          return Response.json({ events: page, nextAfterSeq: last === undefined || last === throughSeq ? null : last,
+            format: "sp-trajectory/v1", cursor: { throughSeq } });
+        },
+      });
+      const store = createEvidenceStore(await openLocalEvidenceBlobs(root));
+      let progress: EvidenceExportProgress | undefined;
+      const onProgress = async (next: EvidenceExportProgress) => { progress = structuredClone(next); };
+
+      const first = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+      expect(first.trajectoryCursor).toEqual({ throughSeq: 6 });
+      await expect(store.resume({ evidence: first, limits, onProgress })).rejects.toMatchObject({ retryable: true, status: 409 });
+      expect(progress!.trajectory).toMatchObject({ format: "sp-trajectory/v1", cursor: { throughSeq: 6 } });
+      expect(progress!.trajectory.afterSeq).toBeGreaterThan(0);
+
+      // The next pass hands the saved pin back, as Runtime does; the Harness never pins again.
+      const { format, cursor } = progress!.trajectory;
+      queries.length = 0;
+      const resumed = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits,
+        trajectory: { ...(format === undefined ? {} : { format }), ...(cursor === undefined ? {} : { cursor }) } });
+      const evidence = await store.open(await store.resume({ evidence: resumed, limits, progress: progress!, onProgress }));
+      expect(queries.length).toBeGreaterThan(0);
+      expect(queries.every((query) => query.throughSeq === "6")).toBe(true);
+      expect(evidence.manifest.trajectory).toMatchObject({ format: "sp-trajectory/v1", events: 6 });
+      const lines = (await Promise.all(evidence.manifest.trajectory.parts.map(async (part) =>
+        new Response(await evidence.readBlob(part.sha256)).text()))).join("").trimEnd().split("\n").map((line) => JSON.parse(line));
+      expect(lines).toEqual(events.slice(0, 6));
+
+      // A pin that differs from the saved progress is never concatenated with it.
+      const moved = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits, trajectory: { format: "sp-trajectory/v1", cursor: { throughSeq: 8 } } });
+      await expect(store.resume({ evidence: moved, limits, progress: progress! }))
+        .rejects.toMatchObject({ name: "EvidenceIntegrityError", retryable: false });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

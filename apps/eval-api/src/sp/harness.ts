@@ -1,7 +1,13 @@
 import { constants as bufferConstants } from "node:buffer";
 import { createHash } from "node:crypto";
-import type { AgentFramework, AgentResourceReadiness, EvidenceLimits, JsonValue } from "@eval-platform/eval-contracts";
-import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
+import type {
+  AgentFramework,
+  AgentResourceReadiness,
+  EvidenceLimits,
+  EvidenceTrajectoryPin,
+  JsonValue,
+} from "@eval-platform/eval-contracts";
+import { evidenceTrajectoryPinOf, isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import { safeLog, type RuntimeLog } from "@eval-platform/eval-runtime";
 import {
@@ -50,6 +56,8 @@ import {
   requireStopResult,
   submission,
   submitRequest,
+  SP_DEFAULT_TRAJECTORY_FORMAT,
+  type EvidenceTrajectoryPage,
 } from "./harness-wire.js";
 import { createSpHttpClient, type Fetch } from "./http.js";
 import { observeTerminalSubmission, type OpenWebSocket } from "./submission-observer.js";
@@ -96,6 +104,33 @@ export interface SpHarnessOptions {
     ownerUserId: string,
     reference: InitialSessionRef,
   ) => Promise<SessionContent>;
+}
+
+/**
+ * The contract `EvidenceTrajectoryPin` with SP's default format filled in: what every trajectory
+ * page of one export is checked against (see `ExportEvidenceInput.trajectory`).
+ */
+type ResolvedTrajectoryPin = EvidenceTrajectoryPin & { readonly format: string };
+
+/** A saved pin (`{}` for progress saved before pinning) or a first page's fields, with the default format applied. */
+function resolveTrajectoryPin(source: EvidenceTrajectoryPin): ResolvedTrajectoryPin {
+  const pin = evidenceTrajectoryPinOf(source);
+  return { ...pin, format: pin.format ?? SP_DEFAULT_TRAJECTORY_FORMAT };
+}
+
+/**
+ * Pages of one export are concatenated only while SP keeps the pinned format and, once pinned, the
+ * same cursor. Without a pinned cursor (old SP, or progress saved before pinning) a page's cursor
+ * is ignored, so the read stays unbounded exactly as before.
+ */
+function requirePinnedPage(page: EvidenceTrajectoryPage, pin: ResolvedTrajectoryPin): void {
+  const format = page.format ?? SP_DEFAULT_TRAJECTORY_FORMAT;
+  if (format !== pin.format) {
+    throw new SpHarnessError(`Eval SP changed the evidence trajectory format from ${pin.format} to ${format}`, false);
+  }
+  if (pin.cursor !== undefined && page.cursor?.throughSeq !== pin.cursor.throughSeq) {
+    throw new SpHarnessError(`Eval SP changed the evidence trajectory cursor from throughSeq ${pin.cursor.throughSeq} to ${page.cursor === undefined ? "none" : page.cursor.throughSeq}`, false);
+  }
 }
 
 /** The SP Harness drives only SP Agents; any other framework is rejected before contacting SP. */
@@ -282,29 +317,48 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
   const operationPath = (kind: "submissions" | "resources", handle: AgentHandle, key: string): string =>
     `${handlePath(handle)}/${kind}/by-key/${encodeURIComponent(key)}`;
 
-  /** Every trajectory event of the whole Chat after `from` (0 for all), oldest first; the Submission only scopes the read. */
-  async function* trajectoryEvents(handle: AgentHandle, submissionId: string, from = 0): AsyncGenerator<{
+  /**
+   * One trajectory page after `afterSeq`; `throughSeq` (only once an export pinned a cursor) asks SP
+   * for the same fixed range as the export's first page. A failure is logged with its fields.
+   */
+  async function trajectoryPage(handle: AgentHandle, submissionId: string, afterSeq: number, throughSeq?: number): Promise<EvidenceTrajectoryPage> {
+    const query = new URLSearchParams({
+      afterSeq: String(afterSeq), limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX), submissionId,
+      ...(throughSeq === undefined ? {} : { throughSeq: String(throughSeq) }),
+    });
+    try {
+      return evidenceTrajectoryPage(await call("GET", `${handlePath(handle)}/evidence/trajectory?${query}`,
+        { timeoutMs: transferTimeoutMs, label: "evidence trajectory page", evidenceRead: true }));
+    } catch (error) {
+      log({ name: "evidence_trajectory_page", ...handleContext(handle), afterSeq, submissionId,
+        ...(throughSeq === undefined ? {} : { throughSeq }), ...failureFields(error) });
+      throw error;
+    }
+  }
+
+  /**
+   * Every trajectory event of the whole Chat after `from` (0 for all), oldest first; the Submission only scopes the read.
+   * With a `pin`, every page must keep its format and, when the pin has a cursor, echo that cursor;
+   * `first` is the page after 0 already read to pin the export, used once instead of reading it again.
+   */
+  async function* trajectoryEvents(handle: AgentHandle, submissionId: string, from = 0, pinned?: {
+    readonly pin: ResolvedTrajectoryPin;
+    readonly first?: EvidenceTrajectoryPage;
+  }): AsyncGenerator<{
     ingestSeq: number;
     event: Record<string, JsonValue>;
   }> {
     if (!Number.isSafeInteger(from) || from < 0) throw new SpHarnessError(`Invalid trajectory cursor ${from}`, false);
-    const path = `${handlePath(handle)}/evidence/trajectory`;
+    const throughSeq = pinned?.pin.cursor?.throughSeq;
+    let first = from === 0 ? pinned?.first : undefined;
     let afterSeq: number | null = from;
     let pages = 0;
     let events = 0;
     while (afterSeq !== null) {
-      const query = new URLSearchParams({
-        afterSeq: String(afterSeq), limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX), submissionId,
-      });
-      const fields = { ...handleContext(handle), afterSeq, submissionId };
-      let page: ReturnType<typeof evidenceTrajectoryPage>;
-      try {
-        page = evidenceTrajectoryPage(await call("GET", `${path}?${query}`,
-          { timeoutMs: transferTimeoutMs, label: "evidence trajectory page", evidenceRead: true }));
-      } catch (error) {
-        log({ name: "evidence_trajectory_page", ...fields, ...failureFields(error) });
-        throw error;
-      }
+      const fields = { ...handleContext(handle), afterSeq, submissionId, ...(throughSeq === undefined ? {} : { throughSeq }) };
+      const page: EvidenceTrajectoryPage = first ?? await trajectoryPage(handle, submissionId, afterSeq, throughSeq);
+      first = undefined;
+      if (pinned !== undefined) requirePinnedPage(page, pinned.pin);
       pages += 1;
       events += page.events.length;
       if (page.nextAfterSeq === null) log({ name: "evidence_trajectory_page", ...fields, status: 200, from, pages, events });
@@ -479,7 +533,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       (snapshot) => ({ coverage: snapshot.coverage, usageEvents: snapshot.usageEvents.length,
         telemetryEvents: snapshot.telemetryEvents.length, billingSettlements: snapshot.billingSettlements.length })),
     inspectAgentResources: (input) => readResources(input, "resources_readiness", "/readiness", resourceReadiness, requestTimeoutMs),
-    async exportEvidence({ handle, submissionId, limits, initialMaterials }) {
+    async exportEvidence({ handle, submissionId, limits, initialMaterials, trajectory }) {
       requireSp(handle.framework);
       if (handle.role !== "subject") throw new SpHarnessError("Only a Subject exports evidence", false);
       if (initialMaterials?.length && !options.resolveInitialMaterials) {
@@ -497,6 +551,19 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       const listed = evidenceArtifacts(await call("GET", `${path}/artifacts?${new URLSearchParams(bound)}`,
         { timeoutMs: transferTimeoutMs, label: "evidence artifact list", evidenceRead: true }));
       const { artifacts, omitted } = applyEvidenceLimits(listed, spEvidenceLimits(limits));
+      // A resumed export keeps its saved pin. A new one pins on the first page, read without
+      // `throughSeq`; SP without a cursor leaves the export unbounded, exactly as before pinning.
+      // This new pin lives only in the returned evidence until `EvidenceStore.resume()` persists
+      // its first progress, which happens before any file or trajectory part is stored; a pass
+      // that fails earlier stores nothing, and the next pass (still without progress) pins again.
+      let first: EvidenceTrajectoryPage | undefined;
+      let pin: ResolvedTrajectoryPin;
+      if (trajectory === undefined) {
+        first = await trajectoryPage(handle, submissionId, 0);
+        pin = resolveTrajectoryPin(first);
+      } else {
+        pin = resolveTrajectoryPin(trajectory);
+      }
       return {
         source: { framework: "sp", samplingId: handle.samplingId, agentRef: { ownerUserId: handle.ownerUserId, chatId: handle.chatId } },
         artifacts,
@@ -515,10 +582,16 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           return response.body;
         },
         async* readTrajectory(afterSeq) {
+          // The pinning page serves only the first read from the start; every later read asks SP again.
+          const cached = afterSeq === 0 ? first : undefined;
+          if (cached !== undefined) first = undefined;
           // The page entry is the raw record: its source cursor and the unchanged event.
-          for await (const entry of trajectoryEvents(handle, submissionId, afterSeq)) yield { seq: entry.ingestSeq, record: entry };
+          for await (const entry of trajectoryEvents(handle, submissionId, afterSeq, { pin, ...(cached === undefined ? {} : { first: cached }) })) {
+            yield { seq: entry.ingestSeq, record: entry };
+          }
         },
-        trajectoryFormat: "sp-trajectory/v1",
+        trajectoryFormat: pin.format,
+        ...(pin.cursor === undefined ? {} : { trajectoryCursor: pin.cursor }),
         // SP reads `trajectory_events` only after the Submission ended and every event was delivered.
         trajectoryComplete: true,
       };

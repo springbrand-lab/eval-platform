@@ -17,8 +17,10 @@ import {
   jsonObjectInPlaceSchema,
   jsonObjectSchema,
   jsonValueSchema,
+  evidenceTrajectoryPinOf,
   summarizeResourceSnapshot,
   type AgentResourceSnapshot,
+  type EvidenceExportProgress,
 } from "./index.js";
 
 describe("@eval-platform/eval-contracts", () => {
@@ -43,6 +45,17 @@ describe("@eval-platform/eval-contracts", () => {
     expect(RESOURCE_WAIT_MS).toBe(600_000);
     expect(RECOLLECT_TARGETS).toEqual(["output", "resources"]);
     expect(DEFAULT_EVIDENCE_LIMITS.maxFileBytes).toBe(95_000_000);
+  });
+
+  it("copies exactly the present trajectory pin fields out of saved progress", () => {
+    const cursor = { throughSeq: 5 };
+    const pinned: EvidenceExportProgress["trajectory"] = { afterSeq: 2, parts: [], format: "sp-trajectory/v1", cursor };
+    expect(evidenceTrajectoryPinOf(pinned)).toEqual({ format: "sp-trajectory/v1", cursor });
+    expect(evidenceTrajectoryPinOf({ format: "sp-trajectory/v1" })).toEqual({ format: "sp-trajectory/v1" });
+    const saved: EvidenceExportProgress["trajectory"] = { afterSeq: 0, parts: [] };
+    const legacy = evidenceTrajectoryPinOf(saved);
+    expect(legacy).toEqual({});
+    expect(Object.keys(legacy)).toEqual([]);
   });
 
   it("classifies every Agent status against the single terminal set", () => {

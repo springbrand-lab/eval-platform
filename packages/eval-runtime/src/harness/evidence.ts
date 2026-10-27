@@ -5,12 +5,14 @@ import type {
   EvidenceLimits,
   EvidenceManifest,
   EvidenceOmission,
+  EvidenceTrajectoryPin,
 } from "@eval-platform/eval-contracts";
 import {
   EVIDENCE_OMISSION_REASONS,
   EVIDENCE_SCHEMA_VERSION,
   AGENT_FRAMEWORKS,
   canonicalJsonBytes,
+  evidenceTrajectoryPinOf,
   sha256Hex,
 } from "@eval-platform/eval-contracts";
 import { z } from "zod";
@@ -93,8 +95,31 @@ function planEvidenceExport(evidence: ExportedEvidence, limits: EvidenceLimits, 
       bundleId, materialId, path, size, mediaType,
     })),
     omitted: evidence.omitted.map(({ path, reason }) => ({ path, reason })),
-    trajectory: { afterSeq: 0, parts: [] },
+    trajectory: { afterSeq: 0, parts: [], ...pinOfExportedEvidence(evidence) },
   };
+}
+
+/** The pin a new export saves: always the actual format, and the source cursor when it pins one. */
+function pinOfExportedEvidence(evidence: ExportedEvidence): EvidenceTrajectoryPin {
+  return {
+    format: evidence.trajectoryFormat,
+    ...(evidence.trajectoryCursor === undefined ? {} : { cursor: { throughSeq: evidence.trajectoryCursor.throughSeq } }),
+  };
+}
+
+/**
+ * A resumed export must read with exactly the saved pin, so parts read before and after a pass
+ * boundary come from the same fixed source range. Progress saved before pinning has neither field
+ * and continues only without a cursor.
+ */
+function requireSavedTrajectoryPin(evidence: ExportedEvidence, progress: EvidenceExportProgress): void {
+  const { format, cursor } = progress.trajectory;
+  if (format !== undefined && format !== evidence.trajectoryFormat) {
+    throw new EvidenceIntegrityError(`Evidence trajectory pin changed: format ${evidence.trajectoryFormat} differs from saved ${format}`);
+  }
+  if (cursor?.throughSeq !== evidence.trajectoryCursor?.throughSeq) {
+    throw new EvidenceIntegrityError(`Evidence trajectory pin changed: cursor ${JSON.stringify(evidence.trajectoryCursor ?? null)} differs from saved ${JSON.stringify(cursor ?? null)}`);
+  }
 }
 
 /** The manifest a complete progress finalizes; the same progress always yields the same bytes. */
@@ -121,7 +146,8 @@ async function finalizeEvidenceManifest(evidence: ExportedEvidence, progress: Ev
       return { bundleId, materialId, path, mediaType, sha256, size };
     }),
     trajectory: {
-      format: evidence.trajectoryFormat,
+      // Progress saved before pinning has no format; resuming it checked no format either.
+      format: progress.trajectory.format ?? evidence.trajectoryFormat,
       parts: [...parts],
       events: parts.reduce((count, part) => count + part.events, 0),
       complete: evidence.trajectoryComplete,
@@ -144,6 +170,11 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
   return {
     async resume({ evidence, limits, progress: saved, onProgress }) {
       const persist = serialProgress(onProgress);
+      if (saved !== undefined) requireSavedTrajectoryPin(evidence, saved);
+      // A new export's pin (format, cursor) becomes durable only here: no file, part or manifest is
+      // stored and neither `readFile` nor `readTrajectory` is called before this first persist succeeds. Until then the pin
+      // exists only in `evidence`, so a failure discards it with nothing stored and the next pass,
+      // having no progress, simply pins again.
       let progress = saved ?? planEvidenceExport(evidence, limits, now());
       if (saved === undefined) await persist(progress);
 
@@ -187,7 +218,12 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
             parts.push({ ...storedPart, events: part.chunks.length });
             afterSeq = part.lastSeq;
           }
-          progress = { ...progress, trajectory: { afterSeq, parts: [...parts], ...(done ? { done: true as const } : {}) } };
+          progress = { ...progress, trajectory: {
+            ...evidenceTrajectoryPinOf(progress.trajectory),
+            afterSeq,
+            parts: [...parts],
+            ...(done ? { done: true as const } : {}),
+          } };
           await persist(progress);
         };
         for await (const part of trajectoryParts(evidence.readTrajectory(afterSeq), afterSeq, limits.maxFileBytes)) {
