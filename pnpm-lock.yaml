@@ -32,8 +32,8 @@ importers:
         specifier: 1.5.1
         version: 1.5.1(hono@4.12.33)(zod@4.6.5)
       '@springbrand/eval-harness':
-        specifier: 0.1.0-alpha.5
-        version: 0.1.0-alpha.5
+        specifier: 0.1.0-alpha.6
+        version: 0.1.0-alpha.6
       '@springbrand/http':
         specifier: 0.1.0-alpha.4
         version: 0.1.0-alpha.4(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
@@ -2521,8 +2521,8 @@ packages:
   '@springbrand/contracts@0.1.0-alpha.0':
     resolution: {integrity: sha512-xbXVBmLAyaH0I11ofFvfR0b7Yx03YxyXirF1RR6G/Tc0CKiMwehSb5fV3H2GPZSo+W6cMNj7YW/vuA75mvUJzQ==}
 
-  '@springbrand/eval-harness@0.1.0-alpha.5':
-    resolution: {integrity: sha512-VU0IFhRaWa9EGYF3AIwZbDkknFvMJWnpJ40+WTPfkQ1ZSN7FfxhysR6h5BDGZcKn1RASkUZ9F9CfA8TFn+RMwg==}
+  '@springbrand/eval-harness@0.1.0-alpha.6':
+    resolution: {integrity: sha512-sJRR6ik2q8pM/zrnC6bcq7rnVS7YuC9TyJbwKZmGnN7koBR9j6Xf+wiLkdnV2P4lScLrsksDC5N8NPex0iebkA==}
 
   '@springbrand/file-renderers@0.1.0-alpha.1':
     resolution: {integrity: sha512-TZLMxjTeEvRvzY8Ee3ZDmzKjSol2huHZYdIuclKxIBQirxkIQToPuPUGQU082ZdBdwCBDolWCMl3JBRFCdiJ/A==}
@@ -7729,7 +7729,7 @@ snapshots:
       - react-dom
       - supports-color
 
-  '@springbrand/eval-harness@0.1.0-alpha.5':
+  '@springbrand/eval-harness@0.1.0-alpha.6':
     dependencies:
       '@zip.js/zip.js': 2.8.41
       ipaddr.js: 2.5.0

@@ -98,6 +98,43 @@ export interface EvidenceExportSubjectInput extends EvidenceExportArtifact {
 }
 
 /**
+ * The fixed end of a source trajectory read: the source pins it on the first page, and every
+ * later page of the same export returns only events with `ingestSeq <= throughSeq`.
+ */
+export interface EvidenceTrajectoryCursor {
+  readonly throughSeq: number;
+}
+
+/**
+ * What a trajectory export is pinned to. Saved with the progress and handed back to the Harness on
+ * a resumed export, so it continues the same read instead of pinning a new one. Both fields are
+ * absent in progress saved before pinning existed: that export continues without a cursor.
+ */
+export interface EvidenceTrajectoryPin {
+  readonly format?: string;
+  readonly cursor?: EvidenceTrajectoryCursor;
+}
+
+/** Every pin field; `satisfies` fails to compile when a field is added to the pin but not here. */
+const EVIDENCE_TRAJECTORY_PIN_FIELDS = {
+  format: true,
+  cursor: true,
+} as const satisfies { readonly [Field in keyof Required<EvidenceTrajectoryPin>]: true };
+
+/**
+ * Exactly the pin fields of `source` (for example a saved `EvidenceExportProgress.trajectory`),
+ * omitting absent ones. Use it wherever a pin is copied, so a new pin field is never dropped.
+ */
+export function evidenceTrajectoryPinOf(source: EvidenceTrajectoryPin): EvidenceTrajectoryPin {
+  const pin: { -readonly [Field in keyof EvidenceTrajectoryPin]: EvidenceTrajectoryPin[Field] } = {};
+  for (const field of Object.keys(EVIDENCE_TRAJECTORY_PIN_FIELDS) as (keyof EvidenceTrajectoryPin)[]) {
+    const value = source[field];
+    if (value !== undefined) Object.assign(pin, { [field]: value });
+  }
+  return pin;
+}
+
+/**
  * Resumable progress of one bundle export. The listing and `exportedAt` are frozen by the first
  * pass, so a resumed export stores only what is missing and finalizes the same manifest.
  */
@@ -106,7 +143,7 @@ export interface EvidenceExportProgress {
   readonly artifacts: readonly EvidenceExportArtifact[];
   readonly subjectInputs: readonly EvidenceExportSubjectInput[];
   readonly omitted: readonly EvidenceOmission[];
-  readonly trajectory: {
+  readonly trajectory: EvidenceTrajectoryPin & {
     /** Source cursor after the last event of the last stored part; 0 before any part. */
     readonly afterSeq: number;
     readonly parts: readonly EvidenceTrajectoryPart[];

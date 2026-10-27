@@ -13,6 +13,8 @@ import type {
   EvidenceManifest,
   EvidenceOmission,
   EvidenceSource,
+  EvidenceTrajectoryCursor,
+  EvidenceTrajectoryPin,
   ExecutionOutput,
   HarnessConfig,
   MaterializedDataBinding,
@@ -120,6 +122,13 @@ export interface ExportEvidenceInput {
   readonly limits: EvidenceLimits;
   readonly initialMaterials?: readonly InitialMaterialsRef[];
   readonly runtime?: HarnessRuntimeOptions;
+  /**
+   * The trajectory pin saved by an earlier pass of this export (`EvidenceExportProgress.trajectory`'s
+   * `format` and `cursor`, either possibly absent). When given, the Harness reads with exactly this
+   * pin and never pins a new one; `{}` (progress saved before pinning existed) reads without a
+   * cursor in the default format. Omitted for a new export, which the Harness pins itself.
+   */
+  readonly trajectory?: EvidenceTrajectoryPin;
 }
 
 export interface ExportedSubjectInput extends ExportedArtifact {
@@ -145,10 +154,16 @@ export interface ExportedEvidence {
   readonly readFile: EvidenceFileReader;
   /**
    * Complete raw events after `afterSeq` (0 for all), in order; the adapter pages through its
-   * source without projection. Each call starts a new read.
+   * source without projection. Each call starts a new read, bounded by `trajectoryCursor` when set.
    */
   readTrajectory(afterSeq: number): AsyncIterable<ExportedTrajectoryEvent>;
+  /** The source's actual raw event format, written to the manifest. */
   readonly trajectoryFormat: string;
+  /**
+   * The fixed end of every `readTrajectory` call of this export, when the source pins one. The
+   * evidence store saves it with new progress and rejects a resumed export whose pin differs.
+   */
+  readonly trajectoryCursor?: EvidenceTrajectoryCursor;
   readonly trajectoryComplete: boolean;
   readonly trajectoryIncompleteReason?: string;
 }

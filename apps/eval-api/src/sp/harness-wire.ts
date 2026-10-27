@@ -11,6 +11,7 @@ import type {
 } from "@eval-platform/eval-contracts";
 import type { AgentHandle, AgentSubmission, EnsureAgentInput } from "@eval-platform/eval-runtime/harness";
 import {
+  EVAL_TRAJECTORY_FORMAT,
   evalEnsureChatSchema,
   evalInitializationResultSchema,
   evalEvidenceArtifactsSchema,
@@ -198,11 +199,42 @@ export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact
   return response(evalEvidenceArtifactsSchema, value, "evidence artifact list").artifacts;
 }
 
-export function evidenceTrajectoryPage(value: unknown) {
-  return response(z.object({
-    events: z.array(z.object({ ingestSeq: z.number().int().positive().safe(), event: jsonObjectInPlaceSchema })),
-    nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
-  }) satisfies z.ZodType<EvalEvidenceTrajectoryPage>, value, "evidence trajectory page");
+/** The raw event format of SP's evidence trajectory when a page names none (SP before pinning). */
+export const SP_DEFAULT_TRAJECTORY_FORMAT: string = EVAL_TRAJECTORY_FORMAT;
+
+/**
+ * SP's evidence trajectory page (`EvalEvidenceTrajectoryPage`), with the optional pinned-read
+ * fields: the raw event `format`, and the fixed end `cursor.throughSeq` that SP pins on a first
+ * page and echoes on every page requested with `throughSeq`. Eval accepts any declared `format`
+ * rather than only SP's current one, so a changed format is recorded faithfully and rejected by
+ * the export's pin check instead of failing as an unreadable page. Events are validated in place:
+ * the package schema would copy every raw event.
+ */
+export type EvidenceTrajectoryPage = Omit<EvalEvidenceTrajectoryPage, "format" | "events"> & {
+  readonly events: readonly { readonly ingestSeq: number; readonly event: Record<string, JsonValue> }[];
+  readonly format?: string;
+};
+
+const evidenceTrajectoryPageSchema = z.object({
+  events: z.array(z.object({ ingestSeq: z.number().int().positive().safe(), event: jsonObjectInPlaceSchema })),
+  nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
+  format: id.exactOptional(),
+  cursor: z.object({ throughSeq: z.number().int().positive().safe() }).exactOptional(),
+}).superRefine((page, context) => {
+  const throughSeq = page.cursor?.throughSeq;
+  if (throughSeq === undefined) return;
+  page.events.forEach((entry, index) => {
+    if (entry.ingestSeq > throughSeq) {
+      context.addIssue({ code: "custom", path: ["events", index, "ingestSeq"], message: `ingestSeq is beyond cursor.throughSeq ${throughSeq}` });
+    }
+  });
+  if (page.nextAfterSeq !== null && page.nextAfterSeq > throughSeq) {
+    context.addIssue({ code: "custom", path: ["nextAfterSeq"], message: `nextAfterSeq is beyond cursor.throughSeq ${throughSeq}` });
+  }
+});
+
+export function evidenceTrajectoryPage(value: unknown): EvidenceTrajectoryPage {
+  return response<EvidenceTrajectoryPage>(evidenceTrajectoryPageSchema, value, "evidence trajectory page");
 }
 
 /** Assistant text of a finished turn in SP's trajectory, or undefined for any other event. */
