@@ -17,17 +17,25 @@ wrapper. Only the SP HTTP Harness adapter resolves it. Evidence JSONL contains
 Historical `AgentResourceSnapshot.nativeRecords` have full source rows; the
 SP adapter now reduces referenced native bodies to verified Pi identities and
 body-free versioned Metrics facts. The public SP page cannot supply those local
-projections. The full resource JSON header is **not yet** bounded/paginated by
-the coordinated SP wire, so the resource consumer is not end-to-end OOM-safe.
-A new
+projections. New collections reuse the existing local structural native page
+contract together with SP's candidate bounded resource header/native/billing
+HTTP routes; the old unbounded combined route is not a fallback.
+`AgentResourceSnapshotDownload` is a temporary, page-backed application-to-Store
+value (summary plus `readPages`/`dispose`), not a second Pi wire or persisted
+format. The existing stored
 `AgentResourceSnapshot` has `nativeRecords`, not `telemetryEvents`; its independent
 `usageEvents`/`billingSettlements` and readiness remain intact. New evidence manifests
 are schema 2 with `trajectory.format:"sp-pi-trajectory/v1"`. Version 1 bundle bytes,
 hashes, refs and already accepted evaluation results are never rewritten. An old
 event-only bundle is deliberately not decoded as Pi-native evidence. The outer
 `ingestSeq` cannot also appear inside a native record; scoped reads accept the
-requested Submission or a directly parented child, never an arbitrary foreign
-parent. SP's pending public package is still the authority for the full schema.
+requested Submission, a directly parented child or a descendant with a
+verified chain, never an arbitrary foreign parent. An attributed child Context
+is included only when its
+same-Chat parent Submission is verified in the ordered resource stream; a
+Chat-wide imported Context or older Submission stays only in evidence. The
+private/unpublished SP `alpha.7` remains the authority for the full schema;
+local structural consumer tests do not establish live deployment parity.
 
 Source-user IDs are opaque Auth identifiers, including legacy non-UUID IDs and
 the official account `springbrand-official` with its optional `official` flag.
@@ -81,7 +89,7 @@ JSON 值与标识符规则也只在这里定义：`jsonValueSchema`、`jsonObjec
 
 状态词表只在这里定义：`SAMPLING_STATUSES`、`PENDING_SAMPLING_STATUSES`、`AGENT_STATUSES`、`TERMINAL_AGENT_STATUSES` 及谓词 `isPendingSamplingStatus`、`isTerminalAgentStatus`，`SamplingStatus`、`AgentStatus` 由它们派生，SQL 使用同一常量。`AgentSubmission.status` 是 SP 归一化后的状态，SP 原始状态只在 Eval API 的 Harness 适配层映射一次。
 
-资源契约位于 `src/resources.ts`，通过包根入口导出。新的 `AgentResourceSnapshot` 原样承载 SP 的 `usageEvents`、`billingSettlements`、覆盖度与 readiness；`nativeRecords` 保留已核验的来源身份及 body-free Metrics facts，不在 PostgreSQL 重复保存 Pi 大正文，也不是 Eval 重新设计的费用/Token/Tool/Turn 模型。来源缺失、`null`、顺序、重复记录及子 Agent 身份保留；Runtime 不补零、不换算、不抽取、不合并、不去重、不计算总量。历史原始快照不迁移，旧 `telemetryEvents` 不属于新快照契约。SP 的资源完整 JSON header 尚未发布有界分页版本，新消费者仍不得声称端到端 OOM 安全。
+资源契约位于 `src/resources.ts`，通过包根入口导出。新的 `AgentResourceSnapshotDownload` 只携带已核验的摘要和有界页流，Store 原子保存后释放临时字节；已保存的 `AgentResourceSnapshot` 原样承载 SP 的 `usageEvents`、`billingSettlements`、覆盖度与 readiness，`nativeRecords` 保留已核验的来源身份及 body-free Metrics facts，不在 PostgreSQL 重复保存 Pi 大正文，也不是 Eval 重新设计的费用/Token/Tool/Turn 模型。来源缺失、`null`、顺序、重复记录及子 Agent 身份保留；Runtime 不补零、不换算、不抽取、不合并、不去重、不计算总量。历史原始快照不迁移，旧 `telemetryEvents` 不属于新快照契约。SP `alpha.7` 的公共资源分页源码仍是私有未发布包；本地消费者不代表部署互通或全局 OOM 安全。
 
 `coverage` 分别保留来源对三组记录的 `complete | partial | unavailable` 声明，`finalized` 保留操作终结声明；`collected` 只表示读到了并保存了快照，不保证来源完整。初始化 Session 历史和导入的 Subject 证据不属于本次资源范围。失败、取消和重启的使用/结算来源事实与 compact Pi facts 不能因最终结果失败而删除，历次主动重评也不能混入同一评估记录。Metrics 读取这些事实，负责来源解析、去重、重叠用量处理、费用/Token/工具/Turn 统计及汇总。
 

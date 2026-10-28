@@ -1,7 +1,7 @@
 import {
   RESOURCE_CHECK_INTERVAL_MS,
   type AgentResourceScope,
-  type AgentResourceSnapshot,
+  type CollectedResourceSnapshot,
   type HarnessConfig,
   type SamplingStageState,
 } from "@eval-platform/eval-contracts";
@@ -50,7 +50,7 @@ export interface FinishedStageRefresh<TAttempt extends AgentAttemptRecord> {
 
 export interface CollectedResources<TAttempt> {
   readonly attempt: TAttempt;
-  readonly snapshot: AgentResourceSnapshot;
+  readonly snapshot: CollectedResourceSnapshot;
 }
 
 /**
@@ -85,7 +85,7 @@ export async function refreshFinishedStage<TAttempt extends AgentAttemptRecord>(
     const errors: string[] = [];
     for (const [index, original] of refresh.attempts.entries()) {
       if (!refresh.agentEnded(original) || original.resources === undefined || original.resources.exhausted) continue;
-      const save = async (attempt: TAttempt, snapshot?: AgentResourceSnapshot) => {
+      const save = async (attempt: TAttempt, snapshot?: CollectedResourceSnapshot) => {
         attempts[index] = attempt;
         await refresh.persist(attempts, stageOwesResources(attempts, refresh.agentEnded) ? refresh.state : finished,
           snapshot && { attempt: original, snapshot });
@@ -134,7 +134,7 @@ async function refreshAttempt<TAttempt extends AgentAttemptRecord>(
   handle: AgentHandle,
   original: TAttempt,
   expired: boolean,
-  save: (attempt: TAttempt, snapshot?: AgentResourceSnapshot) => Promise<void>,
+  save: (attempt: TAttempt, snapshot?: CollectedResourceSnapshot) => Promise<void>,
 ): Promise<{ readonly attempt: TAttempt; readonly error?: string }> {
   const { stage, samplingId } = refresh;
   let attempt = original;

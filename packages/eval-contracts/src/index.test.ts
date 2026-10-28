@@ -160,8 +160,14 @@ describe("@eval-platform/eval-contracts", () => {
     expect(nativeTrajectoryEntrySchema.safeParse({ ...entry, record: { ...native, ingestSeq: 5 } }).success).toBe(false);
     expect(nativeTrajectoryEntrySchema.safeParse({ ...entry, record: { ...native, projection: { kind: "safe" } } }).success).toBe(false);
     expect(nativeRecordMayBelongToScope({ ...native, submissionId: null, origin: "context" }, scope)).toBe(false);
+    expect(nativeRecordMayBelongToScope({ ...native, submissionId: null, origin: "context",
+      parent: { resource: native.resource, submissionId: "submission" } }, scope)).toBe(true);
     expect(nativeRecordMayBelongToScope({ ...native, submissionId: "child",
       parent: { resource: native.resource, submissionId: "submission" } }, scope)).toBe(true);
+    expect(nativeRecordMayBelongToScope({ ...native, submissionId: "nested",
+      parent: { resource: native.resource, submissionId: "child" } }, scope, new Set(["submission", "child"]))).toBe(true);
+    expect(nativeRecordMayBelongToScope({ ...native, submissionId: "nested",
+      parent: { resource: native.resource, submissionId: "child" } }, scope)).toBe(false);
     expect(nativeRecordMayBelongToScope({ ...native, submissionId: "foreign",
       parent: { resource: native.resource, submissionId: "unrelated" } }, scope)).toBe(false);
   });

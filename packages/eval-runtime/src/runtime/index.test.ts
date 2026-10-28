@@ -435,6 +435,7 @@ function makeStore(options: StoreOptions = {}): TestStore {
       evaluations.set(record.evaluationId, { ...record, revision: expected.revision + 1 });
       if (resources) {
         const { samplingId, evaluationId } = record;
+        if ("kind" in resources.snapshot) throw new Error("Test Store has no paged resource persistence");
         resourceSnapshots.set(snapshotKey({ samplingId, evaluationId, attemptId: resources.attemptId }), resources.snapshot);
       }
     },
@@ -452,7 +453,10 @@ function makeStore(options: StoreOptions = {}): TestStore {
         throw new RuntimeRecordConflictError("Sampling changed before update");
       }
       samplings.set(state.samplingId, { ...state, revision: expected.revision + 1 });
-      if (resources) resourceSnapshots.set(snapshotKey({ samplingId: state.samplingId, attemptId: resources.attemptId }), resources.snapshot);
+      if (resources) {
+        if ("kind" in resources.snapshot) throw new Error("Test Store has no paged resource persistence");
+        resourceSnapshots.set(snapshotKey({ samplingId: state.samplingId, attemptId: resources.attemptId }), resources.snapshot);
+      }
     },
     async getSampling(samplingId) {
       return samplings.get(samplingId) ?? null;
@@ -4733,6 +4737,7 @@ describe("raw resource persistence", () => {
     expect(writes).toHaveLength(1);
     const [state, , resources] = writes[0]!;
     const attempt = state.executionAttempts.find((item) => item.executionAttemptId === resources!.attemptId)!;
+    if ("kind" in resources!.snapshot) throw new Error("Test Store did not receive its legacy fixture");
     expect(attempt.resources).toEqual({ status: "collected", summary: summarizeResourceSnapshot(resources!.snapshot) });
     expect(update.mock.calls.findIndex(([record]) => record.executionAttempts.some((item) => item.resources?.status === "collected")))
       .toBe(update.mock.calls.indexOf(writes[0]!));

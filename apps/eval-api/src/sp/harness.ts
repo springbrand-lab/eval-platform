@@ -1,13 +1,13 @@
 import { constants as bufferConstants } from "node:buffer";
 import { createHash } from "node:crypto";
 import type {
-  AgentFramework, AgentResourceReadiness, AgentResourceSnapshot, EvidenceLimits,
+  AgentFramework, AgentResourceFact, AgentResourceSnapshotDownload, AgentResourceSnapshotSummary, EvidenceLimits,
   NativeTrajectoryEntry, SpPiTrajectoryPage, SpPiTrajectoryRecordReference,
 } from "@eval-platform/eval-contracts";
 import {
   EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT, SP_PI_TRAJECTORY_RECORD_IDENTITY_HEADER,
   SP_PI_TRAJECTORY_RECORD_INGEST_SEQ_HEADER, SP_PI_TRAJECTORY_RECORD_THROUGH_SEQ_HEADER,
-  isSpPiTrajectoryReference, isTerminalAgentStatus, nativeRecordMayBelongToScope,
+  equalJson, isSpPiTrajectoryReference, isTerminalAgentStatus, nativeRecordMayBelongToScope,
   spPiTrajectoryIdentityParts,
 } from "@eval-platform/eval-contracts";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
@@ -54,25 +54,27 @@ import {
   executionOutput,
   finalReplyText,
   initializationRequest,
+  resourceBillingPage,
+  resourceHeader,
+  resourceNativePage,
   resourceReadiness,
-  resourceSnapshot,
   requireStopResult,
   submission,
   submitRequest,
-  type SpResourceSnapshotWire,
 } from "./harness-wire.js";
 import { createSpHttpClient, type Fetch } from "./http.js";
 import {
   NativeRecordStreamError, verifiedSafePiJsonlLine, type NativeRecordByteBinding,
   type NativeRecordInspection,
 } from "./native-record-stream.js";
+import { createResourceSpool } from "./resource-spool.js";
 import { observeTerminalSubmission, type OpenWebSocket } from "./submission-observer.js";
 
 export { SpHarnessError } from "./harness-error.js";
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const STOP_TIMEOUT_MS = 10_000;
-/** A full resource snapshot or evidence transfer (100+ MB) may take minutes. */
+/** Evidence bytes and complete paged resource collection can take minutes. */
 const TRANSFER_TIMEOUT_MS = 5 * 60_000;
 /**
  * The HTTP client decodes a body into one string before `JSON.parse`; a UTF-8 byte yields at most
@@ -98,7 +100,7 @@ export interface SpHarnessOptions {
   readonly fetch?: Fetch;
   readonly requestTimeoutMs?: number;
   readonly stopTimeoutMs?: number;
-  /** Bound for one streamed resource snapshot or evidence transfer; defaults to five minutes. */
+  /** Bound for each resource page/native byte read or evidence transfer; defaults to five minutes. */
   readonly transferTimeoutMs?: number;
   /** JSON response ceiling; defaults to, and may not exceed, {@link MAX_JSON_RESPONSE_BYTES}. */
   readonly maxResponseBytes?: number;
@@ -480,47 +482,27 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     }
   }
 
-  async function readResources<
-    Wire extends { readonly finalized: boolean; readonly readiness?: AgentResourceReadiness },
-    Output extends { readonly finalized: boolean; readonly readiness?: AgentResourceReadiness } = Wire,
-  >(
-    input: CollectAgentResourcesInput, name: string, leaf: string, parse: (value: unknown) => Wire, timeoutMs: number,
-    summary: (value: Output) => Record<string, unknown> = () => ({}),
-    hydrate?: (wire: Wire, submissionId: string) => Promise<Output>,
-  ): Promise<Output> {
+  async function readResources(input: CollectAgentResourcesInput) {
     requireSp(input.handle.framework);
     const bound = input.submissionId === undefined ? {} : { submissionId: input.submissionId };
     const query = input.submissionId === undefined ? "" : `?${new URLSearchParams(bound)}`;
     const started = Date.now();
     const fields = () => ({ ...handleContext(input.handle), idempotencyKey: input.idempotencyKey, ...bound, durationMs: Date.now() - started });
-    let value: Output;
+    let value: ReturnType<typeof resourceReadiness>;
     try {
-      // Release blocker for leaf === "": SP still sends one full JSON resource
-      // snapshot. Replace this call with its coordinated bounded PUBLIC facts
-      // header/page before declaring resource OOM safety; do not cap or omit
-      // usage, Action settlements or native references as a workaround.
-      const wire = parse(await call("GET", `${operationPath("resources", input.handle, input.idempotencyKey)}${leaf}${query}`,
-        { timeoutMs, label: `resource ${leaf === "" ? "snapshot" : "readiness"}`,
+      value = resourceReadiness(await call("GET", `${operationPath("resources", input.handle, input.idempotencyKey)}/readiness${query}`,
+        { timeoutMs: requestTimeoutMs, label: "resource readiness",
           ...(input.signal === undefined ? {} : { signal: input.signal }) }));
-      const scoped = wire as Wire & { readonly scope: { readonly chatId: string; readonly idempotencyKey: string; readonly submissionId: string } };
-      if (scoped.scope.chatId !== input.handle.chatId || scoped.scope.idempotencyKey !== input.idempotencyKey
-        || (input.submissionId !== undefined && scoped.scope.submissionId !== input.submissionId)) {
+      if (value.scope.chatId !== input.handle.chatId || value.scope.idempotencyKey !== input.idempotencyKey
+        || (input.submissionId !== undefined && value.scope.submissionId !== input.submissionId)) {
         throw new SpHarnessError("Eval SP returned resources for a different Chat or Submission", false);
-      }
-      value = hydrate ? await hydrate(wire, scoped.scope.submissionId) : wire as unknown as Output;
-      const nativeRecords = (value as Output & { readonly nativeRecords?: readonly NativeTrajectoryEntry[] }).nativeRecords;
-      for (const entry of nativeRecords ?? []) {
-        assertNativeChat(entry, input.handle.chatId);
-        if (!nativeRecordMayBelongToScope(entry.record, scoped.scope)) {
-          throw new SpHarnessError("Eval SP returned a resource record outside the requested operation", false);
-        }
       }
     } catch (error) {
       if (isRequestCancelled(error)) throw error;
-      log({ name, ...fields(), ...failureFields(error) });
+      log({ name: "resources_readiness", ...fields(), ...failureFields(error) });
       throw error;
     }
-    log({ name, ...fields(), status: 200, finalized: value.finalized, readiness: value.readiness, ...summary(value) });
+    log({ name: "resources_readiness", ...fields(), status: 200, finalized: value.finalized, readiness: value.readiness });
     return value;
   }
 
@@ -657,40 +639,153 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       }
       return reply;
     },
-    collectAgentResources: (input) => readResources<SpResourceSnapshotWire, AgentResourceSnapshot>(
-      input, "resources_read", "", resourceSnapshot, transferTimeoutMs,
-      (snapshot) => ({ coverage: snapshot.coverage, usageEvents: snapshot.usageEvents.length,
-        nativeRecords: snapshot.nativeRecords.length, billingSettlements: snapshot.billingSettlements.length }),
-      async (wire, submissionId) => {
-        const nativeRecords: NativeTrajectoryEntry[] = [];
-        for (const row of wire.nativeRecords) {
-          let entry: NativeTrajectoryEntry;
-          let sourceSha256: string | undefined;
-          if (isSpPiTrajectoryReference(row)) {
-            let inspected: NativeRecordInspection | undefined;
-            const stream = await nativeJsonl(input.handle, submissionId, row, {
-              scope: { kind: "operation", chatId: input.handle.chatId, submissionId },
-              interpret: "metrics", onVerified: (result) => { inspected = result; },
-              ...(input.signal === undefined ? {} : { signal: input.signal }),
-            });
-            // No referenced native body, whole JSON object or a second evidence blob
-            // survives this read. Store only verified identity and compact Pi facts.
-            for await (const _ of stream) { /* drain with backpressure through EOF */ }
-            if (!inspected?.record) throw new SpHarnessError("Eval SP returned no verified native resource record", false);
-            sourceSha256 = inspected.sha256;
-            entry = { ingestSeq: row.ingestSeq, record: inspected.record };
-          } else entry = row;
-          assertNativeChat(entry, input.handle.chatId);
-          if (!nativeRecordMayBelongToScope(entry.record, wire.scope)) {
-            throw new SpHarnessError("Eval SP returned a resource record outside the requested operation", false);
-          }
-          nativeRecords.push(await compactNativeTrajectoryRecord(entry, wire.scope, sourceSha256));
+    async collectAgentResources(input): Promise<AgentResourceSnapshotDownload> {
+      requireSp(input.handle.framework);
+      const started = Date.now();
+      const fields = () => ({ ...handleContext(input.handle), idempotencyKey: input.idempotencyKey,
+        ...(input.submissionId === undefined ? {} : { submissionId: input.submissionId }), durationMs: Date.now() - started });
+      const signal = input.signal;
+      const base = operationPath("resources", input.handle, input.idempotencyKey);
+      const pageOptions = (label: string) => ({
+        timeoutMs: transferTimeoutMs, label, evidenceRead: true,
+        maxResponseBytes: Math.min(maxResponseBytes, MAX_TRAJECTORY_PAGE_BYTES),
+        ...(signal === undefined ? {} : { signal }),
+      });
+      let spool: Awaited<ReturnType<typeof createResourceSpool>> | undefined;
+      try {
+        // A pre-receipt Attempt first resolves its real operation-bound Submission via
+        // the small readiness route. The new page paths require that exact ID.
+        const submissionId = input.submissionId ?? (await readResources(input)).scope.submissionId;
+        const bound = new URLSearchParams({ submissionId });
+        const headerPath = `${base}/header?${bound}`;
+        const header = resourceHeader(await call("GET", headerPath, pageOptions("resource header")));
+        if (header.scope.chatId !== input.handle.chatId || header.scope.idempotencyKey !== input.idempotencyKey
+          || header.scope.submissionId !== submissionId) {
+          throw new SpHarnessError("Eval SP returned resources for a different Chat or Submission", false);
         }
-        // Independently authoritative usage and Action/model settlements are unchanged.
-        // Native Pi bodies belong only in the Subject evidence, never DB/R2 duplicates.
-        return { ...wire, nativeRecords };
-      }),
-    inspectAgentResources: (input) => readResources(input, "resources_readiness", "/readiness", resourceReadiness, requestTimeoutMs),
+        if (header.finalized && (!header.readiness.receiptTerminal || header.readiness.stateUnreadable
+          || header.readiness.pendingTelemetryEvents !== 0 || header.readiness.pendingRuntimeEvents !== 0
+          || !header.readiness.actionCharges.complete || header.readiness.actionCharges.unsettledExecutions !== 0
+          || header.readiness.actionCharges.missingExecutionIds !== 0
+          || header.coverage.usageEvents !== "complete" || header.coverage.nativeRecords !== "complete")) {
+          throw new SpHarnessError("Eval SP returned a finalized resource header with unsettled facts", false);
+        }
+        if (!header.finalized) {
+          // SP's native and billing pages require finalization. After the Runtime's wait
+          // deadline, never claim an empty/partial snapshot that the pages cannot prove.
+          throw new SpHarnessError("Eval SP resources are not finalized for bounded collection", true);
+        }
+        spool = await createResourceSpool();
+        const counts = { usageEvents: 0, nativeRecords: 0, billingSettlements: 0 };
+        const verifiedSubmissions = new Set([submissionId]);
+        let creditsTotal = 0;
+        const add = (stream: keyof typeof counts, number: number) => {
+          counts[stream] += number;
+          if (!Number.isSafeInteger(counts[stream])) throw new SpHarnessError("Eval SP resource count exceeds safe integers", false);
+        };
+        const charge = (fact: AgentResourceFact) => {
+          const amount = typeof fact.executionId === "string" && fact.executionId !== "" ? fact.chargedCredits : fact.debitedUnits;
+          if (typeof amount === "number" && Number.isFinite(amount)) creditsTotal += amount;
+        };
+        let afterSeq: number | null = 0;
+        while (afterSeq !== null) {
+          const query = new URLSearchParams({ submissionId, afterSeq: String(afterSeq),
+            limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX), throughSeq: String(header.cursor.throughSeq) });
+          const page = resourceNativePage(await call("GET", `${base}/native-records?${query}`,
+            pageOptions("resource native page")));
+          if (page.cursor.throughSeq !== header.cursor.throughSeq || page.cursor.throughSeq < afterSeq) {
+            throw new SpHarnessError("Eval SP changed the resource native cutoff", false);
+          }
+          let last: number = afterSeq;
+          for (const row of page.records) {
+            if (row.ingestSeq <= last || row.ingestSeq > header.cursor.throughSeq) {
+              throw new SpHarnessError("Eval SP returned an invalid resource native cursor", false);
+            }
+            // Reject a foreign Chat/parent in the page before starting its byte transfer.
+            if (isSpPiTrajectoryReference(row)) assertRecordReference(row, input.handle.chatId);
+            else {
+              assertNativeChat(row, input.handle.chatId);
+              if (!nativeRecordMayBelongToScope(row.record, header.scope, verifiedSubmissions)) {
+                throw new SpHarnessError("Eval SP returned a resource record outside the requested operation", false);
+              }
+            }
+            last = row.ingestSeq;
+            let entry: NativeTrajectoryEntry;
+            let sourceSha256: string | undefined;
+            if (isSpPiTrajectoryReference(row)) {
+              let inspected: NativeRecordInspection | undefined;
+              const stream = await nativeJsonl(input.handle, submissionId, row, {
+                scope: { kind: "operation", chatId: input.handle.chatId, submissionId, verifiedSubmissions },
+                interpret: "metrics", onVerified: (result) => { inspected = result; },
+                ...(signal === undefined ? {} : { signal }),
+              });
+              for await (const _ of stream) { /* verify every byte without retaining the Pi body */ }
+              if (!inspected?.record) throw new SpHarnessError("Eval SP returned no verified native resource record", false);
+              entry = { ingestSeq: row.ingestSeq, record: inspected.record };
+              sourceSha256 = inspected.sha256;
+            } else entry = row;
+            assertNativeChat(entry, input.handle.chatId);
+            if (!nativeRecordMayBelongToScope(entry.record, header.scope, verifiedSubmissions)) {
+              throw new SpHarnessError("Eval SP returned a resource record outside the requested operation", false);
+            }
+            await spool.write({ stream: "nativeRecords",
+              records: [await compactNativeTrajectoryRecord(entry, header.scope, sourceSha256, verifiedSubmissions)] });
+            if (entry.record.submissionId !== null) verifiedSubmissions.add(entry.record.submissionId);
+            add("nativeRecords", 1);
+          }
+          if (page.nextAfterSeq !== null && (page.records.length === 0
+            || page.nextAfterSeq !== last || last >= header.cursor.throughSeq)) {
+            throw new SpHarnessError("Eval SP returned an invalid resource native cursor", false);
+          }
+          afterSeq = page.nextAfterSeq;
+        }
+
+        let after = 0;
+        let frozen: { readonly throughCount: number; readonly sha256: string } | undefined;
+        for (;;) {
+          const query = new URLSearchParams({ submissionId, after: String(after), limit: "200",
+            ...(frozen === undefined ? {} : { throughCount: String(frozen.throughCount), throughSha256: frozen.sha256 }) });
+          const page = resourceBillingPage(await call("GET", `${base}/billing?${query}`,
+            pageOptions("resource billing page")));
+          if (page.scope.chatId !== input.handle.chatId || page.scope.submissionId !== submissionId
+            || page.after !== after || (frozen !== undefined
+              && (page.cursor.throughCount !== frozen.throughCount || page.cursor.sha256 !== frozen.sha256))) {
+            throw new SpHarnessError("Eval SP changed the resource billing scope or source fingerprint", false);
+          }
+          frozen ??= page.cursor;
+          await spool.write({ stream: "usageEvents", records: page.usageEvents });
+          await spool.write({ stream: "billingSettlements", records: page.billingSettlements });
+          add("usageEvents", page.usageEvents.length);
+          add("billingSettlements", page.billingSettlements.length);
+          page.billingSettlements.forEach(charge);
+          if (page.nextAfter === null) break;
+          after = page.nextAfter;
+        }
+        await spool.write({ stream: "billingSettlements", records: header.actionCharges });
+        add("billingSettlements", header.actionCharges.length);
+        header.actionCharges.forEach(charge);
+        // A repeated finalized header must retain its operation, cutoff, coverage and
+        // independently settled Action/Tool charge facts. `observedAt` is a read time.
+        const finished = resourceHeader(await call("GET", headerPath, pageOptions("resource header")));
+        const stable = ({ observedAt: _observedAt, ...facts }: typeof header) => facts;
+        if (!finished.finalized || !equalJson(stable(header), stable(finished))) {
+          throw new SpHarnessError("Eval SP changed the resource header during collection", false);
+        }
+        const summary: AgentResourceSnapshotSummary = {
+          scope: header.scope, observedAt: header.observedAt, finalized: header.finalized,
+          coverage: header.coverage, readiness: header.readiness, counts,
+        };
+        const download = await spool.finish(summary, Number.isFinite(creditsTotal) ? creditsTotal : null);
+        log({ name: "resources_read", ...fields(), submissionId, status: 200, finalized: true,
+          readiness: header.readiness, coverage: header.coverage, ...counts });
+        return download;
+      } catch (error) {
+        await spool?.discard().catch(() => undefined);
+        if (!isRequestCancelled(error)) log({ name: "resources_read", ...fields(), ...failureFields(error) });
+        throw error;
+      }
+    },
+    inspectAgentResources: readResources,
     async exportEvidence({ handle, submissionId, limits, initialMaterials }) {
       requireSp(handle.framework);
       if (handle.role !== "subject") throw new SpHarnessError("Only a Subject exports evidence", false);

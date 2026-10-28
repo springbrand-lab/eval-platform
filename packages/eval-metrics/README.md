@@ -22,8 +22,11 @@ Missing or ambiguous linkage stays partial/unavailable, not zero.
 body-free versioned metric facts. `compactNativeTrajectoryRecord` also accepts
 a checksum already verified over the *source bytes*, so the streaming
 record consumer saves only compact identity/facts, not a second copy
-of a large Pi body. The surrounding resource header still awaits SP's
-bounded public contract. Withheld Tool lengths stay unknown, never zero; total
+of a large Pi body. The Eval API now collects the candidate bounded resource
+header and complete native/API-billing pages and stores their compact facts
+without a whole JS snapshot; cross-deployment compatibility still awaits the
+currently private/unpublished SP package and isolated DB verification.
+Withheld Tool lengths stay unknown, never zero; total
 usage and charges still come **only** from `usageEvents` and `billingSettlements`.
 Old event-only snapshots are not native. SP must publish its new public
 `@springbrand/eval-harness` release and pass [parity checks](../../docs/pi-native-eval-cutover.md)

@@ -1,11 +1,11 @@
 import {
   AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectArrayInPlaceSchema,
-  isSpPiTrajectoryReference, spPiTrajectoryIdentityParts, spPiTrajectoryPageRowSchema, spPiTrajectoryPageSchema,
+  spPiTrajectoryPageSchema,
 } from "@eval-platform/eval-contracts";
 import type {
   AgentResourceReadiness,
   AgentResourceReadinessReport,
-  AgentResourceSnapshot,
+  AgentResourceFact,
   EvaluationAgentOutput,
   EvaluationStructuredOutput,
   ExecutionOutput,
@@ -13,7 +13,6 @@ import type {
   MaterializedDataBinding,
   PiTrajectoryRecord,
   SpPiTrajectoryPage,
-  SpPiTrajectoryPageRow,
 } from "@eval-platform/eval-contracts";
 import type { AgentHandle, AgentSubmission, EnsureAgentInput } from "@eval-platform/eval-runtime/harness";
 import {
@@ -158,66 +157,84 @@ export function evaluationOutput(value: unknown): EvaluationAgentOutput {
   }), value, "evaluation output");
 }
 
-const completenessSchema = z.enum(["complete", "partial", "unavailable"]);
 const count = z.number().int().nonnegative().safe();
 
-const scopeSchema = z.object({ chatId: id, idempotencyKey: id, submissionId: id });
+const scopeSchema = z.strictObject({ chatId: id, idempotencyKey: id, submissionId: id });
 
-const readinessSchema = z.object({
+const readinessSchema = z.strictObject({
   receiptTerminal: z.boolean(),
   stateUnreadable: z.boolean(),
   pendingTelemetryEvents: count,
   pendingRuntimeEvents: count,
-  actionCharges: z.object({ complete: z.boolean(), unsettledExecutions: count, missingExecutionIds: count }),
+  actionCharges: z.strictObject({ complete: z.boolean(), unsettledExecutions: count, missingExecutionIds: count }),
 }) satisfies z.ZodType<AgentResourceReadiness>;
 
-/** Raw SP HTTP wire only. Every reference is verified and reduced to compact facts
- * before leaving the Harness for Runtime/Metrics; no source body is duplicated. */
-export type SpResourceSnapshotWire = Omit<AgentResourceSnapshot, "nativeRecords"> & {
-  readonly nativeRecords: readonly SpPiTrajectoryPageRow[];
-};
-
-const resourceSnapshotSchema = z.strictObject({
+const resourceReportSchema = z.strictObject({
   scope: scopeSchema,
   observedAt: id,
   finalized: z.boolean(),
-  coverage: z.strictObject({
-    usageEvents: completenessSchema,
-    nativeRecords: completenessSchema,
-    billingSettlements: completenessSchema,
-  }),
-  usageEvents: jsonObjectArrayInPlaceSchema,
-  nativeRecords: z.array(spPiTrajectoryPageRowSchema),
-  billingSettlements: jsonObjectArrayInPlaceSchema,
   readiness: readinessSchema,
-}).superRefine((snapshot, context) => {
-  snapshot.nativeRecords.forEach((row, index) => {
-    const { ingestSeq } = row;
-    if (index > 0 && ingestSeq <= snapshot.nativeRecords[index - 1]!.ingestSeq) {
-      context.addIssue({ code: "custom", path: ["nativeRecords", index, "ingestSeq"],
-        message: "Native records must ascend" });
-    }
-    const sessionId = isSpPiTrajectoryReference(row)
-      ? spPiTrajectoryIdentityParts(row.reference.identity)?.[1]
-      : row.record.resource.sessionId;
-    if (sessionId !== snapshot.scope.chatId) {
-      context.addIssue({ code: "custom", path: ["nativeRecords", index, "record", "resource", "sessionId"],
-        message: "Native record belongs to another Chat" });
-    }
-  });
-}) satisfies z.ZodType<SpResourceSnapshotWire>;
+});
 
-export function resourceSnapshot(value: unknown): SpResourceSnapshotWire {
-  return response(resourceSnapshotSchema, value, "resource snapshot");
+/** Structural consumer of the not-yet-published public SP Eval *metadata* wire.
+ * The native page itself reuses the existing sp-pi-trajectory/v1 schema. */
+const resourceHeaderSchema = resourceReportSchema.safeExtend({
+  coverage: z.strictObject({
+    usageEvents: z.enum(["complete", "partial"]),
+    nativeRecords: z.enum(["complete", "partial"]),
+    billingSettlements: z.enum(["complete", "partial"]),
+  }),
+  cursor: z.strictObject({ throughSeq: count }),
+  actionCharges: z.array(z.strictObject({
+    source: z.enum(["action", "tool"]),
+    executionId: z.uuid(),
+    status: z.enum(["succeeded", "failed", "outcome_unknown"]),
+    chargedCredits: z.number().finite().nonnegative(),
+  })).max(1_000),
+});
+export type SpResourceHeader = z.output<typeof resourceHeaderSchema>;
+
+export function resourceHeader(value: unknown): SpResourceHeader {
+  return response(resourceHeaderSchema, value, "resource header");
 }
 
 export function resourceReadiness(value: unknown): AgentResourceReadinessReport {
-  return response(z.object({
-    scope: scopeSchema,
-    observedAt: id,
-    finalized: z.boolean(),
-    readiness: readinessSchema,
-  }) satisfies z.ZodType<AgentResourceReadinessReport>, value, "resource readiness");
+  return response(resourceReportSchema satisfies z.ZodType<AgentResourceReadinessReport>, value, "resource readiness");
+}
+
+export function resourceNativePage(value: unknown): SpPiTrajectoryPage {
+  return response(spPiTrajectoryPageSchema, value, "resource native page");
+}
+
+const billingPageSchema = z.strictObject({
+  scope: z.strictObject({ chatId: id, submissionId: id }),
+  cursor: z.strictObject({ throughCount: count, sha256: z.string().regex(/^[0-9a-f]{64}$/u) }),
+  after: count,
+  usageEvents: jsonObjectArrayInPlaceSchema.refine((facts) => facts.length <= 200),
+  billingSettlements: jsonObjectArrayInPlaceSchema.refine((facts) => facts.length <= 200),
+  nextAfter: count.positive().nullable(),
+}).superRefine((page, context) => {
+  const end = page.after + page.usageEvents.length;
+  if (page.usageEvents.length !== page.billingSettlements.length
+    || page.after > page.cursor.throughCount || !Number.isSafeInteger(end) || end > page.cursor.throughCount
+    || (page.nextAfter === null ? end !== page.cursor.throughCount
+      : page.nextAfter !== end || end === page.cursor.throughCount)) {
+    context.addIssue({ code: "custom", path: ["nextAfter"], message: "Billing page must contain complete paired facts" });
+  }
+  page.usageEvents.forEach((usage, index) => {
+    if (typeof usage.eventId !== "string" || !usage.eventId
+      || usage.eventId !== page.billingSettlements[index]?.eventId) {
+      context.addIssue({ code: "custom", path: ["billingSettlements", index, "eventId"],
+        message: "Billing pair must have the same event ID" });
+    }
+  });
+});
+export type SpBillingPage = z.output<typeof billingPageSchema> & {
+  readonly usageEvents: readonly AgentResourceFact[];
+  readonly billingSettlements: readonly AgentResourceFact[];
+};
+export function resourceBillingPage(value: unknown): SpBillingPage {
+  return response(billingPageSchema, value, "resource billing page");
 }
 
 export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact[] {

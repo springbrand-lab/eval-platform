@@ -149,18 +149,20 @@ export function isSpPiTrajectoryReference(value: SpPiTrajectoryPageRow): value i
   return "reference" in value;
 }
 
-/** SP scopes the resource response to an operation. A temporary Agent can have
- * its own Submission; its public parent still identifies a child of this Chat.
- * Without a verified ancestry chain, only a direct child of the requested
- * Submission is provably in scope. A foreign parent's mere presence is not proof. */
+/** SP scopes the resource pages to one Submission and attributed children. A
+ * descendant's parent is proof only when that Submission was already verified in
+ * this ordered page stream; an arbitrary foreign parent is not authorization.
+ * Child Context (null Submission) is in scope only with such a parent. */
 export function nativeRecordMayBelongToScope(
   value: PiTrajectoryRecord, scope: { readonly chatId: string; readonly submissionId: string },
+  verifiedSubmissions?: ReadonlySet<string>,
 ): boolean {
-  if (value.resource.sessionId !== scope.chatId || value.submissionId === null) return false;
-  if (value.submissionId === scope.submissionId) return true;
   const parent = object(value.parent);
-  return parent !== undefined && object(parent.resource)?.sessionId === scope.chatId
-    && parent.submissionId === scope.submissionId;
+  if (value.resource.sessionId !== scope.chatId ||
+    (parent && object(parent.resource)?.sessionId !== scope.chatId)) return false;
+  if (value.submissionId === scope.submissionId) return true;
+  return parent !== undefined && (parent.submissionId === scope.submissionId
+    || verifiedSubmissions?.has(parent.submissionId as string) === true);
 }
 
 export const nativeTrajectoryEntrySchema: z.ZodType<NativeTrajectoryEntry> = z.strictObject({
@@ -181,13 +183,23 @@ export const spPiTrajectoryPageRowSchema: z.ZodType<SpPiTrajectoryPageRow> =
 export const spPiTrajectoryPageSchema: z.ZodType<SpPiTrajectoryPage> = z.strictObject({
   format: z.literal(SP_PI_TRAJECTORY_FORMAT),
   cursor: z.strictObject({ throughSeq: z.number().int().nonnegative().safe() }),
-  records: z.array(spPiTrajectoryPageRowSchema),
+  records: z.array(spPiTrajectoryPageRowSchema).max(200),
   nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
 }).superRefine((page, context) => {
   page.records.forEach((row, index) => {
+    if (index > 0 && row.ingestSeq <= page.records[index - 1]!.ingestSeq) {
+      context.addIssue({ code: "custom", path: ["records", index, "ingestSeq"], message: "Records must ascend" });
+    }
+    if (row.ingestSeq > page.cursor.throughSeq) {
+      context.addIssue({ code: "custom", path: ["records", index, "ingestSeq"], message: "Record is after the cutoff" });
+    }
     if (isSpPiTrajectoryReference(row) && row.reference.throughSeq !== page.cursor.throughSeq) {
       context.addIssue({ code: "custom", path: ["records", index, "reference", "throughSeq"],
         message: "Record reference must use the page cutoff" });
     }
   });
+  if (page.nextAfterSeq !== null && (page.records.at(-1)?.ingestSeq !== page.nextAfterSeq
+    || page.nextAfterSeq >= page.cursor.throughSeq)) {
+    context.addIssue({ code: "custom", path: ["nextAfterSeq"], message: "Next cursor must advance within the cutoff" });
+  }
 });

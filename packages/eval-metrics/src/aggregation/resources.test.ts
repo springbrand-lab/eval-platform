@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentResourceFact, AgentResourceScope, NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
-import { nativeFixture, nativeResourceInput, resourceInput, settlement, usage } from "../test-support.js";
+import { nativeFixture, nativeResourceInput, nativeScopedFixture, resourceInput, settlement, usage } from "../test-support.js";
 import { aggregateResources } from "./resources.js";
 
 const SCOPE = { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "execution:sampling-1" } satisfies AgentResourceScope;
@@ -237,6 +237,50 @@ describe("resource statistics", () => {
       ratedUnits: { value: 10, coverage: "complete" }, shortfallUnits: { value: 2, coverage: "complete" },
       platformOwnedUnits: { value: 2, coverage: "complete" },
     });
+  });
+
+  it("keeps 300 independently paired API settlements and a known zero Action, while an unknown fee leaves totals partial", () => {
+    const usageEvents = Array.from({ length: 300 }, (_, index) => usage(`event-${index}`));
+    const billingSettlements = [
+      ...usageEvents.map((event) => settlement(event.eventId as string, { debitedUnits: 2 })),
+      { source: "tool", executionId: "88888888-8888-4888-8888-888888888888",
+        status: "outcome_unknown", chargedCredits: 0 },
+    ];
+    const result = aggregateResources([resourceInput({
+      usageEvents, billingSettlements,
+      coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "partial" },
+    })]);
+    expect(result.tokens.input).toEqual({ value: 3_000, coverage: "complete" });
+    expect(result.costs.modelDebitedUnits).toEqual({ value: 600, coverage: "partial" });
+    expect(result.costs.actionChargedUnits).toEqual({ value: 0, coverage: "partial" });
+    expect(result.costs.chargedUnits).toEqual({ value: 600, coverage: "partial" });
+    expect(aggregateResources([resourceInput({ billingSettlements: [], coverage: {
+      usageEvents: "complete", nativeRecords: "complete", billingSettlements: "partial",
+    } })]).costs.chargedUnits.value).toBeNull();
+    expect(aggregateResources([resourceInput({ billingSettlements: [] })]).costs.chargedUnits.value).toBe(0);
+  });
+
+  it("recognizes only a verified native child ancestry and its attributed Context as this operation's supporting facts", () => {
+    const root = nativeScopedFixture([3], SCOPE)[0]!;
+    const context = nativeScopedFixture([1], SCOPE)[0]!;
+    const child = nativeScopedFixture([8], SCOPE)[0]!;
+    const nested = nativeScopedFixture([14], SCOPE)[0]!;
+    const parent = { resource: { agentId: root.record.resource.agentId, sessionId: SCOPE.chatId },
+      submissionId: SCOPE.submissionId };
+    const rows = [
+      root,
+      { ...context, ingestSeq: 4, record: { ...context.record, submissionId: null, origin: "context" as const, parent } },
+      { ...child, ingestSeq: 5, record: { ...child.record, submissionId: "child", parent } },
+      { ...nested, ingestSeq: 6, record: { ...nested.record, submissionId: "nested",
+        parent: { ...parent, submissionId: "child" } } },
+    ];
+    const supported = aggregateResources([resourceInput({ nativeRecords: rows })]);
+    expect(supported.diagnostics.filter((item) => item.stream === "nativeRecords"
+      && item.kind === "conflicting-identity")).toEqual([]);
+    const unproven = aggregateResources([resourceInput({ nativeRecords: [root, rows[3]!] })]);
+    expect(unproven.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stream: "nativeRecords", kind: "conflicting-identity" }),
+    ]));
   });
 
   it("preserves null settlement fields and does not infer actual charges from rated units", () => {

@@ -15,10 +15,11 @@ export const NATIVE_PROJECTION_VERSION = 1;
  */
 export async function compactNativeTrajectoryRecord(
   entry: NativeTrajectoryEntry, scope: AgentResourceSnapshot["scope"], sourceSha256?: string,
+  verifiedSubmissions?: ReadonlySet<string>,
 ): Promise<NativeTrajectoryEntry> {
   if (!Number.isSafeInteger(entry.ingestSeq) || entry.ingestSeq <= 0
     || !isSafePiTrajectoryRecord(entry.record)
-    || !nativeRecordMayBelongToScope(entry.record, scope)
+    || !nativeRecordMayBelongToScope(entry.record, scope, verifiedSubmissions)
     || (sourceSha256 !== undefined && !/^[0-9a-f]{64}$/u.test(sourceSha256))) {
     throw new TypeError(`Cannot compact invalid native trajectory record ${entry.ingestSeq}`);
   }
@@ -58,10 +59,12 @@ export async function compactResourceSnapshot(snapshot: AgentResourceSnapshot): 
   }
   const nativeRecords: NativeTrajectoryEntry[] = [];
   let lastSeq = 0;
+  const verifiedSubmissions = new Set([snapshot.scope.submissionId]);
   for (const entry of snapshot.nativeRecords) {
     if (entry.ingestSeq <= lastSeq) throw new TypeError(`Cannot compact invalid native trajectory record ${entry.ingestSeq}`);
     lastSeq = entry.ingestSeq;
-    nativeRecords.push(await compactNativeTrajectoryRecord(entry, snapshot.scope));
+    nativeRecords.push(await compactNativeTrajectoryRecord(entry, snapshot.scope, undefined, verifiedSubmissions));
+    if (entry.record.submissionId !== null) verifiedSubmissions.add(entry.record.submissionId);
   }
   return { ...snapshot, nativeRecords };
 }

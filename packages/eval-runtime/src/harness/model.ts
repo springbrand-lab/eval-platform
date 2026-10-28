@@ -3,7 +3,7 @@ import type {
   AgentFramework,
   AgentRole,
   AgentResourceReadinessReport,
-  AgentResourceSnapshot,
+  CollectedResourceSnapshot,
   AgentStatus,
   EvaluationAgentOutput,
   EvaluationOutputSchema,
@@ -220,7 +220,7 @@ export interface Harness {
   readFinalReply(input: CollectAgentInput & { readonly submissionId: string }): Promise<string | undefined>;
   /** Whether the snapshot is finalized, without downloading its events. */
   inspectAgentResources(input: CollectAgentResourcesInput): Promise<AgentResourceReadinessReport>;
-  collectAgentResources(input: CollectAgentResourcesInput): Promise<AgentResourceSnapshot>;
+  collectAgentResources(input: CollectAgentResourcesInput): Promise<CollectedResourceSnapshot>;
   /** Export a finished Agent's artifacts and complete trajectory; read-only. */
   exportEvidence(input: ExportEvidenceInput): Promise<ExportedEvidence>;
   /** Place a stored bundle into this Agent's own Space under `root`; repeating it is a no-op. */

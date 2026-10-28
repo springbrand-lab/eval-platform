@@ -75,6 +75,29 @@ export function summarizeResourceSnapshot(snapshot: AgentResourceSnapshot): Agen
   };
 }
 
+/** A bounded, already-verified part of a newly collected resource snapshot. This is an
+ * application-to-Store transfer, not another SP trajectory format or a persisted representation. */
+export type AgentResourceSnapshotPage =
+  | { readonly stream: "nativeRecords"; readonly records: readonly NativeTrajectoryEntry[] }
+  | { readonly stream: "usageEvents" | "billingSettlements"; readonly records: readonly AgentResourceFact[] };
+
+/** New SP collection never assembles the legacy arrays in JS. The Harness finishes every
+ * authenticated page and reference read before returning this sealed, replayable download;
+ * Runtime disposes it after the atomic Store write (including uncertain/retried writes). */
+export interface AgentResourceSnapshotDownload {
+  readonly kind: "pages";
+  readonly summary: AgentResourceSnapshotSummary;
+  /** Payload-free diagnostic, never a substitute for Metrics or persisted billing. */
+  readonly creditsTotal: number | null;
+  readPages(): AsyncIterable<AgentResourceSnapshotPage>;
+  dispose(): Promise<void>;
+}
+
+export type CollectedResourceSnapshot = AgentResourceSnapshot | AgentResourceSnapshotDownload;
+export function isResourceSnapshotDownload(value: CollectedResourceSnapshot): value is AgentResourceSnapshotDownload {
+  return value !== null && typeof value === "object" && "kind" in value && value.kind === "pages";
+}
+
 interface AgentResourceDownloads {
   /** Downloads started since the last stored snapshot, saved before each one so a crash also counts. */
   readonly downloads?: number;

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { summarizeResourceSnapshot, type AgentResourceSnapshot, type AgentResourceState } from "@eval-platform/eval-contracts";
+import { summarizeResourceSnapshot, type AgentResourceSnapshot, type AgentResourceSnapshotDownload, type AgentResourceState,
+  type CollectedResourceSnapshot } from "@eval-platform/eval-contracts";
 import { publicNativeRecords } from "../harness/evidence-test-support.js";
 import type { RetryController } from "./retry.js";
 import {
@@ -7,6 +8,7 @@ import {
   collectResources,
   createExclusiveRunner,
   validateResourceReadiness,
+  validateResourceDownload,
   validateResourceSnapshot,
   type ResourceSource,
 } from "./resources.js";
@@ -197,6 +199,12 @@ describe("resource readiness validation", () => {
 describe("crash-safe resource download", () => {
   const STORED = { status: "pending", scope: SCOPE } as const;
 
+  function sealed(patch: Partial<AgentResourceSnapshotDownload["summary"]> = {}): AgentResourceSnapshotDownload {
+    return { kind: "pages", summary: { ...summarizeResourceSnapshot(snapshot()), ...patch },
+      creditsTotal: null, readPages: async function* () { /* the Store consumes sealed pages */ },
+      dispose: vi.fn(async () => undefined) };
+  }
+
   function setup(collect: () => Promise<unknown>, current: AgentResourceState = STORED, budget = 2, exclusively = createExclusiveRunner()) {
     const events: string[] = [];
     const saved: AgentResourceState[] = [];
@@ -223,7 +231,7 @@ describe("crash-safe resource download", () => {
       exclusively,
       readinessDelays: [0],
       allowUnfinalized: false,
-      save: vi.fn(async (resources: AgentResourceState, stored?: AgentResourceSnapshot) => {
+      save: vi.fn(async (resources: AgentResourceState, stored?: CollectedResourceSnapshot) => {
         saved.push(resources);
         events.push(`save:${resources.status}${stored ? "+snapshot" : ""}`);
       }),
@@ -238,6 +246,25 @@ describe("crash-safe resource download", () => {
     expect(events).toEqual(["log:resource_wait", "save:pending", "download", "save:collected+snapshot", "log:resources_collected"]);
     expect(saved[0]).toEqual({ ...STORED, downloads: 1 });
     expect(download.save.mock.calls[1]).toEqual([{ status: "collected", summary: summarizeResourceSnapshot(snapshot()) }, snapshot()]);
+  });
+
+  it("validates a sealed paged summary without materializing legacy arrays, then always disposes the download after the atomic save", async () => {
+    const paged = sealed({ coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "partial" },
+      counts: { usageEvents: 300, nativeRecords: 450, billingSettlements: 301 } });
+    const { download, events } = setup(async () => paged);
+    expect(validateResourceDownload(paged, SCOPE)).toBe(paged);
+    await expect(collectResources(download)).resolves.toEqual({});
+    expect(download.save.mock.calls[1]).toEqual([{ status: "collected", summary: paged.summary }, paged]);
+    expect(paged.dispose).toHaveBeenCalledOnce();
+    expect(events).toContain("log:resources_collected");
+  });
+
+  it("disposes a rejected foreign paged summary and never persists it as collected", async () => {
+    const paged = sealed({ scope: { ...SCOPE, submissionId: "another-submission" } });
+    const { download } = setup(async () => paged, STORED, 0);
+    await expect(collectResources(download)).resolves.toEqual({});
+    expect(paged.dispose).toHaveBeenCalledOnce();
+    expect(download.save.mock.calls.some(([state]) => state.status === "collected")).toBe(false);
   });
 
   it("counts a download a crashed process started against the same retry budget", async () => {

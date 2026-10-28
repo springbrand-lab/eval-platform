@@ -17,7 +17,8 @@ export interface NativeRecordByteBinding {
   readonly maxBytes: number;
   readonly scope:
     | { readonly kind: "chat"; readonly chatId: string }
-    | { readonly kind: "operation"; readonly chatId: string; readonly submissionId: string };
+    | { readonly kind: "operation"; readonly chatId: string; readonly submissionId: string;
+      readonly verifiedSubmissions?: ReadonlySet<string> };
   /** Bounded native interpretation for Metrics or the Evaluator's result-file fallback.
    * No record object is constructed during evidence export. */
   readonly interpret?: "metrics" | "reply";
@@ -210,9 +211,9 @@ class SafePiJsonScanner {
         if (type(path) !== undefined) text(path);
       }
     }
-    if (scope.kind === "operation" && (submission === null
-      || (submission !== scope.submissionId
-        && (type("parent") !== "object" || value("parent.submissionId") !== scope.submissionId)))) {
+    if (scope.kind === "operation" && submission !== scope.submissionId
+      && (type("parent") !== "object" || (value("parent.submissionId") !== scope.submissionId
+        && !scope.verifiedSubmissions?.has(value("parent.submissionId") as string)))) {
       invalid("foreign Submission or parent");
     }
   }

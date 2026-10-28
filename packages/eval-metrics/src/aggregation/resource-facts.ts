@@ -113,6 +113,7 @@ export function readStream(
   const byIdentity = new Map<string, FactEntry | null>();
   for (const { ownerUserId, canEmitNativeRecords, snapshot } of snapshots) {
     if (!snapshot.finalized || snapshot.coverage?.[stream] !== "complete") complete = false;
+    const verifiedSubmissions = new Set([snapshot.scope.submissionId]);
     const facts: readonly (JsonRecord | NativeTrajectoryEntry)[] | undefined = snapshot[stream];
     if (!Array.isArray(facts)) {
       complete = false;
@@ -135,10 +136,13 @@ export function readStream(
         ...(metricProjection ? { metricProjection } : {}),
       };
       if (native && (!isSafePiTrajectoryRecord(fact)
-        || !nativeRecordMayBelongToScope(fact, snapshot.scope))) {
+        || !nativeRecordMayBelongToScope(fact, snapshot.scope, verifiedSubmissions))) {
         complete = false;
         diagnostics.report("conflicting-identity", stream, entry, "Native record is outside its resource snapshot operation");
         continue;
+      }
+      if (native?.record.submissionId !== undefined && native.record.submissionId !== null) {
+        verifiedSubmissions.add(native.record.submissionId);
       }
       if (native?.metricProjection !== undefined && metricProjection === undefined) {
         complete = false;

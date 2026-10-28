@@ -1,4 +1,7 @@
-import type { AgentResourceSnapshot, AgentResourceState, EvaluationRecord, Sampling } from "@eval-platform/eval-contracts";
+import {
+  isResourceSnapshotDownload, jsonObjectArrayInPlaceSchema, nativeRecordMayBelongToScope, nativeTrajectoryEntrySchema,
+  type AgentResourceSnapshot, type AgentResourceState, type EvaluationRecord, type Sampling,
+} from "@eval-platform/eval-contracts";
 import {
   compactResourceSnapshot,
   MetricsSourceError,
@@ -38,6 +41,100 @@ export async function updateWithResources(
     return;
   }
   const { attemptId, snapshot } = resources;
+  if (isResourceSnapshotDownload(snapshot)) {
+    await db.transaction(async (transaction) => {
+      // A CAS conflict rejects the download before reading its sealed spool. All fragment
+      // inserts, both JSON columns and the collected summary share this one transaction.
+      const { ownerUserId, samplingId, evaluationId } = await update(transaction);
+      await transaction.execute(sql`CREATE TEMP TABLE eval_resource_fragments (
+        position bigint PRIMARY KEY, stream text NOT NULL, records json NOT NULL
+      ) ON COMMIT DROP`);
+      const counts = { usageEvents: 0, nativeRecords: 0, billingSettlements: 0 };
+      let lastSeq = 0;
+      const verifiedSubmissions = new Set([snapshot.summary.scope.submissionId]);
+      let position = 0;
+      let usagePair: readonly Record<string, unknown>[] | undefined;
+      let billingStarted = false;
+      let actionPage = false;
+      for await (const page of snapshot.readPages()) {
+        const { stream, records } = page;
+        if (!["nativeRecords", "usageEvents", "billingSettlements"].includes(stream)
+          || !Array.isArray(records) || actionPage) {
+          throw new Error("Sealed resource download has an invalid page");
+        }
+        if (stream === "nativeRecords") {
+          if (billingStarted) {
+            throw new Error("Native resource page follows billing facts");
+          }
+          for (const entry of records) {
+            if (!nativeTrajectoryEntrySchema.safeParse(entry).success || entry.ingestSeq <= lastSeq
+              || !nativeRecordMayBelongToScope(entry.record, snapshot.summary.scope, verifiedSubmissions)) {
+              throw new Error("Sealed resource download has a foreign or unordered native record");
+            }
+            lastSeq = entry.ingestSeq;
+            if (entry.record.submissionId !== null) verifiedSubmissions.add(entry.record.submissionId);
+          }
+        } else if (!jsonObjectArrayInPlaceSchema.safeParse(records).success) {
+          throw new Error("Sealed resource download has invalid resource facts");
+        } else if (stream === "usageEvents") {
+          billingStarted = true;
+          if (usagePair) throw new Error("Resource usage is not followed by its settlements");
+          usagePair = records;
+        } else if (stream === "billingSettlements") {
+          if (usagePair) {
+            if (records.length !== usagePair.length || records.some((fact, index) =>
+              typeof usagePair![index]?.eventId !== "string" || !usagePair![index]?.eventId
+              || fact.eventId !== usagePair![index]?.eventId)) {
+              throw new Error("Sealed resource billing facts do not match usage in source order");
+            }
+            usagePair = undefined;
+          } else {
+            if (!billingStarted) throw new Error("Resource action facts have no API billing page");
+            actionPage = true;
+          }
+        }
+        const bytes = JSON.stringify(records);
+        if (Buffer.byteLength(bytes) > 4_000_000) throw new Error("Sealed resource page exceeds the public byte bound");
+        counts[stream] += records.length;
+        if (!Number.isSafeInteger(counts[stream])) throw new Error("Resource page count exceeds safe integers");
+        await transaction.execute(sql`INSERT INTO pg_temp.eval_resource_fragments (position, stream, records)
+          VALUES (${position++}, ${stream}, ${bytes}::json)`);
+      }
+      if (usagePair || !actionPage || Object.keys(counts).some((stream) =>
+        counts[stream as keyof typeof counts] !== snapshot.summary.counts[stream as keyof typeof counts])) {
+        throw new Error("Sealed resource download is incomplete or changed before storage");
+      }
+      // JSON (not jsonb) preserves contract-permitted escaped surrogates and NUL.
+      // PostgreSQL assembles the existing two columns without returning a full
+      // nativeRecords/usage array or a whole JSON snapshot to the Node process.
+      const parts = (stream: keyof typeof counts) => sql`coalesce((
+        SELECT json_agg(item.value ORDER BY chunk.position, item.ordinal)
+        FROM pg_temp.eval_resource_fragments AS chunk
+        CROSS JOIN LATERAL json_array_elements(chunk.records) WITH ORDINALITY AS item(value, ordinal)
+        WHERE chunk.stream = ${stream}
+      ), '[]'::json)`;
+      const { summary } = snapshot;
+      await transaction.execute(sql`WITH body AS (
+        SELECT json_build_object(
+          'scope', ${JSON.stringify(summary.scope)}::json,
+          'observedAt', ${summary.observedAt},
+          'finalized', ${summary.finalized},
+          'coverage', ${JSON.stringify(summary.coverage)}::json,
+          'readiness', ${JSON.stringify(summary.readiness)}::json,
+          'usageEvents', ${parts("usageEvents")},
+          'nativeRecords', ${parts("nativeRecords")},
+          'billingSettlements', ${parts("billingSettlements")}
+        ) AS snapshot
+      )
+      INSERT INTO eval_attempt_resources
+        (stage, record_id, attempt_id, owner_user_id, sampling_id, evaluation_id, snapshot, metric_snapshot)
+      SELECT ${evaluationId === undefined ? "execution" : "evaluation"}, ${evaluationId ?? samplingId},
+        ${attemptId}, ${ownerUserId}, ${samplingId}, ${evaluationId ?? null}, body.snapshot, body.snapshot FROM body
+      ON CONFLICT (stage, record_id, attempt_id) DO UPDATE
+        SET snapshot = excluded.snapshot, metric_snapshot = excluded.metric_snapshot`);
+    });
+    return;
+  }
   const metricSnapshot = await compactResourceSnapshot(snapshot);
   await db.transaction(async (transaction) => {
     const { ownerUserId, samplingId, evaluationId } = await update(transaction);

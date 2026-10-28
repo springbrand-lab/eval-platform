@@ -13,8 +13,11 @@ export type {
   AgentResourceScope,
   SubmittedAgentResourceScope,
   AgentResourceSnapshot,
+  AgentResourceSnapshotDownload,
+  AgentResourceSnapshotPage,
   AgentResourceSnapshotSummary,
   AgentResourceState,
+  CollectedResourceSnapshot,
   AgentRole,
   AgentStatus,
   ArtifactRef,
@@ -127,7 +130,7 @@ export {
 export { IDENTIFIER_RULE, identifierSchema, isIdentifier } from "./identifier.js";
 export { canonicalJsonBytes, createId, equalJson, sha256Hex } from "./canonical.js";
 export { jsonObjectArrayInPlaceSchema, jsonObjectInPlaceSchema, jsonObjectSchema, jsonValueSchema } from "./json.js";
-export { summarizeResourceSnapshot } from "./resources.js";
+export { isResourceSnapshotDownload, summarizeResourceSnapshot } from "./resources.js";
 export { evalInputLimitsSchema } from "./input-limits.js";
 export type { EvalInputLimits } from "./input-limits.js";
 export { initialResourceFileSchema } from "./initial-resource-files.js";

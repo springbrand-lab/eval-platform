@@ -1,13 +1,15 @@
 # Pi-native Eval evidence: cutover and parity gate
 
 This is a deliberately breaking **new-run** consumer change, not a migration. SP owns the
-trajectory wire in the **published public** `@springbrand/eval-harness` export. Eval never
+trajectory wire in the intended **published public** `@springbrand/eval-harness` export. Eval never
 imports SP private source, queries SP Durable Object storage, or upgrades an event-only
 `sp-trajectory/v1` bundle by relabelling its JSON. Eval currently pins
 `@springbrand/eval-harness@0.1.0-alpha.5`, whose exported page is still event-only.
-The SP release worktree has an offline `0.1.0-alpha.7` **candidate tarball** and
-public `evalEvidenceTrajectoryPageSchema` / `evalResourceSnapshotSchema`, not a
-published or pinned release. Until a Pi-native package is **published** and pinned,
+The clean SP Eval source at `dc6d2c66` declares `0.1.0-alpha.7` **private**
+and exports public `evalEvidenceTrajectoryPageSchema`, `evalResourceHeaderSchema`,
+`evalResourceNativePageSchema` (the same trajectory page) and
+`evalBillingResourcesPageSchema`, not a published or pinned release.
+Until a Pi-native package is **published** and pinned,
 local fixtures verify consumer behavior and public-schema shape, **not** live
 SP/Eval interoperability or deployment readiness.
 
@@ -42,18 +44,21 @@ SP/Eval interoperability or deployment readiness.
   The published UA `@springbrand/agent-runtime/trajectory` can be consumed now;
   SP's **new** `@springbrand/eval-harness` native page schema is not yet published.
   A bare old `turn.finished` event JSON is never a Pi-native record.
-- SP's operation-scoped resource snapshot retains `scope`, `readiness`, `finalized`,
-  `usageEvents` and `billingSettlements` and replaces both `telemetryEvents` and its
-  coverage field with `nativeRecords` / `coverage.nativeRecords`. A native reference
-  is a mandatory authenticated byte read, not a partial or omitted record. Old
-  `pendingTelemetryEvents` remains an SP diagnostic, not an invented metric value.
-  Eval rejects foreign Chat/Submission records and stores only the verified body-free
-  Pi identity/facts for newly read referenced records; historical raw snapshots are
-  immutable. Tokens and charged units still come **only** from independent usage
-  and model/Action settlement facts; native Pi usage supports Step classification.
-  **Blocked:** SP's public resource response still has an unbounded full JSON header,
-  which Eval currently parses whole. Require a bounded/paginated public facts header
-  with complete inventory and a consumer of that exact seam, not a second HTTP route.
+- SP's operation-scoped, **bounded** resource header retains `scope`, `readiness`,
+  `finalized`, `coverage`, settled Action/Tool charge facts and a frozen Chat
+  `cursor.throughSeq`, but not a full array. The authenticated `/native-records`
+  route uses the same `sp-pi-trajectory/v1` inline/ref page filtered to the
+  selected Submission and provable descendants; `/billing` pages matched
+  API-owned usage/model settlements with `cursor:{throughCount,sha256}`. Every
+  native reference is a mandatory authenticated byte read, not a partial or
+  omitted record. Old `pendingTelemetryEvents` remains an SP diagnostic.
+  Eval's new consumer verifies all pages, pair/cursor/hash/scope stability and
+  a final unchanged header, then persists only compact, body-free Pi facts and
+  independent usage/billing in the existing JSON columns. It **never** calls
+  the combined unbounded route for a new download. Historical rows are not
+  changed. A nonfinalized header cannot yield pages or prove zero. This
+  locally tested candidate still requires public package publication and
+  isolated PostgreSQL/deployed-SP integration before any end-to-end claim.
 - SP's public package source sets a **4,000,000-byte** trajectory page ceiling. Eval
   enforces that limit; SP paginates by bytes as well as count and emits an
   immutable reference for a record above the inline bound, never truncating one.
@@ -99,19 +104,20 @@ The production interpreter therefore reads only the known bookkeeping fields
 and treats unknown or ambiguous Entries as unsupported. Once the public
 dependency is installable and SP publishes the native Harness release,
 replace these temporary structural checks with the public parser/schema and
-rerun this proof plus actual service parity. Direct children are provable from
-their public parent; deeper subagent ancestry requires a verified scoped
-lineage and must not be accepted merely because some parent exists.
+rerun this proof plus actual service parity. Direct and nested children,
+including attributed child Context, require an ordered verified same-Chat
+parent chain; a foreign parent or an imported Chat-wide Context never becomes
+part of the selected Submission's resource collection.
 
 ## Evidence required before an integrated green or release
 
 1. Publish SP's `@springbrand/eval-harness` new public release, pin it in Eval's
    `apps/eval-api/package.json` / lockfile and replace the temporary structural page
-   schema with the actual **public** exported type/schema. Confirm `throughSeq` is an
-   accepted query parameter on both first-page replay and later pages; if the public
-   package offers a different snapshot anchor or record shape, change Eval and rerun
-   this gate rather than adding a legacy fallback.
-2. Obtain a redacted **actual** SP-generated page sequence, resource snapshot, and
+   schema and temporary metadata checks with the actual **public** header/native/billing
+   exports. Confirm `throughSeq`, the API billing `(throughCount, throughSha256)`
+   fingerprint and settled Action/Tool IDs across all pages; if the released public
+   package differs, change Eval and rerun this gate rather than falling back.
+2. Obtain a redacted **actual** SP-generated page sequence, resource header/native/billing pages and
    Evaluator Pi assistant/Tool-result sample from the Eval deployment. Check auth
    rejects absent/wrong service token, foreign user/Chat/key/Submission; first and
    resumed reads keep the same `throughSeq` with appended records; page max bytes,
