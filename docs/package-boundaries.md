@@ -58,8 +58,9 @@ The arrows describe allowed consumption direction. The contract package must not
 > substitutes. Alpha.7's declarations/JS have **no** `allowPartial` requests or
 > route helpers, partial billing `throughSeq`, or partial record-byte
 > `resourceKey`; any older “private/unpublished” or “keep alpha.5” statements
-> in the design text below are superseded. The structural post-wait extension,
-> real SP parity and isolated PostgreSQL assembly are release blockers.
+> in the design text below are superseded. The structural post-wait extension
+> and real deployed SP parity remain release blockers. Bounded Attempt-resource
+> assembly is covered by an isolated PostgreSQL 18.3 regression, not by a live release.
 
 The existing Harness/EvidenceStore seam owns one immutable evidence bundle per successful Subject execution. The Harness exports produced artifacts, original Subject Material files resolved from the Project's fixed references, and the complete raw safe Pi source trajectory in order. Evidence trajectory means the full Chat keyset through one frozen watermark, including imported reference Context and any earlier Submission in that Chat; the requested terminal Submission authorizes and binds the read, but does not filter the evidence rows. The adapter rejects unsafe/unprojected records or records whose resource or parent belongs to another Chat. EvidenceStore stores both file groups by content hash and splits trajectory JSONL at native record boundaries within the file byte limit; it never normalizes or discards source record fields. The v2 manifest records Subject input identities, artifacts, ordered trajectory parts with sizes/hashes/record counts, completeness and explicit artifact omissions. Runtime passes only the frozen Subject Material references to export, never live Dataset contents. An Evaluator receives its own initialization first, then all evidence files, and the manifest last; the SP adapter uses the public package's evidence path helpers and checks path, size and hash receipts. A native record larger than the file limit is never dropped or truncated: the export fails with an explicit non-retryable error before any part is stored, and the SP import likewise refuses a bundle with a file above SP's per-file limit before writing anything.
 

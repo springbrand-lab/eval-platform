@@ -41,6 +41,13 @@ published SP `alpha.7` is the authority for the finalized wire, but lacks the
 post-wait `allowPartial` query and record-byte `resourceKey` public contract;
 local structural storage/byte checks do not establish live deployment parity.
 
+The separate public SP Chat *debug* trajectory read, relayed by Eval API to Web,
+returns `{records:[{ingestSeq,record} | {ingestSeq,reference}],beforeSeq,hasOlder}`.
+Its native row/reference types are shared here, but it does not use the frozen
+evidence page's `format/cursor/nextAfterSeq`. Web cannot fetch a referenced
+record body through its observation route and displays an explicit placeholder
+instead of pretending it has a full record or projecting a legacy `event`.
+
 ## Saved Dashboard configuration
 
 看板配置的 `excludedDataIds` 是已确认的数据展示排除集合，不是指标快照。创建时默认空集合；更新省略该字段时保留现有选择，显式空集合表示恢复全部。集合内身份唯一，配置仍使用同一 revision 防止丢失更新。

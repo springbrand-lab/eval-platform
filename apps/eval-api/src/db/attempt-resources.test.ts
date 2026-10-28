@@ -77,6 +77,8 @@ describe("paged Attempt resource Store write", () => {
     expect(statements.at(-1)?.sql).toContain("INSERT INTO eval_attempt_resources");
     expect(statements.at(-1)?.sql).toContain("json_agg(item.value ORDER BY chunk.position, item.ordinal)");
     expect(statements.at(-1)?.sql).toContain("body.snapshot, body.snapshot");
+    expect(statements.at(-1)?.sql).toMatch(/'observedAt', \$\d+::text/);
+    expect(statements.at(-1)?.sql).toMatch(/'finalized', \$\d+::boolean/);
     expect(statements.slice(1, -1).every(({ params }) =>
       params.every((param) => typeof param !== "string" || Buffer.byteLength(param) <= 4_000_000))).toBe(true);
     expect(statements.at(-1)?.params).toEqual(expect.arrayContaining([

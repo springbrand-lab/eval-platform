@@ -102,7 +102,7 @@ function AgentConversation({ projectId, kind, id, running, title, status, durati
       </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{messages.error ? <div className="p-3"><ErrorBlock error={messages.error} onRetry={() => void messages.refetch()} /></div> : !messages.data ? <LoadingBlock /> : <MessagesTab messages={messages.data} running={running} />}</div>
     </section>
-    {traceOpen && <Dialog open compact placement="right" title={`${title} · 原始轨迹`} description="原始事件用于排查运行细节，关闭后返回会话。" onClose={() => setTraceOpen(false)} footer={<Button variant="outline" size="sm" onClick={() => setTraceOpen(false)}>返回会话</Button>}>
+    {traceOpen && <Dialog open compact placement="right" title={`${title} · 原始轨迹`} description="原始 Pi 记录用于排查运行细节，关闭后返回会话。" onClose={() => setTraceOpen(false)} footer={<Button variant="outline" size="sm" onClick={() => setTraceOpen(false)}>返回会话</Button>}>
       <TrajectoryTab projectId={projectId} kind={kind} id={id} running={running} />
     </Dialog>}
   </>;
