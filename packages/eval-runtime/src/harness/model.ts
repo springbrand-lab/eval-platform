@@ -3,7 +3,7 @@ import type {
   AgentFramework,
   AgentRole,
   AgentResourceReadinessReport,
-  AgentResourceSnapshot,
+  CollectedResourceSnapshot,
   AgentStatus,
   EvaluationAgentOutput,
   EvaluationOutputSchema,
@@ -18,7 +18,6 @@ import type {
   ExecutionOutput,
   HarnessConfig,
   MaterializedDataBinding,
-  JsonValue,
 } from "@eval-platform/eval-contracts";
 import type { DataInput, InitialMaterialsRef } from "@eval-platform/eval-dataset";
 
@@ -91,6 +90,9 @@ export interface CollectAgentResourcesInput {
   readonly idempotencyKey: string;
   /** Omitted only while reconciling a dispatch whose SP receipt is unknown. */
   readonly submissionId?: string;
+  /** Explicitly permits verified, frozen known facts only after Runtime's resource wait expires.
+   * Absence keeps ordinary collection conservative until SP finalizes. Never passed to readiness. */
+  readonly allowPartial?: true;
   readonly runtime?: HarnessRuntimeOptions;
   /** Cancels the request and body read; the Promise settles only after both have ended. */
   readonly signal?: AbortSignal;
@@ -123,10 +125,10 @@ export interface ExportEvidenceInput {
   readonly initialMaterials?: readonly InitialMaterialsRef[];
   readonly runtime?: HarnessRuntimeOptions;
   /**
-   * The trajectory pin saved by an earlier pass of this export (`EvidenceExportProgress.trajectory`'s
-   * `format` and `cursor`, either possibly absent). When given, the Harness reads with exactly this
-   * pin and never pins a new one; `{}` (progress saved before pinning existed) reads without a
-   * cursor in the default format. Omitted for a new export, which the Harness pins itself.
+   * The native format and cutoff saved by an earlier pass. A resumed Harness
+   * binds every page to this pin; old event-only progress is rejected, not
+   * treated as native. If no page has pinned the cutoff yet, the first page
+   * freezes it before a part is stored.
    */
   readonly trajectory?: EvidenceTrajectoryPin;
 }
@@ -137,11 +139,20 @@ export interface ExportedSubjectInput extends ExportedArtifact {
   read(): Promise<ReadableStream<Uint8Array>>;
 }
 
-/** One raw source trajectory event and its strictly increasing, positive source cursor. */
-export interface ExportedTrajectoryEvent {
+/** One complete native JSONL record; the reader must verify the entire source before EOF. */
+export interface ExportedTrajectoryRecord {
   readonly seq: number;
-  /** Written unchanged as one JSONL line. */
-  readonly record: JsonValue;
+  /** Including `{"ingestSeq":...,"record":`, the original UTF-8 JSON, and `}\n`. */
+  readonly byteLength: number;
+  /** A fresh, verified stream of exactly one original JSONL line (no re-serialization). */
+  readJsonl(): Promise<ReadableStream<Uint8Array>>;
+}
+
+/** A bounded source page. Even an empty trajectory has a frozen, durable watermark. */
+export interface ExportedTrajectoryPage {
+  readonly throughSeq: number;
+  readonly records: readonly ExportedTrajectoryRecord[];
+  readonly nextAfterSeq: number | null;
 }
 
 /** What one framework exports from a finished Agent; the evidence store freezes it. */
@@ -153,15 +164,15 @@ export interface ExportedEvidence {
   readonly omitted: readonly EvidenceOmission[];
   readonly readFile: EvidenceFileReader;
   /**
-   * Complete raw events after `afterSeq` (0 for all), in order; the adapter pages through its
-   * source without projection. Each call starts a new read, bounded by `trajectoryCursor` when set.
+   * Complete raw records after `afterSeq` (0 for all), up to the saved `throughSeq` if supplied.
+   * The adapter pages through the public source; each call starts a new read. A terminal page,
+   * including an empty one, is mandatory: running out of pages cannot mean success.
    */
-  readTrajectory(afterSeq: number): AsyncIterable<ExportedTrajectoryEvent>;
-  /** The source's actual raw event format, written to the manifest. */
+  readTrajectory(afterSeq: number, throughSeq?: number): AsyncIterable<ExportedTrajectoryPage>;
   readonly trajectoryFormat: string;
   /**
-   * The fixed end of every `readTrajectory` call of this export, when the source pins one. The
-   * evidence store saves it with new progress and rejects a resumed export whose pin differs.
+   * A resumed export's saved native cutoff (if supplied); the store checks it
+   * against its durable watermark before any writes and on every read.
    */
   readonly trajectoryCursor?: EvidenceTrajectoryCursor;
   readonly trajectoryComplete: boolean;
@@ -226,7 +237,7 @@ export interface Harness {
   readFinalReply(input: CollectAgentInput & { readonly submissionId: string }): Promise<string | undefined>;
   /** Whether the snapshot is finalized, without downloading its events. */
   inspectAgentResources(input: CollectAgentResourcesInput): Promise<AgentResourceReadinessReport>;
-  collectAgentResources(input: CollectAgentResourcesInput): Promise<AgentResourceSnapshot>;
+  collectAgentResources(input: CollectAgentResourcesInput): Promise<CollectedResourceSnapshot>;
   /** Export a finished Agent's artifacts and complete trajectory; read-only. */
   exportEvidence(input: ExportEvidenceInput): Promise<ExportedEvidence>;
   /** Place a stored bundle into this Agent's own Space under `root`; repeating it is a no-op. */

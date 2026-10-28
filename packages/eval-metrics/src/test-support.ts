@@ -1,13 +1,17 @@
+import { readFileSync } from "node:fs";
 import {
   summarizeResourceSnapshot,
   type AgentResourceCollection,
   type AgentResourceFact,
+  type AgentResourceScope,
   type AgentResourceSnapshot,
   type EvaluationOutputSchema,
   type JsonValue,
+  type NativeTrajectoryEntry,
   type ProjectDatasetSnapshot,
   type ProjectPlan,
   type RunSnapshot,
+  nativeTrajectoryEntrySchema,
 } from "@eval-platform/eval-contracts";
 import type { ProjectSample } from "@eval-platform/eval-runtime";
 import type { MetricsEvaluation, MetricsSampling } from "./aggregation/model.js";
@@ -86,8 +90,8 @@ export function collection(patch: Partial<AgentResourceSnapshot> = {}): AgentRes
   const snapshot: AgentResourceSnapshot = {
     scope: { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "execution:sampling-1" },
     observedAt: "2026-10-08T00:00:01.000Z", finalized: true,
-    coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
-    usageEvents: [], telemetryEvents: [], billingSettlements: [], ...patch,
+    coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+    usageEvents: [], nativeRecords: [], billingSettlements: [], ...patch,
   };
   return { status: "collected", summary: summarizeResourceSnapshot(snapshot), snapshot };
 }
@@ -104,19 +108,46 @@ export function usage(eventId: string, patch: AgentResourceFact = {}): AgentReso
   };
 }
 
-export function telemetry(
-  eventId: string,
-  type: string,
-  operationId: string,
-  payload: AgentResourceFact = {},
-  occurredAt = 100,
-  sessionId = "session-1",
-  parentOperationId?: string,
-): AgentResourceFact {
-  return {
-    eventId, type, operationId, occurredAt, resource: { sessionId }, payload,
-    ...(parentOperationId === undefined ? {} : { parentOperationId }),
+/** Exactly the safe output of the published public UA generator, verified by
+ * `scripts/generate-pi-native-fixture.mjs`. No event-only "native" constructors. */
+const publicFixture = JSON.parse(readFileSync(new URL("../../../fixtures/pi-native-public-v1.json", import.meta.url), "utf8")) as {
+  readonly records: readonly NativeTrajectoryEntry[];
+};
+export function nativeFixture(...ingestSeqs: readonly number[]): NativeTrajectoryEntry[] {
+  return structuredClone(ingestSeqs.map((seq) => {
+    const entry = publicFixture.records.find((item) => item.ingestSeq === seq);
+    if (!entry) throw new Error(`No public Pi fixture record ${seq}`);
+    return entry;
+  }));
+}
+
+/** Rebind a projected public UA record to a test Chat/Submission. Event resource
+ * identity follows the envelope; no event-only or top-level message is made up. */
+export function nativeScopedFixture(ingestSeqs: readonly number[], scope: AgentResourceScope): NativeTrajectoryEntry[] {
+  const object = (value: unknown): Record<string, unknown> => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected Pi fixture object");
+    return value as Record<string, unknown>;
   };
+  return nativeFixture(...ingestSeqs).map((entry) => {
+    const envelope = object(entry.record);
+    object(envelope.resource).sessionId = scope.chatId;
+    envelope.submissionId = scope.submissionId;
+    const value = object(object(envelope.record).value);
+    if (value.kind === "springbrand.trajectory" && object(value.data).type === "event") {
+      const event = object(object(value.data).event);
+      object(event.resource).sessionId = scope.chatId;
+      event.submissionId = scope.submissionId;
+    }
+    return nativeTrajectoryEntrySchema.parse(entry);
+  });
+}
+
+export function nativeResourceInput(ingestSeqs: readonly number[], patch: Partial<AgentResourceSnapshot> = {},
+  ownerUserId = "owner-1"): ResourceInput {
+  return resourceInput({
+    scope: { chatId: "chat-1", submissionId: "submission-1", idempotencyKey: "key-1" },
+    nativeRecords: nativeFixture(...ingestSeqs), ...patch,
+  }, ownerUserId);
 }
 
 export function settlement(eventId: string, patch: AgentResourceFact = {}): AgentResourceFact {

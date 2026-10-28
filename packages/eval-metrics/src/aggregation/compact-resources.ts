@@ -1,97 +1,70 @@
-import { canonicalJsonBytes, sha256Hex, type AgentResourceFact, type AgentResourceSnapshot, type JsonValue } from "@eval-platform/eval-contracts";
-import { record, text } from "../json.js";
+import {
+  PI_TRAJECTORY_RECORD_FORMAT, canonicalJsonBytes, isSafePiTrajectoryRecord, nativeRecordMayBelongToScope, sha256Hex,
+  type AgentResourceSnapshot, type JsonValue, type NativeTrajectoryEntry, type PiTrajectoryRecord,
+} from "@eval-platform/eval-contracts";
+import { nativeRecordFacts } from "./native-record-facts.js";
 
-export const TELEMETRY_PROJECTION_VERSION = 3;
+/** The projection is a Metrics storage detail, never an SP trajectory format or a billing source. */
+export const NATIVE_PROJECTION_VERSION = 1;
 
-const HIDDEN_TELEMETRY_TEXT = new Set([
-  "[CONTENT OMITTED]",
-  "[REDACTED]",
-  "[Action business data withheld from telemetry]",
-]);
-
-/** Bytes of present canonical JSON; sanitized whole-body placeholders remain missing. */
-export function telemetryBodyLength(value: JsonValue | undefined): number | null {
-  if (value === undefined || containsHiddenTelemetry(value)) return null;
-  return canonicalJsonBytes(value).byteLength;
-}
-
-/** Uses `response` only when the public event omitted `output`; redaction stays missing. */
-export function telemetryOutputLength(payload: JsonValue | undefined): number | null {
-  const object = record(payload);
-  if (!object) return null;
-  return Object.hasOwn(object, "output") ? telemetryBodyLength(object.output) : telemetryBodyLength(object.response);
-}
-
-export interface TelemetryContentFlags {
-  readonly thinking: boolean;
-  readonly content: boolean;
-  /** Marker absence is proven independently for each category. */
-  readonly thinkingKnown: boolean;
-  readonly contentKnown: boolean;
-}
-
-function hasKey(value: JsonValue | undefined, predicate: (key: string) => boolean): boolean {
-  if (Array.isArray(value)) return value.some((item) => hasKey(item, predicate));
-  const object = record(value);
-  if (!object) return false;
-  return Object.entries(object).some(([key, item]) => predicate(key) || hasKey(item, predicate));
-}
-
-function containsHiddenTelemetry(value: JsonValue | undefined): boolean {
-  if (typeof value === "string" && HIDDEN_TELEMETRY_TEXT.has(value)) return true;
-  if (Array.isArray(value)) return value.some(containsHiddenTelemetry);
-  const object = record(value);
-  return object !== undefined && (object.redacted === true || Object.values(object).some(containsHiddenTelemetry));
-}
-
-/** Reads the assistant output markers used to classify a Turn without retaining its body. */
-export function telemetryContentFlags(event: Readonly<Record<string, JsonValue>>): TelemetryContentFlags {
-  const type = text(event.type);
-  if (type !== "turn.finished" && type !== "generation.finished") return { thinking: false, content: false, thinkingKnown: true, contentKnown: true };
-  const payload = record(event.payload);
-  if (!payload) return { thinking: false, content: false, thinkingKnown: false, contentKnown: false };
-  const output = Object.hasOwn(payload, "output") ? payload.output : payload.response;
-  const directThinking = Object.keys(payload).some((key) => key === "thinking" || key === "signature" || key.toLowerCase().endsWith("signature"));
-  const directContent = Object.hasOwn(payload, "content");
-  const outputMarkers = output ?? (directThinking || directContent ? payload : undefined);
-  const bodyKnown = output !== undefined && !containsHiddenTelemetry(output);
-  const thinking = directThinking || hasKey(outputMarkers, (key) => key === "thinking" || key === "signature" || key.toLowerCase().endsWith("signature"));
-  const content = directContent || hasKey(outputMarkers, (key) => key === "content");
+/**
+ * Body-free facts for a single verified SAFE record. `sourceSha256` is the digest of
+ * original UTF-8 bytes verified by the SP Harness, not a digest of the bounded
+ * interpretation it supplied for a large native Pi body. Without one, historical
+ * object snapshots keep their existing canonical-JSON fingerprint.
+ */
+export async function compactNativeTrajectoryRecord(
+  entry: NativeTrajectoryEntry, scope: AgentResourceSnapshot["scope"], sourceSha256?: string,
+  verifiedSubmissions?: ReadonlySet<string>,
+): Promise<NativeTrajectoryEntry> {
+  if (!Number.isSafeInteger(entry.ingestSeq) || entry.ingestSeq <= 0
+    || !isSafePiTrajectoryRecord(entry.record)
+    || !nativeRecordMayBelongToScope(entry.record, scope, verifiedSubmissions)
+    || (sourceSha256 !== undefined && !/^[0-9a-f]{64}$/u.test(sourceSha256))) {
+    throw new TypeError(`Cannot compact invalid native trajectory record ${entry.ingestSeq}`);
+  }
+  if (entry.metricProjection !== undefined) return entry;
+  const facts = nativeRecordFacts(entry.record as unknown as Readonly<Record<string, JsonValue>>);
+  const { record } = entry;
+  const value = record.record.value;
+  const compactWrite: PiTrajectoryRecord["record"] = record.record.type === "conversation"
+    ? { type: "conversation", value: { id: value.id } }
+    : { type: "entry", value: { id: value.id,
+      conversationId: record.record.value.conversationId, kind: record.record.value.kind } };
   return {
-    thinking,
-    content,
-    thinkingKnown: thinking || directThinking || bodyKnown,
-    contentKnown: content || directContent || bodyKnown,
+    ingestSeq: entry.ingestSeq,
+    record: {
+      format: PI_TRAJECTORY_RECORD_FORMAT,
+      resource: record.resource,
+      submissionId: record.submissionId,
+      projection: record.projection,
+      ...(record.parent === undefined ? {} : { parent: record.parent }),
+      ...(record.origin === undefined ? {} : { origin: record.origin }),
+      record: compactWrite,
+    } satisfies PiTrajectoryRecord,
+    metricProjection: {
+      version: NATIVE_PROJECTION_VERSION,
+      fingerprint: sourceSha256 ?? await sha256Hex(canonicalJsonBytes(entry.record)),
+      supported: facts !== undefined,
+      facts: [...facts ?? []],
+    },
   };
 }
 
-/** Internal Metrics projection of a raw snapshot, stored beside it and never a replacement for it. */
+/** Historical raw snapshots and current compact ones share the same Metrics interpreter.
+ * Billing/usage events remain independent and authoritative, never derived from Pi. */
 export async function compactResourceSnapshot(snapshot: AgentResourceSnapshot): Promise<AgentResourceSnapshot> {
-  const telemetryEvents: AgentResourceFact[] = [];
-  // Sequential hashing bounds temporary canonical JSON buffers to one event, not the full snapshot.
-  for (const raw of snapshot.telemetryEvents) {
-    const event = record(raw.event) ?? raw;
-    const payload = record(event.payload);
-    const contentFlags = telemetryContentFlags(event);
-    const pick = (value: AgentResourceFact | undefined, fields: readonly string[]): AgentResourceFact =>
-      Object.fromEntries(fields.flatMap((key) => value?.[key] === undefined ? [] : [[key, value[key]!]]));
-    telemetryEvents.push({
-      event: {
-        ...pick(event, ["eventId", "type", "operationId", "parentOperationId", "occurredAt"]),
-        resource: pick(record(event.resource), ["sessionId"]),
-        payload: pick(payload, ["outcome", "durationMs", "toolName", "inputTokens", "outputTokens", "totalTokens"]),
-      },
-      metricProjection: {
-        version: TELEMETRY_PROJECTION_VERSION,
-        fingerprint: await sha256Hex(canonicalJsonBytes(event)),
-        hasThinking: contentFlags.thinking,
-        hasContent: contentFlags.content,
-        thinkingKnown: contentFlags.thinkingKnown,
-        contentKnown: contentFlags.contentKnown,
-        inputLength: event.type === "tool.started" ? telemetryBodyLength(payload?.input) : null,
-        outputLength: event.type === "tool.finished" ? telemetryOutputLength(payload) : null,
-      },
-    });
+  if (!Array.isArray(snapshot.nativeRecords)) {
+    throw new TypeError("Cannot compact an event-only resource snapshot as native Pi evidence");
   }
-  return { ...snapshot, telemetryEvents };
+  const nativeRecords: NativeTrajectoryEntry[] = [];
+  let lastSeq = 0;
+  const verifiedSubmissions = new Set([snapshot.scope.submissionId]);
+  for (const entry of snapshot.nativeRecords) {
+    if (entry.ingestSeq <= lastSeq) throw new TypeError(`Cannot compact invalid native trajectory record ${entry.ingestSeq}`);
+    lastSeq = entry.ingestSeq;
+    nativeRecords.push(await compactNativeTrajectoryRecord(entry, snapshot.scope, undefined, verifiedSubmissions));
+    if (entry.record.submissionId !== null) verifiedSubmissions.add(entry.record.submissionId);
+  }
+  return { ...snapshot, nativeRecords };
 }

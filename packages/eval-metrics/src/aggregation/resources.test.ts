@@ -1,9 +1,22 @@
 import { describe, expect, it } from "vitest";
-import type { AgentResourceFact, AgentResourceScope } from "@eval-platform/eval-contracts";
-import { resourceInput, settlement, telemetry, usage } from "../test-support.js";
+import type { AgentResourceFact, AgentResourceScope, NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
+import { nativeFixture, nativeResourceInput, nativeScopedFixture, resourceInput, settlement, usage } from "../test-support.js";
 import { aggregateResources } from "./resources.js";
 
 const SCOPE = { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "execution:sampling-1" } satisfies AgentResourceScope;
+
+/** Only negative/contradictory cases edit an actual publicly projected UA fact. */
+function variant(seq: number, ingestSeq: number, edit: (event: Record<string, unknown>) => void): NativeTrajectoryEntry {
+  const item = nativeFixture(seq)[0]!;
+  const write = item.record.record;
+  if (write.type !== "entry" || write.value.kind !== "springbrand.trajectory") throw new Error("Expected native event fact");
+  const value = write.value as Record<string, unknown>;
+  value.id = ingestSeq;
+  const data = value.data as { event: Record<string, unknown> };
+  data.event.eventId = `fact-${ingestSeq}`;
+  edit(data.event);
+  return { ...item, ingestSeq };
+}
 
 describe("resource statistics", () => {
   it("proves zero only from complete finalized empty sources", () => {
@@ -29,12 +42,8 @@ describe("resource statistics", () => {
 
   it("classifies an unclosed operation from a terminal Attempt as unknown", () => {
     const result = aggregateResources([{
-      ...resourceInput({ telemetryEvents: [
-        telemetry("turn-start", "turn.started", "turn-1"),
-        telemetry("turn-end", "turn.finished", "turn-1", { outcome: "completed" }, 2_000),
-        telemetry("generation-start", "generation.started", "generation-1", {}, 1_000, "session-1", "turn-1"),
-      ] }),
-      canEmitTelemetry: false,
+      ...nativeResourceInput([3, 5, 16]),
+      canEmitNativeRecords: false,
     }]);
     expect(result.modelRequests).toMatchObject({ count: { value: 1 }, inProgress: 0, unknown: 1 });
     expect(result.trajectory.turns).toMatchObject({ count: { value: 1 }, completed: 1, inProgress: 0, unknown: 0 });
@@ -53,7 +62,7 @@ describe("resource statistics", () => {
 
   it.each(["partial", "unavailable"] as const)("does not treat declared %s sources as complete", (coverage) => {
     const result = aggregateResources([resourceInput({
-      usageEvents: [usage("usage-1")], coverage: { usageEvents: coverage, telemetryEvents: coverage, billingSettlements: coverage },
+      usageEvents: [usage("usage-1")], coverage: { usageEvents: coverage, nativeRecords: coverage, billingSettlements: coverage },
     })]);
     expect(result.tokens.total).toEqual({ value: 35, coverage: "partial" });
     expect(result.costs.chargedUnits.value).toBeNull();
@@ -88,26 +97,26 @@ describe("resource statistics", () => {
   it("deduplicates source identities across snapshots and ignores object key order", () => {
     const event = usage("usage-1");
     const reordered = Object.fromEntries(Object.entries(event).reverse());
-    const started = telemetry("tool-start", "tool.started", "tool-1", { toolName: "browser" });
+    const started = nativeFixture(8)[0]!;
     const result = aggregateResources([
-      resourceInput({ usageEvents: [event, reordered], telemetryEvents: [started], billingSettlements: [settlement("usage-1")] }),
-      resourceInput({ usageEvents: [event], telemetryEvents: [{ ingestSeq: 123, event: started }], billingSettlements: [settlement("usage-1")] }),
+      nativeResourceInput([], { usageEvents: [event, reordered], nativeRecords: [started], billingSettlements: [settlement("usage-1")] }),
+      nativeResourceInput([], { usageEvents: [event], nativeRecords: [started], billingSettlements: [settlement("usage-1")] }),
     ]);
     expect(result.tokens.total.value).toBe(35);
     expect(result.trajectory.tools.count.value).toBe(1);
     expect(result.costs.modelDebitedUnits.value).toBe(8);
-    expect(result.duplicateRecords).toEqual({ usageEvents: 2, telemetryEvents: 1, billingSettlements: 1 });
+    expect(result.duplicateRecords).toEqual({ usageEvents: 2, nativeRecords: 1, billingSettlements: 1 });
   });
 
   it("keeps different users, accounts and sessions with the same local ID separate", () => {
     const result = aggregateResources([
-      resourceInput({ usageEvents: [usage("shared")], telemetryEvents: [telemetry("shared", "generation.started", "op-1")], billingSettlements: [settlement("shared")] }),
-      resourceInput({ usageEvents: [usage("shared")], telemetryEvents: [telemetry("shared", "generation.started", "op-1", {}, 100, "session-2")], billingSettlements: [settlement("shared", { accountId: "account-2" })] }, "owner-2"),
+      nativeResourceInput([5], { usageEvents: [usage("shared")], billingSettlements: [settlement("shared")] }),
+      nativeResourceInput([5], { usageEvents: [usage("shared")], billingSettlements: [settlement("shared", { accountId: "account-2" })] }, "owner-2"),
     ]);
     expect(result.tokens.total.value).toBe(70);
     expect(result.modelRequests.count.value).toBe(2);
     expect(result.costs.modelDebitedUnits.value).toBe(16);
-    expect(result.duplicateRecords).toEqual({ usageEvents: 0, telemetryEvents: 0, billingSettlements: 0 });
+    expect(result.duplicateRecords).toEqual({ usageEvents: 0, nativeRecords: 0, billingSettlements: 0 });
   });
 
   it("isolates contradictory facts instead of picking whichever came last", () => {
@@ -120,9 +129,10 @@ describe("resource statistics", () => {
   });
 
   it("diagnoses missing identities and unsupported facts without claiming complete zero", () => {
-    const result = aggregateResources([resourceInput({
+    const missingToolId = variant(8, 8, (event) => { delete event.toolCallId; });
+    const result = aggregateResources([nativeResourceInput([], {
       usageEvents: [{ kind: "assistant_model", metrics: { inputTokens: 1 } }, usage("unsupported", { kind: "new-kind" })],
-      telemetryEvents: [{ eventId: "missing-session", type: "tool.started", operationId: "tool-1" }],
+      nativeRecords: [missingToolId],
       billingSettlements: [{ eventId: "missing-account", debitedUnits: 5 }],
     })]);
     expect(result.tokens.input).toEqual({ value: null, coverage: "unavailable" });
@@ -214,9 +224,8 @@ describe("resource statistics", () => {
   });
 
   it("separates provider USD, model settlement and actual action charges", () => {
-    const result = aggregateResources([resourceInput({
+    const result = aggregateResources([nativeResourceInput([10], {
       usageEvents: [usage("usage-1")],
-      telemetryEvents: [telemetry("tool-1", "tool.finished", "tool-1", { toolName: "action", outcome: "completed", cost: 9_999 })],
       billingSettlements: [
         settlement("usage-1"), { executionId: "action-1", status: "succeeded", chargedCredits: 5 },
         { executionId: "action-2", status: "failed", chargedCredits: 0 },
@@ -228,6 +237,50 @@ describe("resource statistics", () => {
       ratedUnits: { value: 10, coverage: "complete" }, shortfallUnits: { value: 2, coverage: "complete" },
       platformOwnedUnits: { value: 2, coverage: "complete" },
     });
+  });
+
+  it("keeps 300 independently paired API settlements and a known zero Action, while an unknown fee leaves totals partial", () => {
+    const usageEvents = Array.from({ length: 300 }, (_, index) => usage(`event-${index}`));
+    const billingSettlements = [
+      ...usageEvents.map((event) => settlement(event.eventId as string, { debitedUnits: 2 })),
+      { source: "tool", executionId: "88888888-8888-4888-8888-888888888888",
+        status: "outcome_unknown", chargedCredits: 0 },
+    ];
+    const result = aggregateResources([resourceInput({
+      usageEvents, billingSettlements,
+      coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "partial" },
+    })]);
+    expect(result.tokens.input).toEqual({ value: 3_000, coverage: "complete" });
+    expect(result.costs.modelDebitedUnits).toEqual({ value: 600, coverage: "partial" });
+    expect(result.costs.actionChargedUnits).toEqual({ value: 0, coverage: "partial" });
+    expect(result.costs.chargedUnits).toEqual({ value: 600, coverage: "partial" });
+    expect(aggregateResources([resourceInput({ billingSettlements: [], coverage: {
+      usageEvents: "complete", nativeRecords: "complete", billingSettlements: "partial",
+    } })]).costs.chargedUnits.value).toBeNull();
+    expect(aggregateResources([resourceInput({ billingSettlements: [] })]).costs.chargedUnits.value).toBe(0);
+  });
+
+  it("recognizes only a verified native child ancestry and its attributed Context as this operation's supporting facts", () => {
+    const root = nativeScopedFixture([3], SCOPE)[0]!;
+    const context = nativeScopedFixture([1], SCOPE)[0]!;
+    const child = nativeScopedFixture([8], SCOPE)[0]!;
+    const nested = nativeScopedFixture([14], SCOPE)[0]!;
+    const parent = { resource: { agentId: root.record.resource.agentId, sessionId: SCOPE.chatId },
+      submissionId: SCOPE.submissionId };
+    const rows = [
+      root,
+      { ...context, ingestSeq: 4, record: { ...context.record, submissionId: null, origin: "context" as const, parent } },
+      { ...child, ingestSeq: 5, record: { ...child.record, submissionId: "child", parent } },
+      { ...nested, ingestSeq: 6, record: { ...nested.record, submissionId: "nested",
+        parent: { ...parent, submissionId: "child" } } },
+    ];
+    const supported = aggregateResources([resourceInput({ nativeRecords: rows })]);
+    expect(supported.diagnostics.filter((item) => item.stream === "nativeRecords"
+      && item.kind === "conflicting-identity")).toEqual([]);
+    const unproven = aggregateResources([resourceInput({ nativeRecords: [root, rows[3]!] })]);
+    expect(unproven.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stream: "nativeRecords", kind: "conflicting-identity" }),
+    ]));
   });
 
   it("preserves null settlement fields and does not infer actual charges from rated units", () => {
@@ -273,55 +326,41 @@ describe("resource statistics", () => {
     expect(result.modelRequests.count.value).toBe(0);
   });
 
-  it("counts one turn with multiple model requests and pairs tool calls regardless of event order", () => {
-    const events = [
-      telemetry("turn-start", "turn.started", "turn-1", {}, 0),
-      telemetry("turn-end", "turn.finished", "turn-1", { outcome: "completed" }, 500),
-      telemetry("request-1-start", "generation.started", "request-1", {}, 1),
-      telemetry("request-1-end", "generation.finished", "request-1", { outcome: "completed" }, 11),
-      telemetry("request-2-start", "generation.started", "request-2", {}, 100),
-      telemetry("request-2-end", "generation.finished", "request-2", { outcome: "failed" }, 120),
-      telemetry("tool-start", "tool.started", "tool-1", { toolName: "browser" }, 200),
-      telemetry("tool-end", "tool.finished", "tool-1", { toolName: "browser", outcome: "completed" }, 240),
-    ];
-    const result = aggregateResources([resourceInput({ telemetryEvents: events.toReversed() })]);
-    expect(result.trajectory.turns).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 500 } });
-    expect(result.modelRequests).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 1, failed: 1, durationMs: { mean: 15 } });
-    expect(result.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 40 } });
-    expect(result.trajectory.byTool[0]).toMatchObject({ toolName: "browser", count: { value: 1 }, durationMs: { total: 40 } });
+  it("pairs actual Turn/generation/Tool IDs regardless of source observation order", () => {
+    const reversed = nativeFixture(...Array.from({ length: 16 }, (_, index) => index + 1)).toReversed();
+    const result = aggregateResources([nativeResourceInput([], { nativeRecords: reversed })]);
+    expect(result.trajectory.turns).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 400 } });
+    expect(result.modelRequests).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 2, durationMs: { mean: 110 } });
+    expect(result.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "complete" }, failed: 1, durationMs: { mean: 40 } });
+    expect(result.trajectory.byTool[0]).toMatchObject({ toolName: "search", count: { value: 1 }, durationMs: { total: 40 } });
   });
 
-  it("keeps cancelled, unknown and in-progress operations distinct", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      telemetry("cancel", "turn.cancelled", "turn-1"),
-      telemetry("unknown", "tool.finished", "tool-1", { toolName: "browser", durationMs: 7 }),
-      telemetry("start", "tool.started", "tool-2", { toolName: "browser" }),
-      telemetry("other", "approval.requested", "approval-1"),
-    ] })]);
-    expect(result.trajectory.turns.cancelled).toBe(1);
-    expect(result.trajectory.tools).toMatchObject({ count: { value: 2 }, unknown: 1, inProgress: 1, failed: 0, durationMs: { count: 1, missing: 1, mean: 7 } });
+  it("keeps cancelled, unknown and in-progress native operations distinct", () => {
+    const cancelled = variant(16, 16, (event) => { (event.payload as Record<string, unknown>).outcome = "cancelled"; });
+    const snapshot = nativeResourceInput([3, 8], { nativeRecords: [...nativeFixture(3, 8), cancelled] });
+    const active = aggregateResources([snapshot]);
+    const terminal = aggregateResources([{ ...snapshot, canEmitNativeRecords: false }]);
+    expect(active.trajectory.turns.cancelled).toBe(1);
+    expect(active.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "partial" }, inProgress: 1, unknown: 0 });
+    expect(terminal.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "partial" }, inProgress: 0, unknown: 1 });
   });
 
-  it("does not select an arbitrary winner for contradictory operation kind, outcome or tool name", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      telemetry("kind-1", "turn.started", "conflicting-kind"), telemetry("kind-2", "tool.started", "conflicting-kind"),
-      telemetry("outcome-1", "tool.finished", "conflicting-outcome", { toolName: "browser", outcome: "completed", durationMs: 10 }),
-      telemetry("outcome-2", "tool.finished", "conflicting-outcome", { toolName: "browser", outcome: "failed", durationMs: 20 }),
-      telemetry("name-1", "tool.started", "conflicting-name", { toolName: "browser" }),
-      telemetry("name-2", "tool.finished", "conflicting-name", { toolName: "shell", outcome: "completed" }),
+  it("does not select an arbitrary winner for contradictory Tool outcomes and names", () => {
+    const differentOutcome = variant(11, 17, (event) => { (event.payload as Record<string, unknown>).outcome = "completed"; });
+    const differentName = variant(8, 18, (event) => { (event.payload as Record<string, unknown>).toolName = "shell"; });
+    const lateReplay = variant(11, 19, () => {});
+    const result = aggregateResources([nativeResourceInput([], { nativeRecords: [
+      ...nativeFixture(...Array.from({ length: 16 }, (_, index) => index + 1)), differentOutcome, differentName, lateReplay,
     ] })]);
-    expect(result.trajectory.tools).toMatchObject({ count: { value: 2, coverage: "partial" }, unknown: 1, completed: 1 });
-    expect(result.trajectory.turns.count.value).toBeNull();
-    expect(result.trajectory.byTool.find((item) => item.toolName === "browser")!.durationMs.count).toBe(0);
+    expect(result.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "partial" }, unknown: 1, completed: 0 });
     expect(result.trajectory.byTool.some((item) => item.toolName === null)).toBe(true);
-    expect(result.diagnostics.filter((item) => item.kind === "conflicting-identity")).toHaveLength(3);
+    expect(result.diagnostics.filter((item) => item.kind === "conflicting-identity").length).toBeGreaterThanOrEqual(2);
   });
 
-  it("diagnoses unsupported and unidentifiable operation events", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      telemetry("unknown", "generation.future-event", "request-1"),
-      { ...telemetry("missing-operation", "tool.started", "request-1"), operationId: null },
-    ] })]);
+  it("diagnoses unsupported and unidentifiable native record facts", () => {
+    const future = variant(3, 3, (event) => { event.type = "future-event"; });
+    const missingCallId = variant(8, 8, (event) => { delete event.toolCallId; });
+    const result = aggregateResources([nativeResourceInput([], { nativeRecords: [future, missingCallId] })]);
     expect(result.modelRequests.count.value).toBeNull();
     expect(result.diagnostics.map((item) => item.kind)).toEqual(["unsupported-record", "missing-identity"]);
   });

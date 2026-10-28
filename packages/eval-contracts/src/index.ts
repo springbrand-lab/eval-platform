@@ -13,8 +13,11 @@ export type {
   AgentResourceScope,
   SubmittedAgentResourceScope,
   AgentResourceSnapshot,
+  AgentResourceSnapshotDownload,
+  AgentResourceSnapshotPage,
   AgentResourceSnapshotSummary,
   AgentResourceState,
+  CollectedResourceSnapshot,
   AgentRole,
   AgentStatus,
   ArtifactRef,
@@ -99,6 +102,18 @@ export type {
   EvidenceTrajectoryPin,
 } from "./evidence.js";
 export {
+  PI_TRAJECTORY_RECORD_FORMAT, SP_PI_TRAJECTORY_FORMAT, SP_PI_TRAJECTORY_RECORD_FORMAT,
+  SP_PI_TRAJECTORY_RECORD_IDENTITY_HEADER, SP_PI_TRAJECTORY_RECORD_INGEST_SEQ_HEADER,
+  SP_PI_TRAJECTORY_RECORD_THROUGH_SEQ_HEADER, isSafePiTrajectoryRecord,
+  isSpPiTrajectoryReference, nativeRecordMayBelongToScope, nativeTrajectoryEntrySchema,
+  spPiTrajectoryIdentityParts, spPiTrajectoryRecordIdentity, spPiTrajectoryReferenceSchema,
+  spPiTrajectoryPageRowSchema, spPiTrajectoryPageSchema,
+} from "./native-trajectory.js";
+export type {
+  NativeTrajectoryEntry, PiTrajectoryRecord, SpPiTrajectoryPage,
+  SpPiTrajectoryPageRow, SpPiTrajectoryRecordReference,
+} from "./native-trajectory.js";
+export {
   DEFAULT_EVIDENCE_LIMITS,
   evidenceTrajectoryPinOf,
   EVALUATION_FINAL_REPLY_PATH,
@@ -118,7 +133,7 @@ export {
 export { IDENTIFIER_RULE, identifierSchema, isIdentifier } from "./identifier.js";
 export { canonicalJsonBytes, createId, equalJson, sha256Hex } from "./canonical.js";
 export { jsonObjectArrayInPlaceSchema, jsonObjectInPlaceSchema, jsonObjectSchema, jsonValueSchema } from "./json.js";
-export { summarizeResourceSnapshot } from "./resources.js";
+export { isResourceSnapshotDownload, summarizeResourceSnapshot } from "./resources.js";
 export { evalInputLimitsSchema } from "./input-limits.js";
 export type { EvalInputLimits } from "./input-limits.js";
 export { dashboardInputSchema, dashboardCreateSchema, dashboardUpdateSchema, dashboardSchema, dashboardDataExclusionsSchema } from "./dashboards.js";

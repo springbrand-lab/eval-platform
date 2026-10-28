@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_EVIDENCE_LIMITS, type EvidenceExportProgress } from "@eval-platform/eval-contracts";
+import { DEFAULT_EVIDENCE_LIMITS, SP_PI_TRAJECTORY_FORMAT, type EvidenceExportProgress } from "@eval-platform/eval-contracts";
 import { createEvidenceStore, type ExportedEvidence } from "@eval-platform/eval-runtime/harness";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { nativeFixture } from "../sp/native-test-fixture.js";
 import { openLocalEvidenceBlobs } from "./local-blobs.js";
 import { createR2EvidenceBlobs, signV4 } from "./r2-blobs.js";
 
@@ -16,6 +17,11 @@ afterEach(async () => {
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const stream = (text: string) => new Response(text).body!;
 const text = async (body: ReadableStream<Uint8Array> | undefined) => body === undefined ? undefined : new Response(body).text();
+const nativePage = (afterSeq: number) => {
+  const line = `${JSON.stringify(nativeFixture(3, "c-1"))}\n`;
+  return { throughSeq: 3, nextAfterSeq: null,
+    records: afterSeq < 3 ? [{ seq: 3, byteLength: Buffer.byteLength(line), readJsonl: async () => stream(line) }] : [] };
+};
 
 describe("local evidence blobs", () => {
   it("stores each content once under its hash and keeps the first manifest", async () => {
@@ -52,10 +58,10 @@ describe("local evidence blobs", () => {
         omitted: [{ path: "/node_modules/a.js", reason: "excluded" }],
         readFile: async () => stream("hi"),
         async* readTrajectory(afterSeq) {
-          if (afterSeq < 1) yield { seq: 1, record: { ingestSeq: 1, event: { type: "other", content: {}, raw: null } } };
+          yield nativePage(afterSeq);
         },
         trajectoryComplete: true,
-        trajectoryFormat: "sp-trajectory/v1",
+        trajectoryFormat: SP_PI_TRAJECTORY_FORMAT,
       },
     });
     const opened = await store.open(ref);
@@ -65,6 +71,52 @@ describe("local evidence blobs", () => {
 });
 
 describe("R2 evidence blobs", () => {
+  it("spools and SigV4-streams a 30+ MiB part to its content key without a full-body Uint8Array", async () => {
+    const body = new TextEncoder().encode("汉🌎é".repeat(4_096));
+    const repetitions = 900;
+    const expected = createHash("sha256");
+    for (let index = 0; index < repetitions; index++) expected.update(body);
+    const digest = expected.digest("hex");
+    const byteLength = repetitions * body.byteLength;
+    expect(byteLength).toBeGreaterThan(30 * 1024 * 1024);
+    let read = 0;
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      expect(new URL(request.url).pathname).toBe(`/eval-evidence/evidence/blobs/${digest}`);
+      if (request.method === "HEAD") return new Response(null, { status: 404 });
+      expect(request.method).toBe("PUT");
+      expect(request.headers.get("content-length")).toBe(String(byteLength));
+      expect(request.headers.get("x-amz-content-sha256")).toBe(digest);
+      const received = createHash("sha256");
+      for await (const chunk of request.body!) {
+        read += chunk.byteLength;
+        expect(chunk.byteLength).toBeLessThan(1024 * 1024);
+        received.update(chunk);
+      }
+      expect(received.digest("hex")).toBe(digest);
+      return new Response(null, { status: 200 });
+    });
+    const blobs = createR2EvidenceBlobs({
+      endpoint: "https://account.r2.cloudflarestorage.com", bucket: "eval-evidence",
+      accessKeyId: "key-id", secretAccessKey: "secret",
+    }, fetch);
+    const parts = (function* () {
+      for (let index = 0; index < repetitions; index++) {
+        for (let offset = 0; offset < body.byteLength; offset += 257) yield body.subarray(offset, offset + 257);
+      }
+    })();
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const next = parts.next();
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      },
+    });
+    await expect(blobs.putBlob(source, 95_000_000)).resolves.toEqual({ sha256: digest, size: byteLength });
+    expect(read).toBe(byteLength);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  }, 45_000);
+
   it("signs requests with AWS Signature Version 4", () => {
     // AWS S3 documentation example: GET Object with a Range header.
     const headers = signV4({
@@ -155,10 +207,10 @@ describe("R2 evidence blobs", () => {
         return stream(path === "/a.txt" ? "a" : "b");
       },
       async* readTrajectory(afterSeq) {
-        if (afterSeq < 1) yield { seq: 1, record: { ingestSeq: 1, event: { type: "raw" } } };
+        yield nativePage(afterSeq);
       },
       trajectoryComplete: true,
-      trajectoryFormat: "sp-trajectory/v1",
+      trajectoryFormat: SP_PI_TRAJECTORY_FORMAT,
     };
     let progress: EvidenceExportProgress | undefined;
     const onProgress = async (next: EvidenceExportProgress) => { progress = next; };

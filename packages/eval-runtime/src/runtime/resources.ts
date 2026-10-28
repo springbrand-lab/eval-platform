@@ -1,13 +1,18 @@
 import { z } from "zod";
 import {
   identifierSchema,
+  isResourceSnapshotDownload,
+  nativeRecordMayBelongToScope,
+  nativeTrajectoryEntrySchema,
   jsonObjectArrayInPlaceSchema,
   summarizeResourceSnapshot,
   type AgentResourceFact,
   type AgentResourceReadinessReport,
   type AgentResourceScope,
   type AgentResourceSnapshot,
+  type AgentResourceSnapshotDownload,
   type AgentResourceState,
+  type CollectedResourceSnapshot,
 } from "@eval-platform/eval-contracts";
 
 import type { AgentHandle, Harness, HarnessRuntimeOptions } from "../harness/model.js";
@@ -38,19 +43,44 @@ const reportSchema = z.strictObject({
   finalized: z.boolean(),
   readiness: readinessSchema,
 });
+const downloadSummarySchema = reportSchema.safeExtend({
+  coverage: z.strictObject({
+    usageEvents: completeness,
+    nativeRecords: completeness,
+    billingSettlements: completeness,
+  }),
+  counts: z.strictObject({
+    usageEvents: z.number().int().nonnegative().safe(),
+    nativeRecords: z.number().int().nonnegative().safe(),
+    billingSettlements: z.number().int().nonnegative().safe(),
+  }),
+});
 const snapshotSchema = z.strictObject({
   scope: scopeSchema,
   observedAt: z.iso.datetime({ offset: true }),
   finalized: z.boolean(),
   coverage: z.strictObject({
     usageEvents: completeness,
-    telemetryEvents: completeness,
+    nativeRecords: completeness,
     billingSettlements: completeness,
   }),
   usageEvents: jsonObjectArrayInPlaceSchema,
-  telemetryEvents: jsonObjectArrayInPlaceSchema,
+  nativeRecords: z.array(nativeTrajectoryEntrySchema),
   billingSettlements: jsonObjectArrayInPlaceSchema,
   readiness: readinessSchema,
+}).superRefine((snapshot, context) => {
+  const verifiedSubmissions = new Set([snapshot.scope.submissionId]);
+  snapshot.nativeRecords.forEach(({ ingestSeq, record }, index) => {
+    if (index > 0 && ingestSeq <= snapshot.nativeRecords[index - 1]!.ingestSeq) {
+      context.addIssue({ code: "custom", path: ["nativeRecords", index, "ingestSeq"],
+        message: "Native Pi records must ascend by ingest sequence" });
+    }
+    if (!nativeRecordMayBelongToScope(record, snapshot.scope, verifiedSubmissions)) {
+      context.addIssue({ code: "custom", path: ["nativeRecords", index, "record"],
+        message: "Native Pi record is outside the resource Submission" });
+    }
+    if (record.submissionId !== null) verifiedSubmissions.add(record.submissionId);
+  });
 });
 
 /** Recorded on each Attempt still owing resources when a stopping or stopped Run would otherwise read them. */
@@ -95,8 +125,28 @@ function parseScoped<T extends { readonly scope: AgentResourceScope }>(
 
 /** Returns the validated value itself, never a copy. */
 export function validateResourceSnapshot(value: unknown, scope: AgentResourceScope): AgentResourceSnapshot {
+  // Fail a foreign outer operation before interpreting its potentially large
+  // native rows; the full schema still validates every accepted snapshot.
+  const outer = z.object({ scope: scopeSchema }).safeParse(value);
+  if (outer.success && !resourceScopeMatches(outer.data.scope, scope)) {
+    throw new AgentResourceValidationError("Resource snapshot does not match the requested operation scope");
+  }
   parseScoped(snapshotSchema, value, scope, "Resource snapshot");
   return value as AgentResourceSnapshot;
+}
+
+/** No large arrays are visited: the Harness already verified each page and sealed the
+ * download. The Store checks the replayed page counts before its atomic commit. */
+export function validateResourceDownload(value: AgentResourceSnapshotDownload, scope: AgentResourceScope): AgentResourceSnapshotDownload {
+  if (value.kind !== "pages" || typeof value.readPages !== "function" || typeof value.dispose !== "function"
+    || (value.creditsTotal !== null && (typeof value.creditsTotal !== "number" || !Number.isFinite(value.creditsTotal)))) {
+    throw new AgentResourceValidationError("Resource download is invalid");
+  }
+  const { finalized, coverage } = parseScoped(downloadSummarySchema, value.summary, scope, "Resource download summary");
+  if (!finalized && Object.values(coverage).some((stream) => stream !== "partial")) {
+    throw new AgentResourceValidationError("Nonfinalized resource pages must declare partial coverage for every stream");
+  }
+  return value;
 }
 
 export function validateResourceReadiness(value: unknown, scope: AgentResourceScope): AgentResourceReadinessReport {
@@ -152,11 +202,12 @@ function readResources<T>(source: ResourceSource, read: () => Promise<T>): Promi
   });
 }
 
-function resourceInput({ handle, scope, runtime, stop }: ResourceSource) {
+function resourceInput({ handle, scope, runtime, stop }: ResourceSource, allowPartial = false) {
   return {
     handle,
     idempotencyKey: scope.idempotencyKey,
     ...(scope.submissionId === undefined ? {} : { submissionId: scope.submissionId }),
+    ...(allowPartial ? { allowPartial: true as const } : {}),
     ...(runtime === undefined ? {} : { runtime }),
     ...(stop === undefined ? {} : { signal: stop.signal }),
   };
@@ -243,7 +294,7 @@ export interface ResourceDownload {
   /** Persists confirmed Agent terminal facts after budget admission, before resource reads. */
   readonly prepare?: () => Promise<void>;
   /** Saves the Attempt's resources on its stage record, with the raw snapshot they summarize in the same write. */
-  readonly save: (resources: AgentResourceState, snapshot?: AgentResourceSnapshot) => Promise<void>;
+  readonly save: (resources: AgentResourceState, snapshot?: CollectedResourceSnapshot) => Promise<void>;
 }
 
 const INTERRUPTED: RetryErrorDetails = { message: "resource download was interrupted", failureKind: "network", retryable: true };
@@ -298,15 +349,29 @@ export async function collectResources(download: ResourceDownload): Promise<{ re
         state = { ...state, downloads: downloads + 1, ...(state.status === "failed" && failure ? { error: failure.message } : {}) };
         await download.save(state);
         checkResourceStop(source);
-        const snapshot = validateResourceSnapshot(await source.harness.collectAgentResources(resourceInput(source)), source.scope);
-        checkResourceStop(source);
-        const collected: AgentResourceState = { status: "collected", summary: summarizeResourceSnapshot(snapshot) };
-        await download.save(collected, snapshot);
-        source.log({
-          ...fields(), finalized: snapshot.finalized, coverage: snapshot.coverage,
-          ...collected.summary.counts, creditsTotal: creditsTotal(snapshot.billingSettlements),
-        });
-        return collected;
+        const received = await source.harness.collectAgentResources(resourceInput(
+          source, download.allowUnfinalized && owed !== undefined,
+        ));
+        try {
+          const snapshot = isResourceSnapshotDownload(received)
+            ? validateResourceDownload(received, source.scope)
+            : validateResourceSnapshot(received, source.scope);
+          checkResourceStop(source);
+          const summary = isResourceSnapshotDownload(snapshot) ? snapshot.summary : summarizeResourceSnapshot(snapshot);
+          if (!summary.finalized && !(download.allowUnfinalized && owed !== undefined)) {
+            throw new AgentResourceValidationError("Resource download became nonfinalized before its wait expired");
+          }
+          const collected: AgentResourceState = { status: "collected", summary };
+          await download.save(collected, snapshot);
+          source.log({
+            ...fields(), finalized: summary.finalized, coverage: summary.coverage,
+            ...summary.counts, creditsTotal: isResourceSnapshotDownload(snapshot)
+              ? snapshot.creditsTotal : creditsTotal(snapshot.billingSettlements),
+          });
+          return collected;
+        } finally {
+          if (isResourceSnapshotDownload(received)) await received.dispose();
+        }
       }, source.stop?.signal);
       return collected.summary.finalized ? {} : { pending: owed ?? "resource snapshot is not finalized" };
     } catch (error) {

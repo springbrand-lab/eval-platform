@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { summarizeResourceSnapshot, type AgentResourceSnapshot, type AgentResourceState } from "@eval-platform/eval-contracts";
+import { summarizeResourceSnapshot, type AgentResourceSnapshot, type AgentResourceSnapshotDownload, type AgentResourceState,
+  type CollectedResourceSnapshot } from "@eval-platform/eval-contracts";
+import { publicNativeRecords } from "../harness/evidence-test-support.js";
 import type { RetryController } from "./retry.js";
 import {
   AgentResourceValidationError,
   collectResources,
   createExclusiveRunner,
   validateResourceReadiness,
+  validateResourceDownload,
   validateResourceSnapshot,
   type ResourceSource,
 } from "./resources.js";
@@ -21,9 +24,9 @@ function snapshot(): AgentResourceSnapshot {
     scope: SCOPE,
     observedAt: "2026-10-08T00:00:00.000Z",
     finalized: true,
-    coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
+    coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
     usageEvents: [],
-    telemetryEvents: [],
+    nativeRecords: [],
     billingSettlements: [],
     readiness: READY,
   };
@@ -38,7 +41,7 @@ describe("raw resource snapshot validation", () => {
     })).toEqual(input);
   });
 
-  it("preserves source shapes, missing/null values, order, repeats and signed adjustments without processing", () => {
+  it("preserves source shapes, usage repeats and ordered native Pi rows without processing", () => {
     const usage = {
       eventId: "usage-1",
       kind: "subagent",
@@ -47,12 +50,10 @@ describe("raw resource snapshot validation", () => {
       parentRunId: "parent-1",
       unknownSourceField: [true, null, { custom: "native" }],
     };
-    const started = { eventId: "start-1", operationId: "tool-1", type: "tool.started", occurredAt: 20 };
-    const finished = { eventId: "finish-1", operationId: "tool-1", type: "tool.finished", occurredAt: 30 };
     const input = {
       ...snapshot(),
       usageEvents: [usage, usage],
-      telemetryEvents: [finished, started, finished],
+      nativeRecords: publicNativeRecords([8, 10, 11], SCOPE),
       billingSettlements: [{ accountId: "user-1", eventId: "usage-1", adjustment: -3.5, ratedUnits: null }],
     };
 
@@ -69,10 +70,19 @@ describe("raw resource snapshot validation", () => {
     const input = {
       ...snapshot(),
       finalized: false,
-      coverage: { usageEvents: "partial", telemetryEvents: "complete", billingSettlements: "unavailable" },
-      telemetryEvents: [{ type: "generation.started", status: "provider-native-running" }],
+      coverage: { usageEvents: "partial", nativeRecords: "complete", billingSettlements: "unavailable" },
+      nativeRecords: publicNativeRecords([12], SCOPE),
     };
     expect(validateResourceSnapshot(input, SCOPE)).toEqual(input);
+  });
+
+  it("rejects duplicated or out-of-order native cursors and foreign Submission records", () => {
+    const [first, last] = publicNativeRecords([8, 11], SCOPE);
+    const unrelated = publicNativeRecords([10], { ...SCOPE, submissionId: "unrelated" })[0]!;
+    for (const records of [[last!, first!], [first!, first!], [unrelated]]) {
+      expect(() => validateResourceSnapshot({ ...snapshot(), nativeRecords: records }, SCOPE))
+        .toThrow(AgentResourceValidationError);
+    }
   });
 
   it("keeps SP's readiness diagnostics and requires them on a freshly read snapshot", () => {
@@ -151,7 +161,9 @@ describe("raw resource snapshot validation", () => {
     { coverage: [] },
     { coverage: { usageEvents: "complete" } },
     { usageEvents: {} },
-    { telemetryEvents: null },
+    { nativeRecords: null },
+    { nativeRecords: [{ ingestSeq: 1, record: { type: "turn.finished" } }] },
+    { telemetryEvents: [{ eventId: "old" }] },
     { billingSettlements: "raw" },
   ])("rejects an invalid collection envelope %j", (patch) => {
     expect(() => validateResourceSnapshot({ ...snapshot(), ...patch }, SCOPE))
@@ -187,6 +199,12 @@ describe("resource readiness validation", () => {
 describe("crash-safe resource download", () => {
   const STORED = { status: "pending", scope: SCOPE } as const;
 
+  function sealed(patch: Partial<AgentResourceSnapshotDownload["summary"]> = {}): AgentResourceSnapshotDownload {
+    return { kind: "pages", summary: { ...summarizeResourceSnapshot(snapshot()), ...patch },
+      creditsTotal: null, readPages: async function* () { /* the Store consumes sealed pages */ },
+      dispose: vi.fn(async () => undefined) };
+  }
+
   function setup(collect: () => Promise<unknown>, current: AgentResourceState = STORED, budget = 2, exclusively = createExclusiveRunner()) {
     const events: string[] = [];
     const saved: AgentResourceState[] = [];
@@ -213,7 +231,7 @@ describe("crash-safe resource download", () => {
       exclusively,
       readinessDelays: [0],
       allowUnfinalized: false,
-      save: vi.fn(async (resources: AgentResourceState, stored?: AgentResourceSnapshot) => {
+      save: vi.fn(async (resources: AgentResourceState, stored?: CollectedResourceSnapshot) => {
         saved.push(resources);
         events.push(`save:${resources.status}${stored ? "+snapshot" : ""}`);
       }),
@@ -228,6 +246,83 @@ describe("crash-safe resource download", () => {
     expect(events).toEqual(["log:resource_wait", "save:pending", "download", "save:collected+snapshot", "log:resources_collected"]);
     expect(saved[0]).toEqual({ ...STORED, downloads: 1 });
     expect(download.save.mock.calls[1]).toEqual([{ status: "collected", summary: summarizeResourceSnapshot(snapshot()) }, snapshot()]);
+  });
+
+  it("validates a sealed paged summary without materializing legacy arrays, then always disposes the download after the atomic save", async () => {
+    const paged = sealed({ coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "partial" },
+      counts: { usageEvents: 300, nativeRecords: 450, billingSettlements: 301 } });
+    const { download, events } = setup(async () => paged);
+    expect(validateResourceDownload(paged, SCOPE)).toBe(paged);
+    await expect(collectResources(download)).resolves.toEqual({});
+    expect(download.save.mock.calls[1]).toEqual([{ status: "collected", summary: paged.summary }, paged]);
+    expect(paged.dispose).toHaveBeenCalledOnce();
+    expect(events).toContain("log:resources_collected");
+  });
+
+  it("keeps pre-expiry reads pending, then explicitly asks the public Harness for nine known partial facts after expiry", async () => {
+    const pending = { ...READY, pendingTelemetryEvents: 1 };
+    const paged = sealed({ finalized: false, readiness: pending,
+      coverage: { usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial" },
+      counts: { usageEvents: 9, nativeRecords: 9, billingSettlements: 9 } });
+    const { download, harness } = setup(async () => paged);
+    vi.mocked(harness.inspectAgentResources).mockResolvedValue({
+      scope: SCOPE, observedAt: paged.summary.observedAt, finalized: false, readiness: pending,
+    });
+    expect((await collectResources(download)).pending).toContain("not finalized");
+    expect(harness.collectAgentResources).not.toHaveBeenCalled();
+    expect(download.save).not.toHaveBeenCalled();
+
+    expect(await collectResources({ ...download, allowUnfinalized: true })).toMatchObject({
+      pending: expect.stringContaining("not finalized"),
+    });
+    expect(harness.collectAgentResources).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ idempotencyKey: SCOPE.idempotencyKey, allowPartial: true }),
+    );
+    expect(download.save.mock.calls[1]).toEqual([
+      { status: "collected", summary: paged.summary }, paged,
+    ]);
+    expect(paged.dispose).toHaveBeenCalledOnce();
+    expect(() => validateResourceDownload(sealed({ ...paged.summary,
+      coverage: { ...paged.summary.coverage, billingSettlements: "complete" } }), SCOPE))
+      .toThrow(AgentResourceValidationError);
+  });
+
+  it("never stores a nonfinalized page download if readiness looked finalized before the deadline", async () => {
+    const paged = sealed({ finalized: false, coverage: {
+      usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial",
+    } });
+    const { download, harness } = setup(async () => paged, STORED, 0);
+    await collectResources(download);
+    expect(harness.collectAgentResources).toHaveBeenCalledOnce();
+    expect(harness.collectAgentResources).toHaveBeenCalledWith(expect.not.objectContaining({ allowPartial: true }));
+    expect(download.save.mock.calls.some(([resources, received]) =>
+      resources.status === "collected" || received !== undefined)).toBe(false);
+    expect(paged.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("does not spend the retry budget re-downloading a permanently unpageable partial source", async () => {
+    const unavailable = Object.assign(new Error("Eval SP has no readable partial resource pages"), { retryable: false });
+    const { download, harness, saved, decide } = setup(async () => { throw unavailable; }, STORED, 10);
+    vi.mocked(harness.inspectAgentResources).mockResolvedValue({
+      scope: SCOPE, observedAt: snapshot().observedAt, finalized: false,
+      readiness: { ...READY, pendingTelemetryEvents: 1 },
+    });
+    expect(await collectResources({ ...download, allowUnfinalized: true })).toEqual({});
+    expect(harness.collectAgentResources).toHaveBeenCalledOnce();
+    expect(decide).not.toHaveBeenCalled();
+    expect(saved).toMatchObject([
+      { status: "pending", downloads: 1 },
+      { status: "failed", downloads: 1, exhausted: true, error: unavailable.message },
+    ]);
+    expect(download.save.mock.calls.some(([_state, received]) => received !== undefined)).toBe(false);
+  });
+
+  it("disposes a rejected foreign paged summary and never persists it as collected", async () => {
+    const paged = sealed({ scope: { ...SCOPE, submissionId: "another-submission" } });
+    const { download } = setup(async () => paged, STORED, 0);
+    await expect(collectResources(download)).resolves.toEqual({});
+    expect(paged.dispose).toHaveBeenCalledOnce();
+    expect(download.save.mock.calls.some(([state]) => state.status === "collected")).toBe(false);
   });
 
   it("counts a download a crashed process started against the same retry budget", async () => {

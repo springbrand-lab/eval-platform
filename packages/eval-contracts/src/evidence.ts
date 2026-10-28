@@ -1,11 +1,13 @@
 import type { AgentFramework, RecoveryPasses } from "./model.js";
+import { SP_PI_TRAJECTORY_FORMAT } from "./native-trajectory.js";
 
 /**
  * An evidence bundle freezes what a Subject produced: its artifacts and its complete trajectory,
  * exported once by the Subject's Harness and imported into any Evaluator's own Space. Evaluation
  * depends only on the bundle, never on where or how the Subject ran.
  */
-export const EVIDENCE_SCHEMA_VERSION = 1;
+/** Only new Pi-native bundles use this version. Version 1 blobs/refs remain immutable. */
+export const EVIDENCE_SCHEMA_VERSION = 2;
 
 /** Fixed layout of imported evidence inside an Evaluator's Space. */
 export const EVIDENCE_ROOT = "/evidence";
@@ -55,7 +57,7 @@ export interface EvidenceSubjectInput extends EvidenceArtifact {
 export interface EvidenceTrajectoryPart {
   readonly sha256: string;
   readonly size: number;
-  readonly events: number;
+  readonly records: number;
 }
 
 export const EVIDENCE_OMISSION_REASONS = ["excluded", "too-large", "limit"] as const;
@@ -74,10 +76,10 @@ export interface EvidenceManifest {
   readonly artifacts: readonly EvidenceArtifact[];
   readonly subjectInputs: readonly EvidenceSubjectInput[];
   readonly trajectory: {
-    /** The source Harness declares the raw event format; Runtime does not interpret it. */
-    readonly format: string;
+    /** Raw native records; event-only `sp-trajectory/v1` is not a valid v2 manifest. */
+    readonly format: typeof SP_PI_TRAJECTORY_FORMAT;
     readonly parts: readonly EvidenceTrajectoryPart[];
-    readonly events: number;
+    readonly records: number;
     /** False when the framework could not export its full trajectory; `incompleteReason` says why. */
     readonly complete: boolean;
     readonly incompleteReason?: string;
@@ -99,7 +101,7 @@ export interface EvidenceExportSubjectInput extends EvidenceExportArtifact {
 
 /**
  * The fixed end of a source trajectory read: the source pins it on the first page, and every
- * later page of the same export returns only events with `ingestSeq <= throughSeq`.
+ * later native page of the same export returns only records with `ingestSeq <= throughSeq`.
  */
 export interface EvidenceTrajectoryCursor {
   readonly throughSeq: number;
@@ -107,8 +109,8 @@ export interface EvidenceTrajectoryCursor {
 
 /**
  * What a trajectory export is pinned to. Saved with the progress and handed back to the Harness on
- * a resumed export, so it continues the same read instead of pinning a new one. Both fields are
- * absent in progress saved before pinning existed: that export continues without a cursor.
+ * a resumed export, so it continues the same read instead of pinning a new one.
+ * An unfinished old event-only progress is rejected rather than reinterpreted as Pi.
  */
 export interface EvidenceTrajectoryPin {
   readonly format?: string;
@@ -125,11 +127,16 @@ const EVIDENCE_TRAJECTORY_PIN_FIELDS = {
  * Exactly the pin fields of `source` (for example a saved `EvidenceExportProgress.trajectory`),
  * omitting absent ones. Use it wherever a pin is copied, so a new pin field is never dropped.
  */
-export function evidenceTrajectoryPinOf(source: EvidenceTrajectoryPin): EvidenceTrajectoryPin {
+export function evidenceTrajectoryPinOf(source: EvidenceTrajectoryPin & { readonly throughSeq?: number }): EvidenceTrajectoryPin {
   const pin: { -readonly [Field in keyof EvidenceTrajectoryPin]: EvidenceTrajectoryPin[Field] } = {};
   for (const field of Object.keys(EVIDENCE_TRAJECTORY_PIN_FIELDS) as (keyof EvidenceTrajectoryPin)[]) {
     const value = source[field];
     if (value !== undefined) Object.assign(pin, { [field]: value });
+  }
+  // Progress persisted before the generic pin also carried a native throughSeq;
+  // preserve its exact cutoff without rewriting the saved JSON or repinning.
+  if (pin.cursor === undefined && source.throughSeq !== undefined) {
+    pin.cursor = { throughSeq: source.throughSeq };
   }
   return pin;
 }
@@ -144,7 +151,10 @@ export interface EvidenceExportProgress {
   readonly subjectInputs: readonly EvidenceExportSubjectInput[];
   readonly omitted: readonly EvidenceOmission[];
   readonly trajectory: EvidenceTrajectoryPin & {
-    /** Source cursor after the last event of the last stored part; 0 before any part. */
+    readonly format: typeof SP_PI_TRAJECTORY_FORMAT;
+    /** Frozen SP high-water mark, saved on the first validated page before any part is written. */
+    readonly throughSeq?: number;
+    /** Source cursor after the last native record of the last stored part; 0 before any part. */
     readonly afterSeq: number;
     readonly parts: readonly EvidenceTrajectoryPart[];
     readonly done?: true;

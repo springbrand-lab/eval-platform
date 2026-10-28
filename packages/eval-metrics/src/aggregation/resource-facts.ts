@@ -1,7 +1,7 @@
-import type { AgentResourceScope, AgentResourceSnapshot, JsonValue } from "@eval-platform/eval-contracts";
-import { equalJson } from "@eval-platform/eval-contracts";
+import type { AgentResourceScope, AgentResourceSnapshot, JsonValue, NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
+import { equalJson, isSafePiTrajectoryRecord, nativeRecordMayBelongToScope } from "@eval-platform/eval-contracts";
 import { record, text, type JsonRecord } from "../json.js";
-import { TELEMETRY_PROJECTION_VERSION } from "./compact-resources.js";
+import { NATIVE_PROJECTION_VERSION } from "./compact-resources.js";
 import type { MetricNumber, ResourceDiagnostic } from "./model.js";
 import { coverage } from "./statistics.js";
 
@@ -10,9 +10,10 @@ export type Stream = ResourceDiagnostic["stream"];
 export interface FactEntry {
   readonly fact: JsonRecord;
   readonly metricProjection?: JsonRecord;
+  readonly ingestSeq?: number;
   readonly ownerUserId: string;
-  /** True when the Attempt that supplied this fact can still emit telemetry. */
-  readonly canEmitTelemetry: boolean;
+  /** True when the Attempt that supplied this fact can still emit native records. */
+  readonly canEmitNativeRecords: boolean;
   readonly scope: AgentResourceScope;
 }
 
@@ -25,7 +26,7 @@ export interface FactStream {
 
 export interface OwnedSnapshot {
   readonly ownerUserId: string;
-  readonly canEmitTelemetry: boolean;
+  readonly canEmitNativeRecords: boolean;
   readonly snapshot: AgentResourceSnapshot;
 }
 
@@ -40,7 +41,9 @@ export class ResourceDiagnostics {
 
   report(kind: ResourceDiagnostic["kind"], stream: Stream, entry: FactEntry, message: string): void {
     const eventId = text(entry.fact.eventId);
-    const diagnostic = { kind, stream, scope: { ...entry.scope }, message, ...(eventId === undefined ? {} : { eventId }) };
+    const diagnostic = { kind, stream, scope: { ...entry.scope }, message,
+      ...(eventId === undefined ? {} : { eventId }),
+      ...(entry.ingestSeq === undefined ? {} : { ingestSeq: entry.ingestSeq }) };
     const key = JSON.stringify(diagnostic);
     if (this.#keys.has(key)) return;
     this.#keys.add(key);
@@ -85,13 +88,13 @@ export class ResourceDiagnostics {
   }
 }
 
-function sourceIdentity(stream: Stream, ownerUserId: string, fact: JsonRecord): string | undefined {
+function sourceIdentity(stream: Stream, ownerUserId: string, fact: JsonRecord, scope: AgentResourceScope, seq?: number): string | undefined {
+  if (stream === "nativeRecords") {
+    return Number.isSafeInteger(seq) && seq! > 0 && text(scope.chatId)
+      ? identity(ownerUserId, scope.chatId, String(seq)) : undefined;
+  }
   const eventId = text(fact.eventId);
   if (stream === "usageEvents") return eventId ? identity(ownerUserId, eventId) : undefined;
-  if (stream === "telemetryEvents") {
-    const sessionId = text(record(fact.resource)?.sessionId);
-    return eventId && sessionId ? identity(sessionId, eventId) : undefined;
-  }
   const executionId = text(fact.executionId);
   if (executionId) return identity("action", executionId);
   const accountId = text(fact.accountId);
@@ -108,18 +111,45 @@ export function readStream(
   let complete = collectionsComplete;
   let duplicates = 0;
   const byIdentity = new Map<string, FactEntry | null>();
-  for (const { ownerUserId, canEmitTelemetry, snapshot } of snapshots) {
-    if (!snapshot.finalized || snapshot.coverage[stream] !== "complete") complete = false;
-    for (const rawFact of snapshot[stream]) {
-      const fact = stream === "telemetryEvents" ? record(rawFact.event) ?? rawFact : rawFact;
-      const projection = stream === "telemetryEvents" ? record(rawFact.metricProjection) : undefined;
-      const metricProjection = (projection?.version === 1 || projection?.version === 2 || projection?.version === TELEMETRY_PROJECTION_VERSION)
-        && typeof projection.fingerprint === "string" ? projection : undefined;
+  for (const { ownerUserId, canEmitNativeRecords, snapshot } of snapshots) {
+    if (!snapshot.finalized || snapshot.coverage?.[stream] !== "complete") complete = false;
+    const verifiedSubmissions = new Set([snapshot.scope.submissionId]);
+    const facts: readonly (JsonRecord | NativeTrajectoryEntry)[] | undefined = snapshot[stream];
+    if (!Array.isArray(facts)) {
+      complete = false;
+      diagnostics.report("unsupported-record", stream, {
+        fact: {}, ownerUserId, canEmitNativeRecords, scope: snapshot.scope,
+      }, `Snapshot has no ${stream} stream; an event-only snapshot is not native evidence`);
+      continue;
+    }
+    for (const raw of facts) {
+      const native = stream === "nativeRecords" ? raw as NativeTrajectoryEntry : undefined;
+      const fact = native ? record(native.record as unknown as JsonValue) ?? {} : raw as JsonRecord;
+      const projection = native ? record(native.metricProjection) : undefined;
+      const metricProjection = projection?.version === NATIVE_PROJECTION_VERSION
+        && typeof projection.fingerprint === "string" && typeof projection.supported === "boolean"
+        && Array.isArray(projection.facts) && projection.facts.every((item) => record(item) !== undefined)
+        ? projection : undefined;
       const entry: FactEntry = {
-        fact, ownerUserId, canEmitTelemetry, scope: snapshot.scope,
+        fact, ownerUserId, canEmitNativeRecords, scope: snapshot.scope,
+        ...(native === undefined ? {} : { ingestSeq: native.ingestSeq }),
         ...(metricProjection ? { metricProjection } : {}),
       };
-      const key = sourceIdentity(stream, ownerUserId, fact);
+      if (native && (!isSafePiTrajectoryRecord(fact)
+        || !nativeRecordMayBelongToScope(fact, snapshot.scope, verifiedSubmissions))) {
+        complete = false;
+        diagnostics.report("conflicting-identity", stream, entry, "Native record is outside its resource snapshot operation");
+        continue;
+      }
+      if (native?.record.submissionId !== undefined && native.record.submissionId !== null) {
+        verifiedSubmissions.add(native.record.submissionId);
+      }
+      if (native?.metricProjection !== undefined && metricProjection === undefined) {
+        complete = false;
+        diagnostics.report("unsupported-record", stream, entry, "Unsupported compact native metric projection");
+        continue;
+      }
+      const key = sourceIdentity(stream, ownerUserId, fact, snapshot.scope, native?.ingestSeq);
       if (key === undefined) {
         complete = false;
         diagnostics.report("missing-identity", stream, entry, `Cannot identify ${stream} record`);
@@ -143,8 +173,9 @@ export function readStream(
         }
         continue;
       }
-      if (existing && !(existing.metricProjection && metricProjection
-        ? existing.metricProjection.fingerprint === metricProjection.fingerprint : equalJson(existing.fact, fact))) {
+      if (existing && (existing.metricProjection && metricProjection
+        ? existing.metricProjection.fingerprint !== metricProjection.fingerprint
+        : !equalJson(existing.fact, fact))) {
         complete = false;
         diagnostics.report("conflicting-identity", stream, entry, "The same source identity has contradictory facts");
         byIdentity.set(key, null);

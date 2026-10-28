@@ -11,8 +11,8 @@ export interface ResourceInput {
   readonly collection: AgentResourceCollection | undefined;
   /** The Attempt reached SP, so a missing collection is a gap rather than nothing to collect. */
   readonly submitted?: boolean;
-  /** Whether this Attempt can still emit telemetry. Raw aggregation callers default to true. */
-  readonly canEmitTelemetry?: boolean;
+  /** Whether this Attempt can still emit native records. Raw aggregation callers default to true. */
+  readonly canEmitNativeRecords?: boolean;
 }
 
 function readCollections(inputs: readonly ResourceInput[]): {
@@ -28,7 +28,7 @@ function readCollections(inputs: readonly ResourceInput[]): {
     } else if (collection.status === "collected") {
       collections.collected += 1;
       if (collection.snapshot.finalized) collections.finalized += 1;
-      snapshots.push({ ownerUserId, canEmitTelemetry: input.canEmitTelemetry ?? true, snapshot: collection.snapshot });
+      snapshots.push({ ownerUserId, canEmitNativeRecords: input.canEmitNativeRecords ?? true, snapshot: collection.snapshot });
     } else {
       collections[collection.status] += 1;
     }
@@ -48,19 +48,19 @@ export function aggregateResources(inputs: readonly ResourceInput[], groups: Res
   const collectionsComplete = snapshots.length > 0 && collections.pending === 0 && collections.failed === 0
     && collections.uncollected === 0;
   const usageEvents = readStream(snapshots, "usageEvents", collectionsComplete, diagnostics);
-  const telemetryEvents = readStream(snapshots, "telemetryEvents", collectionsComplete, diagnostics);
+  const nativeRecords = readStream(snapshots, "nativeRecords", collectionsComplete, diagnostics);
   const billingSettlements = readStream(snapshots, "billingSettlements", collectionsComplete, diagnostics);
   const usage = aggregateUsage(usageEvents, diagnostics, groups.models);
   const billing = aggregateBilling(billingSettlements, diagnostics);
-  const { modelRequests, trajectory } = aggregateTelemetry(telemetryEvents, diagnostics, groups.tools);
+  const { modelRequests, trajectory } = aggregateTelemetry(nativeRecords, diagnostics, groups.tools);
   const issues = diagnostics.list();
-  const streamsComplete = usageEvents.complete && telemetryEvents.complete && billingSettlements.complete;
+  const streamsComplete = usageEvents.complete && nativeRecords.complete && billingSettlements.complete;
   return {
     coverage: coverage(streamsComplete && issues.length === 0, snapshots.length > 0),
     collections,
     duplicateRecords: {
       usageEvents: usageEvents.duplicates,
-      telemetryEvents: telemetryEvents.duplicates,
+      nativeRecords: nativeRecords.duplicates,
       billingSettlements: billingSettlements.duplicates,
     },
     overlappingUsageRecords: usage.overlappingUsageRecords,
@@ -68,7 +68,7 @@ export function aggregateResources(inputs: readonly ResourceInput[], groups: Res
     cacheHitRate: cacheHitRate(usage.tokens),
     costs: { providerUsd: usage.providerUsd, ...billing },
     modelRequests,
-    trajectory: { ...trajectory, diagnostics: issues.filter((issue) => issue.stream === "telemetryEvents") },
+    trajectory: { ...trajectory, diagnostics: issues.filter((issue) => issue.stream === "nativeRecords") },
     byModel: usage.byModel,
     diagnostics: issues,
   };

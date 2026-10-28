@@ -10,6 +10,7 @@ import type {
 import {
   EVIDENCE_OMISSION_REASONS,
   EVIDENCE_SCHEMA_VERSION,
+  SP_PI_TRAJECTORY_FORMAT,
   AGENT_FRAMEWORKS,
   canonicalJsonBytes,
   evidenceTrajectoryPinOf,
@@ -22,14 +23,16 @@ import type {
   EvidenceStore,
   ExportedArtifact,
   ExportedEvidence,
-  ExportedTrajectoryEvent,
+  ExportedTrajectoryPage,
+  ExportedTrajectoryRecord,
 } from "./model.js";
 
 /** Raw content-addressed storage; `createEvidenceStore` owns the bundle format on top of it. */
 export interface EvidenceBlobStore {
   /**
-   * Stores the bytes under their SHA-256, reading at most `maxBytes`; repeats are no-ops. An
-   * implementation may buffer one blob (the R2 store must, to sign its payload hash).
+   * Stores a complete stream under its SHA-256, reading at most `maxBytes`; repeats are no-ops.
+   * No implementation may retain a whole evidence file in memory. A failed stream never
+   * publishes a blob, and the source must be cancelled on failure.
    */
   putBlob(content: ReadableStream<Uint8Array>, maxBytes: number): Promise<{ readonly sha256: string; readonly size: number }>;
   readBlob(sha256: string): Promise<ReadableStream<Uint8Array> | undefined>;
@@ -82,10 +85,17 @@ export function applyEvidenceLimits(
  * listed sizes; every stored file must then have exactly its listed size.
  */
 function planEvidenceExport(evidence: ExportedEvidence, limits: EvidenceLimits, exportedAt: string): EvidenceExportProgress {
-  if (evidence.artifacts.length > limits.maxFiles) {
+  if (evidence.trajectoryFormat !== SP_PI_TRAJECTORY_FORMAT) {
+    throw new EvidenceIntegrityError(`Cannot export unsupported trajectory format ${evidence.trajectoryFormat}`);
+  }
+  if (evidence.trajectoryCursor !== undefined
+    && (!Number.isSafeInteger(evidence.trajectoryCursor.throughSeq) || evidence.trajectoryCursor.throughSeq < 0)) {
+    throw new EvidenceIntegrityError("Cannot export an invalid native trajectory pin");
+  }
+  if (evidence.artifacts.length + evidence.subjectInputs.length > limits.maxFiles) {
     throw new EvidenceIntegrityError("Exported evidence has more files than its limits allow");
   }
-  if (evidence.artifacts.reduce((total, artifact) => total + artifact.size, 0) > limits.maxTotalBytes) {
+  if ([...evidence.artifacts, ...evidence.subjectInputs].reduce((total, file) => total + file.size, 0) > limits.maxTotalBytes) {
     throw new EvidenceIntegrityError("Exported evidence is larger than its limits allow");
   }
   return {
@@ -95,11 +105,14 @@ function planEvidenceExport(evidence: ExportedEvidence, limits: EvidenceLimits, 
       bundleId, materialId, path, size, mediaType,
     })),
     omitted: evidence.omitted.map(({ path, reason }) => ({ path, reason })),
-    trajectory: { afterSeq: 0, parts: [], ...pinOfExportedEvidence(evidence) },
+    trajectory: { ...pinOfExportedEvidence(evidence), format: SP_PI_TRAJECTORY_FORMAT,
+      ...(evidence.trajectoryCursor === undefined ? {} : { throughSeq: evidence.trajectoryCursor.throughSeq }),
+      afterSeq: 0, parts: [] },
   };
 }
 
-/** The pin a new export saves: always the actual format, and the source cursor when it pins one. */
+/** A source-provided pin is persisted before files; otherwise the first native
+ * page freezes it, before any trajectory part is stored. */
 function pinOfExportedEvidence(evidence: ExportedEvidence): EvidenceTrajectoryPin {
   return {
     format: evidence.trajectoryFormat,
@@ -108,17 +121,18 @@ function pinOfExportedEvidence(evidence: ExportedEvidence): EvidenceTrajectoryPi
 }
 
 /**
- * A resumed export must read with exactly the saved pin, so parts read before and after a pass
- * boundary come from the same fixed source range. Progress saved before pinning has neither field
- * and continues only without a cursor.
+ * A resumed export must read with the saved native cutoff. A missing cutoff is
+ * permitted only before any trajectory part is stored, and the first page pins it.
  */
 function requireSavedTrajectoryPin(evidence: ExportedEvidence, progress: EvidenceExportProgress): void {
-  const { format, cursor } = progress.trajectory;
-  if (format !== undefined && format !== evidence.trajectoryFormat) {
+  const pin = evidenceTrajectoryPinOf(progress.trajectory);
+  if (pin.format !== evidence.trajectoryFormat) {
+    const format = pin.format;
     throw new EvidenceIntegrityError(`Evidence trajectory pin changed: format ${evidence.trajectoryFormat} differs from saved ${format}`);
   }
-  if (cursor?.throughSeq !== evidence.trajectoryCursor?.throughSeq) {
-    throw new EvidenceIntegrityError(`Evidence trajectory pin changed: cursor ${JSON.stringify(evidence.trajectoryCursor ?? null)} differs from saved ${JSON.stringify(cursor ?? null)}`);
+  if (evidence.trajectoryCursor !== undefined
+    && pin.cursor?.throughSeq !== evidence.trajectoryCursor.throughSeq) {
+    throw new EvidenceIntegrityError(`Evidence trajectory pin changed: cursor ${JSON.stringify(evidence.trajectoryCursor)} differs from saved ${JSON.stringify(pin.cursor)}`);
   }
 }
 
@@ -133,6 +147,9 @@ async function finalizeEvidenceManifest(evidence: ExportedEvidence, progress: Ev
     return file as T & { readonly sha256: string };
   };
   if (!progress.trajectory.done) throw new EvidenceIntegrityError("Evidence trajectory is not stored yet");
+  if (evidence.trajectoryFormat !== SP_PI_TRAJECTORY_FORMAT || progress.trajectory.format !== SP_PI_TRAJECTORY_FORMAT) {
+    throw new EvidenceIntegrityError("Cannot finalize non-native trajectory evidence");
+  }
   const parts = progress.trajectory.parts;
   const body = {
     schemaVersion: EVIDENCE_SCHEMA_VERSION,
@@ -146,10 +163,9 @@ async function finalizeEvidenceManifest(evidence: ExportedEvidence, progress: Ev
       return { bundleId, materialId, path, mediaType, sha256, size };
     }),
     trajectory: {
-      // Progress saved before pinning has no format; resuming it checked no format either.
-      format: progress.trajectory.format ?? evidence.trajectoryFormat,
+      format: progress.trajectory.format,
       parts: [...parts],
-      events: parts.reduce((count, part) => count + part.events, 0),
+      records: parts.reduce((count, part) => count + part.records, 0),
       complete: evidence.trajectoryComplete,
       ...(evidence.trajectoryIncompleteReason === undefined
         ? {} : { incompleteReason: evidence.trajectoryIncompleteReason }),
@@ -170,11 +186,31 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
   return {
     async resume({ evidence, limits, progress: saved, onProgress }) {
       const persist = serialProgress(onProgress);
+      if (!evidence.trajectoryComplete) {
+        throw new EvidenceIntegrityError(`Cannot export an incomplete native trajectory: ${evidence.trajectoryIncompleteReason ?? "source did not complete"}`);
+      }
+      // A v1 progress row may already contain event parts; never append Pi records to them or
+      // rewrite the old manifest/reference. Fail before writing any blobs or stage progress.
+      if (evidence.trajectoryFormat !== SP_PI_TRAJECTORY_FORMAT
+        || (saved !== undefined && (saved.trajectory.format !== SP_PI_TRAJECTORY_FORMAT
+          || !Number.isSafeInteger(saved.trajectory.afterSeq) || saved.trajectory.afterSeq < 0
+          || (saved.trajectory.throughSeq !== undefined
+            && (!Number.isSafeInteger(saved.trajectory.throughSeq) || saved.trajectory.throughSeq < saved.trajectory.afterSeq))
+          || (saved.trajectory.cursor !== undefined
+            && saved.trajectory.cursor.throughSeq !== saved.trajectory.throughSeq)
+          || saved.trajectory.parts.some((part) => !/^[0-9a-f]{64}$/u.test(part.sha256)
+            || !Number.isSafeInteger(part.size) || part.size <= 0 || part.size > limits.maxFileBytes
+            || !Number.isSafeInteger(part.records) || part.records <= 0)
+          || saved.artifacts.length + saved.subjectInputs.length + saved.trajectory.parts.length > limits.maxFiles
+          || [...saved.artifacts, ...saved.subjectInputs, ...saved.trajectory.parts]
+            .reduce((sum, file) => sum + file.size, 0) > limits.maxTotalBytes
+          || (saved.trajectory.parts.length > 0 && (saved.trajectory.throughSeq === undefined
+            || saved.trajectory.afterSeq === 0))))) {
+        throw new EvidenceIntegrityError("Cannot resume non-native or invalid trajectory evidence progress");
+      }
       if (saved !== undefined) requireSavedTrajectoryPin(evidence, saved);
-      // A new export's pin (format, cursor) becomes durable only here: no file, part or manifest is
-      // stored and neither `readFile` nor `readTrajectory` is called before this first persist succeeds. Until then the pin
-      // exists only in `evidence`, so a failure discards it with nothing stored and the next pass,
-      // having no progress, simply pins again.
+      // A source-provided pin is durable with the initial progress, before
+      // reading files. A lazy native source freezes on its first validated page.
       let progress = saved ?? planEvidenceExport(evidence, limits, now());
       if (saved === undefined) await persist(progress);
 
@@ -205,31 +241,7 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
       await runSettled(pending, UPLOAD_CONCURRENCY);
 
       if (!progress.trajectory.done) {
-        const parts = [...progress.trajectory.parts];
-        let afterSeq = progress.trajectory.afterSeq;
-        const save = async (part: TrajectoryPartBuffer, done: boolean) => {
-          if (part.chunks.length > 0) {
-            const storedPart = await blobs.putBlob(new ReadableStream({
-              start(controller) {
-                for (const bytes of part.chunks) controller.enqueue(bytes);
-                controller.close();
-              },
-            }), limits.maxFileBytes);
-            parts.push({ ...storedPart, events: part.chunks.length });
-            afterSeq = part.lastSeq;
-          }
-          progress = { ...progress, trajectory: {
-            ...evidenceTrajectoryPinOf(progress.trajectory),
-            afterSeq,
-            parts: [...parts],
-            ...(done ? { done: true as const } : {}),
-          } };
-          await persist(progress);
-        };
-        for await (const part of trajectoryParts(evidence.readTrajectory(afterSeq), afterSeq, limits.maxFileBytes)) {
-          await save(part, false);
-        }
-        await save({ chunks: [], size: 0, lastSeq: afterSeq }, true);
+        progress = await storeTrajectory(blobs, evidence, progress, limits, persist);
       }
 
       const manifest = await finalizeEvidenceManifest(evidence, progress);
@@ -246,7 +258,16 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
       if (await sha256Hex(manifestBytes) !== ref.manifestSha256) {
         throw new EvidenceIntegrityError(`Evidence bundle ${ref.evidenceId} manifest does not match its reference`);
       }
-      const parsed = manifestSchema.safeParse(JSON.parse(new TextDecoder().decode(manifestBytes)));
+      let body: unknown;
+      try {
+        body = JSON.parse(new TextDecoder().decode(manifestBytes));
+      } catch {
+        throw new EvidenceIntegrityError(`Evidence bundle ${ref.evidenceId} manifest is not JSON`);
+      }
+      if (typeof body === "object" && body !== null && "schemaVersion" in body && body.schemaVersion !== EVIDENCE_SCHEMA_VERSION) {
+        throw new EvidenceIntegrityError(`Evidence bundle ${ref.evidenceId} has unsupported manifest schema version ${body.schemaVersion}`);
+      }
+      const parsed = manifestSchema.safeParse(body);
       if (!parsed.success || parsed.data.evidenceId !== ref.evidenceId) {
         throw new EvidenceIntegrityError(`Evidence bundle ${ref.evidenceId} manifest is invalid`);
       }
@@ -291,10 +312,10 @@ const manifestSchema = z.object({
     sha256,
   })),
   trajectory: z.object({
-    format: z.string().min(1),
-    parts: z.array(z.object({ sha256, size: z.number().int().positive(), events: z.number().int().positive() })),
-    events: z.number().int().nonnegative(),
-    complete: z.boolean(),
+    format: z.literal(SP_PI_TRAJECTORY_FORMAT),
+    parts: z.array(z.object({ sha256, size: z.number().int().positive(), records: z.number().int().positive() })),
+    records: z.number().int().nonnegative(),
+    complete: z.literal(true),
     incompleteReason: z.string().optional(),
   }),
   omitted: z.array(z.object({ path: z.string(), reason: z.enum(EVIDENCE_OMISSION_REASONS) })),
@@ -308,45 +329,145 @@ function subjectInputKey(file: { readonly bundleId: string; readonly materialId:
   return JSON.stringify([file.bundleId, file.materialId, file.path]);
 }
 
-interface TrajectoryPartBuffer {
-  readonly chunks: readonly Uint8Array[];
-  readonly size: number;
-  /** Source cursor of the part's last event. */
-  readonly lastSeq: number;
+function streamBytes(bytes: AsyncIterable<Uint8Array>): ReadableStream<Uint8Array> {
+  const iterator = bytes[Symbol.asyncIterator]();
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const next = await iterator.next();
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    async cancel() { await iterator.return?.(); },
+  });
 }
 
 /**
- * Parts retain complete lines and order, with at most one file's bytes buffered. A part ends only
- * at an event boundary, so the same events after a part boundary always split the same way. An
- * event larger than one file can be neither split nor imported, so the export fails on it.
+ * Each part is streamed directly from the public source to the blob store. A single pending
+ * record (and one bounded page) determines the next boundary; no part's bytes or record objects
+ * are retained. The first page's cutoff is persisted BEFORE reading even the first record.
+ * A short source, mismatched line, changed cutoff or missing terminal page cannot mark `done`.
  */
-async function* trajectoryParts(
-  events: AsyncIterable<ExportedTrajectoryEvent>,
-  afterSeq: number,
-  maxBytes: number,
-): AsyncGenerator<TrajectoryPartBuffer> {
-  const encoder = new TextEncoder();
-  let chunks: Uint8Array[] = [];
-  let size = 0;
-  let lastSeq = afterSeq;
-  for await (const { seq, record } of events) {
-    if (!Number.isSafeInteger(seq) || seq <= lastSeq) {
-      throw new EvidenceIntegrityError("Exported trajectory events are out of order");
+async function storeTrajectory(
+  blobs: EvidenceBlobStore, evidence: ExportedEvidence, saved: EvidenceExportProgress, limits: EvidenceLimits,
+  persist: (progress: EvidenceExportProgress) => Promise<void>,
+): Promise<EvidenceExportProgress> {
+  let progress = saved;
+  const pages = evidence.readTrajectory(saved.trajectory.afterSeq, saved.trajectory.throughSeq)[Symbol.asyncIterator]();
+  let current: ExportedTrajectoryPage | undefined;
+  let position = 0;
+  let terminal = false;
+  let seenSeq = saved.trajectory.afterSeq;
+  let throughSeq = saved.trajectory.throughSeq;
+
+  const readPage = async () => {
+    const next = await pages.next();
+    if (next.done) throw new EvidenceIntegrityError("Exported trajectory ended without a terminal page");
+    const page = next.value;
+    if (!Number.isSafeInteger(page.throughSeq) || page.throughSeq < seenSeq
+      || (throughSeq !== undefined && page.throughSeq !== throughSeq)) {
+      throw new EvidenceIntegrityError("Exported trajectory watermark changed during pagination");
     }
-    const bytes = encoder.encode(`${JSON.stringify(record)}\n`);
-    if (bytes.byteLength > maxBytes) {
-      throw new EvidenceIntegrityError(`Trajectory event ${seq} is ${bytes.byteLength} bytes, above the ${maxBytes}-byte evidence file limit`);
+    let last = seenSeq;
+    for (const record of page.records) {
+      if (!Number.isSafeInteger(record.seq) || record.seq <= last || record.seq > page.throughSeq
+        || !Number.isSafeInteger(record.byteLength) || record.byteLength <= 0
+        || typeof record.readJsonl !== "function") {
+        throw new EvidenceIntegrityError("Exported trajectory records are out of order or invalid");
+      }
+      last = record.seq;
     }
-    if (chunks.length > 0 && size + bytes.byteLength > maxBytes) {
-      yield { chunks, size, lastSeq };
-      chunks = [];
-      size = 0;
+    if (page.nextAfterSeq !== null && (page.records.length === 0
+      || page.nextAfterSeq !== last || last >= page.throughSeq)) {
+      throw new EvidenceIntegrityError("Exported trajectory has an invalid continuation cursor");
     }
-    chunks.push(bytes);
-    size += bytes.byteLength;
-    lastSeq = seq;
+    if (throughSeq === undefined) {
+      throughSeq = page.throughSeq;
+      progress = { ...progress, trajectory: { ...progress.trajectory, throughSeq, cursor: { throughSeq } } };
+      await persist(progress);
+    }
+    current = page;
+    position = 0;
+    terminal = page.nextAfterSeq === null;
+  };
+
+  const nextRecord = async (): Promise<ExportedTrajectoryRecord | undefined> => {
+    for (;;) {
+      if (current === undefined) await readPage();
+      if (position < current!.records.length) {
+        const record = current!.records[position++]!;
+        seenSeq = record.seq;
+        return record;
+      }
+      if (terminal) return undefined;
+      await readPage();
+    }
+  };
+
+  let pending: ExportedTrajectoryRecord | undefined;
+  try {
+    for (;;) {
+      const first = pending ?? await nextRecord();
+      pending = undefined;
+      if (!first) break;
+      const files = progress.artifacts.length + progress.subjectInputs.length + progress.trajectory.parts.length + 1;
+      if (files > limits.maxFiles) {
+        throw new EvidenceIntegrityError(`Complete native trajectory exceeds the evidence limit (${files} files)`);
+      }
+      const storedBytes = [...progress.artifacts, ...progress.subjectInputs, ...progress.trajectory.parts]
+        .reduce((total, file) => total + file.size, 0);
+      let partBytes = 0;
+      let records = 0;
+      let partLastSeq = progress.trajectory.afterSeq;
+      const lines = async function* () {
+        let row: ExportedTrajectoryRecord | undefined = first;
+        while (row !== undefined) {
+          if (row.byteLength > limits.maxFileBytes) {
+            throw new EvidenceIntegrityError(`Trajectory record ${row.seq} is ${row.byteLength} bytes, above the ${limits.maxFileBytes}-byte evidence file limit`);
+          }
+          if (records > 0 && partBytes + row.byteLength > limits.maxFileBytes) {
+            pending = row;
+            return;
+          }
+          if (!Number.isSafeInteger(storedBytes + partBytes + row.byteLength)
+            || storedBytes + partBytes + row.byteLength > limits.maxTotalBytes) {
+            throw new EvidenceIntegrityError(`Complete native trajectory exceeds the evidence limit (${files} files, ${storedBytes + partBytes + row.byteLength} bytes)`);
+          }
+          let readBytes = 0;
+          for await (const chunk of await row.readJsonl()) {
+            readBytes += chunk.byteLength;
+            if (readBytes > row.byteLength) throw new EvidenceIntegrityError(`Trajectory record ${row.seq} exceeded its declared length`);
+            yield chunk;
+          }
+          if (readBytes !== row.byteLength) {
+            throw new EvidenceIntegrityError(`Trajectory record ${row.seq} ended before its declared length`);
+          }
+          partBytes += readBytes;
+          partLastSeq = row.seq;
+          records++;
+          if (partBytes === limits.maxFileBytes) return;
+          row = await nextRecord();
+        }
+      };
+      const storedPart = await blobs.putBlob(streamBytes(lines()), limits.maxFileBytes);
+      if (records === 0 || storedPart.size !== partBytes) {
+        throw new EvidenceIntegrityError("Stored trajectory part differs from its complete source records");
+      }
+      progress = { ...progress, trajectory: {
+        ...progress.trajectory, format: SP_PI_TRAJECTORY_FORMAT, throughSeq: throughSeq!,
+        afterSeq: partLastSeq, parts: [...progress.trajectory.parts, { ...storedPart, records }],
+      } };
+      await persist(progress);
+    }
+    progress = { ...progress, trajectory: { ...progress.trajectory, throughSeq: throughSeq!, done: true } };
+    await persist(progress);
+    return progress;
+  } finally {
+    await pages.return?.();
   }
-  if (chunks.length > 0) yield { chunks, size, lastSeq };
 }
 
 /**

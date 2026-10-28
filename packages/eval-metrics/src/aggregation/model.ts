@@ -88,9 +88,9 @@ export interface OperationStatistics {
 
 export interface ToolMetric extends OperationStatistics {
   readonly toolName: string | null;
-  /** UTF-8 bytes of the canonical JSON of `tool.started` payload.input; not tokens. */
+  /** UTF-8 canonical JSON bytes of native Tool arguments or Pi assistant Tool Call arguments. */
   readonly inputLength: CoveredNumericSummary;
-  /** UTF-8 bytes of the canonical JSON of `tool.finished` payload.output, else payload.response; never both. */
+  /** UTF-8 canonical JSON bytes of the safe native Tool result; never an inferred response. */
   readonly outputLength: CoveredNumericSummary;
 }
 
@@ -110,11 +110,11 @@ export interface TrajectorySummary {
   readonly tools: OperationStatistics;
   readonly toolSuccessRate: MetricNumber;
   readonly byTool: readonly ToolMetric[];
-  /** Model steps whose output or owning Turn contains thinking/signature markers. */
+  /** Native request-ID Steps whose Pi assistant blocks carry thinking/signature markers. */
   readonly thinkingSteps: MetricNumber;
   /** Status and duration of the marked model steps counted by `thinkingSteps`. */
   readonly thinkingStepOperations: OperationStatistics;
-  /** Model steps whose output or owning Turn contains a content marker. */
+  /** Native request-ID Steps whose Pi assistant blocks carry a text/content marker. */
   readonly contentSteps: MetricNumber;
   /** Status and duration of the marked model steps counted by `contentSteps`. */
   readonly contentStepOperations: OperationStatistics;
@@ -122,7 +122,7 @@ export interface TrajectorySummary {
   readonly thinkingStepTokens: ThinkingStepTokens;
   /** Tokens of content-marked model steps; may overlap thinkingStepTokens. */
   readonly contentStepTokens: ContentStepTokens;
-  /** Tool/model operations whose parent Turn cannot be resolved through parentOperationId. */
+  /** Tool/request operations whose native `turnId` has no observed owning Turn. */
   readonly unlinkedOperations: { readonly tools: number; readonly generations: number };
   readonly diagnostics: readonly ResourceDiagnostic[];
 }
@@ -137,10 +137,11 @@ export interface ModelStatistics {
 
 export interface ResourceDiagnostic {
   readonly kind: "missing-identity" | "conflicting-identity" | "unsupported-record" | "invalid-value";
-  readonly stream: "usageEvents" | "telemetryEvents" | "billingSettlements";
+  readonly stream: "usageEvents" | "nativeRecords" | "billingSettlements";
   readonly message: string;
   readonly scope: AgentResourceScope;
   readonly eventId?: string;
+  readonly ingestSeq?: number;
 }
 
 export interface ResourceStatistics {
@@ -158,7 +159,7 @@ export interface ResourceStatistics {
   };
   readonly duplicateRecords: {
     readonly usageEvents: number;
-    readonly telemetryEvents: number;
+    readonly nativeRecords: number;
     readonly billingSettlements: number;
   };
   readonly overlappingUsageRecords: number;

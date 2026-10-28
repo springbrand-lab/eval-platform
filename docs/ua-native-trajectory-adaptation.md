@@ -1,5 +1,11 @@
 # EP 适配 SP 原生 Pi 轨迹：调研与定稿方案
 
+> **历史调研（方案 A，不是当前实现）：**以下 `alpha.6`、旧
+> `sp-trajectory/v1` 事件还原与无截止点兼容描述保留为当时的方案记录。
+> 当前 EP 新运行使用已安装的公开 `@springbrand/eval-harness@0.1.0-alpha.7`
+> SAFE Pi 原生页，见 [cutover 与 parity gate](pi-native-eval-cutover.md)；
+> alpha.7 仍缺 `allowPartial` 的公开请求/路径契约，不可声称可上线。
+
 调研基线：EP `origin/main` `cb26d1b`；SP 改造分支从 SP `origin/eval` `0542a5a4` 拉出，目标 Runtime 为 `@springbrand/agent-runtime@0.3.1-alpha.5`。EP 侧改动已在本分支实现，见文末“实现状态”。
 
 ## 结论

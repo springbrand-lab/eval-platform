@@ -4,7 +4,9 @@ import {
   createProjectComparison, MetricsEntityNotFoundError, MetricsQueryError, MetricsSourceError,
   type MetricsFacts, type ProjectComparisonQuery,
 } from "../index.js";
-import { collection, dataset, evaluation, facts, plan, projectSample, sampling, settlement, telemetry, usage } from "../test-support.js";
+import {
+  collection, dataset, evaluation, facts, nativeScopedFixture, plan, projectSample, sampling, settlement, usage,
+} from "../test-support.js";
 
 const DATA_1 = "10000000-0000-4000-8000-000000000001";
 const DATA_2 = "10000000-0000-4000-8000-000000000002";
@@ -333,17 +335,26 @@ describe("scored Project intersection comparison", () => {
       { dataId: DATA_1, datasetIds: ["main", "shared"], results: [{ scores: [0, 2, null] }, { scores: [4, 6] }, { scores: [null] }] },
       { dataId: DATA_2, datasetIds: ["main"], results: [{ scores: [20, 20] }] },
     ]);
-    const resources = (id: string, units: number, input: number, cache: number, succeeded = true) => collection({
-      scope: { chatId: id, submissionId: id, idempotencyKey: id },
-      usageEvents: [usage(id, { metrics: { inputTokens: input, cacheReadTokens: cache, outputTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 } })],
-      billingSettlements: [settlement(id, { debitedUnits: units })],
-      telemetryEvents: [
-        telemetry(`${id}:turn:start`, "turn.started", "turn", {}, 0, id),
-        telemetry(`${id}:tool:start`, "tool.started", "tool", { toolName: "browser", input: {} }, 1, id, "turn"),
-        telemetry(`${id}:tool:end`, "tool.finished", "tool", { toolName: "browser", outcome: succeeded ? "completed" : "failed", output: {} }, 2, id, "turn"),
-        telemetry(`${id}:turn:end`, "turn.finished", "turn", { outcome: "completed" }, 3, id),
-      ],
-    });
+    const resources = (id: string, units: number, input: number, cache: number, succeeded = true) => {
+      const scope = { chatId: id, submissionId: id, idempotencyKey: id };
+      // Real published UA SAFE Pi records, re-scoped to this Attempt. The
+      // Tool's event outcome and Pi Tool Result must agree for each source.
+      const nativeRecords = nativeScopedFixture(Array.from({ length: 16 }, (_, index) => index + 1), scope);
+      const finished = nativeRecords[10]!.record.record;
+      const toolResult = nativeRecords[9]!.record.record;
+      if (finished.type !== "entry" || toolResult.type !== "entry") throw new Error("Expected native Tool records");
+      (finished.value.data as { event: { payload: { outcome: string } } }).event.payload.outcome =
+        succeeded ? "completed" : "failed";
+      (toolResult.value.model as { isError: boolean }[])[0]!.isError = !succeeded;
+      return collection({
+        scope,
+        usageEvents: [usage(id, { metrics: {
+          inputTokens: input, cacheReadTokens: cache, outputTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0,
+        } })],
+        billingSettlements: [settlement(id, { debitedUnits: units })],
+        nativeRecords,
+      });
+    };
     const left: MetricsFacts = {
       ...base,
       samplings: base.samplings.map((item, index) => {
