@@ -5,6 +5,7 @@ import type {
   EvidenceLimits,
   EvidenceManifest,
   EvidenceOmission,
+  EvidenceTrajectoryPin,
 } from "@eval-platform/eval-contracts";
 import {
   EVIDENCE_OMISSION_REASONS,
@@ -12,6 +13,7 @@ import {
   SP_PI_TRAJECTORY_FORMAT,
   AGENT_FRAMEWORKS,
   canonicalJsonBytes,
+  evidenceTrajectoryPinOf,
   sha256Hex,
 } from "@eval-platform/eval-contracts";
 import { z } from "zod";
@@ -86,6 +88,10 @@ function planEvidenceExport(evidence: ExportedEvidence, limits: EvidenceLimits, 
   if (evidence.trajectoryFormat !== SP_PI_TRAJECTORY_FORMAT) {
     throw new EvidenceIntegrityError(`Cannot export unsupported trajectory format ${evidence.trajectoryFormat}`);
   }
+  if (evidence.trajectoryCursor !== undefined
+    && (!Number.isSafeInteger(evidence.trajectoryCursor.throughSeq) || evidence.trajectoryCursor.throughSeq < 0)) {
+    throw new EvidenceIntegrityError("Cannot export an invalid native trajectory pin");
+  }
   if (evidence.artifacts.length + evidence.subjectInputs.length > limits.maxFiles) {
     throw new EvidenceIntegrityError("Exported evidence has more files than its limits allow");
   }
@@ -99,8 +105,35 @@ function planEvidenceExport(evidence: ExportedEvidence, limits: EvidenceLimits, 
       bundleId, materialId, path, size, mediaType,
     })),
     omitted: evidence.omitted.map(({ path, reason }) => ({ path, reason })),
-    trajectory: { format: SP_PI_TRAJECTORY_FORMAT, afterSeq: 0, parts: [] },
+    trajectory: { ...pinOfExportedEvidence(evidence), format: SP_PI_TRAJECTORY_FORMAT,
+      ...(evidence.trajectoryCursor === undefined ? {} : { throughSeq: evidence.trajectoryCursor.throughSeq }),
+      afterSeq: 0, parts: [] },
   };
+}
+
+/** A source-provided pin is persisted before files; otherwise the first native
+ * page freezes it, before any trajectory part is stored. */
+function pinOfExportedEvidence(evidence: ExportedEvidence): EvidenceTrajectoryPin {
+  return {
+    format: evidence.trajectoryFormat,
+    ...(evidence.trajectoryCursor === undefined ? {} : { cursor: { throughSeq: evidence.trajectoryCursor.throughSeq } }),
+  };
+}
+
+/**
+ * A resumed export must read with the saved native cutoff. A missing cutoff is
+ * permitted only before any trajectory part is stored, and the first page pins it.
+ */
+function requireSavedTrajectoryPin(evidence: ExportedEvidence, progress: EvidenceExportProgress): void {
+  const pin = evidenceTrajectoryPinOf(progress.trajectory);
+  if (pin.format !== evidence.trajectoryFormat) {
+    const format = pin.format;
+    throw new EvidenceIntegrityError(`Evidence trajectory pin changed: format ${evidence.trajectoryFormat} differs from saved ${format}`);
+  }
+  if (evidence.trajectoryCursor !== undefined
+    && pin.cursor?.throughSeq !== evidence.trajectoryCursor.throughSeq) {
+    throw new EvidenceIntegrityError(`Evidence trajectory pin changed: cursor ${JSON.stringify(evidence.trajectoryCursor)} differs from saved ${JSON.stringify(pin.cursor)}`);
+  }
 }
 
 /** The manifest a complete progress finalizes; the same progress always yields the same bytes. */
@@ -130,7 +163,7 @@ async function finalizeEvidenceManifest(evidence: ExportedEvidence, progress: Ev
       return { bundleId, materialId, path, mediaType, sha256, size };
     }),
     trajectory: {
-      format: evidence.trajectoryFormat,
+      format: progress.trajectory.format,
       parts: [...parts],
       records: parts.reduce((count, part) => count + part.records, 0),
       complete: evidence.trajectoryComplete,
@@ -163,6 +196,8 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
           || !Number.isSafeInteger(saved.trajectory.afterSeq) || saved.trajectory.afterSeq < 0
           || (saved.trajectory.throughSeq !== undefined
             && (!Number.isSafeInteger(saved.trajectory.throughSeq) || saved.trajectory.throughSeq < saved.trajectory.afterSeq))
+          || (saved.trajectory.cursor !== undefined
+            && saved.trajectory.cursor.throughSeq !== saved.trajectory.throughSeq)
           || saved.trajectory.parts.some((part) => !/^[0-9a-f]{64}$/u.test(part.sha256)
             || !Number.isSafeInteger(part.size) || part.size <= 0 || part.size > limits.maxFileBytes
             || !Number.isSafeInteger(part.records) || part.records <= 0)
@@ -173,6 +208,9 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
             || saved.trajectory.afterSeq === 0))))) {
         throw new EvidenceIntegrityError("Cannot resume non-native or invalid trajectory evidence progress");
       }
+      if (saved !== undefined) requireSavedTrajectoryPin(evidence, saved);
+      // A source-provided pin is durable with the initial progress, before
+      // reading files. A lazy native source freezes on its first validated page.
       let progress = saved ?? planEvidenceExport(evidence, limits, now());
       if (saved === undefined) await persist(progress);
 
@@ -348,7 +386,7 @@ async function storeTrajectory(
     }
     if (throughSeq === undefined) {
       throughSeq = page.throughSeq;
-      progress = { ...progress, trajectory: { ...progress.trajectory, throughSeq } };
+      progress = { ...progress, trajectory: { ...progress.trajectory, throughSeq, cursor: { throughSeq } } };
       await persist(progress);
     }
     current = page;
@@ -419,7 +457,7 @@ async function storeTrajectory(
         throw new EvidenceIntegrityError("Stored trajectory part differs from its complete source records");
       }
       progress = { ...progress, trajectory: {
-        format: SP_PI_TRAJECTORY_FORMAT, throughSeq: throughSeq!,
+        ...progress.trajectory, format: SP_PI_TRAJECTORY_FORMAT, throughSeq: throughSeq!,
         afterSeq: partLastSeq, parts: [...progress.trajectory.parts, { ...storedPart, records }],
       } };
       await persist(progress);

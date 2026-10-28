@@ -81,6 +81,7 @@ function groupOperations(stream: FactStream, diagnostics: ResourceDiagnostics): 
       ? projection?.supported === true ? (projection.facts as readonly JsonRecord[]) : undefined
       : nativeRecordFacts(source.fact);
     if (facts === undefined) {
+
       complete = false;
       diagnostics.report("unsupported-record", "nativeRecords", source, "Unsupported native Pi record or safe projection");
       continue;
@@ -392,12 +393,18 @@ export function aggregateTelemetry(
   for (const name of requestedTools) if (!groups.has(name)) groups.set(name, []);
   const thinking = stepCount(models, "thinking", grouped.complete, unlinkedModels === 0, turns.length === 0);
   const content = stepCount(models, "content", grouped.complete, unlinkedModels === 0, turns.length === 0);
+  const toolStatistics = operationStatistics(tools, grouped.complete);
+  const terminalTools = toolStatistics.completed + toolStatistics.failed + toolStatistics.cancelled;
   return {
     modelRequests: operationStatistics(models, grouped.complete),
     trajectory: {
       coverage: coverage(grouped.complete, grouped.operations.length > 0),
       turns: operationStatistics(turns, grouped.complete),
-      tools: operationStatistics(tools, grouped.complete),
+      tools: toolStatistics,
+      toolSuccessRate: {
+        value: terminalTools === 0 ? null : toolStatistics.completed / terminalTools,
+        coverage: toolStatistics.count.coverage,
+      },
       byTool: [...groups.entries()].map(([name, operations]) =>
         toolMetric(name, operations, grouped.complete && (name === null || toolNamesKnown)))
         .sort((left, right) => (left.toolName ?? "").localeCompare(right.toolName ?? "")),

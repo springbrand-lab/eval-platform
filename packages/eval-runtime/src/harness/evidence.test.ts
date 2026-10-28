@@ -99,7 +99,8 @@ describe("evidence store", () => {
       format: SP_PI_TRAJECTORY_FORMAT, parts: [], records: 0, complete: true,
     });
     expect(progress.at(-1)?.trajectory).toEqual({
-      format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 0, afterSeq: 0, parts: [], done: true,
+      format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 0, cursor: { throughSeq: 0 },
+      afterSeq: 0, parts: [], done: true,
     });
   });
 
@@ -190,7 +191,7 @@ describe("resumable evidence export", () => {
     await expect(store.resume({ evidence, limits: DEFAULT_EVIDENCE_LIMITS, onProgress }))
       .rejects.toThrow(/first page disconnected/u);
     expect(progress?.trajectory).toEqual({
-      format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 2, afterSeq: 0, parts: [],
+      format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 2, cursor: { throughSeq: 2 }, afterSeq: 0, parts: [],
     });
     expect(blobs.blobs.size).toBe(0);
     records.push(...rows([3]));
@@ -221,7 +222,8 @@ describe("resumable evidence export", () => {
       } };
       await expect(store.resume({ evidence, limits: DEFAULT_EVIDENCE_LIMITS,
         onProgress: async (next) => { progress = next; } })).rejects.toBeInstanceOf(EvidenceIntegrityError);
-      expect(progress?.trajectory).toEqual({ format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 2, afterSeq: 0, parts: [] });
+      expect(progress?.trajectory).toEqual({ format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 2,
+        cursor: { throughSeq: 2 }, afterSeq: 0, parts: [] });
       expect(blobs.blobs.size).toBe(0);
       expect(blobs.manifests.size).toBe(0);
       const resumed = await store.open(await store.resume({ evidence: base, limits: DEFAULT_EVIDENCE_LIMITS,
@@ -307,6 +309,154 @@ describe("resumable evidence export", () => {
     await expect(store.resume({ evidence, limits, onProgress: async (next) => { progress = next; } })).rejects.toThrow(/response lost/u);
     const ref = await store.resume({ evidence, limits, progress: progress!, onProgress: async (next) => { progress = next; } });
     expect([...blobs.manifests.keys()]).toEqual([ref.evidenceId.slice("sha256:".length)]);
+  });
+
+  describe("trajectory pin", () => {
+    const pinned = (cursor?: { throughSeq: number }, format: string = SP_PI_TRAJECTORY_FORMAT) => ({
+      ...exportedEvidence({ samplingId: "pinned", files, events }),
+      trajectoryFormat: format,
+      ...(cursor === undefined ? {} : { trajectoryCursor: cursor }),
+    });
+
+    it("saves the source's native format and cursor with new progress before any file read", async () => {
+      const blobs = createMemoryEvidenceBlobs();
+      const saved: EvidenceExportProgress[] = [];
+      const ref = await createEvidenceStore(blobs, () => NOW).resume({
+        evidence: pinned({ throughSeq: 5 }), limits,
+        onProgress: async (progress) => { saved.push(structuredClone(progress)); },
+      });
+      expect(saved[0]!.trajectory).toEqual({ afterSeq: 0, parts: [], format: SP_PI_TRAJECTORY_FORMAT,
+        throughSeq: 5, cursor: { throughSeq: 5 } });
+      expect(saved.every((progress) => progress.trajectory.cursor?.throughSeq === 5
+        && progress.trajectory.format === SP_PI_TRAJECTORY_FORMAT)).toBe(true);
+      expect(saved.at(-1)!.trajectory).toMatchObject({ afterSeq: 5, done: true });
+      expect((await createEvidenceStore(blobs).open(ref)).manifest.trajectory.format).toBe(SP_PI_TRAJECTORY_FORMAT);
+    });
+
+    it("stores and reads nothing before a new pin is persisted, so a failed first persist re-pins harmlessly", async () => {
+      const blobs = createMemoryEvidenceBlobs();
+      const store = createEvidenceStore(blobs, () => NOW);
+      const reads: string[] = [];
+      const observed = (cursor: { throughSeq: number }) => {
+        const base = pinned(cursor);
+        return {
+          ...base,
+          async readFile(path: string) { reads.push(path); return base.readFile(path); },
+          async* readTrajectory(afterSeq: number, throughSeq?: number) {
+            reads.push(`trajectory:${afterSeq}`);
+            yield* base.readTrajectory(afterSeq, throughSeq);
+          },
+        };
+      };
+      const persisted: EvidenceExportProgress[] = [];
+      await expect(store.resume({
+        evidence: observed({ throughSeq: 5 }), limits,
+        onProgress: async () => { throw new Error("progress write failed"); },
+      })).rejects.toThrow(/progress write failed/u);
+      expect(reads).toEqual([]);
+      expect(blobs.blobs.size + blobs.manifests.size).toBe(0);
+
+      // No progress survived, so the next pass is a new export pinned by the source again.
+      const ref = await store.resume({
+        evidence: observed({ throughSeq: 6 }), limits,
+        onProgress: async (progress) => { persisted.push(structuredClone(progress)); },
+      });
+      expect(persisted[0]!.trajectory).toEqual({ afterSeq: 0, parts: [],
+        format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 6, cursor: { throughSeq: 6 } });
+      expect(persisted.every((progress) => progress.trajectory.cursor?.throughSeq === 6)).toBe(true);
+      expect(ref).toEqual(await createEvidenceStore(createMemoryEvidenceBlobs(), () => NOW).resume({ evidence: pinned({ throughSeq: 6 }), limits }));
+    });
+
+    it("saves the format without a cursor until the source's first native page freezes it", async () => {
+      const saved: EvidenceExportProgress[] = [];
+      await createEvidenceStore(createMemoryEvidenceBlobs(), () => NOW).resume({
+        evidence: pinned(), limits, onProgress: async (progress) => { saved.push(structuredClone(progress)); },
+      });
+      expect(saved[0]!.trajectory).toEqual({ afterSeq: 0, parts: [], format: SP_PI_TRAJECTORY_FORMAT });
+      expect(saved.at(-1)!.trajectory).toMatchObject({ throughSeq: 5, cursor: { throughSeq: 5 }, done: true });
+    });
+
+    it("resumes with the saved pin and finalizes the same bundle", async () => {
+      const store = createEvidenceStore(createMemoryEvidenceBlobs(), () => NOW);
+      let failAfter: number | undefined = 3;
+      const base = pinned({ throughSeq: 5 });
+      const flaky = {
+        ...base,
+        async* readTrajectory(afterSeq: number, throughSeq?: number) {
+          for await (const page of base.readTrajectory(afterSeq, throughSeq)) {
+            if (failAfter !== undefined && page.records.some((record) => record.seq > failAfter!)) {
+              const records = page.records.filter((record) => record.seq <= failAfter!);
+              failAfter = undefined;
+              yield { ...page, records, nextAfterSeq: records.at(-1)!.seq };
+              throw new Error("page unavailable");
+            }
+            yield page;
+          }
+        },
+      };
+      let progress: EvidenceExportProgress | undefined;
+      const onProgress = async (next: EvidenceExportProgress) => { progress = structuredClone(next); };
+      await expect(store.resume({ evidence: flaky, limits, onProgress })).rejects.toThrow(/page unavailable/u);
+      expect(progress!.trajectory).toMatchObject({ afterSeq: 2, cursor: { throughSeq: 5 },
+        format: SP_PI_TRAJECTORY_FORMAT });
+      const ref = await store.resume({ evidence: flaky, limits, progress: progress!, onProgress });
+      expect(progress!.trajectory).toMatchObject({ afterSeq: 5, done: true, cursor: { throughSeq: 5 } });
+      expect(ref).toEqual(await createEvidenceStore(createMemoryEvidenceBlobs(), () => NOW).resume({ evidence: pinned({ throughSeq: 5 }), limits }));
+    });
+
+    it.each([
+      { name: "a different cursor", evidence: () => pinned({ throughSeq: 6 }) },
+      { name: "a different format", evidence: () => pinned({ throughSeq: 5 }, "pi-trajectory/v1") },
+    ])("rejects a resumed export whose source returns $name", async ({ evidence }) => {
+      const blobs = createMemoryEvidenceBlobs();
+      const progress: EvidenceExportProgress = {
+        exportedAt: NOW, artifacts: [], subjectInputs: [], omitted: [],
+        trajectory: { afterSeq: 2, parts: [], format: SP_PI_TRAJECTORY_FORMAT,
+          throughSeq: 5, cursor: { throughSeq: 5 } },
+      };
+      const failure = createEvidenceStore(blobs, () => NOW).resume({ evidence: { ...evidence(), artifacts: [] }, limits, progress });
+      await expect(failure).rejects.toBeInstanceOf(EvidenceIntegrityError);
+      expect(blobs.blobs.size + blobs.manifests.size).toBe(0);
+    });
+
+    it("uses the saved cutoff even when a lazy native source announces no cursor ahead of its pages", async () => {
+      const base = pinned();
+      const progress: EvidenceExportProgress = {
+        exportedAt: NOW, artifacts: [], subjectInputs: [], omitted: [],
+        trajectory: { format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 4, cursor: { throughSeq: 4 },
+          afterSeq: 0, parts: [] },
+      };
+      const requested: (number | undefined)[] = [];
+      const evidence = { ...base, async* readTrajectory(afterSeq: number, throughSeq?: number) {
+        requested.push(throughSeq);
+        yield* base.readTrajectory(afterSeq, throughSeq);
+      } };
+      const store = createEvidenceStore(createMemoryEvidenceBlobs(), () => NOW);
+      const ref = await store.resume({ evidence, limits, progress });
+      expect(requested).toEqual([4]);
+      expect((await store.open(ref)).manifest.trajectory.records).toBe(4);
+    });
+
+    it("rejects a cursor appearing on progress saved without one", async () => {
+      const progress: EvidenceExportProgress = {
+        exportedAt: NOW, artifacts: [], subjectInputs: [], omitted: [],
+        trajectory: { format: SP_PI_TRAJECTORY_FORMAT, afterSeq: 0, parts: [] },
+      };
+      await expect(createEvidenceStore(createMemoryEvidenceBlobs(), () => NOW)
+        .resume({ evidence: { ...pinned({ throughSeq: 5 }), artifacts: [] }, limits, progress })).rejects.toBeInstanceOf(EvidenceIntegrityError);
+    });
+
+    it("never relabels an old event-only progress or appends Pi parts to it", async () => {
+      const blobs = createMemoryEvidenceBlobs();
+      const store = createEvidenceStore(blobs, () => NOW);
+      const legacy: EvidenceExportProgress = {
+        exportedAt: NOW, artifacts: [], subjectInputs: [], omitted: [],
+        trajectory: { afterSeq: 2, parts: [{ sha256: "a".repeat(64), size: 10, events: 2 }] },
+      } as unknown as EvidenceExportProgress;
+      await expect(store.resume({ evidence: pinned(), limits, progress: legacy }))
+        .rejects.toThrow(/Cannot resume non-native/u);
+      expect(blobs.blobs.size + blobs.manifests.size).toBe(0);
+    });
   });
 
   it("refuses saved progress whose stored bytes no longer match the listing", async () => {

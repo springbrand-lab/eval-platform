@@ -88,7 +88,13 @@ SP+API reads before end-to-end parity or release. No SP private source is import
 
 内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。设计见 [Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
 
+数据看板的 `GET /api/metrics/comparison` 接受重复 `projectId`、可选 `datasetId` 与 `jsonPointer`，返回 Metrics 的 `ProjectComparisonView`，不设基线。所选项目必须全部归属当前固定服务账号且未删除；事实读取复用现有 Metrics 读取逻辑，在一个 `READ_SNAPSHOT` 事务中完成所有 Project 的读取，不把多个事务冒充同一快照，不读取 SP。查询数量上限由 `COMPARISON_PROJECTS` 及 `GET /api/input-limits` 的 `comparisonProjects` 统一提供，当前为 8；Web 不维护数值副本。数据/Schema 交集、已评分筛选和所有统计归 `eval-metrics`，API 不重算。Sampling/产物/轨迹明细继续使用既有授权端点。
+
+可保存的看板配置由应用的 Dashboards Module 管理：`GET/POST /api/dashboards` 与 `GET/PUT /api/dashboards/{dashboardId}`，公共 DTO/输入 Schema 来自 `eval-contracts`。数据库保存 owner、名称、说明、版本、时间与有序 Project 关联，不保存比较值；配置表与关联表用同 owner 的复合外键防止跨账号引用，读取复用 `READ_SNAPSHOT`，列表不逐看板重复读取 Project。创建在同一事务核验全部 Project 的 owner、未删除及已有已准入 Run 的稳定创建状态（不要求 Run 执行成功），按固定顺序加锁，并以 owner + 创建幂等键与原始规范请求指纹保证重试不重复创建。尚无首个 Run 的暂存 Project 不得被持久引用，避免首 Run 准入失败的删除补偿被新外键阻挡；不通过级联删配置、弱化外键或保留可见孤儿来绕过。更新锁定 owned 看板并核验 revision，版本冲突不覆盖新配置，成功保存后版本递增。既有看板中的 Project 后来软删除不删除看板；读取对比的现有 not-found 状态可通过编辑配置修复。只生成和检查新增迁移，不自动连接真实数据库或应用迁移。
+
 ## 项目评估结果下载
+
+看板数据展示选择复用配置更新 Interface 和 revision；`excludedDataIds` 持久化在看板配置，省略更新时不清空，显式空集合恢复全部。`POST /api/metrics/comparison` 是有界 JSON 请求的只读对比 Interface，避免大量 Data 身份塞进 URL；仍使用同一快照和 Metrics 聚合，不运行 Agent，也不写指标。新增迁移只添加空排除集合列，不修改已有看板或评估事实。
 
 `GET /api/projects/{projectId}/evaluation-results.zip` 在同一只读快照中导出项目当前留存的全部采样与评估记录，不受页面筛选或 Run 选择影响；未知、其他所有者或软删除项目返回 `404 PROJECT_NOT_FOUND`。ZIP 按 `project/dataset/sample/sampling` 的固定身份分层，共享用例按项目冻结的数据集归属分别保存。原始评估结果以独立 JSON 文件原样保存，包含无效结果；缺失或未完成结果只保存状态元数据。目录、元数据文件名与响应保护见 [HTTP 下载契约](../../docs/eval-http-api.md#projects)。
 

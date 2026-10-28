@@ -97,7 +97,9 @@ export type {
   EvidenceOmissionReason,
   EvidenceSource,
   EvidenceSubjectInput,
+  EvidenceTrajectoryCursor,
   EvidenceTrajectoryPart,
+  EvidenceTrajectoryPin,
 } from "./evidence.js";
 export {
   PI_TRAJECTORY_RECORD_FORMAT, SP_PI_TRAJECTORY_FORMAT, SP_PI_TRAJECTORY_RECORD_FORMAT,
@@ -113,6 +115,7 @@ export type {
 } from "./native-trajectory.js";
 export {
   DEFAULT_EVIDENCE_LIMITS,
+  evidenceTrajectoryPinOf,
   EVALUATION_FINAL_REPLY_PATH,
   EVALUATION_RESULT_PATH,
   EVALUATION_SUBMISSION_PATH,
@@ -133,6 +136,8 @@ export { jsonObjectArrayInPlaceSchema, jsonObjectInPlaceSchema, jsonObjectSchema
 export { isResourceSnapshotDownload, summarizeResourceSnapshot } from "./resources.js";
 export { evalInputLimitsSchema } from "./input-limits.js";
 export type { EvalInputLimits } from "./input-limits.js";
+export { dashboardInputSchema, dashboardCreateSchema, dashboardUpdateSchema, dashboardSchema, dashboardDataExclusionsSchema } from "./dashboards.js";
+export type { Dashboard, DashboardInput, DashboardCreateInput, DashboardUpdateInput } from "./dashboards.js";
 export { initialResourceFileSchema } from "./initial-resource-files.js";
 export { EVALUATION_RESULTS_MCP_PATH, isEvaluationResultsMcpUrl, resolveEvaluationResultsMcp } from "./evaluation-results-mcp.js";
 export type { EvaluationResultsMcpResolution, EvaluationResultsMcpServer } from "./evaluation-results-mcp.js";

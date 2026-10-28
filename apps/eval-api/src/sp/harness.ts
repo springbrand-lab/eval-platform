@@ -2,11 +2,11 @@ import { constants as bufferConstants } from "node:buffer";
 import { createHash } from "node:crypto";
 import type {
   AgentFramework, AgentResourceFact, AgentResourceSnapshotDownload, AgentResourceSnapshotSummary, EvidenceLimits,
-  NativeTrajectoryEntry, SpPiTrajectoryPage, SpPiTrajectoryRecordReference,
+  EvidenceTrajectoryPin, NativeTrajectoryEntry, SpPiTrajectoryPage, SpPiTrajectoryRecordReference,
 } from "@eval-platform/eval-contracts";
 import {
   EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT,
-  equalJson, isSpPiTrajectoryReference, isTerminalAgentStatus, nativeRecordMayBelongToScope,
+  equalJson, evidenceTrajectoryPinOf, isSpPiTrajectoryReference, isTerminalAgentStatus, nativeRecordMayBelongToScope,
   spPiTrajectoryIdentityParts,
 } from "@eval-platform/eval-contracts";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
@@ -132,6 +132,19 @@ export interface SpHarnessOptions {
     ownerUserId: string,
     reference: InitialSessionRef,
   ) => Promise<SessionContent>;
+}
+
+/** Never resume an old event-only export as native. With a saved native cutoff
+ * the first request of this pass is bound to it, not to the current Chat head. */
+function nativeEvidencePin(saved: EvidenceTrajectoryPin | undefined): number | undefined {
+  if (saved === undefined) return undefined;
+  const pin = evidenceTrajectoryPinOf(saved);
+  const throughSeq = pin.cursor?.throughSeq;
+  if (pin.format !== SP_PI_TRAJECTORY_FORMAT
+    || (throughSeq !== undefined && (!Number.isSafeInteger(throughSeq) || throughSeq < 0))) {
+    throw new SpHarnessError("Cannot resume non-native or invalid trajectory evidence pin", false);
+  }
+  return throughSeq;
 }
 
 /** The SP Harness drives only SP Agents; any other framework is rejected before contacting SP. */
@@ -845,9 +858,10 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       }
     },
     inspectAgentResources: readResources,
-    async exportEvidence({ handle, submissionId, limits, initialMaterials }) {
+    async exportEvidence({ handle, submissionId, limits, initialMaterials, trajectory }) {
       requireSp(handle.framework);
       if (handle.role !== "subject") throw new SpHarnessError("Only a Subject exports evidence", false);
+      const frozenThroughSeq = nativeEvidencePin(trajectory);
       if (initialMaterials?.length && !options.resolveInitialMaterials) {
         throw new SpHarnessError("Initial material bundle resolver is required for Subject input evidence", false);
       }
@@ -881,9 +895,12 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           return response.body;
         },
         async* readTrajectory(afterSeq, throughSeq) {
+          if (frozenThroughSeq !== undefined && throughSeq !== undefined && throughSeq !== frozenThroughSeq) {
+            throw new SpHarnessError("Eval SP changed the saved native trajectory cutoff", false);
+          }
           // A byte reference is read only when EvidenceStore consumes its record. It is
           // never materialized as a Pi object or copied into an intermediate part array.
-          for await (const page of trajectoryPages(handle, submissionId, afterSeq, throughSeq)) {
+          for await (const page of trajectoryPages(handle, submissionId, afterSeq, throughSeq ?? frozenThroughSeq)) {
             yield { throughSeq: page.cursor.throughSeq, nextAfterSeq: page.nextAfterSeq,
               records: page.records.map((row) => {
                 if (isSpPiTrajectoryReference(row)) {
@@ -902,6 +919,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           }
         },
         trajectoryFormat: SP_PI_TRAJECTORY_FORMAT,
+        ...(frozenThroughSeq === undefined ? {} : { trajectoryCursor: { throughSeq: frozenThroughSeq } }),
         // SP exposes native records only after the Submission ended and its deliveries settled.
         trajectoryComplete: true,
       };

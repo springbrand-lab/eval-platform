@@ -13,6 +13,8 @@ import type {
   EvidenceManifest,
   EvidenceOmission,
   EvidenceSource,
+  EvidenceTrajectoryCursor,
+  EvidenceTrajectoryPin,
   ExecutionOutput,
   HarnessConfig,
   MaterializedDataBinding,
@@ -122,6 +124,13 @@ export interface ExportEvidenceInput {
   readonly limits: EvidenceLimits;
   readonly initialMaterials?: readonly InitialMaterialsRef[];
   readonly runtime?: HarnessRuntimeOptions;
+  /**
+   * The native format and cutoff saved by an earlier pass. A resumed Harness
+   * binds every page to this pin; old event-only progress is rejected, not
+   * treated as native. If no page has pinned the cutoff yet, the first page
+   * freezes it before a part is stored.
+   */
+  readonly trajectory?: EvidenceTrajectoryPin;
 }
 
 export interface ExportedSubjectInput extends ExportedArtifact {
@@ -161,6 +170,11 @@ export interface ExportedEvidence {
    */
   readTrajectory(afterSeq: number, throughSeq?: number): AsyncIterable<ExportedTrajectoryPage>;
   readonly trajectoryFormat: string;
+  /**
+   * A resumed export's saved native cutoff (if supplied); the store checks it
+   * against its durable watermark before any writes and on every read.
+   */
+  readonly trajectoryCursor?: EvidenceTrajectoryCursor;
   readonly trajectoryComplete: boolean;
   readonly trajectoryIncompleteReason?: string;
 }

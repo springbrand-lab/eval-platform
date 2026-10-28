@@ -7369,6 +7369,96 @@ describe("resumable Subject evidence export", () => {
     expect((await evidence.open(done.evidence!)).manifest.trajectory.parts.map((part) => part.records)).toEqual([2, 2, 1]);
   });
 
+  it("hands the saved trajectory pin back to the Harness on a resumed export instead of pinning again", async () => {
+    const harness = makeHarness();
+    let failAfter: number | undefined = 3;
+    let pins = 0;
+    vi.mocked(harness.exportEvidence).mockImplementation(async ({ handle, trajectory }) => {
+      const base = exportedEvidence({ samplingId: handle.samplingId, chatId: handle.chatId, events });
+      // A new export pins the source's current end; a resumed one must reuse the saved pin.
+      const cursor = trajectory === undefined ? { throughSeq: 5 + pins++ } : trajectory.cursor;
+      return {
+        ...base,
+        ...(cursor === undefined ? {} : { trajectoryCursor: cursor }),
+        async* readTrajectory(afterSeq: number, throughSeq?: number) {
+          for await (const page of base.readTrajectory(afterSeq, throughSeq ?? cursor?.throughSeq)) {
+            if (failAfter !== undefined && page.records.some((record) => record.seq > failAfter!)) {
+              const records = page.records.filter((record) => record.seq <= failAfter!);
+              failAfter = undefined;
+              yield { ...page, records, nextAfterSeq: records.at(-1)!.seq };
+              throw transient("trajectory page unavailable");
+            }
+            yield page;
+          }
+        },
+      };
+    });
+    const evidence = createEvidenceStore(createMemoryEvidenceBlobs(), ticking());
+    const runtime = createRuntime({ harness, store: makeStore(), sleep: async () => undefined, evidence, evidenceLimits: twoEventLimits });
+    const run = await runtime.submit(projectRequest("execution", "resume-pin"));
+
+    await runtime.resume(run.runId);
+    const pending = await runtime.getSampling(run.samplingIds[0]!);
+    expect(pending.evidenceExport!.progress!.trajectory).toMatchObject({
+      afterSeq: 2, format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 5, cursor: { throughSeq: 5 },
+    });
+    await runtime.resume(run.runId);
+    expect((await runtime.getSampling(run.samplingIds[0]!)).execution).toEqual({ status: "succeeded" });
+    const calls = vi.mocked(harness.exportEvidence).mock.calls.map(([input]) => input.trajectory);
+    expect(calls[0]).toBeUndefined();
+    expect(calls.at(-1)).toEqual({ format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: 5 } });
+    expect(pins).toBe(1);
+  });
+
+  it("re-pins on the next pass when a new export fails before its first progress is persisted", async () => {
+    const harness = makeHarness();
+    let pins = 0;
+    vi.mocked(harness.exportEvidence).mockImplementation(async ({ handle, trajectory }) => {
+      const cursor = trajectory === undefined ? { throughSeq: 5 + pins++ } : trajectory.cursor;
+      return {
+        ...exportedEvidence({ samplingId: handle.samplingId, chatId: handle.chatId, events }),
+        ...(cursor === undefined ? {} : { trajectoryCursor: cursor }),
+      };
+    });
+    const blobs = createMemoryEvidenceBlobs();
+    const store = createEvidenceStore(blobs, ticking());
+    const persistedPins: unknown[] = [];
+    let failFirst = true;
+    const evidence: typeof store = {
+      ...store,
+      async resume(input) {
+        if (failFirst) {
+          failFirst = false;
+          // The pin read by the Harness is discarded before the store persists or stores anything.
+          throw transient("evidence store unavailable");
+        }
+        return store.resume({
+          ...input,
+          onProgress: async (progress) => {
+            persistedPins.push(progress.trajectory.cursor);
+            await input.onProgress?.(progress);
+          },
+        });
+      },
+    };
+    const runtime = createRuntime({ harness, store: makeStore(), sleep: async () => undefined, evidence, evidenceLimits: twoEventLimits });
+    const run = await runtime.submit(projectRequest("execution", "repin"));
+
+    await runtime.resume(run.runId);
+    const pending = await runtime.getSampling(run.samplingIds[0]!);
+    expect(pending.evidenceExport?.progress).toBeUndefined();
+    await runtime.resume(run.runId);
+    const done = await runtime.getSampling(run.samplingIds[0]!);
+    expect(done.execution).toEqual({ status: "succeeded" });
+    const calls = vi.mocked(harness.exportEvidence).mock.calls.map(([input]) => input.trajectory);
+    expect(calls).toEqual([undefined, undefined]);
+    expect(pins).toBe(2);
+    // Only the second pin was ever persisted, and the bundle holds the complete trajectory.
+    expect(persistedPins.length).toBeGreaterThan(0);
+    expect(persistedPins.every((cursor) => equalJson(cursor, { throughSeq: 6 }))).toBe(true);
+    expect((await evidence.open(done.evidence!)).manifest.trajectory.records).toBe(events.length);
+  });
+
   it("finalizes the same evidence ID after a manifest write whose response was lost", async () => {
     const harness = makeHarness();
     const blobs = createMemoryEvidenceBlobs();

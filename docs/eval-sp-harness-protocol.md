@@ -51,6 +51,37 @@ For an accepted Evaluator whose terminal receipt is still unconfirmed, budget ad
 
 Eval does not trigger delivery of SP's telemetry/runtime outboxes; it only waits for it. Draining them on demand needs a guarded flush API in `@springbrand/agent-runtime` (follow-up).
 
+## Pinned evidence trajectory
+
+An evidence export reads one fixed range of SAFE Pi records, so records appended while
+it pages (or between passes) never enter a bundle half-way.
+
+1. The first native `sp-pi-trajectory/v1` page freezes a `cursor.throughSeq`
+   (including zero for an empty Chat). The adapter validates the entire page
+   with the installed public alpha.7 schema before yielding any record.
+2. `EvidenceStore` saves `format:"sp-pi-trajectory/v1"`, `throughSeq` and
+   `cursor:{throughSeq}` in the first validated page's durable progress **before**
+   storing any trajectory part. If a source already exposes `trajectoryCursor`,
+   its pin is persisted with the initial progress before files are read. The
+   native byte stream and content-addressed part never hold a whole large record.
+3. Continuation/resume requests carry `afterSeq`, `limit`, `submissionId` and
+   the same `throughSeq`. Changed, missing or regressed cutoffs, a record above
+   the cutoff, a non-progressing cursor or a missing terminal page fail without
+   a manifest. The authorized Submission binds the read but does not filter
+   the full SAFE Chat history.
+4. Runtime passes the saved native format/cutoff back as
+   `ExportEvidenceInput.trajectory` via `evidenceTrajectoryPinOf`. For progress
+   saved before the generic `cursor` field, that helper derives it from the
+   existing native `throughSeq`; the saved JSON is not rewritten. The Harness
+   rejects old event-only pins and binds resumed reads to this native cutoff
+   from the first request. A changed source-provided pin fails in the Store.
+   A failed pass without saved progress can pin anew; finished native parts
+   never share a bundle with old event parts. Historical v1 bytes are untouched.
+
+Alpha.7 publishes the native evidence page, safe inline/ref schemas and
+authenticated record-byte path helper; EP does not accept an optional old
+event `format`, unpinned legacy reads or a locally mirrored HTTP page schema.
+
 ## Diagnostics
 
 The Harness accepts an optional `log(event)` sink (the Runtime's `RuntimeLog` type), wired by the Run Worker to the same pino sink as the Runtime log (`error` for `retry_exhausted`; `warn` for an event with `error`, `ws_reconnect` and `operation_retry`; otherwise `info`). Events carry identifiers (role, Chat, Sampling, Evaluation, operation key, Submission), HTTP status, declared byte counts and durations, never prompts, payloads, native records, file bytes or the service token; a failure's `error` is `errorDiagnostics` output, plus SP's `X-Request-ID` as `requestId` and Cloudflare's `cf-ray` as `cfRay` when the response carried them (`cfRay` only on evidence byte requests, whose raw headers the Harness reads). `resources_read` logs source coverage, usage/native-record/billing counts and readiness; `evidence_trajectory_page` logs failures and the final page's `from`, `pages` and `records` (not bodies). The existing WebSocket, file and import summaries remain payload-free.

@@ -34,6 +34,12 @@ import {
   ProjectRunStopConflictError,
 } from "../db/errors.js";
 import { RunTargetsTooLargeError } from "../limits.js";
+import {
+  DashboardIdempotencyConflictError,
+  DashboardNotFoundError,
+  DashboardProjectNotFoundError,
+  DashboardRevisionConflictError,
+} from "../dashboards/errors.js";
 import { BundleFileError, type BundleFileErrorReason } from "../sp/bundle-errors.js";
 import { EvalSpApiError, EvalSpTransportError } from "../sp/http.js";
 
@@ -100,6 +106,13 @@ const publicMessageCodes = new Map<ErrorClass, HttpErrorCode>([
   [OutputSchemaNotFoundError, "OUTPUT_SCHEMA_NOT_FOUND"],
   [DatasetInputError, "DATASET_INPUT_INVALID"],
   [MetricsQueryError, "METRICS_QUERY_INVALID"],
+]);
+
+const dashboardErrorCodes = new Map<ErrorClass, HttpErrorCode>([
+  [DashboardNotFoundError, "DASHBOARD_NOT_FOUND"],
+  [DashboardProjectNotFoundError, "PROJECT_NOT_FOUND"],
+  [DashboardIdempotencyConflictError, "DASHBOARD_IDEMPOTENCY_CONFLICT"],
+  [DashboardRevisionConflictError, "DASHBOARD_REVISION_CONFLICT"],
 ]);
 
 /** Errors that describe persisted Runtime facts; the response keeps the catalog text. */
@@ -189,6 +202,9 @@ export function apiError(error: Error): HttpError {
     if (error instanceof type) return new HttpError(code, error.message, { cause: error });
   }
   for (const [type, code] of catalogMessageCodes) {
+    if (error instanceof type) return new HttpError(code, undefined, { cause: error });
+  }
+  for (const [type, code] of dashboardErrorCodes) {
     if (error instanceof type) return new HttpError(code, undefined, { cause: error });
   }
   // JSON bodies are parsed before validation, so Hono's validator rejects only a malformed multipart body.

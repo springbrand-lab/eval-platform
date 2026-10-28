@@ -108,6 +108,7 @@ export interface TrajectorySummary {
   readonly coverage: AgentResourceCompleteness;
   readonly turns: OperationStatistics;
   readonly tools: OperationStatistics;
+  readonly toolSuccessRate: MetricNumber;
   readonly byTool: readonly ToolMetric[];
   /** Native request-ID Steps whose Pi assistant blocks carry thinking/signature markers. */
   readonly thinkingSteps: MetricNumber;

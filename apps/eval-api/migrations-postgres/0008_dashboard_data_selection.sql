@@ -1,0 +1,1 @@
+ALTER TABLE "eval_dashboards" ADD COLUMN "excluded_data_ids" text[] DEFAULT '{}'::text[] NOT NULL;

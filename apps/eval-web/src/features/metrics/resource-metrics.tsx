@@ -8,6 +8,7 @@ import { useState, type ReactNode } from "react";
 import type { OperationStatistics, ResourceCollections, ResourceDistribution, ResourceStatistics, StageStatistics } from "@/api-sdk/types";
 import { Badge, StatusBadge, type Tone } from "@/components/ui/badge";
 import { DescriptionList } from "@/components/ui/card";
+import { TablePagination, useTablePagination } from "@/components/ui/pagination";
 import { cn } from "@/lib/cn";
 import { formatDuration, formatMetricBytes, formatStatistic, formatUsd } from "@/lib/format";
 import { MetricValue } from "./metric-value";
@@ -56,13 +57,14 @@ function MetricDisclosure({ title, description, children, expanded = false }: { 
 type OperationRow = { label: string; value: OperationStatistics };
 
 function OperationsTable({ label, caption, rows, emptyLabel = "暂无可用数据" }: { label: string; caption: string; rows: readonly OperationRow[]; emptyLabel?: string }) {
+  const pagination = useTablePagination(rows, label);
   return <div className="overflow-hidden rounded-lg border border-border">
     <Table aria-label={label} className="text-[13px]">
       <TableCaption className="m-0 border-t border-border px-4 py-2 text-left text-xs">{caption}</TableCaption>
       <TableHeader className="bg-surface-muted/60"><TableRow>
         {["指标", "次数", "成功", "失败", "取消", "未闭合", "未知"].map((name, index) => <TableHead key={name} scope="col" className={index === 0 ? "px-4 text-xs" : "text-right text-xs"}>{name}</TableHead>)}
       </TableRow></TableHeader>
-      <TableBody>{rows.length === 0 ? <TableRow><TableCell colSpan={7} className="px-4 py-6 text-center text-text-muted">{emptyLabel}</TableCell></TableRow> : rows.map(({ label: name, value }, index) => <TableRow key={`${name}-${index}`}>
+      <TableBody>{rows.length === 0 ? <TableRow><TableCell colSpan={7} className="px-4 py-6 text-center text-text-muted">{emptyLabel}</TableCell></TableRow> : pagination.items.map(({ label: name, value }, index) => <TableRow key={`${name}-${index}`}>
         <TableHead scope="row" className="max-w-64 whitespace-normal break-words px-4 py-3 font-medium text-text-strong">{name}</TableHead>
         <TableCell className="text-right font-semibold tabular-nums"><MetricValue metric={value.count} /></TableCell>
         <TableCell className="text-right tabular-nums">{value.completed}</TableCell>
@@ -72,6 +74,7 @@ function OperationsTable({ label, caption, rows, emptyLabel = "暂无可用数�
         <TableCell className="text-right tabular-nums text-text-muted">{value.unknown}</TableCell>
       </TableRow>)}</TableBody>
     </Table>
+    <TablePagination {...pagination} label={`${label}分页`} />
   </div>;
 }
 

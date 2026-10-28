@@ -20,6 +20,7 @@ import type { Data } from "@eval-platform/eval-dataset";
 import type { ImportPlan, ImportReceipt, PlannedResource, ResourceKind, ResourceSource, SourceSnapshot } from "../agent-imports/model.js";
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   check,
   foreignKey,
@@ -491,4 +492,45 @@ export const runEvaluations = pgTable("eval_run_evaluations", {
   foreignKey({ name: "eval_run_evaluations_run_fk", columns: [table.ownerUserId, table.runId], foreignColumns: [runs.ownerUserId, runs.runId] }).onDelete("cascade"),
   foreignKey({ name: "eval_run_evaluations_membership_fk", columns: [table.runId, table.samplingId], foreignColumns: [runSamplings.runId, runSamplings.samplingId] }),
   foreignKey({ name: "eval_run_evaluations_evaluation_fk", columns: [table.ownerUserId, table.evaluationId, table.samplingId], foreignColumns: [evaluations.ownerUserId, evaluations.evaluationId, evaluations.samplingId] }),
+]);
+
+export const dashboards = pgTable("eval_dashboards", {
+  dashboardId: uuid("dashboard_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
+  name: text("name").notNull(),
+  description: text("description").notNull().default(""),
+  excludedDataIds: text("excluded_data_ids").array().notNull().default(sql`'{}'::text[]`),
+  revision: bigint("revision", { mode: "number" }).notNull().default(1),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  creationKey: text("creation_key").notNull(),
+  creationFingerprint: text("creation_fingerprint").notNull(),
+}, (table) => [
+  unique("eval_dashboards_owner_id_uq").on(table.ownerUserId, table.dashboardId),
+  unique("eval_dashboards_owner_creation_key_uq").on(table.ownerUserId, table.creationKey),
+  index("eval_dashboards_owner_updated_idx").on(table.ownerUserId, table.updatedAt.desc(), table.dashboardId),
+  check("eval_dashboards_name_ck", sql`length(trim(${table.name})) > 0 AND length(${table.name}) <= 120`),
+  check("eval_dashboards_description_ck", sql`length(${table.description}) <= 2000`),
+  check("eval_dashboards_revision_ck", sql`${table.revision} > 0 AND ${table.revision} <= ${sql.raw(String(Number.MAX_SAFE_INTEGER))}`),
+  check("eval_dashboards_creation_ck", sql`length(${table.creationKey}) > 0 AND length(${table.creationFingerprint}) > 0`),
+]);
+
+export const dashboardProjects = pgTable("eval_dashboard_projects", {
+  ownerUserId: text("owner_user_id").notNull(),
+  dashboardId: uuid("dashboard_id").notNull(),
+  projectId: text("project_id").notNull(),
+  position: integer("position").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.dashboardId, table.projectId] }),
+  unique("eval_dashboard_projects_position_uq").on(table.dashboardId, table.position),
+  foreignKey({
+    name: "eval_dashboard_projects_dashboard_fk", columns: [table.ownerUserId, table.dashboardId],
+    foreignColumns: [dashboards.ownerUserId, dashboards.dashboardId],
+  }).onDelete("cascade"),
+  foreignKey({
+    name: "eval_dashboard_projects_project_fk", columns: [table.ownerUserId, table.projectId],
+    foreignColumns: [projects.ownerUserId, projects.projectId],
+  }),
+  index("eval_dashboard_projects_project_idx").on(table.ownerUserId, table.projectId),
+  check("eval_dashboard_projects_position_ck", sql`${table.position} >= 0`),
 ]);

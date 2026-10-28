@@ -26,9 +26,11 @@ import {
   jsonObjectInPlaceSchema,
   jsonObjectSchema,
   jsonValueSchema,
+  evidenceTrajectoryPinOf,
   summarizeResourceSnapshot,
   type AgentResourceSnapshot,
   type SpPiTrajectoryRecordReference,
+  type EvidenceExportProgress,
 } from "./index.js";
 
 describe("@eval-platform/eval-contracts", () => {
@@ -55,6 +57,23 @@ describe("@eval-platform/eval-contracts", () => {
     expect(DEFAULT_EVIDENCE_LIMITS.maxFileBytes).toBe(95_000_000);
     expect(EVIDENCE_SCHEMA_VERSION).toBe(2);
     expect(SP_PI_TRAJECTORY_FORMAT).toBe("sp-pi-trajectory/v1");
+  });
+
+  it("copies exactly the present trajectory pin fields out of saved progress", () => {
+    const cursor = { throughSeq: 5 };
+    const pinned: EvidenceExportProgress["trajectory"] = {
+      afterSeq: 2, parts: [], format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 5, cursor,
+    };
+    expect(evidenceTrajectoryPinOf(pinned)).toEqual({ format: SP_PI_TRAJECTORY_FORMAT, cursor });
+    expect(evidenceTrajectoryPinOf({ format: SP_PI_TRAJECTORY_FORMAT }))
+      .toEqual({ format: SP_PI_TRAJECTORY_FORMAT });
+    // Native progress saved before the generic pin existed already carried
+    // throughSeq; the Runtime must not drop that cutoff on a resumed pass.
+    const saved: EvidenceExportProgress["trajectory"] = {
+      afterSeq: 2, parts: [], format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 5,
+    };
+    expect(evidenceTrajectoryPinOf(saved)).toEqual({ format: SP_PI_TRAJECTORY_FORMAT, cursor });
+    expect(evidenceTrajectoryPinOf({})).toEqual({});
   });
 
   it("classifies every Agent status against the single terminal set", () => {

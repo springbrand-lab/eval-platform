@@ -22,14 +22,15 @@ Missing or ambiguous linkage stays partial/unavailable, not zero.
 body-free versioned metric facts. `compactNativeTrajectoryRecord` also accepts
 a checksum already verified over the *source bytes*, so the streaming
 record consumer saves only compact identity/facts, not a second copy
-of a large Pi body. The Eval API now collects the candidate bounded resource
-header and complete native/API-billing pages and stores their compact facts
-without a whole JS snapshot; cross-deployment compatibility still awaits the
-currently private/unpublished SP package and isolated DB verification.
+of a large Pi body. The Eval API collects bounded resource headers and native/API
+billing pages validated by the installed npm `@springbrand/eval-harness@0.1.0-alpha.7`
+schemas, storing compact facts without a whole JS snapshot. That published
+package lacks the post-wait partial request/byte contract; deployed SP
+compatibility and isolated DB verification remain release blockers.
 Withheld Tool lengths stay unknown, never zero; total
 usage and charges still come **only** from `usageEvents` and `billingSettlements`.
-Old event-only snapshots are not native. SP must publish its new public
-`@springbrand/eval-harness` release and pass [parity checks](../../docs/pi-native-eval-cutover.md)
+Old event-only snapshots are not native. SP must publish a public partial
+contract and pass [parity checks](../../docs/pi-native-eval-cutover.md)
 before an integrated result is claimed.
 
 Project 当前结果的只读统计与四层展示。只读取应用注入的一致事实快照，不运行 Agent，不读 SP 私有存储，不保存第二份状态。
@@ -78,13 +79,23 @@ await metrics.getSamplingDetail({ ...scope, samplingId });
 
 Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sampling 下。层级只来自 `facts.plan.datasets` 与 `facts.projectSamples`（Project 创建时的快照），不读实时目录。未运行的 ProjectSample 照常出现，数值为 null/unavailable。共享 ProjectSample 在每个 Dataset 行中出现，Project 汇总按 Sampling/Evaluation 身份去重。每层都从底层原始记录重算，不平均子层结果。默认读取当前结果全集；`runIds` 只过滤 Sampling/Evaluation，不改变固定绑定。
 
+## 已评分交集对比
+
+`createProjectComparison({ source })` 提供唯一的 `getComparison({ projectIds, datasetId?, jsonPointer?, excludedDataIds? })` Interface；比较无基线，各侧平等。`excludedDataIds` 在共同已评交集形成后、所有字段数量、数据集分组及原始事实聚合前排除 Data；它不是前端隐藏行，也不删除源数据。全部排除仍保留可恢复的共同字段定义，汇总为真实空范围；清空排除列表恢复当前有效交集。`ProjectComparisonSource.read(projectIds)` 必须在同一 owner 的同一一致性快照中提供各 Project 的完整 `MetricsFacts`，Module 复用原有事实校验、Schema 解释与原始记录聚合，不读取 SP 或实时目录，不保存另一份指标状态。
+
+不同 Schema 按共同 JSON Pointer 与兼容统计类型合并（number/integer 同属数值；枚举分类值域须一致，忽略声明顺序，不拼接部分重叠的值域），不要求整份 Schema 相同。共同字段还必须在共同 Data 上实际有有效非空观察；只有成功且 Schema 有效的评估贡献评分，0、false 是有效值，null、未评分、失败、无效输出不进入默认比较。指标切换明确选择一个共同词条：该词条在每个 Project 都有有效评分的 `dataId` 交集决定可比较数据，避免不同词条的有效覆盖范围被混算。没有指定词条时选首个有共同评分的词条；指定词条失去可比较结果时展示空范围，不暗中切换统计口径。
+
+`ProjectComparisonView.fields` 提供全范围可比较词条及各自共同已评数据数量；`selectedField` 指向当前词条。`datasets` 按各 Project 冻结的数据集归属分组当前词条的共同数据，同一个 Data 可出现在多个分组，但全局只算一次；不因数据集 ID 不同而丢失已对齐 Data。`datasetId` 仅缩小当前数据集范围，未知或已失效的数据集返回空范围，不回退成全范围。`summary` 从该范围全部有效底层记录重算，`rows` 各自提供该 Data 的权威聚合、有效 Sampling 身份、对称差异幅度和快照内容差异提示。单条数据选择使用对应 row 的已有投影，不在 Web 重新聚合；分页和定位搜索不改变范围汇总。
+
+资源只统计当前有效评分所关联的去重 Sampling，保留其全部 Attempt 消耗；返回执行 Agent 的实际积分、单 Agent 积分分布、Agent 耗时分布、缓存率和工具成功率，不混入评估 Agent 消耗。数值差异幅度是项目间均值的最大值减最小值，不隐含基线或“高分更好”；分类/布尔仅标分布是否不同。不进行统计显著性或自动胜负断言。返回复用现有 NumericSummary、OutputFieldSummary、MetricNumber，只投影比较所需资源，完整结果和产物仍走既有采样明细 Interface。
+
 每层 `MetricSummary` 包含：固定绑定数（datasets/data/projectSamples）、当前 samplings/evaluations、执行与评估阶段（状态分布、成功率、Attempt/重启、Agent 时长与 Attempt 时长）、`executionAgent` 与 `evaluationAgents` 分开的资源统计，以及 `evaluationOutputs`。`getSamplingDetail` 额外返回 Subject 与每个 Evaluator 的 `AgentMetricView`，以及每条评估的 `EvaluationOutputView`（原始文本、解析后的 JSON、校验结果、字段观察、产物、证据与轨迹引用）。
 
 ## 资源与轨迹
 
 所有数值观察共用 `NumericSummary`，返回有效 `count`、`missing`、total、mean、总体 variance、min、max、median。均值与方差仅以有值的 N 为分母；缺失不补零，真实零参与。N=0 时各统计为 null，N=1 时方差为 0。方差单位是原数值单位的平方。
 
-每层的 `executionAgent` / `evaluationAgents` 是 `AggregatedResourceStatistics`，在全范围来源身份去重后的累计资源上提供缓存命中率，并含 `distribution`：从各 Subject / Evaluator 的原始 Attempts 经同一资源解释器形成单 Agent 观察，再统计 Token（含缓存）、积分/成本、轮数、模型/工具次数及结果、思考步骤、内容步骤与两类对应的 Token、各工具和模型的分布。缓存命中率由 `cacheRead / (input + cacheRead)` 在 Metrics 内计算，并保留输入与缓存读取两者中较弱的 coverage；分母为零时为 null。思考与内容步骤都以唯一 native `generation` operationId 作为一个模型 Step；`request.taskId`/Pi `byTaskId` 与 `generation.finished.refs.assistantTimestamp` 用于关联同一 Step，不以请求条数代替执行事件。一个 Turn 可以包含多个 Step，一个 Step 可命中两类，数量、状态和耗时允许重叠。完整来源事实证明未调用某类型时才产生真实零；未知工具名或缺失/脱敏的 Pi 消息不能证明缺席，记为 missing/partial。工具长度和调用耗时按单次调用统计，Agent 时长按单 Agent，Schema 数值按字段观察值。绝不平均 Dataset/Sample 的下层汇总。
+每层的 `executionAgent` / `evaluationAgents` 是 `AggregatedResourceStatistics`，在全范围来源身份去重后的累计资源上提供缓存命中率，并含 `distribution`：从各 Subject / Evaluator 的原始 Attempts 经同一资源解释器形成单 Agent 观察，再统计 Token（含缓存）、积分/成本、轮数、模型/工具次数及结果、思考步骤、内容步骤与两类对应的 Token、各工具和模型的分布。缓存命中率由 `cacheRead / (input + cacheRead)` 在 Metrics 内计算，并保留输入与缓存读取两者中较弱的 coverage；分母为零时为 null。`trajectory.toolSuccessRate` 是已结束 native Tool 调用的成功数除以成功、失败、取消之和，排除未闭合与未知状态，保留工具调用数的来源 coverage；没有已结束调用时为 null，不当成 0%。思考与内容步骤都以唯一 native `generation` operationId 作为一个模型 Step；`request.taskId`/Pi `byTaskId` 与 `generation.finished.refs.assistantTimestamp` 用于关联同一 Step，不以请求条数代替执行事件。一个 Turn 可以包含多个 Step，一个 Step 可命中两类，数量、状态和耗时允许重叠。完整来源事实证明未调用某类型时才产生真实零；未知工具名或缺失/脱敏的 Pi 消息不能证明缺席，记为 missing/partial。工具长度和调用耗时按单次调用统计，Agent 时长按单 Agent，Schema 数值按字段观察值。绝不平均 Dataset/Sample 的下层汇总。
 
 原始 `AgentResourceSnapshot.usageEvents` 与 `.billingSettlements` 是总费用和 Token 的独立权威来源：模型账单按 `accountId + eventId`、Action 按 `executionId` 去重；Pi 消息 usage 只用于该 Step 的思考/内容分类 Token，不加到总费用/Token，不重新计价或把 reasoning 再加进 total。Native 记录按所属用户、Chat 和 `ingestSeq` 去重；失败、取消、重启 Attempt 的真实消耗照常计入。已提交但没有收集记录的 Attempt 记为 `uncollected` 并使结果不完整；从未提交的 Attempt 不制造缺失。缺失值为 null 并带 coverage（complete/partial/unavailable）与 diagnostics，只有完整空流才证明 0。
 
@@ -136,7 +147,7 @@ Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`�
 
 查询范围外的 Project/Run/Dataset/ProjectSample/Sampling 抛 `MetricsEntityNotFoundError`（entity 为 `project | run | dataset | project-sample | sampling`），非法查询抛 `MetricsQueryError`，来源事实不一致（重复身份、越界 Sampling、缺失绑定 ProjectSample、绑定与计划不符、Schema 与评估计划不符等）抛 `MetricsSourceError`。
 
-不实现实验对比、归因、查询缓存、指标持久化或 API/Web/CLI；本包只有包根入口。
+不实现归因、查询缓存、指标持久化或 API/Web/CLI；对比只读当前保留结果，不提供历史 Run 快照；本包只有包根入口。
 
 `createEvaluationScoreReader()` 为可选 Langfuse 集成提供只读派生接口：复用同一个 Schema presentation plan、严格 JSON 解析和安全数值校验，只从成功且校验通过的原始输出读取顶层 numeric score 与可选字符串 reason。每个 Schema 独立编译，复用 `$id` 不冲突；不保存另一份解析结果到 Runtime。
 

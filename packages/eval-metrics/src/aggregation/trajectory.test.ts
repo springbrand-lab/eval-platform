@@ -42,6 +42,38 @@ describe("actual public UA safe Pi trajectory facts", () => {
     });
   });
 
+  it("derives tool success from terminal native Tool facts, never from missing or unsettled facts", () => {
+    const all = nativeFixture(...Array.from({ length: 16 }, (_, index) => index + 1));
+    const failed = aggregateResources([nativeResourceInput([], { nativeRecords: all })]);
+    expect(failed.trajectory.tools).toMatchObject({ failed: 1, completed: 0 });
+    expect(failed.trajectory.toolSuccessRate).toEqual({ value: 0, coverage: "complete" });
+
+    const completedRows = structuredClone(all);
+    const finished = completedRows[10]!.record.record;
+    const toolResult = completedRows[9]!.record.record;
+    if (finished.type !== "entry" || toolResult.type !== "entry") throw new Error("Expected Pi Tool facts");
+    const data = finished.value.data as { event: { payload: { outcome: string } } };
+    data.event.payload.outcome = "completed";
+    const model = (toolResult.value.model as { isError: boolean }[])[0]!;
+    model.isError = false;
+    const completed = aggregateResources([nativeResourceInput([], { nativeRecords: completedRows })]);
+    expect(completed.trajectory.tools).toMatchObject({ completed: 1, failed: 0 });
+    expect(completed.trajectory.toolSuccessRate).toEqual({ value: 1, coverage: "complete" });
+
+    const partial = aggregateResources([nativeResourceInput([], {
+      nativeRecords: completedRows, finalized: false,
+      coverage: { usageEvents: "complete", nativeRecords: "partial", billingSettlements: "complete" },
+    })]);
+    expect(partial.trajectory.toolSuccessRate).toEqual({ value: 1, coverage: "partial" });
+    const pending = aggregateResources([nativeResourceInput([3, 8])]);
+    expect(pending.trajectory.toolSuccessRate.value).toBeNull();
+    expect(pending.trajectory.toolSuccessRate.coverage).toBe(pending.trajectory.tools.count.coverage);
+    expect(aggregateResources([nativeResourceInput([])]).trajectory.toolSuccessRate)
+      .toEqual({ value: null, coverage: "complete" });
+    const missing = aggregateResources([{ ownerUserId: "owner-1", submitted: true, collection: undefined }]);
+    expect(missing.trajectory.toolSuccessRate).toEqual({ value: null, coverage: "unavailable" });
+  });
+
   it("refuses a contradicted ingest cursor rather than assigning an arbitrary Tool name", () => {
     const source = nativeFixture(8)[0]!;
     const different = structuredClone(source);

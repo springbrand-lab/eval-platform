@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SP_PI_TRAJECTORY_FORMAT, type NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
+import {
+  SP_PI_TRAJECTORY_FORMAT, evidenceTrajectoryPinOf,
+  type EvidenceExportProgress, type NativeTrajectoryEntry,
+} from "@eval-platform/eval-contracts";
 import { createEvidenceStore, type AgentHandle, type ExportedTrajectoryPage } from "@eval-platform/eval-runtime/harness";
 import { EVAL_EVIDENCE_FILE_MAX_BYTES, evalEvidencePath, evalEvidenceTrajectoryPageSchema } from "@springbrand/eval-harness";
 import { describe, expect, it } from "vitest";
@@ -302,6 +305,9 @@ describe("SP Pi-native evidence export, persistence and import", () => {
         { after: "4", through: "8", token: SUBMISSION_ID }]);
       expect(evidence.manifest.schemaVersion).toBe(2);
       expect(evidence.manifest.trajectory).toMatchObject({ format: SP_PI_TRAJECTORY_FORMAT, records: 8, complete: true });
+      // The source was first pinned while reading the native page, not by
+      // an older event-only response during the artifact listing.
+      expect(exported).not.toHaveProperty("trajectoryCursor");
       expect(evidence.manifest.trajectory.parts.length).toBeGreaterThan(1);
       await harness.importEvidence({ handle: evaluator, idempotencyKey: "evidence", evidence, root: "/evidence" });
       expect(imported.at(-1)?.path).toBe("/manifest.json");
@@ -315,6 +321,64 @@ describe("SP Pi-native evidence export, persistence and import", () => {
         const file = imported.find((item) => item.path === `/subject-inputs/${ref.bundleId}/${ref.materialId}/same.txt`);
         expect(new TextDecoder().decode(file!.bytes)).toBe(`original ${ref.materialId}`);
       }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stores exactly the pinned range across an interrupted export and refuses a changed pin", async () => {
+    const root = await mkdtemp(join(tmpdir(), "eval-evidence-pinned-"));
+    try {
+      // SAFE Pi records 7 and 8 arrive after the first page pinned the export at 6.
+      const records = Array.from({ length: 8 }, (_, index) => native(index + 1));
+      const queries: Record<string, string>[] = [];
+      let failSecondPage = true;
+      const harness = createSpHarness({
+        origin: "https://sp.test", serviceToken: "service",
+        fetch: async (input, init) => {
+          const url = new URL(new Request(input, init).url);
+          if (url.pathname.endsWith("/artifacts")) return Response.json({ artifacts: [] });
+          queries.push(Object.fromEntries(url.searchParams));
+          const afterSeq = Number(url.searchParams.get("afterSeq"));
+          const throughSeq = Number(url.searchParams.get("throughSeq") ?? 6);
+          if (afterSeq > 0 && failSecondPage) {
+            failSecondPage = false;
+            return Response.json({ code: "EVIDENCE_NOT_READY", errMsg: "not ready" }, { status: 409 });
+          }
+          const batch = records.filter((entry) => entry.ingestSeq > afterSeq && entry.ingestSeq <= throughSeq).slice(0, 5);
+          const last = batch.at(-1)?.ingestSeq;
+          return Response.json(page(batch, throughSeq, last === undefined || last === throughSeq ? null : last));
+        },
+      });
+      const store = createEvidenceStore(await openLocalEvidenceBlobs(root));
+      let progress: EvidenceExportProgress | undefined;
+      const onProgress = async (next: EvidenceExportProgress) => { progress = structuredClone(next); };
+
+      const first = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
+      expect(first.trajectoryCursor).toBeUndefined();
+      await expect(store.resume({ evidence: first, limits, onProgress })).rejects.toMatchObject({ retryable: true, status: 409 });
+      expect(progress!.trajectory).toMatchObject({
+        format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 6, cursor: { throughSeq: 6 },
+      });
+      expect(progress!.trajectory.afterSeq).toBeGreaterThan(0);
+
+      // The next pass hands the saved pin back, as Runtime does; the Harness never pins again.
+      queries.length = 0;
+      const resumed = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits,
+        trajectory: evidenceTrajectoryPinOf(progress!.trajectory) });
+      const evidence = await store.open(await store.resume({ evidence: resumed, limits, progress: progress!, onProgress }));
+      expect(queries.length).toBeGreaterThan(0);
+      expect(queries.every((query) => query.throughSeq === "6")).toBe(true);
+      expect(evidence.manifest.trajectory).toMatchObject({ format: SP_PI_TRAJECTORY_FORMAT, records: 6 });
+      const lines = (await Promise.all(evidence.manifest.trajectory.parts.map(async (part) =>
+        new Response(await evidence.readBlob(part.sha256)).text()))).join("").trimEnd().split("\n").map((line) => JSON.parse(line));
+      expect(lines).toEqual(records.slice(0, 6));
+
+      // A pin that differs from the saved progress is never concatenated with it.
+      const moved = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits,
+        trajectory: { format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: 8 } } });
+      await expect(store.resume({ evidence: moved, limits, progress: progress! }))
+        .rejects.toMatchObject({ name: "EvidenceIntegrityError", retryable: false });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

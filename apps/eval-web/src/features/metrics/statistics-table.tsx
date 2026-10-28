@@ -1,5 +1,6 @@
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@springbrand/site-block";
 import type { NumericSummary } from "@/api-sdk/types";
+import { TablePagination, useTablePagination } from "@/components/ui/pagination";
 import { formatNumber, formatStatistic, standardDeviation } from "@/lib/format";
 
 export interface StatisticsRow {
@@ -12,6 +13,7 @@ export interface StatisticsRow {
 export function StatisticsTable({ label, description, rows, total = false, showHeader = true }: {
   label: string; description: string; rows: readonly StatisticsRow[]; total?: boolean; showHeader?: boolean;
 }) {
+  const pagination = useTablePagination(rows, label);
   return <section aria-label={label} className="min-w-0">
     {showHeader && <div className="mb-3">
       <div className="min-w-0">
@@ -34,7 +36,7 @@ export function StatisticsTable({ label, description, rows, total = false, showH
           <TableHead scope="col" className="text-right text-xs">有效 N</TableHead>
           <TableHead scope="col" className="pr-4 text-right text-xs">缺失</TableHead>
         </TableRow></TableHeader>
-        <TableBody>{rows.map(({ label: name, unit, summary, format = formatStatistic }, index) => {
+        <TableBody>{pagination.items.map(({ label: name, unit, summary, format = formatStatistic }, index) => {
           const show = (value: number | null) => value === null ? "未获得" : format(value);
           return <TableRow key={`${name}-${index}`}>
             <TableHead scope="row" className="max-w-64 whitespace-normal px-4 py-3">
@@ -53,6 +55,7 @@ export function StatisticsTable({ label, description, rows, total = false, showH
           </TableRow>;
         })}</TableBody>
       </Table>
+      <TablePagination {...pagination} label={`${label}分页`} />
     </div>
   </section>;
 }

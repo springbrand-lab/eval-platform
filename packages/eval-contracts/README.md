@@ -41,6 +41,10 @@ published SP `alpha.7` is the authority for the finalized wire, but lacks the
 post-wait `allowPartial` query and record-byte `resourceKey` public contract;
 local structural storage/byte checks do not establish live deployment parity.
 
+## Saved Dashboard configuration
+
+看板配置的 `excludedDataIds` 是已确认的数据展示排除集合，不是指标快照。创建时默认空集合；更新省略该字段时保留现有选择，显式空集合表示恢复全部。集合内身份唯一，配置仍使用同一 revision 防止丢失更新。
+
 Source-user IDs are opaque Auth identifiers, including legacy non-UUID IDs and
 the official account `springbrand-official` with its optional `official` flag.
 They are bounded to 200 characters and cannot contain whitespace, controls,
@@ -75,6 +79,8 @@ Web 轮询前者、停止自动轮询后者，不根据逐 Agent 的未知结果
 
 `EvalInputLimits` 与 `evalInputLimitsSchema` 定义控制面公开的输入上限形状，不定义 SP 或应用的数值。API 从实际校验常量投影，Web 通过 `GET /api/input-limits` 获取，不维护第二套数值。
 
+`Dashboard`、`DashboardInput`、`DashboardCreateInput`、`DashboardUpdateInput` 与对应严格 Schema 定义可保存的数据看板配置。配置只包含名称、说明、有序且不同的至少两个 Project；创建请求另带 `idempotencyKey`，编辑请求另带正整数 `revision`。读取结果提供 UUID `dashboardId`、配置版本与创建/更新时间，不包含 owner 凭据、指标缓存、历史结果或采样快照。Project 数量上限仍由 API 的 `comparisonProjects` 控制。创建和保存不会运行 Agent；当前比较结果继续由 Metrics 的公开 Interface 派生。
+
 `InitialResourceFile` 与 `initialResourceFileSchema` 定义初始素材、初始上下文共用的只读文件目录投影：资源内绝对路径、媒体类型、字节数。不包含内容副本、预览状态或 SP Workspace 身份。内容仍从 API 的 Bundle 目录按精确路径读取。
 
 `EVALUATION_RESULTS_MCP_PATH`、`isEvaluationResultsMcpUrl` 与 `resolveEvaluationResultsMcp` 是 Agent 用途分类和 Agent 编辑器共用的公开评估结果提交 MCP 判定；只有唯一启用且使用 Bearer 鉴权的用户 MCP 可用，分类不依赖 MCP 的展示名称或描述。
@@ -87,7 +93,7 @@ Agent 编辑器使用的 SP 领域错误由 `sp-editor-errors.ts` 从 SP 公开�
 
 `./web-gateway-errors` 是 Worker 与完整 HTTP 目录共用的轻量错误定义入口，拥有 takt 登录、Eval 权限及 Web 网关依赖不可用的错误；Worker 不加载完整 HTTP 目录或 SP 契约。浏览器解码既保留领域详情，也保留这些网关错误及认证语义。
 
-负责 Project 固定计划（`src/project.ts`）、Sampling、EvaluationRecord、Run、Harness、AgentObservationRef、ArtifactRef、TrajectoryRef 和 EvidenceRef 等公开运行/评估边界。`src/evidence.ts` 定义 Subject 的 `EvidenceBundleRef`（`Sampling.evidence`）、schemaVersion 2 的 `EvidenceManifest`、`EvidenceTrajectoryPart`、`EvidenceExportProgress`、Artifact/Omission、证据限额及导入路径；native `sp-pi-trajectory/v1` 原始行只保存一次。`EvidenceRef` 是 Evaluator 输出中的证据引用，两者不同。SP Chat 是持久 Session：Sampling 和 EvaluationRecord 各自标识 Chat，Attempt 保存该 Chat 内真实的 `submissionId`。Attempt 的 `AgentResourceState` 在提交前按 `chatId + idempotencyKey` 登记 `pending`，`collected` 只保存 `summarizeResourceSnapshot` 摘要（含 `submissionId` 与 usage/native/billing 数量），另有下载计数与放弃标记；原始内容在单独快照。`AgentResourceCollection` 仅在读取 Metrics 时按记录逐条附上该快照。Dataset/Data 由 `eval-dataset` 拥有，ProjectSample 由 `eval-runtime` 拥有；`Sampling.projectSampleId` 引用它。
+负责 Project 与其固定计划（`ProjectPlan`、`ExecutionPlan`、`EvaluationPlan`、Dataset 快照和 Agent Config 快照）、Sampling、EvaluationRecord、Run 选择/目标、HarnessConfig、ExecutionOutput、EvaluationAgentOutput、AgentObservationRef、ArtifactRef、TrajectoryRef 和 EvidenceRef 等公开边界。`src/evidence.ts` 定义 Subject 的 schemaVersion 2 `EvidenceBundleRef`、`EvidenceManifest`、`EvidenceTrajectoryPart`、`EvidenceExportProgress`、Artifact/Omission、`EvidenceLimits` 与路径常量；native `sp-pi-trajectory/v1` 原始行只存一次。`EvidenceTrajectoryPin`、`EvidenceTrajectoryCursor` 和 `evidenceTrajectoryPinOf` 保存/传递冻结的 native 格式与截止点，旧的 `throughSeq` 进度仍保留该截止点；未完成的旧事件格式不能当作 Pi 恢复。`EvidenceRef` 仍是 Evaluator 输出中的证据引用，不是 Subject 证据包。SP Chat 是持久 Session：Sampling 和 EvaluationRecord 各自标识 Chat，Attempt 保存该 Chat 内真实的 `submissionId`。Attempt 的 `AgentResourceState` 在投递前按 `chatId + idempotencyKey` 登记 `pending`，`collected` 只保存 `summarizeResourceSnapshot` 摘要（含 `submissionId` 与 usage/native/billing 数量），另有下载计数和放弃标记；原始正文在单独快照中，Metrics 按记录逐条读取。Dataset/Data 由 `eval-dataset` 拥有，ProjectSample 由 `eval-runtime` 拥有；`Sampling.projectSampleId` 引用它。
 
 JSON 值与标识符规则也只在这里定义：`jsonValueSchema`、`jsonObjectSchema`（有限数、安全整数、无环纯数据）、原地校验不复制的 `jsonObjectInPlaceSchema` 与 `jsonObjectArrayInPlaceSchema`（大体量原始记录，如资源快照事件数组，Eval API 线协议与 Runtime 共用）和 `identifierSchema`、`isIdentifier`、`IDENTIFIER_RULE`（非空且无首尾空白）。
 

@@ -31,6 +31,7 @@ export const IDENTIFIER_CHARS = 512;
 export const RUN_TARGET_IDS = 10_000;
 /** Most Samplings one ProjectSample creates per execution. */
 export const SAMPLING_COUNT_MAX = 100;
+export const COMPARISON_PROJECTS = 8;
 
 /** The browser reads the same bounds that the API enforces. */
 export const INPUT_LIMITS = Object.freeze({
@@ -44,6 +45,7 @@ export const INPUT_LIMITS = Object.freeze({
   promptDatasetFileBytes: PROMPT_DATASET_FILE_BYTES,
   runTargetIds: RUN_TARGET_IDS,
   samplingCountMax: SAMPLING_COUNT_MAX,
+  comparisonProjects: COMPARISON_PROJECTS,
 }) satisfies EvalInputLimits;
 
 /** One JSON string escape (`\uXXXX`) is the most bytes a single text unit can occupy in a body. */
