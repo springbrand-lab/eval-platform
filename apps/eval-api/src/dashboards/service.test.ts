@@ -5,6 +5,7 @@ import type { DashboardStore } from "./store.js";
 import { createDashboardService } from "./service.js";
 
 const dashboard: Dashboard = {
+  excludedDataIds: [],
   dashboardId: "abcdef00-0000-4000-8000-000000000001",
   name: "Board", description: "", projectIds: ["second", "first"], revision: 1,
   createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
@@ -32,8 +33,10 @@ describe("Dashboards application service", () => {
       { key: "create", fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u) },
     ]);
     expect(replay).toEqual(first);
+    await service.create({ ...input, excludedDataIds: [] });
+    expect(store.create.mock.calls.at(-1)).toEqual(first);
     await service.create({ ...input, projectIds: ["first", "second"] });
-    expect(store.create.mock.calls[2]?.[1].fingerprint).not.toBe(first?.[1].fingerprint);
+    expect(store.create.mock.calls.at(-1)?.[1].fingerprint).not.toBe(first?.[1].fingerprint);
   });
 
   it("passes the expected revision and canonical UUID to one atomic replacement", async () => {

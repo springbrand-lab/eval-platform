@@ -5,6 +5,7 @@ import { createOwnerServices } from "./owner-services.js";
 import { createEvalSpClient } from "./sp/client.js";
 import { createSpObservationClient } from "./sp/observation.js";
 import { requestApp, WEB_ORIGIN } from "./test-support.js";
+import { JSON_BODY_BYTES } from "./limits.js";
 
 function fixture() {
   const driver = metricsDriver([
@@ -40,6 +41,42 @@ function fixture() {
 }
 
 describe("comparison through real owner-service composition", () => {
+  it("accepts a bounded exclusion set in a read-only JSON comparison without URL-sized identity lists", async () => {
+    const f = fixture();
+    const response = await f.request("/api/metrics/comparison", {
+      method: "POST", headers: { ...f.headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ projectIds: ["first", "second"], excludedDataIds: ["data-1"], jsonPointer: "" }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ success: true, msg: { rows: [] } });
+    expect(f.queries[0]?.text).toBe("begin isolation level repeatable read read only");
+    expect(f.queries.at(-1)?.text).toBe("commit");
+    expect(f.fetch).not.toHaveBeenCalled();
+    expect(f.sideEffect).not.toHaveBeenCalled();
+    for (const patch of [{ excludedDataIds: ["data-1", "data-1"] }, { excludedDataIds: "data-1" }, { scores: [] }]) {
+      const invalid = await f.request("/api/metrics/comparison", {
+        method: "POST", headers: { ...f.headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ projectIds: ["first", "second"], ...patch }),
+      });
+      expect(invalid.status).toBe(422);
+    }
+  });
+
+  it("guards JSON comparison bodies and owner scope before returning any selected Data", async () => {
+    const f = fixture();
+    const path = "/api/metrics/comparison";
+    const send = (body: unknown, headers = f.headers) => f.request(path, {
+      method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect((await send({ projectIds: ["first", "second"] }, { ...f.headers, Origin: "https://foreign.test" })).status).toBe(403);
+    expect((await send({ projectIds: ["first", "second"], excludedDataIds: ["x".repeat(JSON_BODY_BYTES)] })).status).toBe(413);
+    expect(f.connect).not.toHaveBeenCalled();
+    expect((await send({ projectIds: ["first", "foreign"], excludedDataIds: ["data-1"] })).status).toBe(404);
+    expect(f.queries.at(-1)?.text).toBe("rollback");
+    expect(f.fetch).not.toHaveBeenCalled();
+    expect(f.sideEffect).not.toHaveBeenCalled();
+  });
+
   it("returns the Metrics empty-intersection projection from one owner-scoped SQL snapshot without side effects", async () => {
     const f = fixture();
     const response = await f.request("/api/metrics/comparison?projectId=second&projectId=first&jsonPointer=", { headers: f.headers });

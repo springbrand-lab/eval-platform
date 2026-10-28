@@ -27,14 +27,17 @@ export function createDashboardService(store: DashboardStore): DashboardService 
       return dashboard;
     },
     async create(command) {
-      const { name, description, projectIds, idempotencyKey } = dashboardCreateInputSchema.parse(command);
-      const input = { name, description, projectIds };
+      const { name, description, projectIds, idempotencyKey, excludedDataIds } = dashboardCreateInputSchema.parse(command);
+      const input = { name, description, projectIds, ...(excludedDataIds?.length ? { excludedDataIds: [...excludedDataIds].sort() } : {}) };
       return store.create(input, { key: idempotencyKey, fingerprint: await sha256Hex(canonicalJsonBytes(input)) });
     },
     async update(dashboardId, command) {
       const id = dashboardSchema.shape.dashboardId.parse(dashboardId);
-      const { name, description, projectIds, revision } = dashboardUpdateInputSchema.parse(command);
-      return store.update(id, { name, description, projectIds }, revision);
+      const { name, description, projectIds, revision, excludedDataIds } = dashboardUpdateInputSchema.parse(command);
+      return store.update(id, {
+        name, description, projectIds,
+        ...(excludedDataIds === undefined ? {} : { excludedDataIds: [...excludedDataIds].sort() }),
+      }, revision);
     },
   };
 }

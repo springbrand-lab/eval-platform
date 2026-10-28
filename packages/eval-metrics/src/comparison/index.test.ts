@@ -41,6 +41,33 @@ function projectFacts(projectId: string, schema: EvaluationOutputSchema, cases: 
 const comparisonOf = (...records: readonly MetricsFacts[]) => createProjectComparison({ source: { read: async () => records } });
 
 describe("scored Project intersection comparison", () => {
+  it("excludes confirmed Data before every group and raw-observation aggregate and restores the whole scored intersection", async () => {
+    const left = projectFacts("left", NUMERIC_SCHEMA, [
+      { dataId: DATA_1, datasetIds: ["one", "shared"], results: [{ score: 0 }, { score: 10 }] },
+      { dataId: DATA_2, datasetIds: ["shared", "two"], results: [{ score: 100 }] },
+    ]);
+    const right = projectFacts("right", NUMERIC_SCHEMA, [
+      { dataId: DATA_1, datasetIds: ["one", "shared"], results: [{ score: 20 }] },
+      { dataId: DATA_2, datasetIds: ["shared", "two"], results: [{ score: 200 }, { score: 400 }] },
+    ]);
+    const comparison = comparisonOf(left, right);
+    const selected = await comparison.getComparison({ projectIds: PROJECT_IDS, excludedDataIds: [DATA_2] });
+    expect(selected.rows.map((row) => row.dataId)).toEqual([DATA_1]);
+    expect(selected.fields[0]?.dataCount).toBe(1);
+    expect(selected.datasets.map((item) => [item.datasetId, item.dataCount])).toEqual([["one", 1], ["shared", 1]]);
+    expect(selected.summary.map((item) => [item.dataCount, item.samplingCount, item.score?.numeric?.mean])).toEqual([[1, 2, 5], [1, 1, 20]]);
+    const empty = await comparison.getComparison({ projectIds: PROJECT_IDS, excludedDataIds: [DATA_1, DATA_2] });
+    expect(empty.selectedField?.jsonPointer).toBe("/score");
+    expect(empty.rows).toEqual([]);
+    expect(empty.datasets).toEqual([]);
+    expect(empty.summary.map((item) => [item.dataCount, item.samplingCount, item.score])).toEqual([[0, 0, null], [0, 0, null]]);
+    const restored = await comparison.getComparison({ projectIds: PROJECT_IDS, excludedDataIds: [] });
+    expect(restored.rows.map((row) => row.dataId)).toEqual([DATA_1, DATA_2]);
+    expect(restored.summary.map((item) => item.score?.numeric?.mean)).toEqual([110 / 3, 620 / 3]);
+    expect(left.projectSamples).toHaveLength(2);
+    expect(right.samplings).toHaveLength(3);
+  });
+
   it("compares the common numeric field across different Schemas and retains a real zero", async () => {
     const left = projectFacts("left", NUMERIC_SCHEMA, [
       { dataId: DATA_1, results: [{ score: 0 }] }, { dataId: DATA_2, results: [{ score: 8 }] },
@@ -208,6 +235,8 @@ describe("scored Project intersection comparison", () => {
     { projectIds: ["left", "left"] }, { projectIds: ["left", " right"] }, { projectIds: ["left", 1] },
     { projectIds: ["left", ""] }, { projectIds: ["left", null] }, { projectIds: [, "right"] },
     { projectIds: PROJECT_IDS, datasetId: "" }, { projectIds: PROJECT_IDS, datasetId: " shared" },
+    { projectIds: PROJECT_IDS, excludedDataIds: null }, { projectIds: PROJECT_IDS, excludedDataIds: DATA_1 },
+    { projectIds: PROJECT_IDS, excludedDataIds: [DATA_1, DATA_1] }, { projectIds: PROJECT_IDS, excludedDataIds: [""] },
     { projectIds: PROJECT_IDS, datasetId: null }, { projectIds: PROJECT_IDS, jsonPointer: "score" },
     { projectIds: PROJECT_IDS, jsonPointer: "/bad~escape" }, { projectIds: PROJECT_IDS, jsonPointer: "/bad~" },
     { projectIds: PROJECT_IDS, jsonPointer: 1 }, { projectIds: PROJECT_IDS, jsonPointer: null },
@@ -363,6 +392,18 @@ describe("scored Project intersection comparison", () => {
       score: { observationCount: 6, numeric: { mean: 5 } },
     });
     expect(view.rows[1]!.projects[0]!.score?.numeric?.mean).toBe(20);
+    const selected = await comparisonOf(left, right).getComparison({ projectIds: PROJECT_IDS, excludedDataIds: [DATA_2] });
+    expect(selected.summary[0]).toMatchObject({
+      dataCount: 1, samplingCount: 2, evaluationCount: 3,
+      score: { numeric: { mean: 5, count: 6 } },
+      resources: {
+        chargedUnits: { value: 8, coverage: "complete" },
+        chargedUnitsPerAgent: { mean: 4, total: 8 },
+        agentDurationMs: { count: 2, total: 5_000, mean: 2_500 },
+        toolSuccessRate: { value: 2 / 3, coverage: "complete" },
+      },
+    });
+    expect(selected.summary[0]?.resources.cacheHitRate.value).toBeCloseTo(14 / 20);
   });
 
   it("preserves unavailable resource values instead of inventing zeros while retaining a scored zero", async () => {

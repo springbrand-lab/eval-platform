@@ -498,6 +498,7 @@ export const dashboards = pgTable("eval_dashboards", {
   ownerUserId: text("owner_user_id").notNull(),
   name: text("name").notNull(),
   description: text("description").notNull().default(""),
+  excludedDataIds: text("excluded_data_ids").array().notNull().default(sql`'{}'::text[]`),
   revision: bigint("revision", { mode: "number" }).notNull().default(1),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

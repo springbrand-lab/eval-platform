@@ -130,6 +130,7 @@ describe("persisted Dashboards through HTTP and real owner services", () => {
     f.projects.set("foreign-second", { ownerUserId: "other-owner", deletedAt: null });
     f.seedDashboard({
       dashboardId: unknownId, name: "Private configuration", description: "Private description",
+      excludedDataIds: [],
       projectIds: ["foreign", "foreign-second"], revision: 5,
       createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
     }, "other-owner");

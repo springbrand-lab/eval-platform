@@ -8,6 +8,8 @@
 
 ## 项目评估结果下载
 
+看板数据展示选择复用配置更新 Interface 和 revision；`excludedDataIds` 持久化在看板配置，省略更新时不清空，显式空集合恢复全部。`POST /api/metrics/comparison` 是有界 JSON 请求的只读对比 Interface，避免大量 Data 身份塞进 URL；仍使用同一快照和 Metrics 聚合，不运行 Agent，也不写指标。新增迁移只添加空排除集合列，不修改已有看板或评估事实。
+
 `GET /api/projects/{projectId}/evaluation-results.zip` 在同一只读快照中导出项目当前留存的全部采样与评估记录，不受页面筛选或 Run 选择影响；未知、其他所有者或软删除项目返回 `404 PROJECT_NOT_FOUND`。ZIP 按 `project/dataset/sample/sampling` 的固定身份分层，共享用例按项目冻结的数据集归属分别保存。原始评估结果以独立 JSON 文件原样保存，包含无效结果；缺失或未完成结果只保存状态元数据。目录、元数据文件名与响应保护见 [HTTP 下载契约](../../docs/eval-http-api.md#projects)。
 
 下载只读取 Eval 已存事实，不运行 Agent、不补收结果、不读取 SP，不导出 Agent 配置正文、结果提交凭据、原始资源快照或 Workspace/证据文件内容。数据库读取及 ZIP 输出须有界流式处理，不一次性加载全部结果正文或整个压缩包。

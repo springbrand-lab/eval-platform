@@ -12,6 +12,7 @@ const appliedPrefix = [
   [1792419566642, "367b578f6d9bd4095526a2a75a365a6aa2cd6d4739148dbbed8ecac7d23892a3"],
   [1792440426582, "dba1521d998f78ed6739ea7606b922d73b6c58c019a67f3b97114167514c9bf7"],
   [1792517619186, "fbd9e2a5e49739c4d0887eba6c95696f54167a718c3a975525165f96376e3a92"],
+  [1793176731034, "3cab810e0d98f97d930ce9638a9afac0bb4dcd25ce4a49837be8a79f19f1afe8"],
 ];
 
 async function metadata(name: string) {
@@ -24,7 +25,7 @@ describe("offline Dashboard migration integrity", () => {
     expect(migrations.slice(0, appliedPrefix.length).map((migration) => [migration.folderMillis, migration.hash])).toEqual(appliedPrefix);
     expect(migrations).toHaveLength(appliedPrefix.length + 1);
     const journal = await metadata("_journal.json");
-    expect(journal.entries.at(-1)).toMatchObject({ idx: 7, tag: "0007_dashboards", breakpoints: true });
+    expect(journal.entries.at(-1)).toMatchObject({ idx: 8, tag: "0008_dashboard_data_selection", breakpoints: true });
     expect(migrations.at(-1)!.folderMillis).toBeGreaterThan(migrations.at(-2)!.folderMillis);
   });
 
@@ -49,5 +50,18 @@ describe("offline Dashboard migration integrity", () => {
   it("provides self-contained DDL with no runtime bind parameters", () => {
     const migration = readMigrationFiles({ migrationsFolder }).at(-1)!;
     expect(migration.sql.filter((statement) => /\$\d+/u.test(statement))).toEqual([]);
+  });
+
+  it("adds only an initially empty exclusion set without changing existing facts or migration history", async () => {
+    const previous = await metadata("0007_snapshot.json");
+    const current = await metadata("0008_snapshot.json");
+    expect(current.prevId).toBe(previous.id);
+    const { excluded_data_ids: added, ...columns } = current.tables["public.eval_dashboards"].columns;
+    expect(added).toMatchObject({ type: "text[]", notNull: true, default: "'{}'::text[]" });
+    expect(columns).toEqual(previous.tables["public.eval_dashboards"].columns);
+    for (const [name, table] of Object.entries(previous.tables)) {
+      if (name !== "public.eval_dashboards") expect(current.tables[name]).toEqual(table);
+    }
+    expect(readMigrationFiles({ migrationsFolder }).at(-1)?.sql.join(" ")).not.toMatch(/\b(DROP|DELETE|TRUNCATE)\b/iu);
   });
 });

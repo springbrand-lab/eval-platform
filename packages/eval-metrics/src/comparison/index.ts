@@ -17,12 +17,16 @@ function validateQuery(input: ProjectComparisonQuery): ProjectComparisonQuery {
   if (!Array.isArray(input.projectIds) || input.projectIds.length < 2) throw new MetricsQueryError("projectIds must contain at least two Projects");
   const projectIds = Array.from(input.projectIds, (id) => identifier(id, "projectId"));
   if (new Set(projectIds).size !== projectIds.length) throw new MetricsQueryError("projectIds must not contain duplicates");
+  if (input.excludedDataIds !== undefined && !Array.isArray(input.excludedDataIds)) throw new MetricsQueryError("excludedDataIds must be an array");
+  const excludedDataIds = Array.from(input.excludedDataIds ?? [], (id) => identifier(id, "dataId"));
+  if (new Set(excludedDataIds).size !== excludedDataIds.length) throw new MetricsQueryError("excludedDataIds must not contain duplicates");
   if (input.jsonPointer !== undefined && (typeof input.jsonPointer !== "string"
     || !/^(?:\/(?:[^~]|~[01])*)?$/.test(input.jsonPointer))) {
     throw new MetricsQueryError("jsonPointer must be a JSON Pointer");
   }
   return {
     projectIds,
+    excludedDataIds,
     ...(input.datasetId === undefined ? {} : { datasetId: identifier(input.datasetId, "datasetId") }),
     ...(input.jsonPointer === undefined ? {} : { jsonPointer: input.jsonPointer }),
   };
@@ -162,6 +166,7 @@ export function createProjectComparison(dependencies: { readonly source: Project
         throw new MetricsSourceError("Source returned Projects belonging to different owners");
       }
       const intersections = new Map<string, readonly string[]>();
+      const excluded = new Set(query.excludedDataIds);
       const fields: ComparisonField[] = [];
       for (const [pointer] of projects[0]!.fields) {
         const definitions = projects.map((project) => project.fields.get(pointer));
@@ -170,8 +175,9 @@ export function createProjectComparison(dependencies: { readonly source: Project
           .filter((id) => projects.every((project) => project.scored.get(pointer)?.has(id))).sort();
         if (dataIds.length === 0) continue;
         const definition = selectOutputFields(definitions.map((definition) => new Map([[pointer, definition]]))).get(pointer)!;
-        fields.push({ ...definition, dataCount: dataIds.length });
-        intersections.set(pointer, dataIds);
+        const included = dataIds.filter((id) => !excluded.has(id));
+        fields.push({ ...definition, dataCount: included.length });
+        intersections.set(pointer, included);
       }
       const selectedField = query.jsonPointer === undefined ? fields[0] ?? null : fields.find((field) => field.jsonPointer === query.jsonPointer) ?? null;
       const allDataIds = selectedField === null ? [] : intersections.get(selectedField.jsonPointer)!;

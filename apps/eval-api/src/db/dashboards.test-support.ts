@@ -1,4 +1,4 @@
-import type { Dashboard } from "@eval-platform/eval-contracts";
+import { dashboardDataExclusionsSchema, type Dashboard } from "@eval-platform/eval-contracts";
 import { DatabaseError } from "pg";
 import { dashboardProjects, dashboards } from "./schema.js";
 import { createTestDriver, driverRow, type TestDriverQuery } from "./test-driver.js";
@@ -130,6 +130,7 @@ export function dashboardsDriver() {
       const row: DashboardRow = {
         dashboardId: String(values.dashboard_id), ownerUserId: String(values.owner_user_id),
         name: String(values.name), description: String(values.description ?? ""), revision: Number(values.revision ?? 1),
+        excludedDataIds: values.excluded_data_ids === undefined ? [] : dashboardDataExclusionsSchema.parse(dashboards.excludedDataIds.mapFromDriverValue(String(values.excluded_data_ids))),
         creationKey: String(values.creation_key), creationFingerprint: String(values.creation_fingerprint),
         createdAt: now, updatedAt: now,
       };
@@ -177,6 +178,8 @@ export function dashboardsDriver() {
         else row[field] = String(value);
       }
       row.updatedAt = new Date(clock++);
+      const exclusion = /"excluded_data_ids" = \$(\d+)/u.exec(assignments);
+      if (exclusion) row.excludedDataIds = dashboardDataExclusionsSchema.parse(dashboards.excludedDataIds.mapFromDriverValue(String(params[Number(exclusion[1]) - 1])));
       return [driverRow(dashboards, row)];
     }
     if (text.startsWith('delete from "eval_dashboard_projects" ')) {
@@ -202,6 +205,7 @@ export function dashboardsDriver() {
     state.dashboards.set(dashboard.dashboardId, {
       dashboardId: dashboard.dashboardId, ownerUserId, name: dashboard.name, description: dashboard.description,
       revision: dashboard.revision, createdAt: new Date(dashboard.createdAt), updatedAt: new Date(dashboard.updatedAt),
+      excludedDataIds: dashboard.excludedDataIds ?? [],
       creationKey: dashboard.dashboardId, creationFingerprint: "seeded",
     });
     state.projects.push(...dashboard.projectIds.map((projectId, position) => ({

@@ -14,6 +14,7 @@ import { cn } from "@/lib/cn";
 import { formatNumber, formatStatistic } from "@/lib/format";
 import { ComparisonScore } from "./comparison-summary";
 import type { ChangeDashboardSearch, DashboardSearch } from "./dashboard-search";
+import type { DataSelection } from "./data-selection";
 
 const SamplingResult = lazy(() => import("@/features/results/sampling-detail-page").then((module) => ({ default: module.SamplingResult })));
 export type DataPagination = ReturnType<typeof useTablePagination<ComparisonDataRow>>;
@@ -47,9 +48,10 @@ export function NoMatchingData({ onChange }: { onChange: ChangeDashboardSearch }
     action={<Button size="sm" onClick={() => onChange({ dataSearch: undefined, differences: undefined, dataPage: undefined })}>清空数据筛选</Button>} />;
 }
 
-export function ComparisonDataTable({ view, search, onChange, pagination, viewMode = "evaluation" }: {
-  view: ProjectComparisonView; search: DashboardSearch; onChange: ChangeDashboardSearch; pagination: DataPagination; viewMode?: ComparisonViewMode;
+export function ComparisonDataTable({ view, search, onChange, pagination, viewMode = "evaluation", selection }: {
+  view: ProjectComparisonView; search: DashboardSearch; onChange: ChangeDashboardSearch; pagination: DataPagination; viewMode?: ComparisonViewMode; selection?: DataSelection;
 }) {
+  const selectedOnPage = selection ? pagination.items.filter((row) => selection.checked(row.dataId)).length : 0;
   return <Card className="min-w-0">
     <CardHeader title="逐条数据对比" description={viewMode === "evaluation"
       ? "定位评分差异，再打开数据查看各项目的评估理由与产物。数值不同不代表提升。"
@@ -57,11 +59,16 @@ export function ComparisonDataTable({ view, search, onChange, pagination, viewMo
     <div className="border-b border-border px-4 py-3"><DataSearch search={search} onChange={onChange} viewMode={viewMode} /></div>
     {!pagination.items.length ? <NoMatchingData onChange={onChange} /> : <Table aria-label="逐条数据对比" className="w-full text-xs" style={{ minWidth: (viewMode === "evaluation" ? 340 : 210) + view.projects.length * 210 }}>
       <TableHeader><TableRow className="bg-surface-muted/60">
+        {selection && <TableHead className="w-10 px-3"><Checkbox aria-label="全选当前页共同数据" disabled={selection.frozen}
+          checked={selectedOnPage === pagination.items.length} indeterminate={selectedOnPage > 0 && selectedOnPage < pagination.items.length}
+          onCheckedChange={(checked) => selection.change(pagination.items.map((row) => row.dataId), checked)} /></TableHead>}
         <TableHead className="h-10 min-w-52 px-4 text-xs font-medium">共同数据</TableHead>
         {view.projects.map((meta) => <TableHead key={meta.project.projectId} className="min-w-48 px-4 text-xs font-medium"><span className="line-clamp-2 max-w-52 break-words">{meta.project.name}</span></TableHead>)}
         {viewMode === "evaluation" && <TableHead className="whitespace-nowrap px-4 text-right text-xs font-medium" title="由 Metrics 提供的当前指标差异，不表示胜负或统计显著性">评分差异</TableHead>}
       </TableRow></TableHeader>
       <TableBody>{pagination.items.map((row) => <TableRow key={row.dataId} className="border-b border-border last:border-0 hover:bg-surface-hover">
+        {selection && <TableCell className="w-10 px-3 py-3 align-top"><Checkbox aria-label={`纳入 ${dataTitle(row.data)}`} checked={selection.checked(row.dataId)}
+          disabled={selection.frozen} onCheckedChange={(checked) => selection.change([row.dataId], checked)} /></TableCell>}
         <TableCell className="max-w-72 px-4 py-3">
           <Link to="/dashboard" search={{ ...search, dataId: row.dataId, sampling: undefined }} aria-label={`打开 ${dataTitle(row.data)}`}
             className="group flex items-start gap-2 text-left font-semibold leading-5 text-text-strong hover:underline">

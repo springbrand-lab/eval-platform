@@ -328,9 +328,13 @@ The observation data routes read the service account's Chat from Eval SP server-
 | `GET /api/dashboards/{dashboardId}` | `Dashboard` 或统一 not-found |
 | `PUT /api/dashboards/{dashboardId}` | `DashboardUpdateInput {name, description?, projectIds, revision}` → 保存后的 `Dashboard` |
 
+看板配置还包含已确认的 `excludedDataIds`：创建省略时为空，更新省略时保留，显式 `[]` 恢复全部。集合身份不得重复，数量不超过 `runTargetIds`；保存沿用同一配置 revision，不覆盖并发编辑。被排除的 Data、采样、评分和产物不会被删除。
+
 看板名称非空；Project 必须不同、至少两个且不超过 `comparisonProjects`，创建/更新的所有 Project 必须 owned、未删除且至少已有一个已准入 Run，不能引用可能被首 Run 失败补偿撤销的暂存项目；不要求 Run 执行成功。请求不接受指标、结果快照、owner 选择器或临时下钻状态。看板身份为 UUID，响应含名称、说明、有序 Project IDs、revision、createdAt、updatedAt；配置不保存指标。创建的 owner + 幂等键绑定首次规范请求，同请求重放返回同一看板，不同请求重用键返回冲突；编辑使用 revision 防止丢失更新。所有配置/关联写入同事务成功或失败，无跨 owner 部分写入；未知或 foreign 看板统一 not-found。创建和编辑不调用 Agent、SP 或队列；看板只引用当前 Project，结果仍从现有 Metrics 比较读取，不承诺历史结果冻结。
 
 ### Metrics
+
+`POST /api/metrics/comparison` 是只读的 JSON 对比入口，接受 `{projectIds, datasetId?, jsonPointer?, excludedDataIds?}`，用于携带不宜放入 URL 的数据排除集合。它与 GET 复用同一 owner 校验、同一只读快照和同一 Metrics Interface；请求正文受标准 JSON 大小及身份数量上限保护，不写数据库、不执行 Agent。排除先于字段计数、数据集分组和原始事实聚合，因此全看板使用同一保留范围；全部排除保留字段定义及空范围，便于恢复。
 
 `GET /api/metrics/comparison?projectId=A&projectId=B&datasetId=<optional>&jsonPointer=<optional>` 返回 `ProjectComparisonView`。需要至少两个不同的 owned Project，数量不超过 `GET /api/input-limits` 返回的 `comparisonProjects`（当前 8）；重复、非法、越界及未知查询参数沿用统一查询校验错误，未授权或已删除 Project 不泄露结果，返回 Metrics 的现有 not-found 错误。所选 Project 的事实来自同一 owner 的同一只读一致性事务。
 
