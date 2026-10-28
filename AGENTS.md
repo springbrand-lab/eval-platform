@@ -23,3 +23,5 @@
 ## Verification
 
 - `pnpm check`, then `DATABASE_URL=postgres://<user>:<pass>@<host>:<port>/<db> pnpm -r --no-bail test`; without `DATABASE_URL` the PostgreSQL integration tests are skipped.
+- If concurrent local suites trigger the SP Harness millisecond elapsed-time assertions, rerun with `pnpm -r --workspace-concurrency=1 --no-bail test` to avoid API/Web resource contention; do not relax the assertions.
+- If contention persists within a workspace, run `pnpm --filter @eval-platform/eval-api exec vitest run --maxWorkers=1` or `pnpm --filter @eval-platform/eval-web exec vitest run --maxWorkers=2`; keep the existing timeouts and assertions unchanged.

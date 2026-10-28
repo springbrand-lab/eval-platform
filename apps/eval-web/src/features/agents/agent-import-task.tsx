@@ -1,6 +1,7 @@
 import type { AgentImportTaskView } from "@eval-platform/eval-contracts";
 import { Progress, ProgressLabel, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@springbrand/site-block";
 import { Notice } from "@/components/ui/feedback";
+import { TablePagination, useTablePagination } from "@/components/ui/pagination";
 import { formatBytes, formatDateTime } from "@/lib/format";
 
 const STATUS_LABELS: Record<AgentImportTaskView["status"], string> = {
@@ -27,6 +28,7 @@ const STAGE_LABELS: Readonly<Record<string, string>> = {
 export function AgentImportTask({ task, userName, expired, restored = false }: {
   task: AgentImportTaskView; userName: string; expired: boolean; restored?: boolean;
 }) {
+  const pagination = useTablePagination(task.agents, task.id);
   const ready = task.agents.filter((agent) => agent.status === "ready").length;
   const unknown = task.agents.filter((agent) => agent.status === "outcome_unknown").length;
   const recovering = task.status === "importing" && (task.progress.stage === "receipts" || unknown > 0);
@@ -67,7 +69,7 @@ export function AgentImportTask({ task, userName, expired, restored = false }: {
     {task.error && <p role="alert" className="whitespace-pre-wrap break-words text-[13px] text-danger">{task.error}</p>}
     <Table aria-label="逐 Agent 导入结果">
       <TableHeader><TableRow><TableHead>Agent</TableHead><TableHead>必要依赖</TableHead><TableHead>结果与原因</TableHead></TableRow></TableHeader>
-      <TableBody>{task.agents.map((agent) => <TableRow key={agent.id}>
+      <TableBody>{pagination.items.map((agent) => <TableRow key={agent.id}>
         <TableCell className="min-w-40 whitespace-normal"><span className="font-semibold">{agent.name}</span>
           <p className="mt-1 break-all font-mono text-xs text-text-muted">{agent.id}</p></TableCell>
         <TableCell className="text-xs">Skill {agent.skillCount}<br />参考资料 {agent.referenceCount}</TableCell>
@@ -78,6 +80,7 @@ export function AgentImportTask({ task, userName, expired, restored = false }: {
         </TableCell>
       </TableRow>)}</TableBody>
     </Table>
+    <TablePagination {...pagination} label="逐 Agent 导入结果分页" />
     <p className="text-xs text-text-muted">每行依赖数量可能重叠，不合计为去重资源数；服务端只处理所选 Agent 的必要依赖并集。</p>
   </section>;
 }

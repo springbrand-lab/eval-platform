@@ -80,6 +80,8 @@ export function aggregateTelemetry(
   const complete = stream.complete && grouped.complete && observed.every((operation) => operation.consistent);
   const ofKind = (kind: OperationKind) => observed.filter((operation) => operation.kind === kind);
   const tools = ofKind("tool");
+  const toolStatistics = operationStatistics(tools, complete);
+  const terminalTools = toolStatistics.completed + toolStatistics.failed + toolStatistics.cancelled;
   const toolNamesKnown = tools.every((operation) => operation.toolName !== null);
   const toolGroups = new Map<string | null, ObservedOperation[]>();
   for (const operation of tools) toolGroups.set(operation.toolName, [...toolGroups.get(operation.toolName) ?? [], operation]);
@@ -89,7 +91,11 @@ export function aggregateTelemetry(
     trajectory: {
       coverage: coverage(complete, observed.length > 0),
       turns: operationStatistics(ofKind("turn"), complete),
-      tools: operationStatistics(tools, complete),
+      tools: toolStatistics,
+      toolSuccessRate: {
+        value: terminalTools === 0 ? null : toolStatistics.completed / terminalTools,
+        coverage: toolStatistics.count.coverage,
+      },
       byTool: [...toolGroups.entries()]
         .map(([toolName, operations]) => toolMetric(toolName, operations, complete && (toolName === null || toolNamesKnown)))
         .sort((left, right) => (left.toolName ?? "").localeCompare(right.toolName ?? "")),

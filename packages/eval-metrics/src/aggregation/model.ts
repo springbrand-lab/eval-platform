@@ -108,6 +108,7 @@ export interface TrajectorySummary {
   readonly coverage: AgentResourceCompleteness;
   readonly turns: OperationStatistics;
   readonly tools: OperationStatistics;
+  readonly toolSuccessRate: MetricNumber;
   readonly byTool: readonly ToolMetric[];
   /** Model steps whose output or owning Turn contains thinking/signature markers. */
   readonly thinkingSteps: MetricNumber;

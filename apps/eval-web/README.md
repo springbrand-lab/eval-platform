@@ -6,6 +6,8 @@ Eval 的内部管理界面：准备测试集与初始资源、上传评估结果
 
 与 sp-platform `apps/web` 对齐：React 19、Vite、TanStack Router（文件路由，生成 `src/routeTree.gen.ts`）、TanStack Query、Tailwind CSS v4、`@springbrand/http`（解析 Eval API 的 `{success, msg, errMsg, code}` 信封）、lucide-react、sonner。只读会话复用 SP 聊天页同一套渲染：`@springbrand/message-panel/cloud-os` 的 `CloudOsRoot` 与 `CloudOsChatMessages`（不传任何回调，审批禁用）。样式按该包的宿主要求接入：`src/styles/index.css` 中所有 `@import`（含 `tw-animate-css`、`streamdown/styles.css`、`cloud-os.css`）放在最前，并用显式 glob 把 `cloud-os` 源码与 streamdown 产物加入 `@source`。领域类型从 `@eval-platform/*` 包以 `import type` 引入。
 
+所有业务表格共用 `useTablePagination` / `TablePagination`，固定每页 20 条，提供上一页、下一页、当前页和已知的总页数/记录数。通用管理列表先筛选、排序再分页，全选只作用于当前页，已选身份跨页保留；搜索、排序或列表范围变化回到第一页，数据缩减时页码保持有效。用例结果按父用例分页，整体结果行固定展示且仍覆盖完整范围，展开采样超过 20 条时独立翻页并保留全局采样序号。统计表和逐 Agent 导入结果同样分页，不改变汇总值；候选 Agent 沿用已有每页 20 条的服务端游标，仅复用分页控件，不猜测未知总量或预读全部页面。只读产物/会话中的原始内容不属于业务列表分页范围。
+
 统一 HTTP 客户端的 `maxResponseBytes` 使用 SDK 接受的最大值 `Number.MAX_SAFE_INTEGER`，支持读取超过 SDK 默认 10 MiB 上限的完整采样详情及其他 API 响应。
 
 项目页在“运行 / 重新评估”左侧提供“下载评估结果”：通过现有认证 HTTP 客户端读取 `GET /api/projects/{projectId}/evaluation-results.zip` 并下载 ZIP，不在浏览器遍历用例或构建压缩包。导出包含项目当前留存的全部采样与评估记录，按 `project/dataset/sample/sampling` 分层，不受当前筛选影响；运行期间允许下载后端一致性快照。下载中禁用重复点击并显示进度状态，失败保留页面并提示可重试；项目未加载时不可下载。原始结果与缺失状态的文件契约见 [HTTP 下载契约](../../docs/eval-http-api.md#projects)。
@@ -114,7 +116,7 @@ Workspace 只保存选中的路径，节点取当前目录树。Query 只缓存�
 
 评估指标概览面向结论优先展示有效、无效和未获得结果，以及每个指标的主结论（数值均值或主导分类及占比）；范围、方差、路径等技术统计默认折叠，缺失和部分覆盖明确提示。
 
-用例结果使用 site-block 的语义 Table，父用例与展开采样共用同一列组；指标名称只在表头显示，每项独立右对齐。默认紧凑行高，重复采样显示均值与范围/有效数量，无有效观察显示破折号；仅异常状态追加提示，宽表在容器内横向滚动。
+用例结果使用 site-block 的语义 Table，父用例与展开采样共用同一列组；指标名称只在表头显示，每项独立右对齐。默认紧凑行高，重复采样显示均值与范围/有效数量，无有效观察显示破折号；仅异常状态追加提示，宽表在容器内横向滚动。整体、用例与采样行的积分及累计 Agent 耗时只来自执行 Agent，表头只写“积分 / 累计耗时”；后续同一列上下展示缓存命中率与工具调用成功率，缓存命中率为上行主值，工具调用成功率为下行小号灰色次值，与积分/耗时格式一致。数值使用 Metrics 返回的范围汇总，不混入评估 Agent；无已结束工具调用时不显示 0%。
 
 
 手动重新收集结果：POST /api/projects/{projectId}/samplings/{samplingId}/collect 与 /evaluations/{evaluationId}/collect 返回 202 {runId, queued}。仅接受归属匹配、最后 Attempt 为 completed 且有 Chat/Submission 的失败阶段；已成功为幂等无操作，重复待收集请求不重复入队，项目忙或 Run 已停止时拒绝。API 在 Project 行锁内设置 retrying + collectionPending，并原子提交原 Run 队列任务。Worker 只读取已有输出，不创建或重启 Agent/Attempt；执行侧必须归档产物和完整轨迹，评估侧保存原始结果并沿用校验和同步。失败清除待收集标记并保留错误，支持再次补收。补收执行不自动启动之前已取消的评估。当前运行查询允许旧 Run 因补收重新活跃，runSequence 仍是最大创建序号。
@@ -125,7 +127,7 @@ Workspace 只保存选中的路径，节点取当前目录树。Query 只缓存�
 
 Run 详情与采样页共用 compact PageHeader；首屏用一行运行摘要和评估列表承载主要信息。评估指标、两个 Agent 的资源统计、运行标识分别默认折叠，保留完整明细与错误提示。
 
-项目结果以评估指标卡、整体结果行、用例行、采样行对照同一组指标，积分与 Agent 累计耗时就近展示；缺失数据不当零值。异常和缺失摘要可直接筛选用例（包括部分采样缺失），点击时清除其他范围筛选。项目结果页分别展示两类 Agent 的总览和分项选择卡，分项内包含资源、调用、耗时和分布统计；窄屏纵向排列，宽屏双列。采样详情仍保留单次资源明细。整体结果始终覆盖项目当前结果，不随列表筛选改变。
+项目结果以评估指标卡、整体结果行、用例行、采样行对照同一组指标，执行 Agent 的积分、累计耗时、缓存命中率与工具调用成功率就近展示；缺失数据不当零值。异常和缺失摘要可直接筛选用例（包括部分采样缺失），点击时清除其他范围筛选。项目结果页分别展示两类 Agent 的总览和分项选择卡，分项内包含资源、调用、耗时和分布统计；窄屏纵向排列，宽屏双列。采样详情仍保留单次资源明细。整体结果始终覆盖项目当前结果，不随列表筛选改变。
 
 Agent 编辑页保留共享编辑器的所有表单与保存行为，以 `.agent-editor-layout` 限定宿主样式：取消嵌套页面的窄列、重复标题和分组卡片边框，名称和用途独立置顶，工作指令直接编辑并占主栏，运行设置占右侧辅栏，能力选择以三列排列，保存栏保持可见。样式依赖当前固定版本的 form/fieldset 结构及 data-agent-* 区域标识；升级共享编辑器时需复核布局。MCP 只读清单与表单使用相同宽度。
 

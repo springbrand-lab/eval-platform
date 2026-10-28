@@ -13,6 +13,7 @@ import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button, Checkbox, Input, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@springbrand/site-block";
 import { cn } from "@/lib/cn";
 import { EmptyState } from "./feedback";
+import { TablePagination, useTablePagination } from "./pagination";
 
 export interface Column<T> {
   key: string;
@@ -93,7 +94,11 @@ export function DataTable<T>({
     getFilteredRowModel: getFilteredRowModel(),
   });
 
-  const visible = table.getRowModel().rows;
+  const filtered = table.getRowModel().rows;
+  const pagination = useTablePagination(filtered, JSON.stringify([query, sorting, rows.map(rowKey)]));
+  const visible = pagination.items;
+  const selectedOnPage = visible.filter((row) => row.getIsSelected()).length;
+  const allOnPageSelected = visible.length > 0 && selectedOnPage === visible.length;
   const scroller = useRef<HTMLElement>(null);
   // Dune owns the single table viewport; virtualization and sticky headers use that same public slot.
   const connectViewport = useCallback((table: HTMLTableElement | null) => {
@@ -128,7 +133,7 @@ export function DataTable<T>({
               />
             </div>
           )}
-          <span role="status" className="text-xs tabular text-text-muted">{query.trim() ? `${visible.length} / ${rows.length}` : rows.length} 条记录</span>
+          <span role="status" className="text-xs tabular text-text-muted">{query.trim() ? `${filtered.length} / ${rows.length}` : rows.length} 条记录</span>
           <div className="ml-auto flex flex-wrap items-center gap-2">{toolbar}</div>
       </div>
       {visible.length === 0 ? (
@@ -148,8 +153,12 @@ export function DataTable<T>({
                     return (
                       <TableHead key={header.id} aria-sort={sorted ? (sorted === "asc" ? "ascending" : "descending") : undefined}
                         className={cn("h-10 whitespace-nowrap px-4 font-medium", meta?.align === "right" && "text-right", meta?.className)}>
-                        {header.column.id === "__select" ? <Checkbox aria-label="全选" checked={table.getIsAllRowsSelected()}
-                          indeterminate={!table.getIsAllRowsSelected() && table.getIsSomeRowsSelected()} onCheckedChange={(value) => table.toggleAllRowsSelected(value)} /> : header.column.getCanSort() ? (
+                        {header.column.id === "__select" ? <Checkbox aria-label="全选" title="全选当前页" checked={allOnPageSelected}
+                          indeterminate={!allOnPageSelected && selectedOnPage > 0} onCheckedChange={(value) => {
+                            const next = { ...rowSelection };
+                            for (const row of visible) { if (value) next[row.id] = true; else delete next[row.id]; }
+                            table.setRowSelection(next);
+                          }} /> : header.column.getCanSort() ? (
                           <Button type="button" variant="ghost" size="sm" onClick={header.column.getToggleSortingHandler()}
                             className={cn("inline-flex h-auto items-center gap-1 px-0 py-1 text-xs font-medium hover:text-text-strong", meta?.align === "right" && "flex-row-reverse")}>
                             {columnsByKey.get(header.column.id)!.header}
@@ -200,6 +209,7 @@ export function DataTable<T>({
           </Table>
         </div>
       )}
+      <TablePagination {...pagination} />
     </div>
   );
 }

@@ -33,6 +33,7 @@ describe("trajectory metrics", () => {
     expect(trajectory.coverage).toBe("complete");
     expect(trajectory.turns).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 2 });
     expect(trajectory.tools).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 1, failed: 1 });
+    expect(trajectory.toolSuccessRate).toEqual({ value: 0.5, coverage: "complete" });
     expect(trajectory.byTool.map((item) => item.toolName)).toEqual(["browser", "shell"]);
     expect(trajectory.byTool[0]).toMatchObject({
       count: { value: 1 }, completed: 1, durationMs: { total: 5 },
@@ -52,6 +53,32 @@ describe("trajectory metrics", () => {
     });
     expect(trajectory.unlinkedOperations).toEqual({ tools: 0, generations: 0 });
     expect(result.modelRequests.count.value).toBe(2);
+  });
+
+  it("counts only terminal tool calls in the success rate and preserves missing coverage", () => {
+    const result = aggregateResources([resourceInput({ telemetryEvents: [
+      ...tool("success", undefined, "browser", {}, { outcome: "completed" }),
+      ...tool("failure", undefined, "browser", {}, { outcome: "failed" }),
+      ...tool("cancel", undefined, "browser", {}, { outcome: "cancelled" }),
+      ...tool("pending", undefined, "browser", {}, null),
+      ...tool("unknown", undefined, "browser", {}, {}),
+    ] })]);
+    expect(result.trajectory.tools).toMatchObject({ completed: 1, failed: 1, cancelled: 1, inProgress: 1, unknown: 1 });
+    expect(result.trajectory.toolSuccessRate).toEqual({ value: 1 / 3, coverage: "complete" });
+
+    const partial = aggregateResources([resourceInput({
+      telemetryEvents: tool("success", undefined, "browser", {}, { outcome: "completed" }),
+      coverage: { usageEvents: "complete", telemetryEvents: "partial", billingSettlements: "complete" },
+    })]);
+    expect(partial.trajectory.toolSuccessRate).toEqual({ value: 1, coverage: "partial" });
+
+    const pending = aggregateResources([resourceInput({ telemetryEvents: tool("pending", undefined, "browser", {}, null) })]);
+    expect(pending.trajectory.toolSuccessRate).toEqual({ value: null, coverage: "complete" });
+    expect(aggregateResources([resourceInput()]).trajectory.toolSuccessRate).toEqual({ value: null, coverage: "complete" });
+    const failed = aggregateResources([resourceInput({ telemetryEvents: tool("failed", undefined, "browser", {}, { outcome: "failed" }) })]);
+    expect(failed.trajectory.toolSuccessRate).toEqual({ value: 0, coverage: "complete" });
+    const missing = aggregateResources([{ ownerUserId: "owner-1", submitted: true, collection: undefined }]);
+    expect(missing.trajectory.toolSuccessRate).toEqual({ value: null, coverage: "unavailable" });
   });
 
   it("attributes generation-step tokens to thinking and content steps independently", () => {
