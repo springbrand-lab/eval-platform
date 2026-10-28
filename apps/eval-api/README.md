@@ -82,9 +82,12 @@ native/billing page, evidence and record-byte schemas/paths, but not the
 post-wait partial route/query contract. Its billing builder rejects
 `allowPartial`/`throughSeq`, while its other builders omit partial parameters.
 Local mock tests still exercise the explicit opt-in; they are **not** proof that
-the pinned SP artifact or a deployed SP accepts it. Publish a compatible public
-partial API, then verify an isolated PostgreSQL transaction and real deployed
-SP+API reads before end-to-end parity or release. No SP private source is imported.
+the pinned SP artifact or a deployed SP accepts it. An isolated PostgreSQL 18.3
+regression now verifies the paged Harness → Runtime → Attempt Store transaction,
+including typed `json_build_object` parameters; the old untyped SQL fails with
+`42P18` before saving any resource snapshot. Publish a compatible public partial
+API and verify real deployed SP+API reads before end-to-end parity or release.
+No SP private source is imported.
 
 内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。设计见 [Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
 

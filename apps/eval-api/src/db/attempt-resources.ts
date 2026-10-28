@@ -117,8 +117,8 @@ export async function updateWithResources(
       await transaction.execute(sql`WITH body AS (
         SELECT json_build_object(
           'scope', ${JSON.stringify(summary.scope)}::json,
-          'observedAt', ${summary.observedAt},
-          'finalized', ${summary.finalized},
+          'observedAt', ${summary.observedAt}::text,
+          'finalized', ${summary.finalized}::boolean,
           'coverage', ${JSON.stringify(summary.coverage)}::json,
           'readiness', ${JSON.stringify(summary.readiness)}::json,
           'usageEvents', ${parts("usageEvents")},
