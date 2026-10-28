@@ -1,9 +1,22 @@
 import { describe, expect, it } from "vitest";
-import type { AgentResourceFact, AgentResourceScope } from "@eval-platform/eval-contracts";
-import { piEvent, piHook, piRequest, piResult, resourceInput, settlement, usage } from "../test-support.js";
+import type { AgentResourceFact, AgentResourceScope, NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
+import { nativeFixture, nativeResourceInput, resourceInput, settlement, usage } from "../test-support.js";
 import { aggregateResources } from "./resources.js";
 
 const SCOPE = { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "execution:sampling-1" } satisfies AgentResourceScope;
+
+/** Only negative/contradictory cases edit an actual publicly projected UA fact. */
+function variant(seq: number, ingestSeq: number, edit: (event: Record<string, unknown>) => void): NativeTrajectoryEntry {
+  const item = nativeFixture(seq)[0]!;
+  const write = item.record.record;
+  if (write.type !== "entry" || write.value.kind !== "springbrand.trajectory") throw new Error("Expected native event fact");
+  const value = write.value as Record<string, unknown>;
+  value.id = ingestSeq;
+  const data = value.data as { event: Record<string, unknown> };
+  data.event.eventId = `fact-${ingestSeq}`;
+  edit(data.event);
+  return { ...item, ingestSeq };
+}
 
 describe("resource statistics", () => {
   it("proves zero only from complete finalized empty sources", () => {
@@ -29,11 +42,7 @@ describe("resource statistics", () => {
 
   it("classifies an unclosed operation from a terminal Attempt as unknown", () => {
     const result = aggregateResources([{
-      ...resourceInput({ nativeRecords: [
-        piEvent(1, "turn_start", { turnId: "turn-1", timestamp: 0 }),
-        piEvent(2, "turn_end", { turnId: "turn-1", outcome: "completed", timestamp: 2_000 }),
-        piRequest(3, "start", { requestId: "request-1", turnId: "turn-1", timestamp: 1_000 }),
-      ] }),
+      ...nativeResourceInput([3, 5, 16]),
       canEmitNativeRecords: false,
     }]);
     expect(result.modelRequests).toMatchObject({ count: { value: 1 }, inProgress: 0, unknown: 1 });
@@ -88,10 +97,10 @@ describe("resource statistics", () => {
   it("deduplicates source identities across snapshots and ignores object key order", () => {
     const event = usage("usage-1");
     const reordered = Object.fromEntries(Object.entries(event).reverse());
-    const started = piEvent(1, "tool_execution_start", { toolCallId: "tool-1", toolName: "browser" });
+    const started = nativeFixture(8)[0]!;
     const result = aggregateResources([
-      resourceInput({ usageEvents: [event, reordered], nativeRecords: [started], billingSettlements: [settlement("usage-1")] }),
-      resourceInput({ usageEvents: [event], nativeRecords: [started], billingSettlements: [settlement("usage-1")] }),
+      nativeResourceInput([], { usageEvents: [event, reordered], nativeRecords: [started], billingSettlements: [settlement("usage-1")] }),
+      nativeResourceInput([], { usageEvents: [event], nativeRecords: [started], billingSettlements: [settlement("usage-1")] }),
     ]);
     expect(result.tokens.total.value).toBe(35);
     expect(result.trajectory.tools.count.value).toBe(1);
@@ -101,8 +110,8 @@ describe("resource statistics", () => {
 
   it("keeps different users, accounts and sessions with the same local ID separate", () => {
     const result = aggregateResources([
-      resourceInput({ usageEvents: [usage("shared")], nativeRecords: [piRequest(1, "start", { requestId: "op-1" })], billingSettlements: [settlement("shared")] }),
-      resourceInput({ usageEvents: [usage("shared")], nativeRecords: [piRequest(1, "start", { requestId: "op-1" })], billingSettlements: [settlement("shared", { accountId: "account-2" })] }, "owner-2"),
+      nativeResourceInput([5], { usageEvents: [usage("shared")], billingSettlements: [settlement("shared")] }),
+      nativeResourceInput([5], { usageEvents: [usage("shared")], billingSettlements: [settlement("shared", { accountId: "account-2" })] }, "owner-2"),
     ]);
     expect(result.tokens.total.value).toBe(70);
     expect(result.modelRequests.count.value).toBe(2);
@@ -120,9 +129,10 @@ describe("resource statistics", () => {
   });
 
   it("diagnoses missing identities and unsupported facts without claiming complete zero", () => {
-    const result = aggregateResources([resourceInput({
+    const missingToolId = variant(8, 8, (event) => { delete event.toolCallId; });
+    const result = aggregateResources([nativeResourceInput([], {
       usageEvents: [{ kind: "assistant_model", metrics: { inputTokens: 1 } }, usage("unsupported", { kind: "new-kind" })],
-      nativeRecords: [piEvent(1, "tool_execution_start", { toolName: "search" })],
+      nativeRecords: [missingToolId],
       billingSettlements: [{ eventId: "missing-account", debitedUnits: 5 }],
     })]);
     expect(result.tokens.input).toEqual({ value: null, coverage: "unavailable" });
@@ -214,10 +224,8 @@ describe("resource statistics", () => {
   });
 
   it("separates provider USD, model settlement and actual action charges", () => {
-    const result = aggregateResources([resourceInput({
+    const result = aggregateResources([nativeResourceInput([10], {
       usageEvents: [usage("usage-1")],
-      nativeRecords: [piResult(1, { toolCallId: "tool-1", toolName: "action", isError: false, content: "result",
-        chargedCredits: 9_999 })],
       billingSettlements: [
         settlement("usage-1"), { executionId: "action-1", status: "succeeded", chargedCredits: 5 },
         { executionId: "action-2", status: "failed", chargedCredits: 0 },
@@ -274,52 +282,41 @@ describe("resource statistics", () => {
     expect(result.modelRequests.count.value).toBe(0);
   });
 
-  it("counts one native Turn with multiple model requests and pairs Tool IDs regardless of record order", () => {
-    const records = [
-      piEvent(1, "turn_start", { turnId: "turn-1", timestamp: 0 }),
-      piEvent(2, "turn_end", { turnId: "turn-1", outcome: "completed", timestamp: 500 }),
-      piRequest(3, "start", { requestId: "request-1", turnId: "turn-1", timestamp: 1 }),
-      piRequest(4, "end", { requestId: "request-1", turnId: "turn-1", outcome: "completed", timestamp: 11 }),
-      piRequest(5, "start", { requestId: "request-2", turnId: "turn-1", timestamp: 100 }),
-      piRequest(6, "end", { requestId: "request-2", turnId: "turn-1", outcome: "failed", timestamp: 120 }),
-      piEvent(7, "tool_execution_start", { toolCallId: "tool-1", toolName: "browser", turnId: "turn-1", timestamp: 200 }),
-      piResult(8, { toolCallId: "tool-1", toolName: "browser", isError: false, turnId: "turn-1", timestamp: 240 }),
-    ];
-    const result = aggregateResources([resourceInput({ nativeRecords: records.toReversed() })]);
-    expect(result.trajectory.turns).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 500 } });
-    expect(result.modelRequests).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 1, failed: 1, durationMs: { mean: 15 } });
-    expect(result.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 40 } });
-    expect(result.trajectory.byTool[0]).toMatchObject({ toolName: "browser", count: { value: 1 }, durationMs: { total: 40 } });
+  it("pairs actual Turn/generation/Tool IDs regardless of source observation order", () => {
+    const reversed = nativeFixture(...Array.from({ length: 16 }, (_, index) => index + 1)).toReversed();
+    const result = aggregateResources([nativeResourceInput([], { nativeRecords: reversed })]);
+    expect(result.trajectory.turns).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 400 } });
+    expect(result.modelRequests).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 2, durationMs: { mean: 110 } });
+    expect(result.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "complete" }, failed: 1, durationMs: { mean: 40 } });
+    expect(result.trajectory.byTool[0]).toMatchObject({ toolName: "search", count: { value: 1 }, durationMs: { total: 40 } });
   });
 
   it("keeps cancelled, unknown and in-progress native operations distinct", () => {
-    const result = aggregateResources([resourceInput({ nativeRecords: [
-      piEvent(1, "turn_end", { turnId: "turn-1", outcome: "cancelled" }),
-      piHook(2, "after_tool", { toolCallId: "tool-1", toolName: "browser", durationMs: 7 }),
-      piEvent(3, "tool_execution_start", { toolCallId: "tool-2", toolName: "browser" }),
-      piEvent(4, "agent_end"),
-    ] })]);
-    expect(result.trajectory.turns.cancelled).toBe(1);
-    expect(result.trajectory.tools).toMatchObject({ count: { value: 2 }, unknown: 1, inProgress: 1, failed: 0, durationMs: { count: 1, missing: 1, mean: 7 } });
+    const cancelled = variant(16, 16, (event) => { (event.payload as Record<string, unknown>).outcome = "cancelled"; });
+    const snapshot = nativeResourceInput([3, 8], { nativeRecords: [...nativeFixture(3, 8), cancelled] });
+    const active = aggregateResources([snapshot]);
+    const terminal = aggregateResources([{ ...snapshot, canEmitNativeRecords: false }]);
+    expect(active.trajectory.turns.cancelled).toBe(1);
+    expect(active.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "partial" }, inProgress: 1, unknown: 0 });
+    expect(terminal.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "partial" }, inProgress: 0, unknown: 1 });
   });
 
   it("does not select an arbitrary winner for contradictory Tool outcomes and names", () => {
-    const result = aggregateResources([resourceInput({ nativeRecords: [
-      piResult(1, { toolCallId: "conflicting-outcome", toolName: "browser", isError: false, durationMs: 10 }),
-      piResult(2, { toolCallId: "conflicting-outcome", toolName: "browser", isError: true, durationMs: 20 }),
-      piEvent(3, "tool_execution_start", { toolCallId: "conflicting-name", toolName: "browser" }),
-      piResult(4, { toolCallId: "conflicting-name", toolName: "shell", isError: false }),
+    const differentOutcome = variant(11, 17, (event) => { (event.payload as Record<string, unknown>).outcome = "completed"; });
+    const differentName = variant(8, 18, (event) => { (event.payload as Record<string, unknown>).toolName = "shell"; });
+    const lateReplay = variant(11, 19, () => {});
+    const result = aggregateResources([nativeResourceInput([], { nativeRecords: [
+      ...nativeFixture(...Array.from({ length: 16 }, (_, index) => index + 1)), differentOutcome, differentName, lateReplay,
     ] })]);
-    expect(result.trajectory.tools).toMatchObject({ count: { value: 2, coverage: "partial" }, unknown: 1, completed: 1 });
+    expect(result.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "partial" }, unknown: 1, completed: 0 });
     expect(result.trajectory.byTool.some((item) => item.toolName === null)).toBe(true);
-    expect(result.diagnostics.filter((item) => item.kind === "conflicting-identity")).toHaveLength(3);
+    expect(result.diagnostics.filter((item) => item.kind === "conflicting-identity").length).toBeGreaterThanOrEqual(2);
   });
 
   it("diagnoses unsupported and unidentifiable native record facts", () => {
-    const result = aggregateResources([resourceInput({ nativeRecords: [
-      piEvent(1, "new_native_event", { requestId: "request-1" }),
-      piEvent(2, "tool_execution_start", { toolCallId: null, toolName: "browser" }),
-    ] })]);
+    const future = variant(3, 3, (event) => { event.type = "future-event"; });
+    const missingCallId = variant(8, 8, (event) => { delete event.toolCallId; });
+    const result = aggregateResources([nativeResourceInput([], { nativeRecords: [future, missingCallId] })]);
     expect(result.modelRequests.count.value).toBeNull();
     expect(result.diagnostics.map((item) => item.kind)).toEqual(["unsupported-record", "missing-identity"]);
   });

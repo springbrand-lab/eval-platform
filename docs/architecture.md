@@ -139,7 +139,7 @@ SP Chat 是持久 Session：Sampling/EvaluationRecord 保存各自 Chat ID；每
 2. Eval SP 的普通 Inbox/Chat 创建：Subject 和 Evaluator 都进入 **Eval SP 自己的** Inbox，不进入 dev/production 的 Inbox；Eval 预分配 Chat ID 并要求同 ID 幂等。Evaluator 创建时只携带 `evaluationId`；
 3. 消息投递：`dispatchMessage(message, "enqueue" | "steer")`；
 4. Submission 终态推送：Harness 接收可靠的完成/失败/取消通知；`SubmissionReceipt` 和按幂等键的操作查询只用于提交后的初始确认、断线恢复和重试前校准；
-5. Trajectory：公开 `sp-pi-trajectory/v1` 页按 `afterSeq`、固定 `throughSeq` 分页读取完整 native 轨迹，每页不超过 `200` 条且 Eval 限制 JSON 为 8 MiB；
+5. Trajectory：公开 `sp-pi-trajectory/v1` 页按 `afterSeq`、固定 `throughSeq` 分页读取完整 native 轨迹，每页不超过 `200` 条且 Eval 限制 JSON 为 4,000,000 字节；
 6. Workspace：tree、manifest 和 content 的正式接口。
 
 评估输入准备流程是：

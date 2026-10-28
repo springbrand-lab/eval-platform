@@ -18,6 +18,12 @@ interface Operation {
   readonly facts: FactEntry[];
   readonly canEmit: boolean;
   readonly conflictingFields: Set<string>;
+  scopeKey: string | null;
+  assistantTimestamp: number | null;
+  hasEvent: boolean;
+  hasPiCall: boolean;
+  hasPiResult: boolean;
+  hasToolTerminalEvent: boolean;
   turnId: string | null;
   toolName: string | null;
   status: Status;
@@ -57,13 +63,16 @@ function combineNumber(operation: Operation, field: "inputLength" | "outputLengt
   }
 }
 
-/** Native request/hook, Pi message and Tool-result observations share a stable operation ID.
- * A missing ID or contradictory phase never turns into a successful zero-valued operation. */
+/** Native bookkeeping events own operation status; Pi messages own content. Request
+ * and hook facts are auxiliary evidence, never fabricated generation/Tool results. */
 function groupOperations(stream: FactStream, diagnostics: ResourceDiagnostics): {
   readonly operations: readonly Operation[];
   readonly complete: boolean;
 } {
   const operations = new Map<string, Operation>();
+  const assistants: FactEntry[] = [];
+  const requests: FactEntry[] = [];
+  const hooks: FactEntry[] = [];
   let complete = stream.complete;
   for (const source of stream.entries) {
     const projection = source.metricProjection;
@@ -79,6 +88,9 @@ function groupOperations(stream: FactStream, diagnostics: ResourceDiagnostics): 
     for (const fact of facts) {
       const entry: FactEntry = { ...source, fact };
       const kind = text(fact.type);
+      if (kind === "assistant") { assistants.push(entry); continue; }
+      if (kind === "request") { requests.push(entry); continue; }
+      if (kind === "hook") { hooks.push(entry); continue; }
       if (kind !== "turn" && kind !== "model" && kind !== "tool") {
         complete = false;
         diagnostics.report("unsupported-record", "nativeRecords", entry, "Unsupported native metric fact");
@@ -95,6 +107,8 @@ function groupOperations(stream: FactStream, diagnostics: ResourceDiagnostics): 
       if (!operation) {
         operation = {
           key, kind, first: entry, facts: [], canEmit: entry.canEmitNativeRecords, conflictingFields: new Set(),
+          scopeKey: text(fact.scopeKey) ?? null, assistantTimestamp: null,
+          hasEvent: false, hasPiCall: false, hasPiResult: false, hasToolTerminalEvent: false,
           turnId: null, toolName: null, status: "unknown", hasTerminal: false, consistent: true,
           startMs: null, endMs: null, durationMs: null, inputLength: null, outputLength: null,
           thinking: null, content: null, inputTokens: null, outputTokens: null, totalTokens: null,
@@ -102,27 +116,46 @@ function groupOperations(stream: FactStream, diagnostics: ResourceDiagnostics): 
         operations.set(key, operation);
       }
       operation.facts.push(entry);
-      if (fact.contentComplete === false) {
+      if (operation.scopeKey !== text(fact.scopeKey)) {
+        operation.consistent = false;
         complete = false;
-        diagnostics.report("unsupported-record", "nativeRecords", entry, "Native Pi message content is missing or redacted");
+        diagnostics.report("conflicting-identity", "nativeRecords", entry, "Native operation spans unrelated agent scopes");
+      }
+      operation.hasEvent ||= fact.fromEvent === true;
+      operation.hasPiCall ||= fact.fromPiCall === true;
+      operation.hasPiResult ||= fact.fromPiResult === true;
+      operation.hasToolTerminalEvent ||= kind === "tool" && fact.fromEvent === true && fact.phase === "end";
+      const assistantTimestamp = factNumber(entry, "assistantTimestamp", diagnostics);
+      if (assistantTimestamp !== null && !operation.conflictingFields.has("assistantTimestamp")) {
+        if (operation.assistantTimestamp !== null && operation.assistantTimestamp !== assistantTimestamp) {
+          operation.consistent = false;
+          complete = false;
+          diagnostics.report("conflicting-identity", "nativeRecords", entry, "Generation has contradictory Pi assistant refs");
+          operation.conflictingFields.add("assistantTimestamp");
+          operation.assistantTimestamp = null;
+        } else {
+          operation.assistantTimestamp = assistantTimestamp;
+        }
       }
       const turnId = text(fact.turnId);
-      if (turnId) {
+      if (turnId && !operation.conflictingFields.has("turnId")) {
         if (operation.turnId && operation.turnId !== turnId) {
           operation.consistent = false;
           complete = false;
           diagnostics.report("conflicting-identity", "nativeRecords", entry, "Contradictory owning Turn for one native operation");
+          operation.conflictingFields.add("turnId");
           operation.turnId = null;
         } else {
           operation.turnId = turnId;
         }
       }
       const toolName = text(fact.toolName);
-      if (toolName) {
+      if (toolName && !operation.conflictingFields.has("toolName")) {
         if (operation.toolName && operation.toolName !== toolName) {
           operation.consistent = false;
           complete = false;
           diagnostics.report("conflicting-identity", "nativeRecords", entry, "Contradictory Tool names for one Tool ID");
+          operation.conflictingFields.add("toolName");
           operation.toolName = null;
         } else {
           operation.toolName = toolName;
@@ -131,31 +164,29 @@ function groupOperations(stream: FactStream, diagnostics: ResourceDiagnostics): 
       const phase = text(fact.phase);
       const timestamp = factNumber(entry, "timestamp", diagnostics);
       if (phase === "start") {
-        if (timestamp !== null) operation.startMs = operation.startMs === null ? timestamp : Math.min(operation.startMs, timestamp);
+        // A Pi Tool Call is written with the assistant message, before execution.
+        // Only tool.started marks the actual start of its measured duration.
+        if (timestamp !== null && !(kind === "tool" && fact.fromPiCall === true)) {
+          operation.startMs = operation.startMs === null ? timestamp : Math.min(operation.startMs, timestamp);
+        }
       } else if (phase === "end" || phase === "message" || phase === "result") {
         if (timestamp !== null) operation.endMs = operation.endMs === null ? timestamp : Math.max(operation.endMs, timestamp);
         operation.hasTerminal = true;
         const status = fact.status;
-        if (status === "completed" || status === "failed" || status === "cancelled") {
+        if ((status === "completed" || status === "failed" || status === "cancelled")
+          && !operation.conflictingFields.has("status")) {
           if (operation.status !== "unknown" && operation.status !== status) {
             operation.consistent = false;
             complete = false;
             diagnostics.report("conflicting-identity", "nativeRecords", entry, "Contradictory native operation outcomes");
+            operation.conflictingFields.add("status");
             operation.status = "unknown";
           } else {
             operation.status = status;
           }
-        }
-      }
-      if (kind === "model" && phase === "message") {
-        // Only complete Pi assistant message blocks prove marker *absence*.
-        for (const category of ["thinking", "content"] as const) {
-          const value = fact[category];
-          if (value === true || value === false) {
-            operation[category] = value === true || operation[category] === true;
-          } else if (operation[category] !== true) {
-            operation[category] = null;
-          }
+        } else if (status !== "completed" && status !== "failed" && status !== "cancelled") {
+          complete = false;
+          diagnostics.report("unsupported-record", "nativeRecords", entry, "Native terminal operation has no supported outcome");
         }
       }
       for (const field of ["inputLength", "outputLength", "durationMs", "inputTokens", "outputTokens", "totalTokens"] as const) {
@@ -165,7 +196,120 @@ function groupOperations(stream: FactStream, diagnostics: ResourceDiagnostics): 
       }
     }
   }
+  const assistantKey = (entry: FactEntry, timestamp: number) =>
+    identity(entry.ownerUserId, text(entry.fact.scopeKey) ?? null, String(timestamp));
+  const byAssistant = new Map<string, FactEntry[]>();
+  for (const entry of assistants) {
+    const timestamp = factNumber(entry, "timestamp", diagnostics);
+    if (timestamp === null) {
+      complete = false;
+      continue;
+    }
+    const key = assistantKey(entry, timestamp);
+    byAssistant.set(key, [...byAssistant.get(key) ?? [], entry]);
+  }
+  const requestsByTask = new Map<string, FactEntry[]>();
+  const requestKey = (entry: FactEntry, id: string) =>
+    identity(entry.ownerUserId, text(entry.fact.scopeKey) ?? null, id);
+  const assistantsByTask = new Map<string, FactEntry[]>();
+  for (const assistant of assistants) {
+    const id = text(assistant.fact.taskId);
+    if (!id) continue;
+    const key = requestKey(assistant, id);
+    assistantsByTask.set(key, [...assistantsByTask.get(key) ?? [], assistant]);
+  }
+  for (const request of requests) {
+    if (request.fact.purpose !== "generation") continue;
+    const id = text(request.fact.id);
+    if (!id) { complete = false; continue; }
+    const key = requestKey(request, id);
+    requestsByTask.set(key, [...requestsByTask.get(key) ?? [], request]);
+  }
+  const matchedAssistants = new Set<FactEntry>();
+  const matchedRequests = new Set<FactEntry>();
+  const references = new Map<string, number>();
   for (const operation of operations.values()) {
+    if (operation.kind !== "model" || operation.assistantTimestamp === null) continue;
+    const key = assistantKey(operation.first, operation.assistantTimestamp);
+    references.set(key, (references.get(key) ?? 0) + 1);
+  }
+  for (const operation of operations.values()) {
+    if (operation.kind !== "model") continue;
+    if (operation.assistantTimestamp === null) {
+      // A completed generation with no ref might lack its Pi result; it cannot
+      // prove that a thinking/content Step was absent.
+      if (operation.status === "completed") complete = false;
+      continue;
+    }
+    const key = assistantKey(operation.first, operation.assistantTimestamp);
+    const matches = byAssistant.get(key) ?? [];
+    if (matches.length !== 1 || references.get(key) !== 1 || operation.conflictingFields.has("assistantTimestamp")) {
+      complete = false;
+      diagnostics.report(matches.length === 0 ? "missing-identity" : "conflicting-identity",
+        "nativeRecords", operation.first, "Generation assistant reference has no unique Pi message");
+      continue;
+    }
+    const assistant = matches[0]!;
+    matchedAssistants.add(assistant);
+    const taskId = text(assistant.fact.taskId);
+    const taskKey = taskId ? requestKey(assistant, taskId) : undefined;
+    const matchingRequests = taskKey ? requestsByTask.get(taskKey) ?? [] : [];
+    if (matchingRequests.length !== 1 || (taskKey && assistantsByTask.get(taskKey)?.length !== 1)) {
+      complete = false;
+      diagnostics.report(matchingRequests.length === 0 ? "missing-identity" : "conflicting-identity",
+        "nativeRecords", assistant, "Pi assistant has no unique generation request task");
+      continue;
+    }
+    matchedRequests.add(matchingRequests[0]!);
+    operation.thinking = typeof assistant.fact.thinking === "boolean" ? assistant.fact.thinking : null;
+    operation.content = typeof assistant.fact.content === "boolean" ? assistant.fact.content : null;
+    for (const field of ["inputTokens", "outputTokens", "totalTokens"] as const) {
+      combineNumber(operation, field, factNumber(assistant, field, diagnostics, true), assistant, diagnostics);
+    }
+  }
+  for (const assistant of assistants) {
+    if (matchedAssistants.has(assistant)) continue;
+    complete = false;
+    diagnostics.report("missing-identity", "nativeRecords", assistant, "Pi assistant has no unique generation reference");
+  }
+  for (const request of requests) {
+    if (request.fact.purpose !== "generation" || matchedRequests.has(request)) continue;
+    complete = false;
+    diagnostics.report("missing-identity", "nativeRecords", request, "Generation request task has no linked Pi assistant and event");
+  }
+  const toolsByScope = new Map<string, Set<string>>();
+  for (const item of operations.values()) {
+    if (item.scopeKey === null) continue;
+    if (item.kind === "tool") {
+      const ids = toolsByScope.get(item.scopeKey) ?? new Set<string>();
+      for (const fact of item.facts) {
+        const id = text(fact.fact.id);
+        if (id) ids.add(id);
+      }
+      toolsByScope.set(item.scopeKey, ids);
+    }
+  }
+  for (const hook of hooks) {
+    if (hook.fact.hook !== "beforeTool" && hook.fact.hook !== "afterTool") continue;
+    const toolId = text(hook.fact.toolCallId);
+    const key = text(hook.fact.scopeKey);
+    if (toolId && key && toolsByScope.get(key)?.has(toolId)) continue;
+    complete = false;
+    diagnostics.report("missing-identity", "nativeRecords", hook, "Tool hook has no corresponding Tool Call");
+  }
+  for (const operation of operations.values()) {
+    if (operation.kind === "tool" && operation.hasPiCall && !operation.hasEvent) {
+      complete = false;
+      diagnostics.report("missing-identity", "nativeRecords", operation.first, "Pi Tool Call has no execution event");
+    }
+    if (operation.kind === "tool" && operation.hasPiResult && !operation.hasToolTerminalEvent) {
+      complete = false;
+      diagnostics.report("missing-identity", "nativeRecords", operation.first, "Pi Tool Result has no terminal Tool event");
+    }
+    if (operation.kind === "tool" && operation.hasEvent && !operation.hasPiCall) {
+      complete = false;
+      diagnostics.report("missing-identity", "nativeRecords", operation.first, "Tool event has no Pi Tool Call arguments");
+    }
     if (!operation.hasTerminal) operation.status = operation.canEmit ? "inProgress" : "unknown";
     if (operation.durationMs === null && operation.startMs !== null && operation.endMs !== null) {
       if (operation.endMs < operation.startMs) {
@@ -227,8 +371,8 @@ function stepTokens(steps: readonly Operation[], category: "thinking" | "content
   return { input: tokens("inputTokens"), output: tokens("outputTokens"), total: tokens("totalTokens") };
 }
 
-/** Model Step = one native request ID. No step comes from a legacy `generation.finished`
- * payload and no input/output/cost is derived from an invented model prompt. */
+/** Model Step = one native generation operation ID. Request task IDs only
+ * establish Pi assistant linkage; no input or cost is rebuilt from a prompt. */
 export function aggregateTelemetry(
   stream: FactStream, diagnostics: ResourceDiagnostics, requestedTools: readonly (string | null)[] = [],
 ): Pick<ResourceStatistics, "modelRequests"> & { readonly trajectory: Omit<TrajectorySummary, "diagnostics"> } {

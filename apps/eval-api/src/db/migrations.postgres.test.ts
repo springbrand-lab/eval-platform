@@ -14,6 +14,7 @@ import { createPostgresRuntimeStore } from "./runtime.js";
 import { attemptResources, datasets } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
 import { buildCommand, makeData, release, seedProject } from "./test-fixtures.js";
+import { nativeToolBodyPair } from "../sp/native-test-fixture.js";
 
 const connection = process.env.DATABASE_URL;
 const migrationsFolder = path.resolve("migrations-postgres");
@@ -138,12 +139,8 @@ describe.skipIf(!connection)("resource snapshot JSON migration", () => {
         scope: { chatId: recordId, idempotencyKey: attemptId, submissionId: attemptId },
         observedAt: "2026-10-17T00:00:00Z", finalized: true,
         coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
-        usageEvents: [], billingSettlements: [], nativeRecords: [
-          { ingestSeq: 1, record: { format: "pi-trajectory/v1", kind: "event", projection: { kind: "safe" },
-            event: { type: "tool_execution_start", toolCallId: attemptId, timestamp: 1, toolName: body, args: body } } },
-          { ingestSeq: 2, record: { format: "pi-trajectory/v1", kind: "result", projection: { kind: "safe" },
-            result: { type: "toolResult", toolCallId: attemptId, timestamp: 5, toolName: body, isError: false, content: body } } },
-        ],
+        usageEvents: [], billingSettlements: [],
+        nativeRecords: nativeToolBodyPair(recordId, attemptId, body, body),
       };
       const resources = { status: "collected" as const, summary: summarizeResourceSnapshot(snapshot) };
       if (stage === "execution") {

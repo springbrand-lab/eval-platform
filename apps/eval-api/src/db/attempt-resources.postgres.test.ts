@@ -14,20 +14,21 @@ import { createPostgresRuntimeStore } from "./runtime.js";
 import { attemptResources } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
 import { buildCommand, makeData, release, seedProject } from "./test-fixtures.js";
+import { nativeToolBodyPair } from "../sp/native-test-fixture.js";
 
 const connection = process.env.DATABASE_URL;
 const owner = "attempt-resources-test";
 
 function rawSnapshot(id: string, body: string, toolName = "tool"): AgentResourceSnapshot {
+  // Storage stress is split at the upstream 4 MB page ceiling. Both safe Pi
+  // message bodies are based on the publicly projected assistant/Tool Result.
+  const chunks = body.length > 3_000_000
+    ? [body.slice(0, 3_000_000), body.slice(3_000_000)] : [body];
   return {
     scope: { chatId: id, idempotencyKey: id, submissionId: id }, observedAt: "2026-10-17T00:00:00Z", finalized: true,
     coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
-    usageEvents: [], billingSettlements: [], nativeRecords: [
-      { ingestSeq: 1, record: { format: "pi-trajectory/v1", kind: "event", projection: { kind: "safe" },
-        event: { type: "tool_execution_start", toolCallId: "tool", timestamp: 1, toolName, args: body } } },
-      { ingestSeq: 2, record: { format: "pi-trajectory/v1", kind: "result", projection: { kind: "safe" },
-        result: { type: "toolResult", toolCallId: "tool", timestamp: 5, toolName, isError: false, content: body } } },
-    ],
+    usageEvents: [], billingSettlements: [],
+    nativeRecords: chunks.flatMap((part, index) => nativeToolBodyPair(id, id, part, toolName, index)),
   };
 }
 
@@ -181,8 +182,10 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       const projection = await compactResourceSnapshot(snapshot);
       expect(row?.metricSnapshot).toEqual(projection);
       expect(row?.metricSnapshot.nativeRecords).toMatchObject([
-        { record: { format: "pi-trajectory/v1", kind: "event" }, metricProjection: { facts: [{ toolName: value }] } },
-        { record: { format: "pi-trajectory/v1", kind: "result" }, metricProjection: { facts: [{ toolName: value }] } },
+        { record: { format: "pi-trajectory/v1", record: { type: "entry", value: { kind: "pi.assistant" } } },
+          metricProjection: { facts: [{ type: "assistant" }, { type: "tool", toolName: value }] } },
+        { record: { format: "pi-trajectory/v1", record: { type: "entry", value: { kind: "pi.toolResult" } } },
+          metricProjection: { facts: [{ type: "tool", toolName: value }] } },
       ]);
       const facts = await createPostgresMetricsSource(database.db, owner).read({ projectId: seeded.projectId });
       const attempt = stage === "execution" ? facts.samplings[0]!.executionAttempts[0] : facts.evaluations[0]!.attempts[0];

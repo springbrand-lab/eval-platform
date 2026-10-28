@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { summarizeResourceSnapshot, type AgentResourceSnapshot, type AgentResourceState } from "@eval-platform/eval-contracts";
+import { publicNativeRecords } from "../harness/evidence-test-support.js";
 import type { RetryController } from "./retry.js";
 import {
   AgentResourceValidationError,
@@ -38,7 +39,7 @@ describe("raw resource snapshot validation", () => {
     })).toEqual(input);
   });
 
-  it("preserves source shapes, missing/null values, order, repeats and signed adjustments without processing", () => {
+  it("preserves source shapes, usage repeats and ordered native Pi rows without processing", () => {
     const usage = {
       eventId: "usage-1",
       kind: "subagent",
@@ -47,16 +48,10 @@ describe("raw resource snapshot validation", () => {
       parentRunId: "parent-1",
       unknownSourceField: [true, null, { custom: "native" }],
     };
-    const started = { ingestSeq: 1,
-      record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
-        event: { type: "tool_execution_start", toolCallId: "tool-1", timestamp: 20 } } };
-    const finished = { ingestSeq: 2,
-      record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "result",
-        result: { type: "toolResult", toolCallId: "tool-1", timestamp: 30 } } };
     const input = {
       ...snapshot(),
       usageEvents: [usage, usage],
-      nativeRecords: [finished, started, finished],
+      nativeRecords: publicNativeRecords([8, 10, 11], SCOPE),
       billingSettlements: [{ accountId: "user-1", eventId: "usage-1", adjustment: -3.5, ratedUnits: null }],
     };
 
@@ -74,10 +69,18 @@ describe("raw resource snapshot validation", () => {
       ...snapshot(),
       finalized: false,
       coverage: { usageEvents: "partial", nativeRecords: "complete", billingSettlements: "unavailable" },
-      nativeRecords: [{ ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "request",
-        request: { phase: "start", requestId: "request-1", status: "provider-native-running" } } }],
+      nativeRecords: publicNativeRecords([12], SCOPE),
     };
     expect(validateResourceSnapshot(input, SCOPE)).toEqual(input);
+  });
+
+  it("rejects duplicated or out-of-order native cursors and foreign Submission records", () => {
+    const [first, last] = publicNativeRecords([8, 11], SCOPE);
+    const unrelated = publicNativeRecords([10], { ...SCOPE, submissionId: "unrelated" })[0]!;
+    for (const records of [[last!, first!], [first!, first!], [unrelated]]) {
+      expect(() => validateResourceSnapshot({ ...snapshot(), nativeRecords: records }, SCOPE))
+        .toThrow(AgentResourceValidationError);
+    }
   });
 
   it("keeps SP's readiness diagnostics and requires them on a freshly read snapshot", () => {

@@ -2,24 +2,28 @@
 
 ## Pi-native cutover (new resource snapshots)
 
-The SP `nativeRecords` stream has `{ingestSeq,record}` where each record is
-`pi-trajectory/v1` and `projection.kind` is `safe`. A focused interpreter reads
-native Pi event, request/hook, message and tool-result facts; it does **not**
-reconstruct generation input, unwrap old `telemetryEvents`, or interpret
-`turn.finished` as a native assistant message. Coverage and diagnostics distinguish
-an absent/redacted fact from a proved zero. A missing
-`projection.contentComplete === true` means native Pi block *absence* is unknown,
-even when a visible thinking/text block is positively counted. This optional
-consumer completeness assumption requires actual SP package parity before deployment.
-Unpaired Pi `message_*` lifecycle events alone cannot prove zero requests/Tools;
-the interpreter diagnoses them until the published SP wire establishes their pairing.
-`compactResourceSnapshot` hashes each raw native record and stores only
-versioned safe metric facts beside the unmodified
-raw snapshot. Usage tokens and all charges continue to come **only** from
-`usageEvents` and `billingSettlements`, not from the Pi record's usage or a Tool
-result. Historical event-only snapshots are not a source of native metrics.
-The structural consumer mapping requires a future published
-`@springbrand/eval-harness` release and SP/Eval parity verification before deployment.
+The SP `nativeRecords` stream has `{ingestSeq,record}` where the public UA
+`TrajectoryRecord` is `pi-trajectory/v1`, carries
+`resource:{agentId,sessionId}`, `submissionId`, an explicit safe projection
+policy and a native `record:{type:"conversation"|"entry",value}`. A model-free
+Entry with `value.kind:"springbrand.trajectory"` has **bookkeeping** in
+`value.data`; the *public* `@springbrand/agent-runtime/trajectory` helper
+`readTrajectoryBookkeeping(value)` validates it as an event
+(`generation.finished`, `tool.started`, `turn.finished`, …), request or hook.
+The checked-in fixture is generated and checked with that helper. Production
+extracts only bounded structural facts pending an offline-installable public
+dependency; it rejects unrecognized records rather than claiming zero. Pi
+assistant/Tool Result messages live in `record.value.model?.[0]` and link
+to the real event's refs, task and Tool Call identities. There is no top-level `record.kind`, no
+`turn_start` event and no `projection.contentComplete`. No input/output
+is reconstructed from a bookkeeping event whose Pi-owned body was omitted.
+Missing or ambiguous linkage stays partial/unavailable, not zero.
+`compactResourceSnapshot` hashes each raw native record and keeps body-free
+versioned metric facts alongside the unchanged raw snapshot. Total usage and
+charges still come **only** from `usageEvents` and `billingSettlements`.
+Old event-only snapshots are not native. SP must publish its new public
+`@springbrand/eval-harness` release and pass [parity checks](../../docs/pi-native-eval-cutover.md)
+before an integrated result is claimed.
 
 Project 当前结果的只读统计与四层展示。只读取应用注入的一致事实快照，不运行 Agent，不读 SP 私有存储，不保存第二份状态。
 
@@ -73,15 +77,15 @@ Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sam
 
 所有数值观察共用 `NumericSummary`，返回有效 `count`、`missing`、total、mean、总体 variance、min、max、median。均值与方差仅以有值的 N 为分母；缺失不补零，真实零参与。N=0 时各统计为 null，N=1 时方差为 0。方差单位是原数值单位的平方。
 
-每层的 `executionAgent` / `evaluationAgents` 是 `AggregatedResourceStatistics`，在全范围来源身份去重后的累计资源上提供缓存命中率，并含 `distribution`：从各 Subject / Evaluator 的原始 Attempts 经同一资源解释器形成单 Agent 观察，再统计 Token（含缓存）、积分/成本、轮数、模型/工具次数及结果、思考步骤、内容步骤与两类对应的 Token、各工具和模型的分布。缓存命中率由 `cacheRead / (input + cacheRead)` 在 Metrics 内计算，并保留输入与缓存读取两者中较弱的 coverage；分母为零时为 null。思考与内容步骤都以唯一 native `requestId` 作为一个模型 Step；一个 Turn 可以包含多个 Step，一个 Step 可命中两类，数量、状态和耗时允许重叠。完整来源事实证明未调用某类型时才产生真实零；未知工具名或缺失/脱敏的 Pi 消息不能证明缺席，记为 missing/partial。工具长度和调用耗时按单次调用统计，Agent 时长按单 Agent，Schema 数值按字段观察值。绝不平均 Dataset/Sample 的下层汇总。
+每层的 `executionAgent` / `evaluationAgents` 是 `AggregatedResourceStatistics`，在全范围来源身份去重后的累计资源上提供缓存命中率，并含 `distribution`：从各 Subject / Evaluator 的原始 Attempts 经同一资源解释器形成单 Agent 观察，再统计 Token（含缓存）、积分/成本、轮数、模型/工具次数及结果、思考步骤、内容步骤与两类对应的 Token、各工具和模型的分布。缓存命中率由 `cacheRead / (input + cacheRead)` 在 Metrics 内计算，并保留输入与缓存读取两者中较弱的 coverage；分母为零时为 null。思考与内容步骤都以唯一 native `generation` operationId 作为一个模型 Step；`request.taskId`/Pi `byTaskId` 与 `generation.finished.refs.assistantTimestamp` 用于关联同一 Step，不以请求条数代替执行事件。一个 Turn 可以包含多个 Step，一个 Step 可命中两类，数量、状态和耗时允许重叠。完整来源事实证明未调用某类型时才产生真实零；未知工具名或缺失/脱敏的 Pi 消息不能证明缺席，记为 missing/partial。工具长度和调用耗时按单次调用统计，Agent 时长按单 Agent，Schema 数值按字段观察值。绝不平均 Dataset/Sample 的下层汇总。
 
 原始 `AgentResourceSnapshot.usageEvents` 与 `.billingSettlements` 是总费用和 Token 的独立权威来源：模型账单按 `accountId + eventId`、Action 按 `executionId` 去重；Pi 消息 usage 只用于该 Step 的思考/内容分类 Token，不加到总费用/Token，不重新计价或把 reasoning 再加进 total。Native 记录按所属用户、Chat 和 `ingestSeq` 去重；失败、取消、重启 Attempt 的真实消耗照常计入。已提交但没有收集记录的 Attempt 记为 `uncollected` 并使结果不完整；从未提交的 Attempt 不制造缺失。缺失值为 null 并带 coverage（complete/partial/unavailable）与 diagnostics，只有完整空流才证明 0。
 
-轨迹指标来自每个 Attempt 已保存的 safe Pi `nativeRecords`，跨 Attempt/分页按 Chat、来源序号和原生 Turn/Tool/Request ID 合并：
+轨迹指标来自每个 Attempt 已保存的 safe Pi `nativeRecords`，跨 Attempt/分页按 Chat、来源序号和原生 Turn/Tool/generation operation ID 合并：
 
 - Turn 数及 completed/failed/cancelled/inProgress/unknown；`inProgress` 只表示该操作所属的 Attempt 仍处于活跃状态。Attempt 已进入终态但缺少终结事实时是 `unknown`；来源缺口不改变执行或评估阶段的终态。
 - 按 `toolCallId` 配对 native Tool 开始/结果，按 `toolName` 汇总调用、结果、耗时；输入长度来自 safe Tool 参数，返回长度来自 safe Pi Tool 结果内容，均为规范 JSON UTF-8 字节数。缺失或被脱敏（`[CONTENT OMITTED]`/`[REDACTED]`）为 missing，不从费用或响应估计。
-- 以 native `requestId` 计模型 Step；Pi assistant 的 `thinking`/`*Signature` 块命中思考、`text` 块命中内容，类别可重叠，Step 的 Token 仅来自该 Pi 消息或 safe 请求事实。不重建生成输入，不从 Turn 总数或总 Token 做减法；缺少关联 Turn/可判定消息内容时为 partial/unavailable。
+- 以 native `generation` operationId 计模型 Step；Pi assistant 的 `thinking`/`*Signature` 块命中思考、`text` 块命中内容，类别可重叠，Step 的 Token 仅来自该 Pi 消息或安全的 `generation.finished` 事件。不重建生成输入，不从 Turn 总数或总 Token 做减法；缺少关联 Turn/可判定消息内容时为 partial/unavailable。
 
 
 ## JSON Schema 输出字段

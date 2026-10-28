@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   identifierSchema,
+  nativeRecordMayBelongToScope,
   nativeTrajectoryEntrySchema,
   jsonObjectArrayInPlaceSchema,
   summarizeResourceSnapshot,
@@ -52,6 +53,17 @@ const snapshotSchema = z.strictObject({
   nativeRecords: z.array(nativeTrajectoryEntrySchema),
   billingSettlements: jsonObjectArrayInPlaceSchema,
   readiness: readinessSchema,
+}).superRefine((snapshot, context) => {
+  snapshot.nativeRecords.forEach(({ ingestSeq, record }, index) => {
+    if (index > 0 && ingestSeq <= snapshot.nativeRecords[index - 1]!.ingestSeq) {
+      context.addIssue({ code: "custom", path: ["nativeRecords", index, "ingestSeq"],
+        message: "Native Pi records must ascend by ingest sequence" });
+    }
+    if (!nativeRecordMayBelongToScope(record, snapshot.scope)) {
+      context.addIssue({ code: "custom", path: ["nativeRecords", index, "record"],
+        message: "Native Pi record is outside the resource Submission" });
+    }
+  });
 });
 
 /** Recorded on each Attempt still owing resources when a stopping or stopped Run would otherwise read them. */
@@ -96,6 +108,12 @@ function parseScoped<T extends { readonly scope: AgentResourceScope }>(
 
 /** Returns the validated value itself, never a copy. */
 export function validateResourceSnapshot(value: unknown, scope: AgentResourceScope): AgentResourceSnapshot {
+  // Fail a foreign outer operation before interpreting its potentially large
+  // native rows; the full schema still validates every accepted snapshot.
+  const outer = z.object({ scope: scopeSchema }).safeParse(value);
+  if (outer.success && !resourceScopeMatches(outer.data.scope, scope)) {
+    throw new AgentResourceValidationError("Resource snapshot does not match the requested operation scope");
+  }
   parseScoped(snapshotSchema, value, scope, "Resource snapshot");
   return value as AgentResourceSnapshot;
 }

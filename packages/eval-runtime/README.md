@@ -7,6 +7,9 @@ append to a native bundle. Oversized individual records fail explicitly, never g
 truncated or silently omitted. Artifacts/Subject inputs remain primary. Old manifest
 bytes, refs and evaluation scores are not rewritten; version 1 reading is intentionally
 unsupported after the approved breaking cutover.
+Focused Harness/Runtime tests use the same `fixtures/pi-native-public-v1.json`
+generated through the published UA public trajectory export, rebinding only
+test Chat/Submission IDs and perturbing records for negative/error cases.
 
 评估运行时的控制面和执行编排。它只依赖 SP 的公开 Harness 边界，不复制 SP Runtime，也不直接读取 Durable Object 存储。
 

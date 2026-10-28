@@ -7,9 +7,11 @@ The service-authenticated SP Harness consumes the **published public**
 `sp-pi-trajectory/v1` pages with a frozen `cursor.throughSeq` and safe
 `pi-trajectory/v1` records, and resource snapshots carrying `nativeRecords`
 instead of `telemetryEvents`. The current pinned `0.1.0-alpha.5` still exports
-event pages; these new-run consumer checks are structural until SP publishes its
-replacement. Do not deploy this cutover or claim cross-deployment parity before
-that release. No legacy event decoding or DO storage access is used. Existing
+event pages; the SP worktree has an offline `0.1.0-alpha.7` native candidate
+whose **public** page/snapshot schemas accept the generated UA fixture, but it
+has not been published or pinned here. New-run consumer checks remain structural
+until that release. Do not deploy this cutover or claim cross-deployment parity
+before publishing, installing and checking actual service responses. No legacy event decoding or DO storage access is used. Existing
 version 1 manifest bytes/refs, resource bytes and scores remain untouched;
 old event-only evidence may not be readable with this new code.
 
@@ -323,7 +325,7 @@ Initialization failures still close the pool and drop the temporary database.
 | `LANGFUSE_BASE_URL`、`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY` | 可选，三者同时设置：Eval SP 上报 trace 的同一个 Langfuse 项目。设置后评委分数同步为被测 Chat 的 session 分数 |
 | `LANGFUSE_ENVIRONMENT` | 可选，必须与 Eval SP trace 的 environment 一致（eval 部署为 `dev`） |
 
-被测执行成功后，Worker 经 SP 导出接口取得被测产物清单、逐个文件和完整轨迹（完整原始事件按顺序分片），由 `src/evidence/` 按内容 hash 固化为证据包：`evidence/blobs/<sha256>` 与 `evidence/<evidenceId 的 hex>/manifest.json`，Sampling 只记录 `evidence` 引用。导出中断时，已存文件和轨迹游标作为 `Sampling.evidenceExport` 保存，下一轮只补读缺失部分（见 `packages/eval-runtime/README.md`）。评估时评委是普通 Agent，有自己的 Chat 和 Space；Worker 把证据包导入评委 Space 的 `/evidence/`（`manifest.json`、`artifacts/<原路径>`、`trajectory/events-000001.jsonl` 等有序分片），评委看不到被测 Workspace。
+被测执行成功后，Worker 经 SP 导出接口取得被测产物清单、逐个文件和完整 safe Pi 轨迹（原样 `{ingestSeq,record}` 按记录边界分片），由 `src/evidence/` 按内容 hash 固化为 schemaVersion 2 证据包：`evidence/blobs/<sha256>` 与 `evidence/<evidenceId 的 hex>/manifest.json`，Sampling 只记录 `evidence` 引用。导出中断时，已存文件和轨迹游标作为 `Sampling.evidenceExport` 保存，下一轮只补读缺失部分（见 `packages/eval-runtime/README.md`）。评估时 Evaluator 是普通 Agent，有自己的 Chat 和 Space；Worker 把证据包导入 Evaluator Space 的 `/evidence/`（`manifest.json`、`artifacts/<原路径>`、`trajectory/events-000001.jsonl` 等有序分片），Evaluator 看不到 Subject Workspace。历史版本 1 文件不迁移、不删除，但新代码不把旧事件解码为 Pi。
 
 评估 Agent 通过 Eval API 自带的 MCP Server（`POST /mcp/evaluation-results`，工具 `submit_evaluation`，需配置 `EVAL_RESULT_MCP_TOKEN`）直接提交结果，提交时按锁定 Schema 校验并存入 `eval_evaluation_submissions`；没有提交时依次回退到 SP 返回的 `/output/result.json` 和最终回复中的 JSON。只有合法结果才使评估成功，详见[评估结果提交](../../docs/eval-evaluation-result-submission.md)。Metrics 统一按 Project 锁定 Schema 解析和展示所有支持的字段。配置 Langfuse 时，同一 Metrics reader 从合法输出派生顶层 numeric `score` 和可选字符串 `reason`，发布到被测 Chat 的 session，名称 `judge-score`、ID `eval-score:<evaluationId>`。原始输出不增加派生 score/reason 字段；没有 numeric score 不影响评估。同步失败只记在 `scoreSync`，补同步重新从原始输出与锁定 Schema 派生。
 

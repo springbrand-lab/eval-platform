@@ -331,6 +331,9 @@ importers:
         specifier: ^8.20.0
         version: 8.20.0
     devDependencies:
+      '@types/node':
+        specifier: 26.1.2
+        version: 26.1.2
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -350,6 +353,9 @@ importers:
         specifier: ^4.4.3
         version: 4.6.5
     devDependencies:
+      '@types/node':
+        specifier: 26.1.2
+        version: 26.1.2
       typescript:
         specifier: ^7.0.2
         version: 7.0.2

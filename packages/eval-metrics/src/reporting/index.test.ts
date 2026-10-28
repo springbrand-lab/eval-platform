@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import {
-  collection, dataset, evaluation, facts, OUTPUT_SCHEMA, piEvent, plan, PROJECT, projectSample, run, sampling, usage,
+  collection, dataset, evaluation, facts, nativeScopedFixture, OUTPUT_SCHEMA, plan, PROJECT, projectSample, run, sampling, usage,
 } from "../test-support.js";
 import { createMetrics, MetricsEntityNotFoundError, MetricsQueryError, MetricsSourceError } from "./index.js";
 import type { MetricSummary, MetricsEvaluation, MetricsSampling } from "../aggregation/model.js";
@@ -155,13 +155,10 @@ describe("four-level reporting", () => {
   it("separates the Subject from each Evaluator and exposes full JSON only in Sampling detail", async () => {
     const subject = SAMPLINGS[0]!;
     const withTrajectory = facts({ ...CURRENT, samplings: [{ ...subject, executionAttempts: [{ ...subject.executionAttempts[0]!, resources: collection({
+      scope: { chatId: "subject:s1a", submissionId: "subject-submission:s1a", idempotencyKey: "execution:s1a" },
       usageEvents: [usage("u", { metrics: { totalTokens: 100 } })],
-      nativeRecords: [
-        piEvent(1, "turn_start", { turnId: "turn", timestamp: 0 }),
-        piEvent(2, "turn_end", { turnId: "turn", outcome: "completed", timestamp: 9 }),
-        piEvent(3, "tool_execution_start", { toolCallId: "tool", toolName: "browser", args: { url: "a" },
-          timestamp: 1, turnId: "turn" }),
-      ],
+      nativeRecords: nativeScopedFixture([3, 8, 16],
+        { chatId: "subject:s1a", submissionId: "subject-submission:s1a", idempotencyKey: "execution:s1a" }),
     }) }] }, ...SAMPLINGS.slice(1)], evaluations: [...CURRENT.evaluations, judge("e1a3", "s1a", 70, 3)] });
     const detail = await metricsOf(withTrajectory).getSamplingDetail({ ...scope, samplingId: "s1a" });
     expect(detail.projectSample).toEqual(PS1);

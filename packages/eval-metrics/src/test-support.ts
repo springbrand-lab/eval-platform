@@ -1,16 +1,17 @@
+import { readFileSync } from "node:fs";
 import {
-  PI_TRAJECTORY_RECORD_FORMAT,
   summarizeResourceSnapshot,
   type AgentResourceCollection,
   type AgentResourceFact,
+  type AgentResourceScope,
   type AgentResourceSnapshot,
   type EvaluationOutputSchema,
   type JsonValue,
   type NativeTrajectoryEntry,
-  type PiTrajectoryRecord,
   type ProjectDatasetSnapshot,
   type ProjectPlan,
   type RunSnapshot,
+  nativeTrajectoryEntrySchema,
 } from "@eval-platform/eval-contracts";
 import type { ProjectSample } from "@eval-platform/eval-runtime";
 import type { MetricsEvaluation, MetricsSampling } from "./aggregation/model.js";
@@ -107,35 +108,46 @@ export function usage(eventId: string, patch: AgentResourceFact = {}): AgentReso
   };
 }
 
-/** Test-only constructors for **native** Pi records. Never convert an old event into a new one. */
-function native(ingestSeq: number, kind: string, field: string, content: AgentResourceFact): NativeTrajectoryEntry {
-  return { ingestSeq, record: {
-    format: PI_TRAJECTORY_RECORD_FORMAT, kind, projection: { kind: "safe" },
-    [field]: content,
-  } satisfies PiTrajectoryRecord };
+/** Exactly the safe output of the published public UA generator, verified by
+ * `scripts/generate-pi-native-fixture.mjs`. No event-only "native" constructors. */
+const publicFixture = JSON.parse(readFileSync(new URL("../../../fixtures/pi-native-public-v1.json", import.meta.url), "utf8")) as {
+  readonly records: readonly NativeTrajectoryEntry[];
+};
+export function nativeFixture(...ingestSeqs: readonly number[]): NativeTrajectoryEntry[] {
+  return structuredClone(ingestSeqs.map((seq) => {
+    const entry = publicFixture.records.find((item) => item.ingestSeq === seq);
+    if (!entry) throw new Error(`No public Pi fixture record ${seq}`);
+    return entry;
+  }));
 }
 
-export function piEvent(ingestSeq: number, type: string, facts: AgentResourceFact = {}): NativeTrajectoryEntry {
-  return native(ingestSeq, "event", "event", { type, ...facts });
+/** Rebind a projected public UA record to a test Chat/Submission. Event resource
+ * identity follows the envelope; no event-only or top-level message is made up. */
+export function nativeScopedFixture(ingestSeqs: readonly number[], scope: AgentResourceScope): NativeTrajectoryEntry[] {
+  const object = (value: unknown): Record<string, unknown> => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected Pi fixture object");
+    return value as Record<string, unknown>;
+  };
+  return nativeFixture(...ingestSeqs).map((entry) => {
+    const envelope = object(entry.record);
+    object(envelope.resource).sessionId = scope.chatId;
+    envelope.submissionId = scope.submissionId;
+    const value = object(object(envelope.record).value);
+    if (value.kind === "springbrand.trajectory" && object(value.data).type === "event") {
+      const event = object(object(value.data).event);
+      object(event.resource).sessionId = scope.chatId;
+      event.submissionId = scope.submissionId;
+    }
+    return nativeTrajectoryEntrySchema.parse(entry);
+  });
 }
 
-export function piRequest(ingestSeq: number, phase: "start" | "end", facts: AgentResourceFact): NativeTrajectoryEntry {
-  return native(ingestSeq, "request", "request", { phase, ...facts });
-}
-
-export function piHook(ingestSeq: number, name: string, facts: AgentResourceFact): NativeTrajectoryEntry {
-  return native(ingestSeq, "hook", "hook", { name, ...facts });
-}
-
-export function piMessage(ingestSeq: number, message: AgentResourceFact, context: AgentResourceFact = {}): NativeTrajectoryEntry {
-  return { ingestSeq, record: {
-    format: PI_TRAJECTORY_RECORD_FORMAT, kind: "message", projection: { kind: "safe", contentComplete: Array.isArray(message.content) },
-    ...context, message,
-  } };
-}
-
-export function piResult(ingestSeq: number, result: AgentResourceFact): NativeTrajectoryEntry {
-  return native(ingestSeq, "result", "result", { type: "toolResult", ...result });
+export function nativeResourceInput(ingestSeqs: readonly number[], patch: Partial<AgentResourceSnapshot> = {},
+  ownerUserId = "owner-1"): ResourceInput {
+  return resourceInput({
+    scope: { chatId: "chat-1", submissionId: "submission-1", idempotencyKey: "key-1" },
+    nativeRecords: nativeFixture(...ingestSeqs), ...patch,
+  }, ownerUserId);
 }
 
 export function settlement(eventId: string, patch: AgentResourceFact = {}): AgentResourceFact {

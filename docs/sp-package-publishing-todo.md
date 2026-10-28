@@ -1,5 +1,17 @@
 # SP 共享包接入与升级
 
+> **Pi-native cutover status (2026-10-28):** The alpha.3 table below records an
+> earlier Context release, not the pending evidence wire. Eval currently pins
+> `@springbrand/eval-harness@0.1.0-alpha.5` (old event pages). SP has an offline
+> `0.1.0-alpha.7` **candidate** with public native page/resource schemas, but
+> it has not been published or installed here. Publish a compatible public
+> release, pin it from the registry with its lockfile, then verify actual SP
+> responses; do not use a `file:/tmp` tarball dependency or deploy this cutover
+> on alpha.5. The public UA `0.3.1-alpha.9` fixture passes those candidate
+> schemas offline, but direct offline installation of the UA parser dependency
+> still fails at `@chat-adapter/catalog@4.43.0`. See
+> [Pi-native parity gate](pi-native-eval-cutover.md).
+
 Eval 使用下面四个 npm 包的精确版本，版本与完整性由消费方 `package.json` 和 `pnpm-lock.yaml` 固定。安装不依赖 sibling SP 仓库、私有 Workspace 包或本地 vendor 路径。
 
 | 包 | 版本 | 消费方与公开入口 |

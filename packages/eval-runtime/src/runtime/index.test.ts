@@ -31,7 +31,7 @@ import type {
   Harness,
 } from "../harness/index.js";
 import { AgentHandleNotFoundError, createEvidenceStore } from "../harness/index.js";
-import { createMemoryEvidenceBlobs, exportedEvidence, testClock } from "../harness/evidence-test-support.js";
+import { createMemoryEvidenceBlobs, exportedEvidence, publicAssistantRecord, publicNativeRecords, testClock } from "../harness/evidence-test-support.js";
 import type { ProjectPlanReader, ProjectSample } from "./model.js";
 import { createRetryController as createProductionRetryController, DEFAULT_RETRY_POLICY } from "./retry.js";
 import type {
@@ -609,7 +609,9 @@ function makeHarness(): Harness {
         readiness: FINALIZED_READINESS,
       };
     }),
-    exportEvidence: vi.fn(async ({ handle }) => exportedEvidence({ samplingId: handle.samplingId, chatId: handle.chatId })),
+    exportEvidence: vi.fn(async ({ handle, submissionId }) => exportedEvidence({
+      samplingId: handle.samplingId, chatId: handle.chatId, submissionId,
+    })),
     importEvidence: vi.fn(async () => undefined),
   };
 }
@@ -628,9 +630,6 @@ function makeResources(input: CollectAgentResourcesInput): AgentResourceSnapshot
     providerCostUsd: { input: 0.1, output: 0.02, cacheRead: 0.01, cacheWrite: 0, total: 0.13 },
     sourceExtension: { retained: [true, null, "original"] },
   };
-  const turnId = `${idempotencyKey}:turn`;
-  const requestId = `${idempotencyKey}:model`;
-  const toolCallId = `${idempotencyKey}:tool`;
   return {
     scope: { chatId: handle.chatId, submissionId, idempotencyKey },
     observedAt: "2026-10-08T00:00:00.000Z",
@@ -638,18 +637,7 @@ function makeResources(input: CollectAgentResourcesInput): AgentResourceSnapshot
     readiness: FINALIZED_READINESS,
     coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
     usageEvents: [usage],
-    nativeRecords: [
-      { ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
-        event: { type: "turn_start", turnId, timestamp: 100 } } },
-      { ingestSeq: 2, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "request",
-        request: { phase: "end", requestId, turnId, timestamp: 200, outcome: "completed", totalTokens: 110 } } },
-      { ingestSeq: 3, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
-        event: { type: "tool_execution_start", toolCallId, turnId, toolName: "bash", timestamp: 200 } } },
-      { ingestSeq: 4, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "result",
-        result: { type: "toolResult", toolCallId, turnId, toolName: "bash", isError: false, durationMs: 50, timestamp: 250 } } },
-      { ingestSeq: 5, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
-        event: { type: "turn_end", turnId, timestamp: 300, outcome: "completed", durationMs: 200 } } },
-    ],
+    nativeRecords: publicNativeRecords([1, 2, 3, 4, 5], { chatId: handle.chatId, submissionId }),
     billingSettlements: [{
       eventId,
       usage,
@@ -7270,12 +7258,11 @@ describe("resource readiness waiting and Submission observation", () => {
 
 describe("resumable Subject evidence export", () => {
   const files = { "/a.txt": "first", "/b.txt": "second" };
-  const events = Array.from({ length: 5 }, (_, index) => ({ ingestSeq: index + 1,
-    record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
-      event: { type: "agent_start", index } } }));
+  const events = publicNativeRecords([1, 2, 3, 4, 5], { chatId: "chat-1", submissionId: "submission-1" });
+  const recordBytes = (seq: number) => new TextEncoder().encode(`${JSON.stringify(events[seq - 1])}\n`).byteLength;
   const twoEventLimits = {
     ...DEFAULT_EVIDENCE_LIMITS,
-    maxFileBytes: new TextEncoder().encode(`${JSON.stringify(events[0])}\n`).byteLength * 2,
+    maxFileBytes: Math.max(recordBytes(1) + recordBytes(2), recordBytes(3) + recordBytes(4)),
   };
   const transient = (message: string) => Object.assign(new Error(message), { retryable: true });
 
@@ -7284,8 +7271,8 @@ describe("resumable Subject evidence export", () => {
 
   /** Subject evidence whose file reads are recorded and may fail while `failing` holds the path. */
   function readsRecorded(harness: Harness, failing: Set<string>, reads: string[]) {
-    vi.mocked(harness.exportEvidence).mockImplementation(async ({ handle }) => {
-      const base = exportedEvidence({ samplingId: handle.samplingId, chatId: handle.chatId, files });
+    vi.mocked(harness.exportEvidence).mockImplementation(async ({ handle, submissionId }) => {
+      const base = exportedEvidence({ samplingId: handle.samplingId, chatId: handle.chatId, submissionId, files });
       return {
         ...base,
         async readFile(path) {
@@ -7463,11 +7450,10 @@ describe("resumable Subject evidence export", () => {
 
   it("fails the execution at once on a native trajectory record too large for one evidence file", async () => {
     const harness = makeHarness();
-    vi.mocked(harness.exportEvidence).mockImplementation(async ({ handle }) => exportedEvidence({
-      samplingId: handle.samplingId, chatId: handle.chatId, files, events: [{
-        ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "message",
-          message: { role: "assistant", timestamp: 1, content: [{ type: "text", text: "x".repeat(twoEventLimits.maxFileBytes) }] } },
-      }],
+    vi.mocked(harness.exportEvidence).mockImplementation(async ({ handle, submissionId }) => exportedEvidence({
+      samplingId: handle.samplingId, chatId: handle.chatId, submissionId, files,
+      events: [publicAssistantRecord(1, { chatId: handle.chatId, submissionId },
+        "x".repeat(twoEventLimits.maxFileBytes))],
     }));
     const store = makeStore();
     const runtime = createRuntime({ harness, store, sleep: async () => undefined, evidenceLimits: twoEventLimits });

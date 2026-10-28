@@ -1,7 +1,9 @@
 import { constants as bufferConstants } from "node:buffer";
 import { createHash } from "node:crypto";
-import type { AgentFramework, AgentResourceReadiness, EvidenceLimits, NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
-import { EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT, isTerminalAgentStatus } from "@eval-platform/eval-contracts";
+import type { AgentFramework, AgentResourceReadiness, EvidenceLimits, JsonValue, NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
+import {
+  EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT, isTerminalAgentStatus, nativeRecordMayBelongToScope,
+} from "@eval-platform/eval-contracts";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import { safeLog, type RuntimeLog } from "@eval-platform/eval-runtime";
 import {
@@ -66,7 +68,8 @@ const TRANSFER_TIMEOUT_MS = 5 * 60_000;
  */
 const MAX_JSON_RESPONSE_BYTES = bufferConstants.MAX_STRING_LENGTH;
 /** A page is JSON, not a streaming byte file. Reject it before decoding unbounded native bodies. */
-export const MAX_TRAJECTORY_PAGE_BYTES = 8 * 1024 * 1024;
+/** Match SP's public EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX_BYTES until its package is published. */
+export const MAX_TRAJECTORY_PAGE_BYTES = 4_000_000;
 const ERROR_BODY_BYTES = 64 * 1024;
 /** SP's answer for an evidence read whose Submission or telemetry is not settled yet: retry later. */
 export const EVIDENCE_NOT_READY = "EVIDENCE_NOT_READY";
@@ -328,16 +331,12 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         if (entry.ingestSeq <= last || entry.ingestSeq > throughSeq) {
           throw new SpHarnessError("Eval SP trajectory records are out of order or beyond the watermark", false);
         }
-        if ((entry.record.chatId !== undefined && entry.record.chatId !== handle.chatId)
-          || (entry.record.ownerUserId !== undefined && entry.record.ownerUserId !== handle.ownerUserId)
-          || (entry.record.submissionId !== undefined
-            && (typeof entry.record.submissionId !== "string" || !entry.record.submissionId))) {
-          throw new SpHarnessError("Eval SP returned a trajectory record with different Chat identity", false);
+        if (!nativeRecordMayBelongToScope(entry.record, { chatId: handle.chatId, submissionId })) {
+          throw new SpHarnessError("Eval SP returned a trajectory record outside the requested Chat and Submission", false);
         }
         last = entry.ingestSeq;
       }
-      if ((page.nextAfterSeq !== null && (page.records.length === 0 || page.nextAfterSeq !== last || last >= throughSeq))
-        || (page.nextAfterSeq === null && last !== throughSeq)) {
+      if (page.nextAfterSeq !== null && (page.records.length === 0 || page.nextAfterSeq !== last || last >= throughSeq)) {
         throw new SpHarnessError("Eval SP returned an invalid trajectory cursor", false);
       }
       // Reject the entire page before yielding even its first record. Never persist a prefix
@@ -390,9 +389,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       }
       const nativeRecords = (value as T & { readonly nativeRecords?: readonly NativeTrajectoryEntry[] }).nativeRecords;
       for (const { record } of nativeRecords ?? []) {
-        if ((record.chatId !== undefined && record.chatId !== input.handle.chatId)
-          || (record.ownerUserId !== undefined && record.ownerUserId !== input.handle.ownerUserId)
-          || (record.submissionId !== undefined && record.submissionId !== scoped.scope.submissionId)) {
+        if (!nativeRecordMayBelongToScope(record, scoped.scope)) {
           throw new SpHarnessError("Eval SP returned a resource record outside the requested operation", false);
         }
       }
@@ -512,7 +509,10 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     async readFinalReply({ handle, submissionId }) {
       requireSp(handle.framework);
       let reply: string | undefined;
-      for await (const { record } of trajectoryRecords(handle, submissionId)) reply = finalReplyText(record, submissionId) ?? reply;
+      for await (const { record } of trajectoryRecords(handle, submissionId)) {
+        const candidate = finalReplyText(record, submissionId);
+        if (candidate !== undefined) reply = candidate ?? undefined;
+      }
       return reply;
     },
     collectAgentResources: (input) => readResources(input, "resources_read", "", resourceSnapshot, transferTimeoutMs,
@@ -559,7 +559,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           // high-water mark is additional local progress metadata, never part of that line.
           for await (const entry of trajectoryRecords(handle, submissionId, afterSeq, throughSeq)) {
             yield { seq: entry.ingestSeq, throughSeq: entry.throughSeq,
-              record: { ingestSeq: entry.ingestSeq, record: entry.record } };
+              record: { ingestSeq: entry.ingestSeq, record: entry.record } as unknown as JsonValue };
           }
         },
         trajectoryFormat: SP_PI_TRAJECTORY_FORMAT,

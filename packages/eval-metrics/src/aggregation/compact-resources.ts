@@ -1,5 +1,5 @@
 import {
-  PI_TRAJECTORY_RECORD_FORMAT, canonicalJsonBytes, sha256Hex,
+  PI_TRAJECTORY_RECORD_FORMAT, canonicalJsonBytes, isSafePiTrajectoryRecord, nativeRecordMayBelongToScope, sha256Hex,
   type AgentResourceSnapshot, type NativeTrajectoryEntry, type PiTrajectoryRecord,
 } from "@eval-platform/eval-contracts";
 import { nativeRecordFacts } from "./native-record-facts.js";
@@ -15,22 +15,31 @@ export async function compactResourceSnapshot(snapshot: AgentResourceSnapshot): 
     throw new TypeError("Cannot compact an event-only resource snapshot as native Pi evidence");
   }
   const nativeRecords: NativeTrajectoryEntry[] = [];
+  let lastSeq = 0;
   for (const entry of snapshot.nativeRecords) {
-    const facts = nativeRecordFacts(entry.record);
-    if (!Number.isSafeInteger(entry.ingestSeq) || entry.ingestSeq <= 0
-      || entry.record.format !== PI_TRAJECTORY_RECORD_FORMAT || entry.record.projection?.kind !== "safe"
-      || (entry.record.chatId !== undefined && entry.record.chatId !== snapshot.scope.chatId)
-      || (entry.record.submissionId !== undefined && entry.record.submissionId !== snapshot.scope.submissionId)) {
+    if (!Number.isSafeInteger(entry.ingestSeq) || entry.ingestSeq <= lastSeq
+      || !isSafePiTrajectoryRecord(entry.record)
+      || !nativeRecordMayBelongToScope(entry.record, snapshot.scope)) {
       throw new TypeError(`Cannot compact invalid native trajectory record ${entry.ingestSeq}`);
     }
+    lastSeq = entry.ingestSeq;
+    const facts = nativeRecordFacts(entry.record);
+    const { record } = entry;
+    const value = record.record.value;
+    const compactWrite: PiTrajectoryRecord["record"] = record.record.type === "conversation"
+      ? { type: "conversation", value: { id: value.id } }
+      : { type: "entry", value: { id: value.id,
+        conversationId: record.record.value.conversationId, kind: record.record.value.kind } };
     nativeRecords.push({
       ingestSeq: entry.ingestSeq,
       record: {
         format: PI_TRAJECTORY_RECORD_FORMAT,
-        ...(typeof entry.record.kind !== "string" ? {} : { kind: entry.record.kind }),
-        projection: { kind: "safe" },
-        ...(entry.record.chatId === undefined ? {} : { chatId: entry.record.chatId }),
-        ...(entry.record.submissionId === undefined ? {} : { submissionId: entry.record.submissionId }),
+        resource: record.resource,
+        submissionId: record.submissionId,
+        projection: record.projection,
+        ...(record.parent === undefined ? {} : { parent: record.parent }),
+        ...(record.origin === undefined ? {} : { origin: record.origin }),
+        record: compactWrite,
       } satisfies PiTrajectoryRecord,
       metricProjection: {
         version: NATIVE_PROJECTION_VERSION,

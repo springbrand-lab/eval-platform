@@ -1,5 +1,5 @@
 import type { AgentResourceScope, AgentResourceSnapshot, JsonValue, NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
-import { equalJson } from "@eval-platform/eval-contracts";
+import { equalJson, isSafePiTrajectoryRecord, nativeRecordMayBelongToScope } from "@eval-platform/eval-contracts";
 import { record, text, type JsonRecord } from "../json.js";
 import { NATIVE_PROJECTION_VERSION } from "./compact-resources.js";
 import type { MetricNumber, ResourceDiagnostic } from "./model.js";
@@ -123,7 +123,7 @@ export function readStream(
     }
     for (const raw of facts) {
       const native = stream === "nativeRecords" ? raw as NativeTrajectoryEntry : undefined;
-      const fact = native ? record(native.record) ?? {} : raw as JsonRecord;
+      const fact = native ? record(native.record as unknown as JsonValue) ?? {} : raw as JsonRecord;
       const projection = native ? record(native.metricProjection) : undefined;
       const metricProjection = projection?.version === NATIVE_PROJECTION_VERSION
         && typeof projection.fingerprint === "string" && typeof projection.supported === "boolean"
@@ -134,8 +134,8 @@ export function readStream(
         ...(native === undefined ? {} : { ingestSeq: native.ingestSeq }),
         ...(metricProjection ? { metricProjection } : {}),
       };
-      if (native && ((fact.chatId !== undefined && fact.chatId !== snapshot.scope.chatId)
-        || (fact.submissionId !== undefined && fact.submissionId !== snapshot.scope.submissionId))) {
+      if (native && (!isSafePiTrajectoryRecord(fact)
+        || !nativeRecordMayBelongToScope(fact, snapshot.scope))) {
         complete = false;
         diagnostics.report("conflicting-identity", stream, entry, "Native record is outside its resource snapshot operation");
         continue;

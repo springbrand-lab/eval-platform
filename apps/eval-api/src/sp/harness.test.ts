@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_EVIDENCE_LIMITS, EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT, type JsonValue } from "@eval-platform/eval-contracts";
+import { DEFAULT_EVIDENCE_LIMITS, EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT, type NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
 import {
   AgentHandleNotFoundError,
   AgentIdentityConflictError,
@@ -12,6 +12,7 @@ import { EVAL_EVIDENCE_FILE_MAX_BYTES, EVAL_INITIAL_FILE_MAX_BYTES, EVAL_OUTPUT_
 import { isRequestCancelled } from "@springbrand/http/errors";
 import WebSocket, { WebSocketServer } from "ws";
 import { createSpHarness, SpHarnessError, spEvidenceLimits } from "./harness.js";
+import { nativeAssistantMessage, nativeFixture } from "./native-test-fixture.js";
 
 const OWNER = "11111111-1111-4111-8111-111111111111";
 const OTHER_OWNER = "22222222-2222-4222-8222-222222222222";
@@ -50,13 +51,9 @@ const readiness = {
   actionCharges: { complete: false, unsettledExecutions: 1, missingExecutionIds: 0 },
 };
 const scope = { chatId: SUBJECT_CHAT, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" };
-const native = (ingestSeq: number, kind: string, detail: Record<string, JsonValue>, chatId = SUBJECT_CHAT,
-  submissionId = "submission-1") => ({
-  ingestSeq,
-  record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind,
-    chatId, ownerUserId: OWNER, submissionId, ...detail },
-});
-const nativePage = (records: readonly ReturnType<typeof native>[], throughSeq: number, nextAfterSeq: number | null) => ({
+const native = (ingestSeq: number, chatId = SUBJECT_CHAT, submissionId = "submission-1") =>
+  nativeFixture(ingestSeq, chatId, submissionId);
+const nativePage = (records: readonly NativeTrajectoryEntry[], throughSeq: number, nextAfterSeq: number | null) => ({
   format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq }, records, nextAfterSeq,
 });
 const resources = {
@@ -65,7 +62,7 @@ const resources = {
   finalized: true,
   coverage: { usageEvents: "complete", nativeRecords: "partial", billingSettlements: "complete" },
   usageEvents: [{ eventId: "usage-1", unknownField: null }],
-  nativeRecords: [native(1, "event", { event: { type: "agent_start" } })],
+  nativeRecords: [native(3)],
   billingSettlements: [{ eventId: "billing-1", chargedCredits: 7 }],
   readiness,
 };
@@ -591,13 +588,7 @@ describe("Eval SP Harness", () => {
   });
 
   it("exports Subject artifacts within limits and its complete trajectory, page by page", async () => {
-    const records = [
-      native(1, "event", { event: { type: "turn_start", turnId: "turn-1", timestamp: 1_760_000_000_001 } }),
-      native(2, "event", { event: { type: "tool_execution_start", toolCallId: "call-1", toolName: "write",
-        args: { path: "/index.html" }, timestamp: 1_760_000_000_002 } }),
-      native(3, "message", { message: { role: "assistant", stopReason: "stop", timestamp: 1_760_000_000_003,
-        content: [{ type: "text", text: "Build" }] } }),
-    ];
+    const records = [native(1), native(2), native(3)];
     const { fetch, requests } = spFetch((request) => {
       const url = new URL(request.url);
       if (url.pathname.endsWith("/evidence/artifacts")) {
@@ -777,7 +768,7 @@ describe("Eval SP Harness large transfers and readiness", () => {
       name: "resources_read", status: 200, finalized: true, submissionId: "submission-1", readiness, nativeRecords: 1,
     })]);
     expect(JSON.stringify(events)).not.toContain("service-secret");
-    expect(JSON.stringify(events)).not.toContain("agent_start");
+    expect(JSON.stringify(events)).not.toContain("turn.started");
   });
 
   it.each([
@@ -795,20 +786,43 @@ describe("Eval SP Harness large transfers and readiness", () => {
     { ...resources, scope: { ...scope, chatId: "other-chat" } },
     { ...resources, scope: { ...scope, submissionId: "other-submission" } },
     { ...resources, scope: { ...scope, idempotencyKey: "other-key" } },
-    { ...resources, nativeRecords: [native(1, "event", { event: { type: "agent_start" } }, SUBJECT_CHAT, "other-submission")] },
+    { ...resources, nativeRecords: [native(3, SUBJECT_CHAT, "other-submission")] },
   ])("rejects a resource snapshot with a foreign operation identity", async (body) => {
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
       fetch: queuedFetch(Response.json(body)).fetch });
     await expect(harness.collectAgentResources({
       handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1",
     })).rejects.toMatchObject({ retryable: false,
-      message: expect.stringMatching(/different Chat or Submission|outside the requested operation/u) });
+      message: expect.stringMatching(/invalid resource snapshot|different Chat or Submission|outside the requested operation/u) });
+  });
+
+  it("accepts only directly parented child Submission records in a scoped resource snapshot", async () => {
+    const child = native(8, SUBJECT_CHAT, "child-submission");
+    Object.assign(child.record, { parent: {
+      resource: { agentId: "agent-1", sessionId: SUBJECT_CHAT }, submissionId: "submission-1",
+    } });
+    const snapshot = { ...resources, nativeRecords: [native(3), child] };
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
+      fetch: queuedFetch(Response.json(snapshot)).fetch });
+    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: scope.idempotencyKey,
+      submissionId: scope.submissionId })).resolves.toEqual(snapshot);
+  });
+
+  it.each([
+    [native(8), native(3)],
+    [{ ...native(3), record: { ...native(3).record, ingestSeq: 3 } }],
+  ])("rejects resource rows whose stored sequence is misplaced or duplicated inside the record", async (...records) => {
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
+      fetch: queuedFetch(Response.json({ ...resources, nativeRecords: records })).fetch });
+    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: scope.idempotencyKey,
+      submissionId: scope.submissionId })).rejects.toMatchObject({ retryable: false,
+      message: "Eval SP returned an invalid resource snapshot" });
   });
 
   it("inspects resource readiness on its own route with the control timeout, without events", async () => {
     const report = { scope, observedAt: "2026-10-14T00:00:00.000Z", finalized: false, readiness };
     const events: Record<string, unknown>[] = [];
-    const { fetch, requests } = queuedFetch(Response.json({ ...report, nativeRecords: [native(1, "event", { event: { type: "agent_start" } })] }), Response.json(report));
+    const { fetch, requests } = queuedFetch(Response.json({ ...report, nativeRecords: [native(3)] }), Response.json(report));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, log: (event) => events.push(event) });
     const input = { handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" };
     expect(await harness.inspectAgentResources(input)).toEqual(report);
@@ -840,8 +854,9 @@ describe("Eval SP Harness large transfers and readiness", () => {
   });
 
   it("fails an oversized resource snapshot explicitly and permanently", async () => {
-    const { fetch } = queuedFetch(Response.json({ ...resources, nativeRecords: [native(1, "message",
-      { message: { role: "assistant", timestamp: 1, stopReason: "stop", content: [{ type: "text", text: "x".repeat(2_048) }] } })] }));
+    const { fetch } = queuedFetch(Response.json({ ...resources, nativeRecords: [
+      nativeAssistantMessage(14, SUBJECT_CHAT, "submission-1", [{ type: "text", text: "x".repeat(2_048) }]),
+    ] }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, maxResponseBytes: 1_024 });
     await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
       .rejects.toMatchObject({

@@ -4,13 +4,18 @@
 
 `native-trajectory.ts` describes the *consumer's* minimal structural identity for SP's
 future published `@springbrand/eval-harness` trajectory page. It is not a copy of SP's
-private trajectory parser: a native record has `format:"pi-trajectory/v1"` and a safe
-projection, and the raw `{ingestSeq,record}` is stored unchanged. A new
+private trajectory parser: a native record has `format:"pi-trajectory/v1"`,
+`resource:{agentId,sessionId}`, `submissionId`, a safe projection policy and
+`record:{type:"conversation"|"entry",value}`; the raw `{ingestSeq,record}` is
+stored unchanged. A new
 `AgentResourceSnapshot` has `nativeRecords`, not `telemetryEvents`; its independent
 `usageEvents`/`billingSettlements` and readiness remain intact. New evidence manifests
 are schema 2 with `trajectory.format:"sp-pi-trajectory/v1"`. Version 1 bundle bytes,
 hashes, refs and already accepted evaluation results are never rewritten. An old
-event-only bundle is deliberately not decoded as Pi-native evidence.
+event-only bundle is deliberately not decoded as Pi-native evidence. The outer
+`ingestSeq` cannot also appear inside a native record; scoped reads accept the
+requested Submission or a directly parented child, never an arbitrary foreign
+parent. SP's pending public package is still the authority for the full schema.
 
 Source-user IDs are opaque Auth identifiers, including legacy non-UUID IDs and
 the official account `springbrand-official` with its optional `official` flag.
@@ -92,7 +97,7 @@ Subject 的产物和完整轨迹是执行终态的必需证据。`Sampling.execu
 
 `AgentFramework` 为 `sp | codex | cc`。`HarnessConfig.kind` 表示统一的 SP 云端宿主，必填的 `framework` 表示所运行的 Agent 框架；三种框架都引用 SP 管理的 Agent Config，复用同一 Chat/Submission/Workspace 边界。执行计划可选择三者，评估计划固定 SP 框架，不由本包实现进程启动或云端部署。
 
-Subject 执行成功后导出一份不可变证据包：`manifest.json`（`schemaVersion: 1`、`evidenceId`、来源、`subjectInputs` 原始素材身份和文件信息、`artifacts` 产物信息、`trajectory` 有序分片及完整性、`omitted`）加按 sha256 存一次的文件。轨迹分片记录 size、sha256 和事件数，保留每行原始 `{ingestSeq,event}`，不生成第二套轨迹格式。`evidenceId` 是去掉自身字段后规范 manifest 的 `sha256:<hex>`。`Sampling.evidence` 是 `{evidenceId, manifestSha256, exportedAt}`，`Sampling.trajectory` 指向 `evidence:<evidenceId>/trajectory/`，内容摘要使用 manifest hash。产物超出 `DEFAULT_EVIDENCE_LIMITS` 的记录进入 `omitted`；完整轨迹按事件边界分片，单事件超过文件上限则明确失败，不截断。完整接口约束见[包边界](../../docs/package-boundaries.md#evidence-export-and-import)。
+新运行的 Subject 成功后导出一份不可变证据包：`manifest.json`（`schemaVersion: 2`、`evidenceId`、来源、`subjectInputs`、`artifacts`、`trajectory.format: "sp-pi-trajectory/v1"`、有序分片及完整性、`omitted`）加按 sha256 存一次的文件。轨迹分片记录 size、sha256 和原生记录数，保留每行原始 `{ingestSeq,record}`，不把旧事件改名为 Pi。`evidenceId` 是去掉自身字段后规范 manifest 的 `sha256:<hex>`。`Sampling.evidence` 是 `{evidenceId, manifestSha256, exportedAt}`，`Sampling.trajectory` 指向 `evidence:<evidenceId>/trajectory/`，内容摘要使用 manifest hash。产物超出 `DEFAULT_EVIDENCE_LIMITS` 的记录进入 `omitted`；完整轨迹按记录边界分片，单条记录超过文件上限则明确失败，不截断。历史 schemaVersion 1 的字节、引用和评分保留，但不作为新格式解码。完整接口约束见[包边界](../../docs/package-boundaries.md#evidence-export-and-import)。
 
 原始 `structuredOutput` 是评估输出的唯一事实。可选 Langfuse 分数由 Metrics 同一 Schema reader 派生，不在 `EvaluationAgentOutput` 再保存 `score` 或 `reason`。`scoreSync` 只记录外部投递结果。
 

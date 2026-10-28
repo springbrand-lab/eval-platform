@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_EVIDENCE_LIMITS, SP_PI_TRAJECTORY_FORMAT, type EvidenceExportProgress } from "@eval-platform/eval-contracts";
+import { DEFAULT_EVIDENCE_LIMITS, SP_PI_TRAJECTORY_FORMAT, type EvidenceExportProgress, type JsonValue } from "@eval-platform/eval-contracts";
 import { createEvidenceStore, type ExportedEvidence } from "@eval-platform/eval-runtime/harness";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { nativeFixture } from "../sp/native-test-fixture.js";
 import { openLocalEvidenceBlobs } from "./local-blobs.js";
 import { createR2EvidenceBlobs, signV4 } from "./r2-blobs.js";
 
@@ -52,9 +53,7 @@ describe("local evidence blobs", () => {
         omitted: [{ path: "/node_modules/a.js", reason: "excluded" }],
         readFile: async () => stream("hi"),
         async* readTrajectory(afterSeq) {
-          if (afterSeq < 1) yield { seq: 1, throughSeq: 1,
-            record: { ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" },
-              kind: "event", event: { type: "agent_start", raw: null } } } };
+          if (afterSeq < 3) yield { seq: 3, throughSeq: 3, record: nativeFixture(3, "c-1") as unknown as JsonValue };
         },
         trajectoryComplete: true,
         trajectoryFormat: SP_PI_TRAJECTORY_FORMAT,
@@ -157,9 +156,7 @@ describe("R2 evidence blobs", () => {
         return stream(path === "/a.txt" ? "a" : "b");
       },
       async* readTrajectory(afterSeq) {
-        if (afterSeq < 1) yield { seq: 1, throughSeq: 1,
-          record: { ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" },
-            kind: "event", event: { type: "agent_start" } } } };
+        if (afterSeq < 3) yield { seq: 3, throughSeq: 3, record: nativeFixture(3, "c-1") as unknown as JsonValue };
       },
       trajectoryComplete: true,
       trajectoryFormat: SP_PI_TRAJECTORY_FORMAT,

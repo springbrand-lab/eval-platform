@@ -6,6 +6,7 @@ import type { ApiRuntime, OwnerServices } from "./lib/types.js";
 import { INPUT_LIMITS, METADATA_BODY_BYTES, RUN_TARGET_IDS, SAMPLING_COUNT_MAX, ZIP_BODY_BYTES } from "./limits.js";
 import type { EvalSpClient } from "./sp/client.js";
 import { EvalSpApiError } from "./sp/http.js";
+import { nativeAssistantMessage } from "./sp/native-test-fixture.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "./test-support.js";
 
 const owner = "11111111-1111-4111-8111-111111111111";
@@ -665,7 +666,18 @@ it("rejects a non-JSON collection body with 415", async () => {
 
  it("returns lightweight Run evaluation records without raw resource or output payloads", async () => {
   const app = setup();
-  const evaluation = { evaluationId: "e-1", samplingId: "s-1", status: { status: "succeeded" }, chatId: "chat-1", attempts: [{ status: "completed", submissionId: "submission-1", resources: { snapshot: { nativeRecords: [{ ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "message", message: { role: "assistant", timestamp: 1, content: [{ type: "text", text: "x".repeat(11 * 1024 * 1024) }] } } }] } } }], output: { structuredOutput: { content: "large output" } } };
+  const largeNative = nativeAssistantMessage(14, "chat-1", "submission-1",
+    [{ type: "text", text: "x".repeat(2_000_000) }]);
+  const evaluation = {
+    evaluationId: "e-1", samplingId: "s-1", status: { status: "succeeded" }, chatId: "chat-1",
+    attempts: [{ status: "completed", submissionId: "submission-1", resources: { snapshot: {
+      scope: { chatId: "chat-1", submissionId: "submission-1", idempotencyKey: "key" },
+      observedAt: "2026-10-28T00:00:00Z", finalized: true,
+      coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+      usageEvents: [], nativeRecords: [largeNative], billingSettlements: [],
+    } } }],
+    output: { structuredOutput: { content: "large output" } },
+  };
   app.services.projectRuns.readRun.mockResolvedValue({ run: { runId: "run-1" }, samplings: [{ samplingId: "s-1", execution: { status: "succeeded" } }], evaluations: [evaluation] });
   const response = await app.request("/api/projects/project-1/runs/run-1/evaluations", authorized());
   expect(response.status).toBe(200);

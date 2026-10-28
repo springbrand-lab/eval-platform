@@ -12,9 +12,13 @@ import {
   SAMPLING_STATUSES,
   TERMINAL_AGENT_STATUSES,
   isIdentifier,
+  isSafePiTrajectoryRecord,
   isPendingSamplingStatus,
   isStageRecoveryPending,
   isTerminalAgentStatus,
+  nativeRecordMayBelongToScope,
+  nativeTrajectoryEntrySchema,
+  spPiTrajectoryPageSchema,
   jsonObjectArrayInPlaceSchema,
   jsonObjectInPlaceSchema,
   jsonObjectSchema,
@@ -122,13 +126,39 @@ describe("@eval-platform/eval-contracts", () => {
       coverage: { usageEvents: "complete", nativeRecords: "partial", billingSettlements: "complete" },
       usageEvents: [{ eventId: "u" }],
       nativeRecords: [1, 2].map((ingestSeq) => ({ ingestSeq,
-        record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
-          event: { type: "agent_start" } } })),
+        record: { format: "pi-trajectory/v1", resource: { agentId: "agent", sessionId: "chat" },
+          submissionId: "submission", projection: { kind: "safe", policyId: "test", policyVersion: 1 },
+          record: { type: "conversation", value: { id: ingestSeq } } } })),
       billingSettlements: [],
     };
     expect(summarizeResourceSnapshot(snapshot)).toEqual({
       scope: snapshot.scope, observedAt: snapshot.observedAt, finalized: true, coverage: snapshot.coverage,
       counts: { usageEvents: 1, nativeRecords: 2, billingSettlements: 0 },
     });
+  });
+
+  it("requires a real safe UA envelope and binds stored cursors to the requested Submission", () => {
+    const native = {
+      format: "pi-trajectory/v1", resource: { agentId: "agent", sessionId: "chat" },
+      submissionId: "submission", projection: { kind: "safe", policyId: "test", policyVersion: 1 },
+      record: { type: "entry", value: { id: 2, conversationId: 1, kind: "pi.user",
+        model: [{ role: "user", content: "example", timestamp: 1 }] } },
+    } as const;
+    const entry = { ingestSeq: 5, record: native };
+    expect(nativeTrajectoryEntrySchema.safeParse(entry).success).toBe(true);
+    expect(spPiTrajectoryPageSchema.safeParse({
+      format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: 6 }, records: [entry], nextAfterSeq: null,
+    }).success).toBe(true); // The global watermark may follow the last scoped record.
+    if (!isSafePiTrajectoryRecord(native)) throw new Error("Expected safe fixture");
+    const scope = { chatId: "chat", submissionId: "submission" };
+    expect(nativeRecordMayBelongToScope(native, scope)).toBe(true);
+    expect(nativeTrajectoryEntrySchema.safeParse({ ...entry, record: { ...native, kind: "message" } }).success).toBe(false);
+    expect(nativeTrajectoryEntrySchema.safeParse({ ...entry, record: { ...native, ingestSeq: 5 } }).success).toBe(false);
+    expect(nativeTrajectoryEntrySchema.safeParse({ ...entry, record: { ...native, projection: { kind: "safe" } } }).success).toBe(false);
+    expect(nativeRecordMayBelongToScope({ ...native, submissionId: null, origin: "context" }, scope)).toBe(false);
+    expect(nativeRecordMayBelongToScope({ ...native, submissionId: "child",
+      parent: { resource: native.resource, submissionId: "submission" } }, scope)).toBe(true);
+    expect(nativeRecordMayBelongToScope({ ...native, submissionId: "foreign",
+      parent: { resource: native.resource, submissionId: "unrelated" } }, scope)).toBe(false);
   });
 });

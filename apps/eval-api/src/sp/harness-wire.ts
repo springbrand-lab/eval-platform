@@ -9,6 +9,7 @@ import type {
   EvaluationAgentOutput,
   EvaluationStructuredOutput,
   ExecutionOutput,
+  JsonValue,
   MaterializedDataBinding,
   PiTrajectoryRecord,
   SpPiTrajectoryPage,
@@ -182,6 +183,17 @@ const resourceSnapshotSchema = z.strictObject({
   nativeRecords: z.array(nativeTrajectoryEntrySchema),
   billingSettlements: jsonObjectArrayInPlaceSchema,
   readiness: readinessSchema,
+}).superRefine((snapshot, context) => {
+  snapshot.nativeRecords.forEach(({ ingestSeq, record }, index) => {
+    if (index > 0 && ingestSeq <= snapshot.nativeRecords[index - 1]!.ingestSeq) {
+      context.addIssue({ code: "custom", path: ["nativeRecords", index, "ingestSeq"],
+        message: "Native records must ascend" });
+    }
+    if (record.resource.sessionId !== snapshot.scope.chatId) {
+      context.addIssue({ code: "custom", path: ["nativeRecords", index, "record", "resource", "sessionId"],
+        message: "Native record belongs to another Chat" });
+    }
+  });
 }) satisfies z.ZodType<AgentResourceSnapshot>;
 
 export function resourceSnapshot(value: unknown): AgentResourceSnapshot {
@@ -207,25 +219,40 @@ export function evidenceTrajectoryPage(value: unknown): SpPiTrajectoryPage {
   return response(spPiTrajectoryPageSchema, value, "evidence trajectory page");
 }
 
-/** Only the selected Submission's native, complete Pi assistant message can be a final reply.
- * No `turn.finished` event, role/content-only transcript or another Submission substitutes for it. */
-export function finalReplyText(record: PiTrajectoryRecord, submissionId: string): string | undefined {
-  if (record.kind !== "message" || record.submissionId !== submissionId || record.projection.contentComplete === false) return undefined;
-  const parsed = assistantMessageSchema.safeParse(record.message);
-  if (!parsed.success) return undefined;
-  const blocks = parsed.data.content.flatMap((block) =>
-    block.type === "text" && typeof block.text === "string" ? [block.text] : []);
-  if (blocks.some((text) => text === "[REDACTED]" || text === "[CONTENT OMITTED]")) return undefined;
+/** Only model[0] of a native Entry can carry the selected Submission's assistant
+ * reply. `undefined` is not an assistant; `null` is an assistant with no usable
+ * complete reply (so an earlier message must not be substituted). */
+export function finalReplyText(value: PiTrajectoryRecord, submissionId: string): string | null | undefined {
+  if (value.format !== "pi-trajectory/v1" || value.projection?.kind !== "safe"
+    || value.submissionId !== submissionId || value.origin === "context"
+    || value.record.type !== "entry") return undefined;
+  const entry = value.record.value;
+  if (entry.kind === "springbrand.trajectory") return undefined;
+  const models = entry.model;
+  if (!Array.isArray(models) || models.length !== 1) {
+    return entry.kind === "pi.assistant" || (Array.isArray(models) && models.some((item) =>
+      item !== null && typeof item === "object" && !Array.isArray(item) && item.role === "assistant"))
+      ? null : undefined;
+  }
+  const item = models[0];
+  if (item === null || typeof item !== "object" || Array.isArray(item)) return entry.kind === "pi.assistant" ? null : undefined;
+  const message = item as Record<string, JsonValue>;
+  if (message.role !== "assistant") return entry.kind === "pi.assistant" ? null : undefined;
+  if (!Array.isArray(message.content)
+    || typeof message.timestamp !== "number" || !Number.isFinite(message.timestamp)
+    || message.stopReason !== "stop") return null;
+  const blocks: string[] = [];
+  for (const block of message.content) {
+    if (block === null || typeof block !== "object" || Array.isArray(block)) return null;
+    const content = block as Record<string, JsonValue>;
+    if (content.type === "thinking") continue;
+    if (content.type !== "text" || typeof content.text !== "string"
+      || content.text === "[REDACTED]" || content.text === "[CONTENT OMITTED]") return null;
+    blocks.push(content.text);
+  }
   const text = blocks.join("\n");
-  return text.trim() === "" ? undefined : text;
+  return text.trim() === "" ? null : text;
 }
-
-const assistantMessageSchema = z.looseObject({
-  role: z.literal("assistant"),
-  timestamp: z.number().nonnegative().safe(),
-  stopReason: z.string().min(1),
-  content: z.array(z.looseObject({ type: z.string(), text: z.unknown().optional() })),
-});
 
 export function evidenceFileReceipt(value: unknown): EvalEvidenceFileReceipt {
   return response(z.object({

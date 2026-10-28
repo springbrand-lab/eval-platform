@@ -1,169 +1,137 @@
-import { canonicalJsonBytes, type AgentResourceSnapshot } from "@eval-platform/eval-contracts";
+import type { AgentResourceSnapshot } from "@eval-platform/eval-contracts";
 import { describe, expect, it } from "vitest";
-import { piEvent, piHook, piMessage, piRequest, piResult, resourceInput, settlement, usage } from "../test-support.js";
+import { nativeFixture, nativeResourceInput, resourceInput, settlement, usage } from "../test-support.js";
 import { aggregateResources, type ResourceInput } from "./resources.js";
 
-describe("safe Pi-native trajectory metrics", () => {
-  it("merges native request/hooks, Pi assistant messages and Tool results across Attempts without counting replay twice", () => {
-    const calls = [
-      piEvent(1, "turn_start", { turnId: "turn", timestamp: 0 }),
-      piHook(2, "before_model", { requestId: "request-1", turnId: "turn", timestamp: 1 }),
-      piRequest(3, "start", { requestId: "request-1", turnId: "turn", timestamp: 1 }),
-      piMessage(4, {
-        role: "assistant", timestamp: 5, stopReason: "toolUse",
-        content: [
-          { type: "thinking", thinking: "hidden", signature: "safe-marker" },
-          { type: "text", text: "Searching" },
-          { type: "toolCall", id: "call-1", name: "search", arguments: { query: "é" } },
-        ], usage: { input: 3, output: 2, totalTokens: 5 },
-      }, { requestId: "request-1", turnId: "turn" }),
-      piResult(5, { toolCallId: "call-1", turnId: "turn", toolName: "search", isError: false,
-        timestamp: 8, content: [{ type: "text", text: "ok" }] }),
-      piRequest(6, "end", { requestId: "request-1", turnId: "turn", timestamp: 9, outcome: "completed",
-        inputTokens: 3, outputTokens: 2, totalTokens: 5 }),
-      piEvent(7, "turn_end", { turnId: "turn", timestamp: 10, outcome: "completed" }),
-    ];
-    const result = aggregateResources([
-      resourceInput({ nativeRecords: calls.slice(0, 4) }),
-      resourceInput({ nativeRecords: [calls[3]!, ...calls.slice(4)] }),
-    ]);
-    expect(result.duplicateRecords.nativeRecords).toBe(1);
-    expect(result.trajectory.coverage).toBe("complete");
-    expect(result.trajectory.turns).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { total: 10 } });
-    expect(result.modelRequests).toMatchObject({ count: { value: 1 }, completed: 1, durationMs: { total: 8 } });
-    expect(result.trajectory.tools).toMatchObject({ count: { value: 1 }, completed: 1 });
-    expect(result.trajectory.byTool).toEqual([expect.objectContaining({
-      toolName: "search", count: { value: 1, coverage: "complete" },
-      inputLength: expect.objectContaining({ count: 1, total: canonicalJsonBytes({ query: "é" }).byteLength }),
-      outputLength: expect.objectContaining({ count: 1, total: canonicalJsonBytes([{ type: "text", text: "ok" }]).byteLength }),
-    })]);
-    expect(result.trajectory.thinkingSteps).toEqual({ value: 1, coverage: "complete" });
-    expect(result.trajectory.contentSteps).toEqual({ value: 1, coverage: "complete" });
-    expect(result.trajectory.thinkingStepTokens.total).toEqual({ value: 5, coverage: "complete" });
-    expect(result.trajectory.contentStepTokens.total).toEqual({ value: 5, coverage: "complete" });
-    expect(result.trajectory.unlinkedOperations).toEqual({ tools: 0, generations: 0 });
-  });
-
-  it("counts each model request Step separately; absent Step tokens are missing, not zero or a second usage bill", () => {
-    const result = aggregateResources([resourceInput({
-      usageEvents: [usage("billing", { metrics: { totalTokens: 55 } })],
-      billingSettlements: [settlement("billing")],
-      nativeRecords: [
-        piEvent(1, "turn_start", { turnId: "turn" }),
-        piRequest(2, "end", { turnId: "turn", requestId: "step-1", outcome: "failed", totalTokens: 5 }),
-        piMessage(3, { role: "assistant", timestamp: 2, stopReason: "error",
-          content: [{ type: "thinking", thinking: "attempt" }], usage: { totalTokens: 5 } },
-        { turnId: "turn", requestId: "step-1" }),
-        piRequest(4, "end", { turnId: "turn", requestId: "step-2", outcome: "completed" }),
-        piMessage(5, { role: "assistant", timestamp: 3, stopReason: "stop",
-          content: [{ type: "text", text: "answer" }] },
-        { turnId: "turn", requestId: "step-2" }),
-        piEvent(6, "turn_end", { turnId: "turn", outcome: "completed" }),
-      ],
-    })]);
-    expect(result.modelRequests).toMatchObject({ count: { value: 2 }, failed: 1, completed: 1 });
-    expect(result.trajectory.thinkingSteps).toEqual({ value: 1, coverage: "complete" });
-    expect(result.trajectory.contentSteps).toEqual({ value: 1, coverage: "complete" });
-    expect(result.trajectory.thinkingStepTokens.total).toEqual({ value: 5, coverage: "complete" });
-    expect(result.trajectory.contentStepTokens.total).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.tokens.total.value).toBe(55);
-    expect(result.costs.modelDebitedUnits.value).toBe(8);
-  });
-
-  it("retains partial delivery, missing Tool results and redacted Pi content as unavailable facts", () => {
-    const partial = aggregateResources([{ ...resourceInput({
-      coverage: { usageEvents: "complete", nativeRecords: "partial", billingSettlements: "complete" },
-      nativeRecords: [
-        piEvent(1, "turn_start", { turnId: "turn", timestamp: 1 }),
-        piRequest(2, "start", { turnId: "turn", requestId: "step", timestamp: 2 }),
-        piMessage(3, { role: "assistant", timestamp: 3, stopReason: "stop", content: "[REDACTED]" },
-          { turnId: "turn", requestId: "step" }),
-        piEvent(4, "tool_execution_start", { toolCallId: "call", toolName: "search", turnId: "turn",
-          timestamp: 4, args: "[CONTENT OMITTED]" }),
-      ],
-    }), canEmitNativeRecords: false }]);
-    expect(partial.trajectory.coverage).toBe("partial");
-    expect(partial.modelRequests).toMatchObject({ count: { value: 1, coverage: "partial" }, completed: 1 });
-    expect(partial.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "partial" }, unknown: 1 });
-    expect(partial.trajectory.byTool[0]).toMatchObject({
-      inputLength: { count: 0, missing: 1, total: null, coverage: "unavailable" },
-      outputLength: { count: 0, missing: 1, total: null, coverage: "unavailable" },
-    });
-    expect(partial.trajectory.thinkingSteps).toEqual({ value: null, coverage: "unavailable" });
-    expect(partial.trajectory.contentSteps).toEqual({ value: null, coverage: "unavailable" });
-  });
-
-  it("counts visible redacted thinking as positive but never treats missing block-completeness as negative evidence", () => {
-    const record = piMessage(3, { role: "assistant", timestamp: 3, stopReason: "stop",
-      content: [{ type: "thinking", thinking: "[REDACTED]" }], usage: { totalTokens: 4 } },
-    { turnId: "turn", requestId: "request" });
-    const { contentComplete: _claim, ...onlyKind } = record.record.projection;
-    const safeWithoutProof = { ...record, record: { ...record.record, projection: onlyKind } };
-    const result = aggregateResources([resourceInput({ nativeRecords: [
-      piEvent(1, "turn_start", { turnId: "turn" }),
-      piRequest(2, "start", { turnId: "turn", requestId: "request" }),
-      safeWithoutProof,
-    ] })]);
-    expect(result.trajectory.thinkingSteps).toEqual({ value: 1, coverage: "partial" });
-    expect(result.trajectory.contentSteps).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.thinkingStepTokens.total).toEqual({ value: 4, coverage: "partial" });
-  });
-
-  it("does not decode old event-only snapshots or call `turn.finished` a native Pi message", () => {
-    const snapshot = resourceInput({ usageEvents: [usage("old")], billingSettlements: [settlement("old")] }).collection;
-    if (!snapshot || snapshot.status !== "collected") throw new Error("missing fixture");
-    const { nativeRecords: _native, ...rest } = snapshot.snapshot;
+describe("actual public UA safe Pi trajectory facts", () => {
+  it("does not decode an old event-only resource snapshot as native Pi", () => {
+    const collection = resourceInput({ usageEvents: [usage("old")], billingSettlements: [settlement("old")] }).collection;
+    if (!collection || collection.status !== "collected") throw new Error("expected collected snapshot");
+    const { nativeRecords: _native, ...rest } = collection.snapshot;
     const old = { ...rest, coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
-      telemetryEvents: [{ eventId: "old", type: "turn.finished", payload: { output: { role: "assistant", content: "false" } } }] };
-    const input: ResourceInput = { ownerUserId: "owner-1", collection: { ...snapshot, snapshot: old as unknown as AgentResourceSnapshot } };
+      telemetryEvents: [{ eventId: "old", type: "turn.finished", payload: { outcome: "completed" } }] };
+    const input: ResourceInput = { ownerUserId: "owner-1", collection: {
+      ...collection, snapshot: old as unknown as AgentResourceSnapshot,
+    } };
     const result = aggregateResources([input]);
     expect(result.trajectory.turns.count).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.thinkingSteps.value).toBeNull();
-    expect(result.diagnostics).toContainEqual(expect.objectContaining({ stream: "nativeRecords", kind: "unsupported-record" }));
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      kind: "unsupported-record", stream: "nativeRecords",
+    }));
     expect(result.tokens.total.value).toBe(35);
     expect(result.costs.modelDebitedUnits.value).toBe(8);
   });
 
-  it("isolates contradictory source cursors and Tool names rather than choosing one Attempt's version", () => {
-    const start = piEvent(2, "tool_execution_start", { toolCallId: "id", toolName: "search", turnId: "turn", args: {} });
-    const conflict = piEvent(2, "tool_execution_start", { toolCallId: "id", toolName: "shell", turnId: "turn", args: {} });
+  it("keeps an incomplete delivery partial, rather than proving zero missing Tools or final results", () => {
+    const result = aggregateResources([nativeResourceInput([3, 4, 5, 6, 7, 8], {
+      finalized: false,
+      coverage: { usageEvents: "complete", nativeRecords: "partial", billingSettlements: "complete" },
+    })]);
+    expect(result.modelRequests.count).toEqual({ value: 1, coverage: "partial" });
+    expect(result.trajectory.tools.count).toEqual({ value: 1, coverage: "partial" });
+    expect(result.trajectory.byTool[0]!.outputLength.total).toBeNull();
+    expect(result.trajectory.turns).toMatchObject({ count: { value: 1, coverage: "partial" }, inProgress: 1 });
+  });
+
+  it("uses an actual failed Tool fact even when its Pi Tool Result is missing; output bytes remain missing", () => {
+    const result = aggregateResources([nativeResourceInput([3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16])]);
+    expect(result.trajectory.tools).toMatchObject({ count: { value: 1 }, failed: 1 });
+    expect(result.trajectory.byTool[0]).toMatchObject({
+      inputLength: { count: 1, missing: 0 },
+      outputLength: { count: 0, missing: 1, total: null, coverage: "unavailable" },
+    });
+  });
+
+  it("refuses a contradicted ingest cursor rather than assigning an arbitrary Tool name", () => {
+    const source = nativeFixture(8)[0]!;
+    const different = structuredClone(source);
+    const entry = different.record.record;
+    if (entry.type !== "entry") throw new Error("expected Pi entry");
+    const data = entry.value.data as { event: { payload: { toolName: string } } };
+    data.event.payload.toolName = "shell";
     const result = aggregateResources([
-      resourceInput({ nativeRecords: [piEvent(1, "turn_start", { turnId: "turn" }), start] }),
-      resourceInput({ nativeRecords: [conflict] }),
+      nativeResourceInput([3, 8]),
+      nativeResourceInput([], { nativeRecords: [different] }),
     ]);
     expect(result.duplicateRecords.nativeRecords).toBe(1);
     expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.diagnostics).toContainEqual(expect.objectContaining({ kind: "conflicting-identity", ingestSeq: 2 }));
-  });
-
-  it("does not mistake missing IDs or unsupported safe record shapes for a complete empty Tool stream", () => {
-    const result = aggregateResources([resourceInput({ nativeRecords: [
-      piEvent(1, "tool_execution_start", { toolName: "unknown", args: {} }),
-      piEvent(2, "agent_future_event", { toolCallId: "future" }),
-    ] })]);
-    expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.diagnostics.map(({ kind }) => kind)).toEqual(["missing-identity", "unsupported-record"]);
-  });
-
-  it("does not infer zero requests from an event-only message lifecycle without a Pi result record", () => {
-    const result = aggregateResources([resourceInput({ nativeRecords: [
-      piEvent(1, "turn_start", { turnId: "turn" }),
-      piEvent(2, "message_start", { requestId: "request", turnId: "turn" }),
-    ] })]);
-    expect(result.modelRequests.count).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.diagnostics).toContainEqual(expect.objectContaining({
-      kind: "unsupported-record", ingestSeq: 2,
-    }));
-  });
-
-  it("does not count a Pi record labelled as another operation's Submission", () => {
-    const event = piEvent(1, "tool_execution_start", { toolCallId: "foreign", toolName: "search" });
-    const foreign = { ...event, record: { ...event.record, submissionId: "other-submission" } };
-    const result = aggregateResources([resourceInput({ nativeRecords: [foreign] })]);
-    expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
     expect(result.diagnostics).toContainEqual(expect.objectContaining({
-      stream: "nativeRecords", kind: "conflicting-identity", ingestSeq: 1,
+      kind: "conflicting-identity", stream: "nativeRecords", ingestSeq: 8,
     }));
+  });
+
+  it("does not infer thinking/content absence from a completed generation whose Pi message is undelivered", () => {
+    const result = aggregateResources([nativeResourceInput([3, 4, 5, 7])]);
+    expect(result.modelRequests).toMatchObject({ count: { value: 1, coverage: "partial" }, completed: 1 });
+    expect(result.trajectory.thinkingSteps.value).toBeNull();
+    expect(result.trajectory.contentSteps.value).toBeNull();
+    expect(result.trajectory.diagnostics).toContainEqual(expect.objectContaining({
+      kind: "missing-identity", message: expect.stringContaining("assistant reference"),
+    }));
+  });
+
+  it("does not assign one Pi assistant to two generations that claim the same public reference", () => {
+    const second = structuredClone(nativeFixture(15)[0]!);
+    const write = second.record.record;
+    if (write.type !== "entry") throw new Error("expected Pi event");
+    const data = write.value.data as { refs: { assistantTimestamp: number } };
+    data.refs.assistantTimestamp = 255;
+    const result = aggregateResources([nativeResourceInput([], { nativeRecords: [
+      ...nativeFixture(...Array.from({ length: 14 }, (_, index) => index + 1)), second, ...nativeFixture(16),
+    ] })]);
+    expect(result.modelRequests).toMatchObject({ count: { value: 2, coverage: "partial" }, completed: 2 });
+    expect(result.trajectory.thinkingSteps).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.contentSteps).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.diagnostics).toContainEqual(expect.objectContaining({
+      kind: "conflicting-identity", message: expect.stringContaining("assistant reference"),
+    }));
+  });
+
+  it("keeps Step markers unknown when a Pi assistant's real task ID cannot match the request", () => {
+    const assistant = structuredClone(nativeFixture(14)[0]!);
+    if (assistant.record.record.type !== "entry") throw new Error("expected Pi assistant");
+    Object.assign(assistant.record.record.value, { byTaskId: 999 });
+    const result = aggregateResources([nativeResourceInput([], { nativeRecords: [
+      ...nativeFixture(3, 12, 13), assistant, ...nativeFixture(15),
+    ] })]);
+    expect(result.modelRequests).toMatchObject({ count: { value: 1, coverage: "partial" }, completed: 1 });
+    expect(result.trajectory.thinkingSteps.value).toBeNull();
+    expect(result.trajectory.contentSteps.value).toBeNull();
+    expect(result.trajectory.diagnostics).toContainEqual(expect.objectContaining({
+      kind: "missing-identity", message: expect.stringContaining("request task"),
+    }));
+  });
+
+  it("does not infer zero Tool output bytes from a safe but redacted Pi Tool Result", () => {
+    const resultRecord = structuredClone(nativeFixture(10)[0]!);
+    if (resultRecord.record.record.type !== "entry") throw new Error("expected Pi Tool Result");
+    const message = (resultRecord.record.record.value.model as { content: { text: string }[] }[])[0]!;
+    message.content[0]!.text = "[REDACTED]";
+    const result = aggregateResources([nativeResourceInput([], { nativeRecords: [
+      ...nativeFixture(3, 4, 5, 6, 7, 8, 9), resultRecord, ...nativeFixture(11, 12, 13, 14, 15, 16),
+    ] })]);
+    expect(result.trajectory.tools.failed).toBe(1);
+    expect(result.trajectory.byTool[0]!.outputLength).toMatchObject({
+      count: 0, missing: 1, total: null, coverage: "unavailable",
+    });
+  });
+
+  it("cannot interpret a bookkeeping entry carrying Pi model messages as a complete empty source", () => {
+    const invalid = structuredClone(nativeFixture(3)[0]!);
+    if (invalid.record.record.type !== "entry") throw new Error("expected bookkeeping Entry");
+    Object.assign(invalid.record.record.value, { model: [{
+      role: "assistant", timestamp: 100, content: [{ type: "text", text: "not bookkeeping" }],
+    }] });
+    const result = aggregateResources([nativeResourceInput([], { nativeRecords: [invalid] })]);
+    expect(result.modelRequests.count).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.diagnostics).toContainEqual(expect.objectContaining({ kind: "unsupported-record" }));
+  });
+
+  it("does not count a context-origin native Pi message as an evaluation Step", () => {
+    const context = structuredClone(nativeFixture(6)[0]!);
+    Object.assign(context.record, { submissionId: null, origin: "context" });
+    const result = aggregateResources([nativeResourceInput([], { nativeRecords: [context] })]);
+    expect(result.modelRequests.count).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({ stream: "nativeRecords" }));
   });
 });
