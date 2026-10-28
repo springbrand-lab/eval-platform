@@ -1,4 +1,5 @@
 import { Loader2 } from "lucide-react";
+import { Slot } from "radix-ui";
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
@@ -21,6 +22,7 @@ const sizes: Record<Size, string> = {
 };
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  asChild?: boolean;
   variant?: Variant;
   size?: Size;
   loading?: boolean;
@@ -28,22 +30,27 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { variant = "secondary", size = "md", loading, icon, className, children, disabled, type = "button", ...props }, ref,
+  { asChild = false, variant = "secondary", size = "md", loading, icon, className, children, disabled, type = "button", onClickCapture, tabIndex, ...props }, ref,
 ) {
+  const Component = asChild ? Slot.Root : "button";
+  const blocked = disabled || loading;
   return (
-    <button
+    <Component
       ref={ref}
-      type={type}
-      disabled={disabled || loading}
+      type={asChild ? undefined : type}
+      disabled={blocked}
+      aria-disabled={asChild && blocked ? true : undefined}
+      tabIndex={asChild && blocked ? -1 : tabIndex}
+      onClickCapture={asChild && blocked ? (event) => { event.preventDefault(); event.stopPropagation(); } : onClickCapture}
       className={cn(
         "inline-flex shrink-0 select-none items-center justify-center whitespace-nowrap rounded-[var(--radius-control)] font-semibold transition-colors",
         "disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0",
-        variants[variant], sizes[size], className,
+        variants[variant], sizes[size], asChild && blocked && "pointer-events-none opacity-50", className,
       )}
       {...props}
     >
       {loading ? <Loader2 className="animate-spin" aria-hidden /> : icon}
-      {children}
-    </button>
+      {asChild ? <Slot.Slottable>{children}</Slot.Slottable> : children}
+    </Component>
   );
 });

@@ -15,6 +15,9 @@ import { Route as AuthenticatedCreditsRouteImport } from './routes/_authenticate
 import { Route as AuthenticatedAgentsIndexRouteImport } from './routes/_authenticated/agents/index'
 import { Route as AuthenticatedAgentsIdRouteImport } from './routes/_authenticated/agents/$id'
 import { Route as AuthenticatedAgentsNewRouteImport } from './routes/_authenticated/agents/new'
+import { Route as AuthenticatedDashboardIndexRouteImport } from './routes/_authenticated/dashboard/index'
+import { Route as AuthenticatedDashboardEditRouteImport } from './routes/_authenticated/dashboard/edit'
+import { Route as AuthenticatedDashboardNewRouteImport } from './routes/_authenticated/dashboard/new'
 import { Route as AuthenticatedDataDataIdRouteImport } from './routes/_authenticated/data/$dataId'
 import { Route as AuthenticatedDatasetsIndexRouteImport } from './routes/_authenticated/datasets/index'
 import { Route as AuthenticatedDatasetsPromptsRouteImport } from './routes/_authenticated/datasets/prompts'
@@ -68,6 +71,24 @@ const AuthenticatedAgentsNewRoute = AuthenticatedAgentsNewRouteImport.update({
   path: '/agents/new',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedDashboardIndexRoute =
+  AuthenticatedDashboardIndexRouteImport.update({
+    id: '/dashboard/',
+    path: '/dashboard/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedDashboardEditRoute =
+  AuthenticatedDashboardEditRouteImport.update({
+    id: '/dashboard/edit',
+    path: '/dashboard/edit',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedDashboardNewRoute =
+  AuthenticatedDashboardNewRouteImport.update({
+    id: '/dashboard/new',
+    path: '/dashboard/new',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 const AuthenticatedDataDataIdRoute = AuthenticatedDataDataIdRouteImport.update({
   id: '/data/$dataId',
   path: '/data/$dataId',
@@ -207,11 +228,14 @@ export interface FileRoutesByFullPath {
   '/credits': typeof AuthenticatedCreditsRoute
   '/agents/$id': typeof AuthenticatedAgentsIdRoute
   '/agents/new': typeof AuthenticatedAgentsNewRoute
+  '/dashboard/edit': typeof AuthenticatedDashboardEditRoute
+  '/dashboard/new': typeof AuthenticatedDashboardNewRoute
   '/data/$dataId': typeof AuthenticatedDataDataIdRoute
   '/datasets/prompts': typeof AuthenticatedDatasetsPromptsRoute
   '/output-schemas/$outputSchemaId': typeof AuthenticatedOutputSchemasOutputSchemaIdRoute
   '/projects/new': typeof AuthenticatedProjectsNewRoute
   '/agents/': typeof AuthenticatedAgentsIndexRoute
+  '/dashboard/': typeof AuthenticatedDashboardIndexRoute
   '/datasets/': typeof AuthenticatedDatasetsIndexRoute
   '/output-schemas/': typeof AuthenticatedOutputSchemasIndexRoute
   '/projects/': typeof AuthenticatedProjectsIndexRoute
@@ -236,11 +260,14 @@ export interface FileRoutesByTo {
   '/': typeof AuthenticatedIndexRoute
   '/agents/$id': typeof AuthenticatedAgentsIdRoute
   '/agents/new': typeof AuthenticatedAgentsNewRoute
+  '/dashboard/edit': typeof AuthenticatedDashboardEditRoute
+  '/dashboard/new': typeof AuthenticatedDashboardNewRoute
   '/data/$dataId': typeof AuthenticatedDataDataIdRoute
   '/datasets/prompts': typeof AuthenticatedDatasetsPromptsRoute
   '/output-schemas/$outputSchemaId': typeof AuthenticatedOutputSchemasOutputSchemaIdRoute
   '/projects/new': typeof AuthenticatedProjectsNewRoute
   '/agents': typeof AuthenticatedAgentsIndexRoute
+  '/dashboard': typeof AuthenticatedDashboardIndexRoute
   '/datasets': typeof AuthenticatedDatasetsIndexRoute
   '/output-schemas': typeof AuthenticatedOutputSchemasIndexRoute
   '/projects': typeof AuthenticatedProjectsIndexRoute
@@ -267,11 +294,14 @@ export interface FileRoutesById {
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/agents/$id': typeof AuthenticatedAgentsIdRoute
   '/_authenticated/agents/new': typeof AuthenticatedAgentsNewRoute
+  '/_authenticated/dashboard/edit': typeof AuthenticatedDashboardEditRoute
+  '/_authenticated/dashboard/new': typeof AuthenticatedDashboardNewRoute
   '/_authenticated/data/$dataId': typeof AuthenticatedDataDataIdRoute
   '/_authenticated/datasets/prompts': typeof AuthenticatedDatasetsPromptsRoute
   '/_authenticated/output-schemas/$outputSchemaId': typeof AuthenticatedOutputSchemasOutputSchemaIdRoute
   '/_authenticated/projects/new': typeof AuthenticatedProjectsNewRoute
   '/_authenticated/agents/': typeof AuthenticatedAgentsIndexRoute
+  '/_authenticated/dashboard/': typeof AuthenticatedDashboardIndexRoute
   '/_authenticated/datasets/': typeof AuthenticatedDatasetsIndexRoute
   '/_authenticated/output-schemas/': typeof AuthenticatedOutputSchemasIndexRoute
   '/_authenticated/projects/': typeof AuthenticatedProjectsIndexRoute
@@ -298,11 +328,14 @@ export interface FileRouteTypes {
     | '/credits'
     | '/agents/$id'
     | '/agents/new'
+    | '/dashboard/edit'
+    | '/dashboard/new'
     | '/data/$dataId'
     | '/datasets/prompts'
     | '/output-schemas/$outputSchemaId'
     | '/projects/new'
     | '/agents/'
+    | '/dashboard/'
     | '/datasets/'
     | '/output-schemas/'
     | '/projects/'
@@ -327,11 +360,14 @@ export interface FileRouteTypes {
     | '/'
     | '/agents/$id'
     | '/agents/new'
+    | '/dashboard/edit'
+    | '/dashboard/new'
     | '/data/$dataId'
     | '/datasets/prompts'
     | '/output-schemas/$outputSchemaId'
     | '/projects/new'
     | '/agents'
+    | '/dashboard'
     | '/datasets'
     | '/output-schemas'
     | '/projects'
@@ -357,11 +393,14 @@ export interface FileRouteTypes {
     | '/_authenticated/'
     | '/_authenticated/agents/$id'
     | '/_authenticated/agents/new'
+    | '/_authenticated/dashboard/edit'
+    | '/_authenticated/dashboard/new'
     | '/_authenticated/data/$dataId'
     | '/_authenticated/datasets/prompts'
     | '/_authenticated/output-schemas/$outputSchemaId'
     | '/_authenticated/projects/new'
     | '/_authenticated/agents/'
+    | '/_authenticated/dashboard/'
     | '/_authenticated/datasets/'
     | '/_authenticated/output-schemas/'
     | '/_authenticated/projects/'
@@ -428,6 +467,27 @@ declare module '@tanstack/react-router' {
       path: '/agents/new'
       fullPath: '/agents/new'
       preLoaderRoute: typeof AuthenticatedAgentsNewRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/dashboard/': {
+      id: '/_authenticated/dashboard/'
+      path: '/dashboard'
+      fullPath: '/dashboard/'
+      preLoaderRoute: typeof AuthenticatedDashboardIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/dashboard/edit': {
+      id: '/_authenticated/dashboard/edit'
+      path: '/dashboard/edit'
+      fullPath: '/dashboard/edit'
+      preLoaderRoute: typeof AuthenticatedDashboardEditRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/dashboard/new': {
+      id: '/_authenticated/dashboard/new'
+      path: '/dashboard/new'
+      fullPath: '/dashboard/new'
+      preLoaderRoute: typeof AuthenticatedDashboardNewRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/data/$dataId': {
@@ -592,11 +652,14 @@ interface AuthenticatedRouteChildren {
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedAgentsIdRoute: typeof AuthenticatedAgentsIdRoute
   AuthenticatedAgentsNewRoute: typeof AuthenticatedAgentsNewRoute
+  AuthenticatedDashboardEditRoute: typeof AuthenticatedDashboardEditRoute
+  AuthenticatedDashboardNewRoute: typeof AuthenticatedDashboardNewRoute
   AuthenticatedDataDataIdRoute: typeof AuthenticatedDataDataIdRoute
   AuthenticatedDatasetsPromptsRoute: typeof AuthenticatedDatasetsPromptsRoute
   AuthenticatedOutputSchemasOutputSchemaIdRoute: typeof AuthenticatedOutputSchemasOutputSchemaIdRoute
   AuthenticatedProjectsNewRoute: typeof AuthenticatedProjectsNewRoute
   AuthenticatedAgentsIndexRoute: typeof AuthenticatedAgentsIndexRoute
+  AuthenticatedDashboardIndexRoute: typeof AuthenticatedDashboardIndexRoute
   AuthenticatedDatasetsIndexRoute: typeof AuthenticatedDatasetsIndexRoute
   AuthenticatedOutputSchemasIndexRoute: typeof AuthenticatedOutputSchemasIndexRoute
   AuthenticatedProjectsIndexRoute: typeof AuthenticatedProjectsIndexRoute
@@ -622,12 +685,15 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedAgentsIdRoute: AuthenticatedAgentsIdRoute,
   AuthenticatedAgentsNewRoute: AuthenticatedAgentsNewRoute,
+  AuthenticatedDashboardEditRoute: AuthenticatedDashboardEditRoute,
+  AuthenticatedDashboardNewRoute: AuthenticatedDashboardNewRoute,
   AuthenticatedDataDataIdRoute: AuthenticatedDataDataIdRoute,
   AuthenticatedDatasetsPromptsRoute: AuthenticatedDatasetsPromptsRoute,
   AuthenticatedOutputSchemasOutputSchemaIdRoute:
     AuthenticatedOutputSchemasOutputSchemaIdRoute,
   AuthenticatedProjectsNewRoute: AuthenticatedProjectsNewRoute,
   AuthenticatedAgentsIndexRoute: AuthenticatedAgentsIndexRoute,
+  AuthenticatedDashboardIndexRoute: AuthenticatedDashboardIndexRoute,
   AuthenticatedDatasetsIndexRoute: AuthenticatedDatasetsIndexRoute,
   AuthenticatedOutputSchemasIndexRoute: AuthenticatedOutputSchemasIndexRoute,
   AuthenticatedProjectsIndexRoute: AuthenticatedProjectsIndexRoute,

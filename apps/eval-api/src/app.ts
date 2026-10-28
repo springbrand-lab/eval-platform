@@ -8,6 +8,7 @@ import agentRouter from "./routes/agents/agents.index.js";
 import agentLibraryRouter from "./routes/agent-library/agent-library.index.js";
 import creditRouter from "./routes/credits/credits.index.js";
 import dataRouter from "./routes/data/data.index.js";
+import dashboardRouter from "./routes/dashboards/dashboards.index.js";
 import datasetRouter from "./routes/datasets/datasets.index.js";
 import evaluationResultsMcpRouter from "./evaluation-results/mcp.js";
 import healthRouter from "./routes/health/health.index.js";
@@ -30,6 +31,7 @@ export function createRoutes(logger: pino.Logger) {
   app.route("/", evaluationResultsMcpRouter);
   app.route("/api/me", sessionRouter);
   app.route("/api/input-limits", inputLimitsRouter);
+  app.route("/api/dashboards", dashboardRouter);
   app.route("/api/agent-configs", agentConfigRouter);
   app.route("/api/agent-config-sync", agentImportRouter);
   app.route("/api/agent-library", agentLibraryRouter);

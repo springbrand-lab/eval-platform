@@ -1,18 +1,33 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { formatNumber } from "@/lib/format";
 import { Button } from "./button";
 
 export const TABLE_PAGE_SIZE = 20;
 
-export function useTablePagination<T>(rows: readonly T[], resetKey = "") {
+export interface TablePageControl {
+  pageIndex: number;
+  onPageChange: (pageIndex: number, replace?: boolean) => void;
+}
+
+export function useTablePagination<T>(rows: readonly T[], resetKey = "", control?: TablePageControl) {
   const pageCount = Math.max(1, Math.ceil(rows.length / TABLE_PAGE_SIZE));
   const [state, setState] = useState({ key: resetKey, pageIndex: 0 });
-  const pageIndex = state.key === resetKey ? Math.min(state.pageIndex, pageCount - 1) : 0;
-  if (state.key !== resetKey || state.pageIndex !== pageIndex) setState({ key: resetKey, pageIndex });
+  const requested = control ? control.pageIndex : state.key === resetKey ? state.pageIndex : 0;
+  const pageIndex = Math.max(0, Math.min(requested, pageCount - 1));
+  if (!control && (state.key !== resetKey || state.pageIndex !== pageIndex)) setState({ key: resetKey, pageIndex });
+  const controlledPageIndex = control?.pageIndex;
+  const synchronizePage = control?.onPageChange;
+  useEffect(() => {
+    if (controlledPageIndex !== undefined && controlledPageIndex !== pageIndex) synchronizePage?.(pageIndex, true);
+  }, [controlledPageIndex, pageIndex, synchronizePage]);
   return {
     items: rows.slice(pageIndex * TABLE_PAGE_SIZE, (pageIndex + 1) * TABLE_PAGE_SIZE),
     pageIndex, pageCount, total: rows.length,
-    onPageChange: (next: number) => setState({ key: resetKey, pageIndex: Math.max(0, Math.min(next, pageCount - 1)) }),
+    onPageChange: (next: number) => {
+      const valid = Math.max(0, Math.min(next, pageCount - 1));
+      if (control) control.onPageChange(valid);
+      else setState({ key: resetKey, pageIndex: valid });
+    },
   };
 }
 

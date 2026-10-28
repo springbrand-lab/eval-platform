@@ -37,6 +37,7 @@ export type {
   Sampling,
 };
 export type { ProjectView } from "@eval-platform/eval-runtime";
+export type { Dashboard, DashboardCreateInput, DashboardUpdateInput } from "@eval-platform/eval-contracts";
 export type {
   DatasetOverview,
   EvaluationDetail,
@@ -57,6 +58,15 @@ export type {
   EvaluationOutputSummary,
   OutputFieldSummary,
   StageStatistics,
+  ProjectComparisonQuery,
+  ProjectComparisonView,
+  ComparisonProject,
+  ComparisonField,
+  ComparisonProjectValues,
+  ComparisonDataProjectValues,
+  ComparisonDataRow,
+  ComparisonDataset,
+  ComparisonResources,
 } from "@eval-platform/eval-metrics";
 
 export type RunEvaluation = EvaluationRecord & Pick<Sampling, "execution">;

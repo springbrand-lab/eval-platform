@@ -56,6 +56,10 @@ const errorDefinitions = {
   EVALUATION_NOT_FOUND: { status: 404, message: "Evaluation not found" },
   RESOURCE_SNAPSHOT_NOT_FOUND: { status: 404, message: "Resource snapshot not found" },
 
+  DASHBOARD_NOT_FOUND: { status: 404, message: "Dashboard not found" },
+  DASHBOARD_IDEMPOTENCY_CONFLICT: { status: 409, message: "Idempotency key was used to create a different Dashboard" },
+  DASHBOARD_REVISION_CONFLICT: { status: 409, message: "Dashboard changed. Refresh and try again" },
+
   DATASET_NOT_FOUND: { status: 404, message: "Dataset not found" },
   DATASET_INPUT_INVALID: { status: 400, message: "Dataset input is invalid" },
   DATASET_IDENTITY_CONFLICT: { status: 409, message: "Dataset or Data identity conflicts with existing records" },

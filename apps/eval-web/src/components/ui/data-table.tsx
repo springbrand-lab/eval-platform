@@ -4,6 +4,7 @@ import {
   getSortedRowModel,
   useReactTable,
   type ColumnDef,
+  type OnChangeFn,
   type RowSelectionState,
   type SortingState,
 } from "@tanstack/react-table";
@@ -13,7 +14,7 @@ import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button, Checkbox, Input, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@springbrand/site-block";
 import { cn } from "@/lib/cn";
 import { EmptyState } from "./feedback";
-import { TablePagination, useTablePagination } from "./pagination";
+import { TablePagination, useTablePagination, type TablePageControl } from "./pagination";
 
 export interface Column<T> {
   key: string;
@@ -25,6 +26,11 @@ export interface Column<T> {
   align?: "left" | "right";
 }
 
+export interface TableSortingControl {
+  value: SortingState;
+  onChange: OnChangeFn<SortingState>;
+}
+
 export interface DataTableProps<T> {
   rows: readonly T[];
   columns: readonly Column<T>[];
@@ -33,6 +39,10 @@ export interface DataTableProps<T> {
   /** Present: a search box filters rows by this text. */
   searchText?: (row: T) => string;
   searchPlaceholder?: string;
+  searchValue?: string;
+  onSearchChange?: (query: string) => void;
+  pagination?: TablePageControl;
+  sorting?: TableSortingControl;
   onRowClick?: (row: T) => void;
   empty?: ReactNode;
   toolbar?: ReactNode;
@@ -48,10 +58,16 @@ const ROW_HEIGHT = 44;
 /** TanStack Table with local sorting, search and selection; long lists are virtualized with TanStack Virtual. */
 export function DataTable<T>({
   rows, columns, rowKey, rowLabel, searchText, searchPlaceholder = "搜索", onRowClick, empty, toolbar,
-  selectable, selected, onSelectedChange,
+  selectable, selected, onSelectedChange, searchValue, onSearchChange, pagination: pageControl, sorting: sortControl,
 }: DataTableProps<T>) {
-  const [sorting, setSorting] = useState<SortingState>([]);
-  const [query, setQuery] = useState("");
+  const [localSorting, setLocalSorting] = useState<SortingState>([]);
+  const sorting = sortControl?.value ?? localSorting;
+  const [localQuery, setLocalQuery] = useState("");
+  const query = searchValue ?? localQuery;
+  const changeQuery = (next: string) => {
+    if (onSearchChange) onSearchChange(next);
+    else setLocalQuery(next);
+  };
   const columnsByKey = new Map(columns.map((column) => [column.key, column]));
   const rowSelection = useMemo<RowSelectionState>(
     () => Object.fromEntries([...(selected ?? [])].map((key) => [key, true])), [selected],
@@ -80,8 +96,11 @@ export function DataTable<T>({
     columns: definitions,
     getRowId: (row) => rowKey(row),
     state: { sorting, globalFilter: query, rowSelection },
-    onSortingChange: setSorting,
-    onGlobalFilterChange: setQuery,
+    onSortingChange: (next) => {
+      if (sortControl) sortControl.onChange(next);
+      else { setLocalSorting(next); pageControl?.onPageChange(0); }
+    },
+    onGlobalFilterChange: changeQuery,
     globalFilterFn: (row, _columnId, value: string) =>
       !searchText || searchText(row.original).toLowerCase().includes(value.trim().toLowerCase()),
     enableRowSelection: !!selectable,
@@ -95,7 +114,7 @@ export function DataTable<T>({
   });
 
   const filtered = table.getRowModel().rows;
-  const pagination = useTablePagination(filtered, JSON.stringify([query, sorting, rows.map(rowKey)]));
+  const pagination = useTablePagination(filtered, JSON.stringify([query, sorting, rows.map(rowKey)]), pageControl);
   const visible = pagination.items;
   const selectedOnPage = visible.filter((row) => row.getIsSelected()).length;
   const allOnPageSelected = visible.length > 0 && selectedOnPage === visible.length;
@@ -119,14 +138,14 @@ export function DataTable<T>({
   const columnCount = table.getVisibleLeafColumns().length;
 
   return (
-    <div className="flex flex-col">
+    <div className="flex min-w-0 flex-col">
       <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-3">
           {searchText && (
             <div className="relative w-full sm:w-72">
               <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-text-faint" />
               <Input
                 value={query}
-                onChange={(event) => setQuery(event.target.value)}
+                onChange={(event) => changeQuery(event.target.value)}
                 placeholder={searchPlaceholder}
                 aria-label={searchPlaceholder}
                 className="h-9 w-full rounded-[var(--radius-control)] border border-input bg-surface pl-8 pr-2 text-sm text-text-strong placeholder:text-text-faint focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
@@ -139,7 +158,7 @@ export function DataTable<T>({
       {visible.length === 0 ? (
         query.trim()
           ? <EmptyState title="没有匹配的结果" description="试试其他关键词，或清空搜索查看全部记录。"
-            action={<Button type="button" variant="outline" onClick={() => setQuery("")}>清空搜索</Button>} />
+            action={<Button type="button" variant="outline" onClick={() => changeQuery("")}>清空搜索</Button>} />
           : empty ?? <EmptyState title="暂无数据" />
       ) : (
         <div className={virtual ? "[&>[data-slot=table-container]]:max-h-[70vh] [&>[data-slot=table-container]]:overflow-y-auto" : undefined}>
@@ -180,7 +199,11 @@ export function DataTable<T>({
                   ref={virtual ? virtualizer.measureElement : undefined}
                   data-state={row.getIsSelected() ? "selected" : undefined}
                   tabIndex={onRowClick ? 0 : undefined}
-                  onClick={onRowClick ? () => onRowClick(row.original) : undefined}
+                  onClick={onRowClick ? (event) => {
+                    if (event.defaultPrevented || (event.target instanceof Element
+                      && event.target.closest("a, button, input, select, textarea, [role=button], [role=checkbox], [role=switch]"))) return;
+                    onRowClick(row.original);
+                  } : undefined}
                   onKeyDown={onRowClick ? (event) => {
                     if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
                       event.preventDefault();
