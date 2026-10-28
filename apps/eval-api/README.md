@@ -1,5 +1,18 @@
 # @eval-platform/eval-api
 
+## Pi-native SP seam (new runs)
+
+The service-authenticated SP Harness consumes the **published public**
+`@springbrand/eval-harness` wire only. A future package release must implement
+`sp-pi-trajectory/v1` pages with a frozen `cursor.throughSeq` and safe
+`pi-trajectory/v1` records, and resource snapshots carrying `nativeRecords`
+instead of `telemetryEvents`. The current pinned `0.1.0-alpha.5` still exports
+event pages; these new-run consumer checks are structural until SP publishes its
+replacement. Do not deploy this cutover or claim cross-deployment parity before
+that release. No legacy event decoding or DO storage access is used. Existing
+version 1 manifest bytes/refs, resource bytes and scores remain untouched;
+old event-only evidence may not be readable with this new code.
+
 内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。设计见 [Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
 
 ## 项目评估结果下载

@@ -264,20 +264,20 @@ Sampling 明细把 Subject 和每个当前 Evaluator 分开为 `AgentMetricView`
 
 ### 5.4 轨迹指标
 
-轨迹指标来自每个 Attempt 资源快照中保存的 telemetry 事件；它们与 SP `TrajectoryPage` 使用同一种 UniversalTelemetryEvent 格式，Eval 不另外保存轨迹摘要。事件跨 Attempt 合并，按 session + eventId 去重，按 session + operationId 归并操作。
+新运行的轨迹指标来自每个 Attempt 资源快照中的 safe Pi `nativeRecords`；SP 的公开 `sp-pi-trajectory/v1` 页与资源快照均包含原始 `{ingestSeq,record}`。Eval 不把旧 UniversalTelemetryEvent JSON 解释成 Pi。记录按 owner/Chat/ingestSeq 跨 Attempt 去重，再按 native Turn ID、Tool Call ID 和 Request ID 归并操作。总 Token 与费用只由独立 `usageEvents`、`billingSettlements` 决定，不能从 Pi 结果中的用量/金额重复扣费。新线协议需按[Pi-native parity gate](pi-native-eval-cutover.md)校验。
 
 | 指标 | 规则 |
 | --- | --- |
 | 轮数 | 唯一 Turn operation；展示 completed、failed、cancelled、inProgress、unknown。 |
-| 工具类型 | 按 `toolName` 分组；每个唯一 tool operation 计一次，展示调用数、结果和耗时。 |
-| 工具调用长度 | `tool.started` 的 `payload.input` 规范 JSON 的 UTF-8 字节数。 |
-| 工具返回长度 | `tool.finished` 的 `payload.output`，缺失时用 `response`，两者不相加；UTF-8 字节数。 |
+| 工具类型 | 按 `toolName` 分组；每个唯一 `toolCallId` 计一次，展示调用数、结果和耗时。 |
+| 工具调用长度 | safe native Tool 参数或 Pi assistant Tool Call 的 `arguments`：规范 JSON UTF-8 字节数。 |
+| 工具返回长度 | native `result`/Pi Tool Result 的 safe `content`：规范 JSON UTF-8 字节数。 |
 | 长度分布 | 每种工具给 count、missing、total、min、max、mean、median 和 coverage；正文缺失或被脱敏记为 missing，不补零。 |
-| 思考步骤 | 每个 `generation` operation 是一个模型 Step；该 Step 自身或所属 Turn 的输出含 `thinking`、`signature` 或 `*Signature` 标记。一个 Turn 可以包含多个 Step。 |
-| 内容步骤 | 每个模型 Step 自身或所属 Turn 的输出含 `content` 标记；同一 Step 可以同时是思考步骤和内容步骤。 |
-| 思考步骤 / 内容步骤 Token | 分别汇总命中对应分类的 `generation.finished` Token；同一 Step 同时命中两类时两边保留，不用总 Token 减工具 Token 推算。 |
+| 思考步骤 | 每个 native `requestId` 是一个模型 Step；其 Pi assistant 消息包含 `thinking` 或 `*Signature` 块即命中。一个 Turn 可以包含多个 Step。 |
+| 内容步骤 | 同一 Pi assistant 消息包含 `text` 块即命中；同一 Step 可以同时是思考步骤和内容步骤。 |
+| 思考步骤 / 内容步骤 Token | 分别汇总命中分类的 Pi 消息或 safe request Step 用量，同一 Step 两边可重叠；不从总 Token、Tool Token 做减法推算。 |
 
-没有父 Turn 但 generation Step 自身带有 marker 时，相关分类仍按该 Step 统计并保留未关联诊断，但 coverage 为 partial；既没有父 Turn 也没有自身 marker 时，相关分类为 partial/unavailable。工具长度是字节数，不是 Token。
+没有可关联父 Turn 的 Request Step，已明确观察到的 Pi 块仍可作为正向证据，但 coverage 是 partial。消息内容缺失、被脱敏或安全投影未证明块列表完整时，不能用「没看到」推断零；工具长度是字节数，不是 Token。
 
 ### 5.5 JSON Schema 评估结果
 
@@ -344,7 +344,7 @@ Metrics：
 - 来源改动后固定层级不变；未运行 ProjectSample 仍出现；共享 Data 在 Dataset 视图重复、Project 汇总不重复；
 - 未选中结果保留在默认指标；`runIds` 只过滤本批；
 - Subject 与 Evaluator 资源分开；credit、Token、cache、Provider USD、Action 结算去重；
-- 轨迹跨 Attempt 合并、事件去重、Turn 数、工具结果与长度、思考步骤、内容步骤与 generation Token；思考步骤和内容步骤可以重叠，一个 Turn 内的多个 generation Step 分别统计；
+- native 轨迹跨 Attempt 合并、来源序号去重、Turn 数、工具结果与长度、思考步骤、内容步骤与 request Step Token；思考步骤和内容步骤可以重叠，一个 Turn 内的多个 Request Step 分别统计；
 - complete/partial/unavailable coverage 与 diagnostics；
 - Schema 嵌套数值、数组数值、组合分支、`$ref`、缺失字段与非法数字；
 - 四层聚合从底层原始值重算。

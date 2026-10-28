@@ -1,5 +1,17 @@
 # @eval-platform/eval-contracts
 
+## New SP Pi-native evidence and resource boundary
+
+`native-trajectory.ts` describes the *consumer's* minimal structural identity for SP's
+future published `@springbrand/eval-harness` trajectory page. It is not a copy of SP's
+private trajectory parser: a native record has `format:"pi-trajectory/v1"` and a safe
+projection, and the raw `{ingestSeq,record}` is stored unchanged. A new
+`AgentResourceSnapshot` has `nativeRecords`, not `telemetryEvents`; its independent
+`usageEvents`/`billingSettlements` and readiness remain intact. New evidence manifests
+are schema 2 with `trajectory.format:"sp-pi-trajectory/v1"`. Version 1 bundle bytes,
+hashes, refs and already accepted evaluation results are never rewritten. An old
+event-only bundle is deliberately not decoded as Pi-native evidence.
+
 Source-user IDs are opaque Auth identifiers, including legacy non-UUID IDs and
 the official account `springbrand-official` with its optional `official` flag.
 They are bounded to 200 characters and cannot contain whitespace, controls,
@@ -46,13 +58,13 @@ Agent 编辑器使用的 SP 领域错误由 `sp-editor-errors.ts` 从 SP 公开�
 
 `./web-gateway-errors` 是 Worker 与完整 HTTP 目录共用的轻量错误定义入口，拥有 takt 登录、Eval 权限及 Web 网关依赖不可用的错误；Worker 不加载完整 HTTP 目录或 SP 契约。浏览器解码既保留领域详情，也保留这些网关错误及认证语义。
 
-负责 Project 与其固定计划（`src/project.ts`：`ProjectPlan`、`ExecutionPlan`、`EvaluationPlan`、`ProjectDatasetSnapshot`、`AgentConfigSnapshot`、`EvaluationOutputSchemaRef`）、Sampling、EvaluationRecord、Run 选择与目标、HarnessConfig、ExecutionOutput、EvaluationAgentOutput（评估产物、原始结构化输出、证据和完整轨迹）、AgentObservationRef、ArtifactRef、TrajectoryRef 和 EvidenceRef 等运行与评估类型边界。Subject 证据包契约位于 `src/evidence.ts`：`EvidenceBundleRef`（`Sampling.evidence`）、`EvidenceManifest`、`EvidenceArtifact`、`EvidenceOmission`、`TrajectoryEvent`（`sp-trajectory/v1` 原始轨迹）、`EvidenceLimits` 与 `DEFAULT_EVIDENCE_LIMITS`，以及 `EVIDENCE_ROOT`、`EVIDENCE_MANIFEST_PATH`、`EVIDENCE_ARTIFACTS_ROOT`、`EVIDENCE_TRAJECTORY_ROOT`、`EVALUATION_RESULT_PATH` 等路径常量；`EvidenceRef` 仍是评委输出中的证据引用，两者不同。证据和解释属于评估 Agent 输出，没有独立的归因契约。SP Chat 是持久 Session：`Sampling.subjectChatId` 和 `EvaluationRecord.chatId` 标识各自的 Chat，每个 Attempt 的 `submissionId` 标识该 Chat 内的一次提交。Attempt 的 `resources` 是 `AgentResourceState`：投递前按 `chatId + idempotencyKey` 登记为 `pending`，只表达 `pending | collected | failed` 的采集状态；`collected` 只保存 `summarizeResourceSnapshot` 摘要（含真实 `submissionId` 与事件数），另有下载计数 `downloads` 与放弃标记 `exhausted`，从不包含事件正文。`AgentResourceCollection` 是同一状态在 `collected` 时附上已存原始快照的读取形态，仅由 Metrics 按记录逐条加载。Dataset/Data 由 `eval-dataset` 拥有，ProjectSample（Project 创建时的完整 Data 副本）由 `eval-runtime` 的运行时模型拥有；`Sampling.projectSampleId` 指向它。
+负责 Project 固定计划（`src/project.ts`）、Sampling、EvaluationRecord、Run、Harness、AgentObservationRef、ArtifactRef、TrajectoryRef 和 EvidenceRef 等公开运行/评估边界。`src/evidence.ts` 定义 Subject 的 `EvidenceBundleRef`（`Sampling.evidence`）、schemaVersion 2 的 `EvidenceManifest`、`EvidenceTrajectoryPart`、`EvidenceExportProgress`、Artifact/Omission、证据限额及导入路径；native `sp-pi-trajectory/v1` 原始行只保存一次。`EvidenceRef` 是 Evaluator 输出中的证据引用，两者不同。SP Chat 是持久 Session：Sampling 和 EvaluationRecord 各自标识 Chat，Attempt 保存该 Chat 内真实的 `submissionId`。Attempt 的 `AgentResourceState` 在提交前按 `chatId + idempotencyKey` 登记 `pending`，`collected` 只保存 `summarizeResourceSnapshot` 摘要（含 `submissionId` 与 usage/native/billing 数量），另有下载计数与放弃标记；原始内容在单独快照。`AgentResourceCollection` 仅在读取 Metrics 时按记录逐条附上该快照。Dataset/Data 由 `eval-dataset` 拥有，ProjectSample 由 `eval-runtime` 拥有；`Sampling.projectSampleId` 引用它。
 
 JSON 值与标识符规则也只在这里定义：`jsonValueSchema`、`jsonObjectSchema`（有限数、安全整数、无环纯数据）、原地校验不复制的 `jsonObjectInPlaceSchema` 与 `jsonObjectArrayInPlaceSchema`（大体量原始记录，如资源快照事件数组，Eval API 线协议与 Runtime 共用）和 `identifierSchema`、`isIdentifier`、`IDENTIFIER_RULE`（非空且无首尾空白）。
 
 状态词表只在这里定义：`SAMPLING_STATUSES`、`PENDING_SAMPLING_STATUSES`、`AGENT_STATUSES`、`TERMINAL_AGENT_STATUSES` 及谓词 `isPendingSamplingStatus`、`isTerminalAgentStatus`，`SamplingStatus`、`AgentStatus` 由它们派生，SQL 使用同一常量。`AgentSubmission.status` 是 SP 归一化后的状态，SP 原始状态只在 Eval API 的 Harness 适配层映射一次。
 
-资源契约位于 `src/resources.ts`，通过包根入口导出。`AgentResourceSnapshot` 原样承载 SP 的 `usageEvents`、`telemetryEvents`、`billingSettlements`，记录是开放的 JSON 对象，而不是 Eval 重新设计的费用/Token/工具/Turn 事实模型。来源字段、缺失字段、`null`、事件顺序、重复事件、子 Agent 明细与汇总全部保留；Runtime 不补零、不换算、不抽取、不合并、不去重、不计算总量。
+资源契约位于 `src/resources.ts`，通过包根入口导出。新的 `AgentResourceSnapshot` 原样承载 SP 的 `usageEvents`、`nativeRecords:[{ingestSeq,record}]`、`billingSettlements`，而不是 Eval 重新设计的费用/Token/Tool/Turn 模型。原始来源、缺失字段、`null`、顺序、重复记录、子 Agent 明细与汇总保留；Runtime 不补零、不换算、不抽取、不合并、不去重、不计算总量。旧 `telemetryEvents` 只可能存在于保留的历史字节中，不属于新快照契约。
 
 `coverage` 分别保留来源对三组记录的 `complete | partial | unavailable` 声明，`finalized` 保留操作终结声明；`collected` 只表示读到了并保存了原始快照，不保证来源完整。初始化 Session 历史和导入的 Subject 证据不属于本次资源范围。失败、取消和重启的原始记录不能因最终结果失败而删除，历次主动重评也不能混入同一评估记录。Metric 读取这些原始内容，负责来源解析、去重、重叠用量处理、费用/Token/工具/Turn 统计及汇总。
 

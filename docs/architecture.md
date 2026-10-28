@@ -126,7 +126,7 @@ Dataset ──> Data ──(创建 Project 时复制)──> ProjectSample
 - `ProjectSample` 是 Project 内固定的一条测试输入，结构见[包边界](package-boundaries.md#eval-runtime)；
 - `Sampling` 是一次独立运行，引用自己的 `projectSampleId`，拥有自己的 Subject Chat / Workspace；
 - `Run` 是一次提交的工作范围，只包含本次实际处理的 Sampling/EvaluationRecord；Project 当前结果集合不等于最近 Run 的成员；
-- Subject 执行成功后导出一份不可变、按内容寻址的证据包（产物 + `sp-trajectory/v1` 原始轨迹 轨迹），`Sampling.evidence` 保存其引用；
+- Subject 执行成功后导出一份不可变、按内容寻址的证据包（产物为主 + 原样 `sp-pi-trajectory/v1` native JSONL 为辅助），新 manifest 为 schemaVersion 2，`Sampling.evidence` 保存其引用；旧版本字节、引用和评分不改写；
 - 评估使用普通 Agent：独立 Evaluation Chat / Session 和自己的 Space，不绑定 Subject；每次评估产生独立 `EvaluationRecord`，证据导入自己 Space 的 `/evidence/`，结果写到 `/output/result.json`。
 
 ## SP Harness 对齐
@@ -139,7 +139,7 @@ SP Chat 是持久 Session：Sampling/EvaluationRecord 保存各自 Chat ID；每
 2. Eval SP 的普通 Inbox/Chat 创建：Subject 和 Evaluator 都进入 **Eval SP 自己的** Inbox，不进入 dev/production 的 Inbox；Eval 预分配 Chat ID 并要求同 ID 幂等。Evaluator 创建时只携带 `evaluationId`；
 3. 消息投递：`dispatchMessage(message, "enqueue" | "steer")`；
 4. Submission 终态推送：Harness 接收可靠的完成/失败/取消通知；`SubmissionReceipt` 和按幂等键的操作查询只用于提交后的初始确认、断线恢复和重试前校准；
-5. Trajectory：`TrajectoryPage`，按 `beforeSeq` 分页读取完整轨迹，单页不超过 `200`；
+5. Trajectory：公开 `sp-pi-trajectory/v1` 页按 `afterSeq`、固定 `throughSeq` 分页读取完整 native 轨迹，每页不超过 `200` 条且 Eval 限制 JSON 为 8 MiB；
 6. Workspace：tree、manifest 和 content 的正式接口。
 
 评估输入准备流程是：
@@ -156,7 +156,7 @@ Subject Space ──exportEvidence（产物 + 轨迹）──→ 证据包（R2 
                                           /output/result.json ← 评估结果
 ```
 
-Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产物清单、逐个文件和 SP 完整原始 `trajectory_events` 的有序分片，按 `DEFAULT_EVIDENCE_LIMITS`（单文件 95 MB，实际不超过 SP 的 `EVAL_EVIDENCE_FILE_MAX_BYTES`、总量 500 MB、20,000 个文件、排除 `node_modules` 等目录）写入证据包，未纳入的文件记入 `omitted`。导出与执行阶段共用 Runtime 固定的 10 次幂等重试；瞬态失败耗尽时保留已有产物和轨迹，Sampling 置为 `retrying + evidencePending`，由后续 Worker 只补收证据，不重复提交或重启 Agent；不可重试的最终化错误才置为 `failed`。评估准备时 `Harness.importEvidence` 以 `evidence:<evidenceId>:<evaluationId>` 为幂等键把证据包写入 Evaluator 自己的 Space，manifest 最后写入；同一 Sampling 的多次评估复用同一证据包。Eval 不绕过 SP 的公开边界操作 DO。
+Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产物清单、逐个文件及 SP 公开 native 页 `{format:"sp-pi-trajectory/v1",cursor:{throughSeq},records:[{ingestSeq,record}],nextAfterSeq}`；`throughSeq` 随进度保存以防续传混入新记录。按 `DEFAULT_EVIDENCE_LIMITS`（单文件 95 MB、全部产物/原始输入/轨迹 500 MB、20,000 个文件、排除 `node_modules` 等目录）写入证据包，未纳入的**产物**记入 `omitted`；超出单文件或总证据限制的 native 记录明确失败，不截断/省略。导出与执行阶段共用固定的幂等重试；瞬态耗尽保留已有产物与 native 轨迹进度，由后续 Worker 只补收，不重复运行 Agent；不可重试错误使该阶段失败。Evaluator 用 `evidence:<evidenceId>:<evaluationId>` 幂等键把证据包导入自己的 Space，manifest 最后写入；同一 Sampling 可复用同一新证据包。Eval 不绕过 SP 公开接口操作 DO。SP 新 package 发布和端到端字节/指标 parity 是上线前置条件，详见 [cutover gate](pi-native-eval-cutover.md)。
 
 ## 生命周期语义
 
@@ -176,7 +176,7 @@ Subject 执行整体成功后，Runtime 经 `Harness.exportEvidence` 读取产�
 
 ## Metrics 与只读观察
 
-`eval-metrics` 从应用注入的一致事实快照（Project 计划、ProjectSample、当前 Sampling/EvaluationRecord、Run）聚合，层级固定为 Project → Dataset → ProjectSample → Sampling，来自 Project 快照而不是实时目录；未运行的 ProjectSample 照常出现，共享 ProjectSample 在 Project 汇总中按 Sampling/Evaluation 身份去重。Subject 与每个 Evaluator 分别给出 `AgentMetricView`（资源、Attempt、时长、轨迹）。轨迹指标来自 Attempt 已保存的 SP telemetry 事件：Turn 数、按工具的调用数/结果/输入与返回字节长度、按 `generation` operation 统计的模型 Step，以及命中 `thinking`/`signature` 或 `content` 标记的思考步骤/内容步骤和各自 Token；一个 Turn 可以包含多个 Step，一个 Step 可以同时命中两类，分类按各自命中的 Step 统计并允许重叠。评估结果按 Schema 声明的 number/integer、boolean、enum（含枚举数组元素）字段逐层汇总：数值字段给出数值统计，boolean/enum 给出按声明顺序的非 null 分布条目；Schema 允许 null 时另给独立的 `nullCount`，不进入分布与数值统计、不算 false 或任何枚举值，也不同于缺失。规则见 [eval-metrics README](../packages/eval-metrics/README.md)。没有评估计划时为 unavailable。
+`eval-metrics` 从应用注入的一致事实快照（Project 计划、ProjectSample、当前 Sampling/EvaluationRecord、Run）聚合，层级固定为 Project → Dataset → ProjectSample → Sampling，来自 Project 快照而不是实时目录；未运行的 ProjectSample 照常出现，共享 ProjectSample 在 Project 汇总中按 Sampling/Evaluation 身份去重。Subject 与每个 Evaluator 分别给出 `AgentMetricView`（资源、Attempt、时长、轨迹）。新轨迹指标只来自 Attempt 已保存的 safe Pi `nativeRecords`：Turn、原生 Tool ID 的调用数/结果/输入与返回字节长度、以 native request ID 为模型 Step，以及 Pi assistant `thinking`/`signature` 与 `text` 块标记的两类 Step/Token。一个 Turn 可包含多个 Step，一个 Step 可重叠两类；缺失或脱敏的消息/请求事实不填零。费用和总 Token 仍以独立 `usageEvents`/`billingSettlements` 为权威来源。评估结果按锁定 Schema 声明的 number/integer、boolean、enum（含枚举数组元素）字段逐层汇总：数值字段给出数值统计，boolean/enum 给出按声明顺序的非 null 分布条目；Schema 允许 null 时另给独立 `nullCount`，不进入分布与数值统计、不算 false 或任何枚举值，也不同于缺失。规则见 [eval-metrics README](../packages/eval-metrics/README.md)。没有评估计划时为 unavailable。
 
 每个 Sampling 和 EvaluationRecord 在任何 Run 状态下都有只读观察入口：Eval API 校验 owner、Project 与当前 Sampling/Evaluation 身份后返回 `AgentObservationRef`（角色、Chat 所属用户、Chat ID、`not-started | available`），不向浏览器暴露可写 Chat URL。Context、Workspace 和 Trajectory 的读接口由 Eval SP 提供，交互式观察的只读权限由 SP 服务端执行。
 
