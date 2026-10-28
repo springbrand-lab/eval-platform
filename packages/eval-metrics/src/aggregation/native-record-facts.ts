@@ -79,10 +79,14 @@ export function nativeRecordFacts(source: JsonRecord): readonly NativeMetricFact
           durationMs: event.durationMs ?? null, outputLength: toolBytes(event.result) }];
       case "agent_start":
       case "agent_end":
+        return [];
       case "message_start":
       case "message_update":
       case "message_end":
-        return [];
+        // A lifecycle event without a full Pi message is not proof of an absent
+        // model Step/Tool Call. The public SP release must establish its identity
+        // and delivery guarantees before these can be safely ignored or counted.
+        return undefined;
       default:
         return undefined;
     }

@@ -11,6 +11,8 @@ an absent/redacted fact from a proved zero. A missing
 `projection.contentComplete === true` means native Pi block *absence* is unknown,
 even when a visible thinking/text block is positively counted. This optional
 consumer completeness assumption requires actual SP package parity before deployment.
+Unpaired Pi `message_*` lifecycle events alone cannot prove zero requests/Tools;
+the interpreter diagnoses them until the published SP wire establishes their pairing.
 `compactResourceSnapshot` hashes each raw native record and stores only
 versioned safe metric facts beside the unmodified
 raw snapshot. Usage tokens and all charges continue to come **only** from

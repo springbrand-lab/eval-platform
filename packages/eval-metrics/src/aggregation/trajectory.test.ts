@@ -145,6 +145,18 @@ describe("safe Pi-native trajectory metrics", () => {
     expect(result.diagnostics.map(({ kind }) => kind)).toEqual(["missing-identity", "unsupported-record"]);
   });
 
+  it("does not infer zero requests from an event-only message lifecycle without a Pi result record", () => {
+    const result = aggregateResources([resourceInput({ nativeRecords: [
+      piEvent(1, "turn_start", { turnId: "turn" }),
+      piEvent(2, "message_start", { requestId: "request", turnId: "turn" }),
+    ] })]);
+    expect(result.modelRequests.count).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.diagnostics).toContainEqual(expect.objectContaining({
+      kind: "unsupported-record", ingestSeq: 2,
+    }));
+  });
+
   it("does not count a Pi record labelled as another operation's Submission", () => {
     const event = piEvent(1, "tool_execution_start", { toolCallId: "foreign", toolName: "search" });
     const foreign = { ...event, record: { ...event.record, submissionId: "other-submission" } };

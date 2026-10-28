@@ -33,6 +33,9 @@ only Eval behavior, **not** SP/Eval interoperability or deployment readiness.
   content blocks were included; without that proof, a positive thinking/text block
   can be counted but the *absence* of other blocks remains unknown, never zero.
   Agree on SP's actual completeness signal or keep this conservative coverage.
+  Unpaired `message_start`/`message_update`/`message_end` event-only records are
+  diagnosed as unsupported, not discarded as proof of zero model requests; confirm
+  SP's public pairing/delivery guarantee before changing that interpretation.
   Do not simulate UA generation inputs or accept old `turn.finished` as native history.
 - SP's operation-scoped resource snapshot retains `scope`, `readiness`, `finalized`,
   `usageEvents` and `billingSettlements` and replaces both `telemetryEvents` and its
