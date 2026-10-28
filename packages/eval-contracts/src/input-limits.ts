@@ -14,6 +14,7 @@ export const evalInputLimitsSchema = z.strictObject({
   promptDatasetFileBytes: limit,
   runTargetIds: limit,
   samplingCountMax: limit,
+  comparisonProjects: limit,
 });
 
 export type EvalInputLimits = z.infer<typeof evalInputLimitsSchema>;

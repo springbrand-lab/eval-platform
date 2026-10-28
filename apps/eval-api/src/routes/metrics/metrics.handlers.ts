@@ -7,6 +7,15 @@ function scope(projectId: string, runIds: readonly string[] | undefined): Metric
   return runIds === undefined ? { projectId } : { projectId, runIds };
 }
 
+export const comparison: AppRouteHandler<typeof routes.comparison> = async (c) => {
+  const { projectId: projectIds, datasetId, jsonPointer } = c.req.valid("query");
+  return ok(c, await c.var.services.comparison.getComparison({
+    projectIds,
+    ...(datasetId === undefined ? {} : { datasetId }),
+    ...(jsonPointer === undefined ? {} : { jsonPointer }),
+  }));
+};
+
 export const projectOverview: AppRouteHandler<typeof routes.projectOverview> = async (c) => {
   const { projectId } = c.req.valid("param");
   return ok(c, await c.var.services.metrics.getProjectOverview(scope(projectId, c.req.valid("query").runId)));

@@ -34,6 +34,8 @@ Web 轮询前者、停止自动轮询后者，不根据逐 Agent 的未知结果
 
 `EvalInputLimits` 与 `evalInputLimitsSchema` 定义控制面公开的输入上限形状，不定义 SP 或应用的数值。API 从实际校验常量投影，Web 通过 `GET /api/input-limits` 获取，不维护第二套数值。
 
+`Dashboard`、`DashboardInput`、`DashboardCreateInput`、`DashboardUpdateInput` 与对应严格 Schema 定义可保存的数据看板配置。配置只包含名称、说明、有序且不同的至少两个 Project；创建请求另带 `idempotencyKey`，编辑请求另带正整数 `revision`。读取结果提供 UUID `dashboardId`、配置版本与创建/更新时间，不包含 owner 凭据、指标缓存、历史结果或采样快照。Project 数量上限仍由 API 的 `comparisonProjects` 控制。创建和保存不会运行 Agent；当前比较结果继续由 Metrics 的公开 Interface 派生。
+
 `InitialResourceFile` 与 `initialResourceFileSchema` 定义初始素材、初始上下文共用的只读文件目录投影：资源内绝对路径、媒体类型、字节数。不包含内容副本、预览状态或 SP Workspace 身份。内容仍从 API 的 Bundle 目录按精确路径读取。
 
 `EVALUATION_RESULTS_MCP_PATH`、`isEvaluationResultsMcpUrl` 与 `resolveEvaluationResultsMcp` 是 Agent 用途分类和 Agent 编辑器共用的公开评估结果提交 MCP 判定；只有唯一启用且使用 Bearer 鉴权的用户 MCP 可用，分类不依赖 MCP 的展示名称或描述。

@@ -80,11 +80,14 @@ it("pages cases in groups of 20, retaining the overall result and expanded cases
 
 it("pages expanded samplings independently and keeps their original sequence", async () => {
   const { view, overview } = fixtures();
+  const outputs = { ...summary.evaluationOutputs, fields: ["完整性", "正确性"].map((title): OutputFieldSummary => ({ jsonPointer: "/" + title, title, description: "", kinds: ["number"], observationCount: 0, contributingEvaluationCount: 0, missingEvaluationCount: 1, coverage: "unavailable", diagnostics: [], numeric: null, distribution: [] })) };
+  const sampled = { ...summary, evaluationOutputs: outputs };
+  const data = { ...overview, summary: sampled, projectSamples: overview.projectSamples.map((row) => ({ ...row, summary: sampled })) };
   load.mockResolvedValue({ samplings: Array.from({ length: 25 }, (_, index) => ({
-    samplingId: `sampling-${index}`, execution: { status: "succeeded" }, summary,
+    samplingId: `sampling-${index}`, execution: { status: "succeeded" }, summary: sampled,
   })) });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const screen = await render(<QueryClientProvider client={client}><ProjectResults projectId="p" view={view} overview={overview} /></QueryClientProvider>);
+  const screen = await render(<QueryClientProvider client={client}><ProjectResults projectId="p" view={view} overview={data} /></QueryClientProvider>);
   try {
     await click([...screen.container.querySelectorAll("button")].find((button) => button.textContent === "展开 2 次采样"));
     await vi.waitFor(() => expect(screen.container.querySelector('[aria-label="用例 multiple 采样分页"]')).not.toBeNull());
@@ -95,6 +98,10 @@ it("pages expanded samplings independently and keeps their original sequence", a
     expect(samplings()).toHaveLength(5);
     expect(samplings()[0]?.textContent).toBe("采样 21");
     expect(samplings().at(-1)?.textContent).toBe("采样 25");
+    expect(navigation.closest("td")?.colSpan).toBe(7);
+    await select(screen.container.querySelector('[aria-label="评估指标"]'), "/正确性");
+    expect(samplings()[0]?.textContent).toBe("采样 21");
+    expect(navigation.closest("td")?.colSpan).toBe(6);
     expect(navigation.closest("td")?.colSpan).toBe(screen.container.querySelectorAll("thead th").length);
   } finally { await screen.unmount(); client.clear(); }
 });
@@ -110,15 +117,111 @@ it("aligns schema metrics in shared table columns and filters columns without in
   const screen = await render(<QueryClientProvider client={client}><ProjectResults projectId="p" view={view} overview={data} /></QueryClientProvider>);
   try {
     const headers = () => [...screen.container.querySelectorAll('thead th')].map((el) => el.textContent);
-    expect(headers()).toEqual(["用例 / 采样", "执行完成", "有效评估", "完整性", "正确性", "表达清晰度", "积分 / 累计耗时", "缓存命中率 / 工具调用成功率", "操作"]);
+    expect(headers()).toEqual(["用例 / 采样", "有效评估 / 执行完成", "完整性", "正确性", "表达清晰度", "积分 / 累计耗时", "缓存命中率 / 工具调用成功率", "操作"]);
+    expect(screen.container.querySelectorAll("colgroup col")).toHaveLength(8);
+    expect(screen.container.querySelector("table")?.style.minWidth).toBe("1245px");
     expect(screen.container.textContent).not.toContain("总分");
     expect(screen.container.textContent).toContain("7–9 · n=2");
     await click([...screen.container.querySelectorAll('button')].find((button) => button.textContent === '展开 2 次采样'));
     await vi.waitFor(() => expect(screen.container.textContent).toContain('采样 2'));
-    expect([...screen.container.querySelectorAll('tbody tr')].map((row) => row.querySelectorAll('td').length)).toEqual([9, 9, 9, 9, 9, 9]);
+    expect([...screen.container.querySelectorAll('tbody tr')].map((row) => row.querySelectorAll('td').length)).toEqual([8, 8, 8, 8, 8, 8]);
     await select(screen.container.querySelector('[aria-label="评估指标"]'), '/正确性');
-    expect(headers()).toEqual(["用例 / 采样", "执行完成", "有效评估", "正确性", "积分 / 累计耗时", "缓存命中率 / 工具调用成功率", "操作"]);
-    expect([...screen.container.querySelectorAll('tbody tr')].every((row) => row.querySelectorAll('td').length === 7)).toBe(true);
+    expect(headers()).toEqual(["用例 / 采样", "有效评估 / 执行完成", "正确性", "积分 / 累计耗时", "缓存命中率 / 工具调用成功率", "操作"]);
+    expect(screen.container.querySelectorAll("colgroup col")).toHaveLength(6);
+    expect(screen.container.querySelector("table")?.style.minWidth).toBe("1045px");
+    expect([...screen.container.querySelectorAll('tbody tr')].every((row) => row.querySelectorAll('td').length === 6)).toBe(true);
+  } finally { await screen.unmount(); client.clear(); }
+});
+
+it("stacks valid evaluations above completed executions without sharing denominators or adding toggles", async () => {
+  const { view, overview } = fixtures();
+  const counted = (valid: number, evaluations: number, succeeded: number, records: number) => ({
+    ...summary, counts: { ...summary.counts, evaluations },
+    execution: { ...summary.execution, records, statuses: { ...summary.execution.statuses, succeeded } },
+    evaluationOutputs: { ...summary.evaluationOutputs, validation: { valid, invalid: 0, unavailable: evaluations - valid } },
+  });
+  const data = { ...overview, summary: counted(5, 11, 4, 7), projectSamples: overview.projectSamples.map((row) => ({ ...row, summary: counted(1, 6, 2, 3) })) };
+  const screen = await render(<ProjectResults projectId="p" view={view} overview={data} />);
+  try {
+    const cells = [...screen.container.querySelectorAll("tbody tr")].map((row) => row.querySelectorAll("td")[1]!);
+    expect([...cells[0]!.children].map((line) => line.textContent)).toEqual(["5/11", "4/7"]);
+    for (const cell of cells.slice(1)) expect([...cell.children].map((line) => line.textContent)).toEqual(["1/6", "2/3"]);
+    for (const cell of cells) {
+      expect(cell.children[0]!.classList.contains("text-text-strong")).toBe(true);
+      expect(cell.children[1]!.classList.contains("block")).toBe(true);
+      expect(cell.children[1]!.classList.contains("text-[11px]")).toBe(true);
+      expect(cell.children[1]!.classList.contains("text-text-muted")).toBe(true);
+      expect(cell.querySelector("button, details")).toBeNull();
+    }
+  } finally { await screen.unmount(); }
+});
+
+it("keeps case exception hints grouped with their evaluation or execution stage", async () => {
+  const { view, overview } = fixtures();
+  const exceptional = {
+    ...summary, counts: { ...summary.counts, evaluations: 9 },
+    execution: { ...summary.execution, records: 4, statuses: { ...summary.execution.statuses, succeeded: 1, failed: 2, cancelled: 1 } },
+    evaluation: { ...summary.evaluation, records: 9, statuses: { ...summary.evaluation.statuses, succeeded: 4, failed: 3, cancelled: 2 } },
+    evaluationOutputs: { ...summary.evaluationOutputs, validation: { valid: 3, invalid: 1, unavailable: 5 } },
+  };
+  const data = { ...overview, projectSamples: overview.projectSamples.map((row) => ({ ...row, summary: row.projectSampleId === "multiple" ? exceptional : summary })) };
+  const screen = await render(<ProjectResults projectId="p" view={view} overview={data} />);
+  try {
+    await select(screen.container.querySelector('[aria-label="结果筛选"]'), "attention");
+    const rows = [...screen.container.querySelectorAll("tbody tr")];
+    expect(rows).toHaveLength(2);
+    const cell = rows[1]!.querySelectorAll("td")[1]!;
+    expect([...cell.children].map((line) => line.textContent)).toEqual([
+      "3/9评估失败 3评估取消 2格式无效 1",
+      "1/4执行失败 2执行取消 1",
+    ]);
+    expect(cell.children[0]!.querySelector(".text-danger")?.textContent).toBe("评估失败 3");
+    expect(cell.children[1]!.querySelector(".text-danger")?.textContent).toBe("执行失败 2");
+    expect(cell.children[0]!.querySelector(".text-warning")?.textContent).toBe("格式无效 1");
+  } finally { await screen.unmount(); }
+});
+
+it("retains every sampling execution status below evaluation counts and exception hints", async () => {
+  const { view, overview } = fixtures();
+  const statuses = [["queued", "排队中"], ["starting", "启动中"], ["running", "运行中"], ["retrying", "重试中"], ["succeeded", "成功"], ["failed", "失败"], ["cancelled", "已取消"]] as const;
+  const sampled = {
+    ...summary, counts: { ...summary.counts, evaluations: 4 },
+    evaluation: { ...summary.evaluation, records: 4, statuses: { ...summary.evaluation.statuses, succeeded: 2, failed: 1, cancelled: 1 } },
+    evaluationOutputs: { ...summary.evaluationOutputs, validation: { valid: 1, invalid: 1, unavailable: 2 } },
+  };
+  load.mockResolvedValue({ samplings: statuses.map(([status]) => ({ samplingId: status, execution: { status }, summary: sampled })) });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const screen = await render(<QueryClientProvider client={client}><ProjectResults projectId="p" view={view} overview={overview} /></QueryClientProvider>);
+  try {
+    await click([...screen.container.querySelectorAll("button")].find((button) => button.textContent === "展开 2 次采样"));
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("采样 7"));
+    for (const [index, [, label]] of statuses.entries()) {
+      const row = [...screen.container.querySelectorAll("tbody tr")].find((item) => item.querySelector("td button")?.textContent === `采样 ${index + 1}`)!;
+      const cell = row.querySelectorAll("td")[1]!;
+      expect([...cell.children].map((line) => line.textContent)).toEqual(["1/4评估失败评估取消格式无效 1", label]);
+      expect(cell.children[0]!.classList.contains("text-text-strong")).toBe(true);
+      expect(cell.children[1]!.classList.contains("block")).toBe(true);
+      expect(cell.children[1]!.classList.contains("text-[11px]")).toBe(true);
+      expect(cell.children[1]!.classList.contains("text-text-muted")).toBe(true);
+    }
+  } finally { await screen.unmount(); client.clear(); }
+});
+
+it.each(["loading", "error"])("spans the merged columns for %s sampling feedback before and after metric filtering", async (state) => {
+  const { view, overview } = fixtures();
+  const fields = ["完整性", "正确性"].map((title): OutputFieldSummary => ({ jsonPointer: "/" + title, title, description: "", kinds: ["number"], observationCount: 0, contributingEvaluationCount: 0, missingEvaluationCount: 1, coverage: "unavailable", diagnostics: [], numeric: null, distribution: [] }));
+  const data = { ...overview, summary: { ...summary, evaluationOutputs: { ...summary.evaluationOutputs, fields } } };
+  load.mockImplementation(() => state === "loading" ? new Promise<never>(() => {}) : Promise.reject(new Error("采样读取失败")));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const screen = await render(<QueryClientProvider client={client}><ProjectResults projectId="p" view={view} overview={data} /></QueryClientProvider>);
+  const feedback = () => [...screen.container.querySelectorAll<HTMLTableCellElement>("tbody td")].find((cell) => state === "loading" ? cell.querySelector('[aria-label="加载中"]') : cell.textContent?.includes("采样读取失败"));
+  try {
+    await click([...screen.container.querySelectorAll("button")].find((button) => button.textContent === "展开 2 次采样"));
+    await vi.waitFor(() => expect(feedback()).toBeDefined());
+    expect(feedback()?.colSpan).toBe(7);
+    await select(screen.container.querySelector('[aria-label="评估指标"]'), "/正确性");
+    expect(feedback()?.colSpan).toBe(6);
+    expect(feedback()?.colSpan).toBe(screen.container.querySelectorAll("thead th").length);
   } finally { await screen.unmount(); client.clear(); }
 });
 
@@ -189,13 +292,13 @@ it("shows execution-only rates for overall, case and sampling rows without avera
   const screen = await render(<QueryClientProvider client={client}><ProjectResults projectId="p" view={view} overview={data} /></QueryClientProvider>);
   try {
     const cells = (row: Element) => [
-      row.querySelectorAll("td")[3]!.textContent,
-      [...row.querySelectorAll("td")[4]!.firstElementChild!.children].map((value) => value.textContent),
+      row.querySelectorAll("td")[2]!.textContent,
+      [...row.querySelectorAll("td")[3]!.firstElementChild!.children].map((value) => value.textContent),
     ];
     let rows = [...screen.container.querySelectorAll("tbody tr")];
     expect(cells(rows[0]!)).toEqual(["18 积分5.0 秒", ["40.0%", "75.0%"]]);
     expect(cells(rows[2]!)).toEqual(["8 积分2.0 秒", ["50.0%", "50.0%"]]);
-    const rates = rows[0]!.querySelectorAll("td")[4]!.firstElementChild!;
+    const rates = rows[0]!.querySelectorAll("td")[3]!.firstElementChild!;
     expect(rates.children[0]!.classList.contains("text-text-strong")).toBe(true);
     expect(rates.children[1]!.classList.contains("block")).toBe(true);
     expect(rates.children[1]!.classList.contains("text-[11px]")).toBe(true);
@@ -227,7 +330,7 @@ it("distinguishes missing rates and no terminal calls from zero, and marks parti
   const screen = await render(<ProjectResults projectId="p" view={view} overview={data} />);
   try {
     const rows = [...screen.container.querySelectorAll("tbody tr")];
-    const rates = (index: number) => [...rows[index]!.querySelectorAll("td")[4]!.firstElementChild!.children].map((value) => value.textContent);
+    const rates = (index: number) => [...rows[index]!.querySelectorAll("td")[3]!.firstElementChild!.children].map((value) => value.textContent);
     expect(rates(0)).toEqual(["0%", "—"]);
     expect(rates(1)).toEqual(["未获得", "未获得"]);
     expect(rates(2)).toEqual(["50.0% · 部分", "0% · 部分"]);

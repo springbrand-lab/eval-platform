@@ -13,6 +13,7 @@ import { count, eq, sql } from "drizzle-orm";
 import pino from "pino";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createAgentConfigService } from "../agent-configs.js";
+import { createDashboardService } from "../dashboards/service.js";
 import { createOwnerServices } from "../owner-services.js";
 import { apiError } from "../lib/api-errors.js";
 import { createProjectService } from "../projects/service.js";
@@ -21,6 +22,7 @@ import type { BundleDirectory } from "../sp/bundle-directory.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "../test-support.js";
 import type { PgBoss } from "pg-boss";
 import { createPostgresDatasetStore } from "./dataset.js";
+import { createPostgresDashboardStore } from "./dashboards.js";
 import { createPostgresAgentPurposeStore } from "./agent-purposes.js";
 import {
   AgentConfigFrozenError,
@@ -69,7 +71,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
   }, 30_000);
 
   beforeEach(async () => {
-    await database.db.execute(sql`TRUNCATE TABLE eval_projects, eval_evaluation_output_schemas, eval_datasets, eval_data RESTART IDENTITY CASCADE`);
+    await database.db.execute(sql`TRUNCATE TABLE eval_dashboards, eval_projects, eval_evaluation_output_schemas, eval_datasets, eval_data RESTART IDENTITY CASCADE`);
     await jobs.deleteAllJobs(RUN_QUEUE);
     stub = createStubSp();
   });
@@ -311,6 +313,66 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     expect(stub.calls.created).toHaveLength(3);
     expect(stub.calls.deleted).toHaveLength(3);
     expect(await services().projects.list()).toEqual([]);
+  });
+
+  it.each(["create", "update"])("rejects a Dashboard %s during first-Run admission without blocking compensation or same-key Project retry", async (operation) => {
+    const { first, subject, evaluator, schema } = await catalog();
+    const s = services();
+    const body = {
+      name: "Pending", datasets: [{ datasetId: first.datasetId }], samplingCount: 1,
+      execution: { userAgentId: subject, framework: "sp" as const, executionConcurrency: 1 },
+      evaluation: { userAgentId: evaluator, evaluationConcurrency: 1, outputSchemaId: schema.outputSchemaId },
+      idempotencyKey: "pending-project", run: { operation: "pipeline" as const },
+    };
+    const stable = await Promise.all(["first", "second"].map((key) => s.projects.create({ ...body, idempotencyKey: key })));
+    const dashboards = createDashboardService(createPostgresDashboardStore(database.db, OWNER));
+    const saved = await dashboards.create({
+      name: "Saved", projectIds: stable.map(({ project }) => project.projectId), idempotencyKey: "saved-dashboard",
+    });
+    const failure = new Error("first Run admission failed");
+    let pendingId = "";
+    let visible = false;
+    let copies: string[] = [];
+    let outcome: PromiseSettledResult<unknown> | undefined;
+    const failing = services(OWNER, {
+      preview: planAdmission(OWNER).preview,
+      async submit({ projectId }) {
+        pendingId = projectId;
+        visible = await s.store.exists(projectId);
+        copies = (await database.db.select({ userAgentId: projectAgentConfigs.userAgentId }).from(projectAgentConfigs)
+          .where(eq(projectAgentConfigs.projectId, projectId))).map((copy) => copy.userAgentId);
+        const command = { name: "Pending reference", projectIds: [stable[0]!.project.projectId, projectId] };
+        [outcome] = await Promise.allSettled([
+          operation === "create"
+            ? dashboards.create({ ...command, idempotencyKey: "pending-dashboard" })
+            : dashboards.update(saved.dashboardId, { ...command, revision: saved.revision }),
+        ]);
+        throw failure;
+      },
+    });
+    await expect(failing.projects.create(body)).rejects.toBe(failure);
+    expect(visible).toBe(true);
+    expect(outcome).toMatchObject({ status: "rejected", reason: { name: "DashboardProjectNotFoundError", projectId: pendingId } });
+    expect(copies).toHaveLength(2);
+    expect([...stub.calls.deleted].sort()).toEqual([...copies].sort());
+    expect(await projectRowCounts(pendingId)).toEqual([0, 0, 0, 0, 0, 0, 0]);
+    expect(await s.store.findCreation(body.idempotencyKey)).toBeNull();
+    expect(await dashboards.list()).toEqual([saved]);
+    expect(await dashboards.get(saved.dashboardId)).toEqual(saved);
+
+    const retried = await s.projects.create(body);
+    expect(retried.project.projectId).not.toBe(pendingId);
+    expect(retried.run).not.toBeNull();
+    const copyCount = stub.calls.created.length;
+    expect(await s.projects.create(body)).toEqual(retried);
+    expect(stub.calls.created).toHaveLength(copyCount);
+    const command = { name: "Admitted reference", projectIds: [stable[0]!.project.projectId, retried.project.projectId] };
+    const bound = operation === "create"
+      ? await dashboards.create({ ...command, idempotencyKey: "pending-dashboard" })
+      : await dashboards.update(saved.dashboardId, { ...command, revision: saved.revision });
+    expect(bound.projectIds).toEqual(command.projectIds);
+    expect(await s.store.deleteUnrun(retried.project.projectId)).toEqual([]);
+    expect(await dashboards.get(bound.dashboardId)).toEqual(bound);
   });
 
   describe("idempotent creation", () => {

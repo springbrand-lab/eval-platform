@@ -68,3 +68,37 @@ it("supports cursor paging without inventing a total and disables navigation dur
     expect([...navigation.querySelectorAll("button")].every((button) => button.disabled)).toBe(true);
   } finally { await view.unmount(); }
 });
+
+it("synchronizes a clamped controlled page with its external state so growth cannot revive the old page", async () => {
+  const change = vi.fn();
+  function ControlledPages() {
+    const [count, setCount] = useState(45);
+    const [pageIndex, setPageIndex] = useState(2);
+    const pagination = useTablePagination(Array.from({ length: count }, (_, index) => index), "", {
+      pageIndex,
+      onPageChange: (index: number, replace?: boolean) => { change(index, replace); setPageIndex(index); },
+    });
+    return <>
+      <button onClick={() => setCount(21)}>缩减</button><button onClick={() => setCount(45)}>扩展</button>
+      <output aria-label="外部页码">{pageIndex + 1}</output>
+      <div>{pagination.items.map((item) => <span key={item} data-item={item}>{item}</span>)}</div>
+      <TablePagination {...pagination} />
+    </>;
+  }
+  const view = await render(<ControlledPages />);
+  const button = (label: string) => [...view.container.querySelectorAll("button")].find((item) => item.textContent === label);
+  const first = () => view.container.querySelector("[data-item]")?.textContent;
+  try {
+    expect(first()).toBe("40");
+    await click(button("缩减"));
+    expect(first()).toBe("20");
+    expect(view.container.querySelector('[aria-label="外部页码"]')?.textContent).toBe("2");
+    expect(change.mock.calls).toEqual([[1, true]]);
+    await click(button("扩展"));
+    expect(first()).toBe("20");
+    expect(view.container.querySelector('[aria-label="外部页码"]')?.textContent).toBe("2");
+    await click(button("下一页"));
+    expect(first()).toBe("40");
+    expect(change.mock.calls).toEqual([[1, true], [2, undefined]]);
+  } finally { await view.unmount(); }
+});

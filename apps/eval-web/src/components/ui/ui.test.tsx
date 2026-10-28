@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { act, useState } from "react";
+import type { SortingState } from "@tanstack/react-table";
 import { click, render, type } from "@/test/render";
 import { StatusBadge } from "./badge";
+import { Button } from "./button";
 import { DataTable } from "./data-table";
 
 describe("StatusBadge", () => {
@@ -9,6 +11,36 @@ describe("StatusBadge", () => {
     const view = await render(<StatusBadge status="failed" />);
     expect(view.container.textContent).toBe("失败");
     await view.unmount();
+  });
+});
+
+describe("Button links", () => {
+  it("applies the unchanged button appearance to its link without nesting interactive elements", async () => {
+    const view = await render(<>
+      <Button icon={<span aria-hidden="true">图标</span>}>普通操作</Button>
+      <Button asChild icon={<span aria-hidden="true">图标</span>}><a href="/next">导航</a></Button>
+    </>);
+    try {
+      const anchor = view.container.querySelector("a")!;
+      expect(view.container.querySelectorAll("button")).toHaveLength(1);
+      expect(anchor.closest("button")).toBeNull();
+      expect(anchor.className).toBe(view.container.querySelector("button")?.className);
+      expect(anchor.textContent).toBe("图标导航");
+    } finally { await view.unmount(); }
+  });
+
+  it.each([{ disabled: true }, { loading: true }])("prevents activating a disabled link: %j", async (state) => {
+    const follow = vi.fn();
+    const view = await render(<Button asChild {...state}><a href="/next" onClick={follow}>导航</a></Button>);
+    try {
+      const anchor = view.container.querySelector<HTMLAnchorElement>("a")!;
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+      await act(async () => { anchor.dispatchEvent(event); });
+      expect(follow).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(true);
+      expect(anchor.getAttribute("aria-disabled")).toBe("true");
+      expect(anchor.tabIndex).toBe(-1);
+    } finally { await view.unmount(); }
   });
 });
 
@@ -110,6 +142,74 @@ describe("DataTable", () => {
       open.mockClear();
       await act(async () => { row.querySelector("button")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
       expect(open).not.toHaveBeenCalled();
+    } finally { await view.unmount(); }
+  });
+
+  it("leaves nested links and buttons in charge of clicks while retaining row click and keyboard shortcuts", async () => {
+    const open = vi.fn();
+    const follow = vi.fn();
+    const copy = vi.fn();
+    const view = await render(<DataTable rows={rows} columns={[
+      { key: "name", header: "名称", cell: (row) => <a href={`/details/${row.id}`} onClick={follow}><span>{row.name}</span></a> },
+      { key: "score", header: "分数", cell: (row) => <span>{row.score}</span> },
+      { key: "copy", header: "操作", cell: () => <button type="button" onClick={copy}>复制</button> },
+    ]} rowKey={(row) => row.id} onRowClick={open} />);
+    const preventNavigation = (event: MouseEvent) => event.preventDefault();
+    document.addEventListener("click", preventNavigation);
+    try {
+      const row = view.container.querySelector("tbody tr")!;
+      const link = row.querySelector("a span")!;
+      for (const options of [{}, { ctrlKey: true }, { metaKey: true }, { detail: 0 }]) {
+        await act(async () => { link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ...options })); });
+        expect(open).not.toHaveBeenCalled();
+      }
+      expect(follow).toHaveBeenCalledTimes(4);
+      await click(row.querySelector("button"));
+      expect(copy).toHaveBeenCalledOnce();
+      expect(open).not.toHaveBeenCalled();
+      await click(row.querySelectorAll("td")[1].querySelector("span"));
+      expect(open).toHaveBeenCalledExactlyOnceWith(rows[0]);
+      await act(async () => { row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+      await act(async () => { row.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true })); });
+      expect(open.mock.calls).toEqual([[rows[0]], [rows[0]], [rows[0]]]);
+    } finally {
+      document.removeEventListener("click", preventNavigation);
+      await view.unmount();
+    }
+  });
+
+  it("keeps controlled sorting authoritative and lets its caller reset the page atomically", async () => {
+    const many = Array.from({ length: 45 }, (_, index) => ({ id: String(index), name: `n${index}`, score: index })).toReversed();
+    const sorted = vi.fn();
+    const paged = vi.fn();
+    function Controlled() {
+      const [state, setState] = useState<{ sorting: SortingState; pageIndex: number }>({ sorting: [], pageIndex: 1 });
+      return <DataTable rows={many} columns={columns} rowKey={(row) => row.id}
+        sorting={{ value: state.sorting, onChange: (next) => {
+          sorted();
+          setState((previous) => ({ sorting: typeof next === "function" ? next(previous.sorting) : next, pageIndex: 0 }));
+        } }}
+        pagination={{ pageIndex: state.pageIndex, onPageChange: (pageIndex) => {
+          paged(pageIndex);
+          setState((previous) => ({ ...previous, pageIndex }));
+        } }} />;
+    }
+    const view = await render(<Controlled />);
+    try {
+      expect(view.container.querySelector("tbody td")?.textContent).toBe("n24");
+      await click([...view.container.querySelectorAll("thead button")].find((node) => node.textContent === "分数"));
+      expect(view.container.querySelector("tbody td")?.textContent).toBe("n0");
+      expect(view.container.querySelector('th[aria-sort="ascending"]')?.textContent).toBe("分数");
+      expect(sorted).toHaveBeenCalledOnce();
+      expect(paged).not.toHaveBeenCalled();
+      await click([...view.container.querySelectorAll("nav button")].find((node) => node.textContent === "下一页"));
+      expect(view.container.querySelector("tbody td")?.textContent).toBe("n20");
+      expect(paged).toHaveBeenCalledExactlyOnceWith(1);
+      await click([...view.container.querySelectorAll("thead button")].find((node) => node.textContent === "分数"));
+      expect(view.container.querySelector("tbody td")?.textContent).toBe("n44");
+      expect(view.container.querySelector('th[aria-sort="descending"]')?.textContent).toBe("分数");
+      expect(sorted).toHaveBeenCalledTimes(2);
+      expect(paged).toHaveBeenCalledTimes(1);
     } finally { await view.unmount(); }
   });
 });

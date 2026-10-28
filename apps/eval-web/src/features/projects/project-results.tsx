@@ -62,17 +62,20 @@ function MetricCells({ outputs, fields }: { outputs: EvaluationOutputSummary; fi
 function SamplingRows({ projectId, sampleId, running, fields, onOpen }: { projectId: string; sampleId: string; running: boolean; fields: readonly OutputFieldSummary[]; onOpen: (id: string) => void }) {
   const result = useQuery({ queryKey: metricKeys.sample(projectId, sampleId, []), queryFn: ({ signal }) => getSampleOverview(projectId, sampleId, [], signal), staleTime: 0, refetchInterval: running ? POLL_MS : false });
   const pagination = useTablePagination(result.data?.samplings ?? [], `${projectId}:${sampleId}`);
-  if (result.error || !result.data) return <TableRow><TableCell colSpan={fields.length + 6} className="px-4 py-2">{result.error ? <ErrorBlock error={result.error} onRetry={() => void result.refetch()} /> : <LoadingBlock rows={1} />}</TableCell></TableRow>;
+  if (result.error || !result.data) return <TableRow><TableCell colSpan={fields.length + 5} className="px-4 py-2">{result.error ? <ErrorBlock error={result.error} onRetry={() => void result.refetch()} /> : <LoadingBlock rows={1} />}</TableCell></TableRow>;
   return <>{pagination.items.map((row, index) => <TableRow key={row.samplingId} className="border-b border-border bg-surface-muted/40">
     <TableCell className={`${cellClass} pl-8`}><button className="text-left hover:underline" onClick={() => onOpen(row.samplingId)}>采样 {pagination.pageIndex * TABLE_PAGE_SIZE + index + 1}</button><span className="ml-2 text-[10px] font-mono text-text-faint">{row.samplingId.slice(0, 8)}</span></TableCell>
-    <TableCell className={cellClass}><StatusBadge status={row.execution.status} /></TableCell>
-    <TableCell className={cellClass}>{row.summary.evaluationOutputs.validation.valid}/{row.summary.counts.evaluations}
-      {row.summary.evaluation.statuses.failed > 0 && <span className="block text-[11px] text-danger">评估失败</span>}
-      {row.summary.evaluation.statuses.cancelled > 0 && <span className="block text-[11px] text-text-muted">已取消</span>}
+    <TableCell className={`${cellClass} tabular-nums`}>
+      <span className="block text-text-strong" title="有效评估">{row.summary.evaluationOutputs.validation.valid}/{row.summary.counts.evaluations}
+        {row.summary.evaluation.statuses.failed > 0 && <span className="block text-[11px] text-danger">评估失败</span>}
+        {row.summary.evaluation.statuses.cancelled > 0 && <span className="block text-[11px] text-text-muted">评估取消</span>}
+        {row.summary.evaluationOutputs.validation.invalid > 0 && <span className="block text-[11px] text-warning">格式无效 {row.summary.evaluationOutputs.validation.invalid}</span>}
+      </span>
+      <span className="block text-[11px] text-text-muted" title="执行状态"><StatusBadge status={row.execution.status} className="h-4 text-[11px]" /></span>
     </TableCell>
     <MetricCells outputs={row.summary.evaluationOutputs} fields={fields} /><ExecutionMetricCells summary={row.summary} />
     <TableCell className={`${cellClass} text-right`}><button className="link whitespace-normal break-words font-medium leading-4" onClick={() => onOpen(row.samplingId)}>查看结果</button></TableCell>
-  </TableRow>)}{pagination.pageCount > 1 && <TableRow className="bg-surface-muted/40"><TableCell colSpan={fields.length + 6} className="p-0">
+  </TableRow>)}{pagination.pageCount > 1 && <TableRow className="bg-surface-muted/40"><TableCell colSpan={fields.length + 5} className="p-0">
     <TablePagination {...pagination} label={`用例 ${sampleId} 采样分页`} />
   </TableCell></TableRow>}</>;
 }
@@ -111,10 +114,10 @@ export function ProjectResults({ projectId, view, overview }: { projectId: strin
         <NativeSelect aria-label="结果筛选" value={filter} onChange={(e) => setFilter(e.target.value)}><option value="all">全部结果</option><option value="attention">执行异常 / 评估异常</option><option value="running">尚未结束</option><option value="not-run">尚未运行</option><option value="missing">结果文件未获得</option><option value="unscored">未获得有效评估</option></NativeSelect>
         {fields.length > 0 && <label className="flex items-center gap-2 text-sm">评估指标 <NativeSelect aria-label="评估指标" value={selectedMetric} onChange={(e) => setMetric(e.target.value)}><option value="__all">全部指标</option>{fields.map((field) => <option key={field.jsonPointer} value={field.jsonPointer}>{metricLabel(field)}</option>)}</NativeSelect></label>}
       </div>
-      {rows.length === 0 ? <EmptyState title="没有符合条件的用例" description="调整筛选条件，或在项目设置中查看测试范围。" /> : <Table aria-label="用例结果" className="w-full table-fixed" style={{ minWidth: 1005 + visibleFields.length * 100 }}>
-        <colgroup><col style={{ width: 240 }} /><col style={{ width: 105 }} /><col style={{ width: 110 }} />{visibleFields.map((field) => <col key={field.jsonPointer} style={{ width: 100 }} />)}<col style={{ width: 155 }} /><col style={{ width: 240 }} /><col style={{ width: 155 }} /></colgroup>
+      {rows.length === 0 ? <EmptyState title="没有符合条件的用例" description="调整筛选条件，或在项目设置中查看测试范围。" /> : <Table aria-label="用例结果" className="w-full table-fixed" style={{ minWidth: 945 + visibleFields.length * 100 }}>
+        <colgroup><col style={{ width: 240 }} /><col style={{ width: 155 }} />{visibleFields.map((field) => <col key={field.jsonPointer} style={{ width: 100 }} />)}<col style={{ width: 155 }} /><col style={{ width: 240 }} /><col style={{ width: 155 }} /></colgroup>
         <TableHeader><TableRow className="bg-surface-muted/60">
-          <TableHead className="h-9 whitespace-normal break-words px-3 text-xs leading-4">用例 / 采样</TableHead><TableHead className="h-9 whitespace-normal break-words px-3 text-xs leading-4">执行完成</TableHead><TableHead className="h-9 whitespace-normal break-words px-3 text-xs leading-4">有效评估</TableHead>
+          <TableHead className="h-9 whitespace-normal break-words px-3 text-xs leading-4">用例 / 采样</TableHead><TableHead className="h-9 whitespace-normal break-words px-3 text-xs leading-4">有效评估 / 执行完成</TableHead>
           {visibleFields.map((field) => <TableHead key={field.jsonPointer} className="h-9 whitespace-normal break-words px-3 text-right text-xs leading-4" title={field.description ?? undefined}>{metricLabel(field)}</TableHead>)}
           <TableHead className="h-9 whitespace-normal break-words px-3 text-right text-xs leading-4">积分 / 累计耗时</TableHead>
           <TableHead className="h-9 whitespace-nowrap px-3 text-right text-xs font-semibold leading-4 text-text-strong" title="仅执行 Agent；缓存命中率：缓存读取 ÷（输入 Token + 缓存读取 Token）；工具调用成功率：成功 ÷（成功 + 失败 + 取消），不计进行中与未知调用">缓存命中率 / 工具调用成功率</TableHead>
@@ -122,8 +125,9 @@ export function ProjectResults({ projectId, view, overview }: { projectId: strin
         </TableRow></TableHeader>
         <TableBody><TableRow className="border-b border-border bg-surface-muted/60">
           <TableCell className={cellClass}><strong>整体结果</strong><span className="block text-[11px] text-text-muted">项目全部当前采样</span></TableCell>
-          <TableCell className={cellClass}>{summary.execution.statuses.succeeded}/{summary.execution.records}</TableCell>
-          <TableCell className={cellClass}>{summary.evaluationOutputs.validation.valid}/{summary.counts.evaluations}</TableCell>
+          <TableCell className={`${cellClass} tabular-nums`}><span className="block text-text-strong" title="有效评估">{summary.evaluationOutputs.validation.valid}/{summary.counts.evaluations}</span>
+            <span className="block text-[11px] text-text-muted" title="执行完成">{summary.execution.statuses.succeeded}/{summary.execution.records}</span>
+          </TableCell>
           <MetricCells outputs={summary.evaluationOutputs} fields={visibleFields} />
           <ExecutionMetricCells summary={summary} />
           <TableCell className={`${cellClass} text-right`}><button className="link" onClick={() => focusResults("all")}>全部用例</button></TableCell>
@@ -135,14 +139,16 @@ export function ProjectResults({ projectId, view, overview }: { projectId: strin
           const groups = view.datasets.filter((item) => row.datasetIds.includes(item.datasetId)).map((item) => item.name).join("、");
           return <Fragment key={row.projectSampleId}><TableRow className="border-b border-border hover:bg-surface-hover">
             <TableCell className={cellClass}><button className="max-w-full line-clamp-2 break-words text-left font-semibold leading-5 text-text-strong hover:underline disabled:text-text-muted" title={dataTitle(sample.data)} disabled={!row.samplingIds.length} aria-expanded={single ? undefined : open} onClick={activate}>{dataTitle(sample.data)}</button><p className="mt-0.5 truncate text-[11px] text-text-muted" title={groups}>{groups}</p></TableCell>
-            <TableCell className={`${cellClass} tabular-nums`}>{row.summary.execution.statuses.succeeded}/{row.summary.execution.records}
-              {row.summary.execution.statuses.failed > 0 && <span className="block text-[11px] text-danger">失败 {row.summary.execution.statuses.failed}</span>}
-              {row.summary.execution.statuses.cancelled > 0 && <span className="block text-[11px] text-text-muted">取消 {row.summary.execution.statuses.cancelled}</span>}
-            </TableCell>
-            <TableCell className={`${cellClass} tabular-nums`}>{row.summary.evaluationOutputs.validation.valid}/{row.summary.counts.evaluations}
-              {row.summary.evaluation.statuses.failed > 0 && <span className="block text-[11px] text-danger">失败 {row.summary.evaluation.statuses.failed}</span>}
-              {row.summary.evaluation.statuses.cancelled > 0 && <span className="block text-[11px] text-text-muted">取消 {row.summary.evaluation.statuses.cancelled}</span>}
-              {row.summary.evaluationOutputs.validation.invalid > 0 && <span className="block text-[11px] text-warning">格式无效 {row.summary.evaluationOutputs.validation.invalid}</span>}
+            <TableCell className={`${cellClass} tabular-nums`}>
+              <span className="block text-text-strong" title="有效评估">{row.summary.evaluationOutputs.validation.valid}/{row.summary.counts.evaluations}
+                {row.summary.evaluation.statuses.failed > 0 && <span className="block text-[11px] text-danger">评估失败 {row.summary.evaluation.statuses.failed}</span>}
+                {row.summary.evaluation.statuses.cancelled > 0 && <span className="block text-[11px] text-text-muted">评估取消 {row.summary.evaluation.statuses.cancelled}</span>}
+                {row.summary.evaluationOutputs.validation.invalid > 0 && <span className="block text-[11px] text-warning">格式无效 {row.summary.evaluationOutputs.validation.invalid}</span>}
+              </span>
+              <span className="block text-[11px] text-text-muted" title="执行完成">{row.summary.execution.statuses.succeeded}/{row.summary.execution.records}
+                {row.summary.execution.statuses.failed > 0 && <span className="block text-[11px] text-danger">执行失败 {row.summary.execution.statuses.failed}</span>}
+                {row.summary.execution.statuses.cancelled > 0 && <span className="block text-[11px] text-text-muted">执行取消 {row.summary.execution.statuses.cancelled}</span>}
+              </span>
             </TableCell>
             <MetricCells outputs={row.summary.evaluationOutputs} fields={visibleFields} /><ExecutionMetricCells summary={row.summary} />
             <TableCell className={`${cellClass} text-right`}>{row.samplingIds.length ? <button className="link whitespace-normal break-words font-medium leading-4" aria-expanded={single ? undefined : open} onClick={activate}>{single ? "查看结果" : `${open ? "收起" : "展开"} ${row.samplingIds.length} 次采样`}</button> : <Link className="link whitespace-normal break-words leading-4" to="/projects/$projectId/runs/new" params={{ projectId }} search={{ projectSampleId: row.projectSampleId }}>运行此用例</Link>}</TableCell>

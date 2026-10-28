@@ -121,6 +121,8 @@ export { jsonObjectArrayInPlaceSchema, jsonObjectInPlaceSchema, jsonObjectSchema
 export { summarizeResourceSnapshot } from "./resources.js";
 export { evalInputLimitsSchema } from "./input-limits.js";
 export type { EvalInputLimits } from "./input-limits.js";
+export { dashboardInputSchema, dashboardCreateSchema, dashboardUpdateSchema, dashboardSchema } from "./dashboards.js";
+export type { Dashboard, DashboardInput, DashboardCreateInput, DashboardUpdateInput } from "./dashboards.js";
 export { initialResourceFileSchema } from "./initial-resource-files.js";
 export { EVALUATION_RESULTS_MCP_PATH, isEvaluationResultsMcpUrl, resolveEvaluationResultsMcp } from "./evaluation-results-mcp.js";
 export type { EvaluationResultsMcpResolution, EvaluationResultsMcpServer } from "./evaluation-results-mcp.js";

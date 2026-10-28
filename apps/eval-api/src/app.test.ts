@@ -1,11 +1,22 @@
 import { RuntimeAdmissionConflictError, RuntimeEntityNotFoundError, RuntimeInputError, RuntimeProjectBusyError } from "@eval-platform/eval-runtime";
 import { DatasetEntityNotFoundError, type DataInput } from "@eval-platform/eval-dataset";
+import {
+  MetricsEntityNotFoundError,
+  MetricsQueryError,
+  MetricsSourceError,
+  type ProjectComparisonQuery,
+  type ProjectComparisonView,
+} from "@eval-platform/eval-metrics";
+import { evalInputLimitsSchema, type Dashboard, type DashboardCreateInput, type DashboardUpdateInput } from "@eval-platform/eval-contracts";
 import { describe, expect, it, vi } from "vitest";
 import { AgentConfigFrozenError, AgentConfigPurposeUnavailableError, ProjectEvaluationPlanLockedError } from "./db/errors.js";
+import { createRouter } from "./lib/create-app.js";
 import type { ApiRuntime, OwnerServices } from "./lib/types.js";
-import { INPUT_LIMITS, METADATA_BODY_BYTES, RUN_TARGET_IDS, SAMPLING_COUNT_MAX, ZIP_BODY_BYTES } from "./limits.js";
+import { COMPARISON_PROJECTS, IDENTIFIER_CHARS, INPUT_LIMITS, METADATA_BODY_BYTES, RUN_TARGET_IDS, SAMPLING_COUNT_MAX, ZIP_BODY_BYTES } from "./limits.js";
 import type { EvalSpClient } from "./sp/client.js";
 import { EvalSpApiError } from "./sp/http.js";
+import { comparison as comparisonHandler } from "./routes/metrics/metrics.handlers.js";
+import { comparison as comparisonRoute } from "./routes/metrics/metrics.routes.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "./test-support.js";
 
 const owner = "11111111-1111-4111-8111-111111111111";
@@ -28,6 +39,14 @@ const preview = {
   projectId: "project-1", operation: "execution", selector: { all: true },
   targets: { projectSampleIds: ["sample-1"], samplingIds: [] as string[] },
   replacedSamplingCount: 0, newSamplingCount: 1, evaluationCount: 0, executionPlanDigest: "d", evaluationPlanDigest: null,
+};
+const comparisonView: ProjectComparisonView = {
+  projects: [], fields: [], selectedField: null, datasets: [], datasetId: null, summary: [], rows: [],
+};
+const dashboard: Dashboard = {
+  dashboardId: "abcdef00-0000-4000-8000-000000000001",
+  name: "Board", description: "", projectIds: ["project-2", "project-1"], revision: 1,
+  createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
 function setup() {
@@ -84,6 +103,15 @@ function setup() {
       getProjectOverview: vi.fn(async () => ({ projectId: "project-1" })),
       getSampleOverview: vi.fn(async () => ({ projectSampleId: "sample-1" })),
     },
+    comparison: {
+      getComparison: vi.fn(async (_query: ProjectComparisonQuery) => comparisonView),
+    },
+    dashboards: {
+      list: vi.fn(async () => [dashboard]),
+      get: vi.fn(async (_dashboardId: string) => dashboard),
+      create: vi.fn(async (_input: DashboardCreateInput) => dashboard),
+      update: vi.fn(async (_dashboardId: string, _input: DashboardUpdateInput) => dashboard),
+    },
     materialBundles: {
       create: vi.fn(async () => ({ bundle: { bundleId: datasetId, name: "A", description: "B" }, imported: [] })),
       update: vi.fn(),
@@ -122,6 +150,19 @@ function setup() {
 }
 
 describe("Eval API HTTP layer", () => {
+  it("creates a persisted Dashboard through the owner service", async () => {
+    const app = setup();
+    const response = await app.request("/api/dashboards", jsonRequest("POST", {
+      name: " Board ", projectIds: ["project-2", "project-1"], idempotencyKey: "create-dashboard",
+    }));
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ success: true, msg: dashboard, errMsg: "", code: "" });
+    expect(app.services.dashboards.create).toHaveBeenCalledExactlyOnceWith({
+      name: "Board", description: "", projectIds: ["project-2", "project-1"], idempotencyKey: "create-dashboard",
+    });
+    expect(app.ownerServices).toHaveBeenCalledWith({ id: owner, role: "user" }, "service-session");
+  });
+
   it("passes one validated optional Dataset target to the atomic Data create command", async () => {
     const app = setup();
     const input = { name: "Case", description: "Task", userPrompt: "Execute", evalPrompt: "Judge", custom: [true, null] };
@@ -427,6 +468,144 @@ describe("Eval API HTTP layer", () => {
       [{ projectId: "project-1" }],
     ]);
     expect(app.services.metrics.getSampleOverview).toHaveBeenCalledWith({ projectId: "project-1", runIds: ["run-1"], projectSampleId: "sample-1" });
+  });
+
+  it("compares repeated Project IDs through the owner service in the standard envelope", async () => {
+    const app = setup();
+    const response = await app.request("/api/metrics/comparison?projectId=project-2&projectId=project-1");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: true, msg: comparisonView, errMsg: "", code: "" });
+    expect(app.services.comparison.getComparison).toHaveBeenCalledExactlyOnceWith({ projectIds: ["project-2", "project-1"] });
+    expect(app.ownerServices).toHaveBeenCalledWith({ id: owner, role: "user" }, "service-session");
+    expect(app.release).toHaveBeenCalledTimes(1);
+    expect(app.services.metrics.getProjectOverview).not.toHaveBeenCalled();
+  });
+
+  it("passes comparison Dataset IDs canonically and preserves root and escaped JSON Pointers", async () => {
+    const app = setup();
+    const target = "ABCDEF00-0000-4000-8000-000000000001";
+    for (const jsonPointer of ["", "/ score~0~1尾 ", "/a/b"]) {
+      const query = new URLSearchParams([["projectId", "project-1"], ["projectId", "project-2"], ["datasetId", target], ["jsonPointer", jsonPointer]]);
+      const response = await app.request(`/api/metrics/comparison?${query}`);
+      expect(response.status).toBe(200);
+      expect(app.services.comparison.getComparison).toHaveBeenLastCalledWith({
+        projectIds: ["project-1", "project-2"], datasetId: target.toLowerCase(), jsonPointer,
+      });
+    }
+  });
+
+  it("enforces the comparison count published by the authenticated input-limits route", async () => {
+    const app = setup();
+    const limits = evalInputLimitsSchema.parse((await (await app.request("/api/input-limits")).json()).msg);
+    expect(limits.comparisonProjects).toBe(COMPARISON_PROJECTS);
+    const projectIds = Array.from({ length: limits.comparisonProjects }, (_, index) => `project-${index}`);
+    const query = new URLSearchParams(projectIds.map((projectId) => ["projectId", projectId]));
+    expect((await app.request(`/api/metrics/comparison?${query}`)).status).toBe(200);
+    expect(app.services.comparison.getComparison).toHaveBeenCalledExactlyOnceWith({ projectIds });
+    query.append("projectId", "one-too-many");
+    const response = await app.request(`/api/metrics/comparison?${query}`);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED", errors: [{ path: "projectId" }] });
+    expect(app.services.comparison.getComparison).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "",
+    "projectId=one",
+    "projectId=one&projectId=one",
+    "projectId=one&projectId=",
+    "projectId=one&projectId=%20two",
+    "projectId=one&projectId=two%20",
+    "projectId=one&projectId=two%2Fthree",
+    "projectId=one&projectId=two%00",
+    "projectId=one&projectId=two%7F",
+    `projectId=one&projectId=${"x".repeat(IDENTIFIER_CHARS + 1)}`,
+    "projectId=one&projectId=two&datasetId=",
+    "projectId=one&projectId=two&datasetId=not-a-uuid",
+    `projectId=one&projectId=two&datasetId=${datasetId}&datasetId=${datasetId}`,
+    "projectId=one&projectId=two&jsonPointer=&jsonPointer=%2Fscore",
+    "projectId=one&projectId=two&baseline=one",
+    "projectId=one&projectId=two&runId=run",
+    "projectId=one&projectId=two&ownerUserId=other",
+    "projectId=one&projectId=two&unexpected=",
+  ])("rejects an invalid comparison query before the service: %s", async (query) => {
+    const app = setup();
+    const response = await app.request(`/api/metrics/comparison?${query}`);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ code: "REQUEST_VALIDATION_FAILED", errors: expect.any(Array) });
+    expect(app.services.comparison.getComparison).not.toHaveBeenCalled();
+    expect(app.release).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [new MetricsQueryError("The selected field is unavailable"), 400, "METRICS_QUERY_INVALID"],
+    [new MetricsEntityNotFoundError("project", "foreign-or-deleted"), 404, "PROJECT_NOT_FOUND"],
+    [new MetricsEntityNotFoundError("dataset", datasetId), 404, "DATASET_NOT_FOUND"],
+    [new MetricsSourceError("private database fact"), 500, "INTERNAL_ERROR"],
+    [Object.assign(new Error("private database connection"), { code: "ECONNREFUSED" }), 503, "DATABASE_UNAVAILABLE"],
+  ] as const)("maps comparison failures through the existing Metrics catalog: %s", async (error, status, code) => {
+    const app = setup();
+    app.services.comparison.getComparison.mockRejectedValueOnce(error);
+    const response = await app.request("/api/metrics/comparison?projectId=one&projectId=two");
+    expect(response.status).toBe(status);
+    const body = await response.json();
+    expect(body).toMatchObject({ code, requestId: expect.any(String) });
+    expect(body).not.toHaveProperty("msg");
+    expect(JSON.stringify(body)).not.toContain("private database");
+    expect(app.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps comparison behind the Web gateway, trusted Origin and fixed service-account scope", async () => {
+    const app = setup();
+    const request = requestApp({ ...app.runtime, webApiToken: "w".repeat(40) });
+    const path = "/api/metrics/comparison?projectId=one&projectId=two";
+    for (const token of [undefined, "x".repeat(40)]) {
+      const response = await request(path, token === undefined ? {} : { headers: { "X-Eval-Web-Token": token } });
+      expect(response.status).toBe(401);
+      expect(await response.json()).toMatchObject({ code: "AUTH_UNAUTHENTICATED" });
+    }
+    const forbidden = await request(path, { headers: { "X-Eval-Web-Token": "w".repeat(40), Origin: "https://other.test" } });
+    expect(forbidden.status).toBe(403);
+    expect(await forbidden.json()).toMatchObject({ code: "REQUEST_UNTRUSTED_ORIGIN" });
+    expect(app.ownerServices).not.toHaveBeenCalled();
+    expect(app.services.comparison.getComparison).not.toHaveBeenCalled();
+    const response = await request(path, { headers: {
+      "X-Eval-Web-Token": "w".repeat(40), Origin: WEB_ORIGIN, Authorization: "Bearer other-owner",
+      "X-Eval-Actor": encodeURIComponent(JSON.stringify({ id: "other-owner", name: "Actor" })),
+    } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("access-control-allow-origin")).toBe(WEB_ORIGIN);
+    expect(app.ownerServices).toHaveBeenCalledExactlyOnceWith({ id: owner, role: "user" }, "service-session");
+    expect(app.services.comparison.getComparison).toHaveBeenCalledExactlyOnceWith({ projectIds: ["one", "two"] });
+  });
+
+  it("publishes the comparison query and existing error envelopes in OpenAPI", () => {
+    const comparisonRouter = createRouter();
+    comparisonRouter.openapi(comparisonRoute, comparisonHandler);
+    const app = createRouter();
+    app.route("/api/metrics", comparisonRouter);
+    const document = app.getOpenAPI31Document({
+      openapi: "3.1.0", info: { title: "Eval API", version: "1" },
+    });
+    expect(document.paths?.["/api/metrics/comparison"]?.get).toMatchObject({
+      tags: ["Metrics"],
+      parameters: [
+        {
+          in: "query", name: "projectId", required: true, style: "form", explode: true,
+          schema: { type: "array", minItems: 2, maxItems: COMPARISON_PROJECTS, uniqueItems: true, items: { type: "string" } },
+        },
+        { in: "query", name: "datasetId", required: false, schema: { type: "string", format: "uuid" } },
+        { in: "query", name: "jsonPointer", required: false, schema: { type: "string" } },
+      ],
+      responses: {
+        200: { content: { "application/json": expect.any(Object) } },
+        400: { content: { "application/json": expect.any(Object) } },
+        401: { content: { "application/json": expect.any(Object) } },
+        403: { content: { "application/json": expect.any(Object) } },
+        404: { content: { "application/json": expect.any(Object) } },
+        422: { content: { "application/json": expect.any(Object) } },
+      },
+    });
   });
 
   it("accepts only requests carrying the eval-web token once one is configured, and records the actor", async () => {

@@ -44,6 +44,16 @@ await metrics.getSamplingDetail({ ...scope, samplingId });
 
 Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sampling 下。层级只来自 `facts.plan.datasets` 与 `facts.projectSamples`（Project 创建时的快照），不读实时目录。未运行的 ProjectSample 照常出现，数值为 null/unavailable。共享 ProjectSample 在每个 Dataset 行中出现，Project 汇总按 Sampling/Evaluation 身份去重。每层都从底层原始记录重算，不平均子层结果。默认读取当前结果全集；`runIds` 只过滤 Sampling/Evaluation，不改变固定绑定。
 
+## 已评分交集对比
+
+`createProjectComparison({ source })` 提供唯一的 `getComparison({ projectIds, datasetId?, jsonPointer? })` Interface；比较无基线，各侧平等。`ProjectComparisonSource.read(projectIds)` 必须在同一 owner 的同一一致性快照中提供各 Project 的完整 `MetricsFacts`，Module 复用原有事实校验、Schema 解释与原始记录聚合，不读取 SP 或实时目录，不保存另一份指标状态。
+
+不同 Schema 按共同 JSON Pointer 与兼容统计类型合并（number/integer 同属数值；枚举分类值域须一致，忽略声明顺序，不拼接部分重叠的值域），不要求整份 Schema 相同。共同字段还必须在共同 Data 上实际有有效非空观察；只有成功且 Schema 有效的评估贡献评分，0、false 是有效值，null、未评分、失败、无效输出不进入默认比较。指标切换明确选择一个共同词条：该词条在每个 Project 都有有效评分的 `dataId` 交集决定可比较数据，避免不同词条的有效覆盖范围被混算。没有指定词条时选首个有共同评分的词条；指定词条失去可比较结果时展示空范围，不暗中切换统计口径。
+
+`ProjectComparisonView.fields` 提供全范围可比较词条及各自共同已评数据数量；`selectedField` 指向当前词条。`datasets` 按各 Project 冻结的数据集归属分组当前词条的共同数据，同一个 Data 可出现在多个分组，但全局只算一次；不因数据集 ID 不同而丢失已对齐 Data。`datasetId` 仅缩小当前数据集范围，未知或已失效的数据集返回空范围，不回退成全范围。`summary` 从该范围全部有效底层记录重算，`rows` 各自提供该 Data 的权威聚合、有效 Sampling 身份、对称差异幅度和快照内容差异提示。单条数据选择使用对应 row 的已有投影，不在 Web 重新聚合；分页和定位搜索不改变范围汇总。
+
+资源只统计当前有效评分所关联的去重 Sampling，保留其全部 Attempt 消耗；返回执行 Agent 的实际积分、单 Agent 积分分布、Agent 耗时分布、缓存率和工具成功率，不混入评估 Agent 消耗。数值差异幅度是项目间均值的最大值减最小值，不隐含基线或“高分更好”；分类/布尔仅标分布是否不同。不进行统计显著性或自动胜负断言。返回复用现有 NumericSummary、OutputFieldSummary、MetricNumber，只投影比较所需资源，完整结果和产物仍走既有采样明细 Interface。
+
 每层 `MetricSummary` 包含：固定绑定数（datasets/data/projectSamples）、当前 samplings/evaluations、执行与评估阶段（状态分布、成功率、Attempt/重启、Agent 时长与 Attempt 时长）、`executionAgent` 与 `evaluationAgents` 分开的资源统计，以及 `evaluationOutputs`。`getSamplingDetail` 额外返回 Subject 与每个 Evaluator 的 `AgentMetricView`，以及每条评估的 `EvaluationOutputView`（原始文本、解析后的 JSON、校验结果、字段观察、产物、证据与轨迹引用）。
 
 ## 资源与轨迹
@@ -102,7 +112,7 @@ Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`�
 
 查询范围外的 Project/Run/Dataset/ProjectSample/Sampling 抛 `MetricsEntityNotFoundError`（entity 为 `project | run | dataset | project-sample | sampling`），非法查询抛 `MetricsQueryError`，来源事实不一致（重复身份、越界 Sampling、缺失绑定 ProjectSample、绑定与计划不符、Schema 与评估计划不符等）抛 `MetricsSourceError`。
 
-不实现实验对比、归因、查询缓存、指标持久化或 API/Web/CLI；本包只有包根入口。
+不实现归因、查询缓存、指标持久化或 API/Web/CLI；对比只读当前保留结果，不提供历史 Run 快照；本包只有包根入口。
 
 `createEvaluationScoreReader()` 为可选 Langfuse 集成提供只读派生接口：复用同一个 Schema presentation plan、严格 JSON 解析和安全数值校验，只从成功且校验通过的原始输出读取顶层 numeric score 与可选字符串 reason。每个 Schema 独立编译，复用 `$id` 不冲突；不保存另一份解析结果到 Runtime。
 
