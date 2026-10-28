@@ -84,6 +84,48 @@ describe("paged Attempt resource Store write", () => {
     ]));
   });
 
+  it("assembles only nine verified compact rows and paired bills into the same Attempt write, keeping coverage partial", async () => {
+    const usage = Array.from({ length: 9 }, (_, index) => ({
+      eventId: `known-${index}`, metrics: { totalTokens: index + 1 },
+    }));
+    const bills = usage.map(({ eventId }) => ({ eventId, status: "settled", debitedUnits: 2 }));
+    const native = await Promise.all(Array.from({ length: 9 }, (_, index) =>
+      compactNativeTrajectoryRecord(nativeFixture(index + 1, chatId, submissionId), scope)));
+    const coverage = { usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial" } as const;
+    const partial: AgentResourceSnapshotDownload = {
+      kind: "pages", summary: {
+        scope, observedAt: "2026-10-28T00:10:01.000Z", finalized: false, coverage,
+        readiness: { ...readiness, pendingTelemetryEvents: 1 },
+        counts: { usageEvents: 9, nativeRecords: 9, billingSettlements: 9 },
+      },
+      creditsTotal: null,
+      async *readPages(): AsyncIterable<AgentResourceSnapshotPage> {
+        for (const row of native) yield { stream: "nativeRecords", records: [row] };
+        yield { stream: "usageEvents", records: usage };
+        yield { stream: "billingSettlements", records: bills };
+        yield { stream: "billingSettlements", records: [] }; // No settled Action facts; not a zero-fee claim.
+      },
+      dispose: async () => undefined,
+    };
+    const { db, statements } = fakeDb();
+    let updated = false;
+    await updateWithResources(db, { attemptId: "attempt-1", snapshot: partial }, async () => {
+      updated = true;
+      return { ownerUserId: "11111111-1111-4111-8111-111111111111", samplingId: "sampling-1" };
+    });
+    expect(updated).toBe(true);
+    expect(statements.filter(({ sql }) => sql.includes("INSERT INTO pg_temp.eval_resource_fragments"))).toHaveLength(12);
+    expect(statements.at(-1)?.sql).toContain("INSERT INTO eval_attempt_resources");
+    expect(statements.at(-1)?.params).toEqual(expect.arrayContaining([
+      false, JSON.stringify(coverage), JSON.stringify(partial.summary.readiness),
+    ]));
+    const fragments = statements.filter(({ sql }) => sql.includes("INSERT INTO pg_temp.eval_resource_fragments"));
+    expect(fragments.filter(({ params }) => params.includes("nativeRecords"))).toHaveLength(9);
+    expect(fragments.filter(({ params }) => params.includes("usageEvents"))).toHaveLength(1);
+    expect(fragments.filter(({ params }) => params.includes("billingSettlements"))).toHaveLength(2);
+    expect(JSON.stringify(statements)).not.toContain("known-9"); // The unsettled tenth is not invented or billed.
+  });
+
   it("never inserts a truncated collection if a billed page, action inventory or declared count is missing", async () => {
     for (const download of [await pageDownload({}, true), await pageDownload({ nativeRecords: 3 })]) {
       const { db, statements } = fakeDb();

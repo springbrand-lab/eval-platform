@@ -3,8 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_EVIDENCE_LIMITS, SP_PI_TRAJECTORY_FORMAT,
+  isResourceSnapshotDownload,
   type AgentResourceSnapshotPage, type AgentResourceSnapshotDownload, type NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
-import { createEvidenceStore, type AgentHandle } from "@eval-platform/eval-runtime/harness";
+import { createEvalRunResumer, type AttemptResourceSnapshot, type ProjectPlanReader, type ProjectSample, type RuntimeRunRecord,
+  type RuntimeStore, type SamplingState, withFreshResourceBudget } from "@eval-platform/eval-runtime";
+import { createEvidenceStore, type AgentHandle, type EvidenceStore } from "@eval-platform/eval-runtime/harness";
 import { isRequestCancelled } from "@springbrand/http/errors";
 import { openLocalEvidenceBlobs } from "../evidence/local-blobs.js";
 import { createSpHarness } from "./harness.js";
@@ -68,6 +71,141 @@ function resourceService(serve: (url: URL) => Response | undefined, current: SpR
 }
 
 describe("public paged SP resource collection", () => {
+  it("keeps nine known facts when the tenth remains unsettled past the Runtime wait, without claiming finality", async () => {
+    const waiting = { ...readiness, pendingTelemetryEvents: 1, actionCharges: {
+      complete: false, unsettledExecutions: 0, missingExecutionIds: 0,
+    } };
+    const partial = { ...cleanHeader, finalized: false, readiness: waiting, cursor: { throughSeq: 9 },
+      coverage: { usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial" } as const };
+    const knownUsage = events.slice(0, 9);
+    const knownBills = settlements.slice(0, 9);
+    const knownNative = Array.from({ length: 9 }, (_, index) => nativeFixture(index + 1, chatId, submissionId));
+    let finalized = false;
+    const finalizedHeader = { ...cleanHeader, cursor: { throughSeq: 10 } };
+    const { fetch, requests } = resourceService((url) => {
+      if (url.pathname === `${prefix}/header` && finalized) return Response.json(finalizedHeader);
+      if (url.pathname === `${prefix}/readiness`) return Response.json({
+        scope, observedAt: partial.observedAt, finalized, readiness: finalized ? readiness : waiting,
+      });
+      if (url.pathname === `${prefix}/native-records`) {
+        return Response.json({ format: SP_PI_TRAJECTORY_FORMAT,
+          cursor: finalized ? finalizedHeader.cursor : partial.cursor,
+          records: finalized ? [...knownNative, nativeFixture(10, chatId, submissionId)] : knownNative,
+          nextAfterSeq: null });
+      }
+      if (url.pathname === `${prefix}/billing`) {
+        const after = Number(url.searchParams.get("after"));
+        const count = url.searchParams.get("limit") === "1" ? 1 : after === 0 ? 5 : 200;
+        const usage = finalized ? events.slice(0, 10) : knownUsage;
+        const bills = finalized ? settlements.slice(0, 10) : knownBills;
+        return Response.json({ scope: { chatId, submissionId },
+          cursor: { throughCount: usage.length, sha256: finalized ? "b".repeat(64) : fingerprint },
+          after, usageEvents: usage.slice(after, after + count),
+          billingSettlements: bills.slice(after, after + count),
+          nextAfter: after + count < usage.length ? after + count : null });
+      }
+      return undefined;
+    }, partial);
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    const run: RuntimeRunRecord = {
+      runId: "run-1", projectId: "project-1", sourceCommit: "a".repeat(40),
+      operation: "execution", phases: ["execution"], selector: { all: true },
+      targets: { projectSampleIds: ["sample-1"], samplingIds: [] },
+      samplingIds: ["sampling-1"], evaluationIds: [],
+      planDigests: { execution: "digest" }, requestIdentity: { idempotencyKey: "run-key", requestFingerprint: "digest" },
+    };
+    const sample: ProjectSample = {
+      projectSampleId: "sample-1", projectId: "project-1", dataId: "data-1", datasetIds: ["dataset-1"],
+      samplingCount: 1, data: { dataId: "data-1", userPrompt: "Build the page" },
+    };
+    const plans: ProjectPlanReader = {
+      getProjectPlan: async () => ({
+        project: { projectId: run.projectId, ownerUserId, name: "Test",
+          sourceBranch: "eval", createdAt: "2026-10-28T00:00:00.000Z" },
+        datasets: [], execution: {
+          harness: { kind: "sp", framework: "sp", agentConfig: { ownerUserId, userAgentId: "agent-1" } },
+          subjectAgentConfig: { sourceUserAgentId: "agent-1", name: "Test", body: {} },
+          executionConcurrency: 1, retryPolicy: { maxRestarts: 0, initialBackoffMs: 0, maxBackoffMs: 0 },
+        },
+        executionPlanDigest: run.planDigests.execution, evaluation: null,
+      }),
+      getProjectSamples: async () => [sample],
+      getEvaluationOutputSchema: async () => null,
+    };
+    const deadline = "2026-10-28T00:10:00.000Z";
+    let now = "2026-10-28T00:09:00.000Z";
+    let sampling: SamplingState = {
+      revision: 0, samplingId: "sampling-1", projectId: run.projectId, projectSampleId: sample.projectSampleId,
+      subjectAgent: { ownerUserId, userAgentId: "agent-1" }, subjectChatId: chatId,
+      execution: { status: "succeeded", resourcesPending: { deadline, nextAttemptAt: now } },
+      executionAttempts: [{ executionAttemptId: "attempt-1", samplingId: "sampling-1", attemptNumber: 1,
+        status: "completed", submissionId, completedAt: "2026-10-28T00:00:00.000Z",
+        resources: { status: "pending", scope } }],
+    };
+    let stored: AgentResourceSnapshotPage[] | undefined;
+    const store = {
+      getRun: async () => run,
+      getSamplings: async () => [sampling],
+      getSampling: async () => sampling,
+      updateSampling: async (next: SamplingState, expected: SamplingState, resources?: AttemptResourceSnapshot) => {
+        expect(expected.revision).toBe(sampling.revision);
+        if (resources) {
+          expect(resources.attemptId).toBe("attempt-1");
+          if (!isResourceSnapshotDownload(resources.snapshot)) throw new Error("Expected sealed page download");
+          stored = [];
+          for await (const page of resources.snapshot.readPages()) stored.push(page);
+        }
+        sampling = next;
+      },
+    } as unknown as RuntimeStore;
+    const onError = vi.fn();
+    const runtime = createEvalRunResumer({
+      plans, harness, store, evidence: {} as EvidenceStore, onError,
+      now: () => now, sleep: async () => undefined,
+    });
+    await runtime.resume(run.runId);
+    expect(requests.map(({ pathname }) => pathname)).toEqual([`${prefix}/readiness`]);
+    expect(sampling.execution.resourcesPending).toBeDefined();
+    expect(stored).toBeUndefined();
+
+    now = "2026-10-28T00:10:01.000Z";
+    await runtime.resume(run.runId);
+    expect(sampling.execution.resourcesPending).toBeUndefined();
+    expect(sampling.executionAttempts[0]!.resources).toMatchObject({
+      status: "collected",
+      summary: { finalized: false, coverage: partial.coverage, readiness: waiting,
+        counts: { usageEvents: 9, nativeRecords: 9, billingSettlements: 9 } },
+    });
+    expect(stored?.flatMap((page) => page.stream === "usageEvents" ? page.records : [])).toEqual(knownUsage);
+    expect(stored?.flatMap((page) => page.stream === "billingSettlements" ? page.records : [])).toEqual(knownBills);
+    expect(stored?.flatMap((page) => page.stream === "nativeRecords" ? page.records : [])).toHaveLength(9);
+    expect(requests.filter(({ pathname }) => pathname === `${prefix}/header`)).toHaveLength(2);
+    expect(requests.filter(({ pathname }) => pathname.endsWith("/native-records") || pathname.endsWith("/billing"))
+      .every(({ searchParams }) => searchParams.get("allowPartial") === "true")).toBe(true);
+    expect(requests.filter(({ pathname }) => pathname.endsWith("/billing"))
+      .every(({ searchParams }) => searchParams.get("throughSeq") === "9")).toBe(true);
+    expect(requests.every(({ pathname }) => pathname !== prefix)).toBe(true);
+
+    // A later manual resource retry gives this same Attempt a fresh budget. The
+    // earlier partial snapshot remains honest until a new finalized one commits.
+    requests.length = 0;
+    finalized = true;
+    now = "2026-10-28T00:12:00.000Z";
+    sampling = { ...sampling, revision: sampling.revision + 1,
+      execution: { status: "succeeded", resourcesPending: { deadline: "2026-10-28T00:22:00.000Z", nextAttemptAt: now } },
+      executionAttempts: withFreshResourceBudget(sampling.executionAttempts) };
+    await runtime.resume(run.runId);
+    expect(sampling.executionAttempts[0]!.resources).toMatchObject({
+      status: "collected", summary: { finalized: true,
+        counts: { usageEvents: 10, nativeRecords: 10, billingSettlements: 10 } },
+    });
+    expect(stored?.flatMap((page) => page.stream === "billingSettlements" ? page.records : []))
+      .toEqual(settlements.slice(0, 10));
+    expect(requests.filter(({ pathname }) => pathname === `${prefix}/native-records`
+      || pathname === `${prefix}/billing`).every(({ searchParams }) => !searchParams.has("allowPartial"))).toBe(true);
+    expect(onError).toHaveBeenCalledOnce(); // Only the original wait's partial shortfall.
+  });
+
   it("does not call the legacy whole-response route, retains 300 paired API facts and independently settled Action facts", async () => {
     const child = nativeFixture(8, chatId, "child-submission");
     const row = { ...child, record: { ...child.record, parent: {
@@ -90,7 +228,7 @@ describe("public paged SP resource collection", () => {
           expect(url.searchParams.get("throughCount")).toBe("300");
           expect(url.searchParams.get("throughSha256")).toBe(fingerprint);
         }
-        return Response.json(billingPage(after, after ? 100 : 200));
+        return Response.json(billingPage(after, url.searchParams.get("limit") === "1" ? 1 : after ? 100 : 200));
       }
       throw new Error(`Unexpected resource route ${url}`);
     });
@@ -112,9 +250,14 @@ describe("public paged SP resource collection", () => {
       await collected.dispose();
     }
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
-      `${prefix}/header`, `${prefix}/native-records`, `${prefix}/native-records`, `${prefix}/billing`, `${prefix}/billing`,
+      `${prefix}/header`, `${prefix}/native-records`, `${prefix}/native-records`,
+      `${prefix}/billing`, `${prefix}/billing`, `${prefix}/billing`,
       `${prefix}/header`,
     ]);
+    const probe = new URL(requests.at(-2)!.url).searchParams;
+    expect(probe.get("limit")).toBe("1");
+    expect(probe.get("throughCount")).toBe("300");
+    expect(probe.get("throughSha256")).toBe(fingerprint);
     expect(requests.every((request) => request.headers.get("X-Eval-Service-Token") === "secret"
       && !request.headers.has("Origin"))).toBe(true);
   });
@@ -454,6 +597,125 @@ describe("public paged SP resource collection", () => {
     await expect(createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
       .collectAgentResources(input)).rejects.toMatchObject({ retryable: true, message: expect.stringContaining("not finalized") });
     expect(requests.map((url) => url.pathname)).toEqual([`${prefix}/header`]);
+  });
+
+  it("retries from a finalized header when a partial download finalizes mid-stream, never sealing the old pages", async () => {
+    const waiting = { ...readiness, pendingRuntimeEvents: 1, actionCharges: {
+      complete: false, unsettledExecutions: 0, missingExecutionIds: 0,
+    } };
+    const partial = { ...cleanHeader, finalized: false, readiness: waiting, cursor: { throughSeq: 3 },
+      coverage: { usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial" } as const };
+    const complete = { ...cleanHeader, cursor: partial.cursor };
+    let headerReads = 0;
+    const before = (await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-"));
+    const { fetch, requests } = resourceService((url) => {
+      if (url.pathname === `${prefix}/header`) return Response.json(++headerReads === 1 ? partial : complete);
+      if (url.pathname === `${prefix}/native-records`) return Response.json({
+        format: SP_PI_TRAJECTORY_FORMAT, cursor: partial.cursor,
+        records: [nativeFixture(3, chatId, submissionId)], nextAfterSeq: null,
+      });
+      if (url.pathname === `${prefix}/billing`) {
+        return Response.json({ scope: { chatId, submissionId }, cursor: { throughCount: 1, sha256: fingerprint },
+          after: 0, usageEvents: events.slice(0, 1), billingSettlements: settlements.slice(0, 1), nextAfter: null });
+      }
+      return undefined;
+    }, partial);
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+    await expect(harness.collectAgentResources({ ...input, allowPartial: true }))
+      .rejects.toMatchObject({ retryable: true, message: expect.stringContaining("header during collection") });
+    expect((await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-"))).toEqual(before);
+    const completed = await harness.collectAgentResources(input) as AgentResourceSnapshotDownload;
+    try {
+      expect(completed.summary).toMatchObject({ finalized: true,
+        coverage: complete.coverage, counts: { usageEvents: 1, nativeRecords: 1, billingSettlements: 1 } });
+      const facts = [];
+      for await (const page of completed.readPages()) facts.push(page);
+      expect(facts.filter((page) => page.stream === "usageEvents")).toMatchObject([{ records: events.slice(0, 1) }]);
+    } finally {
+      await completed.dispose();
+    }
+    expect(headerReads).toBe(4);
+    expect(requests.filter(({ pathname }) => pathname === `${prefix}/billing`)).toHaveLength(4);
+    expect(requests.filter(({ pathname }) => pathname === `${prefix}/native-records`)
+      .map(({ searchParams }) => searchParams.get("allowPartial"))).toEqual(["true", null]);
+  });
+
+  it("rejects a changed billing source after a single partial page, even if the header stayed the same", async () => {
+    const partial = { ...cleanHeader, finalized: false, cursor: { throughSeq: 3 },
+      coverage: { usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial" } as const };
+    let reads = 0;
+    const before = (await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-"));
+    const { fetch, requests } = resourceService((url) => {
+      if (url.pathname === `${prefix}/native-records`) return Response.json({
+        format: SP_PI_TRAJECTORY_FORMAT, cursor: partial.cursor, records: [nativeFixture(3, chatId, submissionId)],
+        nextAfterSeq: null,
+      });
+      if (url.pathname === `${prefix}/billing`) {
+        if (++reads === 2) {
+          expect(url.searchParams.get("throughCount")).toBe("1");
+          expect(url.searchParams.get("throughSha256")).toBe(fingerprint);
+          expect(url.searchParams.get("limit")).toBe("1");
+        }
+        expect(url.searchParams.get("allowPartial")).toBe("true");
+        expect(url.searchParams.get("throughSeq")).toBe("3");
+        return Response.json({ scope: { chatId, submissionId },
+          cursor: { throughCount: 1, sha256: reads === 1 ? fingerprint : "b".repeat(64) },
+          after: 0, usageEvents: events.slice(0, 1), billingSettlements: settlements.slice(0, 1), nextAfter: null });
+      }
+      return undefined;
+    }, partial);
+    await expect(createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
+      .collectAgentResources({ ...input, allowPartial: true }))
+      .rejects.toMatchObject({ retryable: false, message: expect.stringContaining("billing source fingerprint") });
+    expect(reads).toBe(2);
+    expect(requests.filter(({ pathname }) => pathname === `${prefix}/header`)).toHaveLength(1);
+    expect((await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-"))).toEqual(before);
+  });
+
+  it("stops after one guaranteed-unpageable partial read on an older SP instead of exhausting the download budget", async () => {
+    const partial = { ...cleanHeader, finalized: false,
+      coverage: { usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial" } as const };
+    const { fetch, requests } = resourceService((url) => url.pathname === `${prefix}/native-records`
+      ? Response.json({ code: "EVIDENCE_NOT_READY", errMsg: "Resources are not finalized" },
+        { status: 409, headers: { "Retry-After": "5" } }) : undefined, partial);
+    await expect(createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
+      .collectAgentResources({ ...input, allowPartial: true }))
+      .rejects.toMatchObject({ retryable: false, status: 409, message: expect.stringContaining("no readable partial resource pages") });
+    expect(requests.map(({ pathname }) => pathname)).toEqual([`${prefix}/header`, `${prefix}/native-records`]);
+  });
+
+  it("passes the operation-bound partial opt-in through a referenced SAFE byte read without storing its body", async () => {
+    const source = nativeAssistantMessage(8, chatId, submissionId, [{ type: "text", text: "known native body" }]);
+    const { reference, bytes } = nativeTransfer(source, 8);
+    const partial = { ...cleanHeader, finalized: false, cursor: { throughSeq: 8 },
+      coverage: { usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial" } as const };
+    const { fetch, requests } = resourceService((url) => {
+      if (url.pathname === `${prefix}/native-records`) return Response.json({
+        format: SP_PI_TRAJECTORY_FORMAT, cursor: partial.cursor, records: [reference], nextAfterSeq: null,
+      });
+      if (url.pathname.endsWith(`/trajectory/records/${reference.ingestSeq}`)) {
+        expect(url.searchParams.get("allowPartial")).toBe("true");
+        expect(url.searchParams.get("resourceKey")).toBe(key);
+        return nativeTransferResponse(reference, bytes);
+      }
+      return undefined;
+    }, partial);
+    const download = await createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
+      .collectAgentResources({ ...input, allowPartial: true }) as AgentResourceSnapshotDownload;
+    try {
+      expect(download.summary).toMatchObject({
+        finalized: false, coverage: partial.coverage,
+        counts: { usageEvents: 0, nativeRecords: 1, billingSettlements: 0 },
+      });
+      const pages = [];
+      for await (const page of download.readPages()) pages.push(page);
+      const compact = pages.flatMap((page) => page.stream === "nativeRecords" ? page.records : []);
+      expect(compact).toMatchObject([{ ingestSeq: 8, metricProjection: { supported: true, fingerprint: reference.reference.sha256 } }]);
+      expect(JSON.stringify(compact)).not.toContain("known native body");
+    } finally {
+      await download.dispose();
+    }
+    expect(requests.some(({ pathname }) => pathname === prefix)).toBe(false);
   });
 
   it.each(["native-cutoff", "native-cursor", "billing-cursor", "billing-fingerprint", "billing-pair", "header-charges"] as const)(

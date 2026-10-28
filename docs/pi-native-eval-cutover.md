@@ -56,7 +56,11 @@ SP/Eval interoperability or deployment readiness.
   a final unchanged header, then persists only compact, body-free Pi facts and
   independent usage/billing in the existing JSON columns. It **never** calls
   the combined unbounded route for a new download. Historical rows are not
-  changed. A nonfinalized header cannot yield pages or prove zero. This
+  changed. A nonfinalized header yields pages only with Runtime's explicit
+  post-wait `allowPartial=true` opt-in (including the frozen cutoff on billing
+  and the bound key on referenced bytes); these are committed known facts
+  with `coverage.partial`, never a zero or complete claim. A final billing
+  fingerprint probe and repeat header reject changes before sealing. This
   locally tested candidate still requires public package publication and
   isolated PostgreSQL/deployed-SP integration before any end-to-end claim.
 - SP's public package source sets a **4,000,000-byte** trajectory page ceiling. Eval

@@ -389,7 +389,10 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
   /** Verified, unchanged UTF-8 bytes: no chunks, Buffer, parsed native object or re-JSON. */
   async function nativeJsonl(
     handle: AgentHandle, submissionId: string, row: SpPiTrajectoryRecordReference,
-    options: Pick<NativeRecordByteBinding, "scope" | "interpret" | "onVerified"> & { readonly signal?: AbortSignal },
+    options: Pick<NativeRecordByteBinding, "scope" | "interpret" | "onVerified"> & {
+      readonly signal?: AbortSignal;
+      readonly partialResourceKey?: string;
+    },
   ): Promise<ReadableStream<Uint8Array>> {
     assertRecordReference(row, handle.chatId);
     const { reference } = row;
@@ -398,6 +401,9 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     const path = `${handlePath(handle)}/evidence/trajectory/records/${row.ingestSeq}?${new URLSearchParams({
       submissionId, throughSeq: String(reference.throughSeq), identity: reference.identity,
       byteLength: String(reference.byteLength), sha256: reference.sha256,
+      ...(options.partialResourceKey === undefined ? {} : {
+        allowPartial: "true", resourceKey: options.partialResourceKey,
+      }),
     })}`;
     try {
       const response = await callBytes("GET", path, { ...(signal === undefined ? {} : { signal }) });
@@ -656,7 +662,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         // A pre-receipt Attempt first resolves its real operation-bound Submission via
         // the small readiness route. The new page paths require that exact ID.
         const submissionId = input.submissionId ?? (await readResources(input)).scope.submissionId;
-        const bound = new URLSearchParams({ submissionId });
+        const bound = new URLSearchParams({ submissionId, ...(input.allowPartial ? { allowPartial: "true" } : {}) });
         const headerPath = `${base}/header?${bound}`;
         const header = resourceHeader(await call("GET", headerPath, pageOptions("resource header")));
         if (header.scope.chatId !== input.handle.chatId || header.scope.idempotencyKey !== input.idempotencyKey
@@ -671,10 +677,14 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           throw new SpHarnessError("Eval SP returned a finalized resource header with unsettled facts", false);
         }
         if (!header.finalized) {
-          // SP's native and billing pages require finalization. After the Runtime's wait
-          // deadline, never claim an empty/partial snapshot that the pages cannot prove.
-          throw new SpHarnessError("Eval SP resources are not finalized for bounded collection", true);
+          if (!input.allowPartial) {
+            throw new SpHarnessError("Eval SP resources are not finalized for bounded collection", true);
+          }
+          if (Object.values(header.coverage).some((stream) => stream !== "partial")) {
+            throw new SpHarnessError("Eval SP nonfinalized resource header claims complete coverage", false);
+          }
         }
+        const partial = !header.finalized;
         spool = await createResourceSpool();
         const counts = { usageEvents: 0, nativeRecords: 0, billingSettlements: 0 };
         const verifiedSubmissions = new Set([submissionId]);
@@ -690,7 +700,8 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         let afterSeq: number | null = 0;
         while (afterSeq !== null) {
           const query = new URLSearchParams({ submissionId, afterSeq: String(afterSeq),
-            limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX), throughSeq: String(header.cursor.throughSeq) });
+            limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX), throughSeq: String(header.cursor.throughSeq),
+            ...(partial ? { allowPartial: "true" } : {}) });
           const page = resourceNativePage(await call("GET", `${base}/native-records?${query}`,
             pageOptions("resource native page")));
           if (page.cursor.throughSeq !== header.cursor.throughSeq || page.cursor.throughSeq < afterSeq) {
@@ -717,6 +728,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
               const stream = await nativeJsonl(input.handle, submissionId, row, {
                 scope: { kind: "operation", chatId: input.handle.chatId, submissionId, verifiedSubmissions },
                 interpret: "metrics", onVerified: (result) => { inspected = result; },
+                ...(partial ? { partialResourceKey: input.idempotencyKey } : {}),
                 ...(signal === undefined ? {} : { signal }),
               });
               for await (const _ of stream) { /* verify every byte without retaining the Pi body */ }
@@ -744,7 +756,8 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         let frozen: { readonly throughCount: number; readonly sha256: string } | undefined;
         for (;;) {
           const query = new URLSearchParams({ submissionId, after: String(after), limit: "200",
-            ...(frozen === undefined ? {} : { throughCount: String(frozen.throughCount), throughSha256: frozen.sha256 }) });
+            ...(frozen === undefined ? {} : { throughCount: String(frozen.throughCount), throughSha256: frozen.sha256 }),
+            ...(partial ? { allowPartial: "true", throughSeq: String(header.cursor.throughSeq) } : {}) });
           const page = resourceBillingPage(await call("GET", `${base}/billing?${query}`,
             pageOptions("resource billing page")));
           if (page.scope.chatId !== input.handle.chatId || page.scope.submissionId !== submissionId
@@ -764,25 +777,47 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         await spool.write({ stream: "billingSettlements", records: header.actionCharges });
         add("billingSettlements", header.actionCharges.length);
         header.actionCharges.forEach(charge);
+        // A terminal page is not a source fingerprint: a new settlement can commit after it,
+        // even when all facts fitted in one page. Recheck the full source after every transfer.
+        const fingerprintQuery = new URLSearchParams({ submissionId, after: "0", limit: "1",
+          throughCount: String(frozen!.throughCount), throughSha256: frozen!.sha256,
+          ...(partial ? { allowPartial: "true", throughSeq: String(header.cursor.throughSeq) } : {}) });
+        const checked = resourceBillingPage(await call("GET", `${base}/billing?${fingerprintQuery}`,
+          pageOptions("resource billing fingerprint")));
+        if (checked.scope.chatId !== input.handle.chatId || checked.scope.submissionId !== submissionId
+          || checked.after !== 0 || checked.cursor.throughCount !== frozen!.throughCount
+          || checked.cursor.sha256 !== frozen!.sha256) {
+          throw new SpHarnessError("Eval SP changed the resource billing source fingerprint", false);
+        }
         // A repeated finalized header must retain its operation, cutoff, coverage and
-        // independently settled Action/Tool charge facts. `observedAt` is a read time.
+        // independently settled Action/Tool charge facts. The same stability proof
+        // applies to partial headers, whose readiness can change while pages are read.
         const finished = resourceHeader(await call("GET", headerPath, pageOptions("resource header")));
         const stable = ({ observedAt: _observedAt, ...facts }: typeof header) => facts;
-        if (!finished.finalized || !equalJson(stable(header), stable(finished))) {
-          throw new SpHarnessError("Eval SP changed the resource header during collection", false);
+        if (!equalJson(stable(header), stable(finished))) {
+          throw new SpHarnessError("Eval SP changed the resource header during collection", partial);
         }
         const summary: AgentResourceSnapshotSummary = {
           scope: header.scope, observedAt: header.observedAt, finalized: header.finalized,
           coverage: header.coverage, readiness: header.readiness, counts,
         };
         const download = await spool.finish(summary, Number.isFinite(creditsTotal) ? creditsTotal : null);
-        log({ name: "resources_read", ...fields(), submissionId, status: 200, finalized: true,
+        log({ name: "resources_read", ...fields(), submissionId, status: 200, finalized: header.finalized,
           readiness: header.readiness, coverage: header.coverage, ...counts });
         return download;
       } catch (error) {
         await spool?.discard().catch(() => undefined);
-        if (!isRequestCancelled(error)) log({ name: "resources_read", ...fields(), ...failureFields(error) });
-        throw error;
+        // An older SP may expose a nonfinalized header but never allow paging it.
+        // That cannot succeed by burning this Attempt's entire resource-download budget.
+        const failure = input.allowPartial && error instanceof SpHarnessError && error.status === 409
+          && error.cause instanceof ApiError && error.cause.code === EVIDENCE_NOT_READY
+          ? new SpHarnessError("Eval SP has no readable partial resource pages", false, {
+            status: error.status, ...(error.requestId === undefined ? {} : { requestId: error.requestId }),
+            cause: error,
+          })
+          : error;
+        if (!isRequestCancelled(failure)) log({ name: "resources_read", ...fields(), ...failureFields(failure) });
+        throw failure;
       }
     },
     inspectAgentResources: readResources,

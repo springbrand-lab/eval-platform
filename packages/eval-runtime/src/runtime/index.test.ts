@@ -6723,6 +6723,10 @@ describe("resource readiness waiting and Submission observation", () => {
     expect(final.execution).toEqual({ status: "succeeded" });
     expect(final.executionAttempts[0]!.resources).toMatchObject({ status: "collected", summary: { finalized: false, readiness: PENDING_READINESS } });
     expect(harness.collectAgentResources).toHaveBeenCalledOnce();
+    expect(harness.collectAgentResources).toHaveBeenCalledWith(expect.objectContaining({
+      allowPartial: true, idempotencyKey: `execution:${samplingId}`,
+      submissionId: final.executionAttempts[0]!.submissionId,
+    }));
     expect(reported).toHaveBeenCalledOnce();
     const [error] = reported.mock.calls[0]! as [Error];
     expect(error.message).toContain(`execution resources for sampling ${samplingId}, Chat ${final.subjectChatId} were not finalized by ${DEADLINE}`);

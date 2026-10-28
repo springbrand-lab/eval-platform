@@ -91,7 +91,7 @@ JSON 值与标识符规则也只在这里定义：`jsonValueSchema`、`jsonObjec
 
 资源契约位于 `src/resources.ts`，通过包根入口导出。新的 `AgentResourceSnapshotDownload` 只携带已核验的摘要和有界页流，Store 原子保存后释放临时字节；已保存的 `AgentResourceSnapshot` 原样承载 SP 的 `usageEvents`、`billingSettlements`、覆盖度与 readiness，`nativeRecords` 保留已核验的来源身份及 body-free Metrics facts，不在 PostgreSQL 重复保存 Pi 大正文，也不是 Eval 重新设计的费用/Token/Tool/Turn 模型。来源缺失、`null`、顺序、重复记录及子 Agent 身份保留；Runtime 不补零、不换算、不抽取、不合并、不去重、不计算总量。历史原始快照不迁移，旧 `telemetryEvents` 不属于新快照契约。SP `alpha.7` 的公共资源分页源码仍是私有未发布包；本地消费者不代表部署互通或全局 OOM 安全。
 
-`coverage` 分别保留来源对三组记录的 `complete | partial | unavailable` 声明，`finalized` 保留操作终结声明；`collected` 只表示读到了并保存了快照，不保证来源完整。初始化 Session 历史和导入的 Subject 证据不属于本次资源范围。失败、取消和重启的使用/结算来源事实与 compact Pi facts 不能因最终结果失败而删除，历次主动重评也不能混入同一评估记录。Metrics 读取这些事实，负责来源解析、去重、重叠用量处理、费用/Token/工具/Turn 统计及汇总。
+`coverage` 分别保留来源对三组记录的 `complete | partial | unavailable` 声明，`finalized` 保留操作终结声明；`collected` 只表示读到了并保存了快照，不保证来源完整。资源等待到期后通过公共 Harness 的显式 `allowPartial` 选项采集时，未终结的三个来源均为 `partial`，有界页和已核验字节仍按真实数量原子写入；未完成计费、未投递记录以及暂时为零的已知条目不能宣称完整或推断为零费用。初始化 Session 历史和导入的 Subject 证据不属于本次资源范围。失败、取消和重启的使用/结算来源事实与 compact Pi facts 不能因最终结果失败而删除，历次主动重评也不能混入同一评估记录。Metrics 读取这些事实，负责来源解析、去重、重叠用量处理、费用/Token/工具/Turn 统计及汇总。
 
 一旦观察到 Agent 终态，Attempt 的状态及完成时间就固定为该 Agent 事实，`error` 保留原 Agent 错误；Runtime 资源持久化/产物收尾失败由执行或评估阶段的 `lastError` 表达，不把已经 `completed` 的 Attempt 改为 Agent 失败。保存重试复用同一份事实，不改变 Sampling/Evaluation/Attempt/Submission 身份。
 

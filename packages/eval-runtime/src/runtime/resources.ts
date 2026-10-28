@@ -142,7 +142,10 @@ export function validateResourceDownload(value: AgentResourceSnapshotDownload, s
     || (value.creditsTotal !== null && (typeof value.creditsTotal !== "number" || !Number.isFinite(value.creditsTotal)))) {
     throw new AgentResourceValidationError("Resource download is invalid");
   }
-  parseScoped(downloadSummarySchema, value.summary, scope, "Resource download summary");
+  const { finalized, coverage } = parseScoped(downloadSummarySchema, value.summary, scope, "Resource download summary");
+  if (!finalized && Object.values(coverage).some((stream) => stream !== "partial")) {
+    throw new AgentResourceValidationError("Nonfinalized resource pages must declare partial coverage for every stream");
+  }
   return value;
 }
 
@@ -199,11 +202,12 @@ function readResources<T>(source: ResourceSource, read: () => Promise<T>): Promi
   });
 }
 
-function resourceInput({ handle, scope, runtime, stop }: ResourceSource) {
+function resourceInput({ handle, scope, runtime, stop }: ResourceSource, allowPartial = false) {
   return {
     handle,
     idempotencyKey: scope.idempotencyKey,
     ...(scope.submissionId === undefined ? {} : { submissionId: scope.submissionId }),
+    ...(allowPartial ? { allowPartial: true as const } : {}),
     ...(runtime === undefined ? {} : { runtime }),
     ...(stop === undefined ? {} : { signal: stop.signal }),
   };
@@ -345,13 +349,18 @@ export async function collectResources(download: ResourceDownload): Promise<{ re
         state = { ...state, downloads: downloads + 1, ...(state.status === "failed" && failure ? { error: failure.message } : {}) };
         await download.save(state);
         checkResourceStop(source);
-        const received = await source.harness.collectAgentResources(resourceInput(source));
+        const received = await source.harness.collectAgentResources(resourceInput(
+          source, download.allowUnfinalized && owed !== undefined,
+        ));
         try {
           const snapshot = isResourceSnapshotDownload(received)
             ? validateResourceDownload(received, source.scope)
             : validateResourceSnapshot(received, source.scope);
           checkResourceStop(source);
           const summary = isResourceSnapshotDownload(snapshot) ? snapshot.summary : summarizeResourceSnapshot(snapshot);
+          if (!summary.finalized && !(download.allowUnfinalized && owed !== undefined)) {
+            throw new AgentResourceValidationError("Resource download became nonfinalized before its wait expired");
+          }
           const collected: AgentResourceState = { status: "collected", summary };
           await download.save(collected, snapshot);
           source.log({

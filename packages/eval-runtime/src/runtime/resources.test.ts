@@ -259,6 +259,64 @@ describe("crash-safe resource download", () => {
     expect(events).toContain("log:resources_collected");
   });
 
+  it("keeps pre-expiry reads pending, then explicitly asks the public Harness for nine known partial facts after expiry", async () => {
+    const pending = { ...READY, pendingTelemetryEvents: 1 };
+    const paged = sealed({ finalized: false, readiness: pending,
+      coverage: { usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial" },
+      counts: { usageEvents: 9, nativeRecords: 9, billingSettlements: 9 } });
+    const { download, harness } = setup(async () => paged);
+    vi.mocked(harness.inspectAgentResources).mockResolvedValue({
+      scope: SCOPE, observedAt: paged.summary.observedAt, finalized: false, readiness: pending,
+    });
+    expect((await collectResources(download)).pending).toContain("not finalized");
+    expect(harness.collectAgentResources).not.toHaveBeenCalled();
+    expect(download.save).not.toHaveBeenCalled();
+
+    expect(await collectResources({ ...download, allowUnfinalized: true })).toMatchObject({
+      pending: expect.stringContaining("not finalized"),
+    });
+    expect(harness.collectAgentResources).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ idempotencyKey: SCOPE.idempotencyKey, allowPartial: true }),
+    );
+    expect(download.save.mock.calls[1]).toEqual([
+      { status: "collected", summary: paged.summary }, paged,
+    ]);
+    expect(paged.dispose).toHaveBeenCalledOnce();
+    expect(() => validateResourceDownload(sealed({ ...paged.summary,
+      coverage: { ...paged.summary.coverage, billingSettlements: "complete" } }), SCOPE))
+      .toThrow(AgentResourceValidationError);
+  });
+
+  it("never stores a nonfinalized page download if readiness looked finalized before the deadline", async () => {
+    const paged = sealed({ finalized: false, coverage: {
+      usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial",
+    } });
+    const { download, harness } = setup(async () => paged, STORED, 0);
+    await collectResources(download);
+    expect(harness.collectAgentResources).toHaveBeenCalledOnce();
+    expect(harness.collectAgentResources).toHaveBeenCalledWith(expect.not.objectContaining({ allowPartial: true }));
+    expect(download.save.mock.calls.some(([resources, received]) =>
+      resources.status === "collected" || received !== undefined)).toBe(false);
+    expect(paged.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("does not spend the retry budget re-downloading a permanently unpageable partial source", async () => {
+    const unavailable = Object.assign(new Error("Eval SP has no readable partial resource pages"), { retryable: false });
+    const { download, harness, saved, decide } = setup(async () => { throw unavailable; }, STORED, 10);
+    vi.mocked(harness.inspectAgentResources).mockResolvedValue({
+      scope: SCOPE, observedAt: snapshot().observedAt, finalized: false,
+      readiness: { ...READY, pendingTelemetryEvents: 1 },
+    });
+    expect(await collectResources({ ...download, allowUnfinalized: true })).toEqual({});
+    expect(harness.collectAgentResources).toHaveBeenCalledOnce();
+    expect(decide).not.toHaveBeenCalled();
+    expect(saved).toMatchObject([
+      { status: "pending", downloads: 1 },
+      { status: "failed", downloads: 1, exhausted: true, error: unavailable.message },
+    ]);
+    expect(download.save.mock.calls.some(([_state, received]) => received !== undefined)).toBe(false);
+  });
+
   it("disposes a rejected foreign paged summary and never persists it as collected", async () => {
     const paged = sealed({ scope: { ...SCOPE, submissionId: "another-submission" } });
     const { download } = setup(async () => paged, STORED, 0);

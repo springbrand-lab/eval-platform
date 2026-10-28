@@ -8,8 +8,8 @@ The service-authenticated SP Harness consumes SP's **public**
 `pi-trajectory/v1` records or an explicit oversized-record reference, and
 resource snapshots carrying `nativeRecords`
 instead of `telemetryEvents`. The current pinned `0.1.0-alpha.5` still exports
-event pages; the SP Eval worktree commit `47479b68` has an offline
-`0.1.0-alpha.7` candidate with the reference wire, but it
+event pages; the SP Eval worktree has an offline, private
+`0.1.0-alpha.7` candidate with the reference and partial-page wire, but it
 has not been published or pinned here. New-run consumer checks remain structural
 until that release. Do not deploy this cutover or claim cross-deployment parity
 before publishing, installing and checking actual service responses. No legacy event decoding or DO storage access is used. Existing
@@ -47,10 +47,19 @@ large parsed object. Existing v2 inline JSONL bytes and historical manifests
 remain unchanged. Focused tests cover 5+ and 30+ MiB streamed records, R2
 uploads, resumed cursors and failures without partial success.
 
-`collectAgentResources` no longer calls or parses the combined resources JSON.
-It reads a small finalized `/header`, frozen `sp-pi-trajectory/v1`
+`collectAgentResources` never calls or parses the combined resources JSON.
+It reads a small `/header`, frozen `sp-pi-trajectory/v1`
 `/native-records` pages and separately fingerprinted, paired `/billing`
-pages (200 entries/4 MB each), then checks the header again. Oversized SAFE
+pages (200 entries/4 MB each), rechecks the full billing fingerprint (even
+after a single page), then checks the header again. Before the resource wait
+deadline, Runtime only polls readiness. Afterwards it explicitly opts into a
+partial read of already-known facts with `allowPartial=true` on the header,
+native and billing pages; partial billing pages also bind the header's
+`throughSeq`. Referenced native bytes use the same existing service-auth
+endpoint with `allowPartial=true&resourceKey={key}`. The source must keep the
+same native cutoff, paired billing fingerprint and header through the entire
+download; a changed source or interrupted page never becomes partial success.
+Oversized SAFE
 Pi records still use the authenticated evidence byte route and contribute
 only body-free compact facts to the new resource download. An overly large
 Tool body is **unknown**, not a fabricated zero-byte value; model usage,
@@ -58,8 +67,10 @@ model settlements and Action/Tool charge IDs remain independent. A temporary
 private spool holds one bounded compact row/page at a time, never an entire
 `nativeRecords` or billing array in JS; the Store projects it into the
 existing two JSON columns atomically with the Attempt revision and deletes
-the spool after save/failure. A nonfinalized header or interrupted page is
-an error, not a truncated/zero-charge success. Historical raw resource rows
+the spool after save/failure. A nonfinalized header without post-wait opt-in
+is still pending; an opted-in read retains only verified facts, with
+`finalized:false` and `coverage.partial` for missing/unsettled rows rather
+than invented zero usage or complete billing. Historical raw resource rows
 and v1/v2 evidence bytes are not migrated.
 
 **Publication/integration blocker:** EP pins the published
@@ -463,7 +474,9 @@ Agent 用途由 Eval 写入 `eval_agent_config_purposes`，只接受 `execution`
 
 readiness 与快照请求接收 Runtime 的本地 `AbortSignal`，使用现有 HTTP SDK 取消请求和正文读取；取消保留其分类，不包装成网络故障。Runtime 统一资源预算、等待和放弃通知，下载名额直到真实请求与原子保存结束才释放，详见 [运行时合同](../../packages/eval-runtime/README.md)。
 
-`src/sp/harness.ts` 用服务凭证确保 Inbox Chat、初始化、提交/重启、按键校准、收集完整产物/轨迹、分页资源、Evaluator 原样的 `structuredOutput` 结果文件，以及按轨迹读取 Evaluator 最后一条回复（`readFinalReply`）；`sp/submission-observer.ts` 以 WebSocket 终态推送为主，Ping/Pong 检测静默失活，断线后按已知 Submission ID 读取一次权威状态（404 表示 Submission 或 Chat 已不存在，不回退按键读取）并对同一 Submission URL 有限重连；瞬态错误只表示状态未知，预算用尽时抛出可重试的 “status unconfirmed” 错误，健康连接期间不轮询。资源先经无事件的 readiness 路由等待 SP 定稿，再读取已定稿的小 header、冻结 native 页面及配对的 API 计费页面；证据读取总是携带 `submissionId`。SP HTTP 请求（含 readiness）默认最多等待 60 秒，停止调用最多 10 秒；每个资源页面与证据传输分别最多等待 5 分钟，页面 JSON 限 4 MB，其他 JSON 仍按 V8 最大字符串长度限制。证据/资源 GET 的 `409 EVIDENCE_NOT_READY` 可重试，其他 409 不重试；证据导入流式 PUT 并边传边校验大小与 SHA-256；单个证据文件上限取 `DEFAULT_EVIDENCE_LIMITS` 与 `@springbrand/eval-harness@0.1.0-alpha.5` 的 `EVAL_EVIDENCE_FILE_MAX_BYTES` 中较小者，现为 95 MB。Harness 的 `log` 事件由 Worker 写入 pino，不含正文或凭证。当前只支持 `sp` 框架，`codex`、`cc` 明确拒绝。服务契约、Bundle 文件布局与校验规则见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。SP 服务路由在只读的独立 SP 分支实现，但新的公共包尚未发布，真实跨部署联调仍需完成。
+`src/sp/harness.ts` 用服务凭证确保 Inbox Chat、初始化、提交/重启、按键校准、收集完整产物/轨迹、分页资源、Evaluator 原样的 `structuredOutput` 结果文件，以及按轨迹读取 Evaluator 最后一条回复（`readFinalReply`）；`sp/submission-observer.ts` 以 WebSocket 终态推送为主，Ping/Pong 检测静默失活，断线后按已知 Submission ID 读取一次权威状态（404 表示 Submission 或 Chat 已不存在，不回退按键读取）并对同一 Submission URL 有限重连；瞬态错误只表示状态未知，预算用尽时抛出可重试的 “status unconfirmed” 错误，健康连接期间不轮询。
+
+资源先经无事件的 readiness 路由等待 SP 定稿；期限内不下载未定稿页面。期限届满后通过 `allowPartial=true` 显式读取冻结的已知 native 页面、配对的 API 计费页面及必要的验证字节，保留 `finalized:false`、`coverage.partial` 与真实计数，不把未知计费记为零。证据读取仍携带 `submissionId` 并保留完整 Chat 轨迹。SP HTTP 请求（含 readiness）默认最多等待 60 秒，停止调用最多等待 10 秒；每个资源页面与证据传输分别最多等待 5 分钟，页面 JSON 限 4 MB，其他 JSON 仍按 V8 最大字符串长度限制。证据/资源 GET 的 `409 EVIDENCE_NOT_READY` 通常可重试，但已请求 partial 页且 SP 仍不支持读取时不会重复消耗下载预算；其他 409 不重试。证据导入流式 PUT 并边传边校验大小与 SHA-256；单个证据文件上限取 `DEFAULT_EVIDENCE_LIMITS` 与 `@springbrand/eval-harness@0.1.0-alpha.5` 的 `EVAL_EVIDENCE_FILE_MAX_BYTES` 中较小者，现为 95 MB。Harness 的 `log` 事件由 Worker 写入 pino，不含正文或凭证。当前只支持 `sp` 框架，`codex`、`cc` 明确拒绝。服务契约、Bundle 文件布局与校验规则见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。SP 服务路由在独立 SP 分支实现，但新的公共包尚未发布，真实跨部署联调仍需完成。
 
 初始化的 `data.userPrompt` 与提交的 `prompt` 通过该包的共享 `evalPromptSchema` 校验：只拒绝非字符串及纯空白，首尾空格、换行和 Unicode 空白原样发送，不在 Eval 侧清洗 Prompt。
 

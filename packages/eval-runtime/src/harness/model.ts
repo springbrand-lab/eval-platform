@@ -88,6 +88,9 @@ export interface CollectAgentResourcesInput {
   readonly idempotencyKey: string;
   /** Omitted only while reconciling a dispatch whose SP receipt is unknown. */
   readonly submissionId?: string;
+  /** Explicitly permits verified, frozen known facts only after Runtime's resource wait expires.
+   * Absence keeps ordinary collection conservative until SP finalizes. Never passed to readiness. */
+  readonly allowPartial?: true;
   readonly runtime?: HarnessRuntimeOptions;
   /** Cancels the request and body read; the Promise settles only after both have ended. */
   readonly signal?: AbortSignal;
