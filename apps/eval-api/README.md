@@ -35,6 +35,23 @@ still fails explicitly at a record boundary. The temporary structural contract
 in `eval-contracts` must be replaced with the released public package contract
 and tested against deployed SP before release; no unpublished dependency is pinned.
 
+**Pending single-store streaming wire:** `src/sp/native-record-stream.ts` is a
+source-independent, test-backed byte reader, not an SP route or an active
+Harness transport. Given a public frozen record identity, length, SHA-256 and
+authorized byte stream, it checks UTF-8/JSON and the bounded SAFE envelope
+(actor, Chat, Context/Submission, parent) without constructing a record object
+or buffering its body. It can frame unchanged source bytes as exactly one v2
+JSONL line; it emits the closing newline and completion callback only after
+full verification. Tests stream actual 5+ and 30+ MiB Pi messages in small
+chunks. The current `alpha.5` dependency does **not** provide the coordinated
+bounded page/facts header plus authenticated single-store byte stream, so this
+reader is not wired into evidence or resource collection. Existing
+`transferNativeRecord`, JSON resource snapshots and EvidenceStore/R2 part
+buffering still materialize large data. Neither completeness nor credit
+readiness can be claimed through this preparatory reader: consume and test
+the SP package's exact public contract once available, without inventing an
+independent transport or changing old bundle hashes.
+
 内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。设计见 [Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
 
 ## 项目评估结果下载
