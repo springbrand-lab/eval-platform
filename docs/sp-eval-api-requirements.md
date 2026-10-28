@@ -2,6 +2,11 @@
 
 > 目标契约，尚未全部实现。部署决定和数据归属见 [Eval 独立 SP 部署方案](eval-sp-deployment.md)；已实现的服务路由见 [Eval SP Harness 服务契约](eval-sp-harness-protocol.md)，不把下表中尚未实现的能力误认为现有接口。
 
+> **2026-10-28 发布状态：**下表中的 “需发布新 package” 指原先尚未发布的 Pi-native 页；
+> EP 现已精确安装 npm `@springbrand/eval-harness@0.1.0-alpha.7`，公开了 finalized
+> 证据/资源分页 Schema 和路径。仍缺 `allowPartial` 页/计费 cutoff/记录字节绑定的
+> 公开契约；尚未进行真实 SP 部署与隔离 PostgreSQL 联调，不得视为上线验收。
+
 ## 对接前提
 
 - Eval 独立发布 SP API/数据库、Agent Worker、Space Worker、DO 命名空间和 R2。Agent 的 `API_ORIGIN` 指向 Eval SP API；Eval 的登录、Agent Config、Chat、Submission、Trajectory、Workspace、计费和 Action 接入都指向这套 SP。运行时不请求 dev/production SP。

@@ -2,11 +2,12 @@ import type { JsonValue } from "./model.js";
 import { z } from "zod";
 import { jsonObjectInPlaceSchema } from "./json.js";
 
-/** SP Eval's public Harness wire owns the schema. These are temporary structural bounds
- * until the new @springbrand/eval-harness release is published. No event-only records are native. */
+/** SP's published eval-harness owns HTTP validation; this browser-safe contract
+ * describes persisted native facts and bounded stream checks, not the wire authority.
+ * No event-only records are native. */
 export const SP_PI_TRAJECTORY_FORMAT = "sp-pi-trajectory/v1";
 export const PI_TRAJECTORY_RECORD_FORMAT = "pi-trajectory/v1";
-/** Temporary structural mirror of SP Eval's public, not-yet-published record transfer wire. */
+/** Browser-safe persisted reference shape; the API parses transfers with SP's public schema. */
 export const SP_PI_TRAJECTORY_RECORD_FORMAT = "sp-pi-trajectory-record/v1";
 export const SP_PI_TRAJECTORY_RECORD_IDENTITY_HEADER = "X-Eval-Trajectory-Identity";
 export const SP_PI_TRAJECTORY_RECORD_INGEST_SEQ_HEADER = "X-Eval-Trajectory-Ingest-Seq";
@@ -60,7 +61,7 @@ export interface SpPiTrajectoryPage {
   readonly nextAfterSeq: number | null;
 }
 
-/** Structural guard only: the future published SP package remains the source of the full schema. */
+/** Local storage/stream guard only; the API HTTP page uses SP's published schema. */
 export function isSafePiTrajectoryRecord(value: unknown): value is PiTrajectoryRecord {
   if (!jsonObjectInPlaceSchema.safeParse(value).success) return false;
   const item = value as Record<string, unknown>;

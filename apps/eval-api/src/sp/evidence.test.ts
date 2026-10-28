@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SP_PI_TRAJECTORY_FORMAT, type NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
 import { createEvidenceStore, type AgentHandle, type ExportedTrajectoryPage } from "@eval-platform/eval-runtime/harness";
-import { EVAL_EVIDENCE_FILE_MAX_BYTES, evalEvidencePath } from "@springbrand/eval-harness";
+import { EVAL_EVIDENCE_FILE_MAX_BYTES, evalEvidencePath, evalEvidenceTrajectoryPageSchema } from "@springbrand/eval-harness";
 import { describe, expect, it } from "vitest";
 import { openLocalEvidenceBlobs } from "../evidence/local-blobs.js";
 import { createSpHarness, MAX_TRAJECTORY_PAGE_BYTES } from "./harness.js";
@@ -19,9 +19,10 @@ const subject: AgentHandle = {
   samplingId: "sampling", role: "subject", framework: "sp",
 };
 const evaluator: AgentHandle = { ...subject, chatId: "33333333-3333-4333-8333-333333333333", role: "evaluator", evaluationId: "evaluation" };
+const SUBMISSION_ID = "77777777-7777-4777-8777-777777777777";
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const limits = { maxFileBytes: 1_200, maxTotalBytes: 15_000, maxFiles: 20, excludedSegments: [] };
-const native = (seq: number, chatId = subject.chatId, submissionId = "submission-1") => nativeFixture(seq, chatId, submissionId);
+const native = (seq: number, chatId = subject.chatId, submissionId = SUBMISSION_ID) => nativeFixture(seq, chatId, submissionId);
 const asContext = (entry: NativeTrajectoryEntry): NativeTrajectoryEntry => ({
   ...entry, record: { ...entry.record, submissionId: null, origin: "context" },
 });
@@ -40,6 +41,58 @@ const read = async (items: AsyncIterable<ExportedTrajectoryPage>) => {
 };
 
 describe("SP Pi-native evidence export, persistence and import", () => {
+  it("keeps additional public Pi native fields unchanged after validating the published page", async () => {
+    const entry = native(6);
+    if (entry.record.record.type !== "entry") throw new Error("Expected a native Entry fixture");
+    const source = { ...entry, record: { ...entry.record, record: {
+      ...entry.record.record, value: { ...entry.record.record.value,
+        upstreamDetail: { opaque: ["汉🌎", null, 0] } },
+    } } };
+    const body = page([source], 6, null);
+    expect(evalEvidenceTrajectoryPageSchema.safeParse(body).success).toBe(true);
+    const harness = createSpHarness({
+      origin: "https://sp.test", serviceToken: "service",
+      fetch: async (input, init) => {
+        const url = new URL(new Request(input, init).url);
+        if (url.pathname.endsWith("/evidence/artifacts")) return Response.json({ artifacts: [] });
+        if (url.pathname.endsWith("/evidence/trajectory")) return Response.json(body);
+        throw new Error(`Unexpected evidence request ${url}`);
+      },
+    });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
+    const [first] = await (async () => {
+      for await (const item of exported.readTrajectory(0)) return item.records;
+      throw new Error("No evidence trajectory page");
+    })();
+    expect(await new Response(await first!.readJsonl()).text()).toBe(`${JSON.stringify(source)}\n`);
+  });
+
+  it("rejects a native Chat page whose Pi message fails the published evidence schema", async () => {
+    const submissionId = "11111111-1111-4111-8111-111111111111";
+    const invalid = structuredClone(native(6, subject.chatId, submissionId)) as unknown as {
+      record: { record: { value: { model: { timestamp: unknown }[] } } };
+    };
+    invalid.record.record.value.model[0]!.timestamp = "not-a-Pi-timestamp";
+    const body = page([invalid], 6, null);
+    expect(evalEvidenceTrajectoryPageSchema.safeParse(body).success).toBe(false);
+    const harness = createSpHarness({
+      origin: "https://sp.test", serviceToken: "service",
+      fetch: async (input, init) => {
+        const url = new URL(new Request(input, init).url);
+        if (url.pathname.endsWith("/evidence/artifacts")) return Response.json({ artifacts: [] });
+        if (url.pathname.endsWith("/evidence/trajectory")) return Response.json(body);
+        throw new Error(`Unexpected evidence request ${url}`);
+      },
+    });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId, limits });
+    async function readPages(): Promise<void> {
+      for await (const _ of exported.readTrajectory(0)) { /* reject before yielding any page */ }
+    }
+    await expect(readPages()).rejects.toMatchObject({
+      retryable: false, message: "Eval SP returned an invalid evidence trajectory page",
+    });
+  });
+
   it("hydrates an authenticated 5+ MiB SAFE Pi reference before unchanged JSONL, manifest and scoped final reply", async () => {
     const submissionId = "11111111-1111-4111-8111-111111111111";
     const context = asContext(native(1));
@@ -215,7 +268,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
       const records = [
         asContext(native(1)),
         ...nativeFixtureRecords([2, 3], subject.chatId, "earlier-submission"),
-        ...nativeFixtureRecords([4, 5, 6, 7, 8], subject.chatId, "submission-1"),
+        ...nativeFixtureRecords([4, 5, 6, 7, 8], subject.chatId, SUBMISSION_ID),
       ];
       const imported: { path: string; bytes: Uint8Array }[] = [];
       const cursors: { after: string | null; through: string | null; token: string | null }[] = [];
@@ -243,10 +296,10 @@ describe("SP Pi-native evidence export, persistence and import", () => {
         },
       });
       const store = createEvidenceStore(await openLocalEvidenceBlobs(root));
-      const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits, initialMaterials: materials });
+      const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits, initialMaterials: materials });
       const evidence = await store.open(await store.resume({ evidence: exported, limits }));
-      expect(cursors).toEqual([{ after: "0", through: null, token: "submission-1" },
-        { after: "4", through: "8", token: "submission-1" }]);
+      expect(cursors).toEqual([{ after: "0", through: null, token: SUBMISSION_ID },
+        { after: "4", through: "8", token: SUBMISSION_ID }]);
       expect(evidence.manifest.schemaVersion).toBe(2);
       expect(evidence.manifest.trajectory).toMatchObject({ format: SP_PI_TRAJECTORY_FORMAT, records: 8, complete: true });
       expect(evidence.manifest.trajectory.parts.length).toBeGreaterThan(1);
@@ -285,7 +338,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
     const harness = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       fetch: async (input) => Response.json(new URL(String(input instanceof Request ? input.url : input)).pathname.endsWith("/artifacts")
         ? { artifacts: [] } : invalid) });
-    const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
     await expect(read(exported.readTrajectory(0))).rejects.toMatchObject({ name: "SpHarnessError", retryable: false });
   });
 
@@ -293,7 +346,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
     const harness = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       fetch: async (input) => Response.json(new URL(String(input instanceof Request ? input.url : input)).pathname.endsWith("/artifacts")
         ? { artifacts: [] } : page([asContext(native(1)), native(2, evaluator.chatId)], 2, null)) });
-    const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
     const iterator = exported.readTrajectory(0)[Symbol.asyncIterator]();
     await expect(iterator.next()).rejects.toMatchObject({
       retryable: false, message: expect.stringContaining("outside the requested Chat"),
@@ -312,7 +365,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
         if (path.includes("/trajectory/records/")) transfers++;
         return Response.json(page([asContext(native(1)), foreign], 2, null));
       } });
-    const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
     await expect(exported.readTrajectory(0)[Symbol.asyncIterator]().next()).rejects.toMatchObject({
       retryable: false, message: expect.stringContaining("outside the requested Chat"),
     });
@@ -383,7 +436,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
         } });
       const root = await mkdtemp(join(tmpdir(), `eval-unsafe-native-${failure}-`));
       try {
-        const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+        const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
         const store = createEvidenceStore(await openLocalEvidenceBlobs(root));
         let saved: Parameters<typeof store.resume>[0]["progress"];
         await expect(store.resume({ evidence: exported, limits, onProgress: async (value) => { saved = value; } }))
@@ -407,7 +460,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
         if (path.includes("/trajectory/records/")) transfers++;
         return Response.json(page([oversized], 2, null));
       } });
-    const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
     await expect(read(exported.readTrajectory(0))).rejects.toMatchObject({ retryable: false });
     expect(transfers).toBe(0);
   });
@@ -425,7 +478,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
             ? nativeTransferResponse(reference, bytes, { [header]: "incorrect" })
             : Response.json(page([reference], 2, null));
       } });
-    const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
     await expect(read(exported.readTrajectory(0))).rejects.toMatchObject({
       retryable: false, message: expect.stringContaining("differs from its reference"),
     });
@@ -446,7 +499,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
             })
             : Response.json(page([reference], 2, null));
       } });
-    const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
     await expect(read(exported.readTrajectory(0))).rejects.toMatchObject({
       retryable, status: 409, requestId: "sp-request-1",
     });
@@ -459,13 +512,13 @@ describe("SP Pi-native evidence export, persistence and import", () => {
     } });
     const child = native(8, subject.chatId, "child-submission");
     Object.assign(child.record, { parent: {
-      resource: { agentId: "agent-1", sessionId: subject.chatId }, submissionId: "submission-1",
+      resource: { agentId: "agent-1", sessionId: subject.chatId }, submissionId: SUBMISSION_ID,
     } });
     const records = [native(3), native(5, subject.chatId, "earlier-submission"), earlierChild, child];
     const harness = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       fetch: async (input) => Response.json(new URL(String(input instanceof Request ? input.url : input)).pathname.endsWith("/artifacts")
         ? { artifacts: [] } : page(records, 9, null)) });
-    const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
     expect(await read(exported.readTrajectory(0))).toEqual(records.map((record) => ({
       seq: record.ingestSeq, throughSeq: 9, record,
     })));
@@ -481,7 +534,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
           return Response.json(url.pathname.endsWith("/artifacts") ? { artifacts: [] }
             : url.searchParams.get("afterSeq") === "0" ? page([first], 2, 1) : last);
         } });
-      const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+      const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
       await expect(read(exported.readTrajectory(0))).rejects.toMatchObject({ retryable: false });
     }
   });
@@ -568,11 +621,11 @@ describe("SP Pi-native evidence export, persistence and import", () => {
   }, 30_000);
 
   it("bounds a JSON page by bytes and rejects an oversized individual record instead of truncating it", async () => {
-    const oversized = nativeAssistantMessage(1, subject.chatId, "submission-1", [{ type: "text", text: "x".repeat(2_000) }]);
+    const oversized = nativeAssistantMessage(1, subject.chatId, SUBMISSION_ID, [{ type: "text", text: "x".repeat(2_000) }]);
     const harness = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       fetch: async (input) => Response.json(new URL(String(input instanceof Request ? input.url : input)).pathname.endsWith("/artifacts")
         ? { artifacts: [] } : page([oversized], 1, null)) });
-    const evidence = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+    const evidence = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
     const root = await mkdtemp(join(tmpdir(), "eval-native-record-limit-"));
     try {
       const store = createEvidenceStore(await openLocalEvidenceBlobs(root));
@@ -583,18 +636,18 @@ describe("SP Pi-native evidence export, persistence and import", () => {
     }
     const bounded = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       maxResponseBytes: 256, fetch: async () => Response.json(page([oversized], 1, null)) });
-    await expect(bounded.readFinalReply({ handle: evaluator, submissionId: "submission-1" }))
+    await expect(bounded.readFinalReply({ handle: evaluator, submissionId: SUBMISSION_ID }))
       .rejects.toMatchObject({ retryable: false, message: "Eval SP evidence trajectory page exceeded the 256-byte response limit" });
     expect(MAX_TRAJECTORY_PAGE_BYTES).toBeLessThan(95_000_000);
   });
 
   it("refuses an oversized inline JSON page even when a separate record-reference transfer exists", async () => {
-    const record = nativeAssistantMessage(1, subject.chatId, "submission-1",
+    const record = nativeAssistantMessage(1, subject.chatId, SUBMISSION_ID,
       [{ type: "text", text: "x".repeat(MAX_TRAJECTORY_PAGE_BYTES) }]);
     const harness = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       fetch: async (input) => Response.json(new URL(String(input instanceof Request ? input.url : input)).pathname.endsWith("/artifacts")
         ? { artifacts: [] } : page([record], 1, null)) });
-    const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
     await expect(read(exported.readTrajectory(0))).rejects.toMatchObject({
       retryable: false,
       message: `Eval SP evidence trajectory page exceeded the ${MAX_TRAJECTORY_PAGE_BYTES}-byte response limit`,

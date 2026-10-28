@@ -23,6 +23,7 @@ const SUBJECT_CHAT = "33333333-3333-4333-8333-333333333333";
 const EVALUATOR_CHAT = "44444444-4444-4444-8444-444444444444";
 const MISSING_CHAT = "55555555-5555-4555-8555-555555555555";
 const AGENT_CONFIG = "66666666-6666-4666-8666-666666666666";
+const RESOURCE_SUBMISSION_ID = "77777777-7777-4777-8777-777777777777";
 const CHAT_PATH = `/internal/v1/eval-harness/users/${OWNER}/chats/${SUBJECT_CHAT}`;
 
 const subject: AgentHandle = {
@@ -726,7 +727,8 @@ describe("Eval SP Harness large transfers and readiness", () => {
     });
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
     const result = harness[method]({
-      handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1", signal: stop.signal,
+      handle: subject, idempotencyKey: "execution:sampling-1",
+      submissionId: method === "collectAgentResources" ? RESOURCE_SUBMISSION_ID : "submission-1", signal: stop.signal,
     }).catch((error: unknown) => error);
     try {
       await reading;
@@ -803,7 +805,8 @@ describe("Eval SP Harness large transfers and readiness", () => {
       .rejects.toMatchObject({ retryable: true });
     expect(Date.now() - readinessStarted).toBeLessThan(55);
     const resourceStarted = Date.now();
-    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
+    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1",
+      submissionId: RESOURCE_SUBMISSION_ID }))
       .rejects.toMatchObject({ retryable: true });
     expect(Date.now() - resourceStarted).toBeGreaterThanOrEqual(55);
   });

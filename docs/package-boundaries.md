@@ -50,6 +50,17 @@ The arrows describe allowed consumption direction. The contract package must not
 
 ### Evidence export and import
 
+> **Published-package status (2026-10-28):** The long-form design below predates
+> npm publication. EP now pins `@springbrand/eval-harness@0.1.0-alpha.7` and
+> parses HTTP evidence/header/native/billing pages with its public schemas and
+> finalized route/record-byte helpers. The browser-safe `eval-contracts` types
+> and bounded byte verifier remain local storage/stream boundaries, not HTTP
+> substitutes. Alpha.7's declarations/JS have **no** `allowPartial` requests or
+> route helpers, partial billing `throughSeq`, or partial record-byte
+> `resourceKey`; any older “private/unpublished” or “keep alpha.5” statements
+> in the design text below are superseded. The structural post-wait extension,
+> real SP parity and isolated PostgreSQL assembly are release blockers.
+
 The existing Harness/EvidenceStore seam owns one immutable evidence bundle per successful Subject execution. The Harness exports produced artifacts, original Subject Material files resolved from the Project's fixed references, and the complete raw safe Pi source trajectory in order. Evidence trajectory means the full Chat keyset through one frozen watermark, including imported reference Context and any earlier Submission in that Chat; the requested terminal Submission authorizes and binds the read, but does not filter the evidence rows. The adapter rejects unsafe/unprojected records or records whose resource or parent belongs to another Chat. EvidenceStore stores both file groups by content hash and splits trajectory JSONL at native record boundaries within the file byte limit; it never normalizes or discards source record fields. The v2 manifest records Subject input identities, artifacts, ordered trajectory parts with sizes/hashes/record counts, completeness and explicit artifact omissions. Runtime passes only the frozen Subject Material references to export, never live Dataset contents. An Evaluator receives its own initialization first, then all evidence files, and the manifest last; the SP adapter uses the public package's evidence path helpers and checks path, size and hash receipts. A native record larger than the file limit is never dropped or truncated: the export fails with an explicit non-retryable error before any part is stored, and the SP import likewise refuses a bundle with a file above SP's per-file limit before writing anything.
 
 The not-yet-published SP public wire represents a record that does not fit a small JSON page as `{ingestSeq,reference:{format,throughSeq,identity,byteLength,sha256}}`. Only the Eval API's service-authenticated SP Harness fetches `/evidence/trajectory/records/{ingestSeq}` using that exact frozen reference and Submission ID. It checks headers, complete length and SHA-256, strict UTF-8/JSON, SAFE identity, Context/Submission and same-Chat parent **while streaming** the original bytes. EvidenceStore receives one verified JSONL line per record, never a parsed or re-serialized large object; it writes a part directly to a content-addressed blob without retaining a part in memory. An empty first page also freezes and durably saves its watermark; a missing terminal page or short byte stream cannot finalize evidence. The R2 adapter uses a bounded temporary disk spool to compute its signed hash, then streams that file once to its content key and removes the spool; neither adapter holds a whole file in JS memory. References never enter JSONL or manifests. The temporary structural checks in `eval-contracts` follow the SP Eval public candidate; the pinned published package still lacks this wire. A published package upgrade and cross-deployment verification are release blockers, not implicit local work.
@@ -221,8 +232,9 @@ Submission, never from Context, an earlier Submission or a child.
 A safe native record that cannot fit one evidence file still fails explicitly.
 Each small JSON resource page and the final header read are capped at 4,000,000 bytes;
 an oversized native body uses the existing verified byte reference, never a truncated page.
-The consumer is locally implemented against SP's public candidate, but its `alpha.7`
-package is private/unpublished and deployed compatibility remains unverified.
+The API uses installed npm `alpha.7` for its finalized HTTP wire; the public
+partial request/byte contract, deployed compatibility and real PostgreSQL
+transaction still require verification.
 
 New bundles use manifest schema **2** and `trajectory.format:"sp-pi-trajectory/v1"`; the
 manifest hash and reference are derived from those new bytes only. Version 1 event bundles,

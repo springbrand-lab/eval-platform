@@ -1,13 +1,20 @@
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { DEFAULT_EVIDENCE_LIMITS, SP_PI_TRAJECTORY_FORMAT,
   isResourceSnapshotDownload,
   type AgentResourceSnapshotPage, type AgentResourceSnapshotDownload, type NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
 import { createEvalRunResumer, type AttemptResourceSnapshot, type ProjectPlanReader, type ProjectSample, type RuntimeRunRecord,
   type RuntimeStore, type SamplingState, withFreshResourceBudget } from "@eval-platform/eval-runtime";
 import { createEvidenceStore, type AgentHandle, type EvidenceStore } from "@eval-platform/eval-runtime/harness";
+import {
+  evalBillingResourcesPageSchema, evalNativeRecordReferenceSchema, evalResourceBillingPagePath,
+  evalResourceHeaderPath, evalResourceHeaderSchema, evalResourceNativePagePath,
+  evalResourceNativePageSchema, evalTrajectoryRecordTransferPath,
+  type EvalBillingResourcesPage, type EvalBillingResourcesPageQuery,
+  type EvalNativeRecordReference, type EvalResourceHeader,
+} from "@springbrand/eval-harness";
 import { isRequestCancelled } from "@springbrand/http/errors";
 import { openLocalEvidenceBlobs } from "../evidence/local-blobs.js";
 import { createSpHarness } from "./harness.js";
@@ -31,7 +38,8 @@ const header = {
   scope, observedAt: "2026-10-28T00:00:00.000Z", finalized: true, readiness, coverage,
   cursor: { throughSeq: 8 }, actionCharges: [action],
 };
-const prefix = `/internal/v1/eval-harness/users/${ownerUserId}/chats/${chatId}/resources/by-key/execution%3Asampling-1`;
+const resourcePath = `/resources/by-key/${encodeURIComponent(key)}`;
+const prefix = `/internal/v1/eval-harness/users/${ownerUserId}/chats/${chatId}${resourcePath}`;
 const nativePage = (records: unknown[], nextAfterSeq: number | null) =>
   ({ format: SP_PI_TRAJECTORY_FORMAT, cursor: header.cursor, records, nextAfterSeq });
 const events = Array.from({ length: 300 }, (_, index) =>
@@ -71,6 +79,60 @@ function resourceService(serve: (url: URL) => Response | undefined, current: SpR
 }
 
 describe("public paged SP resource collection", () => {
+  it("binds the installed public schemas, finalized paths and record-byte path to this operation", () => {
+    const publicHeader: EvalResourceHeader = cleanHeader;
+    const publicBilling: EvalBillingResourcesPage = emptyBilling();
+    const reference: EvalNativeRecordReference = nativeTransfer(nativeFixture(8, chatId, submissionId), 8).reference;
+    expect(evalResourceHeaderSchema.parse(publicHeader)).toEqual(cleanHeader);
+    expect(evalResourceNativePageSchema.parse({ ...nativePage([reference], null), cursor: { throughSeq: 8 } })
+      .records).toEqual([reference]);
+    expect(evalBillingResourcesPageSchema.parse(publicBilling)).toEqual(publicBilling);
+    expect(evalNativeRecordReferenceSchema.parse(reference)).toEqual(reference);
+    expect(evalResourceHeaderPath(key, submissionId)).toBe(`${resourcePath}/header?submissionId=${submissionId}`);
+    expect(evalResourceNativePagePath(key, submissionId, { afterSeq: 0, limit: 200, throughSeq: 8 }))
+      .toBe(`${resourcePath}/native-records?submissionId=${submissionId}&afterSeq=0&limit=200&throughSeq=8`);
+    expect(evalResourceBillingPagePath(key, submissionId, { after: 0, limit: 1, throughCount: 0,
+      throughSha256: fingerprint }))
+      .toBe(`${resourcePath}/billing?submissionId=${submissionId}&after=0&limit=1&throughCount=0&throughSha256=${fingerprint}`);
+    const bytePath = new URL(evalTrajectoryRecordTransferPath(reference, submissionId), "https://eval-sp.test");
+    expect(bytePath.pathname).toBe(`/evidence/trajectory/records/${reference.ingestSeq}`);
+    expect(Object.fromEntries(bytePath.searchParams)).toMatchObject({
+      submissionId, throughSeq: "8", identity: reference.reference.identity,
+      byteLength: String(reference.reference.byteLength), sha256: reference.reference.sha256,
+    });
+  });
+
+  it("makes the published alpha.7 partial-query contract gap explicit", () => {
+    // These declarations and runtime builders describe *finalized* pages only.
+    // The mocked post-wait partial tests below do not prove deployed SP support.
+    expectTypeOf<Parameters<typeof evalResourceHeaderPath>>().toEqualTypeOf<[key: string, submissionId: string]>();
+    expectTypeOf<Parameters<typeof evalTrajectoryRecordTransferPath>>()
+      .toEqualTypeOf<[row: EvalNativeRecordReference, submissionId: string]>();
+    type HasPartial<T> = "allowPartial" extends keyof T ? true : false;
+    expectTypeOf<HasPartial<Parameters<typeof evalResourceNativePagePath>[2]>>().toEqualTypeOf<false>();
+    expectTypeOf<HasPartial<EvalBillingResourcesPageQuery>>().toEqualTypeOf<false>();
+    expect(() => evalResourceBillingPagePath(key, submissionId, {
+      after: 0, limit: 200, allowPartial: true, throughSeq: 8,
+    } as unknown as EvalBillingResourcesPageQuery)).toThrow();
+  });
+
+  it("rejects an inline Pi message that the published native page schema rejects", async () => {
+    const invalid = structuredClone(nativeFixture(6, chatId, submissionId)) as unknown as {
+      record: { record: { value: { model: { timestamp: unknown }[] } } };
+    };
+    invalid.record.record.value.model[0]!.timestamp = "not-a-Pi-timestamp";
+    const current = { ...cleanHeader, cursor: { throughSeq: 6 } };
+    const body = { ...nativePage([invalid], null), cursor: current.cursor };
+    expect(evalResourceNativePageSchema.safeParse(body).success).toBe(false);
+    const { fetch, requests } = resourceService((url) => url.pathname === `${prefix}/native-records`
+      ? Response.json(body) : undefined, current);
+    await expect(createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
+      .collectAgentResources(input)).rejects.toMatchObject({
+      retryable: false, message: "Eval SP returned an invalid resource native page",
+    });
+    expect(requests.some((url) => url.pathname === `${prefix}/billing`)).toBe(false);
+  });
+
   it("keeps nine known facts when the tenth remains unsettled past the Runtime wait, without claiming finality", async () => {
     const waiting = { ...readiness, pendingTelemetryEvents: 1, actionCharges: {
       complete: false, unsettledExecutions: 0, missingExecutionIds: 0,
@@ -394,6 +456,17 @@ describe("public paged SP resource collection", () => {
     expect(requests[0]?.pathname).toBe(`${prefix}/readiness`);
     expect(requests[0]?.searchParams.has("submissionId")).toBe(false);
     expect(requests.slice(1).every((url) => url.searchParams.get("submissionId") === submissionId)).toBe(true);
+  });
+
+  it("rejects a non-UUID readiness receipt before building a public resource page path", async () => {
+    const { fetch, requests } = resourceService((url) => url.pathname === `${prefix}/readiness`
+      ? Response.json({ scope: { ...scope, submissionId: "not-an-SP-uuid" },
+        observedAt: header.observedAt, finalized: true, readiness }) : undefined);
+    await expect(createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
+      .collectAgentResources({ handle, idempotencyKey: key })).rejects.toMatchObject({
+      name: "SpHarnessError", retryable: false, message: "Eval SP resource header request is invalid",
+    });
+    expect(requests.map((url) => url.pathname)).toEqual([`${prefix}/readiness`]);
   });
 
   it("fails closed when the deployed SP has no new header instead of reading the legacy full resource body", async () => {

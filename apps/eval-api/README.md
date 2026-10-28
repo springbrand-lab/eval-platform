@@ -3,16 +3,19 @@
 ## Pi-native SP seam (new runs)
 
 The service-authenticated SP Harness consumes SP's **public**
-`@springbrand/eval-harness` wire only. The coordinated producer candidate implements
+`@springbrand/eval-harness@0.1.0-alpha.7` wire for the supported finalized
+reads. The coordinated producer implements
 `sp-pi-trajectory/v1` pages with a frozen `cursor.throughSeq` and safe
 `pi-trajectory/v1` records or an explicit oversized-record reference, and
-resource snapshots carrying `nativeRecords`
-instead of `telemetryEvents`. The current pinned `0.1.0-alpha.5` still exports
-event pages; the SP Eval worktree has an offline, private
-`0.1.0-alpha.7` candidate with the reference and partial-page wire, but it
-has not been published or pinned here. New-run consumer checks remain structural
-until that release. Do not deploy this cutover or claim cross-deployment parity
-before publishing, installing and checking actual service responses. No legacy event decoding or DO storage access is used. Existing
+resource snapshots carrying `nativeRecords` instead of `telemetryEvents`.
+The npm-published alpha.7 artifact is pinned exactly and its installed public
+schemas validate evidence and resource headers/pages. It does **not** export
+`allowPartial` request types, readers, or path helpers (nor the partial billing
+`throughSeq` and record-byte `resourceKey` binding). The explicit post-wait
+partial query extension below remains unverified structural HTTP behavior.
+Do not deploy this cutover or claim cross-deployment parity until SP publishes
+the missing partial contract and actual service responses are verified. No
+legacy event decoding or DO storage access is used. Existing
 version 1 manifest bytes/refs, resource bytes and scores remain untouched;
 old event-only evidence may not be readable with this new code.
 
@@ -31,9 +34,10 @@ The body contains the exact UTF-8 `TrajectoryRecord` JSON, streamed in bounded
 parts; the adapter verifies headers, length, digest, native identity, Chat
 and parent Chat before storing one original JSONL line. The selected Submission
 is the authorization, not an evidence filter. A record larger than the SP evidence-file limit
-still fails explicitly at a record boundary. The temporary structural contract
-in `eval-contracts` must be replaced with the released public package contract
-and tested against deployed SP before release; no unpublished dependency is pinned.
+still fails explicitly at a record boundary. The API HTTP page seam uses the
+published schemas and record-transfer path; the browser-safe `eval-contracts`
+model and bounded byte scanner retain their local safety/storage checks. Real
+SP deployment behavior is still unverified.
 
 **Evidence and bounded resource-page streaming are wired locally, but not released.** The SP Harness
 now calls `src/sp/native-record-stream.ts` on its authenticated record GET and
@@ -73,15 +77,14 @@ is still pending; an opted-in read retains only verified facts, with
 than invented zero usage or complete billing. Historical raw resource rows
 and v1/v2 evidence bytes are not migrated.
 
-**Publication/integration blocker:** EP pins the published
-`@springbrand/eval-harness@0.1.0-alpha.5`; SP's `0.1.0-alpha.7` containing
-these public paths/schemas is currently **private and unpublished**. The
-consumer uses structural metadata checks and reuses its existing structural
-native page, never imports SP source or pins an unavailable version.
-Focused no-DB tests prove the local HTTP/Runtime/Store SQL shape, not a real
-PostgreSQL transaction or deployed SP+API compatibility. Publish the SP
-package, replace structural checks with public exports and run isolated DB
-and cross-deployment tests before claiming end-to-end parity or release.
+**Release blocker:** The installed npm alpha.7 publishes finalized header,
+native/billing page, evidence and record-byte schemas/paths, but not the
+post-wait partial route/query contract. Its billing builder rejects
+`allowPartial`/`throughSeq`, while its other builders omit partial parameters.
+Local mock tests still exercise the explicit opt-in; they are **not** proof that
+the pinned SP artifact or a deployed SP accepts it. Publish a compatible public
+partial API, then verify an isolated PostgreSQL transaction and real deployed
+SP+API reads before end-to-end parity or release. No SP private source is imported.
 
 内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。设计见 [Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
 
@@ -476,7 +479,7 @@ readiness 与快照请求接收 Runtime 的本地 `AbortSignal`，使用现有 H
 
 `src/sp/harness.ts` 用服务凭证确保 Inbox Chat、初始化、提交/重启、按键校准、收集完整产物/轨迹、分页资源、Evaluator 原样的 `structuredOutput` 结果文件，以及按轨迹读取 Evaluator 最后一条回复（`readFinalReply`）；`sp/submission-observer.ts` 以 WebSocket 终态推送为主，Ping/Pong 检测静默失活，断线后按已知 Submission ID 读取一次权威状态（404 表示 Submission 或 Chat 已不存在，不回退按键读取）并对同一 Submission URL 有限重连；瞬态错误只表示状态未知，预算用尽时抛出可重试的 “status unconfirmed” 错误，健康连接期间不轮询。
 
-资源先经无事件的 readiness 路由等待 SP 定稿；期限内不下载未定稿页面。期限届满后通过 `allowPartial=true` 显式读取冻结的已知 native 页面、配对的 API 计费页面及必要的验证字节，保留 `finalized:false`、`coverage.partial` 与真实计数，不把未知计费记为零。证据读取仍携带 `submissionId` 并保留完整 Chat 轨迹。SP HTTP 请求（含 readiness）默认最多等待 60 秒，停止调用最多等待 10 秒；每个资源页面与证据传输分别最多等待 5 分钟，页面 JSON 限 4 MB，其他 JSON 仍按 V8 最大字符串长度限制。证据/资源 GET 的 `409 EVIDENCE_NOT_READY` 通常可重试，但已请求 partial 页且 SP 仍不支持读取时不会重复消耗下载预算；其他 409 不重试。证据导入流式 PUT 并边传边校验大小与 SHA-256；单个证据文件上限取 `DEFAULT_EVIDENCE_LIMITS` 与 `@springbrand/eval-harness@0.1.0-alpha.5` 的 `EVAL_EVIDENCE_FILE_MAX_BYTES` 中较小者，现为 95 MB。Harness 的 `log` 事件由 Worker 写入 pino，不含正文或凭证。当前只支持 `sp` 框架，`codex`、`cc` 明确拒绝。服务契约、Bundle 文件布局与校验规则见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。SP 服务路由在独立 SP 分支实现，但新的公共包尚未发布，真实跨部署联调仍需完成。
+资源先经无事件的 readiness 路由等待 SP 定稿；期限内不下载未定稿页面。期限届满后通过 `allowPartial=true` 显式读取冻结的已知 native 页面、配对的 API 计费页面及必要的验证字节，保留 `finalized:false`、`coverage.partial` 与真实计数，不把未知计费记为零。证据读取仍携带 `submissionId` 并保留完整 Chat 轨迹。SP HTTP 请求（含 readiness）默认最多等待 60 秒，停止调用最多等待 10 秒；每个资源页面与证据传输分别最多等待 5 分钟，页面 JSON 限 4 MB，其他 JSON 仍按 V8 最大字符串长度限制。证据/资源 GET 的 `409 EVIDENCE_NOT_READY` 通常可重试，但已请求 partial 页且 SP 仍不支持读取时不会重复消耗下载预算；其他 409 不重试。证据导入流式 PUT 并边传边校验大小与 SHA-256；单个证据文件上限取 `DEFAULT_EVIDENCE_LIMITS` 与已安装的 `@springbrand/eval-harness@0.1.0-alpha.7` 的 `EVAL_EVIDENCE_FILE_MAX_BYTES` 中较小者，现为 95 MB。Harness 的 `log` 事件由 Worker 写入 pino，不含正文或凭证。当前只支持 `sp` 框架，`codex`、`cc` 明确拒绝。服务契约、Bundle 文件布局与校验规则见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。SP 服务路由在独立 SP 分支实现；npm alpha.7 已发布，但缺少 partial 请求的公开契约，且真实跨部署联调仍需完成。
 
 初始化的 `data.userPrompt` 与提交的 `prompt` 通过该包的共享 `evalPromptSchema` 校验：只拒绝非字符串及纯空白，首尾空格、换行和 Unicode 空白原样发送，不在 Eval 侧清洗 Prompt。
 

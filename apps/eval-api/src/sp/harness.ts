@@ -5,8 +5,7 @@ import type {
   NativeTrajectoryEntry, SpPiTrajectoryPage, SpPiTrajectoryRecordReference,
 } from "@eval-platform/eval-contracts";
 import {
-  EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT, SP_PI_TRAJECTORY_RECORD_IDENTITY_HEADER,
-  SP_PI_TRAJECTORY_RECORD_INGEST_SEQ_HEADER, SP_PI_TRAJECTORY_RECORD_THROUGH_SEQ_HEADER,
+  EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT,
   equalJson, isSpPiTrajectoryReference, isTerminalAgentStatus, nativeRecordMayBelongToScope,
   spPiTrajectoryIdentityParts,
 } from "@eval-platform/eval-contracts";
@@ -24,15 +23,24 @@ import {
   type SubmitAgentInput,
 } from "@eval-platform/eval-runtime/harness";
 import {
+  EVAL_BILLING_RESOURCES_PAGE_MAX,
   EVAL_EVIDENCE_FILE_MAX_BYTES,
   EVAL_EVIDENCE_SHA256_HEADER,
   EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX,
+  EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX_BYTES,
   EVAL_EVIDENCE_PATHS,
   EVAL_HARNESS_PATH,
   EVAL_SERVICE_HEADER,
+  EVAL_TRAJECTORY_RECORD_IDENTITY_HEADER,
+  EVAL_TRAJECTORY_RECORD_INGEST_SEQ_HEADER,
+  EVAL_TRAJECTORY_RECORD_THROUGH_SEQ_HEADER,
   evalArtifactEvidencePath,
   evalEvidencePath,
+  evalResourceBillingPagePath,
+  evalResourceHeaderPath,
+  evalResourceNativePagePath,
   evalSubjectInputEvidencePath,
+  evalTrajectoryRecordTransferPath,
   evalTrajectoryEvidencePath,
   type EvalInitialization,
 } from "@springbrand/eval-harness";
@@ -82,12 +90,21 @@ const TRANSFER_TIMEOUT_MS = 5 * 60_000;
  */
 const MAX_JSON_RESPONSE_BYTES = bufferConstants.MAX_STRING_LENGTH;
 /** A page is JSON, not a streaming byte file. Reject it before decoding unbounded native bodies. */
-/** Match SP's public EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX_BYTES until its package is published. */
-export const MAX_TRAJECTORY_PAGE_BYTES = 4_000_000;
+export const MAX_TRAJECTORY_PAGE_BYTES = EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX_BYTES;
 const ERROR_BODY_BYTES = 64 * 1024;
 /** SP's answer for an evidence read whose Submission or telemetry is not settled yet: retry later. */
 export const EVIDENCE_NOT_READY = "EVIDENCE_NOT_READY";
 const EVIDENCE_IMPORT_CONCURRENCY = 4;
+
+/** Public route builders enforce SP identities; a bad receipt is a non-retryable
+ * boundary error, not a raw Zod exception or a request to a guessed path. */
+function publicPath(name: string, build: () => string): string {
+  try {
+    return build();
+  } catch (cause) {
+    throw new SpHarnessError(`Eval SP ${name} request is invalid`, false, { cause });
+  }
+}
 
 /** SP's evidence file limit bounds every exported file, trajectory parts included, so import never rejects a stored bundle. */
 export function spEvidenceLimits(limits: EvidenceLimits): EvidenceLimits {
@@ -398,22 +415,21 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     const { reference } = row;
     const { signal } = options;
     const fields = { ...handleContext(handle), submissionId, ingestSeq: row.ingestSeq, bytes: reference.byteLength };
-    const path = `${handlePath(handle)}/evidence/trajectory/records/${row.ingestSeq}?${new URLSearchParams({
-      submissionId, throughSeq: String(reference.throughSeq), identity: reference.identity,
-      byteLength: String(reference.byteLength), sha256: reference.sha256,
-      ...(options.partialResourceKey === undefined ? {} : {
-        allowPartial: "true", resourceKey: options.partialResourceKey,
-      }),
-    })}`;
+    const transferPath = publicPath("native trajectory record", () => evalTrajectoryRecordTransferPath(row, submissionId));
+    // alpha.7 owns the immutable reference path but does not publish partial
+    // query helpers. Keep the post-wait extension explicit until SP releases it.
+    const partialQuery = options.partialResourceKey === undefined ? ""
+      : `&${new URLSearchParams({ allowPartial: "true", resourceKey: options.partialResourceKey })}`;
+    const path = `${handlePath(handle)}${transferPath}${partialQuery}`;
     try {
       const response = await callBytes("GET", path, { ...(signal === undefined ? {} : { signal }) });
       const mismatch = () => new SpHarnessError("Eval SP native trajectory record transfer differs from its reference", false);
       if (response.headers.get("Content-Type")?.toLowerCase().replaceAll(" ", "") !== "application/json;charset=utf-8"
         || response.headers.get("Content-Length") !== String(reference.byteLength)
         || response.headers.get(EVAL_EVIDENCE_SHA256_HEADER) !== reference.sha256
-        || response.headers.get(SP_PI_TRAJECTORY_RECORD_IDENTITY_HEADER) !== encodeURIComponent(reference.identity)
-        || response.headers.get(SP_PI_TRAJECTORY_RECORD_INGEST_SEQ_HEADER) !== String(row.ingestSeq)
-        || response.headers.get(SP_PI_TRAJECTORY_RECORD_THROUGH_SEQ_HEADER) !== String(reference.throughSeq)
+        || response.headers.get(EVAL_TRAJECTORY_RECORD_IDENTITY_HEADER) !== encodeURIComponent(reference.identity)
+        || response.headers.get(EVAL_TRAJECTORY_RECORD_INGEST_SEQ_HEADER) !== String(row.ingestSeq)
+        || response.headers.get(EVAL_TRAJECTORY_RECORD_THROUGH_SEQ_HEADER) !== String(reference.throughSeq)
         || !response.body) {
         await response.body?.cancel();
         throw mismatch();
@@ -651,7 +667,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       const fields = () => ({ ...handleContext(input.handle), idempotencyKey: input.idempotencyKey,
         ...(input.submissionId === undefined ? {} : { submissionId: input.submissionId }), durationMs: Date.now() - started });
       const signal = input.signal;
-      const base = operationPath("resources", input.handle, input.idempotencyKey);
+      const chat = handlePath(input.handle);
       const pageOptions = (label: string) => ({
         timeoutMs: transferTimeoutMs, label, evidenceRead: true,
         maxResponseBytes: Math.min(maxResponseBytes, MAX_TRAJECTORY_PAGE_BYTES),
@@ -662,8 +678,14 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         // A pre-receipt Attempt first resolves its real operation-bound Submission via
         // the small readiness route. The new page paths require that exact ID.
         const submissionId = input.submissionId ?? (await readResources(input)).scope.submissionId;
-        const bound = new URLSearchParams({ submissionId, ...(input.allowPartial ? { allowPartial: "true" } : {}) });
-        const headerPath = `${base}/header?${bound}`;
+        // alpha.7 publishes the finalized route builders, not the partial
+        // opt-in (nor partial billing throughSeq/byte resourceKey). Only these
+        // post-deadline additions are structural; publication is still blocked.
+        const partialQuery = (throughSeq?: number): string => !input.allowPartial ? ""
+          : `&${new URLSearchParams({ allowPartial: "true",
+            ...(throughSeq === undefined ? {} : { throughSeq: String(throughSeq) }) })}`;
+        const headerPath = `${chat}${publicPath("resource header",
+          () => evalResourceHeaderPath(input.idempotencyKey, submissionId))}${partialQuery()}`;
         const header = resourceHeader(await call("GET", headerPath, pageOptions("resource header")));
         if (header.scope.chatId !== input.handle.chatId || header.scope.idempotencyKey !== input.idempotencyKey
           || header.scope.submissionId !== submissionId) {
@@ -699,10 +721,11 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         };
         let afterSeq: number | null = 0;
         while (afterSeq !== null) {
-          const query = new URLSearchParams({ submissionId, afterSeq: String(afterSeq),
-            limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX), throughSeq: String(header.cursor.throughSeq),
-            ...(partial ? { allowPartial: "true" } : {}) });
-          const page = resourceNativePage(await call("GET", `${base}/native-records?${query}`,
+          const cursor = afterSeq;
+          const pagePath = publicPath("resource native page", () => evalResourceNativePagePath(input.idempotencyKey, submissionId, {
+            afterSeq: cursor, limit: EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX, throughSeq: header.cursor.throughSeq,
+          }));
+          const page = resourceNativePage(await call("GET", `${chat}${pagePath}${partial ? partialQuery() : ""}`,
             pageOptions("resource native page")));
           if (page.cursor.throughSeq !== header.cursor.throughSeq || page.cursor.throughSeq < afterSeq) {
             throw new SpHarnessError("Eval SP changed the resource native cutoff", false);
@@ -755,10 +778,11 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         let after = 0;
         let frozen: { readonly throughCount: number; readonly sha256: string } | undefined;
         for (;;) {
-          const query = new URLSearchParams({ submissionId, after: String(after), limit: "200",
-            ...(frozen === undefined ? {} : { throughCount: String(frozen.throughCount), throughSha256: frozen.sha256 }),
-            ...(partial ? { allowPartial: "true", throughSeq: String(header.cursor.throughSeq) } : {}) });
-          const page = resourceBillingPage(await call("GET", `${base}/billing?${query}`,
+          const pagePath = publicPath("resource billing page", () => evalResourceBillingPagePath(input.idempotencyKey, submissionId, {
+            after, limit: EVAL_BILLING_RESOURCES_PAGE_MAX,
+            ...(frozen === undefined ? {} : { throughCount: frozen.throughCount, throughSha256: frozen.sha256 }),
+          }));
+          const page = resourceBillingPage(await call("GET", `${chat}${pagePath}${partial ? partialQuery(header.cursor.throughSeq) : ""}`,
             pageOptions("resource billing page")));
           if (page.scope.chatId !== input.handle.chatId || page.scope.submissionId !== submissionId
             || page.after !== after || (frozen !== undefined
@@ -779,10 +803,10 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         header.actionCharges.forEach(charge);
         // A terminal page is not a source fingerprint: a new settlement can commit after it,
         // even when all facts fitted in one page. Recheck the full source after every transfer.
-        const fingerprintQuery = new URLSearchParams({ submissionId, after: "0", limit: "1",
-          throughCount: String(frozen!.throughCount), throughSha256: frozen!.sha256,
-          ...(partial ? { allowPartial: "true", throughSeq: String(header.cursor.throughSeq) } : {}) });
-        const checked = resourceBillingPage(await call("GET", `${base}/billing?${fingerprintQuery}`,
+        const fingerprintPath = publicPath("resource billing fingerprint", () => evalResourceBillingPagePath(input.idempotencyKey, submissionId, {
+          after: 0, limit: 1, throughCount: frozen!.throughCount, throughSha256: frozen!.sha256,
+        }));
+        const checked = resourceBillingPage(await call("GET", `${chat}${fingerprintPath}${partial ? partialQuery(header.cursor.throughSeq) : ""}`,
           pageOptions("resource billing fingerprint")));
         if (checked.scope.chatId !== input.handle.chatId || checked.scope.submissionId !== submissionId
           || checked.after !== 0 || checked.cursor.throughCount !== frozen!.throughCount

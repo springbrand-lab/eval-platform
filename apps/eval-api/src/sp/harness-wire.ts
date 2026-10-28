@@ -1,9 +1,7 @@
 import {
   AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectArrayInPlaceSchema,
-  spPiTrajectoryPageSchema,
 } from "@eval-platform/eval-contracts";
 import type {
-  AgentResourceReadiness,
   AgentResourceReadinessReport,
   AgentResourceFact,
   EvaluationAgentOutput,
@@ -16,17 +14,26 @@ import type {
 } from "@eval-platform/eval-contracts";
 import type { AgentHandle, AgentSubmission, EnsureAgentInput } from "@eval-platform/eval-runtime/harness";
 import {
+  evalBillingResourcesPageSchema,
   evalEnsureChatSchema,
   evalInitializationResultSchema,
   evalEvidenceArtifactsSchema,
+  evalEvidenceTrajectoryPageSchema,
   evalInitializationSchema,
+  isEvalNativeRecordReference,
+  evalResourceHeaderSchema,
+  evalResourceNativePageSchema,
+  evalResourceReadinessReportSchema,
   evalSubmitSchema,
   stableEvalFacts,
+  type EvalBillingResourcesPage,
   type EvalEnsureChat,
   type EvalEvidenceArtifact,
+  type EvalEvidenceTrajectoryPage,
   type EvalEvidenceFileReceipt,
   type EvalInitialization,
   type EvalInitializationResult,
+  type EvalResourceHeader,
   type EvalSubmissionReceipt,
   type EvalSubmit,
 } from "@springbrand/eval-harness";
@@ -157,84 +164,45 @@ export function evaluationOutput(value: unknown): EvaluationAgentOutput {
   }), value, "evaluation output");
 }
 
-const count = z.number().int().nonnegative().safe();
-
-const scopeSchema = z.strictObject({ chatId: id, idempotencyKey: id, submissionId: id });
-
-const readinessSchema = z.strictObject({
-  receiptTerminal: z.boolean(),
-  stateUnreadable: z.boolean(),
-  pendingTelemetryEvents: count,
-  pendingRuntimeEvents: count,
-  actionCharges: z.strictObject({ complete: z.boolean(), unsettledExecutions: count, missingExecutionIds: count }),
-}) satisfies z.ZodType<AgentResourceReadiness>;
-
-const resourceReportSchema = z.strictObject({
-  scope: scopeSchema,
-  observedAt: id,
-  finalized: z.boolean(),
-  readiness: readinessSchema,
-});
-
-/** Structural consumer of the not-yet-published public SP Eval *metadata* wire.
- * The native page itself reuses the existing sp-pi-trajectory/v1 schema. */
-const resourceHeaderSchema = resourceReportSchema.safeExtend({
-  coverage: z.strictObject({
-    usageEvents: z.enum(["complete", "partial"]),
-    nativeRecords: z.enum(["complete", "partial"]),
-    billingSettlements: z.enum(["complete", "partial"]),
-  }),
-  cursor: z.strictObject({ throughSeq: count }),
-  actionCharges: z.array(z.strictObject({
-    source: z.enum(["action", "tool"]),
-    executionId: z.uuid(),
-    status: z.enum(["succeeded", "failed", "outcome_unknown"]),
-    chargedCredits: z.number().finite().nonnegative(),
-  })).max(1_000),
-});
-export type SpResourceHeader = z.output<typeof resourceHeaderSchema>;
+export type SpResourceHeader = EvalResourceHeader;
 
 export function resourceHeader(value: unknown): SpResourceHeader {
-  return response(resourceHeaderSchema, value, "resource header");
+  return response(evalResourceHeaderSchema, value, "resource header");
 }
 
 export function resourceReadiness(value: unknown): AgentResourceReadinessReport {
-  return response(resourceReportSchema satisfies z.ZodType<AgentResourceReadinessReport>, value, "resource readiness");
+  return response(evalResourceReadinessReportSchema, value, "resource readiness");
+}
+
+/** The public parser enforces the SAFE Pi wire (including the no-inner-sequence
+ * rule). Its UA declaration doesn't narrow the refined projection to `safe`,
+ * so verify that condition before returning Eval's browser-safe record type. */
+function publicNativePage(schema: z.ZodType<EvalEvidenceTrajectoryPage>, value: unknown, name: string): SpPiTrajectoryPage {
+  const page = response(schema, value, name);
+  if (page.records.some((row) => !isEvalNativeRecordReference(row)
+    && (row.record.projection?.kind !== "safe" || "ingestSeq" in row.record))) {
+    throw new SpHarnessError(`Eval SP returned an invalid ${name}`, false);
+  }
+  return page as unknown as SpPiTrajectoryPage;
 }
 
 export function resourceNativePage(value: unknown): SpPiTrajectoryPage {
-  return response(spPiTrajectoryPageSchema, value, "resource native page");
+  return publicNativePage(evalResourceNativePageSchema, value, "resource native page");
 }
 
-const billingPageSchema = z.strictObject({
-  scope: z.strictObject({ chatId: id, submissionId: id }),
-  cursor: z.strictObject({ throughCount: count, sha256: z.string().regex(/^[0-9a-f]{64}$/u) }),
-  after: count,
-  usageEvents: jsonObjectArrayInPlaceSchema.refine((facts) => facts.length <= 200),
-  billingSettlements: jsonObjectArrayInPlaceSchema.refine((facts) => facts.length <= 200),
-  nextAfter: count.positive().nullable(),
-}).superRefine((page, context) => {
-  const end = page.after + page.usageEvents.length;
-  if (page.usageEvents.length !== page.billingSettlements.length
-    || page.after > page.cursor.throughCount || !Number.isSafeInteger(end) || end > page.cursor.throughCount
-    || (page.nextAfter === null ? end !== page.cursor.throughCount
-      : page.nextAfter !== end || end === page.cursor.throughCount)) {
-    context.addIssue({ code: "custom", path: ["nextAfter"], message: "Billing page must contain complete paired facts" });
-  }
-  page.usageEvents.forEach((usage, index) => {
-    if (typeof usage.eventId !== "string" || !usage.eventId
-      || usage.eventId !== page.billingSettlements[index]?.eventId) {
-      context.addIssue({ code: "custom", path: ["billingSettlements", index, "eventId"],
-        message: "Billing pair must have the same event ID" });
-    }
-  });
-});
-export type SpBillingPage = z.output<typeof billingPageSchema> & {
+export type SpBillingPage = Omit<EvalBillingResourcesPage, "usageEvents" | "billingSettlements"> & {
   readonly usageEvents: readonly AgentResourceFact[];
   readonly billingSettlements: readonly AgentResourceFact[];
 };
 export function resourceBillingPage(value: unknown): SpBillingPage {
-  return response(billingPageSchema, value, "resource billing page");
+  const page = response(evalBillingResourcesPageSchema, value, "resource billing page");
+  // The SP schema owns the paired page/cursor; Eval's persisted facts additionally
+  // require JSON values (the public schema deliberately types fact values as unknown).
+  return {
+    ...page,
+    usageEvents: response(jsonObjectArrayInPlaceSchema, page.usageEvents, "resource billing page"),
+    billingSettlements: response(jsonObjectArrayInPlaceSchema, page.billingSettlements, "resource billing page"),
+  };
 }
 
 export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact[] {
@@ -242,9 +210,7 @@ export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact
 }
 
 export function evidenceTrajectoryPage(value: unknown): SpPiTrajectoryPage {
-  // Replace the structural consumer schema with @springbrand/eval-harness's published
-  // public schema after SP's Pi-native package release; never import its private source.
-  return response(spPiTrajectoryPageSchema, value, "evidence trajectory page");
+  return publicNativePage(evalEvidenceTrajectoryPageSchema, value, "evidence trajectory page");
 }
 
 /** Only model[0] of a native Entry can carry the selected Submission's assistant

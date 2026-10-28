@@ -1,17 +1,18 @@
 # Pi-native Eval evidence: cutover and parity gate
 
 This is a deliberately breaking **new-run** consumer change, not a migration. SP owns the
-trajectory wire in the intended **published public** `@springbrand/eval-harness` export. Eval never
+trajectory wire in the **published public** `@springbrand/eval-harness` export. Eval never
 imports SP private source, queries SP Durable Object storage, or upgrades an event-only
-`sp-trajectory/v1` bundle by relabelling its JSON. Eval currently pins
-`@springbrand/eval-harness@0.1.0-alpha.5`, whose exported page is still event-only.
-The clean SP Eval source at `dc6d2c66` declares `0.1.0-alpha.7` **private**
-and exports public `evalEvidenceTrajectoryPageSchema`, `evalResourceHeaderSchema`,
+`sp-trajectory/v1` bundle by relabelling its JSON. Eval pins the npm-published
+`@springbrand/eval-harness@0.1.0-alpha.7` exactly. The **installed artifact**, not
+an SP source branch, exports `evalEvidenceTrajectoryPageSchema`, `evalResourceHeaderSchema`,
 `evalResourceNativePageSchema` (the same trajectory page) and
-`evalBillingResourcesPageSchema`, not a published or pinned release.
-Until a Pi-native package is **published** and pinned,
-local fixtures verify consumer behavior and public-schema shape, **not** live
-SP/Eval interoperability or deployment readiness.
+`evalBillingResourcesPageSchema` and finalized path/record-byte helpers. It does
+**not** export `allowPartial` on header/native/billing request types, readers or
+builders; its billing builder rejects `allowPartial` and `throughSeq`, and its
+byte builder omits `resourceKey`. Local fixtures verify finalized page parsing,
+not the post-wait partial extension, live SP/Eval interoperability or deployment
+readiness. A compatible public partial contract is still a release blocker.
 
 ## Consumer contract to compare against SP's public export
 
@@ -61,8 +62,8 @@ SP/Eval interoperability or deployment readiness.
   and the bound key on referenced bytes); these are committed known facts
   with `coverage.partial`, never a zero or complete claim. A final billing
   fingerprint probe and repeat header reject changes before sealing. This
-  locally tested candidate still requires public package publication and
-  isolated PostgreSQL/deployed-SP integration before any end-to-end claim.
+  locally mocked partial extension still requires a compatible public package
+  and isolated PostgreSQL/deployed-SP integration before any end-to-end claim.
 - SP's public package source sets a **4,000,000-byte** trajectory page ceiling. Eval
   enforces that limit; SP paginates by bytes as well as count and emits an
   immutable reference for a record above the inline bound, never truncating one.
@@ -82,45 +83,47 @@ SP/Eval interoperability or deployment readiness.
 
 `fixtures/pi-native-public-v1.json` is the exact compact output of
 `scripts/generate-pi-native-fixture.mjs` using published
-`@springbrand/agent-runtime/trajectory@0.3.1-alpha.9` exports:
+`@springbrand/agent-runtime/trajectory@0.3.1-alpha.9` exports (the fixture's
+original generator; alpha.7 depends on the published Runtime `0.3.1-alpha.15`):
 `createTrajectoryRecord`, `createTrajectoryEntry`,
 `createTrajectoryEventFact`, `projectTrajectoryForExport`, the public
 `trajectoryRecordSchema` and `readTrajectoryBookkeeping`. With an already
-installed **public** UA export and the SP release worktree's **public**
-`packages/eval-harness/src/index.ts`, the following regenerates the fixture
-byte-for-byte and asserts that all 16 records parse as both SP's new public
-page and its resource snapshot (run from `apps/eval-api`; no packages are
-linked or pinned to another worktree):
+installed **public** UA export and the installed npm alpha.7's public entry,
+the following regenerates the fixture byte-for-byte and asserts that all 16
+records parse as both SP's published public page and its resource snapshot
+(run from `apps/eval-api`; no SP source or private worktree is used):
 
 ```sh
 EVAL_UA_PUBLIC_TRAJECTORY_MODULE='file:///path/to/installed/@springbrand/agent-runtime/dist/trajectory/index.js' \
-EVAL_SP_PUBLIC_EVAL_HARNESS_MODULE='/path/to/sp-release/packages/eval-harness/src/index.ts' \
-node --import tsx ../../scripts/generate-pi-native-fixture.mjs --compact |
+EVAL_SP_PUBLIC_EVAL_HARNESS_MODULE='file:///path/to/eval-api/node_modules/@springbrand/eval-harness/dist/eval-harness/src/index.js' \
+node ../../scripts/generate-pi-native-fixture.mjs --compact |
   cmp - ../../fixtures/pi-native-public-v1.json
 ```
 
-This offline public-schema assertion succeeded locally. It cannot prove a
+The installed alpha.7 public schemas parse the checked-in fixture. This cannot prove a
 deployed endpoint emits those bytes or that safe Projection privacy is configured
 there. A direct offline `pnpm add @springbrand/agent-runtime@0.3.1-alpha.9` to
 `eval-metrics` currently fails resolving transitive
 `@chat-adapter/catalog@4.43.0`; **no** `file:/tmp` dependency is committed.
 The production interpreter therefore reads only the known bookkeeping fields
 and treats unknown or ambiguous Entries as unsupported. Once the public
-dependency is installable and SP publishes the native Harness release,
-replace these temporary structural checks with the public parser/schema and
-rerun this proof plus actual service parity. Direct and nested children,
+dependency is installable, consider the UA parser in browser-safe Metrics;
+the API HTTP adapter already uses the public alpha.7 page schemas. Rerun
+this proof against the next published partial API plus actual service parity.
+Direct and nested children,
 including attributed child Context, require an ordered verified same-Chat
 parent chain; a foreign parent or an imported Chat-wide Context never becomes
 part of the selected Submission's resource collection.
 
 ## Evidence required before an integrated green or release
 
-1. Publish SP's `@springbrand/eval-harness` new public release, pin it in Eval's
-   `apps/eval-api/package.json` / lockfile and replace the temporary structural page
-   schema and temporary metadata checks with the actual **public** header/native/billing
-   exports. Confirm `throughSeq`, the API billing `(throughCount, throughSha256)`
-   fingerprint and settled Action/Tool IDs across all pages; if the released public
-   package differs, change Eval and rerun this gate rather than falling back.
+1. Publish an `@springbrand/eval-harness` release that **also** describes
+   `allowPartial` for header/native/billing requests and binds partial billing
+   `throughSeq` and byte-transfer `resourceKey`; pin the exact compatible npm
+   version and update the lockfile. Alpha.7 already supplies public finalized
+   schemas/helpers; do not treat an untyped structural partial query as a
+   release contract. Confirm `throughSeq`, API billing `(throughCount,throughSha256)`
+   and Action/Tool identities across the new public partial path, without fallback.
 2. Obtain a redacted **actual** SP-generated page sequence, resource header/native/billing pages and
    Evaluator Pi assistant/Tool-result sample from the Eval deployment. Check auth
    rejects absent/wrong service token, foreign user/Chat/key/Submission; first and

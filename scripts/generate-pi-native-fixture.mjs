@@ -7,9 +7,9 @@
  *
  * For offline verification against an already installed public package, set
  * EVAL_UA_PUBLIC_TRAJECTORY_MODULE to its exported dist/trajectory/index.js URL.
- * Optionally set EVAL_SP_PUBLIC_EVAL_HARNESS_MODULE to the public Eval Harness
- * index.ts from the SP release worktree and run with `node --import tsx` to
- * validate the same records against its pending public page/snapshot schemas.
+ * Optionally set EVAL_SP_PUBLIC_EVAL_HARNESS_MODULE to the installed published
+ * @springbrand/eval-harness dist/eval-harness/src/index.js file URL to validate
+ * the records against its public page/snapshot schemas (not SP source).
  * This script prints JSON to stdout; it never writes to another worktree.
  */
 const t = await import(process.env.EVAL_UA_PUBLIC_TRAJECTORY_MODULE ?? "@springbrand/agent-runtime/trajectory");
