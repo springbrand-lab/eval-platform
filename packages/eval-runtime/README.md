@@ -1,10 +1,12 @@
 # @eval-platform/eval-runtime
 
 For new SP runs the evidence store persists the native `throughSeq` before the
-first trajectory part and writes each `{ingestSeq,record}` unchanged to JSONL. New manifests
+first trajectory part and writes each `{ingestSeq,record}` unchanged to JSONL, after
+the SP HTTP adapter resolves and verifies any oversized public record references.
+New manifests
 use schema 2 and `sp-pi-trajectory/v1`; an unfinished version 1 event export must not
-append to a native bundle. Oversized individual records fail explicitly, never get
-truncated or silently omitted. Artifacts/Subject inputs remain primary. Old manifest
+append to a native bundle. Individual records above the unchanged evidence-file
+limit fail explicitly, never get truncated or silently omitted. Artifacts/Subject inputs remain primary. Old manifest
 bytes, refs and evaluation scores are not rewritten; version 1 reading is intentionally
 unsupported after the approved breaking cutover.
 Focused Harness/Runtime tests use the same `fixtures/pi-native-public-v1.json`

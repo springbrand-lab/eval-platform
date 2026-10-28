@@ -1,8 +1,14 @@
 import { constants as bufferConstants } from "node:buffer";
 import { createHash } from "node:crypto";
-import type { AgentFramework, AgentResourceReadiness, EvidenceLimits, JsonValue, NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
+import type {
+  AgentFramework, AgentResourceReadiness, AgentResourceSnapshot, EvidenceLimits, JsonValue,
+  NativeTrajectoryEntry, SpPiTrajectoryRecordReference,
+} from "@eval-platform/eval-contracts";
 import {
-  EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT, isTerminalAgentStatus, nativeRecordMayBelongToScope,
+  EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT, SP_PI_TRAJECTORY_RECORD_IDENTITY_HEADER,
+  SP_PI_TRAJECTORY_RECORD_INGEST_SEQ_HEADER, SP_PI_TRAJECTORY_RECORD_THROUGH_SEQ_HEADER,
+  isSpPiTrajectoryReference, isTerminalAgentStatus, nativeRecordMayBelongToScope,
+  nativeTrajectoryEntrySchema, spPiTrajectoryIdentityParts, spPiTrajectoryRecordIdentity,
 } from "@eval-platform/eval-contracts";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import { safeLog, type RuntimeLog } from "@eval-platform/eval-runtime";
@@ -52,6 +58,7 @@ import {
   requireStopResult,
   submission,
   submitRequest,
+  type SpResourceSnapshotWire,
 } from "./harness-wire.js";
 import { createSpHttpClient, type Fetch } from "./http.js";
 import { observeTerminalSubmission, type OpenWebSocket } from "./submission-observer.js";
@@ -231,14 +238,18 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     readonly body?: Uint8Array | ReadableStream<Uint8Array>;
     readonly headers?: Readonly<Record<string, string>>;
     readonly failure?: () => SpHarnessError | undefined;
+    readonly signal?: AbortSignal;
   } = {}): Promise<Response> {
     let response: Response;
     const { body } = init;
     try {
+      if (init.signal?.aborted) throw init.signal.reason;
       response = await fetchSp(new URL(path, origin), {
         method,
         redirect: "error",
-        signal: AbortSignal.timeout(transferTimeoutMs),
+        signal: init.signal === undefined
+          ? AbortSignal.timeout(transferTimeoutMs)
+          : AbortSignal.any([init.signal, AbortSignal.timeout(transferTimeoutMs)]),
         headers: { ...serviceHeaders, ...init.headers },
         ...(body === undefined ? {} : body instanceof ReadableStream
           // Node's fetch streams a request body only in half-duplex mode.
@@ -246,6 +257,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           : { body: new Uint8Array(body) }),
       });
     } catch (cause) {
+      if (init.signal?.aborted || isRequestCancelled(cause)) throw cause;
       throw init.failure?.() ?? new SpHarnessError("Eval SP evidence request failed", true, { cause });
     }
     if (!response.ok) {
@@ -289,6 +301,108 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
   const operationPath = (kind: "submissions" | "resources", handle: AgentHandle, key: string): string =>
     `${handlePath(handle)}/${kind}/by-key/${encodeURIComponent(key)}`;
 
+  function assertNativeChat(entry: NativeTrajectoryEntry, chatId: string): void {
+    if (entry.record.resource.sessionId !== chatId
+      || (entry.record.parent !== undefined
+        && (entry.record.parent.resource as { readonly sessionId: string }).sessionId !== chatId)) {
+      throw new SpHarnessError("Eval SP returned a trajectory record outside the requested Chat", false);
+    }
+  }
+
+  /** References describe one complete JSONL record, not permission to split a record across files. */
+  function assertRecordReference(reference: SpPiTrajectoryRecordReference, chatId: string): void {
+    if (spPiTrajectoryIdentityParts(reference.reference.identity)?.[1] !== chatId) {
+      throw new SpHarnessError("Eval SP returned a trajectory record outside the requested Chat", false);
+    }
+    const framing = Buffer.byteLength(`{"ingestSeq":${reference.ingestSeq},"record":}\n`);
+    if (reference.reference.byteLength + framing > EVAL_EVIDENCE_FILE_MAX_BYTES) {
+      throw new SpHarnessError("Eval SP native trajectory record exceeds one evidence file", false);
+    }
+  }
+
+  /** Fetch exactly one original SAFE Pi record through SP's public service-authenticated byte route. */
+  async function transferNativeRecord(
+    handle: AgentHandle,
+    submissionId: string,
+    row: SpPiTrajectoryRecordReference,
+    signal?: AbortSignal,
+  ): Promise<NativeTrajectoryEntry> {
+    assertRecordReference(row, handle.chatId);
+    const { reference } = row;
+    const fields = { ...handleContext(handle), submissionId, ingestSeq: row.ingestSeq, bytes: reference.byteLength };
+    const path = `${handlePath(handle)}/evidence/trajectory/records/${row.ingestSeq}?${new URLSearchParams({
+      submissionId, throughSeq: String(reference.throughSeq), identity: reference.identity,
+      byteLength: String(reference.byteLength), sha256: reference.sha256,
+    })}`;
+    try {
+      const response = await callBytes("GET", path, { ...(signal === undefined ? {} : { signal }) });
+      const mismatch = () => new SpHarnessError("Eval SP native trajectory record transfer differs from its reference", false);
+      if (response.headers.get("Content-Type")?.toLowerCase().replaceAll(" ", "") !== "application/json;charset=utf-8"
+        || response.headers.get("Content-Length") !== String(reference.byteLength)
+        || response.headers.get(EVAL_EVIDENCE_SHA256_HEADER) !== reference.sha256
+        || response.headers.get(SP_PI_TRAJECTORY_RECORD_IDENTITY_HEADER) !== encodeURIComponent(reference.identity)
+        || response.headers.get(SP_PI_TRAJECTORY_RECORD_INGEST_SEQ_HEADER) !== String(row.ingestSeq)
+        || response.headers.get(SP_PI_TRAJECTORY_RECORD_THROUGH_SEQ_HEADER) !== String(reference.throughSeq)
+        || !response.body) {
+        await response.body?.cancel();
+        throw mismatch();
+      }
+      const reader = response.body.getReader();
+      const timeout = AbortSignal.timeout(transferTimeoutMs);
+      const bodySignal = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+      const abort = () => { void reader.cancel(bodySignal.reason).catch(() => undefined); };
+      bodySignal.addEventListener("abort", abort, { once: true });
+      const hash = createHash("sha256");
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      let finished = false;
+      try {
+        while (true) {
+          if (bodySignal.aborted) break;
+          const part = await reader.read();
+          if (part.done) break;
+          received += part.value.byteLength;
+          if (received > reference.byteLength) throw mismatch();
+          hash.update(part.value);
+          chunks.push(part.value);
+        }
+        if (signal?.aborted) throw signal.reason;
+        if (timeout.aborted) throw new SpHarnessError("Eval SP native trajectory record transfer timed out", true);
+        if (received !== reference.byteLength || hash.digest("hex") !== reference.sha256) throw mismatch();
+        finished = true;
+      } catch (cause) {
+        if (signal?.aborted) throw signal.reason;
+        if (cause instanceof SpHarnessError || isRequestCancelled(cause)) throw cause;
+        throw new SpHarnessError("Eval SP native trajectory record stream failed", true, { cause });
+      } finally {
+        bodySignal.removeEventListener("abort", abort);
+        if (!finished) await reader.cancel().catch(() => undefined);
+        reader.releaseLock();
+      }
+      let parsed: unknown;
+      try {
+        const body = Buffer.allocUnsafe(received);
+        let offset = 0;
+        for (const chunk of chunks) {
+          body.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(body));
+      } catch {
+        throw mismatch();
+      }
+      const native = nativeTrajectoryEntrySchema.safeParse({ ingestSeq: row.ingestSeq, record: parsed });
+      if (!native.success || spPiTrajectoryRecordIdentity(native.data.record) !== reference.identity) throw mismatch();
+      assertNativeChat(native.data, handle.chatId);
+      log({ name: "evidence_trajectory_record", ...fields, status: 200 });
+      return native.data;
+    } catch (error) {
+      if (isRequestCancelled(error)) throw error;
+      log({ name: "evidence_trajectory_record", ...fields, ...failureFields(error) });
+      throw error;
+    }
+  }
+
   /** Complete safe Pi records of this Chat, bounded at one frozen SP high-water mark.
    * The Submission authorizes the read, not a filter on Context or earlier Submissions.
    * A resumed evidence export passes its saved mark instead of adopting later records. */
@@ -328,26 +442,26 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       pages += 1;
       records += page.records.length;
       let last: number = afterSeq;
-      for (const entry of page.records) {
-        if (entry.ingestSeq <= last || entry.ingestSeq > throughSeq) {
+      for (const row of page.records) {
+        if (row.ingestSeq <= last || row.ingestSeq > throughSeq) {
           throw new SpHarnessError("Eval SP trajectory records are out of order or beyond the watermark", false);
         }
         // The public evidence page carries the full Chat keyset. Validate each safe native
-        // record's Chat (including its parent) before yielding any part of the page; only
-        // resource snapshots and final-reply extraction use the narrower Submission scope.
-        if (entry.record.resource.sessionId !== handle.chatId
-          || (entry.record.parent !== undefined
-            && (entry.record.parent.resource as { readonly sessionId: string }).sessionId !== handle.chatId)) {
-          throw new SpHarnessError("Eval SP returned a trajectory record outside the requested Chat", false);
-        }
-        last = entry.ingestSeq;
+        // inline record's Chat or reference identity before yielding any part of this page.
+        // Evidence is not filtered to the selected Submission.
+        if (isSpPiTrajectoryReference(row)) assertRecordReference(row, handle.chatId);
+        else assertNativeChat(row, handle.chatId);
+        last = row.ingestSeq;
       }
       if (page.nextAfterSeq !== null && (page.records.length === 0 || page.nextAfterSeq !== last || last >= throughSeq)) {
         throw new SpHarnessError("Eval SP returned an invalid trajectory cursor", false);
       }
-      // Reject the entire page before yielding even its first record. Never persist a prefix
-      // of a contradictory or incomplete response as evidence progress.
-      for (const entry of page.records) yield { ...entry, throughSeq };
+      // Reject contradictory page metadata before yielding; byte references are then verified
+      // one at a time. A failed transfer cannot finalize evidence or mislabel a partial record.
+      for (const row of page.records) {
+        const entry = isSpPiTrajectoryReference(row) ? await transferNativeRecord(handle, submissionId, row) : row;
+        yield { ...entry, throughSeq };
+      }
       if (page.nextAfterSeq === null) log({ name: "evidence_trajectory_page", ...fields, status: 200, from, pages, records });
       afterSeq = page.nextAfterSeq;
     }
@@ -374,28 +488,34 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     }
   }
 
-  async function readResources<T extends { readonly finalized: boolean; readonly readiness?: AgentResourceReadiness }>(
-    input: CollectAgentResourcesInput, name: string, leaf: string, parse: (value: unknown) => T, timeoutMs: number,
-    summary: (value: T) => Record<string, unknown> = () => ({}),
-  ): Promise<T> {
+  async function readResources<
+    Wire extends { readonly finalized: boolean; readonly readiness?: AgentResourceReadiness },
+    Output extends { readonly finalized: boolean; readonly readiness?: AgentResourceReadiness } = Wire,
+  >(
+    input: CollectAgentResourcesInput, name: string, leaf: string, parse: (value: unknown) => Wire, timeoutMs: number,
+    summary: (value: Output) => Record<string, unknown> = () => ({}),
+    hydrate?: (wire: Wire, submissionId: string) => Promise<Output>,
+  ): Promise<Output> {
     requireSp(input.handle.framework);
     const bound = input.submissionId === undefined ? {} : { submissionId: input.submissionId };
     const query = input.submissionId === undefined ? "" : `?${new URLSearchParams(bound)}`;
     const started = Date.now();
     const fields = () => ({ ...handleContext(input.handle), idempotencyKey: input.idempotencyKey, ...bound, durationMs: Date.now() - started });
-    let value: T;
+    let value: Output;
     try {
-      value = parse(await call("GET", `${operationPath("resources", input.handle, input.idempotencyKey)}${leaf}${query}`,
+      const wire = parse(await call("GET", `${operationPath("resources", input.handle, input.idempotencyKey)}${leaf}${query}`,
         { timeoutMs, label: `resource ${leaf === "" ? "snapshot" : "readiness"}`,
           ...(input.signal === undefined ? {} : { signal: input.signal }) }));
-      const scoped = value as T & { readonly scope: { readonly chatId: string; readonly idempotencyKey: string; readonly submissionId: string } };
+      const scoped = wire as Wire & { readonly scope: { readonly chatId: string; readonly idempotencyKey: string; readonly submissionId: string } };
       if (scoped.scope.chatId !== input.handle.chatId || scoped.scope.idempotencyKey !== input.idempotencyKey
         || (input.submissionId !== undefined && scoped.scope.submissionId !== input.submissionId)) {
         throw new SpHarnessError("Eval SP returned resources for a different Chat or Submission", false);
       }
-      const nativeRecords = (value as T & { readonly nativeRecords?: readonly NativeTrajectoryEntry[] }).nativeRecords;
-      for (const { record } of nativeRecords ?? []) {
-        if (!nativeRecordMayBelongToScope(record, scoped.scope)) {
+      value = hydrate ? await hydrate(wire, scoped.scope.submissionId) : wire as unknown as Output;
+      const nativeRecords = (value as Output & { readonly nativeRecords?: readonly NativeTrajectoryEntry[] }).nativeRecords;
+      for (const entry of nativeRecords ?? []) {
+        assertNativeChat(entry, input.handle.chatId);
+        if (!nativeRecordMayBelongToScope(entry.record, scoped.scope)) {
           throw new SpHarnessError("Eval SP returned a resource record outside the requested operation", false);
         }
       }
@@ -526,9 +646,24 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       }
       return reply;
     },
-    collectAgentResources: (input) => readResources(input, "resources_read", "", resourceSnapshot, transferTimeoutMs,
+    collectAgentResources: (input) => readResources<SpResourceSnapshotWire, AgentResourceSnapshot>(
+      input, "resources_read", "", resourceSnapshot, transferTimeoutMs,
       (snapshot) => ({ coverage: snapshot.coverage, usageEvents: snapshot.usageEvents.length,
-        nativeRecords: snapshot.nativeRecords.length, billingSettlements: snapshot.billingSettlements.length })),
+        nativeRecords: snapshot.nativeRecords.length, billingSettlements: snapshot.billingSettlements.length }),
+      async (wire, submissionId) => {
+        const nativeRecords: NativeTrajectoryEntry[] = [];
+        for (const row of wire.nativeRecords) {
+          const entry = isSpPiTrajectoryReference(row)
+            ? await transferNativeRecord(input.handle, submissionId, row, input.signal) : row;
+          assertNativeChat(entry, input.handle.chatId);
+          if (!nativeRecordMayBelongToScope(entry.record, wire.scope)) {
+            throw new SpHarnessError("Eval SP returned a resource record outside the requested operation", false);
+          }
+          nativeRecords.push(entry);
+        }
+        // Runtime and Metrics retain complete raw facts, never public transfer references.
+        return { ...wire, nativeRecords };
+      }),
     inspectAgentResources: (input) => readResources(input, "resources_readiness", "/readiness", resourceReadiness, requestTimeoutMs),
     async exportEvidence({ handle, submissionId, limits, initialMaterials }) {
       requireSp(handle.framework);

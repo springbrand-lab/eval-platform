@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_EVIDENCE_LIMITS, EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT, type NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
+import {
+  DEFAULT_EVIDENCE_LIMITS, EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT,
+  canonicalJsonBytes, sha256Hex, type NativeTrajectoryEntry,
+} from "@eval-platform/eval-contracts";
+import { compactResourceSnapshot } from "@eval-platform/eval-metrics";
 import {
   AgentHandleNotFoundError,
   AgentIdentityConflictError,
@@ -12,7 +16,7 @@ import { EVAL_EVIDENCE_FILE_MAX_BYTES, EVAL_INITIAL_FILE_MAX_BYTES, EVAL_OUTPUT_
 import { isRequestCancelled } from "@springbrand/http/errors";
 import WebSocket, { WebSocketServer } from "ws";
 import { createSpHarness, SpHarnessError, spEvidenceLimits } from "./harness.js";
-import { nativeAssistantMessage, nativeFixture } from "./native-test-fixture.js";
+import { nativeAssistantMessage, nativeFixture, nativeTransfer, nativeTransferResponse } from "./native-test-fixture.js";
 
 const OWNER = "11111111-1111-4111-8111-111111111111";
 const OTHER_OWNER = "22222222-2222-4222-8222-222222222222";
@@ -807,6 +811,120 @@ describe("Eval SP Harness large transfers and readiness", () => {
       fetch: queuedFetch(Response.json(snapshot)).fetch });
     await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: scope.idempotencyKey,
       submissionId: scope.submissionId })).resolves.toEqual(snapshot);
+  });
+
+  it("hydrates a 5+ MiB SAFE native resource reference before persistence and preserves compact metric parity", async () => {
+    const large = nativeAssistantMessage(14, SUBJECT_CHAT, scope.submissionId,
+      [{ type: "text", text: "汉🌎é".repeat(650_000) }]);
+    const { reference, bytes } = nativeTransfer(large, 14);
+    expect(bytes.byteLength).toBeGreaterThan(5 * 1024 * 1024);
+    const requests: Request[] = [];
+    const harness = createSpHarness({
+      origin: "https://eval-sp.test", serviceToken: "secret",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        expect(request.headers.get("X-Eval-Service-Token")).toBe("secret");
+        const url = new URL(request.url);
+        if (url.pathname.endsWith(`/trajectory/records/${reference.ingestSeq}`)) {
+          expect(url.searchParams.get("submissionId")).toBe(scope.submissionId);
+          expect(url.searchParams.get("throughSeq")).toBe("14");
+          expect(url.searchParams.get("identity")).toBe(reference.reference.identity);
+          expect(url.searchParams.get("byteLength")).toBe(String(bytes.byteLength));
+          expect(url.searchParams.get("sha256")).toBe(reference.reference.sha256);
+          return nativeTransferResponse(reference, bytes);
+        }
+        expect(url.pathname).toBe(RESOURCES_PATH);
+        return Response.json({ ...resources, nativeRecords: [native(3), reference] });
+      },
+    });
+    const collected = await harness.collectAgentResources({
+      handle: subject, idempotencyKey: scope.idempotencyKey, submissionId: scope.submissionId,
+    });
+    expect(collected).toEqual({ ...resources, nativeRecords: [native(3), large] });
+    expect(collected.nativeRecords.every((item) => "record" in item)).toBe(true);
+    const compact = await compactResourceSnapshot(collected);
+    expect(compact).toEqual(await compactResourceSnapshot({ ...collected, nativeRecords: [native(3), large] }));
+    expect(compact.nativeRecords[1]?.metricProjection?.fingerprint).toBe(await sha256Hex(canonicalJsonBytes(large.record)));
+    expect(JSON.stringify(compact)).not.toContain("汉🌎é");
+    expect(await harness.collectAgentResources({ handle: subject, idempotencyKey: scope.idempotencyKey }))
+      .toEqual(collected); // An unknown receipt ID uses SP's operation-bound scope, not a guessed Submission.
+    expect(requests.map(({ method }) => method)).toEqual(["GET", "GET", "GET", "GET"]);
+  }, 30_000);
+
+  it.each(["foreign-submission", "foreign-parent", "context"] as const)(
+    "never stores or compacts a %s hydrated native resource reference", async (kind) => {
+      const source = nativeAssistantMessage(14, SUBJECT_CHAT, scope.submissionId,
+        [{ type: "text", text: "only the requested operation may be charged" }]);
+      const record = kind === "foreign-submission"
+        ? { ...source, record: { ...source.record, submissionId: "unrelated-submission" } }
+        : kind === "foreign-parent"
+          ? { ...source, record: { ...source.record, parent: {
+            resource: { agentId: "unrelated", sessionId: EVALUATOR_CHAT }, submissionId: scope.submissionId,
+          } } }
+          : { ...source, record: { ...source.record, submissionId: null, origin: "context" as const } };
+      const { reference, bytes } = nativeTransfer(record, 14);
+      const harness = createSpHarness({
+        origin: "https://eval-sp.test", serviceToken: "secret",
+        fetch: async (input, init) => {
+          const url = new URL(new Request(input, init).url);
+          return url.pathname.endsWith(`/trajectory/records/${reference.ingestSeq}`)
+            ? nativeTransferResponse(reference, bytes)
+            : Response.json({ ...resources, nativeRecords: [native(3), reference] });
+        },
+      });
+      await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: scope.idempotencyKey,
+        submissionId: scope.submissionId })).rejects.toMatchObject({
+        name: "SpHarnessError", retryable: false,
+      });
+    },
+  );
+
+  it("rejects a foreign-Chat resource reference before requesting any record bytes", async () => {
+    const { reference } = nativeTransfer(native(3), 3);
+    const foreign = { ...reference, reference: { ...reference.reference,
+      identity: JSON.stringify(["agent-1", EVALUATOR_CHAT, "entry", 3]) } };
+    let recordGets = 0;
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
+      fetch: async (input, init) => {
+        const path = new URL(new Request(input, init).url).pathname;
+        if (path.includes("/trajectory/records/")) recordGets++;
+        return Response.json({ ...resources, nativeRecords: [foreign] });
+      } });
+    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: scope.idempotencyKey,
+      submissionId: scope.submissionId })).rejects.toMatchObject({
+      retryable: false, message: "Eval SP returned an invalid resource snapshot",
+    });
+    expect(recordGets).toBe(0);
+  });
+
+  it("cancels a referenced resource's active byte stream when the Attempt is stopped", async () => {
+    const { reference, bytes } = nativeTransfer(nativeAssistantMessage(14, SUBJECT_CHAT, scope.submissionId,
+      [{ type: "text", text: "uncommitted" }]), 14);
+    const stop = new AbortController();
+    let canceled = false;
+    let waiting!: () => void;
+    const reading = new Promise<void>((resolve) => { waiting = resolve; });
+    let sent = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sent) {
+          sent = true;
+          controller.enqueue(bytes.subarray(0, 7));
+        } else waiting();
+      },
+      cancel() { canceled = true; },
+    });
+    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
+      fetch: async (input, init) => new URL(new Request(input, init).url).pathname.includes("/trajectory/records/")
+        ? new Response(stream, { headers: nativeTransferResponse(reference, bytes).headers })
+        : Response.json({ ...resources, nativeRecords: [reference] }) });
+    const result = harness.collectAgentResources({ handle: subject, idempotencyKey: scope.idempotencyKey,
+      submissionId: scope.submissionId, signal: stop.signal }).catch((error: unknown) => error);
+    await reading;
+    stop.abort();
+    expect(isRequestCancelled(await result)).toBe(true);
+    expect(canceled).toBe(true);
   });
 
   it.each([

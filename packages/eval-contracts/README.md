@@ -3,11 +3,19 @@
 ## New SP Pi-native evidence and resource boundary
 
 `native-trajectory.ts` describes the *consumer's* minimal structural identity for SP's
-future published `@springbrand/eval-harness` trajectory page. It is not a copy of SP's
+not-yet-published `@springbrand/eval-harness` trajectory page and oversized-record
+reference. It is not a copy of SP's
 private trajectory parser: a native record has `format:"pi-trajectory/v1"`,
 `resource:{agentId,sessionId}`, `submissionId`, a safe projection policy and
 `record:{type:"conversation"|"entry",value}`; the raw `{ingestSeq,record}` is
-stored unchanged. A new
+stored unchanged. A page row may instead be
+`{ingestSeq,reference:{format:"sp-pi-trajectory-record/v1",throughSeq,identity,byteLength,sha256}}`:
+the identity is Runtime's canonical `[agentId,sessionId,type,nativeId]`, and the
+SHA-256 and byte length cover only the UTF-8 JSON of `record`, not its ingest
+wrapper. Only the SP HTTP Harness adapter resolves it; the stable cross-package
+`AgentResourceSnapshot.nativeRecords` and evidence JSONL contain **complete**
+`{ingestSeq,record}` rows, never reference placeholders or duplicate content.
+A new
 `AgentResourceSnapshot` has `nativeRecords`, not `telemetryEvents`; its independent
 `usageEvents`/`billingSettlements` and readiness remain intact. New evidence manifests
 are schema 2 with `trajectory.format:"sp-pi-trajectory/v1"`. Version 1 bundle bytes,

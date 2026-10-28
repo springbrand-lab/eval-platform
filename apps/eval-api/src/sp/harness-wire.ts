@@ -1,6 +1,6 @@
 import {
-  AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectArrayInPlaceSchema, nativeTrajectoryEntrySchema,
-  spPiTrajectoryPageSchema,
+  AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectArrayInPlaceSchema,
+  isSpPiTrajectoryReference, spPiTrajectoryIdentityParts, spPiTrajectoryPageRowSchema, spPiTrajectoryPageSchema,
 } from "@eval-platform/eval-contracts";
 import type {
   AgentResourceReadiness,
@@ -13,6 +13,7 @@ import type {
   MaterializedDataBinding,
   PiTrajectoryRecord,
   SpPiTrajectoryPage,
+  SpPiTrajectoryPageRow,
 } from "@eval-platform/eval-contracts";
 import type { AgentHandle, AgentSubmission, EnsureAgentInput } from "@eval-platform/eval-runtime/harness";
 import {
@@ -170,6 +171,11 @@ const readinessSchema = z.object({
   actionCharges: z.object({ complete: z.boolean(), unsettledExecutions: count, missingExecutionIds: count }),
 }) satisfies z.ZodType<AgentResourceReadiness>;
 
+/** Raw SP HTTP wire only. Every reference is hydrated before leaving the Harness for Runtime/Metrics. */
+export type SpResourceSnapshotWire = Omit<AgentResourceSnapshot, "nativeRecords"> & {
+  readonly nativeRecords: readonly SpPiTrajectoryPageRow[];
+};
+
 const resourceSnapshotSchema = z.strictObject({
   scope: scopeSchema,
   observedAt: id,
@@ -180,23 +186,27 @@ const resourceSnapshotSchema = z.strictObject({
     billingSettlements: completenessSchema,
   }),
   usageEvents: jsonObjectArrayInPlaceSchema,
-  nativeRecords: z.array(nativeTrajectoryEntrySchema),
+  nativeRecords: z.array(spPiTrajectoryPageRowSchema),
   billingSettlements: jsonObjectArrayInPlaceSchema,
   readiness: readinessSchema,
 }).superRefine((snapshot, context) => {
-  snapshot.nativeRecords.forEach(({ ingestSeq, record }, index) => {
+  snapshot.nativeRecords.forEach((row, index) => {
+    const { ingestSeq } = row;
     if (index > 0 && ingestSeq <= snapshot.nativeRecords[index - 1]!.ingestSeq) {
       context.addIssue({ code: "custom", path: ["nativeRecords", index, "ingestSeq"],
         message: "Native records must ascend" });
     }
-    if (record.resource.sessionId !== snapshot.scope.chatId) {
+    const sessionId = isSpPiTrajectoryReference(row)
+      ? spPiTrajectoryIdentityParts(row.reference.identity)?.[1]
+      : row.record.resource.sessionId;
+    if (sessionId !== snapshot.scope.chatId) {
       context.addIssue({ code: "custom", path: ["nativeRecords", index, "record", "resource", "sessionId"],
         message: "Native record belongs to another Chat" });
     }
   });
-}) satisfies z.ZodType<AgentResourceSnapshot>;
+}) satisfies z.ZodType<SpResourceSnapshotWire>;
 
-export function resourceSnapshot(value: unknown): AgentResourceSnapshot {
+export function resourceSnapshot(value: unknown): SpResourceSnapshotWire {
   return response(resourceSnapshotSchema, value, "resource snapshot");
 }
 

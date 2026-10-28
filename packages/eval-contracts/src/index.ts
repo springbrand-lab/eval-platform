@@ -97,10 +97,17 @@ export type {
   EvidenceTrajectoryPart,
 } from "./evidence.js";
 export {
-  PI_TRAJECTORY_RECORD_FORMAT, SP_PI_TRAJECTORY_FORMAT, isSafePiTrajectoryRecord,
-  nativeRecordMayBelongToScope, nativeTrajectoryEntrySchema, spPiTrajectoryPageSchema,
+  PI_TRAJECTORY_RECORD_FORMAT, SP_PI_TRAJECTORY_FORMAT, SP_PI_TRAJECTORY_RECORD_FORMAT,
+  SP_PI_TRAJECTORY_RECORD_IDENTITY_HEADER, SP_PI_TRAJECTORY_RECORD_INGEST_SEQ_HEADER,
+  SP_PI_TRAJECTORY_RECORD_THROUGH_SEQ_HEADER, isSafePiTrajectoryRecord,
+  isSpPiTrajectoryReference, nativeRecordMayBelongToScope, nativeTrajectoryEntrySchema,
+  spPiTrajectoryIdentityParts, spPiTrajectoryRecordIdentity, spPiTrajectoryReferenceSchema,
+  spPiTrajectoryPageRowSchema, spPiTrajectoryPageSchema,
 } from "./native-trajectory.js";
-export type { NativeTrajectoryEntry, PiTrajectoryRecord, SpPiTrajectoryPage } from "./native-trajectory.js";
+export type {
+  NativeTrajectoryEntry, PiTrajectoryRecord, SpPiTrajectoryPage,
+  SpPiTrajectoryPageRow, SpPiTrajectoryRecordReference,
+} from "./native-trajectory.js";
 export {
   DEFAULT_EVIDENCE_LIMITS,
   EVALUATION_FINAL_REPLY_PATH,

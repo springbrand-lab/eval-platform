@@ -4,6 +4,7 @@ import {
   DEFAULT_EVIDENCE_LIMITS,
   EVIDENCE_SCHEMA_VERSION,
   SP_PI_TRAJECTORY_FORMAT,
+  SP_PI_TRAJECTORY_RECORD_FORMAT,
   EVIDENCE_EXPORT_MAX_PASSES,
   OBSERVATION_MAX_PASSES,
   PENDING_SAMPLING_STATUSES,
@@ -18,6 +19,8 @@ import {
   isTerminalAgentStatus,
   nativeRecordMayBelongToScope,
   nativeTrajectoryEntrySchema,
+  spPiTrajectoryReferenceSchema,
+  isSpPiTrajectoryReference,
   spPiTrajectoryPageSchema,
   jsonObjectArrayInPlaceSchema,
   jsonObjectInPlaceSchema,
@@ -25,6 +28,7 @@ import {
   jsonValueSchema,
   summarizeResourceSnapshot,
   type AgentResourceSnapshot,
+  type SpPiTrajectoryRecordReference,
 } from "./index.js";
 
 describe("@eval-platform/eval-contracts", () => {
@@ -160,5 +164,37 @@ describe("@eval-platform/eval-contracts", () => {
       parent: { resource: native.resource, submissionId: "submission" } }, scope)).toBe(true);
     expect(nativeRecordMayBelongToScope({ ...native, submissionId: "foreign",
       parent: { resource: native.resource, submissionId: "unrelated" } }, scope)).toBe(false);
+  });
+
+  it("keeps a single oversized record as a typed reference at its frozen ingest position", () => {
+    const reference = { ingestSeq: 5, reference: {
+      format: SP_PI_TRAJECTORY_RECORD_FORMAT, throughSeq: 7,
+      identity: JSON.stringify(["agent", "chat", "entry", 8]),
+      byteLength: 5_500_000, sha256: "a".repeat(64),
+    } } satisfies SpPiTrajectoryRecordReference;
+    expect(spPiTrajectoryReferenceSchema.safeParse(reference).success).toBe(true);
+    expect(isSpPiTrajectoryReference(reference)).toBe(true);
+    const inline = { ingestSeq: 6, record: {
+      format: "pi-trajectory/v1", resource: { agentId: "agent", sessionId: "chat" },
+      submissionId: "submission", projection: { kind: "safe", policyId: "test", policyVersion: 1 },
+      record: { type: "conversation", value: { id: 10 } },
+    } };
+    expect(spPiTrajectoryPageSchema.safeParse({
+      format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: 7 },
+      records: [reference, inline], nextAfterSeq: 6,
+    }).success).toBe(true);
+    for (const invalid of [
+      { ...reference, record: inline.record },
+      { ...reference, reference: { ...reference.reference, format: "sp-trajectory/v1" } },
+      { ...reference, reference: { ...reference.reference, identity: "not an identity" } },
+      { ...reference, reference: { ...reference.reference, identity: JSON.stringify(["agent", "chat", "entry", 0]) } },
+      { ...reference, reference: { ...reference.reference, throughSeq: 4 } },
+      { ...reference, reference: { ...reference.reference, byteLength: -1 } },
+      { ...reference, reference: { ...reference.reference, sha256: "A".repeat(64) } },
+    ]) expect(spPiTrajectoryReferenceSchema.safeParse(invalid).success).toBe(false);
+    expect(spPiTrajectoryPageSchema.safeParse({
+      format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: 8 },
+      records: [reference], nextAfterSeq: null,
+    }).success).toBe(false);
   });
 });

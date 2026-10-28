@@ -2,10 +2,15 @@ import type { JsonValue } from "./model.js";
 import { z } from "zod";
 import { jsonObjectInPlaceSchema } from "./json.js";
 
-/** SP's published Eval Harness wire owns the schema. These are consumer-side structural bounds
- * until the new @springbrand/eval-harness release is available. No event-only records are native. */
+/** SP Eval's public Harness wire owns the schema. These are temporary structural bounds
+ * until the new @springbrand/eval-harness release is published. No event-only records are native. */
 export const SP_PI_TRAJECTORY_FORMAT = "sp-pi-trajectory/v1";
 export const PI_TRAJECTORY_RECORD_FORMAT = "pi-trajectory/v1";
+/** Temporary structural mirror of SP Eval's public, not-yet-published record transfer wire. */
+export const SP_PI_TRAJECTORY_RECORD_FORMAT = "sp-pi-trajectory-record/v1";
+export const SP_PI_TRAJECTORY_RECORD_IDENTITY_HEADER = "X-Eval-Trajectory-Identity";
+export const SP_PI_TRAJECTORY_RECORD_INGEST_SEQ_HEADER = "X-Eval-Trajectory-Ingest-Seq";
+export const SP_PI_TRAJECTORY_RECORD_THROUGH_SEQ_HEADER = "X-Eval-Trajectory-Through-Seq";
 
 /** Minimal structural view of the public UA TrajectoryRecord. `record.value` remains
  * opaque native Pi data: Eval never rewrites or reconstructs a Conversation. */
@@ -31,11 +36,27 @@ export interface NativeTrajectoryEntry {
   readonly metricProjection?: Readonly<Record<string, JsonValue>>;
 }
 
+/** Not a partial native record: its exact serialized SAFE Pi record must be fetched and verified. */
+export interface SpPiTrajectoryRecordReference {
+  readonly ingestSeq: number;
+  readonly reference: {
+    readonly format: typeof SP_PI_TRAJECTORY_RECORD_FORMAT;
+    readonly throughSeq: number;
+    /** Public UA identity `[agentId, sessionId, "entry"|"conversation", nativeId]`. */
+    readonly identity: string;
+    /** Exact UTF-8 JSON bytes of `TrajectoryRecord`, excluding the `{ingestSeq,record}` wrapper. */
+    readonly byteLength: number;
+    readonly sha256: string;
+  };
+}
+
+export type SpPiTrajectoryPageRow = NativeTrajectoryEntry | SpPiTrajectoryRecordReference;
+
 /** The same bounded, frozen page is used for both evidence export and Evaluator final replies. */
 export interface SpPiTrajectoryPage {
   readonly format: typeof SP_PI_TRAJECTORY_FORMAT;
   readonly cursor: { readonly throughSeq: number };
-  readonly records: readonly NativeTrajectoryEntry[];
+  readonly records: readonly SpPiTrajectoryPageRow[];
   readonly nextAfterSeq: number | null;
 }
 
@@ -91,6 +112,43 @@ function onlyKeys(value: Record<string, unknown>, allowed: readonly string[]): b
   return Object.keys(value).every((key) => allowed.includes(key));
 }
 
+/** Parse one canonical, public UA identity without treating a foreign Chat as this one. */
+export function spPiTrajectoryIdentityParts(identity: string):
+  readonly [agentId: string, sessionId: string, kind: "entry" | "conversation", id: number] | null {
+  try {
+    const parts: unknown = JSON.parse(identity);
+    if (!Array.isArray(parts) || parts.length !== 4 || !name(parts[0]) || !name(parts[1])
+      || (parts[2] !== "entry" && parts[2] !== "conversation") || !positive(parts[3])
+      || JSON.stringify(parts) !== identity) return null;
+    return parts as [string, string, "entry" | "conversation", number];
+  } catch {
+    return null;
+  }
+}
+
+export function spPiTrajectoryRecordIdentity(record: PiTrajectoryRecord): string {
+  return JSON.stringify([record.resource.agentId, record.resource.sessionId, record.record.type, record.record.value.id]);
+}
+
+const sequence = z.number().int().positive().safe();
+export const spPiTrajectoryReferenceSchema: z.ZodType<SpPiTrajectoryRecordReference> = z.strictObject({
+  ingestSeq: sequence,
+  reference: z.strictObject({
+    format: z.literal(SP_PI_TRAJECTORY_RECORD_FORMAT),
+    throughSeq: z.number().int().nonnegative().safe(),
+    identity: z.string().min(1).refine((value) => spPiTrajectoryIdentityParts(value) !== null, "Invalid native identity"),
+    byteLength: sequence,
+    sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  }),
+}).superRefine(({ ingestSeq, reference }, context) => {
+  if (ingestSeq > reference.throughSeq) {
+    context.addIssue({ code: "custom", path: ["reference", "throughSeq"], message: "Record is after the cutoff" });
+  }
+});
+export function isSpPiTrajectoryReference(value: SpPiTrajectoryPageRow): value is SpPiTrajectoryRecordReference {
+  return "reference" in value;
+}
+
 /** SP scopes the resource response to an operation. A temporary Agent can have
  * its own Submission; its public parent still identifies a child of this Chat.
  * Without a verified ancestry chain, only a direct child of the requested
@@ -110,9 +168,19 @@ export const nativeTrajectoryEntrySchema: z.ZodType<NativeTrajectoryEntry> = z.s
   record: z.custom<PiTrajectoryRecord>(isSafePiTrajectoryRecord, "Expected a safe native Pi trajectory record"),
 });
 
+export const spPiTrajectoryPageRowSchema: z.ZodType<SpPiTrajectoryPageRow> =
+  z.union([nativeTrajectoryEntrySchema, spPiTrajectoryReferenceSchema]);
+
 export const spPiTrajectoryPageSchema: z.ZodType<SpPiTrajectoryPage> = z.strictObject({
   format: z.literal(SP_PI_TRAJECTORY_FORMAT),
   cursor: z.strictObject({ throughSeq: z.number().int().nonnegative().safe() }),
-  records: z.array(nativeTrajectoryEntrySchema),
+  records: z.array(spPiTrajectoryPageRowSchema),
   nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
+}).superRefine((page, context) => {
+  page.records.forEach((row, index) => {
+    if (isSpPiTrajectoryReference(row) && row.reference.throughSeq !== page.cursor.throughSeq) {
+      context.addIssue({ code: "custom", path: ["records", index, "reference", "throughSeq"],
+        message: "Record reference must use the page cutoff" });
+    }
+  });
 });

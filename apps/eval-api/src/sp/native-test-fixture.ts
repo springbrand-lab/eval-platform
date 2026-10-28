@@ -1,5 +1,9 @@
 import { readFileSync } from "node:fs";
-import { nativeTrajectoryEntrySchema, type JsonValue, type NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
+import { createHash } from "node:crypto";
+import {
+  SP_PI_TRAJECTORY_RECORD_FORMAT, nativeTrajectoryEntrySchema,
+  type JsonValue, type NativeTrajectoryEntry, type SpPiTrajectoryRecordReference,
+} from "@eval-platform/eval-contracts";
 
 /** The checked-in records were projected by the published public UA trajectory
  * helpers. Test transport identities are substituted, never a new event envelope. */
@@ -80,4 +84,42 @@ export function nativeToolBodyPair(
     nativeTrajectoryEntrySchema.parse({ ...assistant, ingestSeq: pairIndex * 2 + 1 }),
     nativeTrajectoryEntrySchema.parse({ ...result, ingestSeq: pairIndex * 2 + 2 }),
   ];
+}
+
+/** Test the published SP reference wire with a real source-projected Pi record, not an event-shaped fake. */
+export function nativeTransfer(entry: NativeTrajectoryEntry, throughSeq: number): {
+  reference: SpPiTrajectoryRecordReference;
+  bytes: Uint8Array;
+} {
+  const bytes = new TextEncoder().encode(JSON.stringify(entry.record));
+  const reference = {
+    ingestSeq: entry.ingestSeq,
+    reference: {
+      format: SP_PI_TRAJECTORY_RECORD_FORMAT,
+      throughSeq,
+      identity: JSON.stringify([entry.record.resource.agentId, entry.record.resource.sessionId,
+        entry.record.record.type, entry.record.record.value.id]),
+      byteLength: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    },
+  } satisfies SpPiTrajectoryRecordReference;
+  return { reference, bytes };
+}
+
+/** SP's raw record GET returns the exact JSON bytes; header overrides exercise operator failures. */
+export function nativeTransferResponse(
+  reference: SpPiTrajectoryRecordReference,
+  bytes: Uint8Array,
+  overrides: Readonly<Record<string, string>> = {},
+): Response {
+  const stream = new Blob([new Uint8Array(bytes)]).stream();
+  return new Response(stream, { headers: {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": String(reference.reference.byteLength),
+    "X-Eval-Content-Sha256": reference.reference.sha256,
+    "X-Eval-Trajectory-Identity": encodeURIComponent(reference.reference.identity),
+    "X-Eval-Trajectory-Ingest-Seq": String(reference.ingestSeq),
+    "X-Eval-Trajectory-Through-Seq": String(reference.reference.throughSeq),
+    ...overrides,
+  } });
 }

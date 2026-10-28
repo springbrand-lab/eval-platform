@@ -28,6 +28,7 @@ export interface AgentResourceSnapshot {
   readonly finalized: boolean;
   readonly coverage: AgentResourceCoverage;
   readonly usageEvents: readonly AgentResourceFact[];
+  /** Full source records only. The SP Harness resolves public byte references before this boundary. */
   readonly nativeRecords: readonly NativeTrajectoryEntry[];
   readonly billingSettlements: readonly AgentResourceFact[];
   /** SP's own explanation of why `finalized` is false; diagnostic only, never a second completeness signal. */

@@ -2,13 +2,14 @@
 
 ## Pi-native SP seam (new runs)
 
-The service-authenticated SP Harness consumes the **published public**
-`@springbrand/eval-harness` wire only. A future package release must implement
+The service-authenticated SP Harness consumes SP's **public**
+`@springbrand/eval-harness` wire only. The coordinated producer candidate implements
 `sp-pi-trajectory/v1` pages with a frozen `cursor.throughSeq` and safe
-`pi-trajectory/v1` records, and resource snapshots carrying `nativeRecords`
+`pi-trajectory/v1` records or an explicit oversized-record reference, and
+resource snapshots carrying `nativeRecords`
 instead of `telemetryEvents`. The current pinned `0.1.0-alpha.5` still exports
-event pages; the SP worktree has an offline `0.1.0-alpha.7` native candidate
-whose **public** page/snapshot schemas accept the generated UA fixture, but it
+event pages; the SP Eval worktree commit `47479b68` has an offline
+`0.1.0-alpha.7` candidate with the reference wire, but it
 has not been published or pinned here. New-run consumer checks remain structural
 until that release. Do not deploy this cutover or claim cross-deployment parity
 before publishing, installing and checking actual service responses. No legacy event decoding or DO storage access is used. Existing
@@ -23,9 +24,16 @@ every original `{ingestSeq,record}` in the evidence JSONL without filtering or
 rewriting it. Resource snapshots/usage/billing still belong only to the selected
 operation and Submission; the Evaluator's final-reply fallback considers only
 the selected Submission's own assistant messages. The current JSON page ceiling
-is 4,000,000 bytes; a larger single record fails explicitly rather than being
-silently dropped. **Item #3 consumer pending shared SP Eval public streaming wire**;
-do not add another transport or change the pinned package before coordination.
+is 4,000,000 bytes. A larger single SAFE record occupies one reference, whose
+`identity`, byte length, SHA-256 and `throughSeq` bind an authenticated
+`GET /evidence/trajectory/records/{ingestSeq}?submissionId=&throughSeq=&identity=&byteLength=&sha256=`.
+The body contains the exact UTF-8 `TrajectoryRecord` JSON, streamed in bounded
+parts; the adapter verifies headers, length, digest, native identity, Chat,
+parent Chat and (for resources/final reply) Submission scope before storing the
+complete raw record. A record larger than the unchanged SP evidence-file limit
+still fails explicitly at a record boundary. The temporary structural contract
+in `eval-contracts` must be replaced with the released public package contract
+and tested against deployed SP before release; no unpublished dependency is pinned.
 
 内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。设计见 [Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
 
