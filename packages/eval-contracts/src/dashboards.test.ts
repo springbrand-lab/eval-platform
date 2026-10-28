@@ -21,13 +21,23 @@ it("requires the known configuration revision for a full replacement without a n
   ]) expect(dashboardUpdateSchema.safeParse({ ...input, ...patch }).success).toBe(false);
 });
 
+it("distinguishes an omitted selection from explicitly restoring all Data without accepting duplicate identities", () => {
+  const input = { name: "模型对比", projectIds: ["project-b", "project-a"], revision: 3 };
+  expect(dashboardUpdateSchema.parse(input)).not.toHaveProperty("excludedDataIds");
+  expect(dashboardUpdateSchema.parse({ ...input, excludedDataIds: [] }).excludedDataIds).toEqual([]);
+  expect(dashboardUpdateSchema.parse({ ...input, excludedDataIds: ["data-2"] }).excludedDataIds).toEqual(["data-2"]);
+  for (const excludedDataIds of [["data-2", "data-2"], [" data-2"], [null], "data-2"]) {
+    expect(dashboardUpdateSchema.safeParse({ ...input, excludedDataIds }).success).toBe(false);
+  }
+});
+
 it("reads a durable configuration identity without admitting copied comparison results", () => {
   const input = {
     dashboardId: "ABCDEF00-0000-4000-8000-000000000001",
     name: "模型对比", description: "", projectIds: ["project-b", "project-a"], revision: 2,
     createdAt: "2026-10-28T08:00:00.000Z", updatedAt: "2026-10-28T09:00:00.000Z",
   };
-  expect(dashboardSchema.parse(input)).toEqual({ ...input, dashboardId: input.dashboardId.toLowerCase() });
+  expect(dashboardSchema.parse(input)).toEqual({ ...input, excludedDataIds: [], dashboardId: input.dashboardId.toLowerCase() });
   for (const patch of [{ dashboardId: "invalid" }, { updatedAt: "yesterday" }, { metrics: [] }, { sampling: {} }]) {
     expect(dashboardSchema.safeParse({ ...input, ...patch }).success).toBe(false);
   }

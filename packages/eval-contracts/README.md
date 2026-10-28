@@ -1,5 +1,7 @@
 # @eval-platform/eval-contracts
 
+看板配置的 `excludedDataIds` 是已确认的数据展示排除集合，不是指标快照。创建时默认空集合；更新省略该字段时保留现有选择，显式空集合表示恢复全部。集合内身份唯一，配置仍使用同一 revision 防止丢失更新。
+
 Source-user IDs are opaque Auth identifiers, including legacy non-UUID IDs and
 the official account `springbrand-official` with its optional `official` flag.
 They are bounded to 200 characters and cannot contain whitespace, controls,

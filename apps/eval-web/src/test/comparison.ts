@@ -9,6 +9,7 @@ export const savedDashboardId = "71000000-0000-4000-8000-000000000001";
 export function savedDashboard(patch: Partial<Dashboard> = {}): Dashboard {
   return {
     dashboardId: savedDashboardId, name: "质量观察", description: "当前共同已评数据",
+    excludedDataIds: [],
     projectIds: ["p1", "p2"], revision: 1, createdAt: "2026-10-28T10:00:00Z", updatedAt: "2026-10-28T10:00:00Z", ...patch,
   };
 }

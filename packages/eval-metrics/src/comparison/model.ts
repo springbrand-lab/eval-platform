@@ -8,6 +8,7 @@ export interface ProjectComparisonQuery {
   readonly projectIds: readonly string[];
   readonly datasetId?: string;
   readonly jsonPointer?: string;
+  readonly excludedDataIds?: readonly string[];
 }
 
 export interface ProjectComparisonSource {

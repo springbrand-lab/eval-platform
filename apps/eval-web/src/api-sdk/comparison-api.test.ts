@@ -30,6 +30,17 @@ it("keeps the project order, Dataset and metric in distinct cache scopes, includ
   expect(comparisonKeys.view({ ...query, datasetId: "one" })).not.toEqual(all);
   expect(comparisonKeys.view({ ...query, jsonPointer: "" })).not.toEqual(all);
   expect(comparisonKeys.view({ ...query, jsonPointer: "/score" })).not.toEqual(all);
+  expect(comparisonKeys.view({ ...query, excludedDataIds: ["data-1"] })).not.toEqual(all);
+});
+
+it("reads a confirmed exclusion scope as JSON, keeping the full Data set out of URL limits", async () => {
+  const { api } = await import("./client");
+  const { getProjectComparison } = await import("./comparison-api");
+  const read = vi.spyOn(api, "post").mockResolvedValue({ rows: [] });
+  const query: ProjectComparisonQuery = { projectIds: ["a", "b"], excludedDataIds: ["data-1"] };
+  const signal = new AbortController().signal;
+  await expect(getProjectComparison(query, signal)).resolves.toEqual({ rows: [] });
+  expect(read).toHaveBeenCalledExactlyOnceWith("/api/metrics/comparison", query, { signal });
 });
 
 it("encodes repeated projectId query parameters and unwraps the standard envelope without a browser aggregation fallback", async () => {

@@ -105,6 +105,112 @@ it("opens at the saved-dashboard directory with a clear empty state rather than 
   } finally { await screen.close(); }
 });
 
+it("keeps cross-page checkbox drafts separate from the confirmed whole-board range and restores only all Data after confirmation", async () => {
+  let stored = savedDashboard();
+  api.detail.mockImplementation(async () => stored);
+  api.update.mockImplementation(async (_id, input) => {
+    stored = savedDashboard({ ...input, excludedDataIds: input.excludedDataIds ?? stored.excludedDataIds, revision: input.revision + 1 });
+    return stored;
+  });
+  api.comparison.mockImplementation(async (query: ProjectComparisonQuery) => {
+    const base = comparisonView();
+    if (!query.excludedDataIds?.length) return base;
+    return {
+      ...base, rows: base.rows.filter((row) => !query.excludedDataIds?.includes(row.dataId)),
+      summary: base.summary.map((value) => ({ ...value, dataCount: 22, score: comparisonScore(113.25, 44) })),
+      datasets: [{ datasetId: "dataset-a", name: "核心任务", dataCount: 22 }],
+    };
+  });
+  const screen = await mount(`/dashboard?dashboardId=${savedDashboardId}&jsonPointer=/score`);
+  try {
+    await waitFor(() => expect(control(screen.container, "纳入 零分用例")).not.toBeNull());
+    expect(control(screen.container, "纳入 零分用例")?.getAttribute("aria-checked")).toBe("true");
+    const readsBeforeDraft = api.comparison.mock.calls.length;
+    await click(control(screen.container, "纳入 零分用例"));
+    await click(button(control(screen.container, "共同数据分页")!, "下一页"));
+    await click(control(screen.container, "纳入 用例 21"));
+    await changeView(screen.container, "执行指标");
+    await changeView(screen.container, "评估指标");
+    await type(control(screen.container, "搜索共同数据"), "用例");
+    await type(control(screen.container, "搜索共同数据"), "");
+    expect(api.update).not.toHaveBeenCalled();
+    expect(api.comparison).toHaveBeenCalledTimes(readsBeforeDraft);
+    expect(control(screen.container, "当前范围表现")?.textContent).toContain("24");
+    await click(button(control(screen.container, "共同数据展示选择")!, "确定"));
+    await waitFor(() => expect(control(screen.container, "项目 1 表现")?.textContent).toContain("113.25"));
+    expect(api.update).toHaveBeenCalledExactlyOnceWith(savedDashboardId, expect.objectContaining({
+      revision: 1, excludedDataIds: ["data-0", "data-20"],
+    }));
+    expect(stored.excludedDataIds).toEqual(["data-0", "data-20"]);
+    expect(api.comparison).toHaveBeenLastCalledWith(expect.objectContaining({ excludedDataIds: ["data-0", "data-20"] }), expect.any(AbortSignal));
+    await click(button(control(screen.container, "共同数据展示选择")!, "恢复全部"));
+    expect(api.update).toHaveBeenCalledTimes(1);
+    expect(control(screen.container, "项目 1 表现")?.textContent).toContain("113.25");
+    await click(button(control(screen.container, "共同数据展示选择")!, "确定"));
+    await waitFor(() => expect(control(screen.container, "项目 1 表现")?.textContent).toContain("7.25"));
+    expect(api.update.mock.calls[1]?.[1]).toMatchObject({ revision: 2, excludedDataIds: [] });
+    expect(button(screen.container, "恢复这条数据")).toBeUndefined();
+    expect(api.create).not.toHaveBeenCalled();
+  } finally { await screen.close(); }
+});
+
+it("can restore an entirely excluded range without exposing per-Data recovery", async () => {
+  let stored = savedDashboard({ excludedDataIds: Array.from({ length: 24 }, (_, index) => `data-${index}`) });
+  api.detail.mockImplementation(async () => stored);
+  api.update.mockImplementation(async (_id, input) => {
+    stored = savedDashboard({ ...input, excludedDataIds: input.excludedDataIds ?? [], revision: input.revision + 1 });
+    return stored;
+  });
+  api.comparison.mockImplementation(async (query: ProjectComparisonQuery) => query.excludedDataIds?.length ? {
+    ...comparisonView(), rows: [], datasets: [],
+    summary: comparisonView().summary.map((value) => ({ ...value, dataCount: 0, score: null })),
+  } : comparisonView());
+  const screen = await mount(`/dashboard?dashboardId=${savedDashboardId}&jsonPointer=/score`);
+  try {
+    await waitFor(() => expect(screen.container.textContent).toContain("当前范围暂无共同已评数据"));
+    await click(button(control(screen.container, "共同数据展示选择")!, "恢复全部"));
+    expect(api.update).not.toHaveBeenCalled();
+    await click(button(control(screen.container, "共同数据展示选择")!, "确定"));
+    await waitFor(() => expect(control(screen.container, "纳入 零分用例")).not.toBeNull());
+    expect(stored.excludedDataIds).toEqual([]);
+    expect(api.update).toHaveBeenCalledTimes(1);
+  } finally { await screen.close(); }
+});
+
+it.each(["unconfirmed", "conflict"] as const)("does not duplicate or overwrite a %s Data selection save", async (failure) => {
+  let stored = savedDashboard();
+  api.detail.mockImplementation(async () => stored);
+  api.update.mockImplementation(async (_id, input) => {
+    if (failure === "conflict") {
+      stored = savedDashboard({ revision: 2, name: "其他窗口保存" });
+      throw new ApiError({ status: 409, code: "DASHBOARD_REVISION_CONFLICT", message: "版本已变化" });
+    }
+    stored = savedDashboard({ ...input, excludedDataIds: input.excludedDataIds ?? [], revision: input.revision + 1 });
+    throw new ApiError({ status: 0, code: "NETWORK_ERROR", kind: "network", message: "响应丢失" });
+  });
+  const screen = await mount(`/dashboard?dashboardId=${savedDashboardId}&jsonPointer=/score`);
+  try {
+    await waitFor(() => expect(control(screen.container, "纳入 零分用例")).not.toBeNull());
+    await click(control(screen.container, "纳入 零分用例"));
+    await act(async () => {
+      button(control(screen.container, "共同数据展示选择")!, "确定")!.click();
+      button(control(screen.container, "共同数据展示选择")!, "确定")!.click();
+    });
+    await waitFor(() => expect(api.update).toHaveBeenCalledTimes(1));
+    if (failure === "unconfirmed") {
+      await waitFor(() => expect(api.comparison).toHaveBeenLastCalledWith(expect.objectContaining({ excludedDataIds: ["data-0"] }), expect.any(AbortSignal)));
+      expect(api.detail.mock.calls.length).toBeGreaterThan(1);
+    } else {
+      await waitFor(() => expect(button(screen.container, "重新加载选择")).toBeDefined());
+      expect(control(screen.container, "纳入 零分用例")?.getAttribute("aria-checked")).toBe("false");
+      await click(button(screen.container, "重新加载选择"));
+      await waitFor(() => expect(control(screen.container, "纳入 零分用例")?.getAttribute("aria-checked")).toBe("true"));
+      expect(stored.name).toBe("其他窗口保存");
+    }
+    expect(api.update).toHaveBeenCalledTimes(1);
+  } finally { await screen.close(); }
+});
+
 it("names a new dashboard, selects Projects across pages, creates once and reopens the response's saved identity", async () => {
   const response = savedDashboard({ dashboardId: "71000000-0000-4000-8000-000000000099", name: "发布质量观察", description: "检查当前留存结果", projectIds: ["p1", "p21"] });
   api.create.mockResolvedValue(response);

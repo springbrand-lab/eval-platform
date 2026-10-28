@@ -13,6 +13,24 @@ function fixture() {
 }
 
 describe("PostgreSQL Dashboard Store through its public service", () => {
+  it("saves Data selection across edits and reopens, restores all, and never overwrites a newer configuration", async () => {
+    const f = fixture();
+    const saved = await f.service.create(input);
+    expect(saved.excludedDataIds).toEqual([]);
+    const selected = await f.service.update(saved.dashboardId, {
+      name: input.name, projectIds: input.projectIds, excludedDataIds: ["data-b", "data-a"], revision: saved.revision,
+    });
+    expect(selected.excludedDataIds).toEqual(["data-a", "data-b"]);
+    expect((await f.service.get(saved.dashboardId)).excludedDataIds).toEqual(["data-a", "data-b"]);
+    const renamed = await f.service.update(saved.dashboardId, { name: "Edited", projectIds: input.projectIds, revision: selected.revision });
+    expect(renamed.excludedDataIds).toEqual(["data-a", "data-b"]);
+    await expect(f.service.update(saved.dashboardId, { name: "Stale", projectIds: input.projectIds, excludedDataIds: [], revision: selected.revision }))
+      .rejects.toMatchObject({ name: "DashboardRevisionConflictError" });
+    const restored = await f.service.update(saved.dashboardId, { name: renamed.name, projectIds: input.projectIds, excludedDataIds: [], revision: renamed.revision });
+    expect(restored.excludedDataIds).toEqual([]);
+    expect((await f.service.list())[0]).toEqual(restored);
+  });
+
   it("creates, lists and reopens normalized configuration with ordered Project associations", async () => {
     const f = fixture();
     const created = await f.service.create(input);
@@ -113,6 +131,7 @@ describe("PostgreSQL Dashboard Store through its public service", () => {
     const saved = {
       dashboardId: "00000000-0000-4000-8000-000000000001", name: "Existing", description: "",
       projectIds: ["unadmitted", "first"], revision: 1,
+      excludedDataIds: [],
       createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
     };
     f.seedDashboard(saved);
@@ -193,6 +212,7 @@ describe("PostgreSQL Dashboard Store through its public service", () => {
     for (const dashboardId of [...ids].reverse()) {
       f.seedDashboard({
         dashboardId, name: dashboardId, description: "", projectIds: ["second", "first"], revision: 1,
+        excludedDataIds: [],
         createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
       });
     }

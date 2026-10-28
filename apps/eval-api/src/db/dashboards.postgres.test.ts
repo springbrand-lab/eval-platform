@@ -33,6 +33,20 @@ describe.skipIf(!connection)("PostgreSQL saved Dashboards", () => {
     return { ids, store, service, input };
   }
 
+  it("persists confirmed exclusions while metadata edits preserve them and a revisioned empty set restores all", async () => {
+    const f = await fixture();
+    const created = await f.service.create(f.input);
+    expect(created.excludedDataIds).toEqual([]);
+    const selected = await f.service.update(created.dashboardId, {
+      name: created.name, projectIds: created.projectIds, excludedDataIds: ["data-2", "data-1"], revision: created.revision,
+    });
+    expect((await f.service.get(created.dashboardId)).excludedDataIds).toEqual(["data-1", "data-2"]);
+    const edited = await f.service.update(created.dashboardId, { name: "Edited", projectIds: created.projectIds, revision: selected.revision });
+    expect(edited.excludedDataIds).toEqual(["data-1", "data-2"]);
+    const restored = await f.service.update(created.dashboardId, { name: edited.name, projectIds: edited.projectIds, excludedDataIds: [], revision: edited.revision });
+    expect(restored.excludedDataIds).toEqual([]);
+  });
+
   it("coordinates concurrent creations, keeps the original fingerprint after edits, and rejects stale concurrent revisions", async () => {
     const f = await fixture();
     const [created, replay] = await Promise.all([f.service.create(f.input), f.service.create({ ...f.input, description: "" })]);

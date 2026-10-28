@@ -14,6 +14,7 @@ import { POLL_MS } from "@/features/runs/use-run-polling";
 import { clearedDataScope, validateDashboardReadSearch, type ChangeDashboardSearch, type DashboardReadSearch } from "./dashboard-search";
 import { ComparisonWorkbench } from "./comparison-workbench";
 import { DashboardsPage } from "./dashboards-page";
+import { useDataSelection } from "./data-selection";
 
 const isDashboardPath = (path: string) => path === "/dashboard" || path === "/dashboard/";
 
@@ -43,6 +44,7 @@ function SavedDashboard({ dashboardId, search }: { dashboardId: string; search: 
   const router = useRouter();
   const navigate = useNavigate({ from: "/dashboard/" });
   const dashboard = useQuery({ queryKey: dashboardKeys.detail(dashboardId), queryFn: ({ signal }) => getDashboard(dashboardId, signal), staleTime: 0 });
+  const selection = useDataSelection(dashboard.data);
   const limits = useInputLimits();
   const limit = limits.data?.comparisonProjects;
   const ids = dashboard.data?.projectIds;
@@ -55,7 +57,10 @@ function SavedDashboard({ dashboardId, search }: { dashboardId: string; search: 
   const onChange: ChangeDashboardSearch = (patch, replace = false) => {
     void navigate({ to: "/dashboard", replace, search: (previous) => validateDashboardReadSearch({ ...previous, ...patch, dashboardId }) });
   };
-  const query = { projectIds: ids ?? [], datasetId: search.datasetId, jsonPointer: search.jsonPointer };
+  const query = {
+    projectIds: ids ?? [], datasetId: search.datasetId, jsonPointer: search.jsonPointer,
+    ...(dashboard.data?.excludedDataIds?.length ? { excludedDataIds: dashboard.data.excludedDataIds } : {}),
+  };
   const comparison = useQuery({
     queryKey: comparisonKeys.view(query), queryFn: ({ signal }) => getProjectComparison(query, signal),
     enabled: comparing && !dashboard.error && !limits.error, staleTime: 0, refetchInterval: POLL_MS, refetchIntervalInBackground: false,
@@ -91,6 +96,6 @@ function SavedDashboard({ dashboardId, search }: { dashboardId: string; search: 
             {search.datasetId && <Button onClick={() => onChange({ ...clearedDataScope, datasetId: undefined })}>返回全部共同数据</Button>}</div>
             : !comparison.data ? <Card><LoadingBlock /></Card> : <ComparisonWorkbench
               view={comparison.data} search={{ ...search, projectId: [...dashboard.data.projectIds] }} onChange={onChange}
-              onRemove={edit} />}
+              onRemove={edit} selection={selection} />}
   </Page></div>;
 }

@@ -28,7 +28,7 @@ async function readDashboards(
   }
   return rows.map((row) => dashboardSchema.parse({
     dashboardId: row.dashboardId, name: row.name, description: row.description,
-    projectIds: members.get(row.dashboardId) ?? [], revision: row.revision,
+    projectIds: members.get(row.dashboardId) ?? [], excludedDataIds: row.excludedDataIds, revision: row.revision,
     createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString(),
   }));
 }
@@ -72,6 +72,7 @@ export function createPostgresDashboardStore(db: EvalDb, ownerUserId: string): D
       return db.transaction(async (transaction) => {
         const [created] = await transaction.insert(dashboards).values({
           dashboardId: createId(), ownerUserId: owner, name: input.name, description: input.description,
+          excludedDataIds: input.excludedDataIds,
           creationKey: creation.key, creationFingerprint: creation.fingerprint,
         }).onConflictDoNothing({ target: [dashboards.ownerUserId, dashboards.creationKey] }).returning();
         if (created) {
@@ -95,6 +96,7 @@ export function createPostgresDashboardStore(db: EvalDb, ownerUserId: string): D
         await requireProjects(transaction, owner, input.projectIds);
         const [updated] = await transaction.update(dashboards).set({
           name: input.name, description: input.description, revision: revision + 1, updatedAt: sql`clock_timestamp()`,
+          excludedDataIds: input.excludedDataIds,
         }).where(and(eq(dashboards.ownerUserId, owner), eq(dashboards.dashboardId, dashboardId), eq(dashboards.revision, revision))).returning();
         if (!updated) throw new DashboardRevisionConflictError(dashboardId);
         await transaction.delete(dashboardProjects)

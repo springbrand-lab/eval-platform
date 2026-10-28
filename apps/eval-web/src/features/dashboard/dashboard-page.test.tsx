@@ -213,10 +213,10 @@ it("shows the current Data's execution measurements per Project without replacin
     await waitFor(() => expect(screen.container.querySelector('table[aria-label="逐条数据对比"] tbody tr')).not.toBeNull());
     await changeView(screen.container, "执行指标");
     const cells = screen.container.querySelector('table[aria-label="逐条数据对比"] tbody tr')!.querySelectorAll("td");
-    expect(executionValues(cells[1])).toEqual({
+    expect(executionValues(cells[2])).toEqual({
       "平均执行积分": "2.75 · 部分", "平均执行耗时": "1.2 秒", "缓存命中率": "0%", "工具调用成功率": "80.0% · 部分",
     });
-    expect(executionValues(cells[2])).toEqual({
+    expect(executionValues(cells[3])).toEqual({
       "平均执行积分": "未获得", "平均执行耗时": "未获得", "缓存命中率": "未获得", "工具调用成功率": "—",
     });
     expect(control(screen.container, "当前范围表现")?.textContent).toContain("24条共同已评数据");

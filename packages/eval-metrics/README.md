@@ -46,7 +46,7 @@ Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sam
 
 ## 已评分交集对比
 
-`createProjectComparison({ source })` 提供唯一的 `getComparison({ projectIds, datasetId?, jsonPointer? })` Interface；比较无基线，各侧平等。`ProjectComparisonSource.read(projectIds)` 必须在同一 owner 的同一一致性快照中提供各 Project 的完整 `MetricsFacts`，Module 复用原有事实校验、Schema 解释与原始记录聚合，不读取 SP 或实时目录，不保存另一份指标状态。
+`createProjectComparison({ source })` 提供唯一的 `getComparison({ projectIds, datasetId?, jsonPointer?, excludedDataIds? })` Interface；比较无基线，各侧平等。`excludedDataIds` 在共同已评交集形成后、所有字段数量、数据集分组及原始事实聚合前排除 Data；它不是前端隐藏行，也不删除源数据。全部排除仍保留可恢复的共同字段定义，汇总为真实空范围；清空排除列表恢复当前有效交集。`ProjectComparisonSource.read(projectIds)` 必须在同一 owner 的同一一致性快照中提供各 Project 的完整 `MetricsFacts`，Module 复用原有事实校验、Schema 解释与原始记录聚合，不读取 SP 或实时目录，不保存另一份指标状态。
 
 不同 Schema 按共同 JSON Pointer 与兼容统计类型合并（number/integer 同属数值；枚举分类值域须一致，忽略声明顺序，不拼接部分重叠的值域），不要求整份 Schema 相同。共同字段还必须在共同 Data 上实际有有效非空观察；只有成功且 Schema 有效的评估贡献评分，0、false 是有效值，null、未评分、失败、无效输出不进入默认比较。指标切换明确选择一个共同词条：该词条在每个 Project 都有有效评分的 `dataId` 交集决定可比较数据，避免不同词条的有效覆盖范围被混算。没有指定词条时选首个有共同评分的词条；指定词条失去可比较结果时展示空范围，不暗中切换统计口径。
 

@@ -14,6 +14,7 @@ import { formatNumber } from "@/lib/format";
 import { ComparisonDataResults, ComparisonDataTable, DataNavigation } from "./comparison-data";
 import { ComparisonSummary } from "./comparison-summary";
 import { clearedDataScope, type ChangeDashboardSearch, type DashboardSearch } from "./dashboard-search";
+import { DataSelectionActions, type DataSelection } from "./data-selection";
 
 function ScopeNavigation({ view, search, children }: { view: ProjectComparisonView; search: DashboardSearch; children?: ReactNode }) {
   const [expanded, setExpanded] = useState(false);
@@ -46,8 +47,8 @@ function ScopeNavigation({ view, search, children }: { view: ProjectComparisonVi
   </Card>;
 }
 
-export function ComparisonWorkbench({ view, search, onChange, onRemove }: {
-  view: ProjectComparisonView; search: DashboardSearch; onChange: ChangeDashboardSearch; onRemove: (projectId: string) => void;
+export function ComparisonWorkbench({ view, search, onChange, onRemove, selection }: {
+  view: ProjectComparisonView; search: DashboardSearch; onChange: ChangeDashboardSearch; onRemove: (projectId: string) => void; selection?: DataSelection;
 }) {
   const field = view.selectedField;
   const viewMode = search.viewMode ?? "evaluation";
@@ -94,6 +95,7 @@ export function ComparisonWorkbench({ view, search, onChange, onRemove }: {
       </div>}
       {!evaluating && field && <p className="break-words text-[11px] leading-5 text-text-muted">沿用「{field.title}」下的共同已评数据，不含项目中其他数据。</p>}
     </section>
+    {selection && <DataSelectionActions selection={selection} />}
     {noFields ? <Card>
       <div className="flex flex-wrap gap-x-6 gap-y-2 border-b border-border px-5 py-4">{view.projects.map((meta) =>
         <div key={meta.project.projectId}><p className="text-sm font-semibold text-text-strong">{meta.project.name}</p><p className="mt-1 text-xs text-text-muted">执行 Agent · {meta.executionAgentName} · {meta.executionModel ?? meta.framework.toUpperCase()}</p><p className="mt-1 text-xs text-text-muted">评估 Agent · {meta.evaluationAgentName ?? "未提供"}</p></div>)}</div>
@@ -125,7 +127,7 @@ export function ComparisonWorkbench({ view, search, onChange, onRemove }: {
                 title={row ? "单条数据表现" : search.datasetId ? "数据集表现" : "整体差异"}
                 scope={<>{field.title} · {row ? dataTitle(row.data) : scope}</>} onRemove={onRemove} viewMode={viewMode} />
               {row ? <ComparisonDataResults view={view} row={row} search={search} onChange={onChange} viewMode={viewMode} />
-                : <ComparisonDataTable view={view} search={search} onChange={onChange} pagination={pagination} viewMode={viewMode} />}
+                : <ComparisonDataTable view={view} search={search} onChange={onChange} pagination={pagination} viewMode={viewMode} selection={selection} />}
             </>}
         </div>
       </div>
