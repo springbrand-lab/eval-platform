@@ -16,7 +16,6 @@ import type {
   ExecutionOutput,
   HarnessConfig,
   MaterializedDataBinding,
-  JsonValue,
 } from "@eval-platform/eval-contracts";
 import type { DataInput, InitialMaterialsRef } from "@eval-platform/eval-dataset";
 
@@ -128,13 +127,20 @@ export interface ExportedSubjectInput extends ExportedArtifact {
   read(): Promise<ReadableStream<Uint8Array>>;
 }
 
-/** One raw native trajectory record and its strictly increasing, positive source cursor. */
-export interface ExportedTrajectoryEvent {
+/** One complete native JSONL record; the reader must verify the entire source before EOF. */
+export interface ExportedTrajectoryRecord {
   readonly seq: number;
-  /** Frozen source high-water mark, unchanged on every page and on a resumed export. */
+  /** Including `{"ingestSeq":...,"record":`, the original UTF-8 JSON, and `}\n`. */
+  readonly byteLength: number;
+  /** A fresh, verified stream of exactly one original JSONL line (no re-serialization). */
+  readJsonl(): Promise<ReadableStream<Uint8Array>>;
+}
+
+/** A bounded source page. Even an empty trajectory has a frozen, durable watermark. */
+export interface ExportedTrajectoryPage {
   readonly throughSeq: number;
-  /** Written unchanged as one JSONL line. */
-  readonly record: JsonValue;
+  readonly records: readonly ExportedTrajectoryRecord[];
+  readonly nextAfterSeq: number | null;
 }
 
 /** What one framework exports from a finished Agent; the evidence store freezes it. */
@@ -147,9 +153,10 @@ export interface ExportedEvidence {
   readonly readFile: EvidenceFileReader;
   /**
    * Complete raw records after `afterSeq` (0 for all), up to the saved `throughSeq` if supplied.
-   * The adapter pages through the public source without projection; each call starts a new read.
+   * The adapter pages through the public source; each call starts a new read. A terminal page,
+   * including an empty one, is mandatory: running out of pages cannot mean success.
    */
-  readTrajectory(afterSeq: number, throughSeq?: number): AsyncIterable<ExportedTrajectoryEvent>;
+  readTrajectory(afterSeq: number, throughSeq?: number): AsyncIterable<ExportedTrajectoryPage>;
   readonly trajectoryFormat: string;
   readonly trajectoryComplete: boolean;
   readonly trajectoryIncompleteReason?: string;

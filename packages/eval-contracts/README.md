@@ -12,9 +12,13 @@ stored unchanged. A page row may instead be
 `{ingestSeq,reference:{format:"sp-pi-trajectory-record/v1",throughSeq,identity,byteLength,sha256}}`:
 the identity is Runtime's canonical `[agentId,sessionId,type,nativeId]`, and the
 SHA-256 and byte length cover only the UTF-8 JSON of `record`, not its ingest
-wrapper. Only the SP HTTP Harness adapter resolves it; the stable cross-package
-`AgentResourceSnapshot.nativeRecords` and evidence JSONL contain **complete**
-`{ingestSeq,record}` rows, never reference placeholders or duplicate content.
+wrapper. Only the SP HTTP Harness adapter resolves it. Evidence JSONL contains
+**complete original** `{ingestSeq,record}` rows, never reference placeholders.
+Historical `AgentResourceSnapshot.nativeRecords` have full source rows; the
+SP adapter now reduces referenced native bodies to verified Pi identities and
+body-free versioned Metrics facts. The public SP page cannot supply those local
+projections. The full resource JSON header is **not yet** bounded/paginated by
+the coordinated SP wire, so the resource consumer is not end-to-end OOM-safe.
 A new
 `AgentResourceSnapshot` has `nativeRecords`, not `telemetryEvents`; its independent
 `usageEvents`/`billingSettlements` and readiness remain intact. New evidence manifests
@@ -77,9 +81,9 @@ JSON 值与标识符规则也只在这里定义：`jsonValueSchema`、`jsonObjec
 
 状态词表只在这里定义：`SAMPLING_STATUSES`、`PENDING_SAMPLING_STATUSES`、`AGENT_STATUSES`、`TERMINAL_AGENT_STATUSES` 及谓词 `isPendingSamplingStatus`、`isTerminalAgentStatus`，`SamplingStatus`、`AgentStatus` 由它们派生，SQL 使用同一常量。`AgentSubmission.status` 是 SP 归一化后的状态，SP 原始状态只在 Eval API 的 Harness 适配层映射一次。
 
-资源契约位于 `src/resources.ts`，通过包根入口导出。新的 `AgentResourceSnapshot` 原样承载 SP 的 `usageEvents`、`nativeRecords:[{ingestSeq,record}]`、`billingSettlements`，而不是 Eval 重新设计的费用/Token/Tool/Turn 模型。原始来源、缺失字段、`null`、顺序、重复记录、子 Agent 明细与汇总保留；Runtime 不补零、不换算、不抽取、不合并、不去重、不计算总量。旧 `telemetryEvents` 只可能存在于保留的历史字节中，不属于新快照契约。
+资源契约位于 `src/resources.ts`，通过包根入口导出。新的 `AgentResourceSnapshot` 原样承载 SP 的 `usageEvents`、`billingSettlements`、覆盖度与 readiness；`nativeRecords` 保留已核验的来源身份及 body-free Metrics facts，不在 PostgreSQL 重复保存 Pi 大正文，也不是 Eval 重新设计的费用/Token/Tool/Turn 模型。来源缺失、`null`、顺序、重复记录及子 Agent 身份保留；Runtime 不补零、不换算、不抽取、不合并、不去重、不计算总量。历史原始快照不迁移，旧 `telemetryEvents` 不属于新快照契约。SP 的资源完整 JSON header 尚未发布有界分页版本，新消费者仍不得声称端到端 OOM 安全。
 
-`coverage` 分别保留来源对三组记录的 `complete | partial | unavailable` 声明，`finalized` 保留操作终结声明；`collected` 只表示读到了并保存了原始快照，不保证来源完整。初始化 Session 历史和导入的 Subject 证据不属于本次资源范围。失败、取消和重启的原始记录不能因最终结果失败而删除，历次主动重评也不能混入同一评估记录。Metric 读取这些原始内容，负责来源解析、去重、重叠用量处理、费用/Token/工具/Turn 统计及汇总。
+`coverage` 分别保留来源对三组记录的 `complete | partial | unavailable` 声明，`finalized` 保留操作终结声明；`collected` 只表示读到了并保存了快照，不保证来源完整。初始化 Session 历史和导入的 Subject 证据不属于本次资源范围。失败、取消和重启的使用/结算来源事实与 compact Pi facts 不能因最终结果失败而删除，历次主动重评也不能混入同一评估记录。Metrics 读取这些事实，负责来源解析、去重、重叠用量处理、费用/Token/工具/Turn 统计及汇总。
 
 一旦观察到 Agent 终态，Attempt 的状态及完成时间就固定为该 Agent 事实，`error` 保留原 Agent 错误；Runtime 资源持久化/产物收尾失败由执行或评估阶段的 `lastError` 表达，不把已经 `completed` 的 Attempt 改为 Agent 失败。保存重试复用同一份事实，不改变 Sampling/Evaluation/Attempt/Submission 身份。
 

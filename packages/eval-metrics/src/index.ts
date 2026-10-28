@@ -5,4 +5,4 @@ export type * from "./evaluators/model.js";
 export type * from "./aggregation/model.js";
 export type * from "./reporting/model.js";
 
-export { compactResourceSnapshot } from "./aggregation/compact-resources.js";
+export { compactNativeTrajectoryRecord, compactResourceSnapshot } from "./aggregation/compact-resources.js";

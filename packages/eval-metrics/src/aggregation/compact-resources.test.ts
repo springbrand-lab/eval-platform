@@ -34,6 +34,7 @@ describe("body-free native Pi metric projections", () => {
     const projected = await compact(inputs);
     expect(JSON.stringify(inputs)).toBe(before);
     expect(JSON.stringify(projected).length).toBeLessThan(20_000);
+    expect(await compact(projected)).toEqual(projected);
     const collection = projected[0]!.collection;
     if (!collection || collection.status !== "collected") throw new Error("Expected compacted snapshot");
     const fingerprint = collection.snapshot.nativeRecords.find((entry) => entry.ingestSeq === 14)?.metricProjection?.fingerprint;

@@ -2,21 +2,21 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_EVIDENCE_LIMITS, EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT,
-  canonicalJsonBytes, sha256Hex, type NativeTrajectoryEntry,
+  type NativeTrajectoryEntry,
 } from "@eval-platform/eval-contracts";
-import { compactResourceSnapshot } from "@eval-platform/eval-metrics";
+import { compactNativeTrajectoryRecord, compactResourceSnapshot } from "@eval-platform/eval-metrics";
 import {
   AgentHandleNotFoundError,
   AgentIdentityConflictError,
   type AgentHandle,
   type EvidenceBundleReader,
-  type ExportedTrajectoryEvent,
+  type ExportedTrajectoryPage,
 } from "@eval-platform/eval-runtime";
 import { EVAL_EVIDENCE_FILE_MAX_BYTES, EVAL_INITIAL_FILE_MAX_BYTES, EVAL_OUTPUT_SCHEMA_PATH as SCHEMA_PATH } from "@springbrand/eval-harness";
 import { isRequestCancelled } from "@springbrand/http/errors";
 import WebSocket, { WebSocketServer } from "ws";
 import { createSpHarness, SpHarnessError, spEvidenceLimits } from "./harness.js";
-import { nativeAssistantMessage, nativeFixture, nativeTransfer, nativeTransferResponse } from "./native-test-fixture.js";
+import { nativeAssistantMessage, nativeFixture, nativeTransfer, nativeTransferResponse, streamedAssistantTransfer } from "./native-test-fixture.js";
 
 const OWNER = "11111111-1111-4111-8111-111111111111";
 const OTHER_OWNER = "22222222-2222-4222-8222-222222222222";
@@ -64,7 +64,7 @@ const resources = {
   scope,
   observedAt: "2026-10-14T00:00:00.000Z",
   finalized: true,
-  coverage: { usageEvents: "complete", nativeRecords: "partial", billingSettlements: "complete" },
+  coverage: { usageEvents: "complete", nativeRecords: "partial", billingSettlements: "complete" } as const,
   usageEvents: [{ eventId: "usage-1", unknownField: null }],
   nativeRecords: [native(3)],
   billingSettlements: [{ eventId: "billing-1", chargedCredits: 7 }],
@@ -198,7 +198,7 @@ describe("Eval SP Harness", () => {
     });
   });
 
-  it("uses service-authenticated public operations and preserves evidence and raw resource facts", async () => {
+  it("uses service-authenticated public operations and preserves evidence and authoritative usage/billing facts", async () => {
     const { fetch, requests } = spFetch((request) => {
       const url = new URL(request.url);
       if (request.method === "PUT" && url.pathname === CHAT_PATH) return Response.json(subject);
@@ -227,7 +227,7 @@ describe("Eval SP Harness", () => {
       .toBe("submission-1");
     expect(await harness.collectExecution({ handle: subject })).toEqual(executionOutput);
     expect(await harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
-      .toEqual(resources);
+      .toEqual({ ...resources, nativeRecords: [await compactNativeTrajectoryRecord(native(3), scope)] });
 
     expect(requests).toHaveLength(6);
     expect(requests.every((request) => new URL(request.url).pathname.startsWith(CHAT_PATH))).toBe(true);
@@ -622,9 +622,16 @@ describe("Eval SP Harness", () => {
     ]);
     expect(exported.trajectoryComplete).toBe(true);
     await expect(new Response(await exported.readFile("/index.html")).text()).resolves.toBe("<h1>Hi</h1>");
-    const events: ExportedTrajectoryEvent[] = [];
-    for await (const item of exported.readTrajectory(0)) events.push(item);
-    expect(events).toEqual(records.map((record) => ({ seq: record.ingestSeq, throughSeq: 3, record })));
+    const pages: ExportedTrajectoryPage[] = [];
+    for await (const item of exported.readTrajectory(0)) pages.push(item);
+    expect(pages.map(({ throughSeq, records, nextAfterSeq }) => ({
+      throughSeq, seqs: records.map((record) => record.seq), nextAfterSeq,
+    }))).toEqual([
+      { throughSeq: 3, seqs: [1, 2], nextAfterSeq: 2 },
+      { throughSeq: 3, seqs: [3], nextAfterSeq: null },
+    ]);
+    expect(await Promise.all(pages.flatMap((page) => page.records.map(async (row) =>
+      JSON.parse(await new Response(await row.readJsonl()).text()) as unknown)))).toEqual(records);
     // Successful file reads and intermediate pages are summarized by Runtime; only the final page is logged.
     expect(logged).toEqual([expect.objectContaining({ name: "evidence_trajectory_page", status: 200, from: 0, pages: 2, records: 3, afterSeq: 2 })]);
     expect(JSON.stringify(logged)).not.toContain("Build");
@@ -637,9 +644,9 @@ describe("Eval SP Harness", () => {
 
     // A resumed read starts at the persisted cursor and yields exactly the remaining events.
     requests.length = 0;
-    const resumed: ExportedTrajectoryEvent[] = [];
+    const resumed: ExportedTrajectoryPage[] = [];
     for await (const item of exported.readTrajectory(2, 3)) resumed.push(item);
-    expect(resumed).toEqual(events.slice(2));
+    expect(resumed.map((page) => page.records.map((row) => row.seq))).toEqual([[3]]);
     expect(requests.map((request) => new URL(request.url).searchParams.get("afterSeq"))).toEqual(["2"]);
     expect(requests.map((request) => new URL(request.url).searchParams.get("throughSeq"))).toEqual(["3"]);
     await expect((async () => { for await (const _ of exported.readTrajectory(-1)) { /* never reached */ } })())
@@ -767,7 +774,7 @@ describe("Eval SP Harness large transfers and readiness", () => {
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "service-secret", fetch,
       log: (event) => events.push(event) });
     expect(await harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
-      .toEqual(resources);
+      .toEqual({ ...resources, nativeRecords: [await compactNativeTrajectoryRecord(native(3), scope)] });
     expect(events).toEqual([expect.objectContaining({
       name: "resources_read", status: 200, finalized: true, submissionId: "submission-1", readiness, nativeRecords: 1,
     })]);
@@ -779,6 +786,9 @@ describe("Eval SP Harness large transfers and readiness", () => {
     ["an invalid", { ...resources, readiness: { ...readiness, pendingTelemetryEvents: -1 } }],
     ["a missing", (({ readiness: _readiness, ...rest }) => rest)(resources)],
     ["an event-only", { ...resources, nativeRecords: undefined, telemetryEvents: [{ eventId: "old" }] }],
+    ["a forged Metrics projection", { ...resources, nativeRecords: [{
+      ...native(3), metricProjection: { supported: true, facts: [] },
+    }] }],
   ])("rejects %s readiness summary instead of persisting the snapshot", async (_case, body) => {
     const { fetch } = queuedFetch(Response.json(body));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
@@ -810,10 +820,10 @@ describe("Eval SP Harness large transfers and readiness", () => {
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
       fetch: queuedFetch(Response.json(snapshot)).fetch });
     await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: scope.idempotencyKey,
-      submissionId: scope.submissionId })).resolves.toEqual(snapshot);
+      submissionId: scope.submissionId })).resolves.toEqual(await compactResourceSnapshot(snapshot));
   });
 
-  it("hydrates a 5+ MiB SAFE native resource reference before persistence and preserves compact metric parity", async () => {
+  it("streams a 5+ MiB SAFE native resource reference into compact Pi facts without storing its raw body", async () => {
     const large = nativeAssistantMessage(14, SUBJECT_CHAT, scope.submissionId,
       [{ type: "text", text: "汉🌎é".repeat(650_000) }]);
     const { reference, bytes } = nativeTransfer(large, 14);
@@ -841,16 +851,53 @@ describe("Eval SP Harness large transfers and readiness", () => {
     const collected = await harness.collectAgentResources({
       handle: subject, idempotencyKey: scope.idempotencyKey, submissionId: scope.submissionId,
     });
-    expect(collected).toEqual({ ...resources, nativeRecords: [native(3), large] });
+    expect(collected).toMatchObject({ ...resources, nativeRecords: [
+      { ingestSeq: 3, metricProjection: { supported: true } },
+      { ingestSeq: 14, metricProjection: { supported: true, fingerprint: reference.reference.sha256 } },
+    ] });
     expect(collected.nativeRecords.every((item) => "record" in item)).toBe(true);
     const compact = await compactResourceSnapshot(collected);
-    expect(compact).toEqual(await compactResourceSnapshot({ ...collected, nativeRecords: [native(3), large] }));
-    expect(compact.nativeRecords[1]?.metricProjection?.fingerprint).toBe(await sha256Hex(canonicalJsonBytes(large.record)));
+    expect(compact).toEqual(collected);
+    const rawProjection = await compactResourceSnapshot({ ...resources, nativeRecords: [native(3), large] });
+    expect(compact.nativeRecords[1]?.metricProjection?.facts).toEqual(rawProjection.nativeRecords[1]?.metricProjection?.facts);
     expect(JSON.stringify(compact)).not.toContain("汉🌎é");
     expect(await harness.collectAgentResources({ handle: subject, idempotencyKey: scope.idempotencyKey }))
       .toEqual(collected); // An unknown receipt ID uses SP's operation-bound scope, not a guessed Submission.
     expect(requests.map(({ method }) => method)).toEqual(["GET", "GET", "GET", "GET"]);
   }, 30_000);
+
+  it("drains a 30+ MiB native resource through the service-authenticated byte route, retaining only compact Pi and authoritative usage/Action facts", async () => {
+    const { reference, recordLength, response } = streamedAssistantTransfer(SUBJECT_CHAT, scope.submissionId);
+    expect(recordLength).toBeGreaterThan(30 * 1024 * 1024);
+    const usageEvents = [{ eventId: "usage-1", kind: "assistant_model", runId: "run-1",
+      metrics: { inputTokens: 4, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 7 } }];
+    const billingSettlements = [
+      { accountId: OWNER, eventId: "model-charge-1", status: "settled", debitedUnits: 8 },
+      { executionId: "action-1", status: "succeeded", chargedCredits: 3 },
+    ];
+    let reads = 0;
+    const harness = createSpHarness({
+      origin: "https://eval-sp.test", serviceToken: "secret",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        expect(request.headers.get("X-Eval-Service-Token")).toBe("secret");
+        if (new URL(request.url).pathname.includes("/trajectory/records/")) { reads++; return response(); }
+        return Response.json({ ...resources, usageEvents, billingSettlements, nativeRecords: [native(3), reference] });
+      },
+    });
+    const snapshot = await harness.collectAgentResources({
+      handle: subject, idempotencyKey: scope.idempotencyKey, submissionId: scope.submissionId,
+    });
+    expect(reads).toBe(1);
+    expect(snapshot.usageEvents).toEqual(usageEvents);
+    expect(snapshot.billingSettlements).toEqual(billingSettlements);
+    expect(snapshot.nativeRecords[1]?.metricProjection).toMatchObject({
+      fingerprint: reference.reference.sha256, supported: true,
+      facts: [{ type: "assistant", thinking: false, content: true, inputTokens: 4, outputTokens: 3, totalTokens: 7 }],
+    });
+    expect(JSON.stringify(snapshot).length).toBeLessThan(10_000);
+    expect(await compactResourceSnapshot(snapshot)).toEqual(snapshot);
+  }, 45_000);
 
   it.each(["foreign-submission", "foreign-parent", "context"] as const)(
     "never stores or compacts a %s hydrated native resource reference", async (kind) => {

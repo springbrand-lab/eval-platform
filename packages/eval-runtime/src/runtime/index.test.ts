@@ -7329,12 +7329,14 @@ describe("resumable Subject evidence export", () => {
         ...base,
         async* readTrajectory(afterSeq, throughSeq) {
           cursors.push(afterSeq);
-          for await (const event of base.readTrajectory(afterSeq, throughSeq)) {
-            if (failAfter !== undefined && event.seq > failAfter) {
+          for await (const page of base.readTrajectory(afterSeq, throughSeq)) {
+            if (failAfter !== undefined && page.records.some((record) => record.seq > failAfter!)) {
+              const records = page.records.filter((record) => record.seq <= failAfter!);
               failAfter = undefined;
+              yield { ...page, records, nextAfterSeq: records.at(-1)!.seq };
               throw transient("trajectory page unavailable");
             }
-            yield event;
+            yield page;
           }
         },
       };

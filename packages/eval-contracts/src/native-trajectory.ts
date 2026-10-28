@@ -166,10 +166,17 @@ export function nativeRecordMayBelongToScope(
 export const nativeTrajectoryEntrySchema: z.ZodType<NativeTrajectoryEntry> = z.strictObject({
   ingestSeq: z.number().int().positive().safe(),
   record: z.custom<PiTrajectoryRecord>(isSafePiTrajectoryRecord, "Expected a safe native Pi trajectory record"),
+  // Only the Eval Metrics projection has this field; the public SP page below
+  // remains a raw wire and cannot supply or forge local derived facts.
+  metricProjection: jsonObjectInPlaceSchema.exactOptional(),
 });
 
+const spNativeRecordSchema = z.strictObject({
+  ingestSeq: z.number().int().positive().safe(),
+  record: z.custom<PiTrajectoryRecord>(isSafePiTrajectoryRecord, "Expected a safe native Pi trajectory record"),
+});
 export const spPiTrajectoryPageRowSchema: z.ZodType<SpPiTrajectoryPageRow> =
-  z.union([nativeTrajectoryEntrySchema, spPiTrajectoryReferenceSchema]);
+  z.union([spNativeRecordSchema, spPiTrajectoryReferenceSchema]);
 
 export const spPiTrajectoryPageSchema: z.ZodType<SpPiTrajectoryPage> = z.strictObject({
   format: z.literal(SP_PI_TRAJECTORY_FORMAT),

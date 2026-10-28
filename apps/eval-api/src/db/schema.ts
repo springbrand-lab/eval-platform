@@ -396,8 +396,9 @@ export const evaluations = pgTable("eval_evaluations", {
 ]);
 
 /**
- * One Attempt's raw resource snapshot, stored unchanged outside its stage record (whose facts keep only
- * its summary), with the Metrics projection derived from it in the same write. `record_id` is the
+ * One Attempt's resource snapshot, stored outside its stage record (whose facts keep only
+ * its summary), with the Metrics projection derived from it in the same write. New stream
+ * consumers store compact native facts, not a second copy of raw evidence bodies. `record_id` is the
  * Sampling of an execution Attempt or the Evaluation of an evaluation Attempt; rows go with their record.
  */
 export const attemptResources = pgTable("eval_attempt_resources", {

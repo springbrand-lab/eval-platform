@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { PI_TRAJECTORY_RECORD_FORMAT, spPiTrajectoryIdentityParts } from "@eval-platform/eval-contracts";
+import {
+  PI_TRAJECTORY_RECORD_FORMAT, isSafePiTrajectoryRecord, spPiTrajectoryIdentityParts,
+  spPiTrajectoryRecordIdentity, type JsonValue, type PiTrajectoryRecord,
+} from "@eval-platform/eval-contracts";
+import { EVAL_RESULT_MAX_BYTES } from "@springbrand/eval-harness";
 
 /**
  * Source-independent byte validation. This is NOT an SP route or a replacement for
@@ -14,7 +18,10 @@ export interface NativeRecordByteBinding {
   readonly scope:
     | { readonly kind: "chat"; readonly chatId: string }
     | { readonly kind: "operation"; readonly chatId: string; readonly submissionId: string };
-  /** Called only after the entire original JSON has been verified. Never includes content. */
+  /** Bounded native interpretation for Metrics or the Evaluator's result-file fallback.
+   * No record object is constructed during evidence export. */
+  readonly interpret?: "metrics" | "reply";
+  /** Called only after the entire original JSON has been verified; never log its `record`. */
   readonly onVerified?: (inspection: NativeRecordInspection) => void;
 }
 
@@ -26,6 +33,11 @@ export interface NativeRecordInspection {
   readonly maxDecodedChars: number;
   readonly maxCapturedChars: number;
   readonly maxDepth: number;
+  /** Present only if requested. At most 512 KiB of original JSON is ever parsed; a
+   * larger record is reduced to bounded native facts, with withheld Tool lengths unknown. */
+  readonly record?: PiTrajectoryRecord;
+  readonly reduced?: boolean;
+  readonly maxBufferedBytes?: number;
 }
 
 export class NativeRecordStreamError extends Error {
@@ -36,6 +48,9 @@ export class NativeRecordStreamError extends Error {
 }
 
 const DECODE_CHUNK_BYTES = 64 * 1024;
+const MAX_INTERPRETED_BYTES = 512 * 1024;
+const MAX_CONTENT_BLOCKS = 256;
+const OMITTED = "[CONTENT OMITTED]";
 const MAX_KEY_CHARS = 512;
 const MAX_FIELD_CHARS = 4_096;
 const MAX_NUMBER_CHARS = 128;
@@ -51,6 +66,8 @@ type Frame = {
   readonly path?: string;
   state: "keyOrEnd" | "key" | "colon" | "valueOrEnd" | "value" | "commaOrEnd";
   key: string | undefined;
+  /** Array position, or the position of a tracked block inside its content array. */
+  index?: number;
   readonly seen?: Set<string>;
 };
 
@@ -63,12 +80,28 @@ const ENVELOPE_KEYS: Readonly<Record<string, readonly string[]>> = {
   "parent.resource": ["agentId", "sessionId"],
 };
 const NATIVE_VALUE_KEYS = new Set(["id", "conversationId", "kind", "model"]);
+const MESSAGE = "record.value.model[0]";
+const BLOCK = `${MESSAGE}.content[*]`;
+const BLOCK_TEXT = `${BLOCK}.text`;
+const MESSAGE_FIELDS = [
+  "role", "timestamp", "stopReason", "content", "usage", "toolCallId", "toolName", "isError", "durationMs",
+];
+const BLOCK_FIELDS = ["type", "id", "name", "arguments", "text"];
 const TRACKED_PATHS = new Set([
   ...Object.keys(ENVELOPE_KEYS),
   ...Object.entries(ENVELOPE_KEYS).flatMap(([parent, keys]) => keys.map((key) => parent ? `${parent}.${key}` : key)),
   "record.value.id", "record.value.conversationId", "record.value.kind", "record.value.model",
+  "record.value.byTaskId", "record.value.head", "record.value.edits",
+  MESSAGE, ...MESSAGE_FIELDS.map((field) => `${MESSAGE}.${field}`),
+  ...["input", "output", "totalTokens"].map((field) => `${MESSAGE}.usage.${field}`),
+  BLOCK, ...BLOCK_FIELDS.map((field) => `${BLOCK}.${field}`),
 ]);
 const INSPECTED_PATHS = new Set([...TRACKED_PATHS].filter((path) => path !== ""));
+const REQUIRED_STRING_PATHS = new Set([
+  "format", "resource.agentId", "resource.sessionId", "projection.kind", "projection.policyId",
+  "record.type", "record.value.kind", "submissionId", "origin",
+  "parent.resource.agentId", "parent.resource.sessionId", "parent.submissionId",
+]);
 
 function invalid(message: string): never {
   throw new NativeRecordStreamError(`Unsafe SAFE Pi record: ${message}`, false);
@@ -84,6 +117,7 @@ class SafePiJsonScanner {
   private readonly frames: Frame[] = [];
   private readonly types = new Map<string, ValueType>();
   private readonly scalars = new Map<string, Scalar>();
+  private readonly blocks: Record<string, JsonValue>[] = [];
   private root: "value" | "done" = "value";
   private token: "idle" | "string" | "escape" | "unicode" | "number" | "literal" = "idle";
   private tokenValue = "";
@@ -93,8 +127,16 @@ class SafePiJsonScanner {
   private overlongKey = false;
   private unicodeRemaining = 0;
   private literal = "";
+  private modelCount = 0;
+  private contentCount = 0;
+  private contentInvalid = false;
+  private replyChars = 0;
   maxCapturedChars = 0;
   maxDepth = 0;
+
+  constructor(private readonly interpret?: "metrics" | "reply") {}
+
+  get hasAmbiguousMessage(): boolean { return this.contentInvalid; }
 
   feed(text: string): void {
     for (const char of text) {
@@ -175,8 +217,84 @@ class SafePiJsonScanner {
     }
   }
 
+  /** Only identities, an optional native message's small fields and withholding
+   * markers survive a large record. Tool body lengths stay unknown, never zero. */
+  reducedRecord(): PiTrajectoryRecord {
+    const scalar = (path: string): JsonValue | undefined => this.scalars.get(path);
+    const agentId = scalar("resource.agentId") as string;
+    const chatId = scalar("resource.sessionId") as string;
+    const kind = scalar("record.type") as "entry" | "conversation";
+    const id = scalar("record.value.id") as number;
+    const parent: Record<string, JsonValue> = {};
+    if (this.types.get("parent") === "object") {
+      parent.resource = {
+        agentId: scalar("parent.resource.agentId") as string,
+        sessionId: scalar("parent.resource.sessionId") as string,
+      };
+      parent.submissionId = scalar("parent.submissionId") as string;
+      for (const field of ["conversationId", "taskId", "requestId", "toolCallId", "runId"]) {
+        const item = scalar(`parent.${field}`);
+        if (item !== undefined) parent[field] = item;
+      }
+    }
+    const value: Record<string, JsonValue> = { id };
+    if (kind === "entry") {
+      value.conversationId = scalar("record.value.conversationId") as number;
+      value.kind = scalar("record.value.kind") as string;
+      const byTaskId = scalar("record.value.byTaskId");
+      if (byTaskId !== undefined) value.byTaskId = byTaskId;
+      for (const field of ["head", "edits"]) {
+        if (this.types.has(`record.value.${field}`)) value[field] = true;
+      }
+      if (this.types.get("record.value.model") === "array") {
+        if (this.modelCount !== 1 || this.contentInvalid) {
+          // NativeMetricFacts rejects a multi-message/delta Entry instead of
+          // treating an omitted second message as absent.
+          value.model = [{}, {}];
+        } else {
+          const message: Record<string, JsonValue> = {};
+          for (const field of MESSAGE_FIELDS) {
+            const item = scalar(`${MESSAGE}.${field}`);
+            if (item !== undefined && field !== "usage" && field !== "content") message[field] = item;
+          }
+          if (this.types.get(`${MESSAGE}.usage`) === "object") {
+            const usage: Record<string, JsonValue> = {};
+            for (const field of ["input", "output", "totalTokens"]) {
+              const item = scalar(`${MESSAGE}.usage.${field}`);
+              if (item !== undefined) usage[field] = item;
+            }
+            message.usage = usage;
+          }
+          if (this.types.get(`${MESSAGE}.content`) === "array") {
+            message.content = this.contentCount <= MAX_CONTENT_BLOCKS
+              ? this.blocks.slice(0, this.contentCount).map((block) => ({ ...block }))
+              : OMITTED;
+          }
+          value.model = [message];
+        }
+      }
+    }
+    return {
+      format: PI_TRAJECTORY_RECORD_FORMAT,
+      resource: { agentId, sessionId: chatId },
+      submissionId: scalar("submissionId") as string | null,
+      projection: { kind: "safe", policyId: scalar("projection.policyId") as string,
+        policyVersion: scalar("projection.policyVersion") as number },
+      ...(this.types.has("parent") ? { parent } : {}),
+      ...(this.types.has("origin") ? { origin: scalar("origin") as "context" | "execution" } : {}),
+      record: { type: kind, value } as PiTrajectoryRecord["record"],
+    };
+  }
+
   private childPath(parent: Frame): string | undefined {
-    if (parent.path === undefined || parent.type === "array" || parent.key === undefined) return undefined;
+    if (parent.path === undefined) return undefined;
+    if (parent.type === "array") {
+      if (this.interpret === undefined) return undefined;
+      if (parent.path === "record.value.model" && parent.index === 0) return MESSAGE;
+      if (parent.path === `${MESSAGE}.content` && parent.index! < MAX_CONTENT_BLOCKS) return BLOCK;
+      return undefined;
+    }
+    if (parent.key === undefined) return undefined;
     const candidate = parent.path ? `${parent.path}.${parent.key}` : parent.key;
     return TRACKED_PATHS.has(candidate) ? candidate : undefined;
   }
@@ -190,6 +308,21 @@ class SafePiJsonScanner {
       this.types.set(path, type);
       if (scalar !== undefined || type === "null") this.scalars.set(path, scalar ?? null);
     }
+    if (this.interpret !== undefined && path === BLOCK) {
+      if (type !== "object") this.contentInvalid = true;
+      else if (parent?.type === "array" && parent.index! < MAX_CONTENT_BLOCKS) {
+        this.blocks[parent.index!] ??= { text: OMITTED };
+      }
+    }
+    if (this.interpret !== undefined && path?.startsWith(`${BLOCK}.`) && parent?.path === BLOCK) {
+      const index = parent.index!;
+      if (index >= MAX_CONTENT_BLOCKS) return;
+      const block = this.blocks[index] ??= { text: OMITTED };
+      const field = path.slice(BLOCK.length + 1);
+      if (field === "arguments") block.arguments = type === "null" ? null : OMITTED;
+      else if (field === "text") block.text = typeof scalar === "string" && this.interpret === "reply" ? scalar : OMITTED;
+      else if (typeof scalar === "string") block[field] = scalar;
+    }
   }
 
   private completeValue(): void {
@@ -200,6 +333,7 @@ class SafePiJsonScanner {
     }
     if (parent.state !== "value" && parent.state !== "valueOrEnd") invalid("invalid JSON value position");
     parent.state = "commaOrEnd";
+    if (parent.type === "array") parent.index!++;
     parent.key = undefined;
   }
 
@@ -207,7 +341,9 @@ class SafePiJsonScanner {
     this.token = "string";
     this.tokenIsKey = key;
     this.tokenPath = path;
-    this.capture = key ? this.frames.at(-1)?.path !== undefined : path !== undefined && INSPECTED_PATHS.has(path);
+    this.capture = key ? this.frames.at(-1)?.path !== undefined
+      : path !== undefined && INSPECTED_PATHS.has(path)
+        && (path !== BLOCK_TEXT || this.interpret === "reply");
     this.overlongKey = false;
     this.tokenValue = this.capture ? "\"" : "";
   }
@@ -216,13 +352,16 @@ class SafePiJsonScanner {
     if (!this.capture) return;
     this.tokenValue += char;
     this.maxCapturedChars = Math.max(this.maxCapturedChars, this.tokenValue.length);
-    if (this.tokenValue.length > (this.tokenIsKey ? MAX_KEY_CHARS : MAX_FIELD_CHARS)) {
-      if (!this.tokenIsKey) invalid("oversized native identity field");
+    const maximum = this.tokenIsKey ? MAX_KEY_CHARS : this.tokenPath === BLOCK_TEXT
+      ? EVAL_RESULT_MAX_BYTES - this.replyChars : MAX_FIELD_CHARS;
+    if (this.tokenValue.length > maximum) {
+      if (!this.tokenIsKey && REQUIRED_STRING_PATHS.has(this.tokenPath ?? "")) invalid("oversized native identity field");
       // An opaque Tool object may have a large key; do not retain it. A strict
       // envelope will reject the unknown key, and it cannot be an expected key.
+      // An overlong reply/optional metric field stays unknown, not an empty value.
       this.tokenValue = "";
       this.capture = false;
-      this.overlongKey = true;
+      if (this.tokenIsKey) this.overlongKey = true;
     }
   }
 
@@ -237,14 +376,25 @@ class SafePiJsonScanner {
       const key = this.overlongKey ? undefined : value;
       const allowed = parent.path === undefined ? undefined : ENVELOPE_KEYS[parent.path];
       if (allowed !== undefined && (key === undefined || !allowed.includes(key))) invalid("unexpected native envelope field");
+      if (this.overlongKey && this.interpret !== undefined && parent.path !== undefined) this.contentInvalid = true;
       if (key !== undefined && (allowed !== undefined || (parent.path === "record.value" && NATIVE_VALUE_KEYS.has(key)))) {
         if (parent.seen!.has(key)) invalid("duplicate native envelope field");
         parent.seen!.add(key);
+      }
+      if (this.interpret !== undefined && key !== undefined && (parent.path === MESSAGE || parent.path === BLOCK
+        || parent.path === `${MESSAGE}.usage`)) {
+        if (parent.seen!.has(key)) this.contentInvalid = true;
+        parent.seen!.add(key);
+      }
+      if (this.interpret !== undefined && parent.path === BLOCK && key?.toLowerCase().endsWith("signature")) {
+        const block = this.blocks[parent.index!] ??= { text: OMITTED };
+        block[key] = OMITTED;
       }
       parent.key = key;
       parent.state = "colon";
     } else {
       this.valueType(this.tokenPath, "string", value);
+      if (this.tokenPath === BLOCK_TEXT && this.capture) this.replyChars += this.tokenValue.length;
       this.completeValue();
     }
     this.tokenValue = "";
@@ -265,7 +415,9 @@ class SafePiJsonScanner {
   }
 
   private closeFrame(): void {
-    this.frames.pop();
+    const frame = this.frames.pop()!;
+    if (frame.type === "array" && frame.path === "record.value.model") this.modelCount = frame.index!;
+    if (frame.type === "array" && frame.path === `${MESSAGE}.content`) this.contentCount = frame.index!;
     this.completeValue();
   }
 
@@ -282,6 +434,8 @@ class SafePiJsonScanner {
         type, ...(path === undefined ? {} : { path }),
         state: type === "object" ? "keyOrEnd" : "valueOrEnd",
         key: undefined,
+        ...(type === "array" ? { index: 0 } : parent?.path === `${MESSAGE}.content`
+          && parent.type === "array" ? { index: parent.index } : {}),
         ...(path === undefined ? {} : { seen: new Set<string>() }),
       });
       this.maxDepth = Math.max(this.maxDepth, this.frames.length);
@@ -411,16 +565,27 @@ export function verifiedSafePiRecordBytes(
   source: ReadableStream<Uint8Array>, binding: NativeRecordByteBinding,
 ): ReadableStream<Uint8Array> {
   validateBinding(binding);
-  const scanner = new SafePiJsonScanner();
+  const scanner = new SafePiJsonScanner(binding.interpret);
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const hash = createHash("sha256");
   let received = 0;
   let maxDecodedChars = 0;
+  let buffered = 0;
+  const parts: Uint8Array[] = [];
   return source.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       received += chunk.byteLength;
       if (received > binding.byteLength) invalid("more bytes than the frozen record length");
       hash.update(chunk);
+      if (binding.interpret !== undefined && buffered <= MAX_INTERPRETED_BYTES) {
+        if (buffered + chunk.byteLength <= MAX_INTERPRETED_BYTES) {
+          parts.push(chunk.slice());
+          buffered += chunk.byteLength;
+        } else {
+          parts.length = 0;
+          buffered = MAX_INTERPRETED_BYTES + 1;
+        }
+      }
       for (let offset = 0; offset < chunk.byteLength; offset += DECODE_CHUNK_BYTES) {
         let text: string;
         try {
@@ -446,9 +611,27 @@ export function verifiedSafePiRecordBytes(
       scanner.finish(binding.identity, binding.scope);
       const actualHash = hash.digest("hex");
       if (actualHash !== binding.sha256) invalid("SHA-256 differs from the frozen record");
+      let record: PiTrajectoryRecord | undefined;
+      if (binding.interpret !== undefined) {
+        if (buffered <= MAX_INTERPRETED_BYTES && !scanner.hasAmbiguousMessage) {
+          const original = new Uint8Array(buffered);
+          let offset = 0;
+          for (const part of parts) { original.set(part, offset); offset += part.byteLength; }
+          try {
+            record = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(original)) as unknown as PiTrajectoryRecord;
+          } catch {
+            invalid("verified native record is not JSON");
+          }
+        } else record = scanner.reducedRecord();
+        if (!isSafePiTrajectoryRecord(record) || spPiTrajectoryRecordIdentity(record) !== binding.identity) {
+          invalid("invalid native interpretation");
+        }
+      }
       binding.onVerified?.({
         byteLength: received, sha256: actualHash, identity: binding.identity,
         maxDecodedChars, maxCapturedChars: scanner.maxCapturedChars, maxDepth: scanner.maxDepth,
+        ...(record === undefined ? {} : { record, reduced: buffered > MAX_INTERPRETED_BYTES || scanner.hasAmbiguousMessage,
+          maxBufferedBytes: Math.min(buffered, MAX_INTERPRETED_BYTES) }),
       });
     },
   }));
@@ -468,23 +651,36 @@ export function verifiedSafePiJsonlLine(
     || prefix.byteLength + binding.byteLength + suffix.byteLength > binding.maxFileBytes) {
     throw new NativeRecordStreamError("Native JSONL record exceeds one evidence file", false);
   }
-  const validated = verifiedSafePiRecordBytes(source, binding);
-  const iterator = (async function* () {
-    yield prefix;
-    for await (const chunk of validated) yield chunk;
-    // The newline is emitted only after the entire native record has been verified.
-    yield suffix;
-  })();
+  const reader = verifiedSafePiRecordBytes(source, binding).getReader();
+  let prefixSent = false;
+  let closed = false;
+  const release = async (cancel: boolean, reason?: unknown) => {
+    if (closed) return;
+    closed = true;
+    if (cancel) await reader.cancel(reason).catch(() => undefined);
+    reader.releaseLock();
+  };
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
+      if (!prefixSent) {
+        prefixSent = true;
+        controller.enqueue(prefix);
+        return;
+      }
       try {
-        const { done, value } = await iterator.next();
-        if (done) controller.close();
-        else controller.enqueue(value);
+        const { done, value } = await reader.read();
+        if (done) {
+          // The newline and successful EOF are emitted only after a complete
+          // verified record, never after cancellation or a short transport.
+          await release(false);
+          controller.enqueue(suffix);
+          controller.close();
+        } else controller.enqueue(value);
       } catch (error) {
+        await release(true, error);
         controller.error(error);
       }
     },
-    async cancel() { await iterator.return(); },
+    async cancel(reason) { await release(true, reason); },
   });
 }

@@ -171,7 +171,8 @@ const readinessSchema = z.object({
   actionCharges: z.object({ complete: z.boolean(), unsettledExecutions: count, missingExecutionIds: count }),
 }) satisfies z.ZodType<AgentResourceReadiness>;
 
-/** Raw SP HTTP wire only. Every reference is hydrated before leaving the Harness for Runtime/Metrics. */
+/** Raw SP HTTP wire only. Every reference is verified and reduced to compact facts
+ * before leaving the Harness for Runtime/Metrics; no source body is duplicated. */
 export type SpResourceSnapshotWire = Omit<AgentResourceSnapshot, "nativeRecords"> & {
   readonly nativeRecords: readonly SpPiTrajectoryPageRow[];
 };

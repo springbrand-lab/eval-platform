@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { spPiTrajectoryRecordIdentity, type NativeTrajectoryEntry, type PiTrajectoryRecord } from "@eval-platform/eval-contracts";
+import { compactNativeTrajectoryRecord } from "@eval-platform/eval-metrics";
 import { describe, expect, it } from "vitest";
-import { nativeAssistantMessage, nativeFixture } from "./native-test-fixture.js";
+import { nativeAssistantMessage, nativeFixture, nativeToolBodyPair } from "./native-test-fixture.js";
 import {
   NativeRecordStreamError, verifiedSafePiJsonlLine, verifiedSafePiRecordBytes,
   type NativeRecordByteBinding, type NativeRecordInspection,
@@ -61,8 +62,7 @@ async function collectHash(stream: ReadableStream<Uint8Array>): Promise<{
  * The generated public UA assistant envelope, with a large SAFE Pi message inserted
  * as bytes. Neither test nor implementation builds a 5/30 MiB JS string/object.
  */
-function largeAssistant(repetitions: number) {
-  const original = nativeAssistantMessage(14, CHAT, SUBMISSION, [{ type: "text", text: "__TEST_BODY__" }]);
+function largeNativeRecord(original: NativeTrajectoryEntry, repetitions: number) {
   const template = JSON.stringify(original.record);
   const marker = "\"__TEST_BODY__\"";
   const index = template.indexOf(marker);
@@ -91,6 +91,8 @@ function largeAssistant(repetitions: number) {
     })()),
   };
 }
+const largeAssistant = (repetitions: number) =>
+  largeNativeRecord(nativeAssistantMessage(14, CHAT, SUBMISSION, [{ type: "text", text: "__TEST_BODY__" }]), repetitions);
 
 describe("source-independent SAFE Pi streaming byte reader", () => {
   it.each([
@@ -131,6 +133,72 @@ describe("source-independent SAFE Pi streaming byte reader", () => {
     expect(inspections[0]!.maxCapturedChars).toBeLessThanOrEqual(512);
     expect(inspections[0]!.maxDepth).toBeLessThan(32);
   }, 45_000);
+
+  it("interprets a streamed 30+ MiB assistant as compact native facts without retaining its text", async () => {
+    const item = largeAssistant(900);
+    let inspected: NativeRecordInspection | undefined;
+    await collectHash(verifiedSafePiRecordBytes(item.source(), {
+      identity: spPiTrajectoryRecordIdentity(item.original.record), scope: {
+        kind: "operation", chatId: CHAT, submissionId: SUBMISSION,
+      },
+      byteLength: item.byteLength, sha256: item.sha256, maxBytes: MAX_FILE_BYTES,
+      interpret: "metrics", onVerified: (result) => { inspected = result; },
+    }));
+    expect(inspected).toMatchObject({
+      reduced: true, sha256: item.sha256, maxBufferedBytes: expect.any(Number),
+      record: { record: { type: "entry", value: { kind: "pi.assistant", model: [
+        { role: "assistant", content: [{ type: "text", text: "[CONTENT OMITTED]" }] },
+      ] } } },
+    });
+    expect(inspected!.maxBufferedBytes).toBeLessThanOrEqual(512 * 1024);
+    const compact = await compactNativeTrajectoryRecord(
+      { ingestSeq: item.original.ingestSeq, record: inspected!.record! },
+      { chatId: CHAT, idempotencyKey: "execution", submissionId: SUBMISSION }, item.sha256,
+    );
+    expect(compact.metricProjection).toMatchObject({
+      fingerprint: item.sha256, supported: true, facts: [
+        { type: "assistant", thinking: false, content: true, inputTokens: 4, outputTokens: 3, totalTokens: 7 },
+      ],
+    });
+    expect(JSON.stringify(compact).length).toBeLessThan(4_096);
+  }, 45_000);
+
+  it("reports a streamed 30+ MiB native Tool Result length as unknown, not zero", async () => {
+    const original = nativeToolBodyPair(CHAT, SUBMISSION, "__TEST_BODY__", "search")[1]!;
+    const item = largeNativeRecord(original, 900);
+    let inspected: NativeRecordInspection | undefined;
+    await collectHash(verifiedSafePiRecordBytes(item.source(), {
+      identity: spPiTrajectoryRecordIdentity(original.record), scope: {
+        kind: "operation", chatId: CHAT, submissionId: SUBMISSION,
+      },
+      byteLength: item.byteLength, sha256: item.sha256, maxBytes: MAX_FILE_BYTES,
+      interpret: "metrics", onVerified: (result) => { inspected = result; },
+    }));
+    const compact = await compactNativeTrajectoryRecord(
+      { ingestSeq: original.ingestSeq, record: inspected!.record! },
+      { chatId: CHAT, idempotencyKey: "execution", submissionId: SUBMISSION }, item.sha256,
+    );
+    expect(compact.metricProjection).toMatchObject({
+      fingerprint: item.sha256, supported: true,
+      facts: [{ type: "tool", phase: "result", toolName: "search", outputLength: null, fromPiResult: true }],
+    });
+    expect(JSON.stringify(compact).length).toBeLessThan(4_096);
+  }, 45_000);
+
+  it("preserves only a bounded selected final reply; an oversized final assistant cannot fall back to an earlier one", async () => {
+    const large = largeAssistant(150);
+    let inspected: NativeRecordInspection | undefined;
+    await collectHash(verifiedSafePiRecordBytes(large.source(), {
+      identity: spPiTrajectoryRecordIdentity(large.original.record), scope: { kind: "chat", chatId: CHAT },
+      byteLength: large.byteLength, sha256: large.sha256, maxBytes: MAX_FILE_BYTES,
+      interpret: "reply", onVerified: (value) => { inspected = value; },
+    }));
+    expect(inspected?.reduced).toBe(true);
+    expect(inspected!.record!.record.value.model).toMatchObject([
+      { role: "assistant", content: [{ type: "text", text: "[CONTENT OMITTED]" }] },
+    ]);
+    expect(inspected!.maxCapturedChars).toBeLessThanOrEqual(1_000_001);
+  }, 30_000);
 
   it("retries from the beginning after an interrupted midchunk stream; neither a partial JSONL line nor a short EOF is verified", async () => {
     const record = nativeFixture(14, CHAT, SUBMISSION);

@@ -123,3 +123,50 @@ export function nativeTransferResponse(
     ...overrides,
   } });
 }
+
+/** Test-only 30+ MiB SAFE Pi response generated from small, reusable UTF-8 chunks.
+ * Neither the test nor the HTTP consumer allocates a whole giant source record. */
+export function streamedAssistantTransfer(chatId: string, submissionId: string, repetitions = 900) {
+  const small = nativeAssistantMessage(14, chatId, submissionId, [{ type: "text", text: "__STREAM_BODY__" }]);
+  const template = JSON.stringify(small.record);
+  const marker = "\"__STREAM_BODY__\"";
+  const at = template.indexOf(marker);
+  if (at < 0 || template.indexOf(marker, at + marker.length) !== -1) throw new Error("Missing unique Pi marker");
+  const encoder = new TextEncoder();
+  const prefix = encoder.encode(`${template.slice(0, at)}"`);
+  const suffix = encoder.encode(`"${template.slice(at + marker.length)}`);
+  const body = encoder.encode("汉🌎é".repeat(4_096));
+  const recordLength = prefix.byteLength + body.byteLength * repetitions + suffix.byteLength;
+  const recordHash = createHash("sha256").update(prefix);
+  const fileHash = createHash("sha256").update(encoder.encode(`{"ingestSeq":14,"record":`)).update(prefix);
+  for (let index = 0; index < repetitions; index++) {
+    recordHash.update(body);
+    fileHash.update(body);
+  }
+  recordHash.update(suffix);
+  fileHash.update(suffix).update(encoder.encode("}\n"));
+  const { reference: base } = nativeTransfer(small, 14);
+  const reference: SpPiTrajectoryRecordReference = { ...base, reference: {
+    ...base.reference, byteLength: recordLength, sha256: recordHash.digest("hex"),
+  } };
+  const stream = () => {
+    const parts = (function* () {
+      yield prefix;
+      for (let index = 0; index < repetitions; index++) {
+        for (let offset = 0; offset < body.byteLength; offset += 257) yield body.subarray(offset, offset + 257);
+      }
+      yield suffix;
+    })();
+    return new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const next = parts.next();
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      },
+    });
+  };
+  return {
+    reference, recordLength, fileSha256: fileHash.digest("hex"), stream,
+    response: () => new Response(stream(), { headers: nativeTransferResponse(reference, new Uint8Array()).headers }),
+  };
+}

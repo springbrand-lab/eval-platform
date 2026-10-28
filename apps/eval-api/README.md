@@ -28,29 +28,40 @@ is 4,000,000 bytes. A larger single SAFE record occupies one reference, whose
 `identity`, byte length, SHA-256 and `throughSeq` bind an authenticated
 `GET /evidence/trajectory/records/{ingestSeq}?submissionId=&throughSeq=&identity=&byteLength=&sha256=`.
 The body contains the exact UTF-8 `TrajectoryRecord` JSON, streamed in bounded
-parts; the adapter verifies headers, length, digest, native identity, Chat,
-parent Chat and (for resources/final reply) Submission scope before storing the
-complete raw record. A record larger than the unchanged SP evidence-file limit
+parts; the adapter verifies headers, length, digest, native identity, Chat
+and parent Chat before storing one original JSONL line. The selected Submission
+is the authorization, not an evidence filter. A record larger than the SP evidence-file limit
 still fails explicitly at a record boundary. The temporary structural contract
 in `eval-contracts` must be replaced with the released public package contract
 and tested against deployed SP before release; no unpublished dependency is pinned.
 
-**Pending single-store streaming wire:** `src/sp/native-record-stream.ts` is a
-source-independent, test-backed byte reader, not an SP route or an active
-Harness transport. Given a public frozen record identity, length, SHA-256 and
-authorized byte stream, it checks UTF-8/JSON and the bounded SAFE envelope
-(actor, Chat, Context/Submission, parent) without constructing a record object
-or buffering its body. It can frame unchanged source bytes as exactly one v2
-JSONL line; it emits the closing newline and completion callback only after
-full verification. Tests stream actual 5+ and 30+ MiB Pi messages in small
-chunks. The current `alpha.5` dependency does **not** provide the coordinated
-bounded page/facts header plus authenticated single-store byte stream, so this
-reader is not wired into evidence or resource collection. Existing
-`transferNativeRecord`, JSON resource snapshots and EvidenceStore/R2 part
-buffering still materialize large data. Neither completeness nor credit
-readiness can be claimed through this preparatory reader: consume and test
-the SP package's exact public contract once available, without inventing an
-independent transport or changing old bundle hashes.
+**Evidence and individual record streaming are wired; the resource header is not yet OOM-safe.** The SP Harness
+now calls `src/sp/native-record-stream.ts` on its authenticated record GET and
+feeds the verified original JSONL bytes to `EvidenceStore`. The store freezes
+the cursor before reading any bytes and streams whole records into immutable
+parts; the R2 adapter uses a temporary file to sign and stream rather than
+buffering a whole part. Strict UTF-8, JSON, length, hash, actor, Chat, parent
+and Context/Submission are checked before a record completes. The selected
+Submission's final-reply fallback also drains referenced records without a
+large parsed object. Existing v2 inline JSONL bytes and historical manifests
+remain unchanged. Focused tests cover 5+ and 30+ MiB streamed records, R2
+uploads, resumed cursors and failures without partial success.
+
+`collectAgentResources` now verifies and interprets each referenced Pi body
+through the same bounded stream, storing only compact native identities/facts.
+An overly large Tool body is **unknown**, not a fabricated zero-byte value;
+`usageEvents` and settled model/Action billing stay independent and unchanged.
+Historical raw resource rows and v1/v2 evidence bytes are not migrated.
+
+**Release blocker:** the current pinned `alpha.5` and SP's public candidate
+still lack a bounded/paginated resource facts header and a proven single-store
+native byte contract. `collectAgentResources` still calls the **full JSON
+resource snapshot** through `call()` before streaming its referenced records;
+many small records/usage/Action facts can still exhaust memory in that header.
+Neither total resource OOM safety nor cross-deployment billing completeness is
+ready. Do not invent a parallel HTTP route, deploy this cutover, or claim parity
+until the coordinated public SP package and authenticated seam are available
+and this path is replaced and tested.
 
 内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。设计见 [Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
 
@@ -461,7 +472,7 @@ Run 评估列表省略可选 output 正文和 attempt.resources，并附带关�
 
 ## Metrics memory bounds
 
-Each Attempt's raw resource snapshot is stored unchanged in `eval_attempt_resources` (primary key `stage, record_id, attempt_id`; cascades with its Sampling/Evaluation) with its body-free Metrics projection, written in one upsert that serializes the snapshot once, in the same transaction as the compare-and-set record update that marks it collected (both or neither). `eval_samplings.facts`/`eval_evaluations.facts` hold only resource state and summaries, so Worker scheduling, stop, Run views and every stage write stay small; writes compare and bump the record's `revision` column (the MCP result acceptance and manual recollection bump it too). Metrics reads the projection one record at a time, for summaries and Sampling detail alike. Migration `0004_attempt_resources` creates the table (its check requires `evaluation_id` exactly for evaluation rows) and revision columns and drops `metric_facts` with its trigger; it does not backfill. No increase to heap/container memory or request timeouts is required.
+Each Attempt's resource snapshot is stored in `eval_attempt_resources` (primary key `stage, record_id, attempt_id`; cascades with its Sampling/Evaluation) with its body-free Metrics projection, written in one upsert in the same transaction as the compare-and-set record update that marks it collected (both or neither). Historical raw snapshots are unchanged; new hydrated native records are immediately reduced to verified compact facts, so the raw Pi body is not stored twice in PostgreSQL/R2. Independent usage and billing settlements remain unchanged. `eval_samplings.facts`/`eval_evaluations.facts` hold only resource state and summaries, so Worker scheduling, stop, Run views and every stage write stay small; writes compare and bump the record's `revision` column (the MCP result acceptance and manual recollection bump it too). Metrics reads the projection one record at a time, for summaries and Sampling detail alike. Migration `0004_attempt_resources` creates the table (its check requires `evaluation_id` exactly for evaluation rows) and revision columns and drops `metric_facts` with its trigger; it does not backfill. This does **not** make the current full resource JSON header OOM-safe; that coordinated public SP seam remains a release blocker above.
 
 The `snapshot` and `metric_snapshot` columns use PostgreSQL `json` to preserve contract-permitted JavaScript strings losslessly, including unpaired surrogates and escaped U+0000; stage facts remain `jsonb`. Migration `0005_resource_snapshot_json` converts both columns in place in one `ALTER TABLE`, preserving existing data and the applied migration-history prefix. Migrations `0000` through `0004` are unchanged and migration-history validation remains enabled. The conversion takes a table lock and may rewrite the table, so plan an appropriate migration window. No online migration execution is included in this change.
 

@@ -89,12 +89,17 @@ describe("evidence store", () => {
 
   it("freezes a verified empty native trajectory without manufacturing an event line", async () => {
     const store = createEvidenceStore(createMemoryEvidenceBlobs(), () => NOW);
+    const progress: EvidenceExportProgress[] = [];
     const opened = await store.open(await store.resume({
       evidence: exportedEvidence({ samplingId: "empty", files: {}, events: [] }),
       limits: DEFAULT_EVIDENCE_LIMITS,
+      onProgress: async (next) => { progress.push(next); },
     }));
     expect(opened.manifest.trajectory).toEqual({
       format: SP_PI_TRAJECTORY_FORMAT, parts: [], records: 0, complete: true,
+    });
+    expect(progress.at(-1)?.trajectory).toEqual({
+      format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 0, afterSeq: 0, parts: [], done: true,
     });
   });
 
@@ -169,9 +174,13 @@ describe("resumable evidence export", () => {
     let fail = true;
     const evidence = { ...base, async* readTrajectory(afterSeq: number, throughSeq?: number) {
       reads.push({ afterSeq, throughSeq });
-      for await (const entry of base.readTrajectory(afterSeq, throughSeq)) {
-        if (entry.seq === 2 && fail) { fail = false; throw new Error("first page disconnected"); }
-        yield entry;
+      for await (const page of base.readTrajectory(afterSeq, throughSeq)) {
+        if (fail) {
+          fail = false;
+          yield { ...page, records: page.records.slice(0, 1), nextAfterSeq: page.records[0]!.seq };
+          throw new Error("first page disconnected");
+        }
+        yield page;
       }
     } };
     const blobs = createMemoryEvidenceBlobs();
@@ -194,6 +203,34 @@ describe("resumable evidence export", () => {
       .trimEnd().split("\n").map((line) => JSON.parse(line))).toEqual(records.slice(0, 2));
   });
 
+  it("never commits a short native line or a missing terminal page as complete evidence", async () => {
+    const base = exportedEvidence({ samplingId: "incomplete", files: {}, events: rows([1, 2]) });
+    for (const broken of ["short-line", "missing-terminal"] as const) {
+      const blobs = createMemoryEvidenceBlobs();
+      const store = createEvidenceStore(blobs, () => NOW);
+      let progress: EvidenceExportProgress | undefined;
+      const evidence = { ...base, async* readTrajectory(afterSeq: number, throughSeq?: number) {
+        for await (const page of base.readTrajectory(afterSeq, throughSeq)) {
+          if (broken === "short-line") {
+            yield { ...page, records: page.records.map((record, index) => index === 0
+              ? { ...record, readJsonl: async () => new Response("short").body! } : record) };
+          } else {
+            yield { ...page, records: page.records.slice(0, 1), nextAfterSeq: 1 };
+          }
+        }
+      } };
+      await expect(store.resume({ evidence, limits: DEFAULT_EVIDENCE_LIMITS,
+        onProgress: async (next) => { progress = next; } })).rejects.toBeInstanceOf(EvidenceIntegrityError);
+      expect(progress?.trajectory).toEqual({ format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 2, afterSeq: 0, parts: [] });
+      expect(blobs.blobs.size).toBe(0);
+      expect(blobs.manifests.size).toBe(0);
+      const resumed = await store.open(await store.resume({ evidence: base, limits: DEFAULT_EVIDENCE_LIMITS,
+        progress: progress!, onProgress: async (next) => { progress = next; } }));
+      expect(resumed.manifest.trajectory.records).toBe(2);
+      expect(progress?.trajectory).toMatchObject({ afterSeq: 2, done: true });
+    }
+  });
+
   it("persists each completed step and stores only what the saved progress lacks", async () => {
     const blobs = createMemoryEvidenceBlobs();
     const store = createEvidenceStore(blobs, testClock(NOW, 1_000).now);
@@ -214,12 +251,14 @@ describe("resumable evidence export", () => {
       },
       async* readTrajectory(afterSeq: number, throughSeq?: number) {
         cursors.push(afterSeq);
-        for await (const event of base.readTrajectory(afterSeq, throughSeq)) {
-          if (failAfter !== undefined && event.seq > failAfter) {
+        for await (const page of base.readTrajectory(afterSeq, throughSeq)) {
+          if (failAfter !== undefined && page.records.some((record) => record.seq > failAfter!)) {
+            const records = page.records.filter((record) => record.seq <= failAfter!);
             failAfter = undefined;
+            yield { ...page, records, nextAfterSeq: records.at(-1)!.seq };
             throw new Error("page unavailable");
           }
-          yield event;
+          yield page;
         }
       },
     };

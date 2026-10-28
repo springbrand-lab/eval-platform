@@ -28,7 +28,8 @@ export interface AgentResourceSnapshot {
   readonly finalized: boolean;
   readonly coverage: AgentResourceCoverage;
   readonly usageEvents: readonly AgentResourceFact[];
-  /** Full source records only. The SP Harness resolves public byte references before this boundary. */
+  /** Raw source records historically; new byte-stream reads retain only checked,
+   * body-free Pi identities and compact metric facts. No public transfer references. */
   readonly nativeRecords: readonly NativeTrajectoryEntry[];
   readonly billingSettlements: readonly AgentResourceFact[];
   /** SP's own explanation of why `finalized` is false; diagnostic only, never a second completeness signal. */
@@ -61,7 +62,7 @@ export interface AgentResourceCounts {
   readonly billingSettlements: number;
 }
 
-/** What a stage record keeps of a stored snapshot; its events live only in the resource store. */
+/** What a stage record keeps of a stored snapshot; compact facts live only in the resource store. */
 export type AgentResourceSnapshotSummary = Omit<AgentResourceSnapshot, "usageEvents" | "nativeRecords" | "billingSettlements"> & {
   readonly counts: AgentResourceCounts;
 };

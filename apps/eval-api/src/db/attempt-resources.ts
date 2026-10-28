@@ -17,7 +17,7 @@ import { attemptResources, projects, samplings } from "./schema.js";
 
 type RecordWriter = Pick<EvalDb, "update" | "insert">;
 
-/** The stage record a raw snapshot belongs to; `evaluationId` is present for, and only for, an Evaluator. */
+/** The stage record a snapshot belongs to; `evaluationId` is present for, and only for, an Evaluator. */
 interface ResourceRecord {
   readonly ownerUserId: string;
   readonly samplingId: string;
@@ -25,8 +25,10 @@ interface ResourceRecord {
 }
 
 /**
- * Runs one compare-and-set record update and, in the same transaction, stores the raw snapshot it
- * marks collected unchanged, replacing an earlier one, with its Metrics projection; both or neither.
+ * Runs one compare-and-set record update and, in the same transaction, stores the collected
+ * snapshot with its Metrics projection; both or neither. Historical raw snapshots are left
+ * unchanged; streamed Pi snapshots contain only verified compact native facts and do not
+ * duplicate their evidence bodies in either PostgreSQL column.
  */
 export async function updateWithResources(
   db: EvalDb, resources: AttemptResourceSnapshot | undefined, update: (writer: RecordWriter) => Promise<ResourceRecord>,

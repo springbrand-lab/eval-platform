@@ -16,7 +16,7 @@ SP/Eval interoperability or deployment readiness.
 - Authenticated `GET /internal/v1/eval-harness/users/{userId}/chats/{chatId}/evidence/trajectory`
   uses `submissionId`, `afterSeq`, `limit <= 200`, and on subsequent pages/resume
   `throughSeq`. The page is
-  `{format:"sp-pi-trajectory/v1",cursor:{throughSeq:number},records:[{ingestSeq:number,record:TrajectoryRecord}],nextAfterSeq:number|null}`.
+  `{format:"sp-pi-trajectory/v1",cursor:{throughSeq:number},records:[{ingestSeq:number,record:TrajectoryRecord} | {ingestSeq:number,reference:{format,throughSeq,identity,byteLength,sha256}}],nextAfterSeq:number|null}`.
   All cursors are safe nonnegative integers, `ingestSeq` is positive and increasing, every
   record is at or below the *same* frozen high-water mark, and `nextAfterSeq` is the final
   returned seq or null precisely at the frozen end. Later Chat work must not enter an
@@ -44,16 +44,20 @@ SP/Eval interoperability or deployment readiness.
   A bare old `turn.finished` event JSON is never a Pi-native record.
 - SP's operation-scoped resource snapshot retains `scope`, `readiness`, `finalized`,
   `usageEvents` and `billingSettlements` and replaces both `telemetryEvents` and its
-  coverage field with `nativeRecords:[{ingestSeq,record}]` / `coverage.nativeRecords`.
-  Old readiness counters such as `pendingTelemetryEvents` remain SP diagnostics, not
-  invented metric values. Eval rejects foreign Chat/Submission records; raw bytes go into
-  `eval_attempt_resources` in the same CAS transaction as the summary and a body-free
-  Metrics projection. Tokens and charged units still come **only** from usage and
-  settlement facts; native Pi usage supports **Step classification** only.
-- SP's public package source sets a **4,000,000-byte** page ceiling. Eval must
-  enforce no higher ceiling (by the HTTP client's read bound). SP must
-  paginate by *bytes as well as count* and return an explicit failure for a single
-  unpageable record, never truncate one. Eval writes each complete
+  coverage field with `nativeRecords` / `coverage.nativeRecords`. A native reference
+  is a mandatory authenticated byte read, not a partial or omitted record. Old
+  `pendingTelemetryEvents` remains an SP diagnostic, not an invented metric value.
+  Eval rejects foreign Chat/Submission records and stores only the verified body-free
+  Pi identity/facts for newly read referenced records; historical raw snapshots are
+  immutable. Tokens and charged units still come **only** from independent usage
+  and model/Action settlement facts; native Pi usage supports Step classification.
+  **Blocked:** SP's public resource response still has an unbounded full JSON header,
+  which Eval currently parses whole. Require a bounded/paginated public facts header
+  with complete inventory and a consumer of that exact seam, not a second HTTP route.
+- SP's public package source sets a **4,000,000-byte** trajectory page ceiling. Eval
+  enforces that limit; SP paginates by bytes as well as count and emits an
+  immutable reference for a record above the inline bound, never truncating one.
+  Eval streams verified native bytes directly into each complete
   `{ingestSeq,record}` line unchanged; a line above the evidence file limit fails
   non-retryably. Artifacts and immutable Subject inputs remain primary.
 - A new bundle is `schemaVersion:2`, `trajectory.format:"sp-pi-trajectory/v1"`;

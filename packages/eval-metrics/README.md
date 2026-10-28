@@ -18,9 +18,13 @@ to the real event's refs, task and Tool Call identities. There is no top-level `
 `turn_start` event and no `projection.contentComplete`. No input/output
 is reconstructed from a bookkeeping event whose Pi-owned body was omitted.
 Missing or ambiguous linkage stays partial/unavailable, not zero.
-`compactResourceSnapshot` hashes each raw native record and keeps body-free
-versioned metric facts alongside the unchanged raw snapshot. Total usage and
-charges still come **only** from `usageEvents` and `billingSettlements`.
+`compactResourceSnapshot` hashes each historical raw native record and keeps
+body-free versioned metric facts. `compactNativeTrajectoryRecord` also accepts
+a checksum already verified over the *source bytes*, so the streaming
+record consumer saves only compact identity/facts, not a second copy
+of a large Pi body. The surrounding resource header still awaits SP's
+bounded public contract. Withheld Tool lengths stay unknown, never zero; total
+usage and charges still come **only** from `usageEvents` and `billingSettlements`.
 Old event-only snapshots are not native. SP must publish its new public
 `@springbrand/eval-harness` release and pass [parity checks](../../docs/pi-native-eval-cutover.md)
 before an integrated result is claimed.
@@ -138,4 +142,4 @@ Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`�
 
 ## Compact resource facts
 
-`compactResourceSnapshot` derives body-free facts and a canonical SHA-256 fingerprint for **each native record**. It keeps native operation identity, status/time/Step Token fields, canonical safe Tool input/output lengths and versioned Pi thinking/content marker flags; an omitted/redacted message cannot prove marker absence. The same interpreter consumes raw and compact facts, retaining exact medians, conflicts and source coverage. The API stores the projection beside each raw snapshot and attaches it to `MetricsFacts` records (`MetricsSampling`/`MetricsEvaluation`); this package performs no storage or background work. Sampling detail returns records without snapshots. Original snapshots, old refs/scores and evidence are never replaced.
+`compactResourceSnapshot` derives body-free facts and a canonical SHA-256 fingerprint for historical raw native records; `compactNativeTrajectoryRecord` instead accepts a verified raw-byte checksum for a streamed record. Both retain native operation identity, status/time/Step Token fields, safe Tool input/output lengths when known and versioned Pi thinking/content marker flags. Missing or withheld data cannot prove absence or a zero length. The same interpreter consumes raw and compact facts, retaining exact medians, conflicts and source coverage. The API stores compact native facts in both the new Attempt snapshot and its Metrics projection, never a second copy of the native body; historical raw snapshots, old refs/scores and evidence are not replaced. Metrics attaches projections to `MetricsFacts` (`MetricsSampling`/`MetricsEvaluation`); this package performs no storage or background work. Sampling detail returns records without snapshots.
