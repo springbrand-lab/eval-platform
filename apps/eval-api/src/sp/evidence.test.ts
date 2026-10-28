@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SP_PI_TRAJECTORY_FORMAT } from "@eval-platform/eval-contracts";
+import { SP_PI_TRAJECTORY_FORMAT, type NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
 import { createEvidenceStore, type AgentHandle } from "@eval-platform/eval-runtime/harness";
 import { evalEvidencePath } from "@springbrand/eval-harness";
 import { describe, expect, it } from "vitest";
@@ -19,6 +19,9 @@ const evaluator: AgentHandle = { ...subject, chatId: "33333333-3333-4333-8333-33
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const limits = { maxFileBytes: 1_200, maxTotalBytes: 15_000, maxFiles: 20, excludedSegments: [] };
 const native = (seq: number, chatId = subject.chatId, submissionId = "submission-1") => nativeFixture(seq, chatId, submissionId);
+const asContext = (entry: NativeTrajectoryEntry): NativeTrajectoryEntry => ({
+  ...entry, record: { ...entry.record, submissionId: null, origin: "context" },
+});
 const page = (records: readonly unknown[], throughSeq: number, nextAfterSeq: number | null) => ({
   format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq }, records, nextAfterSeq,
 });
@@ -28,7 +31,11 @@ describe("SP Pi-native evidence export, persistence and import", () => {
   it("preserves Subject inputs and complete native JSONL through bounded parts, service auth and a frozen high-water mark", async () => {
     const root = await mkdtemp(join(tmpdir(), "eval-native-evidence-roundtrip-"));
     try {
-      const records = nativeFixtureRecords([1, 2, 3, 4, 5, 6, 7, 8], subject.chatId);
+      const records = [
+        asContext(native(1)),
+        ...nativeFixtureRecords([2, 3], subject.chatId, "earlier-submission"),
+        ...nativeFixtureRecords([4, 5, 6, 7, 8], subject.chatId, "submission-1"),
+      ];
       const imported: { path: string; bytes: Uint8Array }[] = [];
       const cursors: { after: string | null; through: string | null; token: string | null }[] = [];
       const materials = [{ bundleId: "bundle-1", materialId: "material-1" }, { bundleId: "bundle-2", materialId: "material-2" }];
@@ -67,6 +74,8 @@ describe("SP Pi-native evidence export, persistence and import", () => {
       const trajectory = imported.filter((file) => file.path.startsWith("/trajectory/")).sort((a, b) => a.path.localeCompare(b.path));
       expect(trajectory.every((file) => file.bytes.byteLength <= limits.maxFileBytes)).toBe(true);
       expect(trajectory.flatMap((file) => new TextDecoder().decode(file.bytes).trimEnd().split("\n").map((line) => JSON.parse(line)))).toEqual(records);
+      expect(trajectory.map((file) => new TextDecoder().decode(file.bytes)).join(""))
+        .toBe(records.map((record) => `${JSON.stringify(record)}\n`).join(""));
       expect(trajectory.map((file) => hash(file.bytes))).toEqual(evidence.manifest.trajectory.parts.map((part) => part.sha256));
       for (const ref of materials) {
         const file = imported.find((item) => item.path === `/subject-inputs/${ref.bundleId}/${ref.materialId}/same.txt`);
@@ -83,14 +92,13 @@ describe("SP Pi-native evidence export, persistence and import", () => {
     ["legacy event in native envelope", { ...page([], 1, null), records: [{ ingestSeq: 1, record: { type: "turn.finished" } }] }],
     ["unsafe projection", page([{ ...native(1), record: { ...native(1).record,
       projection: { kind: "full", policyId: "test", policyVersion: 1 } } }], 1, null)],
+    ["missing safe projection", page([{ ...native(1), record: { ...native(1).record, projection: undefined } }], 1, null)],
     ["backward cursor", page([native(1)], 1, 0)],
     ["out-of-order records", page([native(2), native(1)], 2, null)],
     ["duplicate inner sequence", page([{ ...native(1), record: { ...native(1).record, ingestSeq: 1 } }], 1, null)],
     ["different Chat", page([native(1, evaluator.chatId)], 1, null)],
-    ["foreign Submission", page([native(1, subject.chatId, "foreign-submission")], 1, null)],
-    ["unrelated parent", page([{ ...native(1, subject.chatId, "foreign-submission"),
-      record: { ...native(1, subject.chatId, "foreign-submission").record,
-        parent: { resource: { agentId: "agent-1", sessionId: subject.chatId }, submissionId: "not-the-parent" } } }], 1, null)],
+    ["foreign parent Chat", page([{ ...native(1), record: { ...native(1).record,
+      parent: { resource: { agentId: "agent-1", sessionId: evaluator.chatId }, submissionId: "earlier-submission" } } }], 1, null)],
   ])("rejects %s without mislabelling event JSON as Pi history", async (_name, invalid) => {
     const harness = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       fetch: async (input) => Response.json(new URL(String(input instanceof Request ? input.url : input)).pathname.endsWith("/artifacts")
@@ -99,12 +107,27 @@ describe("SP Pi-native evidence export, persistence and import", () => {
     await expect(read(exported.readTrajectory(0))).rejects.toMatchObject({ name: "SpHarnessError", retryable: false });
   });
 
-  it("accepts a directly parented child Submission and a sparse frozen end without adopting foreign records", async () => {
+  it("rejects a page with a foreign Chat before yielding even its safe Context prefix", async () => {
+    const harness = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
+      fetch: async (input) => Response.json(new URL(String(input instanceof Request ? input.url : input)).pathname.endsWith("/artifacts")
+        ? { artifacts: [] } : page([asContext(native(1)), native(2, evaluator.chatId)], 2, null)) });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+    const iterator = exported.readTrajectory(0)[Symbol.asyncIterator]();
+    await expect(iterator.next()).rejects.toMatchObject({
+      retryable: false, message: expect.stringContaining("outside the requested Chat"),
+    });
+  });
+
+  it("accepts a directly parented child, earlier same-Chat Submissions and a sparse frozen end", async () => {
+    const earlierChild = native(7, subject.chatId, "earlier-child");
+    Object.assign(earlierChild.record, { parent: {
+      resource: { agentId: "agent-1", sessionId: subject.chatId }, submissionId: "earlier-submission",
+    } });
     const child = native(8, subject.chatId, "child-submission");
     Object.assign(child.record, { parent: {
       resource: { agentId: "agent-1", sessionId: subject.chatId }, submissionId: "submission-1",
     } });
-    const records = [native(3), child];
+    const records = [native(3), native(5, subject.chatId, "earlier-submission"), earlierChild, child];
     const harness = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       fetch: async (input) => Response.json(new URL(String(input instanceof Request ? input.url : input)).pathname.endsWith("/artifacts")
         ? { artifacts: [] } : page(records, 9, null)) });
@@ -131,11 +154,18 @@ describe("SP Pi-native evidence export, persistence and import", () => {
 
   it("reads only the selected Submission's last native Pi assistant text, not an event or another Submission", async () => {
     const submissionId = "evaluation-submission";
+    const current = nativeAssistantMessage(14, evaluator.chatId, submissionId, [
+      { type: "thinking", thinking: "hidden" }, { type: "text", text: "final" }, { type: "text", text: "```json\n{}\n```" },
+    ]);
+    const context = asContext(nativeAssistantMessage(2, evaluator.chatId, submissionId, [{ type: "text", text: "initial Context" }]));
+    const earlier = nativeAssistantMessage(5, evaluator.chatId, "earlier-submission", [{ type: "text", text: "earlier reply" }]);
     const records = [
+      context,
+      earlier,
       native(6, evaluator.chatId, submissionId),
-      nativeAssistantMessage(14, evaluator.chatId, submissionId, [{ type: "thinking", thinking: "hidden" }, { type: "text", text: "final" },
-        { type: "text", text: "```json\n{}\n```" }]),
+      current,
       native(16, evaluator.chatId, submissionId),
+      nativeAssistantMessage(18, evaluator.chatId, "later-submission", [{ type: "text", text: "later reply" }]),
     ];
     const urls: URL[] = [];
     const harness = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
@@ -143,7 +173,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
         const url = new URL(new Request(input, init).url);
         urls.push(url);
         return Response.json(url.searchParams.get("afterSeq") === "0"
-          ? page(records.slice(0, 2), 16, 14) : page(records.slice(2), 16, null));
+          ? page(records.slice(0, 4), 18, 14) : page(records.slice(4), 18, null));
       } });
     const reply = { handle: evaluator, submissionId };
     await expect(harness.readFinalReply(reply)).resolves.toBe("final\n```json\n{}\n```");
@@ -152,7 +182,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
         [`/internal/v1/eval-harness/users/${evaluator.ownerUserId}/chats/${evaluator.chatId}/evidence/trajectory`,
           submissionId, null],
         [`/internal/v1/eval-harness/users/${evaluator.ownerUserId}/chats/${evaluator.chatId}/evidence/trajectory`,
-          submissionId, "16"],
+          submissionId, "18"],
       ]);
     expect(finalReplyText(native(14, evaluator.chatId, "earlier-submission").record, submissionId)).toBeUndefined();
     const empty = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
@@ -160,12 +190,12 @@ describe("SP Pi-native evidence export, persistence and import", () => {
     await expect(empty.readFinalReply(reply)).resolves.toBeUndefined();
     const omitted = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       fetch: async () => Response.json(page([
-        records[1]!, nativeAssistantMessage(17, evaluator.chatId, submissionId, [{ type: "text", text: "[CONTENT OMITTED]" }]),
+        current, nativeAssistantMessage(17, evaluator.chatId, submissionId, [{ type: "text", text: "[CONTENT OMITTED]" }]),
       ], 17, null)) });
     await expect(omitted.readFinalReply(reply)).resolves.toBeUndefined();
     const thinkingOnly = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       fetch: async () => Response.json(page([
-        records[1]!, nativeAssistantMessage(17, evaluator.chatId, submissionId, [{ type: "thinking", thinking: "private" }]),
+        current, nativeAssistantMessage(17, evaluator.chatId, submissionId, [{ type: "thinking", thinking: "private" }]),
       ], 17, null)) });
     await expect(thinkingOnly.readFinalReply(reply)).resolves.toBeUndefined();
     const child = nativeAssistantMessage(17, evaluator.chatId, "child-submission", [{ type: "text", text: "child reply" }]);
@@ -173,12 +203,15 @@ describe("SP Pi-native evidence export, persistence and import", () => {
       resource: { agentId: "agent-1", sessionId: evaluator.chatId }, submissionId,
     } });
     const scoped = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
-      fetch: async () => Response.json(page([records[1], child], 17, null)) });
+      fetch: async () => Response.json(page([current, child], 17, null)) });
     await expect(scoped.readFinalReply(reply)).resolves.toBe("final\n```json\n{}\n```");
-    const foreign = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
-      fetch: async () => Response.json(page([native(14, evaluator.chatId, "earlier-submission")], 14, null)) });
-    await expect(foreign.readFinalReply(reply)).rejects.toMatchObject({ retryable: false,
-      message: expect.stringContaining("outside the requested Chat and Submission") });
+    const historyOnly = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
+      fetch: async () => Response.json(page([context, earlier], 5, null)) });
+    await expect(historyOnly.readFinalReply(reply)).resolves.toBeUndefined();
+    const foreignChat = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
+      fetch: async () => Response.json(page([native(14, subject.chatId, submissionId)], 14, null)) });
+    await expect(foreignChat.readFinalReply(reply)).rejects.toMatchObject({ retryable: false,
+      message: expect.stringContaining("outside the requested Chat") });
   });
 
   it("bounds a JSON page by bytes and rejects an oversized individual record instead of truncating it", async () => {
@@ -200,5 +233,18 @@ describe("SP Pi-native evidence export, persistence and import", () => {
     await expect(bounded.readFinalReply({ handle: evaluator, submissionId: "submission-1" }))
       .rejects.toMatchObject({ retryable: false, message: "Eval SP evidence trajectory page exceeded the 256-byte response limit" });
     expect(MAX_TRAJECTORY_PAGE_BYTES).toBeLessThan(95_000_000);
+  });
+
+  it("fails explicitly for a safe record over the 4 MB JSON page limit (streaming consumer pending SP public wire)", async () => {
+    const record = nativeAssistantMessage(1, subject.chatId, "submission-1",
+      [{ type: "text", text: "x".repeat(MAX_TRAJECTORY_PAGE_BYTES) }]);
+    const harness = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
+      fetch: async (input) => Response.json(new URL(String(input instanceof Request ? input.url : input)).pathname.endsWith("/artifacts")
+        ? { artifacts: [] } : page([record], 1, null)) });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits });
+    await expect(read(exported.readTrajectory(0))).rejects.toMatchObject({
+      retryable: false,
+      message: `Eval SP evidence trajectory page exceeded the ${MAX_TRAJECTORY_PAGE_BYTES}-byte response limit`,
+    });
   });
 });

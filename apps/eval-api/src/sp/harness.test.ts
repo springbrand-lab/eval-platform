@@ -787,6 +787,7 @@ describe("Eval SP Harness large transfers and readiness", () => {
     { ...resources, scope: { ...scope, submissionId: "other-submission" } },
     { ...resources, scope: { ...scope, idempotencyKey: "other-key" } },
     { ...resources, nativeRecords: [native(3, SUBJECT_CHAT, "other-submission")] },
+    { ...resources, nativeRecords: [{ ...native(3), record: { ...native(3).record, submissionId: null, origin: "context" } }] },
   ])("rejects a resource snapshot with a foreign operation identity", async (body) => {
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
       fetch: queuedFetch(Response.json(body)).fetch });

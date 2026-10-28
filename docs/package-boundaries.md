@@ -50,7 +50,7 @@ The arrows describe allowed consumption direction. The contract package must not
 
 ### Evidence export and import
 
-The existing Harness/EvidenceStore seam owns one immutable evidence bundle per successful Subject execution. The Harness exports produced artifacts, original Subject Material files resolved from the Project's fixed references, and the complete raw safe Pi source trajectory in order. EvidenceStore stores both file groups by content hash and splits trajectory JSONL at native record boundaries within the file byte limit; it never normalizes or discards source record fields. The v2 manifest records Subject input identities, artifacts, ordered trajectory parts with sizes/hashes/record counts, completeness and explicit artifact omissions. Runtime passes only the frozen Subject Material references to export, never live Dataset contents. An Evaluator receives its own initialization first, then all evidence files, and the manifest last; the SP adapter uses the public package's evidence path helpers and checks path, size and hash receipts. A native record larger than the file limit is never dropped or truncated: the export fails with an explicit non-retryable error before any part is stored, and the SP import likewise refuses a bundle with a file above SP's per-file limit before writing anything.
+The existing Harness/EvidenceStore seam owns one immutable evidence bundle per successful Subject execution. The Harness exports produced artifacts, original Subject Material files resolved from the Project's fixed references, and the complete raw safe Pi source trajectory in order. Evidence trajectory means the full Chat keyset through one frozen watermark, including imported reference Context and any earlier Submission in that Chat; the requested terminal Submission authorizes and binds the read, but does not filter the evidence rows. The adapter rejects unsafe/unprojected records or records whose resource or parent belongs to another Chat. EvidenceStore stores both file groups by content hash and splits trajectory JSONL at native record boundaries within the file byte limit; it never normalizes or discards source record fields. The v2 manifest records Subject input identities, artifacts, ordered trajectory parts with sizes/hashes/record counts, completeness and explicit artifact omissions. Runtime passes only the frozen Subject Material references to export, never live Dataset contents. An Evaluator receives its own initialization first, then all evidence files, and the manifest last; the SP adapter uses the public package's evidence path helpers and checks path, size and hash receipts. A native record larger than the file limit is never dropped or truncated: the export fails with an explicit non-retryable error before any part is stored, and the SP import likewise refuses a bundle with a file above SP's per-file limit before writing anything.
 
 Export is resumable without a second job store. `EvidenceStore.resume()` freezes the listing and `exportedAt` on the first pass, stores each missing artifact/Subject input by content hash and continues trajectory parts from a persisted source cursor (`ExportedEvidence.readTrajectory(afterSeq)`), then writes the deterministic manifest once; without saved progress it starts a new export. Runtime persists that progress after every stored file or part as `Sampling.evidenceExport` through the conditional Sampling update, bound to the Subject Submission ID that `Harness.exportEvidence` also receives; progress of another Submission is never reused. A later pass reads only what is missing, so the same evidence ID results. After `EVIDENCE_EXPORT_MAX_PASSES` failed passes, or a non-retryable failure, the execution fails with `evidence export failed…`, keeping its output and progress; a manual recollection resumes that progress with a fresh pass budget. Export failures never resubmit or restart the Subject Agent, and Evaluations stay queued until the bundle is stored. No legacy single-file trajectory or alternate Workspace initialization branch is retained.
 
@@ -199,16 +199,24 @@ The eval project must not import SP private source files, use Web projections as
 ### Pi-native evidence cutover (new runs)
 
 `@springbrand/eval-harness` owns the **published public** SP service wire. Its next release must
-provide the authenticated, Submission-scoped trajectory page
+provide the authenticated, Submission-bound full-Chat trajectory page
 `{format:"sp-pi-trajectory/v1",cursor:{throughSeq},records:[{ingestSeq,record}],nextAfterSeq}`
 (`record.format:"pi-trajectory/v1"`, `record.projection.kind:"safe"`) and resource snapshot
 with `nativeRecords` in place of `telemetryEvents`. Until that release exists, Eval keeps only a
 structural *consumer* contract in `eval-contracts`; this does not implement SP's routes, read DO
-storage, or turn event JSON into Pi history. The SP adapter enforces the service identity,
-Submission identity, strictly increasing cursors, a frozen `throughSeq`, and a byte ceiling per
-page; the evidence store writes the **unchanged** `{ingestSeq,record}` as JSONL, refusing an
-individual record larger than an importable file. A saved cursor belongs to its original
-Submission and frozen watermark, never to a later retry or another Chat.
+storage, or turn event JSON into Pi history. The SP adapter enforces the service identity, the
+requested Submission's read/watermark identity, same-Chat safe record identities (including
+imported Context with a null Submission ID and prior Submissions), strictly increasing cursors,
+a frozen `throughSeq`, and a byte ceiling per page; the evidence store writes the **unchanged**
+`{ingestSeq,record}` as JSONL, refusing an individual record larger than an importable file.
+A saved cursor belongs to its original Submission and frozen watermark, never to a later retry
+or another Chat. Unlike Chat-wide evidence, usage, billing and native resource snapshots remain
+scoped to the selected operation/Submission, and final-reply text comes only from that exact
+Submission, never from Context, an earlier Submission or a child.
+
+A safe native record that makes a JSON page exceed 4,000,000 bytes currently fails explicitly;
+item #3's streaming consumer is **pending the shared SP Eval public wire**. It must not truncate
+or omit records, or invent a second incompatible transport before that wire is coordinated.
 
 New bundles use manifest schema **2** and `trajectory.format:"sp-pi-trajectory/v1"`; the
 manifest hash and reference are derived from those new bytes only. Version 1 event bundles,

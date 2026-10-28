@@ -290,7 +290,8 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     `${handlePath(handle)}/${kind}/by-key/${encodeURIComponent(key)}`;
 
   /** Complete safe Pi records of this Chat, bounded at one frozen SP high-water mark.
-   * A resumed evidence export passes its saved mark instead of adopting later submissions. */
+   * The Submission authorizes the read, not a filter on Context or earlier Submissions.
+   * A resumed evidence export passes its saved mark instead of adopting later records. */
   async function* trajectoryRecords(
     handle: AgentHandle, submissionId: string, from = 0, frozenThroughSeq?: number,
   ): AsyncGenerator<NativeTrajectoryEntry & { readonly throughSeq: number }> {
@@ -331,8 +332,13 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         if (entry.ingestSeq <= last || entry.ingestSeq > throughSeq) {
           throw new SpHarnessError("Eval SP trajectory records are out of order or beyond the watermark", false);
         }
-        if (!nativeRecordMayBelongToScope(entry.record, { chatId: handle.chatId, submissionId })) {
-          throw new SpHarnessError("Eval SP returned a trajectory record outside the requested Chat and Submission", false);
+        // The public evidence page carries the full Chat keyset. Validate each safe native
+        // record's Chat (including its parent) before yielding any part of the page; only
+        // resource snapshots and final-reply extraction use the narrower Submission scope.
+        if (entry.record.resource.sessionId !== handle.chatId
+          || (entry.record.parent !== undefined
+            && (entry.record.parent.resource as { readonly sessionId: string }).sessionId !== handle.chatId)) {
+          throw new SpHarnessError("Eval SP returned a trajectory record outside the requested Chat", false);
         }
         last = entry.ingestSeq;
       }
@@ -509,7 +515,12 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     async readFinalReply({ handle, submissionId }) {
       requireSp(handle.framework);
       let reply: string | undefined;
+      const scope = { chatId: handle.chatId, submissionId };
       for await (const { record } of trajectoryRecords(handle, submissionId)) {
+        // The Chat page includes Context and other Submissions. Only this Submission's
+        // own assistant entries can supply a final reply; child entries are also
+        // excluded by finalReplyText's exact Submission check.
+        if (!nativeRecordMayBelongToScope(record, scope)) continue;
         const candidate = finalReplyText(record, submissionId);
         if (candidate !== undefined) reply = candidate ?? undefined;
       }

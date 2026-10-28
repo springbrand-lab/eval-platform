@@ -15,6 +15,18 @@ before publishing, installing and checking actual service responses. No legacy e
 version 1 manifest bytes/refs, resource bytes and scores remain untouched;
 old event-only evidence may not be readable with this new code.
 
+The `submissionId` on an evidence trajectory GET authenticates/binds its frozen
+watermark, but the response contains the **whole safe Chat trajectory**, including
+imported reference Context (`submissionId:null`) and earlier Submissions. Export
+verifies each record's safe projection and Chat/parent Chat identity, then keeps
+every original `{ingestSeq,record}` in the evidence JSONL without filtering or
+rewriting it. Resource snapshots/usage/billing still belong only to the selected
+operation and Submission; the Evaluator's final-reply fallback considers only
+the selected Submission's own assistant messages. The current JSON page ceiling
+is 4,000,000 bytes; a larger single record fails explicitly rather than being
+silently dropped. **Item #3 consumer pending shared SP Eval public streaming wire**;
+do not add another transport or change the pinned package before coordination.
+
 内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。设计见 [Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
 
 ## 项目评估结果下载
