@@ -9,7 +9,7 @@ import {
   type Sampling,
 } from "@eval-platform/eval-contracts";
 import { compactNativeTrajectoryRecord, compactResourceSnapshot, createMetrics, type MetricsFacts } from "@eval-platform/eval-metrics";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { Pool, types } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createEvalRunResumer, withoutRevision } from "@eval-platform/eval-runtime";
@@ -208,7 +208,10 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       await store.updateEvaluation(record, first, { attemptId: evaluationId, snapshot });
       storedEvaluations.push(withoutRevision(record));
     }
-    const rows = await database.db.select().from(attemptResources).where(eq(attemptResources.ownerUserId, owner));
+    const rows = await database.db.select().from(attemptResources).where(and(
+      eq(attemptResources.ownerUserId, owner),
+      inArray(attemptResources.samplingId, command.run.samplingIds),
+    ));
     expect(rows).toHaveLength(4);
     for (const row of rows) expect(row.snapshot).toEqual(raw.get(row.recordId));
 
