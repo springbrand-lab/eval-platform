@@ -665,7 +665,7 @@ it("rejects a non-JSON collection body with 415", async () => {
 
  it("returns lightweight Run evaluation records without raw resource or output payloads", async () => {
   const app = setup();
-  const evaluation = { evaluationId: "e-1", samplingId: "s-1", status: { status: "succeeded" }, chatId: "chat-1", attempts: [{ status: "completed", submissionId: "submission-1", resources: { snapshot: { telemetryEvents: ["x".repeat(11 * 1024 * 1024)] } } }], output: { structuredOutput: { content: "large output" } } };
+  const evaluation = { evaluationId: "e-1", samplingId: "s-1", status: { status: "succeeded" }, chatId: "chat-1", attempts: [{ status: "completed", submissionId: "submission-1", resources: { snapshot: { nativeRecords: [{ ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "message", message: { role: "assistant", timestamp: 1, content: [{ type: "text", text: "x".repeat(11 * 1024 * 1024) }] } } }] } } }], output: { structuredOutput: { content: "large output" } } };
   app.services.projectRuns.readRun.mockResolvedValue({ run: { runId: "run-1" }, samplings: [{ samplingId: "s-1", execution: { status: "succeeded" } }], evaluations: [evaluation] });
   const response = await app.request("/api/projects/project-1/runs/run-1/evaluations", authorized());
   expect(response.status).toBe(200);

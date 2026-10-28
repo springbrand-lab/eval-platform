@@ -1,5 +1,5 @@
 import {
-  DEFAULT_EVIDENCE_LIMITS, sha256Hex, type EvidenceExportProgress, type EvidenceLimits,
+  DEFAULT_EVIDENCE_LIMITS, SP_PI_TRAJECTORY_FORMAT, sha256Hex, type EvidenceExportProgress, type EvidenceLimits,
 } from "@eval-platform/eval-contracts";
 import { describe, expect, it } from "vitest";
 
@@ -48,7 +48,7 @@ describe("evidence store", () => {
     expect(blobs.blobs.size).toBe(2);
     const opened = await store.open(ref);
     expect(opened.manifest).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       evidenceId: ref.evidenceId,
       source: { framework: "sp", samplingId: "s-1", exportedAt: NOW },
       artifacts: [
@@ -56,14 +56,15 @@ describe("evidence store", () => {
         { path: "/copy.html", size: 11, mediaType: "text/html", sha256: await sha256Hex("<h1>Hi</h1>") },
       ],
       subjectInputs: [],
-      trajectory: { format: "sp-trajectory/v1", events: 1, complete: true },
+      trajectory: { format: SP_PI_TRAJECTORY_FORMAT, records: 1, complete: true },
       omitted: [],
     });
     expect(await sha256Hex(opened.manifestBytes)).toBe(ref.manifestSha256);
     await expect(text(await opened.readBlob(opened.manifest.artifacts[0]!.sha256))).resolves.toBe("<h1>Hi</h1>");
     const trajectory = await text(await opened.readBlob(opened.manifest.trajectory.parts[0]!.sha256));
     expect(trajectory.trimEnd().split("\n").map((line) => JSON.parse(line))).toEqual([
-      { ingestSeq: 1, event: { type: "turn.admitted", payload: { prompt: "Build" } } },
+      { ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+        event: { type: "agent_start" } } },
     ]);
 
     // The same export at the same moment is the same bundle.
@@ -83,6 +84,17 @@ describe("evidence store", () => {
     await expect(opened.readBlob("2".repeat(64))).rejects.toThrow(/missing blob/u);
   });
 
+  it("freezes a verified empty native trajectory without manufacturing an event line", async () => {
+    const store = createEvidenceStore(createMemoryEvidenceBlobs(), () => NOW);
+    const opened = await store.open(await store.resume({
+      evidence: exportedEvidence({ samplingId: "empty", files: {}, events: [] }),
+      limits: DEFAULT_EVIDENCE_LIMITS,
+    }));
+    expect(opened.manifest.trajectory).toEqual({
+      format: SP_PI_TRAJECTORY_FORMAT, parts: [], records: 0, complete: true,
+    });
+  });
+
   it("rejects a file larger than the per-file limit", async () => {
     const store = createEvidenceStore(createMemoryEvidenceBlobs(), () => NOW);
     await expect(store.resume({
@@ -91,10 +103,12 @@ describe("evidence store", () => {
     })).rejects.toThrow(/too large/u);
   });
 
-  it("splits raw trajectory on event boundaries and keeps original input bytes", async () => {
+  it("splits raw native trajectory on whole record boundaries and keeps original input bytes", async () => {
     const blobs = createMemoryEvidenceBlobs();
     const store = createEvidenceStore(blobs, () => NOW);
-    const events = Array.from({ length: 5 }, (_, index) => ({ ingestSeq: index + 1, event: { unknown: `原始-${index}`, payload: null } }));
+    const events = Array.from({ length: 5 }, (_, index) => ({ ingestSeq: index + 1,
+      record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "message",
+        message: { role: "user", content: `原始-${index}`, timestamp: index } } }));
     const maxFileBytes = new TextEncoder().encode(`${JSON.stringify(events[0])}\n`).byteLength * 2;
     const evidence = {
       ...exportedEvidence({ samplingId: "split", files: {}, events }),
@@ -102,7 +116,7 @@ describe("evidence store", () => {
         read: async () => new Response("original").body! }],
     };
     const opened = await store.open(await store.resume({ evidence, limits: { ...DEFAULT_EVIDENCE_LIMITS, maxFileBytes } }));
-    expect(opened.manifest.trajectory.parts.map((part) => part.events)).toEqual([2, 2, 1]);
+    expect(opened.manifest.trajectory.parts.map((part) => part.records)).toEqual([2, 2, 1]);
     const saved: unknown[] = [];
     for (const part of opened.manifest.trajectory.parts) {
       expect(part.size).toBeLessThanOrEqual(maxFileBytes);
@@ -112,22 +126,88 @@ describe("evidence store", () => {
     expect(await text(await opened.readBlob(opened.manifest.subjectInputs[0]!.sha256))).toBe("original");
   });
 
-  it("fails the export on a trajectory event larger than one file, before storing any part", async () => {
+  it("fails explicitly on a single oversized native record, before storing any part", async () => {
     const blobs = createMemoryEvidenceBlobs();
-    const evidence = exportedEvidence({ samplingId: "large", files: {}, events: [{ small: 1 }, { full: "x".repeat(100) }] });
+    const evidence = exportedEvidence({ samplingId: "large", files: {}, events: [
+      { ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+        event: { type: "agent_start" } } },
+      { ingestSeq: 2, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "message",
+        message: { role: "assistant", timestamp: 1, content: [{ type: "text", text: "x".repeat(100) }] } } },
+    ] });
     const store = createEvidenceStore(blobs, () => NOW);
-    const failure = store.resume({ evidence, limits: { ...DEFAULT_EVIDENCE_LIMITS, maxFileBytes: 50 } });
-    await expect(failure).rejects.toThrow(/Trajectory event 2 is \d+ bytes, above the 50-byte evidence file limit/u);
-    await expect(failure).rejects.toMatchObject({ retryable: false });
+    const failure = () => store.resume({ evidence, limits: { ...DEFAULT_EVIDENCE_LIMITS, maxFileBytes: 150 } });
+    await expect(failure()).rejects.toThrow(/Trajectory record 2 is \d+ bytes, above the 150-byte evidence file limit/u);
+    await expect(failure()).rejects.toMatchObject({ retryable: false });
     expect(blobs.blobs.size).toBe(0);
+    expect(blobs.manifests.size).toBe(0);
+  });
+
+  it("refuses incomplete native history and an over-budget complete history without omitting records", async () => {
+    const blobs = createMemoryEvidenceBlobs();
+    const store = createEvidenceStore(blobs, () => NOW);
+    const raw = exportedEvidence({ samplingId: "bounded", files: {}, events: [
+      { ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+        event: { type: "agent_start", note: "x".repeat(40) } } },
+      { ingestSeq: 2, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+        event: { type: "agent_end", note: "x".repeat(40) } } },
+    ] });
+    await expect(store.resume({ evidence: { ...raw, trajectoryComplete: false,
+      trajectoryIncompleteReason: "source still delivering" }, limits: DEFAULT_EVIDENCE_LIMITS }))
+      .rejects.toThrow(/Cannot export an incomplete native trajectory/u);
+    expect(blobs.blobs.size).toBe(0);
+    const maxFileBytes = new TextEncoder().encode(`${JSON.stringify({
+      ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+        event: { type: "agent_start", note: "x".repeat(40) } },
+    })}\n`).byteLength;
+    await expect(store.resume({ evidence: raw, limits: {
+      ...DEFAULT_EVIDENCE_LIMITS, maxFileBytes, maxTotalBytes: maxFileBytes,
+    } })).rejects.toThrow(/Complete native trajectory exceeds the evidence limit/u);
+    expect(blobs.blobs.size).toBe(1);
     expect(blobs.manifests.size).toBe(0);
   });
 });
 
 describe("resumable evidence export", () => {
-  const events = Array.from({ length: 5 }, (_, index) => ({ ingestSeq: index + 1, event: { type: "raw", index } }));
+  const events = Array.from({ length: 5 }, (_, index) => ({ ingestSeq: index + 1,
+    record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+      event: { type: "agent_start", index } } }));
   const limits = { ...DEFAULT_EVIDENCE_LIMITS, maxFileBytes: new TextEncoder().encode(`${JSON.stringify(events[0])}\n`).byteLength * 2 };
   const files = { "/a.txt": "first", "/b.txt": "second", "/c.txt": "third" };
+
+  it("persists the first page's watermark even if delivery fails before any part can be written", async () => {
+    const records = [1, 2].map((seq) => ({ ingestSeq: seq,
+      record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+        event: { type: "agent_start", seq } } }));
+    const base = exportedEvidence({ samplingId: "first-page", files: {}, events: records });
+    const reads: { afterSeq: number; throughSeq: number | undefined }[] = [];
+    let fail = true;
+    const evidence = { ...base, async* readTrajectory(afterSeq: number, throughSeq?: number) {
+      reads.push({ afterSeq, throughSeq });
+      for await (const entry of base.readTrajectory(afterSeq, throughSeq)) {
+        if (entry.seq === 2 && fail) { fail = false; throw new Error("first page disconnected"); }
+        yield entry;
+      }
+    } };
+    const blobs = createMemoryEvidenceBlobs();
+    const store = createEvidenceStore(blobs, () => NOW);
+    let progress: EvidenceExportProgress | undefined;
+    const onProgress = async (next: EvidenceExportProgress) => { progress = next; };
+    await expect(store.resume({ evidence, limits: DEFAULT_EVIDENCE_LIMITS, onProgress }))
+      .rejects.toThrow(/first page disconnected/u);
+    expect(progress?.trajectory).toEqual({
+      format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 2, afterSeq: 0, parts: [],
+    });
+    expect(blobs.blobs.size).toBe(0);
+    records.push({ ingestSeq: 3, record: { format: "pi-trajectory/v1", projection: { kind: "safe" },
+      kind: "event", event: { type: "agent_start", seq: 3 } } });
+    const opened = await store.open(await store.resume({
+      evidence, limits: DEFAULT_EVIDENCE_LIMITS, progress: progress!, onProgress,
+    }));
+    expect(reads).toEqual([{ afterSeq: 0, throughSeq: undefined }, { afterSeq: 0, throughSeq: 2 }]);
+    expect(opened.manifest.trajectory.records).toBe(2);
+    expect((await text(await opened.readBlob(opened.manifest.trajectory.parts[0]!.sha256)))
+      .trimEnd().split("\n").map((line) => JSON.parse(line))).toEqual(records.slice(0, 2));
+  });
 
   it("persists each completed step and stores only what the saved progress lacks", async () => {
     const blobs = createMemoryEvidenceBlobs();
@@ -147,9 +227,9 @@ describe("resumable evidence export", () => {
         }
         return base.readFile(path);
       },
-      async* readTrajectory(afterSeq: number) {
+      async* readTrajectory(afterSeq: number, throughSeq?: number) {
         cursors.push(afterSeq);
-        for await (const event of base.readTrajectory(afterSeq)) {
+        for await (const event of base.readTrajectory(afterSeq, throughSeq)) {
           if (failAfter !== undefined && event.seq > failAfter) {
             failAfter = undefined;
             throw new Error("page unavailable");
@@ -164,13 +244,13 @@ describe("resumable evidence export", () => {
     await expect(store.resume({ evidence, limits, onProgress })).rejects.toThrow(/file unavailable/u);
     const afterFiles = saved.at(-1)!;
     expect(afterFiles.artifacts.map((artifact) => artifact.sha256 !== undefined)).toEqual([true, false, true]);
-    expect(afterFiles.trajectory).toEqual({ afterSeq: 0, parts: [] });
+    expect(afterFiles.trajectory).toEqual({ format: SP_PI_TRAJECTORY_FORMAT, afterSeq: 0, parts: [] });
 
     reads.length = 0;
     await expect(store.resume({ evidence, limits, progress: afterFiles, onProgress })).rejects.toThrow(/page unavailable/u);
     expect(reads).toEqual(["/b.txt"]);
     const afterPage = saved.at(-1)!;
-    expect(afterPage.trajectory).toMatchObject({ afterSeq: 2, parts: [{ events: 2 }] });
+    expect(afterPage.trajectory).toMatchObject({ throughSeq: 5, afterSeq: 2, parts: [{ records: 2 }] });
     expect(afterPage.trajectory.done).toBeUndefined();
 
     reads.length = 0;
@@ -210,7 +290,26 @@ describe("resumable evidence export", () => {
     const evidence = exportedEvidence({ samplingId: "changed", files: { "/a.txt": "first" } });
     await expect(store.resume({ evidence, limits, progress: {
       exportedAt: NOW, artifacts: [{ path: "/a.txt", size: 99, mediaType: "text/html" }], subjectInputs: [], omitted: [],
-      trajectory: { afterSeq: 0, parts: [] },
+      trajectory: { format: SP_PI_TRAJECTORY_FORMAT, afterSeq: 0, parts: [] },
     } })).rejects.toBeInstanceOf(EvidenceIntegrityError);
+  });
+
+  it("keeps version 1 manifest bytes/ref immutable and rejects event-only progress before any new writes", async () => {
+    const blobs = createMemoryEvidenceBlobs();
+    const store = createEvidenceStore(blobs, () => NOW);
+    const oldBytes = new TextEncoder().encode(JSON.stringify({
+      schemaVersion: 1, evidenceId: `sha256:${"a".repeat(64)}`,
+      trajectory: { format: "sp-trajectory/v1" },
+    }));
+    const ref = { evidenceId: `sha256:${"a".repeat(64)}`, manifestSha256: await sha256Hex(oldBytes), exportedAt: NOW };
+    await blobs.putManifest("a".repeat(64), oldBytes);
+    await expect(store.open(ref)).rejects.toThrow(/unsupported manifest schema version 1/u);
+    expect(await blobs.readManifest("a".repeat(64))).toEqual(oldBytes);
+    const oldProgress = { exportedAt: NOW, artifacts: [], subjectInputs: [], omitted: [],
+      trajectory: { afterSeq: 1, parts: [{ sha256: "b".repeat(64), size: 8, events: 1 }] } } as unknown as EvidenceExportProgress;
+    await expect(store.resume({ evidence: exportedEvidence({ samplingId: "old", files: {} }), limits, progress: oldProgress }))
+      .rejects.toThrow(/Cannot resume non-native/u);
+    expect(blobs.blobs.size).toBe(0);
+    expect(blobs.manifests.size).toBe(1);
   });
 });

@@ -128,9 +128,11 @@ export interface ExportedSubjectInput extends ExportedArtifact {
   read(): Promise<ReadableStream<Uint8Array>>;
 }
 
-/** One raw source trajectory event and its strictly increasing, positive source cursor. */
+/** One raw native trajectory record and its strictly increasing, positive source cursor. */
 export interface ExportedTrajectoryEvent {
   readonly seq: number;
+  /** Frozen source high-water mark, unchanged on every page and on a resumed export. */
+  readonly throughSeq: number;
   /** Written unchanged as one JSONL line. */
   readonly record: JsonValue;
 }
@@ -144,10 +146,10 @@ export interface ExportedEvidence {
   readonly omitted: readonly EvidenceOmission[];
   readonly readFile: EvidenceFileReader;
   /**
-   * Complete raw events after `afterSeq` (0 for all), in order; the adapter pages through its
-   * source without projection. Each call starts a new read.
+   * Complete raw records after `afterSeq` (0 for all), up to the saved `throughSeq` if supplied.
+   * The adapter pages through the public source without projection; each call starts a new read.
    */
-  readTrajectory(afterSeq: number): AsyncIterable<ExportedTrajectoryEvent>;
+  readTrajectory(afterSeq: number, throughSeq?: number): AsyncIterable<ExportedTrajectoryEvent>;
   readonly trajectoryFormat: string;
   readonly trajectoryComplete: boolean;
   readonly trajectoryIncompleteReason?: string;

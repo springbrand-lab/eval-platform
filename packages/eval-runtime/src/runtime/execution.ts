@@ -394,7 +394,7 @@ function exportSummary(progress: EvidenceExportProgress | undefined): Record<str
     filesTotal: files.length,
     bytes: [...stored, ...parts].reduce((sum, { size }) => sum + size, 0),
     trajectoryParts: parts.length,
-    trajectoryEvents: parts.reduce((sum, { events }) => sum + events, 0),
+    trajectoryRecords: parts.reduce((sum, { records }) => sum + records, 0),
     trajectoryDone: progress.trajectory.done === true,
     omitted,
   };

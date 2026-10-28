@@ -1,7 +1,7 @@
 import { constants as bufferConstants } from "node:buffer";
 import { createHash } from "node:crypto";
-import type { AgentFramework, AgentResourceReadiness, EvidenceLimits, JsonValue } from "@eval-platform/eval-contracts";
-import { isTerminalAgentStatus } from "@eval-platform/eval-contracts";
+import type { AgentFramework, AgentResourceReadiness, EvidenceLimits, NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
+import { EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT, isTerminalAgentStatus } from "@eval-platform/eval-contracts";
 import type { InitialMaterialsRef, InitialSessionRef } from "@eval-platform/eval-dataset";
 import { safeLog, type RuntimeLog } from "@eval-platform/eval-runtime";
 import {
@@ -65,6 +65,8 @@ const TRANSFER_TIMEOUT_MS = 5 * 60_000;
  * one UTF-16 unit, so any body within V8's maximum string length decodes. Larger is rejected.
  */
 const MAX_JSON_RESPONSE_BYTES = bufferConstants.MAX_STRING_LENGTH;
+/** A page is JSON, not a streaming byte file. Reject it before decoding unbounded native bodies. */
+export const MAX_TRAJECTORY_PAGE_BYTES = 8 * 1024 * 1024;
 const ERROR_BODY_BYTES = 64 * 1024;
 /** SP's answer for an evidence read whose Submission or telemetry is not settled yet: retry later. */
 export const EVIDENCE_NOT_READY = "EVIDENCE_NOT_READY";
@@ -199,6 +201,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     readonly label?: string;
     readonly evidenceRead?: boolean;
     readonly signal?: AbortSignal;
+    readonly maxResponseBytes?: number;
   }
 
   async function call(method: "GET" | "POST" | "PUT", path: string, request: CallOptions = {}): Promise<unknown> {
@@ -209,10 +212,11 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         ...(body === undefined ? {} : { body }),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ...(signal === undefined ? {} : { signal }),
+        ...(request.maxResponseBytes === undefined ? {} : { maxResponseBytes: request.maxResponseBytes }),
       })).data;
     } catch (error) {
       throw harnessError(error, {
-        maxResponseBytes,
+        maxResponseBytes: request.maxResponseBytes ?? maxResponseBytes,
         ...(request.label === undefined ? {} : { label: request.label }),
         ...(request.evidenceRead === undefined ? {} : { evidenceRead: request.evidenceRead }),
       });
@@ -282,41 +286,64 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
   const operationPath = (kind: "submissions" | "resources", handle: AgentHandle, key: string): string =>
     `${handlePath(handle)}/${kind}/by-key/${encodeURIComponent(key)}`;
 
-  /** Every trajectory event of the whole Chat after `from` (0 for all), oldest first; the Submission only scopes the read. */
-  async function* trajectoryEvents(handle: AgentHandle, submissionId: string, from = 0): AsyncGenerator<{
-    ingestSeq: number;
-    event: Record<string, JsonValue>;
-  }> {
+  /** Complete safe Pi records of this Chat, bounded at one frozen SP high-water mark.
+   * A resumed evidence export passes its saved mark instead of adopting later submissions. */
+  async function* trajectoryRecords(
+    handle: AgentHandle, submissionId: string, from = 0, frozenThroughSeq?: number,
+  ): AsyncGenerator<NativeTrajectoryEntry & { readonly throughSeq: number }> {
     if (!Number.isSafeInteger(from) || from < 0) throw new SpHarnessError(`Invalid trajectory cursor ${from}`, false);
+    if (!submissionId || (frozenThroughSeq !== undefined
+      && (!Number.isSafeInteger(frozenThroughSeq) || frozenThroughSeq < from))) {
+      throw new SpHarnessError("Invalid trajectory Submission or frozen watermark", false);
+    }
     const path = `${handlePath(handle)}/evidence/trajectory`;
     let afterSeq: number | null = from;
+    let throughSeq = frozenThroughSeq;
     let pages = 0;
-    let events = 0;
+    let records = 0;
     while (afterSeq !== null) {
       const query = new URLSearchParams({
         afterSeq: String(afterSeq), limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX), submissionId,
+        ...(throughSeq === undefined ? {} : { throughSeq: String(throughSeq) }),
       });
       const fields = { ...handleContext(handle), afterSeq, submissionId };
       let page: ReturnType<typeof evidenceTrajectoryPage>;
       try {
         page = evidenceTrajectoryPage(await call("GET", `${path}?${query}`,
-          { timeoutMs: transferTimeoutMs, label: "evidence trajectory page", evidenceRead: true }));
+          { timeoutMs: transferTimeoutMs, label: "evidence trajectory page", evidenceRead: true,
+            maxResponseBytes: Math.min(maxResponseBytes, MAX_TRAJECTORY_PAGE_BYTES) }));
       } catch (error) {
         log({ name: "evidence_trajectory_page", ...fields, ...failureFields(error) });
         throw error;
       }
-      pages += 1;
-      events += page.events.length;
-      if (page.nextAfterSeq === null) log({ name: "evidence_trajectory_page", ...fields, status: 200, from, pages, events });
-      let last: number = afterSeq;
-      for (const event of page.events) {
-        if (event.ingestSeq <= last) throw new SpHarnessError("Eval SP trajectory events are out of order", false);
-        yield event;
-        last = event.ingestSeq;
+      if (page.records.length > EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX || page.cursor.throughSeq < afterSeq
+        || (throughSeq !== undefined && page.cursor.throughSeq !== throughSeq)) {
+        throw new SpHarnessError("Eval SP changed the trajectory watermark or exceeded the page limit", false);
       }
-      if (page.nextAfterSeq !== null && (page.events.length === 0 || page.nextAfterSeq !== last)) {
+      throughSeq = page.cursor.throughSeq;
+      pages += 1;
+      records += page.records.length;
+      let last: number = afterSeq;
+      for (const entry of page.records) {
+        if (entry.ingestSeq <= last || entry.ingestSeq > throughSeq) {
+          throw new SpHarnessError("Eval SP trajectory records are out of order or beyond the watermark", false);
+        }
+        if ((entry.record.chatId !== undefined && entry.record.chatId !== handle.chatId)
+          || (entry.record.ownerUserId !== undefined && entry.record.ownerUserId !== handle.ownerUserId)
+          || (entry.record.submissionId !== undefined
+            && (typeof entry.record.submissionId !== "string" || !entry.record.submissionId))) {
+          throw new SpHarnessError("Eval SP returned a trajectory record with different Chat identity", false);
+        }
+        last = entry.ingestSeq;
+      }
+      if ((page.nextAfterSeq !== null && (page.records.length === 0 || page.nextAfterSeq !== last || last >= throughSeq))
+        || (page.nextAfterSeq === null && last !== throughSeq)) {
         throw new SpHarnessError("Eval SP returned an invalid trajectory cursor", false);
       }
+      // Reject the entire page before yielding even its first record. Never persist a prefix
+      // of a contradictory or incomplete response as evidence progress.
+      for (const entry of page.records) yield { ...entry, throughSeq };
+      if (page.nextAfterSeq === null) log({ name: "evidence_trajectory_page", ...fields, status: 200, from, pages, records });
       afterSeq = page.nextAfterSeq;
     }
   }
@@ -356,6 +383,19 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       value = parse(await call("GET", `${operationPath("resources", input.handle, input.idempotencyKey)}${leaf}${query}`,
         { timeoutMs, label: `resource ${leaf === "" ? "snapshot" : "readiness"}`,
           ...(input.signal === undefined ? {} : { signal: input.signal }) }));
+      const scoped = value as T & { readonly scope: { readonly chatId: string; readonly idempotencyKey: string; readonly submissionId: string } };
+      if (scoped.scope.chatId !== input.handle.chatId || scoped.scope.idempotencyKey !== input.idempotencyKey
+        || (input.submissionId !== undefined && scoped.scope.submissionId !== input.submissionId)) {
+        throw new SpHarnessError("Eval SP returned resources for a different Chat or Submission", false);
+      }
+      const nativeRecords = (value as T & { readonly nativeRecords?: readonly NativeTrajectoryEntry[] }).nativeRecords;
+      for (const { record } of nativeRecords ?? []) {
+        if ((record.chatId !== undefined && record.chatId !== input.handle.chatId)
+          || (record.ownerUserId !== undefined && record.ownerUserId !== input.handle.ownerUserId)
+          || (record.submissionId !== undefined && record.submissionId !== scoped.scope.submissionId)) {
+          throw new SpHarnessError("Eval SP returned a resource record outside the requested operation", false);
+        }
+      }
     } catch (error) {
       if (isRequestCancelled(error)) throw error;
       log({ name, ...fields(), ...failureFields(error) });
@@ -472,12 +512,12 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     async readFinalReply({ handle, submissionId }) {
       requireSp(handle.framework);
       let reply: string | undefined;
-      for await (const { event } of trajectoryEvents(handle, submissionId)) reply = finalReplyText(event) ?? reply;
+      for await (const { record } of trajectoryRecords(handle, submissionId)) reply = finalReplyText(record, submissionId) ?? reply;
       return reply;
     },
     collectAgentResources: (input) => readResources(input, "resources_read", "", resourceSnapshot, transferTimeoutMs,
       (snapshot) => ({ coverage: snapshot.coverage, usageEvents: snapshot.usageEvents.length,
-        telemetryEvents: snapshot.telemetryEvents.length, billingSettlements: snapshot.billingSettlements.length })),
+        nativeRecords: snapshot.nativeRecords.length, billingSettlements: snapshot.billingSettlements.length })),
     inspectAgentResources: (input) => readResources(input, "resources_readiness", "/readiness", resourceReadiness, requestTimeoutMs),
     async exportEvidence({ handle, submissionId, limits, initialMaterials }) {
       requireSp(handle.framework);
@@ -514,12 +554,16 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           if (!response.body) throw new SpHarnessError(`Eval SP returned no bytes for ${file}`, true);
           return response.body;
         },
-        async* readTrajectory(afterSeq) {
-          // The page entry is the raw record: its source cursor and the unchanged event.
-          for await (const entry of trajectoryEvents(handle, submissionId, afterSeq)) yield { seq: entry.ingestSeq, record: entry };
+        async* readTrajectory(afterSeq, throughSeq) {
+          // Source identity and native record are unchanged in the JSONL line. Only the frozen
+          // high-water mark is additional local progress metadata, never part of that line.
+          for await (const entry of trajectoryRecords(handle, submissionId, afterSeq, throughSeq)) {
+            yield { seq: entry.ingestSeq, throughSeq: entry.throughSeq,
+              record: { ingestSeq: entry.ingestSeq, record: entry.record } };
+          }
         },
-        trajectoryFormat: "sp-trajectory/v1",
-        // SP reads `trajectory_events` only after the Submission ended and every event was delivered.
+        trajectoryFormat: SP_PI_TRAJECTORY_FORMAT,
+        // SP exposes native records only after the Submission ended and its deliveries settled.
         trajectoryComplete: true,
       };
     },
@@ -527,6 +571,10 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       requireSp(handle.framework);
       if (handle.role !== "evaluator") throw new SpHarnessError("Only an Evaluator imports evidence", false);
       const { manifest } = evidence;
+      if (manifest.schemaVersion !== EVIDENCE_SCHEMA_VERSION
+        || manifest.trajectory.format !== SP_PI_TRAJECTORY_FORMAT || !manifest.trajectory.complete) {
+        throw new SpHarnessError("Cannot import a non-native or unsupported evidence manifest", false);
+      }
       /** Streams one stored blob to SP; SP checks the SHA-256 header and both sides compare the receipt. */
       const put = async (relative: string, mediaType: string, sha256: string, size: number,
         read: () => Promise<ReadableStream<Uint8Array> | Uint8Array>) => {

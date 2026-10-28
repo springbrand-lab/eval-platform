@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AgentFramework,
   AgentResourceSnapshot,
+  EvidenceExportProgress,
   EvaluationPlan,
   EvaluationRecord,
   ExecutionPlan,
@@ -18,6 +19,7 @@ import {
   OBSERVATION_MAX_PASSES,
   RESOURCE_CHECK_INTERVAL_MS,
   RESOURCE_WAIT_MS,
+  SP_PI_TRAJECTORY_FORMAT,
   isStageRecoveryPending,
 } from "@eval-platform/eval-contracts";
 import { digestExecutionPlan, digestJson } from "../plan/index.js";
@@ -598,11 +600,11 @@ function makeHarness(): Harness {
         finalized: true,
         coverage: {
           usageEvents: "complete" as const,
-          telemetryEvents: "complete" as const,
+          nativeRecords: "complete" as const,
           billingSettlements: "complete" as const,
         },
         usageEvents: [],
-        telemetryEvents: [],
+        nativeRecords: [],
         billingSettlements: [],
         readiness: FINALIZED_READINESS,
       };
@@ -626,27 +628,27 @@ function makeResources(input: CollectAgentResourcesInput): AgentResourceSnapshot
     providerCostUsd: { input: 0.1, output: 0.02, cacheRead: 0.01, cacheWrite: 0, total: 0.13 },
     sourceExtension: { retained: [true, null, "original"] },
   };
-  const event = (type: string, operationId: string, occurredAt: number, payload: Record<string, string | number>) => ({
-    eventId: `${submissionId}:${idempotencyKey}:${type}`,
-    operationId,
-    type,
-    occurredAt,
-    resource: { sessionId: handle.chatId },
-    payload,
-  });
+  const turnId = `${idempotencyKey}:turn`;
+  const requestId = `${idempotencyKey}:model`;
+  const toolCallId = `${idempotencyKey}:tool`;
   return {
     scope: { chatId: handle.chatId, submissionId, idempotencyKey },
     observedAt: "2026-10-08T00:00:00.000Z",
     finalized: true,
     readiness: FINALIZED_READINESS,
-    coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
+    coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
     usageEvents: [usage],
-    telemetryEvents: [
-      event("turn.started", `${idempotencyKey}:turn`, 100, {}),
-      event("generation.finished", `${idempotencyKey}:model`, 200, { model: `${handle.role}-model`, totalTokens: 110 }),
-      event("tool.started", `${idempotencyKey}:tool`, 200, { toolName: "bash" }),
-      event("tool.finished", `${idempotencyKey}:tool`, 250, { toolName: "bash", durationMs: 50 }),
-      event("turn.finished", `${idempotencyKey}:turn`, 300, { outcome: "completed", durationMs: 200 }),
+    nativeRecords: [
+      { ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+        event: { type: "turn_start", turnId, timestamp: 100 } } },
+      { ingestSeq: 2, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "request",
+        request: { phase: "end", requestId, turnId, timestamp: 200, outcome: "completed", totalTokens: 110 } } },
+      { ingestSeq: 3, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+        event: { type: "tool_execution_start", toolCallId, turnId, toolName: "bash", timestamp: 200 } } },
+      { ingestSeq: 4, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "result",
+        result: { type: "toolResult", toolCallId, turnId, toolName: "bash", isError: false, durationMs: 50, timestamp: 250 } } },
+      { ingestSeq: 5, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+        event: { type: "turn_end", turnId, timestamp: 300, outcome: "completed", durationMs: 200 } } },
     ],
     billingSettlements: [{
       eventId,
@@ -1837,11 +1839,11 @@ describe("eval runtime orchestration", () => {
       submissionId: expect.any(String), checks: 1, finalized: true, durationMs: expect.any(Number),
     });
     expect(events).toContainEqual(expect.objectContaining({
-      ...evaluator, name: "resources_collected", finalized: true, usageEvents: 1, telemetryEvents: 5, billingSettlements: 2, creditsTotal: 20,
+      ...evaluator, name: "resources_collected", finalized: true, usageEvents: 1, nativeRecords: 5, billingSettlements: 2, creditsTotal: 20,
     }));
     expect(events).toContainEqual(expect.objectContaining({
       ...member, name: "evidence_export", passes: 1, outcome: "stored", filesStored: 1, filesTotal: 1,
-      bytes: expect.any(Number), trajectoryParts: 1, trajectoryEvents: 1, trajectoryDone: true, omitted: {},
+      bytes: expect.any(Number), trajectoryParts: 1, trajectoryRecords: 1, trajectoryDone: true, omitted: {},
     }));
     expect(events.at(-1)).toEqual({
       name: "run_pass_summary", runId: run.runId, operation: "pipeline",
@@ -3817,14 +3819,15 @@ describe("Project Run stop", () => {
     const progress = {
       exportedAt: "2026-10-14T00:00:02.000Z",
       artifacts: [{ path: "/a.txt", size: 1, mediaType: "text/plain", sha256: "a".repeat(64) }],
-      subjectInputs: [], omitted: [], trajectory: { afterSeq: 200, parts: [{ sha256: "b".repeat(64), size: 10, events: 200 }] },
-    };
+      subjectInputs: [], omitted: [], trajectory: { format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 200,
+        afterSeq: 200, parts: [{ sha256: "b".repeat(64), size: 10, records: 200 }] },
+    } satisfies EvidenceExportProgress;
     const collectedResources = (chatId: string, idempotencyKey: string, submissionId: string) => ({
       status: "collected" as const,
       summary: summarizeResourceSnapshot({
         scope: { chatId, idempotencyKey, submissionId }, observedAt: ENDED_AT, finalized: true,
-        coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
-        usageEvents: [], telemetryEvents: [], billingSettlements: [],
+        coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+        usageEvents: [], nativeRecords: [], billingSettlements: [],
       }),
     });
 
@@ -4600,7 +4603,7 @@ describe("raw resource persistence", () => {
     vi.mocked(harness.collectAgentResources).mockImplementation(async (input) => {
       captured = {
         ...makeResources(input),
-        coverage: { usageEvents: "partial", telemetryEvents: "partial", billingSettlements: "unavailable" },
+        coverage: { usageEvents: "partial", nativeRecords: "partial", billingSettlements: "unavailable" },
         billingSettlements: [],
       };
       return captured;
@@ -5501,7 +5504,7 @@ describe("Run recovery from persisted facts", () => {
     const snapshot = {
       ...makeResources({ handle, idempotencyKey }),
       finalized: false,
-      coverage: { usageEvents: "partial" as const, telemetryEvents: "partial" as const, billingSettlements: "partial" as const },
+      coverage: { usageEvents: "partial" as const, nativeRecords: "partial" as const, billingSettlements: "partial" as const },
     };
     await seedSampling(store, {
       ...(await saved(store, samplingId)),
@@ -5554,7 +5557,7 @@ describe("Run recovery from persisted facts", () => {
     const snapshot = {
       ...makeResources({ handle, idempotencyKey }),
       finalized: false,
-      coverage: { usageEvents: "partial" as const, telemetryEvents: "partial" as const, billingSettlements: "partial" as const },
+      coverage: { usageEvents: "partial" as const, nativeRecords: "partial" as const, billingSettlements: "partial" as const },
     };
     await seedEvaluation(store, {
       ...evaluation, chatId, status: { status: "retrying" },
@@ -6623,7 +6626,7 @@ describe("resource readiness waiting and Submission observation", () => {
   const socketClosed = () => Object.assign(new Error("Submission WebSocket closed before terminal status"), { retryable: true });
   const unfinalized = (input: CollectAgentResourcesInput): AgentResourceSnapshot => ({
     ...makeResources(input), finalized: false, readiness: PENDING_READINESS,
-    coverage: { usageEvents: "partial", telemetryEvents: "partial", billingSettlements: "partial" },
+    coverage: { usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial" },
   });
   const validScore = (_schema: unknown, content: string) => (
     typeof (JSON.parse(content) as { score?: unknown }).score === "number"
@@ -7267,7 +7270,9 @@ describe("resource readiness waiting and Submission observation", () => {
 
 describe("resumable Subject evidence export", () => {
   const files = { "/a.txt": "first", "/b.txt": "second" };
-  const events = Array.from({ length: 5 }, (_, index) => ({ ingestSeq: index + 1, event: { type: "raw", index } }));
+  const events = Array.from({ length: 5 }, (_, index) => ({ ingestSeq: index + 1,
+    record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+      event: { type: "agent_start", index } } }));
   const twoEventLimits = {
     ...DEFAULT_EVIDENCE_LIMITS,
     maxFileBytes: new TextEncoder().encode(`${JSON.stringify(events[0])}\n`).byteLength * 2,
@@ -7335,9 +7340,9 @@ describe("resumable Subject evidence export", () => {
       const base = exportedEvidence({ samplingId: handle.samplingId, chatId: handle.chatId, events });
       return {
         ...base,
-        async* readTrajectory(afterSeq) {
+        async* readTrajectory(afterSeq, throughSeq) {
           cursors.push(afterSeq);
-          for await (const event of base.readTrajectory(afterSeq)) {
+          for await (const event of base.readTrajectory(afterSeq, throughSeq)) {
             if (failAfter !== undefined && event.seq > failAfter) {
               failAfter = undefined;
               throw transient("trajectory page unavailable");
@@ -7353,7 +7358,7 @@ describe("resumable Subject evidence export", () => {
 
     await runtime.resume(run.runId);
     const pending = await runtime.getSampling(run.samplingIds[0]!);
-    expect(pending.evidenceExport!.progress!.trajectory).toMatchObject({ afterSeq: 2, parts: [{ events: 2 }] });
+    expect(pending.evidenceExport!.progress!.trajectory).toMatchObject({ afterSeq: 2, parts: [{ records: 2 }] });
 
     await runtime.resume(run.runId);
     expect(cursors).toEqual([0, 2]);
@@ -7363,7 +7368,7 @@ describe("resumable Subject evidence export", () => {
       evidence: exportedEvidence({ samplingId: done.samplingId, chatId: done.subjectChatId!, events }), limits: twoEventLimits,
     });
     expect(done.evidence).toEqual(uninterrupted);
-    expect((await evidence.open(done.evidence!)).manifest.trajectory.parts.map((part) => part.events)).toEqual([2, 2, 1]);
+    expect((await evidence.open(done.evidence!)).manifest.trajectory.parts.map((part) => part.records)).toEqual([2, 2, 1]);
   });
 
   it("finalizes the same evidence ID after a manifest write whose response was lost", async () => {
@@ -7456,19 +7461,22 @@ describe("resumable Subject evidence export", () => {
     expect((await saved(store, run.samplingIds[0]!)).execution).toEqual({ status: "succeeded" });
   });
 
-  it("fails the execution at once on a trajectory event too large for one evidence file", async () => {
+  it("fails the execution at once on a native trajectory record too large for one evidence file", async () => {
     const harness = makeHarness();
     vi.mocked(harness.exportEvidence).mockImplementation(async ({ handle }) => exportedEvidence({
-      samplingId: handle.samplingId, chatId: handle.chatId, files, events: [{ huge: "x".repeat(twoEventLimits.maxFileBytes) }],
+      samplingId: handle.samplingId, chatId: handle.chatId, files, events: [{
+        ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "message",
+          message: { role: "assistant", timestamp: 1, content: [{ type: "text", text: "x".repeat(twoEventLimits.maxFileBytes) }] } },
+      }],
     }));
     const store = makeStore();
     const runtime = createRuntime({ harness, store, sleep: async () => undefined, evidenceLimits: twoEventLimits });
-    const run = await runtime.submit(projectRequest("execution", "oversized-trajectory-event"));
+    const run = await runtime.submit(projectRequest("execution", "oversized-native-trajectory-record"));
 
     await runtime.resume(run.runId);
     const failed = await saved(store, run.samplingIds[0]!);
     expect(failed.execution.status).toBe("failed");
-    expect(failed.execution.lastError).toMatch(/Trajectory event 1 is \d+ bytes, above the \d+-byte evidence file limit/u);
+    expect(failed.execution.lastError).toMatch(/Trajectory record 1 is \d+ bytes, above the \d+-byte evidence file limit/u);
     expect(failed.evidence).toBeUndefined();
     expect(failed.evidenceExport).toMatchObject({ passes: 1 });
     expect(harness.exportEvidence).toHaveBeenCalledOnce();

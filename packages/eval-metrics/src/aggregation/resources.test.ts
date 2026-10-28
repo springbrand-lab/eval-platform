@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentResourceFact, AgentResourceScope } from "@eval-platform/eval-contracts";
-import { resourceInput, settlement, telemetry, usage } from "../test-support.js";
+import { piEvent, piHook, piRequest, piResult, resourceInput, settlement, usage } from "../test-support.js";
 import { aggregateResources } from "./resources.js";
 
 const SCOPE = { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "execution:sampling-1" } satisfies AgentResourceScope;
@@ -29,12 +29,12 @@ describe("resource statistics", () => {
 
   it("classifies an unclosed operation from a terminal Attempt as unknown", () => {
     const result = aggregateResources([{
-      ...resourceInput({ telemetryEvents: [
-        telemetry("turn-start", "turn.started", "turn-1"),
-        telemetry("turn-end", "turn.finished", "turn-1", { outcome: "completed" }, 2_000),
-        telemetry("generation-start", "generation.started", "generation-1", {}, 1_000, "session-1", "turn-1"),
+      ...resourceInput({ nativeRecords: [
+        piEvent(1, "turn_start", { turnId: "turn-1", timestamp: 0 }),
+        piEvent(2, "turn_end", { turnId: "turn-1", outcome: "completed", timestamp: 2_000 }),
+        piRequest(3, "start", { requestId: "request-1", turnId: "turn-1", timestamp: 1_000 }),
       ] }),
-      canEmitTelemetry: false,
+      canEmitNativeRecords: false,
     }]);
     expect(result.modelRequests).toMatchObject({ count: { value: 1 }, inProgress: 0, unknown: 1 });
     expect(result.trajectory.turns).toMatchObject({ count: { value: 1 }, completed: 1, inProgress: 0, unknown: 0 });
@@ -53,7 +53,7 @@ describe("resource statistics", () => {
 
   it.each(["partial", "unavailable"] as const)("does not treat declared %s sources as complete", (coverage) => {
     const result = aggregateResources([resourceInput({
-      usageEvents: [usage("usage-1")], coverage: { usageEvents: coverage, telemetryEvents: coverage, billingSettlements: coverage },
+      usageEvents: [usage("usage-1")], coverage: { usageEvents: coverage, nativeRecords: coverage, billingSettlements: coverage },
     })]);
     expect(result.tokens.total).toEqual({ value: 35, coverage: "partial" });
     expect(result.costs.chargedUnits.value).toBeNull();
@@ -88,26 +88,26 @@ describe("resource statistics", () => {
   it("deduplicates source identities across snapshots and ignores object key order", () => {
     const event = usage("usage-1");
     const reordered = Object.fromEntries(Object.entries(event).reverse());
-    const started = telemetry("tool-start", "tool.started", "tool-1", { toolName: "browser" });
+    const started = piEvent(1, "tool_execution_start", { toolCallId: "tool-1", toolName: "browser" });
     const result = aggregateResources([
-      resourceInput({ usageEvents: [event, reordered], telemetryEvents: [started], billingSettlements: [settlement("usage-1")] }),
-      resourceInput({ usageEvents: [event], telemetryEvents: [{ ingestSeq: 123, event: started }], billingSettlements: [settlement("usage-1")] }),
+      resourceInput({ usageEvents: [event, reordered], nativeRecords: [started], billingSettlements: [settlement("usage-1")] }),
+      resourceInput({ usageEvents: [event], nativeRecords: [started], billingSettlements: [settlement("usage-1")] }),
     ]);
     expect(result.tokens.total.value).toBe(35);
     expect(result.trajectory.tools.count.value).toBe(1);
     expect(result.costs.modelDebitedUnits.value).toBe(8);
-    expect(result.duplicateRecords).toEqual({ usageEvents: 2, telemetryEvents: 1, billingSettlements: 1 });
+    expect(result.duplicateRecords).toEqual({ usageEvents: 2, nativeRecords: 1, billingSettlements: 1 });
   });
 
   it("keeps different users, accounts and sessions with the same local ID separate", () => {
     const result = aggregateResources([
-      resourceInput({ usageEvents: [usage("shared")], telemetryEvents: [telemetry("shared", "generation.started", "op-1")], billingSettlements: [settlement("shared")] }),
-      resourceInput({ usageEvents: [usage("shared")], telemetryEvents: [telemetry("shared", "generation.started", "op-1", {}, 100, "session-2")], billingSettlements: [settlement("shared", { accountId: "account-2" })] }, "owner-2"),
+      resourceInput({ usageEvents: [usage("shared")], nativeRecords: [piRequest(1, "start", { requestId: "op-1" })], billingSettlements: [settlement("shared")] }),
+      resourceInput({ usageEvents: [usage("shared")], nativeRecords: [piRequest(1, "start", { requestId: "op-1" })], billingSettlements: [settlement("shared", { accountId: "account-2" })] }, "owner-2"),
     ]);
     expect(result.tokens.total.value).toBe(70);
     expect(result.modelRequests.count.value).toBe(2);
     expect(result.costs.modelDebitedUnits.value).toBe(16);
-    expect(result.duplicateRecords).toEqual({ usageEvents: 0, telemetryEvents: 0, billingSettlements: 0 });
+    expect(result.duplicateRecords).toEqual({ usageEvents: 0, nativeRecords: 0, billingSettlements: 0 });
   });
 
   it("isolates contradictory facts instead of picking whichever came last", () => {
@@ -122,7 +122,7 @@ describe("resource statistics", () => {
   it("diagnoses missing identities and unsupported facts without claiming complete zero", () => {
     const result = aggregateResources([resourceInput({
       usageEvents: [{ kind: "assistant_model", metrics: { inputTokens: 1 } }, usage("unsupported", { kind: "new-kind" })],
-      telemetryEvents: [{ eventId: "missing-session", type: "tool.started", operationId: "tool-1" }],
+      nativeRecords: [piEvent(1, "tool_execution_start", { toolName: "search" })],
       billingSettlements: [{ eventId: "missing-account", debitedUnits: 5 }],
     })]);
     expect(result.tokens.input).toEqual({ value: null, coverage: "unavailable" });
@@ -216,7 +216,8 @@ describe("resource statistics", () => {
   it("separates provider USD, model settlement and actual action charges", () => {
     const result = aggregateResources([resourceInput({
       usageEvents: [usage("usage-1")],
-      telemetryEvents: [telemetry("tool-1", "tool.finished", "tool-1", { toolName: "action", outcome: "completed", cost: 9_999 })],
+      nativeRecords: [piResult(1, { toolCallId: "tool-1", toolName: "action", isError: false, content: "result",
+        chargedCredits: 9_999 })],
       billingSettlements: [
         settlement("usage-1"), { executionId: "action-1", status: "succeeded", chargedCredits: 5 },
         { executionId: "action-2", status: "failed", chargedCredits: 0 },
@@ -273,54 +274,51 @@ describe("resource statistics", () => {
     expect(result.modelRequests.count.value).toBe(0);
   });
 
-  it("counts one turn with multiple model requests and pairs tool calls regardless of event order", () => {
-    const events = [
-      telemetry("turn-start", "turn.started", "turn-1", {}, 0),
-      telemetry("turn-end", "turn.finished", "turn-1", { outcome: "completed" }, 500),
-      telemetry("request-1-start", "generation.started", "request-1", {}, 1),
-      telemetry("request-1-end", "generation.finished", "request-1", { outcome: "completed" }, 11),
-      telemetry("request-2-start", "generation.started", "request-2", {}, 100),
-      telemetry("request-2-end", "generation.finished", "request-2", { outcome: "failed" }, 120),
-      telemetry("tool-start", "tool.started", "tool-1", { toolName: "browser" }, 200),
-      telemetry("tool-end", "tool.finished", "tool-1", { toolName: "browser", outcome: "completed" }, 240),
+  it("counts one native Turn with multiple model requests and pairs Tool IDs regardless of record order", () => {
+    const records = [
+      piEvent(1, "turn_start", { turnId: "turn-1", timestamp: 0 }),
+      piEvent(2, "turn_end", { turnId: "turn-1", outcome: "completed", timestamp: 500 }),
+      piRequest(3, "start", { requestId: "request-1", turnId: "turn-1", timestamp: 1 }),
+      piRequest(4, "end", { requestId: "request-1", turnId: "turn-1", outcome: "completed", timestamp: 11 }),
+      piRequest(5, "start", { requestId: "request-2", turnId: "turn-1", timestamp: 100 }),
+      piRequest(6, "end", { requestId: "request-2", turnId: "turn-1", outcome: "failed", timestamp: 120 }),
+      piEvent(7, "tool_execution_start", { toolCallId: "tool-1", toolName: "browser", turnId: "turn-1", timestamp: 200 }),
+      piResult(8, { toolCallId: "tool-1", toolName: "browser", isError: false, turnId: "turn-1", timestamp: 240 }),
     ];
-    const result = aggregateResources([resourceInput({ telemetryEvents: events.toReversed() })]);
+    const result = aggregateResources([resourceInput({ nativeRecords: records.toReversed() })]);
     expect(result.trajectory.turns).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 500 } });
     expect(result.modelRequests).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 1, failed: 1, durationMs: { mean: 15 } });
     expect(result.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 40 } });
     expect(result.trajectory.byTool[0]).toMatchObject({ toolName: "browser", count: { value: 1 }, durationMs: { total: 40 } });
   });
 
-  it("keeps cancelled, unknown and in-progress operations distinct", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      telemetry("cancel", "turn.cancelled", "turn-1"),
-      telemetry("unknown", "tool.finished", "tool-1", { toolName: "browser", durationMs: 7 }),
-      telemetry("start", "tool.started", "tool-2", { toolName: "browser" }),
-      telemetry("other", "approval.requested", "approval-1"),
+  it("keeps cancelled, unknown and in-progress native operations distinct", () => {
+    const result = aggregateResources([resourceInput({ nativeRecords: [
+      piEvent(1, "turn_end", { turnId: "turn-1", outcome: "cancelled" }),
+      piHook(2, "after_tool", { toolCallId: "tool-1", toolName: "browser", durationMs: 7 }),
+      piEvent(3, "tool_execution_start", { toolCallId: "tool-2", toolName: "browser" }),
+      piEvent(4, "agent_end"),
     ] })]);
     expect(result.trajectory.turns.cancelled).toBe(1);
     expect(result.trajectory.tools).toMatchObject({ count: { value: 2 }, unknown: 1, inProgress: 1, failed: 0, durationMs: { count: 1, missing: 1, mean: 7 } });
   });
 
-  it("does not select an arbitrary winner for contradictory operation kind, outcome or tool name", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      telemetry("kind-1", "turn.started", "conflicting-kind"), telemetry("kind-2", "tool.started", "conflicting-kind"),
-      telemetry("outcome-1", "tool.finished", "conflicting-outcome", { toolName: "browser", outcome: "completed", durationMs: 10 }),
-      telemetry("outcome-2", "tool.finished", "conflicting-outcome", { toolName: "browser", outcome: "failed", durationMs: 20 }),
-      telemetry("name-1", "tool.started", "conflicting-name", { toolName: "browser" }),
-      telemetry("name-2", "tool.finished", "conflicting-name", { toolName: "shell", outcome: "completed" }),
+  it("does not select an arbitrary winner for contradictory Tool outcomes and names", () => {
+    const result = aggregateResources([resourceInput({ nativeRecords: [
+      piResult(1, { toolCallId: "conflicting-outcome", toolName: "browser", isError: false, durationMs: 10 }),
+      piResult(2, { toolCallId: "conflicting-outcome", toolName: "browser", isError: true, durationMs: 20 }),
+      piEvent(3, "tool_execution_start", { toolCallId: "conflicting-name", toolName: "browser" }),
+      piResult(4, { toolCallId: "conflicting-name", toolName: "shell", isError: false }),
     ] })]);
     expect(result.trajectory.tools).toMatchObject({ count: { value: 2, coverage: "partial" }, unknown: 1, completed: 1 });
-    expect(result.trajectory.turns.count.value).toBeNull();
-    expect(result.trajectory.byTool.find((item) => item.toolName === "browser")!.durationMs.count).toBe(0);
     expect(result.trajectory.byTool.some((item) => item.toolName === null)).toBe(true);
     expect(result.diagnostics.filter((item) => item.kind === "conflicting-identity")).toHaveLength(3);
   });
 
-  it("diagnoses unsupported and unidentifiable operation events", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      telemetry("unknown", "generation.future-event", "request-1"),
-      { ...telemetry("missing-operation", "tool.started", "request-1"), operationId: null },
+  it("diagnoses unsupported and unidentifiable native record facts", () => {
+    const result = aggregateResources([resourceInput({ nativeRecords: [
+      piEvent(1, "new_native_event", { requestId: "request-1" }),
+      piEvent(2, "tool_execution_start", { toolCallId: null, toolName: "browser" }),
     ] })]);
     expect(result.modelRequests.count.value).toBeNull();
     expect(result.diagnostics.map((item) => item.kind)).toEqual(["unsupported-record", "missing-identity"]);

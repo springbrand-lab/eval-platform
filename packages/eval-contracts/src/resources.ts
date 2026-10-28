@@ -1,4 +1,5 @@
 import type { JsonValue } from "./model.js";
+import type { NativeTrajectoryEntry } from "./native-trajectory.js";
 
 export interface AgentResourceScope {
   readonly chatId: string;
@@ -17,7 +18,7 @@ export type AgentResourceCompleteness = "complete" | "partial" | "unavailable";
 
 export interface AgentResourceCoverage {
   readonly usageEvents: AgentResourceCompleteness;
-  readonly telemetryEvents: AgentResourceCompleteness;
+  readonly nativeRecords: AgentResourceCompleteness;
   readonly billingSettlements: AgentResourceCompleteness;
 }
 
@@ -27,7 +28,7 @@ export interface AgentResourceSnapshot {
   readonly finalized: boolean;
   readonly coverage: AgentResourceCoverage;
   readonly usageEvents: readonly AgentResourceFact[];
-  readonly telemetryEvents: readonly AgentResourceFact[];
+  readonly nativeRecords: readonly NativeTrajectoryEntry[];
   readonly billingSettlements: readonly AgentResourceFact[];
   /** SP's own explanation of why `finalized` is false; diagnostic only, never a second completeness signal. */
   readonly readiness?: AgentResourceReadiness;
@@ -55,20 +56,20 @@ export interface AgentResourceReadinessReport {
 
 export interface AgentResourceCounts {
   readonly usageEvents: number;
-  readonly telemetryEvents: number;
+  readonly nativeRecords: number;
   readonly billingSettlements: number;
 }
 
 /** What a stage record keeps of a stored snapshot; its events live only in the resource store. */
-export type AgentResourceSnapshotSummary = Omit<AgentResourceSnapshot, "usageEvents" | "telemetryEvents" | "billingSettlements"> & {
+export type AgentResourceSnapshotSummary = Omit<AgentResourceSnapshot, "usageEvents" | "nativeRecords" | "billingSettlements"> & {
   readonly counts: AgentResourceCounts;
 };
 
 export function summarizeResourceSnapshot(snapshot: AgentResourceSnapshot): AgentResourceSnapshotSummary {
-  const { usageEvents, telemetryEvents, billingSettlements, ...summary } = snapshot;
+  const { usageEvents, nativeRecords, billingSettlements, ...summary } = snapshot;
   return {
     ...summary,
-    counts: { usageEvents: usageEvents.length, telemetryEvents: telemetryEvents.length, billingSettlements: billingSettlements.length },
+    counts: { usageEvents: usageEvents.length, nativeRecords: nativeRecords.length, billingSettlements: billingSettlements.length },
   };
 }
 

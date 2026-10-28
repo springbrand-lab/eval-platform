@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { resourceInput, settlement, telemetry, usage } from "../test-support.js";
+import { piEvent, piResult, resourceInput, settlement, usage } from "../test-support.js";
 import { aggregateAgentResources } from "./resource-distributions.js";
 
 function agent(id: string, cache: number, calls: readonly { input: string; outcome: string; duration: number }[]) {
   return [resourceInput({
+    scope: { chatId: id, idempotencyKey: id, submissionId: id },
     usageEvents: [usage(`usage-${id}`, { metrics: { inputTokens: 0, outputTokens: 0, cacheReadTokens: cache, cacheWriteTokens: 0, reasoningTokens: 0, totalTokens: cache } })],
     billingSettlements: [settlement(`debit-${id}`, { ratedUnits: cache, debitedUnits: cache, shortfallUnits: 0, platformOwned: { units: 0 } })],
-    telemetryEvents: calls.flatMap((call, index) => [
-      telemetry(`${id}-${index}-start`, "tool.started", `${id}-${index}`, { toolName: "write_file", input: call.input }, 0, id),
-      telemetry(`${id}-${index}-end`, "tool.finished", `${id}-${index}`, { toolName: "write_file", outcome: call.outcome, durationMs: call.duration, output: "ok" }, call.duration, id),
+    nativeRecords: calls.flatMap((call, index) => [
+      piEvent(index * 2 + 1, "tool_execution_start", { toolCallId: `${id}-${index}`, toolName: "write_file", args: call.input, timestamp: 0 }),
+      piResult(index * 2 + 2, { toolCallId: `${id}-${index}`, toolName: "write_file", isError: call.outcome === "failed",
+        timestamp: call.duration, content: "ok", durationMs: call.duration }),
     ]),
   })];
 }
@@ -44,9 +46,9 @@ describe("per-Agent resource distributions", () => {
 
   it("keeps unknown tool names separate from proven unused tools", () => {
     const known = agent("known", 10, [{ input: "a", outcome: "completed", duration: 10 }]);
-    const unknown = resourceInput({ telemetryEvents: [
-      telemetry("unknown-start", "tool.started", "unknown", { input: {} }),
-      telemetry("unknown-end", "tool.finished", "unknown", { outcome: "completed", durationMs: 10, output: {} }),
+    const unknown = resourceInput({ nativeRecords: [
+      piEvent(1, "tool_execution_start", { toolCallId: "unknown", args: {} }),
+      piResult(2, { toolCallId: "unknown", isError: false, durationMs: 10, content: {} }),
     ] });
     const result = aggregateAgentResources([known, [unknown], [resourceInput()]]);
     expect(result.distribution.trajectory.byTool.find((tool) => tool.toolName === "write_file")!.operations.count)

@@ -1,4 +1,7 @@
-import { AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectArrayInPlaceSchema, jsonObjectInPlaceSchema } from "@eval-platform/eval-contracts";
+import {
+  AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectArrayInPlaceSchema, nativeTrajectoryEntrySchema,
+  spPiTrajectoryPageSchema,
+} from "@eval-platform/eval-contracts";
 import type {
   AgentResourceReadiness,
   AgentResourceReadinessReport,
@@ -6,8 +9,9 @@ import type {
   EvaluationAgentOutput,
   EvaluationStructuredOutput,
   ExecutionOutput,
-  JsonValue,
   MaterializedDataBinding,
+  PiTrajectoryRecord,
+  SpPiTrajectoryPage,
 } from "@eval-platform/eval-contracts";
 import type { AgentHandle, AgentSubmission, EnsureAgentInput } from "@eval-platform/eval-runtime/harness";
 import {
@@ -20,7 +24,6 @@ import {
   type EvalEnsureChat,
   type EvalEvidenceArtifact,
   type EvalEvidenceFileReceipt,
-  type EvalEvidenceTrajectoryPage,
   type EvalInitialization,
   type EvalInitializationResult,
   type EvalSubmissionReceipt,
@@ -166,17 +169,17 @@ const readinessSchema = z.object({
   actionCharges: z.object({ complete: z.boolean(), unsettledExecutions: count, missingExecutionIds: count }),
 }) satisfies z.ZodType<AgentResourceReadiness>;
 
-const resourceSnapshotSchema = z.object({
+const resourceSnapshotSchema = z.strictObject({
   scope: scopeSchema,
   observedAt: id,
   finalized: z.boolean(),
-  coverage: z.object({
+  coverage: z.strictObject({
     usageEvents: completenessSchema,
-    telemetryEvents: completenessSchema,
+    nativeRecords: completenessSchema,
     billingSettlements: completenessSchema,
   }),
   usageEvents: jsonObjectArrayInPlaceSchema,
-  telemetryEvents: jsonObjectArrayInPlaceSchema,
+  nativeRecords: z.array(nativeTrajectoryEntrySchema),
   billingSettlements: jsonObjectArrayInPlaceSchema,
   readiness: readinessSchema,
 }) satisfies z.ZodType<AgentResourceSnapshot>;
@@ -198,30 +201,30 @@ export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact
   return response(evalEvidenceArtifactsSchema, value, "evidence artifact list").artifacts;
 }
 
-export function evidenceTrajectoryPage(value: unknown) {
-  return response(z.object({
-    events: z.array(z.object({ ingestSeq: z.number().int().positive().safe(), event: jsonObjectInPlaceSchema })),
-    nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
-  }) satisfies z.ZodType<EvalEvidenceTrajectoryPage>, value, "evidence trajectory page");
+export function evidenceTrajectoryPage(value: unknown): SpPiTrajectoryPage {
+  // Replace the structural consumer schema with @springbrand/eval-harness's published
+  // public schema after SP's Pi-native package release; never import its private source.
+  return response(spPiTrajectoryPageSchema, value, "evidence trajectory page");
 }
 
-/** Assistant text of a finished turn in SP's trajectory, or undefined for any other event. */
-export function finalReplyText(event: Readonly<Record<string, JsonValue>>): string | undefined {
-  const parsed = finishedTurnSchema.safeParse(event);
-  if (!parsed.success || parsed.data.payload.output.role !== "assistant") return undefined;
-  const text = parsed.data.payload.output.content
-    .flatMap((block) => block.type === "text" && typeof block.text === "string" ? [block.text] : []).join("\n");
+/** Only the selected Submission's native, complete Pi assistant message can be a final reply.
+ * No `turn.finished` event, role/content-only transcript or another Submission substitutes for it. */
+export function finalReplyText(record: PiTrajectoryRecord, submissionId: string): string | undefined {
+  if (record.kind !== "message" || record.submissionId !== submissionId || record.projection.contentComplete === false) return undefined;
+  const parsed = assistantMessageSchema.safeParse(record.message);
+  if (!parsed.success) return undefined;
+  const blocks = parsed.data.content.flatMap((block) =>
+    block.type === "text" && typeof block.text === "string" ? [block.text] : []);
+  if (blocks.some((text) => text === "[REDACTED]" || text === "[CONTENT OMITTED]")) return undefined;
+  const text = blocks.join("\n");
   return text.trim() === "" ? undefined : text;
 }
 
-const finishedTurnSchema = z.object({
-  type: z.literal("turn.finished"),
-  payload: z.object({
-    output: z.object({
-      role: z.string(),
-      content: z.array(z.looseObject({ type: z.string(), text: z.unknown().optional() })),
-    }),
-  }),
+const assistantMessageSchema = z.looseObject({
+  role: z.literal("assistant"),
+  timestamp: z.number().nonnegative().safe(),
+  stopReason: z.string().min(1),
+  content: z.array(z.looseObject({ type: z.string(), text: z.unknown().optional() })),
 });
 
 export function evidenceFileReceipt(value: unknown): EvalEvidenceFileReceipt {

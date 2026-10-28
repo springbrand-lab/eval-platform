@@ -8,7 +8,7 @@ export function resourceStatistics(patch: Partial<ResourceStatistics> = {}): Res
   return {
     coverage: "complete",
     collections: { collected: 1, pending: 0, failed: 0, uncollected: 0, unsubmitted: 0, finalized: 1 },
-    duplicateRecords: { usageEvents: 0, telemetryEvents: 0, billingSettlements: 0 },
+    duplicateRecords: { usageEvents: 0, nativeRecords: 0, billingSettlements: 0 },
     overlappingUsageRecords: 0,
     tokens: { input: complete(100), output: complete(20), cacheRead: complete(70), cacheWrite: complete(10), reasoning: complete(5), total: complete(200) },
     cacheHitRate: complete(70 / 170),

@@ -1,174 +1,157 @@
+import { canonicalJsonBytes, type AgentResourceSnapshot } from "@eval-platform/eval-contracts";
 import { describe, expect, it } from "vitest";
-import type { AgentResourceFact } from "@eval-platform/eval-contracts";
-import { resourceInput, telemetry } from "../test-support.js";
-import { aggregateResources } from "./resources.js";
+import { piEvent, piHook, piMessage, piRequest, piResult, resourceInput, settlement, usage } from "../test-support.js";
+import { aggregateResources, type ResourceInput } from "./resources.js";
 
-const turn = (id: string, outcome?: string, start = 0, end = 1_000, output: AgentResourceFact = { content: "answer" }): AgentResourceFact[] => [
-  telemetry(`${id}:start`, "turn.started", id, {}, start),
-  ...outcome === undefined ? [] : [telemetry(`${id}:end`, "turn.finished", id, { outcome, output }, end)],
-];
-const tool = (id: string, parent: string | undefined, name: string, input: AgentResourceFact, finished: AgentResourceFact | null) => [
-  telemetry(`${id}:start`, "tool.started", id, { toolName: name, ...input }, 10, "session-1", parent),
-  ...finished === null ? [] : [telemetry(`${id}:end`, "tool.finished", id, { toolName: name, durationMs: 5, ...finished }, 20, "session-1", parent)],
-];
-const generation = (id: string, parent: string | undefined, tokens: AgentResourceFact | null) => [
-  telemetry(`${id}:start`, "generation.started", id, { generationId: id }, 1, "session-1", parent),
-  ...tokens === null ? [] : [telemetry(`${id}:end`, "generation.finished", id, { generationId: id, outcome: "completed", ...tokens }, 2, "session-1", parent)],
-];
-
-describe("trajectory metrics", () => {
-  it("merges Attempts and pages, deduplicates events and links nested tools to their Turn", () => {
-    const toolEvents = tool("tool-1", "turn-a", "browser", { input: { b: 1, a: "é" } }, { outcome: "completed", output: "ok" });
+describe("safe Pi-native trajectory metrics", () => {
+  it("merges native request/hooks, Pi assistant messages and Tool results across Attempts without counting replay twice", () => {
+    const calls = [
+      piEvent(1, "turn_start", { turnId: "turn", timestamp: 0 }),
+      piHook(2, "before_model", { requestId: "request-1", turnId: "turn", timestamp: 1 }),
+      piRequest(3, "start", { requestId: "request-1", turnId: "turn", timestamp: 1 }),
+      piMessage(4, {
+        role: "assistant", timestamp: 5, stopReason: "toolUse",
+        content: [
+          { type: "thinking", thinking: "hidden", signature: "safe-marker" },
+          { type: "text", text: "Searching" },
+          { type: "toolCall", id: "call-1", name: "search", arguments: { query: "é" } },
+        ], usage: { input: 3, output: 2, totalTokens: 5 },
+      }, { requestId: "request-1", turnId: "turn" }),
+      piResult(5, { toolCallId: "call-1", turnId: "turn", toolName: "search", isError: false,
+        timestamp: 8, content: [{ type: "text", text: "ok" }] }),
+      piRequest(6, "end", { requestId: "request-1", turnId: "turn", timestamp: 9, outcome: "completed",
+        inputTokens: 3, outputTokens: 2, totalTokens: 5 }),
+      piEvent(7, "turn_end", { turnId: "turn", timestamp: 10, outcome: "completed" }),
+    ];
     const result = aggregateResources([
-      resourceInput({ telemetryEvents: [...turn("turn-a", "completed", 0, 1_000, { thinking: "hidden", content: "tool request" }), toolEvents[0]!] }),
-      resourceInput({ telemetryEvents: [
-        { ingestSeq: 7, event: toolEvents[0]! }, toolEvents[1]!,
-        ...tool("tool-2", "tool-1", "shell", { input: "ls" }, { outcome: "failed", response: { x: [1, 2] } }),
-        ...turn("turn-b", "completed", 0, 1_000, { signature: "sig", content: "answer" }), ...generation("gen-b", "turn-b", { inputTokens: 10, outputTokens: 5, totalTokens: 15 }),
-        ...generation("gen-a", "turn-a", { inputTokens: 100, outputTokens: 50, totalTokens: 150 }),
-      ] }),
+      resourceInput({ nativeRecords: calls.slice(0, 4) }),
+      resourceInput({ nativeRecords: [calls[3]!, ...calls.slice(4)] }),
     ]);
-    const { trajectory } = result;
-    expect(result.duplicateRecords.telemetryEvents).toBe(1);
-    expect(trajectory.coverage).toBe("complete");
-    expect(trajectory.turns).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 2 });
-    expect(trajectory.tools).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 1, failed: 1 });
-    expect(trajectory.byTool.map((item) => item.toolName)).toEqual(["browser", "shell"]);
-    expect(trajectory.byTool[0]).toMatchObject({
-      count: { value: 1 }, completed: 1, durationMs: { total: 5 },
-      inputLength: { count: 1, missing: 0, total: 16, coverage: "complete" },
-      outputLength: { count: 1, total: 4, coverage: "complete" },
-    });
-    expect(trajectory.byTool[1]).toMatchObject({ failed: 1, inputLength: { total: 4 }, outputLength: { total: 11 } });
-    expect(trajectory.thinkingSteps).toEqual({ value: 2, coverage: "complete" });
-    expect(trajectory.thinkingStepOperations).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 2, failed: 0 });
-    expect(trajectory.contentSteps).toEqual({ value: 2, coverage: "complete" });
-    expect(trajectory.contentStepOperations).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 2, failed: 0 });
-    expect(trajectory.contentStepTokens).toEqual({
-      input: { value: 110, coverage: "complete" }, output: { value: 55, coverage: "complete" }, total: { value: 165, coverage: "complete" },
-    });
-    expect(trajectory.thinkingStepTokens).toEqual({
-      input: { value: 110, coverage: "complete" }, output: { value: 55, coverage: "complete" }, total: { value: 165, coverage: "complete" },
-    });
-    expect(trajectory.unlinkedOperations).toEqual({ tools: 0, generations: 0 });
-    expect(result.modelRequests.count.value).toBe(2);
-  });
-
-  it("attributes generation-step tokens to thinking and content steps independently", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      ...turn("thinking-turn", "completed", 0, 1_000, { thinking: "hidden" }),
-      ...turn("content-turn", "completed", 0, 1_000, { content: "answer" }),
-      ...generation("thinking-generation", "thinking-turn", { output: { thinking: "hidden" }, inputTokens: 10, outputTokens: 4, totalTokens: 14 }),
-      ...generation("content-generation", "content-turn", { output: { content: "answer" }, inputTokens: 20, outputTokens: 8, totalTokens: 28 }),
-    ] })]);
+    expect(result.duplicateRecords.nativeRecords).toBe(1);
+    expect(result.trajectory.coverage).toBe("complete");
+    expect(result.trajectory.turns).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { total: 10 } });
+    expect(result.modelRequests).toMatchObject({ count: { value: 1 }, completed: 1, durationMs: { total: 8 } });
+    expect(result.trajectory.tools).toMatchObject({ count: { value: 1 }, completed: 1 });
+    expect(result.trajectory.byTool).toEqual([expect.objectContaining({
+      toolName: "search", count: { value: 1, coverage: "complete" },
+      inputLength: expect.objectContaining({ count: 1, total: canonicalJsonBytes({ query: "é" }).byteLength }),
+      outputLength: expect.objectContaining({ count: 1, total: canonicalJsonBytes([{ type: "text", text: "ok" }]).byteLength }),
+    })]);
     expect(result.trajectory.thinkingSteps).toEqual({ value: 1, coverage: "complete" });
     expect(result.trajectory.contentSteps).toEqual({ value: 1, coverage: "complete" });
-    expect(result.trajectory.thinkingStepTokens).toEqual({
-      input: { value: 10, coverage: "complete" }, output: { value: 4, coverage: "complete" }, total: { value: 14, coverage: "complete" },
-    });
-    expect(result.trajectory.contentStepTokens).toEqual({
-      input: { value: 20, coverage: "complete" }, output: { value: 8, coverage: "complete" }, total: { value: 28, coverage: "complete" },
-    });
+    expect(result.trajectory.thinkingStepTokens.total).toEqual({ value: 5, coverage: "complete" });
+    expect(result.trajectory.contentStepTokens.total).toEqual({ value: 5, coverage: "complete" });
+    expect(result.trajectory.unlinkedOperations).toEqual({ tools: 0, generations: 0 });
   });
 
-  it("counts each marked generation step separately within one Turn", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      ...turn("turn", "completed", 0, 1_000, {}),
-      ...generation("thinking-1", "turn", { output: { thinking: "one" }, inputTokens: 1, outputTokens: 1, totalTokens: 2 }),
-      ...generation("thinking-2", "turn", { output: { thinking: "two" }, inputTokens: 2, outputTokens: 2, totalTokens: 4 }),
-    ] })]);
-    expect(result.trajectory.turns.count).toEqual({ value: 1, coverage: "complete" });
-    expect(result.trajectory.thinkingSteps).toEqual({ value: 2, coverage: "complete" });
-    expect(result.trajectory.thinkingStepOperations.count).toEqual({ value: 2, coverage: "complete" });
-    expect(result.trajectory.thinkingStepTokens.total).toEqual({ value: 6, coverage: "complete" });
-  });
-
-  it("keeps Turn outcomes distinct while step markers use generation operations", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      ...turn("completed", "completed"), ...turn("failed", "failed"), telemetry("cancel", "turn.cancelled", "cancelled"),
-      ...turn("running"), ...turn("unknown", "mystery"),
-    ] })]);
-    expect(result.trajectory.turns).toMatchObject({
-      count: { value: 5 }, completed: 1, failed: 1, cancelled: 1, inProgress: 1, unknown: 1,
-    });
-    expect(result.trajectory.thinkingSteps).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.thinkingStepOperations).toMatchObject({ count: { value: null, coverage: "unavailable" }, completed: 0, failed: 0 });
-    expect(result.trajectory.contentSteps).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.contentStepOperations).toMatchObject({ count: { value: null, coverage: "unavailable" }, completed: 0, failed: 0, inProgress: 0, unknown: 0 });
-  });
-
-  it("treats missing or sanitizer-omitted bodies as missing, never zero, and never adds output and response", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      ...turn("turn-a", "completed"),
-      ...tool("t1", "turn-a", "browser", { input: "[CONTENT OMITTED]" }, { outcome: "completed", output: "[REDACTED]", response: { shouldNotBeUsed: true } }),
-      ...tool("t2", "turn-a", "browser", {}, { outcome: "completed", output: "abc", response: "ignored response" }),
-      ...tool("t3", "turn-a", "browser", { input: null }, null),
-    ] })]);
-    const [browser] = result.trajectory.byTool;
-    expect(browser).toMatchObject({ count: { value: 3 }, inProgress: 1 });
-    expect(browser!.inputLength).toEqual({ count: 1, missing: 2, total: 4, min: 4, max: 4, mean: 4, variance: 0, median: 4, coverage: "partial" });
-    expect(browser!.outputLength).toMatchObject({ count: 1, missing: 2, total: 5, coverage: "partial" });
-  });
-
-  it("classifies generation steps from output markers while keeping unlinked operation diagnostics", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      ...turn("turn-a", "completed"), ...tool("t1", undefined, "browser", {}, { outcome: "completed" }),
-      ...generation("g1", undefined, { inputTokens: 1, outputTokens: 1, totalTokens: 2 }),
-    ] })]);
-    expect(result.trajectory.thinkingSteps).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.contentSteps).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.thinkingStepTokens.total).toEqual({ value: null, coverage: "unavailable" });
+  it("counts each model request Step separately; absent Step tokens are missing, not zero or a second usage bill", () => {
+    const result = aggregateResources([resourceInput({
+      usageEvents: [usage("billing", { metrics: { totalTokens: 55 } })],
+      billingSettlements: [settlement("billing")],
+      nativeRecords: [
+        piEvent(1, "turn_start", { turnId: "turn" }),
+        piRequest(2, "end", { turnId: "turn", requestId: "step-1", outcome: "failed", totalTokens: 5 }),
+        piMessage(3, { role: "assistant", timestamp: 2, stopReason: "error",
+          content: [{ type: "thinking", thinking: "attempt" }], usage: { totalTokens: 5 } },
+        { turnId: "turn", requestId: "step-1" }),
+        piRequest(4, "end", { turnId: "turn", requestId: "step-2", outcome: "completed" }),
+        piMessage(5, { role: "assistant", timestamp: 3, stopReason: "stop",
+          content: [{ type: "text", text: "answer" }] },
+        { turnId: "turn", requestId: "step-2" }),
+        piEvent(6, "turn_end", { turnId: "turn", outcome: "completed" }),
+      ],
+    })]);
+    expect(result.modelRequests).toMatchObject({ count: { value: 2 }, failed: 1, completed: 1 });
+    expect(result.trajectory.thinkingSteps).toEqual({ value: 1, coverage: "complete" });
+    expect(result.trajectory.contentSteps).toEqual({ value: 1, coverage: "complete" });
+    expect(result.trajectory.thinkingStepTokens.total).toEqual({ value: 5, coverage: "complete" });
     expect(result.trajectory.contentStepTokens.total).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.unlinkedOperations).toEqual({ tools: 1, generations: 1 });
+    expect(result.tokens.total.value).toBe(55);
+    expect(result.costs.modelDebitedUnits.value).toBe(8);
   });
 
-  it("counts an unlinked generation as a step when its own marker is present", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      ...turn("turn-a", "completed", 0, 1_000, {}),
-      ...generation("unlinked-thinking", undefined, { output: { thinking: "hidden" }, totalTokens: 2 }),
+  it("retains partial delivery, missing Tool results and redacted Pi content as unavailable facts", () => {
+    const partial = aggregateResources([{ ...resourceInput({
+      coverage: { usageEvents: "complete", nativeRecords: "partial", billingSettlements: "complete" },
+      nativeRecords: [
+        piEvent(1, "turn_start", { turnId: "turn", timestamp: 1 }),
+        piRequest(2, "start", { turnId: "turn", requestId: "step", timestamp: 2 }),
+        piMessage(3, { role: "assistant", timestamp: 3, stopReason: "stop", content: "[REDACTED]" },
+          { turnId: "turn", requestId: "step" }),
+        piEvent(4, "tool_execution_start", { toolCallId: "call", toolName: "search", turnId: "turn",
+          timestamp: 4, args: "[CONTENT OMITTED]" }),
+      ],
+    }), canEmitNativeRecords: false }]);
+    expect(partial.trajectory.coverage).toBe("partial");
+    expect(partial.modelRequests).toMatchObject({ count: { value: 1, coverage: "partial" }, completed: 1 });
+    expect(partial.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "partial" }, unknown: 1 });
+    expect(partial.trajectory.byTool[0]).toMatchObject({
+      inputLength: { count: 0, missing: 1, total: null, coverage: "unavailable" },
+      outputLength: { count: 0, missing: 1, total: null, coverage: "unavailable" },
+    });
+    expect(partial.trajectory.thinkingSteps).toEqual({ value: null, coverage: "unavailable" });
+    expect(partial.trajectory.contentSteps).toEqual({ value: null, coverage: "unavailable" });
+  });
+
+  it("counts visible redacted thinking as positive but never treats missing block-completeness as negative evidence", () => {
+    const record = piMessage(3, { role: "assistant", timestamp: 3, stopReason: "stop",
+      content: [{ type: "thinking", thinking: "[REDACTED]" }], usage: { totalTokens: 4 } },
+    { turnId: "turn", requestId: "request" });
+    const { contentComplete: _claim, ...onlyKind } = record.record.projection;
+    const safeWithoutProof = { ...record, record: { ...record.record, projection: onlyKind } };
+    const result = aggregateResources([resourceInput({ nativeRecords: [
+      piEvent(1, "turn_start", { turnId: "turn" }),
+      piRequest(2, "start", { turnId: "turn", requestId: "request" }),
+      safeWithoutProof,
     ] })]);
     expect(result.trajectory.thinkingSteps).toEqual({ value: 1, coverage: "partial" });
-    expect(result.trajectory.contentSteps).toEqual({ value: 0, coverage: "partial" });
-  });
-
-  it("marks content tokens partial when only some generations are linked", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      ...turn("turn-a", "completed"), ...turn("turn-b", "completed"),
-      ...tool("t1", "turn-a", "browser", {}, { outcome: "completed" }), ...tool("t2", undefined, "browser", {}, { outcome: "completed" }),
-      ...generation("g1", "turn-b", { inputTokens: 4, outputTokens: 2, totalTokens: 6 }), ...generation("g2", undefined, { totalTokens: 99 }),
-      ...generation("g3", "turn-b", null),
-    ] })]);
-    expect(result.trajectory.thinkingSteps).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.contentSteps).toEqual({ value: 2, coverage: "partial" });
-    expect(result.trajectory.thinkingStepTokens.total).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.contentStepTokens.total).toEqual({ value: 6, coverage: "partial" });
-  });
-
-  it("does not claim complete trajectory metrics from an unfinalized or failed collection", () => {
-    const events = [...turn("turn-a", "completed")];
-    const result = aggregateResources([resourceInput({ finalized: false, telemetryEvents: events })]);
-    expect(result.coverage).toBe("partial");
-    expect(result.trajectory.coverage).toBe("partial");
     expect(result.trajectory.contentSteps).toEqual({ value: null, coverage: "unavailable" });
-    const missing = aggregateResources([{ ownerUserId: "owner-1", collection: undefined, submitted: true }]);
-    expect(missing).toMatchObject({ coverage: "unavailable", collections: { uncollected: 1 } });
-    expect(missing.trajectory.turns.count).toEqual({ value: null, coverage: "unavailable" });
-    const withGap = aggregateResources([resourceInput({ telemetryEvents: events }), { ownerUserId: "owner-1", collection: undefined, submitted: true }]);
-    expect(withGap.trajectory.turns.count).toEqual({ value: 1, coverage: "partial" });
-    const unsubmitted = aggregateResources([resourceInput({ telemetryEvents: events }), { ownerUserId: "owner-1", collection: undefined }]);
-    expect(unsubmitted.trajectory.turns.count).toEqual({ value: 1, coverage: "complete" });
-    expect(unsubmitted.coverage).toBe("complete");
+    expect(result.trajectory.thinkingStepTokens.total).toEqual({ value: 4, coverage: "partial" });
   });
 
-  it("diagnoses contradictory parent links instead of picking one", () => {
-    const result = aggregateResources([resourceInput({ telemetryEvents: [
-      ...turn("turn-a", "completed"), ...turn("turn-b", "completed"),
-      telemetry("t:start", "tool.started", "t", { toolName: "browser" }, 1, "session-1", "turn-a"),
-      telemetry("t:end", "tool.finished", "t", { toolName: "browser", outcome: "completed" }, 2, "session-1", "turn-b"),
+  it("does not decode old event-only snapshots or call `turn.finished` a native Pi message", () => {
+    const snapshot = resourceInput({ usageEvents: [usage("old")], billingSettlements: [settlement("old")] }).collection;
+    if (!snapshot || snapshot.status !== "collected") throw new Error("missing fixture");
+    const { nativeRecords: _native, ...rest } = snapshot.snapshot;
+    const old = { ...rest, coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
+      telemetryEvents: [{ eventId: "old", type: "turn.finished", payload: { output: { role: "assistant", content: "false" } } }] };
+    const input: ResourceInput = { ownerUserId: "owner-1", collection: { ...snapshot, snapshot: old as unknown as AgentResourceSnapshot } };
+    const result = aggregateResources([input]);
+    expect(result.trajectory.turns.count).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.thinkingSteps.value).toBeNull();
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({ stream: "nativeRecords", kind: "unsupported-record" }));
+    expect(result.tokens.total.value).toBe(35);
+    expect(result.costs.modelDebitedUnits.value).toBe(8);
+  });
+
+  it("isolates contradictory source cursors and Tool names rather than choosing one Attempt's version", () => {
+    const start = piEvent(2, "tool_execution_start", { toolCallId: "id", toolName: "search", turnId: "turn", args: {} });
+    const conflict = piEvent(2, "tool_execution_start", { toolCallId: "id", toolName: "shell", turnId: "turn", args: {} });
+    const result = aggregateResources([
+      resourceInput({ nativeRecords: [piEvent(1, "turn_start", { turnId: "turn" }), start] }),
+      resourceInput({ nativeRecords: [conflict] }),
+    ]);
+    expect(result.duplicateRecords.nativeRecords).toBe(1);
+    expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.trajectory.diagnostics).toContainEqual(expect.objectContaining({ kind: "conflicting-identity", ingestSeq: 2 }));
+  });
+
+  it("does not mistake missing IDs or unsupported safe record shapes for a complete empty Tool stream", () => {
+    const result = aggregateResources([resourceInput({ nativeRecords: [
+      piEvent(1, "tool_execution_start", { toolName: "unknown", args: {} }),
+      piEvent(2, "agent_future_event", { toolCallId: "future" }),
     ] })]);
-    expect(result.trajectory.unlinkedOperations.tools).toBe(1);
-    expect(result.trajectory.thinkingSteps).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.contentSteps).toEqual({ value: null, coverage: "unavailable" });
-    expect(result.trajectory.diagnostics).toContainEqual(expect.objectContaining({ kind: "conflicting-identity", message: expect.stringContaining("parent") }));
+    expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.diagnostics.map(({ kind }) => kind)).toEqual(["missing-identity", "unsupported-record"]);
+  });
+
+  it("does not count a Pi record labelled as another operation's Submission", () => {
+    const event = piEvent(1, "tool_execution_start", { toolCallId: "foreign", toolName: "search" });
+    const foreign = { ...event, record: { ...event.record, submissionId: "other-submission" } };
+    const result = aggregateResources([resourceInput({ nativeRecords: [foreign] })]);
+    expect(result.trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      stream: "nativeRecords", kind: "conflicting-identity", ingestSeq: 1,
+    }));
   });
 });

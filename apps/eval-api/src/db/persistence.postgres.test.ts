@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isStageRecoveryPending, RESOURCE_WAIT_MS, startResourceWait, type Sampling, type SamplingStageState } from "@eval-platform/eval-contracts";
+import { isStageRecoveryPending, RESOURCE_WAIT_MS, SP_PI_TRAJECTORY_FORMAT, startResourceWait, type EvidenceExportState, type Sampling, type SamplingStageState } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError, DatasetInputError } from "@eval-platform/eval-dataset";
 import {
   RuntimeEntityNotFoundError,
@@ -119,8 +119,9 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     // An exhausted evidence export keeps its progress, so the recollection resumes instead of restarting it.
     const evidenceExport = { submissionId: "submission", passes: 5, lastError: "evidence export failed: R2 unavailable", progress: {
       exportedAt: "2026-10-16T00:00:02.000Z", artifacts: [{ path: "/a.txt", size: 1, mediaType: "text/plain", sha256: "a".repeat(64) }],
-      subjectInputs: [], omitted: [], trajectory: { afterSeq: 200, parts: [{ sha256: "b".repeat(64), size: 10, events: 200 }] },
-    } };
+      subjectInputs: [], omitted: [], trajectory: { format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 200,
+        afterSeq: 200, parts: [{ sha256: "b".repeat(64), size: 10, records: 200 }] },
+    } } satisfies EvidenceExportState;
     const completed = { ...original, subjectChatId: "chat", execution: { status: "failed" as const, lastError: "output unavailable" }, evidenceExport, executionAttempts: [{ executionAttemptId: "attempt", samplingId: id, attemptNumber: 1, status: "completed" as const, submissionId: "submission", startedAt: "2026-10-16T00:00:00Z", completedAt: "2026-10-16T00:00:01Z" }] };
     await worker.updateSampling(completed, original);
     const second = await seeded.admit({ operation: "execution", projectSampleIds: [seeded.samples[1]!.projectSampleId] });
@@ -477,8 +478,8 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
     status: "collected" as const,
     summary: {
       scope: { chatId: "chat", idempotencyKey: "execution", submissionId: "submission" }, observedAt: "2026-10-16T00:00:02Z", finalized,
-      coverage: { usageEvents: "complete" as const, telemetryEvents: "partial" as const, billingSettlements: "complete" as const },
-      counts: { usageEvents: 0, telemetryEvents: 0, billingSettlements: 0 },
+      coverage: { usageEvents: "complete" as const, nativeRecords: "partial" as const, billingSettlements: "complete" as const },
+      counts: { usageEvents: 0, nativeRecords: 0, billingSettlements: 0 },
     },
   });
 

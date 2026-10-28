@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_STATUSES,
   DEFAULT_EVIDENCE_LIMITS,
+  EVIDENCE_SCHEMA_VERSION,
+  SP_PI_TRAJECTORY_FORMAT,
   EVIDENCE_EXPORT_MAX_PASSES,
   OBSERVATION_MAX_PASSES,
   PENDING_SAMPLING_STATUSES,
@@ -43,6 +45,8 @@ describe("@eval-platform/eval-contracts", () => {
     expect(RESOURCE_WAIT_MS).toBe(600_000);
     expect(RECOLLECT_TARGETS).toEqual(["output", "resources"]);
     expect(DEFAULT_EVIDENCE_LIMITS.maxFileBytes).toBe(95_000_000);
+    expect(EVIDENCE_SCHEMA_VERSION).toBe(2);
+    expect(SP_PI_TRAJECTORY_FORMAT).toBe("sp-pi-trajectory/v1");
   });
 
   it("classifies every Agent status against the single terminal set", () => {
@@ -110,19 +114,21 @@ describe("@eval-platform/eval-contracts", () => {
     }
   });
 
-  it("summarizes a resource snapshot without its events", () => {
+  it("summarizes a native resource snapshot without its records", () => {
     const snapshot: AgentResourceSnapshot = {
       scope: { chatId: "chat", idempotencyKey: "key", submissionId: "submission" },
       observedAt: "2026-10-20T00:00:00.000Z",
       finalized: true,
-      coverage: { usageEvents: "complete", telemetryEvents: "partial", billingSettlements: "complete" },
+      coverage: { usageEvents: "complete", nativeRecords: "partial", billingSettlements: "complete" },
       usageEvents: [{ eventId: "u" }],
-      telemetryEvents: [{ eventId: "t1" }, { eventId: "t2" }],
+      nativeRecords: [1, 2].map((ingestSeq) => ({ ingestSeq,
+        record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+          event: { type: "agent_start" } } })),
       billingSettlements: [],
     };
     expect(summarizeResourceSnapshot(snapshot)).toEqual({
       scope: snapshot.scope, observedAt: snapshot.observedAt, finalized: true, coverage: snapshot.coverage,
-      counts: { usageEvents: 1, telemetryEvents: 2, billingSettlements: 0 },
+      counts: { usageEvents: 1, nativeRecords: 2, billingSettlements: 0 },
     });
   });
 });

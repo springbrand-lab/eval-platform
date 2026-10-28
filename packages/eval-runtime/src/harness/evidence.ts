@@ -9,6 +9,7 @@ import type {
 import {
   EVIDENCE_OMISSION_REASONS,
   EVIDENCE_SCHEMA_VERSION,
+  SP_PI_TRAJECTORY_FORMAT,
   AGENT_FRAMEWORKS,
   canonicalJsonBytes,
   sha256Hex,
@@ -80,10 +81,13 @@ export function applyEvidenceLimits(
  * listed sizes; every stored file must then have exactly its listed size.
  */
 function planEvidenceExport(evidence: ExportedEvidence, limits: EvidenceLimits, exportedAt: string): EvidenceExportProgress {
-  if (evidence.artifacts.length > limits.maxFiles) {
+  if (evidence.trajectoryFormat !== SP_PI_TRAJECTORY_FORMAT) {
+    throw new EvidenceIntegrityError(`Cannot export unsupported trajectory format ${evidence.trajectoryFormat}`);
+  }
+  if (evidence.artifacts.length + evidence.subjectInputs.length > limits.maxFiles) {
     throw new EvidenceIntegrityError("Exported evidence has more files than its limits allow");
   }
-  if (evidence.artifacts.reduce((total, artifact) => total + artifact.size, 0) > limits.maxTotalBytes) {
+  if ([...evidence.artifacts, ...evidence.subjectInputs].reduce((total, file) => total + file.size, 0) > limits.maxTotalBytes) {
     throw new EvidenceIntegrityError("Exported evidence is larger than its limits allow");
   }
   return {
@@ -93,7 +97,7 @@ function planEvidenceExport(evidence: ExportedEvidence, limits: EvidenceLimits, 
       bundleId, materialId, path, size, mediaType,
     })),
     omitted: evidence.omitted.map(({ path, reason }) => ({ path, reason })),
-    trajectory: { afterSeq: 0, parts: [] },
+    trajectory: { format: SP_PI_TRAJECTORY_FORMAT, afterSeq: 0, parts: [] },
   };
 }
 
@@ -108,6 +112,9 @@ async function finalizeEvidenceManifest(evidence: ExportedEvidence, progress: Ev
     return file as T & { readonly sha256: string };
   };
   if (!progress.trajectory.done) throw new EvidenceIntegrityError("Evidence trajectory is not stored yet");
+  if (evidence.trajectoryFormat !== SP_PI_TRAJECTORY_FORMAT || progress.trajectory.format !== SP_PI_TRAJECTORY_FORMAT) {
+    throw new EvidenceIntegrityError("Cannot finalize non-native trajectory evidence");
+  }
   const parts = progress.trajectory.parts;
   const body = {
     schemaVersion: EVIDENCE_SCHEMA_VERSION,
@@ -123,7 +130,7 @@ async function finalizeEvidenceManifest(evidence: ExportedEvidence, progress: Ev
     trajectory: {
       format: evidence.trajectoryFormat,
       parts: [...parts],
-      events: parts.reduce((count, part) => count + part.events, 0),
+      records: parts.reduce((count, part) => count + part.records, 0),
       complete: evidence.trajectoryComplete,
       ...(evidence.trajectoryIncompleteReason === undefined
         ? {} : { incompleteReason: evidence.trajectoryIncompleteReason }),
@@ -144,6 +151,26 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
   return {
     async resume({ evidence, limits, progress: saved, onProgress }) {
       const persist = serialProgress(onProgress);
+      if (!evidence.trajectoryComplete) {
+        throw new EvidenceIntegrityError(`Cannot export an incomplete native trajectory: ${evidence.trajectoryIncompleteReason ?? "source did not complete"}`);
+      }
+      // A v1 progress row may already contain event parts; never append Pi records to them or
+      // rewrite the old manifest/reference. Fail before writing any blobs or stage progress.
+      if (evidence.trajectoryFormat !== SP_PI_TRAJECTORY_FORMAT
+        || (saved !== undefined && (saved.trajectory.format !== SP_PI_TRAJECTORY_FORMAT
+          || !Number.isSafeInteger(saved.trajectory.afterSeq) || saved.trajectory.afterSeq < 0
+          || (saved.trajectory.throughSeq !== undefined
+            && (!Number.isSafeInteger(saved.trajectory.throughSeq) || saved.trajectory.throughSeq < saved.trajectory.afterSeq))
+          || saved.trajectory.parts.some((part) => !/^[0-9a-f]{64}$/u.test(part.sha256)
+            || !Number.isSafeInteger(part.size) || part.size <= 0 || part.size > limits.maxFileBytes
+            || !Number.isSafeInteger(part.records) || part.records <= 0)
+          || saved.artifacts.length + saved.subjectInputs.length + saved.trajectory.parts.length > limits.maxFiles
+          || [...saved.artifacts, ...saved.subjectInputs, ...saved.trajectory.parts]
+            .reduce((sum, file) => sum + file.size, 0) > limits.maxTotalBytes
+          || (saved.trajectory.parts.length > 0 && (saved.trajectory.throughSeq === undefined
+            || saved.trajectory.afterSeq === 0))))) {
+        throw new EvidenceIntegrityError("Cannot resume non-native or invalid trajectory evidence progress");
+      }
       let progress = saved ?? planEvidenceExport(evidence, limits, now());
       if (saved === undefined) await persist(progress);
 
@@ -178,19 +205,33 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
         let afterSeq = progress.trajectory.afterSeq;
         const save = async (part: TrajectoryPartBuffer, done: boolean) => {
           if (part.chunks.length > 0) {
+            const files = progress.artifacts.length + progress.subjectInputs.length + parts.length + 1;
+            const bytes = [...progress.artifacts, ...progress.subjectInputs, ...parts]
+              .reduce((total, file) => total + file.size, part.size);
+            if (files > limits.maxFiles || bytes > limits.maxTotalBytes) {
+              throw new EvidenceIntegrityError(`Complete native trajectory exceeds the evidence limit (${files} files, ${bytes} bytes)`);
+            }
             const storedPart = await blobs.putBlob(new ReadableStream({
               start(controller) {
                 for (const bytes of part.chunks) controller.enqueue(bytes);
                 controller.close();
               },
             }), limits.maxFileBytes);
-            parts.push({ ...storedPart, events: part.chunks.length });
+            parts.push({ ...storedPart, records: part.chunks.length });
             afterSeq = part.lastSeq;
           }
-          progress = { ...progress, trajectory: { afterSeq, parts: [...parts], ...(done ? { done: true as const } : {}) } };
+          const throughSeq = part.throughSeq ?? progress.trajectory.throughSeq;
+          progress = { ...progress, trajectory: {
+            format: SP_PI_TRAJECTORY_FORMAT,
+            ...(throughSeq === undefined ? {} : { throughSeq }),
+            afterSeq, parts: [...parts], ...(done ? { done: true as const } : {}),
+          } };
           await persist(progress);
         };
-        for await (const part of trajectoryParts(evidence.readTrajectory(afterSeq), afterSeq, limits.maxFileBytes)) {
+        for await (const part of trajectoryParts(
+          evidence.readTrajectory(afterSeq, progress.trajectory.throughSeq),
+          afterSeq, limits.maxFileBytes, progress.trajectory.throughSeq,
+        )) {
           await save(part, false);
         }
         await save({ chunks: [], size: 0, lastSeq: afterSeq }, true);
@@ -210,7 +251,16 @@ export function createEvidenceStore(blobs: EvidenceBlobStore, now: () => string 
       if (await sha256Hex(manifestBytes) !== ref.manifestSha256) {
         throw new EvidenceIntegrityError(`Evidence bundle ${ref.evidenceId} manifest does not match its reference`);
       }
-      const parsed = manifestSchema.safeParse(JSON.parse(new TextDecoder().decode(manifestBytes)));
+      let body: unknown;
+      try {
+        body = JSON.parse(new TextDecoder().decode(manifestBytes));
+      } catch {
+        throw new EvidenceIntegrityError(`Evidence bundle ${ref.evidenceId} manifest is not JSON`);
+      }
+      if (typeof body === "object" && body !== null && "schemaVersion" in body && body.schemaVersion !== EVIDENCE_SCHEMA_VERSION) {
+        throw new EvidenceIntegrityError(`Evidence bundle ${ref.evidenceId} has unsupported manifest schema version ${body.schemaVersion}`);
+      }
+      const parsed = manifestSchema.safeParse(body);
       if (!parsed.success || parsed.data.evidenceId !== ref.evidenceId) {
         throw new EvidenceIntegrityError(`Evidence bundle ${ref.evidenceId} manifest is invalid`);
       }
@@ -255,10 +305,10 @@ const manifestSchema = z.object({
     sha256,
   })),
   trajectory: z.object({
-    format: z.string().min(1),
-    parts: z.array(z.object({ sha256, size: z.number().int().positive(), events: z.number().int().positive() })),
-    events: z.number().int().nonnegative(),
-    complete: z.boolean(),
+    format: z.literal(SP_PI_TRAJECTORY_FORMAT),
+    parts: z.array(z.object({ sha256, size: z.number().int().positive(), records: z.number().int().positive() })),
+    records: z.number().int().nonnegative(),
+    complete: z.literal(true),
     incompleteReason: z.string().optional(),
   }),
   omitted: z.array(z.object({ path: z.string(), reason: z.enum(EVIDENCE_OMISSION_REASONS) })),
@@ -275,34 +325,47 @@ function subjectInputKey(file: { readonly bundleId: string; readonly materialId:
 interface TrajectoryPartBuffer {
   readonly chunks: readonly Uint8Array[];
   readonly size: number;
-  /** Source cursor of the part's last event. */
+  /** Source cursor of the part's last native record. */
   readonly lastSeq: number;
+  readonly throughSeq?: number;
 }
 
 /**
  * Parts retain complete lines and order, with at most one file's bytes buffered. A part ends only
- * at an event boundary, so the same events after a part boundary always split the same way. An
- * event larger than one file can be neither split nor imported, so the export fails on it.
+ * at a native record boundary. An oversized record can neither be split nor imported: fail it.
  */
 async function* trajectoryParts(
   events: AsyncIterable<ExportedTrajectoryEvent>,
   afterSeq: number,
   maxBytes: number,
+  frozenThroughSeq?: number,
 ): AsyncGenerator<TrajectoryPartBuffer> {
   const encoder = new TextEncoder();
   let chunks: Uint8Array[] = [];
   let size = 0;
   let lastSeq = afterSeq;
-  for await (const { seq, record } of events) {
-    if (!Number.isSafeInteger(seq) || seq <= lastSeq) {
-      throw new EvidenceIntegrityError("Exported trajectory events are out of order");
+  let throughSeq = frozenThroughSeq;
+  for await (const { seq, throughSeq: sourceThroughSeq, record } of events) {
+    if (!Number.isSafeInteger(sourceThroughSeq) || sourceThroughSeq < 0
+      || (throughSeq !== undefined && throughSeq !== sourceThroughSeq)) {
+      throw new EvidenceIntegrityError("Exported trajectory watermark changed during pagination");
+    }
+    if (!Number.isSafeInteger(seq) || seq <= lastSeq || seq > sourceThroughSeq) {
+      throw new EvidenceIntegrityError("Exported trajectory records are out of order or beyond their watermark");
     }
     const bytes = encoder.encode(`${JSON.stringify(record)}\n`);
     if (bytes.byteLength > maxBytes) {
-      throw new EvidenceIntegrityError(`Trajectory event ${seq} is ${bytes.byteLength} bytes, above the ${maxBytes}-byte evidence file limit`);
+      throw new EvidenceIntegrityError(`Trajectory record ${seq} is ${bytes.byteLength} bytes, above the ${maxBytes}-byte evidence file limit`);
     }
+    if (throughSeq === undefined) {
+      // Commit the first validated page's high-water mark *before* buffering even one
+      // record. A failure before the first full part still resumes against this watermark;
+      // another Submission cannot slip into a later pass.
+      yield { chunks: [], size: 0, lastSeq, throughSeq: sourceThroughSeq };
+    }
+    throughSeq = sourceThroughSeq;
     if (chunks.length > 0 && size + bytes.byteLength > maxBytes) {
-      yield { chunks, size, lastSeq };
+      yield { chunks, size, lastSeq, ...(throughSeq === undefined ? {} : { throughSeq }) };
       chunks = [];
       size = 0;
     }
@@ -310,7 +373,7 @@ async function* trajectoryParts(
     size += bytes.byteLength;
     lastSeq = seq;
   }
-  if (chunks.length > 0) yield { chunks, size, lastSeq };
+  if (chunks.length > 0) yield { chunks, size, lastSeq, ...(throughSeq === undefined ? {} : { throughSeq }) };
 }
 
 /**

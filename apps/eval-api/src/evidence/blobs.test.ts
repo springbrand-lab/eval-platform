@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_EVIDENCE_LIMITS, type EvidenceExportProgress } from "@eval-platform/eval-contracts";
+import { DEFAULT_EVIDENCE_LIMITS, SP_PI_TRAJECTORY_FORMAT, type EvidenceExportProgress } from "@eval-platform/eval-contracts";
 import { createEvidenceStore, type ExportedEvidence } from "@eval-platform/eval-runtime/harness";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openLocalEvidenceBlobs } from "./local-blobs.js";
@@ -52,10 +52,12 @@ describe("local evidence blobs", () => {
         omitted: [{ path: "/node_modules/a.js", reason: "excluded" }],
         readFile: async () => stream("hi"),
         async* readTrajectory(afterSeq) {
-          if (afterSeq < 1) yield { seq: 1, record: { ingestSeq: 1, event: { type: "other", content: {}, raw: null } } };
+          if (afterSeq < 1) yield { seq: 1, throughSeq: 1,
+            record: { ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" },
+              kind: "event", event: { type: "agent_start", raw: null } } } };
         },
         trajectoryComplete: true,
-        trajectoryFormat: "sp-trajectory/v1",
+        trajectoryFormat: SP_PI_TRAJECTORY_FORMAT,
       },
     });
     const opened = await store.open(ref);
@@ -155,10 +157,12 @@ describe("R2 evidence blobs", () => {
         return stream(path === "/a.txt" ? "a" : "b");
       },
       async* readTrajectory(afterSeq) {
-        if (afterSeq < 1) yield { seq: 1, record: { ingestSeq: 1, event: { type: "raw" } } };
+        if (afterSeq < 1) yield { seq: 1, throughSeq: 1,
+          record: { ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" },
+            kind: "event", event: { type: "agent_start" } } } };
       },
       trajectoryComplete: true,
-      trajectoryFormat: "sp-trajectory/v1",
+      trajectoryFormat: SP_PI_TRAJECTORY_FORMAT,
     };
     let progress: EvidenceExportProgress | undefined;
     const onProgress = async (next: EvidenceExportProgress) => { progress = next; };

@@ -1,4 +1,4 @@
-import { sha256Hex, type JsonValue } from "@eval-platform/eval-contracts";
+import { SP_PI_TRAJECTORY_FORMAT, sha256Hex, type JsonValue } from "@eval-platform/eval-contracts";
 
 import type { EvidenceBlobStore } from "./evidence.js";
 import type { ExportedEvidence } from "./model.js";
@@ -37,11 +37,12 @@ export function exportedEvidence(input: {
   readonly samplingId: string;
   readonly chatId?: string;
   readonly files?: Readonly<Record<string, string>>;
-  /** Raw records keyed by their position (seq = index + 1); one event by default. */
+  /** Native `{ingestSeq,record}` lines keyed by their position; one safe record by default. */
   readonly events?: readonly JsonValue[];
 }): ExportedEvidence {
   const files = input.files ?? { "/index.html": "<h1>Hello</h1>" };
-  const events = input.events ?? [{ ingestSeq: 1, event: { type: "turn.admitted", payload: { prompt: "Build" } } }];
+  const events = input.events ?? [{ ingestSeq: 1,
+    record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event", event: { type: "agent_start" } } }];
   const encoder = new TextEncoder();
   return {
     source: { framework: "sp", samplingId: input.samplingId, agentRef: { chatId: input.chatId ?? "chat-1" } },
@@ -55,10 +56,13 @@ export function exportedEvidence(input: {
       if (content === undefined) throw new Error(`No exported file ${path}`);
       return new Response(content).body!;
     },
-    async* readTrajectory(afterSeq) {
-      for (const [index, record] of events.entries()) if (index + 1 > afterSeq) yield { seq: index + 1, record };
+    async* readTrajectory(afterSeq, frozenThroughSeq) {
+      const throughSeq = frozenThroughSeq ?? events.length;
+      for (const [index, record] of events.entries()) {
+        if (index + 1 > afterSeq && index + 1 <= throughSeq) yield { seq: index + 1, throughSeq, record };
+      }
     },
-    trajectoryFormat: "sp-trajectory/v1",
+    trajectoryFormat: SP_PI_TRAJECTORY_FORMAT,
     trajectoryComplete: true,
   };
 }

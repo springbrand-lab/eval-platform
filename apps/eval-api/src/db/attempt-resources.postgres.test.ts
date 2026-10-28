@@ -21,10 +21,12 @@ const owner = "attempt-resources-test";
 function rawSnapshot(id: string, body: string, toolName = "tool"): AgentResourceSnapshot {
   return {
     scope: { chatId: id, idempotencyKey: id, submissionId: id }, observedAt: "2026-10-17T00:00:00Z", finalized: true,
-    coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
-    usageEvents: [], billingSettlements: [], telemetryEvents: [
-      { eventId: "start", type: "tool.started", operationId: "tool", occurredAt: 1, resource: { sessionId: id }, payload: { toolName, input: body } },
-      { eventId: "end", type: "tool.finished", operationId: "tool", occurredAt: 5, resource: { sessionId: id }, payload: { toolName, outcome: "completed", output: body } },
+    coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+    usageEvents: [], billingSettlements: [], nativeRecords: [
+      { ingestSeq: 1, record: { format: "pi-trajectory/v1", kind: "event", projection: { kind: "safe" },
+        event: { type: "tool_execution_start", toolCallId: "tool", timestamp: 1, toolName, args: body } } },
+      { ingestSeq: 2, record: { format: "pi-trajectory/v1", kind: "result", projection: { kind: "safe" },
+        result: { type: "toolResult", toolCallId: "tool", timestamp: 5, toolName, isError: false, content: body } } },
     ],
   };
 }
@@ -178,9 +180,9 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       expect(row?.snapshot).toEqual(snapshot);
       const projection = await compactResourceSnapshot(snapshot);
       expect(row?.metricSnapshot).toEqual(projection);
-      expect(row?.metricSnapshot.telemetryEvents).toMatchObject([
-        { event: { payload: { toolName: value } } },
-        { event: { payload: { toolName: value } } },
+      expect(row?.metricSnapshot.nativeRecords).toMatchObject([
+        { record: { format: "pi-trajectory/v1", kind: "event" }, metricProjection: { facts: [{ toolName: value }] } },
+        { record: { format: "pi-trajectory/v1", kind: "result" }, metricProjection: { facts: [{ toolName: value }] } },
       ]);
       const facts = await createPostgresMetricsSource(database.db, owner).read({ projectId: seeded.projectId });
       const attempt = stage === "execution" ? facts.samplings[0]!.executionAttempts[0] : facts.evaluations[0]!.attempts[0];

@@ -137,10 +137,12 @@ describe.skipIf(!connection)("resource snapshot JSON migration", () => {
       const snapshot: AgentResourceSnapshot = {
         scope: { chatId: recordId, idempotencyKey: attemptId, submissionId: attemptId },
         observedAt: "2026-10-17T00:00:00Z", finalized: true,
-        coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
-        usageEvents: [], billingSettlements: [], telemetryEvents: [
-          { eventId: "start", type: "tool.started", operationId: attemptId, occurredAt: 1, resource: { sessionId: recordId }, payload: { toolName: body, input: body } },
-          { eventId: "end", type: "tool.finished", operationId: attemptId, occurredAt: 5, resource: { sessionId: recordId }, payload: { toolName: body, outcome: "completed", output: body } },
+        coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+        usageEvents: [], billingSettlements: [], nativeRecords: [
+          { ingestSeq: 1, record: { format: "pi-trajectory/v1", kind: "event", projection: { kind: "safe" },
+            event: { type: "tool_execution_start", toolCallId: attemptId, timestamp: 1, toolName: body, args: body } } },
+          { ingestSeq: 2, record: { format: "pi-trajectory/v1", kind: "result", projection: { kind: "safe" },
+            result: { type: "toolResult", toolCallId: attemptId, timestamp: 5, toolName: body, isError: false, content: body } } },
         ],
       };
       const resources = { status: "collected" as const, summary: summarizeResourceSnapshot(snapshot) };

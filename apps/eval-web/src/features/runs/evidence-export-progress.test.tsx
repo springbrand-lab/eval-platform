@@ -1,4 +1,5 @@
-import type { EvidenceExportState } from "@eval-platform/eval-contracts";
+import { SP_PI_TRAJECTORY_FORMAT, type EvidenceExportProgress as EvidenceExportProgressContract,
+  type EvidenceExportState } from "@eval-platform/eval-contracts";
 import { describe, expect, it } from "vitest";
 import { render } from "@/test/render";
 import { EvidenceExportProgress } from "./evidence-export-progress";
@@ -13,8 +14,9 @@ const progress = {
   ],
   subjectInputs: [{ path: "/in.txt", size: 1, mediaType: "text/plain", bundleId: "b", materialId: "m", sha256: sha("d") }],
   omitted: [{ path: "/huge.bin", reason: "too-large" as const }],
-  trajectory: { afterSeq: 400, parts: [{ sha256: sha("e"), size: 10, events: 200 }, { sha256: sha("f"), size: 10, events: 200 }] },
-};
+  trajectory: { format: SP_PI_TRAJECTORY_FORMAT, throughSeq: 400,
+    afterSeq: 400, parts: [{ sha256: sha("e"), size: 10, records: 200 }, { sha256: sha("f"), size: 10, records: 200 }] },
+} satisfies EvidenceExportProgressContract;
 
 async function lines(state: EvidenceExportState | undefined, executionStatus: string) {
   const view = await render(<EvidenceExportProgress state={state} executionStatus={executionStatus} />);

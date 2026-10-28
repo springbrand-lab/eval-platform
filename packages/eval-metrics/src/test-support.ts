@@ -1,10 +1,13 @@
 import {
+  PI_TRAJECTORY_RECORD_FORMAT,
   summarizeResourceSnapshot,
   type AgentResourceCollection,
   type AgentResourceFact,
   type AgentResourceSnapshot,
   type EvaluationOutputSchema,
   type JsonValue,
+  type NativeTrajectoryEntry,
+  type PiTrajectoryRecord,
   type ProjectDatasetSnapshot,
   type ProjectPlan,
   type RunSnapshot,
@@ -86,8 +89,8 @@ export function collection(patch: Partial<AgentResourceSnapshot> = {}): AgentRes
   const snapshot: AgentResourceSnapshot = {
     scope: { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "execution:sampling-1" },
     observedAt: "2026-10-08T00:00:01.000Z", finalized: true,
-    coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
-    usageEvents: [], telemetryEvents: [], billingSettlements: [], ...patch,
+    coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+    usageEvents: [], nativeRecords: [], billingSettlements: [], ...patch,
   };
   return { status: "collected", summary: summarizeResourceSnapshot(snapshot), snapshot };
 }
@@ -104,19 +107,35 @@ export function usage(eventId: string, patch: AgentResourceFact = {}): AgentReso
   };
 }
 
-export function telemetry(
-  eventId: string,
-  type: string,
-  operationId: string,
-  payload: AgentResourceFact = {},
-  occurredAt = 100,
-  sessionId = "session-1",
-  parentOperationId?: string,
-): AgentResourceFact {
-  return {
-    eventId, type, operationId, occurredAt, resource: { sessionId }, payload,
-    ...(parentOperationId === undefined ? {} : { parentOperationId }),
-  };
+/** Test-only constructors for **native** Pi records. Never convert an old event into a new one. */
+function native(ingestSeq: number, kind: string, field: string, content: AgentResourceFact): NativeTrajectoryEntry {
+  return { ingestSeq, record: {
+    format: PI_TRAJECTORY_RECORD_FORMAT, kind, projection: { kind: "safe" },
+    [field]: content,
+  } satisfies PiTrajectoryRecord };
+}
+
+export function piEvent(ingestSeq: number, type: string, facts: AgentResourceFact = {}): NativeTrajectoryEntry {
+  return native(ingestSeq, "event", "event", { type, ...facts });
+}
+
+export function piRequest(ingestSeq: number, phase: "start" | "end", facts: AgentResourceFact): NativeTrajectoryEntry {
+  return native(ingestSeq, "request", "request", { phase, ...facts });
+}
+
+export function piHook(ingestSeq: number, name: string, facts: AgentResourceFact): NativeTrajectoryEntry {
+  return native(ingestSeq, "hook", "hook", { name, ...facts });
+}
+
+export function piMessage(ingestSeq: number, message: AgentResourceFact, context: AgentResourceFact = {}): NativeTrajectoryEntry {
+  return { ingestSeq, record: {
+    format: PI_TRAJECTORY_RECORD_FORMAT, kind: "message", projection: { kind: "safe", contentComplete: Array.isArray(message.content) },
+    ...context, message,
+  } };
+}
+
+export function piResult(ingestSeq: number, result: AgentResourceFact): NativeTrajectoryEntry {
+  return native(ingestSeq, "result", "result", { type: "toolResult", ...result });
 }
 
 export function settlement(eventId: string, patch: AgentResourceFact = {}): AgentResourceFact {

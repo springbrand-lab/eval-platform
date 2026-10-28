@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   identifierSchema,
+  nativeTrajectoryEntrySchema,
   jsonObjectArrayInPlaceSchema,
   summarizeResourceSnapshot,
   type AgentResourceFact,
@@ -44,11 +45,11 @@ const snapshotSchema = z.strictObject({
   finalized: z.boolean(),
   coverage: z.strictObject({
     usageEvents: completeness,
-    telemetryEvents: completeness,
+    nativeRecords: completeness,
     billingSettlements: completeness,
   }),
   usageEvents: jsonObjectArrayInPlaceSchema,
-  telemetryEvents: jsonObjectArrayInPlaceSchema,
+  nativeRecords: z.array(nativeTrajectoryEntrySchema),
   billingSettlements: jsonObjectArrayInPlaceSchema,
   readiness: readinessSchema,
 });

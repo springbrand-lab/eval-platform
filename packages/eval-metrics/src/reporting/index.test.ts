@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import {
-  collection, dataset, evaluation, facts, OUTPUT_SCHEMA, plan, PROJECT, projectSample, run, sampling, telemetry, usage,
+  collection, dataset, evaluation, facts, OUTPUT_SCHEMA, piEvent, plan, PROJECT, projectSample, run, sampling, usage,
 } from "../test-support.js";
 import { createMetrics, MetricsEntityNotFoundError, MetricsQueryError, MetricsSourceError } from "./index.js";
 import type { MetricSummary, MetricsEvaluation, MetricsSampling } from "../aggregation/model.js";
@@ -156,14 +156,16 @@ describe("four-level reporting", () => {
     const subject = SAMPLINGS[0]!;
     const withTrajectory = facts({ ...CURRENT, samplings: [{ ...subject, executionAttempts: [{ ...subject.executionAttempts[0]!, resources: collection({
       usageEvents: [usage("u", { metrics: { totalTokens: 100 } })],
-      telemetryEvents: [
-        telemetry("t:s", "turn.started", "turn", {}, 0), telemetry("t:f", "turn.finished", "turn", { outcome: "completed" }, 9),
-        telemetry("x:s", "tool.started", "tool", { toolName: "browser", input: { url: "a" } }, 1, "session-1", "turn"),
+      nativeRecords: [
+        piEvent(1, "turn_start", { turnId: "turn", timestamp: 0 }),
+        piEvent(2, "turn_end", { turnId: "turn", outcome: "completed", timestamp: 9 }),
+        piEvent(3, "tool_execution_start", { toolCallId: "tool", toolName: "browser", args: { url: "a" },
+          timestamp: 1, turnId: "turn" }),
       ],
     }) }] }, ...SAMPLINGS.slice(1)], evaluations: [...CURRENT.evaluations, judge("e1a3", "s1a", 70, 3)] });
     const detail = await metricsOf(withTrajectory).getSamplingDetail({ ...scope, samplingId: "s1a" });
     expect(detail.projectSample).toEqual(PS1);
-    expect(detail.sampling.executionAttempts[0]!.resources).toMatchObject({ status: "collected", summary: { counts: { usageEvents: 1, telemetryEvents: 3 } } });
+    expect(detail.sampling.executionAttempts[0]!.resources).toMatchObject({ status: "collected", summary: { counts: { usageEvents: 1, nativeRecords: 3 } } });
     expect(detail.sampling.executionAttempts[0]!.resources).not.toHaveProperty("snapshot");
     expect(detail.evaluations[0]!.record.attempts[0]!.resources).not.toHaveProperty("snapshot");
     expect(detail.subject).toMatchObject({ role: "subject", chatId: "subject:s1a", resources: { tokens: { total: { value: 100 } } } });

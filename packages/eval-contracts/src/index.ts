@@ -97,6 +97,11 @@ export type {
   EvidenceTrajectoryPart,
 } from "./evidence.js";
 export {
+  PI_TRAJECTORY_RECORD_FORMAT, SP_PI_TRAJECTORY_FORMAT, isSafePiTrajectoryRecord,
+  nativeTrajectoryEntrySchema, spPiTrajectoryPageSchema,
+} from "./native-trajectory.js";
+export type { NativeTrajectoryEntry, PiTrajectoryRecord, SpPiTrajectoryPage } from "./native-trajectory.js";
+export {
   DEFAULT_EVIDENCE_LIMITS,
   EVALUATION_FINAL_REPLY_PATH,
   EVALUATION_RESULT_PATH,

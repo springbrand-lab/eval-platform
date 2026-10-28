@@ -24,7 +24,7 @@ export function attemptResources(ownerUserId: string, attempts: readonly Attempt
     ownerUserId,
     collection: attempt.resources,
     submitted: attempt.submissionId !== undefined,
-    canEmitTelemetry: !isTerminalAgentStatus(attempt.status),
+    canEmitNativeRecords: !isTerminalAgentStatus(attempt.status),
   }));
 }
 

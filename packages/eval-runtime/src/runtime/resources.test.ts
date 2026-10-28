@@ -21,9 +21,9 @@ function snapshot(): AgentResourceSnapshot {
     scope: SCOPE,
     observedAt: "2026-10-08T00:00:00.000Z",
     finalized: true,
-    coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
+    coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
     usageEvents: [],
-    telemetryEvents: [],
+    nativeRecords: [],
     billingSettlements: [],
     readiness: READY,
   };
@@ -47,12 +47,16 @@ describe("raw resource snapshot validation", () => {
       parentRunId: "parent-1",
       unknownSourceField: [true, null, { custom: "native" }],
     };
-    const started = { eventId: "start-1", operationId: "tool-1", type: "tool.started", occurredAt: 20 };
-    const finished = { eventId: "finish-1", operationId: "tool-1", type: "tool.finished", occurredAt: 30 };
+    const started = { ingestSeq: 1,
+      record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "event",
+        event: { type: "tool_execution_start", toolCallId: "tool-1", timestamp: 20 } } };
+    const finished = { ingestSeq: 2,
+      record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "result",
+        result: { type: "toolResult", toolCallId: "tool-1", timestamp: 30 } } };
     const input = {
       ...snapshot(),
       usageEvents: [usage, usage],
-      telemetryEvents: [finished, started, finished],
+      nativeRecords: [finished, started, finished],
       billingSettlements: [{ accountId: "user-1", eventId: "usage-1", adjustment: -3.5, ratedUnits: null }],
     };
 
@@ -69,8 +73,9 @@ describe("raw resource snapshot validation", () => {
     const input = {
       ...snapshot(),
       finalized: false,
-      coverage: { usageEvents: "partial", telemetryEvents: "complete", billingSettlements: "unavailable" },
-      telemetryEvents: [{ type: "generation.started", status: "provider-native-running" }],
+      coverage: { usageEvents: "partial", nativeRecords: "complete", billingSettlements: "unavailable" },
+      nativeRecords: [{ ingestSeq: 1, record: { format: "pi-trajectory/v1", projection: { kind: "safe" }, kind: "request",
+        request: { phase: "start", requestId: "request-1", status: "provider-native-running" } } }],
     };
     expect(validateResourceSnapshot(input, SCOPE)).toEqual(input);
   });
@@ -151,7 +156,9 @@ describe("raw resource snapshot validation", () => {
     { coverage: [] },
     { coverage: { usageEvents: "complete" } },
     { usageEvents: {} },
-    { telemetryEvents: null },
+    { nativeRecords: null },
+    { nativeRecords: [{ ingestSeq: 1, record: { type: "turn.finished" } }] },
+    { telemetryEvents: [{ eventId: "old" }] },
     { billingSettlements: "raw" },
   ])("rejects an invalid collection envelope %j", (patch) => {
     expect(() => validateResourceSnapshot({ ...snapshot(), ...patch }, SCOPE))
