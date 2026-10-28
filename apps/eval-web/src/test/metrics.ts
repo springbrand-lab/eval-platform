@@ -14,7 +14,7 @@ export function resourceStatistics(patch: Partial<ResourceStatistics> = {}): Res
     cacheHitRate: complete(70 / 170),
     costs: { providerUsd: complete(0), modelDebitedUnits: complete(0), actionChargedUnits: complete(0), chargedUnits: complete(0), ratedUnits: complete(0), shortfallUnits: complete(0), platformOwnedUnits: complete(0) },
     modelRequests: operation,
-    trajectory: { coverage: "complete", turns: operation, tools: operation, byTool: [], thinkingSteps: complete(0), thinkingStepOperations: operation, contentSteps: complete(0), contentStepOperations: operation, thinkingStepTokens: { input: complete(0), output: complete(0), total: complete(0) }, contentStepTokens: { input: complete(0), output: complete(0), total: complete(0) }, unlinkedOperations: { tools: 0, generations: 0 }, diagnostics: [] },
+    trajectory: { coverage: "complete", turns: operation, tools: operation, toolSuccessRate: { value: null, coverage: "complete" }, byTool: [], thinkingSteps: complete(0), thinkingStepOperations: operation, contentSteps: complete(0), contentStepOperations: operation, thinkingStepTokens: { input: complete(0), output: complete(0), total: complete(0) }, contentStepTokens: { input: complete(0), output: complete(0), total: complete(0) }, unlinkedOperations: { tools: 0, generations: 0 }, diagnostics: [] },
     byModel: [], diagnostics: [], ...patch,
   };
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { act } from "react";
+import { act, useState } from "react";
 import { click, render, type } from "@/test/render";
 import { StatusBadge } from "./badge";
 import { DataTable } from "./data-table";
@@ -38,11 +38,50 @@ describe("DataTable", () => {
     await view.unmount();
   });
 
-  it("virtualizes long lists instead of rendering every row", async () => {
-    const many = Array.from({ length: 500 }, (_, index) => ({ id: String(index), name: `n${index}`, score: index }));
-    const view = await render(<DataTable rows={many} columns={columns} rowKey={(row) => row.id} />);
-    expect(view.container.querySelectorAll("tbody tr").length).toBeLessThan(100);
-    await view.unmount();
+  it("pages after sorting and filtering with 20 records per page", async () => {
+    const many = Array.from({ length: 45 }, (_, index) => ({ id: String(index), name: `n${index}`, score: index }));
+    const view = await render(<DataTable rows={many} columns={columns} rowKey={(row) => row.id} searchText={(row) => row.name} />);
+    const page = (label: string) => [...view.container.querySelectorAll('nav[aria-label="表格分页"] button')].find((button) => button.textContent === label);
+    try {
+      expect(view.container.querySelectorAll("tbody tr")).toHaveLength(20);
+      expect(page("上一页")).toHaveProperty("disabled", true);
+      await click(page("下一页"));
+      expect(view.container.querySelector("tbody td")?.textContent).toBe("n20");
+      await click(page("下一页"));
+      expect(view.container.querySelectorAll("tbody tr")).toHaveLength(5);
+      expect(page("下一页")).toHaveProperty("disabled", true);
+      await click([...view.container.querySelectorAll("thead button")].find((button) => button.textContent === "分数"));
+      expect(view.container.querySelector("tbody td")?.textContent).toBe("n0");
+      await click(page("下一页"));
+      await type(view.container.querySelector('input[aria-label="搜索"]'), "n44");
+      expect(view.container.querySelectorAll("tbody tr")).toHaveLength(1);
+      expect(view.container.querySelector("tbody td")?.textContent).toBe("n44");
+      expect(page("上一页")).toHaveProperty("disabled", true);
+    } finally { await view.unmount(); }
+  });
+
+  it("selects only the current page while retaining selections on other pages", async () => {
+    const many = Array.from({ length: 45 }, (_, index) => ({ id: String(index), name: `n${index}`, score: index }));
+    function Selectable() {
+      const [selected, setSelected] = useState(new Set<string>());
+      return <><output>{selected.size}</output><DataTable rows={many} columns={columns} rowKey={(row) => row.id}
+        selectable selected={selected} onSelectedChange={setSelected} /></>;
+    }
+    const view = await render(<Selectable />);
+    const page = (label: string) => [...view.container.querySelectorAll("nav button")].find((button) => button.textContent === label);
+    try {
+      await click(view.container.querySelector('[aria-label="全选"]'));
+      expect(view.container.querySelector("output")?.textContent).toBe("20");
+      await click(page("下一页"));
+      expect(view.container.querySelector('[aria-label="全选"]')?.getAttribute("aria-checked")).toBe("false");
+      await click(view.container.querySelector('[aria-label="全选"]'));
+      expect(view.container.querySelector("output")?.textContent).toBe("40");
+      await click(page("上一页"));
+      await click(view.container.querySelector('[aria-label="全选"]'));
+      expect(view.container.querySelector("output")?.textContent).toBe("20");
+      await click(page("下一页"));
+      expect(view.container.querySelector('[aria-label="全选"]')?.getAttribute("aria-checked")).toBe("true");
+    } finally { await view.unmount(); }
   });
 
   it("distinguishes an unmatched search from an empty catalog and can clear it", async () => {

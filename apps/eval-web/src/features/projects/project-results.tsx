@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell, NativeSelect } from "@springbrand/site-block";
 import { Fragment, lazy, Suspense, useState } from "react";
-import type { ProjectOverview, ProjectView, OutputFieldSummary, EvaluationOutputSummary, MetricSummary } from "@/api-sdk/types";
+import type { ProjectOverview, ProjectView, OutputFieldSummary, EvaluationOutputSummary, MetricNumber, MetricSummary } from "@/api-sdk/types";
 import { getSampleOverview, metricKeys } from "@/api-sdk/metrics-api";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
@@ -10,7 +10,8 @@ import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/form";
 import { StatusBadge } from "@/components/ui/badge";
 import { ErrorBlock, LoadingBlock, EmptyState } from "@/components/ui/feedback";
-import { formatDuration, formatStatistic } from "@/lib/format";
+import { TABLE_PAGE_SIZE, TablePagination, useTablePagination } from "@/components/ui/pagination";
+import { formatDuration, formatPercent, formatStatistic } from "@/lib/format";
 import { dataTitle } from "@/features/datasets/dataset-detail-page";
 import { OutputFields } from "@/features/metrics/summary";
 const SamplingResult = lazy(() => import("@/features/results/sampling-detail-page").then((module) => ({ default: module.SamplingResult })));
@@ -35,32 +36,45 @@ export function MetricCell({ field }: { field?: OutputFieldSummary }) {
 }
 const cellClass = "h-12 min-w-0 whitespace-normal break-words px-3 py-2 align-middle text-xs";
 export function ResultCost({ summary }: { summary: MetricSummary }) {
-  const costs = [summary.executionAgent.costs.chargedUnits, summary.evaluationAgents.costs.chargedUnits];
-  const stages = [summary.execution, summary.evaluation].filter((stage) => stage.records > 0);
-  const costKnown = costs.every((cost, index) => cost.value !== null || [summary.execution, summary.evaluation][index]!.records === 0);
-  const durationKnown = stages.length > 0 && stages.every((stage) => stage.agentDurationMs.total !== null);
-  const partial = costs.some((cost) => cost.coverage === "partial") || stages.some((stage) => stage.agentDurationMs.missing > 0);
-  return <div className="whitespace-normal break-words tabular-nums" title="执行与评估合计；耗时为 Agent 累计耗时，不是并行运行的墙钟时间。部分数据会标注。">
-    <span>{costKnown && stages.length ? `${formatStatistic(costs.reduce((sum, cost) => sum + (cost.value ?? 0), 0))} 积分` : "积分未获得"}</span>
-    <span className="block text-[11px] text-text-muted">{durationKnown ? formatDuration(stages.reduce((sum, stage) => sum + (stage.agentDurationMs.total ?? 0), 0)) : "耗时未获得"}{partial ? " · 部分" : ""}</span>
+  const cost = summary.executionAgent.costs.chargedUnits;
+  const duration = summary.execution.agentDurationMs;
+  return <div className="whitespace-normal break-words tabular-nums" title="仅执行 Agent；耗时为 Agent 累计耗时，不是并行运行的墙钟时间。部分数据会标注。">
+    <span>{summary.execution.records > 0 && cost.value !== null ? `${formatStatistic(cost.value)} 积分${cost.coverage === "partial" ? " · 部分" : ""}` : "积分未获得"}</span>
+    <span className="block text-[11px] text-text-muted">{duration.total !== null ? formatDuration(duration.total) : "耗时未获得"}{duration.total !== null && duration.missing > 0 ? " · 部分" : ""}</span>
   </div>;
+}
+function ResultRate({ metric }: { metric: MetricNumber }) {
+  return <span className="tabular-nums">{metric.value === null ? metric.coverage === "unavailable" ? "未获得" : "—" : formatPercent(metric.value)}
+    {metric.value !== null && metric.coverage === "partial" ? " · 部分" : ""}</span>;
+}
+function ExecutionMetricCells({ summary }: { summary: MetricSummary }) {
+  return <>
+    <TableCell className={`${cellClass} text-right`}><ResultCost summary={summary} /></TableCell>
+    <TableCell className={`${cellClass} text-right`}><div className="whitespace-normal break-words tabular-nums">
+      <span className="text-text-strong"><ResultRate metric={summary.executionAgent.cacheHitRate} /></span>
+      <span className="block text-[11px] text-text-muted"><ResultRate metric={summary.executionAgent.trajectory.toolSuccessRate} /></span>
+    </div></TableCell>
+  </>;
 }
 function MetricCells({ outputs, fields }: { outputs: EvaluationOutputSummary; fields: readonly OutputFieldSummary[] }) {
   return fields.map((field) => <TableCell key={field.jsonPointer} className={`${cellClass} text-right`}><MetricCell field={outputs.fields.find((item) => item.jsonPointer === field.jsonPointer)} /></TableCell>);
 }
 function SamplingRows({ projectId, sampleId, running, fields, onOpen }: { projectId: string; sampleId: string; running: boolean; fields: readonly OutputFieldSummary[]; onOpen: (id: string) => void }) {
   const result = useQuery({ queryKey: metricKeys.sample(projectId, sampleId, []), queryFn: ({ signal }) => getSampleOverview(projectId, sampleId, [], signal), staleTime: 0, refetchInterval: running ? POLL_MS : false });
-  if (result.error || !result.data) return <TableRow><TableCell colSpan={fields.length + 5} className="px-4 py-2">{result.error ? <ErrorBlock error={result.error} onRetry={() => void result.refetch()} /> : <LoadingBlock rows={1} />}</TableCell></TableRow>;
-  return result.data.samplings.map((row, index) => <TableRow key={row.samplingId} className="border-b border-border bg-surface-muted/40">
-    <TableCell className={`${cellClass} pl-8`}><button className="text-left hover:underline" onClick={() => onOpen(row.samplingId)}>采样 {index + 1}</button><span className="ml-2 text-[10px] font-mono text-text-faint">{row.samplingId.slice(0, 8)}</span></TableCell>
+  const pagination = useTablePagination(result.data?.samplings ?? [], `${projectId}:${sampleId}`);
+  if (result.error || !result.data) return <TableRow><TableCell colSpan={fields.length + 6} className="px-4 py-2">{result.error ? <ErrorBlock error={result.error} onRetry={() => void result.refetch()} /> : <LoadingBlock rows={1} />}</TableCell></TableRow>;
+  return <>{pagination.items.map((row, index) => <TableRow key={row.samplingId} className="border-b border-border bg-surface-muted/40">
+    <TableCell className={`${cellClass} pl-8`}><button className="text-left hover:underline" onClick={() => onOpen(row.samplingId)}>采样 {pagination.pageIndex * TABLE_PAGE_SIZE + index + 1}</button><span className="ml-2 text-[10px] font-mono text-text-faint">{row.samplingId.slice(0, 8)}</span></TableCell>
     <TableCell className={cellClass}><StatusBadge status={row.execution.status} /></TableCell>
     <TableCell className={cellClass}>{row.summary.evaluationOutputs.validation.valid}/{row.summary.counts.evaluations}
       {row.summary.evaluation.statuses.failed > 0 && <span className="block text-[11px] text-danger">评估失败</span>}
       {row.summary.evaluation.statuses.cancelled > 0 && <span className="block text-[11px] text-text-muted">已取消</span>}
     </TableCell>
-    <MetricCells outputs={row.summary.evaluationOutputs} fields={fields} /><TableCell className={`${cellClass} text-right`}><ResultCost summary={row.summary} /></TableCell>
+    <MetricCells outputs={row.summary.evaluationOutputs} fields={fields} /><ExecutionMetricCells summary={row.summary} />
     <TableCell className={`${cellClass} text-right`}><button className="link whitespace-normal break-words font-medium leading-4" onClick={() => onOpen(row.samplingId)}>查看结果</button></TableCell>
-  </TableRow>);
+  </TableRow>)}{pagination.pageCount > 1 && <TableRow className="bg-surface-muted/40"><TableCell colSpan={fields.length + 6} className="p-0">
+    <TablePagination {...pagination} label={`用例 ${sampleId} 采样分页`} />
+  </TableCell></TableRow>}</>;
 }
 export function ProjectResults({ projectId, view, overview }: { projectId: string; view: ProjectView; overview: ProjectOverview }) {
   const [dataset, setDataset] = useState("");
@@ -76,6 +90,7 @@ export function ProjectResults({ projectId, view, overview }: { projectId: strin
   const rows = overview.projectSamples.filter((row) => (!dataset || row.datasetIds.includes(dataset))
     && (!query.trim() || dataTitle(samples.get(row.projectSampleId)!.data).toLowerCase().includes(query.trim().toLowerCase()))
     && (filter === "all" || (filter === "attention" ? needsAttention(row) : filter === "not-run" ? !row.samplingIds.length : filter === "missing" ? row.summary.evaluationOutputs.validation.unavailable > 0 : filter === "unscored" ? (row.summary.evaluationOutputs.validation.valid === 0 || row.summary.evaluationOutputs.validation.unavailable > 0) : row.summary.execution.records > row.summary.execution.terminalRecords)));
+  const pagination = useTablePagination(rows, JSON.stringify([projectId, dataset, query.trim().toLowerCase(), filter]));
   const summary = overview.summary;
   const focusResults = (next: string) => { setFilter(next); setQuery(""); setDataset(""); };
   return <>
@@ -89,28 +104,30 @@ export function ProjectResults({ projectId, view, overview }: { projectId: strin
       {summary.evaluationOutputs.validation.unavailable > 0 && <button className="text-warning hover:underline" onClick={() => focusResults("missing")}>结果未获得 {summary.evaluationOutputs.validation.unavailable}</button>}
     </div>
     <OutputFields outputs={summary.evaluationOutputs} compact />
-    <Card><CardHeader className="px-3 py-3" title="用例结果" description="整体与用例使用同一列指标对照；评分仅统计有效结果。积分和累计耗时包含执行与评估，展开用例可定位到单次采样。" />
+    <Card><CardHeader className="px-3 py-3" title="用例结果" description="整体与用例使用同一列指标对照；评分仅统计有效结果。积分、累计耗时、缓存命中率和工具调用成功率仅统计执行 Agent，展开用例可定位到单次采样。" />
       <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
         <Input className="h-8 max-w-52 text-xs" aria-label="搜索用例" placeholder="搜索用例名称" value={query} onChange={(e) => setQuery(e.target.value)} />
         <NativeSelect aria-label="数据集筛选" value={dataset} onChange={(e) => setDataset(e.target.value)}><option value="">全部数据集</option>{view.datasets.map((item) => <option key={item.datasetId} value={item.datasetId}>{item.name}</option>)}</NativeSelect>
         <NativeSelect aria-label="结果筛选" value={filter} onChange={(e) => setFilter(e.target.value)}><option value="all">全部结果</option><option value="attention">执行异常 / 评估异常</option><option value="running">尚未结束</option><option value="not-run">尚未运行</option><option value="missing">结果文件未获得</option><option value="unscored">未获得有效评估</option></NativeSelect>
         {fields.length > 0 && <label className="flex items-center gap-2 text-sm">评估指标 <NativeSelect aria-label="评估指标" value={selectedMetric} onChange={(e) => setMetric(e.target.value)}><option value="__all">全部指标</option>{fields.map((field) => <option key={field.jsonPointer} value={field.jsonPointer}>{metricLabel(field)}</option>)}</NativeSelect></label>}
       </div>
-      {rows.length === 0 ? <EmptyState title="没有符合条件的用例" description="调整筛选条件，或在项目设置中查看测试范围。" /> : <Table aria-label="用例结果" className="w-full table-fixed" style={{ minWidth: 765 + visibleFields.length * 100 }}>
-        <colgroup><col style={{ width: 240 }} /><col style={{ width: 105 }} /><col style={{ width: 110 }} />{visibleFields.map((field) => <col key={field.jsonPointer} style={{ width: 100 }} />)}<col style={{ width: 155 }} /><col style={{ width: 155 }} /></colgroup>
+      {rows.length === 0 ? <EmptyState title="没有符合条件的用例" description="调整筛选条件，或在项目设置中查看测试范围。" /> : <Table aria-label="用例结果" className="w-full table-fixed" style={{ minWidth: 1005 + visibleFields.length * 100 }}>
+        <colgroup><col style={{ width: 240 }} /><col style={{ width: 105 }} /><col style={{ width: 110 }} />{visibleFields.map((field) => <col key={field.jsonPointer} style={{ width: 100 }} />)}<col style={{ width: 155 }} /><col style={{ width: 240 }} /><col style={{ width: 155 }} /></colgroup>
         <TableHeader><TableRow className="bg-surface-muted/60">
           <TableHead className="h-9 whitespace-normal break-words px-3 text-xs leading-4">用例 / 采样</TableHead><TableHead className="h-9 whitespace-normal break-words px-3 text-xs leading-4">执行完成</TableHead><TableHead className="h-9 whitespace-normal break-words px-3 text-xs leading-4">有效评估</TableHead>
           {visibleFields.map((field) => <TableHead key={field.jsonPointer} className="h-9 whitespace-normal break-words px-3 text-right text-xs leading-4" title={field.description ?? undefined}>{metricLabel(field)}</TableHead>)}
-          <TableHead className="h-9 whitespace-normal break-words px-3 text-right text-xs leading-4">积分 / 累计耗时</TableHead><TableHead className="h-9 whitespace-normal break-words px-3 text-right text-xs leading-4">操作</TableHead>
+          <TableHead className="h-9 whitespace-normal break-words px-3 text-right text-xs leading-4">积分 / 累计耗时</TableHead>
+          <TableHead className="h-9 whitespace-nowrap px-3 text-right text-xs font-semibold leading-4 text-text-strong" title="仅执行 Agent；缓存命中率：缓存读取 ÷（输入 Token + 缓存读取 Token）；工具调用成功率：成功 ÷（成功 + 失败 + 取消），不计进行中与未知调用">缓存命中率 / 工具调用成功率</TableHead>
+          <TableHead className="h-9 whitespace-normal break-words px-3 text-right text-xs leading-4">操作</TableHead>
         </TableRow></TableHeader>
         <TableBody><TableRow className="border-b border-border bg-surface-muted/60">
           <TableCell className={cellClass}><strong>整体结果</strong><span className="block text-[11px] text-text-muted">项目全部当前采样</span></TableCell>
           <TableCell className={cellClass}>{summary.execution.statuses.succeeded}/{summary.execution.records}</TableCell>
           <TableCell className={cellClass}>{summary.evaluationOutputs.validation.valid}/{summary.counts.evaluations}</TableCell>
           <MetricCells outputs={summary.evaluationOutputs} fields={visibleFields} />
-          <TableCell className={`${cellClass} text-right`}><ResultCost summary={summary} /></TableCell>
+          <ExecutionMetricCells summary={summary} />
           <TableCell className={`${cellClass} text-right`}><button className="link" onClick={() => focusResults("all")}>全部用例</button></TableCell>
-        </TableRow>{rows.map((row) => {
+        </TableRow>{pagination.items.map((row) => {
           const sample = samples.get(row.projectSampleId)!;
           const single = row.samplingIds.length === 1;
           const open = expanded.has(row.projectSampleId);
@@ -127,12 +144,12 @@ export function ProjectResults({ projectId, view, overview }: { projectId: strin
               {row.summary.evaluation.statuses.cancelled > 0 && <span className="block text-[11px] text-text-muted">取消 {row.summary.evaluation.statuses.cancelled}</span>}
               {row.summary.evaluationOutputs.validation.invalid > 0 && <span className="block text-[11px] text-warning">格式无效 {row.summary.evaluationOutputs.validation.invalid}</span>}
             </TableCell>
-            <MetricCells outputs={row.summary.evaluationOutputs} fields={visibleFields} /><TableCell className={`${cellClass} text-right`}><ResultCost summary={row.summary} /></TableCell>
+            <MetricCells outputs={row.summary.evaluationOutputs} fields={visibleFields} /><ExecutionMetricCells summary={row.summary} />
             <TableCell className={`${cellClass} text-right`}>{row.samplingIds.length ? <button className="link whitespace-normal break-words font-medium leading-4" aria-expanded={single ? undefined : open} onClick={activate}>{single ? "查看结果" : `${open ? "收起" : "展开"} ${row.samplingIds.length} 次采样`}</button> : <Link className="link whitespace-normal break-words leading-4" to="/projects/$projectId/runs/new" params={{ projectId }} search={{ projectSampleId: row.projectSampleId }}>运行此用例</Link>}</TableCell>
           </TableRow>{!single && open && <SamplingRows projectId={projectId} sampleId={row.projectSampleId} fields={visibleFields} running={!!view.currentRun} onOpen={setSampling} />}</Fragment>;
         })}</TableBody>
       </Table>}
-
+      <TablePagination {...pagination} label="用例结果分页" />
     </Card>
     {sampling && <Dialog open compact placement="right" title="采样结果" description="查看本次评估结论与产物；关闭后继续比较用例。" onClose={() => setSampling(null)}
       footer={<><Link className="link text-sm" to="/projects/$projectId/samplings/$samplingId" params={{ projectId, samplingId: sampling }}>独立打开</Link><Button onClick={() => setSampling(null)}>返回用例列表</Button></>}><Suspense fallback={<LoadingBlock />}><SamplingResult key={sampling} projectId={projectId} samplingId={sampling} /></Suspense></Dialog>}
