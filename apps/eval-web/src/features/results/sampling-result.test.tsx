@@ -45,6 +45,8 @@ it("leads with readable evaluation and a direct artifact preview; evidence reads
     await act(async () => { button('评估过程')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); });
     await vi.waitFor(() => expect(api.messages).toHaveBeenCalledWith('project', 'evaluations', 'evaluation', expect.any(AbortSignal)));
     await click(button('查看原始轨迹'));
+    expect(document.body.textContent).toContain('评估 Agent · 原始轨迹');
+    expect(document.body.textContent).toContain('原始 Pi 记录用于排查运行细节');
     expect(document.body.textContent).toContain('trace:evaluations:evaluation');
     await click([...document.querySelectorAll('button')].find((node) => node.textContent === '返回会话'));
     expect(document.body.textContent).not.toContain('trace:evaluations:evaluation');

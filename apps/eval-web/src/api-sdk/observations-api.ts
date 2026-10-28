@@ -1,3 +1,4 @@
+import type { SpPiTrajectoryPageRow } from "@eval-platform/eval-contracts";
 import { api, enc } from "./client";
 import type { AgentObservationRef } from "./types";
 
@@ -13,19 +14,9 @@ export interface WorkspaceTreeNode {
   readonly children?: readonly WorkspaceTreeNode[];
 }
 
-export interface TrajectoryEvent {
-  readonly eventId: string;
-  readonly occurredAt: number;
-  readonly type: string;
-  readonly operationId?: string;
-  readonly parentOperationId?: string;
-  readonly submissionId?: string;
-  readonly payload?: Readonly<Record<string, unknown>>;
-  readonly [field: string]: unknown;
-}
-
+/** Public SP Chat debug page, relayed unchanged by Eval API (not the frozen evidence-export page). */
 export interface TrajectoryPage {
-  readonly events: readonly { readonly ingestSeq: number; readonly event: TrajectoryEvent }[];
+  readonly records: readonly SpPiTrajectoryPageRow[];
   readonly beforeSeq: number | null;
   readonly hasOlder: boolean;
 }
