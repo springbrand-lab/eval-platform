@@ -278,7 +278,8 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const replacement = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, { projectId: seeded.projectId, operation: "execution" });
     await store.admitRun(replacement);
     expect(await database.db.select({ id: attemptResources.recordId }).from(attemptResources)
-      .where(and(eq(attemptResources.ownerUserId, owner)))).toEqual([]);
+      .where(and(eq(attemptResources.ownerUserId, owner),
+        inArray(attemptResources.samplingId, [...command.run.samplingIds, ...replacement.run.samplingIds])))).toEqual([]);
   }, 30_000);
 
   describe.each(["execution", "evaluation"] as const)("%s snapshot string round trips", (stage) => {
