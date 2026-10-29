@@ -5,6 +5,8 @@ import type {
   ProjectPlan,
   RunHandle,
   RunOperation,
+  RunPlanDigests,
+  RunReplayRequest,
   RunRequest,
   RunTargetSelector,
   RunTargets,
@@ -30,6 +32,7 @@ import type {
 } from "./model.js";
 import { RunRecords } from "./records.js";
 import type { RuntimeRunPlanDigests, RuntimeRunRecord, RuntimeStore, SamplingState } from "./store.js";
+import { expandRunTargets } from "./targets.js";
 
 /** The immutable caller intent bound to one idempotency key. */
 type RunRequestFacts = Omit<RunRequest, "idempotencyKey">;
@@ -80,7 +83,7 @@ export class RunAdmission implements EvalRunAdmission {
     const { projectId, operation, selector } = requirePreviewRequest(request);
     const admitted = await this.#plan(projectId, operation);
     const { plan } = admitted;
-    const targets = await this.#expand(plan, operation, selector);
+    const targets = await expandRunTargets(plan, operation, selector, this.#store);
     const { samples, replaced, samplings } = await this.#work(plan, operation, targets);
     const executes = operation !== "evaluation";
     const newSamplingCount = executes
@@ -101,7 +104,7 @@ export class RunAdmission implements EvalRunAdmission {
 
   /** Coalesce concurrent same-key requests, then replay an existing Run or admit the submitted targets. */
   async submit(request: RunRequest): Promise<RunHandle> {
-    const { idempotencyKey, ...facts } = requireRunRequest(request);
+    const { idempotencyKey, ...facts } = requireRunRequest(request, true);
     const key = JSON.stringify([facts.projectId, idempotencyKey]);
     const pending = this.#pending.get(key);
     if (pending) {
@@ -117,17 +120,17 @@ export class RunAdmission implements EvalRunAdmission {
     return promise;
   }
 
-  /** A read-only, stored-Run-only replay, before a management caller consults the current preview.
-   * Do not treat a pending admission as an existing Run: a miss never authorizes a new target. */
-  async replay(request: RunRequest): Promise<RunHandle | null> {
-    const { idempotencyKey, ...facts } = requireRunRequest(request);
+  /** Read-only stored-Run lookup, including a legacy request with no expected digests. */
+  async replay(request: RunReplayRequest): Promise<RunHandle | null> {
+    const { idempotencyKey, ...facts } = requireRunRequest(request, false);
     return this.#replayStored(idempotencyKey, facts);
   }
 
-  async #replayStored(idempotencyKey: string, facts: RunRequestFacts): Promise<RunHandle | null> {
+  async #replayStored(idempotencyKey: string, facts: Omit<RunReplayRequest, "idempotencyKey">): Promise<RunHandle | null> {
     const existing = await this.#store.findRunByIdempotencyKey(facts.projectId, idempotencyKey);
     if (!existing) return null;
     if (existing.projectId !== facts.projectId || existing.requestIdentity.idempotencyKey !== idempotencyKey
+      || (facts.expectedPlanDigests !== undefined && !equalJson(facts.expectedPlanDigests, existing.planDigests))
       || existing.requestIdentity.requestFingerprint !== await requestFingerprint(facts, existing.planDigests)) {
       throw new RuntimeRunIdentityConflictError(IDENTITY_CONFLICT);
     }
@@ -141,7 +144,11 @@ export class RunAdmission implements EvalRunAdmission {
     const { projectId, operation, targets } = facts;
     const admitted = await this.#plan(projectId, operation);
     const { plan } = admitted;
-    const planDigests = planDigestsOf(admitted);
+    if (!equalJson(planDigestsOf(admitted), facts.expectedPlanDigests)) {
+      throw new RuntimeAdmissionConflictError("plan-changed", "Project plan changed after the Run was previewed");
+    }
+    // The caller's preview digest, never a freshly substituted plan, is the identity stored on the Run.
+    const planDigests = facts.expectedPlanDigests;
     const { samples, replaced, samplings } = await this.#work(plan, operation, targets);
     const subjectAgent = plan.execution.harness.agentConfig;
     const created = operation === "evaluation" ? [] : [
@@ -189,38 +196,6 @@ export class RunAdmission implements EvalRunAdmission {
       );
     }
     return { operation, plan, evaluation };
-  }
-
-  /** Expand inside the Project snapshot; evaluation keeps only successful current Samplings. */
-  async #expand(plan: ProjectPlan, operation: RunOperation, selector: RunTargetSelector): Promise<RunTargets> {
-    const { projectId } = plan.project;
-    const bound = planProjectSampleIds(plan);
-    const selected = new Set<string>(selector.all ? bound : []);
-    for (const datasetId of selector.datasetIds ?? []) {
-      const dataset = plan.datasets.find((item) => item.datasetId === datasetId);
-      if (!dataset) throw new RuntimeEntityNotFoundError("dataset", datasetId);
-      for (const projectSampleId of dataset.projectSampleIds) selected.add(projectSampleId);
-    }
-    const known = new Set(bound);
-    for (const projectSampleId of selector.projectSampleIds ?? []) {
-      if (!known.has(projectSampleId)) throw new RuntimeEntityNotFoundError("project-sample", projectSampleId);
-      selected.add(projectSampleId);
-    }
-    const explicit = await this.#projectSamplings(projectId, selector.samplingIds ?? []);
-    if (operation !== "evaluation") {
-      return {
-        projectSampleIds: [...selected],
-        samplingIds: explicit.filter((sampling) => !selected.has(sampling.projectSampleId)).map(({ samplingId }) => samplingId),
-      };
-    }
-    const expanded = selected.size === 0 ? [] : await this.#store.listProjectSamplings(projectId, [...selected]);
-    return {
-      projectSampleIds: [],
-      samplingIds: [...new Set([
-        ...expanded.filter(({ execution }) => execution.status === "succeeded"),
-        ...explicit,
-      ].map(({ samplingId }) => samplingId))],
-    };
   }
 
   /** Validate fixed targets against the plan and current Samplings without re-expanding a selector. */
@@ -310,10 +285,42 @@ function requirePreviewRequest(request: RunPreviewRequest): RunPreviewRequest {
   return { projectId: request.projectId, operation: request.operation, selector: requireSelector(request.selector) };
 }
 
-function requireRunRequest(request: RunRequest): RunRequest {
+function requireRunRequest(request: RunReplayRequest, required: true): RunRequest;
+function requireRunRequest(request: RunReplayRequest, required: false): RunReplayRequest;
+function requireRunRequest(request: RunReplayRequest, required: boolean): RunReplayRequest {
   requireObject(request, "request");
   requireIdentifier(request.idempotencyKey, "idempotencyKey");
-  return { idempotencyKey: request.idempotencyKey, ...requirePreviewRequest(request), targets: requireTargets(request.targets) };
+  const preview = requirePreviewRequest(request);
+  const expectedPlanDigests = request.expectedPlanDigests === undefined
+    ? undefined : requirePlanDigests(request.expectedPlanDigests, preview.operation);
+  if (required && expectedPlanDigests === undefined) {
+    throw new RuntimeInputError("expectedPlanDigests is required to submit a Run", "expectedPlanDigests");
+  }
+  return {
+    idempotencyKey: request.idempotencyKey, ...preview, targets: requireTargets(request.targets),
+    ...(expectedPlanDigests === undefined ? {} : { expectedPlanDigests }),
+  };
+}
+
+function requirePlanDigests(digests: RunPlanDigests, operation: RunOperation): RunPlanDigests {
+  requireObject(digests, "expectedPlanDigests");
+  if (Object.keys(digests).some((key) => key !== "execution" && key !== "evaluation")) {
+    throw new RuntimeInputError("expectedPlanDigests contains an unknown field", "expectedPlanDigests");
+  }
+  const sha256 = (value: unknown, field: string): string => {
+    if (typeof value !== "string" || !/^[0-9a-f]{64}$/u.test(value)) {
+      throw new RuntimeInputError(`${field} must be a lowercase SHA-256 digest`, field);
+    }
+    return value;
+  };
+  const execution = sha256(digests.execution, "expectedPlanDigests.execution");
+  if (operation === "execution") {
+    if (digests.evaluation !== undefined) {
+      throw new RuntimeInputError("execution cannot have an evaluation digest", "expectedPlanDigests.evaluation");
+    }
+    return { execution };
+  }
+  return { execution, evaluation: sha256(digests.evaluation, "expectedPlanDigests.evaluation") };
 }
 
 function requireSelector(selector: RunTargetSelector): RunTargetSelector {
@@ -344,7 +351,7 @@ function requireIds(ids: unknown, field: string): string[] {
   return [...ids];
 }
 
-function requestFingerprint(facts: RunRequestFacts, planDigests: RuntimeRunPlanDigests): Promise<string> {
+function requestFingerprint(facts: Omit<RunReplayRequest, "idempotencyKey">, planDigests: RuntimeRunPlanDigests): Promise<string> {
   const { projectId, operation, selector, targets } = facts;
   return digestJson({ projectId, operation, selector, targets, planDigests });
 }

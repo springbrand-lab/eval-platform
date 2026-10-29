@@ -81,28 +81,11 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     if (database) await database.destroy();
   }, 30_000);
 
-  /** Store-level admission built from the persisted plan, independent of the Runtime package. */
+  /** Exercise the same public Runtime admission used by ProjectService and HTTP. */
   function planAdmission(owner: string): Pick<EvalRunAdmission, "preview" | "submit"> {
     const plans = createPostgresProjectPlanReader(database.db, owner);
     const store = createPostgresRuntimeStore(database.db, owner, release, runQueue);
-    return {
-      async preview({ projectId, operation, selector }) {
-        const command = await buildCommand(plans, store, { projectId, operation });
-        return {
-          projectId, operation, selector, targets: command.run.targets,
-          replacedSamplingCount: command.replacedSamplingIds.length, newSamplingCount: command.samplings.length,
-          evaluationCount: command.evaluations.length, executionPlanDigest: command.run.planDigests.execution,
-          evaluationPlanDigest: command.run.planDigests.evaluation ?? null,
-        };
-      },
-      async submit({ projectId, operation, targets, idempotencyKey, selector }) {
-        const command = await buildCommand(plans, store, {
-          projectId, operation, projectSampleIds: targets.projectSampleIds, samplingIds: targets.samplingIds, idempotencyKey, selector,
-        });
-        const { run } = await store.admitRun(command);
-        return { runId: run.runId, samplingIds: [...run.samplingIds] };
-      },
-    };
+    return createEvalRunAdmission({ sourceCommit: release.sourceCommit, plans, store });
   }
 
   function services(owner = OWNER, admission: Pick<EvalRunAdmission, "preview" | "submit"> = planAdmission(owner)) {
@@ -620,11 +603,16 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
           async preview(request) {
             if (creationRunId === "") {
               // The stalled creator finishes its first Run, then the user starts and finishes another one.
-              const { targets } = await real.preview(request);
-              const creationRun = await real.submit({ ...request, idempotencyKey: body.idempotencyKey, targets });
+              const approved = await real.preview(request);
+              const creationRun = await real.submit({ ...request, idempotencyKey: body.idempotencyKey, targets: approved.targets,
+                expectedPlanDigests: approved.operation === "execution" ? { execution: approved.executionPlanDigest }
+                  : { execution: approved.executionPlanDigest, evaluation: approved.evaluationPlanDigest! } });
               creationRunId = creationRun.runId;
               await settle(s.worker, creationRun.samplingIds, "succeeded");
-              const userRun = await real.submit({ ...request, idempotencyKey: "user", targets: (await real.preview(request)).targets });
+              const fresh = await real.preview(request);
+              const userRun = await real.submit({ ...request, idempotencyKey: "user", targets: fresh.targets,
+                expectedPlanDigests: fresh.operation === "execution" ? { execution: fresh.executionPlanDigest }
+                  : { execution: fresh.executionPlanDigest, evaluation: fresh.evaluationPlanDigest! } });
               await settle(s.worker, userRun.samplingIds, "succeeded");
             }
             return real.preview(request);
@@ -653,7 +641,10 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
               const replayed = await services(OWNER, runtimeAdmission()).projects.create(body);
               creationRunId = replayed.run!.runId;
               await settle(s.worker, replayed.run!.samplingIds, "succeeded");
-              const userRun = await real.submit({ ...request, idempotencyKey: "user", targets: (await real.preview(request)).targets });
+              const fresh = await real.preview(request);
+              const userRun = await real.submit({ ...request, idempotencyKey: "user", targets: fresh.targets,
+                expectedPlanDigests: fresh.operation === "execution" ? { execution: fresh.executionPlanDigest }
+                  : { execution: fresh.executionPlanDigest, evaluation: fresh.evaluationPlanDigest! } });
               await settle(s.worker, userRun.samplingIds, "succeeded");
             }
             return real.preview(request);
@@ -991,10 +982,14 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     await settle(createPostgresWorkerRuntimeStore(database.db, runQueue), run.samplingIds, "succeeded");
     const preview = (await (await send(`${path}/runs/preview`, jsonRequest("POST", {
       operation: "evaluation", selector: { all: true },
-    }, OWNER))).json() as { msg: { targets: { projectSampleIds: string[]; samplingIds: string[] } } }).msg;
+    }, OWNER))).json() as { msg: {
+      targets: { projectSampleIds: string[]; samplingIds: string[] };
+      executionPlanDigest: string; evaluationPlanDigest: string;
+    } }).msg;
     expect(preview.targets.samplingIds.sort()).toEqual([...run.samplingIds].sort());
     const submitted = await send(`${path}/runs`, jsonRequest("POST", {
       idempotencyKey: "evaluate", operation: "evaluation", selector: { all: true }, targets: preview.targets,
+      expectedPlanDigests: { execution: preview.executionPlanDigest, evaluation: preview.evaluationPlanDigest },
     }, OWNER));
     expect(submitted.status).toBe(202);
     const sampling = run.samplingIds[0]!;

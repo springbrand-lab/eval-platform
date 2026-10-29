@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { AGENT, DATASET, OWNER, setupManagement, toolValue } from "./test-fixture.js";
+import { HttpError } from "@eval-platform/eval-contracts/http-errors";
+import { RuntimeInputError, digestJson } from "@eval-platform/eval-runtime";
+import { AGENT, DATASET, OWNER, SCHEMA, setupManagement, toolValue } from "./test-fixture.js";
 
 const FIRST = "55555555-5555-4555-8555-555555555555";
 const SECOND = "66666666-6666-4666-8666-666666666666";
@@ -118,10 +120,14 @@ describe("trusted approval selections through the existing list_options tool", (
         initialSession: { bundleId: BUNDLE, sessionId: MATERIAL } },
     ];
     let deleted = false;
-    Object.assign(app.services.datasets, {
-      getDataset: vi.fn(async () => ({ datasetId: DATASET, name: "Dataset" })),
-      getData: vi.fn(async (id: string) => deleted && id === FIRST ? null : members.find((item) => item.dataId === id) ?? null),
-      listData: vi.fn(async () => members),
+    app.services.projects.reviewSelection.mockImplementation(async (input: unknown) => {
+      const selection = input as { datasetId: string; dataIds?: string[] };
+      if (deleted || selection.dataIds?.some((id) => !members.some((item) => item.dataId === id))) {
+        throw new HttpError("REQUEST_INVALID_INPUT");
+      }
+      const dataset = { datasetId: selection.datasetId, name: "Dataset", kind: "general" };
+      const selected = selection.dataIds ? members.filter((item) => selection.dataIds!.includes(item.dataId)) : members;
+      return { dataset, data: selected, digest: await digestJson({ dataset, selected }) };
     });
     const params = { category: "approval_dataset", datasetId: DATASET, pageSize: 1 };
     const first = await toolValue(await app.call("list_options", params));
@@ -135,18 +141,34 @@ describe("trusted approval selections through the existing list_options tool", (
       evalInitialMaterials: [{ bundleId: BUNDLE, materialId: MATERIAL }],
       initialSession: { bundleId: BUNDLE, sessionId: MATERIAL } }] });
     expect(first.digest).toBe(second.digest);
+    expect(app.services.projects.reviewSelection).toHaveBeenCalledWith({ datasetId: DATASET });
     expect(JSON.stringify([first, second])).not.toMatch(/PRIVATE_|private\.example|https:\/\//u);
     members[0]!.userPrompt = "changed";
     const changed = await toolValue(await app.call("list_options", params));
     expect(changed.digest).not.toBe(first.digest);
     expect(await errorCode(await app.call("list_options", { ...params, dataIds: [BUNDLE] })))
       .toContain("REQUEST_INVALID_INPUT");
+    app.services.projects.reviewSelection.mockRejectedValueOnce(new RuntimeInputError("Selected Data was detached"));
+    expect(await errorCode(await app.call("list_options", params))).toContain("REQUEST_INVALID_INPUT");
     expect(await errorCode(await app.call("list_options", { ...params, q: "PRIVATE_PROMPT" })))
       .toContain("REQUEST_INVALID_INPUT");
     expect(await errorCode(await app.call("list_options", { ...params, pageSize: 11 })))
       .toContain("REQUEST_INVALID_INPUT");
     deleted = true;
     expect(await errorCode(await app.call("list_options", params))).toContain("REQUEST_INVALID_INPUT");
+  });
+
+  it("reviews the immutable output Schema by its existing catalog ID and canonical digest, not its content", async () => {
+    const app = setupManagement();
+    const reviewed = await toolValue(await app.call("list_options", {
+      category: "approval_output_schema", outputSchemaId: SCHEMA,
+    }));
+    expect(reviewed).toEqual({ category: "approval_output_schema", outputSchemaId: SCHEMA,
+      name: "Output", digest: expect.stringMatching(/^[0-9a-f]{64}$/u) });
+    expect(JSON.stringify(reviewed)).not.toContain("private");
+    expect(await errorCode(await app.call("list_options", {
+      category: "approval_output_schema", outputSchemaId: FIRST,
+    }))).toContain("OUTPUT_SCHEMA_NOT_FOUND");
   });
 
   it("reviews only frozen, owner-scoped ProjectSample/Sampling selections and their actual Agent identities", async () => {

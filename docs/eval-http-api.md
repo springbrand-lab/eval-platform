@@ -249,6 +249,9 @@ Creation body:
   samplingCounts?: { [dataId]: count },       per-Data overrides; every key must be selected
   execution: { userAgentId, framework: "sp"|"codex"|"cc", executionConcurrency, retryPolicy?, timeoutMs? },
   evaluation?: <evaluation plan body>,         required when run.operation is "pipeline"
+  expectedSnapshots?: {datasets:[{datasetId,digest}],executionAgent,evaluationAgent?,outputSchema?},
+                                               review digests; required by management create_project,
+                                               optional for direct HTTP creation without Takt approval
   run: { operation: "execution"|"pipeline" }
 }
 ```
@@ -275,7 +278,7 @@ Each Run is chosen per request: `operation` is `execution`, `pipeline` or `evalu
 | Route | Body / result |
 | --- | --- |
 | `POST /api/projects/{projectId}/runs/preview` | `{operation, selector}` / `RunPreview`: `{projectId, operation, selector, targets:{projectSampleIds, samplingIds}, replacedSamplingCount, newSamplingCount, evaluationCount, executionPlanDigest, evaluationPlanDigest\|null}` |
-| `POST /api/projects/{projectId}/runs` | `{idempotencyKey, operation, selector, targets:{projectSampleIds, samplingIds}}` (each list unique, at most `RUN_TARGET_IDS` IDs in total) / `202 RunHandle {runId, samplingIds}` |
+| `POST /api/projects/{projectId}/runs` | `{idempotencyKey, operation, selector, targets:{projectSampleIds, samplingIds}, expectedPlanDigests:{execution,evaluation?}}` (copy digests and targets from the same preview; execution requires only execution, pipeline/evaluation require both; lowercase 64-char SHA-256; each target list unique, at most `RUN_TARGET_IDS` IDs in total) / `202 RunHandle {runId, samplingIds}` |
 | `GET /api/projects/{projectId}/runs/current` | `{run: {runId, stopRequested?} \| null}` |
 | `POST /api/projects/{projectId}/runs/{runId}/stop` | No body / `202 {runId, stopRequested:true}` |
 | `POST /api/projects/{projectId}/runs/{runId}/score-sync` | No body / `{synced, failed, skipped}`; see [Run admission and stop](#run-admission-and-stop) |
@@ -424,7 +427,7 @@ The target account is always the service account; the client cannot name another
 
 Run admission uses a token-free, owner-scoped `ProjectPlanReader` and `RuntimeStore` with `createEvalRunAdmission`. The HTTP process holds no Harness credential and never runs Agents: admission and stop requests commit their Run facts and enqueue the Run job in the same PostgreSQL transaction (see [Run scheduling](architecture.md#run-调度与停止)).
 
-Admission responses follow the rules in [Run admission](architecture.md#run-准入与独立评估): the request fingerprint covers `projectId`, `operation`, `selector`, `targets` and the plan digests. A matching replay of the Project's latest Run returns the original Run, even while it is active; a reused key with different facts, or the key of a Run that a later admission superseded, is `409 RUN_IDEMPOTENCY_CONFLICT`; a new key while the Project has an unfinished Run is `409 PROJECT_BUSY`. Inside the transaction the Store rechecks the plan digests (`PROJECT_PLAN_CHANGED`), the evaluation plan (`PROJECT_EVALUATION_PLAN_REQUIRED`) and that the submitted targets still match the current Samplings (`RUN_TARGETS_STALE`); on any of these the caller previews again with a new key.
+Admission responses follow the rules in [Run admission](architecture.md#run-准入与独立评估): the request fingerprint covers `projectId`, `operation`, `selector`, `targets` and the caller's expected plan digests. A matching persisted Project/key Run returns the original Run before consulting mutable plans or targets, even when later admissions replaced its Samplings (the returned membership may now be empty); a reused key with different facts or digests is `409 RUN_IDEMPOTENCY_CONFLICT`; a new key while the Project has an unfinished Run is `409 PROJECT_BUSY`. Inside the transaction the Store rechecks the supplied digests (`PROJECT_PLAN_CHANGED`), the evaluation plan (`PROJECT_EVALUATION_PLAN_REQUIRED`), the selector's expanded current targets (including evaluation-only), and the replaced Sampling set (`RUN_TARGETS_STALE`). On a conflict the caller needs a new approved preview and a new key; changing the digests of an old approval cannot authorize a new Run.
 
 `POST .../runs/{runId}/stop` targets only the named Run of that Project and returns `202 {runId, stopRequested:true}`, including for a repeat; an unknown Run, another owner's Run or a Run of a deleted Project is `404 RUN_NOT_FOUND`; a finished Run without a stop request is `409 PROJECT_NO_ACTIVE_RUN`. The response only records the request; stop semantics are described in [Run scheduling and stop](architecture.md#run-调度与停止).
 
@@ -466,9 +469,9 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `PROJECT_PLAN_CHANGED` | 409 | Plan digests changed between preview and admission |
 | `PROJECT_SAMPLE_NOT_FOUND` | 404 | ProjectSample not bound by the Project |
 | `RUN_NOT_FOUND` | 404 | Unknown or another owner's Run, or Run of a deleted Project |
-| `RUN_IDEMPOTENCY_CONFLICT` | 409 | Key reused with different facts or superseded |
+| `RUN_IDEMPOTENCY_CONFLICT` | 409 | Key reused with different original request facts or expected plan digests |
 | `RUN_STOPPED` | 409 | Runtime refused a stage after a committed stop (Worker side) |
-| `RUN_TARGETS_STALE` | 409 | Submitted targets no longer match the current Samplings |
+| `RUN_TARGETS_STALE` | 409 | Submitted selector no longer expands to the fixed targets, or the current replacement Samplings differ |
 | `RUN_TARGETS_EMPTY` | 409 | Selection or targets contain no work |
 | `RUN_TARGETS_TOO_LARGE` | 413 | Expanded selection, or the Data a new Project binds, exceeds `RUN_TARGET_IDS` |
 | `RUNTIME_INPUT_INVALID` | 400 | Run request, Project creation selection or plan values rejected (including pipeline creation without an evaluation plan) |

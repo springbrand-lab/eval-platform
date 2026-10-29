@@ -12,9 +12,10 @@ import type { AppBindings } from "../lib/types.js";
 import { JSON_BODY_BYTES, MANAGEMENT_OUTPUT_SCHEMA_BODY_BYTES } from "../limits.js";
 import { serviceAccountScope } from "../middlewares/service-account.js";
 import { text } from "./common.js";
-import { managementSchemas, submitRunToolSchema } from "./schemas.js";
+import { managementSchemas } from "./schemas.js";
 import { ManagementOutcomeUnknownError } from "./skill.js";
 import { callTool } from "./tools.js";
+import { ManagementReconciliationUnknownError } from "./runs.js";
 import { MANAGEMENT_TRAJECTORY_PATH, streamTrajectory } from "./trajectory.js";
 
 export const EVAL_MANAGEMENT_MCP_PATH = "/mcp/eval-management";
@@ -28,9 +29,10 @@ const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
   upload_agent_reference: "Upload one staged file as a public SP attachment, then create a Reference. Unknown writes are not blindly replayed or cleaned up; use get_preparation.",
   create_output_schema: "Create an output JSON Schema from trusted backend-sent content, never model context. Reuse operationKey after an unknown result; distinct keys may share names, so use the receipt ID. Returns only Schema ID/name.",
   create_agent: "Create an execution or evaluation Agent from SP's default template and verified resources. Reuse operationKey after an unknown result.",
-  create_project: "Create a Project and start its first Run under one durable idempotencyKey. Requires approval in the trusted adapter.",
-  preview_run: "Preview up to 50 fixed targets and prospective counts for one existing Project; these are not completed scores. Preserve the selector and targets for submit_run.",
-  submit_run: "Submit an existing Project Run with its original selector and up to 50 fixed preview targets, under one idempotencyKey.",
+  create_project: "Create a Project and start its first Run under one durable idempotencyKey. The trusted adapter supplies approved Dataset/Agent/Schema snapshot digests; changed sources fail closed.",
+  preview_run: "Preview up to 50 fixed targets, plan digests and prospective counts; these are not completed scores. Keep both digests, selector and targets for submit_run.",
+  submit_run: "Submit the original fixed targets and expected preview plan digests under one Project/idempotencyKey. Runtime verifies both at admission.",
+  reconcile_operation: "READ ONLY: look up an already-persisted Run or Project from its original request/key/fingerprint. Run requests may omit expected digests only for old stored Runs. Never starts work.",
   stop_run: "Stop one explicitly identified Run belonging to the specified Project.",
   get_run: "Read Run status and a page of Sampling and Evaluation IDs, without full records.",
   get_metrics: "Page existing Project/Dataset/Sample/Sampling Metrics and current Sampling/Evaluation IDs without runId, or filter to exact current members of runId. runScope distinguishes them; Subject/Evaluator tool success rates keep Metrics coverage and nulls.",
@@ -38,13 +40,16 @@ const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
 };
 const TOOLS = (Object.keys(managementSchemas) as (keyof typeof managementSchemas)[]).map((name) => ({
   name, description: DESCRIPTIONS[name],
-  inputSchema: z.toJSONSchema(name === "submit_run" ? submitRunToolSchema : managementSchemas[name],
+  inputSchema: z.toJSONSchema(managementSchemas[name],
     { target: "draft-07", io: "input", unrepresentable: "any" }),
 }));
 
 function toolFailure(error: unknown) {
   if (error instanceof ManagementOutcomeUnknownError) {
     return "OPERATION_OUTCOME_UNKNOWN: Check get_preparation with the original operationKey. Do not retry under a new key.";
+  }
+  if (error instanceof ManagementReconciliationUnknownError) {
+    return "OPERATION_OUTCOME_UNKNOWN: Project exists without its confirmed first Run. Reconcile manually before any new write.";
   }
   if (error instanceof z.ZodError) return "REQUEST_INVALID_INPUT: Check the tool's input schema.";
   const { code } = apiError(error instanceof Error ? error : new Error("Unknown tool failure"));

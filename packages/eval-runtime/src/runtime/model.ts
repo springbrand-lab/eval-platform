@@ -7,6 +7,7 @@ import type {
   RetryPolicy,
   RunHandle,
   RunOperation,
+  RunReplayRequest,
   RunRequest,
   RunSnapshot,
   RunTargetSelector,
@@ -100,8 +101,8 @@ export interface RunPreview extends RunPreviewRequest {
 export interface EvalRunAdmission {
   preview(request: RunPreviewRequest): Promise<RunPreview>;
   /** Match only an already-persisted Project/key Run against its original complete intent.
-   * Null means no stored Run; this never previews or admits new targets. */
-  replay(request: RunRequest): Promise<RunHandle | null>;
+   * Missing expected digests are permitted only for this read-only legacy lookup, never submit. */
+  replay(request: RunReplayRequest): Promise<RunHandle | null>;
   submit(request: RunRequest): Promise<RunHandle>;
 }
 

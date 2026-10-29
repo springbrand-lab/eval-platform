@@ -487,7 +487,7 @@ export const runs = pgTable("eval_runs", {
   runId: text("run_id").primaryKey(),
   ownerUserId: text("owner_user_id").notNull(),
   projectId: text("project_id").notNull(),
-  /** Admission order within the Project; only the latest Run's key may be replayed. */
+  /** Admission order within the Project; old keys still identify their original persisted Runs. */
   sequence: integer("sequence").notNull(),
   sourceCommit: text("source_commit").notNull(),
   operation: text("operation").$type<RunOperation>().notNull(),

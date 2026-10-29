@@ -50,7 +50,7 @@ describe("trusted management MCP transport", () => {
     expect(app.release).toHaveBeenCalledTimes(1);
   });
 
-  it("is stateless and advertises exactly the fifteen documented management tools, not submit_evaluation", async () => {
+  it("is stateless and advertises exactly sixteen management tools including separate read-only reconciliation", async () => {
     const app = setupManagement();
     const initialized = await app.rpc(rpc("initialize", 2, { protocolVersion: "2025-06-18" }));
     expect(initialized.headers.get("mcp-session-id")).toBeNull();
@@ -64,17 +64,21 @@ describe("trusted management MCP transport", () => {
     expect(tools.result.tools.map(({ name }) => name)).toEqual([
       "list_options", "prepare_inputs", "get_preparation", "search_agent_resources",
       "upload_agent_skill", "upload_agent_reference", "create_output_schema", "create_agent", "create_project", "preview_run",
-      "submit_run", "stop_run", "get_run", "get_metrics", "inspect_case",
+      "submit_run", "reconcile_operation", "stop_run", "get_run", "get_metrics", "inspect_case",
     ]);
-    expect(tools.result.tools.every(({ inputSchema }) => inputSchema.type === "object"
+    expect(tools.result.tools.filter(({ name }) => name !== "reconcile_operation").every(({ inputSchema }) => inputSchema.type === "object"
       && inputSchema.additionalProperties === false)).toBe(true);
     expect(tools.result.tools.find(({ name }) => name === "create_agent")!.inputSchema.required)
       .toEqual(expect.arrayContaining(["operationKey", "purpose", "instructions", "modelId"]));
     expect(tools.result.tools.find(({ name }) => name === "create_output_schema")!.inputSchema.required)
       .toEqual(expect.arrayContaining(["operationKey", "name", "description", "content"]));
+    expect(tools.result.tools.find(({ name }) => name === "create_project")!.inputSchema.required)
+      .toContain("expectedSnapshots");
     const runInput = tools.result.tools.find(({ name }) => name === "submit_run")!.inputSchema;
-    expect(runInput.required).toEqual(expect.arrayContaining(["projectId", "idempotencyKey", "operation", "selector", "targets"]));
-    expect(runInput.properties).not.toHaveProperty("replayOnly"); // adapter-only, never advertised to the model
+    expect(runInput.required).toEqual(expect.arrayContaining(["projectId", "idempotencyKey", "operation", "selector", "targets", "expectedPlanDigests"]));
+    expect(runInput.properties).not.toHaveProperty("replayOnly"); // removed from both call and advertised schemas
+    expect(tools.result.tools.find(({ name }) => name === "reconcile_operation")!.inputSchema)
+      .toHaveProperty("oneOf");
     expect(tools.result.tools.map(({ name }) => name)).not.toContain("submit_evaluation");
     expect(app.release).toHaveBeenCalledTimes(2);
   });

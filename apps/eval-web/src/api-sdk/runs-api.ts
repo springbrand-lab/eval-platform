@@ -1,7 +1,7 @@
-import type { RecollectTarget } from "@eval-platform/eval-contracts";
+import type { RecollectTarget, RunRequest } from "@eval-platform/eval-contracts";
 import { api, enc } from "./client";
 import type {
-  EvaluationRecord, RunEvaluation, RunHandle, RunOperation, RunPreview, RunSnapshot, RunTargetSelector, RunTargets,
+  EvaluationRecord, RunEvaluation, RunHandle, RunOperation, RunPreview, RunSnapshot, RunTargetSelector,
   Sampling, ScoreSyncSummary,
 } from "./types";
 
@@ -15,9 +15,8 @@ const base = (projectId: string) => `/api/projects/${enc(projectId)}/runs`;
 
 export const previewRun = (projectId: string, input: { operation: RunOperation; selector: RunTargetSelector }) =>
   api.post<RunPreview>(`${base(projectId)}/preview`, input);
-export const submitRun = (projectId: string, input: {
-  idempotencyKey: string; operation: RunOperation; selector: RunTargetSelector; targets: RunTargets;
-}) => api.post<RunHandle>(base(projectId), input);
+export const submitRun = (projectId: string, input: Omit<RunRequest, "projectId">) =>
+  api.post<RunHandle>(base(projectId), input);
 export const getProjectRun = (projectId: string, runId: string, signal?: AbortSignal) =>
   api.get<{ run: RunSnapshot }>(`${base(projectId)}/${enc(runId)}`, { signal });
 export const listRunEvaluations = (projectId: string, runId: string, signal?: AbortSignal) =>

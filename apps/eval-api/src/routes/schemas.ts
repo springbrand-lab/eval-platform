@@ -13,6 +13,9 @@ export const idempotencyKeySchema = z.string().min(1).max(IDENTIFIER_CHARS)
 /** Runtime entity IDs (Project, ProjectSample, Run, Sampling, Evaluation) are opaque path-safe text. */
 export const entityIdSchema = idempotencyKeySchema.refine((value) => !value.includes("/"), "must not contain '/'");
 
+/** The preview and Project approval views return canonical SHA-256 digests. */
+export const approvalDigestSchema = z.string().regex(/^[0-9a-f]{64}$/u, "must be a lowercase SHA-256 digest");
+
 /** ID lists that must not repeat an entry. */
 export const unique = (ids: readonly string[]) => new Set(ids).size === ids.length;
 

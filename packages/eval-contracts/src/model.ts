@@ -244,13 +244,27 @@ export interface RunTargets {
   readonly samplingIds: readonly string[];
 }
 
+/** The approved preview's plan identity, not another persisted approval record. */
+export interface RunPlanDigests {
+  readonly execution: string;
+  /** Required exactly when the Run includes evaluation. */
+  readonly evaluation?: string;
+}
+
 export interface RunRequest {
   readonly idempotencyKey: string;
   readonly projectId: string;
   readonly operation: RunOperation;
   readonly selector: RunTargetSelector;
   readonly targets: RunTargets;
+  /** Copy these digests from the same preview as `targets`; retries must keep them unchanged. */
+  readonly expectedPlanDigests: RunPlanDigests;
 }
+
+/** A read-only lookup may omit digests for a Run admitted before preview binding existed. */
+export type RunReplayRequest = Omit<RunRequest, "expectedPlanDigests"> & {
+  readonly expectedPlanDigests?: RunPlanDigests | undefined;
+};
 
 export type RunPhase = "execution" | "evaluation";
 

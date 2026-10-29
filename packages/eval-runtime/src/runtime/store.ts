@@ -2,6 +2,7 @@ import type {
   CollectedResourceSnapshot,
   EvaluationRecord,
   RunOperation,
+  RunPlanDigests,
   RunPhases,
   RunTargetSelector,
   RunTargets,
@@ -25,11 +26,7 @@ export interface RuntimeRunRequestIdentity {
 }
 
 /** Plan digests a Run was admitted against; the Run stores no configuration body. */
-export interface RuntimeRunPlanDigests {
-  readonly execution: string;
-  /** Present for pipeline/evaluation Runs. */
-  readonly evaluation?: string;
-}
+export type RuntimeRunPlanDigests = RunPlanDigests;
 
 export interface RuntimeRunRecord {
   readonly runId: string;
@@ -95,20 +92,21 @@ export interface RuntimeStore {
   getRun(runId: string): Promise<RuntimeRunRecord | null>;
   /** Serialize the start of remote stage mutations with a saved stop request. */
   withRunDispatchGate<T>(runId: string, dispatch: () => Promise<T>): Promise<T>;
-  /** Persistent Project-scoped lookup used before reading the plan or current Samplings. */
+  /** Persistent Project-scoped lookup used before reading the plan or current Samplings, even after replacement. */
   findRunByIdempotencyKey(projectId: string, idempotencyKey: string): Promise<RuntimeRunRecord | null>;
   /** Current Samplings of these ProjectSamples, grouped in input order, each group ordered by samplingId. */
   listProjectSamplings(projectId: string, projectSampleIds: readonly string[]): Promise<readonly SamplingState[]>;
   /**
    * One transaction under the Project row lock. It must:
    * - reject a missing or soft-deleted Project, and a source-release mismatch for user Stores;
-   * - replay the Run of a matching key (same fingerprint) even while active, reject a different
-   *   fingerprint and a key whose Run a later Run superseded, then reject a new key while the
-   *   Project has an active Run;
+   * - replay the Run of a matching key (same fingerprint), including a Run whose members a later
+   *   Run replaced; reject a different fingerprint, then reject a new key while the Project is busy;
    * - refuse a Run carrying the Project's creation key once the Project has any Run
    *   (`creation-superseded`);
-   * - recheck `run.planDigests` against the current plan, and for pipeline/evaluation require an
-   *   evaluation plan (else `evaluation-plan-required`);
+   * - recheck `run.planDigests` (the caller's expected preview digests) against the current plan,
+   *   and for pipeline/evaluation require an evaluation plan (else `evaluation-plan-required`);
+   * - expand `run.selector` inside the locked Project snapshot and compare exactly to `run.targets`,
+   *   including the current successful Sampling set for evaluation-only Runs;
    * - recheck that `replacedSamplingIds` equals the current Sampling set of the targets (else
    *   `stale-targets`), and for evaluation that every target Sampling still succeeded;
    * - delete replaced Samplings with their EvaluationRecords and Run memberships, or for evaluation

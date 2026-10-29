@@ -4,6 +4,7 @@ import type {
   EvaluationPlan,
   Project,
   RunHandle,
+  RunPlanDigests,
 } from "@eval-platform/eval-contracts";
 import type { EvalRunAdmission, ProjectView } from "@eval-platform/eval-runtime";
 import {
@@ -17,7 +18,7 @@ import {
   normalizeEvaluationPlan,
   normalizeExecutionPlan,
 } from "@eval-platform/eval-runtime";
-import { createId } from "@eval-platform/eval-contracts";
+import { createId, equalJson } from "@eval-platform/eval-contracts";
 import type { AgentConfigService, FrozenCopy } from "../agent-configs.js";
 import {
   OutputSchemaNotFoundError,
@@ -25,8 +26,8 @@ import {
   ProjectIdempotencyConflictError,
 } from "../db/errors.js";
 import type { createOutputSchemaCatalog } from "../db/output-schemas.js";
-import type { PostgresProjectStore, StoredProjectCreation } from "../db/project-store.js";
-import type { EvaluationPlanBody, ProjectCreateBody } from "./schemas.js";
+import type { PostgresProjectStore, SelectedDataset, StoredProjectCreation } from "../db/project-store.js";
+import type { DatasetSelection, EvaluationPlanBody, ProjectCreateBody } from "./schemas.js";
 import { requireRunTargetCount } from "../limits.js";
 import { bindProjectSamples } from "./snapshot.js";
 
@@ -60,6 +61,15 @@ function fingerprintOf(body: ProjectCreateBody): Promise<string> {
   return digestJson(facts);
 }
 
+function changedSource(message: string): RuntimeAdmissionConflictError {
+  return new RuntimeAdmissionConflictError("plan-changed", message);
+}
+
+/** Hash the exact same consistent selected-source snapshot for review and creation. */
+function selectedDatasetDigest(selection: SelectedDataset): Promise<string> {
+  return digestJson({ dataset: selection.dataset, selected: selection.data });
+}
+
 /** The harness and optional retry policy shared by the execution and evaluation plan inputs. */
 function agentPolicy<F extends AgentFramework>(ownerUserId: string, framework: F, userAgentId: string, body: AgentPolicy) {
   return {
@@ -86,10 +96,14 @@ export function createProjectService(input: {
 }) {
   const { ownerUserId, store, agentConfigs, admission } = input;
 
-  async function schemaRef(outputSchemaId: string): Promise<EvaluationOutputSchemaRef> {
+  async function schemaRef(outputSchemaId: string, expectedDigest?: string): Promise<EvaluationOutputSchemaRef> {
     const record = await input.outputSchemas.get(outputSchemaId);
-    if (!record) throw new OutputSchemaNotFoundError(outputSchemaId);
-    return { outputSchemaId: record.outputSchemaId, digest: await digestJson(record.schema) };
+    if (!record || record.outputSchemaId !== outputSchemaId) throw new OutputSchemaNotFoundError(outputSchemaId);
+    const digest = await digestJson(record.schema);
+    if (expectedDigest !== undefined && expectedDigest !== await digestJson(record)) {
+      throw changedSource("Approved output Schema changed before Project creation");
+    }
+    return { outputSchemaId: record.outputSchemaId, digest };
   }
 
   function evaluationPlan(body: EvaluationPlanBody, copy: FrozenCopy, outputSchema: EvaluationOutputSchemaRef): EvaluationPlan {
@@ -106,6 +120,18 @@ export function createProjectService(input: {
   /** Builds the Dataset snapshots and one ProjectSample per distinct Data, in binding order. */
   async function snapshotSources(body: ProjectCreateBody, projectId: string) {
     const selected = await store.readSelection(body.datasets);
+    if (body.expectedSnapshots) {
+      if (selected.length !== body.expectedSnapshots.datasets.length) {
+        throw changedSource("Approved Dataset selection changed before Project creation");
+      }
+      for (const [index, selection] of selected.entries()) {
+        const approved = body.expectedSnapshots.datasets[index];
+        if (!approved || approved.datasetId !== selection.dataset.datasetId
+          || approved.digest !== await selectedDatasetDigest(selection)) {
+          throw changedSource("Approved Dataset or Data changed before Project creation");
+        }
+      }
+    }
     const bound = bindProjectSamples({
       projectId, datasets: selected, samplingCountOf: (dataId) => body.samplingCounts?.[dataId] ?? body.samplingCount,
     });
@@ -124,13 +150,24 @@ export function createProjectService(input: {
    * Returns null when the key must be read again: the Project row is gone (compensated or soft-deleted), or
    * the creation-key Run was admitted meanwhile and already superseded.
    */
-  async function admitFirstRun(project: Project, body: ProjectCreateBody): Promise<ProjectCreation | null> {
+  async function admitFirstRun(
+    project: Project, body: ProjectCreateBody, originalPlanDigests?: RunPlanDigests,
+  ): Promise<ProjectCreation | null> {
     const { projectId } = project;
     const { operation } = body.run;
     for (let attempt = 1; ; attempt += 1) {
       try {
-        const { targets } = await admission.preview({ projectId, operation, selector: { all: true } });
-        const run = await admission.submit({ idempotencyKey: body.idempotencyKey, projectId, operation, selector: { all: true }, targets });
+        const preview = await admission.preview({ projectId, operation, selector: { all: true } });
+        const expectedPlanDigests: RunPlanDigests = operation === "execution"
+          ? { execution: preview.executionPlanDigest }
+          : { execution: preview.executionPlanDigest, evaluation: preview.evaluationPlanDigest! };
+        if (originalPlanDigests && !equalJson(originalPlanDigests, expectedPlanDigests)) {
+          throw changedSource("Approved Project plan changed before its first Run");
+        }
+        const run = await admission.submit({
+          idempotencyKey: body.idempotencyKey, projectId, operation, selector: { all: true },
+          targets: preview.targets, expectedPlanDigests,
+        });
         return { project, run };
       } catch (error) {
         if ((error instanceof RuntimeEntityNotFoundError && error.entity === "project")
@@ -139,7 +176,7 @@ export function createProjectService(input: {
         // Under the admission lock a Run committed first: the creation no longer owns the first Run.
         if (error.reason === "creation-superseded") return { project, run: null };
         // An evaluation-plan replacement landed between preview and admission; the Project is valid, so preview again.
-        if (error.reason !== "plan-changed" || attempt >= FIRST_RUN_ATTEMPTS) throw error;
+        if (error.reason !== "plan-changed" || body.expectedSnapshots || attempt >= FIRST_RUN_ATTEMPTS) throw error;
       }
     }
   }
@@ -155,7 +192,13 @@ export function createProjectService(input: {
     if (found.fingerprint !== fingerprint) throw new ProjectIdempotencyConflictError();
     if (found.run) return { project: found.project, run: found.run };
     if (found.superseded) return { project: found.project, run: null };
-    return admitFirstRun(found.project, body);
+    if (body.expectedSnapshots && body.evaluation && found.evaluationReplaced) {
+      throw changedSource("Approved evaluation plan was replaced before the first Run");
+    }
+    return admitFirstRun(found.project, body, body.expectedSnapshots ? {
+      execution: found.planDigests.execution,
+      ...(body.run.operation === "pipeline" ? { evaluation: found.planDigests.evaluation! } : {}),
+    } : undefined);
   }
 
   /** Returns null, for the caller to read the key again, when another request committed under it first or admission says so. */
@@ -163,7 +206,7 @@ export function createProjectService(input: {
     const projectId = createId();
     const { datasets, samples } = await snapshotSources(body, projectId);
     const evaluationInput = body.evaluation
-      ? { body: body.evaluation, outputSchema: await schemaRef(body.evaluation.outputSchemaId) }
+      ? { body: body.evaluation, outputSchema: await schemaRef(body.evaluation.outputSchemaId, body.expectedSnapshots?.outputSchema) }
       : null;
     const project: Project = {
       projectId, ownerUserId, name: body.name,
@@ -171,13 +214,20 @@ export function createProjectService(input: {
       sourceBranch: input.sourceBranch, createdAt: new Date().toISOString(),
     };
     const copies: string[] = [];
+    let originalPlanDigests: RunPlanDigests | undefined;
     try {
-      const subject = await agentConfigs.freeze(body.execution.userAgentId, "execution");
+      const subject = await agentConfigs.freeze(body.execution.userAgentId, "execution", body.expectedSnapshots?.executionAgent);
       copies.push(subject.userAgentId);
+      if (body.expectedSnapshots && await digestJson(subject.snapshot.body) !== body.expectedSnapshots.executionAgent) {
+        throw changedSource("Approved execution Agent changed before it was frozen");
+      }
       let evaluation: { readonly copy: FrozenCopy; readonly plan: EvaluationPlan } | null = null;
       if (evaluationInput) {
-        const copy = await agentConfigs.freeze(evaluationInput.body.userAgentId, "evaluation");
+        const copy = await agentConfigs.freeze(evaluationInput.body.userAgentId, "evaluation", body.expectedSnapshots?.evaluationAgent);
         copies.push(copy.userAgentId);
+        if (body.expectedSnapshots && await digestJson(copy.snapshot.body) !== body.expectedSnapshots.evaluationAgent) {
+          throw changedSource("Approved evaluation Agent changed before it was frozen");
+        }
         evaluation = { copy, plan: evaluationPlan(evaluationInput.body, copy, evaluationInput.outputSchema) };
       }
       const execution = normalizeExecutionPlan({
@@ -185,12 +235,16 @@ export function createProjectService(input: {
         subjectAgentConfig: subject.snapshot,
         executionConcurrency: body.execution.executionConcurrency,
       });
+      const executionDigest = await digestExecutionPlan({ execution, datasets, samples });
+      const evaluationDigest = evaluation ? await digestJson(evaluation.plan) : undefined;
+      originalPlanDigests = body.run.operation === "execution" ? { execution: executionDigest }
+        : { execution: executionDigest, evaluation: evaluationDigest! };
       await store.create({
         project,
         datasets,
         samples,
-        execution: { plan: execution, digest: await digestExecutionPlan({ execution, datasets, samples }) },
-        evaluation: evaluation && { plan: evaluation.plan, digest: await digestJson(evaluation.plan) },
+        execution: { plan: execution, digest: executionDigest },
+        evaluation: evaluation && { plan: evaluation.plan, digest: evaluationDigest! },
         agentConfigs: [
           { userAgentId: subject.userAgentId, role: "subject", snapshot: subject.snapshot },
           ...(evaluation ? [{ userAgentId: evaluation.copy.userAgentId, role: "evaluator" as const, snapshot: evaluation.copy.snapshot }] : []),
@@ -203,7 +257,7 @@ export function createProjectService(input: {
       throw error;
     }
     try {
-      return await admitFirstRun(project, body);
+      return await admitFirstRun(project, body, body.expectedSnapshots ? originalPlanDigests : undefined);
     } catch (error) {
       if (compensates(error)) await compensate(projectId, error);
       throw error;
@@ -231,6 +285,18 @@ export function createProjectService(input: {
     get: (projectId: string) => store.get(projectId),
     getEvaluationOutputSchema: (projectId: string) => store.getEvaluationOutputSchema(projectId),
     delete: (projectId: string) => store.softDelete(projectId),
+    /** Read-only creation lookup by its original owner-scoped key and body fingerprint. */
+    async reconcile(body: ProjectCreateBody): Promise<ProjectCreation | null> {
+      const found = await store.findCreation(body.idempotencyKey);
+      if (!found || found.deleted) return null;
+      if (found.fingerprint !== await fingerprintOf(body)) throw new ProjectIdempotencyConflictError();
+      return { project: found.project, run: found.run };
+    },
+    /** Exposes only the consistent selection ProjectService would actually freeze. */
+    async reviewSelection(selection: DatasetSelection) {
+      const [selected] = await store.readSelection([selection]);
+      return { dataset: selected!.dataset, data: selected!.data, digest: await selectedDatasetDigest(selected!) };
+    },
 
     /**
      * Snapshot, freeze, persist and admit the first Run; nothing remains visible when any step fails.

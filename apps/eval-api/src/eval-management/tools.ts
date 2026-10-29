@@ -8,7 +8,7 @@ import { createOutputSchema } from "./output-schema.js";
 import { prepareInputs, getPreparation } from "./preparation.js";
 import { uploadAgentReference } from "./reference.js";
 import { searchAgentResources } from "./resources.js";
-import { createProject, getRun, previewRun, stopRun, submitRun } from "./runs.js";
+import { createProject, getRun, previewRun, reconcileOperation, stopRun, submitRun } from "./runs.js";
 import { managementSchemas as schemas } from "./schemas.js";
 import { uploadAgentSkill } from "./skill.js";
 
@@ -29,6 +29,7 @@ export function callTool(c: Context<AppBindings>, name: keyof typeof schemas, ar
     case "create_project": return createProject(c, schemas.create_project.parse(args));
     case "preview_run": return previewRun(c, schemas.preview_run.parse(args));
     case "submit_run": return submitRun(c, schemas.submit_run.parse(args));
+    case "reconcile_operation": return reconcileOperation(c, schemas.reconcile_operation.parse(args));
     case "stop_run": return stopRun(c, schemas.stop_run.parse(args));
     case "get_run": return getRun(c, schemas.get_run.parse(args));
     case "get_metrics": return getMetrics(c, schemas.get_metrics.parse(args));

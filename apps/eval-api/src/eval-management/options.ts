@@ -1,7 +1,6 @@
-import { equalJson } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 import type { Data } from "@eval-platform/eval-dataset";
-import { digestJson } from "@eval-platform/eval-runtime";
+import { RuntimeInputError, digestJson } from "@eval-platform/eval-runtime";
 import type { Context } from "hono";
 import type { AppBindings } from "../lib/types.js";
 import { INPUT_LIMITS } from "../limits.js";
@@ -71,30 +70,31 @@ async function approvalDataset(c: Context<AppBindings>, input: Options) {
   const datasetId = input.datasetId!;
   if (!c.env.evalManagement) throw new HttpError("INTERNAL_ERROR", "Management preparation is unavailable");
   await c.env.evalManagement.store.assertReadyDatasets(c.var.user.id, [datasetId]);
-  const [dataset, members] = await Promise.all([
-    c.var.services.datasets.getDataset(datasetId), c.var.services.datasets.listData(datasetId),
-  ]);
-  if (!dataset || dataset.datasetId !== datasetId) throw new HttpError("DATASET_NOT_FOUND");
-  const selected = input.dataIds ? members.filter((row) => input.dataIds!.includes(row.dataId)) : members;
-  if (input.dataIds && selected.length !== input.dataIds.length) {
-    throw new HttpError("REQUEST_INVALID_INPUT", "A selected Data is not a current Dataset member");
-  }
+  const { dataset, data: selected, digest } = await c.var.services.projects.reviewSelection({
+    datasetId, ...(input.dataIds ? { dataIds: input.dataIds } : {}),
+  }).catch((error: unknown) => {
+    if (error instanceof RuntimeInputError) {
+      throw new HttpError("REQUEST_INVALID_INPUT", "A selected Data is not a current Dataset member");
+    }
+    throw error;
+  });
   if (!selected.length || selected.length > MAX_APPROVAL_CASES) {
     throw new HttpError("CATALOG_PAYLOAD_TOO_LARGE", "Select between 1 and 50 Data for approval");
   }
-  // DatasetService.listData includes historical soft-deleted members; Project creation does not.
-  // Refuse such a selection instead of reporting Data/counts that would not be frozen into the Project.
-  const live = await Promise.all(selected.map((row) => c.var.services.datasets.getData(row.dataId)));
-  if (live.some((row, index) => !row || !equalJson(row, selected[index]))) {
-    throw new HttpError("REQUEST_INVALID_INPUT", "A selected Data is deleted or changed");
-  }
   return {
     category: "approval_dataset", datasetId, name: short(dataset.name),
-    // Include the complete Data, even though only its identity/bindings may cross the MCP boundary:
-    // a prompt or other business-field edit invalidates a pending approval.
-    digest: await digestJson({ dataset, selected }),
+    // Digest covers the complete same-snapshot Data/metadata ProjectService will actually freeze.
+    digest,
     ...pageOf(await Promise.all(selected.map(bindings)), input.page, input.pageSize),
   };
+}
+
+async function approvalOutputSchema(c: Context<AppBindings>, input: Options) {
+  const outputSchemaId = input.outputSchemaId!;
+  const schema = await c.var.services.outputSchemas.get(outputSchemaId);
+  if (!schema || schema.outputSchemaId !== outputSchemaId) throw new HttpError("OUTPUT_SCHEMA_NOT_FOUND");
+  return { category: "approval_output_schema", outputSchemaId, name: short(schema.name, 200),
+    digest: await digestJson(schema) };
 }
 
 /** Only an active owned Agent is selectable. Hash its whole public SP body, but never return it. */
@@ -191,6 +191,7 @@ export async function listOptions(c: Context<AppBindings>, input: Options) {
   const { category, q, page, pageSize } = input;
   if (category === "approval_dataset") return approvalDataset(c, input);
   if (category === "approval_agent") return approvalAgent(c, input);
+  if (category === "approval_output_schema") return approvalOutputSchema(c, input);
   if (category === "approval_project") return approvalProject(c, input);
   if (category === "project_detail") return projectDetail(c, input);
   if (category === "input_limits") return { category, limits: INPUT_LIMITS };

@@ -9,7 +9,7 @@ import type {
 } from "@eval-platform/eval-contracts";
 import { DatasetEntityNotFoundError, dataSchema, type Data } from "@eval-platform/eval-dataset";
 import { RuntimeEntityNotFoundError, RuntimeInputError, RuntimeProjectBusyError, type ProjectSample, type ProjectView } from "@eval-platform/eval-runtime";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { addToGroup, sqlBatches } from "./batch.js";
 import type { FrozenCopy } from "../agent-configs.js";
 import type { DatasetSelection } from "../projects/schemas.js";
@@ -71,6 +71,10 @@ export interface StoredProjectCreation {
   readonly run: RunHandle | null;
   /** No Run was admitted under the creation key, but the Project already has other Runs. */
   readonly superseded: boolean;
+  /** Current persisted plan digests; used to keep an approved first Run bound to its original plan. */
+  readonly planDigests: { readonly execution: string; readonly evaluation?: string };
+  /** A retired Evaluator copy proves the pre-first-Run evaluation plan was replaced. */
+  readonly evaluationReplaced: boolean;
 }
 
 /** The single definition of an editable evaluation plan: absent, or not yet locked by an evaluating Run. */
@@ -186,12 +190,22 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
         const [record] = first
           ? await readRunRecords(transaction, [first.runId], { kind: "project", ownerUserId: owner, projectId: row.projectId })
           : [];
+        const [execution] = await transaction.select({ digest: projectExecutionPlans.digest }).from(projectExecutionPlans)
+          .where(eq(projectExecutionPlans.projectId, row.projectId));
+        if (!execution) throw new Error("Project has no stored execution plan");
+        const [evaluation] = await transaction.select({ digest: projectEvaluationPlans.digest }).from(projectEvaluationPlans)
+          .where(eq(projectEvaluationPlans.projectId, row.projectId));
+        const [retiredEvaluator] = await transaction.select({ userAgentId: projectAgentConfigs.userAgentId }).from(projectAgentConfigs)
+          .where(and(eq(projectAgentConfigs.projectId, row.projectId), eq(projectAgentConfigs.role, "evaluator"),
+            isNotNull(projectAgentConfigs.retiredAt))).limit(1);
         return {
           project: projectFromRow(row),
           deleted: row.deletedAt !== null,
           fingerprint: row.creationFingerprint,
           run: record ? { runId: record.runId, samplingIds: [...record.samplingIds] } : null,
           superseded: record === undefined && await projectHasRun(transaction, row.projectId),
+          planDigests: { execution: execution.digest, ...(evaluation ? { evaluation: evaluation.digest } : {}) },
+          evaluationReplaced: retiredEvaluator !== undefined,
         };
       }, READ_SNAPSHOT);
     },

@@ -39,7 +39,7 @@ const createBody = {
 const preview = {
   projectId: "project-1", operation: "execution", selector: { all: true },
   targets: { projectSampleIds: ["sample-1"], samplingIds: [] as string[] },
-  replacedSamplingCount: 0, newSamplingCount: 1, evaluationCount: 0, executionPlanDigest: "d", evaluationPlanDigest: null,
+  replacedSamplingCount: 0, newSamplingCount: 1, evaluationCount: 0, executionPlanDigest: "d".repeat(64), evaluationPlanDigest: null,
 };
 const comparisonView: ProjectComparisonView = {
   projects: [], fields: [], selectedField: null, datasets: [], datasetId: null, summary: [], rows: [],
@@ -403,12 +403,17 @@ describe("Eval API HTTP layer", () => {
     expect(previewed.status).toBe(200);
     expect(await previewed.json()).toMatchObject({ msg: preview });
     expect(app.services.admission.preview).toHaveBeenCalledWith({ projectId: "project-1", operation: "pipeline", selector });
-    const body = { idempotencyKey: "click-1", operation: "execution", selector: { all: true }, targets: preview.targets };
+    const body = { idempotencyKey: "click-1", operation: "execution", selector: { all: true }, targets: preview.targets,
+      expectedPlanDigests: { execution: preview.executionPlanDigest } };
     const submitted = await app.request("/api/projects/project-1/runs", jsonRequest("POST", body));
     expect(submitted.status).toBe(202);
     expect(app.services.admission.submit).toHaveBeenCalledWith({ projectId: "project-1", ...body });
 
     for (const invalid of [
+      { ...body, expectedPlanDigests: undefined },
+      { ...body, expectedPlanDigests: { execution: "wrong" } },
+      { ...body, expectedPlanDigests: { execution: preview.executionPlanDigest, evaluation: "e".repeat(64) } },
+      { ...body, replayOnly: true },
       { ...body, selector: {} },
       { ...body, selector: { all: false } },
       { ...body, targets: { projectSampleIds: ["a", "a"], samplingIds: [] } },
@@ -428,7 +433,8 @@ describe("Eval API HTTP layer", () => {
     const tooLarge = await app.request("/api/projects/project-1/runs/preview", jsonRequest("POST", { operation: "evaluation", selector: { all: true } }));
     expect(tooLarge.status).toBe(413);
     expect(await tooLarge.json()).toMatchObject({ code: "RUN_TARGETS_TOO_LARGE" });
-    const body = { idempotencyKey: "k", operation: "evaluation", selector: { all: true }, targets: preview.targets };
+    const body = { idempotencyKey: "k", operation: "evaluation", selector: { all: true }, targets: preview.targets,
+      expectedPlanDigests: { execution: preview.executionPlanDigest, evaluation: "e".repeat(64) } };
     for (const [error, code] of [
       [new RuntimeAdmissionConflictError("evaluation-plan-required", "m"), "PROJECT_EVALUATION_PLAN_REQUIRED"],
       [new RuntimeAdmissionConflictError("stale-targets", "m"), "RUN_TARGETS_STALE"],

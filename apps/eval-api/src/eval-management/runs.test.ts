@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
+import { RuntimeAdmissionConflictError, RuntimeRunIdentityConflictError } from "@eval-platform/eval-runtime";
+import { ProjectIdempotencyConflictError } from "../db/errors.js";
 import { AGENT, DATASET, preview, project, run, setupManagement, toolValue } from "./test-fixture.js";
 
 const creation = {
   idempotencyKey: "project-key", name: " New project ", datasets: [{ datasetId: DATASET.toUpperCase() }],
   samplingCount: 2, execution: { userAgentId: AGENT, framework: "sp", executionConcurrency: 1 },
   run: { operation: "execution" },
+  expectedSnapshots: { datasets: [{ datasetId: DATASET, digest: "a".repeat(64) }], executionAgent: "b".repeat(64) },
 };
 
 describe("management Project and Run operations", () => {
@@ -23,7 +25,7 @@ describe("management Project and Run operations", () => {
     expect(app.services.projects.create).toHaveBeenCalledTimes(1);
   });
 
-  it("passes original selector/targets/key through existing admission, and stops an explicit Project Run", async () => {
+  it("passes the preview's plan digest and fixed facts once to Runtime, and stops an explicit Project Run", async () => {
     const app = setupManagement();
     const selector = { all: true };
     const fixed = await toolValue(await app.call("preview_run", {
@@ -33,22 +35,16 @@ describe("management Project and Run operations", () => {
     expect(app.services.admission.preview).toHaveBeenCalledWith({
       projectId: project.projectId, operation: "execution", selector,
     });
-    const invented = await (await app.call("submit_run", {
-      projectId: project.projectId, operation: "execution", selector,
-      targets: { projectSampleIds: ["different-sample"], samplingIds: [] }, idempotencyKey: "invented-key",
-    })).json();
-    expect(invented).toMatchObject({ result: { isError: true,
-      content: [{ text: expect.stringContaining("RUN_TARGETS_STALE") }] } });
-    expect(app.services.admission.submit).not.toHaveBeenCalled();
-    const submitted = await toolValue(await app.call("submit_run", {
+    const command = {
       projectId: project.projectId, operation: "execution", selector,
       targets: preview.targets, idempotencyKey: "run-key",
-    }));
+      expectedPlanDigests: { execution: preview.executionPlanDigest },
+    };
+    const submitted = await toolValue(await app.call("submit_run", command));
     expect(submitted).toEqual({ runId: "run-2", samplingCount: 1 });
-    expect(app.services.admission.submit).toHaveBeenCalledExactlyOnceWith({
-      projectId: project.projectId, operation: "execution", selector,
-      targets: preview.targets, idempotencyKey: "run-key",
-    });
+    expect(app.services.admission.submit).toHaveBeenCalledExactlyOnceWith(command);
+    expect(app.services.admission.preview).toHaveBeenCalledOnce(); // only explicit preview_run
+    expect(app.services.admission.replay).not.toHaveBeenCalled();
     expect(await toolValue(await app.call("stop_run", { projectId: project.projectId, runId: run.runId })))
       .toEqual({ runId: run.runId, stopRequested: true });
     expect(app.services.projectRuns.stopRun).toHaveBeenCalledWith(project.projectId, run.runId);
@@ -56,114 +52,118 @@ describe("management Project and Run operations", () => {
     expect(missing).toMatchObject({ result: { isError: true, content: [{ text: expect.stringContaining("RUN_NOT_FOUND") }] } });
   });
 
-  it("replays the persisted original Run before a changed preview, but never admits a stale new-key target", async () => {
+  it("delegates a D1-approved same-target D2 rejection to Runtime without re-previewing or re-replaying", async () => {
     const app = setupManagement();
     const original = {
-      projectId: project.projectId, operation: "evaluation", idempotencyKey: "original-key",
-      selector: { all: true }, targets: { projectSampleIds: [], samplingIds: ["old-sampling"] },
-    } as const;
-    app.services.admission.preview.mockResolvedValueOnce({ ...preview, operation: "evaluation",
-      targets: original.targets }).mockResolvedValue({ ...preview, operation: "evaluation",
-      targets: { projectSampleIds: [], samplingIds: ["replacement-sampling"] } });
-    let saved: { runId: string; samplingIds: string[] } | null = null;
-    app.services.admission.submit.mockImplementation(async () => {
-      saved = { runId: "original-run", samplingIds: ["old-sampling"] };
-      return saved;
-    });
-    app.services.admission.replay.mockImplementation(async (input: unknown) => {
-      const request = input as typeof original;
-      if (!saved || request.idempotencyKey !== original.idempotencyKey) return null;
-      if (JSON.stringify({ ...request, idempotencyKey: undefined })
-        !== JSON.stringify({ ...original, idempotencyKey: undefined })) {
-        throw new RuntimeRunIdentityConflictError("Different original intent");
-      }
-      return saved;
-    });
-    const first = await toolValue(await app.call("submit_run", original));
-    expect(first).toEqual({ runId: "original-run", samplingCount: 1 });
-    expect(await toolValue(await app.call("submit_run", original))).toEqual(first);
-    expect(await toolValue(await app.call("submit_run", { ...original, replayOnly: true }))).toEqual(first);
-    expect(app.services.admission.replay).toHaveBeenLastCalledWith(original); // flag was removed before Runtime
-    expect(app.services.admission.preview).toHaveBeenCalledTimes(1); // current targets are different
-    expect(app.services.admission.submit).toHaveBeenCalledTimes(1);
-
-    const different = await (await app.call("submit_run", {
-      ...original, targets: { projectSampleIds: [], samplingIds: ["replacement-sampling"] },
-    })).json();
-    expect(different).toMatchObject({ result: { isError: true,
-      content: [{ text: expect.stringContaining("RUN_IDEMPOTENCY_CONFLICT") }] } });
-    expect(app.services.admission.preview).toHaveBeenCalledTimes(1);
-    const differentReplayOnly = await (await app.call("submit_run", {
-      ...original, selector: { samplingIds: ["old-sampling"] }, replayOnly: true,
-    })).json();
-    expect(differentReplayOnly).toMatchObject({ result: { isError: true,
-      content: [{ text: expect.stringContaining("RUN_IDEMPOTENCY_CONFLICT") }] } });
-    expect(app.services.admission.preview).toHaveBeenCalledTimes(1);
-    expect(app.services.admission.submit).toHaveBeenCalledTimes(1);
-
-    const stale = await (await app.call("submit_run", { ...original, idempotencyKey: "genuinely-new" })).json();
+      projectId: project.projectId, operation: "evaluation", idempotencyKey: "approved-d1",
+      selector: { all: true }, targets: { projectSampleIds: [], samplingIds: ["same-target"] },
+      expectedPlanDigests: { execution: preview.executionPlanDigest, evaluation: "c".repeat(64) },
+    };
+    // Only the evaluation plan changed; the fixed targets still match.
+    app.services.admission.submit.mockRejectedValueOnce(
+      new RuntimeAdmissionConflictError("plan-changed", "Expected D1, current D2"),
+    );
+    const stale = await (await app.call("submit_run", original)).json();
     expect(stale).toMatchObject({ result: { isError: true,
-      content: [{ text: expect.stringContaining("RUN_TARGETS_STALE") }] } });
-    expect(app.services.admission.submit).toHaveBeenCalledTimes(1);
-    expect(app.services.admission.replay).toHaveBeenCalledWith(original);
+      content: [{ text: expect.stringContaining("PROJECT_PLAN_CHANGED") }] } });
+    expect(app.services.admission.submit).toHaveBeenCalledExactlyOnceWith(original);
+    expect(app.services.admission.preview).not.toHaveBeenCalled();
+    expect(app.services.admission.replay).not.toHaveBeenCalled();
+    const current = { ...original, idempotencyKey: "new-approved-key",
+      expectedPlanDigests: { ...original.expectedPlanDigests, evaluation: "d".repeat(64) } };
+    expect(await toolValue(await app.call("submit_run", current))).toEqual({ runId: "run-2", samplingCount: 1 });
+    expect(app.services.admission.submit).toHaveBeenCalledTimes(2);
   });
 
-  it("replayOnly recovers an existing Run after its explicit Sampling disappears without a current preview", async () => {
+  it("reconciles an already-stored Run after its Sampling was replaced, allowing only read-only legacy digests", async () => {
     const app = setupManagement();
-    const request = {
-      projectId: project.projectId, operation: "execution", selector: { samplingIds: ["replaced"] },
-      targets: { projectSampleIds: [], samplingIds: ["replaced"] }, idempotencyKey: "original-key",
-    } as const;
-    app.services.admission.replay.mockResolvedValueOnce({ runId: "original-run", samplingIds: ["new-sampling"] });
-    app.services.admission.preview.mockRejectedValueOnce(new Error("Original Sampling was replaced"));
-    expect(await toolValue(await app.call("submit_run", { ...request, replayOnly: true })))
-      .toEqual({ runId: "original-run", samplingCount: 1 });
-    expect(app.services.admission.replay).toHaveBeenCalledExactlyOnceWith(request);
+    const original = {
+      projectId: project.projectId, operation: "execution", idempotencyKey: "original-key",
+      selector: { samplingIds: ["replaced"] }, targets: { projectSampleIds: [], samplingIds: ["replaced"] },
+      expectedPlanDigests: { execution: preview.executionPlanDigest },
+    };
+    app.services.admission.replay.mockImplementation(async (input: unknown) => {
+      const request = input as typeof original;
+      if (request.projectId !== original.projectId || request.idempotencyKey !== original.idempotencyKey) return null;
+      if (JSON.stringify(request.selector) !== JSON.stringify(original.selector)
+        || JSON.stringify(request.targets) !== JSON.stringify(original.targets)
+        || request.expectedPlanDigests && request.expectedPlanDigests.execution !== original.expectedPlanDigests.execution) {
+        throw new RuntimeRunIdentityConflictError("Original Run identity differs");
+      }
+      return { runId: "original-run", samplingIds: [] }; // replaced membership is no longer retained
+    });
+    app.services.admission.preview.mockRejectedValue(new Error("Today the old Sampling is gone"));
+    expect(await toolValue(await app.call("reconcile_operation", { kind: "run", request: original })))
+      .toEqual({ projectId: project.projectId, runId: "original-run", samplingCount: 0 });
+    const { expectedPlanDigests: _digest, ...legacy } = original;
+    expect(await toolValue(await app.call("reconcile_operation", { kind: "run", request: legacy })))
+      .toMatchObject({ runId: "original-run" });
+    for (const request of [
+      { ...original, idempotencyKey: "missing-run" },
+      { ...original, projectId: "other-project" },
+    ]) {
+      const result = await (await app.call("reconcile_operation", { kind: "run", request })).json();
+      expect(result).toMatchObject({ result: { isError: true,
+        content: [{ text: expect.stringContaining("RUN_NOT_FOUND") }] } });
+    }
+    expect((await (await app.call("reconcile_operation", { kind: "run", request: {
+      ...original, expectedPlanDigests: { execution: "f".repeat(64) },
+    } })).json())).toMatchObject({ result: { isError: true,
+      content: [{ text: expect.stringContaining("RUN_IDEMPOTENCY_CONFLICT") }] } });
+    expect((await (await app.call("reconcile_operation", { kind: "run", request: {
+      ...original, selector: { all: true },
+    } })).json())).toMatchObject({ result: { isError: true,
+      content: [{ text: expect.stringContaining("RUN_IDEMPOTENCY_CONFLICT") }] } });
+    expect(app.services.admission.preview).not.toHaveBeenCalled();
+    expect(app.services.admission.submit).not.toHaveBeenCalled();
+    expect(app.services.projects.create).not.toHaveBeenCalled();
+  });
+
+  it("reconciles only a previously persisted exact Project body and first Run; a partial creation stays unknown", async () => {
+    const app = setupManagement();
+    const normalized = { ...creation, name: "New project", datasets: [{ datasetId: DATASET }] };
+    app.services.projects.reconcile.mockImplementation(async (input: unknown) => {
+      const body = input as typeof normalized;
+      if (body.idempotencyKey === "missing-project") return null;
+      if (body.name !== normalized.name || body.datasets[0]?.datasetId !== DATASET) {
+        throw new ProjectIdempotencyConflictError();
+      }
+      return { project, run: body.idempotencyKey === "unfinished-project" ? null
+        : { runId: run.runId, samplingIds: run.samplingIds } };
+    });
+    expect(await toolValue(await app.call("reconcile_operation", { kind: "project", request: creation })))
+      .toEqual({ projectId: project.projectId, runId: run.runId, samplingCount: 1 });
+    for (const [idempotencyKey, code] of [
+      ["missing-project", "PROJECT_NOT_FOUND"], ["unfinished-project", "OPERATION_OUTCOME_UNKNOWN"],
+    ]) {
+      const result = await (await app.call("reconcile_operation", {
+        kind: "project", request: { ...creation, idempotencyKey },
+      })).json();
+      expect(result).toMatchObject({ result: { isError: true, content: [{ text: expect.stringContaining(code!) }] } });
+    }
+    const changed = await (await app.call("reconcile_operation", {
+      kind: "project", request: { ...creation, name: "Wrong approved name" },
+    })).json();
+    expect(changed).toMatchObject({ result: { isError: true,
+      content: [{ text: expect.stringContaining("PROJECT_IDEMPOTENCY_CONFLICT") }] } });
+    expect(app.services.projects.create).not.toHaveBeenCalled();
     expect(app.services.admission.preview).not.toHaveBeenCalled();
     expect(app.services.admission.submit).not.toHaveBeenCalled();
   });
 
-  it("replayOnly miss never starts a Run even if today's changed plan has the same targets; fresh approval uses live preview", async () => {
+  it("rejects omitted submit digests and the removed replayOnly flag without any admission", async () => {
     const app = setupManagement();
     const request = {
       projectId: project.projectId, operation: "execution", selector: { all: true },
-      targets: preview.targets, idempotencyKey: "old-private-approval",
-    } as const;
-    // Only the plan/Agent/Data changed; a targets-only preview would misleadingly match.
-    app.services.admission.preview.mockResolvedValue({ ...preview, executionPlanDigest: "different-plan" });
-    const missed = await (await app.call("submit_run", { ...request, replayOnly: true })).json();
-    expect(missed).toMatchObject({ result: { isError: true,
-      content: [{ text: expect.stringContaining("RUN_NOT_FOUND") }] } });
-    expect(app.services.admission.replay).toHaveBeenCalledExactlyOnceWith(request);
-    expect(app.services.admission.preview).not.toHaveBeenCalled();
+      targets: preview.targets, idempotencyKey: "run-key", expectedPlanDigests: { execution: preview.executionPlanDigest },
+    };
+    const { expectedPlanDigests: _digest, ...missing } = request;
+    for (const invalid of [missing, { ...request, replayOnly: true }, { ...request, replayOnly: false }]) {
+      expect((await (await app.call("submit_run", invalid)).json()))
+        .toMatchObject({ result: { isError: true, content: [{ text: expect.stringContaining("REQUEST_INVALID_INPUT") }] } });
+    }
     expect(app.services.admission.submit).not.toHaveBeenCalled();
-
-    const fresh = { ...request, idempotencyKey: "freshly-approved-key" };
-    expect(await toolValue(await app.call("submit_run", fresh))).toEqual({ runId: "run-2", samplingCount: 1 });
-    expect(app.services.admission.preview).toHaveBeenCalledExactlyOnceWith({
-      projectId: fresh.projectId, operation: fresh.operation, selector: fresh.selector,
-    });
-    expect(app.services.admission.submit).toHaveBeenCalledExactlyOnceWith(fresh);
-
-    const invalid = await (await app.call("submit_run", { ...fresh, replayOnly: false })).json();
-    expect(invalid).toMatchObject({ result: { isError: true,
-      content: [{ text: expect.stringContaining("REQUEST_INVALID_INPUT") }] } });
-    expect(app.services.admission.submit).toHaveBeenCalledTimes(1);
-  });
-
-  it("recovers a Run committed between the stored-key lookup and a now-failing preview", async () => {
-    const app = setupManagement();
-    const request = { projectId: project.projectId, operation: "execution", selector: { samplingIds: ["replaced"] },
-      targets: { projectSampleIds: [], samplingIds: ["replaced"] }, idempotencyKey: "racing-key" } as const;
-    app.services.admission.replay.mockResolvedValueOnce(null).mockResolvedValueOnce({
-      runId: "committed-run", samplingIds: ["new-sampling"],
-    });
-    app.services.admission.preview.mockRejectedValueOnce(new Error("Sampling was replaced"));
-    expect(await toolValue(await app.call("submit_run", request))).toEqual({
-      runId: "committed-run", samplingCount: 1,
-    });
-    expect(app.services.admission.replay).toHaveBeenCalledTimes(2);
-    expect(app.services.admission.submit).not.toHaveBeenCalled();
+    expect(app.services.admission.replay).not.toHaveBeenCalled();
   });
 
   it("caps MCP previews/submissions and returns only one page of Run member IDs", async () => {

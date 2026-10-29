@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isStageRecoveryPending, RESOURCE_WAIT_MS, SP_PI_TRAJECTORY_FORMAT, startResourceWait, type EvidenceExportState, type Sampling, type SamplingStageState } from "@eval-platform/eval-contracts";
 import { createDatasetService, DataInUseError, DatasetEntityNotFoundError, DatasetIdentityConflictError, DatasetInputError } from "@eval-platform/eval-dataset";
 import {
+  digestJson,
   RuntimeEntityNotFoundError,
   RuntimeInputError,
   RuntimeProjectBusyError,
@@ -843,7 +844,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
   });
 
   describe("Run admission", () => {
-    it("replays a matching key, rejects other facts, busy Projects and superseded keys", async () => {
+    it("replays a matching key even after its members were replaced, but rejects other facts and busy Projects", async () => {
       const { admit, projectId } = await project();
       const { store, worker } = stores();
       const { command, admission } = await admit({ operation: "execution", idempotencyKey: "first" });
@@ -861,10 +862,11 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
       const second = await admit({ operation: "execution", idempotencyKey: "second" });
       expect(second.admission.created).toBe(true);
       expect([...second.command.replacedSamplingIds].sort()).toEqual([...command.run.samplingIds].sort());
-      await expect(store.findRunByIdempotencyKey(projectId, "first")).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
-      await expect(store.admitRun(replay)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
       // Runs are never deleted; the replaced Run simply has no current members.
       expect(await store.getRun(command.run.runId)).toMatchObject({ runId: command.run.runId, samplingIds: [] });
+      const original = await store.findRunByIdempotencyKey(projectId, "first");
+      expect(original).toMatchObject({ runId: command.run.runId, samplingIds: [] });
+      expect(await store.admitRun(replay)).toEqual({ run: original, created: false });
     });
 
     it("admits one Run for concurrent same-key requests across Stores", async () => {
@@ -889,12 +891,12 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
         .rejects.toMatchObject({ reason: "evaluation-plan-required" });
       await expect(store.admitRun({ ...base, run: { ...base.run, samplingIds: [] }, samplings: [] }))
         .rejects.toMatchObject({ reason: "empty-targets" });
-      // An unknown target ProjectSample is rejected by the Sampling → ProjectSample foreign key as invalid input.
+      // The locked selector check rejects an unpreviewed ProjectSample before FK insertion.
       const unknown = base.samplings.map((sampling) => ({ ...sampling, projectSampleId: "missing" }));
       await expect(store.admitRun({
         ...base, samplings: unknown, replacedSamplingIds: [],
         run: { ...base.run, targets: { projectSampleIds: ["missing"], samplingIds: [] } },
-      })).rejects.toMatchObject({ name: "RuntimeInputError", message: expect.stringContaining("eval_samplings_project_sample_fk") });
+      })).rejects.toMatchObject({ name: "RuntimeAdmissionConflictError", reason: "stale-targets" });
       await expect(store.admitRun({ ...base, run: { ...base.run, phases: ["evaluation"] } }))
         .rejects.toMatchObject({ name: "RuntimeInputError", message: expect.stringContaining("eval_runs_phases_ck") });
 
@@ -917,7 +919,41 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
       await expect(admitEvaluationOf(evaluation.projectId, [...evaluated.run.samplingIds]))
         .rejects.toMatchObject({ reason: "sampling-unavailable" });
       await expect(admitEvaluationOf(evaluation.projectId, [first.run.samplingIds[1]!]))
-        .rejects.toMatchObject({ reason: "sampling-unavailable" });
+        .rejects.toMatchObject({ name: "RuntimeEntityNotFoundError", entity: "sampling" });
+    });
+
+    it("refuses a reviewed D1 pipeline under the Project row lock after D2 replaces only the plan", async () => {
+      const { projectId } = await project({ datasets: [{ data: [makeData()] }], evaluation: true });
+      const { plans, store } = stores();
+      const before = await buildCommand(plans, store, { projectId, operation: "pipeline" });
+      const planned = (await plans.getProjectPlan(projectId))!.evaluation!.plan;
+      const replacement = { ...planned, evaluationConcurrency: planned.evaluationConcurrency + 1 };
+      await database.db.update(projectEvaluationPlans).set({
+        plan: replacement, digest: await digestJson(replacement),
+      }).where(eq(projectEvaluationPlans.projectId, projectId));
+      const after = await buildCommand(plans, store, { projectId, operation: "pipeline" });
+      expect(after.run.targets).toEqual(before.run.targets);
+      expect(after.run.planDigests).not.toEqual(before.run.planDigests);
+      await expect(store.admitRun(before)).rejects.toMatchObject({ reason: "plan-changed" });
+      expect(await store.findRunByIdempotencyKey(projectId, before.run.requestIdentity.idempotencyKey)).toBeNull();
+      expect(await store.getRun(before.run.runId)).toBeNull();
+    });
+
+    it("rechecks an evaluation-only all selector when another Sampling succeeds after its preview", async () => {
+      const { admit, projectId } = await project({
+        datasets: [{ data: [makeData()] }], samplingCount: 2, evaluation: true,
+      });
+      const { plans, store, worker } = stores();
+      const { command: execution } = await admit({ operation: "execution" });
+      await settle(worker, execution.run.samplingIds.slice(0, 1), "succeeded");
+      await settle(worker, execution.run.samplingIds.slice(1), "failed");
+      const oldSelection = await buildCommand(plans, store, { projectId, operation: "evaluation" });
+      expect(oldSelection.run.targets.samplingIds).toEqual(execution.run.samplingIds.slice(0, 1));
+      const secondId = execution.run.samplingIds[1]!;
+      const second = (await store.getSampling(secondId))!;
+      await store.updateSampling({ ...second, execution: { status: "succeeded" } }, second);
+      await expect(store.admitRun(oldSelection)).rejects.toMatchObject({ reason: "stale-targets" });
+      expect(await store.findRunByIdempotencyKey(projectId, oldSelection.run.requestIdentity.idempotencyKey)).toBeNull();
     });
 
     async function admitEvaluationOf(projectId: string, samplingIds: string[]) {

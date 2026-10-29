@@ -20,6 +20,7 @@ import type { PostgresProjectStore } from "./db/project-store.js";
 import type { EvalSpAgentConfig, EvalSpClient, EvalSpMcpServer } from "./sp/client.js";
 import { EvalSpApiError } from "./sp/http.js";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
+import { RuntimeAdmissionConflictError, digestJson } from "@eval-platform/eval-runtime";
 
 /** SP's `createUserAgentConfigInputSchema` bounds the name to 200 characters. */
 const AGENT_CONFIG_NAME_CHARS = 200;
@@ -439,7 +440,7 @@ export function createAgentConfigService(input: {
       }));
     },
     /** Clones a selectable Agent Config into a new SP Agent Config whose body never changes again. */
-    async freeze(sourceUserAgentId: string, expectedPurpose: AgentPurpose): Promise<FrozenCopy> {
+    async freeze(sourceUserAgentId: string, expectedPurpose: AgentPurpose, expectedDigest?: string): Promise<FrozenCopy> {
       // requireEditable shares the pending-import fence with get/update/remove, before any target I/O.
       const source = await requireEditable(sourceUserAgentId);
       // SP retains archived configs for old Chats; only the active list proves new selectability.
@@ -449,6 +450,9 @@ export function createAgentConfigService(input: {
       }
       const stored = await classifyOne(source);
       if (stored.purpose !== expectedPurpose) throw new AgentConfigPurposeMismatchError(sourceUserAgentId, expectedPurpose, stored.purpose);
+      if (expectedDigest !== undefined && await digestJson(source) !== expectedDigest) {
+        throw new RuntimeAdmissionConflictError("plan-changed", "Approved Agent Config changed before it was frozen");
+      }
       const copy = await sp.createAgentConfig(token, frozenCopyInput(source));
       return {
         userAgentId: copy.id,

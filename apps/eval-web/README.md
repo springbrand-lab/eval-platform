@@ -85,6 +85,8 @@ Dataset → Data 下钻保留项目选择，单条数据使用 row 的权威值�
 - `src/auth/`：接收 takt 交给 iframe 的登录 token，只保存在内存中。
 - `worker/`：部署用的 Cloudflare Worker，托管静态资源并转发 `/api/*`。
 
+Run 预览返回固定 targets 和两个计划摘要（execution 没有 evaluation 摘要）。提交时用同一次预览生成 `expectedPlanDigests` 并保留同一命令和 key 供不确定结果重试；计划或目标改变后须重新预览。UI 不替代 Runtime 的 Project 行锁准入。
+
 ## 登录与部署
 
 与 takt 共用登录：takt 的 `/dashboard/eval` 用 iframe 打开本应用，iframe 发出 `eval:ready`，takt 只向本应用的来源回传 `{type: "takt:token", token}`。Worker 用这个 token 调用 takt 的 `/api/auth/me`，用户须有 `eval` 菜单（或是管理员）才放行；之后去掉 token，附上 `X-Eval-Web-Token` 与操作人 `X-Eval-Actor` 转发给 Eval API。页面响应带 `Content-Security-Policy: frame-ancestors`，只允许 takt 嵌入。

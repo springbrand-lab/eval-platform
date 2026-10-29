@@ -120,6 +120,8 @@ ProjectSample 是 Project 内固定的一条测试输入，结构见[包边界](
 
 请求体顶层的 `idempotencyKey` 在用户内唯一，首个 Run 使用同一个 key；Project 保存 key 和校验后请求体（不含 key）的指纹。克隆副本之前先按 key 查找：
 
+管理 MCP 的 `create_project` 还要求 `expectedSnapshots:{datasets:[{datasetId,digest}],executionAgent,evaluationAgent?,outputSchema?}`，来自同一审批的 Dataset 选择快照、SP Agent 全量公开正文和完整输出 Schema 目录记录（ID、名称、描述、Schema 正文）的摘要；评估计划引用里仍只保存原来的 Schema **正文**摘要。Dataset 复用 Project 创建的 `readSelection` 一致读取并在冻结前比对；Agent 在创建 SP 副本之前比对 GET 正文，Schema 在引用前比对已选目录记录。首个 Run 的计划摘要仍从这次已保存的 Project 原计划取得；审批请求不得在评估计划被替换时重新预览成 D2 来启动 D1 没有批准的评估。直接 HTTP 创建没有 Takt 审批，允许省略这些字段；这不是 Run 提交缺少期望摘要的兼容路径。EP 与 SP 不能共享一个原子行锁，若 SP 在 GET 与复制之间绕过 Eval 修改正文，无法保证远端原子快照；Runtime 只使用已比对正文产生的冻结副本引用，并明确保留这项跨服务残余。
+
 - 同一请求体重放原 `{project, run}`，`run` 是以创建 key 准入的首个 Run 的 handle（之后有别的 Run 也返回它），其 `samplingIds` 只列出该 Run 仍为当前的成员 Sampling，被后续 Run 替换的不再出现；若首个 Run 从未准入，重放只在 Project 还没有任何 Run 时补交（在准入的 Project 行锁下判定），否则返回 `run: null`；
 - 不同请求体返回冲突；
 - key 对应的 Project 已软删除时，无论请求体都返回 not found，不会复活；
@@ -128,6 +130,8 @@ ProjectSample 是 Project 内固定的一条测试输入，结构见[包边界](
 - 重放请求从不补偿：它的首个 Run 准入失败只返回错误，Project 留给下一次重放。
 
 补偿只由提交了该 Project 的创建请求执行，规则只有一条：只移除不可用或不需要的 Project。第 3 步之前任何失败都删除已建副本；首个 Run 准入失败时，未软删除且仍没有任何 Run 的 Project 硬删除全部行并删除副本，但 `plan-changed`（评估计划替换先落地，首个 Run 在有限次数内重新预览提交，用尽后返回冲突）不补偿，Project 已有别的 Run 时不算失败而返回 `run: null`，用户已软删除的 Project 及其副本行也原样保留。补偿删除 Project 后，同一 key 会创建新的 Project；保留下来、没有 Run 的 Project 由同一 key 的重放补交首个 Run。错误码见 [Eval HTTP 控制面](eval-http-api.md#projects)。
+
+对包含 `expectedSnapshots` 的已审批管理请求，`plan-changed` **不**重新预览或补交 D2：已存但尚无首个 Run 的 Project 只能通过只读 `reconcile_operation` 报告未完成/未知，由 Takt 重新审批并人工处理；直接 HTTP 创建保留原先的有限次重试。
 
 ### 3.2 评估计划补填与锁定
 
@@ -138,7 +142,7 @@ ProjectSample 是 Project 内固定的一条测试输入，结构见[包边界](
 每次启动分两步，由 `EvalRunAdmission` 完成：
 
 1. `preview({projectId, operation, selector})`：选择器是 `all`、`datasetIds`、`projectSampleIds`、`samplingIds` 的组合，在 Project 快照内展开为固定 `targets: {projectSampleIds, samplingIds}`，并返回将替换/新建的 Sampling 数、评估数和计划摘要；
-2. `submit({idempotencyKey, projectId, operation, selector, targets})`：原样带回 preview 的 `targets`，Runtime 只校验、不重新展开；重试沿用同一 `targets` 和 key。
+2. `submit({idempotencyKey, projectId, operation, selector, targets, expectedPlanDigests})`：原样带回**同一次** preview 的目标和摘要；Runtime 对新 key 检查它们，并由 Store 在 Project 行锁下重新展开 selector（含 evaluation-only），验证固定目标和计划后才准入。重试保持完整请求不变。
 
 请求不携带任何配置 ID 或实时 Dataset/Data 内容；Sampling 次数取各 ProjectSample 的 `samplingCount`，Agent、并发与重试全部来自 Project 计划。展开与替换规则见[架构方案](architecture.md#run-准入与独立评估)。
 
@@ -150,8 +154,8 @@ ProjectSample 是 Project 内固定的一条测试输入，结构见[包边界](
 
 请求指纹覆盖 `projectId`、operation、selector、targets 和计划摘要（pipeline/evaluation 另含评估计划摘要）。key 在 Project 内唯一：
 
-- 同 key 同指纹只在它的 Run 仍是该 Project 最新的 Run 时重放原 Run（即使仍在运行）；
-- 一旦该 Project 存在更晚的 Run，这个 key 被拒绝，旧 key 不能复活；
+- 同 key 同指纹（包括调用方原提交的期望摘要）返回已存 Run，即使成员已被后来 Run 替换；绝不重启旧 Run；
+- 没有期望摘要的历史请求只允许只读核对已存在的 Run，不能用于新准入；
 - 同 key 不同指纹被拒绝；
 - 新 key 遇到未完成 Run 返回忙碌。
 
@@ -182,7 +186,7 @@ Runtime 只通过只读 `ProjectPlanReader` 和 `RuntimeStore` 读取输入，�
 - `RunOperation`：execution、pipeline、evaluation；
 - `RunTargetSelector`：`all`、`datasetIds`、`projectSampleIds`、`samplingIds`；
 - `RunTargets`：`projectSampleIds`、`samplingIds`；
-- `RunRequest`：`idempotencyKey`、`projectId`、`operation`、`selector`、`targets`；
+- `RunRequest`：`idempotencyKey`、`projectId`、`operation`、`selector`、`targets`、`expectedPlanDigests`（提交必填，取自同一次 preview，不另存）；
 - `RuntimeRunRecord`：operation、phases、selector、targets、`samplingIds`、`evaluationIds`、`planDigests`、sourceCommit、requestIdentity、停止标记；
 - `Sampling`：含 `projectSampleId`；
 - `EvaluationRecord`：`output` 为 `EvaluationAgentOutput`，其中 `structuredOutput` 是 Evaluator 结果文件的原始文本 `{path, content, contentHash?}`，没有结果文件时省略。
@@ -197,7 +201,7 @@ Runtime 只用 Project 计划中冻结副本的 `AgentConfigRef` 调用 Eval SP�
 2. 按 projectId + idempotencyKey 处理重放与冲突（3.5）；
 3. 新 key 检查 Project 没有未完成 Run，并核对 source release；
 4. 复核计划摘要；pipeline/evaluation 要求评估计划已填写；
-5. 复核目标 ProjectSample 属于 Project；evaluation 复核目标仍执行成功；execution/pipeline 复核被替换集合仍等于目标的当前 Sampling；
+5. 在 Project 行锁下按 preview 规则重新展开 selector 与固定 targets 完全对比；evaluation 复核其全部当前目标仍执行成功；execution/pipeline 复核被替换集合仍等于目标的当前 Sampling；
 6. execution/pipeline 删除被替换 Sampling 的评估、Run 关联和 Sampling；evaluation 只删除目标 Sampling 的当前评估及其 Run 关联；
 7. 写入新 Run（Project 内递增 `sequence`，`(project_id, idempotency_key)` 唯一）、新 Sampling、新 EvaluationRecord 和 Run 关联；
 8. pipeline/evaluation 且评估计划未锁定时写入锁定时间；

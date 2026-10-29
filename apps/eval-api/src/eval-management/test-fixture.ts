@@ -33,7 +33,7 @@ export const preview = {
   projectId: project.projectId, operation: "execution" as const, selector: { all: true as const },
   targets: { projectSampleIds: ["sample-1"], samplingIds: [] },
   replacedSamplingCount: 0, newSamplingCount: 2, evaluationCount: 0,
-  executionPlanDigest: "digest", evaluationPlanDigest: null,
+  executionPlanDigest: "a".repeat(64), evaluationPlanDigest: null,
 };
 
 export async function toolValue(response: Response): Promise<Record<string, unknown>> {
@@ -60,6 +60,8 @@ export function setupManagement(configured = true, files?: ManagementFiles) {
     projects: {
       list: vi.fn(async () => [project]),
       create: vi.fn(async (_body: unknown) => ({ project, run: { runId: run.runId, samplingIds: run.samplingIds } })),
+      reconcile: vi.fn(async (_body: unknown): Promise<{ project: typeof project; run: { runId: string; samplingIds: string[] } | null } | null> => null),
+      reviewSelection: vi.fn(async (_selection: unknown): Promise<unknown> => undefined),
     },
     outputSchemas: {
       list: vi.fn(async () => [...savedSchemas.values()]),

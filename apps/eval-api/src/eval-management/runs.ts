@@ -1,4 +1,3 @@
-import { equalJson } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 import type { Context } from "hono";
 import type { z } from "zod";
@@ -6,7 +5,7 @@ import { requireRunTargetCount } from "../limits.js";
 import type { AppBindings } from "../lib/types.js";
 import { MAX_PREVIEW_TARGETS, pageOf, short } from "./common.js";
 import type {
-  createProjectSchema, getRunSchema, previewRunSchema, stopRunSchema, submitRunSchema,
+  createProjectSchema, getRunSchema, previewRunSchema, reconcileOperationSchema, stopRunSchema, submitRunSchema,
 } from "./schemas.js";
 
 function boundedTargets(targets: { readonly projectSampleIds: readonly string[]; readonly samplingIds: readonly string[] }) {
@@ -37,38 +36,34 @@ export async function previewRun(c: Context<AppBindings>, body: z.output<typeof 
 }
 
 export async function submitRun(c: Context<AppBindings>, body: z.output<typeof submitRunSchema>) {
-  // The adapter-only flag is not part of the public RuntimeRunRequest or its
-  // original intent fingerprint. Never pass it into admission or the preview.
-  const { replayOnly, ...request } = body;
-  boundedTargets(request.targets);
-  const admission = c.var.services.admission;
-  const receipt = (run: { readonly runId: string; readonly samplingIds: readonly string[] }) =>
-    ({ runId: run.runId, samplingCount: run.samplingIds.length });
-  // A persisted Project/key Run is the only authority for recovering a lost response.
-  // Its original fingerprint is checked by Runtime, without reading today's targets.
-  const existing = await admission.replay(request);
-  if (existing) return receipt(existing);
-  // The original approval might have been recorded before its POST reached EP.
-  // Its private same-key retry may ONLY recover an existing Run, never start one
-  // under the Project's now-different plan even when the old targets still match.
-  if (replayOnly) throw new HttpError("RUN_NOT_FOUND");
-  try {
-    const current = await admission.preview({
-      projectId: request.projectId, operation: request.operation, selector: request.selector,
-    });
-    boundedTargets(current.targets);
-    if (!equalJson(current.targets, request.targets)) {
-      throw new HttpError("RUN_TARGETS_STALE", "Run targets must match the current preview for this selector");
-    }
-  } catch (error) {
-    // An identical Run may have committed between the first lookup and a now-stale
-    // preview (including a selector whose Sampling was just replaced). Still never
-    // call submit on a new/unpreviewed target.
-    const raced = await admission.replay(request);
-    if (raced) return receipt(raced);
-    throw error;
+  boundedTargets(body.targets);
+  const run = await c.var.services.admission.submit(body);
+  return { runId: run.runId, samplingCount: run.samplingIds.length };
+}
+
+/** No Project first Run means the persisted creation is not a confirmed completed operation. */
+export class ManagementReconciliationUnknownError extends Error {
+  constructor() {
+    super("Project exists without its first Run");
+    this.name = "ManagementReconciliationUnknownError";
   }
-  return receipt(await admission.submit(request));
+}
+
+/** Only read the original persisted Project or Run identity. No preview, admission or creation. */
+export async function reconcileOperation(c: Context<AppBindings>, body: z.output<typeof reconcileOperationSchema>) {
+  if (body.kind === "run") {
+    boundedTargets(body.request.targets);
+    const run = await c.var.services.admission.replay(body.request);
+    if (!run) throw new HttpError("RUN_NOT_FOUND");
+    return { projectId: body.request.projectId, runId: run.runId, samplingCount: run.samplingIds.length };
+  }
+  if (body.request.datasets.length > MAX_PREVIEW_TARGETS) {
+    throw new HttpError("RUN_TARGETS_TOO_LARGE", "Narrow the original Project request");
+  }
+  const creation = await c.var.services.projects.reconcile(body.request);
+  if (!creation) throw new HttpError("PROJECT_NOT_FOUND");
+  if (!creation.run) throw new ManagementReconciliationUnknownError();
+  return { projectId: creation.project.projectId, runId: creation.run.runId, samplingCount: creation.run.samplingIds.length };
 }
 
 export async function stopRun(c: Context<AppBindings>, { projectId, runId }: z.output<typeof stopRunSchema>) {
