@@ -8,6 +8,7 @@ import type {
   ExecutionPlan,
   ProjectDatasetSnapshot,
   RunOperation,
+  RunPlanDigests,
   RunRequest,
   RunTargetSelector,
   RetryPolicy,
@@ -36,6 +37,7 @@ import type { ProjectPlanReader, ProjectSample } from "./model.js";
 import { createRetryController as createProductionRetryController, DEFAULT_RETRY_POLICY } from "./retry.js";
 import type {
   EvaluationState,
+  RuntimeFirstRunProof,
   RuntimeRunAdmission,
   RuntimeRunRecord,
   SamplingState,
@@ -57,6 +59,7 @@ import type { RetryController, RetryOperation } from "./retry.js";
 import {
   createEvalRunAdmission,
   createEvalRunResumer as createResumerWithReporter,
+  expandRunTargets,
   toRunSnapshot,
   toSamplingSnapshot,
   withFreshResourceBudget,
@@ -133,6 +136,7 @@ function createRuntime(dependencies: RuntimeDependencies) {
   const { store } = dependencies;
   if (dependencies.plans) store.usePlans(dependencies.plans);
   const plans = store.plans();
+  const readFixturePlan = plans.getProjectPlan.bind(plans);
   const resumer = createEvalRunResumer({ ...dependencies, plans, store });
   const admission = createEvalRunAdmission({
     sourceCommit: dependencies.sourceCommit ?? SOURCE_COMMIT, plans, store,
@@ -141,6 +145,21 @@ function createRuntime(dependencies: RuntimeDependencies) {
   return {
     ...admission,
     ...createRunQueries(store, new RunRecords(store, plans)),
+    // Old orchestration fixtures use projectRequest/evaluationRequest instead of previewing each
+    // custom test plan. Bind only those fixtures to their current test plan before the first submit;
+    // all real admission callers still supply immutable expected digests themselves.
+    submit: async (request: RunRequest, firstRun?: RuntimeFirstRunProof) => {
+      const fixture = request as RunRequest & { [CAPTURE_TEST_PLAN]?: boolean };
+      if (fixture[CAPTURE_TEST_PLAN]) {
+        const existing = await store.findRunByIdempotencyKey(request.projectId, request.idempotencyKey);
+        const original = existing?.operation === request.operation ? existing : null;
+        const plan = original ? null : await readFixturePlan(request.projectId);
+        (fixture as unknown as { expectedPlanDigests: RunPlanDigests }).expectedPlanDigests =
+          original?.planDigests ?? (plan ? approvedDigests(request.operation, plan) : request.expectedPlanDigests);
+        delete fixture[CAPTURE_TEST_PLAN];
+      }
+      return admission.submit(request, firstRun);
+    },
     plans,
     resume: (runId: string) => resumer.resume(runId),
   };
@@ -260,24 +279,42 @@ function makePlans(
   return plans;
 }
 
+const DEFAULT_PLAN = (await makePlans().getProjectPlan(PROJECT_ID))!;
+const CAPTURE_TEST_PLAN = Symbol("capture test fixture's plan digest");
+function captureTestPlan(request: RunRequest): RunRequest {
+  Object.defineProperty(request, CAPTURE_TEST_PLAN, { value: true, configurable: true });
+  return request;
+}
+function approvedDigests(operation: RunOperation, plan = DEFAULT_PLAN): RunPlanDigests {
+  return operation === "execution" ? { execution: plan.executionPlanDigest }
+    : { execution: plan.executionPlanDigest, evaluation: plan.evaluation?.digest ?? DEFAULT_PLAN.evaluation!.digest };
+}
+
+function previewDigests(preview: { operation: RunOperation; executionPlanDigest: string; evaluationPlanDigest: string | null }): RunPlanDigests {
+  return preview.operation === "execution" ? { execution: preview.executionPlanDigest }
+    : { execution: preview.executionPlanDigest, evaluation: preview.evaluationPlanDigest! };
+}
+
 /** A whole-Project execution or pipeline request over these ProjectSamples. */
 function projectRequest(
   operation: "execution" | "pipeline",
   idempotencyKey: string,
   projectSampleIds: readonly string[] = ["sample-1"],
 ): RunRequest {
-  return {
+  return captureTestPlan({
     idempotencyKey, projectId: PROJECT_ID, operation, selector: { all: true },
     targets: { projectSampleIds: [...projectSampleIds], samplingIds: [] },
-  };
+    expectedPlanDigests: approvedDigests(operation),
+  });
 }
 
 /** An evaluation request for these Samplings. */
 function evaluationRequest(samplingIds: readonly string[], idempotencyKey: string = crypto.randomUUID()): RunRequest {
-  return {
+  return captureTestPlan({
     idempotencyKey, projectId: PROJECT_ID, operation: "evaluation", selector: { samplingIds: [...samplingIds] },
     targets: { projectSampleIds: [], samplingIds: [...samplingIds] },
-  };
+    expectedPlanDigests: approvedDigests("evaluation"),
+  });
 }
 
 function createAutoResumingRuntime(dependencies: RuntimeDependencies) {
@@ -393,6 +430,13 @@ function makeStore(options: StoreOptions = {}): TestStore {
       if (plan.executionPlanDigest !== run.planDigests.execution
         || (evaluates && plan.evaluation?.digest !== run.planDigests.evaluation)) {
         throw new RuntimeAdmissionConflictError("plan-changed", "Project plan changed");
+      }
+      const previewTargets = await expandRunTargets(plan, run.operation, run.selector, {
+        getSamplings: async (ids) => ids.map((id) => samplings.get(id) ?? null),
+        listProjectSamplings: async (projectId, ids) => projectSamplings(projectId, ids),
+      });
+      if (!equalJson(previewTargets, run.targets)) {
+        throw new RuntimeAdmissionConflictError("stale-targets", "Run targets differ from the locked selector");
       }
       if (run.operation === "evaluation") {
         if (run.samplingIds.some((id) => samplings.get(id)?.execution.status !== "succeeded")) {
@@ -1131,14 +1175,18 @@ describe("eval runtime orchestration", () => {
     const store = makeStore();
     const runtime = createAutoResumingRuntime({ plans: makePlans([sample]), harness, store });
 
-    const pipeline = projectRequest("pipeline", "missing-evaluation-prompt");
+    const selectedPlan = (await runtime.plans.getProjectPlan(PROJECT_ID))!;
+    const pipeline = { ...projectRequest("pipeline", "missing-evaluation-prompt"),
+      expectedPlanDigests: approvedDigests("pipeline", selectedPlan) };
     await expect(runtime.submit(pipeline)).rejects.toThrow(RuntimeAdmissionConflictError);
     await expect(runtime.submit(pipeline)).rejects.toMatchObject({ reason: "evaluation-prompt" });
     expect(await store.findRunByIdempotencyKey(pipeline.projectId, pipeline.idempotencyKey)).toBeNull();
 
-    const execution = await runtime.submit(projectRequest("execution", "execution-without-evaluation-prompt"));
+    const execution = await runtime.submit({ ...projectRequest("execution", "execution-without-evaluation-prompt"),
+      expectedPlanDigests: approvedDigests("execution", selectedPlan) });
     await expect(waitForTerminal(runtime, execution.runId)).resolves.toMatchObject({ status: "succeeded" });
-    const evaluation = evaluationRequest(execution.samplingIds);
+    const evaluation = { ...evaluationRequest(execution.samplingIds),
+      expectedPlanDigests: approvedDigests("evaluation", selectedPlan) };
     await expect(runtime.submit(evaluation)).rejects.toThrow(RuntimeAdmissionConflictError);
     await expect(runtime.submit(evaluation)).rejects.toMatchObject({ reason: "evaluation-prompt" });
     expect(await store.findRunByIdempotencyKey(evaluation.projectId, evaluation.idempotencyKey)).toBeNull();
@@ -1149,6 +1197,7 @@ describe("eval runtime orchestration", () => {
     const valid = {
       idempotencyKey: "valid-key", projectId: PROJECT_ID, operation: "execution" as const,
       selector: { all: true as const }, targets: { projectSampleIds: ["sample-1"], samplingIds: [] },
+      expectedPlanDigests: approvedDigests("execution"),
     };
     it.each([
       [{ ...valid, projectId: " " }, "projectId"],
@@ -1176,11 +1225,32 @@ describe("eval runtime orchestration", () => {
     it("rejects empty targets and evaluation targets that list ProjectSamples", async () => {
       const runtime = createAutoResumingRuntime({ harness: makeHarness(), store: makeStore() });
       await expect(runtime.submit({
-        ...valid, operation: "pipeline", targets: { projectSampleIds: [], samplingIds: [] },
+        ...valid, operation: "pipeline", expectedPlanDigests: approvedDigests("pipeline"),
+        targets: { projectSampleIds: [], samplingIds: [] },
       })).rejects.toMatchObject({ name: "RuntimeAdmissionConflictError", reason: "empty-targets" });
-      await expect(runtime.submit({ ...valid, operation: "evaluation" })).rejects.toMatchObject({
+      await expect(runtime.submit({ ...valid, operation: "evaluation", expectedPlanDigests: approvedDigests("evaluation") })).rejects.toMatchObject({
         name: "RuntimeInputError", field: "targets.projectSampleIds",
       });
+    });
+
+    it("requires exact preview digests for any new Run, but allows a missing digest only in read-only lookup", async () => {
+      const store = makeStore();
+      const admission = createTestAdmission(store);
+      await expect(admission.submit({ ...valid, expectedPlanDigests: undefined } as unknown as RunRequest))
+        .rejects.toMatchObject({ name: "RuntimeInputError", field: "expectedPlanDigests" });
+      await expect(admission.submit({ ...valid, expectedPlanDigests: { execution: "wrong" } }))
+        .rejects.toMatchObject({ name: "RuntimeInputError", field: "expectedPlanDigests.execution" });
+      await expect(admission.submit({ ...valid, expectedPlanDigests: {
+        execution: valid.expectedPlanDigests.execution, evaluation: "b".repeat(64),
+      } })).rejects.toMatchObject({ name: "RuntimeInputError", field: "expectedPlanDigests.evaluation" });
+      await expect(admission.submit({ ...valid, expectedPlanDigests: {
+        execution: valid.expectedPlanDigests.execution, extra: "unreviewed",
+      } } as unknown as RunRequest)).rejects.toMatchObject({ name: "RuntimeInputError", field: "expectedPlanDigests" });
+      expect(await admission.replay({
+        idempotencyKey: valid.idempotencyKey, projectId: PROJECT_ID, operation: valid.operation,
+        selector: valid.selector, targets: valid.targets,
+      })).toBeNull();
+      expect(await store.findRunByIdempotencyKey(PROJECT_ID, valid.idempotencyKey)).toBeNull();
     });
 
     it("reports an unknown Project, Dataset, ProjectSample or Sampling as a missing entity", async () => {
@@ -1656,6 +1726,143 @@ describe("eval runtime orchestration", () => {
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
   });
 
+  it("replays only the stored original Run intent after its Sampling target and current plan change", async () => {
+    const store = makeStore();
+    const runtime = createAutoResumingRuntime({ harness: makeHarness(), store, sleep: async () => undefined });
+    const first = await runtime.submit(projectRequest("execution", "initial-execution"));
+    await waitForTerminal(runtime, first.runId);
+    const originalSampling = first.samplingIds[0]!;
+    const request: RunRequest = {
+      idempotencyKey: "lost-response", projectId: PROJECT_ID, operation: "execution",
+      selector: { samplingIds: [originalSampling] },
+      targets: { projectSampleIds: [], samplingIds: [originalSampling] },
+      expectedPlanDigests: approvedDigests("execution"),
+    };
+    expect(await runtime.replay(request)).toBeNull();
+    expect((await runtime.preview({ projectId: PROJECT_ID, operation: "execution", selector: request.selector })).targets)
+      .toEqual(request.targets);
+    const admitted = await runtime.submit(request);
+    await waitForTerminal(runtime, admitted.runId);
+    await expect(runtime.preview({ projectId: PROJECT_ID, operation: "execution", selector: request.selector }))
+      .rejects.toBeInstanceOf(RuntimeEntityNotFoundError); // target Sampling no longer exists
+    runtime.plans.execution = executionPlan({ executionConcurrency: 2 });
+    const readPlan = vi.spyOn(runtime.plans, "getProjectPlan");
+    const write = vi.spyOn(store, "admitRun");
+    expect(await runtime.replay(request)).toEqual(admitted);
+    expect(readPlan).not.toHaveBeenCalled(); // use the Run's original saved plan digests
+    expect(write).not.toHaveBeenCalled();
+    await expect(runtime.replay({ ...request, selector: { all: true } }))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(runtime.replay({ ...request, targets: { projectSampleIds: ["sample-1"], samplingIds: [] } }))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    expect(await runtime.replay({ ...request, idempotencyKey: "genuinely-new" })).toBeNull();
+    expect(readPlan).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("refuses a new D1-approved Run after D2 replaces only the plan, with identical selector and targets", async () => {
+    const store = makeStore();
+    const admission = createTestAdmission(store);
+    const preview = await admission.preview({ projectId: PROJECT_ID, operation: "execution", selector: { all: true } });
+    const request: RunRequest = {
+      idempotencyKey: "reviewed-d1", projectId: PROJECT_ID, operation: "execution",
+      selector: preview.selector, targets: preview.targets, expectedPlanDigests: previewDigests(preview),
+    };
+    store.plans().execution = executionPlan({ executionConcurrency: 2 });
+    const changed = await admission.preview({ projectId: PROJECT_ID, operation: "execution", selector: { all: true } });
+    expect(changed.targets).toEqual(preview.targets);
+    expect(changed.executionPlanDigest).not.toBe(preview.executionPlanDigest);
+    const write = vi.spyOn(store, "admitRun");
+    await expect(admission.submit(request)).rejects.toMatchObject({ reason: "plan-changed" });
+    expect(write).not.toHaveBeenCalled();
+    expect(await admission.replay(request)).toBeNull();
+    expect(await store.findRunByIdempotencyKey(PROJECT_ID, request.idempotencyKey)).toBeNull();
+  });
+
+  it("binds evaluation-only D1 to the approved evaluation plan, not today's D2 with the same Sampling", async () => {
+    const store = makeStore();
+    const runtime = createAutoResumingRuntime({ harness: makeHarness(), store, sleep: async () => undefined });
+    const execution = await runtime.submit(projectRequest("execution", "seed-for-evaluation-plan"));
+    await waitForTerminal(runtime, execution.runId);
+    const selector = { samplingIds: [...execution.samplingIds] };
+    const preview = await runtime.preview({ projectId: PROJECT_ID, operation: "evaluation", selector });
+    const request: RunRequest = {
+      idempotencyKey: "reviewed-evaluation", projectId: PROJECT_ID, operation: "evaluation", selector,
+      targets: preview.targets, expectedPlanDigests: previewDigests(preview),
+    };
+    store.plans().evaluation = evaluationPlan({ evaluationConcurrency: 2 });
+    expect((await runtime.preview({ projectId: PROJECT_ID, operation: "evaluation", selector })).targets)
+      .toEqual(preview.targets);
+    const write = vi.spyOn(store, "admitRun");
+    await expect(runtime.submit(request)).rejects.toMatchObject({ reason: "plan-changed" });
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("reconciles an old key after another Run replaced its Sampling, without current plan or target reads", async () => {
+    const store = makeStore();
+    const runtime = createAutoResumingRuntime({ harness: makeHarness(), store, sleep: async () => undefined });
+    const originalPreview = await runtime.preview({ projectId: PROJECT_ID, operation: "execution", selector: { all: true } });
+    const original: RunRequest = {
+      projectId: PROJECT_ID, operation: "execution", selector: originalPreview.selector,
+      targets: originalPreview.targets, idempotencyKey: "original-run", expectedPlanDigests: previewDigests(originalPreview),
+    };
+    const first = await runtime.submit(original);
+    await waitForTerminal(runtime, first.runId);
+    const replacement = await runtime.submit({ ...original, idempotencyKey: "replacement-run" });
+    await waitForTerminal(runtime, replacement.runId);
+    store.plans().execution = executionPlan({ executionConcurrency: 2 });
+    const readPlan = vi.spyOn(runtime.plans, "getProjectPlan");
+    const writes = vi.spyOn(store, "admitRun");
+    expect(await runtime.replay(original)).toEqual({ runId: first.runId, samplingIds: [] });
+    expect(await runtime.submit(original)).toEqual({ runId: first.runId, samplingIds: [] });
+    const { expectedPlanDigests: _digests, ...legacy } = original;
+    expect(await runtime.replay(legacy)).toEqual({ runId: first.runId, samplingIds: [] });
+    await expect(runtime.replay({ ...original, expectedPlanDigests: { execution: "b".repeat(64) } }))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    expect(await runtime.replay({ ...original, idempotencyKey: "never-committed" })).toBeNull();
+    expect(readPlan).not.toHaveBeenCalled();
+    expect(writes).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stored Run whose facts differ despite retaining a matching request fingerprint", async () => {
+    const store = makeStore();
+    const admission = createTestAdmission(store);
+    const request = projectRequest("execution", "historic-key");
+    await admission.submit(request);
+    const stored = (await store.findRunByIdempotencyKey(PROJECT_ID, request.idempotencyKey))!;
+    vi.spyOn(store, "findRunByIdempotencyKey").mockResolvedValue({
+      ...stored, selector: { datasetIds: ["dataset-1"] }, // old fingerprint still matches the submitted `{all:true}`
+    });
+    await expect(admission.replay(request)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(admission.submit(request)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+  });
+
+  it("rechecks an evaluation-only all selector when a second Sampling succeeds after preview", async () => {
+    const store = makeStore({ plans: makePlans([makeSample("sample-1", { samplingCount: 2 })]) });
+    const admission = createTestAdmission(store);
+    const firstPreview = await admission.preview({ projectId: PROJECT_ID, operation: "execution", selector: { all: true } });
+    const execution = await admission.submit({
+      idempotencyKey: "two-samplings", projectId: PROJECT_ID, operation: "execution",
+      selector: firstPreview.selector, targets: firstPreview.targets, expectedPlanDigests: previewDigests(firstPreview),
+    });
+    const [firstId, secondId] = execution.samplingIds;
+    const first = await saved(store, firstId!);
+    await store.updateSampling({ ...first, execution: { status: "succeeded" } }, first);
+    const queuedSecond = await saved(store, secondId!);
+    await store.updateSampling({ ...queuedSecond, execution: { status: "failed" } }, queuedSecond);
+    const preview = await admission.preview({ projectId: PROJECT_ID, operation: "evaluation", selector: { all: true } });
+    expect(preview.targets.samplingIds).toEqual([firstId]);
+    const second = await saved(store, secondId!);
+    await store.updateSampling({ ...second, execution: { status: "succeeded" } }, second);
+    const write = vi.spyOn(store, "admitRun");
+    await expect(admission.submit({
+      idempotencyKey: "stale-evaluation-targets", projectId: PROJECT_ID, operation: "evaluation",
+      selector: preview.selector, targets: preview.targets, expectedPlanDigests: previewDigests(preview),
+    })).rejects.toMatchObject({ reason: "stale-targets" });
+    expect(write).toHaveBeenCalledOnce(); // the Store gate, not a management preview, rejects the changed set
+    expect(await store.findRunByIdempotencyKey(PROJECT_ID, "stale-evaluation-targets")).toBeNull();
+  });
+
   it("rejects a key reused for another Run operation in the same Project", async () => {
     const runtime = createAutoResumingRuntime({
       harness: makeHarness(),
@@ -1676,10 +1883,15 @@ describe("eval runtime orchestration", () => {
       store: makeStore(),
       sleep: async () => undefined,
     });
-    const first = await runtime.submit(projectRequest("execution", "run-key-1", ["sample-1", "sample-2"]));
+    const expectedPlanDigests = previewDigests(await runtime.preview({
+      projectId: PROJECT_ID, operation: "execution", selector: { all: true },
+    }));
+    const first = await runtime.submit({ ...projectRequest("execution", "run-key-1", ["sample-1", "sample-2"]),
+      expectedPlanDigests });
     const request = {
       idempotencyKey: "run-key-1", projectId: PROJECT_ID, operation: "execution" as const,
       selector: { all: true as const }, targets: { projectSampleIds: ["sample-1", "sample-2"], samplingIds: [] },
+      expectedPlanDigests,
     };
     await expect(runtime.submit(request)).resolves.toEqual(first);
     await expect(runtime.submit({ ...request, targets: { projectSampleIds: ["sample-2", "sample-1"], samplingIds: [] } }))
@@ -1720,6 +1932,62 @@ describe("eval runtime orchestration", () => {
       status: "succeeded",
     });
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not coalesce an unproven same-key submit with a pending proven Project first Run", async () => {
+    const plans = makePlans();
+    const getProjectPlan = plans.getProjectPlan.bind(plans);
+    let entered!: () => void;
+    let release!: () => void;
+    const reading = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    plans.getProjectPlan = async (projectId) => {
+      entered();
+      await gate;
+      return getProjectPlan(projectId);
+    };
+    const store = makeStore({ plans });
+    const stored = store.admitRun.bind(store);
+    const admit = vi.spyOn(store, "admitRun").mockImplementation(async (command) => {
+      if (command.firstRun?.creationFingerprint !== "trusted-creation-fingerprint") {
+        throw new RuntimeRunIdentityConflictError("Project creation key is reserved");
+      }
+      return stored(command);
+    });
+    const admission = createTestAdmission(store);
+    const request = projectRequest("execution", "project-creation-key");
+    const proof = { creationFingerprint: "trusted-creation-fingerprint" };
+    const first = admission.submit(request, proof);
+    await reading;
+    const same = admission.submit(request, proof);
+    await expect(admission.submit(request)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(admission.submit(request, { creationFingerprint: "wrong" }))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    release();
+    const [original, joined] = await Promise.all([first, same]);
+    expect(joined).toEqual(original);
+    expect(admit).toHaveBeenCalledOnce();
+    expect(admit.mock.calls[0]![0].firstRun).toEqual(proof);
+    expect(await admission.replay(request)).toEqual(original);
+
+    // The inverse interleaving must not let the trusted call join a failing ordinary submission either.
+    let enterSecond!: () => void;
+    let releaseSecond!: () => void;
+    const secondReading = new Promise<void>((resolve) => { enterSecond = resolve; });
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    plans.getProjectPlan = async (projectId) => {
+      enterSecond();
+      await secondGate;
+      return getProjectPlan(projectId);
+    };
+    const another = projectRequest("execution", "another-creation-key");
+    const unproven = admission.submit(another);
+    await secondReading;
+    await expect(admission.submit(another, proof)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    releaseSecond();
+    await expect(unproven).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    expect(admit).toHaveBeenCalledTimes(2);
+    await expect(admission.submit(another, proof)).rejects.toBeInstanceOf(RuntimeProjectBusyError);
   });
 
   it("returns the original pipeline run when the request is retried", async () => {
@@ -2268,7 +2536,7 @@ describe("eval runtime orchestration", () => {
     const retry = runtime.submit(request);
     await expect(runtime.submit({
       idempotencyKey: request.idempotencyKey, projectId: PROJECT_ID, operation: "evaluation",
-      selector: { all: true }, targets: request.targets,
+      selector: { all: true }, targets: request.targets, expectedPlanDigests: request.expectedPlanDigests,
     })).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
     await expect(runtime.submit(projectRequest("execution", request.idempotencyKey)))
       .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
@@ -3132,7 +3400,10 @@ describe("Project Run targets and partial replacement", () => {
     selector: RunTargetSelector,
   ) {
     const preview = await runtime.preview({ projectId: PROJECT_ID, operation, selector });
-    const handle = await runtime.submit({ idempotencyKey, projectId: PROJECT_ID, operation, selector, targets: preview.targets });
+    const handle = await runtime.submit({
+      idempotencyKey, projectId: PROJECT_ID, operation, selector, targets: preview.targets,
+      expectedPlanDigests: previewDigests(preview),
+    });
     await waitForTerminal(runtime, handle.runId);
     return { handle, preview };
   }
@@ -3254,6 +3525,7 @@ describe("Project Run targets and partial replacement", () => {
       await expect(runtime.submit({
         idempotencyKey: `${operation}-without-plan`, projectId: PROJECT_ID, operation, selector: { all: true },
         targets: operation === "pipeline" ? { projectSampleIds: ["sample-1"], samplingIds: [] } : { projectSampleIds: [], samplingIds: [] },
+        expectedPlanDigests: approvedDigests(operation),
       })).rejects.toMatchObject({ reason: "evaluation-plan-required" });
     }
     const { handle } = await run(runtime, "execution-only", "execution", { all: true });
@@ -3266,15 +3538,18 @@ describe("Project Run targets and partial replacement", () => {
     await expect(fresh.submit({
       idempotencyKey: "new-project-evaluation", projectId: PROJECT_ID, operation: "evaluation",
       selector: { all: true }, targets: { projectSampleIds: [], samplingIds: [] },
+      expectedPlanDigests: approvedDigests("evaluation", (await fresh.plans.getProjectPlan(PROJECT_ID))!),
     })).rejects.toMatchObject({ reason: "empty-targets" });
   });
 
   it("locks the evaluation plan when the first evaluating Run is admitted", async () => {
     const store = makeStore({ plans: projectPlans() });
     const admission = createTestAdmission(store);
+    const plan = (await store.plans().getProjectPlan(PROJECT_ID))!;
     const handle = await admission.submit({
       idempotencyKey: "first-execution", projectId: PROJECT_ID, operation: "execution",
       selector: { projectSampleIds: ["sample-1"] }, targets: { projectSampleIds: ["sample-1"], samplingIds: [] },
+      expectedPlanDigests: approvedDigests("execution", plan),
     });
     expect((await store.plans().getProjectPlan(PROJECT_ID))?.evaluation?.lockedAt).toBeNull();
     const queued = await saved(store, handle.samplingIds[0]!);
@@ -3282,6 +3557,7 @@ describe("Project Run targets and partial replacement", () => {
     await admission.submit({
       idempotencyKey: "first-evaluation", projectId: PROJECT_ID, operation: "evaluation",
       selector: { samplingIds: handle.samplingIds }, targets: { projectSampleIds: [], samplingIds: [...handle.samplingIds] },
+      expectedPlanDigests: approvedDigests("evaluation", plan),
     });
     expect((await store.plans().getProjectPlan(PROJECT_ID))?.evaluation?.lockedAt).toEqual(expect.any(String));
   });
@@ -3289,9 +3565,11 @@ describe("Project Run targets and partial replacement", () => {
   it("rejects a new key while the Project has an unfinished Run and targets that changed before the transaction", async () => {
     const store = makeStore({ plans: projectPlans() });
     const admission = createTestAdmission(store);
+    const plan = (await store.plans().getProjectPlan(PROJECT_ID))!;
     const request = {
       idempotencyKey: "first", projectId: PROJECT_ID, operation: "execution" as const,
       selector: { projectSampleIds: ["sample-1"] }, targets: { projectSampleIds: ["sample-1"], samplingIds: [] },
+      expectedPlanDigests: approvedDigests("execution", plan),
     };
     const first = await admission.submit(request);
     await expect(admission.submit({ ...request, idempotencyKey: "second" })).rejects.toBeInstanceOf(RuntimeProjectBusyError);
@@ -3320,7 +3598,12 @@ describe("Project Run targets and partial replacement", () => {
   it.each(["execution", "evaluation"] as const)("never resumes a Run whose %s plan digest changed", async (stage) => {
     const store = makeStore({ plans: projectPlans() });
     const harness = makeHarness();
-    const handle = await createTestAdmission(store).submit(projectRequest("pipeline", `changed-${stage}`));
+    const handle = await createTestAdmission(store).submit({
+      ...projectRequest("pipeline", `changed-${stage}`),
+      selector: { projectSampleIds: ["sample-1"] },
+      targets: { projectSampleIds: ["sample-1"], samplingIds: [] },
+      expectedPlanDigests: approvedDigests("pipeline", (await store.plans().getProjectPlan(PROJECT_ID))!),
+    });
     if (stage === "execution") store.plans().execution = executionPlan({ retryPolicy: RETRY_ONE });
     else store.plans().evaluation = evaluationPlan({ evaluationConcurrency: 2 });
     const resumer = createTestResumer(store, harness);
@@ -3341,8 +3624,10 @@ describe("Project Run targets and partial replacement", () => {
     });
     store.plans().samples = store.plans().samples.map((sample) => ({ ...sample, samplingCount: 2 }));
     store.plans().execution = executionPlan({ executionConcurrency: 2 });
-    const handle = await createTestAdmission(store)
-      .submit(projectRequest("execution", "plan-concurrency", ["sample-1", "sample-2", "sample-3"]));
+    const handle = await createTestAdmission(store).submit({
+      ...projectRequest("execution", "plan-concurrency", ["sample-1", "sample-2", "sample-3"]),
+      expectedPlanDigests: approvedDigests("execution", (await store.plans().getProjectPlan(PROJECT_ID))!),
+    });
     expect(handle.samplingIds).toHaveLength(6);
     const task = createTestResumer(store, harness).resume(handle.runId);
     await vi.waitFor(() => expect(harness.materializeInitialData).toHaveBeenCalledTimes(2));
@@ -6141,7 +6426,10 @@ describe("evaluation result checking", () => {
     let release!: () => void;
     const waiting = new Promise<void>((resolve) => { release = resolve; });
     const sleep = vi.fn(() => waiting);
-    const run = await createTestAdmission(store).submit(projectRequest("pipeline", "resume-missing-score-recovery"));
+    const run = await createTestAdmission(store).submit({
+      ...projectRequest("pipeline", "resume-missing-score-recovery"),
+      expectedPlanDigests: approvedDigests("pipeline", (await store.plans().getProjectPlan(PROJECT_ID))!),
+    });
     const stop = new AbortController();
     const resumer = createTestResumer(store, harness, { results, sleep, createRetryController: createProductionRetryController });
     const task = resumer.resume(run.runId, stop.signal);
@@ -6430,11 +6718,16 @@ describe("resource downloads during Run cancellation", () => {
     const store = makeStore({ plans: makePlans(samples, { execution: executionPlan({ executionConcurrency: 3 }) }) });
     const harness = makeHarness();
     const admission = createTestAdmission(store);
+    const plan = (await store.plans().getProjectPlan(PROJECT_ID))!;
     const runs: RuntimeRunRecord[] = [];
     let offset = 0;
     for (const [index, size] of sizes.entries()) {
       const ids = samples.slice(offset, offset + size).map(({ projectSampleId }) => projectSampleId);
-      const admitted = await admission.submit(projectRequest("execution", `resource-stop-${index}`, ids));
+      const admitted = await admission.submit({
+        ...projectRequest("execution", `resource-stop-${index}`, ids),
+        selector: { projectSampleIds: ids },
+        expectedPlanDigests: approvedDigests("execution", plan),
+      });
       const run = (await store.getRun(admitted.runId))!;
       runs.push(run);
       for (const samplingId of run.samplingIds) {

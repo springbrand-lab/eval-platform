@@ -61,11 +61,18 @@ Content limits live only in `apps/eval-api/src/limits.ts`, except the Material a
 | `RUN_PREVIEW_BODY_BYTES` | 30,757,168 | Run preview |
 | `RUN_BODY_BYTES` | 61,510,240 | Run submission |
 | `OUTPUT_SCHEMA_BODY_BYTES` | 6,004,096 | Output-format upload |
+| `MANAGEMENT_OUTPUT_SCHEMA_BODY_BYTES` | 6,018,496 | Only the trusted `create_output_schema` MCP JSON-RPC envelope; all other management RPCs remain 1 MB |
 | `SESSION_BODY_BYTES` | 12,004,096 | Session upload |
 | `MATERIAL_BODY_BYTES` | 28,718,764 | Material upload |
 | `ZIP_BODY_BYTES` | 50,004,096 | Material/Session Bundle creation and ZIP import |
 | `PROMPT_IMPORT_BODY_BYTES` | 60,004,096 | Prompt Dataset upload |
 | `DATASET_DOCUMENT_BYTES` | 10,000,000 | Raw Dataset document import |
+
+## Trusted management Interface (outside `/api/*`)
+
+`POST /mcp/eval-management` uses the independent management Bearer and fixed owner lease; it advertises fifteen tools, including `create_output_schema({operationKey,name,description,content})`. Only the trusted Takt backend sends Feishu JSON Schema **text** (bounded by `OUTPUT_SCHEMA_BYTES`) in the MCP request; it never places the content or Bearer in model context or URL. The tool returns only `{outputSchemaId,name}`. Existing owner-scoped output Schema catalog and durable management operation/stage receipts protect same-key retries and unknown outcomes by planned ID; distinct keys retain the existing HTTP behavior that permits duplicate Schema names. Moss must use the receipt ID, never infer one from a name or retry an unknown result under a new key. Other MCP requests remain limited to 1 MB; only this tool has a derived JSON-escape allowance. See the full [management MCP Interface](../apps/eval-api/README.md#management-mcp-interface).
+
+`GET /mcp/eval-management/trajectories?projectId=&samplingId=&role=subject|evaluator&evaluationId?=&runId?=` is a **read-only, fixed** management-Bearer attachment download, not an MCP tool or an `/api/*` Web route. The bearer is checked before leasing the service account. `evaluationId` is required only for the Evaluator; a missing Chat is 404. Owner, Project, current Sampling/Evaluation, optional exact-Run membership, Agent Chat and frozen public SP SAFE pages are validated. It streams `application/x-ndjson` record lines `{"ingestSeq":N,"record":<SAFE Pi>}\n` and a **mandatory last** `{"type":"manifest",...,"throughSeq":<frozen watermark>,"recordCount":<number of record lines>,"recordsSha256":"<SHA-256 of all preceding record-line bytes including LF>","complete":true}\n`. Takt must verify the manifest, requested identities, count, digest, frozen watermark and EOF before atomically saving; interruption or abort yields no valid terminal line. References are downloaded through the fixed public SP owner-Session record route, verified in a private bounded per-record spool **before** any of that record's bytes are sent, and removed afterwards. No credentials, arbitrary SP URL, private SP storage or alternative 4-KiB `inspect_case` tool path is exposed. See the full [JSONL wire contract](../apps/eval-api/README.md#management-mcp-interface).
 
 ## Routes
 
@@ -242,6 +249,9 @@ Creation body:
   samplingCounts?: { [dataId]: count },       per-Data overrides; every key must be selected
   execution: { userAgentId, framework: "sp"|"codex"|"cc", executionConcurrency, retryPolicy?, timeoutMs? },
   evaluation?: <evaluation plan body>,         required when run.operation is "pipeline"
+  expectedSnapshots?: {datasets:[{datasetId,digest}],executionAgent,evaluationAgent?,outputSchema?},
+                                               review digests; required by management create_project,
+                                               optional for direct HTTP creation without Takt approval
   run: { operation: "execution"|"pipeline" }
 }
 ```
@@ -251,6 +261,8 @@ Evaluation plan body: `{userAgentId, evaluationConcurrency, retryPolicy?, timeou
 Creation reads the selected owned, non-deleted Datasets and their current members in one consistent snapshot; a Data shared by several selected Datasets becomes one ProjectSample. It clones the Subject (and Evaluator) Agent Config, stores the snapshot, both plans and the copies in one transaction, then previews and submits the first Run with selector `{all:true}`; which failures remove the Project and its copies and which keep it is defined in [Project 创建](eval-project-redesign.md#31-创建). Cancelling the form calls no route.
 
 Creation is idempotent per owner and `idempotencyKey`; the replay, race and compensation rules are defined once in [Project 创建](eval-project-redesign.md#31-创建). On the wire: creation and a matching replay return `201 {project, run}` (a replay clones no Agent Config), where `run` is the creation's own first Run or `null` when the Project already has other Runs; a different body under the key is `409 PROJECT_IDEMPOTENCY_CONFLICT`; a key whose Project was soft-deleted is `404 PROJECT_NOT_FOUND`; a first Run that keeps meeting evaluation-plan changes ends in `409 PROJECT_PLAN_CHANGED` with the Project kept for a same-key replay.
+
+The creation key is reserved as soon as the Project commits, before its first Run. Only ProjectService supplies a trusted transient first-Run fingerprint to the locked Runtime Store; ordinary Run submission and management `submit_run` have no such field and cannot claim this key (`409 RUN_IDEMPOTENCY_CONFLICT`), even on a Project with no Run. A different key can still run first, leaving creation replay with `run: null`. Read-only creation reconciliation/replay returns a stored first Run only when its immutable identity and full frozen targets match the original creation; a malformed historic creation-key Run returns `409 RUN_IDEMPOTENCY_CONFLICT`, not a false success.
 
 `ProjectView` is the fixed plan plus current state: `{project, datasets: [{datasetId, name, description?, kind, projectSampleIds}], execution, executionPlanDigest, evaluation: {plan, digest, lockedAt | null} | null, projectSamples: [{projectSampleId, projectId, dataId, datasetIds, samplingCount, data}], runSequence, currentRun: {runId, stopRequested?} | null}`. `runSequence` is the latest admitted Run's existing sequence, or 0 before any Run; it is read with `currentRun` in the same snapshot and lets clients detect a Run that both started and finished between polls. It is not another persisted counter. `execution.subjectAgentConfig` and `evaluation.plan.evaluatorAgentConfig` are the Agent Config bodies as frozen; `harness.agentConfig` names the frozen copy. `evaluation.plan.outputSchema` is `{outputSchemaId, digest}`; `evaluation.lockedAt` is set by the first pipeline or evaluation Run.
 
@@ -268,7 +280,7 @@ Each Run is chosen per request: `operation` is `execution`, `pipeline` or `evalu
 | Route | Body / result |
 | --- | --- |
 | `POST /api/projects/{projectId}/runs/preview` | `{operation, selector}` / `RunPreview`: `{projectId, operation, selector, targets:{projectSampleIds, samplingIds}, replacedSamplingCount, newSamplingCount, evaluationCount, executionPlanDigest, evaluationPlanDigest\|null}` |
-| `POST /api/projects/{projectId}/runs` | `{idempotencyKey, operation, selector, targets:{projectSampleIds, samplingIds}}` (each list unique, at most `RUN_TARGET_IDS` IDs in total) / `202 RunHandle {runId, samplingIds}` |
+| `POST /api/projects/{projectId}/runs` | `{idempotencyKey, operation, selector, targets:{projectSampleIds, samplingIds}, expectedPlanDigests:{execution,evaluation?}}` (copy digests and targets from the same preview; execution requires only execution, pipeline/evaluation require both; lowercase 64-char SHA-256; each target list unique, at most `RUN_TARGET_IDS` IDs in total) / `202 RunHandle {runId, samplingIds}` |
 | `GET /api/projects/{projectId}/runs/current` | `{run: {runId, stopRequested?} \| null}` |
 | `POST /api/projects/{projectId}/runs/{runId}/stop` | No body / `202 {runId, stopRequested:true}` |
 | `POST /api/projects/{projectId}/runs/{runId}/score-sync` | No body / `{synced, failed, skipped}`; see [Run admission and stop](#run-admission-and-stop) |
@@ -314,7 +326,7 @@ Replaced Samplings and Evaluations no longer exist and read as `404`. Sampling a
 | `GET /api/projects/{projectId}/evaluations/{evaluationId}/observation` | `AgentObservationRef` for the Evaluator | `404 PROJECT_NOT_FOUND`, `EVALUATION_NOT_FOUND` |
 | `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/messages` | The Chat's UI messages, as Eval SP returns them | As above; `404 EVAL_SP_NOT_FOUND` before the Agent starts; relayed SP errors |
 | `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/tree` | The Chat Workspace tree (`WorkspaceTreeNode[]`) | As above |
-| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/trajectory?limit=&beforeSeq=` | SP Chat debug page `{records:[{ingestSeq,record:SAFE Pi} \| {ingestSeq,reference:{format,throughSeq,identity,byteLength,sha256}}], beforeSeq, hasOlder}` relayed unchanged; `beforeSeq` reads older rows, `limit` 1–200. The reference has no record body on this route. This is **not** the frozen evidence-export page or an `events` projection. | As above |
+| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/trajectory?afterSeq=&limit=&throughSeq=` | SP's owner-session-authenticated Chat page `{format:"sp-pi-trajectory/v1",cursor:{throughSeq},records:[{ingestSeq,record:SAFE Pi} \| {ingestSeq,reference:{format,throughSeq,identity,byteLength,sha256}}],nextAfterSeq}` relayed unchanged. `afterSeq` starts at 0, pages ascend with `nextAfterSeq` and a frozen `throughSeq` (including 0); `limit` is 1–200. The separate owner-session `GET /api/chats/{chatId}/trajectory/records/{ingestSeq}` can resolve a reference when bound to the page's `throughSeq`, identity, length and SHA-256; this Eval HTTP route does **not** proxy record bytes. Neither route is the Submission-bound service evidence export. | As above |
 | `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/file?path=` | Raw file bytes as an attachment under `Content-Security-Policy: default-src 'none'; sandbox`; at most 10 MB | As above; `413 CATALOG_PAYLOAD_TOO_LARGE` |
 
 The observation data routes read the service account's Chat from Eval SP server-side with the service session and `EVAL_SP_TRUSTED_ORIGIN`; they are GET-only and cannot drive an Agent. `AgentObservationRef` is `{role, projectId, samplingId, evaluationId?, ownerUserId, chatId?, state}`. The API checks the owner, a non-deleted Project and that the Sampling or Evaluation is current in that Project. The Subject entry uses `Sampling.subjectChatId` and the Subject Agent Config owner; the Evaluator entry uses `EvaluationRecord.chatId` and the Evaluator owner. `state` is `available` when a Chat ID and at least one attempt exist, otherwise `not-started`. The entry is available in every Run state. No writable Chat URL is returned; the read-only Chat, Context, Workspace and Trajectory pages are served by Eval SP.
@@ -417,7 +429,7 @@ The target account is always the service account; the client cannot name another
 
 Run admission uses a token-free, owner-scoped `ProjectPlanReader` and `RuntimeStore` with `createEvalRunAdmission`. The HTTP process holds no Harness credential and never runs Agents: admission and stop requests commit their Run facts and enqueue the Run job in the same PostgreSQL transaction (see [Run scheduling](architecture.md#run-调度与停止)).
 
-Admission responses follow the rules in [Run admission](architecture.md#run-准入与独立评估): the request fingerprint covers `projectId`, `operation`, `selector`, `targets` and the plan digests. A matching replay of the Project's latest Run returns the original Run, even while it is active; a reused key with different facts, or the key of a Run that a later admission superseded, is `409 RUN_IDEMPOTENCY_CONFLICT`; a new key while the Project has an unfinished Run is `409 PROJECT_BUSY`. Inside the transaction the Store rechecks the plan digests (`PROJECT_PLAN_CHANGED`), the evaluation plan (`PROJECT_EVALUATION_PLAN_REQUIRED`) and that the submitted targets still match the current Samplings (`RUN_TARGETS_STALE`); on any of these the caller previews again with a new key.
+Admission responses follow the rules in [Run admission](architecture.md#run-准入与独立评估): the request fingerprint covers `projectId`, `operation`, `selector`, `targets` and the caller's expected plan digests. A matching persisted Project/key Run returns the original Run before consulting mutable plans or targets, even when later admissions replaced its Samplings (the returned membership may now be empty); a reused key with different facts or digests is `409 RUN_IDEMPOTENCY_CONFLICT`; a new key while the Project has an unfinished Run is `409 PROJECT_BUSY`. Inside the transaction the Store rechecks the supplied digests (`PROJECT_PLAN_CHANGED`), the evaluation plan (`PROJECT_EVALUATION_PLAN_REQUIRED`), the selector's expanded current targets (including evaluation-only), and the replaced Sampling set (`RUN_TARGETS_STALE`). On a conflict the caller needs a new approved preview and a new key; changing the digests of an old approval cannot authorize a new Run.
 
 `POST .../runs/{runId}/stop` targets only the named Run of that Project and returns `202 {runId, stopRequested:true}`, including for a repeat; an unknown Run, another owner's Run or a Run of a deleted Project is `404 RUN_NOT_FOUND`; a finished Run without a stop request is `409 PROJECT_NO_ACTIVE_RUN`. The response only records the request; stop semantics are described in [Run scheduling and stop](architecture.md#run-调度与停止).
 
@@ -459,9 +471,9 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `PROJECT_PLAN_CHANGED` | 409 | Plan digests changed between preview and admission |
 | `PROJECT_SAMPLE_NOT_FOUND` | 404 | ProjectSample not bound by the Project |
 | `RUN_NOT_FOUND` | 404 | Unknown or another owner's Run, or Run of a deleted Project |
-| `RUN_IDEMPOTENCY_CONFLICT` | 409 | Key reused with different facts or superseded |
+| `RUN_IDEMPOTENCY_CONFLICT` | 409 | Run key reused with different original facts/digests, Project creation key claimed without its trusted first-Run proof, or a malformed historic first-Run identity |
 | `RUN_STOPPED` | 409 | Runtime refused a stage after a committed stop (Worker side) |
-| `RUN_TARGETS_STALE` | 409 | Submitted targets no longer match the current Samplings |
+| `RUN_TARGETS_STALE` | 409 | Submitted selector no longer expands to the fixed targets, or the current replacement Samplings differ |
 | `RUN_TARGETS_EMPTY` | 409 | Selection or targets contain no work |
 | `RUN_TARGETS_TOO_LARGE` | 413 | Expanded selection, or the Data a new Project binds, exceeds `RUN_TARGET_IDS` |
 | `RUNTIME_INPUT_INVALID` | 400 | Run request, Project creation selection or plan values rejected (including pipeline creation without an evaluation plan) |

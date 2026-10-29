@@ -28,6 +28,7 @@ export type {
 export type {
   RuntimeRunAdmission,
   RuntimeRunAdmissionCommand,
+  RuntimeFirstRunProof,
   RuntimeRunPlanDigests,
   RuntimeRunRequestIdentity,
   RuntimeRunRecord,
@@ -40,6 +41,7 @@ export type {
 } from "./store.js";
 export { withoutRevision } from "./store.js";
 export { requireSourceCommit } from "./admission.js";
+export { expandRunTargets, type RunSelectionReader, type RunSelectionSampling } from "./targets.js";
 export { toRunSnapshot, toSamplingSnapshot } from "./projection.js";
 export {
   RuntimeAdmissionConflictError,
@@ -84,7 +86,8 @@ export function createEvalRunAdmission(dependencies: EvalRunAdmissionDependencie
   const admission = new RunAdmission(dependencies);
   return {
     preview: (request) => admission.preview(request),
-    submit: (request) => admission.submit(request),
+    replay: (request) => admission.replay(request),
+    submit: (request, firstRun) => admission.submit(request, firstRun),
   };
 }
 

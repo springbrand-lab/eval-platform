@@ -23,9 +23,9 @@
 
 ## 提交与重试
 
-`submit({idempotencyKey, projectId, operation: "evaluation", selector, targets})` 原样提交 preview 返回的 `targets`，Runtime 只校验、不重新展开。一次意图从首次提交到超时重试、网络重发和重复点击，都复用同一 `targets` 和 key；重试不能重新 preview 生成新列表。请求指纹覆盖 Project、operation、selector、targets、执行计划摘要和评估计划摘要。
+`submit({idempotencyKey, projectId, operation: "evaluation", selector, targets, expectedPlanDigests:{execution,evaluation}})` 原样提交同一次 preview 返回的目标与两份计划摘要。Runtime 对未命中的新 key 校验调用方摘要、目标，再在已有 Project 行锁下重新展开选择器（包括新变成成功的 Sampling），与固定目标精确对比；不能用提交时重新计算的摘要代替原来经过审批的摘要。一次意图从首次提交到超时重试、网络重发和重复点击，都复用同一完整请求和 key；重试不能重新 preview 生成新列表或摘要。请求指纹覆盖 Project、operation、selector、targets 和原请求的两份计划摘要。已存 Run 在读取当前计划/目标前通过原 key 和指纹重放；旧请求缺摘要时只可调用只读 `replay` 核对已存在的 Run。
 
-Store 在同一事务内复核每个目标仍执行成功，只删除目标 Sampling 的当前 EvaluationRecord，为每个目标新建一条 EvaluationRecord，并在首个带评估的 Run 时锁定评估计划。目标 Sampling 的 Chat、Attempt、产物、轨迹、资源和状态完全保留，未选中 Sampling 的执行与评估不受影响。候选在 preview 之后失效时整批拒绝，不留下半批 Run 或 EvaluationRecord，调用方需重新 preview 并以新 key 提交。
+Store 在同一事务内复核评估计划摘要、选择器展开结果及每个目标仍执行成功，只删除目标 Sampling 的当前 EvaluationRecord，为每个目标新建一条 EvaluationRecord，并在首个带评估的 Run 时锁定评估计划。目标 Sampling 的 Chat、Attempt、产物、轨迹、资源和状态完全保留，未选中 Sampling 的执行与评估不受影响。候选在 preview 之后失效或多了成功 Sampling 时整批拒绝，不留下半批 Run 或 EvaluationRecord，调用方需重新审批 preview 并以新 key 提交。
 
 ## HTTP
 

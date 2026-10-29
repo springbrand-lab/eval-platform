@@ -1,9 +1,10 @@
 import { RUN_OPERATIONS } from "@eval-platform/eval-contracts";
 import { platformIdSchema } from "@eval-platform/eval-dataset";
 import { z } from "zod";
-import { projectCreateSchema } from "../projects/schemas.js";
+import { expectedSnapshotsSchema, projectCreateSchema } from "../projects/schemas.js";
+import { OUTPUT_SCHEMA_BYTES } from "../limits.js";
 import { entityIdSchema, idempotencyKeySchema, unique } from "../routes/schemas.js";
-import { selectorSchema, targetsSchema } from "../routes/runs/runs.routes.js";
+import { expectedPlanDigestsSchema, submitRunBodySchema, selectorSchema } from "../routes/runs/runs.routes.js";
 
 export const pageSchema = {
   page: z.number().int().min(1).max(10_000).default(1),
@@ -15,28 +16,36 @@ export const resourceIdSchema = idempotencyKeySchema.max(255);
 const resourceIds = z.array(resourceIdSchema).max(50).refine(unique, "IDs must be unique").default([]);
 
 export const listOptionsSchema = z.strictObject({
-  category: z.enum(["agents", "datasets", "projects", "output_schemas", "input_limits", "credits",
-    "approval_dataset", "approval_agent", "approval_project"]),
+  category: z.enum(["agents", "datasets", "projects", "project_detail", "output_schemas", "input_limits", "credits",
+    "approval_dataset", "approval_agent", "approval_output_schema", "approval_project"]),
   q: search, ...pageSchema,
   datasetId: platformIdSchema.optional(),
   dataIds: z.array(platformIdSchema).min(1).max(50).refine(unique).optional(),
   userAgentId: platformIdSchema.optional(),
+  outputSchemaId: platformIdSchema.optional(),
   projectId: entityIdSchema.optional(),
   projectSampleIds: z.array(entityIdSchema).max(50).refine(unique).optional(),
   samplingIds: z.array(entityIdSchema).max(50).refine(unique).optional(),
 }).superRefine((value, ctx) => {
-  const invalid = () => ctx.addIssue({ code: "custom", message: "Choose one bounded approval selection" });
+  const invalid = () => ctx.addIssue({ code: "custom", message: "Choose one bounded selection" });
   if (value.category === "approval_dataset") {
-    if (!value.datasetId || value.userAgentId || value.projectId || value.projectSampleIds || value.samplingIds
+    if (!value.datasetId || value.userAgentId || value.outputSchemaId || value.projectId || value.projectSampleIds || value.samplingIds
       || value.q !== undefined || value.pageSize > 10) invalid();
   } else if (value.category === "approval_agent") {
-    if (!value.userAgentId || value.datasetId || value.dataIds || value.projectId
+    if (!value.userAgentId || value.outputSchemaId || value.datasetId || value.dataIds || value.projectId
+      || value.projectSampleIds || value.samplingIds || value.q !== undefined || value.page !== 1) invalid();
+  } else if (value.category === "approval_output_schema") {
+    if (!value.outputSchemaId || value.userAgentId || value.datasetId || value.dataIds || value.projectId
       || value.projectSampleIds || value.samplingIds || value.q !== undefined || value.page !== 1) invalid();
   } else if (value.category === "approval_project") {
-    if (!value.projectId || value.userAgentId || value.datasetId || value.dataIds || value.q !== undefined || value.pageSize > 10
+    if (!value.projectId || value.userAgentId || value.outputSchemaId || value.datasetId || value.dataIds || value.q !== undefined || value.pageSize > 10
       || !((value.projectSampleIds?.length ?? 0) + (value.samplingIds?.length ?? 0))
       || (value.projectSampleIds?.length ?? 0) + (value.samplingIds?.length ?? 0) > 50) invalid();
-  } else if (value.datasetId || value.dataIds || value.userAgentId || value.projectId || value.projectSampleIds || value.samplingIds) {
+  } else if (value.category === "project_detail") {
+    if (!value.projectId || value.userAgentId || value.outputSchemaId || value.datasetId || value.dataIds
+      || value.projectSampleIds || value.samplingIds || value.q !== undefined) invalid();
+  } else if (value.datasetId || value.dataIds || value.userAgentId || value.outputSchemaId
+    || value.projectId || value.projectSampleIds || value.samplingIds) {
     invalid();
   }
 });
@@ -74,6 +83,13 @@ export const createAgentSchema = z.strictObject({
 });
 
 export const uploadRefSchema = platformIdSchema.describe("Opaque ref returned only by the authenticated byte ingress");
+/** Schema content is accepted only from the trusted backend, not an LLM-generated tool payload. */
+export const createOutputSchemaSchema = z.strictObject({
+  operationKey: idempotencyKeySchema.max(200),
+  name: z.string().trim().min(1).max(200),
+  description: z.string().trim().min(1).max(2_000),
+  content: z.string().max(OUTPUT_SCHEMA_BYTES),
+});
 const materialSelection = z.union([
   z.strictObject({ uploadRef: uploadRefSchema }),
   z.strictObject({ bundleId: platformIdSchema, materialId: platformIdSchema }),
@@ -111,18 +127,27 @@ export const uploadAgentReferenceSchema = z.strictObject({
   operationKey: idempotencyKeySchema.max(200), uploadRef: uploadRefSchema,
 });
 
-export const createProjectSchema = projectCreateSchema;
+export const createProjectSchema = projectCreateSchema.safeExtend({ expectedSnapshots: expectedSnapshotsSchema })
+  .refine((body) => body.datasets.length <= 50, "Review at most 50 Datasets per management Project");
 export const previewRunSchema = z.strictObject({
   projectId: entityIdSchema, operation: z.enum(RUN_OPERATIONS), selector: selectorSchema,
 });
-export const submitRunSchema = z.strictObject({
-  projectId: entityIdSchema, idempotencyKey: idempotencyKeySchema,
-  operation: z.enum(RUN_OPERATIONS), selector: selectorSchema, targets: targetsSchema,
-});
+export const submitRunSchema = submitRunBodySchema.safeExtend({ projectId: entityIdSchema });
+/** Reconciliation never submits, so only this branch may omit digests for old stored Runs. */
+const reconcileRunSchema = z.strictObject({
+  projectId: entityIdSchema, ...submitRunBodySchema.shape,
+  expectedPlanDigests: expectedPlanDigestsSchema.optional(),
+}).refine((request) => request.expectedPlanDigests === undefined
+  || (request.operation === "execution") === (request.expectedPlanDigests.evaluation === undefined),
+{ path: ["expectedPlanDigests", "evaluation"], message: "Supply an evaluation digest exactly when evaluating" });
+export const reconcileOperationSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("run"), request: reconcileRunSchema }),
+  z.strictObject({ kind: z.literal("project"), request: projectCreateSchema }),
+]);
 export const stopRunSchema = z.strictObject({ projectId: entityIdSchema, runId: entityIdSchema });
 export const getRunSchema = z.strictObject({ runId: entityIdSchema, ...pageSchema });
 export const getMetricsSchema = z.strictObject({
-  projectId: entityIdSchema, runId: entityIdSchema,
+  projectId: entityIdSchema, runId: entityIdSchema.optional(),
   scope: z.enum(["project", "dataset", "sample", "sampling"]),
   datasetId: platformIdSchema.optional(), projectSampleId: entityIdSchema.optional(), samplingId: entityIdSchema.optional(),
   ...pageSchema,
@@ -134,15 +159,11 @@ export const getMetricsSchema = z.strictObject({
   }
 });
 export const inspectCaseSchema = z.strictObject({
-  projectId: entityIdSchema, runId: entityIdSchema, samplingId: entityIdSchema,
-  evaluationId: entityIdSchema.optional(), trajectory: z.enum(["subject", "evaluator"]).optional(),
-  beforeSeq: z.number().int().positive().optional(), limit: z.number().int().min(1).max(20).default(10),
-}).refine((value) => value.trajectory !== "evaluator" || value.evaluationId !== undefined,
-  "Evaluator trajectory needs an evaluationId")
-  .refine((value) => value.beforeSeq === undefined || value.trajectory !== undefined,
-    "beforeSeq requires a trajectory");
+  projectId: entityIdSchema, runId: entityIdSchema.optional(), samplingId: entityIdSchema,
+  evaluationId: entityIdSchema.optional(),
+});
 
-/** The same schemas validate calls and generate the advertised input schemas. */
+/** Call validation schemas and advertised tool schemas are identical. */
 export const managementSchemas = {
   list_options: listOptionsSchema,
   prepare_inputs: prepareInputsSchema,
@@ -150,10 +171,12 @@ export const managementSchemas = {
   search_agent_resources: searchResourcesSchema,
   upload_agent_skill: uploadAgentSkillSchema,
   upload_agent_reference: uploadAgentReferenceSchema,
+  create_output_schema: createOutputSchemaSchema,
   create_agent: createAgentSchema,
   create_project: createProjectSchema,
   preview_run: previewRunSchema,
   submit_run: submitRunSchema,
+  reconcile_operation: reconcileOperationSchema,
   stop_run: stopRunSchema,
   get_run: getRunSchema,
   get_metrics: getMetricsSchema,

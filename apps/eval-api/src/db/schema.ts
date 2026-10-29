@@ -218,7 +218,7 @@ export const managementUploads = pgTable("eval_management_uploads", {
 export const managementOperations = pgTable("eval_management_operations", {
   ownerUserId: text("owner_user_id").notNull(),
   operationKey: text("operation_key").notNull(),
-  kind: text("kind").$type<"prepare" | "skill" | "reference">().notNull(),
+  kind: text("kind").$type<"prepare" | "skill" | "reference" | "output_schema">().notNull(),
   fingerprint: text("fingerprint").notNull(),
   plan: jsonb("plan").$type<Record<string, unknown>>().notNull(),
   stages: jsonb("stages").$type<Record<string, { status: "attempted" | "confirmed"; receipt?: unknown }>>().notNull().default({}),
@@ -231,7 +231,7 @@ export const managementOperations = pgTable("eval_management_operations", {
     .where(sql`${table.kind} = 'skill' AND ${table.status} = 'pending'`),
   index("eval_management_pending_dataset_idx").on(table.ownerUserId, sql`${table.plan}->>'datasetId'`)
     .where(sql`${table.kind} = 'prepare' AND ${table.status} = 'pending'`),
-  check("eval_management_operations_kind_ck", sql`${table.kind} IN ('prepare', 'skill', 'reference')`),
+  check("eval_management_operations_kind_ck", sql`${table.kind} IN ('prepare', 'skill', 'reference', 'output_schema')`),
   check("eval_management_operations_status_ck", sql`${table.status} IN ('pending', 'completed')`),
   check("eval_management_operations_identity_ck", sql`length(${table.ownerUserId}) > 0
     AND length(${table.operationKey}) BETWEEN 1 AND 200 AND ${table.fingerprint} ~ '^[0-9a-f]{64}$'
@@ -487,7 +487,7 @@ export const runs = pgTable("eval_runs", {
   runId: text("run_id").primaryKey(),
   ownerUserId: text("owner_user_id").notNull(),
   projectId: text("project_id").notNull(),
-  /** Admission order within the Project; only the latest Run's key may be replayed. */
+  /** Admission order within the Project; old keys still identify their original persisted Runs. */
   sequence: integer("sequence").notNull(),
   sourceCommit: text("source_commit").notNull(),
   operation: text("operation").$type<RunOperation>().notNull(),

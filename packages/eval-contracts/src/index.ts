@@ -46,6 +46,8 @@ export type {
   RunPhase,
   RunPhases,
   RunHandle,
+  RunPlanDigests,
+  RunReplayRequest,
   RunRequest,
   RunSnapshot,
   RunTargetSelector,

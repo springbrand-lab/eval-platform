@@ -3,7 +3,7 @@ import { AGENT_FRAMEWORKS, type RetryPolicy } from "@eval-platform/eval-contract
 import { platformIdSchema } from "@eval-platform/eval-dataset";
 import { catalogLabelSchema } from "../db/catalog-metadata.js";
 import { RUN_TARGET_IDS, SAMPLING_COUNT_MAX } from "../limits.js";
-import { idempotencyKeySchema, unique } from "../routes/schemas.js";
+import { approvalDigestSchema, idempotencyKeySchema, unique } from "../routes/schemas.js";
 
 // The single definition of the Project creation and evaluation-plan request bodies. Routes validate with
 // these schemas and the service consumes their output types; plan value rules belong to Runtime.
@@ -28,6 +28,15 @@ export const evaluationPlanSchema = z.strictObject({
   outputSchemaId: platformIdSchema,
 });
 
+/** Takt's reviewed source identities, checked against the actual data/Agent/Schema frozen by ProjectService. */
+export const expectedSnapshotsSchema = z.strictObject({
+  datasets: z.array(z.strictObject({ datasetId: platformIdSchema, digest: approvalDigestSchema }))
+    .min(1).max(RUN_TARGET_IDS).refine((items) => unique(items.map(({ datasetId }) => datasetId)), "must not repeat a Dataset"),
+  executionAgent: approvalDigestSchema,
+  evaluationAgent: approvalDigestSchema.exactOptional(),
+  outputSchema: approvalDigestSchema.exactOptional(),
+});
+
 export const projectCreateSchema = z.strictObject({
   /** Owner-scoped creation identity; the first Run is admitted under the same key. */
   idempotencyKey: idempotencyKeySchema,
@@ -50,8 +59,21 @@ export const projectCreateSchema = z.strictObject({
     executionConcurrency: z.number(),
   }),
   evaluation: evaluationPlanSchema.exactOptional(),
+  /** Required by management's approved create_project, not by direct HTTP Project creation. */
+  expectedSnapshots: expectedSnapshotsSchema.exactOptional(),
   /** The first Run; a new Project has no successful Sampling, so it cannot be evaluation-only. */
   run: z.strictObject({ operation: z.enum(["execution", "pipeline"]) }),
+}).superRefine((body, context) => {
+  const snapshots = body.expectedSnapshots;
+  if (!snapshots) return;
+  if (snapshots.datasets.length !== body.datasets.length
+    || snapshots.datasets.some((snapshot, index) => snapshot.datasetId !== body.datasets[index]?.datasetId)) {
+    context.addIssue({ code: "custom", path: ["expectedSnapshots", "datasets"], message: "Dataset approvals must match selections in order" });
+  }
+  if ((snapshots.evaluationAgent !== undefined) !== (body.evaluation !== undefined)
+    || (snapshots.outputSchema !== undefined) !== (body.evaluation !== undefined)) {
+    context.addIssue({ code: "custom", path: ["expectedSnapshots"], message: "Evaluation approvals must match the evaluation plan" });
+  }
 });
 
 export type EvaluationPlanBody = z.output<typeof evaluationPlanSchema>;

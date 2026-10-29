@@ -5,11 +5,18 @@ import type {
   ExecutionPlan,
   Project,
   ProjectDatasetSnapshot,
-  RunHandle,
 } from "@eval-platform/eval-contracts";
 import { DatasetEntityNotFoundError, dataSchema, type Data } from "@eval-platform/eval-dataset";
-import { RuntimeEntityNotFoundError, RuntimeInputError, RuntimeProjectBusyError, type ProjectSample, type ProjectView } from "@eval-platform/eval-runtime";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import {
+  RuntimeEntityNotFoundError,
+  RuntimeInputError,
+  RuntimeProjectBusyError,
+  RuntimeRunIdentityConflictError,
+  type ProjectSample,
+  type ProjectView,
+  type RuntimeRunRecord,
+} from "@eval-platform/eval-runtime";
+import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { addToGroup, sqlBatches } from "./batch.js";
 import type { FrozenCopy } from "../agent-configs.js";
 import type { DatasetSelection } from "../projects/schemas.js";
@@ -62,15 +69,21 @@ export interface ProjectSnapshot {
   readonly creation: { readonly key: string; readonly fingerprint: string };
 }
 
-/** A Project found by its creation key, deleted or not, with the first Run admitted under the same key. */
+/** A Project found by its creation key, deleted or not, with the stored first-Run identity for verification. */
 export interface StoredProjectCreation {
   readonly project: Project;
   readonly deleted: boolean;
   readonly fingerprint: string;
-  /** The first Run admitted under the creation key. */
-  readonly run: RunHandle | null;
+  /** Full immutable Run identity and its admission order; current memberships alone cannot prove creation. */
+  readonly run: (RuntimeRunRecord & { readonly sequence: number }) | null;
+  /** All frozen ProjectSample targets, in the same Dataset/member binding order as an initial `{all:true}` preview. */
+  readonly firstRunProjectSampleIds: readonly string[];
   /** No Run was admitted under the creation key, but the Project already has other Runs. */
   readonly superseded: boolean;
+  /** Current persisted plan digests; used to keep an approved first Run bound to its original plan. */
+  readonly planDigests: { readonly execution: string; readonly evaluation?: string };
+  /** A retired Evaluator copy proves the pre-first-Run evaluation plan was replaced. */
+  readonly evaluationReplaced: boolean;
 }
 
 /** The single definition of an editable evaluation plan: absent, or not yet locked by an evaluating Run. */
@@ -175,23 +188,42 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
       });
     },
 
-    /** The Project created under this key, deleted or not, and its first Run if one was admitted. */
+    /** One read-only snapshot of the Project and the stored creation-key Run's immutable identity. */
     findCreation(key: string): Promise<StoredProjectCreation | null> {
       return db.transaction(async (transaction) => {
         const [row] = await transaction.select().from(projects)
           .where(and(eq(projects.ownerUserId, owner), eq(projects.creationKey, key)));
         if (!row) return null;
-        const [first] = await transaction.select({ runId: runs.runId }).from(runs)
-          .where(and(eq(runs.projectId, row.projectId), eq(runs.idempotencyKey, key)));
+        const [first] = await transaction.select({ runId: runs.runId, sequence: runs.sequence }).from(runs)
+          .where(and(eq(runs.projectId, row.projectId), eq(runs.idempotencyKey, key))).limit(1);
         const [record] = first
           ? await readRunRecords(transaction, [first.runId], { kind: "project", ownerUserId: owner, projectId: row.projectId })
           : [];
+        if (first && !record) throw new RuntimeRunIdentityConflictError("Project creation key has an unreadable Run");
+        const bound = record ? await transaction.select({ projectSampleId: projectSampleDatasets.projectSampleId })
+          .from(projectDatasets).innerJoin(projectSampleDatasets, and(
+            eq(projectSampleDatasets.projectId, projectDatasets.projectId),
+            eq(projectSampleDatasets.datasetId, projectDatasets.datasetId),
+          ))
+          .where(eq(projectDatasets.projectId, row.projectId))
+          .orderBy(projectDatasets.position, projectSampleDatasets.position) : [];
+        const [execution] = await transaction.select({ digest: projectExecutionPlans.digest }).from(projectExecutionPlans)
+          .where(eq(projectExecutionPlans.projectId, row.projectId));
+        if (!execution) throw new Error("Project has no stored execution plan");
+        const [evaluation] = await transaction.select({ digest: projectEvaluationPlans.digest }).from(projectEvaluationPlans)
+          .where(eq(projectEvaluationPlans.projectId, row.projectId));
+        const [retiredEvaluator] = await transaction.select({ userAgentId: projectAgentConfigs.userAgentId }).from(projectAgentConfigs)
+          .where(and(eq(projectAgentConfigs.projectId, row.projectId), eq(projectAgentConfigs.role, "evaluator"),
+            isNotNull(projectAgentConfigs.retiredAt))).limit(1);
         return {
           project: projectFromRow(row),
           deleted: row.deletedAt !== null,
           fingerprint: row.creationFingerprint,
-          run: record ? { runId: record.runId, samplingIds: [...record.samplingIds] } : null,
+          run: record ? { ...record, sequence: first!.sequence } : null,
+          firstRunProjectSampleIds: [...new Set(bound.map(({ projectSampleId }) => projectSampleId))],
           superseded: record === undefined && await projectHasRun(transaction, row.projectId),
+          planDigests: { execution: execution.digest, ...(evaluation ? { evaluation: evaluation.digest } : {}) },
+          evaluationReplaced: retiredEvaluator !== undefined,
         };
       }, READ_SNAPSHOT);
     },

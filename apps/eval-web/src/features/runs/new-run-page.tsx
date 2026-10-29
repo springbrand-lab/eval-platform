@@ -49,8 +49,14 @@ export function NewRunPage({ projectId, initial = {} }: { projectId: string; ini
   const runPreview = useMutation({
     mutationFn: async (input: PreviewInput) => {
       const preview = await previewRun(projectId, input);
+      if (preview.operation !== "execution" && !preview.evaluationPlanDigest) {
+        throw new Error("评估计划预览缺少摘要，无法提交 Run");
+      }
       return { requestKey: JSON.stringify(input), preview, command: {
         idempotencyKey: newIdempotencyKey("run"), operation: preview.operation, selector: preview.selector, targets: preview.targets,
+        expectedPlanDigests: preview.operation === "execution"
+          ? { execution: preview.executionPlanDigest }
+          : { execution: preview.executionPlanDigest, evaluation: preview.evaluationPlanDigest! },
       } satisfies RunInput };
     },
     meta: { silent: true },

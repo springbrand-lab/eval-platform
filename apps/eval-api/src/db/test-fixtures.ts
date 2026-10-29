@@ -154,6 +154,11 @@ export async function buildCommand(plans: ProjectPlanReader, store: RuntimeStore
       .filter((sampling) => sampling.execution.status === "succeeded").map((sampling) => sampling.samplingId);
   }
   const targets = { projectSampleIds, samplingIds };
+  const selector = input.selector ?? (input.projectSampleIds !== undefined || input.samplingIds !== undefined
+    ? {
+      ...(projectSampleIds.length ? { projectSampleIds: [...projectSampleIds] } : {}),
+      ...(samplingIds.length ? { samplingIds: [...samplingIds] } : {}),
+    } : { all: true as const });
   let samplings: Sampling[] = [];
   let replacedSamplingIds: string[] = [];
   let runSamplingIds = samplingIds;
@@ -180,7 +185,7 @@ export async function buildCommand(plans: ProjectPlanReader, store: RuntimeStore
   return {
     run: {
       runId: crypto.randomUUID(), projectId: input.projectId, sourceCommit: release.sourceCommit,
-      operation: input.operation, phases: phasesOf(input.operation), selector: input.selector ?? { all: true }, targets,
+      operation: input.operation, phases: phasesOf(input.operation), selector, targets,
       samplingIds: runSamplingIds, evaluationIds: evaluations.map((evaluation) => evaluation.evaluationId),
       planDigests: {
         execution: plan.executionPlanDigest,

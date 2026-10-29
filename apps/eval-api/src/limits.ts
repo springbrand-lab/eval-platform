@@ -60,6 +60,8 @@ function jsonTextBodyBytes(contentUnits: number): number {
 export const PROMPT_IMPORT_BODY_BYTES = jsonTextBodyBytes(PROMPT_DATASET_FILE_BYTES);
 export const SESSION_BODY_BYTES = jsonTextBodyBytes(EVAL_SESSION_CONTENT_MAX_CHARS);
 export const OUTPUT_SCHEMA_BODY_BYTES = jsonTextBodyBytes(OUTPUT_SCHEMA_BYTES);
+/** A JSON-RPC wrapper plus worst-case JSON escaping for Schema text, 200-char key/name and 2k description. */
+export const MANAGEMENT_OUTPUT_SCHEMA_BODY_BYTES = jsonTextBodyBytes(OUTPUT_SCHEMA_BYTES + 200 + 200 + 2_000);
 /** Base64 files plus each file's path and media type. */
 export const MATERIAL_BODY_BYTES = Math.ceil(EVAL_INITIALIZATION_MAX_BYTES / 3) * 4
   + (EVAL_MATERIAL_MAX_FILES + 1) * METADATA_BODY_BYTES;

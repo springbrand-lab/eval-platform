@@ -42,10 +42,13 @@ Action/Tool IDs, never Pi-derived charges.
 - `ProjectPlanReader`：Runtime 唯一的 Project 输入，提供 `getProjectPlan`（固定执行计划及其摘要；`evaluation` 为 `ProjectEvaluation | null`，评估计划 `plan`、摘要 `digest` 和锁定时间 `lockedAt` 只能一起存在）、`getProjectSamples`（按输入顺序返回完整 Data 快照）和 `getEvaluationOutputSchema`。Runtime 不读取实时 Dataset/Data、可编辑 Agent Config 或任何配置表。
 - `createEvalRunAdmission({ sourceCommit, plans, store, idFactory? })`：API 进程的准入入口，不持有 Harness 凭证。
   - `preview({ projectId, operation, selector })` 在 Project 快照内展开选择：`all`/`datasetIds` 按 Dataset 绑定顺序再按成员顺序展开为 ProjectSample，与显式 `projectSampleIds` 合并去重；execution/pipeline 的显式 Sampling 若其 ProjectSample 已被整条选中则被吸收；evaluation 把 ProjectSample 展开为当前执行成功的 Sampling（静默过滤失败/未完成），显式 Sampling 必须执行成功。返回固定 `targets`、替换/新建 Sampling 数、评估数和计划摘要。
-  - `submit({ idempotencyKey, projectId, operation, selector, targets })` 以 `targets` 为准校验（不重新展开），构造新 Sampling（每个目标 ProjectSample 按 `samplingCount` 新建，每个目标 Sampling 一对一新建）、EvaluationRecord（pipeline 每个新 Sampling 一条，evaluation 每个目标 Sampling 一条）和 Run，并调用一次 `RuntimeStore.admitRun()`。请求指纹为 `digestJson({ projectId, operation, selector, targets, planDigests })`，`planDigests` 含执行计划摘要，pipeline/evaluation 另含评估计划摘要；同 key 先按已存 Run 的摘要比对，事实相同即重放原 Run，不再读取计划。
+  - `replay({ idempotencyKey, projectId, operation, selector, targets, expectedPlanDigests? })` **只读**按 Project/key 查询已存 Run，用其原有 `planDigests` 核对原请求指纹；提供期望摘要时还须与已存摘要完全相等。相同事实返回原 Run（即使后续 Run 已替换其成员或计划改变），没有返回 `null`，不同事实拒绝。不查询当前计划/目标、绝不准入；省略摘要仅为旧已存 Run 的只读恢复，`submit` 不能省略。
+  - `submit({ idempotencyKey, projectId, operation, selector, targets, expectedPlanDigests })` 在读可变计划或目标**之前**查已存 Project/key Run；新 key 必须把 preview 的固定目标和计划摘要原样带入。Runtime 检查计划摘要，构造新 Sampling（每个目标 ProjectSample 按 `samplingCount` 新建，每个目标 Sampling 一对一新建）和 EvaluationRecord，并调用一次 `RuntimeStore.admitRun()`。在已有 Project 行锁下 Store 再核对已保存计划摘要、重新展开 selector 与提交 targets（包括 evaluation-only 的当前成功 Sampling）、替换集合，均匹配才写入/排队。请求指纹仍为 `digestJson({ projectId, operation, selector, targets, planDigests })`，Run 的 `planDigests` **来自调用者的 expectedPlanDigests** 而非提交时重新生成；相同 key/意图从已存 Run 重放，不读取当前计划。
 - `createEvalRunResumer({ plans, harness, store, evidence, evidenceLimits?, onError, ... })`：Worker 入口，`evidence` 是证据包存储 `EvidenceStore`，`evidenceLimits` 缺省为 `DEFAULT_EVIDENCE_LIMITS`；提供 `resume(runId, stopSignal?)`、`interrupt(runId)` 和 `stop(runId)`。每次先读取 Run，再读取 Project 计划并核对 `run.planDigests`；摘要不一致直接拒绝，绝不用另一份计划运行。执行使用执行计划的 Harness、`executionConcurrency` 和 `retryPolicy`，评估使用评估计划的对应字段；ProjectSample 按不同 ID 批量读取并校验身份。
 - 结果读取实现 `EvalRunQueries`（`getRun`、`getSampling`、`getEvaluation`、`listEvaluations`），由宿主基于自身存储提供；`toRunSnapshot` 投影 `operation`、`selector`、`targets` 与派生的 `phase/status`。
 - `ProjectView` 是 API 与 Web 共用的 Project 读取投影：固定计划、全部 `ProjectSample` 和 `ProjectRunState`。后者只包含既有 Run 序号和 `CurrentRun | null`，`CurrentRun` 从公开 `RunSnapshot` 选取身份与停止意图；这些是查询契约，不增加持久化状态。
+
+`projects.creation_key` 自 Project 提交起保留给 ProjectService 的首个 Run，即使还没有任何 Run。仅 ProjectService 在 `submit` 的**独立可信参数**中传瞬时 `firstRun.creationFingerprint`；Store 在 Project 行锁下与已有 `projects.creation_fingerprint` 比对，然后才能以该 key 写入/入队。普通 HTTP/管理 Run 请求没有此证明，不能抢占创建 key；不同 key 可以先运行，使创建 key 被 supersede。证明不在公开 `RunRequest`/HTTP Schema、Run 身份指纹、Run 行或队列中。同 key 的内存待提交合并不得让无证明请求加入有证明请求；已存首 Run 在后续 Run 替换其成员后仍可只读重放，但 Project 创建对账必须拒绝旧的错误首 Run 身份。
 
 `RuntimeStore.admitRun()` 的准入事务合同只由 [`runtime/store.ts`](src/runtime/store.ts) 定义，调度与持久化见[架构方案](../../docs/architecture.md#run-准入与独立评估)。
 
@@ -62,7 +65,8 @@ src/
 ├── runtime/
 │   ├── model.ts             # ProjectSample、ProjectPlanReader、准入/恢复端口和临时 Context
 │   ├── index.ts             # createEvalRunAdmission / createEvalRunResumer 入口
-│   ├── admission.ts         # 目标展开、目标校验、请求指纹与同实例并发合并
+│   ├── admission.ts         # 准入目标校验、期望计划摘要、请求指纹与同实例并发合并
+│   ├── targets.ts           # preview 与 Project 行锁准入共用的选择器展开
 │   ├── resume.ts            # 断点续跑和阶段编排
 │   ├── stop.ts              # 中断与停止收尾
 │   ├── records.ts           # 计划摘要核对与按序、校验身份的批量读取

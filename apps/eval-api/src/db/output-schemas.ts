@@ -31,11 +31,14 @@ function toRecord(row: typeof evaluationOutputSchemas.$inferSelect): OutputSchem
 export function createOutputSchemaCatalog(db: EvalDb, ownerUserId: string) {
   const owner = requireOwnerUserId(ownerUserId);
   return {
-    async create(input: { name: string; description: string; content: string }): Promise<OutputSchemaRecord> {
+    async create(input: { name: string; description: string; content: string },
+      plannedOutputSchemaId?: string): Promise<OutputSchemaRecord> {
       const name = requiredCatalogLabel(input.name, "name");
       const description = requiredCatalogLabel(input.description, "description");
       const schema = parseEvaluationOutputSchema(input.content);
-      const record = { outputSchemaId: createId(), ownerUserId: owner, name, description, schema };
+      // Only the trusted management adapter supplies a durable, precommitted ID; HTTP create still generates one.
+      const record = { outputSchemaId: plannedOutputSchemaId === undefined
+        ? createId() : platformId(plannedOutputSchemaId, "outputSchemaId"), ownerUserId: owner, name, description, schema };
       await db.insert(evaluationOutputSchemas).values(record);
       return toRecord({ ...record, deletedAt: null });
     },

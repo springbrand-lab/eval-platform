@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { ImportStaging } from "../agent-imports/bytes.js";
 import { safeImportPath } from "../agent-imports/bytes.js";
 import { ImportConflictError } from "../agent-imports/errors.js";
-import { IMPORT_LIMITS } from "../agent-imports/model.js";
+import { IMPORT_LIMITS, uuid } from "../agent-imports/model.js";
 import { PROMPT_DATASET_FILE_BYTES } from "../limits.js";
 import type { ManagementStore, UploadKind, UploadReceipt } from "./store.js";
 
@@ -30,26 +30,35 @@ export const uploadMetadataSchema = z.strictObject({
   }
 });
 export type UploadMetadata = z.output<typeof uploadMetadataSchema>;
+export interface UploadRecoveryReceipt extends UploadMetadata {
+  readonly uploadRef: string;
+  readonly expiresAt: string;
+}
 
 export interface ManagementFiles {
-  ingest(owner: string, metadata: UploadMetadata, body: ReadableStream<Uint8Array>): Promise<{
+  ingest(owner: string, metadata: UploadMetadata, body: ReadableStream<Uint8Array>, uploadId?: string): Promise<{
     uploadRef: string; byteSize: number; sha256: string; expiresAt: string;
   }>;
+  /** Read-only recovery of one READY, unexpired owner receipt after verifying its staged bytes. */
+  recover(owner: string, uploadId: string): Promise<UploadRecoveryReceipt>;
   info(owner: string, ref: string, kind: UploadKind): Promise<UploadReceipt>;
   read(owner: string, ref: string, kind: UploadKind): Promise<Uint8Array>;
 }
 
 const notAvailable = () => new HttpError("REQUEST_INVALID_INPUT", "The upload reference is unavailable, expired or the wrong kind");
+const notRecoverable = () => new HttpError("REQUEST_NOT_FOUND", "The upload receipt is unavailable");
 const stagedFile = (row: UploadReceipt) => ({
   path: "upload", url: "", size: row.byteSize, sha256: row.sha256,
 });
 
 export function createManagementFiles(store: ManagementStore, staging: ImportStaging): ManagementFiles {
   const files: ManagementFiles = {
-    async ingest(owner, metadata, body) {
+    async ingest(owner, metadata, body, uploadId) {
       const { kind, name, mediaType, byteSize, sha256 } = uploadMetadataSchema.parse(metadata);
+      // Absent for legacy clients. A supplied UUID is correlation, not permission
+      // to retry a POST: the DB reservation must be new before writing any bytes.
+      const uploadRef = uploadId === undefined ? crypto.randomUUID() : uuid.parse(uploadId);
       await staging.prune();
-      const uploadRef = crypto.randomUUID();
       const expiresAt = new Date(Date.now() + IMPORT_LIMITS.ttlMs);
       await store.reserveUpload(owner, uploadRef, { kind, name, mediaType, byteSize, sha256, expiresAt });
       try {
@@ -66,6 +75,27 @@ export function createManagementFiles(store: ManagementStore, staging: ImportSta
         }
         throw cause;
       }
+    },
+    async recover(owner, uploadId) {
+      const row = await store.upload(owner, uploadId);
+      if (!row || row.ownerUserId !== owner || row.uploadId !== uploadId || row.status !== "ready"
+        || !(row.expiresAt.getTime() > Date.now())
+        || !uploadMetadataSchema.safeParse({
+          kind: row.kind, name: row.name, mediaType: row.mediaType, byteSize: row.byteSize, sha256: row.sha256,
+        }).success) throw notRecoverable();
+      // ImportStaging.read() writes an expiry file (and could create a directory).
+      // A receipt GET must instead only check the existing hashed file, without
+      // returning its contents or fabricating a fresh staging entry.
+      try {
+        await staging.verify(uploadId, stagedFile(row), row.expiresAt.toISOString());
+      } catch {
+        throw notRecoverable();
+      }
+      if (!(row.expiresAt.getTime() > Date.now())) throw notRecoverable();
+      return {
+        uploadRef: row.uploadId, kind: row.kind, name: row.name, mediaType: row.mediaType,
+        byteSize: row.byteSize, sha256: row.sha256, expiresAt: row.expiresAt.toISOString(),
+      };
     },
     async info(owner, ref, kind) {
       const row = await store.upload(owner, ref);

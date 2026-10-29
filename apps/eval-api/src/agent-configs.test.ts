@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { digestJson } from "@eval-platform/eval-runtime";
 import { createAgentConfigService } from "./agent-configs.js";
 import type { AgentPurposeRecord, AgentPurposeStore } from "./db/agent-purposes.js";
 import { AgentConfigFrozenError } from "./db/errors.js";
@@ -96,6 +97,19 @@ describe("Agent Config new selections", () => {
     expect(agents.sp.createAgentConfig).toHaveBeenCalledExactlyOnceWith("session", {
       slug: expect.stringMatching(/^eval-frozen-/), name: "active (frozen)", description: null, setting: source.setting,
     });
+  });
+
+  it("refuses an Agent edited after its review digest before creating an SP frozen copy", async () => {
+    const source = config("reviewed", { model: "original", mcpServers: [] });
+    const reviewedDigest = await digestJson(source);
+    const edited = { ...source, setting: { model: "unapproved", mcpServers: [] } };
+    const agents = service([edited], []);
+    await expect(agents.freeze(source.id, "execution", reviewedDigest))
+      .rejects.toMatchObject({ reason: "plan-changed" });
+    expect(agents.sp.createAgentConfig).not.toHaveBeenCalled();
+    const currentDigest = await digestJson(edited);
+    await agents.freeze(source.id, "execution", currentDigest);
+    expect(agents.sp.createAgentConfig).toHaveBeenCalledOnce();
   });
 
   it("keeps recorded and reserved-slug copies out of lists and new selections but readable by ID", async () => {

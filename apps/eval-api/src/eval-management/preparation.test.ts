@@ -143,6 +143,8 @@ describe("durable management preparation", () => {
       idempotencyKey: "first-run", name: "Blocked", datasets: [{ datasetId: progress.datasetId }],
       samplingCount: 1, execution: { userAgentId: AGENT, framework: "sp", executionConcurrency: 1 },
       run: { operation: "execution" },
+      expectedSnapshots: { datasets: [{ datasetId: progress.datasetId, digest: "a".repeat(64) }],
+        executionAgent: "b".repeat(64) },
     })).json();
     expect(blocked).toMatchObject({ result: { isError: true } });
     expect(f.app.services.projects.create).not.toHaveBeenCalled();

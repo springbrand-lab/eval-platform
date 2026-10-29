@@ -11,7 +11,7 @@ import { resourceIdSchema, type uploadAgentSkillSchema } from "./schemas.js";
 type SkillInput = z.output<typeof uploadAgentSkillSchema>;
 const skillRoute = AGENT_LIBRARY_ROUTES.find((item) => item.path === "/skills" && item.method === "post")!;
 export class ManagementOutcomeUnknownError extends Error {
-  constructor() { super("The public SP write has no confirmed receipt; inspect the original operation key, never replay it"); }
+  constructor() { super("The management write has no confirmed receipt; inspect the original operation key, never replay it"); }
 }
 const conflict = () => new HttpError("EVAL_SP_CONFLICT", "Skill name or identity conflicts with the approved intent");
 

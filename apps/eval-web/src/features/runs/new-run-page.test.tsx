@@ -67,7 +67,8 @@ it("does not submit a late preview after the operation changed", async () => {
     expect(mocks.submit).not.toHaveBeenCalled();
     await click(button(view.container, "预览")); await flush();
     await click(button(view.container, "提交 Run")); await flush();
-    expect(mocks.submit.mock.calls[0]?.[1]).toMatchObject({ operation: "evaluation", targets: preview("evaluation").targets });
+    expect(mocks.submit.mock.calls[0]?.[1]).toMatchObject({ operation: "evaluation", targets: preview("evaluation").targets,
+      expectedPlanDigests: { execution: "execution", evaluation: "evaluation" } });
   } finally { await view.close(); }
 });
 
@@ -83,6 +84,9 @@ it("replays the captured command after an uncertain submission, even when the se
     expect(view.container.textContent).toContain("提交结果尚未确认");
     expect(view.container.querySelector("fieldset")?.disabled).toBe(true);
     const command = mocks.submit.mock.calls[0]?.[1];
+    expect(command).toMatchObject({ expectedPlanDigests: { execution: "execution" } });
+    expect(command.expectedPlanDigests).not.toHaveProperty("evaluation");
+    mocks.preview.mockResolvedValue({ ...preview("execution"), executionPlanDigest: "unapproved-new-plan" });
     await click(button(view.container, "重试提交")); await flush();
     expect(mocks.submit.mock.calls[1]?.[1]).toEqual(command);
     expect(mocks.preview).toHaveBeenCalledTimes(1);
@@ -90,19 +94,29 @@ it("replays the captured command after an uncertain submission, even when the se
   } finally { await view.close(); }
 });
 
-it("clears a stale target preview and requires a new preview", async () => {
-  mocks.submit.mockRejectedValueOnce(new ApiError({ kind: "http", code: "RUN_TARGETS_STALE", status: 409, message: "stale" }));
-  const view = await page();
-  try {
-    await click(button(view.container, "预览")); await flush();
-    await click(button(view.container, "提交 Run")); await flush();
-    expect(button(view.container, "提交 Run").disabled).toBe(true);
-    expect(view.container.querySelector("fieldset")?.disabled).toBe(false);
-    expect(view.container.textContent).toContain("目标已变化");
-    await click(button(view.container, "预览")); await flush();
-    expect(button(view.container, "提交 Run").disabled).toBe(false);
-  } finally { await view.close(); }
-});
+it.each(["RUN_TARGETS_STALE", "PROJECT_PLAN_CHANGED"] as const)(
+  "clears a %s preview and requires a new preview", async (code) => {
+    mocks.submit.mockRejectedValueOnce(new ApiError({ kind: "http", code, status: 409, message: "stale" }));
+    const view = await page();
+    try {
+      await click(button(view.container, "预览")); await flush();
+      await click(button(view.container, "提交 Run")); await flush();
+      expect(button(view.container, "提交 Run").disabled).toBe(true);
+      expect(view.container.querySelector("fieldset")?.disabled).toBe(false);
+      expect(view.container.textContent).toContain(code === "PROJECT_PLAN_CHANGED" ? "计划有变化" : "目标已变化");
+      if (code === "PROJECT_PLAN_CHANGED") {
+        mocks.preview.mockResolvedValueOnce({ ...preview("execution"), executionPlanDigest: "new-reviewed-digest" });
+      }
+      await click(button(view.container, "预览")); await flush();
+      expect(button(view.container, "提交 Run").disabled).toBe(false);
+      if (code === "PROJECT_PLAN_CHANGED") {
+        await click(button(view.container, "提交 Run")); await flush();
+        expect(mocks.submit.mock.calls[1]?.[1].expectedPlanDigests)
+          .toEqual({ execution: "new-reviewed-digest" });
+      }
+    } finally { await view.close(); }
+  },
+);
 
 it("keeps hidden Dataset selections while searching and invalidates the preview when cleared", async () => {
   mocks.project.mockResolvedValue(selectionProject());

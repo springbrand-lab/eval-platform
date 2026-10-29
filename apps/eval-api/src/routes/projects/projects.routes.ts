@@ -152,9 +152,10 @@ export const observeChat = createRoute({
   summary: "Read the Subject or Evaluator Chat's messages, Workspace tree or trajectory page (read-only)",
   request: {
     params: observedParams.extend({ part: z.enum(["messages", "tree", "trajectory"]) }),
-    query: z.object({
+    query: z.strictObject({
       limit: z.coerce.number().int().min(1).max(200).optional(),
-      beforeSeq: z.coerce.number().int().positive().optional(),
+      afterSeq: z.coerce.number().int().nonnegative().optional(),
+      throughSeq: z.coerce.number().int().nonnegative().optional(),
     }),
   },
   responses: {

@@ -50,26 +50,45 @@ describe("trusted management MCP transport", () => {
     expect(app.release).toHaveBeenCalledTimes(1);
   });
 
-  it("is stateless and advertises exactly the fourteen documented management tools, not submit_evaluation", async () => {
+  it("is stateless and advertises exactly sixteen management tools including separate read-only reconciliation", async () => {
     const app = setupManagement();
     const initialized = await app.rpc(rpc("initialize", 2, { protocolVersion: "2025-06-18" }));
     expect(initialized.headers.get("mcp-session-id")).toBeNull();
     expect(await initialized.json()).toMatchObject({ result: { protocolVersion: "2025-06-18",
       capabilities: { tools: { listChanged: false } } } });
     const tools = await (await app.rpc(rpc("tools/list"))).json() as {
-      result: { tools: Array<{ name: string; inputSchema: { type: string; required?: string[]; additionalProperties?: boolean } }> };
+      result: { tools: Array<{ name: string; inputSchema: {
+        type: string; required?: string[]; additionalProperties?: boolean; properties?: Record<string, unknown>;
+      } }> };
     };
     expect(tools.result.tools.map(({ name }) => name)).toEqual([
       "list_options", "prepare_inputs", "get_preparation", "search_agent_resources",
-      "upload_agent_skill", "upload_agent_reference", "create_agent", "create_project", "preview_run",
-      "submit_run", "stop_run", "get_run", "get_metrics", "inspect_case",
+      "upload_agent_skill", "upload_agent_reference", "create_output_schema", "create_agent", "create_project", "preview_run",
+      "submit_run", "reconcile_operation", "stop_run", "get_run", "get_metrics", "inspect_case",
     ]);
-    expect(tools.result.tools.every(({ inputSchema }) => inputSchema.type === "object"
+    expect(tools.result.tools.filter(({ name }) => name !== "reconcile_operation").every(({ inputSchema }) => inputSchema.type === "object"
       && inputSchema.additionalProperties === false)).toBe(true);
     expect(tools.result.tools.find(({ name }) => name === "create_agent")!.inputSchema.required)
       .toEqual(expect.arrayContaining(["operationKey", "purpose", "instructions", "modelId"]));
+    expect(tools.result.tools.find(({ name }) => name === "create_output_schema")!.inputSchema.required)
+      .toEqual(expect.arrayContaining(["operationKey", "name", "description", "content"]));
+    expect(tools.result.tools.find(({ name }) => name === "create_project")!.inputSchema.required)
+      .toContain("expectedSnapshots");
+    const runInput = tools.result.tools.find(({ name }) => name === "submit_run")!.inputSchema;
+    expect(runInput.required).toEqual(expect.arrayContaining(["projectId", "idempotencyKey", "operation", "selector", "targets", "expectedPlanDigests"]));
+    expect(runInput.properties).not.toHaveProperty("replayOnly"); // removed from both call and advertised schemas
+    expect(tools.result.tools.find(({ name }) => name === "reconcile_operation")!.inputSchema)
+      .toHaveProperty("oneOf");
     expect(tools.result.tools.map(({ name }) => name)).not.toContain("submit_evaluation");
     expect(app.release).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the ordinary 1 MB MCP ingress limit despite the bounded Schema JSON-escape allowance", async () => {
+    const app = setupManagement();
+    const oversized = await app.rpc(rpc("ping", 1, { padding: "x".repeat(1_000_000) }));
+    expect(oversized.status).toBe(413);
+    expect(await oversized.json()).toMatchObject({ code: "REQUEST_PAYLOAD_TOO_LARGE" });
+    expect(app.services.outputSchemas.create).not.toHaveBeenCalled();
   });
 
   it("negotiates the same four protocol versions and defaults unknown or missing versions", async () => {

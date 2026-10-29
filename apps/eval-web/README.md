@@ -85,6 +85,8 @@ Dataset → Data 下钻保留项目选择，单条数据使用 row 的权威值�
 - `src/auth/`：接收 takt 交给 iframe 的登录 token，只保存在内存中。
 - `worker/`：部署用的 Cloudflare Worker，托管静态资源并转发 `/api/*`。
 
+Run 预览返回固定 targets 和两个计划摘要（execution 没有 evaluation 摘要）。提交时用同一次预览生成 `expectedPlanDigests` 并保留同一命令和 key 供不确定结果重试；计划或目标改变后须重新预览。UI 不替代 Runtime 的 Project 行锁准入。
+
 ## 登录与部署
 
 与 takt 共用登录：takt 的 `/dashboard/eval` 用 iframe 打开本应用，iframe 发出 `eval:ready`，takt 只向本应用的来源回传 `{type: "takt:token", token}`。Worker 用这个 token 调用 takt 的 `/api/auth/me`，用户须有 `eval` 菜单（或是管理员）才放行；之后去掉 token，附上 `X-Eval-Web-Token` 与操作人 `X-Eval-Actor` 转发给 Eval API。页面响应带 `Content-Security-Policy: frame-ancestors`，只允许 takt 嵌入。
@@ -111,7 +113,7 @@ pnpm --filter @eval-platform/eval-web dev
 
 资源与轨迹按 Agent 分开，四层与采样 Agent 详情复用一套投影。执行/评估阶段状态直接使用各自的 Sampling/Evaluation 状态；Turn、模型请求、工具调用以及思考步骤/内容步骤的成功/失败/取消/未闭合/未知是底层遥测操作统计，不作为 Agent 阶段状态。按工具类型展示调用/返回长度与耗时；每个 `generation` operation 是一个模型 Step，Step 自身或所属 Turn 的输出含 `thinking`/`signature` 标记时计入思考步骤，含 `content` 标记时计入内容步骤，并分别汇总命中 Step 的 Token。一个 Turn 可以包含多个 Step，一个 Step 可以同时命中两类，数量不要求加总为 Turn 总数；Token 也可能重叠。长度以规范 JSON 的 UTF-8 字节计，不转换为 Token；时长展示累计、均值、范围与有效/缺失数量，不当成并行批次的墙钟时间。
 
-只读 Trajectory 使用 SP Chat 调试页的 `{records:[{ingestSeq,record} | {ingestSeq,reference}],beforeSeq,hasOlder}`，原样展开 SAFE `pi-trajectory/v1` 记录，不转换成旧 `events`。筛选仅按已加载的原生 `conversation` / `entry.kind` / 大记录引用；引用只展示大小和元数据，明确提示当前调试接口未返回原文字节，不冒充完整记录。轮数等统计始终来自 Metrics。Query 缓存保存一个已加载区间，历史分页与运行中刷新原子合并；新尾页跨过多页时补齐到旧区间，已加载历史不会被滚动窗口替换。Run 结束时再刷新观察数据。
+只读 Trajectory 使用 SP Chat 的 `{format:"sp-pi-trajectory/v1",cursor:{throughSeq},records:[{ingestSeq,record} | {ingestSeq,reference}],nextAfterSeq}`，`afterSeq:0` 从头开始，每次按返回的 `nextAfterSeq` 与冻结的 `throughSeq` 向前读至终点，不发送旧 `beforeSeq`，不转换成旧 `events`。筛选仅按已加载的原生 `conversation` / `entry.kind` / 大记录引用；Web 当前只展示引用大小和元数据，不假装它是完整的 Pi 记录（管理 MCP 的单记录完整字节读取独立于 Web）。轮数等统计始终来自 Metrics。Query 缓存保存一个连续的已加载前缀，运行中刷新只从已完成的水位开始，先读完已冻结的多页数据再发现新尾部；分页与刷新原子合并，不把已加载记录替换成滚动窗口。Run 结束时再刷新观察数据。
 
 Workspace 只保存选中的路径，节点取当前目录树。Query 只缓存原文件 Blob，解码、解析和关联资源属于当前选择的取消生命周期，切换文件或已知版本时旧读取不能回填新预览；读取失败可重试，关联资源失败也可通过重新加载文件重试。每次选中验证当前文件，运行中沿用统一轮询周期读取，结束由 Project 统一刷新，不以可选的 mtime 或 size 推断内容未改变。HTML 视图在同一路径更新时保留用户的源码/预览选择。下载链接按 Blob 生命周期创建和释放。
 

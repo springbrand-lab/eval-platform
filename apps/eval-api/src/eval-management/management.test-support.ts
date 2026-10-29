@@ -18,6 +18,7 @@ export function fakeManagement(owner: string) {
   const store: ManagementStore = {
     async reserveUpload(ownerId, uploadId, meta) {
       if (ownerId !== owner) throw conflict();
+      if (uploads.has(uploadId)) throw conflict();
       uploads.set(uploadId, { ownerUserId: owner, uploadId, ...meta, status: "reserved", claimedBy: null, createdAt: new Date() });
     },
     async releaseUpload(_ownerId, uploadId) { uploads.delete(uploadId); },
@@ -29,12 +30,16 @@ export function fakeManagement(owner: string) {
     async begin(ownerId, key, kind, fingerprint, plan, skillName) {
       if (ownerId !== owner) throw conflict();
       let row = operations.get(key);
-      if (row && (row.kind !== kind || row.fingerprint !== fingerprint)) throw conflict();
+      const claimedSkillName = kind === "skill" ? skillName ?? null : null;
+      if (row && (row.kind !== kind || row.fingerprint !== fingerprint
+        || row.skillName !== claimedSkillName
+        || JSON.stringify(row.plan) !== JSON.stringify(plan))) throw conflict();
       if (kind === "skill" && [...operations.values()].some((other) =>
-        other.operationKey !== key && other.kind === kind && other.skillName === skillName && other.status !== "completed")) throw conflict();
+        other.operationKey !== key && other.kind === kind && other.skillName === claimedSkillName
+          && other.status !== "completed")) throw conflict();
       const refs = kind === "prepare"
         ? [plan.promptUploadRef, ...(plan.assets as Array<{ uploadRef: string }>).map((asset) => asset.uploadRef)]
-        : [plan.uploadRef];
+        : kind === "output_schema" ? [] : [plan.uploadRef];
       for (const ref of refs) {
         const upload = uploads.get(ref as string);
         if (!upload || upload.claimedBy && upload.claimedBy !== key) throw conflict();
@@ -42,7 +47,7 @@ export function fakeManagement(owner: string) {
       for (const ref of refs) uploads.set(ref as string, { ...uploads.get(ref as string)!, claimedBy: key });
       row ??= {
         ownerUserId: owner, operationKey: key, kind, fingerprint, plan, stages: {},
-        status: "pending", skillName: skillName ?? null, createdAt: new Date(),
+        status: "pending", skillName: claimedSkillName, createdAt: new Date(),
       };
       operations.set(key, row);
       return row;
@@ -64,7 +69,8 @@ export function fakeManagement(owner: string) {
     async complete(ownerId, key) {
       const row = saved(ownerId, key);
       const required = row.kind === "skill" ? ["skill"] : row.kind === "reference" ? ["attachment", "reference"]
-        : ["dataset", ...(row.plan.assets as Array<{ uploadRef: string }>).map((asset) => `resource:${asset.uploadRef}`),
+        : row.kind === "output_schema" ? ["output_schema"]
+          : ["dataset", ...(row.plan.assets as Array<{ uploadRef: string }>).map((asset) => `resource:${asset.uploadRef}`),
           ...(row.plan.dataIds as string[]).map((id) => `data:${id}`)];
       if (required.some((stage) => row.stages[stage]?.status !== "confirmed")) throw conflict();
       operations.set(key, { ...row, status: "completed" });
@@ -75,13 +81,23 @@ export function fakeManagement(owner: string) {
     },
   };
   const files: ManagementFiles = {
-    async ingest(ownerId, metadata, body) {
+    async ingest(ownerId, metadata, body, uploadId) {
       if (ownerId !== owner) throw conflict();
       const bytes = new Uint8Array(await new Response(body).arrayBuffer());
       if (bytes.byteLength !== metadata.byteSize || createHash("sha256").update(bytes).digest("hex") !== metadata.sha256) throw unavailable();
-      const ref = addUpload(metadata.kind, metadata.name, bytes, metadata.mediaType);
+      const ref = addUpload(metadata.kind, metadata.name, bytes, metadata.mediaType, uploadId);
       return { uploadRef: ref, byteSize: metadata.byteSize, sha256: metadata.sha256,
         expiresAt: uploads.get(ref)!.expiresAt.toISOString() };
+    },
+    async recover(ownerId, uploadId) {
+      const row = await store.upload(ownerId, uploadId);
+      const bytes = bodies.get(uploadId);
+      if (!row || !bytes || row.expiresAt.getTime() <= Date.now() || bytes.byteLength !== row.byteSize
+        || createHash("sha256").update(bytes).digest("hex") !== row.sha256) {
+        throw new HttpError("REQUEST_NOT_FOUND", "Upload receipt unavailable");
+      }
+      return { uploadRef: row.uploadId, kind: row.kind, name: row.name, mediaType: row.mediaType,
+        byteSize: row.byteSize, sha256: row.sha256, expiresAt: row.expiresAt.toISOString() };
     },
     async info(ownerId, ref, kind) {
       const row = await store.upload(ownerId, ref);
@@ -95,8 +111,9 @@ export function fakeManagement(owner: string) {
     },
   };
   function addUpload(kind: UploadKind, name: string, bytes: Uint8Array,
-    mediaType = kind === "skill" ? "application/zip" : "application/octet-stream"): string {
-    const uploadId = crypto.randomUUID();
+    mediaType = kind === "skill" ? "application/zip" : "application/octet-stream", suppliedId?: string): string {
+    const uploadId = suppliedId ?? crypto.randomUUID();
+    if (uploads.has(uploadId)) throw conflict();
     bodies.set(uploadId, bytes);
     uploads.set(uploadId, {
       ownerUserId: owner, uploadId, kind, name, mediaType, byteSize: bytes.byteLength,

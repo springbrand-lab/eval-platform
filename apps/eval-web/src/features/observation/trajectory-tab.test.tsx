@@ -23,15 +23,15 @@ const conversation = (seq: number): NativeTrajectoryEntry => ({
     record: { type: "conversation", value: { id: seq + 10 } },
   },
 });
-const reference = (seq: number): SpPiTrajectoryRecordReference => ({
-  ingestSeq: seq, reference: { format: "sp-pi-trajectory-record/v1", throughSeq: 50,
+const reference = (seq: number, throughSeq = 8): SpPiTrajectoryRecordReference => ({
+  ingestSeq: seq, reference: { format: "sp-pi-trajectory-record/v1", throughSeq,
     identity: JSON.stringify(["agent", "chat", "entry", seq + 10]), byteLength: 5_500_000, sha256: "a".repeat(64) },
 });
-const page: TrajectoryPage = { records: [
+const page: TrajectoryPage = { format: "sp-pi-trajectory/v1", cursor: { throughSeq: 8 }, records: [
   stored(3, "springbrand.trajectory"), stored(4, "pi.user", {
     model: [{ role: "user", content: "original native evidence", timestamp: 1_700_000_000_000 }],
   }), conversation(5), stored(6, "new.entry"),
-], beforeSeq: 3, hasOlder: true };
+], nextAfterSeq: 6 };
 
 async function choose(select: Element | null, value: string) {
   await act(async () => { (select as HTMLSelectElement).value = value; select!.dispatchEvent(new Event("change", { bubbles: true })); });
@@ -43,7 +43,7 @@ describe("read-only native Chat trajectory", () => {
 
   it("renders an empty native Chat trajectory page without an ingestSeq error", async () => {
     // The public SP Chat route returns `records`, not the old `events` page.
-    get.mockResolvedValueOnce({ records: [], beforeSeq: null, hasOlder: false });
+    get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 0 }, records: [], nextAfterSeq: null });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(<QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="samplings" id="s" /></QueryClientProvider>);
     try {
@@ -54,9 +54,9 @@ describe("read-only native Chat trajectory", () => {
   });
 
   it("renders an inline SAFE Pi record from the Chat page without inventing an event", async () => {
-    get.mockResolvedValueOnce({ records: [stored(3, "pi.user", {
+    get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 3 }, records: [stored(3, "pi.user", {
       model: [{ role: "user", content: "original native evidence", timestamp: 1_700_000_000_000 }],
-    })], beforeSeq: 3, hasOlder: false });
+    })], nextAfterSeq: null });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(<TooltipProvider><QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="evaluations" id="e" /></QueryClientProvider></TooltipProvider>);
     try {
@@ -71,7 +71,8 @@ describe("read-only native Chat trajectory", () => {
   });
 
   it("keeps an oversized record reference visible with a bounded missing-body diagnostic", async () => {
-    get.mockResolvedValueOnce({ records: [stored(3, "pi.user"), reference(4), stored(5, "pi.assistant")], beforeSeq: 3, hasOlder: false });
+    get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 8 },
+      records: [stored(3, "pi.user"), reference(4), stored(5, "pi.assistant")], nextAfterSeq: null });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(<TooltipProvider><QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="samplings" id="s" /></QueryClientProvider></TooltipProvider>);
     try {
@@ -122,26 +123,31 @@ describe("read-only native Chat trajectory", () => {
     } finally { await view.unmount(); client.clear(); }
   });
 
-  it("paginates in order, removes overlap and retains loaded evidence when a later request fails", async () => {
+  it("pages forward under a fixed cutoff and retains loaded records after a failed read", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(<QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="evaluations" id="e" /></QueryClientProvider>);
     try {
       await settle();
       get.mockRejectedValueOnce(new Error("temporary failure"));
-      await click([...view.container.querySelectorAll("button")].find((item) => item.textContent === "加载更早的记录"));
+      await click([...view.container.querySelectorAll("button")].find((item) => item.textContent === "加载更多记录"));
       await settle();
       expect(view.container.querySelectorAll("ol > li")).toHaveLength(4);
       expect(view.container.textContent).toContain("temporary failure");
-      get.mockResolvedValueOnce({ records: [stored(1, "pi.user"), stored(2, "pi.toolResult"), page.records[0]!], beforeSeq: null, hasOlder: false });
-      await click([...view.container.querySelectorAll("button")].find((item) => item.textContent === "加载更早的记录"));
+      get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 8 },
+        records: [stored(7, "pi.user"), stored(8, "pi.toolResult")], nextAfterSeq: null });
+      await click([...view.container.querySelectorAll("button")].find((item) => item.textContent === "加载更多记录"));
       await settle();
       expect(view.container.querySelectorAll("ol > li")).toHaveLength(6);
-      expect([...view.container.querySelectorAll("ol > li")].map((item) => [...item.querySelectorAll("span")].find((span) => /^#\d+$/.test(span.textContent ?? ""))?.textContent)).toEqual(["#1", "#2", "#3", "#4", "#5", "#6"]);
-      expect(get).toHaveBeenLastCalledWith("p", "evaluations", "e", 3, undefined);
+      expect([...view.container.querySelectorAll("ol > li")].map((item) =>
+        item.textContent?.match(/#\d+/u)?.[0])).toEqual(["#3", "#4", "#5", "#6", "#7", "#8"]);
+      expect(get).toHaveBeenLastCalledWith("p", "evaluations", "e", 6, 8, undefined);
+      expect(view.container.textContent).not.toContain("加载更多记录");
     } finally { await view.unmount(); client.clear(); }
   });
 
   it("refreshes the current trajectory while the Project is running", async () => {
+    get.mockResolvedValueOnce({ ...page, cursor: { throughSeq: 6 }, nextAfterSeq: null })
+      .mockResolvedValue({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 6 }, records: [], nextAfterSeq: null });
     vi.useFakeTimers();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(<QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="samplings" id="s" running /></QueryClientProvider>);
@@ -151,50 +157,49 @@ describe("read-only native Chat trajectory", () => {
       expect(initialCalls).toBeGreaterThan(0);
       await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
       expect(get.mock.calls.length).toBeGreaterThan(initialCalls);
+      expect(get).toHaveBeenLastCalledWith("p", "samplings", "s", 6, undefined, expect.any(AbortSignal));
     } finally { await view.unmount(); client.clear(); vi.useRealTimers(); }
   });
 
-  it("sorts newest-first Chat rows before using the last loaded ingestSeq for refresh", async () => {
-    get.mockResolvedValueOnce({ records: [stored(5, "pi.assistant"), stored(4, "pi.user"), stored(3, "springbrand.trajectory")],
-      beforeSeq: 3, hasOlder: true });
+  it("refuses nonascending native rows instead of silently reordering an invalid SP page", async () => {
+    get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 5 },
+      records: [stored(5, "pi.assistant"), stored(4, "pi.user")], nextAfterSeq: null });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(<QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="samplings" id="s" /></QueryClientProvider>);
     try {
       await settle();
-      expect([...view.container.querySelectorAll("ol > li")].map((item) => item.textContent?.match(/#\d+/u)?.[0]))
-        .toEqual(["#3", "#4", "#5"]);
-      get.mockResolvedValueOnce({ records: [stored(6, "pi.assistant"), stored(5, "pi.assistant")], beforeSeq: 5, hasOlder: true });
-      const requestsBeforeRefresh = get.mock.calls.length;
-      await act(async () => { await client.invalidateQueries({ queryKey: ["observation", "p"] }); });
-      await settle();
-      expect(get.mock.calls.length - requestsBeforeRefresh).toBe(1);
-      expect(view.container.querySelectorAll("ol > li")).toHaveLength(4);
-      expect(view.container.querySelector("ol > li:last-child")?.textContent).toContain("#6");
+      expect(view.container.textContent).toContain("轨迹响应不是 SAFE Pi 原生 records 页");
+      expect(view.container.querySelectorAll("ol > li")).toHaveLength(0);
     } finally { await view.unmount(); client.clear(); }
   });
 
-  it("preserves loaded history and fills a multi-page gap when the tail advances", async () => {
+  it("retains a complete prefix and finishes the frozen new tail before polling again", async () => {
+    get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 2 },
+      records: [stored(1, "pi.user"), stored(2, "pi.toolResult")], nextAfterSeq: null });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const view = await render(<QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="samplings" id="s" running /></QueryClientProvider>);
+    const view = await render(<QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="samplings" id="s" /></QueryClientProvider>);
     try {
       await settle();
-      get.mockResolvedValueOnce({ records: [stored(1, "pi.user"), stored(2, "pi.toolResult")], beforeSeq: null, hasOlder: false });
-      await click([...view.container.querySelectorAll("button")].find((item) => item.textContent === "加载更早的记录"));
-      await settle();
-      get.mockResolvedValueOnce({ records: [stored(10, "springbrand.trajectory"), stored(11, "pi.user")], beforeSeq: 10, hasOlder: true });
-      get.mockResolvedValueOnce({ records: [stored(7, "pi.assistant"), stored(8, "pi.toolResult"), stored(9, "pi.user")], beforeSeq: 7, hasOlder: true });
-      get.mockResolvedValueOnce({ records: [page.records[3]!, stored(7, "pi.assistant")], beforeSeq: 6, hasOlder: true });
+      get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 6 },
+        records: [stored(3, "springbrand.trajectory"), stored(4, "pi.assistant")], nextAfterSeq: 4 });
       await act(async () => { await client.invalidateQueries({ queryKey: ["observation", "p"] }); });
       await settle();
-      expect(view.container.querySelectorAll("ol > li")).toHaveLength(11);
+      expect(get).toHaveBeenLastCalledWith("p", "samplings", "s", 2, undefined, expect.any(AbortSignal));
+      get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 6 },
+        records: [stored(5, "pi.assistant"), stored(6, "pi.user")], nextAfterSeq: null });
+      await click([...view.container.querySelectorAll("button")].find((item) => item.textContent === "加载更多记录"));
+      await settle();
+      expect(get).toHaveBeenLastCalledWith("p", "samplings", "s", 4, 6, undefined);
+      expect(view.container.querySelectorAll("ol > li")).toHaveLength(6);
       expect(view.container.querySelector("ol > li")?.textContent).toContain("#1");
-      expect(view.container.querySelector("ol > li:last-child")?.textContent).toContain("#11");
-      expect(view.container.textContent).not.toContain("加载更早的记录");
+      expect(view.container.querySelector("ol > li:last-child")?.textContent).toContain("#6");
+      expect(view.container.textContent).not.toContain("加载更多记录");
     } finally { await view.unmount(); client.clear(); }
   });
 
-  it("opens history paging when the first empty tail grows past a page", async () => {
-    get.mockResolvedValueOnce({ records: [], beforeSeq: null, hasOlder: false });
+  it("retries forward paging when an initially empty Chat grows", async () => {
+    get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 0 },
+      records: [], nextAfterSeq: null });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(<QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="samplings" id="s" /></QueryClientProvider>);
     try {
@@ -203,32 +208,25 @@ describe("read-only native Chat trajectory", () => {
       await act(async () => { await client.invalidateQueries({ queryKey: ["observation", "p"] }); });
       await settle();
       expect(view.container.querySelectorAll("ol > li")).toHaveLength(4);
-      expect(view.container.textContent).toContain("加载更早的记录");
+      expect(view.container.textContent).toContain("加载更多记录");
     } finally { await view.unmount(); client.clear(); }
   });
 
-  it.each(["history-first", "tail-first"])("merges concurrent refresh and history reads atomically (%s)", async (order) => {
+  it("continues an unfinished frozen page on refresh instead of rebasing to a moving cutoff", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(<QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="samplings" id="s" /></QueryClientProvider>);
     try {
       await settle();
-      let finishTail!: (value: TrajectoryPage) => void;
-      let finishHistory!: (value: TrajectoryPage) => void;
-      get.mockImplementationOnce(() => new Promise((resolve) => { finishTail = resolve; }));
-      let refresh!: Promise<void>;
-      await act(async () => { refresh = client.invalidateQueries({ queryKey: ["observation", "p"] }); });
-      get.mockImplementationOnce(() => new Promise((resolve) => { finishHistory = resolve; }));
-      await click([...view.container.querySelectorAll("button")].find((item) => item.textContent === "加载更早的记录"));
-      const tail = () => finishTail({ records: [page.records[3]!, stored(7, "springbrand.trajectory")], beforeSeq: 6, hasOlder: true });
-      const history = () => finishHistory({ records: [stored(1, "pi.user"), stored(2, "pi.toolResult")], beforeSeq: null, hasOlder: false });
-      await act(async () => { if (order === "history-first") history(); else tail(); });
+      const calls = get.mock.calls.length;
+      get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 8 },
+        records: [stored(7, "pi.user"), stored(8, "pi.assistant")], nextAfterSeq: null });
+      await act(async () => { await client.invalidateQueries({ queryKey: ["observation", "p"] }); });
       await settle();
-      await act(async () => { if (order === "history-first") tail(); else history(); await refresh; });
-      await settle();
-      expect(view.container.querySelectorAll("ol > li")).toHaveLength(7);
-      expect(view.container.querySelector("ol > li")?.textContent).toContain("#1");
-      expect(view.container.querySelector("ol > li:last-child")?.textContent).toContain("#7");
-      expect(view.container.textContent).not.toContain("加载更早的记录");
+      expect(get).toHaveBeenCalledTimes(calls + 1);
+      expect(get).toHaveBeenLastCalledWith("p", "samplings", "s", 6, 8, expect.any(AbortSignal));
+      expect(view.container.querySelectorAll("ol > li")).toHaveLength(6);
+      expect(view.container.querySelector("ol > li:last-child")?.textContent).toContain("#8");
+      expect(view.container.textContent).not.toContain("加载更多记录");
     } finally { await view.unmount(); client.clear(); }
   });
 });

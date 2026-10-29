@@ -24,11 +24,12 @@ describe("offline Dashboard and management migration integrity", () => {
   it("preserves the immutable Dashboard history and appends management after it", async () => {
     const migrations = readMigrationFiles({ migrationsFolder });
     expect(migrations.slice(0, appliedPrefix.length).map((migration) => [migration.folderMillis, migration.hash])).toEqual(appliedPrefix);
-    expect(migrations).toHaveLength(appliedPrefix.length + 1);
+    expect(migrations).toHaveLength(appliedPrefix.length + 2);
     const journal = await metadata("_journal.json");
     expect(journal.entries).toHaveLength(migrations.length);
     expect(journal.entries[8]).toMatchObject({ idx: 8, tag: "0008_dashboard_data_selection", breakpoints: true });
-    expect(journal.entries.at(-1)).toMatchObject({ idx: 9, tag: "0009_management_preparation", breakpoints: true });
+    expect(journal.entries[9]).toMatchObject({ idx: 9, tag: "0009_management_preparation", breakpoints: true });
+    expect(journal.entries.at(-1)).toMatchObject({ idx: 10, tag: "0010_management_output_schema", breakpoints: true });
     expect(journal.entries.map((entry: { when: number }) => entry.when)).toEqual(migrations.map((migration) => migration.folderMillis));
     expect(migrations.at(-1)!.folderMillis).toBeGreaterThan(migrations.at(-2)!.folderMillis);
   });
@@ -81,6 +82,33 @@ describe("offline Dashboard and management migration integrity", () => {
       .toHaveProperty("eval_management_operations_pk");
     expect(current.tables["public.eval_management_uploads"].indexes)
       .toHaveProperty("eval_management_uploads_expiry_idx");
-    expect(readMigrationFiles({ migrationsFolder }).at(-1)?.sql.join(" ")).not.toMatch(/\b(DROP|DELETE|TRUNCATE)\b/iu);
+    expect(readMigrationFiles({ migrationsFolder })[9]?.sql.join(" ")).not.toMatch(/\b(DROP|DELETE|TRUNCATE)\b/iu);
+  });
+
+  it("changes only the management operation kind check, preserving catalog duplicates and existing identity", async () => {
+    const previous = await metadata("0009_snapshot.json");
+    const current = await metadata("0010_snapshot.json");
+    expect(current.prevId).toBe(previous.id);
+    expect(Object.keys(current.tables)).toEqual(Object.keys(previous.tables));
+    expect(current.tables["public.eval_evaluation_output_schemas"])
+      .toEqual(previous.tables["public.eval_evaluation_output_schemas"]);
+    for (const [name, table] of Object.entries(previous.tables)) {
+      if (name !== "public.eval_management_operations") {
+        expect(current.tables[name]).toEqual(table);
+      }
+    }
+    const operations = current.tables["public.eval_management_operations"];
+    const old = previous.tables["public.eval_management_operations"];
+    expect(operations.columns).toEqual(old.columns);
+    expect(operations.indexes).toEqual(old.indexes);
+    expect(operations.checkConstraints.eval_management_operations_identity_ck)
+      .toEqual(old.checkConstraints.eval_management_operations_identity_ck);
+    expect({ ...operations, checkConstraints: old.checkConstraints }).toEqual(old);
+    expect(operations.checkConstraints.eval_management_operations_kind_ck.value).toContain("output_schema");
+    const statements = readMigrationFiles({ migrationsFolder })[10]!.sql;
+    expect(statements).toHaveLength(2);
+    expect(statements[0]).toContain('DROP CONSTRAINT "eval_management_operations_kind_ck"');
+    expect(statements[1]).toContain('ADD CONSTRAINT "eval_management_operations_kind_ck"');
+    expect(statements.join(" ")).not.toMatch(/\b(INSERT|DELETE|TRUNCATE|INDEX|COLUMN|CREATE TABLE)\b/iu);
   });
 });

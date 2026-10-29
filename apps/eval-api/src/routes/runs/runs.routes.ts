@@ -10,6 +10,7 @@ import { METADATA_BODY_BYTES, RUN_BODY_BYTES, RUN_PREVIEW_BODY_BYTES, RUN_TARGET
 import {
   bodyErrorResponses,
   conflictResponse,
+  approvalDigestSchema,
   entityIdSchema,
   errorResponses,
   idempotencyKeySchema,
@@ -50,6 +51,21 @@ export const targetsSchema = z.strictObject({
 }).refine((targets) => targets.projectSampleIds.length + targets.samplingIds.length <= RUN_TARGET_IDS,
   `Submit at most ${RUN_TARGET_IDS} target IDs`);
 
+/** Required caller-side plan identity, taken from the preview rather than recomputed on submit. */
+export const expectedPlanDigestsSchema = z.strictObject({
+  execution: approvalDigestSchema,
+  evaluation: approvalDigestSchema.exactOptional(),
+});
+
+export const submitRunBodySchema = z.strictObject({
+  idempotencyKey: idempotencyKeySchema,
+  operation: z.enum(RUN_OPERATIONS),
+  selector: selectorSchema,
+  targets: targetsSchema,
+  expectedPlanDigests: expectedPlanDigestsSchema,
+}).refine((body) => (body.operation === "execution") === (body.expectedPlanDigests.evaluation === undefined),
+  { path: ["expectedPlanDigests", "evaluation"], message: "Supply an evaluation digest exactly when evaluating" });
+
 export const previewRun = createRoute({
   method: "post",
   path: "/projects/{projectId}/runs/preview",
@@ -74,12 +90,7 @@ export const submitRun = createRoute({
   middleware: [jsonBody(RUN_BODY_BYTES)],
   request: {
     params: projectParams,
-    body: jsonBodyContent(z.strictObject({
-      idempotencyKey: idempotencyKeySchema,
-      operation: z.enum(RUN_OPERATIONS),
-      selector: selectorSchema,
-      targets: targetsSchema,
-    })),
+    body: jsonBodyContent(submitRunBodySchema),
   },
   responses: {
     202: jsonContent(responseSchema(runHandleSchema), "Admitted Run"),

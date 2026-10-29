@@ -116,7 +116,9 @@ Subject 的产物和完整轨迹是执行终态的必需证据。`Sampling.execu
 
 `RunOperation` 为 `execution | pipeline | evaluation`，由每次启动选择，不写入 Project。`RunPhase` 只有 `execution | evaluation`；`RunPhases` 由 operation 推导：只执行、只评估或顺序执行后评估。`RunSnapshot` 返回 `operation`、`phases`、`selector`、`targets`、`samplingIds`、`evaluationIds`，`phase` 和 `status` 从子记录推导。Pipeline 只负责组合两阶段，没有第三种阶段或独立的 Pipeline 数据模型。
 
-`RunRequest` 只包含 `idempotencyKey`、`projectId`、`operation`、`selector` 和 `targets`，不携带任何配置 ID 或 Dataset/Data 内容。`RunTargetSelector` 是 `all`、`datasetIds`、`projectSampleIds`、`samplingIds` 的组合，只在 Project 快照内展开；`RunTargets` 是 preview 返回的固定、去重结果（`projectSampleIds` 与 `samplingIds`），提交和重试时原样带回。evaluation 的 `projectSampleIds` 为空，`samplingIds` 为要重新评估的成功 Sampling。
+`RunRequest` 包含 `idempotencyKey`、`projectId`、`operation`、`selector`、`targets` 和必填 `expectedPlanDigests:{execution:string,evaluation?:string}`（规范 JSON SHA-256 小写十六进制）。提交必须从同一次 preview 原样携带计划摘要：execution 只有 execution；pipeline/evaluation 同时有 execution 与 evaluation。该字段只在准入时核对，不另存一份；Run 已有的 `planDigests` 是唯一持久副本。只读 `RunReplayRequest` 允许省略摘要，用于按原 key/完整意图核对旧已存 Run；它不能准入新 Run。请求不携带任何配置 ID 或 Dataset/Data 内容。`RunTargetSelector` 是 `all`、`datasetIds`、`projectSampleIds`、`samplingIds` 的组合，只在 Project 快照内展开；`RunTargets` 是 preview 返回的固定、去重结果（`projectSampleIds` 与 `samplingIds`），提交和重试时原样带回。evaluation 的 `projectSampleIds` 为空，`samplingIds` 为要重新评估的成功 Sampling。
+
+Project 的创建 key 不属于普通 Run 准入：`RunRequest` 和 HTTP Schema 不含创建证明；ProjectService 在调用 Runtime 准入自己首个 Run 时单独传可信、瞬时的 `creationFingerprint`，Store 在 Project 行锁下与已有 `projects.creation_fingerprint` 比对。该证明不改变 Run 公共模型、身份指纹或持久化事实。无证明的普通提交不能在无 Run 的 Project 上占用创建 key；只读 Project 创建重放只认可核验过的原首 Run。
 
 `RunSnapshot.stopRequested` 表示 Run 已请求停止；停止期间与收尾后的 Run 状态见[架构方案](../../docs/architecture.md#run-调度与停止)。
 

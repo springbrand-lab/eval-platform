@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { AGENT, DATASET, OWNER, setupManagement, toolValue } from "./test-fixture.js";
+import { HttpError } from "@eval-platform/eval-contracts/http-errors";
+import { RuntimeInputError, digestJson } from "@eval-platform/eval-runtime";
+import { AGENT, DATASET, OWNER, SCHEMA, setupManagement, toolValue } from "./test-fixture.js";
 
 const FIRST = "55555555-5555-4555-8555-555555555555";
 const SECOND = "66666666-6666-4666-8666-666666666666";
@@ -13,6 +15,68 @@ async function errorCode(response: Response) {
 }
 
 describe("trusted approval selections through the existing list_options tool", () => {
+  it("reads only the owned Project's frozen evaluation choice and paged Dataset names", async () => {
+    const app = setupManagement();
+    const view = {
+      project: { projectId: "project-1", name: "Project", ownerUserId: OWNER },
+      datasets: [{ datasetId: DATASET, name: "Frozen Dataset", description: "PRIVATE_DATASET",
+        projectSampleIds: ["sample-a", "sample-b"] }],
+      execution: { subjectAgentConfig: { sourceUserAgentId: FIRST, name: "Subject",
+        body: { setting: { systemPrompt: "PRIVATE_PROMPT" } } } },
+      evaluation: { lockedAt: null, plan: {
+        evaluatorAgentConfig: { sourceUserAgentId: SECOND, name: "Evaluator",
+          body: { setting: { systemPrompt: "PRIVATE_EVAL" } } },
+        outputSchema: { outputSchemaId: BUNDLE, digest: "PRIVATE_DIGEST" },
+      } },
+      projectSamples: [
+        { projectSampleId: "sample-a", data: { userPrompt: "PRIVATE_PROMPT" } },
+        { projectSampleId: "sample-b", data: { evalPrompt: "PRIVATE_EVAL" } },
+      ],
+    };
+    Object.assign(app.services.projects, { get: vi.fn(async () => view) });
+    const getOutputSchema = vi.fn(async () => ({
+      outputSchemaId: BUNDLE, name: "Bound scoring standard", schema: { raw: "PRIVATE_SCHEMA" },
+    }) as { outputSchemaId: string; name: string; schema: { raw: string } } | null);
+    Object.assign(app.services.outputSchemas, { get: getOutputSchema });
+    const input = { category: "project_detail", projectId: "project-1", pageSize: 1 };
+    const result = await toolValue(await app.call("list_options", input));
+    expect(result).toMatchObject({
+      category: "project_detail", project: { projectId: "project-1", name: "Project" },
+      totalCases: 2, datasets: { total: 1, pageSize: 1, items: [{ datasetId: DATASET, name: "Frozen Dataset" }] },
+      executionAgent: { userAgentId: FIRST, name: "Subject" },
+      evaluation: { userAgentId: SECOND, name: "Evaluator", outputSchemaId: BUNDLE,
+        outputSchemaName: "Bound scoring standard", locked: false },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE_|ownerUserId|projectSampleIds|userPrompt|schema.*raw/u);
+    expect(await errorCode(await app.call("list_options", { category: "project_detail" })))
+      .toContain("REQUEST_INVALID_INPUT");
+    expect(await errorCode(await app.call("list_options", { ...input, q: "Project" })))
+      .toContain("REQUEST_INVALID_INPUT");
+    getOutputSchema.mockResolvedValueOnce(null);
+    const deleted = await toolValue(await app.call("list_options", input));
+    expect(deleted.evaluation).toMatchObject({ outputSchemaId: BUNDLE, outputSchemaName: null });
+    view.project.ownerUserId = "other-owner";
+    expect(await errorCode(await app.call("list_options", input))).toContain("PROJECT_NOT_FOUND");
+  });
+
+  it("reports a Project without an evaluation plan without inventing a scoring standard", async () => {
+    const app = setupManagement();
+    Object.assign(app.services.projects, { get: vi.fn(async () => ({
+      project: { projectId: "project-1", name: "Execution-only", ownerUserId: OWNER },
+      datasets: [], projectSamples: [],
+      execution: { subjectAgentConfig: { sourceUserAgentId: FIRST, name: "Subject", body: {} } },
+      evaluation: null,
+    })) });
+    const getOutputSchema = vi.fn();
+    Object.assign(app.services.outputSchemas, { get: getOutputSchema });
+    const detail = await toolValue(await app.call("list_options", {
+      category: "project_detail", projectId: "project-1",
+    }));
+    expect(detail).toMatchObject({ category: "project_detail", totalCases: 0,
+      evaluation: null, datasets: { total: 0, items: [] } });
+    expect(getOutputSchema).not.toHaveBeenCalled();
+  });
+
   it("binds a selectable Agent's purpose to the complete owned SP config without exposing its body", async () => {
     const app = setupManagement();
     const config = { id: AGENT, user_id: OWNER, name: "Agent",
@@ -56,10 +120,14 @@ describe("trusted approval selections through the existing list_options tool", (
         initialSession: { bundleId: BUNDLE, sessionId: MATERIAL } },
     ];
     let deleted = false;
-    Object.assign(app.services.datasets, {
-      getDataset: vi.fn(async () => ({ datasetId: DATASET, name: "Dataset" })),
-      getData: vi.fn(async (id: string) => deleted && id === FIRST ? null : members.find((item) => item.dataId === id) ?? null),
-      listData: vi.fn(async () => members),
+    app.services.projects.reviewSelection.mockImplementation(async (input: unknown) => {
+      const selection = input as { datasetId: string; dataIds?: string[] };
+      if (deleted || selection.dataIds?.some((id) => !members.some((item) => item.dataId === id))) {
+        throw new HttpError("REQUEST_INVALID_INPUT");
+      }
+      const dataset = { datasetId: selection.datasetId, name: "Dataset", kind: "general" };
+      const selected = selection.dataIds ? members.filter((item) => selection.dataIds!.includes(item.dataId)) : members;
+      return { dataset, data: selected, digest: await digestJson({ dataset, selected }) };
     });
     const params = { category: "approval_dataset", datasetId: DATASET, pageSize: 1 };
     const first = await toolValue(await app.call("list_options", params));
@@ -73,18 +141,34 @@ describe("trusted approval selections through the existing list_options tool", (
       evalInitialMaterials: [{ bundleId: BUNDLE, materialId: MATERIAL }],
       initialSession: { bundleId: BUNDLE, sessionId: MATERIAL } }] });
     expect(first.digest).toBe(second.digest);
+    expect(app.services.projects.reviewSelection).toHaveBeenCalledWith({ datasetId: DATASET });
     expect(JSON.stringify([first, second])).not.toMatch(/PRIVATE_|private\.example|https:\/\//u);
     members[0]!.userPrompt = "changed";
     const changed = await toolValue(await app.call("list_options", params));
     expect(changed.digest).not.toBe(first.digest);
     expect(await errorCode(await app.call("list_options", { ...params, dataIds: [BUNDLE] })))
       .toContain("REQUEST_INVALID_INPUT");
+    app.services.projects.reviewSelection.mockRejectedValueOnce(new RuntimeInputError("Selected Data was detached"));
+    expect(await errorCode(await app.call("list_options", params))).toContain("REQUEST_INVALID_INPUT");
     expect(await errorCode(await app.call("list_options", { ...params, q: "PRIVATE_PROMPT" })))
       .toContain("REQUEST_INVALID_INPUT");
     expect(await errorCode(await app.call("list_options", { ...params, pageSize: 11 })))
       .toContain("REQUEST_INVALID_INPUT");
     deleted = true;
     expect(await errorCode(await app.call("list_options", params))).toContain("REQUEST_INVALID_INPUT");
+  });
+
+  it("reviews the immutable output Schema by its existing catalog ID and canonical digest, not its content", async () => {
+    const app = setupManagement();
+    const reviewed = await toolValue(await app.call("list_options", {
+      category: "approval_output_schema", outputSchemaId: SCHEMA,
+    }));
+    expect(reviewed).toEqual({ category: "approval_output_schema", outputSchemaId: SCHEMA,
+      name: "Output", digest: expect.stringMatching(/^[0-9a-f]{64}$/u) });
+    expect(JSON.stringify(reviewed)).not.toContain("private");
+    expect(await errorCode(await app.call("list_options", {
+      category: "approval_output_schema", outputSchemaId: FIRST,
+    }))).toContain("OUTPUT_SCHEMA_NOT_FOUND");
   });
 
   it("reviews only frozen, owner-scoped ProjectSample/Sampling selections and their actual Agent identities", async () => {

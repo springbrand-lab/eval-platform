@@ -1,0 +1,2 @@
+ALTER TABLE "eval_management_operations" DROP CONSTRAINT "eval_management_operations_kind_ck";--> statement-breakpoint
+ALTER TABLE "eval_management_operations" ADD CONSTRAINT "eval_management_operations_kind_ck" CHECK ("eval_management_operations"."kind" IN ('prepare', 'skill', 'reference', 'output_schema'));
