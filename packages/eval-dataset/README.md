@@ -56,6 +56,8 @@ Data 的 `initialMaterials` 只给执行 Agent，`evalInitialMaterials` 只给�
 - `importDataset(source, format)`、`exportDataset(datasetId, format)`，format 必须明确为 `json` 或 `yaml`。
 - `importPromptDataset({name,description,format,content})`：Dataset 元数据独立于文件，JSON 文件是 Data 数组，JSONL 每行一条 Data；每条都要求 `name`、`description`、`userPrompt` 和 `evalPrompt`，一次原子导入。Store 记录 Prompt Dataset 的内部种类，后续修改和关联 Data 时继续校验这些必填字段。详见 [Dataset upload](../../docs/eval-dataset-upload.md)。
 
+Eval API 的受信管理准备流程可在 `importPromptDataset(input, {datasetId,dataIds})` 的第二参数中传入**已持久规划的** UUID。它仍先用相同的 Prompt 解析器拒绝文件里的 ID 与初始引用；Data ID 数量必须与行数一致，由已有 Store 的原子、身份相等导入处理未知响应与重放。普通 HTTP prompt-import 不提供这些身份，行为不变。
+
 Dataset/Data 的新实体 ID 使用原生 `crypto.randomUUID()`，与 SP 的 ID 生成方式一致；两类 Bundle、Session 和素材 ID 由 Eval API 资源目录生成。平台 Dataset/Data ID 与资源引用 ID 都由同一个 `platformIdSchema` 按 SP 的 Zod UUID 校验与小写规范化模式处理：导入可接受大小写混合的 UUID，查重、Store 比较、目录读取、绑定删除检查、查询和返回值统一使用小写身份；Data 业务字段保持原值。创建实体时输入不允许调用方覆盖实体 ID。修改是全量替换可编辑字段，不是 PATCH；省略可选字段表示移除该字段。查询不存在的单个实体返回 null。数据库读写失败原样抛出，不能转成空结果。
 
 Data 可以关联到同一用户的多个 Dataset，关联不复制 Data。修改 Data 会影响该用户所有引用它的 Dataset，但不影响已有 Project。重复关联和重复解除关联不报错，批量关联必须全成功或全失败。Eval API 删除 Dataset/Data 时设置 `deleted_at`，不删除行；被活动 Dataset 引用的 Data 不能删除，Project 保存的是 Data 副本，不阻止删除。删除已不存在的实体是无操作。列表必须按实体 ID 稳定排序；查询不存在 Dataset 的 Data 列表应抛出 `DatasetEntityNotFoundError`，不能伪装成空集合。

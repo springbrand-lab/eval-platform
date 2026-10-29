@@ -388,6 +388,24 @@ describe("Dataset import and export", () => {
     })).rejects.toBeInstanceOf(DatasetInputError);
     expect(importStore).toHaveBeenCalledTimes(1);
   });
+  it("accepts only preplanned IDs from the management seam, still rejects initial refs and replays by identity", async () => {
+    const store = new TestDatasetStore();
+    const service = createDatasetService(store);
+    const input = { name: "Prompt", description: "Rows", format: "jsonl" as const,
+      content: '{"name":"Case","description":"Details","userPrompt":"act","evalPrompt":"evaluate"}\n' };
+    const planned = { datasetId: crypto.randomUUID(), dataIds: [crypto.randomUUID()] };
+    const first = await service.importPromptDataset(input, planned);
+    expect(first.dataset.datasetId).toBe(planned.datasetId);
+    expect(first.data[0]?.dataId).toBe(planned.dataIds[0]);
+    expect(await service.importPromptDataset(input, planned)).toEqual(first);
+    expect(store.datasets.size).toBe(1);
+    await expect(service.importPromptDataset({ ...input, content: input.content.replace("act", "changed") }, planned))
+      .rejects.toBeInstanceOf(DatasetIdentityConflictError);
+    await expect(service.importPromptDataset(input, { ...planned, dataIds: [planned.datasetId, planned.datasetId] }))
+      .rejects.toBeInstanceOf(DatasetInputError);
+    await expect(service.importPromptDataset({ ...input, content: input.content.replace('"evalPrompt"', '"initialMaterials"') },
+      planned)).rejects.toBeInstanceOf(DatasetInputError);
+  });
   it.each([
     { format: "json", source: '{"dataset":{"name":"tasks"},"data":[{"userPrompt":"task","externalDataId":9007199254740993}]}' },
     { format: "yaml", source: 'dataset: { name: tasks }\ndata: [{ userPrompt: task, externalDataId: 9007199254740993 }]' },

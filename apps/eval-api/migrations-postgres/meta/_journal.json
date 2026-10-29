@@ -50,6 +50,13 @@
       "when": 1792517619186,
       "tag": "0006_agent_imports",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792600000000,
+      "tag": "0007_management_preparation",
+      "breakpoints": true
     }
   ]
 }

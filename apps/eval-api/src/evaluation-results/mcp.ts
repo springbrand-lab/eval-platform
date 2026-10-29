@@ -2,8 +2,10 @@ import { EVALUATION_OUTPUT_SCHEMA_PATH, EVALUATION_SUBMIT_TOOL } from "@eval-pla
 import { retryIdempotentOperation } from "@eval-platform/eval-runtime";
 import type { Context } from "hono";
 import { createRouter } from "../lib/create-app.js";
+import { dispatchMcp, isMcpRequest, mcpError, mcpResult, type McpRpcId, type McpRpcResponse } from "../lib/mcp-transport.js";
+import { sameSecret } from "../lib/secret.js";
 import type { AppBindings } from "../lib/types.js";
-import { createEvaluationResultCheck, sameSecret, verifyEvaluationSubmitToken } from "./submission.js";
+import { createEvaluationResultCheck, verifyEvaluationSubmitToken } from "./submission.js";
 
 /**
  * Stateless Streamable HTTP MCP Server with one tool, `submit_evaluation`. Eval SP loads it as a
@@ -11,7 +13,6 @@ import { createEvaluationResultCheck, sameSecret, verifyEvaluationSubmitToken } 
  */
 export const EVALUATION_RESULTS_MCP_PATH = "/mcp/evaluation-results";
 
-const SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const SERVER_INFO = { name: "eval-platform-evaluation-results", version: "1.0.0" };
 
 /** Never changes at runtime: SP rejects a call whose tool definition differs from the one it discovered. */
@@ -30,11 +31,6 @@ const SUBMIT_TOOL = {
     additionalProperties: false,
   },
 } as const;
-
-type JsonRpcId = string | number;
-type JsonRpcResponse =
-  | { jsonrpc: "2.0"; id: JsonRpcId | null; result: unknown }
-  | { jsonrpc: "2.0"; id: JsonRpcId | null; error: { code: number; message: string } };
 
 const toolText = (text: string, isError = false) => ({ content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) });
 
@@ -75,32 +71,20 @@ async function submit(c: Context<AppBindings>, args: unknown) {
   return toolText("Evaluation result accepted. You are done; end with a short summary.");
 }
 
-async function handle(c: Context<AppBindings>, message: Record<string, unknown>): Promise<JsonRpcResponse | null> {
-  const id = message.id as JsonRpcId | undefined;
+async function handle(c: Context<AppBindings>, message: Record<string, unknown>): Promise<McpRpcResponse | null> {
+  const id = message.id as McpRpcId | undefined;
   // Notifications (no id) get no response.
   if (id === undefined || id === null) return null;
   const params = (typeof message.params === "object" && message.params !== null ? message.params : {}) as Record<string, unknown>;
-  const ok = (result: unknown): JsonRpcResponse => ({ jsonrpc: "2.0", id, result });
-  const fail = (code: number, text: string): JsonRpcResponse => ({ jsonrpc: "2.0", id, error: { code, message: text } });
-  switch (message.method) {
-    case "initialize": {
-      const requested = typeof params.protocolVersion === "string" ? params.protocolVersion : undefined;
-      return ok({
-        protocolVersion: requested && SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : SUPPORTED_PROTOCOL_VERSIONS[0],
-        capabilities: { tools: { listChanged: false } },
-        serverInfo: SERVER_INFO,
-      });
-    }
-    case "ping":
-      return ok({});
-    case "tools/list":
-      return ok({ tools: [SUBMIT_TOOL] });
-    case "tools/call":
-      if (params.name !== EVALUATION_SUBMIT_TOOL) return fail(-32602, `Unknown tool: ${String(params.name)}`);
-      return ok(await submit(c, params.arguments));
-    default:
-      return fail(-32601, `Method not found: ${String(message.method)}`);
-  }
+  return dispatchMcp(message.method, id, params, {
+    serverInfo: SERVER_INFO,
+    tools: [SUBMIT_TOOL],
+    callTool: async (id, params) => {
+      if (params.name !== EVALUATION_SUBMIT_TOOL) return mcpError(id, -32602, `Unknown tool: ${String(params.name)}`);
+      return mcpResult(id, await submit(c, params.arguments));
+    },
+    methodNotFound: (method) => `Method not found: ${String(method)}`,
+  });
 }
 
 const router = createRouter();
@@ -116,12 +100,12 @@ router.post(EVALUATION_RESULTS_MCP_PATH, async (c) => {
   try {
     message = await c.req.json();
   } catch {
-    return c.json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, 400);
+    return c.json(mcpError(null, -32700, "Parse error"), 400);
   }
-  if (typeof message !== "object" || message === null || Array.isArray(message) || (message as { jsonrpc?: unknown }).jsonrpc !== "2.0") {
-    return c.json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } }, 400);
+  if (!isMcpRequest(message)) {
+    return c.json(mcpError(null, -32600, "Invalid Request"), 400);
   }
-  const response = await handle(c, message as Record<string, unknown>);
+  const response = await handle(c, message);
   if (response === null) return c.body(null, 202);
   return c.json(response);
 });

@@ -69,9 +69,11 @@ export interface ImportStaging {
   zip(taskId: string, files: readonly FrozenFile[], expiresAt: string): Promise<Uint8Array>;
   prune(): Promise<void>;
 }
-export async function openImportStaging(bundleDirectory: string): Promise<ImportStaging> {
+/** Separate private roots share the same bounded staging implementation, never the same upload references. */
+export async function openImportStaging(bundleDirectory: string,
+  namespace: "imports" | "management-uploads" = "imports"): Promise<ImportStaging> {
   const base = await realpath(bundleDirectory);
-  const root = path.join(base, "imports");
+  const root = path.join(base, namespace);
   await privateDirectory(root);
   async function directory(taskId: string, expiresAt: string): Promise<string> {
     notExpired(expiresAt);

@@ -114,13 +114,27 @@ describe("ordinary Agent create in the real owner-service composition", () => {
     } finally { f.release(); }
   });
 
-  it.each(["true", "false", null] as const)("retains the ordinary purpose-failure DELETE compensation for header=%s", async (header) => {
-    const f = fixture({ source: false, header, failPurpose: true });
+  for (const source of [false, true]) {
+    it.each(["true", "false", null] as const)(`source configured=${source}, header=%s: only a proven insertion is compensated`, async (header) => {
+      const f = fixture({ source, header, failPurpose: true });
+      try {
+        await expect(f.services.agentConfigs.create({ slug: "native", name: "Native", purpose: "execution" }))
+          .rejects.toThrow("purpose DB failure");
+        expect(f.requests.filter((request) => request.method === "DELETE").map((request) => new URL(request.url).pathname))
+          .toEqual(header === "true" ? [`/api/user-agent-configs/${id}`] : []);
+        expect(f.requests.some((request) => request.url.includes("/imports"))).toBe(false);
+      } finally { f.release(); }
+    });
+  }
+
+  it("never deletes an existing imported Agent on slug replay when purpose persistence fails", async () => {
+    const f = fixture({ source: true, header: "false", existingOrigin: "dev_import", failPurpose: true });
+    const before = structuredClone(f.nativeRows.get(id));
     try {
-      await expect(f.services.agentConfigs.create({ slug: "native", name: "Native", purpose: "execution" })).rejects.toThrow("purpose DB failure");
-      expect(f.requests.filter((request) => request.method === "DELETE").map((request) => new URL(request.url).pathname))
-        .toEqual([`/api/user-agent-configs/${id}`]);
-      expect(f.requests.some((request) => request.url.includes("/imports"))).toBe(false);
+      await expect(f.services.agentConfigs.create({ slug: "native", name: "Native", purpose: "execution" }))
+        .rejects.toThrow("purpose DB failure");
+      expect(f.nativeRows.get(id)).toEqual(before);
+      expect(f.requests.filter((request) => request.method === "DELETE")).toEqual([]);
     } finally { f.release(); }
   });
 

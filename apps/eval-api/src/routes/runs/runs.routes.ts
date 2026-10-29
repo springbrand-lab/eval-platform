@@ -34,7 +34,7 @@ const admissionErrors = {
 const idList = z.array(entityIdSchema).max(RUN_TARGET_IDS);
 
 /** What the user picked inside the Project snapshot; expansion and deduplication belong to Runtime. */
-const selectorSchema = z.strictObject({
+export const selectorSchema = z.strictObject({
   all: z.literal(true).exactOptional(),
   datasetIds: z.array(platformIdSchema).min(1).max(RUN_TARGET_IDS).exactOptional(),
   projectSampleIds: idList.min(1).exactOptional(),
@@ -44,7 +44,7 @@ const selectorSchema = z.strictObject({
     + (selector.samplingIds?.length ?? 0) <= RUN_TARGET_IDS, `Select at most ${RUN_TARGET_IDS} IDs`);
 
 /** The fixed targets a preview returned, submitted unchanged. */
-const targetsSchema = z.strictObject({
+export const targetsSchema = z.strictObject({
   projectSampleIds: idList.refine(unique, "must not contain duplicates"),
   samplingIds: idList.refine(unique, "must not contain duplicates"),
 }).refine((targets) => targets.projectSampleIds.length + targets.samplingIds.length <= RUN_TARGET_IDS,

@@ -189,6 +189,54 @@ export const agentImportLeases = pgTable("eval_agent_import_leases", {
   foreignKey({ columns: [table.ownerUserId, table.taskId], foreignColumns: [agentImportTasks.ownerUserId, agentImportTasks.id] }),
 ]);
 
+/** Trusted management byte ingress: an immutable, owner-scoped, short-lived reference, not a URL. */
+export const managementUploads = pgTable("eval_management_uploads", {
+  uploadId: uuid("upload_id").primaryKey(),
+  ownerUserId: text("owner_user_id").notNull(),
+  kind: text("kind").$type<"prompt" | "material" | "session" | "skill" | "reference">().notNull(),
+  name: text("name").notNull(),
+  mediaType: text("media_type").notNull(),
+  byteSize: integer("byte_size").notNull(),
+  sha256: text("sha256").notNull(),
+  status: text("status").$type<"reserved" | "ready">().notNull(),
+  claimedBy: text("claimed_by"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  unique("eval_management_uploads_owner_id_uq").on(table.ownerUserId, table.uploadId),
+  index("eval_management_uploads_expiry_idx").on(table.expiresAt),
+  check("eval_management_uploads_kind_ck", sql`${table.kind} IN ('prompt', 'material', 'session', 'skill', 'reference')`),
+  check("eval_management_uploads_status_ck", sql`${table.status} IN ('reserved', 'ready')`),
+  check("eval_management_uploads_metadata_ck", sql`length(${table.ownerUserId}) > 0
+    AND length(${table.name}) BETWEEN 1 AND 240 AND length(${table.mediaType}) BETWEEN 1 AND 200
+    AND ${table.byteSize} > 0 AND ${table.byteSize} <= 20971520 AND ${table.sha256} ~ '^[0-9a-f]{64}$'
+    AND (${table.claimedBy} IS NULL OR length(${table.claimedBy}) BETWEEN 1 AND 200)`),
+]);
+
+/** Durable write-ahead identity and stage receipts. Unknown SP writes never become re-playable. */
+export const managementOperations = pgTable("eval_management_operations", {
+  ownerUserId: text("owner_user_id").notNull(),
+  operationKey: text("operation_key").notNull(),
+  kind: text("kind").$type<"prepare" | "skill" | "reference">().notNull(),
+  fingerprint: text("fingerprint").notNull(),
+  plan: jsonb("plan").$type<Record<string, unknown>>().notNull(),
+  stages: jsonb("stages").$type<Record<string, { status: "attempted" | "confirmed"; receipt?: unknown }>>().notNull().default({}),
+  status: text("status").$type<"pending" | "completed">().notNull().default("pending"),
+  skillName: text("skill_name"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ name: "eval_management_operations_pk", columns: [table.ownerUserId, table.operationKey] }),
+  uniqueIndex("eval_management_skill_pending_uq").on(table.ownerUserId, table.skillName)
+    .where(sql`${table.kind} = 'skill' AND ${table.status} = 'pending'`),
+  index("eval_management_pending_dataset_idx").on(table.ownerUserId, sql`${table.plan}->>'datasetId'`)
+    .where(sql`${table.kind} = 'prepare' AND ${table.status} = 'pending'`),
+  check("eval_management_operations_kind_ck", sql`${table.kind} IN ('prepare', 'skill', 'reference')`),
+  check("eval_management_operations_status_ck", sql`${table.status} IN ('pending', 'completed')`),
+  check("eval_management_operations_identity_ck", sql`length(${table.ownerUserId}) > 0
+    AND length(${table.operationKey}) BETWEEN 1 AND 200 AND ${table.fingerprint} ~ '^[0-9a-f]{64}$'
+    AND (${table.kind} = 'skill') = (${table.skillName} IS NOT NULL)`),
+]);
+
 /** Material Bundles and Session Bundles are independent owner-scoped catalogs with identical metadata. */
 function bundleTable<N extends string>(name: N) {
   return pgTable(name, {

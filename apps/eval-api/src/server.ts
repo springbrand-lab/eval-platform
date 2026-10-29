@@ -5,9 +5,12 @@ import { createRoutes } from "./app.js";
 import { createAgentImportQueue, openAgentImportBoss } from "./agent-import-queue.js";
 import { createAgentImportSource } from "./agent-imports/source.js";
 import { createAgentImportTarget } from "./agent-imports/target.js";
+import { openImportStaging } from "./agent-imports/bytes.js";
 import { loadApiConfig } from "./config/api.js";
 import { createEvalDb } from "./db/client.js";
 import { createPostgresEvaluationSubmissions } from "./db/evaluation-submissions.js";
+import { createManagementFiles } from "./eval-management/files.js";
+import { createPostgresManagementStore } from "./eval-management/store.js";
 import { createLangfuseScorePublisher } from "./langfuse/scores.js";
 import { errorDiagnostics } from "./lib/api-errors.js";
 import type { ApiRuntime } from "./lib/types.js";
@@ -29,6 +32,9 @@ if (serviceUser?.id !== config.EVAL_SP_SERVICE_USER_ID || !serviceUser.email) {
   throw new Error("EVAL_SP_SERVICE_SESSION_TOKEN does not belong to EVAL_SP_SERVICE_USER_ID");
 }
 const db = createEvalDb(pool);
+const managementStore = config.EVAL_MANAGEMENT_MCP_TOKEN === undefined ? undefined : createPostgresManagementStore(db);
+const managementFiles = managementStore === undefined ? undefined : createManagementFiles(
+  managementStore, await openImportStaging(config.EVAL_BUNDLE_DIR, "management-uploads"));
 const importBoss = config.EVAL_DEV_SP_API_ORIGIN === undefined ? undefined : await openAgentImportBoss(config.DATABASE_URL, logger);
 const agentImportTarget = createAgentImportTarget({
   origin: config.EVAL_SP_API_ORIGIN, writeOrigin: config.EVAL_WEB_ORIGIN, ownerUserId: serviceUser.id,
@@ -59,6 +65,10 @@ const runtime: ApiRuntime = {
   ...(config.EVAL_RESULT_MCP_TOKEN === undefined ? {} : { evaluationResults: {
     token: config.EVAL_RESULT_MCP_TOKEN,
     submissions: createPostgresEvaluationSubmissions(db, runQueue),
+  } }),
+  ...(config.EVAL_MANAGEMENT_MCP_TOKEN === undefined ? {} : { evalManagement: {
+    token: config.EVAL_MANAGEMENT_MCP_TOKEN,
+    files: managementFiles!, store: managementStore!, spOrigin: config.EVAL_SP_API_ORIGIN,
   } }),
 };
 const app = createRoutes(logger);

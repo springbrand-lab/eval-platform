@@ -12,7 +12,13 @@ import { parseInput } from "./input.js";
 import type { DatasetFormat, PromptDatasetUploadInput } from "./serialization.js";
 import { parseDatasetDocument, parsePromptDatasetUpload, serializeDatasetDocument } from "./serialization.js";
 import type { DatasetStore } from "./store.js";
-import { DatasetEntityNotFoundError } from "./store.js";
+import { DatasetEntityNotFoundError, DatasetInputError } from "./store.js";
+
+/** The management adapter persists these IDs before its first Prompt import write. */
+export interface PlannedPromptIdentities {
+  readonly datasetId: string;
+  readonly dataIds: readonly string[];
+}
 
 export interface DatasetService {
   createDataset(input: DatasetInput): Promise<Dataset>;
@@ -29,7 +35,7 @@ export interface DatasetService {
   attachData(datasetId: string, dataIds: readonly string[]): Promise<void>;
   detachData(datasetId: string, dataIds: readonly string[]): Promise<void>;
   importDataset(source: string, format: DatasetFormat): Promise<DatasetSnapshot>;
-  importPromptDataset(input: PromptDatasetUploadInput): Promise<DatasetSnapshot>;
+  importPromptDataset(input: PromptDatasetUploadInput, planned?: PlannedPromptIdentities): Promise<DatasetSnapshot>;
   exportDataset(datasetId: string, format: DatasetFormat): Promise<string>;
 }
 
@@ -120,8 +126,20 @@ export function createDatasetService(store: DatasetStore): DatasetService {
     async importDataset(source, format) {
       return importDocument(parseDatasetDocument(source, format));
     },
-    async importPromptDataset(input) {
-      return importDocument(parsePromptDatasetUpload(input), { kind: "prompt" });
+    async importPromptDataset(input, planned) {
+      const document = parsePromptDatasetUpload(input);
+      if (!planned) return importDocument(document, { kind: "prompt" });
+      const identities = parseInput(() => ({
+        datasetId: platformIdSchema.parse(planned.datasetId),
+        dataIds: platformIdSchema.array().length(document.data.length).parse(planned.dataIds),
+      }));
+      if (new Set(identities.dataIds).size !== identities.dataIds.length) {
+        throw new DatasetInputError("Planned Prompt Data IDs must be unique");
+      }
+      return importDocument({
+        dataset: { ...document.dataset, datasetId: identities.datasetId },
+        data: document.data.map((row, index) => ({ ...row, dataId: identities.dataIds[index]! })),
+      }, { kind: "prompt" });
     },
     async exportDataset(datasetId, format) {
       const selectedId = platformId(datasetId);

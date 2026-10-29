@@ -3,6 +3,7 @@ import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import { createEvaluationResultValidator } from "@eval-platform/eval-metrics";
 import type { EvaluationResultCheck, EvaluationResultPort } from "@eval-platform/eval-runtime";
 import type { EvaluationSubmissionStore } from "../db/evaluation-submissions.js";
+import { sameSecret } from "../lib/secret.js";
 
 /** Per-Evaluation credential: one Agent Config serves many Evaluations, so the MCP Bearer token alone cannot tell them apart. */
 export function evaluationSubmitToken(secret: string, evaluationId: string): string {
@@ -13,13 +14,6 @@ export function verifyEvaluationSubmitToken(secret: string, evaluationId: string
   const expected = Buffer.from(evaluationSubmitToken(secret, evaluationId));
   const actual = Buffer.from(token);
   return expected.length === actual.length && timingSafeEqual(expected, actual);
-}
-
-/** Constant-time comparison for the shared MCP Bearer token. */
-export function sameSecret(expected: string, actual: string): boolean {
-  const left = Buffer.from(expected);
-  const right = Buffer.from(actual);
-  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 /** Metrics' validator in Runtime's terms; the MCP tool and the Worker reject exactly the same results. */

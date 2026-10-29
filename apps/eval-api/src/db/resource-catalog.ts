@@ -10,7 +10,7 @@ import { BundleFileError } from "../sp/bundle-errors.js";
 import type { EvalDb } from "./client.js";
 import { requireOwnerUserId } from "./owner.js";
 import { parseCatalogMetadataPatch, platformId, requiredCatalogLabel, type CatalogMetadataPatch } from "./catalog-metadata.js";
-import { BundleResourceNotFoundError } from "./errors.js";
+import { BundleResourceNotFoundError, CatalogInputError } from "./errors.js";
 import { bundleMaterials, bundleSessions, materialBundles, sessionBundles } from "./schema.js";
 
 export interface BundleRecord {
@@ -33,11 +33,17 @@ export interface BundleImport<R> {
   readonly imported: readonly R[];
 }
 
+/** Planned before an idempotent management preparation write; ordinary HTTP creates generate their own IDs. */
+export interface PlannedBundleIdentity {
+  readonly bundleId: string;
+  readonly resourceIds: readonly string[];
+}
+
 /** One owner-scoped Bundle kind holding resources `R` created from inputs `I`. */
 export interface BundleCatalog<R, I> {
   list(): Promise<readonly BundleRecord[]>;
   /** Create the Bundle and its resources atomically. */
-  create(labels: CatalogLabels, inputs?: readonly I[]): Promise<BundleImport<R>>;
+  create(labels: CatalogLabels, inputs?: readonly I[], planned?: PlannedBundleIdentity): Promise<BundleImport<R>>;
   get(bundleId: string): Promise<BundleRecord>;
   update(bundleId: string, input: CatalogMetadataPatch): Promise<BundleRecord>;
   delete(bundleId: string): Promise<void>;
@@ -89,7 +95,7 @@ interface BundleKind<F extends SelectedFieldsFlat, I> {
     readonly id: typeof bundleMaterials.materialId | typeof bundleSessions.sessionId;
     /** The public record columns. */
     readonly fields: F;
-    readonly prepare: (directory: BundleDirectory, owner: string, bundleId: string, input: I) =>
+    readonly prepare: (directory: BundleDirectory, owner: string, bundleId: string, input: I, plannedId?: string) =>
       PreparedResource<SelectResultFields<F>>;
     readonly readFiles: (directory: BundleDirectory, owner: string, bundleId: string, resourceId: string) =>
       Promise<readonly StoredResourceFile[]>;
@@ -111,8 +117,8 @@ const materialBundle = {
     id: bundleMaterials.materialId,
     fields: { bundleId: bundleMaterials.bundleId, materialId: bundleMaterials.materialId,
       name: bundleMaterials.name, description: bundleMaterials.description, byteSize: bundleMaterials.byteSize },
-    prepare: (directory: BundleDirectory, owner: string, bundleId: string, input: MaterialInput) => {
-      const reference = { bundleId, materialId: createId() };
+    prepare: (directory: BundleDirectory, owner: string, bundleId: string, input: MaterialInput, plannedId?: string) => {
+      const reference = { bundleId, materialId: plannedId ?? createId() };
       const record = { ...reference, ...labels(input) };
       return {
         upload: async () => ({ ...record, byteSize: await directory.uploadInitialMaterials(owner, reference, input.files) }),
@@ -138,8 +144,8 @@ const sessionBundle = {
     id: bundleSessions.sessionId,
     fields: { bundleId: bundleSessions.bundleId, sessionId: bundleSessions.sessionId,
       name: bundleSessions.name, description: bundleSessions.description, format: bundleSessions.format },
-    prepare: (directory: BundleDirectory, owner: string, bundleId: string, input: SessionInput) => {
-      const reference = { bundleId, sessionId: createId() };
+    prepare: (directory: BundleDirectory, owner: string, bundleId: string, input: SessionInput, plannedId?: string) => {
+      const reference = { bundleId, sessionId: plannedId ?? createId() };
       const record = { ...reference, ...labels(input), format: input.format };
       return {
         upload: async () => {
@@ -221,8 +227,9 @@ function createBundleCatalog<F extends SelectedFieldsFlat, I>(
    */
   async function importResources(
     bundleId: string, claim: (transaction: CatalogWriter) => Promise<BundleRecord>, inputs: readonly I[],
+    resourceIds?: readonly string[],
   ): Promise<BundleImport<ResourceRecord>> {
-    const prepared = inputs.map((input) => resource.prepare(directory, owner, bundleId, input));
+    const prepared = inputs.map((input, index) => resource.prepare(directory, owner, bundleId, input, resourceIds?.[index]));
     const written: PreparedResource<ResourceRecord>[] = [];
     try {
       const imported: ResourceRecord[] = [];
@@ -239,6 +246,10 @@ function createBundleCatalog<F extends SelectedFieldsFlat, I>(
         return { bundle: claimed, imported };
       });
     } catch (error) {
+      // A planned identity may have committed even if the DB response was lost. Never let an
+      // overlapping retry delete that committed file (or another in-flight writer's file).
+      // A rolled-back write can leave an orphan; it is safer to require manual reconciliation.
+      if (resourceIds) throw error;
       const removals = await Promise.allSettled(written.map((item) => item.remove()));
       const failures = removals.flatMap((removal) => removal.status === "rejected" ? [removal.reason] : []);
       if (failures.length > 0) {
@@ -258,12 +269,16 @@ function createBundleCatalog<F extends SelectedFieldsFlat, I>(
         eq(table.ownerUserId, owner), isNull(table.deletedAt),
       )).orderBy(table.bundleId)).map(bundleRecord);
     },
-    async create(input: CatalogLabels, inputs: readonly I[] = []): Promise<BundleImport<ResourceRecord>> {
-      const created: BundleRecord = { bundleId: createId(), ...labels(input) };
+    async create(input: CatalogLabels, inputs: readonly I[] = [], planned?: PlannedBundleIdentity): Promise<BundleImport<ResourceRecord>> {
+      const resourceIds = planned?.resourceIds.map((id) => platformId(id, "resourceId"));
+      if (planned && (resourceIds!.length !== inputs.length || new Set(resourceIds).size !== inputs.length)) {
+        throw new CatalogInputError("Planned Bundle resource IDs must match the inputs");
+      }
+      const created: BundleRecord = { bundleId: planned ? platformId(planned.bundleId, "bundleId") : createId(), ...labels(input) };
       return importResources(created.bundleId, async (transaction) => {
         await transaction.insert(table).values({ ...created, ownerUserId: owner });
         return created;
-      }, inputs);
+      }, inputs, resourceIds);
     },
     get: requireBundle,
     async update(bundleId: string, input: CatalogMetadataPatch): Promise<BundleRecord> {

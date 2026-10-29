@@ -60,8 +60,19 @@ describe("API configuration", () => {
     { EVAL_SP_AGENT_ORIGIN: undefined },
     { EVAL_SP_TRUSTED_ORIGIN: "https://sp-web.test/path" },
     { EVAL_WEB_API_TOKEN: "too-short" },
+    { EVAL_MANAGEMENT_MCP_TOKEN: "too-short" },
+    { EVAL_MANAGEMENT_MCP_TOKEN: "m".repeat(40), EVAL_RESULT_MCP_TOKEN: "m".repeat(40) },
+    { EVAL_MANAGEMENT_MCP_TOKEN: "m".repeat(40), EVAL_WEB_API_TOKEN: "m".repeat(40) },
+    { EVAL_MANAGEMENT_MCP_TOKEN: environment.EVAL_SP_SERVICE_SESSION_TOKEN },
   ])("rejects invalid configuration %o", (override) => {
     expect(() => loadApiConfig({ ...environment, ...override })).toThrow();
+  });
+
+  it("keeps the management and result MCP credentials independently configured", () => {
+    expect(loadApiConfig({
+      ...environment, EVAL_MANAGEMENT_MCP_TOKEN: "m".repeat(40), EVAL_RESULT_MCP_TOKEN: "r".repeat(40),
+    })).toMatchObject({ EVAL_MANAGEMENT_MCP_TOKEN: "m".repeat(40), EVAL_RESULT_MCP_TOKEN: "r".repeat(40) });
+    expect(loadApiConfig(environment)).not.toHaveProperty("EVAL_MANAGEMENT_MCP_TOKEN");
   });
 
   it.each(importConfigurations)("keeps imports optional without allowing source overrides or matching targets for $name", ({ load }) => {

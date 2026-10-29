@@ -54,56 +54,61 @@ export function createOwnerServices({ db, sp, bundles, release, runQueue, publis
   return (user, sessionToken) => {
     const ownerUserId = user.id;
     const { admission, release: releaseAdmission } = admissions.acquire(ownerUserId);
-    const projectStore = createPostgresProjectStore(db, ownerUserId);
-    const outputSchemas = createOutputSchemaCatalog(db, ownerUserId);
-    const agentConfigs = createAgentConfigService({
-      ownerUserId, sessionToken, sp, projects: projectStore, purposes: createPostgresAgentPurposeStore(db, ownerUserId),
-      sources: createPostgresResourceSourceStore(db, ownerUserId),
-      ...(agentImportTarget === undefined ? {} : { imports: agentImportTarget }),
-    });
-    const readRun = createPostgresProjectRunReader(db, ownerUserId);
-    const scores = publishScore === undefined ? undefined : {
-      async syncRun(projectId: string, runId: string) {
-        if (!await readRun(projectId, runId)) return null;
-        const plans = createPostgresProjectPlanReader(db, ownerUserId);
-        const schema = await plans.getEvaluationOutputSchema(projectId);
-        if (!schema) return null;
-        return syncRunScores({
-          store: createPostgresRuntimeStore(db, ownerUserId, release, runQueue),
-          runId,
-          publish: publishScore,
-          read: createEvaluationScoreReader(),
-          schema,
-          now: () => new Date().toISOString(),
-        });
-      },
-    };
-    const services = {
-      datasets: createDatasetService(createPostgresDatasetStore(db, ownerUserId)),
-      projects: createProjectService({
-        ownerUserId, sourceBranch: release.sourceBranch, store: projectStore, outputSchemas, agentConfigs, admission,
-      }),
-      projectResultsExport: createProjectResultsExport(createPostgresProjectResultsSource(db, ownerUserId)),
-      agentConfigs,
-      agentImportTasks: createAgentImportTaskReader(createPostgresAgentImportTaskReader(db, ownerUserId)),
-      ...(agentImports === undefined || agentImportTarget === undefined ? {} : { agentImports: createAgentImportService({
-        source: agentImports.source, target: agentImportTarget,
-        store: createPostgresAgentImportStore(db, ownerUserId, agentImports.queue),
-      }) }),
-      admission,
-      results: createPostgresRuntimeQueries(db, ownerUserId),
-      projectRuns: {
-        ...createPostgresProjectRunControl(db, ownerUserId, runQueue),
-        readRun,
-      },
-      observations: createPostgresObservationReader(db, ownerUserId),
-      resourceSnapshots: createPostgresResourceSnapshotReader(db, ownerUserId),
-      metrics: createMetrics({ source: createPostgresMetricsSource(db, ownerUserId) }),
-      ...createBundleCatalogs(db, ownerUserId, bundles),
-      outputSchemas,
-      initialResources: createInitialResourceApi(db, ownerUserId),
-      ...(scores === undefined ? {} : { scores }),
-    };
-    return { services, release: releaseAdmission };
+    try {
+      const projectStore = createPostgresProjectStore(db, ownerUserId);
+      const outputSchemas = createOutputSchemaCatalog(db, ownerUserId);
+      const agentConfigs = createAgentConfigService({
+        ownerUserId, sessionToken, sp, projects: projectStore, purposes: createPostgresAgentPurposeStore(db, ownerUserId),
+        sources: createPostgresResourceSourceStore(db, ownerUserId),
+        ...(agentImportTarget === undefined ? {} : { imports: agentImportTarget }),
+      });
+      const readRun = createPostgresProjectRunReader(db, ownerUserId);
+      const scores = publishScore === undefined ? undefined : {
+        async syncRun(projectId: string, runId: string) {
+          if (!await readRun(projectId, runId)) return null;
+          const plans = createPostgresProjectPlanReader(db, ownerUserId);
+          const schema = await plans.getEvaluationOutputSchema(projectId);
+          if (!schema) return null;
+          return syncRunScores({
+            store: createPostgresRuntimeStore(db, ownerUserId, release, runQueue),
+            runId,
+            publish: publishScore,
+            read: createEvaluationScoreReader(),
+            schema,
+            now: () => new Date().toISOString(),
+          });
+        },
+      };
+      const services = {
+        datasets: createDatasetService(createPostgresDatasetStore(db, ownerUserId)),
+        projects: createProjectService({
+          ownerUserId, sourceBranch: release.sourceBranch, store: projectStore, outputSchemas, agentConfigs, admission,
+        }),
+        projectResultsExport: createProjectResultsExport(createPostgresProjectResultsSource(db, ownerUserId)),
+        agentConfigs,
+        agentImportTasks: createAgentImportTaskReader(createPostgresAgentImportTaskReader(db, ownerUserId)),
+        ...(agentImports === undefined || agentImportTarget === undefined ? {} : { agentImports: createAgentImportService({
+          source: agentImports.source, target: agentImportTarget,
+          store: createPostgresAgentImportStore(db, ownerUserId, agentImports.queue),
+        }) }),
+        admission,
+        results: createPostgresRuntimeQueries(db, ownerUserId),
+        projectRuns: {
+          ...createPostgresProjectRunControl(db, ownerUserId, runQueue),
+          readRun,
+        },
+        observations: createPostgresObservationReader(db, ownerUserId),
+        resourceSnapshots: createPostgresResourceSnapshotReader(db, ownerUserId),
+        metrics: createMetrics({ source: createPostgresMetricsSource(db, ownerUserId) }),
+        ...createBundleCatalogs(db, ownerUserId, bundles),
+        outputSchemas,
+        initialResources: createInitialResourceApi(db, ownerUserId),
+        ...(scores === undefined ? {} : { scores }),
+      };
+      return { services, release: releaseAdmission };
+    } catch (error) {
+      releaseAdmission();
+      throw error;
+    }
   };
 }

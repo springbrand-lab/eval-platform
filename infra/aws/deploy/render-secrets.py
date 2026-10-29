@@ -57,12 +57,13 @@ def render(app, database):
 
     langfuse = ["LANGFUSE_BASE_URL", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_ENVIRONMENT"]
     result_mcp = ["EVAL_RESULT_MCP_TOKEN"]
+    management_mcp = ["EVAL_MANAGEMENT_MCP_TOKEN"]
     evidence = [
         "EVAL_EVIDENCE_R2_ENDPOINT", "EVAL_EVIDENCE_R2_BUCKET",
         "EVAL_EVIDENCE_R2_ACCESS_KEY_ID", "EVAL_EVIDENCE_R2_SECRET_ACCESS_KEY",
     ]
     services = {
-        "api": {"environment": environment(api_required + langfuse + result_mcp + source)},
+        "api": {"environment": environment(api_required + langfuse + result_mcp + management_mcp + source)},
         "run-worker": {"environment": environment(run_required + evidence + langfuse + result_mcp)},
     }
     if enabled:
