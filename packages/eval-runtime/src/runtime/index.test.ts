@@ -1656,6 +1656,39 @@ describe("eval runtime orchestration", () => {
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
   });
 
+  it("replays only the stored original Run intent after its Sampling target and current plan change", async () => {
+    const store = makeStore();
+    const runtime = createAutoResumingRuntime({ harness: makeHarness(), store, sleep: async () => undefined });
+    const first = await runtime.submit(projectRequest("execution", "initial-execution"));
+    await waitForTerminal(runtime, first.runId);
+    const originalSampling = first.samplingIds[0]!;
+    const request: RunRequest = {
+      idempotencyKey: "lost-response", projectId: PROJECT_ID, operation: "execution",
+      selector: { samplingIds: [originalSampling] },
+      targets: { projectSampleIds: [], samplingIds: [originalSampling] },
+    };
+    expect(await runtime.replay(request)).toBeNull();
+    expect((await runtime.preview({ projectId: PROJECT_ID, operation: "execution", selector: request.selector })).targets)
+      .toEqual(request.targets);
+    const admitted = await runtime.submit(request);
+    await waitForTerminal(runtime, admitted.runId);
+    await expect(runtime.preview({ projectId: PROJECT_ID, operation: "execution", selector: request.selector }))
+      .rejects.toBeInstanceOf(RuntimeEntityNotFoundError); // target Sampling no longer exists
+    runtime.plans.execution = executionPlan({ executionConcurrency: 2 });
+    const readPlan = vi.spyOn(runtime.plans, "getProjectPlan");
+    const write = vi.spyOn(store, "admitRun");
+    expect(await runtime.replay(request)).toEqual(admitted);
+    expect(readPlan).not.toHaveBeenCalled(); // use the Run's original saved plan digests
+    expect(write).not.toHaveBeenCalled();
+    await expect(runtime.replay({ ...request, selector: { all: true } }))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(runtime.replay({ ...request, targets: { projectSampleIds: ["sample-1"], samplingIds: [] } }))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    expect(await runtime.replay({ ...request, idempotencyKey: "genuinely-new" })).toBeNull();
+    expect(readPlan).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
   it("rejects a key reused for another Run operation in the same Project", async () => {
     const runtime = createAutoResumingRuntime({
       harness: makeHarness(),

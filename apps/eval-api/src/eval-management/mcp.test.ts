@@ -57,7 +57,9 @@ describe("trusted management MCP transport", () => {
     expect(await initialized.json()).toMatchObject({ result: { protocolVersion: "2025-06-18",
       capabilities: { tools: { listChanged: false } } } });
     const tools = await (await app.rpc(rpc("tools/list"))).json() as {
-      result: { tools: Array<{ name: string; inputSchema: { type: string; required?: string[]; additionalProperties?: boolean } }> };
+      result: { tools: Array<{ name: string; inputSchema: {
+        type: string; required?: string[]; additionalProperties?: boolean; properties?: Record<string, unknown>;
+      } }> };
     };
     expect(tools.result.tools.map(({ name }) => name)).toEqual([
       "list_options", "prepare_inputs", "get_preparation", "search_agent_resources",
@@ -70,6 +72,9 @@ describe("trusted management MCP transport", () => {
       .toEqual(expect.arrayContaining(["operationKey", "purpose", "instructions", "modelId"]));
     expect(tools.result.tools.find(({ name }) => name === "create_output_schema")!.inputSchema.required)
       .toEqual(expect.arrayContaining(["operationKey", "name", "description", "content"]));
+    const runInput = tools.result.tools.find(({ name }) => name === "submit_run")!.inputSchema;
+    expect(runInput.required).toEqual(expect.arrayContaining(["projectId", "idempotencyKey", "operation", "selector", "targets"]));
+    expect(runInput.properties).not.toHaveProperty("replayOnly"); // adapter-only, never advertised to the model
     expect(tools.result.tools.map(({ name }) => name)).not.toContain("submit_evaluation");
     expect(app.release).toHaveBeenCalledTimes(2);
   });

@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import type { RunPreview } from "@eval-platform/eval-runtime";
 import type { ApiRuntime, OwnerServices } from "../lib/types.js";
 import type { OutputSchemaRecord } from "../db/output-schemas.js";
 import type { EvalSpClient } from "../sp/client.js";
@@ -29,7 +30,7 @@ export const project = {
   sourceBranch: "eval", createdAt: "2026-01-01T00:00:00.000Z",
 };
 export const preview = {
-  projectId: project.projectId, operation: "execution" as const, selector: { all: true },
+  projectId: project.projectId, operation: "execution" as const, selector: { all: true as const },
   targets: { projectSampleIds: ["sample-1"], samplingIds: [] },
   replacedSamplingCount: 0, newSamplingCount: 2, evaluationCount: 0,
   executionPlanDigest: "digest", evaluationPlanDigest: null,
@@ -79,7 +80,8 @@ export function setupManagement(configured = true, files?: ManagementFiles) {
       }),
     },
     admission: {
-      preview: vi.fn(async (_input: unknown) => preview),
+      preview: vi.fn(async (_input: unknown): Promise<RunPreview> => preview),
+      replay: vi.fn(async (_input: unknown): Promise<{ runId: string; samplingIds: string[] } | null> => null),
       submit: vi.fn(async (_input: unknown) => ({ runId: "run-2", samplingIds: ["sampling-2"] })),
     },
     projectRuns: {

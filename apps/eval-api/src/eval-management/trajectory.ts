@@ -4,7 +4,9 @@ import {
   type SpPiTrajectoryPage,
 } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
-import { evalEvidenceTrajectoryPageSchema, EVAL_EVIDENCE_FILE_MAX_BYTES } from "@springbrand/eval-harness";
+import {
+  evalEvidenceTrajectoryPageSchema, EVAL_EVIDENCE_FILE_MAX_BYTES, EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX,
+} from "@springbrand/eval-harness";
 import type { Context } from "hono";
 import { z } from "zod";
 import { fileResponse } from "../lib/file-response.js";
@@ -25,13 +27,15 @@ const querySchema = z.strictObject({
 type Query = z.output<typeof querySchema>;
 const invalid = () => new HttpError("RESPONSE_INVALID", "SP returned an invalid SAFE Pi trajectory page");
 const encoding = new TextEncoder();
+// SP and the public schema bound each page to 200 rows / 4 MB; do not fetch one record per request.
+const PAGE_LIMIT = EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX;
 
 /** Public SP SAFE page is canonical; also bind it to this one Chat and frozen cursor.
  * Keep the original parsed record, never Zod's projected copy of Pi fields. */
 function nativePage(value: unknown, chatId: string, afterSeq: number, throughSeq?: number): SpPiTrajectoryPage {
   if (!evalEvidenceTrajectoryPageSchema.safeParse(value).success) throw invalid();
   const page = value as SpPiTrajectoryPage;
-  if (page.records.length > 1 || page.cursor.throughSeq < afterSeq
+  if (page.records.length > PAGE_LIMIT || page.cursor.throughSeq < afterSeq
     || throughSeq !== undefined && page.cursor.throughSeq !== throughSeq) throw invalid();
   let last = afterSeq;
   for (const row of page.records) {
@@ -116,7 +120,7 @@ async function* lines(c: Context<AppBindings>, input: Query, chat: ChatRef,
     if (page.nextAfterSeq === null) break; // authoritative terminal page under frozen cutoff
     afterSeq = page.nextAfterSeq;
     page = nativePage(await c.env.observation.trajectory(chat,
-      { afterSeq, throughSeq, limit: 1 }, signal), chat.chatId, afterSeq, throughSeq);
+      { afterSeq, throughSeq, limit: PAGE_LIMIT }, signal), chat.chatId, afterSeq, throughSeq);
   }
   // A long-running stream must not claim success if its Project or stage was replaced.
   if (signal.aborted) throw signal.reason;
@@ -158,7 +162,7 @@ function asStream(source: AsyncGenerator<Uint8Array>, abort: AbortController): R
 export async function streamTrajectory(c: Context<AppBindings>): Promise<Response> {
   const input = query(c);
   const chat = await ownedTrajectoryChat(c, input);
-  const first = nativePage(await c.env.observation.trajectory(chat, { afterSeq: 0, limit: 1 }, c.req.raw.signal),
+  const first = nativePage(await c.env.observation.trajectory(chat, { afterSeq: 0, limit: PAGE_LIMIT }, c.req.raw.signal),
     chat.chatId, 0);
   const abort = new AbortController();
   const signal = AbortSignal.any([c.req.raw.signal, abort.signal]);

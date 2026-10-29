@@ -66,6 +66,8 @@ export interface ImportStaging {
   write(taskId: string, file: ExportFile, body: ReadableStream<Uint8Array>, expiresAt: string,
     onBytes?: (bytes: number) => void): Promise<FrozenFile>;
   read(taskId: string, file: FrozenFile, expiresAt: string): Promise<Uint8Array>;
+  /** Verify a staged file without creating directories, rewriting expiry or returning its bytes. */
+  verify(taskId: string, file: FrozenFile, expiresAt: string): Promise<void>;
   zip(taskId: string, files: readonly FrozenFile[], expiresAt: string): Promise<Uint8Array>;
   prune(): Promise<void>;
 }
@@ -147,6 +149,34 @@ export async function openImportStaging(bundleDirectory: string,
         const bytes = await input.readFile();
         if (bytesHash(bytes) !== file.sha256) throw new ImportConflictError("Staged file hash mismatch");
         return new Uint8Array(bytes);
+      } finally { await input.close(); }
+    },
+    async verify(taskId, file, expiresAt) {
+      safeImportPath(file.path);
+      checkSize(file.size);
+      if (!hashPattern.test(file.sha256)) throw new ImportConflictError("Invalid staged file hash");
+      notExpired(expiresAt);
+      const dir = path.join(root, uuid.parse(taskId));
+      const directoryStat = await lstat(dir); // no mkdir, chmod or expiry-file write on a GET
+      if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink() || await realpath(dir) !== dir
+        || (process.getuid && directoryStat.uid !== process.getuid()) || (directoryStat.mode & 0o077) !== 0) {
+        throw new ImportConflictError("Unsafe import staging directory");
+      }
+      const input = await open(path.join(dir, file.sha256), constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const stat = await input.stat();
+        if (!stat.isFile() || stat.size !== file.size) throw new ImportConflictError("Staged file size mismatch");
+        const hash = createHash("sha256");
+        const chunk = Buffer.allocUnsafe(64 * 1024);
+        for (let at = 0; at < file.size;) {
+          const { bytesRead } = await input.read(chunk, 0, Math.min(chunk.byteLength, file.size - at), at);
+          if (bytesRead === 0) throw new ImportConflictError("Staged file ended early");
+          hash.update(chunk.subarray(0, bytesRead));
+          at += bytesRead;
+        }
+        if ((await input.stat()).size !== file.size || hash.digest("hex") !== file.sha256) {
+          throw new ImportConflictError("Staged file hash mismatch");
+        }
       } finally { await input.close(); }
     },
     async zip(taskId, files, expiresAt) {

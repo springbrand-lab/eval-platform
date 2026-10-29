@@ -84,6 +84,7 @@ export function createEvalRunAdmission(dependencies: EvalRunAdmissionDependencie
   const admission = new RunAdmission(dependencies);
   return {
     preview: (request) => admission.preview(request),
+    replay: (request) => admission.replay(request),
     submit: (request) => admission.submit(request),
   };
 }

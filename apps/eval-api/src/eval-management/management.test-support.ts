@@ -18,6 +18,7 @@ export function fakeManagement(owner: string) {
   const store: ManagementStore = {
     async reserveUpload(ownerId, uploadId, meta) {
       if (ownerId !== owner) throw conflict();
+      if (uploads.has(uploadId)) throw conflict();
       uploads.set(uploadId, { ownerUserId: owner, uploadId, ...meta, status: "reserved", claimedBy: null, createdAt: new Date() });
     },
     async releaseUpload(_ownerId, uploadId) { uploads.delete(uploadId); },
@@ -80,13 +81,23 @@ export function fakeManagement(owner: string) {
     },
   };
   const files: ManagementFiles = {
-    async ingest(ownerId, metadata, body) {
+    async ingest(ownerId, metadata, body, uploadId) {
       if (ownerId !== owner) throw conflict();
       const bytes = new Uint8Array(await new Response(body).arrayBuffer());
       if (bytes.byteLength !== metadata.byteSize || createHash("sha256").update(bytes).digest("hex") !== metadata.sha256) throw unavailable();
-      const ref = addUpload(metadata.kind, metadata.name, bytes, metadata.mediaType);
+      const ref = addUpload(metadata.kind, metadata.name, bytes, metadata.mediaType, uploadId);
       return { uploadRef: ref, byteSize: metadata.byteSize, sha256: metadata.sha256,
         expiresAt: uploads.get(ref)!.expiresAt.toISOString() };
+    },
+    async recover(ownerId, uploadId) {
+      const row = await store.upload(ownerId, uploadId);
+      const bytes = bodies.get(uploadId);
+      if (!row || !bytes || row.expiresAt.getTime() <= Date.now() || bytes.byteLength !== row.byteSize
+        || createHash("sha256").update(bytes).digest("hex") !== row.sha256) {
+        throw new HttpError("REQUEST_NOT_FOUND", "Upload receipt unavailable");
+      }
+      return { uploadRef: row.uploadId, kind: row.kind, name: row.name, mediaType: row.mediaType,
+        byteSize: row.byteSize, sha256: row.sha256, expiresAt: row.expiresAt.toISOString() };
     },
     async info(ownerId, ref, kind) {
       const row = await store.upload(ownerId, ref);
@@ -100,8 +111,9 @@ export function fakeManagement(owner: string) {
     },
   };
   function addUpload(kind: UploadKind, name: string, bytes: Uint8Array,
-    mediaType = kind === "skill" ? "application/zip" : "application/octet-stream"): string {
-    const uploadId = crypto.randomUUID();
+    mediaType = kind === "skill" ? "application/zip" : "application/octet-stream", suppliedId?: string): string {
+    const uploadId = suppliedId ?? crypto.randomUUID();
+    if (uploads.has(uploadId)) throw conflict();
     bodies.set(uploadId, bytes);
     uploads.set(uploadId, {
       ownerUserId: owner, uploadId, kind, name, mediaType, byteSize: bytes.byteLength,

@@ -82,7 +82,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
   }, 30_000);
 
   /** Store-level admission built from the persisted plan, independent of the Runtime package. */
-  function planAdmission(owner: string): EvalRunAdmission {
+  function planAdmission(owner: string): Pick<EvalRunAdmission, "preview" | "submit"> {
     const plans = createPostgresProjectPlanReader(database.db, owner);
     const store = createPostgresRuntimeStore(database.db, owner, release, runQueue);
     return {
@@ -105,7 +105,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     };
   }
 
-  function services(owner = OWNER, admission: EvalRunAdmission = planAdmission(owner)) {
+  function services(owner = OWNER, admission: Pick<EvalRunAdmission, "preview" | "submit"> = planAdmission(owner)) {
     const db = database.db;
     const store = createPostgresProjectStore(db, owner);
     const outputSchemas = createOutputSchemaCatalog(db, owner);
@@ -286,7 +286,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
 
   it("compensates a failed creation: no Project rows remain and SP copies are deleted", async () => {
     const { first, subject, evaluator, schema } = await catalog();
-    const failing: EvalRunAdmission = {
+    const failing: Pick<EvalRunAdmission, "preview" | "submit"> = {
       preview: planAdmission(OWNER).preview,
       async submit() { throw new RuntimeProjectBusyError("p", "r"); },
     };

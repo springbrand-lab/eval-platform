@@ -129,7 +129,11 @@ export const previewRunSchema = z.strictObject({
 export const submitRunSchema = z.strictObject({
   projectId: entityIdSchema, idempotencyKey: idempotencyKeySchema,
   operation: z.enum(RUN_OPERATIONS), selector: selectorSchema, targets: targetsSchema,
+  /** Only the trusted adapter may add this after verifying the original private approval. */
+  replayOnly: z.literal(true).optional(),
 });
+/** The model-visible tool contract never offers the trusted replay-only switch. */
+export const submitRunToolSchema = submitRunSchema.omit({ replayOnly: true });
 export const stopRunSchema = z.strictObject({ projectId: entityIdSchema, runId: entityIdSchema });
 export const getRunSchema = z.strictObject({ runId: entityIdSchema, ...pageSchema });
 export const getMetricsSchema = z.strictObject({
@@ -149,7 +153,7 @@ export const inspectCaseSchema = z.strictObject({
   evaluationId: entityIdSchema.optional(),
 });
 
-/** The same schemas validate calls and generate the advertised input schemas. */
+/** Call validation schemas; only submit_run's advertisement omits its derived adapter-only field. */
 export const managementSchemas = {
   list_options: listOptionsSchema,
   prepare_inputs: prepareInputsSchema,

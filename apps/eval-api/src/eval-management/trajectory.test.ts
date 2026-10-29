@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { MetricsEntityNotFoundError } from "@eval-platform/eval-metrics";
+import { EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX } from "@springbrand/eval-harness";
 import { describe, expect, it, vi } from "vitest";
 import { nativeAssistantMessage, nativeTransfer } from "../sp/native-test-fixture.js";
 import { detail } from "./metrics-fixture.js";
@@ -11,10 +12,11 @@ const evaluator = { ...subject, role: "evaluator", evaluationId: "evaluation-1" 
 const address = (query: Record<string, string>) => `${MANAGEMENT_TRAJECTORY_PATH}?${new URLSearchParams(query)}`;
 const get = (app: ReturnType<typeof setupManagement>, query: Record<string, string>, token = MANAGEMENT_TOKEN) =>
   app.request(address(query), { headers: { Authorization: `Bearer ${token}` } });
-const page = (chatId: string, ingestSeq: number, throughSeq: number, nextAfterSeq: number | null) => ({
+const page = (chatId: string, ingestSeq: number | readonly number[], throughSeq: number, nextAfterSeq: number | null) => ({
   format: "sp-pi-trajectory/v1", cursor: { throughSeq },
-  records: [nativeAssistantMessage(ingestSeq, chatId, "submission-1",
-    [{ type: "text", text: `private ${chatId} entry ${ingestSeq}` }])], nextAfterSeq,
+  records: (typeof ingestSeq === "number" ? [ingestSeq] : ingestSeq).map((seq) =>
+    nativeAssistantMessage(seq, chatId, "submission-1", [{ type: "text", text: `private ${chatId} entry ${seq}` }])),
+  nextAfterSeq,
 });
 
 function completeFile(body: string) {
@@ -81,11 +83,11 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     expect(app.observation.trajectory).not.toHaveBeenCalled();
   });
 
-  it("freezes the first Chat watermark across pages and appends only a verified terminal manifest", async () => {
+  it("streams multi-record native pages, a last partial page and one verified frozen manifest", async () => {
     const app = setupManagement();
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
-    app.observation.trajectory.mockResolvedValueOnce(page("subject-chat", 4, 9, 4))
-      .mockResolvedValueOnce(page("subject-chat", 6, 9, null));
+    app.observation.trajectory.mockResolvedValueOnce(page("subject-chat", [1, 4, 5], 9, 5))
+      .mockResolvedValueOnce(page("subject-chat", [6, 9], 9, null));
     const response = await get(app, subject);
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/x-ndjson; charset=utf-8");
@@ -97,17 +99,18 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     const { manifest, records } = completeFile(body);
     expect(manifest).toEqual({
       type: "manifest", format: "sp-pi-trajectory/v1", projectId: project.projectId, samplingId: "sampling-1",
-      runScope: "project_current", role: "subject", chatId: "subject-chat", throughSeq: 9, recordCount: 2,
+      runScope: "project_current", role: "subject", chatId: "subject-chat", throughSeq: 9, recordCount: 5,
       recordsSha256: expect.stringMatching(/^[0-9a-f]{64}$/u), complete: true,
     });
-    expect(records.map(({ ingestSeq }) => ingestSeq)).toEqual([4, 6]);
+    expect(records.map(({ ingestSeq }) => ingestSeq)).toEqual([1, 4, 5, 6, 9]);
     expect(JSON.stringify(records)).toContain("private subject-chat entry 4");
     expect(app.observation.trajectory).toHaveBeenCalledTimes(2);
     expect(app.observation.trajectory).toHaveBeenNthCalledWith(1,
-      { ownerUserId: OWNER, chatId: "subject-chat" }, { afterSeq: 0, limit: 1 }, expect.any(AbortSignal));
+      { ownerUserId: OWNER, chatId: "subject-chat" }, { afterSeq: 0, limit: EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX },
+      expect.any(AbortSignal));
     expect(app.observation.trajectory).toHaveBeenNthCalledWith(2,
       { ownerUserId: OWNER, chatId: "subject-chat" },
-      { afterSeq: 4, throughSeq: 9, limit: 1 }, expect.any(AbortSignal));
+      { afterSeq: 5, throughSeq: 9, limit: EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX }, expect.any(AbortSignal));
     expect(app.services.projectRuns.readRun).not.toHaveBeenCalled();
     expect(app.services.metrics.getSamplingDetail).toHaveBeenCalledTimes(2);
     expect(app.observation.trajectoryRecord).not.toHaveBeenCalled();
@@ -232,6 +235,36 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     const partial = await incompleteFile(await get(app, subject));
     expect(partial).toContain("private subject-chat entry 4");
     expect(partial).not.toContain("entry 5");
+  });
+
+  it("rejects duplicate/out-of-order rows and invalid next cursors within or across pages, without a terminal manifest", async () => {
+    const app = setupManagement();
+    app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
+    for (const invalid of [
+      page("subject-chat", [4, 4], 9, 4),
+      page("subject-chat", [6, 5], 9, 5),
+      page("subject-chat", [4, 5], 9, 4),
+      page("subject-chat", [4, 10], 9, null),
+    ]) {
+      app.observation.trajectory.mockResolvedValueOnce(invalid);
+      expect((await get(app, subject)).status).not.toBe(200);
+    }
+    app.observation.trajectory.mockResolvedValueOnce(page("subject-chat", [4, 6], 9, 6))
+      .mockResolvedValueOnce(page("subject-chat", [6, 9], 9, null));
+    const partial = await incompleteFile(await get(app, subject));
+    expect(partial).toContain("entry 4");
+    expect(partial).not.toContain("entry 9");
+    expect(app.observation.trajectoryRecord).not.toHaveBeenCalled();
+  });
+
+  it("omits the manifest if the next frozen page is missing after multiple records were sent", async () => {
+    const app = setupManagement();
+    app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
+    app.observation.trajectory.mockResolvedValueOnce(page("subject-chat", [1, 3, 5], 9, 5))
+      .mockRejectedValueOnce(new Error("SP page unavailable"));
+    const partial = await incompleteFile(await get(app, subject));
+    expect(partial).toContain("entry 5");
+    expect(app.observation.trajectory).toHaveBeenCalledTimes(2);
   });
 
   it("never sends even a JSONL prefix for an unverified reference", async () => {

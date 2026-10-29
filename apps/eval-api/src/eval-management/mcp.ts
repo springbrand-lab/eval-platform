@@ -12,7 +12,7 @@ import type { AppBindings } from "../lib/types.js";
 import { JSON_BODY_BYTES, MANAGEMENT_OUTPUT_SCHEMA_BODY_BYTES } from "../limits.js";
 import { serviceAccountScope } from "../middlewares/service-account.js";
 import { text } from "./common.js";
-import { managementSchemas } from "./schemas.js";
+import { managementSchemas, submitRunToolSchema } from "./schemas.js";
 import { ManagementOutcomeUnknownError } from "./skill.js";
 import { callTool } from "./tools.js";
 import { MANAGEMENT_TRAJECTORY_PATH, streamTrajectory } from "./trajectory.js";
@@ -38,7 +38,8 @@ const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
 };
 const TOOLS = (Object.keys(managementSchemas) as (keyof typeof managementSchemas)[]).map((name) => ({
   name, description: DESCRIPTIONS[name],
-  inputSchema: z.toJSONSchema(managementSchemas[name], { target: "draft-07", io: "input", unrepresentable: "any" }),
+  inputSchema: z.toJSONSchema(name === "submit_run" ? submitRunToolSchema : managementSchemas[name],
+    { target: "draft-07", io: "input", unrepresentable: "any" }),
 }));
 
 function toolFailure(error: unknown) {

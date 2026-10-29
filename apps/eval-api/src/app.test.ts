@@ -74,6 +74,7 @@ function setup() {
     },
     admission: {
       preview: vi.fn(async () => preview),
+      replay: vi.fn(async () => null),
       submit: vi.fn(async () => ({ runId: "run-2", samplingIds: ["s-2"] })),
     },
     results: { getRun: vi.fn(async () => ({ runId: "run-1" })) },

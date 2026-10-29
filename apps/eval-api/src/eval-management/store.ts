@@ -68,9 +68,10 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
         if (Number(usage?.bytes ?? 0) + metadata.byteSize > IMPORT_LIMITS.stagingBytes) {
           throw new HttpError("REQUEST_PAYLOAD_TOO_LARGE", "Upload staging is full");
         }
-        await transaction.insert(managementUploads).values({
+        const [inserted] = await transaction.insert(managementUploads).values({
           ownerUserId: owner, uploadId, ...metadata, status: "reserved",
-        });
+        }).onConflictDoNothing().returning({ uploadId: managementUploads.uploadId });
+        if (!inserted) throw conflict(); // Never reuse a reserved/READY ID or rewrite its file.
       });
     },
     async releaseUpload(owner, uploadId) {

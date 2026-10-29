@@ -81,7 +81,8 @@ export function createProjectService(input: {
   readonly store: PostgresProjectStore;
   readonly outputSchemas: Pick<ReturnType<typeof createOutputSchemaCatalog>, "get">;
   readonly agentConfigs: Pick<AgentConfigService, "freeze" | "discard">;
-  readonly admission: EvalRunAdmission;
+  /** Project creation only needs preview and submit; management owns stored-Run replay. */
+  readonly admission: Pick<EvalRunAdmission, "preview" | "submit">;
 }) {
   const { ownerUserId, store, agentConfigs, admission } = input;
 

@@ -99,6 +99,9 @@ export interface RunPreview extends RunPreviewRequest {
 /** Persists Run admissions only; Agent execution belongs to a separate resumer. */
 export interface EvalRunAdmission {
   preview(request: RunPreviewRequest): Promise<RunPreview>;
+  /** Match only an already-persisted Project/key Run against its original complete intent.
+   * Null means no stored Run; this never previews or admits new targets. */
+  replay(request: RunRequest): Promise<RunHandle | null>;
   submit(request: RunRequest): Promise<RunHandle>;
 }
 

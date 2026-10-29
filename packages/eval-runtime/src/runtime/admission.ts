@@ -117,14 +117,26 @@ export class RunAdmission implements EvalRunAdmission {
     return promise;
   }
 
-  async #persist(idempotencyKey: string, facts: RunRequestFacts): Promise<RunHandle> {
+  /** A read-only, stored-Run-only replay, before a management caller consults the current preview.
+   * Do not treat a pending admission as an existing Run: a miss never authorizes a new target. */
+  async replay(request: RunRequest): Promise<RunHandle | null> {
+    const { idempotencyKey, ...facts } = requireRunRequest(request);
+    return this.#replayStored(idempotencyKey, facts);
+  }
+
+  async #replayStored(idempotencyKey: string, facts: RunRequestFacts): Promise<RunHandle | null> {
     const existing = await this.#store.findRunByIdempotencyKey(facts.projectId, idempotencyKey);
-    if (existing) {
-      if (existing.requestIdentity.requestFingerprint !== await requestFingerprint(facts, existing.planDigests)) {
-        throw new RuntimeRunIdentityConflictError(IDENTITY_CONFLICT);
-      }
-      return copyHandle(existing);
+    if (!existing) return null;
+    if (existing.projectId !== facts.projectId || existing.requestIdentity.idempotencyKey !== idempotencyKey
+      || existing.requestIdentity.requestFingerprint !== await requestFingerprint(facts, existing.planDigests)) {
+      throw new RuntimeRunIdentityConflictError(IDENTITY_CONFLICT);
     }
+    return copyHandle(existing);
+  }
+
+  async #persist(idempotencyKey: string, facts: RunRequestFacts): Promise<RunHandle> {
+    const existing = await this.#replayStored(idempotencyKey, facts);
+    if (existing) return existing;
 
     const { projectId, operation, targets } = facts;
     const admitted = await this.#plan(projectId, operation);
