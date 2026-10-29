@@ -193,16 +193,19 @@ async function lockExecutionTargets(
 }
 
 /**
- * Locks the Project row and resolves the request identity: a replay returns the existing Run, the
- * creation key is refused once the Project has any Run, and a new key needs an idle Project on the
- * active release. Returns the owner for the remaining steps.
+ * Locks the Project row and resolves the request identity: the creation key needs ProjectService's
+ * transient proof even before the first Run exists, a replay returns the existing Run, a new
+ * creation-key Run is refused once the Project has any Run, and a new key needs an idle Project
+ * on the active release. Returns the owner for the remaining steps.
  */
 async function lockForAdmission(
-  transaction: AdmissionWriter, scope: RuntimeStoreScope, run: RuntimeRunRecord,
+  transaction: AdmissionWriter, scope: RuntimeStoreScope, command: RuntimeRunAdmissionCommand,
 ): Promise<{ readonly owner: string; readonly executionPlanDigest: string; readonly existing: RuntimeRunRecord | null }> {
+  const { run } = command;
   // Every Project row is written with its execution plan in the creation transaction.
   const [project] = await transaction.select({
     ownerUserId: projects.ownerUserId, sourceBranch: projects.sourceBranch, creationKey: projects.creationKey,
+    creationFingerprint: projects.creationFingerprint,
     executionPlanDigest: projectExecutionPlans.digest,
   })
     .from(projects)
@@ -212,6 +215,13 @@ async function lockForAdmission(
   if (!project) throw new RuntimeEntityNotFoundError("project", run.projectId);
   const owner = project.ownerUserId;
   const { executionPlanDigest } = project;
+  if (run.requestIdentity.idempotencyKey === project.creationKey) {
+    if (command.firstRun?.creationFingerprint !== project.creationFingerprint) {
+      throw new RuntimeRunIdentityConflictError("Project creation key is reserved for its first Run");
+    }
+  } else if (command.firstRun !== undefined) {
+    throw new RuntimeRunIdentityConflictError("First-Run proof cannot be used with another Run key");
+  }
   const existing = await findByIdentity(transaction, owner, run.projectId, run.requestIdentity);
   if (existing) return { owner, executionPlanDigest, existing };
   // A creation key admits only the Project's very first Run; once any Run exists the creation was superseded.
@@ -342,7 +352,7 @@ async function admitRun(
   command: RuntimeRunAdmissionCommand,
 ): Promise<RuntimeRunAdmission> {
   const { run } = command;
-  const { owner, executionPlanDigest, existing } = await lockForAdmission(transaction, scope, run);
+  const { owner, executionPlanDigest, existing } = await lockForAdmission(transaction, scope, command);
   if (existing) return { run: existing, created: false };
   const { lockEvaluationPlan } = await checkPlanDigests(transaction, run, executionPlanDigest);
   await checkSelectorTargets(transaction, owner, run);

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { digestJson, RuntimeAdmissionConflictError, type EvalRunAdmission } from "@eval-platform/eval-runtime";
+import {
+  digestJson, phasesOf, RuntimeAdmissionConflictError, RuntimeRunIdentityConflictError,
+  type EvalRunAdmission, type RuntimeRunRecord,
+} from "@eval-platform/eval-runtime";
 import type { Data } from "@eval-platform/eval-dataset";
 import type { AgentConfigService } from "../agent-configs.js";
 import type { PostgresProjectStore, ProjectSnapshot, SelectedDataset, StoredProjectCreation } from "../db/project-store.js";
@@ -29,7 +32,7 @@ async function fixture(evaluating = false) {
   let schema: Record<string, unknown> = structuredClone(outputSchema);
   let schemaName = "Output";
   let persisted: ProjectSnapshot | null = null;
-  let firstRun: { runId: string; samplingIds: string[] } | null = null;
+  let firstRun: (RuntimeRunRecord & { sequence: number }) | null = null;
   let changedEvaluationDigest: string | undefined;
   let evaluationReplaced = false;
   const readSelection = vi.fn(async (selections: readonly { datasetId: string; dataIds?: readonly string[] }[]) =>
@@ -44,6 +47,7 @@ async function fixture(evaluating = false) {
     return {
       project: snapshot.project, fingerprint: snapshot.creation.fingerprint,
       deleted: false, superseded: false, run: firstRun,
+      firstRunProjectSampleIds: [...new Set(snapshot.datasets.flatMap(({ projectSampleIds }) => projectSampleIds))],
       planDigests: { execution: snapshot.execution.digest,
         ...(snapshot.evaluation ? { evaluation: changedEvaluationDigest ?? snapshot.evaluation.digest } : {}) },
       evaluationReplaced,
@@ -73,9 +77,18 @@ async function fixture(evaluating = false) {
       evaluationPlanDigest: operation === "execution" ? null : changedEvaluationDigest ?? snapshot.evaluation!.digest,
     };
   });
-  const submit = vi.fn(async (request: Parameters<EvalRunAdmission["submit"]>[0]) => {
-    firstRun = { runId: "original-first-run", samplingIds: [request.targets.projectSampleIds[0]!] };
-    return firstRun;
+  const submit = vi.fn(async (request: Parameters<EvalRunAdmission["submit"]>[0], _proof?: Parameters<EvalRunAdmission["submit"]>[1]) => {
+    const { idempotencyKey, projectId, operation, selector, targets, expectedPlanDigests } = request;
+    firstRun = {
+      runId: "original-first-run", projectId, operation, phases: phasesOf(operation), selector, targets,
+      sourceCommit: "a".repeat(40), samplingIds: [targets.projectSampleIds[0]!], evaluationIds: [],
+      planDigests: expectedPlanDigests, sequence: 1,
+      requestIdentity: {
+        idempotencyKey,
+        requestFingerprint: await digestJson({ projectId, operation, selector, targets, planDigests: expectedPlanDigests }),
+      },
+    };
+    return { runId: firstRun.runId, samplingIds: [...firstRun.samplingIds] };
   });
   const admission = { preview, submit };
   const service = createProjectService({ ownerUserId: OWNER, sourceBranch: "reviewed-branch",
@@ -93,6 +106,10 @@ async function fixture(evaluating = false) {
     },
   });
   return { service, body, readSelection, create, findCreation, freeze, discard, preview, submit,
+    changeFirstRun(change: (run: RuntimeRunRecord & { sequence: number }) => RuntimeRunRecord & { sequence: number }) {
+      if (!firstRun) throw new Error("First Run was not admitted");
+      firstRun = change(firstRun);
+    },
     setData(data: Data) { source = { ...source, data: [data] }; },
     setSubject(next: typeof subjectSource) { subject = next; },
     setEvaluator(next: typeof evaluatorSource) { evaluator = next; },
@@ -170,15 +187,37 @@ describe("ProjectService approved source and first-Run binding (no database or S
       idempotencyKey: f.body.idempotencyKey, projectId: created.project.projectId,
       operation: "pipeline", selector: { all: true }, targets: preview.targets,
       expectedPlanDigests: { execution: preview.executionPlanDigest, evaluation: preview.evaluationPlanDigest },
-    });
-    f.replaceEvaluationPlan();
+    }, { creationFingerprint: f.create.mock.calls[0]![0].creation.fingerprint });
     const readCount = f.readSelection.mock.calls.length;
     expect(await f.service.reconcile(f.body)).toEqual(created);
+    f.changeFirstRun((run) => ({ ...run, samplingIds: [] })); // a later Run replaced all of its members
+    expect(await f.service.reconcile(f.body)).toEqual({ project: created.project, run: { runId: created.run!.runId, samplingIds: [] } });
+    expect(await f.service.create(f.body)).toEqual({ project: created.project, run: { runId: created.run!.runId, samplingIds: [] } });
     await expect(f.service.reconcile({ ...f.body, name: "Wrong body" }))
       .rejects.toBeInstanceOf(ProjectIdempotencyConflictError);
     expect(await f.service.reconcile({ ...f.body, idempotencyKey: "not-created" })).toBeNull();
     expect(f.readSelection).toHaveBeenCalledTimes(readCount);
     expect(f.create).toHaveBeenCalledOnce();
+    expect(f.submit).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["operation", (run: RuntimeRunRecord) => ({ ...run, operation: "execution" as const, phases: ["execution"] as const })],
+    ["selector", (run: RuntimeRunRecord) => ({ ...run, selector: { datasetIds: [DATASET] } })],
+    ["targets", (run: RuntimeRunRecord) => ({ ...run, targets: { projectSampleIds: [], samplingIds: [] } })],
+    ["plan digests", (run: RuntimeRunRecord) => ({ ...run, planDigests: { ...run.planDigests, evaluation: "f".repeat(64) } })],
+    ["request fingerprint", (run: RuntimeRunRecord) => ({ ...run, requestIdentity: {
+      ...run.requestIdentity, requestFingerprint: "f".repeat(64),
+    } })],
+    ["first sequence", (run: RuntimeRunRecord) => ({ ...run, sequence: 2 })],
+  ] as const)("fails closed on a historic creation-key Run with wrong %s during read-only reconciliation and replay", async (_field, change) => {
+    const f = await fixture(true);
+    await f.service.create(f.body);
+    f.changeFirstRun((run) => ({ ...run, ...change(run) }));
+    const previews = f.preview.mock.calls.length;
+    await expect(f.service.reconcile(f.body)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(f.service.create(f.body)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    expect(f.preview).toHaveBeenCalledTimes(previews);
     expect(f.submit).toHaveBeenCalledOnce();
   });
 });

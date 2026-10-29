@@ -28,6 +28,7 @@ export type {
 export type {
   RuntimeRunAdmission,
   RuntimeRunAdmissionCommand,
+  RuntimeFirstRunProof,
   RuntimeRunPlanDigests,
   RuntimeRunRequestIdentity,
   RuntimeRunRecord,
@@ -86,7 +87,7 @@ export function createEvalRunAdmission(dependencies: EvalRunAdmissionDependencie
   return {
     preview: (request) => admission.preview(request),
     replay: (request) => admission.replay(request),
-    submit: (request) => admission.submit(request),
+    submit: (request, firstRun) => admission.submit(request, firstRun),
   };
 }
 

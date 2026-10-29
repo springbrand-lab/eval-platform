@@ -17,7 +17,7 @@ import type {
 import type { EvidenceStore, Harness } from "../harness/model.js";
 import type { RuntimeContext, RuntimeLog } from "./log.js";
 import type { RetryController } from "./retry.js";
-import type { EvaluationState, SamplingState, RuntimeStore } from "./store.js";
+import type { EvaluationState, RuntimeFirstRunProof, SamplingState, RuntimeStore } from "./store.js";
 import type { EvaluationScorePort } from "./scores.js";
 import type { EvaluationResultPort } from "./results.js";
 
@@ -103,7 +103,8 @@ export interface EvalRunAdmission {
   /** Match only an already-persisted Project/key Run against its original complete intent.
    * Missing expected digests are permitted only for this read-only legacy lookup, never submit. */
   replay(request: RunReplayRequest): Promise<RunHandle | null>;
-  submit(request: RunRequest): Promise<RunHandle>;
+  /** Only ProjectService supplies `firstRun`; it is not a field of the public Run request. */
+  submit(request: RunRequest, firstRun?: RuntimeFirstRunProof): Promise<RunHandle>;
 }
 
 export interface EvalRunAdmissionDependencies {

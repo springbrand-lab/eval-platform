@@ -49,9 +49,16 @@ export interface RuntimeRunRecord {
   readonly stopFinalized?: true;
 }
 
+/** Trusted ProjectService-only, transient proof for its first Run; never a RunRequest, Run row or queue fact. */
+export interface RuntimeFirstRunProof {
+  readonly creationFingerprint: string;
+}
+
 /** Everything one admission transaction replaces and inserts. */
 export interface RuntimeRunAdmissionCommand {
   readonly run: RuntimeRunRecord;
+  /** Absent for generic submits. The Store compares this with the locked Project's creation fingerprint. */
+  readonly firstRun?: RuntimeFirstRunProof;
   /**
    * execution/pipeline: every current Sampling of `run.targets.projectSampleIds` plus
    * `run.targets.samplingIds`, as read before the transaction; empty for evaluation.
@@ -99,10 +106,12 @@ export interface RuntimeStore {
   /**
    * One transaction under the Project row lock. It must:
    * - reject a missing or soft-deleted Project, and a source-release mismatch for user Stores;
+   * - when using the Project's creation key, compare the trusted transient `firstRun` proof with
+   *   its persisted creation fingerprint under this lock (even when no Run exists); generic submits
+   *   without proof cannot claim the key;
    * - replay the Run of a matching key (same fingerprint), including a Run whose members a later
    *   Run replaced; reject a different fingerprint, then reject a new key while the Project is busy;
-   * - refuse a Run carrying the Project's creation key once the Project has any Run
-   *   (`creation-superseded`);
+   * - refuse a new creation-key Run once the Project has any Run (`creation-superseded`);
    * - recheck `run.planDigests` (the caller's expected preview digests) against the current plan,
    *   and for pipeline/evaluation require an evaluation plan (else `evaluation-plan-required`);
    * - expand `run.selector` inside the locked Project snapshot and compare exactly to `run.targets`,

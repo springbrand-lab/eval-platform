@@ -123,6 +123,7 @@ ProjectSample 是 Project 内固定的一条测试输入，结构见[包边界](
 管理 MCP 的 `create_project` 还要求 `expectedSnapshots:{datasets:[{datasetId,digest}],executionAgent,evaluationAgent?,outputSchema?}`，来自同一审批的 Dataset 选择快照、SP Agent 全量公开正文和完整输出 Schema 目录记录（ID、名称、描述、Schema 正文）的摘要；评估计划引用里仍只保存原来的 Schema **正文**摘要。Dataset 复用 Project 创建的 `readSelection` 一致读取并在冻结前比对；Agent 在创建 SP 副本之前比对 GET 正文，Schema 在引用前比对已选目录记录。首个 Run 的计划摘要仍从这次已保存的 Project 原计划取得；审批请求不得在评估计划被替换时重新预览成 D2 来启动 D1 没有批准的评估。直接 HTTP 创建没有 Takt 审批，允许省略这些字段；这不是 Run 提交缺少期望摘要的兼容路径。EP 与 SP 不能共享一个原子行锁，若 SP 在 GET 与复制之间绕过 Eval 修改正文，无法保证远端原子快照；Runtime 只使用已比对正文产生的冻结副本引用，并明确保留这项跨服务残余。
 
 - 同一请求体重放原 `{project, run}`，`run` 是以创建 key 准入的首个 Run 的 handle（之后有别的 Run 也返回它），其 `samplingIds` 只列出该 Run 仍为当前的成员 Sampling，被后续 Run 替换的不再出现；若首个 Run 从未准入，重放只在 Project 还没有任何 Run 时补交（在准入的 Project 行锁下判定），否则返回 `run: null`；
+- 创建 key 自 Project 写入起即仅供 ProjectService：它以可信、瞬时的创建请求指纹证明在 Project 行锁下准入首个 Run，普通 `submit`/`submit_run` 无证明，即使还没有 Run 也不能使用该 key；不同 key 仍可先准入并令创建的首个 Run 被 supersede。证明不进入 Run 请求、HTTP Schema、Run 行或队列。只读对账和创建重放必须核对同 key 已存 Run 的首个序号、operation、`{all:true}`、冻结计划摘要、全部 ProjectSample 目标及请求指纹；历史错误归属不报成功，而是 `RUN_IDEMPOTENCY_CONFLICT`。
 - 不同请求体返回冲突；
 - key 对应的 Project 已软删除时，无论请求体都返回 not found，不会复活；
 - 并发的相同请求只有一个创建事务提交，落败者删除自己创建的副本后重放胜者；

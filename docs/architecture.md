@@ -75,6 +75,8 @@ ProjectSample 是 Project 自己的固定输入：来源 Data 的完整副本、
 
 请求指纹覆盖 `projectId`、operation、selector、targets 和**调用方提供的**计划摘要（执行计划摘要，pipeline/evaluation 另含评估计划摘要）。在读取可变计划/目标之前按 Project/key 查询已存 Run；同 key 同原始指纹及期望摘要返回已存 Run，即使之后的 Run 已替换其成员或计划已改变，旧 Run 的当前成员数可能为零；同 key 不同原始事实返回冲突。无期望摘要的旧 Run 只可通过只读 `replay` 核对，不可提交新 Run。`RuntimeStore.admitRun()` 在 Project 行锁下的一个事务内完成：拒绝缺失或软删除的 Project 和 source release 不符；再次用原始指纹核对同 key；Project 创建 key 只能准入 Project 的第一个 Run，Project 已有任何 Run 时返回 `creation-superseded`（创建重放据此返回 `run: null`）；新 key 遇到未完成 Run 返回 `RuntimeProjectBusyError`；核对**提交期望摘要**与当前存储计划，pipeline/evaluation 要求评估计划已填写（否则 `evaluation-plan-required`）；用 preview 的同一规则在锁内重新展开 selector，核对固定 targets（含仅评估的全部当前成功 Sampling），再核对替换集合或成功状态（否则 `stale-targets`）；然后按批删除与插入，首个带评估的 Run 锁定评估计划，并在同一事务内投递 Worker 任务。PostgreSQL 的 `(project_id, idempotency_key)` 唯一约束保证同一意图只创建一批；同一 Runtime 实例内相同 Project/key 的并发提交先在内存合并，但内存不是权威状态。Takt 负责人的审批，EP 的 Project/Run 是唯一操作结果事实，SP 只提供轨迹。
 
+Project 创建事务一旦提交，其 `creation_key` 就保留给创建服务的首个 Run，**即使此时还没有任何 Run**。创建服务提交首个 Run 时另传仅服务端可信的瞬时 `creationFingerprint`，Store 在相同 Project 行锁内与已有 `projects.creation_fingerprint` 比对；普通 HTTP/管理 `submit_run` 没有该证明，同 key 的新准入返回 `RUN_IDEMPOTENCY_CONFLICT`，不能抢占创建 key。证明不属于公开 `RunRequest`/HTTP Schema、Run 身份指纹或任何额外持久化字段；同 key 待提交的内存合并也不得让无证明请求加入有证明请求。其他 key 仍可先提交 Run，创建 key 此后返回 `creation-superseded`。创建的只读重放/对账只在已存 Run 的序号、操作、`{all:true}` 选择器、冻结计划摘要、完整目标及 Run 请求指纹均匹配时返回其 handle；旧的错误归属行报冲突，不推断为成功，也不新建 Run。
+
 | 操作 | 选中执行 | 选中评估 | 未选中执行与评估 |
 | --- | --- | --- | --- |
 | execution | 删除旧 Sampling（含 Run 关联），新建 Sampling | 随旧 Sampling 删除，新 Sampling 没有评估 | 原样保留 |

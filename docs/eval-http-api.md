@@ -262,6 +262,8 @@ Creation reads the selected owned, non-deleted Datasets and their current member
 
 Creation is idempotent per owner and `idempotencyKey`; the replay, race and compensation rules are defined once in [Project 创建](eval-project-redesign.md#31-创建). On the wire: creation and a matching replay return `201 {project, run}` (a replay clones no Agent Config), where `run` is the creation's own first Run or `null` when the Project already has other Runs; a different body under the key is `409 PROJECT_IDEMPOTENCY_CONFLICT`; a key whose Project was soft-deleted is `404 PROJECT_NOT_FOUND`; a first Run that keeps meeting evaluation-plan changes ends in `409 PROJECT_PLAN_CHANGED` with the Project kept for a same-key replay.
 
+The creation key is reserved as soon as the Project commits, before its first Run. Only ProjectService supplies a trusted transient first-Run fingerprint to the locked Runtime Store; ordinary Run submission and management `submit_run` have no such field and cannot claim this key (`409 RUN_IDEMPOTENCY_CONFLICT`), even on a Project with no Run. A different key can still run first, leaving creation replay with `run: null`. Read-only creation reconciliation/replay returns a stored first Run only when its immutable identity and full frozen targets match the original creation; a malformed historic creation-key Run returns `409 RUN_IDEMPOTENCY_CONFLICT`, not a false success.
+
 `ProjectView` is the fixed plan plus current state: `{project, datasets: [{datasetId, name, description?, kind, projectSampleIds}], execution, executionPlanDigest, evaluation: {plan, digest, lockedAt | null} | null, projectSamples: [{projectSampleId, projectId, dataId, datasetIds, samplingCount, data}], runSequence, currentRun: {runId, stopRequested?} | null}`. `runSequence` is the latest admitted Run's existing sequence, or 0 before any Run; it is read with `currentRun` in the same snapshot and lets clients detect a Run that both started and finished between polls. It is not another persisted counter. `execution.subjectAgentConfig` and `evaluation.plan.evaluatorAgentConfig` are the Agent Config bodies as frozen; `harness.agentConfig` names the frozen copy. `evaluation.plan.outputSchema` is `{outputSchemaId, digest}`; `evaluation.lockedAt` is set by the first pipeline or evaluation Run.
 
 | Route | Domain errors |
@@ -469,7 +471,7 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `PROJECT_PLAN_CHANGED` | 409 | Plan digests changed between preview and admission |
 | `PROJECT_SAMPLE_NOT_FOUND` | 404 | ProjectSample not bound by the Project |
 | `RUN_NOT_FOUND` | 404 | Unknown or another owner's Run, or Run of a deleted Project |
-| `RUN_IDEMPOTENCY_CONFLICT` | 409 | Key reused with different original request facts or expected plan digests |
+| `RUN_IDEMPOTENCY_CONFLICT` | 409 | Run key reused with different original facts/digests, Project creation key claimed without its trusted first-Run proof, or a malformed historic first-Run identity |
 | `RUN_STOPPED` | 409 | Runtime refused a stage after a committed stop (Worker side) |
 | `RUN_TARGETS_STALE` | 409 | Submitted selector no longer expands to the fixed targets, or the current replacement Samplings differ |
 | `RUN_TARGETS_EMPTY` | 409 | Selection or targets contain no work |

@@ -37,6 +37,7 @@ import type { ProjectPlanReader, ProjectSample } from "./model.js";
 import { createRetryController as createProductionRetryController, DEFAULT_RETRY_POLICY } from "./retry.js";
 import type {
   EvaluationState,
+  RuntimeFirstRunProof,
   RuntimeRunAdmission,
   RuntimeRunRecord,
   SamplingState,
@@ -147,7 +148,7 @@ function createRuntime(dependencies: RuntimeDependencies) {
     // Old orchestration fixtures use projectRequest/evaluationRequest instead of previewing each
     // custom test plan. Bind only those fixtures to their current test plan before the first submit;
     // all real admission callers still supply immutable expected digests themselves.
-    submit: async (request: RunRequest) => {
+    submit: async (request: RunRequest, firstRun?: RuntimeFirstRunProof) => {
       const fixture = request as RunRequest & { [CAPTURE_TEST_PLAN]?: boolean };
       if (fixture[CAPTURE_TEST_PLAN]) {
         const existing = await store.findRunByIdempotencyKey(request.projectId, request.idempotencyKey);
@@ -157,7 +158,7 @@ function createRuntime(dependencies: RuntimeDependencies) {
           original?.planDigests ?? (plan ? approvedDigests(request.operation, plan) : request.expectedPlanDigests);
         delete fixture[CAPTURE_TEST_PLAN];
       }
-      return admission.submit(request);
+      return admission.submit(request, firstRun);
     },
     plans,
     resume: (runId: string) => resumer.resume(runId),
@@ -1823,6 +1824,19 @@ describe("eval runtime orchestration", () => {
     expect(writes).not.toHaveBeenCalled();
   });
 
+  it("rejects a stored Run whose facts differ despite retaining a matching request fingerprint", async () => {
+    const store = makeStore();
+    const admission = createTestAdmission(store);
+    const request = projectRequest("execution", "historic-key");
+    await admission.submit(request);
+    const stored = (await store.findRunByIdempotencyKey(PROJECT_ID, request.idempotencyKey))!;
+    vi.spyOn(store, "findRunByIdempotencyKey").mockResolvedValue({
+      ...stored, selector: { datasetIds: ["dataset-1"] }, // old fingerprint still matches the submitted `{all:true}`
+    });
+    await expect(admission.replay(request)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(admission.submit(request)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+  });
+
   it("rechecks an evaluation-only all selector when a second Sampling succeeds after preview", async () => {
     const store = makeStore({ plans: makePlans([makeSample("sample-1", { samplingCount: 2 })]) });
     const admission = createTestAdmission(store);
@@ -1918,6 +1932,62 @@ describe("eval runtime orchestration", () => {
       status: "succeeded",
     });
     expect(harness.ensureAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not coalesce an unproven same-key submit with a pending proven Project first Run", async () => {
+    const plans = makePlans();
+    const getProjectPlan = plans.getProjectPlan.bind(plans);
+    let entered!: () => void;
+    let release!: () => void;
+    const reading = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    plans.getProjectPlan = async (projectId) => {
+      entered();
+      await gate;
+      return getProjectPlan(projectId);
+    };
+    const store = makeStore({ plans });
+    const stored = store.admitRun.bind(store);
+    const admit = vi.spyOn(store, "admitRun").mockImplementation(async (command) => {
+      if (command.firstRun?.creationFingerprint !== "trusted-creation-fingerprint") {
+        throw new RuntimeRunIdentityConflictError("Project creation key is reserved");
+      }
+      return stored(command);
+    });
+    const admission = createTestAdmission(store);
+    const request = projectRequest("execution", "project-creation-key");
+    const proof = { creationFingerprint: "trusted-creation-fingerprint" };
+    const first = admission.submit(request, proof);
+    await reading;
+    const same = admission.submit(request, proof);
+    await expect(admission.submit(request)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    await expect(admission.submit(request, { creationFingerprint: "wrong" }))
+      .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    release();
+    const [original, joined] = await Promise.all([first, same]);
+    expect(joined).toEqual(original);
+    expect(admit).toHaveBeenCalledOnce();
+    expect(admit.mock.calls[0]![0].firstRun).toEqual(proof);
+    expect(await admission.replay(request)).toEqual(original);
+
+    // The inverse interleaving must not let the trusted call join a failing ordinary submission either.
+    let enterSecond!: () => void;
+    let releaseSecond!: () => void;
+    const secondReading = new Promise<void>((resolve) => { enterSecond = resolve; });
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    plans.getProjectPlan = async (projectId) => {
+      enterSecond();
+      await secondGate;
+      return getProjectPlan(projectId);
+    };
+    const another = projectRequest("execution", "another-creation-key");
+    const unproven = admission.submit(another);
+    await secondReading;
+    await expect(admission.submit(another, proof)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    releaseSecond();
+    await expect(unproven).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+    expect(admit).toHaveBeenCalledTimes(2);
+    await expect(admission.submit(another, proof)).rejects.toBeInstanceOf(RuntimeProjectBusyError);
   });
 
   it("returns the original pipeline run when the request is retried", async () => {

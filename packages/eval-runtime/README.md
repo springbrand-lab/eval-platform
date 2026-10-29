@@ -48,6 +48,8 @@ Action/Tool IDs, never Pi-derived charges.
 - 结果读取实现 `EvalRunQueries`（`getRun`、`getSampling`、`getEvaluation`、`listEvaluations`），由宿主基于自身存储提供；`toRunSnapshot` 投影 `operation`、`selector`、`targets` 与派生的 `phase/status`。
 - `ProjectView` 是 API 与 Web 共用的 Project 读取投影：固定计划、全部 `ProjectSample` 和 `ProjectRunState`。后者只包含既有 Run 序号和 `CurrentRun | null`，`CurrentRun` 从公开 `RunSnapshot` 选取身份与停止意图；这些是查询契约，不增加持久化状态。
 
+`projects.creation_key` 自 Project 提交起保留给 ProjectService 的首个 Run，即使还没有任何 Run。仅 ProjectService 在 `submit` 的**独立可信参数**中传瞬时 `firstRun.creationFingerprint`；Store 在 Project 行锁下与已有 `projects.creation_fingerprint` 比对，然后才能以该 key 写入/入队。普通 HTTP/管理 Run 请求没有此证明，不能抢占创建 key；不同 key 可以先运行，使创建 key 被 supersede。证明不在公开 `RunRequest`/HTTP Schema、Run 身份指纹、Run 行或队列中。同 key 的内存待提交合并不得让无证明请求加入有证明请求；已存首 Run 在后续 Run 替换其成员后仍可只读重放，但 Project 创建对账必须拒绝旧的错误首 Run 身份。
+
 `RuntimeStore.admitRun()` 的准入事务合同只由 [`runtime/store.ts`](src/runtime/store.ts) 定义，调度与持久化见[架构方案](../../docs/architecture.md#run-准入与独立评估)。
 
 ## 文件职责

@@ -31,7 +31,7 @@ import type {
   RunPreviewRequest,
 } from "./model.js";
 import { RunRecords } from "./records.js";
-import type { RuntimeRunPlanDigests, RuntimeRunRecord, RuntimeStore, SamplingState } from "./store.js";
+import type { RuntimeFirstRunProof, RuntimeRunPlanDigests, RuntimeRunRecord, RuntimeStore, SamplingState } from "./store.js";
 import { expandRunTargets } from "./targets.js";
 
 /** The immutable caller intent bound to one idempotency key. */
@@ -68,7 +68,11 @@ export class RunAdmission implements EvalRunAdmission {
   readonly #store: RuntimeStore;
   readonly #idFactory: () => string;
   readonly #records: RunRecords;
-  readonly #pending = new Map<string, { readonly facts: RunRequestFacts; readonly promise: Promise<RunHandle> }>();
+  readonly #pending = new Map<string, {
+    readonly facts: RunRequestFacts;
+    readonly creationFingerprint: string | undefined;
+    readonly promise: Promise<RunHandle>;
+  }>();
 
   constructor(dependencies: EvalRunAdmissionDependencies) {
     this.#sourceCommit = requireSourceCommit(dependencies.sourceCommit);
@@ -103,16 +107,21 @@ export class RunAdmission implements EvalRunAdmission {
   }
 
   /** Coalesce concurrent same-key requests, then replay an existing Run or admit the submitted targets. */
-  async submit(request: RunRequest): Promise<RunHandle> {
+  async submit(request: RunRequest, firstRun?: RuntimeFirstRunProof): Promise<RunHandle> {
     const { idempotencyKey, ...facts } = requireRunRequest(request, true);
     const key = JSON.stringify([facts.projectId, idempotencyKey]);
+    const creationFingerprint = firstRun?.creationFingerprint;
+    const proof = firstRun === undefined ? undefined : { creationFingerprint: firstRun.creationFingerprint };
     const pending = this.#pending.get(key);
     if (pending) {
-      if (!equalJson(pending.facts, facts)) throw new RuntimeRunIdentityConflictError(IDENTITY_CONFLICT);
+      // Never let an ordinary submit join a proven ProjectService first-Run call (or vice versa).
+      if (!equalJson(pending.facts, facts) || pending.creationFingerprint !== creationFingerprint) {
+        throw new RuntimeRunIdentityConflictError(IDENTITY_CONFLICT);
+      }
       return pending.promise.then(copyHandle);
     }
-    const promise = Promise.resolve().then(() => this.#persist(idempotencyKey, facts));
-    this.#pending.set(key, { facts, promise });
+    const promise = Promise.resolve().then(() => this.#persist(idempotencyKey, facts, proof));
+    this.#pending.set(key, { facts, creationFingerprint, promise });
     const clear = () => {
       if (this.#pending.get(key)?.promise === promise) this.#pending.delete(key);
     };
@@ -130,6 +139,8 @@ export class RunAdmission implements EvalRunAdmission {
     const existing = await this.#store.findRunByIdempotencyKey(facts.projectId, idempotencyKey);
     if (!existing) return null;
     if (existing.projectId !== facts.projectId || existing.requestIdentity.idempotencyKey !== idempotencyKey
+      || existing.operation !== facts.operation || !equalJson(existing.selector, facts.selector)
+      || !equalJson(existing.targets, facts.targets)
       || (facts.expectedPlanDigests !== undefined && !equalJson(facts.expectedPlanDigests, existing.planDigests))
       || existing.requestIdentity.requestFingerprint !== await requestFingerprint(facts, existing.planDigests)) {
       throw new RuntimeRunIdentityConflictError(IDENTITY_CONFLICT);
@@ -137,7 +148,7 @@ export class RunAdmission implements EvalRunAdmission {
     return copyHandle(existing);
   }
 
-  async #persist(idempotencyKey: string, facts: RunRequestFacts): Promise<RunHandle> {
+  async #persist(idempotencyKey: string, facts: RunRequestFacts, firstRun?: RuntimeFirstRunProof): Promise<RunHandle> {
     const existing = await this.#replayStored(idempotencyKey, facts);
     if (existing) return existing;
 
@@ -176,7 +187,7 @@ export class RunAdmission implements EvalRunAdmission {
       requestIdentity: { idempotencyKey, requestFingerprint: await requestFingerprint(facts, planDigests) },
     };
     const admission = await this.#store.admitRun({
-      run,
+      run, ...(firstRun === undefined ? {} : { firstRun }),
       replacedSamplingIds: operation === "evaluation" ? [] : [...replaced, ...samplings].map(({ samplingId }) => samplingId),
       samplings: created,
       evaluations,

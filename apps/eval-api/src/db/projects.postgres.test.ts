@@ -5,8 +5,10 @@ import {
   RuntimeAdmissionConflictError,
   RuntimeInputError,
   digestExecutionPlan,
+  digestJson,
   RuntimeEntityNotFoundError,
   RuntimeProjectBusyError,
+  RuntimeRunIdentityConflictError,
   type EvalRunAdmission,
 } from "@eval-platform/eval-runtime";
 import { count, eq, sql } from "drizzle-orm";
@@ -165,13 +167,14 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
   it("snapshots Datasets, shared Data and frozen Agent Configs, unaffected by later catalog edits and soft deletes", async () => {
     const { d1, d2, d3, first, second, subject } = await catalog();
     const { projects: service, datasets } = services();
-    const { project, run } = await service.create({
+    const body = {
       name: "Snapshot", description: "fixed",
       datasets: [{ datasetId: first.datasetId }, { datasetId: second.datasetId, dataIds: [d2.dataId] }],
       samplingCount: 1, samplingCounts: { [d2.dataId]: 3 },
-      execution: { userAgentId: subject, framework: "sp", executionConcurrency: 2, timeoutMs: 60_000 },
-      idempotencyKey: "create", run: { operation: "execution" },
-    });
+      execution: { userAgentId: subject, framework: "sp" as const, executionConcurrency: 2, timeoutMs: 60_000 },
+      idempotencyKey: "create", run: { operation: "execution" as const },
+    };
+    const { project, run } = await service.create(body);
     expect(run!.samplingIds).toHaveLength(4);
     const view = (await service.get(project.projectId))!;
     expect(view.project).toEqual(project);
@@ -201,6 +204,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
     expect(view.executionPlanDigest).toBe(await digestExecutionPlan({
       execution: view.execution, datasets: view.datasets, samples: view.projectSamples,
     }));
+    expect(await service.reconcile(body)).toEqual({ project, run }); // shared Data is still one first-Run target
 
     await datasets.updateData(d1.dataId, { userPrompt: "changed" });
     await datasets.updateDataset(first.datasetId, { name: "Renamed" });
@@ -425,6 +429,109 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       expect(await services().projects.create(body)).toEqual({ project, run });
     });
 
+    it("reserves a committed Project's creation key before any Run, but admits its proven first Run exactly once", async () => {
+      const original = await creationBody();
+      const { evaluator, schema } = await catalog();
+      const body = { ...original, evaluation: { userAgentId: evaluator, evaluationConcurrency: 1, outputSchemaId: schema.outputSchemaId } };
+      let entered!: () => void;
+      let resume!: () => void;
+      const persisted = new Promise<void>((resolve) => { entered = resolve; });
+      const gate = new Promise<void>((resolve) => { resume = resolve; });
+      const real = planAdmission(OWNER);
+      const creating = services(OWNER, {
+        async preview(request) {
+          entered(); // store.create has already committed; no first Run has been admitted
+          await gate;
+          return real.preview(request);
+        },
+        submit: real.submit,
+      }).projects.create(body);
+      await persisted;
+      let projectId = "";
+      try {
+        const [project] = await database.db.select().from(projects).where(eq(projects.creationKey, body.idempotencyKey));
+        projectId = project!.projectId;
+        expect(project!.creationFingerprint).toMatch(/^[0-9a-f]{64}$/u);
+        expect((await database.db.select().from(runs)).length).toBe(0);
+        const ordinary = planAdmission(OWNER);
+        for (const request of [
+          { operation: "execution" as const, selector: { all: true as const } }, // even identical ordinary intent cannot claim it
+          { operation: "pipeline" as const, selector: { all: true as const } },
+          { operation: "execution" as const, selector: { projectSampleIds: [(await services().plans.getProjectPlan(projectId))!.datasets[0]!.projectSampleIds[0]!] } },
+        ]) {
+          const preview = await ordinary.preview({ projectId, ...request });
+          await expect(ordinary.submit({
+            idempotencyKey: body.idempotencyKey, projectId, ...request, targets: preview.targets,
+            expectedPlanDigests: preview.operation === "execution" ? { execution: preview.executionPlanDigest }
+              : { execution: preview.executionPlanDigest, evaluation: preview.evaluationPlanDigest! },
+          })).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+        }
+        const command = await buildCommand(services().plans, services().runtime, {
+          projectId, operation: "execution", idempotencyKey: body.idempotencyKey,
+        });
+        await expect(services().runtime.admitRun(command)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+        await expect(services().runtime.admitRun({ ...command, firstRun: { creationFingerprint: "wrong" } }))
+          .rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+        expect((await database.db.select().from(runs)).length).toBe(0);
+        expect(await jobs.findJobs(RUN_QUEUE)).toHaveLength(0);
+      } finally {
+        resume();
+      }
+      const created = await creating;
+      expect(created.project.projectId).toBe(projectId);
+      expect(created.run?.samplingIds).toHaveLength(2);
+      expect(await jobs.findJobs(RUN_QUEUE, { key: created.run!.runId })).toHaveLength(1);
+      expect(await services().projects.create(body)).toEqual(created);
+      await settle(services().worker, created.run!.samplingIds, "succeeded");
+      const later = await buildCommand(services().plans, services().runtime, { projectId, operation: "execution", idempotencyKey: "other-run" });
+      await services().runtime.admitRun(later);
+      expect(await services().projects.reconcile(body)).toEqual({
+        project: created.project, run: { runId: created.run!.runId, samplingIds: [] },
+      });
+      expect(await services().projects.create(body)).toEqual({
+        project: created.project, run: { runId: created.run!.runId, samplingIds: [] },
+      });
+      expect((await database.db.select().from(runs)).length).toBe(2);
+      expect(await jobs.findJobs(RUN_QUEUE, { key: created.run!.runId })).toHaveLength(1);
+    });
+
+    it("does not reconcile a historic wrong-operation Run stored under the creation key", async () => {
+      const original = await creationBody();
+      const { evaluator, schema } = await catalog();
+      const body = { ...original, evaluation: { userAgentId: evaluator, evaluationConcurrency: 1, outputSchemaId: schema.outputSchemaId } };
+      const s = services();
+      const stalled = createProjectService({
+        ownerUserId: OWNER, sourceBranch: release.sourceBranch,
+        store: { ...s.store, deleteUnrun: async (): Promise<string[]> => [] },
+        outputSchemas: s.outputSchemas, agentConfigs: s.agentConfigs,
+        admission: { preview: planAdmission(OWNER).preview, async submit() { throw new Error("creator crashed"); } },
+      });
+      await expect(stalled.create(body)).rejects.toThrow("creator crashed");
+      const [project] = await s.store.list();
+      const preview = await s.plans.getProjectPlan(project!.projectId);
+      const request = await planAdmission(OWNER).preview({ projectId: project!.projectId, operation: "pipeline", selector: { all: true } });
+      const planDigests = { execution: request.executionPlanDigest, evaluation: request.evaluationPlanDigest! };
+      const wrongRunId = crypto.randomUUID();
+      // Simulates an admission committed before the creation-key proof existed; not a permitted write today.
+      await database.db.insert(runs).values({
+        runId: wrongRunId, ownerUserId: OWNER, projectId: project!.projectId, sequence: 1,
+        sourceCommit: release.sourceCommit, operation: "pipeline", phases: ["execution", "evaluation"],
+        selector: { all: true }, targets: request.targets,
+        executionPlanDigest: planDigests.execution, evaluationPlanDigest: planDigests.evaluation,
+        idempotencyKey: body.idempotencyKey,
+        requestFingerprint: await digestJson({
+          projectId: project!.projectId, operation: "pipeline", selector: { all: true },
+          targets: request.targets, planDigests,
+        }),
+      });
+      expect(preview?.datasets[0]?.projectSampleIds).toHaveLength(2);
+      expect((await s.store.findCreation(body.idempotencyKey))?.run?.runId).toBe(wrongRunId);
+      await expect(s.projects.reconcile(body)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+      await expect(s.projects.create(body)).rejects.toBeInstanceOf(RuntimeRunIdentityConflictError);
+      expect((await database.db.select().from(runs)).length).toBe(1);
+      expect(await jobs.findJobs(RUN_QUEUE)).toHaveLength(0);
+    });
+
     it("never lets a replaying request compensate a Project another request committed", async () => {
       const body = await creationBody();
       const committed = services();
@@ -540,7 +647,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
             previews += 1;
             return real.preview(request);
           },
-          async submit(request) {
+          async submit(request, firstRun) {
             if (!raced) {
               raced = true;
               await s.projects.replaceEvaluationPlan(request.projectId, {
@@ -548,7 +655,7 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
               });
               throw new RuntimeAdmissionConflictError("plan-changed", "Project plan changed after the Run was prepared");
             }
-            return real.submit(request);
+            return real.submit(request, firstRun);
           },
         },
       });
@@ -606,7 +713,8 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
               const approved = await real.preview(request);
               const creationRun = await real.submit({ ...request, idempotencyKey: body.idempotencyKey, targets: approved.targets,
                 expectedPlanDigests: approved.operation === "execution" ? { execution: approved.executionPlanDigest }
-                  : { execution: approved.executionPlanDigest, evaluation: approved.evaluationPlanDigest! } });
+                  : { execution: approved.executionPlanDigest, evaluation: approved.evaluationPlanDigest! } },
+              { creationFingerprint: (await s.store.findCreation(body.idempotencyKey))!.fingerprint });
               creationRunId = creationRun.runId;
               await settle(s.worker, creationRun.samplingIds, "succeeded");
               const fresh = await real.preview(request);

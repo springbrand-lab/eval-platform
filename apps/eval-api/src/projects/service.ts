@@ -61,6 +61,34 @@ function fingerprintOf(body: ProjectCreateBody): Promise<string> {
   return digestJson(facts);
 }
 
+/** Validate an old creation-key Run before either replay or read-only reconciliation reports success. */
+async function verifiedCreationRun(found: StoredProjectCreation, body: ProjectCreateBody): Promise<RunHandle | null> {
+  const { run } = found;
+  if (!run) return null;
+  const { projectId } = found.project;
+  const { operation } = body.run;
+  if (body.expectedSnapshots && operation === "pipeline" && found.evaluationReplaced) {
+    throw changedSource("Approved evaluation plan was replaced before the first Run");
+  }
+  if (operation === "pipeline" && !found.planDigests.evaluation) {
+    throw new RuntimeRunIdentityConflictError("Project creation key has no frozen evaluation plan");
+  }
+  const planDigests: RunPlanDigests = operation === "execution"
+    ? { execution: found.planDigests.execution }
+    : { execution: found.planDigests.execution, evaluation: found.planDigests.evaluation! };
+  const selector = { all: true } as const;
+  const targets = { projectSampleIds: found.firstRunProjectSampleIds, samplingIds: [] };
+  // Runtime's persisted request fingerprint covers precisely these immutable first-Run facts.
+  const requestFingerprint = await digestJson({ projectId, operation, selector, targets, planDigests });
+  if (run.sequence !== 1 || run.projectId !== projectId || run.requestIdentity.idempotencyKey !== body.idempotencyKey
+    || run.operation !== operation || !equalJson(run.selector, selector) || !equalJson(run.targets, targets)
+    || found.firstRunProjectSampleIds.length === 0
+    || !equalJson(run.planDigests, planDigests) || run.requestIdentity.requestFingerprint !== requestFingerprint) {
+    throw new RuntimeRunIdentityConflictError("Project creation key is bound to a different first Run");
+  }
+  return { runId: run.runId, samplingIds: [...run.samplingIds] };
+}
+
 function changedSource(message: string): RuntimeAdmissionConflictError {
   return new RuntimeAdmissionConflictError("plan-changed", message);
 }
@@ -151,7 +179,7 @@ export function createProjectService(input: {
    * the creation-key Run was admitted meanwhile and already superseded.
    */
   async function admitFirstRun(
-    project: Project, body: ProjectCreateBody, originalPlanDigests?: RunPlanDigests,
+    project: Project, body: ProjectCreateBody, creationFingerprint: string, originalPlanDigests?: RunPlanDigests,
   ): Promise<ProjectCreation | null> {
     const { projectId } = project;
     const { operation } = body.run;
@@ -167,7 +195,7 @@ export function createProjectService(input: {
         const run = await admission.submit({
           idempotencyKey: body.idempotencyKey, projectId, operation, selector: { all: true },
           targets: preview.targets, expectedPlanDigests,
-        });
+        }, { creationFingerprint });
         return { project, run };
       } catch (error) {
         if ((error instanceof RuntimeEntityNotFoundError && error.entity === "project")
@@ -190,12 +218,12 @@ export function createProjectService(input: {
   async function replay(found: StoredProjectCreation, body: ProjectCreateBody, fingerprint: string): Promise<ProjectCreation | null> {
     if (found.deleted) throw new RuntimeEntityNotFoundError("project", found.project.projectId);
     if (found.fingerprint !== fingerprint) throw new ProjectIdempotencyConflictError();
-    if (found.run) return { project: found.project, run: found.run };
+    if (found.run) return { project: found.project, run: await verifiedCreationRun(found, body) };
     if (found.superseded) return { project: found.project, run: null };
     if (body.expectedSnapshots && body.evaluation && found.evaluationReplaced) {
       throw changedSource("Approved evaluation plan was replaced before the first Run");
     }
-    return admitFirstRun(found.project, body, body.expectedSnapshots ? {
+    return admitFirstRun(found.project, body, fingerprint, body.expectedSnapshots ? {
       execution: found.planDigests.execution,
       ...(body.run.operation === "pipeline" ? { evaluation: found.planDigests.evaluation! } : {}),
     } : undefined);
@@ -257,7 +285,7 @@ export function createProjectService(input: {
       throw error;
     }
     try {
-      return await admitFirstRun(project, body, body.expectedSnapshots ? originalPlanDigests : undefined);
+      return await admitFirstRun(project, body, fingerprint, body.expectedSnapshots ? originalPlanDigests : undefined);
     } catch (error) {
       if (compensates(error)) await compensate(projectId, error);
       throw error;
@@ -290,7 +318,7 @@ export function createProjectService(input: {
       const found = await store.findCreation(body.idempotencyKey);
       if (!found || found.deleted) return null;
       if (found.fingerprint !== await fingerprintOf(body)) throw new ProjectIdempotencyConflictError();
-      return { project: found.project, run: found.run };
+      return { project: found.project, run: await verifiedCreationRun(found, body) };
     },
     /** Exposes only the consistent selection ProjectService would actually freeze. */
     async reviewSelection(selection: DatasetSelection) {
