@@ -3,7 +3,6 @@ import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import { createEvaluationResultValidator } from "@eval-platform/eval-metrics";
 import type { EvaluationResultCheck, EvaluationResultPort } from "@eval-platform/eval-runtime";
 import type { EvaluationSubmissionStore } from "../db/evaluation-submissions.js";
-import { sameSecret } from "../lib/secret.js";
 
 /** Per-Evaluation credential: one Agent Config serves many Evaluations, so the MCP Bearer token alone cannot tell them apart. */
 export function evaluationSubmitToken(secret: string, evaluationId: string): string {

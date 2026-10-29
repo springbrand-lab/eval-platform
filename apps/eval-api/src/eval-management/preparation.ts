@@ -125,7 +125,7 @@ async function prepareDataset(c: Context<AppBindings>, plan: PreparationPlan, st
   await store.confirm(c.var.user.id, key, "dataset", { datasetId: plan.datasetId, dataIds: plan.dataIds });
 }
 
-async function prepareResource(c: Context<AppBindings>, plan: PreparationPlan, asset: PlannedAsset,
+async function prepareResource(c: Context<AppBindings>, asset: PlannedAsset,
   store: ManagementStore, key: string) {
   const stage = `resource:${asset.uploadRef}`;
   const claim = await store.attempt(c.var.user.id, key, stage);
@@ -236,7 +236,7 @@ export async function prepareInputs(c: Context<AppBindings>, input: PreparationI
   const operation = await store.begin(owner, input.operationKey, "prepare", fingerprint, plan as unknown as Record<string, unknown>);
   if (operation.status !== "completed") {
     await prepareDataset(c, plan, store, input.operationKey);
-    for (const asset of plan.assets) await prepareResource(c, plan, asset, store, input.operationKey);
+    for (const asset of plan.assets) await prepareResource(c, asset, store, input.operationKey);
     for (const index of plan.cases.keys()) await bindCase(c, plan, index, store, input.operationKey);
     await store.complete(owner, input.operationKey);
   }
