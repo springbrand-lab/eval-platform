@@ -1,28 +1,39 @@
-import { AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectArrayInPlaceSchema, jsonObjectInPlaceSchema } from "@eval-platform/eval-contracts";
+import {
+  AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectArrayInPlaceSchema,
+} from "@eval-platform/eval-contracts";
 import type {
-  AgentResourceReadiness,
   AgentResourceReadinessReport,
-  AgentResourceSnapshot,
+  AgentResourceFact,
   EvaluationAgentOutput,
   EvaluationStructuredOutput,
   ExecutionOutput,
   JsonValue,
   MaterializedDataBinding,
+  PiTrajectoryRecord,
+  SpPiTrajectoryPage,
 } from "@eval-platform/eval-contracts";
 import type { AgentHandle, AgentSubmission, EnsureAgentInput } from "@eval-platform/eval-runtime/harness";
 import {
+  evalBillingResourcesPageSchema,
   evalEnsureChatSchema,
   evalInitializationResultSchema,
   evalEvidenceArtifactsSchema,
+  evalEvidenceTrajectoryPageSchema,
   evalInitializationSchema,
+  isEvalNativeRecordReference,
+  evalResourceHeaderSchema,
+  evalResourceNativePageSchema,
+  evalResourceReadinessReportSchema,
   evalSubmitSchema,
   stableEvalFacts,
+  type EvalBillingResourcesPage,
   type EvalEnsureChat,
   type EvalEvidenceArtifact,
-  type EvalEvidenceFileReceipt,
   type EvalEvidenceTrajectoryPage,
+  type EvalEvidenceFileReceipt,
   type EvalInitialization,
   type EvalInitializationResult,
+  type EvalResourceHeader,
   type EvalSubmissionReceipt,
   type EvalSubmit,
 } from "@springbrand/eval-harness";
@@ -153,76 +164,89 @@ export function evaluationOutput(value: unknown): EvaluationAgentOutput {
   }), value, "evaluation output");
 }
 
-const completenessSchema = z.enum(["complete", "partial", "unavailable"]);
-const count = z.number().int().nonnegative().safe();
+export type SpResourceHeader = EvalResourceHeader;
 
-const scopeSchema = z.object({ chatId: id, idempotencyKey: id, submissionId: id });
-
-const readinessSchema = z.object({
-  receiptTerminal: z.boolean(),
-  stateUnreadable: z.boolean(),
-  pendingTelemetryEvents: count,
-  pendingRuntimeEvents: count,
-  actionCharges: z.object({ complete: z.boolean(), unsettledExecutions: count, missingExecutionIds: count }),
-}) satisfies z.ZodType<AgentResourceReadiness>;
-
-const resourceSnapshotSchema = z.object({
-  scope: scopeSchema,
-  observedAt: id,
-  finalized: z.boolean(),
-  coverage: z.object({
-    usageEvents: completenessSchema,
-    telemetryEvents: completenessSchema,
-    billingSettlements: completenessSchema,
-  }),
-  usageEvents: jsonObjectArrayInPlaceSchema,
-  telemetryEvents: jsonObjectArrayInPlaceSchema,
-  billingSettlements: jsonObjectArrayInPlaceSchema,
-  readiness: readinessSchema,
-}) satisfies z.ZodType<AgentResourceSnapshot>;
-
-export function resourceSnapshot(value: unknown): AgentResourceSnapshot {
-  return response(resourceSnapshotSchema, value, "resource snapshot");
+export function resourceHeader(value: unknown): SpResourceHeader {
+  return response(evalResourceHeaderSchema, value, "resource header");
 }
 
 export function resourceReadiness(value: unknown): AgentResourceReadinessReport {
-  return response(z.object({
-    scope: scopeSchema,
-    observedAt: id,
-    finalized: z.boolean(),
-    readiness: readinessSchema,
-  }) satisfies z.ZodType<AgentResourceReadinessReport>, value, "resource readiness");
+  return response(evalResourceReadinessReportSchema, value, "resource readiness");
+}
+
+/** The public parser enforces the SAFE Pi wire (including the no-inner-sequence
+ * rule). Its UA declaration doesn't narrow the refined projection to `safe`,
+ * so verify that condition before returning Eval's browser-safe record type. */
+function publicNativePage(schema: z.ZodType<EvalEvidenceTrajectoryPage>, value: unknown, name: string): SpPiTrajectoryPage {
+  const page = response(schema, value, name);
+  if (page.records.some((row) => !isEvalNativeRecordReference(row)
+    && (row.record.projection?.kind !== "safe" || "ingestSeq" in row.record))) {
+    throw new SpHarnessError(`Eval SP returned an invalid ${name}`, false);
+  }
+  return page as unknown as SpPiTrajectoryPage;
+}
+
+export function resourceNativePage(value: unknown): SpPiTrajectoryPage {
+  return publicNativePage(evalResourceNativePageSchema, value, "resource native page");
+}
+
+export type SpBillingPage = Omit<EvalBillingResourcesPage, "usageEvents" | "billingSettlements"> & {
+  readonly usageEvents: readonly AgentResourceFact[];
+  readonly billingSettlements: readonly AgentResourceFact[];
+};
+export function resourceBillingPage(value: unknown): SpBillingPage {
+  const page = response(evalBillingResourcesPageSchema, value, "resource billing page");
+  // The SP schema owns the paired page/cursor; Eval's persisted facts additionally
+  // require JSON values (the public schema deliberately types fact values as unknown).
+  return {
+    ...page,
+    usageEvents: response(jsonObjectArrayInPlaceSchema, page.usageEvents, "resource billing page"),
+    billingSettlements: response(jsonObjectArrayInPlaceSchema, page.billingSettlements, "resource billing page"),
+  };
 }
 
 export function evidenceArtifacts(value: unknown): readonly EvalEvidenceArtifact[] {
   return response(evalEvidenceArtifactsSchema, value, "evidence artifact list").artifacts;
 }
 
-export function evidenceTrajectoryPage(value: unknown) {
-  return response(z.object({
-    events: z.array(z.object({ ingestSeq: z.number().int().positive().safe(), event: jsonObjectInPlaceSchema })),
-    nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
-  }) satisfies z.ZodType<EvalEvidenceTrajectoryPage>, value, "evidence trajectory page");
+export function evidenceTrajectoryPage(value: unknown): SpPiTrajectoryPage {
+  return publicNativePage(evalEvidenceTrajectoryPageSchema, value, "evidence trajectory page");
 }
 
-/** Assistant text of a finished turn in SP's trajectory, or undefined for any other event. */
-export function finalReplyText(event: Readonly<Record<string, JsonValue>>): string | undefined {
-  const parsed = finishedTurnSchema.safeParse(event);
-  if (!parsed.success || parsed.data.payload.output.role !== "assistant") return undefined;
-  const text = parsed.data.payload.output.content
-    .flatMap((block) => block.type === "text" && typeof block.text === "string" ? [block.text] : []).join("\n");
-  return text.trim() === "" ? undefined : text;
+/** Only model[0] of a native Entry can carry the selected Submission's assistant
+ * reply. `undefined` is not an assistant; `null` is an assistant with no usable
+ * complete reply (so an earlier message must not be substituted). */
+export function finalReplyText(value: PiTrajectoryRecord, submissionId: string): string | null | undefined {
+  if (value.format !== "pi-trajectory/v1" || value.projection?.kind !== "safe"
+    || value.submissionId !== submissionId || value.origin === "context"
+    || value.record.type !== "entry") return undefined;
+  const entry = value.record.value;
+  if (entry.kind === "springbrand.trajectory") return undefined;
+  const models = entry.model;
+  if (!Array.isArray(models) || models.length !== 1) {
+    return entry.kind === "pi.assistant" || (Array.isArray(models) && models.some((item) =>
+      item !== null && typeof item === "object" && !Array.isArray(item) && item.role === "assistant"))
+      ? null : undefined;
+  }
+  const item = models[0];
+  if (item === null || typeof item !== "object" || Array.isArray(item)) return entry.kind === "pi.assistant" ? null : undefined;
+  const message = item as Record<string, JsonValue>;
+  if (message.role !== "assistant") return entry.kind === "pi.assistant" ? null : undefined;
+  if (!Array.isArray(message.content)
+    || typeof message.timestamp !== "number" || !Number.isFinite(message.timestamp)
+    || message.stopReason !== "stop") return null;
+  const blocks: string[] = [];
+  for (const block of message.content) {
+    if (block === null || typeof block !== "object" || Array.isArray(block)) return null;
+    const content = block as Record<string, JsonValue>;
+    if (content.type === "thinking") continue;
+    if (content.type !== "text" || typeof content.text !== "string"
+      || content.text === "[REDACTED]" || content.text === "[CONTENT OMITTED]") return null;
+    blocks.push(content.text);
+  }
+  const text = blocks.join("\n");
+  return text.trim() === "" ? null : text;
 }
-
-const finishedTurnSchema = z.object({
-  type: z.literal("turn.finished"),
-  payload: z.object({
-    output: z.object({
-      role: z.string(),
-      content: z.array(z.looseObject({ type: z.string(), text: z.unknown().optional() })),
-    }),
-  }),
-});
 
 export function evidenceFileReceipt(value: unknown): EvalEvidenceFileReceipt {
   return response(z.object({

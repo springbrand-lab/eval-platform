@@ -236,6 +236,8 @@ it("downloads the whole Project independently of dataset, result, metric, and ta
   mocks.overview.mockResolvedValue(overview);
   const view = await page();
   try {
+    // The filters render only after the Project and then its overview load, which a slow runner can take longer than one flush.
+    await vi.waitFor(() => expect(view.container.querySelector('[aria-label="评估指标"]')).not.toBeNull());
     await select(view.container.querySelector('[aria-label="数据集筛选"]'), "dataset");
     await select(view.container.querySelector('[aria-label="结果筛选"]'), "not-run");
     await select(view.container.querySelector('[aria-label="评估指标"]'), "/score");

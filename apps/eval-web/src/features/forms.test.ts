@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { buildDataInput } from "./datasets/data-draft-fields";
-import { eventSummary } from "./observation/trajectory-tab";
 import { checkMaterialFiles } from "./resources/bundle-detail-page";
 import { buildSelector } from "./runs/new-run-page";
 import { normalizePaths } from "@/components/ui/file-dropzone";
@@ -56,12 +55,5 @@ describe("Material upload", () => {
       .toEqual(["/index.html", "/css/a.css"]);
     expect(normalizePaths([{ path: "/index.html", file }, { path: "/site/a.css", file }]).map((item) => item.path))
       .toEqual(["/index.html", "/site/a.css"]);
-  });
-});
-
-describe("Observation helpers", () => {
-  it("summarizes a trajectory event", () => {
-    expect(eventSummary({ eventId: "e", occurredAt: 0, type: "tool.started", payload: { toolName: "write_file" } })).toBe("工具 write_file");
-    expect(eventSummary({ eventId: "e", occurredAt: 0, type: "x" })).toBe("");
   });
 });

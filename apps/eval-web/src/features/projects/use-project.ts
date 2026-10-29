@@ -1,14 +1,24 @@
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient, type QueryFilters } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { getProject, projectKeys } from "@/api-sdk/projects-api";
+import { comparisonKeys } from "@/api-sdk/comparison-api";
 import { POLL_MS } from "@/features/runs/use-run-polling";
 
 /** Abort earlier snapshots even when they have no cached data, then fetch the current results. */
 export async function refreshProjectResults(client: QueryClient, projectId: string): Promise<void> {
-  await Promise.all([["metrics", projectId], ["evaluations", projectId], ["observation", projectId], ["runs", "detail", projectId]].map(async (queryKey) => {
+  const comparisons: QueryFilters = {
+    queryKey: comparisonKeys.all,
+    predicate: ({ queryKey }) => Array.isArray(queryKey[1]) && queryKey[1].includes(projectId),
+  };
+  await Promise.all([...[
+    ["metrics", projectId], ["evaluations", projectId], ["observation", projectId], ["runs", "detail", projectId],
+  ].map(async (queryKey) => {
     await client.cancelQueries({ queryKey });
     await client.invalidateQueries({ queryKey });
-  }));
+  }), (async () => {
+    await client.cancelQueries(comparisons);
+    await client.invalidateQueries(comparisons);
+  })()]);
 }
 
 /** One Project query owns the visible lifecycle, including Runs completed between polls. */

@@ -1,4 +1,10 @@
 import { createHash, createHmac } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { EvidenceBlobStore } from "@eval-platform/eval-runtime/harness";
 import type { Fetch } from "../sp/http.js";
 
@@ -28,15 +34,16 @@ export class R2EvidenceError extends Error {
 
 /**
  * Evidence in an Eval-only R2 bucket through its S3 API: `evidence/blobs/<sha256>` and
- * `evidence/<evidence hex>/manifest.json`. Each blob is hashed before upload, so its key and
- * the signed payload hash are the same digest, and an existing blob is never uploaded again.
+ * `evidence/<evidence hex>/manifest.json`. A temporary, bounded local spool provides the digest
+ * for both the content-addressed key and SigV4 before streaming the file to R2. Neither the
+ * source nor a whole evidence part is retained in JS memory, and every spool is deleted.
  */
 export function createR2EvidenceBlobs(config: R2EvidenceConfig, fetch: Fetch = globalThis.fetch,
   now: () => Date = () => new Date()): EvidenceBlobStore {
   const endpoint = new URL(config.endpoint);
 
   async function send(method: "GET" | "HEAD" | "PUT", key: string, init: {
-    readonly body?: Uint8Array;
+    readonly body?: Uint8Array | ReadableStream<Uint8Array>;
     readonly payloadSha256?: string;
     readonly headers?: Readonly<Record<string, string>>;
   } = {}): Promise<Response> {
@@ -51,7 +58,9 @@ export function createR2EvidenceBlobs(config: R2EvidenceConfig, fetch: Fetch = g
       headers,
       redirect: "error",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      ...(init.body === undefined ? {} : { body: new Uint8Array(init.body) }),
+      ...(init.body === undefined ? {} : init.body instanceof ReadableStream
+        ? { body: init.body, duplex: "half" } as RequestInit
+        : { body: new Uint8Array(init.body) }),
     });
   }
 
@@ -75,7 +84,8 @@ export function createR2EvidenceBlobs(config: R2EvidenceConfig, fetch: Fetch = g
     return response;
   }
 
-  async function write(key: string, body: Uint8Array, payloadSha256: string, headers: Record<string, string>): Promise<void> {
+  async function write(key: string, body: Uint8Array | ReadableStream<Uint8Array>,
+    payloadSha256: string, headers: Record<string, string>): Promise<void> {
     const response = await send("PUT", key, { body, payloadSha256, headers });
     await response.body?.cancel();
     // 412: a conditional write found the object already there, which is the outcome we want.
@@ -84,13 +94,35 @@ export function createR2EvidenceBlobs(config: R2EvidenceConfig, fetch: Fetch = g
 
   return {
     async putBlob(content, maxBytes) {
-      const bytes = await readLimited(content, maxBytes);
-      const sha256 = createHash("sha256").update(bytes).digest("hex");
-      const key = `evidence/blobs/${sha256}`;
-      if (!await exists(key)) {
-        await write(key, bytes, sha256, { "content-type": "application/octet-stream", "if-none-match": "*" });
+      const temporary = await mkdtemp(join(tmpdir(), "eval-evidence-r2-"));
+      const file = join(temporary, "part");
+      let size = 0;
+      const hash = createHash("sha256");
+      try {
+        await pipeline(Readable.fromWeb(content as never), async function* (chunks: AsyncIterable<Uint8Array>) {
+          for await (const chunk of chunks) {
+            size += chunk.byteLength;
+            if (size > maxBytes) throw new Error("Evidence blob is too large");
+            hash.update(chunk);
+            yield chunk;
+          }
+        }, createWriteStream(file, { flags: "wx", mode: 0o600 }));
+        const sha256 = hash.digest("hex");
+        const key = `evidence/blobs/${sha256}`;
+        if (!await exists(key)) {
+          const body = createReadStream(file);
+          try {
+            await write(key, Readable.toWeb(body) as ReadableStream<Uint8Array>, sha256, {
+              "content-type": "application/octet-stream", "content-length": String(size), "if-none-match": "*",
+            });
+          } finally {
+            body.destroy();
+          }
+        }
+        return { sha256, size };
+      } finally {
+        await rm(temporary, { recursive: true, force: true });
       }
-      return { sha256, size: bytes.byteLength };
     },
 
     async readBlob(sha256) {
@@ -110,23 +142,6 @@ export function createR2EvidenceBlobs(config: R2EvidenceConfig, fetch: Fetch = g
       return response === undefined ? undefined : new Uint8Array(await response.arrayBuffer());
     },
   };
-}
-
-async function readLimited(content: ReadableStream<Uint8Array>, maxBytes: number): Promise<Uint8Array> {
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for await (const chunk of content) {
-    size += chunk.byteLength;
-    if (size > maxBytes) throw new Error("Evidence blob is too large");
-    chunks.push(chunk);
-  }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
 }
 
 /** AWS Signature Version 4 for one S3 request; R2 uses the region `auto`. */

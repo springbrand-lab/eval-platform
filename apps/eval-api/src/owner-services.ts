@@ -1,5 +1,5 @@
 import { createDatasetService } from "@eval-platform/eval-dataset";
-import { createMetrics, createEvaluationScoreReader } from "@eval-platform/eval-metrics";
+import { createMetrics, createEvaluationScoreReader, createProjectComparison } from "@eval-platform/eval-metrics";
 import { createEvalRunAdmission, syncRunScores, type EvaluationScore } from "@eval-platform/eval-runtime";
 import { createActiveOwnerAdmission } from "./active-owner-admission.js";
 import { createAgentConfigService } from "./agent-configs.js";
@@ -12,8 +12,9 @@ import { createPostgresResourceSourceStore } from "./db/agent-import-sources.js"
 import { createPostgresResourceSnapshotReader } from "./db/attempt-resources.js";
 import type { EvalDb } from "./db/client.js";
 import { createPostgresDatasetStore } from "./db/dataset.js";
+import { createPostgresDashboardStore } from "./db/dashboards.js";
 import { createPostgresAgentPurposeStore } from "./db/agent-purposes.js";
-import { createPostgresMetricsSource } from "./db/metrics.js";
+import { createPostgresMetricsSource, createPostgresProjectComparisonSource } from "./db/metrics.js";
 import { createPostgresObservationReader } from "./db/observation.js";
 import { createOutputSchemaCatalog } from "./db/output-schemas.js";
 import { createPostgresProjectPlanReader } from "./db/project-plans.js";
@@ -25,6 +26,7 @@ import { createPostgresProjectRunReader } from "./db/run-view.js";
 import { createPostgresProjectRunControl, createPostgresRuntimeStore } from "./db/runtime.js";
 import { createPostgresRuntimeQueries } from "./db/runtime-queries.js";
 import { createInitialResourceApi } from "./initial-resources.js";
+import { createDashboardService } from "./dashboards/service.js";
 import type { ApiRuntime } from "./lib/types.js";
 import { createProjectService } from "./projects/service.js";
 import { createProjectResultsExport } from "./projects/evaluation-results.js";
@@ -100,6 +102,8 @@ export function createOwnerServices({ db, sp, bundles, release, runQueue, publis
         observations: createPostgresObservationReader(db, ownerUserId),
         resourceSnapshots: createPostgresResourceSnapshotReader(db, ownerUserId),
         metrics: createMetrics({ source: createPostgresMetricsSource(db, ownerUserId) }),
+        comparison: createProjectComparison({ source: createPostgresProjectComparisonSource(db, ownerUserId) }),
+        dashboards: createDashboardService(createPostgresDashboardStore(db, ownerUserId)),
         ...createBundleCatalogs(db, ownerUserId, bundles),
         outputSchemas,
         initialResources: createInitialResourceApi(db, ownerUserId),

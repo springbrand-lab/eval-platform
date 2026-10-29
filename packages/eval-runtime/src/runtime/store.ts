@@ -1,5 +1,5 @@
 import type {
-  AgentResourceSnapshot,
+  CollectedResourceSnapshot,
   EvaluationRecord,
   RunOperation,
   RunPhases,
@@ -88,7 +88,7 @@ export function withoutRevision<T extends { readonly revision?: number }>({ revi
  */
 export interface AttemptResourceSnapshot {
   readonly attemptId: string;
-  readonly snapshot: AgentResourceSnapshot;
+  readonly snapshot: CollectedResourceSnapshot;
 }
 
 export interface RuntimeStore {

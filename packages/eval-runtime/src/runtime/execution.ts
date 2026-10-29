@@ -11,6 +11,7 @@ import type {
 } from "@eval-platform/eval-contracts";
 import {
   EVIDENCE_EXPORT_MAX_PASSES,
+  evidenceTrajectoryPinOf,
   isPendingSamplingStatus,
   isTerminalAgentStatus,
 } from "@eval-platform/eval-contracts";
@@ -91,14 +92,18 @@ export async function executeSampling(
       sleep: dependencies.sleep,
       failureLabel: EVIDENCE_EXPORT_FAILED,
       collect: async () => {
+        const progress = exportStateOf(submissionId)?.progress;
+        // A resumed export reads with its saved pin (`{}` for progress saved before pinning), never a new one.
+        // Without progress the Harness pins anew; that pin is durable only after the store's first persist.
+        const savedPin = progress === undefined ? undefined : evidenceTrajectoryPinOf(progress.trajectory);
         const exported = await dependencies.harness.exportEvidence({
           handle: subjectHandle(chatId),
           submissionId,
           limits: dependencies.evidenceLimits,
           ...(sample.data.initialMaterials === undefined ? {} : { initialMaterials: sample.data.initialMaterials }),
           ...(harnessRuntime === undefined ? {} : { runtime: harnessRuntime }),
+          ...(savedPin === undefined ? {} : { trajectory: savedPin }),
         });
-        const progress = exportStateOf(submissionId)?.progress;
         const evidence = await dependencies.evidence.resume({
           evidence: exported,
           limits: dependencies.evidenceLimits,
@@ -394,7 +399,7 @@ function exportSummary(progress: EvidenceExportProgress | undefined): Record<str
     filesTotal: files.length,
     bytes: [...stored, ...parts].reduce((sum, { size }) => sum + size, 0),
     trajectoryParts: parts.length,
-    trajectoryEvents: parts.reduce((sum, { events }) => sum + events, 0),
+    trajectoryRecords: parts.reduce((sum, { records }) => sum + records, 0),
     trajectoryDone: progress.trajectory.done === true,
     omitted,
   };

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EvaluationOutputSchema } from "@eval-platform/eval-contracts";
 import {
-  collection, dataset, evaluation, facts, OUTPUT_SCHEMA, plan, PROJECT, projectSample, run, sampling, telemetry, usage,
+  collection, dataset, evaluation, facts, nativeScopedFixture, OUTPUT_SCHEMA, plan, PROJECT, projectSample, run, sampling, usage,
 } from "../test-support.js";
 import { createMetrics, MetricsEntityNotFoundError, MetricsQueryError, MetricsSourceError } from "./index.js";
 import type { MetricSummary, MetricsEvaluation, MetricsSampling } from "../aggregation/model.js";
@@ -155,15 +155,14 @@ describe("four-level reporting", () => {
   it("separates the Subject from each Evaluator and exposes full JSON only in Sampling detail", async () => {
     const subject = SAMPLINGS[0]!;
     const withTrajectory = facts({ ...CURRENT, samplings: [{ ...subject, executionAttempts: [{ ...subject.executionAttempts[0]!, resources: collection({
+      scope: { chatId: "subject:s1a", submissionId: "subject-submission:s1a", idempotencyKey: "execution:s1a" },
       usageEvents: [usage("u", { metrics: { totalTokens: 100 } })],
-      telemetryEvents: [
-        telemetry("t:s", "turn.started", "turn", {}, 0), telemetry("t:f", "turn.finished", "turn", { outcome: "completed" }, 9),
-        telemetry("x:s", "tool.started", "tool", { toolName: "browser", input: { url: "a" } }, 1, "session-1", "turn"),
-      ],
+      nativeRecords: nativeScopedFixture([3, 8, 16],
+        { chatId: "subject:s1a", submissionId: "subject-submission:s1a", idempotencyKey: "execution:s1a" }),
     }) }] }, ...SAMPLINGS.slice(1)], evaluations: [...CURRENT.evaluations, judge("e1a3", "s1a", 70, 3)] });
     const detail = await metricsOf(withTrajectory).getSamplingDetail({ ...scope, samplingId: "s1a" });
     expect(detail.projectSample).toEqual(PS1);
-    expect(detail.sampling.executionAttempts[0]!.resources).toMatchObject({ status: "collected", summary: { counts: { usageEvents: 1, telemetryEvents: 3 } } });
+    expect(detail.sampling.executionAttempts[0]!.resources).toMatchObject({ status: "collected", summary: { counts: { usageEvents: 1, nativeRecords: 3 } } });
     expect(detail.sampling.executionAttempts[0]!.resources).not.toHaveProperty("snapshot");
     expect(detail.evaluations[0]!.record.attempts[0]!.resources).not.toHaveProperty("snapshot");
     expect(detail.subject).toMatchObject({ role: "subject", chatId: "subject:s1a", resources: { tokens: { total: { value: 100 } } } });

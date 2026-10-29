@@ -6,6 +6,7 @@ import { listAgentImportCandidates, listAgentImportUsers } from "@/api-sdk/agent
 import { Button } from "@/components/ui/button";
 import { Checkbox, Input } from "@/components/ui/form";
 import { ErrorBlock, LoadingBlock, Notice } from "@/components/ui/feedback";
+import { TablePagination } from "@/components/ui/pagination";
 import { AGENT_IMPORT_PAGE_SIZE, agentImportKeys, agentImportUserName } from "./agent-import-state";
 
 interface PickerProps {
@@ -130,13 +131,12 @@ function AgentImportCandidates({
           <TableCell className="text-xs">{agent.exists ? "已存在，导入将覆盖" : "缺失，导入将新增"}</TableCell>
         </TableRow>)}</TableBody>
       </Table>}
-    <nav aria-label="候选 Agent 分页" className="flex items-center justify-end gap-3">
-      <Button size="sm" disabled={disabled || page.isFetching || search.cursors.length === 1}
-        onClick={() => setSearch((current) => ({ ...current, cursors: current.cursors.slice(0, -1) }))}>上一页</Button>
-      <span className="text-xs text-text-muted">第 {search.cursors.length} 页 · 每页 20 个</span>
-      <Button size="sm" disabled={disabled || page.isFetching || !!page.error || !page.data?.nextCursor}
-        onClick={() => { if (page.data?.nextCursor) setSearch((current) => ({ ...current, cursors: [...current.cursors, page.data.nextCursor] })); }}>下一页</Button>
-    </nav>
+    <TablePagination label="候选 Agent 分页" pageIndex={search.cursors.length - 1}
+      disabled={disabled || page.isFetching} hasNextPage={!page.error && !!page.data?.nextCursor}
+      onPageChange={(index) => {
+        if (index < search.cursors.length - 1) setSearch((current) => ({ ...current, cursors: current.cursors.slice(0, -1) }));
+        else if (page.data?.nextCursor) setSearch((current) => ({ ...current, cursors: [...current.cursors, page.data.nextCursor] }));
+      }} />
     {selected.size > 0 && <details className="rounded-lg border border-border px-3 py-2 text-[13px]">
       <summary className="cursor-pointer font-semibold">查看跨页已选 Agent（{selected.size} 个）</summary>
       <ul className="mt-2 max-h-40 space-y-2 overflow-y-auto">{[...selected.values()].map((agent) => <li key={agent.id} className="flex items-start justify-between gap-2">

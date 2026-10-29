@@ -1,15 +1,56 @@
 import { describe, expect, it } from "vitest";
-import { resourceInput, settlement, telemetry, usage } from "../test-support.js";
+import { nativeScopedFixture, resourceInput, settlement, usage } from "../test-support.js";
 import { aggregateAgentResources } from "./resource-distributions.js";
 
+const object = (value: unknown): Record<string, unknown> => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected public Pi fixture object");
+  return value as Record<string, unknown>;
+};
+
 function agent(id: string, cache: number, calls: readonly { input: string; outcome: string; duration: number }[]) {
+  const scope = { chatId: id, idempotencyKey: id, submissionId: id };
+  const records = nativeScopedFixture(Array.from({ length: 16 }, (_, index) => index + 1), scope);
+  const assistant = object(object(records[5]!.record.record).value);
+  const message = object((assistant.model as unknown[])[0]);
+  const originalCall = object((message.content as unknown[]).find((block) => object(block).type === "toolCall"));
+  message.content = (message.content as unknown[]).filter((block) => object(block).type !== "toolCall").concat(
+    calls.map((call, index) => ({ ...originalCall, id: `${id}-${index}`, name: "write_file", arguments: call.input })),
+  );
+  for (const [index, call] of calls.entries()) {
+    const group = index === 0 ? records.slice(7, 11) : nativeScopedFixture([8, 9, 10, 11], scope);
+    for (const [position, row] of group.entries()) {
+      const ingestSeq = index === 0 ? row.ingestSeq : 17 + position;
+      const value = object(object(row.record.record).value);
+      value.id = ingestSeq;
+      const data = value.kind === "springbrand.trajectory" ? object(value.data) : undefined;
+      if (data?.type === "event") {
+        const event = object(data.event);
+        event.eventId = `fact-${ingestSeq}`;
+        event.toolCallId = `${id}-${index}`;
+        event.operationId = `ua:op:tool:${id}:${index}`;
+        event.occurredAt = (280 + index * 100) + (position === 3 ? call.duration : 0);
+        const payload = object(event.payload);
+        payload.toolName = "write_file";
+        if (position === 3) { payload.outcome = call.outcome; payload.durationMs = call.duration; }
+      } else if (data?.type === "hook") {
+        data.toolCallId = `${id}-${index}`;
+        data.toolName = "write_file";
+      } else if (value.kind === "pi.toolResult") {
+        const result = object((value.model as unknown[])[0]);
+        result.toolCallId = `${id}-${index}`;
+        result.toolName = "write_file";
+        result.isError = call.outcome === "failed";
+        result.timestamp = 280 + index * 100 + call.duration;
+        result.durationMs = call.duration;
+      }
+      if (index > 0) records.push({ ...row, ingestSeq });
+    }
+  }
   return [resourceInput({
+    scope,
     usageEvents: [usage(`usage-${id}`, { metrics: { inputTokens: 0, outputTokens: 0, cacheReadTokens: cache, cacheWriteTokens: 0, reasoningTokens: 0, totalTokens: cache } })],
     billingSettlements: [settlement(`debit-${id}`, { ratedUnits: cache, debitedUnits: cache, shortfallUnits: 0, platformOwned: { units: 0 } })],
-    telemetryEvents: calls.flatMap((call, index) => [
-      telemetry(`${id}-${index}-start`, "tool.started", `${id}-${index}`, { toolName: "write_file", input: call.input }, 0, id),
-      telemetry(`${id}-${index}-end`, "tool.finished", `${id}-${index}`, { toolName: "write_file", outcome: call.outcome, durationMs: call.duration, output: "ok" }, call.duration, id),
-    ]),
+    nativeRecords: records,
   })];
 }
 
@@ -44,15 +85,20 @@ describe("per-Agent resource distributions", () => {
 
   it("keeps unknown tool names separate from proven unused tools", () => {
     const known = agent("known", 10, [{ input: "a", outcome: "completed", duration: 10 }]);
-    const unknown = resourceInput({ telemetryEvents: [
-      telemetry("unknown-start", "tool.started", "unknown", { input: {} }),
-      telemetry("unknown-end", "tool.finished", "unknown", { outcome: "completed", durationMs: 10, output: {} }),
-    ] });
+    // A missing name is not valid UA bookkeeping. Corrupt a projected record
+    // deliberately to ensure it cannot prove the absence of write_file.
+    const [started, resultMessage] = nativeScopedFixture([8, 10],
+      { chatId: "subject-chat", submissionId: "subject-submission", idempotencyKey: "unknown" });
+    const startedData = object(object(object(started!.record.record).value).data);
+    delete object(object(startedData.event).payload).toolName;
+    const toolResultMessage = object((object(object(resultMessage!.record.record).value).model as unknown[])[0]);
+    delete toolResultMessage.toolName;
+    const unknown = resourceInput({ nativeRecords: [started!, resultMessage!] });
     const result = aggregateAgentResources([known, [unknown], [resourceInput()]]);
     expect(result.distribution.trajectory.byTool.find((tool) => tool.toolName === "write_file")!.operations.count)
       .toMatchObject({ count: 2, missing: 1, mean: 0.5, variance: 0.25, coverage: "partial" });
     expect(result.distribution.trajectory.byTool.find((tool) => tool.toolName === null)!.operations.count)
-      .toMatchObject({ count: 3, missing: 0, mean: 1 / 3, coverage: "complete" });
+      .toMatchObject({ count: 3, missing: 0, mean: 1 / 3, coverage: "partial" });
     const mixed = aggregateAgentResources([[...known, unknown]]);
     expect(mixed.trajectory.byTool.find((tool) => tool.toolName === "write_file")!.count).toEqual({ value: 1, coverage: "partial" });
   });

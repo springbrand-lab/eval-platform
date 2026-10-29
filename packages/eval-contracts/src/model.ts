@@ -12,8 +12,11 @@ export type {
   AgentResourceScope,
   SubmittedAgentResourceScope,
   AgentResourceSnapshot,
+  AgentResourceSnapshotDownload,
+  AgentResourceSnapshotPage,
   AgentResourceSnapshotSummary,
   AgentResourceState,
+  CollectedResourceSnapshot,
 } from "./resources.js";
 
 export type JsonPrimitive = string | number | boolean | null;

@@ -1,10 +1,19 @@
 import { spawnSync } from "node:child_process";
-import { summarizeResourceSnapshot, type AgentResourceSnapshot, type EvaluationRecord, type Sampling } from "@eval-platform/eval-contracts";
-import { compactResourceSnapshot, createMetrics, type MetricsFacts } from "@eval-platform/eval-metrics";
-import { and, eq } from "drizzle-orm";
+import {
+  SP_PI_TRAJECTORY_FORMAT,
+  summarizeResourceSnapshot,
+  type AgentResourceSnapshot,
+  type AgentResourceSnapshotDownload,
+  type AgentResourceSnapshotPage,
+  type EvaluationRecord,
+  type Sampling,
+} from "@eval-platform/eval-contracts";
+import { compactNativeTrajectoryRecord, compactResourceSnapshot, createMetrics, type MetricsFacts } from "@eval-platform/eval-metrics";
+import { and, eq, inArray } from "drizzle-orm";
 import { Pool, types } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { withoutRevision } from "@eval-platform/eval-runtime";
+import { createEvalRunResumer, withoutRevision } from "@eval-platform/eval-runtime";
+import type { EvidenceStore } from "@eval-platform/eval-runtime/harness";
 import { createPostgresResourceSnapshotReader } from "./attempt-resources.js";
 import { createEvalDb } from "./client.js";
 import { createPostgresMetricsSource } from "./metrics.js";
@@ -14,18 +23,22 @@ import { createPostgresRuntimeStore } from "./runtime.js";
 import { attemptResources } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
 import { buildCommand, makeData, release, seedProject } from "./test-fixtures.js";
+import { nativeFixture, nativeToolBodyPair } from "../sp/native-test-fixture.js";
+import { createSpHarness } from "../sp/harness.js";
 
 const connection = process.env.DATABASE_URL;
 const owner = "attempt-resources-test";
 
 function rawSnapshot(id: string, body: string, toolName = "tool"): AgentResourceSnapshot {
+  // Storage stress is split at the upstream 4 MB page ceiling. Both safe Pi
+  // message bodies are based on the publicly projected assistant/Tool Result.
+  const chunks = body.length > 3_000_000
+    ? [body.slice(0, 3_000_000), body.slice(3_000_000)] : [body];
   return {
     scope: { chatId: id, idempotencyKey: id, submissionId: id }, observedAt: "2026-10-17T00:00:00Z", finalized: true,
-    coverage: { usageEvents: "complete", telemetryEvents: "complete", billingSettlements: "complete" },
-    usageEvents: [], billingSettlements: [], telemetryEvents: [
-      { eventId: "start", type: "tool.started", operationId: "tool", occurredAt: 1, resource: { sessionId: id }, payload: { toolName, input: body } },
-      { eventId: "end", type: "tool.finished", operationId: "tool", occurredAt: 5, resource: { sessionId: id }, payload: { toolName, outcome: "completed", output: body } },
-    ],
+    coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+    usageEvents: [], billingSettlements: [],
+    nativeRecords: chunks.flatMap((part, index) => nativeToolBodyPair(id, id, part, toolName, index)),
   };
 }
 
@@ -33,6 +46,128 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
   beforeAll(async () => { database = await createTestDatabase(connection!); }, 30_000);
   afterAll(async () => { if (database) await database.destroy(); }, 30_000);
+
+  it("persists finalized paged resources with their Attempt revision in real PostgreSQL", async () => {
+    const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }] });
+    const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
+    const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, {
+      projectId: seeded.projectId, operation: "execution",
+    });
+    await store.admitRun(command);
+    const samplingId = command.run.samplingIds[0]!;
+    const chatId = crypto.randomUUID();
+    const submissionId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    const scope = { chatId, submissionId, idempotencyKey: `execution:${samplingId}` };
+    const native = await compactNativeTrajectoryRecord(nativeFixture(3, chatId, submissionId), scope);
+    const summary = {
+      scope, observedAt: "2026-10-28T00:00:00.000Z", finalized: true,
+      readiness: { receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 0, pendingRuntimeEvents: 0,
+        actionCharges: { complete: true, unsettledExecutions: 0, missingExecutionIds: 0 } },
+      coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+      counts: { usageEvents: 1, nativeRecords: 1, billingSettlements: 1 },
+    } as const;
+    const snapshot: AgentResourceSnapshotDownload = {
+      kind: "pages", summary, creditsTotal: 1,
+      async *readPages(): AsyncIterable<AgentResourceSnapshotPage> {
+        yield { stream: "nativeRecords", records: [native] };
+        yield { stream: "usageEvents", records: [{ eventId: "usage-1", kind: "assistant_model" }] };
+        yield { stream: "billingSettlements", records: [{ eventId: "usage-1", accountId: owner,
+          status: "settled", debitedUnits: 1 }] };
+        yield { stream: "billingSettlements", records: [] };
+      },
+      dispose: async () => undefined,
+    };
+    const original = (await store.getSampling(samplingId))!;
+    try {
+      await store.updateSampling({
+        ...original, subjectChatId: chatId, execution: { status: "succeeded" },
+        executionAttempts: [{ executionAttemptId: attemptId, samplingId, attemptNumber: 1, status: "completed",
+          submissionId, completedAt: summary.observedAt, resources: { status: "collected", summary } }],
+      }, original, { attemptId, snapshot });
+    } catch (error) {
+      // Drizzle's message includes bound parameters; only expose the PostgreSQL SQLSTATE.
+      let cause: unknown = error;
+      while (cause instanceof Error && cause.cause instanceof Error) cause = cause.cause;
+      const code = typeof cause === "object" && cause !== null && "code" in cause
+        && typeof cause.code === "string" && /^[A-Z0-9]{5}$/.test(cause.code) ? cause.code : "unknown";
+      const parameter = cause instanceof Error ? /\bparameter \$(\d+)\b/.exec(cause.message)?.[1] : undefined;
+      throw new Error(`Paged resource SQL failed with SQLSTATE ${code}${parameter ? ` at bind $${parameter}` : ""}`);
+    }
+    const [stored] = await database.db.select({ attemptId: attemptResources.attemptId }).from(attemptResources)
+      .where(and(eq(attemptResources.stage, "execution"), eq(attemptResources.recordId, samplingId)));
+    expect(stored?.attemptId).toBe(attemptId);
+    expect((await store.getSampling(samplingId))?.executionAttempts[0]?.resources?.status).toBe("collected");
+  });
+
+  it("collects public SP pages through Runtime into the PostgreSQL Attempt", async () => {
+    const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }] });
+    const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
+    const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, {
+      projectId: seeded.projectId, operation: "execution",
+    });
+    await store.admitRun(command);
+    const samplingId = command.run.samplingIds[0]!;
+    const chatId = crypto.randomUUID();
+    const submissionId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    const key = `execution:${samplingId}`;
+    const scope = { chatId, submissionId, idempotencyKey: key };
+    const observedAt = "2026-10-28T00:00:00.000Z";
+    const readiness = { receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 0, pendingRuntimeEvents: 0,
+      actionCharges: { complete: true, unsettledExecutions: 0, missingExecutionIds: 0 } };
+    const coverage = { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" } as const;
+    const prefix = `/internal/v1/eval-harness/users/${encodeURIComponent(owner)}/chats/${chatId}/resources/by-key/${encodeURIComponent(key)}`;
+    const paths: string[] = [];
+    const harness = createSpHarness({
+      origin: "https://sp.test", serviceToken: "fixture",
+      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(new Request(input, init).url);
+        paths.push(url.pathname);
+        if (url.pathname === `${prefix}/readiness`) {
+          return Response.json({ scope, observedAt, finalized: true, readiness });
+        }
+        if (url.pathname === `${prefix}/header`) {
+          return Response.json({ scope, observedAt, finalized: true, readiness, coverage,
+            cursor: { throughSeq: 3 }, actionCharges: [] });
+        }
+        if (url.pathname === `${prefix}/native-records`) {
+          return Response.json({ format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: 3 },
+            records: [nativeFixture(3, chatId, submissionId)], nextAfterSeq: null });
+        }
+        if (url.pathname === `${prefix}/billing`) {
+          return Response.json({ scope: { chatId, submissionId }, cursor: { throughCount: 1, sha256: "a".repeat(64) },
+            after: 0, usageEvents: [{ eventId: "usage-1", kind: "assistant_model" }],
+            billingSettlements: [{ eventId: "usage-1", accountId: owner, status: "settled", debitedUnits: 1 }],
+            nextAfter: null });
+        }
+        throw new Error("Unexpected resource route");
+      },
+    });
+    const original = (await store.getSampling(samplingId))!;
+    await store.updateSampling({
+      ...original, subjectChatId: chatId,
+      execution: { status: "succeeded", resourcesPending: { deadline: "2026-10-28T00:10:00.000Z", nextAttemptAt: observedAt } },
+      executionAttempts: [{ executionAttemptId: attemptId, samplingId, attemptNumber: 1, status: "completed",
+        submissionId, completedAt: observedAt, resources: { status: "pending", scope } }],
+    }, original);
+    const runtime = createEvalRunResumer({
+      plans: createPostgresProjectPlanReader(database.db, owner), harness, store,
+      evidence: {} as EvidenceStore, now: () => observedAt, sleep: async () => undefined,
+      log: () => undefined, onError: () => undefined,
+    });
+    await runtime.resume(command.run.runId);
+    expect(paths).toContain(`${prefix}/readiness`);
+    expect(paths).toContain(`${prefix}/header`);
+    expect(paths).toContain(`${prefix}/native-records`);
+    expect(paths).toContain(`${prefix}/billing`);
+    const [stored] = await database.db.select({ snapshot: attemptResources.snapshot }).from(attemptResources)
+      .where(and(eq(attemptResources.stage, "execution"), eq(attemptResources.recordId, samplingId)));
+    expect((await store.getSampling(samplingId))?.executionAttempts[0]?.resources?.status).toBe("collected");
+    expect(stored?.snapshot.nativeRecords).toHaveLength(1);
+    expect(stored?.snapshot.usageEvents).toHaveLength(1);
+    expect(stored?.snapshot.billingSettlements).toHaveLength(1);
+  });
 
   it("keeps raw snapshots unchanged while stage, Run and Metrics reads transfer only summaries and projections", async () => {
     const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }], samplingCount: 2, evaluation: true });
@@ -73,7 +208,10 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       await store.updateEvaluation(record, first, { attemptId: evaluationId, snapshot });
       storedEvaluations.push(withoutRevision(record));
     }
-    const rows = await database.db.select().from(attemptResources).where(eq(attemptResources.ownerUserId, owner));
+    const rows = await database.db.select().from(attemptResources).where(and(
+      eq(attemptResources.ownerUserId, owner),
+      inArray(attemptResources.samplingId, command.run.samplingIds),
+    ));
     expect(rows).toHaveLength(4);
     for (const row of rows) expect(row.snapshot).toEqual(raw.get(row.recordId));
 
@@ -140,7 +278,8 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const replacement = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, { projectId: seeded.projectId, operation: "execution" });
     await store.admitRun(replacement);
     expect(await database.db.select({ id: attemptResources.recordId }).from(attemptResources)
-      .where(and(eq(attemptResources.ownerUserId, owner)))).toEqual([]);
+      .where(and(eq(attemptResources.ownerUserId, owner),
+        inArray(attemptResources.samplingId, [...command.run.samplingIds, ...replacement.run.samplingIds])))).toEqual([]);
   }, 30_000);
 
   describe.each(["execution", "evaluation"] as const)("%s snapshot string round trips", (stage) => {
@@ -178,9 +317,11 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       expect(row?.snapshot).toEqual(snapshot);
       const projection = await compactResourceSnapshot(snapshot);
       expect(row?.metricSnapshot).toEqual(projection);
-      expect(row?.metricSnapshot.telemetryEvents).toMatchObject([
-        { event: { payload: { toolName: value } } },
-        { event: { payload: { toolName: value } } },
+      expect(row?.metricSnapshot.nativeRecords).toMatchObject([
+        { record: { format: "pi-trajectory/v1", record: { type: "entry", value: { kind: "pi.assistant" } } },
+          metricProjection: { facts: [{ type: "assistant" }, { type: "tool", toolName: value }] } },
+        { record: { format: "pi-trajectory/v1", record: { type: "entry", value: { kind: "pi.toolResult" } } },
+          metricProjection: { facts: [{ type: "tool", toolName: value }] } },
       ]);
       const facts = await createPostgresMetricsSource(database.db, owner).read({ projectId: seeded.projectId });
       const attempt = stage === "execution" ? facts.samplings[0]!.executionAttempts[0] : facts.evaluations[0]!.attempts[0];

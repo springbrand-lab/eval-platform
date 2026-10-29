@@ -1,16 +1,22 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_EVIDENCE_LIMITS, type JsonValue } from "@eval-platform/eval-contracts";
+import {
+  DEFAULT_EVIDENCE_LIMITS, EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT,
+  type NativeTrajectoryEntry,
+} from "@eval-platform/eval-contracts";
 import {
   AgentHandleNotFoundError,
   AgentIdentityConflictError,
   type AgentHandle,
   type EvidenceBundleReader,
+  type ExportedTrajectoryPage,
+  type ExportedEvidence,
 } from "@eval-platform/eval-runtime";
 import { EVAL_EVIDENCE_FILE_MAX_BYTES, EVAL_INITIAL_FILE_MAX_BYTES, EVAL_OUTPUT_SCHEMA_PATH as SCHEMA_PATH } from "@springbrand/eval-harness";
 import { isRequestCancelled } from "@springbrand/http/errors";
 import WebSocket, { WebSocketServer } from "ws";
 import { createSpHarness, SpHarnessError, spEvidenceLimits } from "./harness.js";
+import { nativeFixture } from "./native-test-fixture.js";
 
 const OWNER = "11111111-1111-4111-8111-111111111111";
 const OTHER_OWNER = "22222222-2222-4222-8222-222222222222";
@@ -18,6 +24,7 @@ const SUBJECT_CHAT = "33333333-3333-4333-8333-333333333333";
 const EVALUATOR_CHAT = "44444444-4444-4444-8444-444444444444";
 const MISSING_CHAT = "55555555-5555-4555-8555-555555555555";
 const AGENT_CONFIG = "66666666-6666-4666-8666-666666666666";
+const RESOURCE_SUBMISSION_ID = "77777777-7777-4777-8777-777777777777";
 const CHAT_PATH = `/internal/v1/eval-harness/users/${OWNER}/chats/${SUBJECT_CHAT}`;
 
 const subject: AgentHandle = {
@@ -49,16 +56,11 @@ const readiness = {
   actionCharges: { complete: false, unsettledExecutions: 1, missingExecutionIds: 0 },
 };
 const scope = { chatId: SUBJECT_CHAT, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" };
-const resources = {
-  scope,
-  observedAt: "2026-10-14T00:00:00.000Z",
-  finalized: true,
-  coverage: { usageEvents: "complete", telemetryEvents: "partial", billingSettlements: "complete" },
-  usageEvents: [{ eventId: "usage-1", unknownField: null }],
-  telemetryEvents: [{ eventId: "event-1" }],
-  billingSettlements: [{ eventId: "billing-1", chargedCredits: 7 }],
-  readiness,
-};
+const native = (ingestSeq: number, chatId = SUBJECT_CHAT, submissionId = "submission-1") =>
+  nativeFixture(ingestSeq, chatId, submissionId);
+const nativePage = (records: readonly NativeTrajectoryEntry[], throughSeq: number, nextAfterSeq: number | null) => ({
+  format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq }, records, nextAfterSeq,
+});
 const RESOURCES_PATH = `${CHAT_PATH}/resources/by-key/execution%3Asampling-1`;
 const BY_ID_PATH = `${CHAT_PATH}/submissions/submission-1`;
 const BY_KEY_PATH = `${CHAT_PATH}/submissions/by-key/execution%3Asampling-1`;
@@ -187,7 +189,7 @@ describe("Eval SP Harness", () => {
     });
   });
 
-  it("uses service-authenticated public operations and preserves evidence and raw resource facts", async () => {
+  it("uses service-authenticated public Chat, Submission and output operations", async () => {
     const { fetch, requests } = spFetch((request) => {
       const url = new URL(request.url);
       if (request.method === "PUT" && url.pathname === CHAT_PATH) return Response.json(subject);
@@ -199,7 +201,6 @@ describe("Eval SP Harness", () => {
         return Response.json(receipt("completed"));
       }
       if (request.method === "GET" && url.pathname.endsWith("/output")) return Response.json(executionOutput);
-      if (request.method === "GET" && url.pathname.includes("/resources/by-key/")) return Response.json(resources);
       throw new Error(`Unexpected ${request.method} ${url}`);
     });
     const resolveInitialMaterials = vi.fn(materialFiles);
@@ -215,10 +216,7 @@ describe("Eval SP Harness", () => {
     expect((await harness.inspectAgentOperation({ handle: subject, idempotencyKey: "execution:sampling-1" }))?.submissionId)
       .toBe("submission-1");
     expect(await harness.collectExecution({ handle: subject })).toEqual(executionOutput);
-    expect(await harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
-      .toEqual(resources);
-
-    expect(requests).toHaveLength(6);
+    expect(requests).toHaveLength(5);
     expect(requests.every((request) => new URL(request.url).pathname.startsWith(CHAT_PATH))).toBe(true);
     expect(requests.every((request) => request.headers.get("X-Eval-Service-Token") === "service-secret")).toBe(true);
     expect(await requests[0]!.json()).toEqual(ensureInput(subject));
@@ -231,7 +229,6 @@ describe("Eval SP Harness", () => {
     });
     expect(resolveInitialMaterials.mock.calls).toEqual(subjectMaterials.map((ref) => [OWNER, ref]));
     expect(await requests[2]!.json()).toEqual({ idempotencyKey: "execution:sampling-1", prompt: "Build a project", unattended: true });
-    expect(new URL(requests[5]!.url).searchParams.get("submissionId")).toBe("submission-1");
   });
 
   it.each([subject, evaluator])("preserves $role Prompt text and business fields across initialization and submission", async (handle) => {
@@ -581,14 +578,7 @@ describe("Eval SP Harness", () => {
   });
 
   it("exports Subject artifacts within limits and its complete trajectory, page by page", async () => {
-    const event = (ingestSeq: number, type: string, payload: Record<string, unknown>) => ({
-      ingestSeq,
-      event: {
-        schemaVersion: 1, type, eventId: `event-${ingestSeq}`, operationId: `operation-${ingestSeq}`,
-        submissionId: "submission-1", occurredAt: 1_760_000_000_000 + ingestSeq,
-        resource: { sessionId: SUBJECT_CHAT, agentName: "severn", agentId: "agent", serviceName: "sp" }, payload,
-      },
-    });
+    const records = [native(1), native(2), native(3)];
     const { fetch, requests } = spFetch((request) => {
       const url = new URL(request.url);
       if (url.pathname.endsWith("/evidence/artifacts")) {
@@ -600,8 +590,8 @@ describe("Eval SP Harness", () => {
       }
       if (url.pathname.endsWith("/evidence/trajectory")) {
         return url.searchParams.get("afterSeq") === "0"
-          ? Response.json({ events: [event(1, "turn.admitted", { prompt: "Build" }), event(2, "tool.started", { toolName: "write", input: { path: "/index.html" } })], nextAfterSeq: 2 })
-          : Response.json({ events: [event(3, "context.compacted", { removedMessages: 3 })], nextAfterSeq: null });
+          ? Response.json(nativePage(records.slice(0, 2), 3, 2))
+          : Response.json(nativePage(records.slice(2), 3, null));
       }
       if (url.pathname.endsWith("/evidence/files")) return new Response("<h1>Hi</h1>", { headers: { "Content-Type": "text/html" } });
       throw new Error(`Unexpected ${request.method} ${url}`);
@@ -618,15 +608,18 @@ describe("Eval SP Harness", () => {
     ]);
     expect(exported.trajectoryComplete).toBe(true);
     await expect(new Response(await exported.readFile("/index.html")).text()).resolves.toBe("<h1>Hi</h1>");
-    const events: { seq: number; record: JsonValue }[] = [];
-    for await (const item of exported.readTrajectory(0)) events.push(item);
-    expect(events).toEqual([
-      { seq: 1, record: event(1, "turn.admitted", { prompt: "Build" }) },
-      { seq: 2, record: event(2, "tool.started", { toolName: "write", input: { path: "/index.html" } }) },
-      { seq: 3, record: event(3, "context.compacted", { removedMessages: 3 }) },
+    const pages: ExportedTrajectoryPage[] = [];
+    for await (const item of exported.readTrajectory(0)) pages.push(item);
+    expect(pages.map(({ throughSeq, records, nextAfterSeq }) => ({
+      throughSeq, seqs: records.map((record) => record.seq), nextAfterSeq,
+    }))).toEqual([
+      { throughSeq: 3, seqs: [1, 2], nextAfterSeq: 2 },
+      { throughSeq: 3, seqs: [3], nextAfterSeq: null },
     ]);
+    expect(await Promise.all(pages.flatMap((page) => page.records.map(async (row) =>
+      JSON.parse(await new Response(await row.readJsonl()).text()) as unknown)))).toEqual(records);
     // Successful file reads and intermediate pages are summarized by Runtime; only the final page is logged.
-    expect(logged).toEqual([expect.objectContaining({ name: "evidence_trajectory_page", status: 200, from: 0, pages: 2, events: 3, afterSeq: 2 })]);
+    expect(logged).toEqual([expect.objectContaining({ name: "evidence_trajectory_page", status: 200, from: 0, pages: 2, records: 3, afterSeq: 2 })]);
     expect(JSON.stringify(logged)).not.toContain("Build");
     const fileRequest = requests.find((request) => new URL(request.url).pathname.endsWith("/evidence/files"))!;
     expect(new URL(fileRequest.url).searchParams.get("path")).toBe("/index.html");
@@ -637,14 +630,129 @@ describe("Eval SP Harness", () => {
 
     // A resumed read starts at the persisted cursor and yields exactly the remaining events.
     requests.length = 0;
-    const resumed: { seq: number; record: JsonValue }[] = [];
-    for await (const item of exported.readTrajectory(2)) resumed.push(item);
-    expect(resumed).toEqual(events.slice(2));
+    const resumed: ExportedTrajectoryPage[] = [];
+    for await (const item of exported.readTrajectory(2, 3)) resumed.push(item);
+    expect(resumed.map((page) => page.records.map((row) => row.seq))).toEqual([[3]]);
     expect(requests.map((request) => new URL(request.url).searchParams.get("afterSeq"))).toEqual(["2"]);
+    expect(requests.map((request) => new URL(request.url).searchParams.get("throughSeq"))).toEqual(["3"]);
     await expect((async () => { for await (const _ of exported.readTrajectory(-1)) { /* never reached */ } })())
       .rejects.toMatchObject({ name: "SpHarnessError", retryable: false });
     expect(requests.every((request) => request.headers.get("X-Eval-Service-Token") === "secret")).toBe(true);
     expect(requests.every((request) => new URL(request.url).pathname.startsWith(CHAT_PATH))).toBe(true);
+    // A new native export freezes the first page when it is read; only a
+    // saved progress pin is announced before the next pass starts.
+    expect(exported.trajectoryFormat).toBe(SP_PI_TRAJECTORY_FORMAT);
+    expect(exported).not.toHaveProperty("trajectoryCursor");
+    expect(requests.map((request) => new URL(request.url).searchParams.get("throughSeq"))).toEqual(["3"]);
+  });
+
+  describe("pinned evidence trajectory", () => {
+    const TRAJECTORY_PATH = `${CHAT_PATH}/evidence/trajectory`;
+    const entry = (ingestSeq: number) => nativeFixture(ingestSeq, SUBJECT_CHAT, RESOURCE_SUBMISSION_ID);
+    /** Public native pages pin `throughSeq: 3` and echo an explicitly saved cutoff. */
+    const pinningSp = (overrides: (url: URL) => Record<string, unknown> = () => ({})) => spFetch((request) => {
+      const url = new URL(request.url);
+      if (url.pathname.endsWith("/evidence/artifacts")) return Response.json({ artifacts: [] });
+      if (url.pathname !== TRAJECTORY_PATH) throw new Error(`Unexpected ${request.method} ${url}`);
+      const afterSeq = Number(url.searchParams.get("afterSeq"));
+      const throughSeq = Number(url.searchParams.get("throughSeq") ?? 3);
+      const records = [1, 2, 3].filter((seq) => seq > afterSeq && seq <= throughSeq).slice(0, 2).map(entry);
+      const last = records.at(-1)?.ingestSeq;
+      return Response.json({
+        records, nextAfterSeq: last === undefined || last === throughSeq ? null : last,
+        format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq }, ...overrides(url),
+      });
+    });
+    const trajectoryQueries = (requests: readonly Request[]) => requests
+      .map((request) => new URL(request.url)).filter((url) => url.pathname === TRAJECTORY_PATH)
+      .map((url) => Object.fromEntries(url.searchParams));
+    const readAll = async (exported: ExportedEvidence, afterSeq = 0, throughSeq?: number) => {
+      const seqs: number[] = [];
+      for await (const page of exported.readTrajectory(afterSeq, throughSeq)) {
+        seqs.push(...page.records.map((record) => record.seq));
+      }
+      return seqs;
+    };
+    const exportInput = { handle: subject, submissionId: RESOURCE_SUBMISSION_ID, limits: DEFAULT_EVIDENCE_LIMITS };
+
+    it("pins the first native page on demand and sends its cutoff with later pages", async () => {
+      const { fetch, requests } = pinningSp();
+      const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+      const exported = await harness.exportEvidence(exportInput);
+      expect(exported.trajectoryCursor).toBeUndefined();
+      expect(exported.trajectoryFormat).toBe(SP_PI_TRAJECTORY_FORMAT);
+      expect(trajectoryQueries(requests)).toEqual([]);
+
+      await expect(readAll(exported)).resolves.toEqual([1, 2, 3]);
+      expect(trajectoryQueries(requests)).toEqual([
+        { afterSeq: "0", limit: "200", submissionId: RESOURCE_SUBMISSION_ID },
+        { afterSeq: "2", limit: "200", submissionId: RESOURCE_SUBMISSION_ID, throughSeq: "3" },
+      ]);
+      requests.length = 0;
+      await expect(readAll(exported, 0, 3)).resolves.toEqual([1, 2, 3]);
+      expect(trajectoryQueries(requests).map((query) => query.throughSeq)).toEqual(["3", "3"]);
+    });
+
+    it("rejects a first page in the old event format instead of relabelling it as native", async () => {
+      const { fetch } = pinningSp(() => ({ format: "sp-trajectory/v2" }));
+      const exported = await createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch }).exportEvidence(exportInput);
+      expect(exported.trajectoryFormat).toBe(SP_PI_TRAJECTORY_FORMAT);
+      await expect(readAll(exported)).rejects.toMatchObject({ retryable: false,
+        message: "Eval SP returned an invalid evidence trajectory page" });
+    });
+
+    it.each([
+      { name: "a different cursor", change: { cursor: { throughSeq: 4 } } },
+      { name: "no cursor", change: { cursor: undefined } },
+      { name: "a different format", change: { format: "pi-trajectory/v1" } },
+      { name: "no format", change: { format: undefined } },
+    ])("rejects a later page with $name", async ({ change }) => {
+      const { fetch } = pinningSp((url) => url.searchParams.has("throughSeq") ? change : {});
+      const exported = await createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch }).exportEvidence(exportInput);
+      await expect(readAll(exported)).rejects.toMatchObject({ name: "SpHarnessError", retryable: false });
+    });
+
+    it.each([
+      { name: "a record beyond the cutoff", page: {
+        format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: 3 }, records: [entry(1), entry(4)], nextAfterSeq: null,
+      } },
+      { name: "a next cursor beyond the cutoff", page: {
+        format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: 3 }, records: [entry(3)], nextAfterSeq: 4,
+      } },
+      { name: "a negative cutoff", page: {
+        format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: -1 }, records: [], nextAfterSeq: null,
+      } },
+      { name: "an empty format", page: {
+        format: "", cursor: { throughSeq: 3 }, records: [], nextAfterSeq: null,
+      } },
+    ])("rejects a page with $name", async ({ page }) => {
+      const { fetch } = queuedFetch(Response.json({ artifacts: [] }), Response.json(page));
+      const exported = await createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch }).exportEvidence(exportInput);
+      await expect(readAll(exported)).rejects.toMatchObject({
+        name: "SpHarnessError", retryable: false, message: "Eval SP returned an invalid evidence trajectory page",
+      });
+    });
+
+    it("resumes with the saved pin without pinning again", async () => {
+      const { fetch, requests } = pinningSp();
+      const exported = await createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
+        .exportEvidence({ ...exportInput, trajectory: { format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: 2 } } });
+      expect(exported.trajectoryCursor).toEqual({ throughSeq: 2 });
+      expect(trajectoryQueries(requests)).toEqual([]);
+      await expect(readAll(exported, 1)).resolves.toEqual([2]);
+      expect(trajectoryQueries(requests)).toEqual([{ afterSeq: "1", limit: "200", submissionId: RESOURCE_SUBMISSION_ID, throughSeq: "2" }]);
+    });
+
+    it("rejects an old event-only or missing-format progress pin before contacting SP", async () => {
+      const { fetch, requests } = pinningSp();
+      const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
+      for (const trajectory of [{}, { format: "sp-trajectory/v1" }]) {
+        await expect(harness.exportEvidence({ ...exportInput, trajectory })).rejects.toMatchObject({
+          name: "SpHarnessError", retryable: false, message: expect.stringContaining("non-native"),
+        });
+      }
+      expect(requests).toHaveLength(0);
+    });
   });
 
   it("imports every evidence file into the Evaluator's own Space, manifest last", async () => {
@@ -655,9 +763,10 @@ describe("Eval SP Harness", () => {
       ref: { evidenceId: `sha256:${"a".repeat(64)}`, manifestSha256: sha('{"manifest":true}'), exportedAt: "2026-10-15T00:00:00.000Z" },
       manifestBytes,
       manifest: {
+        schemaVersion: EVIDENCE_SCHEMA_VERSION,
         artifacts: [{ path: "/site/index.html", size: 11, mediaType: "text/html", sha256: sha("<h1>Hi</h1>") }],
         subjectInputs: [],
-        trajectory: { parts: [{ sha256: sha("{}\n"), size: 3, events: 1 }] },
+        trajectory: { format: SP_PI_TRAJECTORY_FORMAT, complete: true, parts: [{ sha256: sha("{}\n"), size: 3, records: 1 }] },
       },
       readBlob: async (hash: string) => new Response(content[hash]).body!,
     } as unknown as EvidenceBundleReader;
@@ -691,7 +800,8 @@ describe("Eval SP Harness", () => {
     const evidence = {
       ref: { evidenceId: `sha256:${"a".repeat(64)}`, manifestSha256: "b".repeat(64), exportedAt: "x" },
       manifestBytes: new TextEncoder().encode("manifest"),
-      manifest: { artifacts: [], subjectInputs: [], trajectory: { parts: [] } },
+      manifest: { schemaVersion: EVIDENCE_SCHEMA_VERSION, artifacts: [], subjectInputs: [],
+        trajectory: { format: SP_PI_TRAJECTORY_FORMAT, complete: true, parts: [] } },
       readBlob: async () => new Response("").body!,
     } as unknown as EvidenceBundleReader;
     Object.assign(evidence.ref, { manifestSha256: createHash("sha256").update(evidence.manifestBytes).digest("hex") });
@@ -732,7 +842,8 @@ describe("Eval SP Harness large transfers and readiness", () => {
     });
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
     const result = harness[method]({
-      handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1", signal: stop.signal,
+      handle: subject, idempotencyKey: "execution:sampling-1",
+      submissionId: method === "collectAgentResources" ? RESOURCE_SUBMISSION_ID : "submission-1", signal: stop.signal,
     }).catch((error: unknown) => error);
     try {
       await reading;
@@ -749,7 +860,7 @@ describe("Eval SP Harness large transfers and readiness", () => {
   });
 
   it.each(["collectAgentResources", "inspectAgentResources"] as const)("does not start %s with an already aborted signal", async (method) => {
-    const fetch = vi.fn(async () => Response.json(resources));
+    const fetch = vi.fn(async () => Response.json({ scope }));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
     const error = await harness[method]({
       handle: subject, idempotencyKey: "execution:sampling-1", signal: AbortSignal.abort(),
@@ -758,34 +869,10 @@ describe("Eval SP Harness large transfers and readiness", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("passes SP's resource readiness through and reports the read without payload contents", async () => {
-    const events: Record<string, unknown>[] = [];
-    const { fetch } = queuedFetch(Response.json(resources));
-    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "service-secret", fetch,
-      log: (event) => events.push(event) });
-    expect(await harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
-      .toEqual(resources);
-    expect(events).toEqual([expect.objectContaining({
-      name: "resources_read", status: 200, finalized: true, submissionId: "submission-1", readiness, telemetryEvents: 1,
-    })]);
-    expect(JSON.stringify(events)).not.toContain("service-secret");
-    expect(JSON.stringify(events)).not.toContain("event-1");
-  });
-
-  it.each([
-    ["an invalid", { ...resources, readiness: { ...readiness, pendingTelemetryEvents: -1 } }],
-    ["a missing", (({ readiness: _readiness, ...rest }) => rest)(resources)],
-  ])("rejects %s readiness summary instead of persisting the snapshot", async (_case, body) => {
-    const { fetch } = queuedFetch(Response.json(body));
-    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
-    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
-      .rejects.toMatchObject({ retryable: false, message: "Eval SP returned an invalid resource snapshot" });
-  });
-
   it("inspects resource readiness on its own route with the control timeout, without events", async () => {
     const report = { scope, observedAt: "2026-10-14T00:00:00.000Z", finalized: false, readiness };
     const events: Record<string, unknown>[] = [];
-    const { fetch, requests } = queuedFetch(Response.json({ ...report, telemetryEvents: [{ eventId: "event-1" }] }), Response.json(report));
+    const { fetch, requests } = queuedFetch(Response.json(report), Response.json(report));
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, log: (event) => events.push(event) });
     const input = { handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" };
     expect(await harness.inspectAgentResources(input)).toEqual(report);
@@ -807,37 +894,14 @@ describe("Eval SP Harness large transfers and readiness", () => {
   });
 
   it.each([
-    { ...resources, readiness: { ...readiness, actionCharges: { complete: true } } },
+    { scope, observedAt: "2026-10-14T00:00:00.000Z", finalized: false,
+      readiness: { ...readiness, actionCharges: { complete: true } } },
     { scope, observedAt: "2026-10-14T00:00:00.000Z", finalized: false },
     { scope: { ...scope, submissionId: "" }, observedAt: "x", finalized: true, readiness },
   ])("rejects a readiness report outside SP's contract", async (body) => {
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch: queuedFetch(Response.json(body)).fetch });
     await expect(harness.inspectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
       .rejects.toMatchObject({ retryable: false, message: "Eval SP returned an invalid resource readiness" });
-  });
-
-  it("fails an oversized resource snapshot explicitly and permanently", async () => {
-    const { fetch } = queuedFetch(Response.json({ ...resources, telemetryEvents: [{ payload: "x".repeat(2_048) }] }));
-    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch, maxResponseBytes: 1_024 });
-    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
-      .rejects.toMatchObject({
-        name: "SpHarnessError", retryable: false,
-        message: "Eval SP resource snapshot exceeded the 1024-byte response limit",
-      });
-  });
-
-  it("retries a resource snapshot whose stream was cut off mid-body", async () => {
-    const full = new TextEncoder().encode(JSON.stringify(resources));
-    const cut = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(full.slice(0, full.length / 2));
-        controller.error(new TypeError("terminated"));
-      },
-    });
-    const { fetch } = queuedFetch(new Response(cut, { headers: { "Content-Type": "application/json" } }));
-    const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
-    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
-      .rejects.toMatchObject({ name: "SpHarnessError", retryable: true });
   });
 
   it("uses the large-transfer timeout for resources and evidence, and the short timeout elsewhere", async () => {
@@ -856,7 +920,8 @@ describe("Eval SP Harness large transfers and readiness", () => {
       .rejects.toMatchObject({ retryable: true });
     expect(Date.now() - readinessStarted).toBeLessThan(55);
     const resourceStarted = Date.now();
-    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1", submissionId: "submission-1" }))
+    await expect(harness.collectAgentResources({ handle: subject, idempotencyKey: "execution:sampling-1",
+      submissionId: RESOURCE_SUBMISSION_ID }))
       .rejects.toMatchObject({ retryable: true });
     expect(Date.now() - resourceStarted).toBeGreaterThanOrEqual(55);
   });
@@ -872,6 +937,12 @@ describe("Eval SP Harness large transfers and readiness", () => {
     await expect(harness.exportEvidence({ handle: subject, submissionId: "submission-1", limits: DEFAULT_EVIDENCE_LIMITS })).rejects.toMatchObject({
       name: "SpHarnessError", retryable: true, status: 409, retryAfterMs: 3_000,
     });
+    const paged = await createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
+      fetch: queuedFetch(Response.json({ artifacts: [] }), notReady()).fetch })
+      .exportEvidence({ handle: subject, submissionId: "submission-1", limits: DEFAULT_EVIDENCE_LIMITS });
+    await expect((async () => {
+      for await (const _ of paged.readTrajectory(0)) { /* page never becomes an export */ }
+    })()).rejects.toMatchObject({ name: "SpHarnessError", retryable: true, status: 409 });
     const exported = (await createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret",
       fetch: queuedFetch(Response.json({ artifacts: [] })).fetch }).exportEvidence({ handle: subject, submissionId: "submission-1", limits: DEFAULT_EVIDENCE_LIMITS }));
     expect(exported.artifacts).toEqual([]);
@@ -891,7 +962,8 @@ describe("Eval SP Harness large transfers and readiness", () => {
     const evidence = {
       ref: { evidenceId: `sha256:${"a".repeat(64)}`, manifestSha256: "", exportedAt: "x" },
       manifestBytes: new TextEncoder().encode("manifest"),
-      manifest: { artifacts: [], subjectInputs: [], trajectory: { parts: [] } },
+      manifest: { schemaVersion: EVIDENCE_SCHEMA_VERSION, artifacts: [], subjectInputs: [],
+        trajectory: { format: SP_PI_TRAJECTORY_FORMAT, complete: true, parts: [] } },
       readBlob: async () => new Response("").body!,
     } as unknown as EvidenceBundleReader;
     Object.assign(evidence.ref, { manifestSha256: createHash("sha256").update(evidence.manifestBytes).digest("hex") });
@@ -918,9 +990,10 @@ describe("Eval SP Harness large transfers and readiness", () => {
       ref: { evidenceId: `sha256:${"a".repeat(64)}`, manifestSha256: sha("{}"), exportedAt: "x" },
       manifestBytes,
       manifest: {
+        schemaVersion: EVIDENCE_SCHEMA_VERSION,
         artifacts: [{ path: "/a.txt", size: 5, mediaType: "text/plain", sha256: sha("hello") }],
         subjectInputs: [],
-        trajectory: { parts: [] },
+        trajectory: { format: SP_PI_TRAJECTORY_FORMAT, complete: true, parts: [] },
       },
       readBlob: async () => new Response(stored).body!,
     }) as unknown as EvidenceBundleReader;
@@ -965,9 +1038,11 @@ describe("Eval SP Harness large transfers and readiness", () => {
       ref: { evidenceId: `sha256:${"a".repeat(64)}`, manifestSha256: "b".repeat(64), exportedAt: "x" },
       manifestBytes: new TextEncoder().encode("{}"),
       manifest: {
+        schemaVersion: EVIDENCE_SCHEMA_VERSION,
         artifacts: [{ path: "/a.txt", size: 5, mediaType: "text/plain", sha256: "c".repeat(64) }],
         subjectInputs: [],
-        trajectory: { parts: [{ sha256: "d".repeat(64), size: 1, events: 1 }, { sha256: "e".repeat(64), size: EVAL_EVIDENCE_FILE_MAX_BYTES + 1, events: 1 }] },
+        trajectory: { format: SP_PI_TRAJECTORY_FORMAT, complete: true,
+          parts: [{ sha256: "d".repeat(64), size: 1, records: 1 }, { sha256: "e".repeat(64), size: EVAL_EVIDENCE_FILE_MAX_BYTES + 1, records: 1 }] },
       },
       readBlob: async () => new Response("").body!,
     } as unknown as EvidenceBundleReader;

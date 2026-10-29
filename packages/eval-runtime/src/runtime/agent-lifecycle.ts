@@ -1,7 +1,7 @@
 import type {
   AgentRole,
   AgentResourceScope,
-  AgentResourceSnapshot,
+  CollectedResourceSnapshot,
   AgentResourceState,
   AgentStatus,
   EvidenceLimits,
@@ -133,7 +133,7 @@ export interface AgentLifecycleOptions<TAttempt extends AgentAttemptRecord, TOut
   }) => TAttempt;
   readonly appendAttempt: (attempt: TAttempt) => Promise<void>;
   /** Saves the patch; a raw resource snapshot is stored in the same write, outside the stage record. */
-  readonly updateAttempt: (attempt: TAttempt, patch: AttemptPatch, snapshot?: AgentResourceSnapshot) => Promise<TAttempt>;
+  readonly updateAttempt: (attempt: TAttempt, patch: AttemptPatch, snapshot?: CollectedResourceSnapshot) => Promise<TAttempt>;
   readonly setSamplingStatus: (status: SamplingStatus, lastError?: string) => Promise<void>;
   readonly prepare: (handle: AgentHandle) => Promise<void>;
   readonly collectOutput: (handle: AgentHandle) => Promise<TOutput>;

@@ -1,10 +1,11 @@
 import type { RouteConfig, RouteHandler } from "@hono/zod-openapi";
 import type { DatasetService } from "@eval-platform/eval-dataset";
-import type { Metrics } from "@eval-platform/eval-metrics";
+import type { Metrics, ProjectComparison } from "@eval-platform/eval-metrics";
 import type { EvalRunAdmission, EvalRunQueries } from "@eval-platform/eval-runtime";
 import type { Env as PinoEnv } from "hono-pino";
 import type { AgentConfigService } from "../agent-configs.js";
 import type { AgentImportService, AgentImportTaskReader } from "../agent-imports/service.js";
+import type { DashboardService } from "../dashboards/service.js";
 import type { createPostgresResourceSnapshotReader } from "../db/attempt-resources.js";
 import type { createPostgresObservationReader } from "../db/observation.js";
 import type { createOutputSchemaCatalog } from "../db/output-schemas.js";
@@ -39,6 +40,8 @@ export interface OwnerServices {
   readonly observations: ReturnType<typeof createPostgresObservationReader>;
   readonly resourceSnapshots: ReturnType<typeof createPostgresResourceSnapshotReader>;
   readonly metrics: Metrics;
+  readonly comparison: ProjectComparison;
+  readonly dashboards: DashboardService;
   readonly materialBundles: BundleCatalogs["materialBundles"];
   readonly sessionBundles: BundleCatalogs["sessionBundles"];
   readonly outputSchemas: ReturnType<typeof createOutputSchemaCatalog>;

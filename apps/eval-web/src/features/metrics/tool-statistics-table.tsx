@@ -1,5 +1,6 @@
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@springbrand/site-block";
 import type { ResourceStatistics } from "@/api-sdk/types";
+import { TablePagination, useTablePagination } from "@/components/ui/pagination";
 import { formatDuration, formatMetricBytes } from "@/lib/format";
 import { MetricValue } from "./metric-value";
 
@@ -23,6 +24,7 @@ export function ToolStatisticsTable({
   emptyLabel?: string;
 }) {
   const overview = variant === "overview";
+  const pagination = useTablePagination(tools, label);
   return <div className="overflow-hidden rounded-lg border border-border">
     <div className="overflow-x-auto">
       <Table aria-label={label} className={overview ? "min-w-[760px] text-[13px]" : "text-[13px]"}>
@@ -33,7 +35,7 @@ export function ToolStatisticsTable({
             : ["工具", "调用次数", "成功", "失败", "取消", "进行中", "未知"]
           ).map((name, index) => <TableHead key={name} className={index === 0 ? "px-3 text-xs" : "text-right text-xs"}>{name}</TableHead>)}
         </TableRow></TableHeader>
-        <TableBody>{tools.length === 0 ? <TableRow><TableCell colSpan={7} className="px-3 py-5 text-center text-text-muted">{emptyLabel}</TableCell></TableRow> : tools.map((tool, index) => overview ? <TableRow key={`${tool.toolName ?? "unknown"}-${index}`}>
+        <TableBody>{tools.length === 0 ? <TableRow><TableCell colSpan={7} className="px-3 py-5 text-center text-text-muted">{emptyLabel}</TableCell></TableRow> : pagination.items.map((tool, index) => overview ? <TableRow key={`${tool.toolName ?? "unknown"}-${index}`}>
           <TableHead scope="row" className="px-3 font-medium text-text-strong">{toolName(tool)}</TableHead>
           <TableCell className="text-right font-semibold tabular-nums"><MetricValue metric={tool.count} /></TableCell>
           <TableCell className="text-right tabular-nums">{tool.completed}</TableCell>
@@ -52,5 +54,6 @@ export function ToolStatisticsTable({
         </TableRow>)}</TableBody>
       </Table>
     </div>
+    <TablePagination {...pagination} label={`${label}分页`} />
   </div>;
 }

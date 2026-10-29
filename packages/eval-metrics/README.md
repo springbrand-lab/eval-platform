@@ -1,5 +1,38 @@
 # @eval-platform/eval-metrics
 
+## Pi-native cutover (new resource snapshots)
+
+The SP `nativeRecords` stream has `{ingestSeq,record}` where the public UA
+`TrajectoryRecord` is `pi-trajectory/v1`, carries
+`resource:{agentId,sessionId}`, `submissionId`, an explicit safe projection
+policy and a native `record:{type:"conversation"|"entry",value}`. A model-free
+Entry with `value.kind:"springbrand.trajectory"` has **bookkeeping** in
+`value.data`; the *public* `@springbrand/agent-runtime/trajectory` helper
+`readTrajectoryBookkeeping(value)` validates it as an event
+(`generation.finished`, `tool.started`, `turn.finished`, …), request or hook.
+The checked-in fixture is generated and checked with that helper. Production
+extracts only bounded structural facts pending an offline-installable public
+dependency; it rejects unrecognized records rather than claiming zero. Pi
+assistant/Tool Result messages live in `record.value.model?.[0]` and link
+to the real event's refs, task and Tool Call identities. There is no top-level `record.kind`, no
+`turn_start` event and no `projection.contentComplete`. No input/output
+is reconstructed from a bookkeeping event whose Pi-owned body was omitted.
+Missing or ambiguous linkage stays partial/unavailable, not zero.
+`compactResourceSnapshot` hashes each historical raw native record and keeps
+body-free versioned metric facts. `compactNativeTrajectoryRecord` also accepts
+a checksum already verified over the *source bytes*, so the streaming
+record consumer saves only compact identity/facts, not a second copy
+of a large Pi body. The Eval API collects bounded resource headers and native/API
+billing pages validated by the installed npm `@springbrand/eval-harness@0.1.0-alpha.7`
+schemas, storing compact facts without a whole JS snapshot. That published
+package lacks the post-wait partial request/byte contract; deployed SP
+compatibility and isolated DB verification remain release blockers.
+Withheld Tool lengths stay unknown, never zero; total
+usage and charges still come **only** from `usageEvents` and `billingSettlements`.
+Old event-only snapshots are not native. SP must publish a public partial
+contract and pass [parity checks](../../docs/pi-native-eval-cutover.md)
+before an integrated result is claimed.
+
 Project 当前结果的只读统计与四层展示。只读取应用注入的一致事实快照，不运行 Agent，不读 SP 私有存储，不保存第二份状态。
 
 ```text
@@ -20,7 +53,9 @@ src/
 │   ├── resource-facts.ts     # 诊断、数值校验与按来源身份去重
 │   ├── resource-usage.ts     # Token/Provider USD 与 Subagent 覆盖
 │   ├── resource-billing.ts   # 模型与 Action 结算
-│   ├── resource-telemetry.ts # 模型请求、Turn、工具、长度、思考步骤与内容步骤
+│   ├── native-record-facts.ts # safe Pi event/request/hook/message/result 的聚焦事实适配
+│   ├── compact-resources.ts  # 无正文、逐条哈希的 native Metrics 投影
+│   ├── resource-telemetry.ts # 从 native facts 合并模型请求、Turn、工具与步骤
 │   ├── output-fields.ts      # JSON Schema 输出字段汇总
 │   ├── statistics.ts         # NumericSummary 与唯一的 coverage 规则
 │   └── index.ts              # 单层汇总
@@ -44,21 +79,31 @@ await metrics.getSamplingDetail({ ...scope, samplingId });
 
 Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sampling 下。层级只来自 `facts.plan.datasets` 与 `facts.projectSamples`（Project 创建时的快照），不读实时目录。未运行的 ProjectSample 照常出现，数值为 null/unavailable。共享 ProjectSample 在每个 Dataset 行中出现，Project 汇总按 Sampling/Evaluation 身份去重。每层都从底层原始记录重算，不平均子层结果。默认读取当前结果全集；`runIds` 只过滤 Sampling/Evaluation，不改变固定绑定。
 
+## 已评分交集对比
+
+`createProjectComparison({ source })` 提供唯一的 `getComparison({ projectIds, datasetId?, jsonPointer?, excludedDataIds? })` Interface；比较无基线，各侧平等。`excludedDataIds` 在共同已评交集形成后、所有字段数量、数据集分组及原始事实聚合前排除 Data；它不是前端隐藏行，也不删除源数据。全部排除仍保留可恢复的共同字段定义，汇总为真实空范围；清空排除列表恢复当前有效交集。`ProjectComparisonSource.read(projectIds)` 必须在同一 owner 的同一一致性快照中提供各 Project 的完整 `MetricsFacts`，Module 复用原有事实校验、Schema 解释与原始记录聚合，不读取 SP 或实时目录，不保存另一份指标状态。
+
+不同 Schema 按共同 JSON Pointer 与兼容统计类型合并（number/integer 同属数值；枚举分类值域须一致，忽略声明顺序，不拼接部分重叠的值域），不要求整份 Schema 相同。共同字段还必须在共同 Data 上实际有有效非空观察；只有成功且 Schema 有效的评估贡献评分，0、false 是有效值，null、未评分、失败、无效输出不进入默认比较。指标切换明确选择一个共同词条：该词条在每个 Project 都有有效评分的 `dataId` 交集决定可比较数据，避免不同词条的有效覆盖范围被混算。没有指定词条时选首个有共同评分的词条；指定词条失去可比较结果时展示空范围，不暗中切换统计口径。
+
+`ProjectComparisonView.fields` 提供全范围可比较词条及各自共同已评数据数量；`selectedField` 指向当前词条。`datasets` 按各 Project 冻结的数据集归属分组当前词条的共同数据，同一个 Data 可出现在多个分组，但全局只算一次；不因数据集 ID 不同而丢失已对齐 Data。`datasetId` 仅缩小当前数据集范围，未知或已失效的数据集返回空范围，不回退成全范围。`summary` 从该范围全部有效底层记录重算，`rows` 各自提供该 Data 的权威聚合、有效 Sampling 身份、对称差异幅度和快照内容差异提示。单条数据选择使用对应 row 的已有投影，不在 Web 重新聚合；分页和定位搜索不改变范围汇总。
+
+资源只统计当前有效评分所关联的去重 Sampling，保留其全部 Attempt 消耗；返回执行 Agent 的实际积分、单 Agent 积分分布、Agent 耗时分布、缓存率和工具成功率，不混入评估 Agent 消耗。数值差异幅度是项目间均值的最大值减最小值，不隐含基线或“高分更好”；分类/布尔仅标分布是否不同。不进行统计显著性或自动胜负断言。返回复用现有 NumericSummary、OutputFieldSummary、MetricNumber，只投影比较所需资源，完整结果和产物仍走既有采样明细 Interface。
+
 每层 `MetricSummary` 包含：固定绑定数（datasets/data/projectSamples）、当前 samplings/evaluations、执行与评估阶段（状态分布、成功率、Attempt/重启、Agent 时长与 Attempt 时长）、`executionAgent` 与 `evaluationAgents` 分开的资源统计，以及 `evaluationOutputs`。`getSamplingDetail` 额外返回 Subject 与每个 Evaluator 的 `AgentMetricView`，以及每条评估的 `EvaluationOutputView`（原始文本、解析后的 JSON、校验结果、字段观察、产物、证据与轨迹引用）。
 
 ## 资源与轨迹
 
 所有数值观察共用 `NumericSummary`，返回有效 `count`、`missing`、total、mean、总体 variance、min、max、median。均值与方差仅以有值的 N 为分母；缺失不补零，真实零参与。N=0 时各统计为 null，N=1 时方差为 0。方差单位是原数值单位的平方。
 
-每层的 `executionAgent` / `evaluationAgents` 是 `AggregatedResourceStatistics`，在全范围原始事件去重后的累计资源上提供缓存命中率，并含 `distribution`：从各 Subject / Evaluator 的原始 Attempts 经同一资源解释器形成单 Agent 观察，再统计 Token（含缓存）、积分/成本、轮数、模型/工具次数及结果、思考步骤、内容步骤与两类对应的 Token、各工具和模型的分布。缓存命中率由 `cacheRead / (input + cacheRead)` 在 Metrics 内计算，并保留输入与缓存读取两者中较弱的 coverage；分母为零时为 null。思考步骤和内容步骤都以唯一 `generation` operation 作为一个模型 Step；一个 Turn 可以包含多个 Step，一个 Step 也可以同时命中两类，因此两类数量、状态和耗时可以重叠，不能相加推算处理轮。分组归属与数值完整性分别判断：完整事实证明未调用某类型时才产生真实零，其他类型的数值缺失不影响这个零；存在可能归入该类型的未知模型或工具名时，不能证明缺席，记为缺失，已知部分也不能标为 complete。分组与补零都由原始资源解释器处理，展示层不从累计数值猜测归属。工具长度和调用耗时仍按单次调用统计，Agent 时长按单 Agent，Schema 数值按字段观察值。绝不平均 Dataset/Sample 的下层汇总。
+每层的 `executionAgent` / `evaluationAgents` 是 `AggregatedResourceStatistics`，在全范围来源身份去重后的累计资源上提供缓存命中率，并含 `distribution`：从各 Subject / Evaluator 的原始 Attempts 经同一资源解释器形成单 Agent 观察，再统计 Token（含缓存）、积分/成本、轮数、模型/工具次数及结果、思考步骤、内容步骤与两类对应的 Token、各工具和模型的分布。缓存命中率由 `cacheRead / (input + cacheRead)` 在 Metrics 内计算，并保留输入与缓存读取两者中较弱的 coverage；分母为零时为 null。`trajectory.toolSuccessRate` 是已结束 native Tool 调用的成功数除以成功、失败、取消之和，排除未闭合与未知状态，保留工具调用数的来源 coverage；没有已结束调用时为 null，不当成 0%。思考与内容步骤都以唯一 native `generation` operationId 作为一个模型 Step；`request.taskId`/Pi `byTaskId` 与 `generation.finished.refs.assistantTimestamp` 用于关联同一 Step，不以请求条数代替执行事件。一个 Turn 可以包含多个 Step，一个 Step 可命中两类，数量、状态和耗时允许重叠。完整来源事实证明未调用某类型时才产生真实零；未知工具名或缺失/脱敏的 Pi 消息不能证明缺席，记为 missing/partial。工具长度和调用耗时按单次调用统计，Agent 时长按单 Agent，Schema 数值按字段观察值。绝不平均 Dataset/Sample 的下层汇总。
 
-原始 `AgentResourceSnapshot` 是费用和 Token 的唯一来源：模型账单按 `accountId + eventId`、Action 按 `executionId`、遥测按 `sessionId + eventId` 去重；不重算价格，不把 reasoning 再加进 total；失败、取消、重启 Attempt 的消耗照常计入。已提交但没有收集记录的 Attempt 记为 `uncollected` 并使结果不完整；从未提交的 Attempt 不制造缺失。缺失值为 null 并带 coverage（complete/partial/unavailable）与 diagnostics，只有完整空流才证明 0。
+原始 `AgentResourceSnapshot.usageEvents` 与 `.billingSettlements` 是总费用和 Token 的独立权威来源：模型账单按 `accountId + eventId`、Action 按 `executionId` 去重；Pi 消息 usage 只用于该 Step 的思考/内容分类 Token，不加到总费用/Token，不重新计价或把 reasoning 再加进 total。Native 记录按所属用户、Chat 和 `ingestSeq` 去重；失败、取消、重启 Attempt 的真实消耗照常计入。已提交但没有收集记录的 Attempt 记为 `uncollected` 并使结果不完整；从未提交的 Attempt 不制造缺失。缺失值为 null 并带 coverage（complete/partial/unavailable）与 diagnostics，只有完整空流才证明 0。
 
-轨迹指标来自每个 Attempt 已保存的 SP Telemetry 事件，跨 Attempt/分页合并后按 `sessionId + operationId` 归并操作：
+轨迹指标来自每个 Attempt 已保存的 safe Pi `nativeRecords`，跨 Attempt/分页按 Chat、来源序号和原生 Turn/Tool/generation operation ID 合并：
 
-- Turn 数及 completed/failed/cancelled/inProgress/unknown；`inProgress` 只表示该操作所属的 Attempt 仍处于活跃状态。Attempt 已进入终态但遥测缺少对应终端事件时，操作归为 `unknown`；这类遥测缺口不改变执行或评估阶段本身的终态。
-- 按 `toolName` 的调用数、结果、耗时，输入长度（`tool.started` 的 `payload.input`）与返回长度（`tool.finished` 的 `payload.output`，缺失时用 `response`，不相加），均为规范 JSON 的 UTF-8 字节数；缺失或被 SP 脱敏（`[CONTENT OMITTED]`/`[REDACTED]`）记为 missing；
-- 思考步骤：每个 `generation` operation 是一个模型 Step；该 Step 自身或所属 Turn 的输出中出现 `thinking`、`signature` 或 `*Signature` 标记即命中。内容步骤：同一模型 Step 自身或所属 Turn 的输出中出现 `content` 标记即命中。一个 Turn 可以包含多个 Step，一个 Step 可以同时属于两类；工具调用仍按独立的 `tool` operation 统计。思考步骤 Token 和内容步骤 Token 分别汇总命中 Step 的 `generation.finished` input/output/total；同一 Step 同时命中两类时两边都会保留。没有父 Turn 但 Step 自身带有 marker 时仍按 Step 统计并保留未关联诊断，但 coverage 为 partial；既没有父 Turn 也没有自身 marker 时，相关分类为 partial/unavailable，不用减法推算。
+- Turn 数及 completed/failed/cancelled/inProgress/unknown；`inProgress` 只表示该操作所属的 Attempt 仍处于活跃状态。Attempt 已进入终态但缺少终结事实时是 `unknown`；来源缺口不改变执行或评估阶段的终态。
+- 按 `toolCallId` 配对 native Tool 开始/结果，按 `toolName` 汇总调用、结果、耗时；输入长度来自 safe Tool 参数，返回长度来自 safe Pi Tool 结果内容，均为规范 JSON UTF-8 字节数。缺失或被脱敏（`[CONTENT OMITTED]`/`[REDACTED]`）为 missing，不从费用或响应估计。
+- 以 native `generation` operationId 计模型 Step；Pi assistant 的 `thinking`/`*Signature` 块命中思考、`text` 块命中内容，类别可重叠，Step 的 Token 仅来自该 Pi 消息或安全的 `generation.finished` 事件。不重建生成输入，不从 Turn 总数或总 Token 做减法；缺少关联 Turn/可判定消息内容时为 partial/unavailable。
 
 
 ## JSON Schema 输出字段
@@ -102,7 +147,7 @@ Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`�
 
 查询范围外的 Project/Run/Dataset/ProjectSample/Sampling 抛 `MetricsEntityNotFoundError`（entity 为 `project | run | dataset | project-sample | sampling`），非法查询抛 `MetricsQueryError`，来源事实不一致（重复身份、越界 Sampling、缺失绑定 ProjectSample、绑定与计划不符、Schema 与评估计划不符等）抛 `MetricsSourceError`。
 
-不实现实验对比、归因、查询缓存、指标持久化或 API/Web/CLI；本包只有包根入口。
+不实现归因、查询缓存、指标持久化或 API/Web/CLI；对比只读当前保留结果，不提供历史 Run 快照；本包只有包根入口。
 
 `createEvaluationScoreReader()` 为可选 Langfuse 集成提供只读派生接口：复用同一个 Schema presentation plan、严格 JSON 解析和安全数值校验，只从成功且校验通过的原始输出读取顶层 numeric score 与可选字符串 reason。每个 Schema 独立编译，复用 `$id` 不冲突；不保存另一份解析结果到 Runtime。
 
@@ -111,4 +156,4 @@ Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`�
 
 ## Compact resource facts
 
-`compactResourceSnapshot` derives a raw snapshot's telemetry metric facts without event bodies. It keeps canonical SHA-256 fingerprints for source conflicts, canonical input/output lengths (including omitted-body and output/response fallback semantics), and versioned thinking/content marker flags. A sanitized projection cannot prove marker absence, so the interpreter reports partial/unavailable coverage. The existing interpreter consumes these facts with the same operation merging, completeness, distributions and exact medians as raw snapshots. The API stores the projection beside each raw snapshot and attaches it to `MetricsFacts` records (`MetricsSampling`/`MetricsEvaluation`); this package performs no storage or background work. Sampling detail returns the stored records without the attached snapshots. Original snapshots and evidence are never replaced by the projection.
+`compactResourceSnapshot` derives body-free facts and a canonical SHA-256 fingerprint for historical raw native records; `compactNativeTrajectoryRecord` instead accepts a verified raw-byte checksum for a streamed record. Both retain native operation identity, status/time/Step Token fields, safe Tool input/output lengths when known and versioned Pi thinking/content marker flags. Missing or withheld data cannot prove absence or a zero length. The same interpreter consumes raw and compact facts, retaining exact medians, conflicts and source coverage. The API stores compact native facts in both the new Attempt snapshot and its Metrics projection, never a second copy of the native body; historical raw snapshots, old refs/scores and evidence are not replaced. Metrics attaches projections to `MetricsFacts` (`MetricsSampling`/`MetricsEvaluation`); this package performs no storage or background work. Sampling detail returns records without snapshots.

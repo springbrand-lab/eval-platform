@@ -30,7 +30,7 @@ export class MetricsSourceError extends Error {
 
 type Target = "datasetId" | "projectSampleId" | "samplingId";
 
-function identifier(value: unknown, name: string): string {
+export function identifier(value: unknown, name: string): string {
   if (!isIdentifier(value)) throw new MetricsQueryError(`${name} ${IDENTIFIER_RULE}`);
   return value;
 }
@@ -51,7 +51,7 @@ function validateQuery(input: MetricsQuery, target?: Target): MetricsQuery {
   };
 }
 
-function indexBy<Value>(values: readonly Value[], key: (value: Value) => string, label: string): Map<string, Value> {
+export function indexBy<Value>(values: readonly Value[], key: (value: Value) => string, label: string): Map<string, Value> {
   const indexed = new Map<string, Value>();
   for (const value of values) {
     const id = key(value);
@@ -103,10 +103,14 @@ function validateFacts(facts: MetricsFacts, query: MetricsQuery) {
   indexBy(plan.datasets, (dataset) => dataset.datasetId, "Dataset");
   const bindings = readBindings(facts);
   const sampleById = indexBy(facts.projectSamples, (sample) => sample.projectSampleId, "ProjectSample");
+  indexBy(facts.projectSamples, (sample) => sample.dataId, "Project Data");
   for (const sample of facts.projectSamples) {
     const datasetIds = bindings.get(sample.projectSampleId);
     if (sample.projectId !== projectId || !datasetIds) {
       throw new MetricsSourceError(`ProjectSample ${sample.projectSampleId} is not bound to the Project`);
+    }
+    if (sample.dataId !== sample.data.dataId) {
+      throw new MetricsSourceError(`ProjectSample ${sample.projectSampleId} disagrees with its Data identity`);
     }
     if (datasetIds.length !== sample.datasetIds.length || datasetIds.some((id, index) => sample.datasetIds[index] !== id)) {
       throw new MetricsSourceError(`ProjectSample ${sample.projectSampleId} disagrees with the plan's Dataset bindings`);
@@ -133,7 +137,7 @@ function validateFacts(facts: MetricsFacts, query: MetricsQuery) {
   return { sampleById, runById };
 }
 
-function prepareFacts(facts: MetricsFacts, query: MetricsQuery) {
+export function prepareFacts(facts: MetricsFacts, query: MetricsQuery) {
   const { plan } = facts;
   const { sampleById, runById } = validateFacts(facts, query);
   const selectedRuns = query.runIds?.map((runId) => {

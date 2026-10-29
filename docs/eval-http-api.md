@@ -2,7 +2,7 @@
 
 ## Input limits
 
-Authenticated `GET /api/input-limits` returns `EvalInputLimits`: positive integer fields `materialFileBytes`, `materialTotalBytes`, `materialMaxFiles`, `sessionContentChars`, `zipArchiveBytes`, `outputSchemaBytes`, `datasetDocumentBytes`, `promptDatasetFileBytes`, `runTargetIds`, `samplingCountMax`. Values come from the API's actual validation constants. Web enables the corresponding submit actions only after loading these bounds; it has no default numeric copy. The API continues enforcing every bound.
+Authenticated `GET /api/input-limits` returns `EvalInputLimits`: positive integer fields `materialFileBytes`, `materialTotalBytes`, `materialMaxFiles`, `sessionContentChars`, `zipArchiveBytes`, `outputSchemaBytes`, `datasetDocumentBytes`, `promptDatasetFileBytes`, `runTargetIds`, `samplingCountMax`, `comparisonProjects`. Values come from the API's actual validation constants. Web enables the corresponding submit actions only after loading these bounds; it has no default numeric copy. The API continues enforcing every bound.
 
 `apps/eval-api` exposes the Dataset, initial-resource catalog, Agent Config, Project, Run, observation and Metrics services through one Hono application served by `@hono/node-server` (`start:api`, entry `src/server.ts`). It owns request authentication and composition, not evaluation semantics or SP storage. Process configuration is listed in the [eval-api README](../apps/eval-api/README.md); the Project, Runtime and Metrics design behind these routes is recorded in [Project、Runtime 与 Metrics 设计](eval-project-redesign.md). This document is the single source for routes, the response envelope, status codes and error codes.
 
@@ -314,12 +314,31 @@ Replaced Samplings and Evaluations no longer exist and read as `404`. Sampling a
 | `GET /api/projects/{projectId}/evaluations/{evaluationId}/observation` | `AgentObservationRef` for the Evaluator | `404 PROJECT_NOT_FOUND`, `EVALUATION_NOT_FOUND` |
 | `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/messages` | The Chat's UI messages, as Eval SP returns them | As above; `404 EVAL_SP_NOT_FOUND` before the Agent starts; relayed SP errors |
 | `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/tree` | The Chat Workspace tree (`WorkspaceTreeNode[]`) | As above |
-| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/trajectory?limit=&beforeSeq=` | One trajectory page `{events:[{ingestSeq, event}], beforeSeq, hasOlder}`, newest first; `limit` 1–200 | As above |
+| `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/trajectory?limit=&beforeSeq=` | SP Chat debug page `{records:[{ingestSeq,record:SAFE Pi} \| {ingestSeq,reference:{format,throughSeq,identity,byteLength,sha256}}], beforeSeq, hasOlder}` relayed unchanged; `beforeSeq` reads older rows, `limit` 1–200. The reference has no record body on this route. This is **not** the frozen evidence-export page or an `events` projection. | As above |
 | `GET /api/projects/{projectId}/{samplings\|evaluations}/{id}/observation/file?path=` | Raw file bytes as an attachment under `Content-Security-Policy: default-src 'none'; sandbox`; at most 10 MB | As above; `413 CATALOG_PAYLOAD_TOO_LARGE` |
 
 The observation data routes read the service account's Chat from Eval SP server-side with the service session and `EVAL_SP_TRUSTED_ORIGIN`; they are GET-only and cannot drive an Agent. `AgentObservationRef` is `{role, projectId, samplingId, evaluationId?, ownerUserId, chatId?, state}`. The API checks the owner, a non-deleted Project and that the Sampling or Evaluation is current in that Project. The Subject entry uses `Sampling.subjectChatId` and the Subject Agent Config owner; the Evaluator entry uses `EvaluationRecord.chatId` and the Evaluator owner. `state` is `available` when a Chat ID and at least one attempt exist, otherwise `not-started`. The entry is available in every Run state. No writable Chat URL is returned; the read-only Chat, Context, Workspace and Trajectory pages are served by Eval SP.
 
+### Dashboards
+
+| Interface | 请求与返回 |
+|---|---|
+| `GET /api/dashboards` | 当前 owner 的 `Dashboard[]`，按更新时间与身份稳定排序，含有序 `projectIds` |
+| `POST /api/dashboards` | `DashboardCreateInput {name, description?, projectIds, idempotencyKey}` → `201 Dashboard` |
+| `GET /api/dashboards/{dashboardId}` | `Dashboard` 或统一 not-found |
+| `PUT /api/dashboards/{dashboardId}` | `DashboardUpdateInput {name, description?, projectIds, revision}` → 保存后的 `Dashboard` |
+
+看板配置还包含已确认的 `excludedDataIds`：创建省略时为空，更新省略时保留，显式 `[]` 恢复全部。集合身份不得重复，数量不超过 `runTargetIds`；保存沿用同一配置 revision，不覆盖并发编辑。被排除的 Data、采样、评分和产物不会被删除。
+
+看板名称非空；Project 必须不同、至少两个且不超过 `comparisonProjects`，创建/更新的所有 Project 必须 owned、未删除且至少已有一个已准入 Run，不能引用可能被首 Run 失败补偿撤销的暂存项目；不要求 Run 执行成功。请求不接受指标、结果快照、owner 选择器或临时下钻状态。看板身份为 UUID，响应含名称、说明、有序 Project IDs、revision、createdAt、updatedAt；配置不保存指标。创建的 owner + 幂等键绑定首次规范请求，同请求重放返回同一看板，不同请求重用键返回冲突；编辑使用 revision 防止丢失更新。所有配置/关联写入同事务成功或失败，无跨 owner 部分写入；未知或 foreign 看板统一 not-found。创建和编辑不调用 Agent、SP 或队列；看板只引用当前 Project，结果仍从现有 Metrics 比较读取，不承诺历史结果冻结。
+
 ### Metrics
+
+`POST /api/metrics/comparison` 是只读的 JSON 对比入口，接受 `{projectIds, datasetId?, jsonPointer?, excludedDataIds?}`，用于携带不宜放入 URL 的数据排除集合。它与 GET 复用同一 owner 校验、同一只读快照和同一 Metrics Interface；请求正文受标准 JSON 大小及身份数量上限保护，不写数据库、不执行 Agent。排除先于字段计数、数据集分组和原始事实聚合，因此全看板使用同一保留范围；全部排除保留字段定义及空范围，便于恢复。
+
+`GET /api/metrics/comparison?projectId=A&projectId=B&datasetId=<optional>&jsonPointer=<optional>` 返回 `ProjectComparisonView`。需要至少两个不同的 owned Project，数量不超过 `GET /api/input-limits` 返回的 `comparisonProjects`（当前 8）；重复、非法、越界及未知查询参数沿用统一查询校验错误，未授权或已删除 Project 不泄露结果，返回 Metrics 的现有 not-found 错误。所选 Project 的事实来自同一 owner 的同一只读一致性事务。
+
+该视图是当前已评分结果的对称交集，没有 baseline 参数。`fields` 为共同且已有共同有效评分的统计词条，`selectedField` 为当前词条，`datasets` 为当前词条的共同数据分组，`summary` / `rows` 为当前数据集范围的权威汇总与逐 Data 投影；完整定义见 `eval-metrics` 公共类型。只比较各 Project 对共同 Data 已取得的有效非空评分，0 和 false 保留，null、未评分、失败及无效结果不参与默认对比。无交集返回正常空视图，不补零、不做页面内统计。单条数据选择读取对应 row 的既有投影，有效采样 ID 用既有明细/产物端点下钻；完整配置正文、原始资源快照和大产物不加入比较响应。
 
 All four routes are read-only views over one consistent snapshot of the Project's fixed hierarchy (Project → Dataset → ProjectSample → Sampling) and its current results; live Dataset membership is never consulted. An optional repeated `runId` query (`?runId=a&runId=b`) restricts Samplings and Evaluations to those Runs without changing the bound hierarchy. No other query parameter is accepted.
 
@@ -479,7 +498,7 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 
 ## Manual recollection
 
-手动重新收集结果：POST /api/projects/{projectId}/samplings/{samplingId}/collect 与 /evaluations/{evaluationId}/collect 返回 202 {runId, queued}。请求体可选：`{"target": RecollectTarget}`，取值来自 `@eval-platform/eval-contracts` 的 `RECOLLECT_TARGETS`（`"output" | "resources"`）；无请求体、零字节请求体（不论 Content-Type）或 `{}` 均为 `"output"`。有字节时必须是 `application/json` 的 JSON 对象，且只允许 `target` 一个字段（否则 415/400/422）。两种目标都不创建、提交或重启 Agent/Attempt，都在 Project 行锁内更新阶段事实并原子提交原 Run 的 `collection` 队列任务（同一 Run 去重）。Run 停止尚未收尾时一律拒绝，停止已收尾时只接受 `output`。
+手动重新收集结果：POST /api/projects/{projectId}/samplings/{samplingId}/collect 与 /evaluations/{evaluationId}/collect 返回 202 {runId, queued}。请求体可选：`{"target": RecollectTarget}`，取值来自 `@eval-platform/eval-contracts` 的 `RECOLLECT_TARGETS`（`"output" | "resources"`）；无请求体、零字节请求体（不论 Content-Type）或 `{}` 均为 `"output"`。有字节时必须是 `application/json` 的 JSON 对象，且只允许 `target` 一个字段（否则 415/400/422）。两种目标都不创建、提交或重启 Agent/Attempt，都在 Project 行锁内更新阶段事实并原子提交原 Run 的 `collection` 队列任务（同一 Run 去重）。Run 停止尚未收尾时一律拒绝；停止已收尾后可按下述条件补收 `output` 或 `resources`。
 
 - `target: "output"`：仅接受归属匹配、最后 Attempt 为 completed 且有 Chat/Submission 的失败阶段；已成功为幂等无操作，重复待收集请求不重复入队，项目忙或 Run 停止尚未收尾时拒绝；停止已收尾的 Run 可补收输出，也可补采停止时记为失败的资源（均不重开停止）。API 设置 retrying + collectionPending。Worker 只读取已有输出；执行侧必须归档产物和完整轨迹，评估侧保存原始结果并沿用校验和同步。失败清除待收集标记并保留错误，支持再次补收。补收执行不自动启动之前已取消的评估。
 - `target: "resources"`：只重新读取仍欠资源的已结束 Attempt 的原始资源快照，判断与 Runtime 刷新共用 `stageOwesResources`（任一已结束 Attempt——含失败的 Agent 和更早的 Attempt——的快照失败或 `finalized: false`），Runtime 已放弃（`exhausted`）的 Attempt 也计入。接受状态为 succeeded 或 failed 且有 Chat 的阶段；API 只在阶段上写入 `resourcesPending: {deadline}`（`startResourceWait`：当前时间加 `RESOURCE_WAIT_MS`，10 分钟），并清除各 Attempt 资源的 `downloads`/`exhausted` 以重新给下载重试预算，不改变 `status`、`lastError` 或 Attempt 其他事实。没有 Attempt 欠资源时为幂等无操作（`queued: false`）；阶段已带 `resourcesPending` 时只再次唤醒同一 Run（`queued: true`）。其他 Run 活跃时为 `409 PROJECT_BUSY`（所属 Run 仍活跃时可以加入），阶段未结束、没有 Chat 或 Run 停止尚未收尾为 `409 RESULT_COLLECTION_CONFLICT`；停止已收尾的 Run 可补采停止时记为失败的资源，Run 重新活跃但不重开停止。Runtime 按 [Waiting for resources](eval-sp-harness-protocol.md#waiting-for-resources) 等待 SP 定稿，定稿或到期后只完整下载一次，然后清除该标记。
