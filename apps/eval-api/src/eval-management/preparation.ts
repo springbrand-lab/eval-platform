@@ -26,7 +26,8 @@ export async function getPreparation(c: Context<AppBindings>, operationKey: stri
   const operation = await dependencies(c).store.get(c.var.user.id, operationKey);
   if (!operation) throw new HttpError("REQUEST_NOT_FOUND", "Unknown preparation key");
   if (operation.kind !== "prepare") {
-    const stage = operation.kind === "skill" ? "skill" : "reference";
+    const stage = operation.kind === "skill" ? "skill"
+      : operation.kind === "reference" ? "reference" : "output_schema";
     const final = operation.stages[stage];
     const confirmed = final?.status === "confirmed" ? record(final.receipt) : null;
     return { operationKey, kind: operation.kind,
@@ -35,7 +36,9 @@ export async function getPreparation(c: Context<AppBindings>, operationKey: stri
           : Object.values(operation.stages).some((item) => item.status === "attempted") ? "outcome_unknown" : "pending",
       ...(confirmed ? { receipt: operation.kind === "skill"
         ? { skillId: short(confirmed.skillId, 255), name: short(confirmed.name, 120) }
-        : { referenceId: short(confirmed.referenceId, 36), name: short(confirmed.name, 240) } } : {}),
+        : operation.kind === "reference"
+          ? { referenceId: short(confirmed.referenceId, 36), name: short(confirmed.name, 240) }
+          : { outputSchemaId: short(confirmed.outputSchemaId, 36), name: short(confirmed.name, 200) } } : {}),
       stages: Object.fromEntries(Object.entries(operation.stages).map(([name, item]) => [name, item.status])),
     };
   }

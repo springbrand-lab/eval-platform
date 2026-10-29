@@ -1,4 +1,4 @@
-import type { SpPiTrajectoryPageRow } from "@eval-platform/eval-contracts";
+import type { SpPiTrajectoryPage } from "@eval-platform/eval-contracts";
 import { api, enc } from "./client";
 import type { AgentObservationRef } from "./types";
 
@@ -14,12 +14,8 @@ export interface WorkspaceTreeNode {
   readonly children?: readonly WorkspaceTreeNode[];
 }
 
-/** Public SP Chat debug page, relayed unchanged by Eval API (not the frozen evidence-export page). */
-export interface TrajectoryPage {
-  readonly records: readonly SpPiTrajectoryPageRow[];
-  readonly beforeSeq: number | null;
-  readonly hasOlder: boolean;
-}
+/** Forward-only, frozen public SP Chat page, relayed unchanged by Eval API. */
+export type TrajectoryPage = SpPiTrajectoryPage;
 
 export const observationKeys = {
   ref: (projectId: string, kind: ObservedKind, id: string) => ["observation", projectId, kind, id, "ref"] as const,
@@ -34,8 +30,11 @@ export const getMessages = (projectId: string, kind: ObservedKind, id: string, s
   api.get<unknown[]>(`${base(projectId, kind, id)}/messages`, { signal });
 export const getWorkspaceTree = (projectId: string, kind: ObservedKind, id: string, signal?: AbortSignal) =>
   api.get<WorkspaceTreeNode[]>(`${base(projectId, kind, id)}/tree`, { signal });
-export const getTrajectoryPage = (projectId: string, kind: ObservedKind, id: string, beforeSeq?: number, signal?: AbortSignal) =>
-  api.get<TrajectoryPage>(`${base(projectId, kind, id)}/trajectory`, { params: { limit: 100, ...(beforeSeq ? { beforeSeq } : {}) }, signal });
+export const getTrajectoryPage = (projectId: string, kind: ObservedKind, id: string, afterSeq = 0,
+  throughSeq?: number, signal?: AbortSignal) =>
+  api.get<TrajectoryPage>(`${base(projectId, kind, id)}/trajectory`, {
+    params: { afterSeq, limit: 100, ...(throughSeq === undefined ? {} : { throughSeq }) }, signal,
+  });
 export const getWorkspaceFile = (projectId: string, kind: ObservedKind, id: string, path: string, signal?: AbortSignal) =>
   api.blob(`${base(projectId, kind, id)}/file`, { params: { path }, signal, timeoutMs: 120_000 });
 

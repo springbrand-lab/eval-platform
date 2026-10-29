@@ -1,4 +1,4 @@
-import type { MetricSummary, StageStatistics } from "@eval-platform/eval-metrics";
+import type { MetricSummary, ResourceStatistics, StageStatistics } from "@eval-platform/eval-metrics";
 import type { Context } from "hono";
 import type { z } from "zod";
 import type { AppBindings } from "../lib/types.js";
@@ -9,6 +9,15 @@ function stage(value: StageStatistics) {
   return {
     records: value.records, statuses: value.statuses, successRate: value.successRate,
     attempts: value.attempts, restarts: value.restarts, agentDurationMs: value.agentDurationMs,
+  };
+}
+
+/** Projection of already-computed Metrics facts; never infer missing resources from stage status. */
+export function resourceSummary(item: ResourceStatistics) {
+  return {
+    coverage: item.coverage, collections: item.collections, tokens: item.tokens,
+    costs: item.costs, cacheHitRate: item.cacheHitRate,
+    toolSuccessRate: item.trajectory.toolSuccessRate,
   };
 }
 
@@ -26,14 +35,11 @@ export function metricSummary(value: MetricSummary, page: number, pageSize: numb
     })),
     coverage: field.coverage,
   }));
-  const resources = (item: MetricSummary["executionAgent"]) => ({
-    coverage: item.coverage, collections: item.collections, tokens: item.tokens,
-    costs: item.costs, cacheHitRate: item.cacheHitRate,
-  });
   return {
     counts: value.counts,
     execution: stage(value.execution), evaluation: stage(value.evaluation),
-    executionAgent: resources(value.executionAgent), evaluationAgents: resources(value.evaluationAgents),
+    executionAgent: resourceSummary(value.executionAgent),
+    evaluationAgents: resourceSummary(value.evaluationAgents),
     evaluationOutputs: {
       evaluations: value.evaluationOutputs.evaluations,
       validation: value.evaluationOutputs.validation,
@@ -49,6 +55,8 @@ export async function getMetrics(c: Context<AppBindings>, input: Query) {
   // Metrics' owner-scoped source validates both Project and selected Run in one read-only snapshot;
   // do not materialize the entire Run view (and its Evaluation bodies) a second time here.
   const query = runId === undefined ? { projectId } : { projectId, runIds: [runId] };
+  const runScope = runId === undefined
+    ? { runScope: "project_current" as const } : { runScope: "exact_run" as const, runId };
   const metrics = c.var.services.metrics;
   const project = (value: { projectId: string; name: string }) => ({
     projectId: value.projectId, name: short(value.name),
@@ -61,21 +69,21 @@ export async function getMetrics(c: Context<AppBindings>, input: Query) {
     const view = await metrics.getProjectOverview(query);
     const datasetPage = pageOf(view.datasets, page, pageSize);
     const samplePage = pageOf(view.projectSamples, page, pageSize);
-    return { scope, project: project(view.project),
-      ...(runId === undefined ? { runScope: "project_current" } : { runId }),
+    return { scope, project: project(view.project), ...runScope,
       summary: metricSummary(view.summary, page, pageSize),
       datasets: { ...datasetPage, items: datasetPage.items.map(({ dataset, summary }) => ({
         datasetId: dataset.datasetId, name: short(dataset.name), counts: summary.counts,
       })) },
       projectSamples: { ...samplePage, items: samplePage.items.map((item) => ({
         ...sample(item), currentSamplingCount: item.samplingIds.length,
+        samplingIds: pageOf(item.samplingIds, 1, pageSize),
       })) },
     };
   }
   if (scope === "dataset") {
     const view = await metrics.getDatasetOverview({ ...query, datasetId: input.datasetId! });
     const samplePage = pageOf(view.projectSamples, page, pageSize);
-    return { scope, project: project(view.project), runId,
+    return { scope, project: project(view.project), ...runScope,
       dataset: { datasetId: view.dataset.datasetId, name: short(view.dataset.name) },
       summary: metricSummary(view.summary, page, pageSize),
       projectSamples: { ...samplePage, items: samplePage.items.map(sample) } };
@@ -83,7 +91,7 @@ export async function getMetrics(c: Context<AppBindings>, input: Query) {
   if (scope === "sample") {
     const view = await metrics.getSampleOverview({ ...query, projectSampleId: input.projectSampleId! });
     const samplingPage = pageOf(view.samplings, page, pageSize);
-    return { scope, project: project(view.project), runId, projectSample: sample(view.projectSample),
+    return { scope, project: project(view.project), ...runScope, projectSample: sample(view.projectSample),
       summary: metricSummary(view.summary, page, pageSize),
       samplings: { ...samplingPage, items: samplingPage.items.map((item) => ({
         samplingId: item.samplingId, status: item.execution.status,
@@ -92,7 +100,7 @@ export async function getMetrics(c: Context<AppBindings>, input: Query) {
   }
   const view = await metrics.getSamplingDetail({ ...query, samplingId: input.samplingId! });
   const evaluationPage = pageOf(view.evaluations, page, pageSize);
-  return { scope, project: project(view.project), runId, projectSample: sample(view.projectSample),
+  return { scope, project: project(view.project), ...runScope, projectSample: sample(view.projectSample),
     sampling: { samplingId: view.sampling.samplingId, status: view.sampling.execution.status },
     summary: metricSummary(view.summary, page, pageSize),
     evaluations: { ...evaluationPage, items: evaluationPage.items.map(({ record, output }) => ({

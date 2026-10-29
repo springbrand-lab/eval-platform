@@ -135,7 +135,8 @@ function setup() {
   const observation = {
     messages: vi.fn(async () => [{ id: "m1", role: "user", parts: [{ type: "text", text: "Build a page" }] }]),
     tree: vi.fn(async () => [{ name: "index.html", path: "/index.html", type: "file" }]),
-    trajectory: vi.fn(async () => ({ events: [], beforeSeq: null, hasOlder: false })),
+    trajectory: vi.fn(async () => ({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 9 }, records: [], nextAfterSeq: null })),
+    trajectoryRecord: vi.fn(async () => { throw new Error("Unexpected record-byte read"); }),
     file: vi.fn(async () => ({ body: new Blob(["<h1>Hi</h1>"]).stream(), contentType: "text/html", contentLength: "11" })),
   };
   const release = vi.fn();
@@ -631,9 +632,13 @@ describe("Eval API HTTP layer", () => {
     const messages = await app.request("/api/projects/project-1/samplings/s-1/observation/messages");
     expect(await messages.json()).toMatchObject({ success: true, msg: [{ id: "m1" }] });
     expect(app.observation.messages).toHaveBeenCalledWith({ ownerUserId: owner, chatId: "chat-1" });
-    const page = await app.request("/api/projects/project-1/samplings/s-1/observation/trajectory?limit=50&beforeSeq=9");
+    const page = await app.request("/api/projects/project-1/samplings/s-1/observation/trajectory?limit=50&afterSeq=5&throughSeq=9");
     expect(page.status).toBe(200);
-    expect(app.observation.trajectory).toHaveBeenCalledWith({ ownerUserId: owner, chatId: "chat-1" }, { limit: 50, beforeSeq: 9 });
+    expect(await page.json()).toMatchObject({ msg: { format: "sp-pi-trajectory/v1", cursor: { throughSeq: 9 } } });
+    expect(app.observation.trajectory).toHaveBeenCalledWith({ ownerUserId: owner, chatId: "chat-1" },
+      { limit: 50, afterSeq: 5, throughSeq: 9 });
+    const obsolete = await app.request("/api/projects/project-1/samplings/s-1/observation/trajectory?beforeSeq=9");
+    expect(obsolete.status).toBe(422);
     const file = await app.request("/api/projects/project-1/samplings/s-1/observation/file?path=%2Findex.html");
     expect(file.status).toBe(200);
     expect(file.headers.get("content-disposition")).toBe("attachment");

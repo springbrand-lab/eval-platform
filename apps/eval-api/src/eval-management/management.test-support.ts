@@ -29,12 +29,16 @@ export function fakeManagement(owner: string) {
     async begin(ownerId, key, kind, fingerprint, plan, skillName) {
       if (ownerId !== owner) throw conflict();
       let row = operations.get(key);
-      if (row && (row.kind !== kind || row.fingerprint !== fingerprint)) throw conflict();
+      const claimedSkillName = kind === "skill" ? skillName ?? null : null;
+      if (row && (row.kind !== kind || row.fingerprint !== fingerprint
+        || row.skillName !== claimedSkillName
+        || JSON.stringify(row.plan) !== JSON.stringify(plan))) throw conflict();
       if (kind === "skill" && [...operations.values()].some((other) =>
-        other.operationKey !== key && other.kind === kind && other.skillName === skillName && other.status !== "completed")) throw conflict();
+        other.operationKey !== key && other.kind === kind && other.skillName === claimedSkillName
+          && other.status !== "completed")) throw conflict();
       const refs = kind === "prepare"
         ? [plan.promptUploadRef, ...(plan.assets as Array<{ uploadRef: string }>).map((asset) => asset.uploadRef)]
-        : [plan.uploadRef];
+        : kind === "output_schema" ? [] : [plan.uploadRef];
       for (const ref of refs) {
         const upload = uploads.get(ref as string);
         if (!upload || upload.claimedBy && upload.claimedBy !== key) throw conflict();
@@ -42,7 +46,7 @@ export function fakeManagement(owner: string) {
       for (const ref of refs) uploads.set(ref as string, { ...uploads.get(ref as string)!, claimedBy: key });
       row ??= {
         ownerUserId: owner, operationKey: key, kind, fingerprint, plan, stages: {},
-        status: "pending", skillName: skillName ?? null, createdAt: new Date(),
+        status: "pending", skillName: claimedSkillName, createdAt: new Date(),
       };
       operations.set(key, row);
       return row;
@@ -64,7 +68,8 @@ export function fakeManagement(owner: string) {
     async complete(ownerId, key) {
       const row = saved(ownerId, key);
       const required = row.kind === "skill" ? ["skill"] : row.kind === "reference" ? ["attachment", "reference"]
-        : ["dataset", ...(row.plan.assets as Array<{ uploadRef: string }>).map((asset) => `resource:${asset.uploadRef}`),
+        : row.kind === "output_schema" ? ["output_schema"]
+          : ["dataset", ...(row.plan.assets as Array<{ uploadRef: string }>).map((asset) => `resource:${asset.uploadRef}`),
           ...(row.plan.dataIds as string[]).map((id) => `data:${id}`)];
       if (required.some((stage) => row.stages[stage]?.status !== "confirmed")) throw conflict();
       operations.set(key, { ...row, status: "completed" });

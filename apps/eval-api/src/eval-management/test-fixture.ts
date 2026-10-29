@@ -1,7 +1,10 @@
 import { vi } from "vitest";
 import type { ApiRuntime, OwnerServices } from "../lib/types.js";
+import type { OutputSchemaRecord } from "../db/output-schemas.js";
 import type { EvalSpClient } from "../sp/client.js";
 import type { SpObservationClient } from "../sp/observation.js";
+import { nativeAssistantMessage } from "../sp/native-test-fixture.js";
+import { parseEvaluationOutputSchema } from "../project-output-schema.js";
 import type { ManagementFiles } from "./files.js";
 import { requestApp, WEB_ORIGIN } from "../test-support.js";
 import { EVAL_MANAGEMENT_MCP_PATH } from "./mcp.js";
@@ -40,6 +43,10 @@ export async function toolValue(response: Response): Promise<Record<string, unkn
 
 export function setupManagement(configured = true, files?: ManagementFiles) {
   const managed = fakeManagement(OWNER);
+  const savedSchemas = new Map<string, OutputSchemaRecord>([[
+    SCHEMA, { outputSchemaId: SCHEMA, name: "Output", description: "Existing output",
+      schema: { secret: "private" } },
+  ]]);
   const services = {
     agentConfigs: {
       listAgents: vi.fn(async () => [{ agentConfig: { ownerUserId: OWNER, userAgentId: AGENT },
@@ -53,7 +60,24 @@ export function setupManagement(configured = true, files?: ManagementFiles) {
       list: vi.fn(async () => [project]),
       create: vi.fn(async (_body: unknown) => ({ project, run: { runId: run.runId, samplingIds: run.samplingIds } })),
     },
-    outputSchemas: { list: vi.fn(async () => [{ outputSchemaId: SCHEMA, name: "Output", schema: { secret: "private" } }]) },
+    outputSchemas: {
+      list: vi.fn(async () => [...savedSchemas.values()]),
+      get: vi.fn(async (id: string) => savedSchemas.get(id) ?? null),
+      create: vi.fn(async (input: { name: string; description: string; content: string }, plannedId?: string) => {
+        const row = { outputSchemaId: plannedId ?? crypto.randomUUID(), name: input.name,
+          description: input.description, schema: parseEvaluationOutputSchema(input.content) };
+        if (savedSchemas.has(row.outputSchemaId)) throw new Error("An output Schema with this ID already exists");
+        savedSchemas.set(row.outputSchemaId, row);
+        return row;
+      }),
+      updateMetadata: vi.fn(async (id: string, patch: { name?: string; description?: string }) => {
+        const row = savedSchemas.get(id);
+        if (!row) throw new Error("Unknown output Schema");
+        const updated = { ...row, ...patch };
+        savedSchemas.set(id, updated);
+        return updated;
+      }),
+    },
     admission: {
       preview: vi.fn(async (_input: unknown) => preview),
       submit: vi.fn(async (_input: unknown) => ({ runId: "run-2", samplingIds: ["sampling-2"] })),
@@ -75,11 +99,12 @@ export function setupManagement(configured = true, files?: ManagementFiles) {
     },
     observations: {
       subject: vi.fn(async (projectId: string, samplingId: string) => ({
-        role: "subject", projectId, samplingId, ownerUserId: OWNER, chatId: "subject-chat",
+        role: "subject", projectId, samplingId, ownerUserId: OWNER,
+        chatId: "subject-chat" as string | undefined, state: "available",
       })),
       evaluator: vi.fn(async (projectId: string, evaluationId: string) => ({
         role: "evaluator", projectId, samplingId: "sampling-1", evaluationId,
-        ownerUserId: OWNER, chatId: "evaluator-chat",
+        ownerUserId: OWNER, chatId: "evaluator-chat", state: "available",
       })),
     },
   };
@@ -102,10 +127,16 @@ export function setupManagement(configured = true, files?: ManagementFiles) {
       throw new Error(`Unexpected public library path ${input.route.path}`);
     }),
   };
-  const observation = { trajectory: vi.fn(async (_chat: unknown, _query: unknown): Promise<unknown> => ({
-    events: [{ ingestSeq: 4, event: { type: "tool.started", occurredAt: "2026-01-01T00:00:00Z",
-      payload: { input: "private prompt", output: "private response" } } }], beforeSeq: 4, hasOlder: false,
-  })) };
+  const observation = {
+    trajectory: vi.fn(async (chat: { chatId: string }, _query: unknown): Promise<unknown> => ({
+    format: "sp-pi-trajectory/v1", cursor: { throughSeq: 4 },
+    records: [nativeAssistantMessage(4, chat.chatId, "submission-1",
+      [{ type: "text", text: "private prompt / private response" }])], nextAfterSeq: null,
+    })),
+    trajectoryRecord: vi.fn(async (_chat: unknown, _row: unknown): Promise<unknown> => {
+      throw new Error("Unexpected SAFE Pi record-byte read");
+    }),
+  };
   const release = vi.fn();
   const ownerServices = vi.fn((_user: { id: string }, _sessionToken: string) => ({
     services: services as unknown as OwnerServices, release,
@@ -128,5 +159,5 @@ export function setupManagement(configured = true, files?: ManagementFiles) {
   const call = (name: string, args: unknown) => rpc({
     jsonrpc: "2.0", id: 7, method: "tools/call", params: { name, arguments: args },
   });
-  return { request, rpc, call, services, sp, observation, release, ownerServices, runtime, managed };
+  return { request, rpc, call, services, sp, observation, release, ownerServices, runtime, managed, savedSchemas };
 }

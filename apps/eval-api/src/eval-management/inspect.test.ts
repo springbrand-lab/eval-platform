@@ -1,52 +1,76 @@
+import { MetricsEntityNotFoundError } from "@eval-platform/eval-metrics";
+import { RuntimeEntityNotFoundError } from "@eval-platform/eval-runtime";
 import { describe, expect, it } from "vitest";
 import { detail } from "./metrics-fixture.js";
-import { OWNER, project, run, setupManagement, toolValue } from "./test-fixture.js";
+import { MANAGEMENT_TOKEN, OWNER, project, run, setupManagement, toolValue } from "./test-fixture.js";
 
 const args = { projectId: project.projectId, runId: run.runId, samplingId: "sampling-1" };
 
-describe("owned, bounded case inspection", () => {
-  it("shows the existing metric summary, one short Evaluator excerpt and only trajectory metadata", async () => {
-    const app = setupManagement();
-    app.services.metrics.getSamplingDetail.mockResolvedValueOnce(detail);
-    const value = await toolValue(await app.call("inspect_case", {
-      ...args, evaluationId: "evaluation-1", trajectory: "evaluator", limit: 2, beforeSeq: 5,
-    }));
-    expect(app.services.projectRuns.readRun).toHaveBeenCalledWith(args.projectId, args.runId);
-    expect(app.services.metrics.getSamplingDetail).toHaveBeenCalledWith({
-      projectId: args.projectId, runIds: [args.runId], samplingId: args.samplingId,
-    });
-    expect(app.services.observations.evaluator).toHaveBeenCalledWith(args.projectId, "evaluation-1");
-    expect(app.observation.trajectory).toHaveBeenCalledWith({ ownerUserId: OWNER, chatId: "evaluator-chat" },
-      { limit: 2, beforeSeq: 5 });
-    expect(value).toMatchObject({
-      sampling: { evidence: { evidenceId: "sha256:proof" }, artifactCount: 1 },
-      evaluation: { validation: { status: "valid" }, result: { truncated: true },
-        evidenceRefs: { items: [{ ref: "/workspace/proof.txt" }, { ref: null }] } },
-      trajectory: { events: [{ ingestSeq: 4, type: "tool.started", occurredAt: "2026-01-01T00:00:00Z" }] },
-    });
-    for (const secret of ["private Subject prompt", "private raw resource snapshot",
-      "private response", "private-connection", "https://signed.test", "private-output.txt"]) {
-      expect(JSON.stringify(value)).not.toContain(secret);
-    }
-    expect(app.observation.trajectory).toHaveBeenCalledTimes(1);
-  });
-
-  it("drops traversal-looking evidence locations while preserving owned Workspace references", async () => {
+describe("bounded owned case inspection (trajectory files use a separate authenticated GET)", () => {
+  it("keeps exact-Run membership and selected Evaluator Metrics/evidence bounded", async () => {
     const app = setupManagement();
     const unsafe = structuredClone(detail);
     unsafe.evaluations[0]!.output.evidenceRefs.push({ kind: "workspace", ref: "/workspace/../secret" });
     app.services.metrics.getSamplingDetail.mockResolvedValueOnce(unsafe);
     const value = await toolValue(await app.call("inspect_case", { ...args, evaluationId: "evaluation-1" }));
+    expect(app.services.projectRuns.readRun).toHaveBeenCalledWith(args.projectId, args.runId);
+    expect(app.services.metrics.getSamplingDetail).toHaveBeenCalledWith({
+      projectId: args.projectId, runIds: [args.runId], samplingId: args.samplingId,
+    });
+    expect(value).toMatchObject({
+      runScope: "exact_run", runId: run.runId,
+      summary: { executionAgent: { toolSuccessRate: { value: 0.5 } } },
+      subject: { toolSuccessRate: { value: 0.5, coverage: "complete" } },
+      evaluation: { result: { truncated: true }, evaluator: { toolSuccessRate: { value: null, coverage: "unavailable" } } },
+    });
     expect((value.evaluation as { evidenceRefs: { items: Array<{ ref: string | null }> } }).evidenceRefs.items
       .map(({ ref }) => ref)).toEqual(["/workspace/proof.txt", null, null]);
+    expect(value).not.toHaveProperty("trajectory.recordJson");
+    expect(app.services.observations.subject).not.toHaveBeenCalled();
+    expect(app.services.observations.evaluator).not.toHaveBeenCalled();
+    expect(app.observation.trajectory).not.toHaveBeenCalled();
+    for (const secret of [MANAGEMENT_TOKEN, "fixed-session", "private Subject prompt", "private raw resource snapshot",
+      "private-connection", "https://signed.test", "private-output.txt"]) {
+      expect(JSON.stringify(value)).not.toContain(secret);
+    }
   });
 
-  it("rejects nonmember Sampling/Evaluation IDs before reading details or another Chat", async () => {
+  it("follows current Sampling/Evaluation without inventing Run membership or reading SP", async () => {
+    const app = setupManagement();
+    app.services.metrics.getSamplingDetail.mockResolvedValueOnce(detail);
+    const value = await toolValue(await app.call("inspect_case", {
+      projectId: args.projectId, samplingId: args.samplingId, evaluationId: "evaluation-1",
+    }));
+    expect(app.services.projectRuns.readRun).not.toHaveBeenCalled();
+    expect(app.services.metrics.getSamplingDetail).toHaveBeenCalledExactlyOnceWith({
+      projectId: args.projectId, samplingId: args.samplingId,
+    });
+    expect(value).toMatchObject({ runScope: "project_current", samplingId: args.samplingId,
+      evaluations: { total: 1 }, evaluation: { evaluationId: "evaluation-1" } });
+    expect(value).not.toHaveProperty("runId");
+    expect(app.observation.trajectory).not.toHaveBeenCalled();
+  });
+
+  it("rejects old 4-KiB/continuation arguments, with no second byte path", async () => {
+    const app = setupManagement();
+    for (const field of [
+      { trajectory: "subject" }, { afterSeq: 0 }, { throughSeq: 1 }, { ingestSeq: 1 }, { offset: 0 },
+      { limit: 1 },
+    ]) {
+      const result = await (await app.call("inspect_case", { ...args, ...field })).json();
+      expect(result).toMatchObject({ result: { isError: true,
+        content: [{ text: expect.stringContaining("REQUEST_INVALID_INPUT") }] } });
+    }
+    expect(app.services.metrics.getSamplingDetail).not.toHaveBeenCalled();
+    expect(app.observation.trajectory).not.toHaveBeenCalled();
+  });
+
+  it("rejects nonmember exact-Run identities before current Metrics or observing a Chat", async () => {
     const app = setupManagement();
     for (const input of [
-      { ...args, samplingId: "other-sampling", trajectory: "subject" },
-      { ...args, evaluationId: "other-evaluation", trajectory: "evaluator" },
-      { ...args, projectId: "other-project", trajectory: "subject" },
+      { ...args, samplingId: "other-sampling" },
+      { ...args, evaluationId: "other-evaluation" },
+      { ...args, projectId: "other-project" },
     ]) {
       expect(await (await app.call("inspect_case", input)).json())
         .toMatchObject({ result: { isError: true } });
@@ -55,46 +79,36 @@ describe("owned, bounded case inspection", () => {
     expect(app.observation.trajectory).not.toHaveBeenCalled();
   });
 
-  it("does not follow an observation ref for a different owner or Sampling", async () => {
-    for (const mismatch of ["ownerUserId", "samplingId"] as const) {
-      const app = setupManagement();
-      app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
-      app.services.observations.evaluator.mockResolvedValueOnce({
-        role: "evaluator", projectId: args.projectId, samplingId: "sampling-1",
-        evaluationId: "evaluation-1", ownerUserId: OWNER, chatId: "evaluator-chat",
-        [mismatch]: "foreign",
-      });
-      const result = await (await app.call("inspect_case", {
-        ...args, evaluationId: "evaluation-1", trajectory: "evaluator",
-      })).json();
-      expect(result).toMatchObject({ result: { isError: true,
-        content: [{ text: expect.stringContaining("EVAL_SP_FORBIDDEN") }] } });
-      expect(app.observation.trajectory).not.toHaveBeenCalled();
-    }
+  it("rejects deleted/replaced/foreign current facts and a mismatched Evaluator association", async () => {
+    const app = setupManagement();
+    app.services.metrics.getSamplingDetail.mockRejectedValueOnce(
+      new MetricsEntityNotFoundError("sampling", args.samplingId));
+    expect(await (await app.call("inspect_case", args)).json()).toMatchObject({ result: { isError: true,
+      content: [{ text: expect.stringContaining("SAMPLING_NOT_FOUND") }] } });
+    app.services.metrics.getSamplingDetail.mockResolvedValueOnce({
+      ...detail, project: { ...detail.project, ownerUserId: "foreign" },
+    });
+    expect(await (await app.call("inspect_case", args)).json()).toMatchObject({ result: { isError: true,
+      content: [{ text: expect.stringContaining("EVAL_SP_FORBIDDEN") }] } });
+    app.services.metrics.getSamplingDetail.mockResolvedValueOnce({
+      ...detail, evaluations: [{ ...detail.evaluations[0]!,
+        record: { ...detail.evaluations[0]!.record, samplingId: "other-sampling" } }],
+    });
+    expect(await (await app.call("inspect_case", { ...args, evaluationId: "evaluation-1" })).json())
+      .toMatchObject({ result: { isError: true, content: [{ text: expect.stringContaining("EVALUATION_NOT_FOUND") }] } });
+    app.services.metrics.getSamplingDetail.mockResolvedValueOnce(detail);
+    app.services.projectRuns.readRun.mockRejectedValueOnce(new RuntimeEntityNotFoundError("run", args.runId));
+    expect(await (await app.call("inspect_case", args)).json()).toMatchObject({ result: { isError: true } });
+    expect(app.observation.trajectory).not.toHaveBeenCalled();
   });
 
-  it("does not fetch a not-started Chat or accept non-metadata or unbounded event pages", async () => {
+  it("retains Subject Chat identity in the owned current Metrics even without an observation read", async () => {
     const app = setupManagement();
-    app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
-    app.services.observations.subject.mockResolvedValueOnce({
-      role: "subject", projectId: args.projectId, samplingId: args.samplingId, ownerUserId: OWNER, chatId: "",
+    app.services.metrics.getSamplingDetail.mockResolvedValueOnce({
+      ...detail, subject: { ...detail.subject, chatId: "foreign-chat",
+        agentConfigRef: { ownerUserId: OWNER, userAgentId: "subject-agent" } },
     });
-    const notStarted = await toolValue(await app.call("inspect_case", { ...args, trajectory: "subject" }));
-    expect(notStarted).toMatchObject({ trajectory: { state: "not-started", events: [] } });
-    expect(app.observation.trajectory).not.toHaveBeenCalled();
-    const invalid = await (await app.call("inspect_case", { ...args, beforeSeq: 2 })).json();
-    expect(invalid).toMatchObject({ result: { isError: true } });
-    expect(app.observation.trajectory).not.toHaveBeenCalled();
-
-    app.observation.trajectory.mockResolvedValueOnce({ events: Array.from({ length: 21 }, (_, i) => ({
-      ingestSeq: i, event: { type: "tool.started", occurredAt: "2026-01-01T00:00:00Z",
-        payload: { input: "secret", output: "secret" } },
-    })), beforeSeq: null, hasOlder: false });
-    const oversized = await (await app.call("inspect_case", {
-      ...args, trajectory: "subject", limit: 20,
-    })).json();
-    expect(oversized).toMatchObject({ result: { isError: true,
-      content: [{ text: expect.stringContaining("RESPONSE_INVALID") }] } });
-    expect(JSON.stringify(oversized)).not.toContain("secret");
+    expect(await (await app.call("inspect_case", args)).json()).toMatchObject({ result: { isError: true,
+      content: [{ text: expect.stringContaining("EVAL_SP_FORBIDDEN") }] } });
   });
 });

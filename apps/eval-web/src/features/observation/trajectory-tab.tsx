@@ -51,7 +51,7 @@ function RecordRow({ row }: { row: SpPiTrajectoryPageRow }) {
 export function TrajectoryTab({ projectId, kind, id, running = false }: { projectId: string; kind: ObservedKind; id: string; running?: boolean }) {
   const [filter, setFilter] = useState<RecordCategory | "all">("all");
   const [selectedKind, setSelectedKind] = useState("");
-  const { query: pages, older } = useTrajectory({ projectId, kind, id, running });
+  const { query: pages, more } = useTrajectory({ projectId, kind, id, running });
   if (pages.isPending) return <LoadingBlock />;
   if (!pages.data) return <ErrorBlock error={pages.error} onRetry={() => void pages.refetch()} />;
   const records = pages.data.records;
@@ -81,10 +81,10 @@ export function TrajectoryTab({ projectId, kind, id, running = false }: { projec
         <p className="text-xs text-muted-foreground">已加载 {records.length} 条，显示 {visible.length} 条。筛选仅限已加载记录。</p>
       </fieldset>
       {pages.error && <ErrorBlock error={pages.error} onRetry={() => void pages.refetch()} />}
-      {older.error && <ErrorBlock error={older.error} onRetry={() => older.mutate()} />}
-      {pages.data.hasOlder && (
+      {more.error && <ErrorBlock error={more.error} onRetry={() => more.mutate()} />}
+      {pages.data.nextAfterSeq !== null && (
         <div className="border-b border-border p-2 text-center">
-          <Button size="sm" variant="ghost" loading={older.isPending} onClick={() => older.mutate()}>加载更早的记录</Button>
+          <Button size="sm" variant="ghost" loading={more.isPending} onClick={() => more.mutate()}>加载更多记录</Button>
         </div>
       )}
       {visible.length === 0 ? <EmptyState title={records.length === 0 ? "还没有轨迹记录" : "已加载记录中没有匹配项"} />

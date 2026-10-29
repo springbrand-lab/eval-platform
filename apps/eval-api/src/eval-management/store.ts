@@ -91,19 +91,20 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
       const refs = kind === "prepare"
         ? [plan.promptUploadRef, ...(Array.isArray(plan.assets) ? plan.assets.map((asset) =>
           asset && typeof asset === "object" && "uploadRef" in asset ? asset.uploadRef : null) : [])]
-        : [plan.uploadRef];
+        : kind === "output_schema" ? [] : [plan.uploadRef];
       const parsed = refs.map((ref) => platformIdSchema.parse(ref)).sort();
       if (parsed.length > 101 || new Set(parsed).size !== parsed.length) throw conflict();
-      // A second key cannot claim an unresolved same-name Skill, including across API processes.
+      // Only Skills claim names: the existing output Schema catalog permits duplicate names.
+      const claimedSkillName = kind === "skill" ? skillName ?? null : null;
       return db.transaction(async (transaction) => {
         await transaction.insert(managementOperations).values({
           ownerUserId: owner, operationKey, kind, fingerprint, plan,
-          skillName: skillName ?? null, stages: {}, status: "pending",
+          skillName: claimedSkillName, stages: {}, status: "pending",
         }).onConflictDoNothing();
         const [current] = await transaction.select().from(managementOperations)
           .where(operationWhere(owner, operationKey)).for("update");
         if (!current || current.kind !== kind || current.fingerprint !== fingerprint ||
-          current.skillName !== (skillName ?? null) || !equalJson(current.plan, plan)) throw conflict();
+          current.skillName !== claimedSkillName || !equalJson(current.plan, plan)) throw conflict();
         for (const ref of parsed) {
           const [claimed] = await transaction.update(managementUploads).set({ claimedBy: operationKey })
             .where(and(uploadWhere(owner, ref), eq(managementUploads.status, "ready"),
@@ -153,7 +154,8 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
           throw conflict();
         }
         const required = row.kind === "skill" ? ["skill"] : row.kind === "reference" ? ["attachment", "reference"]
-          : ["dataset", ...(Array.isArray(row.plan.assets) ? row.plan.assets.map((asset) =>
+          : row.kind === "output_schema" ? ["output_schema"]
+            : ["dataset", ...(Array.isArray(row.plan.assets) ? row.plan.assets.map((asset) =>
             asset && typeof asset === "object" && "uploadRef" in asset ? `resource:${asset.uploadRef}` : "") : []),
           ...(Array.isArray(row.plan.dataIds) ? row.plan.dataIds.map((id) => `data:${id}`) : [])];
         if (required.includes("") || required.some((stage) => row.stages[stage]?.status !== "confirmed")) throw conflict();

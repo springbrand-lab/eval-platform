@@ -59,10 +59,11 @@ export const observeChat: AppRouteHandler<typeof routes.observeChat> = async (c)
   const observation = c.env.observation;
   if (part === "messages") return ok(c, await observation.messages(chat));
   if (part === "tree") return ok(c, await observation.tree(chat));
-  const { limit, beforeSeq } = c.req.valid("query");
+  const { limit, afterSeq, throughSeq } = c.req.valid("query");
   return ok(c, await observation.trajectory(chat, {
     ...(limit === undefined ? {} : { limit }),
-    ...(beforeSeq === undefined ? {} : { beforeSeq }),
+    ...(afterSeq === undefined ? {} : { afterSeq }),
+    ...(throughSeq === undefined ? {} : { throughSeq }),
   }));
 };
 

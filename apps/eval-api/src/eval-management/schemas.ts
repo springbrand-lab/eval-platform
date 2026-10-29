@@ -2,6 +2,7 @@ import { RUN_OPERATIONS } from "@eval-platform/eval-contracts";
 import { platformIdSchema } from "@eval-platform/eval-dataset";
 import { z } from "zod";
 import { projectCreateSchema } from "../projects/schemas.js";
+import { OUTPUT_SCHEMA_BYTES } from "../limits.js";
 import { entityIdSchema, idempotencyKeySchema, unique } from "../routes/schemas.js";
 import { selectorSchema, targetsSchema } from "../routes/runs/runs.routes.js";
 
@@ -77,6 +78,13 @@ export const createAgentSchema = z.strictObject({
 });
 
 export const uploadRefSchema = platformIdSchema.describe("Opaque ref returned only by the authenticated byte ingress");
+/** Schema content is accepted only from the trusted backend, not an LLM-generated tool payload. */
+export const createOutputSchemaSchema = z.strictObject({
+  operationKey: idempotencyKeySchema.max(200),
+  name: z.string().trim().min(1).max(200),
+  description: z.string().trim().min(1).max(2_000),
+  content: z.string().max(OUTPUT_SCHEMA_BYTES),
+});
 const materialSelection = z.union([
   z.strictObject({ uploadRef: uploadRefSchema }),
   z.strictObject({ bundleId: platformIdSchema, materialId: platformIdSchema }),
@@ -130,9 +138,6 @@ export const getMetricsSchema = z.strictObject({
   datasetId: platformIdSchema.optional(), projectSampleId: entityIdSchema.optional(), samplingId: entityIdSchema.optional(),
   ...pageSchema,
 }).superRefine((value, ctx) => {
-  if (value.scope !== "project" && value.runId === undefined) {
-    ctx.addIssue({ code: "custom", message: "A Run ID is required for non-project Metrics" });
-  }
   const expected = { project: undefined, dataset: "datasetId", sample: "projectSampleId", sampling: "samplingId" }[value.scope];
   if (["datasetId", "projectSampleId", "samplingId"].some((key) =>
     (value[key as "datasetId" | "projectSampleId" | "samplingId"] !== undefined) !== (key === expected))) {
@@ -140,13 +145,9 @@ export const getMetricsSchema = z.strictObject({
   }
 });
 export const inspectCaseSchema = z.strictObject({
-  projectId: entityIdSchema, runId: entityIdSchema, samplingId: entityIdSchema,
-  evaluationId: entityIdSchema.optional(), trajectory: z.enum(["subject", "evaluator"]).optional(),
-  beforeSeq: z.number().int().positive().optional(), limit: z.number().int().min(1).max(20).default(10),
-}).refine((value) => value.trajectory !== "evaluator" || value.evaluationId !== undefined,
-  "Evaluator trajectory needs an evaluationId")
-  .refine((value) => value.beforeSeq === undefined || value.trajectory !== undefined,
-    "beforeSeq requires a trajectory");
+  projectId: entityIdSchema, runId: entityIdSchema.optional(), samplingId: entityIdSchema,
+  evaluationId: entityIdSchema.optional(),
+});
 
 /** The same schemas validate calls and generate the advertised input schemas. */
 export const managementSchemas = {
@@ -156,6 +157,7 @@ export const managementSchemas = {
   search_agent_resources: searchResourcesSchema,
   upload_agent_skill: uploadAgentSkillSchema,
   upload_agent_reference: uploadAgentReferenceSchema,
+  create_output_schema: createOutputSchemaSchema,
   create_agent: createAgentSchema,
   create_project: createProjectSchema,
   preview_run: previewRunSchema,
