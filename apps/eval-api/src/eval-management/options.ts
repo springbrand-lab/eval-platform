@@ -155,11 +155,44 @@ async function approvalProject(c: Context<AppBindings>, input: Options) {
   };
 }
 
+/** Display-only Project plan; prospective Run counts and raw frozen bodies stay out of model context. */
+async function projectDetail(c: Context<AppBindings>, input: Options) {
+  const projectId = input.projectId!;
+  const view = await c.var.services.projects.get(projectId);
+  if (!view || view.project.projectId !== projectId || view.project.ownerUserId !== c.var.user.id) {
+    throw new HttpError("PROJECT_NOT_FOUND");
+  }
+  const schemaId = view.evaluation?.plan.outputSchema.outputSchemaId;
+  const schema = schemaId ? await c.var.services.outputSchemas.get(schemaId) : null;
+  if (schema && schema.outputSchemaId !== schemaId) {
+    throw new HttpError("RESPONSE_INVALID", "The Project's output Schema identity changed");
+  }
+  return {
+    category: "project_detail",
+    project: { projectId, name: short(view.project.name) },
+    totalCases: view.projectSamples.length,
+    datasets: pageOf(view.datasets.map((dataset) => ({
+      datasetId: dataset.datasetId, name: short(dataset.name),
+    })), input.page, input.pageSize),
+    executionAgent: {
+      userAgentId: view.execution.subjectAgentConfig.sourceUserAgentId,
+      name: short(view.execution.subjectAgentConfig.name),
+    },
+    evaluation: view.evaluation ? {
+      userAgentId: view.evaluation.plan.evaluatorAgentConfig.sourceUserAgentId,
+      name: short(view.evaluation.plan.evaluatorAgentConfig.name),
+      outputSchemaId: schemaId, outputSchemaName: schema ? short(schema.name) : null,
+      locked: view.evaluation.lockedAt !== null,
+    } : null,
+  };
+}
+
 export async function listOptions(c: Context<AppBindings>, input: Options) {
   const { category, q, page, pageSize } = input;
   if (category === "approval_dataset") return approvalDataset(c, input);
   if (category === "approval_agent") return approvalAgent(c, input);
   if (category === "approval_project") return approvalProject(c, input);
+  if (category === "project_detail") return projectDetail(c, input);
   if (category === "input_limits") return { category, limits: INPUT_LIMITS };
   if (category === "credits") {
     const { availableUnits, topupRemainingUnits, otherRemainingUnits } =

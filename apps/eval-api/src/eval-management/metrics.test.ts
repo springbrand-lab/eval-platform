@@ -4,6 +4,30 @@ import { detail, summary } from "./metrics-fixture.js";
 import { DATASET, project, run, setupManagement, toolValue } from "./test-fixture.js";
 
 describe("run-scoped management Metrics", () => {
+  it("reads the current retained Project summary without requiring or inventing a Run", async () => {
+    const app = setupManagement();
+    app.services.metrics.getProjectOverview.mockResolvedValueOnce({
+      project, summary, runIds: [run.runId],
+      datasets: [{ dataset: { datasetId: DATASET, name: "Dataset",
+        projectSampleIds: ["sample-1"] }, summary }],
+      projectSamples: [{ ...detail.projectSample, samplingIds: ["sampling-1"], summary }],
+    });
+    const result = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project",
+    }));
+    expect(app.services.metrics.getProjectOverview).toHaveBeenCalledExactlyOnceWith({ projectId: project.projectId });
+    expect(result).toMatchObject({ runScope: "project_current",
+      summary: { counts: { samplings: 1, evaluations: 1 },
+        evaluationOutputs: { fields: { items: [{ jsonPointer: "/score", numeric: { mean: 8 } }] } } } });
+    expect(result).not.toHaveProperty("runId");
+    expect(JSON.stringify(result)).not.toMatch(/private Subject prompt|private raw resource snapshot|ownerUserId/u);
+    const invalid = await (await app.call("get_metrics", {
+      projectId: project.projectId, scope: "sampling", samplingId: "sampling-1",
+    })).json();
+    expect(invalid).toMatchObject({ result: { isError: true } });
+    expect(app.services.metrics.getSamplingDetail).not.toHaveBeenCalled();
+  });
+
   it("uses exactly the owned Run and existing Project summary; pages fixed hierarchy without input data", async () => {
     const app = setupManagement();
     app.services.metrics.getProjectOverview.mockResolvedValueOnce({

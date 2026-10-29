@@ -13,6 +13,68 @@ async function errorCode(response: Response) {
 }
 
 describe("trusted approval selections through the existing list_options tool", () => {
+  it("reads only the owned Project's frozen evaluation choice and paged Dataset names", async () => {
+    const app = setupManagement();
+    const view = {
+      project: { projectId: "project-1", name: "Project", ownerUserId: OWNER },
+      datasets: [{ datasetId: DATASET, name: "Frozen Dataset", description: "PRIVATE_DATASET",
+        projectSampleIds: ["sample-a", "sample-b"] }],
+      execution: { subjectAgentConfig: { sourceUserAgentId: FIRST, name: "Subject",
+        body: { setting: { systemPrompt: "PRIVATE_PROMPT" } } } },
+      evaluation: { lockedAt: null, plan: {
+        evaluatorAgentConfig: { sourceUserAgentId: SECOND, name: "Evaluator",
+          body: { setting: { systemPrompt: "PRIVATE_EVAL" } } },
+        outputSchema: { outputSchemaId: BUNDLE, digest: "PRIVATE_DIGEST" },
+      } },
+      projectSamples: [
+        { projectSampleId: "sample-a", data: { userPrompt: "PRIVATE_PROMPT" } },
+        { projectSampleId: "sample-b", data: { evalPrompt: "PRIVATE_EVAL" } },
+      ],
+    };
+    Object.assign(app.services.projects, { get: vi.fn(async () => view) });
+    const getOutputSchema = vi.fn(async () => ({
+      outputSchemaId: BUNDLE, name: "Bound scoring standard", schema: { raw: "PRIVATE_SCHEMA" },
+    }) as { outputSchemaId: string; name: string; schema: { raw: string } } | null);
+    Object.assign(app.services.outputSchemas, { get: getOutputSchema });
+    const input = { category: "project_detail", projectId: "project-1", pageSize: 1 };
+    const result = await toolValue(await app.call("list_options", input));
+    expect(result).toMatchObject({
+      category: "project_detail", project: { projectId: "project-1", name: "Project" },
+      totalCases: 2, datasets: { total: 1, pageSize: 1, items: [{ datasetId: DATASET, name: "Frozen Dataset" }] },
+      executionAgent: { userAgentId: FIRST, name: "Subject" },
+      evaluation: { userAgentId: SECOND, name: "Evaluator", outputSchemaId: BUNDLE,
+        outputSchemaName: "Bound scoring standard", locked: false },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE_|ownerUserId|projectSampleIds|userPrompt|schema.*raw/u);
+    expect(await errorCode(await app.call("list_options", { category: "project_detail" })))
+      .toContain("REQUEST_INVALID_INPUT");
+    expect(await errorCode(await app.call("list_options", { ...input, q: "Project" })))
+      .toContain("REQUEST_INVALID_INPUT");
+    getOutputSchema.mockResolvedValueOnce(null);
+    const deleted = await toolValue(await app.call("list_options", input));
+    expect(deleted.evaluation).toMatchObject({ outputSchemaId: BUNDLE, outputSchemaName: null });
+    view.project.ownerUserId = "other-owner";
+    expect(await errorCode(await app.call("list_options", input))).toContain("PROJECT_NOT_FOUND");
+  });
+
+  it("reports a Project without an evaluation plan without inventing a scoring standard", async () => {
+    const app = setupManagement();
+    Object.assign(app.services.projects, { get: vi.fn(async () => ({
+      project: { projectId: "project-1", name: "Execution-only", ownerUserId: OWNER },
+      datasets: [], projectSamples: [],
+      execution: { subjectAgentConfig: { sourceUserAgentId: FIRST, name: "Subject", body: {} } },
+      evaluation: null,
+    })) });
+    const getOutputSchema = vi.fn();
+    Object.assign(app.services.outputSchemas, { get: getOutputSchema });
+    const detail = await toolValue(await app.call("list_options", {
+      category: "project_detail", projectId: "project-1",
+    }));
+    expect(detail).toMatchObject({ category: "project_detail", totalCases: 0,
+      evaluation: null, datasets: { total: 0, items: [] } });
+    expect(getOutputSchema).not.toHaveBeenCalled();
+  });
+
   it("binds a selectable Agent's purpose to the complete owned SP config without exposing its body", async () => {
     const app = setupManagement();
     const config = { id: AGENT, user_id: OWNER, name: "Agent",

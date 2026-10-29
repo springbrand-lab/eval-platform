@@ -18,7 +18,7 @@ import { callTool } from "./tools.js";
 export const EVAL_MANAGEMENT_MCP_PATH = "/mcp/eval-management";
 const SERVER = { name: "eval-platform-eval-management", version: "1.0.0" };
 const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
-  list_options: "Page through Eval Agent, Dataset, Project and output format choices; read input limits or credit balance.",
+  list_options: "Page through Eval Agent, Dataset, Project and output format choices. project_detail with projectId reads the frozen evaluation plan and Schema choice, not results.",
   prepare_inputs: "Prepare a Prompt Dataset from an uploaded JSON/JSONL file and up to 50 per-row Subject/Evaluator resource mappings. Creates Material/Session Bundles separately and binds each Data before any Project can start. Reuse operationKey after an unknown result.",
   get_preparation: "Read bounded durable progress, IDs and stage receipts by operationKey; no prompt, bytes or attachment URL. Also reports uncertain Skill/Reference uploads.",
   search_agent_resources: "Search live Eval SP resources. Actions need supplierId or unassigned:true; use action_groups first. id reads an Action or Reference. Toolkit pages use cursor, not page. Never returns connection credentials.",
@@ -26,11 +26,11 @@ const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
   upload_agent_reference: "Upload one staged file as a public SP attachment, then create a Reference. Unknown writes are not blindly replayed or cleaned up; use get_preparation.",
   create_agent: "Create an execution or evaluation Agent from SP's default template and verified resources. Reuse operationKey after an unknown result.",
   create_project: "Create a Project and start its first Run under one durable idempotencyKey. Requires approval in the trusted adapter.",
-  preview_run: "Preview up to 50 fixed targets and counts for one existing Project. Preserve the selector and targets for submit_run.",
+  preview_run: "Preview up to 50 fixed targets and prospective counts for one existing Project; these are not completed scores. Preserve the selector and targets for submit_run.",
   submit_run: "Submit an existing Project Run with its original selector and up to 50 fixed preview targets, under one idempotencyKey.",
   stop_run: "Stop one explicitly identified Run belonging to the specified Project.",
   get_run: "Read Run status and a page of Sampling and Evaluation IDs, without full records.",
-  get_metrics: "Read existing Run-scoped Metrics with paged metadata. Provide datasetId, projectSampleId or samplingId for the matching non-project scope.",
+  get_metrics: "Read existing Project Metrics across currently retained facts when scope is project and runId is omitted; never call a preview a completed score. With runId, read that exact Run. Non-project scopes require runId and their matching ID. Metadata is paged.",
   inspect_case: "Inspect one Run's Sampling and optionally one Evaluation's bounded output. Evaluator trajectory requires evaluationId; trajectory pages contain metadata only, no messages or file bytes.",
 };
 const TOOLS = (Object.keys(managementSchemas) as (keyof typeof managementSchemas)[]).map((name) => ({

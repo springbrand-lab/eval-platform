@@ -48,7 +48,7 @@ export async function getMetrics(c: Context<AppBindings>, input: Query) {
   const { projectId, runId, scope, page, pageSize } = input;
   // Metrics' owner-scoped source validates both Project and selected Run in one read-only snapshot;
   // do not materialize the entire Run view (and its Evaluation bodies) a second time here.
-  const query = { projectId, runIds: [runId] };
+  const query = runId === undefined ? { projectId } : { projectId, runIds: [runId] };
   const metrics = c.var.services.metrics;
   const project = (value: { projectId: string; name: string }) => ({
     projectId: value.projectId, name: short(value.name),
@@ -61,7 +61,9 @@ export async function getMetrics(c: Context<AppBindings>, input: Query) {
     const view = await metrics.getProjectOverview(query);
     const datasetPage = pageOf(view.datasets, page, pageSize);
     const samplePage = pageOf(view.projectSamples, page, pageSize);
-    return { scope, project: project(view.project), runId, summary: metricSummary(view.summary, page, pageSize),
+    return { scope, project: project(view.project),
+      ...(runId === undefined ? { runScope: "project_current" } : { runId }),
+      summary: metricSummary(view.summary, page, pageSize),
       datasets: { ...datasetPage, items: datasetPage.items.map(({ dataset, summary }) => ({
         datasetId: dataset.datasetId, name: short(dataset.name), counts: summary.counts,
       })) },

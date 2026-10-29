@@ -15,7 +15,7 @@ export const resourceIdSchema = idempotencyKeySchema.max(255);
 const resourceIds = z.array(resourceIdSchema).max(50).refine(unique, "IDs must be unique").default([]);
 
 export const listOptionsSchema = z.strictObject({
-  category: z.enum(["agents", "datasets", "projects", "output_schemas", "input_limits", "credits",
+  category: z.enum(["agents", "datasets", "projects", "project_detail", "output_schemas", "input_limits", "credits",
     "approval_dataset", "approval_agent", "approval_project"]),
   q: search, ...pageSchema,
   datasetId: platformIdSchema.optional(),
@@ -25,7 +25,7 @@ export const listOptionsSchema = z.strictObject({
   projectSampleIds: z.array(entityIdSchema).max(50).refine(unique).optional(),
   samplingIds: z.array(entityIdSchema).max(50).refine(unique).optional(),
 }).superRefine((value, ctx) => {
-  const invalid = () => ctx.addIssue({ code: "custom", message: "Choose one bounded approval selection" });
+  const invalid = () => ctx.addIssue({ code: "custom", message: "Choose one bounded selection" });
   if (value.category === "approval_dataset") {
     if (!value.datasetId || value.userAgentId || value.projectId || value.projectSampleIds || value.samplingIds
       || value.q !== undefined || value.pageSize > 10) invalid();
@@ -36,6 +36,9 @@ export const listOptionsSchema = z.strictObject({
     if (!value.projectId || value.userAgentId || value.datasetId || value.dataIds || value.q !== undefined || value.pageSize > 10
       || !((value.projectSampleIds?.length ?? 0) + (value.samplingIds?.length ?? 0))
       || (value.projectSampleIds?.length ?? 0) + (value.samplingIds?.length ?? 0) > 50) invalid();
+  } else if (value.category === "project_detail") {
+    if (!value.projectId || value.userAgentId || value.datasetId || value.dataIds
+      || value.projectSampleIds || value.samplingIds || value.q !== undefined) invalid();
   } else if (value.datasetId || value.dataIds || value.userAgentId || value.projectId || value.projectSampleIds || value.samplingIds) {
     invalid();
   }
@@ -122,11 +125,14 @@ export const submitRunSchema = z.strictObject({
 export const stopRunSchema = z.strictObject({ projectId: entityIdSchema, runId: entityIdSchema });
 export const getRunSchema = z.strictObject({ runId: entityIdSchema, ...pageSchema });
 export const getMetricsSchema = z.strictObject({
-  projectId: entityIdSchema, runId: entityIdSchema,
+  projectId: entityIdSchema, runId: entityIdSchema.optional(),
   scope: z.enum(["project", "dataset", "sample", "sampling"]),
   datasetId: platformIdSchema.optional(), projectSampleId: entityIdSchema.optional(), samplingId: entityIdSchema.optional(),
   ...pageSchema,
 }).superRefine((value, ctx) => {
+  if (value.scope !== "project" && value.runId === undefined) {
+    ctx.addIssue({ code: "custom", message: "A Run ID is required for non-project Metrics" });
+  }
   const expected = { project: undefined, dataset: "datasetId", sample: "projectSampleId", sampling: "samplingId" }[value.scope];
   if (["datasetId", "projectSampleId", "samplingId"].some((key) =>
     (value[key as "datasetId" | "projectSampleId" | "samplingId"] !== undefined) !== (key === expected))) {
