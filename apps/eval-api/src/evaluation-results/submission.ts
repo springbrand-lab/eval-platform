@@ -15,13 +15,6 @@ export function verifyEvaluationSubmitToken(secret: string, evaluationId: string
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
-/** Constant-time comparison for the shared MCP Bearer token. */
-export function sameSecret(expected: string, actual: string): boolean {
-  const left = Buffer.from(expected);
-  const right = Buffer.from(actual);
-  return left.length === right.length && timingSafeEqual(left, right);
-}
-
 /** Metrics' validator in Runtime's terms; the MCP tool and the Worker reject exactly the same results. */
 export function createEvaluationResultCheck(): (schema: EvaluationOutputSchema, content: string) => EvaluationResultCheck {
   const validate = createEvaluationResultValidator();

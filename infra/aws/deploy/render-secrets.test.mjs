@@ -127,11 +127,15 @@ test("evidence and score credentials do not spread to import consumer", () => {
     EVAL_EVIDENCE_R2_SECRET_ACCESS_KEY: "evidence-only",
     LANGFUSE_SECRET_KEY: "score-only",
     EVAL_RESULT_MCP_TOKEN: "result-only",
+    EVAL_MANAGEMENT_MCP_TOKEN: "management-only",
   });
   assert.equal(result.status, 0, result.stderr);
   const services = JSON.parse(result.stdout).services;
   assert.equal(services["run-worker"].environment.EVAL_EVIDENCE_R2_SECRET_ACCESS_KEY, "evidence-only");
   assert.equal(services.api.environment.LANGFUSE_SECRET_KEY, "score-only");
+  assert.equal(services.api.environment.EVAL_MANAGEMENT_MCP_TOKEN, "management-only");
+  assert.equal(services["run-worker"].environment.EVAL_MANAGEMENT_MCP_TOKEN, undefined);
+  assert.equal(services["import-worker"].environment.EVAL_MANAGEMENT_MCP_TOKEN, undefined);
   assert.equal(services["import-worker"].environment.EVAL_EVIDENCE_R2_SECRET_ACCESS_KEY, undefined);
   assert.equal(services["import-worker"].environment.LANGFUSE_SECRET_KEY, undefined);
   assert.equal(services["import-worker"].environment.EVAL_RESULT_MCP_TOKEN, undefined);

@@ -19,6 +19,7 @@ import type { AgentPurposeRecord, AgentPurposeStore } from "./db/agent-purposes.
 import type { PostgresProjectStore } from "./db/project-store.js";
 import type { EvalSpAgentConfig, EvalSpClient, EvalSpMcpServer } from "./sp/client.js";
 import { EvalSpApiError } from "./sp/http.js";
+import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 
 /** SP's `createUserAgentConfigInputSchema` bounds the name to 200 characters. */
 const AGENT_CONFIG_NAME_CHARS = 200;
@@ -241,32 +242,80 @@ export function createAgentConfigService(input: {
     return { config: withMcpSelections(config, setting, mcpServers), evaluationMcpServerId: null };
   }
 
+  /** SP may fill in these optional saved-setting defaults. Never compare a replay using only its POST receipt. */
+  function savedSetting(setting: unknown): Record<string, unknown> | null {
+    const fields = bodyRecord(setting);
+    return fields && {
+      ...fields,
+      presetId: fields.presetId ?? null,
+      referenceFileIds: fields.referenceFileIds ?? [],
+      connectorIds: fields.connectorIds ?? [],
+      extensionIds: fields.extensionIds ?? [],
+    };
+  }
+
+  async function verifiedReplay(
+    receipt: EvalSpAgentConfig, expected: Record<string, unknown>, purpose: AgentPurpose,
+    evaluationMcpServerId: string | null,
+  ): Promise<EvalSpAgentConfig> {
+    // SP GET can return a deleted Agent. An active, owned list entry AND a fresh body are required.
+    if (!(await list()).some((item) => item.id === receipt.id && item.user_id === ownerUserId)) {
+      throw new HttpError("EVAL_SP_CONFLICT", "Agent creation key no longer names an active owned Agent");
+    }
+    const current = await sp.getAgentConfig(token, receipt.id);
+    const recorded = await purposes.get(receipt.id);
+    if (current.id !== receipt.id || current.user_id !== ownerUserId || current.is_default === true
+      || current.slug !== expected.slug
+      || current.name !== expected.name || (current.description ?? null) !== (expected.description ?? null)
+      || !equalJson(savedSetting(current.setting), savedSetting(expected.setting))
+      || recorded?.purpose !== purpose || recorded.evaluationMcpServerId !== evaluationMcpServerId) {
+      throw new HttpError("EVAL_SP_CONFLICT", "Agent creation key conflicts with the current Agent or purpose");
+    }
+    return current;
+  }
+
   return {
     list,
     async get(id: string) {
       await requireNotPendingImport(id);
       return sp.getAgentConfig(token, id);
     },
-    async create(body: unknown) {
+    async create(body: unknown, options?: { readonly verifyReplay: true }) {
       const { config, purpose } = createBody(body);
       const catalog = await purposeCatalog();
       const normalized = normalizePurposeConfig(config, purpose, catalog);
       const actual = purposeFromConfig({ ...normalized.config, id: "new" }, catalog);
       if (actual !== purpose) throw new AgentConfigPurposeMismatchError("new", purpose, actual);
-      // Ordinary create retains SP's body, status, slug replay and compensation semantics.
-      // Only the ordinary POST's affirmative insertion header can establish new native provenance.
-      const outcome = input.sources && sp.createAgentConfigOutcome
+      // The management entry requires SP's affirmative insertion/replay receipt before it can
+      // distinguish a new Agent from an existing slug. Ordinary HTTP still supports older SPs.
+      if (options && !sp.createAgentConfigOutcome) throw new HttpError("EVAL_SP_UNAVAILABLE", "Agent insertion receipt is required");
+      const outcome = sp.createAgentConfigOutcome
         ? await sp.createAgentConfigOutcome(token, normalized.config) : null;
       const created = outcome?.config ?? await sp.createAgentConfig(token, normalized.config);
+      if (options) {
+        if (outcome?.created === false) {
+          return verifiedReplay(created, normalized.config, purpose, normalized.evaluationMcpServerId);
+        }
+        if (outcome?.created !== true) throw new HttpError("EVAL_SP_UNAVAILABLE", "Agent insertion could not be confirmed");
+        if (created.user_id !== ownerUserId || created.slug !== normalized.config.slug) {
+          throw new HttpError("EVAL_SP_CONFLICT", "SP returned a different Agent");
+        }
+      }
       try {
         await purposes.upsert({
           userAgentId: created.id,
           purpose,
           evaluationMcpServerId: normalized.evaluationMcpServerId,
         });
-        if (outcome?.created === true && created.user_id === ownerUserId) await input.sources!.recordNative(created.id);
+        if (input.sources && outcome?.created === true && created.user_id === ownerUserId) {
+          await input.sources.recordNative(created.id);
+        }
       } catch (error) {
-        await Promise.allSettled([sp.deleteAgentConfig(token, created.id)]);
+        // A slug replay (false), missing header or legacy SP call may refer to a pre-existing
+        // Agent. Only a proven insertion owned by this account may ever be compensated.
+        if (outcome?.created === true && created.user_id === ownerUserId) {
+          await Promise.allSettled([sp.deleteAgentConfig(token, created.id)]);
+        }
         throw error;
       }
       return created;

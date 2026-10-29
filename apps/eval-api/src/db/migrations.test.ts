@@ -13,19 +13,23 @@ const appliedPrefix = [
   [1792440426582, "dba1521d998f78ed6739ea7606b922d73b6c58c019a67f3b97114167514c9bf7"],
   [1792517619186, "fbd9e2a5e49739c4d0887eba6c95696f54167a718c3a975525165f96376e3a92"],
   [1793176731034, "3cab810e0d98f97d930ce9638a9afac0bb4dcd25ce4a49837be8a79f19f1afe8"],
+  [1793187963783, "7b409f16a0b9fb06a4072ce7389a46c15e879402a02b7f8b305d7775e9f494ea"],
 ];
 
 async function metadata(name: string) {
   return JSON.parse(await readFile(path.join(migrationsFolder, "meta", name), "utf8"));
 }
 
-describe("offline Dashboard migration integrity", () => {
-  it("preserves the immutable migration history and appends one new migration", async () => {
+describe("offline Dashboard and management migration integrity", () => {
+  it("preserves the immutable Dashboard history and appends management after it", async () => {
     const migrations = readMigrationFiles({ migrationsFolder });
     expect(migrations.slice(0, appliedPrefix.length).map((migration) => [migration.folderMillis, migration.hash])).toEqual(appliedPrefix);
     expect(migrations).toHaveLength(appliedPrefix.length + 1);
     const journal = await metadata("_journal.json");
-    expect(journal.entries.at(-1)).toMatchObject({ idx: 8, tag: "0008_dashboard_data_selection", breakpoints: true });
+    expect(journal.entries).toHaveLength(migrations.length);
+    expect(journal.entries[8]).toMatchObject({ idx: 8, tag: "0008_dashboard_data_selection", breakpoints: true });
+    expect(journal.entries.at(-1)).toMatchObject({ idx: 9, tag: "0009_management_preparation", breakpoints: true });
+    expect(journal.entries.map((entry: { when: number }) => entry.when)).toEqual(migrations.map((migration) => migration.folderMillis));
     expect(migrations.at(-1)!.folderMillis).toBeGreaterThan(migrations.at(-2)!.folderMillis);
   });
 
@@ -48,8 +52,9 @@ describe("offline Dashboard migration integrity", () => {
   });
 
   it("provides self-contained DDL with no runtime bind parameters", () => {
-    const migration = readMigrationFiles({ migrationsFolder }).at(-1)!;
-    expect(migration.sql.filter((statement) => /\$\d+/u.test(statement))).toEqual([]);
+    for (const migration of readMigrationFiles({ migrationsFolder }).slice(8)) {
+      expect(migration.sql.filter((statement) => /\$\d+/u.test(statement))).toEqual([]);
+    }
   });
 
   it("adds only an initially empty exclusion set without changing existing facts or migration history", async () => {
@@ -62,6 +67,20 @@ describe("offline Dashboard migration integrity", () => {
     for (const [name, table] of Object.entries(previous.tables)) {
       if (name !== "public.eval_dashboards") expect(current.tables[name]).toEqual(table);
     }
+    expect(readMigrationFiles({ migrationsFolder })[8]?.sql.join(" ")).not.toMatch(/\b(DROP|DELETE|TRUNCATE)\b/iu);
+  });
+
+  it("appends only the two management tables after Dashboard selection", async () => {
+    const previous = await metadata("0008_snapshot.json");
+    const current = await metadata("0009_snapshot.json");
+    expect(current.prevId).toBe(previous.id);
+    const added = Object.keys(current.tables).filter((key) => !(key in previous.tables));
+    expect(added.sort()).toEqual(["public.eval_management_operations", "public.eval_management_uploads"]);
+    expect(Object.fromEntries(Object.entries(current.tables).filter(([key]) => !added.includes(key)))).toEqual(previous.tables);
+    expect(current.tables["public.eval_management_operations"].compositePrimaryKeys)
+      .toHaveProperty("eval_management_operations_pk");
+    expect(current.tables["public.eval_management_uploads"].indexes)
+      .toHaveProperty("eval_management_uploads_expiry_idx");
     expect(readMigrationFiles({ migrationsFolder }).at(-1)?.sql.join(" ")).not.toMatch(/\b(DROP|DELETE|TRUNCATE)\b/iu);
   });
 });

@@ -44,13 +44,75 @@ describe("evaluation result MCP Server", () => {
     expect(list.result.tools[0]!.description).toContain("Call this MCP tool directly");
     expect(list.result.tools[0]!.description).toContain("do not invoke it through codemode or the execution tool");
     expect(list.result.tools[0]!.inputSchema.required).toEqual(["evaluationId", "submitToken", "result"]);
-    expect(await (await app.rpc({ jsonrpc: "2.0", id: 3, method: "nope" })).json()).toMatchObject({ error: { code: -32601 } });
-    expect((await app.request(EVALUATION_RESULTS_MCP_PATH, { method: "GET", headers: { Authorization: `Bearer ${TOKEN}` } })).status).toBe(405);
+    expect(await (await app.rpc({ jsonrpc: "2.0", id: 3, method: "ping" })).json())
+      .toEqual({ jsonrpc: "2.0", id: 3, result: {} });
+    expect(await (await app.rpc({ jsonrpc: "2.0", id: 4, method: "nope" })).json())
+      .toEqual({ jsonrpc: "2.0", id: 4, error: { code: -32601, message: "Method not found: nope" } });
+    for (const method of ["GET", "DELETE"]) {
+      const response = await app.request(EVALUATION_RESULTS_MCP_PATH, {
+        method, headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      expect(response.status).toBe(405);
+      expect(response.headers.get("Allow")).toBe("POST");
+    }
+  });
+
+  it("negotiates all four supported protocol versions and defaults unknown or missing versions", async () => {
+    const app = setup();
+    for (const version of ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]) {
+      const initialized = await app.rpc({ jsonrpc: "2.0", id: 5, method: "initialize", params: { protocolVersion: version } });
+      expect(initialized.status).toBe(200);
+      expect(await initialized.json()).toEqual({ jsonrpc: "2.0", id: 5, result: {
+        protocolVersion: version, capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: "eval-platform-evaluation-results", version: "1.0.0" },
+      } });
+    }
+    for (const params of [{ protocolVersion: "unsupported" }, {}]) {
+      const initialized = await app.rpc({ jsonrpc: "2.0", id: 5, method: "initialize", params });
+      expect(await initialized.json()).toMatchObject({ result: { protocolVersion: "2025-11-25" } });
+    }
   });
 
   it("rejects a wrong Bearer token and is absent when not configured", async () => {
-    expect((await setup().rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, "x".repeat(40))).status).toBe(401);
+    const app = setup();
+    expect((await app.rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, "x".repeat(40))).status).toBe(401);
+    expect(app.submissions.target).not.toHaveBeenCalled();
     expect((await setup(undefined, false).rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" })).status).toBe(404);
+  });
+
+  it("rejects malformed JSON and envelopes before dispatch", async () => {
+    const app = setup();
+    const malformed = await app.request(EVALUATION_RESULTS_MCP_PATH, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+      body: '{"jsonrpc":',
+    });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+    for (const body of [[], { jsonrpc: "1.0", id: 7, method: "tools/call", params: { name: "submit_evaluation", arguments: valid } }]) {
+      const invalid = await app.rpc(body);
+      expect(invalid.status).toBe(400);
+      expect(await invalid.json()).toEqual({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
+    }
+    expect(app.submissions.target).not.toHaveBeenCalled();
+    expect(app.submissions.save).not.toHaveBeenCalled();
+  });
+
+  it("never executes a notification or exposes the management tool catalog", async () => {
+    const app = setup();
+    for (const id of [undefined, null]) {
+      const notice = await app.rpc({ jsonrpc: "2.0", ...(id === undefined ? {} : { id }),
+        method: "tools/call", params: { name: "submit_evaluation", arguments: valid } });
+      expect(notice.status).toBe(202);
+      expect(await notice.text()).toBe("");
+    }
+    const forbidden = await app.rpc({ jsonrpc: "2.0", id: 8, method: "tools/call",
+      params: { name: "create_project", arguments: {} } });
+    expect(forbidden.status).toBe(200);
+    expect(await forbidden.json()).toEqual({ jsonrpc: "2.0", id: 8,
+      error: { code: -32602, message: "Unknown tool: create_project" } });
+    expect(app.submissions.target).not.toHaveBeenCalled();
+    expect(app.submissions.save).not.toHaveBeenCalled();
   });
 
   it("saves a valid result for a running Evaluation", async () => {

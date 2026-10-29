@@ -11,6 +11,8 @@ import dataRouter from "./routes/data/data.index.js";
 import dashboardRouter from "./routes/dashboards/dashboards.index.js";
 import datasetRouter from "./routes/datasets/datasets.index.js";
 import evaluationResultsMcpRouter from "./evaluation-results/mcp.js";
+import evalManagementMcpRouter from "./eval-management/mcp.js";
+import managementUploadRouter from "./eval-management/upload-route.js";
 import healthRouter from "./routes/health/health.index.js";
 import inputLimitsRouter from "./routes/input-limits/input-limits.index.js";
 import materialBundleRouter from "./routes/material-bundles/material-bundles.index.js";
@@ -29,6 +31,9 @@ export function createRoutes(logger: pino.Logger) {
   app.route("/", healthRouter);
   // Called by Eval SP's Evaluator runtime with its own Bearer token, not by Eval Web.
   app.route("/", evaluationResultsMcpRouter);
+  // Trusted Moss service-to-service calls only: distinct token and tool catalog, never an Agent Config.
+  app.route("/", evalManagementMcpRouter);
+  app.route("/", managementUploadRouter);
   app.route("/api/me", sessionRouter);
   app.route("/api/input-limits", inputLimitsRouter);
   app.route("/api/dashboards", dashboardRouter);

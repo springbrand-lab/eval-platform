@@ -1,16 +1,10 @@
-import { timingSafeEqual } from "node:crypto";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 import type { MiddlewareHandler } from "hono";
+import { sameSecret } from "../lib/secret.js";
 import type { AppBindings, WebActor } from "../lib/types.js";
 
 export const WEB_TOKEN_HEADER = "X-Eval-Web-Token";
 export const ACTOR_HEADER = "X-Eval-Actor";
-
-function sameSecret(given: string, expected: string): boolean {
-  const left = Buffer.from(given);
-  const right = Buffer.from(expected);
-  return left.length === right.length && timingSafeEqual(left, right);
-}
 
 /** The takt user the eval-web Worker verified; URI-encoded JSON `{id, name}`. Invalid values are ignored. */
 export function readActor(header: string | undefined): WebActor | undefined {
@@ -33,7 +27,7 @@ export const webGateway: MiddlewareHandler<AppBindings> = async (c, next) => {
   const expected = c.env.webApiToken;
   if (expected !== undefined) {
     const given = c.req.header(WEB_TOKEN_HEADER);
-    if (!given || !sameSecret(given, expected)) throw new HttpError("AUTH_UNAUTHENTICATED", "Requests must come through Eval Web");
+    if (!given || !sameSecret(expected, given)) throw new HttpError("AUTH_UNAUTHENTICATED", "Requests must come through Eval Web");
   }
   const actor = readActor(c.req.header(ACTOR_HEADER));
   if (actor) c.set("actor", actor);

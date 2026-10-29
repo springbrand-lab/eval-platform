@@ -324,3 +324,74 @@ describe("Agent purpose filtering", () => {
     });
   });
 });
+
+describe("management Agent creation replay safety", () => {
+  const slug = "eval-mgmt-operation-digest";
+  const existing = { ...config("agent", { mcpServers: [] }), slug, name: "Executor", description: null };
+  const body = { slug, name: "Executor", description: null, purpose: "execution", setting: { mcpServers: [] } };
+
+  it("returns only an active owned Agent whose fresh body and recorded purpose match", async () => {
+    const agents = service([existing], []);
+    await agents.purposeStore.upsert({ userAgentId: existing.id, purpose: "execution", evaluationMcpServerId: null });
+    const receipt = vi.fn(async () => ({ config: existing, created: false }));
+    Object.assign(agents.sp, { createAgentConfigOutcome: receipt });
+
+    await expect(agents.create(body, { verifyReplay: true })).resolves.toEqual(existing);
+    expect(receipt).toHaveBeenCalledWith("session", { slug, name: "Executor", description: null, setting: { mcpServers: [] } });
+    expect(agents.sp.deleteAgentConfig).not.toHaveBeenCalled();
+    expect(agents.sp.createAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it("checks the result-submission MCP binding on an Evaluation Agent replay without changing it", async () => {
+    const evaluator = { ...existing, setting: { mcpServers: [{ serverId: resultMcp.id }] } };
+    const agents = service([evaluator], [resultMcp]);
+    await agents.purposeStore.upsert({ userAgentId: evaluator.id, purpose: "evaluation",
+      evaluationMcpServerId: resultMcp.id });
+    Object.assign(agents.sp, { createAgentConfigOutcome: vi.fn(async () => ({ config: evaluator, created: false })) });
+    await expect(agents.create({ ...body, purpose: "evaluation" }, { verifyReplay: true })).resolves.toEqual(evaluator);
+    expect(agents.sp.deleteAgentConfig).not.toHaveBeenCalled();
+    await agents.purposeStore.upsert({ userAgentId: evaluator.id, purpose: "evaluation",
+      evaluationMcpServerId: "other-result-server" });
+    await expect(agents.create({ ...body, purpose: "evaluation" }, { verifyReplay: true }))
+      .rejects.toMatchObject({ code: "EVAL_SP_CONFLICT" });
+    expect(agents.sp.deleteAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing-purpose", "different-purpose", "changed-body", "archived", "other-owner", "system-default"] as const)(
+    "refuses %s without rewriting the existing Agent or deleting it", async (failure) => {
+      const agents = service([existing], []);
+      if (failure !== "missing-purpose") {
+        await agents.purposeStore.upsert({ userAgentId: existing.id,
+          purpose: failure === "different-purpose" ? "evaluation" : "execution", evaluationMcpServerId: null });
+      }
+      Object.assign(agents.sp, { createAgentConfigOutcome: vi.fn(async () => ({ config: existing, created: false })) });
+      if (failure === "changed-body") agents.sp.getAgentConfig.mockResolvedValue({ ...existing, setting: { mcpServers: [], systemPrompt: "changed" } });
+      if (failure === "archived") agents.sp.listAgentConfigs.mockResolvedValue([]);
+      if (failure === "other-owner") agents.sp.getAgentConfig.mockResolvedValue({ ...existing, user_id: "foreign" });
+      if (failure === "system-default") agents.sp.getAgentConfig.mockResolvedValue({ ...existing, is_default: true });
+
+      await expect(agents.create(body, { verifyReplay: true })).rejects.toMatchObject({ code: "EVAL_SP_CONFLICT" });
+      expect(agents.sp.deleteAgentConfig).not.toHaveBeenCalled();
+      expect(agents.sp.updateAgentConfig).not.toHaveBeenCalled();
+      if (failure === "missing-purpose") expect(await agents.purposeStore.get(existing.id)).toBeNull();
+      else expect(await agents.purposeStore.get(existing.id)).toMatchObject({
+        purpose: failure === "different-purpose" ? "evaluation" : "execution",
+      });
+    },
+  );
+
+  it("refuses an unknown creation result instead of writing a purpose or deleting an Agent", async () => {
+    const agents = service([], []);
+    Object.assign(agents.sp, { createAgentConfigOutcome: vi.fn(async () => ({ config: existing, created: null })) });
+    await expect(agents.create(body, { verifyReplay: true })).rejects.toMatchObject({ code: "EVAL_SP_UNAVAILABLE" });
+    expect(await agents.purposeStore.get(existing.id)).toBeNull();
+    expect(agents.sp.deleteAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it("never compensates an unproven legacy SP response on ordinary create failure", async () => {
+    const agents = service([], []);
+    vi.spyOn(agents.purposeStore, "upsert").mockRejectedValue(new Error("purpose DB failure"));
+    await expect(agents.create(body)).rejects.toThrow("purpose DB failure");
+    expect(agents.sp.deleteAgentConfig).not.toHaveBeenCalled();
+  });
+});

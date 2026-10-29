@@ -10,6 +10,8 @@ import type { createPostgresResourceSnapshotReader } from "../db/attempt-resourc
 import type { createPostgresObservationReader } from "../db/observation.js";
 import type { createOutputSchemaCatalog } from "../db/output-schemas.js";
 import type { EvaluationSubmissionStore } from "../db/evaluation-submissions.js";
+import type { ManagementFiles } from "../eval-management/files.js";
+import type { ManagementStore } from "../eval-management/store.js";
 import type { BundleCatalogs } from "../db/resource-catalog.js";
 import type { ProjectRunView } from "../db/run-view.js";
 import type { createPostgresProjectRunControl } from "../db/runtime.js";
@@ -79,6 +81,13 @@ export interface ApiRuntime {
   readonly evaluationResults?: {
     readonly token: string;
     readonly submissions: Pick<EvaluationSubmissionStore, "target" | "save">;
+  };
+  /** The trusted Moss management MCP; absent unless its independent Secret is set. */
+  readonly evalManagement?: {
+    readonly token: string;
+    readonly files: ManagementFiles;
+    readonly store: ManagementStore;
+    readonly spOrigin: string;
   };
 }
 

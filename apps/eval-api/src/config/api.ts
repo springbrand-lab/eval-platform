@@ -37,10 +37,21 @@ const apiEnvSchema = databaseEnvSchema.extend({
   EVAL_API_PORT: portSchema.default(8788),
   /** Bearer token of the Evaluator result submission MCP Server; also keys every per-Evaluation submit token. */
   EVAL_RESULT_MCP_TOKEN: z.string().min(32).optional(),
+  /** Bearer token for the separate Moss management MCP; never included in an Agent Config. */
+  EVAL_MANAGEMENT_MCP_TOKEN: z.string().min(32).optional(),
   /** Lets the API re-sync a Run's scores; the Run Worker syncs them as Evaluations finish. */
   ...langfuseEnvShape,
   ...agentImportEnvShape,
-}).superRefine(refineLangfuseEnv).superRefine(refineAgentImportEnv).transform(withFixedAgentImportSource);
+}).superRefine(refineLangfuseEnv).superRefine(refineAgentImportEnv).superRefine((value, context) => {
+  const token = value.EVAL_MANAGEMENT_MCP_TOKEN;
+  if (token && [
+    value.EVAL_RESULT_MCP_TOKEN, value.EVAL_WEB_API_TOKEN, value.EVAL_SP_SERVICE_SESSION_TOKEN,
+    value.EVAL_SP_ADMIN_TOKEN, value.SP_PLATFORM_RESOURCE_ADMIN_TOKEN,
+  ].includes(token)) {
+    context.addIssue({ code: "custom", path: ["EVAL_MANAGEMENT_MCP_TOKEN"],
+      message: "management MCP token must differ from every other configured credential" });
+  }
+}).transform(withFixedAgentImportSource);
 
 export type ApiConfig = Omit<ReturnType<typeof takeLangfuseConfig<z.output<typeof apiEnvSchema>>>,
   "EVAL_SP_SOURCE_BRANCH" | "EVAL_SP_SOURCE_COMMIT"> & {
