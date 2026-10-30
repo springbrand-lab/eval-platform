@@ -1,7 +1,10 @@
-import { createDatasetService, DatasetEntityNotFoundError, DatasetIdentityConflictError } from "@eval-platform/eval-dataset";
+import { createHash } from "node:crypto";
+import { createDatasetService, DatasetEntityNotFoundError, DatasetIdentityConflictError,
+  parsePromptDatasetUpload } from "@eval-platform/eval-dataset";
 import { digestJson } from "@eval-platform/eval-runtime";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { preparationFingerprint, validPreparationPlan, validPreparationStages } from "../eval-management/preparation-plan.js";
 import { createPostgresManagementStore } from "../eval-management/store.js";
 import { createProjectService } from "../projects/service.js";
 import { bindProjectSamples } from "../projects/snapshot.js";
@@ -70,19 +73,36 @@ describe.skipIf(!connection)("PostgreSQL Dataset upload order and bounded manage
     await database.db.execute(sql`UPDATE eval_datasets SET original_order_intact = NULL WHERE dataset_id = ${datasetId}`);
   }
 
-  async function insertOldPreparation(datasetId: string, dataIds: readonly string[] = [FIRST, SECOND],
+  async function insertCompletedPreparation(datasetId: string, dataIds: readonly string[] = [FIRST, SECOND],
     status: "pending" | "completed" = "completed", ownerUserId = OWNER) {
+    const operationKey = crypto.randomUUID();
+    const promptUploadRef = crypto.randomUUID();
+    const bytes = Buffer.from(prompt.content, "utf8");
+    // A completed historical plan keeps the original upload's immutable byte facts after staging expires.
+    const uploadFact = { uploadRef: promptUploadRef, kind: "prompt" as const, name: "tasks.jsonl",
+      mediaType: "application/x-ndjson", byteSize: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex") };
+    const cases = dataIds.map(() => ({}));
+    const request = { operationKey, promptUploadRef, name: prompt.name, description: prompt.description,
+      format: prompt.format, cases };
+    const rows = parsePromptDatasetUpload(prompt).data;
+    const rowDigests = await Promise.all(dataIds.map(async (_, index) => {
+      const original = await digestJson(rows[index]!);
+      return { original, bound: original }; // No resource bindings for these imported rows.
+    }));
+    const plan = { version: 3 as const, datasetId, dataIds, promptUploadRef, uploadFact,
+      name: prompt.name, description: prompt.description, format: prompt.format, cases, rowDigests };
+    const stages = { dataset: { status: "confirmed" as const, receipt: { datasetId, dataIds } },
+      ...Object.fromEntries(dataIds.map((dataId) => [`data:${dataId}`, {
+        status: "confirmed" as const, receipt: { dataId },
+      }])) };
+    const fingerprint = preparationFingerprint(ownerUserId, request, uploadFact, rowDigests);
+    expect(validPreparationPlan(ownerUserId, operationKey, fingerprint, plan)).toBe(true);
+    expect(validPreparationStages(plan, stages, true)).toBe(true);
     await database.db.insert(managementOperations).values({
-      ownerUserId, operationKey: crypto.randomUUID(), kind: "prepare",
-      fingerprint: "a".repeat(64), status,
-      plan: { version: 1, datasetId, dataIds, promptUploadRef: crypto.randomUUID(),
-        name: prompt.name, description: prompt.description, format: prompt.format,
-        cases: dataIds.map(() => ({})), assets: [] },
-      stages: { dataset: { status: "confirmed", receipt: { datasetId, dataIds } },
-        ...Object.fromEntries(dataIds.map((dataId) => [`data:${dataId}`, {
-          status: "confirmed", receipt: { dataId },
-        }])) },
+      ownerUserId, operationKey, kind: "prepare", fingerprint, status, plan, stages,
     });
+    return { operationKey, fingerprint, plan, stages };
   }
 
   it("persists file row 1 ahead of a smaller UUID in all Dataset/Project reads and keeps the first replay order", async () => {
@@ -178,7 +198,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset upload order and bounded manage
     });
     expect((await database.db.select().from(datasetTable).where(eq(datasetTable.datasetId, id)))[0]?.originalOrderIntact)
       .toBe(false);
-    await insertOldPreparation(id); // A completed plan cannot override changed known positions.
+    await insertCompletedPreparation(id); // Even a valid completed v3 plan cannot restore invalidated provenance.
     expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
 
     expect((await projectStore.readSelection([{ datasetId: id, dataIds: [FIRST] }]))[0]?.data.map(({ dataId }) => dataId))
@@ -200,7 +220,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset upload order and bounded manage
     expect((await database.db.select().from(datasetData).where(eq(datasetData.datasetId, id)))
       .map(({ dataId, position }) => ({ dataId, position })).sort((a, b) => a.position! - b.position!))
       .toEqual([{ dataId: SECOND, position: 0 }, { dataId: FIRST, position: 1 }]);
-    await insertOldPreparation(id);
+    await insertCompletedPreparation(id);
     expect(await members.listDatasetData(OWNER, id, 1, 5)).toMatchObject({
       order: "unknown", total: 2, items: [{ dataId: SECOND }, { dataId: FIRST }],
     });
@@ -234,13 +254,16 @@ describe.skipIf(!connection)("PostgreSQL Dataset upload order and bounded manage
       .toBe(true);
   });
 
-  it("recovers an old completed Moss plan only for the same owner and full membership", async () => {
+  it("recovers an owner-scoped completed v3 Moss plan only for its exact legacy membership", async () => {
     const imported = await importPlanned();
     const id = imported.dataset.datasetId;
     await legacyMembers(id);
     const { datasets, members, projectStore, projects } = services();
     expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
-    await insertOldPreparation(id);
+    const proof = await insertCompletedPreparation(id);
+    expect([FIRST, SECOND].sort()).toEqual([SECOND, FIRST]); // File row 1 is not UUID order.
+    expect(await Promise.all((await datasets.listData(id)).map(async ({ dataId: _id, ...row }) => digestJson(row))))
+      .toEqual(proof.plan.rowDigests.map(({ original }) => original));
     expect(await members.listDatasetData(OWNER, id, 1, 5)).toMatchObject({
       order: "upload", total: 2, items: [{ dataId: FIRST }, { dataId: SECOND }],
     });
@@ -260,7 +283,51 @@ describe.skipIf(!connection)("PostgreSQL Dataset upload order and bounded manage
     expect(changed.items.map((item) => item.dataId)).toEqual([SECOND, FIRST, extra.dataId]);
   });
 
-  it("never invents row 1 for legacy UI imports, partial preparation, foreign or deleted Datasets", async () => {
+  it("does not promote completed v1/v2 or tampered v3 hashes to upload order", async () => {
+    const id = (await importPlanned()).dataset.datasetId;
+    await legacyMembers(id);
+    const { members } = services();
+    const { operationKey, fingerprint, plan, stages } = await insertCompletedPreparation(id);
+    const saved = and(eq(managementOperations.ownerUserId, OWNER), eq(managementOperations.operationKey, operationKey));
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("upload");
+
+    for (const version of [1, 2]) {
+      // Even retaining v3 hashes and receipts must not make an unshipped older version authoritative.
+      await database.db.update(managementOperations).set({ plan: { ...plan, version } }).where(saved);
+      expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
+    }
+    await database.db.update(managementOperations).set({ plan: { ...plan, rowDigests: [] } }).where(saved);
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
+
+    const wrongRowDigest = plan.rowDigests[1]!.original; // A real hash, but for the wrong file row.
+    expect(wrongRowDigest).not.toBe(plan.rowDigests[0]!.original);
+    await database.db.update(managementOperations).set({ plan: { ...plan, rowDigests: [
+      { ...plan.rowDigests[0]!, original: wrongRowDigest }, ...plan.rowDigests.slice(1),
+    ] } }).where(saved);
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
+
+    const wrongUploadHash = createHash("sha256").update(`${prompt.content}\n`).digest("hex");
+    expect(wrongUploadHash).not.toBe(plan.uploadFact.sha256);
+    await database.db.update(managementOperations).set({ plan: { ...plan, uploadFact: {
+      ...plan.uploadFact, sha256: wrongUploadHash,
+    } } }).where(saved);
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
+
+    await database.db.update(managementOperations).set({ plan, fingerprint:
+      preparationFingerprint(OTHER, { operationKey, promptUploadRef: plan.promptUploadRef,
+        name: plan.name, description: plan.description, format: plan.format, cases: plan.cases },
+      plan.uploadFact, plan.rowDigests),
+    }).where(saved);
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
+    await database.db.update(managementOperations).set({ fingerprint, stages: {
+      ...stages, [`data:${SECOND}`]: { status: "attempted" as const },
+    } }).where(saved);
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
+    await database.db.update(managementOperations).set({ stages }).where(saved);
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("upload");
+  });
+
+  it("never invents row 1 for legacy UI imports or a pending/partial preparation", async () => {
     const imported = await importPlanned();
     const id = imported.dataset.datasetId;
     await legacyMembers(id);
@@ -268,12 +335,26 @@ describe.skipIf(!connection)("PostgreSQL Dataset upload order and bounded manage
     expect(await members.listDatasetData(OWNER, id, 1, 5)).toMatchObject({
       order: "unknown", items: [{ dataId: SECOND }, { dataId: FIRST }],
     });
-    await insertOldPreparation(id, [FIRST, SECOND], "pending");
+    const partial = await insertCompletedPreparation(id, [FIRST], "pending");
     await expect(members.listDatasetData(OWNER, id, 1, 5)).rejects.toMatchObject({ code: "EVAL_SP_CONFLICT" });
-    await database.db.update(managementOperations).set({ status: "completed", plan: { version: 1, datasetId: id,
-      dataIds: [FIRST], cases: [{}], assets: [] } });
+    await database.db.update(managementOperations).set({ status: "completed" })
+      .where(and(eq(managementOperations.ownerUserId, OWNER), eq(managementOperations.operationKey, partial.operationKey)));
     expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
     await expect(members.listDatasetData(OTHER, id, 1, 5)).rejects.toMatchObject({ code: "DATASET_NOT_FOUND" });
+    await datasets.deleteDataset(id);
+    await expect(members.listDatasetData(OWNER, id, 1, 5)).rejects.toMatchObject({ code: "DATASET_NOT_FOUND" });
+  });
+
+  it("cannot use a foreign completed plan or read a deleted Dataset even with an owned v3 proof", async () => {
+    const id = (await importPlanned()).dataset.datasetId;
+    await legacyMembers(id);
+    const { datasets, members } = services();
+    await insertCompletedPreparation(id, [FIRST, SECOND], "completed", OTHER);
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
+    await expect(members.listDatasetData(OTHER, id, 1, 5)).rejects.toMatchObject({ code: "DATASET_NOT_FOUND" });
+
+    await insertCompletedPreparation(id);
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("upload");
     await datasets.deleteDataset(id);
     await expect(members.listDatasetData(OWNER, id, 1, 5)).rejects.toMatchObject({ code: "DATASET_NOT_FOUND" });
   });

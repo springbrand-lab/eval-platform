@@ -4,6 +4,7 @@ import path from "node:path";
 import { summarizeResourceSnapshot, type AgentResourceSnapshot } from "@eval-platform/eval-contracts";
 import { compactResourceSnapshot } from "@eval-platform/eval-metrics";
 import { eq, sql } from "drizzle-orm";
+import { readMigrationFiles } from "drizzle-orm/migrator";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createPostgresManagementStore } from "../eval-management/store.js";
@@ -131,7 +132,7 @@ describe.skipIf(!connection)("Dataset membership order migration", () => {
     await migrateDatabase(db, { migrationsFolder });
     const history = (await db.execute(sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`)).rows;
     expect(history.slice(0, before.length)).toEqual(before);
-    expect(history).toHaveLength(13);
+    expect(history).toHaveLength(readMigrationFiles({ migrationsFolder }).length);
     expect((await db.select().from(datasetData).where(eq(datasetData.datasetId, datasetId)))
       .map((row) => row.position)).toEqual([null, null]);
     expect((await db.select().from(datasets).where(eq(datasets.datasetId, datasetId)))[0]?.originalOrderIntact)
@@ -187,7 +188,7 @@ describe.skipIf(!connection)("Dataset original-order provenance upgrade", () => 
     await migrateDatabase(db, { migrationsFolder });
     const history = (await db.execute(sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`)).rows;
     expect(history.slice(0, before.length)).toEqual(before);
-    expect(history).toHaveLength(13);
+    expect(history).toHaveLength(readMigrationFiles({ migrationsFolder }).length);
     expect((await db.select().from(datasetData).where(eq(datasetData.datasetId, datasetId)))
       .map(({ position }) => position).sort()).toEqual([0, 1]);
     expect((await db.select().from(datasets).where(eq(datasets.datasetId, datasetId)))[0]?.originalOrderIntact)

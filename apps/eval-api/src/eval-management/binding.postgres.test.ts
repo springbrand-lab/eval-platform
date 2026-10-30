@@ -363,7 +363,7 @@ describe.skipIf(!connection)("PostgreSQL existing Data binding and active resour
       return uploadId;
     };
     const approval = await toolValue(await call("list_options", {
-      category: "approval_dataset", datasetId: dataset.datasetId, dataIds: [original.dataId],
+      category: "approval_dataset", datasetId: dataset.datasetId, dataIds: [original.dataId], page: 1, pageSize: 5,
     }));
     const originalDigest = (approval.items as Array<{ contentDigest: string }>)[0]!.contentDigest;
     expect(originalDigest).toBe(await digestJson(original));
