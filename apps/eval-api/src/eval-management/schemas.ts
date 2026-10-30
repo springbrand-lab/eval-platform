@@ -146,17 +146,32 @@ export const prepareInputsSchema = z.strictObject({
     initialSession: sessionSelection.optional(),
   })).min(1).max(50),
 });
-export const bindDataResourcesSchema = z.strictObject({
-  operationKey: idempotencyKeySchema.max(200),
-  datasetId: platformIdSchema,
+const bindDataFields = {
   dataId: platformIdSchema,
   expectedContentDigest: z.string().regex(/^[0-9a-f]{64}$/u),
   initialMaterials: bindMaterials.nullable().optional(),
   evalInitialMaterials: bindMaterials.nullable().optional(),
   initialSession: sessionSelection.nullable().optional(),
-}).refine(({ initialMaterials, evalInitialMaterials, initialSession }) =>
-  initialMaterials !== undefined || evalInitialMaterials !== undefined || initialSession !== undefined,
-{ message: "Supply at least one initial resource field" });
+};
+const hasBindChange = ({ initialMaterials, evalInitialMaterials, initialSession }: {
+  initialMaterials?: unknown; evalInitialMaterials?: unknown; initialSession?: unknown;
+}) =>
+  initialMaterials !== undefined || evalInitialMaterials !== undefined || initialSession !== undefined;
+const bindField = z.strictObject(bindDataFields)
+  .refine(hasBindChange, { message: "Supply at least one initial resource field" });
+const singleBind = z.strictObject({
+  operationKey: idempotencyKeySchema.max(200),
+  datasetId: platformIdSchema,
+  ...bindDataFields,
+}).refine(hasBindChange, { message: "Supply at least one initial resource field" });
+export const batchBindSchema = z.strictObject({
+  operationKey: idempotencyKeySchema.max(200),
+  datasetId: platformIdSchema,
+  bindings: z.array(bindField).min(1).max(20).refine((rows) => unique(rows.map(({ dataId }) => dataId)),
+    "Data IDs must be unique"),
+});
+/** The old single-Data request stays byte-for-byte compatible; batch is a strict alternative. */
+export const bindDataResourcesSchema = z.union([singleBind, batchBindSchema]);
 export const getPreparationSchema = z.strictObject({
   operationKey: idempotencyKeySchema.max(200),
   page: z.number().int().min(1).max(10_000).default(1),

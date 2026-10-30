@@ -57,7 +57,7 @@ describe("trusted management MCP transport", () => {
     expect(await initialized.json()).toMatchObject({ result: { protocolVersion: "2025-06-18",
       capabilities: { tools: { listChanged: false } } } });
     const tools = await (await app.rpc(rpc("tools/list"))).json() as {
-      result: { tools: Array<{ name: string; inputSchema: {
+      result: { tools: Array<{ name: string; description: string; inputSchema: {
         type: string; required?: string[]; additionalProperties?: boolean; properties?: Record<string, unknown>;
       } }> };
     };
@@ -66,7 +66,10 @@ describe("trusted management MCP transport", () => {
       "upload_agent_skill", "upload_agent_reference", "create_output_schema", "create_agent", "create_project", "preview_run",
       "submit_run", "reconcile_operation", "stop_run", "get_run", "get_metrics", "inspect_case",
     ]);
-    expect(tools.result.tools.filter(({ name }) => name !== "reconcile_operation" && name !== "save_initial_resource")
+    expect(tools.result.tools.find(({ name }) => name === "list_options")!.description).toContain("up to 20 safe Data IDs");
+    expect(tools.result.tools.find(({ name }) => name === "bind_data_resources")!.description)
+      .toContain("1–20 distinct members in one atomic transaction");
+    expect(tools.result.tools.filter(({ name }) => !["reconcile_operation", "save_initial_resource", "bind_data_resources"].includes(name))
       .every(({ inputSchema }) => inputSchema.type === "object"
       && inputSchema.additionalProperties === false)).toBe(true);
     const saveInput = tools.result.tools.find(({ name }) => name === "save_initial_resource")!.inputSchema;
@@ -85,8 +88,19 @@ describe("trusted management MCP transport", () => {
       .toEqual(expect.arrayContaining(["operationKey", "purpose", "instructions", "modelId"]));
     expect(tools.result.tools.find(({ name }) => name === "create_output_schema")!.inputSchema.required)
       .toEqual(expect.arrayContaining(["operationKey", "name", "description", "content"]));
-    expect(tools.result.tools.find(({ name }) => name === "bind_data_resources")!.inputSchema.required)
-      .toEqual(expect.arrayContaining(["operationKey", "datasetId", "dataId", "expectedContentDigest"]));
+    const bindInput = tools.result.tools.find(({ name }) => name === "bind_data_resources")!.inputSchema as {
+      oneOf?: Array<{ required: string[]; additionalProperties: boolean; properties: Record<string, unknown> }>;
+      anyOf?: Array<{ required: string[]; additionalProperties: boolean; properties: Record<string, unknown> }>;
+    };
+    const bindBranches = bindInput.oneOf ?? bindInput.anyOf;
+    expect(bindBranches).toHaveLength(2);
+    const singleBind = bindBranches!.find(({ required }) => required.includes("dataId"))!;
+    const batchBind = bindBranches!.find(({ required }) => required.includes("bindings"))!;
+    expect(singleBind.required).toEqual(expect.arrayContaining(["operationKey", "datasetId", "dataId", "expectedContentDigest"]));
+    expect(batchBind.required).toEqual(expect.arrayContaining(["operationKey", "datasetId", "bindings"]));
+    expect(singleBind.additionalProperties).toBe(false);
+    expect(batchBind.additionalProperties).toBe(false);
+    expect(JSON.stringify(batchBind)).toMatch(/"maxItems":20/u);
     const prepareInput = tools.result.tools.find(({ name }) => name === "prepare_inputs")!.inputSchema;
     expect(JSON.stringify(prepareInput)).not.toContain("uploadRef");
     expect(JSON.stringify(tools.result.tools.find(({ name }) => name === "bind_data_resources")!.inputSchema))

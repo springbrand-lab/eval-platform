@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { equalJson } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 import type { ManagementFiles } from "./files.js";
+import { validBatchBindingPlan, validBatchBindingStages } from "./binding-plan.js";
 import { validPreparationPlan, validPreparationStages } from "./preparation-plan.js";
 import type { ManagementStore, OperationReceipt, UploadKind, UploadReceipt } from "./store.js";
 
@@ -39,9 +40,15 @@ export function fakeManagement(owner: string) {
       if (kind === "skill" && [...operations.values()].some((other) =>
         other.operationKey !== key && other.kind === kind && other.skillName === claimedSkillName
           && other.status !== "completed")) throw conflict();
-      if (kind === "bind" && [...operations.values()].some((other) =>
-        other.operationKey !== key && other.kind === "bind" && other.status === "pending"
-          && other.plan.dataId === plan.dataId)) throw conflict();
+      if (kind === "bind") {
+        const batch = plan.version === 4;
+        if (batch && !validBatchBindingPlan(ownerId, key, fingerprint, plan)) throw conflict();
+        const ids = batch ? (plan.bindings as Array<{ dataId: string }>).map(({ dataId }) => dataId) : [plan.dataId];
+        if ([...operations.values()].some((other) => other.operationKey !== key && other.kind === "bind"
+          && other.status === "pending" && (other.plan.version === 4
+            ? (other.plan.bindings as Array<{ dataId: string }>).some(({ dataId }) => ids.includes(dataId))
+            : ids.includes(other.plan.dataId)))) throw conflict();
+      }
       const refs = kind === "prepare"
         ? [plan.promptUploadRef]
         : kind === "initial_resource" ? [(plan.asset as { uploadRef: string }).uploadRef]
@@ -81,13 +88,17 @@ export function fakeManagement(owner: string) {
       const row = saved(ownerId, key);
       if (row.kind === "prepare" && (!validPreparationPlan(ownerId, key, row.fingerprint, row.plan)
         || !validPreparationStages(row.plan, row.stages, true))) throw conflict();
-      if (row.kind === "bind" && (row.plan.version !== 3
-        || typeof row.plan.dataId !== "string" || Array.isArray(row.plan.dataIds))) throw conflict();
+      if (row.kind === "bind" && (row.plan.version === 4
+        ? !validBatchBindingPlan(ownerId, key, row.fingerprint, row.plan)
+          || !validBatchBindingStages(row.plan, row.stages, true)
+        : row.plan.version !== 3 || typeof row.plan.dataId !== "string" || Array.isArray(row.plan.dataIds))) {
+        throw conflict();
+      }
       if (row.kind === "initial_resource" && (row.plan.version !== 1 || !row.plan.asset)) throw conflict();
       const required = row.kind === "skill" ? ["skill"] : row.kind === "reference" ? ["attachment", "reference"]
         : row.kind === "output_schema" ? ["output_schema"]
           : row.kind === "initial_resource" ? [`resource:${(row.plan.asset as { uploadRef: string }).uploadRef}`]
-            : row.kind === "bind" ? [`data:${row.plan.dataId}`]
+            : row.kind === "bind" ? [row.plan.version === 4 ? "batch" : `data:${row.plan.dataId}`]
               : ["dataset", ...(row.plan.dataIds as string[]).map((id) => `data:${id}`)];
       if (required.some((stage) => row.stages[stage]?.status !== "confirmed")) throw conflict();
       operations.set(key, { ...row, status: "completed" });

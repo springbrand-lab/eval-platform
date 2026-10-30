@@ -8,7 +8,9 @@ import { READ_SNAPSHOT, type EvalDb } from "../db/client.js";
 import { orderDatasetMemberships } from "../db/dataset.js";
 import type { DatasetMemberOrder } from "../db/dataset-order.js";
 import { data, datasetData, datasets, managementOperations, managementUploads } from "../db/schema.js";
-import { lockedBindTarget } from "../initial-resources.js";
+import { assertDataReferencesSelectable } from "../db/resource-catalog.js";
+import { lockedBindTarget, patchedInitialResources } from "../initial-resources.js";
+import { validBatchBindingPlan, validBatchBindingStages } from "./binding-plan.js";
 import { validPreparationPlan, validPreparationStages } from "./preparation-plan.js";
 
 export type UploadKind = typeof managementUploads.$inferInsert.kind;
@@ -132,21 +134,35 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
       const claimedSkillName = kind === "skill" ? skillName ?? null : null;
       return db.transaction(async (transaction) => {
         if (kind === "bind") {
-          // Dataset/Data locks also serialize two different keys for this Data (even across
-          // Datasets). Reject a second pending intent before it can strand either key or
-          // claim its uploads. The original full Data digest is rechecked before a new
-          // reservation, not just later when applying the patch.
+          // Dataset first, then every Data in sorted order. This also serializes a v4 claim
+          // with legacy v3 keys and overlapping v4 batches across different Datasets.
           const datasetId = platformIdSchema.parse(plan.datasetId);
-          const dataId = platformIdSchema.parse(plan.dataId);
-          const current = await lockedBindTarget(transaction, owner, datasetId, dataId);
+          const batch = plan.version === 4;
+          if (batch && !validBatchBindingPlan(owner, operationKey, fingerprint, plan)) throw conflict();
+          const ids = batch
+            ? (plan.bindings as { dataId: string }[]).map(({ dataId }) => dataId)
+            : [platformIdSchema.parse(plan.dataId)];
+          const originals = new Map<string, Data>();
+          for (const dataId of [...ids].sort()) {
+            originals.set(dataId, await lockedBindTarget(transaction, owner, datasetId, dataId));
+          }
           const [sameKey] = await transaction.select({ key: managementOperations.operationKey }).from(managementOperations)
             .where(operationWhere(owner, operationKey)).limit(1);
           const [pending] = await transaction.select({ key: managementOperations.operationKey }).from(managementOperations)
             .where(and(eq(managementOperations.ownerUserId, owner), eq(managementOperations.kind, "bind"),
               eq(managementOperations.status, "pending"),
-              eq(sql<string>`${managementOperations.plan}->>'dataId'`, dataId),
-              ne(managementOperations.operationKey, operationKey))).limit(1);
-          if (pending || (!sameKey && await digestJson(current) !== plan.expectedContentDigest)) throw conflict();
+              ne(managementOperations.operationKey, operationKey),
+              or(inArray(sql<string>`${managementOperations.plan}->>'dataId'`, ids),
+                ...ids.map((id) => sql<boolean>`${managementOperations.plan}->'bindings' @> ${JSON.stringify([{ dataId: id }])}::jsonb`))))
+            .limit(1);
+          if (pending) throw conflict();
+          if (!sameKey) {
+            for (const [index, dataId] of ids.entries()) {
+              const expected = batch ? (plan.bindings as { expectedContentDigest: string }[])[index]!.expectedContentDigest
+                : plan.expectedContentDigest;
+              if (await digestJson(originals.get(dataId)!) !== expected) throw conflict();
+            }
+          }
         }
         await transaction.insert(managementOperations).values({
           ownerUserId: owner, operationKey, kind, fingerprint, plan,
@@ -200,20 +216,54 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
       });
     },
     async complete(owner, operationKey) {
+      const [candidate] = await db.select().from(managementOperations).where(operationWhere(owner, operationKey));
+      if (!candidate) throw missing();
+      if (candidate.kind === "bind" && candidate.plan.version === 4) {
+        const plan = candidate.plan;
+        if (!validBatchBindingPlan(owner, operationKey, candidate.fingerprint, plan)) throw conflict();
+        await db.transaction(async (transaction) => {
+          // Use the same Dataset -> sorted Data -> operation lock order as begin.
+          // A forged/early stage receipt cannot mark an uncommitted batch complete.
+          const actual = new Map<string, Data>();
+          for (const dataId of plan.bindings.map(({ dataId }) => dataId).sort()) {
+            actual.set(dataId, await lockedBindTarget(transaction, owner, plan.datasetId, dataId));
+          }
+          const [row] = await transaction.select().from(managementOperations)
+            .where(operationWhere(owner, operationKey)).for("update");
+          if (!row || row.kind !== "bind" || row.fingerprint !== candidate.fingerprint
+            || !equalJson(row.plan, plan)
+            || !validBatchBindingStages(plan, row.stages, true)) throw conflict();
+          for (const { dataId, contentDigest, patch } of plan.bindings) {
+            const member = actual.get(dataId)!;
+            if (await digestJson(member) !== contentDigest
+              || await digestJson(patchedInitialResources(member, patch)) !== contentDigest) throw conflict();
+            // Completion cannot accept a forged/early confirmed no-op stage
+            // with an unmet patch, invalid references or an over-budget field.
+            await assertDataReferencesSelectable(transaction, owner, member, member);
+          }
+          if (row.status !== "completed") await transaction.update(managementOperations)
+            .set({ status: "completed" }).where(operationWhere(owner, operationKey));
+        });
+        return;
+      }
       await locked(owner, operationKey, async (row, transaction) => {
         if (row.kind === "prepare" && (!validPreparationPlan(owner, operationKey, row.fingerprint, row.plan)
           || !validPreparationStages(row.plan, row.stages, true))) {
           throw conflict();
         }
-        if (row.kind === "bind" && (row.plan.version !== 3
-          || typeof row.plan.dataId !== "string" || Array.isArray(row.plan.dataIds))) throw conflict();
+        if (row.kind === "bind" && (row.plan.version === 4
+          ? !validBatchBindingPlan(owner, operationKey, row.fingerprint, row.plan)
+            || !validBatchBindingStages(row.plan, row.stages, true)
+          : row.plan.version !== 3 || typeof row.plan.dataId !== "string" || Array.isArray(row.plan.dataIds))) {
+          throw conflict();
+        }
         if (row.kind === "initial_resource" && (row.plan.version !== 1
           || !row.plan.asset || typeof row.plan.asset !== "object"
           || typeof (row.plan.asset as { uploadRef?: unknown }).uploadRef !== "string")) throw conflict();
         const required = row.kind === "skill" ? ["skill"] : row.kind === "reference" ? ["attachment", "reference"]
           : row.kind === "output_schema" ? ["output_schema"]
             : row.kind === "initial_resource" ? [`resource:${(row.plan.asset as { uploadRef: string }).uploadRef}`]
-              : row.kind === "bind" ? [`data:${row.plan.dataId}`]
+              : row.kind === "bind" ? [row.plan.version === 4 ? "batch" : `data:${row.plan.dataId}`]
                 : ["dataset", ...(row.plan.dataIds as string[]).map((id) => `data:${id}`)];
         if (required.includes("") || required.some((stage) => row.stages[stage]?.status !== "confirmed")) throw conflict();
         if (row.status !== "completed") await transaction.update(managementOperations)
@@ -267,8 +317,8 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
     },
     async listDatasetData(owner, datasetId, page, pageSize) {
       if (!Number.isSafeInteger(page) || page < 1 || page > 10_000
-        || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 5) {
-        throw new HttpError("REQUEST_INVALID_INPUT", "Select a page of at most five Data");
+        || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 20) {
+        throw new HttpError("REQUEST_INVALID_INPUT", "Select a page of at most twenty Data");
       }
       return db.transaction(async (transaction) => {
         const [dataset] = await transaction.select({

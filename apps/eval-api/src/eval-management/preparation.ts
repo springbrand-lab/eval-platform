@@ -8,6 +8,7 @@ import type { Context } from "hono";
 import { BundleResourceNotFoundError } from "../db/errors.js";
 import type { AppBindings } from "../lib/types.js";
 import { requireInitializationBudget, validateMaterialFiles, validateSessionContent } from "../sp/bundle-content.js";
+import { validBatchBindingPlan, validBatchBindingStages } from "./binding-plan.js";
 import type { BindingPlan } from "./binding.js";
 import { record, short } from "./common.js";
 import type { InitialResourcePlan } from "./initial-resource.js";
@@ -78,6 +79,23 @@ export async function getPreparation(c: Context<AppBindings>, operationKey: stri
     };
   }
   if (operation.kind === "bind") {
+    if (operation.plan.version === 4) {
+      if (operation.ownerUserId !== c.var.user.id || operation.operationKey !== operationKey
+        || !validBatchBindingPlan(c.var.user.id, operationKey, operation.fingerprint, operation.plan)
+        || !validBatchBindingStages(operation.plan, operation.stages, operation.status === "completed")) {
+        throw new HttpError("RESPONSE_INVALID", "Stored batch binding receipt is invalid");
+      }
+      const plan = operation.plan;
+      const binding = stageOf(operation, "batch");
+      const start = (page - 1) * pageSize;
+      return {
+        operationKey, kind: "bind", status: operation.status === "completed" ? "completed"
+          : binding === "confirmed" ? "finalizing" : binding === "attempted" ? "outcome_unknown" : "preparing",
+        datasetId: plan.datasetId, totalBindings: plan.bindings.length, page, pageSize,
+        bindings: plan.bindings.slice(start, start + pageSize).map(({ dataId, contentDigest }) =>
+          ({ dataId, contentDigest, binding })),
+      };
+    }
     const plan = operation.plan as unknown as BindingPlan;
     if (!plan || plan.version !== 3 || !plan.patch || plan.datasetId !== plan.request?.datasetId
       || plan.dataId !== plan.request.dataId) {

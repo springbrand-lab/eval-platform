@@ -47,27 +47,27 @@ describe("bounded Dataset member choices through list_options", () => {
     expect(Object.keys(result).sort()).toEqual(["category", "datasetId", "items", "name", "order", "page", "pageSize", "total"]);
     expect(result).toMatchObject({
       category: "dataset_data", datasetId: DATASET, name: "Tasks 🧪", order: "upload",
-      page: 1, pageSize: 5, total: 34,
-      items: [
-        { dataId: dataIds[0], name: "First 🧪" },
-        { dataId: dataIds[1], sourceRedacted: true },
-        { dataId: dataIds[2], sourceRedacted: true },
-        { dataId: dataIds[3], sourceRedacted: true },
-        { dataId: dataIds[4], nameTruncated: true },
-      ],
+      page: 1, pageSize: 20, total: 34,
     });
-    expect((result.items as unknown[])).toHaveLength(5);
+    expect((result.items as Array<Record<string, unknown>>).slice(0, 5)).toMatchObject([
+      { dataId: dataIds[0], name: "First 🧪" },
+      { dataId: dataIds[1], sourceRedacted: true },
+      { dataId: dataIds[2], sourceRedacted: true },
+      { dataId: dataIds[3], sourceRedacted: true },
+      { dataId: dataIds[4], nameTruncated: true },
+    ]);
+    expect((result.items as Array<{ dataId: string }>).map(({ dataId }) => dataId)).toEqual(dataIds.slice(0, 20));
     expect(JSON.stringify(result)).not.toMatch(/PRIVATE_|private task|https?:\/\/|password:|bundleId|materialId|userPrompt|evalPrompt|privateNote/u);
     const next = await toolValue(await app.call("list_options", {
       category: "dataset_data", datasetId: DATASET, page: 2, pageSize: 50,
     }));
-    expect(next).toMatchObject({ order: "upload", page: 2, pageSize: 5, total: 34 });
-    expect(next.items).toEqual(dataIds.slice(5, 10).map((dataId, index) => ({
-      dataId, name: `Case ${index + 6}`,
+    expect(next).toMatchObject({ order: "upload", page: 2, pageSize: 20, total: 34 });
+    expect(next.items).toEqual(dataIds.slice(20).map((dataId, index) => ({
+      dataId, name: `Case ${index + 21}`,
     })));
-    const last = await toolValue(await app.call("list_options", { category: "dataset_data", datasetId: DATASET, page: 8 }));
-    expect(last).toMatchObject({ page: 8, pageSize: 5, total: 34, items: [] });
-    expect(list).toHaveBeenCalledWith(OWNER, DATASET, 1, 5);
+    const last = await toolValue(await app.call("list_options", { category: "dataset_data", datasetId: DATASET, page: 3 }));
+    expect(last).toMatchObject({ page: 3, pageSize: 20, total: 34, items: [] });
+    expect(list).toHaveBeenCalledWith(OWNER, DATASET, 1, 20);
     expect(app.services.projects.reviewSelection).not.toHaveBeenCalled();
     expect(app.services.projects.create).not.toHaveBeenCalled();
   });
@@ -81,7 +81,7 @@ describe("bounded Dataset member choices through list_options", () => {
     });
     expect(await toolValue(await app.call("list_options", { category: "dataset_data", datasetId: DATASET })))
       .toEqual({ category: "dataset_data", datasetId: DATASET, name: "Legacy",
-        order: "unknown", page: 1, pageSize: 5, total: 2,
+        order: "unknown", page: 1, pageSize: 20, total: 2,
         items: [{ dataId: dataIds[1], name: null }, { dataId: dataIds[0], name: null }] });
   });
 
@@ -129,7 +129,7 @@ describe("bounded Dataset member choices through list_options", () => {
     const app = setupManagement();
     vi.spyOn(app.managed.store, "listDatasetData").mockResolvedValue({
       name: "\ud800".repeat(5_000), order: "upload", total: 34,
-      items: dataIds.slice(0, 5).map((dataId) => ({
+      items: dataIds.slice(0, 20).map((dataId) => ({
         dataId, content: { name: "\ud800".repeat(5_000), userPrompt: "never shown" },
       })),
     });
@@ -138,7 +138,37 @@ describe("bounded Dataset member choices through list_options", () => {
     };
     expect(response.result.isError).not.toBe(true);
     expect(Buffer.byteLength(response.result.content[0].text, "utf8")).toBeLessThanOrEqual(4_800);
-    expect(JSON.parse(response.result.content[0].text)).toMatchObject({ pageSize: 5, total: 34 });
+    expect(JSON.parse(response.result.content[0].text)).toMatchObject({ pageSize: 20, total: 34 });
+    expect((JSON.parse(response.result.content[0].text) as { items: Array<{ dataId: string; nameTruncated?: boolean }> })
+      .items).toEqual(dataIds.slice(0, 20).map((dataId) =>
+      expect.objectContaining({ dataId, nameTruncated: true })));
+  });
+
+  it("adapts one 20-item page of multibyte/escaped names without dropping IDs or leaking private source", async () => {
+    const app = setupManagement();
+    const rows = dataIds.map((dataId, index) => ({
+      dataId, content: {
+        name: index % 2 ? "🧪\"\\\n".repeat(200) : "\ud800".repeat(200),
+        userPrompt: "PRIVATE_PROMPT", evalPrompt: "PRIVATE_EVAL_PROMPT", url: "https://private.example",
+      },
+    }));
+    vi.spyOn(app.managed.store, "listDatasetData").mockImplementation(async (_owner, _datasetId, page, pageSize) =>
+      ({ name: "Dataset", order: "upload", total: rows.length,
+        items: rows.slice((page - 1) * pageSize, page * pageSize) }));
+    for (const [page, ids] of [[1, dataIds.slice(0, 20)], [2, dataIds.slice(20)]] as const) {
+      const rpc = await (await app.call("list_options", { category: "dataset_data", datasetId: DATASET, page,
+        pageSize: 50 })).json() as { result: { isError?: boolean; content: [{ text: string }] } };
+      expect(rpc.result.isError).not.toBe(true);
+      const text = rpc.result.content[0].text;
+      expect(text.length).toBeLessThanOrEqual(4_800);
+      expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(4_800);
+      expect(text).not.toMatch(/PRIVATE_|https?:\/\/|userPrompt|evalPrompt|bundleId/u);
+      const value = JSON.parse(text) as { page: number; pageSize: number; total: number; order: string;
+        items: Array<{ dataId: string; nameTruncated?: boolean }> };
+      expect(value).toMatchObject({ page, pageSize: 20, total: 34, order: "upload" });
+      expect(value.items.map(({ dataId }) => dataId)).toEqual(ids);
+      expect(value.items.every(({ nameTruncated }) => nameTruncated === true)).toBe(true);
+    }
   });
 });
 

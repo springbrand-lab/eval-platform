@@ -12,7 +12,7 @@ import { BundleResourceNotFoundError } from "../db/errors.js";
 import { createPostgresDatasetStore } from "../db/dataset.js";
 import { createPostgresProjectStore } from "../db/project-store.js";
 import { createBundleCatalogs } from "../db/resource-catalog.js";
-import { data as dataTable, managementOperations } from "../db/schema.js";
+import { bundleMaterials, data as dataTable, managementOperations } from "../db/schema.js";
 import { createTestDatabase } from "../db/test-database.js";
 import { seedProject } from "../db/test-fixtures.js";
 import { createInitialResourceApi, patchedInitialResources } from "../initial-resources.js";
@@ -22,6 +22,7 @@ import { openBundleDirectory, type BundleDirectory } from "../sp/bundle-director
 import type { EvalSpClient } from "../sp/client.js";
 import type { SpObservationClient } from "../sp/observation.js";
 import { requestApp, WEB_ORIGIN } from "../test-support.js";
+import { batchBindingFingerprint, batchBindingReceipt, type BatchBindingPlan } from "./binding-plan.js";
 import { createManagementFiles } from "./files.js";
 import { EVAL_MANAGEMENT_MCP_PATH } from "./mcp.js";
 import { createPostgresManagementStore } from "./store.js";
@@ -85,6 +86,13 @@ describe.skipIf(!connection)("PostgreSQL existing Data binding and active resour
       material: { bundleId: material.bundleId, materialId: material.materialId },
       session: { bundleId: session.bundleId, sessionId: session.sessionId },
     };
+  }
+
+  async function rowVersion(dataId: string): Promise<string> {
+    const { rows } = await database.db.execute<{ version: string }>(
+      sql`SELECT xmin::text AS version FROM eval_data WHERE data_id = ${dataId}`);
+    if (!rows[0]) throw new Error("Missing Data version");
+    return rows[0].version;
   }
 
   it("locks owner, active membership, upstream readiness and full Data digest; leaves frozen Project copies unchanged", async () => {
@@ -553,5 +561,636 @@ describe.skipIf(!connection)("PostgreSQL existing Data binding and active resour
     await materialBundles.delete(material.bundleId);
     expect(await toolValue(await app.call("list_options", { category: "material_bundles" })))
       .toMatchObject({ total: 0, items: [] });
+  });
+
+  it("atomically binds three owned Data, with whole-row CAS, Session ownership and unchanged frozen Project samples", async () => {
+    const { datasets, dataset, original, material, session, materialBundles, sessionBundles } = await seeded();
+    const second = await datasets.createData({ userPrompt: "PRIVATE_SECOND", name: "Second" },
+      { datasetId: dataset.datasetId });
+    const third = await datasets.createData({ userPrompt: "PRIVATE_THIRD", name: "Third" },
+      { datasetId: dataset.datasetId });
+    const frozen = await seedProject(database.db, OWNER, {
+      datasets: [{ datasetId: dataset.datasetId, data: [original, second, third] }],
+    });
+    const store = createPostgresManagementStore(database.db);
+    const app = setupManagement();
+    Object.assign(app.runtime.evalManagement!, { store });
+    Object.assign(app.services, {
+      initialResources: createInitialResourceApi(database.db, OWNER), materialBundles, sessionBundles,
+    });
+    const bindings = [
+      { dataId: third.dataId, expectedContentDigest: await digestJson(third), initialSession: session },
+      { dataId: original.dataId, expectedContentDigest: await digestJson(original), initialMaterials: [material] },
+      { dataId: second.dataId, expectedContentDigest: await digestJson(second), evalInitialMaterials: [material] },
+    ];
+    const input = { operationKey: "pg-v4-three", datasetId: dataset.datasetId, bindings };
+    const receipt = await toolValue(await app.call("bind_data_resources", input));
+    expect(receipt).toEqual({ operationKey: input.operationKey, kind: "bind", status: "completed",
+      datasetId: dataset.datasetId,
+      bindings: await Promise.all(bindings.map(async ({ dataId }) => ({
+        dataId, contentDigest: await digestJson(await datasets.getData(dataId)),
+      }))) });
+    expect(await toolValue(await app.call("get_preparation", { operationKey: input.operationKey, pageSize: 2 })))
+      .toMatchObject({ kind: "bind", status: "completed", datasetId: dataset.datasetId,
+        totalBindings: 3, page: 1, pageSize: 2,
+        bindings: [{ dataId: third.dataId, binding: "confirmed" },
+          { dataId: original.dataId, binding: "confirmed" }] });
+    expect((await store.get(OWNER, input.operationKey))?.stages.batch?.status).toBe("confirmed");
+    expect((await createPostgresProjectStore(database.db, OWNER).get(frozen.projectId))!.projectSamples
+      .map(({ data: snapshot }) => snapshot)).toEqual([original, second, third]);
+    expect(await toolValue(await app.call("bind_data_resources", input))).toEqual(receipt);
+    const other = createInitialResourceApi(database.db, OTHER);
+    await expect(other.inspectBindTargets(dataset.datasetId, bindings.map(({ dataId, expectedContentDigest }) =>
+      ({ dataId, expectedContentDigest, contentDigest: expectedContentDigest }))))
+      .rejects.toBeInstanceOf(DatasetEntityNotFoundError);
+  });
+
+  it("commits one already-satisfied Data and two changed Data in a single v4 MCP request, then accepts all-no-op", async () => {
+    const { datasets, dataset, original, material, materialBundles, sessionBundles } = await seeded();
+    const extra = await materialBundles.createResource(material.bundleId, { ...labels, files: materialFiles });
+    const second = await datasets.createData({ userPrompt: "PRIVATE_SECOND" }, { datasetId: dataset.datasetId });
+    const third = await datasets.createData({ userPrompt: "PRIVATE_THIRD" }, { datasetId: dataset.datasetId });
+    const { dataId: _originalId, ...originalContent } = original;
+    await datasets.updateData(original.dataId, {
+      ...originalContent, initialMaterials: [material], evalInitialMaterials: [material],
+    });
+    const first = (await datasets.getData(original.dataId))!;
+    const originalVersions = await Promise.all([first, second, third].map(({ dataId }) => rowVersion(dataId)));
+    const store = createPostgresManagementStore(database.db);
+    const api = createInitialResourceApi(database.db, OWNER);
+    const app = setupManagement();
+    let preflights = 0, transactions = 0;
+    Object.assign(app.runtime.evalManagement!, { store });
+    Object.assign(app.services, { materialBundles, sessionBundles, initialResources: {
+      ...api,
+      async preflightBindMaterialBytes(...args: Parameters<typeof api.preflightBindMaterialBytes>) {
+        preflights++;
+        return api.preflightBindMaterialBytes(...args);
+      },
+      async bindDataBatch(...args: Parameters<typeof api.bindDataBatch>) {
+        transactions++;
+        return api.bindDataBatch(...args);
+      },
+    } });
+    const extraRef = { bundleId: extra.bundleId, materialId: extra.materialId };
+    const bindings = [
+      { dataId: first.dataId, expectedContentDigest: await digestJson(first),
+        initialMaterials: [material], evalInitialMaterials: [material] },
+      { dataId: second.dataId, expectedContentDigest: await digestJson(second),
+        initialMaterials: [material], evalInitialMaterials: [material] },
+      { dataId: third.dataId, expectedContentDigest: await digestJson(third),
+        initialMaterials: [material, extraRef], evalInitialMaterials: [material] },
+    ];
+    const input = { operationKey: "pg-v4-mixed", datasetId: dataset.datasetId, bindings };
+    const receipt = await toolValue(await app.call("bind_data_resources", input));
+    expect(receipt).toEqual({ operationKey: input.operationKey, kind: "bind", status: "completed",
+      datasetId: dataset.datasetId, bindings: await Promise.all(bindings.map(async ({ dataId }) => ({
+        dataId, contentDigest: await digestJson(await datasets.getData(dataId)),
+      }))) });
+    expect(preflights).toBe(3);
+    expect(transactions).toBe(1);
+    expect((await store.get(OWNER, input.operationKey))?.stages.batch?.status).toBe("confirmed");
+    expect(await datasets.getData(first.dataId)).toEqual(first);
+    expect(await datasets.getData(second.dataId)).toMatchObject({
+      initialMaterials: [material], evalInitialMaterials: [material],
+    });
+    expect(await datasets.getData(third.dataId)).toMatchObject({
+      initialMaterials: [material, extraRef], evalInitialMaterials: [material],
+    });
+    const updatedVersions = await Promise.all(bindings.map(({ dataId }) => rowVersion(dataId)));
+    expect(updatedVersions[0]).toBe(originalVersions[0]); // No redundant SQL UPDATE of the first Data.
+    expect(updatedVersions[1]).not.toBe(originalVersions[1]);
+    expect(updatedVersions[2]).not.toBe(originalVersions[2]);
+    expect(await toolValue(await app.call("bind_data_resources", input))).toEqual(receipt);
+    expect(transactions).toBe(1);
+
+    const allSatisfied = { operationKey: "pg-v4-all-satisfied", datasetId: dataset.datasetId,
+      bindings: await Promise.all(bindings.map(async ({ dataId, initialMaterials, evalInitialMaterials }) => ({
+        dataId, expectedContentDigest: await digestJson(await datasets.getData(dataId)),
+        initialMaterials, evalInitialMaterials,
+      }))) };
+    expect(await toolValue(await app.call("bind_data_resources", allSatisfied)))
+      .toMatchObject({ status: "completed", bindings: [
+        { dataId: first.dataId }, { dataId: second.dataId }, { dataId: third.dataId },
+      ] });
+    expect(preflights).toBe(6);
+    expect(transactions).toBe(2); // Even an all-no-op batch performs its atomic locked validation.
+    expect(await Promise.all(bindings.map(({ dataId }) => rowVersion(dataId)))).toEqual(updatedVersions);
+    expect((await store.get(OWNER, allSatisfied.operationKey))?.status).toBe("completed");
+    await expect(store.assertReadyDatasets(OWNER, [dataset.datasetId])).resolves.toBeUndefined();
+  });
+
+  it("replays a lost mixed-batch reply only after reading every no-op/original and changed/target Data digest", async () => {
+    const { datasets, dataset, original, material, materialBundles, sessionBundles } = await seeded();
+    const second = await datasets.createData({ userPrompt: "PRIVATE_SECOND" }, { datasetId: dataset.datasetId });
+    const third = await datasets.createData({ userPrompt: "PRIVATE_THIRD" }, { datasetId: dataset.datasetId });
+    const { dataId: _originalId, ...originalContent } = original;
+    await datasets.updateData(original.dataId, { ...originalContent, initialMaterials: [material] });
+    const first = (await datasets.getData(original.dataId))!;
+    const store = createPostgresManagementStore(database.db);
+    const api = createInitialResourceApi(database.db, OWNER);
+    const app = setupManagement();
+    let transactions = 0, loseReply = true;
+    Object.assign(app.runtime.evalManagement!, { store });
+    Object.assign(app.services, { materialBundles, sessionBundles, initialResources: {
+      ...api,
+      async bindDataBatch(...args: Parameters<typeof api.bindDataBatch>) {
+        transactions++;
+        const result = await api.bindDataBatch(...args);
+        if (loseReply) { loseReply = false; throw new Error("private reply lost after commit"); }
+        return result;
+      },
+    } });
+    const input = { operationKey: "pg-v4-mixed-lost", datasetId: dataset.datasetId, bindings: [
+      { dataId: first.dataId, expectedContentDigest: await digestJson(first), initialMaterials: [material] },
+      { dataId: second.dataId, expectedContentDigest: await digestJson(second), evalInitialMaterials: [material] },
+      { dataId: third.dataId, expectedContentDigest: await digestJson(third), initialMaterials: [material] },
+    ] };
+    const lost = await (await app.call("bind_data_resources", input)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(lost.result.isError).toBe(true);
+    expect(lost.result.content[0].text).not.toContain("private reply");
+    expect((await store.get(OWNER, input.operationKey))?.stages.batch?.status).toBe("attempted");
+    const versions = await Promise.all(input.bindings.map(({ dataId }) => rowVersion(dataId)));
+    expect(await datasets.getData(first.dataId)).toEqual(first);
+    expect(await datasets.getData(second.dataId)).toMatchObject({ evalInitialMaterials: [material] });
+    expect(await datasets.getData(third.dataId)).toMatchObject({ initialMaterials: [material] });
+    expect(await toolValue(await app.call("bind_data_resources", input))).toMatchObject({
+      status: "completed", bindings: [{ dataId: first.dataId }, { dataId: second.dataId }, { dataId: third.dataId }],
+    });
+    expect(transactions).toBe(1); // A lost response never repeats the atomic batch.
+    expect(await Promise.all(input.bindings.map(({ dataId }) => rowVersion(dataId)))).toEqual(versions);
+    await datasets.updateData(first.dataId, { ...originalContent, initialMaterials: [material],
+      userPrompt: "PRIVATE_EDIT_AFTER_COMPLETION" });
+    const replay = await (await app.call("bind_data_resources", input)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(replay.result.content[0].text).toContain("EVAL_SP_CONFLICT");
+    expect(transactions).toBe(1);
+  });
+
+  it.each([0, 1, 2])("rolls back a mixed batch when member %i changes another field after trusted preflight", async (index) => {
+    const { datasets, dataset, original, material, materialBundles, sessionBundles } = await seeded();
+    const second = await datasets.createData({ userPrompt: "PRIVATE_SECOND" }, { datasetId: dataset.datasetId });
+    const third = await datasets.createData({ userPrompt: "PRIVATE_THIRD" }, { datasetId: dataset.datasetId });
+    const { dataId: _originalId, ...originalContent } = original;
+    await datasets.updateData(original.dataId, { ...originalContent,
+      initialMaterials: [material], evalInitialMaterials: [material] });
+    const rows = [(await datasets.getData(original.dataId))!, second, third];
+    const versions = await Promise.all(rows.map(({ dataId }) => rowVersion(dataId)));
+    const store = createPostgresManagementStore(database.db);
+    const api = createInitialResourceApi(database.db, OWNER);
+    const app = setupManagement();
+    let attempts = 0;
+    Object.assign(app.runtime.evalManagement!, { store });
+    Object.assign(app.services, { materialBundles, sessionBundles, initialResources: {
+      ...api,
+      async bindDataBatch(...args: Parameters<typeof api.bindDataBatch>) {
+        attempts++;
+        const { dataId: _id, ...content } = rows[index]!;
+        await datasets.updateData(rows[index]!.dataId, {
+          ...content, userPrompt: "PRIVATE_EDIT_AFTER_PREFLIGHT",
+        });
+        return api.bindDataBatch(...args);
+      },
+    } });
+    const input = { operationKey: `pg-v4-mixed-stale-${index}`, datasetId: dataset.datasetId, bindings: [
+      { dataId: rows[0]!.dataId, expectedContentDigest: await digestJson(rows[0]),
+        initialMaterials: [material], evalInitialMaterials: [material] },
+      { dataId: second.dataId, expectedContentDigest: await digestJson(second), evalInitialMaterials: [material] },
+      { dataId: third.dataId, expectedContentDigest: await digestJson(third), initialMaterials: [material] },
+    ] };
+    const rpc = await (await app.call("bind_data_resources", input)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(rpc.result.isError).toBe(true);
+    expect(rpc.result.content[0].text).toContain("EVAL_SP_CONFLICT");
+    expect(attempts).toBe(1);
+    for (const [position, row] of rows.entries()) {
+      expect(await datasets.getData(row.dataId)).toEqual(position === index
+        ? { ...row, userPrompt: "PRIVATE_EDIT_AFTER_PREFLIGHT" } : row);
+      if (position === index) expect(await rowVersion(row.dataId)).not.toBe(versions[position]);
+      else expect(await rowVersion(row.dataId)).toBe(versions[position]);
+    }
+    expect((await store.get(OWNER, input.operationKey))?.status).toBe("pending");
+    expect((await store.get(OWNER, input.operationKey))?.stages.batch?.status).toBe("attempted");
+  });
+
+  it("rejects a new soft-deleted reference in a mixed batch without updating the no-op or either changing Data", async () => {
+    const { datasets, dataset, original, material, materialBundles, sessionBundles } = await seeded();
+    const second = await datasets.createData({ userPrompt: "PRIVATE_SECOND" }, { datasetId: dataset.datasetId });
+    const third = await datasets.createData({ userPrompt: "PRIVATE_THIRD" }, { datasetId: dataset.datasetId });
+    const { dataId: _originalId, ...originalContent } = original;
+    await datasets.updateData(original.dataId, { ...originalContent, initialMaterials: [material] });
+    const first = (await datasets.getData(original.dataId))!;
+    const doomed = await materialBundles.createResource(material.bundleId, { ...labels, files: materialFiles });
+    const versions = await Promise.all([first, second, third].map(({ dataId }) => rowVersion(dataId)));
+    const store = createPostgresManagementStore(database.db);
+    const api = createInitialResourceApi(database.db, OWNER);
+    const app = setupManagement();
+    Object.assign(app.runtime.evalManagement!, { store });
+    Object.assign(app.services, { materialBundles, sessionBundles, initialResources: {
+      ...api,
+      async bindDataBatch(...args: Parameters<typeof api.bindDataBatch>) {
+        await materialBundles.deleteResource(doomed.bundleId, doomed.materialId);
+        return api.bindDataBatch(...args);
+      },
+    } });
+    const input = { operationKey: "pg-v4-mixed-deleted", datasetId: dataset.datasetId, bindings: [
+      { dataId: first.dataId, expectedContentDigest: await digestJson(first), initialMaterials: [material] },
+      { dataId: second.dataId, expectedContentDigest: await digestJson(second), initialMaterials: [material] },
+      { dataId: third.dataId, expectedContentDigest: await digestJson(third),
+        initialMaterials: [{ bundleId: doomed.bundleId, materialId: doomed.materialId }] },
+    ] };
+    const rpc = await (await app.call("bind_data_resources", input)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(rpc.result.isError).toBe(true);
+    expect(rpc.result.content[0].text).toContain("BUNDLE_RESOURCE_NOT_FOUND");
+    for (const [position, row] of [first, second, third].entries()) {
+      expect(await datasets.getData(row.dataId)).toEqual(row);
+      expect(await rowVersion(row.dataId)).toBe(versions[position]);
+    }
+    expect((await store.get(OWNER, input.operationKey))?.status).toBe("pending");
+  });
+
+  it("cannot claim an all-no-op batch succeeded when catalog bytes change after preflight, even with a forged confirmed stage", async () => {
+    const { datasets, dataset, original, material, materialBundles, sessionBundles } = await seeded();
+    const { dataId: _originalId, ...originalContent } = original;
+    await datasets.updateData(original.dataId, { ...originalContent, initialMaterials: [material] });
+    const first = (await datasets.getData(original.dataId))!;
+    const version = await rowVersion(first.dataId);
+    const store = createPostgresManagementStore(database.db);
+    const api = createInitialResourceApi(database.db, OWNER);
+    const app = setupManagement();
+    Object.assign(app.runtime.evalManagement!, { store });
+    Object.assign(app.services, { materialBundles, sessionBundles, initialResources: {
+      ...api,
+      async bindDataBatch(...args: Parameters<typeof api.bindDataBatch>) {
+        await database.db.update(bundleMaterials).set({ byteSize: EVAL_INITIALIZATION_MAX_BYTES + 1 })
+          .where(eq(bundleMaterials.materialId, material.materialId));
+        return api.bindDataBatch(...args);
+      },
+    } });
+    const input = { operationKey: "pg-v4-all-noop-budget", datasetId: dataset.datasetId,
+      bindings: [{ dataId: first.dataId, expectedContentDigest: await digestJson(first), initialMaterials: [material] }] };
+    const rpc = await (await app.call("bind_data_resources", input)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(rpc.result.isError).toBe(true);
+    expect(rpc.result.content[0].text).toContain("BUNDLE_FILE_TOO_LARGE");
+    expect(await rowVersion(first.dataId)).toBe(version);
+    expect((await store.get(OWNER, input.operationKey))?.status).toBe("pending");
+    const plan = (await store.get(OWNER, input.operationKey))!.plan as unknown as BatchBindingPlan;
+    await store.confirm(OWNER, input.operationKey, "batch", batchBindingReceipt(plan));
+    await expect(store.complete(OWNER, input.operationKey)).rejects.toThrow();
+    expect((await store.get(OWNER, input.operationKey))?.status).toBe("pending");
+    expect((await (await app.call("bind_data_resources", input)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    }).result.content[0].text).toContain("BUNDLE_FILE_TOO_LARGE"); // Attempted replay still validates.
+  });
+
+  it("rejects a foreign existing reference in an all-no-op Data and refuses to complete a forged receipt", async () => {
+    const { datasets, dataset, original, materialBundles, sessionBundles } = await seeded();
+    const foreign = await createBundleCatalogs(database.db, OTHER, directory).materialBundles.create(labels,
+      [{ ...labels, files: materialFiles }]);
+    const badRef = { bundleId: foreign.bundle.bundleId, materialId: foreign.imported[0]!.materialId };
+    const { dataId: _originalId, ...content } = { ...original, initialMaterials: [badRef] };
+    await database.db.update(dataTable).set({ content }).where(eq(dataTable.dataId, original.dataId));
+    const current = (await datasets.getData(original.dataId))!;
+    const version = await rowVersion(original.dataId);
+    const store = createPostgresManagementStore(database.db);
+    const app = setupManagement();
+    Object.assign(app.runtime.evalManagement!, { store });
+    Object.assign(app.services, { materialBundles, sessionBundles,
+      initialResources: createInitialResourceApi(database.db, OWNER) });
+    const input = { operationKey: "pg-v4-noop-foreign", datasetId: dataset.datasetId,
+      bindings: [{ dataId: original.dataId, expectedContentDigest: await digestJson(current), initialSession: null }] };
+    const rpc = await (await app.call("bind_data_resources", input)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(rpc.result.content[0].text).toContain("BUNDLE_RESOURCE_NOT_FOUND");
+    expect(await datasets.getData(original.dataId)).toEqual(current);
+    expect(await rowVersion(original.dataId)).toBe(version);
+    const plan = (await store.get(OWNER, input.operationKey))!.plan as unknown as BatchBindingPlan;
+    await store.confirm(OWNER, input.operationKey, "batch", batchBindingReceipt(plan));
+    await expect(store.complete(OWNER, input.operationKey)).rejects.toBeInstanceOf(BundleResourceNotFoundError);
+    expect((await store.get(OWNER, input.operationKey))?.status).toBe("pending");
+  });
+
+  it("does not complete a forged no-op plan whose patch would actually change the Data", async () => {
+    const { datasets, dataset, original, material, materialBundles, sessionBundles } = await seeded();
+    const request = { operationKey: "pg-v4-false-noop", datasetId: dataset.datasetId, bindings: [{
+      dataId: original.dataId, expectedContentDigest: await digestJson(original), initialMaterials: [material],
+    }] };
+    const plan: BatchBindingPlan = { version: 4, request, datasetId: dataset.datasetId, bindings: [{
+      dataId: original.dataId, expectedContentDigest: request.bindings[0]!.expectedContentDigest,
+      contentDigest: request.bindings[0]!.expectedContentDigest, patch: { initialMaterials: [material] },
+    }] };
+    const store = createPostgresManagementStore(database.db);
+    await store.begin(OWNER, request.operationKey, "bind", batchBindingFingerprint(OWNER, request),
+      plan as unknown as Record<string, unknown>);
+    await store.attempt(OWNER, request.operationKey, "batch");
+    await store.confirm(OWNER, request.operationKey, "batch", batchBindingReceipt(plan));
+    await expect(store.complete(OWNER, request.operationKey)).rejects.toThrow();
+    const app = setupManagement();
+    Object.assign(app.runtime.evalManagement!, { store });
+    Object.assign(app.services, { materialBundles, sessionBundles,
+      initialResources: createInitialResourceApi(database.db, OWNER) });
+    const replay = await (await app.call("bind_data_resources", request)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(replay.result.content[0].text).toContain("EVAL_SP_CONFLICT");
+    expect((await store.get(OWNER, request.operationKey))?.status).toBe("pending");
+    expect(await datasets.getData(original.dataId)).toEqual(original);
+  });
+
+  it.each(["stale", "detached"] as const)("checks every original no-op Data again before completing a %s batch", async (scenario) => {
+    const { datasets, dataset, original, material } = await seeded();
+    const second = await datasets.createData({ userPrompt: "PRIVATE_SECOND" }, { datasetId: dataset.datasetId });
+    const { dataId: _originalId, ...content } = original;
+    await datasets.updateData(original.dataId, { ...content, initialMaterials: [material] });
+    const first = (await datasets.getData(original.dataId))!;
+    const request = { operationKey: `pg-v4-completion-${scenario}`, datasetId: dataset.datasetId,
+      bindings: await Promise.all([first, second].map(async (row) => ({
+        dataId: row.dataId, expectedContentDigest: await digestJson(row), initialSession: null,
+      }))) };
+    const plan: BatchBindingPlan = { version: 4, request, datasetId: dataset.datasetId,
+      bindings: request.bindings.map(({ dataId, expectedContentDigest }) => ({
+        dataId, expectedContentDigest, contentDigest: expectedContentDigest, patch: { initialSession: null },
+      })) };
+    const store = createPostgresManagementStore(database.db);
+    await store.begin(OWNER, request.operationKey, "bind", batchBindingFingerprint(OWNER, request),
+      plan as unknown as Record<string, unknown>);
+    await store.attempt(OWNER, request.operationKey, "batch");
+    await store.confirm(OWNER, request.operationKey, "batch", batchBindingReceipt(plan));
+    if (scenario === "stale") {
+      await datasets.updateData(second.dataId, { userPrompt: "PRIVATE_EDIT_AFTER_PREFLIGHT" });
+    } else {
+      await datasets.detachData(dataset.datasetId, [second.dataId]);
+    }
+    await expect(store.complete(OWNER, request.operationKey)).rejects.toThrow();
+    expect((await store.get(OWNER, request.operationKey))?.status).toBe("pending");
+    expect(await datasets.getData(first.dataId)).toEqual(first);
+  });
+
+  it("rolls back every Data if a later selected Material soft-deletes after preflight; attempted replay cannot rewrite", async () => {
+    const { datasets, dataset, original, material, materialBundles, sessionBundles } = await seeded();
+    const second = await datasets.createData({ userPrompt: "PRIVATE_SECOND" }, { datasetId: dataset.datasetId });
+    const third = await datasets.createData({ userPrompt: "PRIVATE_THIRD" }, { datasetId: dataset.datasetId });
+    const doomed = await materialBundles.createResource(material.bundleId, { ...labels, files: materialFiles });
+    const store = createPostgresManagementStore(database.db);
+    const api = createInitialResourceApi(database.db, OWNER);
+    const app = setupManagement();
+    let attempts = 0;
+    Object.assign(app.runtime.evalManagement!, { store });
+    Object.assign(app.services, {
+      materialBundles, sessionBundles, initialResources: {
+        ...api,
+        async bindDataBatch(...args: Parameters<typeof api.bindDataBatch>) {
+          attempts++;
+          // The first row was valid at planning; make a later member invalid only
+          // AFTER store.begin/attempt, so the final transaction must revalidate all.
+          await materialBundles.deleteResource(doomed.bundleId, doomed.materialId);
+          return api.bindDataBatch(...args);
+        },
+      },
+    });
+    const input = {
+      operationKey: "pg-v4-rollback", datasetId: dataset.datasetId,
+      bindings: [
+        { dataId: original.dataId, expectedContentDigest: await digestJson(original),
+          initialMaterials: [material] },
+        { dataId: second.dataId, expectedContentDigest: await digestJson(second),
+          initialMaterials: [{ bundleId: doomed.bundleId, materialId: doomed.materialId }] },
+        { dataId: third.dataId, expectedContentDigest: await digestJson(third), evalInitialMaterials: [material] },
+      ],
+    };
+    const rpc = await (await app.call("bind_data_resources", input)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(rpc.result.isError).toBe(true);
+    expect(attempts).toBe(1);
+    expect(await datasets.getData(original.dataId)).toEqual(original);
+    expect(await datasets.getData(second.dataId)).toEqual(second);
+    expect(await datasets.getData(third.dataId)).toEqual(third);
+    expect(await toolValue(await app.call("get_preparation", { operationKey: input.operationKey })))
+      .toMatchObject({ kind: "bind", status: "outcome_unknown",
+        bindings: [{ binding: "attempted" }, { binding: "attempted" }, { binding: "attempted" }] });
+    const replay = await (await app.call("bind_data_resources", input)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(replay.result.content[0].text).toContain("OPERATION_OUTCOME_UNKNOWN");
+    expect(attempts).toBe(1);
+    await expect(store.assertReadyDatasets(OWNER, [dataset.datasetId])).rejects.toThrow();
+  });
+
+  it("rolls back an earlier SQL update if a later Data update fails (not just a pre-write validation)", async () => {
+    const { datasets, dataset, original, material } = await seeded();
+    const second = await datasets.createData({ userPrompt: "PRIVATE_SECOND" }, { datasetId: dataset.datasetId });
+    const ordered = [original, second].sort((a, b) => a.dataId < b.dataId ? -1 : a.dataId > b.dataId ? 1 : 0);
+    const api = createInitialResourceApi(database.db, OWNER);
+    const patch = { initialMaterials: [material] };
+    const bindings = await Promise.all([...ordered].reverse().map(async (row) => ({
+      dataId: row.dataId, expectedContentDigest: await digestJson(row),
+      contentDigest: await digestJson(patchedInitialResources(row, patch)), patch,
+    })));
+    // NOT VALID leaves the existing last row in place, but rejects its later
+    // UPDATE. The sorted first UPDATE must be rolled back with it.
+    const rejectLast = ordered[1]!.dataId === original.dataId
+      ? sql`CHECK (content->>'userPrompt' <> 'PRIVATE_PROMPT') NOT VALID`
+      : sql`CHECK (content->>'userPrompt' <> 'PRIVATE_SECOND') NOT VALID`;
+    await database.db.execute(sql`ALTER TABLE eval_data ADD CONSTRAINT eval_batch_rollback_test_ck ${rejectLast}`);
+    try {
+      await expect(api.bindDataBatch(dataset.datasetId, bindings)).rejects.toThrow();
+    } finally {
+      await database.db.execute(sql`ALTER TABLE eval_data DROP CONSTRAINT eval_batch_rollback_test_ck`);
+    }
+    expect(await datasets.getData(original.dataId)).toEqual(original);
+    expect(await datasets.getData(second.dataId)).toEqual(second);
+  });
+
+  it("recovers a committed v4 batch after a lost DB response only by reading back all Data, fencing another v4", async () => {
+    const { datasets, dataset, original, material, materialBundles, sessionBundles } = await seeded();
+    const second = await datasets.createData({ userPrompt: "PRIVATE_SECOND" }, { datasetId: dataset.datasetId });
+    const store = createPostgresManagementStore(database.db);
+    const api = createInitialResourceApi(database.db, OWNER);
+    const app = setupManagement();
+    let writes = 0, loseReply = true;
+    Object.assign(app.runtime.evalManagement!, { store });
+    Object.assign(app.services, {
+      materialBundles, sessionBundles, initialResources: {
+        ...api,
+        async bindDataBatch(...args: Parameters<typeof api.bindDataBatch>) {
+          writes++;
+          const result = await api.bindDataBatch(...args);
+          if (loseReply) { loseReply = false; throw Error("Private DB response lost after commit"); }
+          return result;
+        },
+      },
+    });
+    const input = { operationKey: "pg-v4-lost-reply", datasetId: dataset.datasetId, bindings: [
+      { dataId: original.dataId, expectedContentDigest: await digestJson(original), initialMaterials: [material] },
+      { dataId: second.dataId, expectedContentDigest: await digestJson(second), evalInitialMaterials: [material] },
+    ] };
+    const lost = await (await app.call("bind_data_resources", input)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(lost.result.isError).toBe(true);
+    expect(lost.result.content[0].text).not.toContain("Private DB");
+    expect((await store.get(OWNER, input.operationKey))?.stages.batch?.status).toBe("attempted");
+    const overlapping = await (await app.call("bind_data_resources", {
+      operationKey: "pg-v4-other", datasetId: dataset.datasetId,
+      bindings: [{ dataId: second.dataId, expectedContentDigest: await digestJson(await datasets.getData(second.dataId)),
+        initialMaterials: [material] }],
+    })).json() as { result: { content: [{ text: string }] } };
+    expect(overlapping.result.content[0].text).toContain("EVAL_SP_CONFLICT");
+    expect(await store.get(OWNER, "pg-v4-other")).toBeNull();
+    const receipt = await toolValue(await app.call("bind_data_resources", input));
+    expect(receipt).toMatchObject({ kind: "bind", status: "completed", bindings: [
+      { dataId: original.dataId }, { dataId: second.dataId },
+    ] });
+    expect(writes).toBe(1);
+    expect((await store.get(OWNER, input.operationKey))?.status).toBe("completed");
+    expect(await toolValue(await app.call("bind_data_resources", input))).toEqual(receipt);
+    expect(writes).toBe(1);
+  });
+
+  it("fences overlapping v3 and v4 bind keys across Datasets, but not a disjoint new Data", async () => {
+    const { datasets, dataset, original, material } = await seeded();
+    const otherDataset = await datasets.createDataset({ name: "Shared Data" });
+    await datasets.attachData(otherDataset.datasetId, [original.dataId]);
+    const unrelated = await datasets.createData({ userPrompt: "UNRELATED" }, { datasetId: dataset.datasetId });
+    const store = createPostgresManagementStore(database.db);
+    const originalDigest = await digestJson(original);
+    await store.begin(OWNER, "pg-v3-pending", "bind", "a".repeat(64),
+      { version: 3, datasetId: otherDataset.datasetId, dataId: original.dataId,
+        expectedContentDigest: originalDigest, contentDigest: "b".repeat(64), patch: { initialMaterials: [material] } });
+    const app = setupManagement();
+    Object.assign(app.runtime.evalManagement!, { store });
+    Object.assign(app.services, {
+      initialResources: createInitialResourceApi(database.db, OWNER),
+      ...createBundleCatalogs(database.db, OWNER, directory),
+    });
+    const overlap = { operationKey: "pg-v4-overlap", datasetId: dataset.datasetId,
+      bindings: [{ dataId: original.dataId, expectedContentDigest: originalDigest, initialMaterials: [material] },
+        { dataId: unrelated.dataId, expectedContentDigest: await digestJson(unrelated), initialMaterials: [material] }] };
+    const failed = await (await app.call("bind_data_resources", overlap)).json() as {
+      result: { content: [{ text: string }] };
+    };
+    expect(failed.result.content[0].text).toContain("EVAL_SP_CONFLICT");
+    expect(await store.get(OWNER, overlap.operationKey)).toBeNull();
+    expect(await toolValue(await app.call("bind_data_resources", {
+      operationKey: "pg-v4-disjoint", datasetId: dataset.datasetId,
+      bindings: [{ dataId: unrelated.dataId, expectedContentDigest: await digestJson(unrelated),
+        initialMaterials: [material] }],
+    }))).toMatchObject({ kind: "bind", status: "completed" });
+    expect((await store.get(OWNER, "pg-v3-pending"))?.status).toBe("pending"); // v3 plan untouched
+  });
+
+  it("uses the existing locked catalog validation for v4 retained soft-deletes, foreign refs and full rollback", async () => {
+    const { datasets, dataset, original, material, session, materialBundles } = await seeded();
+    const second = await datasets.createData({ userPrompt: "OTHER_MEMBER" }, { datasetId: dataset.datasetId });
+    const { dataId: _id, ...content } = original;
+    await datasets.updateData(original.dataId, { ...content, initialMaterials: [material] });
+    const retained = (await datasets.getData(original.dataId))!;
+    await materialBundles.deleteResource(material.bundleId, material.materialId);
+    const api = createInitialResourceApi(database.db, OWNER);
+    const firstPatch = { initialMaterials: [material], initialSession: session };
+    const secondPatch = { initialSession: session };
+    const batch = [
+      { dataId: retained.dataId, expectedContentDigest: await digestJson(retained),
+        contentDigest: await digestJson(patchedInitialResources(retained, firstPatch)), patch: firstPatch },
+      { dataId: second.dataId, expectedContentDigest: await digestJson(second),
+        contentDigest: await digestJson(patchedInitialResources(second, secondPatch)), patch: secondPatch },
+    ];
+    expect(await api.bindDataBatch(dataset.datasetId, batch)).toMatchObject([
+      { dataId: original.dataId, initialMaterials: [material], initialSession: session },
+      { dataId: second.dataId, initialSession: session },
+    ]);
+    const before = await api.inspectBindTargets(dataset.datasetId, batch);
+    const clear = { initialSession: null };
+    const invalid = { evalInitialMaterials: [material] }; // Deleted in this *other* field, never retained.
+    await expect(api.bindDataBatch(dataset.datasetId, [
+      { dataId: before[0]!.dataId, expectedContentDigest: await digestJson(before[0]),
+        contentDigest: await digestJson(patchedInitialResources(before[0]!, clear)), patch: clear },
+      { dataId: before[1]!.dataId, expectedContentDigest: await digestJson(before[1]),
+        contentDigest: await digestJson(patchedInitialResources(before[1]!, invalid)), patch: invalid },
+    ])).rejects.toBeInstanceOf(BundleResourceNotFoundError);
+    expect(await api.inspectBindTargets(dataset.datasetId, batch)).toEqual(before);
+    const wrongKind = { initialSession: { bundleId: material.bundleId, sessionId: session.sessionId } };
+    await expect(api.bindDataBatch(dataset.datasetId, [
+      { dataId: before[0]!.dataId, expectedContentDigest: await digestJson(before[0]),
+        contentDigest: await digestJson(patchedInitialResources(before[0]!, clear)), patch: clear },
+      { dataId: before[1]!.dataId, expectedContentDigest: await digestJson(before[1]),
+        contentDigest: await digestJson(patchedInitialResources(before[1]!, wrongKind)), patch: wrongKind },
+    ])).rejects.toBeInstanceOf(BundleResourceNotFoundError);
+    expect(await api.inspectBindTargets(dataset.datasetId, batch)).toEqual(before);
+  });
+
+  it("a confirmed stage cannot complete v4 until the actual batch is committed", async () => {
+    const { datasets, dataset, original, material } = await seeded();
+    const second = await datasets.createData({ userPrompt: "Second" }, { datasetId: dataset.datasetId });
+    const store = createPostgresManagementStore(database.db);
+    const api = createInitialResourceApi(database.db, OWNER);
+    const request = { operationKey: "pg-confirm-before-write", datasetId: dataset.datasetId,
+      bindings: await Promise.all([original, second].map(async (row) => ({
+        dataId: row.dataId, expectedContentDigest: await digestJson(row), initialMaterials: [material],
+      }))) };
+    const plan = { version: 4 as const, request, datasetId: dataset.datasetId,
+      bindings: await Promise.all([original, second].map(async (row, index) => {
+        const patch = { initialMaterials: [material] };
+        return { dataId: row.dataId, expectedContentDigest: request.bindings[index]!.expectedContentDigest,
+          contentDigest: await digestJson(patchedInitialResources(row, patch)), patch };
+      })) };
+    await store.begin(OWNER, request.operationKey, "bind", batchBindingFingerprint(OWNER, request), plan);
+    await store.attempt(OWNER, request.operationKey, "batch");
+    await store.confirm(OWNER, request.operationKey, "batch", batchBindingReceipt(plan));
+    await expect(store.complete(OWNER, request.operationKey)).rejects.toThrow();
+    expect((await store.get(OWNER, request.operationKey))?.status).toBe("pending");
+    expect(await datasets.getData(original.dataId)).toEqual(original);
+    expect(await datasets.getData(second.dataId)).toEqual(second);
+    await api.bindDataBatch(dataset.datasetId, plan.bindings);
+    await store.complete(OWNER, request.operationKey);
+    expect((await store.get(OWNER, request.operationKey))?.status).toBe("completed");
+  });
+
+  it("serializes concurrent v4 begin reservations and pages all 20 Dataset members without dropping identities", async () => {
+    const { datasets, dataset, original, material } = await seeded();
+    const members = [original];
+    for (let index = 0; index < 21; index++) members.push(await datasets.createData({
+      userPrompt: `PRIVATE_PROMPT_${index}`, name: `Case ${index}`,
+    }, { datasetId: dataset.datasetId }));
+    const store = createPostgresManagementStore(database.db);
+    const first = await store.listDatasetData(OWNER, dataset.datasetId, 1, 20);
+    expect(first).toMatchObject({ total: 22, order: "upload" });
+    expect(first.items.map(({ dataId }) => dataId)).toEqual(members.slice(0, 20).map(({ dataId }) => dataId));
+    expect((await store.listDatasetData(OWNER, dataset.datasetId, 2, 20)).items.map(({ dataId }) => dataId))
+      .toEqual(members.slice(20).map(({ dataId }) => dataId));
+    await expect(store.listDatasetData(OWNER, dataset.datasetId, 1, 21)).rejects.toThrow();
+
+    const reserve = async (key: string, ids: readonly string[]) => {
+      const request = { operationKey: key, datasetId: dataset.datasetId,
+        bindings: await Promise.all(ids.map(async (dataId) => ({
+          dataId, expectedContentDigest: await digestJson(members.find((row) => row.dataId === dataId)!),
+          initialMaterials: [material],
+        }))) };
+      const bindings = await Promise.all(request.bindings.map(async ({ dataId, expectedContentDigest }) => {
+        const patch = { initialMaterials: [material] };
+        return { dataId, expectedContentDigest,
+          contentDigest: await digestJson(patchedInitialResources(members.find((row) => row.dataId === dataId)!, patch)),
+          patch };
+      }));
+      return store.begin(OWNER, key, "bind", batchBindingFingerprint(OWNER, request),
+        { version: 4, request, datasetId: dataset.datasetId, bindings });
+    };
+    const concurrent = await Promise.allSettled([
+      reserve("concurrent-one", [members[0]!.dataId, members[1]!.dataId]),
+      reserve("concurrent-two", [members[1]!.dataId, members[2]!.dataId]),
+    ]);
+    expect(concurrent.map(({ status }) => status).sort()).toEqual(["fulfilled", "rejected"]);
+    expect([await store.get(OWNER, "concurrent-one"), await store.get(OWNER, "concurrent-two")]
+      .filter((row) => row?.status === "pending")).toHaveLength(1);
   });
 });
