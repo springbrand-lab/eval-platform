@@ -68,7 +68,7 @@ class TestDatasetStore implements DatasetStore {
       return [...this.data.values()].sort((left, right) => left.dataId.localeCompare(right.dataId));
     }
     this.requireDataset(datasetId);
-    return [...this.memberships.get(datasetId)!].sort().map((dataId) => this.data.get(dataId)!);
+    return [...this.memberships.get(datasetId)!].map((dataId) => this.data.get(dataId)!);
   }
 
   async deleteData(dataId: string): Promise<void> {
@@ -96,7 +96,7 @@ class TestDatasetStore implements DatasetStore {
     if (!dataset) return null;
     return {
       dataset,
-      data: [...this.memberships.get(datasetId)!].sort().map((dataId) => this.data.get(dataId)!),
+      data: [...this.memberships.get(datasetId)!].map((dataId) => this.data.get(dataId)!),
     };
   }
 
@@ -110,8 +110,8 @@ class TestDatasetStore implements DatasetStore {
     }
     const existing = this.datasets.get(incoming.dataset.datasetId);
     if (existing) {
-      const existingIds = [...this.memberships.get(existing.datasetId)!].sort();
-      const incomingIds = incoming.data.map((entry) => entry.dataId).sort();
+      const existingIds = [...this.memberships.get(existing.datasetId)!];
+      const incomingIds = incoming.data.map((entry) => entry.dataId);
       if (!isDeepStrictEqual(existing, incoming.dataset) || !isDeepStrictEqual(existingIds, incomingIds)) {
         throw new DatasetIdentityConflictError("dataset", existing.datasetId);
       }
@@ -406,6 +406,24 @@ describe("Dataset import and export", () => {
     await expect(service.importPromptDataset({ ...input, content: input.content.replace('"evalPrompt"', '"initialMaterials"') },
       planned)).rejects.toBeInstanceOf(DatasetInputError);
   });
+  it("passes the original file order to the Store even when planned UUIDs have the opposite sort order", async () => {
+    const store = new TestDatasetStore();
+    const service = createDatasetService(store);
+    const datasetId = crypto.randomUUID();
+    const first = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const second = "11111111-1111-4111-8111-111111111111";
+    const input = { name: "Prompt", description: "Rows", format: "jsonl" as const, content: [
+      '{"name":"File row 1","description":"a","userPrompt":"first","evalPrompt":"first eval"}',
+      '{"name":"File row 2","description":"b","userPrompt":"second","evalPrompt":"second eval"}',
+    ].join("\n") };
+    const imported = await service.importPromptDataset(input, { datasetId, dataIds: [first, second] });
+    expect(imported.data.map((row) => row.dataId)).toEqual([first, second]);
+    expect((await service.listData(datasetId)).map((row) => row.dataId)).toEqual([first, second]);
+    expect(parseDatasetDocument(await service.exportDataset(datasetId, "json"), "json").data.map((row) => row.dataId))
+      .toEqual([first, second]);
+    await service.importPromptDataset(input, { datasetId, dataIds: [first, second] });
+    expect((await service.listData(datasetId)).map((row) => row.dataId)).toEqual([first, second]);
+  });
   it.each([
     { format: "json", source: '{"dataset":{"name":"tasks"},"data":[{"userPrompt":"task","externalDataId":9007199254740993}]}' },
     { format: "yaml", source: 'dataset: { name: tasks }\ndata: [{ userPrompt: task, externalDataId: 9007199254740993 }]' },
@@ -507,12 +525,15 @@ describe("Dataset import and export", () => {
     await expect(service.getData(existing.dataId)).resolves.toEqual(existing);
   });
 
-  it("rejects conflicting Dataset content but accepts reordered identical members", async () => {
+  it("rejects changed membership order as well as conflicting Dataset content", async () => {
     const store = new TestDatasetStore();
     const service = createDatasetService(store);
     const imported = await service.importDataset(JSON.stringify({ dataset: { name: "tasks" }, data: [{ userPrompt: "first" }, { userPrompt: "second" }] }), "json");
     const reordered = { dataset: imported.dataset, data: [...imported.data].reverse() };
-    await expect(service.importDataset(JSON.stringify(reordered), "json")).resolves.toEqual(reordered);
+    await expect(service.importDataset(JSON.stringify(reordered), "json"))
+      .rejects.toBeInstanceOf(DatasetIdentityConflictError);
+    expect((await service.listData(imported.dataset.datasetId)).map((row) => row.dataId))
+      .toEqual(imported.data.map((row) => row.dataId));
     await expect(service.importDataset(JSON.stringify({ ...imported, dataset: { ...imported.dataset, name: "changed" } }), "json"))
       .rejects.toBeInstanceOf(DatasetIdentityConflictError);
     await expect(service.importDataset(JSON.stringify({ ...imported, data: [] }), "json"))

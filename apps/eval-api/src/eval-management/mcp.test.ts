@@ -86,7 +86,7 @@ describe("trusted management MCP transport", () => {
     const optionsInput = tools.result.tools.find(({ name }) => name === "list_options")!.inputSchema;
     expect(optionsInput.properties).toHaveProperty("schemaOffset");
     expect(optionsInput.properties?.category).toMatchObject({
-      enum: expect.arrayContaining(["output_schema_detail", "project_schema_detail", "approval_output_schema"]),
+      enum: expect.arrayContaining(["dataset_data", "output_schema_detail", "project_schema_detail", "approval_output_schema"]),
     });
     expect(tools.result.tools.find(({ name }) => name === "reconcile_operation")!.inputSchema)
       .toHaveProperty("oneOf");

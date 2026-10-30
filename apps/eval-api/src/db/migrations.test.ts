@@ -14,6 +14,8 @@ const appliedPrefix = [
   [1792517619186, "fbd9e2a5e49739c4d0887eba6c95696f54167a718c3a975525165f96376e3a92"],
   [1793176731034, "3cab810e0d98f97d930ce9638a9afac0bb4dcd25ce4a49837be8a79f19f1afe8"],
   [1793187963783, "7b409f16a0b9fb06a4072ce7389a46c15e879402a02b7f8b305d7775e9f494ea"],
+  [1793264185720, "98696eba43c3b40ccf31391b2f990a23bce25878c7f3daa9e2691b8434a662c9"],
+  [1793285187605, "588676807bb0b38f0c95db2b9270da6c970eac2d18a1537a13eec70368d0fcd2"],
 ];
 
 async function metadata(name: string) {
@@ -24,12 +26,13 @@ describe("offline Dashboard and management migration integrity", () => {
   it("preserves the immutable Dashboard history and appends management after it", async () => {
     const migrations = readMigrationFiles({ migrationsFolder });
     expect(migrations.slice(0, appliedPrefix.length).map((migration) => [migration.folderMillis, migration.hash])).toEqual(appliedPrefix);
-    expect(migrations).toHaveLength(appliedPrefix.length + 2);
+    expect(migrations).toHaveLength(appliedPrefix.length + 1);
     const journal = await metadata("_journal.json");
     expect(journal.entries).toHaveLength(migrations.length);
     expect(journal.entries[8]).toMatchObject({ idx: 8, tag: "0008_dashboard_data_selection", breakpoints: true });
     expect(journal.entries[9]).toMatchObject({ idx: 9, tag: "0009_management_preparation", breakpoints: true });
-    expect(journal.entries.at(-1)).toMatchObject({ idx: 10, tag: "0010_management_output_schema", breakpoints: true });
+    expect(journal.entries[10]).toMatchObject({ idx: 10, tag: "0010_management_output_schema", breakpoints: true });
+    expect(journal.entries.at(-1)).toMatchObject({ idx: 11, tag: "0011_dataset_member_order", breakpoints: true });
     expect(journal.entries.map((entry: { when: number }) => entry.when)).toEqual(migrations.map((migration) => migration.folderMillis));
     expect(migrations.at(-1)!.folderMillis).toBeGreaterThan(migrations.at(-2)!.folderMillis);
   });
@@ -110,5 +113,30 @@ describe("offline Dashboard and management migration integrity", () => {
     expect(statements[0]).toContain('DROP CONSTRAINT "eval_management_operations_kind_ck"');
     expect(statements[1]).toContain('ADD CONSTRAINT "eval_management_operations_kind_ck"');
     expect(statements.join(" ")).not.toMatch(/\b(INSERT|DELETE|TRUNCATE|INDEX|COLUMN|CREATE TABLE)\b/iu);
+  });
+
+  it("appends only nullable Dataset membership positions and their per-Dataset constraints", async () => {
+    const previous = await metadata("0010_snapshot.json");
+    const current = await metadata("0011_snapshot.json");
+    expect(current.prevId).toBe(previous.id);
+    expect(Object.keys(current.tables)).toEqual(Object.keys(previous.tables));
+    for (const [name, table] of Object.entries(previous.tables)) {
+      if (name !== "public.eval_dataset_data") expect(current.tables[name]).toEqual(table);
+    }
+    const before = previous.tables["public.eval_dataset_data"];
+    const after = current.tables["public.eval_dataset_data"];
+    const { position, ...columns } = after.columns;
+    expect(position).toMatchObject({ type: "integer", notNull: false });
+    expect(columns).toEqual(before.columns);
+    expect(after.indexes.eval_dataset_data_position_uq).toMatchObject({
+      columns: [{ expression: "dataset_id" }, { expression: "position" }], isUnique: true,
+    });
+    expect(after.checkConstraints.eval_dataset_data_position_ck.value).toContain(">= 0");
+    expect({ ...after, columns: before.columns, indexes: before.indexes, checkConstraints: before.checkConstraints })
+      .toEqual(before);
+    const statements = readMigrationFiles({ migrationsFolder })[11]!.sql.join(" ");
+    expect(statements).toMatch(/ADD COLUMN "position" integer/iu);
+    expect(statements).toMatch(/UNIQUE INDEX "eval_dataset_data_position_uq"/iu);
+    expect(statements).not.toMatch(/\b(UPDATE|INSERT|DELETE|TRUNCATE|DROP)\b/iu);
   });
 });

@@ -111,6 +111,7 @@ async function fixture(evaluating = false) {
       firstRun = change(firstRun);
     },
     setData(data: Data) { source = { ...source, data: [data] }; },
+    setSelection(data: readonly Data[]) { source = { ...source, data }; },
     setSubject(next: typeof subjectSource) { subject = next; },
     setEvaluator(next: typeof evaluatorSource) { evaluator = next; },
     setSchema(next: Record<string, unknown>) { schema = next; },
@@ -121,6 +122,27 @@ async function fixture(evaluating = false) {
 }
 
 describe("ProjectService approved source and first-Run binding (no database or SP calls)", () => {
+  it("keeps reviewed file order in the selected digest even when UUIDs and requested IDs sort the other way", async () => {
+    const f = await fixture();
+    const first = { dataId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      userPrompt: "private original row 1", evalPrompt: "judge row 1" };
+    const second = { dataId: "11111111-1111-4111-8111-111111111111",
+      userPrompt: "private original row 2", evalPrompt: "judge row 2" };
+    f.setSelection([first, second]);
+    const selection = { datasetId: DATASET, dataIds: [second.dataId, first.dataId] };
+    const reviewed = await f.service.reviewSelection(selection);
+    expect(reviewed.data.map(({ dataId }) => dataId)).toEqual([first.dataId, second.dataId]);
+    expect(reviewed.digest).toBe(await digestJson({ dataset: reviewed.dataset, selected: [first, second] }));
+    const wrongDigest = await digestJson({ dataset: reviewed.dataset, selected: [second, first] });
+    expect(wrongDigest).not.toBe(reviewed.digest);
+    const body = { ...f.body, datasets: [selection],
+      expectedSnapshots: { ...f.body.expectedSnapshots!, datasets: [{ datasetId: DATASET, digest: wrongDigest }] } };
+    await expect(f.service.create(body)).rejects.toMatchObject({ reason: "plan-changed" });
+    expect(f.freeze).not.toHaveBeenCalled();
+    expect(f.create).not.toHaveBeenCalled();
+    expect(f.submit).not.toHaveBeenCalled(); // No Run is created for an order-mismatched approval.
+  });
+
   it("uses the same consistent selection for review and creation; rejects changed Data before freezing", async () => {
     const f = await fixture();
     const reviewed = await f.service.reviewSelection(f.body.datasets[0]!);

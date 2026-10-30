@@ -1,10 +1,12 @@
 import { equalJson } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
-import { platformIdSchema } from "@eval-platform/eval-dataset";
+import { platformIdSchema, type Data } from "@eval-platform/eval-dataset";
 import { and, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { IMPORT_LIMITS } from "../agent-imports/model.js";
-import type { EvalDb } from "../db/client.js";
-import { managementOperations, managementUploads } from "../db/schema.js";
+import { READ_SNAPSHOT, type EvalDb } from "../db/client.js";
+import { orderDatasetMemberships } from "../db/dataset.js";
+import type { DatasetMemberOrder } from "../db/dataset-order.js";
+import { data, datasetData, datasets, managementOperations, managementUploads } from "../db/schema.js";
 
 export type UploadKind = typeof managementUploads.$inferInsert.kind;
 export type OperationKind = typeof managementOperations.$inferInsert.kind;
@@ -12,6 +14,14 @@ export type UploadReceipt = typeof managementUploads.$inferSelect;
 export type OperationReceipt = typeof managementOperations.$inferSelect;
 type Stage = OperationReceipt["stages"][string];
 export type StageClaim = { status: "started" } | { status: "attempted" } | { status: "confirmed"; receipt: unknown };
+
+/** Internal read result; only the allowlisted, redacted name is exposed by list_options. */
+export interface DatasetDataPage {
+  readonly name: string;
+  readonly order: DatasetMemberOrder;
+  readonly total: number;
+  readonly items: readonly { readonly dataId: string; readonly content: Omit<Data, "dataId"> }[];
+}
 
 /** Persistent reservations and write-ahead receipts; no SP work takes place inside a DB transaction. */
 export interface ManagementStore {
@@ -28,6 +38,8 @@ export interface ManagementStore {
   confirm(owner: string, operationKey: string, stage: string, receipt: unknown): Promise<void>;
   complete(owner: string, operationKey: string): Promise<void>;
   assertReadyDatasets(owner: string, ids: readonly string[]): Promise<void>;
+  /** Same snapshot for active owner, pending-preparation fence, order proof, total and page. */
+  listDatasetData(owner: string, datasetId: string, page: number, pageSize: number): Promise<DatasetDataPage>;
 }
 
 const conflict = () => new HttpError("EVAL_SP_CONFLICT", "The operation key or resource is already claimed");
@@ -38,6 +50,14 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
     and(eq(managementOperations.ownerUserId, owner), eq(managementOperations.operationKey, key));
   const uploadWhere = (owner: string, id: string) =>
     and(eq(managementUploads.ownerUserId, owner), eq(managementUploads.uploadId, id));
+
+  async function assertReady(reader: Pick<EvalDb, "select">, owner: string, ids: readonly string[]): Promise<void> {
+    const [pending] = await reader.select({ operationKey: managementOperations.operationKey }).from(managementOperations)
+      .where(and(eq(managementOperations.ownerUserId, owner), eq(managementOperations.kind, "prepare"),
+        eq(managementOperations.status, "pending"),
+        inArray(sql<string>`${managementOperations.plan}->>'datasetId'`, [...ids]))).limit(1);
+    if (pending) throw new HttpError("EVAL_SP_CONFLICT", "Bind all prepared Data before creating a Project");
+  }
 
   async function locked(owner: string, key: string, callback: (row: OperationReceipt,
     transaction: Parameters<Parameters<EvalDb["transaction"]>[0]>[0]) => Promise<void>): Promise<void> {
@@ -165,11 +185,32 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
       });
     },
     async assertReadyDatasets(owner, ids) {
-      const [pending] = await db.select({ operationKey: managementOperations.operationKey }).from(managementOperations)
-        .where(and(eq(managementOperations.ownerUserId, owner), eq(managementOperations.kind, "prepare"),
-          eq(managementOperations.status, "pending"),
-          inArray(sql<string>`${managementOperations.plan}->>'datasetId'`, [...ids]))).limit(1);
-      if (pending) throw new HttpError("EVAL_SP_CONFLICT", "Bind all prepared Data before creating a Project");
+      await assertReady(db, owner, ids);
+    },
+    async listDatasetData(owner, datasetId, page, pageSize) {
+      if (!Number.isSafeInteger(page) || page < 1 || page > 10_000
+        || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 5) {
+        throw new HttpError("REQUEST_INVALID_INPUT", "Select a page of at most five Data");
+      }
+      return db.transaction(async (transaction) => {
+        const [dataset] = await transaction.select({
+          datasetId: datasets.datasetId, kind: datasets.kind, name: datasets.name,
+        }).from(datasets).where(and(eq(datasets.ownerUserId, owner), eq(datasets.datasetId, datasetId),
+          isNull(datasets.deletedAt)));
+        if (!dataset) throw new HttpError("DATASET_NOT_FOUND");
+        await assertReady(transaction, owner, [datasetId]);
+        const bound = await transaction.select({
+          datasetId: datasetData.datasetId, dataId: datasetData.dataId, position: datasetData.position,
+        }).from(datasetData).where(and(eq(datasetData.ownerUserId, owner), eq(datasetData.datasetId, datasetId)));
+        const ordered = (await orderDatasetMemberships(transaction, owner, [dataset], bound)).get(datasetId)!;
+        const total = ordered.members.length;
+        const ids = ordered.members.slice((page - 1) * pageSize, page * pageSize).map(({ dataId }) => dataId);
+        const items = ids.length ? await transaction.select({ dataId: data.dataId, content: data.content })
+          .from(data).where(and(eq(data.ownerUserId, owner), inArray(data.dataId, ids), isNull(data.deletedAt))) : [];
+        const byId = new Map(items.map((item) => [item.dataId, item]));
+        if (byId.size !== ids.length) throw new HttpError("RESPONSE_INVALID", "Dataset has a missing Data member");
+        return { name: dataset.name, order: ordered.order, total, items: ids.map((id) => byId.get(id)!) };
+      }, READ_SNAPSHOT);
     },
   };
 }

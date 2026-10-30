@@ -79,6 +79,9 @@ export function fakeManagement(owner: string) {
       if (ownerId !== owner || [...operations.values()].some((row) =>
         row.kind === "prepare" && row.status === "pending" && ids.includes(row.plan.datasetId as string))) throw conflict();
     },
+    async listDatasetData() {
+      throw new HttpError("DATASET_NOT_FOUND");
+    },
   };
   const files: ManagementFiles = {
     async ingest(ownerId, metadata, body, uploadId) {

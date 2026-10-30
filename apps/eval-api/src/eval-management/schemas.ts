@@ -17,7 +17,7 @@ export const resourceIdSchema = idempotencyKeySchema.max(255);
 const resourceIds = z.array(resourceIdSchema).max(50).refine(unique, "IDs must be unique").default([]);
 
 export const listOptionsSchema = z.strictObject({
-  category: z.enum(["agents", "datasets", "projects", "project_detail", "output_schemas", "output_schema_detail", "project_schema_detail",
+  category: z.enum(["agents", "datasets", "dataset_data", "projects", "project_detail", "output_schemas", "output_schema_detail", "project_schema_detail",
     "input_limits", "credits",
     "approval_dataset", "approval_agent", "approval_output_schema", "approval_project"]),
   q: search, ...pageSchema,
@@ -33,7 +33,10 @@ export const listOptionsSchema = z.strictObject({
   const invalid = () => ctx.addIssue({ code: "custom", message: "Choose one bounded selection" });
   if (value.schemaOffset !== undefined
     && value.category !== "output_schema_detail" && value.category !== "project_schema_detail") invalid();
-  if (value.category === "approval_dataset") {
+  if (value.category === "dataset_data") {
+    if (!value.datasetId || value.dataIds || value.userAgentId || value.outputSchemaId || value.projectId
+      || value.projectSampleIds || value.samplingIds || value.q !== undefined) invalid();
+  } else if (value.category === "approval_dataset") {
     if (!value.datasetId || value.userAgentId || value.outputSchemaId || value.projectId || value.projectSampleIds || value.samplingIds
       || value.q !== undefined || value.pageSize > 10) invalid();
   } else if (value.category === "approval_agent") {

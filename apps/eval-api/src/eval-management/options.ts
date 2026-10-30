@@ -89,6 +89,34 @@ async function approvalDataset(c: Context<AppBindings>, input: Options) {
   };
 }
 
+/** A name-only page. The Store proves order and gates pending preparations in the same owner snapshot. */
+async function datasetDataOptions(c: Context<AppBindings>, input: Options) {
+  if (!c.env.evalManagement) throw new HttpError("INTERNAL_ERROR", "Management preparation is unavailable");
+  const datasetId = input.datasetId!;
+  const { page } = input;
+  const pageSize = Math.min(input.pageSize, 5); // The ordinary catalog default is 20, not 20 Data names.
+  const listing = await c.env.evalManagement.store.listDatasetData(c.var.user.id, datasetId, page, pageSize);
+  const items = listing.items.map(({ dataId, content }) => {
+    if (typeof content.name !== "string") return { dataId, name: null };
+    // A user-authored name can itself contain a prompt or credential. Never project other Data fields.
+    const safe = redactLiteral(content.name, "", [
+      typeof content.userPrompt === "string" ? content.userPrompt : "",
+      typeof content.evalPrompt === "string" ? content.evalPrompt : "",
+    ]);
+    return { dataId, name: short(safe.value, 80),
+      ...(safe.redacted ? { sourceRedacted: true } : {}),
+      ...(safe.value.length > 80 ? { nameTruncated: true } : {}) };
+  });
+  const datasetName = redactLiteral(listing.name);
+  const result = {
+    category: "dataset_data", datasetId, name: short(datasetName.value, 100),
+    ...(datasetName.redacted ? { sourceRedacted: true } : {}),
+    order: listing.order, page, pageSize, total: listing.total, items,
+  };
+  if (!fitsTaktResult(result)) throw new HttpError("CATALOG_PAYLOAD_TOO_LARGE", "Dataset member page is too large");
+  return result;
+}
+
 async function approvalOutputSchema(c: Context<AppBindings>, input: Options) {
   const outputSchemaId = input.outputSchemaId!;
   const schema = await c.var.services.outputSchemas.get(outputSchemaId);
@@ -236,6 +264,7 @@ async function projectDetail(c: Context<AppBindings>, input: Options) {
 
 export async function listOptions(c: Context<AppBindings>, input: Options) {
   const { category, q, page, pageSize } = input;
+  if (category === "dataset_data") return datasetDataOptions(c, input);
   if (category === "approval_dataset") return approvalDataset(c, input);
   if (category === "approval_agent") return approvalAgent(c, input);
   if (category === "approval_output_schema") return approvalOutputSchema(c, input);
