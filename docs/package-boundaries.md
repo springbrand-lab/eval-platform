@@ -164,6 +164,45 @@ The file layout lives in [packages/eval-metrics/README.md](../packages/eval-metr
 
 ### `apps/eval-api`
 
+Moss management `bind_data_resources` keeps its existing single-Data v3
+input/receipt and also accepts a v4 batch of 1–20 distinct existing Data
+members of one Dataset. Each item carries its original complete
+`approval_dataset` Data digest and at least one Material/Session replacement
+or explicit `null`; the requested state may already be present. A Material
+may be used by multiple Data, in both Material fields of one Data, and
+alongside other distinct Materials within a field. A no-op member is a
+validated, already-satisfied target, not evidence that a write occurred.
+`approval_dataset` remains a read-only digest view, not an EP binding approval.
+A v4 `kind:"bind"` JSON plan uses the existing operation
+table without a migration; one write-ahead batch stage covers a **single**
+PostgreSQL transaction. It locks the owned active Dataset and Data in sorted
+ID order, rechecks membership and every original/result digest, applies the
+same retained-soft-delete/owned-catalog/Material budget/Session rules as v3,
+and commits all necessary updates or none; already-satisfied rows need no
+UPDATE, including when all members were already satisfied. A new bind key
+cannot overlap any pending v3/v4 Data, even via another Dataset. An attempted
+batch is reconciled **only** by a locked, complete readback: each changing
+member must have its exact planned full-row digest and every no-op member its
+original digest. Original-state changing members leave the batch pending/unknown;
+stale rows fail closed, never triggering a partial success or blind retry.
+Readback revalidates the complete current references and budgets so an
+all-no-op lost attempt cannot skip the atomic transaction's checks. Completion
+also rechecks ownership, active membership, full planned Data digests,
+the stored patch's actual target and catalog rules under sorted row locks in
+the Store, not merely the shape of a write-ahead receipt.
+`get_preparation` returns only paged (at most ten)
+`{dataId,contentDigest,binding}` v4 receipts and completes only after the
+atomic result and operation are confirmed; v3 plans, replays and receipts
+remain compatible. Binding never imports a Prompt, starts a Run, changes
+frozen Project snapshots, or proves upload order.
+`list_options(category:"dataset_data")` uses the same actual 20-row page as
+Eval Web (valid larger sizes clamp to 20) and adapts only redacted/truncated
+display names, not identities, order, `page` or `total`, to fit 4,800 JSON
+characters and UTF-8 bytes. Material/Session/file directories retain their
+five-row limit; the trusted `approval_dataset` still requests `pageSize:5`
+(the unchanged EP schema permits up to ten). No private SP, Takt or approval
+seam is introduced.
+
 Project/Dataset overview adds `summary.evaluationOutputs.scoreField` (nullable), directly reusing `sampleScoreIndex(summary,numericPointer ?? "/score").field` over the same overall Metrics snapshot. Its selected field shape is `{jsonPointer:string,value:number|null,coverage,observationCount,contributingEvaluationCount,missingEvaluationCount,sourceRedacted?:true,jsonPointerTruncated?:true}`. `numericPointer` may select another numeric Schema field for `overview` or `samples`, never `fields`, `tools`, Sample or Sampling; the field list stays a separate section. The mean is Metrics' precomputed numeric mean, **not** a Sample-row average, Tool rate or business pass rate; missing/non-numeric yields null, no observations and partial coverage keep Metrics' null/counts, and sensitive pointers mask the value with `sourceRedacted:true` instead of fabricating a result.
 
 The saved Dashboards Module belongs to this application, not Metrics. A Dashboard is a named, revisioned, owner-scoped ordered Project selection, not a result snapshot or metric cache. Its normalized Store owns configuration writes, Project-reference eligibility, idempotent creation and revision conflicts. New references require an admitted Run, preserving initial Project compensation without weakening same-owner foreign keys or silently removing configuration links. Opening a Dashboard supplies its saved configuration to the existing Metrics comparison Interface; view switching and evidence browsing never persist analytical facts.
