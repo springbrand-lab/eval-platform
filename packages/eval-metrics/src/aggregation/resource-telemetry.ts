@@ -335,14 +335,22 @@ function operationStatistics(observed: readonly Operation[], complete: boolean):
   };
 }
 
+/** One terminal-only rule for the entire scope and each native Tool name. */
+function toolSuccessRate(statistics: OperationStatistics): MetricNumber {
+  const terminal = statistics.completed + statistics.failed + statistics.cancelled;
+  return { value: terminal === 0 ? null : statistics.completed / terminal,
+    coverage: statistics.count.coverage };
+}
+
 function lengthSummary(operations: readonly Operation[], field: "inputLength" | "outputLength", complete: boolean): CoveredNumericSummary {
   const summary = summarizeNumbers(operations.map((operation) => operation[field]));
   return { ...summary, coverage: coverage(complete && summary.missing === 0, summary.count > 0) };
 }
 
 function toolMetric(name: string | null, operations: readonly Operation[], complete: boolean): ToolMetric {
+  const statistics = operationStatistics(operations, complete);
   return {
-    toolName: name, ...operationStatistics(operations, complete),
+    toolName: name, ...statistics, toolSuccessRate: toolSuccessRate(statistics),
     inputLength: lengthSummary(operations, "inputLength", complete),
     outputLength: lengthSummary(operations, "outputLength", complete),
   };
@@ -394,17 +402,13 @@ export function aggregateTelemetry(
   const thinking = stepCount(models, "thinking", grouped.complete, unlinkedModels === 0, turns.length === 0);
   const content = stepCount(models, "content", grouped.complete, unlinkedModels === 0, turns.length === 0);
   const toolStatistics = operationStatistics(tools, grouped.complete);
-  const terminalTools = toolStatistics.completed + toolStatistics.failed + toolStatistics.cancelled;
   return {
     modelRequests: operationStatistics(models, grouped.complete),
     trajectory: {
       coverage: coverage(grouped.complete, grouped.operations.length > 0),
       turns: operationStatistics(turns, grouped.complete),
       tools: toolStatistics,
-      toolSuccessRate: {
-        value: terminalTools === 0 ? null : toolStatistics.completed / terminalTools,
-        coverage: toolStatistics.count.coverage,
-      },
+      toolSuccessRate: toolSuccessRate(toolStatistics),
       byTool: [...groups.entries()].map(([name, operations]) =>
         toolMetric(name, operations, grouped.complete && (name === null || toolNamesKnown)))
         .sort((left, right) => (left.toolName ?? "").localeCompare(right.toolName ?? "")),

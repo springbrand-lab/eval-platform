@@ -332,7 +332,8 @@ describe("resource statistics", () => {
     expect(result.trajectory.turns).toMatchObject({ count: { value: 1, coverage: "complete" }, completed: 1, durationMs: { mean: 400 } });
     expect(result.modelRequests).toMatchObject({ count: { value: 2, coverage: "complete" }, completed: 2, durationMs: { mean: 110 } });
     expect(result.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "complete" }, failed: 1, durationMs: { mean: 40 } });
-    expect(result.trajectory.byTool[0]).toMatchObject({ toolName: "search", count: { value: 1 }, durationMs: { total: 40 } });
+    expect(result.trajectory.byTool[0]).toMatchObject({ toolName: "search", count: { value: 1 },
+      durationMs: { total: 40 }, toolSuccessRate: { value: 0, coverage: "complete" } });
   });
 
   it("keeps cancelled, unknown and in-progress native operations distinct", () => {

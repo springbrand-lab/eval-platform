@@ -20,9 +20,9 @@ it("pages numeric statistics without changing their measurements", async () => {
 });
 
 it.each(["overview", "operations"] as const)("pages tool statistics in the %s view", async (variant) => {
-  const operation = resourceStatistics().trajectory.tools;
+  const { tools: operation, toolSuccessRate } = resourceStatistics().trajectory;
   const tools = Array.from({ length: 41 }, (_, index) => ({
-    ...operation, toolName: `tool-${index}`,
+    ...operation, toolName: `tool-${index}`, toolSuccessRate,
     inputLength: { ...numeric, coverage: "complete" as const },
     outputLength: { ...numeric, coverage: "complete" as const },
   }));

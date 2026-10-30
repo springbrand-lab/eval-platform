@@ -10,24 +10,28 @@ export const pageSchema = {
   page: z.number().int().min(1).max(10_000).default(1),
   pageSize: z.number().int().min(1).max(50).default(20),
 };
+const byteOffset = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional();
 const search = z.string().trim().max(120).optional();
 /** SP resource IDs may contain '/' (encoded for detail reads), unlike Runtime path IDs. */
 export const resourceIdSchema = idempotencyKeySchema.max(255);
 const resourceIds = z.array(resourceIdSchema).max(50).refine(unique, "IDs must be unique").default([]);
 
 export const listOptionsSchema = z.strictObject({
-  category: z.enum(["agents", "datasets", "projects", "project_detail", "output_schemas", "input_limits", "credits",
+  category: z.enum(["agents", "datasets", "projects", "project_detail", "output_schemas", "output_schema_detail",
+    "input_limits", "credits",
     "approval_dataset", "approval_agent", "approval_output_schema", "approval_project"]),
   q: search, ...pageSchema,
   datasetId: platformIdSchema.optional(),
   dataIds: z.array(platformIdSchema).min(1).max(50).refine(unique).optional(),
   userAgentId: platformIdSchema.optional(),
   outputSchemaId: platformIdSchema.optional(),
+  schemaOffset: byteOffset,
   projectId: entityIdSchema.optional(),
   projectSampleIds: z.array(entityIdSchema).max(50).refine(unique).optional(),
   samplingIds: z.array(entityIdSchema).max(50).refine(unique).optional(),
 }).superRefine((value, ctx) => {
   const invalid = () => ctx.addIssue({ code: "custom", message: "Choose one bounded selection" });
+  if (value.schemaOffset !== undefined && value.category !== "output_schema_detail") invalid();
   if (value.category === "approval_dataset") {
     if (!value.datasetId || value.userAgentId || value.outputSchemaId || value.projectId || value.projectSampleIds || value.samplingIds
       || value.q !== undefined || value.pageSize > 10) invalid();
@@ -37,6 +41,10 @@ export const listOptionsSchema = z.strictObject({
   } else if (value.category === "approval_output_schema") {
     if (!value.outputSchemaId || value.userAgentId || value.datasetId || value.dataIds || value.projectId
       || value.projectSampleIds || value.samplingIds || value.q !== undefined || value.page !== 1) invalid();
+  } else if (value.category === "output_schema_detail") {
+    if (!value.outputSchemaId || value.userAgentId || value.datasetId || value.dataIds || value.projectId
+      || value.projectSampleIds || value.samplingIds || value.q !== undefined || value.page !== 1
+      || value.pageSize !== 20) invalid();
   } else if (value.category === "approval_project") {
     if (!value.projectId || value.userAgentId || value.outputSchemaId || value.datasetId || value.dataIds || value.q !== undefined || value.pageSize > 10
       || !((value.projectSampleIds?.length ?? 0) + (value.samplingIds?.length ?? 0))
@@ -150,12 +158,26 @@ export const getMetricsSchema = z.strictObject({
   projectId: entityIdSchema, runId: entityIdSchema.optional(),
   scope: z.enum(["project", "dataset", "sample", "sampling"]),
   datasetId: platformIdSchema.optional(), projectSampleId: entityIdSchema.optional(), samplingId: entityIdSchema.optional(),
+  numericPointer: z.string().max(512).refine((pointer) => pointer === "" || pointer.startsWith("/"),
+    "Select a JSON Pointer").optional(),
   ...pageSchema,
+  pageSize: z.number().int().min(1).max(50).default(5),
+  toolPage: z.number().int().min(1).max(10_000).default(1),
+  toolPageSize: z.number().int().min(1).max(5).default(2),
+  evaluationId: entityIdSchema.optional(), resultOffset: byteOffset,
 }).superRefine((value, ctx) => {
   const expected = { project: undefined, dataset: "datasetId", sample: "projectSampleId", sampling: "samplingId" }[value.scope];
   if (["datasetId", "projectSampleId", "samplingId"].some((key) =>
     (value[key as "datasetId" | "projectSampleId" | "samplingId"] !== undefined) !== (key === expected))) {
     ctx.addIssue({ code: "custom", message: `Supply exactly the ${expected ?? "project"} scope ID` });
+  }
+  if (value.evaluationId === undefined && value.resultOffset !== undefined
+    || value.evaluationId !== undefined && (value.scope !== "sampling"
+      || value.page !== 1 || value.pageSize !== 5 || value.toolPage !== 1 || value.toolPageSize !== 2)) {
+    ctx.addIssue({ code: "custom", message: "Select one Sampling Evaluation for resultOffset, without summary paging" });
+  }
+  if (value.numericPointer !== undefined && value.scope !== "project" && value.scope !== "dataset") {
+    ctx.addIssue({ code: "custom", message: "A numeric field index is only available for Project/Dataset Sample rows" });
   }
 });
 export const inspectCaseSchema = z.strictObject({

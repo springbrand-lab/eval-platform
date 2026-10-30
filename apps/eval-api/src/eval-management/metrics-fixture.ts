@@ -1,5 +1,5 @@
 import type { MetricSummary } from "@eval-platform/eval-metrics";
-import { DATASET, project } from "./test-fixture.js";
+import { DATASET, project, run } from "./test-fixture.js";
 
 /** Model-visible projection tests include deliberately private, non-metric fields. */
 export const summary = {
@@ -12,13 +12,28 @@ export const summary = {
     tokens: { total: { value: 50, coverage: "complete" } },
     costs: { chargedUnits: { value: 3, coverage: "partial" } },
     cacheHitRate: { value: 0, coverage: "complete" },
-    trajectory: { toolSuccessRate: { value: 0.5, coverage: "complete" } },
+    trajectory: { toolSuccessRate: { value: 0.5, coverage: "complete" }, byTool: [
+      { toolName: null, count: { value: null, coverage: "partial" },
+        completed: 0, failed: 0, cancelled: 0, inProgress: 0, unknown: 1,
+        toolSuccessRate: { value: null, coverage: "partial" } },
+      { toolName: "browser", count: { value: 2, coverage: "complete" },
+        completed: 1, failed: 1, cancelled: 0, inProgress: 0, unknown: 0,
+        toolSuccessRate: { value: 0.5, coverage: "complete" },
+        inputLength: { secret: "private Tool arguments" } },
+      { toolName: "search", count: { value: 1, coverage: "partial" },
+        completed: 0, failed: 0, cancelled: 1, inProgress: 0, unknown: 0,
+        toolSuccessRate: { value: 0, coverage: "partial" } },
+    ] },
     diagnostics: [{ message: "private raw resource snapshot" }] },
   evaluationAgents: { coverage: "partial", collections: { collected: 1 },
     tokens: { total: { value: 20, coverage: "partial" } },
     costs: { chargedUnits: { value: 1, coverage: "complete" } },
     cacheHitRate: { value: null, coverage: "unavailable" },
-    trajectory: { toolSuccessRate: { value: null, coverage: "unavailable" } } },
+    trajectory: { toolSuccessRate: { value: null, coverage: "unavailable" }, byTool: [
+      { toolName: "evaluator_tool", count: { value: null, coverage: "unavailable" },
+        completed: 0, failed: 0, cancelled: 0, inProgress: 0, unknown: 1,
+        toolSuccessRate: { value: null, coverage: "unavailable" } },
+    ] } },
   evaluationOutputs: { evaluations: 1, validation: { valid: 1 }, fields: [{
     jsonPointer: "/score", title: "Score", description: "private schema description",
     kinds: ["integer"], observationCount: 1, contributingEvaluationCount: 1,
@@ -28,7 +43,7 @@ export const summary = {
 } as unknown as MetricSummary;
 
 export const detail = {
-  project, summary,
+  project, summary, runIds: [run.runId],
   projectSample: {
     projectSampleId: "sample-1", projectId: project.projectId, dataId: DATASET,
     datasetIds: [DATASET], samplingCount: 2, data: { userPrompt: "private Subject prompt" },
@@ -54,9 +69,11 @@ export const detail = {
       agentConfigRef: { ownerUserId: project.ownerUserId, userAgentId: "evaluator-agent" },
       resources: summary.evaluationAgents },
     output: {
+      evaluationId: "evaluation-1", samplingId: "sampling-1",
       validation: { status: "valid", reason: "valid", errors: [] },
       content: `{"score":8,"explanation":"${"private explanation ".repeat(150)}"}`,
       contentHash: "b".repeat(64), path: "/output/result.json",
+      outputStatus: "succeeded", rawJson: { score: 8, explanation: "private explanation ".repeat(150) },
       artifacts: [{ artifactId: "artifact-2", kind: "file", path: "/workspace/private-output.txt" }],
       evidenceRefs: [{ kind: "artifact", ref: "/workspace/proof.txt" },
         { kind: "workspace", ref: "https://signed.test/credential?token=private" }],

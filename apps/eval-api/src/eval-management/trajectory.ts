@@ -138,7 +138,8 @@ async function* lines(c: Context<AppBindings>, input: Query, chat: ChatRef,
   yield encoding.encode(`${JSON.stringify(manifest)}\n`);
 }
 
-function asStream(source: AsyncGenerator<Uint8Array>, abort: AbortController): ReadableStream<Uint8Array> {
+/** A failed or cancelled management download never appends a success manifest. */
+export function asStream(source: AsyncGenerator<Uint8Array>, abort: AbortController): ReadableStream<Uint8Array> {
   return new ReadableStream({
     async pull(controller) {
       try {

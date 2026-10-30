@@ -11,17 +11,18 @@ import { sameSecret } from "../lib/secret.js";
 import type { AppBindings } from "../lib/types.js";
 import { JSON_BODY_BYTES, MANAGEMENT_OUTPUT_SCHEMA_BODY_BYTES } from "../limits.js";
 import { serviceAccountScope } from "../middlewares/service-account.js";
-import { text } from "./common.js";
+import { record, TAKT_RESULT_CHARS, text } from "./common.js";
 import { managementSchemas } from "./schemas.js";
 import { ManagementOutcomeUnknownError } from "./skill.js";
 import { callTool } from "./tools.js";
 import { ManagementReconciliationUnknownError } from "./runs.js";
 import { MANAGEMENT_TRAJECTORY_PATH, streamTrajectory } from "./trajectory.js";
+import { MANAGEMENT_DOCUMENT_PATH, streamDocument } from "./documents.js";
 
 export const EVAL_MANAGEMENT_MCP_PATH = "/mcp/eval-management";
 const SERVER = { name: "eval-platform-eval-management", version: "1.0.0" };
 const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
-  list_options: "Page through Eval Agent, Dataset, Project and output format choices. project_detail with projectId reads the frozen evaluation plan and Schema choice, not results.",
+  list_options: "Page Agent/Dataset/Project/Schema choices. project_detail reads the frozen plan's Schema ID. output_schema_detail pages a small owned, active Schema JSON; streamRequired:true instead requires the fixed authenticated documents GET. Verify the displayed SHA-256; source redactions are explicit.",
   prepare_inputs: "Prepare a Prompt Dataset from an uploaded JSON/JSONL file and up to 50 per-row Subject/Evaluator resource mappings. Creates Material/Session Bundles separately and binds each Data before any Project can start. Reuse operationKey after an unknown result.",
   get_preparation: "Read bounded durable progress, IDs and stage receipts by operationKey; no prompt, Schema content, bytes or attachment URL. Also reports uncertain Skill/Reference/Schema writes.",
   search_agent_resources: "Search live Eval SP resources. Actions need supplierId or unassigned:true; use action_groups first. id reads an Action or Reference. Toolkit pages use cursor, not page. Never returns connection credentials.",
@@ -35,7 +36,7 @@ const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
   reconcile_operation: "READ ONLY: look up an already-persisted Run or Project from its original request/key/fingerprint. Run requests may omit expected digests only for old stored Runs. Never starts work.",
   stop_run: "Stop one explicitly identified Run belonging to the specified Project.",
   get_run: "Read Run status and a page of Sampling and Evaluation IDs, without full records.",
-  get_metrics: "Page existing Project/Dataset/Sample/Sampling Metrics and current Sampling/Evaluation IDs without runId, or filter to exact current members of runId. runScope distinguishes them; Subject/Evaluator tool success rates keep Metrics coverage and nulls.",
+  get_metrics: "Page current Project/Dataset/Sample/Sampling Metrics and Sampling/Evaluation IDs, or exact current Run members. Project/Dataset Sample rows include a bounded scoreIndex for numericPointer (default /score) from their existing Metrics summaries, not per-Tool rates. Subject/Evaluator native per-Tool counts and Metrics-calculated terminal success rates have separate byTool pages. sampling + evaluationId returns only that owned Evaluation's parsed JSON (including schema mismatches, labelled invalid) in <=2KiB resultOffset chunks for small documents, streamRequired:true for the authenticated documents GET for larger ones, or explicit null with Metrics validation for missing/unparseable output; no summary/list in selected mode.",
   inspect_case: "Inspect bounded evidence and Subject/Evaluator Metrics for one current owned Sampling/Evaluation (or exact Run member). For a complete SAFE Pi file use the authenticated fixed GET /mcp/eval-management/trajectories from the trusted backend, never an MCP tool.",
 };
 const TOOLS = (Object.keys(managementSchemas) as (keyof typeof managementSchemas)[]).map((name) => ({
@@ -82,7 +83,12 @@ async function handle(c: Context<AppBindings>, message: Record<string, unknown>)
       }
       try {
         const result = await callTool(c, name as keyof typeof managementSchemas, params.arguments);
-        return mcpResult(id, { content: [{ type: "text", text: text(result) }] });
+        // Takt displays at most 5,000 characters of tool text. These reads must fail
+        // explicitly instead of letting an outer adapter silently clip a page.
+        const category = record(result)?.category;
+        const taktBounded = name === "get_metrics"
+          || name === "list_options" && (category === "output_schemas" || category === "output_schema_detail");
+        return mcpResult(id, { content: [{ type: "text", text: text(result, taktBounded ? TAKT_RESULT_CHARS : Infinity) }] });
       } catch (error) {
         return mcpResult(id, { content: [{ type: "text", text: toolFailure(error) }], isError: true });
       }
@@ -135,6 +141,16 @@ router.post(EVAL_MANAGEMENT_MCP_PATH, managementBearer, serviceAccountScope, asy
 router.get(MANAGEMENT_TRAJECTORY_PATH, managementBearer, serviceAccountScope, streamTrajectory);
 for (const method of ["post", "delete", "put", "patch"] as const) {
   router[method](MANAGEMENT_TRAJECTORY_PATH, (c) => {
+    c.header("Cache-Control", "no-store");
+    if (!c.env.evalManagement) return c.json({ error: "Not found" }, 404);
+    c.header("Allow", "GET");
+    return c.json({ error: "Method not allowed" }, 405);
+  });
+}
+
+router.get(MANAGEMENT_DOCUMENT_PATH, managementBearer, serviceAccountScope, streamDocument);
+for (const method of ["post", "delete", "put", "patch"] as const) {
+  router[method](MANAGEMENT_DOCUMENT_PATH, (c) => {
     c.header("Cache-Control", "no-store");
     if (!c.env.evalManagement) return c.json({ error: "Not found" }, 404);
     c.header("Allow", "GET");
