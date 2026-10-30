@@ -1,14 +1,25 @@
+import { equalJson } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
-import { parsePromptDatasetUpload } from "@eval-platform/eval-dataset";
+import { parsePromptDatasetUpload, platformIdSchema } from "@eval-platform/eval-dataset";
+import { digestJson } from "@eval-platform/eval-runtime";
 import { z } from "zod";
-import { digest, IMPORT_LIMITS } from "../agent-imports/model.js";
+import { digest } from "../agent-imports/model.js";
 import { validateMaterialFiles, validateSessionContent } from "../sp/bundle-content.js";
 import type { ManagementFiles } from "./files.js";
-import { prepareInputsSchema } from "./schemas.js";
+import { prepareInputsSchema, saveInitialResourceSchema } from "./schemas.js";
 import type { UploadReceipt } from "./store.js";
 
 export type PreparationInput = z.output<typeof prepareInputsSchema>;
-type AssetKind = "material" | "session";
+export type InitialResourceInput = z.output<typeof saveInitialResourceSchema>;
+type AssetKind = InitialResourceInput["kind"];
+export interface UploadFact {
+  readonly uploadRef: string;
+  readonly kind: UploadReceipt["kind"];
+  readonly name: string;
+  readonly mediaType: string;
+  readonly byteSize: number;
+  readonly sha256: string;
+}
 export interface PlannedAsset {
   readonly uploadRef: string;
   readonly kind: AssetKind;
@@ -21,59 +32,104 @@ export interface PlannedAsset {
   readonly format?: "json" | "jsonl";
 }
 export interface PreparationPlan {
-  readonly version: 1;
+  readonly version: 3;
   readonly promptUploadRef: string;
+  readonly uploadFact: UploadFact;
   readonly name: string;
   readonly description: string;
   readonly format: "json" | "jsonl";
   readonly datasetId: string;
   readonly dataIds: readonly string[];
   readonly cases: PreparationInput["cases"];
-  readonly assets: readonly PlannedAsset[];
+  /** Canonical SHA-256 of every original Data field and of the complete planned bound Data. */
+  readonly rowDigests: readonly PreparationRowDigests[];
 }
 
-const uploadRefs = (input: PreparationInput) => new Set([
-  input.promptUploadRef,
-  ...input.cases.flatMap((row) => [
-    ...(row.initialMaterials ?? []), ...(row.evalInitialMaterials ?? []),
-    ...(row.initialSession ? [row.initialSession] : []),
-  ].flatMap((selection) => "uploadRef" in selection ? [selection.uploadRef] : [])),
-]);
+export interface PreparationRowDigests {
+  /** The full Prompt Data content, without its separately recorded planned dataId. */
+  readonly original: string;
+  /** The full Data content after exactly this case's existing resource refs are bound. */
+  readonly bound: string;
+}
 
-/** Bind the input to immutable *stored byte facts*, not to model-supplied hashes or URLs. */
-export async function preparationUploads(owner: string, input: PreparationInput, files: ManagementFiles) {
-  const refs = [...uploadRefs(input)].sort();
-  if (refs.length > 101) throw new HttpError("REQUEST_INVALID_INPUT", "Too many separate uploaded resources");
-  const uploads = new Map<string, UploadReceipt>();
-  let bytes = 0;
-  for (const ref of refs) {
-    const kinds = new Set<AssetKind | "prompt">();
-    if (ref === input.promptUploadRef) kinds.add("prompt");
-    for (const row of input.cases) {
-      for (const item of [...(row.initialMaterials ?? []), ...(row.evalInitialMaterials ?? [])]) {
-        if ("uploadRef" in item && item.uploadRef === ref) kinds.add("material");
-      }
-      if (row.initialSession && "uploadRef" in row.initialSession && row.initialSession.uploadRef === ref) kinds.add("session");
-    }
-    if (kinds.size !== 1) throw new HttpError("REQUEST_INVALID_INPUT", "An upload ref cannot serve multiple resource kinds");
-    const [kind] = kinds;
-    const upload = await files.info(owner, ref, kind!);
-    uploads.set(ref, upload);
-    bytes += upload.byteSize;
+const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
+const planSchema = z.strictObject({
+  version: z.literal(3),
+  promptUploadRef: platformIdSchema,
+  uploadFact: z.strictObject({
+    uploadRef: platformIdSchema, kind: z.literal("prompt"),
+    name: z.string().min(1), mediaType: z.string().min(1),
+    byteSize: z.number().int().positive(), sha256,
+  }),
+  name: prepareInputsSchema.shape.name,
+  description: prepareInputsSchema.shape.description,
+  format: prepareInputsSchema.shape.format,
+  datasetId: platformIdSchema,
+  dataIds: z.array(platformIdSchema).min(1).max(50),
+  cases: prepareInputsSchema.shape.cases,
+  rowDigests: z.array(z.strictObject({ original: sha256, bound: sha256 })).min(1).max(50),
+}).refine((plan) => plan.dataIds.length === plan.cases.length
+  && plan.rowDigests.length === plan.dataIds.length
+  && new Set([plan.datasetId, ...plan.dataIds]).size === plan.dataIds.length + 1
+  && plan.promptUploadRef === plan.uploadFact.uploadRef);
+
+/** Only existing owned, normalized UUID references are included; never stage a new resource here. */
+export function plannedCaseBindings(row: PreparationInput["cases"][number]) {
+  return {
+    ...(row.initialMaterials?.length ? { initialMaterials: row.initialMaterials } : {}),
+    ...(row.evalInitialMaterials?.length ? { evalInitialMaterials: row.evalInitialMaterials } : {}),
+    ...(row.initialSession ? { initialSession: row.initialSession } : {}),
+  };
+}
+
+/** Reject older/partial plans and altered hashes without ever reopening staged bytes. */
+export function validPreparationPlan(owner: string, key: string, fingerprint: string,
+  value: unknown): value is PreparationPlan {
+  const parsed = planSchema.safeParse(value);
+  if (!parsed.success || !equalJson(value, parsed.data)) return false;
+  const plan = parsed.data;
+  const request = { operationKey: key, promptUploadRef: plan.promptUploadRef,
+    name: plan.name, description: plan.description, format: plan.format, cases: plan.cases };
+  return prepareInputsSchema.safeParse(request).success
+    && fingerprint === preparationFingerprint(owner, request, plan.uploadFact, plan.rowDigests);
+}
+
+/** A confirmed stage must carry the exact planned identity, not merely the stage name. */
+export function validPreparationStages(plan: PreparationPlan, value: unknown, completed: boolean): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const stages = value as Record<string, unknown>;
+  const required = new Map<string, unknown>([
+    ["dataset", { datasetId: plan.datasetId, dataIds: plan.dataIds }],
+    ...plan.dataIds.map((dataId): [string, unknown] => [`data:${dataId}`, { dataId }]),
+  ]);
+  for (const [name, stage] of Object.entries(stages)) {
+    if (!required.has(name) || stage === null || typeof stage !== "object" || Array.isArray(stage)) return false;
+    const entry = stage as Record<string, unknown>;
+    if (entry.status !== "attempted" && entry.status !== "confirmed") return false;
+    if (entry.status === "confirmed" && !equalJson(entry.receipt, required.get(name))
+      || entry.status === "attempted" && entry.receipt !== undefined) return false;
   }
-  if (bytes > IMPORT_LIMITS.totalBytes) throw new HttpError("REQUEST_PAYLOAD_TOO_LARGE", "Preparation exceeds its byte budget");
-  const facts = refs.map((ref) => {
-    const { kind, name, mediaType, byteSize, sha256 } = uploads.get(ref)!;
-    return { uploadRef: ref, kind, name, mediaType, byteSize, sha256 };
-  });
-  return { uploads, fingerprint: digest(["management-preparation/v1", owner, input, facts]) };
+  return !completed || [...required.keys()].every((name) =>
+    (stages[name] as { status?: unknown } | undefined)?.status === "confirmed");
+}
+
+/** Only trusted ingress metadata, never a model assertion or file bytes. */
+export function uploadFact(row: UploadReceipt): UploadFact {
+  return { uploadRef: row.uploadId, kind: row.kind, name: row.name, mediaType: row.mediaType,
+    byteSize: row.byteSize, sha256: row.sha256 };
+}
+
+export function preparationFingerprint(owner: string, input: PreparationInput, fact: UploadFact,
+  rowDigests: readonly PreparationRowDigests[]) {
+  return digest(["management-preparation/v3", owner, input, fact, rowDigests]);
+}
+
+export function initialResourceFingerprint(owner: string, input: InitialResourceInput, fact: UploadFact) {
+  return digest(["management-initial-resource/v1", owner, input, fact]);
 }
 
 export async function planPreparation(owner: string, input: PreparationInput, files: ManagementFiles,
-  uploads: ReadonlyMap<string, UploadReceipt>): Promise<PreparationPlan> {
-  if ([...uploads.values()].some((item) => item.expiresAt.getTime() <= Date.now())) {
-    throw new HttpError("REQUEST_INVALID_INPUT", "Upload refs must be unexpired before starting a preparation");
-  }
+  fact: UploadFact): Promise<PreparationPlan> {
   const content = new TextDecoder("utf-8", { fatal: true }).decode(await files.read(owner, input.promptUploadRef, "prompt"));
   const parsed = parsePromptDatasetUpload({
     name: input.name, description: input.description, format: input.format, content,
@@ -81,48 +137,33 @@ export async function planPreparation(owner: string, input: PreparationInput, fi
   if (parsed.data.length !== input.cases.length) {
     throw new HttpError("REQUEST_INVALID_INPUT", "Specify exactly one file mapping for each Prompt row");
   }
-  const assets = new Map<string, PlannedAsset>();
-  const add = (ref: string, kind: AssetKind, format?: "json" | "jsonl") => {
-    const previous = assets.get(ref);
-    if (previous) {
-      if (previous.kind !== kind || previous.format !== format) {
-        throw new HttpError("REQUEST_INVALID_INPUT", "One Session upload cannot have two formats");
-      }
-      return;
-    }
-    const upload = uploads.get(ref)!;
-    assets.set(ref, {
-      uploadRef: ref, kind, bundleId: crypto.randomUUID(), resourceId: crypto.randomUUID(),
-      name: upload.name, mediaType: upload.mediaType, byteSize: upload.byteSize, sha256: upload.sha256,
-      ...(format === undefined ? {} : { format }),
-    });
-  };
-  for (const row of input.cases) {
-    for (const selections of [row.initialMaterials ?? [], row.evalInitialMaterials ?? []]) {
-      const identities = selections.map((item) => "uploadRef" in item
-        ? `upload:${item.uploadRef}` : `material:${item.bundleId}:${item.materialId}`);
-      if (new Set(identities).size !== identities.length) {
-        throw new HttpError("REQUEST_INVALID_INPUT", "A Data resource field cannot repeat the same Material");
-      }
-    }
-    for (const item of [...(row.initialMaterials ?? []), ...(row.evalInitialMaterials ?? [])]) {
-      if ("uploadRef" in item) add(item.uploadRef, "material");
-    }
-    if (row.initialSession && "uploadRef" in row.initialSession) {
-      add(row.initialSession.uploadRef, "session", row.initialSession.format);
-    }
-  }
-  // Validate all bytes and SP content before any Dataset or Bundle write.
-  for (const asset of assets.values()) {
-    const raw = await files.read(owner, asset.uploadRef, asset.kind);
-    if (asset.kind === "material") validateMaterialFiles([{
-      path: `/${asset.name}`, mediaType: asset.mediaType, contentBase64: Buffer.from(raw).toString("base64"),
-    }]);
-    else validateSessionContent({ format: asset.format!, content: new TextDecoder("utf-8", { fatal: true }).decode(raw) });
-  }
+  const rowDigests = await Promise.all(parsed.data.map(async (row, index) => ({
+    original: await digestJson(row),
+    bound: await digestJson({ ...row, ...plannedCaseBindings(input.cases[index]!) }),
+  })));
   return {
-    version: 1, promptUploadRef: input.promptUploadRef, name: input.name, description: input.description,
+    version: 3, promptUploadRef: input.promptUploadRef, uploadFact: fact,
+    name: input.name, description: input.description,
     format: input.format, datasetId: crypto.randomUUID(),
-    dataIds: parsed.data.map(() => crypto.randomUUID()), cases: input.cases, assets: [...assets.values()],
+    dataIds: parsed.data.map(() => crypto.randomUUID()), cases: input.cases, rowDigests,
   };
+}
+
+/** Plan and validate a single standalone Bundle + child, using the shared SP content rules. */
+export async function planResource(owner: string, input: InitialResourceInput,
+  files: ManagementFiles, upload: UploadReceipt): Promise<PlannedAsset> {
+  if (upload.uploadId !== input.uploadRef || upload.kind !== input.kind || upload.expiresAt.getTime() <= Date.now()) {
+    throw new HttpError("REQUEST_INVALID_INPUT", "The staged resource is unavailable or expired");
+  }
+  const asset: PlannedAsset = {
+    uploadRef: input.uploadRef, kind: input.kind, bundleId: crypto.randomUUID(), resourceId: crypto.randomUUID(),
+    name: upload.name, mediaType: upload.mediaType, byteSize: upload.byteSize, sha256: upload.sha256,
+    ...(input.kind === "session" ? { format: input.format } : {}),
+  };
+  const raw = await files.read(owner, input.uploadRef, input.kind);
+  if (input.kind === "material") validateMaterialFiles([{
+    path: `/${asset.name}`, mediaType: asset.mediaType, contentBase64: Buffer.from(raw).toString("base64"),
+  }]);
+  else validateSessionContent({ format: input.format, content: new TextDecoder("utf-8", { fatal: true }).decode(raw) });
+  return asset;
 }

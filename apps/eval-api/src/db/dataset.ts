@@ -72,6 +72,7 @@ export async function orderDatasetMemberships<T extends Membership>(
     && byDataset.get(datasetId)!.every(({ position }) => position === null));
   const plans = candidates.length === 0 ? [] : await reader.select({
     ownerUserId: managementOperations.ownerUserId, kind: managementOperations.kind,
+    operationKey: managementOperations.operationKey, fingerprint: managementOperations.fingerprint,
     status: managementOperations.status, plan: managementOperations.plan, stages: managementOperations.stages,
   }).from(managementOperations).where(and(
     eq(managementOperations.ownerUserId, owner), eq(managementOperations.kind, "prepare"),

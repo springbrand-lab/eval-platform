@@ -18,9 +18,13 @@ const resourceIds = z.array(resourceIdSchema).max(50).refine(unique, "IDs must b
 
 export const listOptionsSchema = z.strictObject({
   category: z.enum(["agents", "datasets", "dataset_data", "projects", "project_detail", "output_schemas", "output_schema_detail", "project_schema_detail",
+    "material_bundles", "session_bundles", "materials", "sessions", "material_files", "session_files",
     "input_limits", "credits",
     "approval_dataset", "approval_agent", "approval_output_schema", "approval_project"]),
   q: search, ...pageSchema,
+  bundleId: platformIdSchema.optional(),
+  materialId: platformIdSchema.optional(),
+  sessionId: platformIdSchema.optional(),
   datasetId: platformIdSchema.optional(),
   dataIds: z.array(platformIdSchema).min(1).max(50).refine(unique).optional(),
   userAgentId: platformIdSchema.optional(),
@@ -33,7 +37,16 @@ export const listOptionsSchema = z.strictObject({
   const invalid = () => ctx.addIssue({ code: "custom", message: "Choose one bounded selection" });
   if (value.schemaOffset !== undefined
     && value.category !== "output_schema_detail" && value.category !== "project_schema_detail") invalid();
-  if (value.category === "dataset_data") {
+  if (["material_bundles", "session_bundles", "materials", "sessions", "material_files", "session_files"].includes(value.category)) {
+    if (value.q !== undefined || value.datasetId || value.dataIds || value.userAgentId || value.outputSchemaId
+      || value.projectId || value.projectSampleIds || value.samplingIds
+      || (value.category === "materials" || value.category === "sessions"
+        || value.category === "material_files" || value.category === "session_files") !== !!value.bundleId
+      || (value.category === "material_files") !== !!value.materialId
+      || (value.category === "session_files") !== !!value.sessionId) invalid();
+  } else if (value.bundleId || value.materialId || value.sessionId) {
+    invalid();
+  } else if (value.category === "dataset_data") {
     if (!value.datasetId || value.dataIds || value.userAgentId || value.outputSchemaId || value.projectId
       || value.projectSampleIds || value.samplingIds || value.q !== undefined) invalid();
   } else if (value.category === "approval_dataset") {
@@ -99,6 +112,11 @@ export const createAgentSchema = z.strictObject({
 });
 
 export const uploadRefSchema = platformIdSchema.describe("Opaque ref returned only by the authenticated byte ingress");
+const resourceUpload = { operationKey: idempotencyKeySchema.max(200), uploadRef: uploadRefSchema };
+export const saveInitialResourceSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ ...resourceUpload, kind: z.literal("material") }),
+  z.strictObject({ ...resourceUpload, kind: z.literal("session"), format: z.enum(["json", "jsonl"]) }),
+]);
 /** Schema content is accepted only from the trusted backend, not an LLM-generated tool payload. */
 export const createOutputSchemaSchema = z.strictObject({
   operationKey: idempotencyKeySchema.max(200),
@@ -106,14 +124,16 @@ export const createOutputSchemaSchema = z.strictObject({
   description: z.string().trim().min(1).max(2_000),
   content: z.string().max(OUTPUT_SCHEMA_BYTES),
 });
-const materialSelection = z.union([
-  z.strictObject({ uploadRef: uploadRefSchema }),
-  z.strictObject({ bundleId: platformIdSchema, materialId: platformIdSchema }),
-]);
-const sessionSelection = z.union([
-  z.strictObject({ uploadRef: uploadRefSchema, format: z.enum(["json", "jsonl"]) }),
-  z.strictObject({ bundleId: platformIdSchema, sessionId: platformIdSchema }),
-]);
+const materialSelection = z.strictObject({ bundleId: platformIdSchema, materialId: platformIdSchema });
+const sessionSelection = z.strictObject({ bundleId: platformIdSchema, sessionId: platformIdSchema });
+const bindMaterials = z.array(materialSelection).min(1).max(8).superRefine((items, ctx) => {
+  const seen = new Set<string>();
+  items.forEach((item, index) => {
+    const identity = `${item.bundleId}:${item.materialId}`;
+    if (seen.has(identity)) ctx.addIssue({ code: "custom", path: [index], message: "Duplicate Material" });
+    seen.add(identity);
+  });
+});
 export const prepareInputsSchema = z.strictObject({
   operationKey: idempotencyKeySchema.max(200),
   promptUploadRef: uploadRefSchema,
@@ -126,6 +146,17 @@ export const prepareInputsSchema = z.strictObject({
     initialSession: sessionSelection.optional(),
   })).min(1).max(50),
 });
+export const bindDataResourcesSchema = z.strictObject({
+  operationKey: idempotencyKeySchema.max(200),
+  datasetId: platformIdSchema,
+  dataId: platformIdSchema,
+  expectedContentDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+  initialMaterials: bindMaterials.nullable().optional(),
+  evalInitialMaterials: bindMaterials.nullable().optional(),
+  initialSession: sessionSelection.nullable().optional(),
+}).refine(({ initialMaterials, evalInitialMaterials, initialSession }) =>
+  initialMaterials !== undefined || evalInitialMaterials !== undefined || initialSession !== undefined,
+{ message: "Supply at least one initial resource field" });
 export const getPreparationSchema = z.strictObject({
   operationKey: idempotencyKeySchema.max(200),
   page: z.number().int().min(1).max(10_000).default(1),
@@ -208,7 +239,9 @@ export const inspectCaseSchema = z.strictObject({
 /** Call validation schemas and advertised tool schemas are identical. */
 export const managementSchemas = {
   list_options: listOptionsSchema,
+  save_initial_resource: saveInitialResourceSchema,
   prepare_inputs: prepareInputsSchema,
+  bind_data_resources: bindDataResourcesSchema,
   get_preparation: getPreparationSchema,
   search_agent_resources: searchResourcesSchema,
   upload_agent_skill: uploadAgentSkillSchema,

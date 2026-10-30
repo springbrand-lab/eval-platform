@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { equalJson } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 import type { ManagementFiles } from "./files.js";
+import { validPreparationPlan, validPreparationStages } from "./preparation-plan.js";
 import type { ManagementStore, OperationReceipt, UploadKind, UploadReceipt } from "./store.js";
 
 export function fakeManagement(owner: string) {
@@ -37,8 +39,13 @@ export function fakeManagement(owner: string) {
       if (kind === "skill" && [...operations.values()].some((other) =>
         other.operationKey !== key && other.kind === kind && other.skillName === claimedSkillName
           && other.status !== "completed")) throw conflict();
+      if (kind === "bind" && [...operations.values()].some((other) =>
+        other.operationKey !== key && other.kind === "bind" && other.status === "pending"
+          && other.plan.dataId === plan.dataId)) throw conflict();
       const refs = kind === "prepare"
-        ? [plan.promptUploadRef, ...(plan.assets as Array<{ uploadRef: string }>).map((asset) => asset.uploadRef)]
+        ? [plan.promptUploadRef]
+        : kind === "initial_resource" ? [(plan.asset as { uploadRef: string }).uploadRef]
+        : kind === "bind" ? []
         : kind === "output_schema" ? [] : [plan.uploadRef];
       for (const ref of refs) {
         const upload = uploads.get(ref as string);
@@ -63,22 +70,34 @@ export function fakeManagement(owner: string) {
     },
     async confirm(ownerId, key, stage, receipt) {
       const row = saved(ownerId, key);
+      if (row.stages[stage]?.status === "confirmed") {
+        if (!equalJson(row.stages[stage]?.receipt, receipt)) throw conflict();
+        return;
+      }
       if (row.stages[stage]?.status !== "attempted") throw conflict();
       operations.set(key, { ...row, stages: { ...row.stages, [stage]: { status: "confirmed", receipt } } });
     },
     async complete(ownerId, key) {
       const row = saved(ownerId, key);
+      if (row.kind === "prepare" && (!validPreparationPlan(ownerId, key, row.fingerprint, row.plan)
+        || !validPreparationStages(row.plan, row.stages, true))) throw conflict();
+      if (row.kind === "bind" && (row.plan.version !== 3
+        || typeof row.plan.dataId !== "string" || Array.isArray(row.plan.dataIds))) throw conflict();
+      if (row.kind === "initial_resource" && (row.plan.version !== 1 || !row.plan.asset)) throw conflict();
       const required = row.kind === "skill" ? ["skill"] : row.kind === "reference" ? ["attachment", "reference"]
         : row.kind === "output_schema" ? ["output_schema"]
-          : ["dataset", ...(row.plan.assets as Array<{ uploadRef: string }>).map((asset) => `resource:${asset.uploadRef}`),
-          ...(row.plan.dataIds as string[]).map((id) => `data:${id}`)];
+          : row.kind === "initial_resource" ? [`resource:${(row.plan.asset as { uploadRef: string }).uploadRef}`]
+            : row.kind === "bind" ? [`data:${row.plan.dataId}`]
+              : ["dataset", ...(row.plan.dataIds as string[]).map((id) => `data:${id}`)];
       if (required.some((stage) => row.stages[stage]?.status !== "confirmed")) throw conflict();
       operations.set(key, { ...row, status: "completed" });
     },
     async assertReadyDatasets(ownerId, ids) {
       if (ownerId !== owner || [...operations.values()].some((row) =>
-        row.kind === "prepare" && row.status === "pending" && ids.includes(row.plan.datasetId as string))) throw conflict();
+        (row.kind === "prepare" || row.kind === "bind")
+        && row.status === "pending" && ids.includes(row.plan.datasetId as string))) throw conflict();
     },
+    async inspectPreparedDataset() { return null; },
     async listDatasetData() {
       throw new HttpError("DATASET_NOT_FOUND");
     },

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { preparationFingerprint } from "../eval-management/preparation-plan.js";
 import { resolveDatasetMemberOrder } from "./dataset-order.js";
 
 const OWNER = "owner-A";
@@ -14,10 +15,17 @@ const members = [
 ];
 
 function completedPlan(dataIds: readonly string[] = [FIRST, SECOND]) {
+  const plan = { version: 3 as const, datasetId: DATASET, dataIds, name: "Uploaded", description: "Rows",
+    format: "jsonl" as const, promptUploadRef: THIRD, cases: dataIds.map(() => ({})),
+    uploadFact: { uploadRef: THIRD, kind: "prompt" as const, name: "rows.jsonl", mediaType: "application/x-ndjson",
+      byteSize: 100, sha256: "a".repeat(64) },
+    rowDigests: dataIds.map(() => ({ original: "b".repeat(64), bound: "b".repeat(64) })) };
+  const operationKey = "original-order";
   return {
-    ownerUserId: OWNER, kind: "prepare", status: "completed",
-    plan: { version: 1, datasetId: DATASET, dataIds, name: "Uploaded", description: "Rows",
-      format: "jsonl", promptUploadRef: THIRD, cases: dataIds.map(() => ({})), assets: [] },
+    ownerUserId: OWNER, operationKey, kind: "prepare", status: "completed",
+    fingerprint: preparationFingerprint(OWNER, { operationKey, promptUploadRef: THIRD, name: plan.name,
+      description: plan.description, format: plan.format, cases: plan.cases }, plan.uploadFact, plan.rowDigests),
+    plan,
     stages: {
       dataset: { status: "confirmed", receipt: { datasetId: DATASET, dataIds } },
       ...Object.fromEntries(dataIds.map((dataId) => [`data:${dataId}`, { status: "confirmed", receipt: { dataId } }])),
@@ -62,6 +70,24 @@ describe("one authoritative Dataset membership order", () => {
     expect(resolveDatasetMemberOrder(OWNER, { ...dataset, originalOrderIntact: null }, [
       { dataId: FIRST, position: 0 }, { dataId: SECOND, position: 1 },
     ], [completedPlan()]).order).toBe("unknown");
+  });
+
+  it("does not treat a completed v1/v2 plan without proven full row hashes as original file order", () => {
+    const valid = completedPlan();
+    for (const version of [1, 2]) {
+      const legacy = { ...valid, plan: { ...valid.plan, version, assets: [] } };
+      expect(resolveDatasetMemberOrder(OWNER, { ...dataset, originalOrderIntact: null },
+        members, [legacy]).order).toBe("unknown");
+    }
+    const withoutDigests = { ...valid, plan: { ...valid.plan, rowDigests: [] } };
+    expect(resolveDatasetMemberOrder(OWNER, { ...dataset, originalOrderIntact: null },
+      members, [withoutDigests]).order).toBe("unknown");
+    expect(resolveDatasetMemberOrder(OWNER, { ...dataset, originalOrderIntact: null },
+      members, [{ ...valid, fingerprint: "f".repeat(64) }]).order).toBe("unknown");
+    expect(resolveDatasetMemberOrder(OWNER, { ...dataset, originalOrderIntact: null },
+      members, [{ ...valid, plan: { ...valid.plan, rowDigests: valid.plan.rowDigests.map((row) => ({
+        ...row, original: "e".repeat(64),
+      })) } }]).order).toBe("unknown");
   });
 
   it("does not infer the first uploaded row of a legacy UI Dataset from UUID order", () => {

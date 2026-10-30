@@ -5,6 +5,7 @@ import type { Context } from "hono";
 import type { AppBindings } from "../lib/types.js";
 import { INPUT_LIMITS } from "../limits.js";
 import { fitsTaktResult, jsonChunk, pageOf, record, redactLiteral, short, type JsonChunkResult } from "./common.js";
+import { resourceOptions } from "./resource-options.js";
 import { resourceIdSchema, type listOptionsSchema } from "./schemas.js";
 import type { z } from "zod";
 
@@ -264,6 +265,9 @@ async function projectDetail(c: Context<AppBindings>, input: Options) {
 
 export async function listOptions(c: Context<AppBindings>, input: Options) {
   const { category, q, page, pageSize } = input;
+  if (["material_bundles", "session_bundles", "materials", "sessions", "material_files", "session_files"].includes(category)) {
+    return resourceOptions(c, input);
+  }
   if (category === "dataset_data") return datasetDataOptions(c, input);
   if (category === "approval_dataset") return approvalDataset(c, input);
   if (category === "approval_agent") return approvalAgent(c, input);

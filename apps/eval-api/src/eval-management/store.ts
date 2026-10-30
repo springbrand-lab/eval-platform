@@ -1,12 +1,15 @@
 import { equalJson } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
-import { platformIdSchema, type Data } from "@eval-platform/eval-dataset";
-import { and, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { dataSchema, datasetSchema, platformIdSchema, type Data, type Dataset } from "@eval-platform/eval-dataset";
+import { digestJson } from "@eval-platform/eval-runtime";
+import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { IMPORT_LIMITS } from "../agent-imports/model.js";
 import { READ_SNAPSHOT, type EvalDb } from "../db/client.js";
 import { orderDatasetMemberships } from "../db/dataset.js";
 import type { DatasetMemberOrder } from "../db/dataset-order.js";
 import { data, datasetData, datasets, managementOperations, managementUploads } from "../db/schema.js";
+import { lockedBindTarget } from "../initial-resources.js";
+import { validPreparationPlan, validPreparationStages } from "./preparation-plan.js";
 
 export type UploadKind = typeof managementUploads.$inferInsert.kind;
 export type OperationKind = typeof managementOperations.$inferInsert.kind;
@@ -21,6 +24,13 @@ export interface DatasetDataPage {
   readonly order: DatasetMemberOrder;
   readonly total: number;
   readonly items: readonly { readonly dataId: string; readonly content: Omit<Data, "dataId"> }[];
+}
+
+export interface PreparedDatasetSnapshot {
+  readonly dataset: Dataset;
+  readonly order: DatasetMemberOrder;
+  /** Raw JSONB content digests, before any Data schema could normalize a stored reference. */
+  readonly data: readonly { readonly dataId: string; readonly contentDigest: string }[];
 }
 
 /** Persistent reservations and write-ahead receipts; no SP work takes place inside a DB transaction. */
@@ -38,6 +48,8 @@ export interface ManagementStore {
   confirm(owner: string, operationKey: string, stage: string, receipt: unknown): Promise<void>;
   complete(owner: string, operationKey: string): Promise<void>;
   assertReadyDatasets(owner: string, ids: readonly string[]): Promise<void>;
+  /** One owner-scoped, read-only snapshot, including current membership order and soft-deletion proof. */
+  inspectPreparedDataset(owner: string, datasetId: string): Promise<PreparedDatasetSnapshot | null>;
   /** Same snapshot for active owner, pending-preparation fence, order proof, total and page. */
   listDatasetData(owner: string, datasetId: string, page: number, pageSize: number): Promise<DatasetDataPage>;
 }
@@ -53,10 +65,10 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
 
   async function assertReady(reader: Pick<EvalDb, "select">, owner: string, ids: readonly string[]): Promise<void> {
     const [pending] = await reader.select({ operationKey: managementOperations.operationKey }).from(managementOperations)
-      .where(and(eq(managementOperations.ownerUserId, owner), eq(managementOperations.kind, "prepare"),
+      .where(and(eq(managementOperations.ownerUserId, owner), inArray(managementOperations.kind, ["prepare", "bind"]),
         eq(managementOperations.status, "pending"),
         inArray(sql<string>`${managementOperations.plan}->>'datasetId'`, [...ids]))).limit(1);
-    if (pending) throw new HttpError("EVAL_SP_CONFLICT", "Bind all prepared Data before creating a Project");
+    if (pending) throw new HttpError("EVAL_SP_CONFLICT", "Finish the pending Data preparation or binding");
   }
 
   async function locked(owner: string, key: string, callback: (row: OperationReceipt,
@@ -110,14 +122,32 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
     },
     async begin(owner, operationKey, kind, fingerprint, plan, skillName) {
       const refs = kind === "prepare"
-        ? [plan.promptUploadRef, ...(Array.isArray(plan.assets) ? plan.assets.map((asset) =>
-          asset && typeof asset === "object" && "uploadRef" in asset ? asset.uploadRef : null) : [])]
+        ? [plan.promptUploadRef]
+        : kind === "initial_resource" ? [(plan.asset as { uploadRef?: unknown } | undefined)?.uploadRef]
+        : kind === "bind" ? []
         : kind === "output_schema" ? [] : [plan.uploadRef];
       const parsed = refs.map((ref) => platformIdSchema.parse(ref)).sort();
       if (parsed.length > 101 || new Set(parsed).size !== parsed.length) throw conflict();
       // Only Skills claim names: the existing output Schema catalog permits duplicate names.
       const claimedSkillName = kind === "skill" ? skillName ?? null : null;
       return db.transaction(async (transaction) => {
+        if (kind === "bind") {
+          // Dataset/Data locks also serialize two different keys for this Data (even across
+          // Datasets). Reject a second pending intent before it can strand either key or
+          // claim its uploads. The original full Data digest is rechecked before a new
+          // reservation, not just later when applying the patch.
+          const datasetId = platformIdSchema.parse(plan.datasetId);
+          const dataId = platformIdSchema.parse(plan.dataId);
+          const current = await lockedBindTarget(transaction, owner, datasetId, dataId);
+          const [sameKey] = await transaction.select({ key: managementOperations.operationKey }).from(managementOperations)
+            .where(operationWhere(owner, operationKey)).limit(1);
+          const [pending] = await transaction.select({ key: managementOperations.operationKey }).from(managementOperations)
+            .where(and(eq(managementOperations.ownerUserId, owner), eq(managementOperations.kind, "bind"),
+              eq(managementOperations.status, "pending"),
+              eq(sql<string>`${managementOperations.plan}->>'dataId'`, dataId),
+              ne(managementOperations.operationKey, operationKey))).limit(1);
+          if (pending || (!sameKey && await digestJson(current) !== plan.expectedContentDigest)) throw conflict();
+        }
         await transaction.insert(managementOperations).values({
           ownerUserId: owner, operationKey, kind, fingerprint, plan,
           skillName: claimedSkillName, stages: {}, status: "pending",
@@ -171,14 +201,20 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
     },
     async complete(owner, operationKey) {
       await locked(owner, operationKey, async (row, transaction) => {
-        if (row.kind === "prepare" && (!Array.isArray(row.plan.assets) || !Array.isArray(row.plan.dataIds))) {
+        if (row.kind === "prepare" && (!validPreparationPlan(owner, operationKey, row.fingerprint, row.plan)
+          || !validPreparationStages(row.plan, row.stages, true))) {
           throw conflict();
         }
+        if (row.kind === "bind" && (row.plan.version !== 3
+          || typeof row.plan.dataId !== "string" || Array.isArray(row.plan.dataIds))) throw conflict();
+        if (row.kind === "initial_resource" && (row.plan.version !== 1
+          || !row.plan.asset || typeof row.plan.asset !== "object"
+          || typeof (row.plan.asset as { uploadRef?: unknown }).uploadRef !== "string")) throw conflict();
         const required = row.kind === "skill" ? ["skill"] : row.kind === "reference" ? ["attachment", "reference"]
           : row.kind === "output_schema" ? ["output_schema"]
-            : ["dataset", ...(Array.isArray(row.plan.assets) ? row.plan.assets.map((asset) =>
-            asset && typeof asset === "object" && "uploadRef" in asset ? `resource:${asset.uploadRef}` : "") : []),
-          ...(Array.isArray(row.plan.dataIds) ? row.plan.dataIds.map((id) => `data:${id}`) : [])];
+            : row.kind === "initial_resource" ? [`resource:${(row.plan.asset as { uploadRef: string }).uploadRef}`]
+              : row.kind === "bind" ? [`data:${row.plan.dataId}`]
+                : ["dataset", ...(row.plan.dataIds as string[]).map((id) => `data:${id}`)];
         if (required.includes("") || required.some((stage) => row.stages[stage]?.status !== "confirmed")) throw conflict();
         if (row.status !== "completed") await transaction.update(managementOperations)
           .set({ status: "completed" }).where(operationWhere(owner, operationKey));
@@ -186,6 +222,48 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
     },
     async assertReadyDatasets(owner, ids) {
       await assertReady(db, owner, ids);
+    },
+    async inspectPreparedDataset(owner, datasetId) {
+      return db.transaction(async (transaction) => {
+        // Metadata is read only from the owner. An ID-only exclusion check rejects
+        // foreign collisions instead of mistaking them for an absent Dataset.
+        const [stored] = await transaction.select({
+          datasetId: datasets.datasetId, ownerUserId: datasets.ownerUserId,
+          name: datasets.name, description: datasets.description, kind: datasets.kind,
+          deletedAt: datasets.deletedAt, originalOrderIntact: datasets.originalOrderIntact,
+        }).from(datasets).where(and(eq(datasets.ownerUserId, owner), eq(datasets.datasetId, datasetId))).limit(1);
+        if (!stored) {
+          const [claimed] = await transaction.select({ datasetId: datasets.datasetId }).from(datasets)
+            .where(eq(datasets.datasetId, datasetId)).limit(1);
+          if (claimed) throw conflict();
+          return null;
+        }
+        if (stored.deletedAt !== null || stored.kind !== "prompt" || stored.originalOrderIntact !== true) throw conflict();
+        const parsed = datasetSchema.safeParse({
+          datasetId: stored.datasetId, name: stored.name,
+          ...(stored.description === null ? {} : { description: stored.description }),
+        });
+        // A schema parse can trim a stored name. Replay must compare the *actual*
+        // database label, not a normalized projection that hides a later edit.
+        if (!parsed.success || parsed.data.name !== stored.name) throw conflict();
+        const members = await transaction.select({
+          datasetId: datasetData.datasetId, dataId: datasetData.dataId, position: datasetData.position,
+          content: data.content, dataOwner: data.ownerUserId, deletedAt: data.deletedAt,
+        }).from(datasetData).leftJoin(data, and(
+          eq(data.dataId, datasetData.dataId), eq(data.ownerUserId, datasetData.ownerUserId),
+        )).where(and(eq(datasetData.ownerUserId, owner), eq(datasetData.datasetId, datasetId))).limit(51);
+        if (members.length === 0 || members.length > 50 || members.some((row) =>
+          row.dataOwner !== owner || row.deletedAt !== null || row.content === null)) throw conflict();
+        const ordered = (await orderDatasetMemberships(transaction, owner, [stored], members)).get(datasetId)!;
+        if (ordered.order !== "upload") throw conflict();
+        const rows = await Promise.all(ordered.members.map(async (row) => {
+          if (row.content === null) throw conflict();
+          const parsedRow = dataSchema.safeParse({ ...row.content, dataId: row.dataId });
+          if (!parsedRow.success) throw conflict();
+          return { dataId: row.dataId, contentDigest: await digestJson(row.content) };
+        }));
+        return { dataset: parsed.data, order: ordered.order, data: rows };
+      }, READ_SNAPSHOT);
     },
     async listDatasetData(owner, datasetId, page, pageSize) {
       if (!Number.isSafeInteger(page) || page < 1 || page > 10_000
