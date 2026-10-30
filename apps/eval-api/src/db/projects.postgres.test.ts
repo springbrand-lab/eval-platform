@@ -1094,12 +1094,12 @@ describe.skipIf(!connection)("PostgreSQL Project snapshots, evaluation plans, Me
       targets: { projectSampleIds: string[]; samplingIds: string[] };
       executionPlanDigest: string; evaluationPlanDigest: string;
     } }).msg;
-    expect(preview.targets.samplingIds.sort()).toEqual([...run.samplingIds].sort());
+    expect([...preview.targets.samplingIds].sort()).toEqual([...run.samplingIds].sort());
     const submitted = await send(`${path}/runs`, jsonRequest("POST", {
       idempotencyKey: "evaluate", operation: "evaluation", selector: { all: true }, targets: preview.targets,
       expectedPlanDigests: { execution: preview.executionPlanDigest, evaluation: preview.evaluationPlanDigest },
     }, OWNER));
-    expect(submitted.status).toBe(202);
+    expect(submitted.status, submitted.status === 202 ? "" : await submitted.text()).toBe(202);
     const sampling = run.samplingIds[0]!;
     expect(await (await send(`${path}/samplings/${sampling}/observation`, authorized(OWNER))).json())
       .toMatchObject({ msg: { role: "subject", samplingId: sampling, state: "not-started" } });
