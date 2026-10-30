@@ -77,6 +77,16 @@ describe("trusted management MCP transport", () => {
     const runInput = tools.result.tools.find(({ name }) => name === "submit_run")!.inputSchema;
     expect(runInput.required).toEqual(expect.arrayContaining(["projectId", "idempotencyKey", "operation", "selector", "targets", "expectedPlanDigests"]));
     expect(runInput.properties).not.toHaveProperty("replayOnly"); // removed from both call and advertised schemas
+    const metricsInput = tools.result.tools.find(({ name }) => name === "get_metrics")!.inputSchema;
+    expect(metricsInput.properties).toEqual(expect.objectContaining({
+      toolPage: expect.any(Object), toolPageSize: expect.any(Object),
+      evaluationId: expect.any(Object), resultOffset: expect.any(Object), numericPointer: expect.any(Object),
+    }));
+    const optionsInput = tools.result.tools.find(({ name }) => name === "list_options")!.inputSchema;
+    expect(optionsInput.properties).toHaveProperty("schemaOffset");
+    expect(optionsInput.properties?.category).toMatchObject({
+      enum: expect.arrayContaining(["output_schema_detail", "approval_output_schema"]),
+    });
     expect(tools.result.tools.find(({ name }) => name === "reconcile_operation")!.inputSchema)
       .toHaveProperty("oneOf");
     expect(tools.result.tools.map(({ name }) => name)).not.toContain("submit_evaluation");

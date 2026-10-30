@@ -95,11 +95,11 @@ No SP private source is imported.
 
 `POST /mcp/eval-management` is an independent, stateless JSON-RPC 2.0 control plane for a **trusted server-side Moss adapter**. Send `Authorization: Bearer <EVAL_MANAGEMENT_MCP_TOKEN>` and `Content-Type: application/json`; do not put the token, service account, actor, files or URLs in tool arguments. The optional secret must have at least 32 characters; when unset the endpoint is 404. Invalid/missing Bearer is 401; GET/DELETE/PUT/PATCH are 405 with `Allow: POST`. `initialize` (supported versions as for `/mcp/evaluation-results`), `ping`, `tools/list` and `tools/call` are stateless; an ID-less notification has no effect (202). Tool failures return MCP `isError` text with a safe error code/message, not raw SP/DB diagnostics. Each authenticated call uses and releases one fixed-account `OwnerServices` lease; no caller can select another owner. `EVAL_RESULT_MCP_TOKEN` and `EVAL_WEB_API_TOKEN` do not authorize this endpoint, and its token cannot authorize `/mcp/evaluation-results`. Never register this management MCP on an Agent Config: only Evaluators receive the **other** MCP's `submit_evaluation`.
 
-This slice advertises **only sixteen** management tools; catalog `page` defaults to 1 and `pageSize` to 20 (maximum 50), while `get_preparation` pages at most 10 cases. IDs, selectors and Project bodies use the existing Eval schemas; MCP JSON requests are limited to 1 MB except `create_output_schema`, which has a `MANAGEMENT_OUTPUT_SCHEMA_BODY_BYTES` (6,018,496) JSON-escaping allowance for its 1 MB `OUTPUT_SCHEMA_BYTES` content and bounded labels/key. Run preview/submit/reconcile are limited to 50 fixed targets (narrower than HTTP). Toolkit pagination uses an opaque cursor instead of `page`. Tool text is capped at 32 KB. Reads paginate/sanitize model-visible results; no unbounded prompts, SP credentials, raw resource snapshots or binary files:
+This slice advertises **only sixteen** management tools; catalog `page` defaults to 1 and `pageSize` to 20 (maximum 50), while `get_metrics` defaults to **5** rows/fields per page to leave room for summary and Takt's 5,000-character output, and `get_preparation` pages at most 10 cases. IDs, selectors and Project bodies use the existing Eval schemas; MCP JSON requests are limited to 1 MB except `create_output_schema`, which has a `MANAGEMENT_OUTPUT_SCHEMA_BODY_BYTES` (6,018,496) JSON-escaping allowance for its 1 MB `OUTPUT_SCHEMA_BYTES` content and bounded labels/key. Run preview/submit/reconcile are limited to 50 fixed targets (narrower than HTTP). Toolkit pagination uses an opaque cursor instead of `page`. Tool text is capped at 32 KB; `get_metrics` and `list_options(output_schemas|output_schema_detail)` additionally fail explicitly above either 4,800 UTF-8 bytes **or** 4,800 characters of model text, below Takt's 5 KB / 5,000-character display cap. Reads paginate/sanitize model-visible results; no unbounded prompts, SP credentials, raw resource snapshots or binary files:
 
 | Tool | `tools/call` arguments | Result / boundary |
 | --- | --- | --- |
-| `list_options` | `{category:"agents" \| "datasets" \| "projects" \| "project_detail" \| "output_schemas" \| "input_limits" \| "credits", q?, page?, pageSize?, projectId?}`; `project_detail` requires `projectId` and pages its bound Datasets. Trusted adapter also uses `approval_dataset` (`datasetId,dataIds?,page,pageSize<=10`), `approval_agent` (`userAgentId`), `approval_output_schema` (`outputSchemaId`), `approval_project` (`projectId,projectSampleIds,samplingIds,page,pageSize<=10`) | Choice IDs/names, limits or credits; `project_detail` returns the owned frozen Project's case count, Agent names and whether an evaluation plan exists, with its bound output Schema ID and optional live catalog name. It never returns prompts, Schema content or Agent Config bodies. Dataset approval reads the same consistent selected-source snapshot that ProjectService will freeze, and returns its complete digest across pages. Agent approval hashes the owned public SP body; output Schema approval hashes the complete owned catalog record (ID, mutable name/description and immutable Schema body), not just its display name. The evaluation plan still stores its original body-only Schema digest. |
+| `list_options` | `{category:"agents" \| "datasets" \| "projects" \| "project_detail" \| "output_schemas" \| "output_schema_detail" \| "input_limits" \| "credits", q?, page?, pageSize?, projectId?, outputSchemaId?, schemaOffset?}`; `project_detail` requires `projectId` and pages its bound Datasets. `output_schema_detail` requires `outputSchemaId` and permits only `schemaOffset` (byte cursor, default 0; catalog paging/filtering is forbidden). Trusted adapter also uses `approval_dataset` (`datasetId,dataIds?,page,pageSize<=10`), `approval_agent` (`userAgentId`), `approval_output_schema` (`outputSchemaId`), `approval_project` (`projectId,projectSampleIds,samplingIds,page,pageSize<=10`) | Choice IDs/names, limits or credits. `project_detail` returns the owned frozen Project's case count, Agent names and plan-bound Schema ID, never its content. `output_schema_detail` uses the **active owner-scoped** `outputSchemas.get(outputSchemaId)` to return its actual JSON Schema (including nested field definitions) in bounded `schemaChunk` continuations for small documents or a marked `streamRequired:true`/fixed trusted GET for large ones, not a name-only choice; unknown, foreign and deleted catalog entries are not available. Dataset approval reads the same consistent selected-source snapshot that ProjectService will freeze, and returns its complete digest across pages. Agent approval hashes the owned public SP body; output Schema approval hashes the complete owned catalog record (ID, mutable name/description and immutable Schema body), not just its display name. The evaluation plan still stores its original body-only Schema digest. |
 | `prepare_inputs` | `{operationKey, promptUploadRef, name, description, format:"json" \| "jsonl", cases:[{initialMaterials?,evalInitialMaterials?,initialSession?}]}` | Exactly one case mapping per prompt row (at most 50). Material selectors are `{uploadRef}` or owned `{bundleId,materialId}`; an optional Subject-only Session is `{uploadRef,format}` or owned `{bundleId,sessionId}`. Creates/reconciles a Prompt Dataset and separate Material/Session Bundles, then binds each Data and reads it back. Returns bounded IDs and per-case bindings; never starts a Run. |
 | `get_preparation` | `{operationKey,page?,pageSize?}` | Durable status, planned Dataset ID and one page of Data binding and Material/Session stage receipts (default/max 10 cases), plus resource progress counts; also reports safe unknown-outcome state for file/Agent library and output Schema operations. An output Schema receipt contains only `{outputSchemaId,name}`. Never original prompts, Schema content, bytes or attachment URLs. |
 | `search_agent_resources` | `{kind:"models" \| "skills" \| "action_groups" \| "actions" \| "connector_components" \| "extensions" \| "toolkits" \| "references", q?, page?, pageSize?, supplierId?, unassigned?, cursor?, id?}` | Live allowlisted SP catalog, concise selectable metadata. Actions require `supplierId` or `unassigned:true`; `action_groups` finds these groups. `id` reads one Action or Reference detail. `cursor` is only for Toolkit pages (status, never connection IDs or credentials). |
@@ -113,8 +113,168 @@ This slice advertises **only sixteen** management tools; catalog `page` defaults
 | `reconcile_operation` | `{kind:"run",request:{projectId,idempotencyKey,operation,selector,targets,expectedPlanDigests?}}` or `{kind:"project",request:original ProjectCreateBody}` (including `expectedSnapshots` if originally supplied). Only the **read-only Run branch** may omit `expectedPlanDigests`, to look up a persisted legacy Run. | Uses `admission.replay` / ProjectStore's existing creation-key/fingerprint read, **not** `submit` or `create`. A found Project Run must also match the creation's first-Run operation, `{all:true}` selector, complete frozen targets/plan digests, request fingerprint and first sequence; otherwise `RUN_IDEMPOTENCY_CONFLICT` (not success). A matching operation returns `{projectId,runId,samplingCount}` (current retained Run membership count); mismatched ID/body conflicts. Missing Project/Run returns `PROJECT_NOT_FOUND`/`RUN_NOT_FOUND`; a stored Project without its own first Run returns `OPERATION_OUTCOME_UNKNOWN`, never a false success or a new Run. Does not preview targets, read live plans or write any fact. |
 | `stop_run` | `{projectId, runId}` | Existing Project-scoped Run stop; never an implicit/current Run. |
 | `get_run` | `{runId, page?, pageSize?}` | Status/phase/operation, ID counts and one page of Sampling/Evaluation IDs, not full records. |
-| `get_metrics` | `{projectId, runId?, scope:"project" \| "dataset" \| "sample" \| "sampling", datasetId?, projectSampleId?, samplingId?, page?, pageSize?}` | With no `runId`, **every scope** reads the Project's currently retained, owner-scoped facts (not a latest-Run score or historical result); `runScope:"project_current"` makes that explicit. With `runId`, the existing exact-Run filter still applies at every scope (`runScope:"exact_run",runId`), including membership after replacement. Exactly the matching scope ID is required. Project rows include `projectSampleId` and a **first page** of actual `samplingIds` with `total`; use `scope:"sample",projectSampleId,page` to page **all** current Sampling IDs, then `scope:"sampling",samplingId,page` for Evaluation IDs/status/validation. The existing Metrics summary separates `executionAgent` and `evaluationAgents` tokens, costs, cacheHitRate, coverage and nullable `trajectory.toolSuccessRate` (projected as `toolSuccessRate`); no second metric is calculated. |
+| `get_metrics` | `{projectId, runId?, scope:"project" \| "dataset" \| "sample" \| "sampling", datasetId?, projectSampleId?, samplingId?, page?, pageSize?, toolPage?, toolPageSize?, numericPointer?, evaluationId?, resultOffset?}` | Without `runId`, **every scope** reads currently retained owner-scoped Project facts (`runScope:"project_current"`), not a latest-Run score. With `runId`, the exact-Run filter (`runScope:"exact_run",runId`) still requires current membership after replacement. Exactly the matching scope ID is required. Normal reads keep the existing Project-wide counts, scores, separate Subject/Evaluator tool success (nullable with coverage), cache/tokens/costs and paged ProjectSample → Sampling → Evaluation IDs. Project/Dataset `projectSamples.items[]` include one compact `scoreIndex` from each row's already-computed Metrics summary; optional `numericPointer` (JSON Pointer, max 512, default `/score`) selects that field **only for these two scopes**. Each summary's `executionAgent` and `evaluationAgents` additionally has an independent bounded `byTool` page of Metrics' existing native per-Tool counts/statuses/coverage **and source-backed success rates**; `toolPage` defaults to 1, `toolPageSize` to 2 (max 5). `evaluationId` is valid **only** with `scope:"sampling",samplingId` and returns a selected-only `evaluationResult` with complete parsed JSON in small `resultOffset` continuations or via the fixed trusted GET when `streamRequired:true` (no summary/list in that response); it never reads an unrelated Evaluator or sends raw Agent args/results. |
 | `inspect_case` | `{projectId, runId?, samplingId, evaluationId?}` | Without `runId`, requires a **current** owned Sampling (and selected Evaluation, if any) in that Project. With `runId`, requires the original exact Run/Sampling/Evaluation membership **and** current members. Returns bounded Sampling/Subject resource Metrics, selected Evaluator Metrics, result excerpt and internal evidence references. It does not return trajectory bytes or a continuation cursor. The existing Project Metrics toolSuccessRate, cache/tokens and ID drilldown are unchanged. |
+
+**Metric/Schema continuations (read-only, model-visible):** A normal `get_metrics` response has
+`summary.executionAgent.byTool` and `summary.evaluationAgents.byTool`, each
+`{page,pageSize,total,items:[{toolName:string|null,count:{value:number|null,coverage},completed,failed,cancelled,inProgress,unknown,coverage,toolSuccessRate:{value:number|null,coverage}}]}`.
+These are separate source-backed pages of `ResourceStatistics.trajectory.byTool`;
+`toolSuccessRate` is the **Metrics-supplied** value for each native Tool name:
+`completed / (completed + failed + cancelled)` among that name's terminal calls,
+or `null` when there are none; `inProgress`/`unknown` never enter the denominator.
+Its coverage equals **that row's** `count.coverage` (including partial/unavailable),
+not the overall role's coverage. Eval API and Takt must not recompute or average
+this rate. `total` includes all rows, including a null/unknown Tool name.
+An unsafe or overlong Tool name is masked with `sourceRedacted:true` on that row;
+its counts remain native Metrics facts. Project/Dataset/field labels and bounded
+field distributions similarly mark any source redaction or display truncation;
+`distributionCount`/`distributionTruncated` distinguish an excerpt of >10 options
+from a complete distribution. A numeric field whose JSON Pointer itself names a
+sensitive value (e.g. `/token`) retains the pointer/count/coverage but masks
+`numeric` as null (`numericRedacted:true`) and every distribution value with
+`sourceRedacted:true`; a redacted null is **not** a zero or a missing score.
+Other aggregate scores/counts themselves are not clipped.
+
+Project/Dataset `projectSamples.items[].scoreIndex` is
+`{evaluations:number,statuses:Record<SamplingStatus,number>,validation:Record<EvaluationValidationStatus,number>,
+field:{jsonPointer:string,value:number|null,coverage:"complete"|"partial"|"unavailable",
+observationCount:number,contributingEvaluationCount:number,missingEvaluationCount:number,
+sourceRedacted?:true,jsonPointerTruncated?:true}|null}`. All facts come directly
+from that row's **already computed** `summary.evaluation` and
+`summary.evaluationOutputs`, for the requested numeric field (default `/score`);
+`field:null` means no numeric Metrics field at that pointer, not zero. A field
+with no usable observations has `value:null` and its source coverage/counts.
+`value` is that field's `numeric.mean` over observed numeric **values**; multiple
+Evaluations or an array field can contribute multiple observations, so it is
+not an individual Evaluation score or the native per-Tool `toolSuccessRate`.
+`statuses` are Evaluator stage statuses, **not** Subject/execution statuses;
+`validation` distinguishes valid/invalid/unavailable outputs. The separate
+execution/evaluation summaries remain unchanged, and `runScope`/optional `runId`
+on the page identify current versus exact-Run facts. To index a different
+Schema numeric field, pass its exact JSON Pointer as `numericPointer`; do not
+infer a score from an arbitrary field or recompute it in Takt.
+
+After paging Evaluation IDs at `scope:"sampling"` (without `evaluationId`), call
+`get_metrics({scope:"sampling",projectId,samplingId,evaluationId,resultOffset?:number,runId?})`.
+The selected-only response is
+`{scope:"sampling",project:{projectId,name},runScope,runId?,projectSample,sampling,evaluationResult:
+{evaluationId,outputStatus:"succeeded"|"failed"|null,validation:{status,reason},
+contentHash:string|null,sourceRedacted:boolean,rawJsonChunk:JsonChunk|null,
+streamRequired?:true,display?:{totalBytes:number,sha256:string}}}`.
+`rawJsonChunk` is **null** for absent, malformed or unsafe-number output
+(no `streamRequired`); it is also null with `streamRequired:true` and a
+displayed-document digest when a parsed result is larger than the bounded MCP
+continuation allowance. A parsed value withheld because a *key itself* is
+unsafe has `rawJsonChunk:null,sourceRedacted:true` **without**
+`streamRequired`. The real Metrics validation reason remains visible.
+A successfully parsed result that violates its Schema (`schema-mismatch`) still
+has its parsed JSON available by one of these paths **when displayable**,
+with `validation.status:"invalid"`, never a fabricated valid score. A parsed
+result with an unavailable Schema (`no-schema` or `invalid-schema`) is likewise
+returned with `validation.status:"unavailable"`. For a parsed JSON `null`, the real chunk contains
+the text `"null"`, not an absent result. A parsed result can be an object, array,
+string, boolean, number or null, including nonnumeric text and nested values.
+The output's original text/paths/evidence are never returned by this tool.
+Wrong evaluation/sampling/Project/owner/current-or-exact-Run membership is an error.
+
+`list_options({category:"output_schema_detail",outputSchemaId,schemaOffset?:number})`
+returns `{category:"output_schema_detail",outputSchemaId,name,nameTruncated?:true,
+sourceRedacted:boolean,schemaChunk:JsonChunk|null,streamRequired?:true,
+display?:{totalBytes:number,sha256:string}}` for the active owned catalog
+record. The display name is at most 80 characters, with truncation marked;
+the **displayed** Schema document (MCP chunks or trusted GET) retains its `properties`,
+`$defs`, types, conditions, enums and descriptions, not just aggregated numeric
+fields unless a specific value has been explicitly redacted. Both chunk types are
+`{text:string,offset:number,totalBytes:number,nextOffset:number|null,sha256:string}`:
+`text` is at most 2,048 UTF-8 bytes (adaptively smaller if JSON escaping or
+long IDs require it to stay below the 4,800-byte/character model-text limits), on code-point boundaries from
+`JSON.stringify(parsedJson)` / `JSON.stringify(schema)`, after the same
+redaction policy. MCP continuations apply only when the **displayed** document
+is at most 16,384 UTF-8 bytes; larger documents yield
+`{schemaChunk|rawJsonChunk:null,streamRequired:true,display:{totalBytes,sha256}}`.
+SHA-256 hashes the **whole displayed canonical JSON**, not an individual page
+or the Evaluator's original file (`contentHash`). For small documents, start
+at offset 0, follow `nextOffset` until null, check every page's identity,
+total and hash, concatenate UTF-8 bytes and verify
+the digest; a changed digest/total means restart, never accept a partial result.
+Out-of-range, mid-code-point and nonzero MCP cursors for stream-required
+documents are errors. No silently clipped JSON or Schema is called complete.
+
+The trusted Takt adapter should consume MCP `content[0].text` **only if**
+`isError` is absent, and must not truncate it again. For a small selected
+Evaluation/Schema, keep the same IDs and optional exact `runId`, start at byte
+offset 0 and follow `nextOffset` until `null`. Compare `totalBytes` and `sha256`
+across **all** pages; encode and concatenate `text` chunks as UTF-8, verify
+their combined byte count/SHA-256, then parse the one displayed JSON document.
+For `streamRequired:true` do **not** follow `resultOffset`/`schemaOffset`: use
+the fixed authenticated GET below, compare its manifest's `display` size/SHA
+to the MCP `display`, and reject a changed identity. A missing chunk, changed
+digest, error or out-of-budget aggregate is **not** a completed result:
+reject/restart, or retry a normal aggregate with smaller `pageSize` /
+`toolPageSize` or a narrower scope. `contentHash` describes original Evaluator
+text and is not the displayed JSON digest.
+
+The **same policy** applies to Schema and Evaluation JSON at every depth:
+keep safe object field names, including literal `url`, `token` and `prompt`,
+but replace their **entire value** (string, number, boolean, null, object or
+array) with `"[REDACTED: sensitive source content]"`. A safe sibling such as
+`reason` remains unchanged. Other string values that reveal URLs, credentials
+or frozen private prompts use the same marker; `sourceRedacted:true` is set
+on **every MCP chunk** or the stream manifest when the document is transformed,
+and the digest covers only the displayed **redacted** JSON. A property name
+that **itself contains** a literal URL, credential or private prompt cannot
+be emitted: return `schemaChunk`/`rawJsonChunk:null,sourceRedacted:true`
+without `streamRequired` (trusted GET reports `display:null,withheld:true`),
+never silently omit that key. Takt's `UNSAFE_JSON_KEY` policy must allow the
+safe names `url`/`token`/`prompt` **only when their value is exactly the marker
+and the result is flagged `sourceRedacted:true`**; it must still reject an
+actual URL/credential in a key, unmarked sensitive values and partial output.
+MCP's response-level redaction flag may also include a redacted name or
+`contentHash`, whereas GET's flag refers to its JSON document; preserve
+either flag when reporting to the user. A redacted display is **not** an
+original complete Schema/result (e.g. a redacted Schema need not itself
+validate as a usable Schema), and an undetectable paraphrase of a secret cannot
+be inferred to be safe or restored from a hash.
+
+**Trusted JSON document GET (not a model tool):**
+`GET /mcp/eval-management/documents?kind=output_schema&outputSchemaId=<id>` or
+`GET /mcp/eval-management/documents?kind=evaluation_result&projectId=<id>&samplingId=<id>&evaluationId=<id>[&runId=<id>]`
+accepts exactly those query fields (no URL, path, owner, arbitrary cursor or
+token). The same management Bearer is checked **before** the fixed-owner lease;
+other credentials fail. Schema selection uses the active owned catalog;
+Evaluation selection uses the same Metrics current-scope checks and, when
+`runId` is supplied, original Run membership as `get_metrics`. Both are
+rechecked at the stream end. Wrong, foreign, deleted or replaced selections
+never receive a terminal manifest. `200 application/x-ndjson; charset=utf-8`
+is attachment-only with sandbox CSP, `nosniff` and no-store; it does **not**
+put the JSON bytes or a URL into model context. No new DB, file spool,
+document cache or SP integration is involved.
+
+Its JSONL has zero or more `{"type":"chunk","offset":0,"base64":"..."}` lines
+of at most **8,192 decoded bytes** each, in consecutive byte-offset order,
+followed by exactly one terminal manifest line and EOF. For a Schema the
+manifest is `{"type":"manifest","format":"eval-management-json/v1",
+"kind":"output_schema","outputSchemaId":"<id>",
+"display":{"totalBytes":123,"sha256":"<lowercase SHA-256>"},
+"sourceRedacted":false,"withheld":false,"displayComplete":true}`. For an
+Evaluation, `kind` is `"evaluation_result"` and the **only** identity/status
+fields in place of `outputSchemaId` are
+`projectId,samplingId,evaluationId,runScope:"project_current"|"exact_run",
+runId?` (only for exact Run), `outputStatus:"succeeded"|"failed"|null` and
+`validation:{status,reason}`; the same four display/redaction/completion
+fields then follow.
+For absent/malformed Evaluation output there are **no** chunks,
+`display:null,withheld:false` with the real validation reason; for a key unsafe
+to display there are no chunks and `display:null,withheld:true,sourceRedacted:true`.
+For a present document `display` hashes the concatenated **decoded displayed**
+UTF-8 bytes (even if redacted), not base64/JSONL or the original text. Takt must
+check identities, validation, frame ordering/nonempty lengths, full byte count,
+SHA-256 and any MCP `display`, a **terminal** manifest and EOF before using
+the parsed JSON; HTTP 200 or a prefix is not success. Failed/aborted/cancelled
+streams have no manifest. `displayComplete` certifies delivery of the *display*
+or explicit null, never completeness of a redacted original. Other MCP tools
+and the separate, trusted trajectory download are unchanged.
 
 Takt owns approval and must keep the original preview digests/targets and the original create body with its review digests. On an uncertain write, `reconcile_operation` only consults previously persisted EP facts. A lookup miss must **not** become a blind `submit_run`/`create_project` retry: compare to the original approved facts and obtain new human approval for a changed plan or source. The Runtime's required expected digests, rather than management preview logic, block a D1→D2 same-target Run. No second Run receipt or approval state is stored in EP.
 

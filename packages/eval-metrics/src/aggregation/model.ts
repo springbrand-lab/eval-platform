@@ -88,6 +88,8 @@ export interface OperationStatistics {
 
 export interface ToolMetric extends OperationStatistics {
   readonly toolName: string | null;
+  /** Terminal native Tool calls for this name only; null without a terminal call, coverage follows count. */
+  readonly toolSuccessRate: MetricNumber;
   /** UTF-8 canonical JSON bytes of native Tool arguments or Pi assistant Tool Call arguments. */
   readonly inputLength: CoveredNumericSummary;
   /** UTF-8 canonical JSON bytes of the safe native Tool result; never an inferred response. */

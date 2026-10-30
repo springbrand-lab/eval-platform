@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 import { RuntimeInputError, digestJson } from "@eval-platform/eval-runtime";
-import { AGENT, DATASET, OWNER, SCHEMA, setupManagement, toolValue } from "./test-fixture.js";
+import type { JsonChunk } from "./common.js";
+import { AGENT, DATASET, OWNER, SCHEMA, project, setupManagement, toolValue } from "./test-fixture.js";
 
 const FIRST = "55555555-5555-4555-8555-555555555555";
 const SECOND = "66666666-6666-4666-8666-666666666666";
@@ -169,6 +171,189 @@ describe("trusted approval selections through the existing list_options tool", (
     expect(await errorCode(await app.call("list_options", {
       category: "approval_output_schema", outputSchemaId: FIRST,
     }))).toContain("OUTPUT_SCHEMA_NOT_FOUND");
+  });
+
+  it("reads actual nested Schema field definitions by exact owned catalog ID, not a name or aggregate", async () => {
+    const app = setupManagement();
+    const schema = { type: "object", properties: {
+      reason: { type: "string", description: "Actual free-text reason" },
+      passed: { type: ["boolean", "null"] },
+      checks: { type: "array", items: { $ref: "#/$defs/check" } },
+    }, required: ["reason", "checks"],
+    $defs: { check: { type: "object", properties: { label: { type: "string" }, score: { type: "number" } } } } };
+    app.savedSchemas.set(SCHEMA, { outputSchemaId: SCHEMA, name: "Scoring", description: "Metadata", schema });
+    const otherId = SECOND;
+    app.savedSchemas.set(otherId, { outputSchemaId: otherId, name: "Scoring", description: "Same name",
+      schema: { type: "boolean" } });
+    const result = await toolValue(await app.call("list_options", {
+      category: "output_schema_detail", outputSchemaId: SCHEMA,
+    }));
+    const chunk = result.schemaChunk as JsonChunk;
+    expect(result).toMatchObject({ category: "output_schema_detail", outputSchemaId: SCHEMA,
+      name: "Scoring", sourceRedacted: false });
+    expect(chunk).toMatchObject({ offset: 0, totalBytes: Buffer.byteLength(JSON.stringify(schema), "utf8"),
+      nextOffset: null, sha256: createHash("sha256").update(JSON.stringify(schema)).digest("hex") });
+    expect(JSON.parse(chunk.text)).toEqual(schema);
+    expect((await toolValue(await app.call("list_options", {
+      category: "output_schema_detail", outputSchemaId: otherId,
+    }))).schemaChunk).toMatchObject({ text: '{"type":"boolean"}' });
+    expect(app.services.outputSchemas.get).toHaveBeenCalledWith(SCHEMA);
+    expect(result).not.toHaveProperty("projectId");
+  });
+
+  it("pages owner-scoped Schema choices instead of letting Takt clip a large catalog page", async () => {
+    const app = setupManagement();
+    for (let index = 0; index < 50; index++) {
+      const outputSchemaId = crypto.randomUUID();
+      app.savedSchemas.set(outputSchemaId, { outputSchemaId, name: `Schema ${index} ${"中".repeat(140)}`,
+        description: "Not a choice field", schema: { type: "object", properties: { reason: { type: "string" } } } });
+    }
+    expect(await errorCode(await app.call("list_options", {
+      category: "output_schemas", pageSize: 50,
+    }))).toContain("CATALOG_PAYLOAD_TOO_LARGE");
+    const rpc = await (await app.call("list_options", {
+      category: "output_schemas", page: 2, pageSize: 5,
+    })).json() as { result: { content: [{ text: string }] } };
+    expect(Buffer.byteLength(rpc.result.content[0].text, "utf8")).toBeLessThanOrEqual(4_800);
+    const page = JSON.parse(rpc.result.content[0].text) as { total: number; page: number; items: unknown[] };
+    expect(page).toMatchObject({ total: 51, page: 2 });
+    expect(page.items).toHaveLength(5);
+    expect(page.items[0]).not.toHaveProperty("schema");
+  });
+
+  it("continues a long UTF-8 Schema without clipping or mistaking a character offset for a byte offset", async () => {
+    const app = setupManagement();
+    const schema = { type: "object", title: "规则🧮".repeat(800),
+      properties: { reason: { type: "string", description: "complete" } } };
+    app.savedSchemas.set(SCHEMA, { outputSchemaId: SCHEMA, name: "Long", description: "Metadata", schema });
+    const chunks: JsonChunk[] = [];
+    let schemaOffset = 0;
+    do {
+      const response = await app.call("list_options", { category: "output_schema_detail", outputSchemaId: SCHEMA, schemaOffset });
+      const rpc = await response.json() as { result: { content: [{ text: string }] } };
+      expect(rpc.result.content[0].text.length).toBeLessThan(5_000);
+      const value = JSON.parse(rpc.result.content[0].text) as { schemaChunk: JsonChunk; sourceRedacted: boolean };
+      expect(value.sourceRedacted).toBe(false);
+      expect(value.schemaChunk.offset).toBe(schemaOffset);
+      expect(Buffer.byteLength(value.schemaChunk.text, "utf8")).toBeLessThanOrEqual(2_048);
+      chunks.push(value.schemaChunk);
+      schemaOffset = value.schemaChunk.nextOffset ?? 0;
+    } while (schemaOffset !== 0 && chunks.length < 20);
+    const canonical = JSON.stringify(schema);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.at(-1)!.nextOffset).toBeNull();
+    expect(chunks.map((chunk) => chunk.text).join("")).toBe(canonical);
+    expect(chunks.every((chunk) => chunk.sha256 === chunks[0]!.sha256
+      && chunk.totalBytes === Buffer.byteLength(canonical, "utf8"))).toBe(true);
+    expect(chunks[0]!.sha256).toBe(createHash("sha256").update(canonical).digest("hex"));
+    const insideCodePoint = Buffer.from(canonical).indexOf(Buffer.from("规")) + 1;
+    expect(await errorCode(await app.call("list_options", {
+      category: "output_schema_detail", outputSchemaId: SCHEMA, schemaOffset: insideCodePoint,
+    }))).toContain("REQUEST_INVALID_INPUT");
+    expect(await errorCode(await app.call("list_options", {
+      category: "output_schema_detail", outputSchemaId: SCHEMA, schemaOffset: Buffer.byteLength(canonical, "utf8"),
+    }))).toContain("REQUEST_INVALID_INPUT");
+  });
+
+  it("keeps escape-heavy Schema definitions within Takt's output budget without dropping a property", async () => {
+    const app = setupManagement();
+    const schema = { type: "object", description: '"\\'.repeat(3_000),
+      properties: { reason: { type: "string" }, verdict: { type: "boolean" } } };
+    app.savedSchemas.set(SCHEMA, { outputSchemaId: SCHEMA, name: "Scoring", description: "Metadata", schema });
+    const chunks: JsonChunk[] = [];
+    let schemaOffset = 0;
+    do {
+      const rpc = await (await app.call("list_options", {
+        category: "output_schema_detail", outputSchemaId: SCHEMA, schemaOffset,
+      })).json() as { result: { isError?: boolean; content: [{ text: string }] } };
+      expect(rpc.result.isError).not.toBe(true);
+      expect(rpc.result.content[0].text.length).toBeLessThanOrEqual(4_800);
+      expect(Buffer.byteLength(rpc.result.content[0].text, "utf8")).toBeLessThanOrEqual(4_800);
+      const { schemaChunk } = JSON.parse(rpc.result.content[0].text) as { schemaChunk: JsonChunk };
+      expect(schemaChunk.offset).toBe(schemaOffset);
+      expect(Buffer.byteLength(schemaChunk.text, "utf8")).toBeLessThanOrEqual(2_048);
+      chunks.push(schemaChunk);
+      schemaOffset = schemaChunk.nextOffset ?? 0;
+    } while (schemaOffset !== 0 && chunks.length < 30);
+    expect(chunks.at(-1)!.nextOffset).toBeNull();
+    expect(JSON.parse(chunks.map((chunk) => chunk.text).join(""))).toEqual(schema);
+    expect(chunks.every((chunk) => chunk.sha256 === chunks[0]!.sha256
+      && chunk.totalBytes === Buffer.byteLength(JSON.stringify(schema), "utf8"))).toBe(true);
+  });
+
+  it("rejects foreign/deleted or mismatched Schema identities and cross-category cursors", async () => {
+    const app = setupManagement();
+    for (const input of [
+      { category: "output_schema_detail" },
+      { category: "output_schema_detail", outputSchemaId: SCHEMA, q: "Output" },
+      { category: "output_schema_detail", outputSchemaId: SCHEMA, page: 2 },
+      { category: "output_schema_detail", outputSchemaId: SCHEMA, pageSize: 5 },
+      { category: "output_schema_detail", outputSchemaId: SCHEMA, projectId: project.projectId },
+      { category: "output_schema_detail", outputSchemaId: SCHEMA, schemaOffset: -1 },
+      { category: "output_schema_detail", outputSchemaId: SCHEMA, schemaOffset: 0.5 },
+      { category: "output_schemas", schemaOffset: 0 },
+      { category: "approval_output_schema", outputSchemaId: SCHEMA, schemaOffset: 0 },
+    ]) {
+      expect(await errorCode(await app.call("list_options", input))).toContain("REQUEST_INVALID_INPUT");
+    }
+    expect(app.services.outputSchemas.get).not.toHaveBeenCalled();
+    expect(await errorCode(await app.call("list_options", {
+      category: "output_schema_detail", outputSchemaId: FIRST,
+    }))).toContain("OUTPUT_SCHEMA_NOT_FOUND");
+    app.services.outputSchemas.get.mockResolvedValueOnce({
+      outputSchemaId: SECOND, name: "Other", description: "Other", schema: {},
+    });
+    expect(await errorCode(await app.call("list_options", {
+      category: "output_schema_detail", outputSchemaId: SCHEMA,
+    }))).toContain("OUTPUT_SCHEMA_NOT_FOUND");
+    app.savedSchemas.delete(SCHEMA); // The catalog hides deleted records; Project plan readers are a separate seam.
+    expect(await errorCode(await app.call("list_options", {
+      category: "output_schema_detail", outputSchemaId: SCHEMA,
+    }))).toContain("OUTPUT_SCHEMA_NOT_FOUND");
+  });
+
+  it("marks Schema source-content redactions instead of silently omitting a field or leaking a URL/key", async () => {
+    const app = setupManagement();
+    app.savedSchemas.set(SCHEMA, { outputSchemaId: SCHEMA, name: "https://private.example", description: "Metadata",
+      schema: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object",
+        properties: { accessToken: { type: "string", default: "sk-abcdefghijk" } },
+        description: "Bearer private-token" } });
+    const result = await toolValue(await app.call("list_options", { category: "output_schema_detail", outputSchemaId: SCHEMA }));
+    const display = JSON.parse((result.schemaChunk as JsonChunk).text) as Record<string, unknown>;
+    expect(result.sourceRedacted).toBe(true);
+    expect(result.name).toBe("[REDACTED: sensitive source content]");
+    expect(display.$schema).toBe("[REDACTED: sensitive source content]");
+    expect(JSON.stringify(display.properties)).toContain("accessToken");
+    expect(JSON.stringify(result)).not.toMatch(/https:|sk-abcdefghijk|Bearer private-token/u);
+    app.savedSchemas.set(SCHEMA, { outputSchemaId: SCHEMA, name: "Output", description: "Metadata",
+      schema: { properties: { "https://unsafe.example": { type: "string" } } } });
+    expect(await toolValue(await app.call("list_options", {
+      category: "output_schema_detail", outputSchemaId: SCHEMA,
+    }))).toMatchObject({ sourceRedacted: true, schemaChunk: null });
+    expect(await errorCode(await app.call("list_options", {
+      category: "output_schema_detail", outputSchemaId: SCHEMA, schemaOffset: 1,
+    }))).toContain("REQUEST_INVALID_INPUT");
+  });
+
+  it("retains safe Schema property identities url/token/prompt while explicitly masking their values", async () => {
+    const app = setupManagement();
+    const schema = { type: "object", properties: {
+      url: { type: "string", default: "https://private.example/file" },
+      token: { type: "integer", const: 123456789 },
+      prompt: { type: "string", example: "private instruction" },
+      reason: { type: "string", description: "Safe reason" },
+    }, required: ["url", "token", "prompt", "reason"] };
+    app.savedSchemas.set(SCHEMA, { outputSchemaId: SCHEMA, name: "Scoring", description: "Metadata", schema });
+    const result = await toolValue(await app.call("list_options", { category: "output_schema_detail", outputSchemaId: SCHEMA }));
+    expect(result.sourceRedacted).toBe(true);
+    expect(JSON.parse((result.schemaChunk as JsonChunk).text)).toEqual({
+      type: "object", properties: {
+        url: "[REDACTED: sensitive source content]", token: "[REDACTED: sensitive source content]",
+        prompt: "[REDACTED: sensitive source content]",
+        reason: { type: "string", description: "Safe reason" },
+      }, required: schema.required,
+    });
+    expect(JSON.stringify(result)).not.toMatch(/https:|private\.example|123456789|private instruction/u);
   });
 
   it("reviews only frozen, owner-scoped ProjectSample/Sampling selections and their actual Agent identities", async () => {

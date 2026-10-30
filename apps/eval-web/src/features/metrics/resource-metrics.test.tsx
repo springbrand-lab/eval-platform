@@ -20,6 +20,7 @@ function fixture() {
     contentStepTokens: { input: { value: 80, coverage: "partial" }, output: { value: null, coverage: "unavailable" }, total: { value: null, coverage: "unavailable" } },
     byTool: [{
       ...base.trajectory.tools, toolName: "write_file", count: { value: 3, coverage: "partial" }, completed: 2, failed: 1,
+      toolSuccessRate: { value: 2 / 3, coverage: "partial" },
       durationMs: { count: 3, missing: 0, total: 600, min: 100, max: 300, mean: 200, variance: 6666.666666666667, median: 200 },
       inputLength: { count: 3, missing: 0, total: 480, min: 100, max: 200, mean: 160, variance: 1866.6666666666667, median: 180, coverage: "partial" },
       outputLength: { count: 0, missing: 3, total: null, min: null, max: null, mean: null, variance: null, median: null, coverage: "unavailable" },

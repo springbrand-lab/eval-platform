@@ -4,7 +4,7 @@ import { RuntimeInputError, digestJson } from "@eval-platform/eval-runtime";
 import type { Context } from "hono";
 import type { AppBindings } from "../lib/types.js";
 import { INPUT_LIMITS } from "../limits.js";
-import { pageOf, record, short } from "./common.js";
+import { fitsTaktResult, jsonChunk, pageOf, record, redactLiteral, short, type JsonChunkResult } from "./common.js";
 import { resourceIdSchema, type listOptionsSchema } from "./schemas.js";
 import type { z } from "zod";
 
@@ -95,6 +95,32 @@ async function approvalOutputSchema(c: Context<AppBindings>, input: Options) {
   if (!schema || schema.outputSchemaId !== outputSchemaId) throw new HttpError("OUTPUT_SCHEMA_NOT_FOUND");
   return { category: "approval_output_schema", outputSchemaId, name: short(schema.name, 200),
     digest: await digestJson(schema) };
+}
+
+/** The same active owner-catalog selection is used by the MCP and the trusted one-shot GET. */
+export async function readOwnedOutputSchema(c: Context<AppBindings>, outputSchemaId: string) {
+  const schema = await c.var.services.outputSchemas.get(outputSchemaId);
+  if (!schema || schema.outputSchemaId !== outputSchemaId) throw new HttpError("OUTPUT_SCHEMA_NOT_FOUND");
+  if (typeof schema.name !== "string" || schema.name.length > 200) {
+    throw new HttpError("RESPONSE_INVALID", "The output Schema name is invalid");
+  }
+  return schema;
+}
+
+/** One owned catalog record, not a Schema guessed by its (non-unique) name or a Project-scoped prompt. */
+async function outputSchemaDetail(c: Context<AppBindings>, input: Options) {
+  const outputSchemaId = input.outputSchemaId!;
+  const schema = await readOwnedOutputSchema(c, outputSchemaId);
+  const name = redactLiteral(schema.name);
+  const modelResult = ({ chunk, sourceRedacted, streamRequired, display }: JsonChunkResult) => ({
+    category: "output_schema_detail", outputSchemaId, name: short(name.value, 80),
+    ...(name.value.length > 80 ? { nameTruncated: true } : {}),
+    sourceRedacted: name.redacted || sourceRedacted, schemaChunk: chunk,
+    ...(streamRequired ? { streamRequired, display } : {}),
+  });
+  const result = jsonChunk(schema.schema, input.schemaOffset ?? 0, [],
+    (chunk, sourceRedacted) => fitsTaktResult(modelResult({ chunk, sourceRedacted })));
+  return modelResult(result);
 }
 
 /** Only an active owned Agent is selectable. Hash its whole public SP body, but never return it. */
@@ -192,6 +218,7 @@ export async function listOptions(c: Context<AppBindings>, input: Options) {
   if (category === "approval_dataset") return approvalDataset(c, input);
   if (category === "approval_agent") return approvalAgent(c, input);
   if (category === "approval_output_schema") return approvalOutputSchema(c, input);
+  if (category === "output_schema_detail") return outputSchemaDetail(c, input);
   if (category === "approval_project") return approvalProject(c, input);
   if (category === "project_detail") return projectDetail(c, input);
   if (category === "input_limits") return { category, limits: INPUT_LIMITS };
