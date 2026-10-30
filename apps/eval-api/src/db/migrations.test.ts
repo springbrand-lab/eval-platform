@@ -16,6 +16,7 @@ const appliedPrefix = [
   [1793187963783, "7b409f16a0b9fb06a4072ce7389a46c15e879402a02b7f8b305d7775e9f494ea"],
   [1793264185720, "98696eba43c3b40ccf31391b2f990a23bce25878c7f3daa9e2691b8434a662c9"],
   [1793285187605, "588676807bb0b38f0c95db2b9270da6c970eac2d18a1537a13eec70368d0fcd2"],
+  [1793343954992, "3a675c763c4f3caade4c7144b787f99faaf86bf2731cf1962488c5b5b6c8ff2b"],
 ];
 
 async function metadata(name: string) {
@@ -32,7 +33,8 @@ describe("offline Dashboard and management migration integrity", () => {
     expect(journal.entries[8]).toMatchObject({ idx: 8, tag: "0008_dashboard_data_selection", breakpoints: true });
     expect(journal.entries[9]).toMatchObject({ idx: 9, tag: "0009_management_preparation", breakpoints: true });
     expect(journal.entries[10]).toMatchObject({ idx: 10, tag: "0010_management_output_schema", breakpoints: true });
-    expect(journal.entries.at(-1)).toMatchObject({ idx: 11, tag: "0011_dataset_member_order", breakpoints: true });
+    expect(journal.entries[11]).toMatchObject({ idx: 11, tag: "0011_dataset_member_order", breakpoints: true });
+    expect(journal.entries.at(-1)).toMatchObject({ idx: 12, tag: "0012_dataset_order_provenance", breakpoints: true });
     expect(journal.entries.map((entry: { when: number }) => entry.when)).toEqual(migrations.map((migration) => migration.folderMillis));
     expect(migrations.at(-1)!.folderMillis).toBeGreaterThan(migrations.at(-2)!.folderMillis);
   });
@@ -138,5 +140,25 @@ describe("offline Dashboard and management migration integrity", () => {
     expect(statements).toMatch(/ADD COLUMN "position" integer/iu);
     expect(statements).toMatch(/UNIQUE INDEX "eval_dataset_data_position_uq"/iu);
     expect(statements).not.toMatch(/\b(UPDATE|INSERT|DELETE|TRUNCATE|DROP)\b/iu);
+  });
+
+  it("adds nullable Dataset-level order provenance without backfilling historical positions or changing any other facts", async () => {
+    const previous = await metadata("0011_snapshot.json");
+    const current = await metadata("0012_snapshot.json");
+    expect(current.prevId).toBe(previous.id);
+    expect(Object.keys(current.tables)).toEqual(Object.keys(previous.tables));
+    for (const [name, table] of Object.entries(previous.tables)) {
+      if (name !== "public.eval_datasets") expect(current.tables[name]).toEqual(table);
+    }
+    const before = previous.tables["public.eval_datasets"];
+    const after = current.tables["public.eval_datasets"];
+    const { original_order_intact: provenance, ...columns } = after.columns;
+    expect(provenance).toMatchObject({ type: "boolean", notNull: false });
+    expect(provenance).not.toHaveProperty("default"); // NULL = untracked 0011-era Dataset, not proof.
+    expect(columns).toEqual(before.columns);
+    expect({ ...after, columns: before.columns }).toEqual(before);
+    const statements = readMigrationFiles({ migrationsFolder })[12]!.sql.join(" ");
+    expect(statements).toMatch(/ALTER TABLE "eval_datasets" ADD COLUMN "original_order_intact" boolean/iu);
+    expect(statements).not.toMatch(/\b(UPDATE|INSERT|DELETE|TRUNCATE|DROP|DEFAULT)\b/iu);
   });
 });

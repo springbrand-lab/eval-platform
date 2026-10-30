@@ -7,7 +7,7 @@ import { createProjectService } from "../projects/service.js";
 import { bindProjectSamples } from "../projects/snapshot.js";
 import { createPostgresDatasetStore, readDatasetSnapshots } from "./dataset.js";
 import { createPostgresProjectStore } from "./project-store.js";
-import { data as dataTable, datasetData, managementOperations } from "./schema.js";
+import { data as dataTable, datasetData, datasets as datasetTable, managementOperations } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
 
 const connection = process.env.DATABASE_URL;
@@ -67,6 +67,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset upload order and bounded manage
   async function legacyMembers(datasetId: string) {
     // Models rows written by the already-applied migration prefix: no historical order was stored.
     await database.db.update(datasetData).set({ position: null }).where(eq(datasetData.datasetId, datasetId));
+    await database.db.execute(sql`UPDATE eval_datasets SET original_order_intact = NULL WHERE dataset_id = ${datasetId}`);
   }
 
   async function insertOldPreparation(datasetId: string, dataIds: readonly string[] = [FIRST, SECOND],
@@ -93,6 +94,8 @@ describe.skipIf(!connection)("PostgreSQL Dataset upload order and bounded manage
       .map(({ dataId, position }) => ({ dataId, position })).sort((a, b) => a.position! - b.position!))
       .toEqual([{ dataId: FIRST, position: 0 }, { dataId: SECOND, position: 1 }]);
     expect((await datasets.listData(id)).map((row) => row.dataId)).toEqual([FIRST, SECOND]);
+    expect((await database.db.select().from(datasetTable).where(eq(datasetTable.datasetId, id)))[0]?.originalOrderIntact)
+      .toBe(true);
     expect((await readDatasetSnapshots(database.db, OWNER, [id]))[0]?.data.map((row) => row.dataId))
       .toEqual([FIRST, SECOND]);
     expect(JSON.parse(await datasets.exportDataset(id, "json")).data.map((row: { dataId: string }) => row.dataId))
@@ -144,6 +147,7 @@ describe.skipIf(!connection)("PostgreSQL Dataset upload order and bounded manage
     expect((await datasets.listData(id)).map((row) => row.dataId)).toEqual([
       FIRST, SECOND, third.dataId, ...added.map((item) => item.dataId), detached.dataId,
     ]);
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("upload");
     await datasets.detachData(id, [FIRST]);
     await datasets.attachData(id, [FIRST]);
     expect((await datasets.listData(id)).map((row) => row.dataId)).toEqual([
@@ -152,7 +156,82 @@ describe.skipIf(!connection)("PostgreSQL Dataset upload order and bounded manage
     // Once new members are added, the old import cannot replace the complete membership set.
     await expect(datasets.importDataset(JSON.stringify(original), "json"))
       .rejects.toBeInstanceOf(DatasetIdentityConflictError);
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
+  });
+
+  it("invalidates the original file order after a real detach/reattach, without changing explicit Data ID selection", async () => {
+    const { datasets, members, projectStore, projects } = services();
+    const imported = await importPlanned();
+    const id = imported.dataset.datasetId;
     expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("upload");
+    await datasets.detachData(id, [THIRD]); // No-op must not invalidate the proof.
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("upload");
+
+    await datasets.detachData(id, [FIRST]);
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
+    await datasets.attachData(id, [FIRST]);
+    expect((await database.db.select().from(datasetData).where(eq(datasetData.datasetId, id)))
+      .map(({ dataId, position }) => ({ dataId, position })).sort((a, b) => a.position! - b.position!))
+      .toEqual([{ dataId: SECOND, position: 1 }, { dataId: FIRST, position: 2 }]);
+    expect(await members.listDatasetData(OWNER, id, 1, 5)).toMatchObject({
+      order: "unknown", total: 2, items: [{ dataId: SECOND }, { dataId: FIRST }],
+    });
+    expect((await database.db.select().from(datasetTable).where(eq(datasetTable.datasetId, id)))[0]?.originalOrderIntact)
+      .toBe(false);
+    await insertOldPreparation(id); // A completed plan cannot override changed known positions.
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
+
+    expect((await projectStore.readSelection([{ datasetId: id, dataIds: [FIRST] }]))[0]?.data.map(({ dataId }) => dataId))
+      .toEqual([FIRST]);
+    expect((await projects.reviewSelection({ datasetId: id, dataIds: [FIRST] })).data.map(({ dataId }) => dataId))
+      .toEqual([FIRST]);
+    expect((await projectStore.readSelection([{ datasetId: id }]))[0]?.data.map(({ dataId }) => dataId))
+      .toEqual([SECOND, FIRST]);
+    expect((await datasets.listData(id)).map(({ dataId }) => dataId)).toEqual([SECOND, FIRST]);
+  });
+
+  it("keeps provenance invalid after detach-all/readd when positions are contiguous again", async () => {
+    const { datasets, members, projectStore } = services();
+    const imported = await importPlanned();
+    const id = imported.dataset.datasetId;
+    await datasets.detachData(id, [FIRST, SECOND]);
+    expect((await members.listDatasetData(OWNER, id, 1, 5)).order).toBe("unknown");
+    await datasets.attachData(id, [SECOND, FIRST]);
+    expect((await database.db.select().from(datasetData).where(eq(datasetData.datasetId, id)))
+      .map(({ dataId, position }) => ({ dataId, position })).sort((a, b) => a.position! - b.position!))
+      .toEqual([{ dataId: SECOND, position: 0 }, { dataId: FIRST, position: 1 }]);
+    await insertOldPreparation(id);
+    expect(await members.listDatasetData(OWNER, id, 1, 5)).toMatchObject({
+      order: "unknown", total: 2, items: [{ dataId: SECOND }, { dataId: FIRST }],
+    });
+    expect((await projectStore.readSelection([{ datasetId: id, dataIds: [FIRST] }]))[0]?.data.map(({ dataId }) => dataId))
+      .toEqual([FIRST]);
+    expect((await database.db.select().from(datasetTable).where(eq(datasetTable.datasetId, id)))[0]?.originalOrderIntact)
+      .toBe(false);
+    // Even an identity-equal reimport after contiguous reattachment cannot repair lost provenance.
+    await datasets.detachData(id, [FIRST, SECOND]);
+    await datasets.attachData(id, [FIRST, SECOND]);
+    await expect(datasets.importPromptDataset(prompt, { datasetId: id, dataIds: [FIRST, SECOND] }))
+      .resolves.toEqual(imported);
+    expect(await members.listDatasetData(OWNER, id, 1, 5)).toMatchObject({
+      order: "unknown", total: 2, items: [{ dataId: FIRST }, { dataId: SECOND }],
+    });
+    expect((await database.db.select().from(datasetTable).where(eq(datasetTable.datasetId, id)))[0]?.originalOrderIntact)
+      .toBe(false);
+  });
+
+  it("proves appends in a newly created general Dataset until an actual member removal", async () => {
+    const { datasets, members } = services();
+    const id = (await datasets.createDataset({ name: "Manually assembled" })).datasetId;
+    const first = await datasets.createData({ userPrompt: "first" }, { datasetId: id });
+    const second = await datasets.createData({ userPrompt: "second" });
+    await datasets.attachData(id, [first.dataId, second.dataId, second.dataId]);
+    await datasets.detachData(id, []); // No-op retains the proof.
+    expect(await members.listDatasetData(OWNER, id, 1, 5)).toMatchObject({
+      order: "upload", total: 2, items: [{ dataId: first.dataId }, { dataId: second.dataId }],
+    });
+    expect((await database.db.select().from(datasetTable).where(eq(datasetTable.datasetId, id)))[0]?.originalOrderIntact)
+      .toBe(true);
   });
 
   it("recovers an old completed Moss plan only for the same owner and full membership", async () => {

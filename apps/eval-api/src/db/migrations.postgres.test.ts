@@ -6,6 +6,7 @@ import { compactResourceSnapshot } from "@eval-platform/eval-metrics";
 import { eq, sql } from "drizzle-orm";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createPostgresManagementStore } from "../eval-management/store.js";
 import { createPostgresResourceSnapshotReader } from "./attempt-resources.js";
 import { createPostgresMetricsSource } from "./metrics.js";
 import { migrateDatabase } from "./migrations.js";
@@ -113,7 +114,9 @@ describe.skipIf(!connection)("Dataset membership order migration", () => {
     const datasetId = crypto.randomUUID();
     const first = crypto.randomUUID();
     const second = crypto.randomUUID();
-    await db.insert(datasets).values({ datasetId, ownerUserId: "migration-test", kind: "general", name: "Legacy" });
+    // The fixture predates 0011/0012, so avoid issuing an INSERT with current-schema columns.
+    await db.execute(sql`INSERT INTO eval_datasets (dataset_id, owner_user_id, kind, name)
+      VALUES (${datasetId}, ${"migration-test"}, 'general', 'Legacy')`);
     await db.insert(data).values([
       { dataId: first, ownerUserId: "migration-test", content: { userPrompt: "first" } },
       { dataId: second, ownerUserId: "migration-test", content: { userPrompt: "second" } },
@@ -128,15 +131,71 @@ describe.skipIf(!connection)("Dataset membership order migration", () => {
     await migrateDatabase(db, { migrationsFolder });
     const history = (await db.execute(sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`)).rows;
     expect(history.slice(0, before.length)).toEqual(before);
-    expect(history).toHaveLength(12);
+    expect(history).toHaveLength(13);
     expect((await db.select().from(datasetData).where(eq(datasetData.datasetId, datasetId)))
       .map((row) => row.position)).toEqual([null, null]);
+    expect((await db.select().from(datasets).where(eq(datasets.datasetId, datasetId)))[0]?.originalOrderIntact)
+      .toBeNull();
     await db.update(datasetData).set({ position: 0 }).where(eq(datasetData.dataId, first));
     await expect(db.update(datasetData).set({ position: 0 }).where(eq(datasetData.dataId, second)))
       .rejects.toThrow(); // Same Dataset cannot have two known members at the same position.
     await expect(db.update(datasetData).set({ position: -1 }).where(eq(datasetData.dataId, second)))
       .rejects.toThrow();
     await db.update(datasetData).set({ position: 1 }).where(eq(datasetData.dataId, second));
+    await expect(migrateDatabase(db, { migrationsFolder })).resolves.toBeUndefined();
+    expect((await db.execute(sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`)).rows).toEqual(history);
+  }, 30_000);
+});
+
+describe.skipIf(!connection)("Dataset original-order provenance upgrade", () => {
+  let database: Awaited<ReturnType<typeof createTestDatabase>>;
+  let directory: string;
+
+  beforeAll(async () => {
+    directory = await mkdtemp(path.join(tmpdir(), "eval-dataset-provenance-upgrade-"));
+    await cp(migrationsFolder, directory, { recursive: true });
+    const journalPath = path.join(directory, "meta/_journal.json");
+    const journal = JSON.parse(await readFile(journalPath, "utf8"));
+    journal.entries = journal.entries.filter((entry: { idx: number }) => entry.idx <= 11);
+    await writeFile(journalPath, JSON.stringify(journal));
+    database = await createTestDatabase(connection!, (db) => migrate(db, { migrationsFolder: directory }));
+  }, 30_000);
+
+  afterAll(async () => {
+    if (database) await database.destroy();
+    if (directory) await rm(directory, { recursive: true, force: true });
+  }, 30_000);
+
+  it("keeps 0011 known positions but does not invent original-order provenance for existing Datasets", async () => {
+    const { db } = database;
+    const owner = "provenance-upgrade-test";
+    const datasetId = crypto.randomUUID();
+    const first = crypto.randomUUID();
+    const second = crypto.randomUUID();
+    // 0011 positions 0,1 are ambiguous: a prior detach-all/readd also produces 0,1.
+    await db.execute(sql`INSERT INTO eval_datasets (dataset_id, owner_user_id, kind, name)
+      VALUES (${datasetId}, ${owner}, 'general', 'Before upgrade')`);
+    await db.insert(data).values([
+      { dataId: first, ownerUserId: owner, content: { userPrompt: "first" } },
+      { dataId: second, ownerUserId: owner, content: { userPrompt: "second" } },
+    ]);
+    await db.execute(sql`INSERT INTO eval_dataset_data (owner_user_id, dataset_id, data_id, position)
+      VALUES (${owner}, ${datasetId}, ${second}, 0), (${owner}, ${datasetId}, ${first}, 1)`);
+    const before = (await db.execute(sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`)).rows;
+    expect(before).toHaveLength(12);
+
+    await migrateDatabase(db, { migrationsFolder });
+    const history = (await db.execute(sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`)).rows;
+    expect(history.slice(0, before.length)).toEqual(before);
+    expect(history).toHaveLength(13);
+    expect((await db.select().from(datasetData).where(eq(datasetData.datasetId, datasetId)))
+      .map(({ position }) => position).sort()).toEqual([0, 1]);
+    expect((await db.select().from(datasets).where(eq(datasets.datasetId, datasetId)))[0]?.originalOrderIntact)
+      .toBeNull();
+    const management = createPostgresManagementStore(db);
+    expect(await management.listDatasetData(owner, datasetId, 1, 5)).toMatchObject({
+      order: "unknown", total: 2, items: [{ dataId: second }, { dataId: first }],
+    });
     await expect(migrateDatabase(db, { migrationsFolder })).resolves.toBeUndefined();
     expect((await db.execute(sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`)).rows).toEqual(history);
   }, 30_000);
