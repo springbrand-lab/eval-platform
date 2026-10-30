@@ -1,5 +1,8 @@
 import { parsePromptDatasetUpload } from "@eval-platform/eval-dataset";
+import { EVAL_INITIAL_FILE_MAX_BYTES, EVAL_INITIALIZATION_MAX_BYTES } from "@springbrand/eval-harness";
 import { describe, expect, it, vi } from "vitest";
+import { IMPORT_LIMITS } from "../agent-imports/model.js";
+import { BundleResourceNotFoundError } from "../db/errors.js";
 import { AGENT, setupManagement, toolValue } from "./test-fixture.js";
 
 const encode = (text: string) => new TextEncoder().encode(text);
@@ -52,6 +55,14 @@ function preparedFixture() {
   });
   const materials = new Map<string, { bundle: { bundleId: string; name: string; description: string };
     resource: Record<string, unknown>; files: Array<{ path: string; mediaType: string; contentBase64: string }> }>();
+  const addExistingMaterial = (byteSize: number) => {
+    const bundleId = crypto.randomUUID();
+    const materialId = crypto.randomUUID();
+    materials.set(bundleId, { bundle: { bundleId, name: "Owned", description: "Existing material" },
+      resource: { bundleId, materialId, name: "Owned", description: "Existing material", byteSize }, files: [] });
+    return { bundleId, materialId };
+  };
+  const hideMaterial = (bundleId: string) => { materials.delete(bundleId); };
   const sessions = new Map<string, { bundle: { bundleId: string; name: string; description: string };
     resource: Record<string, unknown>; format: "json" | "jsonl"; content: string }>();
   let loseMaterialResponse = false;
@@ -77,7 +88,11 @@ function preparedFixture() {
     materialBundles: {
       create: createMaterials,
       get: async (id: string) => materials.get(id)?.bundle ?? null,
-      getResource: async (bundleId: string) => materials.get(bundleId)!.resource,
+      getResource: async (bundleId: string, materialId: string) => {
+        const resource = materials.get(bundleId)?.resource;
+        if (!resource || resource.materialId !== materialId) throw new BundleResourceNotFoundError("Material", materialId);
+        return resource;
+      },
       getFile: async (bundleId: string, _id: string, filePath: string) => {
         const file = materials.get(bundleId)!.files.find((entry) => entry.path === filePath)!;
         return { path: file.path, mediaType: file.mediaType, bytes: Buffer.from(file.contentBase64, "base64") };
@@ -92,7 +107,7 @@ function preparedFixture() {
       }),
     },
   });
-  return { app, input, importPromptDataset, bindData, createMaterials, createSessions,
+  return { app, input, importPromptDataset, bindData, createMaterials, createSessions, addExistingMaterial, hideMaterial,
     loseDatasetResponse: () => { loseDatasetResponse = true; },
     loseMaterialResponse: () => { loseMaterialResponse = true; },
     loseBindingResponse: () => { loseBindingResponse = true; } };
@@ -102,31 +117,147 @@ describe("durable management preparation", () => {
   it("imports raw Prompt rows first, binds Subject/Evaluator separately, and reuses shared Materials once", async () => {
     const f = preparedFixture();
     const result = await toolValue(await f.app.call("prepare_inputs", f.input));
-    expect(result).toMatchObject({ kind: "prepare", status: "completed", cases: [
+    expect(result).toEqual({ operationKey: f.input.operationKey, kind: "prepare", status: "completed",
+      datasetId: expect.any(String), totalCases: 2, resources: { total: 3, confirmed: 3 } });
+    const detail = await toolValue(await f.app.call("get_preparation", {
+      operationKey: f.input.operationKey, pageSize: 1,
+    }));
+    expect(detail).toMatchObject({ page: 1, pageSize: 1, totalCases: 2, cases: [
       { initialMaterials: [expect.objectContaining({ bundleId: expect.any(String), materialId: expect.any(String) })],
         evalInitialMaterials: [expect.objectContaining({ bundleId: expect.any(String), materialId: expect.any(String) })],
         initialSession: { bundleId: expect.any(String), sessionId: expect.any(String) } },
-      { initialMaterials: [expect.objectContaining({ materialId: expect.any(String) })], evalInitialMaterials: [] },
-    ] });
+    ], resources: { total: 3, confirmed: 3,
+      items: expect.arrayContaining([{ kind: "session", status: "confirmed",
+        bundleId: expect.any(String), resourceId: expect.any(String) }]) } });
     const args = f.importPromptDataset.mock.calls[0]!;
     expect(args[0].content).not.toContain("initialMaterials");
-    expect(args[1].dataIds).toEqual((result.cases as Array<{ dataId: string }>).map((row) => row.dataId));
+    expect(args[1].dataIds[0]).toBe((detail.cases as Array<{ dataId: string }>)[0]!.dataId);
     expect(f.createMaterials).toHaveBeenCalledTimes(2);
     expect(f.createSessions).toHaveBeenCalledTimes(1);
     expect(f.bindData).toHaveBeenCalledTimes(2);
-    expect(result).toMatchObject({ resources: { total: 3, confirmed: 3,
-      items: expect.arrayContaining([{ kind: "session", status: "confirmed",
-        bundleId: expect.any(String), resourceId: expect.any(String) }]) } });
     expect(f.app.services.projects.create).not.toHaveBeenCalled();
     expect(JSON.stringify(result)).not.toContain("private task");
     const second = await toolValue(await f.app.call("get_preparation", {
       operationKey: f.input.operationKey, page: 2, pageSize: 1,
     }));
     expect(second).toMatchObject({ page: 2, pageSize: 1, totalCases: 2,
-      cases: [{ dataId: (result.cases as Array<{ dataId: string }>)[1]!.dataId }] });
+      cases: [{ dataId: args[1].dataIds[1] }] });
     expect(await toolValue(await f.app.call("prepare_inputs", f.input))).toEqual(result);
     expect(f.importPromptDataset).toHaveBeenCalledTimes(1);
     expect(f.createMaterials).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns a compact exact-replay receipt for five cases with 85 distinct resources, leaving detail to one-case pages", async () => {
+    const f = preparedFixture();
+    const cases = Array.from({ length: 5 }, (_, index) => {
+      const materials = (role: string) => Array.from({ length: 8 }, (_, item) => ({
+        uploadRef: f.app.managed.addUpload("material", `${role}-${index}-${item}.txt`, encode("small"), "text/plain"),
+      }));
+      return {
+        initialMaterials: materials("subject"),
+        evalInitialMaterials: materials("evaluator"),
+        initialSession: { uploadRef: f.app.managed.addUpload("session", `session-${index}.jsonl`, session),
+          format: "jsonl" as const },
+      };
+    });
+    const promptUploadRef = f.app.managed.addUpload("prompt", "five.jsonl",
+      encode(Array.from({ length: cases.length }, (_, index) => JSON.stringify(promptRow(`case-${index}`))).join("\n")));
+    const input = { ...f.input, promptUploadRef, cases, operationKey: "prepare-85" };
+    const refs = new Set([promptUploadRef, ...cases.flatMap((row) => [
+      ...row.initialMaterials, ...row.evalInitialMaterials, row.initialSession,
+    ].map((item) => item.uploadRef))]);
+    expect(refs.size).toBe(86); // Within the existing 101-ref bound.
+    expect([...refs].reduce((total, ref) => total + f.app.managed.uploads.get(ref)!.byteSize, 0))
+      .toBeLessThan(IMPORT_LIMITS.totalBytes);
+
+    const result = await toolValue(await f.app.call("prepare_inputs", input));
+    expect(result).toEqual({ operationKey: input.operationKey, kind: "prepare", status: "completed",
+      datasetId: expect.any(String), totalCases: 5, resources: { total: 85, confirmed: 85 } });
+    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(5 * 1024);
+    expect(JSON.stringify(result)).not.toMatch(/"cases"|"items"|"uploadRef"|"initialMaterials"/u);
+    const detail = await toolValue(await f.app.call("get_preparation", { operationKey: input.operationKey, pageSize: 1 }));
+    expect(detail).toMatchObject({ page: 1, pageSize: 1, totalCases: 5, cases: [expect.objectContaining({
+      initialMaterials: expect.any(Array), evalInitialMaterials: expect.any(Array),
+    })], resources: { total: 85, confirmed: 85, items: expect.any(Array) } });
+    expect((detail.cases as unknown[]).length).toBe(1);
+    expect((detail.resources as { items: unknown[] }).items.length).toBe(17);
+    expect(await toolValue(await f.app.call("prepare_inputs", input))).toEqual(result);
+    expect(f.importPromptDataset).toHaveBeenCalledTimes(1);
+    expect(f.createMaterials).toHaveBeenCalledTimes(80);
+    expect(f.createSessions).toHaveBeenCalledTimes(5);
+  });
+
+  it.each(["initialMaterials", "evalInitialMaterials"] as const)(
+    "rejects five 5 MB existing+uploaded Materials in one %s before any operation or Bundle write", async (field) => {
+      const f = preparedFixture();
+      const existing = Array.from({ length: 2 }, () => f.addExistingMaterial(EVAL_INITIAL_FILE_MAX_BYTES));
+      const uploaded = Array.from({ length: 3 }, (_, index) => ({
+        uploadRef: f.app.managed.addUpload("material", `${field}-${index}.bin`,
+          new Uint8Array(EVAL_INITIAL_FILE_MAX_BYTES), "application/octet-stream"),
+      }));
+      const promptUploadRef = f.app.managed.addUpload("prompt", "budget.jsonl", encode(JSON.stringify(promptRow("budget"))));
+      const input = { ...f.input, operationKey: `over-budget-${field}`, promptUploadRef,
+        cases: [{ [field]: [...existing, ...uploaded] }] };
+      expect((existing.length + uploaded.length) * EVAL_INITIAL_FILE_MAX_BYTES).toBeGreaterThan(EVAL_INITIALIZATION_MAX_BYTES);
+
+      const result = await (await f.app.call("prepare_inputs", input)).json();
+      expect(result).toMatchObject({ result: { isError: true,
+        content: [{ text: expect.stringContaining("BUNDLE_FILE_TOO_LARGE") }] } });
+      expect(f.app.managed.operations.size).toBe(0);
+      expect(f.importPromptDataset).not.toHaveBeenCalled();
+      expect(f.createMaterials).not.toHaveBeenCalled();
+      expect(f.createSessions).not.toHaveBeenCalled();
+      expect(f.bindData).not.toHaveBeenCalled();
+    },
+  );
+
+  it("allows exactly 20 MB of Materials independently for Subject and Evaluator", async () => {
+    const f = preparedFixture();
+    const existing = Array.from({ length: 2 }, () => f.addExistingMaterial(EVAL_INITIAL_FILE_MAX_BYTES));
+    const uploaded = Array.from({ length: 2 }, (_, index) => ({
+      uploadRef: f.app.managed.addUpload("material", `allowed-${index}.bin`,
+        new Uint8Array(EVAL_INITIAL_FILE_MAX_BYTES), "application/octet-stream"),
+    }));
+    const promptUploadRef = f.app.managed.addUpload("prompt", "budget.jsonl", encode(JSON.stringify(promptRow("budget"))));
+    const selections = [...existing, ...uploaded];
+    const input = { ...f.input, operationKey: "within-budget", promptUploadRef,
+      cases: [{ initialMaterials: selections, evalInitialMaterials: selections }] };
+    expect(selections.length * EVAL_INITIAL_FILE_MAX_BYTES).toBe(EVAL_INITIALIZATION_MAX_BYTES);
+    expect(await toolValue(await f.app.call("prepare_inputs", input))).toMatchObject({
+      kind: "prepare", status: "completed", totalCases: 1, resources: { total: 2, confirmed: 2 },
+    });
+    expect(f.createMaterials).toHaveBeenCalledTimes(2);
+    expect(f.bindData).toHaveBeenCalledTimes(1);
+  });
+
+  it("still requires an owned existing Material before beginning the operation", async () => {
+    const f = preparedFixture();
+    const promptUploadRef = f.app.managed.addUpload("prompt", "foreign.jsonl", encode(JSON.stringify(promptRow("foreign"))));
+    const input = { ...f.input, operationKey: "foreign-material", promptUploadRef,
+      cases: [{ initialMaterials: [{ bundleId: crypto.randomUUID(), materialId: crypto.randomUUID() }] }] };
+    const response = await (await f.app.call("prepare_inputs", input)).json();
+    expect(response).toMatchObject({ result: { isError: true,
+      content: [{ text: expect.stringContaining("BUNDLE_RESOURCE_NOT_FOUND") }] } });
+    expect(f.app.managed.operations.size).toBe(0);
+    expect(f.importPromptDataset).not.toHaveBeenCalled();
+    expect(f.createMaterials).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a stored same-key binding even when its previously owned Material is later deleted", async () => {
+    const f = preparedFixture();
+    const material = f.addExistingMaterial(5);
+    const promptUploadRef = f.app.managed.addUpload("prompt", "retained.jsonl", encode(JSON.stringify(promptRow("retained"))));
+    const input = { ...f.input, operationKey: "retained-binding", promptUploadRef,
+      cases: [{ initialMaterials: [material] }] };
+    const completed = await toolValue(await f.app.call("prepare_inputs", input));
+    const operation = f.app.managed.operations.get(input.operationKey)!;
+    // All writes committed, but the completion response/status was uncertain.
+    f.app.managed.operations.set(input.operationKey, { ...operation, status: "pending" });
+    f.hideMaterial(material.bundleId);
+
+    expect(await toolValue(await f.app.call("prepare_inputs", input))).toEqual(completed);
+    expect(f.importPromptDataset).toHaveBeenCalledTimes(1);
+    expect(f.bindData).toHaveBeenCalledTimes(1);
   });
 
   it("reconciles a committed Dataset, Material and Data binding after lost responses without another write", async () => {

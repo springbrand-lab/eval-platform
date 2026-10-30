@@ -43,7 +43,7 @@ Content limits live only in `apps/eval-api/src/limits.ts`, except the Material a
 | `RUN_TARGET_IDS` | 10,000 | Most Data one Project binds; most IDs in one Run selector; most IDs in one Run's `targets`; most entries in `dataIds`, `datasets` and `samplingCounts` on creation |
 | `SAMPLING_COUNT_MAX` | 100 | Largest `samplingCount` per Data |
 | `IDENTIFIER_CHARS` | 512 | Longest Runtime ID or idempotency key |
-| `DATASET_DOCUMENT_BYTES`, `PROMPT_DATASET_FILE_BYTES` | 10 MB each | Dataset document and Prompt Dataset file |
+| `DATASET_DOCUMENT_BYTES`, `PROMPT_DATASET_FILE_BYTES` | 20 MiB (20,971,520 bytes) each | Dataset document and Prompt Dataset file; the Prompt limit matches `ImportStaging.fileBytes` |
 | `EVAL_INITIAL_FILE_MAX_BYTES`, `EVAL_INITIALIZATION_MAX_BYTES` (SP) | 5 MB, 20 MB | One Material file; SP's whole-initialization budget, applied to one Material and to the Materials one Data field binds |
 | `EVAL_MATERIAL_MAX_FILES` (SP) | 500 | Files in one Material |
 | `EVAL_SESSION_CONTENT_MAX_CHARS`, `EVAL_SESSION_MAX_ENTRIES` (SP) | 2,000,000, 10,000 | Characters and canonical entries in one Session |
@@ -65,12 +65,14 @@ Content limits live only in `apps/eval-api/src/limits.ts`, except the Material a
 | `SESSION_BODY_BYTES` | 12,004,096 | Session upload |
 | `MATERIAL_BODY_BYTES` | 28,718,764 | Material upload |
 | `ZIP_BODY_BYTES` | 50,004,096 | Material/Session Bundle creation and ZIP import |
-| `PROMPT_IMPORT_BODY_BYTES` | 60,004,096 | Prompt Dataset upload |
-| `DATASET_DOCUMENT_BYTES` | 10,000,000 | Raw Dataset document import |
+| `PROMPT_IMPORT_BODY_BYTES` | 125,833,216 | Prompt Dataset and Data case-list JSON upload (worst-case escaping of a 20 MiB file) |
+| `DATASET_DOCUMENT_BYTES` | 20,971,520 | Raw Dataset document import |
 
 ## Trusted management Interface (outside `/api/*`)
 
 `POST /mcp/eval-management` uses the independent management Bearer and fixed owner lease; it advertises sixteen tools, including `create_output_schema({operationKey,name,description,content})`. Only the trusted Takt backend sends Feishu JSON Schema **text** (bounded by `OUTPUT_SCHEMA_BYTES`) in the MCP request; it never places the content or Bearer in model context or URL. The tool returns only `{outputSchemaId,name}`. Existing owner-scoped output Schema catalog and durable management operation/stage receipts protect same-key retries and unknown outcomes by planned ID; distinct keys retain the existing HTTP behavior that permits duplicate Schema names. Moss must use the receipt ID, never infer one from a name or retry an unknown result under a new key. Other MCP requests remain limited to 1 MB; only this tool has a derived JSON-escape allowance. Project/Dataset `get_metrics` defaults to compact `section:"overview"`; `samples`, `tools` (one required role) and `fields` are separate pages. `list_options({category:"project_schema_detail",projectId})` reads the Project-frozen plan-digest-checked Schema, including a deleted catalog record. See the full [management MCP Interface](../apps/eval-api/README.md#management-mcp-interface).
+
+`POST /mcp/eval-management/uploads` accepts a verified Prompt (`X-Upload-Kind: prompt`) up to the existing staging file ceiling of **20 MiB (20,971,520 bytes)**, inclusive; HTTP Prompt and case-list imports use the same content limit. A successful `prepare_inputs` returns only `{operationKey,kind:"prepare",status,datasetId,totalCases,resources?:{total,confirmed}}`, not a case/resource first page. Use `get_preparation({operationKey,pageSize:1})` for paginated binding and resource stage details. Existing plus uploaded Materials are checked for each case and each Subject/Evaluator field against SP's separate 20,000,000-byte initialization budget **before** starting a new preparation or writing its first Dataset/Bundle; same-key replay uses saved receipts, and the Material file/field and Session limits do not change.
 
 `GET /mcp/eval-management/documents?kind=project_schema&projectId=<id>` reuses the existing read-only, management-Bearer JSONL document route. The frozen plan's `projectId,outputSchemaId,digest` are top-level manifest fields, alongside the displayed-document byte length/SHA-256; owner, plan reference and content are rechecked before its terminal manifest. No Run selector or alternate Schema store is involved. The complete sanitized document is limited to 10 MiB; small MCP pages still have their independent 2,048-byte/4,800-byte budgets.
 
@@ -383,7 +385,7 @@ Datasets and Data are the user's editable source catalog; Projects copy what the
 | `DELETE /api/datasets/{datasetId}/data` | `{dataIds}` / `204` | `404 DATASET_NOT_FOUND` |
 | `POST /api/datasets/import?format=json\|yaml` | Raw document text / `201 {dataset, data}` | `400 DATASET_INPUT_INVALID`, `REQUEST_INVALID_INPUT`; `404 BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`); `409 DATASET_IDENTITY_CONFLICT` |
 | `GET /api/datasets/{datasetId}/export?format=json\|yaml` | Document text with `application/json` or `application/yaml` | `404 DATASET_NOT_FOUND` |
-| `POST /api/datasets/prompt-import` | `{name, description, format:"json"\|"jsonl", content}` / `201 {dataset, data}`; see [Dataset upload](eval-dataset-upload.md) | `400 DATASET_INPUT_INVALID` |
+| `POST /api/datasets/prompt-import` | `{name, description, format:"json"\|"jsonl", content}` (content at most 20 MiB) / `201 {dataset, data}`; see [Dataset upload](eval-dataset-upload.md) | `400 DATASET_INPUT_INVALID` |
 | `GET /api/data?datasetId=` | Non-deleted `Data[]`, optionally one Dataset's members | `404 DATASET_NOT_FOUND` |
 | `POST /api/data?datasetId=...` | Data input / `201 Data`; optional Dataset binding is atomic with creation | `400 DATASET_INPUT_INVALID`; `404 DATASET_NOT_FOUND`, `BUNDLE_RESOURCE_NOT_FOUND`; `413 BUNDLE_FILE_TOO_LARGE` (one field's Materials together over `EVAL_INITIALIZATION_MAX_BYTES`); `409 DATASET_IDENTITY_CONFLICT` |
 | `GET /api/data/{dataId}` | `Data` | `404 DATA_NOT_FOUND` |

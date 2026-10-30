@@ -5,13 +5,15 @@ import {
   EVAL_SESSION_CONTENT_MAX_CHARS,
 } from "@springbrand/eval-harness";
 import type { EvalInputLimits } from "@eval-platform/eval-contracts";
+import { IMPORT_LIMITS } from "./agent-imports/model.js";
 
 /**
  * Single source for Eval API content limits. Request body limits are derived from these values
  * rather than restated; validation and HTTP routing import the same constants.
  */
-export const DATASET_DOCUMENT_BYTES = 10_000_000;
-export const PROMPT_DATASET_FILE_BYTES = 10_000_000;
+/** The Prompt file must fit the same per-file ceiling as its private ImportStaging upload. */
+export const PROMPT_DATASET_FILE_BYTES = IMPORT_LIMITS.fileBytes;
+export const DATASET_DOCUMENT_BYTES = PROMPT_DATASET_FILE_BYTES;
 export const OUTPUT_SCHEMA_BYTES = 1_000_000;
 /** Most error details one Bundle content validation or ZIP import reports. */
 export const BUNDLE_ERROR_DETAILS = 100;

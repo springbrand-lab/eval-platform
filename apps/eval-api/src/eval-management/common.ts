@@ -81,13 +81,101 @@ export function redactLiteral(value: string, key = "", privatePrompts: readonly 
   return { value: redacted ? REDACTED : value, redacted };
 }
 
+/** Only selected Evaluation reason/explanation strings may retain text surrounding a sensitive literal. */
+function redactExplanation(value: string, privatePrompts: readonly string[]) {
+  const withheld = redactLiteral(value, "", privatePrompts);
+  if (!withheld.redacted) return withheld;
+
+  const spans: { start: number; end: number }[] = [];
+  const addSpan = (start: number, end: number) => {
+    // Too many separate matches are not worth buffering/expanding into a
+    // huge displayed document. The caller falls back to the whole-value marker.
+    if (spans.length >= 1_024) return false;
+    spans.push({ start, end });
+    return true;
+  };
+  const throughWord = (start: number) => {
+    let end = start;
+    while (end < value.length && !/\s/u.test(value[end]!)) end++;
+    return end;
+  };
+  // Use the *same* literal detector as the whole-value policy and Takt. Restart
+  // just after each match's start so overlapping "apiKey: Bearer TOKEN" or
+  // "password: -----BEGIN ... PRIVATE KEY-----" cannot hide a second match.
+  const literal = new RegExp(SENSITIVE_SOURCE_LITERAL.source, "giu");
+  let coveredWordThrough = 0;
+  for (let match = literal.exec(value); match !== null; match = literal.exec(value)) {
+    const start = match.index;
+    literal.lastIndex = start + 1;
+    // A PEM header cannot delimit its key body; a huge credential match is
+    // likewise not worth rescanning for overlaps. Withhold the whole value.
+    if (/^-----BEGIN/iu.test(match[0]) || match[0].length > 8_192) return withheld;
+    const urlPrefix = /^(?:mailto|data):|^www\./iu.test(match[0]);
+    const end = start + match[0].length;
+    if (urlPrefix && (end === value.length || /\s/u.test(value[end]!))) return withheld;
+    // The short AKIA/sk/... matches may precede another part of the same
+    // non-whitespace credential. Mask the complete word, not just its prefix.
+    const wordLiteral = urlPrefix || !/[\s:=]/u.test(match[0]);
+    if (wordLiteral && start < coveredWordThrough) continue;
+    const through = wordLiteral ? throughWord(end) : end;
+    if (wordLiteral) coveredWordThrough = through;
+    if (!addSpan(start, through)) return withheld;
+  }
+  // As with hasSourceUrl, scan from each :// delimiter rather than running an
+  // unbounded forward scheme regex over a long benign explanation.
+  let coveredThrough = 0;
+  for (let delimiter = value.indexOf("://"); delimiter !== -1;
+    delimiter = value.indexOf("://", delimiter + 3)) {
+    if (delimiter + 3 === value.length || /\s/u.test(value[delimiter + 3]!)) return withheld;
+    if (delimiter < coveredThrough) continue;
+    let start = delimiter, hasLetter = false;
+    while (start > 0 && URL_SCHEME_CHAR.test(value[start - 1]!)) {
+      start--;
+      hasLetter ||= URL_SCHEME_START.test(value[start]!);
+    }
+    if (!hasLetter) continue;
+    const end = throughWord(delimiter + 3);
+    if (!addSpan(start, end)) return withheld;
+    coveredThrough = end;
+  }
+  for (const prompt of privatePrompts) {
+    if (!prompt.length) continue;
+    for (let start = value.indexOf(prompt); start !== -1;
+      start = value.indexOf(prompt, start + 1)) {
+      if (!addSpan(start, start + prompt.length)) return withheld;
+    }
+  }
+  if (!spans.length) return withheld; // A detector fired but no complete span was found.
+  spans.sort((left, right) => left.start - right.start || left.end - right.end);
+  let scrubbed = "", offset = 0, start = spans[0]!.start, end = spans[0]!.end;
+  for (let index = 1; index < spans.length; index++) {
+    const next = spans[index]!;
+    if (next.start <= end) {
+      end = Math.max(end, next.end);
+    } else {
+      scrubbed += value.slice(offset, start) + REDACTED;
+      offset = end;
+      start = next.start;
+      end = next.end;
+    }
+  }
+  scrubbed += value.slice(offset, start) + REDACTED + value.slice(end);
+  // Takt's unsafeEvalLiteral uses the same URL/literal rules. Never present a
+  // partial scrub as safe if those checks or an exact private prompt still match.
+  return redactLiteral(scrubbed, "", privatePrompts).redacted
+    ? withheld : { value: scrubbed, redacted: true };
+}
+
 /**
  * Validate and prepare the *whole* canonical displayed JSON once per read.
  * Never expose a partial document when a key itself contains a URL/secret/prompt.
  * Values of safe sensitive keys (including "url"/"token"/"prompt") are masked at
- * any type, while ordinary field identities and safe values remain available.
+ * any type. Only an explicitly selected Evaluation may preserve safe text
+ * around literals inside its business reason/explanation string values.
  */
-export function displayJson(value: unknown, privatePrompts: readonly string[] = []): DisplayJson {
+export function displayJson(
+  value: unknown, privatePrompts: readonly string[] = [], scope?: "evaluation_result",
+): DisplayJson {
   const visited = new WeakSet<object>();
   let sourceRedacted = false;
   let unsafeFieldName = false;
@@ -96,7 +184,9 @@ export function displayJson(value: unknown, privatePrompts: readonly string[] = 
     if (depth > 512) throw invalid();
     if (item === null || typeof item === "boolean") return item;
     if (typeof item === "string") {
-      const safe = redactLiteral(item, key, privatePrompts);
+      const safe = scope === "evaluation_result" && (key === "reason" || key === "explanation")
+        && !sensitiveJsonKey(key)
+        ? redactExplanation(item, privatePrompts) : redactLiteral(item, key, privatePrompts);
       sourceRedacted ||= safe.redacted;
       return safe.value;
     }
@@ -151,8 +241,9 @@ export function displayJson(value: unknown, privatePrompts: readonly string[] = 
 export function jsonChunk(
   value: unknown, offset: number, privatePrompts: readonly string[] = [],
   fits?: (chunk: JsonChunk, sourceRedacted: boolean) => boolean,
+  scope?: "evaluation_result",
 ): JsonChunkResult {
-  const { bytes: encoded, display, sourceRedacted } = displayJson(value, privatePrompts);
+  const { bytes: encoded, display, sourceRedacted } = displayJson(value, privatePrompts, scope);
   if (!encoded || !display) {
     if (offset !== 0) throw new HttpError("REQUEST_INVALID_INPUT", "The source has no safe JSON continuation");
     return { chunk: null, sourceRedacted };

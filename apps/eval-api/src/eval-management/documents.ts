@@ -79,7 +79,8 @@ async function prepare(c: Context<AppBindings>, input: Query): Promise<{
     };
   }
   const owned = await readOwnedEvaluationResult(c, input);
-  const document = owned.hasParsedDocument ? displayJson(owned.output.rawJson, owned.privatePrompts) : EMPTY;
+  const document = owned.hasParsedDocument
+    ? displayJson(owned.output.rawJson, owned.privatePrompts, owned.displayScope) : EMPTY;
   return {
     document, identity: {
       kind: input.kind, projectId: input.projectId, samplingId: input.samplingId, evaluationId: input.evaluationId,
@@ -89,7 +90,8 @@ async function prepare(c: Context<AppBindings>, input: Query): Promise<{
     },
     async recheck() {
       const current = await readOwnedEvaluationResult(c, input);
-      const after = current.hasParsedDocument ? displayJson(current.output.rawJson, current.privatePrompts) : EMPTY;
+      const after = current.hasParsedDocument
+        ? displayJson(current.output.rawJson, current.privatePrompts, current.displayScope) : EMPTY;
       if (current.hasParsedDocument !== owned.hasParsedDocument
         || current.output.content !== owned.output.content || current.output.contentHash !== owned.output.contentHash
         || current.output.outputStatus !== owned.output.outputStatus

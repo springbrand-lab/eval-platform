@@ -845,6 +845,38 @@ describe("run-scoped management Metrics", () => {
       .toMatchObject({ sourceRedacted: true, rawJsonChunk: null });
   });
 
+  it("keeps selected business reasoning while masking whole literals and private prompt echoes", async () => {
+    const app = setupManagement();
+    const userPrompt = detail.projectSample.data.userPrompt;
+    const evalPrompt = "SYNTHETIC_PRIVATE_EVAL_PROMPT";
+    const rawJson = { score: 40,
+      reason: "Because the answer missed https://example.test/path?token=SYNTHETIC but got the score right.",
+      checks: [{ explanation: `The model echoed ${userPrompt} and ${evalPrompt} and Bearer SYNTHETIC_CREDENTIAL; the rest was correct.`,
+        reason: "No additional issue." }],
+      other: "Evidence at https://example.test/other?token=SECOND",
+    };
+    app.services.metrics.getSamplingDetail.mockResolvedValueOnce({
+      ...withJson(rawJson), projectSample: { ...detail.projectSample,
+        data: { ...detail.projectSample.data, evalPrompt } },
+    });
+    const result = selected(await toolValue(await app.call("get_metrics", chosen))).evaluationResult;
+    const displayed = { score: 40,
+      reason: "Because the answer missed [REDACTED: sensitive source content] but got the score right.",
+      checks: [{ explanation: "The model echoed [REDACTED: sensitive source content] and [REDACTED: sensitive source content] and [REDACTED: sensitive source content] the rest was correct.",
+        reason: "No additional issue." }],
+      other: "[REDACTED: sensitive source content]",
+    };
+    expect(result).toMatchObject({ sourceRedacted: true, contentHash: "b".repeat(64) });
+    expect(JSON.parse(result.rawJsonChunk!.text)).toEqual(displayed);
+    const canonical = JSON.stringify(displayed);
+    expect(result.rawJsonChunk).toMatchObject({ totalBytes: Buffer.byteLength(canonical, "utf8"),
+      sha256: createHash("sha256").update(canonical).digest("hex"), nextOffset: null });
+    expect(JSON.stringify(result)).not.toMatch(/example\.test|SYNTHETIC|private Subject prompt/u);
+    expect(app.services.metrics.getSamplingDetail).toHaveBeenCalledExactlyOnceWith({
+      projectId: project.projectId, samplingId: "sampling-1",
+    });
+  });
+
   it("preserves safe url/token/prompt field names with masked values across every result chunk", async () => {
     const app = setupManagement();
     const rawJson = { url: "https://private.example/result", token: 123456789,

@@ -211,6 +211,7 @@ export async function readOwnedEvaluationResult(
   }
   return { view, output, contentHash: hash?.value ?? null, hashRedacted: hash?.redacted ?? false,
     hasParsedDocument,
+    displayScope: "evaluation_result" as const,
     privatePrompts: [view.projectSample.data.userPrompt, view.projectSample.data.evalPrompt]
       .filter((prompt): prompt is string => typeof prompt === "string") };
 }
@@ -295,7 +296,7 @@ export async function getMetrics(c: Context<AppBindings>, input: Query) {
     : await readOwnedEvaluationResult(c, { projectId, samplingId, runId, evaluationId });
   const view = selected?.view ?? await ownedSampling(c, { projectId, samplingId, runId });
   if (evaluationId !== undefined) {
-    const { output, contentHash, hashRedacted, hasParsedDocument, privatePrompts } = selected!;
+    const { output, contentHash, hashRedacted, hasParsedDocument, privatePrompts, displayScope } = selected!;
     const modelResult = ({ chunk, sourceRedacted, streamRequired, display }: JsonChunkResult) => ({
       scope, project: project(view.project), ...runScope,
       projectSample: { projectSampleId: view.projectSample.projectSampleId, dataId: view.projectSample.dataId },
@@ -309,7 +310,7 @@ export async function getMetrics(c: Context<AppBindings>, input: Query) {
     });
     const result: JsonChunkResult = hasParsedDocument
       ? jsonChunk(output.rawJson, input.resultOffset ?? 0, privatePrompts,
-        (chunk, sourceRedacted) => fitsTaktResult(modelResult({ chunk, sourceRedacted })))
+        (chunk, sourceRedacted) => fitsTaktResult(modelResult({ chunk, sourceRedacted })), displayScope)
       : { chunk: null, sourceRedacted: false };
     if (result.chunk === null && !result.streamRequired && (input.resultOffset ?? 0) !== 0) {
       throw new HttpError("REQUEST_INVALID_INPUT", "This Evaluation has no result continuation");

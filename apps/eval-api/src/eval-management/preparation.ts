@@ -5,11 +5,11 @@ import { parsePromptDatasetUpload, type InitialMaterialsRef, type InitialSession
 import type { Context } from "hono";
 import { BundleResourceNotFoundError } from "../db/errors.js";
 import type { AppBindings } from "../lib/types.js";
-import { validateMaterialFiles, validateSessionContent } from "../sp/bundle-content.js";
+import { requireInitializationBudget, validateMaterialFiles, validateSessionContent } from "../sp/bundle-content.js";
 import { record, short } from "./common.js";
 import type { PreparationInput, PreparationPlan, PlannedAsset } from "./preparation-plan.js";
 import { planPreparation, preparationUploads } from "./preparation-plan.js";
-import type { ManagementStore, OperationReceipt } from "./store.js";
+import type { ManagementStore, OperationReceipt, UploadReceipt } from "./store.js";
 
 const conflict = () => new HttpError("EVAL_SP_CONFLICT", "The preparation no longer matches its planned resources");
 const unavailable = () => new HttpError("INTERNAL_ERROR", "Management preparation has no durable store");
@@ -95,6 +95,33 @@ function sessionRef(plan: PreparationPlan,
   const asset = assetOf(plan, selection.uploadRef, "session");
   if (asset.format !== selection.format) throw conflict();
   return { bundleId: asset.bundleId, sessionId: asset.resourceId };
+}
+
+/** Check each new preparation's Subject/Evaluator fields before its first operation or catalog write. */
+async function preflightMaterials(c: Context<AppBindings>, input: PreparationInput,
+  uploads: ReadonlyMap<string, UploadReceipt>): Promise<void> {
+  const ownedBytes = new Map<string, number>();
+  for (const row of input.cases) {
+    for (const field of ["initialMaterials", "evalInitialMaterials"] as const) {
+      let bytes = 0;
+      for (const selection of row[field] ?? []) {
+        if ("uploadRef" in selection) {
+          const upload = uploads.get(selection.uploadRef);
+          if (!upload || upload.kind !== "material") throw conflict();
+          bytes += upload.byteSize;
+        } else {
+          const id = `${selection.bundleId}:${selection.materialId}`;
+          let size = ownedBytes.get(id);
+          if (size === undefined) {
+            size = (await c.var.services.materialBundles.getResource(selection.bundleId, selection.materialId)).byteSize;
+            ownedBytes.set(id, size);
+          }
+          bytes += size;
+        }
+        requireInitializationBudget(bytes, field);
+      }
+    }
+  }
 }
 
 async function promptContent(c: Context<AppBindings>, plan: PreparationPlan): Promise<string> {
@@ -214,18 +241,13 @@ export async function prepareInputs(c: Context<AppBindings>, input: PreparationI
   const { uploads, fingerprint } = await preparationUploads(owner, input, files);
   const existing = await store.get(owner, input.operationKey);
   if (existing && (existing.kind !== "prepare" || existing.fingerprint !== fingerprint)) throw conflict();
+  // Preflight before the first begin/write. A pending same-key replay uses its saved plan and receipts:
+  // an already-bound owned Material can since have been soft-deleted without invalidating recovery.
+  if (!existing) await preflightMaterials(c, input, uploads);
   const plan = existing ? existing.plan as unknown as PreparationPlan : await planPreparation(owner, input, files, uploads);
   if (!existing) {
     const checked = new Set<string>();
     for (const row of plan.cases) {
-      for (const resource of [...(row.initialMaterials ?? []), ...(row.evalInitialMaterials ?? [])]) {
-        if ("uploadRef" in resource) continue;
-        const id = `material:${resource.bundleId}:${resource.materialId}`;
-        if (!checked.has(id)) {
-          await c.var.services.materialBundles.getResource(resource.bundleId, resource.materialId);
-          checked.add(id);
-        }
-      }
       const session = row.initialSession;
       if (session && !("uploadRef" in session)) {
         const id = `session:${session.bundleId}:${session.sessionId}`;
@@ -243,5 +265,12 @@ export async function prepareInputs(c: Context<AppBindings>, input: PreparationI
     for (const index of plan.cases.keys()) await bindCase(c, plan, index, store, input.operationKey);
     await store.complete(owner, input.operationKey);
   }
-  return getPreparation(c, input.operationKey);
+  // The paginated case/resource receipts remain available only through get_preparation.
+  const receipt = await getPreparation(c, input.operationKey, 1, 1);
+  if (receipt.kind !== "prepare") throw conflict();
+  return {
+    operationKey: receipt.operationKey, kind: "prepare", status: receipt.status,
+    datasetId: receipt.datasetId, totalCases: receipt.totalCases,
+    resources: { total: receipt.resources.total, confirmed: receipt.resources.confirmed },
+  };
 }
