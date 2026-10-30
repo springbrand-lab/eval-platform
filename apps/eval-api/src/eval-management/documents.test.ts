@@ -162,6 +162,33 @@ describe("read-only trusted one-shot JSON documents", () => {
     expect(await incomplete(await get(app, projectSchemaQuery))).not.toContain('"type":"manifest"');
   });
 
+  it("keeps whole-value Schema redaction for both active catalog and Project-frozen documents", async () => {
+    const app = setupManagement();
+    const schema = { type: "object",
+      reason: "Because https://example.test/path?token=SYNTHETIC is part of this Schema",
+      properties: { score: { type: "number" } } };
+    app.savedSchemas.set(SCHEMA, { outputSchemaId: SCHEMA, name: "Scoring",
+      description: "Owned Schema", schema });
+    app.services.projects.getEvaluationOutputSchema.mockResolvedValue({
+      reference: { outputSchemaId: SCHEMA, digest: await digestJson(schema) }, content: schema,
+    });
+    const expected = { ...schema, reason: "[REDACTED: sensitive source content]" };
+    for (const [category, query] of [
+      ["output_schema_detail", schemaQuery], ["project_schema_detail", projectSchemaQuery],
+    ] as const) {
+      const page = await toolValue(await app.call("list_options", { category,
+        ...(category === "output_schema_detail" ? { outputSchemaId: SCHEMA } : { projectId: project.projectId }) }));
+      expect(page).toMatchObject({ sourceRedacted: true });
+      const { manifest, bytes } = file(await (await get(app, query)).text());
+      expect(JSON.parse(bytes.toString("utf8"))).toEqual(expected);
+      expect(bytes.toString("utf8")).not.toContain("SYNTHETIC");
+      expect(manifest).toMatchObject({ display: {
+        totalBytes: Buffer.byteLength(JSON.stringify(expected), "utf8"),
+        sha256: createHash("sha256").update(JSON.stringify(expected)).digest("hex"),
+      }, sourceRedacted: true, withheld: false });
+    }
+  });
+
   it("rejects a complete sanitized JSON document over 10 MiB before opening any stream", async () => {
     const app = setupManagement();
     app.services.metrics.getSamplingDetail.mockResolvedValueOnce(withResult({
@@ -206,10 +233,38 @@ describe("read-only trusted one-shot JSON documents", () => {
     expect(continued.result.content[0].text).toContain("REQUEST_INVALID_INPUT");
   });
 
+  it("binds a selected redacted explanation's exact MCP page to the trusted GET bytes and manifest", async () => {
+    const app = setupManagement();
+    const raw = { score: 40,
+      reason: "Because the answer missed https://example.test/path?token=SYNTHETIC but later recovered.",
+      checks: [{ explanation: `The reply copied ${detail.projectSample.data.userPrompt} then passed.` }] };
+    app.services.metrics.getSamplingDetail.mockResolvedValue(withResult(raw));
+    const page = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "sampling", samplingId: "sampling-1", evaluationId: "evaluation-1",
+    })) as { evaluationResult: { sourceRedacted: boolean; rawJsonChunk: {
+      text: string; totalBytes: number; sha256: string; nextOffset: number | null;
+    } } };
+    expect(page.evaluationResult.sourceRedacted).toBe(true);
+    const response = await get(app, resultQuery);
+    expect(response.status).toBe(200);
+    const { manifest, bytes } = file(await response.text());
+    expect(JSON.parse(bytes.toString("utf8"))).toEqual({ score: 40,
+      reason: "Because the answer missed [REDACTED: sensitive source content] but later recovered.",
+      checks: [{ explanation: "The reply copied [REDACTED: sensitive source content] then passed." }] });
+    expect(bytes.toString("utf8")).toBe(page.evaluationResult.rawJsonChunk.text);
+    expect(page.evaluationResult.rawJsonChunk.nextOffset).toBeNull();
+    expect(manifest).toMatchObject({ kind: "evaluation_result",
+      display: { totalBytes: page.evaluationResult.rawJsonChunk.totalBytes,
+        sha256: page.evaluationResult.rawJsonChunk.sha256 }, sourceRedacted: true, withheld: false });
+    expect(bytes.toString("utf8")).not.toMatch(/example\.test|SYNTHETIC|private Subject prompt/u);
+    expect(app.services.metrics.getSamplingDetail).toHaveBeenCalledTimes(3); // MCP, GET start and recheck.
+  });
+
   it("binds a large redacted Evaluation to its original and current exact Run, with one displayed digest", async () => {
     const app = setupManagement();
     const raw = { url: "https://private.example/result", token: 123456789, prompt: { secret: "private" },
-      reason: "Safe reason", detail: "Helpful but long. ".repeat(15_000) };
+      reason: "Because https://example.test/path?token=SYNTHETIC was not relevant.",
+      detail: "Helpful but long. ".repeat(15_000) };
     app.services.metrics.getSamplingDetail.mockResolvedValue(withResult(raw));
     const chosen = { projectId: project.projectId, runId: run.runId,
       scope: "sampling", samplingId: "sampling-1", evaluationId: "evaluation-1" };
@@ -225,8 +280,8 @@ describe("read-only trusted one-shot JSON documents", () => {
     expect(records.length).toBeGreaterThan(10);
     expect(JSON.parse(bytes.toString("utf8"))).toEqual({ url: "[REDACTED: sensitive source content]",
       token: "[REDACTED: sensitive source content]", prompt: "[REDACTED: sensitive source content]",
-      reason: "Safe reason", detail: raw.detail });
-    expect(bytes.toString("utf8")).not.toMatch(/https:|123456789|private\.example/u);
+      reason: "Because [REDACTED: sensitive source content] was not relevant.", detail: raw.detail });
+    expect(bytes.toString("utf8")).not.toMatch(/https:|123456789|private\.example|SYNTHETIC/u);
     expect(manifest).toMatchObject({ ...resultQuery,
       runScope: "exact_run", runId: run.runId,
       display: preview.evaluationResult.display, sourceRedacted: true, withheld: false,
@@ -267,6 +322,21 @@ describe("read-only trusted one-shot JSON documents", () => {
     expect(partial).not.toContain("unsafe.example");
   });
 
+  it("withholds an entire selected Evaluation when a nested source key contains an unsafe literal", async () => {
+    const app = setupManagement();
+    app.services.metrics.getSamplingDetail.mockResolvedValue(withResult({ score: 40, reason: "A safe reason.",
+      details: [{ "https://example.test/path?token=SYNTHETIC": "Not for display" }] }));
+    const page = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "sampling", samplingId: "sampling-1", evaluationId: "evaluation-1",
+    }));
+    expect(page.evaluationResult).toMatchObject({ rawJsonChunk: null, sourceRedacted: true });
+    expect(page.evaluationResult).not.toHaveProperty("streamRequired");
+    const { manifest, records, bytes } = file(await (await get(app, resultQuery)).text());
+    expect(manifest).toMatchObject({ display: null, sourceRedacted: true, withheld: true });
+    expect(records).toEqual([]);
+    expect(bytes.length).toBe(0);
+  });
+
   it("does not certify a changed Schema body under the same owned ID", async () => {
     const app = setupManagement();
     const original = { title: "A".repeat(32_000) };
@@ -287,6 +357,25 @@ describe("read-only trusted one-shot JSON documents", () => {
       .mockRejectedValueOnce(new MetricsEntityNotFoundError("sampling", "sampling-1"));
     const partial = await incomplete(await get(app, resultQuery));
     expect(partial).toContain('"type":"chunk"');
+    expect(app.services.metrics.getSamplingDetail).toHaveBeenCalledTimes(2);
+  });
+
+  it("never certifies a changed private literal merely because its redacted display hash is identical", async () => {
+    const app = setupManagement();
+    const first = { score: 40,
+      reason: "Because https://example.test/path?token=SYNTHETIC_FIRST was not relevant.",
+      explanation: "A safe explanation. ".repeat(2_000) };
+    const changed = { ...first,
+      reason: "Because https://example.test/path?token=SYNTHETIC_SECOND was not relevant." };
+    app.services.metrics.getSamplingDetail.mockResolvedValueOnce(withResult(first))
+      .mockResolvedValueOnce(withResult(changed));
+    const partial = await incomplete(await get(app, resultQuery));
+    expect(partial).toContain('"type":"chunk"');
+    expect(partial).not.toContain('"type":"manifest"');
+    const displayed = Buffer.concat(partial.trimEnd().split("\n").map((line) =>
+      Buffer.from((JSON.parse(line) as { base64: string }).base64, "base64"))).toString("utf8");
+    expect(displayed).toContain("Because [REDACTED: sensitive source content] was not relevant.");
+    expect(displayed).not.toMatch(/SYNTHETIC_FIRST|SYNTHETIC_SECOND/u);
     expect(app.services.metrics.getSamplingDetail).toHaveBeenCalledTimes(2);
   });
 

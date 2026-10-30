@@ -2,11 +2,13 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readdir, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { IMPORT_LIMITS } from "../agent-imports/model.js";
 import { openImportStaging } from "../agent-imports/bytes.js";
-import { createManagementFiles } from "./files.js";
+import { DATASET_DOCUMENT_BYTES, PROMPT_DATASET_FILE_BYTES, PROMPT_IMPORT_BODY_BYTES } from "../limits.js";
+import { createManagementFiles, uploadMetadataSchema } from "./files.js";
 import { fakeManagement } from "./management.test-support.js";
-import { MANAGEMENT_TOKEN, OWNER, RESULT_TOKEN, setupManagement } from "./test-fixture.js";
+import { MANAGEMENT_TOKEN, OWNER, RESULT_TOKEN, WEB_TOKEN, setupManagement } from "./test-fixture.js";
 import { MANAGEMENT_UPLOAD_PATH } from "./upload-route.js";
 
 const directories: string[] = [];
@@ -211,4 +213,62 @@ describe("trusted bounded management bytes", () => {
     }
     expect(app.managed.uploads.size).toBe(0);
   });
+
+  it("accepts exactly one ImportStaging-sized valid Prompt through upload, HTTP Prompt import and case-list parsing", async () => {
+    expect(DATASET_DOCUMENT_BYTES).toBe(IMPORT_LIMITS.fileBytes);
+    expect(PROMPT_DATASET_FILE_BYTES).toBe(IMPORT_LIMITS.fileBytes);
+    expect(PROMPT_IMPORT_BODY_BYTES).toBe(6 * PROMPT_DATASET_FILE_BYTES + 4_096);
+
+    const prefix = '{"name":"Case","description":"Details","userPrompt":"Execute","evalPrompt":"Judge","notes":"';
+    const suffix = '"}\n';
+    const content = prefix + "x".repeat(IMPORT_LIMITS.fileBytes - prefix.length - suffix.length) + suffix;
+    const body = Buffer.from(content, "utf8");
+    expect(body.byteLength).toBe(20 * 1024 * 1024);
+
+    const root = await mkdtemp(path.join(tmpdir(), "eval-management-file-"));
+    directories.push(root);
+    const managed = fakeManagement(OWNER);
+    const app = setupManagement(true, createManagementFiles(managed.store,
+      await openImportStaging(root, "management-uploads")));
+    const upload = await app.request(MANAGEMENT_UPLOAD_PATH, {
+      method: "POST",
+      headers: { ...headers(body), "X-Upload-Kind": "prompt", "X-Upload-Name": "cases.jsonl",
+        "X-Upload-Media-Type": "application/x-ndjson" },
+      body,
+    });
+    expect(upload.status).toBe(201);
+    const receipt = await upload.json() as { uploadRef: string; byteSize: number; sha256: string };
+    expect(receipt).toMatchObject({ byteSize: IMPORT_LIMITS.fileBytes, sha256: sha256(body) });
+    const saved = await app.runtime.evalManagement!.files.read(OWNER, receipt.uploadRef, "prompt");
+    expect(saved.byteLength).toBe(IMPORT_LIMITS.fileBytes);
+    expect(sha256(saved)).toBe(receipt.sha256);
+    const declared = { kind: "prompt", name: "cases.jsonl", mediaType: "application/x-ndjson",
+      byteSize: IMPORT_LIMITS.fileBytes + 1, sha256: sha256(body) };
+    expect(uploadMetadataSchema.safeParse(declared).success).toBe(false);
+
+    const inputLimits = await (await app.request("/api/input-limits", {
+      headers: { "X-Eval-Web-Token": WEB_TOKEN },
+    })).json() as {
+      msg: { datasetDocumentBytes: number; promptDatasetFileBytes: number };
+    };
+    expect(inputLimits.msg).toMatchObject({ datasetDocumentBytes: IMPORT_LIMITS.fileBytes,
+      promptDatasetFileBytes: IMPORT_LIMITS.fileBytes });
+    const importPromptDataset = vi.fn(async () => ({
+      dataset: { datasetId: crypto.randomUUID(), name: "Dataset", description: "Cases" }, data: [],
+    }));
+    const addData = vi.fn(async () => []);
+    Object.assign(app.services.datasets, { importPromptDataset, addData });
+    const imported = await app.request("/api/datasets/prompt-import", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Eval-Web-Token": WEB_TOKEN },
+      body: JSON.stringify({ name: "Dataset", description: "Cases", format: "jsonl", content }),
+    });
+    expect(imported.status).toBe(201);
+    expect(importPromptDataset).toHaveBeenCalledOnce();
+    const appended = await app.request(`/api/datasets/${crypto.randomUUID()}/data/import`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Eval-Web-Token": WEB_TOKEN },
+      body: JSON.stringify({ format: "jsonl", content }),
+    });
+    expect(appended.status).toBe(201);
+    expect(addData).toHaveBeenCalledOnce();
+  }, 60_000);
 });
