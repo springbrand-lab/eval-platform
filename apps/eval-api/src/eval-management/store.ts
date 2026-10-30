@@ -195,6 +195,7 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
       return db.transaction(async (transaction) => {
         const [dataset] = await transaction.select({
           datasetId: datasets.datasetId, kind: datasets.kind, name: datasets.name,
+          originalOrderIntact: datasets.originalOrderIntact,
         }).from(datasets).where(and(eq(datasets.ownerUserId, owner), eq(datasets.datasetId, datasetId),
           isNull(datasets.deletedAt)));
         if (!dataset) throw new HttpError("DATASET_NOT_FOUND");

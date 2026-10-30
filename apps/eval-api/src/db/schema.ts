@@ -298,6 +298,8 @@ export const datasets = pgTable("eval_datasets", {
   name: text("name").notNull(),
   description: text("description"),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  /** NULL predates provenance tracking; an effective member removal irreversibly makes it false. */
+  originalOrderIntact: boolean("original_order_intact"),
 }, (table) => [
   unique("eval_datasets_owner_id_uq").on(table.ownerUserId, table.datasetId),
   index("eval_datasets_owner_idx").on(table.ownerUserId),

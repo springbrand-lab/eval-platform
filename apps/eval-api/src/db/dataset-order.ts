@@ -59,24 +59,27 @@ function deterministic<T extends { readonly dataId: string; readonly position: n
 }
 
 /**
- * First committed positions are authoritative only when every member has one. For old, entirely
- * position-less Prompt Datasets, accept only a *single* completed, owned preparation whose original
- * planned IDs and confirmed receipts prove exactly the current full membership. Never write back
- * an inferred position or claim an original first row for an ordinary legacy UI Dataset.
+ * Positions prove the original order only for Datasets tracked since creation with no effective
+ * membership removal. A pre-tracking Dataset may have undergone a detach-all/readd with dense
+ * positions: do not promote its positions to proof. For old, entirely position-less Prompt
+ * Datasets, accept only a *single* completed, owned preparation whose original planned IDs and
+ * confirmed receipts prove exactly the current full membership. Never revive invalidated proof.
  */
 export function resolveDatasetMemberOrder<T extends { readonly dataId: string; readonly position: number | null }>(
   owner: string,
-  dataset: { readonly datasetId: string; readonly kind: "general" | "prompt" },
+  dataset: { readonly datasetId: string; readonly kind: "general" | "prompt";
+    readonly originalOrderIntact: boolean | null },
   members: readonly T[],
   completedPlans: readonly PreparationOrderEvidence[],
 ): { readonly order: DatasetMemberOrder; readonly members: readonly T[] } {
   const positions = members.map((member) => member.position);
-  if (members.length && positions.every((position): position is number =>
+  if (dataset.originalOrderIntact === true && members.length && positions.every((position): position is number =>
     typeof position === "number" && Number.isSafeInteger(position) && position >= 0)
     && new Set(positions).size === positions.length) {
     return { order: "upload", members: [...members].sort((left, right) => left.position! - right.position!) };
   }
-  if (members.length && dataset.kind === "prompt" && positions.every((position) => position === null)
+  if (dataset.originalOrderIntact === null && members.length && dataset.kind === "prompt"
+    && positions.every((position) => position === null)
     && completedPlans.length === 1) {
     const original = completedOriginalIds(owner, dataset.datasetId, completedPlans[0]!);
     if (original && members.length === original.length

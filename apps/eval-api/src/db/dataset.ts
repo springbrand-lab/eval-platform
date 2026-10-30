@@ -55,7 +55,7 @@ async function nextMemberPosition(transaction: DatasetWriter, owner: string, dat
 }
 
 type Membership = { readonly datasetId: string; readonly dataId: string; readonly position: number | null };
-type DatasetIdentity = Pick<typeof datasets.$inferSelect, "datasetId" | "kind">;
+type DatasetIdentity = Pick<typeof datasets.$inferSelect, "datasetId" | "kind" | "originalOrderIntact">;
 
 /** Share the same proof and fallback for Dataset reads, Project selection and management paging. */
 export async function orderDatasetMemberships<T extends Membership>(
@@ -67,8 +67,8 @@ export async function orderDatasetMemberships<T extends Membership>(
     entries.push(member);
     byDataset.set(member.datasetId, entries);
   }
-  const candidates = selected.filter(({ datasetId, kind }) =>
-    kind === "prompt" && (byDataset.get(datasetId)?.length ?? 0) > 0
+  const candidates = selected.filter(({ datasetId, kind, originalOrderIntact }) =>
+    originalOrderIntact === null && kind === "prompt" && (byDataset.get(datasetId)?.length ?? 0) > 0
     && byDataset.get(datasetId)!.every(({ position }) => position === null));
   const plans = candidates.length === 0 ? [] : await reader.select({
     ownerUserId: managementOperations.ownerUserId, kind: managementOperations.kind,
@@ -114,7 +114,8 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
     async createDataset(dataset) {
       const record = datasetSchema.parse(dataset);
       const inserted = await db.insert(datasets).values({
-        datasetId: record.datasetId, ownerUserId, kind: "general", name: record.name, description: record.description ?? null,
+        datasetId: record.datasetId, ownerUserId, kind: "general", name: record.name,
+        description: record.description ?? null, originalOrderIntact: true,
       }).onConflictDoNothing().returning({ datasetId: datasets.datasetId });
       if (inserted.length === 0) throw new DatasetIdentityConflictError("dataset", record.datasetId);
     },
@@ -264,15 +265,16 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
     },
     async detachData(datasetId, dataIds) {
       await db.transaction(async (transaction) => {
-        const [dataset] = await transaction.select({ datasetId: datasets.datasetId }).from(datasets)
-          .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId),
-            isNull(datasets.deletedAt))).for("update");
-        if (!dataset) throw new DatasetEntityNotFoundError("dataset", datasetId);
+        await lockDataset(transaction, ownerUserId, datasetId);
         if (dataIds.length > 0) {
-          await transaction.delete(datasetData).where(and(
+          const removed = await transaction.delete(datasetData).where(and(
             eq(datasetData.ownerUserId, ownerUserId),
             eq(datasetData.datasetId, datasetId), inArray(datasetData.dataId, dataIds),
-          ));
+          )).returning({ dataId: datasetData.dataId });
+          if (removed.length > 0) {
+            await transaction.update(datasets).set({ originalOrderIntact: false })
+              .where(and(eq(datasets.ownerUserId, ownerUserId), eq(datasets.datasetId, datasetId)));
+          }
         }
       });
     },
@@ -295,6 +297,7 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
           const [inserted] = await transaction.insert(datasets).values({
             datasetId: incoming.datasetId, ownerUserId, kind,
             name: incoming.name, description: incoming.description ?? null,
+            originalOrderIntact: true,
           }).onConflictDoNothing().returning();
           created = inserted !== undefined;
           existing = inserted ?? (await transaction.select().from(datasets)

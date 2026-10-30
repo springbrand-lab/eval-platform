@@ -106,7 +106,7 @@ Dataset、文档外壳和资源引用使用严格 schema；Data 允许任意其�
 - Dataset/Data 主键唯一，关联键 `(datasetId, dataId)` 唯一。
 - 关联两端必须存在；创建、修改、批量关联、导入和带关联约束的删除都在数据库边界保证原子性，不能以服务层“先查询，再分别写入”代替事务。
 - 删除 Data 的引用检查和删除必须是同一个受保护操作；并发新增关联不能绕过限制。
-- `getDatasetSnapshot()` 必须返回同一读取时点的 Dataset、关联和 Data 内容，不能拼接不同读取时点的结果。应用 Store 的 nullable 关联位置仅证明新写入顺序；旧 `NULL` 不填假值。旧 Moss `prepare` 的 owner-scoped completed `plan.dataIds` 在完整成员身份/receipt 证明成立时可作为只读回退；其他旧 Dataset 的原始文件顺序不可恢复，管理选项会显式返回 `order:"unknown"`。
+- `getDatasetSnapshot()` 必须返回同一读取时点的 Dataset、关联和 Data 内容，不能拼接不同读取时点的结果。应用 Store 的 nullable 关联位置仅证明新写入顺序，还必须有 Dataset 层持久的原始顺序完整证明，才能声明 `order:"upload"`；实际解除任一关联后不可恢复此证明，解除全部再加入时位置重新连续也不例外，无效解绑不改变证明。`0012` 前的 Dataset 不具备此证明（`NULL`），已有非空位置也不能补猜。旧 Moss `prepare` 的 owner-scoped completed `plan.dataIds` 仅能在原有成员位置全为 `NULL` 且 Dataset 未被新 Store 标记为解绑失效，并且完整成员身份/receipt 证明成立时作为只读回退；其他旧 Dataset 的原始文件顺序不可恢复，管理选项显式返回 `order:"unknown"`，仍可按 Data ID 选取。
 - 领域失败使用 `DatasetEntityNotFoundError`、`DatasetIdentityConflictError`、`DataInUseError`，用户输入失败使用 `DatasetInputError`；不引入 HTTP 错误或掩盖未知 I/O 错误。
 
 本包不依赖 SP 包，也不复制 SP 的数据库实现。它使用原生 UUID/JSON、Zod/YAML 和 `jsonc-parser` 的严格遍历能力检查重复 JSON 字段，并在自己的 Zod schema 中沿用 SP 已采用的 UUID 校验与小写规范化模式；真实数据库客户端、事务执行和 Workspace 素材能力由其所属边界提供。
