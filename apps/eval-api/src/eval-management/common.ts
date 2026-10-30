@@ -7,7 +7,7 @@ import { AGENT_LIBRARY_ROUTES } from "../sp/agent-library.js";
 
 /** MCP results go into a model context, never a bulk download. */
 export const TOOL_RESULT_BYTES = 32_000;
-/** Only Metrics may use the larger trusted-adapter budget. */
+/** Metrics text and a complete displayed JSON document each have a 10 MiB budget. */
 export const METRICS_TOOL_RESULT_BYTES = 10 * 1024 * 1024;
 /** JSON continuation and Schema catalog pages remain small. */
 export const TAKT_RESULT_CHARS = 4_800;
@@ -133,7 +133,11 @@ export function displayJson(value: unknown, privatePrompts: readonly string[] = 
   if (unsafeFieldName) {
     return { bytes: null, display: null, sourceRedacted: true };
   }
-  const encoded = Buffer.from(JSON.stringify(document), "utf8");
+  const canonical = JSON.stringify(document);
+  if (Buffer.byteLength(canonical, "utf8") > METRICS_TOOL_RESULT_BYTES) {
+    throw new HttpError("CATALOG_PAYLOAD_TOO_LARGE", "The complete displayed JSON document exceeds 10 MiB");
+  }
+  const encoded = Buffer.from(canonical, "utf8");
   return { bytes: encoded, display: { totalBytes: encoded.length,
     sha256: createHash("sha256").update(encoded).digest("hex") }, sourceRedacted };
 }

@@ -17,7 +17,7 @@ export const resourceIdSchema = idempotencyKeySchema.max(255);
 const resourceIds = z.array(resourceIdSchema).max(50).refine(unique, "IDs must be unique").default([]);
 
 export const listOptionsSchema = z.strictObject({
-  category: z.enum(["agents", "datasets", "projects", "project_detail", "output_schemas", "output_schema_detail",
+  category: z.enum(["agents", "datasets", "projects", "project_detail", "output_schemas", "output_schema_detail", "project_schema_detail",
     "input_limits", "credits",
     "approval_dataset", "approval_agent", "approval_output_schema", "approval_project"]),
   q: search, ...pageSchema,
@@ -31,7 +31,8 @@ export const listOptionsSchema = z.strictObject({
   samplingIds: z.array(entityIdSchema).max(50).refine(unique).optional(),
 }).superRefine((value, ctx) => {
   const invalid = () => ctx.addIssue({ code: "custom", message: "Choose one bounded selection" });
-  if (value.schemaOffset !== undefined && value.category !== "output_schema_detail") invalid();
+  if (value.schemaOffset !== undefined
+    && value.category !== "output_schema_detail" && value.category !== "project_schema_detail") invalid();
   if (value.category === "approval_dataset") {
     if (!value.datasetId || value.userAgentId || value.outputSchemaId || value.projectId || value.projectSampleIds || value.samplingIds
       || value.q !== undefined || value.pageSize > 10) invalid();
@@ -43,6 +44,10 @@ export const listOptionsSchema = z.strictObject({
       || value.projectSampleIds || value.samplingIds || value.q !== undefined || value.page !== 1) invalid();
   } else if (value.category === "output_schema_detail") {
     if (!value.outputSchemaId || value.userAgentId || value.datasetId || value.dataIds || value.projectId
+      || value.projectSampleIds || value.samplingIds || value.q !== undefined || value.page !== 1
+      || value.pageSize !== 20) invalid();
+  } else if (value.category === "project_schema_detail") {
+    if (!value.projectId || value.outputSchemaId || value.userAgentId || value.datasetId || value.dataIds
       || value.projectSampleIds || value.samplingIds || value.q !== undefined || value.page !== 1
       || value.pageSize !== 20) invalid();
   } else if (value.category === "approval_project") {
@@ -157,6 +162,8 @@ export const getRunSchema = z.strictObject({ runId: entityIdSchema, ...pageSchem
 export const getMetricsSchema = z.strictObject({
   projectId: entityIdSchema, runId: entityIdSchema.optional(),
   scope: z.enum(["project", "dataset", "sample", "sampling"]),
+  section: z.enum(["overview", "samples", "tools", "fields"]).optional(),
+  role: z.enum(["execution", "evaluation"]).optional(),
   datasetId: platformIdSchema.optional(), projectSampleId: entityIdSchema.optional(), samplingId: entityIdSchema.optional(),
   numericPointer: z.string().max(512).refine((pointer) => pointer === "" || pointer.startsWith("/"),
     "Select a JSON Pointer").optional(),
@@ -176,8 +183,18 @@ export const getMetricsSchema = z.strictObject({
       || value.page !== 1 || value.pageSize !== 5 || value.toolPage !== 1 || value.toolPageSize !== 2)) {
     ctx.addIssue({ code: "custom", message: "Select one Sampling Evaluation for resultOffset, without summary paging" });
   }
-  if (value.numericPointer !== undefined && value.scope !== "project" && value.scope !== "dataset") {
-    ctx.addIssue({ code: "custom", message: "A numeric field index is only available for Project/Dataset Sample rows" });
+  if (value.scope === "project" || value.scope === "dataset") {
+    const section = value.section ?? "overview";
+    if (section === "tools") {
+      if (!value.role || value.numericPointer !== undefined) {
+        ctx.addIssue({ code: "custom", message: "Select a single Tool role without a numeric field selector" });
+      }
+    } else if (value.role !== undefined || value.toolPage !== 1 || value.toolPageSize !== 2
+      || section !== "samples" && section !== "overview" && value.numericPointer !== undefined) {
+      ctx.addIssue({ code: "custom", message: "Choose only the selectors for this Metrics section" });
+    }
+  } else if (value.section !== undefined || value.role !== undefined || value.numericPointer !== undefined) {
+    ctx.addIssue({ code: "custom", message: "Sections and numeric field selectors require Project/Dataset scope" });
   }
 });
 export const inspectCaseSchema = z.strictObject({

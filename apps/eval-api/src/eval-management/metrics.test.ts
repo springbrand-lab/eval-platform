@@ -3,7 +3,7 @@ import { MetricsEntityNotFoundError } from "@eval-platform/eval-metrics";
 import { describe, expect, it } from "vitest";
 import type { JsonChunk } from "./common.js";
 import { detail, summary } from "./metrics-fixture.js";
-import { DATASET, OWNER, project, run, setupManagement, toolValue } from "./test-fixture.js";
+import { DATASET, OWNER, SCHEMA, project, run, setupManagement, toolValue } from "./test-fixture.js";
 
 const samplingArgs = { projectId: project.projectId, scope: "sampling", samplingId: "sampling-1" } as const;
 const chosen = { ...samplingArgs, evaluationId: "evaluation-1" };
@@ -25,6 +25,234 @@ async function errorCode(response: Response) {
 }
 
 describe("run-scoped management Metrics", () => {
+  it("defaults Project/Dataset to a compact overview, not the former combined fixed overhead", async () => {
+    const app = setupManagement();
+    const fields = Array.from({ length: 50 }, (_, index) => ({
+      ...summary.evaluationOutputs.fields[0]!, jsonPointer: `/score${index}`,
+      title: `Score ${index}`, distribution: Array.from({ length: 15 }, (_, number) => ({
+        value: number, count: 1, share: 0.1,
+      })),
+    }));
+    const aggregate = { ...summary, evaluationOutputs: { ...summary.evaluationOutputs, fields } };
+    app.services.metrics.getProjectOverview.mockResolvedValue({
+      project, summary: aggregate, datasets: [{ dataset: { datasetId: DATASET, name: "Dataset" }, summary }],
+      projectSamples: [{ ...detail.projectSample, samplingIds: ["sampling-1"], summary }],
+    });
+    app.services.metrics.getDatasetOverview.mockResolvedValue({
+      project, summary: aggregate, dataset: { datasetId: DATASET, name: "Dataset" }, projectSamples: [],
+    });
+    const overview = await toolValue(await app.call("get_metrics", { projectId: project.projectId, scope: "project" }));
+    expect(overview).toMatchObject({
+      scope: "project", section: "overview", project: { projectId: project.projectId },
+      runScope: "project_current", summary: { counts: summary.counts,
+        execution: { records: 1, terminalRecords: 1, completedAttempts: 1, failedAttempts: 0,
+          attemptDurationMs: { mean: 200 }, successRate: 1 },
+        evaluation: { records: 1, terminalRecords: 1, cancelledAttempts: 0 },
+        executionAgent: { coverage: "complete", tokens: { total: { value: 50 } },
+          cacheHitRate: { value: 0 }, costs: { chargedUnits: { value: 3 } } },
+        evaluationAgents: { coverage: "partial", tokens: { total: { value: 20 } } },
+        evaluationOutputs: { schema: { outputSchemaId: SCHEMA, digest: "f".repeat(64) },
+          coverage: "complete", evaluations: 1, validation: { valid: 1 }, fields: { total: 50 } } },
+    });
+    expect(Object.keys(overview).sort()).toEqual(["project", "runScope", "scope", "section", "summary"]);
+    expect(JSON.stringify(overview)).not.toMatch(/byTool|scoreIndex|score0|sample-1|private Tool arguments/u);
+    expect(Buffer.byteLength(JSON.stringify(overview), "utf8")).toBeLessThan(4_800);
+    expect(app.services.projects.getEvaluationOutputSchema).not.toHaveBeenCalled(); // No extra Project lookup per page.
+    const dataset = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "dataset", datasetId: DATASET, runId: run.runId,
+    }));
+    expect(dataset).toMatchObject({ scope: "dataset", section: "overview", datasetId: DATASET,
+      runScope: "exact_run", runId: run.runId, summary: { evaluationOutputs: { fields: { total: 50 } } } });
+    expect(dataset).not.toHaveProperty("dataset");
+    expect(dataset).not.toHaveProperty("projectSamples");
+    expect(dataset).not.toHaveProperty("datasets");
+    expect(app.services.metrics.getDatasetOverview).toHaveBeenCalledExactlyOnceWith({
+      projectId: project.projectId, datasetId: DATASET, runIds: [run.runId],
+    });
+  });
+
+  it("includes the precomputed overall numeric mean in Project and exact-Run Dataset overviews, not Sample row means", async () => {
+    const app = setupManagement();
+    const field = { ...summary.evaluationOutputs.fields[0]!,
+      numeric: { ...summary.evaluationOutputs.fields[0]!.numeric!, mean: 6.25 },
+      coverage: "partial", observationCount: 4, contributingEvaluationCount: 2, missingEvaluationCount: 1 };
+    const aggregate = { ...summary, evaluationOutputs: { ...summary.evaluationOutputs,
+      coverage: "partial", evaluations: 3, validation: { valid: 2, invalid: 1 }, fields: [field] } };
+    const datasetAggregate = { ...aggregate, evaluationOutputs: { ...aggregate.evaluationOutputs,
+      fields: [{ ...field, numeric: { ...field.numeric, mean: 2.5 } }] } };
+    app.services.metrics.getProjectOverview.mockResolvedValue({
+      project, summary: aggregate, datasets: [],
+      projectSamples: [{ ...detail.projectSample, samplingIds: ["sampling-1"], summary }], // Row mean is 8, not 6.25.
+    });
+    app.services.metrics.getDatasetOverview.mockResolvedValue({
+      project, dataset: { datasetId: DATASET, name: "Dataset" }, summary: datasetAggregate,
+      projectSamples: [{ ...detail.projectSample, summary }], // Neither overall mean comes from row averaging.
+    });
+    const expected = { jsonPointer: "/score", value: 6.25, coverage: "partial",
+      observationCount: 4, contributingEvaluationCount: 2, missingEvaluationCount: 1 };
+    const overview = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project",
+    }));
+    expect(overview).toHaveProperty("summary.evaluationOutputs.scoreField", expected);
+    expect(overview).toHaveProperty("summary.evaluationOutputs.fields", { total: 1 });
+    expect(overview).not.toHaveProperty("projectSamples");
+    const dataset = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "dataset", datasetId: DATASET, runId: run.runId, section: "overview",
+    }));
+    expect(dataset).toHaveProperty("summary.evaluationOutputs.scoreField", { ...expected, value: 2.5 });
+    expect(dataset).toHaveProperty("summary.evaluationOutputs.fields", { total: 1 });
+    expect(dataset).not.toHaveProperty("projectSamples");
+    expect(app.services.metrics.getDatasetOverview).toHaveBeenCalledExactlyOnceWith({
+      projectId: project.projectId, datasetId: DATASET, runIds: [run.runId],
+    });
+    expect(app.services.metrics.getSampleOverview).not.toHaveBeenCalled();
+    expect(app.services.metrics.getSamplingDetail).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes zero, an absent/non-numeric pointer and a null partial mean in overviews", async () => {
+    const app = setupManagement();
+    const field = summary.evaluationOutputs.fields[0]!;
+    const quality = { ...field, jsonPointer: "/quality", numeric: { ...field.numeric!, mean: 0 },
+      coverage: "partial", observationCount: 2, contributingEvaluationCount: 1, missingEvaluationCount: 2 };
+    const unavailable = { ...field, numeric: { ...field.numeric!, mean: null },
+      coverage: "partial", observationCount: 0, contributingEvaluationCount: 0, missingEvaluationCount: 2 };
+    app.services.metrics.getProjectOverview.mockResolvedValue({
+      project, summary: { ...summary, evaluationOutputs: { ...summary.evaluationOutputs,
+        fields: [quality, { ...field, jsonPointer: "/non-numeric", numeric: null }] } },
+      datasets: [], projectSamples: [],
+    });
+    app.services.metrics.getDatasetOverview.mockResolvedValue({
+      project, dataset: { datasetId: DATASET, name: "Dataset" },
+      summary: { ...summary, evaluationOutputs: { ...summary.evaluationOutputs, fields: [unavailable] } },
+      projectSamples: [{ ...detail.projectSample, summary }], // A populated row cannot fill the aggregate null.
+    });
+    const args = { projectId: project.projectId, scope: "project" };
+    expect(await toolValue(await app.call("get_metrics", args)))
+      .toHaveProperty("summary.evaluationOutputs.scoreField", null); // No silent /quality fallback.
+    const zero = await toolValue(await app.call("get_metrics", {
+      ...args, section: "overview", numericPointer: "/quality",
+    }));
+    expect(zero).toHaveProperty("summary.evaluationOutputs.scoreField", {
+      jsonPointer: "/quality", value: 0, coverage: "partial",
+      observationCount: 2, contributingEvaluationCount: 1, missingEvaluationCount: 2,
+    });
+    for (const numericPointer of ["/absent", "/non-numeric"]) {
+      expect(await toolValue(await app.call("get_metrics", { ...args, numericPointer })))
+        .toHaveProperty("summary.evaluationOutputs.scoreField", null);
+    }
+    const dataset = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "dataset", datasetId: DATASET,
+    }));
+    expect(dataset).toHaveProperty("summary.evaluationOutputs.scoreField", {
+      jsonPointer: "/score", value: null, coverage: "partial",
+      observationCount: 0, contributingEvaluationCount: 0, missingEvaluationCount: 2,
+    });
+    expect(dataset).not.toHaveProperty("projectSamples");
+  });
+
+  it("exposes the already-computed frozen Schema reference even with zero numeric fields", async () => {
+    const app = setupManagement();
+    app.services.metrics.getProjectOverview.mockResolvedValueOnce({
+      project, summary: { ...summary, evaluationOutputs: { ...summary.evaluationOutputs, fields: [] } },
+      datasets: [], projectSamples: [],
+    });
+    const overview = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project",
+    }));
+    expect(overview).toMatchObject({ summary: { evaluationOutputs: {
+      schema: { outputSchemaId: SCHEMA, digest: "f".repeat(64) }, fields: { total: 0 }, scoreField: null,
+    } } });
+    expect(JSON.stringify(overview)).not.toMatch(/schemaAbsent|no-schema|no numeric/u);
+    expect(app.services.projects.getEvaluationOutputSchema).not.toHaveBeenCalled();
+  });
+
+  it("serves Sample scores/navigation and countable field summaries only in their own Project/Dataset sections", async () => {
+    const app = setupManagement();
+    app.services.metrics.getProjectOverview.mockResolvedValue({
+      project, summary, datasets: [{ dataset: { datasetId: DATASET, name: "Dataset" }, summary }],
+      projectSamples: [{ ...detail.projectSample, samplingIds: ["sampling-1"], summary }],
+    });
+    app.services.metrics.getDatasetOverview.mockResolvedValue({
+      project, dataset: { datasetId: DATASET, name: "Dataset" }, summary,
+      projectSamples: [{ ...detail.projectSample, summary }],
+    });
+    const samples = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project", section: "samples", runId: run.runId, pageSize: 1,
+    }));
+    expect(samples).toMatchObject({ scope: "project", section: "samples", runScope: "exact_run", runId: run.runId,
+      datasets: { total: 1, items: [{ datasetId: DATASET }] },
+      projectSamples: { pageSize: 1, total: 1, items: [{ projectSampleId: "sample-1",
+        scoreIndex: { field: { value: 8 } }, samplingIds: { items: ["sampling-1"] } }] } });
+    expect(samples).not.toHaveProperty("summary");
+    expect(samples).not.toHaveProperty("evaluationOutputs");
+    const dataset = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "dataset", datasetId: DATASET, section: "samples",
+      numericPointer: "/quality",
+    }));
+    expect(dataset).toMatchObject({ section: "samples", datasetId: DATASET,
+      projectSamples: { items: [{ scoreIndex: { field: null } }] } });
+    expect(dataset).not.toHaveProperty("datasets");
+    expect(dataset).not.toHaveProperty("summary");
+    const fields = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project", section: "fields", page: 2, pageSize: 1,
+    }));
+    expect(fields).toEqual({ scope: "project", section: "fields",
+      project: { projectId: project.projectId, name: project.name }, runScope: "project_current",
+      evaluationOutputs: { fields: { page: 2, pageSize: 1, total: 1, items: [] } } });
+    const datasetFields = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "dataset", section: "fields", datasetId: DATASET,
+    }));
+    expect(datasetFields).toMatchObject({ datasetId: DATASET,
+      evaluationOutputs: { fields: { total: 1, items: [{ jsonPointer: "/score", numeric: { mean: 8 } }] } } });
+    expect(datasetFields).not.toHaveProperty("summary");
+    // Metrics supplies only countable numeric/boolean/enum fields, not free-text Schema properties.
+    expect(JSON.stringify(datasetFields)).not.toContain("/explanation");
+  });
+
+  it("selects exactly one native Metrics Tool role and rejects cross-section selectors", async () => {
+    const app = setupManagement();
+    app.services.metrics.getProjectOverview.mockResolvedValue({ project, summary, datasets: [], projectSamples: [] });
+    const execution = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project", section: "tools", role: "execution",
+      toolPage: 2, toolPageSize: 1,
+    }));
+    expect(execution).toMatchObject({ section: "tools", executionAgent: { byTool: { page: 2, pageSize: 1,
+      total: 3, items: [{ toolName: "browser", toolSuccessRate: { value: 0.5, coverage: "complete" } }] } } });
+    expect(execution).not.toHaveProperty("summary");
+    expect(execution).not.toHaveProperty("evaluationAgents");
+    expect((execution.executionAgent as Record<string, unknown>)).not.toHaveProperty("tokens");
+    app.services.metrics.getDatasetOverview.mockResolvedValue({
+      project, summary, dataset: { datasetId: DATASET, name: "Dataset" }, projectSamples: [],
+    });
+    const evaluation = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "dataset", datasetId: DATASET,
+      section: "tools", role: "evaluation",
+    }));
+    expect(evaluation).toMatchObject({ datasetId: DATASET, section: "tools",
+      evaluationAgents: { byTool: { total: 1, items: [{ toolName: "evaluator_tool",
+        toolSuccessRate: { value: null, coverage: "unavailable" } }] } } });
+    expect(evaluation).not.toHaveProperty("executionAgent");
+    for (const selectors of [
+      { section: "overview", role: "execution" }, { section: "samples", role: "evaluation" },
+      { section: "fields", toolPage: 2 }, { section: "samples", toolPageSize: 3 },
+      { section: "tools" }, { section: "tools", role: "subject" },
+      { section: "fields", numericPointer: "/score" },
+      { section: "tools", role: "execution", numericPointer: "/score" },
+    ]) {
+      expect(await errorCode(await app.call("get_metrics", {
+        projectId: project.projectId, scope: "project", ...selectors,
+      }))).toContain("REQUEST_INVALID_INPUT");
+    }
+    expect(await errorCode(await app.call("get_metrics", {
+      ...samplingArgs, section: "tools", role: "execution",
+    }))).toContain("REQUEST_INVALID_INPUT");
+    expect(await errorCode(await app.call("get_metrics", {
+      ...samplingArgs, numericPointer: "/score",
+    }))).toContain("REQUEST_INVALID_INPUT");
+    expect(app.services.metrics.getProjectOverview).toHaveBeenCalledTimes(1);
+    expect(app.services.metrics.getSamplingDetail).not.toHaveBeenCalled();
+  });
+
   it("reads the current retained Project summary without requiring or inventing a Run", async () => {
     const app = setupManagement();
     app.services.metrics.getProjectOverview.mockResolvedValueOnce({
@@ -34,10 +262,10 @@ describe("run-scoped management Metrics", () => {
       projectSamples: [{ ...detail.projectSample, samplingIds: ["sampling-1"], summary }],
     });
     const result = await toolValue(await app.call("get_metrics", {
-      projectId: project.projectId, scope: "project",
+      projectId: project.projectId, scope: "project", pageSize: 1,
     }));
     expect(app.services.metrics.getProjectOverview).toHaveBeenCalledExactlyOnceWith({ projectId: project.projectId });
-    expect(result).toMatchObject({ runScope: "project_current",
+    expect(result).toMatchObject({ runScope: "project_current", section: "overview",
       summary: { counts: { samplings: 1, evaluations: 1 },
         executionAgent: { tokens: { total: { value: 50, coverage: "complete" } },
           cacheHitRate: { value: 0, coverage: "complete" },
@@ -47,23 +275,10 @@ describe("run-scoped management Metrics", () => {
           costs: { chargedUnits: { value: 1, coverage: "complete" } },
           cacheHitRate: { value: null, coverage: "unavailable" },
           toolSuccessRate: { value: null, coverage: "unavailable" } },
-        evaluationOutputs: { fields: { items: [{ jsonPointer: "/score", numeric: { mean: 8 } }] } } } });
-    expect(result).toMatchObject({ summary: {
-      executionAgent: { byTool: { page: 1, pageSize: 2, total: 3, items: [
-        { toolName: null, count: { value: null, coverage: "partial" }, coverage: "partial", unknown: 1,
-          toolSuccessRate: { value: null, coverage: "partial" } },
-        { toolName: "browser", count: { value: 2, coverage: "complete" },
-          completed: 1, failed: 1, cancelled: 0, inProgress: 0, unknown: 0,
-          toolSuccessRate: { value: 0.5, coverage: "complete" } },
-      ] } },
-      evaluationAgents: { byTool: { total: 1, items: [
-        { toolName: "evaluator_tool", count: { value: null, coverage: "unavailable" }, unknown: 1,
-          toolSuccessRate: { value: null, coverage: "unavailable" } },
-      ] } },
-    } });
-    expect(result).toMatchObject({ projectSamples: { items: [{
-      projectSampleId: "sample-1", samplingIds: { page: 1, total: 1, items: ["sampling-1"] },
-    }] } });
+        evaluationOutputs: { fields: { total: 1 } } } });
+    expect(result).not.toHaveProperty("projectSamples");
+    expect(result).not.toHaveProperty("datasets");
+    expect(JSON.stringify(result)).not.toContain("byTool");
     expect(result).not.toHaveProperty("runId");
     expect(JSON.stringify(result)).not.toMatch(/private Subject prompt|private raw resource snapshot|private Tool arguments|ownerUserId/u);
     const invalid = await (await app.call("get_metrics", {
@@ -73,7 +288,7 @@ describe("run-scoped management Metrics", () => {
     expect(app.services.metrics.getSamplingDetail).not.toHaveBeenCalled();
   });
 
-  it("uses exactly the owned Run and existing Project summary; pages fixed hierarchy without input data", async () => {
+  it("uses exactly the owned Run and existing Project Sample summaries; pages fixed hierarchy without input data", async () => {
     const app = setupManagement();
     app.services.metrics.getProjectOverview.mockResolvedValueOnce({
       project, summary,
@@ -85,17 +300,16 @@ describe("run-scoped management Metrics", () => {
       ],
     });
     const result = await toolValue(await app.call("get_metrics", {
-      projectId: project.projectId, runId: run.runId, scope: "project", pageSize: 1,
+      projectId: project.projectId, runId: run.runId, scope: "project", section: "samples", pageSize: 1,
     }));
     expect(app.services.projectRuns.readRun).not.toHaveBeenCalled();
     expect(app.services.metrics.getProjectOverview).toHaveBeenCalledExactlyOnceWith({
       projectId: project.projectId, runIds: [run.runId],
     });
-    expect(result).toMatchObject({ runScope: "exact_run", runId: run.runId,
-      summary: { counts: { samplings: 1, evaluations: 1 },
-      evaluationOutputs: { fields: { items: [{ jsonPointer: "/score", numeric: { mean: 8 } }] } } },
+    expect(result).toMatchObject({ runScope: "exact_run", runId: run.runId, section: "samples",
       projectSamples: { pageSize: 1, total: 2, items: [{ projectSampleId: "sample-1", currentSamplingCount: 1,
         samplingIds: { items: ["sampling-1"], total: 1 } }] } });
+    expect(result).not.toHaveProperty("summary");
     for (const secret of ["private Subject prompt", "private raw resource snapshot", "private schema description", "ownerUserId"]) {
       expect(JSON.stringify(result)).not.toContain(secret);
     }
@@ -127,7 +341,7 @@ describe("run-scoped management Metrics", () => {
     const low: string[] = [];
     for (let page = 1; page <= 12; page++) {
       const result = await toolValue(await app.call("get_metrics", {
-        projectId: project.projectId, runId: run.runId, scope: "project", page, pageSize: 3,
+        projectId: project.projectId, runId: run.runId, scope: "project", section: "samples", page, pageSize: 3,
       })) as { projectSamples: { total: number; items: Array<{ projectSampleId: string; scoreIndex: {
         evaluations: number; statuses: Record<string, number>; validation: Record<string, number>;
         field: { jsonPointer: string; value: number | null; coverage: string;
@@ -150,7 +364,7 @@ describe("run-scoped management Metrics", () => {
     expect(app.services.metrics.getSamplingDetail).not.toHaveBeenCalled();
     expect(app.services.metrics.getProjectOverview).toHaveBeenCalledWith({ projectId: project.projectId, runIds: [run.runId] });
     const dataset = await toolValue(await app.call("get_metrics", {
-      projectId: project.projectId, scope: "dataset", datasetId: DATASET, pageSize: 1,
+      projectId: project.projectId, scope: "dataset", datasetId: DATASET, section: "samples", pageSize: 1,
     }));
     expect(dataset).toMatchObject({ runScope: "project_current",
       projectSamples: { items: [{ scoreIndex: { evaluations: 1, statuses: { succeeded: 1 },
@@ -173,7 +387,7 @@ describe("run-scoped management Metrics", () => {
     app.services.metrics.getProjectOverview.mockResolvedValue({ project, summary,
       datasets: [], projectSamples: [{ ...detail.projectSample, samplingIds: ["sampling-1"], summary: sampleSummary }] });
     const indexed = await toolValue(await app.call("get_metrics", {
-      projectId: project.projectId, scope: "project", numericPointer: "/quality", pageSize: 1,
+      projectId: project.projectId, scope: "project", section: "samples", numericPointer: "/quality", pageSize: 1,
     }));
     expect(indexed).toMatchObject({ projectSamples: { items: [{ scoreIndex: {
       evaluations: 3, statuses: { succeeded: 2, failed: 1 }, validation: { valid: 2, invalid: 1 },
@@ -184,7 +398,7 @@ describe("run-scoped management Metrics", () => {
       datasets: [], projectSamples: [{ ...detail.projectSample, samplingIds: ["sampling-1"],
         summary: { ...sampleSummary, evaluationOutputs: { ...sampleSummary.evaluationOutputs, fields: [alternate] } } }] });
     expect(await toolValue(await app.call("get_metrics", {
-      projectId: project.projectId, scope: "project", pageSize: 1,
+      projectId: project.projectId, scope: "project", section: "samples", pageSize: 1,
     }))).toMatchObject({ projectSamples: { items: [{ scoreIndex: {
       evaluations: 3, field: null,
     } }] } }); // Do not silently reinterpret /quality as /score.
@@ -194,27 +408,41 @@ describe("run-scoped management Metrics", () => {
     expect(app.services.metrics.getSampleOverview).not.toHaveBeenCalled();
   });
 
-  it("does not reveal numeric credentials through either the sample index or the usual aggregate field", async () => {
+  it("does not reveal numeric credentials through the overview, sample index or aggregate field page", async () => {
     const app = setupManagement();
     const token = 123456789;
     const tokenField = { ...summary.evaluationOutputs.fields[0]!, jsonPointer: "/token",
       numeric: { ...summary.evaluationOutputs.fields[0]!.numeric!, mean: token, min: token, max: token, total: token },
       distribution: [{ value: token, count: 1, share: 1, evaluations: 1 }] };
     const secretSummary = { ...summary, evaluationOutputs: { ...summary.evaluationOutputs, fields: [tokenField] } };
-    app.services.metrics.getProjectOverview.mockResolvedValueOnce({
+    app.services.metrics.getProjectOverview.mockResolvedValue({
       project, summary: secretSummary, datasets: [],
       projectSamples: [{ ...detail.projectSample, samplingIds: ["sampling-1"], summary: secretSummary }],
     });
-    const indexed = await toolValue(await app.call("get_metrics", {
-      projectId: project.projectId, scope: "project", numericPointer: "/token", pageSize: 1,
+    const overview = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project", section: "overview", numericPointer: "/token",
     }));
-    expect(indexed).toMatchObject({ summary: { evaluationOutputs: { fields: { items: [{
-      jsonPointer: "/token", numeric: null, numericRedacted: true, sourceRedacted: true,
-      distribution: [{ value: "[REDACTED: sensitive source content]", sourceRedacted: true }],
-    }] } } }, projectSamples: { items: [{ scoreIndex: { field: {
+    expect(overview).toHaveProperty("summary.evaluationOutputs.scoreField", {
+      jsonPointer: "/token", value: null, coverage: "complete", sourceRedacted: true,
+      observationCount: 1, contributingEvaluationCount: 1, missingEvaluationCount: 0,
+    });
+    expect(overview).not.toHaveProperty("projectSamples");
+    const indexed = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project", section: "samples", numericPointer: "/token", pageSize: 1,
+    }));
+    expect(indexed).toMatchObject({ projectSamples: { items: [{ scoreIndex: { field: {
       jsonPointer: "/token", value: null, sourceRedacted: true, coverage: "complete",
     } } }] } });
-    expect(JSON.stringify(indexed)).not.toContain(String(token));
+    const fields = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project", section: "fields", pageSize: 1,
+    }));
+    expect(fields).toMatchObject({ evaluationOutputs: { fields: { items: [{
+      jsonPointer: "/token", numeric: null, numericRedacted: true, sourceRedacted: true,
+      distribution: [{ value: "[REDACTED: sensitive source content]", sourceRedacted: true }],
+    }] } } });
+    for (const value of [overview, indexed, fields]) {
+      expect(JSON.stringify(value)).not.toContain(String(token));
+    }
   });
 
   it("relies on the existing owner/Project/Run-scoped Metrics reader and rejects malformed scope IDs", async () => {
@@ -292,7 +520,7 @@ describe("run-scoped management Metrics", () => {
       ],
     });
     const dataset = await toolValue(await app.call("get_metrics", {
-      projectId: project.projectId, scope: "dataset", datasetId: DATASET,
+      projectId: project.projectId, scope: "dataset", datasetId: DATASET, section: "samples",
     }));
     const sample = await toolValue(await app.call("get_metrics", {
       projectId: project.projectId, scope: "sample", projectSampleId: "sample-1", page: 2, pageSize: 1,
@@ -329,23 +557,27 @@ describe("run-scoped management Metrics", () => {
       project, summary, datasets: [], projectSamples: [],
     });
     const page = await toolValue(await app.call("get_metrics", {
-      projectId: project.projectId, scope: "project", toolPage: 2, toolPageSize: 1,
+      projectId: project.projectId, scope: "project", section: "tools", role: "execution", toolPage: 2, toolPageSize: 1,
     }));
-    expect(page).toMatchObject({ summary: {
-      executionAgent: { toolSuccessRate: { value: 0.5, coverage: "complete" },
-        byTool: { page: 2, pageSize: 1, total: 3, items: [
+    expect(page).toMatchObject({ executionAgent: {
+      byTool: { page: 2, pageSize: 1, total: 3, items: [
           { toolName: "browser", count: { value: 2, coverage: "complete" },
             completed: 1, failed: 1, cancelled: 0, inProgress: 0, unknown: 0, coverage: "complete",
             toolSuccessRate: { value: 0.5, coverage: "complete" } },
-        ] } },
-      evaluationAgents: { toolSuccessRate: { value: null, coverage: "unavailable" },
-        byTool: { page: 2, pageSize: 1, total: 1, items: [] } },
-    } });
+        ] } } });
+    expect(page).not.toHaveProperty("summary");
+    expect(page).not.toHaveProperty("evaluationAgents");
+    const evaluator = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project", section: "tools", role: "evaluation",
+      toolPage: 2, toolPageSize: 1,
+    }));
+    expect(evaluator).toMatchObject({ evaluationAgents: { byTool: { page: 2, pageSize: 1, total: 1, items: [] } } });
+    expect(evaluator).not.toHaveProperty("executionAgent");
     expect(JSON.stringify(page)).not.toMatch(/private Tool arguments|inputLength|outputLength|toolArguments|toolResult/u);
     expect(await errorCode(await app.call("get_metrics", {
-      projectId: project.projectId, scope: "project", toolPageSize: 6,
+      projectId: project.projectId, scope: "project", section: "tools", role: "execution", toolPageSize: 6,
     }))).toContain("REQUEST_INVALID_INPUT");
-    expect(app.services.metrics.getProjectOverview).toHaveBeenCalledTimes(1);
+    expect(app.services.metrics.getProjectOverview).toHaveBeenCalledTimes(2);
   });
 
   it("keeps per-role numeric rates, cancelled calls and unknown/in-progress coverage from Metrics", async () => {
@@ -361,31 +593,29 @@ describe("run-scoped management Metrics", () => {
       } },
     });
     const first = await toolValue(await app.call("get_metrics", {
-      projectId: project.projectId, scope: "project", toolPageSize: 1,
+      projectId: project.projectId, scope: "project", section: "tools", role: "execution", toolPageSize: 1,
     }));
-    expect(first).toMatchObject({ summary: {
-      executionAgent: { byTool: { total: 3, items: [{
+    expect(first).toMatchObject({ executionAgent: { byTool: { total: 3, items: [{
         toolName: null, toolSuccessRate: { value: null, coverage: "partial" },
-      }] } },
-      evaluationAgents: { toolSuccessRate: reviewerRate, byTool: {
+      }] } } });
+    const evaluator = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project", section: "tools", role: "evaluation", toolPageSize: 1,
+    }));
+    expect(evaluator).toMatchObject({ evaluationAgents: { byTool: {
         total: 1, items: [{ toolName: "review", count: { value: 6, coverage: "partial" },
           completed: 1, failed: 2, cancelled: 1, inProgress: 1, unknown: 1,
           toolSuccessRate: reviewerRate }],
-      } },
-    } });
+      } } });
     const last = await toolValue(await app.call("get_metrics", {
-      projectId: project.projectId, scope: "project", toolPage: 3, toolPageSize: 1,
+      projectId: project.projectId, scope: "project", section: "tools", role: "execution", toolPage: 3, toolPageSize: 1,
     }));
-    expect(last).toMatchObject({ summary: {
-      executionAgent: { byTool: { page: 3, total: 3, items: [{
+    expect(last).toMatchObject({ executionAgent: { byTool: { page: 3, total: 3, items: [{
         toolName: "search", completed: 0, cancelled: 1,
         toolSuccessRate: { value: 0, coverage: "partial" },
-      }] } },
-      evaluationAgents: { byTool: { page: 3, total: 1, items: [] } },
-    } });
+      }] } } });
   });
 
-  it("returns a detailed Project page beyond the former 4,800-byte ceiling", async () => {
+  it("returns a dedicated field page beyond the 4,800-byte continuation ceiling", async () => {
     const app = setupManagement();
     const fields = Array.from({ length: 20 }, (_, index) => ({
       ...summary.evaluationOutputs.fields[0]!, jsonPointer: `/score${index}`, title: `Score ${index}`,
@@ -395,21 +625,20 @@ describe("run-scoped management Metrics", () => {
       datasets: [], projectSamples: [],
     });
     const detailed = await toolValue(await app.call("get_metrics", {
-      projectId: project.projectId, scope: "project", pageSize: 20,
+      projectId: project.projectId, scope: "project", section: "fields", pageSize: 20,
     }));
     expect(Buffer.byteLength(JSON.stringify(detailed), "utf8")).toBeGreaterThan(4_800);
-    expect(detailed).toMatchObject({ summary: {
+    expect(detailed).toMatchObject({ section: "fields",
       evaluationOutputs: { fields: { pageSize: 20, total: 20, items: expect.arrayContaining([
         expect.objectContaining({ jsonPointer: "/score19" }),
       ]) } },
-    } });
+    });
+    expect(detailed).not.toHaveProperty("summary");
     const smaller = await toolValue(await app.call("get_metrics", {
-      projectId: project.projectId, scope: "project", pageSize: 1,
+      projectId: project.projectId, scope: "project", section: "fields", pageSize: 1,
     }));
-    expect(smaller).toMatchObject({ summary: {
-      counts: { samplings: 1, evaluations: 1 },
-      evaluationOutputs: { fields: { pageSize: 1, total: 20, items: [{ jsonPointer: "/score0" }] } },
-    } });
+    expect(smaller).toMatchObject({ evaluationOutputs:
+      { fields: { pageSize: 1, total: 20, items: [{ jsonPointer: "/score0" }] } } });
   });
 
   it("marks unsafe native Tool and Schema-display labels without exposing a raw URL or key", async () => {
@@ -422,17 +651,22 @@ describe("run-scoped management Metrics", () => {
           distribution: [{ value: "Bearer very-private-token", count: 1, share: 1 }] },
       ] },
     };
-    app.services.metrics.getProjectOverview.mockResolvedValueOnce({
+    app.services.metrics.getProjectOverview.mockResolvedValue({
       project, summary: withSensitive, datasets: [], projectSamples: [],
     });
-    const value = await toolValue(await app.call("get_metrics", { projectId: project.projectId, scope: "project" }));
-    expect(value).toMatchObject({ summary: {
-      executionAgent: { byTool: { items: [{ toolName: "[REDACTED: sensitive source content]",
-        sourceRedacted: true, count: { value: 2 } }] } },
-      evaluationOutputs: { fields: { items: [{ title: "[REDACTED: sensitive source content]",
+    const tools = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project", section: "tools", role: "execution",
+    }));
+    expect(tools).toMatchObject({ executionAgent: { byTool: { items: [
+      { toolName: "[REDACTED: sensitive source content]", sourceRedacted: true, count: { value: 2 } },
+    ] } } });
+    const fields = await toolValue(await app.call("get_metrics", {
+      projectId: project.projectId, scope: "project", section: "fields",
+    }));
+    expect(fields).toMatchObject({ evaluationOutputs: { fields: { items: [{ title: "[REDACTED: sensitive source content]",
         sourceRedacted: true, distribution: [{ value: "[REDACTED: sensitive source content]", sourceRedacted: true }] }] } },
-    } });
-    expect(JSON.stringify(value)).not.toMatch(/https:|very-private-token/u);
+    });
+    expect(JSON.stringify([tools, fields])).not.toMatch(/https:|very-private-token/u);
   });
 
   it("returns the selected Evaluator's complete parsed nonnumeric JSON, not a score excerpt or another Evaluation", async () => {

@@ -7,12 +7,13 @@ import type { AppBindings } from "../lib/types.js";
 import { entityIdSchema } from "../routes/schemas.js";
 import { displayJson, type DisplayJson } from "./common.js";
 import { readOwnedEvaluationResult } from "./metrics.js";
-import { readOwnedOutputSchema } from "./options.js";
+import { readOwnedOutputSchema, readOwnedProjectSchema } from "./options.js";
 import { asStream } from "./trajectory.js";
 
 export const MANAGEMENT_DOCUMENT_PATH = "/mcp/eval-management/documents";
 const querySchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("output_schema"), outputSchemaId: platformIdSchema }),
+  z.strictObject({ kind: z.literal("project_schema"), projectId: entityIdSchema }),
   z.strictObject({ kind: z.literal("evaluation_result"), projectId: entityIdSchema,
     samplingId: entityIdSchema, evaluationId: entityIdSchema, runId: entityIdSchema.optional() }),
 ]);
@@ -38,7 +39,7 @@ function sameDisplay(left: DisplayJson, right: DisplayJson) {
     && left.display?.totalBytes === right.display?.totalBytes;
 }
 
-/** Both sources are owner-scoped; recheck their identity/current membership at the *end*. */
+/** Every fixed source is owner-scoped; recheck its identity/current membership at the *end*. */
 async function prepare(c: Context<AppBindings>, input: Query): Promise<{
   readonly document: DisplayJson;
   readonly identity: Record<string, unknown>;
@@ -55,6 +56,24 @@ async function prepare(c: Context<AppBindings>, input: Query): Promise<{
         if (!sameDisplay(document, after)
           || document.display === null && JSON.stringify(current.schema) !== JSON.stringify(schema.schema)) {
           throw new HttpError("OUTPUT_SCHEMA_NOT_FOUND", "The output Schema changed during the download");
+        }
+      },
+    };
+  }
+  if (input.kind === "project_schema") {
+    const schema = await readOwnedProjectSchema(c, input.projectId);
+    const document = displayJson(schema.content);
+    return {
+      document, identity: { kind: input.kind, projectId: input.projectId,
+        outputSchemaId: schema.reference.outputSchemaId, digest: schema.reference.digest },
+      async recheck() {
+        const current = await readOwnedProjectSchema(c, input.projectId);
+        const after = displayJson(current.content);
+        if (current.reference.outputSchemaId !== schema.reference.outputSchemaId
+          || current.reference.digest !== schema.reference.digest
+          || JSON.stringify(current.content) !== JSON.stringify(schema.content)
+          || !sameDisplay(document, after)) {
+          throw new HttpError("OUTPUT_SCHEMA_NOT_FOUND", "The Project's frozen Schema changed during the download");
         }
       },
     };

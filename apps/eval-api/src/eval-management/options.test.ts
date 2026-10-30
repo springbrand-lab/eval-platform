@@ -17,6 +17,88 @@ async function errorCode(response: Response) {
 }
 
 describe("trusted approval selections through the existing list_options tool", () => {
+  it("reads the owned Project-frozen Schema body and original digest, not its renamed/deleted catalog entry", async () => {
+    const app = setupManagement();
+    const content = { type: "object", properties: {
+      score: { type: "number" }, reason: { type: "string", description: "Free text is still part of the Schema" },
+    }, $schema: "https://json-schema.org/draft/2020-12/schema" };
+    const digest = await digestJson(content);
+    app.services.projects.getEvaluationOutputSchema.mockResolvedValue({
+      reference: { outputSchemaId: SCHEMA, digest }, content,
+    });
+    app.savedSchemas.delete(SCHEMA); // The catalog can be deleted while a Project still uses its frozen Schema.
+    const result = await toolValue(await app.call("list_options", {
+      category: "project_schema_detail", projectId: project.projectId,
+    }));
+    expect(result).toMatchObject({ category: "project_schema_detail", projectId: project.projectId,
+      outputSchemaId: SCHEMA, digest, sourceRedacted: true,
+      schemaChunk: { offset: 0, nextOffset: null } });
+    const displayed = JSON.parse((result.schemaChunk as JsonChunk).text);
+    expect(displayed).toEqual({ ...content, $schema: "[REDACTED: sensitive source content]" });
+    expect((result.schemaChunk as JsonChunk).sha256).not.toBe(digest); // Original identity != displayed digest.
+    expect(app.services.projects.getEvaluationOutputSchema).toHaveBeenCalledExactlyOnceWith(project.projectId);
+    expect(app.services.outputSchemas.get).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("https://");
+  });
+
+  it("validates Project-only frozen Schema selectors and never treats an absent plan as missing fields", async () => {
+    const app = setupManagement();
+    for (const input of [
+      { category: "project_schema_detail" },
+      { category: "project_schema_detail", projectId: project.projectId, outputSchemaId: SCHEMA },
+      { category: "project_schema_detail", projectId: project.projectId, q: "score" },
+      { category: "project_schema_detail", projectId: project.projectId, page: 2 },
+      { category: "project_schema_detail", projectId: project.projectId, pageSize: 5 },
+      { category: "project_schema_detail", projectId: project.projectId, schemaOffset: -1 },
+      { category: "project_schema_detail", projectId: project.projectId, schemaOffset: 1.5 },
+    ]) {
+      expect(await errorCode(await app.call("list_options", input))).toContain("REQUEST_INVALID_INPUT");
+    }
+    expect(app.services.projects.getEvaluationOutputSchema).not.toHaveBeenCalled();
+    expect(await errorCode(await app.call("list_options", {
+      category: "project_schema_detail", projectId: "foreign-project",
+    }))).toContain("PROJECT_NOT_FOUND");
+    expect(await errorCode(await app.call("list_options", {
+      category: "project_schema_detail", projectId: project.projectId,
+    }))).toContain("OUTPUT_SCHEMA_NOT_FOUND"); // The owned Project has no evaluation plan.
+    expect(app.services.outputSchemas.get).not.toHaveBeenCalled();
+  });
+
+  it("pages a Project-frozen UTF-8 Schema with a stable original reference and small displayed continuations", async () => {
+    const app = setupManagement();
+    const content = { title: "规则🧪".repeat(800), properties: { reason: { type: "string" } } };
+    const digest = await digestJson(content);
+    app.services.projects.getEvaluationOutputSchema.mockResolvedValue({
+      reference: { outputSchemaId: SCHEMA, digest }, content,
+    });
+    const chunks: JsonChunk[] = [];
+    let schemaOffset = 0;
+    do {
+      const rpc = await (await app.call("list_options", {
+        category: "project_schema_detail", projectId: project.projectId, schemaOffset,
+      })).json() as { result: { isError?: boolean; content: [{ text: string }] } };
+      expect(rpc.result.isError).not.toBe(true);
+      expect(Buffer.byteLength(rpc.result.content[0].text, "utf8")).toBeLessThanOrEqual(4_800);
+      const part = JSON.parse(rpc.result.content[0].text) as {
+        outputSchemaId: string; digest: string; schemaChunk: JsonChunk;
+      };
+      expect(part).toMatchObject({ outputSchemaId: SCHEMA, digest });
+      expect(part.schemaChunk.offset).toBe(schemaOffset);
+      expect(Buffer.byteLength(part.schemaChunk.text, "utf8")).toBeLessThanOrEqual(2_048);
+      chunks.push(part.schemaChunk);
+      schemaOffset = part.schemaChunk.nextOffset ?? 0;
+    } while (schemaOffset !== 0 && chunks.length < 20);
+    expect(chunks.length).toBeGreaterThan(2);
+    expect(chunks.at(-1)!.nextOffset).toBeNull();
+    expect(chunks.map((part) => part.text).join("")).toBe(JSON.stringify(content));
+    expect(chunks.every((part) => part.sha256 === chunks[0]!.sha256
+      && part.totalBytes === Buffer.byteLength(JSON.stringify(content), "utf8"))).toBe(true);
+    const insideCodePoint = Buffer.from(JSON.stringify(content)).indexOf(Buffer.from("规")) + 1;
+    expect(await errorCode(await app.call("list_options", {
+      category: "project_schema_detail", projectId: project.projectId, schemaOffset: insideCodePoint,
+    }))).toContain("REQUEST_INVALID_INPUT");
+  });
+
   it("reads only the owned Project's frozen evaluation choice and paged Dataset names", async () => {
     const app = setupManagement();
     const view = {

@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { MetricsEntityNotFoundError } from "@eval-platform/eval-metrics";
+import { RuntimeEntityNotFoundError, digestJson } from "@eval-platform/eval-runtime";
 import { describe, expect, it } from "vitest";
 import { detail } from "./metrics-fixture.js";
 import { MANAGEMENT_TOKEN, RESULT_TOKEN, SCHEMA, WEB_TOKEN, project, run, setupManagement, toolValue } from "./test-fixture.js";
 
 const DOCUMENTS = "/mcp/eval-management/documents";
 const schemaQuery = { kind: "output_schema", outputSchemaId: SCHEMA };
+const projectSchemaQuery = { kind: "project_schema", projectId: project.projectId };
 const resultQuery = { kind: "evaluation_result", projectId: project.projectId,
   samplingId: "sampling-1", evaluationId: "evaluation-1" };
 const url = (query: Record<string, string>) => `${DOCUMENTS}?${new URLSearchParams(query)}`;
@@ -28,7 +30,7 @@ function file(body: string) {
   const manifest = JSON.parse(lines.at(-2)!) as {
     type: string; format: string; kind: string;
     projectId?: string; samplingId?: string; evaluationId?: string; runScope?: string; runId?: string;
-    outputSchemaId?: string; validation?: { status: string; reason: string };
+    outputSchemaId?: string; digest?: string; validation?: { status: string; reason: string };
     display: { totalBytes: number; sha256: string } | null; sourceRedacted: boolean;
     withheld: boolean; displayComplete: boolean;
   };
@@ -77,6 +79,7 @@ describe("read-only trusted one-shot JSON documents", () => {
     const app = setupManagement();
     for (const token of [RESULT_TOKEN, WEB_TOKEN, "bad"]) {
       expect((await get(app, schemaQuery, token)).status).toBe(401);
+      expect((await get(app, projectSchemaQuery, token)).status).toBe(401);
     }
     expect(app.ownerServices).not.toHaveBeenCalled();
     for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
@@ -89,6 +92,7 @@ describe("read-only trusted one-shot JSON documents", () => {
     expect(app.ownerServices).not.toHaveBeenCalled();
     for (const query of [
       { ...schemaQuery, url: "https://foreign.example" }, { ...schemaQuery, projectId: project.projectId },
+      { ...projectSchemaQuery, outputSchemaId: SCHEMA }, { ...projectSchemaQuery, runId: run.runId },
       { kind: "output_schema" }, { ...resultQuery, outputSchemaId: SCHEMA },
       { ...resultQuery, runId: "foreign-run" }, { ...resultQuery, kind: "invalid" },
     ]) {
@@ -98,7 +102,75 @@ describe("read-only trusted one-shot JSON documents", () => {
       headers: { Authorization: `Bearer ${MANAGEMENT_TOKEN}` },
     })).status).not.toBe(200);
     expect(app.services.outputSchemas.get).not.toHaveBeenCalled();
+    expect(app.services.projects.getEvaluationOutputSchema).not.toHaveBeenCalled();
     expect(app.services.metrics.getSamplingDetail).not.toHaveBeenCalled();
+  });
+
+  it("streams the Project-frozen Schema after catalog deletion, binding the original plan digest in the manifest", async () => {
+    const app = setupManagement();
+    const content = { type: "object", description: "Safe field definition. ".repeat(2_000),
+      properties: { score: { type: "number" }, reason: { type: "string" } } };
+    const digest = await digestJson(content);
+    app.services.projects.getEvaluationOutputSchema.mockImplementation(async (projectId) => {
+      if (projectId !== project.projectId) throw new RuntimeEntityNotFoundError("project", projectId);
+      return { reference: { outputSchemaId: SCHEMA, digest }, content };
+    });
+    app.savedSchemas.delete(SCHEMA);
+    const preview = await toolValue(await app.call("list_options", {
+      category: "project_schema_detail", projectId: project.projectId,
+    }));
+    expect(preview).toMatchObject({ projectId: project.projectId, outputSchemaId: SCHEMA,
+      digest, schemaChunk: null, streamRequired: true,
+      display: { totalBytes: Buffer.byteLength(JSON.stringify(content), "utf8") } });
+    const response = await get(app, projectSchemaQuery);
+    expect(response.status).toBe(200);
+    const { manifest, bytes } = file(await response.text());
+    expect(bytes.toString("utf8")).toBe(JSON.stringify(content));
+    expect(manifest).toMatchObject({ kind: "project_schema", projectId: project.projectId,
+      outputSchemaId: SCHEMA, digest, display: preview.display, sourceRedacted: false, withheld: false });
+    expect(manifest).not.toHaveProperty("runId");
+    expect(manifest).not.toHaveProperty("runScope");
+    expect(app.services.projects.getEvaluationOutputSchema).toHaveBeenCalledTimes(3); // Preview, GET start, GET end.
+    expect(app.services.outputSchemas.get).not.toHaveBeenCalled();
+    expect((await get(app, { ...projectSchemaQuery, projectId: "foreign-project" })).status).toBe(404);
+  });
+
+  it("never emits a Project Schema manifest if its frozen plan or content changes before stream completion", async () => {
+    const app = setupManagement();
+    const original = { description: "A".repeat(32_000) };
+    const changed = { description: "B".repeat(32_000) };
+    app.services.projects.getEvaluationOutputSchema.mockResolvedValueOnce({
+      reference: { outputSchemaId: SCHEMA, digest: await digestJson(original) }, content: original,
+    }).mockResolvedValueOnce({
+      reference: { outputSchemaId: SCHEMA, digest: await digestJson(changed) }, content: changed,
+    });
+    const partial = await incomplete(await get(app, projectSchemaQuery));
+    expect(partial).toContain('"type":"chunk"');
+    expect(partial).not.toContain('"type":"manifest"');
+    expect(app.services.projects.getEvaluationOutputSchema).toHaveBeenCalledTimes(2);
+  });
+
+  it("rechecks Project Schema content even when a broken source repeats the same reference digest", async () => {
+    const app = setupManagement();
+    const original = { description: "A".repeat(32_000) };
+    const digest = await digestJson(original);
+    app.services.projects.getEvaluationOutputSchema.mockResolvedValueOnce({
+      reference: { outputSchemaId: SCHEMA, digest }, content: original,
+    }).mockResolvedValueOnce({
+      reference: { outputSchemaId: SCHEMA, digest }, content: { description: "B".repeat(32_000) },
+    });
+    expect(await incomplete(await get(app, projectSchemaQuery))).not.toContain('"type":"manifest"');
+  });
+
+  it("rejects a complete sanitized JSON document over 10 MiB before opening any stream", async () => {
+    const app = setupManagement();
+    app.services.metrics.getSamplingDetail.mockResolvedValueOnce(withResult({
+      reason: "x".repeat(10 * 1024 * 1024),
+    }));
+    const response = await get(app, resultQuery);
+    expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({ code: "CATALOG_PAYLOAD_TOO_LARGE" });
+    expect(app.services.metrics.getSamplingDetail).toHaveBeenCalledTimes(1);
   });
 
   it("sends a ~1MB owned Schema once, not hundreds of repeated full-document MCP pages", async () => {
