@@ -37,8 +37,12 @@ export function fakeManagement(owner: string) {
       if (kind === "skill" && [...operations.values()].some((other) =>
         other.operationKey !== key && other.kind === kind && other.skillName === claimedSkillName
           && other.status !== "completed")) throw conflict();
+      if (kind === "bind" && [...operations.values()].some((other) =>
+        other.operationKey !== key && other.kind === "bind" && other.status === "pending"
+          && other.plan.dataId === plan.dataId)) throw conflict();
       const refs = kind === "prepare"
         ? [plan.promptUploadRef, ...(plan.assets as Array<{ uploadRef: string }>).map((asset) => asset.uploadRef)]
+        : kind === "bind" ? (plan.assets as Array<{ uploadRef: string }>).map((asset) => asset.uploadRef)
         : kind === "output_schema" ? [] : [plan.uploadRef];
       for (const ref of refs) {
         const upload = uploads.get(ref as string);
@@ -68,16 +72,20 @@ export function fakeManagement(owner: string) {
     },
     async complete(ownerId, key) {
       const row = saved(ownerId, key);
+      if (row.kind === "bind" && (row.plan.version !== 2 || !Array.isArray(row.plan.assets)
+        || typeof row.plan.dataId !== "string" || Array.isArray(row.plan.dataIds))) throw conflict();
       const required = row.kind === "skill" ? ["skill"] : row.kind === "reference" ? ["attachment", "reference"]
         : row.kind === "output_schema" ? ["output_schema"]
-          : ["dataset", ...(row.plan.assets as Array<{ uploadRef: string }>).map((asset) => `resource:${asset.uploadRef}`),
-          ...(row.plan.dataIds as string[]).map((id) => `data:${id}`)];
+          : [...(row.kind === "prepare" ? ["dataset"] : []),
+            ...(row.plan.assets as Array<{ uploadRef: string }>).map((asset) => `resource:${asset.uploadRef}`),
+            ...(row.kind === "bind" ? [`data:${row.plan.dataId}`] : (row.plan.dataIds as string[]).map((id) => `data:${id}`))];
       if (required.some((stage) => row.stages[stage]?.status !== "confirmed")) throw conflict();
       operations.set(key, { ...row, status: "completed" });
     },
     async assertReadyDatasets(ownerId, ids) {
       if (ownerId !== owner || [...operations.values()].some((row) =>
-        row.kind === "prepare" && row.status === "pending" && ids.includes(row.plan.datasetId as string))) throw conflict();
+        (row.kind === "prepare" || row.kind === "bind")
+        && row.status === "pending" && ids.includes(row.plan.datasetId as string))) throw conflict();
     },
     async listDatasetData() {
       throw new HttpError("DATASET_NOT_FOUND");

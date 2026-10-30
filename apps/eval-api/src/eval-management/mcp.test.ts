@@ -50,7 +50,7 @@ describe("trusted management MCP transport", () => {
     expect(app.release).toHaveBeenCalledTimes(1);
   });
 
-  it("is stateless and advertises exactly sixteen management tools including separate read-only reconciliation", async () => {
+  it("is stateless and advertises exactly seventeen management tools including guarded Data binding", async () => {
     const app = setupManagement();
     const initialized = await app.rpc(rpc("initialize", 2, { protocolVersion: "2025-06-18" }));
     expect(initialized.headers.get("mcp-session-id")).toBeNull();
@@ -62,7 +62,7 @@ describe("trusted management MCP transport", () => {
       } }> };
     };
     expect(tools.result.tools.map(({ name }) => name)).toEqual([
-      "list_options", "prepare_inputs", "get_preparation", "search_agent_resources",
+      "list_options", "prepare_inputs", "bind_data_resources", "get_preparation", "search_agent_resources",
       "upload_agent_skill", "upload_agent_reference", "create_output_schema", "create_agent", "create_project", "preview_run",
       "submit_run", "reconcile_operation", "stop_run", "get_run", "get_metrics", "inspect_case",
     ]);
@@ -72,6 +72,8 @@ describe("trusted management MCP transport", () => {
       .toEqual(expect.arrayContaining(["operationKey", "purpose", "instructions", "modelId"]));
     expect(tools.result.tools.find(({ name }) => name === "create_output_schema")!.inputSchema.required)
       .toEqual(expect.arrayContaining(["operationKey", "name", "description", "content"]));
+    expect(tools.result.tools.find(({ name }) => name === "bind_data_resources")!.inputSchema.required)
+      .toEqual(expect.arrayContaining(["operationKey", "datasetId", "dataId", "expectedContentDigest"]));
     expect(tools.result.tools.find(({ name }) => name === "create_project")!.inputSchema.required)
       .toContain("expectedSnapshots");
     const runInput = tools.result.tools.find(({ name }) => name === "submit_run")!.inputSchema;
@@ -86,7 +88,8 @@ describe("trusted management MCP transport", () => {
     const optionsInput = tools.result.tools.find(({ name }) => name === "list_options")!.inputSchema;
     expect(optionsInput.properties).toHaveProperty("schemaOffset");
     expect(optionsInput.properties?.category).toMatchObject({
-      enum: expect.arrayContaining(["dataset_data", "output_schema_detail", "project_schema_detail", "approval_output_schema"]),
+      enum: expect.arrayContaining(["dataset_data", "output_schema_detail", "project_schema_detail", "approval_output_schema",
+        "material_bundles", "session_bundles", "materials", "sessions", "material_files", "session_files"]),
     });
     expect(tools.result.tools.find(({ name }) => name === "reconcile_operation")!.inputSchema)
       .toHaveProperty("oneOf");

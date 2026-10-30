@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
 import { equalJson } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
-import { parsePromptDatasetUpload, type InitialMaterialsRef, type InitialSessionRef } from "@eval-platform/eval-dataset";
+import { parsePromptDatasetUpload } from "@eval-platform/eval-dataset";
 import type { Context } from "hono";
 import { BundleResourceNotFoundError } from "../db/errors.js";
 import type { AppBindings } from "../lib/types.js";
 import { requireInitializationBudget, validateMaterialFiles, validateSessionContent } from "../sp/bundle-content.js";
+import type { BindingPlan } from "./binding.js";
 import { record, short } from "./common.js";
 import type { PreparationInput, PreparationPlan, PlannedAsset } from "./preparation-plan.js";
-import { planPreparation, preparationUploads } from "./preparation-plan.js";
+import { materialRefs, planPreparation, preparationUploads, sessionRef } from "./preparation-plan.js";
 import type { ManagementStore, OperationReceipt, UploadReceipt } from "./store.js";
 
 const conflict = () => new HttpError("EVAL_SP_CONFLICT", "The preparation no longer matches its planned resources");
@@ -25,6 +26,31 @@ function dependencies(c: Context<AppBindings>) {
 export async function getPreparation(c: Context<AppBindings>, operationKey: string, page = 1, pageSize = 10) {
   const operation = await dependencies(c).store.get(c.var.user.id, operationKey);
   if (!operation) throw new HttpError("REQUEST_NOT_FOUND", "Unknown preparation key");
+  if (operation.kind === "bind") {
+    const plan = operation.plan as unknown as BindingPlan;
+    if (!plan || plan.version !== 2 || !Array.isArray(plan.assets) || plan.assets.length > 17
+      || !plan.patch || plan.datasetId !== plan.request?.datasetId || plan.dataId !== plan.request.dataId) {
+      throw new HttpError("RESPONSE_INVALID", "Stored binding plan is invalid");
+    }
+    const resourcePageSize = Math.min(pageSize, 5);
+    return {
+      operationKey, kind: "bind", status: operation.status === "completed" ? "completed"
+        : Object.values(operation.stages).some((stage) => stage.status === "attempted") ? "outcome_unknown" : "preparing",
+      datasetId: plan.datasetId, dataId: plan.dataId,
+      expectedContentDigest: plan.expectedContentDigest, contentDigest: plan.contentDigest,
+      binding: stageOf(operation, `data:${plan.dataId}`),
+      page, pageSize: resourcePageSize,
+      ...plan.patch,
+      resources: {
+        total: plan.assets.length,
+        confirmed: plan.assets.filter((asset) => stageOf(operation, `resource:${asset.uploadRef}`) === "confirmed").length,
+        items: plan.assets.slice((page - 1) * resourcePageSize, page * resourcePageSize).map((asset) => ({
+          kind: asset.kind, bundleId: asset.bundleId, resourceId: asset.resourceId,
+          status: stageOf(operation, `resource:${asset.uploadRef}`),
+        })),
+      },
+    };
+  }
   if (operation.kind !== "prepare") {
     const stage = operation.kind === "skill" ? "skill"
       : operation.kind === "reference" ? "reference" : "output_schema";
@@ -75,26 +101,6 @@ export async function getPreparation(c: Context<AppBindings>, operationKey: stri
       })),
     },
   };
-}
-
-function assetOf(plan: PreparationPlan, ref: string, kind: PlannedAsset["kind"]): PlannedAsset {
-  const asset = plan.assets.find((item) => item.uploadRef === ref && item.kind === kind);
-  if (!asset) throw conflict();
-  return asset;
-}
-
-function materialRefs(plan: PreparationPlan, selections: PreparationInput["cases"][number]["initialMaterials"]): InitialMaterialsRef[] {
-  return (selections ?? []).map((selection) => "uploadRef" in selection
-    ? { bundleId: assetOf(plan, selection.uploadRef, "material").bundleId,
-      materialId: assetOf(plan, selection.uploadRef, "material").resourceId } : selection);
-}
-
-function sessionRef(plan: PreparationPlan,
-  selection: NonNullable<PreparationInput["cases"][number]["initialSession"]>): InitialSessionRef {
-  if (!("uploadRef" in selection)) return selection;
-  const asset = assetOf(plan, selection.uploadRef, "session");
-  if (asset.format !== selection.format) throw conflict();
-  return { bundleId: asset.bundleId, sessionId: asset.resourceId };
 }
 
 /** Check each new preparation's Subject/Evaluator fields before its first operation or catalog write. */
@@ -155,7 +161,7 @@ async function prepareDataset(c: Context<AppBindings>, plan: PreparationPlan, st
   await store.confirm(c.var.user.id, key, "dataset", { datasetId: plan.datasetId, dataIds: plan.dataIds });
 }
 
-async function prepareResource(c: Context<AppBindings>, asset: PlannedAsset,
+export async function prepareResource(c: Context<AppBindings>, asset: PlannedAsset,
   store: ManagementStore, key: string) {
   const stage = `resource:${asset.uploadRef}`;
   const claim = await store.attempt(c.var.user.id, key, stage);

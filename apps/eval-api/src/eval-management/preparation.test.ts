@@ -260,6 +260,24 @@ describe("durable management preparation", () => {
     expect(f.bindData).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps new Data + old Material selection in the original prepare_inputs path", async () => {
+    const f = preparedFixture();
+    const owned = f.addExistingMaterial(5);
+    const promptUploadRef = f.app.managed.addUpload("prompt", "old-material.jsonl",
+      encode(JSON.stringify(promptRow("new Data"))));
+    const input = { ...f.input, operationKey: "new-data-old-resources", promptUploadRef,
+      cases: [{ initialMaterials: [owned], evalInitialMaterials: [owned] }] };
+    const created = await toolValue(await f.app.call("prepare_inputs", input));
+    expect(created).toMatchObject({ kind: "prepare", status: "completed",
+      totalCases: 1, resources: { total: 0, confirmed: 0 } });
+    const readback = await toolValue(await f.app.call("get_preparation", { operationKey: input.operationKey }));
+    expect(readback).toMatchObject({ kind: "prepare", status: "completed",
+      cases: [{ binding: "confirmed", initialMaterials: [owned], evalInitialMaterials: [owned] }] });
+    expect(f.createMaterials).not.toHaveBeenCalled();
+    expect(f.createSessions).not.toHaveBeenCalled();
+    expect(f.bindData).toHaveBeenCalledOnce();
+  });
+
   it("reconciles a committed Dataset, Material and Data binding after lost responses without another write", async () => {
     const f = preparedFixture();
     f.loseDatasetResponse();

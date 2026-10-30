@@ -1,12 +1,14 @@
 import { equalJson } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 import { platformIdSchema, type Data } from "@eval-platform/eval-dataset";
-import { and, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { digestJson } from "@eval-platform/eval-runtime";
+import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { IMPORT_LIMITS } from "../agent-imports/model.js";
 import { READ_SNAPSHOT, type EvalDb } from "../db/client.js";
 import { orderDatasetMemberships } from "../db/dataset.js";
 import type { DatasetMemberOrder } from "../db/dataset-order.js";
 import { data, datasetData, datasets, managementOperations, managementUploads } from "../db/schema.js";
+import { lockedBindTarget } from "../initial-resources.js";
 
 export type UploadKind = typeof managementUploads.$inferInsert.kind;
 export type OperationKind = typeof managementOperations.$inferInsert.kind;
@@ -53,10 +55,10 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
 
   async function assertReady(reader: Pick<EvalDb, "select">, owner: string, ids: readonly string[]): Promise<void> {
     const [pending] = await reader.select({ operationKey: managementOperations.operationKey }).from(managementOperations)
-      .where(and(eq(managementOperations.ownerUserId, owner), eq(managementOperations.kind, "prepare"),
+      .where(and(eq(managementOperations.ownerUserId, owner), inArray(managementOperations.kind, ["prepare", "bind"]),
         eq(managementOperations.status, "pending"),
         inArray(sql<string>`${managementOperations.plan}->>'datasetId'`, [...ids]))).limit(1);
-    if (pending) throw new HttpError("EVAL_SP_CONFLICT", "Bind all prepared Data before creating a Project");
+    if (pending) throw new HttpError("EVAL_SP_CONFLICT", "Finish the pending Data preparation or binding");
   }
 
   async function locked(owner: string, key: string, callback: (row: OperationReceipt,
@@ -109,15 +111,34 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
       return row ?? null;
     },
     async begin(owner, operationKey, kind, fingerprint, plan, skillName) {
+      const assets = Array.isArray(plan.assets) ? plan.assets.map((asset) =>
+        asset && typeof asset === "object" && "uploadRef" in asset ? asset.uploadRef : null) : [];
       const refs = kind === "prepare"
-        ? [plan.promptUploadRef, ...(Array.isArray(plan.assets) ? plan.assets.map((asset) =>
-          asset && typeof asset === "object" && "uploadRef" in asset ? asset.uploadRef : null) : [])]
+        ? [plan.promptUploadRef, ...assets]
+        : kind === "bind" ? assets
         : kind === "output_schema" ? [] : [plan.uploadRef];
       const parsed = refs.map((ref) => platformIdSchema.parse(ref)).sort();
       if (parsed.length > 101 || new Set(parsed).size !== parsed.length) throw conflict();
       // Only Skills claim names: the existing output Schema catalog permits duplicate names.
       const claimedSkillName = kind === "skill" ? skillName ?? null : null;
       return db.transaction(async (transaction) => {
+        if (kind === "bind") {
+          // Dataset/Data locks also serialize two different keys for this Data (even across
+          // Datasets). Reject a second pending intent before it can strand either key or
+          // claim its uploads. The original full Data digest is rechecked before a new
+          // reservation, not just later when applying the patch.
+          const datasetId = platformIdSchema.parse(plan.datasetId);
+          const dataId = platformIdSchema.parse(plan.dataId);
+          const current = await lockedBindTarget(transaction, owner, datasetId, dataId);
+          const [sameKey] = await transaction.select({ key: managementOperations.operationKey }).from(managementOperations)
+            .where(operationWhere(owner, operationKey)).limit(1);
+          const [pending] = await transaction.select({ key: managementOperations.operationKey }).from(managementOperations)
+            .where(and(eq(managementOperations.ownerUserId, owner), eq(managementOperations.kind, "bind"),
+              eq(managementOperations.status, "pending"),
+              eq(sql<string>`${managementOperations.plan}->>'dataId'`, dataId),
+              ne(managementOperations.operationKey, operationKey))).limit(1);
+          if (pending || (!sameKey && await digestJson(current) !== plan.expectedContentDigest)) throw conflict();
+        }
         await transaction.insert(managementOperations).values({
           ownerUserId: owner, operationKey, kind, fingerprint, plan,
           skillName: claimedSkillName, stages: {}, status: "pending",
@@ -174,11 +195,14 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
         if (row.kind === "prepare" && (!Array.isArray(row.plan.assets) || !Array.isArray(row.plan.dataIds))) {
           throw conflict();
         }
+        if (row.kind === "bind" && (row.plan.version !== 2 || !Array.isArray(row.plan.assets)
+          || typeof row.plan.dataId !== "string" || Array.isArray(row.plan.dataIds))) throw conflict();
         const required = row.kind === "skill" ? ["skill"] : row.kind === "reference" ? ["attachment", "reference"]
           : row.kind === "output_schema" ? ["output_schema"]
-            : ["dataset", ...(Array.isArray(row.plan.assets) ? row.plan.assets.map((asset) =>
+            : [...(row.kind === "prepare" ? ["dataset"] : []), ...(Array.isArray(row.plan.assets) ? row.plan.assets.map((asset) =>
             asset && typeof asset === "object" && "uploadRef" in asset ? `resource:${asset.uploadRef}` : "") : []),
-          ...(Array.isArray(row.plan.dataIds) ? row.plan.dataIds.map((id) => `data:${id}`) : [])];
+          ...(row.kind === "bind" ? [`data:${row.plan.dataId}`]
+            : Array.isArray(row.plan.dataIds) ? row.plan.dataIds.map((id) => `data:${id}`) : [])];
         if (required.includes("") || required.some((stage) => row.stages[stage]?.status !== "confirmed")) throw conflict();
         if (row.status !== "completed") await transaction.update(managementOperations)
           .set({ status: "completed" }).where(operationWhere(owner, operationKey));
