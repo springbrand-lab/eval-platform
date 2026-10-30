@@ -385,7 +385,7 @@ describe("run-scoped management Metrics", () => {
     } });
   });
 
-  it("fails explicitly above Takt's display budget, while leaving the Project aggregate available with smaller pages", async () => {
+  it("returns a detailed Project page beyond the former 4,800-byte ceiling", async () => {
     const app = setupManagement();
     const fields = Array.from({ length: 20 }, (_, index) => ({
       ...summary.evaluationOutputs.fields[0]!, jsonPointer: `/score${index}`, title: `Score ${index}`,
@@ -394,9 +394,15 @@ describe("run-scoped management Metrics", () => {
       project, summary: { ...summary, evaluationOutputs: { ...summary.evaluationOutputs, fields } },
       datasets: [], projectSamples: [],
     });
-    expect(await errorCode(await app.call("get_metrics", {
+    const detailed = await toolValue(await app.call("get_metrics", {
       projectId: project.projectId, scope: "project", pageSize: 20,
-    }))).toContain("CATALOG_PAYLOAD_TOO_LARGE");
+    }));
+    expect(Buffer.byteLength(JSON.stringify(detailed), "utf8")).toBeGreaterThan(4_800);
+    expect(detailed).toMatchObject({ summary: {
+      evaluationOutputs: { fields: { pageSize: 20, total: 20, items: expect.arrayContaining([
+        expect.objectContaining({ jsonPointer: "/score19" }),
+      ]) } },
+    } });
     const smaller = await toolValue(await app.call("get_metrics", {
       projectId: project.projectId, scope: "project", pageSize: 1,
     }));
