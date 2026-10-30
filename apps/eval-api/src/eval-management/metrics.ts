@@ -13,6 +13,16 @@ function stage(value: StageStatistics) {
   };
 }
 
+/** Overview includes every safe public stage count/duration; detail scopes retain their original projection. */
+function overviewStage(value: StageStatistics) {
+  return {
+    ...stage(value), terminalRecords: value.terminalRecords,
+    completedAttempts: value.completedAttempts, failedAttempts: value.failedAttempts,
+    interruptedAttempts: value.interruptedAttempts, cancelledAttempts: value.cancelledAttempts,
+    attemptDurationMs: value.attemptDurationMs,
+  };
+}
+
 function safeLabel(value: unknown, length = 160) {
   const original = typeof value === "string" ? value : "";
   const safe = redactLiteral(original);
@@ -21,20 +31,12 @@ function safeLabel(value: unknown, length = 160) {
 }
 
 /** Projection of already-computed Metrics facts; never infer missing resources from stage status. */
-export function resourceSummary(item: ResourceStatistics, toolPage?: number, toolPageSize?: number) {
-  const base = {
-    coverage: item.coverage, collections: item.collections, tokens: item.tokens,
-    costs: item.costs, cacheHitRate: item.cacheHitRate,
-    toolSuccessRate: item.trajectory.toolSuccessRate,
-  };
-  // inspect_case keeps its existing projection. get_metrics pages both roles independently,
-  // forwarding Metrics' native Tool success rates without recalculation or raw Tool bodies.
-  if (toolPage === undefined || toolPageSize === undefined) return base;
+function nativeToolPage(item: ResourceStatistics, toolPage: number, toolPageSize: number) {
   if (!Array.isArray(item.trajectory.byTool)) {
     throw new HttpError("RESPONSE_INVALID", "Metrics has no per-Tool facts");
   }
   const tools = pageOf(item.trajectory.byTool, toolPage, toolPageSize);
-  return { ...base, byTool: { ...tools, items: tools.items.map((tool) => {
+  return { ...tools, items: tools.items.map((tool) => {
     if (tool.toolName !== null && typeof tool.toolName !== "string") {
       throw new HttpError("RESPONSE_INVALID", "Metrics returned an invalid Tool name");
     }
@@ -47,12 +49,22 @@ export function resourceSummary(item: ResourceStatistics, toolPage?: number, too
       completed: tool.completed, failed: tool.failed, cancelled: tool.cancelled,
       inProgress: tool.inProgress, unknown: tool.unknown, toolSuccessRate: tool.toolSuccessRate,
     };
-  }) } };
+  }) };
 }
 
-/** Project Metrics calculates every statistic. This only drops bulky, model-visible payloads. */
-export function metricSummary(value: MetricSummary, page: number, pageSize: number,
-  toolPage?: number, toolPageSize?: number) {
+/** inspect_case and Sample/Sampling keep their original projection; Project/Dataset tools select one role. */
+export function resourceSummary(item: ResourceStatistics, toolPage?: number, toolPageSize?: number) {
+  const base = {
+    coverage: item.coverage, collections: item.collections, tokens: item.tokens,
+    costs: item.costs, cacheHitRate: item.cacheHitRate,
+    toolSuccessRate: item.trajectory.toolSuccessRate,
+  };
+  return toolPage === undefined || toolPageSize === undefined ? base
+    : { ...base, byTool: nativeToolPage(item, toolPage, toolPageSize) };
+}
+
+/** Page the same sanitized Metrics field projection in the field section and original detail scopes. */
+function outputFieldsPage(value: MetricSummary, page: number, pageSize: number) {
   const fieldPage = pageOf(value.evaluationOutputs.fields, page, pageSize);
   const fields = fieldPage.items.map((field) => {
     const pointer = safeLabel(field.jsonPointer);
@@ -79,6 +91,12 @@ export function metricSummary(value: MetricSummary, page: number, pageSize: numb
       coverage: field.coverage,
     };
   });
+  return { ...fieldPage, items: fields };
+}
+
+/** Project Metrics calculates every statistic. This only drops bulky, model-visible payloads. */
+export function metricSummary(value: MetricSummary, page: number, pageSize: number,
+  toolPage?: number, toolPageSize?: number) {
   return {
     counts: value.counts,
     execution: stage(value.execution), evaluation: stage(value.evaluation),
@@ -87,7 +105,23 @@ export function metricSummary(value: MetricSummary, page: number, pageSize: numb
     evaluationOutputs: {
       evaluations: value.evaluationOutputs.evaluations,
       validation: value.evaluationOutputs.validation,
-      fields: { ...fieldPage, items: fields },
+      fields: outputFieldsPage(value, page, pageSize),
+    },
+  };
+}
+
+/** A complete aggregate without either role's Tool rows or any field/Sample list. */
+function metricOverview(value: MetricSummary, numericPointer: string) {
+  return {
+    counts: value.counts,
+    execution: overviewStage(value.execution), evaluation: overviewStage(value.evaluation),
+    executionAgent: resourceSummary(value.executionAgent),
+    evaluationAgents: resourceSummary(value.evaluationAgents),
+    evaluationOutputs: {
+      schema: value.evaluationOutputs.schema, coverage: value.evaluationOutputs.coverage,
+      evaluations: value.evaluationOutputs.evaluations, validation: value.evaluationOutputs.validation,
+      scoreField: sampleScoreIndex(value, numericPointer).field,
+      fields: { total: value.evaluationOutputs.fields.length },
     },
   };
 }
@@ -183,6 +217,18 @@ export async function readOwnedEvaluationResult(
 
 type Query = z.output<typeof getMetricsSchema>;
 
+/** Project/Dataset sections reuse the same source snapshot and projection, never another Metrics flow. */
+function aggregateSection(value: MetricSummary, input: Query) {
+  switch (input.section ?? "overview") {
+    case "overview": return { summary: metricOverview(value, input.numericPointer ?? "/score") };
+    case "fields": return { evaluationOutputs: { fields: outputFieldsPage(value, input.page, input.pageSize) } };
+    case "tools": return input.role === "execution"
+      ? { executionAgent: { byTool: nativeToolPage(value.executionAgent, input.toolPage, input.toolPageSize) } }
+      : { evaluationAgents: { byTool: nativeToolPage(value.evaluationAgents, input.toolPage, input.toolPageSize) } };
+    case "samples": return null;
+  }
+}
+
 export async function getMetrics(c: Context<AppBindings>, input: Query) {
   const { projectId, runId, scope, page, pageSize, toolPage, toolPageSize, evaluationId } = input;
   // Normal reads rely on one owner-scoped Metrics snapshot. Selected exact-Run output also checks
@@ -203,10 +249,12 @@ export async function getMetrics(c: Context<AppBindings>, input: Query) {
   });
   if (scope === "project") {
     const view = await metrics.getProjectOverview(query);
+    const base = { scope, section: input.section ?? "overview", project: project(view.project), ...runScope };
+    const section = aggregateSection(view.summary, input);
+    if (section) return { ...base, ...section };
     const datasetPage = pageOf(view.datasets, page, pageSize);
     const samplePage = pageOf(view.projectSamples, page, pageSize);
-    return { scope, project: project(view.project), ...runScope,
-      summary: metricSummary(view.summary, page, pageSize, toolPage, toolPageSize),
+    return { ...base,
       datasets: { ...datasetPage, items: datasetPage.items.map(({ dataset, summary }) => {
         const name = safeLabel(dataset.name);
         return { datasetId: dataset.datasetId, name: name.value, counts: summary.counts,
@@ -222,13 +270,12 @@ export async function getMetrics(c: Context<AppBindings>, input: Query) {
   }
   if (scope === "dataset") {
     const view = await metrics.getDatasetOverview({ ...query, datasetId: input.datasetId! });
+    const base = { scope, section: input.section ?? "overview", project: project(view.project),
+      ...runScope, datasetId: view.dataset.datasetId };
+    const section = aggregateSection(view.summary, input);
+    if (section) return { ...base, ...section };
     const samplePage = pageOf(view.projectSamples, page, pageSize);
-    const name = safeLabel(view.dataset.name);
-    return { scope, project: project(view.project), ...runScope,
-      dataset: { datasetId: view.dataset.datasetId, name: name.value,
-        ...(name.redacted ? { sourceRedacted: true } : {}),
-        ...(name.truncated ? { nameTruncated: true } : {}) },
-      summary: metricSummary(view.summary, page, pageSize, toolPage, toolPageSize),
+    return { ...base,
       projectSamples: { ...samplePage, items: samplePage.items.map((item) => ({
         ...sample(item), scoreIndex: sampleScoreIndex(item.summary, input.numericPointer ?? "/score"),
       })) } };

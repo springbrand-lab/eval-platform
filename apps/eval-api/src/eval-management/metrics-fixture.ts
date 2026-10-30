@@ -1,13 +1,17 @@
 import type { MetricSummary } from "@eval-platform/eval-metrics";
-import { DATASET, project, run } from "./test-fixture.js";
+import { DATASET, SCHEMA, project, run } from "./test-fixture.js";
 
 /** Model-visible projection tests include deliberately private, non-metric fields. */
 export const summary = {
   counts: { datasets: 1, data: 2, projectSamples: 2, samplings: 1, evaluations: 1 },
-  execution: { records: 1, statuses: { succeeded: 1 }, successRate: 1, attempts: 1, restarts: 0,
-    agentDurationMs: { mean: 200 }, lastError: "hidden stage error" },
-  evaluation: { records: 1, statuses: { succeeded: 1 }, successRate: 1, attempts: 1, restarts: 0,
-    agentDurationMs: { mean: 100 } },
+  execution: { records: 1, statuses: { succeeded: 1 }, terminalRecords: 1, successRate: 1,
+    attempts: 1, restarts: 0, completedAttempts: 1, failedAttempts: 0,
+    interruptedAttempts: 0, cancelledAttempts: 0,
+    agentDurationMs: { mean: 200 }, attemptDurationMs: { mean: 200 }, lastError: "hidden stage error" },
+  evaluation: { records: 1, statuses: { succeeded: 1 }, terminalRecords: 1, successRate: 1,
+    attempts: 1, restarts: 0, completedAttempts: 1, failedAttempts: 0,
+    interruptedAttempts: 0, cancelledAttempts: 0,
+    agentDurationMs: { mean: 100 }, attemptDurationMs: { mean: 100 } },
   executionAgent: { coverage: "complete", collections: { collected: 1 },
     tokens: { total: { value: 50, coverage: "complete" } },
     costs: { chargedUnits: { value: 3, coverage: "partial" } },
@@ -34,7 +38,8 @@ export const summary = {
         completed: 0, failed: 0, cancelled: 0, inProgress: 0, unknown: 1,
         toolSuccessRate: { value: null, coverage: "unavailable" } },
     ] } },
-  evaluationOutputs: { evaluations: 1, validation: { valid: 1 }, fields: [{
+  evaluationOutputs: { schema: { outputSchemaId: SCHEMA, digest: "f".repeat(64) },
+    coverage: "complete", evaluations: 1, validation: { valid: 1 }, fields: [{
     jsonPointer: "/score", title: "Score", description: "private schema description",
     kinds: ["integer"], observationCount: 1, contributingEvaluationCount: 1,
     missingEvaluationCount: 0, numeric: { mean: 8, median: 8 },

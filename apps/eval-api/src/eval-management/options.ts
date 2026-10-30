@@ -123,6 +123,27 @@ async function outputSchemaDetail(c: Context<AppBindings>, input: Options) {
   return modelResult(result);
 }
 
+/** The Project service checks owner, soft deletion and the plan's original body digest in one read. */
+export async function readOwnedProjectSchema(c: Context<AppBindings>, projectId: string) {
+  const document = await c.var.services.projects.getEvaluationOutputSchema(projectId);
+  if (!document) throw new HttpError("OUTPUT_SCHEMA_NOT_FOUND", "This Project has no evaluation output Schema");
+  return document;
+}
+
+/** Never substitute an active/mutable catalog Schema for the Project's frozen evaluation plan. */
+async function projectSchemaDetail(c: Context<AppBindings>, input: Options) {
+  const projectId = input.projectId!;
+  const { reference, content } = await readOwnedProjectSchema(c, projectId);
+  const modelResult = ({ chunk, sourceRedacted, streamRequired, display }: JsonChunkResult) => ({
+    category: "project_schema_detail", projectId,
+    outputSchemaId: reference.outputSchemaId, digest: reference.digest,
+    sourceRedacted, schemaChunk: chunk, ...(streamRequired ? { streamRequired, display } : {}),
+  });
+  const result = jsonChunk(content, input.schemaOffset ?? 0, [],
+    (chunk, sourceRedacted) => fitsTaktResult(modelResult({ chunk, sourceRedacted })));
+  return modelResult(result);
+}
+
 /** Only an active owned Agent is selectable. Hash its whole public SP body, but never return it. */
 async function approvalAgent(c: Context<AppBindings>, input: Options) {
   const userAgentId = input.userAgentId!;
@@ -219,6 +240,7 @@ export async function listOptions(c: Context<AppBindings>, input: Options) {
   if (category === "approval_agent") return approvalAgent(c, input);
   if (category === "approval_output_schema") return approvalOutputSchema(c, input);
   if (category === "output_schema_detail") return outputSchemaDetail(c, input);
+  if (category === "project_schema_detail") return projectSchemaDetail(c, input);
   if (category === "approval_project") return approvalProject(c, input);
   if (category === "project_detail") return projectDetail(c, input);
   if (category === "input_limits") return { category, limits: INPUT_LIMITS };

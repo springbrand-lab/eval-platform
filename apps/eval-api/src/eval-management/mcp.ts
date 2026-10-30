@@ -22,7 +22,7 @@ import { MANAGEMENT_DOCUMENT_PATH, streamDocument } from "./documents.js";
 export const EVAL_MANAGEMENT_MCP_PATH = "/mcp/eval-management";
 const SERVER = { name: "eval-platform-eval-management", version: "1.0.0" };
 const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
-  list_options: "Page Agent/Dataset/Project/Schema choices. project_detail reads the frozen plan's Schema ID. output_schema_detail pages a small owned, active Schema JSON; streamRequired:true instead requires the fixed authenticated documents GET. Verify the displayed SHA-256; source redactions are explicit.",
+  list_options: "Page Agent/Dataset/Project/Schema choices. project_detail reads the frozen plan's Schema ID. output_schema_detail reads the active catalog; project_schema_detail(projectId) reads the owned, digest-checked frozen Project Schema even after catalog deletion. Small JSON uses schemaOffset; streamRequired:true needs the fixed authenticated documents GET (kind=project_schema for Projects). Verify the displayed SHA-256 and Project Schema ID/digest; source redactions are explicit.",
   prepare_inputs: "Prepare a Prompt Dataset from an uploaded JSON/JSONL file and up to 50 per-row Subject/Evaluator resource mappings. Creates Material/Session Bundles separately and binds each Data before any Project can start. Reuse operationKey after an unknown result.",
   get_preparation: "Read bounded durable progress, IDs and stage receipts by operationKey; no prompt, Schema content, bytes or attachment URL. Also reports uncertain Skill/Reference/Schema writes.",
   search_agent_resources: "Search live Eval SP resources. Actions need supplierId or unassigned:true; use action_groups first. id reads an Action or Reference. Toolkit pages use cursor, not page. Never returns connection credentials.",
@@ -36,7 +36,7 @@ const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
   reconcile_operation: "READ ONLY: look up an already-persisted Run or Project from its original request/key/fingerprint. Run requests may omit expected digests only for old stored Runs. Never starts work.",
   stop_run: "Stop one explicitly identified Run belonging to the specified Project.",
   get_run: "Read Run status and a page of Sampling and Evaluation IDs, without full records.",
-  get_metrics: "Page current Project/Dataset/Sample/Sampling Metrics and Sampling/Evaluation IDs, or exact current Run members. Project/Dataset Sample rows include a bounded scoreIndex for numericPointer (default /score) from their existing Metrics summaries, not per-Tool rates. Subject/Evaluator native per-Tool counts and Metrics-calculated terminal success rates have separate byTool pages. sampling + evaluationId returns only that owned Evaluation's parsed JSON (including schema mismatches, labelled invalid) in <=2KiB resultOffset chunks for small documents, streamRequired:true for the authenticated documents GET for larger ones, or explicit null with Metrics validation for missing/unparseable output; no summary/list in selected mode.",
+  get_metrics: "Read current owner-scoped or exact-Run Metrics. Project/Dataset default section=overview returns compact complete summary with field total but no rows or byTool. section=samples pages existing scoreIndex and navigation; section=tools requires role=execution|evaluation and pages only that role's Metrics-authoritative native byTool rates; section=fields pages countable output fields. Sample/Sampling and sampling+evaluationId keep their existing resultOffset contract; large selected JSON uses the authenticated documents GET.",
   inspect_case: "Inspect bounded evidence and Subject/Evaluator Metrics for one current owned Sampling/Evaluation (or exact Run member). For a complete SAFE Pi file use the authenticated fixed GET /mcp/eval-management/trajectories from the trusted backend, never an MCP tool.",
 };
 const TOOLS = (Object.keys(managementSchemas) as (keyof typeof managementSchemas)[]).map((name) => ({
@@ -87,7 +87,8 @@ async function handle(c: Context<AppBindings>, message: Record<string, unknown>)
         const category = record(result)?.category;
         const metrics = name === "get_metrics";
         const smallCatalog = name === "list_options"
-          && (category === "output_schemas" || category === "output_schema_detail");
+          && (category === "output_schemas" || category === "output_schema_detail"
+            || category === "project_schema_detail");
         return mcpResult(id, { content: [{ type: "text", text: text(result,
           metrics ? METRICS_TOOL_RESULT_BYTES : smallCatalog ? TAKT_RESULT_CHARS : Infinity,
           metrics ? METRICS_TOOL_RESULT_BYTES : undefined) }] });

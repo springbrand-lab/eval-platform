@@ -1,5 +1,6 @@
 import { vi } from "vitest";
-import type { RunPreview } from "@eval-platform/eval-runtime";
+import type { EvaluationOutputSchemaDocument } from "@eval-platform/eval-contracts";
+import { RuntimeEntityNotFoundError, type RunPreview } from "@eval-platform/eval-runtime";
 import type { ApiRuntime, OwnerServices } from "../lib/types.js";
 import type { OutputSchemaRecord } from "../db/output-schemas.js";
 import type { EvalSpClient } from "../sp/client.js";
@@ -61,6 +62,10 @@ export function setupManagement(configured = true, files?: ManagementFiles) {
       list: vi.fn(async () => [project]),
       create: vi.fn(async (_body: unknown) => ({ project, run: { runId: run.runId, samplingIds: run.samplingIds } })),
       reconcile: vi.fn(async (_body: unknown): Promise<{ project: typeof project; run: { runId: string; samplingIds: string[] } | null } | null> => null),
+      getEvaluationOutputSchema: vi.fn(async (projectId: string): Promise<EvaluationOutputSchemaDocument | null> => {
+        if (projectId !== project.projectId) throw new RuntimeEntityNotFoundError("project", projectId);
+        return null;
+      }),
       reviewSelection: vi.fn(async (_selection: unknown): Promise<unknown> => undefined),
     },
     outputSchemas: {
