@@ -60,7 +60,7 @@ Eval API 的受信管理准备流程可在 `importPromptDataset(input, {datasetI
 
 Dataset/Data 的新实体 ID 使用原生 `crypto.randomUUID()`，与 SP 的 ID 生成方式一致；两类 Bundle、Session 和素材 ID 由 Eval API 资源目录生成。平台 Dataset/Data ID 与资源引用 ID 都由同一个 `platformIdSchema` 按 SP 的 Zod UUID 校验与小写规范化模式处理：导入可接受大小写混合的 UUID，查重、Store 比较、目录读取、绑定删除检查、查询和返回值统一使用小写身份；Data 业务字段保持原值。创建实体时输入不允许调用方覆盖实体 ID。修改是全量替换可编辑字段，不是 PATCH；省略可选字段表示移除该字段。查询不存在的单个实体返回 null。数据库读写失败原样抛出，不能转成空结果。
 
-Data 可以关联到同一用户的多个 Dataset，关联不复制 Data。修改 Data 会影响该用户所有引用它的 Dataset，但不影响已有 Project。重复关联和重复解除关联不报错，批量关联必须全成功或全失败。Eval API 删除 Dataset/Data 时设置 `deleted_at`，不删除行；被活动 Dataset 引用的 Data 不能删除，Project 保存的是 Data 副本，不阻止删除。删除已不存在的实体是无操作。列表必须按实体 ID 稳定排序；查询不存在 Dataset 的 Data 列表应抛出 `DatasetEntityNotFoundError`，不能伪装成空集合。
+Data 可以关联到同一用户的多个 Dataset，关联不复制 Data。修改 Data 会影响该用户所有引用它的 Dataset，但不影响已有 Project。重复关联和重复解除关联不报错，批量关联必须全成功或全失败。Eval API 删除 Dataset/Data 时设置 `deleted_at`，不删除行；被活动 Dataset 引用的 Data 不能删除，Project 保存的是 Data 副本，不阻止删除。删除已不存在的实体是无操作。Dataset 列表和未指定 Dataset 的全局 Data 列表按实体 ID 稳定排序；指定 Dataset 的 `listData(datasetId)` / `getDatasetSnapshot` / 导出按已验证的成员上传/新增顺序，老关联无法证明时采用确定性的回退顺序，**不**宣称 UUID 最小的是原始文件第一条。查询不存在 Dataset 的 Data 列表应抛出 `DatasetEntityNotFoundError`，不能伪装成空集合。
 
 ## 文档格式
 
@@ -95,7 +95,7 @@ JSON 和 YAML 使用同一个结构：
 
 解析不会生成 ID 或写入数据库；已提供的平台 ID 在解析时规范为小写。导入时为缺失的 `datasetId`、`dataId` 生成 UUID，返回包含小写实际 ID 的 `DatasetSnapshot`。导出保留全部 ID，能够恢复共享关系。没有 ID 的同一文档再次导入会创建新实体；需要原身份恢复时应使用导出文档。
 
-整个导入必须一次原子提交：新 Dataset 可以复用已有、内容完全相同的 Data ID；同一个 ID 对应不同内容时抛出 `DatasetIdentityConflictError`，不覆盖原记录。已有 Dataset 只有在元数据、Data ID 集合和每条 Data 内容都相同时才视为重复导入，Data 的排列顺序不构成冲突；否则整批拒绝。一个文档内不能重复声明同一个 Data ID。
+整个导入必须一次原子提交：新 Dataset 可以复用已有、内容完全相同的 Data ID；同一个 ID 对应不同内容时抛出 `DatasetIdentityConflictError`，不覆盖原记录。已有 Dataset 只有在元数据、Data ID 集合和每条 Data 内容都相同，且已验证的成员位置与原文件顺序一致时才视为重复导入；顺序不同或内容不同都整批拒绝。旧 Dataset 的成员位置未知时仅能核对身份和内容，不能推断旧文件顺序。一个文档内不能重复声明同一个 Data ID。**首次成功导入**时，Eval API 的 Store 按文档/Prompt 文件里的 Data 数组顺序保存成员位置（不是 ID 排序）；同一文件的重放不改写首次已保存的位置。新建单个 Data、批量新增、关联已有 Data 按请求顺序追加（已有成员重复关联不变）。`DatasetSnapshot` 不增添成员位置字段，Data 业务 JSON 也不承担这个内部关系事实。
 
 Dataset、文档外壳和资源引用使用严格 schema；Data 允许任意其他 JSON 业务字段，但 `userPrompt`、`evalPrompt` 和资源引用仍按明确契约校验。Data 输入不能用扩展字段覆盖平台生成的 `dataId`，原身份恢复只通过带 ID 的导入文档。错误的对象/数组形状、空白 prompt 和不能无损表示为 JSON 的值都会失败。JSON 和 YAML 都拒绝同一个对象内的重复字段名，包括转义后相同的 JSON 字段名；不同对象使用相同字段名不构成冲突。JSON 不接受注释、尾逗号或其他 JSONC 扩展。YAML 使用严格模式，拒绝非字符串映射键、未知 tag、多文档和 alias；序列化不会输出 alias。文本数据与素材引用不会被隐式转换或下载。
 
@@ -106,7 +106,7 @@ Dataset、文档外壳和资源引用使用严格 schema；Data 允许任意其�
 - Dataset/Data 主键唯一，关联键 `(datasetId, dataId)` 唯一。
 - 关联两端必须存在；创建、修改、批量关联、导入和带关联约束的删除都在数据库边界保证原子性，不能以服务层“先查询，再分别写入”代替事务。
 - 删除 Data 的引用检查和删除必须是同一个受保护操作；并发新增关联不能绕过限制。
-- `getDatasetSnapshot()` 必须返回同一读取时点的 Dataset、关联和 Data 内容，不能拼接不同读取时点的结果。
+- `getDatasetSnapshot()` 必须返回同一读取时点的 Dataset、关联和 Data 内容，不能拼接不同读取时点的结果。应用 Store 的 nullable 关联位置仅证明新写入顺序；旧 `NULL` 不填假值。旧 Moss `prepare` 的 owner-scoped completed `plan.dataIds` 在完整成员身份/receipt 证明成立时可作为只读回退；其他旧 Dataset 的原始文件顺序不可恢复，管理选项会显式返回 `order:"unknown"`。
 - 领域失败使用 `DatasetEntityNotFoundError`、`DatasetIdentityConflictError`、`DataInUseError`，用户输入失败使用 `DatasetInputError`；不引入 HTTP 错误或掩盖未知 I/O 错误。
 
 本包不依赖 SP 包，也不复制 SP 的数据库实现。它使用原生 UUID/JSON、Zod/YAML 和 `jsonc-parser` 的严格遍历能力检查重复 JSON 字段，并在自己的 Zod schema 中沿用 SP 已采用的 UUID 校验与小写规范化模式；真实数据库客户端、事务执行和 Workspace 素材能力由其所属边界提供。

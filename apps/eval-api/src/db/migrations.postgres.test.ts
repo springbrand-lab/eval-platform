@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { summarizeResourceSnapshot, type AgentResourceSnapshot } from "@eval-platform/eval-contracts";
 import { compactResourceSnapshot } from "@eval-platform/eval-metrics";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createPostgresResourceSnapshotReader } from "./attempt-resources.js";
@@ -11,7 +11,7 @@ import { createPostgresMetricsSource } from "./metrics.js";
 import { migrateDatabase } from "./migrations.js";
 import { createPostgresProjectPlanReader } from "./project-plans.js";
 import { createPostgresRuntimeStore } from "./runtime.js";
-import { attemptResources, datasets } from "./schema.js";
+import { attemptResources, data, datasetData, datasets } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
 import { buildCommand, makeData, release, seedProject } from "./test-fixtures.js";
 import { nativeToolBodyPair } from "../sp/native-test-fixture.js";
@@ -87,6 +87,59 @@ describe.skipIf(!connection)("deployment database migrations", () => {
       .toBe("migration_probe");
     await expect(migrateDatabase(database.db, { migrationsFolder: nextFolder })).resolves.toBeUndefined();
   });
+});
+
+describe.skipIf(!connection)("Dataset membership order migration", () => {
+  let database: Awaited<ReturnType<typeof createTestDatabase>>;
+  let directory: string;
+
+  beforeAll(async () => {
+    directory = await mkdtemp(path.join(tmpdir(), "eval-dataset-order-upgrade-"));
+    await cp(migrationsFolder, directory, { recursive: true });
+    const journalPath = path.join(directory, "meta/_journal.json");
+    const journal = JSON.parse(await readFile(journalPath, "utf8"));
+    journal.entries = journal.entries.filter((entry: { idx: number }) => entry.idx <= 10);
+    await writeFile(journalPath, JSON.stringify(journal));
+    database = await createTestDatabase(connection!, (db) => migrate(db, { migrationsFolder: directory }));
+  }, 30_000);
+
+  afterAll(async () => {
+    if (database) await database.destroy();
+    if (directory) await rm(directory, { recursive: true, force: true });
+  }, 30_000);
+
+  it("retains the unchanged applied prefix and legacy unknowns, then accepts unique known positions", async () => {
+    const { db } = database;
+    const datasetId = crypto.randomUUID();
+    const first = crypto.randomUUID();
+    const second = crypto.randomUUID();
+    await db.insert(datasets).values({ datasetId, ownerUserId: "migration-test", kind: "general", name: "Legacy" });
+    await db.insert(data).values([
+      { dataId: first, ownerUserId: "migration-test", content: { userPrompt: "first" } },
+      { dataId: second, ownerUserId: "migration-test", content: { userPrompt: "second" } },
+    ]);
+    await db.execute(sql`INSERT INTO eval_dataset_data (owner_user_id, dataset_id, data_id)
+      VALUES (${"migration-test"}, ${datasetId}, ${first}), (${"migration-test"}, ${datasetId}, ${second})`);
+    const before = (await db.execute(sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`)).rows;
+    expect(before).toHaveLength(11);
+    expect((await db.execute(sql`SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'eval_dataset_data' AND column_name = 'position'`)).rows).toEqual([]);
+
+    await migrateDatabase(db, { migrationsFolder });
+    const history = (await db.execute(sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`)).rows;
+    expect(history.slice(0, before.length)).toEqual(before);
+    expect(history).toHaveLength(12);
+    expect((await db.select().from(datasetData).where(eq(datasetData.datasetId, datasetId)))
+      .map((row) => row.position)).toEqual([null, null]);
+    await db.update(datasetData).set({ position: 0 }).where(eq(datasetData.dataId, first));
+    await expect(db.update(datasetData).set({ position: 0 }).where(eq(datasetData.dataId, second)))
+      .rejects.toThrow(); // Same Dataset cannot have two known members at the same position.
+    await expect(db.update(datasetData).set({ position: -1 }).where(eq(datasetData.dataId, second)))
+      .rejects.toThrow();
+    await db.update(datasetData).set({ position: 1 }).where(eq(datasetData.dataId, second));
+    await expect(migrateDatabase(db, { migrationsFolder })).resolves.toBeUndefined();
+    expect((await db.execute(sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`)).rows).toEqual(history);
+  }, 30_000);
 });
 
 describe.skipIf(!connection)("resource snapshot JSON migration", () => {

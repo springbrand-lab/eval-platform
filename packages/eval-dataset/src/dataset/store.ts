@@ -11,12 +11,14 @@ export interface DatasetStore {
   createDataBatch(datasetId: string, data: readonly Data[]): Promise<void>;
   updateData(data: Data): Promise<void>;
   getData(dataId: string): Promise<Data | null>;
+  /** A scoped list follows proven membership order; an unscoped list is stable by Data ID. */
   listData(datasetId?: string): Promise<readonly Data[]>;
   deleteData(dataId: string): Promise<void>;
   attachData(datasetId: string, dataIds: readonly string[]): Promise<void>;
   detachData(datasetId: string, dataIds: readonly string[]): Promise<void>;
+  /** One consistent Dataset/relationship/Data read, in its verified (or deterministic unknown) member order. */
   getDatasetSnapshot(datasetId: string): Promise<DatasetSnapshot | null>;
-  /** `prompt` persists the stricter Dataset kind; omitted means general import. */
+  /** `prompt` persists the stricter Dataset kind; new memberships use snapshot.data's file order. */
   importDataset(snapshot: DatasetSnapshot, options?: { readonly kind: "prompt" }): Promise<void>;
 }
 

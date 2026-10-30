@@ -318,11 +318,15 @@ export const datasetData = pgTable("eval_dataset_data", {
   ownerUserId: text("owner_user_id").notNull(),
   datasetId: uuid("dataset_id").notNull(),
   dataId: uuid("data_id").notNull(),
+  /** NULL is a pre-migration member with no provable original file position. */
+  position: integer("position"),
 }, (table) => [
   primaryKey({ columns: [table.datasetId, table.dataId] }),
   foreignKey({ name: "eval_dataset_data_dataset_fk", columns: [table.ownerUserId, table.datasetId], foreignColumns: [datasets.ownerUserId, datasets.datasetId] }).onDelete("cascade"),
   foreignKey({ name: "eval_dataset_data_data_fk", columns: [table.ownerUserId, table.dataId], foreignColumns: [data.ownerUserId, data.dataId] }).onDelete("restrict"),
   index("eval_dataset_data_data_idx").on(table.dataId),
+  uniqueIndex("eval_dataset_data_position_uq").on(table.datasetId, table.position),
+  check("eval_dataset_data_position_ck", sql`${table.position} IS NULL OR ${table.position} >= 0`),
 ]);
 
 /** A Dataset as bound at Project creation; never a foreign key to the live catalog. */

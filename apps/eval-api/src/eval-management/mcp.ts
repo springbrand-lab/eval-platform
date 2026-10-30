@@ -22,7 +22,7 @@ import { MANAGEMENT_DOCUMENT_PATH, streamDocument } from "./documents.js";
 export const EVAL_MANAGEMENT_MCP_PATH = "/mcp/eval-management";
 const SERVER = { name: "eval-platform-eval-management", version: "1.0.0" };
 const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
-  list_options: "Page Agent/Dataset/Project/Schema choices. project_detail reads the frozen plan's Schema ID. output_schema_detail reads the active catalog; project_schema_detail(projectId) reads the owned, digest-checked frozen Project Schema even after catalog deletion. Small JSON uses schemaOffset; streamRequired:true needs the fixed authenticated documents GET (kind=project_schema for Projects). Verify the displayed SHA-256 and Project Schema ID/digest; source redactions are explicit.",
+  list_options: "Page Agent/Dataset/Project/Schema choices. dataset_data(datasetId) returns at most five safe Data IDs/names; order:upload is proven original membership, order:unknown never identifies row 1. project_detail reads the frozen plan's Schema ID. output_schema_detail reads the active catalog; project_schema_detail(projectId) reads the owned, digest-checked frozen Project Schema even after catalog deletion. Small JSON uses schemaOffset; streamRequired:true needs the fixed authenticated documents GET (kind=project_schema for Projects). Verify the displayed SHA-256 and Project Schema ID/digest; source redactions are explicit.",
   prepare_inputs: "Prepare a Prompt Dataset from an uploaded JSON/JSONL file and up to 50 per-row Subject/Evaluator resource mappings. Creates Material/Session Bundles separately and binds each Data before any Project can start. Reuse operationKey after an unknown result.",
   get_preparation: "Read bounded durable progress, IDs and stage receipts by operationKey; no prompt, Schema content, bytes or attachment URL. Also reports uncertain Skill/Reference/Schema writes.",
   search_agent_resources: "Search live Eval SP resources. Actions need supplierId or unassigned:true; use action_groups first. id reads an Action or Reference. Toolkit pages use cursor, not page. Never returns connection credentials.",
@@ -87,7 +87,7 @@ async function handle(c: Context<AppBindings>, message: Record<string, unknown>)
         const category = record(result)?.category;
         const metrics = name === "get_metrics";
         const smallCatalog = name === "list_options"
-          && (category === "output_schemas" || category === "output_schema_detail"
+          && (category === "dataset_data" || category === "output_schemas" || category === "output_schema_detail"
             || category === "project_schema_detail");
         return mcpResult(id, { content: [{ type: "text", text: text(result,
           metrics ? METRICS_TOOL_RESULT_BYTES : smallCatalog ? TAKT_RESULT_CHARS : Infinity,

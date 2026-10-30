@@ -4,16 +4,18 @@ import {
   DataInUseError,
   DatasetEntityNotFoundError,
   DatasetIdentityConflictError,
+  DatasetInputError,
   assertPromptData,
   assertPromptDatasetMetadata,
   dataSchema,
   datasetSchema,
 } from "@eval-platform/eval-dataset";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { READ_SNAPSHOT, type EvalDb } from "./client.js";
+import { resolveDatasetMemberOrder, type DatasetMemberOrder } from "./dataset-order.js";
 import { requireOwnerUserId } from "./owner.js";
 import { assertDataReferencesSelectable } from "./resource-catalog.js";
-import { data, datasetData, datasets } from "./schema.js";
+import { data, datasetData, datasets, managementOperations } from "./schema.js";
 
 type DatasetReader = Pick<EvalDb, "select">;
 type DatasetWriter = Parameters<Parameters<EvalDb["transaction"]>[0]>[0];
@@ -43,6 +45,45 @@ function dataContent(record: Data): Omit<Data, "dataId"> {
   return content;
 }
 
+/** A locked Dataset row serializes all membership writes, including position allocation. */
+async function nextMemberPosition(transaction: DatasetWriter, owner: string, datasetId: string, count: number): Promise<number> {
+  const [row] = await transaction.select({ last: sql<number | null>`max(${datasetData.position})` })
+    .from(datasetData).where(and(eq(datasetData.ownerUserId, owner), eq(datasetData.datasetId, datasetId)));
+  const next = (row?.last ?? -1) + 1;
+  if (next + count - 1 > 2_147_483_647) throw new DatasetInputError("Dataset membership positions are exhausted");
+  return next;
+}
+
+type Membership = { readonly datasetId: string; readonly dataId: string; readonly position: number | null };
+type DatasetIdentity = Pick<typeof datasets.$inferSelect, "datasetId" | "kind">;
+
+/** Share the same proof and fallback for Dataset reads, Project selection and management paging. */
+export async function orderDatasetMemberships<T extends Membership>(
+  reader: DatasetReader, owner: string, selected: readonly DatasetIdentity[], members: readonly T[],
+): Promise<Map<string, { readonly order: DatasetMemberOrder; readonly members: readonly T[] }>> {
+  const byDataset = new Map<string, T[]>();
+  for (const member of members) {
+    const entries = byDataset.get(member.datasetId) ?? [];
+    entries.push(member);
+    byDataset.set(member.datasetId, entries);
+  }
+  const candidates = selected.filter(({ datasetId, kind }) =>
+    kind === "prompt" && (byDataset.get(datasetId)?.length ?? 0) > 0
+    && byDataset.get(datasetId)!.every(({ position }) => position === null));
+  const plans = candidates.length === 0 ? [] : await reader.select({
+    ownerUserId: managementOperations.ownerUserId, kind: managementOperations.kind,
+    status: managementOperations.status, plan: managementOperations.plan, stages: managementOperations.stages,
+  }).from(managementOperations).where(and(
+    eq(managementOperations.ownerUserId, owner), eq(managementOperations.kind, "prepare"),
+    eq(managementOperations.status, "completed"),
+    inArray(sql<string>`${managementOperations.plan}->>'datasetId'`, candidates.map(({ datasetId }) => datasetId)),
+  ));
+  return new Map(selected.map((dataset) => [dataset.datasetId, resolveDatasetMemberOrder(
+    owner, dataset, byDataset.get(dataset.datasetId) ?? [],
+    plans.filter(({ plan }) => plan.datasetId === dataset.datasetId),
+  )]));
+}
+
 export async function readDatasetSnapshots(
   reader: DatasetReader,
   ownerUserId: string,
@@ -54,20 +95,16 @@ export async function readDatasetSnapshots(
       isNull(datasets.deletedAt)))
     .orderBy(datasets.datasetId);
   if (rows.length === 0) return [];
-  const members = await reader.select({ datasetId: datasetData.datasetId, dataId: data.dataId, content: data.content })
+  const members = await reader.select({
+    datasetId: datasetData.datasetId, dataId: data.dataId, position: datasetData.position, content: data.content,
+  })
     .from(datasetData)
     .innerJoin(data, and(eq(datasetData.dataId, data.dataId), eq(data.ownerUserId, datasetData.ownerUserId)))
-    .where(and(eq(datasetData.ownerUserId, ownerUserId), inArray(datasetData.datasetId, rows.map((row) => row.datasetId))))
-    .orderBy(datasetData.datasetId, data.dataId);
-  const dataByDataset = new Map<string, Data[]>();
-  for (const member of members) {
-    const entries = dataByDataset.get(member.datasetId) ?? [];
-    entries.push(dataFromRow(member));
-    dataByDataset.set(member.datasetId, entries);
-  }
+    .where(and(eq(datasetData.ownerUserId, ownerUserId), inArray(datasetData.datasetId, rows.map((row) => row.datasetId))));
+  const ordered = await orderDatasetMemberships(reader, ownerUserId, rows, members);
   return rows.map((row) => ({
     dataset: datasetFromRow(row),
-    data: dataByDataset.get(row.datasetId) ?? [],
+    data: ordered.get(row.datasetId)!.members.map(dataFromRow),
   }));
 }
 
@@ -122,7 +159,10 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
           dataId: entry.dataId, ownerUserId, content: dataContent(entry),
         }).onConflictDoNothing().returning({ dataId: data.dataId });
         if (inserted.length === 0) throw new DatasetIdentityConflictError("data", entry.dataId);
-        if (target) await transaction.insert(datasetData).values({ ownerUserId, datasetId: target.datasetId, dataId: entry.dataId });
+        if (target) await transaction.insert(datasetData).values({
+          ownerUserId, datasetId: target.datasetId, dataId: entry.dataId,
+          position: await nextMemberPosition(transaction, ownerUserId, target.datasetId, 1),
+        });
       });
     },
     async createDataBatch(datasetId, records) {
@@ -135,7 +175,10 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
         }
         if (!entries.length) return;
         await transaction.insert(data).values(entries.map((entry) => ({ dataId: entry.dataId, ownerUserId, content: dataContent(entry) })));
-        await transaction.insert(datasetData).values(entries.map((entry) => ({ ownerUserId, datasetId, dataId: entry.dataId })));
+        const start = await nextMemberPosition(transaction, ownerUserId, datasetId, entries.length);
+        await transaction.insert(datasetData).values(entries.map((entry, offset) => ({
+          ownerUserId, datasetId, dataId: entry.dataId, position: start + offset,
+        })));
       });
     },
     async updateData(record) {
@@ -206,8 +249,17 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
         if (dataset.kind === "prompt") {
           for (const row of existing) assertPromptData(dataFromRow(row));
         }
-        await transaction.insert(datasetData).values(uniqueIds.map((dataId) => ({ ownerUserId, datasetId, dataId })))
-          .onConflictDoNothing();
+        const existingMembers = await transaction.select({ dataId: datasetData.dataId }).from(datasetData)
+          .where(and(eq(datasetData.ownerUserId, ownerUserId), eq(datasetData.datasetId, datasetId),
+            inArray(datasetData.dataId, uniqueIds)));
+        const alreadyAttached = new Set(existingMembers.map(({ dataId }) => dataId));
+        const newIds = [...new Set(dataIds)].filter((dataId) => !alreadyAttached.has(dataId));
+        if (newIds.length) {
+          const start = await nextMemberPosition(transaction, ownerUserId, datasetId, newIds.length);
+          await transaction.insert(datasetData).values(newIds.map((dataId, offset) => ({
+            ownerUserId, datasetId, dataId, position: start + offset,
+          }))).onConflictDoNothing({ target: [datasetData.datasetId, datasetData.dataId] });
+        }
       });
     },
     async detachData(datasetId, dataIds) {
@@ -253,17 +305,18 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
           throw new DatasetIdentityConflictError("dataset", incoming.datasetId);
         }
 
-        const incomingData = snapshot.data.map((entry) => dataSchema.parse(entry))
-          .sort((left, right) => left.dataId.localeCompare(right.dataId));
-        for (const entry of incomingData) {
+        const incomingData = snapshot.data.map((entry) => dataSchema.parse(entry));
+        // Lock shared Data in a deterministic order, but retain the *file* order for membership positions.
+        const lockedData = [...incomingData].sort((left, right) => left.dataId.localeCompare(right.dataId));
+        for (const entry of lockedData) {
           if (kind === "prompt") assertPromptData(entry);
         }
         const seenIds = new Set<string>();
-        for (const entry of incomingData) {
+        for (const entry of lockedData) {
           if (seenIds.has(entry.dataId)) throw new DatasetIdentityConflictError("data", entry.dataId);
           seenIds.add(entry.dataId);
         }
-        for (const entry of incomingData) {
+        for (const entry of lockedData) {
           const [lockedData] = await transaction.select().from(data)
             .where(and(eq(data.ownerUserId, ownerUserId), eq(data.dataId, entry.dataId))).for("update");
           await assertDataReferencesSelectable(transaction, ownerUserId, entry,
@@ -281,16 +334,25 @@ export function createPostgresDatasetStore(db: EvalDb, ownerUserId: string): Dat
           }
         }
 
-        const existingMembers = await transaction.select({ dataId: datasetData.dataId })
+        const existingMembers = await transaction.select({
+          dataId: datasetData.dataId, position: datasetData.position,
+        })
           .from(datasetData).where(and(eq(datasetData.ownerUserId, ownerUserId), eq(datasetData.datasetId, incoming.datasetId)))
           .orderBy(datasetData.dataId);
         if (!created) {
-          if (!isDeepStrictEqual(existingMembers.map((member) => member.dataId), incomingData.map((entry) => entry.dataId))) {
+          if (!isDeepStrictEqual(existingMembers.map((member) => member.dataId), lockedData.map((entry) => entry.dataId))) {
+            throw new DatasetIdentityConflictError("dataset", incoming.datasetId);
+          }
+          if (existingMembers.length > 0 && existingMembers.every(({ position }) => position !== null)
+            && !isDeepStrictEqual(
+              [...existingMembers].sort((left, right) => left.position! - right.position!).map(({ dataId }) => dataId),
+              incomingData.map(({ dataId }) => dataId),
+            )) {
             throw new DatasetIdentityConflictError("dataset", incoming.datasetId);
           }
         } else if (incomingData.length > 0) {
-          await transaction.insert(datasetData).values(incomingData.map((entry) => ({
-            ownerUserId, datasetId: incoming.datasetId, dataId: entry.dataId,
+          await transaction.insert(datasetData).values(incomingData.map((entry, position) => ({
+            ownerUserId, datasetId: incoming.datasetId, dataId: entry.dataId, position,
           })));
         }
       });

@@ -17,10 +17,11 @@ import {
   type RuntimeRunRecord,
 } from "@eval-platform/eval-runtime";
 import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
-import { addToGroup, sqlBatches } from "./batch.js";
+import { sqlBatches } from "./batch.js";
 import type { FrozenCopy } from "../agent-configs.js";
 import type { DatasetSelection } from "../projects/schemas.js";
 import { constraintViolation, READ_SNAPSHOT, type EvalDb } from "./client.js";
+import { orderDatasetMemberships } from "./dataset.js";
 import { ProjectCreationKeyTakenError, ProjectEvaluationPlanLockedError } from "./errors.js";
 import { requireOwnerUserId } from "./owner.js";
 import {
@@ -115,19 +116,18 @@ export function createPostgresProjectStore(db: EvalDb, ownerUserId: string) {
         const rows = await transaction.select().from(datasets)
           .where(and(eq(datasets.ownerUserId, owner), inArray(datasets.datasetId, ids), isNull(datasets.deletedAt)));
         const members = await transaction
-          .select({ datasetId: datasetData.datasetId, dataId: data.dataId, content: data.content }).from(datasetData)
+          .select({
+            datasetId: datasetData.datasetId, dataId: data.dataId, position: datasetData.position, content: data.content,
+          }).from(datasetData)
           .innerJoin(data, and(eq(data.dataId, datasetData.dataId), eq(data.ownerUserId, datasetData.ownerUserId)))
-          .where(and(eq(datasetData.ownerUserId, owner), inArray(datasetData.datasetId, ids), isNull(data.deletedAt)))
-          .orderBy(datasetData.datasetId, data.dataId);
+          .where(and(eq(datasetData.ownerUserId, owner), inArray(datasetData.datasetId, ids), isNull(data.deletedAt)));
         const byId = new Map(rows.map((row) => [row.datasetId, row]));
-        const membersOf = new Map<string, Data[]>();
-        for (const member of members) {
-          addToGroup(membersOf, member.datasetId, dataSchema.parse({ ...member.content, dataId: member.dataId }));
-        }
+        const ordered = await orderDatasetMemberships(transaction, owner, rows, members);
         return selections.map((selection, index) => {
           const row = byId.get(selection.datasetId);
           if (!row) throw new DatasetEntityNotFoundError("dataset", selection.datasetId);
-          const current = membersOf.get(row.datasetId) ?? [];
+          const current = ordered.get(row.datasetId)!.members.map((member) =>
+            dataSchema.parse({ ...member.content, dataId: member.dataId }));
           let selected = current;
           if (selection.dataIds !== undefined) {
             const wanted = new Set(selection.dataIds);

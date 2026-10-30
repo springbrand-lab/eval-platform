@@ -16,6 +16,132 @@ async function errorCode(response: Response) {
   return rpc.result.content[0].text;
 }
 
+describe("bounded Dataset member choices through list_options", () => {
+  const dataIds = Array.from({ length: 34 }, (_, index) =>
+    `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`);
+
+  it("pages 34 uploaded rows from row 1, not a guessed UUID-first row, with only safe names and IDs", async () => {
+    const app = setupManagement();
+    const rows = dataIds.map((dataId, index) => ({
+      dataId, content: {
+        name: ["First 🧪", "https://internal.example/secret", "password: secret-token",
+          "do not publish private task", "𐀀".repeat(1_000)][index] ?? `Case ${index + 1}`,
+        userPrompt: index === 3 ? "do not publish private task" : `PRIVATE_USER_PROMPT_${index}`,
+        evalPrompt: `PRIVATE_EVAL_PROMPT_${index}`, url: "https://private.example",
+        initialMaterials: [{ bundleId: BUNDLE, materialId: MATERIAL }],
+        privateNote: "PRIVATE_EXTRA_FIELD",
+      },
+    }));
+    const list = vi.spyOn(app.managed.store, "listDatasetData").mockImplementation(async (owner, datasetId, page, pageSize) => {
+      expect(owner).toBe(OWNER);
+      expect(datasetId).toBe(DATASET);
+      return { name: "Tasks 🧪", order: "upload", total: rows.length,
+        items: rows.slice((page - 1) * pageSize, page * pageSize) };
+    });
+    const rpc = (await (await app.call("list_options", { category: "dataset_data", datasetId: DATASET })).json()) as {
+      result: { content: [{ text: string }]; isError?: boolean };
+    };
+    expect(rpc.result.isError).not.toBe(true);
+    expect(Buffer.byteLength(rpc.result.content[0].text, "utf8")).toBeLessThanOrEqual(4_800);
+    const result = JSON.parse(rpc.result.content[0].text) as Record<string, unknown>;
+    expect(Object.keys(result).sort()).toEqual(["category", "datasetId", "items", "name", "order", "page", "pageSize", "total"]);
+    expect(result).toMatchObject({
+      category: "dataset_data", datasetId: DATASET, name: "Tasks 🧪", order: "upload",
+      page: 1, pageSize: 5, total: 34,
+      items: [
+        { dataId: dataIds[0], name: "First 🧪" },
+        { dataId: dataIds[1], sourceRedacted: true },
+        { dataId: dataIds[2], sourceRedacted: true },
+        { dataId: dataIds[3], sourceRedacted: true },
+        { dataId: dataIds[4], nameTruncated: true },
+      ],
+    });
+    expect((result.items as unknown[])).toHaveLength(5);
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE_|private task|https?:\/\/|password:|bundleId|materialId|userPrompt|evalPrompt|privateNote/u);
+    const next = await toolValue(await app.call("list_options", {
+      category: "dataset_data", datasetId: DATASET, page: 2, pageSize: 50,
+    }));
+    expect(next).toMatchObject({ order: "upload", page: 2, pageSize: 5, total: 34 });
+    expect(next.items).toEqual(dataIds.slice(5, 10).map((dataId, index) => ({
+      dataId, name: `Case ${index + 6}`,
+    })));
+    const last = await toolValue(await app.call("list_options", { category: "dataset_data", datasetId: DATASET, page: 8 }));
+    expect(last).toMatchObject({ page: 8, pageSize: 5, total: 34, items: [] });
+    expect(list).toHaveBeenCalledWith(OWNER, DATASET, 1, 5);
+    expect(app.services.projects.reviewSelection).not.toHaveBeenCalled();
+    expect(app.services.projects.create).not.toHaveBeenCalled();
+  });
+
+  it("labels unknown legacy order even while returning deterministic IDs for explicit selection", async () => {
+    const app = setupManagement();
+    vi.spyOn(app.managed.store, "listDatasetData").mockResolvedValue({
+      name: "Legacy", order: "unknown", total: 2,
+      items: [{ dataId: dataIds[1]!, content: { userPrompt: "private prompt" } },
+        { dataId: dataIds[0]!, content: { name: null, userPrompt: "private prompt" } }],
+    });
+    expect(await toolValue(await app.call("list_options", { category: "dataset_data", datasetId: DATASET })))
+      .toEqual({ category: "dataset_data", datasetId: DATASET, name: "Legacy",
+        order: "unknown", page: 1, pageSize: 5, total: 2,
+        items: [{ dataId: dataIds[1], name: null }, { dataId: dataIds[0], name: null }] });
+  });
+
+  it("keeps an owned Dataset readable when its name is redacted", async () => {
+    const app = setupManagement();
+    vi.spyOn(app.managed.store, "listDatasetData").mockResolvedValue({
+      name: "https://private.example/dataset", order: "upload", total: 1,
+      items: [{ dataId: dataIds[0]!, content: { name: "First", userPrompt: "PRIVATE_PROMPT" } }],
+    });
+    const result = await toolValue(await app.call("list_options", {
+      category: "dataset_data", datasetId: DATASET, pageSize: 1,
+    }));
+    expect(result).toMatchObject({
+      category: "dataset_data", datasetId: DATASET, name: "[REDACTED: sensitive source content]",
+      sourceRedacted: true, order: "upload", items: [{ dataId: dataIds[0], name: "First" }],
+    });
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE_PROMPT|private\.example/u);
+  });
+
+  it("rejects other selectors and never bypasses the owned, ready, non-deleted catalog read", async () => {
+    const app = setupManagement();
+    const list = vi.spyOn(app.managed.store, "listDatasetData");
+    for (const input of [
+      { category: "dataset_data" },
+      { category: "dataset_data", datasetId: DATASET, q: "First" },
+      { category: "dataset_data", datasetId: DATASET, dataIds: [dataIds[0]] },
+      { category: "dataset_data", datasetId: DATASET, projectId: project.projectId },
+      { category: "dataset_data", datasetId: DATASET, outputSchemaId: SCHEMA },
+      { category: "dataset_data", datasetId: DATASET, extra: "PRIVATE" },
+      { category: "dataset_data", datasetId: DATASET, pageSize: 0 },
+    ]) expect(await errorCode(await app.call("list_options", input))).toContain("REQUEST_INVALID_INPUT");
+    expect(list).not.toHaveBeenCalled();
+    list.mockRejectedValueOnce(new HttpError("EVAL_SP_CONFLICT", "Preparation pending"));
+    expect(await errorCode(await app.call("list_options", { category: "dataset_data", datasetId: DATASET })))
+      .toContain("EVAL_SP_CONFLICT");
+    list.mockRejectedValue(new HttpError("DATASET_NOT_FOUND"));
+    for (const datasetId of [DATASET, crypto.randomUUID()]) {
+      expect(await errorCode(await app.call("list_options", { category: "dataset_data", datasetId })))
+        .toContain("DATASET_NOT_FOUND");
+    }
+    expect(app.services.projects.create).not.toHaveBeenCalled();
+  });
+
+  it("stays under 4,800 UTF-8 bytes even when every label needs JSON escaping", async () => {
+    const app = setupManagement();
+    vi.spyOn(app.managed.store, "listDatasetData").mockResolvedValue({
+      name: "\ud800".repeat(5_000), order: "upload", total: 34,
+      items: dataIds.slice(0, 5).map((dataId) => ({
+        dataId, content: { name: "\ud800".repeat(5_000), userPrompt: "never shown" },
+      })),
+    });
+    const response = (await (await app.call("list_options", { category: "dataset_data", datasetId: DATASET })).json()) as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(response.result.isError).not.toBe(true);
+    expect(Buffer.byteLength(response.result.content[0].text, "utf8")).toBeLessThanOrEqual(4_800);
+    expect(JSON.parse(response.result.content[0].text)).toMatchObject({ pageSize: 5, total: 34 });
+  });
+});
+
 describe("trusted approval selections through the existing list_options tool", () => {
   it("reads the owned Project-frozen Schema body and original digest, not its renamed/deleted catalog entry", async () => {
     const app = setupManagement();
