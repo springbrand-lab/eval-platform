@@ -7,7 +7,9 @@ import { AGENT_LIBRARY_ROUTES } from "../sp/agent-library.js";
 
 /** MCP results go into a model context, never a bulk download. */
 export const TOOL_RESULT_BYTES = 32_000;
-/** Leave room below the trusted Takt adapter's 5 KB / 5,000-character model-output limit. */
+/** Only Metrics may use the larger trusted-adapter budget. */
+export const METRICS_TOOL_RESULT_BYTES = 10 * 1024 * 1024;
+/** JSON continuation and Schema catalog pages remain small. */
 export const TAKT_RESULT_CHARS = 4_800;
 export const MAX_PREVIEW_TARGETS = 50;
 const JSON_CHUNK_BYTES = 2_048;
@@ -178,10 +180,10 @@ export function jsonChunk(
   }
 }
 
-export function text(value: unknown, maxChars = Infinity): string {
+export function text(value: unknown, maxChars = Infinity, maxBytes = TOOL_RESULT_BYTES): string {
   const result = JSON.stringify(value);
   const byteLength = result === undefined ? 0 : Buffer.byteLength(result, "utf8");
-  if (result === undefined || byteLength > TOOL_RESULT_BYTES
+  if (result === undefined || byteLength > maxBytes
     || result.length > maxChars || byteLength > maxChars) {
     throw new HttpError("CATALOG_PAYLOAD_TOO_LARGE", "The result is too large; select a smaller page");
   }

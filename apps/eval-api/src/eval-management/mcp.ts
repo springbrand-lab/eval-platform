@@ -11,7 +11,7 @@ import { sameSecret } from "../lib/secret.js";
 import type { AppBindings } from "../lib/types.js";
 import { JSON_BODY_BYTES, MANAGEMENT_OUTPUT_SCHEMA_BODY_BYTES } from "../limits.js";
 import { serviceAccountScope } from "../middlewares/service-account.js";
-import { record, TAKT_RESULT_CHARS, text } from "./common.js";
+import { METRICS_TOOL_RESULT_BYTES, record, TAKT_RESULT_CHARS, text } from "./common.js";
 import { managementSchemas } from "./schemas.js";
 import { ManagementOutcomeUnknownError } from "./skill.js";
 import { callTool } from "./tools.js";
@@ -83,12 +83,14 @@ async function handle(c: Context<AppBindings>, message: Record<string, unknown>)
       }
       try {
         const result = await callTool(c, name as keyof typeof managementSchemas, params.arguments);
-        // Takt displays at most 5,000 characters of tool text. These reads must fail
-        // explicitly instead of letting an outer adapter silently clip a page.
+        // Other tools retain the MCP limit; trusted Takt alone handles large Metrics results.
         const category = record(result)?.category;
-        const taktBounded = name === "get_metrics"
-          || name === "list_options" && (category === "output_schemas" || category === "output_schema_detail");
-        return mcpResult(id, { content: [{ type: "text", text: text(result, taktBounded ? TAKT_RESULT_CHARS : Infinity) }] });
+        const metrics = name === "get_metrics";
+        const smallCatalog = name === "list_options"
+          && (category === "output_schemas" || category === "output_schema_detail");
+        return mcpResult(id, { content: [{ type: "text", text: text(result,
+          metrics ? METRICS_TOOL_RESULT_BYTES : smallCatalog ? TAKT_RESULT_CHARS : Infinity,
+          metrics ? METRICS_TOOL_RESULT_BYTES : undefined) }] });
       } catch (error) {
         return mcpResult(id, { content: [{ type: "text", text: toolFailure(error) }], isError: true });
       }

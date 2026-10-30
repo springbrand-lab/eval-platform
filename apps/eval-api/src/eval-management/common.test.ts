@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { redactLiteral } from "./common.js";
+import { redactLiteral, text } from "./common.js";
+
+const TEN_MIB = 10 * 1024 * 1024;
+
+describe("bounded management tool text", () => {
+  it("accepts metrics through 10 MiB, but rejects the next byte", () => {
+    const exact = { payload: "x".repeat(TEN_MIB - Buffer.byteLength('{"payload":""}')) };
+    expect(Buffer.byteLength(text(exact, TEN_MIB, TEN_MIB), "utf8")).toBe(TEN_MIB);
+    expect(() => text({ payload: exact.payload + "x" }, TEN_MIB, TEN_MIB)).toThrow();
+    expect(() => text({ payload: "x".repeat(32_000) })).toThrow();
+  });
+});
 
 describe("source literal redaction", () => {
   it("does not scan each suffix of a long benign string for a URL", () => {
