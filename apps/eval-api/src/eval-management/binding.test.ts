@@ -110,8 +110,22 @@ function fixture() {
   Object.assign(app.services, {
     initialResources: { inspectBindTarget, preflightBindMaterialBytes, bindData },
     materialBundles: {
+      list: async () => [...materials.values()].filter((row) => !row.deleted).map((row) => row.bundle),
+      listResources: async (id: string) => {
+        const saved = materials.get(id);
+        if (!saved || saved.deleted) throw new BundleResourceNotFoundError("Material Bundle", id);
+        return [saved.record];
+      },
+      listFiles: async (id: string, materialId: string) => {
+        const saved = materials.get(id);
+        if (!saved || saved.deleted || saved.record.materialId !== materialId) {
+          throw new BundleResourceNotFoundError("Material", materialId);
+        }
+        return [{ path: `/${saved.record.name}`, mediaType: saved.mediaType, byteSize: saved.bytes.byteLength }];
+      },
       get: async (id: string) => {
-        const bundle = materials.get(id)?.bundle;
+        const saved = materials.get(id);
+        const bundle = saved?.deleted ? null : saved?.bundle;
         if (!bundle) throw new BundleResourceNotFoundError("Material Bundle", id);
         return bundle;
       },
@@ -129,6 +143,12 @@ function fixture() {
       create: createMaterials,
     },
     sessionBundles: {
+      list: async () => [...sessions.values()].map((row) => row.bundle),
+      listResources: async (id: string) => sessions.get(id) ? [sessions.get(id)!.record] : [],
+      listFiles: async (id: string) => sessions.get(id) ? [{
+        path: `/context.${sessions.get(id)!.record.format}`, mediaType: "application/x-ndjson",
+        byteSize: sessions.get(id)!.bytes.byteLength,
+      }] : [],
       get: async (id: string) => {
         const bundle = sessions.get(id)?.bundle;
         if (!bundle) throw new BundleResourceNotFoundError("Session Bundle", id);
@@ -175,26 +195,33 @@ function fixture() {
 }
 
 describe("durable binding of existing Dataset Data", () => {
-  it("reuses uploaded Materials across Subject/Evaluator, plans a Session once and retains unrelated Data fields", async () => {
+  it("saves Material and Session independently, lists both, then binds their UUIDs to existing Data", async () => {
     const f = fixture();
     const before = await f.digest();
-    const material = f.app.managed.addUpload("material", "new.txt", encode("new asset bytes"), "text/plain");
-    const context = f.app.managed.addUpload("session", "context.jsonl", encode(session), "application/x-ndjson");
+    const materialUpload = f.app.managed.addUpload("material", "new.txt", encode("new asset bytes"), "text/plain");
+    const sessionUpload = f.app.managed.addUpload("session", "context.jsonl", encode(session), "application/x-ndjson");
+    const material = await toolValue(await f.app.call("save_initial_resource", {
+      operationKey: "saved-material", kind: "material", uploadRef: materialUpload,
+    }));
+    const context = await toolValue(await f.app.call("save_initial_resource", {
+      operationKey: "saved-session", kind: "session", uploadRef: sessionUpload, format: "jsonl",
+    }));
+    expect(await toolValue(await f.app.call("list_options", { category: "materials", bundleId: material.bundleId })))
+      .toMatchObject({ items: [{ materialId: material.materialId, byteSize: 15 }] });
+    expect(await toolValue(await f.app.call("list_options", { category: "sessions", bundleId: context.bundleId })))
+      .toMatchObject({ items: [{ sessionId: context.sessionId, format: "jsonl" }] });
+    const materialChoice = { bundleId: material.bundleId, materialId: material.materialId };
+    const sessionChoice = { bundleId: context.bundleId, sessionId: context.sessionId };
     const input = {
-      operationKey: "old-data-new-resources", datasetId: DATASET, dataId: DATA_ID, expectedContentDigest: before,
-      initialMaterials: [OLD, { uploadRef: material }],
-      evalInitialMaterials: [{ uploadRef: material }],
-      initialSession: { uploadRef: context, format: "jsonl" },
+      operationKey: "old-data-existing-resources", datasetId: DATASET, dataId: DATA_ID, expectedContentDigest: before,
+      initialMaterials: [OLD, materialChoice], evalInitialMaterials: [materialChoice], initialSession: sessionChoice,
     };
     const receipt = await toolValue(await f.app.call("bind_data_resources", input));
     expect(receipt).toEqual({ operationKey: input.operationKey, kind: "bind", status: "completed",
-      datasetId: DATASET, dataId: DATA_ID, contentDigest: await f.digest(),
-      resources: { total: 2, confirmed: 2 } });
+      datasetId: DATASET, dataId: DATA_ID, contentDigest: await f.digest() });
     expect(f.current()).toMatchObject({ name: "Case 1", userPrompt: "PRIVATE_USER_PROMPT",
       evalPrompt: "PRIVATE_EVAL_PROMPT", business: { url: "https://private.example", priority: 1 },
-      initialMaterials: [OLD, expect.objectContaining({ bundleId: expect.any(String), materialId: expect.any(String) })],
-      evalInitialMaterials: [expect.objectContaining({ bundleId: expect.any(String), materialId: expect.any(String) })],
-      initialSession: { bundleId: expect.any(String), sessionId: expect.any(String) } });
+      initialMaterials: [OLD, materialChoice], evalInitialMaterials: [materialChoice], initialSession: sessionChoice });
     expect(f.current().initialMaterials![1]).toEqual(f.current().evalInitialMaterials![0]);
     expect(f.createMaterials).toHaveBeenCalledTimes(1);
     expect(f.createSessions).toHaveBeenCalledTimes(1);
@@ -202,14 +229,13 @@ describe("durable binding of existing Dataset Data", () => {
     expect(detail).toMatchObject({ kind: "bind", status: "completed", binding: "confirmed",
       expectedContentDigest: before, contentDigest: receipt.contentDigest,
       initialMaterials: f.current().initialMaterials, evalInitialMaterials: f.current().evalInitialMaterials,
-      initialSession: f.current().initialSession,
-      resources: { total: 2, confirmed: 2, items: [
-        { kind: "material", status: "confirmed" }, { kind: "session", status: "confirmed" },
-      ] } });
+      initialSession: f.current().initialSession });
+    expect(detail).not.toHaveProperty("resources");
     expect(JSON.stringify(detail)).not.toMatch(/PRIVATE_|https?:\/\/|new asset bytes|Earlier private context|uploadRef/u);
     const plan = f.app.managed.operations.get(input.operationKey)!.plan;
-    expect(plan).toMatchObject({ version: 2, datasetId: DATASET, dataId: DATA_ID });
-    expect(plan).not.toHaveProperty("dataIds"); // bind must not become a prepare v1 original-file order proof.
+    expect(plan).toMatchObject({ version: 3, datasetId: DATASET, dataId: DATA_ID });
+    expect(plan).not.toHaveProperty("dataIds"); // bind never proves Prompt file order.
+    expect(plan).not.toHaveProperty("assets"); // only save owns a Bundle stage.
     expect(await toolValue(await f.app.call("bind_data_resources", input))).toEqual(receipt);
     expect(f.createMaterials).toHaveBeenCalledTimes(1);
     expect(f.createSessions).toHaveBeenCalledTimes(1);
@@ -218,17 +244,17 @@ describe("durable binding of existing Dataset Data", () => {
   });
 
   it.each([{ deleted: false, label: "active" }, { deleted: true, label: "soft-deleted" }])(
-    "rejects over-budget $label retained Materials before planning or creating a Bundle",
+    "rejects over-budget $label retained Materials before recording a binding",
     async ({ deleted }) => {
       const f = fixture();
       f.setExistingMaterial(EVAL_INITIAL_FILE_MAX_BYTES, deleted);
       const retained = [OLD, ...Array.from({ length: 3 }, () => f.addExistingMaterial(EVAL_INITIAL_FILE_MAX_BYTES))];
       f.change({ ...f.current(), initialMaterials: retained });
-      const uploadRef = f.app.managed.addUpload("material", "one-byte.txt", encode("x"), "text/plain");
+      const oneByte = f.addExistingMaterial(1);
       const input = {
         operationKey: `over-budget-${deleted ? "deleted" : "active"}`,
         datasetId: DATASET, dataId: DATA_ID, expectedContentDigest: await f.digest(),
-        initialMaterials: [...retained, { uploadRef }],
+        initialMaterials: [...retained, oneByte],
       };
       expect(retained.length * EVAL_INITIAL_FILE_MAX_BYTES).toBe(EVAL_INITIALIZATION_MAX_BYTES);
       expect(await errorCode(await f.app.call("bind_data_resources", input))).toContain("BUNDLE_FILE_TOO_LARGE");
@@ -237,29 +263,8 @@ describe("durable binding of existing Dataset Data", () => {
       expect(f.createSessions).not.toHaveBeenCalled();
       expect(f.bindData).not.toHaveBeenCalled();
       expect(f.app.managed.operations.size).toBe(0);
-      expect(f.app.managed.uploads.get(uploadRef)?.claimedBy).toBeNull();
       expect(f.current().initialMaterials).toEqual(retained);
     });
-
-  it("rechecks retained bytes before a pending-key replay writes an outstanding Bundle", async () => {
-    const f = fixture();
-    const retained = [OLD, ...Array.from({ length: 3 }, () => f.addExistingMaterial(EVAL_INITIAL_FILE_MAX_BYTES))];
-    f.change({ ...f.current(), initialMaterials: retained });
-    const uploadRef = f.app.managed.addUpload("material", "outstanding.txt", encode("x"), "text/plain");
-    const input = { operationKey: "old-pending-bind", datasetId: DATASET, dataId: DATA_ID,
-      expectedContentDigest: await f.digest(), initialMaterials: [...retained, { uploadRef }] };
-    f.createMaterials.mockImplementationOnce(async () => { throw new Error("catalog write not completed"); });
-    expect(await errorCode(await f.app.call("bind_data_resources", input))).toContain("INTERNAL_ERROR");
-    expect(f.app.managed.operations.get(input.operationKey)?.status).toBe("pending");
-    expect(f.createMaterials).toHaveBeenCalledOnce();
-    // Model an older pending plan admitted without counting its retained byte size.
-    // The owned catalog now reports the full size; replay must not issue another create.
-    f.setExistingMaterial(EVAL_INITIAL_FILE_MAX_BYTES);
-    expect(await errorCode(await f.app.call("bind_data_resources", input))).toContain("BUNDLE_FILE_TOO_LARGE");
-    expect(f.createMaterials).toHaveBeenCalledOnce();
-    expect(f.app.managed.operations.get(input.operationKey)?.status).toBe("pending");
-    expect(f.bindData).not.toHaveBeenCalled();
-  });
 
   it("allows a full separate byte budget per role, but never treats a deleted ref in the other field as retained", async () => {
     const f = fixture();
@@ -267,44 +272,42 @@ describe("durable binding of existing Dataset Data", () => {
     const retained = [OLD, f.addExistingMaterial(EVAL_INITIAL_FILE_MAX_BYTES),
       f.addExistingMaterial(EVAL_INITIAL_FILE_MAX_BYTES), f.addExistingMaterial(EVAL_INITIAL_FILE_MAX_BYTES - 1)];
     f.change({ ...f.current(), initialMaterials: retained, evalInitialMaterials: retained });
-    const uploadRef = f.app.managed.addUpload("material", "last-byte.txt", encode("x"), "text/plain");
+    const lastByte = f.addExistingMaterial(1);
     const input = {
       operationKey: "independent-role-budgets", datasetId: DATASET, dataId: DATA_ID,
       expectedContentDigest: await f.digest(),
-      initialMaterials: [...retained, { uploadRef }], evalInitialMaterials: [...retained, { uploadRef }],
+      initialMaterials: [...retained, lastByte], evalInitialMaterials: [...retained, lastByte],
     };
     expect(await toolValue(await f.app.call("bind_data_resources", input))).toMatchObject({
-      kind: "bind", status: "completed", resources: { total: 1, confirmed: 1 },
+      kind: "bind", status: "completed",
     });
-    expect(f.createMaterials).toHaveBeenCalledOnce();
+    expect(f.createMaterials).not.toHaveBeenCalled();
     expect(f.current().initialMaterials).toHaveLength(5);
     expect(f.current().evalInitialMaterials).toHaveLength(5);
     expect(f.current().initialMaterials?.[4]).toEqual(f.current().evalInitialMaterials?.[4]);
 
     const deleted = fixture();
     deleted.setExistingMaterial(EVAL_INITIAL_FILE_MAX_BYTES, true);
-    const newUpload = deleted.app.managed.addUpload("material", "blocked.txt", encode("x"), "text/plain");
+    const another = deleted.addExistingMaterial(1);
     expect(await errorCode(await deleted.app.call("bind_data_resources", {
       operationKey: "different-role-deleted-ref", datasetId: DATASET, dataId: DATA_ID,
-      expectedContentDigest: await deleted.digest(), evalInitialMaterials: [OLD, { uploadRef: newUpload }],
+      expectedContentDigest: await deleted.digest(), evalInitialMaterials: [OLD, another],
     }))).toContain("BUNDLE_RESOURCE_NOT_FOUND");
     expect(deleted.createMaterials).not.toHaveBeenCalled();
     expect(deleted.app.managed.operations.size).toBe(0);
   });
 
-  it("pages 17 new-resource receipts by five without clipping the complete post-bind reference lists", async () => {
+  it("keeps eight existing references per role and a Session in a bounded, unpaged binding receipt", async () => {
     const f = fixture();
-    const uploads = (role: string) => Array.from({ length: 8 }, (_, index) => ({
-      uploadRef: f.app.managed.addUpload("material", `${role}-${index}.txt`, encode("tiny"), "text/plain"),
-    }));
+    const refs = () => Array.from({ length: 8 }, () => f.addExistingMaterial(1));
+    const subject = refs(), evaluator = refs(), context = f.existingSession();
     const input = {
       operationKey: "b".repeat(200), datasetId: DATASET, dataId: DATA_ID, expectedContentDigest: await f.digest(),
-      initialMaterials: uploads("subject"), evalInitialMaterials: uploads("evaluator"),
-      initialSession: { uploadRef: f.app.managed.addUpload("session", "history.jsonl", encode(session)),
-        format: "jsonl" },
+      initialMaterials: subject, evalInitialMaterials: evaluator, initialSession: context,
     };
     const completed = await toolValue(await f.app.call("bind_data_resources", input));
-    expect(completed).toMatchObject({ resources: { total: 17, confirmed: 17 } });
+    expect(completed).toEqual({ operationKey: input.operationKey, kind: "bind", status: "completed",
+      datasetId: DATASET, dataId: DATA_ID, contentDigest: await f.digest() });
     for (const page of [1, 2, 3, 4, 5]) {
       const rpc = await (await f.app.call("get_preparation", { operationKey: input.operationKey, page })).json() as {
         result: { isError?: boolean; content: [{ text: string }] };
@@ -314,15 +317,14 @@ describe("durable binding of existing Dataset Data", () => {
       expect(text.length).toBeLessThanOrEqual(4_800);
       expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(4_800);
       const detail = JSON.parse(text) as {
-        page: number; pageSize: number; initialMaterials: unknown[]; evalInitialMaterials: unknown[];
-        resources: { total: number; confirmed: number; items: unknown[] };
+        initialMaterials: unknown[]; evalInitialMaterials: unknown[]; initialSession: unknown;
       };
-      expect(detail).toMatchObject({ page, pageSize: 5, resources: { total: 17, confirmed: 17 } });
-      expect(detail.resources.items).toHaveLength(page < 4 ? 5 : page === 4 ? 2 : 0);
-      expect(detail.initialMaterials).toHaveLength(8);
-      expect(detail.evalInitialMaterials).toHaveLength(8);
+      expect(detail).toMatchObject({ initialMaterials: subject, evalInitialMaterials: evaluator,
+        initialSession: context });
       expect(text).not.toContain("uploadRef");
     }
+    expect(f.createMaterials).not.toHaveBeenCalled();
+    expect(f.createSessions).not.toHaveBeenCalled();
   });
 
   it("replaces with old resources, clears only explicit null fields and leaves omitted refs unchanged", async () => {
@@ -334,13 +336,13 @@ describe("durable binding of existing Dataset Data", () => {
       evalInitialMaterials: [OLD], initialSession: existingSession,
     };
     const receipt = await toolValue(await f.app.call("bind_data_resources", input));
-    expect(receipt).toMatchObject({ kind: "bind", status: "completed", resources: { total: 0, confirmed: 0 } });
+    expect(receipt).toMatchObject({ kind: "bind", status: "completed" });
     expect(f.current()).toMatchObject({ initialMaterials: [OLD], evalInitialMaterials: [OLD],
       initialSession: existingSession });
     const detail = await toolValue(await f.app.call("get_preparation", { operationKey: input.operationKey }));
     expect(detail).not.toHaveProperty("initialMaterials"); // omitted, not implicitly cleared or replaced.
-    expect(detail).toMatchObject({ evalInitialMaterials: [OLD], initialSession: existingSession,
-      resources: { items: [] } });
+    expect(detail).toMatchObject({ evalInitialMaterials: [OLD], initialSession: existingSession });
+    expect(detail).not.toHaveProperty("resources");
     expect(f.createMaterials).not.toHaveBeenCalled();
     expect(f.createSessions).not.toHaveBeenCalled();
 
@@ -354,61 +356,33 @@ describe("durable binding of existing Dataset Data", () => {
     expect(f.current()).not.toHaveProperty("initialSession");
   });
 
-  it("fences pending work, reconciles a lost Data response by full post-bind digest and never replans assets", async () => {
+  it("fences pending work and reconciles a lost Data response by its full post-bind digest", async () => {
     const f = fixture();
-    const uploadRef = f.app.managed.addUpload("material", "lost.txt", encode("new bytes"), "text/plain");
+    const material = f.addExistingMaterial(8);
     const input = {
       operationKey: "response-lost", datasetId: DATASET, dataId: DATA_ID, expectedContentDigest: await f.digest(),
-      initialMaterials: [{ uploadRef }],
+      initialMaterials: [material],
     };
     f.loseResponse();
     expect(await errorCode(await f.app.call("bind_data_resources", input))).toContain("INTERNAL_ERROR");
     expect(f.writes()).toBe(1);
     const pending = await toolValue(await f.app.call("get_preparation", { operationKey: input.operationKey }));
-    expect(pending).toMatchObject({ kind: "bind", status: "outcome_unknown", binding: "attempted",
-      resources: { total: 1, confirmed: 1 } });
+    expect(pending).toMatchObject({ kind: "bind", status: "outcome_unknown", binding: "attempted" });
     await expect(f.app.managed.store.assertReadyDatasets(OWNER, [DATASET])).rejects.toThrow();
-    // The trusted staged bytes may have expired; planned IDs and the committed Data are enough to reconcile.
-    f.app.managed.uploads.set(uploadRef, { ...f.app.managed.uploads.get(uploadRef)!, expiresAt: new Date(0) });
     const recovered = await toolValue(await f.app.call("bind_data_resources", input));
     expect(recovered).toMatchObject({ status: "completed", contentDigest: await f.digest() });
     expect(f.writes()).toBe(1);
-    expect(f.createMaterials).toHaveBeenCalledTimes(1);
+    expect(f.createMaterials).not.toHaveBeenCalled();
     await expect(f.app.managed.store.assertReadyDatasets(OWNER, [DATASET])).resolves.toBeUndefined();
     expect(await toolValue(await f.app.call("get_preparation", { operationKey: input.operationKey })))
       .toMatchObject({ status: "completed", binding: "confirmed" });
   });
 
-  it("reads back a planned Material after a lost catalog write, without a second create or Data mutation", async () => {
-    const f = fixture();
-    const uploadRef = f.app.managed.addUpload("material", "uncertain.txt", encode("verified bytes"), "text/plain");
-    const input = { operationKey: "resource-response-lost", datasetId: DATASET, dataId: DATA_ID,
-      expectedContentDigest: await f.digest(), evalInitialMaterials: [{ uploadRef }] };
-    const write = f.createMaterials.getMockImplementation()!;
-    f.createMaterials.mockImplementationOnce(async (...args) => {
-      await write(...args);
-      throw new Error("catalog committed but response was lost");
-    });
-    expect(await errorCode(await f.app.call("bind_data_resources", input))).toContain("INTERNAL_ERROR");
-    expect(f.writes()).toBe(0);
-    expect(await toolValue(await f.app.call("get_preparation", { operationKey: input.operationKey })))
-      .toMatchObject({ status: "outcome_unknown", binding: "pending", resources: {
-        total: 1, confirmed: 0, items: [{ status: "attempted" }],
-      } });
-    const receipt = await toolValue(await f.app.call("bind_data_resources", input));
-    expect(receipt).toMatchObject({ status: "completed", resources: { total: 1, confirmed: 1 } });
-    expect(f.createMaterials).toHaveBeenCalledTimes(1);
-    expect(f.writes()).toBe(1);
-    expect(f.current().evalInitialMaterials).toEqual([expect.objectContaining({
-      bundleId: expect.any(String), materialId: expect.any(String),
-    })]);
-  });
-
   it("fails closed if Data changes after an uncertain binding, leaving the planned receipt historical", async () => {
     const f = fixture();
-    const uploadRef = f.app.managed.addUpload("material", "unknown.txt", encode("new bytes"), "text/plain");
+    const material = f.addExistingMaterial(8);
     const input = { operationKey: "stale-after-write", datasetId: DATASET, dataId: DATA_ID,
-      expectedContentDigest: await f.digest(), initialMaterials: [{ uploadRef }] };
+      expectedContentDigest: await f.digest(), initialMaterials: [material] };
     f.loseResponse();
     await f.app.call("bind_data_resources", input);
     expect(await errorCode(await f.app.call("bind_data_resources", {
@@ -419,17 +393,17 @@ describe("durable binding of existing Dataset Data", () => {
     expect(await errorCode(await f.app.call("bind_data_resources", input))).toContain("EVAL_SP_CONFLICT");
     expect(f.current().userPrompt).toBe("Edited after lost response");
     expect(f.writes()).toBe(1);
-    expect(f.createMaterials).toHaveBeenCalledTimes(1);
+    expect(f.createMaterials).not.toHaveBeenCalled();
     expect(await toolValue(await f.app.call("get_preparation", { operationKey: input.operationKey })))
       .toMatchObject({ kind: "bind", status: "outcome_unknown", binding: "attempted" });
   });
 
-  it("rejects stale Data, wrong membership, changed operation bodies and reuse of an upload under another key", async () => {
+  it("rejects stale Data, wrong membership, changed key intent and stale digest under a different key", async () => {
     const f = fixture();
     const digest = await f.digest();
-    const uploadRef = f.app.managed.addUpload("material", "claimed.txt", encode("new bytes"), "text/plain");
+    const material = f.addExistingMaterial(8);
     const input = { operationKey: "claimed", datasetId: DATASET, dataId: DATA_ID, expectedContentDigest: digest,
-      initialMaterials: [{ uploadRef }] };
+      initialMaterials: [material] };
     const changed = { ...f.current(), name: "Changed after review" };
     f.change(changed);
     expect(await errorCode(await f.app.call("bind_data_resources", input))).toContain("EVAL_SP_CONFLICT");
@@ -439,23 +413,22 @@ describe("durable binding of existing Dataset Data", () => {
     expect(await errorCode(await f.app.call("bind_data_resources", input))).toContain("DATA_NOT_FOUND");
     expect(f.app.managed.operations.size).toBe(0);
     const f2 = fixture();
-    const upload = f2.app.managed.addUpload("material", "claimed.txt", encode("new bytes"), "text/plain");
-    const first = { ...input, uploadRef: undefined, initialMaterials: [{ uploadRef: upload }] };
+    const first = { ...input, initialMaterials: [f2.addExistingMaterial(8)] };
     await toolValue(await f2.app.call("bind_data_resources", first));
     expect(await errorCode(await f2.app.call("bind_data_resources", {
       ...first, initialMaterials: null,
     }))).toContain("EVAL_SP_CONFLICT");
     expect(await errorCode(await f2.app.call("bind_data_resources", {
-      ...first, operationKey: "other-key", expectedContentDigest: await f2.digest(),
+      ...first, operationKey: "other-key",
     }))).toContain("EVAL_SP_CONFLICT");
-    expect(f2.createMaterials).toHaveBeenCalledTimes(1);
+    expect(f2.createMaterials).not.toHaveBeenCalled();
     f2.change({ ...f2.current(), name: "Edited after the completed receipt" });
     expect(await errorCode(await f2.app.call("bind_data_resources", first))).toContain("EVAL_SP_CONFLICT");
     expect(f2.current().name).toBe("Edited after the completed receipt");
     expect(f2.writes()).toBe(1);
   });
 
-  it("rejects malformed, duplicate or empty resource patches before any catalog or upload read", async () => {
+  it("rejects malformed, duplicate or inline-upload resource patches before any catalog read", async () => {
     const f = fixture();
     const base = { operationKey: "bad", datasetId: DATASET, dataId: DATA_ID, expectedContentDigest: await f.digest() };
     for (const input of [
@@ -465,6 +438,8 @@ describe("durable binding of existing Dataset Data", () => {
       { ...base, evalInitialMaterials: [OLD, OLD] },
       { ...base, expectedContentDigest: "A".repeat(64), initialSession: null },
       { ...base, initialSession: { uploadRef: crypto.randomUUID() } },
+      { ...base, initialSession: { uploadRef: crypto.randomUUID(), format: "jsonl" } },
+      { ...base, initialMaterials: [{ uploadRef: crypto.randomUUID() }] },
       { ...base, initialMaterials: [{ ...OLD, url: "https://private.example" }] },
       { ...base, initialMaterials: [{ uploadRef: "https://private.example" }] },
       { ...base, initialSession: null, dataContent: "PRIVATE_USER_PROMPT" },

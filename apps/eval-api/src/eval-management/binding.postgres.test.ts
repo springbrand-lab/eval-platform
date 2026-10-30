@@ -106,8 +106,8 @@ describe.skipIf(!connection)("PostgreSQL existing Data binding and active resour
       .rejects.toThrow();
 
     const key = crypto.randomUUID();
-    const plan = { version: 2, datasetId: dataset.datasetId, dataId: original.dataId,
-      expectedContentDigest: digest, contentDigest: nextDigest, patch, assets: [] };
+    const plan = { version: 3, datasetId: dataset.datasetId, dataId: original.dataId,
+      expectedContentDigest: digest, contentDigest: nextDigest, patch };
     await management.begin(OWNER, key, "bind", "a".repeat(64), plan);
     await expect(management.assertReadyDatasets(OWNER, [dataset.datasetId])).rejects.toThrow();
     await expect(management.listDatasetData(OWNER, dataset.datasetId, 1, 5)).rejects.toThrow();
@@ -190,7 +190,7 @@ describe.skipIf(!connection)("PostgreSQL existing Data binding and active resour
   });
 
   it.each([{ deleted: false, label: "active" }, { deleted: true, label: "soft-deleted" }])(
-    "rejects a new upload beside an already full $label field before any Bundle or operation write",
+    "rejects a new owned reference beside an already full $label field before binding",
     async ({ deleted }) => {
       const { datasets, dataset, original, materialBundles, sessionBundles, material } = await seeded();
       const large = Buffer.alloc(EVAL_INITIAL_FILE_MAX_BYTES).toString("base64");
@@ -210,12 +210,13 @@ describe.skipIf(!connection)("PostgreSQL existing Data binding and active resour
       Object.assign(app.services, {
         initialResources: createInitialResourceApi(database.db, OWNER), materialBundles, sessionBundles,
       });
-      const uploadRef = app.managed.addUpload("material", "one-byte.txt", new TextEncoder().encode("x"), "text/plain");
+      const oneByte = await materialBundles.createResource(material.bundleId, { ...labels,
+        files: [{ path: "/one-byte.txt", mediaType: "text/plain", contentBase64: "eA==" }] });
       const existingBundles = await materialBundles.list();
       const response = await (await app.call("bind_data_resources", {
         operationKey: `preflight-${deleted ? "deleted" : "active"}`,
         datasetId: dataset.datasetId, dataId: original.dataId, expectedContentDigest: await digestJson(current),
-        initialMaterials: [...refs, { uploadRef }],
+        initialMaterials: [...refs, { bundleId: oneByte.bundleId, materialId: oneByte.materialId }],
       })).json() as { result: { isError?: boolean; content: [{ text: string }] } };
       expect(response.result.isError).toBe(true);
       expect(response.result.content[0].text).toContain("BUNDLE_FILE_TOO_LARGE");
@@ -246,13 +247,16 @@ describe.skipIf(!connection)("PostgreSQL existing Data binding and active resour
     Object.assign(app.services, {
       initialResources: createInitialResourceApi(database.db, OWNER), materialBundles, sessionBundles,
     });
-    const uploadRef = app.managed.addUpload("material", "last-byte.txt", new TextEncoder().encode("x"), "text/plain");
+    const lastByte = await materialBundles.createResource(material.bundleId, { ...labels,
+      files: [{ path: "/last-byte.txt", mediaType: "text/plain", contentBase64: "eA==" }] });
+    const oneByte = { bundleId: lastByte.bundleId, materialId: lastByte.materialId };
     const result = await toolValue(await app.call("bind_data_resources", {
       operationKey: "separate-full-roles", datasetId: dataset.datasetId, dataId: original.dataId,
       expectedContentDigest: await digestJson(current),
-      initialMaterials: [...refs, { uploadRef }], evalInitialMaterials: [...refs, { uploadRef }],
+      initialMaterials: [...refs, oneByte], evalInitialMaterials: [...refs, oneByte],
     }));
-    expect(result).toMatchObject({ status: "completed", resources: { total: 1, confirmed: 1 } });
+    expect(result).toMatchObject({ status: "completed" });
+    expect(result).not.toHaveProperty("resources");
     const updated = (await datasets.getData(original.dataId))!;
     expect(updated.initialMaterials).toHaveLength(5);
     expect(updated.initialMaterials).toEqual(updated.evalInitialMaterials);
@@ -309,7 +313,7 @@ describe.skipIf(!connection)("PostgreSQL existing Data binding and active resour
     expect(await datasets.getData(original.dataId)).not.toHaveProperty("initialMaterials");
   });
 
-  it("uses the real managed byte ingress, planned catalog ID and PostgreSQL stages for disconnect replay", async () => {
+  it("uses real byte ingress, standalone saves, active discovery, Prompt import and guarded binding with PostgreSQL replay", async () => {
     const { datasets, dataset, original, material } = await seeded();
     const store = createPostgresManagementStore(database.db);
     const files = createManagementFiles(store, await openImportStaging(root, "management-uploads"));
@@ -329,7 +333,7 @@ describe.skipIf(!connection)("PostgreSQL existing Data binding and active resour
           ...lease.services.initialResources,
           async bindData(...args: Parameters<typeof lease.services.initialResources.bindData>) {
             const data = await lease.services.initialResources.bindData(...args);
-            if (loseBindingReply) { loseBindingReply = false; throw new Error("the committed reply was lost"); }
+            if (args[2] && loseBindingReply) { loseBindingReply = false; throw new Error("the committed reply was lost"); }
             return data;
           },
         } } };
@@ -341,49 +345,176 @@ describe.skipIf(!connection)("PostgreSQL existing Data binding and active resour
       method: "POST", headers: { Authorization: `Bearer ${MANAGEMENT_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
     });
+    const upload = async (kind: "material" | "session" | "prompt", name: string,
+      bytes: Uint8Array, mediaType: string) => {
+      const uploadId = crypto.randomUUID();
+      const response = await request(MANAGEMENT_UPLOAD_PATH, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${MANAGEMENT_TOKEN}`, "Content-Type": "application/octet-stream",
+          "X-Upload-Id": uploadId, "X-Upload-Kind": kind, "X-Upload-Name": name,
+          "X-Upload-Media-Type": mediaType, "X-Upload-Size": String(bytes.length),
+          "X-Upload-Sha256": createHash("sha256").update(bytes).digest("hex"),
+        },
+        body: new Uint8Array(bytes),
+      });
+      expect(response.status).toBe(201);
+      expect((await response.json() as { uploadRef: string }).uploadRef).toBe(uploadId);
+      return uploadId;
+    };
     const approval = await toolValue(await call("list_options", {
       category: "approval_dataset", datasetId: dataset.datasetId, dataIds: [original.dataId],
     }));
     const originalDigest = (approval.items as Array<{ contentDigest: string }>)[0]!.contentDigest;
     expect(originalDigest).toBe(await digestJson(original));
-    const bytes = new TextEncoder().encode("uploaded private bytes");
-    const uploadId = crypto.randomUUID();
-    const upload = await request(MANAGEMENT_UPLOAD_PATH, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${MANAGEMENT_TOKEN}`, "Content-Type": "application/octet-stream",
-        "X-Upload-Id": uploadId, "X-Upload-Kind": "material", "X-Upload-Name": "new.txt",
-        "X-Upload-Media-Type": "text/plain", "X-Upload-Size": String(bytes.length),
-        "X-Upload-Sha256": createHash("sha256").update(bytes).digest("hex"),
-      },
-      body: bytes,
+    const materialUpload = await upload("material", "new.txt",
+      new TextEncoder().encode("uploaded private bytes"), "text/plain");
+    const contextUpload = await upload("session", "history.json", new TextEncoder().encode(JSON.stringify({
+      entries: [{ id: "m1", message: { role: "user", content: "Previous private context", timestamp: 1 }, createdAt: 1 }],
+    })), "application/json");
+    const savedMaterial = await toolValue(await call("save_initial_resource", {
+      operationKey: "postgres-material", kind: "material", uploadRef: materialUpload,
+    }));
+    const savedSession = await toolValue(await call("save_initial_resource", {
+      operationKey: "postgres-session", kind: "session", uploadRef: contextUpload, format: "json",
+    }));
+    const materialChoice = { bundleId: savedMaterial.bundleId as string, materialId: savedMaterial.materialId as string };
+    const sessionChoice = { bundleId: savedSession.bundleId as string, sessionId: savedSession.sessionId as string };
+    expect(savedMaterial).toEqual({ operationKey: "postgres-material", kind: "initial_resource",
+      resourceKind: "material", status: "completed", ...materialChoice });
+    expect(savedSession).toEqual({ operationKey: "postgres-session", kind: "initial_resource",
+      resourceKind: "session", status: "completed", ...sessionChoice });
+    expect((await store.get(OWNER, "postgres-material"))?.plan).toMatchObject({
+      asset: { kind: "material", bundleId: materialChoice.bundleId, resourceId: materialChoice.materialId },
     });
-    expect(upload.status).toBe(201);
-    expect((await upload.json() as { uploadRef: string }).uploadRef).toBe(uploadId);
+    expect(await store.get(OTHER, "postgres-material")).toBeNull();
+    expect(await toolValue(await call("list_options", { category: "materials", bundleId: materialChoice.bundleId })))
+      .toMatchObject({ total: 1, items: [{ materialId: materialChoice.materialId }] });
+    expect(await toolValue(await call("list_options", { category: "sessions", bundleId: sessionChoice.bundleId })))
+      .toMatchObject({ total: 1, items: [{ sessionId: sessionChoice.sessionId, format: "json" }] });
+    const promptUpload = await upload("prompt", "new-data.jsonl", new TextEncoder().encode(`${JSON.stringify({
+      name: "New case", description: "Existing independent resources",
+      userPrompt: "PRIVATE_NEW_PROMPT", evalPrompt: "PRIVATE_NEW_EVAL_PROMPT",
+    })}\n`), "application/x-ndjson");
+    const prepared = await toolValue(await call("prepare_inputs", {
+      operationKey: "postgres-new-data", promptUploadRef: promptUpload,
+      name: "New Prompt Dataset", description: "Independent initial resources", format: "jsonl",
+      cases: [{ initialMaterials: [materialChoice], evalInitialMaterials: [materialChoice],
+        initialSession: sessionChoice }],
+    }));
+    expect(prepared).toMatchObject({ kind: "prepare", status: "completed", totalCases: 1 });
+    const preparedDetail = await toolValue(await call("get_preparation", { operationKey: "postgres-new-data" }));
+    expect(preparedDetail).toMatchObject({ cases: [{
+      binding: "confirmed", initialMaterials: [materialChoice], evalInitialMaterials: [materialChoice],
+      initialSession: sessionChoice,
+    }] });
+    expect(await datasets.getData((preparedDetail.cases as Array<{ dataId: string }>)[0]!.dataId))
+      .toMatchObject({ initialMaterials: [materialChoice], initialSession: sessionChoice });
     const input = {
       operationKey: "postgres-lost-bind", datasetId: dataset.datasetId, dataId: original.dataId,
-      expectedContentDigest: originalDigest, initialMaterials: [material, { uploadRef: uploadId }],
+      expectedContentDigest: originalDigest, initialMaterials: [material, materialChoice],
+      evalInitialMaterials: [materialChoice], initialSession: sessionChoice,
     };
     const lost = await (await call("bind_data_resources", input)).json() as { result: { isError?: boolean; content: [{ text: string }] } };
     expect(lost.result.isError).toBe(true);
     expect(lost.result.content[0].text).not.toContain("committed reply was lost");
     const pending = await toolValue(await call("get_preparation", { operationKey: input.operationKey }));
     expect(pending).toMatchObject({ kind: "bind", status: "outcome_unknown", binding: "attempted",
-      resources: { total: 1, confirmed: 1 } });
+      initialSession: sessionChoice });
     await expect(store.assertReadyDatasets(OWNER, [dataset.datasetId])).rejects.toThrow();
     expect((await datasets.getData(original.dataId))!.initialMaterials).toHaveLength(2);
     const active = createBundleCatalogs(database.db, OWNER, directory).materialBundles;
-    expect((await active.list()).length).toBe(2); // The original and exactly one new Bundle.
+    expect((await active.list()).length).toBe(2); // The original and exactly one saved Material Bundle.
 
     const receipt = await toolValue(await call("bind_data_resources", input));
     expect(receipt).toMatchObject({ kind: "bind", status: "completed", contentDigest: await digestJson(
-      (await datasets.getData(original.dataId))!), resources: { total: 1, confirmed: 1 } });
+      (await datasets.getData(original.dataId))!) });
     expect((await active.list()).length).toBe(2);
     expect((await store.get(OWNER, input.operationKey))?.status).toBe("completed");
     await expect(store.assertReadyDatasets(OWNER, [dataset.datasetId])).resolves.toBeUndefined();
     expect(JSON.stringify(receipt)).not.toMatch(/uploaded private bytes|PRIVATE_PROMPT|uploadRef|https?:\/\//u);
     expect(await toolValue(await call("bind_data_resources", input))).toEqual(receipt);
     expect((await active.list()).length).toBe(2);
+  }, 60_000);
+
+  it("fences an uncertain standalone catalog commit in PostgreSQL and read-only reconciles only its original key", async () => {
+    const store = createPostgresManagementStore(database.db);
+    const files = createManagementFiles(store, await openImportStaging(root, "management-uploads"));
+    const sp = {} as EvalSpClient;
+    const ownerServices = createOwnerServices({
+      db: database.db, sp, bundles: directory,
+      release: { sourceBranch: "no-network", sourceCommit: "a".repeat(40) },
+      runQueue: { async enqueue() {} },
+    });
+    let loseReply = true;
+    let writes = 0;
+    const runtime: ApiRuntime = {
+      webOrigin: WEB_ORIGIN, spAdminToken: "unused", sp, observation: {} as SpObservationClient,
+      serviceAccount: { user: { id: OWNER, role: "user" }, email: "fixed@example.test", sessionToken: "session" },
+      ownerServices: (user, token) => {
+        const lease = ownerServices(user, token);
+        return { ...lease, services: { ...lease.services, materialBundles: {
+          ...lease.services.materialBundles,
+          async create(...args: Parameters<typeof lease.services.materialBundles.create>) {
+            writes++;
+            const result = await lease.services.materialBundles.create(...args);
+            if (loseReply) { loseReply = false; throw Error("catalog committed but reply was lost"); }
+            return result;
+          },
+        } } };
+      },
+      evalManagement: { token: MANAGEMENT_TOKEN, store, files, spOrigin: "https://no-network.invalid" },
+    };
+    const request = requestApp(runtime);
+    const call = async (name: string, args: unknown) => request(EVAL_MANAGEMENT_MCP_PATH, {
+      method: "POST", headers: { Authorization: `Bearer ${MANAGEMENT_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+    });
+    const bytes = new TextEncoder().encode("private PostgreSQL resource");
+    const uploadId = crypto.randomUUID();
+    const upload = await request(MANAGEMENT_UPLOAD_PATH, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${MANAGEMENT_TOKEN}`, "Content-Type": "application/octet-stream",
+        "X-Upload-Id": uploadId, "X-Upload-Kind": "material", "X-Upload-Name": "lost.txt",
+        "X-Upload-Media-Type": "text/plain", "X-Upload-Size": String(bytes.length),
+        "X-Upload-Sha256": createHash("sha256").update(bytes).digest("hex"),
+      },
+      body: bytes,
+    });
+    expect(upload.status).toBe(201);
+    const input = { operationKey: "pg-uncertain-material", kind: "material", uploadRef: uploadId };
+    const lost = await (await call("save_initial_resource", input)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(lost.result.isError).toBe(true);
+    expect(lost.result.content[0].text).not.toContain("catalog committed");
+    const pending = await toolValue(await call("get_preparation", { operationKey: input.operationKey }));
+    expect(pending).toMatchObject({ kind: "initial_resource", resourceKind: "material",
+      status: "outcome_unknown", stage: "attempted", bundleId: expect.any(String), materialId: expect.any(String) });
+    expect(await store.get(OTHER, input.operationKey)).toBeNull();
+    await expect(files.info(OTHER, uploadId, "material")).rejects.toThrow();
+    const another = await (await call("save_initial_resource", { ...input, operationKey: "pg-new-key" })).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(another.result.content[0].text).toContain("EVAL_SP_CONFLICT");
+    expect(await store.get(OWNER, "pg-new-key")).toBeNull();
+    const recovered = await toolValue(await call("save_initial_resource", input));
+    expect(recovered).toEqual({ operationKey: input.operationKey, kind: "initial_resource",
+      resourceKind: "material", status: "completed",
+      bundleId: pending.bundleId, materialId: pending.materialId });
+    expect(writes).toBe(1);
+    const catalog = createBundleCatalogs(database.db, OWNER, directory).materialBundles;
+    await catalog.delete(recovered.bundleId as string);
+    expect(await toolValue(await call("list_options", { category: "material_bundles" })))
+      .toMatchObject({ total: 0, items: [] });
+    expect(await toolValue(await call("get_preparation", { operationKey: input.operationKey })))
+      .toEqual({ ...recovered, stage: "confirmed" });
+    const deleted = await (await call("save_initial_resource", input)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(deleted.result.isError).toBe(true);
+    expect(writes).toBe(1);
   }, 60_000);
 
   it("lists only active resources for the owner, matching Bundle kind and selected child", async () => {

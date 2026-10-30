@@ -1,5 +1,7 @@
 # Moss 查看已有初始资源及复用绑定：基线调研（2026-10-30）
 
+> **历史快照，非当前工具契约。** 下述 `prepare_inputs` 内联上传、缺失目录等结论仅描述固定的旧提交；当前解耦后的 `save_initial_resource` → `list_options` → 新 Data `prepare_inputs` / 旧 Data `bind_data_resources` 契约，以 [eval-api 管理 MCP 文档](../apps/eval-api/README.md#management-mcp-interface) 为准。
+
 > **取证范围与时间点。** `EP` 指 `springbrand-lab/eval-platform` 在本地实际取得的 `origin/main` 提交 [`6ed154f`](https://github.com/springbrand-lab/eval-platform/tree/6ed154f57165aa1e3fbe93836df31467ec39bc13)；`Takt` 指 `springbrand-lab/takt` 的 `main` 提交 [`080ac6e`](https://github.com/springbrand-lab/takt/tree/080ac6ea4830d0fc7e1bb24c0aaf22cf8d4073ff)。取证工作树分别为 `/Users/apple/code/.worktrees/ep-moss-existing-resources-bindings-20261030`、`/Users/apple/code/.worktrees/takt-moss-existing-resources-bindings-20261030`，两者 `origin` URL 分别为 `https://github.com/springbrand-lab/eval-platform.git`、`https://github.com/springbrand-lab/takt.git`（本地 `git remote -v`、`git rev-parse HEAD origin/main`）。下文 `EP:路径:Lx–Ly` / `Takt:路径:Lx–Ly` 均指**上述固定提交**中的相应行，避免与并行开发中的未提交改动混淆；关键处附固定提交链接。此文只陈述该基线和由其推导的缺口，不宣称并行实现已经交付。
 >
 > **本轮「查看」边界：安全、有限的 Bundle/资源目录及文件清单（路径、媒体类型、字节数），不向 Moss 提供 Material 文件、Session 上下文的正文、原始 bytes/base64、任意文件 URL 或沙盒文件。** 文件正文是否需要开放尚未明确，不能用已有 Web 文件读取路由暗中扩大本轮范围。EP: `packages/eval-contracts/src/initial-resource-files.ts:L3–L10`、`apps/eval-api/README.md:L96–L103`；Takt: `docs/company-agent-engine/eval-management-mcp.md:L13–L18`。

@@ -112,6 +112,11 @@ export const createAgentSchema = z.strictObject({
 });
 
 export const uploadRefSchema = platformIdSchema.describe("Opaque ref returned only by the authenticated byte ingress");
+const resourceUpload = { operationKey: idempotencyKeySchema.max(200), uploadRef: uploadRefSchema };
+export const saveInitialResourceSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ ...resourceUpload, kind: z.literal("material") }),
+  z.strictObject({ ...resourceUpload, kind: z.literal("session"), format: z.enum(["json", "jsonl"]) }),
+]);
 /** Schema content is accepted only from the trusted backend, not an LLM-generated tool payload. */
 export const createOutputSchemaSchema = z.strictObject({
   operationKey: idempotencyKeySchema.max(200),
@@ -119,18 +124,12 @@ export const createOutputSchemaSchema = z.strictObject({
   description: z.string().trim().min(1).max(2_000),
   content: z.string().max(OUTPUT_SCHEMA_BYTES),
 });
-const materialSelection = z.union([
-  z.strictObject({ uploadRef: uploadRefSchema }),
-  z.strictObject({ bundleId: platformIdSchema, materialId: platformIdSchema }),
-]);
-const sessionSelection = z.union([
-  z.strictObject({ uploadRef: uploadRefSchema, format: z.enum(["json", "jsonl"]) }),
-  z.strictObject({ bundleId: platformIdSchema, sessionId: platformIdSchema }),
-]);
+const materialSelection = z.strictObject({ bundleId: platformIdSchema, materialId: platformIdSchema });
+const sessionSelection = z.strictObject({ bundleId: platformIdSchema, sessionId: platformIdSchema });
 const bindMaterials = z.array(materialSelection).min(1).max(8).superRefine((items, ctx) => {
   const seen = new Set<string>();
   items.forEach((item, index) => {
-    const identity = "uploadRef" in item ? `upload:${item.uploadRef}` : `material:${item.bundleId}:${item.materialId}`;
+    const identity = `${item.bundleId}:${item.materialId}`;
     if (seen.has(identity)) ctx.addIssue({ code: "custom", path: [index], message: "Duplicate Material" });
     seen.add(identity);
   });
@@ -240,6 +239,7 @@ export const inspectCaseSchema = z.strictObject({
 /** Call validation schemas and advertised tool schemas are identical. */
 export const managementSchemas = {
   list_options: listOptionsSchema,
+  save_initial_resource: saveInitialResourceSchema,
   prepare_inputs: prepareInputsSchema,
   bind_data_resources: bindDataResourcesSchema,
   get_preparation: getPreparationSchema,

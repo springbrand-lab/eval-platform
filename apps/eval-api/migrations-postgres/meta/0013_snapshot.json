@@ -1742,7 +1742,7 @@
       "checkConstraints": {
         "eval_management_operations_kind_ck": {
           "name": "eval_management_operations_kind_ck",
-          "value": "\"eval_management_operations\".\"kind\" IN ('prepare', 'bind', 'skill', 'reference', 'output_schema')"
+          "value": "\"eval_management_operations\".\"kind\" IN ('prepare', 'bind', 'initial_resource', 'skill', 'reference', 'output_schema')"
         },
         "eval_management_operations_status_ck": {
           "name": "eval_management_operations_status_ck",

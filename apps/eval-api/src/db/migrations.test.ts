@@ -163,7 +163,7 @@ describe("offline Dashboard and management migration integrity", () => {
     expect(statements).not.toMatch(/\b(UPDATE|INSERT|DELETE|TRUNCATE|DROP|DEFAULT)\b/iu);
   });
 
-  it("adds bind only to the management operation kind and pending-Dataset index, preserving prepare v1", async () => {
+  it("adds bind and standalone initial_resource to the unpublished kind check, preserving prior history", async () => {
     const previous = await metadata("0012_snapshot.json");
     const current = await metadata("0013_snapshot.json");
     expect(current.prevId).toBe(previous.id);
@@ -175,7 +175,9 @@ describe("offline Dashboard and management migration integrity", () => {
     const after = current.tables["public.eval_management_operations"];
     expect(after.columns).toEqual(before.columns);
     expect(after.checkConstraints.eval_management_operations_kind_ck.value).toContain("'bind'");
+    expect(after.checkConstraints.eval_management_operations_kind_ck.value).toContain("'initial_resource'");
     expect(after.indexes.eval_management_pending_dataset_idx.where).toContain("'bind'");
+    expect(after.indexes.eval_management_pending_dataset_idx.where).not.toContain("'initial_resource'");
     expect({ ...after, indexes: before.indexes, checkConstraints: before.checkConstraints }).toEqual(before);
     const sql = readMigrationFiles({ migrationsFolder })[13]!.sql.join(" ");
     expect(sql).toContain('DROP CONSTRAINT "eval_management_operations_kind_ck"');
@@ -185,6 +187,7 @@ describe("offline Dashboard and management migration integrity", () => {
       /CREATE INDEX "eval_management_pending_dataset_idx" ON "eval_management_operations" USING btree \("owner_user_id",\s*\("eval_management_operations"\."plan"->>'datasetId'\)\)/u,
     );
     expect(sql).toContain('ADD CONSTRAINT "eval_management_operations_kind_ck"');
+    expect(sql).toContain("'initial_resource'");
     expect(sql).not.toMatch(/\b(UPDATE|INSERT|DELETE|TRUNCATE|COLUMN|CREATE TABLE)\b/iu);
   });
 });
