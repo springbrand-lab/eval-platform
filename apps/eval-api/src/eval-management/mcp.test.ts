@@ -67,6 +67,8 @@ describe("trusted management MCP transport", () => {
       "submit_run", "reconcile_operation", "stop_run", "get_run", "get_metrics", "inspect_case",
     ]);
     expect(tools.result.tools.find(({ name }) => name === "list_options")!.description).toContain("up to 20 safe Data IDs");
+    expect(tools.result.tools.find(({ name }) => name === "list_options")!.description)
+      .toContain("dataset_data_resources(datasetId,dataId)");
     expect(tools.result.tools.find(({ name }) => name === "bind_data_resources")!.description)
       .toContain("1–20 distinct members in one atomic transaction");
     expect(tools.result.tools.filter(({ name }) => !["reconcile_operation", "save_initial_resource", "bind_data_resources"].includes(name))
@@ -118,8 +120,10 @@ describe("trusted management MCP transport", () => {
     }));
     const optionsInput = tools.result.tools.find(({ name }) => name === "list_options")!.inputSchema;
     expect(optionsInput.properties).toHaveProperty("schemaOffset");
+    expect(optionsInput.properties).toHaveProperty("dataId");
     expect(optionsInput.properties?.category).toMatchObject({
-      enum: expect.arrayContaining(["dataset_data", "output_schema_detail", "project_schema_detail", "approval_output_schema",
+      enum: expect.arrayContaining(["dataset_data", "dataset_data_resources",
+        "output_schema_detail", "project_schema_detail", "approval_output_schema",
         "material_bundles", "session_bundles", "materials", "sessions", "material_files", "session_files"]),
     });
     expect(tools.result.tools.find(({ name }) => name === "reconcile_operation")!.inputSchema)

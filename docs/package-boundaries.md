@@ -203,6 +203,23 @@ five-row limit; the trusted `approval_dataset` still requests `pageSize:5`
 (the unchanged EP schema permits up to ten). No private SP, Takt or approval
 seam is introduced.
 
+The separate read-only `list_options(category:"dataset_data_resources")`
+requires one owned, active Dataset **and** its active member `dataId`. It
+returns only stored reference UUIDs, in the original `initialMaterials`,
+`evalInitialMaterials`, then optional `initialSession` order, with each item's
+source field and zero-based index. A complete-reference canonical digest is
+shared across pages (not the full Data approval digest); the two Material
+counts, Session-presence flag and `total` distinguish empty and later pages.
+The owner-scoped single-member read and pending-preparation/binding fence
+share one repeatable-read snapshot, including a pending binding against the
+same reusable Data through another owned Dataset, without scanning all
+Dataset members or consulting the Bundle catalog. Thus retained soft-deleted
+references are visible but **not** asserted selectable or active; use the separate
+Material/Session directory to check current availability. Valid `pageSize`
+1–50 clamps to 20; oversized JSON fails instead of dropping an item. The
+existing `dataset_data` name/ID page, `approval_dataset` and binding CAS stay
+unchanged; no new write tool or migration is introduced.
+
 Project/Dataset overview adds `summary.evaluationOutputs.scoreField` (nullable), directly reusing `sampleScoreIndex(summary,numericPointer ?? "/score").field` over the same overall Metrics snapshot. Its selected field shape is `{jsonPointer:string,value:number|null,coverage,observationCount,contributingEvaluationCount,missingEvaluationCount,sourceRedacted?:true,jsonPointerTruncated?:true}`. `numericPointer` may select another numeric Schema field for `overview` or `samples`, never `fields`, `tools`, Sample or Sampling; the field list stays a separate section. The mean is Metrics' precomputed numeric mean, **not** a Sample-row average, Tool rate or business pass rate; missing/non-numeric yields null, no observations and partial coverage keep Metrics' null/counts, and sensitive pointers mask the value with `sourceRedacted:true` instead of fabricating a result.
 
 The saved Dashboards Module belongs to this application, not Metrics. A Dashboard is a named, revisioned, owner-scoped ordered Project selection, not a result snapshot or metric cache. Its normalized Store owns configuration writes, Project-reference eligibility, idempotent creation and revision conflicts. New references require an admitted Run, preserving initial Project compensation without weakening same-owner foreign keys or silently removing configuration links. Opening a Dashboard supplies its saved configuration to the existing Metrics comparison Interface; view switching and evidence browsing never persist analytical facts.

@@ -1,6 +1,9 @@
 import { equalJson } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
-import { dataSchema, datasetSchema, platformIdSchema, type Data, type Dataset } from "@eval-platform/eval-dataset";
+import {
+  dataSchema, datasetSchema, initialMaterialsRefsSchema, initialSessionRefSchema, platformIdSchema,
+  type Data, type Dataset, type InitialMaterialsRef, type InitialSessionRef,
+} from "@eval-platform/eval-dataset";
 import { digestJson } from "@eval-platform/eval-runtime";
 import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { IMPORT_LIMITS } from "../agent-imports/model.js";
@@ -26,6 +29,13 @@ export interface DatasetDataPage {
   readonly order: DatasetMemberOrder;
   readonly total: number;
   readonly items: readonly { readonly dataId: string; readonly content: Omit<Data, "dataId"> }[];
+}
+
+/** Only the three validated, stored reference fields; never a Data body or catalog activity claim. */
+export interface DatasetDataResources {
+  readonly initialMaterials: readonly InitialMaterialsRef[];
+  readonly evalInitialMaterials: readonly InitialMaterialsRef[];
+  readonly initialSession: InitialSessionRef | null;
 }
 
 export interface PreparedDatasetSnapshot {
@@ -54,6 +64,8 @@ export interface ManagementStore {
   inspectPreparedDataset(owner: string, datasetId: string): Promise<PreparedDatasetSnapshot | null>;
   /** Same snapshot for active owner, pending-preparation fence, order proof, total and page. */
   listDatasetData(owner: string, datasetId: string, page: number, pageSize: number): Promise<DatasetDataPage>;
+  /** Direct, owner-scoped active Dataset/Data/member read with the same pending fence; no Dataset-wide scan. */
+  readDatasetDataResources(owner: string, datasetId: string, dataId: string): Promise<DatasetDataResources>;
 }
 
 const conflict = () => new HttpError("EVAL_SP_CONFLICT", "The operation key or resource is already claimed");
@@ -339,6 +351,58 @@ export function createPostgresManagementStore(db: EvalDb): ManagementStore {
         const byId = new Map(items.map((item) => [item.dataId, item]));
         if (byId.size !== ids.length) throw new HttpError("RESPONSE_INVALID", "Dataset has a missing Data member");
         return { name: dataset.name, order: ordered.order, total, items: ids.map((id) => byId.get(id)!) };
+      }, READ_SNAPSHOT);
+    },
+    async readDatasetDataResources(owner, datasetId, dataId) {
+      const selectedDataset = platformIdSchema.safeParse(datasetId);
+      const selectedData = platformIdSchema.safeParse(dataId);
+      if (!selectedDataset.success || !selectedData.success) {
+        throw new HttpError("REQUEST_INVALID_INPUT", "Select a Dataset and Data UUID");
+      }
+      return db.transaction(async (transaction) => {
+        const [dataset] = await transaction.select({ datasetId: datasets.datasetId }).from(datasets)
+          .where(and(eq(datasets.ownerUserId, owner), eq(datasets.datasetId, selectedDataset.data),
+            isNull(datasets.deletedAt))).limit(1);
+        if (!dataset) throw new HttpError("DATASET_NOT_FOUND");
+        await assertReady(transaction, owner, [dataset.datasetId]);
+
+        // The (dataset_id, data_id) membership PK targets exactly one Data. Project
+        // only the three JSONB reference fields: no prompt, business data, uploadRef
+        // or Bundle contents are read, even into this private Store result.
+        const [member] = await transaction.select({
+          contentIsObject: sql<boolean>`jsonb_typeof(${data.content}) = 'object'`,
+          initialMaterials: sql<unknown>`${data.content}->'initialMaterials'`,
+          evalInitialMaterials: sql<unknown>`${data.content}->'evalInitialMaterials'`,
+          initialSession: sql<unknown>`${data.content}->'initialSession'`,
+        }).from(datasetData).innerJoin(data, and(
+          eq(data.ownerUserId, datasetData.ownerUserId),
+          eq(data.dataId, datasetData.dataId), isNull(data.deletedAt),
+        )).where(and(eq(datasetData.ownerUserId, owner), eq(datasetData.datasetId, dataset.datasetId),
+          eq(datasetData.dataId, selectedData.data))).limit(1);
+        if (!member) throw new HttpError("DATA_NOT_FOUND");
+        if (!member.contentIsObject) throw new HttpError("RESPONSE_INVALID", "Stored Data content is invalid");
+        // A Data can belong to several Datasets. A pending v3/v4 bind via a
+        // different Dataset still makes this member's current bindings uncertain.
+        const [pendingBind] = await transaction.select({ operationKey: managementOperations.operationKey })
+          .from(managementOperations).where(and(eq(managementOperations.ownerUserId, owner),
+            eq(managementOperations.kind, "bind"), eq(managementOperations.status, "pending"),
+            or(eq(sql<string>`${managementOperations.plan}->>'dataId'`, selectedData.data),
+              sql<boolean>`${managementOperations.plan}->'bindings' @> ${
+                JSON.stringify([{ dataId: selectedData.data }])
+              }::jsonb`))).limit(1);
+        if (pendingBind) throw new HttpError("EVAL_SP_CONFLICT", "Finish the pending Data binding");
+
+        const initialMaterials = initialMaterialsRefsSchema.nullish().safeParse(member.initialMaterials);
+        const evalInitialMaterials = initialMaterialsRefsSchema.nullish().safeParse(member.evalInitialMaterials);
+        const initialSession = initialSessionRefSchema.nullish().safeParse(member.initialSession);
+        if (!initialMaterials.success || !evalInitialMaterials.success || !initialSession.success) {
+          throw new HttpError("RESPONSE_INVALID", "Stored Data resource references are invalid");
+        }
+        return {
+          initialMaterials: initialMaterials.data ?? [],
+          evalInitialMaterials: evalInitialMaterials.data ?? [],
+          initialSession: initialSession.data ?? null,
+        };
       }, READ_SNAPSHOT);
     },
   };

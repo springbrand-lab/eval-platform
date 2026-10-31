@@ -17,7 +17,8 @@ export const resourceIdSchema = idempotencyKeySchema.max(255);
 const resourceIds = z.array(resourceIdSchema).max(50).refine(unique, "IDs must be unique").default([]);
 
 export const listOptionsSchema = z.strictObject({
-  category: z.enum(["agents", "datasets", "dataset_data", "projects", "project_detail", "output_schemas", "output_schema_detail", "project_schema_detail",
+  category: z.enum(["agents", "datasets", "dataset_data", "dataset_data_resources", "projects", "project_detail",
+    "output_schemas", "output_schema_detail", "project_schema_detail",
     "material_bundles", "session_bundles", "materials", "sessions", "material_files", "session_files",
     "input_limits", "credits",
     "approval_dataset", "approval_agent", "approval_output_schema", "approval_project"]),
@@ -26,6 +27,7 @@ export const listOptionsSchema = z.strictObject({
   materialId: platformIdSchema.optional(),
   sessionId: platformIdSchema.optional(),
   datasetId: platformIdSchema.optional(),
+  dataId: platformIdSchema.optional(),
   dataIds: z.array(platformIdSchema).min(1).max(50).refine(unique).optional(),
   userAgentId: platformIdSchema.optional(),
   outputSchemaId: platformIdSchema.optional(),
@@ -35,6 +37,8 @@ export const listOptionsSchema = z.strictObject({
   samplingIds: z.array(entityIdSchema).max(50).refine(unique).optional(),
 }).superRefine((value, ctx) => {
   const invalid = () => ctx.addIssue({ code: "custom", message: "Choose one bounded selection" });
+  // No other list_options category can select a single current Data ID.
+  if (value.dataId !== undefined && value.category !== "dataset_data_resources") invalid();
   if (value.schemaOffset !== undefined
     && value.category !== "output_schema_detail" && value.category !== "project_schema_detail") invalid();
   if (["material_bundles", "session_bundles", "materials", "sessions", "material_files", "session_files"].includes(value.category)) {
@@ -49,6 +53,9 @@ export const listOptionsSchema = z.strictObject({
   } else if (value.category === "dataset_data") {
     if (!value.datasetId || value.dataIds || value.userAgentId || value.outputSchemaId || value.projectId
       || value.projectSampleIds || value.samplingIds || value.q !== undefined) invalid();
+  } else if (value.category === "dataset_data_resources") {
+    if (!value.datasetId || !value.dataId || value.dataIds || value.userAgentId || value.outputSchemaId
+      || value.projectId || value.projectSampleIds || value.samplingIds || value.q !== undefined) invalid();
   } else if (value.category === "approval_dataset") {
     if (!value.datasetId || value.userAgentId || value.outputSchemaId || value.projectId || value.projectSampleIds || value.samplingIds
       || value.q !== undefined || value.pageSize > 10) invalid();

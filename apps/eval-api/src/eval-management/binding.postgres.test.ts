@@ -6,13 +6,13 @@ import { createDatasetService, DatasetEntityNotFoundError } from "@eval-platform
 import { digestJson } from "@eval-platform/eval-runtime";
 import { EVAL_INITIAL_FILE_MAX_BYTES, EVAL_INITIALIZATION_MAX_BYTES } from "@springbrand/eval-harness";
 import { eq, sql } from "drizzle-orm";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { openImportStaging } from "../agent-imports/bytes.js";
 import { BundleResourceNotFoundError } from "../db/errors.js";
 import { createPostgresDatasetStore } from "../db/dataset.js";
 import { createPostgresProjectStore } from "../db/project-store.js";
 import { createBundleCatalogs } from "../db/resource-catalog.js";
-import { bundleMaterials, data as dataTable, managementOperations } from "../db/schema.js";
+import { bundleMaterials, data as dataTable, datasets as datasetTable, managementOperations } from "../db/schema.js";
 import { createTestDatabase } from "../db/test-database.js";
 import { seedProject } from "../db/test-fixtures.js";
 import { createInitialResourceApi, patchedInitialResources } from "../initial-resources.js";
@@ -94,6 +94,214 @@ describe.skipIf(!connection)("PostgreSQL existing Data binding and active resour
     if (!rows[0]) throw new Error("Missing Data version");
     return rows[0].version;
   }
+
+  it("reads three ordered Subject Materials, Evaluator Materials and a Session without content or active claims", async () => {
+    const { datasets, dataset, original, material, session, materialBundles, sessionBundles } = await seeded();
+    const extra: Array<{ bundleId: string; materialId: string }> = [];
+    for (const index of [1, 2]) {
+      const row = await materialBundles.createResource(material.bundleId, {
+        name: `More ${index}`, description: "PRIVATE_FILE_METADATA",
+        files: [{ path: `/private-${index}.txt`, mediaType: "text/plain", contentBase64: "UFJJVkFURV9CT0RZ" }],
+      });
+      extra.push({ bundleId: row.bundleId, materialId: row.materialId });
+    }
+    const refs = { initialMaterials: [extra[1]!, material, extra[0]!],
+      evalInitialMaterials: [material, extra[1]!], initialSession: session };
+    const { dataId: _originalId, ...input } = original;
+    await datasets.updateData(original.dataId, { ...input, ...refs });
+    const store = createPostgresManagementStore(database.db);
+    expect(await store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId)).toEqual(refs);
+    const app = setupManagement();
+    vi.spyOn(app.managed.store, "readDatasetDataResources")
+      .mockImplementation((...args) => store.readDatasetDataResources(...args));
+    const response = (await (await app.call("list_options", {
+      category: "dataset_data_resources", datasetId: dataset.datasetId, dataId: original.dataId,
+    })).json()) as { result: { content: [{ text: string }]; isError?: boolean } };
+    expect(response.result.isError).not.toBe(true);
+    const text = response.result.content[0].text;
+    expect(text.length).toBeLessThanOrEqual(4_800);
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(4_800);
+    expect(text).not.toMatch(/PRIVATE_|https?:\/\/|userPrompt|evalPrompt|metadata|uploadRef|active|byteSize|contentBase64/u);
+    const expected = { category: "dataset_data_resources", datasetId: dataset.datasetId, dataId: original.dataId,
+      page: 1, pageSize: 20, total: 6, initialMaterialsCount: 3, evalInitialMaterialsCount: 2,
+      hasInitialSession: true, bindingDigest: await digestJson(refs),
+      items: [...refs.initialMaterials.map((ref, index) => ({ field: "initialMaterials", index, ...ref })),
+        ...refs.evalInitialMaterials.map((ref, index) => ({ field: "evalInitialMaterials", index, ...ref })),
+        { field: "initialSession", index: 0, ...session }] };
+    expect(JSON.parse(text)).toEqual(expected);
+    expect(app.services.projects.reviewSelection).not.toHaveBeenCalled();
+
+    const saved = (await datasets.getData(original.dataId))!;
+    const { dataId: _savedId, ...savedInput } = saved;
+    await datasets.updateData(original.dataId, { ...savedInput, userPrompt: "DIFFERENT_PRIVATE_PROMPT",
+      metadata: { nested: { answer: "PRIVATE_CHANGED" } } });
+    expect(await toolValue(await app.call("list_options", {
+      category: "dataset_data_resources", datasetId: dataset.datasetId, dataId: original.dataId,
+    }))).toEqual(expected); // Not a full Data approval digest.
+
+    await materialBundles.deleteResource(material.bundleId, material.materialId);
+    await sessionBundles.deleteResource(session.bundleId, session.sessionId);
+    expect(await toolValue(await app.call("list_options", {
+      category: "dataset_data_resources", datasetId: dataset.datasetId, dataId: original.dataId,
+    }))).toEqual(expected); // Stored references persist even when the directory no longer offers them.
+  }, 60_000);
+
+  it("pages exactly 20/21 stored references and an empty Data without losing a UUID or exceeding 4.8 KB", async () => {
+    const { datasets, dataset, original, material, session, materialBundles } = await seeded();
+    const materials = [material];
+    for (let index = 1; index < 20; index++) {
+      const row = await materialBundles.createResource(material.bundleId, {
+        name: `Slot ${index}`, description: "Page test",
+        files: [{ path: `/slot-${index}.txt`, mediaType: "text/plain", contentBase64: "eA==" }],
+      });
+      materials.push({ bundleId: row.bundleId, materialId: row.materialId });
+    }
+    const refs = { initialMaterials: materials.slice(0, 10), evalInitialMaterials: materials.slice(10),
+      initialSession: session };
+    const { dataId: _originalId, ...input } = original;
+    await datasets.updateData(original.dataId, { ...input, ...refs });
+    const store = createPostgresManagementStore(database.db);
+    const app = setupManagement();
+    vi.spyOn(app.managed.store, "readDatasetDataResources")
+      .mockImplementation((...args) => store.readDatasetDataResources(...args));
+    const page = (number: number) => app.call("list_options", {
+      category: "dataset_data_resources", datasetId: dataset.datasetId, dataId: original.dataId,
+      page: number, pageSize: 50,
+    });
+    const firstRpc = await (await page(1)).json() as {
+      result: { content: [{ text: string }]; isError?: boolean };
+    };
+    expect(firstRpc.result.isError).not.toBe(true);
+    expect(firstRpc.result.content[0].text.length).toBeLessThanOrEqual(4_800);
+    expect(Buffer.byteLength(firstRpc.result.content[0].text, "utf8")).toBeLessThanOrEqual(4_800);
+    const first = JSON.parse(firstRpc.result.content[0].text) as Record<string, unknown>;
+    const second = await toolValue(await page(2));
+    const beyond = await toolValue(await page(3));
+    expect(first).toMatchObject({ page: 1, pageSize: 20, total: 21, initialMaterialsCount: 10,
+      evalInitialMaterialsCount: 10, hasInitialSession: true, bindingDigest: await digestJson(refs) });
+    expect((first.items as unknown[]).concat(second.items as unknown[])).toEqual([
+      ...refs.initialMaterials.map((ref, index) => ({ field: "initialMaterials", index, ...ref })),
+      ...refs.evalInitialMaterials.map((ref, index) => ({ field: "evalInitialMaterials", index, ...ref })),
+      { field: "initialSession", index: 0, ...session },
+    ]);
+    expect(second).toMatchObject({ page: 2, pageSize: 20, total: 21, bindingDigest: first.bindingDigest });
+    expect(beyond).toMatchObject({ page: 3, pageSize: 20, total: 21, bindingDigest: first.bindingDigest, items: [] });
+    const saved = (await datasets.getData(original.dataId))!;
+    const { dataId: _savedId, initialSession: _session, ...withoutSession } = saved;
+    await datasets.updateData(original.dataId, withoutSession);
+    const twenty = await toolValue(await page(1));
+    expect(twenty).toMatchObject({ pageSize: 20, total: 20, hasInitialSession: false });
+    expect((twenty.items as unknown[])).toHaveLength(20);
+    expect((await toolValue(await page(2))).items).toEqual([]);
+    expect(twenty.bindingDigest).not.toBe(first.bindingDigest);
+
+    const current = (await datasets.getData(original.dataId))!;
+    const { dataId: _currentId, initialMaterials: _initial, evalInitialMaterials: _eval, ...withoutRefs } = current;
+    await datasets.updateData(original.dataId, withoutRefs);
+    const empty = await toolValue(await page(1));
+    expect(empty).toEqual({ category: "dataset_data_resources", datasetId: dataset.datasetId,
+      dataId: original.dataId, page: 1, pageSize: 20, total: 0, initialMaterialsCount: 0,
+      evalInitialMaterialsCount: 0, hasInitialSession: false,
+      bindingDigest: await digestJson({ initialMaterials: [], evalInitialMaterials: [], initialSession: null }),
+      items: [] });
+    expect(await toolValue(await page(2))).toEqual({ ...empty, page: 2 });
+  }, 90_000);
+
+  it("fails closed for foreign, deleted, detached, pending or malformed members, not unrelated Data", async () => {
+    const { datasets, dataset, original } = await seeded();
+    const store = createPostgresManagementStore(database.db);
+    const foreignService = createDatasetService(createPostgresDatasetStore(database.db, OTHER));
+    const foreignDataset = await foreignService.createDataset({ name: "Foreign Dataset" });
+    const foreignData = await foreignService.createData({ userPrompt: "FOREIGN_PROMPT" },
+      { datasetId: foreignDataset.datasetId });
+    const unattached = await datasets.createData({ userPrompt: "UNATTACHED_PROMPT" });
+    const otherDataset = await datasets.createDataset({ name: "Another owned Dataset" });
+    const empty = { initialMaterials: [], evalInitialMaterials: [], initialSession: null };
+    expect(await store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId)).toEqual(empty);
+    await expect(store.readDatasetDataResources(OTHER, dataset.datasetId, original.dataId))
+      .rejects.toMatchObject({ code: "DATASET_NOT_FOUND" });
+    await expect(store.readDatasetDataResources(OWNER, foreignDataset.datasetId, foreignData.dataId))
+      .rejects.toMatchObject({ code: "DATASET_NOT_FOUND" });
+    for (const dataId of [foreignData.dataId, unattached.dataId, crypto.randomUUID()]) {
+      await expect(store.readDatasetDataResources(OWNER, dataset.datasetId, dataId))
+        .rejects.toMatchObject({ code: "DATA_NOT_FOUND" });
+    }
+    await expect(store.readDatasetDataResources(OWNER, otherDataset.datasetId, original.dataId))
+      .rejects.toMatchObject({ code: "DATA_NOT_FOUND" });
+    await datasets.detachData(dataset.datasetId, [original.dataId]);
+    await expect(store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId))
+      .rejects.toMatchObject({ code: "DATA_NOT_FOUND" });
+    await datasets.attachData(dataset.datasetId, [original.dataId]);
+
+    await database.db.update(dataTable).set({ deletedAt: new Date() }).where(eq(dataTable.dataId, original.dataId));
+    await expect(store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId))
+      .rejects.toMatchObject({ code: "DATA_NOT_FOUND" });
+    await database.db.update(dataTable).set({ deletedAt: null }).where(eq(dataTable.dataId, original.dataId));
+    await database.db.update(datasetTable).set({ deletedAt: new Date() })
+      .where(eq(datasetTable.datasetId, dataset.datasetId));
+    await expect(store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId))
+      .rejects.toMatchObject({ code: "DATASET_NOT_FOUND" });
+    await database.db.update(datasetTable).set({ deletedAt: null })
+      .where(eq(datasetTable.datasetId, dataset.datasetId));
+
+    for (const kind of ["prepare", "bind"] as const) {
+      const operationKey = `pending-${kind}`;
+      await database.db.insert(managementOperations).values({
+        ownerUserId: OWNER, operationKey, kind, fingerprint: "b".repeat(64),
+        status: "pending", plan: { datasetId: dataset.datasetId }, stages: {},
+      });
+      await expect(store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId))
+        .rejects.toMatchObject({ code: "EVAL_SP_CONFLICT" });
+      await database.db.update(managementOperations).set({ status: "completed" })
+        .where(eq(managementOperations.operationKey, operationKey));
+    }
+    await datasets.attachData(otherDataset.datasetId, [original.dataId]);
+    await database.db.insert(managementOperations).values({
+      ownerUserId: OWNER, operationKey: "pending-shared-data", kind: "bind", fingerprint: "b".repeat(64),
+      status: "pending", plan: { datasetId: otherDataset.datasetId, dataId: original.dataId }, stages: {},
+    });
+    await expect(store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId))
+      .rejects.toMatchObject({ code: "EVAL_SP_CONFLICT" });
+    await database.db.update(managementOperations).set({ status: "completed" })
+      .where(eq(managementOperations.operationKey, "pending-shared-data"));
+    expect(await store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId)).toEqual(empty);
+    await database.db.insert(managementOperations).values({
+      ownerUserId: OWNER, operationKey: "pending-shared-batch", kind: "bind", fingerprint: "b".repeat(64),
+      status: "pending", plan: { datasetId: otherDataset.datasetId, bindings: [{ dataId: original.dataId }] },
+      stages: {},
+    });
+    await expect(store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId))
+      .rejects.toMatchObject({ code: "EVAL_SP_CONFLICT" });
+    await database.db.update(managementOperations).set({ status: "completed" })
+      .where(eq(managementOperations.operationKey, "pending-shared-batch"));
+
+    const invalidSibling = await datasets.createData({ userPrompt: "unrelated" },
+      { datasetId: dataset.datasetId });
+    await database.db.execute(sql`UPDATE eval_data SET content =
+      jsonb_set(content, '{initialMaterials}', ${JSON.stringify([{ bundleId: "not-a-uuid", materialId: "bad" }])}::jsonb)
+      WHERE data_id = ${invalidSibling.dataId}`);
+    expect(await store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId)).toEqual(empty);
+    await database.db.execute(sql`UPDATE eval_data SET content =
+      jsonb_set(content, '{initialMaterials}', ${JSON.stringify([{ bundleId: "not-a-uuid", materialId: "bad" }])}::jsonb)
+      WHERE data_id = ${original.dataId}`);
+    await expect(store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId))
+      .rejects.toMatchObject({ code: "RESPONSE_INVALID" });
+    await database.db.execute(sql`UPDATE eval_data SET content =
+      jsonb_set(content - 'initialMaterials', '{initialSession}',
+        ${JSON.stringify({ bundleId: "invalid", sessionId: "bad" })}::jsonb)
+      WHERE data_id = ${original.dataId}`);
+    await expect(store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId))
+      .rejects.toMatchObject({ code: "RESPONSE_INVALID" });
+    // The detail read projects only reference fields. It never reads or parses the prompt or arbitrary Data fields.
+    await database.db.execute(sql`UPDATE eval_data SET content = (content - 'initialSession') ||
+      '{"userPrompt":null,"privateNote":{"url":"https://private.example","uploadRef":"PRIVATE_UPLOAD"}}'::jsonb
+      WHERE data_id = ${original.dataId}`);
+    expect(await store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId)).toEqual(empty);
+    await database.db.execute(sql`UPDATE eval_data SET content = '"PRIVATE_BODY"'::jsonb
+      WHERE data_id = ${original.dataId}`);
+    await expect(store.readDatasetDataResources(OWNER, dataset.datasetId, original.dataId))
+      .rejects.toMatchObject({ code: "RESPONSE_INVALID" });
+  }, 60_000);
 
   it("locks owner, active membership, upstream readiness and full Data digest; leaves frozen Project copies unchanged", async () => {
     const { datasets, dataset, original, material } = await seeded();
