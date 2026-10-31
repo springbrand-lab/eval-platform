@@ -112,6 +112,9 @@ export function fakeManagement(owner: string) {
     async listDatasetData() {
       throw new HttpError("DATASET_NOT_FOUND");
     },
+    async readDatasetDataResources() {
+      throw new HttpError("DATASET_NOT_FOUND");
+    },
   };
   const files: ManagementFiles = {
     async ingest(ownerId, metadata, body, uploadId) {

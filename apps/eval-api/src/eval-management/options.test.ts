@@ -9,6 +9,10 @@ const FIRST = "55555555-5555-4555-8555-555555555555";
 const SECOND = "66666666-6666-4666-8666-666666666666";
 const BUNDLE = "77777777-7777-4777-8777-777777777777";
 const MATERIAL = "88888888-8888-4888-8888-888888888888";
+const SESSION = "99999999-9999-4999-8999-999999999999";
+const materialRef = (index: number) => ({
+  bundleId: BUNDLE, materialId: `80000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+});
 
 async function errorCode(response: Response) {
   const rpc = await response.json() as { result: { isError: boolean; content: [{ text: string }] } };
@@ -169,6 +173,163 @@ describe("bounded Dataset member choices through list_options", () => {
       expect(value.items.map(({ dataId }) => dataId)).toEqual(ids);
       expect(value.items.every(({ nameTruncated }) => nameTruncated === true)).toBe(true);
     }
+  });
+});
+
+describe("read-only per-Data resource bindings through list_options", () => {
+  it("returns the exact three-field reference order, field indexes and complete binding digest without Data content", async () => {
+    const app = setupManagement();
+    const refs = {
+      initialMaterials: [materialRef(3), materialRef(1), materialRef(2)],
+      evalInitialMaterials: [materialRef(2), materialRef(4)],
+      initialSession: { bundleId: BUNDLE, sessionId: SESSION },
+    };
+    const read = vi.spyOn(app.managed.store, "readDatasetDataResources").mockResolvedValue(Object.assign({}, refs, {
+      userPrompt: "PRIVATE_USER_PROMPT", evalPrompt: "PRIVATE_EVAL_PROMPT",
+      uploadRef: "PRIVATE_UPLOAD_REF", arbitraryData: { url: "https://private.example", rawBytes: "PRIVATE_BODY" },
+    }));
+    const rpc = await (await app.call("list_options", {
+      category: "dataset_data_resources", datasetId: DATASET, dataId: FIRST,
+    })).json() as { result: { isError?: boolean; content: [{ text: string }] } };
+    expect(rpc.result.isError).not.toBe(true);
+    const text = rpc.result.content[0].text;
+    expect(text.length).toBeLessThanOrEqual(4_800);
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(4_800);
+    expect(text).not.toMatch(/PRIVATE_|https?:\/\/|userPrompt|evalPrompt|uploadRef|rawBytes|arbitraryData/u);
+    const expected = {
+      category: "dataset_data_resources", datasetId: DATASET, dataId: FIRST,
+      page: 1, pageSize: 20, total: 6, initialMaterialsCount: 3,
+      evalInitialMaterialsCount: 2, hasInitialSession: true,
+      bindingDigest: await digestJson(refs),
+      items: [
+        { field: "initialMaterials", index: 0, ...refs.initialMaterials[0] },
+        { field: "initialMaterials", index: 1, ...refs.initialMaterials[1] },
+        { field: "initialMaterials", index: 2, ...refs.initialMaterials[2] },
+        { field: "evalInitialMaterials", index: 0, ...refs.evalInitialMaterials[0] },
+        { field: "evalInitialMaterials", index: 1, ...refs.evalInitialMaterials[1] },
+        { field: "initialSession", index: 0, ...refs.initialSession },
+      ],
+    };
+    expect(JSON.parse(text)).toEqual(expected);
+    expect(expected.bindingDigest).toMatch(/^[a-f0-9]{64}$/u);
+    expect(expected.bindingDigest).not.toBe(await digestJson({ dataId: FIRST, userPrompt: "PRIVATE_USER_PROMPT", ...refs }));
+    const third = await toolValue(await app.call("list_options", {
+      category: "dataset_data_resources", datasetId: DATASET, dataId: FIRST, page: 3, pageSize: 2,
+    }));
+    expect(third).toEqual({ ...expected, page: 3, pageSize: 2, items: expected.items.slice(4, 6) });
+    expect(read).toHaveBeenCalledWith(OWNER, DATASET, FIRST);
+    expect(app.services.projects.reviewSelection).not.toHaveBeenCalled();
+    expect(app.services.projects.create).not.toHaveBeenCalled();
+    expect(app.services.agentConfigs.listAgents).not.toHaveBeenCalled();
+  });
+
+  it("pages all 20/21 refs without truncation, preserves the digest across pages and changes it only with refs", async () => {
+    const app = setupManagement();
+    const materials = Array.from({ length: 20 }, (_, index) => materialRef(index + 1));
+    const complete = { initialMaterials: materials.slice(0, 10), evalInitialMaterials: materials.slice(10),
+      initialSession: { bundleId: BUNDLE, sessionId: SESSION } };
+    const read = vi.spyOn(app.managed.store, "readDatasetDataResources").mockResolvedValue(complete);
+    const request = (page: number) => app.call("list_options", {
+      category: "dataset_data_resources", datasetId: DATASET, dataId: FIRST, page, pageSize: 50,
+    });
+    const firstRpc = await (await request(1)).json() as {
+      result: { isError?: boolean; content: [{ text: string }] };
+    };
+    expect(firstRpc.result.isError).not.toBe(true);
+    expect(firstRpc.result.content[0].text.length).toBeLessThanOrEqual(4_800);
+    expect(Buffer.byteLength(firstRpc.result.content[0].text, "utf8")).toBeLessThanOrEqual(4_800);
+    const first = JSON.parse(firstRpc.result.content[0].text) as Record<string, unknown>;
+    const second = await toolValue(await request(2));
+    expect(first).toMatchObject({ page: 1, pageSize: 20, total: 21, initialMaterialsCount: 10,
+      evalInitialMaterialsCount: 10, hasInitialSession: true });
+    expect(second).toMatchObject({ page: 2, pageSize: 20, total: 21, items: [
+      { field: "initialSession", index: 0, ...complete.initialSession },
+    ] });
+    expect((first.items as unknown[]).concat(second.items as unknown[])).toEqual([
+      ...complete.initialMaterials.map((ref, index) => ({ field: "initialMaterials", index, ...ref })),
+      ...complete.evalInitialMaterials.map((ref, index) => ({ field: "evalInitialMaterials", index, ...ref })),
+      { field: "initialSession", index: 0, ...complete.initialSession },
+    ]);
+    expect(first.bindingDigest).toBe(await digestJson(complete));
+    expect(second.bindingDigest).toBe(first.bindingDigest);
+    const beyond = await toolValue(await request(3));
+    expect(beyond).toMatchObject({ page: 3, pageSize: 20, total: 21, items: [],
+      bindingDigest: first.bindingDigest });
+
+    // A Data prompt/URL change is irrelevant to this digest; removing the Session is not.
+    read.mockResolvedValue(Object.assign({}, complete, { userPrompt: "different PRIVATE_PROMPT",
+      url: "https://private.example" }));
+    expect((await toolValue(await request(1))).bindingDigest).toBe(first.bindingDigest);
+    read.mockResolvedValue({ ...complete, initialSession: null });
+    const twenty = await toolValue(await request(1));
+    expect(twenty).toMatchObject({ total: 20, hasInitialSession: false, pageSize: 20 });
+    expect((twenty.items as unknown[])).toHaveLength(20);
+    expect((await toolValue(await request(2))).items).toEqual([]);
+    expect(twenty.bindingDigest).not.toBe(first.bindingDigest);
+    expect(twenty.bindingDigest).toBe(await digestJson({ ...complete, initialSession: null }));
+
+    read.mockResolvedValue({ initialMaterials: [], evalInitialMaterials: [], initialSession: null });
+    const empty = await toolValue(await request(1));
+    expect(empty).toEqual({ category: "dataset_data_resources", datasetId: DATASET, dataId: FIRST,
+      page: 1, pageSize: 20, total: 0, initialMaterialsCount: 0, evalInitialMaterialsCount: 0,
+      hasInitialSession: false, bindingDigest: await digestJson({
+        initialMaterials: [], evalInitialMaterials: [], initialSession: null,
+      }), items: [] });
+    expect(await toolValue(await request(2))).toEqual({ ...empty, page: 2 });
+  });
+
+  it("requires precisely the Dataset and Data UUIDs, rejecting all other selectors before any read", async () => {
+    const app = setupManagement();
+    const read = vi.spyOn(app.managed.store, "readDatasetDataResources");
+    for (const input of [
+      { category: "dataset_data_resources" },
+      { category: "dataset_data_resources", datasetId: DATASET },
+      { category: "dataset_data_resources", dataId: FIRST },
+      { category: "dataset_data_resources", datasetId: DATASET, dataId: "not-a-uuid" },
+      { category: "dataset_data_resources", datasetId: "not-a-uuid", dataId: FIRST },
+      ...[
+        { q: "anything" }, { dataIds: [FIRST] }, { projectId: project.projectId }, { outputSchemaId: SCHEMA },
+        { bundleId: BUNDLE }, { materialId: MATERIAL }, { sessionId: SESSION }, { schemaOffset: 0 },
+        { userAgentId: AGENT }, { projectSampleIds: ["sample-1"] }, { samplingIds: ["sampling-1"] },
+        { extra: "PRIVATE" }, { page: 0 }, { pageSize: 0 }, { pageSize: 51 },
+      ].map((extra) => ({ category: "dataset_data_resources", datasetId: DATASET, dataId: FIRST, ...extra })),
+      { category: "dataset_data", datasetId: DATASET, dataId: FIRST },
+      { category: "approval_dataset", datasetId: DATASET, dataId: FIRST },
+      { category: "materials", bundleId: BUNDLE, dataId: FIRST },
+    ]) expect(await errorCode(await app.call("list_options", input))).toContain("REQUEST_INVALID_INPUT");
+    expect(read).not.toHaveBeenCalled();
+    read.mockResolvedValue({ initialMaterials: [], evalInitialMaterials: [], initialSession: null });
+    const upper = await toolValue(await app.call("list_options", {
+      category: "dataset_data_resources", datasetId: DATASET.toUpperCase(), dataId: FIRST.toUpperCase(),
+    }));
+    expect(upper).toMatchObject({ datasetId: DATASET, dataId: FIRST });
+    expect(read).toHaveBeenCalledExactlyOnceWith(OWNER, DATASET, FIRST);
+    read.mockRejectedValueOnce(new HttpError("EVAL_SP_CONFLICT", "PRIVATE pending operation"));
+    expect(await errorCode(await app.call("list_options", {
+      category: "dataset_data_resources", datasetId: DATASET, dataId: FIRST,
+    }))).toContain("EVAL_SP_CONFLICT");
+    for (const code of ["DATASET_NOT_FOUND", "DATA_NOT_FOUND"] as const) {
+      read.mockRejectedValueOnce(new HttpError(code, "PRIVATE owner or deleted member"));
+      const error = await errorCode(await app.call("list_options", {
+        category: "dataset_data_resources", datasetId: DATASET, dataId: FIRST,
+      }));
+      expect(error).toContain(code);
+      expect(error).not.toContain("PRIVATE");
+    }
+  });
+
+  it("reports over-budget JSON rather than clipping an item, count or binding digest", async () => {
+    const app = setupManagement();
+    // A lying Store bypasses its UUID validation here only to exercise the MCP output guard.
+    vi.spyOn(app.managed.store, "readDatasetDataResources").mockResolvedValue({
+      initialMaterials: Array.from({ length: 20 }, () => ({ bundleId: "x".repeat(500), materialId: MATERIAL })),
+      evalInitialMaterials: [], initialSession: null,
+    });
+    const error = await errorCode(await app.call("list_options", {
+      category: "dataset_data_resources", datasetId: DATASET, dataId: FIRST, pageSize: 50,
+    }));
+    expect(error).toMatch(/^CATALOG_PAYLOAD_TOO_LARGE:/u);
+    expect(error).not.toContain("xxx");
   });
 });
 

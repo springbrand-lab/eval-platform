@@ -142,6 +142,45 @@ async function datasetDataOptions(c: Context<AppBindings>, input: Options) {
   return result;
 }
 
+/** A single current member's stored UUID references; no Dataset scan, file read or catalog liveness claim. */
+async function datasetDataResourceOptions(c: Context<AppBindings>, input: Options) {
+  if (!c.env.evalManagement) throw new HttpError("INTERNAL_ERROR", "Management preparation is unavailable");
+  const datasetId = input.datasetId!;
+  const dataId = input.dataId!;
+  const { page } = input;
+  const pageSize = Math.min(input.pageSize, 20);
+  const { initialMaterials, evalInitialMaterials, initialSession } =
+    await c.env.evalManagement.store.readDatasetDataResources(c.var.user.id, datasetId, dataId);
+  const initialMaterialsCount = initialMaterials.length;
+  const evalInitialMaterialsCount = evalInitialMaterials.length;
+  const hasInitialSession = initialSession !== null;
+  const total = initialMaterialsCount + evalInitialMaterialsCount + (hasInitialSession ? 1 : 0);
+  // Only materialize the requested continuous page. Index is within its source
+  // field, not the global page, and the digest still covers every stored ref.
+  const items = [];
+  for (let position = (page - 1) * pageSize; position < Math.min(page * pageSize, total); position++) {
+    if (position < initialMaterialsCount) {
+      const ref = initialMaterials[position]!;
+      items.push({ field: "initialMaterials", index: position, bundleId: ref.bundleId, materialId: ref.materialId });
+    } else if (position < initialMaterialsCount + evalInitialMaterialsCount) {
+      const index = position - initialMaterialsCount;
+      const ref = evalInitialMaterials[index]!;
+      items.push({ field: "evalInitialMaterials", index, bundleId: ref.bundleId, materialId: ref.materialId });
+    } else if (initialSession) {
+      items.push({ field: "initialSession", index: 0,
+        bundleId: initialSession.bundleId, sessionId: initialSession.sessionId });
+    }
+  }
+  const result = {
+    category: "dataset_data_resources", datasetId, dataId, page, pageSize, total,
+    initialMaterialsCount, evalInitialMaterialsCount, hasInitialSession,
+    bindingDigest: await digestJson({ initialMaterials, evalInitialMaterials, initialSession }),
+    items,
+  };
+  if (!fitsTaktResult(result)) throw new HttpError("CATALOG_PAYLOAD_TOO_LARGE", "Data binding page is too large");
+  return result;
+}
+
 async function approvalOutputSchema(c: Context<AppBindings>, input: Options) {
   const outputSchemaId = input.outputSchemaId!;
   const schema = await c.var.services.outputSchemas.get(outputSchemaId);
@@ -293,6 +332,7 @@ export async function listOptions(c: Context<AppBindings>, input: Options) {
     return resourceOptions(c, input);
   }
   if (category === "dataset_data") return datasetDataOptions(c, input);
+  if (category === "dataset_data_resources") return datasetDataResourceOptions(c, input);
   if (category === "approval_dataset") return approvalDataset(c, input);
   if (category === "approval_agent") return approvalAgent(c, input);
   if (category === "approval_output_schema") return approvalOutputSchema(c, input);
