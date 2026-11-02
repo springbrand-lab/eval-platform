@@ -257,6 +257,21 @@ export const inspectCaseSchema = z.strictObject({
   projectId: entityIdSchema, runId: entityIdSchema.optional(), samplingId: entityIdSchema,
   evaluationId: entityIdSchema.optional(),
 });
+export const getCaseUsageSchema = z.strictObject({
+  projectId: entityIdSchema, samplingId: entityIdSchema, role: z.enum(["execution", "evaluation"]),
+  evaluationId: entityIdSchema.optional(), runId: entityIdSchema.optional(),
+  section: z.enum(["attempts", "models", "actions"]).default("attempts"),
+  attemptId: entityIdSchema.optional(),
+  page: z.number().int().min(1).max(10_000).default(1),
+  pageSize: z.number().int().min(1).max(10).default(5),
+}).superRefine((value, ctx) => {
+  if ((value.role === "evaluation") !== (value.evaluationId !== undefined)) {
+    ctx.addIssue({ code: "custom", message: "Select an Evaluation ID exactly for the evaluation role" });
+  }
+  if ((value.section === "attempts") === (value.attemptId !== undefined)) {
+    ctx.addIssue({ code: "custom", message: "Select an Attempt ID only for model or Action facts" });
+  }
+});
 
 /** Call validation schemas and advertised tool schemas are identical. */
 export const managementSchemas = {
@@ -278,4 +293,5 @@ export const managementSchemas = {
   get_run: getRunSchema,
   get_metrics: getMetricsSchema,
   inspect_case: inspectCaseSchema,
+  get_case_usage: getCaseUsageSchema,
 } as const;

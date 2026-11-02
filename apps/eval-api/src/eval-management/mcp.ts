@@ -11,7 +11,7 @@ import { sameSecret } from "../lib/secret.js";
 import type { AppBindings } from "../lib/types.js";
 import { JSON_BODY_BYTES, MANAGEMENT_OUTPUT_SCHEMA_BODY_BYTES } from "../limits.js";
 import { serviceAccountScope } from "../middlewares/service-account.js";
-import { METRICS_TOOL_RESULT_BYTES, record, TAKT_RESULT_CHARS, text } from "./common.js";
+import { METRICS_TOOL_RESULT_BYTES, record, redactLiteral, TAKT_RESULT_CHARS, text } from "./common.js";
 import { managementSchemas } from "./schemas.js";
 import { ManagementOutcomeUnknownError } from "./skill.js";
 import { callTool } from "./tools.js";
@@ -40,12 +40,135 @@ const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
   get_run: "Read Run status and a page of Sampling and Evaluation IDs, without full records.",
   get_metrics: "Read current owner-scoped or exact-Run Metrics. Project/Dataset default section=overview returns compact complete summary with field total but no rows or byTool. section=samples pages existing scoreIndex and navigation; section=tools requires role=execution|evaluation and pages only that role's Metrics-authoritative native byTool rates; section=fields pages countable output fields. Sample/Sampling and sampling+evaluationId keep their existing resultOffset contract; large selected JSON uses the authenticated documents GET.",
   inspect_case: "Inspect bounded evidence and Subject/Evaluator Metrics for one current owned Sampling/Evaluation (or exact Run member). For a complete SAFE Pi file use the authenticated fixed GET /mcp/eval-management/trajectories from the trusted backend, never an MCP tool.",
+  get_case_usage: "READ ONLY: list current owned Sampling/Evaluation Attempts, or page one selected Attempt's per-model tokens/cache hit/provider USD estimate plus paired rated/debited/shortfall/platform-owned SP credits, or verified Action execution charges. role=execution forbids evaluationId; role=evaluation requires it. Optional runId checks exact original AND current membership. section defaults to attempts; models/actions require attemptId. At most 10 rows, no raw snapshot, account/Chat ID or Tool arguments. Partial/unsettled is explicitly marked, never estimated as billed credits.",
 };
 const TOOLS = (Object.keys(managementSchemas) as (keyof typeof managementSchemas)[]).map((name) => ({
   name, description: DESCRIPTIONS[name],
   inputSchema: z.toJSONSchema(managementSchemas[name],
     { target: "draft-07", io: "input", unrepresentable: "any" }),
 }));
+
+const count = (value: unknown): number | null => {
+  const n = typeof value === "string" && /^\d{1,16}$/u.test(value) ? Number(value) : value;
+  return typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : null;
+};
+const usd = (value: unknown): number | null => {
+  const n = typeof value === "string" && /^[0-9.eE+-]{1,32}$/u.test(value) ? Number(value) : null;
+  return n !== null && Number.isFinite(n) && n >= 0 ? n : null;
+};
+/** No partial credential, URL or arbitrary source label can become an identity. */
+const safeId = (value: unknown, length = 128): string | null =>
+  typeof value === "string" && value.length <= length && /^[\w.:-]+$/u.test(value)
+    && !redactLiteral(value).redacted ? value : null;
+const safeLabel = (value: unknown): string | null =>
+  typeof value === "string" && value.length <= 96 && /^[\w .:/+-]+$/u.test(value)
+    && !redactLiteral(value).redacted ? value : null;
+const coverage = (value: unknown): "complete" | "partial" | "unavailable" =>
+  value === "complete" || value === "partial" ? value : "unavailable";
+const attemptView = (raw: unknown) => {
+  const row = record(raw) ?? {};
+  const state = row.resourcesStatus === "collected" || row.resourcesStatus === "pending"
+    || row.resourcesStatus === "failed" ? row.resourcesStatus : "unavailable";
+  return {
+    attemptId: safeId(row.attemptId, 512), attemptNumber: count(row.attemptNumber),
+    status: ["queued", "running", "completed", "failed", "interrupted", "cancelled"].includes(String(row.status))
+      ? row.status : null,
+    resources: {
+      status: state, finalized: state === "collected" ? row.finalized === "true" ? true
+        : row.finalized === "false" ? false : null : null,
+      coverage: {
+        usageEvents: state === "collected" ? coverage(row.usageCoverage) : "unavailable",
+        nativeRecords: state === "collected" ? coverage(row.nativeCoverage) : "unavailable",
+        billingSettlements: state === "collected" ? coverage(row.billingCoverage) : "unavailable",
+      },
+      actionCharges: {
+        complete: state === "collected" ? row.actionsComplete === "true" ? true
+          : row.actionsComplete === "false" ? false : null : null,
+        unsettledExecutions: state === "collected" ? count(row.unsettledExecutions) : null,
+        missingExecutionIds: state === "collected" ? count(row.missingExecutionIds) : null,
+      },
+    },
+  };
+};
+
+/** A single line is not a cross-Attempt aggregate: source coverage remains visible separately. */
+function modelLine(raw: unknown, usageCoverage: "complete" | "partial" | "unavailable") {
+  const row = record(raw) ?? {};
+  const tokens = {
+    input: count(row.inputTokens), output: count(row.outputTokens),
+    cacheRead: count(row.cacheReadTokens), cacheWrite: count(row.cacheWriteTokens),
+    reasoning: count(row.reasoningTokens),
+    total: count(row.totalTokens),
+  };
+  if (tokens.total === null && tokens.input !== null && tokens.output !== null
+    && tokens.cacheRead !== null && tokens.cacheWrite !== null) {
+    tokens.total = count(tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite);
+  }
+  const denominator = tokens.input !== null && tokens.cacheRead !== null
+    ? tokens.input + tokens.cacheRead : null;
+  const eventId = safeId(row.eventId);
+  const matches = count(row.settlementMatches);
+  const status = ["settled", "platform_owned", "anomaly"].includes(String(row.status))
+    ? row.status as string : null;
+  const amounts = {
+    ratedCredits: count(row.ratedUnits), debitedCredits: count(row.debitedUnits),
+    shortfallCredits: count(row.shortfallUnits), platformOwnedCredits: count(row.platformOwnedUnits),
+  };
+  const state = count(row.usageMatches) !== 1 || eventId === null ? "ambiguous"
+    : matches === 0 ? "missing"
+      : matches !== 1 || row.accountPresent !== true ? "ambiguous"
+        : status === null ? "unsettled"
+          : status === "anomaly" || Object.values(amounts).some((amount) => amount === null) ? "partial" : "settled";
+  const confirmedAmounts = status !== "anomaly" && (state === "settled" || state === "partial");
+  return {
+    index: count(row.index), eventId,
+    kind: ["assistant_model", "compaction", "subagent", "chat_title"].includes(String(row.kind)) ? row.kind : null,
+    provider: safeLabel(row.provider), model: safeLabel(row.model), tokens,
+    cacheHitRate: { value: denominator !== null && Number.isSafeInteger(denominator) && denominator > 0
+      ? tokens.cacheRead! / denominator : null,
+      coverage: denominator === null || !Number.isSafeInteger(denominator) ? "unavailable" : usageCoverage },
+    providerUsdEstimate: usd(row.providerUsd),
+    modelSettlement: {
+      state, status: state === "settled" || state === "partial" ? status : null,
+      ratedCredits: confirmedAmounts ? amounts.ratedCredits : null,
+      debitedCredits: confirmedAmounts ? amounts.debitedCredits : null,
+      shortfallCredits: confirmedAmounts ? amounts.shortfallCredits : null,
+      platformOwnedCredits: confirmedAmounts ? amounts.platformOwnedCredits : null,
+    },
+  };
+}
+
+async function getCaseUsage(c: Context<AppBindings>, input: z.output<typeof managementSchemas.get_case_usage>) {
+  const { projectId, samplingId, role, evaluationId, runId, section, page, pageSize } = input;
+  // Do not hydrate a Metrics detail, observation stage or entire Run to authorize one page:
+  // the owner/current/role/original-Run joins are checked with the projection in one read-only DB snapshot.
+  const projection = await c.var.services.resourceSnapshots.readCaseUsage(input);
+  if (!Array.isArray(projection.rows) || projection.rows.length > pageSize
+    || projection.total !== null && count(projection.total) === null) throw new HttpError("RESPONSE_INVALID");
+  const base = { projectId, samplingId, role, ...(evaluationId === undefined ? {} : { evaluationId }),
+    ...(runId === undefined ? { runScope: "project_current" } : { runScope: "exact_run", runId }), section };
+  if (section === "attempts") return { ...base,
+    attempts: { page, pageSize, total: projection.total, items: projection.rows.map(attemptView) } };
+  if (!projection.attempt) throw new HttpError("RESPONSE_INVALID");
+  const attempt = attemptView(projection.attempt);
+  const availability = attempt.resources.status !== "collected" ? "not_collected"
+    : projection.total === null ? "snapshot_missing" : "available";
+  const items = availability !== "available" ? [] : section === "models"
+    ? projection.rows.map((row) => modelLine(row, attempt.resources.coverage.usageEvents))
+    : projection.rows.map((raw) => {
+      const row = record(raw) ?? {};
+      const executionId = safeId(row.executionId);
+      const status = ["succeeded", "failed", "outcome_unknown", "running"].includes(String(row.status))
+        ? row.status : null;
+      const charge = count(row.chargedCredits);
+      const observed = executionId !== null && count(row.executionMatches) === 1
+        && (status === "succeeded" || status === "failed") && charge !== null;
+      return { index: count(row.index), executionId, status, chargedCredits: observed ? charge : null,
+        chargeState: observed ? "observed" : "unconfirmed" };
+    });
+  return { ...base, attempt, availability,
+    [section]: { page, pageSize, total: availability === "available" ? projection.total : null, items } };
+}
 
 function toolFailure(error: unknown) {
   if (error instanceof ManagementOutcomeUnknownError) {
@@ -84,7 +207,10 @@ async function handle(c: Context<AppBindings>, message: Record<string, unknown>)
         return mcpError(id, -32602, "Unknown tool");
       }
       try {
-        const result = await callTool(c, name as keyof typeof managementSchemas, params.arguments);
+        // This read is bound to the common authenticated tools/call seam; no raw snapshot or bulk GET enters it.
+        const result = name === "get_case_usage"
+          ? await getCaseUsage(c, managementSchemas.get_case_usage.parse(params.arguments))
+          : await callTool(c, name as keyof typeof managementSchemas, params.arguments);
         // Other tools retain the MCP limit; trusted Takt alone handles large Metrics results.
         const category = record(result)?.category;
         const kind = record(result)?.kind;

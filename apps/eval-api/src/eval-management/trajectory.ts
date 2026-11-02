@@ -100,6 +100,7 @@ async function* lines(c: Context<AppBindings>, input: Query, chat: ChatRef,
             yield part;
           }
           if (transferred !== row.reference.byteLength || transferredHash.digest("hex") !== row.reference.sha256) throw invalid();
+          if (signal.aborted) throw signal.reason;
           records.update(suffix);
           yield suffix;
         } finally {
@@ -111,6 +112,7 @@ async function* lines(c: Context<AppBindings>, input: Query, chat: ChatRef,
         const bytes = encoding.encode(JSON.stringify(row.record));
         if (bytes.byteLength > EVAL_EVIDENCE_FILE_MAX_BYTES) throw invalid();
         for (const part of [prefix, bytes, suffix]) {
+          if (signal.aborted) throw signal.reason;
           records.update(part);
           yield part;
         }
@@ -156,7 +158,7 @@ export function asStream(source: AsyncGenerator<Uint8Array>, abort: AbortControl
       abort.abort(reason);
       await source.return(undefined);
     },
-  });
+  }, { highWaterMark: 0 }); // Do not prefetch a large next part after the downstream stops reading.
 }
 
 /** Authenticated by the router before this handler leases the fixed owner. */
