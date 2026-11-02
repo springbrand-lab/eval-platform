@@ -77,12 +77,15 @@ is still pending; an opted-in read retains only verified facts, with
 than invented zero usage or complete billing. Historical raw resource rows
 and v1/v2 evidence bytes are not migrated.
 
-For new paged snapshots, only validated SAFE Pi Tool Result
-`details.executionId`/`capabilityId` and bounded actor, Submission, Tool Call
-and Tool name identities enter compact facts. The large-reference byte scanner
-applies the same allowlist after verifying the complete source digest and scope.
-No Tool arguments, Result body, arbitrary `details` or credentials enter this
-projection; the independent SP Action charge remains the only billed amount.
+For new paged snapshots, validated SAFE Pi Tool Result
+`details.executionId`/`capabilityId` and bounded actor, Submission and Tool
+Call identities enter compact facts only when the Tool name is safe for a
+charge link. Existing Metrics facts still preserve SAFE source Tool labels
+(including Unicode); an unsuitable label cannot establish a charge link.
+The large-reference byte scanner applies the same link allowlist after
+verifying the complete source digest and scope. No Tool arguments, Result
+body or arbitrary `details` enter the new link facts; the independent SP
+Action charge remains the only billed amount.
 
 **Release blocker:** The installed npm alpha.7 publishes finalized header,
 native/billing page, evidence and record-byte schemas/paths, but not the
