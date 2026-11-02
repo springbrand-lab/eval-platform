@@ -428,12 +428,11 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     const { reference } = row;
     const { signal } = options;
     const fields = { ...handleContext(handle), submissionId, ingestSeq: row.ingestSeq, bytes: reference.byteLength };
-    const transferPath = publicPath("native trajectory record", () => evalTrajectoryRecordTransferPath(row, submissionId));
-    // alpha.7 owns the immutable reference path but does not publish partial
-    // query helpers. Keep the post-wait extension explicit until SP releases it.
-    const partialQuery = options.partialResourceKey === undefined ? ""
-      : `&${new URLSearchParams({ allowPartial: "true", resourceKey: options.partialResourceKey })}`;
-    const path = `${handlePath(handle)}${transferPath}${partialQuery}`;
+    const transferPath = publicPath("native trajectory record", () => evalTrajectoryRecordTransferPath(
+      row, submissionId, options.partialResourceKey === undefined ? undefined
+        : { allowPartial: true, resourceKey: options.partialResourceKey },
+    ));
+    const path = `${handlePath(handle)}${transferPath}`;
     try {
       const response = await callBytes("GET", path, { ...(signal === undefined ? {} : { signal }) });
       const mismatch = () => new SpHarnessError("Eval SP native trajectory record transfer differs from its reference", false);
@@ -691,14 +690,9 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         // A pre-receipt Attempt first resolves its real operation-bound Submission via
         // the small readiness route. The new page paths require that exact ID.
         const submissionId = input.submissionId ?? (await readResources(input)).scope.submissionId;
-        // alpha.7 publishes the finalized route builders, not the partial
-        // opt-in (nor partial billing throughSeq/byte resourceKey). Only these
-        // post-deadline additions are structural; publication is still blocked.
-        const partialQuery = (throughSeq?: number): string => !input.allowPartial ? ""
-          : `&${new URLSearchParams({ allowPartial: "true",
-            ...(throughSeq === undefined ? {} : { throughSeq: String(throughSeq) }) })}`;
         const headerPath = `${chat}${publicPath("resource header",
-          () => evalResourceHeaderPath(input.idempotencyKey, submissionId))}${partialQuery()}`;
+          () => evalResourceHeaderPath(input.idempotencyKey, submissionId,
+            input.allowPartial ? { allowPartial: true } : undefined))}`;
         const header = resourceHeader(await call("GET", headerPath, pageOptions("resource header")));
         if (header.scope.chatId !== input.handle.chatId || header.scope.idempotencyKey !== input.idempotencyKey
           || header.scope.submissionId !== submissionId) {
@@ -737,8 +731,9 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           const cursor = afterSeq;
           const pagePath = publicPath("resource native page", () => evalResourceNativePagePath(input.idempotencyKey, submissionId, {
             afterSeq: cursor, limit: EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX, throughSeq: header.cursor.throughSeq,
+            ...(partial ? { allowPartial: true as const } : {}),
           }));
-          const page = resourceNativePage(await call("GET", `${chat}${pagePath}${partial ? partialQuery() : ""}`,
+          const page = resourceNativePage(await call("GET", `${chat}${pagePath}`,
             pageOptions("resource native page")));
           if (page.cursor.throughSeq !== header.cursor.throughSeq || page.cursor.throughSeq < afterSeq) {
             throw new SpHarnessError("Eval SP changed the resource native cutoff", false);
@@ -794,8 +789,9 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           const pagePath = publicPath("resource billing page", () => evalResourceBillingPagePath(input.idempotencyKey, submissionId, {
             after, limit: EVAL_BILLING_RESOURCES_PAGE_MAX,
             ...(frozen === undefined ? {} : { throughCount: frozen.throughCount, throughSha256: frozen.sha256 }),
+            ...(partial ? { allowPartial: true as const, throughSeq: header.cursor.throughSeq } : {}),
           }));
-          const page = resourceBillingPage(await call("GET", `${chat}${pagePath}${partial ? partialQuery(header.cursor.throughSeq) : ""}`,
+          const page = resourceBillingPage(await call("GET", `${chat}${pagePath}`,
             pageOptions("resource billing page")));
           if (page.scope.chatId !== input.handle.chatId || page.scope.submissionId !== submissionId
             || page.after !== after || (frozen !== undefined
@@ -818,8 +814,9 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         // even when all facts fitted in one page. Recheck the full source after every transfer.
         const fingerprintPath = publicPath("resource billing fingerprint", () => evalResourceBillingPagePath(input.idempotencyKey, submissionId, {
           after: 0, limit: 1, throughCount: frozen!.throughCount, throughSha256: frozen!.sha256,
+          ...(partial ? { allowPartial: true as const, throughSeq: header.cursor.throughSeq } : {}),
         }));
-        const checked = resourceBillingPage(await call("GET", `${chat}${fingerprintPath}${partial ? partialQuery(header.cursor.throughSeq) : ""}`,
+        const checked = resourceBillingPage(await call("GET", `${chat}${fingerprintPath}`,
           pageOptions("resource billing fingerprint")));
         if (checked.scope.chatId !== input.handle.chatId || checked.scope.submissionId !== submissionId
           || checked.after !== 0 || checked.cursor.throughCount !== frozen!.throughCount

@@ -256,8 +256,8 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const attemptId = crypto.randomUUID();
     const chatId = crypto.randomUUID();
     const submissionId = crypto.randomUUID();
-    // This exercises the independent Attempt Store/SQL reader; alpha.7's strict
-    // HTTP header is *not* made to accept the future public actionId receipt.
+    // This exercises the independent Attempt Store/SQL reader. The installed
+    // alpha.9 Header and paged collection are covered by the Harness tests.
     const snapshot: AgentResourceSnapshot = {
       scope: { chatId, submissionId, idempotencyKey: `execution:${samplingId}` },
       observedAt: "2026-11-02T00:00:00.000Z", finalized: true,

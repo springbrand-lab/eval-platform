@@ -1,7 +1,7 @@
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_EVIDENCE_LIMITS, SP_PI_TRAJECTORY_FORMAT,
   isResourceSnapshotDownload,
   type AgentResourceSnapshotPage, type AgentResourceSnapshotDownload, type NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
@@ -12,7 +12,7 @@ import {
   evalBillingResourcesPageSchema, evalNativeRecordReferenceSchema, evalResourceBillingPagePath,
   evalResourceHeaderPath, evalResourceHeaderSchema, evalResourceNativePagePath,
   evalResourceNativePageSchema, evalTrajectoryRecordTransferPath,
-  type EvalBillingResourcesPage, type EvalBillingResourcesPageQuery,
+  type EvalBillingResourcesPage, type EvalResourceBillingPageQuery,
   type EvalNativeRecordReference, type EvalResourceHeader,
 } from "@springbrand/eval-harness";
 import { isRequestCancelled } from "@springbrand/http/errors";
@@ -33,7 +33,7 @@ const readiness = {
 };
 const coverage = { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "partial" } as const;
 const action = { source: "action", executionId: "88888888-8888-4888-8888-888888888888",
-  status: "outcome_unknown", chargedCredits: 0 };
+  actionId: "action.exa.search", status: "outcome_unknown", chargedCredits: 0 };
 const header = {
   scope, observedAt: "2026-10-28T00:00:00.000Z", finalized: true, readiness, coverage,
   cursor: { throughSeq: 8 }, actionCharges: [action],
@@ -42,10 +42,21 @@ const resourcePath = `/resources/by-key/${encodeURIComponent(key)}`;
 const prefix = `/internal/v1/eval-harness/users/${ownerUserId}/chats/${chatId}${resourcePath}`;
 const nativePage = (records: unknown[], nextAfterSeq: number | null) =>
   ({ format: SP_PI_TRAJECTORY_FORMAT, cursor: header.cursor, records, nextAfterSeq });
-const events = Array.from({ length: 300 }, (_, index) =>
-  ({ eventId: `event-${index}`, kind: "assistant_model", metrics: { totalTokens: index + 1 } }));
+const events = Array.from({ length: 300 }, (_, index) => ({
+  eventId: `event-${index}`, runId: submissionId, chatId, kind: "assistant_model",
+  outcome: "billable", rateVersion: 1, meterId: "model:openrouter/test",
+  metrics: { inputTokens: index + 1 }, providerMetadata: { provider: "openrouter", model: "openrouter/test" },
+}));
 const settlements = events.map((event) => ({
-  eventId: event.eventId, accountId: ownerUserId, status: "settled", debitedUnits: 2,
+  id: `settlement-${event.eventId}`, eventId: event.eventId, accountId: ownerUserId,
+  status: "settled", ratedUnits: 2, debitedUnits: 2, shortfallUnits: 0,
+  platformOwnedUnits: 0, platformOwnedReason: null, createdAt: 123,
+  firstResult: {
+    eventId: event.eventId, usage: event, status: "settled",
+    ratedUnits: 2, debitedUnits: 2, shortfallUnits: 0,
+    platformOwned: { units: 0, reason: null },
+    accountAfter: { version: 2, availableUnits: 10 }, settledAtMs: 123,
+  },
 }));
 const fingerprint = "a".repeat(64);
 const billingPage = (after: number, length: number) => ({
@@ -95,7 +106,8 @@ describe("public paged SP resource collection", () => {
       privateMetadata: "private-key" };
     const { reference, bytes } = nativeTransfer(result, 10);
     const local: EvalResourceHeader = { ...cleanHeader, cursor: { throughSeq: 10 },
-      actionCharges: [{ source: "action", executionId, status: "succeeded", chargedCredits: 7 }] };
+      actionCharges: [{ source: "action", executionId, actionId: "action.exa.search",
+        status: "succeeded", chargedCredits: 7 }] };
     const { fetch, requests } = resourceService((url) => {
       if (url.pathname === `${prefix}/native-records`) return Response.json({
         format: SP_PI_TRAJECTORY_FORMAT, cursor: local.cursor,
@@ -153,35 +165,71 @@ describe("public paged SP resource collection", () => {
     });
   });
 
-  it("keeps the alpha.7 Action-ID receipt blocked at the public header schema, not a local parser override", async () => {
-    // This is a release gate, not an alternate EP wire format: the installed
-    // public alpha.7 strict schema does not yet publish the new actionId field.
-    const nextReceipt = { ...cleanHeader, actionCharges: [{
-      source: "action", executionId: action.executionId, actionId: "action.exa.search",
-      status: "succeeded", chargedCredits: 7,
-    }] };
-    expect(evalResourceHeaderSchema.safeParse(nextReceipt).success).toBe(false);
-    const { fetch, requests } = resourceService((url) =>
-      url.pathname === `${prefix}/header` ? Response.json(nextReceipt) : undefined);
-    await expect(createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
-      .collectAgentResources(input)).rejects.toMatchObject({
-      retryable: false, message: "Eval SP returned an invalid resource header",
-    });
-    expect(requests.some((url) => url.pathname === `${prefix}/billing`)).toBe(false);
+  it("accepts the published alpha.9 Action receipt without losing its authoritative ID", async () => {
+    const nextReceipt: EvalResourceHeader = { ...cleanHeader, cursor: { throughSeq: 10 },
+      actionCharges: [{ source: "action", executionId: action.executionId, actionId: "action.exa.search",
+        status: "succeeded", chargedCredits: 7 }] };
+    expect(evalResourceHeaderSchema.parse(nextReceipt)).toEqual(nextReceipt);
+    const receipt = nextReceipt.actionCharges[0]!;
+    if (receipt.source !== "action") throw new Error("Expected an Action receipt");
+    const { actionId: _actionId, ...withoutId } = receipt;
+    expect(evalResourceHeaderSchema.safeParse({ ...nextReceipt, actionCharges: [withoutId] }).success).toBe(false);
+    const result = nativeFixture(10, chatId, submissionId);
+    const { fetch, requests } = resourceService((url) => {
+      if (url.pathname === `${prefix}/header`) return Response.json(nextReceipt);
+      if (url.pathname === `${prefix}/native-records`) return Response.json({
+        ...nativePage([result], null), cursor: nextReceipt.cursor,
+      });
+      return undefined;
+    }, nextReceipt);
+    const download = await createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
+      .collectAgentResources(input) as AgentResourceSnapshotDownload;
+    try {
+      expect(download.summary.counts.billingSettlements).toBe(1);
+      const pages: AgentResourceSnapshotPage[] = [];
+      for await (const page of download.readPages()) pages.push(page);
+      expect(pages.flatMap((page) => page.stream === "billingSettlements" ? page.records : []))
+        .toEqual(nextReceipt.actionCharges);
+    } finally {
+      await download.dispose();
+    }
+    expect(requests.some((url) => url.pathname === `${prefix}/billing`)).toBe(true);
   });
 
-  it("makes the published alpha.7 partial-query contract gap explicit", () => {
-    // These declarations and runtime builders describe *finalized* pages only.
-    // The mocked post-wait partial tests below do not prove deployed SP support.
-    expectTypeOf<Parameters<typeof evalResourceHeaderPath>>().toEqualTypeOf<[key: string, submissionId: string]>();
-    expectTypeOf<Parameters<typeof evalTrajectoryRecordTransferPath>>()
-      .toEqualTypeOf<[row: EvalNativeRecordReference, submissionId: string]>();
-    type HasPartial<T> = "allowPartial" extends keyof T ? true : false;
-    expectTypeOf<HasPartial<Parameters<typeof evalResourceNativePagePath>[2]>>().toEqualTypeOf<false>();
-    expectTypeOf<HasPartial<EvalBillingResourcesPageQuery>>().toEqualTypeOf<false>();
-    expect(() => evalResourceBillingPagePath(key, submissionId, {
-      after: 0, limit: 200, allowPartial: true, throughSeq: 8,
-    } as unknown as EvalBillingResourcesPageQuery)).toThrow();
+  it("uses alpha.9's public partial-query and frozen-reference contract", () => {
+    const reference: EvalNativeRecordReference = nativeTransfer(nativeFixture(8, chatId, submissionId), 8).reference;
+    const headerPath = new URL(evalResourceHeaderPath(key, submissionId, { allowPartial: true }), "https://eval-sp.test");
+    expect(headerPath.searchParams.get("allowPartial")).toBe("true");
+    const nativePath = new URL(evalResourceNativePagePath(key, submissionId, {
+      afterSeq: 0, limit: 200, throughSeq: 8, allowPartial: true,
+    }), "https://eval-sp.test");
+    expect(nativePath.searchParams.get("allowPartial")).toBe("true");
+    const billingQuery: EvalResourceBillingPageQuery = {
+      after: 0, limit: 1, throughCount: 0, throughSha256: fingerprint, allowPartial: true, throughSeq: 8,
+    };
+    const billingPath = new URL(evalResourceBillingPagePath(key, submissionId, billingQuery), "https://eval-sp.test");
+    expect(billingPath.searchParams.get("allowPartial")).toBe("true");
+    expect(billingPath.searchParams.get("throughSeq")).toBe("8");
+    const bytePath = new URL(evalTrajectoryRecordTransferPath(reference, submissionId, {
+      allowPartial: true, resourceKey: key,
+    }), "https://eval-sp.test");
+    expect(bytePath.searchParams.get("allowPartial")).toBe("true");
+    expect(bytePath.searchParams.get("resourceKey")).toBe(key);
+  });
+
+  it("rejects a model billing page that impersonates a Header Action receipt", async () => {
+    const forged = { ...settlements[0], source: "action", executionId: action.executionId,
+      actionId: action.actionId, chargedCredits: 99 };
+    const page = { scope: { chatId, submissionId }, cursor: { throughCount: 1, sha256: fingerprint },
+      after: 0, usageEvents: events.slice(0, 1), billingSettlements: [forged], nextAfter: null };
+    expect(evalBillingResourcesPageSchema.safeParse(page).success).toBe(false);
+    const { fetch, requests } = resourceService((url) =>
+      url.pathname === `${prefix}/billing` ? Response.json(page) : undefined);
+    await expect(createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
+      .collectAgentResources(input)).rejects.toMatchObject({
+      retryable: false, message: "Eval SP returned an invalid resource billing page",
+    });
+    expect(requests.filter((url) => url.pathname === `${prefix}/billing`)).toHaveLength(1);
   });
 
   it("rejects an inline Pi message that the published native page schema rejects", async () => {
