@@ -91,7 +91,8 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
         yield { stream: "billingSettlements", records: [{ eventId: "usage-1", accountId: owner,
           status: "settled", debitedUnits: 1 }] };
         yield { stream: "billingSettlements", records: [{ source: "action",
-          executionId: "88888888-8888-4888-8888-888888888888", status: "succeeded", chargedCredits: 7 }] };
+          executionId: "88888888-8888-4888-8888-888888888888", actionId: "action.exa.search",
+          status: "succeeded", chargedCredits: 7 }] };
       },
       dispose: async () => undefined,
     };
@@ -121,20 +122,11 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     });
     expect(actions).toMatchObject({ total: 1, rows: [{
       executionId: "88888888-8888-4888-8888-888888888888", chargedCredits: "7",
-      billingSource: "action",
+      billingSource: "action", actionId: "action.exa.search", actionIdPresent: true,
       executionMatches: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
-      resultCallMatches: 1, legacyCompact: false, toolName: "search", capabilityId: "capability-1",
-      snapshotNativeRows: 3, scopedNativeRows: 3, rawRoleToolResults: 0,
-      scopedPiAssistants: 1, supportedPiAssistants: 1,
-      scopedPiToolResults: 1, compactedPiToolResults: 1, supportedPiToolResults: 1,
-      projectedPiToolCalls: 1, callAgentIdsAccepted: 1, callSubmissionIdsAccepted: 1,
-      callIdsAccepted: 1, callNamesAccepted: 1, callLinkIdentityAccepted: 1,
-      projectedPiToolResults: 1, resultAgentIdsAccepted: 1, resultSubmissionIdsAccepted: 1,
-      resultCallIdsAccepted: 1, resultNamesAccepted: 1, resultLinkIdentityAccepted: 1,
-      projectedCapabilityIds: 1, projectedExecutionIds: 1,
-      linkableToolCalls: 1, linkableToolResults: 1,
+      resultCallMatches: 1, legacyCompact: false, toolName: "search",
     }] });
-    expect(JSON.stringify(actions)).not.toMatch(/private Tool arguments|private-key|credential|chatId|agentId|toolCallId/u);
+    expect(JSON.stringify(actions)).not.toMatch(/private Tool arguments|private-key|capabilityId|credential|chatId|agentId|toolCallId/u);
   });
 
   it("requires a unique same-actor, same-Submission and same-name v2 link for each Action charge", async () => {
@@ -174,7 +166,8 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
       usageEvents: [], nativeRecords: [...native, duplicate],
       billingSettlements: Array.from({ length: 6 }, (_, index) => ({
-        source: "action", executionId: `action-${index}`, status: "succeeded", chargedCredits: 7,
+        source: "action", executionId: `action-${index}`, actionId: `action.ledger-${index}`,
+        status: "succeeded", chargedCredits: 7,
       })),
     };
     const compacted = await compactResourceSnapshot(snapshot);
@@ -190,14 +183,14 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     });
     expect(page).toMatchObject({ total: 6, rows: [
       { executionMatches: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
-        resultCallMatches: 1, toolName: "lookup", capabilityId: "capability-1" },
+        resultCallMatches: 1, toolName: "lookup", actionId: "action.ledger-0" },
       { executionMatches: 1, linkMatches: 1, toolCallMatches: 0, namedToolCallMatches: 0 },
       { executionMatches: 1, linkMatches: 1, toolCallMatches: 0, namedToolCallMatches: 0 },
       { executionMatches: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 0 },
       { executionMatches: 1, linkMatches: 1, toolCallMatches: 2, namedToolCallMatches: 2 },
       { executionMatches: 1, linkMatches: 0 },
     ] });
-    expect(JSON.stringify(page)).not.toMatch(/call_1\|fc_1|call_4\|fc_4|toolCallKey|toolCallId/u);
+    expect(JSON.stringify(page)).not.toMatch(/call_1\|fc_1|call_4\|fc_4|capabilityId|toolCallKey|toolCallId/u);
   });
 
   it("shows old raw and v1 compact charges without attributing them to Tools", async () => {
@@ -223,7 +216,8 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       observedAt: "2026-11-02T00:00:00.000Z", finalized: true,
       coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
       usageEvents: [], nativeRecords: native, billingSettlements: [
-        { source: "action", executionId: "action-1", status: "succeeded", chargedCredits: 7 },
+        { source: "action", executionId: "action-1", actionId: "action.from-ledger",
+          status: "succeeded", chargedCredits: 7 },
       ],
     };
     const original = (await store.getSampling(samplingId))!;
@@ -236,9 +230,8 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const base = { projectId: seeded.projectId, samplingId, role: "execution" as const,
       section: "actions" as const, attemptId, page: 1, pageSize: 1 };
     expect(await reader.readCaseUsage(base)).toMatchObject({ total: 1, rows: [
-      { chargedCredits: "7", executionMatches: 1, linkMatches: 0,
-        legacyCompact: true, toolName: null, capabilityId: null,
-        snapshotNativeRows: 2, rawRoleToolResults: 1, linkableToolCalls: 0, linkableToolResults: 0 },
+      { chargedCredits: "7", executionMatches: 1, actionId: "action.from-ledger",
+        linkMatches: 0, legacyCompact: true, toolName: null },
     ] });
     const compacted = await compactResourceSnapshot(snapshot);
     const old: AgentResourceSnapshot = { ...snapshot, nativeRecords: compacted.nativeRecords.map((entry) =>
@@ -248,8 +241,74 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       resources: { status: "collected", summary: summarizeResourceSnapshot(old) } }] }, saved,
     { attemptId, snapshot: old });
     expect(await reader.readCaseUsage(base)).toMatchObject({
-      rows: [{ linkMatches: 0, legacyCompact: true, toolName: null, capabilityId: null }],
+      rows: [{ actionId: "action.from-ledger", linkMatches: 0, legacyCompact: true, toolName: null }],
     });
+  });
+
+  it("reads only owner-scoped, source-specific receipts without borrowing model debits or SAFE Action IDs", async () => {
+    const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }] });
+    const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
+    const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, {
+      projectId: seeded.projectId, operation: "execution",
+    });
+    await store.admitRun(command);
+    const samplingId = command.run.samplingIds[0]!;
+    const attemptId = crypto.randomUUID();
+    const chatId = crypto.randomUUID();
+    const submissionId = crypto.randomUUID();
+    // This exercises the independent Attempt Store/SQL reader; alpha.7's strict
+    // HTTP header is *not* made to accept the future public actionId receipt.
+    const snapshot: AgentResourceSnapshot = {
+      scope: { chatId, submissionId, idempotencyKey: `execution:${samplingId}` },
+      observedAt: "2026-11-02T00:00:00.000Z", finalized: true,
+      coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+      usageEvents: [{ eventId: "usage-1", kind: "assistant_model" }], nativeRecords: [],
+      billingSettlements: [
+        { eventId: "usage-1", accountId: owner, status: "settled", debitedUnits: 3 },
+        { source: "action", executionId: "execution-1", actionId: "action.exa.search",
+          status: "succeeded", chargedCredits: 7 },
+        { source: "tool", executionId: "execution-1", status: "succeeded", chargedCredits: 4.5 },
+        { source: "action", executionId: "execution-duplicate", actionId: "action.first",
+          status: "succeeded", chargedCredits: 2 },
+        { source: "action", executionId: "execution-duplicate", actionId: "action.second",
+          status: "failed", chargedCredits: 5 },
+        { source: "action", executionId: "execution-missing", status: "failed", chargedCredits: 0 },
+        { source: "action", executionId: "execution-unsafe", actionId: "Bearer private-credential",
+          status: "succeeded", chargedCredits: 9 },
+        { source: "tool", eventId: "usage-1", status: "succeeded", chargedCredits: 99 },
+        { source: "connector", eventId: "usage-1", executionId: "execution-other",
+          actionId: "action.forged", status: "succeeded", chargedCredits: 999 },
+        { source: "action", executionId: "private-prompt-execution",
+          actionId: "action.exa.search", status: "succeeded", chargedCredits: 42 },
+      ],
+    };
+    const original = (await store.getSampling(samplingId))!;
+    await store.updateSampling({
+      ...original, subjectChatId: chatId, execution: { status: "succeeded" },
+      executionAttempts: [{ executionAttemptId: attemptId, samplingId, attemptNumber: 1, status: "completed",
+        submissionId, resources: { status: "collected", summary: summarizeResourceSnapshot(snapshot) } }],
+    }, original, { attemptId, snapshot });
+    const reader = createPostgresResourceSnapshotReader(database.db, owner);
+    const base = { projectId: seeded.projectId, samplingId, role: "execution" as const,
+      runId: command.run.runId, attemptId, page: 1, pageSize: 10 };
+    expect(await reader.readCaseUsage({ ...base, section: "actions" })).toMatchObject({ total: 6, rows: [
+      { index: 2, billingSource: "action", executionId: "execution-1", executionMatches: 1,
+        actionId: "action.exa.search", actionIdPresent: true, chargedCredits: "7", linkMatches: 0 },
+      { index: 4, executionId: "execution-duplicate", executionMatches: 2, actionId: "action.first" },
+      { index: 5, executionId: "execution-duplicate", executionMatches: 2, actionId: "action.second" },
+      { index: 6, executionId: "execution-missing", executionMatches: 1, actionId: null, actionIdPresent: false },
+      { index: 7, executionId: "execution-unsafe", executionMatches: 1, actionId: null, actionIdPresent: true },
+      { index: 10, executionId: null, executionMatches: 1, actionId: "action.exa.search" },
+    ] });
+    expect(await reader.readCaseUsage({ ...base, section: "tools" })).toMatchObject({ total: 2, rows: [
+      { index: 3, billingSource: "tool", executionId: "execution-1", executionMatches: 1, chargedCredits: "4.5" },
+      { index: 8, billingSource: "tool", executionId: null, executionMatches: 0, chargedCredits: "99" },
+    ] });
+    expect(await reader.readCaseUsage({ ...base, section: "models" })).toMatchObject({ total: 1, rows: [
+      { index: 1, eventId: "usage-1", settlementMatches: 1, debitedUnits: "3" },
+    ] });
+    await expect(createPostgresResourceSnapshotReader(database.db, "other-owner")
+      .readCaseUsage({ ...base, section: "actions" })).rejects.toMatchObject({ code: "SAMPLING_NOT_FOUND" });
   });
 
   it("collects public SP pages through Runtime into the PostgreSQL Attempt", async () => {

@@ -13,19 +13,30 @@ export function aggregateBilling(
 ): Omit<CostStatistics, "providerUsd"> {
   const modelBills: FactEntry[] = [];
   const actionBills: FactEntry[] = [];
+  const toolBills: FactEntry[] = [];
+  const unclassifiedBills: FactEntry[] = [];
   let complete = stream.complete;
   for (const entry of stream.entries) {
     const status = text(entry.fact.status) ?? "";
+    const source = text(entry.fact.source);
     if (text(entry.fact.executionId)) {
       if (ACTION_SETTLED_STATUSES.has(status)) {
-        actionBills.push(entry);
+        if (source === "action") actionBills.push(entry);
+        else if (source === "tool") toolBills.push(entry);
+        else {
+          // Preserve historical observed totals, but without a source never
+          // assert that this debit belonged to an SP Action.
+          unclassifiedBills.push(entry);
+          complete = false;
+          diagnostics.report("unsupported-record", "billingSettlements", entry, "Unclassified ledger charge source");
+        }
         continue;
       }
       complete = false;
       if (status !== "running") {
         diagnostics.report("unsupported-record", "billingSettlements", entry, "Unsupported Action settlement status");
       }
-    } else if (MODEL_SETTLED_STATUSES.has(status)) {
+    } else if ((source === undefined || source === "model") && MODEL_SETTLED_STATUSES.has(status)) {
       modelBills.push(entry);
     } else {
       complete = false;
@@ -36,17 +47,18 @@ export function aggregateBilling(
     entries: readonly FactEntry[],
     field: string,
     read: (fact: JsonRecord) => JsonValue | undefined,
+    integer = true,
   ): MetricNumber => diagnostics.sum(
-    entries, complete, "billingSettlements", field, true,
-    (entry) => diagnostics.number(entry, "billingSettlements", read(entry.fact), field, true),
+    entries, complete, "billingSettlements", field, integer,
+    (entry) => diagnostics.number(entry, "billingSettlements", read(entry.fact), field, integer),
   );
   return {
     modelDebitedUnits: units(modelBills, "debitedUnits", (fact) => fact.debitedUnits),
-    actionChargedUnits: units(actionBills, "chargedCredits", (fact) => fact.chargedCredits),
+    actionChargedUnits: units(actionBills, "chargedCredits", (fact) => fact.chargedCredits, false),
     chargedUnits: units(
-      [...modelBills, ...actionBills],
+      [...modelBills, ...actionBills, ...toolBills, ...unclassifiedBills],
       "chargedUnits",
-      (fact) => text(fact.executionId) ? fact.chargedCredits : fact.debitedUnits,
+      (fact) => text(fact.executionId) ? fact.chargedCredits : fact.debitedUnits, false,
     ),
     ratedUnits: units(modelBills, "ratedUnits", (fact) => fact.ratedUnits),
     shortfallUnits: units(modelBills, "shortfallUnits", (fact) => fact.shortfallUnits),

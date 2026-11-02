@@ -40,7 +40,7 @@ const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
   get_run: "Read Run status and a page of Sampling and Evaluation IDs, without full records.",
   get_metrics: "Read current owner-scoped or exact-Run Metrics. Project/Dataset default section=overview returns compact complete summary with field total but no rows or byTool. section=samples pages existing scoreIndex and navigation; section=tools requires role=execution|evaluation and pages only that role's Metrics-authoritative native byTool rates; section=fields pages countable output fields. Sample/Sampling and sampling+evaluationId keep their existing resultOffset contract; large selected JSON uses the authenticated documents GET.",
   inspect_case: "Inspect bounded evidence and Subject/Evaluator Metrics for one current owned Sampling/Evaluation (or exact Run member). For a complete SAFE Pi file use the authenticated fixed GET /mcp/eval-management/trajectories from the trusted backend, never an MCP tool.",
-  get_case_usage: "READ ONLY: list current owned Sampling/Evaluation Attempts, or page one selected Attempt's model usage and paired SP credits, or Action ledger charges with uniquely matched SAFE Tool/API name and capability ID when available. role=execution forbids evaluationId; role=evaluation requires it. Optional runId checks exact original AND current membership. section defaults to attempts; models/actions require attemptId. At most 10 rows, no raw snapshot, account/Chat ID or Tool arguments. Unknown historical links and partial/unsettled charges are explicit, never estimated.",
+  get_case_usage: "READ ONLY: list current owned Sampling/Evaluation Attempts, or page one selected Attempt's model settlements, Action receipts (ledger actionId and chargedCredits), or separate Super Link Tool receipts. A SAFE Pi Tool name is optional, never an Action identity or a price. role=execution forbids evaluationId; role=evaluation requires it. Optional runId checks exact original AND current membership. section defaults to attempts; models/actions/tools require attemptId. At most 10 rows, no raw snapshot, account/Chat ID or Tool arguments. Incomplete coverage and unconfirmed charges are explicit, never estimated.",
 };
 const TOOLS = (Object.keys(managementSchemas) as (keyof typeof managementSchemas)[]).map((name) => ({
   name, description: DESCRIPTIONS[name],
@@ -56,12 +56,39 @@ const usd = (value: unknown): number | null => {
   const n = typeof value === "string" && /^[0-9.eE+-]{1,32}$/u.test(value) ? Number(value) : null;
   return n !== null && Number.isFinite(n) && n >= 0 ? n : null;
 };
+/** The public SP receipt permits non-integer chargedCredits; do not round an
+ * observed debit or reprice it from model/Tool usage. */
+const ledgerCredits = (value: unknown): number | null => {
+  const n = typeof value === "number" ? value
+    : typeof value === "string" && /^[0-9.eE+-]{1,32}$/u.test(value) ? Number(value) : null;
+  return n !== null && Number.isFinite(n) && n >= 0 && n <= Number.MAX_SAFE_INTEGER ? n : null;
+};
 /** No partial credential, URL or arbitrary source label can become an identity. */
 const safeId = (value: unknown, length = 128): string | null =>
   typeof value === "string" && value.length <= length && /^[\w.:-]+$/u.test(value)
     && !redactLiteral(value).redacted ? value : null;
+/** Ledger IDs only cross the model boundary as complete, bounded identifiers,
+ * not as arbitrary SP-authored strings, private text or truncated prefixes. */
+const safeLedgerId = (value: unknown): string | null =>
+  typeof value === "string" && value.length <= 128
+    && /^[A-Za-z0-9_][A-Za-z0-9_.:-]*$/u.test(value)
+    && !/(?:^|[_.:-])(?:secret|token|password|api[_-]?key|bearer|credential|authorization|private|prompt)(?:$|[_.:-])/iu.test(value)
+    && !/^(?:sk-|key_|ghp_|glpat-|xox[baprs]-)/iu.test(value)
+    && !redactLiteral(value).redacted ? value : null;
+/** The public SP Action catalog uses action.* IDs; UUID-shaped IDs are also
+ * harmless to display. Anything else stays unavailable rather than leaking. */
+const safeActionId = (value: unknown): string | null => {
+  const id = safeLedgerId(value);
+  return id !== null && (/^action\.[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(id)
+    || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(id)) ? id : null;
+};
 const safeLabel = (value: unknown): string | null =>
   typeof value === "string" && value.length <= 96 && /^[\w .:/+-]+$/u.test(value)
+    && !redactLiteral(value).redacted ? value : null;
+const safeToolDisplayName = (value: unknown): string | null =>
+  typeof value === "string" && value.length <= 96 && /^[A-Za-z_][A-Za-z0-9_./:-]*$/u.test(value)
+    && !/(?:^|[_.:/-])(?:secret|token|password|api[_-]?key|bearer|private|prompt|credential|authorization)(?:$|[_.:/-])/iu.test(value)
+    && !/^(?:sk-|key_|bearer|ghp_|glpat-|xox[baprs]-)/iu.test(value)
     && !redactLiteral(value).redacted ? value : null;
 const coverage = (value: unknown): "complete" | "partial" | "unavailable" =>
   value === "complete" || value === "partial" ? value : "unavailable";
@@ -138,52 +165,64 @@ function modelLine(raw: unknown, usageCoverage: "complete" | "partial" | "unavai
   };
 }
 
-/** Mapping is independent of charge confirmation; neither a price nor a matching
- * Tool Result can promote an unsettled SP debit to an observed charge. */
-function actionLine(raw: unknown, nativeCoverage: "complete" | "partial" | "unavailable") {
-  const row = record(raw) ?? {};
-  const executionId = safeId(row.executionId);
+/** Only one source-specific terminal SP receipt proves a charge. Neither model
+ * usage nor SAFE Pi can supply an Action/Tool amount. */
+function ledgerCharge(row: Record<string, unknown>) {
+  const executionId = safeLedgerId(row.executionId);
   const status = ["succeeded", "failed", "outcome_unknown", "running"].includes(String(row.status))
     ? row.status : null;
-  const charge = count(row.chargedCredits);
+  const charge = ledgerCredits(row.chargedCredits);
   const executionMatches = count(row.executionMatches);
   const observed = executionId !== null && executionMatches === 1
-    && (status === "succeeded" || status === "failed") && charge !== null;
-  const linkMatches = count(row.linkMatches);
-  const toolName = safeLabel(row.toolName);
-  const capabilityId = safeId(row.capabilityId);
-  const calls = count(row.toolCallMatches);
-  const namedCalls = count(row.namedToolCallMatches);
-  const resultCalls = count(row.resultCallMatches);
-  let matchState: "matched" | "ambiguous" | "unavailable" | "unknown" = "unavailable";
-  if (executionId !== null && executionMatches !== null) {
-    if (executionMatches !== 1 || linkMatches !== null && linkMatches > 1) matchState = "ambiguous";
-    else if (row.legacyCompact === true || nativeCoverage !== "complete") {
-      // Old compact rows lost details; a partial source cannot prove uniqueness.
-      matchState = "unknown";
-    } else if (linkMatches === 1 && toolName !== null
-      && (row.capabilityId == null || capabilityId !== null)
-      && calls !== null && calls !== 0 && namedCalls !== null && resultCalls !== null) {
-      matchState = calls === 1 && namedCalls === 1 && resultCalls === 1 ? "matched" : "ambiguous";
-    }
-  }
+    && (status === "succeeded" || status === "failed"
+      || status === "outcome_unknown" && charge === 0) && charge !== null;
   return {
     index: count(row.index), executionId, status, chargedCredits: observed ? charge : null,
     chargeState: observed ? "observed" : "unconfirmed",
-    toolName: matchState === "matched" ? toolName : null,
-    capabilityId: matchState === "matched" ? capabilityId : null,
-    matchState,
   };
 }
 
-function matchHistogram(rows: readonly unknown[], key: string) {
-  const counts = { none: 0, one: 0, multiple: 0, missing: 0 };
-  for (const raw of rows) {
-    const value = count(record(raw)?.[key]);
-    const bucket = value === null ? "missing" : value === 0 ? "none" : value === 1 ? "one" : "multiple";
-    counts[bucket] += 1;
+/** The receipt's actionId is authoritative for Action identity. SAFE Pi can
+ * independently describe a uniquely correlated Tool, but cannot name an Action. */
+function actionLine(raw: unknown, nativeCoverage: "complete" | "partial" | "unavailable") {
+  const row = record(raw) ?? {};
+  if (row.billingSource !== "action") throw new HttpError("RESPONSE_INVALID");
+  const charge = ledgerCharge(row);
+  const executionMatches = count(row.executionMatches);
+  const actionId = safeActionId(row.actionId);
+  const actionIdentityState = charge.executionId === null || executionMatches === null
+    ? "unavailable" : executionMatches !== 1
+      ? "ambiguous" : actionId !== null
+        ? "identified" : row.actionIdPresent === true || row.actionId != null
+          ? "unsafe" : "missing";
+  const linkMatches = count(row.linkMatches);
+  const toolName = safeToolDisplayName(row.toolName);
+  const calls = count(row.toolCallMatches);
+  const namedCalls = count(row.namedToolCallMatches);
+  const resultCalls = count(row.resultCallMatches);
+  let toolMatchState: "matched" | "ambiguous" | "unavailable" | "unknown" = "unavailable";
+  if (charge.executionId !== null && executionMatches !== null) {
+    if (executionMatches !== 1 || linkMatches !== null && linkMatches > 1) toolMatchState = "ambiguous";
+    else if (row.legacyCompact === true || nativeCoverage !== "complete") {
+      // Old raw/v1 facts and a partial source cannot prove Tool uniqueness.
+      toolMatchState = "unknown";
+    } else if (linkMatches === 1 && toolName !== null
+      && calls !== null && calls !== 0 && namedCalls !== null && resultCalls !== null) {
+      toolMatchState = calls === 1 && namedCalls === 1 && resultCalls === 1 ? "matched" : "ambiguous";
+    }
   }
-  return counts;
+  return {
+    ...charge, source: "action" as const,
+    actionId: actionIdentityState === "identified" ? actionId : null, actionIdentityState,
+    toolName: toolMatchState === "matched" ? toolName : null, toolMatchState,
+  };
+}
+
+/** Super Link Tool debits are real ledger charges, but never SP Actions. */
+function toolLine(raw: unknown) {
+  const row = record(raw) ?? {};
+  if (row.billingSource !== "tool") throw new HttpError("RESPONSE_INVALID");
+  return { ...ledgerCharge(row), source: "tool" as const };
 }
 
 async function getCaseUsage(c: Context<AppBindings>, input: z.output<typeof managementSchemas.get_case_usage>) {
@@ -203,53 +242,11 @@ async function getCaseUsage(c: Context<AppBindings>, input: z.output<typeof mana
     : projection.total === null ? "snapshot_missing" : "available";
   if (section === "actions" && availability === "available") {
     const items = projection.rows.map((row) => actionLine(row, attempt.resources.coverage.nativeRecords));
-    if (items.some((item) => item.matchState !== "matched")) {
-      const matchStates = { matched: 0, ambiguous: 0, unavailable: 0, unknown: 0 };
-      const billingSources = { action: 0, tool: 0, missing: 0, other: 0 };
-      for (const [index, item] of items.entries()) {
-        matchStates[item.matchState] += 1;
-        const source = record(projection.rows[index])?.billingSource;
-        const bucket = source === "action" || source === "tool" ? source
-          : source == null ? "missing" : "other";
-        billingSources[bucket] += 1;
-      }
-      const first = record(projection.rows[0]) ?? {};
-      c.var.logger?.warn({
-        event: "eval_case_action_link_diagnostics", page, pageSize, total: projection.total,
-        nativeCoverage: attempt.resources.coverage.nativeRecords, finalized: attempt.resources.finalized,
-        matchStates, billingSources, executionMatches: matchHistogram(projection.rows, "executionMatches"),
-        resultLinks: matchHistogram(projection.rows, "linkMatches"),
-        toolCalls: matchHistogram(projection.rows, "toolCallMatches"),
-        namedToolCalls: matchHistogram(projection.rows, "namedToolCallMatches"),
-        resultCalls: matchHistogram(projection.rows, "resultCallMatches"),
-        inventory: {
-          snapshotNativeRows: count(first.snapshotNativeRows),
-          scopedNativeRows: count(first.scopedNativeRows),
-          scopedPiAssistants: count(first.scopedPiAssistants),
-          supportedPiAssistants: count(first.supportedPiAssistants),
-          scopedPiToolResults: count(first.scopedPiToolResults),
-          compactedPiToolResults: count(first.compactedPiToolResults),
-          supportedPiToolResults: count(first.supportedPiToolResults),
-          projectedPiToolCalls: count(first.projectedPiToolCalls),
-          callAgentIdsAccepted: count(first.callAgentIdsAccepted),
-          callSubmissionIdsAccepted: count(first.callSubmissionIdsAccepted),
-          callIdsAccepted: count(first.callIdsAccepted),
-          callNamesAccepted: count(first.callNamesAccepted),
-          callLinkIdentityAccepted: count(first.callLinkIdentityAccepted),
-          projectedPiToolResults: count(first.projectedPiToolResults),
-          resultAgentIdsAccepted: count(first.resultAgentIdsAccepted),
-          resultSubmissionIdsAccepted: count(first.resultSubmissionIdsAccepted),
-          resultCallIdsAccepted: count(first.resultCallIdsAccepted),
-          resultNamesAccepted: count(first.resultNamesAccepted),
-          resultLinkIdentityAccepted: count(first.resultLinkIdentityAccepted),
-          projectedCapabilityIds: count(first.projectedCapabilityIds),
-          projectedExecutionIds: count(first.projectedExecutionIds),
-          linkableToolCalls: count(first.linkableToolCalls),
-          linkableToolResults: count(first.linkableToolResults),
-        },
-      }, "Eval Action charge link evidence is incomplete");
-    }
     return { ...base, attempt, availability, actions: { page, pageSize, total: projection.total, items } };
+  }
+  if (section === "tools" && availability === "available") {
+    const items = projection.rows.map(toolLine);
+    return { ...base, attempt, availability, tools: { page, pageSize, total: projection.total, items } };
   }
   const items = availability !== "available" ? [] : section === "models"
     ? projection.rows.map((row) => modelLine(row, attempt.resources.coverage.usageEvents)) : [];

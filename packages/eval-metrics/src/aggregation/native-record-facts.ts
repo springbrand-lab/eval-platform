@@ -65,8 +65,8 @@ function nonnegative(value: JsonValue | undefined): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-/** An SP SAFE projection is authoritative for the message, but details/identifiers
- * are still opaque Pi data. Other charge-link identities keep their old guards. */
+/** An SP SAFE projection is authoritative for the message, but Tool details
+ * remain opaque Pi data: only executionId can corroborate a ledger execution. */
 function safeIdentity(value: JsonValue | undefined): string | undefined {
   return typeof value === "string" && value.length <= 128
     && /^[A-Za-z0-9_][A-Za-z0-9_.:-]*$/u.test(value)
@@ -217,12 +217,10 @@ function messageFacts(source: PiTrajectoryRecord, native: JsonRecord): readonly 
         && callKey && linkName && agentId && submissionId;
       const details = record(message.details);
       const executionId = linkable ? safeIdentity(details?.executionId) : undefined;
-      const capabilityId = details?.capabilityId === undefined ? undefined : safeIdentity(details.capabilityId);
       facts.push({ type: "tool", phase: "result", id: callKey ? nativeKey(source, callKey) : null,
         toolName: metricToolName(message.toolName), timestamp: message.timestamp,
         ...(linkable ? { agentId, submissionId, toolCallKey: callKey } : {}),
-        ...(executionId && (details?.capabilityId === undefined || capabilityId)
-          ? { executionId, ...(capabilityId === undefined ? {} : { capabilityId }) } : {}),
+        ...(executionId ? { executionId } : {}),
         status: message.isError === true ? "failed" : message.isError === false ? "completed" : null,
         durationMs: message.durationMs ?? null, outputLength: toolBytes(message.content), fromPiResult: true });
     } else if ((message.role !== "user" && message.role !== "system")

@@ -96,7 +96,11 @@ function sourceIdentity(stream: Stream, ownerUserId: string, fact: JsonRecord, s
   const eventId = text(fact.eventId);
   if (stream === "usageEvents") return eventId ? identity(ownerUserId, eventId) : undefined;
   const executionId = text(fact.executionId);
-  if (executionId) return identity("action", executionId);
+  if (executionId) return identity("charge",
+    fact.source === "action" || fact.source === "tool" ? fact.source : "unclassified", executionId);
+  // A malformed Tool/Action receipt with a model event ID cannot impersonate
+  // the paired API-owned model settlement.
+  if (fact.source !== undefined && fact.source !== "model") return undefined;
   const accountId = text(fact.accountId);
   return accountId && eventId ? identity("model", accountId, eventId) : undefined;
 }

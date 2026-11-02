@@ -62,10 +62,10 @@ describe("body-free native Pi metric projections", () => {
     expect(call).toMatchObject({ fromPiCall: true, agentId: "agent-1", submissionId: "submission-1",
       toolCallKey: expected, toolName: "lookup" });
     expect(result).toMatchObject({ fromPiResult: true, agentId: "agent-1", submissionId: "submission-1",
-      toolCallKey: expected, toolName: "lookup", executionId: "execution-1", capabilityId: "capability-1" });
+      toolCallKey: expected, toolName: "lookup", executionId: "execution-1" });
     expect(call?.id).toBe(result?.id);
     expect(compacted.nativeRecords.map((entry) => entry.metricProjection?.chargeLinkVersion)).toEqual([2, 2]);
-    expect(JSON.stringify(compacted)).not.toMatch(/call_1\|fc_1|private-business-result|private-credential|toolCallId/u);
+    expect(JSON.stringify(compacted)).not.toMatch(/call_1\|fc_1|capability-1|private-business-result|private-credential|toolCallId/u);
     expect(aggregateResources([nativeResourceInput([], { nativeRecords: responsesFixture.records })]))
       .toEqual(aggregateResources([nativeResourceInput([], { ...compacted })]));
   });
@@ -206,15 +206,15 @@ describe("body-free native Pi metric projections", () => {
       chargeLinkVersion: 2, facts: [{
         type: "tool", phase: "result", fromPiResult: true, agentId: "agent-1",
         submissionId: "submission-1", toolCallKey: expectedKey, toolName: "search",
-        executionId: "execution-1", capabilityId: "capability-1",
+        executionId: "execution-1",
       }],
     });
-    expect(JSON.stringify(projected)).not.toMatch(/call-1|private-argument|private-business-body|private-key|apiKey|details/u);
+    expect(JSON.stringify(projected)).not.toMatch(/call-1|capability-1|private-argument|private-business-body|private-key|apiKey|details/u);
     expect(aggregateResources([nativeResourceInput([], { nativeRecords: [call, result] })]))
       .toEqual(aggregateResources([nativeResourceInput([], { ...projected })]));
   });
 
-  it("does not turn untrusted Tool Result details or names into charge links, and hashes opaque IDs", async () => {
+  it("ignores Tool Result capabilityId for Action identity without losing a safe optional execution link", async () => {
     const source = nativeFixture(10)[0]!;
     if (source.record.record.type !== "entry") throw new Error("Expected Pi result");
     const message = (source.record.record.value.model as Record<string, JsonValue>[])[0]!;
@@ -222,8 +222,6 @@ describe("body-free native Pi metric projections", () => {
     if (!collection || collection.status !== "collected") throw new Error("Expected native snapshot");
     for (const details of [
       { executionId: "https://private.test/secret", capabilityId: "capability-1" },
-      { executionId: "execution-1", capabilityId: "Bearer private-key" },
-      { executionId: "execution-1", capabilityId: "x".repeat(129) },
       { executionId: "[REDACTED]", capabilityId: "capability-1" },
     ]) {
       message.details = details;
@@ -233,13 +231,13 @@ describe("body-free native Pi metric projections", () => {
       expect(fact[0]).not.toHaveProperty("capabilityId");
       expect(JSON.stringify(compacted)).not.toContain(details.capabilityId);
     }
-    message.details = { executionId: "execution-1", capabilityId: "capability-1" };
+    message.details = { executionId: "execution-1", capabilityId: "Bearer private-key" };
     message.toolCallId = "https://private.test/call";
     const opaqueCall = await compactResourceSnapshot(collection.snapshot);
     expect(toolFact(opaqueCall.nativeRecords[0]!)).toMatchObject({
       executionId: "execution-1", toolCallKey: expect.stringMatching(/^tck2_[0-9a-f]{64}$/u),
     });
-    expect(JSON.stringify(opaqueCall)).not.toContain("https://private.test/call");
+    expect(JSON.stringify(opaqueCall)).not.toMatch(/https:\/\/private\.test\/call|Bearer private-key|capabilityId/u);
     const bookkeeping = nativeFixture(8)[0]!;
     if (bookkeeping.record.record.type !== "entry") throw new Error("Expected a Tool event");
     const event = (bookkeeping.record.record.value.data as { event: { payload: { toolName: string } } }).event;

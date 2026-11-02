@@ -188,21 +188,25 @@ and `runId` are not needed by Metrics or the read-only Action join and are
 not copied into compact storage. The separately saved original SAFE evidence
 still retains the complete original parent.
 Only the existing bounded, allowlisted agentId, submissionId and Tool name
-enter a charge link; Result `details.executionId` and optional capabilityId
-retain their existing conservative validators.
+enter an optional Tool link; Result `details.executionId` keeps its
+conservative validator. `details.capabilityId` is not copied into compact
+facts, even when present or when a large Tool body is scanned.
 SP emits `pi.tool-result`; historical Pi records may use `pi.toolResult`.
 Both kinds require the same validated Tool Result role and charge-link identities.
 The existing Metrics Tool label remains the SAFE source name, including
 Unicode or escaped control characters, but only a short, identifier-shaped
 name may establish a charge link; non-linkable names never acquire charge IDs.
 `metricProjection.chargeLinkVersion:2` distinguishes these keys from previously
-persisted raw and version-1 compact rows: those rows are *unknown* for Action
-attribution, never silently reinterpreted or backfilled. This is **not** a
-pricing or attribution aggregate: the API may
-correlate these facts read-only against its independently verified SP Action
-ledger, while Metrics' total usage/charges and model/Tool ownership stay
-unchanged. No Tool arguments, Result body, arbitrary details or credentials
+persisted raw and version-1 compact rows: those rows are *unknown* for
+optional Tool association, never silently reinterpreted or backfilled. The
+Action ID and actual charged credits come **only** from SP's `source:"action"`
+ledger receipt, regardless of whether this Tool link exists. This compact
+seam neither prices nor identifies Actions. Model settlements are model-only;
+Metrics includes Super Link `source:"tool"` fees in the overall charged
+total but never in `actionChargedUnits`. A historical charge lacking a
+trusted source may contribute to a partial total, not a confirmed Action
+subtotal. No Tool arguments, Result body, arbitrary details or credentials
 are persisted in the new facts. Oversized referenced bytes use the same
-bounded two-ID interpretation as inline SAFE records. The existing bounded large-record
+bounded Tool-call/execution-ID interpretation as inline SAFE records. The bounded large-record
 scanner marks an ID it cannot retain as omitted/unknown; it never hashes a
 truncated prefix or treats a historical raw ID as a derived key.

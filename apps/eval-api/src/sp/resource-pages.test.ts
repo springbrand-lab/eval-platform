@@ -79,7 +79,7 @@ function resourceService(serve: (url: URL) => Response | undefined, current: SpR
 }
 
 describe("public paged SP resource collection", () => {
-  it.each([false, true])("collects a SAFE Tool Result's charge identity from an %s record without its private body", async (referenced) => {
+  it.each([false, true])("collects optional SAFE Tool execution linkage from an %s record without its private body", async (referenced) => {
     const executionId = "88888888-8888-4888-8888-888888888888";
     const call = nativeFixture(6, chatId, submissionId);
     const result = nativeFixture(10, chatId, submissionId);
@@ -115,7 +115,7 @@ describe("public paged SP resource collection", () => {
       expect(native).toHaveLength(2);
       expect(native[1]).toMatchObject({ metricProjection: {
         chargeLinkVersion: 2, facts: [{ type: "tool", phase: "result",
-          executionId, capabilityId: "capability-1",
+          executionId,
           toolCallKey: expect.stringMatching(/^tck2_[0-9a-f]{64}$/u), toolName: "search" }],
       } });
       const callFacts = native[0]!.metricProjection?.facts as readonly Record<string, unknown>[];
@@ -123,7 +123,7 @@ describe("public paged SP resource collection", () => {
       expect(callFacts.find((fact) => fact.type === "tool")?.toolCallKey).toBe(resultFacts[0]?.toolCallKey);
       expect(pages.flatMap((page) => page.stream === "billingSettlements" ? page.records : []))
         .toEqual(local.actionCharges);
-      expect(JSON.stringify(native)).not.toMatch(/call_1\|fc_1|private-business-body|private-key|privateMetadata|details/u);
+      expect(JSON.stringify(native)).not.toMatch(/call_1\|fc_1|capability-1|private-business-body|private-key|privateMetadata|details/u);
     } finally {
       await download.dispose();
     }
@@ -151,6 +151,23 @@ describe("public paged SP resource collection", () => {
       submissionId, throughSeq: "8", identity: reference.reference.identity,
       byteLength: String(reference.reference.byteLength), sha256: reference.reference.sha256,
     });
+  });
+
+  it("keeps the alpha.7 Action-ID receipt blocked at the public header schema, not a local parser override", async () => {
+    // This is a release gate, not an alternate EP wire format: the installed
+    // public alpha.7 strict schema does not yet publish the new actionId field.
+    const nextReceipt = { ...cleanHeader, actionCharges: [{
+      source: "action", executionId: action.executionId, actionId: "action.exa.search",
+      status: "succeeded", chargedCredits: 7,
+    }] };
+    expect(evalResourceHeaderSchema.safeParse(nextReceipt).success).toBe(false);
+    const { fetch, requests } = resourceService((url) =>
+      url.pathname === `${prefix}/header` ? Response.json(nextReceipt) : undefined);
+    await expect(createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
+      .collectAgentResources(input)).rejects.toMatchObject({
+      retryable: false, message: "Eval SP returned an invalid resource header",
+    });
+    expect(requests.some((url) => url.pathname === `${prefix}/billing`)).toBe(false);
   });
 
   it("makes the published alpha.7 partial-query contract gap explicit", () => {
