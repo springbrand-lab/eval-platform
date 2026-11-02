@@ -19,7 +19,10 @@ import { isRequestCancelled } from "@springbrand/http/errors";
 import { openLocalEvidenceBlobs } from "../evidence/local-blobs.js";
 import { createSpHarness } from "./harness.js";
 import type { SpResourceHeader } from "./harness-wire.js";
-import { nativeAssistantMessage, nativeFixture, nativeTransfer, nativeTransferResponse, streamedAssistantTransfer } from "./native-test-fixture.js";
+import {
+  modelBillingPairFixture, nativeAssistantMessage, nativeFixture, nativeTransfer, nativeTransferResponse,
+  streamedAssistantTransfer,
+} from "./native-test-fixture.js";
 
 const chatId = "33333333-3333-4333-8333-333333333333";
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
@@ -42,22 +45,10 @@ const resourcePath = `/resources/by-key/${encodeURIComponent(key)}`;
 const prefix = `/internal/v1/eval-harness/users/${ownerUserId}/chats/${chatId}${resourcePath}`;
 const nativePage = (records: unknown[], nextAfterSeq: number | null) =>
   ({ format: SP_PI_TRAJECTORY_FORMAT, cursor: header.cursor, records, nextAfterSeq });
-const events = Array.from({ length: 300 }, (_, index) => ({
-  eventId: `event-${index}`, runId: submissionId, chatId, kind: "assistant_model",
-  outcome: "billable", rateVersion: 1, meterId: "model:openrouter/test",
-  metrics: { inputTokens: index + 1 }, providerMetadata: { provider: "openrouter", model: "openrouter/test" },
-}));
-const settlements = events.map((event) => ({
-  id: `settlement-${event.eventId}`, eventId: event.eventId, accountId: ownerUserId,
-  status: "settled", ratedUnits: 2, debitedUnits: 2, shortfallUnits: 0,
-  platformOwnedUnits: 0, platformOwnedReason: null, createdAt: 123,
-  firstResult: {
-    eventId: event.eventId, usage: event, status: "settled",
-    ratedUnits: 2, debitedUnits: 2, shortfallUnits: 0,
-    platformOwned: { units: 0, reason: null },
-    accountAfter: { version: 2, availableUnits: 10 }, settledAtMs: 123,
-  },
-}));
+const modelPairs = Array.from({ length: 300 }, (_, index) =>
+  modelBillingPairFixture(`event-${index}`, chatId, submissionId, ownerUserId, index + 1));
+const events = modelPairs.map(({ usage }) => usage);
+const settlements = modelPairs.map(({ settlement }) => settlement);
 const fingerprint = "a".repeat(64);
 const billingPage = (after: number, length: number) => ({
   scope: { chatId, submissionId }, cursor: { throughCount: events.length, sha256: fingerprint },
