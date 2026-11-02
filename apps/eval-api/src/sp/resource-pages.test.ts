@@ -787,7 +787,7 @@ describe("public paged SP resource collection", () => {
       coverage: { usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial" } as const };
     const complete = { ...cleanHeader, cursor: partial.cursor };
     let headerReads = 0;
-    const before = (await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-"));
+    const before = new Set((await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-")));
     const { fetch, requests } = resourceService((url) => {
       if (url.pathname === `${prefix}/header`) return Response.json(++headerReads === 1 ? partial : complete);
       if (url.pathname === `${prefix}/native-records`) return Response.json({
@@ -803,7 +803,8 @@ describe("public paged SP resource collection", () => {
     const harness = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch });
     await expect(harness.collectAgentResources({ ...input, allowPartial: true }))
       .rejects.toMatchObject({ retryable: true, message: expect.stringContaining("header during collection") });
-    expect((await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-"))).toEqual(before);
+    expect((await readdir(tmpdir())).filter((entry) =>
+      entry.startsWith("eval-resources-") && !before.has(entry))).toEqual([]);
     const completed = await harness.collectAgentResources(input) as AgentResourceSnapshotDownload;
     try {
       expect(completed.summary).toMatchObject({ finalized: true,
@@ -824,7 +825,7 @@ describe("public paged SP resource collection", () => {
     const partial = { ...cleanHeader, finalized: false, cursor: { throughSeq: 3 },
       coverage: { usageEvents: "partial", nativeRecords: "partial", billingSettlements: "partial" } as const };
     let reads = 0;
-    const before = (await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-"));
+    const before = new Set((await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-")));
     const { fetch, requests } = resourceService((url) => {
       if (url.pathname === `${prefix}/native-records`) return Response.json({
         format: SP_PI_TRAJECTORY_FORMAT, cursor: partial.cursor, records: [nativeFixture(3, chatId, submissionId)],
@@ -849,7 +850,8 @@ describe("public paged SP resource collection", () => {
       .rejects.toMatchObject({ retryable: false, message: expect.stringContaining("billing source fingerprint") });
     expect(reads).toBe(2);
     expect(requests.filter(({ pathname }) => pathname === `${prefix}/header`)).toHaveLength(1);
-    expect((await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-"))).toEqual(before);
+    expect((await readdir(tmpdir())).filter((entry) =>
+      entry.startsWith("eval-resources-") && !before.has(entry))).toEqual([]);
   });
 
   it("stops after one guaranteed-unpageable partial read on an older SP instead of exhausting the download budget", async () => {
@@ -936,7 +938,7 @@ describe("public paged SP resource collection", () => {
     const local = { ...cleanHeader, cursor: { throughSeq: 4 } };
     const first = { ...nativePage([nativeFixture(3, chatId, submissionId)], 3),
       cursor: local.cursor };
-    const spoolsBefore = (await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-"));
+    const spoolsBefore = new Set((await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-")));
     const { fetch } = resourceService((url) => {
       if (url.pathname === `${prefix}/native-records`) {
         if (url.searchParams.get("afterSeq") === "0") return Response.json(first);
@@ -952,6 +954,7 @@ describe("public paged SP resource collection", () => {
     }, local);
     await expect(createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
       .collectAgentResources(input)).rejects.toMatchObject({ retryable: true });
-    expect((await readdir(tmpdir())).filter((entry) => entry.startsWith("eval-resources-"))).toEqual(spoolsBefore);
+    expect((await readdir(tmpdir())).filter((entry) =>
+      entry.startsWith("eval-resources-") && !spoolsBefore.has(entry))).toEqual([]);
   });
 });
