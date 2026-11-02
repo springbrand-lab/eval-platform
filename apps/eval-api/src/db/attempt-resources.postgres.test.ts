@@ -278,9 +278,14 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
         .toMatchObject({ total: 1, rows: [{ eventId: "usage-1", cacheReadTokens: "10", providerUsd: "0.005",
           settlementMatches: 1, accountPresent: true, debitedUnits: "4" }] });
       expect(await caseReader.readCaseUsage({ ...base, section: "actions", attemptId: samplingId }))
+        .toMatchObject({ total: 2, rows: [
+          { index: 2, executionId: "action-1", chargedCredits: "7", executionMatches: 1 },
+          { index: 3, executionId: "action-2", chargedCredits: "0", executionMatches: 1 },
+        ] });
+      expect(await caseReader.readCaseUsage({ ...base, section: "actions", attemptId: samplingId, page: 1, pageSize: 1 }))
         .toMatchObject({ total: 2, rows: [{ index: 2, executionId: "action-1", chargedCredits: "7", executionMatches: 1 }] });
       expect(await caseReader.readCaseUsage({ ...base, section: "actions", attemptId: samplingId, page: 2, pageSize: 1 }))
-        .toMatchObject({ total: 2, rows: [{ index: 3, executionId: "action-2", chargedCredits: "0" }] });
+        .toMatchObject({ total: 2, rows: [{ index: 3, executionId: "action-2", chargedCredits: "0", executionMatches: 1 }] });
       expect(await caseReader.readCaseUsage({ ...base, role: "evaluation", evaluationId: evaluationId!,
         section: "models", attemptId: evaluationId })).toMatchObject({ total: 0, rows: [] });
       await expect(createPostgresResourceSnapshotReader(measured, "other-owner")
