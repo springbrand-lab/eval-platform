@@ -79,6 +79,51 @@ function resourceService(serve: (url: URL) => Response | undefined, current: SpR
 }
 
 describe("public paged SP resource collection", () => {
+  it.each([false, true])("collects a SAFE Tool Result's charge identity from an %s record without its private body", async (referenced) => {
+    const executionId = "88888888-8888-4888-8888-888888888888";
+    const call = nativeFixture(6, chatId, submissionId);
+    const result = nativeFixture(10, chatId, submissionId);
+    if (result.record.record.type !== "entry") throw new Error("Expected a Pi Tool Result");
+    const message = (result.record.record.value.model as Record<string, unknown>[])[0]!;
+    message.toolName = "search";
+    message.content = [{ type: "text", text: referenced
+      ? `private-business-body${"x".repeat(600_000)}` : "private-business-body" }];
+    message.details = { executionId, capabilityId: "capability-1",
+      privateMetadata: "private-key" };
+    const { reference, bytes } = nativeTransfer(result, 10);
+    const local: EvalResourceHeader = { ...cleanHeader, cursor: { throughSeq: 10 },
+      actionCharges: [{ source: "action", executionId, status: "succeeded", chargedCredits: 7 }] };
+    const { fetch, requests } = resourceService((url) => {
+      if (url.pathname === `${prefix}/native-records`) return Response.json({
+        format: SP_PI_TRAJECTORY_FORMAT, cursor: local.cursor,
+        records: [call, referenced ? reference : result], nextAfterSeq: null,
+      });
+      if (url.pathname.endsWith(`/trajectory/records/${reference.ingestSeq}`)) {
+        return nativeTransferResponse(reference, bytes);
+      }
+      return undefined;
+    }, local);
+    const download = await createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
+      .collectAgentResources(input) as AgentResourceSnapshotDownload;
+    try {
+      const pages: AgentResourceSnapshotPage[] = [];
+      for await (const page of download.readPages()) pages.push(page);
+      const native = pages.flatMap((page) => page.stream === "nativeRecords" ? page.records : []);
+      expect(native).toHaveLength(2);
+      expect(native[1]).toMatchObject({ metricProjection: {
+        chargeLinkVersion: 1, facts: [{ type: "tool", phase: "result",
+          executionId, capabilityId: "capability-1",
+          toolCallId: "call-1", toolName: "search" }],
+      } });
+      expect(pages.flatMap((page) => page.stream === "billingSettlements" ? page.records : []))
+        .toEqual(local.actionCharges);
+      expect(JSON.stringify(native)).not.toMatch(/private-business-body|private-key|privateMetadata|details/u);
+    } finally {
+      await download.dispose();
+    }
+    expect(requests.filter(({ pathname }) => pathname.endsWith("/trajectory/records/10"))).toHaveLength(referenced ? 1 : 0);
+  });
+
   it("binds the installed public schemas, finalized paths and record-byte path to this operation", () => {
     const publicHeader: EvalResourceHeader = cleanHeader;
     const publicBilling: EvalBillingResourcesPage = emptyBilling();

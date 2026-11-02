@@ -206,7 +206,31 @@ describe("bounded read-only case usage projection", () => {
     expect(statements[3]?.sql).toMatch(/executionMatches.*FROM page CROSS JOIN body/su);
     expect(statements[3]?.sql).toMatch(/WHERE .*ORDER BY b.ordinal OFFSET .* LIMIT /su);
     expect(statements[3]?.sql).not.toContain("b.ordinal >");
-    expect(statements[3]?.sql).not.toMatch(/nativeRecords|toolArguments|metric_snapshot/su);
+    expect(statements[3]?.sql).toMatch(/json_array_elements\(CASE WHEN json_typeof\(body.snapshot->'nativeRecords'\)/su);
+    expect(statements[3]?.sql).not.toMatch(/SELECT \*|toolArguments|metric_snapshot/su);
+  });
+
+  it("joins Action charges to unique scoped SAFE Tool Results/Calls in SQL, including raw old object snapshots", async () => {
+    const { db, statements, transaction } = caseDb([[{ total: 1 }], [attempt], [{ total: 1 }], [{
+      index: 1, executionId: "execution-1", executionMatches: 1, linkMatches: 1,
+      toolCallMatches: 1, namedToolCallMatches: 1, resultCallMatches: 1,
+      legacyCompact: false, toolName: "api.search", capabilityId: "capability-1",
+    }]]);
+    await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage({
+      ...selection, section: "actions", page: 1, pageSize: 1,
+    });
+    expect(transaction.mock.calls[0]?.[1]).toEqual(READ_SNAPSHOT);
+    const page = statements[3]!;
+    expect(page.sql).toMatch(/json_array_elements\(CASE WHEN json_typeof\(body.snapshot->'nativeRecords'\)/su);
+    expect(page.sql).toMatch(/metricProjection.*chargeLinkVersion/su);
+    expect(page.sql).toMatch(/record.*model.*details.*executionId/su);
+    expect(page.sql).toMatch(/linkMatches.*toolCallMatches.*namedToolCallMatches.*resultCallMatches.*legacyCompact/su);
+    expect(page.sql).toMatch(/scope.*chatId.*resource.*sessionId/su);
+    expect(page.sql).toMatch(/call\.agent_id = result\.agent_id AND call\.submission_id = result\.submission_id\s+AND call\.tool_call_id = result\.tool_call_id/su);
+    expect(page.sql).toMatch(/duplicate\.agent_id = result\.agent_id AND duplicate\.submission_id = result\.submission_id\s+AND duplicate\.tool_call_id = result\.tool_call_id/su);
+    expect(page.sql).not.toMatch(/SELECT \*|metric_snapshot|toolArguments|accountId.*AS "accountId"/su);
+    expect(page.params).toContain("owner-1");
+    expect(page.params).toContain(1);
   });
 
   it("never asks PostgreSQL for a snapshot when the selected Attempt's resources were not collected", async () => {

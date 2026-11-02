@@ -40,7 +40,7 @@ const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
   get_run: "Read Run status and a page of Sampling and Evaluation IDs, without full records.",
   get_metrics: "Read current owner-scoped or exact-Run Metrics. Project/Dataset default section=overview returns compact complete summary with field total but no rows or byTool. section=samples pages existing scoreIndex and navigation; section=tools requires role=execution|evaluation and pages only that role's Metrics-authoritative native byTool rates; section=fields pages countable output fields. Sample/Sampling and sampling+evaluationId keep their existing resultOffset contract; large selected JSON uses the authenticated documents GET.",
   inspect_case: "Inspect bounded evidence and Subject/Evaluator Metrics for one current owned Sampling/Evaluation (or exact Run member). For a complete SAFE Pi file use the authenticated fixed GET /mcp/eval-management/trajectories from the trusted backend, never an MCP tool.",
-  get_case_usage: "READ ONLY: list current owned Sampling/Evaluation Attempts, or page one selected Attempt's per-model tokens/cache hit/provider USD estimate plus paired rated/debited/shortfall/platform-owned SP credits, or verified Action execution charges. role=execution forbids evaluationId; role=evaluation requires it. Optional runId checks exact original AND current membership. section defaults to attempts; models/actions require attemptId. At most 10 rows, no raw snapshot, account/Chat ID or Tool arguments. Partial/unsettled is explicitly marked, never estimated as billed credits.",
+  get_case_usage: "READ ONLY: list current owned Sampling/Evaluation Attempts, or page one selected Attempt's model usage and paired SP credits, or Action ledger charges with uniquely matched SAFE Tool/API name and capability ID when available. role=execution forbids evaluationId; role=evaluation requires it. Optional runId checks exact original AND current membership. section defaults to attempts; models/actions require attemptId. At most 10 rows, no raw snapshot, account/Chat ID or Tool arguments. Unknown historical links and partial/unsettled charges are explicit, never estimated.",
 };
 const TOOLS = (Object.keys(managementSchemas) as (keyof typeof managementSchemas)[]).map((name) => ({
   name, description: DESCRIPTIONS[name],
@@ -138,6 +138,44 @@ function modelLine(raw: unknown, usageCoverage: "complete" | "partial" | "unavai
   };
 }
 
+/** Mapping is independent of charge confirmation; neither a price nor a matching
+ * Tool Result can promote an unsettled SP debit to an observed charge. */
+function actionLine(raw: unknown, nativeCoverage: "complete" | "partial" | "unavailable") {
+  const row = record(raw) ?? {};
+  const executionId = safeId(row.executionId);
+  const status = ["succeeded", "failed", "outcome_unknown", "running"].includes(String(row.status))
+    ? row.status : null;
+  const charge = count(row.chargedCredits);
+  const executionMatches = count(row.executionMatches);
+  const observed = executionId !== null && executionMatches === 1
+    && (status === "succeeded" || status === "failed") && charge !== null;
+  const linkMatches = count(row.linkMatches);
+  const toolName = safeLabel(row.toolName);
+  const capabilityId = safeId(row.capabilityId);
+  const calls = count(row.toolCallMatches);
+  const namedCalls = count(row.namedToolCallMatches);
+  const resultCalls = count(row.resultCallMatches);
+  let matchState: "matched" | "ambiguous" | "unavailable" | "unknown" = "unavailable";
+  if (executionId !== null && executionMatches !== null) {
+    if (executionMatches !== 1 || linkMatches !== null && linkMatches > 1) matchState = "ambiguous";
+    else if (row.legacyCompact === true || nativeCoverage !== "complete") {
+      // Old compact rows lost details; a partial source cannot prove uniqueness.
+      matchState = "unknown";
+    } else if (linkMatches === 1 && toolName !== null
+      && (row.capabilityId == null || capabilityId !== null)
+      && calls !== null && calls !== 0 && namedCalls !== null && resultCalls !== null) {
+      matchState = calls === 1 && namedCalls === 1 && resultCalls === 1 ? "matched" : "ambiguous";
+    }
+  }
+  return {
+    index: count(row.index), executionId, status, chargedCredits: observed ? charge : null,
+    chargeState: observed ? "observed" : "unconfirmed",
+    toolName: matchState === "matched" ? toolName : null,
+    capabilityId: matchState === "matched" ? capabilityId : null,
+    matchState,
+  };
+}
+
 async function getCaseUsage(c: Context<AppBindings>, input: z.output<typeof managementSchemas.get_case_usage>) {
   const { projectId, samplingId, role, evaluationId, runId, section, page, pageSize } = input;
   // Do not hydrate a Metrics detail, observation stage or entire Run to authorize one page:
@@ -155,17 +193,7 @@ async function getCaseUsage(c: Context<AppBindings>, input: z.output<typeof mana
     : projection.total === null ? "snapshot_missing" : "available";
   const items = availability !== "available" ? [] : section === "models"
     ? projection.rows.map((row) => modelLine(row, attempt.resources.coverage.usageEvents))
-    : projection.rows.map((raw) => {
-      const row = record(raw) ?? {};
-      const executionId = safeId(row.executionId);
-      const status = ["succeeded", "failed", "outcome_unknown", "running"].includes(String(row.status))
-        ? row.status : null;
-      const charge = count(row.chargedCredits);
-      const observed = executionId !== null && count(row.executionMatches) === 1
-        && (status === "succeeded" || status === "failed") && charge !== null;
-      return { index: count(row.index), executionId, status, chargedCredits: observed ? charge : null,
-        chargeState: observed ? "observed" : "unconfirmed" };
-    });
+    : projection.rows.map((row) => actionLine(row, attempt.resources.coverage.nativeRecords));
   return { ...base, attempt, availability,
     [section]: { page, pageSize, total: availability === "available" ? projection.total : null, items } };
 }

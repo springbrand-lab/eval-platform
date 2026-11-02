@@ -159,3 +159,15 @@ Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`�
 ## Compact resource facts
 
 `compactResourceSnapshot` derives body-free facts and a canonical SHA-256 fingerprint for historical raw native records; `compactNativeTrajectoryRecord` instead accepts a verified raw-byte checksum for a streamed record. Both retain native operation identity, status/time/Step Token fields, safe Tool input/output lengths when known and versioned Pi thinking/content marker flags. Missing or withheld data cannot prove absence or a zero length. The same interpreter consumes raw and compact facts, retaining exact medians, conflicts and source coverage. The API stores compact native facts in both the new Attempt snapshot and its Metrics projection, never a second copy of the native body; historical raw snapshots, old refs/scores and evidence are not replaced. Metrics attaches projections to `MetricsFacts` (`MetricsSampling`/`MetricsEvaluation`); this package performs no storage or background work. Sampling detail returns records without snapshots.
+
+New compact facts retain only allowlisted, bounded identities for a SAFE Pi
+assistant Tool Call and Tool Result: agentId, submissionId, toolCallId, safe
+toolName and, from Result `details`, executionId and optional capabilityId.
+`metricProjection.chargeLinkVersion:1` distinguishes them from previously
+persisted version-1 compact rows that lost the Action link (unknown, never a
+backfill). This is **not** a pricing or attribution aggregate: the API may
+correlate these facts read-only against its independently verified SP Action
+ledger, while Metrics' total usage/charges and model/Tool ownership stay
+unchanged. No Tool arguments, Result body, arbitrary details or credentials
+are persisted in the new facts. Oversized referenced bytes use the same
+bounded two-ID interpretation as inline SAFE records.

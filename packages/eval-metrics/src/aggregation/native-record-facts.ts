@@ -62,6 +62,21 @@ function nonnegative(value: JsonValue | undefined): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+/** An SP SAFE projection is authoritative for the message, but details/identifiers
+ * are still opaque Pi data. A charge link copies only short, non-credential IDs. */
+function safeIdentity(value: JsonValue | undefined): string | undefined {
+  return typeof value === "string" && value.length <= 128
+    && /^[A-Za-z0-9_][A-Za-z0-9_.:-]*$/u.test(value)
+    && !/(?:^|[_.:-])(?:secret|token|password|api[_-]?key|bearer)(?:$|[_.:-])/iu.test(value)
+    && !/^(?:sk-|key_)/iu.test(value) ? value : undefined;
+}
+
+function safeToolName(value: JsonValue | undefined): string | null {
+  return typeof value === "string" && value.length <= 96
+    && /^[A-Za-z_][A-Za-z0-9_./:-]*$/u.test(value) && !value.includes("://")
+    && !/^(?:sk-|key_|bearer)/iu.test(value) ? value : null;
+}
+
 /** Native IDs, not telemetry event IDs: a temporary Agent and another Submission cannot collide. */
 function nativeKey(source: PiTrajectoryRecord, value: string | number): string {
   return JSON.stringify([source.resource.agentId, source.resource.sessionId, source.submissionId, value]);
@@ -123,7 +138,7 @@ function eventFacts(source: PiTrajectoryRecord, data: JsonRecord): readonly Nati
     const callId = text(event.toolCallId);
     return [{ type: "tool", phase: event.type === "tool.started" ? "start" : "end",
       id: callId ? nativeKey(source, callId) : null, turnId: parentTurn(source, event),
-      toolName: payload.toolName ?? null, timestamp: occurredAt,
+      toolName: safeToolName(payload.toolName), timestamp: occurredAt,
       status: event.type === "tool.finished" ? payload.outcome ?? null : null,
       durationMs: payload.durationMs ?? null, fromEvent: true, eventId: event.eventId ?? null,
       // `input`/`output` are intentionally absent from UA event facts: Pi owns them.
@@ -157,18 +172,33 @@ function messageFacts(source: PiTrajectoryRecord, native: JsonRecord): readonly 
       for (const blockValue of message.content) {
         const block = record(blockValue);
         if (block?.type !== "toolCall") continue;
-        const callId = text(block.id);
+        const callId = safeIdentity(block.id);
+        const toolName = safeToolName(block.name);
+        const agentId = safeIdentity(source.resource.agentId);
+        const submissionId = safeIdentity(source.submissionId);
         facts.push({ type: "tool", phase: "start", id: callId ? nativeKey(source, callId) : null,
-          toolName: block.name ?? null, timestamp: message.timestamp,
+          toolName, timestamp: message.timestamp,
+          ...(native.kind === "pi.assistant" && callId && toolName && agentId && submissionId
+            ? { agentId, submissionId, toolCallId: callId } : {}),
           inputLength: toolBytes(block.arguments), fromPiCall: true });
       }
       continue;
     }
     if (message.role === "toolResult") {
       if (!Array.isArray(message.content)) return undefined;
-      const callId = text(message.toolCallId);
+      const callId = safeIdentity(message.toolCallId);
+      const toolName = safeToolName(message.toolName);
+      const agentId = safeIdentity(source.resource.agentId);
+      const submissionId = safeIdentity(source.submissionId);
+      const linkable = native.kind === "pi.toolResult" && callId && toolName && agentId && submissionId;
+      const details = record(message.details);
+      const executionId = linkable ? safeIdentity(details?.executionId) : undefined;
+      const capabilityId = details?.capabilityId === undefined ? undefined : safeIdentity(details.capabilityId);
       facts.push({ type: "tool", phase: "result", id: callId ? nativeKey(source, callId) : null,
-        toolName: message.toolName ?? null, timestamp: message.timestamp,
+        toolName, timestamp: message.timestamp,
+        ...(linkable ? { agentId, submissionId, toolCallId: callId } : {}),
+        ...(executionId && (details?.capabilityId === undefined || capabilityId)
+          ? { executionId, ...(capabilityId === undefined ? {} : { capabilityId }) } : {}),
         status: message.isError === true ? "failed" : message.isError === false ? "completed" : null,
         durationMs: message.durationMs ?? null, outputLength: toolBytes(message.content), fromPiResult: true });
     } else if ((message.role !== "user" && message.role !== "system")

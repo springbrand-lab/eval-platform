@@ -5,6 +5,7 @@ import {
   type AgentResourceSnapshot,
   type AgentResourceSnapshotDownload,
   type AgentResourceSnapshotPage,
+  type JsonValue,
   type EvaluationRecord,
   type Sampling,
 } from "@eval-platform/eval-contracts";
@@ -60,21 +61,32 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const attemptId = crypto.randomUUID();
     const scope = { chatId, submissionId, idempotencyKey: `execution:${samplingId}` };
     const native = await compactNativeTrajectoryRecord(nativeFixture(3, chatId, submissionId), scope);
+    const call = await compactNativeTrajectoryRecord(nativeFixture(6, chatId, submissionId), scope);
+    const toolResult = nativeFixture(10, chatId, submissionId);
+    if (toolResult.record.record.type !== "entry") throw new Error("Expected a SAFE Tool Result");
+    (toolResult.record.record.value.model as Record<string, unknown>[])[0]!.details = {
+      executionId: "88888888-8888-4888-8888-888888888888", capabilityId: "capability-1",
+      arguments: "private Tool arguments", credential: "private-key",
+    };
+    const result = await compactNativeTrajectoryRecord(toolResult, scope);
     const summary = {
       scope, observedAt: "2026-10-28T00:00:00.000Z", finalized: true,
       readiness: { receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 0, pendingRuntimeEvents: 0,
         actionCharges: { complete: true, unsettledExecutions: 0, missingExecutionIds: 0 } },
       coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
-      counts: { usageEvents: 1, nativeRecords: 1, billingSettlements: 1 },
+      counts: { usageEvents: 1, nativeRecords: 3, billingSettlements: 2 },
     } as const;
     const snapshot: AgentResourceSnapshotDownload = {
-      kind: "pages", summary, creditsTotal: 1,
+      kind: "pages", summary, creditsTotal: 8,
       async *readPages(): AsyncIterable<AgentResourceSnapshotPage> {
         yield { stream: "nativeRecords", records: [native] };
+        yield { stream: "nativeRecords", records: [call] };
+        yield { stream: "nativeRecords", records: [result] };
         yield { stream: "usageEvents", records: [{ eventId: "usage-1", kind: "assistant_model" }] };
         yield { stream: "billingSettlements", records: [{ eventId: "usage-1", accountId: owner,
           status: "settled", debitedUnits: 1 }] };
-        yield { stream: "billingSettlements", records: [] };
+        yield { stream: "billingSettlements", records: [{ source: "action",
+          executionId: "88888888-8888-4888-8888-888888888888", status: "succeeded", chargedCredits: 7 }] };
       },
       dispose: async () => undefined,
     };
@@ -98,6 +110,105 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       .where(and(eq(attemptResources.stage, "execution"), eq(attemptResources.recordId, samplingId)));
     expect(stored?.attemptId).toBe(attemptId);
     expect((await store.getSampling(samplingId))?.executionAttempts[0]?.resources?.status).toBe("collected");
+    const actions = await createPostgresResourceSnapshotReader(database.db, owner).readCaseUsage({
+      projectId: seeded.projectId, samplingId, role: "execution", section: "actions",
+      attemptId, page: 1, pageSize: 1,
+    });
+    expect(actions).toMatchObject({ total: 1, rows: [{
+      executionId: "88888888-8888-4888-8888-888888888888", chargedCredits: "7",
+      executionMatches: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
+      resultCallMatches: 1, legacyCompact: false, toolName: "search", capabilityId: "capability-1",
+    }] });
+    expect(JSON.stringify(actions)).not.toMatch(/private Tool arguments|private-key|credential|chatId|agentId|toolCallId/u);
+  });
+
+  it("matches old raw object Tool Results without hydrating them, but never invents links for old compact rows", async () => {
+    const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }] });
+    const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
+    const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, {
+      projectId: seeded.projectId, operation: "execution",
+    });
+    await store.admitRun(command);
+    const samplingId = command.run.samplingIds[0]!;
+    const chatId = crypto.randomUUID();
+    const submissionId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    const native = [0, 1, 2, 3, 4].flatMap((index) =>
+      nativeToolBodyPair(chatId, submissionId, "private-business-body", "api.search", index));
+    const toolResult = native[1]!;
+    if (toolResult.record.record.type !== "entry") throw new Error("Expected Pi result");
+    (toolResult.record.record.value.model as Record<string, unknown>[])[0]!.details = {
+      executionId: "action-1", capabilityId: "capability-1", response: "private-response",
+    };
+    for (const index of [3, 5]) {
+      const entry = native[index]!;
+      if (entry.record.record.type !== "entry") throw new Error("Expected Pi result");
+      (entry.record.record.value.model as Record<string, unknown>[])[0]!.details = {
+        executionId: "action-shared", capabilityId: "capability-shared",
+      };
+    }
+    const mismatch = native[7]!;
+    if (mismatch.record.record.type !== "entry") throw new Error("Expected Pi result");
+    const mismatchMessage = (mismatch.record.record.value.model as Record<string, unknown>[])[0]!;
+    mismatchMessage.toolName = "api.other";
+    mismatchMessage.details = { executionId: "action-mismatch", capabilityId: "capability-other" };
+    const foreign = native[9]!;
+    if (foreign.record.record.type !== "entry") throw new Error("Expected Pi result");
+    (foreign.record.record.value.model as Record<string, unknown>[])[0]!.details = {
+      executionId: "action-foreign", capabilityId: "capability-foreign",
+    };
+    native[9] = { ...foreign, record: { ...foreign.record,
+      resource: { ...foreign.record.resource, agentId: "agent-2" } } };
+    const snapshot: AgentResourceSnapshot = {
+      scope: { chatId, submissionId, idempotencyKey: `execution:${samplingId}` },
+      observedAt: "2026-11-02T00:00:00.000Z", finalized: true,
+      coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+      usageEvents: [], nativeRecords: native, billingSettlements: [
+        { source: "action", executionId: "action-1", status: "succeeded", chargedCredits: 7 },
+        { source: "action", executionId: "action-missing", status: "failed", chargedCredits: 0 },
+        { source: "action", executionId: "action-duplicate", status: "succeeded", chargedCredits: 2 },
+        { source: "action", executionId: "action-duplicate", status: "succeeded", chargedCredits: 2 },
+        { source: "action", executionId: "action-shared", status: "succeeded", chargedCredits: 3 },
+        { source: "action", executionId: "action-mismatch", status: "succeeded", chargedCredits: 4 },
+        { source: "action", executionId: "action-foreign", status: "succeeded", chargedCredits: 5 },
+      ],
+    };
+    const original = (await store.getSampling(samplingId))!;
+    await store.updateSampling({
+      ...original, subjectChatId: chatId, execution: { status: "succeeded" },
+      executionAttempts: [{ executionAttemptId: attemptId, samplingId, attemptNumber: 1,
+        status: "completed", submissionId, resources: { status: "collected", summary: summarizeResourceSnapshot(snapshot) } }],
+    }, original, { attemptId, snapshot });
+    const reader = createPostgresResourceSnapshotReader(database.db, owner);
+    const base = { projectId: seeded.projectId, samplingId, role: "execution" as const,
+      section: "actions" as const, attemptId, page: 1, pageSize: 10 };
+    const raw = await reader.readCaseUsage(base);
+    expect(raw).toMatchObject({ total: 7, rows: [
+      { index: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
+        resultCallMatches: 1, toolName: "api.search", capabilityId: "capability-1", legacyCompact: false },
+      { index: 2, linkMatches: 0, legacyCompact: false },
+      { index: 3, executionMatches: 2, legacyCompact: false },
+      { index: 4, executionMatches: 2, legacyCompact: false },
+      { index: 5, linkMatches: 2, legacyCompact: false },
+      { index: 6, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 0, legacyCompact: false },
+      { index: 7, linkMatches: 1, toolCallMatches: 0, legacyCompact: false },
+    ] });
+    expect(JSON.stringify(raw)).not.toMatch(/private-business-body|private-response|chatId|agentId|toolCallId/u);
+    const previouslyCompacted = await compactResourceSnapshot(snapshot);
+    const oldRecords = previouslyCompacted.nativeRecords.map((entry) => {
+      const { chargeLinkVersion: _charge, facts, ...projection } = entry.metricProjection!;
+      return { ...entry, metricProjection: { ...projection,
+        facts: (facts as readonly Readonly<Record<string, JsonValue>>[]).map(({ executionId: _execution,
+          capabilityId: _capability, agentId: _agent, submissionId: _submission, toolCallId: _call, ...fact }) => fact) } };
+    });
+    const old: AgentResourceSnapshot = { ...snapshot, nativeRecords: oldRecords };
+    const saved = (await store.getSampling(samplingId))!;
+    await store.updateSampling({ ...saved, executionAttempts: [{ ...saved.executionAttempts[0]!,
+      resources: { status: "collected", summary: summarizeResourceSnapshot(old) } }] }, saved,
+    { attemptId, snapshot: old });
+    expect(await reader.readCaseUsage({ ...base, pageSize: 1 })).toMatchObject({
+      rows: [{ linkMatches: 0, legacyCompact: true, toolName: null, capabilityId: null }],
+    });
   });
 
   it("collects public SP pages through Runtime into the PostgreSQL Attempt", async () => {
