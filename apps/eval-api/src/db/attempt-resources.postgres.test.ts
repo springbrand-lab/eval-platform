@@ -9,6 +9,7 @@ import {
   type Sampling,
 } from "@eval-platform/eval-contracts";
 import { compactNativeTrajectoryRecord, compactResourceSnapshot, createMetrics, type MetricsFacts } from "@eval-platform/eval-metrics";
+import { evalBillingResourcesPageSchema } from "@springbrand/eval-harness";
 import { and, eq, inArray } from "drizzle-orm";
 import { Pool, types } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -23,7 +24,7 @@ import { createPostgresRuntimeStore } from "./runtime.js";
 import { attemptResources } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
 import { buildCommand, makeData, release, seedProject } from "./test-fixtures.js";
-import { nativeFixture, nativeToolBodyPair } from "../sp/native-test-fixture.js";
+import { modelBillingPairFixture, nativeFixture, nativeToolBodyPair } from "../sp/native-test-fixture.js";
 import { createSpHarness } from "../sp/harness.js";
 
 const connection = process.env.DATABASE_URL;
@@ -145,7 +146,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       const call = pair[0]!;
       const result = pair[1]!;
       if (call.record.record.type !== "entry" || result.record.record.type !== "entry") throw new Error("Expected Pi entries");
-      const callId = index === 0 ? "call_1|fc_1" : index === 5 ? "[REDACTED]" : `call_${index}|fc_${index}`;
+      const callId = index === 5 ? "[REDACTED]" : `call_${index + 1}|fc_${index + 1}`;
       ((call.record.record.value.model as Record<string, unknown>[])[0]!.content as Record<string, unknown>[])[0]!.id = callId;
       const message = (result.record.record.value.model as Record<string, unknown>[])[0]!;
       message.toolCallId = callId;
@@ -159,7 +160,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const duplicate = nativeToolBodyPair(chatId, submissionId, "private-business-body", "lookup", 6)[0]!;
     if (duplicate.record.record.type !== "entry") throw new Error("Expected duplicate Pi Call");
     ((duplicate.record.record.value.model as Record<string, unknown>[])[0]!.content as Record<string, unknown>[])[0]!.id =
-      "call_4|fc_4";
+      "call_5|fc_5";
     const scope = { chatId, submissionId, idempotencyKey: `execution:${samplingId}` };
     const snapshot: AgentResourceSnapshot = {
       scope, observedAt: "2026-11-02T00:00:00.000Z", finalized: true,
@@ -171,7 +172,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       })),
     };
     const compacted = await compactResourceSnapshot(snapshot);
-    expect(JSON.stringify(compacted)).not.toMatch(/call_1\|fc_1|call_4\|fc_4|private-business-body|toolCallId/u);
+    expect(JSON.stringify(compacted)).not.toMatch(/call_1\|fc_1|call_5\|fc_5|private-business-body|toolCallId/u);
     const original = (await store.getSampling(samplingId))!;
     await store.updateSampling({
       ...original, subjectChatId: chatId, execution: { status: "succeeded" },
@@ -190,7 +191,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       { executionMatches: 1, linkMatches: 1, toolCallMatches: 2, namedToolCallMatches: 2 },
       { executionMatches: 1, linkMatches: 0 },
     ] });
-    expect(JSON.stringify(page)).not.toMatch(/call_1\|fc_1|call_4\|fc_4|capabilityId|toolCallKey|toolCallId/u);
+    expect(JSON.stringify(page)).not.toMatch(/call_1\|fc_1|call_5\|fc_5|capabilityId|toolCallKey|toolCallId/u);
   });
 
   it("shows old raw and v1 compact charges without attributing them to Tools", async () => {
@@ -325,6 +326,14 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const key = `execution:${samplingId}`;
     const scope = { chatId, submissionId, idempotencyKey: key };
     const observedAt = "2026-10-28T00:00:00.000Z";
+    const { usage, settlement } = modelBillingPairFixture(
+      "usage-1", chatId, submissionId, crypto.randomUUID(),
+    );
+    const billingPage = {
+      scope: { chatId, submissionId }, cursor: { throughCount: 1, sha256: "a".repeat(64) },
+      after: 0, usageEvents: [usage], billingSettlements: [settlement], nextAfter: null,
+    };
+    expect(evalBillingResourcesPageSchema.parse(billingPage)).toEqual(billingPage);
     const readiness = { receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 0, pendingRuntimeEvents: 0,
       actionCharges: { complete: true, unsettledExecutions: 0, missingExecutionIds: 0 } };
     const coverage = { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" } as const;
@@ -347,10 +356,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
             records: [nativeFixture(3, chatId, submissionId)], nextAfterSeq: null });
         }
         if (url.pathname === `${prefix}/billing`) {
-          return Response.json({ scope: { chatId, submissionId }, cursor: { throughCount: 1, sha256: "a".repeat(64) },
-            after: 0, usageEvents: [{ eventId: "usage-1", kind: "assistant_model" }],
-            billingSettlements: [{ eventId: "usage-1", accountId: owner, status: "settled", debitedUnits: 1 }],
-            nextAfter: null });
+          return Response.json(billingPage);
         }
         throw new Error("Unexpected resource route");
       },
