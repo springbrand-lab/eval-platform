@@ -119,6 +119,7 @@ export function setupManagement(configured = true, files?: ManagementFiles) {
     resourceSnapshots: {
       readCaseUsage: vi.fn(async (_input: unknown): Promise<{
         total: number | null; rows: Record<string, unknown>[]; attempt: Record<string, unknown> | null;
+        snapshotPresent?: boolean;
       }> => ({ total: 0, rows: [], attempt: null })),
     },
   };

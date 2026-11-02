@@ -70,6 +70,62 @@ describe("body-free native Pi metric projections", () => {
       .toEqual(aggregateResources([nativeResourceInput([], { ...compacted })]));
   });
 
+  it("keeps attributed Context as supported, zero-fact evidence beside the selected Tool pair", async () => {
+    const original = responsesCall();
+    if (original.record.record.type !== "entry") throw new Error("Expected Pi entry");
+    const context: NativeTrajectoryEntry = {
+      ...original, ingestSeq: responsesResult().ingestSeq + 1,
+      record: { ...original.record, submissionId: null, origin: "context",
+        parent: { resource: { agentId: "agent-1", sessionId: "chat-1" }, submissionId: "submission-1" },
+        record: { ...original.record.record, value: { ...original.record.record.value, id: 999 } } },
+    };
+    const input = nativeResourceInput([], {
+      nativeRecords: [responsesCall(), responsesResult(), context],
+    }).collection;
+    if (!input || input.status !== "collected") throw new Error("Expected native snapshot");
+    const compacted = await compactResourceSnapshot(input.snapshot);
+    expect(compacted.nativeRecords[2]?.metricProjection)
+      .toMatchObject({ version: 1, chargeLinkVersion: 2, supported: true, facts: [] });
+    expect(toolFact(compacted.nativeRecords[0]!)).toMatchObject({ fromPiCall: true });
+    expect(toolFact(compacted.nativeRecords[1]!)).toMatchObject({ fromPiResult: true });
+  });
+
+  it("retains only body-free Pi Result milliseconds and outcome, distinguishing zero from missing", async () => {
+    for (const { duration, failed } of [
+      { duration: 0, failed: false }, { duration: 13, failed: true }, { duration: undefined, failed: false },
+    ]) {
+      const result = responsesResult();
+      const message = sourceMessage(result);
+      message.isError = failed;
+      if (duration === undefined) delete message.durationMs;
+      else message.durationMs = duration;
+      const compact = await compactNativeTrajectoryRecord(result, responsesScope);
+      expect(toolFact(compact)).toMatchObject({
+        type: "tool", phase: "result", status: failed ? "failed" : "completed",
+        durationMs: duration ?? null, fromPiResult: true,
+      });
+      expect(JSON.stringify(compact)).not.toMatch(/call_1\|fc_1|private-business-result|capabilityId|details/u);
+    }
+  });
+
+  it("retains two distinct SAFE Pi Tool Call facts from one assistant message, in content order", async () => {
+    const assistant = responsesCall();
+    const content = sourceMessage(assistant).content as Record<string, JsonValue>[];
+    content.push({ type: "toolCall", id: "call_2|fc_2", name: "read_only",
+      arguments: { privateInput: "private-business-body" } });
+    const compact = await compactNativeTrajectoryRecord(assistant, responsesScope);
+    const calls = (compact.metricProjection?.facts as Record<string, JsonValue>[]).filter((fact) =>
+      fact.fromPiCall === true);
+    expect(calls).toMatchObject([
+      { type: "tool", phase: "start", toolName: "lookup", fromPiCall: true },
+      { type: "tool", phase: "start", toolName: "read_only", fromPiCall: true },
+    ]);
+    expect(calls[0]?.toolCallKey).toMatch(/^tck2_[0-9a-f]{64}$/u);
+    expect(calls[1]?.toolCallKey).toMatch(/^tck2_[0-9a-f]{64}$/u);
+    expect(calls[0]?.toolCallKey).not.toBe(calls[1]?.toolCallKey);
+    expect(JSON.stringify(compact)).not.toMatch(/call_[12]\|fc_[12]|private-business-body|privateInput/u);
+  });
+
   it("keeps actor/Submission and Tool-name collisions apart even with the same UA ID", async () => {
     const baseCall = toolFact(await compactNativeTrajectoryRecord(responsesCall(), responsesScope))!;
     const baseResult = toolFact(await compactNativeTrajectoryRecord(responsesResult(), responsesScope))!;
