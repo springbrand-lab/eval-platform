@@ -176,6 +176,16 @@ function actionLine(raw: unknown, nativeCoverage: "complete" | "partial" | "unav
   };
 }
 
+function matchHistogram(rows: readonly unknown[], key: string) {
+  const counts = { none: 0, one: 0, multiple: 0, missing: 0 };
+  for (const raw of rows) {
+    const value = count(record(raw)?.[key]);
+    const bucket = value === null ? "missing" : value === 0 ? "none" : value === 1 ? "one" : "multiple";
+    counts[bucket] += 1;
+  }
+  return counts;
+}
+
 async function getCaseUsage(c: Context<AppBindings>, input: z.output<typeof managementSchemas.get_case_usage>) {
   const { projectId, samplingId, role, evaluationId, runId, section, page, pageSize } = input;
   // Do not hydrate a Metrics detail, observation stage or entire Run to authorize one page:
@@ -191,9 +201,45 @@ async function getCaseUsage(c: Context<AppBindings>, input: z.output<typeof mana
   const attempt = attemptView(projection.attempt);
   const availability = attempt.resources.status !== "collected" ? "not_collected"
     : projection.total === null ? "snapshot_missing" : "available";
+  if (section === "actions" && availability === "available") {
+    const items = projection.rows.map((row) => actionLine(row, attempt.resources.coverage.nativeRecords));
+    if (items.some((item) => item.matchState !== "matched")) {
+      const matchStates = { matched: 0, ambiguous: 0, unavailable: 0, unknown: 0 };
+      const billingSources = { action: 0, tool: 0, missing: 0, other: 0 };
+      for (const [index, item] of items.entries()) {
+        matchStates[item.matchState] += 1;
+        const source = record(projection.rows[index])?.billingSource;
+        const bucket = source === "action" || source === "tool" ? source
+          : source == null ? "missing" : "other";
+        billingSources[bucket] += 1;
+      }
+      const first = record(projection.rows[0]) ?? {};
+      c.var.logger?.warn({
+        event: "eval_case_action_link_diagnostics", page, pageSize, total: projection.total,
+        nativeCoverage: attempt.resources.coverage.nativeRecords, finalized: attempt.resources.finalized,
+        matchStates, billingSources, executionMatches: matchHistogram(projection.rows, "executionMatches"),
+        resultLinks: matchHistogram(projection.rows, "linkMatches"),
+        toolCalls: matchHistogram(projection.rows, "toolCallMatches"),
+        namedToolCalls: matchHistogram(projection.rows, "namedToolCallMatches"),
+        resultCalls: matchHistogram(projection.rows, "resultCallMatches"),
+        inventory: {
+          snapshotNativeRows: count(first.snapshotNativeRows),
+          scopedNativeRows: count(first.scopedNativeRows),
+          rawRoleToolResults: count(first.rawRoleToolResults),
+          scopedPiToolResults: count(first.scopedPiToolResults),
+          compactedPiToolResults: count(first.compactedPiToolResults),
+          supportedPiToolResults: count(first.supportedPiToolResults),
+          projectedPiToolResults: count(first.projectedPiToolResults),
+          projectedExecutionIds: count(first.projectedExecutionIds),
+          linkableToolCalls: count(first.linkableToolCalls),
+          linkableToolResults: count(first.linkableToolResults),
+        },
+      }, "Eval Action charge link evidence is incomplete");
+    }
+    return { ...base, attempt, availability, actions: { page, pageSize, total: projection.total, items } };
+  }
   const items = availability !== "available" ? [] : section === "models"
-    ? projection.rows.map((row) => modelLine(row, attempt.resources.coverage.usageEvents))
-    : projection.rows.map((row) => actionLine(row, attempt.resources.coverage.nativeRecords));
+    ? projection.rows.map((row) => modelLine(row, attempt.resources.coverage.usageEvents)) : [];
   return { ...base, attempt, availability,
     [section]: { page, pageSize, total: availability === "available" ? projection.total : null, items } };
 }

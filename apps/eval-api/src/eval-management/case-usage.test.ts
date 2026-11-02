@@ -1,5 +1,8 @@
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
+import pino from "pino";
 import { describe, expect, it } from "vitest";
+import { createRoutes } from "../app.js";
+import { EVAL_MANAGEMENT_MCP_PATH } from "./mcp.js";
 import { MANAGEMENT_TOKEN, run, setupManagement, toolValue } from "./test-fixture.js";
 
 const scope = { projectId: "project-1", samplingId: "sampling-1", role: "execution" as const };
@@ -109,6 +112,61 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
       availability: "not_collected", models: { total: null, items: [] } });
     expect(await toolValue(await app.call("get_case_usage", select))).toMatchObject({
       availability: "snapshot_missing", models: { total: null, items: [] } });
+  });
+
+  it("logs bounded Action-link counts without exposing source identities or Tool data", async () => {
+    const app = setupManagement();
+    const privateValue = "PRIVATE_TRACE_DO_NOT_LOG";
+    const inventory = {
+      snapshotNativeRows: "328", scopedNativeRows: "328", rawRoleToolResults: "0",
+      scopedPiToolResults: "45", compactedPiToolResults: "45", supportedPiToolResults: "45",
+      projectedPiToolResults: "45", projectedExecutionIds: "0",
+      linkableToolCalls: "45", linkableToolResults: "0",
+    };
+    app.services.resourceSnapshots.readCaseUsage.mockResolvedValueOnce({ total: 2, attempt, rows: [
+      { ...inventory, index: 1, executionId: "action-1", billingSource: "tool",
+        status: "succeeded", chargedCredits: "7",
+        executionMatches: 1, linkMatches: 0, toolCallMatches: 0, namedToolCallMatches: 0,
+        resultCallMatches: 0, legacyCompact: false, toolName: `https://${privateValue}/tool`,
+        details: { credential: privateValue }, accountId: privateValue },
+      { ...inventory, index: 2, executionId: "action-2", billingSource: "action",
+        status: "succeeded", chargedCredits: "4",
+        executionMatches: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
+        resultCallMatches: 1, legacyCompact: false, toolName: "execute_capability",
+        capabilityId: "action.send-invoice" },
+    ] });
+    const logs: Record<string, unknown>[] = [];
+    const logger = pino({ level: "info" }, {
+      write: (line: string) => { logs.push(JSON.parse(line) as Record<string, unknown>); },
+    });
+    const response = await createRoutes(logger).request(EVAL_MANAGEMENT_MCP_PATH, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${MANAGEMENT_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+        name: "get_case_usage", arguments: { ...scope, section: "actions", attemptId: "attempt-1", pageSize: 2 },
+      } }),
+    }, app.runtime);
+    const value = await toolValue(response);
+    expect(value.actions).toMatchObject({ total: 2, items: [
+      { chargedCredits: 7, matchState: "unavailable", toolName: null },
+      { chargedCredits: 4, matchState: "matched", toolName: "execute_capability" },
+    ] });
+    expect(JSON.stringify(value)).not.toMatch(/PRIVATE_TRACE_DO_NOT_LOG|snapshotNativeRows|linkMatches|billingSource/u);
+    expect(logs.filter((entry) => entry.event === "eval_case_action_link_diagnostics")).toEqual([
+      expect.objectContaining({
+        page: 1, pageSize: 2, total: 2, nativeCoverage: "complete",
+        matchStates: { matched: 1, ambiguous: 0, unavailable: 1, unknown: 0 },
+        billingSources: { action: 1, tool: 1, missing: 0, other: 0 },
+        resultLinks: { none: 1, one: 1, multiple: 0, missing: 0 },
+        inventory: {
+          snapshotNativeRows: 328, scopedNativeRows: 328, rawRoleToolResults: 0,
+          scopedPiToolResults: 45, compactedPiToolResults: 45, supportedPiToolResults: 45,
+          projectedPiToolResults: 45, projectedExecutionIds: 0,
+          linkableToolCalls: 45, linkableToolResults: 0,
+        },
+      }),
+    ]);
+    expect(JSON.stringify(logs)).not.toMatch(/PRIVATE_TRACE_DO_NOT_LOG|action-1|action-2|action\.send-invoice/u);
   });
 
   it("links a unique charged Action to a SAFE Tool Result only with one matching scoped Tool Call", async () => {
