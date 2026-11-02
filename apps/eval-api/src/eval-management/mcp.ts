@@ -40,7 +40,7 @@ const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
   get_run: "Read Run status and a page of Sampling and Evaluation IDs, without full records.",
   get_metrics: "Read current owner-scoped or exact-Run Metrics. Project/Dataset default section=overview returns compact complete summary with field total but no rows or byTool. section=samples pages existing scoreIndex and navigation; section=tools requires role=execution|evaluation and pages only that role's Metrics-authoritative native byTool rates; section=fields pages countable output fields. Sample/Sampling and sampling+evaluationId keep their existing resultOffset contract; large selected JSON uses the authenticated documents GET.",
   inspect_case: "Inspect bounded evidence and Subject/Evaluator Metrics for one current owned Sampling/Evaluation (or exact Run member). For a complete SAFE Pi file use the authenticated fixed GET /mcp/eval-management/trajectories from the trusted backend, never an MCP tool.",
-  get_case_usage: "READ ONLY: list current owned Sampling/Evaluation Attempts, or page one selected Attempt's model settlements, Action receipts (ledger actionId and chargedCredits), or separate Super Link Tool receipts. A SAFE Pi Tool name is optional, never an Action identity or a price. role=execution forbids evaluationId; role=evaluation requires it. Optional runId checks exact original AND current membership. section defaults to attempts; models/actions/tools require attemptId. At most 10 rows, no raw snapshot, account/Chat ID or Tool arguments. Incomplete coverage and unconfirmed charges are explicit, never estimated.",
+  get_case_usage: "READ ONLY: list owned execution/evaluation Attempts, or page one Attempt's models, Action receipts, separate Super Link debit tools, or tool_calls: every observed SAFE v2 Pi Tool Call (free/read-only/status/Super Link/Action, failed/unreturned). toolCalls items give resultState and nullable top-level Pi Tool Result toolDurationMs in ms (zero is real; not Action/provider lifetime); total:null with a present snapshot means native inventory unproven. Action receipts keep authoritative actionId/chargedCredits; actions.toolDurationMs needs a uniquely matched initiating execute_capability or direct action_* Result, never a status-only get_capability_execution. No Super Link debit-to-Pi-Call pairing is claimed. role=execution forbids evaluationId; role=evaluation requires it. Optional runId checks exact original AND current membership. section defaults to attempts; selected sections require attemptId. At most 10 rows, no raw snapshot, account/Chat/Call ID, args or result bodies. Old raw/v1 and missing/partial proof never supply durations.",
 };
 const TOOLS = (Object.keys(managementSchemas) as (keyof typeof managementSchemas)[]).map((name) => ({
   name, description: DESCRIPTIONS[name],
@@ -50,6 +50,12 @@ const TOOLS = (Object.keys(managementSchemas) as (keyof typeof managementSchemas
 
 const count = (value: unknown): number | null => {
   const n = typeof value === "string" && /^\d{1,16}$/u.test(value) ? Number(value) : value;
+  return typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : null;
+};
+/** PostgreSQL returns JSON number scalars as canonical decimal text, never a
+ * provider/event string; keep the second read boundary strict as well. */
+const piMilliseconds = (value: unknown): number | null => {
+  const n = typeof value === "string" && /^(0|[1-9][0-9]{0,15})$/u.test(value) ? Number(value) : value;
   return typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : null;
 };
 const usd = (value: unknown): number | null => {
@@ -215,6 +221,35 @@ function actionLine(raw: unknown, nativeCoverage: "complete" | "partial" | "unav
     ...charge, source: "action" as const,
     actionId: actionIdentityState === "identified" ? actionId : null, actionIdentityState,
     toolName: toolMatchState === "matched" ? toolName : null, toolMatchState,
+    toolDurationMs: toolMatchState === "matched"
+      && (toolName === "execute_capability" || toolName !== null
+        && toolName.startsWith("action_") && toolName.length > "action_".length)
+      && (row.resultStatus === "completed" || row.resultStatus === "failed")
+      ? piMilliseconds(row.toolDurationMs) : null,
+  };
+}
+
+/** Tool calls, including unbilled and status-only ones, are not ledger entries. */
+function toolCallLine(raw: unknown, completeInventory: boolean) {
+  const row = record(raw) ?? {};
+  const toolName = safeToolDisplayName(row.toolName);
+  const calls = count(row.toolCallMatches);
+  const results = count(row.resultCallMatches);
+  const namedResults = count(row.namedResultMatches);
+  let resultState: "completed" | "failed" | "missing" | "ambiguous" | "unknown" = "unknown";
+  if (calls !== null && calls > 1 || results !== null && results > 1
+    || results === 1 && namedResults !== null && namedResults !== 1) {
+    resultState = "ambiguous";
+  } else if (completeInventory && toolName !== null && calls === 1 && results !== null) {
+    if (results === 0) resultState = "missing";
+    else if (namedResults === 1 && (row.resultStatus === "completed" || row.resultStatus === "failed")) {
+      resultState = row.resultStatus;
+    }
+  }
+  return {
+    index: count(row.index), toolName,
+    toolDurationMs: resultState === "completed" || resultState === "failed" ? piMilliseconds(row.toolDurationMs) : null,
+    resultState,
   };
 }
 
@@ -239,10 +274,16 @@ async function getCaseUsage(c: Context<AppBindings>, input: z.output<typeof mana
   if (!projection.attempt) throw new HttpError("RESPONSE_INVALID");
   const attempt = attemptView(projection.attempt);
   const availability = attempt.resources.status !== "collected" ? "not_collected"
-    : projection.total === null ? "snapshot_missing" : "available";
+    : section === "tool_calls" ? projection.snapshotPresent === true ? "available" : "snapshot_missing"
+      : projection.total === null ? "snapshot_missing" : "available";
   if (section === "actions" && availability === "available") {
     const items = projection.rows.map((row) => actionLine(row, attempt.resources.coverage.nativeRecords));
     return { ...base, attempt, availability, actions: { page, pageSize, total: projection.total, items } };
+  }
+  if (section === "tool_calls" && availability === "available") {
+    const items = projection.rows.map((row) => toolCallLine(row, projection.total !== null
+      && attempt.resources.coverage.nativeRecords === "complete"));
+    return { ...base, attempt, availability, toolCalls: { page, pageSize, total: projection.total, items } };
   }
   if (section === "tools" && availability === "available") {
     const items = projection.rows.map(toolLine);
@@ -251,7 +292,8 @@ async function getCaseUsage(c: Context<AppBindings>, input: z.output<typeof mana
   const items = availability !== "available" ? [] : section === "models"
     ? projection.rows.map((row) => modelLine(row, attempt.resources.coverage.usageEvents)) : [];
   return { ...base, attempt, availability,
-    [section]: { page, pageSize, total: availability === "available" ? projection.total : null, items } };
+    [section === "tool_calls" ? "toolCalls" : section]:
+      { page, pageSize, total: availability === "available" ? projection.total : null, items } };
 }
 
 function toolFailure(error: unknown) {

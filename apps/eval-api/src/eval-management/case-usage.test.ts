@@ -41,7 +41,7 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
         inputTokens: "30", outputTokens: "12", cacheReadTokens: "10", cacheWriteTokens: "1",
         reasoningTokens: "3", providerUsd: "0.005", usageMatches: 1, settlementMatches: 1,
         accountPresent: true, status: "settled", ratedUnits: "9", debitedUnits: "4",
-        shortfallUnits: "5", platformOwnedUnits: "2", snapshot: "private raw snapshot" },
+        shortfallUnits: "5", platformOwnedUnits: "2", snapshot: "private raw snapshot", toolDurationMs: "999" },
       { index: 2, eventId: "usage-2", kind: "compaction", provider: "https://private.test",
         model: "sk-veryprivatecredential", usageMatches: 1, settlementMatches: 1,
         accountPresent: true, status: "settled", ratedUnits: "3", debitedUnits: null },
@@ -64,7 +64,7 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
         { modelSettlement: { state: "unsettled", debitedCredits: null } },
         { modelSettlement: { state: "ambiguous", debitedCredits: null } },
       ] } });
-    expect(JSON.stringify(value)).not.toMatch(/private|https:|sk-very|accountId|snapshot|chatId/u);
+    expect(JSON.stringify(value)).not.toMatch(/private|https:|sk-very|accountId|snapshot|chatId|toolDurationMs/u);
   });
 
   it("never treats an anomalous settlement as a confirmed debit", async () => {
@@ -220,14 +220,15 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
         index: 1, billingSource: "action", executionId: "execution-1",
         actionId: "action.exa.search", status: "succeeded", chargedCredits: "3",
         executionMatches: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
-        resultCallMatches: 1, legacyCompact: false, toolName: "api.search", capabilityId: "capability-1",
+        resultCallMatches: 1, legacyCompact: false, toolName: "execute_capability",
+        resultStatus: "completed", toolDurationMs: "99", capabilityId: "capability-1",
       }],
     });
     expect(await toolValue(await app.call("get_case_usage", {
       ...scope, section: "actions", attemptId: "attempt-1",
     }))).toMatchObject({ attempt: { resources: { coverage: { nativeRecords: "partial" } } },
       actions: { items: [{ chargedCredits: 3, chargeState: "observed",
-        actionId: "action.exa.search", toolName: null, toolMatchState: "unknown" }] } });
+        actionId: "action.exa.search", toolName: null, toolMatchState: "unknown", toolDurationMs: null }] } });
   });
 
   it("identifies the billed Action from its own receipt, independent of missing/old SAFE Tool evidence", async () => {
@@ -318,7 +319,7 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
     app.services.resourceSnapshots.readCaseUsage.mockResolvedValueOnce({ total: 1, attempt, rows: [{
       index: 2, billingSource: "tool", executionId: "tool-execution-1",
       actionId: "action.forged", chargedCredits: "4.5", status: "failed", executionMatches: 1,
-      linkMatches: 1, toolName: "forgedTool",
+      linkMatches: 1, toolName: "forgedTool", resultStatus: "completed", toolDurationMs: "42",
     }] });
     const value = await toolValue(await app.call("get_case_usage", {
       ...scope, section: "tools", attemptId: "attempt-1",
@@ -326,7 +327,7 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
     expect(value).toMatchObject({ section: "tools", tools: { total: 1, items: [{
       source: "tool", chargedCredits: 4.5, chargeState: "observed",
     }] } });
-    expect(JSON.stringify(value)).not.toMatch(/action\.forged|forgedTool|actionId|modelSettlement/u);
+    expect(JSON.stringify(value)).not.toMatch(/action\.forged|forgedTool|actionId|modelSettlement|toolDurationMs/u);
     expect(app.services.resourceSnapshots.readCaseUsage).toHaveBeenCalledExactlyOnceWith({
       ...scope, section: "tools", attemptId: "attempt-1", page: 1, pageSize: 5,
     });
@@ -338,10 +339,155 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
     expect(await rejected.json()).toMatchObject({ result: { isError: true } });
   });
 
+  it("pages every observed SAFE Pi Tool Call, including free, read-only, status, failed and unreturned calls", async () => {
+    const app = setupManagement();
+    const privateValue = "PRIVATE_CALL_RESULT_OR_KEY";
+    const select = { ...scope, section: "tool_calls", attemptId: "attempt-1", pageSize: 2 };
+    app.services.resourceSnapshots.readCaseUsage
+      .mockResolvedValueOnce({ snapshotPresent: true, total: 5, attempt, rows: [
+        { index: 1, toolName: "free_read", toolCallMatches: 1, resultCallMatches: 1,
+          namedResultMatches: 1, resultStatus: "completed", toolDurationMs: "0",
+          agentId: privateValue, submissionId: privateValue, toolCallKey: privateValue,
+          args: privateValue, result: privateValue, accountId: privateValue, chatId: privateValue },
+        { index: 2, toolName: "get_capability_execution", toolCallMatches: 1, resultCallMatches: 1,
+          namedResultMatches: 1, resultStatus: "failed", toolDurationMs: "27" },
+      ] })
+      .mockResolvedValueOnce({ snapshotPresent: true, total: 5, attempt, rows: [
+        { index: 3, toolName: "superlink_lookup", toolCallMatches: 1, resultCallMatches: 1,
+          namedResultMatches: 1, resultStatus: "completed", toolDurationMs: null },
+        { index: 4, toolName: "execute_capability", toolCallMatches: 1, resultCallMatches: 0,
+          namedResultMatches: 0, resultStatus: null, toolDurationMs: null },
+      ] })
+      .mockResolvedValueOnce({ snapshotPresent: true, total: 5, attempt, rows: [
+        { index: 5, toolName: "free_read", toolCallMatches: 2, resultCallMatches: 1,
+          namedResultMatches: 1, resultStatus: "completed", toolDurationMs: "1" },
+      ] });
+    const first = await toolValue(await app.call("get_case_usage", select));
+    expect(first).toMatchObject({ ...scope, runScope: "project_current", section: "tool_calls",
+      availability: "available", toolCalls: { page: 1, pageSize: 2, total: 5, items: [
+        { index: 1, toolName: "free_read", toolDurationMs: 0, resultState: "completed" },
+        { index: 2, toolName: "get_capability_execution", toolDurationMs: 27, resultState: "failed" },
+      ] } });
+    expect(Object.keys((first.toolCalls as { items: Record<string, unknown>[] }).items[0]!))
+      .toEqual(["index", "toolName", "toolDurationMs", "resultState"]);
+    expect(JSON.stringify(first)).not.toContain(privateValue);
+    expect(await toolValue(await app.call("get_case_usage", { ...select, page: 2 })))
+      .toMatchObject({ toolCalls: { page: 2, total: 5, items: [
+        { index: 3, toolName: "superlink_lookup", toolDurationMs: null, resultState: "completed" },
+        { index: 4, toolName: "execute_capability", toolDurationMs: null, resultState: "missing" },
+      ] } });
+    expect(await toolValue(await app.call("get_case_usage", { ...select, page: 3 })))
+      .toMatchObject({ toolCalls: { page: 3, total: 5, items: [
+        { index: 5, toolName: "free_read", toolDurationMs: null, resultState: "ambiguous" },
+      ] } });
+    expect(app.services.resourceSnapshots.readCaseUsage).toHaveBeenNthCalledWith(3, { ...select, page: 3 });
+  });
+
+  it("never invents complete Tool coverage or a duration from partial, legacy or invalid evidence", async () => {
+    const app = setupManagement();
+    const select = { ...scope, section: "tool_calls", attemptId: "attempt-1" };
+    app.services.resourceSnapshots.readCaseUsage
+      .mockResolvedValueOnce({ snapshotPresent: true, total: null, attempt: { ...attempt, nativeCoverage: "partial" },
+        rows: [{ index: 1, toolName: "free_read", toolCallMatches: 1, resultCallMatches: 1,
+          namedResultMatches: 1, resultStatus: "completed", toolDurationMs: "55" }] })
+      .mockResolvedValueOnce({ snapshotPresent: true, total: null, attempt, rows: [] })
+      .mockResolvedValueOnce({ snapshotPresent: false, total: null, attempt, rows: [] })
+      .mockResolvedValueOnce({ snapshotPresent: false, total: null,
+        attempt: { ...attempt, resourcesStatus: "pending" }, rows: [] });
+    expect(await toolValue(await app.call("get_case_usage", select))).toMatchObject({
+      availability: "available", attempt: { resources: { coverage: { nativeRecords: "partial" } } },
+      toolCalls: { total: null, items: [
+        { toolName: "free_read", resultState: "unknown", toolDurationMs: null },
+      ] } });
+    expect(await toolValue(await app.call("get_case_usage", select))).toMatchObject({
+      availability: "available", toolCalls: { total: null, items: [] },
+    });
+    expect(await toolValue(await app.call("get_case_usage", select))).toMatchObject({
+      availability: "snapshot_missing", toolCalls: { total: null, items: [] },
+    });
+    expect(await toolValue(await app.call("get_case_usage", select))).toMatchObject({
+      availability: "not_collected", toolCalls: { total: null, items: [] },
+    });
+  });
+
+  it("withholds invalid Pi durations, unsafe names, mismatched and duplicate Results even when a Call was observed", async () => {
+    const app = setupManagement();
+    const call = { toolName: "read_only", toolCallMatches: 1, resultCallMatches: 1,
+      namedResultMatches: 1, resultStatus: "completed" };
+    app.services.resourceSnapshots.readCaseUsage.mockResolvedValueOnce({ snapshotPresent: true,
+      total: 9, attempt, rows: [
+        { ...call, index: 1, toolDurationMs: "-1" },
+        { ...call, index: 2, toolDurationMs: "0.5" },
+        { ...call, index: 3, toolDurationMs: "9007199254740992" },
+        { ...call, index: 4, toolDurationMs: null },
+        { ...call, index: 5, toolDurationMs: "04" },
+        { ...call, index: 6, toolDurationMs: "1e3" },
+        { ...call, index: 7, resultStatus: null, toolDurationMs: "4" },
+        { ...call, index: 8, resultCallMatches: 1, namedResultMatches: 0, toolDurationMs: "4" },
+        { ...call, index: 9, toolName: "private-prompt-token", toolDurationMs: "4" },
+      ] });
+    const value = await toolValue(await app.call("get_case_usage", {
+      ...scope, section: "tool_calls", attemptId: "attempt-1", pageSize: 9,
+    }));
+    expect(value.toolCalls).toMatchObject({ total: 9, items: [
+      { resultState: "completed", toolDurationMs: null },
+      { resultState: "completed", toolDurationMs: null },
+      { resultState: "completed", toolDurationMs: null },
+      { resultState: "completed", toolDurationMs: null },
+      { resultState: "completed", toolDurationMs: null },
+      { resultState: "completed", toolDurationMs: null },
+      { resultState: "unknown", toolDurationMs: null },
+      { resultState: "ambiguous", toolDurationMs: null },
+      { toolName: null, resultState: "unknown", toolDurationMs: null },
+    ] });
+    expect(JSON.stringify(value)).not.toContain("private-prompt-token");
+  });
+
+  it("only displays a matched initiating Action Result's safe Pi milliseconds, without changing its ledger debit", async () => {
+    const app = setupManagement();
+    const line = { billingSource: "action", status: "succeeded", chargedCredits: "1.25",
+      actionId: "action.exa.search", executionMatches: 1, linkMatches: 1,
+      toolCallMatches: 1, namedToolCallMatches: 1, resultCallMatches: 1,
+      legacyCompact: false, resultStatus: "completed", toolDurationMs: "25" };
+    const rows = [
+      { ...line, index: 1, executionId: "execution-1", toolName: "execute_capability", toolDurationMs: "0" },
+      { ...line, index: 2, executionId: "execution-2", toolName: "action_direct", resultStatus: "failed" },
+      { ...line, index: 3, executionId: "execution-3", toolName: "get_capability_execution" },
+      { ...line, index: 4, executionId: "execution-4", toolName: "api.search" },
+      { ...line, index: 5, executionId: "execution-5", toolName: "execute_capability", resultStatus: null },
+      { ...line, index: 6, executionId: "execution-6", toolName: "execute_capability", toolDurationMs: null },
+      { ...line, index: 7, executionId: "execution-7", toolName: "execute_capability", toolDurationMs: "1.5" },
+      { ...line, index: 8, executionId: "execution-8", toolName: "execute_capability",
+        toolDurationMs: "9007199254740992" },
+      { ...line, index: 9, executionId: "execution-9", toolName: "execute_capability", linkMatches: 2 },
+      { ...line, index: 10, executionId: "execution-10", toolName: "execute_capability", legacyCompact: true },
+    ];
+    app.services.resourceSnapshots.readCaseUsage.mockResolvedValueOnce({ total: 10, attempt, rows });
+    const value = await toolValue(await app.call("get_case_usage", {
+      ...scope, section: "actions", attemptId: "attempt-1", pageSize: 10,
+    }));
+    expect(value.actions).toMatchObject({ total: 10, items: [
+      { actionId: "action.exa.search", chargedCredits: 1.25, toolName: "execute_capability",
+        toolDurationMs: 0, toolMatchState: "matched" },
+      { actionId: "action.exa.search", chargedCredits: 1.25, toolName: "action_direct",
+        toolDurationMs: 25, toolMatchState: "matched" },
+      { chargedCredits: 1.25, toolMatchState: "matched", toolDurationMs: null },
+      { chargedCredits: 1.25, toolMatchState: "matched", toolDurationMs: null },
+      { chargedCredits: 1.25, toolMatchState: "matched", toolDurationMs: null },
+      { chargedCredits: 1.25, toolMatchState: "matched", toolDurationMs: null },
+      { chargedCredits: 1.25, toolMatchState: "matched", toolDurationMs: null },
+      { chargedCredits: 1.25, toolMatchState: "matched", toolDurationMs: null },
+      { chargedCredits: 1.25, toolMatchState: "ambiguous", toolDurationMs: null },
+      { chargedCredits: 1.25, toolMatchState: "unknown", toolDurationMs: null },
+    ] });
+    const items = (value.actions as { items: Record<string, unknown>[] }).items;
+    expect(items.every((item) => Object.hasOwn(item, "toolDurationMs"))).toBe(true);
+  });
+
   it("validates role/selection before SQL, fails closed on nonmembers and rejects an unauthenticated caller", async () => {
     const app = setupManagement();
     for (const invalid of [{ role: "evaluation" }, { evaluationId: "evaluation-1" },
-      { section: "models" }, { section: "attempts", attemptId: "attempt-1" },
+      { section: "models" }, { section: "tool_calls" }, { section: "attempts", attemptId: "attempt-1" },
       { pageSize: 11 }, { accountId: "private" }]) {
       expect(await (await app.call("get_case_usage", { ...scope, ...invalid })).json())
         .toMatchObject({ result: { isError: true, content: [{ text: expect.stringContaining("REQUEST_INVALID_INPUT") }] } });

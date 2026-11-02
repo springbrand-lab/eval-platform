@@ -200,7 +200,7 @@ export interface CaseUsageQuery {
   readonly role: "execution" | "evaluation";
   readonly evaluationId?: string | undefined;
   readonly runId?: string | undefined;
-  readonly section: "attempts" | "models" | "actions" | "tools";
+  readonly section: "attempts" | "models" | "actions" | "tools" | "tool_calls";
   readonly attemptId?: string | undefined;
   readonly page: number;
   readonly pageSize: number;
@@ -235,6 +235,126 @@ const nativeToolName = (value: SQL) => sql`char_length(${value}) BETWEEN 1 AND 9
   AND position('://' IN ${value}) = 0
   AND ${value} !~* '(^|[_.:/-])(secret|token|password|api[_-]?key|bearer|private|prompt|credential|authorization)($|[_.:/-])'
   AND ${value} !~* '^(sk-|key_|bearer|ghp_|glpat-|xox[baprs]-)'`;
+
+/** Only a Pi Tool Result fact's JSON number can be a duration. Do not cast arbitrary
+ * JSON, derive a wall-clock difference, or coerce strings/negative/fractional values. */
+const piToolDuration = (fact: SQL) => sql`CASE WHEN json_typeof(${fact}->'durationMs') = 'number'
+  AND char_length(${fact}->>'durationMs') BETWEEN 1 AND 16
+  AND (${fact}->>'durationMs') COLLATE "C" ~ '^(0|[1-9][0-9]*)$'
+  AND (char_length(${fact}->>'durationMs') < 16
+    OR (${fact}->>'durationMs') COLLATE "C" <= '9007199254740991')
+  THEN ${fact}->>'durationMs' END`;
+
+/** Storage versions and `supported` have concrete JSON types; a string that
+ * happens to read as "2"/"true" is not v2 compact proof. */
+const v2PiFacts = (entry: SQL) => sql`
+  json_typeof(${entry}->'metricProjection'->'version') = 'number'
+  AND ${entry}->'metricProjection'->>'version' = ${String(NATIVE_PROJECTION_VERSION)}
+  AND json_typeof(${entry}->'metricProjection'->'chargeLinkVersion') = 'number'
+  AND ${entry}->'metricProjection'->>'chargeLinkVersion' = ${String(NATIVE_CHARGE_LINK_VERSION)}
+  AND json_typeof(${entry}->'metricProjection'->'supported') = 'boolean'
+  AND ${entry}->'metricProjection'->>'supported' = 'true'
+  AND (${entry}->'metricProjection'->>'fingerprint') COLLATE "C" ~ '^[0-9a-f]{64}$'
+  AND json_typeof(${entry}->'metricProjection'->'facts') = 'array'`;
+
+/** Shared SAFE v2 facts for the Action association and the independent Pi Call page.
+ * `call_facts` keeps *every observed* v2 Call, even one without a usable key.
+ * Only `calls`/`results` can prove a unique identity; executionId is optional on
+ * a free Tool Result and is checked separately when matching an Action receipt. */
+const piToolFacts = sql`
+  records AS MATERIALIZED (
+    SELECT n.value AS entry, n.ordinal FROM body
+    CROSS JOIN LATERAL json_array_elements(CASE WHEN json_typeof(body.snapshot->'nativeRecords') = 'array'
+      THEN body.snapshot->'nativeRecords' ELSE '[]'::json END) WITH ORDINALITY AS n(value, ordinal)),
+  native AS MATERIALIZED (
+    SELECT n.entry, n.ordinal, n.entry->'record' AS source,
+      n.entry->'record'->'record'->'value' AS value FROM records AS n CROSS JOIN body
+    WHERE n.entry->'record'->>'format' = 'pi-trajectory/v1'
+      AND n.entry->'record'->'projection'->>'kind' = 'safe'
+      AND n.entry->'record'->'projection'->>'policyId' IS NOT NULL
+      AND json_typeof(n.entry->'record'->'projection'->'policyVersion') = 'number'
+      AND body.snapshot->'scope'->>'chatId' = n.entry->'record'->'resource'->>'sessionId'
+      AND (n.entry->'record'->>'submissionId' IS NOT NULL
+        OR (json_typeof(n.entry->'record'->'submissionId') = 'null'
+          AND n.entry->'record'->>'origin' = 'context'
+          AND n.entry->'record'->'parent'->>'submissionId' IS NOT NULL))
+      AND n.entry->'record'->'record'->>'type' IN ('entry', 'conversation')
+      AND (n.entry->'record'->'parent' IS NULL
+        OR (n.entry->'record'->'parent'->'resource'->>'sessionId' = body.snapshot->'scope'->>'chatId'
+          AND n.entry->'record'->'parent'->>'submissionId' IS NOT NULL))),
+  compact AS MATERIALIZED (
+    SELECT n.ordinal AS record_ordinal, n.source, n.value, f.value AS fact, f.ordinal AS fact_ordinal
+    FROM native AS n CROSS JOIN LATERAL json_array_elements(
+      CASE WHEN ${v2PiFacts(sql`n.entry`)}
+        THEN n.entry->'metricProjection'->'facts' ELSE '[]'::json END
+    ) WITH ORDINALITY AS f(value, ordinal)),
+  call_facts AS MATERIALIZED (
+    SELECT f.record_ordinal, f.fact_ordinal, f.value->>'kind' AS pi_kind,
+      f.source->'resource'->>'agentId' AS agent_id,
+      f.source->>'submissionId' AS submission_id,
+      f.fact->>'agentId' AS fact_agent_id, f.fact->>'submissionId' AS fact_submission_id,
+      f.fact->>'toolCallKey' AS tool_call_key, f.fact->>'toolName' AS tool_name
+    FROM compact AS f
+    WHERE f.fact->>'type' = 'tool' AND f.fact->>'phase' = 'start'
+      AND f.fact->>'fromPiCall' = 'true'),
+  result_facts AS MATERIALIZED (
+    SELECT f.value->>'kind' AS pi_kind,
+      f.source->'resource'->>'agentId' AS agent_id, f.source->>'submissionId' AS submission_id,
+      f.fact->>'agentId' AS fact_agent_id, f.fact->>'submissionId' AS fact_submission_id,
+      f.fact->>'toolCallKey' AS tool_call_key, f.fact->>'toolName' AS tool_name,
+      f.fact->>'executionId' AS execution_id, f.fact->>'status' AS status, f.fact AS fact
+    FROM compact AS f
+    WHERE f.fact->>'type' = 'tool' AND f.fact->>'phase' = 'result'
+      AND f.fact->>'fromPiResult' = 'true'),
+  calls AS MATERIALIZED (
+    SELECT c.agent_id, c.submission_id, c.tool_call_key, c.tool_name FROM call_facts AS c
+    WHERE c.pi_kind = 'pi.assistant'
+      AND c.fact_agent_id = c.agent_id AND c.fact_submission_id = c.submission_id
+      AND ${nativeId(sql`c.agent_id`)} AND ${nativeId(sql`c.submission_id`)}
+      AND ${derivedToolCallKey(sql`c.tool_call_key`)} AND ${nativeToolName(sql`c.tool_name`)}),
+  results AS MATERIALIZED (
+    SELECT r.agent_id, r.submission_id, r.tool_call_key, r.tool_name,
+      r.execution_id, CASE WHEN r.status IN ('completed', 'failed') THEN r.status END AS status,
+      ${piToolDuration(sql`r.fact`)} AS duration_ms
+    FROM result_facts AS r
+    WHERE r.pi_kind IN ('pi.tool-result', 'pi.toolResult')
+      AND r.fact_agent_id = r.agent_id AND r.fact_submission_id = r.submission_id
+      AND ${nativeId(sql`r.agent_id`)} AND ${nativeId(sql`r.submission_id`)}
+      AND ${derivedToolCallKey(sql`r.tool_call_key`)} AND ${nativeToolName(sql`r.tool_name`)})`;
+
+/** A numeric Call total proves an inventory only if *every* stored native record
+ * and Pi Call/Result fact can be interpreted as supported, scoped v2 evidence.
+ * Partial coverage is checked against the Attempt summary in the same snapshot. */
+const trustedPiInventory = sql`(
+  json_typeof(body.snapshot->'nativeRecords') = 'array'
+  AND (SELECT count(*) FROM records) = (SELECT count(*) FROM native)
+  AND NOT EXISTS (SELECT 1 FROM native AS n WHERE (
+    ${v2PiFacts(sql`n.entry`)}
+    AND ${nativeId(sql`n.source->'resource'->>'agentId'`)}
+    AND (${nativeId(sql`n.source->>'submissionId'`)}
+      OR (json_typeof(n.source->'submissionId') = 'null'
+        AND n.source->>'origin' = 'context'
+        AND n.source->'parent'->>'submissionId' IS NOT NULL))
+  ) IS NOT TRUE)
+  AND (SELECT count(*) FROM call_facts) = (SELECT count(*) FROM calls)
+  AND (SELECT count(*) FROM result_facts) = (SELECT count(*) FROM results)
+  AND NOT EXISTS (SELECT 1 FROM compact AS f WHERE f.source->>'origin' = 'context')
+  AND NOT EXISTS (SELECT 1 FROM results AS r WHERE NOT EXISTS (
+    SELECT 1 FROM calls AS c
+    WHERE c.agent_id = r.agent_id AND c.submission_id = r.submission_id
+      AND c.tool_call_key = r.tool_call_key))
+  AND NOT EXISTS (SELECT 1 FROM compact AS f WHERE (
+    json_typeof(f.fact) = 'object'
+    AND f.fact->>'type' IN ('turn', 'model', 'tool', 'assistant', 'request', 'hook')
+  ) IS NOT TRUE)
+  AND NOT EXISTS (SELECT 1 FROM compact AS f WHERE f.fact->>'type' = 'tool'
+    AND (f.value->>'kind' = 'pi.assistant' AND f.fact->>'phase' = 'start'
+      AND f.fact->>'fromPiCall' = 'true'
+      OR f.value->>'kind' IN ('pi.tool-result', 'pi.toolResult')
+        AND f.fact->>'phase' = 'result' AND f.fact->>'fromPiResult' = 'true'
+      OR f.value->>'kind' = 'springbrand.trajectory'
+        AND f.fact->>'phase' IN ('start', 'end') AND f.fact->>'fromEvent' = 'true') IS NOT TRUE)
+)`;
 
 /** Owner-scoped reads of raw snapshots for current records of a non-deleted Project. */
 export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: string) {
@@ -297,6 +417,55 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
           AND r.stage = ${role} AND r.record_id = ${evaluationId ?? samplingId}
           AND r.sampling_id = ${samplingId} AND r.attempt_id = ${attemptId}
           AND r.evaluation_id ${role === "execution" ? sql`IS NULL` : sql`= ${evaluationId}`}`;
+        const body = sql`SELECT r.snapshot AS snapshot ${snapshot}`;
+        if (section === "tool_calls") {
+          const [stored] = (await transaction.execute<{ observed: number; trusted: boolean | null }>(sql`
+            WITH body AS MATERIALIZED (${body}), ${piToolFacts}
+            SELECT (SELECT count(*)::integer FROM call_facts) AS observed,
+              ${trustedPiInventory} AS trusted FROM body`)).rows;
+          if (!stored) return { snapshotPresent: false, total: null, rows: [], attempt };
+          if (!Number.isSafeInteger(stored.observed) || stored.observed < 0) throw new HttpError("RESPONSE_INVALID");
+          const complete = attempt.nativeCoverage === "complete" && stored.trusted === true;
+          // Null is *not* zero: old/unsupported facts and partial collection cannot
+          // prove an inventory, although observed v2 Calls can still be paged.
+          const total = complete ? stored.observed : null;
+          if (offset >= stored.observed) return { snapshotPresent: true, total, rows: [], attempt };
+          const { rows } = await transaction.execute<Record<string, unknown>>(sql`
+            WITH body AS MATERIALIZED (${body}), ${piToolFacts},
+              indexed_calls AS MATERIALIZED (
+                SELECT row_number() OVER (ORDER BY c.record_ordinal, c.fact_ordinal) AS ordinal,
+                  c.agent_id, c.submission_id, c.tool_call_key, c.tool_name FROM call_facts AS c),
+              page AS MATERIALIZED (
+                SELECT ordinal, agent_id, submission_id, tool_call_key, tool_name
+                FROM indexed_calls ORDER BY ordinal OFFSET ${offset} LIMIT ${pageSize})
+            SELECT page.ordinal::integer AS "index",
+              CASE WHEN ${nativeToolName(sql`page.tool_name`)} THEN page.tool_name END AS "toolName",
+              call_count.matches AS "toolCallMatches",
+              result_count.matches AS "resultCallMatches",
+              result_count.named AS "namedResultMatches",
+              CASE WHEN ${complete} AND call_count.matches = 1
+                AND result_count.matches = 1 AND result_count.named = 1
+                THEN result_count.status END AS "resultStatus",
+              CASE WHEN ${complete} AND call_count.matches = 1
+                AND result_count.matches = 1 AND result_count.named = 1
+                AND result_count.status IN ('completed', 'failed')
+                THEN result_count.duration_ms END AS "toolDurationMs"
+            FROM page
+            CROSS JOIN LATERAL (
+              SELECT count(*)::integer AS matches FROM calls AS c
+              WHERE c.agent_id = page.agent_id AND c.submission_id = page.submission_id
+                AND c.tool_call_key = page.tool_call_key
+            ) AS call_count
+            CROSS JOIN LATERAL (
+              SELECT count(*)::integer AS matches,
+                count(*) FILTER (WHERE r.tool_name = page.tool_name)::integer AS named,
+                min(r.status) AS status, min(r.duration_ms) AS duration_ms
+              FROM results AS r
+              WHERE r.agent_id = page.agent_id AND r.submission_id = page.submission_id
+                AND r.tool_call_key = page.tool_call_key
+            ) AS result_count ORDER BY page.ordinal`);
+          return { snapshotPresent: true, total, rows, attempt };
+        }
         // Action and Super Link Tool charges share the same SP ledger snapshot,
         // but are distinct sources and must have distinct page counts.
         const chargeSource = section === "actions" ? "action" : "tool";
@@ -315,7 +484,6 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
           throw new HttpError("RESPONSE_INVALID");
         }
         if (offset >= stored.total) return { total: stored.total, rows: [], attempt };
-        const body = sql`SELECT r.snapshot AS snapshot ${snapshot}`;
         if (section === "models") {
           const { rows } = await transaction.execute<Record<string, unknown>>(sql`
             WITH body AS MATERIALIZED (${body}),
@@ -381,64 +549,7 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
         const { rows } = await transaction.execute<Record<string, unknown>>(sql`
           WITH body AS MATERIALIZED (${body}),
             page AS MATERIALIZED (${page}),
-            -- Only v2 compact SAFE facts can corroborate a Tool. Historical raw/v1
-            -- records are never decoded into a charge link.
-            native AS MATERIALIZED (
-              SELECT n.value AS entry, n.value->'record' AS source,
-                n.value->'record'->'record'->'value' AS value FROM body
-              CROSS JOIN LATERAL json_array_elements(CASE WHEN json_typeof(body.snapshot->'nativeRecords') = 'array'
-                THEN body.snapshot->'nativeRecords' ELSE '[]'::json END) AS n(value)
-              WHERE n.value->'record'->>'format' = 'pi-trajectory/v1'
-                AND n.value->'record'->'projection'->>'kind' = 'safe'
-                AND n.value->'record'->'projection'->>'policyId' IS NOT NULL
-                AND json_typeof(n.value->'record'->'projection'->'policyVersion') = 'number'
-                AND body.snapshot->'scope'->>'chatId' = n.value->'record'->'resource'->>'sessionId'
-                AND n.value->'record'->>'submissionId' IS NOT NULL
-                AND n.value->'record'->'record'->>'type' = 'entry'
-                AND (n.value->'record'->'parent' IS NULL
-                  OR (n.value->'record'->'parent'->'resource'->>'sessionId' = body.snapshot->'scope'->>'chatId'
-                    AND n.value->'record'->'parent'->>'submissionId' IS NOT NULL))),
-            compact AS MATERIALIZED (
-              SELECT n.source, n.value, f.value AS fact FROM native AS n
-              CROSS JOIN LATERAL json_array_elements(
-                CASE WHEN n.entry->'metricProjection'->>'version' = ${String(NATIVE_PROJECTION_VERSION)}
-                  AND n.entry->'metricProjection'->>'chargeLinkVersion' = ${String(NATIVE_CHARGE_LINK_VERSION)}
-                  AND n.entry->'metricProjection'->>'supported' = 'true'
-                  AND json_typeof(n.entry->'metricProjection'->'facts') = 'array'
-                  THEN n.entry->'metricProjection'->'facts' ELSE '[]'::json END) AS f(value)),
-            calls AS MATERIALIZED (
-              SELECT c.agent_id, c.submission_id, c.tool_call_key, c.tool_name
-              FROM (
-                SELECT f.source->'resource'->>'agentId' AS agent_id,
-                  f.source->>'submissionId' AS submission_id,
-                  f.fact->>'toolCallKey' AS tool_call_key, f.fact->>'toolName' AS tool_name
-                FROM compact AS f
-                WHERE f.value->>'kind' = 'pi.assistant' AND f.fact->>'type' = 'tool'
-                  AND f.fact->>'phase' = 'start' AND f.fact->>'fromPiCall' = 'true'
-                  AND f.fact->>'agentId' = f.source->'resource'->>'agentId'
-                  AND f.fact->>'submissionId' = f.source->>'submissionId'
-                  AND ${derivedToolCallKey(sql`f.fact->>'toolCallKey'`)}
-              ) AS c
-              WHERE ${nativeId(sql`c.agent_id`)} AND ${nativeId(sql`c.submission_id`)}
-                AND ${nativeToolName(sql`c.tool_name`)}),
-            results AS MATERIALIZED (
-              SELECT r.agent_id, r.submission_id, r.tool_call_key, r.tool_name,
-                r.execution_id
-              FROM (
-                SELECT f.source->'resource'->>'agentId' AS agent_id,
-                  f.source->>'submissionId' AS submission_id,
-                  f.fact->>'toolCallKey' AS tool_call_key, f.fact->>'toolName' AS tool_name,
-                  f.fact->>'executionId' AS execution_id
-                FROM compact AS f
-                WHERE f.value->>'kind' IN ('pi.tool-result', 'pi.toolResult') AND f.fact->>'type' = 'tool'
-                  AND f.fact->>'phase' = 'result' AND f.fact->>'fromPiResult' = 'true'
-                  AND f.fact->>'agentId' = f.source->'resource'->>'agentId'
-                  AND f.fact->>'submissionId' = f.source->>'submissionId'
-                  AND ${derivedToolCallKey(sql`f.fact->>'toolCallKey'`)}
-              ) AS r
-              WHERE ${nativeId(sql`r.agent_id`)} AND ${nativeId(sql`r.submission_id`)}
-                AND ${nativeToolName(sql`r.tool_name`)}
-                AND ${nativeId(sql`r.execution_id`)})
+            ${piToolFacts}
           SELECT ${chargeFields},
             CASE WHEN json_typeof(page.fact->'actionId') = 'string'
               AND ${displayActionId(sql`page.fact->>'actionId'`)}
@@ -449,13 +560,16 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
             link.calls AS "toolCallMatches", link.named AS "namedToolCallMatches",
             link.results AS "resultCallMatches",
             ${bounded(sql`link.tool_name`, 96)} AS "toolName",
-            EXISTS (SELECT 1 FROM native AS old
-              WHERE old.entry->'metricProjection' IS NULL
-                OR old.entry->'metricProjection'->>'chargeLinkVersion'
-                  IS DISTINCT FROM ${String(NATIVE_CHARGE_LINK_VERSION)}) AS "legacyCompact"
+            CASE WHEN link.matches = 1 AND link.calls = 1 AND link.named = 1
+              AND link.results = 1 THEN link.result_status END AS "resultStatus",
+            CASE WHEN link.matches = 1 AND link.calls = 1 AND link.named = 1
+              AND link.results = 1 AND link.result_status IN ('completed', 'failed')
+              THEN link.duration_ms END AS "toolDurationMs",
+            (${trustedPiInventory}) IS NOT TRUE AS "legacyCompact"
           FROM page CROSS JOIN body
           CROSS JOIN LATERAL (
             SELECT count(*)::integer AS matches, min(result.tool_name) AS tool_name,
+              min(result.status) AS result_status, min(result.duration_ms) AS duration_ms,
               coalesce(max(call_count.matches), 0) AS calls,
               coalesce(max(call_count.named), 0) AS named,
               coalesce(max(result_count.matches), 0) AS results
@@ -472,7 +586,8 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
               WHERE duplicate.agent_id = result.agent_id AND duplicate.submission_id = result.submission_id
                 AND duplicate.tool_call_key = result.tool_call_key
             ) AS result_count
-            WHERE result.execution_id = page.fact->>'executionId'
+            WHERE ${nativeId(sql`result.execution_id`)}
+              AND result.execution_id = page.fact->>'executionId'
           ) AS link ORDER BY page.ordinal`);
         return { total: stored.total, rows, attempt };
       }, READ_SNAPSHOT);

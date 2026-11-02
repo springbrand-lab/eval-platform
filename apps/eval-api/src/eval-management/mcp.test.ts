@@ -142,6 +142,9 @@ describe("trusted management MCP transport", () => {
     expect(schema).toMatchObject({ additionalProperties: false,
       required: expect.arrayContaining(["projectId", "samplingId", "role"]),
       properties: { role: expect.any(Object), attemptId: expect.any(Object), section: expect.any(Object) } });
+    expect(schema?.properties?.section).toMatchObject({ enum: expect.arrayContaining([
+      "attempts", "models", "actions", "tools", "tool_calls",
+    ]) });
     const value = await toolValue(await app.call("get_case_usage", {
       projectId: "project-1", samplingId: "sampling-1", role: "execution",
     }));

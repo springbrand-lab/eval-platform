@@ -226,7 +226,7 @@ describe("bounded read-only case usage projection", () => {
     expect(page.sql).toMatch(/metricProjection.*chargeLinkVersion/su);
     expect(page.sql).toContain("f.fact->>'executionId'");
     expect(page.sql).toContain('AS "billingSource"');
-    expect(page.sql).toMatch(/f\.value->>'kind' IN \('pi\.tool-result', 'pi\.toolResult'\)/u);
+    expect(page.sql).toMatch(/r\.pi_kind IN \('pi\.tool-result', 'pi\.toolResult'\)/u);
     expect(page.sql).not.toContain("r.message->>'toolCallId'");
     expect(page.sql).toMatch(/AS "actionId".*AS "actionIdPresent".*AS "linkMatches".*AS "toolCallMatches"/su);
     expect(page.sql).not.toMatch(/projectedCapabilityIds|capability_id|inventory/su);
@@ -295,6 +295,55 @@ describe("bounded read-only case usage projection", () => {
     expect(query).not.toContain("link_mode");
     expect(query).toMatch(/call\.agent_id = result\.agent_id AND call\.submission_id = result\.submission_id/u);
     expect(query).toMatch(/call\.tool_name = result\.tool_name/u);
+  });
+
+  it("reads the Pi Call page under the same owned snapshot using only v2 Result duration scalars", async () => {
+    const { db, statements, transaction } = caseDb([
+      [{ total: 1 }], [{ ...attempt, nativeCoverage: "complete" }],
+      [{ observed: 2, trusted: true }],
+      [{ index: 2, toolName: "free_read", toolCallMatches: 1, resultCallMatches: 1,
+        namedResultMatches: 1, resultStatus: "completed", toolDurationMs: "0" }],
+    ]);
+    const result = await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage({
+      ...selection, section: "tool_calls", runId: "run-1", page: 2, pageSize: 1,
+    });
+    expect(result).toMatchObject({ snapshotPresent: true, total: 2, rows: [
+      { index: 2, toolName: "free_read", resultStatus: "completed", toolDurationMs: "0" },
+    ] });
+    expect(transaction.mock.calls[0]?.[1]).toEqual(READ_SNAPSHOT);
+    expect(statements).toHaveLength(4);
+    expect(statements[0]?.sql).toMatch(/eval_run_samplings.*r.operation IN \('execution', 'pipeline'\)/su);
+    expect(statements[2]?.sql).toMatch(/records AS MATERIALIZED.*native AS MATERIALIZED.*compact AS MATERIALIZED.*call_facts AS MATERIALIZED.*result_facts AS MATERIALIZED/su);
+    expect(statements[2]?.sql).toContain("json_typeof(body.snapshot->'nativeRecords')");
+    expect(statements[2]?.sql).toContain("chargeLinkVersion");
+    expect(statements[2]?.sql).toContain('AS trusted FROM body');
+    const page = statements[3]!;
+    expect(page.sql).toMatch(/indexed_calls AS MATERIALIZED.*row_number\(\) OVER.*page AS MATERIALIZED.*OFFSET .* LIMIT /su);
+    expect(page.sql).toContain("r.fact->'durationMs'");
+    expect(page.sql).toContain("json_typeof(r.fact->'durationMs') = 'number'");
+    expect(page.sql).toContain("9007199254740991");
+    expect(page.sql).toContain("result_count.status IN ('completed', 'failed')");
+    expect(page.sql).toContain("c.agent_id = page.agent_id AND c.submission_id = page.submission_id");
+    expect(page.sql).not.toMatch(/SELECT \*|metric_snapshot|toolArguments|->>'toolCallId'|->'details'|AS "toolCallKey"|AS "agentId"|AS "accountId"/su);
+    expect(page.params).toEqual(expect.arrayContaining(["owner-1", "attempt-1", 1, 1]));
+  });
+
+  it("never reports a complete Tool inventory from an untrusted snapshot or absent resource row", async () => {
+    const { db, statements } = caseDb([
+      [{ total: 1 }], [{ ...attempt, nativeCoverage: "partial" }],
+      [{ observed: 2, trusted: false }], [{ index: 1, toolName: "free_read", toolDurationMs: null }],
+    ]);
+    expect(await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage({
+      ...selection, section: "tool_calls", page: 1, pageSize: 1,
+    })).toMatchObject({ snapshotPresent: true, total: null, rows: [
+      { toolName: "free_read", toolDurationMs: null },
+    ] });
+    expect(statements[3]?.params).toContain(false);
+    const absent = caseDb([[{ total: 1 }], [{ ...attempt, nativeCoverage: "complete" }], []]);
+    expect(await createPostgresResourceSnapshotReader(absent.db, "owner-1").readCaseUsage({
+      ...selection, section: "tool_calls", page: 1, pageSize: 1,
+    })).toMatchObject({ snapshotPresent: false, total: null, rows: [] });
+    expect(absent.statements).toHaveLength(3);
   });
 
   it("never asks PostgreSQL for a snapshot when the selected Attempt's resources were not collected", async () => {
