@@ -270,8 +270,11 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     await store.updateSampling({ ...saved, executionAttempts: [{ ...saved.executionAttempts[0]!,
       resources: { status: "collected", summary: summarizeResourceSnapshot(orphaned) } }] }, saved,
     { attemptId, snapshot: orphaned });
-    expect(await reader.readCaseUsage(select)).toMatchObject({ snapshotPresent: true, total: null,
-      rows: [{ index: 1, toolDurationMs: null }] });
+    const orphanPage = await reader.readCaseUsage(select);
+    expect(orphanPage).toMatchObject({ snapshotPresent: true, total: null });
+    expect(orphanPage.rows).toHaveLength(3);
+    expect(orphanPage.rows.map((row) => [row.index, row.resultStatus, row.toolDurationMs]))
+      .toEqual([[1, null, null], [2, null, null], [3, null, null]]);
   });
 
   it("requires a unique same-actor, same-Submission and same-name v2 link for each Action charge", async () => {
@@ -434,8 +437,10 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     await store.updateSampling({ ...saved, executionAttempts: [{ ...saved.executionAttempts[0]!,
       resources: { status: "collected", summary: summarizeResourceSnapshot(partial) } }] }, saved,
     { attemptId, snapshot: partial });
-    expect(await reader.readCaseUsage(select)).toMatchObject({ snapshotPresent: true, total: null,
-      rows: [{ index: 1, toolDurationMs: null }] });
+    const partialPage = await reader.readCaseUsage(select);
+    expect(partialPage).toMatchObject({ snapshotPresent: true, total: null });
+    expect(partialPage.rows).toHaveLength(8);
+    expect(partialPage.rows.every((row) => row.resultStatus === null && row.toolDurationMs === null)).toBe(true);
     expect(await reader.readCaseUsage({ ...select, section: "actions" })).toMatchObject({ total: 1, rows: [
       { actionId: "action.independent", chargedCredits: "7" },
     ] });
