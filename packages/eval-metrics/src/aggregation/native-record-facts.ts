@@ -195,7 +195,8 @@ function messageFacts(source: PiTrajectoryRecord, native: JsonRecord): readonly 
       const linkName = safeToolName(message.toolName);
       const agentId = safeIdentity(source.resource.agentId);
       const submissionId = safeIdentity(source.submissionId);
-      const linkable = native.kind === "pi.toolResult" && callId && linkName && agentId && submissionId;
+      const linkable = (native.kind === "pi.tool-result" || native.kind === "pi.toolResult")
+        && callId && linkName && agentId && submissionId;
       const details = record(message.details);
       const executionId = linkable ? safeIdentity(details?.executionId) : undefined;
       const capabilityId = details?.capabilityId === undefined ? undefined : safeIdentity(details.capabilityId);

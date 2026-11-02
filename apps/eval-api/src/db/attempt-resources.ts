@@ -406,7 +406,7 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
                   f.fact->>'toolCallId' AS tool_call_id, f.fact->>'toolName' AS tool_name,
                   f.fact->>'executionId' AS execution_id, f.fact->>'capabilityId' AS capability_id
                 FROM compact AS f
-                WHERE f.value->>'kind' = 'pi.toolResult' AND f.fact->>'type' = 'tool'
+                WHERE f.value->>'kind' IN ('pi.tool-result', 'pi.toolResult') AND f.fact->>'type' = 'tool'
                   AND f.fact->>'phase' = 'result' AND f.fact->>'fromPiResult' = 'true'
                   AND f.fact->>'agentId' = f.source->'resource'->>'agentId'
                   AND f.fact->>'submissionId' = f.source->>'submissionId'
@@ -415,7 +415,7 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
                   r.message->>'toolCallId', r.message->>'toolName',
                   r.message->'details'->>'executionId', r.message->'details'->>'capabilityId'
                 FROM raw AS r
-                WHERE r.value->>'kind' = 'pi.toolResult' AND r.message->>'role' = 'toolResult'
+                WHERE r.value->>'kind' IN ('pi.tool-result', 'pi.toolResult') AND r.message->>'role' = 'toolResult'
                   AND json_typeof(r.message->'content') = 'array'
                   AND json_typeof(r.message->'details'->'executionId') = 'string'
                   AND (json_typeof(r.message->'details'->'capabilityId') IS NULL
