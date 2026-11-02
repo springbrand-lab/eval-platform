@@ -224,8 +224,14 @@ describe("bounded read-only case usage projection", () => {
     expect(page.sql).toMatch(/json_array_elements\(CASE WHEN json_typeof\(body.snapshot->'nativeRecords'\)/su);
     expect(page.sql).toMatch(/metricProjection.*chargeLinkVersion/su);
     expect(page.sql).toMatch(/record.*model.*details.*executionId/su);
+    expect(page.sql).toContain('AS "billingSource"');
     expect(page.sql).toMatch(/f\.value->>'kind' IN \('pi\.tool-result', 'pi\.toolResult'\)/u);
     expect(page.sql).toMatch(/r\.value->>'kind' IN \('pi\.tool-result', 'pi\.toolResult'\)/u);
+    for (const field of ["snapshotNativeRows", "scopedNativeRows", "rawRoleToolResults",
+      "scopedPiToolResults", "compactedPiToolResults", "supportedPiToolResults",
+      "projectedPiToolResults", "projectedExecutionIds", "linkableToolCalls", "linkableToolResults"]) {
+      expect(page.sql).toContain(`"${field}"`);
+    }
     expect(page.sql).toMatch(/linkMatches.*toolCallMatches.*namedToolCallMatches.*resultCallMatches.*legacyCompact/su);
     expect(page.sql).toMatch(/scope.*chatId.*resource.*sessionId/su);
     expect(page.sql).toMatch(/call\.agent_id = result\.agent_id AND call\.submission_id = result\.submission_id\s+AND call\.tool_call_id = result\.tool_call_id/su);

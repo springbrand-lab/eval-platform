@@ -117,8 +117,12 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     });
     expect(actions).toMatchObject({ total: 1, rows: [{
       executionId: "88888888-8888-4888-8888-888888888888", chargedCredits: "7",
+      billingSource: "action",
       executionMatches: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
       resultCallMatches: 1, legacyCompact: false, toolName: "search", capabilityId: "capability-1",
+      snapshotNativeRows: 3, scopedNativeRows: 3, rawRoleToolResults: 0, scopedPiToolResults: 1,
+      compactedPiToolResults: 1, supportedPiToolResults: 1, projectedPiToolResults: 1,
+      projectedExecutionIds: 1, linkableToolCalls: 1, linkableToolResults: 1,
     }] });
     expect(JSON.stringify(actions)).not.toMatch(/private Tool arguments|private-key|credential|chatId|agentId|toolCallId/u);
   });
@@ -187,7 +191,10 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const raw = await reader.readCaseUsage(base);
     expect(raw).toMatchObject({ total: 7, rows: [
       { index: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
-        resultCallMatches: 1, toolName: "api.search", capabilityId: "capability-1", legacyCompact: false },
+        resultCallMatches: 1, toolName: "api.search", capabilityId: "capability-1", legacyCompact: false,
+        snapshotNativeRows: 10, scopedNativeRows: 10, rawRoleToolResults: 5,
+        scopedPiToolResults: 5, compactedPiToolResults: 0, supportedPiToolResults: 0,
+        projectedPiToolResults: 0, projectedExecutionIds: 0, linkableToolCalls: 5, linkableToolResults: 5 },
       { index: 2, linkMatches: 0, legacyCompact: false },
       { index: 3, executionMatches: 2, legacyCompact: false },
       { index: 4, executionMatches: 2, legacyCompact: false },

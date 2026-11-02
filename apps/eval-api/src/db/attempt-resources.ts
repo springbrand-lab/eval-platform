@@ -425,9 +425,32 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
               WHERE ${nativeId(sql`r.agent_id`)} AND ${nativeId(sql`r.submission_id`)}
                 AND ${nativeId(sql`r.tool_call_id`)} AND ${nativeToolName(sql`r.tool_name`)}
                 AND ${nativeId(sql`r.execution_id`)}
-                AND (r.capability_id IS NULL OR ${nativeId(sql`r.capability_id`)}))
+                AND (r.capability_id IS NULL OR ${nativeId(sql`r.capability_id`)})),
+            native_inventory AS MATERIALIZED (
+              SELECT count(*)::integer AS "scopedNativeRows",
+                count(*) FILTER (WHERE entry->'metricProjection' IS NULL
+                  AND value->'model'->0->>'role' = 'toolResult')::integer AS "rawRoleToolResults",
+                count(*) FILTER (WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult'))::integer AS "scopedPiToolResults",
+                count(*) FILTER (WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult')
+                  AND entry->'metricProjection' IS NOT NULL)::integer AS "compactedPiToolResults",
+                count(*) FILTER (WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult')
+                  AND entry->'metricProjection'->>'supported' = 'true')::integer AS "supportedPiToolResults"
+              FROM native),
+            projected_inventory AS MATERIALIZED (
+              SELECT count(*) FILTER (WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult')
+                  AND fact->>'type' = 'tool' AND fact->>'phase' = 'result'
+                  AND fact->>'fromPiResult' = 'true')::integer AS "projectedPiToolResults",
+                count(*) FILTER (WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult')
+                  AND fact->>'type' = 'tool' AND fact->>'phase' = 'result'
+                  AND fact->>'fromPiResult' = 'true'
+                  AND json_typeof(fact->'executionId') = 'string')::integer AS "projectedExecutionIds"
+              FROM compact),
+            link_inventory AS MATERIALIZED (
+              SELECT (SELECT count(*)::integer FROM calls) AS "linkableToolCalls",
+                (SELECT count(*)::integer FROM results) AS "linkableToolResults")
           SELECT page.ordinal::integer AS "index",
             ${bounded(sql`page.fact->>'executionId'`, 128)} AS "executionId",
+            ${bounded(sql`page.fact->>'source'`, 24)} AS "billingSource",
             ${bounded(sql`page.fact->>'status'`, 32)} AS status,
             ${number(sql`page.fact`, "chargedCredits")} AS "chargedCredits",
             (SELECT count(*)::integer FROM json_array_elements(body.snapshot->'billingSettlements') AS duplicate(value)
@@ -440,8 +463,15 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
             ${bounded(sql`link.capability_id`, 128)} AS "capabilityId",
             EXISTS (SELECT 1 FROM native AS old
               WHERE old.entry->'metricProjection' IS NOT NULL
-                AND old.entry->'metricProjection'->>'chargeLinkVersion' IS DISTINCT FROM '1') AS "legacyCompact"
-          FROM page CROSS JOIN body
+                AND old.entry->'metricProjection'->>'chargeLinkVersion' IS DISTINCT FROM '1') AS "legacyCompact",
+            CASE WHEN json_typeof(body.snapshot->'nativeRecords') = 'array'
+              THEN json_array_length(body.snapshot->'nativeRecords') END AS "snapshotNativeRows",
+            native_inventory."scopedNativeRows", native_inventory."rawRoleToolResults",
+            native_inventory."scopedPiToolResults", native_inventory."compactedPiToolResults",
+            native_inventory."supportedPiToolResults",
+            projected_inventory."projectedPiToolResults", projected_inventory."projectedExecutionIds",
+            link_inventory."linkableToolCalls", link_inventory."linkableToolResults"
+          FROM page CROSS JOIN body CROSS JOIN native_inventory CROSS JOIN projected_inventory CROSS JOIN link_inventory
           CROSS JOIN LATERAL (
             SELECT count(*)::integer AS matches, min(result.tool_name) AS tool_name,
               min(result.capability_id) AS capability_id,
