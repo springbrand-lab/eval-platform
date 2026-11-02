@@ -163,6 +163,8 @@ Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`�
 New compact charge-link facts retain only allowlisted, bounded identities
 for a SAFE Pi assistant Tool Call and Tool Result: agentId, submissionId,
 toolCallId and, from Result `details`, executionId and optional capabilityId.
+SP emits `pi.tool-result`; historical Pi records may use `pi.toolResult`.
+Both kinds require the same validated Tool Result role and charge-link identities.
 The existing Metrics Tool label remains the SAFE source name, including
 Unicode or escaped control characters, but only a short, identifier-shaped
 name may establish a charge link; non-linkable names never acquire charge IDs.

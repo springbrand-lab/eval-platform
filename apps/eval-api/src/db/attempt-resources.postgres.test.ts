@@ -64,6 +64,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const call = await compactNativeTrajectoryRecord(nativeFixture(6, chatId, submissionId), scope);
     const toolResult = nativeFixture(10, chatId, submissionId);
     if (toolResult.record.record.type !== "entry") throw new Error("Expected a SAFE Tool Result");
+    (toolResult.record.record.value as { kind: string }).kind = "pi.tool-result";
     (toolResult.record.record.value.model as Record<string, unknown>[])[0]!.details = {
       executionId: "88888888-8888-4888-8888-888888888888", capabilityId: "capability-1",
       arguments: "private Tool arguments", credential: "private-key",
@@ -137,6 +138,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       nativeToolBodyPair(chatId, submissionId, "private-business-body", "api.search", index));
     const toolResult = native[1]!;
     if (toolResult.record.record.type !== "entry") throw new Error("Expected Pi result");
+    (toolResult.record.record.value as { kind: string }).kind = "pi.tool-result";
     (toolResult.record.record.value.model as Record<string, unknown>[])[0]!.details = {
       executionId: "action-1", capabilityId: "capability-1", response: "private-response",
     };

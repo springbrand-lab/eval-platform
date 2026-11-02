@@ -80,8 +80,10 @@ and v1/v2 evidence bytes are not migrated.
 For new paged snapshots, validated SAFE Pi Tool Result
 `details.executionId`/`capabilityId` and bounded actor, Submission and Tool
 Call identities enter compact facts only when the Tool name is safe for a
-charge link. Existing Metrics facts still preserve SAFE source Tool labels
-(including Unicode); an unsuitable label cannot establish a charge link.
+charge link. The Action join accepts SP's `pi.tool-result` and historical
+`pi.toolResult` with the same role/ID/name checks. Existing Metrics facts
+still preserve SAFE source Tool labels (including Unicode); an unsuitable
+label cannot establish a charge link.
 The large-reference byte scanner applies the same link allowlist after
 verifying the complete source digest and scope. No Tool arguments, Result
 body or arbitrary `details` enter the new link facts; the independent SP

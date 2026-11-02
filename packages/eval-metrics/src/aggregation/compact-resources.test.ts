@@ -21,10 +21,11 @@ function assistantWithText(text: string) {
 }
 
 describe("body-free native Pi metric projections", () => {
-  it("keeps only validated Tool Call and SAFE Tool Result charge identities, not details or business data", async () => {
+  it.each(["pi.toolResult", "pi.tool-result"])("keeps validated Tool Call and %s Result charge links", async (kind) => {
     const call = nativeFixture(6)[0]!;
     const result = nativeFixture(10)[0]!;
     if (call.record.record.type !== "entry" || result.record.record.type !== "entry") throw new Error("Expected Pi entries");
+    (result.record.record.value as { kind: string }).kind = kind;
     const message = (result.record.record.value.model as Record<string, JsonValue>[])[0]!;
     message.details = {
       executionId: "execution-1", capabilityId: "capability-1",
