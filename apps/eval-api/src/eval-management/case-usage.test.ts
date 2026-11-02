@@ -119,9 +119,14 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
     const privateValue = "PRIVATE_TRACE_DO_NOT_LOG";
     const inventory = {
       snapshotNativeRows: "328", scopedNativeRows: "328", rawRoleToolResults: "0",
+      scopedPiAssistants: "48", supportedPiAssistants: "48",
       scopedPiToolResults: "45", compactedPiToolResults: "45", supportedPiToolResults: "45",
-      projectedPiToolResults: "45", projectedExecutionIds: "0",
-      linkableToolCalls: "45", linkableToolResults: "0",
+      projectedPiToolCalls: "45", callAgentIdsAccepted: "45", callSubmissionIdsAccepted: "45",
+      callIdsAccepted: "45", callNamesAccepted: "45", callLinkIdentityAccepted: "45",
+      projectedPiToolResults: "45", resultAgentIdsAccepted: "45", resultSubmissionIdsAccepted: "45",
+      resultCallIdsAccepted: "44", resultNamesAccepted: "45", resultLinkIdentityAccepted: "44",
+      projectedCapabilityIds: "1", projectedExecutionIds: "1",
+      linkableToolCalls: "45", linkableToolResults: "1",
     };
     app.services.resourceSnapshots.readCaseUsage.mockResolvedValueOnce({ total: 2, attempt, rows: [
       { ...inventory, index: 1, executionId: "action-1", billingSource: "tool",
@@ -160,9 +165,14 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
         resultLinks: { none: 1, one: 1, multiple: 0, missing: 0 },
         inventory: {
           snapshotNativeRows: 328, scopedNativeRows: 328, rawRoleToolResults: 0,
+          scopedPiAssistants: 48, supportedPiAssistants: 48,
           scopedPiToolResults: 45, compactedPiToolResults: 45, supportedPiToolResults: 45,
-          projectedPiToolResults: 45, projectedExecutionIds: 0,
-          linkableToolCalls: 45, linkableToolResults: 0,
+          projectedPiToolCalls: 45, callAgentIdsAccepted: 45, callSubmissionIdsAccepted: 45,
+          callIdsAccepted: 45, callNamesAccepted: 45, callLinkIdentityAccepted: 45,
+          projectedPiToolResults: 45, resultAgentIdsAccepted: 45, resultSubmissionIdsAccepted: 45,
+          resultCallIdsAccepted: 44, resultNamesAccepted: 45, resultLinkIdentityAccepted: 44,
+          projectedCapabilityIds: 1, projectedExecutionIds: 1,
+          linkableToolCalls: 45, linkableToolResults: 1,
         },
       }),
     ]);
