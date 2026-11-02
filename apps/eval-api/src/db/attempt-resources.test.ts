@@ -228,8 +228,13 @@ describe("bounded read-only case usage projection", () => {
     expect(page.sql).toMatch(/f\.value->>'kind' IN \('pi\.tool-result', 'pi\.toolResult'\)/u);
     expect(page.sql).toMatch(/r\.value->>'kind' IN \('pi\.tool-result', 'pi\.toolResult'\)/u);
     for (const field of ["snapshotNativeRows", "scopedNativeRows", "rawRoleToolResults",
+      "scopedPiAssistants", "supportedPiAssistants",
       "scopedPiToolResults", "compactedPiToolResults", "supportedPiToolResults",
-      "projectedPiToolResults", "projectedExecutionIds", "linkableToolCalls", "linkableToolResults"]) {
+      "projectedPiToolCalls", "callAgentIdsAccepted", "callSubmissionIdsAccepted",
+      "callIdsAccepted", "callNamesAccepted", "callLinkIdentityAccepted",
+      "projectedPiToolResults", "resultAgentIdsAccepted", "resultSubmissionIdsAccepted",
+      "resultCallIdsAccepted", "resultNamesAccepted", "resultLinkIdentityAccepted",
+      "projectedCapabilityIds", "projectedExecutionIds", "linkableToolCalls", "linkableToolResults"]) {
       expect(page.sql).toContain(`"${field}"`);
     }
     expect(page.sql).toMatch(/linkMatches.*toolCallMatches.*namedToolCallMatches.*resultCallMatches.*legacyCompact/su);

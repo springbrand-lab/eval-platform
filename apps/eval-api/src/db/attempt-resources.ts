@@ -430,6 +430,9 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
               SELECT count(*)::integer AS "scopedNativeRows",
                 count(*) FILTER (WHERE entry->'metricProjection' IS NULL
                   AND value->'model'->0->>'role' = 'toolResult')::integer AS "rawRoleToolResults",
+                count(*) FILTER (WHERE value->>'kind' = 'pi.assistant')::integer AS "scopedPiAssistants",
+                count(*) FILTER (WHERE value->>'kind' = 'pi.assistant'
+                  AND entry->'metricProjection'->>'supported' = 'true')::integer AS "supportedPiAssistants",
                 count(*) FILTER (WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult'))::integer AS "scopedPiToolResults",
                 count(*) FILTER (WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult')
                   AND entry->'metricProjection' IS NOT NULL)::integer AS "compactedPiToolResults",
@@ -437,14 +440,29 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
                   AND entry->'metricProjection'->>'supported' = 'true')::integer AS "supportedPiToolResults"
               FROM native),
             projected_inventory AS MATERIALIZED (
-              SELECT count(*) FILTER (WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult')
-                  AND fact->>'type' = 'tool' AND fact->>'phase' = 'result'
-                  AND fact->>'fromPiResult' = 'true')::integer AS "projectedPiToolResults",
-                count(*) FILTER (WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult')
-                  AND fact->>'type' = 'tool' AND fact->>'phase' = 'result'
-                  AND fact->>'fromPiResult' = 'true'
-                  AND json_typeof(fact->'executionId') = 'string')::integer AS "projectedExecutionIds"
-              FROM compact),
+              SELECT count(*)::integer AS "projectedPiToolResults",
+                count(*) FILTER (WHERE ${nativeId(sql`source->'resource'->>'agentId'`)})::integer AS "resultAgentIdsAccepted",
+                count(*) FILTER (WHERE ${nativeId(sql`source->>'submissionId'`)})::integer AS "resultSubmissionIdsAccepted",
+                count(*) FILTER (WHERE json_typeof(fact->'id') = 'string')::integer AS "resultCallIdsAccepted",
+                count(*) FILTER (WHERE ${nativeToolName(sql`fact->>'toolName'`)})::integer AS "resultNamesAccepted",
+                count(*) FILTER (WHERE fact->>'agentId' IS NOT NULL)::integer AS "resultLinkIdentityAccepted",
+                count(*) FILTER (WHERE json_typeof(fact->'capabilityId') = 'string')::integer AS "projectedCapabilityIds",
+                count(*) FILTER (WHERE json_typeof(fact->'executionId') = 'string')::integer AS "projectedExecutionIds"
+              FROM compact
+              WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult')
+                AND fact->>'type' = 'tool' AND fact->>'phase' = 'result'
+                AND fact->>'fromPiResult' = 'true'),
+            call_inventory AS MATERIALIZED (
+              SELECT count(*)::integer AS "projectedPiToolCalls",
+                count(*) FILTER (WHERE ${nativeId(sql`source->'resource'->>'agentId'`)})::integer AS "callAgentIdsAccepted",
+                count(*) FILTER (WHERE ${nativeId(sql`source->>'submissionId'`)})::integer AS "callSubmissionIdsAccepted",
+                count(*) FILTER (WHERE json_typeof(fact->'id') = 'string')::integer AS "callIdsAccepted",
+                count(*) FILTER (WHERE ${nativeToolName(sql`fact->>'toolName'`)})::integer AS "callNamesAccepted",
+                count(*) FILTER (WHERE fact->>'agentId' IS NOT NULL)::integer AS "callLinkIdentityAccepted"
+              FROM compact
+              WHERE value->>'kind' = 'pi.assistant'
+                AND fact->>'type' = 'tool' AND fact->>'phase' = 'start'
+                AND fact->>'fromPiCall' = 'true'),
             link_inventory AS MATERIALIZED (
               SELECT (SELECT count(*)::integer FROM calls) AS "linkableToolCalls",
                 (SELECT count(*)::integer FROM results) AS "linkableToolResults")
@@ -467,11 +485,19 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
             CASE WHEN json_typeof(body.snapshot->'nativeRecords') = 'array'
               THEN json_array_length(body.snapshot->'nativeRecords') END AS "snapshotNativeRows",
             native_inventory."scopedNativeRows", native_inventory."rawRoleToolResults",
+            native_inventory."scopedPiAssistants", native_inventory."supportedPiAssistants",
             native_inventory."scopedPiToolResults", native_inventory."compactedPiToolResults",
             native_inventory."supportedPiToolResults",
-            projected_inventory."projectedPiToolResults", projected_inventory."projectedExecutionIds",
+            call_inventory."projectedPiToolCalls", call_inventory."callAgentIdsAccepted",
+            call_inventory."callSubmissionIdsAccepted", call_inventory."callIdsAccepted",
+            call_inventory."callNamesAccepted", call_inventory."callLinkIdentityAccepted",
+            projected_inventory."projectedPiToolResults", projected_inventory."resultAgentIdsAccepted",
+            projected_inventory."resultSubmissionIdsAccepted", projected_inventory."resultCallIdsAccepted",
+            projected_inventory."resultNamesAccepted", projected_inventory."resultLinkIdentityAccepted",
+            projected_inventory."projectedCapabilityIds", projected_inventory."projectedExecutionIds",
             link_inventory."linkableToolCalls", link_inventory."linkableToolResults"
-          FROM page CROSS JOIN body CROSS JOIN native_inventory CROSS JOIN projected_inventory CROSS JOIN link_inventory
+          FROM page CROSS JOIN body CROSS JOIN native_inventory CROSS JOIN projected_inventory
+          CROSS JOIN call_inventory CROSS JOIN link_inventory
           CROSS JOIN LATERAL (
             SELECT count(*)::integer AS matches, min(result.tool_name) AS tool_name,
               min(result.capability_id) AS capability_id,
