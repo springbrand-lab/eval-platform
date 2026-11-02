@@ -6,6 +6,8 @@ import { nativeRecordFacts } from "./native-record-facts.js";
 
 /** The projection is a Metrics storage detail, never an SP trajectory format or a billing source. */
 export const NATIVE_PROJECTION_VERSION = 1;
+/** Older version-1 compact rows lack Action charge links: do not re-interpret them as empty links. */
+export const NATIVE_CHARGE_LINK_VERSION = 1;
 
 /**
  * Body-free facts for a single verified SAFE record. `sourceSha256` is the digest of
@@ -44,6 +46,7 @@ export async function compactNativeTrajectoryRecord(
     } satisfies PiTrajectoryRecord,
     metricProjection: {
       version: NATIVE_PROJECTION_VERSION,
+      chargeLinkVersion: NATIVE_CHARGE_LINK_VERSION,
       fingerprint: sourceSha256 ?? await sha256Hex(canonicalJsonBytes(entry.record)),
       supported: facts !== undefined,
       facts: [...facts ?? []],

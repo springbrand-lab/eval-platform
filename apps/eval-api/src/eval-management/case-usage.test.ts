@@ -97,11 +97,11 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
     expect(actions).toMatchObject({ availability: "available",
       attempt: { resources: { actionCharges: { complete: false, missingExecutionIds: 1 } } },
       actions: { total: 5, items: [
-        { chargedCredits: 7, chargeState: "observed" },
-        { chargedCredits: null, chargeState: "unconfirmed" },
-        { chargedCredits: null, chargeState: "unconfirmed" },
-        { chargedCredits: null, chargeState: "unconfirmed" },
-        { chargedCredits: 0, chargeState: "observed" },
+        { chargedCredits: 7, chargeState: "observed", toolName: null, capabilityId: null, matchState: "unavailable" },
+        { chargedCredits: null, chargeState: "unconfirmed", matchState: "unavailable" },
+        { chargedCredits: null, chargeState: "unconfirmed", matchState: "unavailable" },
+        { chargedCredits: null, chargeState: "unconfirmed", matchState: "ambiguous" },
+        { chargedCredits: 0, chargeState: "observed", matchState: "unavailable" },
       ] } });
     expect(JSON.stringify(actions)).not.toMatch(/private|toolArguments/u);
     const select = { ...scope, section: "models", attemptId: "attempt-1" };
@@ -109,6 +109,76 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
       availability: "not_collected", models: { total: null, items: [] } });
     expect(await toolValue(await app.call("get_case_usage", select))).toMatchObject({
       availability: "snapshot_missing", models: { total: null, items: [] } });
+  });
+
+  it("links a unique charged Action to a SAFE Tool Result only with one matching scoped Tool Call", async () => {
+    const app = setupManagement();
+    const linked = { index: 1, executionId: "execution-1", status: "succeeded",
+      chargedCredits: "7", executionMatches: 1,
+      linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1, resultCallMatches: 1,
+      legacyCompact: false, toolName: "api.search", capabilityId: "capability-1",
+      agentId: "private-actor", submissionId: "private-submission", toolCallId: "private-call",
+      accountId: "private-account", details: { credential: "private-key" } };
+    app.services.resourceSnapshots.readCaseUsage.mockResolvedValueOnce({
+      total: 1, attempt, rows: [linked],
+    });
+    const result = await toolValue(await app.call("get_case_usage", {
+      ...scope, section: "actions", attemptId: "attempt-1",
+    }));
+    expect(result).toMatchObject({ actions: { items: [{
+      executionId: "execution-1", status: "succeeded", chargedCredits: 7, chargeState: "observed",
+      toolName: "api.search", capabilityId: "capability-1", matchState: "matched",
+    }] } });
+    expect(JSON.stringify(result)).not.toMatch(/private|agentId|submissionId|toolCallId|accountId|details/u);
+  });
+
+  it("does not attribute duplicate, mismatched or historical unlinked Tool Results to a charge", async () => {
+    const app = setupManagement();
+    const linked = { executionId: "execution-1", status: "failed", chargedCredits: "0",
+      executionMatches: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
+      resultCallMatches: 1, legacyCompact: false, toolName: "api.search", capabilityId: "capability-1" };
+    const rows = [
+      { ...linked, index: 1, executionMatches: 2 },
+      { ...linked, index: 2, linkMatches: 2 },
+      { ...linked, index: 3, toolCallMatches: 2 },
+      { ...linked, index: 4, namedToolCallMatches: 0 },
+      { ...linked, index: 5, resultCallMatches: 2 },
+      { ...linked, index: 6, toolCallMatches: 0 },
+      { ...linked, index: 7, linkMatches: 0, legacyCompact: true },
+      { ...linked, index: 8, legacyCompact: true },
+      { ...linked, index: 9, linkMatches: 0 },
+      { ...linked, index: 10, toolName: "sk-private-token" },
+    ];
+    app.services.resourceSnapshots.readCaseUsage.mockResolvedValueOnce({ total: 10, attempt, rows });
+    const result = await toolValue(await app.call("get_case_usage", {
+      ...scope, section: "actions", attemptId: "attempt-1", pageSize: 10,
+    }));
+    expect((result.actions as { items: Record<string, unknown>[] }).items.map((item) =>
+      [item.matchState, item.toolName, item.capabilityId])).toEqual([
+      ["ambiguous", null, null], ["ambiguous", null, null],
+      ["ambiguous", null, null], ["ambiguous", null, null], ["ambiguous", null, null],
+      ["unavailable", null, null], ["unknown", null, null], ["unknown", null, null],
+      ["unavailable", null, null], ["unavailable", null, null],
+    ]);
+    expect((result.actions as { items: Record<string, unknown>[] }).items[7]).toMatchObject({
+      chargedCredits: 0, chargeState: "observed",
+    });
+  });
+
+  it("reports an incomplete native inventory as unknown without losing a settled Action debit", async () => {
+    const app = setupManagement();
+    app.services.resourceSnapshots.readCaseUsage.mockResolvedValueOnce({
+      total: 1, attempt: { ...attempt, nativeCoverage: "partial" }, rows: [{
+        index: 1, executionId: "execution-1", status: "succeeded", chargedCredits: "3",
+        executionMatches: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
+        resultCallMatches: 1, legacyCompact: false, toolName: "api.search", capabilityId: "capability-1",
+      }],
+    });
+    expect(await toolValue(await app.call("get_case_usage", {
+      ...scope, section: "actions", attemptId: "attempt-1",
+    }))).toMatchObject({ attempt: { resources: { coverage: { nativeRecords: "partial" } } },
+      actions: { items: [{ chargedCredits: 3, chargeState: "observed",
+        toolName: null, capabilityId: null, matchState: "unknown" }] } });
   });
 
   it("validates role/selection before SQL, fails closed on nonmembers and rejects an unauthenticated caller", async () => {

@@ -21,6 +21,70 @@ function assistantWithText(text: string) {
 }
 
 describe("body-free native Pi metric projections", () => {
+  it("keeps only validated Tool Call and SAFE Tool Result charge identities, not details or business data", async () => {
+    const call = nativeFixture(6)[0]!;
+    const result = nativeFixture(10)[0]!;
+    if (call.record.record.type !== "entry" || result.record.record.type !== "entry") throw new Error("Expected Pi entries");
+    const message = (result.record.record.value.model as Record<string, JsonValue>[])[0]!;
+    message.details = {
+      executionId: "execution-1", capabilityId: "capability-1",
+      arguments: { secret: "private-argument" }, response: "private-business-body", apiKey: "private-key",
+    };
+    const snapshot = nativeResourceInput([], { nativeRecords: [call, result] }).collection;
+    if (!snapshot || snapshot.status !== "collected") throw new Error("Expected native snapshot");
+    const projected = await compactResourceSnapshot(snapshot.snapshot);
+    expect(projected.nativeRecords[0]!.metricProjection).toMatchObject({
+      chargeLinkVersion: 1, facts: expect.arrayContaining([
+        expect.objectContaining({ type: "tool", fromPiCall: true, agentId: "agent-1", submissionId: "submission-1",
+          toolCallId: "call-1", toolName: "search" }),
+      ]),
+    });
+    expect(projected.nativeRecords[1]!.metricProjection).toMatchObject({
+      chargeLinkVersion: 1, facts: [{
+        type: "tool", phase: "result", fromPiResult: true, agentId: "agent-1",
+        submissionId: "submission-1", toolCallId: "call-1", toolName: "search",
+        executionId: "execution-1", capabilityId: "capability-1",
+      }],
+    });
+    expect(JSON.stringify(projected)).not.toMatch(/private-argument|private-business-body|private-key|apiKey|details/u);
+    expect(aggregateResources([nativeResourceInput([], { nativeRecords: [call, result] })]))
+      .toEqual(aggregateResources([nativeResourceInput([], { ...projected })]));
+  });
+
+  it("does not turn untrusted Tool Result details, identifiers or names into charge links", async () => {
+    const source = nativeFixture(10)[0]!;
+    if (source.record.record.type !== "entry") throw new Error("Expected Pi result");
+    const message = (source.record.record.value.model as Record<string, JsonValue>[])[0]!;
+    const collection = nativeResourceInput([], { nativeRecords: [source] }).collection;
+    if (!collection || collection.status !== "collected") throw new Error("Expected native snapshot");
+    for (const details of [
+      { executionId: "https://private.test/secret", capabilityId: "capability-1" },
+      { executionId: "execution-1", capabilityId: "Bearer private-key" },
+      { executionId: "execution-1", capabilityId: "x".repeat(129) },
+      { executionId: "[REDACTED]", capabilityId: "capability-1" },
+    ]) {
+      message.details = details;
+      const compacted = await compactResourceSnapshot(collection.snapshot);
+      const fact = compacted.nativeRecords[0]!.metricProjection!.facts as Record<string, unknown>[];
+      expect(fact[0]).not.toHaveProperty("executionId");
+      expect(fact[0]).not.toHaveProperty("capabilityId");
+      expect(JSON.stringify(compacted)).not.toContain(details.capabilityId);
+    }
+    message.details = { executionId: "execution-1", capabilityId: "capability-1" };
+    message.toolCallId = "https://private.test/call";
+    const invalidCall = await compactResourceSnapshot(collection.snapshot);
+    expect(invalidCall.nativeRecords[0]!.metricProjection!.facts).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ executionId: "execution-1" }),
+    ]));
+    const bookkeeping = nativeFixture(8)[0]!;
+    if (bookkeeping.record.record.type !== "entry") throw new Error("Expected a Tool event");
+    const event = (bookkeeping.record.record.value.data as { event: { payload: { toolName: string } } }).event;
+    event.payload.toolName = "sk-private-credential";
+    const eventCollection = nativeResourceInput([], { nativeRecords: [bookkeeping] }).collection;
+    if (!eventCollection || eventCollection.status !== "collected") throw new Error("Expected native snapshot");
+    expect(JSON.stringify(await compactResourceSnapshot(eventCollection.snapshot))).not.toContain("sk-private-credential");
+  });
+
   it("hashes the full source record, drops multi-megabyte Pi text and preserves raw/compact conflicts", async () => {
     const large = assistantWithText("x".repeat(2_000_000));
     const conflict = assistantWithText("different");

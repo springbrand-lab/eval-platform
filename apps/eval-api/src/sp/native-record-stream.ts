@@ -82,6 +82,7 @@ const ENVELOPE_KEYS: Readonly<Record<string, readonly string[]>> = {
 };
 const NATIVE_VALUE_KEYS = new Set(["id", "conversationId", "kind", "model"]);
 const MESSAGE = "record.value.model[0]";
+const DETAILS = `${MESSAGE}.details`;
 const BLOCK = `${MESSAGE}.content[*]`;
 const BLOCK_TEXT = `${BLOCK}.text`;
 const MESSAGE_FIELDS = [
@@ -94,6 +95,7 @@ const TRACKED_PATHS = new Set([
   "record.value.id", "record.value.conversationId", "record.value.kind", "record.value.model",
   "record.value.byTaskId", "record.value.head", "record.value.edits",
   MESSAGE, ...MESSAGE_FIELDS.map((field) => `${MESSAGE}.${field}`),
+  DETAILS, `${DETAILS}.executionId`, `${DETAILS}.capabilityId`,
   ...["input", "output", "totalTokens"].map((field) => `${MESSAGE}.usage.${field}`),
   BLOCK, ...BLOCK_FIELDS.map((field) => `${BLOCK}.${field}`),
 ]);
@@ -103,6 +105,15 @@ const REQUIRED_STRING_PATHS = new Set([
   "record.type", "record.value.kind", "submissionId", "origin",
   "parent.resource.agentId", "parent.resource.sessionId", "parent.submissionId",
 ]);
+
+/** Only these two SAFE Tool Result identifiers survive a large Pi body. The
+ * same conservative allowlist is applied again during metric fact extraction. */
+function safeChargeId(value: JsonValue | undefined): value is string {
+  return typeof value === "string" && value.length <= 128
+    && /^[A-Za-z0-9_][A-Za-z0-9_.:-]*$/u.test(value)
+    && !/(?:^|[_.:-])(?:secret|token|password|api[_-]?key|bearer)(?:$|[_.:-])/iu.test(value)
+    && !/^(?:sk-|key_)/iu.test(value);
+}
 
 function invalid(message: string): never {
   throw new NativeRecordStreamError(`Unsafe SAFE Pi record: ${message}`, false);
@@ -266,6 +277,18 @@ class SafePiJsonScanner {
             }
             message.usage = usage;
           }
+          if (message.role === "toolResult" && this.types.get(DETAILS) === "object") {
+            const details: Record<string, JsonValue> = {};
+            for (const field of ["executionId", "capabilityId"]) {
+              const path = `${DETAILS}.${field}`;
+              if (!this.types.has(path)) continue;
+              const item = scalar(path);
+              // Preserve only the invalidity, not a private value. A present
+              // malformed capability must never be mistaken for an absent one.
+              details[field] = safeChargeId(item) ? item : null;
+            }
+            if (Object.keys(details).length > 0) message.details = details;
+          }
           if (this.types.get(`${MESSAGE}.content`) === "array") {
             message.content = this.contentCount <= MAX_CONTENT_BLOCKS
               ? this.blocks.slice(0, this.contentCount).map((block) => ({ ...block }))
@@ -383,7 +406,8 @@ class SafePiJsonScanner {
         parent.seen!.add(key);
       }
       if (this.interpret !== undefined && key !== undefined && (parent.path === MESSAGE || parent.path === BLOCK
-        || parent.path === `${MESSAGE}.usage`)) {
+        || parent.path === `${MESSAGE}.usage`
+        || parent.path === DETAILS && (key === "executionId" || key === "capabilityId"))) {
         if (parent.seen!.has(key)) this.contentInvalid = true;
         parent.seen!.add(key);
       }
