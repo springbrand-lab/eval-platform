@@ -78,16 +78,23 @@ than invented zero usage or complete billing. Historical raw resource rows
 and v1/v2 evidence bytes are not migrated.
 
 For new paged snapshots, validated SAFE Pi Tool Result
-`details.executionId`/`capabilityId` and bounded actor, Submission and Tool
-Call identities enter compact facts only when the Tool name is safe for a
-charge link. The Action join accepts SP's `pi.tool-result` and historical
-`pi.toolResult` with the same role/ID/name checks. Existing Metrics facts
-still preserve SAFE source Tool labels (including Unicode); an unsuitable
-label cannot establish a charge link.
-The large-reference byte scanner applies the same link allowlist after
-verifying the complete source digest and scope. No Tool arguments, Result
-body or arbitrary `details` enter the new link facts; the independent SP
-Action charge remains the only billed amount.
+`details.executionId`/`capabilityId`, bounded actor/Submission, and a
+version-2 **derived** `toolCallKey` enter compact facts only when the Tool
+name is safe for a charge link. The Tool Call/Result raw ID follows UA's
+nonempty-string contract (including Responses `call_1|fc_1`); at the single
+Metrics input seam it is hashed into a fixed-length scope-bound key, never
+stored as a raw compact field or returned to MCP/logs. PostgreSQL checks
+only this derived key's `tck2_` + SHA-256 shape, never revalidates the raw
+UA ID. It joins one Call and one Result on the same key, actor, Submission
+and Tool name, with unique execution ID. Historical raw and v1 compact
+records are not used for Action-to-Tool attribution.
+The Action join accepts SP's `pi.tool-result` and historical `pi.toolResult`
+with the same role/name/actor checks. Existing Metrics facts still preserve
+SAFE source Tool labels (including Unicode); an unsuitable label cannot
+establish a charge link. The large-reference byte scanner applies the same
+input seam after verifying the complete source digest and scope. No Tool
+arguments, Result body or arbitrary `details` enter the new link facts; the
+independent SP Action charge remains the only billed amount.
 
 **Release blocker:** The installed npm alpha.7 publishes finalized header,
 native/billing page, evidence and record-byte schemas/paths, but not the
@@ -138,9 +145,9 @@ For `get_case_usage` with `role:"execution"` and an exact `runId`, the Run must 
 
 `models.items` are `{index,eventId,kind,provider,model,tokens:{input,output,cacheRead,cacheWrite,reasoning,total},cacheHitRate:{value,coverage},providerUsdEstimate,modelSettlement:{state,status,ratedCredits,debitedCredits,shortfallCredits,platformOwnedCredits}}`. Cache hit rate is `cacheRead/(input+cacheRead)` only with both buckets and a nonzero safe-integer denominator. Each nullable token/cost is an independently observed source field, never inferred from another price; `total` may be the sum of all four valid token buckets when the source omitted its total. Model settlement pairs by **full** eventId within the same snapshot, requiring one usage event, one settlement, an account identity (never displayed) and a supported terminal status; `state` is `"settled"|"partial"|"missing"|"unsettled"|"ambiguous"`. Missing/unsettled/ambiguous amounts are null; `partial` retains only observed amounts when a terminal receipt lacks numeric fields, while anomalous receipts show no credit amount. Provider USD is a source estimate **not** SP-billed credits.
 
-`actions.items` are `{index,executionId,status,chargedCredits,chargeState:"observed"|"unconfirmed",toolName,capabilityId,matchState:"matched"|"ambiguous"|"unavailable"|"unknown"}`. The charge still comes **only** from the original SP ledger: a unique executionId, terminal succeeded/failed status and valid numeric charge give `chargeState:"observed"`; otherwise its debit is null, never inferred from a Tool or price. The independent `matchState:"matched"` additionally requires complete native source coverage, exactly one linked SAFE Tool Result and one same-actor/Submission/ToolCall/name Pi Tool Call in this Attempt. A duplicate executionId, linked Result, Tool Call or name conflict is `"ambiguous"`; an absent/invalid link or Call is `"unavailable"`. An older persisted **compact** native record with no charge-link version, or incomplete native source coverage, makes attribution `"unknown"` (even when another Result links); no historical ID is fabricated. Historical **raw object** snapshots can be matched where they still contain validated SAFE Result details. Non-matched states return `toolName:null,capabilityId:null`; a uniquely matched Result without a capability ID returns `capabilityId:null`. No Action/Tool charge is assigned to model usage.
+`actions.items` are `{index,executionId,status,chargedCredits,chargeState:"observed"|"unconfirmed",toolName,capabilityId,matchState:"matched"|"ambiguous"|"unavailable"|"unknown"}`. The charge still comes **only** from the original SP ledger: a unique executionId, terminal succeeded/failed status and valid numeric charge give `chargeState:"observed"`; otherwise its debit is null, never inferred from a Tool or price. The independent `matchState:"matched"` additionally requires complete native source coverage, exactly one linked SAFE Tool Result and one same-actor/Submission/derived-key/name Pi Tool Call in this Attempt. A duplicate executionId, linked Result, Tool Call or name conflict is `"ambiguous"`; an absent/invalid link or Call is `"unavailable"`. Historical raw or compact records lacking charge-link version **2**, or incomplete native coverage, make attribution `"unknown"` (even when another Result links); no historical ID is fabricated or inferred from a Tool's price. Non-matched states return `toolName:null,capabilityId:null`; a uniquely matched Result without a capability ID returns `capabilityId:null`. No Action/Tool charge is assigned to model usage.
 
-An authenticated Action usage page with unmatched rows emits one `eval_case_action_link_diagnostics` warning. It includes only bounded match-state/Call/Result-link histograms, fixed `action|tool|missing|other` billing-source counts and counts of stored, scope-eligible and compacted native facts from the same read-only snapshot. Re-read the affected Attempt's Action pages to diagnose stored facts without re-running its Agents. `rawRoleToolResults` counts only historical un-compacted rows and is normally zero for compact snapshots. The Call/Result `*Accepted` counts apply the same bounded actor, Submission, Call ID and Tool-name rules to each stored compact fact, without logging any values; compare them with `*LinkIdentityAccepted` and `projectedExecutionIds` to find the first failed gate. When all identities are accepted but the execution ID is absent, this compact snapshot cannot distinguish a missing/unsafe source ID from an invalid capability ID: only authorized SAFE source evidence can. No project/Attempt/account/Chat/Tool/Execution IDs, charged amounts, Tool names, arguments or raw records enter this diagnostic log. A missing persisted compact link cannot be recreated by logging or reading the page again.
+An authenticated Action usage page with unmatched rows emits one `eval_case_action_link_diagnostics` warning. It includes only bounded match-state/Call/Result-link histograms, fixed `action|tool|missing|other` billing-source counts and counts of stored, scope-eligible and compacted native facts from the same read-only snapshot. Re-read the affected Attempt's Action pages to diagnose stored facts without re-running its Agents. The Call/Result `*Accepted` counts check the existing bounded actor/Submission/Tool-name rules and **v2 derived-key shape** on each stored compact fact, without logging any values; compare them with `*LinkIdentityAccepted` and `projectedExecutionIds` to find the first failed gate. When all identities are accepted but the execution ID is absent, this compact snapshot cannot distinguish a missing/withheld source ID from an invalid capability ID: only authorized SAFE source evidence can. No project/Attempt/account/Chat/Tool/Execution IDs, derived keys, charged amounts, Tool names, arguments or raw records enter this diagnostic log. A missing persisted compact link cannot be recreated by logging or reading the page again.
 
 Coverage and `actionCharges` readiness remain on each Attempt; an observed line does not claim the entire Attempt is fully settled. IDs/labels are bounded and redacted; source account/Chat/actor/Submission/Tool Call IDs, private metadata and arbitrary JSON keys cannot enter the result. This is an **individual ledger view, not the cross-Attempt Metrics aggregate** (which owns deduplication, overlap and totals). The PostgreSQL JSON column is scanned/expanded server-side per requested page; the API process never hydrates its nativeRecords or entire snapshot. There is no indexed per-event random access, so very large stored Attempts can cost PostgreSQL CPU/memory even for a 5-row page; no global DB work bound or pagination stability under concurrent recollection is promised. Reads of a page and its Attempt/coverage header share a repeatable-read snapshot.
 

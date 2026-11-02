@@ -183,10 +183,11 @@ describe("source-independent SAFE Pi streaming byte reader", () => {
       { chatId: CHAT, idempotencyKey: "execution", submissionId: SUBMISSION }, item.sha256,
     );
     expect(compact.metricProjection).toMatchObject({
-      fingerprint: item.sha256, supported: true, chargeLinkVersion: 1,
+      fingerprint: item.sha256, supported: true, chargeLinkVersion: 2,
       facts: [{ type: "tool", phase: "result", toolName: "search", outputLength: null, fromPiResult: true,
         executionId: "execution-large", capabilityId: "capability-large",
-        agentId: "agent-1", submissionId: SUBMISSION, toolCallId: "tool-0" }],
+        agentId: "agent-1", submissionId: SUBMISSION,
+        toolCallKey: expect.stringMatching(/^tck2_[0-9a-f]{64}$/u) }],
     });
     expect(JSON.stringify(compact).length).toBeLessThan(4_096);
     expect(JSON.stringify(compact)).not.toMatch(/private-business-body|private-key|apiKey|details/u);
@@ -216,7 +217,7 @@ describe("source-independent SAFE Pi streaming byte reader", () => {
         { ingestSeq: result.ingestSeq, record: inspected!.record! },
         { chatId: CHAT, submissionId: SUBMISSION, idempotencyKey: "execution" }, inspected!.sha256,
       );
-      expect(compact.metricProjection).toMatchObject({ chargeLinkVersion: 1, supported: index === 0 });
+      expect(compact.metricProjection).toMatchObject({ chargeLinkVersion: 2, supported: index === 0 });
       expect(JSON.stringify(compact)).not.toMatch(/execution-1|capability-1|private-business-body|private-credential/u);
       expect(compact.metricProjection?.facts).not.toEqual(expect.arrayContaining([
         expect.objectContaining({ executionId: "execution-1" }),

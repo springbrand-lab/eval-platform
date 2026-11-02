@@ -83,8 +83,11 @@ describe("public paged SP resource collection", () => {
     const executionId = "88888888-8888-4888-8888-888888888888";
     const call = nativeFixture(6, chatId, submissionId);
     const result = nativeFixture(10, chatId, submissionId);
-    if (result.record.record.type !== "entry") throw new Error("Expected a Pi Tool Result");
+    if (call.record.record.type !== "entry" || result.record.record.type !== "entry") throw new Error("Expected Pi Tool entries");
+    const callMessage = (call.record.record.value.model as Record<string, unknown>[])[0]!;
+    (callMessage.content as Record<string, unknown>[]).find((block) => block.type === "toolCall")!.id = "call_1|fc_1";
     const message = (result.record.record.value.model as Record<string, unknown>[])[0]!;
+    message.toolCallId = "call_1|fc_1";
     message.toolName = "search";
     message.content = [{ type: "text", text: referenced
       ? `private-business-body${"x".repeat(600_000)}` : "private-business-body" }];
@@ -111,13 +114,16 @@ describe("public paged SP resource collection", () => {
       const native = pages.flatMap((page) => page.stream === "nativeRecords" ? page.records : []);
       expect(native).toHaveLength(2);
       expect(native[1]).toMatchObject({ metricProjection: {
-        chargeLinkVersion: 1, facts: [{ type: "tool", phase: "result",
+        chargeLinkVersion: 2, facts: [{ type: "tool", phase: "result",
           executionId, capabilityId: "capability-1",
-          toolCallId: "call-1", toolName: "search" }],
+          toolCallKey: expect.stringMatching(/^tck2_[0-9a-f]{64}$/u), toolName: "search" }],
       } });
+      const callFacts = native[0]!.metricProjection?.facts as readonly Record<string, unknown>[];
+      const resultFacts = native[1]!.metricProjection?.facts as readonly Record<string, unknown>[];
+      expect(callFacts.find((fact) => fact.type === "tool")?.toolCallKey).toBe(resultFacts[0]?.toolCallKey);
       expect(pages.flatMap((page) => page.stream === "billingSettlements" ? page.records : []))
         .toEqual(local.actionCharges);
-      expect(JSON.stringify(native)).not.toMatch(/private-business-body|private-key|privateMetadata|details/u);
+      expect(JSON.stringify(native)).not.toMatch(/call_1\|fc_1|private-business-body|private-key|privateMetadata|details/u);
     } finally {
       await download.dispose();
     }

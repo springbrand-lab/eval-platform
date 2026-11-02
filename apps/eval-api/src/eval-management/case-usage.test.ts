@@ -118,7 +118,7 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
     const app = setupManagement();
     const privateValue = "PRIVATE_TRACE_DO_NOT_LOG";
     const inventory = {
-      snapshotNativeRows: "328", scopedNativeRows: "328", rawRoleToolResults: "0",
+      snapshotNativeRows: "328", scopedNativeRows: "328",
       scopedPiAssistants: "48", supportedPiAssistants: "48",
       scopedPiToolResults: "45", compactedPiToolResults: "45", supportedPiToolResults: "45",
       projectedPiToolCalls: "45", callAgentIdsAccepted: "45", callSubmissionIdsAccepted: "45",
@@ -164,7 +164,7 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
         billingSources: { action: 1, tool: 1, missing: 0, other: 0 },
         resultLinks: { none: 1, one: 1, multiple: 0, missing: 0 },
         inventory: {
-          snapshotNativeRows: 328, scopedNativeRows: 328, rawRoleToolResults: 0,
+          snapshotNativeRows: 328, scopedNativeRows: 328,
           scopedPiAssistants: 48, supportedPiAssistants: 48,
           scopedPiToolResults: 45, compactedPiToolResults: 45, supportedPiToolResults: 45,
           projectedPiToolCalls: 45, callAgentIdsAccepted: 45, callSubmissionIdsAccepted: 45,

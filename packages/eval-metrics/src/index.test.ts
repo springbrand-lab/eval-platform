@@ -7,6 +7,7 @@ describe("@eval-platform/eval-metrics", () => {
       "compactNativeTrajectoryRecord", "compactResourceSnapshot", "createMetrics", "createProjectComparison",
       "createEvaluationScoreReader", "createEvaluationResultValidator",
       "MetricsEntityNotFoundError", "MetricsQueryError", "MetricsSourceError",
+      "NATIVE_CHARGE_LINK_VERSION", "NATIVE_PROJECTION_VERSION", "NATIVE_TOOL_CALL_KEY_PREFIX",
     ].toSorted());
   });
 });

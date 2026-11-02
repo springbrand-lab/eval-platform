@@ -210,7 +210,7 @@ describe("bounded read-only case usage projection", () => {
     expect(statements[3]?.sql).not.toMatch(/SELECT \*|toolArguments|metric_snapshot/su);
   });
 
-  it("joins Action charges to unique scoped SAFE Tool Results/Calls in SQL, including raw old object snapshots", async () => {
+  it("joins Action charges only to unique scoped v2 SAFE Tool Results/Calls in SQL", async () => {
     const { db, statements, transaction } = caseDb([[{ total: 1 }], [attempt], [{ total: 1 }], [{
       index: 1, executionId: "execution-1", executionMatches: 1, linkMatches: 1,
       toolCallMatches: 1, namedToolCallMatches: 1, resultCallMatches: 1,
@@ -223,11 +223,11 @@ describe("bounded read-only case usage projection", () => {
     const page = statements[3]!;
     expect(page.sql).toMatch(/json_array_elements\(CASE WHEN json_typeof\(body.snapshot->'nativeRecords'\)/su);
     expect(page.sql).toMatch(/metricProjection.*chargeLinkVersion/su);
-    expect(page.sql).toMatch(/record.*model.*details.*executionId/su);
+    expect(page.sql).toContain("f.fact->>'executionId'");
     expect(page.sql).toContain('AS "billingSource"');
     expect(page.sql).toMatch(/f\.value->>'kind' IN \('pi\.tool-result', 'pi\.toolResult'\)/u);
-    expect(page.sql).toMatch(/r\.value->>'kind' IN \('pi\.tool-result', 'pi\.toolResult'\)/u);
-    for (const field of ["snapshotNativeRows", "scopedNativeRows", "rawRoleToolResults",
+    expect(page.sql).not.toContain("r.message->>'toolCallId'");
+    for (const field of ["snapshotNativeRows", "scopedNativeRows",
       "scopedPiAssistants", "supportedPiAssistants",
       "scopedPiToolResults", "compactedPiToolResults", "supportedPiToolResults",
       "projectedPiToolCalls", "callAgentIdsAccepted", "callSubmissionIdsAccepted",
@@ -239,11 +239,33 @@ describe("bounded read-only case usage projection", () => {
     }
     expect(page.sql).toMatch(/linkMatches.*toolCallMatches.*namedToolCallMatches.*resultCallMatches.*legacyCompact/su);
     expect(page.sql).toMatch(/scope.*chatId.*resource.*sessionId/su);
-    expect(page.sql).toMatch(/call\.agent_id = result\.agent_id AND call\.submission_id = result\.submission_id\s+AND call\.tool_call_id = result\.tool_call_id/su);
-    expect(page.sql).toMatch(/duplicate\.agent_id = result\.agent_id AND duplicate\.submission_id = result\.submission_id\s+AND duplicate\.tool_call_id = result\.tool_call_id/su);
+    expect(page.sql).toMatch(/call\.agent_id = result\.agent_id AND call\.submission_id = result\.submission_id\s+AND call\.tool_call_key = result\.tool_call_key/su);
+    expect(page.sql).toMatch(/duplicate\.agent_id = result\.agent_id AND duplicate\.submission_id = result\.submission_id\s+AND duplicate\.tool_call_key = result\.tool_call_key/su);
     expect(page.sql).not.toMatch(/SELECT \*|metric_snapshot|toolArguments|accountId.*AS "accountId"/su);
     expect(page.params).toContain("owner-1");
     expect(page.params).toContain(1);
+  });
+
+  it("matches only v2 derived keys without a raw or v1 Tool ID fallback", async () => {
+    const { db, statements } = caseDb([[{ total: 1 }], [attempt], [{ total: 1 }], [{
+      index: 1, executionId: "execution-1", executionMatches: 1, linkMatches: 1,
+      toolCallMatches: 1, namedToolCallMatches: 1, resultCallMatches: 1,
+    }]]);
+    await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage({
+      ...selection, section: "actions", page: 1, pageSize: 1,
+    });
+    const query = statements[3]!.sql;
+    expect(query).toContain("chargeLinkVersion");
+    expect(query).toContain("f.fact->>'toolCallKey'");
+    expect(query).not.toContain("raw AS MATERIALIZED");
+    expect(query).not.toContain("f.fact->>'toolCallId'");
+    expect(query).not.toContain("r.message->>'toolCallId'");
+    expect(statements[3]!.params).toContain("^tck2_[0-9a-f]{64}$");
+    expect(statements[3]!.params).toContain(69);
+    expect(statements[3]!.params).toContain("2");
+    expect(query).not.toContain("link_mode");
+    expect(query).toMatch(/call\.agent_id = result\.agent_id AND call\.submission_id = result\.submission_id/u);
+    expect(query).toMatch(/call\.tool_name = result\.tool_name/u);
   });
 
   it("never asks PostgreSQL for a snapshot when the selected Attempt's resources were not collected", async () => {

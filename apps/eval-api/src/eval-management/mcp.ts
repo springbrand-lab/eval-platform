@@ -225,7 +225,6 @@ async function getCaseUsage(c: Context<AppBindings>, input: z.output<typeof mana
         inventory: {
           snapshotNativeRows: count(first.snapshotNativeRows),
           scopedNativeRows: count(first.scopedNativeRows),
-          rawRoleToolResults: count(first.rawRoleToolResults),
           scopedPiAssistants: count(first.scopedPiAssistants),
           supportedPiAssistants: count(first.supportedPiAssistants),
           scopedPiToolResults: count(first.scopedPiToolResults),

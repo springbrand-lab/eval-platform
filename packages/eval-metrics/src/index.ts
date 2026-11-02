@@ -7,4 +7,7 @@ export type * from "./aggregation/model.js";
 export type * from "./reporting/model.js";
 export type * from "./comparison/model.js";
 
-export { compactNativeTrajectoryRecord, compactResourceSnapshot } from "./aggregation/compact-resources.js";
+export {
+  compactNativeTrajectoryRecord, compactResourceSnapshot, NATIVE_CHARGE_LINK_VERSION, NATIVE_PROJECTION_VERSION,
+} from "./aggregation/compact-resources.js";
+export { NATIVE_TOOL_CALL_KEY_PREFIX } from "./aggregation/native-record-facts.js";
