@@ -260,7 +260,7 @@ export const inspectCaseSchema = z.strictObject({
 export const getCaseUsageSchema = z.strictObject({
   projectId: entityIdSchema, samplingId: entityIdSchema, role: z.enum(["execution", "evaluation"]),
   evaluationId: entityIdSchema.optional(), runId: entityIdSchema.optional(),
-  section: z.enum(["attempts", "models", "actions"]).default("attempts"),
+  section: z.enum(["attempts", "models", "actions", "tools"]).default("attempts"),
   attemptId: entityIdSchema.optional(),
   page: z.number().int().min(1).max(10_000).default(1),
   pageSize: z.number().int().min(1).max(10).default(5),
@@ -269,7 +269,7 @@ export const getCaseUsageSchema = z.strictObject({
     ctx.addIssue({ code: "custom", message: "Select an Evaluation ID exactly for the evaluation role" });
   }
   if ((value.section === "attempts") === (value.attemptId !== undefined)) {
-    ctx.addIssue({ code: "custom", message: "Select an Attempt ID only for model or Action facts" });
+    ctx.addIssue({ code: "custom", message: "Select an Attempt ID only for model, Action or Super Link Tool facts" });
   }
 });
 

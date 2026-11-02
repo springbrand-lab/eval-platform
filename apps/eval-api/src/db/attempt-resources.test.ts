@@ -202,7 +202,8 @@ describe("bounded read-only case usage projection", () => {
     });
     expect(result.rows).toEqual([{ index: 3, executionId: null, chargedCredits: "3", executionMatches: 0 }]);
     expect(statements[0]?.sql).toMatch(/JOIN eval_evaluations AS e.*e.evaluation_id = .*eval_run_evaluations.*m.evaluation_id = e.evaluation_id/su);
-    expect(statements[2]?.sql).toContain("b.value->>'source' IN ('action', 'tool')");
+    expect(statements[2]?.sql).toContain("b.value->>'source' =");
+    expect(statements[2]?.params).toContain("action");
     expect(statements[3]?.sql).toMatch(/executionMatches.*FROM page CROSS JOIN body/su);
     expect(statements[3]?.sql).toMatch(/WHERE .*ORDER BY b.ordinal OFFSET .* LIMIT /su);
     expect(statements[3]?.sql).not.toContain("b.ordinal >");
@@ -210,11 +211,11 @@ describe("bounded read-only case usage projection", () => {
     expect(statements[3]?.sql).not.toMatch(/SELECT \*|toolArguments|metric_snapshot/su);
   });
 
-  it("joins Action charges to unique scoped SAFE Tool Results/Calls in SQL, including raw old object snapshots", async () => {
+  it("joins Action charges only to unique scoped v2 SAFE Tool Results/Calls in SQL", async () => {
     const { db, statements, transaction } = caseDb([[{ total: 1 }], [attempt], [{ total: 1 }], [{
       index: 1, executionId: "execution-1", executionMatches: 1, linkMatches: 1,
       toolCallMatches: 1, namedToolCallMatches: 1, resultCallMatches: 1,
-      legacyCompact: false, toolName: "api.search", capabilityId: "capability-1",
+      legacyCompact: false, toolName: "api.search", actionId: "action.exa.search",
     }]]);
     await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage({
       ...selection, section: "actions", page: 1, pageSize: 1,
@@ -223,27 +224,77 @@ describe("bounded read-only case usage projection", () => {
     const page = statements[3]!;
     expect(page.sql).toMatch(/json_array_elements\(CASE WHEN json_typeof\(body.snapshot->'nativeRecords'\)/su);
     expect(page.sql).toMatch(/metricProjection.*chargeLinkVersion/su);
-    expect(page.sql).toMatch(/record.*model.*details.*executionId/su);
+    expect(page.sql).toContain("f.fact->>'executionId'");
     expect(page.sql).toContain('AS "billingSource"');
     expect(page.sql).toMatch(/f\.value->>'kind' IN \('pi\.tool-result', 'pi\.toolResult'\)/u);
-    expect(page.sql).toMatch(/r\.value->>'kind' IN \('pi\.tool-result', 'pi\.toolResult'\)/u);
-    for (const field of ["snapshotNativeRows", "scopedNativeRows", "rawRoleToolResults",
-      "scopedPiAssistants", "supportedPiAssistants",
-      "scopedPiToolResults", "compactedPiToolResults", "supportedPiToolResults",
-      "projectedPiToolCalls", "callAgentIdsAccepted", "callSubmissionIdsAccepted",
-      "callIdsAccepted", "callNamesAccepted", "callLinkIdentityAccepted",
-      "projectedPiToolResults", "resultAgentIdsAccepted", "resultSubmissionIdsAccepted",
-      "resultCallIdsAccepted", "resultNamesAccepted", "resultLinkIdentityAccepted",
-      "projectedCapabilityIds", "projectedExecutionIds", "linkableToolCalls", "linkableToolResults"]) {
-      expect(page.sql).toContain(`"${field}"`);
-    }
-    expect(page.sql).toMatch(/linkMatches.*toolCallMatches.*namedToolCallMatches.*resultCallMatches.*legacyCompact/su);
+    expect(page.sql).not.toContain("r.message->>'toolCallId'");
+    expect(page.sql).toMatch(/AS "actionId".*AS "actionIdPresent".*AS "linkMatches".*AS "toolCallMatches"/su);
+    expect(page.sql).not.toMatch(/projectedCapabilityIds|capability_id|inventory/su);
     expect(page.sql).toMatch(/scope.*chatId.*resource.*sessionId/su);
-    expect(page.sql).toMatch(/call\.agent_id = result\.agent_id AND call\.submission_id = result\.submission_id\s+AND call\.tool_call_id = result\.tool_call_id/su);
-    expect(page.sql).toMatch(/duplicate\.agent_id = result\.agent_id AND duplicate\.submission_id = result\.submission_id\s+AND duplicate\.tool_call_id = result\.tool_call_id/su);
+    expect(page.sql).toMatch(/call\.agent_id = result\.agent_id AND call\.submission_id = result\.submission_id\s+AND call\.tool_call_key = result\.tool_call_key/su);
+    expect(page.sql).toMatch(/duplicate\.agent_id = result\.agent_id AND duplicate\.submission_id = result\.submission_id\s+AND duplicate\.tool_call_key = result\.tool_call_key/su);
     expect(page.sql).not.toMatch(/SELECT \*|metric_snapshot|toolArguments|accountId.*AS "accountId"/su);
     expect(page.params).toContain("owner-1");
     expect(page.params).toContain(1);
+  });
+
+  it("pages only the selected Action or Super Link source and projects Action IDs from ledger facts, never SAFE details", async () => {
+    for (const section of ["actions", "tools"] as const) {
+      const { db, statements } = caseDb([[{ total: 1 }], [attempt], [{ total: 1 }], [{
+        index: 2, billingSource: section === "actions" ? "action" : "tool",
+        actionId: section === "actions" ? "action.exa.search" : null, chargedCredits: "7",
+      }]]);
+      const result = await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage({
+        ...selection, section, page: 1,
+      });
+      expect(result.total).toBe(1);
+      expect(statements[2]?.params).toContain(section === "actions" ? "action" : "tool");
+      expect(statements[3]?.params).toContain(section === "actions" ? "action" : "tool");
+      const page = statements[3]!.sql;
+      if (section === "actions") expect(page).toContain("page.fact->>'actionId'");
+      else {
+        expect(page).not.toContain("actionId");
+        expect(page).not.toContain("nativeRecords");
+      }
+      expect(page).toContain("private|prompt");
+      expect(page).not.toMatch(/f\.fact->>'capabilityId'|AS "capabilityId"|projectedCapabilityIds/u);
+      expect(page).toContain("duplicate.value->>'source'");
+    }
+  });
+
+  it("keeps Action/Tool receipts out of paired model settlements even when their execution ID is missing", async () => {
+    const { db, statements } = caseDb([[{ total: 1 }], [attempt], [{ total: 1 }], [{
+      index: 1, eventId: "usage-1", settlementMatches: 1, debitedUnits: "3",
+    }]]);
+    await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage({
+      ...selection, page: 1,
+    });
+    const page = statements[3]!.sql;
+    expect(page).toContain("b.value->>'source'");
+    expect(page).toContain("b.value->>'eventId' = page.fact->>'eventId'");
+    expect(page).toMatch(/AND \(b\.value->>'source' IS NULL OR b\.value->>'source' = 'model'\)\s+AND b\.value->>'executionId' IS NULL/u);
+  });
+
+  it("matches only v2 derived keys without a raw or v1 Tool ID fallback", async () => {
+    const { db, statements } = caseDb([[{ total: 1 }], [attempt], [{ total: 1 }], [{
+      index: 1, executionId: "execution-1", executionMatches: 1, linkMatches: 1,
+      toolCallMatches: 1, namedToolCallMatches: 1, resultCallMatches: 1,
+    }]]);
+    await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage({
+      ...selection, section: "actions", page: 1, pageSize: 1,
+    });
+    const query = statements[3]!.sql;
+    expect(query).toContain("chargeLinkVersion");
+    expect(query).toContain("f.fact->>'toolCallKey'");
+    expect(query).not.toContain("raw AS MATERIALIZED");
+    expect(query).not.toContain("f.fact->>'toolCallId'");
+    expect(query).not.toContain("r.message->>'toolCallId'");
+    expect(statements[3]!.params).toContain("^tck2_[0-9a-f]{64}$");
+    expect(statements[3]!.params).toContain(69);
+    expect(statements[3]!.params).toContain("2");
+    expect(query).not.toContain("link_mode");
+    expect(query).toMatch(/call\.agent_id = result\.agent_id AND call\.submission_id = result\.submission_id/u);
+    expect(query).toMatch(/call\.tool_name = result\.tool_name/u);
   });
 
   it("never asks PostgreSQL for a snapshot when the selected Attempt's resources were not collected", async () => {

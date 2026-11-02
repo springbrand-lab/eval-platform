@@ -6,6 +6,9 @@ import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 import {
   compactResourceSnapshot,
   MetricsSourceError,
+  NATIVE_CHARGE_LINK_VERSION,
+  NATIVE_PROJECTION_VERSION,
+  NATIVE_TOOL_CALL_KEY_PREFIX,
   type MetricsEvaluation,
   type MetricsSampling,
   type WithResourceSnapshot,
@@ -197,7 +200,7 @@ export interface CaseUsageQuery {
   readonly role: "execution" | "evaluation";
   readonly evaluationId?: string | undefined;
   readonly runId?: string | undefined;
-  readonly section: "attempts" | "models" | "actions";
+  readonly section: "attempts" | "models" | "actions" | "tools";
   readonly attemptId?: string | undefined;
   readonly page: number;
   readonly pageSize: number;
@@ -209,17 +212,29 @@ const bounded = (value: SQL, max: number) =>
 const number = (parent: SQL, key: string) =>
   sql`CASE WHEN json_typeof(${parent}->${key}::text) = 'number'
     AND char_length(${parent}->>${key}::text) <= 32 THEN ${parent}->>${key}::text END`;
-const actionFact = sql`(b.value->>'executionId' IS NOT NULL OR b.value->>'source' IN ('action', 'tool')
-  OR (b.value->>'chargedCredits' IS NOT NULL AND b.value->>'eventId' IS NULL))`;
-/** Mirror the compact fact's conservative ID/name allowlists for historical raw
- * object snapshots. These tests happen in PostgreSQL, never on a hydrated Pi body. */
+/** Retain the conservative guards for actor, Submission and execution
+ * identities. Raw Tool IDs never enter the compact-key join. */
 const nativeId = (value: SQL) => sql`char_length(${value}) BETWEEN 1 AND 128
   AND ${value} ~ '^[A-Za-z0-9_][A-Za-z0-9_.:-]*$'
   AND ${value} !~* '(^|[_.:-])(secret|token|password|api[_-]?key|bearer)($|[_.:-])'
   AND ${value} !~* '^(sk-|key_)'`;
+const displayLedgerId = (value: SQL) => sql`${nativeId(value)}
+  AND ${value} !~* '(^|[_.:-])(credential|authorization|private|prompt)($|[_.:-])'
+  AND ${value} !~* '^(ghp_|glpat-|xox[baprs]-)'`;
+/** A bounded *display* gate, not a parser for SP's private Action IDs.
+ * The MCP repeats its independent whole-value redaction check. */
+const displayActionId = (value: SQL) => sql`${displayLedgerId(value)}
+  AND (${value}) COLLATE "C" ~ '^(action[.][A-Za-z0-9][A-Za-z0-9._-]*|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$'`;
+/** The only SQL validation of a new Tool Call ID is its *derived key* shape.
+ * EP never re-parses UA's nonempty, opaque source ID in PostgreSQL. */
+const derivedToolCallKey = (value: SQL) =>
+  sql`char_length(${value}) = ${NATIVE_TOOL_CALL_KEY_PREFIX.length + 64}
+    AND (${value}) COLLATE "C" ~ ${`^${NATIVE_TOOL_CALL_KEY_PREFIX}[0-9a-f]{64}$`}`;
 const nativeToolName = (value: SQL) => sql`char_length(${value}) BETWEEN 1 AND 96
   AND ${value} ~ '^[A-Za-z_][A-Za-z0-9_./:-]*$'
-  AND position('://' IN ${value}) = 0 AND ${value} !~* '^(sk-|key_|bearer)'`;
+  AND position('://' IN ${value}) = 0
+  AND ${value} !~* '(^|[_.:/-])(secret|token|password|api[_-]?key|bearer|private|prompt|credential|authorization)($|[_.:/-])'
+  AND ${value} !~* '^(sk-|key_|bearer|ghp_|glpat-|xox[baprs]-)'`;
 
 /** Owner-scoped reads of raw snapshots for current records of a non-deleted Project. */
 export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: string) {
@@ -282,13 +297,17 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
           AND r.stage = ${role} AND r.record_id = ${evaluationId ?? samplingId}
           AND r.sampling_id = ${samplingId} AND r.attempt_id = ${attemptId}
           AND r.evaluation_id ${role === "execution" ? sql`IS NULL` : sql`= ${evaluationId}`}`;
-        const actionRows = sql`FROM json_array_elements(r.snapshot->'billingSettlements') AS b(value) WHERE ${actionFact}`;
+        // Action and Super Link Tool charges share the same SP ledger snapshot,
+        // but are distinct sources and must have distinct page counts.
+        const chargeSource = section === "actions" ? "action" : "tool";
+        const chargeRows = sql`FROM json_array_elements(r.snapshot->'billingSettlements') AS b(value)
+          WHERE b.value->>'source' = ${chargeSource}`;
         const counted = section === "models"
           ? sql`CASE WHEN json_typeof(r.snapshot->'usageEvents') = 'array'
             AND json_typeof(r.snapshot->'billingSettlements') = 'array'
             THEN json_array_length(r.snapshot->'usageEvents') END`
           : sql`CASE WHEN json_typeof(r.snapshot->'billingSettlements') = 'array'
-            THEN (SELECT count(*)::integer ${actionRows}) END`;
+            THEN (SELECT count(*)::integer ${chargeRows}) END`;
         const [stored] = (await transaction.execute<{ total: number | null }>(sql`
           SELECT ${counted} AS total ${snapshot}`)).rows;
         if (!stored) return { total: null, rows: [], attempt };
@@ -333,19 +352,37 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
                 min(${number(sql`b.value->'platformOwned'`, "units")}) AS platform
               FROM json_array_elements(body.snapshot->'billingSettlements') AS b(value)
               WHERE page.fact->>'eventId' IS NOT NULL AND page.fact->>'eventId' <> ''
+                AND (b.value->>'source' IS NULL OR b.value->>'source' = 'model')
                 AND b.value->>'executionId' IS NULL AND b.value->>'eventId' = page.fact->>'eventId'
             ) AS bill ORDER BY page.ordinal`);
           return { total: stored.total, rows, attempt };
         }
+        const page = sql`SELECT b.value AS fact, b.ordinal FROM body
+          CROSS JOIN LATERAL json_array_elements(body.snapshot->'billingSettlements') WITH ORDINALITY AS b(value, ordinal)
+          WHERE b.value->>'source' = ${chargeSource}
+          ORDER BY b.ordinal OFFSET ${offset} LIMIT ${pageSize}`;
+        const executionMatches = sql`(SELECT count(*)::integer FROM json_array_elements(body.snapshot->'billingSettlements') AS duplicate(value)
+          WHERE page.fact->>'executionId' IS NOT NULL AND page.fact->>'executionId' <> ''
+            AND duplicate.value->>'source' = page.fact->>'source'
+            AND duplicate.value->>'executionId' = page.fact->>'executionId')`;
+        const chargeFields = sql`page.ordinal::integer AS "index",
+          CASE WHEN ${displayLedgerId(sql`page.fact->>'executionId'`)}
+            THEN page.fact->>'executionId' END AS "executionId",
+          ${bounded(sql`page.fact->>'source'`, 24)} AS "billingSource",
+          ${bounded(sql`page.fact->>'status'`, 32)} AS status,
+          ${number(sql`page.fact`, "chargedCredits")} AS "chargedCredits",
+          ${executionMatches} AS "executionMatches"`;
+        if (section === "tools") {
+          const { rows } = await transaction.execute<Record<string, unknown>>(sql`
+            WITH body AS MATERIALIZED (${body}), page AS MATERIALIZED (${page})
+            SELECT ${chargeFields} FROM page CROSS JOIN body ORDER BY page.ordinal`);
+          return { total: stored.total, rows, attempt };
+        }
         const { rows } = await transaction.execute<Record<string, unknown>>(sql`
           WITH body AS MATERIALIZED (${body}),
-            page AS MATERIALIZED (
-              SELECT b.value AS fact, b.ordinal FROM body
-              CROSS JOIN LATERAL json_array_elements(body.snapshot->'billingSettlements') WITH ORDINALITY AS b(value, ordinal)
-              WHERE ${actionFact}
-              ORDER BY b.ordinal OFFSET ${offset} LIMIT ${pageSize}),
-            -- Only locally compacted facts or the original validated old object path.
-            -- The latter is expanded in PostgreSQL, never returned to Node.
+            page AS MATERIALIZED (${page}),
+            -- Only v2 compact SAFE facts can corroborate a Tool. Historical raw/v1
+            -- records are never decoded into a charge link.
             native AS MATERIALIZED (
               SELECT n.value AS entry, n.value->'record' AS source,
                 n.value->'record'->'record'->'value' AS value FROM body
@@ -364,143 +401,61 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
             compact AS MATERIALIZED (
               SELECT n.source, n.value, f.value AS fact FROM native AS n
               CROSS JOIN LATERAL json_array_elements(
-                CASE WHEN n.entry->'metricProjection'->>'version' = '1'
-                  AND n.entry->'metricProjection'->>'chargeLinkVersion' = '1'
+                CASE WHEN n.entry->'metricProjection'->>'version' = ${String(NATIVE_PROJECTION_VERSION)}
+                  AND n.entry->'metricProjection'->>'chargeLinkVersion' = ${String(NATIVE_CHARGE_LINK_VERSION)}
                   AND n.entry->'metricProjection'->>'supported' = 'true'
                   AND json_typeof(n.entry->'metricProjection'->'facts') = 'array'
                   THEN n.entry->'metricProjection'->'facts' ELSE '[]'::json END) AS f(value)),
-            raw AS MATERIALIZED (
-              SELECT n.source, n.value, CASE
-                WHEN json_typeof(n.value->'model') = 'array' THEN
-                  CASE WHEN json_array_length(n.value->'model') = 1 THEN n.value->'model'->0 END
-                END AS message FROM native AS n
-              WHERE n.entry->'metricProjection' IS NULL),
             calls AS MATERIALIZED (
-              SELECT c.agent_id, c.submission_id, c.tool_call_id, c.tool_name
+              SELECT c.agent_id, c.submission_id, c.tool_call_key, c.tool_name
               FROM (
                 SELECT f.source->'resource'->>'agentId' AS agent_id,
                   f.source->>'submissionId' AS submission_id,
-                  f.fact->>'toolCallId' AS tool_call_id, f.fact->>'toolName' AS tool_name
+                  f.fact->>'toolCallKey' AS tool_call_key, f.fact->>'toolName' AS tool_name
                 FROM compact AS f
                 WHERE f.value->>'kind' = 'pi.assistant' AND f.fact->>'type' = 'tool'
                   AND f.fact->>'phase' = 'start' AND f.fact->>'fromPiCall' = 'true'
                   AND f.fact->>'agentId' = f.source->'resource'->>'agentId'
                   AND f.fact->>'submissionId' = f.source->>'submissionId'
-                UNION ALL
-                SELECT r.source->'resource'->>'agentId', r.source->>'submissionId',
-                  call.value->>'id', call.value->>'name'
-                FROM raw AS r CROSS JOIN LATERAL json_array_elements(
-                  CASE WHEN r.value->>'kind' = 'pi.assistant' AND r.message->>'role' = 'assistant'
-                    AND json_typeof(r.message->'content') = 'array'
-                    THEN r.message->'content' ELSE '[]'::json END) AS call(value)
-                WHERE call.value->>'type' = 'toolCall'
+                  AND ${derivedToolCallKey(sql`f.fact->>'toolCallKey'`)}
               ) AS c
               WHERE ${nativeId(sql`c.agent_id`)} AND ${nativeId(sql`c.submission_id`)}
-                AND ${nativeId(sql`c.tool_call_id`)} AND ${nativeToolName(sql`c.tool_name`)}),
+                AND ${nativeToolName(sql`c.tool_name`)}),
             results AS MATERIALIZED (
-              SELECT r.agent_id, r.submission_id, r.tool_call_id, r.tool_name,
-                r.execution_id, r.capability_id
+              SELECT r.agent_id, r.submission_id, r.tool_call_key, r.tool_name,
+                r.execution_id
               FROM (
                 SELECT f.source->'resource'->>'agentId' AS agent_id,
                   f.source->>'submissionId' AS submission_id,
-                  f.fact->>'toolCallId' AS tool_call_id, f.fact->>'toolName' AS tool_name,
-                  f.fact->>'executionId' AS execution_id, f.fact->>'capabilityId' AS capability_id
+                  f.fact->>'toolCallKey' AS tool_call_key, f.fact->>'toolName' AS tool_name,
+                  f.fact->>'executionId' AS execution_id
                 FROM compact AS f
                 WHERE f.value->>'kind' IN ('pi.tool-result', 'pi.toolResult') AND f.fact->>'type' = 'tool'
                   AND f.fact->>'phase' = 'result' AND f.fact->>'fromPiResult' = 'true'
                   AND f.fact->>'agentId' = f.source->'resource'->>'agentId'
                   AND f.fact->>'submissionId' = f.source->>'submissionId'
-                UNION ALL
-                SELECT r.source->'resource'->>'agentId', r.source->>'submissionId',
-                  r.message->>'toolCallId', r.message->>'toolName',
-                  r.message->'details'->>'executionId', r.message->'details'->>'capabilityId'
-                FROM raw AS r
-                WHERE r.value->>'kind' IN ('pi.tool-result', 'pi.toolResult') AND r.message->>'role' = 'toolResult'
-                  AND json_typeof(r.message->'content') = 'array'
-                  AND json_typeof(r.message->'details'->'executionId') = 'string'
-                  AND (json_typeof(r.message->'details'->'capabilityId') IS NULL
-                    OR (json_typeof(r.message->'details'->'capabilityId') = 'string'
-                      AND ${nativeId(sql`r.message->'details'->>'capabilityId'`)}))
+                  AND ${derivedToolCallKey(sql`f.fact->>'toolCallKey'`)}
               ) AS r
               WHERE ${nativeId(sql`r.agent_id`)} AND ${nativeId(sql`r.submission_id`)}
-                AND ${nativeId(sql`r.tool_call_id`)} AND ${nativeToolName(sql`r.tool_name`)}
-                AND ${nativeId(sql`r.execution_id`)}
-                AND (r.capability_id IS NULL OR ${nativeId(sql`r.capability_id`)})),
-            native_inventory AS MATERIALIZED (
-              SELECT count(*)::integer AS "scopedNativeRows",
-                count(*) FILTER (WHERE entry->'metricProjection' IS NULL
-                  AND value->'model'->0->>'role' = 'toolResult')::integer AS "rawRoleToolResults",
-                count(*) FILTER (WHERE value->>'kind' = 'pi.assistant')::integer AS "scopedPiAssistants",
-                count(*) FILTER (WHERE value->>'kind' = 'pi.assistant'
-                  AND entry->'metricProjection'->>'supported' = 'true')::integer AS "supportedPiAssistants",
-                count(*) FILTER (WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult'))::integer AS "scopedPiToolResults",
-                count(*) FILTER (WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult')
-                  AND entry->'metricProjection' IS NOT NULL)::integer AS "compactedPiToolResults",
-                count(*) FILTER (WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult')
-                  AND entry->'metricProjection'->>'supported' = 'true')::integer AS "supportedPiToolResults"
-              FROM native),
-            projected_inventory AS MATERIALIZED (
-              SELECT count(*)::integer AS "projectedPiToolResults",
-                count(*) FILTER (WHERE ${nativeId(sql`source->'resource'->>'agentId'`)})::integer AS "resultAgentIdsAccepted",
-                count(*) FILTER (WHERE ${nativeId(sql`source->>'submissionId'`)})::integer AS "resultSubmissionIdsAccepted",
-                count(*) FILTER (WHERE json_typeof(fact->'id') = 'string')::integer AS "resultCallIdsAccepted",
-                count(*) FILTER (WHERE ${nativeToolName(sql`fact->>'toolName'`)})::integer AS "resultNamesAccepted",
-                count(*) FILTER (WHERE fact->>'agentId' IS NOT NULL)::integer AS "resultLinkIdentityAccepted",
-                count(*) FILTER (WHERE json_typeof(fact->'capabilityId') = 'string')::integer AS "projectedCapabilityIds",
-                count(*) FILTER (WHERE json_typeof(fact->'executionId') = 'string')::integer AS "projectedExecutionIds"
-              FROM compact
-              WHERE value->>'kind' IN ('pi.tool-result', 'pi.toolResult')
-                AND fact->>'type' = 'tool' AND fact->>'phase' = 'result'
-                AND fact->>'fromPiResult' = 'true'),
-            call_inventory AS MATERIALIZED (
-              SELECT count(*)::integer AS "projectedPiToolCalls",
-                count(*) FILTER (WHERE ${nativeId(sql`source->'resource'->>'agentId'`)})::integer AS "callAgentIdsAccepted",
-                count(*) FILTER (WHERE ${nativeId(sql`source->>'submissionId'`)})::integer AS "callSubmissionIdsAccepted",
-                count(*) FILTER (WHERE json_typeof(fact->'id') = 'string')::integer AS "callIdsAccepted",
-                count(*) FILTER (WHERE ${nativeToolName(sql`fact->>'toolName'`)})::integer AS "callNamesAccepted",
-                count(*) FILTER (WHERE fact->>'agentId' IS NOT NULL)::integer AS "callLinkIdentityAccepted"
-              FROM compact
-              WHERE value->>'kind' = 'pi.assistant'
-                AND fact->>'type' = 'tool' AND fact->>'phase' = 'start'
-                AND fact->>'fromPiCall' = 'true'),
-            link_inventory AS MATERIALIZED (
-              SELECT (SELECT count(*)::integer FROM calls) AS "linkableToolCalls",
-                (SELECT count(*)::integer FROM results) AS "linkableToolResults")
-          SELECT page.ordinal::integer AS "index",
-            ${bounded(sql`page.fact->>'executionId'`, 128)} AS "executionId",
-            ${bounded(sql`page.fact->>'source'`, 24)} AS "billingSource",
-            ${bounded(sql`page.fact->>'status'`, 32)} AS status,
-            ${number(sql`page.fact`, "chargedCredits")} AS "chargedCredits",
-            (SELECT count(*)::integer FROM json_array_elements(body.snapshot->'billingSettlements') AS duplicate(value)
-              WHERE page.fact->>'executionId' IS NOT NULL AND page.fact->>'executionId' <> ''
-                AND duplicate.value->>'executionId' = page.fact->>'executionId') AS "executionMatches",
+                AND ${nativeToolName(sql`r.tool_name`)}
+                AND ${nativeId(sql`r.execution_id`)})
+          SELECT ${chargeFields},
+            CASE WHEN json_typeof(page.fact->'actionId') = 'string'
+              AND ${displayActionId(sql`page.fact->>'actionId'`)}
+              THEN page.fact->>'actionId' END AS "actionId",
+            coalesce(json_typeof(page.fact->'actionId') = 'string'
+              AND char_length(page.fact->>'actionId') > 0, false) AS "actionIdPresent",
             link.matches AS "linkMatches",
             link.calls AS "toolCallMatches", link.named AS "namedToolCallMatches",
             link.results AS "resultCallMatches",
             ${bounded(sql`link.tool_name`, 96)} AS "toolName",
-            ${bounded(sql`link.capability_id`, 128)} AS "capabilityId",
             EXISTS (SELECT 1 FROM native AS old
-              WHERE old.entry->'metricProjection' IS NOT NULL
-                AND old.entry->'metricProjection'->>'chargeLinkVersion' IS DISTINCT FROM '1') AS "legacyCompact",
-            CASE WHEN json_typeof(body.snapshot->'nativeRecords') = 'array'
-              THEN json_array_length(body.snapshot->'nativeRecords') END AS "snapshotNativeRows",
-            native_inventory."scopedNativeRows", native_inventory."rawRoleToolResults",
-            native_inventory."scopedPiAssistants", native_inventory."supportedPiAssistants",
-            native_inventory."scopedPiToolResults", native_inventory."compactedPiToolResults",
-            native_inventory."supportedPiToolResults",
-            call_inventory."projectedPiToolCalls", call_inventory."callAgentIdsAccepted",
-            call_inventory."callSubmissionIdsAccepted", call_inventory."callIdsAccepted",
-            call_inventory."callNamesAccepted", call_inventory."callLinkIdentityAccepted",
-            projected_inventory."projectedPiToolResults", projected_inventory."resultAgentIdsAccepted",
-            projected_inventory."resultSubmissionIdsAccepted", projected_inventory."resultCallIdsAccepted",
-            projected_inventory."resultNamesAccepted", projected_inventory."resultLinkIdentityAccepted",
-            projected_inventory."projectedCapabilityIds", projected_inventory."projectedExecutionIds",
-            link_inventory."linkableToolCalls", link_inventory."linkableToolResults"
-          FROM page CROSS JOIN body CROSS JOIN native_inventory CROSS JOIN projected_inventory
-          CROSS JOIN call_inventory CROSS JOIN link_inventory
+              WHERE old.entry->'metricProjection' IS NULL
+                OR old.entry->'metricProjection'->>'chargeLinkVersion'
+                  IS DISTINCT FROM ${String(NATIVE_CHARGE_LINK_VERSION)}) AS "legacyCompact"
+          FROM page CROSS JOIN body
           CROSS JOIN LATERAL (
             SELECT count(*)::integer AS matches, min(result.tool_name) AS tool_name,
-              min(result.capability_id) AS capability_id,
               coalesce(max(call_count.matches), 0) AS calls,
               coalesce(max(call_count.named), 0) AS named,
               coalesce(max(result_count.matches), 0) AS results
@@ -510,12 +465,12 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
                 count(*) FILTER (WHERE call.tool_name = result.tool_name)::integer AS named
               FROM calls AS call
               WHERE call.agent_id = result.agent_id AND call.submission_id = result.submission_id
-                AND call.tool_call_id = result.tool_call_id
+                AND call.tool_call_key = result.tool_call_key
             ) AS call_count
             CROSS JOIN LATERAL (
               SELECT count(*)::integer AS matches FROM results AS duplicate
               WHERE duplicate.agent_id = result.agent_id AND duplicate.submission_id = result.submission_id
-                AND duplicate.tool_call_id = result.tool_call_id
+                AND duplicate.tool_call_key = result.tool_call_key
             ) AS result_count
             WHERE result.execution_id = page.fact->>'executionId'
           ) AS link ORDER BY page.ordinal`);

@@ -5,7 +5,6 @@ import {
   type AgentResourceSnapshot,
   type AgentResourceSnapshotDownload,
   type AgentResourceSnapshotPage,
-  type JsonValue,
   type EvaluationRecord,
   type Sampling,
 } from "@eval-platform/eval-contracts";
@@ -61,7 +60,11 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const attemptId = crypto.randomUUID();
     const scope = { chatId, submissionId, idempotencyKey: `execution:${samplingId}` };
     const native = await compactNativeTrajectoryRecord(nativeFixture(3, chatId, submissionId), scope);
-    const call = await compactNativeTrajectoryRecord(nativeFixture(6, chatId, submissionId), scope);
+    const assistant = nativeFixture(6, chatId, submissionId);
+    if (assistant.record.record.type !== "entry") throw new Error("Expected a SAFE Tool Call");
+    const callMessage = (assistant.record.record.value.model as Record<string, unknown>[])[0]!;
+    (callMessage.content as Record<string, unknown>[]).find((block) => block.type === "toolCall")!.id = "call_1|fc_1";
+    const call = await compactNativeTrajectoryRecord(assistant, scope);
     const toolResult = nativeFixture(10, chatId, submissionId);
     if (toolResult.record.record.type !== "entry") throw new Error("Expected a SAFE Tool Result");
     (toolResult.record.record.value as { kind: string }).kind = "pi.tool-result";
@@ -69,6 +72,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       executionId: "88888888-8888-4888-8888-888888888888", capabilityId: "capability-1",
       arguments: "private Tool arguments", credential: "private-key",
     };
+    (toolResult.record.record.value.model as Record<string, unknown>[])[0]!.toolCallId = "call_1|fc_1";
     const result = await compactNativeTrajectoryRecord(toolResult, scope);
     const summary = {
       scope, observedAt: "2026-10-28T00:00:00.000Z", finalized: true,
@@ -87,7 +91,8 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
         yield { stream: "billingSettlements", records: [{ eventId: "usage-1", accountId: owner,
           status: "settled", debitedUnits: 1 }] };
         yield { stream: "billingSettlements", records: [{ source: "action",
-          executionId: "88888888-8888-4888-8888-888888888888", status: "succeeded", chargedCredits: 7 }] };
+          executionId: "88888888-8888-4888-8888-888888888888", actionId: "action.exa.search",
+          status: "succeeded", chargedCredits: 7 }] };
       },
       dispose: async () => undefined,
     };
@@ -117,23 +122,14 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     });
     expect(actions).toMatchObject({ total: 1, rows: [{
       executionId: "88888888-8888-4888-8888-888888888888", chargedCredits: "7",
-      billingSource: "action",
+      billingSource: "action", actionId: "action.exa.search", actionIdPresent: true,
       executionMatches: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
-      resultCallMatches: 1, legacyCompact: false, toolName: "search", capabilityId: "capability-1",
-      snapshotNativeRows: 3, scopedNativeRows: 3, rawRoleToolResults: 0,
-      scopedPiAssistants: 1, supportedPiAssistants: 1,
-      scopedPiToolResults: 1, compactedPiToolResults: 1, supportedPiToolResults: 1,
-      projectedPiToolCalls: 1, callAgentIdsAccepted: 1, callSubmissionIdsAccepted: 1,
-      callIdsAccepted: 1, callNamesAccepted: 1, callLinkIdentityAccepted: 1,
-      projectedPiToolResults: 1, resultAgentIdsAccepted: 1, resultSubmissionIdsAccepted: 1,
-      resultCallIdsAccepted: 1, resultNamesAccepted: 1, resultLinkIdentityAccepted: 1,
-      projectedCapabilityIds: 1, projectedExecutionIds: 1,
-      linkableToolCalls: 1, linkableToolResults: 1,
+      resultCallMatches: 1, legacyCompact: false, toolName: "search",
     }] });
-    expect(JSON.stringify(actions)).not.toMatch(/private Tool arguments|private-key|credential|chatId|agentId|toolCallId/u);
+    expect(JSON.stringify(actions)).not.toMatch(/private Tool arguments|private-key|capabilityId|credential|chatId|agentId|toolCallId/u);
   });
 
-  it("matches old raw object Tool Results without hydrating them, but never invents links for old compact rows", async () => {
+  it("requires a unique same-actor, same-Submission and same-name v2 link for each Action charge", async () => {
     const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }] });
     const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
     const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, {
@@ -144,45 +140,84 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const chatId = crypto.randomUUID();
     const submissionId = crypto.randomUUID();
     const attemptId = crypto.randomUUID();
-    const native = [0, 1, 2, 3, 4].flatMap((index) =>
-      nativeToolBodyPair(chatId, submissionId, "private-business-body", "api.search", index));
+    const native = Array.from({ length: 6 }, (_, index) => {
+      const pair = nativeToolBodyPair(chatId, submissionId, "private-business-body", "lookup", index);
+      const call = pair[0]!;
+      const result = pair[1]!;
+      if (call.record.record.type !== "entry" || result.record.record.type !== "entry") throw new Error("Expected Pi entries");
+      const callId = index === 0 ? "call_1|fc_1" : index === 5 ? "[REDACTED]" : `call_${index}|fc_${index}`;
+      ((call.record.record.value.model as Record<string, unknown>[])[0]!.content as Record<string, unknown>[])[0]!.id = callId;
+      const message = (result.record.record.value.model as Record<string, unknown>[])[0]!;
+      message.toolCallId = callId;
+      message.details = { executionId: `action-${index}`, capabilityId: "capability-1" };
+      if (index === 1) (result.record.resource as { agentId: string }).agentId = "other-agent";
+      if (index === 2) Object.assign(result.record, { submissionId: "child-submission",
+        parent: { resource: { agentId: "agent-1", sessionId: chatId }, submissionId } });
+      if (index === 3) message.toolName = "other";
+      return pair;
+    }).flat();
+    const duplicate = nativeToolBodyPair(chatId, submissionId, "private-business-body", "lookup", 6)[0]!;
+    if (duplicate.record.record.type !== "entry") throw new Error("Expected duplicate Pi Call");
+    ((duplicate.record.record.value.model as Record<string, unknown>[])[0]!.content as Record<string, unknown>[])[0]!.id =
+      "call_4|fc_4";
+    const scope = { chatId, submissionId, idempotencyKey: `execution:${samplingId}` };
+    const snapshot: AgentResourceSnapshot = {
+      scope, observedAt: "2026-11-02T00:00:00.000Z", finalized: true,
+      coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+      usageEvents: [], nativeRecords: [...native, duplicate],
+      billingSettlements: Array.from({ length: 6 }, (_, index) => ({
+        source: "action", executionId: `action-${index}`, actionId: `action.ledger-${index}`,
+        status: "succeeded", chargedCredits: 7,
+      })),
+    };
+    const compacted = await compactResourceSnapshot(snapshot);
+    expect(JSON.stringify(compacted)).not.toMatch(/call_1\|fc_1|call_4\|fc_4|private-business-body|toolCallId/u);
+    const original = (await store.getSampling(samplingId))!;
+    await store.updateSampling({
+      ...original, subjectChatId: chatId, execution: { status: "succeeded" },
+      executionAttempts: [{ executionAttemptId: attemptId, samplingId, attemptNumber: 1,
+        status: "completed", submissionId, resources: { status: "collected", summary: summarizeResourceSnapshot(compacted) } }],
+    }, original, { attemptId, snapshot: compacted });
+    const page = await createPostgresResourceSnapshotReader(database.db, owner).readCaseUsage({
+      projectId: seeded.projectId, samplingId, role: "execution", section: "actions", attemptId, page: 1, pageSize: 10,
+    });
+    expect(page).toMatchObject({ total: 6, rows: [
+      { executionMatches: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
+        resultCallMatches: 1, toolName: "lookup", actionId: "action.ledger-0" },
+      { executionMatches: 1, linkMatches: 1, toolCallMatches: 0, namedToolCallMatches: 0 },
+      { executionMatches: 1, linkMatches: 1, toolCallMatches: 0, namedToolCallMatches: 0 },
+      { executionMatches: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 0 },
+      { executionMatches: 1, linkMatches: 1, toolCallMatches: 2, namedToolCallMatches: 2 },
+      { executionMatches: 1, linkMatches: 0 },
+    ] });
+    expect(JSON.stringify(page)).not.toMatch(/call_1\|fc_1|call_4\|fc_4|capabilityId|toolCallKey|toolCallId/u);
+  });
+
+  it("shows old raw and v1 compact charges without attributing them to Tools", async () => {
+    const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }] });
+    const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
+    const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, {
+      projectId: seeded.projectId, operation: "execution",
+    });
+    await store.admitRun(command);
+    const samplingId = command.run.samplingIds[0]!;
+    const chatId = crypto.randomUUID();
+    const submissionId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    const native = nativeToolBodyPair(chatId, submissionId, "private-business-body", "api.search");
     const toolResult = native[1]!;
     if (toolResult.record.record.type !== "entry") throw new Error("Expected Pi result");
     (toolResult.record.record.value as { kind: string }).kind = "pi.tool-result";
     (toolResult.record.record.value.model as Record<string, unknown>[])[0]!.details = {
       executionId: "action-1", capabilityId: "capability-1", response: "private-response",
     };
-    for (const index of [3, 5]) {
-      const entry = native[index]!;
-      if (entry.record.record.type !== "entry") throw new Error("Expected Pi result");
-      (entry.record.record.value.model as Record<string, unknown>[])[0]!.details = {
-        executionId: "action-shared", capabilityId: "capability-shared",
-      };
-    }
-    const mismatch = native[7]!;
-    if (mismatch.record.record.type !== "entry") throw new Error("Expected Pi result");
-    const mismatchMessage = (mismatch.record.record.value.model as Record<string, unknown>[])[0]!;
-    mismatchMessage.toolName = "api.other";
-    mismatchMessage.details = { executionId: "action-mismatch", capabilityId: "capability-other" };
-    const foreign = native[9]!;
-    if (foreign.record.record.type !== "entry") throw new Error("Expected Pi result");
-    (foreign.record.record.value.model as Record<string, unknown>[])[0]!.details = {
-      executionId: "action-foreign", capabilityId: "capability-foreign",
-    };
-    native[9] = { ...foreign, record: { ...foreign.record,
-      resource: { ...foreign.record.resource, agentId: "agent-2" } } };
     const snapshot: AgentResourceSnapshot = {
       scope: { chatId, submissionId, idempotencyKey: `execution:${samplingId}` },
       observedAt: "2026-11-02T00:00:00.000Z", finalized: true,
       coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
       usageEvents: [], nativeRecords: native, billingSettlements: [
-        { source: "action", executionId: "action-1", status: "succeeded", chargedCredits: 7 },
-        { source: "action", executionId: "action-missing", status: "failed", chargedCredits: 0 },
-        { source: "action", executionId: "action-duplicate", status: "succeeded", chargedCredits: 2 },
-        { source: "action", executionId: "action-duplicate", status: "succeeded", chargedCredits: 2 },
-        { source: "action", executionId: "action-shared", status: "succeeded", chargedCredits: 3 },
-        { source: "action", executionId: "action-mismatch", status: "succeeded", chargedCredits: 4 },
-        { source: "action", executionId: "action-foreign", status: "succeeded", chargedCredits: 5 },
+        { source: "action", executionId: "action-1", actionId: "action.from-ledger",
+          status: "succeeded", chargedCredits: 7 },
       ],
     };
     const original = (await store.getSampling(samplingId))!;
@@ -193,42 +228,87 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     }, original, { attemptId, snapshot });
     const reader = createPostgresResourceSnapshotReader(database.db, owner);
     const base = { projectId: seeded.projectId, samplingId, role: "execution" as const,
-      section: "actions" as const, attemptId, page: 1, pageSize: 10 };
-    const raw = await reader.readCaseUsage(base);
-    expect(raw).toMatchObject({ total: 7, rows: [
-      { index: 1, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 1,
-        resultCallMatches: 1, toolName: "api.search", capabilityId: "capability-1", legacyCompact: false,
-        snapshotNativeRows: 10, scopedNativeRows: 10, rawRoleToolResults: 5,
-        scopedPiAssistants: 5, supportedPiAssistants: 0,
-        scopedPiToolResults: 5, compactedPiToolResults: 0, supportedPiToolResults: 0,
-        projectedPiToolCalls: 0, callAgentIdsAccepted: 0, callSubmissionIdsAccepted: 0,
-        callIdsAccepted: 0, callNamesAccepted: 0, callLinkIdentityAccepted: 0,
-        projectedPiToolResults: 0, resultAgentIdsAccepted: 0, resultSubmissionIdsAccepted: 0,
-        resultCallIdsAccepted: 0, resultNamesAccepted: 0, resultLinkIdentityAccepted: 0,
-        projectedCapabilityIds: 0, projectedExecutionIds: 0, linkableToolCalls: 5, linkableToolResults: 5 },
-      { index: 2, linkMatches: 0, legacyCompact: false },
-      { index: 3, executionMatches: 2, legacyCompact: false },
-      { index: 4, executionMatches: 2, legacyCompact: false },
-      { index: 5, linkMatches: 2, legacyCompact: false },
-      { index: 6, linkMatches: 1, toolCallMatches: 1, namedToolCallMatches: 0, legacyCompact: false },
-      { index: 7, linkMatches: 1, toolCallMatches: 0, legacyCompact: false },
+      section: "actions" as const, attemptId, page: 1, pageSize: 1 };
+    expect(await reader.readCaseUsage(base)).toMatchObject({ total: 1, rows: [
+      { chargedCredits: "7", executionMatches: 1, actionId: "action.from-ledger",
+        linkMatches: 0, legacyCompact: true, toolName: null },
     ] });
-    expect(JSON.stringify(raw)).not.toMatch(/private-business-body|private-response|chatId|agentId|toolCallId/u);
-    const previouslyCompacted = await compactResourceSnapshot(snapshot);
-    const oldRecords = previouslyCompacted.nativeRecords.map((entry) => {
-      const { chargeLinkVersion: _charge, facts, ...projection } = entry.metricProjection!;
-      return { ...entry, metricProjection: { ...projection,
-        facts: (facts as readonly Readonly<Record<string, JsonValue>>[]).map(({ executionId: _execution,
-          capabilityId: _capability, agentId: _agent, submissionId: _submission, toolCallId: _call, ...fact }) => fact) } };
-    });
-    const old: AgentResourceSnapshot = { ...snapshot, nativeRecords: oldRecords };
+    const compacted = await compactResourceSnapshot(snapshot);
+    const old: AgentResourceSnapshot = { ...snapshot, nativeRecords: compacted.nativeRecords.map((entry) =>
+      ({ ...entry, metricProjection: { ...entry.metricProjection!, chargeLinkVersion: 1 } })) };
     const saved = (await store.getSampling(samplingId))!;
     await store.updateSampling({ ...saved, executionAttempts: [{ ...saved.executionAttempts[0]!,
       resources: { status: "collected", summary: summarizeResourceSnapshot(old) } }] }, saved,
     { attemptId, snapshot: old });
-    expect(await reader.readCaseUsage({ ...base, pageSize: 1 })).toMatchObject({
-      rows: [{ linkMatches: 0, legacyCompact: true, toolName: null, capabilityId: null }],
+    expect(await reader.readCaseUsage(base)).toMatchObject({
+      rows: [{ actionId: "action.from-ledger", linkMatches: 0, legacyCompact: true, toolName: null }],
     });
+  });
+
+  it("reads only owner-scoped, source-specific receipts without borrowing model debits or SAFE Action IDs", async () => {
+    const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }] });
+    const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
+    const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, {
+      projectId: seeded.projectId, operation: "execution",
+    });
+    await store.admitRun(command);
+    const samplingId = command.run.samplingIds[0]!;
+    const attemptId = crypto.randomUUID();
+    const chatId = crypto.randomUUID();
+    const submissionId = crypto.randomUUID();
+    // This exercises the independent Attempt Store/SQL reader. The installed
+    // alpha.9 Header and paged collection are covered by the Harness tests.
+    const snapshot: AgentResourceSnapshot = {
+      scope: { chatId, submissionId, idempotencyKey: `execution:${samplingId}` },
+      observedAt: "2026-11-02T00:00:00.000Z", finalized: true,
+      coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+      usageEvents: [{ eventId: "usage-1", kind: "assistant_model" }], nativeRecords: [],
+      billingSettlements: [
+        { eventId: "usage-1", accountId: owner, status: "settled", debitedUnits: 3 },
+        { source: "action", executionId: "execution-1", actionId: "action.exa.search",
+          status: "succeeded", chargedCredits: 7 },
+        { source: "tool", executionId: "execution-1", status: "succeeded", chargedCredits: 4.5 },
+        { source: "action", executionId: "execution-duplicate", actionId: "action.first",
+          status: "succeeded", chargedCredits: 2 },
+        { source: "action", executionId: "execution-duplicate", actionId: "action.second",
+          status: "failed", chargedCredits: 5 },
+        { source: "action", executionId: "execution-missing", status: "failed", chargedCredits: 0 },
+        { source: "action", executionId: "execution-unsafe", actionId: "Bearer private-credential",
+          status: "succeeded", chargedCredits: 9 },
+        { source: "tool", eventId: "usage-1", status: "succeeded", chargedCredits: 99 },
+        { source: "connector", eventId: "usage-1", executionId: "execution-other",
+          actionId: "action.forged", status: "succeeded", chargedCredits: 999 },
+        { source: "action", executionId: "private-prompt-execution",
+          actionId: "action.exa.search", status: "succeeded", chargedCredits: 42 },
+      ],
+    };
+    const original = (await store.getSampling(samplingId))!;
+    await store.updateSampling({
+      ...original, subjectChatId: chatId, execution: { status: "succeeded" },
+      executionAttempts: [{ executionAttemptId: attemptId, samplingId, attemptNumber: 1, status: "completed",
+        submissionId, resources: { status: "collected", summary: summarizeResourceSnapshot(snapshot) } }],
+    }, original, { attemptId, snapshot });
+    const reader = createPostgresResourceSnapshotReader(database.db, owner);
+    const base = { projectId: seeded.projectId, samplingId, role: "execution" as const,
+      runId: command.run.runId, attemptId, page: 1, pageSize: 10 };
+    expect(await reader.readCaseUsage({ ...base, section: "actions" })).toMatchObject({ total: 6, rows: [
+      { index: 2, billingSource: "action", executionId: "execution-1", executionMatches: 1,
+        actionId: "action.exa.search", actionIdPresent: true, chargedCredits: "7", linkMatches: 0 },
+      { index: 4, executionId: "execution-duplicate", executionMatches: 2, actionId: "action.first" },
+      { index: 5, executionId: "execution-duplicate", executionMatches: 2, actionId: "action.second" },
+      { index: 6, executionId: "execution-missing", executionMatches: 1, actionId: null, actionIdPresent: false },
+      { index: 7, executionId: "execution-unsafe", executionMatches: 1, actionId: null, actionIdPresent: true },
+      { index: 10, executionId: null, executionMatches: 1, actionId: "action.exa.search" },
+    ] });
+    expect(await reader.readCaseUsage({ ...base, section: "tools" })).toMatchObject({ total: 2, rows: [
+      { index: 3, billingSource: "tool", executionId: "execution-1", executionMatches: 1, chargedCredits: "4.5" },
+      { index: 8, billingSource: "tool", executionId: null, executionMatches: 0, chargedCredits: "99" },
+    ] });
+    expect(await reader.readCaseUsage({ ...base, section: "models" })).toMatchObject({ total: 1, rows: [
+      { index: 1, eventId: "usage-1", settlementMatches: 1, debitedUnits: "3" },
+    ] });
+    await expect(createPostgresResourceSnapshotReader(database.db, "other-owner")
+      .readCaseUsage({ ...base, section: "actions" })).rejects.toMatchObject({ code: "SAMPLING_NOT_FOUND" });
   });
 
   it("collects public SP pages through Runtime into the PostgreSQL Attempt", async () => {

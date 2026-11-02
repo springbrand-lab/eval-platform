@@ -3,18 +3,20 @@
 ## Pi-native SP seam (new runs)
 
 The service-authenticated SP Harness consumes SP's **public**
-`@springbrand/eval-harness@0.1.0-alpha.7` wire for the supported finalized
-reads. The coordinated producer implements
+`@springbrand/eval-harness@0.1.0-alpha.9` wire for finalized and explicitly
+opted-in partial reads. The coordinated producer implements
 `sp-pi-trajectory/v1` pages with a frozen `cursor.throughSeq` and safe
 `pi-trajectory/v1` records or an explicit oversized-record reference, and
 resource snapshots carrying `nativeRecords` instead of `telemetryEvents`.
-The npm-published alpha.7 artifact is pinned exactly and its installed public
-schemas validate evidence and resource headers/pages. It does **not** export
-`allowPartial` request types, readers, or path helpers (nor the partial billing
-`throughSeq` and record-byte `resourceKey` binding). The explicit post-wait
-partial query extension below remains unverified structural HTTP behavior.
-Do not deploy this cutover or claim cross-deployment parity until SP publishes
-the missing partial contract and actual service responses are verified. No
+The npm-published alpha.9 artifact is pinned exactly. Its installed schemas
+validate evidence and resource pages, require `actionId` on SP Action receipts
+and reject Action/Tool identities in model billing pages. EP uses its published
+partial route and reference-byte builders; it does not cast or duplicate the
+HTTP schema, put Action IDs on model billing pages, or read an SP private
+database. Local collection tests verify this installed contract, not the
+independently deployed SP API/Agent or a real PostgreSQL transaction.
+Do not claim cross-deployment parity until those deployments and reads are
+verified. No
 legacy event decoding or DO storage access is used. Existing
 version 1 manifest bytes/refs, resource bytes and scores remain untouched;
 old event-only evidence may not be readable with this new code.
@@ -77,28 +79,35 @@ is still pending; an opted-in read retains only verified facts, with
 than invented zero usage or complete billing. Historical raw resource rows
 and v1/v2 evidence bytes are not migrated.
 
-For new paged snapshots, validated SAFE Pi Tool Result
-`details.executionId`/`capabilityId` and bounded actor, Submission and Tool
-Call identities enter compact facts only when the Tool name is safe for a
-charge link. The Action join accepts SP's `pi.tool-result` and historical
-`pi.toolResult` with the same role/ID/name checks. Existing Metrics facts
-still preserve SAFE source Tool labels (including Unicode); an unsuitable
-label cannot establish a charge link.
-The large-reference byte scanner applies the same link allowlist after
-verifying the complete source digest and scope. No Tool arguments, Result
-body or arbitrary `details` enter the new link facts; the independent SP
-Action charge remains the only billed amount.
+For new paged snapshots, a validated SAFE Pi Tool Result's
+`details.executionId`, bounded actor/Submission, and a version-2
+**derived** `toolCallKey` enter compact facts only when the Tool name
+is safe for an **optional Tool association**. `details.capabilityId`
+never becomes a compact fact or an Action identity. The Tool Call/Result raw ID follows UA's
+nonempty-string contract (including Responses `call_1|fc_1`); at the single
+Metrics input seam it is hashed into a fixed-length scope-bound key, never
+stored as a raw compact field or returned to MCP/logs. PostgreSQL checks
+only this derived key's `tck2_` + SHA-256 shape, never revalidates the raw
+UA ID. It joins one Call and one Result on the same key, actor, Submission
+and Tool name, with unique execution ID. Historical raw and v1 compact
+records are not used for Action-to-Tool association.
+The Action join accepts SP's `pi.tool-result` and historical `pi.toolResult`
+with the same role/name/actor checks. Existing Metrics facts still preserve
+SAFE source Tool labels (including Unicode); an unsuitable label cannot
+establish a charge link. The large-reference byte scanner applies the same
+input seam after verifying the complete source digest and scope. No Tool
+arguments, Result body or arbitrary `details` enter the new link facts; the
+independent SP `source:"action"` receipt alone supplies the Action ID and
+its charged credits, even when no Tool Result exists.
 
-**Release blocker:** The installed npm alpha.7 publishes finalized header,
-native/billing page, evidence and record-byte schemas/paths, but not the
-post-wait partial route/query contract. Its billing builder rejects
-`allowPartial`/`throughSeq`, while its other builders omit partial parameters.
-Local mock tests still exercise the explicit opt-in; they are **not** proof that
-the pinned SP artifact or a deployed SP accepts it. An isolated PostgreSQL 18.3
+**Release gate:** Installed npm alpha.9 owns the Action-ID receipt and post-wait
+partial route/query contract, including billing `throughSeq` and byte
+`resourceKey`. Local mock tests use those public builders; they are **not**
+proof that deployed SP accepts the same version. An isolated PostgreSQL 18.3
 regression now verifies the paged Harness → Runtime → Attempt Store transaction,
 including typed `json_build_object` parameters; the old untyped SQL fails with
-`42P18` before saving any resource snapshot. Publish a compatible public partial
-API and verify real deployed SP+API reads before end-to-end parity or release.
+`42P18` before saving any resource snapshot. Verify real deployed SP+API reads
+and a current PostgreSQL run before end-to-end parity or release.
 No SP private source is imported.
 
 内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。设计见 [Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
@@ -129,25 +138,28 @@ This slice advertises **only nineteen** management tools; catalog `page` default
 | `get_run` | `{runId, page?, pageSize?}` | Status/phase/operation, ID counts and one page of Sampling/Evaluation IDs, not full records. |
 | `get_metrics` | `{projectId, runId?, scope:"project" \| "dataset" \| "sample" \| "sampling", datasetId?, projectSampleId?, samplingId?, section?:"overview"\|"samples"\|"tools"\|"fields", role?:"execution"\|"evaluation", page?, pageSize?, toolPage?, toolPageSize?, numericPointer?, evaluationId?, resultOffset?}` | Without `runId`, **every scope** reads currently retained owner-scoped Project facts (`runScope:"project_current"`), not a latest-Run score. With `runId`, the exact-Run filter (`runScope:"exact_run",runId`) still requires current membership after replacement. Exactly the matching scope ID is required. **Breaking default for Project/Dataset:** omitted `section` means `"overview"` rather than the old combined summary+samples+both roles' Tools+fields. No second combined Project response exists. Those scopes return only `{scope,section,project,runScope,runId?}` (Dataset adds `datasetId`) plus their section's payload: `summary` for overview (complete counts/stages including Attempt status/duration, role-separated coverage/cache/tokens/costs/success, output coverage/validation, already-available frozen `evaluationOutputs.schema:{outputSchemaId,digest}|null`, selected numeric `evaluationOutputs.scoreField`, and `evaluationOutputs.fields.total`, **no item lists/byTool**); `projectSamples` and (for Project) `datasets` for samples (with each Sample's existing `scoreIndex` and paged Sampling IDs); **one** `executionAgent` or `evaluationAgents` `{byTool:{page,pageSize,total,items}}` for tools, selected by the required `role`; or `evaluationOutputs:{fields:{page,pageSize,total,items}}` for fields (only numeric/boolean/enum Metrics fields; plain free text does not count). `page/pageSize` apply to samples/fields, `toolPage/toolPageSize` only to tools (default 1/2, max 5); `numericPointer` (default `/score`) selects the overview's overall `scoreField` or Sample rows' `scoreIndex.field` in samples, but is forbidden for tools/fields/Sample/Sampling. `role` is only valid for tools. Per-Tool rates and scores are forwarded from existing Metrics, not recomputed. `scope:"sample"` and `"sampling"` (including selected-only `evaluationId`/`resultOffset` response) retain their existing contract; they do not accept `section` or `role`. |
 | `inspect_case` | `{projectId, runId?, samplingId, evaluationId?}` | Without `runId`, requires a **current** owned Sampling (and selected Evaluation, if any) in that Project. With `runId`, requires the original exact Run/Sampling/Evaluation membership **and** current members. Returns bounded Sampling/Subject resource Metrics, selected Evaluator Metrics, result excerpt and internal evidence references. It does not return trajectory bytes or a continuation cursor. The existing Project Metrics toolSuccessRate, cache/tokens and ID drilldown are unchanged. |
-| `get_case_usage` | `{projectId,samplingId,role:"execution"|"evaluation",evaluationId?,runId?,section?:"attempts"|"models"|"actions",attemptId?,page?,pageSize?}` | **Read-only, current owned Sampling**, `evaluationId` required exactly for `role:"evaluation"`; optional `runId` additionally requires current membership in that exact Run. `section` defaults to `"attempts"` and forbids `attemptId`; `"models"`/`"actions"` require an `attemptId` selected from the Attempt list. `page` defaults to 1 (max 10,000), `pageSize` to 5 (max 10). No prompt, Chat/account ID, raw snapshot, native record, Tool arguments or credential is returned. See the exact projection below. |
+| `get_case_usage` | `{projectId,samplingId,role:"execution"|"evaluation",evaluationId?,runId?,section?:"attempts"|"models"|"actions"|"tools",attemptId?,page?,pageSize?}` | **Read-only, current owned Sampling**, `evaluationId` required exactly for `role:"evaluation"`; optional `runId` additionally requires current membership in that exact Run. `section` defaults to `"attempts"` and forbids `attemptId`; `"models"`/`"actions"`/`"tools"` require an `attemptId` selected from the Attempt list. `page` defaults to 1 (max 10,000), `pageSize` to 5 (max 10). No prompt, Chat/account ID, raw snapshot, native record, Tool arguments or credential is returned. See the exact projection below. |
 
 Sample and Sampling `get_metrics` summaries now include the same safe execution/evaluation Stage counters and Attempt-duration statistics as the Project overview; they are recalculated for that scope, not apportioned from Project totals.
 For `get_case_usage` with `role:"execution"` and an exact `runId`, the Run must have executed the Subject (`execution` or `pipeline`); an evaluation-only Run may reuse that Sampling but did not incur its Subject debit. Omit `runId` to inspect the current Subject's original Attempts instead.
 
-**Per-Attempt usage contract.** All three sections return `{projectId,samplingId,role,evaluationId?,runScope:"project_current"|"exact_run",runId?,section}`. The list adds `attempts:{page,pageSize,total,items:[{attemptId,attemptNumber,status,resources:{status,finalized,coverage:{usageEvents,nativeRecords,billingSettlements},actionCharges:{complete,unsettledExecutions,missingExecutionIds}}}]}`. Missing resources use `status:"unavailable"`, `finalized:null`, three `"unavailable"` coverages and null Action readiness, not zero. A selected section adds `attempt` (the same metadata), `availability:"available"|"not_collected"|"snapshot_missing"` and `models` or `actions` as `{page,pageSize,total,items}`. `total:null` and `items:[]` mean **no stored snapshot**, not a confirmed empty stream. A stored partial snapshot may report `total:0` observed rows with partial coverage; a complete empty stream proves zero.
+**Per-Attempt usage contract.** All four sections return `{projectId,samplingId,role,evaluationId?,runScope:"project_current"|"exact_run",runId?,section}`. The list adds `attempts:{page,pageSize,total,items:[{attemptId,attemptNumber,status,resources:{status,finalized,coverage:{usageEvents,nativeRecords,billingSettlements},actionCharges:{complete,unsettledExecutions,missingExecutionIds}}}]}`. Missing resources use `status:"unavailable"`, `finalized:null`, three `"unavailable"` coverages and null Action readiness, not zero. A selected section adds `attempt` (the same metadata), `availability:"available"|"not_collected"|"snapshot_missing"` and the selected `models`, `actions` or `tools` page `{page,pageSize,total,items}`. `total:null` and `items:[]` mean **no stored snapshot**, not a confirmed empty stream. A stored partial snapshot may report `total:0` observed rows with partial coverage; a complete empty stream proves zero.
 
-`models.items` are `{index,eventId,kind,provider,model,tokens:{input,output,cacheRead,cacheWrite,reasoning,total},cacheHitRate:{value,coverage},providerUsdEstimate,modelSettlement:{state,status,ratedCredits,debitedCredits,shortfallCredits,platformOwnedCredits}}`. Cache hit rate is `cacheRead/(input+cacheRead)` only with both buckets and a nonzero safe-integer denominator. Each nullable token/cost is an independently observed source field, never inferred from another price; `total` may be the sum of all four valid token buckets when the source omitted its total. Model settlement pairs by **full** eventId within the same snapshot, requiring one usage event, one settlement, an account identity (never displayed) and a supported terminal status; `state` is `"settled"|"partial"|"missing"|"unsettled"|"ambiguous"`. Missing/unsettled/ambiguous amounts are null; `partial` retains only observed amounts when a terminal receipt lacks numeric fields, while anomalous receipts show no credit amount. Provider USD is a source estimate **not** SP-billed credits.
+`models.items` are `{index,eventId,kind,provider,model,tokens:{input,output,cacheRead,cacheWrite,reasoning,total},cacheHitRate:{value,coverage},providerUsdEstimate,modelSettlement:{state,status,ratedCredits,debitedCredits,shortfallCredits,platformOwnedCredits}}`. Cache hit rate is `cacheRead/(input+cacheRead)` only with both buckets and a nonzero safe-integer denominator. Each nullable token/cost is an independently observed source field, never inferred from another price; `total` may be the sum of all four valid token buckets when the source omitted its total. Model settlement pairs by **full** eventId within the same snapshot, requiring one usage event, one API/model-source settlement **without** an execution ID, an account identity (never displayed) and a supported terminal status; `state` is `"settled"|"partial"|"missing"|"unsettled"|"ambiguous"`. Missing/unsettled/ambiguous amounts are null; `partial` retains only observed amounts when a terminal receipt lacks numeric fields, while anomalous receipts show no credit amount. Provider USD is a source estimate **not** SP-billed credits.
 
-`actions.items` are `{index,executionId,status,chargedCredits,chargeState:"observed"|"unconfirmed",toolName,capabilityId,matchState:"matched"|"ambiguous"|"unavailable"|"unknown"}`. The charge still comes **only** from the original SP ledger: a unique executionId, terminal succeeded/failed status and valid numeric charge give `chargeState:"observed"`; otherwise its debit is null, never inferred from a Tool or price. The independent `matchState:"matched"` additionally requires complete native source coverage, exactly one linked SAFE Tool Result and one same-actor/Submission/ToolCall/name Pi Tool Call in this Attempt. A duplicate executionId, linked Result, Tool Call or name conflict is `"ambiguous"`; an absent/invalid link or Call is `"unavailable"`. An older persisted **compact** native record with no charge-link version, or incomplete native source coverage, makes attribution `"unknown"` (even when another Result links); no historical ID is fabricated. Historical **raw object** snapshots can be matched where they still contain validated SAFE Result details. Non-matched states return `toolName:null,capabilityId:null`; a uniquely matched Result without a capability ID returns `capabilityId:null`. No Action/Tool charge is assigned to model usage.
+`actions.items` contain `{index,source:"action",executionId,actionId,actionIdentityState:"identified"|"missing"|"unsafe"|"ambiguous"|"unavailable",status,chargedCredits,chargeState:"observed"|"unconfirmed",toolName,toolMatchState:"matched"|"ambiguous"|"unavailable"|"unknown"}`. Each **individual**, unique, terminal SP `source:"action"` receipt provides both the authoritative `actionId` and the actual `chargedCredits`: an unknown Tool name never hides a known charged Action. A duplicate execution ID is ambiguous, a missing Action ID remains missing, and an unsuitable or unsafe Action ID is **null**, not a redacted substring or a Tool-derived fallback. A valid ID is displayed only when it is a whole bounded `action.*` identifier or UUID that passes the literal/secret checks. An unshowable execution ID also blocks receipt attribution.
+`chargeState:"observed"` requires a unique **same-source** execution ID and a finite, bounded nonnegative numeric charge (including fractions). Succeeded/failed are terminal; `outcome_unknown` is observed only when the Account Log explicitly confirms zero charged Credits. Otherwise `chargedCredits:null`. This does not claim all Action executions were delivered, settled or have Tool Results.
 
-An authenticated Action usage page with unmatched rows emits one `eval_case_action_link_diagnostics` warning. It includes only bounded match-state/Call/Result-link histograms, fixed `action|tool|missing|other` billing-source counts and counts of stored, scope-eligible and compacted native facts from the same read-only snapshot. Re-read the affected Attempt's Action pages to diagnose stored facts without re-running its Agents. `rawRoleToolResults` counts only historical un-compacted rows and is normally zero for compact snapshots. The Call/Result `*Accepted` counts apply the same bounded actor, Submission, Call ID and Tool-name rules to each stored compact fact, without logging any values; compare them with `*LinkIdentityAccepted` and `projectedExecutionIds` to find the first failed gate. When all identities are accepted but the execution ID is absent, this compact snapshot cannot distinguish a missing/unsafe source ID from an invalid capability ID: only authorized SAFE source evidence can. No project/Attempt/account/Chat/Tool/Execution IDs, charged amounts, Tool names, arguments or raw records enter this diagnostic log. A missing persisted compact link cannot be recreated by logging or reading the page again.
+`toolMatchState` is independent of both the Action receipt's ID and its charge. `"matched"` requires complete native coverage, exactly one v2 compact SAFE Tool Result with that execution ID and one same-actor/Submission/derived-key/name Pi Tool Call in this Attempt. Duplicate links, Calls or mismatched names are `"ambiguous"`; absent/invalid links are `"unavailable"`; historical raw/v1 compact records or partial native coverage make **only the optional Tool association** `"unknown"`, not the Action's ledger ID or amount. `toolName` is null unless that Call/Result association is unique and its entire name passes the conservative display/literal checks. SAFE `details.capabilityId` is never projected, queried or used as an Action identity. Old bills without an `actionId` remain `"missing"`; old raw/v1 Tool paths are never revived.
+
+`tools.items` separately contain `{index,source:"tool",executionId,status,chargedCredits,chargeState}` for **Super Link** receipts from the same stored ledger, with the same unique-terminal-charge rule but no `actionId`, `toolName` or SP Action claim. Model settlements remain on `models` alone; no model debit is apportioned to an Action or Tool. Neither page fetches a second service nor combines charges across Attempts. The old Action-link inventory diagnostic log is removed; the page states carry the uncertainty without logging source identities.
 
 Coverage and `actionCharges` readiness remain on each Attempt; an observed line does not claim the entire Attempt is fully settled. IDs/labels are bounded and redacted; source account/Chat/actor/Submission/Tool Call IDs, private metadata and arbitrary JSON keys cannot enter the result. This is an **individual ledger view, not the cross-Attempt Metrics aggregate** (which owns deduplication, overlap and totals). The PostgreSQL JSON column is scanned/expanded server-side per requested page; the API process never hydrates its nativeRecords or entire snapshot. There is no indexed per-event random access, so very large stored Attempts can cost PostgreSQL CPU/memory even for a 5-row page; no global DB work bound or pagination stability under concurrent recollection is promised. Reads of a page and its Attempt/coverage header share a repeatable-read snapshot.
 
 Historical `json` snapshots with an unpaired Unicode surrogate may be stored losslessly but rejected by PostgreSQL's JSON extraction operators; such a selected page fails safely instead of falling back to parsing the entire snapshot in Node. No isolated PostgreSQL run has verified this new projection yet; the local test uses the same temporary-database boundary as other Attempt-resource integration tests.
 An anomalous model settlement is shown with `state:"partial",status:"anomaly"` and null credit amounts even if malformed source data includes numbers; it is never reported as a confirmed debit.
 At the maximum `pageSize:10`, only the first 100,000 rows of a section are addressable (`page<=10000`); `total` still reports the observed stream count, rather than silently claiming the inaccessible tail was read. Larger ledgers need a separately reviewed read mechanism, not a bigger MCP page.
-Each item's `index` is its 1-based ordinal in the stored usage or billing stream. Action pages and `total` count **only Action rows** after filtering, so their indexes can skip over intervening model settlements.
+Each item's `index` is its 1-based ordinal in the stored usage or billing stream. `actions` and `tools` have separate, source-exact totals and pages; their indexes can skip over intervening model or other-source settlements.
 
 **Existing Material/Session discovery:** `list_options` accepts the six exact
 categories `material_bundles`, `session_bundles`, `materials`, `sessions`,
@@ -973,7 +985,7 @@ readiness 与快照请求接收 Runtime 的本地 `AbortSignal`，使用现有 H
 
 `src/sp/harness.ts` 用服务凭证确保 Inbox Chat、初始化、提交/重启、按键校准、收集完整产物/轨迹、分页资源、Evaluator 原样的 `structuredOutput` 结果文件，以及按轨迹读取 Evaluator 最后一条回复（`readFinalReply`）；`sp/submission-observer.ts` 以 WebSocket 终态推送为主，Ping/Pong 检测静默失活，断线后按已知 Submission ID 读取一次权威状态（404 表示 Submission 或 Chat 已不存在，不回退按键读取）并对同一 Submission URL 有限重连；瞬态错误只表示状态未知，预算用尽时抛出可重试的 “status unconfirmed” 错误，健康连接期间不轮询。
 
-资源先经无事件的 readiness 路由等待 SP 定稿；期限内不下载未定稿页面。期限届满后通过 `allowPartial=true` 显式读取冻结的已知 native 页面、配对的 API 计费页面及必要的验证字节，保留 `finalized:false`、`coverage.partial` 与真实计数，不把未知计费记为零。证据读取仍携带 `submissionId` 并保留完整 Chat 轨迹。SP HTTP 请求（含 readiness）默认最多等待 60 秒，停止调用最多等待 10 秒；每个资源页面与证据传输分别最多等待 5 分钟，页面 JSON 限 4 MB，其他 JSON 仍按 V8 最大字符串长度限制。证据/资源 GET 的 `409 EVIDENCE_NOT_READY` 通常可重试，但已请求 partial 页且 SP 仍不支持读取时不会重复消耗下载预算；其他 409 不重试。证据导入流式 PUT 并边传边校验大小与 SHA-256；单个证据文件上限取 `DEFAULT_EVIDENCE_LIMITS` 与已安装的 `@springbrand/eval-harness@0.1.0-alpha.7` 的 `EVAL_EVIDENCE_FILE_MAX_BYTES` 中较小者，现为 95 MB。Harness 的 `log` 事件由 Worker 写入 pino，不含正文或凭证。当前只支持 `sp` 框架，`codex`、`cc` 明确拒绝。服务契约、Bundle 文件布局与校验规则见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。SP 服务路由在独立 SP 分支实现；npm alpha.7 已发布，但缺少 partial 请求的公开契约，且真实跨部署联调仍需完成。
+资源先经无事件的 readiness 路由等待 SP 定稿；期限内不下载未定稿页面。期限届满后通过 `allowPartial=true` 显式读取冻结的已知 native 页面、配对的 API 计费页面及必要的验证字节，保留 `finalized:false`、`coverage.partial` 与真实计数，不把未知计费记为零。证据读取仍携带 `submissionId` 并保留完整 Chat 轨迹。SP HTTP 请求（含 readiness）默认最多等待 60 秒，停止调用最多等待 10 秒；每个资源页面与证据传输分别最多等待 5 分钟，页面 JSON 限 4 MB，其他 JSON 仍按 V8 最大字符串长度限制。证据/资源 GET 的 `409 EVIDENCE_NOT_READY` 通常可重试，但已请求 partial 页且 SP 仍不支持读取时不会重复消耗下载预算；其他 409 不重试。证据导入流式 PUT 并边传边校验大小与 SHA-256；单个证据文件上限取 `DEFAULT_EVIDENCE_LIMITS` 与已安装的 `@springbrand/eval-harness@0.1.0-alpha.9` 的 `EVAL_EVIDENCE_FILE_MAX_BYTES` 中较小者，现为 95 MB。Harness 的 `log` 事件由 Worker 写入 pino，不含正文或凭证。当前只支持 `sp` 框架，`codex`、`cc` 明确拒绝。服务契约、Bundle 文件布局与校验规则见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。npm alpha.9 已发布并提供 partial 请求的公开契约，真实跨部署联调仍需完成。
 
 初始化的 `data.userPrompt` 与提交的 `prompt` 通过该包的共享 `evalPromptSchema` 校验：只拒绝非字符串及纯空白，首尾空格、换行和 Unicode 空白原样发送，不在 Eval 侧清洗 Prompt。
 

@@ -1,8 +1,31 @@
-import { canonicalJsonBytes, sha256Hex, type AgentResourceSnapshot, type JsonValue } from "@eval-platform/eval-contracts";
+import { readFileSync } from "node:fs";
+import {
+  canonicalJsonBytes, nativeTrajectoryEntrySchema, sha256Hex,
+  type AgentResourceSnapshot, type JsonValue, type NativeTrajectoryEntry,
+} from "@eval-platform/eval-contracts";
 import { describe, expect, it } from "vitest";
 import { nativeFixture, nativeResourceInput, resourceInput } from "../test-support.js";
-import { compactResourceSnapshot, NATIVE_PROJECTION_VERSION } from "./compact-resources.js";
+import {
+  compactNativeTrajectoryRecord, compactResourceSnapshot, NATIVE_CHARGE_LINK_VERSION, NATIVE_PROJECTION_VERSION,
+} from "./compact-resources.js";
+import { NATIVE_TOOL_CALL_KEY_PREFIX } from "./native-record-facts.js";
 import { aggregateResources, type ResourceInput } from "./resources.js";
+
+// Generated from UA alpha.15's public canonicalMessageSchema and trajectory export,
+// with the actual Responses ID from its OpenRouter protocols.test.ts:325-375.
+const responsesFixture = JSON.parse(readFileSync(new URL("./ua-responses-tool-id.fixture.json", import.meta.url), "utf8")) as {
+  readonly generator: string;
+  readonly records: readonly NativeTrajectoryEntry[];
+};
+const responsesCall = () => structuredClone(responsesFixture.records[0]!);
+const responsesResult = () => structuredClone(responsesFixture.records[1]!);
+const toolFact = (entry: NativeTrajectoryEntry) =>
+  ((entry.metricProjection?.facts ?? []) as readonly Record<string, JsonValue>[]).find((fact) => fact.type === "tool");
+const sourceMessage = (entry: NativeTrajectoryEntry) => {
+  if (entry.record.record.type !== "entry") throw new Error("Expected Pi entry");
+  return (entry.record.record.value.model as Record<string, JsonValue>[])[0]!;
+};
+const responsesScope = { chatId: "chat-1", submissionId: "submission-1", idempotencyKey: "fixture" };
 
 async function compact(inputs: readonly ResourceInput[]): Promise<ResourceInput[]> {
   return Promise.all(inputs.map(async (input) => {
@@ -21,6 +44,142 @@ function assistantWithText(text: string) {
 }
 
 describe("body-free native Pi metric projections", () => {
+  it("correlates the public UA Responses composite Call/Result ID as one opaque, non-reversible key", async () => {
+    expect(NATIVE_TOOL_CALL_KEY_PREFIX).toBe(`tck${NATIVE_CHARGE_LINK_VERSION}_`);
+    expect(responsesFixture.generator).toContain("@springbrand/agent-runtime@0.3.1-alpha.15");
+    expect(responsesFixture.records).toHaveLength(2);
+    for (const entry of responsesFixture.records) expect(nativeTrajectoryEntrySchema.safeParse(entry).success).toBe(true);
+    expect((sourceMessage(responsesCall()).content as Record<string, JsonValue>[])[0]!.id).toBe("call_1|fc_1");
+    expect(sourceMessage(responsesResult()).toolCallId).toBe("call_1|fc_1");
+
+    const raw = nativeResourceInput([], { nativeRecords: responsesFixture.records }).collection;
+    if (!raw || raw.status !== "collected") throw new Error("Expected native snapshot");
+    const compacted = await compactResourceSnapshot(raw.snapshot);
+    const [call, result] = compacted.nativeRecords.map(toolFact);
+    const expected = `tck2_${await sha256Hex(JSON.stringify([
+      "eval-platform.pi-tool-call-id/v2", "agent-1", "chat-1", "submission-1", "call_1|fc_1",
+    ]))}`;
+    expect(call).toMatchObject({ fromPiCall: true, agentId: "agent-1", submissionId: "submission-1",
+      toolCallKey: expected, toolName: "lookup" });
+    expect(result).toMatchObject({ fromPiResult: true, agentId: "agent-1", submissionId: "submission-1",
+      toolCallKey: expected, toolName: "lookup", executionId: "execution-1" });
+    expect(call?.id).toBe(result?.id);
+    expect(compacted.nativeRecords.map((entry) => entry.metricProjection?.chargeLinkVersion)).toEqual([2, 2]);
+    expect(JSON.stringify(compacted)).not.toMatch(/call_1\|fc_1|capability-1|private-business-result|private-credential|toolCallId/u);
+    expect(aggregateResources([nativeResourceInput([], { nativeRecords: responsesFixture.records })]))
+      .toEqual(aggregateResources([nativeResourceInput([], { ...compacted })]));
+  });
+
+  it("keeps actor/Submission and Tool-name collisions apart even with the same UA ID", async () => {
+    const baseCall = toolFact(await compactNativeTrajectoryRecord(responsesCall(), responsesScope))!;
+    const baseResult = toolFact(await compactNativeTrajectoryRecord(responsesResult(), responsesScope))!;
+    expect(baseResult.toolCallKey).toBe(baseCall.toolCallKey);
+
+    const otherActor = responsesResult();
+    (otherActor.record.resource as { agentId: string }).agentId = "agent-2";
+    const actorResult = toolFact(await compactNativeTrajectoryRecord(otherActor, responsesScope))!;
+    expect(actorResult.toolCallKey).not.toBe(baseCall.toolCallKey);
+    expect(actorResult.agentId).toBe("agent-2");
+
+    const otherSubmission = responsesResult();
+    Object.assign(otherSubmission.record, { submissionId: "child-submission",
+      parent: { resource: { agentId: "agent-1", sessionId: "chat-1" }, submissionId: "submission-1" } });
+    const submissionResult = toolFact(await compactNativeTrajectoryRecord(otherSubmission, responsesScope))!;
+    expect(submissionResult.toolCallKey).not.toBe(baseCall.toolCallKey);
+    expect(submissionResult.submissionId).toBe("child-submission");
+
+    const otherName = responsesResult();
+    sourceMessage(otherName).toolName = "other";
+    const nameResult = toolFact(await compactNativeTrajectoryRecord(otherName, responsesScope))!;
+    expect(nameResult.toolCallKey).toBe(baseCall.toolCallKey); // SQL must also require the same name.
+    expect(nameResult.toolName).not.toBe(baseCall.toolName);
+    for (const fact of [baseCall, baseResult, actorResult, submissionResult, nameResult]) {
+      expect(fact.toolCallKey).toMatch(/^tck2_[0-9a-f]{64}$/u);
+      expect(JSON.stringify(fact)).not.toContain("call_1|fc_1");
+    }
+  });
+
+  it("keeps only parent scope proof, not an opaque parent Tool Call ID or other private metadata", async () => {
+    const child = responsesResult();
+    Object.assign(child.record, { submissionId: "child-submission",
+      parent: { resource: { agentId: "agent-1", sessionId: "chat-1" }, submissionId: "submission-1",
+        toolCallId: "call_1|fc_1", requestId: "Bearer private-request", runId: "private-run" } });
+    const projected = await compactNativeTrajectoryRecord(child, responsesScope);
+    expect(projected.record.parent).toEqual({
+      resource: { agentId: "agent-1", sessionId: "chat-1" }, submissionId: "submission-1",
+    });
+    expect(toolFact(projected)).toMatchObject({ submissionId: "child-submission",
+      toolCallKey: expect.stringMatching(/^tck2_[0-9a-f]{64}$/u), executionId: "execution-1" });
+    expect(JSON.stringify(projected)).not.toMatch(/call_1\|fc_1|Bearer private-request|private-run/u);
+  });
+
+  it("uses the same composite Tool operation ID in Pi Call, events, hook and Result (raw/compact parity)", async () => {
+    const records = nativeFixture(...Array.from({ length: 16 }, (_, index) => index + 1));
+    const value = (seq: number) => {
+      const write = records[seq - 1]!.record.record;
+      if (write.type !== "entry") throw new Error("Expected a Pi entry");
+      return write.value;
+    };
+    ((value(6).model as Record<string, JsonValue>[])[0]!.content as Record<string, JsonValue>[])
+      .find((block) => block.type === "toolCall")!.id = "call_1|fc_1";
+    (value(10).model as Record<string, JsonValue>[])[0]!.toolCallId = "call_1|fc_1";
+    for (const seq of [8, 11]) {
+      const data = value(seq).data as { event: { toolCallId: string } };
+      data.event.toolCallId = "call_1|fc_1";
+    }
+    (value(9).data as { toolCallId: string }).toolCallId = "call_1|fc_1";
+    const input = nativeResourceInput([], { nativeRecords: records });
+    const raw = aggregateResources([input]);
+    expect(raw.trajectory.tools).toMatchObject({ count: { value: 1, coverage: "complete" }, failed: 1 });
+    const collection = input.collection;
+    if (!collection || collection.status !== "collected") throw new Error("Expected native snapshot");
+    const compacted = await compactResourceSnapshot(collection.snapshot);
+    expect(aggregateResources([nativeResourceInput([], { ...compacted })])).toEqual(raw);
+    const key = toolFact(compacted.nativeRecords[5]!)!.id;
+    for (const seq of [8, 10, 11]) expect(toolFact(compacted.nativeRecords[seq - 1]!)?.id).toBe(key);
+    expect(((compacted.nativeRecords[8]!.metricProjection?.facts ?? []) as readonly Record<string, JsonValue>[])[0]!.toolCallId)
+      .toBe(key);
+    expect(JSON.stringify(compacted)).not.toContain("call_1|fc_1");
+  });
+
+  it("never copies malformed, withheld or credential-like Call/Result IDs into compact facts", async () => {
+    for (const [id, linkable] of [
+      ["", false], [null, false], [17, false], ["[REDACTED]", false],
+      ["[CONTENT OMITTED]", false], ["[Action business data withheld from telemetry]", false],
+      [" ", true], ["\u0000", true], ["x".repeat(200), true],
+      ["Bearer private-call-credential/from-safe-source", true],
+    ] as const) {
+      const call = responsesCall();
+      const result = responsesResult();
+      (sourceMessage(call).content as Record<string, JsonValue>[])[0]!.id = id;
+      sourceMessage(result).toolCallId = id;
+      const compacted = await compactResourceSnapshot({
+        scope: responsesScope, observedAt: "2026-11-02T00:00:00Z", finalized: true,
+        coverage: { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" },
+        usageEvents: [], billingSettlements: [], nativeRecords: [call, result],
+      });
+      const [callFact, resultFact] = compacted.nativeRecords.map(toolFact);
+      for (const fact of [callFact, resultFact]) {
+        if (linkable) expect(fact?.toolCallKey).toMatch(/^tck2_[0-9a-f]{64}$/u);
+        else {
+          expect(fact).not.toHaveProperty("toolCallKey");
+          expect(fact?.id).toBeNull();
+        }
+      }
+      if (linkable) expect(resultFact).toHaveProperty("executionId", "execution-1");
+      else expect(resultFact).not.toHaveProperty("executionId");
+      const saved = JSON.stringify(compacted);
+      if (typeof id === "string" && id.length > 1) expect(saved).not.toContain(id);
+      expect(saved).not.toContain("toolCallId");
+    }
+    const surrogate = responsesCall();
+    const replacement = responsesCall();
+    (sourceMessage(surrogate).content as Record<string, JsonValue>[])[0]!.id = "\ud83e";
+    (sourceMessage(replacement).content as Record<string, JsonValue>[])[0]!.id = "\ufffd";
+    expect(toolFact(await compactNativeTrajectoryRecord(surrogate, responsesScope))?.toolCallKey)
+      .not.toBe(toolFact(await compactNativeTrajectoryRecord(replacement, responsesScope))?.toolCallKey);
+  });
+
   it.each(["pi.toolResult", "pi.tool-result"])("keeps validated Tool Call and %s Result charge links", async (kind) => {
     const call = nativeFixture(6)[0]!;
     const result = nativeFixture(10)[0]!;
@@ -34,25 +193,28 @@ describe("body-free native Pi metric projections", () => {
     const snapshot = nativeResourceInput([], { nativeRecords: [call, result] }).collection;
     if (!snapshot || snapshot.status !== "collected") throw new Error("Expected native snapshot");
     const projected = await compactResourceSnapshot(snapshot.snapshot);
+    const expectedKey = `tck2_${await sha256Hex(JSON.stringify([
+      "eval-platform.pi-tool-call-id/v2", "agent-1", "chat-1", "submission-1", "call-1",
+    ]))}`;
     expect(projected.nativeRecords[0]!.metricProjection).toMatchObject({
-      chargeLinkVersion: 1, facts: expect.arrayContaining([
+      chargeLinkVersion: 2, facts: expect.arrayContaining([
         expect.objectContaining({ type: "tool", fromPiCall: true, agentId: "agent-1", submissionId: "submission-1",
-          toolCallId: "call-1", toolName: "search" }),
+          toolCallKey: expectedKey, toolName: "search" }),
       ]),
     });
     expect(projected.nativeRecords[1]!.metricProjection).toMatchObject({
-      chargeLinkVersion: 1, facts: [{
+      chargeLinkVersion: 2, facts: [{
         type: "tool", phase: "result", fromPiResult: true, agentId: "agent-1",
-        submissionId: "submission-1", toolCallId: "call-1", toolName: "search",
-        executionId: "execution-1", capabilityId: "capability-1",
+        submissionId: "submission-1", toolCallKey: expectedKey, toolName: "search",
+        executionId: "execution-1",
       }],
     });
-    expect(JSON.stringify(projected)).not.toMatch(/private-argument|private-business-body|private-key|apiKey|details/u);
+    expect(JSON.stringify(projected)).not.toMatch(/call-1|capability-1|private-argument|private-business-body|private-key|apiKey|details/u);
     expect(aggregateResources([nativeResourceInput([], { nativeRecords: [call, result] })]))
       .toEqual(aggregateResources([nativeResourceInput([], { ...projected })]));
   });
 
-  it("does not turn untrusted Tool Result details, identifiers or names into charge links", async () => {
+  it("ignores Tool Result capabilityId for Action identity without losing a safe optional execution link", async () => {
     const source = nativeFixture(10)[0]!;
     if (source.record.record.type !== "entry") throw new Error("Expected Pi result");
     const message = (source.record.record.value.model as Record<string, JsonValue>[])[0]!;
@@ -60,8 +222,6 @@ describe("body-free native Pi metric projections", () => {
     if (!collection || collection.status !== "collected") throw new Error("Expected native snapshot");
     for (const details of [
       { executionId: "https://private.test/secret", capabilityId: "capability-1" },
-      { executionId: "execution-1", capabilityId: "Bearer private-key" },
-      { executionId: "execution-1", capabilityId: "x".repeat(129) },
       { executionId: "[REDACTED]", capabilityId: "capability-1" },
     ]) {
       message.details = details;
@@ -71,12 +231,13 @@ describe("body-free native Pi metric projections", () => {
       expect(fact[0]).not.toHaveProperty("capabilityId");
       expect(JSON.stringify(compacted)).not.toContain(details.capabilityId);
     }
-    message.details = { executionId: "execution-1", capabilityId: "capability-1" };
+    message.details = { executionId: "execution-1", capabilityId: "Bearer private-key" };
     message.toolCallId = "https://private.test/call";
-    const invalidCall = await compactResourceSnapshot(collection.snapshot);
-    expect(invalidCall.nativeRecords[0]!.metricProjection!.facts).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ executionId: "execution-1" }),
-    ]));
+    const opaqueCall = await compactResourceSnapshot(collection.snapshot);
+    expect(toolFact(opaqueCall.nativeRecords[0]!)).toMatchObject({
+      executionId: "execution-1", toolCallKey: expect.stringMatching(/^tck2_[0-9a-f]{64}$/u),
+    });
+    expect(JSON.stringify(opaqueCall)).not.toMatch(/https:\/\/private\.test\/call|Bearer private-key|capabilityId/u);
     const bookkeeping = nativeFixture(8)[0]!;
     if (bookkeeping.record.record.type !== "entry") throw new Error("Expected a Tool event");
     const event = (bookkeeping.record.record.value.data as { event: { payload: { toolName: string } } }).event;

@@ -1,14 +1,15 @@
 import {
   PI_TRAJECTORY_RECORD_FORMAT, canonicalJsonBytes, type JsonValue, type PiTrajectoryRecord,
 } from "@eval-platform/eval-contracts";
+import sha256 from "fast-sha256";
 import { record, text, type JsonRecord } from "../json.js";
 
 /**
  * A deliberately narrow, body-free adapter for the *published UA* TrajectoryRecord
  * envelope. The full native record is never converted to an old event. The public
  * `readTrajectoryBookkeeping` defines the public bookkeeping contract. The
- * fixture is checked with that helper; the production adapter reads only the
- * bounded fields below until its published dependency can be installed offline.
+ * fixture is checked with that helper; the production adapter retains only
+ * focused body-free facts until its published dependency can be installed offline.
  * An unrecognized fact is unsupported, not evidence of a complete empty stream.
  */
 export type NativeMetricFact = JsonRecord;
@@ -20,6 +21,8 @@ const OTHER_EVENTS = new Set([
   "approval.requested", "approval.decided", "interaction.requested", "interaction.responded",
   "interaction.cancelled", "context.compacted",
 ]);
+/** Versioned internal key shape shared with the SQL consumer; not a raw UA ID grammar. */
+export const NATIVE_TOOL_CALL_KEY_PREFIX = "tck2_";
 
 function hidden(value: JsonValue | undefined): boolean {
   const pending: (JsonValue | undefined)[] = [value];
@@ -62,8 +65,8 @@ function nonnegative(value: JsonValue | undefined): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-/** An SP SAFE projection is authoritative for the message, but details/identifiers
- * are still opaque Pi data. A charge link copies only short, non-credential IDs. */
+/** An SP SAFE projection is authoritative for the message, but Tool details
+ * remain opaque Pi data: only executionId can corroborate a ledger execution. */
 function safeIdentity(value: JsonValue | undefined): string | undefined {
   return typeof value === "string" && value.length <= 128
     && /^[A-Za-z0-9_][A-Za-z0-9_.:-]*$/u.test(value)
@@ -85,6 +88,21 @@ function metricToolName(value: JsonValue | undefined): string | null {
 /** Native IDs, not telemetry event IDs: a temporary Agent and another Submission cannot collide. */
 function nativeKey(source: PiTrajectoryRecord, value: string | number): string {
   return JSON.stringify([source.resource.agentId, source.resource.sessionId, source.submissionId, value]);
+}
+
+/** Pi ToolCall.id / ToolResult.toolCallId: UA's native schema accepts any
+ * nonempty string, including whitespace and provider composite IDs. A SAFE
+ * projector's withholding marker is not the original ID and cannot prove a
+ * unique Call. Do not persist even a credential-shaped *valid* source ID:
+ * every Tool operation and Action link uses this same scoped digest instead. */
+function piToolCallKey(source: PiTrajectoryRecord, value: JsonValue | undefined): string | undefined {
+  if (typeof value !== "string" || value.length === 0 || HIDDEN.has(value)) return undefined;
+  // JSON.stringify is injective for JS strings (including isolated surrogates).
+  // TextEncoder(value) alone would conflate a lone surrogate with U+FFFD.
+  const bytes = new TextEncoder().encode(JSON.stringify([
+    "eval-platform.pi-tool-call-id/v2", source.resource.agentId, source.resource.sessionId, source.submissionId, value,
+  ]));
+  return `${NATIVE_TOOL_CALL_KEY_PREFIX}${[...sha256(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function parentTurn(source: PiTrajectoryRecord, event: JsonRecord): string | null {
@@ -140,9 +158,9 @@ function eventFacts(source: PiTrajectoryRecord, data: JsonRecord): readonly Nati
   }
   if (event.type === "tool.started" || event.type === "tool.finished") {
     if (!text(payload.toolName)) return undefined;
-    const callId = text(event.toolCallId);
+    const callKey = piToolCallKey(source, event.toolCallId);
     return [{ type: "tool", phase: event.type === "tool.started" ? "start" : "end",
-      id: callId ? nativeKey(source, callId) : null, turnId: parentTurn(source, event),
+      id: callKey ? nativeKey(source, callKey) : null, turnId: parentTurn(source, event),
       toolName: metricToolName(payload.toolName), timestamp: occurredAt,
       status: event.type === "tool.finished" ? payload.outcome ?? null : null,
       durationMs: payload.durationMs ?? null, fromEvent: true, eventId: event.eventId ?? null,
@@ -177,34 +195,32 @@ function messageFacts(source: PiTrajectoryRecord, native: JsonRecord): readonly 
       for (const blockValue of message.content) {
         const block = record(blockValue);
         if (block?.type !== "toolCall") continue;
-        const callId = safeIdentity(block.id);
+        const callKey = piToolCallKey(source, block.id);
         const linkName = safeToolName(block.name);
         const agentId = safeIdentity(source.resource.agentId);
         const submissionId = safeIdentity(source.submissionId);
-        facts.push({ type: "tool", phase: "start", id: callId ? nativeKey(source, callId) : null,
+        facts.push({ type: "tool", phase: "start", id: callKey ? nativeKey(source, callKey) : null,
           toolName: metricToolName(block.name), timestamp: message.timestamp,
-          ...(native.kind === "pi.assistant" && callId && linkName && agentId && submissionId
-            ? { agentId, submissionId, toolCallId: callId } : {}),
+          ...(native.kind === "pi.assistant" && callKey && linkName && agentId && submissionId
+            ? { agentId, submissionId, toolCallKey: callKey } : {}),
           inputLength: toolBytes(block.arguments), fromPiCall: true });
       }
       continue;
     }
     if (message.role === "toolResult") {
       if (!Array.isArray(message.content)) return undefined;
-      const callId = safeIdentity(message.toolCallId);
+      const callKey = piToolCallKey(source, message.toolCallId);
       const linkName = safeToolName(message.toolName);
       const agentId = safeIdentity(source.resource.agentId);
       const submissionId = safeIdentity(source.submissionId);
       const linkable = (native.kind === "pi.tool-result" || native.kind === "pi.toolResult")
-        && callId && linkName && agentId && submissionId;
+        && callKey && linkName && agentId && submissionId;
       const details = record(message.details);
       const executionId = linkable ? safeIdentity(details?.executionId) : undefined;
-      const capabilityId = details?.capabilityId === undefined ? undefined : safeIdentity(details.capabilityId);
-      facts.push({ type: "tool", phase: "result", id: callId ? nativeKey(source, callId) : null,
+      facts.push({ type: "tool", phase: "result", id: callKey ? nativeKey(source, callKey) : null,
         toolName: metricToolName(message.toolName), timestamp: message.timestamp,
-        ...(linkable ? { agentId, submissionId, toolCallId: callId } : {}),
-        ...(executionId && (details?.capabilityId === undefined || capabilityId)
-          ? { executionId, ...(capabilityId === undefined ? {} : { capabilityId }) } : {}),
+        ...(linkable ? { agentId, submissionId, toolCallKey: callKey } : {}),
+        ...(executionId ? { executionId } : {}),
         status: message.isError === true ? "failed" : message.isError === false ? "completed" : null,
         durationMs: message.durationMs ?? null, outputLength: toolBytes(message.content), fromPiResult: true });
     } else if ((message.role !== "user" && message.role !== "system")
@@ -254,9 +270,10 @@ export function nativeRecordFacts(source: JsonRecord): readonly NativeMetricFact
         || !["change", "decision", "error"].includes(String(record(data.result)?.type))
         || !nonnegative(data.startedAt) || !nonnegative(data.endedAt)
         || data.startedAt > data.endedAt) return undefined;
+      const callKey = piToolCallKey(native, data.toolCallId);
       return withScope([{ type: "hook", id: nativeKey(native, value.id as number),
         hook: data.hook ?? null, taskId: nativeKey(native, data.taskId as number),
-        toolCallId: text(data.toolCallId) ? nativeKey(native, data.toolCallId as string) : null,
+        toolCallId: callKey ? nativeKey(native, callKey) : null,
         timestamp: data.startedAt ?? null, durationMs: typeof data.endedAt === "number"
           && typeof data.startedAt === "number" ? data.endedAt - data.startedAt : null,
         outcome: record(data.result)?.type ?? null }]);

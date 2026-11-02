@@ -95,7 +95,7 @@ const TRACKED_PATHS = new Set([
   "record.value.id", "record.value.conversationId", "record.value.kind", "record.value.model",
   "record.value.byTaskId", "record.value.head", "record.value.edits",
   MESSAGE, ...MESSAGE_FIELDS.map((field) => `${MESSAGE}.${field}`),
-  DETAILS, `${DETAILS}.executionId`, `${DETAILS}.capabilityId`,
+  DETAILS, `${DETAILS}.executionId`,
   ...["input", "output", "totalTokens"].map((field) => `${MESSAGE}.usage.${field}`),
   BLOCK, ...BLOCK_FIELDS.map((field) => `${BLOCK}.${field}`),
 ]);
@@ -106,8 +106,8 @@ const REQUIRED_STRING_PATHS = new Set([
   "parent.resource.agentId", "parent.resource.sessionId", "parent.submissionId",
 ]);
 
-/** Only these two SAFE Tool Result identifiers survive a large Pi body. The
- * same conservative allowlist is applied again during metric fact extraction. */
+/** Only the SAFE Tool Result's execution ID survives a large Pi body, solely
+ * for optional Tool association. Action identity comes from SP's receipt. */
 function safeChargeId(value: JsonValue | undefined): value is string {
   return typeof value === "string" && value.length <= 128
     && /^[A-Za-z0-9_][A-Za-z0-9_.:-]*$/u.test(value)
@@ -278,16 +278,12 @@ class SafePiJsonScanner {
             message.usage = usage;
           }
           if (message.role === "toolResult" && this.types.get(DETAILS) === "object") {
-            const details: Record<string, JsonValue> = {};
-            for (const field of ["executionId", "capabilityId"]) {
-              const path = `${DETAILS}.${field}`;
-              if (!this.types.has(path)) continue;
+            const path = `${DETAILS}.executionId`;
+            if (this.types.has(path)) {
               const item = scalar(path);
-              // Preserve only the invalidity, not a private value. A present
-              // malformed capability must never be mistaken for an absent one.
-              details[field] = safeChargeId(item) ? item : null;
+              // Keep invalidity without retaining a private source value.
+              message.details = { executionId: safeChargeId(item) ? item : null };
             }
-            if (Object.keys(details).length > 0) message.details = details;
           }
           if (this.types.get(`${MESSAGE}.content`) === "array") {
             message.content = this.contentCount <= MAX_CONTENT_BLOCKS
@@ -407,7 +403,7 @@ class SafePiJsonScanner {
       }
       if (this.interpret !== undefined && key !== undefined && (parent.path === MESSAGE || parent.path === BLOCK
         || parent.path === `${MESSAGE}.usage`
-        || parent.path === DETAILS && (key === "executionId" || key === "capabilityId"))) {
+        || parent.path === DETAILS && key === "executionId")) {
         if (parent.seen!.has(key)) this.contentInvalid = true;
         parent.seen!.add(key);
       }

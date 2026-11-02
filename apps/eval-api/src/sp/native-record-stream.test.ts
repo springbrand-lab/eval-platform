@@ -183,16 +183,17 @@ describe("source-independent SAFE Pi streaming byte reader", () => {
       { chatId: CHAT, idempotencyKey: "execution", submissionId: SUBMISSION }, item.sha256,
     );
     expect(compact.metricProjection).toMatchObject({
-      fingerprint: item.sha256, supported: true, chargeLinkVersion: 1,
+      fingerprint: item.sha256, supported: true, chargeLinkVersion: 2,
       facts: [{ type: "tool", phase: "result", toolName: "search", outputLength: null, fromPiResult: true,
-        executionId: "execution-large", capabilityId: "capability-large",
-        agentId: "agent-1", submissionId: SUBMISSION, toolCallId: "tool-0" }],
+        executionId: "execution-large",
+        agentId: "agent-1", submissionId: SUBMISSION,
+        toolCallKey: expect.stringMatching(/^tck2_[0-9a-f]{64}$/u) }],
     });
     expect(JSON.stringify(compact).length).toBeLessThan(4_096);
-    expect(JSON.stringify(compact)).not.toMatch(/private-business-body|private-key|apiKey|details/u);
+    expect(JSON.stringify(compact)).not.toMatch(/capability-large|private-business-body|private-key|apiKey|details/u);
   }, 45_000);
 
-  it("cannot link an oversized Result with malformed/duplicated SAFE detail IDs", async () => {
+  it("ignores an oversized Result's private capabilityId but rejects a duplicated execution ID", async () => {
     const result = nativeToolBodyPair(CHAT, SUBMISSION, "x".repeat(600_000), "search")[1]!;
     if (result.record.record.type !== "entry") throw new Error("Expected Pi Tool Result");
     (result.record.record.value.model as Record<string, unknown>[])[0]!.details = {
@@ -216,9 +217,12 @@ describe("source-independent SAFE Pi streaming byte reader", () => {
         { ingestSeq: result.ingestSeq, record: inspected!.record! },
         { chatId: CHAT, submissionId: SUBMISSION, idempotencyKey: "execution" }, inspected!.sha256,
       );
-      expect(compact.metricProjection).toMatchObject({ chargeLinkVersion: 1, supported: index === 0 });
-      expect(JSON.stringify(compact)).not.toMatch(/execution-1|capability-1|private-business-body|private-credential/u);
-      expect(compact.metricProjection?.facts).not.toEqual(expect.arrayContaining([
+      expect(compact.metricProjection).toMatchObject({ chargeLinkVersion: 2, supported: index === 0 });
+      expect(JSON.stringify(compact)).not.toMatch(/capability-1|private-business-body|private-credential/u);
+      if (index === 0) expect(compact.metricProjection?.facts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ executionId: "execution-1" }),
+      ]));
+      else expect(compact.metricProjection?.facts).not.toEqual(expect.arrayContaining([
         expect.objectContaining({ executionId: "execution-1" }),
       ]));
       expect(inspected!.maxCapturedChars).toBeLessThan(4_096);
