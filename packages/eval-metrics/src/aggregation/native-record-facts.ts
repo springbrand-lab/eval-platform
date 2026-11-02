@@ -77,6 +77,11 @@ function safeToolName(value: JsonValue | undefined): string | null {
     && !/^(?:sk-|key_|bearer)/iu.test(value) ? value : null;
 }
 
+/** Metrics retain SAFE source names; only charge links require identifier-shaped names. */
+function metricToolName(value: JsonValue | undefined): string | null {
+  return typeof value === "string" && !/^(?:sk-|key_|bearer)/iu.test(value) ? value : null;
+}
+
 /** Native IDs, not telemetry event IDs: a temporary Agent and another Submission cannot collide. */
 function nativeKey(source: PiTrajectoryRecord, value: string | number): string {
   return JSON.stringify([source.resource.agentId, source.resource.sessionId, source.submissionId, value]);
@@ -138,7 +143,7 @@ function eventFacts(source: PiTrajectoryRecord, data: JsonRecord): readonly Nati
     const callId = text(event.toolCallId);
     return [{ type: "tool", phase: event.type === "tool.started" ? "start" : "end",
       id: callId ? nativeKey(source, callId) : null, turnId: parentTurn(source, event),
-      toolName: safeToolName(payload.toolName), timestamp: occurredAt,
+      toolName: metricToolName(payload.toolName), timestamp: occurredAt,
       status: event.type === "tool.finished" ? payload.outcome ?? null : null,
       durationMs: payload.durationMs ?? null, fromEvent: true, eventId: event.eventId ?? null,
       // `input`/`output` are intentionally absent from UA event facts: Pi owns them.
@@ -173,12 +178,12 @@ function messageFacts(source: PiTrajectoryRecord, native: JsonRecord): readonly 
         const block = record(blockValue);
         if (block?.type !== "toolCall") continue;
         const callId = safeIdentity(block.id);
-        const toolName = safeToolName(block.name);
+        const linkName = safeToolName(block.name);
         const agentId = safeIdentity(source.resource.agentId);
         const submissionId = safeIdentity(source.submissionId);
         facts.push({ type: "tool", phase: "start", id: callId ? nativeKey(source, callId) : null,
-          toolName, timestamp: message.timestamp,
-          ...(native.kind === "pi.assistant" && callId && toolName && agentId && submissionId
+          toolName: metricToolName(block.name), timestamp: message.timestamp,
+          ...(native.kind === "pi.assistant" && callId && linkName && agentId && submissionId
             ? { agentId, submissionId, toolCallId: callId } : {}),
           inputLength: toolBytes(block.arguments), fromPiCall: true });
       }
@@ -187,15 +192,15 @@ function messageFacts(source: PiTrajectoryRecord, native: JsonRecord): readonly 
     if (message.role === "toolResult") {
       if (!Array.isArray(message.content)) return undefined;
       const callId = safeIdentity(message.toolCallId);
-      const toolName = safeToolName(message.toolName);
+      const linkName = safeToolName(message.toolName);
       const agentId = safeIdentity(source.resource.agentId);
       const submissionId = safeIdentity(source.submissionId);
-      const linkable = native.kind === "pi.toolResult" && callId && toolName && agentId && submissionId;
+      const linkable = native.kind === "pi.toolResult" && callId && linkName && agentId && submissionId;
       const details = record(message.details);
       const executionId = linkable ? safeIdentity(details?.executionId) : undefined;
       const capabilityId = details?.capabilityId === undefined ? undefined : safeIdentity(details.capabilityId);
       facts.push({ type: "tool", phase: "result", id: callId ? nativeKey(source, callId) : null,
-        toolName, timestamp: message.timestamp,
+        toolName: metricToolName(message.toolName), timestamp: message.timestamp,
         ...(linkable ? { agentId, submissionId, toolCallId: callId } : {}),
         ...(executionId && (details?.capabilityId === undefined || capabilityId)
           ? { executionId, ...(capabilityId === undefined ? {} : { capabilityId }) } : {}),

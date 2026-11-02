@@ -85,6 +85,33 @@ describe("body-free native Pi metric projections", () => {
     expect(JSON.stringify(await compactResourceSnapshot(eventCollection.snapshot))).not.toContain("sk-private-credential");
   });
 
+  it.each(["\ud83e", "\udd16", "\u0000", "\u4e2d\u6587 \u00e9 \ud83e\udd16"])(
+    "keeps a SAFE Tool name %j in Metrics without using it as a charge-link identity", async (name) => {
+      const call = nativeFixture(6)[0]!;
+      const event = nativeFixture(8)[0]!;
+      const result = nativeFixture(10)[0]!;
+      if (call.record.record.type !== "entry" || event.record.record.type !== "entry"
+        || result.record.record.type !== "entry") throw new Error("Expected Pi entries");
+      const assistant = (call.record.record.value.model as Record<string, JsonValue>[])[0]!;
+      (assistant.content as Record<string, JsonValue>[]).find((block) => block.type === "toolCall")!.name = name;
+      (event.record.record.value.data as { event: { payload: { toolName: string } } }).event.payload.toolName = name;
+      const tool = (result.record.record.value.model as Record<string, JsonValue>[])[0]!;
+      tool.toolName = name;
+      tool.details = { executionId: "execution-1", capabilityId: "capability-1" };
+      const collection = nativeResourceInput([], { nativeRecords: [call, event, result] }).collection;
+      if (!collection || collection.status !== "collected") throw new Error("Expected native snapshot");
+
+      const compacted = await compactResourceSnapshot(collection.snapshot);
+      for (const entry of compacted.nativeRecords) {
+        const fact = (entry.metricProjection!.facts as Record<string, unknown>[])
+          .find((item) => item.type === "tool");
+        expect(fact?.toolName).toBe(name);
+        expect(fact).not.toHaveProperty("executionId");
+        expect(fact).not.toHaveProperty("capabilityId");
+      }
+    },
+  );
+
   it("hashes the full source record, drops multi-megabyte Pi text and preserves raw/compact conflicts", async () => {
     const large = assistantWithText("x".repeat(2_000_000));
     const conflict = assistantWithText("different");
