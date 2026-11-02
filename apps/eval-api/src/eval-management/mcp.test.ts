@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EVAL_MANAGEMENT_MCP_PATH } from "./mcp.js";
-import { MANAGEMENT_TOKEN, RESULT_TOKEN, WEB_TOKEN, run, setupManagement } from "./test-fixture.js";
+import { MANAGEMENT_TOKEN, RESULT_TOKEN, WEB_TOKEN, run, setupManagement, toolValue } from "./test-fixture.js";
 
 const rpc = (method: string, id: number | undefined = 1, params: unknown = {}) => ({
   jsonrpc: "2.0", ...(id === undefined ? {} : { id }), method, params,
@@ -50,7 +50,7 @@ describe("trusted management MCP transport", () => {
     expect(app.release).toHaveBeenCalledTimes(1);
   });
 
-  it("is stateless and advertises exactly eighteen management tools, including standalone resource saving", async () => {
+  it("is stateless and advertises exactly nineteen management tools, including case usage", async () => {
     const app = setupManagement();
     const initialized = await app.rpc(rpc("initialize", 2, { protocolVersion: "2025-06-18" }));
     expect(initialized.headers.get("mcp-session-id")).toBeNull();
@@ -64,7 +64,7 @@ describe("trusted management MCP transport", () => {
     expect(tools.result.tools.map(({ name }) => name)).toEqual([
       "list_options", "save_initial_resource", "prepare_inputs", "bind_data_resources", "get_preparation", "search_agent_resources",
       "upload_agent_skill", "upload_agent_reference", "create_output_schema", "create_agent", "create_project", "preview_run",
-      "submit_run", "reconcile_operation", "stop_run", "get_run", "get_metrics", "inspect_case",
+      "submit_run", "reconcile_operation", "stop_run", "get_run", "get_metrics", "inspect_case", "get_case_usage",
     ]);
     expect(tools.result.tools.find(({ name }) => name === "list_options")!.description).toContain("up to 20 safe Data IDs");
     expect(tools.result.tools.find(({ name }) => name === "list_options")!.description)
@@ -129,6 +129,25 @@ describe("trusted management MCP transport", () => {
     expect(tools.result.tools.find(({ name }) => name === "reconcile_operation")!.inputSchema)
       .toHaveProperty("oneOf");
     expect(tools.result.tools.map(({ name }) => name)).not.toContain("submit_evaluation");
+    expect(app.release).toHaveBeenCalledTimes(2);
+  });
+
+  it("advertises a strict read-only case usage selector and accepts it through the public tools/call seam", async () => {
+    const app = setupManagement();
+    const list = await (await app.rpc(rpc("tools/list"))).json() as {
+      result: { tools: Array<{ name: string; inputSchema: { additionalProperties?: boolean;
+        required?: string[]; properties?: Record<string, unknown> } }> };
+    };
+    const schema = list.result.tools.find(({ name }) => name === "get_case_usage")?.inputSchema;
+    expect(schema).toMatchObject({ additionalProperties: false,
+      required: expect.arrayContaining(["projectId", "samplingId", "role"]),
+      properties: { role: expect.any(Object), attemptId: expect.any(Object), section: expect.any(Object) } });
+    const value = await toolValue(await app.call("get_case_usage", {
+      projectId: "project-1", samplingId: "sampling-1", role: "execution",
+    }));
+    expect(value).toMatchObject({ projectId: "project-1", samplingId: "sampling-1",
+      role: "execution", section: "attempts", attempts: { page: 1, pageSize: 5, total: 0, items: [] } });
+    expect(app.services.resourceSnapshots.readCaseUsage).toHaveBeenCalledOnce();
     expect(app.release).toHaveBeenCalledTimes(2);
   });
 

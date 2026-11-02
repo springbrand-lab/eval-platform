@@ -104,10 +104,24 @@ export function createSpObservationClient(input: {
         || throughSeq !== undefined && (!Number.isSafeInteger(throughSeq) || throughSeq < 0 || afterSeq > throughSeq)) {
         throw new HttpError("REQUEST_INVALID_INPUT", "Invalid frozen Chat trajectory cursor");
       }
-      return (await get(api, `/api/chats/${encodeURIComponent(chat.chatId)}/trajectory`, {
+      const { data, headers: responseHeaders } = await get(api, `/api/chats/${encodeURIComponent(chat.chatId)}/trajectory`, {
         params: { afterSeq, limit, ...(throughSeq === undefined ? {} : { throughSeq }) },
         maxResponseBytes: EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX_BYTES, ...(signal ? { signal } : {}),
-      })).data;
+      });
+      // The HTTP client exposes the original headers alongside the parsed, bounded envelope.
+      // Fetch may have already decompressed a supported encoding; Content-Length then measures
+      // wire bytes, not the decoded JSON, so only validate its syntax/range here.
+      const mime = responseHeaders["content-type"] ?? "";
+      const encoding = responseHeaders["content-encoding"];
+      const length = responseHeaders["content-length"];
+      if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(mime)
+        || encoding !== undefined && !encoding.split(",").every((part) =>
+          /^(?:identity|gzip|deflate|br|zstd)$/iu.test(part.trim()))
+        || length !== undefined && (!/^\d+$/u.test(length) || !Number.isSafeInteger(Number(length))
+          || Number(length) < 1 || Number(length) > EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX_BYTES)) {
+        throw new HttpError("RESPONSE_INVALID", "SP returned invalid Chat trajectory page headers");
+      }
+      return data;
     },
     async trajectoryRecord(chat, row, signal) {
       const parsed = evalNativeRecordReferenceSchema.safeParse(row);

@@ -179,7 +179,16 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const storedSamplings: Sampling[] = [];
     const storedEvaluations: EvaluationRecord[] = [];
     for (const { samplingId } of command.samplings) {
-      const snapshot = rawSnapshot(samplingId, body);
+      const snapshot = samplingId === command.samplings[0]!.samplingId
+        ? { ...rawSnapshot(samplingId, body),
+          usageEvents: [{ eventId: "usage-1", kind: "assistant_model", runId: "model-1",
+            metrics: { inputTokens: 30, outputTokens: 12, cacheReadTokens: 10, cacheWriteTokens: 1 },
+            providerMetadata: { provider: "provider", model: "model-1" }, providerCostUsd: { total: 0.005 } }],
+          billingSettlements: [{ eventId: "usage-1", accountId: owner, status: "settled",
+            ratedUnits: 9, debitedUnits: 4, shortfallUnits: 5, platformOwned: { units: 2 } },
+          { source: "action", executionId: "action-1", status: "succeeded", chargedCredits: 7 },
+          { source: "action", executionId: "action-2", status: "failed", chargedCredits: 0 }] }
+        : rawSnapshot(samplingId, body);
       raw.set(samplingId, snapshot);
       const original = (await store.getSampling(samplingId))!;
       expect(original.revision).toBe(0);
@@ -259,6 +268,25 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       const facts = await source.read(query);
       expect(Math.max(...sizes)).toBeLessThan(15_000);
       expect(JSON.stringify(facts)).not.toContain(body);
+      const caseReader = createPostgresResourceSnapshotReader(measured, owner);
+      const base = { projectId: seeded.projectId, samplingId: samplingId!, role: "execution" as const,
+        runId: command.run.runId, page: 1, pageSize: 5 };
+      const before = sizes.length;
+      expect(await caseReader.readCaseUsage({ ...base, section: "attempts" }))
+        .toMatchObject({ total: 1, rows: [{ attemptId: samplingId, resourcesStatus: "collected" }] });
+      expect(await caseReader.readCaseUsage({ ...base, section: "models", attemptId: samplingId }))
+        .toMatchObject({ total: 1, rows: [{ eventId: "usage-1", cacheReadTokens: "10", providerUsd: "0.005",
+          settlementMatches: 1, accountPresent: true, debitedUnits: "4" }] });
+      expect(await caseReader.readCaseUsage({ ...base, section: "actions", attemptId: samplingId }))
+        .toMatchObject({ total: 2, rows: [{ index: 2, executionId: "action-1", chargedCredits: "7", executionMatches: 1 }] });
+      expect(await caseReader.readCaseUsage({ ...base, section: "actions", attemptId: samplingId, page: 2, pageSize: 1 }))
+        .toMatchObject({ total: 2, rows: [{ index: 3, executionId: "action-2", chargedCredits: "0" }] });
+      expect(await caseReader.readCaseUsage({ ...base, role: "evaluation", evaluationId: evaluationId!,
+        section: "models", attemptId: evaluationId })).toMatchObject({ total: 0, rows: [] });
+      await expect(createPostgresResourceSnapshotReader(measured, "other-owner")
+        .readCaseUsage({ ...base, section: "models", attemptId: samplingId }))
+        .rejects.toMatchObject({ code: "SAMPLING_NOT_FOUND" });
+      expect(sizes).toHaveLength(before); // No JSON column, including huge nativeRecords, reaches the driver.
 
       const withRaw = <T extends { readonly resources?: unknown }>(attempt: T, id: string) => ({
         ...attempt, resources: { ...attempt.resources as object, snapshot: raw.get(id)! },

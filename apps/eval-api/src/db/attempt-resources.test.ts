@@ -4,7 +4,8 @@ import type { SQL } from "drizzle-orm";
 import type { AgentResourceSnapshotDownload, AgentResourceSnapshotPage } from "@eval-platform/eval-contracts";
 import { compactNativeTrajectoryRecord } from "@eval-platform/eval-metrics";
 import { nativeFixture } from "../sp/native-test-fixture.js";
-import { updateWithResources } from "./attempt-resources.js";
+import { createPostgresResourceSnapshotReader, updateWithResources } from "./attempt-resources.js";
+import { READ_SNAPSHOT } from "./client.js";
 import type { EvalDb } from "./client.js";
 
 const chatId = "33333333-3333-4333-8333-333333333333";
@@ -136,5 +137,89 @@ describe("paged Attempt resource Store write", () => {
         .rejects.toThrow(/incomplete|usage is not followed/u);
       expect(statements.some(({ sql }) => sql.includes("INSERT INTO eval_attempt_resources"))).toBe(false);
     }
+  });
+});
+
+function caseDb(results: Array<Record<string, unknown>[]>) {
+  const statements: { sql: string; params: unknown[] }[] = [];
+  const execute = vi.fn(async (statement: SQL) => {
+    statements.push(new PgDialect().sqlToQuery(statement));
+    return { rows: results.shift() ?? [] };
+  });
+  const transaction = vi.fn(async (read: (transaction: { execute: typeof execute }) => Promise<unknown>,
+    _options: unknown) => read({ execute }));
+  return { db: { transaction } as unknown as EvalDb, statements, transaction };
+}
+
+describe("bounded read-only case usage projection", () => {
+  const selection = { projectId: "project-1", samplingId: "sampling-1", role: "execution" as const,
+    section: "models" as const, attemptId: "attempt-1", page: 2, pageSize: 5 };
+  const attempt = { attemptId: "attempt-1", resourcesStatus: "collected", usageCoverage: "partial",
+    billingCoverage: "partial", finalized: "false" };
+
+  it("selects one current owned Attempt and only five scalar model/billing rows under a consistent snapshot", async () => {
+    const { db, statements, transaction } = caseDb([
+      [{ total: 9 }], [attempt], [{ total: 17 }], [{ index: 6, eventId: "usage-6", inputTokens: "7",
+        status: "settled", settlementMatches: 1, debitedUnits: "2" }],
+    ]);
+    const result = await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage(selection);
+    expect(result).toMatchObject({ total: 17, attempt, rows: [{ index: 6, eventId: "usage-6" }] });
+    expect(transaction.mock.calls[0]?.[1]).toEqual(READ_SNAPSHOT);
+    expect(statements).toHaveLength(4);
+    expect(statements[0]?.sql).toMatch(/JOIN eval_projects AS p.*p.deleted_at IS NULL/su);
+    expect(statements[1]?.sql).toMatch(/a.value->>.* = .*LIMIT 2/su);
+    expect(statements[2]?.sql).toContain("json_array_length(r.snapshot->'usageEvents')");
+    const page = statements[3]!;
+    expect(page.sql).toMatch(/WITH body AS MATERIALIZED.*page AS MATERIALIZED/su);
+    expect(page.sql).toContain("json_array_elements(body.snapshot->'usageEvents')");
+    expect(page.sql).toContain("json_array_elements(body.snapshot->'billingSettlements')");
+    expect(page.sql).toContain("duplicate.value->>'eventId'");
+    expect(page.sql).toContain("b.value->>'accountId'");
+    expect(page.sql).not.toMatch(/SELECT \*|metric_snapshot|nativeRecords|toolArguments/su);
+    expect(page.params).toEqual(expect.arrayContaining([5, "owner-1", "attempt-1", "inputTokens", "debitedUnits"]));
+    expect(page.params).not.toContain("private raw snapshot");
+  });
+
+  it("lists Attempt metadata only and requires current membership in the selected original Run", async () => {
+    const { db, statements } = caseDb([[{ total: 13 }], [attempt, { ...attempt, attemptId: "attempt-2" }]]);
+    const result = await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage({
+      ...selection, section: "attempts", attemptId: undefined, page: 1, pageSize: 2, runId: "run-1",
+    });
+    expect(result.total).toBe(13);
+    expect(result.rows).toHaveLength(2);
+    expect(statements).toHaveLength(2);
+    expect(statements[0]?.sql).toMatch(/eval_run_samplings.*r.operation IN \('execution', 'pipeline'\)/su);
+    expect(statements[1]?.sql).toMatch(/OFFSET .* LIMIT /su);
+    expect(statements[1]?.sql).not.toMatch(/eval_attempt_resources|metric_snapshot|jsonb_array_elements\([^)]*nativeRecords|toolArguments/su);
+  });
+
+  it("scopes an Evaluator to its parent Sampling and exact Evaluation member, including Action missing-ID rows", async () => {
+    const { db, statements } = caseDb([[{ total: 2 }], [attempt], [{ total: 2 }],
+      [{ index: 3, executionId: null, chargedCredits: "3", executionMatches: 0 }]]);
+    const result = await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage({
+      projectId: "project-1", samplingId: "sampling-1", role: "evaluation", evaluationId: "evaluation-1",
+      runId: "run-1", section: "actions", attemptId: "attempt-1", page: 2, pageSize: 1,
+    });
+    expect(result.rows).toEqual([{ index: 3, executionId: null, chargedCredits: "3", executionMatches: 0 }]);
+    expect(statements[0]?.sql).toMatch(/JOIN eval_evaluations AS e.*e.evaluation_id = .*eval_run_evaluations.*m.evaluation_id = e.evaluation_id/su);
+    expect(statements[2]?.sql).toContain("b.value->>'source' IN ('action', 'tool')");
+    expect(statements[3]?.sql).toMatch(/executionMatches.*FROM page CROSS JOIN body/su);
+    expect(statements[3]?.sql).toMatch(/WHERE .*ORDER BY b.ordinal OFFSET .* LIMIT /su);
+    expect(statements[3]?.sql).not.toContain("b.ordinal >");
+    expect(statements[3]?.sql).not.toMatch(/nativeRecords|toolArguments|metric_snapshot/su);
+  });
+
+  it("never asks PostgreSQL for a snapshot when the selected Attempt's resources were not collected", async () => {
+    const { db, statements } = caseDb([[{ total: 1 }], [{ ...attempt, resourcesStatus: "pending" }]]);
+    const result = await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage(selection);
+    expect(result).toEqual({ total: null, rows: [], attempt: { ...attempt, resourcesStatus: "pending" } });
+    expect(statements).toHaveLength(2);
+  });
+
+  it("denies a missing/deleted/foreign current case before even selecting an Attempt or its snapshot", async () => {
+    const { db, statements } = caseDb([[]]);
+    await expect(createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage(selection))
+      .rejects.toMatchObject({ code: "SAMPLING_NOT_FOUND" });
+    expect(statements).toHaveLength(1);
   });
 });

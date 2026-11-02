@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX_BYTES } from "@springbrand/eval-harness";
 import { describe, expect, it, vi } from "vitest";
 import { nativeAssistantMessage, nativeTransfer, nativeTransferResponse } from "./native-test-fixture.js";
 import { createSpObservationClient } from "./observation.js";
@@ -46,6 +47,48 @@ describe("Eval SP observation client", () => {
       code: "REQUEST_INVALID_INPUT",
     });
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  const safePage = { format: "sp-pi-trajectory/v1", cursor: { throughSeq: 7 }, records: [], nextAfterSeq: null };
+  const safeBody = JSON.stringify({ success: true, msg: safePage });
+  it.each([
+    ["application/json", { "Content-Type": "application/json" }],
+    ["UTF-8 JSON", { "Content-Type": "application/json; charset=UTF-8",
+      "Content-Length": String(Buffer.byteLength(safeBody)), "Content-Encoding": "identity" }],
+    // Fetch transparently decompresses supported encodings before the SDK parses the JSON;
+    // these test responses represent the decoded bytes while retaining the wire header.
+    ["decoded gzip JSON", { "Content-Type": "application/json", "Content-Encoding": "gzip" }],
+    ["decoded brotli JSON", { "Content-Type": "application/json", "Content-Encoding": "br" }],
+  ])("accepts a valid public trajectory page with %s", async (_label, headers) => {
+    const fetch = vi.fn(async () => new Response(safeBody, { headers }));
+    expect(await client(fetch).trajectory(chat, { afterSeq: 3, limit: 50, throughSeq: 7 })).toEqual(safePage);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["missing Content-Type", {}],
+    ["non-JSON Content-Type", { "Content-Type": "text/plain" }],
+    ["incorrect charset", { "Content-Type": "application/json; charset=iso-8859-1" }],
+    ["unsupported Content-Encoding", { "Content-Type": "application/json", "Content-Encoding": "compress" }],
+    ["malformed Content-Encoding", { "Content-Type": "application/json", "Content-Encoding": "gzip, unknown" }],
+    ["malformed Content-Length", { "Content-Type": "application/json", "Content-Length": "not-a-number" }],
+    ["empty declared Content-Length", { "Content-Type": "application/json", "Content-Length": "0" }],
+  ])("rejects a public trajectory page with %s after the bounded HTTP read", async (_label, headers) => {
+    const fetch = vi.fn(async () => new Response(safeBody, { headers }));
+    await expect(client(fetch).trajectory(chat, { afterSeq: 3, limit: 50, throughSeq: 7 }))
+      .rejects.toMatchObject({ code: "RESPONSE_INVALID" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("still refuses a declared or actual JSON page above the public 4 MB limit", async () => {
+    const declared = vi.fn(async () => new Response(safeBody, { headers: {
+      "Content-Type": "application/json", "Content-Length": String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX_BYTES + 1),
+    } }));
+    await expect(client(declared).trajectory(chat, {})).rejects.toThrow();
+    const oversized = vi.fn(async () => new Response(new Blob([
+      safeBody, " ".repeat(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX_BYTES),
+    ]).stream(), { headers: { "Content-Type": "application/json" } }));
+    await expect(client(oversized).trajectory(chat, {})).rejects.toThrow();
   });
 
   it("maps SP failures and refuses oversized Workspace files", async () => {
