@@ -980,6 +980,7 @@ Agent 用途由 Eval 写入 `eval_agent_config_purposes`，只接受 `execution`
 
 - `createPostgresProjectStore` 写 Project 快照、替换评估计划、软删除（存在活动 Run 时拒绝）和读取计划视图；`createPostgresProjectPlanReader`（用户范围）与 `createPostgresWorkerProjectPlanReader`（仅 Worker）实现 Runtime 的 `ProjectPlanReader`，已软删除的 Project 读为不存在，详情、预览、Run、Metrics 和观察入口因此一律 404。
 - `createPostgresRuntimeStore` 与 HTTP 路由使用同一已校验的 `EvalSpRelease`；`admitRun` 在 Project 行锁下先校验创建 key 的可信瞬时证明，再完成重放/冲突（同 key 的原 Run 即使被后续 Run 取代也可重放）、忙碌检查、发布校验、计划摘要与评估计划复核、目标与当前 Sampling 集合复核、只删除选中记录及其 Run 关联、分批插入、首次评估锁定评估计划，并在同一事务内经 `fromDrizzle(transaction)` 投递 pg-boss 任务。Run 行从不删除，被替换的成员从其 Run 关联中移除。
+- 跨 Project 准入限制同一数据库最多 3 个活跃 Project，使用 `runActive` 判定，事务级 PostgreSQL 锁串行化多 API 实例的新 Run 准入与旧 Run 手动补收后的重新激活。重放和已活跃 Run 的补采不占新名额；达到上限返回 `409 ACTIVE_PROJECT_LIMIT_REACHED`。Worker 的 `EVAL_RUN_WORKER_CONCURRENCY` 仍只控制每实例处理数量。
 - `createPostgresWorkerRuntimeStore` 只供 Worker 跨用户恢复 Run，HTTP 路由不能注入它。
 - Sampling/Evaluation 写入携带预期 `revision`，PostgreSQL 用条件 `UPDATE` 检查版本并递增；未命中即报告冲突，由 Runtime 读回校准。原始资源快照与摘要在同一事务写入，阶段事实不含快照正文。
 - `createPostgresMetricsSource` 在一个 repeatable-read 只读事务内按固定计划读取范围内全部 ProjectSample（含从未运行的）、当前 Sampling/Evaluation（可按 `runIds` 过滤）和相关 Run 投影，全部为集合查询，不用实时 `dataset_data` 推断归属。`createPostgresObservationReader` 校验 Project 与当前记录后返回只读观察引用，从不返回可写 Chat URL。

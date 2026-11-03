@@ -14,6 +14,8 @@ describe("errors", () => {
 
   it("maps known codes to Chinese, appends field errors and falls back to the server text", () => {
     expect(describeError(new ApiError({ status: 409, code: "PROJECT_BUSY", message: "busy" }))).toBe("Project 还有未结束的 Run");
+    expect(describeError(new ApiError({ status: 409, code: "ACTIVE_PROJECT_LIMIT_REACHED", message: "full" })))
+      .toBe("同时最多运行 3 个 Project，请等待其他项目结束后重试");
     expect(describeError(new ApiError({
       status: 422, code: "REQUEST_VALIDATION_FAILED", message: "Validation failed",
       errors: [{ path: "name", errMsg: "Required" }],

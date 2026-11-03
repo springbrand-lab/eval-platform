@@ -13,7 +13,7 @@ function setup(target: Awaited<ReturnType<NonNullable<ApiRuntime["evaluationResu
 }, configured = true) {
   const submissions = {
     target: vi.fn(async () => target),
-    save: vi.fn(async (..._args: readonly unknown[]) => "accepted" as "accepted" | "replayed" | "closed" | "conflict"),
+    save: vi.fn(async (..._args: readonly unknown[]) => "accepted" as "accepted" | "replayed" | "closed" | "conflict" | "capacity"),
   };
   const runtime = {
     webOrigin: WEB_ORIGIN,
@@ -155,6 +155,17 @@ describe("evaluation result MCP Server", () => {
   it("accepts a late valid result after an observation failure", async () => {
     const app = setup({ ownerUserId: "owner-1", status: "failed", schema });
     expect(await (await app.call(valid)).json()).toMatchObject({ result: { content: [{ text: expect.stringContaining("accepted") }] } });
+    expect(app.submissions.save).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks an Evaluator to retry a capacity-blocked late result without claiming acceptance", async () => {
+    const app = setup({ ownerUserId: "owner-1", status: "failed", schema });
+    app.submissions.save.mockResolvedValue("capacity");
+    const response = await app.call(valid);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ result: {
+      isError: true, content: [{ text: expect.stringContaining("retry later") }],
+    } });
     expect(app.submissions.save).toHaveBeenCalledTimes(1);
   });
 
