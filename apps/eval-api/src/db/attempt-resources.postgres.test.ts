@@ -24,7 +24,7 @@ import { readRunView } from "./run-view.js";
 import { createPostgresRuntimeStore } from "./runtime.js";
 import { attemptResources } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
-import { buildCommand, makeData, release, seedProject } from "./test-fixtures.js";
+import { buildCommand, makeData, release, seedProject, settle } from "./test-fixtures.js";
 import { modelBillingPairFixture, nativeFixture, nativeToolBodyPair } from "../sp/native-test-fixture.js";
 import { createSpHarness } from "../sp/harness.js";
 
@@ -814,6 +814,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     expect(await database.db.select({ id: attemptResources.recordId }).from(attemptResources)
       .where(and(eq(attemptResources.ownerUserId, owner),
         inArray(attemptResources.samplingId, [...command.run.samplingIds, ...replacement.run.samplingIds])))).toEqual([]);
+    await settle(store, replacement.run.samplingIds, "succeeded");
   }, 30_000);
 
   describe.each(["execution", "evaluation"] as const)("%s snapshot string round trips", (stage) => {
@@ -866,6 +867,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       const text = await new Response(stream!).text();
       expect(JSON.parse(text)).toEqual(snapshot);
       expect(text).toContain(JSON.stringify(value));
+      if (stage === "evaluation") await settle(store, command.run.samplingIds, "succeeded");
     });
   });
 
