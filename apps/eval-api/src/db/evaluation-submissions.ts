@@ -4,6 +4,8 @@ import { evaluationAgentEnded, stageOwesResources } from "@eval-platform/eval-ru
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { RunQueue } from "../run-worker-queue.js";
 import type { EvalDb } from "./client.js";
+import { ActiveProjectLimitError } from "./errors.js";
+import { requireActiveProjectCapacity } from "./project-capacity.js";
 import { readEvaluationOutputSchema } from "./project-plans.js";
 import { evaluationSubmissions, evaluations, projects, runEvaluations, runs, samplings } from "./schema.js";
 
@@ -14,7 +16,7 @@ export interface EvaluationSubmissionTarget {
 }
 
 export type EvaluationSubmissionStore = ReturnType<typeof createPostgresEvaluationSubmissions>;
-export type EvaluationSubmissionReceipt = "accepted" | "replayed" | "closed" | "conflict";
+export type EvaluationSubmissionReceipt = "accepted" | "replayed" | "closed" | "conflict" | "capacity";
 
 /** Validated MCP results are authoritative; Agent completion and resource collection are separate facts. */
 export function createPostgresEvaluationSubmissions(db: EvalDb, runQueue: RunQueue) {
@@ -70,6 +72,14 @@ export function createPostgresEvaluationSubmissions(db: EvalDb, runQueue: RunQue
         const resourcesPending = evaluation.status.resourcesPending
           ?? (stageOwesResources(accepted.attempts, evaluationAgentEnded(accepted))
             ? startResourceWait(input.submittedAt.toISOString()) : undefined);
+        if (resourcesPending !== undefined && !isStageRecoveryPending(evaluation.status)) {
+          try {
+            await requireActiveProjectCapacity(tx, project.id);
+          } catch (error) {
+            if (error instanceof ActiveProjectLimitError) return "capacity";
+            throw error;
+          }
+        }
         const patch = JSON.stringify({ status: { ...accepted.status, ...(resourcesPending === undefined ? {} : { resourcesPending }) }, output });
         if (!existing) await tx.insert(evaluationSubmissions).values({ ...input, contentHash });
         await tx.update(evaluations).set({

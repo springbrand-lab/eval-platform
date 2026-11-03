@@ -67,6 +67,7 @@ async function submit(c: Context<AppBindings>, args: unknown) {
   });
   if (receipt === "closed") return toolText(`Evaluation ${evaluationId} is stopped, cancelled, replaced or unavailable; the result was not accepted.`, true);
   if (receipt === "conflict") return toolText(`Evaluation ${evaluationId} already has an accepted result; a different result cannot replace it.`, true);
+  if (receipt === "capacity") return toolText("Three Projects are already running; your result was not saved, retry later with the same result.", true);
   c.var.logger?.info({ event: "evaluation_result_submitted", evaluationId }, "Evaluation result submitted");
   return toolText("Evaluation result accepted. You are done; end with a short summary.");
 }

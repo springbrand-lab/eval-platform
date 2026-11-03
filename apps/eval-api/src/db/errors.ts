@@ -89,6 +89,14 @@ export class ProjectRunStopConflictError extends Error {
   }
 }
 
+/** Another Project cannot become active until one of the current Runs finishes. */
+export class ActiveProjectLimitError extends Error {
+  constructor(readonly limit: number) {
+    super(`At most ${limit} Projects may have an active Run`);
+    this.name = "ActiveProjectLimitError";
+  }
+}
+
 export class ResultCollectionConflictError extends Error {
   constructor() { super("Only a failed stage with a completed Agent in a non-stopped Run can recollect results"); this.name = "ResultCollectionConflictError"; }
 }

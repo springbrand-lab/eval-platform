@@ -30,6 +30,7 @@ import type { RunRecoveryStore } from "../worker.js";
 import { constraintViolation, READ_SNAPSHOT, type EvalDb } from "./client.js";
 import { ProjectRunStopConflictError, ResultCollectionConflictError } from "./errors.js";
 import { requireOwnerUserId } from "./owner.js";
+import { requireActiveProjectCapacity } from "./project-capacity.js";
 import { readProjectPlan, visibleProject } from "./project-plans.js";
 import { requireEvalSpRelease, type EvalSpRelease } from "./release.js";
 import {
@@ -357,6 +358,7 @@ async function admitRun(
   const { lockEvaluationPlan } = await checkPlanDigests(transaction, run, executionPlanDigest);
   await checkSelectorTargets(transaction, owner, run);
   await lockTargets(transaction, owner, command);
+  await requireActiveProjectCapacity(transaction, run.projectId);
   await clearSelected(transaction, owner, command);
   await insertRun(transaction, owner, command);
   if (lockEvaluationPlan) {
@@ -584,6 +586,7 @@ export function createPostgresProjectRunControl(db: EvalDb, ownerUserId: string,
         };
         /** A manual resource recollection also gives every Attempt a fresh download budget. */
         const requeue = async (next: SamplingStageState) => {
+          await requireActiveProjectCapacity(transaction, projectId);
           const fresh = target === "resources";
           if (evaluation) {
             const attempts = fresh ? withFreshResourceBudget(evaluation.attempts) : evaluation.attempts;

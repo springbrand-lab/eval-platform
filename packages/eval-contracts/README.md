@@ -94,7 +94,7 @@ Web 轮询前者、停止自动轮询后者，不根据逐 Agent 的未知结果
 
 `AgentPurpose` 是 Eval Agent Config 当前的 `execution | evaluation` 用途，可在编辑时切换；它与 Runtime 的 `AgentRole` 分开，Subject/Evaluator 运行契约不因此改变。切换为评估用途时由 Eval 自动绑定评估结果 MCP，切回执行用途时移除该绑定。
 
-评估平台跨包共享的稳定契约层，公共契约从包根入口导入。`./http-errors` 是 Eval API 唯一的错误码目录（`defineErrorCatalog`），`./http` 是基于它的 Hono 响应器（`createHonoHttp`）；只有这两个 HTTP 边界子路径依赖 `@springbrand/http` 与 `hono`，包根不加载它们。HTTP 契约见 [Eval HTTP 控制面](../../docs/eval-http-api.md)。
+评估平台跨包共享的稳定契约层，公共契约从包根入口导入。`./http-errors` 是 Eval API 唯一的错误码目录（`defineErrorCatalog`），`./http` 是基于它的 Hono 响应器（`createHonoHttp`）；只有这两个 HTTP 边界子路径依赖 `@springbrand/http` 与 `hono`，包根不加载它们。`ACTIVE_PROJECT_LIMIT_REACHED` 表示新 Run 或补收使同时活跃的 Project 超过 3 个，409 不改变已保存的结果。HTTP 契约见 [Eval HTTP 控制面](../../docs/eval-http-api.md)。
 
 Agent 编辑器使用的 SP 领域错误由 `sp-editor-errors.ts` 从 SP 公开错误目录选取，状态码、默认文案和删除阻挡详情 Schema 均复用上游定义。仅 HTTP 子路径加载这些契约；服务账号认证失败仍由 API 翻译为依赖不可用，不要求浏览器重新登录。
 

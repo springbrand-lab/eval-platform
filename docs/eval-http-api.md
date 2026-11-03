@@ -304,12 +304,12 @@ Expansion and replacement follow [Run admission](architecture.md#run-准入与�
 | Route | Domain errors |
 | --- | --- |
 | Preview | `404 PROJECT_NOT_FOUND`, `DATASET_NOT_FOUND`, `PROJECT_SAMPLE_NOT_FOUND`, `SAMPLING_NOT_FOUND`; `409 PROJECT_EVALUATION_PLAN_REQUIRED`, `RUN_TARGETS_EMPTY`, `SAMPLING_UNAVAILABLE`, `PROJECT_SAMPLE_EVALUATION_PROMPT_MISSING`; `413 RUN_TARGETS_TOO_LARGE` when the expanded targets exceed `RUN_TARGET_IDS` |
-| Submit | Preview's `404`s; `400 RUNTIME_INPUT_INVALID` (evaluation targets listing ProjectSamples, a Sampling listed with its own ProjectSample); `409 PROJECT_BUSY`, `RUN_IDEMPOTENCY_CONFLICT`, `PROJECT_SOURCE_BRANCH_CONFLICT`, `PROJECT_EVALUATION_PLAN_REQUIRED`, `PROJECT_PLAN_CHANGED`, `RUN_TARGETS_STALE`, `RUN_TARGETS_EMPTY`, `SAMPLING_UNAVAILABLE`, `PROJECT_SAMPLE_EVALUATION_PROMPT_MISSING` |
+| Submit | Preview's `404`s; `400 RUNTIME_INPUT_INVALID` (evaluation targets listing ProjectSamples, a Sampling listed with its own ProjectSample); `409 PROJECT_BUSY`, `ACTIVE_PROJECT_LIMIT_REACHED`, `RUN_IDEMPOTENCY_CONFLICT`, `PROJECT_SOURCE_BRANCH_CONFLICT`, `PROJECT_EVALUATION_PLAN_REQUIRED`, `PROJECT_PLAN_CHANGED`, `RUN_TARGETS_STALE`, `RUN_TARGETS_EMPTY`, `SAMPLING_UNAVAILABLE`, `PROJECT_SAMPLE_EVALUATION_PROMPT_MISSING` |
 | Current | `404 PROJECT_NOT_FOUND` |
 | Stop | `404 RUN_NOT_FOUND` (also for another owner's or a deleted Project); `409 PROJECT_NO_ACTIVE_RUN` |
 | Run, Run evaluations | `404 RUN_NOT_FOUND` |
 | Score re-sync | `404 RUN_NOT_FOUND`; `503 SCORE_SYNC_UNCONFIGURED` |
-| Collect | `404 PROJECT_NOT_FOUND`, `SAMPLING_NOT_FOUND`, `EVALUATION_NOT_FOUND`; `409 PROJECT_BUSY` (another Run is active), `RESULT_COLLECTION_CONFLICT` (stage or Attempt not eligible, Run stopped); `400 REQUEST_INVALID_JSON`, `415 REQUEST_UNSUPPORTED_MEDIA_TYPE`, `422 REQUEST_VALIDATION_FAILED` (unknown `target` or extra field) |
+| Collect | `404 PROJECT_NOT_FOUND`, `SAMPLING_NOT_FOUND`, `EVALUATION_NOT_FOUND`; `409 PROJECT_BUSY` (another Run is active), `ACTIVE_PROJECT_LIMIT_REACHED` (an inactive Run would reopen while three Projects are active), `RESULT_COLLECTION_CONFLICT` (stage or Attempt not eligible, Run stopped); `400 REQUEST_INVALID_JSON`, `415 REQUEST_UNSUPPORTED_MEDIA_TYPE`, `422 REQUEST_VALIDATION_FAILED` (unknown `target` or extra field) |
 
 ### Result reads
 
@@ -437,7 +437,7 @@ The target account is always the service account; the client cannot name another
 
 Run admission uses a token-free, owner-scoped `ProjectPlanReader` and `RuntimeStore` with `createEvalRunAdmission`. The HTTP process holds no Harness credential and never runs Agents: admission and stop requests commit their Run facts and enqueue the Run job in the same PostgreSQL transaction (see [Run scheduling](architecture.md#run-调度与停止)).
 
-Admission responses follow the rules in [Run admission](architecture.md#run-准入与独立评估): the request fingerprint covers `projectId`, `operation`, `selector`, `targets` and the caller's expected plan digests. A matching persisted Project/key Run returns the original Run before consulting mutable plans or targets, even when later admissions replaced its Samplings (the returned membership may now be empty); a reused key with different facts or digests is `409 RUN_IDEMPOTENCY_CONFLICT`; a new key while the Project has an unfinished Run is `409 PROJECT_BUSY`. Inside the transaction the Store rechecks the supplied digests (`PROJECT_PLAN_CHANGED`), the evaluation plan (`PROJECT_EVALUATION_PLAN_REQUIRED`), the selector's expanded current targets (including evaluation-only), and the replaced Sampling set (`RUN_TARGETS_STALE`). On a conflict the caller needs a new approved preview and a new key; changing the digests of an old approval cannot authorize a new Run.
+Admission responses follow the rules in [Run admission](architecture.md#run-准入与独立评估): the request fingerprint covers `projectId`, `operation`, `selector`, `targets` and the caller's expected plan digests. A matching persisted Project/key Run returns the original Run before consulting mutable plans or targets, even when later admissions replaced its Samplings (the returned membership may now be empty); a reused key with different facts or digests is `409 RUN_IDEMPOTENCY_CONFLICT`; a new key while the Project has an unfinished Run is `409 PROJECT_BUSY`. Across all owners, no more than three Projects may have an active Run; starting a fourth (including the first Run of a newly created Project or reopening an old Run via recollection) is `409 ACTIVE_PROJECT_LIMIT_REACHED`. Inside the transaction the Store rechecks the supplied digests (`PROJECT_PLAN_CHANGED`), the evaluation plan (`PROJECT_EVALUATION_PLAN_REQUIRED`), the selector's expanded current targets (including evaluation-only), and the replaced Sampling set (`RUN_TARGETS_STALE`). On a plan/target conflict the caller needs a new approved preview and a new key; capacity rejection can be retried with the same request/key once a Project finishes.
 
 `POST .../runs/{runId}/stop` targets only the named Run of that Project and returns `202 {runId, stopRequested:true}`, including for a repeat; an unknown Run, another owner's Run or a Run of a deleted Project is `404 RUN_NOT_FOUND`; a finished Run without a stop request is `409 PROJECT_NO_ACTIVE_RUN`. The response only records the request; stop semantics are described in [Run scheduling and stop](architecture.md#run-调度与停止).
 
@@ -470,6 +470,7 @@ The complete catalog of `packages/eval-contracts/src/http-errors.ts`. Status `0`
 | `AGENT_CONFIG_FROZEN` | 409 | Edit, deletion or source selection of a frozen Project copy |
 | `PROJECT_NOT_FOUND` | 404 | Unknown, another owner's or soft-deleted Project |
 | `PROJECT_BUSY` | 409 | New Run key or deletion while a Run is unfinished |
+| `ACTIVE_PROJECT_LIMIT_REACHED` | 409 | Three other Projects already have active Runs; wait for one to finish |
 | `PROJECT_IDEMPOTENCY_CONFLICT` | 409 | Creation key reused with a different body |
 | `PROJECT_NO_ACTIVE_RUN` | 409 | Stop of a finished Run without a stop request |
 | `RESULT_COLLECTION_CONFLICT` | 409 | Manual recollection of a stage, Attempt or Run that is not eligible |
