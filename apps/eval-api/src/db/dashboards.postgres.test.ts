@@ -8,7 +8,7 @@ import { createPostgresProjectPlanReader } from "./project-plans.js";
 import { createPostgresRuntimeStore } from "./runtime.js";
 import { dashboardProjects, dashboards, projects } from "./schema.js";
 import { createTestDatabase } from "./test-database.js";
-import { buildCommand, makeData, release, seedProject } from "./test-fixtures.js";
+import { buildCommand, makeData, release, seedProject, settle } from "./test-fixtures.js";
 
 const connection = process.env.DATABASE_URL;
 const owner = "dashboard-persistence-test";
@@ -24,7 +24,9 @@ describe.skipIf(!connection)("PostgreSQL saved Dashboards", () => {
     const runtime = createPostgresRuntimeStore(database.db, owner, release, { async enqueue() {} });
     for (let index = 0; index < 3; index++) {
       const { projectId } = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }] });
-      await runtime.admitRun(await buildCommand(plans, runtime, { projectId, operation: "execution" }));
+      const command = await buildCommand(plans, runtime, { projectId, operation: "execution" });
+      await runtime.admitRun(command);
+      await settle(runtime, command.run.samplingIds, "succeeded");
       ids.push(projectId);
     }
     const store = createPostgresDashboardStore(database.db, owner);
