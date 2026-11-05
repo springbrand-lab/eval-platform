@@ -1,12 +1,13 @@
 import type { RecollectTarget, RunRequest } from "@eval-platform/eval-contracts";
 import { api, enc } from "./client";
 import type {
-  EvaluationRecord, RunEvaluation, RunHandle, RunOperation, RunPreview, RunSnapshot, RunTargetSelector,
+  EvaluationRecord, ProjectRunHistoryPage, RunEvaluation, RunHandle, RunOperation, RunPreview, RunSnapshot, RunTargetSelector,
   Sampling, ScoreSyncSummary,
 } from "./types";
 
 export const runKeys = {
   detail: (projectId: string, runId: string) => ["runs", "detail", projectId, runId] as const,
+  history: (projectId: string) => ["runs", "history", projectId] as const,
   evaluations: (projectId: string, runId: string) => ["evaluations", projectId, "run", runId] as const,
   samplingEvaluations: (projectId: string, samplingId: string) => ["evaluations", projectId, "sampling", samplingId] as const,
 };
@@ -17,6 +18,10 @@ export const previewRun = (projectId: string, input: { operation: RunOperation; 
   api.post<RunPreview>(`${base(projectId)}/preview`, input);
 export const submitRun = (projectId: string, input: Omit<RunRequest, "projectId">) =>
   api.post<RunHandle>(base(projectId), input);
+export const listProjectRuns = (projectId: string, beforeSequence?: number, signal?: AbortSignal) =>
+  api.get<ProjectRunHistoryPage>(base(projectId), {
+    ...(beforeSequence === undefined ? {} : { params: { beforeSequence } }), signal,
+  });
 export const getProjectRun = (projectId: string, runId: string, signal?: AbortSignal) =>
   api.get<{ run: RunSnapshot }>(`${base(projectId)}/${enc(runId)}`, { signal });
 export const listRunEvaluations = (projectId: string, runId: string, signal?: AbortSignal) =>

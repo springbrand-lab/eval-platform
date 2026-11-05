@@ -80,6 +80,13 @@ function setup() {
     results: { getRun: vi.fn(async () => ({ runId: "run-1" })) },
     projectRuns: {
       readRun: vi.fn(),
+      listRunHistory: vi.fn(async (projectId: string) => projectId === "project-1" ? {
+        runs: [
+          { runId: "run-2", sequence: 2, operation: "execution", retainedSamplingCount: 1, retainedEvaluationCount: 0 },
+          { runId: "run-1", sequence: 1, operation: "execution", retainedSamplingCount: 0, retainedEvaluationCount: 0 },
+        ],
+        nextBeforeSequence: null,
+      } : null),
       recollect: vi.fn(async () => ({ runId: "run-1", queued: true })),
       getCurrentRun: vi.fn(async () => null),
       stopRun: vi.fn(async (_projectId: string, runId: string) => runId === "run-1" ? { runId, stopRequested: true as const } : null),
@@ -305,6 +312,24 @@ describe("Eval API HTTP layer", () => {
     app.services.projects.delete.mockRejectedValueOnce(new RuntimeProjectBusyError("project-1", "run-1"));
     const busy = await app.request("/api/projects/project-1", authorized("session", { method: "DELETE" }));
     expect(await busy.json()).toMatchObject({ code: "PROJECT_BUSY" });
+  });
+
+  it("lists persisted Runs independently of current results and validates the history cursor", async () => {
+    const app = setup();
+    const history = await app.request("/api/projects/project-1/runs", authorized());
+    expect(history.status).toBe(200);
+    expect(await history.json()).toMatchObject({ msg: { runs: [
+      { runId: "run-2", sequence: 2 }, { runId: "run-1", sequence: 1, retainedSamplingCount: 0 },
+    ] } });
+    expect(app.services.projectRuns.listRunHistory).toHaveBeenCalledWith("project-1", undefined);
+    expect((await app.request("/api/projects/project-1/runs?beforeSequence=2", authorized())).status).toBe(200);
+    expect(app.services.projectRuns.listRunHistory).toHaveBeenLastCalledWith("project-1", 2);
+    for (const query of ["beforeSequence=0", "beforeSequence=no", "beforeSequence=9007199254740992", "other=1"]) {
+      expect((await app.request(`/api/projects/project-1/runs?${query}`, authorized())).status).toBe(422);
+    }
+    const missing = await app.request("/api/projects/missing/runs", authorized());
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ code: "PROJECT_NOT_FOUND" });
   });
 
   it("replaces only the evaluation plan and reports a locked plan", async () => {
