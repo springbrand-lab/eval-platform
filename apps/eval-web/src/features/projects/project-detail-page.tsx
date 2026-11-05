@@ -1,11 +1,12 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ArrowRight, Play, Square, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { getProjectOverview, metricKeys } from "@/api-sdk/metrics-api";
+import { listProjectRuns, runKeys } from "@/api-sdk/runs-api";
 import { deleteProject, projectKeys } from "@/api-sdk/projects-api";
-import type { ProjectView } from "@/api-sdk/types";
+import type { ProjectRunHistoryPage, ProjectView } from "@/api-sdk/types";
 import { Page, PageHeader } from "@/components/layout/page";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,6 +15,7 @@ import { ProjectStatistics } from "./project-statistics";
 import { ProjectResults } from "./project-results";
 import { ProjectResultsDownloadButton } from "./project-results-download-button";
 import { CopyId, ProgressBar, Tabs } from "@/components/ui/data-display";
+import { TablePagination } from "@/components/ui/pagination";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { EmptyState, ErrorBlock, LoadingBlock, Spinner } from "@/components/ui/feedback";
 import { ActionMenu } from "@/components/ui/menu";
@@ -111,17 +113,31 @@ function PlanCard({ view }: { view: ProjectView }) {
   );
 }
 
-function RunRow({ projectId, runId }: { projectId: string; runId: string }) {
-  const run = useRun(projectId, runId);
+function RunRow({ projectId, entry, live }: {
+  projectId: string; entry: ProjectRunHistoryPage["runs"][number]; live: boolean;
+}) {
+  const { runId, sequence, operation, retainedSamplingCount, retainedEvaluationCount } = entry;
+  const retained = operation === "evaluation" ? retainedEvaluationCount : retainedSamplingCount;
+  const run = useRun(projectId, live ? runId : null);
   const snapshot = run.data?.run;
-  return (
+  const content = <>
+    <span className="w-16 shrink-0 font-semibold text-text-strong">第 {sequence} 次</span>
+    <span className="w-20 shrink-0 font-semibold text-text-strong">{OPERATION_LABELS[operation]}</span>
+    {live ? snapshot ? <StatusBadge status={snapshot.status} /> : <Spinner />
+      : <span className="text-text-muted">{retained ? "仅显示留存结果" : "结果已替换"}</span>}
+    <span className="text-text-muted">
+      留存 {retainedSamplingCount} 个采样 · {retainedEvaluationCount} 个评估
+    </span>
+    <span className="ml-auto font-mono text-xs text-text-faint" title={runId}>
+      {retained ? runId.slice(0, 8) : <CopyId value={runId} />}
+    </span>
+  </>;
+  const className = "flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border px-4 py-2.5 text-[13px] last:border-b-0";
+  return retained ? (
     <Link to="/projects/$projectId/runs/$runId" params={{ projectId, runId }}
-      className="flex items-center gap-4 border-b border-border px-4 py-2.5 text-[13px] last:border-b-0 hover:bg-surface-hover">
-      {snapshot ? <StatusBadge status={snapshot.status} /> : <Spinner />}
-      <span className="w-24 font-semibold text-text-strong">{snapshot ? OPERATION_LABELS[snapshot.operation] : "—"}</span>
-      <span className="text-text-muted">{snapshot ? `${snapshot.samplingIds.length} 个采样 · ${snapshot.evaluationIds.length} 个评估` : ""}</span>
-      <span className="ml-auto font-mono text-xs text-text-faint">{runId.slice(0, 8)}</span>
-    </Link>
+      className={`${className} hover:bg-surface-hover`}>{content}</Link>
+  ) : (
+    <div className={className}>{content}</div>
   );
 }
 
@@ -136,6 +152,16 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
     refetchInterval: view.data?.currentRun ? 10_000 : false,
   });
   const [tab, setTab] = useState<"results" | "runs" | "settings">("results");
+  const [historyPosition, setHistoryPosition] = useState({ projectId, pageIndex: 0 });
+  const historyPageIndex = historyPosition.projectId === projectId ? historyPosition.pageIndex : 0;
+  const history = useInfiniteQuery({
+    queryKey: runKeys.history(projectId),
+    queryFn: ({ pageParam, signal }) => listProjectRuns(projectId, pageParam ?? undefined, signal),
+    initialPageParam: null as number | null,
+    getNextPageParam: (page) => page.nextBeforeSequence ?? undefined,
+    enabled: tab === "runs" && !!view.data,
+  });
+  const historyPage = history.data?.pages[historyPageIndex];
   const [deleting, setDeleting] = useState(false);
   const [stopTarget, setStopTarget] = useState<StopRunTarget | null>(null);
   const remove = useMutation({
@@ -178,10 +204,25 @@ export function ProjectDetailPage({ projectId }: { projectId: string }) {
           </> : overview.error ? <ErrorBlock error={overview.error} onRetry={() => void overview.refetch()} /> : <LoadingBlock rows={2} />)}
           {tab === "settings" && view.data && <><PlanCard view={view.data} /><Card><CardHeader title="测试范围" description="项目使用创建时的数据副本，之后修改数据集不会改变已有项目。" /><CardBody><ul>{view.data.datasets.map((dataset) => <li key={dataset.datasetId}><Link className="link" to="/projects/$projectId/datasets/$datasetId" params={{ projectId, datasetId: dataset.datasetId }}>{dataset.name}</Link></li>)}</ul></CardBody></Card></>}
           {tab === "runs" && <Card>
-            <CardHeader title="运行记录" description="列出与当前结果关联的运行。进入记录查看该次操作的范围和状态；已被替换的历史结果不在此汇总。" />
-            {!overview.data ? overview.error ? <ErrorBlock error={overview.error} onRetry={() => void overview.refetch()} /> : <LoadingBlock rows={2} /> : overview.data.runIds.length === 0
-              ? <EmptyState title="还没有运行记录" />
-              : <div>{overview.data.runIds.map((runId) => <RunRow key={runId} projectId={projectId} runId={runId} />)}</div>}
+            <CardHeader title="运行记录" description="按提交顺序列出全部运行。重跑会替换旧结果，但旧 Run 的记录仍保留。" />
+            {!historyPage ? history.error ? <ErrorBlock error={history.error} onRetry={() => void history.refetch()} /> : <LoadingBlock rows={2} />
+              : historyPage.runs.length === 0 && historyPageIndex === 0 ? <EmptyState title="还没有运行记录" />
+                : <>
+                  {historyPage.runs.map((entry) => <RunRow key={entry.runId} projectId={projectId} entry={entry}
+                    live={entry.sequence === view.data!.runSequence || entry.runId === view.data!.currentRun?.runId} />)}
+                  <TablePagination label="运行记录分页" pageIndex={historyPageIndex}
+                    hasNextPage={historyPage.nextBeforeSequence !== null} disabled={history.isFetchingNextPage}
+                    onPageChange={(next) => {
+                      if (history.data?.pages[next]) {
+                        setHistoryPosition({ projectId, pageIndex: next });
+                      } else if (next > historyPageIndex && historyPage.nextBeforeSequence !== null) {
+                        void history.fetchNextPage().then((result) => {
+                          if (result.data?.pages[next]) setHistoryPosition({ projectId, pageIndex: next });
+                        });
+                      }
+                    }} />
+                  {history.isFetchNextPageError && <ErrorBlock error={history.error} onRetry={() => void history.fetchNextPage()} />}
+                </>}
           </Card>}
           {project && <p className="text-xs text-text-faint">创建于 {formatDateTime(project.createdAt)} · <CopyId value={project.projectId} /></p>}
         </div>

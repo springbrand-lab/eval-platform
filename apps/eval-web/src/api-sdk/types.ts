@@ -71,6 +71,18 @@ export type {
 
 export type RunEvaluation = EvaluationRecord & Pick<Sampling, "execution">;
 
+/** Run provenance, not a snapshot of results that may have been replaced. */
+export interface ProjectRunHistoryPage {
+  readonly runs: readonly {
+    readonly runId: string;
+    readonly sequence: number;
+    readonly operation: RunOperation;
+    readonly retainedSamplingCount: number;
+    readonly retainedEvaluationCount: number;
+  }[];
+  readonly nextBeforeSequence: number | null;
+}
+
 export type ResourceCollections = ResourceStatistics["collections"];
 
 export interface Me {

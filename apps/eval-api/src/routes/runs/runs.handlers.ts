@@ -23,6 +23,12 @@ export const previewRun: AppRouteHandler<typeof routes.previewRun> = async (c) =
 export const submitRun: AppRouteHandler<typeof routes.submitRun> = async (c) =>
   ok(c, await c.var.services.admission.submit({ projectId: c.req.valid("param").projectId, ...c.req.valid("json") }), 202);
 
+export const listProjectRuns: AppRouteHandler<typeof routes.listProjectRuns> = async (c) => {
+  const history = await c.var.services.projectRuns.listRunHistory(c.req.valid("param").projectId, c.req.valid("query").beforeSequence);
+  if (!history) throw new HttpError("PROJECT_NOT_FOUND");
+  return ok(c, history);
+};
+
 export const getRun: AppRouteHandler<typeof routes.getRun> = async (c) =>
   ok(c, await c.var.services.results.getRun(c.req.valid("param").runId));
 

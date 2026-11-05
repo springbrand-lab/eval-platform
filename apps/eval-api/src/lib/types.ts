@@ -13,7 +13,7 @@ import type { EvaluationSubmissionStore } from "../db/evaluation-submissions.js"
 import type { ManagementFiles } from "../eval-management/files.js";
 import type { ManagementStore } from "../eval-management/store.js";
 import type { BundleCatalogs } from "../db/resource-catalog.js";
-import type { ProjectRunView } from "../db/run-view.js";
+import type { ProjectRunView, createPostgresProjectRunHistoryReader } from "../db/run-view.js";
 import type { createPostgresProjectRunControl } from "../db/runtime.js";
 import type { InitialResourceApi } from "../initial-resources.js";
 import type { ProjectService } from "../projects/service.js";
@@ -36,6 +36,7 @@ export interface OwnerServices {
   readonly results: EvalRunQueries;
   readonly projectRuns: ReturnType<typeof createPostgresProjectRunControl> & {
     readRun(projectId: string, runId: string): Promise<ProjectRunView | null>;
+    listRunHistory: ReturnType<typeof createPostgresProjectRunHistoryReader>;
   };
   readonly observations: ReturnType<typeof createPostgresObservationReader>;
   readonly resourceSnapshots: ReturnType<typeof createPostgresResourceSnapshotReader>;

@@ -22,7 +22,7 @@ import { createPostgresProjectResultsSource } from "./db/project-results.js";
 import { createPostgresProjectStore } from "./db/project-store.js";
 import type { EvalSpRelease } from "./db/release.js";
 import { createBundleCatalogs } from "./db/resource-catalog.js";
-import { createPostgresProjectRunReader } from "./db/run-view.js";
+import { createPostgresProjectRunHistoryReader, createPostgresProjectRunReader } from "./db/run-view.js";
 import { createPostgresProjectRunControl, createPostgresRuntimeStore } from "./db/runtime.js";
 import { createPostgresRuntimeQueries } from "./db/runtime-queries.js";
 import { createInitialResourceApi } from "./initial-resources.js";
@@ -98,6 +98,7 @@ export function createOwnerServices({ db, sp, bundles, release, runQueue, publis
         projectRuns: {
           ...createPostgresProjectRunControl(db, ownerUserId, runQueue),
           readRun,
+          listRunHistory: createPostgresProjectRunHistoryReader(db, ownerUserId),
         },
         observations: createPostgresObservationReader(db, ownerUserId),
         resourceSnapshots: createPostgresResourceSnapshotReader(db, ownerUserId),

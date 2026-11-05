@@ -5,6 +5,7 @@ import { platformIdSchema } from "@eval-platform/eval-dataset";
 import type { RunPreview, SamplingSnapshot } from "@eval-platform/eval-runtime";
 import { responseSchema } from "@springbrand/http/catalog";
 import { jsonContent } from "stoker/openapi/helpers";
+import type { ProjectRunHistoryPage } from "../../db/run-view.js";
 import { jsonBody, optionalJsonBody } from "../../lib/request-body.js";
 import { METADATA_BODY_BYTES, RUN_BODY_BYTES, RUN_PREVIEW_BODY_BYTES, RUN_TARGET_IDS } from "../../limits.js";
 import {
@@ -95,6 +96,22 @@ export const submitRun = createRoute({
   responses: {
     202: jsonContent(responseSchema(runHandleSchema), "Admitted Run"),
     ...admissionErrors,
+  },
+});
+
+export const listProjectRuns = createRoute({
+  method: "get",
+  path: "/projects/{projectId}/runs",
+  tags: ["Run"],
+  summary: "List all persisted Runs, including those whose results were replaced",
+  request: {
+    params: projectParams,
+    query: z.strictObject({ beforeSequence: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional() }),
+  },
+  responses: {
+    200: jsonContent(responseSchema(z.custom<ProjectRunHistoryPage>()), "Run history page"),
+    ...errorResponses,
+    ...notFoundResponse,
   },
 });
 

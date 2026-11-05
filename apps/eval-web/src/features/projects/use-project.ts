@@ -11,7 +11,8 @@ export async function refreshProjectResults(client: QueryClient, projectId: stri
     predicate: ({ queryKey }) => Array.isArray(queryKey[1]) && queryKey[1].includes(projectId),
   };
   await Promise.all([...[
-    ["metrics", projectId], ["evaluations", projectId], ["observation", projectId], ["runs", "detail", projectId],
+    ["metrics", projectId], ["evaluations", projectId], ["observation", projectId],
+    ["runs", "detail", projectId], ["runs", "history", projectId],
   ].map(async (queryKey) => {
     await client.cancelQueries({ queryKey });
     await client.invalidateQueries({ queryKey });

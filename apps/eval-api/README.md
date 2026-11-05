@@ -949,6 +949,8 @@ AWS 资源由 `infra/aws/cloudformation.yaml`（栈 `eval-platform-api`）创建
 
 Project 视图的 `runSequence` 和 `currentRun` 从同一最新 Run 行及其当前工作投影读取；序号复用准入已有的 `runs.sequence`，没有另一份版本存储。Web 因而能发现两次轮询间已经结束的短 Run。
 
+`GET /api/projects/{projectId}/runs` 在 owner 的只读一致性快照中按 `eval_runs.sequence` 倒序分页读取所有 Run 来源记录；历史 Run 即使已无当前 Sampling/Evaluation 关联仍保留在列表。响应只给身份、操作及当前留存成员数，不重建已替换的结果或当时的状态；不能用 Metrics 的 `runIds` 充当完整历史。详见 HTTP 控制面契约。
+
 `GET /api/projects/{projectId}/evaluation-output-schema` 在同一只读快照中检查 Project 归属和可见性，复用 Worker 的计划引用及摘要校验，返回 Schema 引用与正文；没有评估计划时为 null。Schema 目录软删除不影响此读取，目录接口仍禁止新选择已删除项。
 
 路由、信封、状态码、错误码和请求体规则只在 [Eval HTTP 控制面](../../docs/eval-http-api.md) 描述；Dataset 上传、初始资源与输出格式见 [Dataset upload](../../docs/eval-dataset-upload.md)。内容上限的唯一来源是 `src/limits.ts`（`RUN_TARGET_IDS` 同时限制一个 Project 绑定的 Data 数和一次 Run 的选择/目标 ID 数，超出的展开结果返回 413），各路由的请求体上限由其推导。
