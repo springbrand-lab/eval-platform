@@ -159,3 +159,54 @@ Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`�
 ## Compact resource facts
 
 `compactResourceSnapshot` derives body-free facts and a canonical SHA-256 fingerprint for historical raw native records; `compactNativeTrajectoryRecord` instead accepts a verified raw-byte checksum for a streamed record. Both retain native operation identity, status/time/Step Token fields, safe Tool input/output lengths when known and versioned Pi thinking/content marker flags. Missing or withheld data cannot prove absence or a zero length. The same interpreter consumes raw and compact facts, retaining exact medians, conflicts and source coverage. The API stores compact native facts in both the new Attempt snapshot and its Metrics projection, never a second copy of the native body; historical raw snapshots, old refs/scores and evidence are not replaced. Metrics attaches projections to `MetricsFacts` (`MetricsSampling`/`MetricsEvaluation`); this package performs no storage or background work. Sampling detail returns records without snapshots.
+
+UA alpha.15's public `canonical-context` schema accepts any nonempty string
+(`z.string().min(1)`) as a Pi Tool Call `id` or Result `toolCallId`. Its public
+OpenRouter Responses test produces `call_1|fc_1`. UA does not export a small,
+standalone Tool Call ID validator; importing the whole Runtime just to check
+an ID would cross this package boundary. The fixed consumer fixture
+`src/aggregation/ua-responses-tool-id.fixture.json` was projected by the
+published UA alpha.15 public canonical-message and trajectory helpers with
+that Responses ID. This is a producer-contract fixture, **not** a new EP
+identifier alphabet.
+
+At the verified SAFE Pi input seam, compact charge-link **version 2** accepts
+nonempty string IDs without trimming or a character/length allowlist. A
+withheld SAFE placeholder (`[REDACTED]`/`[CONTENT OMITTED]`) is not a real
+identity and cannot link. It derives `toolCallKey` for Call and Result,
+and uses the same digest for Tool event and hook Metrics IDs, from SHA-256
+of the JSON tuple
+`["eval-platform.pi-tool-call-id/v2", agentId, sessionId, submissionId, rawId]`,
+prefixed `tck2_` (64 lowercase hex digits). JSON encoding distinguishes
+unpaired surrogates from replacement characters; the pure-JS `fast-sha256`
+works in browser and server Metrics without async aggregation. The original
+Tool Call ID is never persisted in new compact facts, including their Metrics
+operation `id`, and the correlation key is internal, never an MCP/log field.
+The compact record's `parent` keeps only `resource` and `submissionId` to
+prove a same-Chat descendant: optional opaque `parent.toolCallId`, `requestId`
+and `runId` are not needed by Metrics or the read-only Action join and are
+not copied into compact storage. The separately saved original SAFE evidence
+still retains the complete original parent.
+Only the existing bounded, allowlisted agentId, submissionId and Tool name
+enter an optional Tool link; Result `details.executionId` keeps its
+conservative validator. `details.capabilityId` is not copied into compact
+facts, even when present or when a large Tool body is scanned.
+SP emits `pi.tool-result`; historical Pi records may use `pi.toolResult`.
+Both kinds require the same validated Tool Result role and charge-link identities.
+The existing Metrics Tool label remains the SAFE source name, including
+Unicode or escaped control characters, but only a short, identifier-shaped
+name may establish a charge link; non-linkable names never acquire charge IDs.
+`metricProjection.chargeLinkVersion:2` distinguishes these keys from previously
+persisted raw and version-1 compact rows: those rows are *unknown* for
+optional Tool association, never silently reinterpreted or backfilled. The
+Action ID and actual charged credits come **only** from SP's `source:"action"`
+ledger receipt, regardless of whether this Tool link exists. This compact
+seam neither prices nor identifies Actions. Model settlements are model-only;
+Metrics includes Super Link `source:"tool"` fees in the overall charged
+total but never in `actionChargedUnits`. A historical charge lacking a
+trusted source may contribute to a partial total, not a confirmed Action
+subtotal. No Tool arguments, Result body, arbitrary details or credentials
+are persisted in the new facts. Oversized referenced bytes use the same
+bounded Tool-call/execution-ID interpretation as inline SAFE records. The bounded large-record
+scanner marks an ID it cannot retain as omitted/unknown; it never hashes a
+truncated prefix or treats a historical raw ID as a derived key.

@@ -6,6 +6,8 @@ import { nativeRecordFacts } from "./native-record-facts.js";
 
 /** The projection is a Metrics storage detail, never an SP trajectory format or a billing source. */
 export const NATIVE_PROJECTION_VERSION = 1;
+/** v1 copied restricted IDs; only v2 hashed keys may enter the Action join. */
+export const NATIVE_CHARGE_LINK_VERSION = 2;
 
 /**
  * Body-free facts for a single verified SAFE record. `sourceSha256` is the digest of
@@ -38,12 +40,18 @@ export async function compactNativeTrajectoryRecord(
       resource: record.resource,
       submissionId: record.submissionId,
       projection: record.projection,
-      ...(record.parent === undefined ? {} : { parent: record.parent }),
+      // Parent scope proves a descendant belongs to this Chat. Optional parent
+      // toolCallId/requestId/runId can hold opaque provider IDs or credentials;
+      // they are not needed by Metrics or the Action join.
+      ...(record.parent === undefined ? {} : { parent: {
+        resource: record.parent.resource!, submissionId: record.parent.submissionId!,
+      } }),
       ...(record.origin === undefined ? {} : { origin: record.origin }),
       record: compactWrite,
     } satisfies PiTrajectoryRecord,
     metricProjection: {
       version: NATIVE_PROJECTION_VERSION,
+      chargeLinkVersion: NATIVE_CHARGE_LINK_VERSION,
       fingerprint: sourceSha256 ?? await sha256Hex(canonicalJsonBytes(entry.record)),
       supported: facts !== undefined,
       facts: [...facts ?? []],

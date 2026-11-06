@@ -227,8 +227,8 @@ describe("resource statistics", () => {
     const result = aggregateResources([nativeResourceInput([10], {
       usageEvents: [usage("usage-1")],
       billingSettlements: [
-        settlement("usage-1"), { executionId: "action-1", status: "succeeded", chargedCredits: 5 },
-        { executionId: "action-2", status: "failed", chargedCredits: 0 },
+        settlement("usage-1"), { source: "action", executionId: "action-1", status: "succeeded", chargedCredits: 5 },
+        { source: "action", executionId: "action-2", status: "failed", chargedCredits: 0 },
       ],
     })]);
     expect(result.costs).toEqual({
@@ -239,7 +239,35 @@ describe("resource statistics", () => {
     });
   });
 
-  it("keeps 300 independently paired API settlements and a known zero Action, while an unknown fee leaves totals partial", () => {
+  it("counts Super Link Tool charges in the total without presenting them as Action or model credits", () => {
+    const result = aggregateResources([resourceInput({
+      usageEvents: [usage("usage-1")],
+      billingSettlements: [
+        settlement("usage-1"),
+        { source: "action", executionId: "shared-execution", actionId: "action.exa.search",
+          status: "succeeded", chargedCredits: 7 },
+        { source: "tool", executionId: "shared-execution",
+          status: "succeeded", chargedCredits: 4 },
+      ],
+    })]);
+    expect(result.costs.modelDebitedUnits).toEqual({ value: 8, coverage: "complete" });
+    expect(result.costs.actionChargedUnits).toEqual({ value: 7, coverage: "complete" });
+    expect(result.costs.chargedUnits).toEqual({ value: 19, coverage: "complete" });
+    expect(result.duplicateRecords.billingSettlements).toBe(0);
+  });
+
+  it("retains fractional SP Action and Super Link charges without assigning any model units to Tools", () => {
+    const result = aggregateResources([resourceInput({ billingSettlements: [
+      settlement("usage-1"),
+      { source: "action", executionId: "action-execution", status: "succeeded", chargedCredits: 1.25 },
+      { source: "tool", executionId: "tool-execution", status: "failed", chargedCredits: 2.5 },
+    ] })]);
+    expect(result.costs.modelDebitedUnits.value).toBe(8);
+    expect(result.costs.actionChargedUnits).toEqual({ value: 1.25, coverage: "complete" });
+    expect(result.costs.chargedUnits).toEqual({ value: 11.75, coverage: "complete" });
+  });
+
+  it("keeps 300 independently paired API settlements and an uncertain Super Link Tool fee without inventing an Action zero", () => {
     const usageEvents = Array.from({ length: 300 }, (_, index) => usage(`event-${index}`));
     const billingSettlements = [
       ...usageEvents.map((event) => settlement(event.eventId as string, { debitedUnits: 2 })),
@@ -252,7 +280,7 @@ describe("resource statistics", () => {
     })]);
     expect(result.tokens.input).toEqual({ value: 3_000, coverage: "complete" });
     expect(result.costs.modelDebitedUnits).toEqual({ value: 600, coverage: "partial" });
-    expect(result.costs.actionChargedUnits).toEqual({ value: 0, coverage: "partial" });
+    expect(result.costs.actionChargedUnits).toEqual({ value: null, coverage: "unavailable" });
     expect(result.costs.chargedUnits).toEqual({ value: 600, coverage: "partial" });
     expect(aggregateResources([resourceInput({ billingSettlements: [], coverage: {
       usageEvents: "complete", nativeRecords: "complete", billingSettlements: "partial",

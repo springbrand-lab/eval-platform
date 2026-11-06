@@ -116,6 +116,12 @@ export function setupManagement(configured = true, files?: ManagementFiles) {
         ownerUserId: OWNER, chatId: "evaluator-chat", state: "available",
       })),
     },
+    resourceSnapshots: {
+      readCaseUsage: vi.fn(async (_input: unknown): Promise<{
+        total: number | null; rows: Record<string, unknown>[]; attempt: Record<string, unknown> | null;
+        snapshotPresent?: boolean;
+      }> => ({ total: 0, rows: [], attempt: null })),
+    },
   };
   const template = { name: "Default", setting: {
     model: null, presetId: null, thinking: "medium", executionLevel: "safe", systemPrompt: null,

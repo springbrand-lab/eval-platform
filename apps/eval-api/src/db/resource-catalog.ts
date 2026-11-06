@@ -375,6 +375,15 @@ async function selectableResource<F extends SelectedFieldsFlat>(
   return row as SelectResultFields<F>;
 }
 
+/** The same owner-scoped active/retained-soft-delete lookup used by final Data validation and bind preflight. */
+export async function materialReferenceByteSize(
+  reader: Pick<EvalDb, "select">, ownerUserId: string,
+  field: "initialMaterials" | "evalInitialMaterials", reference: InitialMaterialsRef, previous: DataReferences | undefined,
+): Promise<number> {
+  return (await selectableResource(materialBundle, reader, ownerUserId, reference.bundleId, reference.materialId,
+    hasReference({ field, list: true }, previous, reference))).byteSize;
+}
+
 /** Validate one Data field's Material references; together they must fit one SP initialization. */
 async function assertMaterialsSelectable(
   reader: Pick<EvalDb, "select">, ownerUserId: string,
@@ -382,8 +391,7 @@ async function assertMaterialsSelectable(
 ): Promise<void> {
   let byteSize = 0;
   for (const reference of references) {
-    byteSize += (await selectableResource(materialBundle, reader, ownerUserId, reference.bundleId, reference.materialId,
-      hasReference(field, previous, reference))).byteSize;
+    byteSize += await materialReferenceByteSize(reader, ownerUserId, field.field, reference, previous);
   }
   requireInitializationBudget(byteSize, field.field);
 }

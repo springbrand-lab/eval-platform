@@ -25,6 +25,7 @@ import {
   AgentConfigFrozenError,
   AgentConfigPurposeMismatchError,
   AgentConfigPurposeUnavailableError,
+  ActiveProjectLimitError,
   BundleResourceNotFoundError,
   CatalogInputError,
   CatalogPayloadTooLargeError,
@@ -90,6 +91,7 @@ type ErrorClass = abstract new (...args: never[]) => Error;
 const publicMessageCodes = new Map<ErrorClass, HttpErrorCode>([
   [ResultCollectionConflictError, "RESULT_COLLECTION_CONFLICT"],
   [RuntimeProjectBusyError, "PROJECT_BUSY"],
+  [ActiveProjectLimitError, "ACTIVE_PROJECT_LIMIT_REACHED"],
   [RuntimeRunIdentityConflictError, "RUN_IDEMPOTENCY_CONFLICT"],
   [RuntimeRunStoppedError, "RUN_STOPPED"],
   [ProjectRunStopConflictError, "PROJECT_NO_ACTIVE_RUN"],

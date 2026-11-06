@@ -3,18 +3,20 @@
 ## Pi-native SP seam (new runs)
 
 The service-authenticated SP Harness consumes SP's **public**
-`@springbrand/eval-harness@0.1.0-alpha.7` wire for the supported finalized
-reads. The coordinated producer implements
+`@springbrand/eval-harness@0.1.0-alpha.9` wire for finalized and explicitly
+opted-in partial reads. The coordinated producer implements
 `sp-pi-trajectory/v1` pages with a frozen `cursor.throughSeq` and safe
 `pi-trajectory/v1` records or an explicit oversized-record reference, and
 resource snapshots carrying `nativeRecords` instead of `telemetryEvents`.
-The npm-published alpha.7 artifact is pinned exactly and its installed public
-schemas validate evidence and resource headers/pages. It does **not** export
-`allowPartial` request types, readers, or path helpers (nor the partial billing
-`throughSeq` and record-byte `resourceKey` binding). The explicit post-wait
-partial query extension below remains unverified structural HTTP behavior.
-Do not deploy this cutover or claim cross-deployment parity until SP publishes
-the missing partial contract and actual service responses are verified. No
+The npm-published alpha.9 artifact is pinned exactly. Its installed schemas
+validate evidence and resource pages, require `actionId` on SP Action receipts
+and reject Action/Tool identities in model billing pages. EP uses its published
+partial route and reference-byte builders; it does not cast or duplicate the
+HTTP schema, put Action IDs on model billing pages, or read an SP private
+database. Local collection tests verify this installed contract, not the
+independently deployed SP API/Agent or a real PostgreSQL transaction.
+Do not claim cross-deployment parity until those deployments and reads are
+verified. No
 legacy event decoding or DO storage access is used. Existing
 version 1 manifest bytes/refs, resource bytes and scores remain untouched;
 old event-only evidence may not be readable with this new code.
@@ -77,16 +79,35 @@ is still pending; an opted-in read retains only verified facts, with
 than invented zero usage or complete billing. Historical raw resource rows
 and v1/v2 evidence bytes are not migrated.
 
-**Release blocker:** The installed npm alpha.7 publishes finalized header,
-native/billing page, evidence and record-byte schemas/paths, but not the
-post-wait partial route/query contract. Its billing builder rejects
-`allowPartial`/`throughSeq`, while its other builders omit partial parameters.
-Local mock tests still exercise the explicit opt-in; they are **not** proof that
-the pinned SP artifact or a deployed SP accepts it. An isolated PostgreSQL 18.3
+For new paged snapshots, a validated SAFE Pi Tool Result's
+`details.executionId`, bounded actor/Submission, and a version-2
+**derived** `toolCallKey` enter compact facts only when the Tool name
+is safe for an **optional Tool association**. `details.capabilityId`
+never becomes a compact fact or an Action identity. The Tool Call/Result raw ID follows UA's
+nonempty-string contract (including Responses `call_1|fc_1`); at the single
+Metrics input seam it is hashed into a fixed-length scope-bound key, never
+stored as a raw compact field or returned to MCP/logs. PostgreSQL checks
+only this derived key's `tck2_` + SHA-256 shape, never revalidates the raw
+UA ID. It joins one Call and one Result on the same key, actor, Submission
+and Tool name, with unique execution ID. Historical raw and v1 compact
+records are not used for Action-to-Tool association.
+The Action join accepts SP's `pi.tool-result` and historical `pi.toolResult`
+with the same role/name/actor checks. Existing Metrics facts still preserve
+SAFE source Tool labels (including Unicode); an unsuitable label cannot
+establish a charge link. The large-reference byte scanner applies the same
+input seam after verifying the complete source digest and scope. No Tool
+arguments, Result body or arbitrary `details` enter the new link facts; the
+independent SP `source:"action"` receipt alone supplies the Action ID and
+its charged credits, even when no Tool Result exists.
+
+**Release gate:** Installed npm alpha.9 owns the Action-ID receipt and post-wait
+partial route/query contract, including billing `throughSeq` and byte
+`resourceKey`. Local mock tests use those public builders; they are **not**
+proof that deployed SP accepts the same version. An isolated PostgreSQL 18.3
 regression now verifies the paged Harness → Runtime → Attempt Store transaction,
 including typed `json_build_object` parameters; the old untyped SQL fails with
-`42P18` before saving any resource snapshot. Publish a compatible public partial
-API and verify real deployed SP+API reads before end-to-end parity or release.
+`42P18` before saving any resource snapshot. Verify real deployed SP+API reads
+and a current PostgreSQL run before end-to-end parity or release.
 No SP private source is imported.
 
 内部评估控制面的应用组合层：Hono HTTP 控制面、PostgreSQL 适配器（`DatasetStore`、Project 快照存储、`ProjectPlanReader`、`RuntimeStore`、只读 `MetricsSource`）、Project 创建与评估计划服务（含 Agent Config 冻结副本）、Eval SP 客户端与 SP Harness，以及 pg-boss Run Worker。不增加第五个共享包。设计见 [Project、Runtime 与 Metrics 设计](../../docs/eval-project-redesign.md)。
@@ -95,13 +116,15 @@ No SP private source is imported.
 
 `POST /mcp/eval-management` is an independent, stateless JSON-RPC 2.0 control plane for a **trusted server-side Moss adapter**. Send `Authorization: Bearer <EVAL_MANAGEMENT_MCP_TOKEN>` and `Content-Type: application/json`; do not put the token, service account, actor, files or URLs in tool arguments. The optional secret must have at least 32 characters; when unset the endpoint is 404. Invalid/missing Bearer is 401; GET/DELETE/PUT/PATCH are 405 with `Allow: POST`. `initialize` (supported versions as for `/mcp/evaluation-results`), `ping`, `tools/list` and `tools/call` are stateless; an ID-less notification has no effect (202). Tool failures return MCP `isError` text with a safe error code/message, not raw SP/DB diagnostics. Each authenticated call uses and releases one fixed-account `OwnerServices` lease; no caller can select another owner. `EVAL_RESULT_MCP_TOKEN` and `EVAL_WEB_API_TOKEN` do not authorize this endpoint, and its token cannot authorize `/mcp/evaluation-results`. Never register this management MCP on an Agent Config: only Evaluators receive the **other** MCP's `submit_evaluation`.
 
-This slice advertises **only sixteen** management tools; catalog `page` defaults to 1 and `pageSize` to 20 (maximum 50), while `get_metrics` defaults to **5** rows/fields per page and `get_preparation` pages at most 10 cases. IDs, selectors and Project bodies use the existing Eval schemas; MCP JSON requests are limited to 1 MB except `create_output_schema`, which has a `MANAGEMENT_OUTPUT_SCHEMA_BODY_BYTES` (6,018,496) JSON-escaping allowance for its 1 MB `OUTPUT_SCHEMA_BYTES` content and bounded labels/key. Run preview/submit/reconcile are limited to 50 fixed targets (narrower than HTTP). Toolkit pagination uses an opaque cursor instead of `page`. Ordinary tool text remains capped at 32 KB; `get_metrics` permits at most 10 MiB of complete sanitized UTF-8 JSON tool text (and 10 MiB of characters). Each **complete displayed** Schema or Evaluation JSON document also has a 10 MiB UTF-8 limit; this is separate from the 2,048-byte/4,800-byte **per-continuation** budgets and the 16 KiB threshold for using the one-shot verified documents GET. `list_options(output_schemas|output_schema_detail|project_schema_detail)` and selected Evaluation JSON continuations still fail explicitly above 4,800 bytes or characters. The trusted Takt adapter must verify the complete Metrics result before giving a large safe projection to Moss as a sandbox file; simply putting 10 MiB inline would exceed the Agent runtime's 1 MiB durable Tool-result limit. Reads paginate/sanitize model-visible results; no unbounded prompts, SP credentials, raw resource snapshots or binary files:
+This slice advertises **only nineteen** management tools; catalog `page` defaults to 1 and `pageSize` to 20 (maximum 50), while `get_metrics` and `get_case_usage` default to **5** rows per page (`get_case_usage` maximum 10) and `get_preparation` pages at most 10 cases. The six Material/Session option categories clamp that catalog page size to **5**. IDs, selectors and Project bodies use the existing Eval schemas; MCP JSON requests are limited to 1 MB except `create_output_schema`, which has a `MANAGEMENT_OUTPUT_SCHEMA_BODY_BYTES` (6,018,496) JSON-escaping allowance for its 1 MB `OUTPUT_SCHEMA_BYTES` content and bounded labels/key. Run preview/submit/reconcile are limited to 50 fixed targets (narrower than HTTP). Toolkit pagination uses an opaque cursor instead of `page`. Ordinary tool text remains capped at 32 KB; `get_metrics` permits at most 10 MiB of complete sanitized UTF-8 JSON tool text (and 10 MiB of characters). Each **complete displayed** Schema or Evaluation JSON document also has a 10 MiB UTF-8 limit; this is separate from the 2,048-byte/4,800-byte **per-continuation** budgets and the 16 KiB threshold for using the one-shot verified documents GET. `list_options(output_schemas|output_schema_detail|project_schema_detail|material_bundles|session_bundles|materials|sessions|material_files|session_files)`, `bind_data_resources` / `get_preparation(kind:"bind")`, and selected Evaluation JSON continuations still fail explicitly above 4,800 bytes or characters. The trusted Takt adapter must verify the complete Metrics result before giving a large safe projection to Moss as a sandbox file; simply putting 10 MiB inline would exceed the Agent runtime's 1 MiB durable Tool-result limit. Reads paginate/sanitize model-visible results; no unbounded prompts, SP credentials, raw resource snapshots or binary files:
 
 | Tool | `tools/call` arguments | Result / boundary |
 | --- | --- | --- |
-| `list_options` | `{category:"agents" \| "datasets" \| "dataset_data" \| "projects" \| "project_detail" \| "output_schemas" \| "output_schema_detail" \| "project_schema_detail" \| "input_limits" \| "credits", q?, page?, pageSize?, datasetId?, projectId?, outputSchemaId?, schemaOffset?}`; `dataset_data` requires `datasetId`, forbids unrelated selectors/filtering, and pages at most five members. `project_detail` requires `projectId` and pages its bound Datasets. `output_schema_detail` requires `outputSchemaId`; **`project_schema_detail` requires only `projectId`**. Both permit only `schemaOffset` (byte cursor, default 0; catalog paging/filtering is forbidden). Trusted adapter also uses `approval_dataset` (`datasetId,dataIds?,page,pageSize<=10`), `approval_agent` (`userAgentId`), `approval_output_schema` (`outputSchemaId`), `approval_project` (`projectId,projectSampleIds,samplingIds,page,pageSize<=10`) | Choice IDs/names, limits or credits. `dataset_data` returns only safe Data IDs/names and a verified `order`; see exact contract below. `project_detail` returns the owned frozen Project's case count, Agent names and plan-bound Schema ID, never its content. `output_schema_detail` uses the **active owner-scoped** catalog record; unknown, foreign and deleted entries are unavailable. **`project_schema_detail` reads the Project-bound, plan-digest-checked Schema even if the original catalog entry is renamed or deleted.** It returns `{category,projectId,outputSchemaId,digest,sourceRedacted,schemaChunk,streamRequired?,display?}`; `digest` identifies the original frozen Schema body, whereas `display.sha256` authenticates only the sanitized displayed JSON. Both use bounded `schemaChunk` continuations for small documents or `streamRequired:true`/the fixed trusted GET for large ones. A Project without an evaluation plan has no Schema; absence of numeric fields is **not** evidence of that. Dataset approval reads the same consistent selected-source snapshot that ProjectService will freeze, and returns its complete digest across pages. Agent approval hashes the owned public SP body; output Schema approval hashes the complete owned catalog record (ID, mutable name/description and immutable Schema body), not just its display name. |
-| `prepare_inputs` | `{operationKey, promptUploadRef, name, description, format:"json" \| "jsonl", cases:[{initialMaterials?,evalInitialMaterials?,initialSession?}]}` | Exactly one case mapping per prompt row (at most 50). Material selectors are `{uploadRef}` or owned `{bundleId,materialId}`; an optional Subject-only Session is `{uploadRef,format}` or owned `{bundleId,sessionId}`. Creates/reconciles a Prompt Dataset and separate Material/Session Bundles, then binds each Data and reads it back. On success returns only the compact `{operationKey,kind:"prepare",status,datasetId,totalCases,resources:{total,confirmed}}` (<5 KiB, no inline case/resource lists); never starts a Run. |
-| `get_preparation` | `{operationKey,page?,pageSize?}` | Durable status, planned Dataset ID and one page of Data binding and Material/Session stage receipts (default/max 10 cases), plus resource progress counts; also reports safe unknown-outcome state for file/Agent library and output Schema operations. An output Schema receipt contains only `{outputSchemaId,name}`. Never original prompts, Schema content, bytes or attachment URLs. |
+| `list_options` | `{category:"agents" \| "datasets" \| "dataset_data" \| "dataset_data_resources" \| "projects" \| "project_detail" \| "output_schemas" \| "output_schema_detail" \| "project_schema_detail" \| "material_bundles" \| "session_bundles" \| "materials" \| "sessions" \| "material_files" \| "session_files" \| "input_limits" \| "credits", q?, page?, pageSize?, datasetId?, dataId?, projectId?, outputSchemaId?, schemaOffset?, bundleId?, materialId?, sessionId?}`; `materials`/`sessions` require `bundleId`; `material_files`/`session_files` require `bundleId` and their matching `materialId`/`sessionId`; all six forbid unrelated selectors/filtering and return at most five entries per page. `dataset_data` requires only `datasetId`, forbids unrelated selectors/filtering, and pages at most **20** members. Only `dataset_data_resources` requires **both** `datasetId` and `dataId`; it forbids `q` and all other selectors, and pages at most **20** stored references. `project_detail` requires `projectId` and pages its bound Datasets. `output_schema_detail` requires `outputSchemaId`; **`project_schema_detail` requires only `projectId`**. Both permit only `schemaOffset` (byte cursor, default 0; catalog paging/filtering is forbidden). Trusted adapter also uses `approval_dataset` (`datasetId,dataIds?,page,pageSize<=10`), `approval_agent` (`userAgentId`), `approval_output_schema` (`outputSchemaId`), `approval_project` (`projectId,projectSampleIds,samplingIds,page,pageSize<=10`) | Choice IDs/names, limits or credits. New Material/Session choices contain only active owner-scoped metadata; exact page/item shapes below. `dataset_data` returns only safe Data IDs/names and a verified `order`; `dataset_data_resources` returns only stored UUID refs and their original field/index, not an availability claim; see exact contracts below. `project_detail` returns the owned frozen Project's case count, Agent names and plan-bound Schema ID, never its content. `output_schema_detail` uses the **active owner-scoped** catalog record; unknown, foreign and deleted entries are unavailable. **`project_schema_detail` reads the Project-bound, plan-digest-checked Schema even if the original catalog entry is renamed or deleted.** It returns `{category,projectId,outputSchemaId,digest,sourceRedacted,schemaChunk,streamRequired?,display?}`; `digest` identifies the original frozen Schema body, whereas `display.sha256` authenticates only the sanitized displayed JSON. Both use bounded `schemaChunk` continuations for small documents or `streamRequired:true`/the fixed trusted GET for large ones. A Project without an evaluation plan has no Schema; absence of numeric fields is **not** evidence of that. Dataset approval reads the same consistent selected-source snapshot that ProjectService will freeze, and returns its complete digest across pages. Agent approval hashes the owned public SP body; output Schema approval hashes the complete owned catalog record (ID, mutable name/description and immutable Schema body), not just its display name. |
+| `save_initial_resource` | `{operationKey,kind:"material",uploadRef}` **or** `{operationKey,kind:"session",uploadRef,format:"json"\|"jsonl"}` | Independently saves one owned Bundle and one Material/Session from authenticated, privately staged bytes; no Dataset/Data/Prompt is needed or created. Material **forbids** `format`; Session **requires** it. Only a confirmed, completed save returns exactly `{operationKey,kind:"initial_resource",resourceKind:"material"\|"session",status:"completed",bundleId,materialId}` **or** the same shape with `sessionId` instead of `materialId`. No uploadRef, file body, URL, labels, or second resource ID appears in the result. |
+| `prepare_inputs` | `{operationKey, promptUploadRef, name, description, format:"json" \| "jsonl", cases:[{initialMaterials?,evalInitialMaterials?,initialSession?}]}` | Exactly one case mapping per Prompt row (at most 50); every supplied resource is an **existing owned UUID reference** (`{bundleId,materialId}` for either Material field, `{bundleId,sessionId}` for the optional Subject Session). Creates a new Prompt Dataset/Data, then binds and reads back only those references; it never uploads a Material/Session or starts a Run. Success: `{operationKey,kind:"prepare",status:"completed",datasetId,totalCases}`. |
+| `bind_data_resources` | v3 single `{operationKey,datasetId,dataId,expectedContentDigest,initialMaterials?,evalInitialMaterials?,initialSession?}` **or** v4 batch `{operationKey,datasetId,bindings:[{dataId,expectedContentDigest,initialMaterials?,evalInitialMaterials?,initialSession?}]}` | Binds one, or **1–20 distinct existing** Data belonging to the same selected existing Dataset in **one atomic transaction**. Each item requires at least one supplied field (including `null` to clear). Each Material field is a complete ordered replacement of 1–8 existing `{bundleId,materialId}` entries, or `null` to clear; omitted fields stay untouched. Session is an existing `{bundleId,sessionId}` or `null`; omitted stays untouched. No inline uploadRef/format. Each expected digest is the lowercase full Data `approval_dataset.items[].contentDigest` from before binding. No new Dataset/Data, Bundle or Run. Legacy success stays `{operationKey,kind:"bind",status:"completed",datasetId,dataId,contentDigest}`; batch success is `{operationKey,kind:"bind",status:"completed",datasetId,bindings:[{dataId,contentDigest}]}` in input order. Post-bind digests are binding receipts, not an approval Dataset digest. |
+| `get_preparation` | `{operationKey,page?,pageSize?}` | For `initial_resource`: `{operationKey,kind:"initial_resource",resourceKind,status,stage,bundleId,materialId}` or the corresponding `sessionId`; `stage` is the actual `pending`/`attempted`/`confirmed` write-ahead stage, and `status` is `preparing`, `outcome_unknown`, `finalizing`, or `completed` **only after** confirmed stage and operation completion. For `prepare`: durable Dataset status and up to 10 Data binding/reference receipts per page. For v3 `bind`: `{operationKey,kind:"bind",status,datasetId,dataId,expectedContentDigest,contentDigest,binding,initialMaterials?,evalInitialMaterials?,initialSession?}` (only supplied fields). For v4 `bind`: `{operationKey,kind:"bind",status,datasetId,totalBindings,page,pageSize,bindings:[{dataId,contentDigest,binding:"pending"|"attempted"|"confirmed"}]}`, at most ten entries per page; `completed` requires the atomic batch receipt and completed operation. Also reports unknown outcomes for Skill/Reference/Schema writes. Never original prompts, Schema content, uploadRef, file bytes or URLs. |
 | `search_agent_resources` | `{kind:"models" \| "skills" \| "action_groups" \| "actions" \| "connector_components" \| "extensions" \| "toolkits" \| "references", q?, page?, pageSize?, supplierId?, unassigned?, cursor?, id?}` | Live allowlisted SP catalog, concise selectable metadata. Actions require `supplierId` or `unassigned:true`; `action_groups` finds these groups. `id` reads one Action or Reference detail. `cursor` is only for Toolkit pages (status, never connection IDs or credentials). |
 | `upload_agent_skill` | `{operationKey,uploadRef,name,overwriteExistingSkill?,existingSkillId?}` | Reads a staged Skill ZIP, checks its actual `SKILL.md` name and current SP library. SP's ordinary POST has no conditional create, so **every write** requires explicit user approval for a possible overwrite (`overwriteExistingSkill:true`); if a same-name Skill exists, also supply its exact approved `existingSkillId`. The trusted adapter enforces approval, never a model assertion. Returns the active Skill ID only after an affirmative public SP receipt. |
 | `upload_agent_reference` | `{operationKey,uploadRef}` | Uploads the staged Reference bytes as a public attachment, saves its validated attachment receipt, then creates and verifies the Reference via the public SP library; returns only the Reference ID. No URL or attachment bytes in model output. |
@@ -115,10 +138,230 @@ This slice advertises **only sixteen** management tools; catalog `page` defaults
 | `get_run` | `{runId, page?, pageSize?}` | Status/phase/operation, ID counts and one page of Sampling/Evaluation IDs, not full records. |
 | `get_metrics` | `{projectId, runId?, scope:"project" \| "dataset" \| "sample" \| "sampling", datasetId?, projectSampleId?, samplingId?, section?:"overview"\|"samples"\|"tools"\|"fields", role?:"execution"\|"evaluation", page?, pageSize?, toolPage?, toolPageSize?, numericPointer?, evaluationId?, resultOffset?}` | Without `runId`, **every scope** reads currently retained owner-scoped Project facts (`runScope:"project_current"`), not a latest-Run score. With `runId`, the exact-Run filter (`runScope:"exact_run",runId`) still requires current membership after replacement. Exactly the matching scope ID is required. **Breaking default for Project/Dataset:** omitted `section` means `"overview"` rather than the old combined summary+samples+both roles' Tools+fields. No second combined Project response exists. Those scopes return only `{scope,section,project,runScope,runId?}` (Dataset adds `datasetId`) plus their section's payload: `summary` for overview (complete counts/stages including Attempt status/duration, role-separated coverage/cache/tokens/costs/success, output coverage/validation, already-available frozen `evaluationOutputs.schema:{outputSchemaId,digest}|null`, selected numeric `evaluationOutputs.scoreField`, and `evaluationOutputs.fields.total`, **no item lists/byTool**); `projectSamples` and (for Project) `datasets` for samples (with each Sample's existing `scoreIndex` and paged Sampling IDs); **one** `executionAgent` or `evaluationAgents` `{byTool:{page,pageSize,total,items}}` for tools, selected by the required `role`; or `evaluationOutputs:{fields:{page,pageSize,total,items}}` for fields (only numeric/boolean/enum Metrics fields; plain free text does not count). `page/pageSize` apply to samples/fields, `toolPage/toolPageSize` only to tools (default 1/2, max 5); `numericPointer` (default `/score`) selects the overview's overall `scoreField` or Sample rows' `scoreIndex.field` in samples, but is forbidden for tools/fields/Sample/Sampling. `role` is only valid for tools. Per-Tool rates and scores are forwarded from existing Metrics, not recomputed. `scope:"sample"` and `"sampling"` (including selected-only `evaluationId`/`resultOffset` response) retain their existing contract; they do not accept `section` or `role`. |
 | `inspect_case` | `{projectId, runId?, samplingId, evaluationId?}` | Without `runId`, requires a **current** owned Sampling (and selected Evaluation, if any) in that Project. With `runId`, requires the original exact Run/Sampling/Evaluation membership **and** current members. Returns bounded Sampling/Subject resource Metrics, selected Evaluator Metrics, result excerpt and internal evidence references. It does not return trajectory bytes or a continuation cursor. The existing Project Metrics toolSuccessRate, cache/tokens and ID drilldown are unchanged. |
+| `get_case_usage` | `{projectId,samplingId,role:"execution"|"evaluation",evaluationId?,runId?,section?:"attempts"|"models"|"actions"|"tools"|"tool_calls",attemptId?,page?,pageSize?}` | **Read-only, current owned Sampling**, `evaluationId` required exactly for `role:"evaluation"`; optional `runId` additionally requires current membership in that exact Run. `section` defaults to `"attempts"` and forbids `attemptId`; `"models"`/`"actions"`/`"tools"`/`"tool_calls"` require an `attemptId` selected from the Attempt list. `page` defaults to 1 (max 10,000), `pageSize` to 5 (max 10). No prompt, Chat/account ID, raw snapshot, native record, Tool arguments or credential is returned. See the exact projection below. |
+
+Sample and Sampling `get_metrics` summaries now include the same safe execution/evaluation Stage counters and Attempt-duration statistics as the Project overview; they are recalculated for that scope, not apportioned from Project totals.
+For `get_case_usage` with `role:"execution"` and an exact `runId`, the Run must have executed the Subject (`execution` or `pipeline`); an evaluation-only Run may reuse that Sampling but did not incur its Subject debit. Omit `runId` to inspect the current Subject's original Attempts instead.
+
+**Per-Attempt usage contract.** All five sections return `{projectId,samplingId,role,evaluationId?,runScope:"project_current"|"exact_run",runId?,section}`. The list adds `attempts:{page,pageSize,total,items:[{attemptId,attemptNumber,status,resources:{status,finalized,coverage:{usageEvents,nativeRecords,billingSettlements},actionCharges:{complete,unsettledExecutions,missingExecutionIds}}}]}`. Missing resources use `status:"unavailable"`, `finalized:null`, three `"unavailable"` coverages and null Action readiness, not zero. A selected section adds `attempt` (the same metadata), `availability:"available"|"not_collected"|"snapshot_missing"` and the selected `models`, `actions`, `tools` or `toolCalls` page `{page,pageSize,total,items}`. For billing pages, `total:null` and `items:[]` mean **no stored snapshot**, not a confirmed empty stream. For `tool_calls`, `availability:"available"` means a snapshot exists, while `total:null` means its native Tool inventory cannot be proven complete; even when some v2 Calls are listed, do not treat them as a complete list. Only a complete supported v2 native stream makes a numeric `toolCalls.total` authoritative (including zero). A stored partial billing snapshot may report `total:0` observed rows with partial coverage; this never asserts native completeness.
+
+`tool_calls` includes **all observed Pi Tool Calls** in the selected execution or evaluation Agent Attempt: free/read-only queries, status checks, Super Link calls and Action calls, including failures and Calls with no Result. `toolCalls.items` are exactly `{index,toolName:string|null,toolDurationMs:number|null,resultState:"completed"|"failed"|"missing"|"ambiguous"|"unknown"}`. `index` follows the native record and content-block order, so two Calls from one assistant message occupy two items. A unique SAFE v2 Result matches only the same Agent, Submission, derived Tool Call key and full safe name; duplicate Calls/Results or a mismatched name are `"ambiguous"`, and `"missing"` means no Result was observed in a **complete** native inventory, not proof the Tool never ran. With partial/unsupported/old native proof, observed v2 Call facts may be paged with `total:null`, `"unknown"`/`null`; old raw/v1 Calls are not decoded or backfilled. The only time source is the **top-level Pi Tool Result `durationMs`** in milliseconds, a nonnegative safe integer; real `0` remains `0`, while a missing/invalid/ambiguous/unproven value stays `null`. No event duration, message timestamp subtraction, `details` field or async provider completion time substitutes for it. This page does not claim a correlation to the separately billed Super Link `tools` entries.
+
+`models.items` are `{index,eventId,kind,provider,model,tokens:{input,output,cacheRead,cacheWrite,reasoning,total},cacheHitRate:{value,coverage},providerUsdEstimate,modelSettlement:{state,status,ratedCredits,debitedCredits,shortfallCredits,platformOwnedCredits}}`. Cache hit rate is `cacheRead/(input+cacheRead)` only with both buckets and a nonzero safe-integer denominator. Each nullable token/cost is an independently observed source field, never inferred from another price; `total` may be the sum of all four valid token buckets when the source omitted its total. Model settlement pairs by **full** eventId within the same snapshot, requiring one usage event, one API/model-source settlement **without** an execution ID, an account identity (never displayed) and a supported terminal status; `state` is `"settled"|"partial"|"missing"|"unsettled"|"ambiguous"`. Missing/unsettled/ambiguous amounts are null; `partial` retains only observed amounts when a terminal receipt lacks numeric fields, while anomalous receipts show no credit amount. Provider USD is a source estimate **not** SP-billed credits.
+
+`actions.items` contain `{index,source:"action",executionId,actionId,actionIdentityState:"identified"|"missing"|"unsafe"|"ambiguous"|"unavailable",status,chargedCredits,chargeState:"observed"|"unconfirmed",toolName,toolMatchState:"matched"|"ambiguous"|"unavailable"|"unknown",toolDurationMs:number|null}`. Each **individual**, unique, terminal SP `source:"action"` receipt provides both the authoritative `actionId` and the actual `chargedCredits`: an unknown Tool name or duration never hides a known charged Action. A duplicate execution ID is ambiguous, a missing Action ID remains missing, and an unsuitable or unsafe Action ID is **null**, not a redacted substring or a Tool-derived fallback. A valid ID is displayed only when it is a whole bounded `action.*` identifier or UUID that passes the literal/secret checks. An unshowable execution ID also blocks receipt attribution.
+`chargeState:"observed"` requires a unique **same-source** execution ID and a finite, bounded nonnegative numeric charge (including fractions). Succeeded/failed are terminal; `outcome_unknown` is observed only when the Account Log explicitly confirms zero charged Credits. Otherwise `chargedCredits:null`. This does not claim all Action executions were delivered, settled or have Tool Results.
+
+`toolMatchState` is independent of both the Action receipt's ID and its charge. `"matched"` requires complete native coverage, exactly one v2 compact SAFE Tool Result with that execution ID and one same-actor/Submission/derived-key/name Pi Tool Call in this Attempt. Duplicate links, Calls or mismatched names are `"ambiguous"`; absent/invalid links are `"unavailable"`; historical raw/v1 compact records or partial native coverage make **only the optional Tool association** `"unknown"`, not the Action's ledger ID or amount. `toolName` is null unless that Call/Result association is unique and its entire name passes the conservative display/literal checks. SAFE `details.capabilityId` is never projected, queried or used as an Action identity. Old bills without an `actionId` remain `"missing"`; old raw/v1 Tool paths are never revived.
+
+The Action's explicitly nullable `toolDurationMs` can be non-null only with that existing `"matched"` association, a completed/failed **Pi** Result and an initiating Tool: `execute_capability` or a uniquely evidence-linked direct `action_*`. A matching `get_capability_execution` only queries/polls status; even if it settles the Action charge and has its own measurable duration on `tool_calls`, it never proves the initiating Action Tool's duration. An async `execute_capability` Tool may return while the provider continues: these milliseconds describe only this Pi Tool invocation, **not** supplier execution, provider wait or SP Action-log creation-to-settlement seconds. The ledger's Action ID and real charge are unchanged even when the duration is null.
+
+`tools.items` separately contain `{index,source:"tool",executionId,status,chargedCredits,chargeState}` for **Super Link** receipts from the same stored ledger, with the same unique-terminal-charge rule but no `actionId`, `toolName` or SP Action claim. Model settlements remain on `models` alone; no model debit is apportioned to an Action or Tool. Neither page fetches a second service nor combines charges across Attempts. The old Action-link inventory diagnostic log is removed; the page states carry the uncertainty without logging source identities.
+
+EP's new fields are offered to the trusted management MCP, but the separately owned Takt/Moss `eval_inspect_case` input and output allowlists must opt into `tool_calls` and `toolDurationMs` to show them to Moss. An EP-only rollout cannot bypass that boundary.
+
+Coverage and `actionCharges` readiness remain on each Attempt; an observed line does not claim the entire Attempt is fully settled. IDs/labels are bounded and redacted; source account/Chat/actor/Submission/Tool Call IDs, private metadata and arbitrary JSON keys cannot enter the result. This is an **individual ledger view, not the cross-Attempt Metrics aggregate** (which owns deduplication, overlap and totals). The PostgreSQL JSON column is scanned/expanded server-side per requested page; the API process never hydrates its nativeRecords or entire snapshot. There is no indexed per-event random access, so very large stored Attempts can cost PostgreSQL CPU/memory even for a 5-row page; no global DB work bound or pagination stability under concurrent recollection is promised. Reads of a page and its Attempt/coverage header share a repeatable-read snapshot.
+
+Historical `json` snapshots with an unpaired Unicode surrogate may be stored losslessly but rejected by PostgreSQL's JSON extraction operators; such a selected page fails safely instead of falling back to parsing the entire snapshot in Node. No isolated PostgreSQL run has verified this new projection yet; the local test uses the same temporary-database boundary as other Attempt-resource integration tests.
+An anomalous model settlement is shown with `state:"partial",status:"anomaly"` and null credit amounts even if malformed source data includes numbers; it is never reported as a confirmed debit.
+At the maximum `pageSize:10`, only the first 100,000 rows of a section are addressable (`page<=10000`); `total` still reports the observed stream count, rather than silently claiming the inaccessible tail was read. Larger ledgers need a separately reviewed read mechanism, not a bigger MCP page.
+Each item's `index` is its 1-based ordinal in the stored usage or billing stream. `actions` and `tools` have separate, source-exact totals and pages; their indexes can skip over intervening model or other-source settlements.
+
+**Existing Material/Session discovery:** `list_options` accepts the six exact
+categories `material_bundles`, `session_bundles`, `materials`, `sessions`,
+`material_files`, `session_files`. All return
+`{category,bundleId?,materialId?,sessionId?,page,pageSize,total,items}`:
+the optional top-level IDs echo only the required selection. Bundle pages
+need no IDs and contain `{bundleId,name,description}`; `materials` requires
+`bundleId` and returns `{bundleId,materialId,name,description,byteSize}`;
+`sessions` requires `bundleId` and returns
+`{bundleId,sessionId,name,description,format:"json"|"jsonl"}`;
+file pages require `bundleId` **and** `materialId` or `sessionId` respectively,
+and return only `{path,mediaType,byteSize}`. Each item may additionally mark
+`sourceRedacted:true` and `nameTruncated`, `descriptionTruncated`,
+`pathTruncated` or `mediaTypeTruncated` when applicable. Names/descriptions are
+redacted before truncation to 80/120 UTF-16 code units, paths to 160 and media
+types to 80. A sensitive filename/path or metadata is fully masked, never
+partially excerpted. Bundle/resource IDs are validated UUIDs, never arbitrary
+catalog strings. Only active resources belonging to the fixed owner are
+selectable; wrong-kind, deleted, foreign and unknown choices fail closed. No
+`q`, Data/Project selectors, source content, private URL or binary bytes can
+appear in these pages. `page` is 1–10,000; the existing catalog
+`pageSize` default 20 and valid maximum 50 are clamped to 5; `total` counts
+the entire selected active list and an out-of-range page has `items:[]`.
+**Both** JSON-stringified result length and UTF-8 byte length must be at most
+4,800; an over-budget page fails rather than truncating any item or changing
+`total`.
+
+**Guarded rebind of existing Data:** select the Dataset member explicitly
+(`list_options({category:"dataset_data",datasetId})` for IDs,
+`list_options({category:"approval_dataset",datasetId,dataIds:[dataId]})` for
+its full `contentDigest`). Submit `bind_data_resources` with the original
+digest and complete replacements for only the fields to change. `null`
+removes a field, **not** a null resource; `[]` is not a valid replacement.
+Subject `initialSession` never becomes Evaluator Session data. The first write
+locks the owned active Dataset and Data, confirms current membership and no
+pending upstream `prepare`, checks the entire original Data's canonical
+SHA-256 under the Data row lock, then checks the entire next Data's catalog
+references (including unchanged fields) for owner, kind, retained soft-deletes,
+duplicate ordered Materials and each role's initialization byte budget.
+An unmodified, retained soft-deleted reference may stay or move within its
+original field; adding it to another field is a new selection and fails.
+Updating a live Data changes no previously frozen ProjectSample, nor any
+existing Project or Run.
+
+**Standalone Material/Session first:** a trusted backend posts a bounded file
+to the existing management-Bearer upload route (not to a model tool), then calls
+`save_initial_resource` with its opaque `uploadRef`. EP verifies owner, kind,
+immutable name/media type/size/SHA-256, unexpired staged bytes and the shared
+Bundle content validators before planning one Bundle and one child UUID. The
+`kind:"initial_resource"` owner/key/request/immutable-upload-fact fingerprint,
+planned IDs and write-ahead `resource:<uploadRef>` receipt use the *existing*
+management store. On an attempted write's lost reply, the original key only
+reads the **planned** Bundle, child and byte hash: if absent or unverifiable,
+it remains `outcome_unknown`, without re-POSTing or inventing another key.
+`get_preparation` exposes the identities and actual stage/status; only a
+confirmed completed operation produces the minimal save success result.
+Once saved, use the six existing `list_options` categories to find its active
+IDs; both new and existing Data bind those IDs, never raw file bytes. No new
+HTTP catalog, dataset package dependency, or change to Web's independent
+standalone initial-resource routes is introduced.
+
+Before `store.begin` for a **new** bind, EP locks the owned Dataset/Data and
+checks the original full Data digest and membership. For each supplied
+Material field it sums owner-catalog byte sizes, including soft-deleted
+references retained in that same Data field, then enforces the separate
+Subject/Evaluator initialization budgets. Retained does **not** mean zero
+bytes; a deleted Material newly selected for another field is unavailable.
+The atomic Data update still rechecks the full next Data under its row lock.
+An already-over-budget request creates no operation and performs no mutation.
+
+`kind:"bind"` shares `eval_management_operations` with `prepare_inputs` and
+`initial_resource`, but has its own versioned, owner/key/intent fingerprint,
+original full Data digest, planned post-binding digest and Data write-ahead
+stage. A lost response is reconciled by that exact digest; a later edit is
+never restored. `get_preparation(kind:"bind")` reports the planned digest even
+while pending; only `status:"completed"` and `binding:"confirmed"` establish
+the historical binding receipt. Same-key replay succeeds only while the
+current owned Dataset member still has the planned full Data digest. Changed
+intent or a second pending bind of that Data (even in another Dataset)
+conflicts. A pending bind fences `dataset_data`, `approval_dataset` and
+management `create_project`; a bind receipt never proves Prompt file-row
+order. `prepare_inputs` now plans only Prompt Dataset/Data IDs and existing
+resource UUID references, never inline Material/Session uploads or Bundle
+stages.
+
+The legacy paragraph above describes the single-Data v3 plan/stage. A v4
+`bindings` array uses the **same** `kind:"bind"` operation with a JSON v4 plan
+and one atomic `batch` write-ahead stage (no new migration). All distinct Data
+IDs must be members of the same owned active Dataset. A supplied patch may
+already be satisfied (including clearing an absent field); its planned
+digest then equals its original full-row digest. This is a valid no-op member,
+even if the *entire* batch is already satisfied. The same owned Material may
+appear across Data and in both roles of one Data; a Data may also select
+multiple distinct Materials per field. The v3 single-Data contract is
+unchanged. Before a new reservation
+the original full-row digests and selected resource budgets are checked; the
+write then locks the Dataset and Data in sorted ID order in **one** DB
+transaction, checks membership, original/result digests, entire next Data
+catalog references and budgets, then updates only changing rows or rolls
+back all; a no-op still undergoes the same full validation.
+Neither a pending v3 nor another v4 can claim any overlapping Data, even via
+another Dataset. An attempted batch never repeats a write: replay confirms it
+only when a single locked readback proves every changing member has its exact
+planned full-row digest and each no-op remains at its original full-row
+digest. A changing member still original means unknown outcome; a stale row
+conflicts. Readback revalidates all current catalog references and budgets,
+so an all-no-op attempted stage cannot bypass the original atomic checks.
+Do not try a new key to bypass the fence. Completed replays check all
+current rows too. v4 `get_preparation` pages at most ten original-order Data
+IDs, planned result digests and one shared actual pending/attempted/confirmed
+batch stage; a completed status requires confirmation of the whole atomic
+batch and operation (state satisfied, not a claim that every row was written).
+The Store also checks every owned active member's full Data digest, the
+stored patch's actual target and catalog references under sorted row locks
+before marking the v4 operation complete, so a confirmed stage alone cannot
+stand in for a valid batch. No raw Data, prompts, resource lists, bytes or
+URLs appear in its v4 receipts. EP validates binding intent
+and readback but does not approve binding: `approval_dataset` is an existing
+read-only digest selector, not a binding approval step.
+
+**Prompt Dataset recovery (internal v3 plan, unchanged public response):**
+Before its first import, `prepare_inputs` parses the Prompt once and persists
+an ordered planned Data ID and canonical SHA-256 of **every field** in each
+original row, plus its full post-binding content digest. The owner, original
+key, normalized request, immutable upload metadata (including byte size and
+SHA-256) and ordered row digests determine its fingerprint. Neither the plan
+nor a tool result stores/exposes the Prompt text. A concurrent first call
+whose random IDs lose `begin` may adopt only the persisted winner after
+matching the original request, upload facts and row hashes; it uses the
+winner's IDs and receipts and never repeats its own proposed import.
+
+Before reading a staged Prompt on replay, a consistent owner-scoped Store
+snapshot must prove the active Prompt Dataset's exact name/description,
+original-order provenance, all and only the ordered active Data IDs and
+**each complete persisted row digest** (original or exact planned binding).
+An atomic import whose response was lost can therefore be confirmed even
+after the 24-hour staging expiry. An attempted import not yet visible might
+still be in flight: wait a bounded read-only window before any local retry.
+If it remains absent, **only the same operation key** may reopen a still-ready
+owned Prompt upload whose ref, kind, name, media type, byte size and SHA-256
+match the saved plan. Reparse it and compare every original and post-binding
+row digest; then call the existing atomic Dataset import with the **same
+planned Dataset/Data IDs** and read back the entire committed result. The
+PostgreSQL Store accepts identity-equal same-owner content and ordered
+membership under its transaction, so a first writer that commits during the
+retry is settled by identity, not by a second Dataset or a guessed name.
+If that first writer already bound a Data row before the atomic identity
+replay sees it, a failed replay can be confirmed **only** by the same full
+owner-scoped Dataset/order/row-digest read-back; no import error alone proves
+success.
+Changed content, partial membership, foreign/deleted rows or wrong order
+fail closed. If the staged Prompt expired or cannot be verified and no Dataset
+exists, report `outcome_unknown`, never fabricated success or a new-key import.
+An already completed replay never opens staging bytes. `get_preparation`
+returns only validated v3 identities and paged binding stages, not hashes or
+Prompt text. A v1/v2 `prepare` plan without those hashes cannot be
+resumed/finalized or used as old-Dataset order proof; `save_initial_resource`
+and `bind_data_resources` keep their own plans.
 
 `list_options({category:"dataset_data",datasetId,page?,pageSize?})` returns **exactly**
 `{category:"dataset_data",datasetId,name:<safe Dataset name>,order:"upload"|"unknown",page,pageSize,total,items:[{dataId:<UUID>,name:<safe Data.name or null>,sourceRedacted?:true,nameTruncated?:true}]}`.
-The owned, active Dataset must not have a pending Moss preparation. `page` starts at 1; the shared default `pageSize:20` and any larger **valid** catalog size (at most 50) are clamped to **5**, and the response reports the actual size (5 for those inputs). `total` covers all current members, not just the page; a page beyond the end has `items:[]`. Source-authored names are redacted before bounded truncation (Data names at 80 UTF-16 code units; Dataset name at 100); null/missing/non-string Data names return `null`. The source's prompt text and arbitrary business fields, URLs and Material/Session references are **never** returned. The result including JSON escaping must fit 4,800 UTF-8 bytes/characters. `order:"upload"` requires **both** intact Dataset-level original-order provenance and valid stored positions for every member, or an owner-scoped completed original Moss preparation whose `plan.dataIds` and confirmed receipts prove the entire all-`NULL` membership of an untracked legacy Prompt Dataset. A real detach invalidates provenance durably, even if every row is removed and reattached with contiguous positions; a no-op detach does not. A completed plan cannot revive invalidated provenance or override known positions. Pre-`0012` Datasets with positions but no recorded provenance cannot prove their original file row and become `order:"unknown"`, even if unchanged in reality: a previous detach-all/readd is indistinguishable. Legacy UI imports without a valid plan are also unknown. Unknown order provides deterministic IDs for explicit `dataIds` selection, **not** an inferable first file row. The selected member order used in `approval_dataset`'s digest and Project creation is the same deterministic order, but `approval_dataset` and `expectedSnapshots` shapes and checks are unchanged; explicit Data ID selection still works.
+The owned, active Dataset must not have a pending Moss preparation **or binding**. `page` starts at 1; the shared default `pageSize:20` and any larger **valid** catalog size (at most 50) are clamped to **20**, and the response reports the actual size. `total` covers all current members, not just the page; a page beyond the end has `items:[]`. Source-authored names are redacted before truncation (Data names at most 80 UTF-16 code units; Dataset name at most 100); null/missing/non-string Data names return `null`. On each page, safe names are further adaptively and **explicitly marked** `nameTruncated:true` if JSON escaping or multibyte Unicode would exceed 4,800 UTF-8 bytes or characters; all 20 IDs, order, page and total remain intact. The source's prompt text and arbitrary business fields, URLs and Material/Session references are **never** returned. `order:"upload"` requires **both** intact Dataset-level original-order provenance and valid stored positions for every member, or an owner-scoped completed **v3** Moss preparation with bounded ordered row hashes, original planned IDs and confirmed receipts proving the entire all-`NULL` membership of an untracked legacy Prompt Dataset. A v1/v2 plan without those hashes cannot promote unknown order. A real detach invalidates provenance durably, even if every row is removed and reattached with contiguous positions; a no-op detach does not. A completed plan cannot revive invalidated provenance or override known positions. Pre-`0012` Datasets with positions but no recorded provenance cannot prove their original file row and become `order:"unknown"`, even if unchanged in reality: a previous detach-all/readd is indistinguishable. Legacy UI imports without a valid plan are also unknown. Unknown order provides deterministic IDs for explicit `dataIds` selection, **not** an inferable first file row. The selected member order used in `approval_dataset`'s digest and Project creation is the same deterministic order, but `approval_dataset` and `expectedSnapshots` shapes and checks are unchanged; explicit Data ID selection still works.
+
+**Per-Data stored binding detail (read-only):**
+`list_options({category:"dataset_data_resources",datasetId,dataId,page?,pageSize?})`
+returns **exactly**
+`{category:"dataset_data_resources",datasetId,dataId,page,pageSize,total,initialMaterialsCount,evalInitialMaterialsCount,hasInitialSession:boolean,bindingDigest:<lowercase hex64>,items:[...]}`.
+For each current, owned, active Data member of the owned, active Dataset,
+`items` are one continuous page of the complete ordered references:
+first `initialMaterials` in their **stored field order**, then
+`evalInitialMaterials` in their **stored field order**, then `initialSession`
+if present. Material items are exactly
+`{field:"initialMaterials"|"evalInitialMaterials",index:<zero-based position in that field>,bundleId,materialId}`;
+the Session item is exactly `{field:"initialSession",index:0,bundleId,sessionId}`.
+`total = initialMaterialsCount + evalInitialMaterialsCount + (hasInitialSession ? 1 : 0)`;
+`page` defaults to 1 and `pageSize` to 20; a valid requested `pageSize` of
+1–50 is clamped to **20** and reported as the effective size, with no
+truncation or dropped entries; out-of-range pages return `items:[]`.
+`bindingDigest` is the canonical SHA-256 of the **complete** ordered
+`{initialMaterials:storedInitialMaterials??[],evalInitialMaterials:storedEvalInitialMaterials??[],initialSession:storedInitialSession??null}`
+using the existing `digestJson` rule, identical across pages until these
+references change. It is **not** the complete Data `contentDigest` or an
+`approval_dataset` digest: changing only prompts or business fields leaves
+this binding digest unchanged. All three stored reference fields and their UUIDs
+are schema-validated, including references to subsequently soft-deleted
+resources. This read checks active Dataset/Data membership and pending Moss
+preparation/binding (including a bind of the same reusable Data through
+another Dataset) in one owner-scoped repeatable-read snapshot, without a
+whole-Dataset membership scan or any resource catalog/file read. A listed
+reference is **not** proof it is currently active or newly selectable; check
+the separate `materials`/`sessions` directory for that. No prompts,
+arbitrary Data fields, model-invisible upload refs, labels, URLs, file bodies
+or raw bytes appear in this detail, nor in `dataset_data`. The response must
+fit **both** 4,800 JSON characters and 4,800 UTF-8 bytes; overflow fails
+explicitly rather than trimming or altering the page. This adds no new tool,
+write path or migration and does not change `approval_dataset` or binding CAS.
 
 An incidental `page`/`pageSize` on `overview` or `tools` does not add rows to those responses; only `samples`/`fields` use that page, and only `toolPage`/`toolPageSize` page Tools.
 
@@ -336,9 +579,11 @@ Recovery also requires the GET-serving API process to see the **same existing pr
 
 Maxima: 20 MiB (20,971,520 bytes) Prompt, 5 MB Material (public SP limit), 8 MB UTF-8 Session (then SP's 2M-character native-context validation), and 20 MiB Skill ZIP/Reference; all additionally use the Agent-import 20 MiB/file, 2 GiB private staging root and 24-hour fixed TTL. Streaming checks actual size/hash; a PostgreSQL reservation caps total bytes and at most eight simultaneous uploads across API instances. Expired/unready/wrong-kind refs cannot authorize a tool write. Upload refs never appear in an Agent Config or Project.
 
-All five new operations reuse an `operationKey` for an unknown response. The durable fingerprint covers normalized intent and the immutable SHA/size/kind/name/media type of referenced uploads (or, for output Schemas, the exact bounded content SHA-256 without storing that content in the operation). A changed intent with the same key conflicts. Preparation saves planned UUIDs before any catalog write, reconciles by owned identity/content and confirms a stage only after read-back. Before the first `store.begin` or any Dataset/Bundle write for a **new** preparation, it checks each case's Subject and Evaluator Material fields separately against SP's 20,000,000-byte initialization budget, counting existing owned and staged Material sizes together; same-key recovery follows the saved plan rather than rechecking previously bound, possibly soft-deleted resources. `prepare_inputs` returns only a compact completion receipt; `get_preparation({operationKey,pageSize:1})` is the paginated source for case bindings and resource details. Prompt-import rejects initial refs, so each Data is bound before Project creation. Pi-native history is checked by the existing SP public-context validator, never sent to the Evaluator. A Bundle file with a planned identity is not automatically deleted on an uncertain catalog transaction: if the transaction rolled back, an orphan may need operator reconciliation before that stage can be retried, rather than risking deletion of a committed Material/Session. Remote ordinary SP Skill/Reference writes have no import-key receipt: after a POST was attempted and its result is not proved, **do not resend it, delete its attachment or use a new operation key as a recovery trick**. `get_preparation` reports that stage as `outcome_unknown` for manual review; only an affirmative public result can complete it. An unresolved same-name Skill intent fences other Skill operations. Output Schemas instead retain the existing name-permissive catalog contract; only an exact planned ID and operation key can prove a Schema receipt. Project/Run retain their existing durable idempotency; `create_agent` still lacks durable Agent intent receipts and its uncertain SP response is not treated as success.
+Durable management writes use the original `operationKey` after a lost response. `save_initial_resource` fingerprints the owner, exact request and trusted immutable upload kind/name/media type/size/SHA-256, stores the planned Bundle/child UUIDs **before** its only write, and confirms the resource stage only after active owner-catalog byte verification. An attempted write absent or unverifiable at the planned ID is `outcome_unknown`: reconciliation is read-only and neither a same-key second write nor a different key is permitted as an unknown-outcome retry. A failed planned file transaction may leave an orphan for operator reconciliation; its file is not blindly deleted. Before a new `prepare_inputs`, the owned existing Material UUID refs in each case/role are budget-checked separately against SP's 20,000,000-byte initialization limit; the Prompt attachment is imported without initial refs and each Data is then bound before Project creation. `get_preparation({operationKey,pageSize:1})` pages Prompt Data binding receipts; standalone resource status/identity is a single unpaged receipt. The Session content validator is shared with HTTP uploads, and a Subject's Pi-native history is never seeded into the Evaluator. Remote ordinary SP Skill/Reference writes have no import-key receipt: after an unproved POST, **do not resend it, delete its attachment or use a new operation key as a recovery trick**. `get_preparation` reports unknown stages for manual review; only an affirmative public result can complete them. An unresolved same-name Skill intent fences other Skill operations. Output Schemas retain the existing name-permissive catalog contract; only their exact planned ID and operation key can prove a receipt. Project/Run retain their existing durable idempotency; `create_agent` still lacks durable Agent intent receipts and its uncertain SP response is not treated as success.
 
 `migrations-postgres/0009_management_preparation.sql` and its Drizzle metadata add only upload reservations and owner-scoped operation/stage receipts, after the unchanged Dashboard migrations `0007` and `0008`. The minimal `0010_management_output_schema.sql` changes **only** the existing management operation `kind` check to allow `output_schema`; it creates no column, index, table or uniqueness constraint, and leaves the output Schema catalog and existing identity check unchanged. Existing duplicate names remain valid before and after migration. Neither migration is applied by this change; run the existing deployment migration before enabling management. Without a public SP conditional Skill create or ordinary Skill operation receipt, an attempted/unknown Skill upload stays fenced for manual reconciliation. Skill-name preflight and Reference attachment-identity reconciliation scan at most 500 public catalog entries; a larger catalog fails closed rather than choosing a resource by name. Takt's trusted adapter must enforce attachment provenance and actual user approval; this repository never accepts model-provided approval as proof.
+
+The **unpublished** `0013_management_bind.sql` also admits `initial_resource` in the management operation kind check; the current Drizzle schema and `0013_snapshot.json` agree, and journal entry 13 retains its existing tag. No `0014` was generated and migration history through `0012` remains untouched. The pending-Dataset index still covers **only** `prepare`/`bind`: saving a resource alone must not fence any Dataset.
 
 `migrations-postgres/0011_dataset_member_order.sql` is an append-only change to the existing membership table only: nullable, non-negative `position` with a per-Dataset unique index. It leaves every old membership `NULL` rather than guessing from UUID/order of insertion; no old SQL/journal entry or Project/Run fact is rewritten. Migration journal/snapshot integrity tests guard the unchanged applied prefix, and the PostgreSQL upgrade test exercises an old database when a **safe isolated** test `DATABASE_URL` exists. Generating/checking a migration never applies it to production.
 
@@ -739,6 +984,7 @@ Agent 用途由 Eval 写入 `eval_agent_config_purposes`，只接受 `execution`
 
 - `createPostgresProjectStore` 写 Project 快照、替换评估计划、软删除（存在活动 Run 时拒绝）和读取计划视图；`createPostgresProjectPlanReader`（用户范围）与 `createPostgresWorkerProjectPlanReader`（仅 Worker）实现 Runtime 的 `ProjectPlanReader`，已软删除的 Project 读为不存在，详情、预览、Run、Metrics 和观察入口因此一律 404。
 - `createPostgresRuntimeStore` 与 HTTP 路由使用同一已校验的 `EvalSpRelease`；`admitRun` 在 Project 行锁下先校验创建 key 的可信瞬时证明，再完成重放/冲突（同 key 的原 Run 即使被后续 Run 取代也可重放）、忙碌检查、发布校验、计划摘要与评估计划复核、目标与当前 Sampling 集合复核、只删除选中记录及其 Run 关联、分批插入、首次评估锁定评估计划，并在同一事务内经 `fromDrizzle(transaction)` 投递 pg-boss 任务。Run 行从不删除，被替换的成员从其 Run 关联中移除。
+- 跨 Project 准入限制同一数据库最多 3 个活跃 Project，使用 `runActive` 判定，事务级 PostgreSQL 锁串行化多 API 实例的新 Run 准入与旧 Run 手动补收后的重新激活。重放和已活跃 Run 的补采不占新名额；达到上限返回 `409 ACTIVE_PROJECT_LIMIT_REACHED`。Worker 的 `EVAL_RUN_WORKER_CONCURRENCY` 仍只控制每实例处理数量。
 - `createPostgresWorkerRuntimeStore` 只供 Worker 跨用户恢复 Run，HTTP 路由不能注入它。
 - Sampling/Evaluation 写入携带预期 `revision`，PostgreSQL 用条件 `UPDATE` 检查版本并递增；未命中即报告冲突，由 Runtime 读回校准。原始资源快照与摘要在同一事务写入，阶段事实不含快照正文。
 - `createPostgresMetricsSource` 在一个 repeatable-read 只读事务内按固定计划读取范围内全部 ProjectSample（含从未运行的）、当前 Sampling/Evaluation（可按 `runIds` 过滤）和相关 Run 投影，全部为集合查询，不用实时 `dataset_data` 推断归属。`createPostgresObservationReader` 校验 Project 与当前记录后返回只读观察引用，从不返回可写 Chat URL。
@@ -750,7 +996,7 @@ readiness 与快照请求接收 Runtime 的本地 `AbortSignal`，使用现有 H
 
 `src/sp/harness.ts` 用服务凭证确保 Inbox Chat、初始化、提交/重启、按键校准、收集完整产物/轨迹、分页资源、Evaluator 原样的 `structuredOutput` 结果文件，以及按轨迹读取 Evaluator 最后一条回复（`readFinalReply`）；`sp/submission-observer.ts` 以 WebSocket 终态推送为主，Ping/Pong 检测静默失活，断线后按已知 Submission ID 读取一次权威状态（404 表示 Submission 或 Chat 已不存在，不回退按键读取）并对同一 Submission URL 有限重连；瞬态错误只表示状态未知，预算用尽时抛出可重试的 “status unconfirmed” 错误，健康连接期间不轮询。
 
-资源先经无事件的 readiness 路由等待 SP 定稿；期限内不下载未定稿页面。期限届满后通过 `allowPartial=true` 显式读取冻结的已知 native 页面、配对的 API 计费页面及必要的验证字节，保留 `finalized:false`、`coverage.partial` 与真实计数，不把未知计费记为零。证据读取仍携带 `submissionId` 并保留完整 Chat 轨迹。SP HTTP 请求（含 readiness）默认最多等待 60 秒，停止调用最多等待 10 秒；每个资源页面与证据传输分别最多等待 5 分钟，页面 JSON 限 4 MB，其他 JSON 仍按 V8 最大字符串长度限制。证据/资源 GET 的 `409 EVIDENCE_NOT_READY` 通常可重试，但已请求 partial 页且 SP 仍不支持读取时不会重复消耗下载预算；其他 409 不重试。证据导入流式 PUT 并边传边校验大小与 SHA-256；单个证据文件上限取 `DEFAULT_EVIDENCE_LIMITS` 与已安装的 `@springbrand/eval-harness@0.1.0-alpha.7` 的 `EVAL_EVIDENCE_FILE_MAX_BYTES` 中较小者，现为 95 MB。Harness 的 `log` 事件由 Worker 写入 pino，不含正文或凭证。当前只支持 `sp` 框架，`codex`、`cc` 明确拒绝。服务契约、Bundle 文件布局与校验规则见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。SP 服务路由在独立 SP 分支实现；npm alpha.7 已发布，但缺少 partial 请求的公开契约，且真实跨部署联调仍需完成。
+资源先经无事件的 readiness 路由等待 SP 定稿；期限内不下载未定稿页面。期限届满后通过 `allowPartial=true` 显式读取冻结的已知 native 页面、配对的 API 计费页面及必要的验证字节，保留 `finalized:false`、`coverage.partial` 与真实计数，不把未知计费记为零。证据读取仍携带 `submissionId` 并保留完整 Chat 轨迹。SP HTTP 请求（含 readiness）默认最多等待 60 秒，停止调用最多等待 10 秒；每个资源页面与证据传输分别最多等待 5 分钟，页面 JSON 限 4 MB，其他 JSON 仍按 V8 最大字符串长度限制。证据/资源 GET 的 `409 EVIDENCE_NOT_READY` 通常可重试，但已请求 partial 页且 SP 仍不支持读取时不会重复消耗下载预算；其他 409 不重试。证据导入流式 PUT 并边传边校验大小与 SHA-256；单个证据文件上限取 `DEFAULT_EVIDENCE_LIMITS` 与已安装的 `@springbrand/eval-harness@0.1.0-alpha.9` 的 `EVAL_EVIDENCE_FILE_MAX_BYTES` 中较小者，现为 95 MB。Harness 的 `log` 事件由 Worker 写入 pino，不含正文或凭证。当前只支持 `sp` 框架，`codex`、`cc` 明确拒绝。服务契约、Bundle 文件布局与校验规则见 [Eval SP Harness service contract](../../docs/eval-sp-harness-protocol.md)。npm alpha.9 已发布并提供 partial 请求的公开契约，真实跨部署联调仍需完成。
 
 初始化的 `data.userPrompt` 与提交的 `prompt` 通过该包的共享 `evalPromptSchema` 校验：只拒绝非字符串及纯空白，首尾空格、换行和 Unicode 空白原样发送，不在 Eval 侧清洗 Prompt。
 

@@ -1,0 +1,107 @@
+{
+  "generator": "@springbrand/agent-runtime@0.3.1-alpha.15 public canonicalMessageSchema + trajectory helpers (UA 0b709ace, OpenRouter protocols.test.ts:325-375)",
+  "records": [
+    {
+      "ingestSeq": 1,
+      "record": {
+        "format": "pi-trajectory/v1",
+        "resource": {
+          "agentId": "agent-1",
+          "sessionId": "chat-1"
+        },
+        "projection": {
+          "kind": "safe",
+          "policyId": "eval-tool-id-fixture",
+          "policyVersion": 1
+        },
+        "record": {
+          "type": "entry",
+          "value": {
+            "id": 1,
+            "conversationId": 1,
+            "kind": "pi.assistant",
+            "model": [
+              {
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "toolCall",
+                    "id": "call_1|fc_1",
+                    "name": "lookup",
+                    "arguments": {
+                      "redacted": true
+                    }
+                  }
+                ],
+                "api": "openrouter-responses",
+                "provider": "openrouter",
+                "model": "test",
+                "timestamp": 1,
+                "usage": {
+                  "input": 1,
+                  "output": 1,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "totalTokens": 2,
+                  "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "total": 0
+                  }
+                },
+                "stopReason": "toolUse"
+              }
+            ]
+          }
+        },
+        "submissionId": "submission-1"
+      }
+    },
+    {
+      "ingestSeq": 2,
+      "record": {
+        "format": "pi-trajectory/v1",
+        "resource": {
+          "agentId": "agent-1",
+          "sessionId": "chat-1"
+        },
+        "projection": {
+          "kind": "safe",
+          "policyId": "eval-tool-id-fixture",
+          "policyVersion": 1
+        },
+        "record": {
+          "type": "entry",
+          "value": {
+            "id": 2,
+            "conversationId": 1,
+            "kind": "pi.tool-result",
+            "model": [
+              {
+                "role": "toolResult",
+                "toolCallId": "call_1|fc_1",
+                "toolName": "lookup",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "[REDACTED]"
+                  }
+                ],
+                "isError": false,
+                "timestamp": 2,
+                "details": {
+                  "redacted": true,
+                  "executionId": "execution-1",
+                  "capabilityId": "capability-1"
+                }
+              }
+            ]
+          }
+        },
+        "submissionId": "submission-1"
+      }
+    }
+  ]
+}

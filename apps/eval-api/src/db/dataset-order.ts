@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { canonicalJsonBytes } from "@eval-platform/eval-contracts";
 import { platformIdSchema } from "@eval-platform/eval-dataset";
 
 export type DatasetMemberOrder = "upload" | "unknown";
@@ -5,8 +7,10 @@ export type DatasetMemberOrder = "upload" | "unknown";
 /** Only facts already persisted by the management preparation flow, not another order store. */
 export interface PreparationOrderEvidence {
   readonly ownerUserId: string;
+  readonly operationKey: string;
   readonly kind: string;
   readonly status: string;
+  readonly fingerprint: string;
   readonly plan: unknown;
   readonly stages: unknown;
 }
@@ -24,10 +28,34 @@ function completedOriginalIds(owner: string, datasetId: string, evidence: Prepar
   if (evidence.ownerUserId !== owner || evidence.kind !== "prepare" || evidence.status !== "completed") return null;
   const plan = record(evidence.plan);
   const stages = record(evidence.stages);
-  if (!plan || !stages || plan.version !== 1 || plan.datasetId !== datasetId
+  if (!plan || !stages || plan.version !== 3 || plan.datasetId !== datasetId
+    || typeof evidence.operationKey !== "string" || !evidence.operationKey
+    || typeof plan.name !== "string" || !plan.name.trim()
+    || typeof plan.description !== "string" || !plan.description.trim()
+    || typeof plan.promptUploadRef !== "string"
+    || platformIdSchema.safeParse(plan.promptUploadRef).data !== plan.promptUploadRef
     || !Array.isArray(plan.dataIds) || plan.dataIds.length < 1 || plan.dataIds.length > 50
     || !Array.isArray(plan.cases) || plan.cases.length !== plan.dataIds.length
-    || !Array.isArray(plan.assets) || !["json", "jsonl"].includes(plan.format as string)) return null;
+    || !Array.isArray(plan.rowDigests) || plan.rowDigests.length !== plan.dataIds.length
+    || !["json", "jsonl"].includes(plan.format as string)) return null;
+  const fact = record(plan.uploadFact);
+  if (!fact || fact.kind !== "prompt" || fact.uploadRef !== plan.promptUploadRef
+    || typeof fact.name !== "string" || !fact.name
+    || typeof fact.mediaType !== "string" || !fact.mediaType
+    || typeof fact.byteSize !== "number" || !Number.isSafeInteger(fact.byteSize) || fact.byteSize < 1
+    || typeof fact.sha256 !== "string" || !/^[a-f0-9]{64}$/u.test(fact.sha256)
+    || plan.rowDigests.some((item) => {
+      const row = record(item);
+      return !row || typeof row.original !== "string" || !/^[a-f0-9]{64}$/u.test(row.original)
+        || typeof row.bound !== "string" || !/^[a-f0-9]{64}$/u.test(row.bound);
+    })) return null;
+  const request = { operationKey: evidence.operationKey, promptUploadRef: plan.promptUploadRef,
+    name: plan.name, description: plan.description, format: plan.format, cases: plan.cases };
+  // The completed receipt alone is not proof if its ordered hashes or request
+  // have changed after completion. Match the same canonical v3 operation fingerprint.
+  if (createHash("sha256").update(canonicalJsonBytes([
+    "management-preparation/v3", owner, request, fact, plan.rowDigests,
+  ])).digest("hex") !== evidence.fingerprint) return null;
   const ids: string[] = plan.dataIds;
   if (new Set(ids).size !== ids.length || ids.some((id) => {
     const parsed = platformIdSchema.safeParse(id);
@@ -62,8 +90,9 @@ function deterministic<T extends { readonly dataId: string; readonly position: n
  * Positions prove the original order only for Datasets tracked since creation with no effective
  * membership removal. A pre-tracking Dataset may have undergone a detach-all/readd with dense
  * positions: do not promote its positions to proof. For old, entirely position-less Prompt
- * Datasets, accept only a *single* completed, owned preparation whose original planned IDs and
- * confirmed receipts prove exactly the current full membership. Never revive invalidated proof.
+ * Datasets, accept only a *single* completed, owned v3 preparation whose fingerprint,
+ * ordered row hashes, planned IDs and confirmed receipts prove the full membership.
+ * Never revive invalidated proof or accept an older unhashed plan.
  */
 export function resolveDatasetMemberOrder<T extends { readonly dataId: string; readonly position: number | null }>(
   owner: string,

@@ -27,14 +27,15 @@ describe("offline Dashboard and management migration integrity", () => {
   it("preserves the immutable Dashboard history and appends management after it", async () => {
     const migrations = readMigrationFiles({ migrationsFolder });
     expect(migrations.slice(0, appliedPrefix.length).map((migration) => [migration.folderMillis, migration.hash])).toEqual(appliedPrefix);
-    expect(migrations).toHaveLength(appliedPrefix.length + 1);
+    expect(migrations).toHaveLength(appliedPrefix.length + 2);
     const journal = await metadata("_journal.json");
     expect(journal.entries).toHaveLength(migrations.length);
     expect(journal.entries[8]).toMatchObject({ idx: 8, tag: "0008_dashboard_data_selection", breakpoints: true });
     expect(journal.entries[9]).toMatchObject({ idx: 9, tag: "0009_management_preparation", breakpoints: true });
     expect(journal.entries[10]).toMatchObject({ idx: 10, tag: "0010_management_output_schema", breakpoints: true });
     expect(journal.entries[11]).toMatchObject({ idx: 11, tag: "0011_dataset_member_order", breakpoints: true });
-    expect(journal.entries.at(-1)).toMatchObject({ idx: 12, tag: "0012_dataset_order_provenance", breakpoints: true });
+    expect(journal.entries[12]).toMatchObject({ idx: 12, tag: "0012_dataset_order_provenance", breakpoints: true });
+    expect(journal.entries.at(-1)).toMatchObject({ idx: 13, tag: "0013_management_bind", breakpoints: true });
     expect(journal.entries.map((entry: { when: number }) => entry.when)).toEqual(migrations.map((migration) => migration.folderMillis));
     expect(migrations.at(-1)!.folderMillis).toBeGreaterThan(migrations.at(-2)!.folderMillis);
   });
@@ -160,5 +161,33 @@ describe("offline Dashboard and management migration integrity", () => {
     const statements = readMigrationFiles({ migrationsFolder })[12]!.sql.join(" ");
     expect(statements).toMatch(/ALTER TABLE "eval_datasets" ADD COLUMN "original_order_intact" boolean/iu);
     expect(statements).not.toMatch(/\b(UPDATE|INSERT|DELETE|TRUNCATE|DROP|DEFAULT)\b/iu);
+  });
+
+  it("adds bind and standalone initial_resource to the unpublished kind check, preserving prior history", async () => {
+    const previous = await metadata("0012_snapshot.json");
+    const current = await metadata("0013_snapshot.json");
+    expect(current.prevId).toBe(previous.id);
+    expect(Object.keys(current.tables)).toEqual(Object.keys(previous.tables));
+    for (const [name, table] of Object.entries(previous.tables)) {
+      if (name !== "public.eval_management_operations") expect(current.tables[name]).toEqual(table);
+    }
+    const before = previous.tables["public.eval_management_operations"];
+    const after = current.tables["public.eval_management_operations"];
+    expect(after.columns).toEqual(before.columns);
+    expect(after.checkConstraints.eval_management_operations_kind_ck.value).toContain("'bind'");
+    expect(after.checkConstraints.eval_management_operations_kind_ck.value).toContain("'initial_resource'");
+    expect(after.indexes.eval_management_pending_dataset_idx.where).toContain("'bind'");
+    expect(after.indexes.eval_management_pending_dataset_idx.where).not.toContain("'initial_resource'");
+    expect({ ...after, indexes: before.indexes, checkConstraints: before.checkConstraints }).toEqual(before);
+    const sql = readMigrationFiles({ migrationsFolder })[13]!.sql.join(" ");
+    expect(sql).toContain('DROP CONSTRAINT "eval_management_operations_kind_ck"');
+    expect(sql).toContain('DROP INDEX "eval_management_pending_dataset_idx"');
+    expect(sql).toContain('CREATE INDEX "eval_management_pending_dataset_idx"');
+    expect(sql).toMatch(
+      /CREATE INDEX "eval_management_pending_dataset_idx" ON "eval_management_operations" USING btree \("owner_user_id",\s*\("eval_management_operations"\."plan"->>'datasetId'\)\)/u,
+    );
+    expect(sql).toContain('ADD CONSTRAINT "eval_management_operations_kind_ck"');
+    expect(sql).toContain("'initial_resource'");
+    expect(sql).not.toMatch(/\b(UPDATE|INSERT|DELETE|TRUNCATE|COLUMN|CREATE TABLE)\b/iu);
   });
 });

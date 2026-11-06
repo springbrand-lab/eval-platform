@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EVAL_MANAGEMENT_MCP_PATH } from "./mcp.js";
-import { MANAGEMENT_TOKEN, RESULT_TOKEN, WEB_TOKEN, run, setupManagement } from "./test-fixture.js";
+import { MANAGEMENT_TOKEN, RESULT_TOKEN, WEB_TOKEN, run, setupManagement, toolValue } from "./test-fixture.js";
 
 const rpc = (method: string, id: number | undefined = 1, params: unknown = {}) => ({
   jsonrpc: "2.0", ...(id === undefined ? {} : { id }), method, params,
@@ -50,28 +50,63 @@ describe("trusted management MCP transport", () => {
     expect(app.release).toHaveBeenCalledTimes(1);
   });
 
-  it("is stateless and advertises exactly sixteen management tools including separate read-only reconciliation", async () => {
+  it("is stateless and advertises exactly nineteen management tools, including case usage", async () => {
     const app = setupManagement();
     const initialized = await app.rpc(rpc("initialize", 2, { protocolVersion: "2025-06-18" }));
     expect(initialized.headers.get("mcp-session-id")).toBeNull();
     expect(await initialized.json()).toMatchObject({ result: { protocolVersion: "2025-06-18",
       capabilities: { tools: { listChanged: false } } } });
     const tools = await (await app.rpc(rpc("tools/list"))).json() as {
-      result: { tools: Array<{ name: string; inputSchema: {
+      result: { tools: Array<{ name: string; description: string; inputSchema: {
         type: string; required?: string[]; additionalProperties?: boolean; properties?: Record<string, unknown>;
       } }> };
     };
     expect(tools.result.tools.map(({ name }) => name)).toEqual([
-      "list_options", "prepare_inputs", "get_preparation", "search_agent_resources",
+      "list_options", "save_initial_resource", "prepare_inputs", "bind_data_resources", "get_preparation", "search_agent_resources",
       "upload_agent_skill", "upload_agent_reference", "create_output_schema", "create_agent", "create_project", "preview_run",
-      "submit_run", "reconcile_operation", "stop_run", "get_run", "get_metrics", "inspect_case",
+      "submit_run", "reconcile_operation", "stop_run", "get_run", "get_metrics", "inspect_case", "get_case_usage",
     ]);
-    expect(tools.result.tools.filter(({ name }) => name !== "reconcile_operation").every(({ inputSchema }) => inputSchema.type === "object"
+    expect(tools.result.tools.find(({ name }) => name === "list_options")!.description).toContain("up to 20 safe Data IDs");
+    expect(tools.result.tools.find(({ name }) => name === "list_options")!.description)
+      .toContain("dataset_data_resources(datasetId,dataId)");
+    expect(tools.result.tools.find(({ name }) => name === "bind_data_resources")!.description)
+      .toContain("1–20 distinct members in one atomic transaction");
+    expect(tools.result.tools.filter(({ name }) => !["reconcile_operation", "save_initial_resource", "bind_data_resources"].includes(name))
+      .every(({ inputSchema }) => inputSchema.type === "object"
       && inputSchema.additionalProperties === false)).toBe(true);
+    const saveInput = tools.result.tools.find(({ name }) => name === "save_initial_resource")!.inputSchema;
+    expect(saveInput).toHaveProperty("oneOf");
+    const branches = (saveInput as typeof saveInput & { oneOf: Array<{
+      required: string[]; additionalProperties: boolean; properties: Record<string, unknown>;
+    }> }).oneOf;
+    expect(branches).toHaveLength(2);
+    expect(branches.every(({ additionalProperties }) => additionalProperties === false)).toBe(true);
+    const material = branches.find(({ properties }) => !("format" in properties))!;
+    const session = branches.find(({ properties }) => "format" in properties)!;
+    expect(material.required).toEqual(expect.arrayContaining(["operationKey", "kind", "uploadRef"]));
+    expect(session.required).toEqual(expect.arrayContaining(["operationKey", "kind", "uploadRef", "format"]));
+    expect(JSON.stringify(saveInput)).not.toContain("datasetId");
     expect(tools.result.tools.find(({ name }) => name === "create_agent")!.inputSchema.required)
       .toEqual(expect.arrayContaining(["operationKey", "purpose", "instructions", "modelId"]));
     expect(tools.result.tools.find(({ name }) => name === "create_output_schema")!.inputSchema.required)
       .toEqual(expect.arrayContaining(["operationKey", "name", "description", "content"]));
+    const bindInput = tools.result.tools.find(({ name }) => name === "bind_data_resources")!.inputSchema as {
+      oneOf?: Array<{ required: string[]; additionalProperties: boolean; properties: Record<string, unknown> }>;
+      anyOf?: Array<{ required: string[]; additionalProperties: boolean; properties: Record<string, unknown> }>;
+    };
+    const bindBranches = bindInput.oneOf ?? bindInput.anyOf;
+    expect(bindBranches).toHaveLength(2);
+    const singleBind = bindBranches!.find(({ required }) => required.includes("dataId"))!;
+    const batchBind = bindBranches!.find(({ required }) => required.includes("bindings"))!;
+    expect(singleBind.required).toEqual(expect.arrayContaining(["operationKey", "datasetId", "dataId", "expectedContentDigest"]));
+    expect(batchBind.required).toEqual(expect.arrayContaining(["operationKey", "datasetId", "bindings"]));
+    expect(singleBind.additionalProperties).toBe(false);
+    expect(batchBind.additionalProperties).toBe(false);
+    expect(JSON.stringify(batchBind)).toMatch(/"maxItems":20/u);
+    const prepareInput = tools.result.tools.find(({ name }) => name === "prepare_inputs")!.inputSchema;
+    expect(JSON.stringify(prepareInput)).not.toContain("uploadRef");
+    expect(JSON.stringify(tools.result.tools.find(({ name }) => name === "bind_data_resources")!.inputSchema))
+      .not.toContain("uploadRef");
     expect(tools.result.tools.find(({ name }) => name === "create_project")!.inputSchema.required)
       .toContain("expectedSnapshots");
     const runInput = tools.result.tools.find(({ name }) => name === "submit_run")!.inputSchema;
@@ -85,12 +120,37 @@ describe("trusted management MCP transport", () => {
     }));
     const optionsInput = tools.result.tools.find(({ name }) => name === "list_options")!.inputSchema;
     expect(optionsInput.properties).toHaveProperty("schemaOffset");
+    expect(optionsInput.properties).toHaveProperty("dataId");
     expect(optionsInput.properties?.category).toMatchObject({
-      enum: expect.arrayContaining(["dataset_data", "output_schema_detail", "project_schema_detail", "approval_output_schema"]),
+      enum: expect.arrayContaining(["dataset_data", "dataset_data_resources",
+        "output_schema_detail", "project_schema_detail", "approval_output_schema",
+        "material_bundles", "session_bundles", "materials", "sessions", "material_files", "session_files"]),
     });
     expect(tools.result.tools.find(({ name }) => name === "reconcile_operation")!.inputSchema)
       .toHaveProperty("oneOf");
     expect(tools.result.tools.map(({ name }) => name)).not.toContain("submit_evaluation");
+    expect(app.release).toHaveBeenCalledTimes(2);
+  });
+
+  it("advertises a strict read-only case usage selector and accepts it through the public tools/call seam", async () => {
+    const app = setupManagement();
+    const list = await (await app.rpc(rpc("tools/list"))).json() as {
+      result: { tools: Array<{ name: string; inputSchema: { additionalProperties?: boolean;
+        required?: string[]; properties?: Record<string, unknown> } }> };
+    };
+    const schema = list.result.tools.find(({ name }) => name === "get_case_usage")?.inputSchema;
+    expect(schema).toMatchObject({ additionalProperties: false,
+      required: expect.arrayContaining(["projectId", "samplingId", "role"]),
+      properties: { role: expect.any(Object), attemptId: expect.any(Object), section: expect.any(Object) } });
+    expect(schema?.properties?.section).toMatchObject({ enum: expect.arrayContaining([
+      "attempts", "models", "actions", "tools", "tool_calls",
+    ]) });
+    const value = await toolValue(await app.call("get_case_usage", {
+      projectId: "project-1", samplingId: "sampling-1", role: "execution",
+    }));
+    expect(value).toMatchObject({ projectId: "project-1", samplingId: "sampling-1",
+      role: "execution", section: "attempts", attempts: { page: 1, pageSize: 5, total: 0, items: [] } });
+    expect(app.services.resourceSnapshots.readCaseUsage).toHaveBeenCalledOnce();
     expect(app.release).toHaveBeenCalledTimes(2);
   });
 

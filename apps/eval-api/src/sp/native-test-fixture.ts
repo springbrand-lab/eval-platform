@@ -86,6 +86,28 @@ export function nativeToolBodyPair(
   ];
 }
 
+export function modelBillingPairFixture(
+  eventId: string, chatId: string, submissionId: string, accountId: string, inputTokens = 1,
+) {
+  const usage = {
+    eventId, runId: submissionId, chatId, kind: "assistant_model" as const,
+    outcome: "billable" as const, rateVersion: 1, meterId: "model:openrouter/test",
+    metrics: { inputTokens }, providerMetadata: { provider: "openrouter", model: "openrouter/test" },
+  };
+  const settlement = {
+    id: `settlement-${eventId}`, eventId, accountId,
+    status: "settled" as const, ratedUnits: 2, debitedUnits: 2, shortfallUnits: 0,
+    platformOwnedUnits: 0, platformOwnedReason: null, createdAt: 123,
+    firstResult: {
+      eventId, usage, status: "settled" as const,
+      ratedUnits: 2, debitedUnits: 2, shortfallUnits: 0,
+      platformOwned: { units: 0, reason: null },
+      accountAfter: { version: 2, availableUnits: 10 }, settledAtMs: 123,
+    },
+  };
+  return { usage, settlement };
+}
+
 /** Test the published SP reference wire with a real source-projected Pi record, not an event-shaped fake. */
 export function nativeTransfer(entry: NativeTrajectoryEntry, throughSeq: number): {
   reference: SpPiTrajectoryRecordReference;

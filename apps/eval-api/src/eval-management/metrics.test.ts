@@ -540,9 +540,11 @@ describe("run-scoped management Metrics", () => {
     expect(app.services.projectRuns.readRun).not.toHaveBeenCalled();
     expect(dataset).toMatchObject({ runScope: "project_current", projectSamples: { items: [{ projectSampleId: "sample-1" }] } });
     expect(sample).toMatchObject({ runScope: "project_current",
+      summary: { execution: { terminalRecords: 1, completedAttempts: 1, attemptDurationMs: { mean: 200 } } },
       samplings: { page: 2, pageSize: 1, total: 2, items: [{ samplingId: "sampling-2" }] } });
     expect(sampling).toMatchObject({ runScope: "project_current",
-      summary: { executionAgent: { toolSuccessRate: { value: 0.5, coverage: "complete" } },
+      summary: { execution: { terminalRecords: 1, completedAttempts: 1, attemptDurationMs: { mean: 200 } },
+        executionAgent: { toolSuccessRate: { value: 0.5, coverage: "complete" } },
         evaluationAgents: { toolSuccessRate: { value: null, coverage: "unavailable" } } },
       evaluations: { page: 2, pageSize: 1, total: 2, items: [{ evaluationId: "evaluation-2" }] } });
     for (const value of [dataset, sample, sampling]) {

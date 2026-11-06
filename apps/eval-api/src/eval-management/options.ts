@@ -5,6 +5,7 @@ import type { Context } from "hono";
 import type { AppBindings } from "../lib/types.js";
 import { INPUT_LIMITS } from "../limits.js";
 import { fitsTaktResult, jsonChunk, pageOf, record, redactLiteral, short, type JsonChunkResult } from "./common.js";
+import { resourceOptions } from "./resource-options.js";
 import { resourceIdSchema, type listOptionsSchema } from "./schemas.js";
 import type { z } from "zod";
 
@@ -94,26 +95,89 @@ async function datasetDataOptions(c: Context<AppBindings>, input: Options) {
   if (!c.env.evalManagement) throw new HttpError("INTERNAL_ERROR", "Management preparation is unavailable");
   const datasetId = input.datasetId!;
   const { page } = input;
-  const pageSize = Math.min(input.pageSize, 5); // The ordinary catalog default is 20, not 20 Data names.
+  const pageSize = Math.min(input.pageSize, 20); // Match Eval Web's Data page, not Material/Session directories.
   const listing = await c.env.evalManagement.store.listDatasetData(c.var.user.id, datasetId, page, pageSize);
-  const items = listing.items.map(({ dataId, content }) => {
-    if (typeof content.name !== "string") return { dataId, name: null };
+  const names = listing.items.map(({ dataId, content }) => {
+    if (typeof content.name !== "string") return { dataId, name: null, redacted: false };
     // A user-authored name can itself contain a prompt or credential. Never project other Data fields.
     const safe = redactLiteral(content.name, "", [
       typeof content.userPrompt === "string" ? content.userPrompt : "",
       typeof content.evalPrompt === "string" ? content.evalPrompt : "",
     ]);
-    return { dataId, name: short(safe.value, 80),
-      ...(safe.redacted ? { sourceRedacted: true } : {}),
-      ...(safe.value.length > 80 ? { nameTruncated: true } : {}) };
+    return { dataId, name: safe.value, redacted: safe.redacted };
   });
   const datasetName = redactLiteral(listing.name);
-  const result = {
-    category: "dataset_data", datasetId, name: short(datasetName.value, 100),
-    ...(datasetName.redacted ? { sourceRedacted: true } : {}),
-    order: listing.order, page, pageSize, total: listing.total, items,
+  const render = (nameLimit: number) => {
+    const items = names.map(({ dataId, name, redacted }) => {
+      if (name === null) return { dataId, name: null };
+      // Sensitive names stay fully masked. Safe names share one per-page adaptive
+      // display limit, so JSON escaping/UTF-8 never drops an identity from the page.
+      const limit = redacted ? 80 : nameLimit;
+      let value = short(name, limit);
+      if (value.length < name.length && /[\ud800-\udbff]$/u.test(value)) value = value.slice(0, -1);
+      return { dataId, name: value,
+        ...(redacted ? { sourceRedacted: true } : {}),
+        ...(value.length < name.length ? { nameTruncated: true } : {}) };
+    });
+    return {
+      category: "dataset_data", datasetId, name: short(datasetName.value, 100),
+      ...(datasetName.redacted ? { sourceRedacted: true } : {}),
+      order: listing.order, page, pageSize, total: listing.total, items,
+    };
   };
-  if (!fitsTaktResult(result)) throw new HttpError("CATALOG_PAYLOAD_TOO_LARGE", "Dataset member page is too large");
+  let result = render(80);
+  if (!fitsTaktResult(result)) {
+    // 20 UUID identities and the bounded Dataset label fit even at zero displayed
+    // Data-name characters. Select the longest *uniform* prefix that actually fits.
+    result = render(0);
+    if (!fitsTaktResult(result)) throw new HttpError("CATALOG_PAYLOAD_TOO_LARGE", "Dataset member page is too large");
+    let low = 1, high = 79;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const candidate = render(middle);
+      if (fitsTaktResult(candidate)) { result = candidate; low = middle + 1; }
+      else high = middle - 1;
+    }
+  }
+  return result;
+}
+
+/** A single current member's stored UUID references; no Dataset scan, file read or catalog liveness claim. */
+async function datasetDataResourceOptions(c: Context<AppBindings>, input: Options) {
+  if (!c.env.evalManagement) throw new HttpError("INTERNAL_ERROR", "Management preparation is unavailable");
+  const datasetId = input.datasetId!;
+  const dataId = input.dataId!;
+  const { page } = input;
+  const pageSize = Math.min(input.pageSize, 20);
+  const { initialMaterials, evalInitialMaterials, initialSession } =
+    await c.env.evalManagement.store.readDatasetDataResources(c.var.user.id, datasetId, dataId);
+  const initialMaterialsCount = initialMaterials.length;
+  const evalInitialMaterialsCount = evalInitialMaterials.length;
+  const hasInitialSession = initialSession !== null;
+  const total = initialMaterialsCount + evalInitialMaterialsCount + (hasInitialSession ? 1 : 0);
+  // Only materialize the requested continuous page. Index is within its source
+  // field, not the global page, and the digest still covers every stored ref.
+  const items = [];
+  for (let position = (page - 1) * pageSize; position < Math.min(page * pageSize, total); position++) {
+    if (position < initialMaterialsCount) {
+      const ref = initialMaterials[position]!;
+      items.push({ field: "initialMaterials", index: position, bundleId: ref.bundleId, materialId: ref.materialId });
+    } else if (position < initialMaterialsCount + evalInitialMaterialsCount) {
+      const index = position - initialMaterialsCount;
+      const ref = evalInitialMaterials[index]!;
+      items.push({ field: "evalInitialMaterials", index, bundleId: ref.bundleId, materialId: ref.materialId });
+    } else if (initialSession) {
+      items.push({ field: "initialSession", index: 0,
+        bundleId: initialSession.bundleId, sessionId: initialSession.sessionId });
+    }
+  }
+  const result = {
+    category: "dataset_data_resources", datasetId, dataId, page, pageSize, total,
+    initialMaterialsCount, evalInitialMaterialsCount, hasInitialSession,
+    bindingDigest: await digestJson({ initialMaterials, evalInitialMaterials, initialSession }),
+    items,
+  };
+  if (!fitsTaktResult(result)) throw new HttpError("CATALOG_PAYLOAD_TOO_LARGE", "Data binding page is too large");
   return result;
 }
 
@@ -264,7 +328,11 @@ async function projectDetail(c: Context<AppBindings>, input: Options) {
 
 export async function listOptions(c: Context<AppBindings>, input: Options) {
   const { category, q, page, pageSize } = input;
+  if (["material_bundles", "session_bundles", "materials", "sessions", "material_files", "session_files"].includes(category)) {
+    return resourceOptions(c, input);
+  }
   if (category === "dataset_data") return datasetDataOptions(c, input);
+  if (category === "dataset_data_resources") return datasetDataResourceOptions(c, input);
   if (category === "approval_dataset") return approvalDataset(c, input);
   if (category === "approval_agent") return approvalAgent(c, input);
   if (category === "approval_output_schema") return approvalOutputSchema(c, input);

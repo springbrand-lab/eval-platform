@@ -108,7 +108,8 @@ describe("agent views", () => {
   it("shows the Subject with its Chat, attempts, span, deduplicated resources and evidence", () => {
     const base = sampling();
     const shared = collection({
-      usageEvents: [usage("u1")], billingSettlements: [settlement("u1"), { executionId: "action-1", status: "succeeded", chargedCredits: 5 }],
+      usageEvents: [usage("u1")], billingSettlements: [settlement("u1"),
+        { source: "action", executionId: "action-1", status: "succeeded", chargedCredits: 5 }],
     });
     const view = subjectAgent({ ...base, executionAttempts: [
       { ...base.executionAttempts[0]!, status: "failed", resources: shared },

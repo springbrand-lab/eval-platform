@@ -163,8 +163,13 @@ describe("source-independent SAFE Pi streaming byte reader", () => {
     expect(JSON.stringify(compact).length).toBeLessThan(4_096);
   }, 45_000);
 
-  it("reports a streamed 30+ MiB native Tool Result length as unknown, not zero", async () => {
+  it("keeps a 30+ MiB Result's Pi milliseconds while its withheld body length remains unknown", async () => {
     const original = nativeToolBodyPair(CHAT, SUBMISSION, "__TEST_BODY__", "search")[1]!;
+    if (original.record.record.type !== "entry") throw new Error("Expected Pi Tool Result");
+    const message = (original.record.record.value.model as Record<string, unknown>[])[0]!;
+    message.durationMs = 321;
+    message.details = { executionId: "execution-large", capabilityId: "capability-large",
+      business: "private-business-body", apiKey: "private-key" };
     const item = largeNativeRecord(original, 900);
     let inspected: NativeRecordInspection | undefined;
     await collectHash(verifiedSafePiRecordBytes(item.source(), {
@@ -179,11 +184,53 @@ describe("source-independent SAFE Pi streaming byte reader", () => {
       { chatId: CHAT, idempotencyKey: "execution", submissionId: SUBMISSION }, item.sha256,
     );
     expect(compact.metricProjection).toMatchObject({
-      fingerprint: item.sha256, supported: true,
-      facts: [{ type: "tool", phase: "result", toolName: "search", outputLength: null, fromPiResult: true }],
+      fingerprint: item.sha256, supported: true, chargeLinkVersion: 2,
+      facts: [{ type: "tool", phase: "result", toolName: "search", outputLength: null, fromPiResult: true,
+        executionId: "execution-large", durationMs: 321,
+        agentId: "agent-1", submissionId: SUBMISSION,
+        toolCallKey: expect.stringMatching(/^tck2_[0-9a-f]{64}$/u) }],
     });
     expect(JSON.stringify(compact).length).toBeLessThan(4_096);
+    expect(JSON.stringify(compact)).not.toMatch(/capability-large|private-business-body|private-key|apiKey|details/u);
   }, 45_000);
+
+  it("preserves a real zero and rejects duplicate execution ID or Pi duration on oversized Results", async () => {
+    const result = nativeToolBodyPair(CHAT, SUBMISSION, "x".repeat(600_000), "search")[1]!;
+    if (result.record.record.type !== "entry") throw new Error("Expected Pi Tool Result");
+    (result.record.record.value.model as Record<string, unknown>[])[0]!.durationMs = 0;
+    (result.record.record.value.model as Record<string, unknown>[])[0]!.details = {
+      executionId: "execution-1", capabilityId: "capability-1", business: "private-business-body",
+    };
+    const serialized = JSON.stringify(result.record);
+    const variants = [
+      serialized.replace('"capabilityId":"capability-1"', '"capabilityId":"sk-private-credential"'),
+      serialized.replace('"executionId":"execution-1"',
+        '"executionId":"execution-1","executionId":"execution-duplicate"'),
+      serialized.replace('"durationMs":0', '"durationMs":0,"durationMs":1'),
+    ];
+    for (const [index, text] of variants.entries()) {
+      const bytes = encoder.encode(text);
+      let inspected: NativeRecordInspection | undefined;
+      await collectHash(verifiedSafePiRecordBytes(streamed(bytes), {
+        ...binding(result.record, bytes, { kind: "operation", chatId: CHAT, submissionId: SUBMISSION }),
+        interpret: "metrics", onVerified: (inspection) => { inspected = inspection; },
+      }));
+      expect(inspected?.reduced).toBe(true);
+      const compact = await compactNativeTrajectoryRecord(
+        { ingestSeq: result.ingestSeq, record: inspected!.record! },
+        { chatId: CHAT, submissionId: SUBMISSION, idempotencyKey: "execution" }, inspected!.sha256,
+      );
+      expect(compact.metricProjection).toMatchObject({ chargeLinkVersion: 2, supported: index === 0 });
+      expect(JSON.stringify(compact)).not.toMatch(/capability-1|private-business-body|private-credential/u);
+      if (index === 0) expect(compact.metricProjection?.facts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ executionId: "execution-1", durationMs: 0 }),
+      ]));
+      else expect(compact.metricProjection?.facts).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ executionId: "execution-1" }),
+      ]));
+      expect(inspected!.maxCapturedChars).toBeLessThan(4_096);
+    }
+  });
 
   it("preserves only a bounded selected final reply; an oversized final assistant cannot fall back to an earlier one", async () => {
     const large = largeAssistant(150);

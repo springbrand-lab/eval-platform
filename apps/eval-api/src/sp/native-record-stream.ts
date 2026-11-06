@@ -82,6 +82,7 @@ const ENVELOPE_KEYS: Readonly<Record<string, readonly string[]>> = {
 };
 const NATIVE_VALUE_KEYS = new Set(["id", "conversationId", "kind", "model"]);
 const MESSAGE = "record.value.model[0]";
+const DETAILS = `${MESSAGE}.details`;
 const BLOCK = `${MESSAGE}.content[*]`;
 const BLOCK_TEXT = `${BLOCK}.text`;
 const MESSAGE_FIELDS = [
@@ -94,6 +95,7 @@ const TRACKED_PATHS = new Set([
   "record.value.id", "record.value.conversationId", "record.value.kind", "record.value.model",
   "record.value.byTaskId", "record.value.head", "record.value.edits",
   MESSAGE, ...MESSAGE_FIELDS.map((field) => `${MESSAGE}.${field}`),
+  DETAILS, `${DETAILS}.executionId`,
   ...["input", "output", "totalTokens"].map((field) => `${MESSAGE}.usage.${field}`),
   BLOCK, ...BLOCK_FIELDS.map((field) => `${BLOCK}.${field}`),
 ]);
@@ -103,6 +105,15 @@ const REQUIRED_STRING_PATHS = new Set([
   "record.type", "record.value.kind", "submissionId", "origin",
   "parent.resource.agentId", "parent.resource.sessionId", "parent.submissionId",
 ]);
+
+/** Only the SAFE Tool Result's execution ID survives a large Pi body, solely
+ * for optional Tool association. Action identity comes from SP's receipt. */
+function safeChargeId(value: JsonValue | undefined): value is string {
+  return typeof value === "string" && value.length <= 128
+    && /^[A-Za-z0-9_][A-Za-z0-9_.:-]*$/u.test(value)
+    && !/(?:^|[_.:-])(?:secret|token|password|api[_-]?key|bearer)(?:$|[_.:-])/iu.test(value)
+    && !/^(?:sk-|key_)/iu.test(value);
+}
 
 function invalid(message: string): never {
   throw new NativeRecordStreamError(`Unsafe SAFE Pi record: ${message}`, false);
@@ -266,6 +277,14 @@ class SafePiJsonScanner {
             }
             message.usage = usage;
           }
+          if (message.role === "toolResult" && this.types.get(DETAILS) === "object") {
+            const path = `${DETAILS}.executionId`;
+            if (this.types.has(path)) {
+              const item = scalar(path);
+              // Keep invalidity without retaining a private source value.
+              message.details = { executionId: safeChargeId(item) ? item : null };
+            }
+          }
           if (this.types.get(`${MESSAGE}.content`) === "array") {
             message.content = this.contentCount <= MAX_CONTENT_BLOCKS
               ? this.blocks.slice(0, this.contentCount).map((block) => ({ ...block }))
@@ -383,7 +402,8 @@ class SafePiJsonScanner {
         parent.seen!.add(key);
       }
       if (this.interpret !== undefined && key !== undefined && (parent.path === MESSAGE || parent.path === BLOCK
-        || parent.path === `${MESSAGE}.usage`)) {
+        || parent.path === `${MESSAGE}.usage`
+        || parent.path === DETAILS && key === "executionId")) {
         if (parent.seen!.has(key)) this.contentInvalid = true;
         parent.seen!.add(key);
       }

@@ -13,7 +13,7 @@ function stage(value: StageStatistics) {
   };
 }
 
-/** Overview includes every safe public stage count/duration; detail scopes retain their original projection. */
+/** Keep Stage statistics consistent when drilling from Project into one Sample or Sampling. */
 function overviewStage(value: StageStatistics) {
   return {
     ...stage(value), terminalRecords: value.terminalRecords,
@@ -99,7 +99,7 @@ export function metricSummary(value: MetricSummary, page: number, pageSize: numb
   toolPage?: number, toolPageSize?: number) {
   return {
     counts: value.counts,
-    execution: stage(value.execution), evaluation: stage(value.evaluation),
+    execution: overviewStage(value.execution), evaluation: overviewStage(value.evaluation),
     executionAgent: resourceSummary(value.executionAgent, toolPage, toolPageSize),
     evaluationAgents: resourceSummary(value.evaluationAgents, toolPage, toolPageSize),
     evaluationOutputs: {

@@ -36,6 +36,7 @@ export const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   DASHBOARD_REVISION_CONFLICT: "看板已被修改，请核对最新配置后重新载入",
   RESULT_COLLECTION_CONFLICT: "当前记录不能补收：仅支持 Agent 已完成、结果收集失败且运行未被停止的记录",
   PROJECT_BUSY: "Project 还有未结束的 Run",
+  ACTIVE_PROJECT_LIMIT_REACHED: "同时最多运行 3 个 Project，请等待其他项目结束后重试",
   PROJECT_IDEMPOTENCY_CONFLICT: "这次创建请求与之前同一个请求的内容不同，请刷新后重新填写",
   PROJECT_NO_ACTIVE_RUN: "这个 Run 已经结束",
   PROJECT_SOURCE_BRANCH_CONFLICT: "Project 属于另一个 Eval SP 分支",

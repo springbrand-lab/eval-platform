@@ -15,7 +15,8 @@
     "@eval-platform/eval-contracts": "workspace:*",
     "@eval-platform/eval-dataset": "workspace:*",
     "@eval-platform/eval-runtime": "workspace:*",
-    "ajv": "^8.20.0"
+    "ajv": "^8.20.0",
+    "fast-sha256": "1.3.0"
   },
   "devDependencies": {
     "@types/node": "26.1.2",

@@ -1,0 +1,4 @@
+ALTER TABLE "eval_management_operations" DROP CONSTRAINT "eval_management_operations_kind_ck";--> statement-breakpoint
+DROP INDEX "eval_management_pending_dataset_idx";--> statement-breakpoint
+CREATE INDEX "eval_management_pending_dataset_idx" ON "eval_management_operations" USING btree ("owner_user_id", ("eval_management_operations"."plan"->>'datasetId')) WHERE "eval_management_operations"."kind" IN ('prepare', 'bind') AND "eval_management_operations"."status" = 'pending';--> statement-breakpoint
+ALTER TABLE "eval_management_operations" ADD CONSTRAINT "eval_management_operations_kind_ck" CHECK ("eval_management_operations"."kind" IN ('prepare', 'bind', 'initial_resource', 'skill', 'reference', 'output_schema'));

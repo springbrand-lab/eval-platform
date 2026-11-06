@@ -1,6 +1,8 @@
 import type { Context } from "hono";
 import type { AppBindings } from "../lib/types.js";
 import { createAgent } from "./agent.js";
+import { bindDataResources } from "./binding.js";
+import { saveInitialResource } from "./initial-resource.js";
 import { inspectCase } from "./inspect.js";
 import { getMetrics } from "./metrics.js";
 import { listOptions } from "./options.js";
@@ -16,7 +18,9 @@ import { uploadAgentSkill } from "./skill.js";
 export function callTool(c: Context<AppBindings>, name: keyof typeof schemas, args: unknown): Promise<unknown> {
   switch (name) {
     case "list_options": return listOptions(c, schemas.list_options.parse(args));
+    case "save_initial_resource": return saveInitialResource(c, schemas.save_initial_resource.parse(args));
     case "prepare_inputs": return prepareInputs(c, schemas.prepare_inputs.parse(args));
+    case "bind_data_resources": return bindDataResources(c, schemas.bind_data_resources.parse(args));
     case "get_preparation": {
       const { operationKey, page, pageSize } = schemas.get_preparation.parse(args);
       return getPreparation(c, operationKey, page, pageSize);

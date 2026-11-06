@@ -62,12 +62,12 @@ const outputSchemaReview = z.strictObject({
 const datasetDataPage = z.strictObject({
   category: z.literal("dataset_data"), datasetId: uuid, name: z.string().max(160),
   sourceRedacted: z.literal(true).optional(), order: z.enum(["upload", "unknown"]),
-  page: z.number().int().min(1).max(10_000), pageSize: z.number().int().min(1).max(5),
+  page: z.number().int().min(1).max(10_000), pageSize: z.number().int().min(1).max(20),
   total: z.number().int().min(0),
   items: z.array(z.strictObject({
     dataId: uuid, name: z.string().max(160).nullable(),
     sourceRedacted: z.literal(true).optional(), nameTruncated: z.literal(true).optional(),
-  })).max(5),
+  })).max(20),
 });
 
 async function reviewed<Schema extends z.ZodType>(response: Response, schema: Schema): Promise<z.output<Schema>> {
@@ -163,8 +163,8 @@ describe("Moss private Project pre-approval reads at EP MCP tools/call", () => {
       }), datasetDataPage);
       expect(first).toEqual({
         category: "dataset_data", datasetId: DATASET, name: source.dataset.name, order: provenance,
-        page: 1, pageSize: 5, total: 34,
-        items: source.ordered.members.slice(0, 5).map(({ row }) => ({ dataId: row.dataId, name: row.name })),
+        page: 1, pageSize: 20, total: 34,
+        items: source.ordered.members.slice(0, 20).map(({ row }) => ({ dataId: row.dataId, name: row.name })),
       });
       expect(source.ordered.members[0]!.dataId).toBe(provenance === "upload" ? dataIds[0] : dataIds[33]);
       const selected = source.rows.find(({ dataId }) => dataId === selectedId)!;
@@ -180,7 +180,7 @@ describe("Moss private Project pre-approval reads at EP MCP tools/call", () => {
           initialSession: selected.initialSession }],
       });
       expect(source.readSelection).toHaveBeenCalledWith([{ datasetId: DATASET, dataIds: [selectedId] }]);
-      expect(source.list).toHaveBeenCalledWith(OWNER, DATASET, 1, 5);
+      expect(source.list).toHaveBeenCalledWith(OWNER, DATASET, 1, 20);
       expect(JSON.stringify(choice)).not.toMatch(/PRIVATE_|Case 18|privateField|userPrompt|evalPrompt/u);
 
       // Takt's unfiltered review reads every five-case page and compares full-selection metadata.

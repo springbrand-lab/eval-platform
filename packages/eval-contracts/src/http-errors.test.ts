@@ -11,6 +11,9 @@ describe("Eval API error catalog", () => {
     const error = new HttpError("PROJECT_BUSY");
     expect({ status: error.status, message: error.message })
       .toEqual({ status: 409, message: "Project already has an unfinished Run" });
+    const capacity = new HttpError("ACTIVE_PROJECT_LIMIT_REACHED");
+    expect({ status: capacity.status, message: capacity.message })
+      .toEqual({ status: 409, message: "At most three Projects may run at once" });
   });
 
   it.each([

@@ -844,6 +844,109 @@ describe.skipIf(!connection)("PostgreSQL Dataset, Run admission and Worker persi
   });
 
   describe("Run admission", () => {
+    async function preparedProject(owner = OWNER) {
+      const { projectId } = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }] });
+      const { plans, store, control } = stores(owner);
+      const command = await buildCommand(plans, store, { projectId, operation: "execution" });
+      return { projectId, store, control, command };
+    }
+
+    it("limits active Projects to three across owners and independent concurrent admissions", async () => {
+      const [first, second, third, fourth] = await Promise.all(
+        [OWNER, "user-B", OWNER, "user-C"].map(preparedProject));
+      await first!.store.admitRun(first!.command);
+      await second!.store.admitRun(second!.command);
+      const attempts = await Promise.allSettled([third!.store.admitRun(third!.command), fourth!.store.admitRun(fourth!.command)]);
+      expect(attempts.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+      const winner = attempts[0]!.status === "fulfilled" ? third! : fourth!;
+      const loser = attempts[0]!.status === "rejected" ? third! : fourth!;
+      expect(attempts.find((result) => result.status === "rejected")).toMatchObject({
+        reason: { name: "ActiveProjectLimitError", limit: 3 },
+      });
+      expect((await database.db.select({ n: count() }).from(runs))[0]!.n).toBe(3);
+      expect(await runJobs(loser.command.run.runId)).toEqual([]);
+      expect(await winner.store.admitRun(winner.command)).toEqual({ run: winner.command.run, created: false });
+
+      await first!.control.stopRun(first!.projectId, first!.command.run.runId);
+      const worker = stores().worker;
+      await settle(worker, first!.command.run.samplingIds, "cancelled");
+      await expect(loser.store.admitRun(loser.command)).rejects.toMatchObject({ name: "ActiveProjectLimitError", limit: 3 });
+      expect(await worker.markRunStopFinalized(first!.command.run.runId)).toBe(true);
+      expect(await loser.store.admitRun(loser.command)).toEqual({ run: loser.command.run, created: true });
+    });
+
+    it("does not reopen a finished Project for output recollection while three others are active", async () => {
+      const seeded = await project();
+      const { store, worker, control } = stores();
+      const { command } = await seeded.admit({ operation: "execution" });
+      const id = command.run.samplingIds[0]!;
+      const original = (await worker.getSampling(id))!;
+      const failed = { ...original, subjectChatId: "chat", execution: { status: "failed" as const, lastError: "output missing" },
+        executionAttempts: [{ executionAttemptId: "attempt", samplingId: id, attemptNumber: 1, status: "completed" as const,
+          submissionId: "submission", startedAt: "2026-10-16T00:00:00Z", completedAt: "2026-10-16T00:00:01Z" }] };
+      await worker.updateSampling(failed, original);
+      expect(await worker.isRunActive(command.run.runId)).toBe(false);
+      const occupied = await Promise.all([OWNER, "user-B", "user-C"].map(preparedProject));
+      for (const entry of occupied) await entry.store.admitRun(entry.command);
+
+      await expect(control.recollect(seeded.projectId, "execution", id))
+        .rejects.toMatchObject({ name: "ActiveProjectLimitError", limit: 3 });
+      expect((await store.getSampling(id))!.execution).toEqual(failed.execution);
+      expect(await jobs.findJobs(RUN_QUEUE, { key: `collection:${command.run.runId}` })).toEqual([]);
+      await settle(worker, occupied[0]!.command.run.samplingIds, "succeeded");
+      expect(await control.recollect(seeded.projectId, "execution", id)).toEqual({ runId: command.run.runId, queued: true });
+      expect(await control.recollect(seeded.projectId, "execution", id)).toEqual({ runId: command.run.runId, queued: true });
+      expect(await worker.isRunActive(command.run.runId)).toBe(true);
+    });
+
+    it("keeps resource-only recollection idle when three other Projects occupy the slots", async () => {
+      const seeded = await project();
+      const { store, worker, control } = stores();
+      const { command } = await seeded.admit({ operation: "execution" });
+      const id = command.run.samplingIds[0]!;
+      await settle(worker, [id], "succeeded");
+      const original = (await store.getSampling(id))!;
+      await worker.updateSampling({ ...original, subjectChatId: "chat",
+        executionAttempts: [completedAttempt(id, snapshot(false))] }, original);
+      const occupied = await Promise.all([OWNER, "user-B", "user-C"].map(preparedProject));
+      for (const entry of occupied) await entry.store.admitRun(entry.command);
+
+      await expect(control.recollect(seeded.projectId, "execution", id, "resources"))
+        .rejects.toMatchObject({ name: "ActiveProjectLimitError", limit: 3 });
+      expect((await store.getSampling(id))!.execution).toEqual({ status: "succeeded" });
+      await settle(worker, occupied[0]!.command.run.samplingIds, "succeeded");
+      expect(await control.recollect(seeded.projectId, "execution", id, "resources"))
+        .toEqual({ runId: command.run.runId, queued: true });
+      expect(await worker.isRunActive(command.run.runId)).toBe(true);
+    });
+
+    it("asks a late MCP result to retry instead of reactivating a fourth Project", async () => {
+      const seeded = await project({ datasets: [{ data: [makeData()] }], evaluation: true });
+      const { command } = await seeded.admit({ operation: "pipeline" });
+      const worker = stores().worker;
+      await settle(worker, command.run.samplingIds, "succeeded");
+      const evaluationId = command.run.evaluationIds[0]!;
+      const original = (await worker.getEvaluation(evaluationId))!;
+      const failed = { ...original, chatId: "evaluator-chat",
+        status: { status: "failed" as const, lastError: "observation lost" },
+        attempts: [{ evaluationAttemptId: "attempt", evaluationId, attemptNumber: 1,
+          status: "running" as const, submissionId: "submission", startedAt: "2026-10-16T00:00:00Z",
+          resources: { status: "pending" as const, scope: { chatId: "evaluator-chat", idempotencyKey: "evaluation" } } }] };
+      await worker.updateEvaluation(failed, original);
+      expect(await worker.isRunActive(command.run.runId)).toBe(false);
+      const occupied = await Promise.all([OWNER, "user-B", "user-C"].map(preparedProject));
+      for (const entry of occupied) await entry.store.admitRun(entry.command);
+      const submissions = createPostgresEvaluationSubmissions(database.db, runQueue);
+      const input = { evaluationId, ownerUserId: OWNER, content: '{"score":1}', submittedAt: new Date() };
+      expect(await submissions.save(input)).toBe("capacity");
+      expect(await submissions.read(evaluationId)).toBeUndefined();
+      expect((await worker.getEvaluation(evaluationId))!.status).toEqual(failed.status);
+      await settle(worker, occupied[0]!.command.run.samplingIds, "succeeded");
+      expect(await submissions.save(input)).toBe("accepted");
+      expect(await worker.isRunActive(command.run.runId)).toBe(true);
+      expect(await submissions.save(input)).toBe("replayed");
+    });
+
     it("replays a matching key even after its members were replaced, but rejects other facts and busy Projects", async () => {
       const { admit, projectId } = await project();
       const { store, worker } = stores();
