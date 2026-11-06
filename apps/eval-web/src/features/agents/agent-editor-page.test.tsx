@@ -134,6 +134,32 @@ describe("SP Agent editor in Eval", () => {
     }
   });
 
+  it("reads managed MCPs in selection order without looking up Connector Toolkits as MCP Servers", async () => {
+    stored.setting.mcpServers = [
+      { serverId: "calendar", kind: "connector_toolkit" },
+      { serverId: "other-mcp" },
+      { serverId: "github", kind: "connector_toolkit" },
+      { serverId: "platform-mcp" },
+    ];
+    const get = transport.get.getMockImplementation()!;
+    transport.get.mockImplementation((path: string) => path === "/api/agent-library/mcp-servers/other-mcp"
+      ? { id: "other-mcp", name: "Other MCP", description: null, status: "active", source: "user", url: null, authType: null }
+      : get(path));
+    const view = await mount("/agents/agent-a");
+    try {
+      await settle(() => expect(view.container.textContent).toContain("MCP Server (2)"));
+      await settle(() => expect(view.container.textContent).toContain("Other MCP"));
+      await settle(() => expect(view.container.textContent).toContain("Eval 结果提交"));
+      const text = view.container.querySelector('[aria-label="MCP Server"]')!.textContent!;
+      expect(text.indexOf("Other MCP")).toBeLessThan(text.indexOf("Eval 结果提交"));
+      const paths = transport.get.mock.calls.map(([path]) => path);
+      expect(paths).not.toContain("/api/agent-library/mcp-servers/calendar");
+      expect(paths).not.toContain("/api/agent-library/mcp-servers/github");
+    } finally {
+      await view.close();
+    }
+  });
+
   it.each([
     { authoring: importedFields.authoring },
     { preferredSupplierIds: importedFields.preferredSupplierIds },

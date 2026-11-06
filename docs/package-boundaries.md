@@ -46,6 +46,15 @@ eval-contracts → eval-dataset → eval-runtime → eval-metrics
 
 The arrows describe allowed consumption direction. The contract package must not depend on runtime, storage, API, Web, CLI or Cloudflare bindings; only its `./http-errors` and `./http` subpaths depend on `@springbrand/http` and `hono`.
 
+API and Web pin `@springbrand/agent-contracts@0.1.0-alpha.0` and consume only its
+browser-safe `./agent-config` export. SP owns managed-MCP/Connector-Toolkit
+classification and saved-setting defaults. API retains its permissive structural
+read guards, Eval purpose rules and replay comparison, including unknown saved
+fields; it reads default values from the public schema without applying full SP
+admission validation to historical settings. Web uses the public selection type
+and selector for its read-only MCP list. This does not upgrade Harness, Runtime
+or the shared editor.
+
 ## Package responsibilities
 
 ### Evidence export and import

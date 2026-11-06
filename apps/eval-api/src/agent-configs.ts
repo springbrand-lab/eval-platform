@@ -1,5 +1,6 @@
 import type { AgentConfigRef, AgentConfigSnapshot, AgentPurpose, AgentRole, JsonValue } from "@eval-platform/eval-contracts";
 import { createId, equalJson, resolveEvaluationResultsMcp } from "@eval-platform/eval-contracts";
+import { canonicalAgentConfigSchema } from "@springbrand/agent-contracts/agent-config";
 import { ImportConflictError, ImportDependencyError } from "./agent-imports/errors.js";
 import type { ImportResult, PlannedImportResources, PreparedAgent, SourceAgent } from "./agent-imports/model.js";
 import { requireDefinitionEvidence, type DefinitionEvidence } from "./agent-imports/definition-evidence.js";
@@ -26,6 +27,7 @@ import { RuntimeAdmissionConflictError, digestJson } from "@eval-platform/eval-r
 const AGENT_CONFIG_NAME_CHARS = 200;
 const FROZEN_SUFFIX = " (frozen)";
 const AGENT_ROLES: readonly AgentRole[] = ["subject", "evaluator"];
+const SAVED_SETTING_FIELDS = canonicalAgentConfigSchema.shape;
 
 /** Every frozen copy's slug starts with this; user-written Agent Configs cannot use it. */
 export const FROZEN_SLUG_PREFIX = "eval-frozen-";
@@ -248,10 +250,10 @@ export function createAgentConfigService(input: {
     const fields = bodyRecord(setting);
     return fields && {
       ...fields,
-      presetId: fields.presetId ?? null,
-      referenceFileIds: fields.referenceFileIds ?? [],
-      connectorIds: fields.connectorIds ?? [],
-      extensionIds: fields.extensionIds ?? [],
+      presetId: fields.presetId ?? SAVED_SETTING_FIELDS.presetId.parse(undefined),
+      referenceFileIds: fields.referenceFileIds ?? SAVED_SETTING_FIELDS.referenceFileIds.parse(undefined),
+      connectorIds: fields.connectorIds ?? SAVED_SETTING_FIELDS.connectorIds.parse(undefined),
+      extensionIds: fields.extensionIds ?? SAVED_SETTING_FIELDS.extensionIds.parse(undefined),
     };
   }
 
