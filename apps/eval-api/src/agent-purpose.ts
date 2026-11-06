@@ -1,4 +1,5 @@
 import { isEvaluationResultsMcpUrl } from "@eval-platform/eval-contracts";
+import { selectedMcpServerIds as managedMcpServerIds } from "@springbrand/agent-contracts/agent-config";
 import type { EvalSpMcpServer } from "./sp/client.js";
 
 /** Returns all user MCPs at the canonical result path, including unavailable records. */
@@ -10,9 +11,6 @@ export function selectedMcpServerIds(config: Readonly<Record<string, unknown>>):
   if (!setting || typeof setting !== "object") return [];
   const mcpServers = (setting as { readonly mcpServers?: unknown }).mcpServers;
   if (!Array.isArray(mcpServers)) return [];
-  return mcpServers.flatMap((selection) => {
-    if (!selection || typeof selection !== "object" || "kind" in selection) return [];
-    const id = (selection as { readonly serverId?: unknown }).serverId;
-    return typeof id === "string" && id.length > 0 ? [id] : [];
-  });
+  return managedMcpServerIds(mcpServers.filter((selection) => !!selection && typeof selection === "object"))
+    .filter((id) => typeof id === "string" && id.length > 0);
 }

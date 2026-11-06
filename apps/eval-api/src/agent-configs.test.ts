@@ -344,6 +344,42 @@ describe("management Agent creation replay safety", () => {
   const existing = { ...config("agent", { mcpServers: [] }), slug, name: "Executor", description: null };
   const body = { slug, name: "Executor", description: null, purpose: "execution", setting: { mcpServers: [] } };
 
+  it.each(["omitted", "nullish", "present"] as const)("preserves %s saved-setting comparison without adding SP admission rules", async (variant) => {
+    const defaults = { presetId: null, referenceFileIds: [], connectorIds: [], extensionIds: [] };
+    const setting = {
+      mcpServers: [],
+      futureSettings: { note: " \tKeep unknown saved facts 汉🙂\r\n" },
+      ...(variant === "nullish" ? { presetId: null, referenceFileIds: null, connectorIds: null, extensionIds: null }
+        : variant === "present" ? { presetId: 42, referenceFileIds: "unchanged", connectorIds: false, extensionIds: ["extension"] } : {}),
+    };
+    const current = { ...existing, setting: { ...setting, ...(variant === "present" ? {} : defaults) } };
+    const agents = service([current], []);
+    await agents.purposeStore.upsert({ userAgentId: current.id, purpose: "execution", evaluationMcpServerId: null });
+    Object.assign(agents.sp, { createAgentConfigOutcome: vi.fn(async () => ({ config: current, created: false })) });
+    const before = structuredClone(setting);
+
+    await expect(agents.create({ ...body, setting }, { verifyReplay: true })).resolves.toEqual(current);
+    expect(setting).toEqual(before);
+    expect(agents.sp.deleteAgentConfig).not.toHaveBeenCalled();
+    expect(agents.sp.updateAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it.each(["presetId", "referenceFileIds", "connectorIds", "extensionIds", "futureSettings"] as const)(
+    "still rejects a changed saved %s instead of hiding it behind defaults", async (field) => {
+      const setting = { mcpServers: [], presetId: null, referenceFileIds: [], connectorIds: [], extensionIds: [],
+        futureSettings: { note: "original" } };
+      const current = { ...existing, setting: { ...setting, [field]: field === "presetId" ? "changed"
+        : field === "futureSettings" ? { note: "changed" } : ["changed"] } };
+      const agents = service([current], []);
+      await agents.purposeStore.upsert({ userAgentId: current.id, purpose: "execution", evaluationMcpServerId: null });
+      Object.assign(agents.sp, { createAgentConfigOutcome: vi.fn(async () => ({ config: current, created: false })) });
+
+      await expect(agents.create({ ...body, setting }, { verifyReplay: true })).rejects.toMatchObject({ code: "EVAL_SP_CONFLICT" });
+      expect(agents.sp.deleteAgentConfig).not.toHaveBeenCalled();
+      expect(agents.sp.updateAgentConfig).not.toHaveBeenCalled();
+    },
+  );
+
   it("returns only an active owned Agent whose fresh body and recorded purpose match", async () => {
     const agents = service([existing], []);
     await agents.purposeStore.upsert({ userAgentId: existing.id, purpose: "execution", evaluationMcpServerId: null });

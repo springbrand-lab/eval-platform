@@ -20,6 +20,8 @@ Agent 新建与编辑直接复用 SP 同一份 `@springbrand/agent-config-editor
 
 Agent 创建时选择“执行 Agent”或“评估 Agent”，用途由 Eval 统一记录，管理页可按用途筛选，也可在编辑时切换。切换为评估 Agent 时自动绑定评估结果 MCP，切回执行 Agent 时自动移除该绑定。用途信息读取失败或 MCP 目录无法完成 reconciliation 时，管理页阻断列表并提示重试，不显示用途未知的配置。新建 Project 的执行 Agent 和评估计划的评估 Agent 分别只请求对应用途，API 也会再次校验用途，不能依赖浏览器筛选绕过。
 
+MCP 只读清单的选择类型及 managed MCP 分类函数直接来自精确版本 `@springbrand/agent-contracts@0.1.0-alpha.0` 的 `./agent-config` 公共出口；按配置顺序读取 managed MCP，不把 Connector Toolkit 当作 MCP Server。此轻量产物只依赖 Zod，不引入 UA 运行时，也不升级或替换现有共享编辑器、用途同步及保存行为。
+
 ### 从 dev 导入 Agent
 
 Agent 管理页的「从 dev 导入」是独立的显式按 ID 覆盖流程，不改变普通列表、用途筛选、编辑或新建入口；选中的已有自有 Agent 也会被覆盖。来源凭据只在服务端，浏览器只调用 Eval 的 `/api/agent-config-sync`：读取 `config`、分页读取来源 `users`，再按所选用户搜索和游标分页读取 `users/{sourceUserId}/agents`（每页 20，不设置 `onlyMissing`，已有 ID 仍可选择）。未选用户不读取 Agent；跨页选择保留并明确展示，切换用户清空未提交选择与预览。

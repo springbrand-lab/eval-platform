@@ -31,6 +31,9 @@ importers:
       '@hono/zod-openapi':
         specifier: 1.5.1
         version: 1.5.1(hono@4.12.33)(zod@4.6.5)
+      '@springbrand/agent-contracts':
+        specifier: 0.1.0-alpha.0
+        version: 0.1.0-alpha.0
       '@springbrand/eval-harness':
         specifier: 0.1.0-alpha.7
         version: 0.1.0-alpha.7(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
@@ -144,6 +147,9 @@ importers:
       '@springbrand/agent-config-editor':
         specifier: 0.1.0-alpha.3
         version: 0.1.0-alpha.3(patch_hash=c8099b63843f9afa20ec505549f7ba7aa52814acb0c196bef2e6d872a35670c8)(@date-fns/tz@1.5.0)(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(date-fns@4.4.0)(hono@4.12.33)(react-dom@19.3.0(react@19.3.0))(react-icons@5.6.0(react@19.3.0))(react@19.3.0)(recharts@2.15.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0))
+      '@springbrand/agent-contracts':
+        specifier: 0.1.0-alpha.0
+        version: 0.1.0-alpha.0
       '@springbrand/file-renderers':
         specifier: 0.1.0-alpha.2
         version: 0.1.0-alpha.2(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -2896,6 +2902,7 @@ packages:
   '@smithy/core@3.37.0':
     resolution: {integrity: sha512-97imTcCyiPd8k0e9+ts/Sp0W65Dn9Ti357J7M09Ov4tI8Q1JDJVFSoAJtjEVKqfHEr3Pdo2jfolqKCaaiszH0g==}
     engines: {node: '>=18.0.0'}
+    deprecated: Deprecated due to a bug in custom logger data redaction. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/credential-provider-imds@4.5.2':
     resolution: {integrity: sha512-A9uSdn72ozbRUSit0eib0TW7nXuNPlaeM0zcGkJ+nE6tFcSDbnmtwoxbTCFBukVQcszDAyvsd7+rTduPTXpygg==}
@@ -2930,6 +2937,9 @@ packages:
       '@tanstack/react-query': ^5.0.0
       react: ^19.0.0
       react-dom: ^19.0.0
+
+  '@springbrand/agent-contracts@0.1.0-alpha.0':
+    resolution: {integrity: sha512-SpKpRWnYf7+bOEzJdz4LeCuWAg6LESItyWQo2FYoqdRT50ieU1XjgvFLYZffQsreujp0oZnntUhrdlt2JLnVmQ==}
 
   '@springbrand/agent-runtime@0.3.1-alpha.15':
     resolution: {integrity: sha512-poX3wuEUCDRdS0PX2DMXz0eiwyDYK6+3JR7Wq0loIbVCH3ulEyTCodvbVJH8BIEsnPokHm2I3p4Eq6UXwHN0OQ==}
@@ -9586,6 +9596,10 @@ snapshots:
       - react-icons
       - recharts
       - supports-color
+
+  '@springbrand/agent-contracts@0.1.0-alpha.0':
+    dependencies:
+      zod: 4.6.5
 
   '@springbrand/agent-runtime@0.3.1-alpha.15(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)':
     dependencies:

@@ -1,17 +1,16 @@
 import { useQueries } from "@tanstack/react-query";
+import { selectedMcpServerIds, type AgentMcpServerSelection } from "@springbrand/agent-contracts/agent-config";
 import { api } from "@/api-sdk/client";
 import type { McpServerSummary } from "@/api-sdk/mcp-servers-api";
 import { Badge } from "@/components/ui/badge";
-
-type McpSelection = { readonly serverId: string; readonly kind?: string };
 
 /**
  * The shared Agent editor shows Connector Toolkits only; it keeps other MCP selections in the draft
  * unchanged on save. This read-only list makes those selections visible, e.g. the Evaluator result
  * submission MCP (docs/eval-evaluation-result-submission.md).
  */
-export function AgentMcpServers({ selections }: { selections: readonly McpSelection[] }) {
-  const ids = selections.filter((selection) => selection.kind === undefined).map((selection) => selection.serverId);
+export function AgentMcpServers({ selections }: { selections: readonly AgentMcpServerSelection[] }) {
+  const ids = selectedMcpServerIds(selections);
   const servers = useQueries({
     queries: ids.map((id) => ({
       queryKey: ["agent-library", "mcp-servers", id],
