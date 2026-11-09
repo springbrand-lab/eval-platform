@@ -13,6 +13,7 @@ export const AGENT_LIBRARY_ROUTES = [
   { method: "get", path: "/connectors", upstream: "/api/connectors", body: "none" },
   { method: "post", path: "/connectors/attempts", upstream: "/api/connectors/attempts", body: "json" },
   { method: "get", path: "/connectors/attempts/{id}", upstream: "/api/connectors/attempts/{id}", body: "none" },
+  { method: "delete", path: "/connectors/{id}", upstream: "/api/connectors/{id}", body: "none" },
   { method: "get", path: "/user-references", upstream: "/api/user-references", body: "none" },
   { method: "post", path: "/user-references", upstream: "/api/user-references", body: "json" },
   { method: "get", path: "/user-references/{id}", upstream: "/api/user-references/{id}", body: "none" },

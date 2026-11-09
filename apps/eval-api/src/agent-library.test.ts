@@ -114,9 +114,28 @@ describe("shared Agent editor HTTP gateway", () => {
     expect(app.calls).toHaveLength(1);
   });
 
+  it("disconnects the exact Connector account through the fixed service account", async () => {
+    const account = { id: "account+1", displayName: "Work account", status: "disconnected" };
+    const app = setup(envelope(account));
+    const response = await app.request("/api/agent-library/connectors/account%2B1", {
+      method: "DELETE", headers: { Origin: WEB_ORIGIN, Authorization: "Bearer caller-token" },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ success: true, msg: account });
+    expect(app.calls).toHaveLength(1);
+    expect(app.calls[0]!.url).toBe("https://eval-sp.test/api/connectors/account%2B1");
+    expect(app.calls[0]!.method).toBe("DELETE");
+    expect(app.calls[0]!.headers.get("Authorization")).toBe("Bearer service-session");
+    expect(app.calls[0]!.headers.get("Origin")).toBe(WEB_ORIGIN);
+  });
+
   it("rejects unauthorized requests, foreign Origins and Config write bypasses", async () => {
     const app = setup();
     expect((await app.anonymous("/api/agent-library/models")).status).toBe(401);
+    expect((await app.anonymous("/api/agent-library/connectors/account-1", { method: "DELETE" })).status).toBe(401);
+    expect((await app.request("/api/agent-library/connectors/account-1", {
+      method: "DELETE", headers: { Origin: "https://other.test" },
+    })).status).toBe(403);
     expect((await app.request("/api/agent-library/skills", { headers: { Origin: "https://other.test" } })).status).toBe(403);
     expect((await app.request("/api/agent-library/user-agent-configs", jsonRequest("POST", {}))).status).toBe(404);
     expect((await app.request(`/api/agent-library/user-agent-configs/${agentId}`, jsonRequest("PATCH", {}))).status).toBe(404);

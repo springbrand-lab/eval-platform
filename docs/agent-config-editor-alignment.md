@@ -11,4 +11,6 @@ Eval 另在 `/api/agents` 返回用途筛选后的可选配置。`eval_agent_con
 
 公共 Agent 编辑器的领域错误和删除阻挡详情从 SP 唯一错误目录选取，服务端与浏览器均用同一 Eval HTTP 目录解码。删除预检查与实际删除之间新增的活跃工作仍能显示真实阻挡原因；未经 Schema 校验的详情不公开。SP 服务会话失效是依赖不可用，不能清除浏览器登录。
 
+Connector 连接成功后在原选择弹窗提供断开操作。网关允许 `DELETE /api/agent-library/connectors/{id}`，仅用固定服务账号转发 SP 的同名公开接口；`id` 是账号连接 ID，不是 Toolkit ID。断开前确认会影响所有使用该账号的 Chat，成功后刷新连接状态，不移除 Agent 的 Toolkit 选择或自动保存配置。
+
 共享包使用 npm 精确版本，内部工作区依赖由发布产物携带；Eval 不连接 sibling 源码，也不保留旧编辑器或格式兼容分支。Tailwind 扫描发布后的 JS，类型、运行时和文件预览统一使用同一份 npm 安装产物。
