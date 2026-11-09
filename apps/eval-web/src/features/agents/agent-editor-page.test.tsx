@@ -134,6 +134,49 @@ describe("SP Agent editor in Eval", () => {
     }
   });
 
+  it("disconnects a connected account in the existing Connector picker without saving the Agent", async () => {
+    stored.setting = { ...stored.setting, mcpServers: [
+      ...stored.setting.mcpServers, { kind: "connector_toolkit", serverId: "gmail" },
+    ] };
+    const request = transport.request.getMockImplementation()!;
+    let disconnected = false;
+    transport.request.mockImplementation(async (path: string, options?: { method?: string }) => {
+      if (path === "/api/agent-library/connectors/work%2Baccount" && options?.method === "DELETE") {
+        disconnected = true;
+        return { id: "work+account", displayName: "Work account", status: "disconnected" };
+      }
+      if (path === "/api/agent-library/connectors") return { items: [{
+        toolkitId: "gmail", name: "Gmail", description: "Email", icon: null, credentialSource: "user_connection",
+        status: disconnected ? "not_connected" : "connected",
+        connections: [{ id: "work+account", displayName: "Work account", status: disconnected ? "disconnected" : "active" }],
+      }], nextCursor: null };
+      return request(path, options);
+    });
+    const view = await mount("/agents/agent-a");
+    try {
+      await settle(() => expect(name()).not.toBeNull());
+      await click(view.container.querySelector('[aria-label="添加外部应用连接"]'));
+      const dialog = document.querySelector('[role="dialog"]')!;
+      await settle(() => expect(button("断开连接", dialog)).toBeTruthy());
+      await click(button("断开连接", dialog));
+      const confirmation = document.querySelector('[role="alertdialog"]')!;
+      expect(confirmation.textContent).toContain("Work account");
+      expect(disconnected).toBe(false);
+      await click(button("取消", confirmation));
+      expect(disconnected).toBe(false);
+      await click(button("断开连接", dialog));
+      await click(button("确认断开", document.querySelector('[role="alertdialog"]')!));
+      await settle(() => expect(button("连接账号", dialog).disabled).toBe(false));
+      expect(transport.request.mock.calls.filter((call) => call[1]?.method === "DELETE")).toEqual([
+        ["/api/agent-library/connectors/work%2Baccount", { method: "DELETE" }],
+      ]);
+      await click(button("取消", dialog));
+      expect(view.container.textContent).toContain("Gmail");
+      expect(transport.patch).not.toHaveBeenCalled();
+      expect(transport.post).not.toHaveBeenCalled();
+    } finally { await view.close(); }
+  });
+
   it("reads managed MCPs in selection order without looking up Connector Toolkits as MCP Servers", async () => {
     stored.setting.mcpServers = [
       { serverId: "calendar", kind: "connector_toolkit" },

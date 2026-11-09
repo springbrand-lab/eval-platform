@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  '@springbrand/agent-config-editor@0.1.0-alpha.3': c8099b63843f9afa20ec505549f7ba7aa52814acb0c196bef2e6d872a35670c8
+  '@springbrand/agent-config-editor@0.1.0-alpha.4': d9ef1f46b2431954c915db58ac82d0d961bc21e42c61fee2ce660aee953274de
 
 importers:
 
@@ -145,8 +145,8 @@ importers:
         specifier: ^5.3.0
         version: 5.3.0
       '@springbrand/agent-config-editor':
-        specifier: 0.1.0-alpha.3
-        version: 0.1.0-alpha.3(patch_hash=c8099b63843f9afa20ec505549f7ba7aa52814acb0c196bef2e6d872a35670c8)(@date-fns/tz@1.5.0)(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(date-fns@4.4.0)(hono@4.12.33)(react-dom@19.3.0(react@19.3.0))(react-icons@5.6.0(react@19.3.0))(react@19.3.0)(recharts@2.15.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0))
+        specifier: 0.1.0-alpha.4
+        version: 0.1.0-alpha.4(patch_hash=d9ef1f46b2431954c915db58ac82d0d961bc21e42c61fee2ce660aee953274de)(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@date-fns/tz@1.5.0)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(date-fns@4.4.0)(hono@4.12.33)(react-dom@19.3.0(react@19.3.0))(react-icons@5.6.0(react@19.3.0))(react@19.3.0)(recharts@2.15.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(undici@7.29.1)(ws@8.22.0)
       '@springbrand/agent-contracts':
         specifier: 0.1.0-alpha.0
         version: 0.1.0-alpha.0
@@ -2905,7 +2905,9 @@ packages:
   '@smithy/core@3.37.0':
     resolution: {integrity: sha512-97imTcCyiPd8k0e9+ts/Sp0W65Dn9Ti357J7M09Ov4tI8Q1JDJVFSoAJtjEVKqfHEr3Pdo2jfolqKCaaiszH0g==}
     engines: {node: '>=18.0.0'}
-    deprecated: Deprecated due to a bug in custom logger data redaction. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
+    deprecated: |-
+      Deprecated due to a bug in custom logger data redaction. Upgrade to the latest version. If you used a custom logger with this
+        version, review your logs and rotate any credentials or other secrets. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/credential-provider-imds@4.5.2':
     resolution: {integrity: sha512-A9uSdn72ozbRUSit0eib0TW7nXuNPlaeM0zcGkJ+nE6tFcSDbnmtwoxbTCFBukVQcszDAyvsd7+rTduPTXpygg==}
@@ -2934,8 +2936,8 @@ packages:
   '@speed-highlight/core@1.2.24':
     resolution: {integrity: sha512-qeW2e1l78afw8VhRPfPQ1Gjj+KU5XFQ/OFV5ti6eTa9bruO7mJyZtA4vw0ofqmA3tKCkROE9xLk3VZoeRc98nw==}
 
-  '@springbrand/agent-config-editor@0.1.0-alpha.3':
-    resolution: {integrity: sha512-l6ag9bUvb1DrkJVO7gCGuEvnZc5SUOkSwBa7ZeNkLQGrbFR1gncGPY/r7ntQrqcyfXD/h1Wlx5fI6vjlsHX62Q==}
+  '@springbrand/agent-config-editor@0.1.0-alpha.4':
+    resolution: {integrity: sha512-B3LSWUbedhjqYFg9WO/JWu/AvQG9jm3npdq5nSTJpBspju/QzvDvE/IMhL7RaulPJIStf15dnDOin/2Br6F6Dg==}
     peerDependencies:
       '@tanstack/react-query': ^5.0.0
       react: ^19.0.0
@@ -2946,6 +2948,12 @@ packages:
 
   '@springbrand/agent-runtime@0.3.1-alpha.15':
     resolution: {integrity: sha512-poX3wuEUCDRdS0PX2DMXz0eiwyDYK6+3JR7Wq0loIbVCH3ulEyTCodvbVJH8BIEsnPokHm2I3p4Eq6UXwHN0OQ==}
+    peerDependencies:
+      agents: '>=0.30.0 <0.31.0'
+      ai: ^7.0.0
+
+  '@springbrand/agent-runtime@0.3.1-alpha.9':
+    resolution: {integrity: sha512-NlumLN+cWuXNMQWpvG9VtfqV6uc9pgFeHCklaN3NLxekZsRdRzjfyyDHLeAhNahozux/qOZMEVA4Z4sUjB6GKQ==}
     peerDependencies:
       agents: '>=0.30.0 <0.31.0'
       ai: ^7.0.0
@@ -9573,8 +9581,9 @@ snapshots:
 
   '@speed-highlight/core@1.2.24': {}
 
-  '@springbrand/agent-config-editor@0.1.0-alpha.3(patch_hash=c8099b63843f9afa20ec505549f7ba7aa52814acb0c196bef2e6d872a35670c8)(@date-fns/tz@1.5.0)(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(date-fns@4.4.0)(hono@4.12.33)(react-dom@19.3.0(react@19.3.0))(react-icons@5.6.0(react@19.3.0))(react@19.3.0)(recharts@2.15.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0))':
+  '@springbrand/agent-config-editor@0.1.0-alpha.4(patch_hash=d9ef1f46b2431954c915db58ac82d0d961bc21e42c61fee2ce660aee953274de)(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@date-fns/tz@1.5.0)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(date-fns@4.4.0)(hono@4.12.33)(react-dom@19.3.0(react@19.3.0))(react-icons@5.6.0(react@19.3.0))(react@19.3.0)(recharts@2.15.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(undici@7.29.1)(ws@8.22.0)':
     dependencies:
+      '@springbrand/agent-runtime': 0.3.1-alpha.9(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
       '@springbrand/contracts': 0.1.0-alpha.0(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@springbrand/file-renderers': 0.1.0-alpha.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@springbrand/http': 0.1.0-alpha.4(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
@@ -9589,16 +9598,36 @@ snapshots:
       sonner: 2.0.8(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       zod: 4.6.5
     transitivePeerDependencies:
+      - '@ai-sdk/google'
+      - '@ai-sdk/provider'
+      - '@ai-sdk/react'
+      - '@aws-sdk/credential-provider-node'
+      - '@chat-adapter/telegram'
       - '@date-fns/tz'
+      - '@modelcontextprotocol/sdk'
+      - '@openai/agents'
+      - '@opencode-ai/sdk'
+      - '@smithy/hash-node'
+      - '@smithy/signature-v4'
+      - '@tanstack/ai'
       - '@types/react'
       - '@types/react-dom'
+      - '@xterm/xterm'
+      - agents
+      - ai
+      - bufferutil
       - date-fns
       - debug
       - hono
       - immer
+      - kerberos
       - react-icons
       - recharts
       - supports-color
+      - undici
+      - utf-8-validate
+      - workflow
+      - ws
 
   '@springbrand/agent-contracts@0.1.0-alpha.0':
     dependencies:
@@ -9620,6 +9649,46 @@ snapshots:
       ai: 7.0.56(zod@4.6.5)
       cron-schedule: 6.0.0
       fast-sha256: 1.3.0
+      isomorphic-git: 1.38.6
+      lodash-es: 4.18.1
+      zod: 4.6.5
+    transitivePeerDependencies:
+      - '@ai-sdk/google'
+      - '@ai-sdk/provider'
+      - '@ai-sdk/react'
+      - '@aws-sdk/credential-provider-node'
+      - '@chat-adapter/telegram'
+      - '@modelcontextprotocol/sdk'
+      - '@openai/agents'
+      - '@opencode-ai/sdk'
+      - '@smithy/hash-node'
+      - '@smithy/signature-v4'
+      - '@tanstack/ai'
+      - '@xterm/xterm'
+      - bufferutil
+      - kerberos
+      - react
+      - supports-color
+      - undici
+      - utf-8-validate
+      - workflow
+      - ws
+
+  '@springbrand/agent-runtime@0.3.1-alpha.9(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)':
+    dependencies:
+      '@cloudflare/codemode': 0.5.4(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
+      '@cloudflare/sandbox': 0.12.4
+      '@cloudflare/shell': 0.4.3(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
+      '@cloudflare/think': 0.20.2(@ai-sdk/provider@4.0.34)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(zod@4.6.5)
+      '@earendil-works/chord': 1.4.0
+      '@earendil-works/pi-agent-core': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
+      '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
+      '@earendil-works/pi-durable': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
+      '@springbrand/model-client': 0.1.0
+      '@types/lodash-es': 4.17.12
+      agents: 0.30.1(a176c87e2574b30186e650fab4fc19cd)
+      ai: 7.0.56(zod@4.6.5)
+      cron-schedule: 6.0.0
       isomorphic-git: 1.38.6
       lodash-es: 4.18.1
       zod: 4.6.5
