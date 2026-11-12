@@ -119,6 +119,13 @@ pnpm --filter @eval-platform/eval-web dev
 
 只读 Trajectory 使用 SP Chat 的 `{format:"sp-pi-trajectory/v1",cursor:{throughSeq},records:[{ingestSeq,record} | {ingestSeq,reference}],nextAfterSeq}`，`afterSeq:0` 从头开始，每次按返回的 `nextAfterSeq` 与冻结的 `throughSeq` 向前读至终点，不发送旧 `beforeSeq`，不转换成旧 `events`。筛选仅按已加载的原生 `conversation` / `entry.kind` / 大记录引用；Web 当前只展示引用大小和元数据，不假装它是完整的 Pi 记录（管理 MCP 的单记录完整字节读取独立于 Web）。轮数等统计始终来自 Metrics。Query 缓存保存一个连续的已加载前缀，运行中刷新只从已完成的水位开始，先读完已冻结的多页数据再发现新尾部；分页与刷新原子合并，不把已加载记录替换成滚动窗口。Run 结束时再刷新观察数据。
 
+The API observation adapter validates original pages with the public Harness
+parser before relaying them. Web consumes that contract and checks only its
+requested cursor, frozen cutoff and cache continuity; it does not carry a second
+generic Pi page schema or import the Harness runtime root. The shared page
+metadata is a type-only derivation of the public Harness DTO, not SP's separate
+backward debugger DTO.
+
 Workspace 只保存选中的路径，节点取当前目录树。Query 只缓存原文件 Blob，解码、解析和关联资源属于当前选择的取消生命周期，切换文件或已知版本时旧读取不能回填新预览；读取失败可重试，关联资源失败也可通过重新加载文件重试。每次选中验证当前文件，运行中沿用统一轮询周期读取，结束由 Project 统一刷新，不以可选的 mtime 或 size 推断内容未改变。HTML 视图在同一路径更新时保留用户的源码/预览选择。下载链接按 Blob 生命周期创建和释放。
 
 聚合数值均使用 Metrics 返回值。资源区域中的执行与评估 Agent 独立折叠；展开后先看总览，再通过费用、Token、操作次数和耗时选择卡查看分项详细数据。消耗/轮数/工具次数的分布按单 Agent，工具长度/操作耗时按单次调用，Agent/Attempt 耗时和 Schema 数值各按自己的观察单位。共用统计表默认显示均值、中位数、最小—最大、标准差、有效 N 与缺失，累计值按需单列。每项保留自己的有效 N，不重复展示模型分布；标准差与指标使用相同基础单位。

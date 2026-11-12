@@ -295,12 +295,12 @@ describe("resource statistics", () => {
     const nested = nativeScopedFixture([14], SCOPE)[0]!;
     const parent = { resource: { agentId: root.record.resource.agentId, sessionId: SCOPE.chatId },
       submissionId: SCOPE.submissionId };
-    const rows = [
+    const rows: NativeTrajectoryEntry[] = [
       root,
       { ...context, ingestSeq: 4, record: { ...context.record, submissionId: null, origin: "context" as const, parent } },
-      { ...child, ingestSeq: 5, record: { ...child.record, submissionId: "child", parent } },
+      { ...child, ingestSeq: 5, record: { ...child.record, submissionId: "child", origin: "execution", parent } },
       { ...nested, ingestSeq: 6, record: { ...nested.record, submissionId: "nested",
-        parent: { ...parent, submissionId: "child" } } },
+        origin: "execution", parent: { ...parent, submissionId: "child" } } },
     ];
     const supported = aggregateResources([resourceInput({ nativeRecords: rows })]);
     expect(supported.diagnostics.filter((item) => item.stream === "nativeRecords"

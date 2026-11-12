@@ -18,6 +18,7 @@ import { EvalSpApiError } from "./sp/http.js";
 import { comparison as comparisonHandler } from "./routes/metrics/metrics.handlers.js";
 import { comparison as comparisonRoute } from "./routes/metrics/metrics.routes.js";
 import { nativeAssistantMessage } from "./sp/native-test-fixture.js";
+import type { SpObservationClient } from "./sp/observation.js";
 import { authorized, jsonRequest, requestApp, WEB_ORIGIN } from "./test-support.js";
 
 const owner = "11111111-1111-4111-8111-111111111111";
@@ -143,7 +144,9 @@ function setup() {
   const observation = {
     messages: vi.fn(async () => [{ id: "m1", role: "user", parts: [{ type: "text", text: "Build a page" }] }]),
     tree: vi.fn(async () => [{ name: "index.html", path: "/index.html", type: "file" }]),
-    trajectory: vi.fn(async () => ({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 9 }, records: [], nextAfterSeq: null })),
+    trajectory: vi.fn<SpObservationClient["trajectory"]>(async () => ({
+      format: "sp-pi-trajectory/v1", cursor: { throughSeq: 9 }, records: [], nextAfterSeq: null,
+    })),
     trajectoryRecord: vi.fn(async () => { throw new Error("Unexpected record-byte read"); }),
     file: vi.fn(async () => ({ body: new Blob(["<h1>Hi</h1>"]).stream(), contentType: "text/html", contentLength: "11" })),
   };

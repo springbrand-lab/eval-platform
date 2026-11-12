@@ -30,6 +30,48 @@ describe("management Agent creation", () => {
     expect(app.release).toHaveBeenCalledTimes(1);
   });
 
+  it("creates an Agent with Frank's raw local Action IDs without rebuilding a Supplier catalog", async () => {
+    const app = setupManagement();
+    const actionIds = ["action.local.exa.get_contents", "action.local.exa.search"];
+    const original = app.sp.requestAgentLibrary.getMockImplementation()!;
+    app.sp.requestAgentLibrary.mockImplementation(async (token, request) => request.route.path === "/actions/{id}"
+      ? { id: request.id, name: "Exa Action (local)", status: "active", selectable: true,
+        supplier: { id: "exa", name: "Exa" } }
+      : original(token, request));
+    expect(await toolValue(await app.call("create_agent", { ...input, actionIds })))
+      .toEqual({ agentId: AGENT, name: input.name, purpose: input.purpose });
+    expect(app.services.agentConfigs.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      setting: expect.objectContaining({ actionIds }),
+    }), { verifyReplay: true });
+    expect(app.sp.requestAgentLibrary.mock.calls.map(([token, request]) => ({
+      token, path: request.route.path, id: request.id,
+    }))).toEqual([
+      { token: "fixed-session", path: "/models", id: undefined },
+      { token: "fixed-session", path: "/skills", id: undefined },
+      { token: "fixed-session", path: "/user-references/{id}", id: referenceId },
+      ...actionIds.map((id) => ({ token: "fixed-session", path: "/actions/{id}", id })),
+      { token: "fixed-session", path: "/default-template", id: undefined },
+    ]);
+  });
+
+  it.each(["missing", "different historical ID"])("rejects a %s Frank Action instead of falling back before creation", async (state) => {
+    const app = setupManagement();
+    const original = app.sp.requestAgentLibrary.getMockImplementation()!;
+    app.sp.requestAgentLibrary.mockImplementation(async (token, request) => request.route.path === "/actions/{id}"
+      ? state === "missing" ? null : { id: "action.exa.search", status: "active", selectable: true }
+      : original(token, request));
+    const response = await (await app.call("create_agent", {
+      ...input, actionIds: ["action.local.exa.search"],
+    })).json();
+    expect(response).toMatchObject({ result: { isError: true,
+      content: [{ text: expect.stringContaining("EVAL_SP_CONFLICT") }] } });
+    expect(app.services.agentConfigs.create).not.toHaveBeenCalled();
+    expect(app.sp.requestAgentLibrary.mock.calls.filter(([, request]) => request.route.path.startsWith("/actions")))
+      .toEqual([["fixed-session", expect.objectContaining({
+        route: expect.objectContaining({ path: "/actions/{id}" }), id: "action.local.exa.search", search: "",
+      })]]);
+  });
+
   it("refuses a removed or unavailable Model, Skill, Reference or Action before an SP write", async () => {
     for (const resource of ["model", "skill", "reference", "action"] as const) {
       const app = setupManagement();

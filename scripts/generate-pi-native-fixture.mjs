@@ -17,10 +17,6 @@ const t = await import(process.env.EVAL_UA_PUBLIC_TRAJECTORY_MODULE ?? "@springb
 const resource = { agentId: "agent-1", sessionId: "chat-1" };
 const metadata = { resource, submissionId: "submission-1" };
 const eventResource = { serviceName: "test", agentName: "Agent", ...resource };
-const policy = {
-  id: "eval-native-fixture", version: 1, secrets: "redact",
-  actionTools: { names: [], prefixes: [] }, allowedDetailsPaths: [],
-};
 const usage = (input, output) => ({
   input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
@@ -55,7 +51,7 @@ const raw = [
   event(5, "generation.started", gen1, { generationId: "model-1" }, 110, { parentOperationId: turn }),
   entry(6, { kind: "pi.assistant", byTaskId: 5,
     model: [assistant(255, "toolUse", [
-      { type: "thinking", thinking: "reason", thinkingSignature: "safe-marker" },
+      { type: "thinking", thinking: "reason", thinkingSignature: "raw-signature" },
       { type: "text", text: "Searching" },
       { type: "toolCall", id: "call-1", name: "search", arguments: { query: "é" } },
     ], usage(11, 5))] }),
@@ -93,8 +89,11 @@ const raw = [
   event(16, "turn.finished", turn, { outcome: "completed", durationMs: 400 }, 500, {}, { entryId: 14 }),
 ];
 
-const safe = await t.projectTrajectoryForExport(raw, policy);
-const records = safe.map((record, index) => ({ ingestSeq: index + 1, record }));
+const records = raw.map((record, index) => {
+  const parsed = t.parseTrajectoryRecord(record);
+  if ("projection" in parsed) throw new Error("The public trajectory export is not the alpha.32 raw contract");
+  return { ingestSeq: index + 1, record: parsed };
+});
 for (const { record } of records) {
   if (!t.trajectoryRecordSchema.safeParse(record).success) throw new Error("Generated record failed UA public schema");
   if (record.record.type === "entry") {
@@ -121,6 +120,6 @@ if (process.env.EVAL_SP_PUBLIC_EVAL_HARNESS_MODULE) {
   sp.evalResourceSnapshotSchema.parse(snapshot);
 }
 process.stdout.write(`${JSON.stringify({
-  generator: "@springbrand/agent-runtime/trajectory@0.3.1-alpha.9",
+  generator: "@springbrand/agent-runtime/trajectory@0.3.1-alpha.32",
   resource, submissionId: metadata.submissionId, records,
 }, null, process.argv.includes("--compact") ? 0 : 2)}\n`);

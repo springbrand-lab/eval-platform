@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { spPiTrajectoryPageSchema, type SpPiTrajectoryPageRow } from "@eval-platform/eval-contracts";
+import type { SpPiTrajectoryPageRow } from "@eval-platform/eval-contracts";
 import { getTrajectoryPage, observationKeys, type ObservedKind, type TrajectoryPage } from "@/api-sdk/observations-api";
 import { POLL_MS } from "@/features/runs/use-run-polling";
 
@@ -34,10 +34,11 @@ export function useTrajectory(input: { projectId: string; kind: ObservedKind; id
 
   async function read(afterSeq: number, throughSeq?: number, signal?: AbortSignal): Promise<LoadedTrajectory> {
     const page = await getTrajectoryPage(projectId, kind, id, afterSeq, throughSeq, signal);
-    if (!spPiTrajectoryPageSchema.safeParse(page).success
-      || page.cursor.throughSeq < afterSeq
+    // The real API observation adapter owns public wire validation. This cache owns
+    // only the relationship between that validated page and the range it requested.
+    if (page.cursor.throughSeq < afterSeq
       || throughSeq !== undefined && page.cursor.throughSeq !== throughSeq) {
-      throw new Error("轨迹响应不是 SAFE Pi 原生 records 页");
+      throw new Error("轨迹响应不是 raw Pi 原生 records 页");
     }
     if (page.records.some((row) => row.ingestSeq <= afterSeq)
       || page.nextAfterSeq !== null && page.nextAfterSeq <= afterSeq) {

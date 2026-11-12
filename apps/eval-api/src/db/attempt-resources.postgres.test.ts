@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import {
   SP_PI_TRAJECTORY_FORMAT,
+  PI_METRIC_RECORD_FORMAT,
+  compactNativeTrajectoryEntrySchema,
   summarizeResourceSnapshot,
   type AgentResourceSnapshot,
   type AgentResourceSnapshotDownload,
@@ -32,7 +34,7 @@ const connection = process.env.DATABASE_URL;
 const owner = "attempt-resources-test";
 
 function rawSnapshot(id: string, body: string, toolName = "tool"): AgentResourceSnapshot {
-  // Storage stress is split at the upstream 4 MB page ceiling. Both safe Pi
+  // Storage stress is split at the upstream 4 MB page ceiling. Both raw Pi
   // message bodies are based on the publicly projected assistant/Tool Result.
   const chunks = body.length > 3_000_000
     ? [body.slice(0, 3_000_000), body.slice(3_000_000)] : [body];
@@ -63,12 +65,12 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const scope = { chatId, submissionId, idempotencyKey: `execution:${samplingId}` };
     const native = await compactNativeTrajectoryRecord(nativeFixture(3, chatId, submissionId), scope);
     const assistant = nativeFixture(6, chatId, submissionId);
-    if (assistant.record.record.type !== "entry") throw new Error("Expected a SAFE Tool Call");
+    if (assistant.record.record.type !== "entry") throw new Error("Expected a raw Tool Call");
     const callMessage = (assistant.record.record.value.model as Record<string, unknown>[])[0]!;
     (callMessage.content as Record<string, unknown>[]).find((block) => block.type === "toolCall")!.id = "call_1|fc_1";
     const call = await compactNativeTrajectoryRecord(assistant, scope);
     const toolResult = nativeFixture(10, chatId, submissionId);
-    if (toolResult.record.record.type !== "entry") throw new Error("Expected a SAFE Tool Result");
+    if (toolResult.record.record.type !== "entry") throw new Error("Expected a raw Tool Result");
     (toolResult.record.record.value as { kind: string }).kind = "pi.tool-result";
     (toolResult.record.record.value.model as Record<string, unknown>[])[0]!.details = {
       executionId: "88888888-8888-4888-8888-888888888888", capabilityId: "capability-1",
@@ -129,6 +131,45 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       resultCallMatches: 1, legacyCompact: false, toolName: "search",
     }] });
     expect(JSON.stringify(actions)).not.toMatch(/private Tool arguments|private-key|capabilityId|credential|chatId|agentId|toolCallId/u);
+  });
+
+  it("streams an already-saved legacy snapshot byte-for-byte without decoding or rewriting it", async () => {
+    const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }] });
+    const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
+    const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, {
+      projectId: seeded.projectId, operation: "execution",
+    });
+    await store.admitRun(command);
+    const samplingId = command.run.samplingIds[0]!;
+    const archived = JSON.parse(JSON.stringify(rawSnapshot(samplingId, "saved-body".repeat(150_000))));
+    for (const entry of archived.nativeRecords) {
+      entry.record.projection = { kind: "safe", policyId: "archived", policyVersion: 1 };
+    }
+    const original = (await store.getSampling(samplingId))!;
+    await store.updateSampling({ ...original, execution: { status: "succeeded" }, executionAttempts: [{
+      executionAttemptId: samplingId, samplingId, attemptNumber: 1, status: "completed",
+      resources: { status: "collected", summary: summarizeResourceSnapshot(archived) },
+    }] }, original);
+    await database.db.insert(attemptResources).values({
+      stage: "execution", recordId: samplingId, attemptId: samplingId, ownerUserId: owner, samplingId,
+      evaluationId: null, snapshot: archived, metricSnapshot: archived,
+    });
+    const reader = createPostgresResourceSnapshotReader(database.db, owner);
+    const first = await reader.open(seeded.projectId, "execution", samplingId, samplingId);
+    expect(first).not.toBeNull();
+    const text = await new Response(first!).text();
+    expect(Buffer.byteLength(text)).toBeGreaterThan(1 << 20);
+    expect(text).toBe(JSON.stringify(archived));
+    const second = await reader.open(seeded.projectId, "execution", samplingId, samplingId);
+    expect(await new Response(second!).text()).toBe(text);
+    const page = await reader.readCaseUsage({ projectId: seeded.projectId, samplingId, role: "execution",
+      section: "tool_calls", attemptId: samplingId, page: 1, pageSize: 1 });
+    expect(page).toMatchObject({ snapshotPresent: true, total: null, rows: [] });
+    const [saved] = await database.db.select().from(attemptResources).where(and(
+      eq(attemptResources.stage, "execution"), eq(attemptResources.recordId, samplingId),
+    ));
+    expect(saved?.snapshot).toEqual(archived);
+    expect(saved?.metricSnapshot).toEqual(archived);
   });
 
   it("pages every v2 Pi Call in order across free, status, Action, Super Link and descendant agents", async () => {
@@ -401,13 +442,15 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
         status: "succeeded", chargedCredits: 7 }],
     };
     const compacted = await compactResourceSnapshot(snapshot);
-    // A malformed already-stored v2 JSON number must not be cast, displayed or
-    // silently rounded. The source SAFE record itself cannot contain an unsafe integer.
+    // A malformed v2 JSON number must not enter new compact storage or be
+    // silently rounded. The public raw record cannot contain an unsafe integer.
     const unsafe = compacted.nativeRecords[13]?.metricProjection?.facts;
     if (!Array.isArray(unsafe) || !unsafe[0] || typeof unsafe[0] !== "object") {
       throw new Error("Expected compact Pi Result fact");
     }
     (unsafe[0] as Record<string, unknown>).durationMs = Number.MAX_SAFE_INTEGER + 1;
+    expect(compactNativeTrajectoryEntrySchema.safeParse(compacted.nativeRecords[13]).success).toBe(false);
+    (unsafe[0] as Record<string, unknown>).durationMs = null;
     const original = (await store.getSampling(samplingId))!;
     await store.updateSampling({
       ...original, subjectChatId: chatId, execution: { status: "succeeded" },
@@ -447,7 +490,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     const badKey = structuredClone(compacted);
     const firstCall = badKey.nativeRecords[0]!;
     if (!firstCall.metricProjection) throw new Error("Missing compact facts");
-    (firstCall.metricProjection as { supported: boolean }).supported = false;
+    (firstCall.metricProjection as { complete: boolean }).complete = false;
     saved = (await store.getSampling(samplingId))!;
     await store.updateSampling({ ...saved, executionAttempts: [{ ...saved.executionAttempts[0]!,
       resources: { status: "collected", summary: summarizeResourceSnapshot(badKey) } }] }, saved,
@@ -455,7 +498,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     expect(await reader.readCaseUsage(select)).toMatchObject({ snapshotPresent: true, total: null });
   });
 
-  it("shows old raw and v1 compact charges without attributing them to Tools", async () => {
+  it("rejects obsolete compact inputs without rewriting the saved current facts or authoritative receipt", async () => {
     const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }] });
     const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
     const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, {
@@ -493,38 +536,28 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       section: "actions" as const, attemptId, page: 1, pageSize: 1 };
     expect(await reader.readCaseUsage(base)).toMatchObject({ total: 1, rows: [
       { chargedCredits: "7", executionMatches: 1, actionId: "action.from-ledger",
-        linkMatches: 0, legacyCompact: true, toolName: null },
+        linkMatches: 1, legacyCompact: false, toolName: "api.search" },
     ] });
     expect(await reader.readCaseUsage({ ...base, section: "tool_calls" }))
-      .toMatchObject({ snapshotPresent: true, total: null, rows: [] });
+      .toMatchObject({ snapshotPresent: true, total: 1, rows: [{ toolName: "api.search" }] });
     const compacted = await compactResourceSnapshot(snapshot);
-    const old: AgentResourceSnapshot = { ...snapshot, nativeRecords: compacted.nativeRecords.map((entry) =>
-      ({ ...entry, metricProjection: { ...entry.metricProjection!, chargeLinkVersion: 1 } })) };
-    let saved = (await store.getSampling(samplingId))!;
-    await store.updateSampling({ ...saved, executionAttempts: [{ ...saved.executionAttempts[0]!,
-      resources: { status: "collected", summary: summarizeResourceSnapshot(old) } }] }, saved,
-    { attemptId, snapshot: old });
-    expect(await reader.readCaseUsage(base)).toMatchObject({
-      rows: [{ actionId: "action.from-ledger", linkMatches: 0, legacyCompact: true, toolName: null }],
-    });
+    for (const version of [1, "2"]) {
+      const invalid = JSON.parse(JSON.stringify(compacted));
+      for (const entry of invalid.nativeRecords) entry.metricProjection.chargeLinkVersion = version;
+      const saved = (await store.getSampling(samplingId))!;
+      await expect(store.updateSampling({ ...saved, executionAttempts: [{ ...saved.executionAttempts[0]!,
+        resources: { status: "collected", summary: summarizeResourceSnapshot(invalid) } }] }, saved,
+      { attemptId, snapshot: invalid })).rejects.toThrow(/invalid native trajectory/u);
+      expect(await store.getSampling(samplingId)).toEqual(saved);
+    }
     expect(await reader.readCaseUsage({ ...base, section: "tool_calls" }))
-      .toMatchObject({ snapshotPresent: true, total: null, rows: [] });
-    const invalidVersion: AgentResourceSnapshot = { ...snapshot,
-      nativeRecords: compacted.nativeRecords.map((entry) => ({
-        ...entry, metricProjection: { ...entry.metricProjection!, chargeLinkVersion: "2" },
-      })) };
-    saved = (await store.getSampling(samplingId))!;
-    await store.updateSampling({ ...saved, executionAttempts: [{ ...saved.executionAttempts[0]!,
-      resources: { status: "collected", summary: summarizeResourceSnapshot(invalidVersion) } }] }, saved,
-    { attemptId, snapshot: invalidVersion });
-    expect(await reader.readCaseUsage({ ...base, section: "tool_calls" }))
-      .toMatchObject({ snapshotPresent: true, total: null, rows: [] });
+      .toMatchObject({ snapshotPresent: true, total: 1, rows: [{ toolName: "api.search" }] });
     expect(await reader.readCaseUsage(base)).toMatchObject({
-      rows: [{ actionId: "action.from-ledger", chargedCredits: "7", legacyCompact: true }],
+      rows: [{ actionId: "action.from-ledger", chargedCredits: "7", legacyCompact: false }],
     });
   });
 
-  it("reads only owner-scoped, source-specific receipts without borrowing model debits or SAFE Action IDs", async () => {
+  it("reads only owner-scoped, source-specific receipts without borrowing model debits or native Action hints", async () => {
     const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }] });
     const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
     const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, {
@@ -717,7 +750,11 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       inArray(attemptResources.samplingId, command.run.samplingIds),
     ));
     expect(rows).toHaveLength(4);
-    for (const row of rows) expect(row.snapshot).toEqual(raw.get(row.recordId));
+    for (const row of rows) {
+      expect(row.snapshot).toEqual(await compactResourceSnapshot(raw.get(row.recordId)!));
+      expect(row.snapshot).toEqual(row.metricSnapshot);
+      expect(JSON.stringify(row.snapshot)).not.toContain(body);
+    }
 
     const [samplingId] = command.run.samplingIds;
     const [evaluationId] = command.run.evaluationIds;
@@ -728,8 +765,8 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     };
     for (const [stage, id] of [["execution", samplingId!], ["evaluation", evaluationId!]] as const) {
       const text = await read(stage, id);
-      expect(Buffer.byteLength(text!)).toBeGreaterThan(1 << 20);
-      expect(JSON.parse(text!)).toEqual(raw.get(id));
+      expect(Buffer.byteLength(text!)).toBeLessThan(15_000);
+      expect(JSON.parse(text!)).toEqual(await compactResourceSnapshot(raw.get(id)!));
     }
     expect(await read("evaluation", samplingId!)).toBeNull();
     expect(await read("execution", samplingId!, "other")).toBeNull();
@@ -782,12 +819,14 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       expect(await caseReader.readCaseUsage({ ...base, section: "actions", attemptId: samplingId, page: 2, pageSize: 1 }))
         .toMatchObject({ total: 2, rows: [{ index: 3, executionId: "action-2", chargedCredits: "0", executionMatches: 1 }] });
       expect(await caseReader.readCaseUsage({ ...base, section: "tool_calls", attemptId: samplingId }))
-        .toMatchObject({ snapshotPresent: true, total: null, rows: [] }); // Historical raw is not v2 evidence.
+        .toMatchObject({ snapshotPresent: true, total: 2, rows: [
+          { toolName: "tool" }, { toolName: "tool" },
+        ] }); // New native inputs become current compact facts at the single Store seam.
       expect(await caseReader.readCaseUsage({ ...base, role: "evaluation", evaluationId: evaluationId!,
         section: "models", attemptId: evaluationId })).toMatchObject({ total: 0, rows: [] });
       expect(await caseReader.readCaseUsage({ ...base, role: "evaluation", evaluationId: evaluationId!,
         section: "tool_calls", attemptId: evaluationId })).toMatchObject({
-        snapshotPresent: true, total: null, rows: [],
+        snapshotPresent: true, total: 2, rows: [{ toolName: "tool" }, { toolName: "tool" }],
       });
       await expect(createPostgresResourceSnapshotReader(measured, "other-owner")
         .readCaseUsage({ ...base, section: "models", attemptId: samplingId }))
@@ -849,13 +888,13 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
 
       const [row] = await database.db.select().from(attemptResources)
         .where(and(eq(attemptResources.stage, stage), eq(attemptResources.recordId, recordId)));
-      expect(row?.snapshot).toEqual(snapshot);
       const projection = await compactResourceSnapshot(snapshot);
+      expect(row?.snapshot).toEqual(projection);
       expect(row?.metricSnapshot).toEqual(projection);
       expect(row?.metricSnapshot.nativeRecords).toMatchObject([
-        { record: { format: "pi-trajectory/v1", record: { type: "entry", value: { kind: "pi.assistant" } } },
+        { record: { format: PI_METRIC_RECORD_FORMAT, record: { type: "entry", value: { kind: "pi.assistant" } } },
           metricProjection: { facts: [{ type: "assistant" }, { type: "tool", toolName: value }] } },
-        { record: { format: "pi-trajectory/v1", record: { type: "entry", value: { kind: "pi.toolResult" } } },
+        { record: { format: PI_METRIC_RECORD_FORMAT, record: { type: "entry", value: { kind: "pi.toolResult" } } },
           metricProjection: { facts: [{ type: "tool", toolName: value }] } },
       ]);
       const facts = await createPostgresMetricsSource(database.db, owner).read({ projectId: seeded.projectId });
@@ -865,13 +904,13 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       const stream = await createPostgresResourceSnapshotReader(database.db, owner).open(seeded.projectId, stage, recordId, recordId);
       expect(stream).not.toBeNull();
       const text = await new Response(stream!).text();
-      expect(JSON.parse(text)).toEqual(snapshot);
+      expect(JSON.parse(text)).toEqual(projection);
       expect(text).toContain(JSON.stringify(value));
       if (stage === "evaluation") await settle(store, command.run.samplingIds, "succeeded");
     });
   });
 
-  it("serves a 312 MB raw project in a process with a 128 MB heap", async () => {
+  it("compacts 312 MB of incoming native bodies before serving a Project in a process with a 128 MB heap", async () => {
     const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }], samplingCount: 26 });
     const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
     const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, { projectId: seeded.projectId, operation: "execution" });

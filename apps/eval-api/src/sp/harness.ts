@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type {
   AgentFramework, AgentResourceFact, AgentResourceSnapshotDownload, AgentResourceSnapshotSummary, EvidenceLimits,
   EvidenceTrajectoryPin, NativeTrajectoryEntry, SpPiTrajectoryPage, SpPiTrajectoryRecordReference,
+  NativeTrajectoryInterpretationEntry, PiTrajectoryRecordView,
 } from "@eval-platform/eval-contracts";
 import {
   EVIDENCE_SCHEMA_VERSION, SP_PI_TRAJECTORY_FORMAT,
@@ -72,7 +73,7 @@ import {
 } from "./harness-wire.js";
 import { createSpHttpClient, type Fetch } from "./http.js";
 import {
-  NativeRecordStreamError, verifiedSafePiJsonlLine, type NativeRecordByteBinding,
+  NativeRecordStreamError, verifiedPiJsonlLine, type NativeRecordByteBinding,
   type NativeRecordInspection,
 } from "./native-record-stream.js";
 import { createResourceSpool } from "./resource-spool.js";
@@ -338,7 +339,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
   const operationPath = (kind: "submissions" | "resources", handle: AgentHandle, key: string): string =>
     `${handlePath(handle)}/${kind}/by-key/${encodeURIComponent(key)}`;
 
-  function assertNativeChat(entry: NativeTrajectoryEntry, chatId: string): void {
+  function assertNativeChat(entry: { readonly record: PiTrajectoryRecordView }, chatId: string): void {
     if (entry.record.resource.sessionId !== chatId
       || (entry.record.parent !== undefined
         && (entry.record.parent.resource as { readonly sessionId: string }).sessionId !== chatId)) {
@@ -357,7 +358,7 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     }
   }
 
-  /** Complete SAFE Pi Chat pages, including Context and earlier Submissions. An empty
+  /** Complete raw Pi Chat pages, including Context and earlier Submissions. An empty
    * terminal page still freezes its watermark; only the selected Submission authorizes
    * the read. Validate the whole page before allowing a byte transfer or yield. */
   async function* trajectoryPages(
@@ -374,8 +375,9 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
     let pages = 0;
     let records = 0;
     while (afterSeq !== null) {
+      const requestedAfterSeq = afterSeq;
       const query = new URLSearchParams({
-        afterSeq: String(afterSeq), limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX), submissionId,
+        afterSeq: String(requestedAfterSeq), limit: String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX), submissionId,
         ...(throughSeq === undefined ? {} : { throughSeq: String(throughSeq) }),
       });
       const fields = { ...handleContext(handle), afterSeq, submissionId };
@@ -388,27 +390,24 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         log({ name: "evidence_trajectory_page", ...fields, ...failureFields(error) });
         throw error;
       }
-      if (page.records.length > EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX || page.cursor.throughSeq < afterSeq
+      if (page.cursor.throughSeq < requestedAfterSeq
         || (throughSeq !== undefined && page.cursor.throughSeq !== throughSeq)) {
-        throw new SpHarnessError("Eval SP changed the trajectory watermark or exceeded the page limit", false);
+        throw new SpHarnessError("Eval SP changed the trajectory watermark", false);
+      }
+      // Page shape/order belongs to the public parser. This range belongs to the request.
+      if (page.records.some((row) => row.ingestSeq <= requestedAfterSeq)
+        || page.nextAfterSeq !== null && page.nextAfterSeq <= requestedAfterSeq) {
+        throw new SpHarnessError("Eval SP trajectory cursor did not advance beyond the request", false);
       }
       throughSeq = page.cursor.throughSeq;
       pages += 1;
       records += page.records.length;
-      let last: number = afterSeq;
       for (const row of page.records) {
-        if (row.ingestSeq <= last || row.ingestSeq > throughSeq) {
-          throw new SpHarnessError("Eval SP trajectory records are out of order or beyond the watermark", false);
-        }
-        // The public evidence page carries the full Chat keyset. Validate each safe native
+        // The public evidence page carries the full Chat keyset. Validate each raw native
         // inline record's Chat or reference identity before yielding any part of this page.
         // Evidence is not filtered to the selected Submission.
         if (isSpPiTrajectoryReference(row)) assertRecordReference(row, handle.chatId);
         else assertNativeChat(row, handle.chatId);
-        last = row.ingestSeq;
-      }
-      if (page.nextAfterSeq !== null && (page.records.length === 0 || page.nextAfterSeq !== last || last >= throughSeq)) {
-        throw new SpHarnessError("Eval SP returned an invalid trajectory cursor", false);
       }
       yield page;
       if (page.nextAfterSeq === null) log({ name: "evidence_trajectory_page", ...fields, status: 200, from, pages, records });
@@ -446,10 +445,9 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
         await response.body?.cancel();
         throw mismatch();
       }
-      const verified = verifiedSafePiJsonlLine(response.body, {
-        identity: reference.identity, sha256: reference.sha256, byteLength: reference.byteLength,
+      const verified = verifiedPiJsonlLine(response.body, row, {
         maxBytes: EVAL_EVIDENCE_FILE_MAX_BYTES, maxFileBytes: EVAL_EVIDENCE_FILE_MAX_BYTES,
-        ingestSeq: row.ingestSeq, scope: options.scope,
+        scope: options.scope,
         ...(options.interpret === undefined ? {} : { interpret: options.interpret }),
         ...(options.onVerified === undefined ? {} : { onVerified: options.onVerified }),
       });
@@ -650,7 +648,8 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
       const scope = { chatId: handle.chatId, submissionId };
       for await (const page of trajectoryPages(handle, submissionId)) {
         for (const row of page.records) {
-          let entry: NativeTrajectoryEntry;
+          let record: PiTrajectoryRecordView;
+          let omittedPaths: readonly string[] = [];
           if (isSpPiTrajectoryReference(row)) {
             let checked: NativeRecordInspection | undefined;
             const stream = await nativeJsonl(handle, submissionId, row, {
@@ -660,14 +659,15 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
             // Drain, but never retain the native body. A later assistant with no usable
             // reply suppresses an earlier one, exactly as it does for inline records.
             for await (const _ of stream) { /* verify the complete immutable record */ }
-            if (!checked?.record) throw new SpHarnessError("Eval SP returned no verified native reply record", false);
-            entry = { ingestSeq: row.ingestSeq, record: checked.record };
-          } else entry = row;
+            if (!checked?.interpretation) throw new SpHarnessError("Eval SP returned no verified native reply interpretation", false);
+            record = checked.interpretation.record;
+            omittedPaths = checked.interpretation.omittedPaths;
+          } else record = row.record;
           // The Chat page includes Context and other Submissions. Only this Submission's
           // own assistant entries can supply a final reply; child entries are also
           // excluded by finalReplyText's exact Submission check.
-          if (!nativeRecordMayBelongToScope(entry.record, scope)) continue;
-          const candidate = finalReplyText(entry.record, submissionId);
+          if (!nativeRecordMayBelongToScope(record, scope)) continue;
+          const candidate = finalReplyText(record, submissionId, omittedPaths);
           if (candidate !== undefined) reply = candidate ?? undefined;
         }
       }
@@ -702,7 +702,8 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           || header.readiness.pendingTelemetryEvents !== 0 || header.readiness.pendingRuntimeEvents !== 0
           || !header.readiness.actionCharges.complete || header.readiness.actionCharges.unsettledExecutions !== 0
           || header.readiness.actionCharges.missingExecutionIds !== 0
-          || header.coverage.usageEvents !== "complete" || header.coverage.nativeRecords !== "complete")) {
+          || header.coverage.usageEvents !== "complete" || header.coverage.nativeRecords !== "complete"
+          || header.coverage.billingSettlements !== "complete")) {
           throw new SpHarnessError("Eval SP returned a finalized resource header with unsettled facts", false);
         }
         if (!header.finalized) {
@@ -738,11 +739,11 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
           if (page.cursor.throughSeq !== header.cursor.throughSeq || page.cursor.throughSeq < afterSeq) {
             throw new SpHarnessError("Eval SP changed the resource native cutoff", false);
           }
-          let last: number = afterSeq;
+          if (page.records.some((row) => row.ingestSeq <= cursor)
+            || page.nextAfterSeq !== null && page.nextAfterSeq <= cursor) {
+            throw new SpHarnessError("Eval SP resource native cursor did not advance beyond the request", false);
+          }
           for (const row of page.records) {
-            if (row.ingestSeq <= last || row.ingestSeq > header.cursor.throughSeq) {
-              throw new SpHarnessError("Eval SP returned an invalid resource native cursor", false);
-            }
             // Reject a foreign Chat/parent in the page before starting its byte transfer.
             if (isSpPiTrajectoryReference(row)) assertRecordReference(row, input.handle.chatId);
             else {
@@ -751,8 +752,8 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
                 throw new SpHarnessError("Eval SP returned a resource record outside the requested operation", false);
               }
             }
-            last = row.ingestSeq;
-            let entry: NativeTrajectoryEntry;
+            let entry: NativeTrajectoryEntry | NativeTrajectoryInterpretationEntry;
+            let record: PiTrajectoryRecordView;
             let sourceSha256: string | undefined;
             if (isSpPiTrajectoryReference(row)) {
               let inspected: NativeRecordInspection | undefined;
@@ -763,22 +764,22 @@ export function createSpHarness(options: SpHarnessOptions): Harness {
                 ...(signal === undefined ? {} : { signal }),
               });
               for await (const _ of stream) { /* verify every byte without retaining the Pi body */ }
-              if (!inspected?.record) throw new SpHarnessError("Eval SP returned no verified native resource record", false);
-              entry = { ingestSeq: row.ingestSeq, record: inspected.record };
+              if (!inspected?.interpretation) throw new SpHarnessError("Eval SP returned no verified native resource interpretation", false);
+              entry = { ingestSeq: row.ingestSeq, interpretation: inspected.interpretation };
+              record = inspected.interpretation.record;
               sourceSha256 = inspected.sha256;
-            } else entry = row;
-            assertNativeChat(entry, input.handle.chatId);
-            if (!nativeRecordMayBelongToScope(entry.record, header.scope, verifiedSubmissions)) {
+            } else {
+              entry = row;
+              record = row.record;
+            }
+            assertNativeChat({ record }, input.handle.chatId);
+            if (!nativeRecordMayBelongToScope(record, header.scope, verifiedSubmissions)) {
               throw new SpHarnessError("Eval SP returned a resource record outside the requested operation", false);
             }
             await spool.write({ stream: "nativeRecords",
               records: [await compactNativeTrajectoryRecord(entry, header.scope, sourceSha256, verifiedSubmissions)] });
-            if (entry.record.submissionId !== null) verifiedSubmissions.add(entry.record.submissionId);
+            if (record.submissionId !== null) verifiedSubmissions.add(record.submissionId);
             add("nativeRecords", 1);
-          }
-          if (page.nextAfterSeq !== null && (page.records.length === 0
-            || page.nextAfterSeq !== last || last >= header.cursor.throughSeq)) {
-            throw new SpHarnessError("Eval SP returned an invalid resource native cursor", false);
           }
           afterSeq = page.nextAfterSeq;
         }

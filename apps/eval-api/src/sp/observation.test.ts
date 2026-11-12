@@ -49,6 +49,38 @@ describe("Eval SP observation client", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("rejects a source-projected SAFE page rather than relaying it as original raw Pi", async () => {
+    const legacy = { ...source, record: { ...source.record,
+      projection: { kind: "safe", policyId: "legacy", policyVersion: 1 },
+    } };
+    const fetch = vi.fn(async () => Response.json({ success: true, msg: {
+      format: "sp-pi-trajectory/v1", cursor: { throughSeq: 5 }, records: [legacy], nextAfterSeq: null,
+    } }));
+    await expect(client(fetch).trajectory(chat, {})).rejects.toMatchObject({ code: "RESPONSE_INVALID" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("relays every original raw Pi value after the real public page parser accepts the HTTP response", async () => {
+    const page = { format: "sp-pi-trajectory/v1", cursor: { throughSeq: 5 }, records: [source], nextAfterSeq: null };
+    const fetch = vi.fn(async () => Response.json({ success: true, msg: page }));
+    expect(await client(fetch).trajectory(chat, { afterSeq: 0, throughSeq: 5 })).toEqual(page);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { name: "obsolete event-only response", page: {
+      events: [{ ingestSeq: 1, event: { type: "turn.started" } }], beforeSeq: null, hasOlder: false,
+    } },
+    { name: "nonascending native page", page: {
+      format: "sp-pi-trajectory/v1", cursor: { throughSeq: 5 },
+      records: [reference, { ...reference, ingestSeq: 4 }], nextAfterSeq: null,
+    } },
+  ])("rejects an $name at the real HTTP parser before Web can receive it", async ({ page }) => {
+    const fetch = vi.fn(async () => Response.json({ success: true, msg: page }));
+    await expect(client(fetch).trajectory(chat, {})).rejects.toMatchObject({ code: "RESPONSE_INVALID" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   const safePage = { format: "sp-pi-trajectory/v1", cursor: { throughSeq: 7 }, records: [], nextAfterSeq: null };
   const safeBody = JSON.stringify({ success: true, msg: safePage });
   it.each([

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { summarizeResourceSnapshot, type AgentResourceSnapshot, type AgentResourceSnapshotDownload, type AgentResourceState,
+import { compactNativeTrajectoryEntrySchema, NATIVE_CHARGE_LINK_VERSION, NATIVE_PROJECTION_VERSION, PI_METRIC_RECORD_FORMAT,
+  summarizeResourceSnapshot, type AgentResourceSnapshot, type AgentResourceSnapshotDownload, type AgentResourceState,
   type CollectedResourceSnapshot } from "@eval-platform/eval-contracts";
 import { publicNativeRecords } from "../harness/evidence-test-support.js";
 import type { RetryController } from "./retry.js";
@@ -33,6 +34,31 @@ function snapshot(): AgentResourceSnapshot {
 }
 
 describe("raw resource snapshot validation", () => {
+  it("accepts the separate body-free Metrics carrier without treating it as raw history", () => {
+    const source = publicNativeRecords([1], SCOPE)[0]!;
+    const compact = compactNativeTrajectoryEntrySchema.parse({
+      ingestSeq: source.ingestSeq,
+      record: { ...source.record, format: PI_METRIC_RECORD_FORMAT },
+      metricProjection: {
+        version: NATIVE_PROJECTION_VERSION, chargeLinkVersion: NATIVE_CHARGE_LINK_VERSION,
+        fingerprint: "a".repeat(64), supported: true, complete: true, facts: [],
+      },
+    });
+    const input = { ...snapshot(), nativeRecords: [compact] };
+    expect(validateResourceSnapshot(input, SCOPE)).toBe(input);
+    expect(input.nativeRecords[0]!.record.format).not.toBe("pi-trajectory/v1");
+    expect(input.nativeRecords[0]!.record.record.value).toEqual({ id: 1 });
+  });
+
+  it("rejects legacy SAFE records rather than converting or resuming them", () => {
+    const source = publicNativeRecords([1], SCOPE)[0]!;
+    const legacy = { ...source, record: { ...source.record,
+      projection: { kind: "safe", policyId: "legacy", policyVersion: 1 } } };
+    expect(() => validateResourceSnapshot({ ...snapshot(), nativeRecords: [legacy] }, SCOPE))
+      .toThrow(AgentResourceValidationError);
+    expect(legacy.record.projection.kind).toBe("safe");
+  });
+
   it("accepts a pre-dispatch Chat/key scope while requiring the snapshot's real Submission ID", () => {
     const input = snapshot();
     expect(validateResourceSnapshot(input, {

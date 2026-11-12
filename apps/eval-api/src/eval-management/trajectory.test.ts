@@ -3,10 +3,12 @@ import { MetricsEntityNotFoundError } from "@eval-platform/eval-metrics";
 import { EVAL_EVIDENCE_FILE_MAX_BYTES, EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX } from "@springbrand/eval-harness";
 import { describe, expect, it, vi } from "vitest";
 import { nativeAssistantMessage, nativeTransfer, nativeTransferResponse } from "../sp/native-test-fixture.js";
-import { createSpObservationClient } from "../sp/observation.js";
+import { createSpObservationClient, type SpObservationClient } from "../sp/observation.js";
 import { detail } from "./metrics-fixture.js";
 import { MANAGEMENT_TRAJECTORY_PATH } from "./trajectory.js";
-import { MANAGEMENT_TOKEN, OWNER, RESULT_TOKEN, WEB_TOKEN, project, run, setupManagement } from "./test-fixture.js";
+import {
+  MANAGEMENT_TOKEN, OWNER, RESULT_TOKEN, WEB_TOKEN, project, run, setupManagement as setupManagementFixture,
+} from "./test-fixture.js";
 
 const subject = { projectId: project.projectId, samplingId: "sampling-1", role: "subject" };
 const evaluator = { ...subject, role: "evaluator", evaluationId: "evaluation-1" };
@@ -27,9 +29,30 @@ const page = (chatId: string, ingestSeq: number | readonly number[], throughSeq:
   nextAfterSeq,
 });
 
-/** Real SAFE Pi JSON with a reusable 64 KiB text chunk: compute hashes without materializing a giant record. */
+function setupManagement(configured = true) {
+  const app = setupManagementFixture(configured);
+  // Page fixtures enter as HTTP payloads. Never replace the owned observation/page parser.
+  const pages = vi.fn(async (request: Request): Promise<unknown> => {
+    const chatId = decodeURIComponent(new URL(request.url).pathname.split("/")[3]!);
+    return page(chatId, 4, 4, null);
+  });
+  const observation = createSpObservationClient({
+    agentOrigin: "https://agent.test", apiOrigin: "https://api.test", trustedOrigin: "https://web.test",
+    sessionToken: "fixed-session",
+    fetch: async (source, init) => Response.json({ success: true, msg: await pages(new Request(source, init)) }),
+  });
+  // The private verified-file seam can independently fail or be cancelled after parsing a page.
+  const trajectoryRecord = vi.fn<SpObservationClient["trajectoryRecord"]>(async () => {
+    throw new Error("Unexpected raw Pi record-byte read");
+  });
+  const observed = { ...observation, trajectoryRecord };
+  Object.assign(app.runtime, { observation: observed });
+  return { ...app, observation: observed, pages };
+}
+
+/** Real raw Pi JSON with a reusable 64 KiB text chunk: compute hashes without materializing a giant record. */
 function virtualReference(ingestSeq: number, throughSeq: number, repetitions: number) {
-  const marker = "__SAFE_BODY__";
+  const marker = "__RAW_BODY__";
   const native = nativeAssistantMessage(ingestSeq, "subject-chat", "submission-1", [{ type: "text", text: marker }]);
   const original = JSON.stringify(native.record);
   const at = original.indexOf(marker);
@@ -89,7 +112,7 @@ async function incompleteFile(response: Response): Promise<string> {
   return partial;
 }
 
-describe("read-only trusted complete SAFE Pi trajectory file", () => {
+describe("read-only trusted complete raw Pi trajectory file", () => {
   it("requires the management Bearer before leasing an owner, rejecting unknown/duplicate query fields", async () => {
     const disabled = setupManagement(false);
     expect((await get(disabled, subject)).status).toBe(404);
@@ -113,13 +136,13 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
       const response = await app.request(path, { headers: { Authorization: `Bearer ${MANAGEMENT_TOKEN}` } });
       expect(response.status).not.toBe(200);
     }
-    expect(app.observation.trajectory).not.toHaveBeenCalled();
+    expect(app.pages).not.toHaveBeenCalled();
   });
 
   it("streams multi-record native pages, a last partial page and one verified frozen manifest", async () => {
     const app = setupManagement();
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
-    app.observation.trajectory.mockResolvedValueOnce(page("subject-chat", [1, 4, 5], 9, 5))
+    app.pages.mockResolvedValueOnce(page("subject-chat", [1, 4, 5], 9, 5))
       .mockResolvedValueOnce(page("subject-chat", [6, 9], 9, null));
     const response = await get(app, subject);
     expect(response.status).toBe(200);
@@ -137,13 +160,10 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     });
     expect(records.map(({ ingestSeq }) => ingestSeq)).toEqual([1, 4, 5, 6, 9]);
     expect(JSON.stringify(records)).toContain("private subject-chat entry 4");
-    expect(app.observation.trajectory).toHaveBeenCalledTimes(2);
-    expect(app.observation.trajectory).toHaveBeenNthCalledWith(1,
-      { ownerUserId: OWNER, chatId: "subject-chat" }, { afterSeq: 0, limit: EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX },
-      expect.any(AbortSignal));
-    expect(app.observation.trajectory).toHaveBeenNthCalledWith(2,
-      { ownerUserId: OWNER, chatId: "subject-chat" },
-      { afterSeq: 5, throughSeq: 9, limit: EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX }, expect.any(AbortSignal));
+    expect(app.pages.mock.calls.map(([request]) => request.url)).toEqual([
+      `https://api.test/api/chats/subject-chat/trajectory?afterSeq=0&limit=${EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX}`,
+      `https://api.test/api/chats/subject-chat/trajectory?afterSeq=5&limit=${EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX}&throughSeq=9`,
+    ]);
     expect(app.services.projectRuns.readRun).not.toHaveBeenCalled();
     expect(app.services.metrics.getSamplingDetail).toHaveBeenCalledTimes(2);
     expect(app.observation.trajectoryRecord).not.toHaveBeenCalled();
@@ -212,17 +232,76 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it("accepts a continuation at the frozen cutoff followed by an empty EOF page", async () => {
+    const app = setupManagement();
+    app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
+    const native = nativeAssistantMessage(4, "subject-chat", "submission-1", [{ type: "text", text: "complete raw record" }]);
+    const transfer = nativeTransfer(native, 4);
+    const fetch = vi.fn(async (source: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(new Request(source, init).url);
+      if (url.pathname.endsWith("/records/4")) return nativeTransferResponse(transfer.reference, transfer.bytes);
+      const first = url.searchParams.get("afterSeq") === "0";
+      return Response.json({ success: true, msg: {
+        format: "sp-pi-trajectory/v1", cursor: { throughSeq: 4 },
+        records: first ? [transfer.reference] : [], nextAfterSeq: first ? 4 : null,
+      } });
+    });
+    withPublicSp(app, fetch);
+    const response = await get(app, subject);
+    expect(response.status).toBe(200);
+    const { manifest, records } = completeFile(await response.text());
+    expect(records).toEqual([native]);
+    expect(manifest).toMatchObject({ throughSeq: 4, recordCount: 1, complete: true });
+    expect(fetch.mock.calls.map(([source, init]) => {
+      const url = new URL(new Request(source, init).url);
+      return [url.pathname, url.searchParams.get("afterSeq"), url.searchParams.get("throughSeq")];
+    })).toEqual([
+      ["/api/chats/subject-chat/trajectory", "0", null],
+      ["/api/chats/subject-chat/trajectory/records/4", null, "4"],
+      ["/api/chats/subject-chat/trajectory", "4", "4"],
+    ]);
+  });
+
+  it.each(["empty continuation", "replayed continuation", "changed cutoff"] as const)(
+    "never certifies an %s after a real cutoff-equality page", async (failure) => {
+      const app = setupManagement();
+      app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
+      const native = nativeAssistantMessage(4, "subject-chat", "submission-1", [{ type: "text", text: "verified prefix" }]);
+      const { reference, bytes } = nativeTransfer(native, 4);
+      const requests: URL[] = [];
+      const fetch = vi.fn(async (source: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(new Request(source, init).url);
+        requests.push(url);
+        if (url.pathname.endsWith("/records/4")) return nativeTransferResponse(reference, bytes);
+        const first = url.searchParams.get("afterSeq") === "0";
+        return Response.json({ success: true, msg: {
+          format: "sp-pi-trajectory/v1",
+          cursor: { throughSeq: !first && failure === "changed cutoff" ? 5 : 4 },
+          records: first || failure === "replayed continuation" ? [reference] : [],
+          nextAfterSeq: first || failure !== "changed cutoff" ? 4 : null,
+        } });
+      });
+      withPublicSp(app, fetch);
+      const response = await get(app, subject);
+      expect(response.status).toBe(200);
+      expect(await incompleteFile(response)).toBe(`${JSON.stringify(native)}\n`);
+      expect(requests.filter(({ pathname }) => pathname.endsWith("/trajectory"))
+        .map(({ searchParams }) => [searchParams.get("afterSeq"), searchParams.get("throughSeq")]))
+        .toEqual([["0", null], ["4", "4"]]);
+      expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
   it("handles an empty frozen Chat with a complete zero-record manifest", async () => {
     const app = setupManagement();
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
-    app.observation.trajectory.mockResolvedValueOnce({
+    app.pages.mockResolvedValueOnce({
       format: "sp-pi-trajectory/v1", cursor: { throughSeq: 0 }, records: [], nextAfterSeq: null,
     });
     const { manifest, records } = completeFile(await (await get(app, subject)).text());
     expect(records).toHaveLength(0);
     expect(manifest.throughSeq).toBe(0);
     expect(manifest.recordsSha256).toBe(createHash("sha256").digest("hex"));
-    expect(app.observation.trajectory).toHaveBeenCalledTimes(1);
+    expect(app.pages).toHaveBeenCalledTimes(1);
   });
 
   it("returns an HTTP error, not a 200 record prefix, if the first public SP page fails", async () => {
@@ -280,7 +359,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
   it("scopes Evaluator to the matching current Evaluation and exact Run, never the Subject Chat", async () => {
     const app = setupManagement();
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
-    app.observation.trajectory.mockResolvedValueOnce(page("evaluator-chat", 4, 4, null));
+    app.pages.mockResolvedValueOnce(page("evaluator-chat", 4, 4, null));
     const { manifest, records } = completeFile(await (await get(app, { ...evaluator, runId: run.runId })).text());
     expect(manifest).toMatchObject({ role: "evaluator", evaluationId: "evaluation-1",
       runScope: "exact_run", runId: run.runId, chatId: "evaluator-chat", throughSeq: 4 });
@@ -291,7 +370,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     });
     expect(app.services.observations.evaluator).toHaveBeenCalledWith(project.projectId, "evaluation-1");
     expect(app.services.observations.subject).not.toHaveBeenCalled();
-    expect(app.observation.trajectory).toHaveBeenCalledTimes(1);
+    expect(app.pages).toHaveBeenCalledTimes(1);
   });
 
   it("rejects nonmembers/foreign or replaced current facts, observation mismatches and not-started Chats before SP", async () => {
@@ -324,11 +403,11 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
         record: { ...detail.evaluations[0]!.record, samplingId: "other-sampling" } }],
     });
     expect((await get(app, evaluator)).status).toBe(404);
-    expect(app.observation.trajectory).not.toHaveBeenCalled();
+    expect(app.pages).not.toHaveBeenCalled();
     expect(app.observation.trajectoryRecord).not.toHaveBeenCalled();
   });
 
-  it("streams an original referenced SAFE record exactly once (not repeated per 4-KiB chunk)", async () => {
+  it("streams an original referenced raw record exactly once (not repeated per 4-KiB chunk)", async () => {
     const app = setupManagement();
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
     const native = nativeAssistantMessage(4, "evaluator-chat", "submission-1",
@@ -339,7 +418,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     const reference = { ...transfer.reference, reference: { ...transfer.reference.reference,
       byteLength: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex"),
     } };
-    app.observation.trajectory.mockResolvedValueOnce({
+    app.pages.mockResolvedValueOnce({
       format: "sp-pi-trajectory/v1", cursor: { throughSeq: 4 }, records: [reference], nextAfterSeq: null,
     });
     const dispose = vi.fn(async () => {});
@@ -356,7 +435,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     expect(manifest).toMatchObject({ role: "evaluator", throughSeq: 4, recordCount: 1, complete: true });
     expect(app.observation.trajectoryRecord).toHaveBeenCalledExactlyOnceWith(
       { ownerUserId: OWNER, chatId: "evaluator-chat" }, reference, expect.any(AbortSignal));
-    expect(app.observation.trajectory).toHaveBeenCalledTimes(1);
+    expect(app.pages).toHaveBeenCalledTimes(1);
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 
@@ -365,7 +444,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
     const native = nativeAssistantMessage(4, "subject-chat", "submission-1",
       [{ type: "text", text: "a literal escaped \\n is fine, but JSON formatting is not" }]);
-    const bytes = Buffer.from(JSON.stringify(native.record).replace(',"projection":', ',\n"projection":'));
+    const bytes = Buffer.from(JSON.stringify(native.record).replace(',"record":', ',\n"record":'));
     const { reference: base } = nativeTransfer(native, 4);
     const reference = { ...base, reference: { ...base.reference,
       byteLength: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex"),
@@ -387,7 +466,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  it("streams a SAFE record larger than the public JSON page ceiling through one owner-session reference", async () => {
+  it("streams a raw record larger than the public JSON page ceiling through one owner-session reference", async () => {
     const app = setupManagement();
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
     const native = nativeAssistantMessage(4, "subject-chat", "submission-1",
@@ -421,7 +500,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
       [{ type: "text", text: "do not fetch" }]), 4);
     // No 95 MB buffer is allocated: the published reference schema checks the framed file size.
     const overLimit = { ...base, reference: { ...base.reference, byteLength: EVAL_EVIDENCE_FILE_MAX_BYTES } };
-    app.observation.trajectory.mockResolvedValueOnce({
+    app.pages.mockResolvedValueOnce({
       format: "sp-pi-trajectory/v1", cursor: { throughSeq: 4 }, records: [overLimit], nextAfterSeq: null,
     });
     const response = await get(app, subject);
@@ -456,7 +535,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
   it("rejects invalid public pages before any bytes, and a changed cutoff without a success manifest", async () => {
     const app = setupManagement();
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
-    app.observation.trajectory.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 5 },
+    app.pages.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 5 },
       records: [nativeAssistantMessage(4, "foreign-chat", "submission-1", [{ type: "text", text: "foreign" }])],
       nextAfterSeq: null });
     const foreign = await get(app, subject);
@@ -465,11 +544,11 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     expect(app.observation.trajectoryRecord).not.toHaveBeenCalled();
     const { reference: foreignRef } = nativeTransfer(nativeAssistantMessage(4, "foreign-chat", "submission-1",
       [{ type: "text", text: "foreign body" }]), 4);
-    app.observation.trajectory.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1",
+    app.pages.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1",
       cursor: { throughSeq: 4 }, records: [foreignRef], nextAfterSeq: null });
     expect((await get(app, subject)).status).not.toBe(200);
     expect(app.observation.trajectoryRecord).not.toHaveBeenCalled();
-    app.observation.trajectory.mockResolvedValueOnce(page("subject-chat", 4, 5, 4))
+    app.pages.mockResolvedValueOnce(page("subject-chat", 4, 5, 4))
       .mockResolvedValueOnce(page("subject-chat", 5, 6, null));
     const partial = await incompleteFile(await get(app, subject));
     expect(partial).toContain("private subject-chat entry 4");
@@ -485,10 +564,10 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
       page("subject-chat", [4, 5], 9, 4),
       page("subject-chat", [4, 10], 9, null),
     ]) {
-      app.observation.trajectory.mockResolvedValueOnce(invalid);
+      app.pages.mockResolvedValueOnce(invalid);
       expect((await get(app, subject)).status).not.toBe(200);
     }
-    app.observation.trajectory.mockResolvedValueOnce(page("subject-chat", [4, 6], 9, 6))
+    app.pages.mockResolvedValueOnce(page("subject-chat", [4, 6], 9, 6))
       .mockResolvedValueOnce(page("subject-chat", [6, 9], 9, null));
     const partial = await incompleteFile(await get(app, subject));
     expect(partial).toContain("entry 4");
@@ -499,11 +578,11 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
   it("omits the manifest if the next frozen page is missing after multiple records were sent", async () => {
     const app = setupManagement();
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
-    app.observation.trajectory.mockResolvedValueOnce(page("subject-chat", [1, 3, 5], 9, 5))
+    app.pages.mockResolvedValueOnce(page("subject-chat", [1, 3, 5], 9, 5))
       .mockRejectedValueOnce(new Error("SP page unavailable"));
     const partial = await incompleteFile(await get(app, subject));
     expect(partial).toContain("entry 5");
-    expect(app.observation.trajectory).toHaveBeenCalledTimes(2);
+    expect(app.pages).toHaveBeenCalledTimes(2);
   });
 
   it("aborts the next public SP page when the download request ends, without a terminal manifest", async () => {
@@ -555,7 +634,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
     const { reference } = nativeTransfer(nativeAssistantMessage(4, "subject-chat", "submission-1",
       [{ type: "text", text: "private rejected body" }]), 4);
-    app.observation.trajectory.mockResolvedValueOnce({
+    app.pages.mockResolvedValueOnce({
       format: "sp-pi-trajectory/v1", cursor: { throughSeq: 4 }, records: [reference], nextAfterSeq: null,
     });
     app.observation.trajectoryRecord.mockRejectedValueOnce(new Error("source is corrupt"));
@@ -567,7 +646,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
     const { reference, bytes } = nativeTransfer(nativeAssistantMessage(4, "subject-chat", "submission-1",
       [{ type: "text", text: "broken disk spool" }]), 4);
-    app.observation.trajectory.mockResolvedValueOnce({
+    app.pages.mockResolvedValueOnce({
       format: "sp-pi-trajectory/v1", cursor: { throughSeq: 4 }, records: [reference], nextAfterSeq: null,
     });
     const dispose = vi.fn(async () => {});
@@ -588,7 +667,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     const app = setupManagement();
     app.services.metrics.getSamplingDetail.mockResolvedValueOnce(detail)
       .mockRejectedValueOnce(new MetricsEntityNotFoundError("sampling", "sampling-1"));
-    app.observation.trajectory.mockResolvedValueOnce(page("subject-chat", 4, 4, null));
+    app.pages.mockResolvedValueOnce(page("subject-chat", 4, 4, null));
     const partial = await incompleteFile(await get(app, subject));
     expect(partial).toContain("private subject-chat entry 4");
     expect(partial).not.toContain("\"type\":\"manifest\"");
@@ -600,7 +679,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
     const { reference, bytes } = nativeTransfer(nativeAssistantMessage(4, "subject-chat", "submission-1",
       [{ type: "text", text: "long private response".repeat(350) }]), 5);
-    app.observation.trajectory.mockResolvedValueOnce({
+    app.pages.mockResolvedValueOnce({
       format: "sp-pi-trajectory/v1", cursor: { throughSeq: 5 }, records: [reference], nextAfterSeq: 4,
     });
     const dispose = vi.fn(async () => {});
@@ -613,14 +692,14 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     expect((await reader.read()).value).toEqual(new TextEncoder().encode('{"ingestSeq":4,"record":'));
     await reader.cancel();
     expect(dispose).toHaveBeenCalledTimes(1);
-    expect(app.observation.trajectory).toHaveBeenCalledTimes(1);
+    expect(app.pages).toHaveBeenCalledTimes(1);
     expect(app.services.metrics.getSamplingDetail).toHaveBeenCalledTimes(1);
   });
 
   it("stops sending the current inline record when the original request signal is aborted after its prefix", async () => {
     const app = setupManagement();
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
-    app.observation.trajectory.mockResolvedValueOnce(page("subject-chat", 4, 4, null));
+    app.pages.mockResolvedValueOnce(page("subject-chat", 4, 4, null));
     const abort = new AbortController();
     const response = await app.request(address(subject), {
       headers: { Authorization: `Bearer ${MANAGEMENT_TOKEN}` }, signal: abort.signal,
@@ -638,7 +717,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
     const { reference, bytes } = nativeTransfer(nativeAssistantMessage(4, "subject-chat", "submission-1",
       [{ type: "text", text: "private bytes" }]), 4);
-    app.observation.trajectory.mockResolvedValueOnce({
+    app.pages.mockResolvedValueOnce({
       format: "sp-pi-trajectory/v1", cursor: { throughSeq: 4 }, records: [reference], nextAfterSeq: null,
     });
     const dispose = vi.fn(async () => {});
@@ -665,13 +744,13 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
     const transfers = [virtualReference(1, 2, 1_088), virtualReference(2, 2, 1_088)];
     for (const transfer of transfers) expect(transfer.reference.reference.byteLength).toBeLessThan(EVAL_EVIDENCE_FILE_MAX_BYTES);
-    app.observation.trajectory.mockResolvedValueOnce({
+    app.pages.mockResolvedValueOnce({
       format: "sp-pi-trajectory/v1", cursor: { throughSeq: 2 },
       records: transfers.map((transfer) => transfer.reference), nextAfterSeq: null,
     });
     const dispose = vi.fn(async () => {});
     app.observation.trajectoryRecord.mockImplementation(async (_chat, row) => {
-      const transfer = transfers.find((item) => item.reference.ingestSeq === (row as { ingestSeq: number }).ingestSeq)!;
+      const transfer = transfers.find((item) => item.reference.ingestSeq === row.ingestSeq)!;
       return { byteLength: transfer.reference.reference.byteLength, sha256: transfer.reference.reference.sha256,
         bytes: () => transfer.bytes(), dispose };
     });
@@ -714,12 +793,12 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     const totalRecords = 100_001;
     const base = nativeAssistantMessage(1, "subject-chat", "submission-1", [{ type: "text", text: "a" }]);
     expect(Buffer.byteLength(JSON.stringify(base))).toBeLessThan(1_000);
-    app.observation.trajectory.mockImplementation(async (_chat, rawQuery) => {
-      const query = rawQuery as { afterSeq?: number; throughSeq?: number; limit: number };
-      const start = query.afterSeq ?? 0;
-      expect(query.limit).toBe(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX);
-      expect(query.throughSeq).toBe(start === 0 ? undefined : totalRecords);
-      const end = Math.min(start + query.limit, totalRecords);
+    app.pages.mockImplementation(async (request) => {
+      const query = new URL(request.url).searchParams;
+      const start = Number(query.get("afterSeq"));
+      expect(query.get("limit")).toBe(String(EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX));
+      expect(query.get("throughSeq")).toBe(start === 0 ? null : String(totalRecords));
+      const end = Math.min(start + EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX, totalRecords);
       return {
         format: "sp-pi-trajectory/v1", cursor: { throughSeq: totalRecords },
         records: Array.from({ length: end - start }, (_, index) => ({ ...base, ingestSeq: start + index + 1 })),
@@ -751,7 +830,7 @@ describe("read-only trusted complete SAFE Pi trajectory file", () => {
     expect(downloaded).toBeLessThan(128 * 1024 * 1024);
     expect(manifest).toMatchObject({ recordCount: totalRecords, recordsSha256: sha.digest("hex"), complete: true });
     // The full EP file is still too many records for Moss even though it is under Moss's byte limit.
-    expect(app.observation.trajectory).toHaveBeenCalledTimes(Math.ceil(totalRecords / EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX));
+    expect(app.pages).toHaveBeenCalledTimes(Math.ceil(totalRecords / EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX));
     expect(app.services.metrics.getSamplingDetail).toHaveBeenCalledTimes(2);
   }, 60_000);
 });

@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import {
-  canonicalJsonBytes, nativeTrajectoryEntrySchema, sha256Hex,
-  type AgentResourceSnapshot, type JsonValue, type NativeTrajectoryEntry,
+  canonicalJsonBytes, nativeTrajectoryEntrySchema, compactNativeTrajectoryEntrySchema,
+  isPiTrajectoryRecord, sha256Hex,
+  type AgentResourceSnapshot, type JsonValue, type NativeTrajectoryEntry, type ResourceNativeTrajectoryEntry,
 } from "@eval-platform/eval-contracts";
 import { describe, expect, it } from "vitest";
 import { nativeFixture, nativeResourceInput, resourceInput } from "../test-support.js";
@@ -11,15 +12,15 @@ import {
 import { NATIVE_TOOL_CALL_KEY_PREFIX } from "./native-record-facts.js";
 import { aggregateResources, type ResourceInput } from "./resources.js";
 
-// Generated from UA alpha.15's public canonicalMessageSchema and trajectory export,
-// with the actual Responses ID from its OpenRouter protocols.test.ts:325-375.
+// Generated from Runtime alpha.32's public trajectory create/export helpers,
+// with the Responses composite ID covered by the public native message contract.
 const responsesFixture = JSON.parse(readFileSync(new URL("./ua-responses-tool-id.fixture.json", import.meta.url), "utf8")) as {
   readonly generator: string;
   readonly records: readonly NativeTrajectoryEntry[];
 };
 const responsesCall = () => structuredClone(responsesFixture.records[0]!);
 const responsesResult = () => structuredClone(responsesFixture.records[1]!);
-const toolFact = (entry: NativeTrajectoryEntry) =>
+const toolFact = (entry: ResourceNativeTrajectoryEntry) =>
   ((entry.metricProjection?.facts ?? []) as readonly Record<string, JsonValue>[]).find((fact) => fact.type === "tool");
 const sourceMessage = (entry: NativeTrajectoryEntry) => {
   if (entry.record.record.type !== "entry") throw new Error("Expected Pi entry");
@@ -44,9 +45,92 @@ function assistantWithText(text: string) {
 }
 
 describe("body-free native Pi metric projections", () => {
+  it("separates raw records, bounded interpretations and body-free stored facts without marker collisions", async () => {
+    const raw = responsesCall();
+    const block = (sourceMessage(raw).content as Record<string, JsonValue>[])[0]!;
+    block.id = "[CONTENT OMITTED]";
+    block.arguments = { redacted: true, nested: ["[REDACTED]", "[CONTENT OMITTED]"] };
+    const fingerprint = await sha256Hex(canonicalJsonBytes(raw.record));
+    const exact = await compactNativeTrajectoryRecord(raw, responsesScope);
+    expect(toolFact(exact)).toMatchObject({
+      toolCallKey: expect.stringMatching(/^tck2_[0-9a-f]{64}$/u),
+      inputLength: canonicalJsonBytes(block.arguments).byteLength,
+    });
+    expect(exact.record.format).toBe("eval-pi-metric-record/v1");
+    expect(exact.metricProjection).toMatchObject({ version: NATIVE_PROJECTION_VERSION, complete: true, fingerprint });
+    expect(isPiTrajectoryRecord(exact.record)).toBe(false);
+    expect(nativeTrajectoryEntrySchema.safeParse(exact).success).toBe(false);
+    expect(compactNativeTrajectoryEntrySchema.safeParse(exact).success).toBe(true);
+    expect(JSON.stringify(exact)).not.toMatch(/nested|REDACTED|CONTENT OMITTED|redacted/u);
+
+    const { format: _format, ...view } = raw.record;
+    const interpreted = { ingestSeq: raw.ingestSeq, interpretation: {
+      record: view, omittedPaths: ["/record/value/model/0/content/0/arguments"],
+    } };
+    await expect(compactNativeTrajectoryRecord(interpreted, responsesScope)).rejects.toThrow(/invalid native/u);
+    const bounded = await compactNativeTrajectoryRecord(interpreted, responsesScope, fingerprint);
+    expect(bounded.metricProjection).toMatchObject({ supported: true, complete: false, fingerprint });
+    expect(toolFact(bounded)).toMatchObject({
+      inputLength: null, toolCallKey: toolFact(exact)?.toolCallKey,
+    });
+    const omittedId = await compactNativeTrajectoryRecord({
+      ...interpreted, interpretation: { record: view, omittedPaths: ["/record/value/model/0/content/0/id"] },
+    }, responsesScope, fingerprint);
+    expect(toolFact(omittedId)).toMatchObject({ id: null });
+    expect(toolFact(omittedId)).not.toHaveProperty("toolCallKey");
+    await expect(compactNativeTrajectoryRecord({
+      ...interpreted, interpretation: { record: view, omittedPaths: ["/resource/agentId"] },
+    }, responsesScope, fingerprint)).rejects.toThrow(/invalid native/u);
+    expect(compactNativeTrajectoryEntrySchema.safeParse({
+      ...bounded, record: { ...bounded.record, record: raw.record.record },
+    }).success).toBe(false);
+    expect(compactNativeTrajectoryEntrySchema.safeParse({
+      ...bounded, metricProjection: { ...bounded.metricProjection,
+        facts: [{ type: "tool", arguments: { privateBody: "must-not-be-stored" } }] },
+    }).success).toBe(false);
+    expect(compactNativeTrajectoryEntrySchema.safeParse({
+      ...bounded, metricProjection: { ...bounded.metricProjection,
+        facts: [{ ...toolFact(bounded), fromPiCall: "true" }] },
+    }).success).toBe(false);
+    expect(compactNativeTrajectoryEntrySchema.safeParse({
+      ...bounded, metricProjection: { ...bounded.metricProjection,
+        facts: [{ ...toolFact(bounded), id: "raw-private-call-id" }] },
+    }).success).toBe(false);
+  });
+
+  it("withholds only explicitly omitted Result fields, retaining real duration zero and verified source fingerprints", async () => {
+    const raw = responsesResult();
+    sourceMessage(raw).durationMs = 0;
+    sourceMessage(raw).content = [{ type: "text", text: "[CONTENT OMITTED]" }];
+    const fingerprint = await sha256Hex(canonicalJsonBytes(raw.record));
+    const { format: _format, ...view } = raw.record;
+    const compact = await compactNativeTrajectoryRecord({ ingestSeq: raw.ingestSeq, interpretation: {
+      record: view, omittedPaths: ["/record/value/model/0/content"],
+    } }, responsesScope, fingerprint);
+    expect(toolFact(compact)).toMatchObject({ durationMs: 0, outputLength: null, status: "completed" });
+    const hiddenDuration = await compactNativeTrajectoryRecord({ ingestSeq: raw.ingestSeq, interpretation: {
+      record: view, omittedPaths: ["/record/value/model/0/durationMs"],
+    } }, responsesScope, fingerprint);
+    expect(toolFact(hiddenDuration)).toMatchObject({ durationMs: null,
+      outputLength: canonicalJsonBytes([{ type: "text", text: "[CONTENT OMITTED]" }]).byteLength });
+    await expect(compactNativeTrajectoryRecord(compact, responsesScope, "f".repeat(64)))
+      .rejects.toThrow(/fingerprint/u);
+  });
+
+  it.each(["https://private.example/credential", "Bearer source-key", "api_key=source-key", "ghp_source-key"])(
+    "does not retain credential-like raw Tool labels in compact facts: %s", async (name) => {
+      const raw = responsesResult();
+      sourceMessage(raw).toolName = name;
+      const compact = await compactNativeTrajectoryRecord(raw, responsesScope);
+      expect(toolFact(compact)?.toolName).toBeNull();
+      expect(toolFact(compact)).not.toHaveProperty("executionId");
+      expect(JSON.stringify(compact)).not.toContain(name);
+    },
+  );
+
   it("correlates the public UA Responses composite Call/Result ID as one opaque, non-reversible key", async () => {
     expect(NATIVE_TOOL_CALL_KEY_PREFIX).toBe(`tck${NATIVE_CHARGE_LINK_VERSION}_`);
-    expect(responsesFixture.generator).toContain("@springbrand/agent-runtime@0.3.1-alpha.15");
+    expect(responsesFixture.generator).toContain("@springbrand/agent-runtime@0.3.1-alpha.32");
     expect(responsesFixture.records).toHaveLength(2);
     for (const entry of responsesFixture.records) expect(nativeTrajectoryEntrySchema.safeParse(entry).success).toBe(true);
     expect((sourceMessage(responsesCall()).content as Record<string, JsonValue>[])[0]!.id).toBe("call_1|fc_1");
@@ -85,7 +169,7 @@ describe("body-free native Pi metric projections", () => {
     if (!input || input.status !== "collected") throw new Error("Expected native snapshot");
     const compacted = await compactResourceSnapshot(input.snapshot);
     expect(compacted.nativeRecords[2]?.metricProjection)
-      .toMatchObject({ version: 1, chargeLinkVersion: 2, supported: true, facts: [] });
+      .toMatchObject({ version: NATIVE_PROJECTION_VERSION, chargeLinkVersion: 2, supported: true, complete: true, facts: [] });
     expect(toolFact(compacted.nativeRecords[0]!)).toMatchObject({ fromPiCall: true });
     expect(toolFact(compacted.nativeRecords[1]!)).toMatchObject({ fromPiResult: true });
   });
@@ -108,7 +192,7 @@ describe("body-free native Pi metric projections", () => {
     }
   });
 
-  it("retains two distinct SAFE Pi Tool Call facts from one assistant message, in content order", async () => {
+  it("retains two distinct raw Pi Tool Call facts from one assistant message, in content order", async () => {
     const assistant = responsesCall();
     const content = sourceMessage(assistant).content as Record<string, JsonValue>[];
     content.push({ type: "toolCall", id: "call_2|fc_2", name: "read_only",
@@ -198,10 +282,10 @@ describe("body-free native Pi metric projections", () => {
     expect(JSON.stringify(compacted)).not.toContain("call_1|fc_1");
   });
 
-  it("never copies malformed, withheld or credential-like Call/Result IDs into compact facts", async () => {
+  it("hashes all nonempty raw Call/Result IDs without marker or credential-string exceptions", async () => {
     for (const [id, linkable] of [
-      ["", false], [null, false], [17, false], ["[REDACTED]", false],
-      ["[CONTENT OMITTED]", false], ["[Action business data withheld from telemetry]", false],
+      ["", false], [null, false], [17, false], ["[REDACTED]", true],
+      ["[CONTENT OMITTED]", true], ["[Action business data withheld from telemetry]", true],
       [" ", true], ["\u0000", true], ["x".repeat(200), true],
       ["Bearer private-call-credential/from-safe-source", true],
     ] as const) {
@@ -304,7 +388,7 @@ describe("body-free native Pi metric projections", () => {
   });
 
   it.each(["\ud83e", "\udd16", "\u0000", "\u4e2d\u6587 \u00e9 \ud83e\udd16"])(
-    "keeps a SAFE Tool name %j in Metrics without using it as a charge-link identity", async (name) => {
+    "keeps a raw Tool name %j in Metrics without using it as a charge-link identity", async (name) => {
       const call = nativeFixture(6)[0]!;
       const event = nativeFixture(8)[0]!;
       const result = nativeFixture(10)[0]!;
@@ -360,7 +444,7 @@ describe("body-free native Pi metric projections", () => {
     ["[REDACTED]", "[CONTENT OMITTED]"],
     [{ query: "é" }, "safe result"],
   ] as readonly (readonly [JsonValue, string | null])[])(
-    "keeps absent, redacted and present native Tool bodies distinct: %j", async (argumentsValue, output) => {
+    "measures genuine raw values without treating literal markers as omissions: %j", async (argumentsValue, output) => {
       const call = nativeFixture(6)[0]!;
       const result = nativeFixture(10)[0]!;
       if (call.record.record.type !== "entry" || result.record.record.type !== "entry") throw new Error("Expected Pi messages");
@@ -374,14 +458,13 @@ describe("body-free native Pi metric projections", () => {
       ] });
       expect(aggregateResources(await compact([input]))).toEqual(aggregateResources([input]));
       const length = aggregateResources([input]).trajectory.byTool[0]!;
-      expect(length.inputLength.total).toBe(argumentsValue === null || argumentsValue === "[REDACTED]"
-        ? null : canonicalJsonBytes(argumentsValue).byteLength);
-      expect(length.outputLength.total).toBe(output === null || output === "[CONTENT OMITTED]"
+      expect(length.inputLength.total).toBe(canonicalJsonBytes(argumentsValue).byteLength);
+      expect(length.outputLength.total).toBe(output === null
         ? null : canonicalJsonBytes([{ type: "text", text: output }]).byteLength);
     },
   );
 
-  it("keeps an excessively wide safe Pi Tool body unknown instead of treating it as zero bytes", async () => {
+  it("keeps an excessively wide raw Pi Tool body unknown instead of treating it as zero bytes", async () => {
     const call = nativeFixture(6)[0]!;
     if (call.record.record.type !== "entry") throw new Error("Expected Pi assistant");
     const message = (call.record.record.value.model as { content: { type: string; arguments?: JsonValue }[] }[])[0]!;
@@ -414,7 +497,8 @@ describe("body-free native Pi metric projections", () => {
     expect(item.metricProjection).toMatchObject({ version: NATIVE_PROJECTION_VERSION, supported: false, facts: [] });
     expect(JSON.stringify(collection.snapshot)).not.toContain("private body");
     expect(aggregateResources([projected!]).trajectory.tools.count).toEqual({ value: null, coverage: "unavailable" });
-    const oldVersion = { ...item, metricProjection: { ...item.metricProjection, version: -1 } };
+    const oldVersion = JSON.parse(JSON.stringify(item));
+    oldVersion.metricProjection.version = -1;
     const invalid = { ...projected!, collection: { ...collection, snapshot: {
       ...collection.snapshot, nativeRecords: [oldVersion],
     } } };

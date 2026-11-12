@@ -483,7 +483,8 @@ describe("trusted approval selections through the existing list_options tool", (
     const config = { id: AGENT, user_id: OWNER, name: "Agent",
       setting: { presetId: null, model: "provider/model", systemPrompt: "PRIVATE_PROMPT",
         authoring: { goal: "PRIVATE_GOAL", inputs: "", exampleInput: "", instructionsMode: "manual" },
-        referenceNotes: "PRIVATE_NOTES", preferredSupplierIds: ["supplier/team"], skillIds: ["sp/skill"],
+        referenceNotes: "PRIVATE_NOTES", preferredSupplierIds: ["supplier/team", "exa"], skillIds: ["sp/skill"],
+        actionIds: ["action.local.exa.search"],
         mcpServers: [{ serverId: "private-mcp" }], sandbox: { url: "https://private.example", token: "PRIVATE_TOKEN" } } };
     Object.assign(app.services.agentConfigs, { get: vi.fn(async () => config) });
     const input = { category: "approval_agent", userAgentId: AGENT };
@@ -493,8 +494,8 @@ describe("trusted approval selections through the existing list_options tool", (
       configDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
       resources: {
         modelId: null, model: "provider/model",
-        preferredSupplierIds: ["supplier/team"], referenceNotesChars: "PRIVATE_NOTES".length, authoringPresent: true,
-        skillIds: ["sp/skill"], referenceFileIds: [], actionIds: [],
+        preferredSupplierIds: ["supplier/team", "exa"], referenceNotesChars: "PRIVATE_NOTES".length, authoringPresent: true,
+        skillIds: ["sp/skill"], referenceFileIds: [], actionIds: ["action.local.exa.search"],
         connectorIds: [], extensionIds: [], subagentNames: [],
         mcpServers: [{ kind: "managed", serverId: "private-mcp" }],
         toolPolicy: { allow: [], deny: [] },

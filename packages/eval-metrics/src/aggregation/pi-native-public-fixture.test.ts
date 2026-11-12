@@ -19,9 +19,9 @@ const snapshot = () => resourceInput({
   billingSettlements: [settlement("billed-1")],
 });
 
-describe("published UA safe Pi trajectory fixture", () => {
+describe("published UA raw Pi trajectory fixture", () => {
   it("rejects invented top-level record shapes and keeps source Pi history intact", () => {
-    expect(fixture.generator).toBe("@springbrand/agent-runtime/trajectory@0.3.1-alpha.9");
+    expect(fixture.generator).toBe("@springbrand/agent-runtime/trajectory@0.3.1-alpha.32");
     expect(fixture.records).toHaveLength(16);
     for (const item of fixture.records) {
       expect(nativeTrajectoryEntrySchema.safeParse(item).success).toBe(true);
@@ -29,8 +29,8 @@ describe("published UA safe Pi trajectory fixture", () => {
       expect(item.record).toMatchObject({
         format: "pi-trajectory/v1",
         resource: { agentId: "agent-1", sessionId: "chat-1" },
-        projection: { kind: "safe", policyId: "eval-native-fixture", policyVersion: 1 },
       });
+      expect(item.record).not.toHaveProperty("projection");
     }
     const history = fixture.records[6]!.record.record;
     expect(history).toMatchObject({ type: "entry", value: { kind: "springbrand.trajectory",

@@ -211,7 +211,7 @@ describe("bounded read-only case usage projection", () => {
     expect(statements[3]?.sql).not.toMatch(/SELECT \*|toolArguments|metric_snapshot/su);
   });
 
-  it("joins Action charges only to unique scoped v2 SAFE Tool Results/Calls in SQL", async () => {
+  it("joins Action charges only to unique scoped current compact Tool Results/Calls in SQL", async () => {
     const { db, statements, transaction } = caseDb([[{ total: 1 }], [attempt], [{ total: 1 }], [{
       index: 1, executionId: "execution-1", executionMatches: 1, linkMatches: 1,
       toolCallMatches: 1, namedToolCallMatches: 1, resultCallMatches: 1,
@@ -224,6 +224,9 @@ describe("bounded read-only case usage projection", () => {
     const page = statements[3]!;
     expect(page.sql).toMatch(/json_array_elements\(CASE WHEN json_typeof\(body.snapshot->'nativeRecords'\)/su);
     expect(page.sql).toMatch(/metricProjection.*chargeLinkVersion/su);
+    expect(page.params).toContain("eval-pi-metric-record/v1");
+    expect(page.sql).not.toMatch(/projection'|policyId|policyVersion/u);
+    expect(page.sql).toContain("metricProjection'->>'complete' = 'true'");
     expect(page.sql).toContain("f.fact->>'executionId'");
     expect(page.sql).toContain('AS "billingSource"');
     expect(page.sql).toMatch(/r\.pi_kind IN \('pi\.tool-result', 'pi\.toolResult'\)/u);
@@ -238,7 +241,7 @@ describe("bounded read-only case usage projection", () => {
     expect(page.params).toContain(1);
   });
 
-  it("pages only the selected Action or Super Link source and projects Action IDs from ledger facts, never SAFE details", async () => {
+  it("pages only the selected Action or Super Link source and projects Action IDs from ledger facts, never native details", async () => {
     for (const section of ["actions", "tools"] as const) {
       const { db, statements } = caseDb([[{ total: 1 }], [attempt], [{ total: 1 }], [{
         index: 2, billingSource: section === "actions" ? "action" : "tool",
@@ -299,7 +302,7 @@ describe("bounded read-only case usage projection", () => {
 
   it("reads the Pi Call page under the same owned snapshot using only v2 Result duration scalars", async () => {
     const { db, statements, transaction } = caseDb([
-      [{ total: 1 }], [{ ...attempt, nativeCoverage: "complete" }],
+      [{ total: 1 }], [{ ...attempt, finalized: "true", nativeCoverage: "complete" }],
       [{ observed: 2, trusted: true }],
       [{ index: 2, toolName: "free_read", toolCallMatches: 1, resultCallMatches: 1,
         namedResultMatches: 1, resultStatus: "completed", toolDurationMs: "0" }],
@@ -344,6 +347,16 @@ describe("bounded read-only case usage projection", () => {
       ...selection, section: "tool_calls", page: 1, pageSize: 1,
     })).toMatchObject({ snapshotPresent: false, total: null, rows: [] });
     expect(absent.statements).toHaveLength(3);
+  });
+
+  it("does not turn an unfinalized complete-looking native stream into a proven empty inventory", async () => {
+    const { db } = caseDb([
+      [{ total: 1 }], [{ ...attempt, finalized: "false", nativeCoverage: "complete" }],
+      [{ observed: 0, trusted: true }],
+    ]);
+    expect(await createPostgresResourceSnapshotReader(db, "owner-1").readCaseUsage({
+      ...selection, section: "tool_calls", page: 1, pageSize: 1,
+    })).toMatchObject({ snapshotPresent: true, total: null, rows: [] });
   });
 
   it("never asks PostgreSQL for a snapshot when the selected Attempt's resources were not collected", async () => {

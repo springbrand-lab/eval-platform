@@ -13,7 +13,7 @@ import {
   SAMPLING_STATUSES,
   TERMINAL_AGENT_STATUSES,
   isIdentifier,
-  isSafePiTrajectoryRecord,
+  isPiTrajectoryRecord,
   isPendingSamplingStatus,
   isStageRecoveryPending,
   isTerminalAgentStatus,
@@ -21,7 +21,6 @@ import {
   nativeTrajectoryEntrySchema,
   spPiTrajectoryReferenceSchema,
   isSpPiTrajectoryReference,
-  spPiTrajectoryPageSchema,
   jsonObjectArrayInPlaceSchema,
   jsonObjectInPlaceSchema,
   jsonObjectSchema,
@@ -150,7 +149,7 @@ describe("@eval-platform/eval-contracts", () => {
       usageEvents: [{ eventId: "u" }],
       nativeRecords: [1, 2].map((ingestSeq) => ({ ingestSeq,
         record: { format: "pi-trajectory/v1", resource: { agentId: "agent", sessionId: "chat" },
-          submissionId: "submission", projection: { kind: "safe", policyId: "test", policyVersion: 1 },
+          submissionId: "submission",
           record: { type: "conversation", value: { id: ingestSeq } } } })),
       billingSettlements: [],
     };
@@ -160,24 +159,31 @@ describe("@eval-platform/eval-contracts", () => {
     });
   });
 
-  it("requires a real safe UA envelope and binds stored cursors to the requested Submission", () => {
+  it("checks a raw UA envelope and binds stored cursors to the requested Submission", () => {
     const native = {
       format: "pi-trajectory/v1", resource: { agentId: "agent", sessionId: "chat" },
-      submissionId: "submission", projection: { kind: "safe", policyId: "test", policyVersion: 1 },
+      submissionId: "submission",
       record: { type: "entry", value: { id: 2, conversationId: 1, kind: "pi.user",
         model: [{ role: "user", content: "example", timestamp: 1 }] } },
     } as const;
     const entry = { ingestSeq: 5, record: native };
     expect(nativeTrajectoryEntrySchema.safeParse(entry).success).toBe(true);
-    expect(spPiTrajectoryPageSchema.safeParse({
-      format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: 6 }, records: [entry], nextAfterSeq: null,
-    }).success).toBe(true); // The global watermark may follow the last scoped record.
-    if (!isSafePiTrajectoryRecord(native)) throw new Error("Expected safe fixture");
+    if (!isPiTrajectoryRecord(native)) throw new Error("Expected raw envelope");
     const scope = { chatId: "chat", submissionId: "submission" };
     expect(nativeRecordMayBelongToScope(native, scope)).toBe(true);
     expect(nativeTrajectoryEntrySchema.safeParse({ ...entry, record: { ...native, kind: "message" } }).success).toBe(false);
     expect(nativeTrajectoryEntrySchema.safeParse({ ...entry, record: { ...native, ingestSeq: 5 } }).success).toBe(false);
+    expect(isPiTrajectoryRecord({ ...native, ingestSeq: 5 })).toBe(true);
+    expect(isPiTrajectoryRecord({ ...native, ingestSeq: 0 })).toBe(false);
     expect(nativeTrajectoryEntrySchema.safeParse({ ...entry, record: { ...native, projection: { kind: "safe" } } }).success).toBe(false);
+    for (const invalid of [
+      { ...native, submissionId: null }, { ...native, submissionId: null, origin: "execution" },
+      { ...native, origin: "context" }, { ...native, submissionId: "" },
+      { ...native, parent: { resource: native.resource, submissionId: "parent", taskId: 0 } },
+    ]) expect(isPiTrajectoryRecord(invalid)).toBe(false);
+    expect(isPiTrajectoryRecord({ ...native, submissionId: null, origin: "context" })).toBe(true);
+    expect(isPiTrajectoryRecord({ ...native, origin: "execution" })).toBe(true);
+    expect(nativeTrajectoryEntrySchema.safeParse({ ...entry, metricProjection: { facts: [] } }).success).toBe(false);
     expect(nativeRecordMayBelongToScope({ ...native, submissionId: null, origin: "context" }, scope)).toBe(false);
     expect(nativeRecordMayBelongToScope({ ...native, submissionId: null, origin: "context",
       parent: { resource: native.resource, submissionId: "submission" } }, scope)).toBe(true);
@@ -201,13 +207,10 @@ describe("@eval-platform/eval-contracts", () => {
     expect(isSpPiTrajectoryReference(reference)).toBe(true);
     const inline = { ingestSeq: 6, record: {
       format: "pi-trajectory/v1", resource: { agentId: "agent", sessionId: "chat" },
-      submissionId: "submission", projection: { kind: "safe", policyId: "test", policyVersion: 1 },
+      submissionId: "submission",
       record: { type: "conversation", value: { id: 10 } },
     } };
-    expect(spPiTrajectoryPageSchema.safeParse({
-      format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: 7 },
-      records: [reference, inline], nextAfterSeq: 6,
-    }).success).toBe(true);
+    expect(nativeTrajectoryEntrySchema.safeParse(inline).success).toBe(true);
     for (const invalid of [
       { ...reference, record: inline.record },
       { ...reference, reference: { ...reference.reference, format: "sp-trajectory/v1" } },
@@ -217,9 +220,5 @@ describe("@eval-platform/eval-contracts", () => {
       { ...reference, reference: { ...reference.reference, byteLength: -1 } },
       { ...reference, reference: { ...reference.reference, sha256: "A".repeat(64) } },
     ]) expect(spPiTrajectoryReferenceSchema.safeParse(invalid).success).toBe(false);
-    expect(spPiTrajectoryPageSchema.safeParse({
-      format: SP_PI_TRAJECTORY_FORMAT, cursor: { throughSeq: 8 },
-      records: [reference], nextAfterSeq: null,
-    }).success).toBe(false);
   });
 });

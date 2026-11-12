@@ -1,6 +1,6 @@
 # Eval SP Harness service contract
 
-This is the service contract consumed by `apps/eval-api`. The independently deployed SP Agent Worker exposes the user-scoped routes below. Eval must not call SP Durable Object storage or private source modules. The npm-published `@springbrand/eval-harness@0.1.0-alpha.9` is pinned exactly; its public schemas and finalized/partial route and record-byte helpers validate the API HTTP seam. Its strict Header requires an Action receipt's `actionId`, and model billing pages cannot claim Action/Tool charges. Local consumer tests prove the published contract is installed, **not** that independently deployed SP and EP run matching versions. See [cutover and parity checklist](pi-native-eval-cutover.md); do not claim deployed parity before checking both services.
+This is the service contract consumed by `apps/eval-api`. The independently deployed SP Agent Worker exposes the user-scoped routes below. Eval must not call SP Durable Object storage or private source modules. The npm-published `@springbrand/eval-harness@0.1.0-alpha.9` is pinned exactly and supplies finalized/partial routes and record-byte helpers, but depends on Runtime alpha.15 and rejects raw records. The alpha.32/raw consumer requires a new verified public Harness release; its schemas remain the HTTP authority and are never replaced by a local wire or cast. Its strict Header must retain an Action receipt's `actionId`, and model billing pages cannot claim Action/Tool charges. Local consumer tests do **not** prove independently deployed SP and EP run matching versions. See [cutover and parity checklist](pi-native-eval-cutover.md); do not claim deployed parity before checking both services.
 
 The Eval Run Worker calls the independently deployed Eval SP origin with `X-Eval-Service-Token`. SP authenticates the service and checks the requested user, Agent Config, Chat, and Workspace ownership. HTTP responses below are bare JSON. A `409` on Chat ensure means immutable creation facts conflict; an unknown operation lookup returns JSON `null` with `200`, while an unknown Chat is an error. Retries use the original Chat ID and operation key. Both Eval SP clients (this service client and the API's session/Agent Config client) use `@springbrand/http/client`: redirects are rejected, response size is bounded, and network errors, timeouts, `408`, `429` and `≥500` are retryable. Normally a Harness `GET` answered `409 EVIDENCE_NOT_READY` is retryable, except a post-wait opted-in partial page that SP cannot serve (see [Readiness](#readiness-and-large-transfers)); every other `409`, and any `409` on a `PUT`, is not.
 
@@ -53,12 +53,12 @@ Eval does not trigger delivery of SP's telemetry/runtime outboxes; it only waits
 
 ## Pinned evidence trajectory
 
-An evidence export reads one fixed range of SAFE Pi records, so records appended while
+An evidence export reads one fixed range of raw Pi records, so records appended while
 it pages (or between passes) never enter a bundle half-way.
 
 1. The first native `sp-pi-trajectory/v1` page freezes a `cursor.throughSeq`
    (including zero for an empty Chat). The adapter validates the entire page
-   with the installed public alpha.9 schema before yielding any record.
+   with the public raw-capable Harness schema before yielding any record.
 2. `EvidenceStore` saves `format:"sp-pi-trajectory/v1"`, `throughSeq` and
    `cursor:{throughSeq}` in the first validated page's durable progress **before**
    storing any trajectory part. If a source already exposes `trajectoryCursor`,
@@ -68,19 +68,28 @@ it pages (or between passes) never enter a bundle half-way.
    the same `throughSeq`. Changed, missing or regressed cutoffs, a record above
    the cutoff, a non-progressing cursor or a missing terminal page fail without
    a manifest. The authorized Submission binds the read but does not filter
-   the full SAFE Chat history.
+   the full raw Chat history.
 4. Runtime passes the saved native format/cutoff back as
    `ExportEvidenceInput.trajectory` via `evidenceTrajectoryPinOf`. For progress
-   saved before the generic `cursor` field, that helper derives it from the
-   existing native `throughSeq`; the saved JSON is not rewritten. The Harness
+   in this raw generation, the same native cutoff is preserved without rewriting
+   source bytes. This does not promise resumption of an old SAFE Chat. The Harness
    rejects old event-only pins and binds resumed reads to this native cutoff
    from the first request. A changed source-provided pin fails in the Store.
    A failed pass without saved progress can pin anew; finished native parts
    never share a bundle with old event parts. Historical v1 bytes are untouched.
 
-Alpha.7 publishes the native evidence page, safe inline/ref schemas and
+The next public release must supply raw inline/ref schemas and preserve the
 authenticated record-byte path helper; EP does not accept an optional old
 event `format`, unpinned legacy reads or a locally mirrored HTTP page schema.
+
+Raw `[CONTENT OMITTED]` and similar strings are ordinary source content, not
+omission facts. The bounded scanner preserves original JSON bytes through
+strict UTF-8/JSON, identity, parent, length, hash and EOF verification. For Metrics
+and reply interpretation it emits a separate format-free record view with
+JSON-Pointer `omittedPaths`; absent/ambiguous values stay unknown. Those views
+never enter full-Chat JSONL or impersonate native records. Only new Chats/Runs
+are admitted to this cutover; stored results and archived evidence remain
+unchanged. Manifest schema stays 2 because the bundle structure has not changed.
 
 ## Diagnostics
 

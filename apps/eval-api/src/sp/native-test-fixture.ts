@@ -5,7 +5,7 @@ import {
   type JsonValue, type NativeTrajectoryEntry, type SpPiTrajectoryRecordReference,
 } from "@eval-platform/eval-contracts";
 
-/** The checked-in records were projected by the published public UA trajectory
+/** The checked-in records were exported by the published public UA trajectory
  * helpers. Test transport identities are substituted, never a new event envelope. */
 const fixture = JSON.parse(readFileSync(new URL("../../../../fixtures/pi-native-public-v1.json", import.meta.url), "utf8")) as {
   readonly records: readonly NativeTrajectoryEntry[];
@@ -42,7 +42,7 @@ export function nativeFixtureRecords(ingestSeqs: readonly number[], chatId: stri
   return ingestSeqs.map((seq) => nativeFixture(seq, chatId, submissionId));
 }
 
-/** A targeted Pi assistant variant, based on the publicly projected assistant
+/** A targeted Pi assistant variant, based on the publicly exported assistant
  * Entry rather than an invented top-level `message` or event-shaped record. */
 export function nativeAssistantMessage(
   ingestSeq: number, chatId: string, submissionId: string, content: readonly JsonValue[],
@@ -60,7 +60,7 @@ export function nativeAssistantMessage(
   });
 }
 
-/** The two publicly projected Pi message kinds carrying a Tool Call's safe
+/** The two publicly exported Pi message kinds carrying a Tool Call's raw
  * arguments and its Tool Result body. Used only for storage/Unicode stress. */
 export function nativeToolBodyPair(
   chatId: string, submissionId: string, body: string, toolName: string, pairIndex = 0,
@@ -72,7 +72,7 @@ export function nativeToolBodyPair(
   assistantValue.id = pairIndex * 2 + 1;
   const assistantMessage = object((assistantValue.model as unknown[])[0]);
   assistantMessage.timestamp = 255 + pairIndex;
-  assistantMessage.content = [{ type: "toolCall", id: callId, name: toolName, arguments: body }];
+  assistantMessage.content = [{ type: "toolCall", id: callId, name: toolName, arguments: { body } }];
   const resultValue = object(object(result.record.record).value);
   resultValue.id = pairIndex * 2 + 2;
   const toolResult = object((resultValue.model as unknown[])[0]);
@@ -102,13 +102,13 @@ export function modelBillingPairFixture(
       eventId, usage, status: "settled" as const,
       ratedUnits: 2, debitedUnits: 2, shortfallUnits: 0,
       platformOwned: { units: 0, reason: null },
-      accountAfter: { version: 2, availableUnits: 10 }, settledAtMs: 123,
+      accountAfter: { version: 2, availableUnits: 10, reservedUnits: 0 }, settledAtMs: 123,
     },
   };
   return { usage, settlement };
 }
 
-/** Test the published SP reference wire with a real source-projected Pi record, not an event-shaped fake. */
+/** Test the published SP reference wire with a real source-exported Pi record, not an event-shaped fake. */
 export function nativeTransfer(entry: NativeTrajectoryEntry, throughSeq: number): {
   reference: SpPiTrajectoryRecordReference;
   bytes: Uint8Array;
@@ -146,7 +146,7 @@ export function nativeTransferResponse(
   } });
 }
 
-/** Test-only 30+ MiB SAFE Pi response generated from small, reusable UTF-8 chunks.
+/** Test-only 30+ MiB raw Pi response generated from small, reusable UTF-8 chunks.
  * Neither the test nor the HTTP consumer allocates a whole giant source record. */
 export function streamedAssistantTransfer(chatId: string, submissionId: string, repetitions = 900) {
   const small = nativeAssistantMessage(14, chatId, submissionId, [{ type: "text", text: "__STREAM_BODY__" }]);

@@ -34,7 +34,7 @@ const readiness = {
   receiptTerminal: true, stateUnreadable: false, pendingTelemetryEvents: 0, pendingRuntimeEvents: 0,
   actionCharges: { complete: true, unsettledExecutions: 0, missingExecutionIds: 0 },
 };
-const coverage = { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "partial" } as const;
+const coverage = { usageEvents: "complete", nativeRecords: "complete", billingSettlements: "complete" } as const;
 const action = { source: "action", executionId: "88888888-8888-4888-8888-888888888888",
   actionId: "action.exa.search", status: "outcome_unknown", chargedCredits: 0 };
 const header = {
@@ -81,7 +81,45 @@ function resourceService(serve: (url: URL) => Response | undefined, current: SpR
 }
 
 describe("public paged SP resource collection", () => {
-  it.each([false, true])("collects optional SAFE Tool execution linkage from an %s record without its private body", async (referenced) => {
+  it("rejects a finalized header with partial settlement coverage before downloading facts", async () => {
+    const current: SpResourceHeader = { ...cleanHeader,
+      coverage: { ...cleanHeader.coverage, billingSettlements: "partial" } };
+    const { fetch, requests } = resourceService(() => undefined, current);
+    const pending = createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
+      .collectAgentResources(input).then(async (download) => {
+        if (isResourceSnapshotDownload(download)) await download.dispose();
+        return download;
+      });
+    await expect(pending).rejects.toMatchObject({ retryable: false });
+    expect(requests.map(({ pathname }) => pathname)).toEqual([`${prefix}/header`]);
+  });
+
+  it("follows a public native continuation at the frozen cutoff through an empty EOF page", async () => {
+    const { reference, bytes } = nativeTransfer(nativeFixture(8, chatId, submissionId), 8);
+    const first = nativePage([reference], 8);
+    expect(evalResourceNativePageSchema.safeParse(first).success).toBe(true);
+    const { fetch, requests } = resourceService((url) => {
+      if (url.pathname === `${prefix}/native-records`) {
+        return Response.json(url.searchParams.get("afterSeq") === "0" ? first : nativePage([], null));
+      }
+      if (url.pathname.endsWith(`/trajectory/records/${reference.ingestSeq}`)) {
+        return nativeTransferResponse(reference, bytes);
+      }
+      return undefined;
+    });
+    const download = await createSpHarness({ origin: "https://eval-sp.test", serviceToken: "secret", fetch })
+      .collectAgentResources(input);
+    if (!isResourceSnapshotDownload(download)) throw new Error("Expected a bounded resource download");
+    try {
+      expect(download.summary.counts.nativeRecords).toBe(1);
+      expect(requests.filter(({ pathname }) => pathname === `${prefix}/native-records`)
+        .map(({ searchParams }) => searchParams.get("afterSeq"))).toEqual(["0", "8"]);
+    } finally {
+      await download.dispose();
+    }
+  });
+
+  it.each([false, true])("collects optional raw Tool execution linkage from an %s record without its private body", async (referenced) => {
     const executionId = "88888888-8888-4888-8888-888888888888";
     const call = nativeFixture(6, chatId, submissionId);
     const result = nativeFixture(10, chatId, submissionId);
@@ -431,7 +469,7 @@ describe("public paged SP resource collection", () => {
       && !request.headers.has("Origin"))).toBe(true);
   });
 
-  it("spools hundreds of SAFE native rows one at a time rather than assembling an operation-sized array", async () => {
+  it("spools hundreds of raw native rows one at a time rather than assembling an operation-sized array", async () => {
     const base = nativeFixture(3, chatId, submissionId);
     const rows = Array.from({ length: 450 }, (_, index) => ({
       ingestSeq: index + 1, record: { ...base.record, record: { ...base.record.record,
@@ -585,7 +623,7 @@ describe("public paged SP resource collection", () => {
     expect(requests.map((url) => url.pathname)).toEqual([`${prefix}/header`]);
   });
 
-  it.each([170, 900])("verifies %i streamed chunks of a >5/30 MiB SAFE Pi reference without retaining a JSON body", async (repetitions) => {
+  it.each([170, 900])("verifies %i streamed chunks of a >5/30 MiB raw Pi reference without retaining a JSON body", async (repetitions) => {
     const { reference, recordLength, response } = streamedAssistantTransfer(chatId, submissionId, repetitions);
     expect(recordLength).toBeGreaterThan(repetitions < 900 ? 5 * 1024 * 1024 : 30 * 1024 * 1024);
     const local = { ...cleanHeader, cursor: { throughSeq: reference.ingestSeq } };
@@ -645,11 +683,12 @@ describe("public paged SP resource collection", () => {
     "rejects a referenced %s native body only after verifying its complete byte stream", async (kind) => {
       const source = nativeAssistantMessage(14, chatId, submissionId, [{ type: "text", text: "not this operation" }]);
       const record = kind === "foreign-submission"
-        ? { ...source.record, submissionId: "prior-submission" }
+        ? { ...source.record, submissionId: "prior-submission", origin: "execution" as const }
         : kind === "foreign-parent-chat"
-          ? { ...source.record, parent: { resource: { agentId: "other", sessionId: "other-chat" }, submissionId } }
+          ? { ...source.record, submissionId, origin: "execution" as const,
+            parent: { resource: { agentId: "other", sessionId: "other-chat" }, submissionId } }
           : kind === "unproven-parent"
-            ? { ...source.record, submissionId: "nested-submission",
+            ? { ...source.record, submissionId: "nested-submission", origin: "execution" as const,
               parent: { resource: { agentId: "other", sessionId: chatId }, submissionId: "foreign-parent" } }
             : { ...source.record, submissionId: null, origin: "context" as const };
       const { reference, bytes } = nativeTransfer({ ingestSeq: 14, record }, 14);
@@ -866,7 +905,7 @@ describe("public paged SP resource collection", () => {
     expect(requests.map(({ pathname }) => pathname)).toEqual([`${prefix}/header`, `${prefix}/native-records`]);
   });
 
-  it("passes the operation-bound partial opt-in through a referenced SAFE byte read without storing its body", async () => {
+  it("passes the operation-bound partial opt-in through a referenced raw byte read without storing its body", async () => {
     const source = nativeAssistantMessage(8, chatId, submissionId, [{ type: "text", text: "known native body" }]);
     const { reference, bytes } = nativeTransfer(source, 8);
     const partial = { ...cleanHeader, finalized: false, cursor: { throughSeq: 8 },

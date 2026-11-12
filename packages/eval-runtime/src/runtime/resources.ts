@@ -3,7 +3,7 @@ import {
   identifierSchema,
   isResourceSnapshotDownload,
   nativeRecordMayBelongToScope,
-  nativeTrajectoryEntrySchema,
+  resourceNativeTrajectoryEntrySchema,
   jsonObjectArrayInPlaceSchema,
   summarizeResourceSnapshot,
   type AgentResourceFact,
@@ -65,7 +65,7 @@ const snapshotSchema = z.strictObject({
     billingSettlements: completeness,
   }),
   usageEvents: jsonObjectArrayInPlaceSchema,
-  nativeRecords: z.array(nativeTrajectoryEntrySchema),
+  nativeRecords: z.array(resourceNativeTrajectoryEntrySchema),
   billingSettlements: jsonObjectArrayInPlaceSchema,
   readiness: readinessSchema,
 }).superRefine((snapshot, context) => {

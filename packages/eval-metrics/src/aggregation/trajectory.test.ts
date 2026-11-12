@@ -1,9 +1,9 @@
-import type { AgentResourceSnapshot } from "@eval-platform/eval-contracts";
+import { canonicalJsonBytes, type AgentResourceSnapshot } from "@eval-platform/eval-contracts";
 import { describe, expect, it } from "vitest";
 import { nativeFixture, nativeResourceInput, resourceInput, settlement, usage } from "../test-support.js";
 import { aggregateResources, type ResourceInput } from "./resources.js";
 
-describe("actual public UA safe Pi trajectory facts", () => {
+describe("actual public UA raw Pi trajectory facts", () => {
   it("does not decode an old event-only resource snapshot as native Pi", () => {
     const collection = resourceInput({ usageEvents: [usage("old")], billingSettlements: [settlement("old")] }).collection;
     if (!collection || collection.status !== "collected") throw new Error("expected collected snapshot");
@@ -134,7 +134,7 @@ describe("actual public UA safe Pi trajectory facts", () => {
     }));
   });
 
-  it("does not infer zero Tool output bytes from a safe but redacted Pi Tool Result", () => {
+  it("counts a genuine raw marker string as Tool output rather than local omission", () => {
     const resultRecord = structuredClone(nativeFixture(10)[0]!);
     if (resultRecord.record.record.type !== "entry") throw new Error("expected Pi Tool Result");
     const message = (resultRecord.record.record.value.model as { content: { text: string }[] }[])[0]!;
@@ -144,9 +144,24 @@ describe("actual public UA safe Pi trajectory facts", () => {
     ] })]);
     expect(result.trajectory.tools.failed).toBe(1);
     expect(result.trajectory.byTool[0]!.outputLength).toMatchObject({
-      count: 0, missing: 1, total: null, coverage: "unavailable",
+      count: 1, missing: 0, total: canonicalJsonBytes([{ type: "text", text: "[REDACTED]" }]).byteLength,
+      coverage: "complete",
     });
   });
+
+  it.each([undefined, null, "another-submission"])(
+    "does not attribute a bookkeeping event with Submission %s to its source Submission",
+    (submissionId) => {
+      const invalid = structuredClone(nativeFixture(3)[0]!);
+      if (invalid.record.record.type !== "entry") throw new Error("expected bookkeeping Entry");
+      const data = invalid.record.record.value.data as { event: { submissionId?: string | null } };
+      if (submissionId === undefined) delete data.event.submissionId;
+      else data.event.submissionId = submissionId;
+      const result = aggregateResources([nativeResourceInput([], { nativeRecords: [invalid] })]);
+      expect(result.trajectory.turns.count.value).toBeNull();
+      expect(result.trajectory.diagnostics).toContainEqual(expect.objectContaining({ kind: "unsupported-record" }));
+    },
+  );
 
   it("cannot interpret a bookkeeping entry carrying Pi model messages as a complete empty source", () => {
     const invalid = structuredClone(nativeFixture(3)[0]!);

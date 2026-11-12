@@ -108,7 +108,7 @@ export function usage(eventId: string, patch: AgentResourceFact = {}): AgentReso
   };
 }
 
-/** Exactly the safe output of the published public UA generator, verified by
+/** Exactly the raw output of the published public Runtime generator, verified by
  * `scripts/generate-pi-native-fixture.mjs`. No event-only "native" constructors. */
 const publicFixture = JSON.parse(readFileSync(new URL("../../../fixtures/pi-native-public-v1.json", import.meta.url), "utf8")) as {
   readonly records: readonly NativeTrajectoryEntry[];
@@ -121,7 +121,7 @@ export function nativeFixture(...ingestSeqs: readonly number[]): NativeTrajector
   }));
 }
 
-/** Rebind a projected public UA record to a test Chat/Submission. Event resource
+/** Rebind a raw public Runtime record to a test Chat/Submission. Event resource
  * identity follows the envelope; no event-only or top-level message is made up. */
 export function nativeScopedFixture(ingestSeqs: readonly number[], scope: AgentResourceScope): NativeTrajectoryEntry[] {
   const object = (value: unknown): Record<string, unknown> => {

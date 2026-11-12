@@ -12,14 +12,14 @@ vi.mock("@/api-sdk/observations-api", async (original) => ({ ...await original<o
 const stored = (seq: number, kind: string, value: Record<string, JsonValue> = {}): NativeTrajectoryEntry => ({
   ingestSeq: seq, record: {
     format: "pi-trajectory/v1", resource: { agentId: "agent", sessionId: "chat" },
-    submissionId: "submission", projection: { kind: "safe", policyId: "test", policyVersion: 1 },
+    submissionId: "submission",
     record: { type: "entry", value: { id: seq + 10, conversationId: 1, kind, ...value } },
   },
 });
 const conversation = (seq: number): NativeTrajectoryEntry => ({
   ingestSeq: seq, record: {
     format: "pi-trajectory/v1", resource: { agentId: "agent", sessionId: "chat" },
-    submissionId: "submission", projection: { kind: "safe", policyId: "test", policyVersion: 1 },
+    submissionId: "submission",
     record: { type: "conversation", value: { id: seq + 10 } },
   },
 });
@@ -53,9 +53,9 @@ describe("read-only native Chat trajectory", () => {
     } finally { await view.unmount(); client.clear(); }
   });
 
-  it("renders an inline SAFE Pi record from the Chat page without inventing an event", async () => {
+  it("renders an inline raw Pi record from the Chat page without inventing an event", async () => {
     get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 3 }, records: [stored(3, "pi.user", {
-      model: [{ role: "user", content: "original native evidence", timestamp: 1_700_000_000_000 }],
+      model: [{ role: "user", content: "original native evidence [CONTENT OMITTED]", timestamp: 1_700_000_000_000 }],
     })], nextAfterSeq: null });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(<TooltipProvider><QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="evaluations" id="e" /></QueryClientProvider></TooltipProvider>);
@@ -66,6 +66,7 @@ describe("read-only native Chat trajectory", () => {
       expect(view.container.querySelector("ol > li")?.textContent).toContain("pi.user");
       await click(view.container.querySelector("ol button"));
       expect(view.container.querySelector("ol")?.textContent).toContain("original native evidence");
+      expect(view.container.querySelector("ol")?.textContent).toContain("[CONTENT OMITTED]");
       expect(view.container.querySelector("ol")?.textContent).toContain("pi-trajectory/v1");
     } finally { await view.unmount(); client.clear(); }
   });
@@ -89,15 +90,16 @@ describe("read-only native Chat trajectory", () => {
     } finally { await view.unmount(); client.clear(); }
   });
 
-  it("reports an obsolete event-only response instead of disguising it as native Pi", async () => {
-    get.mockResolvedValueOnce({ events: [{ ingestSeq: 1, event: { type: "turn.started" } }],
-      beforeSeq: null, hasOlder: false } as unknown as TrajectoryPage);
+  it("reports the API's rejection of an obsolete event-only response instead of disguising it as native Pi", async () => {
+    // The real observation adapter rejects obsolete pages; Web receives its HTTP failure.
+    get.mockRejectedValueOnce(new Error("SP returned an invalid Chat trajectory page"));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(<QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="samplings" id="s" /></QueryClientProvider>);
     try {
       await settle();
-      expect(view.container.textContent).toContain("轨迹响应不是 SAFE Pi 原生 records 页");
+      expect(view.container.textContent).toContain("SP returned an invalid Chat trajectory page");
       expect(view.container.textContent).not.toContain("Cannot read properties of undefined (reading 'ingestSeq')");
+      expect(view.container.querySelectorAll("ol > li")).toHaveLength(0);
     } finally { await view.unmount(); client.clear(); }
   });
 
@@ -161,15 +163,40 @@ describe("read-only native Chat trajectory", () => {
     } finally { await view.unmount(); client.clear(); vi.useRealTimers(); }
   });
 
-  it("refuses nonascending native rows instead of silently reordering an invalid SP page", async () => {
+  it("retains the loaded cutoff record when the next page is an empty authoritative EOF", async () => {
     get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 5 },
-      records: [stored(5, "pi.assistant"), stored(4, "pi.user")], nextAfterSeq: null });
+      records: [reference(5, 5)], nextAfterSeq: 5 })
+      .mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 5 },
+        records: [], nextAfterSeq: null });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(<QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="samplings" id="s" /></QueryClientProvider>);
     try {
       await settle();
-      expect(view.container.textContent).toContain("轨迹响应不是 SAFE Pi 原生 records 页");
-      expect(view.container.querySelectorAll("ol > li")).toHaveLength(0);
+      expect(view.container.querySelectorAll("ol > li")).toHaveLength(1);
+      await click([...view.container.querySelectorAll("button")].find((item) => item.textContent === "加载更多记录"));
+      await settle();
+      expect(get).toHaveBeenLastCalledWith("p", "samplings", "s", 5, 5, undefined);
+      expect(view.container.querySelectorAll("ol > li")).toHaveLength(1);
+      expect(view.container.querySelector("ol > li")?.textContent).toContain("#5");
+      expect(view.container.textContent).not.toContain("加载更多记录");
+    } finally { await view.unmount(); client.clear(); }
+  });
+
+  it.each([
+    { name: "replayed range", throughSeq: 8, error: "轨迹分页游标未前进" },
+    { name: "changed frozen cutoff", throughSeq: 9, error: "轨迹响应不是 raw Pi 原生 records 页" },
+  ])("keeps its loaded prefix after a request-relative $name rejection", async ({ throughSeq, error }) => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = await render(<QueryClientProvider client={client}><TrajectoryTab projectId="p" kind="samplings" id="s" /></QueryClientProvider>);
+    try {
+      await settle();
+      get.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq },
+        records: [stored(6, "pi.user")], nextAfterSeq: 6 });
+      await click([...view.container.querySelectorAll("button")].find((item) => item.textContent === "加载更多记录"));
+      await settle();
+      expect(get).toHaveBeenLastCalledWith("p", "samplings", "s", 6, 8, undefined);
+      expect(view.container.querySelectorAll("ol > li")).toHaveLength(4);
+      expect(view.container.textContent).toContain(error);
     } finally { await view.unmount(); client.clear(); }
   });
 

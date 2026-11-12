@@ -2,13 +2,13 @@
 
 ## New SP Pi-native evidence and resource boundary
 
-`native-trajectory.ts` describes the browser-safe persisted evidence/resource
+`native-trajectory.ts` describes the browser-safe structural evidence/resource
 shape and bounded byte-stream safety checks. The API HTTP seam validates
 headers, native/billing pages, evidence pages and references with the installed
-`@springbrand/eval-harness@0.1.0-alpha.7` public exports, not these local
-page schemas. The local shape is not a copy of SP's
+`@springbrand/eval-harness` public exports aligned with Runtime `.32`; this package
+does not define a generic HTTP page schema. The local storage shape is not a copy of SP's
 private trajectory parser: a native record has `format:"pi-trajectory/v1"`,
-`resource:{agentId,sessionId}`, `submissionId`, a safe projection policy and
+`resource:{agentId,sessionId}`, `submissionId`, no `projection`, and
 `record:{type:"conversation"|"entry",value}`; the raw `{ingestSeq,record}` is
 stored unchanged. A page row may instead be
 `{ingestSeq,reference:{format:"sp-pi-trajectory-record/v1",throughSeq,identity,byteLength,sha256}}`:
@@ -23,6 +23,48 @@ projections. New collections use the published bounded resource
 header/native/billing schemas at the HTTP boundary; the old unbounded combined
 route is not a fallback. The package remains browser-safe and does not depend
 on SP's runtime or private implementation.
+
+`SpPiTrajectoryPage` derives its page metadata from the public
+`EvalEvidenceTrajectoryPage` **type-only** export; original Pi bodies retain the
+opaque JSON view used by storage and byte verification. No Harness runtime root
+is loaded into a browser. Its direct dependency currently matches the API's
+installed alpha.9; both exact pins must move to alpha.10 together after the user
+publishes it. The old installed parser is not raw `.32` acceptance or a fallback.
+The API's real observation adapter returns pages
+validated through `sp/harness-wire.ts`, including the original raw values, and
+binds them to the requested Chat/range. Management and Web consume that validated
+contract rather than reimplementing generic ordering/cutoff/continuation grammar.
+Web still owns its request-relative cache continuity. Stored native/compact rows
+and record pointers keep their separate storage validation.
+
+For new Chat/Run collection, Runtime `.32`'s public
+`@springbrand/agent-runtime/trajectory` `trajectoryRecordSchema` is the sole full
+native authority, consumed by the public SP Harness/API adapter. The local
+`PiTrajectoryRecord` and `isPiTrajectoryRecord` describe/check only its opaque
+JSON envelope and identity; they are not a second native-message validator.
+Execution requires a nonempty Submission and absent/`execution` origin;
+Context requires `submissionId:null` and `origin:"context"`. The native envelope
+allows Runtime's optional positive `ingestSeq`; SP page/storage rows instead own
+the outer cursor and reject a second inner one. Old SAFE records fail the live
+guard and are not converted.
+
+`PiTrajectoryRecordView` is explicitly an interpretation view, not raw evidence.
+`NativeTrajectoryInterpretationEntry` carries that view under `interpretation`,
+with JSON-Pointer `omittedPaths` relative to the source record. An omitted path
+and all of its descendants are unavailable; a containing value cannot prove
+an exact length. Literal `[CONTENT OMITTED]`, `[REDACTED]` and `redacted:true`
+have no omission semantics. Interpretation requires the verified original-byte
+SHA-256 when compacted and never enters evidence JSONL.
+
+`CompactNativeTrajectoryEntry` uses the distinct
+`record.format:"eval-pi-metric-record/v1"` storage identity and Metrics projection
+version 2. It contains only identity and allowlisted scalar facts, never native
+model/data bodies. Version 2 changes raw value-length and explicit interpretation
+completeness semantics; `chargeLinkVersion:2` and scoped `tck2_` keys are unchanged.
+The current reader accepts only this fact version, not a SAFE decoder, old
+projection union or a backfill. Saved rows, result scores and archives are not
+rewritten. Native resource pages delivered to the Store contain compact entries;
+complete original native entries remain the evidence seam.
 `AgentResourceSnapshotDownload` is a temporary, page-backed application-to-Store
 value (summary plus `readPages`/`dispose`), not a second Pi wire or persisted
 format. The existing stored
@@ -37,16 +79,16 @@ verified chain, never an arbitrary foreign parent. An attributed child Context
 is included only when its
 same-Chat parent Submission is verified in the ordered resource stream; a
 Chat-wide imported Context or older Submission stays only in evidence. The
-published SP `alpha.7` is the authority for the finalized wire, but lacks the
-post-wait `allowPartial` query and record-byte `resourceKey` public contract;
-local structural storage/byte checks do not establish live deployment parity.
+pinned Harness must validate raw `.32` records, post-wait `allowPartial` reads,
+record-byte `resourceKey`, and matching billing watermarks. Installed
+`alpha.9`/Runtime `.15` is not proof of this cutover; package upgrade, deployed
+SP parity and PostgreSQL runtime verification remain separate release gates.
 
-The separate public SP Chat *debug* trajectory read, relayed by Eval API to Web,
-returns `{records:[{ingestSeq,record} | {ingestSeq,reference}],beforeSeq,hasOlder}`.
-Its native row/reference types are shared here, but it does not use the frozen
-evidence page's `format/cursor/nextAfterSeq`. Web cannot fetch a referenced
-record body through its observation route and displays an explicit placeholder
-instead of pretending it has a full record or projecting a legacy `event`.
+Eval API observation and Web use the same frozen Harness page
+(`format/cursor/records/nextAfterSeq`), not SP Agent Contracts' separate backward
+debugger DTO (`records/beforeSeq/hasOlder`). Web cannot fetch a referenced record
+body through its observation route and displays an explicit placeholder instead
+of pretending it has a full record or projecting a legacy `event`.
 
 ## Saved Dashboard configuration
 
@@ -106,7 +148,7 @@ JSON 值与标识符规则也只在这里定义：`jsonValueSchema`、`jsonObjec
 
 状态词表只在这里定义：`SAMPLING_STATUSES`、`PENDING_SAMPLING_STATUSES`、`AGENT_STATUSES`、`TERMINAL_AGENT_STATUSES` 及谓词 `isPendingSamplingStatus`、`isTerminalAgentStatus`，`SamplingStatus`、`AgentStatus` 由它们派生，SQL 使用同一常量。`AgentSubmission.status` 是 SP 归一化后的状态，SP 原始状态只在 Eval API 的 Harness 适配层映射一次。
 
-资源契约位于 `src/resources.ts`，通过包根入口导出。新的 `AgentResourceSnapshotDownload` 只携带已核验的摘要和有界页流，Store 原子保存后释放临时字节；已保存的 `AgentResourceSnapshot` 原样承载 SP 的 `usageEvents`、`billingSettlements`、覆盖度与 readiness，`nativeRecords` 保留已核验的来源身份及 body-free Metrics facts，不在 PostgreSQL 重复保存 Pi 大正文，也不是 Eval 重新设计的费用/Token/Tool/Turn 模型。来源缺失、`null`、顺序、重复记录及子 Agent 身份保留；Runtime 不补零、不换算、不抽取、不合并、不去重、不计算总量。历史原始快照不迁移，旧 `telemetryEvents` 不属于新快照契约。SP `alpha.7` 已作为 npm 公共包安装，HTTP finalized 页使用其 Schema；partial 请求尚无公共包契约，本地消费者不代表部署互通或全局 OOM 安全。
+资源契约位于 `src/resources.ts`，通过包根入口导出。新的 `AgentResourceSnapshotDownload` 只携带已核验的摘要和有界页流，Store 原子保存后释放临时字节；已保存的 `AgentResourceSnapshot` 原样承载 SP 的 `usageEvents`、`billingSettlements`、覆盖度与 readiness，`nativeRecords` 保留已核验的来源身份及 body-free Metrics facts，不在 PostgreSQL 重复保存 Pi 大正文，也不是 Eval 重新设计的费用/Token/Tool/Turn 模型。来源缺失、`null`、顺序、重复记录及子 Agent 身份保留；Runtime 不补零、不换算、不抽取、不合并、不去重、不计算总量。历史原始快照不迁移，旧 `telemetryEvents` 不属于新快照契约。HTTP 与 partial 页必须使用对齐 Runtime `.32` 的 Harness 公共 Schema；本地结构守卫与跳过的数据库测试不代表部署互通或全局 OOM 安全。
 
 `coverage` 分别保留来源对三组记录的 `complete | partial | unavailable` 声明，`finalized` 保留操作终结声明；`collected` 只表示读到了并保存了快照，不保证来源完整。资源等待到期后通过公共 Harness 的显式 `allowPartial` 选项采集时，未终结的三个来源均为 `partial`，有界页和已核验字节仍按真实数量原子写入；未完成计费、未投递记录以及暂时为零的已知条目不能宣称完整或推断为零费用。初始化 Session 历史和导入的 Subject 证据不属于本次资源范围。失败、取消和重启的使用/结算来源事实与 compact Pi facts 不能因最终结果失败而删除，历次主动重评也不能混入同一评估记录。Metrics 读取这些事实，负责来源解析、去重、重叠用量处理、费用/Token/工具/Turn 统计及汇总。
 

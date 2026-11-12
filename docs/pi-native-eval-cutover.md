@@ -4,15 +4,15 @@ This is a deliberately breaking **new-run** consumer change, not a migration. SP
 trajectory wire in the **published public** `@springbrand/eval-harness` export. Eval never
 imports SP private source, queries SP Durable Object storage, or upgrades an event-only
 `sp-trajectory/v1` bundle by relabelling its JSON. Eval pins the npm-published
-`@springbrand/eval-harness@0.1.0-alpha.7` exactly. The **installed artifact**, not
+`@springbrand/eval-harness@0.1.0-alpha.9` exactly. The **installed artifact**, not
 an SP source branch, exports `evalEvidenceTrajectoryPageSchema`, `evalResourceHeaderSchema`,
 `evalResourceNativePageSchema` (the same trajectory page) and
-`evalBillingResourcesPageSchema` and finalized path/record-byte helpers. It does
-**not** export `allowPartial` on header/native/billing request types, readers or
-builders; its billing builder rejects `allowPartial` and `throughSeq`, and its
-byte builder omits `resourceKey`. Local fixtures verify finalized page parsing,
-not the post-wait partial extension, live SP/Eval interoperability or deployment
-readiness. A compatible public partial contract is still a release blocker.
+`evalBillingResourcesPageSchema` and finalized/partial path/record-byte helpers.
+It still depends on Runtime alpha.15 and requires SAFE records. The raw consumer
+targets Runtime alpha.32 and a new public Harness release; the existing alpha.9
+rejects the new raw fixture. Its HTTP schemas are not bypassed or locally mirrored.
+Raw HTTP/evidence lifecycle acceptance remains blocked until the coordinator
+pins and verifies that actual public release. No deployment parity is implied.
 
 ## Consumer contract to compare against SP's public export
 
@@ -25,7 +25,10 @@ readiness. A compatible public partial contract is still a release blocker.
   returned seq or null precisely at the frozen end. Later Chat work must not enter an
   export resumed with its saved watermark.
 - The actual **published UA public** `TrajectoryRecord` is
-  `{format:"pi-trajectory/v1",resource:{agentId,sessionId},submissionId:string|null,projection:{kind:"safe",policyId,policyVersion},record:{type:"conversation"|"entry",value},parent?,origin?}`.
+  `{format:"pi-trajectory/v1",resource:{agentId,sessionId},submissionId:string|null,record:{type:"conversation"|"entry",value},parent?,origin?}`.
+  Execution has a nonempty Submission and optional `origin:"execution"`;
+  Context requires `submissionId:null` together with `origin:"context"`.
+  Legacy `projection` is rejected, not stripped or accepted as a union.
   There is **no top-level** `kind`, `event`, `request`, `hook`, `message`, `turnId`,
   `timestamp` or `projection.contentComplete`. Pi messages are
   `record.value.model` (assistant, user and toolResult); model-free bookkeeping
@@ -39,9 +42,11 @@ readiness. A compatible public partial contract is still a release blocker.
   content live in Pi messages and are matched by `toolCallId`. Ambiguous or
   missing linkage is diagnosed and cannot prove zero. Final reply is the last
   *native Pi assistant* `record.value.model` message of the exact Submission,
-  not the bookkeeping `turn.finished` fact. Source policy redacts strings but
-  preserves Pi block structure; use the public trajectory helper rather than
-  inventing a content-completeness field.
+  not the bookkeeping `turn.finished` fact. Raw marker-looking strings are real
+  content, not withholding evidence. Bounded interpretation uses a separate
+  format-free record view and JSON-Pointer `omittedPaths`; original raw bytes
+  remain unchanged in evidence. Missing interpretations cannot prove zero or
+  completeness, and incomplete last replies suppress earlier replies.
   The published UA `@springbrand/agent-runtime/trajectory` can be consumed now;
   SP's **new** `@springbrand/eval-harness` native page schema is not yet published.
   A bare old `turn.finished` event JSON is never a Pi-native record.
@@ -73,8 +78,8 @@ readiness. A compatible public partial contract is still a release blocker.
 - A new bundle is `schemaVersion:2`, `trajectory.format:"sp-pi-trajectory/v1"`;
   its trajectory and each part count native **`records`**, not legacy events.
   `evidenceId` and `manifestSha256` are content hashes of those **new** manifest bytes.
-  An unfinished old event export cannot resume as a native one. Existing version-1
-  manifests, blobs, refs, scores and resource rows are not rewritten or deleted.
+  An unfinished old event or SAFE export is not resumed as raw. Existing version-1
+  and SAFE version-2 manifests, blobs, refs, scores and resource rows are not rewritten or deleted.
   Version-1 reads and old event-only metrics are unsupported; missing native facts
   return partial/unavailable, not a fake zero. Dataset, Execution and Evaluation
   remain independent entry points; Subject/Evaluator result acceptance is unchanged.
@@ -83,12 +88,11 @@ readiness. A compatible public partial contract is still a release blocker.
 
 `fixtures/pi-native-public-v1.json` is the exact compact output of
 `scripts/generate-pi-native-fixture.mjs` using published
-`@springbrand/agent-runtime/trajectory@0.3.1-alpha.9` exports (the fixture's
-original generator; alpha.7 depends on the published Runtime `0.3.1-alpha.15`):
+`@springbrand/agent-runtime/trajectory@0.3.1-alpha.32` exports:
 `createTrajectoryRecord`, `createTrajectoryEntry`,
-`createTrajectoryEventFact`, `projectTrajectoryForExport`, the public
+`createTrajectoryEventFact`, `parseTrajectoryRecord`, the public
 `trajectoryRecordSchema` and `readTrajectoryBookkeeping`. With an already
-installed **public** UA export and the installed npm alpha.7's public entry,
+installed **public** UA export and the next raw-capable npm Harness public entry,
 the following regenerates the fixture byte-for-byte and asserts that all 16
 records parse as both SP's published public page and its resource snapshot
 (run from `apps/eval-api`; no SP source or private worktree is used):
@@ -100,16 +104,13 @@ node ../../scripts/generate-pi-native-fixture.mjs --compact |
   cmp - ../../fixtures/pi-native-public-v1.json
 ```
 
-The installed alpha.7 public schemas parse the checked-in fixture. This cannot prove a
-deployed endpoint emits those bytes or that safe Projection privacy is configured
-there. A direct offline `pnpm add @springbrand/agent-runtime@0.3.1-alpha.9` to
-`eval-metrics` currently fails resolving transitive
-`@chat-adapter/catalog@4.43.0`; **no** `file:/tmp` dependency is committed.
-The production interpreter therefore reads only the known bookkeeping fields
-and treats unknown or ambiguous Entries as unsupported. Once the public
-dependency is installable, consider the UA parser in browser-safe Metrics;
-the API HTTP adapter already uses the public alpha.7 page schemas. Rerun
-this proof against the next published partial API plus actual service parity.
+The alpha.32 generator matches the checked-in raw fixture byte-for-byte. The
+installed alpha.9 Harness rejects that fixture; this is a publication blocker,
+not a reason to cast or replace its public schemas. No installs/publication or
+live SP calls are part of the Group B implementation. The production Metrics
+interpreter consumes only supported body-free facts and treats unknown or
+ambiguous Entries as unsupported. Rerun the proof against the next published
+raw API and actual service parity.
 Direct and nested children,
 including attributed child Context, require an ordered verified same-Chat
 parent chain; a foreign parent or an imported Chat-wide Context never becomes
@@ -117,11 +118,11 @@ part of the selected Submission's resource collection.
 
 ## Evidence required before an integrated green or release
 
-1. Publish an `@springbrand/eval-harness` release that **also** describes
+1. Publish a Runtime alpha.32-backed raw `@springbrand/eval-harness` release that preserves
    `allowPartial` for header/native/billing requests and binds partial billing
    `throughSeq` and byte-transfer `resourceKey`; pin the exact compatible npm
-   version and update the lockfile. Alpha.7 already supplies public finalized
-   schemas/helpers; do not treat an untyped structural partial query as a
+   version and update the lockfile. Alpha.9 already supplies public partial
+   schemas/helpers but is not raw-capable; do not treat a local replacement as a
    release contract. Confirm `throughSeq`, API billing `(throughCount,throughSha256)`
    and Action/Tool identities across the new public partial path, without fallback.
 2. Obtain a redacted **actual** SP-generated page sequence, resource header/native/billing pages and
@@ -130,7 +131,7 @@ part of the selected Submission's resource collection.
    resumed reads keep the same `throughSeq` with appended records; page max bytes,
    empty terminal page, failed Tool/Step, partial delivery, redacted content, and a
    record larger than one importable part. Confirm the public UA `TrajectoryRecord`,
-   `readTrajectoryBookkeeping`, Pi message refs, task identity, policy redaction,
+   `readTrajectoryBookkeeping`, Pi message refs, task identity, raw content fidelity,
    timestamp units, and usage shape against an actual SP-native export.
    No secrets or original prompts belong in fixtures or logs.
 3. Cross-check byte-for-byte native JSONL lines, part SHA-256, v2 manifest hashes,

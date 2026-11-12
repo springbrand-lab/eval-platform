@@ -47,6 +47,53 @@ describe("shared Agent editor HTTP gateway", () => {
     expect(app.calls[0]!.headers.has("Origin")).toBe(false);
   });
 
+  it("relays Frank Action groups, connector slugs and raw local IDs through the public SP views unchanged", async () => {
+    const supplier = { id: "exa", name: "Exa" };
+    const action = { id: "action.local.exa.search", name: "Exa Search (local)", description: "Search the web",
+      status: "active", selectable: true, supplier };
+    const cases = [
+      { path: "/actions", search: "?q=Exa%20%28local%29&page=2&pageSize=1",
+        value: { data: [{ supplier: { ...supplier, description: "Search", iconUrl: "" }, actionCount: 2 }],
+          total: 2, page: 2, pageSize: 1 } },
+      { path: "/actions/group-actions", search: "?supplierId=exa&q=search%2Bweb&page=2&pageSize=1",
+        value: { data: [action], total: 2, page: 2, pageSize: 1 } },
+      { path: `/actions/${action.id}`, search: "",
+        value: { ...action, supplier: { ...supplier, iconUrl: "" } } },
+    ];
+    const app = setup(...cases.map(({ value }) => envelope(value)));
+    for (const { path, search, value } of cases) {
+      const response = await app.request(`/api/agent-library${path}${search}`, {
+        headers: { Authorization: "Bearer caller-token", "X-User-Id": "caller-user" },
+      });
+      expect(response.status).toBe(200);
+      expect((await response.json()).msg).toEqual(value);
+      const upstream = app.calls.at(-1)!;
+      expect(upstream.url).toBe(`https://eval-sp.test/api${path}${search}`);
+      expect(upstream.method).toBe("GET");
+      expect(upstream.headers.get("Authorization")).toBe("Bearer service-session");
+      expect(upstream.headers.has("X-User-Id")).toBe(false);
+      expect(upstream.headers.has("X-Eval-Web-Token")).toBe(false);
+      expect(upstream.headers.has("Origin")).toBe(false);
+    }
+    expect(app.calls).toHaveLength(cases.length);
+  });
+
+  it.each([
+    { path: "/actions?q=Exa", upstreamStatus: 503, status: 502, code: "EVAL_SP_REQUEST_FAILED" },
+    { path: "/actions/group-actions?supplierId=exa", upstreamStatus: 503, status: 502, code: "EVAL_SP_REQUEST_FAILED" },
+    { path: "/actions/action.local.exa.search", upstreamStatus: 404, status: 404, code: "EVAL_SP_NOT_FOUND" },
+    { path: "/actions/action.exa.search", upstreamStatus: 404, status: 404, code: "EVAL_SP_NOT_FOUND" },
+  ])("does not replace an unavailable public Action view $path with a local catalog or ID alias", async ({
+    path, upstreamStatus, status, code,
+  }) => {
+    const app = setup(Response.json({ code: "UNAVAILABLE", errMsg: "Not available" }, { status: upstreamStatus }));
+    const response = await app.request(`/api/agent-library${path}`);
+    expect(response.status).toBe(status);
+    expect(await response.json()).toMatchObject({ code });
+    expect(app.calls).toHaveLength(1);
+    expect(app.calls[0]!.url).toBe(`https://eval-sp.test/api${path}`);
+  });
+
   it("reads one selected MCP Server read-only", async () => {
     const id = "d75b2a66-08b3-4c7c-acf2-79d17110d663";
     const app = setup(envelope({ id, name: "Eval 结果提交", source: "user", status: "active", authType: "bearer" }));

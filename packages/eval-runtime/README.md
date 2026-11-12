@@ -16,6 +16,16 @@ Focused Harness/Runtime tests use the same `fixtures/pi-native-public-v1.json`
 generated through the published UA public trajectory export, rebinding only
 test Chat/Submission IDs and perturbing records for negative/error cases.
 
+The raw cutover uses Runtime alpha.32 public fixtures and only new Chats/Runs.
+It does not resume an old SAFE Chat or relabel archived evidence. Manifest schema
+stays 2 because the bundle layout is unchanged. Public HTTP validation remains
+in the SP Harness; the installed alpha.9 cannot validate raw records and must be
+replaced by a verified public release before integrated acceptance.
+Bounded scanner interpretations are not native evidence records: they carry
+independent omission paths, not magic withholding strings. Runtime's resource
+boundary accepts the contracts-owned raw or body-free Metrics entries while
+retaining scope, CAS, cancellation/disposal, retry and terminal-result behavior.
+
 For new resources the Harness returns an ephemeral `AgentResourceSnapshotDownload`
 with a validated `summary`, not a Chat-sized `AgentResourceSnapshot` array.
 Runtime saves the counted download, checks its scope, passes its bounded

@@ -1,18 +1,16 @@
 import { createHash } from "node:crypto";
 import {
-  isSafePiTrajectoryRecord, isSpPiTrajectoryReference, spPiTrajectoryIdentityParts,
-  type SpPiTrajectoryPage,
+  isSpPiTrajectoryReference, type SpPiTrajectoryPage,
 } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 import {
-  evalEvidenceTrajectoryPageSchema, EVAL_EVIDENCE_FILE_MAX_BYTES, EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX,
+  EVAL_EVIDENCE_FILE_MAX_BYTES, EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX,
 } from "@springbrand/eval-harness";
 import type { Context } from "hono";
 import { z } from "zod";
 import { fileResponse } from "../lib/file-response.js";
 import type { AppBindings } from "../lib/types.js";
 import type { ChatRef } from "../sp/observation.js";
-import { record } from "./common.js";
 import { ownedTrajectoryChat } from "./inspect.js";
 import { inspectCaseSchema } from "./schemas.js";
 
@@ -25,35 +23,10 @@ const querySchema = z.strictObject({
   }
 });
 type Query = z.output<typeof querySchema>;
-const invalid = () => new HttpError("RESPONSE_INVALID", "SP returned an invalid SAFE Pi trajectory page");
+const invalid = () => new HttpError("RESPONSE_INVALID", "SP returned an invalid raw Pi trajectory page");
 const encoding = new TextEncoder();
 // SP and the public schema bound each page to 200 rows / 4 MB; do not fetch one record per request.
 const PAGE_LIMIT = EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX;
-
-/** Public SP SAFE page is canonical; also bind it to this one Chat and frozen cursor.
- * Keep the original parsed record, never Zod's projected copy of Pi fields. */
-function nativePage(value: unknown, chatId: string, afterSeq: number, throughSeq?: number): SpPiTrajectoryPage {
-  if (!evalEvidenceTrajectoryPageSchema.safeParse(value).success) throw invalid();
-  const page = value as SpPiTrajectoryPage;
-  if (page.records.length > PAGE_LIMIT || page.cursor.throughSeq < afterSeq
-    || throughSeq !== undefined && page.cursor.throughSeq !== throughSeq) throw invalid();
-  let last = afterSeq;
-  for (const row of page.records) {
-    if (row.ingestSeq <= last || row.ingestSeq > page.cursor.throughSeq) throw invalid();
-    if (isSpPiTrajectoryReference(row)) {
-      if (row.reference.throughSeq !== page.cursor.throughSeq
-        || spPiTrajectoryIdentityParts(row.reference.identity)?.[1] !== chatId
-        || row.reference.byteLength > EVAL_EVIDENCE_FILE_MAX_BYTES) throw invalid();
-    } else if (!isSafePiTrajectoryRecord(row.record) || row.record.resource.sessionId !== chatId
-      || row.record.parent !== undefined && record(row.record.parent.resource)?.sessionId !== chatId) {
-      throw invalid();
-    }
-    last = row.ingestSeq;
-  }
-  if (page.nextAfterSeq !== null && (page.records.length === 0 || page.nextAfterSeq !== last
-    || last >= page.cursor.throughSeq)) throw invalid();
-  return page;
-}
 
 function query(c: Context<AppBindings>): Query {
   if (c.req.url.length > 32_768) throw new HttpError("REQUEST_INVALID_INPUT", "Trajectory query is too large");
@@ -72,7 +45,6 @@ async function* lines(c: Context<AppBindings>, input: Query, chat: ChatRef,
   const records = createHash("sha256");
   const throughSeq = first.cursor.throughSeq;
   let page = first;
-  let afterSeq = 0;
   let recordCount = 0;
   for (;;) {
     if (signal.aborted) throw signal.reason;
@@ -82,7 +54,7 @@ async function* lines(c: Context<AppBindings>, input: Query, chat: ChatRef,
       const suffix = encoding.encode("}\n");
       if (isSpPiTrajectoryReference(row)) {
         // Only the verified spool is made available: no JSONL prefix or SP bytes
-        // can be sent before the full reference has passed length/hash/SAFE checks.
+        // can be sent before the full reference has passed length/hash/raw checks.
         const verified = await c.env.observation.trajectoryRecord(chat, row, signal);
         try {
           if (signal.aborted) throw signal.reason;
@@ -107,7 +79,7 @@ async function* lines(c: Context<AppBindings>, input: Query, chat: ChatRef,
           await verified.dispose();
         }
       } else {
-        // The SP page has already passed its public SAFE schema and Chat checks.
+        // The SP page has already passed its public raw schema and Chat checks.
         // Reserialization preserves every parsed Pi field, without 4-KiB truncation.
         const bytes = encoding.encode(JSON.stringify(row.record));
         if (bytes.byteLength > EVAL_EVIDENCE_FILE_MAX_BYTES) throw invalid();
@@ -120,9 +92,8 @@ async function* lines(c: Context<AppBindings>, input: Query, chat: ChatRef,
       recordCount++;
     }
     if (page.nextAfterSeq === null) break; // authoritative terminal page under frozen cutoff
-    afterSeq = page.nextAfterSeq;
-    page = nativePage(await c.env.observation.trajectory(chat,
-      { afterSeq, throughSeq, limit: PAGE_LIMIT }, signal), chat.chatId, afterSeq, throughSeq);
+    page = await c.env.observation.trajectory(chat,
+      { afterSeq: page.nextAfterSeq, throughSeq, limit: PAGE_LIMIT }, signal);
   }
   // A long-running stream must not claim success if its Project or stage was replaced.
   if (signal.aborted) throw signal.reason;
@@ -165,8 +136,7 @@ export function asStream(source: AsyncGenerator<Uint8Array>, abort: AbortControl
 export async function streamTrajectory(c: Context<AppBindings>): Promise<Response> {
   const input = query(c);
   const chat = await ownedTrajectoryChat(c, input);
-  const first = nativePage(await c.env.observation.trajectory(chat, { afterSeq: 0, limit: PAGE_LIMIT }, c.req.raw.signal),
-    chat.chatId, 0);
+  const first = await c.env.observation.trajectory(chat, { afterSeq: 0, limit: PAGE_LIMIT }, c.req.raw.signal);
   const abort = new AbortController();
   const signal = AbortSignal.any([c.req.raw.signal, abort.signal]);
   return fileResponse({ body: asStream(lines(c, input, chat, first, signal), abort),

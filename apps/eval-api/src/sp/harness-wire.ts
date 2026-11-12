@@ -1,5 +1,5 @@
 import {
-  AGENT_STATUSES, EVIDENCE_KINDS, jsonObjectArrayInPlaceSchema,
+  AGENT_STATUSES, EVIDENCE_KINDS, isPiTrajectoryRecord, jsonObjectArrayInPlaceSchema, jsonObjectInPlaceSchema,
 } from "@eval-platform/eval-contracts";
 import type {
   AgentResourceReadinessReport,
@@ -9,7 +9,7 @@ import type {
   ExecutionOutput,
   JsonValue,
   MaterializedDataBinding,
-  PiTrajectoryRecord,
+  PiTrajectoryRecordView,
   SpPiTrajectoryPage,
 } from "@eval-platform/eval-contracts";
 import type { AgentHandle, AgentSubmission, EnsureAgentInput } from "@eval-platform/eval-runtime/harness";
@@ -25,6 +25,7 @@ import {
   evalResourceNativePageSchema,
   evalResourceReadinessReportSchema,
   evalSubmitSchema,
+  EVAL_RESULT_MAX_BYTES,
   stableEvalFacts,
   type EvalBillingResourcesPage,
   type EvalEnsureChat,
@@ -174,16 +175,28 @@ export function resourceReadiness(value: unknown): AgentResourceReadinessReport 
   return response(evalResourceReadinessReportSchema, value, "resource readiness");
 }
 
-/** The public parser enforces the SAFE Pi wire (including the no-inner-sequence
- * rule). Its UA declaration doesn't narrow the refined projection to `safe`,
- * so verify that condition before returning Eval's browser-safe record type. */
+/** The public parser enforces the raw Pi wire (including the no-inner-sequence
+ * rule). The local guard keeps original parsed Pi values after validation,
+ * without replacing the public native schema with a local wire mirror. */
 function publicNativePage(schema: z.ZodType<EvalEvidenceTrajectoryPage>, value: unknown, name: string): SpPiTrajectoryPage {
   const page = response(schema, value, name);
-  if (page.records.some((row) => !isEvalNativeRecordReference(row)
-    && (row.record.projection?.kind !== "safe" || "ingestSeq" in row.record))) {
+  const original = response(jsonObjectInPlaceSchema, value, name).records;
+  if (!Array.isArray(original) || original.length !== page.records.length) {
     throw new SpHarnessError(`Eval SP returned an invalid ${name}`, false);
   }
-  return page as unknown as SpPiTrajectoryPage;
+  const records: SpPiTrajectoryPage["records"][number][] = [];
+  for (const [index, row] of page.records.entries()) {
+    if (isEvalNativeRecordReference(row)) records.push(row);
+    else {
+      const source = original[index];
+      if (source === null || typeof source !== "object" || Array.isArray(source)
+        || !isPiTrajectoryRecord(source.record) || "ingestSeq" in source.record) {
+        throw new SpHarnessError(`Eval SP returned an invalid ${name}`, false);
+      }
+      records.push({ ingestSeq: row.ingestSeq, record: source.record });
+    }
+  }
+  return { ...page, records };
 }
 
 export function resourceNativePage(value: unknown): SpPiTrajectoryPage {
@@ -216,9 +229,9 @@ export function evidenceTrajectoryPage(value: unknown): SpPiTrajectoryPage {
 /** Only model[0] of a native Entry can carry the selected Submission's assistant
  * reply. `undefined` is not an assistant; `null` is an assistant with no usable
  * complete reply (so an earlier message must not be substituted). */
-export function finalReplyText(value: PiTrajectoryRecord, submissionId: string): string | null | undefined {
-  if (value.format !== "pi-trajectory/v1" || value.projection?.kind !== "safe"
-    || value.submissionId !== submissionId || value.origin === "context"
+export function finalReplyText(value: PiTrajectoryRecordView, submissionId: string,
+  omittedPaths: readonly string[] = []): string | null | undefined {
+  if (value.submissionId !== submissionId
     || value.record.type !== "entry") return undefined;
   const entry = value.record.value;
   if (entry.kind === "springbrand.trajectory") return undefined;
@@ -236,16 +249,19 @@ export function finalReplyText(value: PiTrajectoryRecord, submissionId: string):
     || typeof message.timestamp !== "number" || !Number.isFinite(message.timestamp)
     || message.stopReason !== "stop") return null;
   const blocks: string[] = [];
-  for (const block of message.content) {
+  const missing = (path: string) => omittedPaths.some((omitted) =>
+    path === omitted || path.startsWith(`${omitted}/`) || omitted.startsWith(`${path}/`));
+  for (const [index, block] of message.content.entries()) {
     if (block === null || typeof block !== "object" || Array.isArray(block)) return null;
     const content = block as Record<string, JsonValue>;
+    const path = `/record/value/model/0/content/${index}`;
+    if (missing(`${path}/type`)) return null;
     if (content.type === "thinking") continue;
-    if (content.type !== "text" || typeof content.text !== "string"
-      || content.text === "[REDACTED]" || content.text === "[CONTENT OMITTED]") return null;
+    if (content.type !== "text" || typeof content.text !== "string" || missing(`${path}/text`)) return null;
     blocks.push(content.text);
   }
   const text = blocks.join("\n");
-  return text.trim() === "" ? null : text;
+  return text.trim() === "" || new TextEncoder().encode(text).byteLength > EVAL_RESULT_MAX_BYTES ? null : text;
 }
 
 export function evidenceFileReceipt(value: unknown): EvalEvidenceFileReceipt {

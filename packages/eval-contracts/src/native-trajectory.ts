@@ -1,4 +1,5 @@
 import type { JsonValue } from "./model.js";
+import type { EvalEvidenceTrajectoryPage } from "@springbrand/eval-harness";
 import { z } from "zod";
 import { jsonObjectInPlaceSchema } from "./json.js";
 
@@ -7,37 +8,65 @@ import { jsonObjectInPlaceSchema } from "./json.js";
  * No event-only records are native. */
 export const SP_PI_TRAJECTORY_FORMAT = "sp-pi-trajectory/v1";
 export const PI_TRAJECTORY_RECORD_FORMAT = "pi-trajectory/v1";
+export const PI_METRIC_RECORD_FORMAT = "eval-pi-metric-record/v1";
+export const NATIVE_PROJECTION_VERSION = 2;
+export const NATIVE_CHARGE_LINK_VERSION = 2;
+export const NATIVE_TOOL_CALL_KEY_PREFIX = "tck2_";
 /** Browser-safe persisted reference shape; the API parses transfers with SP's public schema. */
 export const SP_PI_TRAJECTORY_RECORD_FORMAT = "sp-pi-trajectory-record/v1";
-export const SP_PI_TRAJECTORY_RECORD_IDENTITY_HEADER = "X-Eval-Trajectory-Identity";
-export const SP_PI_TRAJECTORY_RECORD_INGEST_SEQ_HEADER = "X-Eval-Trajectory-Ingest-Seq";
-export const SP_PI_TRAJECTORY_RECORD_THROUGH_SEQ_HEADER = "X-Eval-Trajectory-Through-Seq";
 
 /** Minimal structural view of the public UA TrajectoryRecord. `record.value` remains
- * opaque native Pi data: Eval never rewrites or reconstructs a Conversation. */
-export interface PiTrajectoryRecord {
-  readonly format: typeof PI_TRAJECTORY_RECORD_FORMAT;
+ * opaque native Pi data: this view is not a full native validator or original evidence. */
+export type PiTrajectoryRecordView = {
   readonly resource: { readonly agentId: string; readonly sessionId: string };
-  readonly submissionId: string | null;
-  readonly projection: { readonly kind: "safe"; readonly policyId: string; readonly policyVersion: number };
   readonly record:
     | { readonly type: "conversation"; readonly value: { readonly id: number } & Readonly<Record<string, JsonValue>> }
     | { readonly type: "entry"; readonly value: {
       readonly id: number; readonly conversationId: number; readonly kind: string;
     } & Readonly<Record<string, JsonValue>> };
-  readonly origin?: "execution" | "context";
   readonly parent?: Readonly<Record<string, JsonValue>>;
+} & (
+  | { readonly submissionId: string; readonly origin?: "execution" }
+  | { readonly submissionId: null; readonly origin: "context" }
+);
+
+export type PiTrajectoryRecord = PiTrajectoryRecordView & {
+  readonly format: typeof PI_TRAJECTORY_RECORD_FORMAT;
+  readonly ingestSeq?: number;
+};
+
+export interface NativeTrajectoryInterpretationEntry {
+  readonly ingestSeq: number;
+  readonly interpretation: {
+    readonly record: PiTrajectoryRecordView;
+    readonly omittedPaths: readonly string[];
+  };
 }
+
+export interface CompactNativeTrajectoryEntry {
+  readonly ingestSeq: number;
+  readonly record: PiTrajectoryRecordView & { readonly format: typeof PI_METRIC_RECORD_FORMAT };
+  readonly metricProjection: {
+    readonly version: typeof NATIVE_PROJECTION_VERSION;
+    readonly chargeLinkVersion: typeof NATIVE_CHARGE_LINK_VERSION;
+    readonly fingerprint: string;
+    readonly supported: boolean;
+    readonly complete: boolean;
+    readonly facts: readonly Readonly<Record<string, JsonValue>>[];
+  };
+}
+
+export type ResourceNativeTrajectoryEntry = NativeTrajectoryEntry | CompactNativeTrajectoryEntry;
 
 /** Source cursor of a single complete native record; not an event ID or an index into a page. */
 export interface NativeTrajectoryEntry {
   readonly ingestSeq: number;
   readonly record: PiTrajectoryRecord;
-  /** Eval-only compact metric facts, never a field of SP's public page or raw resource response. */
-  readonly metricProjection?: Readonly<Record<string, JsonValue>>;
+  /** Raw pages cannot supply or impersonate local derived Metrics facts. */
+  readonly metricProjection?: never;
 }
 
-/** Not a partial native record: its exact serialized SAFE Pi record must be fetched and verified. */
+/** Not a partial native record: its exact serialized raw Pi record must be fetched and verified. */
 export interface SpPiTrajectoryRecordReference {
   readonly ingestSeq: number;
   readonly reference: {
@@ -53,27 +82,30 @@ export interface SpPiTrajectoryRecordReference {
 
 export type SpPiTrajectoryPageRow = NativeTrajectoryEntry | SpPiTrajectoryRecordReference;
 
-/** The same bounded, frozen page is used for both evidence export and Evaluator final replies. */
-export interface SpPiTrajectoryPage {
-  readonly format: typeof SP_PI_TRAJECTORY_FORMAT;
-  readonly cursor: { readonly throughSeq: number };
+/** Public Harness page metadata with original, opaque Pi bodies after HTTP validation.
+ * This type-only dependency never loads the Harness runtime root in a browser. */
+export type SpPiTrajectoryPage = Omit<EvalEvidenceTrajectoryPage, "records"> & {
   readonly records: readonly SpPiTrajectoryPageRow[];
-  readonly nextAfterSeq: number | null;
-}
+};
 
 /** Local storage/stream guard only; the API HTTP page uses SP's published schema. */
-export function isSafePiTrajectoryRecord(value: unknown): value is PiTrajectoryRecord {
+export function isPiTrajectoryRecord(value: unknown): value is PiTrajectoryRecord {
+  const item = object(value);
+  if (!item || item.format !== PI_TRAJECTORY_RECORD_FORMAT
+    || !onlyKeys(item, ["format", "resource", "submissionId", "record", "parent", "origin", "ingestSeq"])
+    || ("ingestSeq" in item && !positive(item.ingestSeq))) return false;
+  const { format: _format, ingestSeq: _ingestSeq, ...view } = item;
+  return isPiTrajectoryRecordView(view);
+}
+
+export function isPiTrajectoryRecordView(value: unknown): value is PiTrajectoryRecordView {
   if (!jsonObjectInPlaceSchema.safeParse(value).success) return false;
   const item = value as Record<string, unknown>;
   const resource = object(item.resource);
-  const projection = object(item.projection);
   const write = object(item.record);
   const native = object(write?.value);
-  if (item.format !== PI_TRAJECTORY_RECORD_FORMAT
-    || !resource || !name(resource.agentId) || !name(resource.sessionId)
+  if (!resource || !name(resource.agentId) || !name(resource.sessionId)
     || !onlyKeys(resource, ["agentId", "sessionId"])
-    || !projection || projection.kind !== "safe" || !name(projection.policyId)
-    || !positive(projection.policyVersion) || !onlyKeys(projection, ["kind", "policyId", "policyVersion"])
     || !write || (write.type !== "entry" && write.type !== "conversation")
     || !native || !positive(native.id)) return false;
   if (item.submissionId === null) {
@@ -92,8 +124,8 @@ export function isSafePiTrajectoryRecord(value: unknown): value is PiTrajectoryR
     || !name(parent.submissionId)
     || ["conversationId", "taskId"].some((key) => parent[key] !== undefined && !positive(parent[key]))
     || ["requestId", "toolCallId", "runId"].some((key) => parent[key] !== undefined && !name(parent[key])))) return false;
-  // SP's page schema forbids an inner ingestSeq: only the outer stored row owns it.
-  return onlyKeys(item, ["format", "resource", "submissionId", "projection", "record", "parent", "origin"])
+  // Interpretation views have no cursor; SP's row guard separately rejects an inner ingestSeq.
+  return onlyKeys(item, ["resource", "submissionId", "record", "parent", "origin"])
     && onlyKeys(write, ["type", "value"]);
 }
 
@@ -127,7 +159,7 @@ export function spPiTrajectoryIdentityParts(identity: string):
   }
 }
 
-export function spPiTrajectoryRecordIdentity(record: PiTrajectoryRecord): string {
+export function spPiTrajectoryRecordIdentity(record: PiTrajectoryRecordView): string {
   return JSON.stringify([record.resource.agentId, record.resource.sessionId, record.record.type, record.record.value.id]);
 }
 
@@ -155,7 +187,7 @@ export function isSpPiTrajectoryReference(value: SpPiTrajectoryPageRow): value i
  * this ordered page stream; an arbitrary foreign parent is not authorization.
  * Child Context (null Submission) is in scope only with such a parent. */
 export function nativeRecordMayBelongToScope(
-  value: PiTrajectoryRecord, scope: { readonly chatId: string; readonly submissionId: string },
+  value: PiTrajectoryRecordView, scope: { readonly chatId: string; readonly submissionId: string },
   verifiedSubmissions?: ReadonlySet<string>,
 ): boolean {
   const parent = object(value.parent);
@@ -166,41 +198,103 @@ export function nativeRecordMayBelongToScope(
     || verifiedSubmissions?.has(parent.submissionId as string) === true);
 }
 
+const rawSpRecordSchema = z.custom<PiTrajectoryRecord>(isPiTrajectoryRecord, "Expected a raw native Pi trajectory envelope")
+  .refine((record) => record.ingestSeq === undefined, "Only the outer SP row owns the ingestion cursor");
+
 export const nativeTrajectoryEntrySchema: z.ZodType<NativeTrajectoryEntry> = z.strictObject({
   ingestSeq: z.number().int().positive().safe(),
-  record: z.custom<PiTrajectoryRecord>(isSafePiTrajectoryRecord, "Expected a safe native Pi trajectory record"),
+  record: rawSpRecordSchema,
   // Only the Eval Metrics projection has this field; the public SP page below
   // remains a raw wire and cannot supply or forge local derived facts.
-  metricProjection: jsonObjectInPlaceSchema.exactOptional(),
 });
 
-const spNativeRecordSchema = z.strictObject({
-  ingestSeq: z.number().int().positive().safe(),
-  record: z.custom<PiTrajectoryRecord>(isSafePiTrajectoryRecord, "Expected a safe native Pi trajectory record"),
-});
-export const spPiTrajectoryPageRowSchema: z.ZodType<SpPiTrajectoryPageRow> =
-  z.union([spNativeRecordSchema, spPiTrajectoryReferenceSchema]);
+const metricFields: Readonly<Record<string, readonly string[]>> = {
+  turn: ["type", "phase", "id", "timestamp", "status", "durationMs", "eventId", "scopeKey"],
+  model: ["type", "phase", "id", "turnId", "timestamp", "status", "durationMs", "assistantTimestamp",
+    "inputTokens", "outputTokens", "totalTokens", "eventId", "scopeKey"],
+  tool: ["type", "phase", "id", "turnId", "toolName", "timestamp", "status", "durationMs", "eventId",
+    "fromEvent", "fromPiCall", "fromPiResult", "inputLength", "outputLength", "agentId", "submissionId",
+    "toolCallKey", "executionId", "scopeKey"],
+  assistant: ["type", "id", "timestamp", "taskId", "thinking", "content", "inputTokens", "outputTokens",
+    "totalTokens", "scopeKey"],
+  request: ["type", "id", "purpose", "timestamp", "scopeKey"],
+  hook: ["type", "id", "hook", "taskId", "toolCallId", "timestamp", "durationMs", "outcome", "scopeKey"],
+};
+const numericMetricFields = new Set(["timestamp", "durationMs", "assistantTimestamp",
+  "inputTokens", "outputTokens", "totalTokens", "inputLength", "outputLength"]);
+const booleanMetricFields = new Set(["thinking", "content", "fromEvent", "fromPiCall", "fromPiResult"]);
+const metricFactSchema = jsonObjectInPlaceSchema.refine((fact) =>
+  typeof fact.type === "string" && metricFields[fact.type] !== undefined
+  && Object.entries(fact).every(([key, value]) => metricFields[fact.type as string]!.includes(key)
+    && (value === null || typeof value === (numericMetricFields.has(key)
+      ? "number" : booleanMetricFields.has(key) ? "boolean" : "string"))),
+"Expected body-free scalar Metrics facts");
 
-export const spPiTrajectoryPageSchema: z.ZodType<SpPiTrajectoryPage> = z.strictObject({
-  format: z.literal(SP_PI_TRAJECTORY_FORMAT),
-  cursor: z.strictObject({ throughSeq: z.number().int().nonnegative().safe() }),
-  records: z.array(spPiTrajectoryPageRowSchema).max(200),
-  nextAfterSeq: z.number().int().nonnegative().safe().nullable(),
-}).superRefine((page, context) => {
-  page.records.forEach((row, index) => {
-    if (index > 0 && row.ingestSeq <= page.records[index - 1]!.ingestSeq) {
-      context.addIssue({ code: "custom", path: ["records", index, "ingestSeq"], message: "Records must ascend" });
+function derivedToolKey(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith(NATIVE_TOOL_CALL_KEY_PREFIX)
+    && /^[0-9a-f]{64}$/u.test(value.slice(NATIVE_TOOL_CALL_KEY_PREFIX.length));
+}
+
+function scopedToolOperation(value: JsonValue | undefined, source: PiTrajectoryRecordView): boolean {
+  if (value === null) return true;
+  if (typeof value !== "string") return false;
+  try {
+    const parts: unknown = JSON.parse(value);
+    return Array.isArray(parts) && parts.length === 4 && parts[0] === source.resource.agentId
+      && parts[1] === source.resource.sessionId && parts[2] === source.submissionId
+      && derivedToolKey(parts[3]) && JSON.stringify(parts) === value;
+  } catch {
+    return false;
+  }
+}
+
+function isCompactNativeSource(value: unknown): value is CompactNativeTrajectoryEntry["record"] {
+  const source = object(value);
+  if (!source || source.format !== PI_METRIC_RECORD_FORMAT) return false;
+  const { format: _format, ...view } = source;
+  if (!isPiTrajectoryRecordView(view)) return false;
+  const write = view.record;
+  return onlyKeys(write.value, write.type === "conversation" ? ["id"] : ["id", "conversationId", "kind"])
+    && (view.parent === undefined || onlyKeys(view.parent, ["resource", "submissionId"]));
+}
+
+export const compactNativeTrajectoryEntrySchema: z.ZodType<CompactNativeTrajectoryEntry> = z.strictObject({
+  ingestSeq: sequence,
+  record: z.custom<CompactNativeTrajectoryEntry["record"]>(isCompactNativeSource, "Expected a body-free Metrics source identity"),
+  metricProjection: z.strictObject({
+    version: z.literal(NATIVE_PROJECTION_VERSION),
+    chargeLinkVersion: z.literal(NATIVE_CHARGE_LINK_VERSION),
+    fingerprint: z.string().regex(/^[0-9a-f]{64}$/u),
+    supported: z.boolean(),
+    complete: z.boolean(),
+    facts: z.array(metricFactSchema),
+  }).refine((projection) => projection.supported || (!projection.complete && projection.facts.length === 0)),
+}).superRefine((entry, context) => {
+  if (!isCompactNativeSource(entry.record) || !entry.metricProjection
+    || !Array.isArray(entry.metricProjection.facts)) return;
+  if (entry.record.submissionId === null && entry.metricProjection.facts.length !== 0) {
+    context.addIssue({ code: "custom", path: ["metricProjection", "facts"], message: "Context has no execution facts" });
+  }
+  for (const [index, fact] of entry.metricProjection.facts.entries()) {
+    if (!object(fact)) continue;
+    if (fact.type === "tool" && (!scopedToolOperation(fact.id, entry.record)
+      || (fact.toolCallKey !== undefined && (!derivedToolKey(fact.toolCallKey)
+        || fact.id !== JSON.stringify([
+          entry.record.resource.agentId, entry.record.resource.sessionId, entry.record.submissionId, fact.toolCallKey,
+        ]) || fact.agentId !== entry.record.resource.agentId || fact.submissionId !== entry.record.submissionId)))) {
+      context.addIssue({ code: "custom", path: ["metricProjection", "facts", index],
+        message: "Tool facts require scoped derived identities, never raw Call IDs" });
     }
-    if (row.ingestSeq > page.cursor.throughSeq) {
-      context.addIssue({ code: "custom", path: ["records", index, "ingestSeq"], message: "Record is after the cutoff" });
+    if (fact.type === "hook" && !scopedToolOperation(fact.toolCallId, entry.record)) {
+      context.addIssue({ code: "custom", path: ["metricProjection", "facts", index, "toolCallId"],
+        message: "Tool hook identity must be scoped and derived" });
     }
-    if (isSpPiTrajectoryReference(row) && row.reference.throughSeq !== page.cursor.throughSeq) {
-      context.addIssue({ code: "custom", path: ["records", index, "reference", "throughSeq"],
-        message: "Record reference must use the page cutoff" });
-    }
-  });
-  if (page.nextAfterSeq !== null && (page.records.at(-1)?.ingestSeq !== page.nextAfterSeq
-    || page.nextAfterSeq >= page.cursor.throughSeq)) {
-    context.addIssue({ code: "custom", path: ["nextAfterSeq"], message: "Next cursor must advance within the cutoff" });
   }
 });
+
+export function isCompactNativeTrajectoryEntry(value: unknown): value is CompactNativeTrajectoryEntry {
+  return compactNativeTrajectoryEntrySchema.safeParse(value).success;
+}
+
+export const resourceNativeTrajectoryEntrySchema: z.ZodType<ResourceNativeTrajectoryEntry> =
+  z.union([nativeTrajectoryEntrySchema, compactNativeTrajectoryEntrySchema]);

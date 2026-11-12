@@ -1,4 +1,5 @@
 import { text, type JsonRecord } from "../json.js";
+import { isPiTrajectoryRecord } from "@eval-platform/eval-contracts";
 import type {
   CoveredNumericSummary, MetricNumber, OperationStatistics, ResourceStatistics,
   StepTokens, ToolMetric, TrajectorySummary,
@@ -79,11 +80,12 @@ function groupOperations(stream: FactStream, diagnostics: ResourceDiagnostics): 
     const compact = projection?.version === NATIVE_PROJECTION_VERSION;
     const facts = compact
       ? projection?.supported === true ? (projection.facts as readonly JsonRecord[]) : undefined
-      : nativeRecordFacts(source.fact);
+      : isPiTrajectoryRecord(source.fact) ? nativeRecordFacts(source.fact) : undefined;
+    if (compact && projection?.complete !== true) complete = false;
     if (facts === undefined) {
 
       complete = false;
-      diagnostics.report("unsupported-record", "nativeRecords", source, "Unsupported native Pi record or safe projection");
+      diagnostics.report("unsupported-record", "nativeRecords", source, "Unsupported native Pi record or Metrics facts");
       continue;
     }
     for (const fact of facts) {
@@ -312,7 +314,8 @@ function groupOperations(stream: FactStream, diagnostics: ResourceDiagnostics): 
       diagnostics.report("missing-identity", "nativeRecords", operation.first, "Tool event has no Pi Tool Call arguments");
     }
     if (!operation.hasTerminal) operation.status = operation.canEmit ? "inProgress" : "unknown";
-    if (operation.durationMs === null && operation.startMs !== null && operation.endMs !== null) {
+    if (operation.durationMs === null && !operation.conflictingFields.has("durationMs")
+      && operation.startMs !== null && operation.endMs !== null) {
       if (operation.endMs < operation.startMs) {
         complete = false;
         diagnostics.report("invalid-value", "nativeRecords", operation.first, "Native operation ended before it started");

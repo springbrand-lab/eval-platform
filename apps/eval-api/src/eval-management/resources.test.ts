@@ -88,4 +88,53 @@ describe("bounded management choices and SP discovery", () => {
     expect(app.ownerServices).toHaveBeenCalledTimes(5);
     expect(app.ownerServices.mock.calls.every(([user]) => user.id === OWNER)).toBe(true);
   });
+
+  it("discovers Frank connector-slug groups and returns raw local Action IDs for selection and detail", async () => {
+    const app = setupManagement();
+    const supplier = { id: "exa", name: "Exa" };
+    const action = { id: "action.local.exa.search", name: "Exa Search (local)", description: "Search the web",
+      status: "active", selectable: true, supplier };
+    app.sp.requestAgentLibrary.mockImplementation(async (_token, request) => {
+      if (request.route.path === "/actions") return { data: [{ supplier, actionCount: 1 }], total: 1 };
+      if (request.route.path === "/actions/group-actions") return { data: [action], total: 1 };
+      if (request.route.path === "/actions/{id}") return action;
+      throw new Error(`Unexpected public library path ${request.route.path}`);
+    });
+    expect(await toolValue(await app.call("search_agent_resources", {
+      kind: "action_groups", q: "Exa (local)", pageSize: 2,
+    }))).toEqual({ kind: "action_groups", page: 1, pageSize: 2, total: 1,
+      items: [{ id: "exa", name: "Exa", unassigned: false, actionCount: 1 }] });
+    const selected = { id: action.id, name: action.name, description: action.description,
+      status: "active", selectable: true, supplierId: "exa" };
+    expect(await toolValue(await app.call("search_agent_resources", {
+      kind: "actions", supplierId: "exa", q: "Search (local)", pageSize: 2,
+    }))).toEqual({ kind: "actions", page: 1, pageSize: 2, total: 1, items: [selected] });
+    expect(await toolValue(await app.call("search_agent_resources", {
+      kind: "actions", id: action.id,
+    }))).toEqual({ kind: "actions", item: selected });
+    expect(app.sp.requestAgentLibrary.mock.calls.map(([token, request]) => ({
+      token, path: request.route.path, id: request.id, search: request.search,
+    }))).toEqual([
+      { token: "fixed-session", path: "/actions", id: undefined, search: "?page=1&pageSize=2&q=Exa+%28local%29" },
+      { token: "fixed-session", path: "/actions/group-actions", id: undefined,
+        search: "?page=1&pageSize=2&q=Search+%28local%29&supplierId=exa" },
+      { token: "fixed-session", path: "/actions/{id}", id: action.id, search: "" },
+    ]);
+  });
+
+  it("does not accept a different historical ID as a Frank Action detail alias", async () => {
+    const app = setupManagement();
+    app.sp.requestAgentLibrary.mockResolvedValueOnce({
+      id: "action.exa.search", name: "Search", status: "active", selectable: true,
+      supplier: { id: "exa", name: "Exa" },
+    });
+    const response = await (await app.call("search_agent_resources", {
+      kind: "actions", id: "action.local.exa.search",
+    })).json();
+    expect(response).toMatchObject({ result: { isError: true,
+      content: [{ text: expect.stringContaining("RESPONSE_INVALID") }] } });
+    expect(app.sp.requestAgentLibrary).toHaveBeenCalledExactlyOnceWith("fixed-session",
+      expect.objectContaining({ route: expect.objectContaining({ path: "/actions/{id}" }),
+        id: "action.local.exa.search", search: "" }));
+  });
 });

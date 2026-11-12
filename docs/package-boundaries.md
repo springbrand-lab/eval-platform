@@ -59,21 +59,49 @@ or the shared editor.
 
 ### Evidence export and import
 
-> **Published-package status (2026-11-02):** EP pins
-> `@springbrand/eval-harness@0.1.0-alpha.9` and parses HTTP
-> evidence/header/native/billing pages with its public schemas and finalized
-> or explicitly opted-in partial route/record-byte builders. The strict Header
-> requires an Action receipt's `actionId`; model billing pages cannot impersonate
-> Action/Tool charges. Browser-safe `eval-contracts` types and the bounded byte
-> verifier remain local storage/stream boundaries, not HTTP substitutes.
-> Older "private/unpublished" or "keep alpha.5/alpha.7" statements below are
-> superseded. Real deployed SP/EP parity remains unverified. Bounded
-> Attempt-resource assembly has an isolated PostgreSQL 18.3 regression,
-> not a verified live release.
+> **Source cutover status (2026-11-12):** New Chats/Runs target the exact
+> Runtime alpha.32 raw contract and Harness alpha.10. EP still installs Harness
+> alpha.9, whose SAFE-only schema is not valid for the new raw producer; the
+> user must publish the new package before the exact dependency cutover.
+> Public Harness schemas and path builders remain the HTTP authority.
+> Generic byte/JSON/envelope verification is owned by SP's public Harness
+> exports over canonical Agent Contracts, not an EP-local parser. EP retains
+> browser-safe storage views and bounded Metrics/reply interpretation. The
+> real alpha.10 candidate passes an isolated strict adapter typecheck and
+> 232 tests; this does not make the installed alpha.9 gate pass.
+> Large-record receipts prove integrity/envelope, not full opaque native-schema
+> validation. No SAFE/raw decoder
+> union, historical resume, or evidence rewrite is part of the cutover.
+> Real deployment parity and a current isolated PostgreSQL run remain unverified.
+> See [source delivery status](agent-runtime-alpha32-integration-status-2026-11-11.md).
 
-The existing Harness/EvidenceStore seam owns one immutable evidence bundle per successful Subject execution. The Harness exports produced artifacts, original Subject Material files resolved from the Project's fixed references, and the complete raw safe Pi source trajectory in order. Evidence trajectory means the full Chat keyset through one frozen watermark, including imported reference Context and any earlier Submission in that Chat; the requested terminal Submission authorizes and binds the read, but does not filter the evidence rows. The adapter rejects unsafe/unprojected records or records whose resource or parent belongs to another Chat. EvidenceStore stores both file groups by content hash and splits trajectory JSONL at native record boundaries within the file byte limit; it never normalizes or discards source record fields. The v2 manifest records Subject input identities, artifacts, ordered trajectory parts with sizes/hashes/record counts, completeness and explicit artifact omissions. Runtime passes only the frozen Subject Material references to export, never live Dataset contents. An Evaluator receives its own initialization first, then all evidence files, and the manifest last; the SP adapter uses the public package's evidence path helpers and checks path, size and hash receipts. A native record larger than the file limit is never dropped or truncated: the export fails with an explicit non-retryable error before any part is stored, and the SP import likewise refuses a bundle with a file above SP's per-file limit before writing anything.
+The existing Harness/EvidenceStore seam owns one immutable evidence bundle per
+successful Subject execution. It exports produced artifacts, original Subject
+Material files from the Project's fixed references, and the complete raw Pi
+trajectory in order. The trajectory covers the full Chat keyset through one
+frozen watermark, including imported Context and earlier Submissions in that
+Chat; the terminal Submission authorizes the read, not a filter on evidence rows.
+The adapter rejects malformed or nonraw records and foreign Chat/parent bindings.
+EvidenceStore content-addresses files and splits JSONL only at record boundaries,
+without normalizing or discarding native fields. The v2 manifest preserves input
+identities, artifacts, ordered trajectory part sizes/hashes/counts, completeness
+and explicit artifact omissions. Runtime passes only frozen Material references.
+An Evaluator receives initialization, all evidence files, and the manifest last,
+using the public path helpers and verified path/size/hash receipts. A native
+record larger than the importable file limit fails explicitly; it is never
+dropped, truncated or split into multiple evidence rows.
 
-The published alpha.9 native page represents an oversized SAFE Pi record as `{ingestSeq,reference:{format,throughSeq,identity,byteLength,sha256}}`. Only the service-authenticated Eval API Harness fetches `/evidence/trajectory/records/{ingestSeq}` with that frozen public reference path and Submission ID. It checks content headers, full length/SHA-256, strict UTF-8/JSON, SAFE identity, Context/Submission and same-Chat parent **while streaming** original bytes. EvidenceStore writes one verified JSONL line per native record directly to content-addressed storage without retaining a whole part in JS memory. An empty first page freezes and durably saves its watermark; a missing terminal page or short stream cannot finalize evidence. The R2 adapter uses a bounded temporary disk spool, uploads once to the content key and removes it. References never enter JSONL or manifests. The browser-safe `eval-contracts` structural view is only a storage/byte safety boundary: the HTTP page and record paths use installed public schemas/helpers. Real cross-deployment verification is outstanding.
+An oversized raw record uses
+`{ingestSeq,reference:{format,throughSeq,identity,byteLength,sha256}}`.
+Only the service-authenticated Harness fetches the public record-byte path with
+the frozen reference and Submission ID. It verifies headers, complete length and
+SHA-256, strict UTF-8/JSON, native identity, Context/Submission and same-Chat parent
+while streaming original bytes. EvidenceStore writes one verified JSONL row per
+native record without retaining a whole part in JS memory. An empty first page
+durably freezes its watermark; a short stream or missing terminal page cannot
+finalize evidence. The R2 adapter uses the existing bounded temporary disk spool.
+References never enter evidence JSONL or manifests. The structural consumer view
+does not replace public HTTP validation. Live cross-deployment parity is unverified.
 
 The same authenticated public Chat service offers a **small** `resources/by-key/{key}/header?submissionId=...` with scope/readiness/coverage, verified Action/Tool charges and a Chat `throughSeq`. `native-records?submissionId=...&afterSeq=&limit=200&throughSeq=` reuses the `sp-pi-trajectory/v1` inline/reference page, filtered to one Submission and its provable same-Chat descendants. `billing?submissionId=...&after=&limit=200&throughCount=&throughSha256=` carries paired, API-owned committed usage/settlement facts under a full-source count/SHA-256. The installed npm alpha.9 public schemas and path helpers validate finalized and opted-in partial pages; new collection never calls the legacy combined resources endpoint.
 
@@ -91,7 +119,18 @@ Owns stable runtime/evaluation types shared across packages: Project and its fix
 
 An owner-scoped output-format catalog holds standalone named draft 2020-12 JSON Schema files with immutable bodies; the evaluation plan stores the selected ID and its content digest. Every pipeline/evaluation Run requires an evaluation plan. Runtime resolves the Schema by ID, even after its catalog entry is soft-deleted, and every Evaluation Agent receives it at the fixed path `/evaluation-output.schema.json` in its confined Workspace before submission (see [Eval SP Harness](eval-sp-harness-protocol.md)).
 
-It is the only place for cross-package evaluation contracts. `InitialResourceFile` describes an initial resource's read-only file inventory (`path`, `mediaType`, `byteSize`) shared by API and Web; bytes remain in the API's existing Bundle directory. `AgentResourceSnapshot` carries unchanged SP usage events, safe Pi `nativeRecords` and billing settlements with collection scope and source-completeness metadata. The new, ephemeral `AgentResourceSnapshotDownload` exposes a verified summary and replayable bounded `AgentResourceSnapshotPage`s to the application Store without constructing those arrays in Runtime. Stage records carry only `AgentResourceState` (status with scope or a `summarizeResourceSnapshot` summary, download count, `exhausted`); `AgentResourceCollection` is that state with its stored snapshot loaded. `jsonObjectInPlaceSchema` and `jsonObjectArrayInPlaceSchema` validate raw facts by the same JSON rules without copying them or their array. It does not implement orchestration, persistence, normalization, aggregation or pricing.
+It is the only place for cross-package evaluation contracts.
+`InitialResourceFile` describes the read-only file inventory
+(`path`, `mediaType`, `byteSize`) shared by API and Web; bytes stay in the existing
+Bundle directory. `AgentResourceSnapshot` carries SP usage/billing facts and
+verified native records or the current body-free Metrics projection, with scope
+and source completeness. A compact projection is never advertised as raw Pi;
+complete raw bytes remain the evidence truth. The ephemeral
+`AgentResourceSnapshotDownload` exposes a verified summary and replayable bounded
+pages without constructing whole arrays in Runtime. Stage records carry only
+`AgentResourceState`; `AgentResourceCollection` adds its stored snapshot.
+The in-place JSON schemas validate facts without copying their bodies or arrays.
+This package owns no orchestration, persistence, normalization, aggregation or pricing.
 
 `AgentImportSourceUserPage` and `agentImportSourceUserPageSchema` own the shared source-directory page: exactly `{users:[{id,name,email}],nextCursor:string|null}`, at most 20 users. Source SP owns directory scope, stable name/ID keyset ordering and opaque cursors; the contract package owns no directory lookup, credential or pagination state.
 
@@ -143,7 +182,16 @@ Evaluation requires `sampling.evidence`; otherwise it fails with "sampling has n
 
 Each submitted execution/evaluation attempt owns a persisted `AgentResourceState`; the raw snapshot itself is stored apart from it (see [Attempt resource snapshots](#attempt-resource-snapshots)). Before dispatch, Runtime persists the pending operation scope as `chatId + idempotencyKey`; SP assigns the actual Submission ID on acceptance, which Runtime saves on the Attempt immediately after the receipt or recovery lookup. A collected resource snapshot must include `chatId + submissionId + idempotencyKey`; the Harness may resolve the operation by Chat and key if the receipt is uncertain. Runtime calls the required public `Harness.collectAgentResources()` after terminal observation or uncertain submission/status failure, before collecting outputs, deciding a restart or publishing the stage's terminal state. Creation/initialization failures that never dispatch have no resource collection. Failed, interrupted and cancelled submissions are collected too. Every restart keeps the previous attempt's facts; a separately requested evaluation keeps its own facts in its new EvaluationRecord. Store updates atomically persist the snapshot, attempt and its resource state with the owning Sampling/EvaluationRecord. No resource ledger, database client or DO storage access is added to Runtime.
 
-SP supplies an operation-scoped, consistent snapshot containing only that operation's new work and descendants, excluding imported Session history and shared Subject evidence. For **new** snapshots, `usageEvents`, safe Pi `nativeRecords:[{ingestSeq,record}]` and `billingSettlements` retain original source facts, ordering, duplicates and nulls; `telemetryEvents` is not a live input. Runtime validates scope, envelope and lossless JSON without extracting model requests, Tools or Turns, normalizing Token fields, deduplicating, calculating totals or repricing charges. Source `coverage`, `readiness` and `finalized` remain SP facts. Metrics alone reads native records; authoritative usage/billing remain independent. See [Pi-native parity gate](pi-native-eval-cutover.md).
+SP supplies an operation-scoped snapshot of that operation's new work and
+descendants, excluding imported Session history and shared Subject evidence.
+New HTTP snapshots preserve raw `nativeRecords:[{ingestSeq,record}]` and the
+independent `usageEvents`/`billingSettlements`, including source ordering,
+duplicates and nulls. `telemetryEvents` is not a live input. Runtime validates
+scope, envelope and lossless JSON without extracting requests, Tools or Turns,
+normalizing Tokens, deduplicating, totalling or repricing. Source `coverage`,
+`readiness` and `finalized` remain SP facts. Metrics owns the body-free projection,
+not another trajectory or billing authority.
+See [raw cutover status](agent-runtime-alpha32-integration-status-2026-11-11.md).
 
 Resource reads use the Runtime's fixed ten-retry budget and backoff; for downloads the count is saved on the Attempt before each one, so it survives a crashed process. Retry re-reads the same scope and never creates/restarts an Agent or resubmits work. `AgentResourceState.status` is only `pending | collected | failed`: collected means the original snapshot was saved, not that the source is complete. When the download budget is spent, a collected snapshot is kept and otherwise the Attempt is `failed`, both marked `exhausted` and no longer owed; the refresh reports it through `onError`, never resource payloads. SP's `readiness` diagnostic is required on every newly read snapshot and stored unchanged; stored historical snapshots may lack it. When an ended Agent (terminal Attempt, or an Evaluator whose MCP result was accepted) still owes a failed or unfinalized snapshot (`stageOwesResources`, the one definition shared with the API's resource recollection), its stage state carries `resourcesPending`, derived from and committed with the Attempt write. A finished stage with that flag gets read-only refresh passes on resume (same Chat, key and Submission; no ensure/submit/restart; stage status, output, evidence and accepted results unchanged), spaced by `nextAttemptAt` (60 s, never after `deadline`); at the deadline the current snapshot is kept, the flag cleared and the shortfall reported once. The flag never enters `PENDING_SAMPLING_STATUSES`; `isStageRecoveryPending()` lets a recovery store keep a Run without a pending stop scheduled. Finalizing a stop never reads resources: each ended Attempt still owing them without a collected snapshot is saved as `failed` (`Run stopped before resources were collected`), a collected snapshot is kept, and the flag is cleared; a later manual resource recollection refreshes them as usual. An unconfirmable terminal status persists `observationPending` across Worker passes; the next pass re-observes the same Attempt and Submission, only an explicit failed/interrupted/cancelled terminal consumes `maxRestarts`, and after `OBSERVATION_MAX_ATTEMPTS` passes the stage fails with an explicit message. Status errors carry the inspection outcome (`inspect: null` / `inspect error: …`). Resource collection does not change the Agent/output result or replace its original error. `getSampling()` and EvaluationRecord queries expose these durable facts even from a new Runtime instance; Metrics consumes the application's `MetricsSource` facts rather than SP or private Store tables. Artifacts and complete trajectories still use references; resource snapshots store source resource events, not an additional Workspace or Session copy. Subject artifacts and the complete trajectory are required: after a terminal Submission, execution stays nonterminal until both references and the final execution status are saved together. `execution.evidencePending` marks evidence finalization for recovery without submitting or restarting the Agent; the original Agent failure is preserved.
 
@@ -161,7 +209,32 @@ Owns three internal submodules: `evaluators` compiles the Project Schema into on
 
 `MetricsSource.read(query)` is the application's read-only, consistent projection port, not another Store. Its `MetricsFacts` contain the `ProjectPlan`, the evaluation-plan Schema content (or null), every bound ProjectSample in the queried scope including never-run ones, the current Samplings and EvaluationRecords, and the relevant Run snapshots. The package does not access private Store tables or implement PostgreSQL/DO/R2 adapters. Source results are detached and validated before processing. Every view requires an explicit Project scope. The hierarchy comes only from the Project snapshot, never the live catalog: a ProjectSample without Samplings still appears with null/unavailable values, and a shared ProjectSample appears under each bound Dataset while Project totals deduplicate by Sampling and Evaluation identity. Every level is recomputed from the underlying raw records, never by averaging child summaries. The default query reads the Project's current result set; optional `runIds` restrict only Sampling and Evaluation records, not the fixed bindings.
 
-Each `MetricSummary` keeps the Subject (`executionAgent`) and Evaluator (`evaluationAgents`) resources apart, and `getSamplingDetail` returns an `AgentMetricView` for the Subject and each Evaluator plus an `EvaluationOutputView` per evaluation (raw text, parsed JSON, validation, field observations, artifacts, evidence and trajectory references). Trajectory metrics come from safe native Pi records: Turn and generation operation status/duration from dotted bookkeeping events, Tool status from events and Pi Tool Results, and UTF-8 Tool argument/result lengths from Pi messages. A Step is one generation operation; `generation.finished.refs.assistantTimestamp` and the Pi assistant's `byTaskId` associate its content markers and tokens with that Step. It never reconstructs omitted generation/Turn content; incomplete or ambiguous linkage yields partial/unavailable, not zero. Output fields are extracted only from successful, Schema-valid outputs at fields the Schema declares `number`/`integer`, `boolean` or `enum`/`const` (an enum array is the enum at its `*` item pointer), keyed by JSON Pointer with array indexes as `*`, through one Schema walk that intersects a node with its `$ref` and `allOf` members and unites `anyOf`/`oneOf`/`then`/`else` alternatives; a field's shape is its declared shape united with the Schema locations outputs actually reach (map keys, `patternProperties`, recursion). Each field reports its kinds, observation, contributing and missing evaluation counts, a numeric summary over numbers only, a distribution of boolean/enum entries in Schema order with occurrence count, evaluations containing the value and share of all observed values, and coverage. A null the Schema allows is counted separately in `nullCount` (present only when the Schema allows null), never in the distribution and never a number, false, an enum value or a missing evaluation; free-text strings and objects are not aggregated. The field rules live in the package README. Without an evaluation plan output fields are unavailable while execution metrics still show. A failed Agent, a Runtime finalization error and a missing or invalid output remain different facts and are never zero. Stage success rates use terminal records as the denominator; durations describe Agent and Attempt spans, not a batch's parallel wall-clock time.
+Each `MetricSummary` keeps Subject (`executionAgent`) and Evaluator
+(`evaluationAgents`) resources apart. `getSamplingDetail` returns their
+`AgentMetricView`s and an `EvaluationOutputView` per Evaluation, including raw
+text, parsed JSON, validation, observations, artifacts, evidence and trajectory.
+Trajectory metrics come from verified raw Pi records: Turn/generation
+status/duration from bookkeeping events, Tool status from events and Pi Results,
+and UTF-8 Tool lengths from Pi messages. Bookkeeping must match the source
+Agent, Session and Submission; missing attribution cannot create scoped counts.
+A Step is one generation operation; `generation.finished.refs.assistantTimestamp`
+and the Pi assistant's `byTaskId` associate content markers and Tokens.
+Omitted content and ambiguous linkage stay partial/unavailable, never zero.
+
+Output fields come only from successful, Schema-valid outputs at declared
+`number`/`integer`, `boolean` or `enum`/`const` locations. An enum array uses its
+`*` item pointer; JSON Pointer indexes normalize to `*`. One Schema walk
+intersects `$ref`/`allOf` and unites `anyOf`/`oneOf`/`then`/`else` alternatives.
+The field shape combines declarations and locations actually reached, including
+map keys, `patternProperties` and recursion. Each field reports kinds,
+observations, contributing/missing Evaluation counts, numeric statistics only
+over numbers, Schema-ordered boolean/enum distributions, value/Evaluation counts,
+shares and coverage. Allowed null is separate `nullCount`, not an enum value,
+zero, false or missing observation; free text and objects are not aggregated.
+The package README owns these rules. Without an evaluation plan these fields
+are unavailable while execution metrics still show. Agent failure, finalization
+error and missing/invalid output remain distinct. Success rates use terminal
+records; durations describe Agent/Attempt spans, not batch wall-clock time.
 
 Resource totals carry `complete | partial | unavailable` coverage and nullable values. Complete empty source streams can prove zero; absent, pending, failed, unfinalized or unsupported data cannot. Usage identity is owner plus eventId; native record identity is owner/Chat plus `ingestSeq`, and operation identity additionally includes Agent, Submission and native operation/Tool Call ID; model settlement identity is accountId plus eventId. Missing source identities or contradictory duplicates are diagnosed rather than silently counted. Action charges use their execution identity. Provider USD, model debits, rated/shortfall/platform-owned units and actual Action charges stay separate; the package does not derive charges from prices or tool estimates. A Subagent summary suppresses child detail only for each individual Token or Provider USD metric that contains a valid value; missing summary metrics keep valid child detail and report the resulting coverage. Actual distinct billing settlements remain authoritative charges. SP input/output/cache buckets are disjoint, while reasoning is an output subset and is not added to total tokens. Model generations and Turns are counted from distinct native events, not usage rows or model-request/Turn equivalence. Per-tool outcomes and durations use event and Pi Tool Result facts; `inProgress` is reserved for operations belonging to an active Attempt, while an unclosed operation from a terminal Attempt is `unknown`. Parsing does not mutate any raw source records.
 
@@ -321,39 +394,41 @@ The eval project must not import SP private source files, use Web projections as
 
 ### Pi-native evidence cutover (new runs)
 
-`@springbrand/eval-harness` owns the intended **published public** SP service wire. Its next release must
-provide the authenticated, Submission-bound full-Chat trajectory page
-`{format:"sp-pi-trajectory/v1",cursor:{throughSeq},records:[{ingestSeq,record}],nextAfterSeq}`
-(`record.format:"pi-trajectory/v1"`, `record.projection.kind:"safe"`) and resource snapshot
-with `nativeRecords` in place of `telemetryEvents`. Until that release exists, Eval keeps only a
-structural *consumer* contract in `eval-contracts`; this does not implement SP's routes, read DO
-storage, or turn event JSON into Pi history. The SP adapter enforces the service identity, the
-requested Submission's read/watermark identity, same-Chat safe record identities (including
-imported Context with a null Submission ID and prior Submissions), strictly increasing cursors,
-a frozen `throughSeq`, and a byte ceiling per page; the evidence store writes the **unchanged**
-`{ingestSeq,record}` as JSONL, refusing an individual record larger than an importable file.
-A saved cursor belongs to its original Submission and frozen watermark, never to a later retry
-or another Chat. Unlike Chat-wide evidence, usage, billing and native resource snapshots remain
-scoped to the selected operation/Submission, and final-reply text comes only from that exact
-Submission, never from Context, an earlier Submission or a child.
+`@springbrand/eval-harness` owns the public SP service wire. Harness alpha.10
+source uses Runtime alpha.32's raw `pi-trajectory/v1` records, without `projection`,
+inside the existing full-Chat page
+`{format:"sp-pi-trajectory/v1",cursor:{throughSeq},records:[{ingestSeq,record}],nextAfterSeq}`.
+Resource snapshots use `nativeRecords`, not `telemetryEvents`.
+The browser-safe structural consumer view does not implement SP routes, access
+DO storage, replace public HTTP validation or turn bookkeeping into Pi history.
 
-A safe native record that cannot fit one evidence file still fails explicitly.
-Each small JSON resource page and the final header read are capped at 4,000,000 bytes;
-an oversized native body uses the existing verified byte reference, never a truncated page.
-The API uses installed npm `alpha.9` for its finalized and opted-in partial
-HTTP wire; deployed compatibility and a current PostgreSQL transaction still
-require verification.
+The adapter validates service identity, the requested Submission's read identity,
+same-Chat native/parent attribution, strict sequence advancement and the frozen
+watermark. A continuation may equal the cutoff; the following empty terminal
+page proves EOF. Empty or nonadvancing continuations and out-of-range cursors
+are rejected. Evidence stores unchanged `{ingestSeq,record}` bytes as JSONL.
+A new Run's saved cursor stays bound to that Submission and watermark.
+Operation resources and final-reply extraction remain independently scoped;
+Context, earlier Submissions and children cannot supply another Submission's reply.
 
-New bundles use manifest schema **2** and `trajectory.format:"sp-pi-trajectory/v1"`; the
-manifest hash and reference are derived from those new bytes only. Version 1 event bundles,
-their blobs, refs, scores and old resource snapshots are not migrated or rewritten. This is an
-approved breaking read cutover: there is no live `sp-trajectory/v1` decoder or fallback.
-Artifacts and immutable Subject inputs remain the primary evidence; the complete native
-trajectory remains supporting evidence. `eval-metrics` computes operation, Tool and step facts
-only from safe native records and reports absent or redacted facts as missing, never as zero.
-Billing and usage still come independently from `usageEvents` and `billingSettlements`.
-The Dataset, Execution, Evaluation and public Subject/Evaluator result contracts do not
-depend on a live historical decoder.
+Each resource page and final header read is capped at 4,000,000 bytes.
+Oversized records use the existing authenticated byte reference, not truncation;
+one raw record larger than an importable evidence file still fails explicitly.
+EP currently installs the older alpha.9 package, so the new wire acceptance is
+blocked until the user publishes and installs alpha.10. No compatibility parser
+is provided to make the old SAFE package accept raw records.
+
+New evidence retains manifest schema **2** and the existing trajectory format.
+Old results, scores, blobs, refs and resource snapshots remain stored, without
+rewrites or a live historical resume/decoder path. Only new Chats/Runs are
+supported. Artifacts and immutable Subject inputs stay primary evidence; complete
+raw trajectory stays supporting evidence. Metrics derives body-free facts from
+verified raw sources. A bounded interpretation marks omissions explicitly:
+genuine raw marker strings are content, not missing values. Unknown facts never
+become zero. A finalized resource header/snapshot requires complete native,
+usage and settlement coverage; unknown billing stays unfinalized until explicit
+partial collection. Dataset, Execution, Evaluation and public Subject/Evaluator
+result contracts do not depend on a historical decoder.
 
 
 数据集维护：DatasetService.addData(datasetId, inputs) 校验全部输入并生成身份，DatasetStore.createDataBatch 在一个事务中创建全部 Data 及其关联，失败不保留部分用例。HTTP `POST /api/datasets/{datasetId}/data/import` 接受 `{format: "json" | "jsonl", content: string}`，采用用例列表的严格解析、资源引用限制及 prompt 文件/请求大小上限；返回 201 Data[]。原有完整文档导入的身份冲突和重放语义不变。Web 导航调整不改变 Subject/Evaluator、资源引用和项目冻结副本契约。
@@ -370,11 +445,48 @@ Run evaluation lists omit optional output bodies and attempt resource snapshots 
 
 ### Bounded Metrics reads
 
-`eval-metrics` owns the deterministic compact native-record projection (`compactNativeTrajectoryRecord` / `compactResourceSnapshot`): per-record SHA-256, ingest/operation identity, safe event/request/hook/Pi message/result facts, Tool input/output byte lengths and versioned thinking/content flags. It preserves individual observations for exact medians, cross-Attempt deduplication and conflicts; it never reconstructs generation input or averages lower-level summaries. Already-stored historical raw resource rows are not replaced. New referenced records retain only checked identity and body-free facts, not another copy of Subject evidence. Model/Action billing and total usage still come only from SP's separately authoritative usage/settlement facts; missing Pi contents or unsupported billing never imply zero.
+`eval-metrics` owns `compactNativeTrajectoryRecord` / `compactResourceSnapshot`:
+per-record SHA-256, ingest/operation identity, body-free event/request/hook/Pi
+facts, Tool byte lengths and versioned thinking/content flags. It retains
+individual observations for exact medians, cross-Attempt deduplication and
+conflicts, without reconstructing generation input or averaging summaries.
+Historical raw rows stay unchanged. New referenced records retain verified
+identity and facts, not a second copy of evidence. Model/Action fees and total
+usage come only from SP's independent authoritative usage/settlement facts.
+Missing Pi content or unsupported billing never implies zero.
 
-For per-Attempt Action charges, the single SP `source:"action"` receipt in the existing Harness header → Attempt snapshot → owner-scoped `readCaseUsage` → `get_case_usage` path provides `executionId`, `actionId` and actual `chargedCredits`. A unique, terminal source-specific execution is the authoritative charge; an Action ID comes only from that receipt, and unsafe/absent IDs stay null with a separate identity state. Super Link `source:"tool"` receipts have their own page and real fee, never an SP Action ID; model settlements are neither Action nor Tool fees. The verified SAFE Pi Call/Result seam in `eval-metrics` **only optionally associates a Tool name**: it derives the scoped SHA-256 `tck2_` key from any UA-valid nonempty Tool Call ID, withholds redacted placeholders and never persists a raw Tool Call ID. `eval-api` checks only the derived key's fixed shape and requires one same-actor/Submission/name Call and Result for that execution; `details.capabilityId` is not a compact Action identity or a SQL fallback. Historical raw and version-1 compact records cannot establish a Tool match, but cannot erase a real Action ID or debit already present in the ledger. Published alpha.9's strict Header now validates the Action ID receipt in local tests; deployed SP and EP contract parity remains unverified. There is no local schema/cast or second SP data source.
+The existing Harness header -> Attempt snapshot -> owner-scoped `readCaseUsage`
+-> `get_case_usage` path carries one authoritative SP `source:"action"` receipt:
+`executionId`, `actionId` and actual `chargedCredits`. An Action ID comes only
+from that unique terminal receipt; unsafe/absent IDs remain null with a separate
+identity state. Super Link `source:"tool"` receipts carry real Tool fees, not
+Action IDs; model settlements are neither Action nor Tool charges.
+The verified raw Pi Call/Result seam only optionally associates a Tool name.
+It hashes any UA-valid nonempty Call ID into a scoped SHA-256 `tck2_` key and
+never persists the source ID. Genuine raw marker strings are valid source
+content; only explicitly unavailable interpretation identities are omitted.
+`eval-api` checks the derived key shape and requires one same-actor/Submission/
+name Call and Result. `details.capabilityId` is not an Action identity or SQL
+fallback. Unsupported historical records cannot establish a Tool match or erase
+an independently proven Action ID/debit. Deployed SP/EP parity remains unverified;
+there is no local wire schema/cast or second SP data source.
 
-The same EP management `get_case_usage` now pages `section:"tool_calls"` independently of billing: each observed SAFE v2 compact Pi assistant Tool Call in one authorized execution/evaluation Attempt (including free, read-only, status, Super Link and Action calls, failures and calls with no Result) gets one body-free item `{index,toolName,toolDurationMs,resultState}`. `toolDurationMs` is only that Call's uniquely matched Pi Tool Result **top-level** `durationMs` in milliseconds, a nonnegative safe integer including real zero; it is not the asynchronous Action lifecycle, a timestamp subtraction, an event duration, or a charge. Multiple Calls in one message are distinct; Result association uses the existing actor/Submission/derived-key/name source facts. Missing, duplicate or invalid evidence produces explicit null/unknown/ambiguous states. A `total:null` page with `availability:"available"` means a stored snapshot has incomplete/unsupported/old native proof: it may list observed v2 Calls, but **does not** assert a complete inventory; no raw/v1 backfill or database migration is performed. `actions.items[].toolDurationMs` is explicitly present but non-null only on the existing unique `toolMatchState:"matched"` initiating `execute_capability` or evidence-backed direct `action_*` Result; status-only `get_capability_execution` cannot supply that Action initiation duration. Action ID/real debit, independent model settlements and separate Super Link `tools` receipts remain unchanged. Takt/Moss must explicitly accept the new page/field in its own allowlisted projection before Moss can see them; this EP-only boundary does not change that repository.
+Management `get_case_usage` pages `section:"tool_calls"` independently of billing.
+Every observed current-format raw-derived compact Pi assistant Call in an
+authorized Attempt gets `{index,toolName,toolDurationMs,resultState}`, including
+free/read-only/status calls, Super Link/Action calls, failures and missing Results.
+Duration is only its uniquely matched Pi Result's top-level `durationMs`: a
+nonnegative safe integer, including real zero. It is not an asynchronous Action
+span, timestamp subtraction, bookkeeping duration or fee. Multiple Calls remain
+distinct; Result matching uses actor/Submission/derived-key/name facts.
+Missing/duplicate/invalid proof stays null/unknown/ambiguous.
+`total:null` with `availability:"available"` may list observed Calls but does not
+prove a complete inventory; no historical backfill or database migration occurs.
+An Action's `toolDurationMs` is non-null only for the uniquely matched initiating
+`execute_capability` or direct `action_*` Result, not a status-only poll.
+Action identity/debit, model settlements and separate Super Link receipts remain
+independent. Takt/Moss must explicitly accept the new fields in its allowlist;
+this EP-only boundary does not change that repository.
 
 ### Attempt resource snapshots
 

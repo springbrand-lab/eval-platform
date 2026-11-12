@@ -104,15 +104,17 @@ export type {
   EvidenceTrajectoryPin,
 } from "./evidence.js";
 export {
-  PI_TRAJECTORY_RECORD_FORMAT, SP_PI_TRAJECTORY_FORMAT, SP_PI_TRAJECTORY_RECORD_FORMAT,
-  SP_PI_TRAJECTORY_RECORD_IDENTITY_HEADER, SP_PI_TRAJECTORY_RECORD_INGEST_SEQ_HEADER,
-  SP_PI_TRAJECTORY_RECORD_THROUGH_SEQ_HEADER, isSafePiTrajectoryRecord,
+  PI_TRAJECTORY_RECORD_FORMAT, PI_METRIC_RECORD_FORMAT, NATIVE_PROJECTION_VERSION, NATIVE_CHARGE_LINK_VERSION,
+  NATIVE_TOOL_CALL_KEY_PREFIX,
+  SP_PI_TRAJECTORY_FORMAT, SP_PI_TRAJECTORY_RECORD_FORMAT,
+  isPiTrajectoryRecord, isPiTrajectoryRecordView,
   isSpPiTrajectoryReference, nativeRecordMayBelongToScope, nativeTrajectoryEntrySchema,
+  compactNativeTrajectoryEntrySchema, isCompactNativeTrajectoryEntry, resourceNativeTrajectoryEntrySchema,
   spPiTrajectoryIdentityParts, spPiTrajectoryRecordIdentity, spPiTrajectoryReferenceSchema,
-  spPiTrajectoryPageRowSchema, spPiTrajectoryPageSchema,
 } from "./native-trajectory.js";
 export type {
-  NativeTrajectoryEntry, PiTrajectoryRecord, SpPiTrajectoryPage,
+  NativeTrajectoryEntry, PiTrajectoryRecord, PiTrajectoryRecordView, NativeTrajectoryInterpretationEntry,
+  CompactNativeTrajectoryEntry, ResourceNativeTrajectoryEntry, SpPiTrajectoryPage,
   SpPiTrajectoryPageRow, SpPiTrajectoryRecordReference,
 } from "./native-trajectory.js";
 export {

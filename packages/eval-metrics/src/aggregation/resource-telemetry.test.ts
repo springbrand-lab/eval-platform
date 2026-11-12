@@ -11,7 +11,7 @@ function projectedTools() {
     ownerUserId: "owner-1",
     scope: { chatId: "chat-1", submissionId: "submission-1", idempotencyKey: "operation-1" },
     canEmitNativeRecords, ingestSeq: ++ingestSeq, fact: {},
-    metricProjection: { version: NATIVE_PROJECTION_VERSION, supported: true, facts: [fact] },
+    metricProjection: { version: NATIVE_PROJECTION_VERSION, supported: true, complete: true, facts: [fact] },
   });
   const tool = (id: string, toolName: string | null,
     status: "completed" | "failed" | "cancelled" | "inProgress" | "unknown"): FactEntry[] => {

@@ -1,5 +1,5 @@
 import type { JsonValue } from "./model.js";
-import type { NativeTrajectoryEntry } from "./native-trajectory.js";
+import type { CompactNativeTrajectoryEntry, ResourceNativeTrajectoryEntry } from "./native-trajectory.js";
 
 export interface AgentResourceScope {
   readonly chatId: string;
@@ -30,7 +30,7 @@ export interface AgentResourceSnapshot {
   readonly usageEvents: readonly AgentResourceFact[];
   /** Raw source records historically; new byte-stream reads retain only checked,
    * body-free Pi identities and compact metric facts. No public transfer references. */
-  readonly nativeRecords: readonly NativeTrajectoryEntry[];
+  readonly nativeRecords: readonly ResourceNativeTrajectoryEntry[];
   readonly billingSettlements: readonly AgentResourceFact[];
   /** SP's own explanation of why `finalized` is false; diagnostic only, never a second completeness signal. */
   readonly readiness?: AgentResourceReadiness;
@@ -78,7 +78,7 @@ export function summarizeResourceSnapshot(snapshot: AgentResourceSnapshot): Agen
 /** A bounded, already-verified part of a newly collected resource snapshot. This is an
  * application-to-Store transfer, not another SP trajectory format or a persisted representation. */
 export type AgentResourceSnapshotPage =
-  | { readonly stream: "nativeRecords"; readonly records: readonly NativeTrajectoryEntry[] }
+  | { readonly stream: "nativeRecords"; readonly records: readonly CompactNativeTrajectoryEntry[] }
   | { readonly stream: "usageEvents" | "billingSettlements"; readonly records: readonly AgentResourceFact[] };
 
 /** New SP collection never assembles the legacy arrays in JS. The Harness finishes every

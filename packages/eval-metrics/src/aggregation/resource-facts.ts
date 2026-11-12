@@ -1,5 +1,5 @@
-import type { AgentResourceScope, AgentResourceSnapshot, JsonValue, NativeTrajectoryEntry } from "@eval-platform/eval-contracts";
-import { equalJson, isSafePiTrajectoryRecord, nativeRecordMayBelongToScope } from "@eval-platform/eval-contracts";
+import type { AgentResourceScope, AgentResourceSnapshot, JsonValue, ResourceNativeTrajectoryEntry } from "@eval-platform/eval-contracts";
+import { equalJson, isPiTrajectoryRecord, isCompactNativeTrajectoryEntry, nativeRecordMayBelongToScope } from "@eval-platform/eval-contracts";
 import { record, text, type JsonRecord } from "../json.js";
 import { NATIVE_PROJECTION_VERSION } from "./compact-resources.js";
 import type { MetricNumber, ResourceDiagnostic } from "./model.js";
@@ -118,7 +118,7 @@ export function readStream(
   for (const { ownerUserId, canEmitNativeRecords, snapshot } of snapshots) {
     if (!snapshot.finalized || snapshot.coverage?.[stream] !== "complete") complete = false;
     const verifiedSubmissions = new Set([snapshot.scope.submissionId]);
-    const facts: readonly (JsonRecord | NativeTrajectoryEntry)[] | undefined = snapshot[stream];
+    const facts: readonly (JsonRecord | ResourceNativeTrajectoryEntry)[] | undefined = snapshot[stream];
     if (!Array.isArray(facts)) {
       complete = false;
       diagnostics.report("unsupported-record", stream, {
@@ -127,31 +127,30 @@ export function readStream(
       continue;
     }
     for (const raw of facts) {
-      const native = stream === "nativeRecords" ? raw as NativeTrajectoryEntry : undefined;
+      const native = stream === "nativeRecords" ? raw as ResourceNativeTrajectoryEntry : undefined;
       const fact = native ? record(native.record as unknown as JsonValue) ?? {} : raw as JsonRecord;
       const projection = native ? record(native.metricProjection) : undefined;
-      const metricProjection = projection?.version === NATIVE_PROJECTION_VERSION
-        && typeof projection.fingerprint === "string" && typeof projection.supported === "boolean"
-        && Array.isArray(projection.facts) && projection.facts.every((item) => record(item) !== undefined)
+      const metricProjection = native && isCompactNativeTrajectoryEntry(native)
+        && projection?.version === NATIVE_PROJECTION_VERSION
         ? projection : undefined;
       const entry: FactEntry = {
         fact, ownerUserId, canEmitNativeRecords, scope: snapshot.scope,
         ...(native === undefined ? {} : { ingestSeq: native.ingestSeq }),
         ...(metricProjection ? { metricProjection } : {}),
       };
-      if (native && (!isSafePiTrajectoryRecord(fact)
-        || !nativeRecordMayBelongToScope(fact, snapshot.scope, verifiedSubmissions))) {
+      if (native?.metricProjection !== undefined && metricProjection === undefined) {
+        complete = false;
+        diagnostics.report("unsupported-record", stream, entry, "Unsupported compact native metric projection");
+        continue;
+      }
+      if (native && ((!isPiTrajectoryRecord(fact) && !isCompactNativeTrajectoryEntry(native))
+        || !nativeRecordMayBelongToScope(native.record, snapshot.scope, verifiedSubmissions))) {
         complete = false;
         diagnostics.report("conflicting-identity", stream, entry, "Native record is outside its resource snapshot operation");
         continue;
       }
       if (native?.record.submissionId !== undefined && native.record.submissionId !== null) {
         verifiedSubmissions.add(native.record.submissionId);
-      }
-      if (native?.metricProjection !== undefined && metricProjection === undefined) {
-        complete = false;
-        diagnostics.report("unsupported-record", stream, entry, "Unsupported compact native metric projection");
-        continue;
       }
       const key = sourceIdentity(stream, ownerUserId, fact, snapshot.scope, native?.ingestSeq);
       if (key === undefined) {
@@ -167,10 +166,7 @@ export function readStream(
       duplicates += 1;
       if (existing && existing.metricProjection && metricProjection
         && existing.metricProjection.fingerprint === metricProjection.fingerprint) {
-        const existingVersion = typeof existing.metricProjection.version === "number" ? existing.metricProjection.version : 0;
-        const version = typeof metricProjection.version === "number" ? metricProjection.version : 0;
-        if (version > existingVersion) byIdentity.set(key, entry);
-        else if (version === existingVersion && !equalJson(existing.metricProjection, metricProjection)) {
+        if (!equalJson(existing.metricProjection, metricProjection) || !equalJson(existing.fact, fact)) {
           complete = false;
           diagnostics.report("conflicting-identity", stream, entry, "The same source identity has contradictory metric projections");
           byIdentity.set(key, null);

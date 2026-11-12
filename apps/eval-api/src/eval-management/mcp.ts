@@ -39,8 +39,8 @@ const DESCRIPTIONS: Record<keyof typeof managementSchemas, string> = {
   stop_run: "Stop one explicitly identified Run belonging to the specified Project.",
   get_run: "Read Run status and a page of Sampling and Evaluation IDs, without full records.",
   get_metrics: "Read current owner-scoped or exact-Run Metrics. Project/Dataset default section=overview returns compact complete summary with field total but no rows or byTool. section=samples pages existing scoreIndex and navigation; section=tools requires role=execution|evaluation and pages only that role's Metrics-authoritative native byTool rates; section=fields pages countable output fields. Sample/Sampling and sampling+evaluationId keep their existing resultOffset contract; large selected JSON uses the authenticated documents GET.",
-  inspect_case: "Inspect bounded evidence and Subject/Evaluator Metrics for one current owned Sampling/Evaluation (or exact Run member). For a complete SAFE Pi file use the authenticated fixed GET /mcp/eval-management/trajectories from the trusted backend, never an MCP tool.",
-  get_case_usage: "READ ONLY: list owned execution/evaluation Attempts, or page one Attempt's models, Action receipts, separate Super Link debit tools, or tool_calls: every observed SAFE v2 Pi Tool Call (free/read-only/status/Super Link/Action, failed/unreturned). toolCalls items give resultState and nullable top-level Pi Tool Result toolDurationMs in ms (zero is real; not Action/provider lifetime); total:null with a present snapshot means native inventory unproven. Action receipts keep authoritative actionId/chargedCredits; actions.toolDurationMs needs a uniquely matched initiating execute_capability or direct action_* Result, never a status-only get_capability_execution. No Super Link debit-to-Pi-Call pairing is claimed. role=execution forbids evaluationId; role=evaluation requires it. Optional runId checks exact original AND current membership. section defaults to attempts; selected sections require attemptId. At most 10 rows, no raw snapshot, account/Chat/Call ID, args or result bodies. Old raw/v1 and missing/partial proof never supply durations.",
+  inspect_case: "Inspect bounded evidence and Subject/Evaluator Metrics for one current owned Sampling/Evaluation (or exact Run member). For a complete raw Pi file use the authenticated fixed GET /mcp/eval-management/trajectories from the trusted backend, never an MCP tool.",
+  get_case_usage: "READ ONLY: list owned execution/evaluation Attempts, or page one Attempt's models, Action receipts, separate Super Link debit tools, or tool_calls: every observed raw-derived v2 compact Pi Tool Call (free/read-only/status/Super Link/Action, failed/unreturned). toolCalls items give resultState and nullable top-level Pi Tool Result toolDurationMs in ms (zero is real; not Action/provider lifetime); total:null with a present snapshot means native inventory unproven. Action receipts keep authoritative actionId/chargedCredits; actions.toolDurationMs needs a uniquely matched initiating execute_capability or direct action_* Result, never a status-only get_capability_execution. No Super Link debit-to-Pi-Call pairing is claimed. role=execution forbids evaluationId; role=evaluation requires it. Optional runId checks exact original AND current membership. section defaults to attempts; selected sections require attemptId. At most 10 rows, no raw snapshot, account/Chat/Call ID, args or result bodies. Old raw/v1 and missing/partial proof never supply durations.",
 };
 const TOOLS = (Object.keys(managementSchemas) as (keyof typeof managementSchemas)[]).map((name) => ({
   name, description: DESCRIPTIONS[name],
@@ -172,7 +172,7 @@ function modelLine(raw: unknown, usageCoverage: "complete" | "partial" | "unavai
 }
 
 /** Only one source-specific terminal SP receipt proves a charge. Neither model
- * usage nor SAFE Pi can supply an Action/Tool amount. */
+ * usage nor raw Pi can supply an Action/Tool amount. */
 function ledgerCharge(row: Record<string, unknown>) {
   const executionId = safeLedgerId(row.executionId);
   const status = ["succeeded", "failed", "outcome_unknown", "running"].includes(String(row.status))
@@ -188,7 +188,7 @@ function ledgerCharge(row: Record<string, unknown>) {
   };
 }
 
-/** The receipt's actionId is authoritative for Action identity. SAFE Pi can
+/** The receipt's actionId is authoritative for Action identity. Raw Pi can
  * independently describe a uniquely correlated Tool, but cannot name an Action. */
 function actionLine(raw: unknown, nativeCoverage: "complete" | "partial" | "unavailable") {
   const row = record(raw) ?? {};

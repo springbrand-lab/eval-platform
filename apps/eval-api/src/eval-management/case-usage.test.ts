@@ -122,6 +122,35 @@ describe("get_case_usage over the authenticated management tools/call seam", () 
       availability: "snapshot_missing", models: { total: null, items: [] } });
   });
 
+  it.each([
+    { actionId: "action.local.exa.search", displayedId: "action.local.exa.search", identityState: "identified" },
+    { actionId: "action.exa.search", displayedId: "action.exa.search", identityState: "identified" },
+    { actionId: "action.local.exa.api_key.search", displayedId: null, identityState: "unsafe" },
+  ])("reads the stored $actionId debit without a live catalog or an ID rewrite", async ({
+    actionId, displayedId, identityState,
+  }) => {
+    const app = setupManagement();
+    app.sp.requestAgentLibrary.mockRejectedValue(new HttpError("EVAL_SP_REQUEST_FAILED"));
+    app.services.resourceSnapshots.readCaseUsage.mockResolvedValueOnce({ total: 1, attempt, rows: [{
+      index: 1, billingSource: "action", executionId: "execution-stored", actionId,
+      status: "succeeded", chargedCredits: "1.25", executionMatches: 1,
+    }] });
+    const value = await toolValue(await app.call("get_case_usage", {
+      ...scope, section: "actions", attemptId: "attempt-1",
+    }));
+    expect(value).toMatchObject({ availability: "available",
+      attempt: { resources: { actionCharges: { complete: false, unsettledExecutions: 2, missingExecutionIds: 1 } } } });
+    expect(value.actions).toEqual({ page: 1, pageSize: 5, total: 1, items: [{
+      index: 1, source: "action", executionId: "execution-stored", actionId: displayedId,
+      actionIdentityState: identityState, status: "succeeded", chargedCredits: 1.25, chargeState: "observed",
+      toolName: null, toolMatchState: "unavailable", toolDurationMs: null,
+    }] });
+    expect(app.services.resourceSnapshots.readCaseUsage).toHaveBeenCalledExactlyOnceWith({
+      ...scope, section: "actions", attemptId: "attempt-1", page: 1, pageSize: 5,
+    });
+    expect(app.sp.requestAgentLibrary).not.toHaveBeenCalled();
+  });
+
   it("returns only safe ledger fields, without logging a redundant SAFE link inventory", async () => {
     const app = setupManagement();
     const privateValue = "PRIVATE_TRACE_DO_NOT_LOG";

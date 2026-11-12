@@ -50,6 +50,17 @@ describe("trusted management MCP transport", () => {
     expect(app.release).toHaveBeenCalledTimes(1);
   });
 
+  it("describes raw trajectory and raw-derived compact facts without a SAFE projection guarantee", async () => {
+    const app = setupManagement();
+    const result = await (await app.rpc(rpc("tools/list"))).json() as {
+      result: { tools: Array<{ name: string; description: string }> };
+    };
+    expect(result.result.tools.find(({ name }) => name === "inspect_case")!.description).toContain("complete raw Pi file");
+    expect(result.result.tools.find(({ name }) => name === "get_case_usage")!.description)
+      .toContain("raw-derived v2 compact Pi Tool Call");
+    expect(result.result.tools.every(({ description }) => !/\bSAFE\b/u.test(description))).toBe(true);
+  });
+
   it("is stateless and advertises exactly nineteen management tools, including case usage", async () => {
     const app = setupManagement();
     const initialized = await app.rpc(rpc("initialize", 2, { protocolVersion: "2025-06-18" }));

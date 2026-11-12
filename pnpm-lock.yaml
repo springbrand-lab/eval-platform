@@ -280,6 +280,9 @@ importers:
       '@springbrand/contracts':
         specifier: 0.1.0-alpha.0
         version: 0.1.0-alpha.0(@tanstack/react-query@5.104.2(react@19.3.0))(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+      '@springbrand/eval-harness':
+        specifier: 0.1.0-alpha.9
+        version: 0.1.0-alpha.9(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
       '@springbrand/http':
         specifier: 0.1.0-alpha.4
         version: 0.1.0-alpha.4(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)

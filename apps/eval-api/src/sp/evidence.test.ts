@@ -44,6 +44,30 @@ const read = async (items: AsyncIterable<ExportedTrajectoryPage>) => {
 };
 
 describe("SP Pi-native evidence export, persistence and import", () => {
+  it("exports the original referenced record at the cutoff and drains the following empty EOF page", async () => {
+    const source = nativeAssistantMessage(5, subject.chatId, SUBMISSION_ID,
+      [{ type: "text", text: "raw record before authoritative EOF" }]);
+    const { reference, bytes } = nativeTransfer(source, 5);
+    const requests: URL[] = [];
+    const harness = createSpHarness({
+      origin: "https://sp.test", serviceToken: "service",
+      fetch: async (input, init) => {
+        const url = new URL(new Request(input, init).url);
+        requests.push(url);
+        if (url.pathname.endsWith("/artifacts")) return Response.json({ artifacts: [] });
+        if (url.pathname.endsWith("/records/5")) return nativeTransferResponse(reference, bytes);
+        return Response.json(url.searchParams.get("afterSeq") === "0"
+          ? page([reference], 5, 5) : page([], 5, null));
+      },
+    });
+    const exported = await harness.exportEvidence({ handle: subject, submissionId: SUBMISSION_ID, limits });
+    expect(await read(exported.readTrajectory(0))).toEqual([{ seq: 5, throughSeq: 5, record: source }]);
+    expect(requests.filter(({ pathname }) => pathname.endsWith("/evidence/trajectory"))
+      .map(({ searchParams }) => [searchParams.get("afterSeq"), searchParams.get("throughSeq")]))
+      .toEqual([["0", null], ["5", "5"]]);
+    expect(requests.filter(({ pathname }) => pathname.endsWith("/records/5"))).toHaveLength(1);
+  });
+
   it("keeps additional public Pi native fields unchanged after validating the published page", async () => {
     const entry = native(6);
     if (entry.record.record.type !== "entry") throw new Error("Expected a native Entry fixture");
@@ -96,7 +120,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
     });
   });
 
-  it("hydrates an authenticated 5+ MiB SAFE Pi reference before unchanged JSONL, manifest and scoped final reply", async () => {
+  it("hydrates an authenticated 5+ MiB raw Pi reference before unchanged JSONL, manifest and scoped final reply", async () => {
     const submissionId = "11111111-1111-4111-8111-111111111111";
     const context = asContext(native(1));
     const earlier = nativeAssistantMessage(2, subject.chatId, "earlier-submission",
@@ -172,7 +196,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
     }
   }, 30_000);
 
-  it("streams a 30+ MiB immutable SAFE Pi JSONL record from the authenticated GET into one evidence blob without a whole-body object", async () => {
+  it("streams a 30+ MiB immutable raw Pi JSONL record from the authenticated GET into one evidence blob without a whole-body object", async () => {
     const submissionId = "11111111-1111-4111-8111-111111111111";
     const { reference, recordLength, fileSha256, response } = streamedAssistantTransfer(subject.chatId, submissionId);
     expect(recordLength).toBeGreaterThan(30 * 1024 * 1024);
@@ -329,7 +353,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
   it("stores exactly the pinned range across an interrupted export and refuses a changed pin", async () => {
     const root = await mkdtemp(join(tmpdir(), "eval-evidence-pinned-"));
     try {
-      // SAFE Pi records 7 and 8 arrive after the first page pinned the export at 6.
+      // Raw Pi records 7 and 8 arrive after the first page pinned the export at 6.
       const records = Array.from({ length: 8 }, (_, index) => native(index + 1));
       const queries: Record<string, string>[] = [];
       let failSecondPage = true;
@@ -388,9 +412,10 @@ describe("SP Pi-native evidence export, persistence and import", () => {
     ["legacy page", { events: [{ ingestSeq: 1, event: { type: "turn.finished" } }], nextAfterSeq: null }],
     ["wrong wire", { ...page([native(1)], 1, null), format: "sp-trajectory/v1" }],
     ["legacy event in native envelope", { ...page([], 1, null), records: [{ ingestSeq: 1, record: { type: "turn.finished" } }] }],
-    ["unsafe projection", page([{ ...native(1), record: { ...native(1).record,
+    ["legacy full projection", page([{ ...native(1), record: { ...native(1).record,
       projection: { kind: "full", policyId: "test", policyVersion: 1 } } }], 1, null)],
-    ["missing safe projection", page([{ ...native(1), record: { ...native(1).record, projection: undefined } }], 1, null)],
+    ["legacy safe projection", page([{ ...native(1), record: { ...native(1).record,
+      projection: { kind: "safe", policyId: "test", policyVersion: 1 } } }], 1, null)],
     ["forged local metric projection", page([{ ...native(1), metricProjection: { supported: true, facts: [] } }], 1, null)],
     ["backward cursor", page([native(1)], 1, 0)],
     ["out-of-order records", page([native(2), native(1)], 2, null)],
@@ -438,7 +463,7 @@ describe("SP Pi-native evidence export, persistence and import", () => {
 
   it.each(["corrupt-hash", "truncated", "overlong", "invalid-utf8",
     "wrong-header", "foreign-record", "foreign-parent", "partial"] as const)(
-    "never marks a %s SAFE Pi record transfer complete or publishes a partial evidence manifest", async (failure) => {
+    "never marks a %s raw Pi record transfer complete or publishes a partial evidence manifest", async (failure) => {
       const original = nativeAssistantMessage(2, subject.chatId, "earlier-submission", [{ type: "text", text: "current answer" }]);
       const { reference: originalRef, bytes: originalBytes } = nativeTransfer(original, 2);
       let reference = originalRef;
@@ -639,11 +664,11 @@ describe("SP Pi-native evidence export, persistence and import", () => {
     const empty = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       fetch: async () => Response.json(page([native(16, evaluator.chatId, submissionId)], 17, null)) });
     await expect(empty.readFinalReply(reply)).resolves.toBeUndefined();
-    const omitted = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
+    const literal = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       fetch: async () => Response.json(page([
         current, nativeAssistantMessage(17, evaluator.chatId, submissionId, [{ type: "text", text: "[CONTENT OMITTED]" }]),
       ], 17, null)) });
-    await expect(omitted.readFinalReply(reply)).resolves.toBeUndefined();
+    await expect(literal.readFinalReply(reply)).resolves.toBe("[CONTENT OMITTED]");
     const thinkingOnly = createSpHarness({ origin: "https://sp.test", serviceToken: "service",
       fetch: async () => Response.json(page([
         current, nativeAssistantMessage(17, evaluator.chatId, submissionId, [{ type: "thinking", thinking: "private" }]),

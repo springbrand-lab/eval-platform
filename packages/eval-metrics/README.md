@@ -4,29 +4,29 @@
 
 The SP `nativeRecords` stream has `{ingestSeq,record}` where the public UA
 `TrajectoryRecord` is `pi-trajectory/v1`, carries
-`resource:{agentId,sessionId}`, `submissionId`, an explicit safe projection
-policy and a native `record:{type:"conversation"|"entry",value}`. A model-free
+`resource:{agentId,sessionId}`, `submissionId`, no SAFE projection
+field and a native `record:{type:"conversation"|"entry",value}`. A model-free
 Entry with `value.kind:"springbrand.trajectory"` has **bookkeeping** in
 `value.data`; the *public* `@springbrand/agent-runtime/trajectory` helper
 `readTrajectoryBookkeeping(value)` validates it as an event
-(`generation.finished`, `tool.started`, `turn.finished`, …), request or hook.
+(`generation.finished`, `tool.started`, `turn.finished`, …), request, hook or reminder.
 The checked-in fixture is generated and checked with that helper. Production
-extracts only bounded structural facts pending an offline-installable public
-dependency; it rejects unrecognized records rather than claiming zero. Pi
+extracts only bounded structural facts after the public adapter's native
+validation; it rejects unrecognized records rather than claiming zero. Pi
 assistant/Tool Result messages live in `record.value.model?.[0]` and link
 to the real event's refs, task and Tool Call identities. There is no top-level `record.kind`, no
 `turn_start` event and no `projection.contentComplete`. No input/output
 is reconstructed from a bookkeeping event whose Pi-owned body was omitted.
 Missing or ambiguous linkage stays partial/unavailable, not zero.
-`compactResourceSnapshot` hashes each historical raw native record and keeps
+`compactResourceSnapshot` hashes each current raw native object and keeps
 body-free versioned metric facts. `compactNativeTrajectoryRecord` also accepts
 a checksum already verified over the *source bytes*, so the streaming
 record consumer saves only compact identity/facts, not a second copy
 of a large Pi body. The Eval API collects bounded resource headers and native/API
-billing pages validated by the installed npm `@springbrand/eval-harness@0.1.0-alpha.7`
-schemas, storing compact facts without a whole JS snapshot. That published
-package lacks the post-wait partial request/byte contract; deployed SP
-compatibility and isolated DB verification remain release blockers.
+billing pages validated by public `@springbrand/eval-harness` schemas aligned
+with Runtime `.32`, storing compact facts without a whole JS snapshot. The
+installed alpha.9/Runtime `.15` package is not proof of raw compatibility;
+package/deployed SP parity and isolated DB verification remain release blockers.
 Withheld Tool lengths stay unknown, never zero; total
 usage and charges still come **only** from `usageEvents` and `billingSettlements`.
 Old event-only snapshots are not native. SP must publish a public partial
@@ -53,7 +53,7 @@ src/
 │   ├── resource-facts.ts     # 诊断、数值校验与按来源身份去重
 │   ├── resource-usage.ts     # Token/Provider USD 与 Subagent 覆盖
 │   ├── resource-billing.ts   # 模型与 Action 结算
-│   ├── native-record-facts.ts # safe Pi event/request/hook/message/result 的聚焦事实适配
+│   ├── native-record-facts.ts # raw Pi event/request/hook/message/result 的聚焦事实适配
 │   ├── compact-resources.ts  # 无正文、逐条哈希的 native Metrics 投影
 │   ├── resource-telemetry.ts # 从 native facts 合并模型请求、Turn、工具与步骤
 │   ├── output-fields.ts      # JSON Schema 输出字段汇总
@@ -101,10 +101,10 @@ Project → Dataset → ProjectSample → Sampling，EvaluationRecord 挂在 Sam
 
 原始 `AgentResourceSnapshot.usageEvents` 与 `.billingSettlements` 是总费用和 Token 的独立权威来源：模型账单按 `accountId + eventId`、Action 按 `executionId` 去重；Pi 消息 usage 只用于该 Step 的思考/内容分类 Token，不加到总费用/Token，不重新计价或把 reasoning 再加进 total。Native 记录按所属用户、Chat 和 `ingestSeq` 去重；失败、取消、重启 Attempt 的真实消耗照常计入。已提交但没有收集记录的 Attempt 记为 `uncollected` 并使结果不完整；从未提交的 Attempt 不制造缺失。缺失值为 null 并带 coverage（complete/partial/unavailable）与 diagnostics，只有完整空流才证明 0。
 
-轨迹指标来自每个 Attempt 已保存的 safe Pi `nativeRecords`，跨 Attempt/分页按 Chat、来源序号和原生 Turn/Tool/generation operation ID 合并：
+轨迹指标来自每个新 Attempt 已保存的 raw Pi body-free `nativeRecords` facts，跨 Attempt/分页按 Chat、来源序号和原生 Turn/Tool/generation operation ID 合并：
 
 - Turn 数及 completed/failed/cancelled/inProgress/unknown；`inProgress` 只表示该操作所属的 Attempt 仍处于活跃状态。Attempt 已进入终态但缺少终结事实时是 `unknown`；来源缺口不改变执行或评估阶段的终态。
-- 按 `toolCallId` 配对 native Tool 开始/结果，按 `toolName` 汇总调用、结果、耗时；输入长度来自 safe Tool 参数，返回长度来自 safe Pi Tool 结果内容，均为规范 JSON UTF-8 字节数。缺失或被脱敏（`[CONTENT OMITTED]`/`[REDACTED]`）为 missing，不从费用或响应估计。
+- 按作用域派生的 `tck2_` key 配对 native Tool 开始/结果，按 `toolName` 汇总调用、结果、耗时；输入与返回长度为完整 raw 值的规范 JSON UTF-8 字节数。缺失或独立 `omittedPaths` 标记的值为 missing；字面量 `[CONTENT OMITTED]`/`[REDACTED]` 和 `redacted:true` 不表示缺失，不从费用或响应估计。
 - 以 native `generation` operationId 计模型 Step；Pi assistant 的 `thinking`/`*Signature` 块命中思考、`text` 块命中内容，类别可重叠，Step 的 Token 仅来自该 Pi 消息或安全的 `generation.finished` 事件。不重建生成输入，不从 Turn 总数或总 Token 做减法；缺少关联 Turn/可判定消息内容时为 partial/unavailable。
 
 
@@ -158,22 +158,44 @@ Schema 声明顺序指：先节点自身的 `properties`，再依次为 `$ref`�
 
 ## Compact resource facts
 
-`compactResourceSnapshot` derives body-free facts and a canonical SHA-256 fingerprint for historical raw native records; `compactNativeTrajectoryRecord` instead accepts a verified raw-byte checksum for a streamed record. Both retain native operation identity, status/time/Step Token fields, safe Tool input/output lengths when known and versioned Pi thinking/content marker flags. Missing or withheld data cannot prove absence or a zero length. The same interpreter consumes raw and compact facts, retaining exact medians, conflicts and source coverage. The API stores compact native facts in both the new Attempt snapshot and its Metrics projection, never a second copy of the native body; historical raw snapshots, old refs/scores and evidence are not replaced. Metrics attaches projections to `MetricsFacts` (`MetricsSampling`/`MetricsEvaluation`); this package performs no storage or background work. Sampling detail returns records without snapshots.
+New Chat/Run inputs are Runtime `.32` raw records validated by the public
+Harness/API adapter. This browser-safe package interprets a bounded structural
+view; it does not import Runtime or duplicate its full native schema.
+`compactNativeTrajectoryRecord` accepts a raw `NativeTrajectoryEntry` or an
+explicit `NativeTrajectoryInterpretationEntry`. The latter requires a verified
+source-byte checksum and carries JSON-Pointer `omittedPaths`; it is never called
+an original native record. Exact Tool lengths require all relevant values.
+Literal `[CONTENT OMITTED]`/`[REDACTED]` and objects containing `redacted:true`
+are ordinary raw data, including opaque Tool Call IDs.
 
-UA alpha.15's public `canonical-context` schema accepts any nonempty string
+The returned `CompactNativeTrajectoryEntry` has
+`record.format:"eval-pi-metric-record/v1"` and `metricProjection.version:2`,
+with a separate `complete` interpretation fact. This is a real semantic change
+from SAFE lengths/markers, not a relabeling of old facts. Known facts survive
+bounded interpretation, but omissions prevent complete-inventory/zero claims.
+Only the current fact version is decoded; no historical SAFE/raw union, dual
+projection reader, row rewrite or raw/v1/v2 backfill is introduced.
+`NATIVE_CHARGE_LINK_VERSION` remains 2 because the scope-bound SHA-256 `tck2_`
+algorithm and unique Call/Result association do not change. Action/Tool receipts
+and model settlements remain the only billing authority. New object and paged
+Store writes retain compact facts in both JSON columns, never native bodies.
+
+`compactResourceSnapshot` derives body-free facts and a canonical SHA-256 fingerprint for current raw native objects; `compactNativeTrajectoryRecord` accepts a verified raw-byte checksum for a streamed source. Both retain native operation identity, status/time/Step Token fields, exact Tool lengths when known and versioned Pi thinking/content category flags. Missing or explicitly omitted data cannot prove absence or a zero length. The current interpreter retains exact medians, conflicts and source coverage, but does not decode historical SAFE records or old fact generations. The API stores compact native facts in both new Attempt snapshot columns, never a second native body; historical snapshots, old refs/scores and evidence are not replaced. Metrics attaches projections to `MetricsFacts` (`MetricsSampling`/`MetricsEvaluation`); this package performs no storage or background work. Sampling detail returns records without snapshots.
+
+Runtime `.32`'s public `canonical-context` schema accepts any nonempty string
 (`z.string().min(1)`) as a Pi Tool Call `id` or Result `toolCallId`. Its public
 OpenRouter Responses test produces `call_1|fc_1`. UA does not export a small,
 standalone Tool Call ID validator; importing the whole Runtime just to check
 an ID would cross this package boundary. The fixed consumer fixture
 `src/aggregation/ua-responses-tool-id.fixture.json` was projected by the
-published UA alpha.15 public canonical-message and trajectory helpers with
+published Runtime `.32` public trajectory create/export helpers with
 that Responses ID. This is a producer-contract fixture, **not** a new EP
 identifier alphabet.
 
-At the verified SAFE Pi input seam, compact charge-link **version 2** accepts
+At the verified raw Pi input seam, compact charge-link **version 2** accepts
 nonempty string IDs without trimming or a character/length allowlist. A
-withheld SAFE placeholder (`[REDACTED]`/`[CONTENT OMITTED]`) is not a real
-identity and cannot link. It derives `toolCallKey` for Call and Result,
+literal marker is an identity when genuinely present in raw data; an independently
+omitted ID is not retained or hashed. It derives `toolCallKey` for Call and Result,
 and uses the same digest for Tool event and hook Metrics IDs, from SHA-256
 of the JSON tuple
 `["eval-platform.pi-tool-call-id/v2", agentId, sessionId, submissionId, rawId]`,
@@ -185,7 +207,7 @@ operation `id`, and the correlation key is internal, never an MCP/log field.
 The compact record's `parent` keeps only `resource` and `submissionId` to
 prove a same-Chat descendant: optional opaque `parent.toolCallId`, `requestId`
 and `runId` are not needed by Metrics or the read-only Action join and are
-not copied into compact storage. The separately saved original SAFE evidence
+not copied into compact storage. The separately saved original raw evidence
 still retains the complete original parent.
 Only the existing bounded, allowlisted agentId, submissionId and Tool name
 enter an optional Tool link; Result `details.executionId` keeps its
@@ -193,8 +215,8 @@ conservative validator. `details.capabilityId` is not copied into compact
 facts, even when present or when a large Tool body is scanned.
 SP emits `pi.tool-result`; historical Pi records may use `pi.toolResult`.
 Both kinds require the same validated Tool Result role and charge-link identities.
-The existing Metrics Tool label remains the SAFE source name, including
-Unicode or escaped control characters, but only a short, identifier-shaped
+The bounded Metrics Tool label remains the raw source name, including
+Unicode or escaped control characters, subject to credential/URL checks. Only a short, identifier-shaped
 name may establish a charge link; non-linkable names never acquire charge IDs.
 `metricProjection.chargeLinkVersion:2` distinguishes these keys from previously
 persisted raw and version-1 compact rows: those rows are *unknown* for
@@ -207,6 +229,6 @@ total but never in `actionChargedUnits`. A historical charge lacking a
 trusted source may contribute to a partial total, not a confirmed Action
 subtotal. No Tool arguments, Result body, arbitrary details or credentials
 are persisted in the new facts. Oversized referenced bytes use the same
-bounded Tool-call/execution-ID interpretation as inline SAFE records. The bounded large-record
+bounded Tool-call/execution-ID interpretation as inline raw records. The bounded large-record
 scanner marks an ID it cannot retain as omitted/unknown; it never hashes a
 truncated prefix or treats a historical raw ID as a derived key.

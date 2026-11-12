@@ -1,5 +1,6 @@
 import {
-  isResourceSnapshotDownload, jsonObjectArrayInPlaceSchema, nativeRecordMayBelongToScope, nativeTrajectoryEntrySchema,
+  isResourceSnapshotDownload, jsonObjectArrayInPlaceSchema, nativeRecordMayBelongToScope, compactNativeTrajectoryEntrySchema,
+  PI_METRIC_RECORD_FORMAT,
   type AgentResourceSnapshot, type AgentResourceState, type EvaluationRecord, type Sampling,
 } from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
@@ -71,7 +72,7 @@ export async function updateWithResources(
             throw new Error("Native resource page follows billing facts");
           }
           for (const entry of records) {
-            if (!nativeTrajectoryEntrySchema.safeParse(entry).success || entry.ingestSeq <= lastSeq
+            if (!compactNativeTrajectoryEntrySchema.safeParse(entry).success || entry.ingestSeq <= lastSeq
               || !nativeRecordMayBelongToScope(entry.record, snapshot.summary.scope, verifiedSubmissions)) {
               throw new Error("Sealed resource download has a foreign or unordered native record");
             }
@@ -145,7 +146,8 @@ export async function updateWithResources(
     await transaction.insert(attemptResources).values({
       stage: evaluationId === undefined ? "execution" : "evaluation",
       recordId: evaluationId ?? samplingId,
-      attemptId, ownerUserId, samplingId, evaluationId: evaluationId ?? null, snapshot, metricSnapshot,
+      attemptId, ownerUserId, samplingId, evaluationId: evaluationId ?? null,
+      snapshot: metricSnapshot, metricSnapshot,
     }).onConflictDoUpdate({
       target: [attemptResources.stage, attemptResources.recordId, attemptResources.attemptId],
       // Refer to the inserted row so the snapshot is serialized only once.
@@ -254,10 +256,11 @@ const v2PiFacts = (entry: SQL) => sql`
   AND ${entry}->'metricProjection'->>'chargeLinkVersion' = ${String(NATIVE_CHARGE_LINK_VERSION)}
   AND json_typeof(${entry}->'metricProjection'->'supported') = 'boolean'
   AND ${entry}->'metricProjection'->>'supported' = 'true'
+  AND json_typeof(${entry}->'metricProjection'->'complete') = 'boolean'
   AND (${entry}->'metricProjection'->>'fingerprint') COLLATE "C" ~ '^[0-9a-f]{64}$'
   AND json_typeof(${entry}->'metricProjection'->'facts') = 'array'`;
 
-/** Shared SAFE v2 facts for the Action association and the independent Pi Call page.
+/** Shared current v2 facts for the Action association and the independent Pi Call page.
  * `call_facts` keeps *every observed* v2 Call, even one without a usable key.
  * Only `calls`/`results` can prove a unique identity; executionId is optional on
  * a free Tool Result and is checked separately when matching an Action receipt. */
@@ -269,10 +272,7 @@ const piToolFacts = sql`
   native AS MATERIALIZED (
     SELECT n.entry, n.ordinal, n.entry->'record' AS source,
       n.entry->'record'->'record'->'value' AS value FROM records AS n CROSS JOIN body
-    WHERE n.entry->'record'->>'format' = 'pi-trajectory/v1'
-      AND n.entry->'record'->'projection'->>'kind' = 'safe'
-      AND n.entry->'record'->'projection'->>'policyId' IS NOT NULL
-      AND json_typeof(n.entry->'record'->'projection'->'policyVersion') = 'number'
+    WHERE n.entry->'record'->>'format' = ${PI_METRIC_RECORD_FORMAT}
       AND body.snapshot->'scope'->>'chatId' = n.entry->'record'->'resource'->>'sessionId'
       AND (n.entry->'record'->>'submissionId' IS NOT NULL
         OR (json_typeof(n.entry->'record'->'submissionId') = 'null'
@@ -330,6 +330,7 @@ const trustedPiInventory = sql`(
   AND (SELECT count(*) FROM records) = (SELECT count(*) FROM native)
   AND NOT EXISTS (SELECT 1 FROM native AS n WHERE (
     ${v2PiFacts(sql`n.entry`)}
+    AND n.entry->'metricProjection'->>'complete' = 'true'
     AND ${nativeId(sql`n.source->'resource'->>'agentId'`)}
     AND (${nativeId(sql`n.source->>'submissionId'`)}
       OR (json_typeof(n.source->'submissionId') = 'null'
@@ -425,7 +426,8 @@ export function createPostgresResourceSnapshotReader(db: EvalDb, ownerUserId: st
               ${trustedPiInventory} AS trusted FROM body`)).rows;
           if (!stored) return { snapshotPresent: false, total: null, rows: [], attempt };
           if (!Number.isSafeInteger(stored.observed) || stored.observed < 0) throw new HttpError("RESPONSE_INVALID");
-          const complete = attempt.nativeCoverage === "complete" && stored.trusted === true;
+          const complete = attempt.finalized === "true"
+            && attempt.nativeCoverage === "complete" && stored.trusted === true;
           // Null is *not* zero: old/unsupported facts and partial collection cannot
           // prove an inventory, although observed v2 Calls can still be paged.
           const total = complete ? stored.observed : null;

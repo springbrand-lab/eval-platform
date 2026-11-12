@@ -2,7 +2,9 @@ import { createReadStream } from "node:fs";
 import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spPiTrajectoryIdentityParts, type SpPiTrajectoryRecordReference } from "@eval-platform/eval-contracts";
+import {
+  spPiTrajectoryIdentityParts, type SpPiTrajectoryPage, type SpPiTrajectoryRecordReference,
+} from "@eval-platform/eval-contracts";
 import { HttpError } from "@eval-platform/eval-contracts/http-errors";
 import {
   EVAL_EVIDENCE_FILE_MAX_BYTES, EVAL_EVIDENCE_SHA256_HEADER, EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX_BYTES,
@@ -12,8 +14,10 @@ import {
 } from "@springbrand/eval-harness";
 import { ApiError, type HttpClient, type HttpRequestOptions } from "@springbrand/http/client";
 import { httpOriginSchema } from "../config/env.js";
+import { SpHarnessError } from "./harness-error.js";
+import { evidenceTrajectoryPage } from "./harness-wire.js";
 import { createSpHttpClient, EvalSpApiError, EvalSpTransportError, throwSpClientError, type Fetch } from "./http.js";
-import { verifiedSafePiRecordBytes } from "./native-record-stream.js";
+import { verifiedPiRecordBytes } from "./native-record-stream.js";
 
 /** One Eval SP Chat of the service account. */
 export interface ChatRef {
@@ -28,7 +32,7 @@ export interface TrajectoryQuery {
   readonly throughSeq?: number;
 }
 
-/** One *fully verified* original SAFE record; dispose removes its private temporary file. */
+/** One *fully verified* original raw record; dispose removes its private temporary file. */
 export interface VerifiedTrajectoryRecord {
   readonly byteLength: number;
   readonly sha256: string;
@@ -47,7 +51,8 @@ export interface SpObservationClient {
   messages(chat: ChatRef): Promise<unknown>;
   tree(chat: ChatRef): Promise<unknown>;
   file(chat: ChatRef, path: string): Promise<WorkspaceFile>;
-  trajectory(chat: ChatRef, query: TrajectoryQuery, signal?: AbortSignal): Promise<unknown>;
+  /** Publicly validated original page, bound to the requested Chat and frozen range. */
+  trajectory(chat: ChatRef, query: TrajectoryQuery, signal?: AbortSignal): Promise<SpPiTrajectoryPage>;
   /** Fixed owner-session byte route; no record bytes can leave before full verification. */
   trajectoryRecord(chat: ChatRef, row: SpPiTrajectoryRecordReference,
     signal?: AbortSignal): Promise<VerifiedTrajectoryRecord>;
@@ -121,7 +126,37 @@ export function createSpObservationClient(input: {
           || Number(length) < 1 || Number(length) > EVAL_EVIDENCE_TRAJECTORY_PAGE_MAX_BYTES)) {
         throw new HttpError("RESPONSE_INVALID", "SP returned invalid Chat trajectory page headers");
       }
-      return data;
+      let page: SpPiTrajectoryPage;
+      try {
+        page = evidenceTrajectoryPage(data);
+      } catch (cause) {
+        if (!(cause instanceof SpHarnessError)) throw cause;
+        throw new HttpError("RESPONSE_INVALID", "SP returned an invalid Chat trajectory page", { cause });
+      }
+      // The public parser owns page shape/order. These checks depend on this request.
+      if (page.cursor.throughSeq < afterSeq
+        || throughSeq !== undefined && page.cursor.throughSeq !== throughSeq) {
+        throw new HttpError("RESPONSE_INVALID", "SP returned an invalid Chat trajectory page");
+      }
+      if (page.records.some((row) => row.ingestSeq <= afterSeq)
+        || page.nextAfterSeq !== null && page.nextAfterSeq <= afterSeq) {
+        throw new HttpError("RESPONSE_INVALID", "SP returned an invalid Chat trajectory cursor");
+      }
+      for (const row of page.records) {
+        if ("reference" in row) {
+          if (spPiTrajectoryIdentityParts(row.reference.identity)?.[1] !== chat.chatId) {
+            throw new HttpError("RESPONSE_INVALID", "SP returned a foreign Chat trajectory reference");
+          }
+        } else {
+          const parentResource = row.record.parent?.resource;
+          if (row.record.resource.sessionId !== chat.chatId
+            || parentResource !== undefined && (parentResource === null || typeof parentResource !== "object"
+              || !("sessionId" in parentResource) || parentResource.sessionId !== chat.chatId)) {
+            throw new HttpError("RESPONSE_INVALID", "SP returned a foreign Chat trajectory record");
+          }
+        }
+      }
+      return page;
     },
     async trajectoryRecord(chat, row, signal) {
       const parsed = evalNativeRecordReferenceSchema.safeParse(row);
@@ -170,20 +205,20 @@ export function createSpObservationClient(input: {
         })
         || !response.body) {
         await response.body?.cancel();
-        throw new HttpError("RESPONSE_INVALID", "SP returned invalid SAFE Pi record headers");
+        throw new HttpError("RESPONSE_INVALID", "SP returned invalid raw Pi record headers");
       }
-      const verified = verifiedSafePiRecordBytes(response.body, {
+      const verified = verifiedPiRecordBytes(response.body, {
         identity: reference.identity, byteLength: reference.byteLength, sha256: reference.sha256,
         maxBytes: EVAL_EVIDENCE_FILE_MAX_BYTES, scope: { kind: "chat", chatId: chat.chatId },
       });
-      // Spool only this bounded record while the existing SAFE byte verifier drains it
+      // Spool only this bounded record while the existing raw byte verifier drains it
       // to EOF. Never release a prefix if hash, length, JSON, identity or parent fails.
       let directory: string;
       try {
         directory = await mkdtemp(join(tmpdir(), "eval-trajectory-"));
       } catch (cause) {
         await verified.cancel(cause).catch(() => undefined);
-        throw new HttpError("RESPONSE_INVALID", "Cannot privately verify SAFE Pi record bytes", { cause });
+        throw new HttpError("RESPONSE_INVALID", "Cannot privately verify raw Pi record bytes", { cause });
       }
       const path = join(directory, "record.json");
       let writer: Awaited<ReturnType<typeof open>> | undefined;
@@ -217,7 +252,7 @@ export function createSpObservationClient(input: {
       } catch (cause) {
         await reader.cancel(cause).catch(() => undefined);
         if (signal?.aborted) throw cause;
-        throw new HttpError("RESPONSE_INVALID", "SP returned invalid SAFE Pi record bytes", { cause });
+        throw new HttpError("RESPONSE_INVALID", "SP returned invalid raw Pi record bytes", { cause });
       } finally {
         activeSignal.removeEventListener("abort", abort);
         reader.releaseLock();
