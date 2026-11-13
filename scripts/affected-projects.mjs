@@ -56,6 +56,10 @@ function isRootConfigurationFile(file) {
     file === "tsconfig.base.json" ||
     file === ".node-version" ||
     file === "scripts/affected-projects.mjs" ||
+    // The sp-platform submodule pointer moves the SP packages every app consumes.
+    file === ".gitmodules" ||
+    file === "vendor/sp-platform" ||
+    file.startsWith("vendor/sp-platform/") ||
     file.startsWith(".github/workflows/") ||
     file.startsWith(".github/actions/")
   );

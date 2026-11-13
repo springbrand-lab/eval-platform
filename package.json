@@ -9,10 +9,10 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm --parallel --filter @eval-platform/eval-web --filter @eval-platform/eval-api run \"/^(dev|start:api|start:worker)$/\"",
-    "build": "pnpm -r --if-present build",
-    "check": "pnpm -r --if-present check",
-    "test": "pnpm -r --if-present test",
-    "typegen": "pnpm -r --if-present typegen",
+    "build": "pnpm -r --if-present --filter '!./vendor/**' build",
+    "check": "pnpm -r --if-present --filter '!./vendor/**' check",
+    "test": "pnpm -r --if-present --filter '!./vendor/**' test",
+    "typegen": "pnpm -r --if-present --filter '!./vendor/**' typegen",
     "check:packages": "pnpm -r --if-present --filter './packages/**' check",
     "test:packages": "pnpm -r --if-present --filter './packages/**' test",
     "test:deployment": "node --test infra/aws/deploy/*.test.mjs"

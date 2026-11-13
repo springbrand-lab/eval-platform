@@ -15,8 +15,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@springbrand/contracts": "0.1.0-alpha.0",
-    "@springbrand/eval-harness": "0.1.0-alpha.9",
+    "@springbrand/contracts": "workspace:*",
+    "@springbrand/eval-harness": "workspace:*",
     "@springbrand/http": "0.1.0-alpha.4",
     "hono": "4.12.33",
     "zod": "^4.4.3"

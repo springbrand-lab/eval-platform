@@ -74,3 +74,12 @@ test("AWS deployment credentials stay isolated from Web deployment and test jobs
   assert.equal(cloudflareDeploy.env.CLOUDFLARE_API_TOKEN, "${{ secrets.CLOUDFLARE_API_TOKEN }}");
   assert.equal(cloudflareDeploy.env.CLOUDFLARE_ACCOUNT_ID, "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}");
 });
+
+test("every job that installs or builds checks out the private sp-platform submodule", () => {
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    if (name === "changes") continue;
+    const checkout = job.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
+    assert.equal(checkout.with?.submodules, true, name);
+    assert.equal(checkout.with?.token, "${{ secrets.SP_PLATFORM_READ_TOKEN }}", name);
+  }
+});

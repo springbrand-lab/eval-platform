@@ -14,9 +14,19 @@ COPY packages/eval-contracts/package.json packages/eval-contracts/
 COPY packages/eval-dataset/package.json packages/eval-dataset/
 COPY packages/eval-metrics/package.json packages/eval-metrics/
 COPY packages/eval-runtime/package.json packages/eval-runtime/
+# SP packages consumed from source through the vendor/sp-platform submodule.
+COPY vendor/sp-platform/packages/agent-contracts/package.json vendor/sp-platform/packages/agent-contracts/
+COPY vendor/sp-platform/packages/contracts/package.json vendor/sp-platform/packages/contracts/
+COPY vendor/sp-platform/packages/eval-harness/package.json vendor/sp-platform/packages/eval-harness/
+COPY vendor/sp-platform/packages/file-renderers/package.json vendor/sp-platform/packages/file-renderers/
+COPY vendor/sp-platform/packages/resource/package.json vendor/sp-platform/packages/resource/
+COPY vendor/sp-platform/packages/utils/package.json vendor/sp-platform/packages/utils/
+# file-renderers installs this tarball by relative path.
+COPY vendor/sp-platform/vendor/silurus-ooxml-0.88.0-alt.tgz vendor/sp-platform/vendor/
 RUN --mount=type=cache,id=eval-platform-pnpm,target=/pnpm/store \
     pnpm --filter "@eval-platform/eval-api..." install --frozen-lockfile --store-dir /pnpm/store
 COPY packages packages
+COPY vendor/sp-platform/packages vendor/sp-platform/packages
 COPY apps/eval-api apps/eval-api
 RUN pnpm --filter @eval-platform/eval-api build \
     && node apps/eval-api/scripts/runtime-package.mjs

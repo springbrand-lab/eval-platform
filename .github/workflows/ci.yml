@@ -32,6 +32,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          # Detection only diffs the submodule pointer; it never needs SP sources.
           fetch-depth: 0
 
       - name: Set up Node.js
@@ -59,6 +60,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # vendor/sp-platform is a private submodule; this token reads both repositories.
+          submodules: true
+          token: ${{ secrets.SP_PLATFORM_READ_TOKEN }}
 
       - name: Prepare tests
         uses: ./.github/actions/prepare-workspace
@@ -106,6 +111,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # vendor/sp-platform is a private submodule; this token reads both repositories.
+          submodules: true
+          token: ${{ secrets.SP_PLATFORM_READ_TOKEN }}
 
       - name: Prepare tests
         uses: ./.github/actions/prepare-workspace
@@ -142,6 +151,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # vendor/sp-platform is a private submodule; this token reads both repositories.
+          submodules: true
+          token: ${{ secrets.SP_PLATFORM_READ_TOKEN }}
 
       - name: Prepare tests
         uses: ./.github/actions/prepare-workspace
@@ -173,6 +186,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # vendor/sp-platform is a private submodule; this token reads both repositories.
+          submodules: true
+          token: ${{ secrets.SP_PLATFORM_READ_TOKEN }}
 
       - name: Prepare tests
         uses: ./.github/actions/prepare-workspace
@@ -228,6 +245,10 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # vendor/sp-platform is a private submodule; this token reads both repositories.
+          submodules: true
+          token: ${{ secrets.SP_PLATFORM_READ_TOKEN }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
@@ -308,6 +329,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # vendor/sp-platform is a private submodule; this token reads both repositories.
+          submodules: true
+          token: ${{ secrets.SP_PLATFORM_READ_TOKEN }}
 
       - name: Prepare workspace
         uses: ./.github/actions/prepare-workspace

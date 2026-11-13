@@ -622,8 +622,10 @@ describe("public SP raw record verification with bounded Eval interpretation", (
 
   it("preserves native identity whitespace rather than trimming public Runtime identifiers", async () => {
     const entry = nativeFixture(14, CHAT, SUBMISSION);
-    const record: PiTrajectoryRecord = { ...entry.record,
-      resource: { ...entry.record.resource, agentId: " agent-1 " }, submissionId: ` ${SUBMISSION} `,
+    const source = entry.record;
+    if (source.submissionId === null) throw new Error("Expected an execution record");
+    const record: PiTrajectoryRecord = { ...source,
+      resource: { ...source.resource, agentId: " agent-1 " }, submissionId: ` ${SUBMISSION} `,
     };
     const bytes = encoder.encode(JSON.stringify(record));
     let inspected: NativeRecordInspection | undefined;

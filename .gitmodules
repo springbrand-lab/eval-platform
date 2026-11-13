@@ -1,0 +1,4 @@
+[submodule "vendor/sp-platform"]
+	path = vendor/sp-platform
+	url = ../sp-platform.git
+	shallow = true

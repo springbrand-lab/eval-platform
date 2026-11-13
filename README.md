@@ -94,10 +94,17 @@ eval-contracts → eval-dataset → eval-runtime → eval-metrics
 
 工程约定与 `sp-platform` 对齐：每个 workspace 都有独立的 package metadata、TypeScript 配置、README 和 Vitest 入口；共享包提供 `src/index.ts` 公共入口，应用只提供进程入口，并额外拥有自己的 `CONTEXT.md`。`eval-api` 使用注入的 `pg` 连接池、Drizzle 和独立迁移；不复制 SP 私有数据库客户端或 Agent 内核。Eval 发布流程从固定 SP 源码部署独立的 SP 运行环境，Eval 代码不导入其私有源文件。可使用 `DATABASE_URL` 运行数据库集成测试。
 
-`@springbrand/eval-harness` 与 `@springbrand/http` 都以精确版本从 npm 安装，不需要检出 sp-platform。
+`@springbrand/eval-harness`、`agent-contracts`、`contracts`、`file-renderers` 及其依赖的 `resource`、`utils` 不再从 npm 安装，而是通过 git submodule `vendor/sp-platform` 以 workspace 源码引用（见 `pnpm-workspace.yaml`），SP 改动不需要先发包。`@springbrand/http` 等其余包仍以精确版本从 npm 安装。
+
+```bash
+git clone --recurse-submodules git@github.com:springbrand-lab/eval-platform.git   # 新克隆
+git submodule update --init                                                       # 已有克隆
+```
+
+更新 SP：`git -C vendor/sp-platform fetch origin <分支> && git -C vendor/sp-platform checkout <提交>`，再运行 `pnpm install` 并提交 submodule 指针。EP 依赖的 SP 提交必须先推到 SP 远端。CI 用仓库 secret `SP_PLATFORM_READ_TOKEN`（可读 eval-platform 与 sp-platform 的 token）检出 submodule。根目录的 `pnpm check`/`test`/`build` 只覆盖 EP 自己的 workspace，不运行 SP 包的脚本。
 
 接入真实环境前，还需要部署独立的 Eval SP 与 Eval API/Worker，配置各服务地址、数据库和 Bundle 目录（进程与环境变量见 [eval-api README](apps/eval-api/README.md)），并验证登录、Agent 初始化、执行、评估、证据和指标的完整链路。Project 分支绑定与 Run commit 来源记录已在类型和数据库中实现。
 
 ## CI
 
-GitHub Actions 会先根据 Git 变更和 workspace 依赖图计算受影响项目，再并行检查和测试受影响的 shared packages 与应用。根配置、锁文件、CI 配置或受影响项目检测逻辑变化会触发完整测试；不涉及 workspace 的仓库级文档变更不会启动包测试。
+GitHub Actions 会先根据 Git 变更和 workspace 依赖图计算受影响项目，再并行检查和测试受影响的 shared packages 与应用。根配置、锁文件、`vendor/sp-platform` submodule 指针、CI 配置或受影响项目检测逻辑变化会触发完整测试；不涉及 workspace 的仓库级文档变更不会启动包测试。

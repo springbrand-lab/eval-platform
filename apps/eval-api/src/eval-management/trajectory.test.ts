@@ -536,11 +536,11 @@ describe("read-only trusted complete raw Pi trajectory file", () => {
     const app = setupManagement();
     app.services.metrics.getSamplingDetail.mockResolvedValue(detail);
     app.pages.mockResolvedValueOnce({ format: "sp-pi-trajectory/v1", cursor: { throughSeq: 5 },
-      records: [nativeAssistantMessage(4, "foreign-chat", "submission-1", [{ type: "text", text: "foreign" }])],
+      records: [nativeAssistantMessage(4, "foreign-chat", "submission-1", [{ type: "text", text: "leaked foreign reply" }])],
       nextAfterSeq: null });
     const foreign = await get(app, subject);
     expect(foreign.status).not.toBe(200);
-    expect(await foreign.text()).not.toContain("foreign");
+    expect(await foreign.text()).not.toContain("leaked foreign reply");
     expect(app.observation.trajectoryRecord).not.toHaveBeenCalled();
     const { reference: foreignRef } = nativeTransfer(nativeAssistantMessage(4, "foreign-chat", "submission-1",
       [{ type: "text", text: "foreign body" }]), 4);

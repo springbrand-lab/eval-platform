@@ -81,3 +81,15 @@ test("deploys the API when its deployment files change", () => {
     any: true,
   });
 });
+
+test("runs everything when the sp-platform submodule pointer moves", () => {
+  for (const file of ["vendor/sp-platform", ".gitmodules"]) {
+    assert.deepEqual(affectedProjects([file]), {
+      api: true,
+      cli: true,
+      web: true,
+      packages: true,
+      any: true,
+    });
+  }
+});
