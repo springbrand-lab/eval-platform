@@ -101,7 +101,7 @@ git clone --recurse-submodules git@github.com:springbrand-lab/eval-platform.git 
 git submodule update --init                                                       # 已有克隆
 ```
 
-更新 SP：`git -C vendor/sp-platform fetch origin <分支> && git -C vendor/sp-platform checkout <提交>`，再运行 `pnpm install` 并提交 submodule 指针。EP 依赖的 SP 提交必须先推到 SP 远端。CI 用仓库 secret `SP_PLATFORM_READ_TOKEN`（可读 eval-platform 与 sp-platform 的 token）检出 submodule。根目录的 `pnpm check`/`test`/`build` 只覆盖 EP 自己的 workspace，不运行 SP 包的脚本。
+SP 的 `eval` 分支有新提交时，SP 的 `Sync Eval Platform submodule` workflow 会更新本分支的 submodule 指针和锁文件。手动同步时，在 EP 根目录运行 `git submodule update --init --remote --checkout --no-single-branch -- vendor/sp-platform`，再运行 `pnpm install` 并提交更新。CI 用仓库 secret `SP_PLATFORM_READ_TOKEN`（可读 eval-platform 与 sp-platform 的 token）检出 submodule。根目录的 `pnpm check`/`test`/`build` 只覆盖 EP 自己的 workspace，不运行 SP 包的脚本。
 
 接入真实环境前，还需要部署独立的 Eval SP 与 Eval API/Worker，配置各服务地址、数据库和 Bundle 目录（进程与环境变量见 [eval-api README](apps/eval-api/README.md)），并验证登录、Agent 初始化、执行、评估、证据和指标的完整链路。Project 分支绑定与 Run commit 来源记录已在类型和数据库中实现。
 

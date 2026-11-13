@@ -2,4 +2,4 @@
 	path = vendor/sp-platform
 	url = ../sp-platform.git
 	shallow = true
-	branch = feat/eval-on-main-20261113
+	branch = eval
