@@ -28,7 +28,7 @@ describe("Eval SP observation client", () => {
     const [raw, init] = fetch.mock.calls[0] as unknown as [RequestInfo | URL, RequestInit];
     const request = new Request(raw, init);
     const messages = new URL(request.url);
-    expect(messages.href).toBe(`https://agent.test/agents/inbox/${chat.ownerUserId}/chat-sockets/${chat.chatId}/get-messages?view=hydration`);
+    expect(messages.href).toBe(`https://agent.test/agents/severn-agent/${chat.ownerUserId}:${chat.chatId}/get-messages?view=hydration`);
     expect(request.headers.get("Authorization")).toBe("Bearer service");
     expect(request.headers.get("Origin")).toBe("https://web.test");
     expect(new URL((fetch.mock.calls[1] as unknown as [Request])[0].url).pathname).toMatch(/\/workspace\/tree$/u);

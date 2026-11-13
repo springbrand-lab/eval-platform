@@ -77,8 +77,9 @@ export function createSpObservationClient(input: {
     maxResponseBytes: OBSERVATION_FILE_BYTES, headers, fetch: input.fetch });
   const apiOrigin = httpOriginSchema.parse(input.apiOrigin);
   const fetchSp = input.fetch ?? globalThis.fetch;
+  // SP addresses a Chat's HTTP by its Severn name `${ownerUserId}:${chatId}`; the `:` stays raw.
   const chatPath = (chat: ChatRef, suffix: string) =>
-    `/agents/inbox/${encodeURIComponent(chat.ownerUserId)}/chat-sockets/${encodeURIComponent(chat.chatId)}/${suffix}`;
+    `/agents/severn-agent/${encodeURIComponent(chat.ownerUserId)}:${encodeURIComponent(chat.chatId)}/${suffix}`;
 
   async function get<T>(http: HttpClient, path: string, options?: HttpRequestOptions) {
     try {
