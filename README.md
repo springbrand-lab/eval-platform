@@ -94,7 +94,7 @@ eval-contracts → eval-dataset → eval-runtime → eval-metrics
 
 工程约定与 `sp-platform` 对齐：每个 workspace 都有独立的 package metadata、TypeScript 配置、README 和 Vitest 入口；共享包提供 `src/index.ts` 公共入口，应用只提供进程入口，并额外拥有自己的 `CONTEXT.md`。`eval-api` 使用注入的 `pg` 连接池、Drizzle 和独立迁移；不复制 SP 私有数据库客户端或 Agent 内核。Eval 发布流程从固定 SP 源码部署独立的 SP 运行环境，Eval 代码不导入其私有源文件。可使用 `DATABASE_URL` 运行数据库集成测试。
 
-`@springbrand/eval-harness`、`agent-contracts`、`contracts`、`file-renderers` 及其依赖的 `resource`、`utils` 不再从 npm 安装，而是通过 git submodule `vendor/sp-platform` 以 workspace 源码引用（见 `pnpm-workspace.yaml`），SP 改动不需要先发包。`@springbrand/http` 等其余包仍以精确版本从 npm 安装。
+`@springbrand/eval-harness`、`agent-contracts`、`contracts`、`file-renderers` 及其依赖的 `morphy`、`resource`、`utils` 不再从 npm 安装，而是通过 git submodule `vendor/sp-platform` 以 workspace 源码引用（见 `pnpm-workspace.yaml`），SP 改动不需要先发包。`@springbrand/http` 等其余包仍以精确版本从 npm 安装。
 
 ```bash
 git clone --recurse-submodules git@github.com:springbrand-lab/eval-platform.git   # 新克隆

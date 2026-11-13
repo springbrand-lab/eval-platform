@@ -378,11 +378,14 @@ importers:
   vendor/sp-platform/packages/agent-contracts:
     dependencies:
       '@springbrand/agent-runtime':
-        specifier: 0.3.1-alpha.32
-        version: 0.3.1-alpha.32(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
+        specifier: 0.3.1-alpha.34
+        version: 0.3.1-alpha.34(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
       '@springbrand/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@springbrand/morphy':
+        specifier: workspace:*
+        version: link:../morphy
       '@springbrand/resource':
         specifier: workspace:*
         version: link:../resource
@@ -396,9 +399,6 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
     devDependencies:
-      esbuild:
-        specifier: ^0.28.2
-        version: 0.28.2
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -411,12 +411,15 @@ importers:
       '@js-temporal/polyfill':
         specifier: ^0.5.1
         version: 0.5.1
+      '@springbrand/errors':
+        specifier: 0.1.0-alpha.2
+        version: 0.1.0-alpha.2
       '@springbrand/file-renderers':
         specifier: workspace:*
         version: link:../file-renderers
       '@springbrand/http':
-        specifier: 0.1.0-alpha.5
-        version: 0.1.0-alpha.5(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
+        specifier: 0.1.0-alpha.8
+        version: 0.1.0-alpha.8(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
       '@springbrand/resource':
         specifier: workspace:*
         version: link:../resource
@@ -443,8 +446,8 @@ importers:
         specifier: workspace:*
         version: link:../agent-contracts
       '@springbrand/agent-runtime':
-        specifier: 0.3.1-alpha.32
-        version: 0.3.1-alpha.32(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
+        specifier: 0.3.1-alpha.34
+        version: 0.3.1-alpha.34(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
       '@springbrand/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -549,6 +552,22 @@ importers:
       vitest:
         specifier: ^4.1.10
         version: 4.1.11(@types/node@26.1.2)(jsdom@26.1.0)(vite@8.3.2(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.0))
+
+  vendor/sp-platform/packages/morphy:
+    dependencies:
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
+    devDependencies:
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      vite:
+        specifier: ^8.2.0
+        version: 8.3.2(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1)
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.11(@types/node@26.1.2)(jsdom@26.1.0)(vite@8.3.2(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1))
 
   vendor/sp-platform/packages/resource:
     dependencies:
@@ -3161,8 +3180,8 @@ packages:
       react: ^19.0.0
       react-dom: ^19.0.0
 
-  '@springbrand/agent-runtime@0.3.1-alpha.32':
-    resolution: {integrity: sha512-ERV6WqbIOhaFFbqmyY2zpafof4O6NE1BZhL50LC6Znansm3inor6xPkV+NS+Mv7Frqs4QrftzsGPht1KV/WZYw==}
+  '@springbrand/agent-runtime@0.3.1-alpha.34':
+    resolution: {integrity: sha512-LMF/kJraDX6NQKL9mrhFEWEazWAyUu+XMavIY4ZLGwT5bDnhpIjmTSJPDNmGd6oswhF/Fm8ETGiYnwN1uzcQcQ==}
     peerDependencies:
       agents: '>=0.30.0 <0.31.0'
       ai: ^7.0.0
@@ -3175,6 +3194,12 @@ packages:
 
   '@springbrand/contracts@0.1.0-alpha.0':
     resolution: {integrity: sha512-xbXVBmLAyaH0I11ofFvfR0b7Yx03YxyXirF1RR6G/Tc0CKiMwehSb5fV3H2GPZSo+W6cMNj7YW/vuA75mvUJzQ==}
+
+  '@springbrand/errors@0.1.0-alpha.2':
+    resolution: {integrity: sha512-Wz6rT+Pi/TahQfHaxsEz+hwHDKqh1QVhXvuGXhAbmtE938HtErBxPDlDpX+KOIjnKYBHpLmKlAnp3fePzsx5LQ==}
+
+  '@springbrand/errors@0.1.0-alpha.4':
+    resolution: {integrity: sha512-69qSGGJVzXuks2QILLYVLf6hI8ULekV6Wdym3MMXIOLJTyPilImMcYfD7tKtW7qiJZ/VXy9ugDlPs0vxHdcmTA==}
 
   '@springbrand/file-renderers@0.1.0-alpha.1':
     resolution: {integrity: sha512-TZLMxjTeEvRvzY8Ee3ZDmzKjSol2huHZYdIuclKxIBQirxkIQToPuPUGQU082ZdBdwCBDolWCMl3JBRFCdiJ/A==}
@@ -3203,8 +3228,8 @@ packages:
       zod:
         optional: true
 
-  '@springbrand/http@0.1.0-alpha.5':
-    resolution: {integrity: sha512-XNGYOjoPDqSng0kv8O1H7gB93offKZTjyXpGRosVbKQWA7RU8kEvOwKdbTU5LCkMWYe9hWiTGyV2jY9eOwZyQg==}
+  '@springbrand/http@0.1.0-alpha.8':
+    resolution: {integrity: sha512-6q5icEkJuNzAXH14szKomva/WkojTXAuSv7xj7kYr8Up9nz/j7PWzYXj6rQzBR48wxKSmRYH/eahp4G4MZ3IzA==}
     peerDependencies:
       '@tanstack/react-query': ^5.104.1
       hono: ^4.12.0
@@ -10188,7 +10213,7 @@ snapshots:
       - workflow
       - ws
 
-  '@springbrand/agent-runtime@0.3.1-alpha.32(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)':
+  '@springbrand/agent-runtime@0.3.1-alpha.34(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)':
     dependencies:
       '@cloudflare/codemode': 0.5.4(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
       '@cloudflare/sandbox': 0.12.4
@@ -10199,6 +10224,7 @@ snapshots:
       '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
       '@earendil-works/pi-durable': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
       '@ffmpeg/core': 0.12.10
+      '@springbrand/errors': 0.1.0-alpha.2
       '@springbrand/model-client': 0.1.1-alpha.0
       '@types/lodash-es': 4.17.12
       agents: 0.30.1(a176c87e2574b30186e650fab4fc19cd)
@@ -10290,6 +10316,10 @@ snapshots:
       - react-dom
       - supports-color
 
+  '@springbrand/errors@0.1.0-alpha.2': {}
+
+  '@springbrand/errors@0.1.0-alpha.4': {}
+
   '@springbrand/file-renderers@0.1.0-alpha.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)':
     dependencies:
       '@excalidraw/excalidraw': 0.18.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -10334,8 +10364,9 @@ snapshots:
       - debug
       - supports-color
 
-  '@springbrand/http@0.1.0-alpha.5(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)':
+  '@springbrand/http@0.1.0-alpha.8(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)':
     dependencies:
+      '@springbrand/errors': 0.1.0-alpha.4
       axios: 1.20.0
       content-disposition: 2.0.1
     optionalDependencies:

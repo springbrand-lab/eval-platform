@@ -9,6 +9,7 @@ packages:
   - vendor/sp-platform/packages/contracts
   - vendor/sp-platform/packages/eval-harness
   - vendor/sp-platform/packages/file-renderers
+  - vendor/sp-platform/packages/morphy
   - vendor/sp-platform/packages/resource
   - vendor/sp-platform/packages/utils
 
@@ -25,6 +26,8 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - "@springbrand/agent-config-editor"
   - "@springbrand/agent-runtime"
+  - '@springbrand/errors@0.1.0-alpha.4'
+  - '@springbrand/http@0.1.0-alpha.8'
 
 patchedDependencies:
   '@springbrand/agent-config-editor@0.1.0-alpha.4': patches/@springbrand__agent-config-editor@0.1.0-alpha.4.patch

@@ -151,7 +151,7 @@ describe("Material ZIP", () => {
     await expect(readMaterialZip(patch(await zip(["aa/x.txt", "x"]), "aa/x", "../x")))
       .rejects.toMatchObject(invalid({ path: "../x.txt", errMsg: "../x.txt: Unsafe archive path" }));
     await expect(readMaterialZip(await zip(["ok.txt", "x"], ["link", "ok.txt", { unixMode: 0o120777, msDosCompatible: false }])))
-      .rejects.toMatchObject(invalid({ path: "link", errMsg: "link: Archive entry must be a regular file" }));
+      .rejects.toMatchObject(invalid({ path: "link", errMsg: "link: Archive entry must be a regular file or directory" }));
     await expect(readMaterialZip(Buffer.from("not a zip archive"))).rejects.toMatchObject(invalid({ path: "zip" }));
   });
 

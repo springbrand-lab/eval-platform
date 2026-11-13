@@ -19,6 +19,7 @@ COPY vendor/sp-platform/packages/agent-contracts/package.json vendor/sp-platform
 COPY vendor/sp-platform/packages/contracts/package.json vendor/sp-platform/packages/contracts/
 COPY vendor/sp-platform/packages/eval-harness/package.json vendor/sp-platform/packages/eval-harness/
 COPY vendor/sp-platform/packages/file-renderers/package.json vendor/sp-platform/packages/file-renderers/
+COPY vendor/sp-platform/packages/morphy/package.json vendor/sp-platform/packages/morphy/
 COPY vendor/sp-platform/packages/resource/package.json vendor/sp-platform/packages/resource/
 COPY vendor/sp-platform/packages/utils/package.json vendor/sp-platform/packages/utils/
 # file-renderers installs this tarball by relative path.
