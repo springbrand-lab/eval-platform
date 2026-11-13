@@ -6993,6 +6993,65 @@ describe("resource readiness waiting and Submission observation", () => {
     expect(harness.collectAgentResources).toHaveBeenCalledOnce();
   });
 
+  it("collects a finished Sampling's resources on its own schedule while another Subject still runs", async () => {
+    const store = makeStore({ plans: makePlans([makeSample("sample-1"), makeSample("sample-2")]) });
+    const harness = makeHarness();
+    const clock = testClock(START);
+    let ready = false;
+    mockReadiness(harness, () => ready);
+    let slowSamplingId!: string;
+    let releaseSlow!: () => void;
+    const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve; });
+    vi.mocked(harness.collectExecution).mockImplementation(async ({ handle }) => {
+      if (handle.samplingId === slowSamplingId) await slowGate;
+      return {
+        samplingId: handle.samplingId, status: "succeeded",
+        artifacts: [{ artifactId: `artifact-${handle.samplingId}`, kind: "project", path: "/output" }],
+        trajectory: { trajectoryId: `trajectory-${handle.samplingId}`, source: "subject", path: "/trajectory" },
+      };
+    });
+    // The first readiness checks right after the Agent miss; SP finalizes before the next one is due.
+    const resourceWait = vi.fn(async (milliseconds: number) => { clock.advance(milliseconds); ready = true; });
+    const runtime = createRuntime({ harness, store, sleep: async () => undefined, now: clock.now, resourceWait });
+    store.plans().execution = executionPlan({ executionConcurrency: 2 });
+    const run = await runtime.submit(projectRequest("execution", "per-sampling-resources", ["sample-1", "sample-2"]));
+    const [fastSamplingId] = run.samplingIds as [string, string];
+    slowSamplingId = run.samplingIds[1]!;
+
+    const pass = runtime.resume(run.runId);
+    await vi.waitFor(async () => expect((await saved(store, fastSamplingId)).executionAttempts[0]!.resources?.status)
+      .toBe("collected"));
+    expect((await saved(store, fastSamplingId)).execution).toEqual({ status: "succeeded" });
+    expect(resourceWait).toHaveBeenCalledWith(RESOURCE_CHECK_INTERVAL_MS, expect.any(AbortSignal));
+    expect((await saved(store, slowSamplingId)).execution.status).not.toBe("succeeded");
+
+    releaseSlow();
+    await pass;
+    expect((await saved(store, slowSamplingId)).executionAttempts[0]!.resources?.status).toBe("collected");
+    expect(harness.collectAgentResources).toHaveBeenCalledTimes(2);
+  });
+
+  it("hands a still-owed resource check back to the next pass once the pass's Agents are done", async () => {
+    const store = makeStore();
+    const harness = makeHarness();
+    const clock = testClock(START);
+    mockReadiness(harness, () => false);
+    let waiting = 0;
+    const resourceWait = vi.fn((_milliseconds: number, signal: AbortSignal) => new Promise<void>((resolve) => {
+      waiting++;
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    }));
+    const runtime = createRuntime({ harness, store, sleep: async () => undefined, now: clock.now, resourceWait });
+    const run = await runtime.submit(projectRequest("execution", "follow-up-ends-with-pass"));
+
+    await runtime.resume(run.runId);
+    expect(waiting).toBe(1);
+    expect((await saved(store, run.samplingIds[0]!)).execution).toEqual({
+      status: "succeeded", resourcesPending: { deadline: DEADLINE, nextAttemptAt: FIRST_CHECK },
+    });
+    expect(harness.collectAgentResources).not.toHaveBeenCalled();
+  });
+
   it("stores the current snapshot once at the ten-minute deadline, ends the wait and reports it once", async () => {
     const store = makeStore();
     const harness = makeHarness();

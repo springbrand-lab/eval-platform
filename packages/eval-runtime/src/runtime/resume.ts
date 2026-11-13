@@ -17,6 +17,7 @@ import type { EvalRunResumer, EvalRunResumerDependencies, RunStopReporter } from
 import { reportError, safeLog, type RuntimeContext, type RuntimeLog } from "./log.js";
 import { RunRecords, type RunStagePlans } from "./records.js";
 import { createExclusiveRunner } from "./resources.js";
+import { ResourceFollowers, waitOrAbort, type ResourceFollow } from "./resource-followers.js";
 import { createRetryController, loggedRetryController, type RetryController } from "./retry.js";
 import { createAgentScheduler, createAgentTaskQueue } from "./scheduler.js";
 import { finishStoppedRun, interruptRun, type StopContext } from "./stop.js";
@@ -53,8 +54,10 @@ export class RunResumer implements EvalRunResumer {
   readonly #onError: (error: Error, context?: RuntimeContext) => void;
   readonly #log: RuntimeLog;
   readonly #stage: StageDependencies;
+  readonly #resourceWait: (milliseconds: number, signal: AbortSignal) => Promise<void>;
 
   constructor(dependencies: EvalRunResumerDependencies) {
+    this.#resourceWait = dependencies.resourceWait ?? waitOrAbort;
     this.#store = dependencies.store;
     this.#records = new RunRecords(dependencies.store, dependencies.plans);
     this.#harness = dependencies.harness;
@@ -173,6 +176,40 @@ export class RunResumer implements EvalRunResumer {
     await finishStoppedRun(context, run, plans, reporter);
   }
 
+  #resourceFollowers(runId: string, stopSignal: AbortSignal | undefined): ResourceFollowers {
+    return new ResourceFollowers(this.#resourceWait, this.#stage.now, (error) => reportError(
+      (reported) => this.#onError(reported, { runId }),
+      new Error(`Run ${runId} resource follow-up failed: ${errorMessage(error)}`, { cause: error }),
+    ), stopSignal);
+  }
+
+  /** A finished Subject's owed resources, checked again by its own schedule within this pass. */
+  #executionFollow(samplingId: string, refresh: (state: SamplingState) => Promise<unknown>): ResourceFollow {
+    return {
+      read: async () => (await this.#store.getSampling(samplingId))?.execution,
+      refresh: async () => {
+        const state = await this.#store.getSampling(samplingId);
+        if (state) await refresh(state);
+      },
+    };
+  }
+
+  /** A finished Evaluator's owed resources, checked again by its own schedule within this pass. */
+  #evaluationFollow(
+    evaluationId: string, samplingId: string,
+    refresh: (sampling: SamplingState, evaluation: EvaluationState) => Promise<unknown>,
+  ): ResourceFollow {
+    return {
+      read: async () => (await this.#store.getEvaluation(evaluationId))?.status,
+      refresh: async () => {
+        const [sampling, evaluation] = await Promise.all([
+          this.#store.getSampling(samplingId), this.#store.getEvaluation(evaluationId),
+        ]);
+        if (sampling && evaluation) await refresh(sampling, evaluation);
+      },
+    };
+  }
+
   async #requireRun(runId: string): Promise<RuntimeRunRecord> {
     const run = await this.#store.getRun(runId);
     if (!run) throw new RuntimeEntityNotFoundError("run", runId);
@@ -203,6 +240,11 @@ export class RunResumer implements EvalRunResumer {
         retryPolicy: config.retryPolicy,
       }),
       "Execution phase could not persist its progress",
+      (dependencies, { state, sample }) => this.#executionFollow(state.samplingId, (latest) => executeSampling(dependencies, {
+        context: { state: latest, sample },
+        harnessConfig: config.harness,
+        retryPolicy: config.retryPolicy,
+      })),
     );
   }
 
@@ -232,6 +274,7 @@ export class RunResumer implements EvalRunResumer {
     const cancelledEvaluationIds = new Set<string>();
     const scheduledEvaluationIds = new Set<string>();
     let evaluationOutputSchema: Promise<EvaluationOutputSchema> | undefined;
+    const followers = this.#resourceFollowers(run.runId, stopSignal);
 
     const getEvaluationOutputSchema = (): Promise<EvaluationOutputSchema> => {
       evaluationOutputSchema ??= this.#outputSchema(run.projectId);
@@ -248,17 +291,17 @@ export class RunResumer implements EvalRunResumer {
     const scheduleEvaluation = (sampling: SamplingState, evaluation: EvaluationState): void => {
       if (scheduledEvaluationIds.has(evaluation.evaluationId) || !owesWork(evaluation.status)) return;
       scheduledEvaluationIds.add(evaluation.evaluationId);
+      const sample = sampleBySamplingId.get(sampling.samplingId)!;
+      const evaluate = async (current: SamplingState, latest: EvaluationState) => evaluateSampling(evaluationDependencies, {
+        context: { sampling: current, evaluation: latest, sample },
+        harnessConfig: evaluationConfig.evaluationHarness,
+        retryPolicy: evaluationConfig.retryPolicy,
+        evaluationOutputSchema: await getEvaluationOutputSchema(),
+      });
       evaluationQueue.enqueue(() => this.#runQueuedStageTask(stopSignal, evaluationErrors, async () => {
-        await evaluateSampling(evaluationDependencies, {
-          context: {
-            sampling,
-            evaluation,
-            sample: sampleBySamplingId.get(sampling.samplingId)!,
-          },
-          harnessConfig: evaluationConfig.evaluationHarness,
-          retryPolicy: evaluationConfig.retryPolicy,
-          evaluationOutputSchema: await getEvaluationOutputSchema(),
-        });
+        await evaluate(sampling, evaluation);
+        followers.follow(this.#evaluationFollow(evaluation.evaluationId, sampling.samplingId,
+          (current, latest) => this.#runQueuedStageTask(stopSignal, evaluationErrors, () => evaluate(current, latest).then(() => undefined))));
       }));
     };
 
@@ -287,6 +330,12 @@ export class RunResumer implements EvalRunResumer {
         const latest = await this.#store.getSampling(state.samplingId);
         if (!latest) throw new RuntimeEntityNotFoundError("sampling", state.samplingId);
         samplingById.set(latest.samplingId, latest);
+        followers.follow(this.#executionFollow(latest.samplingId, (current) => this.#runQueuedStageTask(
+          stopSignal, executionErrors, () => executeSampling(executionDependencies, {
+            context: { state: current, sample: sampleBySamplingId.get(current.samplingId)! },
+            harnessConfig: executionConfig.harness,
+            retryPolicy: executionConfig.retryPolicy,
+          }).then(() => undefined))));
         const evaluation = evaluationBySamplingId.get(latest.samplingId);
         if (!evaluation || !isPendingSamplingStatus(evaluation.status.status)) return;
         if (latest.execution.status === "succeeded") {
@@ -307,6 +356,8 @@ export class RunResumer implements EvalRunResumer {
     } catch (error) {
       evaluationErrors.push(error);
     }
+    // Every Agent of this pass has finished; the next pass takes over any resources still owed.
+    await followers.finish();
     // Cancellation deliberately runs outside the evaluation queue: it is a
     // record-only cleanup and must never consume an Evaluator concurrency slot.
     await Promise.allSettled(cancellationTasks);
@@ -359,6 +410,15 @@ export class RunResumer implements EvalRunResumer {
         evaluationOutputSchema,
       }),
       "Evaluation phase could not persist its progress",
+      (dependencies, { evaluation, sample }) => this.#evaluationFollow(
+        evaluation.evaluationId, evaluation.samplingId,
+        (sampling, latest) => evaluateSampling(dependencies, {
+          context: { sampling, evaluation: latest, sample },
+          harnessConfig: config.evaluationHarness,
+          retryPolicy: config.retryPolicy,
+          evaluationOutputSchema,
+        }),
+      ),
     );
   }
 
@@ -369,17 +429,25 @@ export class RunResumer implements EvalRunResumer {
     contexts: readonly TContext[],
     runContext: (dependencies: StageDependencies, context: TContext) => Promise<unknown>,
     failure: string,
+    follow?: (dependencies: StageDependencies, context: TContext) => ResourceFollow,
   ): Promise<void> {
     const dependencies = this.#stageDependencies(run, this.#guardedHarness(run.runId, stopSignal), () => !stopSignal?.aborted, stopSignal);
     const errors: unknown[] = [];
-    await createAgentScheduler({ maxConcurrentDos: concurrency }).run(contexts.map((context) => async () => {
-      if (stopSignal?.aborted) return;
-      try {
-        await runContext(dependencies, context);
-      } catch (error) {
-        if (!(error instanceof RuntimeRunStoppedError)) errors.push(error);
-      }
-    }));
+    const followers = this.#resourceFollowers(run.runId, stopSignal);
+    try {
+      await createAgentScheduler({ maxConcurrentDos: concurrency }).run(contexts.map((context) => async () => {
+        if (stopSignal?.aborted) return;
+        try {
+          await runContext(dependencies, context);
+        } catch (error) {
+          if (!(error instanceof RuntimeRunStoppedError)) errors.push(error);
+          return;
+        }
+        if (follow) followers.follow(follow(dependencies, context));
+      }));
+    } finally {
+      await followers.finish();
+    }
     if (errors.length > 0) throw new AggregateError(errors, failure);
   }
 

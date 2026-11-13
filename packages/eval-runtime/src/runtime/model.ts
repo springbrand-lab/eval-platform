@@ -135,6 +135,11 @@ export interface EvalRunResumerDependencies {
   readonly idFactory?: () => string;
   readonly now?: () => string;
   readonly sleep?: (milliseconds: number) => Promise<void>;
+  /**
+   * Waits until a finished stage's next resource check is due, ending early when `signal` aborts.
+   * Defaults to a real timer; it is separate from `sleep` because the wait is cancelled when the pass ends.
+   */
+  readonly resourceWait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   /** Optional score integration. Metrics interprets the raw output; Runtime only delivers scores. */
   readonly scores?: EvaluationScorePort;
   /** Result submission and Schema checking; only a valid result makes an Evaluation succeed. */
