@@ -270,7 +270,9 @@ describe.skipIf(!connection)("resource snapshot JSON migration", () => {
       return snapshot;
     };
     for (const [stage, recordId] of records) {
-      await saveSnapshot(stage, recordId, recordId, "before upgrade \u4e2d\u6587 \ud83e\udd16");
+      const snapshot = await saveSnapshot(stage, recordId, recordId, "before upgrade \u4e2d\u6587 \ud83e\udd16");
+      // Historical rows stored the raw body alongside the Metrics projection.
+      await db.update(attemptResources).set({ snapshot }).where(eq(attemptResources.attemptId, recordId));
     }
     const snapshots = () => db.select().from(attemptResources).orderBy(attemptResources.stage, attemptResources.recordId, attemptResources.attemptId);
     const history = async () => (await db.execute(sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`)).rows;
@@ -304,10 +306,11 @@ describe.skipIf(!connection)("resource snapshot JSON migration", () => {
     for (const [stage, recordId] of records) {
       const attemptId = `${recordId}:after-upgrade`;
       const snapshot = await saveSnapshot(stage, recordId, attemptId, "Unicode \u4e2d\u6587 \ud83e\udd16; high \ud83e; low \udd16; NUL \u0000");
+      const projection = await compactResourceSnapshot(snapshot);
       const row = (await snapshots()).find((item) => item.attemptId === attemptId);
-      expect(row?.snapshot).toEqual(snapshot);
-      expect(row?.metricSnapshot).toEqual(await compactResourceSnapshot(snapshot));
-      expect(await download(stage, recordId, attemptId)).toEqual(snapshot);
+      expect(row?.snapshot).toEqual(projection);
+      expect(row?.metricSnapshot).toEqual(projection);
+      expect(await download(stage, recordId, attemptId)).toEqual(projection);
     }
 
     const beforeRerun = await snapshots();

@@ -334,7 +334,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       const call = pair[0]!;
       const result = pair[1]!;
       if (call.record.record.type !== "entry" || result.record.record.type !== "entry") throw new Error("Expected Pi entries");
-      const callId = index === 5 ? "[REDACTED]" : `call_${index + 1}|fc_${index + 1}`;
+      const callId = index === 5 ? "" : `call_${index + 1}|fc_${index + 1}`;
       ((call.record.record.value.model as Record<string, unknown>[])[0]!.content as Record<string, unknown>[])[0]!.id = callId;
       const message = (result.record.record.value.model as Record<string, unknown>[])[0]!;
       message.toolCallId = callId;
@@ -697,7 +697,7 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
     expect(stored?.snapshot.billingSettlements).toHaveLength(1);
   });
 
-  it("keeps raw snapshots unchanged while stage, Run and Metrics reads transfer only summaries and projections", async () => {
+  it("stores compact snapshots while stage, Run and Metrics reads transfer only summaries and projections", async () => {
     const seeded = await seedProject(database.db, owner, { datasets: [{ data: [makeData()] }], samplingCount: 2, evaluation: true });
     const store = createPostgresRuntimeStore(database.db, owner, release, { enqueue: async () => {} });
     const command = await buildCommand(createPostgresProjectPlanReader(database.db, owner), store, { projectId: seeded.projectId, operation: "pipeline" });
@@ -819,14 +819,14 @@ describe.skipIf(!connection)("Attempt resource snapshots stored apart from stage
       expect(await caseReader.readCaseUsage({ ...base, section: "actions", attemptId: samplingId, page: 2, pageSize: 1 }))
         .toMatchObject({ total: 2, rows: [{ index: 3, executionId: "action-2", chargedCredits: "0", executionMatches: 1 }] });
       expect(await caseReader.readCaseUsage({ ...base, section: "tool_calls", attemptId: samplingId }))
-        .toMatchObject({ snapshotPresent: true, total: 2, rows: [
-          { toolName: "tool" }, { toolName: "tool" },
-        ] }); // New native inputs become current compact facts at the single Store seam.
+        .toMatchObject({ snapshotPresent: true, total: 1, rows: [
+          { toolName: "tool", toolDurationMs: "40", resultStatus: "failed" },
+        ] });
       expect(await caseReader.readCaseUsage({ ...base, role: "evaluation", evaluationId: evaluationId!,
         section: "models", attemptId: evaluationId })).toMatchObject({ total: 0, rows: [] });
       expect(await caseReader.readCaseUsage({ ...base, role: "evaluation", evaluationId: evaluationId!,
         section: "tool_calls", attemptId: evaluationId })).toMatchObject({
-        snapshotPresent: true, total: 2, rows: [{ toolName: "tool" }, { toolName: "tool" }],
+        snapshotPresent: true, total: 1, rows: [{ toolName: "tool", toolDurationMs: "40", resultStatus: "failed" }],
       });
       await expect(createPostgresResourceSnapshotReader(measured, "other-owner")
         .readCaseUsage({ ...base, section: "models", attemptId: samplingId }))
