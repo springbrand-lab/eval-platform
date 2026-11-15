@@ -378,8 +378,8 @@ importers:
   vendor/sp-platform/packages/agent-contracts:
     dependencies:
       '@springbrand/agent-runtime':
-        specifier: 0.3.1-alpha.44
-        version: 0.3.1-alpha.44(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
+        specifier: 0.3.1-alpha.45
+        version: 0.3.1-alpha.45(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
       '@springbrand/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -446,8 +446,8 @@ importers:
         specifier: workspace:*
         version: link:../agent-contracts
       '@springbrand/agent-runtime':
-        specifier: 0.3.1-alpha.44
-        version: 0.3.1-alpha.44(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
+        specifier: 0.3.1-alpha.45
+        version: 0.3.1-alpha.45(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
       '@springbrand/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -3184,8 +3184,8 @@ packages:
       react: ^19.0.0
       react-dom: ^19.0.0
 
-  '@springbrand/agent-runtime@0.3.1-alpha.44':
-    resolution: {integrity: sha512-d4SV5k5ptEDRaK7v/H+TYpAB3r/HT7pIomSWDKtDFbJFY/79UMyDicfNbQ5WhvHsNq4F58uoVXD8NaCV5Zw0YA==}
+  '@springbrand/agent-runtime@0.3.1-alpha.45':
+    resolution: {integrity: sha512-BJQg9FQeufF1+rj/wU25L5n15jjWmk/dWOO2LuZptKB1B1W3iduw3SDlOMKXTpL+my15DomBw/KKp7Mu7njFEQ==}
     peerDependencies:
       '@springbrand/errors': '>=0.0.0-0'
       '@springbrand/model-client': '>=0.0.0-0'
@@ -10311,7 +10311,7 @@ snapshots:
       - workflow
       - ws
 
-  '@springbrand/agent-runtime@0.3.1-alpha.44(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)':
+  '@springbrand/agent-runtime@0.3.1-alpha.45(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)':
     dependencies:
       '@cloudflare/codemode': 0.5.4(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
       '@cloudflare/sandbox': 0.12.4
