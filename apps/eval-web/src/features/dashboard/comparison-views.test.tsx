@@ -17,11 +17,13 @@ const reads = vi.hoisted(() => ({
   project: vi.fn<(projectId: string, signal?: AbortSignal) => Promise<ProjectView>>(),
   sampling: vi.fn<(projectId: string, samplingId: string, signal?: AbortSignal) => Promise<SamplingDetail>>(),
   file: vi.fn<typeof import("@/api-sdk/observations-api").getWorkspaceFile>(),
+  tree: vi.fn(async (_projectId: string, kind: string, id: string) => [{ type: "file" as const, updatedAt: 1,
+    ...kind === "samplings" ? { name: `${id}.html`, path: `/${id}.html` } : { name: "evidence.html", path: `/evidence/artifacts/${id.replace(/-evaluation$/u, "")}.html` } }]),
 }));
 vi.mock("@/api-sdk/projects-api", async (original) => ({ ...await original<object>(), getProject: reads.project }));
 vi.mock("@/api-sdk/metrics-api", async (original) => ({ ...await original<object>(), getSamplingDetail: reads.sampling }));
 vi.mock("@/api-sdk/runs-api", async (original) => ({ ...await original<object>(), listSamplingEvaluations: async () => [] }));
-vi.mock("@/api-sdk/observations-api", async (original) => ({ ...await original<object>(), getWorkspaceFile: reads.file }));
+vi.mock("@/api-sdk/observations-api", async (original) => ({ ...await original<object>(), getWorkspaceFile: reads.file, getWorkspaceTree: reads.tree }));
 vi.mock("@/components/files/file-preview", () => ({
   FilePreview: ({ file, readFile }: { file: { path: string }; readFile: (path: string, signal: AbortSignal) => Promise<Blob> }) =>
     <button onClick={() => void readFile(file.path, new AbortController().signal)}>读取文件 {file.path}</button>,
@@ -44,6 +46,11 @@ function executionValues(container: ParentNode) {
   const metrics = control(container, "执行 Agent 指标");
   expect(metrics).not.toBeNull();
   return Object.fromEntries([...metrics!.querySelectorAll("dt")].map((term) => [term.textContent, term.nextElementSibling?.textContent]));
+}
+
+async function openTab(container: ParentNode, label: string) {
+  const tab = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((item) => item.textContent === label)!;
+  await act(async () => { tab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 })); });
 }
 
 async function changeView(container: ParentNode, label: string) {
@@ -295,7 +302,8 @@ it("uses each selected Sampling's actual subject values, independent selections 
     });
     expect(control(screen.container, "当前采样执行 Agent 指标")).toBeNull();
     expect(control(side(1), "评估数值")?.textContent).toContain("否");
-    expect(control(side(1), "产物与证据预览")).not.toBeNull();
+    expect(control(side(1), "执行任务与评估要求")).not.toBeNull();
+    expect(control(side(1), "Workspace")).toBeNull();
     expect(reads.sampling).not.toHaveBeenCalledWith("p1", "p1-data-1-valid-b", expect.anything());
     expect(screen.container.textContent).not.toMatch(/重新执行|重新评估|重新收集结果/u);
 
@@ -318,9 +326,14 @@ it("uses each selected Sampling's actual subject values, independent selections 
     expect(executionValues(metrics(2))["实际执行积分"]).toBe("29");
     expect(side(2).textContent).toContain("p2-data-0-valid-b 的评估理由");
     expect(screen.container.querySelector<HTMLSelectElement>('[aria-label="项目 2 的有效采样"]')?.value).toBe("p2-data-0-valid-b");
+    await openTab(side(1), "执行过程");
+    await waitFor(() => expect(button(side(1), "读取文件 /p1-data-0-valid-b.html")).toBeDefined());
+    expect(control(side(1), "Workspace")?.closest(".eval-chat")).toBeNull();
     await click(button(side(1), "读取文件 /p1-data-0-valid-b.html"));
     expect(reads.file).toHaveBeenLastCalledWith("p1", "samplings", "p1-data-0-valid-b", "/p1-data-0-valid-b.html", expect.any(AbortSignal));
+    await openTab(side(1), "结果");
     await click(button(side(2), "/evidence/artifacts/p2-data-0-valid-b.html"));
+    await waitFor(() => expect(button(side(2), "读取文件 /evidence/artifacts/p2-data-0-valid-b.html")).toBeDefined());
     await click(button(side(2), "读取文件 /evidence/artifacts/p2-data-0-valid-b.html"));
     expect(reads.file).toHaveBeenLastCalledWith("p2", "evaluations", "p2-data-0-valid-b-evaluation", "/evidence/artifacts/p2-data-0-valid-b.html", expect.any(AbortSignal));
 
@@ -339,8 +352,9 @@ it("uses each selected Sampling's actual subject values, independent selections 
     expect(executionValues(metrics(1))["实际执行积分"]).toBe("41");
     expect(executionValues(metrics(2))["实际执行积分"]).toBe("43");
     expect(side(1).textContent).not.toContain("p1-data-0-valid-b 的评估理由");
-    expect(button(side(2), "读取文件 /p2-data-1-valid-a.html")).toBeDefined();
     expect(button(side(2), "读取文件 /evidence/artifacts/p2-data-0-valid-b.html")).toBeUndefined();
+    await openTab(side(2), "执行过程");
+    await waitFor(() => expect(button(side(2), "读取文件 /p2-data-1-valid-a.html")).toBeDefined());
   } finally { await screen.close(); }
 });
 
@@ -350,6 +364,7 @@ it("defaults a reused comparison SamplingResult to evaluation without adding an 
     await waitFor(() => expect(screen.container.textContent).toContain("p1-data-0-valid-a 的评估理由"));
     expect(control(screen.container, "当前采样执行 Agent 指标")).toBeNull();
     expect(control(screen.container, "评估数值")?.textContent).toContain("否");
-    expect(control(screen.container, "产物与证据预览")).not.toBeNull();
+    expect(control(screen.container, "执行任务与评估要求")).not.toBeNull();
+    expect(control(screen.container, "Workspace")).toBeNull();
   } finally { await screen.close(); }
 });

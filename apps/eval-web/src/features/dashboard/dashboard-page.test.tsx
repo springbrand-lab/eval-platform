@@ -17,6 +17,7 @@ import { dashboardEditSearchMiddleware, dashboardSearchMiddleware, validateDashb
 
 const reads = vi.hoisted(() => ({
   projects: vi.fn(), limits: vi.fn(), comparison: vi.fn(), project: vi.fn(), sampling: vi.fn(), file: vi.fn(),
+  tree: vi.fn(async () => [{ name: "index.html", path: "/index.html", type: "file", updatedAt: 1 }]),
   dashboard: vi.fn(), dashboards: vi.fn(), createDashboard: vi.fn(), updateDashboard: vi.fn(),
 }));
 vi.mock("@/api-sdk/dashboards-api", async (original) => ({
@@ -27,7 +28,7 @@ vi.mock("@/api-sdk/input-limits-api", async (original) => ({ ...await original<o
 vi.mock("@/api-sdk/comparison-api", async (original) => ({ ...await original<object>(), getProjectComparison: reads.comparison }));
 vi.mock("@/api-sdk/metrics-api", async (original) => ({ ...await original<object>(), getSamplingDetail: reads.sampling }));
 vi.mock("@/api-sdk/runs-api", async (original) => ({ ...await original<object>(), listSamplingEvaluations: async () => [] }));
-vi.mock("@/api-sdk/observations-api", async (original) => ({ ...await original<object>(), getWorkspaceFile: reads.file }));
+vi.mock("@/api-sdk/observations-api", async (original) => ({ ...await original<object>(), getWorkspaceFile: reads.file, getWorkspaceTree: reads.tree }));
 vi.mock("@/components/files/file-preview", () => ({
   FilePreview: ({ file, readFile }: { file: { path: string }; readFile: (path: string, signal: AbortSignal) => Promise<Blob> }) =>
     <button onClick={() => void readFile(file.path, new AbortController().signal)}>打开产物 {file.path}</button>,
@@ -324,7 +325,11 @@ it("walks from Projects through a metric and Dataset to a Data's authoritative v
     });
     expect(button(screen.container, "重新执行")).toBeUndefined();
     expect(button(screen.container, "重新评估")).toBeUndefined();
-    await click(button(control(screen.container, "项目 1 结果")!, "打开产物 /index.html"));
+    const result = control(screen.container, "项目 1 结果")!;
+    const tab = [...result.querySelectorAll('[role="tab"]')].find((item) => item.textContent === "执行过程")!;
+    await act(async () => { tab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 })); });
+    await waitFor(() => expect(button(result, "打开产物 /index.html")).toBeDefined());
+    await click(button(result, "打开产物 /index.html"));
     expect(reads.file).toHaveBeenLastCalledWith("p1", "samplings", "p1-data-0-valid-b", "/index.html", expect.any(AbortSignal));
     await click(control(screen.container, "返回当前数据集"));
     await waitFor(() => expect(control(screen.container, "打开 零分用例")).not.toBeNull());

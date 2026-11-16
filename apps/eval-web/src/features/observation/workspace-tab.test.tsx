@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { WorkspaceTreeNode } from "@/api-sdk/observations-api";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { click, render } from "@/test/render";
-import { WorkspaceTab } from "./workspace-tab";
+import { WorkspaceTab, defaultPreviewPath } from "./workspace-tab";
 
 const getFile = vi.hoisted(() => vi.fn());
 vi.mock("@/api-sdk/observations-api", async (original) => ({ ...await original<object>(), getWorkspaceFile: getFile }));
@@ -127,4 +127,12 @@ it("refreshes a running file even when optional mtime and size cannot identify c
     await vi.waitFor(() => expect(document.querySelector("pre")?.textContent).toBe("NEW"));
     expect(getFile.mock.calls.length).toBeGreaterThan(1);
   } finally { await view.cleanup(); }
+});
+
+it("opens SP Chat's default Workspace file: the latest previewable file, never data files or a 404 page", () => {
+  expect(defaultPreviewPath([
+    file("/report.md", 2), file("/data.json", 9), file("/404.html", 9), file("/untimed.html", Number.NaN),
+    { name: "site", path: "/site", type: "directory", children: [file("/site/index.html", 2), file("/site/chart.svg", 1)] },
+  ])).toBe("/report.md");
+  expect(defaultPreviewPath([file("/data.json"), file("/notes.txt")])).toBeNull();
 });
