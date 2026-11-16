@@ -14,7 +14,7 @@ function Entry({ node, depth, selectedPath, onSelect }: {
 }) {
   const style = { paddingLeft: depth * 12 + 8 };
   const className = "h-auto w-full justify-start gap-1.5 rounded-none py-2 pr-2 text-left text-[13px]";
-  if (node.type === "directory") return <Collapsible defaultOpen={depth === 0}>
+  if (node.type === "directory") return <Collapsible defaultOpen={depth === 0 || !!selectedPath?.startsWith(`${node.path}/`)}>
     <CollapsibleTrigger asChild>
       <Button type="button" variant="ghost" title={node.path} style={style} className={cn(className, "group")}>
         <ChevronRight aria-hidden className="size-3.5 shrink-0 group-aria-expanded:rotate-90" />

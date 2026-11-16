@@ -157,7 +157,7 @@ export function ProjectResults({ projectId, view, overview }: { projectId: strin
       </Table>}
       <TablePagination {...pagination} label="用例结果分页" />
     </Card>
-    {sampling && <Dialog open compact placement="right" title="采样结果" description="查看本次评估结论与产物；关闭后继续比较用例。" onClose={() => setSampling(null)}
+    {sampling && <Dialog open compact size="xl" placement="right" title="采样结果" description="查看本次评估结论、执行与评估过程；关闭后继续比较用例。" onClose={() => setSampling(null)}
       footer={<><Link className="link text-sm" to="/projects/$projectId/samplings/$samplingId" params={{ projectId, samplingId: sampling }}>独立打开</Link><Button onClick={() => setSampling(null)}>返回用例列表</Button></>}><Suspense fallback={<LoadingBlock />}><SamplingResult key={sampling} projectId={projectId} samplingId={sampling} /></Suspense></Dialog>}
   </>;
 }

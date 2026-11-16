@@ -9,7 +9,7 @@ const content = cn(
   "fixed left-1/2 top-1/2 z-50 flex max-h-[85vh] w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-xl border border-border bg-surface text-text shadow-[var(--shadow)] focus:outline-none",
   "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95",
 );
-const widths = { sm: "max-w-md", md: "max-w-xl", lg: "max-w-3xl" };
+const widths = { sm: "max-w-md", md: "max-w-xl", lg: "max-w-3xl", xl: "max-w-7xl" };
 
 export interface DialogProps {
   open: boolean;
@@ -18,7 +18,8 @@ export interface DialogProps {
   description?: ReactNode;
   children?: ReactNode;
   footer?: ReactNode;
-  size?: "sm" | "md" | "lg";
+  /** A right drawer is max-w-5xl unless `xl`. */
+  size?: "sm" | "md" | "lg" | "xl";
   placement?: "center" | "right";
   compact?: boolean;
 }
@@ -28,7 +29,7 @@ export function Dialog({ open, onClose, title, description, children, footer, si
     <DialogPrimitive.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className={overlay} />
-        <DialogPrimitive.Content className={cn(content, widths[size], placement === "right" && "left-auto right-0 top-0 h-dvh max-h-dvh w-full max-w-5xl translate-x-0 translate-y-0 rounded-none")}>
+        <DialogPrimitive.Content className={cn(content, widths[size], placement === "right" && cn("left-auto right-0 top-0 h-dvh max-h-dvh w-full translate-x-0 translate-y-0 rounded-none", size === "xl" ? widths.xl : "max-w-5xl"))}>
           <div className={cn("flex items-start justify-between gap-4 px-5 pb-3 pt-5", compact && "px-4 py-2")}>
             <div>
               <DialogPrimitive.Title className="text-base font-semibold text-text-strong">{title}</DialogPrimitive.Title>

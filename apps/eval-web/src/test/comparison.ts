@@ -111,10 +111,10 @@ export function comparisonSampling(projectId: string, samplingId: string): Sampl
       subjectAgent: agent.agentConfigRef, executionAttempts: [],
     },
     summary: { ...summary, evaluationOutputs: { ...summary.evaluationOutputs, fields: [comparisonScore(0)] } },
-    subject: { ...agent, samplingId, artifacts: [{ artifactId: `${samplingId}-artifact`, path: "/index.html", kind: "file" }] },
+    subject: { ...agent, samplingId, chatId: `${samplingId}-chat`, artifacts: [{ artifactId: `${samplingId}-artifact`, path: "/index.html", kind: "file" }] },
     evaluations: [{
       record: { evaluationId, samplingId, evaluator: agent.agentConfigRef, status: { status: "succeeded" }, attempts: [] },
-      agent: { ...agent, role: "evaluator", evaluationId, samplingId },
+      agent: { ...agent, role: "evaluator", chatId: `${evaluationId}-chat`, evaluationId, samplingId },
       output: {
         evaluationId, samplingId, path: "/result.json", contentHash: null, content: null, rawJson: { score: 0, reason: `${samplingId} 的评估理由` },
         outputStatus: "succeeded", outputError: null, validation: { status: "valid", reason: "valid", errors: [] }, observations: [],

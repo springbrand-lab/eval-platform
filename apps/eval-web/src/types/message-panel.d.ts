@@ -17,6 +17,15 @@ declare module "@springbrand/message-panel/cloud-os" {
     emptyTitle?: string;
     constrainWidth?: boolean;
   }): ReactNode;
+
+  export function CloudOsWorkspaceSplit(props: {
+    chat: ReactNode;
+    workspace: ReactNode;
+    workspaceOpen: boolean;
+    railWidth?: number;
+    rail?: ReactNode;
+    isLoading?: boolean;
+  }): ReactNode;
 }
 
 declare module "@springbrand/message-panel/cloud-os.css";
