@@ -34,7 +34,7 @@ SP 根据可信部署 `API_ORIGIN` 固定权限：`https://devrapi.springbrand.a
 
 来源 SP 的 AWS 部署沿用现有必需的 `RESOURCE_ADMIN_TOKEN` 注入 API，不注入 Cloudflared、Agent Worker 或 Web。该共享令牌本身保留原管理权限，只有导出接口是只读入口；管理员轮换时须同步更新 Takt 和 Eval 调用方。启用前须通过正常流水线发布包含 canonical export、依赖证据和覆盖契约的来源/目标 SP 代码。目标的 `POST /api/agent-config-imports/validate` 校验、插入/更新和回执重放须使用同一版指纹规则；旧来源缺少规范化字段或所选平台定义证据时会阻断，不退回仅比较 ID。
 
-目标 Eval SP 必须经正常部署流水线应用 `0083_agent_config_import_receipts.sql`，不可手动操作远程数据库。该迁移可重复执行：表不存在时创建；已由旧 `0040`/`0041` 建出的表则保留全部回执，并收敛为相同结构，即 `(owner, kind, resource_id)` 非唯一索引、`(owner, kind, import_key)` 唯一；多个不可变操作回执指向同一条可变资源，不生成旧版资源副本。导入端须先读取目标公开能力 `GET /api/agent-config-imports/config` 并确认 `{version:1,enabled:true}`，然后才能上传目标附件或调用三类导入。来源管理令牌不能用于目标导入鉴权；普通 Agent 创建不依赖该导入开关。
+目标 Eval SP 必须经正常部署流水线应用 `0084_agent_config_import_receipts.sql`，不可手动操作远程数据库。该迁移可重复执行：表不存在时创建；已由旧 `0040`/`0041` 建出的表则保留全部回执，并收敛为相同结构，即 `(owner, kind, resource_id)` 非唯一索引、`(owner, kind, import_key)` 唯一；多个不可变操作回执指向同一条可变资源，不生成旧版资源副本。导入端须先读取目标公开能力 `GET /api/agent-config-imports/config` 并确认 `{version:1,enabled:true}`，然后才能上传目标附件或调用三类导入。来源管理令牌不能用于目标导入鉴权；普通 Agent 创建不依赖该导入开关。
 
 目标 Skill 的内容地址必须为独立 `https://creation-file-eval.springbrand.ai`，绑定 `sp-platform-content-eval-enam`；Reference 使用 `https://evalworkspace.springbrand.ai`。不能因为 Eval 暂无 Creation 页面就让目标 Skill 回读 `creation-file-dev.springbrand.ai`。仓库已修正 Eval 的内容 origin，但域名/bucket 绑定与部署后的实际读取尚未核验，必须由运维在启用导入前完成。导入端按 source/target 分开的精确 CDN 允许列表校验，不能从导出 payload 自动授权新域名。
 

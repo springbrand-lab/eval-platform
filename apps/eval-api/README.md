@@ -880,7 +880,7 @@ not browser authentication. A disabled apply keeps its durable plan/key resumabl
 
 `migrations-postgres/0006_agent_imports.sql` and its Drizzle metadata add only
 Eval-side source/task/intent/lease structures. No old sources are backfilled.
-Target SP needs `0083_agent_config_import_receipts.sql` through its normal
+Target SP needs `0084_agent_config_import_receipts.sql` through its normal
 deployment pipeline, not manual remote database actions. It is idempotent: it
 creates the receipt table when absent and converges a table left by the former
 `0040`/`0041` migrations on the same overwrite-capable shape, keeping its receipts. Immutable operation receipts may refer to
