@@ -18,6 +18,8 @@ allowBuilds:
   '@mongodb-js/zstd': false
   core-js-pure: false
   esbuild: true
+  # Ships a prebuilt dist; its postinstall only rebuilds for a custom exifreader config.
+  exifreader: false
   node-liblzma: false
   protobufjs: false
   workerd: true
