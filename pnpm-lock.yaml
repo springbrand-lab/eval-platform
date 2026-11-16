@@ -378,8 +378,8 @@ importers:
   vendor/sp-platform/packages/agent-contracts:
     dependencies:
       '@springbrand/agent-runtime':
-        specifier: 0.3.1-alpha.47
-        version: 0.3.1-alpha.47(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
+        specifier: 0.3.4-alpha.0
+        version: 0.3.4-alpha.0(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
       '@springbrand/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -446,8 +446,8 @@ importers:
         specifier: workspace:*
         version: link:../agent-contracts
       '@springbrand/agent-runtime':
-        specifier: 0.3.1-alpha.47
-        version: 0.3.1-alpha.47(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
+        specifier: 0.3.4-alpha.0
+        version: 0.3.4-alpha.0(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
       '@springbrand/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -3184,17 +3184,17 @@ packages:
       react: ^19.0.0
       react-dom: ^19.0.0
 
-  '@springbrand/agent-runtime@0.3.1-alpha.47':
-    resolution: {integrity: sha512-xQeomC4WRJXXkHD5o7iBz1aTcqh/1yLd3vmCm40GME4AFR6eeMgGJAbzdHymV4ik8SYLyhF0wGcVCl1V01y0Gg==}
-    peerDependencies:
-      '@springbrand/errors': '>=0.0.0-0'
-      '@springbrand/model-client': '>=0.0.0-0'
-      agents: '>=0.30.0 <0.31.0'
-      ai: ^7.0.0
-
   '@springbrand/agent-runtime@0.3.1-alpha.9':
     resolution: {integrity: sha512-NlumLN+cWuXNMQWpvG9VtfqV6uc9pgFeHCklaN3NLxekZsRdRzjfyyDHLeAhNahozux/qOZMEVA4Z4sUjB6GKQ==}
     peerDependencies:
+      agents: '>=0.30.0 <0.31.0'
+      ai: ^7.0.0
+
+  '@springbrand/agent-runtime@0.3.4-alpha.0':
+    resolution: {integrity: sha512-1xTkUR7GT1MImLWlmhE22hu98o2Cpdki5Cxozi8NGB6NpUqHsNNTTA5xr8VMi7wNkJz56PNvNNPxA6B5BUvFcg==}
+    peerDependencies:
+      '@springbrand/errors': '>=0.0.0-0'
+      '@springbrand/model-client': '>=0.0.0-0'
       agents: '>=0.30.0 <0.31.0'
       ai: ^7.0.0
 
@@ -10307,7 +10307,47 @@ snapshots:
       - workflow
       - ws
 
-  '@springbrand/agent-runtime@0.3.1-alpha.47(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)':
+  '@springbrand/agent-runtime@0.3.1-alpha.9(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)':
+    dependencies:
+      '@cloudflare/codemode': 0.5.4(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
+      '@cloudflare/sandbox': 0.12.4
+      '@cloudflare/shell': 0.4.3(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
+      '@cloudflare/think': 0.20.2(@ai-sdk/provider@4.0.34)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(zod@4.6.5)
+      '@earendil-works/chord': 1.4.0
+      '@earendil-works/pi-agent-core': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
+      '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
+      '@earendil-works/pi-durable': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
+      '@springbrand/model-client': 0.1.0
+      '@types/lodash-es': 4.17.12
+      agents: 0.30.1(a176c87e2574b30186e650fab4fc19cd)
+      ai: 7.0.56(zod@4.6.5)
+      cron-schedule: 6.0.0
+      isomorphic-git: 1.38.6
+      lodash-es: 4.18.1
+      zod: 4.6.5
+    transitivePeerDependencies:
+      - '@ai-sdk/google'
+      - '@ai-sdk/provider'
+      - '@ai-sdk/react'
+      - '@aws-sdk/credential-provider-node'
+      - '@chat-adapter/telegram'
+      - '@modelcontextprotocol/sdk'
+      - '@openai/agents'
+      - '@opencode-ai/sdk'
+      - '@smithy/hash-node'
+      - '@smithy/signature-v4'
+      - '@tanstack/ai'
+      - '@xterm/xterm'
+      - bufferutil
+      - kerberos
+      - react
+      - supports-color
+      - undici
+      - utf-8-validate
+      - workflow
+      - ws
+
+  '@springbrand/agent-runtime@0.3.4-alpha.0(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)':
     dependencies:
       '@cloudflare/codemode': 0.5.4(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
       '@cloudflare/sandbox': 0.12.4
@@ -10339,46 +10379,6 @@ snapshots:
       simple-statistics: 8.0.0
       svgdom: 0.1.29
       three: 0.180.0
-      zod: 4.6.5
-    transitivePeerDependencies:
-      - '@ai-sdk/google'
-      - '@ai-sdk/provider'
-      - '@ai-sdk/react'
-      - '@aws-sdk/credential-provider-node'
-      - '@chat-adapter/telegram'
-      - '@modelcontextprotocol/sdk'
-      - '@openai/agents'
-      - '@opencode-ai/sdk'
-      - '@smithy/hash-node'
-      - '@smithy/signature-v4'
-      - '@tanstack/ai'
-      - '@xterm/xterm'
-      - bufferutil
-      - kerberos
-      - react
-      - supports-color
-      - undici
-      - utf-8-validate
-      - workflow
-      - ws
-
-  '@springbrand/agent-runtime@0.3.1-alpha.9(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)':
-    dependencies:
-      '@cloudflare/codemode': 0.5.4(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
-      '@cloudflare/sandbox': 0.12.4
-      '@cloudflare/shell': 0.4.3(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
-      '@cloudflare/think': 0.20.2(@ai-sdk/provider@4.0.34)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(zod@4.6.5)
-      '@earendil-works/chord': 1.4.0
-      '@earendil-works/pi-agent-core': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
-      '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
-      '@earendil-works/pi-durable': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
-      '@springbrand/model-client': 0.1.0
-      '@types/lodash-es': 4.17.12
-      agents: 0.30.1(a176c87e2574b30186e650fab4fc19cd)
-      ai: 7.0.56(zod@4.6.5)
-      cron-schedule: 6.0.0
-      isomorphic-git: 1.38.6
-      lodash-es: 4.18.1
       zod: 4.6.5
     transitivePeerDependencies:
       - '@ai-sdk/google'
