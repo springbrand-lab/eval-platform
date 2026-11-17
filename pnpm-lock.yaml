@@ -378,8 +378,8 @@ importers:
   vendor/sp-platform/packages/agent-contracts:
     dependencies:
       '@springbrand/agent-runtime':
-        specifier: 0.3.4-alpha.1
-        version: 0.3.4-alpha.1(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
+        specifier: 0.3.5-alpha.2
+        version: 0.3.5-alpha.2(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(03aba32e0bd856492ee127390d7757b2))(ai@7.0.56(zod@4.6.5))(esbuild@0.28.2)(react@19.3.0)(undici@7.29.1)(ws@8.21.0)
       '@springbrand/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -446,8 +446,8 @@ importers:
         specifier: workspace:*
         version: link:../agent-contracts
       '@springbrand/agent-runtime':
-        specifier: 0.3.4-alpha.1
-        version: 0.3.4-alpha.1(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)
+        specifier: 0.3.5-alpha.2
+        version: 0.3.5-alpha.2(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(03aba32e0bd856492ee127390d7757b2))(ai@7.0.56(zod@4.6.5))(esbuild@0.28.2)(react@19.3.0)(undici@7.29.1)(ws@8.21.0)
       '@springbrand/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -506,6 +506,9 @@ importers:
       react-data-grid:
         specifier: 7.0.0-beta.64
         version: 7.0.0-beta.64(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      react-zoom-pan-pinch:
+        specifier: 4.2.0
+        version: 4.2.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       saxes:
         specifier: ^6.0.0
         version: 6.0.0
@@ -1168,8 +1171,27 @@ packages:
     resolution: {integrity: sha512-dTbgyz4xgDS5KAUFx1bFENqj0Cr1N3tYxJJOYStc6g6HS78FSBZydyoCwLoddiQRF+VgRS0fpgAi+iKxjZ3BQA==}
     engines: {node: '>=22.19.0'}
 
+  '@earendil-works/chord@1.5.2':
+    resolution: {integrity: sha512-3g088g7qVXL2cpRAKWjj9za6RLls9FBnuUo5c0hBZ0xCftBQjae0opS+34M22vdXTVE7BNqkRG/FPc9BsM7eEg==}
+    engines: {node: '>=22.19.0'}
+    peerDependencies:
+      esbuild: 0.28.2
+      react: 19.3.0
+      ws: 8.21.0
+    peerDependenciesMeta:
+      esbuild:
+        optional: true
+      react:
+        optional: true
+      ws:
+        optional: true
+
   '@earendil-works/pi-agent-core@1.4.0':
     resolution: {integrity: sha512-PoKY84SKUwnt7S5QBZaGUqfNO1kjP3KHpHUA9QpFTj4cOjaVWMYIcBPJ6FDRCdE8Zen9OSECQUd0uUfVgtSmgA==}
+    engines: {node: '>=22.19.0'}
+
+  '@earendil-works/pi-agent-core@1.5.2':
+    resolution: {integrity: sha512-ie5mejS7mGfXt//9As7i3LfxVXdktZvF1JP4EQsUXTp4mU437h23MNGx7wXZ5VYs3YiG/Qnj3e7OZ2HC069OMw==}
     engines: {node: '>=22.19.0'}
 
   '@earendil-works/pi-ai@1.4.0':
@@ -1177,16 +1199,37 @@ packages:
     engines: {node: '>=22.19.0'}
     hasBin: true
 
+  '@earendil-works/pi-ai@1.5.2':
+    resolution: {integrity: sha512-2tWPSnV3qzfiDIY3aWluBag3vC++Vs+VsXt/UquSU5onPMohPih72FUhIhaqmDdMYubOgB3Byl9uF4Vk40JLvQ==}
+    engines: {node: '>=22.19.0'}
+    hasBin: true
+
   '@earendil-works/pi-codemode@1.4.0':
     resolution: {integrity: sha512-23CNAXpS9DuLzPMyYuvrXVVio46x4YhffCgCqaWmF7F5H8PooqjrQvX4ucF6M0BhUd+x2tV6r1J0dv8cCME4Cg==}
+    engines: {node: '>=22.19.0'}
+
+  '@earendil-works/pi-codemode@1.5.2':
+    resolution: {integrity: sha512-HoZQ40a9RgdZ1VgmrX6x8887cNXedaRJT1l+Ie5YRIMK4gY7v0EpsiNqf6dmixrKylZlTgUSyR+vE8xhjfkr+w==}
     engines: {node: '>=22.19.0'}
 
   '@earendil-works/pi-durable@1.4.0':
     resolution: {integrity: sha512-EtIyXH1MBSXdJSkodmy+CYXuwfve3gPrD4GNCZ0XmuRWLPupwRlNQ7fdaXjRcLoKb6SWkT/yEzK+sMmrqvYK+Q==}
     engines: {node: '>=22.19.0'}
 
+  '@earendil-works/pi-durable@1.5.2':
+    resolution: {integrity: sha512-zDB3anbI/yD0IG+VVY+g5tU+c5XOVqQAFwLkXRMiqZb4p/afWro0voZtLNoRAWcDA2r73kvmH6kKin9Ka8l55g==}
+    engines: {node: '>=22.19.0'}
+
+  '@earendil-works/pi-schema@1.5.2':
+    resolution: {integrity: sha512-hJoyCXWUhsSrXY5wJo2Q4kHXUsR51pNhkJHAMkWRwVMLDRtMDPkKNaa+JlVRVqTw1hjdSxcVVaFLSDbKlaTXEQ==}
+    engines: {node: '>=22.19.0'}
+
   '@earendil-works/pi-telemetry@1.4.0':
     resolution: {integrity: sha512-MLIfowwUYIY65jSjMX82paZOrX/NTvLk6D08h+3Jq42a99RzUOewzuCR0zOlPul3D6UBfddat76VT6LvsHEs1w==}
+    engines: {node: '>=22.19.0'}
+
+  '@earendil-works/pi-telemetry@1.5.2':
+    resolution: {integrity: sha512-m+cumjIqNh1aMISi/9ttcG3ZOwIdriPbz/eMyWmRMJCGa/WcgY1RX4lrb7HvsHhSfI/JUeBESA4nOCr8C3y5ow==}
     engines: {node: '>=22.19.0'}
 
   '@emnapi/runtime@1.11.3':
@@ -3190,12 +3233,12 @@ packages:
       agents: '>=0.30.0 <0.31.0'
       ai: ^7.0.0
 
-  '@springbrand/agent-runtime@0.3.4-alpha.1':
-    resolution: {integrity: sha512-awDCCKgupAyXgGtJxB12D7bVH1cqnTvGUo+sWnQeJp7IWzfF6nyW0zTEwmkiXSoNaBE/jLsf4R6z5sRFEhZZNA==}
+  '@springbrand/agent-runtime@0.3.5-alpha.2':
+    resolution: {integrity: sha512-CWLk1jt4k6+7eMbT2aOhWTPZ7YpwVXH6avb7lSN+DhCcQAWt8Jot68Fb+Lly6B3ADrXCGVpoQuyG+ws7TPUWUQ==}
     peerDependencies:
       '@springbrand/errors': '>=0.0.0-0'
       '@springbrand/model-client': '>=0.0.0-0'
-      agents: '>=0.30.0 <0.31.0'
+      agents: '>=0.33.0 <0.34.0'
       ai: ^7.0.0
 
   '@springbrand/contracts@0.1.0-alpha.0':
@@ -6224,6 +6267,10 @@ packages:
     resolution: {integrity: sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==}
     engines: {node: '>=6'}
 
+  purejsimage@0.17.0:
+    resolution: {integrity: sha512-u/A6tC4FYCRqL61QMAHiTEwKByh17txytXalgAjKhv84lFQfDNVaRc8H816dLqsTpm5MaEz9pd7UzHc0qaaJ8A==}
+    engines: {node: '>=22'}
+
   pwacompat@2.0.17:
     resolution: {integrity: sha512-6Du7IZdIy7cHiv7AhtDy4X2QRM8IAD5DII69mt5qWibC2d15ZU8DmBG1WdZKekG11cChSu4zkSUGPF9sweOl6w==}
 
@@ -6375,6 +6422,13 @@ packages:
     peerDependencies:
       react: '>=16.6.0'
       react-dom: '>=16.6.0'
+
+  react-zoom-pan-pinch@4.2.0:
+    resolution: {integrity: sha512-QSw1dvr6QGv5zHCUY7SEIY7EWRDbx1y6plylrWf2Nko9KOMW1MEoPC6oJ+Y/qOSeQjhvbkMV0m5bFF7pBxCH4A==}
+    engines: {node: '>=8', npm: '>=5'}
+    peerDependencies:
+      react: '*'
+      react-dom: '*'
 
   react@19.2.8:
     resolution: {integrity: sha512-PWaYA1L/q9u2u7xYQi+Y3L3Yfnie7XyLeaJICV1MGD6LprsBxcAqGjYyr0eY3p+QdsA+x/Irkt4Qif8D63+Sbw==}
@@ -8012,6 +8066,28 @@ snapshots:
       - ai
       - zod
 
+  '@cloudflare/think@0.20.2(@ai-sdk/provider@4.0.34)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(agents@0.30.1(03aba32e0bd856492ee127390d7757b2))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(zod@4.6.5)':
+    dependencies:
+      '@ai-sdk/anthropic': 4.0.89(zod@4.6.5)
+      '@ai-sdk/openai': 4.0.103(zod@4.6.5)
+      '@cloudflare/codemode': 0.5.4(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
+      '@cloudflare/shell': 0.4.3(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
+      agents: 0.30.1(03aba32e0bd856492ee127390d7757b2)
+      ai: 7.0.56(zod@4.6.5)
+      chat: 4.43.0(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
+      just-bash: 3.6.0
+      workers-ai-provider: 4.0.1(@ai-sdk/anthropic@4.0.89(zod@4.6.5))(@ai-sdk/openai@4.0.103(zod@4.6.5))(@ai-sdk/provider@4.0.34)(ai@7.0.56(zod@4.6.5))
+      zod: 4.6.5
+    optionalDependencies:
+      react: 19.3.0
+    transitivePeerDependencies:
+      - '@ai-sdk/google'
+      - '@ai-sdk/provider'
+      - '@modelcontextprotocol/sdk'
+      - '@tanstack/ai'
+      - supports-color
+      - workflow
+
   '@cloudflare/think@0.20.2(@ai-sdk/provider@4.0.34)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(zod@4.6.5)':
     dependencies:
       '@ai-sdk/anthropic': 4.0.89(zod@4.6.5)
@@ -8090,6 +8166,15 @@ snapshots:
       '@earendil-works/pi-telemetry': 1.4.0
       typebox: 1.3.27
 
+  '@earendil-works/chord@1.5.2(esbuild@0.28.2)(react@19.3.0)(ws@8.21.0)':
+    dependencies:
+      '@earendil-works/pi-schema': 1.5.2
+      '@earendil-works/pi-telemetry': 1.5.2
+    optionalDependencies:
+      esbuild: 0.28.2
+      react: 19.3.0
+      ws: 8.21.0
+
   '@earendil-works/pi-agent-core@1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)':
     dependencies:
       '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
@@ -8106,6 +8191,49 @@ snapshots:
       - utf-8-validate
       - ws
       - zod
+
+  '@earendil-works/pi-agent-core@1.5.2(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)':
+    dependencies:
+      '@earendil-works/pi-ai': 1.5.2(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)
+      '@earendil-works/pi-schema': 1.5.2
+    transitivePeerDependencies:
+      - '@aws-sdk/credential-provider-node'
+      - '@modelcontextprotocol/sdk'
+      - '@smithy/hash-node'
+      - '@smithy/signature-v4'
+      - bufferutil
+      - kerberos
+      - supports-color
+      - undici
+      - utf-8-validate
+      - ws
+      - zod
+
+  '@earendil-works/pi-ai@1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)':
+    dependencies:
+      '@anthropic-ai/sdk': 0.129.0(zod@4.6.5)
+      '@aws-sdk/client-bedrock-runtime': 3.1127.0
+      '@earendil-works/pi-telemetry': 1.4.0
+      '@google/genai': 2.21.0(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))
+      '@smithy/node-http-handler': 4.12.1
+      http-proxy-agent: 9.1.0
+      https-proxy-agent: 9.1.0
+      openai: 7.19.0(@aws-sdk/credential-provider-node@3.972.89)(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)
+      partial-json: 0.1.7
+      typebox: 1.3.27
+    transitivePeerDependencies:
+      - '@aws-sdk/credential-provider-node'
+      - '@modelcontextprotocol/sdk'
+      - '@smithy/hash-node'
+      - '@smithy/signature-v4'
+      - bufferutil
+      - kerberos
+      - supports-color
+      - undici
+      - utf-8-validate
+      - ws
+      - zod
+    optional: true
 
   '@earendil-works/pi-ai@1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)':
     dependencies:
@@ -8132,9 +8260,61 @@ snapshots:
       - ws
       - zod
 
+  '@earendil-works/pi-ai@1.5.2(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)':
+    dependencies:
+      '@anthropic-ai/sdk': 0.129.0(zod@4.6.5)
+      '@aws-sdk/client-bedrock-runtime': 3.1127.0
+      '@earendil-works/pi-schema': 1.5.2
+      '@earendil-works/pi-telemetry': 1.5.2
+      '@google/genai': 2.21.0(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))
+      '@smithy/node-http-handler': 4.12.1
+      http-proxy-agent: 9.1.0
+      https-proxy-agent: 9.1.0
+      openai: 7.19.0(@aws-sdk/credential-provider-node@3.972.89)(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)
+      partial-json: 0.1.7
+    transitivePeerDependencies:
+      - '@aws-sdk/credential-provider-node'
+      - '@modelcontextprotocol/sdk'
+      - '@smithy/hash-node'
+      - '@smithy/signature-v4'
+      - bufferutil
+      - kerberos
+      - supports-color
+      - undici
+      - utf-8-validate
+      - ws
+      - zod
+
   '@earendil-works/pi-codemode@1.4.0':
     dependencies:
       quickjs-wasi: 3.6.2
+
+  '@earendil-works/pi-codemode@1.5.2':
+    dependencies:
+      quickjs-wasi: 3.6.2
+
+  '@earendil-works/pi-durable@1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)':
+    dependencies:
+      '@earendil-works/chord': 1.4.0
+      '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)
+      '@earendil-works/pi-codemode': 1.4.0
+      '@earendil-works/pi-telemetry': 1.4.0
+      '@silvia-odwyer/photon': 0.3.3
+      diff: 8.0.4
+      typebox: 1.3.27
+    transitivePeerDependencies:
+      - '@aws-sdk/credential-provider-node'
+      - '@modelcontextprotocol/sdk'
+      - '@smithy/hash-node'
+      - '@smithy/signature-v4'
+      - bufferutil
+      - kerberos
+      - supports-color
+      - undici
+      - utf-8-validate
+      - ws
+      - zod
+    optional: true
 
   '@earendil-works/pi-durable@1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)':
     dependencies:
@@ -8158,7 +8338,35 @@ snapshots:
       - ws
       - zod
 
+  '@earendil-works/pi-durable@1.5.2(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(react@19.3.0)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)':
+    dependencies:
+      '@earendil-works/chord': 1.5.2(esbuild@0.28.2)(react@19.3.0)(ws@8.21.0)
+      '@earendil-works/pi-ai': 1.5.2(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)
+      '@earendil-works/pi-codemode': 1.5.2
+      '@earendil-works/pi-schema': 1.5.2
+      '@earendil-works/pi-telemetry': 1.5.2
+      '@silvia-odwyer/photon': 0.3.3
+      diff: 8.0.4
+    transitivePeerDependencies:
+      - '@aws-sdk/credential-provider-node'
+      - '@modelcontextprotocol/sdk'
+      - '@smithy/hash-node'
+      - '@smithy/signature-v4'
+      - bufferutil
+      - esbuild
+      - kerberos
+      - react
+      - supports-color
+      - undici
+      - utf-8-validate
+      - ws
+      - zod
+
+  '@earendil-works/pi-schema@1.5.2': {}
+
   '@earendil-works/pi-telemetry@1.4.0': {}
+
+  '@earendil-works/pi-telemetry@1.5.2': {}
 
   '@emnapi/runtime@1.11.3':
     dependencies:
@@ -10353,16 +10561,17 @@ snapshots:
       - workflow
       - ws
 
-  '@springbrand/agent-runtime@0.3.4-alpha.1(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(undici@7.29.1)(ws@8.22.0)':
+  '@springbrand/agent-runtime@0.3.5-alpha.2(@ai-sdk/provider@4.0.34)(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(@springbrand/errors@0.1.0-alpha.4)(@springbrand/model-client@0.1.1-alpha.0)(agents@0.30.1(03aba32e0bd856492ee127390d7757b2))(ai@7.0.56(zod@4.6.5))(esbuild@0.28.2)(react@19.3.0)(undici@7.29.1)(ws@8.21.0)':
     dependencies:
       '@cloudflare/codemode': 0.5.4(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
       '@cloudflare/sandbox': 0.12.4
       '@cloudflare/shell': 0.4.3(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
-      '@cloudflare/think': 0.20.2(@ai-sdk/provider@4.0.34)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(agents@0.30.1(a176c87e2574b30186e650fab4fc19cd))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(zod@4.6.5)
-      '@earendil-works/chord': 1.4.0
-      '@earendil-works/pi-agent-core': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
-      '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
-      '@earendil-works/pi-durable': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5)
+      '@cloudflare/think': 0.20.2(@ai-sdk/provider@4.0.34)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(agents@0.30.1(03aba32e0bd856492ee127390d7757b2))(ai@7.0.56(zod@4.6.5))(react@19.3.0)(zod@4.6.5)
+      '@earendil-works/chord': 1.5.2(esbuild@0.28.2)(react@19.3.0)(ws@8.21.0)
+      '@earendil-works/pi-agent-core': 1.5.2(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)
+      '@earendil-works/pi-ai': 1.5.2(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)
+      '@earendil-works/pi-durable': 1.5.2(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(esbuild@0.28.2)(react@19.3.0)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)
+      '@earendil-works/pi-schema': 1.5.2
       '@kuramajs/excel': 0.2.0
       '@resvg/resvg-wasm': 2.6.2
       '@springbrand/errors': 0.1.0-alpha.4
@@ -10370,7 +10579,7 @@ snapshots:
       '@streamparser/json-whatwg': 0.0.26
       '@svgdotjs/svg.js': 3.2.8
       '@types/lodash-es': 4.17.12
-      agents: 0.30.1(a176c87e2574b30186e650fab4fc19cd)
+      agents: 0.30.1(03aba32e0bd856492ee127390d7757b2)
       ai: 7.0.56(zod@4.6.5)
       cron-schedule: 6.0.0
       csv-parse: 7.0.3
@@ -10381,10 +10590,12 @@ snapshots:
       isomorphic-git: 1.38.6
       lodash-es: 4.18.1
       pica: 10.0.3
+      purejsimage: 0.17.0
       saxes: 6.0.0
       simple-statistics: 8.0.0
       svgdom: 0.1.29
       three: 0.180.0
+      typebox: 1.3.27
       zod: 4.6.5
     transitivePeerDependencies:
       - '@ai-sdk/google'
@@ -10400,6 +10611,7 @@ snapshots:
       - '@tanstack/ai'
       - '@xterm/xterm'
       - bufferutil
+      - esbuild
       - kerberos
       - react
       - supports-color
@@ -11160,6 +11372,40 @@ snapshots:
   agent-base@7.1.4: {}
 
   agent-base@9.0.0: {}
+
+  agents@0.30.1(03aba32e0bd856492ee127390d7757b2):
+    dependencies:
+      '@babel/plugin-proposal-decorators': 8.0.2(@babel/core@7.29.7)
+      '@cfworker/json-schema': 4.1.1
+      '@modelcontextprotocol/client': 2.3.1
+      '@modelcontextprotocol/sdk': 1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5)
+      '@modelcontextprotocol/server': 2.3.1
+      '@rolldown/plugin-babel': 0.2.4(@babel/core@7.29.7)(@babel/runtime@8.0.7)(rolldown@1.2.12)(vite@8.3.2(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1))
+      capnweb: 0.12.0
+      cron-schedule: 6.0.0
+      esbuild: 0.28.2
+      mimetext: 3.0.28
+      nanoid: 5.1.16
+      partysocket: 1.3.0(react@19.3.0)
+      postal-mime: 2.7.6
+      yaml: 2.9.1
+      zod: 4.6.5
+    optionalDependencies:
+      '@ai-sdk/provider': 4.0.34
+      '@cloudflare/codemode': 0.5.4(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
+      '@earendil-works/chord': 1.4.0
+      '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)
+      '@earendil-works/pi-durable': 1.4.0(@aws-sdk/credential-provider-node@3.972.89)(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5)
+      ai: 7.0.56(zod@4.6.5)
+      chat: 4.43.0(ai@7.0.56(zod@4.6.5))(zod@4.6.5)
+      just-bash: 3.6.0
+      react: 19.3.0
+      vite: 8.3.2(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1)
+    transitivePeerDependencies:
+      - '@babel/core'
+      - '@babel/plugin-transform-runtime'
+      - '@babel/runtime'
+      - rolldown
 
   agents@0.30.1(a176c87e2574b30186e650fab4fc19cd):
     dependencies:
@@ -13462,6 +13708,14 @@ snapshots:
 
   open-color@1.9.1: {}
 
+  openai@7.19.0(@aws-sdk/credential-provider-node@3.972.89)(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.21.0)(zod@4.6.5):
+    optionalDependencies:
+      '@aws-sdk/credential-provider-node': 3.972.89
+      '@smithy/signature-v4': 5.7.4
+      undici: 7.29.1
+      ws: 8.21.0
+      zod: 4.6.5
+
   openai@7.19.0(@aws-sdk/credential-provider-node@3.972.89)(@smithy/signature-v4@5.7.4)(undici@7.29.1)(ws@8.22.0)(zod@4.6.5):
     optionalDependencies:
       '@aws-sdk/credential-provider-node': 3.972.89
@@ -13719,6 +13973,8 @@ snapshots:
 
   punycode@2.3.1: {}
 
+  purejsimage@0.17.0: {}
+
   pwacompat@2.0.17: {}
 
   qs@6.17.0:
@@ -13948,6 +14204,11 @@ snapshots:
       prop-types: 15.8.1
       react: 19.3.0
       react-dom: 19.3.0(react@19.3.0)
+
+  react-zoom-pan-pinch@4.2.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8):
+    dependencies:
+      react: 19.2.8
+      react-dom: 19.2.8(react@19.2.8)
 
   react@19.2.8: {}
 
