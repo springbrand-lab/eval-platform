@@ -36,6 +36,14 @@ runs:
         restore-keys: |
           pnpm-${{ runner.os }}-${{ runner.arch }}-node-${{ hashFiles('.node-version') }}-${{ inputs.cache-scope }}-
 
+    # @springbrand/* resolves to the private registry (root .npmrc); the workflow passes the
+    # repository secret NPM_REGISTRY_TOKEN through the environment.
+    - name: Authenticate private npm registry
+      shell: bash
+      run: |
+        : "${NPM_REGISTRY_TOKEN:?NPM_REGISTRY_TOKEN is required to install @springbrand packages}"
+        printf '//npm.cuecue.cc/:_authToken=%s\n' "$NPM_REGISTRY_TOKEN" >> "$HOME/.npmrc"
+
     - name: Install dependencies
       shell: bash
       env:
