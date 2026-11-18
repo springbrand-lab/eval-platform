@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+# prepare-workspace and the API image build authenticate the private npm registry with this secret.
+env:
+  NPM_REGISTRY_TOKEN: ${{ secrets.NPM_REGISTRY_TOKEN }}
+
 # A newer push cancels stale test runs on PRs, but never interrupts a deploy on main.
 concurrency:
   group: ci-${{ github.ref }}
@@ -286,6 +290,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.ecr.outputs.registry }}/${{ vars.AWS_ECR_REPOSITORY }}:${{ github.sha }}
+          # BuildKit secret: mounted only while pnpm installs, never stored in an image or cache layer.
+          secret-envs: npm_registry_token=NPM_REGISTRY_TOKEN
           cache-from: type=gha,scope=eval-api
           cache-to: type=gha,scope=eval-api,mode=max
 

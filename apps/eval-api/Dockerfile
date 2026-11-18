@@ -24,8 +24,12 @@ COPY vendor/sp-platform/packages/resource/package.json vendor/sp-platform/packag
 COPY vendor/sp-platform/packages/utils/package.json vendor/sp-platform/packages/utils/
 # file-renderers installs this tarball by relative path.
 COPY vendor/sp-platform/vendor/silurus-ooxml-0.88.0-alt.tgz vendor/sp-platform/vendor/
+# The private-registry token is a BuildKit secret: the npmrc holding it lives only for this RUN.
 RUN --mount=type=cache,id=eval-platform-pnpm,target=/pnpm/store \
-    pnpm --filter "@eval-platform/eval-api..." install --frozen-lockfile --store-dir /pnpm/store
+    --mount=type=secret,id=npm_registry_token,env=NPM_REGISTRY_TOKEN,required=true \
+    printf '@springbrand:registry=https://npm.cuecue.cc/\n//npm.cuecue.cc/:_authToken=%s\n' "$NPM_REGISTRY_TOKEN" > /tmp/npmrc \
+    && NPM_CONFIG_USERCONFIG=/tmp/npmrc pnpm --filter "@eval-platform/eval-api..." install --frozen-lockfile --store-dir /pnpm/store \
+    && rm /tmp/npmrc
 COPY packages packages
 COPY vendor/sp-platform/packages vendor/sp-platform/packages
 COPY apps/eval-api apps/eval-api
@@ -36,7 +40,10 @@ FROM build-tools AS runtime-deps
 WORKDIR /app/api
 COPY --from=build /app/apps/eval-api/dist/runtime-package/ ./
 RUN --mount=type=cache,id=eval-platform-pnpm,target=/pnpm/store \
-    pnpm install --prod --ignore-scripts --frozen-lockfile --store-dir /pnpm/store \
+    --mount=type=secret,id=npm_registry_token,env=NPM_REGISTRY_TOKEN,required=true \
+    printf '@springbrand:registry=https://npm.cuecue.cc/\n//npm.cuecue.cc/:_authToken=%s\n' "$NPM_REGISTRY_TOKEN" > /tmp/npmrc \
+    && NPM_CONFIG_USERCONFIG=/tmp/npmrc pnpm install --prod --ignore-scripts --frozen-lockfile --store-dir /pnpm/store \
+    && rm /tmp/npmrc \
     && node -e "import('pg').then(() => console.log('Runtime dependencies load.'))"
 
 FROM node:24-bookworm-slim AS production
