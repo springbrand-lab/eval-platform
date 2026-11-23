@@ -78,9 +78,6 @@ describe("SP Agent editor in Eval", () => {
       if (path === "/api/agent-library/default-template") return structuredClone(template);
       if (path === "/api/agent-configs/agent-a") return structuredClone(stored);
       if (path === "/api/agents") return [{ name: "Original name", agentConfig: { userAgentId: "agent-a" }, role: "evaluator", purpose: "evaluation" }];
-      if (path === "/api/agent-library/user-agent-configs/agent-a/deletion-check") return {
-        allowed: true, activeChatIds: [], enabledScheduleIds: [], unfinishedRunIds: [],
-      };
       if (path === "/api/agent-library/mcp-servers?source=user&page=1&pageSize=100") return {
         data: [{
           id: "platform-mcp", name: "Eval 结果提交", description: "submit_evaluation", status: "active", source: "user",
@@ -527,7 +524,26 @@ describe("SP Agent editor in Eval", () => {
     } finally { await view.close(); }
   });
 
-  it("keeps a raced deletion conflict visible with the actual blocker", async () => {
+  it("confirms and deletes without requesting the removed SP deletion preflight", async () => {
+    const view = await mount("/agents/agent-a");
+    try {
+      await settle(() => expect(name()?.value).toBe("Original name"));
+      await click(button("删除 Agent"));
+      await settle(() => expect(document.querySelector('[role="alertdialog"]')).not.toBeNull());
+      expect(transport.delete).not.toHaveBeenCalled();
+      await click(button("取消", document.querySelector('[role="alertdialog"]')!));
+      expect(transport.delete).not.toHaveBeenCalled();
+      await click(button("删除 Agent"));
+      const detailReads = transport.get.mock.calls.filter(([path]) => path === "/api/agent-configs/agent-a").length;
+      await click(button("删除", document.querySelector('[role="alertdialog"]')!));
+      await settle(() => expect(view.router.state.location.pathname).toBe("/agents"));
+      expect(transport.delete).toHaveBeenCalledExactlyOnceWith("/api/agent-configs/agent-a");
+      expect(transport.get.mock.calls.some(([path]) => path.includes("deletion-check"))).toBe(false);
+      expect(transport.get.mock.calls.filter(([path]) => path === "/api/agent-configs/agent-a")).toHaveLength(detailReads);
+    } finally { await view.close(); }
+  });
+
+  it("keeps an actual deletion conflict visible in the confirmation dialog", async () => {
     transport.delete.mockRejectedValueOnce(new ApiError({
       kind: "http", status: 409, code: "AGENT_CONFIG_ACTIVE_CHAT", message: "Blocked",
       details: { allowed: false, activeChatIds: ["00000000-0000-4000-8000-000000000001"], enabledScheduleIds: [], unfinishedRunIds: [] },

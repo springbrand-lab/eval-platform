@@ -216,13 +216,22 @@ describe("shared Agent editor HTTP gateway", () => {
     expect(app.calls).toHaveLength(0);
   });
 
-  it("preserves a raced deletion blocker and its validated public details across both HTTP boundaries", async () => {
+  it("rejects the removed deletion preflight and relays a soft-delete receipt through the Config service", async () => {
+    const app = setup(envelope({ id: agentId, deletedAt: 1 }));
+    expect((await app.request(`/api/agent-library/user-agent-configs/${agentId}/deletion-check`)).status).toBe(404);
+    expect(app.calls).toHaveLength(0);
+    expect((await app.request(`/api/agent-configs/${agentId}`, { method: "DELETE" })).status).toBe(204);
+    expect(app.calls).toHaveLength(1);
+    expect(app.calls[0]!.url).toBe(`https://eval-sp.test/api/user-agent-configs/${agentId}`);
+    expect(app.calls[0]!.method).toBe("DELETE");
+    expect(app.calls[0]!.headers.get("Authorization")).toBe("Bearer service-session");
+  });
+
+  it("preserves a deletion error and its validated public details across both HTTP boundaries", async () => {
     const details = { allowed: false, activeChatIds: [activeChatId], enabledScheduleIds: [], unfinishedRunIds: [] };
     const app = setup(
-      envelope({ allowed: true, activeChatIds: [], enabledScheduleIds: [], unfinishedRunIds: [] }),
       Response.json({ code: "AGENT_CONFIG_ACTIVE_CHAT", errMsg: "Finish active Chat work", details, requestId: "sp-request-1" }, { status: 409 }),
     );
-    expect((await app.request(`/api/agent-library/user-agent-configs/${agentId}/deletion-check`)).status).toBe(200);
     const result = await app.request(`/api/agent-configs/${agentId}`, { method: "DELETE" });
     expect(result.status).toBe(409);
     const payload = await result.json();

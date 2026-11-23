@@ -26,7 +26,6 @@ export const AGENT_LIBRARY_ROUTES = [
   // and resolves the canonical evaluation-result server when the Agent purpose is changed.
   { method: "get", path: "/mcp-servers", upstream: "/api/mcp-servers", body: "none" },
   { method: "get", path: "/mcp-servers/{id}", upstream: "/api/mcp-servers/{id}", body: "none" },
-  { method: "get", path: "/user-agent-configs/{id}/deletion-check", upstream: "/api/user-agent-configs/{id}/deletion-check", body: "none" },
 ] as const;
 
 export type AgentLibraryRoute = typeof AGENT_LIBRARY_ROUTES[number];
