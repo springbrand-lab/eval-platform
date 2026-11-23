@@ -384,18 +384,27 @@ export function createAgentConfigService(input: {
         throw new TypeError("Agent Config purpose must be execution or evaluation");
       }
       const configBody = bodyRecord(forwarded.config);
-      const settingChanged = configBody !== null && "setting" in configBody;
+      const settingPatch = bodyRecord(configBody?.settingPatch);
+      if (configBody && "setting" in configBody) throw new HttpError("REQUEST_INVALID_INPUT", "Use settingPatch to update Agent settings");
+      const settingChanged = configBody !== null && "settingPatch" in configBody;
+      if (settingChanged && (!settingPatch || !Object.keys(settingPatch).length)) {
+        throw new HttpError("REQUEST_INVALID_INPUT", "settingPatch must be a non-empty object");
+      }
       const purposeChanged = requestedPurpose !== stored.purpose;
       const shouldNormalize = settingChanged || purposeChanged;
       let spUpdateBody: unknown = forwarded.config;
       let nextPurpose = stored.purpose;
       let nextEvaluationMcpServerId = stored.evaluationMcpServerId;
       if (shouldNormalize) {
-        const next = { ...current, ...(configBody ?? {}) };
+        const next = { ...current, ...(configBody ?? {}),
+          ...(settingPatch ? { setting: { ...bodyRecord(current.setting), ...settingPatch } } : {}) };
         const normalized = requestedPurpose === "execution" && stored.purpose === "evaluation" && stored.evaluationMcpServerId
           ? removeEvaluationMcp(next, stored.evaluationMcpServerId)
           : normalizePurposeConfig(next, requestedPurpose, await purposeCatalog(), stored.evaluationMcpServerId);
-        const normalizedInput = { ...(configBody ?? {}), setting: normalized.config.setting };
+        const normalizedInput = { ...(configBody ?? {}), settingPatch: {
+          ...(settingPatch ?? {}),
+          mcpServers: readMcpSelections(normalized.config).selections,
+        } };
         spUpdateBody = normalizedInput;
         nextPurpose = requestedPurpose;
         nextEvaluationMcpServerId = normalized.evaluationMcpServerId;
@@ -417,7 +426,7 @@ export function createAgentConfigService(input: {
             ...(typeof revision === "number" ? { revision } : {}),
             name: current.name,
             description: typeof current.description === "string" ? current.description : null,
-            setting: current.setting,
+            settingPatch: current.setting,
           })]);
           throw error;
         }

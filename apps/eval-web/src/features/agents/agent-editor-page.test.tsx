@@ -46,7 +46,7 @@ const modelCatalog = [
 const template: UserAgentConfigTemplate = { name: "新建 Agent", description: null, setting: { ...setting, mcpServers: [] } };
 const initial: AgentConfig = {
   id: "agent-a", user_id: "user-a", slug: "agent-a", name: "Original name", description: null,
-  revision: 3, setting_schema_version: 4, setting, is_default: false, created_at: 1, updated_at: 1,
+  revision: 3, deletedAt: null, setting, is_default: false, created_at: 1, updated_at: 1,
 };
 let stored: AgentConfig;
 
@@ -96,6 +96,7 @@ describe("SP Agent editor in Eval", () => {
     transport.request.mockImplementation(async (path: string) => {
       const url = new URL(path, "http://eval.test");
       if (url.pathname === "/api/agent-library/models") return modelCatalog;
+      if (url.pathname === "/api/agent-library/api-suppliers") return { data: [] };
       if (url.pathname === "/api/agent-library/connectors") return { items: [], nextCursor: null };
       if (url.pathname === "/api/agent-library/components") return { data: [], page: 1, pageSize: 50, total: 0 };
       if (url.pathname === "/api/agent-library/skills") return {
@@ -108,8 +109,9 @@ describe("SP Agent editor in Eval", () => {
       stored = { ...stored, ...input, revision: 1 };
       return structuredClone(stored);
     });
-    transport.patch.mockImplementation(async (_path: string, input: object) => {
-      stored = { ...stored, ...input, revision: stored.revision + 1 };
+    transport.patch.mockImplementation(async (_path: string, input: { settingPatch?: Record<string, unknown> }) => {
+      const { settingPatch, ...fields } = input;
+      stored = { ...stored, ...fields, setting: { ...stored.setting, ...settingPatch }, revision: stored.revision + 1 };
       return structuredClone(stored);
     });
     window.scrollTo = vi.fn();
@@ -128,10 +130,52 @@ describe("SP Agent editor in Eval", () => {
       await type(name(), "Renamed");
       await click(button("保存修改"));
       await settle(() => expect(transport.patch).toHaveBeenCalledTimes(1));
-      expect(transport.patch.mock.calls[0]![1]).toMatchObject({ setting: { mcpServers: [{ serverId: "platform-mcp" }] } });
+      expect(transport.patch.mock.calls[0]![1]).toMatchObject({ settingPatch: { mcpServers: [{ serverId: "platform-mcp" }] } });
     } finally {
       await view.close();
     }
+  });
+
+  it("uses the published Action and Supplier selectors and saves one settings patch", async () => {
+    stored.setting = { ...stored.setting, actionIds: ["action.retained"], preferredSupplierIds: ["supplier.retained"] };
+    const original = transport.request.getMockImplementation()!;
+    transport.request.mockImplementation(async (path: string, options?: unknown) => {
+      const url = new URL(path, "https://eval.test");
+      if (url.pathname === "/api/agent-library/actions") {
+        expect(url.searchParams.has("pageSize")).toBe(false);
+        return { items: [{ id: "action.lookup", name: "Standalone Lookup", description: "Lookup" }],
+          page: Number(url.searchParams.get("page")), pageSize: 20, total: 1 };
+      }
+      if (url.pathname.startsWith("/api/agent-library/actions/")) return {
+        id: decodeURIComponent(url.pathname.split("/").at(-1)!), name: "Retained Action", description: "Old choice",
+        status: "active", selectable: false, supplier: { id: "supplier.retained", name: "Retained service", iconUrl: "" },
+      };
+      if (url.pathname === "/api/agent-library/api-suppliers") return { data: [{
+        id: "supplier.search", name: "Search service", description: "Search APIs", iconUrl: "", category: "",
+        categoryIds: [], userCount: 0, displayOrder: 0, resources: [],
+      }] };
+      return original(path, options);
+    });
+    const view = await mount("/agents/agent-a");
+    try {
+      await settle(() => expect(name()).not.toBeNull());
+      await click(view.container.querySelector('[aria-label="添加可执行操作"]'));
+      await settle(() => expect(document.querySelector('[aria-label="选择Standalone Lookup"]')).not.toBeNull());
+      await click(document.querySelector('[aria-label="选择Standalone Lookup"]'));
+      await click(button("保存修改", document.querySelector('[role="dialog"]')!));
+      await click(view.container.querySelector('[aria-label="添加API 服务"]'));
+      await settle(() => expect(document.querySelector('[aria-label="选择Search service"]')).not.toBeNull());
+      await click(document.querySelector('[aria-label="选择Search service"]'));
+      await click(button("保存修改", document.querySelector('[role="dialog"]')!));
+      expect(transport.patch).not.toHaveBeenCalled();
+      await click(button("保存修改", view.container));
+      await settle(() => expect(transport.patch).toHaveBeenCalledTimes(1));
+      expect(transport.patch.mock.calls[0]![1]).toMatchObject({ settingPatch: {
+        actionIds: ["action.retained", "action.lookup"], preferredSupplierIds: ["supplier.retained", "supplier.search"],
+      } });
+      expect(transport.patch.mock.calls[0]![1]).not.toHaveProperty("setting");
+      expect(transport.request.mock.calls.some(([path]) => path.includes("group-actions"))).toBe(false);
+    } finally { await view.close(); }
   });
 
   it("disconnects a connected account in the existing Connector picker without saving the Agent", async () => {
@@ -217,7 +261,7 @@ describe("SP Agent editor in Eval", () => {
       await click(button("保存修改"));
       await settle(() => expect(transport.patch).toHaveBeenCalledTimes(1));
       expect(transport.patch.mock.calls[0]![1]).toMatchObject({
-        name: "Renamed imported Agent", setting: fields,
+        name: "Renamed imported Agent", settingPatch: fields,
       });
     } finally { await view.close(); }
   });
@@ -233,7 +277,7 @@ describe("SP Agent editor in Eval", () => {
       expect(view.container.textContent).not.toContain("行为与指令");
       expect(view.container.querySelector('[data-agent-runtime] [aria-expanded]')).toBeNull();
       expect(view.container.textContent).not.toContain("暂未添加");
-      expect(view.container.querySelectorAll('[data-agent-empty]')).toHaveLength(6);
+      expect(view.container.querySelectorAll('[data-agent-empty]')).toHaveLength(7);
       expect(view.container.querySelector('[data-agent-empty] [aria-expanded]')).toBeNull();
       expect(view.container.querySelector('[aria-label="添加任务技能"]')).not.toBeNull();
       for (const label of ["Behavior", "Thinking", "Connectors", "Save changes", "None selected."]) expect(view.container.textContent).not.toContain(label);
@@ -376,7 +420,7 @@ describe("SP Agent editor in Eval", () => {
       await click(button("保存修改"));
       await settle(() => expect(transport.patch).toHaveBeenCalledTimes(1));
       expect(transport.patch.mock.calls[0]![1]).toMatchObject({
-        purpose: "execution", setting: { mcpServers: [] },
+        purpose: "execution", settingPatch: { mcpServers: [] },
       });
     } finally { await view.close(); }
   });
@@ -447,7 +491,7 @@ describe("SP Agent editor in Eval", () => {
       expect(name()?.value).toBe("Unsaved name");
       await click(button("保存修改"));
       await settle(() => expect(transport.patch).toHaveBeenCalledExactlyOnceWith("/api/agent-configs/agent-a", {
-        revision: 3, name: "Unsaved name", description: null, setting, purpose: "evaluation",
+        revision: 3, name: "Unsaved name", description: null, settingPatch: setting, purpose: "evaluation",
       }));
     } finally { await view.close(); }
   });

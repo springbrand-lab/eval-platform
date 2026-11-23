@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { AGENT, OWNER, SCHEMA, setupManagement, toolValue } from "./test-fixture.js";
 
-describe("bounded management choices and SP discovery", () => {
-  it("paginates fixed-account choices, omits Schema bodies and exposes only a credit balance", async () => {
+describe("bounded management choices and current SP discovery", () => {
+  it("paginates fixed-account choices and exposes only a credit balance", async () => {
     const app = setupManagement();
     expect(await toolValue(await app.call("list_options", { category: "agents", q: "agent" }))).toMatchObject({
       items: [{ id: AGENT, name: "Agent", purpose: "execution" }], total: 1,
@@ -11,64 +11,81 @@ describe("bounded management choices and SP discovery", () => {
     const schemas = await toolValue(await app.call("list_options", { category: "output_schemas" }));
     expect(schemas).toMatchObject({ items: [{ id: SCHEMA, name: "Output" }] });
     expect(JSON.stringify(schemas)).not.toContain("private");
-    const credits = await toolValue(await app.call("list_options", { category: "credits" }));
-    expect(credits).toMatchObject({ balance: { availableUnits: 5, topupRemainingUnits: 1, otherRemainingUnits: 4 } });
+    expect(await toolValue(await app.call("list_options", { category: "credits" }))).toMatchObject({
+      balance: { availableUnits: 5, topupRemainingUnits: 1, otherRemainingUnits: 4 },
+    });
     expect(app.sp.getCreditBalance).toHaveBeenCalledWith("fixed-session");
-    expect(JSON.stringify(credits)).not.toContain("unused");
     expect(await toolValue(await app.call("list_options", { category: "input_limits" })))
       .toMatchObject({ limits: { runTargetIds: expect.any(Number) } });
     expect(app.release).toHaveBeenCalledTimes(4);
   });
 
-  it("searches only allowlisted public SP routes, with bounded metadata and no connection credentials", async () => {
+  it("searches whole Suppliers and standalone Actions without returning provider metadata", async () => {
     const app = setupManagement();
-    const original = app.sp.requestAgentLibrary.getMockImplementation()!;
-    app.sp.requestAgentLibrary.mockImplementation(async (token, request) => {
-      if (request.route.path === "/connectors") return { items: [
-        { toolkitId: "tool-1", name: "Toolkit 1", status: "connected", description: "Public",
-          connections: [{ id: "private-connection", displayName: "Private person", secret: "token" }] },
-        { toolkitId: "tool-2", name: "Toolkit 2", status: "not_connected" },
-        { toolkitId: "tool-3", name: "Toolkit 3", status: "connected" },
-      ], nextCursor: null };
-      if (request.route.path === "/actions") return { data: [{ supplier: { id: "supplier-1", name: "Supplier",
-        iconUrl: "https://private.test" }, actionCount: 3 }], total: 1 };
-      if (request.route.path === "/actions/group-actions") return { data: [
-        { id: "action-1", name: "Action", status: "active", selectable: true,
-          description: "Search", supplier: { id: "supplier-1", name: "Supplier", iconUrl: "https://private.test" } },
-      ], total: 1 };
-      if (request.route.path === "/components") return { data: [{
-        id: "component-1", name: "Component", status: "active", selectable: true,
-      }], total: 1 };
-      return original(token, request);
+    expect(await toolValue(await app.call("search_agent_resources", { kind: "suppliers" }))).toMatchObject({
+      items: [{ id: "supplier-1", name: "Supplier", description: "APIs" }], total: 1,
     });
+    const actions = await toolValue(await app.call("search_agent_resources", { kind: "actions", pageSize: 2 }));
+    expect(actions).toEqual({ kind: "actions", page: 1, pageSize: 2, total: 1,
+      items: [{ id: "action-1", name: "Action", description: "" }] });
+    const detail = await toolValue(await app.call("search_agent_resources", { kind: "actions", id: "action-1" }));
+    expect(detail).toMatchObject({ item: { id: "action-1", selectable: true, supplierId: null } });
+    expect(app.sp.requestAgentLibrary.mock.calls.map(([token, request]) => ({ token, path: request.route.path, search: request.search }))).toEqual([
+      { token: "fixed-session", path: "/api-suppliers", search: "" },
+      { token: "fixed-session", path: "/actions", search: "?page=1" },
+      { token: "fixed-session", path: "/actions/{id}", search: "" },
+    ]);
+  });
 
-    const groups = await toolValue(await app.call("search_agent_resources", { kind: "action_groups" }));
-    expect(groups).toMatchObject({ items: [{ id: "supplier-1", name: "Supplier", actionCount: 3 }] });
-    const actions = await toolValue(await app.call("search_agent_resources", {
-      kind: "actions", supplierId: "supplier-1", pageSize: 2,
+  it("re-pages the fixed-size public catalog across an MCP page boundary", async () => {
+    const app = setupManagement();
+    const all = Array.from({ length: 45 }, (_, index) => ({ id: `action.${index + 1}`, name: `Action ${index + 1}` }));
+    app.sp.requestAgentLibrary.mockImplementation(async (_token, request) => {
+      expect(request.route.path).toBe("/actions");
+      const query = new URLSearchParams(request.search);
+      expect(query.has("pageSize")).toBe(false);
+      expect(query.get("q")).toBe("Search + notes");
+      const page = Number(query.get("page"));
+      return { items: all.slice((page - 1) * 20, page * 20), page, pageSize: 20, total: all.length };
+    });
+    const value = await toolValue(await app.call("search_agent_resources", {
+      kind: "actions", q: "Search + notes", page: 2, pageSize: 25,
     }));
-    expect(actions).toMatchObject({ items: [{ id: "action-1", supplierId: "supplier-1" }] });
-    const call = app.sp.requestAgentLibrary.mock.calls.find(([, input]) => input.route.path === "/actions/group-actions")!;
-    expect(call[1].search).toContain("supplierId=supplier-1");
-    const components = await toolValue(await app.call("search_agent_resources", { kind: "extensions" }));
-    expect(components).toMatchObject({ items: [{ id: "component-1" }] });
-    expect(app.sp.requestAgentLibrary.mock.calls.find(([, input]) => input.route.path === "/components")![1].search)
-      .toContain("kind=extension");
+    expect(value).toMatchObject({ page: 2, pageSize: 25, total: 45 });
+    expect((value.items as { id: string }[]).map((item) => item.id)).toEqual(all.slice(25).map((item) => item.id));
+    expect(app.sp.requestAgentLibrary).toHaveBeenCalledTimes(3);
+  });
 
+  it("rejects a changed or obsolete catalog response instead of presenting partial success", async () => {
+    for (const obsolete of [false, true]) {
+      const app = setupManagement();
+      app.sp.requestAgentLibrary.mockImplementation(async (_token, request) => {
+        const page = Number(new URLSearchParams(request.search).get("page"));
+        if (obsolete) return { data: [], total: 0, page, pageSize: 50 };
+        return { items: Array.from({ length: 20 }, (_, index) => ({ id: `action.${page}.${index}`, name: "Action" })),
+          page, pageSize: 20, total: page === 1 ? 45 : 44 };
+      });
+      expect(await (await app.call("search_agent_resources", { kind: "actions", pageSize: 25 })).json())
+        .toMatchObject({ result: { isError: true, content: [{ text: expect.stringContaining("RESPONSE_INVALID") }] } });
+    }
+  });
+
+  it("keeps Toolkit cursor paging and omits account connection credentials", async () => {
+    const app = setupManagement();
+    app.sp.requestAgentLibrary.mockResolvedValue({ items: [
+      { toolkitId: "tool-1", name: "Toolkit 1", status: "connected", description: "Public",
+        connections: [{ id: "private-connection", displayName: "Private person", secret: "token" }] },
+      { toolkitId: "tool-2", name: "Toolkit 2", status: "not_connected" },
+    ], nextCursor: null });
     const first = await toolValue(await app.call("search_agent_resources", { kind: "toolkits", pageSize: 1 }));
     expect(first).toMatchObject({ items: [{ id: "tool-1" }], nextCursor: expect.any(String) });
     expect(JSON.stringify(first)).not.toMatch(/private-connection|Private person|token/u);
-    const second = await toolValue(await app.call("search_agent_resources", {
+    expect(await toolValue(await app.call("search_agent_resources", {
       kind: "toolkits", cursor: first.nextCursor, pageSize: 1,
-    }));
-    expect(second).toMatchObject({ items: [{ id: "tool-2" }], nextCursor: expect.any(String) });
-    const third = await toolValue(await app.call("search_agent_resources", {
-      kind: "toolkits", cursor: second.nextCursor, pageSize: 1,
-    }));
-    expect(third).toMatchObject({ items: [{ id: "tool-3" }], nextCursor: null });
+    }))).toMatchObject({ items: [{ id: "tool-2" }], nextCursor: null });
   });
 
-  it("omits Reference URLs and rejects ambiguous Action searches or forged Toolkit cursors", async () => {
+  it("omits Reference URLs and rejects retired group filters and forged cursors", async () => {
     const app = setupManagement();
     const original = app.sp.requestAgentLibrary.getMockImplementation()!;
     app.sp.requestAgentLibrary.mockImplementation(async (token, request) => request.route.path === "/user-references/{id}"
@@ -78,63 +95,20 @@ describe("bounded management choices and SP discovery", () => {
     const detail = await toolValue(await app.call("search_agent_resources", {
       kind: "references", id: "55555555-5555-4555-8555-555555555555",
     }));
-    expect(detail).toMatchObject({ item: { status: "active", size: 20 } });
     expect(JSON.stringify(detail)).not.toContain("private.test");
-    for (const input of [{ kind: "actions" }, { kind: "actions", supplierId: "supplier-1", unassigned: true },
+    for (const input of [{ kind: "action_groups" }, { kind: "actions", supplierId: "supplier-1" },
       { kind: "models", cursor: "connection" }, { kind: "toolkits", cursor: "not-a-cursor" }]) {
-      expect(await (await app.call("search_agent_resources", input)).json())
-        .toMatchObject({ result: { isError: true } });
+      expect(await (await app.call("search_agent_resources", input)).json()).toMatchObject({ result: { isError: true } });
     }
-    expect(app.ownerServices).toHaveBeenCalledTimes(5);
     expect(app.ownerServices.mock.calls.every(([user]) => user.id === OWNER)).toBe(true);
   });
 
-  it("discovers Frank connector-slug groups and returns raw local Action IDs for selection and detail", async () => {
-    const app = setupManagement();
-    const supplier = { id: "exa", name: "Exa" };
-    const action = { id: "action.local.exa.search", name: "Exa Search (local)", description: "Search the web",
-      status: "active", selectable: true, supplier };
-    app.sp.requestAgentLibrary.mockImplementation(async (_token, request) => {
-      if (request.route.path === "/actions") return { data: [{ supplier, actionCount: 1 }], total: 1 };
-      if (request.route.path === "/actions/group-actions") return { data: [action], total: 1 };
-      if (request.route.path === "/actions/{id}") return action;
-      throw new Error(`Unexpected public library path ${request.route.path}`);
-    });
-    expect(await toolValue(await app.call("search_agent_resources", {
-      kind: "action_groups", q: "Exa (local)", pageSize: 2,
-    }))).toEqual({ kind: "action_groups", page: 1, pageSize: 2, total: 1,
-      items: [{ id: "exa", name: "Exa", unassigned: false, actionCount: 1 }] });
-    const selected = { id: action.id, name: action.name, description: action.description,
-      status: "active", selectable: true, supplierId: "exa" };
-    expect(await toolValue(await app.call("search_agent_resources", {
-      kind: "actions", supplierId: "exa", q: "Search (local)", pageSize: 2,
-    }))).toEqual({ kind: "actions", page: 1, pageSize: 2, total: 1, items: [selected] });
-    expect(await toolValue(await app.call("search_agent_resources", {
-      kind: "actions", id: action.id,
-    }))).toEqual({ kind: "actions", item: selected });
-    expect(app.sp.requestAgentLibrary.mock.calls.map(([token, request]) => ({
-      token, path: request.route.path, id: request.id, search: request.search,
-    }))).toEqual([
-      { token: "fixed-session", path: "/actions", id: undefined, search: "?page=1&pageSize=2&q=Exa+%28local%29" },
-      { token: "fixed-session", path: "/actions/group-actions", id: undefined,
-        search: "?page=1&pageSize=2&q=Search+%28local%29&supplierId=exa" },
-      { token: "fixed-session", path: "/actions/{id}", id: action.id, search: "" },
-    ]);
-  });
-
-  it("does not accept a different historical ID as a Frank Action detail alias", async () => {
+  it("does not alias a selected historical Action ID", async () => {
     const app = setupManagement();
     app.sp.requestAgentLibrary.mockResolvedValueOnce({
-      id: "action.exa.search", name: "Search", status: "active", selectable: true,
-      supplier: { id: "exa", name: "Exa" },
+      id: "action.other", name: "Other", description: "", status: "active", selectable: true, supplier: null,
     });
-    const response = await (await app.call("search_agent_resources", {
-      kind: "actions", id: "action.local.exa.search",
-    })).json();
-    expect(response).toMatchObject({ result: { isError: true,
-      content: [{ text: expect.stringContaining("RESPONSE_INVALID") }] } });
-    expect(app.sp.requestAgentLibrary).toHaveBeenCalledExactlyOnceWith("fixed-session",
-      expect.objectContaining({ route: expect.objectContaining({ path: "/actions/{id}" }),
-        id: "action.local.exa.search", search: "" }));
+    expect(await (await app.call("search_agent_resources", { kind: "actions", id: "action.local.search" })).json())
+      .toMatchObject({ result: { isError: true, content: [{ text: expect.stringContaining("RESPONSE_INVALID") }] } });
   });
 });

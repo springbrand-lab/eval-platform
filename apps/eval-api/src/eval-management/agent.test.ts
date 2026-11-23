@@ -10,6 +10,29 @@ const input = {
 };
 
 describe("management Agent creation", () => {
+  it("selects a whole Supplier in preferredSupplierIds and rejects a missing Supplier", async () => {
+    const app = setupManagement();
+    await toolValue(await app.call("create_agent", { ...input, supplierIds: ["supplier-1"] }));
+    expect(app.services.agentConfigs.create).toHaveBeenCalledWith(expect.objectContaining({
+      setting: expect.objectContaining({ preferredSupplierIds: ["supplier-1"], actionIds: input.actionIds }),
+    }), { verifyReplay: true });
+    const missing = setupManagement();
+    expect(await (await missing.call("create_agent", { ...input, supplierIds: ["missing"] })).json())
+      .toMatchObject({ result: { isError: true, content: [{ text: expect.stringContaining("EVAL_SP_CONFLICT") }] } });
+    expect(missing.services.agentConfigs.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects adding a Supplier child as a standalone Action", async () => {
+    const app = setupManagement();
+    const read = app.sp.requestAgentLibrary.getMockImplementation()!;
+    app.sp.requestAgentLibrary.mockImplementation(async (token, request) => request.route.path === "/actions/{id}"
+      ? { id: request.id, name: "Child", description: "Child Action", status: "active", selectable: false,
+        supplier: { id: "supplier-1", name: "Supplier", iconUrl: "" } }
+      : read(token, request));
+    expect(await (await app.call("create_agent", input)).json())
+      .toMatchObject({ result: { isError: true, content: [{ text: expect.stringContaining("EVAL_SP_CONFLICT") }] } });
+    expect(app.services.agentConfigs.create).not.toHaveBeenCalled();
+  });
   it("uses a stable owner-scoped slug, current template/model and selected active resources", async () => {
     const app = setupManagement();
     const value = await toolValue(await app.call("create_agent", input));
@@ -30,13 +53,12 @@ describe("management Agent creation", () => {
     expect(app.release).toHaveBeenCalledTimes(1);
   });
 
-  it("creates an Agent with Frank's raw local Action IDs without rebuilding a Supplier catalog", async () => {
+  it("creates an Agent with raw standalone Action IDs without rebuilding a Supplier catalog", async () => {
     const app = setupManagement();
     const actionIds = ["action.local.exa.get_contents", "action.local.exa.search"];
     const original = app.sp.requestAgentLibrary.getMockImplementation()!;
     app.sp.requestAgentLibrary.mockImplementation(async (token, request) => request.route.path === "/actions/{id}"
-      ? { id: request.id, name: "Exa Action (local)", status: "active", selectable: true,
-        supplier: { id: "exa", name: "Exa" } }
+      ? { id: request.id, name: "Exa Action (local)", description: "Lookup", status: "active", selectable: true, supplier: null }
       : original(token, request));
     expect(await toolValue(await app.call("create_agent", { ...input, actionIds })))
       .toEqual({ agentId: AGENT, name: input.name, purpose: input.purpose });
@@ -64,7 +86,7 @@ describe("management Agent creation", () => {
       ...input, actionIds: ["action.local.exa.search"],
     })).json();
     expect(response).toMatchObject({ result: { isError: true,
-      content: [{ text: expect.stringContaining("EVAL_SP_CONFLICT") }] } });
+      content: [{ text: expect.stringContaining("RESPONSE_INVALID") }] } });
     expect(app.services.agentConfigs.create).not.toHaveBeenCalled();
     expect(app.sp.requestAgentLibrary.mock.calls.filter(([, request]) => request.route.path.startsWith("/actions")))
       .toEqual([["fixed-session", expect.objectContaining({
@@ -85,7 +107,7 @@ describe("management Agent creation", () => {
           return { id: referenceId, status: "disabled" };
         }
         if (resource === "action" && request.route.path === "/actions/{id}") {
-          return { id: "action-1", status: "deprecated", selectable: false };
+          return { id: "action-1", name: "Action", description: "Unavailable", status: "deprecated", selectable: true, supplier: null };
         }
         return original(token, request);
       });

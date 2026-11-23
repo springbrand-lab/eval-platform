@@ -26,7 +26,7 @@ const users = [
 const base = "/api/agent-config-sync";
 const native: AgentConfig = {
   id: uuid(800), user_id: TARGET, slug: "native", name: "Eval 原生配置", description: "独立于 dev 的配置",
-  revision: 1, setting_schema_version: 4, is_default: false, created_at: 1, updated_at: 1,
+  revision: 1, deletedAt: null, is_default: false, created_at: 1, updated_at: 1,
   setting: {
     model: null, presetId: null, thinking: "medium", systemPrompt: "Native instructions",
     skillIds: [], actionIds: [], referenceFileIds: [], mcpServers: [], connectorIds: [], extensionIds: [], subagentNames: [],
