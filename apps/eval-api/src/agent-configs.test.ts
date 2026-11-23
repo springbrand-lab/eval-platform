@@ -44,7 +44,11 @@ function service(configs: readonly EvalSpAgentConfig[], mcpServers: readonly {
       const body = input as Record<string, unknown>;
       return { id: "created", user_id: owner, name: String(body.name ?? "created"), slug: "created", setting: body.setting };
     }),
-    updateAgentConfig: vi.fn(async (_token: string, id: string, body: unknown) => ({ ...configs.find((item) => item.id === id)!, ...(body as object) })),
+    updateAgentConfig: vi.fn(async (_token: string, id: string, body: unknown) => {
+      const current = configs.find((item) => item.id === id)!;
+      const { settingPatch, ...fields } = body as { settingPatch?: Record<string, unknown> };
+      return { ...current, ...fields, setting: { ...(current.setting as object), ...settingPatch } };
+    }),
     deleteAgentConfig: vi.fn(async () => undefined),
   };
   const client = sp as unknown as EvalSpClient;
@@ -276,7 +280,7 @@ describe("Agent purpose filtering", () => {
     await executor.purposeStore.upsert({ userAgentId: "executor", purpose: "execution", evaluationMcpServerId: null });
     await executor.update("executor", { purpose: "evaluation", name: "Evaluator" });
     expect(executor.sp.updateAgentConfig).toHaveBeenLastCalledWith("session", "executor", {
-      name: "Evaluator", setting: { mcpServers: [{ serverId: resultMcp.id }] },
+      name: "Evaluator", settingPatch: { mcpServers: [{ serverId: resultMcp.id }] },
     });
     await expect(executor.purposeStore.get("executor")).resolves.toEqual({
       userAgentId: "executor", purpose: "evaluation", evaluationMcpServerId: resultMcp.id,
@@ -286,7 +290,7 @@ describe("Agent purpose filtering", () => {
     await evaluator.purposeStore.upsert({ userAgentId: "evaluator", purpose: "evaluation", evaluationMcpServerId: resultMcp.id });
     await evaluator.update("evaluator", { purpose: "execution" });
     expect(evaluator.sp.updateAgentConfig).toHaveBeenLastCalledWith("session", "evaluator", {
-      setting: { mcpServers: [] },
+      settingPatch: { mcpServers: [] },
     });
     await expect(evaluator.purposeStore.get("evaluator")).resolves.toEqual({
       userAgentId: "evaluator", purpose: "execution", evaluationMcpServerId: null,
@@ -298,7 +302,7 @@ describe("Agent purpose filtering", () => {
     await evaluator.purposeStore.upsert({ userAgentId: "evaluator", purpose: "evaluation", evaluationMcpServerId: resultMcp.id });
     evaluator.sp.listMcpServers.mockRejectedValue(new Error("catalog offline"));
     await expect(evaluator.update("evaluator", { purpose: "execution" })).resolves.toMatchObject({ id: "evaluator" });
-    expect(evaluator.sp.updateAgentConfig).toHaveBeenLastCalledWith("session", "evaluator", { setting: { mcpServers: [] } });
+    expect(evaluator.sp.updateAgentConfig).toHaveBeenLastCalledWith("session", "evaluator", { settingPatch: { mcpServers: [] } });
   });
 
   it("keeps the persisted purpose after the external MCP catalog changes", async () => {
@@ -310,24 +314,24 @@ describe("Agent purpose filtering", () => {
     servers.splice(0);
     await expect(agents.listAgents("evaluator", "evaluation")).resolves.toHaveLength(1);
     await expect(agents.update("evaluator", { name: "renamed" })).resolves.toMatchObject({ name: "renamed" });
-    await expect(agents.update("evaluator", { setting: { mcpServers: [] } })).rejects.toMatchObject({ name: "AgentConfigPurposeUnavailableError" });
+    await expect(agents.update("evaluator", { settingPatch: { mcpServers: [] } })).rejects.toMatchObject({ name: "AgentConfigPurposeUnavailableError" });
   });
 
   it("repairs a missing result binding when an Evaluation Agent is saved", async () => {
     const agents = service([config("evaluator", { mcpServers: [] })], [resultMcp]);
     await agents.purposeStore.upsert({ userAgentId: "evaluator", purpose: "evaluation", evaluationMcpServerId: resultMcp.id });
-    await expect(agents.update("evaluator", { purpose: "evaluation", name: "renamed", setting: { mcpServers: [] } })).resolves.toMatchObject({ name: "renamed" });
+    await expect(agents.update("evaluator", { purpose: "evaluation", name: "renamed", settingPatch: { mcpServers: [] } })).resolves.toMatchObject({ name: "renamed" });
     expect(agents.sp.updateAgentConfig).toHaveBeenLastCalledWith("session", "evaluator", {
-      name: "renamed", setting: { mcpServers: [{ serverId: resultMcp.id }] },
+      name: "renamed", settingPatch: { mcpServers: [{ serverId: resultMcp.id }] },
     });
   });
 
   it("replaces a stale result MCP instead of accumulating a second binding", async () => {
     const agents = service([config("evaluator", { mcpServers: [{ serverId: "old-result-mcp" }] })], [resultMcp]);
     await agents.purposeStore.upsert({ userAgentId: "evaluator", purpose: "evaluation", evaluationMcpServerId: "old-result-mcp" });
-    await agents.update("evaluator", { purpose: "evaluation", setting: { mcpServers: [{ serverId: "old-result-mcp" }] } });
+    await agents.update("evaluator", { purpose: "evaluation", settingPatch: { mcpServers: [{ serverId: "old-result-mcp" }] } });
     expect(agents.sp.updateAgentConfig).toHaveBeenLastCalledWith("session", "evaluator", {
-      setting: { mcpServers: [{ serverId: resultMcp.id }] },
+      settingPatch: { mcpServers: [{ serverId: resultMcp.id }] },
     });
   });
 
@@ -336,6 +340,29 @@ describe("Agent purpose filtering", () => {
     await expect(agents.freeze("executor", "evaluation")).rejects.toMatchObject({
       name: "AgentConfigPurposeMismatchError", expected: "evaluation", actual: "execution",
     });
+  });
+
+  it("merges a settings patch for purpose checks without rewriting untouched settings", async () => {
+    const current = config("executor", { systemPrompt: "old", privateSavedField: "keep",
+      mcpServers: [toolkit, { serverId: otherMcp.id }] });
+    const agents = service([current], [resultMcp, otherMcp]);
+    await agents.purposeStore.upsert({ userAgentId: "executor", purpose: "execution", evaluationMcpServerId: null });
+    const updated = await agents.update("executor", { revision: 3,
+      settingPatch: { systemPrompt: "new", preferredSupplierIds: ["supplier-1"] } });
+    expect(agents.sp.updateAgentConfig).toHaveBeenCalledExactlyOnceWith("session", "executor", {
+      revision: 3, settingPatch: { systemPrompt: "new", preferredSupplierIds: ["supplier-1"],
+        mcpServers: [toolkit, { serverId: otherMcp.id }] },
+    });
+    expect(updated.setting).toMatchObject({ systemPrompt: "new", privateSavedField: "keep", preferredSupplierIds: ["supplier-1"] });
+  });
+
+  it("rejects empty and malformed settings patches before adding an MCP binding", async () => {
+    for (const body of [{ settingPatch: {} }, { settingPatch: [] }, { setting: { mcpServers: [] } }]) {
+      const agents = service([config("executor", { mcpServers: [] })], [resultMcp]);
+      await agents.purposeStore.upsert({ userAgentId: "executor", purpose: "execution", evaluationMcpServerId: null });
+      await expect(agents.update("executor", body)).rejects.toMatchObject({ code: "REQUEST_INVALID_INPUT" });
+      expect(agents.sp.updateAgentConfig).not.toHaveBeenCalled();
+    }
   });
 });
 

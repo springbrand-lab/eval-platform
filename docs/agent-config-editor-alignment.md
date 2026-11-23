@@ -4,7 +4,9 @@ Eval 与 SP 共用 `@springbrand/agent-config-editor`，不复制 SP 应用源�
 
 新建从 Eval SP 的默认模板初始化，名称、描述由用户填写；Slug 在一次创建会话开始时生成，重试沿用。创建与编辑直接使用 SP 的公开输入校验、配置正文和 revision；未知创建结果通过相同 Slug 校准，不能重复创建。取消未提交的表单不写配置。冻结 Project 副本仍只读，不能经资源目录入口绕过冻结保护。
 
-公共编辑器只接受宿主注入的 HTTP 客户端和导航，不持有凭据、SP 应用路由、数据库或运行时。SP Web 与 Eval Web 都消费同一公共实现。模型和资源目录从当前 Eval SP 的公开接口读取，不使用生产 SP 数据或本地枚举副本。
+公共编辑器只接受宿主注入的 HTTP 客户端和导航，不持有凭据、SP 应用路由、数据库或运行时。共享实现由 SP 维护和发布，Eval Web 消费公开包。模型和资源目录从当前 Eval SP 的公开接口读取，不使用生产 SP 数据或本地枚举副本。
+
+编辑器升级至 `0.1.0-alpha.5`：独立 Actions 只发送 `page`、`q` 并读取固定 20 条的 `items`；API 服务读取 `/api/api-suppliers`，整组选入 `preferredSupplierIds`。目录请求、Schema 校验、分页和选择器均由 SP 发布包实现，Eval Web 不复制选择逻辑；API 只增加明确允许的 Supplier 读取。旧子 Action 保留在已选列表，可显式移除。配置更新使用当前 SP 的 `settingPatch`，Eval 仍负责用途与结果 MCP 的合并校验。现有 pnpm 补丁只保留中文文案及宿主布局扩展。
 
 Eval API 在现有 Web 网关和固定服务账号作用域内提供 `/api/agent-library`：仅开放默认模板、模型目录、Skills、Actions、Components、Connectors、References 和 Reference 附件所需的明确路径与方法。正文由 SP 校验，Eval 保留请求体限长、错误翻译、取消信号和 Origin 校验；不提供任意 URL 转发，不将服务账号会话交给浏览器。公共编辑器只展示 Connector Toolkit；用户选择的其他 MCP 原样保留在配置中，Eval Web 在编辑页下方以只读方式列出这些用户 MCP Server。评估结果提交 MCP 是 Eval 管理的用途绑定例外：用途选择器按固定 URL 路径自动加入或移除它，用户不能把它当作普通 MCP 编辑；为此 `/api/agent-library` 额外开放 `GET /mcp-servers` 和 `GET /mcp-servers/{id}`，响应不含连接凭据。Agent Config 写入仍走既有 `/api/agent-configs` 冻结保护。
 Eval 另在 `/api/agents` 返回用途筛选后的可选配置。`eval_agent_config_purposes` 是用途唯一事实源；历史缺记录只在首次读取时用 SP 公共 MCP 目录做一次性 reconciliation。目录读取失败、canonical 评估结果 MCP 歧义、或配置引用的 MCP 不可用时，接口返回 `AGENT_CONFIG_PURPOSE_UNAVAILABLE`（503），不返回用途为空或未知的选项。记录存在后列表、Project 角色筛选、更新和冻结都消费同一用途记录；编辑器允许切换用途，服务端在切换时自动加入或移除评估结果 MCP。

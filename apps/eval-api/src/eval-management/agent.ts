@@ -5,6 +5,7 @@ import type { z } from "zod";
 import type { AppBindings } from "../lib/types.js";
 import { collection, readLibrary, record, short } from "./common.js";
 import type { createAgentSchema } from "./schemas.js";
+import { readAction, readSuppliers } from "./agent-catalog.js";
 
 type AgentInput = z.output<typeof createAgentSchema>;
 
@@ -76,8 +77,12 @@ async function requireResources(c: Context<AppBindings>, input: AgentInput) {
     if (!item || item.id !== id || item.status !== "active") unavailable();
   }
   for (const id of input.actionIds) {
-    const item = record(await readLibrary(c, "/actions/{id}", new URLSearchParams(), id));
-    if (!item || item.id !== id || item.status !== "active" || item.selectable !== true) unavailable();
+    const item = await readAction(c, id);
+    if (item.status !== "active" || !item.selectable || item.supplier !== null) unavailable();
+  }
+  if (input.supplierIds.length) {
+    const available = new Set((await readSuppliers(c)).data.map((supplier) => supplier.id));
+    if (input.supplierIds.some((id) => !available.has(id))) unavailable();
   }
   await requireComponents(c, "connector", input.connectorIds);
   await requireComponents(c, "extension", input.extensionIds);
@@ -107,6 +112,7 @@ export async function createAgent(c: Context<AppBindings>, input: AgentInput) {
       thinking: model.thinking, executionLevel: model.executionLevel,
       systemPrompt: input.instructions,
       skillIds: input.skillIds, referenceFileIds: input.referenceFileIds, actionIds: input.actionIds,
+      preferredSupplierIds: input.supplierIds,
       // Only explicitly selected Connector Toolkits are added; Eval handles the result MCP by purpose.
       mcpServers: input.connectorToolkitIds.map((serverId) => ({ kind: "connector_toolkit", serverId })),
       connectorIds: input.connectorIds, extensionIds: input.extensionIds,

@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AppBindings } from "../lib/types.js";
 import { collection, pageOf, readLibrary, record, short } from "./common.js";
 import { resourceIdSchema, type searchResourcesSchema } from "./schemas.js";
+import { readAction, readActionPage, readSuppliers } from "./agent-catalog.js";
 
 type Search = z.output<typeof searchResourcesSchema>;
 const invalid = () => new HttpError("RESPONSE_INVALID", "SP returned invalid resource metadata");
@@ -78,6 +79,36 @@ async function toolkits(c: Context<AppBindings>, { cursor, pageSize, q }: Search
 export async function searchAgentResources(c: Context<AppBindings>, input: Search) {
   const { kind, q, page, pageSize, id } = input;
   if (kind === "toolkits") return toolkits(c, input);
+  if (kind === "suppliers") {
+    const suppliers = (await readSuppliers(c)).data;
+    const needle = q?.toLocaleLowerCase();
+    return { kind, ...pageOf(suppliers.filter((supplier) => !needle || [supplier.name, supplier.description,
+      ...supplier.resources.flatMap((resource) => [resource.title, resource.summary]),
+    ].some((text) => text.toLocaleLowerCase().includes(needle))).map(named), page, pageSize) };
+  }
+  if (kind === "actions" && id) {
+    const item = await readAction(c, id);
+    return { kind, item: { ...selectable(item), supplierId: item.supplier ? identity(item.supplier.id) : null } };
+  }
+  if (kind === "actions") {
+    const start = (page - 1) * pageSize;
+    const header = await readActionPage(c, { page: 1, ...(q ? { q } : {}) });
+    if (start >= header.total) return { kind, page, pageSize, total: header.total, items: [] };
+    const firstPage = Math.floor(start / header.pageSize) + 1;
+    if (firstPage > 1000) throw new HttpError("REQUEST_INVALID_INPUT", "Action catalog page is outside the SP limit");
+    const first = firstPage === 1 ? header : await readActionPage(c, { page: firstPage, ...(q ? { q } : {}) });
+    if (first.total !== header.total) throw invalid();
+    const rows = [...first.items];
+    const offset = start % first.pageSize;
+    for (let next = firstPage + 1; rows.length < offset + pageSize && (next - 1) * first.pageSize < first.total; next++) {
+      const following = await readActionPage(c, { page: next, ...(q ? { q } : {}) });
+      if (following.total !== first.total) throw invalid();
+      rows.push(...following.items);
+      if (!following.items.length) break;
+    }
+    return { kind, page, pageSize, total: first.total,
+      items: rows.slice(offset, offset + pageSize).map((item) => named(item)) };
+  }
   if (kind === "models") {
     const result = await readLibrary(c, "/models");
     if (!Array.isArray(result) || result.length > 1000 || result.some((item) => !record(item))) throw invalid();
@@ -91,40 +122,28 @@ export async function searchAgentResources(c: Context<AppBindings>, input: Searc
     return { kind, ...pageOf(models, page, pageSize) };
   }
   if (id) {
-    const item = record(await readLibrary(c, kind === "actions" ? "/actions/{id}" : "/user-references/{id}",
-      new URLSearchParams(), id));
+    const item = record(await readLibrary(c, "/user-references/{id}", new URLSearchParams(), id));
     if (!item || identity(item.id) !== id) throw invalid();
-    const supplier = record(item.supplier);
-    return { kind, item: kind === "actions" ? {
-      ...selectable(item), supplierId: supplier ? identity(supplier.id) : null,
-    } : { ...named(item), status: short(item.status, 32), size: nonnegative(item.size),
+    return { kind, item: { ...named(item), status: short(item.status, 32), size: nonnegative(item.size),
       mediaType: short(item.mediaType, 80) } };
   }
 
   const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
   if (q) query.set("q", q);
   if (kind === "skills") query.set("view", "selectable");
-  if (kind === "actions" && input.supplierId) query.set("supplierId", input.supplierId);
-  if (kind === "actions" && input.unassigned) query.set("unassigned", "true");
   if (kind === "connector_components" || kind === "extensions") {
     query.set("kind", kind === "extensions" ? "extension" : "connector");
   }
   const path = {
-    skills: "/skills", action_groups: "/actions", actions: "/actions/group-actions",
+    skills: "/skills",
     connector_components: "/components", extensions: "/components", references: "/user-references",
   } as const;
   const { data, total } = collection(await readLibrary(c, path[kind], query), pageSize);
   const items = data.map((item) => {
-    if (kind === "action_groups") {
-      const supplier = record(item.supplier);
-      return { id: supplier ? identity(supplier.id) : null, name: supplier ? short(supplier.name) : "Unassigned",
-        unassigned: !supplier, actionCount: nonnegative(item.actionCount) };
-    }
     if (kind === "skills") return { ...named(item), available: item.available === true, deleted: item.deleted === true };
     if (kind === "references") return { ...named(item), status: short(item.status, 32),
       size: nonnegative(item.size), mediaType: short(item.mediaType, 80) };
-    const supplier = record(item.supplier);
-    return { ...selectable(item), ...(kind === "actions" ? { supplierId: supplier ? identity(supplier.id) : null } : {}) };
+    return selectable(item);
   });
   return { kind, page, pageSize, total, items };
 }

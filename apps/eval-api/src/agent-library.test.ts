@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ApiRuntime } from "./lib/types.js";
 import { ZIP_ARCHIVE_BYTES } from "./limits.js";
 import { createEvalSpClient } from "./sp/client.js";
+import { createActionsClient, type AgentEditorRequest } from "@springbrand/agent-config-editor/client";
 import { jsonRequest, requestApp, WEB_ORIGIN } from "./test-support.js";
 
 const agentId = "00000000-0000-4000-8000-000000000001";
@@ -16,6 +17,10 @@ function setup(...responses: Response[]) {
     origin: "https://eval-sp.test", writeOrigin: WEB_ORIGIN,
     fetch: vi.fn(async (input, init) => {
       calls.push(new Request(input, init));
+      const url = new URL(calls.at(-1)!.url);
+      if (url.pathname === "/api/actions") {
+        if (url.searchParams.has("pageSize")) return Response.json({ code: "REQUEST_VALIDATION_FAILED", errMsg: "Invalid Action query" }, { status: 422 });
+      }
       return responses.shift() ?? envelope({ id: "saved" });
     }),
   });
@@ -47,16 +52,15 @@ describe("shared Agent editor HTTP gateway", () => {
     expect(app.calls[0]!.headers.has("Origin")).toBe(false);
   });
 
-  it("relays Frank Action groups, connector slugs and raw local IDs through the public SP views unchanged", async () => {
+  it("relays standalone Action pages, whole API Suppliers and retained Action IDs", async () => {
     const supplier = { id: "exa", name: "Exa" };
     const action = { id: "action.local.exa.search", name: "Exa Search (local)", description: "Search the web",
       status: "active", selectable: true, supplier };
     const cases = [
-      { path: "/actions", search: "?q=Exa%20%28local%29&page=2&pageSize=1",
-        value: { data: [{ supplier: { ...supplier, description: "Search", iconUrl: "" }, actionCount: 2 }],
-          total: 2, page: 2, pageSize: 1 } },
-      { path: "/actions/group-actions", search: "?supplierId=exa&q=search%2Bweb&page=2&pageSize=1",
-        value: { data: [action], total: 2, page: 2, pageSize: 1 } },
+      { path: "/actions", search: "?q=Search%20%28local%29&page=2",
+        value: { items: [{ id: "action.lookup", name: "Lookup", description: "Search" }],
+          total: 21, page: 2, pageSize: 20 } },
+      { path: "/api-suppliers", search: "", value: { data: [{ ...supplier, resources: [] }] } },
       { path: `/actions/${action.id}`, search: "",
         value: { ...action, supplier: { ...supplier, iconUrl: "" } } },
     ];
@@ -78,9 +82,21 @@ describe("shared Agent editor HTTP gateway", () => {
     expect(app.calls).toHaveLength(cases.length);
   });
 
+  it("runs the published Action client through the gateway against the strict producer query", async () => {
+    const page = { items: [{ id: "action.lookup", name: "Lookup" }], total: 1, page: 1, pageSize: 20 };
+    const app = setup(envelope(page));
+    const request: AgentEditorRequest = async <T>(path: string) => {
+      const response = await app.request(`/api/agent-library${path.slice("/api".length)}`);
+      expect(response.status).toBe(200);
+      return (await response.json()).msg as T;
+    };
+    expect(await createActionsClient(request).listActions({ page: 1 })).toEqual(page);
+    expect(app.calls[0]!.url).toBe("https://eval-sp.test/api/actions?page=1");
+  });
+
   it.each([
     { path: "/actions?q=Exa", upstreamStatus: 503, status: 502, code: "EVAL_SP_REQUEST_FAILED" },
-    { path: "/actions/group-actions?supplierId=exa", upstreamStatus: 503, status: 502, code: "EVAL_SP_REQUEST_FAILED" },
+    { path: "/api-suppliers", upstreamStatus: 503, status: 502, code: "EVAL_SP_REQUEST_FAILED" },
     { path: "/actions/action.local.exa.search", upstreamStatus: 404, status: 404, code: "EVAL_SP_NOT_FOUND" },
     { path: "/actions/action.exa.search", upstreamStatus: 404, status: 404, code: "EVAL_SP_NOT_FOUND" },
   ])("does not replace an unavailable public Action view $path with a local catalog or ID alias", async ({

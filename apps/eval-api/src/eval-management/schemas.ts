@@ -1,6 +1,7 @@
 import { RUN_OPERATIONS } from "@eval-platform/eval-contracts";
 import { platformIdSchema } from "@eval-platform/eval-dataset";
 import { z } from "zod";
+import { AGENT_SUPPLIER_PREFERENCE_LIMIT } from "@springbrand/agent-contracts/agent";
 import { expectedSnapshotsSchema, projectCreateSchema } from "../projects/schemas.js";
 import { OUTPUT_SCHEMA_BYTES } from "../limits.js";
 import { entityIdSchema, idempotencyKeySchema, unique } from "../routes/schemas.js";
@@ -87,17 +88,11 @@ export const listOptionsSchema = z.strictObject({
 });
 
 export const searchResourcesSchema = z.strictObject({
-  kind: z.enum(["models", "skills", "action_groups", "actions", "connector_components", "extensions", "toolkits", "references"]),
+  kind: z.enum(["models", "skills", "suppliers", "actions", "connector_components", "extensions", "toolkits", "references"]),
   q: search, ...pageSchema,
-  supplierId: resourceIdSchema.optional(), unassigned: z.boolean().optional(),
   cursor: z.string().min(1).max(512).optional(), id: resourceIdSchema.optional(),
 }).superRefine((value, ctx) => {
   const invalid = (message: string) => ctx.addIssue({ code: "custom", message });
-  if (value.kind === "actions" && !value.id && (!!value.supplierId === (value.unassigned === true))) {
-    invalid("Choose exactly one Action supplierId or unassigned:true");
-  }
-  if (value.id && (value.supplierId || value.unassigned !== undefined)) invalid("A detail read cannot filter Action groups");
-  if (value.kind !== "actions" && (value.supplierId || value.unassigned !== undefined)) invalid("Action group filters are only for actions");
   if (value.cursor && value.kind !== "toolkits") invalid("cursor is only for toolkits");
   if (value.id && !["actions", "references"].includes(value.kind)) invalid("id is only for Action or Reference details");
   if (value.kind === "toolkits" && value.page !== 1) invalid("Toolkit connections use cursor, not page");
@@ -113,6 +108,7 @@ export const createAgentSchema = z.strictObject({
   skillIds: resourceIds,
   referenceFileIds: z.array(platformIdSchema).max(8).refine(unique, "IDs must be unique").default([]),
   actionIds: resourceIds,
+  supplierIds: z.array(resourceIdSchema).max(AGENT_SUPPLIER_PREFERENCE_LIMIT).refine(unique, "IDs must be unique").default([]),
   connectorToolkitIds: resourceIds,
   connectorIds: resourceIds,
   extensionIds: resourceIds,

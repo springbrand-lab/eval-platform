@@ -23,7 +23,7 @@ vi.mock("@/api-sdk/agent-editor-api", () => ({
 function config(id: string): AgentConfig {
   return {
     id, user_id: "owner", slug: id, name: id === "executor" ? "执行配置" : "评估配置", description: `${id} description`,
-    revision: 1, setting_schema_version: 4,
+    revision: 1, deletedAt: null,
     setting: {
       presetId: null, model: "model", thinking: "medium", systemPrompt: null,
       toolPolicy: { allow: [], deny: [] }, subagentNames: [], executionLevel: "safe",

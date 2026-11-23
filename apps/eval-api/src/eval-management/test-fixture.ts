@@ -137,7 +137,10 @@ export function setupManagement(configured = true, files?: ManagementFiles) {
         thinking: "medium", executionLevel: "safe", available: true, thinkingLevels: ["medium"], requiredPlan: "free" }];
       if (input.route.path === "/skills") return { data: [{ id: "skill-1", name: "Skill", description: "safe",
         available: true, deleted: false }], total: 1 };
-      if (input.route.path === "/actions/{id}") return { id: input.id, name: "Action", status: "active", selectable: true };
+      if (input.route.path === "/actions/{id}") return { id: input.id, name: "Action", description: "Action", status: "active", selectable: true, supplier: null };
+      if (input.route.path === "/actions") return { items: [{ id: "action-1", name: "Action" }], total: 1, page: 1, pageSize: 20 };
+      if (input.route.path === "/api-suppliers") return { data: [{ id: "supplier-1", name: "Supplier", description: "APIs",
+        category: "", categoryIds: [], iconUrl: "", userCount: 0, displayOrder: 0, resources: [] }] };
       if (input.route.path === "/user-references/{id}") return { id: input.id, name: "Reference", status: "active", size: 10 };
       throw new Error(`Unexpected public library path ${input.route.path}`);
     }),

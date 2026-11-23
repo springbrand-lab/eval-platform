@@ -215,7 +215,7 @@ Manual creation still calls SP's ordinary create operation, independently of the
 | `/skills` | GET, POST (raw `application/zip`) | `/api/skills` |
 | `/skills/{id}/files` | GET | `/api/skills/{id}/files` |
 | `/skills/{id}` | DELETE | `/api/skills/{id}` |
-| `/actions`, `/actions/group-actions`, `/actions/{id}` | GET | Same suffix under `/api` |
+| `/actions`, `/actions/{id}`, `/api-suppliers` | GET | Same suffix under `/api` |
 | `/components` | GET | `/api/components` |
 | `/connectors` | GET | `/api/connectors` |
 | `/connectors/attempts` | POST (JSON) | `/api/connectors/attempts` |
