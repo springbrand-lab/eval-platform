@@ -5,17 +5,17 @@ import { toast } from "sonner";
 import { ZodError } from "zod";
 import {
   AgentCreationError, AgentEditor, AgentEditorProvider, agentDraftEqual, createAgentFromInput,
-  createInputFromDraft, deletionBlockerFeedback, deletionErrorFeedback, describeAgentCreationError,
-  draftFromAgent, updateInputFromDraft, type AgentDeletionFeedback, type AgentDraft,
+  createInputFromDraft, deletionErrorFeedback, describeAgentCreationError,
+  draftFromAgent, updateInputFromDraft, type AgentDraft,
 } from "@springbrand/agent-config-editor";
-import type { AgentConfigDeletionCheck, CreateUserAgentConfigInput, UserAgentConfigTemplate } from "@springbrand/agent-config-editor/client";
+import type { CreateUserAgentConfigInput, UserAgentConfigTemplate } from "@springbrand/agent-config-editor/client";
 import {
   agentKeys, createAgentConfig, deleteAgentConfig, getAgentConfig, listAgentOptions, updateAgentConfig,
   type AgentConfigUpdateInput,
 } from "@/api-sdk/agent-configs-api";
 import { agentEditorClient, agentLibraryKeys, getAgentTemplate } from "@/api-sdk/agent-editor-api";
 import { getEvaluationResultsMcp, mcpServerKeys } from "@/api-sdk/mcp-servers-api";
-import { ApiError, api } from "@/api-sdk/client";
+import { ApiError } from "@/api-sdk/client";
 import { describeError } from "@/lib/errors";
 import { getMe, meKey } from "@/api-sdk/session-api";
 import type { AgentConfig } from "@/api-sdk/types";
@@ -44,7 +44,6 @@ function AgentForm({ initial, template, userId, onSaved }: {
   const [slug] = useState(() => `agent-${crypto.randomUUID()}`);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [deleteBlocker, setDeleteBlocker] = useState<AgentDeletionFeedback | null>(null);
   const submitting = useRef(false);
   const allowNavigation = useRef(false);
   // Purpose is loaded from the server once; after the user changes it, background query refreshes must not overwrite the draft.
@@ -149,20 +148,12 @@ function AgentForm({ initial, template, userId, onSaved }: {
     enableBeforeUnload: dirty || save.isPending,
     withResolver: true,
   });
-  const deletionCheck = useMutation({
-    mutationFn: () => api.get<AgentConfigDeletionCheck>(`/api/agent-library/user-agent-configs/${encodeURIComponent(base!.id)}/deletion-check`),
-    onSuccess: (check) => {
-      const feedback = deletionBlockerFeedback(check);
-      setDeleteBlocker(feedback);
-      if (!feedback) setDeleting(true);
-    },
-  });
   const remove = useMutation({
     mutationFn: () => deleteAgentConfig(base!.id),
     onSuccess: () => {
       allowNavigation.current = true;
       toast.success("已删除");
-      void queryClient.invalidateQueries({ queryKey: agentKeys.all });
+      void queryClient.invalidateQueries({ queryKey: agentKeys.all, refetchType: "none" });
       void navigate({ to: "/agents" });
     },
   });
@@ -227,9 +218,8 @@ function AgentForm({ initial, template, userId, onSaved }: {
   return <div className="agent-editor-layout">
     <AgentEditorProvider client={agentEditorClient} connectorReturnTo={base ? `/agents/${encodeURIComponent(base.id)}` : "/agents/new"}>
       {base ? <AgentEditor mode="edit" {...common} agent={base} dirty={dirty}
-        checkingDelete={deletionCheck.isPending} deleteBlocker={deleteBlocker}
-        deleteCheckError={deletionCheck.error ? deletionErrorFeedback(deletionCheck.error).message : null}
-        onDelete={() => { if (!readOnly) deletionCheck.mutate(); }} /> : <AgentEditor mode="create" {...common} />}
+        checkingDelete={remove.isPending} deleteBlocker={null} deleteCheckError={null}
+        onDelete={() => { if (!readOnly) { remove.reset(); setDeleting(true); } }} /> : <AgentEditor mode="create" {...common} />}
     </AgentEditorProvider>
     <ConfirmDialog open={deleting} onClose={() => { if (!remove.isPending) setDeleting(false); }}
       onConfirm={() => remove.mutate()} loading={remove.isPending} danger title="删除 Agent 配置"

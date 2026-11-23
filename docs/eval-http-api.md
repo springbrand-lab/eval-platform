@@ -116,7 +116,9 @@ Agent Configs are created, read, edited and deleted in Eval; the independent Eva
 
 The create request supplies the requested `purpose`; Eval normalizes the forwarded MCP selections so an Evaluation Agent includes the canonical `/mcp/evaluation-results` server and an Execution Agent does not. Existing pre-purpose configs are classified once from the same MCP binding and then persisted. If the public MCP catalog is unavailable, the canonical result MCP is ambiguous, or a selected MCP is unavailable, purpose reads or writes that need synchronization fail with `503 AGENT_CONFIG_PURPOSE_UNAVAILABLE` rather than returning an unknown option. `purpose` is never forwarded to SP; a PATCH can change it, and Eval updates the purpose record together with the normalized SP setting.
 
-Public Agent editor domain errors retain the codes, statuses and messages selected from SP's public catalog in `eval-contracts/src/sp-editor-errors.ts`; no second definition of those SP errors exists in Eval. The three deletion blocker codes (`AGENT_CONFIG_ACTIVE_CHAT`, `AGENT_CONFIG_ACTIVE_SCHEDULE_RUN`, `AGENT_CONFIG_ENABLED_SCHEDULE`) may carry SP's validated `AgentConfigDeletionCheck` details. Invalid or unregistered details are discarded. This applies when a deletion blocker appears after a successful deletion preflight as well as to resource-library errors.
+Agent deletion uses the current SP soft-delete operation after user confirmation. The editor calls `DELETE /api/agent-configs/{id}` directly; it does not call SP's removed `deletion-check` route. Eval's frozen-copy protection still runs before the SP write.
+
+Public Agent editor domain errors retain the codes, statuses and messages selected from SP's public catalog in `eval-contracts/src/sp-editor-errors.ts`; no second definition of those SP errors exists in Eval. Legacy deletion blocker codes (`AGENT_CONFIG_ACTIVE_CHAT`, `AGENT_CONFIG_ACTIVE_SCHEDULE_RUN`, `AGENT_CONFIG_ENABLED_SCHEDULE`) may carry SP's validated `AgentConfigDeletionCheck` details. Invalid or unregistered details are discarded; this error compatibility does not add a deletion preflight.
 
 Other relayed SP errors: SP `401` → `503 EVAL_SP_UNAVAILABLE` (the service session failed, not the browser login); `403` → `EVAL_SP_FORBIDDEN`; `404` → `EVAL_SP_NOT_FOUND`; `409` → `EVAL_SP_CONFLICT`; `400`/`422` → `422 EVAL_SP_REQUEST_INVALID`; `429` → `REQUEST_RATE_LIMITED`; other statuses → `502 EVAL_SP_REQUEST_FAILED`. For `400`, `409` and `422`, SP's `errMsg` and field `errors` are relayed. An unreachable SP is `503 EVAL_SP_UNAVAILABLE`.
 
@@ -224,7 +226,6 @@ Manual creation still calls SP's ordinary create operation, independently of the
 | `/user-references/{id}` | GET, PATCH (JSON), DELETE | `/api/user-references/{id}` |
 | `/user-references/{id}/content` | PUT (JSON) | `/api/user-references/{id}/content` |
 | `/inbox/attachments` | POST (multipart), DELETE | `/api/inbox/attachments` |
-| `/user-agent-configs/{id}/deletion-check` | GET | Same suffix under `/api` |
 
 JSON bodies use `JSON_BODY_BYTES` and the same bounded, duplicate-field-free JSON parser as Config writes. Skill archives use `ZIP_ARCHIVE_BYTES`, counting actual bytes received. Reference multipart uploads use `ZIP_BODY_BYTES` and the public attachment fields `file`, `name`, `clientAttachmentId`. Resource IDs are nonempty, bounded segments without `/`, not a duplicate UUID restriction on SP catalog IDs. Request cancellation propagates to the SP client. There is no arbitrary URL relay and no Config creation/update/deletion route in this library; those operations remain behind Eval's frozen-copy service.
 
