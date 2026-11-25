@@ -3,7 +3,6 @@ import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
-import { startAuth } from "@/auth/session";
 import { ApiError } from "@/api-sdk/client";
 import { describeError } from "@/lib/errors";
 import { applyTheme, watchSystemTheme } from "@/lib/theme";
@@ -12,7 +11,6 @@ import "./styles/index.css";
 
 applyTheme();
 watchSystemTheme();
-startAuth();
 
 export const queryClient = new QueryClient({
   defaultOptions: {

@@ -15,7 +15,7 @@ function ok(msg: unknown, status = 200) { return Response.json({ success: true, 
 describe("Agent import SDK public HTTP seam", () => {
   beforeEach(async () => {
     vi.resetModules();
-    (await import("@/auth/session")).resetAuthForTest({ status: "ready", token: "fixture-eval-token" });
+    (await import("@/auth/session")).resetAuthForTest({ status: "ready" });
   });
   afterEach(async () => {
     vi.unstubAllGlobals();
@@ -34,7 +34,7 @@ describe("Agent import SDK public HTTP seam", () => {
       requests.push(request);
       const url = new URL(request.url);
       expect(request.method).toBe("GET");
-      expect(request.headers.get("Authorization")).toBe("Bearer fixture-eval-token");
+      expect(request.headers.get("Authorization")).toBeNull();
       expect(url.origin).toBe(window.location.origin);
       if (url.pathname.endsWith("/config")) return ok({ enabled: true, maxAgents: 50 });
       if (url.pathname.endsWith("/users")) return ok({

@@ -12,7 +12,7 @@ const transport = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock("@/api-sdk/client", async (original) => ({ ...await original<object>(), api: transport }));
 
 beforeEach(() => {
-  resetAuthForTest({ status: "ready", token: "test-token" });
+  resetAuthForTest({ status: "ready" });
   vi.stubGlobal("scrollTo", vi.fn());
   vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false, addListener: vi.fn(), removeListener: vi.fn(),
     addEventListener: vi.fn(), removeEventListener: vi.fn() })));

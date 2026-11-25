@@ -1,36 +1,33 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { currentToken, getAuthState, readTaktToken, resetAuthForTest, startAuth } from "./session";
+import { getAuthState, markForbidden, markUnauthorized, resetAuthForTest, signIn } from "./session";
 
 afterEach(() => resetAuthForTest());
 
-describe("takt token handoff", () => {
-  it("accepts only takt:token messages from the takt origin", () => {
-    expect(readTaktToken({ origin: "https://takt.test", data: { type: "takt:token", token: "t1" } }, "https://takt.test")).toBe("t1");
-    expect(readTaktToken({ origin: "https://evil.test", data: { type: "takt:token", token: "t1" } }, "https://takt.test")).toBeUndefined();
-    expect(readTaktToken({ origin: "https://takt.test", data: { type: "other" } }, "https://takt.test")).toBeUndefined();
-    expect(readTaktToken({ origin: "https://takt.test", data: { type: "takt:token", token: null } }, "https://takt.test")).toBeNull();
+function fakeWindow(href: string) {
+  return { location: { href, assign: vi.fn() } } as unknown as Window & { location: { assign: ReturnType<typeof vi.fn> } };
+}
+
+describe("sign-in state", () => {
+  it("goes through IAM and returns to the current page without the old failure", () => {
+    const win = fakeWindow("https://eval.test/projects/p1?tab=runs&auth_error=expired#top");
+    signIn(win);
+    expect(getAuthState()).toEqual({ status: "signing-in" });
+    expect(win.location.assign).toHaveBeenCalledExactlyOnceWith("/api/auth/login?redirect=%2Fprojects%2Fp1%3Ftab%3Druns%23top");
   });
 
-  it("reports standalone outside an iframe", () => {
-    startAuth(window, false);
-    expect(getAuthState()).toEqual({ status: "standalone" });
-    expect(currentToken()).toBeNull();
+  it("signs in again on a missing session, but not right after a failed attempt", () => {
+    const win = fakeWindow("https://eval.test/");
+    markUnauthorized(win);
+    expect(win.location.assign).toHaveBeenCalledOnce();
+    resetAuthForTest({ status: "failed", reason: "not_permitted" });
+    const again = fakeWindow("https://eval.test/");
+    markUnauthorized(again);
+    expect(again.location.assign).not.toHaveBeenCalled();
+    expect(getAuthState()).toEqual({ status: "failed", reason: "not_permitted" });
   });
 
-  it("asks the parent for the token in an iframe and keeps it in memory", () => {
-    const listeners: ((event: MessageEvent) => void)[] = [];
-    const parent = { postMessage: vi.fn() };
-    const frame = {
-      self: {}, top: {}, parent,
-      addEventListener: (_: string, listener: (event: MessageEvent) => void) => listeners.push(listener),
-      removeEventListener: vi.fn(),
-    } as unknown as Window;
-    startAuth(frame, false);
-    expect(parent.postMessage).toHaveBeenCalledWith({ type: "eval:ready" }, expect.any(String));
-    const origin = (parent.postMessage.mock.calls[0] as unknown as [unknown, string])[1];
-    listeners[0]!({ origin, data: { type: "takt:token", token: "abc" } } as MessageEvent);
-    expect(currentToken()).toBe("abc");
-    listeners[0]!({ origin, data: { type: "takt:token", token: null } } as MessageEvent);
-    expect(getAuthState()).toEqual({ status: "unauthorized" });
+  it("reports a person IAM does not let use Eval", () => {
+    markForbidden();
+    expect(getAuthState()).toEqual({ status: "forbidden" });
   });
 });

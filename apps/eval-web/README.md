@@ -86,16 +86,26 @@ Dataset → Data 下钻保留项目选择，单条数据使用 row 的权威值�
 - `src/features/<模块>/`：页面、表单与领域组件。
 - `src/api-sdk/`：每个领域一个文件，请求函数与 query key。
 - `src/components/ui/`：自建基础组件；`src/styles/theme.css` 是设计令牌（浅色与 `html.dark` 深色）。
-- `src/auth/`：接收 takt 交给 iframe 的登录 token，只保存在内存中。
-- `worker/`：部署用的 Cloudflare Worker，托管静态资源并转发 `/api/*`。
+- `src/auth/`：登录状态。会话是 Worker 发的 HttpOnly Cookie，页面只根据接口返回判断是否需要登录或无权使用。
+- `worker/`：部署用的 Cloudflare Worker，托管静态资源、经 saas-iam 登录并转发 `/api/*`。
 
 Run 预览返回固定 targets 和两个计划摘要（execution 没有 evaluation 摘要）。提交时用同一次预览生成 `expectedPlanDigests` 并保留同一命令和 key 供不确定结果重试；计划或目标改变后须重新预览。UI 不替代 Runtime 的 Project 行锁准入。
 
 ## 登录与部署
 
-与 takt 共用登录：takt 的 `/dashboard/eval` 用 iframe 打开本应用，iframe 发出 `eval:ready`，takt 只向本应用的来源回传 `{type: "takt:token", token}`。Worker 用这个 token 调用 takt 的 `/api/auth/me`，用户须有 `eval` 菜单（或是管理员）才放行；之后去掉 token，附上 `X-Eval-Web-Token` 与操作人 `X-Eval-Actor` 转发给 Eval API。页面响应带 `Content-Security-Policy: frame-ancestors`，只允许 takt 嵌入。
+登录交给 saas-iam，做法与 saas-template 相同（OAuth 授权码 + S256 PKCE），见 `worker/auth.ts`：`/api/auth/login` 把浏览器送到 IAM，IAM 回到 `/api/auth/callback` 后 Worker 用应用凭据换出这个人，发 12 小时有效的签名 HttpOnly Cookie，再回到原页面；`POST /api/auth/logout` 结束本应用的会话。登录失败回到 `/?auth_error=…`（`not_permitted`、`access_denied`、`expired`、`iam_unavailable`），页面显示原因，不自动重试。之后每个 `/api/*` 请求都向 IAM 查一次（缓存 1 分钟）这个人是否在职、是否有 `eval:app:use`，通过后去掉 Cookie，附上 `X-Eval-Web-Token` 与操作人 `X-Eval-Actor`（IAM principalId 和姓名）转发给 Eval API。非 GET 请求带了别的 `Origin` 时拒绝。
 
-Worker 配置见 `wrangler.jsonc`：`TAKT_ORIGIN`、`TAKT_EVAL_MENU_ID`、`EVAL_API_ORIGIN`、`EVAL_WEB_ORIGIN`、`FRAME_ANCESTORS`，密钥 `EVAL_WEB_API_TOKEN`（与 Eval API 相同）。构建期变量写在 `.env.production`：`VITE_TAKT_ORIGIN`、`VITE_LANGFUSE_PROJECT_URL`。`pnpm --filter @eval-platform/eval-web deploy` 构建并部署；推送到 `main` 时由 `.github/workflows/ci.yml` 在 eval-web 和受影响共享包测试通过后自动部署。同次发布涉及 API 时，Web 还须等待 AWS API 发布及冒烟检查成功；只改 Web 时允许 API 发布 job 跳过。
+本应用部署在 `eval.cuecue.cc`，与 takt、主 App 同站，所以嵌在它们的 iframe 里时 Cookie 照常可用；已经登录过 IAM 的人打开时直接回来，看不到登录页。页面响应带 `Content-Security-Policy: frame-ancestors`，只允许 `FRAME_ANCESTORS` 里的站点嵌入。IAM 里的 Eval 应用：回调地址 `https://eval.cuecue.cc/api/auth/callback`，动作 `eval:app:use`，并设为登录需要的功能点。
+
+Worker 配置见 `wrangler.jsonc`：`IAM_ORIGIN`、`IAM_CLIENT_ID`、`EVAL_API_ORIGIN`、`EVAL_WEB_ORIGIN`（Eval API 与 Eval SP 认的写请求来源，不是本应用的访问地址）、`FRAME_ANCESTORS`，密钥 `EVAL_WEB_API_TOKEN`（与 Eval API 相同）、`IAM_CLIENT_SECRET`、`SESSION_SECRET`（至少 32 位）。构建期变量写在 `.env.production`：`VITE_LANGFUSE_PROJECT_URL`。`pnpm --filter @eval-platform/eval-web deploy` 构建并部署；推送到 `main` 时由 `.github/workflows/ci.yml` 在 eval-web 和受影响共享包测试通过后自动部署。同次发布涉及 API 时，Web 还须等待 AWS API 发布及冒烟检查成功；只改 Web 时允许 API 发布 job 跳过。
+
+首次上线或更换 IAM 应用时，合并到 `main` 之前（合并即自动部署）须先完成：
+
+1. IAM 后台 → 应用：`eval` 应用的回调地址为 `https://eval.cuecue.cc/api/auth/callback`；把 `wrangler.jsonc` 的 `IAM_CLIENT_ID` 改为它的客户端 ID。
+2. `wrangler secret put IAM_CLIENT_SECRET`（应用的客户端密钥）和 `wrangler secret put SESSION_SECRET`（至少 32 位随机值）。
+3. 用应用凭据 `PUT /api/v1/app/actions` 发布 `eval:app:use`，在 IAM 里把它设为登录需要的功能点，并授权给使用 Eval 的人。
+
+部署后 CI 的「Smoke Eval Web」检查 `/healthz`、未登录时 `/api/auth/me` 为 401、`/api/auth/login` 跳到带客户端 ID 的 IAM 授权地址；其中任一项失败即部署失败。
 
 ## 本地开发
 
@@ -105,7 +115,6 @@ pnpm --filter @eval-platform/eval-web dev
 
 在 `apps/eval-web/.env.local`（不提交）中设置：
 
-- `VITE_DEV_AUTH=1`：跳过 takt，使用本地开发用户（只在开发构建中生效）。
 - `EVAL_API_ORIGIN`：本地 Eval API，默认 `http://127.0.0.1:18788`；dev 代理转发 `/api` 时代替 Worker 附上 `Origin` 和操作人。
 - `EVAL_WEB_ORIGIN`：须与 Eval API 的 `EVAL_WEB_ORIGIN` 相同，默认 `http://localhost:5176`。
 - `EVAL_WEB_API_TOKEN`：仅当本地 Eval API 配置了同名令牌时需要。

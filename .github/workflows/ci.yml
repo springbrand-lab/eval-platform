@@ -331,7 +331,7 @@ jobs:
       cancel-in-progress: false
     environment:
       name: production
-      url: https://evalrapp.springbrand.ai
+      url: https://eval.cuecue.cc
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -355,3 +355,17 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: pnpm exec wrangler deploy
+
+      - name: Smoke Eval Web
+        env:
+          WEB_ORIGIN: https://eval.cuecue.cc
+        run: |
+          set -eu
+          curl --fail --show-error --silent --retry 5 --retry-all-errors --retry-delay 5 "$WEB_ORIGIN/healthz" > /dev/null
+          # Signed out: the API refuses, and signing in goes to IAM with this app's client id.
+          test "$(curl --show-error --silent --output /dev/null --write-out '%{http_code}' "$WEB_ORIGIN/api/auth/me")" = 401
+          location="$(curl --show-error --silent --output /dev/null --write-out '%{redirect_url}' "$WEB_ORIGIN/api/auth/login")"
+          case "$location" in
+            https://iam.cuecue.cc/oauth/authorize\?*client_id=[!\&]*) ;;
+            *) echo "Unexpected sign-in redirect: $location" >&2; exit 1 ;;
+          esac

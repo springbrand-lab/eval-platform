@@ -1,6 +1,7 @@
 import { MutationCache, QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearVerificationCacheForTest, handle, type Env } from "../../worker/index";
+import { clearPermissionCacheForTest, sessionCookieForTest } from "../../worker/auth";
+import { handle, type Env } from "../../worker/index";
 
 // HTTP fixtures exercise real retry counts; deletion-retry.test.ts verifies actual timing.
 vi.mock("@eval-platform/eval-contracts", async (importOriginal) => ({
@@ -10,30 +11,40 @@ vi.mock("@eval-platform/eval-contracts", async (importOriginal) => ({
 
 const env: Env = {
   ASSETS: { fetch: async () => new Response("assets") },
-  TAKT_ORIGIN: "https://takt.test", TAKT_EVAL_MENU_ID: "eval",
+  IAM_ORIGIN: "https://iam.test", IAM_CLIENT_ID: "app_test", IAM_CLIENT_SECRET: "client-secret", SESSION_SECRET: "s".repeat(32),
   EVAL_API_ORIGIN: "https://eval-api.test", EVAL_WEB_ORIGIN: "https://eval-web.test",
   EVAL_WEB_API_TOKEN: "worker-service-key", FRAME_ANCESTORS: "https://takt.test",
 };
 
+const iamAllows = (allowed = true) => Response.json({ success: true, msg: { status: "active", permissions: allowed ? [{ action: "eval:app:use" }] : [] } });
+
+/** The browser request as the Worker sees it, with a signed-in session. */
+async function signedIn(input: RequestInfo | URL, init?: RequestInit): Promise<Request> {
+  const request = new Request(input, init);
+  const headers = new Headers(request.headers);
+  headers.set("cookie", await sessionCookieForTest(env, { id: "operator-1", name: "Operator" }));
+  return new Request(request, { headers });
+}
+
 describe("browser SDK and Web gateway errors", () => {
-  beforeEach(() => { vi.resetModules(); clearVerificationCacheForTest(); });
-  afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); clearVerificationCacheForTest(); });
+  beforeEach(() => { vi.resetModules(); clearPermissionCacheForTest(); });
+  afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); clearPermissionCacheForTest(); });
 
   it("accepts an empty successful deletion without reporting a response error", async () => {
     let deleted = false;
     const upstream: typeof fetch = async (input, init) => {
-      if (String(input).startsWith(env.TAKT_ORIGIN)) {
-        return Response.json({ user: { userId: "operator-1", access: { menuIds: ["eval"] } } });
+      if (String(input).startsWith(env.IAM_ORIGIN)) {
+        return iamAllows();
       }
       expect(String(input)).toBe(`${env.EVAL_API_ORIGIN}/api/projects/project-a`);
       expect(init?.method).toBe("DELETE");
       deleted = true;
       return new Response(null, { status: 204 });
     };
-    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(new Request(input, init), env, upstream));
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(await signedIn(input, init), env, upstream));
     vi.stubGlobal("fetch", fetcher);
     const auth = await import("@/auth/session");
-    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    auth.resetAuthForTest({ status: "ready" });
     const { deleteProject } = await import("./projects-api");
 
     await expect(deleteProject("project-a")).resolves.toBeUndefined();
@@ -46,8 +57,8 @@ describe("browser SDK and Web gateway errors", () => {
     let deleted = false;
     const methods: string[] = [];
     const upstream: typeof fetch = async (input, init) => {
-      if (String(input).startsWith(env.TAKT_ORIGIN)) {
-        return Response.json({ user: { userId: "operator-1", access: { menuIds: ["eval"] } } });
+      if (String(input).startsWith(env.IAM_ORIGIN)) {
+        return iamAllows();
       }
       expect(String(input)).toBe(`${env.EVAL_API_ORIGIN}/api/projects/project-a`);
       methods.push(init!.method!);
@@ -65,13 +76,13 @@ describe("browser SDK and Web gateway errors", () => {
       return Response.json({ code: "PROJECT_NOT_FOUND", errMsg: "Project not found" }, { status: 404 });
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const request = new Request(input, init);
+      const request = await signedIn(input, init);
       const response = await handle(request, env, upstream);
       if (request.method === "DELETE" && failure === "disconnect") throw new TypeError("Connection closed after deletion");
       return response;
     }));
     const auth = await import("@/auth/session");
-    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    auth.resetAuthForTest({ status: "ready" });
     const { deleteProject } = await import("./projects-api");
     const onError = vi.fn();
     const onSuccess = vi.fn();
@@ -100,8 +111,8 @@ describe("browser SDK and Web gateway errors", () => {
   ] as const)("does not confirm deletion from an unrelated verification result (%i %s)", async (status, code) => {
     const methods: string[] = [];
     const upstream: typeof fetch = async (input, init) => {
-      if (String(input).startsWith(env.TAKT_ORIGIN)) {
-        return Response.json({ user: { userId: "operator-1", access: { menuIds: ["eval"] } } });
+      if (String(input).startsWith(env.IAM_ORIGIN)) {
+        return iamAllows();
       }
       methods.push(init!.method!);
       if (init?.method === "DELETE") return new Response(null, { status: 204 });
@@ -110,13 +121,13 @@ describe("browser SDK and Web gateway errors", () => {
         : { code, errMsg: "Verification did not confirm deletion" }, { status });
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const request = new Request(input, init);
+      const request = await signedIn(input, init);
       const response = await handle(request, env, upstream);
       if (request.method === "DELETE") throw new TypeError("Connection closed after deletion");
       return response;
     }));
     const auth = await import("@/auth/session");
-    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    auth.resetAuthForTest({ status: "ready" });
     const { deleteProject } = await import("./projects-api");
 
     await expect(deleteProject("project-a")).rejects.toMatchObject({
@@ -128,16 +139,16 @@ describe("browser SDK and Web gateway errors", () => {
   it("preserves a rejected deletion without making a confirmation request", async () => {
     const methods: string[] = [];
     const upstream: typeof fetch = async (input, init) => {
-      if (String(input).startsWith(env.TAKT_ORIGIN)) {
-        return Response.json({ user: { userId: "operator-1", access: { menuIds: ["eval"] } } });
+      if (String(input).startsWith(env.IAM_ORIGIN)) {
+        return iamAllows();
       }
       methods.push(init!.method!);
       return Response.json({ code: "PROJECT_BUSY", errMsg: "Project has an active Run" }, { status: 409 });
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
-      handle(new Request(input, init), env, upstream)));
+      handle(await signedIn(input, init), env, upstream)));
     const auth = await import("@/auth/session");
-    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    auth.resetAuthForTest({ status: "ready" });
     const { deleteProject } = await import("./projects-api");
 
     await expect(deleteProject("project-a")).rejects.toMatchObject({ code: "PROJECT_BUSY", status: 409 });
@@ -147,8 +158,8 @@ describe("browser SDK and Web gateway errors", () => {
   it.each(["POST", "DELETE"] as const)("accepts an empty successful dataset membership %s", async (method) => {
     let changes = 0;
     const upstream: typeof fetch = async (input, init) => {
-      if (String(input).startsWith(env.TAKT_ORIGIN)) {
-        return Response.json({ user: { userId: "operator-1", access: { menuIds: ["eval"] } } });
+      if (String(input).startsWith(env.IAM_ORIGIN)) {
+        return iamAllows();
       }
       expect(String(input)).toBe(`${env.EVAL_API_ORIGIN}/api/datasets/dataset-a/data`);
       expect(init?.method).toBe(method);
@@ -156,9 +167,9 @@ describe("browser SDK and Web gateway errors", () => {
       changes += 1;
       return new Response(null, { status: 204 });
     };
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(new Request(input, init), env, upstream)));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(await signedIn(input, init), env, upstream)));
     const auth = await import("@/auth/session");
-    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    auth.resetAuthForTest({ status: "ready" });
     const { attachData, detachData } = await import("./datasets-api");
 
     await expect((method === "POST" ? attachData : detachData)("dataset-a", ["data-a"])).resolves.toBeUndefined();
@@ -170,8 +181,8 @@ describe("browser SDK and Web gateway errors", () => {
     let deletions = 0;
     let confirmations = 0;
     const upstream: typeof fetch = async (input, init) => {
-      if (String(input).startsWith(env.TAKT_ORIGIN)) {
-        return Response.json({ user: { userId: "operator-1", access: { menuIds: ["eval"] } } });
+      if (String(input).startsWith(env.IAM_ORIGIN)) {
+        return iamAllows();
       }
       if (init?.method === "DELETE") {
         deletions += 1;
@@ -181,14 +192,14 @@ describe("browser SDK and Web gateway errors", () => {
       return Response.json({ code: "INTERNAL_ERROR", errMsg: "Verification unavailable" }, { status: 500 });
     };
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const request = new Request(input, init);
+      const request = await signedIn(input, init);
       const response = await handle(request, env, upstream);
       if (request.method === "DELETE") throw new TypeError("Connection closed after deletion");
       return response;
     });
     vi.stubGlobal("fetch", fetcher);
     const auth = await import("@/auth/session");
-    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    auth.resetAuthForTest({ status: "ready" });
     const { deleteProject } = await import("./projects-api");
     const { isWriteOutcomeUnknown } = await import("@/lib/errors");
 
@@ -203,12 +214,12 @@ describe("browser SDK and Web gateway errors", () => {
 
   it("loads sampling details larger than the SDK's default response limit without truncation", async () => {
     const content = "x".repeat(10 * 1024 * 1024 + 1);
-    const upstream: typeof fetch = async (input) => String(input).startsWith(env.TAKT_ORIGIN)
-      ? Response.json({ user: { userId: "operator-1", access: { menuIds: ["eval"] } } })
+    const upstream: typeof fetch = async (input) => String(input).startsWith(env.IAM_ORIGIN)
+      ? iamAllows()
       : Response.json({ success: true, msg: { sampling: { samplingId: "sampling-a", execution: { status: "failed", lastError: content } } } });
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(new Request(input, init), env, upstream)));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(await signedIn(input, init), env, upstream)));
     const auth = await import("@/auth/session");
-    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    auth.resetAuthForTest({ status: "ready" });
     const { getSamplingDetail } = await import("./metrics-api");
     const detail = await getSamplingDetail("project-a", "sampling-a");
     expect(detail.sampling.samplingId).toBe("sampling-a");
@@ -218,36 +229,43 @@ describe("browser SDK and Web gateway errors", () => {
 
   it.each([
     ["denied", "EVAL_ACCESS_DENIED", 403, "forbidden"],
-    ["expired", "AUTH_UNAUTHENTICATED", 401, "unauthorized"],
-    ["takt-outage", "TAKT_UNAVAILABLE", 503, "ready"],
+    ["iam-outage", "IAM_UNAVAILABLE", 503, "ready"],
     ["api-outage", "EVAL_API_UNAVAILABLE", 503, "ready"],
     ["service-outage", "EVAL_SP_UNAVAILABLE", 503, "ready"],
   ] as const)("preserves %s and its correct auth state", async (scenario, code, status, authStatus) => {
     const upstream: typeof fetch = async (input) => {
-      if (String(input).startsWith(env.TAKT_ORIGIN)) {
-        if (scenario === "expired") return new Response(null, { status: 401 });
-        if (scenario === "takt-outage") throw new TypeError("network unavailable");
-        return Response.json({ user: { userId: "operator-1", name: "Operator", access: { menuIds: scenario === "denied" ? [] : ["eval"] } } });
+      if (String(input).startsWith(env.IAM_ORIGIN)) {
+        if (scenario === "iam-outage") throw new TypeError("network unavailable");
+        return iamAllows(scenario !== "denied");
       }
       if (scenario === "api-outage") throw new TypeError("network unavailable");
       return Response.json({ code: "EVAL_SP_UNAVAILABLE", errMsg: "Service session unavailable" }, { status: 503 });
     };
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(new Request(input, init), env, upstream)));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(await signedIn(input, init), env, upstream)));
     const auth = await import("@/auth/session");
-    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    auth.resetAuthForTest({ status: "ready" });
     const { api } = await import("./client");
     await expect(api.get("/api/me")).rejects.toMatchObject({ code, status });
     expect(auth.getAuthState().status).toBe(authStatus);
   });
 
+  it("sends the browser to sign in when the session is missing", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(new Request(input, init), env, async () => iamAllows())));
+    const auth = await import("@/auth/session");
+    auth.resetAuthForTest({ status: "ready" });
+    const { api } = await import("./client");
+    await expect(api.get("/api/me")).rejects.toMatchObject({ code: "AUTH_UNAUTHENTICATED", status: 401 });
+    expect(auth.getAuthState().status).toBe("signing-in");
+  });
+
   it("retains validated domain details through the Worker and browser decoder", async () => {
     const details = { allowed: false, activeChatIds: ["00000000-0000-4000-8000-000000000001"], enabledScheduleIds: [], unfinishedRunIds: [] };
-    const upstream: typeof fetch = async (input) => String(input).startsWith(env.TAKT_ORIGIN)
-      ? Response.json({ user: { userId: "operator-1", access: { menuIds: ["eval"] } } })
+    const upstream: typeof fetch = async (input) => String(input).startsWith(env.IAM_ORIGIN)
+      ? iamAllows()
       : Response.json({ code: "AGENT_CONFIG_ACTIVE_CHAT", errMsg: "Blocked", details }, { status: 409 });
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(new Request(input, init), env, upstream)));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(await signedIn(input, init), env, upstream)));
     const auth = await import("@/auth/session");
-    auth.resetAuthForTest({ status: "ready", token: "valid-takt-token" });
+    auth.resetAuthForTest({ status: "ready" });
     const { api } = await import("./client");
     await expect(api.delete("/api/agent-configs/agent-a")).rejects.toMatchObject({ code: "AGENT_CONFIG_ACTIVE_CHAT", status: 409, details });
     expect(auth.getAuthState().status).toBe("ready");

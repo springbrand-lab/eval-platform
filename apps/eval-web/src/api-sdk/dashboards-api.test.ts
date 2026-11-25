@@ -43,7 +43,7 @@ it("unwraps a 201 create envelope and an updated revision using the normal authe
   const updated = { ...created, name: "发布复核", revision: 2 };
   const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const call = new Request(input, init);
-    expect(call.headers.get("Authorization")).toBe("Bearer synthetic-dashboard-token");
+    expect(call.headers.get("Authorization")).toBeNull();
     if (call.method === "POST") {
       expect(new URL(call.url).pathname).toBe("/api/dashboards");
       expect(await call.json()).toEqual(request);
@@ -55,7 +55,7 @@ it("unwraps a 201 create envelope and an updated revision using the normal authe
     return Response.json({ success: true, msg: updated });
   });
   vi.stubGlobal("fetch", fetcher);
-  (await import("@/auth/session")).resetAuthForTest({ status: "ready", token: "synthetic-dashboard-token" });
+  (await import("@/auth/session")).resetAuthForTest({ status: "ready" });
   const { createDashboard, updateDashboard } = await import("./dashboards-api");
   await expect(createDashboard(request)).resolves.toEqual(created);
   await expect(updateDashboard(created.dashboardId, { name: updated.name, description: "", projectIds: ["p2", "p1"], revision: 1 })).resolves.toEqual(updated);

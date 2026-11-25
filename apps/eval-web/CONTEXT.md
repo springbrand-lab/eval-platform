@@ -1,6 +1,6 @@
 # Web Context
 
-`eval-web` is the internal evaluation console, embedded in takt and sharing its login.
+`eval-web` is the internal evaluation console. People sign in through saas-iam; takt and the main App embed it.
 
 It prepares Datasets, Data, initial resources, output formats and Agent Configs; creates Projects
 from Datasets, Data subsets and Sampling counts with a Subject Agent and execution policy; fills or
@@ -11,7 +11,7 @@ Workspace and Trajectory views. It also shows the service account's credits and 
 
 It consumes only the Eval API and package public contracts. It never drives an Agent, never connects
 to SP Durable Objects, and never reconstructs trajectory facts from UI state. Its Worker is the only
-place the takt token is checked; the Eval API sees the verified user only as an audit actor.
+place the IAM session is checked; the Eval API sees the verified user only as an audit actor.
 
 Agent management receives a current `execution` or `evaluation` purpose on every selectable
 Agent option. The API reconciles missing purpose records before returning options; an unavailable
