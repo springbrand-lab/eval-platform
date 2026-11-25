@@ -5,7 +5,7 @@ const projectId = "project /中文?#%";
 describe("Project evaluation results download SDK", () => {
   beforeEach(async () => {
     vi.resetModules();
-    (await import("@/auth/session")).resetAuthForTest({ status: "ready", token: "eval-download-token" });
+    (await import("@/auth/session")).resetAuthForTest({ status: "ready" });
   });
   afterEach(async () => {
     vi.restoreAllMocks();
@@ -33,7 +33,7 @@ describe("Project evaluation results download SDK", () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = new Request(input, init);
       expect(request.method).toBe("GET");
-      expect(request.headers.get("Authorization")).toBe("Bearer eval-download-token");
+      expect(request.headers.get("Authorization")).toBeNull();
       expect(request.url).toBe(`${window.location.origin}/api/projects/${encodeURIComponent(projectId)}/evaluation-results.zip`);
       return new Response(bytes, {
         headers: { "Content-Type": "application/zip", "Content-Disposition": "attachment; filename=results.zip" },

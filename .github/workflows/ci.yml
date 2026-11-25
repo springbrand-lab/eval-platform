@@ -331,7 +331,7 @@ jobs:
       cancel-in-progress: false
     environment:
       name: production
-      url: https://evalrapp.springbrand.ai
+      url: https://eval.cuecue.cc
     steps:
       - name: Checkout
         uses: actions/checkout@v6

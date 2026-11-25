@@ -49,7 +49,7 @@ it("encodes repeated projectId query parameters and unwraps the standard envelop
     const request = new Request(input, init);
     const url = new URL(request.url);
     expect(request.method).toBe("GET");
-    expect(request.headers.get("Authorization")).toBe("Bearer synthetic-token");
+    expect(request.headers.get("Authorization")).toBeNull();
     expect(url.pathname).toBe("/api/metrics/comparison");
     expect(url.searchParams.getAll("projectId")).toEqual(["project /甲", "project /乙"]);
     expect(url.searchParams.get("datasetId")).toBe("dataset /共享");
@@ -57,7 +57,7 @@ it("encodes repeated projectId query parameters and unwraps the standard envelop
     return Response.json({ success: true, msg: view });
   });
   vi.stubGlobal("fetch", fetcher);
-  (await import("@/auth/session")).resetAuthForTest({ status: "ready", token: "synthetic-token" });
+  (await import("@/auth/session")).resetAuthForTest({ status: "ready" });
   const { getProjectComparison } = await import("./comparison-api");
   await expect(getProjectComparison({ projectIds: ["project /甲", "project /乙"], datasetId: "dataset /共享", jsonPointer: "" })).resolves.toEqual(view);
   expect(fetcher).toHaveBeenCalledOnce();

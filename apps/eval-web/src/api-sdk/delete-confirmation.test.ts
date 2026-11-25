@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearVerificationCacheForTest, handle, type Env } from "../../worker/index";
+import { clearPermissionCacheForTest, sessionCookieForTest } from "../../worker/auth";
+import { handle, type Env } from "../../worker/index";
 
 // HTTP fixtures exercise real retry counts; deletion-retry.test.ts verifies actual timing.
 vi.mock("@eval-platform/eval-contracts", async (importOriginal) => ({
@@ -9,10 +10,20 @@ vi.mock("@eval-platform/eval-contracts", async (importOriginal) => ({
 
 const env: Env = {
   ASSETS: { fetch: async () => new Response("assets") },
-  TAKT_ORIGIN: "https://takt.test", TAKT_EVAL_MENU_ID: "eval",
+  IAM_ORIGIN: "https://iam.test", IAM_CLIENT_ID: "app_test", IAM_CLIENT_SECRET: "client-secret", SESSION_SECRET: "s".repeat(32),
   EVAL_API_ORIGIN: "https://eval-api.test", EVAL_WEB_ORIGIN: "https://eval-web.test",
   EVAL_WEB_API_TOKEN: "fixture-key", FRAME_ANCESTORS: "https://takt.test",
 };
+
+const iamAllows = (allowed = true) => Response.json({ success: true, msg: { status: "active", permissions: allowed ? [{ action: "eval:app:use" }] : [] } });
+
+/** The browser request as the Worker sees it, with a signed-in session. */
+async function signedIn(input: RequestInfo | URL, init?: RequestInit): Promise<Request> {
+  const request = new Request(input, init);
+  const headers = new Headers(request.headers);
+  headers.set("cookie", await sessionCookieForTest(env, { id: "operator-1", name: "Operator" }));
+  return new Request(request, { headers });
+}
 
 const resources = [
   { name: "Project", path: "/api/projects/item", code: "PROJECT_NOT_FOUND",
@@ -37,30 +48,30 @@ const resources = [
 
 async function installApi(upstream: typeof fetch, loseDeleteResponse = true) {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const request = new Request(input, init);
+    const request = await signedIn(input, init);
     const response = await handle(request, env, upstream);
     if (request.method === "DELETE" && loseDeleteResponse) throw new TypeError("Connection closed after deletion");
     return response;
   }));
-  (await import("@/auth/session")).resetAuthForTest({ status: "ready", token: "fixture-token" });
+  (await import("@/auth/session")).resetAuthForTest({ status: "ready" });
 }
 
 function authenticatedApi(handler: (url: string, init: RequestInit) => Promise<Response> | Response): typeof fetch {
-  return async (input, init) => String(input).startsWith(env.TAKT_ORIGIN)
-    ? Response.json({ user: { userId: "operator", access: { menuIds: ["eval"] } } })
+  return async (input, init) => String(input).startsWith(env.IAM_ORIGIN)
+    ? iamAllows()
     : handler(String(input), init!);
 }
 
 describe("deletion outcome confirmation", () => {
-  beforeEach(() => { vi.resetModules(); clearVerificationCacheForTest(); });
-  afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); clearVerificationCacheForTest(); });
+  beforeEach(() => { vi.resetModules(); clearPermissionCacheForTest(); });
+  afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); clearPermissionCacheForTest(); });
 
   it.each(resources)("$name confirms absence after a lost response without repeating DELETE", async (resource) => {
     const methods: string[] = [];
     const readPath = "readPath" in resource ? resource.readPath : resource.path;
     const upstream: typeof fetch = async (input, init) => {
-      if (String(input).startsWith(env.TAKT_ORIGIN)) {
-        return Response.json({ user: { userId: "operator", access: { menuIds: ["eval"] } } });
+      if (String(input).startsWith(env.IAM_ORIGIN)) {
+        return iamAllows();
       }
       expect(String(input)).toBe(`${env.EVAL_API_ORIGIN}${init?.method === "DELETE" ? resource.path : readPath}`);
       methods.push(init!.method!);

@@ -20,7 +20,7 @@ describe("errors", () => {
       status: 422, code: "REQUEST_VALIDATION_FAILED", message: "Validation failed",
       errors: [{ path: "name", errMsg: "Required" }],
     }))).toBe("填写的内容未通过校验：name Required");
-    expect(describeError(new ApiError({ status: 503, code: "TAKT_UNAVAILABLE", message: "暂时无法连接 takt" }))).toBe("暂时无法连接 takt");
+    expect(describeError(new ApiError({ status: 503, code: "IAM_UNAVAILABLE", message: "暂时无法连接登录服务" }))).toBe("暂时无法连接登录服务");
     expect(describeError(new Error("boom"))).toBe("boom");
   });
 

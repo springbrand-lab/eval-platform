@@ -13,7 +13,6 @@ const errorDefinitions = {
   REQUEST_VALIDATION_FAILED: { status: 422, message: "Validation failed" },
   REQUEST_PAYLOAD_TOO_LARGE: { status: 413, message: "Request body is too large" },
   REQUEST_UNSUPPORTED_MEDIA_TYPE: { status: 415, message: "Content-Type is not supported" },
-  REQUEST_UNTRUSTED_ORIGIN: { status: 403, message: "Request origin is not allowed" },
   REQUEST_NOT_FOUND: { status: 404, message: "Resource not found" },
   REQUEST_RATE_LIMITED: { status: 429, message: "Too many requests" },
   INTERNAL_ERROR: { status: 500, message: "Internal server error" },

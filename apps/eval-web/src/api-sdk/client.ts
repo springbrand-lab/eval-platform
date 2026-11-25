@@ -1,10 +1,10 @@
 import { ApiError, createHttpClient, type HttpRequestOptions } from "@springbrand/http/client";
 import { decodeError } from "@eval-platform/eval-contracts/http-errors";
-import { currentToken, markForbidden, markUnauthorized } from "@/auth/session";
+import { markForbidden, markUnauthorized } from "@/auth/session";
 
 export { ApiError };
 
-/** The Worker answers 403 with this code when the takt user lacks the Eval menu. */
+/** The Worker answers 403 with this code when IAM does not let the person use Eval. */
 export const ACCESS_DENIED_CODE = "EVAL_ACCESS_DENIED";
 
 const client = createHttpClient({
@@ -13,12 +13,11 @@ const client = createHttpClient({
   decodeError,
   timeoutMs: 60_000,
   maxResponseBytes: Number.MAX_SAFE_INTEGER,
-  getToken: currentToken,
-  onUnauthorized: () => markUnauthorized(),
 });
 
 function watch<T>(pending: Promise<T>): Promise<T> {
   return pending.catch((error: unknown) => {
+    if (error instanceof ApiError && error.status === 401) markUnauthorized();
     if (error instanceof ApiError && error.status === 403 && error.code === ACCESS_DENIED_CODE) markForbidden();
     throw error;
   });

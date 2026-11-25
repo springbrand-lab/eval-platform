@@ -5,20 +5,22 @@
   "compatibility_date": "2026-08-01",
   "workers_dev": false,
   "preview_urls": false,
-  "routes": [{ "pattern": "evalrapp.springbrand.ai", "custom_domain": true }],
+  "routes": [{ "pattern": "eval.cuecue.cc", "custom_domain": true }],
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     "run_worker_first": true
   },
-  // Public values only. Secrets: EVAL_WEB_API_TOKEN (`wrangler secret put EVAL_WEB_API_TOKEN`).
+  // Public values only. Secrets (`wrangler secret put <name>`): EVAL_WEB_API_TOKEN, IAM_CLIENT_SECRET, SESSION_SECRET.
+  // Served on eval.cuecue.cc, the same site as takt and the main App, so signing in through IAM works inside their iframes.
+  // EVAL_WEB_ORIGIN stays the Eval API's and Eval SP's trusted Origin for writes; it is not where the app is served.
   // VITE_* values are read at build time by vite (see .env.production).
   "vars": {
-    "TAKT_ORIGIN": "https://takt.cuecue.cc",
-    "TAKT_EVAL_MENU_ID": "eval",
+    "IAM_ORIGIN": "https://iam.cuecue.cc",
+    "IAM_CLIENT_ID": "",
     "EVAL_API_ORIGIN": "https://evalapi.springbrand.ai",
     "EVAL_WEB_ORIGIN": "https://evalrapp.springbrand.ai",
-    "FRAME_ANCESTORS": "https://takt.cuecue.cc"
+    "FRAME_ANCESTORS": "https://takt.cuecue.cc https://app.cuecue.cc"
   }
 }

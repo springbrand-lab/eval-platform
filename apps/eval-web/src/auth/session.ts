@@ -1,19 +1,21 @@
-// The takt login token, held only in memory. takt hands it to this iframe over postMessage.
+// Sign-in state. The session itself is the Worker's HttpOnly cookie, sent with every same-origin request;
+// the page only learns from API answers whether it is signed in and allowed to use Eval.
 
 export type AuthState =
-  | { readonly status: "waiting" }
-  | { readonly status: "ready"; readonly token: string }
-  /** Opened outside takt: there is no token to receive. */
-  | { readonly status: "standalone" }
-  /** takt rejected the token; the user must sign in to takt again. */
-  | { readonly status: "unauthorized" }
-  /** The token is valid but its user lacks the Eval menu in takt. */
+  | { readonly status: "ready" }
+  /** Sending the browser to sign in through IAM. */
+  | { readonly status: "signing-in" }
+  /** Signing in did not finish; `reason` comes from the Worker's `?auth_error=`. */
+  | { readonly status: "failed"; readonly reason: string }
+  /** Signed in, but IAM does not let this person use Eval. */
   | { readonly status: "forbidden" };
 
-export const TAKT_ORIGIN: string = import.meta.env.VITE_TAKT_ORIGIN ?? "https://takt.cuecue.cc";
-const DEV_AUTH = import.meta.env.DEV && import.meta.env.VITE_DEV_AUTH === "1";
+function initialState(win: Window | undefined): AuthState {
+  const reason = win ? new URL(win.location.href).searchParams.get("auth_error") : null;
+  return reason ? { status: "failed", reason } : { status: "ready" };
+}
 
-let state: AuthState = { status: "waiting" };
+let state: AuthState = initialState(typeof window === "undefined" ? undefined : window);
 const listeners = new Set<() => void>();
 
 function setState(next: AuthState): void {
@@ -30,18 +32,6 @@ export function subscribeAuth(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-export function currentToken(): string | null {
-  return state.status === "ready" ? state.token : null;
-}
-
-export function markUnauthorized(): void {
-  setState({ status: "unauthorized" });
-}
-
-export function markForbidden(): void {
-  setState({ status: "forbidden" });
-}
-
 export function isEmbedded(win: Window = window): boolean {
   try {
     return win.self !== win.top;
@@ -50,40 +40,24 @@ export function isEmbedded(win: Window = window): boolean {
   }
 }
 
-/** A message from takt; anything else, or from another origin, is ignored. */
-export function readTaktToken(event: Pick<MessageEvent, "origin" | "data">, taktOrigin = TAKT_ORIGIN): string | null | undefined {
-  if (event.origin !== taktOrigin) return undefined;
-  const data = event.data as { type?: unknown; token?: unknown } | null;
-  if (!data || data.type !== "takt:token") return undefined;
-  return typeof data.token === "string" && data.token.length > 0 ? data.token : null;
+/** Go through IAM and come back to the current page. */
+export function signIn(win: Window = window): void {
+  const here = new URL(win.location.href);
+  here.searchParams.delete("auth_error");
+  setState({ status: "signing-in" });
+  win.location.assign(`/api/auth/login?redirect=${encodeURIComponent(here.pathname + here.search + here.hash)}`);
 }
 
-/** Start receiving the takt token. Returns a cleanup function. */
-export function startAuth(win: Window = window, devAuth: boolean = DEV_AUTH): () => void {
-  if (devAuth) {
-    setState({ status: "ready", token: "local-dev" });
-    return () => undefined;
-  }
-  if (!isEmbedded(win)) {
-    setState({ status: "standalone" });
-    return () => undefined;
-  }
-  const onMessage = (event: MessageEvent) => {
-    const token = readTaktToken(event);
-    if (token === undefined) return;
-    setState(token === null ? { status: "unauthorized" } : { status: "ready", token });
-  };
-  win.addEventListener("message", onMessage);
-  win.parent.postMessage({ type: "eval:ready" }, TAKT_ORIGIN);
-  return () => win.removeEventListener("message", onMessage);
+/** The session is missing or expired: sign in again, unless the last attempt just failed. */
+export function markUnauthorized(win: Window = window): void {
+  if (state.status === "ready") signIn(win);
 }
 
-/** Ask takt again, for example after it reported an expired token. */
-export function requestToken(win: Window = window): void {
-  if (isEmbedded(win)) win.parent.postMessage({ type: "eval:ready" }, TAKT_ORIGIN);
+export function markForbidden(): void {
+  setState({ status: "forbidden" });
 }
 
 /** For tests only. */
-export function resetAuthForTest(next: AuthState = { status: "waiting" }): void {
+export function resetAuthForTest(next: AuthState = { status: "ready" }): void {
   setState(next);
 }
