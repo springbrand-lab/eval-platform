@@ -8,11 +8,12 @@ interface HostProps {
   accessToken(refresh?: boolean): Promise<string | null>;
   navigate(path: string): void;
   openCommandMenu(): void;
+  theme?(): "light" | "dark";
 }
 
 interface WujieWindow {
   __POWERED_BY_WUJIE__?: boolean;
-  $wujie?: { props?: HostProps; bus?: { $on(event: string, fn: (path: string) => void): void; $off(event: string, fn: (path: string) => void): void } };
+  $wujie?: { props?: HostProps; bus?: { $on(event: string, fn: (value: string) => void): void; $off(event: string, fn: (value: string) => void): void } };
 }
 
 const wujie = typeof window === "undefined" ? undefined : (window as unknown as WujieWindow);
@@ -50,4 +51,17 @@ export function onHostNavigate(go: (path: string) => void): () => void {
   const event = `springbrand:navigate:${APP_KEY}`;
   bus.$on(event, go);
   return () => bus.$off(event, go);
+}
+
+/**
+ * Inside the main App, Eval shows the main App's appearance instead of its own setting: now, and
+ * whenever it changes (`springbrand:theme`). Returns the unsubscribe.
+ */
+export function followHostTheme(apply: (dark: boolean) => void): () => void {
+  apply(wujie?.$wujie?.props?.theme?.() === "dark");
+  const bus = wujie?.$wujie?.bus;
+  if (!bus) return () => undefined;
+  const onTheme = (theme: string) => apply(theme === "dark");
+  bus.$on("springbrand:theme", onTheme);
+  return () => bus.$off("springbrand:theme", onTheme);
 }

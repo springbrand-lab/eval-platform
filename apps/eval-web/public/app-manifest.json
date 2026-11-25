@@ -11,9 +11,9 @@
     { "id": "projects", "title": { "zh-CN": "项目管理", "en-US": "Projects" }, "path": "/projects", "icon": "flask-conical", "permission": "eval:app:use" },
     { "id": "datasets", "title": { "zh-CN": "数据集", "en-US": "Datasets" }, "path": "/datasets", "icon": "database", "permission": "eval:app:use" },
     { "id": "agents", "title": { "zh-CN": "Agent 管理", "en-US": "Agents" }, "path": "/agents", "icon": "bot", "permission": "eval:app:use" },
-    { "id": "material", "title": { "zh-CN": "输入素材", "en-US": "Input materials" }, "path": "/resources/material", "icon": "folder-archive", "permission": "eval:app:use", "group": { "zh-CN": "资源", "en-US": "Resources" } },
-    { "id": "session", "title": { "zh-CN": "初始对话", "en-US": "Initial sessions" }, "path": "/resources/session", "icon": "messages-square", "permission": "eval:app:use", "group": { "zh-CN": "资源", "en-US": "Resources" } },
-    { "id": "output-schemas", "title": { "zh-CN": "评估结果格式", "en-US": "Output formats" }, "path": "/output-schemas", "icon": "file-json-2", "permission": "eval:app:use", "group": { "zh-CN": "资源", "en-US": "Resources" } },
+    { "id": "material", "title": { "zh-CN": "输入素材", "en-US": "Input materials" }, "path": "/resources/material", "icon": "folder-archive", "permission": "eval:app:use", "group": { "zh-CN": "资源", "en-US": "Resources", "expanded": true } },
+    { "id": "session", "title": { "zh-CN": "初始对话", "en-US": "Initial sessions" }, "path": "/resources/session", "icon": "messages-square", "permission": "eval:app:use", "group": { "zh-CN": "资源", "en-US": "Resources", "expanded": true } },
+    { "id": "output-schemas", "title": { "zh-CN": "评估结果格式", "en-US": "Output formats" }, "path": "/output-schemas", "icon": "file-json-2", "permission": "eval:app:use", "group": { "zh-CN": "资源", "en-US": "Resources", "expanded": true } },
     { "id": "credits", "title": { "zh-CN": "积分", "en-US": "Credits" }, "path": "/credits", "icon": "coins", "permission": "eval:app:use" }
   ]
 }
