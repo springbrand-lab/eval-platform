@@ -3,6 +3,7 @@
 // - GET  /api/auth/login?redirect=/path  sends the browser to IAM
 // - GET  /api/auth/callback              IAM sends it back; starts this app's session
 // - POST /api/auth/logout                ends this app's session (the IAM session stays)
+// - GET  /api/auth/me                    who this session belongs to, so an embedding page can check it is the same person
 //
 // The session is a signed HttpOnly cookie; nothing is stored server-side. Every API request still asks
 // IAM (cached briefly) whether the person is active and may use Eval. Failures land on `/?auth_error=…`.
@@ -97,10 +98,16 @@ function redirect(location: string, cookies: string[] = []): Response {
   return new Response(null, { status: 302, headers });
 }
 
-/** A same-site path to return to after signing in, or `/`. */
+/**
+ * A path on this app to return to after signing in, or `/`. Resolved the way a browser resolves `Location`
+ * (which drops tabs and newlines and treats `\\` as `/`), so nothing can turn it into another host.
+ */
 export function safeRedirect(path: string | null): string {
-  if (!path || !path.startsWith("/") || path.startsWith("//") || path.startsWith("/\\") || path.startsWith("/api/")) return "/";
-  return path;
+  if (!path?.startsWith("/")) return "/";
+  const base = "https://eval.invalid";
+  const target = new URL(path, base);
+  if (target.origin !== base || target.pathname.startsWith("/api/")) return "/";
+  return target.pathname + target.search + target.hash;
 }
 
 const callbackUrl = (request: Request) => `${new URL(request.url).origin}/api/auth/callback`;
@@ -137,10 +144,15 @@ export async function mayUseEval(principalId: string, env: AuthEnv, fetcher: typ
     headers: { Authorization: basicAuth(env), "Content-Type": "application/json" },
     body: JSON.stringify({ principal: principalId }),
   });
-  const json = await response.json().catch(() => null) as { success?: boolean; msg?: { status?: string; permissions?: { action?: string }[] } } | null;
-  if (!response.ok || !json?.success || !json.msg) throw new IamUnavailableError(`IAM ${path} → ${response.status}`);
-  const actions = (json.msg.permissions ?? []).map((permission) => permission.action);
-  const allowed = json.msg.status === "active" && (actions.includes(EVAL_ACTION) || actions.includes("*"));
+  const json = await response.json().catch(() => null) as { success?: unknown; msg?: { status?: unknown; permissions?: unknown } } | null;
+  const status = json?.msg?.status;
+  const permissions = json?.msg?.permissions;
+  // An answer of another shape is an outage, not a refusal: it must not lock everyone out silently.
+  if (!response.ok || json?.success !== true || typeof status !== "string" || !Array.isArray(permissions)) {
+    throw new IamUnavailableError(`IAM ${path} → ${response.status}: unexpected answer`);
+  }
+  const actions = permissions.map((permission: { action?: unknown }) => permission?.action);
+  const allowed = status === "active" && (actions.includes(EVAL_ACTION) || actions.includes("*"));
   if (permissionCache.size >= PERMISSION_CACHE_LIMIT) permissionCache.clear();
   permissionCache.set(principalId, { allowed, expires: now + PERMISSION_CACHE_MS });
   return allowed;
@@ -208,6 +220,12 @@ export async function handleAuth(request: Request, env: AuthEnv, fetcher: typeof
   const { pathname } = new URL(request.url);
   if (pathname === "/api/auth/login" && request.method === "GET") return login(request, env);
   if (pathname === "/api/auth/callback" && request.method === "GET") return callback(request, env, fetcher);
+  if (pathname === "/api/auth/me" && request.method === "GET") {
+    const user = await readSession(request, env);
+    return user
+      ? Response.json({ success: true, msg: user }, { headers: { "Cache-Control": "no-store" } })
+      : Response.json({ code: "AUTH_UNAUTHENTICATED", errMsg: "请登录后使用 Eval" }, { status: 401, headers: { "Cache-Control": "no-store" } });
+  }
   if (pathname === "/api/auth/logout" && request.method === "POST") {
     return new Response(null, { status: 204, headers: { "Set-Cookie": cookie(request, SESSION_COOKIE, "", 0), "Cache-Control": "no-store" } });
   }

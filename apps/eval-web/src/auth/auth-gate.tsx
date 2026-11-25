@@ -1,7 +1,9 @@
-import { Lock, LogIn } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Lock, LogIn, UserX } from "lucide-react";
 import type { ReactNode } from "react";
+import { api } from "@/api-sdk/client";
 import { Spinner } from "@/components/ui/feedback";
-import { signIn } from "./session";
+import { expectedPrincipalId, signIn, signOutAndIn } from "./session";
 import { useAuth } from "./use-auth";
 
 function Message({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
@@ -23,12 +25,26 @@ const FAILURES: Readonly<Record<string, string>> = {
   iam_unavailable: "登录服务暂时不可用，请稍后再试。",
 };
 
+/** When takt says who should be here, Eval shows its data only to that same person. */
+function SamePerson({ expected, children }: { expected: string; children: ReactNode }) {
+  const me = useQuery({ queryKey: ["auth", "me"], queryFn: ({ signal }) => api.get<{ id: string; name: string }>("/api/auth/me", { signal }) });
+  if (me.isPending) return <div className="flex h-full items-center justify-center gap-2 text-sm text-text-muted"><Spinner />正在确认登录账号…</div>;
+  if (me.isError) return <>{children}</>;
+  if (me.data.id === expected) return <>{children}</>;
+  return (
+    <Message icon={<UserX className="size-5" />} title="登录账号和 takt 不一致">
+      Eval 当前登录的是「{me.data.name}」，和 takt 里的账号不是同一个人。请在同一个账号下使用；需要切换时，先在 IAM 换成正确的账号再重新登录。
+      <button type="button" onClick={() => void signOutAndIn()} className="mt-3 block w-full link font-semibold">退出 Eval 并重新登录</button>
+    </Message>
+  );
+}
+
 /** Renders children while signed in; otherwise explains what the user must do. */
 export function AuthGate({ children }: { children: ReactNode }) {
   const auth = useAuth();
   switch (auth.status) {
     case "ready":
-      return <>{children}</>;
+      return expectedPrincipalId ? <SamePerson expected={expectedPrincipalId}>{children}</SamePerson> : <>{children}</>;
     case "signing-in":
       return <div className="flex h-full items-center justify-center gap-2 text-sm text-text-muted"><Spinner />正在跳转到登录…</div>;
     case "failed":

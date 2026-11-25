@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearPermissionCacheForTest, EVAL_ACTION, sessionCookieForTest } from "./auth";
+import { clearPermissionCacheForTest, EVAL_ACTION, safeRedirect, sessionCookieForTest } from "./auth";
 import { handle, type Env } from "./index";
 
 const env: Env = {
@@ -109,6 +109,23 @@ describe("eval-web Worker", () => {
     expect((await callback(`code=c1&state=${state}`)).headers.get("location")).toBe("/");
     const down = await handle(new Request(`https://eval-web.test/api/auth/callback?code=c1&state=${state}`, { headers: { cookie: pending } }), env, upstream({ iamDown: true }));
     expect(down.headers.get("location")).toBe("/?auth_error=iam_unavailable");
+  });
+
+  it("keeps return paths on this app however the browser would resolve them", () => {
+    for (const path of ["/\t/evil.com", "/\n/evil.com", "//evil.com", "/\\evil.com", "https://evil.com", "/api/projects", null]) expect(safeRedirect(path)).toBe("/");
+    expect(safeRedirect("/projects/p1?tab=runs#top")).toBe("/projects/p1?tab=runs#top");
+    expect(safeRedirect("/%09/evil.com")).toBe("/%09/evil.com");
+  });
+
+  it("treats an IAM permission answer of another shape as an outage, not a refusal", async () => {
+    const odd = vi.fn(async () => Response.json({ success: true, msg: { allowed: true } }));
+    expect(await (await handle(await api(), env, odd)).json()).toMatchObject({ code: "IAM_UNAVAILABLE" });
+  });
+
+  it("tells an embedding page who the session belongs to", async () => {
+    const me = await handle(new Request("https://eval-web.test/api/auth/me", { headers: { cookie: await sessionCookieForTest(env, user) } }), env, upstream());
+    expect(await me.json()).toEqual({ success: true, msg: user });
+    expect((await handle(new Request("https://eval-web.test/api/auth/me"), env, upstream())).status).toBe(401);
   });
 
   it("signs out by clearing the session cookie", async () => {

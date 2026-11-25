@@ -99,6 +99,14 @@ Run 预览返回固定 targets 和两个计划摘要（execution 没有 evaluati
 
 Worker 配置见 `wrangler.jsonc`：`IAM_ORIGIN`、`IAM_CLIENT_ID`、`EVAL_API_ORIGIN`、`EVAL_WEB_ORIGIN`（Eval API 与 Eval SP 认的写请求来源，不是本应用的访问地址）、`FRAME_ANCESTORS`，密钥 `EVAL_WEB_API_TOKEN`（与 Eval API 相同）、`IAM_CLIENT_SECRET`、`SESSION_SECRET`（至少 32 位）。构建期变量写在 `.env.production`：`VITE_LANGFUSE_PROJECT_URL`。`pnpm --filter @eval-platform/eval-web deploy` 构建并部署；推送到 `main` 时由 `.github/workflows/ci.yml` 在 eval-web 和受影响共享包测试通过后自动部署。同次发布涉及 API 时，Web 还须等待 AWS API 发布及冒烟检查成功；只改 Web 时允许 API 发布 job 跳过。
 
+首次上线或更换 IAM 应用时，合并到 `main` 之前（合并即自动部署）须先完成：
+
+1. IAM 后台 → 应用：`eval` 应用的回调地址为 `https://eval.cuecue.cc/api/auth/callback`；把 `wrangler.jsonc` 的 `IAM_CLIENT_ID` 改为它的客户端 ID。
+2. `wrangler secret put IAM_CLIENT_SECRET`（应用的客户端密钥）和 `wrangler secret put SESSION_SECRET`（至少 32 位随机值）。
+3. 用应用凭据 `PUT /api/v1/app/actions` 发布 `eval:app:use`，在 IAM 里把它设为登录需要的功能点，并授权给使用 Eval 的人。
+
+部署后 CI 的「Smoke Eval Web」检查 `/healthz`、未登录时 `/api/auth/me` 为 401、`/api/auth/login` 跳到带客户端 ID 的 IAM 授权地址；其中任一项失败即部署失败。
+
 ## 本地开发
 
 ```bash

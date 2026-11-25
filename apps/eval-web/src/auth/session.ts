@@ -16,6 +16,13 @@ function initialState(win: Window | undefined): AuthState {
 }
 
 let state: AuthState = initialState(typeof window === "undefined" ? undefined : window);
+
+/**
+ * The person the embedding page (takt) is signed in as, from `?expect=<IAM principalId>`. Eval checks its own
+ * session against it, so the two never silently show different accounts.
+ */
+export const expectedPrincipalId: string | null =
+  typeof window === "undefined" ? null : new URL(window.location.href).searchParams.get("expect");
 const listeners = new Set<() => void>();
 
 function setState(next: AuthState): void {
@@ -55,6 +62,12 @@ export function markUnauthorized(win: Window = window): void {
 
 export function markForbidden(): void {
   setState({ status: "forbidden" });
+}
+
+/** End this app's session and sign in again with whoever IAM has signed in now. */
+export async function signOutAndIn(win: Window = window): Promise<void> {
+  await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+  signIn(win);
 }
 
 /** For tests only. */
