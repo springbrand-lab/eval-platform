@@ -35,25 +35,17 @@ const THEMES: readonly { value: ThemePreference; label: string; icon: ComponentT
   { value: "system", label: "跟随系统", icon: Monitor },
 ];
 
-/** Inside the main App, its menu shows Eval's pages: Eval keeps only the page, and both URLs follow each other. */
-function HostedShell() {
+/** Inside the main App: Eval's URL and the main App's follow each other. */
+function useHostUrlSync() {
   const router = useRouter();
   const href = useRouterState({ select: (state) => state.location.href });
-  useEffect(() => reportPath(href), [href]);
-  useEffect(() => onHostNavigate((path) => void router.history.replace(path)), [router]);
-  return (
-    <main className="h-full min-w-0 overflow-y-auto bg-bg">
-      <Outlet />
-    </main>
-  );
+  useEffect(() => { if (hosted) reportPath(href); }, [href]);
+  useEffect(() => (hosted ? onHostNavigate((path) => void router.history.replace(path)) : undefined), [router]);
 }
 
+/** Eval's own sidebar and page, on its own and inside the main App (which then shows Eval as one entry). */
 export function AppShell() {
-  if (hosted) return <HostedShell />;
-  return <StandaloneShell />;
-}
-
-function StandaloneShell() {
+  useHostUrlSync();
   const embedded = isEmbedded();
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useState<ThemePreference>(readThemePreference);
@@ -69,7 +61,7 @@ function StandaloneShell() {
         <div className={cn("flex h-14 items-center gap-2 px-3", collapsed && "justify-center px-0")}>
           {!collapsed && (
             <span className="hidden min-w-0 items-center gap-2.5 pl-1 text-base font-semibold tracking-tight text-text-strong md:flex">
-              <img src="/favicon.svg" alt="" className="size-5" />
+              <img src={`${import.meta.env.BASE_URL}favicon.svg`} alt="" className="size-5" />
               {embedded ? "Eval" : "Eval 评测"}
             </span>
           )}
@@ -111,6 +103,8 @@ function StandaloneShell() {
             </div>
           ))}
         </nav>
+        {/* Inside the main App its appearance rules, so there is no switch here. */}
+        {!hosted && (
         <div className="border-t border-border p-2">
           {collapsed ? (
             <button
@@ -146,6 +140,7 @@ function StandaloneShell() {
             </div>
           )}
         </div>
+        )}
       </aside>
       <main className="min-w-0 flex-1 overflow-y-auto">
         <Outlet />
