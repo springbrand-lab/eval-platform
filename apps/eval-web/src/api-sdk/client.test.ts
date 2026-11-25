@@ -13,7 +13,7 @@ const env: Env = {
   ASSETS: { fetch: async () => new Response("assets") },
   IAM_ORIGIN: "https://iam.test", IAM_CLIENT_ID: "app_test", IAM_CLIENT_SECRET: "client-secret", SESSION_SECRET: "s".repeat(32),
   EVAL_API_ORIGIN: "https://eval-api.test", EVAL_WEB_ORIGIN: "https://eval-web.test",
-  EVAL_WEB_API_TOKEN: "worker-service-key", FRAME_ANCESTORS: "https://takt.test",
+  EVAL_WEB_API_TOKEN: "worker-service-key", HOST_ORIGINS: "https://takt.test",
 };
 
 const iamAllows = (allowed = true) => Response.json({ success: true, msg: { status: "active", permissions: allowed ? [{ action: "eval:app:use" }] : [] } });

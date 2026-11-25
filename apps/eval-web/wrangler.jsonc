@@ -21,6 +21,6 @@
     "IAM_CLIENT_ID": "app_bUeBBtR-YFKJ6EqM",
     "EVAL_API_ORIGIN": "https://evalapi.springbrand.ai",
     "EVAL_WEB_ORIGIN": "https://evalrapp.springbrand.ai",
-    "FRAME_ANCESTORS": "https://takt.cuecue.cc https://app.cuecue.cc"
+    "HOST_ORIGINS": "https://takt.cuecue.cc https://app.cuecue.cc"
   }
 }

@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { clearPermissionCacheForTest, EVAL_ACTION, safeRedirect, sessionCookieForTest } from "./auth";
+import { clearIamTokenCachesForTest } from "./iamToken";
 import { handle, type Env } from "./index";
 
 const env: Env = {
@@ -12,7 +13,7 @@ const env: Env = {
   EVAL_API_ORIGIN: "https://eval-api.test",
   EVAL_WEB_ORIGIN: "https://eval-web.test",
   EVAL_WEB_API_TOKEN: "w".repeat(40),
-  FRAME_ANCESTORS: "https://takt.test",
+  HOST_ORIGINS: "https://takt.test",
 };
 
 const user = { id: "principal-1", name: "张三" };
@@ -25,10 +26,28 @@ function upstream(options: { actions?: string[]; status?: string; iamDown?: bool
       if (options.iamDown) throw new TypeError("network unavailable");
       if (url.endsWith("/oauth/token")) return Response.json({ access_token: "iam-access" });
       if (url.endsWith("/oauth/userinfo")) return Response.json({ sub: user.id, name: user.name });
+      if (url.endsWith("/.well-known/jwks.json")) return Response.json({ keys: [iamKey.publicJwk] });
+      if (url.includes("/api/v1/app/principals/")) return Response.json({ success: true, msg: { displayName: user.name } });
       return Response.json({ success: true, msg: { status: options.status ?? "active", permissions: (options.actions ?? [EVAL_ACTION]).map((action) => ({ action })) } });
     }
     return Response.json({ success: true, msg: { url, headers: Object.fromEntries(new Headers(init?.headers)) } });
   });
+}
+
+// IAM's signing key, as the main App's access tokens are signed with it.
+const iamKey = await (async () => {
+  const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]) as CryptoKeyPair;
+  return { privateKey: pair.privateKey, publicJwk: { ...await crypto.subtle.exportKey("jwk", pair.publicKey), kid: "iam-1" } };
+})();
+const b64 = (value: string | Uint8Array) =>
+  btoa(String.fromCharCode(...(typeof value === "string" ? new TextEncoder().encode(value) : value))).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/u, "");
+
+/** An IAM access token for `claims`, signed with IAM's key (or `key`). */
+async function iamToken(claims: Record<string, unknown> = {}, key = iamKey.privateKey) {
+  const header = b64(JSON.stringify({ alg: "EdDSA", kid: "iam-1" }));
+  const payload = b64(JSON.stringify({ iss: env.IAM_ORIGIN, typ: "human", sub: user.id, exp: Math.floor(Date.now() / 1000) + 900, ...claims }));
+  const signature = new Uint8Array(await crypto.subtle.sign("Ed25519", key, new TextEncoder().encode(`${header}.${payload}`)));
+  return `${header}.${payload}.${b64(signature)}`;
 }
 
 async function api(init: RequestInit = {}, signedIn = true) {
@@ -41,7 +60,7 @@ const setCookies = (response: Response): string[] => [...response.headers].filte
 const cookieValue = (response: Response, name: string) => setCookies(response).find((value) => value.startsWith(`${name}=`))!.split(";")[0]!;
 
 describe("eval-web Worker", () => {
-  beforeEach(() => clearPermissionCacheForTest());
+  beforeEach(() => { clearPermissionCacheForTest(); clearIamTokenCachesForTest(); });
 
   it("rejects /api without a session, without the Eval action, for inactive people and when IAM is down", async () => {
     expect((await handle(await api({}, false), env, upstream())).status).toBe(401);
@@ -126,6 +145,39 @@ describe("eval-web Worker", () => {
     const me = await handle(new Request("https://eval-web.test/api/auth/me", { headers: { cookie: await sessionCookieForTest(env, user) } }), env, upstream());
     expect(await me.json()).toEqual({ success: true, msg: user });
     expect((await handle(new Request("https://eval-web.test/api/auth/me"), env, upstream())).status).toBe(401);
+  });
+
+  it("serves a host page with the person's IAM access token, cross-origin and without the cookie checks", async () => {
+    const host = "https://takt.test";
+    const preflight = await handle(new Request("https://eval-web.test/api/projects", { method: "OPTIONS", headers: { Origin: host, "Access-Control-Request-Headers": "authorization" } }), env, upstream());
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe(host);
+    expect(preflight.headers.get("access-control-allow-headers")).toContain("Authorization");
+    expect(preflight.headers.get("access-control-allow-credentials")).toBeNull();
+
+    const write = await handle(new Request("https://eval-web.test/api/projects", { method: "POST", headers: { Origin: host, Authorization: `Bearer ${await iamToken()}` } }), env, upstream());
+    expect(write.status).toBe(200);
+    expect(write.headers.get("access-control-allow-origin")).toBe(host);
+    const forwarded = (await write.json() as { msg: { headers: Record<string, string> } }).msg.headers;
+    expect(JSON.parse(decodeURIComponent(forwarded["x-eval-actor"]!))).toEqual(user);
+    expect(forwarded.authorization).toBeUndefined();
+
+    // Other origins get no CORS headers, so their pages cannot read the answer.
+    const other = await handle(new Request("https://eval-web.test/api/projects", { headers: { Origin: "https://other.test", Authorization: `Bearer ${await iamToken()}` } }), env, upstream());
+    expect(other.headers.get("access-control-allow-origin")).toBeNull();
+    // Assets are readable by hosts too: the micro-frontend loader fetches them.
+    expect((await handle(new Request("https://eval-web.test/", { headers: { Origin: host } }), env, upstream())).headers.get("access-control-allow-origin")).toBe(host);
+  });
+
+  it("refuses IAM tokens that are forged, expired, from another issuer or not a person's", async () => {
+    const forger = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]) as CryptoKeyPair;
+    const call = async (token: string) => (await handle(new Request("https://eval-web.test/api/projects", { headers: { Authorization: `Bearer ${token}` } }), env, upstream())).status;
+    expect(await call(await iamToken({}, forger.privateKey))).toBe(401);
+    expect(await call(await iamToken({ exp: Math.floor(Date.now() / 1000) - 120 }))).toBe(401);
+    expect(await call(await iamToken({ iss: "https://evil.test" }))).toBe(401);
+    expect(await call(await iamToken({ typ: "agent" }))).toBe(401);
+    expect(await call("not.a.token")).toBe(401);
+    expect(await call(await iamToken())).toBe(200);
   });
 
   it("signs out by clearing the session cookie", async () => {

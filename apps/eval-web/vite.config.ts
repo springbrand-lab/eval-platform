@@ -9,6 +9,9 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const apiOrigin = env.EVAL_API_ORIGIN ?? "http://127.0.0.1:18788";
   return {
+    // Absolute in production (EVAL_WEB_BASE in .env.production): inside the main App (wujie) Eval's pages
+    // run on the main App's origin, so assets and the API must name Eval's own origin.
+    base: env.EVAL_WEB_BASE ?? "/",
     plugins: [
       tanstackRouter({ target: "react", autoCodeSplitting: true }),
       react(),

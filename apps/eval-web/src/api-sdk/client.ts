@@ -1,14 +1,31 @@
 import { ApiError, createHttpClient, type HttpRequestOptions } from "@springbrand/http/client";
 import { decodeError } from "@eval-platform/eval-contracts/http-errors";
 import { markForbidden, markUnauthorized } from "@/auth/session";
+import { apiOrigin, hosted, hostAccessToken } from "@/lib/host";
 
 export { ApiError };
 
 /** The Worker answers 403 with this code when IAM does not let the person use Eval. */
 export const ACCESS_DENIED_CODE = "EVAL_ACCESS_DENIED";
 
+/**
+ * Inside the main App, Eval's API is on another origin: send the person's IAM access token, and on a
+ * 401 once more with a token re-issued from the IAM session (tokens last 15 minutes).
+ */
+const hostedFetch: typeof fetch = async (input, init) => {
+  const send = async (refresh: boolean) => {
+    const headers = new Headers(init?.headers);
+    const token = await hostAccessToken(refresh);
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    return fetch(input, { ...init, headers, credentials: "omit" });
+  };
+  const response = await send(false);
+  return response.status === 401 ? send(true) : response;
+};
+
 const client = createHttpClient({
-  baseUrl: typeof window === "undefined" ? "http://localhost" : window.location.origin,
+  baseUrl: apiOrigin,
+  ...(hosted ? { fetch: hostedFetch } : {}),
   responseMode: "envelope",
   decodeError,
   timeoutMs: 60_000,
