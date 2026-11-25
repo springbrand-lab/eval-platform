@@ -5,12 +5,17 @@ import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
 import { ApiError } from "@/api-sdk/client";
 import { describeError } from "@/lib/errors";
+import { followHostTheme, hosted } from "@/lib/host";
 import { applyTheme, watchSystemTheme } from "@/lib/theme";
 import { routeTree } from "./routeTree.gen";
 import "./styles/index.css";
 
-applyTheme();
-watchSystemTheme();
+// Inside the main App its appearance rules; on its own Eval keeps its own setting.
+if (hosted) followHostTheme((dark) => document.documentElement.classList.toggle("dark", dark));
+else {
+  applyTheme();
+  watchSystemTheme();
+}
 
 export const queryClient = new QueryClient({
   defaultOptions: {
