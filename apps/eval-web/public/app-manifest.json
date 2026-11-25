@@ -5,7 +5,7 @@
   "publisher": "springbrand",
   "load": { "mode": "micro", "entry": "/" },
   "login": "sso",
-  "menuDisplay": "expanded",
+  "menuDisplay": "collapsed",
   "menu": [
     { "id": "dashboard", "title": { "zh-CN": "数据看板", "en-US": "Dashboards" }, "path": "/dashboard", "icon": "chart-no-axes-column", "permission": "eval:app:use" },
     { "id": "projects", "title": { "zh-CN": "项目管理", "en-US": "Projects" }, "path": "/projects", "icon": "flask-conical", "permission": "eval:app:use" },
