@@ -249,6 +249,15 @@ describe("browser SDK and Web gateway errors", () => {
     expect(auth.getAuthState().status).toBe(authStatus);
   });
 
+  it("sends the session cookie with every API request", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(await signedIn(input, init), env, async () => iamAllows()));
+    vi.stubGlobal("fetch", fetcher);
+    const { api } = await import("./client");
+    await api.get("/api/me").catch(() => undefined);
+    const [input, init] = fetcher.mock.calls[0]!;
+    expect(new Request(input, init).credentials).toBe("include");
+  });
+
   it("sends the browser to sign in when the session is missing", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => handle(new Request(input, init), env, async () => iamAllows())));
     const auth = await import("@/auth/session");

@@ -13,6 +13,8 @@ const client = createHttpClient({
   decodeError,
   timeoutMs: 60_000,
   maxResponseBytes: Number.MAX_SAFE_INTEGER,
+  // The session is the Worker's HttpOnly cookie. Without this the SDK's fetch adapter sends no cookies at all.
+  credentials: "include",
 });
 
 function watch<T>(pending: Promise<T>): Promise<T> {
