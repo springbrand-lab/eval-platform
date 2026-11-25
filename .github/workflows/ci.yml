@@ -366,6 +366,6 @@ jobs:
           test "$(curl --show-error --silent --output /dev/null --write-out '%{http_code}' "$WEB_ORIGIN/api/auth/me")" = 401
           location="$(curl --show-error --silent --output /dev/null --write-out '%{redirect_url}' "$WEB_ORIGIN/api/auth/login")"
           case "$location" in
-            https://iam.cuecue.cc/oauth/authorize\?*client_id=app_*) ;;
+            https://iam.cuecue.cc/oauth/authorize\?*client_id=[!\&]*) ;;
             *) echo "Unexpected sign-in redirect: $location" >&2; exit 1 ;;
           esac

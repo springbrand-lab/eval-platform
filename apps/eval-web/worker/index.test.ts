@@ -112,7 +112,7 @@ describe("eval-web Worker", () => {
   });
 
   it("keeps return paths on this app however the browser would resolve them", () => {
-    for (const path of ["/\t/evil.com", "/\n/evil.com", "//evil.com", "/\\evil.com", "https://evil.com", "/api/projects", null]) expect(safeRedirect(path)).toBe("/");
+    for (const path of ["/\t/evil.com", "/\n/evil.com", "//evil.com", "/\\evil.com", "/.//evil.com", "/a/..//evil.com", "/./\\evil.com", "/./api/x", "https://evil.com", "/api/projects", null]) expect(safeRedirect(path)).toBe("/");
     expect(safeRedirect("/projects/p1?tab=runs#top")).toBe("/projects/p1?tab=runs#top");
     expect(safeRedirect("/%09/evil.com")).toBe("/%09/evil.com");
   });

@@ -29,7 +29,16 @@ const FAILURES: Readonly<Record<string, string>> = {
 function SamePerson({ expected, children }: { expected: string; children: ReactNode }) {
   const me = useQuery({ queryKey: ["auth", "me"], queryFn: ({ signal }) => api.get<{ id: string; name: string }>("/api/auth/me", { signal }) });
   if (me.isPending) return <div className="flex h-full items-center justify-center gap-2 text-sm text-text-muted"><Spinner />正在确认登录账号…</div>;
-  if (me.isError) return <>{children}</>;
+  // Unconfirmed is not the same person: a missing session signs in again (the API client does that on 401);
+  // anything else waits for a retry rather than showing data to whoever this session is.
+  if (me.isError) {
+    return (
+      <Message icon={<UserX className="size-5" />} title="暂时无法确认登录账号">
+        无法确认 Eval 登录的是不是 takt 里的账号，请稍后再试。
+        <button type="button" onClick={() => void me.refetch()} className="mt-3 block w-full link font-semibold">重试</button>
+      </Message>
+    );
+  }
   if (me.data.id === expected) return <>{children}</>;
   return (
     <Message icon={<UserX className="size-5" />} title="登录账号和 takt 不一致">

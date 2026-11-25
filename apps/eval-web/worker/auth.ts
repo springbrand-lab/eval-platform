@@ -106,8 +106,10 @@ export function safeRedirect(path: string | null): string {
   if (!path?.startsWith("/")) return "/";
   const base = "https://eval.invalid";
   const target = new URL(path, base);
-  if (target.origin !== base || target.pathname.startsWith("/api/")) return "/";
-  return target.pathname + target.search + target.hash;
+  const resolved = target.pathname + target.search + target.hash;
+  // Dot segments can collapse into `//host` only after resolving, so the result must stay here when resolved again.
+  if (target.origin !== base || target.pathname.startsWith("//") || target.pathname.startsWith("/api/") || new URL(resolved, base).origin !== base) return "/";
+  return resolved;
 }
 
 const callbackUrl = (request: Request) => `${new URL(request.url).origin}/api/auth/callback`;
