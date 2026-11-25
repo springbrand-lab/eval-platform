@@ -95,9 +95,16 @@ Run 预览返回固定 targets 和两个计划摘要（execution 没有 evaluati
 
 登录交给 saas-iam，做法与 saas-template 相同（OAuth 授权码 + S256 PKCE），见 `worker/auth.ts`：`/api/auth/login` 把浏览器送到 IAM，IAM 回到 `/api/auth/callback` 后 Worker 用应用凭据换出这个人，发 12 小时有效的签名 HttpOnly Cookie，再回到原页面；`POST /api/auth/logout` 结束本应用的会话。登录失败回到 `/?auth_error=…`（`not_permitted`、`access_denied`、`expired`、`iam_unavailable`），页面显示原因，不自动重试。之后每个 `/api/*` 请求都向 IAM 查一次（缓存 1 分钟）这个人是否在职、是否有 `eval:app:use`，通过后去掉 Cookie，附上 `X-Eval-Web-Token` 与操作人 `X-Eval-Actor`（IAM principalId 和姓名）转发给 Eval API。非 GET 请求带了别的 `Origin` 时拒绝。
 
-本应用部署在 `eval.cuecue.cc`，与 takt、主 App 同站，所以嵌在它们的 iframe 里时 Cookie 照常可用；已经登录过 IAM 的人打开时直接回来，看不到登录页。页面响应带 `Content-Security-Policy: frame-ancestors`，只允许 `FRAME_ANCESTORS` 里的站点嵌入。IAM 里的 Eval 应用：回调地址 `https://eval.cuecue.cc/api/auth/callback`，动作 `eval:app:use`，并设为登录需要的功能点。
+本应用部署在 `eval.cuecue.cc`，与 takt、主 App 同站，所以嵌在它们的 iframe 里时 Cookie 照常可用；已经登录过 IAM 的人打开时直接回来，看不到登录页。页面响应带 `Content-Security-Policy: frame-ancestors`，只允许 `HOST_ORIGINS` 里的站点嵌入。IAM 里的 Eval 应用：回调地址 `https://eval.cuecue.cc/api/auth/callback`，动作 `eval:app:use`，并设为登录需要的功能点。
 
-Worker 配置见 `wrangler.jsonc`：`IAM_ORIGIN`、`IAM_CLIENT_ID`、`EVAL_API_ORIGIN`、`EVAL_WEB_ORIGIN`（Eval API 与 Eval SP 认的写请求来源，不是本应用的访问地址）、`FRAME_ANCESTORS`，密钥 `EVAL_WEB_API_TOKEN`（与 Eval API 相同）、`IAM_CLIENT_SECRET`、`SESSION_SECRET`（至少 32 位）。构建期变量写在 `.env.production`：`VITE_LANGFUSE_PROJECT_URL`。`pnpm --filter @eval-platform/eval-web deploy` 构建并部署；推送到 `main` 时由 `.github/workflows/ci.yml` 在 eval-web 和受影响共享包测试通过后自动部署。同次发布涉及 API 时，Web 还须等待 AWS API 发布及冒烟检查成功；只改 Web 时允许 API 发布 job 跳过。
+Worker 配置见 `wrangler.jsonc`：`IAM_ORIGIN`、`IAM_CLIENT_ID`、`EVAL_API_ORIGIN`、`EVAL_WEB_ORIGIN`（Eval API 与 Eval SP 认的写请求来源，不是本应用的访问地址）、`HOST_ORIGINS`（可以嵌入或以微前端加载本应用的站点），密钥 `EVAL_WEB_API_TOKEN`（与 Eval API 相同）、`IAM_CLIENT_SECRET`、`SESSION_SECRET`（至少 32 位）。构建期变量写在 `.env.production`：`VITE_LANGFUSE_PROJECT_URL`。`pnpm --filter @eval-platform/eval-web deploy` 构建并部署；推送到 `main` 时由 `.github/workflows/ci.yml` 在 eval-web 和受影响共享包测试通过后自动部署。同次发布涉及 API 时，Web 还须等待 AWS API 发布及冒烟检查成功；只改 Web 时允许 API 发布 job 跳过。
+
+主 App（saas-console）以微前端（wujie，声明文件 `public/app-manifest.json`，`load.mode: "micro"`）加载本应用：页面渲染在主 App 里，脚本在和主 App 同源的沙盒 iframe 里跑，样式和 DOM 在 shadow root 里，互不影响。这时本应用（`src/lib/host.ts`）：
+
+- 不显示自己的侧边栏，菜单由主 App 按声明文件显示；地址和主 App 互相同步（本应用换页时告诉主 App，主 App 菜单切换时通过 `springbrand:navigate:eval` 事件让本应用换页）。
+- 调自己的 API 用自己的域名（脚本所在的域名），带主 App 给的 IAM 访问令牌（`Authorization: Bearer`），401 时向主 App 要一个新令牌再试一次。Worker（`worker/iamToken.ts`）用 IAM 的 JWKS 在本地验签（EdDSA、issuer 是 `IAM_ORIGIN`、`typ: "human"`），再照常向 IAM 确认 `eval:app:use`；用令牌的请求不做会话的来源检查。
+- `HOST_ORIGINS` 里的站点可以跨域读取静态资源和 API 响应（不带凭据，所以别的站点拿不到会话）。
+- 构建时资源地址是完整域名（`.env.production` 的 `EVAL_WEB_BASE`），否则在主 App 里会按主 App 的域名去取。
 
 首次上线或更换 IAM 应用时，合并到 `main` 之前（合并即自动部署）须先完成：
 

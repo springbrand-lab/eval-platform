@@ -50,7 +50,7 @@ function base64url(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/u, "");
 }
 
-function fromBase64url(value: string): Uint8Array<ArrayBuffer> {
+export function fromBase64url(value: string): Uint8Array<ArrayBuffer> {
   const binary = atob(value.replace(/-/gu, "+").replace(/_/gu, "/"));
   return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 }
@@ -113,9 +113,9 @@ export function safeRedirect(path: string | null): string {
 }
 
 const callbackUrl = (request: Request) => `${new URL(request.url).origin}/api/auth/callback`;
-const basicAuth = (env: AuthEnv) => `Basic ${btoa(`${encodeURIComponent(env.IAM_CLIENT_ID)}:${encodeURIComponent(env.IAM_CLIENT_SECRET)}`)}`;
+export const basicAuth = (env: AuthEnv) => `Basic ${btoa(`${encodeURIComponent(env.IAM_CLIENT_ID)}:${encodeURIComponent(env.IAM_CLIENT_SECRET)}`)}`;
 
-async function iamFetch(env: AuthEnv, fetcher: typeof fetch, path: string, init: RequestInit): Promise<Response> {
+export async function iamFetch(env: AuthEnv, fetcher: typeof fetch, path: string, init: RequestInit): Promise<Response> {
   try {
     return await fetcher(new URL(path, env.IAM_ORIGIN), { ...init, redirect: "manual", signal: AbortSignal.timeout(10_000) });
   } catch (cause) {

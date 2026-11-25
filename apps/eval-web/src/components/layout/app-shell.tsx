@@ -1,11 +1,12 @@
-import { Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { Link, Outlet, useRouter, useRouterState } from "@tanstack/react-router";
 import {
   Bot, ChartNoAxesColumn, Coins, Database, FolderArchive, FileJson2, MessagesSquare, FlaskConical, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
 } from "lucide-react";
-import { useState, type ComponentType } from "react";
+import { useEffect, useState, type ComponentType } from "react";
 import { isEmbedded } from "@/auth/session";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
+import { hosted, onHostNavigate, reportPath } from "@/lib/host";
 import { readThemePreference, saveThemePreference, type ThemePreference } from "@/lib/theme";
 
 interface NavItem { to: string; label: string; icon: ComponentType<{ className?: string }>; paths?: readonly string[] }
@@ -34,7 +35,25 @@ const THEMES: readonly { value: ThemePreference; label: string; icon: ComponentT
   { value: "system", label: "跟随系统", icon: Monitor },
 ];
 
+/** Inside the main App, its menu shows Eval's pages: Eval keeps only the page, and both URLs follow each other. */
+function HostedShell() {
+  const router = useRouter();
+  const href = useRouterState({ select: (state) => state.location.href });
+  useEffect(() => reportPath(href), [href]);
+  useEffect(() => onHostNavigate((path) => void router.history.replace(path)), [router]);
+  return (
+    <main className="h-full min-w-0 overflow-y-auto bg-bg">
+      <Outlet />
+    </main>
+  );
+}
+
 export function AppShell() {
+  if (hosted) return <HostedShell />;
+  return <StandaloneShell />;
+}
+
+function StandaloneShell() {
   const embedded = isEmbedded();
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useState<ThemePreference>(readThemePreference);

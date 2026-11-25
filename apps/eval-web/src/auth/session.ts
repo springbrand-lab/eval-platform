@@ -1,3 +1,5 @@
+import { hosted } from "@/lib/host";
+
 // Sign-in state. The session itself is the Worker's HttpOnly cookie, sent with every same-origin request;
 // the page only learns from API answers whether it is signed in and allowed to use Eval.
 
@@ -55,9 +57,13 @@ export function signIn(win: Window = window): void {
   win.location.assign(`/api/auth/login?redirect=${encodeURIComponent(here.pathname + here.search + here.hash)}`);
 }
 
-/** The session is missing or expired: sign in again, unless the last attempt just failed. */
+/**
+ * The session is missing or expired: sign in again, unless the last attempt just failed. Inside the
+ * main App the token comes from it, so there is nothing to sign in to here.
+ */
 export function markUnauthorized(win: Window = window): void {
-  if (state.status === "ready") signIn(win);
+  if (hosted) setState({ status: "failed", reason: "expired" });
+  else if (state.status === "ready") signIn(win);
 }
 
 export function markForbidden(): void {
