@@ -18,7 +18,7 @@
   // VITE_* values are read at build time by vite (see .env.production).
   "vars": {
     "IAM_ORIGIN": "https://iam.cuecue.cc",
-    "IAM_CLIENT_ID": "",
+    "IAM_CLIENT_ID": "app_bUeBBtR-YFKJ6EqM",
     "EVAL_API_ORIGIN": "https://evalapi.springbrand.ai",
     "EVAL_WEB_ORIGIN": "https://evalrapp.springbrand.ai",
     "FRAME_ANCESTORS": "https://takt.cuecue.cc https://app.cuecue.cc"
