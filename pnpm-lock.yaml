@@ -41,8 +41,8 @@ importers:
         specifier: workspace:*
         version: link:../../vendor/sp-platform/packages/eval-harness
       '@springbrand/http':
-        specifier: 0.1.0-alpha.10
-        version: 0.1.0-alpha.10(@springbrand/errors@0.1.0-alpha.4)(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
+        specifier: 0.1.0-alpha.11
+        version: 0.1.0-alpha.11(@springbrand/errors@0.1.0-alpha.4)(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
       '@zip.js/zip.js':
         specifier: 2.8.41
         version: 2.8.41
@@ -157,8 +157,8 @@ importers:
         specifier: workspace:*
         version: link:../../vendor/sp-platform/packages/file-renderers
       '@springbrand/http':
-        specifier: 0.1.0-alpha.10
-        version: 0.1.0-alpha.10(@springbrand/errors@0.1.0-alpha.4)(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
+        specifier: 0.1.0-alpha.11
+        version: 0.1.0-alpha.11(@springbrand/errors@0.1.0-alpha.4)(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
       '@springbrand/message-panel':
         specifier: 0.3.0-alpha.16
         version: 0.3.0-alpha.16(@date-fns/tz@1.5.0)(@types/mdast@4.0.4)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(ai@7.0.56(zod@4.6.5))(date-fns@4.4.0)(micromark-util-types@2.0.3)(micromark@4.0.3)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(unified@11.0.5)(use-sync-external-store@1.7.0(react@19.3.0))
@@ -287,8 +287,8 @@ importers:
         specifier: workspace:*
         version: link:../../vendor/sp-platform/packages/eval-harness
       '@springbrand/http':
-        specifier: 0.1.0-alpha.10
-        version: 0.1.0-alpha.10(@springbrand/errors@0.1.0-alpha.4)(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
+        specifier: 0.1.0-alpha.11
+        version: 0.1.0-alpha.11(@springbrand/errors@0.1.0-alpha.4)(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)
       hono:
         specifier: 4.12.33
         version: 4.12.33
@@ -3342,6 +3342,21 @@ packages:
 
   '@springbrand/http@0.1.0-alpha.10':
     resolution: {integrity: sha512-hvJLfKCVC30s+sCFTkvBEShAcBIQp/5rxbWVIQQs/SsHDAYna355Sdd2F+WCCG3Cwo08kHpndf5lPmPmNVGmjw==}
+    peerDependencies:
+      '@springbrand/errors': '>=0.0.0-0'
+      '@tanstack/react-query': ^5.104.1
+      hono: ^4.12.0
+      zod: ^4.0.0
+    peerDependenciesMeta:
+      '@tanstack/react-query':
+        optional: true
+      hono:
+        optional: true
+      zod:
+        optional: true
+
+  '@springbrand/http@0.1.0-alpha.11':
+    resolution: {integrity: sha512-p/hdVEgcR/GkuC+3xI/cBTMQLdIWSOQu1wxCs1vDekchTRpprX/APWgirNev89nAF51r5jFFXnpFrCP+AEoXXQ==}
     peerDependencies:
       '@springbrand/errors': '>=0.0.0-0'
       '@tanstack/react-query': ^5.104.1
@@ -10989,6 +11004,19 @@ snapshots:
       react: 19.3.0
 
   '@springbrand/http@0.1.0-alpha.10(@springbrand/errors@0.1.0-alpha.4)(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)':
+    dependencies:
+      '@springbrand/errors': 0.1.0-alpha.4
+      axios: 1.20.0
+      content-disposition: 2.0.1
+    optionalDependencies:
+      '@tanstack/react-query': 5.104.2(react@19.3.0)
+      hono: 4.12.33
+      zod: 4.6.5
+    transitivePeerDependencies:
+      - debug
+      - supports-color
+
+  '@springbrand/http@0.1.0-alpha.11(@springbrand/errors@0.1.0-alpha.4)(@tanstack/react-query@5.104.2(react@19.3.0))(hono@4.12.33)(zod@4.6.5)':
     dependencies:
       '@springbrand/errors': 0.1.0-alpha.4
       axios: 1.20.0

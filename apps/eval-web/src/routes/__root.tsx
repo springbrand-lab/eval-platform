@@ -4,9 +4,11 @@ import { Toaster } from "sonner";
 import { EmptyState } from "@/components/ui/feedback";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useDarkMode } from "@/lib/use-dark";
+import { useHostUrlSync } from "@/lib/use-host-url-sync";
 
 export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()({
   component: function Root() {
+    useHostUrlSync();
     const dark = useDarkMode();
     return (
       <TooltipProvider delayDuration={300}>

@@ -1,12 +1,12 @@
-import { Link, Outlet, useRouter, useRouterState } from "@tanstack/react-router";
+import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import {
   Bot, ChartNoAxesColumn, Coins, Database, FolderArchive, FileJson2, MessagesSquare, FlaskConical, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun,
 } from "lucide-react";
-import { useEffect, useState, type ComponentType } from "react";
+import { useState, type ComponentType } from "react";
 import { isEmbedded } from "@/auth/session";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
-import { hosted, onHostNavigate, reportPath } from "@/lib/host";
+import { hosted } from "@/lib/host";
 import { readThemePreference, saveThemePreference, type ThemePreference } from "@/lib/theme";
 
 interface NavItem { to: string; label: string; icon: ComponentType<{ className?: string }>; paths?: readonly string[] }
@@ -35,17 +35,8 @@ const THEMES: readonly { value: ThemePreference; label: string; icon: ComponentT
   { value: "system", label: "跟随系统", icon: Monitor },
 ];
 
-/** Inside the main App: Eval's URL and the main App's follow each other. */
-function useHostUrlSync() {
-  const router = useRouter();
-  const href = useRouterState({ select: (state) => state.location.href });
-  useEffect(() => { if (hosted) reportPath(href); }, [href]);
-  useEffect(() => (hosted ? onHostNavigate((path) => void router.history.replace(path)) : undefined), [router]);
-}
-
 /** Eval's own sidebar and page, on its own and inside the main App (which then shows Eval as one entry). */
 export function AppShell() {
-  useHostUrlSync();
   const embedded = isEmbedded();
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useState<ThemePreference>(readThemePreference);
