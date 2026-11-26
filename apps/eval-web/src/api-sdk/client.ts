@@ -9,29 +9,19 @@ export { ApiError };
 export const ACCESS_DENIED_CODE = "EVAL_ACCESS_DENIED";
 
 /**
- * Inside the main App, Eval's API is on another origin: send the person's IAM access token, and on a
- * 401 once more with a token re-issued from the IAM session (tokens last 15 minutes).
+ * Inside the main App, Eval's API is on another origin: no cookie, the person's IAM access token instead,
+ * and a token re-issued from the IAM session after a 401 (tokens last 15 minutes). Outside it, the
+ * session is the Worker's HttpOnly cookie, which the SDK sends only with credentials "include".
  */
-const hostedFetch: typeof fetch = async (input, init) => {
-  const send = async (refresh: boolean) => {
-    const headers = new Headers(init?.headers);
-    const token = await hostAccessToken(refresh);
-    if (token) headers.set("Authorization", `Bearer ${token}`);
-    return fetch(input, { ...init, headers, credentials: "omit" });
-  };
-  const response = await send(false);
-  return response.status === 401 ? send(true) : response;
-};
-
 const client = createHttpClient({
   baseUrl: apiOrigin,
-  ...(hosted ? { fetch: hostedFetch } : {}),
+  ...(hosted
+    ? { credentials: "omit", getToken: () => hostAccessToken(), refreshToken: () => hostAccessToken(true) }
+    : { credentials: "include" }),
   responseMode: "envelope",
   decodeError,
   timeoutMs: 60_000,
   maxResponseBytes: Number.MAX_SAFE_INTEGER,
-  // The session is the Worker's HttpOnly cookie. Without this the SDK's fetch adapter sends no cookies at all.
-  credentials: "include",
 });
 
 function watch<T>(pending: Promise<T>): Promise<T> {
